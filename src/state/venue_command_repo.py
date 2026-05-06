@@ -1263,13 +1263,12 @@ def find_unknown_command_by_economic_intent(
     object; they are not allocation or retry clearance.
     """
 
-    placeholders = ",".join("?" for _ in UNRESOLVED_SIDE_EFFECT_STATES)
     with _row_factory_as(conn, sqlite3.Row):
         rows = conn.execute(
-            f"""
+            """
             SELECT *
             FROM venue_commands
-            WHERE state IN ({placeholders})
+            WHERE state IN (?, ?, ?)
               AND intent_kind = ?
               AND token_id = ?
               AND side = ?

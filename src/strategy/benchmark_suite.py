@@ -199,6 +199,8 @@ CREATE TABLE IF NOT EXISTS strategy_benchmark_runs (
 )
 """.strip()
 
+_REQUIRED_BENCHMARK_ENVIRONMENT_VALUES = frozenset(item.value for item in BenchmarkEnvironment)
+
 
 class StrategyBenchmarkSuite:
     """Compute supporting evidence metrics and gate promotion-grade economics.
@@ -319,12 +321,42 @@ class StrategyBenchmarkSuite:
         )
 
     def ensure_schema(self, conn: Connection) -> None:
-        conn.execute(STRATEGY_BENCHMARK_RUNS_DDL)
+        existing = conn.execute(
+            """
+            SELECT sql
+            FROM sqlite_master
+            WHERE type = 'table' AND name = 'strategy_benchmark_runs'
+            """
+        ).fetchone()
+        if existing is None:
+            conn.execute(STRATEGY_BENCHMARK_RUNS_DDL)
+            return
+
         cols = {row[1] for row in conn.execute("PRAGMA table_info(strategy_benchmark_runs)").fetchall()}
         if "evidence_grade" not in cols:
             raise RuntimeError(
                 "strategy_benchmark_runs is missing evidence_grade; run an explicit "
                 "benchmark schema migration packet before recording evidence-grade runs"
+            )
+        schema_sql = str(existing[0] or "")
+        missing_environment_values = sorted(
+            value
+            for value in _REQUIRED_BENCHMARK_ENVIRONMENT_VALUES
+            if f"'{value}'" not in schema_sql
+        )
+        if missing_environment_values:
+            row_count = int(
+                conn.execute("SELECT COUNT(*) FROM strategy_benchmark_runs").fetchone()[0]
+                or 0
+            )
+            if row_count == 0:
+                conn.execute("DROP TABLE strategy_benchmark_runs")
+                conn.execute(STRATEGY_BENCHMARK_RUNS_DDL)
+                return
+            raise RuntimeError(
+                "strategy_benchmark_runs has legacy environment constraint values; "
+                "run an explicit benchmark schema migration packet before recording "
+                "evidence-grade runs"
             )
 
     def record_benchmark_run(

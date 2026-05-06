@@ -1,7 +1,7 @@
 """Runtime guard and live-cycle wiring tests."""
-# Lifecycle: created=2026-04-28; last_reviewed=2026-05-05; last_reused=2026-05-05
+# Lifecycle: created=2026-04-28; last_reviewed=2026-05-06; last_reused=2026-05-06
 # Created: 2026-04-28
-# Last reused/audited: 2026-05-05
+# Last reused/audited: 2026-05-06
 # Authority basis: task_2026-04-28_contamination_remediation Batch G; Phase 1B ENS snapshot persistence; Phase 1D forecast source policy; PR #56 MarketPhaseEvidence sidecar propagation.
 # Purpose: Lock runtime guard and live-cycle wiring contracts.
 # Reuse: Run for runtime guard, live-only cleanup, and cycle wiring changes.
@@ -1331,6 +1331,7 @@ def test_reconcile_pending_positions_sets_verified_entry_but_keeps_chain_local(m
     assert pos.fill_quality == pytest.approx((0.41 - 0.40) / 0.40)
     assert exec_row is not None
     assert exec_row["terminal_exec_status"] == "filled"
+    assert exec_row["fill_price"] == pytest.approx(0.41)
 
 
 def test_reconcile_pending_partial_fill_updates_fill_authority_without_finality(monkeypatch):

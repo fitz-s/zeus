@@ -42,8 +42,11 @@ def get_settlement_truth(
     """Return settlement truth for (city, target_date) from world DB.
 
     world_conn must already be open — caller manages lifecycle.
+    ``temperature_metric`` is the high/low physical quantity identity for the
+    requested market family; callers outside the high-temperature default must
+    pass it explicitly.
     Returns None if no VERIFIED settlement row exists for the requested
-    temperature metric.
+    temperature metric, and rows for other metrics are intentionally ignored.
     """
     target_date_str = str(target_date)
 

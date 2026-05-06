@@ -1819,6 +1819,79 @@ def test_log_execution_report_does_not_promote_nonfinal_fill_price(tmp_path):
     assert fact["terminal_exec_status"] == "pending_fill_authority"
 
 
+def test_log_execution_report_uses_entry_fill_authority_average_not_limit_price(tmp_path):
+    from src.execution.executor import OrderResult
+    from src.state.db import log_execution_report
+    from src.state.portfolio import (
+        ENTRY_ECONOMICS_AVG_FILL_PRICE,
+        FILL_AUTHORITY_VENUE_CONFIRMED_FULL,
+        Position,
+    )
+
+    db_path = tmp_path / "test.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+    _create_execution_fact_table(conn)
+    shares = 24.39
+    submitted_limit = 0.40
+    avg_fill = 0.41
+
+    pos = Position(
+        trade_id="rt-exec-authority-fill",
+        market_id="m4",
+        city="NYC",
+        cluster="US-Northeast",
+        target_date="2026-04-01",
+        bin_label="39-40°F",
+        direction="buy_yes",
+        unit="F",
+        size_usd=shares * avg_fill,
+        entry_price=submitted_limit,
+        entry_price_submitted=submitted_limit,
+        entry_price_avg_fill=avg_fill,
+        shares=shares,
+        shares_filled=shares,
+        filled_cost_basis_usd=shares * avg_fill,
+        p_posterior=0.60,
+        edge=0.05,
+        order_posted_at="2026-04-01T01:00:00Z",
+        entered_at="2026-04-01T01:00:05Z",
+        order_status="filled",
+        state="entered",
+        strategy_key="center_buy",
+        strategy="center_buy",
+        entry_economics_authority=ENTRY_ECONOMICS_AVG_FILL_PRICE,
+        fill_authority=FILL_AUTHORITY_VENUE_CONFIRMED_FULL,
+    )
+    result = OrderResult(
+        trade_id="rt-exec-authority-fill",
+        status="filled",
+        fill_price=submitted_limit,
+        filled_at="2026-04-01T01:00:05Z",
+        submitted_price=submitted_limit,
+        shares=shares,
+        command_state="FILLED",
+    )
+
+    log_execution_report(conn, pos, result, decision_id="dec-authority-fill")
+    conn.commit()
+
+    fact = conn.execute(
+        """
+        SELECT submitted_price, fill_price, shares, fill_quality, terminal_exec_status
+        FROM execution_fact
+        WHERE intent_id = 'rt-exec-authority-fill:entry'
+        """
+    ).fetchone()
+    conn.close()
+
+    assert fact["submitted_price"] == pytest.approx(submitted_limit)
+    assert fact["fill_price"] == pytest.approx(avg_fill)
+    assert fact["shares"] == pytest.approx(shares)
+    assert fact["fill_quality"] == pytest.approx((avg_fill - submitted_limit) / submitted_limit)
+    assert fact["terminal_exec_status"] == "filled"
+
+
 def test_log_execution_report_clears_stale_nonfinal_fill_telemetry(tmp_path):
     from src.execution.executor import OrderResult
     from src.state.db import log_execution_fact, log_execution_report
@@ -2406,6 +2479,17 @@ def test_query_authoritative_settlement_rows_falls_back_to_decision_log(tmp_path
     }.issubset(set(rows[0]["contract_missing_fields"]))
     assert rows[0]["outcome"] == 1
     assert rows[0]["pnl"] == pytest.approx(12.5)
+
+
+def test_query_authoritative_settlement_rows_accepts_env_keyword_for_portfolio_compat(tmp_path):
+    from src.state.db import query_authoritative_settlement_rows
+
+    conn = get_connection(tmp_path / "settlement-env-compat.db")
+    init_schema(conn)
+
+    assert query_authoritative_settlement_rows(conn, limit=None, env="live") == []
+
+    conn.close()
 
 
 def test_query_authoritative_settlement_rows_requires_verified_settlement_truth(tmp_path):

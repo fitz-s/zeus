@@ -280,10 +280,11 @@ def query_legacy_settlement_records(
     *,
     city: str | None = None,
     target_date: str | None = None,
+    env: str | None = None,
     not_before: str | None = None,
 ) -> list[dict]:
     """Load recent settlement records written into legacy decision_log blobs only."""
-    query_env = get_mode()
+    query_env = str(env or get_mode())
     sql = """
         SELECT artifact_json, timestamp, env FROM decision_log
         WHERE mode = 'settlement'

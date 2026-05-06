@@ -4388,12 +4388,27 @@ def log_execution_report(conn: sqlite3.Connection, pos, result, *, decision_id: 
     reported_shares = getattr(result, "shares", None)
     status = str(getattr(result, "status", "") or "")
     command_state = str(getattr(result, "command_state", "") or "")
+    order_role = str(getattr(result, "order_role", "") or "entry")
+    entry_fill_authority = order_role == "entry" and bool(
+        getattr(pos, "has_fill_economics_authority", False)
+    )
     fill_has_finality = (
         command_state == "FILLED"
         or bool(getattr(result, "filled_at", None))
-        or bool(getattr(pos, "has_fill_economics_authority", False))
+        or entry_fill_authority
     )
     fill_price = reported_fill_price if fill_has_finality else None
+    shares = reported_shares if fill_has_finality else None
+    if entry_fill_authority:
+        authority_price = _finite_float_or_zero(getattr(pos, "entry_price_avg_fill", None))
+        authority_shares = _finite_float_or_zero(getattr(pos, "shares_filled", None))
+        authority_cost = _finite_float_or_zero(getattr(pos, "filled_cost_basis_usd", None))
+        if authority_price <= 0.0 and authority_cost > 0.0 and authority_shares > 0.0:
+            authority_price = authority_cost / authority_shares
+        if authority_price > 0.0:
+            fill_price = authority_price
+        if authority_shares > 0.0:
+            shares = authority_shares
     fill_quality = None
     if fill_has_finality and fill_price not in (None, 0) and submitted_price not in (None, 0):
         try:
@@ -4411,7 +4426,7 @@ def log_execution_report(conn: sqlite3.Connection, pos, result, *, decision_id: 
         "reported_fill_price_ignored": (
             reported_fill_price if reported_fill_price not in (None, 0) and not fill_has_finality else None
         ),
-        "shares": reported_shares if fill_has_finality else None,
+        "shares": shares,
         "reported_shares_ignored": (
             reported_shares if reported_shares is not None and not fill_has_finality else None
         ),
@@ -4419,7 +4434,6 @@ def log_execution_report(conn: sqlite3.Connection, pos, result, *, decision_id: 
         "fill_quality": fill_quality,
         "order_status": getattr(pos, "order_status", ""),
     }
-    order_role = str(getattr(result, "order_role", "") or "entry")
     event_timestamp = (
         (getattr(result, "filled_at", None) if fill_has_finality else None)
         or getattr(pos, "order_posted_at", None)
@@ -4456,7 +4470,7 @@ def log_execution_report(conn: sqlite3.Connection, pos, result, *, decision_id: 
         voided_at=voided_at,
         submitted_price=submitted_price,
         fill_price=fill_price,
-        shares=reported_shares if fill_has_finality else None,
+        shares=shares,
         fill_quality=fill_quality,
         venue_status=str(getattr(result, "venue_status", "") or getattr(pos, "order_status", "") or status or "") or None,
         terminal_exec_status=terminal_exec_status,
@@ -4829,9 +4843,15 @@ def query_authoritative_settlement_rows(
     *,
     city: str | None = None,
     target_date: str | None = None,
+    env: str | None = None,
     not_before: str | None = None,
 ) -> list[dict]:
-    """Prefer stage-level settlement events, then fall back to legacy decision_log blobs."""
+    """Prefer stage-level settlement events, then fall back to legacy decision_log blobs.
+
+    ``env`` is retained for legacy ``decision_log`` compatibility. Canonical
+    ``position_events`` rows do not carry env; DB-level authority separation is
+    the remaining Wave24 repair surface.
+    """
     stage_events = []
     if _table_exists(conn, "position_events") and _table_exists(conn, "position_current"):
         stage_events = query_settlement_events(
@@ -4857,6 +4877,7 @@ def query_authoritative_settlement_rows(
         limit=limit,
         city=city,
         target_date=target_date,
+        env=env,
         not_before=not_before,
     )
     return legacy_rows[:limit] if limit is not None else legacy_rows

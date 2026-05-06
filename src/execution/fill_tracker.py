@@ -233,7 +233,11 @@ def _maybe_log_execution_fill(
             pos,
             SimpleNamespace(
                 status=execution_status,
-                fill_price=getattr(pos, "entry_price", None),
+                fill_price=(
+                    getattr(pos, "entry_price_avg_fill", None)
+                    if getattr(pos, "has_fill_economics_authority", False)
+                    else getattr(pos, "entry_price", None)
+                ),
                 filled_at=getattr(pos, "entered_at", None),
                 submitted_price=submitted_price,
                 shares=shares,

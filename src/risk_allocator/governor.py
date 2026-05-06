@@ -580,12 +580,11 @@ def count_unknown_side_effects(conn: Any) -> tuple[int, tuple[str, ...]]:
     UNKNOWN are operator/recovery handoff states, not allocation clearance.
     """
 
-    placeholders = ",".join("?" for _ in _UNRESOLVED_SIDE_EFFECT_STATES)
     rows = conn.execute(
-        f"""
+        """
         SELECT market_id
         FROM venue_commands
-        WHERE state IN ({placeholders})
+        WHERE state IN (?, ?, ?)
         ORDER BY updated_at, command_id
         """,
         tuple(sorted(_UNRESOLVED_SIDE_EFFECT_STATES)),
