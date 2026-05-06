@@ -32,6 +32,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from apscheduler.schedulers.blocking import BlockingScheduler
+from apscheduler.executors.pool import ThreadPoolExecutor as _APSchedulerThreadPoolExecutor
 
 logger = logging.getLogger("zeus.ingest")
 
@@ -800,7 +801,41 @@ def main() -> None:
     # SIGTERM → graceful shutdown.
     signal.signal(signal.SIGTERM, _graceful_shutdown)
 
-    _scheduler = BlockingScheduler()
+    # Two-executor topology (Fix #4 2026-05-06; refined post-deployment):
+    #
+    # Problem: the ingest daemon writes to a single SQLite DB (state/zeus-world.db)
+    # under WAL. WAL allows concurrent readers + ONE writer; the default
+    # APScheduler ThreadPoolExecutor(max_workers=10) let multiple jobs (hourly
+    # insert, OpenData cycle write, harvester truth writer, etc.) hit the
+    # writer lock simultaneously, producing the `OperationalError: database is
+    # locked` storm observed 2026-05-06 (Chongqing hourly_instants_append
+    # failing every ~30s).
+    #
+    # Naive fix (max_workers=1 single executor) serialised everything but
+    # starved the heartbeat + status_rollup + source_health_probe ticks
+    # behind the long-running startup catch-up — daemon-heartbeat-ingest.json
+    # went 60+ minutes stale, breaking the heartbeat-sensor liveness contract.
+    #
+    # Refined topology:
+    #   - "default" executor (max_workers=1): all DB-writing jobs queue here
+    #     and serialise. Per-job max_instances=1 still prevents same-job
+    #     overlap; max_workers=1 prevents cross-job overlap.
+    #   - "fast" executor (max_workers=4): file-only / observability ticks
+    #     (heartbeat, status rollup, source health probe) run in parallel
+    #     so they don't starve behind a long DB writer. These jobs do NOT
+    #     write to the world DB, so they can't contend on the writer lock.
+    #
+    # Each add_job() below is annotated with the executor it should run on.
+    # New jobs default to "default" (safe for DB writers); only add a job to
+    # "fast" if it provably does not write to state/zeus-world.db.
+    #
+    # See memory: feedback_sqlite_wal_multi_writer_starvation.md.
+    _scheduler = BlockingScheduler(
+        executors={
+            "default": _APSchedulerThreadPoolExecutor(max_workers=1),
+            "fast": _APSchedulerThreadPoolExecutor(max_workers=4),
+        },
+    )
 
     from src.config import settings
 
@@ -902,10 +937,13 @@ def main() -> None:
     )
 
     # Phase 2: source health probe every 10 minutes (§2.1) — APPENDED END
+    # File-only writer (state/source_health.json) — runs on "fast" executor
+    # so it doesn't starve behind a long DB writer (Fix #4 refinement).
     _scheduler.add_job(
         _source_health_probe_tick, "interval",
         minutes=10, id="ingest_source_health_probe",
         max_instances=1, coalesce=True,
+        executor="fast",
     )
 
     # 2026-05-01: Station-migration probe — hourly (Invariant F).
@@ -923,17 +961,26 @@ def main() -> None:
     )
 
     # Phase 2: ingest status rollup every 5 minutes (§2.5) — APPENDED END
+    # Reads from DB (concurrent reads OK under WAL) and writes
+    # state/ingest_status.json (file-only). Runs on "fast" executor so
+    # observability doesn't starve behind a long DB writer (Fix #4 refinement).
     _scheduler.add_job(
         _ingest_status_rollup_tick, "interval",
         minutes=5, id="ingest_status_rollup",
         max_instances=1, coalesce=True,
+        executor="fast",
     )
 
-    # 60s heartbeat.
+    # 60s heartbeat — pure file write to state/daemon-heartbeat-ingest.json,
+    # no DB. Must run on "fast" executor — the heartbeat-sensor liveness
+    # contract requires this file to update every minute regardless of
+    # what DB writers are doing (Fix #4 refinement, observed regression
+    # post initial single-writer fix).
     _scheduler.add_job(
         _write_ingest_heartbeat, "interval",
         seconds=60, id="ingest_heartbeat",
         max_instances=1, coalesce=True,
+        executor="fast",
     )
 
     jobs = [j.id for j in _scheduler.get_jobs()]
