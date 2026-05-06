@@ -1,0 +1,73 @@
+name: replay-correctness
+
+# Phase 0.G scaffold — opt-in CI lane, NOT a merge gate.
+# Promotion condition: Phase 0.H GO decision signs off replay-correctness scaffold.
+# Until then, continue-on-error: true keeps this purely advisory.
+# Authority: IMPLEMENTATION_PLAN §2.G; ADR-5; ANTI_DRIFT_CHARTER §3 M1.
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Run daily at 06:00 UTC to monitor seed-window drift over time.
+    - cron: "0 6 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: replay-correctness-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  replay-correctness-gate:
+    name: replay-correctness-gate (advisory, Phase 0.G)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    env:
+      GATE_OWNER: "implementer (Phase 0.G)"
+      GATE_RATIONALE: >
+        Phase 0.G scaffold: opt-in replay-correctness lane. Runs <60s on 7-day
+        seed window. Not a merge gate until Phase 0.H GO signs off. Emits
+        ritual_signal per ANTI_DRIFT_CHARTER §3 M1.
+      GATE_REVIEW_CONDITION: >
+        Promote to blocking only after Phase 0.H operator GO decision is signed
+        (evidence/phase0_h_decision.md) and baseline freshness policy is defined.
+      PROMOTION_PHASE: "0.H"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Describe gate contract
+        run: |
+          echo "owner=${GATE_OWNER}"
+          echo "rationale=${GATE_RATIONALE}"
+          echo "review_condition=${GATE_REVIEW_CONDITION}"
+          echo "promotion_phase=${PROMOTION_PHASE}"
+
+      - name: Run seeded regression tests (no DB required)
+        run: |
+          pytest -q \
+            tests/test_replay_correctness_gate.py::test_compare_match \
+            tests/test_replay_correctness_gate.py::test_compare_mismatch_hash \
+            tests/test_replay_correctness_gate.py::test_non_deterministic_types_excluded \
+            tests/test_replay_correctness_gate.py::test_gate_missing_db
+
+      - name: Summarize advisory stance
+        if: always()
+        run: |
+          {
+            echo "## replay-correctness advisory lane (Phase 0.G)"
+            echo "- continue-on-error is intentional: scaffold is opt-in until Phase 0.H GO"
+            echo "- promotion condition: ${GATE_REVIEW_CONDITION}"
+            echo "- authority: IMPLEMENTATION_PLAN §2.G; ADR-5; ANTI_DRIFT_CHARTER §3 M1"
+          } >> "$GITHUB_STEP_SUMMARY"

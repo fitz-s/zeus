@@ -1,0 +1,158 @@
+# Created: 2026-05-06
+# Last reused or audited: 2026-05-06
+# Authority basis: ULTIMATE_DESIGN §2.2 sunset 2027-05-06; IMPLEMENTATION_PLAN Phase 0.B
+
+schema_version: 1
+metadata:
+  charter_version: 1.0.0
+  catalog_size: 6
+  created: 2026-05-06
+  authority_basis: ULTIMATE_DESIGN §2.2 sunset 2027-05-06
+capabilities:
+
+  - id: canonical_position_write
+    owner_module: src/state/ledger.py
+    intent: >
+      Write canonical position events to the ledger (state/zeus_trades.db). This is
+      the sole authority for appending lifecycle-affecting position facts;
+      all downstream projections (src/state/projection.py) read from this
+      surface. Mutations here are TRUTH_REWRITE severity because rollback
+      requires a full Chronicler replay rebuild.
+    relationships:
+      protects_invariants: [INV-04, INV-08]
+      blocked_when:
+        - settlement_window_freeze_active
+    hard_kernel_paths:
+      - src/state/ledger.py
+      - src/state/projection.py
+      - src/state/lifecycle_manager.py
+      - state/zeus_trades.db
+    original_intent:
+      intent_test: "diff touches ledger.py or lifecycle_manager or position projection"
+      does_not_fit: log_and_advisory
+      scope_keywords: [position, ledger, lifecycle, projection, append]
+      out_of_scope_keywords: [paper, replay, backtest, mock]
+    sunset_date: 2027-05-06
+    lease_required: true
+    telemetry:
+      ritual_signal_emitted: true
+      latency_budget_ms: 100
+    reversibility_class: TRUTH_REWRITE
+
+  - id: control_write
+    owner_module: src/control/control_plane.py
+    intent: >
+      Write governance-plane control events (kill switch, risk-level changes,
+      freeze activations) through the control plane. This is the sole surface
+      authorized to mutate live-runtime governance state.
+    relationships:
+      protects_invariants: [INV-05, INV-21]
+      blocked_when: []
+    hard_kernel_paths:
+      - src/control/control_plane.py
+      - src/supervisor_api/contracts.py
+    original_intent:
+      intent_test: "diff touches control_plane.py or supervisor_api contracts"
+      does_not_fit: log_and_advisory
+      scope_keywords: [control, kill_switch, freeze, risk_level, governance]
+      out_of_scope_keywords: [paper, replay, backtest, mock]
+    sunset_date: 2027-05-06
+    lease_required: false
+    telemetry:
+      ritual_signal_emitted: true
+      latency_budget_ms: 50
+    reversibility_class: WORKING
+
+  - id: settlement_write
+    owner_module: src/execution/harvester.py
+    intent: >
+      Write canonical settlement values. Harvester is the sole live writer.
+      Rollback requires Chronicler replay; severity TRUTH_REWRITE.
+    relationships:
+      protects_invariants: [INV-14, INV-16]
+      blocked_when: []
+    hard_kernel_paths:
+      - src/execution/harvester.py
+      - src/contracts/settlement_semantics.py
+      - src/state/db.py
+    original_intent:
+      intent_test: "diff touches harvester or settlement_semantics or state/db"
+      does_not_fit: log_and_advisory
+      scope_keywords: [settlement, harvester, temperature, observation, data_version]
+      out_of_scope_keywords: [paper, replay, backtest, mock]
+    sunset_date: 2027-05-06
+    lease_required: true
+    telemetry:
+      ritual_signal_emitted: true
+      latency_budget_ms: 200
+    reversibility_class: TRUTH_REWRITE
+
+  - id: live_venue_submit
+    owner_module: src/execution/live_executor.py
+    intent: >
+      Submit live orders to Polymarket venue. ON_CHAIN severity — no local rollback.
+    relationships:
+      protects_invariants: [INV-01, INV-02, INV-03]
+      blocked_when:
+        - kill_switch_active
+        - risk_level_halt
+    hard_kernel_paths:
+      - src/execution/live_executor.py
+      - src/venue/polymarket_adapter.py
+    original_intent:
+      intent_test: "diff touches live_executor or venue adapter"
+      does_not_fit: log_and_advisory
+      scope_keywords: [live, venue, submit, order, polymarket, on_chain]
+      out_of_scope_keywords: [paper, replay, backtest, mock, shadow]
+    sunset_date: 2027-05-06
+    lease_required: true
+    telemetry:
+      ritual_signal_emitted: true
+      latency_budget_ms: 50
+    reversibility_class: ON_CHAIN
+
+  - id: authority_doc_rewrite
+    owner_module: AGENTS.md
+    intent: >
+      Rewrite or promote authority documents. ARCHIVE severity.
+    relationships:
+      protects_invariants: [INV-22]
+      blocked_when: []
+    hard_kernel_paths:
+      - AGENTS.md
+      - LIVE_LAUNCH_HANDOFF.md
+      - architecture/invariants.yaml
+      - architecture/source_rationale.yaml
+    original_intent:
+      intent_test: "diff touches AGENTS.md or LIVE_LAUNCH_HANDOFF.md or invariants.yaml"
+      does_not_fit: log_and_advisory
+      scope_keywords: [authority, agents, invariant, law, handoff]
+      out_of_scope_keywords: [paper, replay, backtest, mock]
+    sunset_date: 2027-05-06
+    lease_required: false
+    telemetry:
+      ritual_signal_emitted: true
+      latency_budget_ms: 50
+    reversibility_class: ARCHIVE
+
+  - id: archive_promotion
+    owner_module: docs/operations/LIVE_LAUNCH_HANDOFF.md
+    intent: >
+      Promote a working document to archive status. ARCHIVE severity.
+    relationships:
+      protects_invariants: [INV-22]
+      blocked_when: []
+    hard_kernel_paths:
+      - docs/operations/LIVE_LAUNCH_HANDOFF.md
+      - docs/operations/AGENTS.md
+    original_intent:
+      intent_test: "diff promotes a doc to archive or handoff status"
+      does_not_fit: log_and_advisory
+      scope_keywords: [archive, promotion, handoff, ops_packet]
+      out_of_scope_keywords: [paper, replay, backtest, mock]
+    sunset_date: 2027-05-06
+    lease_required: false
+    telemetry:
+      ritual_signal_emitted: true
+      latency_budget_ms: 50
+    reversibility_class: ARCHIVE

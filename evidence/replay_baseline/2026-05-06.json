@@ -1,0 +1,23 @@
+{
+  "generated_at": "2026-05-06T13:55:33.563597+00:00",
+  "non_deterministic_excluded": [
+    "external_position_sync",
+    "http_fetch",
+    "market_price_snapshot",
+    "model_call",
+    "model_response",
+    "web_fetch"
+  ],
+  "projection": {
+    "content_hash": "5b55f2be52a2c2b3ab51a8fa7b791222ad12c95f8e15ec8e3e249f4541a8d93e",
+    "counts_by_type": {
+      "decision_log::decision_cycle_completed": 277,
+      "opportunity_fact::opportunity_evaluated": 1768,
+      "shadow_signals::shadow_signal_emitted": 1722
+    },
+    "event_count": 3767,
+    "seed_cutoff_utc": "2026-04-29T13:55:33.563375+00:00",
+    "seed_window_days": 7
+  },
+  "schema_version": "0.1.0"
+}
