@@ -1,0 +1,32 @@
+# Created: 2026-05-06
+# Last reused or audited: 2026-05-06
+# Authority basis: CUTOVER_RUNBOOK §2; IMPLEMENTATION_PLAN §6; phase5_h_decision.md
+
+# Topology-redesign feature flags — cutover state as of Phase 5.D
+# Modify only per CUTOVER_RUNBOOK §4 rollback procedure.
+# All four flags enforced from Phase 5.D cutover commit onward.
+
+# Gate 1: Edit-time Write-tool capability hook
+# Flipped to 'on' at Phase 5.D T+0h. Observation window: 24h.
+# Rollback: set to 'off' per CUTOVER_RUNBOOK §7 (ZEUS_ROUTE_GATE_EDIT=off)
+ZEUS_ROUTE_GATE_EDIT: "on"
+
+# Gate 2: Type-time LiveAuthToken phantom
+# Type-system enforcement was promoted to Phase 4 (ABC split).
+# @untyped_for_compat escape hatch has 0 active call sites; expiry deadline 2026-06-05.
+# No flag needed — enforcement is structural (type error on wrong use).
+# ZEUS_ROUTE_GATE_TYPE: structural (no flag)
+
+# Gate 3: Commit-time diff verifier
+# Flipped to 'on' at Phase 5.D T+0h. Observation window: 72h.
+# Rollback: set to 'off' per CUTOVER_RUNBOOK §7 (ZEUS_ROUTE_GATE_COMMIT=off)
+ZEUS_ROUTE_GATE_COMMIT: "on"
+
+# Gate 4: Pre-merge replay-correctness CI
+# Already promoted from advisory to required in Phase 4.D (continue-on-error removed).
+# No flag flip needed — CI configuration is already enforcing.
+# ZEUS_REPLAY_GATE_MERGE: required (already live via CI; no flag to flip)
+
+# Gate 5: Runtime kill-switch + settlement-window freeze
+# Already live as of Phase 4 (non-bypassable, no env flag override).
+# ZEUS_KILL_SWITCH: runtime env var (armed by ops; not a feature flag)
