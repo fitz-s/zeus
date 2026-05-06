@@ -158,19 +158,12 @@ _REQUIRED_SIGNAL_FIELDS = {
 # field entirely — not a schema violation, just a field-absent older format).
 _HELPERS_WITHOUT_CAP_ID = frozenset({"gate2_live_auth_token", "replay_correctness_gate"})
 
-# Cap IDs emitted by gate_runtime.py Phase 4.D that are not yet in
-# capabilities.yaml (capabilities.yaml has 6 of 16 planned entries; the
-# remaining 10 are Phase 1 carry-forwards tracked in IMPLEMENTATION_PLAN §3).
-# This set must shrink monotonically as capabilities.yaml is extended.
-_PHASE4D_DEFERRED_CAP_IDS: frozenset[str] = frozenset({
-    "calibration_decision_group_write",
-    "calibration_persistence_write",
-    "calibration_rebuild",
-    "decision_artifact_write",
-    "on_chain_mutation",
-    "settlement_rebuild",
-    "venue_command_write",
-})
+# Capabilities.yaml restored to canonical 16 entries on 2026-05-06 from
+# stash@{0}^3 (Phase 5.A discovery: 4.B re-authoring had hallucinated 6 entries
+# during the off-branch incident; recovery executor restored the 6-entry stash
+# version, masking the regression). The deferred-cap-id allowlist is removed —
+# every gate-emitted cap_id must now resolve to capabilities.yaml.
+_PHASE4D_DEFERRED_CAP_IDS: frozenset[str] = frozenset()
 
 
 def test_every_invocation_emits_ritual_signal():
