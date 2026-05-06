@@ -736,8 +736,8 @@ cycle_runner._execute_monitoring_phase()
       → EdgeContext(forward_edge, p_market, confidence_band_*)
   → exit_triggers.evaluate_exit_triggers(pos, edge_ctx)
     → EDGE_REVERSAL / BUY_NO_EDGE_EXIT / SETTLEMENT_IMMINENT / etc.
-  → exit_lifecycle.execute_exit(portfolio, pos, reason, price, paper_mode, clob)
-    → paper: close_position() directly
+  → exit_lifecycle.execute_exit(portfolio, pos, reason, price, legacy_env, clob)
+    → legacy diagnostic: close_position() directly
     → live: place_sell_order() → check fill → retry/backoff
 ```
 
@@ -757,7 +757,7 @@ cycle_runner._execute_monitoring_phase()
 
 ### [STALE-UNVERIFIED] CycleRunner fails on malformed `solar_daily` schema rootpage
 **Location:** `zeus/state/zeus.db` / the day0 capture path that reads `solar_daily`
-**Problem (filed 2026-04-02):** The paper cycle failed with `malformed database schema (solar_daily) - invalid rootpage`. The monitor path was reading a broken SQLite object and the cycle aborted instead of degrading cleanly.
+**Problem (filed 2026-04-02):** A legacy diagnostic cycle failed with `malformed database schema (solar_daily) - invalid rootpage`. The monitor path was reading a broken SQLite object and the cycle aborted instead of degrading cleanly.
 **Status (2026-04-06):** The latest `opening_hunt` cycles completed without this error appearing in the log. Not confirmed fixed — may have been intermittent or masked by a different cycle mode. Requires a deliberate `day0_capture` run to verify.
 **Proposed antibody:** Add an explicit schema/integrity check before day0 capture and fail closed with a structured error (plus a repair/migration path) instead of letting SQLite rootpage corruption surface mid-cycle.
 

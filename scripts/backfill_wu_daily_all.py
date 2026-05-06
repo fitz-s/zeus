@@ -363,6 +363,8 @@ def _dates_needing_fetch(
             WHERE city = ?
               AND settlement_value IS NOT NULL
               AND settlement_value != ''
+              AND temperature_metric = 'high'
+              AND authority = 'VERIFIED'
               AND target_date BETWEEN ? AND ?
             """,
             (city_name, start_date.isoformat(), end_date.isoformat()),

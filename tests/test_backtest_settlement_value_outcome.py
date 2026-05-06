@@ -1,5 +1,5 @@
 """Replay settlement-value outcome antibodies."""
-# Lifecycle: created=2026-04-25; last_reviewed=2026-04-25; last_reused=2026-04-25
+# Lifecycle: created=2026-04-25; last_reviewed=2026-04-25; last_reused=2026-05-06
 # Purpose: Lock WU settlement-value replay scoring against winning-bin and market-event fixture drift.
 # Reuse: Pair with tests/test_run_replay_cli.py when changing replay settlement queries.
 # Authority basis: P3 usage-path residual guards packet; replay settlement-value outcome antibodies.
@@ -11,6 +11,10 @@ from src.engine import replay as replay_module
 from src.engine.replay import derive_outcome_from_settlement_value
 from src.state.db import get_connection, init_backtest_schema, init_schema
 from src.types import Bin
+
+
+def _mark_settlements_verified(conn) -> None:
+    conn.execute("UPDATE settlements SET authority = 'VERIFIED'")
 
 
 def _seed_market_event(conn, *, city: str, target_date: str, range_label: str) -> None:
@@ -46,6 +50,8 @@ def _run_wu_sweep(tmp_path, monkeypatch, *, winning_bin: str | None, value: floa
         """,
         (winning_bin, value),
     )
+    if winning_bin is not None:
+        _mark_settlements_verified(world)
     _seed_market_event(
         world,
         city="NYC",
@@ -98,12 +104,11 @@ def _patch_connections(monkeypatch, trade_db, world_db, backtest_db) -> None:
     monkeypatch.setattr(replay_module, "get_backtest_connection", lambda: get_connection(backtest_db))
 
 
-def test_wu_outcome_ignores_null_winning_bin(tmp_path, monkeypatch):
+def test_wu_sweep_rejects_null_winning_bin_without_verified_authority(tmp_path, monkeypatch):
     summary, row = _run_wu_sweep(tmp_path, monkeypatch, winning_bin=None, value=40.0)
 
-    assert summary.n_replayed == 1
-    assert row["derived_wu_outcome"] == 1
-    assert row["truth_source"] == "wu_settlement_value"
+    assert summary.n_replayed == 0
+    assert row is None
 
 
 def test_wu_outcome_ignores_wrong_winning_bin(tmp_path, monkeypatch):
@@ -169,6 +174,7 @@ def test_wu_sweep_flags_invalid_probability_groups(tmp_path, monkeypatch):
         VALUES ('NYC', '2026-04-03', '39-40°F', 40.0, 'high')
         """
     )
+    _mark_settlements_verified(world)
     _seed_market_event(
         world,
         city="NYC",
@@ -240,6 +246,7 @@ def test_trade_history_audit_uses_position_metric_for_settlement_match(tmp_path,
         VALUES ('NYC', '2026-04-03', '39-40°F', 40.0, 'low')
         """
     )
+    _mark_settlements_verified(world)
     world.commit()
     world.close()
 

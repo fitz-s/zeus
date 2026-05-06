@@ -67,7 +67,7 @@ PR #56 replaced them with this evidence stack.
 - [ ] precedence=200 NULL-expiry `control_overrides` row remains in
       place until both A and B above are checked.
 - [ ] Critic-opus third-pass review after B-list completes.
-- [ ] Operator-go: paper-mode green for ≥1 cycle on real 12z data with
+- [ ] Operator-go: diagnostic green for ≥1 cycle on real 12z data with
       cycle-stratified Platt + phase_aware_kelly_live.
 
 ## Pointers

@@ -29,11 +29,11 @@ Concurrent with this artifact, `ZEUS_TIGGE_INGEST_ENABLED=1` is added to the
 
 ## Risk envelope at activation
 
-- `live_safety_cap_usd=$5` (per-trade hard ceiling)
-- `smoke_test_portfolio_cap_usd=$5` (portfolio-wide cost-basis cap)
-- `capital_base_usd=$150` (config), real wallet ≈ $199.40
-- Worst-case 24h loss bound: $5 (per-trade cap × 1, blocked from re-entry by
-  portfolio cap)
+This authorization artifact is not current sizing authority. The temporary
+cap-based activation envelope has been superseded: live bankroll truth now comes
+from the wallet bankroll provider, and entry discipline is enforced by
+RiskGuard, posture, executable-price, and max-exposure gates. Do not promote
+this dated risk envelope into current live sizing, replay, or learning truth.
 
 ## Why now
 

@@ -142,7 +142,7 @@ def test_stale_reference_with_real_loss_still_red(fresh_risk_conn):
         fresh_risk_conn,
         now=now.isoformat(),
         lookback=timedelta(hours=24),
-        current_equity=150.0,  # 25% loss vs 200 baseline — well above 10% threshold
+        current_equity=151.0,  # 24.5% loss vs 200 baseline — well above 10% threshold
         initial_bankroll=200.0,
         threshold_pct=0.10,
     )

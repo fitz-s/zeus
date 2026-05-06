@@ -1,6 +1,6 @@
-# Lifecycle: created=2026-04-28; last_reviewed=2026-05-01; last_reused=2026-05-01
+# Lifecycle: created=2026-04-28; last_reviewed=2026-05-05; last_reused=2026-05-06
 # Created: 2026-04-28
-# Last reused/audited: 2026-05-01
+# Last reused/audited: 2026-05-06
 # Authority basis: docs/operations/task_2026-04-27_backtest_first_principles_review/01_backtest_upgrade_design.md
 # Purpose: Guard backtest economics tombstone behavior and report/replay cohort gates.
 # Reuse: Run after backtest purpose, economics readiness, or report/replay cohort changes.
@@ -26,11 +26,14 @@ from src.backtest.purpose import (
     SKILL_PARITY,
 )
 from src.backtest.skill import run_skill, _economics_fields_in_limitations
+from scripts import equity_curve as equity_curve_module
 from scripts.equity_curve import _single_exit_economics_cohort
 from scripts.profit_validation_replay import (
     CORRECTED_ECONOMICS_COHORT,
+    LEGACY_EXIT_TRIGGER_REPLAY_COHORT,
     LEGACY_DIAGNOSTIC_COHORT,
     require_single_exit_economics_cohort,
+    require_legacy_exit_trigger_replay_cohort,
 )
 
 
@@ -73,6 +76,56 @@ def test_equity_curve_reports_single_corrected_cohort():
     assert cohort == CORRECTED_ECONOMICS_COHORT
     assert counts == {CORRECTED_ECONOMICS_COHORT: 2}
     assert require_single_exit_economics_cohort([]) == LEGACY_DIAGNOSTIC_COHORT
+
+
+def test_equity_curve_uses_status_pnl_not_bankroll_delta(monkeypatch):
+    def _fake_read_runtime_truth_json(name):
+        if name == "status_summary.json":
+            return (
+                {
+                    "portfolio": {
+                        "initial_bankroll": 211.37,
+                        "realized_pnl": 4.0,
+                        "unrealized_pnl": 3.0,
+                        "total_pnl": 7.0,
+                        "effective_bankroll": 211.37,
+                        "bankroll_object_identity": "wallet_equity",
+                    }
+                },
+                {
+                    "generated_at": "2026-05-05T00:00:00+00:00",
+                    "source_path": "status_summary.json",
+                    "stale_age_seconds": 0,
+                },
+            )
+        if name == "positions.json":
+            return ({"positions": [], "recent_exits": []}, {"source_path": "positions.json"})
+        if name == "strategy_tracker.json":
+            return ({}, {"source_path": "strategy_tracker.json"})
+        raise AssertionError(name)
+
+    monkeypatch.setattr(equity_curve_module, "read_runtime_truth_json", _fake_read_runtime_truth_json)
+    monkeypatch.setattr(equity_curve_module, "plt", None)
+
+    report = equity_curve_module.build_equity_curve()
+
+    assert report["bankroll"] == pytest.approx(211.37)
+    assert report["bankroll_object_identity"] == "wallet_equity"
+    assert report["total_pnl"] == pytest.approx(7.0)
+    assert report["performance_equity"] == pytest.approx(218.37)
+    assert report["return_pct"] == pytest.approx(3.31)
+
+
+def test_profit_replay_allows_legacy_trigger_only_for_legacy_diagnostic_cohort():
+    assert (
+        require_legacy_exit_trigger_replay_cohort(LEGACY_DIAGNOSTIC_COHORT)
+        == LEGACY_EXIT_TRIGGER_REPLAY_COHORT
+    )
+
+
+def test_profit_replay_rejects_corrected_cohort_for_legacy_exit_trigger_replay():
+    with pytest.raises(ValueError, match="corrected executable exit cohort"):
+        require_legacy_exit_trigger_replay_cohort(CORRECTED_ECONOMICS_COHORT)
 
 
 def test_economics_tombstone_raises():
@@ -170,6 +223,19 @@ def test_economics_readiness_rejects_gamma_price_only_history():
     assert "market_price_history_lacks_full_linkage_contract" in readiness.blockers
 
 
+def test_economics_readiness_does_not_accept_legacy_outcome_fact_as_resolution_authority():
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE outcome_fact (decision_snapshot_id TEXT, outcome INTEGER)")
+    conn.execute("INSERT INTO outcome_fact (decision_snapshot_id, outcome) VALUES ('snap-1', 1)")
+
+    readiness = check_economics_readiness(conn)
+    conn.close()
+
+    assert readiness.ready is False
+    assert "outcome_fact_lacks_settlement_authority_provenance" in readiness.blockers
+    assert "no_resolution_matched_outcome_facts" not in readiness.blockers
+
+
 def test_economics_readiness_full_substrate_still_blocks_until_engine_implemented():
     conn = sqlite3.connect(":memory:")
     conn.execute("CREATE TABLE market_events_v2 (id INTEGER PRIMARY KEY, outcome TEXT)")
@@ -213,7 +279,10 @@ def test_economics_readiness_full_substrate_still_blocks_until_engine_implemente
     readiness = check_economics_readiness(conn)
 
     assert readiness.ready is False
-    assert readiness.blockers == ("economics_engine_not_implemented",)
+    assert readiness.blockers == (
+        "outcome_fact_lacks_settlement_authority_provenance",
+        "economics_engine_not_implemented",
+    )
     with pytest.raises(PurposeContractViolation) as excinfo:
         run_economics(conn=conn)
     conn.close()

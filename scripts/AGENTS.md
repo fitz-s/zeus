@@ -62,7 +62,7 @@ Only list durable entry points here; use the manifest for the full catalog.
 | `backfill_tigge_snapshot_p_raw.py` | Replay-compatible TIGGE `p_raw_json` materialization |
 | `watch_source_contract.py` | Polymarket settlement source-contract monitor, city quarantine writer, and conversion-history reporter |
 | `source_contract_auto_convert.py` | Cron-safe source-contract transition controller, deterministic date-scope planner, apply/evidence runner, quarantine release gate, receipt writer, and Discord reporter |
-| `arm_live_mode.sh` | Operator tool: flip all mode flags from paper to live without starting the live daemon (created 2026-05-01) |
+| `arm_live_mode.sh` | Deprecated operator tool retained only for non-live execution cleanup checks; it must not be used to introduce runtime modes (created 2026-05-01) |
 | `install_hooks.sh` | Installs git pre-commit and related hook symlinks for fail-closed enforcement (ultrareview25 P0-2; created 2026-05-01) |
 | `check_dynamic_sql.py` | Enforcement scan for f-string SQL interpolations without whitelist; security review §10 antibody (created 2026-05-01) |
 | `check_identity_column_defaults.py` | Enforcement check for identity-column DEFAULT violations per INV-14 and SYNTHESIS K-D (created 2026-05-01) |

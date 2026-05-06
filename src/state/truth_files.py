@@ -1,4 +1,4 @@
-"""Mode-aware truth-file helpers and legacy-state deprecation tooling."""
+"""Runtime truth-file helpers and legacy-state deprecation tooling."""
 
 from __future__ import annotations
 
@@ -9,18 +9,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from src.config import ACTIVE_MODES, get_mode, legacy_state_path, mode_state_path
+from src.config import get_mode, legacy_state_path, runtime_state_path
 
 logger = logging.getLogger(__name__)
 
 
-class ModeMismatchError(ValueError):
-    """Raised when a truth file's mode tag does not match the caller's requested mode.
-
-    B077 / SD-A: read_mode_truth_json must validate that the file on disk was
-    written for the same mode the caller expects. Cross-mode truth-file
-    collisions produce this error rather than silently serving wrong-mode data.
-    """
+class RuntimeStateMismatchError(ValueError):
+    """Raised when a runtime truth file carries a non-live state tag."""
 
 
 LEGACY_STATE_FILES = (
@@ -36,14 +31,14 @@ _LOW_LANE_FILES: frozenset[str] = frozenset(
 LEGACY_ARCHIVE_DIR = legacy_state_path("legacy_state_archive")
 
 
-def current_mode(mode: str | None = None) -> str:
-    return mode or get_mode()
+def current_runtime_state() -> str:
+    return get_mode()
 
 
 def build_truth_metadata(
     path: Path,
     *,
-    mode: str | None = None,
+    runtime_state: str | None = None,
     generated_at: str | None = None,
     deprecated: bool = False,
     archived_to: str | None = None,
@@ -51,7 +46,11 @@ def build_truth_metadata(
     temperature_metric: str | None = None,
     data_version: str | None = None,
 ) -> dict[str, Any]:
-    mode = current_mode(mode)
+    resolved_runtime_state = runtime_state or current_runtime_state()
+    if resolved_runtime_state != "live" and not deprecated:
+        raise RuntimeStateMismatchError(
+            f"runtime truth metadata must be live, got runtime_state={resolved_runtime_state!r}"
+        )
     generated_at = generated_at or datetime.now(timezone.utc).isoformat()
     # Fail-closed: low-lane files stamped VERIFIED without temperature_metric silently
     # misidentify the metric. Downgrade to UNVERIFIED to enforce explicit tagging.
@@ -59,7 +58,7 @@ def build_truth_metadata(
     if authority == "VERIFIED" and temperature_metric is None and Path(path).name in _LOW_LANE_FILES:
         resolved_authority = "UNVERIFIED"
     meta: dict[str, Any] = {
-        "mode": mode,
+        "runtime_state": resolved_runtime_state,
         "generated_at": generated_at,
         "source_path": str(path),
         "stale_age_seconds": 0.0,
@@ -74,19 +73,11 @@ def build_truth_metadata(
     return meta
 
 
-def infer_mode_from_path(path: Path) -> str | None:
-    stem = path.stem
-    for mode in ACTIVE_MODES:
-        if stem.endswith(f"-{mode}"):
-            return mode
-    return None
-
-
 def annotate_truth_payload(
     payload: dict[str, Any],
     path: Path,
     *,
-    mode: str | None = None,
+    runtime_state: str | None = None,
     generated_at: str | None = None,
     authority: str = "UNVERIFIED",
     temperature_metric: str | None = None,
@@ -95,7 +86,7 @@ def annotate_truth_payload(
     enriched = dict(payload)
     enriched["truth"] = build_truth_metadata(
         path,
-        mode=mode,
+        runtime_state=runtime_state,
         generated_at=generated_at,
         authority=authority,
         temperature_metric=temperature_metric,
@@ -143,29 +134,26 @@ def read_truth_json(path: Path) -> tuple[dict[str, Any], dict[str, Any]]:
             )
             stale_age_seconds = None
     truth = dict(data.get("truth", {})) if isinstance(data.get("truth"), dict) else {}
-    truth.setdefault("mode", infer_mode_from_path(path))
+    legacy_mode_tag = truth.pop("mode", None)
+    if legacy_mode_tag not in (None, "live", "deprecated"):
+        raise RuntimeStateMismatchError(
+            f"runtime truth file {path} carries retired state selector tag {legacy_mode_tag!r}"
+        )
+    truth.setdefault("runtime_state", "deprecated" if legacy_mode_tag == "deprecated" else "live")
     truth.setdefault("source_path", str(path))
     truth.setdefault("generated_at", generated_at)
     truth["stale_age_seconds"] = stale_age_seconds
     return data, truth
 
 
-def read_mode_truth_json(filename: str, *, mode: str | None = None) -> tuple[dict[str, Any], dict[str, Any]]:
-    if mode is None:
-        raise ModeMismatchError(
-            "mode=None is not allowed — pass an explicit mode string (e.g. mode=get_mode()). "
-            "Implicit None bypasses the ModeMismatchError cross-mode guard (B077 / SD-A)."
-        )
-    path = mode_state_path(filename, mode=mode)
+def read_runtime_truth_json(filename: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    path = runtime_state_path(filename)
     data, truth = read_truth_json(path)
-    if mode is not None:
-        file_mode = truth.get("mode")
-        if file_mode is not None and file_mode != mode:
-            raise ModeMismatchError(
-                f"Truth file mode mismatch: caller requested mode={mode!r} but "
-                f"file at {path} is tagged mode={file_mode!r}. "
-                "This indicates a cross-mode routing error (B077 / SD-A)."
-            )
+    runtime_state = truth.get("runtime_state")
+    if runtime_state != "live":
+        raise RuntimeStateMismatchError(
+            f"runtime truth file {path} must be tagged runtime_state='live', got {runtime_state!r}"
+        )
     return data, truth
 
 
@@ -178,19 +166,16 @@ def legacy_tombstone_payload(
     return {
         "error": (
             f"{filename} is deprecated and must not be used as current truth. "
-            "Use the mode-suffixed state files instead."
+            "Use the live runtime state file instead."
         ),
         "truth": {
             **build_truth_metadata(
                 legacy_path,
-                mode="deprecated",
+                runtime_state="deprecated",
                 deprecated=True,
                 archived_to=archived_to,
             ),
-            "replacement_paths": {
-                mode: str(mode_state_path(filename, mode=mode))
-                for mode in ACTIVE_MODES
-            },
+            "replacement_path": str(runtime_state_path(filename)),
         },
     }
 
@@ -222,8 +207,8 @@ def deprecate_legacy_truth_files() -> list[dict[str, Any]]:
     return [ensure_legacy_state_tombstone(filename) for filename in LEGACY_STATE_FILES]
 
 
-def backfill_mode_truth_metadata(filename: str, *, mode: str) -> dict[str, Any]:
-    path = mode_state_path(filename)
+def backfill_runtime_truth_metadata(filename: str) -> dict[str, Any]:
+    path = runtime_state_path(filename)
     if not path.exists():
         return {"path": str(path), "updated": False, "missing": True}
 
@@ -232,16 +217,14 @@ def backfill_mode_truth_metadata(filename: str, *, mode: str) -> dict[str, Any]:
     enriched = annotate_truth_payload(
         data,
         path,
-        mode=mode,
         generated_at=generated_at,
     )
     path.write_text(json.dumps(enriched, indent=2))
     return {"path": str(path), "updated": True, "missing": False}
 
 
-def backfill_truth_metadata_for_modes(modes: tuple[str, ...] = ACTIVE_MODES) -> list[dict[str, Any]]:
+def backfill_truth_metadata() -> list[dict[str, Any]]:
     reports: list[dict[str, Any]] = []
-    for mode in modes:
-        for filename in LEGACY_STATE_FILES:
-            reports.append(backfill_mode_truth_metadata(filename, mode=mode))
+    for filename in LEGACY_STATE_FILES:
+        reports.append(backfill_runtime_truth_metadata(filename))
     return reports

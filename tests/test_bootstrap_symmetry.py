@@ -1,6 +1,6 @@
 # Created: 2026-04-29
 # Last reused/audited: 2026-04-30
-# Authority basis: DSA-07 paper/live residue cleanup; native multi-bin buy_no monitor bootstrap reuse.
+# Authority basis: DSA-07 non-live execution residue cleanup; native multi-bin buy_no monitor bootstrap reuse.
 """Tests for A1: bootstrap symmetry at exit.
 
 Verifies that monitor refresh produces fresh bootstrap CI bounds

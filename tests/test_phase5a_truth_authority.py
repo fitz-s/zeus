@@ -1,6 +1,6 @@
 # Lifecycle: created=2026-04-17; last_reviewed=2026-04-17; last_reused=never
 # Purpose: Phase 5A truth-authority foundation tests (R-AB, R-AC, R-AD, R-AE)
-# Reuse: Inspect PortfolioState, read_mode_truth_json, portfolio_loader_view,
+# Reuse: Inspect PortfolioState, read_runtime_truth_json, portfolio_loader_view,
 #        save_portfolio, and write_status signatures before running — tests are
 #        spec-anchored to B069/B073/B077/MAJOR-4; R-AE RED until exec-emma wires
 #        authority= at production call sites.
@@ -14,9 +14,8 @@ R-AB (PortfolioState.authority): PortfolioState carries authority: Literal field
     load_portfolio() with DB outage returns authority="unverified". Risk-sizing
     callers must assert authority before consuming state.
 
-R-AC (ModeMismatchError): read_mode_truth_json(filename, mode="paper") against a
-    live-tagged file raises ModeMismatchError. Correct-mode reads succeed and
-    round-trip mode metadata.
+R-AC (RuntimeStateMismatchError): read_runtime_truth_json(filename) rejects retired
+    selector tags and returns live runtime-state metadata on valid files.
 
 R-AD (MetricIdentity view-layer): portfolio_loader_view emits temperature_metric
     on every position row. Empty low-book and empty high-book are DISTINGUISHABLE
@@ -57,28 +56,28 @@ class TestPortfolioStateAuthority:
 
         # The field must exist as a declared attribute.
         # If it does not exist, AttributeError fires here — correct RED.
-        ps = PortfolioState(positions=[], bankroll=150.0)
+        ps = PortfolioState(positions=[], bankroll=211.37)
         _ = ps.authority  # AttributeError if field absent
 
     def test_portfolio_state_authority_accepts_canonical_db(self):
         """R-AB (acceptance): authority='canonical_db' must be a valid value."""
         from src.state.portfolio import PortfolioState
 
-        ps = PortfolioState(positions=[], bankroll=150.0, authority="canonical_db")
+        ps = PortfolioState(positions=[], bankroll=211.37, authority="canonical_db")
         assert ps.authority == "canonical_db"
 
     def test_portfolio_state_authority_accepts_degraded(self):
         """R-AB (acceptance): authority='degraded' must be a valid value."""
         from src.state.portfolio import PortfolioState
 
-        ps = PortfolioState(positions=[], bankroll=150.0, authority="degraded")
+        ps = PortfolioState(positions=[], bankroll=211.37, authority="degraded")
         assert ps.authority == "degraded"
 
     def test_portfolio_state_authority_accepts_unverified(self):
         """R-AB (acceptance): authority='unverified' must be a valid value."""
         from src.state.portfolio import PortfolioState
 
-        ps = PortfolioState(positions=[], bankroll=150.0, authority="unverified")
+        ps = PortfolioState(positions=[], bankroll=211.37, authority="unverified")
         assert ps.authority == "unverified"
 
     def test_load_portfolio_db_outage_returns_unverified_authority(self):
@@ -131,78 +130,52 @@ class TestPortfolioStateAuthority:
 
 
 # ---------------------------------------------------------------------------
-# R-AC: ModeMismatchError on cross-mode truth-file reads
+# R-AC: runtime-state truth-file authority
 # ---------------------------------------------------------------------------
 
 
-class TestModeMismatchError:
-    """R-AC: read_mode_truth_json(filename, mode=X) must validate mode against file metadata.
+class TestRuntimeStateTruthAuthority:
+    """R-AC: runtime truth reads must reject retired selector metadata."""
 
-    B077 root cause: read_mode_truth_json ignores the mode parameter; live-vs-paper
-    truth files can silently collide.
-    """
+    def test_runtime_state_mismatch_error_is_importable(self):
+        """R-AC (existence): RuntimeStateMismatchError is the fail-closed truth-file error."""
+        from src.state.truth_files import RuntimeStateMismatchError
 
-    def test_mode_mismatch_error_is_importable(self):
-        """R-AC (existence): ModeMismatchError must be importable from truth_files module."""
-        from src.state.truth_files import ModeMismatchError  # ImportError if absent — correct RED
-        assert issubclass(ModeMismatchError, Exception)
+        assert issubclass(RuntimeStateMismatchError, Exception)
 
-    def test_read_mode_truth_json_accepts_mode_parameter(self):
-        """R-AC (signature): read_mode_truth_json must accept a mode keyword argument.
-
-        The current signature is read_mode_truth_json(filename). Adding mode= is
-        the spec requirement. TypeError on the call means the param is absent.
-        """
-        from src.state.truth_files import read_mode_truth_json
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            # Write a live-tagged truth file.
-            fname = "positions.json"
-            truth_path = Path(tmpdir) / fname
-            truth_path.write_text(json.dumps({
-                "positions": [],
-                "truth": {"mode": "live", "generated_at": "2026-04-17T00:00:00+00:00"},
-            }))
-
-            with patch("src.state.truth_files.mode_state_path", return_value=truth_path):
-                # Must accept mode= kwarg without TypeError.
-                # If the kwarg is not in the signature, TypeError fires — correct RED.
-                read_mode_truth_json(fname, mode="live")
-
-    def test_read_mode_truth_json_raises_mode_mismatch_on_wrong_mode(self):
-        """R-AC (rejection): reading a live-tagged file with mode='paper' raises ModeMismatchError."""
-        from src.state.truth_files import read_mode_truth_json, ModeMismatchError
+    def test_read_runtime_truth_json_rejects_retired_selector_tag(self):
+        """R-AC (rejection): retired selector tags cannot be consumed as live truth."""
+        from src.state.truth_files import read_runtime_truth_json, RuntimeStateMismatchError
 
         with tempfile.TemporaryDirectory() as tmpdir:
             fname = "positions.json"
             truth_path = Path(tmpdir) / fname
             truth_path.write_text(json.dumps({
                 "positions": [],
-                "truth": {"mode": "live", "generated_at": "2026-04-17T00:00:00+00:00"},
+                "truth": {"mode": "legacy_env", "generated_at": "2026-04-17T00:00:00+00:00"},
             }))
 
-            with patch("src.state.truth_files.mode_state_path", return_value=truth_path):
-                with pytest.raises(ModeMismatchError):
-                    read_mode_truth_json(fname, mode="paper")
+            with patch("src.state.truth_files.runtime_state_path", return_value=truth_path):
+                with pytest.raises(RuntimeStateMismatchError):
+                    read_runtime_truth_json(fname)
 
-    def test_read_mode_truth_json_correct_mode_succeeds_and_roundtrips(self):
-        """R-AC (acceptance): reading a live-tagged file with mode='live' succeeds and returns mode metadata."""
-        from src.state.truth_files import read_mode_truth_json
+    def test_read_runtime_truth_json_live_state_succeeds_and_roundtrips(self):
+        """R-AC (acceptance): live runtime-state metadata is returned to callers."""
+        from src.state.truth_files import read_runtime_truth_json
 
         with tempfile.TemporaryDirectory() as tmpdir:
             fname = "positions.json"
             truth_path = Path(tmpdir) / fname
             truth_path.write_text(json.dumps({
                 "positions": [],
-                "truth": {"mode": "live", "generated_at": "2026-04-17T00:00:00+00:00"},
+                "truth": {"runtime_state": "live", "generated_at": "2026-04-17T00:00:00+00:00"},
             }))
 
-            with patch("src.state.truth_files.mode_state_path", return_value=truth_path):
-                data, truth = read_mode_truth_json(fname, mode="live")
+            with patch("src.state.truth_files.runtime_state_path", return_value=truth_path):
+                data, truth = read_runtime_truth_json(fname)
 
-        # mode must round-trip through the truth metadata.
-        assert truth.get("mode") == "live", (
-            f"Expected mode='live' in truth metadata, got {truth.get('mode')!r}"
+        assert truth.get("runtime_state") == "live", (
+            f"Expected runtime_state='live' in truth metadata, got {truth.get('runtime_state')!r}"
         )
 
 
@@ -389,7 +362,7 @@ class TestTruthMetadataAuthorityRoundTrip:
         from pathlib import Path
         from src.state.truth_files import annotate_truth_payload
 
-        payload = {"positions": [], "bankroll": 150.0}
+        payload = {"positions": [], "bankroll": 211.37}
         result = annotate_truth_payload(payload, Path("/tmp/positions.json"), authority="VERIFIED")
 
         assert isinstance(result.get("truth"), dict), "annotate_truth_payload must inject 'truth' dict"
@@ -434,7 +407,7 @@ class TestAnnotateTruthPayloadProductionCallers:
         from pathlib import Path
         from src.state.portfolio import PortfolioState, save_portfolio
 
-        state = PortfolioState(positions=[], bankroll=150.0, authority="canonical_db")
+        state = PortfolioState(positions=[], bankroll=211.37, authority="canonical_db")
 
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "positions-live.json"
@@ -454,7 +427,7 @@ class TestAnnotateTruthPayloadProductionCallers:
         from pathlib import Path
         from src.state.portfolio import PortfolioState, save_portfolio
 
-        state = PortfolioState(positions=[], bankroll=150.0, authority="unverified")
+        state = PortfolioState(positions=[], bankroll=211.37, authority="unverified")
 
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "positions-live.json"
@@ -480,7 +453,7 @@ class TestAnnotateTruthPayloadProductionCallers:
         from pathlib import Path
         from src.state.portfolio import PortfolioState, save_portfolio
 
-        state = PortfolioState(positions=[], bankroll=150.0, authority="degraded")
+        state = PortfolioState(positions=[], bankroll=211.37, authority="degraded")
 
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "positions-live.json"

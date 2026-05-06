@@ -271,7 +271,7 @@ class TestLoaderD6Counter:
         }
 
         with caplog.at_level(logging.WARNING, logger="src.state.portfolio"):
-            pos = _position_from_projection_row(row, current_mode="paper")
+            pos = _position_from_projection_row(row, current_mode="legacy_env")
 
         # Position should have defaults
         assert pos.entry_price == pytest.approx(0.0)

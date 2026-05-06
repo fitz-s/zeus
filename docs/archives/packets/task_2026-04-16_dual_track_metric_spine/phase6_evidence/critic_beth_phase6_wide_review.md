@@ -49,7 +49,7 @@ $ grep -rn "day0_high_signal" src/signal/day0_low_nowcast_signal.py → No match
 - **Fitz P4 category-impossibility**: `RemainingMemberExtrema.__post_init__` raises when both maxes+mins are None. Metric mismatch caught at Router boundary (`Day0Router.route`). Making wrong code unwritable. ✓
 
 ## L2 — Forbidden Moves
-- Paper-mode resurrection: zero new refs (grep clean).
+- Obsolete non-live runtime resurrection: zero new refs (grep clean).
 - `--track` CLI flags: none added; dataclass-driven (Day0SignalInputs). ✓
 - Bundle Phase 7 scope: checked — rebuild_v2 METRIC_SPECS iteration untouched, `_tigge_common.py` untouched, historical_forecasts_v2 migration untouched. ✓
 - Modification of locked 5A/5B semantics: `PortfolioState` gains `portfolio_loader_degraded: bool = False` field — this IS a modification to PortfolioState, but it's an ADDITION of a flag, not a change to the `authority` Literal. Consistent with B055 absorption per contract item 9; I'll rate this as in-scope. ✓

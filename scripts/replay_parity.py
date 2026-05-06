@@ -59,10 +59,10 @@ def _canonical_open_projection(conn: sqlite3.Connection) -> dict:
 
 def _infer_legacy_env(path: Path) -> str:
     stem = path.stem
-    if stem.endswith("-paper"):
-        return "paper"
     if stem.endswith("-live"):
         return "live"
+    if "-" in stem:
+        return "legacy_env"
     return "unknown"
 
 

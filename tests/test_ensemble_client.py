@@ -62,13 +62,13 @@ def test_fetch_ensemble_uses_cache(monkeypatch):
     first = ensemble_client.fetch_ensemble(
         NYC,
         forecast_days=4,
-        model="ecmwf_ifs025",
+        model="gfs025",
         role="monitor_fallback",
     )
     second = ensemble_client.fetch_ensemble(
         NYC,
         forecast_days=4,
-        model="ecmwf_ifs025",
+        model="gfs025",
         role="monitor_fallback",
     )
 
@@ -83,7 +83,7 @@ def test_fetch_ensemble_blocks_openmeteo_for_entry_primary_role():
     ensemble_client._ENSEMBLE_CACHE.clear()
 
     with pytest.raises(SourceNotEnabled, match="entry_primary"):
-        ensemble_client.fetch_ensemble(NYC, forecast_days=4, model="ecmwf_ifs025", role="entry_primary")
+        ensemble_client.fetch_ensemble(NYC, forecast_days=4, model="gfs025", role="entry_primary")
 
 
 def test_fetch_ensemble_cache_key_includes_model(monkeypatch):
@@ -102,13 +102,13 @@ def test_fetch_ensemble_cache_key_includes_model(monkeypatch):
     ensemble_client.fetch_ensemble(
         NYC,
         forecast_days=4,
-        model="ecmwf_ifs025",
+        model="gfs025",
         role="monitor_fallback",
     )
     ensemble_client.fetch_ensemble(
         NYC,
         forecast_days=4,
-        model="gfs025",
+        model="gfs",
         role="monitor_fallback",
     )
 
@@ -191,13 +191,13 @@ def test_fetch_ensemble_cache_key_includes_role(monkeypatch):
     monitor = ensemble_client.fetch_ensemble(
         NYC,
         forecast_days=4,
-        model="ecmwf_ifs025",
+        model="gfs025",
         role="monitor_fallback",
     )
     diagnostic = ensemble_client.fetch_ensemble(
         NYC,
         forecast_days=4,
-        model="ecmwf_ifs025",
+        model="gfs025",
         role="diagnostic",
     )
 

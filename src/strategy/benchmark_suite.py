@@ -22,12 +22,12 @@ from typing import Any, Iterable, Mapping, Protocol, Sequence
 
 
 class BenchmarkEnvironment(str, Enum):
-    """Legacy storage labels for benchmark provenance, not promotion authority."""
+    """Benchmark provenance labels, not runtime modes or promotion authority."""
 
     REPLAY = "replay"
-    SIMULATED_VENUE = "paper"
-    READ_ONLY_LIVE = "shadow"
-    PROMOTION_GRADE_ECONOMICS = "live"
+    SIMULATED_VENUE = "simulated_venue"
+    READ_ONLY_LIVE = "read_only_live"
+    PROMOTION_GRADE_ECONOMICS = "promotion_grade_economics"
 
 
 class EvidenceGrade(str, Enum):
@@ -175,7 +175,14 @@ STRATEGY_BENCHMARK_RUNS_DDL = """
 CREATE TABLE IF NOT EXISTS strategy_benchmark_runs (
   run_id INTEGER PRIMARY KEY AUTOINCREMENT,
   strategy_key TEXT NOT NULL,
-  environment TEXT NOT NULL CHECK (environment IN ('replay','paper','shadow','live')),
+  environment TEXT NOT NULL CHECK (
+    environment IN (
+      'replay',
+      'simulated_venue',
+      'read_only_live',
+      'promotion_grade_economics'
+    )
+  ),
   evidence_grade TEXT NOT NULL CHECK (
     evidence_grade IN (
       'diagnostic_replay',

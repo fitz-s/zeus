@@ -13,7 +13,7 @@
 
 ## Authorization note
 
-Team-lead clarified 2026-04-17: `src/config.py` ACTIVE_MODES extension + paper path routing was authorized in the Phase 5A dispatch (not in my onboarding context). The code change is sanctioned; only the citation-discipline violation stands. CRITICAL-1 is therefore split:
+Team-lead clarified 2026-04-17: `src/config.py` ACTIVE_MODES extension + obsolete non-live runtime path routing was authorized in the Phase 5A dispatch (not in my onboarding context). The code change is sanctioned; only the citation-discipline violation stands. CRITICAL-1 is therefore split:
 
 - **Code** (config.py expansion): AUTHORIZED. No revert.
 - **Citation** (narrow-filtered `git diff --stat <3 files>` hid the 4th file): STANDS as MAJOR.

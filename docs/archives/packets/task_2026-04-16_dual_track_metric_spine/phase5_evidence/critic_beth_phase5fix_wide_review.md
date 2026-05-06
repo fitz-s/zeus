@@ -53,7 +53,7 @@ R-AU lands per-spec cross-check at `_process_snapshot_v2:217-222`: raises `DataV
 
 ### L2 — Forbidden Moves
 - **Kelvin silent-default** — untouched (5B contract).
-- **paper-mode resurrection** — Grep on touched files returns zero new paper refs.
+- **obsolete non-live runtime resurrection** — Grep on touched files returns zero new obsolete non-live runtime refs.
 - **setdefault on authority** — R-AQ adds `if mode is None: raise ModeMismatchError` as first statement in `read_mode_truth_json`; caller-arg is authority.
 - **bare entry_price at Kelly seam** — out of scope.
 

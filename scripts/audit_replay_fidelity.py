@@ -24,7 +24,10 @@ def run_audit() -> dict:
     init_schema(conn)
 
     total_settlements = conn.execute(
-        "SELECT COUNT(*) FROM world.settlements WHERE settlement_value IS NOT NULL"
+        "SELECT COUNT(*) FROM world.settlements "
+        "WHERE settlement_value IS NOT NULL "
+        "AND authority = 'VERIFIED' "
+        "AND temperature_metric = 'high'"
     ).fetchone()[0]
     snapshot_pairs = conn.execute(
         "SELECT COUNT(DISTINCT city || '|' || target_date) FROM world.ensemble_snapshots WHERE p_raw_json IS NOT NULL"
@@ -43,6 +46,8 @@ def run_audit() -> dict:
         JOIN world.ensemble_snapshots es
           ON s.city = es.city AND s.target_date = es.target_date
         WHERE s.settlement_value IS NOT NULL
+          AND s.authority = 'VERIFIED'
+          AND s.temperature_metric = 'high'
           AND es.p_raw_json IS NOT NULL
         """
     ).fetchone()[0]
@@ -90,6 +95,8 @@ def run_audit() -> dict:
         JOIN world.settlements s
           ON s.city = pc.city AND s.target_date = pc.target_date
         WHERE s.settlement_value IS NOT NULL
+          AND s.authority = 'VERIFIED'
+          AND s.temperature_metric = COALESCE(pc.temperature_metric, 'high')
           AND pc.bin_label IS NOT NULL
           AND pc.bin_label != ''
         """
@@ -110,6 +117,8 @@ def run_audit() -> dict:
         JOIN world.ensemble_snapshots es
           ON s.city = es.city AND s.target_date = es.target_date
         WHERE s.settlement_value IS NOT NULL
+          AND s.authority = 'VERIFIED'
+          AND s.temperature_metric = 'high'
           AND es.p_raw_json IS NOT NULL
         """
     ).fetchall()
@@ -159,6 +168,8 @@ def run_audit() -> dict:
         SELECT city, target_date
         FROM world.settlements
         WHERE settlement_value IS NOT NULL
+          AND authority = 'VERIFIED'
+          AND temperature_metric = 'high'
         ORDER BY target_date DESC, city
         LIMIT 10
         """
@@ -169,6 +180,8 @@ def run_audit() -> dict:
         SELECT city, target_date
         FROM world.settlements
         WHERE settlement_value IS NOT NULL
+          AND authority = 'VERIFIED'
+          AND temperature_metric = 'high'
         ORDER BY target_date DESC, city
         """
     ).fetchall()

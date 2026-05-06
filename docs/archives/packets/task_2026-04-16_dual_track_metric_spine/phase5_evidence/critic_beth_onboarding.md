@@ -7,12 +7,12 @@
 ### Tier 1 — operating manual + law
 1. `~/.claude/agent-team-methodology.md` — context is investment not budget; phantom-work disk-verify; wide-critic L0-L5+WIDEN; §"Critic role — critique TASK not TEAMMATE" (L0.0 peer-not-suspect, 5-tier hypothesis ordering).
 2. `~/.claude/CLAUDE.md` — Fitz methodology (K << N structural decisions, relationship tests), Four Constraints, Code Provenance (LEGACY until audited; verdicts CURRENT_REUSABLE / STALE_REWRITE / DEAD_DELETE / QUARANTINED).
-3. `AGENTS.md` (root) — dual-track system; §"Forbidden Moves" (paper-mode retired, JSON-before-commit banned per DT#1, bare entry_price banned per INV-21/DT#5); §"Function Naming" points at naming_conventions.yaml.
+3. `AGENTS.md` (root) — dual-track system; §"Forbidden Moves" (obsolete non-live runtime retired, JSON-before-commit banned per DT#1, bare entry_price banned per INV-21/DT#5); §"Function Naming" points at naming_conventions.yaml.
 4. `architecture/naming_conventions.yaml` — Lifecycle/Purpose/Reuse header triad on scripts+tests; allowed-prefix list for durable scripts; packet-ephemeral `task_YYYY-MM-DD_*.py` rule.
 5. `docs/authority/zeus_dual_track_architecture.md` §2/§5/§6/§8 — MetricIdentity triad (temperature_metric, physical_quantity, observation_field, data_version); low-Day0 is nowcast not mirror-of-high; DT#1-#7 binding law; forbidden moves (no daily-low before Gate F; no high/low mix in Platt/bin-lookup/calibration).
 
 ### Tier 2 — current state
-6. `team_lead_handoff.md` — fix-pack scope (4 CRITICAL + 4 MAJOR, ~500 LOC cap); 5C after; co-landing imperative evaluator.py:825 ↔ Phase 6 guard removal; zero-data golden window active; paper retired antibody.
+6. `team_lead_handoff.md` — fix-pack scope (4 CRITICAL + 4 MAJOR, ~500 LOC cap); 5C after; co-landing imperative evaluator.py:825 ↔ Phase 6 guard removal; zero-data golden window active; obsolete non-live runtime retired antibody.
 7. `zeus_dt_coordination_handoff.md` — 12-bug RED queue; Section A (pre-5 unlock), B (Phase-5 unlock; B069/B073/B077/B078 RESOLVED, B093 bifurcated), C (DT#1/DT#6 gated).
 
 ### Tier 3 — retired team learnings
@@ -33,7 +33,7 @@
 - **L0.0 — Peer, not suspect.** 6-tier hypothesis ordering (accepting critic-alice's 5C refinement): `concurrent-write` → `memory/report-state lag` → `shell/tool artifact` → `deferred team-lead ruling I don't see` → `benign mistake` → `discipline breach` (LAST, triple-verified + team-lead concurrence). Language: "the diff shows", "the disk reveals". Every "grep reveals X" = fresh bash grep right before writing, raw output pasted inline. Discipline findings never go in a verdict — they go to team-lead as a flagged prefix-missing observation, team-lead owns escalation.
 - **L0** — authority chain re-loaded post-subagent-start (above).
 - **L1** — INV-##/FM-## in scoped AGENTS for every directory touched (`scripts/`, `src/contracts/`, `src/state/`, `src/engine/`, `src/data/`, `src/signal/`, `tests/`).
-- **L2** — Forbidden Moves sweep: paper-mode resurrection; `setdefault` on fields where caller-arg must be authority (MINOR-NEW-1 shape); polarity-swap without semantic rethink; orphan helper / parallel-source (51-source STALE); JSON-write-before-commit (DT#1); bare entry_price at Kelly seam (INV-21); high/low mix in any Platt/bin-lookup/calibration.
+- **L2** — Forbidden Moves sweep: obsolete non-live runtime resurrection; `setdefault` on fields where caller-arg must be authority (MINOR-NEW-1 shape); polarity-swap without semantic rethink; orphan helper / parallel-source (51-source STALE); JSON-write-before-commit (DT#1); bare entry_price at Kelly seam (INV-21); high/low mix in any Platt/bin-lookup/calibration.
 - **L3** — silent fallbacks / default-value traps (`DEFAULT 'high'`, `or "high"`, `setdefault`, `mode=None` skip); unit semantics (Kelvin at GRIB level).
 - **L4** — source authority at every seam: contract module wired INTO the writer, not co-resident; `decision.*` wins over `payload.*`; triad (data_version + temperature_metric + physical_quantity) cross-checked on every v2 write/read.
 - **L5** — phase boundary leakage: no Phase 6/7/9 concern landing early; no 5A/5B contract regressed; co-landing imperatives (evaluator.py:825 ↔ Phase-6 guard; DST fix before real-data batch).

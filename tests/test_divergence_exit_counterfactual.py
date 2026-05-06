@@ -8,7 +8,7 @@ import scripts.audit_divergence_exit_counterfactual as counterfactual
 def test_counterfactual_reports_delayed_and_settlement_pnl(tmp_path, monkeypatch):
     state_dir = tmp_path / "state"
     state_dir.mkdir()
-    positions_path = state_dir / "positions-paper.json"
+    positions_path = state_dir / "positions-legacy.json"
     positions_path.write_text(json.dumps({
         "recent_exits": [
             {
@@ -44,8 +44,9 @@ def test_counterfactual_reports_delayed_and_settlement_pnl(tmp_path, monkeypatch
         """
         INSERT INTO settlements
         (city, target_date, winning_bin, settlement_value, temperature_metric,
+         authority,
          physical_quantity, observation_field, data_version)
-        VALUES ('Paris', '2026-04-03', '12°C', 12.0, 'high',
+        VALUES ('Paris', '2026-04-03', '12°C', 12.0, 'high', 'VERIFIED',
                 'mx2t6_local_calendar_day_max', 'high_temp',
                 'tigge_mx2t6_local_calendar_day_max_v1')
         """
@@ -56,7 +57,7 @@ def test_counterfactual_reports_delayed_and_settlement_pnl(tmp_path, monkeypatch
     monkeypatch.setattr(counterfactual, "PROJECT_ROOT", tmp_path)
     monkeypatch.setattr(counterfactual, "DB_PATH", db_path)
 
-    report = counterfactual.run_audit(mode="paper")
+    report = counterfactual.run_audit(positions_path=positions_path)
     sample = report["sample"][0]
 
     assert report["divergence_exits_analyzed"] == 1

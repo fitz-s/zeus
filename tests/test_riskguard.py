@@ -1,6 +1,9 @@
 # Created: 2026-03-30
-# Last reused/audited: 2026-04-28
+# Last reused/audited: 2026-05-05
 # Authority basis: docs/operations/task_2026-04-28_contamination_remediation/plan.md Batch D RiskGuard test-law remediation.
+# Lifecycle: created=2026-03-30; last_reviewed=2026-05-05; last_reused=2026-05-05
+# Purpose: Guard RiskGuard protective metrics, policy resolution, source authority, and portfolio loader invariants.
+# Reuse: Run after RiskGuard risk details, portfolio loader, settlement source, bankroll, or risk-action changes.
 """Tests for RiskGuard metrics, policy resolution, and risk levels."""
 
 import json
@@ -24,8 +27,13 @@ from src.state.db import (
     query_strategy_health_snapshot,
     refresh_strategy_health,
 )
-from src.state.portfolio import Position
-from src.state.portfolio import PortfolioState
+from src.state.portfolio import (
+    ENTRY_ECONOMICS_AVG_FILL_PRICE,
+    FILL_AUTHORITY_VENUE_CONFIRMED_FULL,
+    PortfolioState,
+    Position,
+    total_exposure_usd,
+)
 
 
 def _policy_conn() -> sqlite3.Connection:
@@ -102,6 +110,10 @@ def _insert_position_current(
     shares: float = 0.0,
     cost_basis_usd: float = 0.0,
     last_monitor_market_price: float | None = None,
+    temperature_metric: str = "high",
+    token_id: str = "",
+    no_token_id: str = "",
+    condition_id: str = "",
 ) -> None:
     conn.execute(
         """
@@ -110,8 +122,9 @@ def _insert_position_current(
             direction, unit, size_usd, shares, cost_basis_usd, entry_price, p_posterior,
             last_monitor_prob, last_monitor_edge, last_monitor_market_price,
             decision_snapshot_id, entry_method, strategy_key, edge_source, discovery_mode,
-            chain_state, order_id, order_status, updated_at, temperature_metric
-        ) VALUES (?, ?, ?, 'm-test', 'NYC', 'NYC', '2026-04-01', '39-40°F', 'buy_yes', 'F', ?, ?, ?, NULL, NULL, NULL, NULL, ?, '', '', ?, '', '', 'unknown', '', '', ?, 'high')
+            chain_state, token_id, no_token_id, condition_id, order_id, order_status, updated_at,
+            temperature_metric
+        ) VALUES (?, ?, ?, 'm-test', 'NYC', 'NYC', '2026-04-01', '39-40°F', 'buy_yes', 'F', ?, ?, ?, NULL, NULL, NULL, NULL, ?, '', '', ?, '', '', 'unknown', ?, ?, ?, '', '', ?, ?)
         """,
         (
             position_id,
@@ -122,7 +135,11 @@ def _insert_position_current(
             cost_basis_usd,
             last_monitor_market_price,
             strategy_key,
+            token_id,
+            no_token_id,
+            condition_id,
             "2026-04-04T12:00:00+00:00",
+            temperature_metric,
         ),
     )
 
@@ -154,6 +171,58 @@ def _insert_outcome_fact(
     )
 
 
+def _append_verified_settlement_event(
+    conn: sqlite3.Connection,
+    *,
+    position_id: str,
+    strategy_key: str,
+    settled_at: str,
+    pnl: float,
+    outcome: int,
+    sequence_no: int,
+) -> None:
+    from src.engine.lifecycle_events import build_settlement_canonical_write
+    from src.state.db import append_many_and_project
+
+    pos = Position(
+        trade_id=position_id,
+        market_id=f"m-{position_id}",
+        city="NYC",
+        cluster="NYC",
+        target_date="2026-04-01",
+        bin_label="39-40°F",
+        direction="buy_yes",
+        unit="F",
+        size_usd=10.0,
+        entry_price=0.4,
+        p_posterior=0.7,
+        decision_snapshot_id=f"snap-{position_id}",
+        strategy_key=strategy_key,
+        strategy=strategy_key,
+        edge_source=strategy_key,
+        exit_price=1.0 if outcome == 1 else 0.0,
+        pnl=pnl,
+        exit_reason="SETTLEMENT",
+        last_exit_at=settled_at,
+        state="settled",
+    )
+    events, projection = build_settlement_canonical_write(
+        pos,
+        winning_bin="39-40°F" if outcome == 1 else "41-42°F",
+        won=bool(outcome),
+        outcome=outcome,
+        sequence_no=sequence_no,
+        phase_before="pending_exit",
+        settlement_authority="VERIFIED",
+        settlement_truth_source="world.settlements",
+        settlement_market_slug=f"nyc-high-{position_id}",
+        settlement_temperature_metric="high",
+        settlement_source="WU",
+        settlement_value=40.0 if outcome == 1 else 42.0,
+    )
+    append_many_and_project(conn, events, projection)
+
+
 def _insert_execution_fact(
     conn: sqlite3.Connection,
     *,
@@ -161,6 +230,10 @@ def _insert_execution_fact(
     strategy_key: str,
     terminal_exec_status: str,
     posted_at: str,
+    filled_at: str | None = None,
+    fill_price: float | None = None,
+    shares: float | None = None,
+    venue_status: str | None = None,
 ) -> None:
     conn.execute(
         """
@@ -168,16 +241,132 @@ def _insert_execution_fact(
             intent_id, position_id, decision_id, order_role, strategy_key, posted_at,
             filled_at, voided_at, submitted_price, fill_price, shares, fill_quality,
             latency_seconds, venue_status, terminal_exec_status
-        ) VALUES (?, ?, NULL, 'entry', ?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, ?)
+        ) VALUES (?, ?, NULL, 'entry', ?, ?, ?, NULL, NULL, ?, ?, NULL, NULL, ?, ?)
         """,
         (
             intent_id,
             intent_id,
             strategy_key,
             posted_at,
+            filled_at,
+            fill_price,
+            shares,
+            venue_status,
             terminal_exec_status,
         ),
     )
+
+
+def test_riskguard_recent_exits_skip_settlement_rows_without_metric_authority():
+    rows = [
+        {
+            "city": "NYC",
+            "range_label": "legacy-bin",
+            "target_date": "2026-04-01",
+            "direction": "buy_yes",
+            "exit_reason": "SETTLEMENT",
+            "settled_at": "2026-04-01T23:00:00Z",
+            "pnl": 99.0,
+            "metric_ready": False,
+            "settlement_authority": "LEGACY_UNKNOWN",
+        },
+        {
+            "city": "NYC",
+            "range_label": "39-40°F",
+            "target_date": "2026-04-01",
+            "direction": "buy_yes",
+            "exit_reason": "SETTLEMENT",
+            "settled_at": "2026-04-02T00:00:00Z",
+            "pnl": 4.2,
+            "metric_ready": True,
+            "settlement_authority": "VERIFIED",
+        },
+    ]
+
+    assert riskguard_module._canonical_recent_exits_from_settlement_rows(rows) == [
+        {
+            "city": "NYC",
+            "bin_label": "39-40°F",
+            "target_date": "2026-04-01",
+            "direction": "buy_yes",
+            "token_id": "",
+            "no_token_id": "",
+            "exit_reason": "SETTLEMENT",
+            "exited_at": "2026-04-02T00:00:00Z",
+            "pnl": 4.2,
+        }
+    ]
+
+
+def test_current_mode_realized_exits_prefers_verified_settlements_over_outcome_fact():
+    conn = _policy_conn()
+    _insert_outcome_fact(
+        conn,
+        position_id="authorityless-outcome",
+        strategy_key="center_buy",
+        settled_at="2026-04-03T12:00:00+00:00",
+        pnl=99.0,
+        outcome=1,
+    )
+    settlement_rows = [
+        {
+            "city": "NYC",
+            "range_label": "39-40°F",
+            "target_date": "2026-04-01",
+            "direction": "buy_yes",
+            "exit_reason": "SETTLEMENT",
+            "settled_at": "2026-04-03T12:00:00+00:00",
+            "pnl": 4.25,
+            "metric_ready": True,
+            "settlement_authority": "VERIFIED",
+        }
+    ]
+
+    exits, source, degraded = riskguard_module._current_mode_realized_exits(
+        conn,
+        env="live",
+        settlement_rows=settlement_rows,
+    )
+
+    assert source == "authoritative_settlement_rows"
+    assert degraded is False
+    assert [exit_row["pnl"] for exit_row in exits] == [4.25]
+
+
+def test_current_mode_realized_exits_blocks_degraded_settlement_rows_without_outcome_fact_fallback():
+    conn = _policy_conn()
+    _insert_outcome_fact(
+        conn,
+        position_id="authorityless-outcome",
+        strategy_key="center_buy",
+        settled_at="2026-04-03T12:00:00+00:00",
+        pnl=99.0,
+        outcome=1,
+    )
+    settlement_rows = [
+        {
+            "city": "NYC",
+            "range_label": "legacy-bin",
+            "target_date": "2026-04-01",
+            "direction": "buy_yes",
+            "exit_reason": "SETTLEMENT",
+            "settled_at": "2026-04-03T12:00:00+00:00",
+            "pnl": 99.0,
+            "metric_ready": False,
+            "is_degraded": True,
+            "settlement_authority": "LEGACY_UNKNOWN",
+        }
+    ]
+
+    exits, source, degraded = riskguard_module._current_mode_realized_exits(
+        conn,
+        env="live",
+        settlement_rows=settlement_rows,
+    )
+
+    assert source == "authoritative_settlement_rows"
+    assert degraded is True
+    assert exits == []
 
 
 def _insert_risk_state_row(
@@ -185,7 +374,7 @@ def _insert_risk_state_row(
     *,
     checked_at: str,
     level: str = "GREEN",
-    initial_bankroll: float = 150.0,
+    initial_bankroll: float = 211.37,
     total_pnl: float = 0.0,
     effective_bankroll: float | None = None,
 ) -> int:
@@ -284,7 +473,7 @@ def _mock_trailing_loss_tick(
     monkeypatch.setattr(
         riskguard_module,
         "load_portfolio",
-        lambda: portfolio or PortfolioState(bankroll=150.0, daily_baseline_total=150.0, weekly_baseline_total=150.0),
+        lambda: portfolio or PortfolioState(bankroll=211.37, daily_baseline_total=211.37, weekly_baseline_total=211.37),
     )
     monkeypatch.setattr(
         riskguard_module,
@@ -366,8 +555,9 @@ class TestRiskGuardSettlementSource:
         # this test's axis is portfolio TRUTH-SOURCE preference (canonical_db
         # vs metadata fallback). Bankroll value is now provider-sourced, so
         # we monkeypatch `bankroll_provider.current()` instead of stuffing
-        # PortfolioState(bankroll=150.0). Under DEF A, effective_bankroll
-        # equals the wallet value with NO PnL math added (was 150+2=152).
+        # PortfolioState(bankroll=211.37). Under DEF A, effective_bankroll
+        # equals the wallet value with NO PnL math added (formerly a fixed-capital
+        # literal plus PnL).
         zeus_db = tmp_path / "zeus.db"
         risk_db = tmp_path / "risk_state.db"
 
@@ -397,7 +587,7 @@ class TestRiskGuardSettlementSource:
             _bp,
             "current",
             lambda **_kw: _bp.BankrollOfRecord(
-                value_usd=150.0,
+                value_usd=211.37,
                 fetched_at="2026-04-01T00:00:00+00:00",
                 source="polymarket_wallet",
                 authority="canonical",
@@ -413,7 +603,7 @@ class TestRiskGuardSettlementSource:
             # source; left as-is so the daily/weekly baseline annotations in
             # details_json keep their previous values.
             lambda: PortfolioState(
-                bankroll=150.0,
+                bankroll=211.37,
                 daily_baseline_total=151.0,
                 weekly_baseline_total=152.0,
                 recent_exits=[
@@ -456,18 +646,225 @@ class TestRiskGuardSettlementSource:
         assert details["portfolio_fallback_active"] is False
         assert details["portfolio_position_count"] == 1
         assert details["portfolio_capital_source"] == "dual_source_blended"
-        # Bankroll truth axis (P0-A): provider-sourced wallet = 150.0; DEF A
+        # Bankroll truth axis (P0-A): provider-sourced wallet; DEF A
         # makes effective_bankroll == initial_bankroll (no PnL fold-in).
-        assert details["initial_bankroll"] == pytest.approx(150.0)
-        assert details["effective_bankroll"] == pytest.approx(150.0)
+        assert details["initial_bankroll"] == pytest.approx(211.37)
+        assert details["effective_bankroll"] == pytest.approx(211.37)
         assert details["bankroll_truth_source"] == "polymarket_wallet"
         # Baselines come from PortfolioState's daily/weekly snapshots (still
         # provided by the legacy load_portfolio path).
         assert details["daily_baseline_total"] == pytest.approx(151.0)
         assert details["weekly_baseline_total"] == pytest.approx(152.0)
-        # PnL signals are still emitted for analytics, just not folded into equity.
-        assert details["realized_pnl"] == pytest.approx(-3.0)
+        # PnL signals are still emitted for analytics, but realized PnL now
+        # comes only from the strategy_health 30d read-model window.
+        assert details["realized_pnl"] == pytest.approx(0.0)
+        assert details["realized_pnl_source"] == "strategy_health.realized_pnl_30d"
+        assert details["realized_pnl_window_days"] == 30
         assert details["unrealized_pnl"] == pytest.approx(5.0)
+
+    def test_portfolio_loader_fill_authority_preserved_into_riskguard_position(self, monkeypatch, tmp_path):
+        zeus_db = tmp_path / "zeus.db"
+        conn = get_connection(zeus_db)
+        from src.state.db import init_schema
+
+        init_schema(conn)
+        _insert_position_current(
+            conn,
+            position_id="db-pos-fill",
+            strategy_key="center_buy",
+            size_usd=25.0,
+            shares=12.0,
+            cost_basis_usd=25.0,
+            last_monitor_market_price=2.5,
+            temperature_metric="low",
+            token_id="yes-low-token",
+            no_token_id="no-low-token",
+            condition_id="condition-low",
+        )
+        _insert_execution_fact(
+            conn,
+            intent_id="db-pos-fill",
+            strategy_key="center_buy",
+            terminal_exec_status="filled",
+            posted_at="2026-04-04T12:00:00+00:00",
+            filled_at="2026-04-04T12:00:03+00:00",
+            fill_price=2.0,
+            shares=10.0,
+            venue_status="filled",
+        )
+        conn.commit()
+
+        monkeypatch.setattr(
+            riskguard_module,
+            "load_portfolio",
+            lambda: PortfolioState(
+                bankroll=211.37,
+                positions=[
+                    Position(
+                        trade_id="metadata-pos",
+                        market_id="m-test",
+                        city="NYC",
+                        cluster="NYC",
+                        target_date="2026-04-01",
+                        bin_label="39-40°F",
+                        direction="buy_yes",
+                    )
+                ],
+            ),
+        )
+
+        portfolio, truth = riskguard_module._load_riskguard_portfolio_truth(conn)
+        pos = portfolio.positions[0]
+
+        assert truth["source"] == "position_current"
+        assert truth["loader_status"] == "ok"
+        assert truth["consistency_lock"] == "pass"
+        assert pos.temperature_metric == "low"
+        assert pos.token_id == "yes-low-token"
+        assert pos.no_token_id == "no-low-token"
+        assert pos.condition_id == "condition-low"
+        assert pos.entry_economics_authority == ENTRY_ECONOMICS_AVG_FILL_PRICE
+        assert pos.fill_authority == FILL_AUTHORITY_VENUE_CONFIRMED_FULL
+        assert pos.entry_fill_verified is True
+        assert pos.has_fill_economics_authority is True
+        assert pos.entry_price_avg_fill == pytest.approx(2.0)
+        assert pos.shares_filled == pytest.approx(10.0)
+        assert pos.filled_cost_basis_usd == pytest.approx(20.0)
+        assert pos.effective_shares == pytest.approx(10.0)
+        assert pos.effective_cost_basis_usd == pytest.approx(20.0)
+        assert pos.unrealized_pnl == pytest.approx(5.0)
+        assert total_exposure_usd(portfolio) == pytest.approx(20.0)
+
+    def test_tick_does_not_use_metadata_recent_exits_without_authoritative_settlements(self, monkeypatch, tmp_path):
+        zeus_db = tmp_path / "zeus.db"
+        risk_db = tmp_path / "risk_state.db"
+
+        def _fake_get_connection(path=None):
+            if path == riskguard_module.RISK_DB_PATH:
+                return get_connection(risk_db)
+            return get_connection(zeus_db)
+
+        _init_empty_canonical_portfolio_schema(zeus_db)
+        from src.runtime import bankroll_provider as _bp
+        monkeypatch.setattr(
+            _bp,
+            "current",
+            lambda **_kw: _bp.BankrollOfRecord(
+                value_usd=211.37,
+                fetched_at="2026-04-01T00:00:00+00:00",
+                source="polymarket_wallet",
+                authority="canonical",
+                staleness_seconds=0.0,
+                cached=False,
+            ),
+        )
+        monkeypatch.setattr(riskguard_module, "get_connection", _fake_get_connection)
+        monkeypatch.setattr(
+            riskguard_module,
+            "load_portfolio",
+            lambda: PortfolioState(
+                bankroll=211.37,
+                recent_exits=[
+                    {
+                        "city": "NYC",
+                        "bin_label": "legacy",
+                        "target_date": "2026-04-01",
+                        "direction": "buy_yes",
+                        "exit_reason": "SETTLEMENT",
+                        "exited_at": "2026-04-03T12:00:00+00:00",
+                        "pnl": 99.0,
+                    }
+                ],
+            ),
+        )
+        monkeypatch.setattr(riskguard_module, "query_authoritative_settlement_rows", lambda *_, **__: [])
+        monkeypatch.setattr(riskguard_module, "load_tracker", lambda: strategy_tracker_module.StrategyTracker())
+
+        riskguard_module.tick()
+        row = get_connection(risk_db).execute(
+            "SELECT details_json FROM risk_state ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        details = json.loads(row["details_json"])
+
+        assert details["realized_truth_source"] == "authoritative_settlement_rows"
+        assert details["realized_degraded"] is False
+        assert details["realized_pnl"] == pytest.approx(0.0)
+
+    def test_tick_marks_missing_settlement_authority_surface_degraded(self, monkeypatch, tmp_path):
+        zeus_db = tmp_path / "zeus.db"
+        risk_db = tmp_path / "risk_state.db"
+
+        def _fake_get_connection(path=None):
+            if path == riskguard_module.RISK_DB_PATH:
+                return get_connection(risk_db)
+            return get_connection(zeus_db)
+
+        _init_empty_canonical_portfolio_schema(zeus_db)
+        conn = get_connection(zeus_db)
+        conn.execute("DROP TABLE position_events")
+        conn.commit()
+        conn.close()
+
+        from src.runtime import bankroll_provider as _bp
+        monkeypatch.setattr(
+            _bp,
+            "current",
+            lambda **_kw: _bp.BankrollOfRecord(
+                value_usd=211.37,
+                fetched_at="2026-04-01T00:00:00+00:00",
+                source="polymarket_wallet",
+                authority="canonical",
+                staleness_seconds=0.0,
+                cached=False,
+            ),
+        )
+        monkeypatch.setattr(riskguard_module, "get_connection", _fake_get_connection)
+        monkeypatch.setattr(riskguard_module, "load_portfolio", lambda: PortfolioState(bankroll=211.37))
+        monkeypatch.setattr(riskguard_module, "load_tracker", lambda: strategy_tracker_module.StrategyTracker())
+
+        riskguard_module.tick()
+        row = get_connection(risk_db).execute(
+            "SELECT details_json FROM risk_state ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        details = json.loads(row["details_json"])
+
+        assert details["strategy_health_refresh_status"] == "refreshed_empty_degraded"
+        assert details["strategy_health_settlement_authority_missing_tables"] == ["position_events"]
+        assert details["realized_truth_source"] == "authoritative_settlement_rows"
+        assert details["realized_degraded"] is True
+
+    def test_portfolio_loader_fill_authority_requires_source_time_provenance(self, tmp_path):
+        zeus_db = tmp_path / "zeus.db"
+        conn = get_connection(zeus_db)
+        from src.state.db import init_schema, query_portfolio_loader_view
+
+        init_schema(conn)
+        _insert_position_current(
+            conn,
+            position_id="db-pos-fill",
+            strategy_key="center_buy",
+            size_usd=25.0,
+            shares=12.0,
+            cost_basis_usd=25.0,
+            last_monitor_market_price=2.5,
+        )
+        _insert_execution_fact(
+            conn,
+            intent_id="db-pos-fill",
+            strategy_key="center_buy",
+            terminal_exec_status="filled",
+            posted_at="2026-04-04T12:00:00+00:00",
+            filled_at="2026-04-04T12:00:03+00:00",
+            fill_price=2.0,
+            shares=10.0,
+            venue_status="filled",
+        )
+        conn.commit()
+        loader_row = dict(query_portfolio_loader_view(conn)["positions"][0])
+        loader_row["execution_fact_filled_at"] = ""
+
+        with pytest.raises(ValueError, match="execution_fact_filled_at"):
+            riskguard_module._portfolio_position_from_loader_row(loader_row)
 
     def test_tick_records_explicit_portfolio_fallback_when_projection_unavailable(self, monkeypatch, tmp_path):
         zeus_db = tmp_path / "zeus.db"
@@ -483,7 +880,7 @@ class TestRiskGuardSettlementSource:
             riskguard_module,
             "load_portfolio",
             lambda: PortfolioState(
-                bankroll=150.0,
+                bankroll=211.37,
                 daily_baseline_total=149.0,
                 weekly_baseline_total=148.0,
             ),
@@ -520,7 +917,7 @@ class TestRiskGuardSettlementSource:
 
         _init_empty_canonical_portfolio_schema(zeus_db)
         monkeypatch.setattr(riskguard_module, "get_connection", _fake_get_connection)
-        monkeypatch.setattr(riskguard_module, "load_portfolio", lambda: PortfolioState(bankroll=150.0))
+        monkeypatch.setattr(riskguard_module, "load_portfolio", lambda: PortfolioState(bankroll=211.37))
         monkeypatch.setattr(
             riskguard_module,
             "query_authoritative_settlement_rows",
@@ -549,7 +946,7 @@ class TestRiskGuardSettlementSource:
 
         _init_empty_canonical_portfolio_schema(zeus_db)
         monkeypatch.setattr(riskguard_module, "get_connection", _fake_get_connection)
-        monkeypatch.setattr(riskguard_module, "load_portfolio", lambda: PortfolioState(bankroll=150.0))
+        monkeypatch.setattr(riskguard_module, "load_portfolio", lambda: PortfolioState(bankroll=211.37))
         monkeypatch.setattr(
             riskguard_module,
             "query_authoritative_settlement_rows",
@@ -577,7 +974,7 @@ class TestRiskGuardSettlementSource:
 
         _init_empty_canonical_portfolio_schema(zeus_db)
         monkeypatch.setattr(riskguard_module, "get_connection", _fake_get_connection)
-        monkeypatch.setattr(riskguard_module, "load_portfolio", lambda: PortfolioState(bankroll=150.0))
+        monkeypatch.setattr(riskguard_module, "load_portfolio", lambda: PortfolioState(bankroll=211.37))
         monkeypatch.setattr(
             riskguard_module,
             "query_authoritative_settlement_rows",
@@ -609,7 +1006,7 @@ class TestRiskGuardSettlementSource:
             return get_connection(zeus_db)
 
         monkeypatch.setattr(riskguard_module, "get_connection", _fake_get_connection)
-        monkeypatch.setattr(riskguard_module, "load_portfolio", lambda: PortfolioState(bankroll=150.0))
+        monkeypatch.setattr(riskguard_module, "load_portfolio", lambda: PortfolioState(bankroll=211.37))
         monkeypatch.setattr(
             riskguard_module,
             "query_authoritative_settlement_rows",
@@ -682,7 +1079,7 @@ class TestRiskGuardSettlementSource:
 
         _init_empty_canonical_portfolio_schema(zeus_db)
         monkeypatch.setattr(riskguard_module, "get_connection", _fake_get_connection)
-        monkeypatch.setattr(riskguard_module, "load_portfolio", lambda: PortfolioState(bankroll=150.0))
+        monkeypatch.setattr(riskguard_module, "load_portfolio", lambda: PortfolioState(bankroll=211.37))
         monkeypatch.setattr(riskguard_module, "load_tracker", lambda: tracker)
         monkeypatch.setattr(
             riskguard_module,
@@ -747,14 +1144,14 @@ class TestRiskGuardTrailingLossSemantics:
         assert details["daily_loss_source"] == "risk_state_history"
         # P0-A DEF A (followup_design.md §2.1): effective_bankroll == initial_bankroll
         # (= wallet snapshot, no PnL math). The legacy assertion expected
-        # effective=136.74 (=150-13.26 under DEF B); the structural correction
-        # is effective=150 with total_pnl preserved as analytics-only.
+        # effective == initial minus PnL under DEF B; the structural correction
+        # is effective == initial with total_pnl preserved as analytics-only.
         assert details["daily_loss_reference"] == {
             "row_id": reference_id,
             "checked_at": reference_checked_at,
-            "initial_bankroll": 150.0,
+            "initial_bankroll": 211.37,
             "total_pnl": -13.26,
-            "effective_bankroll": 150.0,
+            "effective_bankroll": 211.37,
         }
 
     def test_tick_uses_trailing_7d_loss_when_reference_exists(self, monkeypatch, tmp_path):
@@ -794,9 +1191,9 @@ class TestRiskGuardTrailingLossSemantics:
         details = json.loads(row["details_json"])
 
         # P0-A DEF A: equity == wallet, not wallet+pnl. Both daily and weekly
-        # references use initial_bankroll (= 150 at this default seed). Loss
+        # references use initial_bankroll at this default seed. Loss
         # signal comes from current-equity vs reference-equity, both of which
-        # are wallet snapshots. With monkey-patched 150.0 wallet on both sides,
+        # are wallet snapshots. With monkey-patched wallet truth on both sides,
         # weekly_loss is 0 — but the test fixtures inject realized_pnl=-10 via
         # _mock_trailing_loss_tick which moves current_total_value separately.
         # Under DEF A this no longer changes equity; the assertion below is
@@ -807,9 +1204,9 @@ class TestRiskGuardTrailingLossSemantics:
         assert details["weekly_loss_reference"] == {
             "row_id": weekly_reference_id,
             "checked_at": weekly_reference_checked_at,
-            "initial_bankroll": 150.0,
+            "initial_bankroll": 211.37,
             "total_pnl": -5.0,
-            "effective_bankroll": 150.0,
+            "effective_bankroll": 211.37,
         }
 
     def test_tick_marks_insufficient_history_without_false_trigger(self, monkeypatch, tmp_path):
@@ -968,7 +1365,7 @@ class TestRiskGuardTrailingLossSemantics:
         details = json.loads(row["details_json"])
 
         # P0-A DEF A (followup_design.md §2.1): equity = wallet, no pnl math.
-        # Both reference and current equity come from a flat $150 wallet
+        # Both reference and current equity come from the same wallet
         # (default monkeypatched in conftest), so daily_loss is structurally 0
         # under DEF A. The original assertion (loss=2) encoded DEF B; the
         # structural property this test guards is "stale-but-trustworthy
@@ -1177,7 +1574,7 @@ class TestStrategyPolicyResolver:
             return get_connection(zeus_db)
 
         monkeypatch.setattr(riskguard_module, "get_connection", _fake_get_connection)
-        monkeypatch.setattr(riskguard_module, "load_portfolio", lambda: PortfolioState(bankroll=150.0))
+        monkeypatch.setattr(riskguard_module, "load_portfolio", lambda: PortfolioState(bankroll=211.37))
         monkeypatch.setattr(riskguard_module, "load_tracker", lambda: strategy_tracker_module.StrategyTracker())
         monkeypatch.setattr(
             riskguard_module,
@@ -1233,7 +1630,7 @@ class TestStrategyPolicyResolver:
 
         _init_empty_canonical_portfolio_schema(zeus_db)
         monkeypatch.setattr(riskguard_module, "get_connection", _fake_get_connection)
-        monkeypatch.setattr(riskguard_module, "load_portfolio", lambda: PortfolioState(bankroll=150.0))
+        monkeypatch.setattr(riskguard_module, "load_portfolio", lambda: PortfolioState(bankroll=211.37))
         monkeypatch.setattr(riskguard_module, "load_tracker", lambda: tracker)
         monkeypatch.setattr(
             riskguard_module,
@@ -1275,7 +1672,7 @@ class TestStrategyPolicyResolver:
         conn.close()
 
         monkeypatch.setattr(riskguard_module, "get_connection", _fake_get_connection)
-        monkeypatch.setattr(riskguard_module, "load_portfolio", lambda: PortfolioState(bankroll=150.0))
+        monkeypatch.setattr(riskguard_module, "load_portfolio", lambda: PortfolioState(bankroll=211.37))
         monkeypatch.setattr(riskguard_module, "load_tracker", lambda: tracker)
         monkeypatch.setattr(
             riskguard_module,
@@ -1343,7 +1740,7 @@ class TestStrategyPolicyResolver:
         conn.close()
 
         monkeypatch.setattr(riskguard_module, "get_connection", _fake_get_connection)
-        monkeypatch.setattr(riskguard_module, "load_portfolio", lambda: PortfolioState(bankroll=150.0))
+        monkeypatch.setattr(riskguard_module, "load_portfolio", lambda: PortfolioState(bankroll=211.37))
         monkeypatch.setattr(riskguard_module, "load_tracker", lambda: tracker)
         monkeypatch.setattr(
             riskguard_module,
@@ -1391,7 +1788,7 @@ class TestStrategyPolicyResolver:
         conn.close()
 
         monkeypatch.setattr(riskguard_module, "get_connection", _fake_get_connection)
-        monkeypatch.setattr(riskguard_module, "load_portfolio", lambda: PortfolioState(bankroll=150.0))
+        monkeypatch.setattr(riskguard_module, "load_portfolio", lambda: PortfolioState(bankroll=211.37))
         monkeypatch.setattr(riskguard_module, "load_tracker", lambda: strategy_tracker_module.StrategyTracker())
         monkeypatch.setattr(
             riskguard_module,
@@ -1429,7 +1826,7 @@ class TestStrategyPolicyResolver:
 
         _init_empty_canonical_portfolio_schema(zeus_db, drop_risk_actions=True)
         monkeypatch.setattr(riskguard_module, "get_connection", _fake_get_connection)
-        monkeypatch.setattr(riskguard_module, "load_portfolio", lambda: PortfolioState(bankroll=150.0))
+        monkeypatch.setattr(riskguard_module, "load_portfolio", lambda: PortfolioState(bankroll=211.37))
         monkeypatch.setattr(riskguard_module, "load_tracker", lambda: tracker)
         monkeypatch.setattr(
             riskguard_module,
@@ -1460,7 +1857,7 @@ class TestStrategyPolicyResolver:
 
         _init_empty_canonical_portfolio_schema(zeus_db)
         monkeypatch.setattr(riskguard_module, "get_connection", _fake_get_connection)
-        monkeypatch.setattr(riskguard_module, "load_portfolio", lambda: PortfolioState(bankroll=150.0))
+        monkeypatch.setattr(riskguard_module, "load_portfolio", lambda: PortfolioState(bankroll=211.37))
         monkeypatch.setattr(riskguard_module, "load_tracker", lambda: (_ for _ in ()).throw(RuntimeError("tracker unavailable")))
         monkeypatch.setattr(
             riskguard_module,
@@ -1491,7 +1888,7 @@ class TestStrategyPolicyResolver:
 
         _init_empty_canonical_portfolio_schema(zeus_db)
         monkeypatch.setattr(riskguard_module, "get_connection", _fake_get_connection)
-        monkeypatch.setattr(riskguard_module, "load_portfolio", lambda: PortfolioState(bankroll=150.0))
+        monkeypatch.setattr(riskguard_module, "load_portfolio", lambda: PortfolioState(bankroll=211.37))
         monkeypatch.setattr(
             riskguard_module,
             "query_authoritative_settlement_rows",
@@ -1545,7 +1942,7 @@ class TestStrategyPolicyResolver:
 
         _init_empty_canonical_portfolio_schema(zeus_db)
         monkeypatch.setattr(riskguard_module, "get_connection", _fake_get_connection)
-        monkeypatch.setattr(riskguard_module, "load_portfolio", lambda: PortfolioState(bankroll=150.0))
+        monkeypatch.setattr(riskguard_module, "load_portfolio", lambda: PortfolioState(bankroll=211.37))
         monkeypatch.setattr(
             riskguard_module,
             "query_authoritative_settlement_rows",
@@ -1661,19 +2058,29 @@ def test_refresh_strategy_health_records_rows_from_lawful_surfaces():
     )
     _insert_outcome_fact(
         conn,
+        position_id="unverified-outcome-fact",
+        strategy_key="center_buy",
+        settled_at="2026-04-03T12:00:00+00:00",
+        pnl=99.0,
+        outcome=1,
+    )
+    _append_verified_settlement_event(
+        conn,
         position_id="settle-center-1",
         strategy_key="center_buy",
         settled_at="2026-04-03T12:00:00+00:00",
         pnl=7.5,
         outcome=1,
+        sequence_no=1,
     )
-    _insert_outcome_fact(
+    _append_verified_settlement_event(
         conn,
         position_id="settle-center-2",
         strategy_key="center_buy",
         settled_at="2026-03-20T12:00:00+00:00",
         pnl=-2.0,
         outcome=0,
+        sequence_no=2,
     )
     for idx in range(2):
         _insert_execution_fact(
@@ -1737,6 +2144,84 @@ def test_refresh_strategy_health_records_rows_from_lawful_surfaces():
     assert snapshot["stale_strategy_keys"] == []
 
 
+def test_refresh_strategy_health_ignores_authorityless_outcome_fact_rows():
+    conn = _policy_conn()
+    as_of = "2026-04-04T12:00:00+00:00"
+
+    _insert_outcome_fact(
+        conn,
+        position_id="authorityless-outcome",
+        strategy_key="center_buy",
+        settled_at="2026-04-03T12:00:00+00:00",
+        pnl=99.0,
+        outcome=1,
+    )
+    _append_verified_settlement_event(
+        conn,
+        position_id="verified-settlement",
+        strategy_key="center_buy",
+        settled_at="2026-04-03T12:00:00+00:00",
+        pnl=4.25,
+        outcome=1,
+        sequence_no=1,
+    )
+
+    result = refresh_strategy_health(conn, as_of=as_of)
+    row = conn.execute(
+        """
+        SELECT settled_trades_30d, realized_pnl_30d, win_rate_30d
+        FROM strategy_health
+        WHERE strategy_key = 'center_buy' AND as_of = ?
+        """,
+        (as_of,),
+    ).fetchone()
+
+    assert result["status"] == "refreshed"
+    assert row["settled_trades_30d"] == 1
+    assert row["realized_pnl_30d"] == pytest.approx(4.25)
+    assert row["win_rate_30d"] == pytest.approx(1.0)
+
+
+def test_refresh_strategy_health_uses_parsed_settlement_time_basis():
+    conn = _policy_conn()
+    as_of = "2026-05-03T12:00:00+00:00"
+    _append_verified_settlement_event(
+        conn,
+        position_id="verified-cutoff-settlement",
+        strategy_key="center_buy",
+        settled_at="2026-04-03 12:00:00",
+        pnl=3.5,
+        outcome=1,
+        sequence_no=1,
+    )
+
+    result = refresh_strategy_health(conn, as_of=as_of)
+    row = conn.execute(
+        """
+        SELECT settled_trades_30d, realized_pnl_30d, win_rate_30d
+        FROM strategy_health
+        WHERE strategy_key = 'center_buy' AND as_of = ?
+        """,
+        (as_of,),
+    ).fetchone()
+
+    assert result["status"] == "refreshed"
+    assert row["settled_trades_30d"] == 1
+    assert row["realized_pnl_30d"] == pytest.approx(3.5)
+    assert row["win_rate_30d"] == pytest.approx(1.0)
+
+
+def test_refresh_strategy_health_marks_missing_settlement_authority_surface():
+    conn = _policy_conn()
+    conn.execute("DROP TABLE position_events")
+
+    result = refresh_strategy_health(conn, as_of="2026-04-04T12:00:00+00:00")
+
+    assert result["status"] == "refreshed_empty_degraded"
+    assert result["settlement_authority_missing_tables"] == ["position_events", "decision_log"]
+    assert result["settlement_degraded_rows"] == 0
+
+
 def test_refresh_strategy_health_reports_missing_inputs_explicitly():
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
@@ -1791,7 +2276,7 @@ def test_tick_records_strategy_health_refresh_metadata(monkeypatch, tmp_path):
     # P0-A masking-test repoint (architect_memo §6, followup_design §2.1):
     # this test's axis is strategy_health_refresh metadata. Bankroll is now
     # provider-sourced; we monkeypatch the provider explicitly so the test
-    # stops enshrining the legacy `PortfolioState(bankroll=150)` fiction as a
+    # stops enshrining legacy `PortfolioState.bankroll` as a
     # truth source. The PortfolioState patch is kept (without bankroll= kwarg)
     # because the canonical-loader-truth path uses it for non-bankroll fields.
     zeus_db = tmp_path / "zeus.db"
@@ -1821,7 +2306,7 @@ def test_tick_records_strategy_health_refresh_metadata(monkeypatch, tmp_path):
         _bp,
         "current",
         lambda **_kw: _bp.BankrollOfRecord(
-            value_usd=150.0,
+            value_usd=211.37,
             fetched_at="2026-04-01T00:00:00+00:00",
             source="polymarket_wallet",
             authority="canonical",
@@ -1832,11 +2317,6 @@ def test_tick_records_strategy_health_refresh_metadata(monkeypatch, tmp_path):
     monkeypatch.setattr(riskguard_module, "get_connection", _fake_get_connection)
     monkeypatch.setattr(riskguard_module, "load_portfolio", lambda: PortfolioState())
     monkeypatch.setattr(riskguard_module, "load_tracker", lambda: strategy_tracker_module.StrategyTracker())
-    monkeypatch.setattr(
-        riskguard_module,
-        "query_authoritative_settlement_rows",
-        lambda conn, limit=50, **kwargs: [{"p_posterior": 0.7, "outcome": 1, "source": "position_events", "metric_ready": True, "strategy": "center_buy"}],
-    )
 
     riskguard_module.tick()
     row = get_connection(risk_db).execute(

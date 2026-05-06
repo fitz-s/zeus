@@ -27,19 +27,12 @@ def legacy_state_path(filename: str) -> Path:
     return STATE_DIR / filename
 
 
-def mode_state_path(filename: str, mode: Optional[str] = None) -> Path:
+def runtime_state_path(filename: str) -> Path:
     """State path for the live runtime.
 
-    ``mode`` remains an explicit compatibility parameter for truth-file callers
-    that must prove they are reading live runtime state. Backtest/replay lanes
-    use their own DB paths and must not route through runtime state files.
+    Backtest/replay lanes use their own DB paths and must not route through
+    runtime state files.
     """
-    resolved = mode or get_mode()
-    if resolved not in ACTIVE_MODES:
-        raise ValueError(
-            f"mode_state_path called with invalid mode={resolved!r}; "
-            f"runtime state is live-only ({ACTIVE_MODES})."
-        )
     return STATE_DIR / filename
 
 
@@ -59,7 +52,7 @@ def get_mode() -> str:
 
 
 def state_path(filename: str) -> Path:
-    return mode_state_path(filename)
+    return runtime_state_path(filename)
 
 
 def _load_json(path: Path) -> dict:
@@ -116,8 +109,8 @@ class Settings:
         path = path or (CONFIG_DIR / "settings.json")
         self._data = _load_json(path)
         required = [
-            # capital_base_usd removed 2026-05-04 — bankroll truth flows from
-            # src.runtime.bankroll_provider.current(); no config-literal default.
+            # Fixed config-bankroll authority was removed 2026-05-04; bankroll
+            # truth flows from src.runtime.bankroll_provider.current().
             "discovery",
             "ensemble",
             "entry_forecast",
@@ -143,8 +136,9 @@ class Settings:
     def mode(self) -> str:
         return get_mode()
 
-    # capital_base_usd property removed 2026-05-04 — see _bankroll_doctrine_2026_05_04
-    # in config/settings.json. Live bankroll: src.runtime.bankroll_provider.current().
+    # Fixed config-bankroll property removed 2026-05-04 — see
+    # _bankroll_doctrine_2026_05_04 in config/settings.json. Live bankroll:
+    # src.runtime.bankroll_provider.current().
 
     @property
     def bias_correction_enabled(self) -> bool:

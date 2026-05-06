@@ -221,9 +221,9 @@ Three levels: `VERIFIED`, `UNVERIFIED`, `QUARANTINED`.
 `truth_files.py` manages JSON truth file provenance:
 
 ```python
-build_truth_metadata(path, *, mode, generated_at, authority,
+build_truth_metadata(path, *, runtime_state, generated_at, authority,
                      temperature_metric, data_version):
-    → {"mode", "generated_at", "source_path", "stale_age_seconds",
+    → {"runtime_state", "generated_at", "source_path", "stale_age_seconds",
        "deprecated", "authority", "temperature_metric", "data_version"}
 ```
 
@@ -231,9 +231,9 @@ Fail-closed: low-lane files (`platt_models_low.json`,
 `calibration_pairs_low.json`) stamped VERIFIED without
 `temperature_metric` are downgraded to UNVERIFIED.
 
-Mode safety: `read_mode_truth_json()` validates the file's mode tag
-matches the caller's requested mode. Cross-mode collision →
-`ModeMismatchError` (not silent fallback).
+Runtime-state safety: `read_runtime_truth_json()` validates that the file is live
+runtime truth. Retired selector tags or diagnostic/backtest provenance in a
+runtime truth file fail closed with `RuntimeStateMismatchError`.
 
 ### 4.3 Market scan provenance
 

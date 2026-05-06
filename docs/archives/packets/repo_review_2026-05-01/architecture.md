@@ -49,7 +49,7 @@ The remediation plan (`docs/operations/task_2026-05-01_ultrareview25_remediation
 
 ## Provenance survey
 
-- `src/config.py:48` `get_mode() -> "live"` — paper/shadow modes structurally removed; `ACTIVE_MODES = ("live",)`. **Strong antibody**.
+- `src/config.py:48` `get_mode() -> "live"` — obsolete non-live runtime/shadow modes structurally removed; `ACTIVE_MODES = ("live",)`. **Strong antibody**.
 - `src/state/truth_files.py:43-74` `build_truth_metadata` defaults `authority="UNVERIFIED"`. Producer-side discipline is good.
 - **Consumer side is weak**: `_TRUTH_AUTHORITY_MAP` (portfolio.py:65) admits no downstream consumer reads `DEGRADED_PROJECTION` differently. INV-23 is producer-validated, consumer-blind.
 - `src/calibration/store.py:116-135` `_resolve_training_allowed` whitelist-by-prefix on `data_version` (INV-15). Proper provenance gating.

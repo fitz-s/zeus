@@ -1,7 +1,7 @@
 # Zeus Live Phase 1: First Boot Runbook
 
 Authority: `docs/authority/zeus_current_delivery.md`
-Applies to: First live daemon boot after non-live validation.
+Applies to: First live daemon boot after pre-live validation.
 
 ---
 
@@ -9,7 +9,7 @@ Applies to: First live daemon boot after non-live validation.
 
 Before starting, verify all of the following:
 
-- [ ] `ZEUS_MODE=live` will be set in daemon environment
+- [ ] Daemon uses the code-authoritative live runtime state; `ZEUS_MODE` is not a selector
 - [ ] macOS Keychain entries present: `openclaw-metamask-private-key`, `openclaw-polymarket-funder-address`, `zeus_discord_webhook`
 - [ ] `state/` directory exists and is writable
 - [ ] Shadow/backtest validation produced no blocking safety issues
@@ -20,9 +20,9 @@ Before starting, verify all of the following:
 ## Step 1: Verify wallet balance
 
 ```bash
-ZEUS_MODE=live python - <<'EOF'
+python - <<'EOF'
 from src.data.polymarket_client import PolymarketClient
-c = PolymarketClient(paper_mode=False)
+c = PolymarketClient()
 bal = c.get_balance()
 print(f"Wallet: ${bal:.2f} USDC")
 EOF
@@ -32,30 +32,32 @@ EOF
 
 ---
 
-## Step 2: Verify initial_bankroll sanity
+## Step 2: Verify wallet bankroll and sizing policy
 
 ```bash
-ZEUS_MODE=live python - <<'EOF'
+python - <<'EOF'
+from src.runtime import bankroll_provider
 from src.config import settings
-print(f"capital_base_usd: {settings.capital_base_usd}")
+record = bankroll_provider.current()
+print(f"wallet_bankroll_usd: {record.value_usd if record else 'UNAVAILABLE'}")
 print(f"kelly_multiplier: {settings['sizing']['kelly_multiplier']}")
 print(f"loss_limit_usd:   {settings['riskguard']['loss_limit_usd']}")
 EOF
 ```
 
 **Sanity thresholds for Phase 1:**
-- `capital_base_usd`: matches your intended starting bankroll
+- `wallet_bankroll_usd`: matches the read-only wallet balance checked in Step 1
 - `kelly_multiplier`: 0.10-0.25 (Phase 1 is fractional Kelly, not full)
-- `loss_limit_usd`: <=10% of capital_base_usd
+- `loss_limit_usd`: within the operator-approved Phase 1 loss budget
 
-If any value is wrong, edit `config/settings.json` and re-check.
+If the wallet value is unavailable or stale, do not start the daemon. If sizing or risk policy is wrong, edit `config/settings.json` and re-check.
 
 ---
 
 ## Step 3: Manual single-cycle trigger
 
 ```bash
-ZEUS_MODE=live python -m src.main --once 2>&1 | tee /tmp/zeus_first_boot.log
+python -m src.main --once 2>&1 | tee /tmp/zeus_first_boot.log
 ```
 
 This runs ONE full cycle and exits. Do NOT use the daemon loop for first boot.
@@ -93,7 +95,7 @@ After `--once`, verify:
 
 ```bash
 # Check trade DB for any new trade_decisions rows
-ZEUS_MODE=live python - <<'EOF'
+python - <<'EOF'
 from src.state.db import get_trade_connection
 conn = get_trade_connection()
 rows = conn.execute("SELECT COUNT(*) FROM trade_decisions").fetchone()[0]
@@ -105,9 +107,9 @@ EOF
 For a first boot with no open markets matching current criteria, expect 0 rows. If rows exist, review them with:
 
 ```bash
-ZEUS_MODE=live python -m src.analysis dashboard
+python -m src.analysis dashboard
 # or
-ZEUS_MODE=live python - <<'EOF'
+python - <<'EOF'
 from src.state.db import get_trade_connection
 conn = get_trade_connection()
 rows = conn.execute("SELECT * FROM trade_decisions ORDER BY created_at DESC LIMIT 10").fetchall()
@@ -143,7 +145,7 @@ After kill, Zeus holds all open positions as-is. No orders are sent while the da
 Once single-cycle verified:
 
 ```bash
-ZEUS_MODE=live nohup python -m src.main >> logs/zeus-live.log 2>&1 &
+nohup python -m src.main >> logs/zeus-live.log 2>&1 &
 echo $! > state/zeus-live.pid
 ```
 
@@ -154,6 +156,6 @@ Or via launchd (preferred for persistent operation).
 ## What to expect on Phase 1 boot
 
 - `insufficient_history` warnings in logs: normal. Markets with <N prior samples don't meet the FDR threshold yet.
-- `capped_by_safety_cap` in logs: this is operator-visible metadata only. It is NOT a trading decision input.
+- No per-trade cap log should appear; per-trade hard caps were removed. Entry throttling should surface through RiskGuard, posture, executable-price, or max-exposure reasons.
 - Discord alert `RISKGUARD HALT`: if triggered on first cycle, check the failed_rules detail in the alert.
 - 0 trades placed is a valid outcome if no edges exceed the FDR/Kelly floor.

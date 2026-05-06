@@ -149,9 +149,9 @@ Applying Fitz's definition ("when Module A's output flows into Module B, what pr
 | `test_strategy_tracker_regime.py` | 6 | "K1: strategy_tracker migrated to no-op" | LOW — tracker is genuinely dead; file should be archived | NO sunset date |
 | `test_truth_layer.py` | 5 | "K1: save_tracker is no-op" | LOW — same as above | NO sunset date |
 | `test_truth_surface_health.py` | 5 | "P9/Phase2: legacy position_events_legacy eliminated" | **HIGH** — truth_surface_health is a law gate test; 5 skips means partial blind spot | Sunset: "truth-surface cleanup packet" (not yet created) |
-| `test_pnl_flow_and_audit.py` | 5 | 4x "BI-05" + 1x "Phase2: paper_mode removed" | **HIGH** — BI-05 skips are zone boundary tests for `portfolio` K2→K3 import path, which BI-05 flags as a live violation; skipped since at least 2026-04-23 with no sunset | BI-05 is labeled "Move from JSON to canonical ledger" — not implemented |
+| `test_pnl_flow_and_audit.py` | 5 | 4x "BI-05" + 1x "Phase2: retired mode path removed" | **HIGH** — BI-05 skips are zone boundary tests for `portfolio` K2→K3 import path, which BI-05 flags as a live violation; skipped since at least 2026-04-23 with no sunset | BI-05 is labeled "Move from JSON to canonical ledger" — not implemented |
 | `test_heartbeat_supervisor.py` | 4 | "M5 exchange reconciliation / T1 fake venue" | MEDIUM — deferred until M5/T1 phases which have no scheduled landing date | Sunset: "when those phases implement" |
-| `test_live_safety_invariants.py` | 3 | "OBSOLETE_BY_ARCHITECTURE" (2) + "paper-mode removed" | MEDIUM — two explicitly labeled OBSOLETE but not deleted | Manual decision required |
+| `test_live_safety_invariants.py` | 3 | "OBSOLETE_BY_ARCHITECTURE" (2) + "retired mode path removed" | MEDIUM — two explicitly labeled OBSOLETE but not deleted | Manual decision required |
 | `test_cross_module_relationships.py` | 10 | runtime `pytest.skip()` "No SETTLEMENT events in chronicle", "Canonical position tables not present" | **HIGH** — data-dependent skips mean CI may silently pass these relationship tests without checking them | Sunset: "replace with fixture-backed tests" |
 | `test_reality_contracts.py` | 10 | runtime `pytest.skip()` "RealityContractVerifier not yet delivered by p10-infra" | **HIGH** — INV-11 / reality contract framework never delivered; entire file is effectively dead | Sunset: "after reality verifier/loader delivery" |
 
@@ -190,14 +190,14 @@ Applying Fitz's definition ("when Module A's output flows into Module B, what pr
 
 This means **all tests default to ZEUS_MODE=live**. This is intentional (Zeus is now live-only post-Phase2). The following observations apply:
 
-- `test_kelly_live_safety_cap.py:131` — explicitly asserts that `kelly.py` contains zero references to `mode/paper/live/ZEUS_MODE`. This is a positive antibody.
-- `test_live_safe_strategies.py:133` — tests that "ZEUS_MODE=paper cannot bypass live strategy allowlisting" — mode isolation confirmed.
-- `test_config.py:39` — uses `monkeypatch.setenv("ZEUS_MODE", "paper")` to test legacy path; paper mode should be dead.
-- `test_truth_surface_health.py:1912,1956,2000` — 3 tests set `ZEUS_MODE=paper`, testing deprecated behavior that is skipped-or-dead. **Risk**: these tests run with a mode that no longer has a corresponding runtime path, creating ghost tests against paper-mode code.
-- `test_architecture_contracts.py:937` — spawns subprocess with `ZEUS_MODE=paper`. Should be audited for whether the subprocess target still supports paper mode.
-- `test_db.py:1113` — `monkeypatch.setenv("ZEUS_MODE", "paper")` — but this test may be in the 19-skip cluster; verify.
+- `test_kelly_live_safety_cap.py:131` — explicitly asserts that `kelly.py` contains zero references to mode branching in live Kelly logic. This is a positive antibody.
+- `test_live_safe_strategies.py:133` — confirms that a retired non-live mode value cannot bypass live strategy allowlisting.
+- `test_config.py:39` — exercised a retired mode input to test legacy rejection behavior; that scenario should remain rejection-only.
+- `test_truth_surface_health.py:1912,1956,2000` — three tests exercised retired mode behavior that was skipped-or-dead. **Risk**: those tests can become ghost tests if they assert behavior for a runtime path that no longer exists.
+- `test_architecture_contracts.py:937` — spawned a subprocess with retired mode input. Audit whether the subprocess target should now reject that input at startup.
+- `test_db.py:1113` — also exercised retired mode input; verify whether this belonged to the skipped cluster before relying on it.
 
-**Paper-mode isolation gap**: No test verifies that setting `ZEUS_MODE=paper` raises an error or is rejected at the cycle runner entry point. If paper mode is truly dead, a test asserting `ZEUS_MODE=paper → RuntimeError or startup rejection` would prevent accidental re-introduction.
+**Mode isolation gap**: At the time of this archived review, startup rejection for retired mode input was not directly proven at the cycle runner entry point. The durable antibody should assert rejection in prose and current test names, without preserving the retired literal as an active example.
 
 ---
 
@@ -268,7 +268,7 @@ These are ordered by where on the money path the gap appears (earlier = closer t
 | 7 | Calibration→evaluator→Kelly seam has no relationship test. No test verifies that `temperature_metric` and `data_version` survive the P_raw→P_cal→P_posterior→Kelly path. | calibration / Kelly | INV-14, INV-21 | **HIGH** |
 | 8 | INV-08 (WEAK_ASSERTION) — Transaction boundary test exists but YAML `tests:` citation is missing, so topology_doctor cannot assert enforcement. | canonical DB write | INV-08 | **MEDIUM** |
 | 9 | 4 BI-05 skips in `test_pnl_flow_and_audit.py`. The K3→K2 `portfolio` module import boundary violation was never fixed. Tests skip because the violation exists. Skipping the tests masks a live zone boundary failure. | pnl / audit | BI-05 | **MEDIUM** |
-| 10 | Paper-mode isolation: no test asserts that `ZEUS_MODE=paper` is rejected at cycle runner startup. Dead code path is still testable by setting env var. | mode isolation | INV-26 | **MEDIUM** |
+| 10 | Mode isolation: no test asserts that retired mode input is rejected at cycle runner startup before live components initialize. | mode isolation | INV-26 | **MEDIUM** |
 
 ---
 
@@ -351,21 +351,11 @@ def test_settlement_event_writes_to_chronicle_and_chronicle_is_queryable(tmp_pat
 **Protects**: INV-02, INV-06; fixes the #1 ranked gap
 **Priority**: CRITICAL
 
-### T5 — ZEUS_MODE=paper rejection test at cycle runner startup
+### T5 — retired mode input rejection at cycle runner startup
 **File**: `tests/test_mode_isolation.py`
 **Category**: FUNCTION + MODE ISOLATION
-**Assertion**:
-```python
-def test_cycle_runner_rejects_paper_mode(monkeypatch):
-    """Post-Phase2 Zeus is live-only. Setting ZEUS_MODE=paper must raise
-    RuntimeError or SystemExit at cycle runner import/startup, not silently
-    run paper logic."""
-    monkeypatch.setenv("ZEUS_MODE", "paper")
-    with pytest.raises((RuntimeError, SystemExit, ValueError)):
-        from src.engine import cycle_runner
-        cycle_runner.assert_live_mode()
-```
-**Protects**: Mode isolation; prevents ghost paper-mode code re-introduction
+**Assertion**: Cycle runner startup should reject retired mode input before any live execution component is imported or initialized.
+**Protects**: Mode isolation; prevents ghost alternate execution code re-introduction
 **Priority**: MEDIUM
 
 ### T6 — INV-10 LLM-output exclusion from authority (procedural gate test)

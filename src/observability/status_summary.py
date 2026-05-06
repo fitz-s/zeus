@@ -51,6 +51,15 @@ def _enum_text(value, default: str) -> str:
     return str(getattr(value, "value", value))
 
 
+def _round_money_or_none(value) -> float | None:
+    if value is None:
+        return None
+    try:
+        return round(float(value), 2)
+    except (TypeError, ValueError):
+        return None
+
+
 def _get_risk_level() -> str:
     """Read actual RiskGuard level instead of hardcoding GREEN."""
     try:
@@ -666,6 +675,8 @@ def write_status(cycle_summary: dict = None) -> None:
         bucket["settlement_count"] = int(row.get("settled_trades_30d") or 0)
         bucket["settlement_pnl"] = round(float(row.get("realized_pnl_30d") or 0.0), 2)
         bucket["settlement_accuracy"] = row.get("win_rate_30d")
+        bucket["settlement_source"] = "strategy_health"
+        bucket["settlement_window"] = "30d"
         bucket["fill_rate_14d"] = row.get("fill_rate_14d")
         bucket["execution_decay_flag"] = bool(row.get("execution_decay_flag", 0))
         bucket["edge_compression_flag"] = bool(row.get("edge_compression_flag", 0))
@@ -678,6 +689,11 @@ def write_status(cycle_summary: dict = None) -> None:
                 "realized_pnl": 0.0,
                 "unrealized_pnl": 0.0,
                 "total_pnl": 0.0,
+                "settlement_count": 0,
+                "settlement_pnl": 0.0,
+                "settlement_accuracy": None,
+                "settlement_source": "strategy_health",
+                "settlement_window": "30d",
             },
         )
         bucket["open_positions"] = int(open_count)
@@ -755,10 +771,31 @@ def write_status(cycle_summary: dict = None) -> None:
         status,
         include_review_required=True,
     )
-    effective_bankroll = risk_details.get("effective_bankroll")
+    risk_effective_bankroll = _round_money_or_none(risk_details.get("effective_bankroll"))
+    risk_initial_bankroll = _round_money_or_none(risk_details.get("initial_bankroll"))
     realized_pnl = risk_details.get("realized_pnl")
     unrealized_pnl = risk_details.get("unrealized_pnl")
     total_pnl = risk_details.get("total_pnl")
+    bankroll_truth = risk_details.get("bankroll_truth") if isinstance(risk_details.get("bankroll_truth"), dict) else {}
+    risk_bankroll_truth_source = risk_details.get("bankroll_truth_source") or bankroll_truth.get("source")
+    risk_bankroll_truth_authority = bankroll_truth.get("authority")
+    risk_bankroll_provenance_ok = (
+        risk_effective_bankroll is not None
+        and risk_initial_bankroll is not None
+        and str(risk_bankroll_truth_source or "") == "polymarket_wallet"
+        and str(bankroll_truth.get("source") or "") == "polymarket_wallet"
+        and str(risk_bankroll_truth_authority or "") == "canonical"
+    )
+    effective_bankroll = risk_effective_bankroll if risk_bankroll_provenance_ok else None
+    initial_bankroll = risk_initial_bankroll if risk_bankroll_provenance_ok else None
+    bankroll_truth_source = risk_bankroll_truth_source if risk_bankroll_provenance_ok else None
+    bankroll_truth_authority = risk_bankroll_truth_authority if risk_bankroll_provenance_ok else None
+    bankroll_truth_status = "present" if risk_bankroll_provenance_ok else "missing"
+    bankroll_derivation = "riskguard_effective_bankroll" if risk_bankroll_provenance_ok else None
+    bankroll_fallback_source = None
+    bankroll_rejected_source = None
+    if risk_effective_bankroll is not None and not risk_bankroll_provenance_ok:
+        bankroll_rejected_source = "riskguard_unproven"
     if realized_pnl is None:
         realized_pnl = round(
             sum(float(bucket.get("realized_pnl", 0.0) or 0.0) for bucket in strategy_summary.values()),
@@ -768,12 +805,15 @@ def write_status(cycle_summary: dict = None) -> None:
         unrealized_pnl = status["portfolio"]["unrealized_pnl"]
     if total_pnl is None:
         total_pnl = round(float(realized_pnl or 0.0) + float(unrealized_pnl or 0.0), 2)
-    initial_bankroll = risk_details.get("initial_bankroll")
     if initial_bankroll is None:
-        initial_bankroll = (cycle_summary or {}).get("wallet_balance_usd")
+        initial_bankroll = _round_money_or_none((cycle_summary or {}).get("wallet_balance_usd"))
+        if initial_bankroll is not None:
+            bankroll_truth_source = "cycle_summary.wallet_balance_usd"
+            bankroll_truth_authority = "runtime_summary"
+            bankroll_fallback_source = "cycle_summary.wallet_balance_usd"
     if initial_bankroll is None:
-        # Removed 2026-05-04: previously fell back to settings.capital_base_usd
-        # ($150 fiction). Now query the on-chain wallet via bankroll_provider;
+        # Removed 2026-05-04: previously fell back to retired config-literal
+        # capital. Now query the on-chain wallet via bankroll_provider;
         # if the provider has no usable value (None / wallet unreachable + no
         # cache), leave initial_bankroll as None so downstream renders it as
         # null + flags DATA_DEGRADED rather than smuggling a config literal.
@@ -784,15 +824,37 @@ def write_status(cycle_summary: dict = None) -> None:
             _record = None
         if _record is not None:
             initial_bankroll = round(float(_record.value_usd), 2)
+            bankroll_truth_source = str(getattr(_record, "source", None) or "polymarket_wallet")
+            bankroll_truth_authority = str(getattr(_record, "authority", None) or "canonical")
+            bankroll_fallback_source = "bankroll_provider"
+        else:
+            bankroll_fallback_source = "bankroll_provider_unavailable"
     if effective_bankroll is None:
-        effective_bankroll = round(float(initial_bankroll or 0.0) + float(total_pnl or 0.0), 2)
+        if initial_bankroll is not None:
+            # Definition A: status bankroll preserves wallet-equity identity.
+            # PnL is report analytics; folding it into bankroll would recreate
+            # the legacy wallet+PnL synthetic equity object.
+            effective_bankroll = round(float(initial_bankroll), 2)
+            bankroll_truth_status = "present"
+            bankroll_derivation = "wallet_equity_no_pnl"
+        else:
+            effective_bankroll = None
+            bankroll_truth_status = "missing"
+            bankroll_derivation = "missing_wallet_truth"
     status["portfolio"]["realized_pnl"] = round(float(realized_pnl or 0.0), 2)
     status["portfolio"]["unrealized_pnl"] = round(float(unrealized_pnl or 0.0), 2)
     status["portfolio"]["total_pnl"] = round(float(total_pnl or 0.0), 2)
-    status["portfolio"]["effective_bankroll"] = round(float(effective_bankroll or 0.0), 2)
-    status["portfolio"]["bankroll"] = round(float(effective_bankroll or 0.0), 2)
-    status["portfolio"]["initial_bankroll"] = round(float(initial_bankroll or 0.0), 2)
-    if float(effective_bankroll or 0.0) > 0:
+    status["portfolio"]["effective_bankroll"] = _round_money_or_none(effective_bankroll)
+    status["portfolio"]["bankroll"] = _round_money_or_none(effective_bankroll)
+    status["portfolio"]["initial_bankroll"] = _round_money_or_none(initial_bankroll)
+    status["portfolio"]["bankroll_object_identity"] = "wallet_equity"
+    status["portfolio"]["bankroll_truth_status"] = bankroll_truth_status
+    status["portfolio"]["bankroll_truth_source"] = bankroll_truth_source or "unknown"
+    status["portfolio"]["bankroll_truth_authority"] = bankroll_truth_authority or "unknown"
+    status["portfolio"]["effective_bankroll_derivation"] = bankroll_derivation
+    if bankroll_rejected_source is not None:
+        status["portfolio"]["bankroll_rejected_source"] = bankroll_rejected_source
+    if effective_bankroll is not None and float(effective_bankroll) > 0:
         status["portfolio"]["heat_pct"] = round(
             (float(status["portfolio"]["total_exposure_usd"]) / float(effective_bankroll)) * 100,
             1,
@@ -855,6 +917,10 @@ def write_status(cycle_summary: dict = None) -> None:
     strategy_health_status = str(strategy_health.get("status") or "")
     if strategy_health_status not in {"fresh"}:
         consistency_issues.append(f"strategy_health_{strategy_health_status or 'unknown'}")
+    if status["portfolio"].get("bankroll_truth_status") == "missing":
+        consistency_issues.append("bankroll_truth_missing")
+    if status["portfolio"].get("bankroll_rejected_source"):
+        consistency_issues.append(f"bankroll_rejected_{status['portfolio']['bankroll_rejected_source']}")
 
     status["risk"]["consistency_check"] = {
         "ok": not consistency_issues,
@@ -910,17 +976,31 @@ def write_status(cycle_summary: dict = None) -> None:
                 "gated": _lgate is not None and not _lgate.enabled,
                 "recommended_gate": name in recommended_strategy_gates,
                 "recommended_gate_reasons": list(recommended_strategy_gate_reasons.get(name, [])),
+                "settlement_count": 0,
+                "settlement_pnl": 0.0,
+                "settlement_accuracy": None,
+                "settlement_source": "strategy_health",
+                "settlement_window": "30d",
             },
         )
-        bucket["settlement_count"] = learning_bucket.get("settlement_count", 0)
-        bucket["settlement_pnl"] = learning_bucket.get("settlement_pnl", 0.0)
-        bucket["settlement_accuracy"] = learning_bucket.get("settlement_accuracy")
+        bucket.setdefault("settlement_count", 0)
+        bucket.setdefault("settlement_pnl", 0.0)
+        bucket.setdefault("settlement_accuracy", None)
+        bucket.setdefault("settlement_source", "strategy_health")
+        bucket.setdefault("settlement_window", "30d")
+        bucket["learning_settlement_count"] = learning_bucket.get("settlement_count", 0)
+        bucket["learning_settlement_pnl"] = learning_bucket.get("settlement_pnl", 0.0)
+        bucket["learning_settlement_accuracy"] = learning_bucket.get("settlement_accuracy")
+        bucket["learning_settlement_source"] = "learning_surface"
+        bucket["learning_settlement_window"] = (
+            "current_regime" if current_regime_started_at else "learning_surface_default"
+        )
         bucket["no_trade_count"] = learning_bucket.get("no_trade_count", 0)
         bucket["no_trade_stage_counts"] = dict(learning_bucket.get("no_trade_stage_counts", {}) or {})
         bucket["entry_attempted"] = learning_bucket.get("entry_attempted", 0)
         bucket["entry_filled"] = learning_bucket.get("entry_filled", 0)
         bucket["entry_rejected"] = learning_bucket.get("entry_rejected", 0)
-    status = annotate_truth_payload(status, STATUS_PATH, mode=get_mode(), generated_at=generated_at, authority="VERIFIED")
+    status = annotate_truth_payload(status, STATUS_PATH, generated_at=generated_at, authority="VERIFIED")
     status["truth"]["db_primary_inputs"] = {
         "position_current": str(position_view.get("status") or "unknown"),
         "strategy_health": strategy_health_status or "unknown",
@@ -928,12 +1008,13 @@ def write_status(cycle_summary: dict = None) -> None:
     compatibility_inputs: dict[str, object] = {}
     if current_regime_started_at:
         compatibility_inputs["strategy_tracker_current_regime_started_at"] = current_regime_started_at
-    if risk_details.get("initial_bankroll") is None:
-        # Removed 2026-05-04: previously labelled fallback source as
-        # settings.capital_base_usd. Live truth now flows from
-        # bankroll_provider.current(); when it returns None the field stays
+    if bankroll_fallback_source is not None:
+        # Removed 2026-05-04: the previous config-cap fallback label is gone.
+        # Live truth now flows from bankroll_provider.current(); when it returns None the field stays
         # null and DATA_DEGRADED surfaces upstream — no config-literal smuggle.
-        compatibility_inputs["bankroll_fallback_source"] = "bankroll_provider"
+        compatibility_inputs["bankroll_fallback_source"] = bankroll_fallback_source
+    if bankroll_rejected_source is not None:
+        compatibility_inputs["bankroll_rejected_source"] = bankroll_rejected_source
     if compatibility_inputs:
         status["truth"]["compatibility_inputs"] = compatibility_inputs
 

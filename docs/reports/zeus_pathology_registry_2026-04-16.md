@@ -337,10 +337,8 @@ No date filter. Each harvester cycle paginates ALL closed events (not just recen
 ### TB-4. Year Boundary Lead Days (LOW)
 For UTC+13 cities, `lead_days_to_date_start` at year boundary can produce off-by-one.
 
-### TB-5. `smoke_test_portfolio_cap_usd` Never Removed (MEDIUM)
-**File:** `src/engine/cycle_runner.py` L249-260
-
-Comment says "Remove after first lifecycle observed" — still present. Permanent entry blocker when cap is hit.
+### TB-5. Temporary Smoke Cap Removed (RESOLVED 2026-05-04)
+The former first-lifecycle smoke cap is no longer a live entry gate. Current entry discipline is wallet bankroll + RiskGuard/posture/max-exposure gates, with no permanent smoke cap in sizing or cycle admission.
 
 ### TB-6. Harvester Hourly vs Real-Time Settlement (MEDIUM)
 Harvester runs every 1 hour. Settled position at minute 1 → up to 59 minutes delay. During this window, `monitor_refresh` still runs on the settled position.

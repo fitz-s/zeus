@@ -42,7 +42,7 @@
 
 The 5-tier hypothesis ordering worked cleanly in 5B. I caught 3 moments where disk disagreed with a report (testeng-grace's R-letter count, exec-emma's "80/80 GREEN" scope, the scanner-deferral addendum timing) — all three resolved via concurrent-write hypothesis. Zero discipline findings filed in 5B. Zero false escalations.
 
-One sharpening for 5C: **add a "deferred ruling" tier between #3 (shell/tool artifact) and #4 (benign mistake)**. When team-lead has issued a ruling after my last context snapshot, disk will look like a teammate bypassed instructions — but actually they followed a newer ruling I'm not on. Concrete: Phase 5A's paper-mode flap was exactly this shape (team-lead retired paper; I thought exec-emma silently reverted ratified code). Default hypothesis should now be: "is there a newer ruling I don't see?" before "concurrent write". Team-lead confirms via a2a if in doubt.
+One sharpening for 5C: **add a "deferred ruling" tier between #3 (shell/tool artifact) and #4 (benign mistake)**. When team-lead has issued a ruling after my last context snapshot, disk will look like a teammate bypassed instructions — but actually they followed a newer ruling I'm not on. Concrete: Phase 5A's obsolete non-live runtime flap was exactly this shape (team-lead retired obsolete non-live runtime; I thought exec-emma silently reverted ratified code). Default hypothesis should now be: "is there a newer ruling I don't see?" before "concurrent write". Team-lead confirms via a2a if in doubt.
 
 Otherwise the rule is mature. Fresh critic should apply it from message 1, not learn it via burns.
 

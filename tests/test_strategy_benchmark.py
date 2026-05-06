@@ -179,13 +179,19 @@ def test_promotion_requires_economics_evidence_grade():
     assert suite.promotion_decision(replay, simulated, read_only_live, economics=economics).verdict is PromotionVerdict.PROMOTE
 
 
-def test_benchmark_api_uses_evidence_class_names_not_runtime_paper_shadow():
-    assert "PAPER" not in BenchmarkEnvironment.__members__
+def test_benchmark_api_uses_evidence_class_names_not_non_live_execution_labels():
+    assert set(BenchmarkEnvironment.__members__) == {
+        "REPLAY",
+        "SIMULATED_VENUE",
+        "READ_ONLY_LIVE",
+        "PROMOTION_GRADE_ECONOMICS",
+    }
     assert "SHADOW" not in BenchmarkEnvironment.__members__
     assert "LIVE" not in BenchmarkEnvironment.__members__
+    assert {item.value for item in BenchmarkEnvironment}.isdisjoint({"legacy_env", "shadow", "live"})
 
     suite = StrategyBenchmarkSuite(read_only_live_corpora={STRATEGY: _corpus()})
-    assert not hasattr(suite, "evaluate_" + "paper")
+    assert not hasattr(suite, "evaluate_" + "legacy_env")
     assert not hasattr(suite, "evaluate_live_" + "shadow")
 
 

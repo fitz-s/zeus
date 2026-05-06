@@ -8,14 +8,15 @@
 Locks six invariants surfaced by the 2026-05-01 architect + followup memos:
 
 1. ``riskguard.tick`` consumes ``bankroll_provider.current().value_usd`` as the
-   trailing-loss equity base, NOT ``settings.capital_base_usd`` and NOT the
-   ``PortfolioState.bankroll`` field (a config-constant fossil).
+   trailing-loss equity base, not the removed config-cap fossil and not the
+   ``PortfolioState.bankroll`` field.
 2. When the wallet is unreachable and no fresh cache exists, tick fails closed
    at ``RiskLevel.DATA_DEGRADED`` with status ``bankroll_provider_unavailable``.
 3. When the live fetch fails but a recent cache is available, tick proceeds
    using the cached value AND surfaces ``staleness_seconds`` for observability.
 4. The trailing-loss RED threshold is ``wallet_balance * max_daily_loss_pct``
-   (≈$15.95 at today's $199.40 wallet) — NOT ``capital_base_usd * pct`` (=$12).
+   (≈$15.95 at today's $199.40 wallet) — NOT retired config-literal capital
+   times pct.
    A real $15 daily loss must NOT trigger a false-positive RED that sweeps
    live positions.
 5. Definition A (followup §2.1, §7 hazard #1): ``effective_bankroll`` MUST equal
@@ -23,9 +24,9 @@ Locks six invariants surfaced by the 2026-05-01 architect + followup memos:
    (already in the wallet via cash settlement).
 6. Cutover guard (followup §6.2, §7 hazard #3): ``_trailing_loss_reference``
    MUST skip historical rows that lack ``bankroll_truth_source ==
-   "polymarket_wallet"``. Without this, day-1 post-cutover compares t-24h
-   ($150 fiction) to t-now ($199 real) → fake $49 LOSS → false RED → sweeps
-   live positions. This is a STRICTLY worse outcome than the bug being fixed.
+   "polymarket_wallet"``. Without this, day-1 post-cutover compares different
+   bankroll objects → false RED → sweeps live positions. This is a STRICTLY
+   worse outcome than the bug being fixed.
 
 Failure of any test in this file means the daemon is computing trailing-loss
 risk against the wrong base — the structural bug the operator flagged
@@ -126,7 +127,7 @@ def _seed_post_cutover_reference(
 
 
 def test_tick_uses_onchain_wallet_for_trailing_loss(monkeypatch, tmp_path):
-    """Effective bankroll = on-chain wallet, NOT capital_base_usd=150."""
+    """Effective bankroll = on-chain wallet, not retired config-literal capital."""
     zeus_db = tmp_path / "zeus.db"
     risk_db = tmp_path / "risk_state.db"
     _bootstrap_canonical_zeus_db(zeus_db)
@@ -141,7 +142,7 @@ def test_tick_uses_onchain_wallet_for_trailing_loss(monkeypatch, tmp_path):
     details = _read_latest_details(risk_db)
 
     # Initial bankroll (the equity base for trailing-loss math) MUST be the
-    # wallet, not 150.0 from settings/PortfolioState.
+    # wallet, not settings/PortfolioState.
     assert details["initial_bankroll"] == pytest.approx(199.40)
     assert details["effective_bankroll"] == pytest.approx(199.40)
     # Cutover provenance marker is set so future ticks accept this row.
@@ -200,8 +201,8 @@ def test_tick_uses_cached_wallet_when_fresh_fetch_fails(monkeypatch, tmp_path):
 def test_red_threshold_at_real_wallet_not_config_constant(monkeypatch, tmp_path):
     """A $15 wallet drop against $199.40 must NOT trigger RED.
 
-    With the legacy code (initial_bankroll=$150), an $15 loss = 10% > 8% RED
-    threshold of $12 → would force_exit_review and sweep all positions.
+    With the legacy code, a fixed-cap threshold could mark this wallet move RED
+    and sweep all positions.
     With the on-chain wallet ($199.40), the 8% threshold is $15.95 → $15 stays
     GREEN. This locks the false-positive prevention that motivates P0-A.
     """
@@ -234,15 +235,15 @@ def test_red_threshold_at_real_wallet_not_config_constant(monkeypatch, tmp_path)
     # trigger RED at the current-wallet base, but the architect memo's example
     # uses the historical wallet ($199.40) as the threshold base. Both are
     # defensible — what this antibody DEMANDS is that the threshold be a
-    # function of REAL wallet, not the $150 fiction. The per-call decision of
+    # function of REAL wallet, not retired config-literal capital. The per-call decision of
     # "current wallet vs historical wallet for threshold base" is followup §2.3
     # (peak-drawdown vs anchor-point). Lock the structural property only:
     threshold_at_current_wallet = round(184.40 * 0.08, 2)  # 14.75
     threshold_at_historical_wallet = round(199.40 * 0.08, 2)  # 15.95
-    legacy_fiction_threshold = round(150.0 * 0.08, 2)  # 12.00
+    retired_literal_threshold = 12.00
     assert details["daily_loss"] == pytest.approx(15.0)
     # Definitively NOT the legacy threshold:
-    assert details["daily_loss"] > legacy_fiction_threshold  # 15 > 12 (legacy would RED)
+    assert details["daily_loss"] > retired_literal_threshold
     # And the level decision is a function of the real-wallet threshold, NOT
     # the $12 fiction. We verify by computing both possible level outcomes
     # against real-wallet thresholds and asserting the daemon agrees.
@@ -269,9 +270,9 @@ def test_no_double_counting_pnl(monkeypatch, tmp_path):
         "current",
         lambda **_kwargs: _bor(199.40),
     )
-    # Inject a meaningful realized-pnl bookkeeping signal via recent_exits
-    # fallback: $5 realized PnL would, under the (wrong) Def B math, push
-    # effective_bankroll to $204.40. Under Def A, it stays $199.40.
+    # Inject a stale recent_exits bookkeeping signal. It must not become
+    # bankroll truth and no longer feeds realized_pnl; realized PnL comes from
+    # the strategy_health read model window.
     monkeypatch.setattr(
         riskguard_module,
         "load_portfolio",
@@ -286,8 +287,9 @@ def test_no_double_counting_pnl(monkeypatch, tmp_path):
     # The structural anti-double-count assertion:
     assert details["effective_bankroll"] == pytest.approx(199.40)
     assert details["initial_bankroll"] == pytest.approx(199.40)
-    # PnL is still surfaced for analytics, just not folded into equity.
-    assert details["realized_pnl"] == pytest.approx(5.0)
+    # Stale recent_exits is not promoted to analytics authority here either.
+    assert details["realized_pnl"] == pytest.approx(0.0)
+    assert details["realized_pnl_source"] == "strategy_health.realized_pnl_30d"
     # Confirm the legacy double-counting path is NOT in effect.
     legacy_double_counted = round(199.40 + 5.0, 2)
     assert details["effective_bankroll"] != pytest.approx(legacy_double_counted)
@@ -296,16 +298,15 @@ def test_no_double_counting_pnl(monkeypatch, tmp_path):
 def test_trailing_loss_skips_pre_cutover_reference_rows(monkeypatch, tmp_path):
     """Cutover guard: pre-cutover risk_state rows MUST be skipped as references.
 
-    Before P0-A, every risk_state row stored ``effective_bankroll = $150 + pnl``
-    (config-constant fiction). After P0-A, rows store ``effective_bankroll =
-    real_wallet``. If `_trailing_loss_reference` does not filter on
+    Before P0-A, risk_state rows could store config-literal capital plus PnL
+    as ``effective_bankroll``. After P0-A, rows store real wallet equity. If
+    `_trailing_loss_reference` does not filter on
     ``bankroll_truth_source == "polymarket_wallet"``, the first 24h post-cutover
-    will compare today's $199 wallet to yesterday's $150 fiction → fake $49
-    loss → false RED → ``force_exit_review`` sweeps live positions. This is a
-    strictly worse failure mode than the bug being fixed.
+    can compare different bankroll objects and false-RED live positions. This is
+    a strictly worse failure mode than the bug being fixed.
 
-    Antibody: insert a 23h-old PRE-cutover row ($150 fiction, no provenance
-    tag) and a much older OR no post-cutover row. `_trailing_loss_reference`
+    Antibody: insert a 23h-old PRE-cutover row with no wallet provenance tag and
+    a much older OR no post-cutover row. `_trailing_loss_reference`
     must return "no_reference_row" (treating the pre-cutover row as if it
     didn't exist) and trailing-loss must report bootstrap_no_history → GREEN.
     """
@@ -313,10 +314,9 @@ def test_trailing_loss_skips_pre_cutover_reference_rows(monkeypatch, tmp_path):
     risk_db = tmp_path / "risk_state.db"
     _bootstrap_canonical_zeus_db(zeus_db)
 
-    # Insert a 23h-old pre-cutover row (NO bankroll_truth_source) carrying the
-    # $150 fiction. If the cutover guard is missing, this becomes the t-24h
-    # reference and the trailing-loss diff would be $199.40 - $150.00 = $49.40
-    # → 33% drop → instant RED.
+    # Insert a 23h-old pre-cutover row (NO bankroll_truth_source). If the cutover
+    # guard is missing, this becomes the t-24h reference and can compare a
+    # retired bankroll object to current wallet equity → instant false RED.
     risk_conn = get_connection(risk_db)
     riskguard_module.init_risk_db(risk_conn)
     pre_cutover_ts = (datetime.now(timezone.utc) - timedelta(hours=23)).isoformat()
@@ -327,9 +327,9 @@ def test_trailing_loss_skips_pre_cutover_reference_rows(monkeypatch, tmp_path):
         """,
         (
             json.dumps({
-                "initial_bankroll": 150.0,
+                "initial_bankroll": 211.37,
                 "total_pnl": 0.0,
-                "effective_bankroll": 150.0,
+                "effective_bankroll": 211.37,
                 # Note: NO bankroll_truth_source field. This is what every row
                 # written before the P0-A cutover looks like.
             }),

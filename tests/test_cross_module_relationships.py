@@ -1,9 +1,9 @@
 # Created: 2026-04-07
-# Lifecycle: created=2026-04-07; last_reviewed=2026-04-30; last_reused=2026-04-30
+# Lifecycle: created=2026-04-07; last_reviewed=2026-05-06; last_reused=2026-05-06
 # Purpose: Protect cross-module invariants where one module output becomes another module input.
 # Reuse: Run for finality, lifecycle, replay, truth-surface, and relationship-boundary changes.
-# Last reused/audited: 2026-04-30
-# Authority basis: first-principles MATCHED/MINED finality cleanup 2026-04-30
+# Last reused/audited: 2026-05-06
+# Authority basis: first-principles MATCHED/MINED finality cleanup 2026-04-30; Wave17 outcome_fact non-authority repair 2026-05-06
 """Cross-module relationship tests.
 
 These tests verify that when Module A's output flows to Module B,
@@ -48,19 +48,21 @@ def _table_exists(conn, table: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Test 1: harvester → chronicle + outcome_fact + trade_decisions + risk_state
+# Test 1: harvester -> chronicle + trade_decisions + risk_state; outcome_fact legacy projection
 # ---------------------------------------------------------------------------
 
 def test_settlement_pnl_flows_to_all_surfaces():
-    """After settlement, P&L must agree across all four surfaces:
-    chronicle.SETTLEMENT → outcome_fact → trade_decisions.settlement_edge_usd
-    → risk_state.realized_pnl (aggregate).
+    """After settlement, P&L must agree across authoritative settlement surfaces:
+    chronicle.SETTLEMENT -> trade_decisions.settlement_edge_usd ->
+    risk_state.realized_pnl (aggregate).
 
-    Relationship: harvester.log_event(SETTLEMENT) must produce matching records
-    on all four downstream surfaces. If any surface is missing or diverges,
-    a pipeline stage failed silently.
+    Relationship: harvester.log_event(SETTLEMENT) must produce matching records on
+    authoritative downstream surfaces. outcome_fact is a legacy lifecycle
+    diagnostic projection, not settlement/report/learning authority, so this test
+    must not require it as proof of settlement P&L authority.
 
-    This test catches SD-1 / SD-2 class regressions.
+    This test catches SD-1 class regressions without reintroducing SD-2 pressure
+    to promote legacy outcome_fact rows.
     """
     from src.state.db import RISK_DB_PATH
     from src.config import settings
@@ -104,22 +106,8 @@ def test_settlement_pnl_flows_to_all_surfaces():
         if chron_pnl is None:
             continue  # Chronicle has NULL pnl — can't assert downstream
 
-        # --- outcome_fact ---
-        if _table_exists(conn, "outcome_fact"):
-            of_row = conn.execute(
-                "SELECT pnl FROM outcome_fact WHERE position_id = ?",
-                (trade_id,),
-            ).fetchone()
-            if of_row is None:
-                failures.append(
-                    f"{trade_id}: chronicle has SETTLEMENT pnl={chron_pnl:.4f} "
-                    f"but outcome_fact has NO ROW (SD-2 regression)"
-                )
-            elif of_row["pnl"] is not None and abs(float(of_row["pnl"]) - chron_pnl) > 0.01:
-                failures.append(
-                    f"{trade_id}: outcome_fact.pnl={of_row['pnl']:.4f} "
-                    f"!= chronicle pnl={chron_pnl:.4f}"
-                )
+        # outcome_fact is intentionally excluded from authority assertions.
+        # It is a legacy lifecycle projection, not settlement P&L authority.
 
         # --- trade_decisions ---
         if _table_exists(conn, "trade_decisions"):
@@ -334,7 +322,6 @@ def test_canonical_write_produces_matching_projection():
 # Test 3: monitor_refresh → ExitContext.fresh_prob_is_fresh
 # ---------------------------------------------------------------------------
 
-@pytest.mark.skip(reason="Phase2: paper best_bid fallback removed from _build_exit_context")
 def test_monitor_refresh_updates_exit_context_freshness():
     """After monitor_refresh runs, last_monitor_prob_is_fresh must be set on
     the position. The ExitContext.fresh_prob_is_fresh that exit triggers read
@@ -411,39 +398,6 @@ def test_monitor_refresh_updates_exit_context_freshness():
     assert exit_ctx_stale.fresh_prob_is_fresh is False, (
         "monitor_refresh fallback set last_monitor_prob_is_fresh=False but ExitContext sees True — "
         "stale exit trigger may fire on bad data."
-    )
-
-    # --- Case C: paper mode + missing best_bid defaults correctly ---
-    pos_paper = SimpleNamespace(
-        trade_id="test-paper",
-        last_monitor_prob_is_fresh=True,
-        last_monitor_market_price=0.60,
-        last_monitor_market_price_is_fresh=True,
-        last_monitor_best_bid=None,  # paper mode: None is OK, defaults to p_market
-        last_monitor_best_ask=None,
-        last_monitor_market_vig=None,
-        last_monitor_whale_toxicity=None,
-        chain_state="synced",
-        state="open",
-    )
-    edge_ctx_paper = SimpleNamespace(
-        p_posterior=0.65,
-        p_market=[0.60],
-        divergence_score=0.0,
-        market_velocity_1h=0.0,
-        forward_edge=0.0,
-    )
-    exit_ctx_paper = _build_exit_context(
-        pos_paper,
-        edge_ctx_paper,
-        hours_to_settlement=5.0,
-        ExitContext=ExitContext,
-    )
-    assert exit_ctx_paper.fresh_prob_is_fresh is True, (
-        "Paper mode: freshness flag lost at boundary"
-    )
-    assert exit_ctx_paper.best_bid == 0.60, (
-        "Paper mode: missing best_bid should default to current_market_price"
     )
 
 
@@ -678,6 +632,7 @@ def run_relationship_checks() -> dict:
         }
         surfaces_checked = 0
         failures = []
+        legacy_outcome_fact_notes = []
         if not chronicle_pnl:
             results["settlement_pnl_consistent"] = {"status": SKIP, "detail": "no SETTLEMENT events", "agreement": True}
         else:
@@ -685,16 +640,23 @@ def run_relationship_checks() -> dict:
                 if chron_pnl is None:
                     continue
                 if _table_exists(conn, "outcome_fact"):
-                    surfaces_checked = max(surfaces_checked, 2)
                     of = conn.execute(
                         "SELECT pnl FROM outcome_fact WHERE position_id = ?", (trade_id,)
                     ).fetchone()
-                    if of is None:
-                        failures.append(f"{trade_id}: missing from outcome_fact")
-                    elif of["pnl"] is not None and abs(float(of["pnl"]) - chron_pnl) > 0.01:
-                        failures.append(f"{trade_id}: outcome_fact pnl diverges")
+                    if of is not None and of["pnl"] is not None:
+                        try:
+                            outcome_fact_pnl = float(of["pnl"])
+                        except (TypeError, ValueError):
+                            legacy_outcome_fact_notes.append(
+                                f"{trade_id}: legacy outcome_fact pnl is non-numeric"
+                            )
+                        else:
+                            if abs(outcome_fact_pnl - chron_pnl) > 0.01:
+                                legacy_outcome_fact_notes.append(
+                                    f"{trade_id}: legacy outcome_fact pnl diverges from chronicle"
+                                )
                 if _table_exists(conn, "trade_decisions"):
-                    surfaces_checked = max(surfaces_checked, 3)
+                    surfaces_checked = max(surfaces_checked, 2)
                     td = conn.execute(
                         "SELECT settlement_edge_usd FROM trade_decisions WHERE runtime_trade_id = ? ORDER BY rowid DESC LIMIT 1",
                         (trade_id,),
@@ -710,6 +672,8 @@ def run_relationship_checks() -> dict:
                 "trades_checked": len([v for v in chronicle_pnl.values() if v is not None]),
                 "agreement": not failures,
                 "failures": failures[:3],
+                "legacy_outcome_fact_authority": "legacy_lifecycle_projection_not_settlement_authority",
+                "legacy_outcome_fact_notes": legacy_outcome_fact_notes[:3],
                 "detail": f"checked {len(chronicle_pnl)} settlements across {surfaces_checked} surfaces",
             }
         conn.close()
@@ -783,17 +747,16 @@ def run_relationship_checks() -> dict:
             results["daily_baseline_anchoring"] = {"status": SKIP, "detail": "risk_state empty"}
         else:
             daily, weekly = _load_baselines_from_risk_history()
-            # 2026-05-04: capital_base_usd removed. The "anchored away from
-            # capital" check is now inert — there's no config-literal anchor
-            # to compare against. We still record daily/weekly for diagnostic
-            # value but the anchoring property is no longer meaningful.
+            # 2026-05-04: fixed config-bankroll authority was removed. The
+            # anchoring check is now inert; record daily/weekly for diagnostic
+            # value, but do not compare against a config-literal anchor.
             results["daily_baseline_anchoring"] = {
                 "status": PASS,
                 "daily_baseline": round(daily, 2),
                 "weekly_baseline": round(weekly, 2),
                 "capital_base": None,
                 "anchored_away_from_capital": None,
-                "detail": f"daily={daily:.2f}, weekly={weekly:.2f}, capital_base_usd removed (2026-05-04)",
+                "detail": f"daily={daily:.2f}, weekly={weekly:.2f}, config-bankroll removed (2026-05-04)",
             }
     except Exception as exc:
         results["daily_baseline_anchoring"] = {"status": FAIL, "detail": str(exc)}

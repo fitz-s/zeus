@@ -1,7 +1,8 @@
-# Lifecycle: created=2026-04-25; last_reviewed=2026-04-30; last_reused=2026-04-30
+# Lifecycle: created=2026-04-25; last_reviewed=2026-04-30; last_reused=2026-05-06
 # Purpose: Lock replay CLI and market-events preflight behavior against unsafe diagnostic fallback.
 # Reuse: Run when replay preflight, WU settlement sweep, or replay CLI error handling changes.
 # Authority basis: POST_AUDIT_HANDOFF 4.2.C market-events preflight packet
+import json
 from types import SimpleNamespace
 import sys
 
@@ -38,6 +39,78 @@ def _seed_market_events(conn, city: str, target_date: str, labels: tuple[str, ..
         )
 
 
+def _mark_settlements_verified(conn) -> None:
+    conn.execute("UPDATE settlements SET authority = 'VERIFIED'")
+
+
+def _patch_trade_history_connections(monkeypatch, trade_db, world_db, backtest_db) -> None:
+    import src.engine.replay as replay_module
+    import src.state.db as db_module
+
+    def _trade_with_world():
+        conn = db_module.get_connection(trade_db)
+        conn.execute("ATTACH DATABASE ? AS world", (str(world_db),))
+        return conn
+
+    monkeypatch.setattr(replay_module, "get_trade_connection_with_world", _trade_with_world)
+    monkeypatch.setattr(replay_module, "get_backtest_connection", lambda: db_module.get_connection(backtest_db))
+
+
+def _seed_trade_history_fixture(
+    tmp_path,
+    *,
+    position_decision_snapshot_id: str = "snap-1",
+    outcome_decision_snapshot_id: str | None = "snap-1",
+    outcome_settled_at: str | None = "2026-04-04T00:00:00Z",
+):
+    trade_db = tmp_path / "trade-history-trade.db"
+    world_db = tmp_path / "trade-history-world.db"
+    backtest_db = tmp_path / "trade-history-backtest.db"
+
+    world = get_connection(world_db)
+    init_schema(world)
+    world.execute(
+        """
+        INSERT INTO settlements (city, target_date, winning_bin, settlement_value, temperature_metric)
+        VALUES ('NYC', '2026-04-03', '39-40°F', 40.0, 'high')
+        """
+    )
+    _mark_settlements_verified(world)
+    world.commit()
+    world.close()
+
+    trade = get_connection(trade_db)
+    init_schema(trade)
+    trade.execute(
+        """
+        INSERT INTO position_current
+        (position_id, phase, trade_id, market_id, city, cluster, target_date,
+         bin_label, direction, unit, size_usd, shares, cost_basis_usd,
+         entry_price, p_posterior, last_monitor_prob, last_monitor_edge,
+         last_monitor_market_price, decision_snapshot_id, entry_method,
+         strategy_key, edge_source, discovery_mode, chain_state, order_id,
+         order_status, updated_at, temperature_metric)
+        VALUES ('pos-1', 'settled', 'pos-1', 'mkt', 'NYC', 'US-Northeast',
+                '2026-04-03', '39-40°F', 'buy_yes', 'F', 5.0, 10.0, 5.0,
+                0.5, 0.6, 0.6, 0.1, 0.5, ?, 'entry', 'center_buy',
+                'edge', 'opening_hunt', 'on_chain', 'ord-1', 'filled',
+                '2026-04-02T00:00:00Z', 'high')
+        """,
+        (position_decision_snapshot_id,),
+    )
+    trade.execute(
+        """
+        INSERT INTO outcome_fact
+        (position_id, strategy_key, settled_at, decision_snapshot_id, pnl, outcome)
+        VALUES ('pos-1', 'center_buy', ?, ?, -5.0, 0)
+        """,
+        (outcome_settled_at, outcome_decision_snapshot_id),
+    )
+    trade.commit()
+    trade.close()
+    return trade_db, world_db, backtest_db
+
+
 def test_run_replay_allows_snapshot_only_reference_opt_in(tmp_path, monkeypatch):
     db_path = tmp_path / "zeus.db"
     conn = get_connection(db_path)
@@ -48,6 +121,7 @@ def test_run_replay_allows_snapshot_only_reference_opt_in(tmp_path, monkeypatch)
         VALUES ('Paris', '2026-04-03', '12°C', 12.0, 'high')
         """
     )
+    _mark_settlements_verified(conn)
     conn.execute(
         """
         INSERT INTO ensemble_snapshots
@@ -98,6 +172,7 @@ def test_counterfactual_replay_does_not_auto_enable_snapshot_only_reference(tmp_
         VALUES ('Paris', '2026-04-03', '12°C', 12.0, 'high')
         """
     )
+    _mark_settlements_verified(conn)
     conn.execute(
         """
         INSERT INTO ensemble_snapshots
@@ -145,10 +220,11 @@ def test_run_replay_snapshot_only_can_fallback_to_forecast_rows(tmp_path, monkey
     init_schema(conn)
     conn.execute(
         """
-        INSERT INTO settlements (city, target_date, settlement_value, temperature_metric)
-        VALUES ('Ankara', '2026-04-03', 20.0, 'high')
+        INSERT INTO settlements (city, target_date, winning_bin, settlement_value, temperature_metric)
+        VALUES ('Ankara', '2026-04-03', '20°C', 20.0, 'high')
         """
     )
+    _mark_settlements_verified(conn)
     conn.execute(
         """
         INSERT INTO calibration_pairs
@@ -209,6 +285,7 @@ def test_run_replay_shadow_signal_fallback_uses_legacy_diagnostic_source(tmp_pat
         VALUES ('Dallas', '2026-04-05', '41-42°F', 42.0, 'high')
         """
     )
+    _mark_settlements_verified(conn)
     conn.execute(
         """
         INSERT INTO ensemble_snapshots
@@ -284,6 +361,7 @@ def test_wu_settlement_sweep_requires_market_events_for_strict_subjects(tmp_path
         VALUES ('Paris', '2026-04-03', '12°C', 12.0, 'high')
         """
     )
+    _mark_settlements_verified(conn)
     conn.commit()
     conn.close()
 
@@ -310,6 +388,7 @@ def test_wu_settlement_sweep_rejects_wrong_market_event_label(tmp_path, monkeypa
         VALUES ('Paris', '2026-04-03', '12°C', 12.0, 'high')
         """
     )
+    _mark_settlements_verified(conn)
     _seed_market_events(conn, "Paris", "2026-04-03", ("99°C",))
     conn.commit()
     conn.close()
@@ -337,6 +416,7 @@ def test_market_events_preflight_matches_bins_semantically(tmp_path):
         VALUES ('Paris', '2026-04-03', '12°C', 12.0, 'high')
         """
     )
+    _mark_settlements_verified(conn)
     _seed_market_events(
         conn,
         "Paris",
@@ -370,6 +450,7 @@ def test_replay_without_market_price_linkage_cannot_generate_pnl(tmp_path, monke
         VALUES ('Paris', '2026-04-04', '12°C', 12.0, 'high')
         """
     )
+    _mark_settlements_verified(conn)
     conn.execute(
         """
         INSERT INTO ensemble_snapshots
@@ -454,6 +535,7 @@ def test_replay_alpha_uses_trade_decision_market_hours_open(tmp_path, monkeypatc
         VALUES ('Paris', '2026-04-05', '12°C', 12.0, 'high')
         """
     )
+    _mark_settlements_verified(conn)
     conn.execute(
         """
         INSERT INTO ensemble_snapshots
@@ -523,6 +605,7 @@ def test_replay_alpha_uses_no_trade_market_hours_open(tmp_path, monkeypatch):
         VALUES ('Paris', '2026-04-06', '12°C', 12.0, 'high')
         """
     )
+    _mark_settlements_verified(conn)
     conn.execute(
         """
         INSERT INTO ensemble_snapshots
@@ -614,6 +697,7 @@ def test_replay_alpha_legacy_no_trade_without_market_hours_uses_fallback(tmp_pat
         VALUES ('Paris', '2026-04-07', '12°C', 12.0, 'high')
         """
     )
+    _mark_settlements_verified(conn)
     conn.execute(
         """
         INSERT INTO ensemble_snapshots
@@ -706,6 +790,7 @@ def test_replay_records_provenance_counts_and_hours_since_open_fallback(tmp_path
         ('Paris', '2026-04-09', '12°C', 12.0, 'high')
         """
     )
+    _mark_settlements_verified(conn)
     conn.execute(
         """
         INSERT INTO ensemble_snapshots
@@ -1115,3 +1200,79 @@ def test_cli_trade_history_audit_routes_to_backtest_lane(tmp_path, monkeypatch, 
     }
     assert "TRADE_HISTORY_AUDIT" in output
     assert "Results stored in zeus_backtest.db" in output
+
+
+def test_trade_history_audit_labels_outcome_fact_as_legacy_non_promotion(tmp_path, monkeypatch):
+    trade_db, world_db, backtest_db = _seed_trade_history_fixture(tmp_path)
+    _patch_trade_history_connections(monkeypatch, trade_db, world_db, backtest_db)
+
+    summary = run_replay("2026-04-03", "2026-04-03", mode="trade_history_audit")
+
+    conn = get_connection(backtest_db)
+    row = conn.execute("SELECT * FROM backtest_outcome_comparison").fetchone()
+    conn.close()
+    evidence = json.loads(row["evidence_json"])
+    assert summary.limitations["actual_trade_outcome_source"] == "outcome_fact_legacy_lifecycle_projection"
+    assert summary.limitations["actual_outcome_learning_eligible"] is False
+    assert summary.limitations["actual_outcome_promotion_eligible"] is False
+    assert row["truth_source"] == "verified_settlement_vs_legacy_outcome_fact"
+    assert row["authority_scope"] == "diagnostic_non_promotion"
+    assert row["actual_trade_outcome"] == 0
+    assert row["actual_pnl"] == -5.0
+    assert evidence["actual_trade_outcome_source"] == "outcome_fact_legacy_lifecycle_projection"
+    assert evidence["actual_outcome_evidence_class"] == "legacy_lifecycle_projection_not_settlement_authority"
+    assert evidence["actual_outcome_authority_scope"] == "diagnostic_non_promotion"
+    assert evidence["actual_outcome_learning_eligible"] is False
+    assert evidence["actual_outcome_promotion_eligible"] is False
+    assert evidence["outcome_fact_consumed_as_actual_trade_evidence"] is True
+
+
+def test_trade_history_audit_rejects_unlinked_outcome_fact_as_actual_trade_evidence(tmp_path, monkeypatch):
+    trade_db, world_db, backtest_db = _seed_trade_history_fixture(
+        tmp_path,
+        outcome_decision_snapshot_id=None,
+    )
+    _patch_trade_history_connections(monkeypatch, trade_db, world_db, backtest_db)
+
+    summary = run_replay("2026-04-03", "2026-04-03", mode="trade_history_audit")
+
+    conn = get_connection(backtest_db)
+    row = conn.execute("SELECT * FROM backtest_outcome_comparison").fetchone()
+    conn.close()
+    evidence = json.loads(row["evidence_json"])
+    missing = json.loads(row["missing_reason_json"])
+    assert summary.n_actual_traded == 0
+    assert row["actual_trade_outcome"] is None
+    assert row["actual_pnl"] is None
+    assert row["divergence_status"] == "trade_unresolved"
+    assert "outcome_fact_missing_decision_snapshot_id" in missing
+    assert evidence["actual_trade_outcome_source"] == "none"
+    assert evidence["actual_pnl_source"] == "none"
+    assert evidence["outcome_fact_required_linkage_ok"] is False
+    assert evidence["outcome_fact_consumed_as_actual_trade_evidence"] is False
+
+
+def test_trade_history_audit_rejects_snapshot_mismatched_outcome_fact(tmp_path, monkeypatch):
+    trade_db, world_db, backtest_db = _seed_trade_history_fixture(
+        tmp_path,
+        position_decision_snapshot_id="snap-1",
+        outcome_decision_snapshot_id="snap-stale",
+    )
+    _patch_trade_history_connections(monkeypatch, trade_db, world_db, backtest_db)
+
+    summary = run_replay("2026-04-03", "2026-04-03", mode="trade_history_audit")
+
+    conn = get_connection(backtest_db)
+    row = conn.execute("SELECT * FROM backtest_outcome_comparison").fetchone()
+    conn.close()
+    evidence = json.loads(row["evidence_json"])
+    missing = json.loads(row["missing_reason_json"])
+    assert summary.n_actual_traded == 0
+    assert row["actual_trade_outcome"] is None
+    assert row["actual_pnl"] is None
+    assert row["divergence_status"] == "trade_unresolved"
+    assert "outcome_fact_decision_snapshot_mismatch" in missing
+    assert evidence["expected_decision_snapshot_id"] == "snap-1"
+    assert evidence["outcome_fact_decision_snapshot_id"] == "snap-stale"
+    assert evidence["outcome_fact_decision_snapshot_matches_position"] is False
+    assert evidence["outcome_fact_consumed_as_actual_trade_evidence"] is False

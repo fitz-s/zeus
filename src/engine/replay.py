@@ -47,6 +47,9 @@ DIAGNOSTIC_REPLAY_REFERENCE_SOURCES = frozenset({
     "ensemble_snapshots_v2.available_at",
     "forecasts_table_synthetic",
 })
+LEGACY_OUTCOME_FACT_DIAGNOSTIC_SOURCE = "outcome_fact_legacy_lifecycle_projection"
+LEGACY_OUTCOME_FACT_EVIDENCE_CLASS = "legacy_lifecycle_projection_not_settlement_authority"
+TRADE_HISTORY_DIAGNOSTIC_TRUTH_SOURCE = "verified_settlement_vs_legacy_outcome_fact"
 
 
 class ReplayPreflightError(RuntimeError):
@@ -70,6 +73,40 @@ def _first_existing_table(conn, table: str) -> str:
     if _table_exists(conn, "", table):
         return table
     return ""
+
+
+def _replay_calibration_lookup_keys(
+    snapshot: dict,
+) -> tuple[bool, Optional[str], Optional[str], Optional[str]]:
+    """Return whether replay may use Platt plus explicit bucket keys.
+
+    Replay snapshots carry forecast data_version and issue_time. If the
+    data_version cannot prove a calibration source bucket, replay must not fall
+    through to get_calibrator's TIGGE schema defaults or legacy high fallback.
+    """
+
+    data_version = str(snapshot.get("data_version") or "").strip()
+    if data_version:
+        from src.calibration.forecast_calibration_domain import (
+            derive_source_id_from_data_version,
+        )
+
+        source_id = derive_source_id_from_data_version(data_version)
+        if source_id is None:
+            return False, None, None, None
+    else:
+        source_id = None
+
+    cycle: Optional[str] = None
+    horizon_profile: Optional[str] = None
+    issue_time = snapshot.get("issue_time")
+    if isinstance(issue_time, str) and len(issue_time) >= 13:
+        cycle = issue_time[11:13]
+    elif hasattr(issue_time, "hour"):
+        cycle = f"{int(issue_time.hour):02d}"
+    if cycle is not None:
+        horizon_profile = "full" if cycle in ("00", "12") else "short"
+    return True, cycle, source_id, horizon_profile
 
 
 def _table_columns(conn, table: str) -> set[str]:
@@ -203,7 +240,7 @@ def _missing_parity_dimensions(full_linkage: bool) -> list[str]:
     return [
         dim for dim, present in [
             ("market_price_linkage", full_linkage),
-            ("active_sizing_parity", False),   # replay uses flat $5, not Kelly
+            ("active_sizing_parity", False),   # replay lacks full live sizing parity
             ("selection_family_parity", False), # replay has no bootstrap/FDR
         ] if not present
     ]
@@ -882,7 +919,8 @@ class ReplayContext:
         """Get settlement outcome for scoring."""
         row = self.conn.execute(
             f"SELECT settlement_value, winning_bin FROM {self._sp}settlements "
-            "WHERE city = ? AND target_date = ? AND temperature_metric = ?",
+            "WHERE city = ? AND target_date = ? AND temperature_metric = ? "
+            "AND authority = 'VERIFIED'",
             (city_name, target_date, temperature_metric),
         ).fetchone()
         if row:
@@ -1496,10 +1534,29 @@ def _replay_one_settlement(
 
     bins = [Bin(low=_parse_temp_range(label)[0], high=_parse_temp_range(label)[1], label=label, unit=city.settlement_unit) for label in bin_labels]
 
-    # Get calibrator — L3 Phase 9C: thread metric from replay public entry
-    cal, cal_level = get_calibrator(
-        ctx.conn, city, target_date, temperature_metric=temperature_metric,
-    )
+    # Get calibrator — L3 Phase 9C: thread metric from replay public entry.
+    # Wave7: replay may use Platt only when the snapshot proves the same
+    # calibration bucket source identity as live lookup. Diagnostic or legacy
+    # data_versions without a bucket mapping stay uncalibrated instead of using
+    # schema defaults.
+    (
+        calibration_lookup_supported,
+        _phase2_cycle,
+        _phase2_source_id,
+        _phase2_horizon_profile,
+    ) = _replay_calibration_lookup_keys(snapshot)
+    if calibration_lookup_supported:
+        cal, cal_level = get_calibrator(
+            ctx.conn,
+            city,
+            target_date,
+            temperature_metric=temperature_metric,
+            cycle=_phase2_cycle,
+            source_id=_phase2_source_id,
+            horizon_profile=_phase2_horizon_profile,
+        )
+    else:
+        cal, cal_level = None, 4
 
     # Compute alpha (with overrides if any)
     override_alpha = ctx.overrides.get("alpha", {}).get(city.name, {}).get(season)
@@ -1968,6 +2025,7 @@ def run_wu_settlement_sweep(
         FROM {ctx._sp}settlements
         WHERE target_date >= ? AND target_date <= ?
           AND temperature_metric = 'high'
+          AND authority = 'VERIFIED'
           AND settlement_value IS NOT NULL
         ORDER BY target_date, city
         """,
@@ -2220,6 +2278,71 @@ def _trade_subject_rows(conn) -> list[str]:
     return sorted({str(row["position_id"]) for row in rows if row["position_id"]})
 
 
+def _diagnostic_outcome_fact_projection(
+    row,
+    *,
+    expected_decision_snapshot_id: str | None,
+) -> tuple[int | None, float | None, dict, list[str]]:
+    """Return actual-trade fields only when legacy outcome_fact is linkable.
+
+    outcome_fact predates settlement-authority provenance. The trade-history
+    lane may compare it diagnostically, but it must never turn into settlement,
+    learning, or promotion authority by omission.
+    """
+    expected_snapshot = str(expected_decision_snapshot_id or "").strip()
+    evidence = {
+        "actual_trade_outcome_source": "none",
+        "actual_pnl_source": "none",
+        "actual_outcome_evidence_class": LEGACY_OUTCOME_FACT_EVIDENCE_CLASS,
+        "actual_outcome_authority_scope": BACKTEST_AUTHORITY_SCOPE,
+        "actual_outcome_learning_eligible": False,
+        "actual_outcome_promotion_eligible": False,
+        "expected_decision_snapshot_id": expected_snapshot,
+        "outcome_fact_consumed_as_actual_trade_evidence": False,
+    }
+    if row is None:
+        return None, None, evidence, []
+
+    decision_snapshot_id = str(row["decision_snapshot_id"] or "").strip()
+    settled_at = str(row["settled_at"] or "").strip()
+    missing: list[str] = []
+    if not expected_snapshot:
+        missing.append("position_current_missing_decision_snapshot_id")
+    if not decision_snapshot_id:
+        missing.append("outcome_fact_missing_decision_snapshot_id")
+    elif expected_snapshot and decision_snapshot_id != expected_snapshot:
+        missing.append("outcome_fact_decision_snapshot_mismatch")
+    if not settled_at:
+        missing.append("outcome_fact_missing_settled_at")
+    if row["outcome"] is None:
+        missing.append("outcome_fact_missing_outcome")
+
+    evidence.update(
+        {
+            "outcome_fact_decision_snapshot_id": decision_snapshot_id,
+            "outcome_fact_settled_at": settled_at,
+            "outcome_fact_has_pnl": row["pnl"] is not None,
+            "outcome_fact_decision_snapshot_matches_position": (
+                bool(expected_snapshot) and decision_snapshot_id == expected_snapshot
+            ),
+            "outcome_fact_required_linkage_ok": not missing,
+        }
+    )
+    if missing:
+        return None, None, evidence, missing
+
+    evidence.update(
+        {
+            "actual_trade_outcome_source": LEGACY_OUTCOME_FACT_DIAGNOSTIC_SOURCE,
+            "actual_pnl_source": (
+                LEGACY_OUTCOME_FACT_DIAGNOSTIC_SOURCE if row["pnl"] is not None else "none"
+            ),
+            "outcome_fact_consumed_as_actual_trade_evidence": True,
+        }
+    )
+    return int(row["outcome"]), row["pnl"], evidence, []
+
+
 def run_trade_history_audit(start_date: str, end_date: str) -> ReplaySummary:
     """Compare actual trade-history outcomes with WU-derived outcomes."""
     run_id = str(uuid.uuid4())[:12]
@@ -2237,6 +2360,11 @@ def run_trade_history_audit(start_date: str, end_date: str) -> ReplaySummary:
             "lane_goal": "real_trade_outcome_divergence_not_hypothetical_pnl",
             "pnl_available": False,
             "pnl_unavailable_reason": "trade_history_audit_reports_actual_trade_pnl_rows_not_simulated_strategy_pnl",
+            "actual_trade_outcome_source": LEGACY_OUTCOME_FACT_DIAGNOSTIC_SOURCE,
+            "actual_outcome_evidence_class": LEGACY_OUTCOME_FACT_EVIDENCE_CLASS,
+            "actual_outcome_authority_scope": BACKTEST_AUTHORITY_SCOPE,
+            "actual_outcome_learning_eligible": False,
+            "actual_outcome_promotion_eligible": False,
         },
     )
     _insert_backtest_run(backtest_conn, summary, status="running")
@@ -2258,9 +2386,17 @@ def run_trade_history_audit(start_date: str, end_date: str) -> ReplaySummary:
                 subject_kind="position",
                 city=None,
                 target_date=None,
-                truth_source="trade_history",
+                truth_source=TRADE_HISTORY_DIAGNOSTIC_TRUTH_SOURCE,
                 divergence_status=divergence_status,
-                evidence={"aliases": list(subject.aliases), "source": subject.source},
+                evidence={
+                    "aliases": list(subject.aliases),
+                    "source": subject.source,
+                    "actual_trade_outcome_source": "none",
+                    "actual_pnl_source": "none",
+                    "actual_outcome_authority_scope": BACKTEST_AUTHORITY_SCOPE,
+                    "actual_outcome_learning_eligible": False,
+                    "actual_outcome_promotion_eligible": False,
+                },
                 missing_reasons=[subject.missing_reason],
             )
             continue
@@ -2268,7 +2404,7 @@ def run_trade_history_audit(start_date: str, end_date: str) -> ReplaySummary:
         current = conn.execute(
             """
             SELECT position_id, city, target_date, bin_label, direction, unit,
-                   temperature_metric
+                   temperature_metric, decision_snapshot_id
             FROM position_current
             WHERE position_id = ?
             """,
@@ -2276,13 +2412,19 @@ def run_trade_history_audit(start_date: str, end_date: str) -> ReplaySummary:
         ).fetchone()
         outcome = conn.execute(
             """
-            SELECT outcome, pnl, settled_at
+            SELECT outcome, pnl, settled_at, decision_snapshot_id
             FROM outcome_fact
             WHERE position_id = ?
             """,
             (subject.position_id,),
         ).fetchone()
         if current is None:
+            actual_outcome, actual_pnl, outcome_evidence, outcome_missing = (
+                _diagnostic_outcome_fact_projection(
+                    outcome,
+                    expected_decision_snapshot_id=None,
+                )
+            )
             _insert_backtest_outcome(
                 backtest_conn,
                 run_id=run_id,
@@ -2291,13 +2433,19 @@ def run_trade_history_audit(start_date: str, end_date: str) -> ReplaySummary:
                 subject_kind="position",
                 city=None,
                 target_date=None,
-                truth_source="trade_history",
+                truth_source=TRADE_HISTORY_DIAGNOSTIC_TRUTH_SOURCE,
                 divergence_status="trade_unresolved",
-                evidence={"resolved_source": subject.source},
-                missing_reasons=["missing_position_current"],
+                evidence={"resolved_source": subject.source, **outcome_evidence},
+                missing_reasons=["missing_position_current", *outcome_missing],
             )
             continue
 
+        actual_outcome, actual_pnl, outcome_evidence, outcome_missing = (
+            _diagnostic_outcome_fact_projection(
+                outcome,
+                expected_decision_snapshot_id=current["decision_snapshot_id"],
+            )
+        )
         city_name = current["city"]
         target_date = current["target_date"]
         if target_date < start_date or target_date > end_date:
@@ -2312,6 +2460,7 @@ def run_trade_history_audit(start_date: str, end_date: str) -> ReplaySummary:
             SELECT settlement_value
             FROM world.settlements
             WHERE city = ? AND target_date = ? AND temperature_metric = ?
+              AND authority = 'VERIFIED'
             """,
             (city_name, target_date, position_metric),
         ).fetchone()
@@ -2334,7 +2483,7 @@ def run_trade_history_audit(start_date: str, end_date: str) -> ReplaySummary:
             )
             divergence = classify_outcome_divergence(
                 wu_outcome,
-                outcome["outcome"] if outcome else None,
+                actual_outcome,
             )
 
         _insert_backtest_outcome(
@@ -2350,15 +2499,15 @@ def run_trade_history_audit(start_date: str, end_date: str) -> ReplaySummary:
             settlement_value=settlement["settlement_value"] if settlement else None,
             settlement_unit=unit,
             derived_wu_outcome=wu_outcome,
-            actual_trade_outcome=outcome["outcome"] if outcome else None,
-            actual_pnl=outcome["pnl"] if outcome else None,
-            truth_source="trade_history",
+            actual_trade_outcome=actual_outcome,
+            actual_pnl=actual_pnl,
+            truth_source=TRADE_HISTORY_DIAGNOSTIC_TRUTH_SOURCE,
             divergence_status=divergence,
-            evidence={"resolved_source": subject.source},
-            missing_reasons=missing,
+            evidence={"resolved_source": subject.source, **outcome_evidence},
+            missing_reasons=[*missing, *outcome_missing],
         )
         summary.n_replayed += 1
-        if outcome is not None:
+        if actual_outcome is not None:
             summary.n_actual_traded += 1
 
     summary.coverage_pct = round(summary.n_replayed / max(1, summary.n_settlements) * 100, 1)
@@ -2430,9 +2579,8 @@ def run_replay(
     # 2026-05-04 bankroll truth-chain cleanup: replay sizing modes need a
     # bankroll. Doctrine — on-chain wallet is the only truth source. When the
     # caller does not pass sizing_bankroll explicitly, fall through to
-    # bankroll_provider.current() (5-min stale-cache window). The prior
-    # behaviour pulled from settings.capital_base_usd ($150 fiction); that
-    # config literal has been removed.
+    # bankroll_provider.current() (5-min stale-cache window). The retired
+    # behavior pulled from config-literal capital; that fallback has been removed.
     if sizing_bankroll is None:
         from src.runtime.bankroll_provider import current as _bankroll_current
         _record = _bankroll_current()
@@ -2464,6 +2612,7 @@ def run_replay(
         FROM {ctx._sp}settlements
         WHERE target_date >= ? AND target_date <= ?
           AND temperature_metric = ?
+          AND authority = 'VERIFIED'
           AND settlement_value IS NOT NULL
         ORDER BY target_date, city
     """, (start_date, end_date, temperature_metric)).fetchall()

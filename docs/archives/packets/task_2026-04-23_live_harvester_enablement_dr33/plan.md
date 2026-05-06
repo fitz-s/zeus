@@ -68,7 +68,7 @@ DR-33 unblocks midstream T6.1/T6.2 P&L regression work (explicitly blocked on â‰
 
 - Flag check at `run_harvester()` entry â€” blanket gate. If OFF, the entire function short-circuits. No partial execution.
 - Default OFF means deploy doesn't change runtime behavior. Code change ships; writes dormant.
-- Operator flipping ON is an explicit act of live-write enablement. At that point, DR-33-C-level review (monitoring, fallback, degrade-to-paper) is expected.
+- Operator flipping ON is an explicit act of live-write enablement. At that point, DR-33-C-level review (monitoring, fallback, degrade-to-obsolete non-live runtime) is expected.
 
 ### 3.2 Fail-closed semantics in `_find_winning_bin`
 

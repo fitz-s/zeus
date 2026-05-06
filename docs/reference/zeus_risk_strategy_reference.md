@@ -42,8 +42,9 @@ RiskGuard's `tick()` computes 6 independent risk levels, then takes the max:
 `_trailing_loss_snapshot()` is the most complex risk input:
 
 1. Query `risk_state` table for reference row within `[now - lookback, now]`
-2. Validate reference row: `initial_bankroll + total_pnl ≈ effective_bankroll`
-   (within `$0.01` tolerance)
+2. Validate reference row: `initial_bankroll` and `effective_bankroll` denote
+   the same wallet-equity object (within `$0.01` tolerance). `total_pnl` is
+   analytics/reporting evidence only and is not folded into bankroll truth.
 3. If no valid reference → `DATA_DEGRADED` (not GREEN, not RED)
 4. If valid reference found:
    - `loss = max(0, reference_equity - current_equity)`
@@ -175,8 +176,9 @@ Pre-conditions enforced before computation:
 - `p_posterior ∈ [0, 1]`
 - `p_posterior > price_value` — no positive edge → return 0
 
-Safety cap: if `safety_cap_usd` is provided, clips output and logs the
-pre-clip value for auditing.
+Per-trade cap parameters are not part of the current Kelly contract. Entry
+discipline is enforced after Kelly by wallet-bankroll availability, RiskGuard,
+posture, executable-price, and max-exposure gates.
 
 ### 3.2 Dynamic multiplier (`dynamic_kelly_mult()`)
 
@@ -222,7 +224,8 @@ dynamic_kelly_mult(base=0.25, ci_width=0.12, lead_days=4,
 
 Position = 0.30 × 0.105 × $10,000 = $315
 
-If safety_cap_usd=$5: → $5 (clipped, structured log emitted)
+Downstream exposure gates may reject or throttle the entry, but `kelly_size()`
+does not apply a per-trade hard cap.
 ```
 
 ### 3.4 Provenance guard

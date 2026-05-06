@@ -71,7 +71,7 @@ The session demonstrated that team-lead will accept Option B when the fix is cor
 - 5B landed: low extractor, ingest contract gate, B078 truth-file metadata.
 - Fix-pack landed: lazy-guard, dead-code deletes, two-layer data_version antibody, `spec` kwarg through rebuild chain.
 - 5C landed: replay `_forecast_reference_for` typed status fields, `temperature_metric` SQL filter in `_forecast_rows_for`, `_decision_ref_cache` key includes metric, Gate D R-AZ tests GREEN.
-- Phase 6 start state: zero v2 DB rows (Golden Window intact), paper mode retired, all five phases of the dual-track spine are antibody-equipped.
+- Phase 6 start state: zero v2 DB rows (Golden Window intact), obsolete non-live runtime retired, all five phases of the dual-track spine are antibody-equipped.
 
 **METRIC_SPECS pattern**: the Phase 6 exec should treat `METRIC_SPECS` in `rebuild_calibration_pairs_v2.py` as the canonical reference implementation. When parametrizing any new script for dual-track, copy the `CalibrationMetricSpec` dataclass pattern and iterate over `METRIC_SPECS`. Do not add a `--track` CLI flag (package authority prohibits it); use `spec` as the internal routing key.
 

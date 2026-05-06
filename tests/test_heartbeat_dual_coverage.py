@@ -93,10 +93,7 @@ class TestHeartbeatFunctional:
         def _fake_state_path(filename):
             return tmp_path / filename
 
-        monkeypatch.setattr(
-            "src.config.mode_state_path",
-            lambda fn, mode=None: tmp_path / fn,
-        )
+        monkeypatch.setattr("src.config.runtime_state_path", lambda fn: tmp_path / fn)
 
         # Run the write function
         ingest_module._write_ingest_heartbeat()

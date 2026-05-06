@@ -191,7 +191,7 @@ class SettlementRecord:
     contract_version: str = LEGACY_SETTLEMENT_CONTRACT_VERSION
 
 
-def store_artifact(conn, artifact: CycleArtifact, env: str = "") -> "int | None":
+def store_artifact(conn, artifact: CycleArtifact) -> "int | None":
     """Store cycle artifact to decision_log table.
 
     Returns the inserted row's decision_log.id (for DT#1 / INV-17 tracking),
@@ -203,7 +203,7 @@ def store_artifact(conn, artifact: CycleArtifact, env: str = "") -> "int | None"
     """
     from src.config import get_mode as _get_mode
     now = datetime.now(timezone.utc).isoformat()
-    env = env or _get_mode()
+    env = _get_mode()
     cursor = conn.execute("""
         INSERT INTO decision_log (mode, started_at, completed_at, artifact_json, timestamp, env)
         VALUES (?, ?, ?, ?, ?, ?)
@@ -261,7 +261,6 @@ def query_settlement_records(
     *,
     city: str | None = None,
     target_date: str | None = None,
-    env: str | None = None,
 ) -> list[dict]:
     """Load settlement records, preferring canonical stage events over legacy blobs."""
     from src.state.db import query_authoritative_settlement_rows
@@ -271,7 +270,6 @@ def query_settlement_records(
         limit=limit,
         city=city,
         target_date=target_date,
-        env=env,
     )
 
 
@@ -282,11 +280,10 @@ def query_legacy_settlement_records(
     *,
     city: str | None = None,
     target_date: str | None = None,
-    env: str | None = None,
     not_before: str | None = None,
 ) -> list[dict]:
     """Load recent settlement records written into legacy decision_log blobs only."""
-    query_env = get_mode() if env is None else env
+    query_env = get_mode()
     sql = """
         SELECT artifact_json, timestamp, env FROM decision_log
         WHERE mode = 'settlement'
@@ -367,6 +364,12 @@ def _normalize_legacy_settlement_record(
         "won": _coerce_bool(record.get("won")),
         "exit_price": _coerce_float(record.get("exit_price")),
         "exit_reason": str(record.get("exit_reason") or ""),
+        "settlement_authority": "LEGACY_UNKNOWN",
+        "settlement_truth_source": "decision_log",
+        "settlement_market_slug": "",
+        "settlement_temperature_metric": "",
+        "settlement_source": "",
+        "settlement_value": None,
         "source": "decision_log",
         "authority_level": "legacy_decision_log_fallback",
         "contract_version": str(record.get("contract_version") or LEGACY_SETTLEMENT_CONTRACT_VERSION),
@@ -391,7 +394,8 @@ def _normalize_legacy_settlement_record(
         "degraded_reason": "; ".join(degraded_reasons),
         "contract_missing_fields": contract_missing_fields,
         "canonical_payload_complete": False,
-        "learning_snapshot_ready": bool(normalized["decision_snapshot_id"]),
+        "learning_snapshot_ready": False,
+        "metric_ready": False,
     })
     return normalized
 
@@ -401,11 +405,10 @@ def query_no_trade_cases(
     city: str = None,
     hours: int = 24,
     *,
-    env: str | None = None,
     not_before: str | None = None,
 ) -> list[dict]:
     """Query recent NoTradeCase entries for diagnostics."""
-    query_env = get_mode() if env is None else env
+    query_env = get_mode()
     if not_before:
         try:
             cutoff_dt = datetime.fromisoformat(str(not_before).replace("Z", "+00:00"))
@@ -441,7 +444,6 @@ def query_no_trade_cases(
 def query_learning_surface_summary(
     conn,
     *,
-    env: str | None = None,
     hours: int = 24,
     settlement_limit: int = 50,
     execution_limit: int = 200,
@@ -454,19 +456,18 @@ def query_learning_surface_summary(
     settlements = query_authoritative_settlement_rows(
         conn,
         limit=settlement_query_limit,
-        env=env,
         not_before=not_before,
     )
-    no_trades = query_no_trade_cases(conn, hours=hours, env=env, not_before=not_before)
+    no_trades = query_no_trade_cases(conn, hours=hours, not_before=not_before)
     execution_summary = query_execution_event_summary(
         conn,
-        env=env,
         limit=execution_query_limit,
         not_before=not_before,
     )
+    metric_ready_settlements = [row for row in settlements if row.get("metric_ready", False)]
 
     by_strategy: dict[str, dict] = {}
-    for row in settlements:
+    for row in metric_ready_settlements:
         strategy = str(row.get("strategy_key") or row.get("strategy") or "unclassified")
         bucket = by_strategy.setdefault(
             strategy,
@@ -542,7 +543,7 @@ def query_learning_surface_summary(
 
     degraded_settlements = sum(1 for row in settlements if row.get("is_degraded", False))
     return {
-        "settlement_sample_size": len(settlements),
+        "settlement_sample_size": len(metric_ready_settlements),
         "settlement_degraded_count": degraded_settlements,
         "no_trade_stage_counts": no_trade_stage_counts,
         "availability_status_counts": availability_status_counts,

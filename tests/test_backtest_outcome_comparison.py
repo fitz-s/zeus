@@ -1,3 +1,9 @@
+# Lifecycle: created=2026-04-29; last_reviewed=2026-05-06; last_reused=2026-05-06
+# Created: 2026-04-29
+# Last reused/audited: 2026-05-06
+# Authority basis: Wave15 object-meaning invariance replay diagnostic settlement authority repair.
+# Purpose: Guard trade-history diagnostic comparison authority and non-mutation behavior.
+# Reuse: Run when replay trade-history audit, backtest outcome comparison, or settlement authority filters change.
 from __future__ import annotations
 
 from src.engine import replay as replay_module
@@ -25,9 +31,9 @@ def _init_trade_world(tmp_path):
     world.execute(
         """
         INSERT INTO settlements
-        (city, target_date, settlement_value, temperature_metric,
+        (city, target_date, winning_bin, settlement_value, authority, temperature_metric,
          physical_quantity, observation_field, data_version)
-        VALUES ('NYC', '2026-04-03', 40.0, 'high',
+        VALUES ('NYC', '2026-04-03', '39-40°F', 40.0, 'VERIFIED', 'high',
                 'mx2t6_local_calendar_day_max', 'high_temp',
                 'tigge_mx2t6_local_calendar_day_max_v1')
         """

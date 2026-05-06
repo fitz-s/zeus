@@ -11,8 +11,8 @@ calls the real public entry point.
 R-AP (TestClassifyBoundaryLowBehavioral): classify_boundary_low polarity contract.
     Anchored to critic-alice MAJOR-1 + testeng-grace's R-AG importability-only gap flag.
 
-R-AQ (TestModeNoneStrictRejection): read_mode_truth_json with mode=None must be rejected.
-    Anchored to exec-emma finding: explicit None bypasses ModeMismatchError guard.
+R-AQ (TestRuntimeTruthReadAuthority): read_runtime_truth_json must reject retired
+    selector metadata and accept live runtime-state metadata.
 
 R-AR (TestQuarantinedValueNativeUnitIsNone): quarantined snapshot members must emit
     value_native_unit=None, not inner_min. Anchored to exec-dan finding.
@@ -178,73 +178,52 @@ class TestClassifyBoundaryLowBehavioral:
 
 
 # ---------------------------------------------------------------------------
-# R-AQ: mode=None strict rejection (exec-emma finding)
+# R-AQ: runtime truth read authority
 # ---------------------------------------------------------------------------
 
 
-class TestModeNoneStrictRejection:
-    """R-AQ: read_mode_truth_json must reject mode=None explicitly.
+class TestRuntimeTruthReadAuthority:
+    """R-AQ: runtime truth reads reject retired selector metadata."""
 
-    Anchors: exec-emma §1 finding — mode=None bypasses ModeMismatchError guard at
-    truth_files.py:156 because the guard is 'if mode is not None'.
-    Fix: reject mode=None at entry with ModeMismatchError (or ValueError).
-    """
-
-    def test_R_AQ_1_explicit_none_mode_raises(self, tmp_path: Path, monkeypatch):
-        """R-AQ-1 (rejection): read_mode_truth_json("portfolio.json", mode=None) must raise.
-
-        Currently mode=None is silently accepted (guard is 'if mode is not None' at line 156).
-        Fix: raise ModeMismatchError (or ValueError) at entry when mode=None is explicit.
-
-        We write a real live-tagged file so the function reaches the mode-check rather than
-        short-circuiting on FileNotFoundError before the guard can be evaluated.
-        """
+    def test_R_AQ_1_retired_selector_tag_raises(self, tmp_path: Path, monkeypatch):
+        """R-AQ-1 (rejection): retired selector tags cannot be read as live truth."""
+        from src.state.truth_files import read_runtime_truth_json, RuntimeStateMismatchError
         import src.config as config_mod
-        from src.state.truth_files import read_mode_truth_json, ModeMismatchError
 
         monkeypatch.setattr(config_mod, "STATE_DIR", tmp_path)
 
         truth_file = tmp_path / "portfolio.json"
         payload = {
             "truth": {
-                "mode": "live",
+                "mode": "legacy_env",
                 "authority": "VERIFIED",
                 "generated_at": "2026-04-17T00:00:00+00:00",
             }
         }
         truth_file.write_text(json.dumps(payload))
 
-        # The fix must raise when mode=None is explicitly passed.
-        # Current behaviour: mode=None → guard skipped → silently returns live file.
-        # This assertion is RED until the fix lands.
-        with pytest.raises((ModeMismatchError, ValueError)):
-            read_mode_truth_json("portfolio.json", mode=None)
+        with pytest.raises(RuntimeStateMismatchError):
+            read_runtime_truth_json("portfolio.json")
 
-    def test_R_AQ_2_valid_mode_succeeds(self, tmp_path: Path, monkeypatch):
-        """R-AQ-2 (acceptance): mode="live" with a live-tagged file succeeds.
-
-        Regression guard: the fix must not break the valid path.
-        """
-        from src.state.truth_files import read_mode_truth_json, ModeMismatchError
+    def test_R_AQ_2_live_runtime_state_succeeds(self, tmp_path: Path, monkeypatch):
+        """R-AQ-2 (acceptance): runtime_state='live' succeeds."""
+        from src.state.truth_files import read_runtime_truth_json
         import src.config as config_mod
 
-        # Redirect state dir to tmp_path so we control the file
         monkeypatch.setattr(config_mod, "STATE_DIR", tmp_path)
 
-        # Write a minimal live-tagged truth file
         truth_file = tmp_path / "portfolio.json"
         payload = {
             "truth": {
-                "mode": "live",
+                "runtime_state": "live",
                 "authority": "VERIFIED",
                 "generated_at": "2026-04-17T00:00:00+00:00",
             }
         }
         truth_file.write_text(json.dumps(payload))
 
-        # Should not raise — live mode matches live-tagged file
-        data, truth = read_mode_truth_json("portfolio.json", mode="live")
-        assert truth.get("mode") == "live"
+        data, truth = read_runtime_truth_json("portfolio.json")
+        assert truth.get("runtime_state") == "live"
 
 
 # ---------------------------------------------------------------------------

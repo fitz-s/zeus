@@ -61,7 +61,7 @@ Runtime-relevant map:
 
 | Path                                              | Runtime role                                                                                                                             |
 | ------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| `src/main.py`                                     | Daemon entrypoint, `ZEUS_MODE=live` gate, startup wallet check.([GitHub][14])                                                            |
+| `src/main.py`                                     | Daemon entrypoint, code-authoritative live runtime state, startup wallet check.([GitHub][14])                                            |
 | `src/data/polymarket_client.py`                   | Main Polymarket CLOB/Data API adapter: SDK init, orderbook, limit order, cancel, order status, positions, balance, redeem.([GitHub][15]) |
 | `src/data/market_scanner.py`                      | Gamma market discovery, event parsing, outcome / token extraction, Gamma price fallback.([GitHub][16])                                   |
 | `src/engine/evaluator.py`                         | Converts candidate weather markets into edge decisions; uses CLOB best bid/ask and fee-aware sizing.([GitHub][17])                       |
@@ -93,7 +93,7 @@ Runtime-relevant map:
 | `AGENTS.md`                                       | Future coding-agent authority | Agent-use safety                | Key-file routing, canonical truth claims                                                                                                          | Overstates canonical reconciliation and RED behavior; dangerous for AI agents.([GitHub][32])                                                                                                  |
 | `workspace_map.md`                                | Navigation authority          | Determines likely edit path     | Repo routing                                                                                                                                      | Correctly says code/DB truth outranks docs, but docs still overclaim runtime behavior.([GitHub][33])                                                                                          |
 | `requirements.txt`                                | Dependency truth              | SDK version and official client | `py-clob-client>=0.25`                                                                                                                            | Zeus uses official SDK dependency, not pure homemade signing.([GitHub][34])                                                                                                                   |
-| `src/main.py`                                     | Live daemon entrypoint        | Accidental live trading guard   | `_startup_wallet_check`, scheduler                                                                                                                | Requires `ZEUS_MODE=live`; startup balance check fail-closes. Good but insufficient.([GitHub][14])                                                                                            |
+| `src/main.py`                                     | Live daemon entrypoint        | Accidental live trading guard   | `_startup_wallet_check`, scheduler                                                                                                                | Code-authoritative live runtime state; startup balance check fail-closes. Good but insufficient.([GitHub][14])                                                                                |
 | `src/data/polymarket_client.py`                   | Polymarket adapter            | Core API boundary               | `_ensure_client`, `get_orderbook`, `place_limit_order`, `cancel_order`, `get_order_status`, `get_open_orders`, `get_positions_from_api`, `redeem` | Uses SDK for signing/posting. Hardcodes `signature_type=2`. Direct `/book` orderbook fetch has no raw persistence/stale guard. Exceptions not typed at adapter boundary.([GitHub][15])        |
 | `src/data/market_scanner.py`                      | Gamma discovery               | Token identity / metadata truth | `_get_active_events_snapshot`, `_fetch_events_by_tags`, `_parse_event`, `_extract_outcomes`, `get_current_yes_price`                              | Parses `clobTokenIds` and outcome labels; has some YES/NO protection. But discovery uses Gamma metadata and has Gamma price fallback; no executable CLOB market-state snapshot.([GitHub][16]) |
 | `src/engine/evaluator.py`                         | Signal → executable candidate | Tradability check               | CLOB best bid/ask, VWMP, fee sizing                                                                                                               | Better than docs-only discovery: uses CLOB book before entry. Still lacks book raw snapshot, exchange timestamp, stale-age guard.([GitHub][17])                                               |
@@ -111,7 +111,7 @@ Runtime-relevant map:
 | `src/data/observation_instants_v2_writer.py`      | Observation provenance        | Timestamp/unit/revision safety  | typed writer validation                                                                                                                           | Strong: rejects missing authority/provenance, validates source tier, units, timestamp basis, revisions.([GitHub][27])                                                                         |
 | `src/riskguard/risk_level.py`                     | Risk semantics                | RED/DATA_DEGRADED truth         | `RiskLevel` enum/actions                                                                                                                          | Docs say RED cancels pending and exits all positions. Runtime does not fully implement immediate behavior.([GitHub][28])                                                                      |
 | `src/riskguard/riskguard.py`                      | Risk process                  | Degraded-state behavior         | risk process writer                                                                                                                               | Risk process writes state/actions; not sufficient to guarantee order cancellation.([GitHub][35])                                                                                              |
-| `tests/test_executor.py`                          | Execution tests               | Live failure coverage           | exit rounding, missing order id                                                                                                                   | Paper mode skipped; no timeout/partial/cancel failure/duplicate submit tests.([GitHub][36])                                                                                                   |
+| `tests/test_executor.py`                          | Execution tests               | Live failure coverage           | exit rounding, missing order id                                                                                                                   | retired diagnostic execution path skipped; no timeout/partial/cancel failure/duplicate submit tests.([GitHub][36])                                                                                          |
 | `tests/test_executor_typed_boundary.py`           | Typed boundary tests          | Price validation                | malformed limit price                                                                                                                             | Useful but tiny. Does not test exchange semantics.([GitHub][37])                                                                                                                              |
 | `tests/test_harvester_dr33_live_enablement.py`    | Settlement tests              | Weather settlement              | UMA resolved gate, VERIFIED/QUARANTINED                                                                                                           | Better settlement coverage than execution coverage.([GitHub][38])                                                                                                                             |
 | `tests/test_force_exit_review.py`                 | Risk flag test                | RED behavior                    | review flag getter                                                                                                                                | Tests review flag, not actual cancel/sweep.([GitHub][39])                                                                                                                                     |
@@ -229,7 +229,7 @@ Assessment: **substantially better than execution**, but still needs resolved-ma
 
 ### 5.8 Test / mocking path
 
-Execution tests are not live-failure tests. Paper mode is skipped; boundary tests validate malformed price only; settlement tests are more meaningful than execution tests.([GitHub][36])
+Execution tests are not live-failure tests. The retired diagnostic execution path is skipped; boundary tests validate malformed price only; settlement tests are more meaningful than execution tests.([GitHub][36])
 
 Assessment: **TESTS-INSUFFICIENT**.
 
@@ -275,7 +275,7 @@ Assessment: **MISLEADING-DOCS**.
 | 28 | Execution journal / ledger completeness         | PARTIAL            | S1/S0    | Journal must include every side-effect attempt and raw result.                                                                    | Chronicler/canonical events exist but missing critical states.([GitHub][22])                                                  | Audit cannot reconstruct order truth.                                                              | Add order-command/order-event/trade-fill ledger.                                            | High        |
 | 29 | Risk caps and kill switch                       | PARTIAL            | S1       | Kill switch must stop entry and manage live orders.                                                                               | GREEN gate exists; RED runtime incomplete.([GitHub][43])                                                                      | RED leaves pending orders/resting exposure.                                                        | Immediate cancel-all + review state + exit plan.                                            | High        |
 | 30 | RED/degraded risk behavior                      | MISLEADING-DOCS    | S1       | Docs claim cancel pending / sweep positions.                                                                                      | Runtime marks positions for exit; not immediate cancel sweep.([GitHub][4])                                                    | Operators think risk has acted when it has not.                                                    | Align docs and runtime; test RED behavior.                                                  | Very high   |
-| 31 | Paper/live parity                               | FAIL               | S1       | Paper simulator must encode spread/liquidity/partial/precision.                                                                   | Paper mode skipped/removed in execution test.([GitHub][36])                                                                   | Happy-path paper confidence, live failure.                                                         | Rebuild simulator or explicitly forbid paper confidence claims.                             | High        |
+| 31 | Simulated/live venue parity                              | FAIL               | S1       | Simulated venue evidence must encode spread/liquidity/partial/precision.                                                                   | Obsolete simulated execution was skipped/removed in execution test.([GitHub][36])                                                   | Happy-path simulated confidence, live failure.                                                                 | Build fake CLOB harnesses or explicitly forbid simulated evidence from authorizing live confidence.    | High        |
 | 32 | Raw API payload storage                         | FAIL/PARTIAL       | S2       | Postmortem requires raw request/response/orderbook/trades.                                                                        | Weather raw/provenance strong; CLOB order/trade raw weak.([GitHub][23])                                                       | Cannot prove what was traded or why.                                                               | Raw CLOB payload tables.                                                                    | High        |
 | 33 | Normalized schema correctness                   | PARTIAL            | S2       | Normalization must preserve identifiers and versioning.                                                                           | Market/trade/position schemas exist but incomplete for execution.([GitHub][23])                                               | Identifier conflation and unreplayable history.                                                    | Add schema-versioned normalized execution entities.                                         | Medium-high |
 | 34 | Derived feature provenance                      | PARTIAL            | S2       | Derived features must link to raw source snapshots.                                                                               | Weather/probability artifacts stronger than trading microstructure.([GitHub][23])                                             | Edge decision cannot be replayed exactly.                                                          | Link every decision to market/book/weather snapshots.                                       | Medium      |
@@ -293,7 +293,7 @@ Assessment: **MISLEADING-DOCS**.
 | 46 | Logging/audit/explainability                    | PARTIAL            | S2       | Audit trail must contain raw side effects.                                                                                        | Chronicler exists; raw CLOB payloads missing.([GitHub][22])                                                                   | Cannot reconstruct after loss.                                                                     | Raw request/response/trade/book event log.                                                  | High        |
 | 47 | Secret/wallet/key safety                        | PARTIAL            | S2/S1    | Keys/funder/signature must match account type.                                                                                    | Keychain/funder used; startup balance check exists; signature type hardcoded.([GitHub][15])                                   | Wrong signer/funder or allowance failure.                                                          | Configurable signature/funder, dry auth verification, no hardcoded live smoke token.        | High        |
 | 48 | CLI/script accidental live-trading guard        | PARTIAL            | S2       | Live scripts need explicit blast-radius guard.                                                                                    | `live_smoke_test.py` posts real order when enabled; `force_lifecycle.py` mutates state.([GitHub][30])                         | Accidental live order or polluted DB.                                                              | Script-level confirmation, isolated DB, max notional, no hardcoded production tokens.       | High        |
-| 49 | Tests realism                                   | TESTS-INSUFFICIENT | S1       | Tests must cover timeout/partial/cancel/crash/stale metadata.                                                                     | Current execution tests miss these; paper skipped.([GitHub][36])                                                              | CI proves happy path only.                                                                         | Add failure-mode suite before live.                                                         | Very high   |
+| 49 | Tests realism                                   | TESTS-INSUFFICIENT | S1       | Tests must cover timeout/partial/cancel/crash/stale metadata.                                                                     | Current execution tests miss these; obsolete simulated execution skipped.([GitHub][36])                                                              | CI proves happy path only.                                                                         | Add failure-mode suite before live.                                                         | Very high   |
 | 50 | Docs/authority/agent-use safety                 | MISLEADING-DOCS    | S1       | Docs must route agents to runtime truth and forbid unsafe shortcuts.                                                              | README/AGENTS overclaim RED/reconciliation/lifecycle.([GitHub][4])                                                            | Future agent edits wrong layer and preserves S0 bugs.                                              | Docs must state live-disabled blockers and true runtime gaps.                               | Very high   |
 
 ---
@@ -548,9 +548,9 @@ Assessment: **MISLEADING-DOCS**.
 **Severity:** S1
 **Pre-live blocker:** yes
 
-**External benchmark:** Live trading CI must inject exchange failures, partial fills, stale metadata, precision errors, crash/restart, and paper/live divergence.
+**External benchmark:** Live trading CI must inject exchange failures, partial fills, stale metadata, precision errors, crash/restart, and simulated/live venue divergence.
 
-**Zeus evidence:** `test_executor.py` skips paper mode and tests exit rounding/missing order id; typed boundary test only validates malformed limit price; settlement tests are stronger than execution tests.([GitHub][36])
+**Zeus evidence:** `test_executor.py` skips obsolete simulated execution and tests exit rounding/missing order id; typed boundary test only validates malformed limit price; settlement tests are stronger than execution tests.([GitHub][36])
 
 **Observed behavior:** CI can pass while S0 execution bugs remain.
 
@@ -1004,13 +1004,13 @@ cycle_runtime.execute_discovery_phase()
 
 ---
 
-### Drill 9 — Paper trading passes, live fails
+### Drill 9 — Simulated venue evidence passes, live fails
 
-**Code path traced:** execution test marks paper mode skipped; live path uses real SDK semantics but tests do not simulate spread/liquidity/partial/precision.
+**Code path traced:** execution test marks obsolete simulated execution skipped; live path uses real SDK semantics but tests do not simulate spread/liquidity/partial/precision.
 
-**Zeus currently does:** paper path is not a meaningful safety gate.([GitHub][36])
+**Zeus currently does:** simulated execution is not a meaningful safety gate.([GitHub][36])
 
-**Correct behavior:** paper simulator encodes CLOB semantics enough to prevent false confidence.
+**Correct behavior:** simulated venue evidence encodes CLOB semantics enough to prevent false confidence.
 
 **Survives?** **No. S1 fail.**
 
@@ -1049,7 +1049,7 @@ cycle_runtime.execute_discovery_phase()
 | Active order reconciliation     | `tests/execution/test_active_order_reconciliation.py`  | Align local journal with exchange open orders    | Open-order payloads                             | Unknown exchange order ignored                 | P0       |
 | Trade reconciliation            | `tests/execution/test_trade_reconciliation.py`         | Derive fills from trades                         | Fake `get_trades` payloads                      | Fill not recorded or duplicated                | P0       |
 | Market close with resting order | `tests/execution/test_market_close_resting_order.py`   | Close detection/cancel/review                    | Market close + open order                       | Strategy keeps entering or state stays pending | P0       |
-| Paper/live parity               | `tests/execution/test_paper_live_parity.py`            | Simulator matches core CLOB semantics            | Fake orderbook, partial, precision              | Paper fills impossible live order              | P1       |
+| Simulated/live venue parity               | `tests/execution/test_simulated_venue_live_parity.py`  | Simulator matches core CLOB semantics            | Fake orderbook, partial, precision              | Simulated venue fills impossible live order              | P1       |
 | Settlement rounding             | `tests/settlement/test_resolved_market_rounding.py`    | Historical resolved bin validation               | Resolved market corpus                          | Reconstructed bin differs from exchange        | P1       |
 | Timezone/local day              | `tests/settlement/test_timezone_local_day.py`          | Local-day/DST correctness                        | Station near UTC boundary                       | Wrong target local day                         | P1       |
 | Degraded data blocks entry      | `tests/risk/test_degraded_data_blocks_execution.py`    | Ensure unverified source blocks entry            | DATA_DEGRADED risk state                        | Order posted                                   | P0       |
@@ -1242,7 +1242,7 @@ Resolved market corpus reconstructs winning bin exactly or QUARANTINED with expl
 
 ---
 
-### Phase 5 — Paper/live parity and CI gates
+### Phase 5 — Simulated/Live Venue Parity And CI Gates
 
 **Scope:** fake exchange simulator and failure injection.
 
@@ -1258,7 +1258,7 @@ src/execution/*
 
 ```text
 - Fake CLOB with orderbook, matching, partial fills, cancel failure, rate limits.
-- Paper mode uses same order state machine as live.
+- Fake CLOB harness uses the same order state machine shape as live-facing execution tests.
 - CI fails on docs/runtime authority drift.
 ```
 
@@ -1266,7 +1266,7 @@ src/execution/*
 
 ```text
 All mandatory failure drills are executable tests.
-Paper cannot fill impossible live orders.
+Simulated venue evidence cannot fill impossible live orders or authorize live confidence.
 ```
 
 ---
@@ -1388,7 +1388,7 @@ Forbidden shortcuts:
   - Do not use Gamma price as executable trading truth.
   - Do not mark accepted order as filled without trade/position proof.
   - Do not retry unknown submit by posting another order.
-  - Do not add paper fills that ignore spread/liquidity/tick/min-size.
+  - Do not add simulated fills that ignore spread/liquidity/tick/min-size.
   - Do not update README to claim fixed behavior before tests exist.
   - Do not mutate strategy/model thresholds while fixing execution safety.
 

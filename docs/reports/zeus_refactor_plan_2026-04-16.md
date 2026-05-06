@@ -19,7 +19,7 @@
 
 ### 1.1 Current State
 
-Zeus is a live weather probability trading system on Polymarket — 116 source files, ~37K LOC, 117 test files (~49K LOC). It trades 51 cities across 35 timezones with 4 strategies on a $150 bankroll ($5 safety cap). The system is architecturally sound in its probability chain and K-zone governance, but has accumulated structural debt across 6 confirmed pathologies, 7 contamination vectors, and 7 time bombs.
+Zeus is a live weather probability trading system on Polymarket — 116 source files, ~37K LOC, 117 test files (~49K LOC). It trades 51 cities across 35 timezones with 4 strategies; current bankroll truth is wallet-derived, not a fixed config literal or per-trade cap. The system is architecturally sound in its probability chain and K-zone governance, but has accumulated structural debt across 6 confirmed pathologies, 7 contamination vectors, and 7 time bombs.
 
 **What works well:**
 - Probability chain (ENS → MC → Platt → posterior → Kelly) is mathematically rigorous
@@ -55,7 +55,7 @@ After all 8 phases:
 | Constraint | Implication |
 |------------|-------------|
 | **Live system** | Cannot stop trading during refactor. Every commit must be deployable. |
-| **$150 bankroll / $5 cap** | Low capital = low blast radius, but any loss is proportionally large. |
+| **Live bankroll authority** | Wallet-derived bankroll and RiskGuard/exposure gates bound live blast radius; fixed config capital and per-trade caps are not current authority. |
 | **Single daemon process** | No blue-green deployment. Restart = brief downtime (~5s). |
 | **SQLite WAL** | Schema changes must be additive (new columns with defaults, never remove). |
 | **117 existing tests** | Zero test regressions. New tests add, never subtract. |
@@ -144,7 +144,7 @@ Every phase must verify these invariants are preserved. The checklist is cumulat
 | INV-02 | `round_wmo_half_up_values()` | `test_cross_module_invariants.py` | 1 (P16 fix) |
 | INV-03 | `calibrate_and_normalize()` | `test_platt.py`, `test_calibration_manager.py` | 2 |
 | INV-04 | `compute_posterior()` | `test_cross_module_invariants.py` | 2 |
-| INV-05 | `kelly_size()` | `test_kelly.py`, `test_kelly_live_safety_cap.py` | 3 |
+| INV-05 | `kelly_size()` | `test_kelly.py::TestKellySize::test_no_per_trade_safety_cap_parameter` | 3 |
 | INV-06 | `dynamic_kelly_mult()` | `test_kelly_cascade_bounds.py` | 3 |
 | INV-07 | `fdr_filter()` / `benjamini_hochberg_mask()` | `test_fdr.py` | 2 |
 | INV-08 | `bin_probability_from_values()` | `test_market_analysis.py` | 2 |
@@ -159,7 +159,7 @@ Every phase must verify these invariants are preserved. The checklist is cumulat
 | BEH-04 | Chain reconciliation | `test_lifecycle.py` | 1, 4 |
 | BEH-05 | Settlement flow | `test_pnl_flow_and_audit.py` | 1, 4 |
 | BEH-06 | Gate_50 irrevocability | `test_riskguard.py` | 3 |
-| BEH-07 | Mode rejection | `test_config.py` | None |
+| BEH-07 | Runtime state authority | `test_config.py` | None |
 | BEH-08 | Wallet fail-closed | `test_wallet_source.py` | None |
 | BEH-09 | Limit-only enforcement | `test_executor.py` | 4 |
 | BEH-10 | Authority violation on UNVERIFIED | `test_authority_gate.py` | 1, 2 |
@@ -793,7 +793,6 @@ class SizingInput:
     rolling_win_rate: float | None
     portfolio_heat: float
     drawdown_pct: float
-    safety_cap_usd: float
     strategy_policy: StrategyPolicy
 
 @dataclass(frozen=True)
@@ -817,7 +816,7 @@ Add explicit assertions to `kelly_size()` and `dynamic_kelly_mult()`:
 | `entry_price ∈ (0, 1)` | Not checked | `assert 0 < entry_price < 1` |
 | `bankroll > 0` | Checked in risk_limits | Also checked in kelly_size |
 | `kelly_mult > 0` | Checked via ValueError | Preserved |
-| `safety_cap_usd > 0` | Implicit | Explicit assert |
+| Per-trade cap parameter absent | Not enforced in this legacy target | `test_no_per_trade_safety_cap_parameter` rejects reintroduction |
 
 ### 10.5 Files Touched
 
@@ -1542,7 +1541,7 @@ Cross-reference from pathology registry to refactor phase:
 | TB-1 | LOW | DST in hours_since_open | — | Low risk, not addressed |
 | TB-2 | MEDIUM | Season flip mid-position | — | Document as known limitation |
 | TB-3 | HIGH | Gamma API pagination O(n) | Phase 4 | Add `since` date filter to harvester |
-| TB-5 | MEDIUM | smoke_test_portfolio_cap never removed | Phase 3 | Add removal condition |
+| TB-5 | MEDIUM | temporary smoke cap removed | Phase 3 | Current authority: no permanent smoke cap in sizing or cycle gates |
 | TB-6 | MEDIUM | Harvester hourly vs real-time | Phase 6 | Document as design tradeoff |
 | TB-7 | MEDIUM | Harvester no max_instances | Phase 1 | Add max_instances=1 |
 
@@ -1558,7 +1557,7 @@ These items are important but are out of scope for this refactor plan:
 | Position god object full decomposition (P2) | Requires touching 40+ call sites. Do incrementally across Phases 4-5, complete in a future plan. |
 | Replay engine refactor (2,068 LOC) | Replay is a diagnostic tool, not live path. Low priority. |
 | Full test coverage for all 116 src files | Aspirational. Phase 0 covers K0; expand organically. |
-| SQLite to PostgreSQL migration | Not needed at current scale ($150 bankroll). Revisit if capital > $10K. |
+| SQLite to PostgreSQL migration | Not needed at current scale. Revisit if live wallet bankroll and throughput grow beyond SQLite's operational envelope. |
 | Blue-green deployment | Not possible with single-process launchd daemon. Revisit with containerization. |
 | Automated DB backups | Should exist but is operational, not refactor work. |
 | TB-3: Gamma API pagination | Partially addressed in Phase 4 harvester work. Full fix needs Gamma API date filter. |

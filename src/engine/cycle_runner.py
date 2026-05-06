@@ -118,6 +118,19 @@ def __getattr__(name: str):
         return live_safe_keys()
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
+
+def _semantic_value(value) -> str:
+    return str(getattr(value, "value", value) or "")
+
+
+def _has_quarantined_positions(portfolio: PortfolioState) -> bool:
+    return any(
+        _semantic_value(getattr(pos, "state", "")) == "quarantined"
+        or _semantic_value(getattr(pos, "chain_state", "")) in {"quarantined", "quarantine_expired"}
+        for pos in portfolio.positions
+    )
+
+
 # DT#2 P9B (INV-19): terminal position states are excluded from the RED
 # force-exit sweep. Slice B1 (PR #19 finding 9, 2026-04-26) collapsed the
 # prior local frozenset into the canonical TERMINAL_STATES owned by
@@ -319,6 +332,21 @@ def _red_proxy_size(pos: Position) -> float | None:
 
 def _risk_allows_new_entries(risk_level: RiskLevel) -> bool:
     return risk_level == RiskLevel.GREEN
+
+
+def _discovery_gates_allow_entries(
+    risk_level: RiskLevel,
+    heartbeat_status: dict,
+    ws_gap_status: dict,
+    *,
+    has_quarantine: bool,
+) -> bool:
+    return (
+        not has_quarantine
+        and _risk_allows_new_entries(risk_level)
+        and heartbeat_status.get("entry", {}).get("allow_submit", False)
+        and ws_gap_status.get("entry", {}).get("allow_submit", False)
+    )
 
 
 # P0.3 (INV-27): observability-only surfacing of positions in execution-unsafe
@@ -691,14 +719,11 @@ def run_cycle(mode: DiscoveryMode) -> dict:
         summary["execution_truth_warnings"] = _exec_truth_warnings
 
     entries_blocked_reason = None
-    has_quarantine = any(
-        pos.chain_state in {"quarantined", "quarantine_expired"}
-        for pos in portfolio.positions
-    )
+    has_quarantine = _has_quarantined_positions(portfolio)
     # 2026-05-04 bankroll truth-chain cleanup tail: the legacy ONE-TIME
-    # `smoke_test_portfolio_cap_usd` aggregate-exposure brake (added 2026-04-12
-    # after the first live cycle placed 12 orders intending $60 instead of one
-    # $5 trade) has been removed. Smoke-testing must run as a separate one-off
+    # aggregate-exposure brake (added 2026-04-12 after the first live cycle
+    # placed too many canary orders) has been removed. Smoke-testing must run
+    # as a separate one-off
     # script, not as a perma-gate that throttles real live trading. Per-cycle
     # exposure discipline now lives in the existing posture / RiskGuard /
     # max-exposure gates only.
@@ -887,7 +912,12 @@ def run_cycle(mode: DiscoveryMode) -> dict:
     # heartbeat_supervisor.summary / ws_gap_guard.summary), default to
     # not allowing submit so we mirror the explicit fail-closed paths at
     # cycle_runner.py:752,754 above.
-    if _risk_allows_new_entries(risk_level) and _heartbeat_status.get("entry", {}).get("allow_submit", False) and _ws_gap_status.get("entry", {}).get("allow_submit", False):
+    if _discovery_gates_allow_entries(
+        risk_level,
+        _heartbeat_status,
+        _ws_gap_status,
+        has_quarantine=has_quarantine,
+    ):
         try:
             p_dirty, t_dirty = _execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mode, summary, entry_bankroll, decision_time, env=get_mode())
             portfolio_dirty = portfolio_dirty or p_dirty

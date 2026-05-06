@@ -223,7 +223,7 @@ The output contains:
 - `source_rationale` — per-file zone, hazards, and write routes
 - `history_lore` — relevant historical failure lessons
 
-Topology is the routing entrypoint, not a paperwork generator. T0/T1 work stays
+Topology is the routing entrypoint, not a process-tax generator. T0/T1 work stays
 light: cite routed files, make focused edits, and run focused checks. Escalate
 only when risk or claims demand it: T2 source behavior needs scoped AGENTS and
 relationship tests; T3 governance/runtime tooling needs planning-lock for

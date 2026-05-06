@@ -34,6 +34,11 @@ ExposureState = Literal[
 
 _ACTIVE_EXPOSURE_STATES = {"OPTIMISTIC_EXPOSURE", "CONFIRMED_EXPOSURE", "EXIT_PENDING", "QUARANTINED"}
 _CLOSED_EXPOSURE_STATES = {"ECONOMICALLY_CLOSED_OPTIMISTIC", "ECONOMICALLY_CLOSED_CONFIRMED", "SETTLED"}
+_UNRESOLVED_SIDE_EFFECT_STATES = {
+    "SUBMIT_UNKNOWN_SIDE_EFFECT",
+    "UNKNOWN",
+    "REVIEW_REQUIRED",
+}
 
 
 @dataclass(frozen=True)
@@ -568,13 +573,22 @@ def load_position_lots(conn: Any) -> tuple[ExposureLot, ...]:
 
 
 def count_unknown_side_effects(conn: Any) -> tuple[int, tuple[str, ...]]:
+    """Count venue commands that still carry unresolved submit-side-effect risk.
+
+    The public name is retained for compatibility with the A2 governor, but the
+    object being counted is broader than one CommandState. REVIEW_REQUIRED and
+    UNKNOWN are operator/recovery handoff states, not allocation clearance.
+    """
+
+    placeholders = ",".join("?" for _ in _UNRESOLVED_SIDE_EFFECT_STATES)
     rows = conn.execute(
-        """
+        f"""
         SELECT market_id
         FROM venue_commands
-        WHERE state = 'SUBMIT_UNKNOWN_SIDE_EFFECT'
+        WHERE state IN ({placeholders})
         ORDER BY updated_at, command_id
-        """
+        """,
+        tuple(sorted(_UNRESOLVED_SIDE_EFFECT_STATES)),
     ).fetchall()
     markets = tuple(
         sorted({str(_row_mapping(row).get("market_id") or "") for row in rows if str(_row_mapping(row).get("market_id") or "")})

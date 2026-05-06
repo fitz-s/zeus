@@ -1,10 +1,11 @@
 # Created: 2026-04-19
-# Last reused/audited: 2026-05-01
+# Last reused/audited: 2026-05-05
 # Authority basis: Phase 10B DT-Seam Cleanup, 2026-04-29 design simplification audit F4, and 2026-05-01 stale live-state artifact tracking.
-# Lifecycle: created=2026-04-19; last_reviewed=2026-05-01; last_reused=2026-05-01
+# Lifecycle: created=2026-04-19; last_reviewed=2026-05-05; last_reused=2026-05-05
 # Purpose: Phase 10B "DT-Seam Cleanup" antibodies (R-CL..R-CP).
 #          Dedicated test file per critic-carol cycle-3 L2 convention.
 #          Do NOT co-locate with test_phase10a_hygiene.py.
+# Reuse: Run after status_summary, v2 row-count, bankroll semantics, or execution capability status changes.
 
 from __future__ import annotations
 
@@ -665,6 +666,244 @@ class TestRCPV2RowCountSensor:
         ]
         assert status["risk"]["infrastructure_level"] == "RED"
         assert "legacy_positions_json_conflicts_with_canonical_empty" in status["risk"]["infrastructure_issues"]
+
+    def test_bankroll_semantics_status_keeps_pnl_out_of_effective_bankroll(self, tmp_path, monkeypatch):
+        """Relationship: wallet-equity bankroll is not recomputed from analytics PnL."""
+        from src.observability import status_summary as status_summary_module
+        from src.runtime import bankroll_provider
+
+        status_path = tmp_path / "status_summary.json"
+        positions_path = tmp_path / "positions.json"
+
+        class DummyConn:
+            def close(self):
+                return None
+
+        record = bankroll_provider.BankrollOfRecord(
+            value_usd=211.37,
+            fetched_at="2026-05-05T00:00:00+00:00",
+            source="polymarket_wallet",
+            authority="canonical",
+            staleness_seconds=0.0,
+            cached=False,
+        )
+
+        monkeypatch.setattr(status_summary_module, "STATUS_PATH", status_path)
+        monkeypatch.setattr(status_summary_module, "LEGACY_POSITIONS_PATH", positions_path)
+        monkeypatch.setattr(status_summary_module, "_get_risk_level", lambda: "GREEN")
+        monkeypatch.setattr(status_summary_module, "_get_risk_details", lambda: {})
+        monkeypatch.setattr(status_summary_module, "get_trade_connection_with_world", lambda: DummyConn())
+        monkeypatch.setattr(bankroll_provider, "current", lambda: record)
+        monkeypatch.setattr(
+            status_summary_module,
+            "query_position_current_status_view",
+            lambda conn: {
+                "status": "ok",
+                "positions": [],
+                "open_positions": 0,
+                "total_exposure_usd": 15.0,
+                "unrealized_pnl": 3.0,
+                "strategy_open_counts": {},
+                "chain_state_counts": {},
+                "exit_state_counts": {},
+                "unverified_entries": 0,
+                "day0_positions": 0,
+            },
+        )
+        monkeypatch.setattr(
+            status_summary_module,
+            "query_strategy_health_snapshot",
+            lambda conn, now=None: {
+                "status": "fresh",
+                "by_strategy": {
+                    "center_buy": {
+                        "open_exposure_usd": 15.0,
+                        "realized_pnl_30d": 4.0,
+                        "unrealized_pnl": 3.0,
+                    },
+                },
+                "stale_strategy_keys": [],
+            },
+        )
+        monkeypatch.setattr(status_summary_module, "query_execution_event_summary", lambda conn, not_before=None: {"overall": {}})
+        monkeypatch.setattr(status_summary_module, "query_learning_surface_summary", lambda conn, not_before=None: {"by_strategy": {}})
+        monkeypatch.setattr(status_summary_module, "query_no_trade_cases", lambda conn, hours=24: [])
+        monkeypatch.setattr(status_summary_module, "_get_execution_capability_status", lambda: {})
+        monkeypatch.setattr(status_summary_module, "is_entries_paused", lambda: False)
+        monkeypatch.setattr(status_summary_module, "get_entries_pause_source", lambda: None)
+        monkeypatch.setattr(status_summary_module, "get_entries_pause_reason", lambda: None)
+        monkeypatch.setattr(status_summary_module, "get_edge_threshold_multiplier", lambda: 1.0)
+        monkeypatch.setattr(status_summary_module, "strategy_gates", lambda: {})
+        monkeypatch.setattr(status_summary_module, "recommended_autosafe_commands_from_status", lambda status: [])
+        monkeypatch.setattr(status_summary_module, "recommended_commands_from_status", lambda status, include_review_required=True: [])
+        monkeypatch.setattr(status_summary_module, "review_required_commands_from_status", lambda status: [])
+
+        status_summary_module.write_status({"mode": "opening_hunt", "risk_level": "GREEN"})
+        status = json.loads(status_path.read_text())
+
+        assert status["portfolio"]["initial_bankroll"] == pytest.approx(211.37)
+        assert status["portfolio"]["total_pnl"] == pytest.approx(7.0)
+        assert status["portfolio"]["effective_bankroll"] == pytest.approx(211.37)
+        assert status["portfolio"]["bankroll"] == pytest.approx(211.37)
+        assert status["portfolio"]["bankroll_object_identity"] == "wallet_equity"
+        assert status["portfolio"]["effective_bankroll_derivation"] == "wallet_equity_no_pnl"
+        assert status["truth"]["compatibility_inputs"]["bankroll_fallback_source"] == "bankroll_provider"
+
+    def test_bankroll_semantics_rejects_unproven_riskguard_bankroll(self, tmp_path, monkeypatch):
+        """Relationship: legacy risk rows cannot promote wallet+PnL into status bankroll."""
+        from src.observability import status_summary as status_summary_module
+        from src.runtime import bankroll_provider
+
+        status_path = tmp_path / "status_summary.json"
+        positions_path = tmp_path / "positions.json"
+
+        class DummyConn:
+            def close(self):
+                return None
+
+        record = bankroll_provider.BankrollOfRecord(
+            value_usd=211.37,
+            fetched_at="2026-05-05T00:00:00+00:00",
+            source="polymarket_wallet",
+            authority="canonical",
+            staleness_seconds=0.0,
+            cached=False,
+        )
+
+        monkeypatch.setattr(status_summary_module, "STATUS_PATH", status_path)
+        monkeypatch.setattr(status_summary_module, "LEGACY_POSITIONS_PATH", positions_path)
+        monkeypatch.setattr(status_summary_module, "_get_risk_level", lambda: "GREEN")
+        monkeypatch.setattr(
+            status_summary_module,
+            "_get_risk_details",
+            lambda: {
+                "initial_bankroll": 211.37,
+                "effective_bankroll": 157.0,
+                "realized_pnl": 4.0,
+                "unrealized_pnl": 3.0,
+                "total_pnl": 7.0,
+            },
+        )
+        monkeypatch.setattr(status_summary_module, "get_trade_connection_with_world", lambda: DummyConn())
+        monkeypatch.setattr(bankroll_provider, "current", lambda: record)
+        monkeypatch.setattr(
+            status_summary_module,
+            "query_position_current_status_view",
+            lambda conn: {
+                "status": "ok",
+                "positions": [],
+                "open_positions": 0,
+                "total_exposure_usd": 15.0,
+                "unrealized_pnl": 3.0,
+                "strategy_open_counts": {},
+                "chain_state_counts": {},
+                "exit_state_counts": {},
+                "unverified_entries": 0,
+                "day0_positions": 0,
+            },
+        )
+        monkeypatch.setattr(
+            status_summary_module,
+            "query_strategy_health_snapshot",
+            lambda conn, now=None: {"status": "fresh", "by_strategy": {}, "stale_strategy_keys": []},
+        )
+        monkeypatch.setattr(status_summary_module, "query_execution_event_summary", lambda conn, not_before=None: {"overall": {}})
+        monkeypatch.setattr(status_summary_module, "query_learning_surface_summary", lambda conn, not_before=None: {"by_strategy": {}})
+        monkeypatch.setattr(status_summary_module, "query_no_trade_cases", lambda conn, hours=24: [])
+        monkeypatch.setattr(status_summary_module, "_get_execution_capability_status", lambda: {})
+        monkeypatch.setattr(status_summary_module, "is_entries_paused", lambda: False)
+        monkeypatch.setattr(status_summary_module, "get_entries_pause_source", lambda: None)
+        monkeypatch.setattr(status_summary_module, "get_entries_pause_reason", lambda: None)
+        monkeypatch.setattr(status_summary_module, "get_edge_threshold_multiplier", lambda: 1.0)
+        monkeypatch.setattr(status_summary_module, "strategy_gates", lambda: {})
+        monkeypatch.setattr(status_summary_module, "recommended_autosafe_commands_from_status", lambda status: [])
+        monkeypatch.setattr(status_summary_module, "recommended_commands_from_status", lambda status, include_review_required=True: [])
+        monkeypatch.setattr(status_summary_module, "review_required_commands_from_status", lambda status: [])
+
+        status_summary_module.write_status({"mode": "opening_hunt", "risk_level": "GREEN"})
+        status = json.loads(status_path.read_text())
+
+        assert status["portfolio"]["total_pnl"] == pytest.approx(7.0)
+        assert status["portfolio"]["initial_bankroll"] == pytest.approx(211.37)
+        assert status["portfolio"]["effective_bankroll"] == pytest.approx(211.37)
+        assert status["portfolio"]["effective_bankroll"] != pytest.approx(157.0)
+        assert status["portfolio"]["bankroll_rejected_source"] == "riskguard_unproven"
+        assert status["truth"]["compatibility_inputs"]["bankroll_rejected_source"] == "riskguard_unproven"
+        assert "bankroll_rejected_riskguard_unproven" in status["risk"]["infrastructure_issues"]
+
+    def test_bankroll_semantics_status_degrades_when_wallet_truth_missing(self, tmp_path, monkeypatch):
+        """Relationship: missing wallet truth does not become 0+PnL synthetic bankroll."""
+        from src.observability import status_summary as status_summary_module
+        from src.runtime import bankroll_provider
+
+        status_path = tmp_path / "status_summary.json"
+        positions_path = tmp_path / "positions.json"
+
+        class DummyConn:
+            def close(self):
+                return None
+
+        monkeypatch.setattr(status_summary_module, "STATUS_PATH", status_path)
+        monkeypatch.setattr(status_summary_module, "LEGACY_POSITIONS_PATH", positions_path)
+        monkeypatch.setattr(status_summary_module, "_get_risk_level", lambda: "DATA_DEGRADED")
+        monkeypatch.setattr(status_summary_module, "_get_risk_details", lambda: {})
+        monkeypatch.setattr(status_summary_module, "get_trade_connection_with_world", lambda: DummyConn())
+        monkeypatch.setattr(bankroll_provider, "current", lambda: None)
+        monkeypatch.setattr(
+            status_summary_module,
+            "query_position_current_status_view",
+            lambda conn: {
+                "status": "ok",
+                "positions": [],
+                "open_positions": 0,
+                "total_exposure_usd": 15.0,
+                "unrealized_pnl": 3.0,
+                "strategy_open_counts": {},
+                "chain_state_counts": {},
+                "exit_state_counts": {},
+                "unverified_entries": 0,
+                "day0_positions": 0,
+            },
+        )
+        monkeypatch.setattr(
+            status_summary_module,
+            "query_strategy_health_snapshot",
+            lambda conn, now=None: {
+                "status": "fresh",
+                "by_strategy": {
+                    "center_buy": {
+                        "open_exposure_usd": 15.0,
+                        "realized_pnl_30d": 4.0,
+                        "unrealized_pnl": 3.0,
+                    },
+                },
+                "stale_strategy_keys": [],
+            },
+        )
+        monkeypatch.setattr(status_summary_module, "query_execution_event_summary", lambda conn, not_before=None: {"overall": {}})
+        monkeypatch.setattr(status_summary_module, "query_learning_surface_summary", lambda conn, not_before=None: {"by_strategy": {}})
+        monkeypatch.setattr(status_summary_module, "query_no_trade_cases", lambda conn, hours=24: [])
+        monkeypatch.setattr(status_summary_module, "_get_execution_capability_status", lambda: {})
+        monkeypatch.setattr(status_summary_module, "is_entries_paused", lambda: False)
+        monkeypatch.setattr(status_summary_module, "get_entries_pause_source", lambda: None)
+        monkeypatch.setattr(status_summary_module, "get_entries_pause_reason", lambda: None)
+        monkeypatch.setattr(status_summary_module, "get_edge_threshold_multiplier", lambda: 1.0)
+        monkeypatch.setattr(status_summary_module, "strategy_gates", lambda: {})
+        monkeypatch.setattr(status_summary_module, "recommended_autosafe_commands_from_status", lambda status: [])
+        monkeypatch.setattr(status_summary_module, "recommended_commands_from_status", lambda status, include_review_required=True: [])
+        monkeypatch.setattr(status_summary_module, "review_required_commands_from_status", lambda status: [])
+
+        status_summary_module.write_status({"mode": "opening_hunt", "risk_level": "DATA_DEGRADED"})
+        status = json.loads(status_path.read_text())
+
+        assert status["portfolio"]["total_pnl"] == pytest.approx(7.0)
+        assert status["portfolio"]["initial_bankroll"] is None
+        assert status["portfolio"]["effective_bankroll"] is None
+        assert status["portfolio"]["bankroll"] is None
+        assert status["portfolio"]["bankroll_truth_status"] == "missing"
+        assert status["portfolio"]["effective_bankroll_derivation"] == "missing_wallet_truth"
+        assert status["truth"]["compatibility_inputs"]["bankroll_fallback_source"] == "bankroll_provider_unavailable"
+        assert "bankroll_truth_missing" in status["risk"]["infrastructure_issues"]
 
 
 # ---------------------------------------------------------------------------

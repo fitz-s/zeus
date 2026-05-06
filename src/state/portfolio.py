@@ -117,7 +117,7 @@ class ExitContext:
     # T6.4-phase2 (2026-04-24): portfolio context for correlation-crowding
     # cost computation in HoldValue.compute_with_exit_costs. Threaded by
     # cycle_runtime._build_exit_context from PortfolioState at monitor tick.
-    # Each element is (cluster, size_usd, trade_id) for OTHER held positions
+    # Each element is (cluster, effective_cost_basis_usd, trade_id) for OTHER held positions
     # (self excluded). Empty tuple = no co-held positions / not threaded.
     # bankroll: current bankroll used as the denominator for exposure %.
     portfolio_positions: tuple = ()
@@ -136,9 +136,7 @@ class ExitContext:
         missing: list[str] = []
         if not self._is_finite(self.fresh_prob):
             missing.append("fresh_prob")
-        elif not self.fresh_prob_is_fresh and not self.day0_active:
-            # Day0 positions waive fresh_prob_is_fresh requirement
-            missing.append("fresh_prob_is_fresh")
+        elif not self.fresh_prob_is_fresh:
             missing.append("fresh_prob_is_fresh")
         if not self._is_finite(self.current_market_price):
             missing.append("current_market_price")
@@ -165,7 +163,7 @@ def _compute_exit_correlation_crowding(
 
     Formula:
         exposure_ratio = Σ over OTHER held positions of
-            (other.size_usd / bankroll) × get_correlation(this_cluster, other.cluster)
+            (other.effective_cost_basis_usd / bankroll) × get_correlation(this_cluster, other.cluster)
         cost_usd = crowding_rate × exposure_ratio × shares × best_bid
 
     Returns 0.0 safely when:
@@ -186,7 +184,7 @@ def _compute_exit_correlation_crowding(
 
     exposure_ratio = 0.0
     for entry in portfolio_positions:
-        # entry is (cluster, size_usd, trade_id) tuple per _build_exit_context
+        # entry is (cluster, effective_cost_basis_usd, trade_id) tuple per _build_exit_context
         try:
             other_cluster, other_size_usd, _trade_id = entry
         except (TypeError, ValueError):
@@ -215,6 +213,7 @@ QUARANTINE_SENTINEL = "QUARANTINE_UNRESOLVED"
 ENTRY_ECONOMICS_LEGACY_UNKNOWN = "legacy_unknown"
 ENTRY_ECONOMICS_MODEL_EDGE_PRICE = "model_edge_price"
 ENTRY_ECONOMICS_SUBMITTED_LIMIT = "submitted_limit"
+ENTRY_ECONOMICS_OPTIMISTIC_MATCH_PRICE = "optimistic_match_price"
 ENTRY_ECONOMICS_AVG_FILL_PRICE = "avg_fill_price"
 ENTRY_ECONOMICS_CORRECTED_COST_BASIS = "corrected_executable_cost_basis"
 
@@ -236,6 +235,15 @@ FILL_GRADE_FILL_AUTHORITIES = frozenset({
     FILL_AUTHORITY_CANCELLED_REMAINDER,
     FILL_AUTHORITY_SETTLED,
 })
+
+FILL_AUTHORITY_RANK = {
+    FILL_AUTHORITY_NONE: 0,
+    FILL_AUTHORITY_OPTIMISTIC_SUBMITTED: 0,
+    FILL_AUTHORITY_VENUE_CONFIRMED_PARTIAL: 1,
+    FILL_AUTHORITY_CANCELLED_REMAINDER: 2,
+    FILL_AUTHORITY_VENUE_CONFIRMED_FULL: 3,
+    FILL_AUTHORITY_SETTLED: 4,
+}
 
 
 @dataclass
@@ -401,7 +409,11 @@ class Position:
     @property
     def effective_shares(self) -> float:
         if self.has_fill_economics_authority:
-            return self.shares_filled
+            current_open_shares = float(self.shares or 0.0)
+            entry_fill_shares = float(self.shares_filled or 0.0)
+            if current_open_shares > 0:
+                return min(current_open_shares, entry_fill_shares)
+            return entry_fill_shares
         if self.shares > 0:
             return self.shares
         if self.entry_price > 0:
@@ -411,7 +423,11 @@ class Position:
     @property
     def effective_cost_basis_usd(self) -> float:
         if self.has_fill_economics_authority:
-            return self.filled_cost_basis_usd
+            current_open_cost = float(self.cost_basis_usd or 0.0)
+            entry_fill_cost = float(self.filled_cost_basis_usd or 0.0)
+            if current_open_cost > 0:
+                return min(current_open_cost, entry_fill_cost)
+            return entry_fill_cost
         return self.cost_basis_usd if self.cost_basis_usd > 0 else self.size_usd
 
     @property
@@ -477,8 +493,48 @@ class Position:
             )
 
         missing = exit_context.missing_authority_fields()
+        model_probability_missing_only = (
+            exit_context.day0_active
+            and bool(missing)
+            and set(missing) <= {"fresh_prob", "fresh_prob_is_fresh"}
+        )
+        if model_probability_missing_only:
+            if not ExitContext._is_finite(exit_context.best_bid):
+                applied.append("best_bid_unavailable")
+                applied.append("exit_context_incomplete")
+                applied.append("day0_probability_authority_blocked")
+                missing_with_bid = list(missing) + ["best_bid"]
+                self.applied_validations = _dedupe_validations(applied)
+                return ExitDecision(
+                    False,
+                    f"INCOMPLETE_EXIT_CONTEXT (missing={','.join(missing_with_bid)})",
+                    selected_method=self.selected_method or self.entry_method,
+                    applied_validations=list(self.applied_validations),
+                )
+            if exit_context.hours_to_settlement is not None and exit_context.hours_to_settlement < 1.0:
+                applied.append("near_settlement_gate")
+                applied.append("model_probability_authority_not_required:settlement_imminent")
+                self.applied_validations = _dedupe_validations(applied)
+                return ExitDecision(
+                    True, "SETTLEMENT_IMMINENT", "immediate",
+                    selected_method=self.selected_method or self.entry_method,
+                    applied_validations=list(self.applied_validations),
+                    trigger="SETTLEMENT_IMMINENT",
+                )
+            if exit_context.whale_toxicity:
+                applied.append("whale_toxicity_gate")
+                applied.append("model_probability_authority_not_required:whale_toxicity")
+                self.applied_validations = _dedupe_validations(applied)
+                return ExitDecision(
+                    True, "WHALE_TOXICITY", "immediate",
+                    selected_method=self.selected_method or self.entry_method,
+                    applied_validations=list(self.applied_validations),
+                    trigger="WHALE_TOXICITY",
+                )
         if missing:
             applied.append("exit_context_incomplete")
+            if exit_context.day0_active and any(field in missing for field in ("fresh_prob", "fresh_prob_is_fresh")):
+                applied.append("day0_probability_authority_blocked")
             self.applied_validations = _dedupe_validations(applied)
             return ExitDecision(
                 False,
@@ -510,11 +566,16 @@ class Position:
 
         if exit_context.day0_active:
             applied.append("day0_observation_authority")
-            # Day0 stale prob waiver: when fresh_prob_is_fresh=False, log the
-            # authority waiver and note the substitution for auditability
-            if not exit_context.fresh_prob_is_fresh:
-                applied.append("day0_stale_prob_authority_waived")
-                applied.append("stale_prob_substitution")
+            if not ExitContext._is_finite(exit_context.best_bid):
+                applied.append("best_bid_unavailable")
+                applied.append("exit_context_incomplete")
+                self.applied_validations = _dedupe_validations(applied)
+                return ExitDecision(
+                    False,
+                    "INCOMPLETE_EXIT_CONTEXT (missing=best_bid)",
+                    selected_method=self.selected_method or self.entry_method,
+                    applied_validations=list(self.applied_validations),
+                )
             if self.direction == "buy_no":
                 day0_decision = self._buy_no_exit(
                     forward_edge,
@@ -539,6 +600,8 @@ class Position:
                     bankroll=exit_context.bankroll,
                 )
             if day0_decision.should_exit:
+                return day0_decision
+            if day0_decision.reason.startswith("INCOMPLETE_EXIT_CONTEXT"):
                 return day0_decision
             # Don't return False here — fall through to SETTLEMENT_IMMINENT
             # and other force-exit checks (whale toxicity, edge reversal).
@@ -611,7 +674,7 @@ class Position:
             )
 
         # Micro-position hold (Layer 8: < $1 never sold)
-        if self.size_usd < 1.0:
+        if self.effective_cost_basis_usd < 1.0:
             applied.append("micro_position_hold")
             self.applied_validations = _dedupe_validations(applied)
             return ExitDecision(
@@ -650,10 +713,6 @@ class Position:
             )
         else:
             best_bid = exit_context.best_bid
-            if exit_context.day0_active and best_bid is None:
-                applied.append("best_bid_proxy_from_current_market_price")
-                applied.append("best_bid_proxy_tick_discount")
-                best_bid = max(0.0, float(exit_context.current_market_price) * 0.95)
             return self._buy_yes_exit(
                 forward_edge,
                 current_p_posterior=float(exit_context.fresh_prob),
@@ -686,13 +745,15 @@ class Position:
 
         T6.4-phase2: portfolio_positions + bankroll thread the correlation-
         crowding substrate through to HoldValue.compute_with_exit_costs.
-        Each element of portfolio_positions is (cluster, size_usd, trade_id)
-        for OTHER co-held positions (self-excluded at _build_exit_context
+        Each element of portfolio_positions is
+        (cluster, effective_cost_basis_usd, trade_id) for OTHER co-held
+        positions (self-excluded at _build_exit_context
         layer). Crowding cost defaults to 0.0 via the helper when
         exit_correlation_crowding_rate() is 0.0 (current default).
         """
         applied = list(applied or [])
-        if best_bid is None:
+        if not ExitContext._is_finite(best_bid):
+            applied.append("best_bid_unavailable")
             applied.append("exit_context_incomplete")
             self.applied_validations = _dedupe_validations(applied)
             return ExitDecision(
@@ -707,7 +768,7 @@ class Position:
         if day0_active and evidence_edge < edge_threshold:
             applied.append("day0_observation_gate")
             applied.append("ev_gate")
-            shares = self.size_usd / self.entry_price if self.entry_price > 0 else 0.0
+            shares = self.effective_shares
             if hold_value_exit_costs_enabled():
                 applied.append("hold_value_exit_costs_enabled")
                 if hours_to_settlement is None or hours_to_settlement < 0.0:
@@ -778,9 +839,9 @@ class Position:
             )
 
         # Layer 4: EV gate
-        if best_bid is not None and self.entry_price > 0:
+        shares = self.effective_shares
+        if best_bid is not None and shares > 0:
             applied.append("ev_gate")
-            shares = self.size_usd / self.entry_price
             if hold_value_exit_costs_enabled():
                 applied.append("hold_value_exit_costs_enabled")
                 if hours_to_settlement is None or hours_to_settlement < 0.0:
@@ -859,7 +920,7 @@ class Position:
 
         if day0_active and evidence_edge < edge_threshold:
             applied.append("day0_observation_gate")
-            if best_bid is None:
+            if not ExitContext._is_finite(best_bid):
                 applied.append("best_bid_unavailable")
                 self.applied_validations = _dedupe_validations(applied)
                 return ExitDecision(
@@ -868,9 +929,9 @@ class Position:
                     selected_method=self.selected_method or self.entry_method,
                     applied_validations=list(self.applied_validations),
                 )
-            if best_bid is not None and self.entry_price > 0:
+            shares = self.effective_shares
+            if shares > 0:
                 applied.append("ev_gate")
-                shares = self.size_usd / self.entry_price
                 if hold_value_exit_costs_enabled():
                     applied.append("hold_value_exit_costs_enabled")
                     if hours_to_settlement is None or hours_to_settlement < 0.0:
@@ -944,7 +1005,7 @@ class Position:
             self.neg_edge_count = 0
 
         if self.neg_edge_count >= consecutive_confirmations():
-            if best_bid is None:
+            if not ExitContext._is_finite(best_bid):
                 applied.append("best_bid_unavailable")
                 self.applied_validations = _dedupe_validations(applied)
                 return ExitDecision(
@@ -953,9 +1014,9 @@ class Position:
                     selected_method=self.selected_method or self.entry_method,
                     applied_validations=list(self.applied_validations),
                 )
-            if best_bid is not None and self.entry_price > 0:
+            shares = self.effective_shares
+            if shares > 0:
                 applied.append("ev_gate")
-                shares = self.size_usd / self.entry_price
                 if hold_value_exit_costs_enabled():
                     applied.append("hold_value_exit_costs_enabled")
                     if hours_to_settlement is None or hours_to_settlement < 0.0:
@@ -1018,9 +1079,9 @@ class Position:
 @dataclass
 class PortfolioState:
     # bankroll/daily_baseline_total/weekly_baseline_total default to 0.0
-    # ("uninitialized — ask bankroll_provider"). The legacy 150.0 default
-    # was the structural-failure source: any caller that constructed a bare
-    # PortfolioState() inherited the $150 fiction. Live truth must come from
+    # ("uninitialized — ask bankroll_provider"). The retired config-literal
+    # default was the structural-failure source: any caller that constructed a
+    # bare PortfolioState() inherited synthetic capital. Live truth must come from
     # src.runtime.bankroll_provider.current(); when that returns None the
     # cycle fails-CLOSED rather than falling back to a config literal.
     positions: list[Position] = field(default_factory=list)
@@ -1133,8 +1194,8 @@ def _load_portfolio_from_json_data(data: dict, *, current_mode: str) -> Portfoli
 
     # Bankroll is uninitialized at this load step; live truth is supplied by
     # src.runtime.bankroll_provider.current() in cycle_runner / riskguard.
-    # Removed 2026-05-04: previously defaulted to settings.capital_base_usd
-    # ($150 fiction). PortfolioState is now position-and-snapshot data only;
+    # Removed 2026-05-04: previously defaulted to retired config-literal
+    # capital. PortfolioState is now position-and-snapshot data only;
     # the bankroll field is overridden by upstream callers when on-chain
     # truth is available, and remains 0.0 (fail-CLOSED in sizing) otherwise.
     bankroll = 0.0
@@ -1243,6 +1304,8 @@ def _position_from_projection_row(row: dict, *, current_mode: str) -> Position:
 def _canonical_recent_exits_from_settlement_rows(rows: list[dict]) -> list[dict]:
     exits: list[dict] = []
     for row in rows:
+        if not row.get("metric_ready", False):
+            continue
         pnl = row.get("pnl")
         if pnl is None:
             continue
@@ -1313,8 +1376,8 @@ def load_portfolio(path: Optional[Path] = None) -> PortfolioState:
     current_mode = get_mode()
     # Bankroll uninitialized at load — live truth is supplied by
     # src.runtime.bankroll_provider.current() in cycle_runner / riskguard.
-    # Removed 2026-05-04: previously defaulted to settings.capital_base_usd
-    # ($150 fiction). PortfolioState carries 0.0 when canonical metadata is
+    # Removed 2026-05-04: previously defaulted to retired config-literal
+    # capital. PortfolioState carries 0.0 when canonical metadata is
     # absent; sizing math fails-CLOSED, riskguard returns DATA_DEGRADED.
     bankroll = 0.0
 
@@ -1472,7 +1535,7 @@ def save_portfolio(
     # position_events / position_current, not in this cache file.
     active_positions = [
         p for p in state.positions
-        if str(getattr(p, "state", "") or "").strip().lower() not in _TERMINAL_POSITION_STATES
+        if _semantic_value(getattr(p, "state", "")).strip().lower() not in _TERMINAL_POSITION_STATES
     ]
     data = {
         "positions": [asdict(p) for p in active_positions],
@@ -1491,7 +1554,6 @@ def save_portfolio(
     data = annotate_truth_payload(
         data,
         path,
-        mode=get_mode(),
         generated_at=state.updated_at,
         authority=_TRUTH_AUTHORITY_MAP.get(state.authority, TruthAuthority.UNVERIFIED),
     )
@@ -1516,9 +1578,46 @@ def add_position(state: PortfolioState, pos: Position) -> None:
 
     for existing in state.positions:
         if pos.order_id and existing.order_id and pos.order_id == existing.order_id:
+            authority_regression = (
+                existing.has_fill_economics_authority
+                and (
+                    not pos.has_fill_economics_authority
+                    or FILL_AUTHORITY_RANK.get(pos.fill_authority, 0)
+                    < FILL_AUTHORITY_RANK.get(existing.fill_authority, 0)
+                    or float(pos.shares_filled or 0.0)
+                    < float(existing.shares_filled or 0.0)
+                    or float(pos.filled_cost_basis_usd or 0.0)
+                    < float(existing.filled_cost_basis_usd or 0.0)
+                )
+            )
+            protected_fields = frozenset()
+            if authority_regression:
+                protected_fields = _D6_LOCKED_FIELDS | frozenset(
+                    {
+                        "entry_economics_authority",
+                        "fill_authority",
+                        "shares_filled",
+                        "filled_cost_basis_usd",
+                        "entry_price_avg_fill",
+                        "entry_fill_verified",
+                        "order_status",
+                        "state",
+                        "entered_at",
+                    }
+                )
             for field_name, value in asdict(pos).items():
+                if field_name in protected_fields:
+                    continue
                 if value not in (None, "", 0, 0.0) or getattr(existing, field_name) in (None, "", 0, 0.0):
                     setattr(existing, field_name, value)
+            if authority_regression:
+                existing.applied_validations = _dedupe_validations(
+                    list(existing.applied_validations)
+                    + ["same_order_fill_authority_regression_blocked"]
+                )
+                existing.shares = existing.effective_shares
+                existing.cost_basis_usd = existing.effective_cost_basis_usd
+                existing.size_usd = existing.effective_cost_basis_usd
             return
 
     tid = pos.token_id if pos.direction == "buy_yes" else pos.no_token_id
@@ -1527,6 +1626,22 @@ def add_position(state: PortfolioState, pos: Position) -> None:
             continue
         existing_tid = existing.token_id if existing.direction == "buy_yes" else existing.no_token_id
         if tid and existing_tid == tid and existing.direction == pos.direction:
+            existing_fill_grade = existing.has_fill_economics_authority
+            pos_fill_grade = pos.has_fill_economics_authority
+            if existing_fill_grade != pos_fill_grade:
+                logger.warning(
+                    "DEDUP/LEDGER: preserving separate %s %s slices for token=%s "
+                    "because fill authority differs (existing=%s incoming=%s)",
+                    pos.direction,
+                    pos.bin_label,
+                    tid,
+                    getattr(existing, "fill_authority", ""),
+                    getattr(pos, "fill_authority", ""),
+                )
+                state.positions.append(pos)
+                return
+            pos_open_shares = pos.effective_shares
+            pos_open_cost = pos.effective_cost_basis_usd
             # Append-only virtual ledger projection
             logger.warning(
                 "DEDUP/LEDGER: appending duplicate %s %s fill into existing %s %s; "
@@ -1540,9 +1655,20 @@ def add_position(state: PortfolioState, pos: Position) -> None:
                 pos.entry_price,
             )
             existing.nested_fills.append(pos)
-            existing.size_usd += pos.size_usd
-            existing.shares += pos.effective_shares
-            existing.cost_basis_usd += pos.effective_cost_basis_usd
+            existing.size_usd += pos_open_cost
+            existing.shares += pos_open_shares
+            existing.cost_basis_usd += pos_open_cost
+            if existing_fill_grade and pos_fill_grade:
+                existing.shares_filled += pos_open_shares
+                existing.filled_cost_basis_usd += pos_open_cost
+                if existing.shares_filled > 0:
+                    existing.entry_price_avg_fill = (
+                        existing.filled_cost_basis_usd / existing.shares_filled
+                    )
+            if existing.has_fill_economics_authority:
+                existing.shares = existing.effective_shares
+                existing.cost_basis_usd = existing.effective_cost_basis_usd
+                existing.size_usd = existing.effective_cost_basis_usd
             if existing.effective_shares > 0:
                 existing.entry_price = existing.effective_cost_basis_usd / existing.effective_shares
             return
@@ -1560,6 +1686,28 @@ def _dedupe_validations(steps: list[str]) -> list[str]:
 
 
 INACTIVE_RUNTIME_STATES = frozenset({"voided", "settled", "economically_closed", "quarantined", "admin_closed"})
+LEGACY_NONVOCABULARY_INACTIVE_STATES = frozenset({"quarantine_fill_failed", "quarantine_void_failed"})
+QUARANTINED_CHAIN_STATES = frozenset({"quarantined", "quarantine_expired"})
+
+
+def _semantic_value(value: object) -> str:
+    if hasattr(value, "value"):
+        value = getattr(value, "value")
+    return str(value or "")
+
+
+def _is_runtime_open_position(pos: Position) -> bool:
+    state = _semantic_value(getattr(pos, "state", ""))
+    chain_state = _semantic_value(getattr(pos, "chain_state", ""))
+    return (
+        state not in INACTIVE_RUNTIME_STATES
+        and state not in LEGACY_NONVOCABULARY_INACTIVE_STATES
+        and chain_state not in QUARANTINED_CHAIN_STATES
+    )
+
+
+def _runtime_open_exposure_usd(pos: Position) -> float:
+    return float(getattr(pos, "effective_cost_basis_usd", 0.0) or 0.0)
 
 
 def _compute_realized_pnl(position: Position, exit_price: float) -> float:
@@ -1809,11 +1957,11 @@ def get_open_positions(state: PortfolioState, chain_view=None) -> list[Position]
     local metadata (city, range, direction, decision context).
     """
     if chain_view is None or getattr(chain_view, "is_stale", True):
-        return [p for p in state.positions if p.state not in INACTIVE_RUNTIME_STATES]
+        return [p for p in state.positions if _is_runtime_open_position(p)]
 
     merged = []
     for pos in state.positions:
-        if pos.state in INACTIVE_RUNTIME_STATES:
+        if not _is_runtime_open_position(pos):
             continue
 
         tid = pos.token_id if pos.direction == "buy_yes" else pos.no_token_id
@@ -1826,7 +1974,7 @@ def get_open_positions(state: PortfolioState, chain_view=None) -> list[Position]
                 pos.entry_price = chain_pos.avg_price
             pos.chain_state = "synced"
             merged.append(pos)
-        elif pos.state == "pending_tracked":
+        elif _semantic_value(pos.state) == "pending_tracked":
             merged.append(pos)  # Just placed, chain hasn't indexed yet
         # else: gone from chain — reconciler will handle
 
@@ -1835,7 +1983,11 @@ def get_open_positions(state: PortfolioState, chain_view=None) -> list[Position]
 
 def total_exposure_usd(state: PortfolioState) -> float:
     """Total open exposure in USD."""
-    return sum(p.size_usd for p in state.positions if p.state not in INACTIVE_RUNTIME_STATES)
+    return sum(
+        _runtime_open_exposure_usd(p)
+        for p in state.positions
+        if _is_runtime_open_position(p)
+    )
 
 
 def portfolio_heat_for_bankroll(state: PortfolioState, bankroll: float) -> float:
@@ -1849,7 +2001,11 @@ def city_exposure_for_bankroll(state: PortfolioState, city: str, bankroll: float
     """City exposure against an explicit entry bankroll/cap."""
     if bankroll <= 0:
         return 0.0
-    total = sum(p.size_usd for p in state.positions if p.city == city and p.state not in INACTIVE_RUNTIME_STATES)
+    total = sum(
+        _runtime_open_exposure_usd(p)
+        for p in state.positions
+        if p.city == city and _is_runtime_open_position(p)
+    )
     return total / bankroll
 
 
@@ -1857,7 +2013,11 @@ def cluster_exposure_for_bankroll(state: PortfolioState, cluster: str, bankroll:
     """Cluster exposure against an explicit entry bankroll/cap."""
     if bankroll <= 0:
         return 0.0
-    total = sum(p.size_usd for p in state.positions if p.cluster == cluster and p.state not in INACTIVE_RUNTIME_STATES)
+    total = sum(
+        _runtime_open_exposure_usd(p)
+        for p in state.positions
+        if p.cluster == cluster and _is_runtime_open_position(p)
+    )
     return total / bankroll
 
 
@@ -1901,7 +2061,7 @@ def has_same_city_range_open(state: PortfolioState, city: str, bin_label: str) -
     return any(
         p.city == city
         and p.bin_label == bin_label
-        and p.state not in INACTIVE_RUNTIME_STATES
+        and _is_runtime_open_position(p)
         for p in state.positions
     )
 

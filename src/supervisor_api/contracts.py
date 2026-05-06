@@ -124,7 +124,7 @@ class Proposal:
     rationale: str
     related_gap_id: Optional[str] = None
     files_touched: list[str] = field(default_factory=list)
-    risk_scope: Literal["paper_only", "live_path", "docs_only"] = "paper_only"
+    risk_scope: Literal["diagnostic_only", "live_path", "docs_only"] = "diagnostic_only"
     env: str = ""
     source: str = "venus"
     provenance_ref: Optional[str] = None  # B005

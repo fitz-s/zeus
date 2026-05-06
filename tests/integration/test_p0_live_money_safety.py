@@ -308,7 +308,7 @@ def test_MATCHED_then_FAILED_chain_rolls_back_optimistic_exposure():
     assert fake.get_trades()[-1].raw["state"] == "FAILED"
 
 
-def test_paper_and_live_produce_identical_journal_event_shapes(tmp_path):
+def test_fake_and_live_produce_identical_journal_event_shapes(tmp_path):
     from src.venue.polymarket_v2_adapter import PolymarketV2Adapter, SubmitResult
     from tests.fakes.polymarket_v2 import FakePolymarketVenue
 
@@ -330,18 +330,18 @@ def test_paper_and_live_produce_identical_journal_event_shapes(tmp_path):
         client_factory=lambda **_kwargs: MockLiveClient(),
         sdk_version="fake-live-sdk",
     )
-    paper = FakePolymarketVenue(funder_address="0xfake-funder", sdk_version="fake-live-sdk")
+    fake = FakePolymarketVenue(funder_address="0xfake-funder", sdk_version="fake-live-sdk")
 
     live_envelope = live.create_submission_envelope(_intent(), ScenarioSnapshot(), "GTC")
-    paper_envelope = paper.create_submission_envelope(_intent(), ScenarioSnapshot(), "GTC")
+    fake_envelope = fake.create_submission_envelope(_intent(), ScenarioSnapshot(), "GTC")
     live_result = live.submit(live_envelope)
-    paper_result = paper.submit(paper_envelope)
+    fake_result = fake.submit(fake_envelope)
     live_journal_shape = _persist_submit_journal_shape(live_result, prefix="live")
-    paper_journal_shape = _persist_submit_journal_shape(paper_result, prefix="paper")
+    fake_journal_shape = _persist_submit_journal_shape(fake_result, prefix="fake")
 
     assert {f.name for f in fields(SubmitResult)} == {"status", "envelope", "error_code", "error_message"}
-    assert set(live_result.envelope.to_dict()) == set(paper_result.envelope.to_dict())
+    assert set(live_result.envelope.to_dict()) == set(fake_result.envelope.to_dict())
     assert set(json.loads(live_result.envelope.raw_response_json or "{}")) == set(
-        json.loads(paper_result.envelope.raw_response_json or "{}")
+        json.loads(fake_result.envelope.raw_response_json or "{}")
     )
-    assert live_journal_shape == paper_journal_shape
+    assert live_journal_shape == fake_journal_shape
