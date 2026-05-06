@@ -2,6 +2,7 @@
 # Last reused or audited: 2026-05-06
 # Authority basis: docs/operations/task_2026-05-06_hook_redesign/PLAN.md §2.3
 #   + critic-opus §0.5 amendments (evidence/hook_redesign_critic_opus.md)
+# Phase 2: added HOOK_SCHEMA_CHANGE (ATTACK 2 / OD-HOOK-2); OPERATOR_SIGNATURE_REQUIRED for TRUTH_REWRITE class
 # Note: all evidence_file paths use `evidence/` prefix (OD-HOOK-3 resolved)
 
 schema_version: 1
@@ -98,3 +99,19 @@ overrides:
       operator_signature: true
       auto_expires_after: 14d
     audit_log: .claude/logs/hook_overrides/operator_override.jsonl
+
+  - id: HOOK_SCHEMA_CHANGE
+    description: >
+      Authorized change to .claude/settings.json or .claude/hooks/** by the
+      operator. TRUTH_REWRITE-class: requires operator-signed sentinel file
+      at evidence/operator_signed/<override_id>_<date>.signed written outside
+      agent write surface (ATTACK 2 / OD-HOOK-2). Reversibility: any edit
+      to the hook configuration system is a TRUTH_REWRITE — the sentinel
+      prevents agents from self-disabling gates.
+    requires:
+      evidence_file: evidence/hook_schema_changes/<date>.md
+      operator_signed_sentinel: evidence/operator_signed/HOOK_SCHEMA_CHANGE_<date>.signed
+      operator_signature: true
+      auto_expires_after: 24h
+    reversibility_class: TRUTH_REWRITE
+    audit_log: .claude/logs/hook_overrides/hook_schema_change.jsonl

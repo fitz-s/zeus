@@ -1,7 +1,9 @@
 # Created: 2026-05-06
 # Last reused or audited: 2026-05-06
 # Authority basis: ANTI_DRIFT_CHARTER §7 (INV-HELP-NOT-GATE); IMPLEMENTATION_PLAN Phase 3 day 48-50
-"""INV-HELP-NOT-GATE mid-drift check — Phase 3 deliverable.
+#   + PLAN §3 Phase 2 exit criteria: no hook fires on payload outside its intent
+#   + docs/operations/task_2026-05-06_hook_redesign/PLAN.md §5 (M4 original-intent contract)
+"""INV-HELP-NOT-GATE mid-drift check — Phase 3 deliverable + Phase 2 hook extension.
 
 Three concrete assertions per ANTI_DRIFT_CHARTER §7:
 
@@ -263,4 +265,144 @@ def test_does_not_fit_returns_zero():
     assert not violations, (
         "INV-HELP-NOT-GATE: helpers have forbidden_files without scope_capabilities:\n"
         + "\n".join(f"  - {v}" for v in violations)
+    )
+
+
+# ===========================================================================
+# Phase 2 extension: hook-layer INV-HOOK-NOT-GATE
+# PLAN §5 M4: hooks must NOT fire on payloads outside their declared intent.
+# Coverage extends to all 12 hooks (11 from Phase 1 + 1 new pre_edit_hooks_protected).
+# ===========================================================================
+
+import json
+import subprocess
+import sys
+import yaml
+
+_HOOK_REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
+_REGISTRY_PATH = _HOOK_REPO_ROOT / ".claude" / "hooks" / "registry.yaml"
+_DISPATCH_PATH = _HOOK_REPO_ROOT / ".claude" / "hooks" / "dispatch.py"
+
+_HOOK_REGISTRY = yaml.safe_load(_REGISTRY_PATH.read_text()) if _REGISTRY_PATH.exists() else {"hooks": []}
+_ALL_HOOKS = _HOOK_REGISTRY.get("hooks", [])
+_ALL_HOOK_IDS = [h["id"] for h in _ALL_HOOKS]
+_HOOK_BY_ID_MAP = {h["id"]: h for h in _ALL_HOOKS}
+
+
+def _dispatch(hook_id: str, payload: dict) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [sys.executable, str(_DISPATCH_PATH), hook_id],
+        input=json.dumps(payload),
+        capture_output=True,
+        text=True,
+        cwd=_HOOK_REPO_ROOT,
+    )
+
+
+def _out_of_scope_payload(spec: dict) -> dict:
+    """
+    Build a payload that is deliberately outside the hook's intent.
+
+    Strategy:
+    - Bash hooks: send a Read tool payload (not Bash)
+    - Edit|Write hooks: send a Bash tool payload (not an edit)
+    - SubagentStop hooks: send a PreToolUse payload
+    """
+    event = spec["event"]
+    matcher = spec.get("matcher", "")
+
+    if event == "PreToolUse" and "Bash" in matcher and "Edit" not in matcher:
+        # Out-of-scope: use a Read tool payload (not Bash)
+        return {
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Read",
+            "tool_input": {"file_path": "/tmp/some_file.txt"},
+            "session_id": "oos-test",
+        }
+    elif event == "PreToolUse" and ("Edit" in matcher or "Write" in matcher):
+        # Out-of-scope: use a Bash payload (not Edit/Write)
+        return {
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "echo hello"},
+            "session_id": "oos-test",
+        }
+    elif event == "PostToolUse":
+        # Out-of-scope: use a PreToolUse payload
+        return {
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "echo hello"},
+            "session_id": "oos-test",
+        }
+    elif event == "SubagentStop":
+        # Out-of-scope: use a PreToolUse payload
+        return {
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "git status"},
+            "session_id": "oos-test",
+        }
+    else:
+        # Generic out-of-scope
+        return {
+            "hook_event_name": "SessionStart",
+            "session_id": "oos-test",
+        }
+
+
+@pytest.mark.parametrize("hook_id", _ALL_HOOK_IDS)
+def test_hook_does_not_fire_on_out_of_scope_payload(hook_id: str) -> None:
+    """
+    INV-HOOK-NOT-GATE (PLAN §5 M4): No hook may block a payload that is
+    outside its declared intent (wrong tool_name, wrong event type).
+
+    A hook that blocks on an out-of-scope payload is over-gating — it would
+    refuse the wrong operations, creating the hook-layer equivalent of 禁书.
+
+    Coverage: all 12 hooks (11 Phase 1 + 1 Phase 2 pre_edit_hooks_protected).
+    """
+    spec = _HOOK_BY_ID_MAP[hook_id]
+    payload = _out_of_scope_payload(spec)
+
+    result = _dispatch(hook_id, payload)
+
+    # Exit code must be 0 (may emit advisory JSON but must not crash-block)
+    assert result.returncode == 0, (
+        f"Hook {hook_id}: out-of-scope payload caused non-zero exit {result.returncode}.\n"
+        f"Hook only serves event={spec['event']!r} matcher={spec.get('matcher')!r}.\n"
+        f"Payload: {payload}\nstderr: {result.stderr!r}"
+    )
+
+    # If JSON emitted, must not be a deny
+    stdout = result.stdout.strip()
+    if stdout:
+        try:
+            parsed = json.loads(stdout)
+        except json.JSONDecodeError:
+            pytest.fail(f"Hook {hook_id}: out-of-scope payload produced non-JSON stdout: {stdout!r}")
+        hook_output = parsed.get("hookSpecificOutput", {})
+        decision = hook_output.get("permissionDecision", "allow")
+        assert decision != "deny", (
+            f"INV-HOOK-NOT-GATE violation: hook {hook_id} issued permissionDecision=deny "
+            f"on a payload that is outside its intent.\n"
+            f"Hook intent: {spec.get('intent', '').strip()!r}\n"
+            f"Payload tool_name: {payload.get('tool_name')!r}\n"
+            f"Expected: hook must allow or emit no permissionDecision for out-of-scope payloads."
+        )
+
+
+def test_hook_coverage_is_complete() -> None:
+    """
+    Assert that test_hook_does_not_fire_on_out_of_scope_payload covers ALL
+    hook IDs in registry.yaml. Phase 2 must cover 12 hooks total.
+    """
+    # 11 from Phase 1 + 1 new (pre_edit_hooks_protected)
+    assert len(_ALL_HOOK_IDS) >= 12, (
+        f"Expected at least 12 hooks in registry.yaml (Phase 2 deliverable); "
+        f"found {len(_ALL_HOOK_IDS)}: {_ALL_HOOK_IDS}"
+    )
+    # Verify the new Phase 2 hook is present
+    assert "pre_edit_hooks_protected" in _ALL_HOOK_IDS, (
+        "pre_edit_hooks_protected must be in registry.yaml (Phase 2 ATTACK 2 deliverable)"
     )

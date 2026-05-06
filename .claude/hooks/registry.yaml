@@ -2,11 +2,12 @@
 # Last reused or audited: 2026-05-06
 # Authority basis: docs/operations/task_2026-05-06_hook_redesign/PLAN.md §2.2
 #   + critic-opus §0.5 amendments (evidence/hook_redesign_critic_opus.md)
+# Phase 2: added pre_edit_hooks_protected (ATTACK 2); OPERATOR_SIGNATURE_REQUIRED on TRUTH_REWRITE/ON_CHAIN (OD-HOOK-2)
 
 schema_version: 1
 metadata:
   charter_version: 1.0.0
-  catalog_size: 11
+  catalog_size: 12
   sunset_default: 90d
 
 hooks:
@@ -24,6 +25,7 @@ hooks:
       override_ids: [BASELINE_RATCHET, MAIN_REGRESSION, COTENANT_SHIM]
       max_active_per_30d: 5
       requires_evidence_file: true
+      OPERATOR_SIGNATURE_REQUIRED: false   # WORKING-class evidence accepted (PLAN §0.5 OD-HOOK-2)
     sunset_date: 2026-08-06
     telemetry:
       ritual_signal_emitted: true
@@ -77,6 +79,7 @@ hooks:
       class: structured_override
       override_ids: [STASH_FIRST_VERIFIED, OPERATOR_DESTRUCTIVE]
       requires_evidence_file: true
+      OPERATOR_SIGNATURE_REQUIRED: true   # TRUTH_REWRITE class — operator-signed sentinel per OD-HOOK-2
     sunset_date: 2026-08-06
     telemetry:
       ritual_signal_emitted: true
@@ -134,6 +137,7 @@ hooks:
     bypass_policy:
       class: structured_override
       override_ids: [OPERATOR_OVERRIDE]
+      OPERATOR_SIGNATURE_REQUIRED: true   # TRUTH_REWRITE class — operator-signed sentinel per OD-HOOK-2
     sunset_date: 2026-08-06
     telemetry:
       ritual_signal_emitted: true
@@ -180,5 +184,25 @@ hooks:
       override_ids: [OPERATOR_OVERRIDE]
       requires_evidence_file: true
     sunset_date: 2026-08-04
+    telemetry:
+      ritual_signal_emitted: true
+
+  - id: pre_edit_hooks_protected
+    event: PreToolUse
+    matcher: "Edit|Write|MultiEdit|NotebookEdit"
+    intent: >
+      Refuse any edit to .claude/settings.json or .claude/hooks/** without
+      operator-signed authorization. Agents can self-disable gates by editing
+      these files; this hook closes that attack surface (ATTACK 2 / OD-HOOK-2).
+    blocked_when:
+      - edit_to_hook_configuration_without_operator_signed_sentinel
+    severity: BLOCKING
+    reversibility_class: TRUTH_REWRITE
+    bypass_policy:
+      class: structured_override
+      override_ids: [HOOK_SCHEMA_CHANGE]
+      requires_evidence_file: true
+      OPERATOR_SIGNATURE_REQUIRED: true   # TRUTH_REWRITE class — operator-signed sentinel required
+    sunset_date: 2026-08-06
     telemetry:
       ritual_signal_emitted: true
