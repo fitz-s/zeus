@@ -55,8 +55,20 @@ def get_calibration_pin_config() -> dict:
 
         {
           "frozen_as_of": "2026-05-03 12:00:00" | None,
-          "model_keys": { "<temperature_metric>:<cluster>:<season>": "<model_key>", ... }
+          "model_keys": { "<temperature_metric>:<cluster>:<season>:<cycle>": "<model_key>", ... }
         }
+
+    Fix C (golden-knitting-wand.md Phase 1): ``frozen_as_of`` may now also be
+    a cycle-stratified dict::
+
+        {
+          "frozen_as_of": {"00": "2026-05-05T00:00:00Z", "12": "2026-05-06T00:00:00Z"},
+          "model_keys": { ... }
+        }
+
+    Scalar form (str) is back-compat and means "all cycles share this timestamp".
+    Dict form keys are cycle strings ("00", "12"). A missing cycle key → None
+    (no pin for that cycle, legacy unpinned behavior applies).
 
     Both keys default to safe values (None / empty dict) when settings.json
     has no ``calibration.pin`` section. The cache is populated once per
@@ -75,8 +87,20 @@ def get_calibration_pin_config() -> dict:
         if cfg_path.exists():
             cfg = _json.loads(cfg_path.read_text())
             pin_cfg = (cfg.get("calibration") or {}).get("pin") or {}
-            if isinstance(pin_cfg.get("frozen_as_of"), str):
-                pin["frozen_as_of"] = pin_cfg["frozen_as_of"]
+            raw_fao = pin_cfg.get("frozen_as_of")
+            if isinstance(raw_fao, str):
+                pin["frozen_as_of"] = raw_fao
+            elif isinstance(raw_fao, dict):
+                # Cycle-stratified form: {"00": "<ts>", "12": "<ts>"}
+                # PR #65 Copilot follow-up 2026-05-06: preserve None values
+                # rather than stringifying. A null value for a cycle means
+                # "no pin for this cycle; default loader behaviour applies"
+                # — coercing it to the literal string "None" would corrupt
+                # downstream timestamp comparisons.
+                pin["frozen_as_of"] = {
+                    str(k): (None if v is None else str(v))
+                    for k, v in raw_fao.items()
+                }
             if isinstance(pin_cfg.get("model_keys"), dict):
                 pin["model_keys"] = dict(pin_cfg["model_keys"])
     except Exception as exc:  # noqa: BLE001 — fail-open to legacy behavior
@@ -86,16 +110,25 @@ def get_calibration_pin_config() -> dict:
 
 
 def _resolve_pin_for_bucket(
-    temperature_metric: str, cluster: str, season: str
+    temperature_metric: str, cluster: str, season: str, cycle: str
 ) -> tuple[Optional[str], Optional[str]]:
     """Look up (frozen_as_of, model_key) for one bucket.
 
     Returns (frozen_as_of, model_key) where either may be None to indicate
     "no pin at this layer; default loader behavior applies".
+
+    Fix C (golden-knitting-wand.md Phase 1): if ``frozen_as_of`` in the pin
+    config is a dict (cycle-stratified), resolve per ``cycle``; if it is a
+    scalar string, apply it to all cycles (back-compat).
     """
     pin = get_calibration_pin_config()
-    key = f"{temperature_metric}:{cluster}:{season}"
-    return pin.get("frozen_as_of"), pin.get("model_keys", {}).get(key)
+    key = f"{temperature_metric}:{cluster}:{season}:{cycle}"
+    raw_fao = pin.get("frozen_as_of")
+    if isinstance(raw_fao, dict):
+        frozen_as_of = raw_fao.get(cycle)  # None if this cycle has no pin
+    else:
+        frozen_as_of = raw_fao  # scalar or None — legacy back-compat
+    return frozen_as_of, pin.get("model_keys", {}).get(key)
 
 
 def _emit_v2_legacy_fallback_warning(
@@ -300,7 +333,7 @@ def get_calibrator(
     # F1 (2026-05-03): resolve config-pinned frozen_as_of + model_key for this
     # bucket. Both default to None → legacy behavior preserved.
     primary_frozen, primary_model_key = _resolve_pin_for_bucket(
-        temperature_metric, cluster, season
+        temperature_metric, cluster, season, cycle
     )
 
     # Try primary bucket — v2 FIRST (metric-aware), then legacy (HIGH BC).
@@ -334,6 +367,8 @@ def get_calibrator(
             refit = _fit_from_pairs(
                 conn, cluster, season, unit=city.settlement_unit,
                 temperature_metric=temperature_metric,
+                cycle=cycle, source_id=source_id, horizon_profile=horizon_profile,
+                data_version=expected_data_version,
             )
             if refit is not None:
                 level = maturity_level(refit.n_samples)
@@ -370,6 +405,8 @@ def get_calibrator(
             cal = _fit_from_pairs(
                 conn, cluster, season, unit=city.settlement_unit,
                 temperature_metric=temperature_metric,
+                cycle=cycle, source_id=source_id, horizon_profile=horizon_profile,
+                data_version=expected_data_version,
             )
             if cal is not None:
                 level = maturity_level(n)
@@ -381,7 +418,7 @@ def get_calibrator(
         if fallback_cluster == cluster:
             continue
         fb_frozen, fb_model_key = _resolve_pin_for_bucket(
-            temperature_metric, fallback_cluster, season
+            temperature_metric, fallback_cluster, season, cycle
         )
         model_data = load_platt_model_v2(
             conn,
@@ -391,6 +428,9 @@ def get_calibrator(
             data_version=expected_data_version,
             frozen_as_of=fb_frozen,
             model_key=fb_model_key,
+            cycle=cycle,
+            source_id=source_id,
+            horizon_profile=horizon_profile,
         )
         if model_data is None and temperature_metric == "high":
             bk_fb = bucket_key(fallback_cluster, season)
@@ -440,12 +480,17 @@ def _model_data_to_calibrator(model_data: dict) -> ExtendedPlattCalibrator:
     cal._bucket_source_id = model_data.get("bucket_source_id")
     cal._bucket_horizon_profile = model_data.get("bucket_horizon_profile")
     cal._bucket_data_version = model_data.get("bucket_data_version")
+    cal._bucket_model_key = model_data.get("model_key")
     return cal
 
 
 def _fit_from_pairs(
     conn, cluster: str, season: str, *, unit: str | None = None,
     temperature_metric: Literal["high", "low"] = "high",
+    cycle: Optional[str] = None,
+    source_id: Optional[str] = None,
+    horizon_profile: Optional[str] = None,
+    data_version: Optional[str] = None,
 ) -> Optional[ExtendedPlattCalibrator]:
     """Fit a new calibrator from stored pairs.
 
@@ -516,6 +561,28 @@ def _fit_from_pairs(
     except Exception as e:
         logger.warning("Platt fit failed for %s_%s: %s", cluster, season, e)
         return None
+
+    # Fix E (golden-knitting-wand.md Phase 1): set _bucket_* attrs so evaluator
+    # σ-query at evaluator.py:2778 reads a non-empty bucket_model_key instead of
+    # the empty string it gets from unconfigured fit-path calibrators.
+    # Defaults (None → "00"/"tigge_mars"/"full") mirror the save_platt_model_v2
+    # template so model_key is consistent with what would be written to DB.
+    from src.types.metric_identity import HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN  # lazy — avoids circular at module level
+    _eff_cycle = cycle if cycle is not None else "00"
+    _eff_source_id = source_id if source_id is not None else "tigge_mars"
+    _eff_horizon = horizon_profile if horizon_profile is not None else "full"
+    _eff_dv = data_version if data_version is not None else (
+        HIGH_LOCALDAY_MAX.data_version if temperature_metric == "high"
+        else LOW_LOCALDAY_MIN.data_version
+    )
+    cal._bucket_cycle = _eff_cycle
+    cal._bucket_source_id = _eff_source_id
+    cal._bucket_horizon_profile = _eff_horizon
+    cal._bucket_data_version = _eff_dv
+    cal._bucket_model_key = (
+        f"{temperature_metric}:{cluster}:{season}"
+        f":{_eff_dv}:{_eff_cycle}:{_eff_source_id}:{_eff_horizon}:{cal.input_space}"
+    )
 
     # Save to DB for future use
     bk = bucket_key(cluster, season)

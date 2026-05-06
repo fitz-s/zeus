@@ -175,13 +175,14 @@ def evaluate_entry_forecast_shadow(
             calibration_data_version=None,
         )
 
-    # Phase β: evidence-gated call (flag-off → legacy fallback, byte-identical).
+    # Phase β: evidence-gated call (flag-off → legacy fallback).
     # source_cycle/target_cycle/horizon_profile/season/cluster/platt_model_key
     # are not available on this shadow path (pre-sizing readiness check, no
     # routing context). Passing None is correct: the new function returns
     # INSUFFICIENT_ROUTE_INFO → SHADOW_ONLY when flag is on, which is the
     # desired fail-closed behaviour. live_calibration_promotion_approved is
-    # intentionally not forwarded — DB row is authority when flag is on.
+    # forwarded to the legacy fallback (flag OFF); when flag is ON, DB row
+    # is authority and the parameter is unused.
     calibration = evaluate_calibration_transfer_policy_with_evidence(
         config=config,
         source_id=config.source_id,
@@ -195,6 +196,7 @@ def evaluate_entry_forecast_shadow(
         platt_model_key=None,
         conn=conn,
         now=now_utc,
+        live_promotion_approved=live_calibration_promotion_approved,
     )
     if calibration.status != "LIVE_ELIGIBLE":
         return EntryForecastShadowDecision(

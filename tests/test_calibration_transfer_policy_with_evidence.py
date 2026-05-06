@@ -525,7 +525,8 @@ def test_malformed_evaluated_at_returns_shadow_only(monkeypatch: pytest.MonkeyPa
 
     assert decision.status == "SHADOW_ONLY"
     assert decision.live_promotion_approved is False
-    assert decision.note == "invalid_evidence_time"
+    assert decision.reason_codes == ("CALIBRATION_TRANSFER_EVIDENCE_TIMESTAMP_UNPARSEABLE",)
+    assert decision.note == "evaluated_at_unparseable:str"
 
 
 def test_future_evaluated_at_returns_shadow_only(monkeypatch: pytest.MonkeyPatch) -> None:

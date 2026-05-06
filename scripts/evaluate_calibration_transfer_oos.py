@@ -433,6 +433,41 @@ def _upsert_row(
 # Main evaluation loop
 # ---------------------------------------------------------------------------
 
+STALENESS_DAYS_DEFAULT = 90
+
+
+def _has_fresh_row(
+    conn,
+    *,
+    policy_id: str,
+    model_key: str,
+    target_source_id: str,
+    target_cycle: str,
+    staleness_days: int,
+    now: datetime,
+) -> bool:
+    """Return True if validated_calibration_transfers already has a recent row.
+
+    Fix F (golden-knitting-wand.md Phase 1): used by --refresh mode to skip
+    buckets whose evidence is still within staleness_days TTL.
+    """
+    cutoff = now.timestamp() - staleness_days * 86400
+    cutoff_iso = datetime.fromtimestamp(cutoff, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    row = conn.execute(
+        """
+        SELECT 1 FROM validated_calibration_transfers
+         WHERE policy_id = ?
+           AND platt_model_key = ?
+           AND target_source_id = ?
+           AND target_cycle = ?
+           AND evaluated_at >= ?
+         LIMIT 1
+        """,
+        (policy_id, model_key, target_source_id, target_cycle, cutoff_iso),
+    ).fetchone()
+    return row is not None
+
+
 def run_oos_evaluation(
     conn,
     *,
@@ -440,9 +475,17 @@ def run_oos_evaluation(
     target_source_id_filter: str | None = None,
     limit_models: int | None = None,
     dry_run: bool = False,
+    refresh: bool = False,
+    staleness_days: int = STALENESS_DAYS_DEFAULT,
     now: datetime | None = None,
 ) -> dict:
-    """Run OOS evaluation; returns summary dict."""
+    """Run OOS evaluation; returns summary dict.
+
+    Fix F (golden-knitting-wand.md Phase 1): added ``refresh`` + ``staleness_days``
+    params.  When ``refresh=True``, buckets with an existing row evaluated within
+    ``staleness_days`` are skipped (idempotent cron-safe run).  When
+    ``refresh=False`` (default), all routes are evaluated unconditionally.
+    """
     if now is None:
         now = datetime.now(timezone.utc)
 
@@ -468,6 +511,8 @@ def run_oos_evaluation(
         "dry_run": dry_run,
     }
 
+    stats["refresh_skipped"] = 0
+
     for model in models:
         source_domain = (model["source_id"], model["cycle"])
 
@@ -482,6 +527,23 @@ def run_oos_evaluation(
                 logger.debug(
                     "same-domain skip: model=%s source=(%s,%s)",
                     model["model_key"], tgt_source_id, tgt_cycle,
+                )
+                continue
+
+            # Fix F: --refresh mode skips buckets with fresh evidence rows
+            if refresh and _has_fresh_row(
+                conn,
+                policy_id=policy_id,
+                model_key=model["model_key"],
+                target_source_id=tgt_source_id,
+                target_cycle=tgt_cycle,
+                staleness_days=staleness_days,
+                now=now,
+            ):
+                stats["refresh_skipped"] += 1
+                logger.debug(
+                    "refresh skip (fresh row within %dd): model=%s target=(%s,%s)",
+                    staleness_days, model["model_key"], tgt_source_id, tgt_cycle,
                 )
                 continue
 
@@ -582,6 +644,19 @@ def main() -> int:
                         help="Process at most N active Platt models (debugging).")
     parser.add_argument("--skip-lock-check", action="store_true",
                         help="DANGEROUS: bypass trade-daemon-locked precondition.")
+    parser.add_argument(
+        "--refresh", action="store_true", default=False,
+        help=(
+            "Idempotent mode: skip (model, target) pairs that already have a "
+            f"fresh row within --staleness-days (default {STALENESS_DAYS_DEFAULT}d). "
+            "Safe for weekly cron — only stale/missing buckets are re-evaluated."
+        ),
+    )
+    parser.add_argument(
+        "--staleness-days", dest="staleness_days", type=int,
+        default=STALENESS_DAYS_DEFAULT,
+        help=f"Max age of an evidence row before --refresh re-evaluates it (default: {STALENESS_DAYS_DEFAULT}).",
+    )
     args = parser.parse_args()
 
     from src.state.db import get_world_connection
@@ -605,6 +680,8 @@ def main() -> int:
             target_source_id_filter=args.target_source_id,
             limit_models=args.limit_models,
             dry_run=args.dry_run,
+            refresh=args.refresh,
+            staleness_days=args.staleness_days,
         )
 
         print(json.dumps(summary, indent=2))

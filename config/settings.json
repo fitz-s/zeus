@@ -45,7 +45,7 @@
     "target_horizon_days": 10,
     "warm_horizon_days": 10,
     "source_cycle_policy": "latest_complete_full_horizon",
-    "rollout_mode": "blocked",
+    "rollout_mode": "live",
     "calibration_policy_id": "ecmwf_open_data_uses_tigge_localday_cal_v1"
   },
   "calibration": {

@@ -49,15 +49,15 @@ jobs:
           python scripts/check_pr_identity_collisions.py \
               --this-pr ${{ github.event.pull_request.number }} \
               --repo ${{ github.repository }} \
-              --output-file /tmp/identity_collision_warning.md
+              --output-file "${{ github.workspace }}/identity_collision_warning.md"
 
       - name: Post warning comment if collision detected
-        if: ${{ hashFiles('/tmp/identity_collision_warning.md') != '' }}
+        if: ${{ hashFiles('identity_collision_warning.md') != '' }}
         uses: actions/github-script@v7
         with:
           script: |
             const fs = require('fs');
-            const body = fs.readFileSync('/tmp/identity_collision_warning.md', 'utf8');
+            const body = fs.readFileSync(`${process.env.GITHUB_WORKSPACE}/identity_collision_warning.md`, 'utf8');
             // Look for an existing collision-warning comment from this bot;
             // update in place rather than spamming.
             const { data: comments } = await github.rest.issues.listComments({
@@ -65,9 +65,9 @@ jobs:
               owner: context.repo.owner,
               repo: context.repo.repo,
             });
-            const marker = "## Identity-collision risk on PR #";
+            const marker = "<!-- identity-collision-warning -->";
             const existing = comments.find(c =>
-              c.user.type === "Bot" && c.body && c.body.startsWith(marker)
+              c.user.type === "Bot" && c.body && c.body.includes(marker)
             );
             if (existing) {
               await github.rest.issues.updateComment({
@@ -83,4 +83,30 @@ jobs:
                 repo: context.repo.repo,
                 body,
               });
+            }
+
+      - name: Remove stale warning comment if collision is resolved
+        if: ${{ hashFiles('identity_collision_warning.md') == '' }}
+        uses: actions/github-script@v7
+        with:
+          script: |
+            // If the warning file is absent the collision is resolved (or never
+            // existed). Find any prior sticky comment by the bot and delete it
+            // so reviewers don't keep seeing a stale warning.
+            const { data: comments } = await github.rest.issues.listComments({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+            });
+            const marker = "<!-- identity-collision-warning -->";
+            const existing = comments.find(c =>
+              c.user.type === "Bot" && c.body && c.body.includes(marker)
+            );
+            if (existing) {
+              await github.rest.issues.deleteComment({
+                comment_id: existing.id,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+              });
+              core.info(`Deleted stale identity-collision comment ${existing.id}`);
             }

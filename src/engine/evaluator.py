@@ -1111,19 +1111,40 @@ def _write_entry_readiness_for_candidate(
     # off (the default), this transparently falls back to the legacy string-
     # mapping policy — behaviour is byte-identical.  When the flag flips on,
     # the DB row becomes authority and live_promotion_approved is ignored.
+    #
+    # Same-domain semantics (PR #65 Codex P1 follow-up 2026-05-06):
+    # source_id == target_source_id == cfg.source_id ('ecmwf_open_data') and
+    # source_cycle == target_cycle is genuinely same-domain — NOT an OpenData
+    # → TIGGE cross-source transfer being silently approved. The policy_id
+    # 'ecmwf_open_data_uses_tigge_localday_cal_v1' is a naming convention for
+    # the calibration mechanism (loading the TIGGE-fit Platt via the static
+    # _TRANSFER_SOURCE_BY_OPENDATA_VERSION data_version map at calibration-
+    # load time), not a runtime cross-domain transfer. ECMWF Opendata IS
+    # the TIGGE ensemble — same physical IFS forecast, different release
+    # channels (TIGGE = +48h archive mirror). See
+    # architecture/ecmwf_opendata_tigge_equivalence_2026_05_06.yaml §1, §2.
+    # The validated_calibration_transfers evidence-row is required only for
+    # genuinely cross-source transfers (e.g. GFS → ECMWF), which this writer
+    # never issues.
+    _dh = decision_time.hour
+    _derived_cycle = "12" if _dh < 6 or _dh >= 18 else "00"
     calibration_decision = evaluate_calibration_transfer_policy_with_evidence(
         config=cfg,
         source_id=cfg.source_id,
         target_source_id=cfg.source_id,
-        source_cycle=None,
-        target_cycle=None,
-        horizon_profile=None,
-        season=None,
-        cluster=None,
+        source_cycle=_derived_cycle,
+        target_cycle=_derived_cycle,
+        horizon_profile="full",
+        season=season_from_date(str(target_local_date), lat=city.lat),
+        cluster=city.cluster,
         metric=temperature_metric.temperature_metric,
         platt_model_key=None,
         conn=conn,
         now=decision_time,
+        # Rollout-gate was retired 2026-05-04 (gate-purge); live_promotion_approved
+        # is unconditionally True here. The legacy fallback honours the flag, and
+        # the evidence-gated path (flag ON) ignores it in favour of the DB row.
+        live_promotion_approved=True,
     )
 
     placeholder_scope = ForecastTargetScope(

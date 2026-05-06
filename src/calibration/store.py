@@ -623,14 +623,28 @@ def deactivate_model_v2(
 
     Phase 2 (2026-05-04): cycle, source_id, horizon_profile added to model_key
     per DESIGN_PHASE2_PLATT_CYCLE_STRATIFICATION.md.
+    Phase 2 fix (2026-05-06): use 9-tuple column WHERE instead of reconstructed
+    model_key string — matches both legacy-format-keyed and new-format-keyed rows
+    by column values, not by key string reconstruction.
     """
-    model_key = (
-        f"{metric_identity.temperature_metric}:{cluster}:{season}"
-        f":{data_version}:{cycle}:{source_id}:{horizon_profile}:{input_space}"
-    )
     result = conn.execute(
-        "DELETE FROM platt_models_v2 WHERE model_key = ?",
-        (model_key,),
+        """
+        DELETE FROM platt_models_v2
+        WHERE temperature_metric = ?
+          AND cluster = ?
+          AND season = ?
+          AND data_version = ?
+          AND input_space = ?
+          AND cycle = ?
+          AND source_id = ?
+          AND horizon_profile = ?
+          AND is_active = 1
+        """,
+        (
+            metric_identity.temperature_metric,
+            cluster, season, data_version, input_space,
+            cycle, source_id, horizon_profile,
+        ),
     )
     return result.rowcount
 
@@ -770,13 +784,13 @@ def load_platt_model_v2(
         _v2_select_cols = (
             "param_A, param_B, param_C, bootstrap_params_json, "
             "n_samples, brier_insample, fitted_at, input_space, "
-            "cycle, source_id, horizon_profile, data_version"
+            "cycle, source_id, horizon_profile, data_version, model_key"
         )
     else:
         _v2_select_cols = (
             "param_A, param_B, param_C, bootstrap_params_json, "
             "n_samples, brier_insample, fitted_at, input_space, "
-            "data_version"
+            "data_version, model_key"
         )
 
     # Explicit model_key pin — bypasses match filters, still gated by auth/active
@@ -909,6 +923,7 @@ def load_platt_model_v2(
         "bucket_source_id": _row_field("source_id") if _strat_cols else None,
         "bucket_horizon_profile": _row_field("horizon_profile") if _strat_cols else None,
         "bucket_data_version": _row_field("data_version"),
+        "model_key": _row_field("model_key"),
     }
 
 

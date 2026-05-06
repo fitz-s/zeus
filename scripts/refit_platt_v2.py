@@ -42,6 +42,7 @@ import sqlite3
 import sys
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Sequence
 
@@ -394,6 +395,7 @@ def refit_v2(
     metric_identity: MetricIdentity,
     dry_run: bool,
     force: bool,
+    strict: bool = False,
     city_filter: str | None = None,
     start_date: str | None = None,
     end_date: str | None = None,
@@ -449,6 +451,17 @@ def refit_v2(
     failed_buckets: list[str] = []
     overall_start = time.monotonic()
 
+    # Fix D (golden-knitting-wand.md Phase 1): per-bucket SAVEPOINT isolation.
+    # Previously a single outer SAVEPOINT meant ANY bucket failure rolled back
+    # ALL successfully-fit buckets. New pattern: outer v2_refit wraps the whole
+    # batch; inner v2_refit_bucket_{idx} wraps each individual bucket so a NaN/
+    # p_raw/lock failure in one bucket rolls back ONLY that bucket and the loop
+    # continues. Successful buckets are committed at the end.
+    #
+    # CRITICAL: do NOT use `with conn:` around any SAVEPOINT block — Python
+    # sqlite3 `with conn:` auto-commits on exit and silently releases SAVEPOINTs,
+    # breaking atomicity. Use explicit conn.execute("SAVEPOINT ...") only.
+    # (See memory: feedback_with_conn_nested_savepoint_audit.md)
     conn.execute("SAVEPOINT v2_refit")
     try:
         for bucket_idx, bucket in enumerate(buckets, start=1):
@@ -467,12 +480,15 @@ def refit_v2(
                 flush=True,
             )
             t0 = time.monotonic()
+            sp_name = f"v2_refit_bucket_{bucket_idx}"
+            conn.execute(f"SAVEPOINT {sp_name}")
             try:
                 _fit_bucket(
                     conn, cluster, season, data_version,
                     cycle, source_id, horizon_profile,
                     metric_identity=metric_identity, dry_run=dry_run, stats=stats,
                 )
+                conn.execute(f"RELEASE SAVEPOINT {sp_name}")
                 elapsed = time.monotonic() - t0
                 cumulative = time.monotonic() - overall_start
                 print(
@@ -481,24 +497,104 @@ def refit_v2(
                     flush=True,
                 )
             except Exception as e:
-                print(f"ERR {bucket_key}: {e}", flush=True)
+                conn.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
+                conn.execute(f"RELEASE SAVEPOINT {sp_name}")
                 stats.buckets_failed += 1
                 failed_buckets.append(bucket_key)
+                print(f"ERR {bucket_key}: {type(e).__name__}: {e}", flush=True)
+                # Write failure record to refit_bucket_failures for operator triage.
+                # Gated on `not dry_run` (PR #65 Codex P2 follow-up 2026-05-06):
+                # the outer SAVEPOINT can persist on RELEASE if it began outside
+                # an explicit transaction, so a dry-run preview must NOT mutate
+                # state. Best-effort: if the failures table doesn't exist yet
+                # (schema not migrated), log and continue — do not let the
+                # ledger write kill the whole run.
+                if not dry_run:
+                    try:
+                        conn.execute(
+                            """
+                            INSERT INTO refit_bucket_failures
+                                (cluster, season, cycle, source_id, error_class, error_text, ts)
+                            VALUES (?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            (
+                                cluster, season, cycle, source_id,
+                                type(e).__name__, str(e)[:500],
+                                datetime.now(timezone.utc).isoformat(),
+                            ),
+                        )
+                    except Exception as ledger_err:
+                        print(
+                            f"WARN: could not write refit_bucket_failures row: {ledger_err}",
+                            flush=True,
+                        )
 
+        # After loop: check strict mode before committing.
+        strict_err: RuntimeError | None = None
         if failed_buckets:
             stats.refused = True
-            raise RuntimeError(
-                f"refit_platt_v2 failed for {len(failed_buckets)} bucket(s): "
-                + ", ".join(sorted(failed_buckets))
-            )
+            if strict:
+                # Strict mode triage rule (golden-knitting-wand.md Phase 1 fix-up
+                # 2026-05-06, code-reviewer P0): ROLLBACK TO outer SAVEPOINT
+                # ALSO rewinds the refit_bucket_failures INSERTs the inner
+                # except-blocks just wrote. To preserve operator triage
+                # visibility, dump the failure summary to stderr BEFORE the
+                # rollback. Operator parses stderr; the DB ledger will be
+                # empty after strict rollback (intentional; documented).
+                # PR #65 Copilot follow-up 2026-05-06: explicit file=sys.stderr
+                # on every print() in this branch — the comment above said
+                # stderr but the calls defaulted to stdout, so any operator
+                # parsing stderr would have missed the rollback summary.
+                print(
+                    f"\n=== --strict mode: ROLLING BACK ALL BUCKETS ===",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                print(
+                    f"Failed buckets ({len(failed_buckets)}):",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                for fb in sorted(failed_buckets):
+                    print(f"  ERR {fb}", file=sys.stderr, flush=True)
+                print(
+                    "NOTE: refit_bucket_failures table will be EMPTY after this "
+                    "rollback (strict mode discards the ledger along with bucket "
+                    "writes). Use these stderr lines for triage.",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                # Roll back ALL buckets (including successful ones) so the DB
+                # is left unchanged. Then release the outer SP and raise.
+                conn.execute("ROLLBACK TO SAVEPOINT v2_refit")
+                strict_err = RuntimeError(
+                    f"--strict mode: {len(failed_buckets)} bucket(s) failed: "
+                    + ", ".join(sorted(failed_buckets))
+                )
+            else:
+                # Non-strict (default): commit successful buckets, report failures.
+                print(
+                    f"WARN: {len(failed_buckets)} bucket(s) failed; "
+                    "successful buckets will be committed (non-strict mode). "
+                    "See refit_bucket_failures table for details.",
+                    flush=True,
+                )
 
         conn.execute("RELEASE SAVEPOINT v2_refit")
-        if not dry_run:
+        if not dry_run and strict_err is None:
             conn.commit()
 
+        if strict_err is not None:
+            raise strict_err
+
     except Exception:
-        conn.execute("ROLLBACK TO SAVEPOINT v2_refit")
-        conn.execute("RELEASE SAVEPOINT v2_refit")
+        # Only reached for unexpected exceptions (not strict_err, which is raised
+        # after the RELEASE). Guard: ROLLBACK only if the savepoint still exists.
+        try:
+            conn.execute("ROLLBACK TO SAVEPOINT v2_refit")
+            conn.execute("RELEASE SAVEPOINT v2_refit")
+        except Exception:
+            pass
         raise
 
     print()
@@ -519,6 +615,7 @@ def refit_all_v2(
     *,
     dry_run: bool,
     force: bool,
+    strict: bool = False,
     temperature_metric: str = "all",
     city_filter: str | None = None,
     start_date: str | None = None,
@@ -543,6 +640,7 @@ def refit_all_v2(
             metric_identity=spec.identity,
             dry_run=dry_run,
             force=force,
+            strict=strict,
             city_filter=city_filter,
             start_date=start_date,
             end_date=end_date,
@@ -598,6 +696,15 @@ def main() -> int:
         default=None,
         help="Limit refit to one calibration data_version bucket.",
     )
+    parser.add_argument(
+        "--strict", dest="strict", action="store_true", default=False,
+        help=(
+            "Fix D: fail-fast mode — if ANY bucket fails, roll back ALL buckets "
+            "and exit non-zero. Default (off): per-bucket isolation; failed buckets "
+            "roll back individually, successful buckets commit. Failures written "
+            "to refit_bucket_failures table for triage."
+        ),
+    )
     args = parser.parse_args()
 
     db_path_for_preflight = Path(args.db_path) if args.db_path else SHARED_DB
@@ -622,6 +729,7 @@ def main() -> int:
             conn,
             dry_run=args.dry_run,
             force=args.force,
+            strict=args.strict,
             temperature_metric=args.temperature_metric,
             city_filter=args.city,
             start_date=args.start_date,
