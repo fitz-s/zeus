@@ -334,7 +334,6 @@ modules:
       - src/calibration/retrain_trigger.py
       - src/calibration/effective_sample_size.py
       - src/calibration/forecast_calibration_domain.py
-      - src/calibration/retrain_trigger.py
     public_entry_files:
       - src/calibration/platt.py
       - src/calibration/manager.py

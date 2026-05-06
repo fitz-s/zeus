@@ -21,9 +21,15 @@ from typing import Any, Optional
 
 @dataclass
 class PlattModelView:
-    """Read-only view of an active Platt model from world DB.
+    """Read-only typed view of an active Platt model from world DB.
 
-    Mirrors the dict shape returned by load_platt_model_v2.
+    Field naming convention: ``param_A``/``param_B``/``param_C`` (typed-view
+    canonical shape). This deliberately differs from the raw dict returned
+    by ``src.calibration.store.load_platt_model_v2``, which uses bare
+    ``"A"``/``"B"``/``"C"`` keys. The typed-view layer prefixes them to
+    make ``A`` (matrix-style) vs ``param_A`` (named coefficient) explicit
+    at call sites.
+
     Callers must not write back through this object.
     """
     param_A: float
@@ -40,7 +46,16 @@ class PlattModelView:
     data_version: Optional[str]
 
     def as_dict(self) -> dict[str, Any]:
-        """Return dict shape compatible with load_platt_model_v2 callers."""
+        """Return the canonical PlattModelView dict shape (param_A/B/C keys).
+
+        NOT the same as ``load_platt_model_v2``'s raw dict shape (A/B/C keys).
+        PR #65 Copilot follow-up 2026-05-06: docstring previously claimed
+        compatibility with load_platt_model_v2 callers — incorrect; the keys
+        differ deliberately. Callers that need the raw dict shape should
+        call ``load_platt_model_v2`` directly; callers that have a typed
+        ``PlattModelView`` and want a serialisable dict should use this
+        method and consume ``param_A/B/C``.
+        """
         return {
             "param_A": self.param_A,
             "param_B": self.param_B,
@@ -58,6 +73,10 @@ def get_active_platt_model(
     city: str,
     season: str,
     metric_identity: Any,
+    *,
+    cycle: Optional[str] = None,
+    source_id: Optional[str] = None,
+    horizon_profile: Optional[str] = None,
 ) -> Optional[PlattModelView]:
     """Return the active Platt model for (city, season, metric_identity) from world DB.
 
@@ -65,6 +84,13 @@ def get_active_platt_model(
       - temperature_metric: "high" | "low"
       - data_version: str
       - input_space: str (optional, defaults to "width_normalized_density")
+
+    Fix B (golden-knitting-wand.md Phase 1): added cycle/source_id/horizon_profile
+    keyword params so callers can pass phase-2 stratification keys. Without these,
+    load_platt_model_v2 silently defaults to (cycle=None, source_id=None,
+    horizon_profile=None) which resolves to schema defaults (00z TIGGE full) —
+    a 12z OpenData call would receive the 00z TIGGE Platt instead of the
+    cycle-matched bucket. Same bug pattern sonnet fixed at manager.py:391-394.
 
     world_conn must already be open — caller manages lifecycle.
     Returns None if no matching active VERIFIED model exists.
@@ -84,14 +110,19 @@ def get_active_platt_model(
         season=season,
         data_version=data_version,
         input_space=input_space,
+        cycle=cycle,
+        source_id=source_id,
+        horizon_profile=horizon_profile,
     )
     if raw is None:
         return None
 
+    # load_platt_model_v2 returns keys "A", "B", "C" (not "param_A"/"param_B"/"param_C").
+    # Fixed here to match the actual dict shape from store.py.
     return PlattModelView(
-        param_A=raw["param_A"],
-        param_B=raw["param_B"],
-        param_C=raw["param_C"],
+        param_A=raw["A"],
+        param_B=raw["B"],
+        param_C=raw["C"],
         n_samples=raw.get("n_samples", 0),
         brier_insample=raw.get("brier_insample"),
         fitted_at=raw.get("fitted_at", ""),

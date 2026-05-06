@@ -105,11 +105,18 @@ _BARE_SOURCE_STR_PATTERN = re.compile(
 #   - src/contracts/world_view/forecasts.py:34   data_source_version: Optional[str]
 #   - src/contracts/world_view/observations.py:29  source: Optional[str]
 #   - src/contracts/world_view/settlements.py:28  source: Optional[str]
+#
+# golden-knitting-wand.md Phase 1 (2026-05-06, Fix B): new field surfaced
+# in src/contracts/world_view/calibration.py via the cycle/source_id/
+# horizon_profile stratification thread-through. Classified internal label
+# (one of {'tigge_mars', 'ecmwf_open_data', ...}, enumerated values not
+# external authority).
 _BASELINE_PER_FILE: dict[str, int] = {
     "src/contracts/execution_intent.py": 6,
     "src/contracts/executable_market_snapshot_v2.py": 4,
     "src/contracts/semantic_types.py": 1,
     "src/contracts/expiring_assumption.py": 1,
+    "src/contracts/world_view/calibration.py": 1,
     "src/contracts/world_view/forecasts.py": 2,
     "src/contracts/world_view/observations.py": 1,
     "src/contracts/world_view/settlements.py": 1,

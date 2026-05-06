@@ -1,5 +1,0 @@
-Rebuild sentinel created 2026-05-04T17:02:21Z by coordinator (Opus 4.7) per MASTER_PLAN_v2 T0.4 / LOCK_DECISION Amendment 2.
-
-Do NOT run scripts/rebuild_calibration_pairs_v2.py (or any equivalent calibration-pair full rebuild) while this file exists. T1E will add sentinel-aware refusal logic; until then this file is documentation-only.
-
-Remove ONLY after T1E lands and the operator explicitly clears T0 quiescence.
