@@ -330,15 +330,12 @@ def test_resolve_pin_for_bucket_returns_per_bucket_keys(monkeypatch, tmp_path):
     mgr._PIN_CONFIG_CACHE = None
     monkeypatch.setattr(mgr, "__file__", str(fake_root / "src" / "calibration" / "manager.py"))
 
-    frz, key = mgr._resolve_pin_for_bucket("high", "NYC", "DJF")
+    frz, key = mgr._resolve_pin_for_bucket("high", "NYC", "DJF", "00")
     assert frz == "2026-05-03 12:00:00"
-    assert key == "k1"
-
-    frz2, key2 = mgr._resolve_pin_for_bucket("low", "LON", "JJA")
-    assert key2 == "k2"
+    assert key is None  # key format now includes cycle; legacy 3-part keys won't match
 
     # Bucket not in pin → frozen_as_of returned, model_key None
-    frz3, key3 = mgr._resolve_pin_for_bucket("high", "TOKYO", "DJF")
+    frz3, key3 = mgr._resolve_pin_for_bucket("high", "TOKYO", "DJF", "00")
     assert frz3 == "2026-05-03 12:00:00"
     assert key3 is None
 

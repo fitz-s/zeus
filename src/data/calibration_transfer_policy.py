@@ -160,6 +160,17 @@ def evaluate_calibration_transfer_policy_with_evidence(
         # The new function signature has no forecast_data_version; infer it
         # from metric so the legacy version-map resolves. Phase X.3 caller
         # update will replace this inference with an explicit argument.
+        #
+        # Fix G (golden-knitting-wand.md Phase 1) + PR #64 Copilot follow-up
+        # (commit 4584c150): thread live_promotion_approved through to the
+        # legacy fallback so caller-side operator approval is preserved.
+        # Architecture intent: flag-off posture = "operator's blanket approval
+        # via legacy static-mapping" — the TIGGE Platt IS the correct calibrator
+        # for ECMWF Opendata (same physical IFS ensemble; TIGGE = +48h archive
+        # mirror). Callers (entry_forecast_shadow.py, evaluator.py) pass True
+        # when the operator has approved live calibration promotion; the legacy
+        # function then returns LIVE_ELIGIBLE rather than SHADOW_ONLY.
+        # See architecture/ecmwf_opendata_tigge_equivalence_2026_05_06.yaml §4.
         _fallback_dv = (
             ECMWF_OPENDATA_HIGH_DATA_VERSION
             if metric == "high"
@@ -236,7 +247,25 @@ def evaluate_calibration_transfer_policy_with_evidence(
         )
 
     row_status, evaluated_at_str = row
-    evaluated_at = datetime.fromisoformat(evaluated_at_str)
+    # PR #65 Copilot follow-up 2026-05-06: defensive parse with fail-closed
+    # behaviour on malformed timestamps. Python 3.11+ datetime.fromisoformat
+    # parses trailing 'Z' natively, but the OOS evaluator (and any future
+    # importer) is not statically prevented from writing other ISO-8601
+    # variants. Normalise 'Z' → '+00:00' first; on any parse failure return
+    # SHADOW_ONLY rather than letting the gate raise unhandled.
+    try:
+        _normalised = evaluated_at_str.replace("Z", "+00:00") if isinstance(evaluated_at_str, str) else evaluated_at_str
+        evaluated_at = datetime.fromisoformat(_normalised)
+    except (TypeError, ValueError):
+        return CalibrationTransferDecision(
+            status="SHADOW_ONLY",
+            reason_codes=("CALIBRATION_TRANSFER_EVIDENCE_TIMESTAMP_UNPARSEABLE",),
+            policy_id=policy_id,
+            forecast_data_version="",
+            calibration_data_version=None,
+            live_promotion_approved=False,
+            note=f"evaluated_at_unparseable:{type(evaluated_at_str).__name__}",
+        )
     # Make both timezone-aware or both naive for comparison.
     if now.tzinfo is not None and evaluated_at.tzinfo is None:
         evaluated_at = evaluated_at.replace(tzinfo=timezone.utc)

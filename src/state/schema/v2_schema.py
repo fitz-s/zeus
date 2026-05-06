@@ -726,6 +726,28 @@ def apply_v2_schema(conn: sqlite3.Connection) -> None:
                 ON rescue_events_v2(temperature_metric, causality_status, recorded_at)
         """)
 
+        # Fix D (golden-knitting-wand.md Phase 1): per-bucket failure ledger
+        # for refit_platt_v2.py. Written when per-bucket SAVEPOINT rolls back
+        # so the operator can triage which buckets failed without losing
+        # the successful buckets' rows. Separate from refit logic so the table
+        # is available before the first refit run.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS refit_bucket_failures (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                cluster TEXT NOT NULL,
+                season TEXT NOT NULL,
+                cycle TEXT,
+                source_id TEXT,
+                error_class TEXT NOT NULL,
+                error_text TEXT NOT NULL,
+                ts TEXT NOT NULL
+            )
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_refit_bucket_failures_ts
+                ON refit_bucket_failures(ts)
+        """)
+
         conn.execute("COMMIT")
 
     except Exception:

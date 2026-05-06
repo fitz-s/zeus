@@ -1,0 +1,152 @@
+# Created: 2026-05-06
+# Authority basis: calibration/READ-path audit (critic-opus aa9c677ca10142a84)
+#                 and phased plan golden-knitting-wand.md Phase 0A
+---
+document_id: ecmwf_opendata_tigge_equivalence_2026_05_06
+version: "1.0"
+status: AUTHORITATIVE
+
+# ────────────────────────────────────────────────────────────────
+# 1. Physical ensemble equivalence
+# ────────────────────────────────────────────────────────────────
+same_physical_ensemble:
+  claim: >
+    ECMWF Opendata (source_id='ecmwf_open_data', data_version prefix
+    'ecmwf_opendata_*') and the TIGGE archive (data_version prefix
+    'tigge_*', source_id='tigge_mars') are the SAME physical ECMWF IFS
+    ensemble.  TIGGE = archive mirror with a +48h release lag.  The
+    underlying forecast fields (ensemble members, resolution, physics
+    parameterisation) are byte-identical.
+  release_channels:
+    - id: ecmwf_open_data
+      latency: real-time (~8h post-cycle-init)
+      purpose: live serving
+    - id: tigge_mars
+      latency: archive (+48h post-cycle-init)
+      purpose: reanalysis / training
+  key_implication: >
+    A Platt model trained on TIGGE pairs (tigge_*) IS the canonical
+    calibrator for ECMWF Opendata live forecasts.  The underlying
+    probability distribution is the same; the Platt sigmoid correction
+    learned from TIGGE applies without bias to live OpenData input.
+
+# ────────────────────────────────────────────────────────────────
+# 2. Calibration implication
+# ────────────────────────────────────────────────────────────────
+calibration_implication:
+  launch_path: legacy_static_mapping
+  mechanism: >
+    _TRANSFER_SOURCE_BY_OPENDATA_VERSION (code_anchors §3) maps each
+    ecmwf_opendata_* data_version key to its TIGGE counterpart.
+    evaluate_calibration_transfer_policy resolves the TIGGE Platt and
+    returns LIVE_ELIGIBLE (with live_promotion_approved=True).
+  statistical_sanity_check: >
+    Cross-domain OOS validation (Phase B) is a verification step, not a
+    prerequisite.  Given physical equivalence, brier_diff is expected to
+    be statistically indistinguishable from zero.  Phase B confirms this
+    empirically once ECMWF pairs accumulate.
+
+# ────────────────────────────────────────────────────────────────
+# 3. Code anchors
+# ────────────────────────────────────────────────────────────────
+code_anchors:
+  transfer_source_map:
+    file: src/data/calibration_transfer_policy.py
+    lines: 38-41
+    symbol: _TRANSFER_SOURCE_BY_OPENDATA_VERSION
+    note: >
+      Maps ecmwf_opendata_high/low data_version keys to tigge_mx2t6/mn2t6
+      counterparts.  THIS IS NOT SYNTHETIC DATA — both keys name the same
+      physical IFS ensemble at different release timestamps.
+  legacy_policy_function:
+    file: src/data/calibration_transfer_policy.py
+    line: 59
+    symbol: evaluate_calibration_transfer_policy
+    note: Launch path.  Resolves TIGGE Platt from static map; returns LIVE_ELIGIBLE.
+  evidence_gated_function:
+    file: src/data/calibration_transfer_policy.py
+    line: 126
+    symbol: evaluate_calibration_transfer_policy_with_evidence
+    note: >
+      Phase B upgrade path.  When flag is OFF, delegates to legacy (line 166).
+      When flag is ON, requires DB row in validated_calibration_transfers.
+  flag_off_delegation:
+    file: src/data/calibration_transfer_policy.py
+    lines: 162-180  # post-Fix-G state (2026-05-06): kwarg lands at line 179
+    note: >
+      Flag-off path must pass live_promotion_approved=True to legacy so
+      LIVE_ELIGIBLE is returned (Fix G in golden-knitting-wand.md Phase 1).
+      Verify: `grep -n live_promotion_approved=True src/data/calibration_transfer_policy.py`
+      should return a line in this range.
+
+# ────────────────────────────────────────────────────────────────
+# 4. Flag state at launch
+# ────────────────────────────────────────────────────────────────
+flag_state_at_launch:
+  ZEUS_CALIBRATION_TRANSFER_OOS_EVAL_ENABLED: false
+  rationale: >
+    The evidence-gated path (_with_evidence) requires rows in
+    validated_calibration_transfers for ECMWF target_source_id.  At launch
+    those rows are absent — ECMWF calibration_pairs_v2 accumulate naturally
+    over ~2-4 weeks.  Activating the flag before rows exist causes every
+    ECMWF candidate to return SHADOW_ONLY → silent live-entry kill.
+    The legacy static mapping is correct and sufficient at launch.
+  do_not_set: >
+    DO NOT add ZEUS_CALIBRATION_TRANSFER_OOS_EVAL_ENABLED=true to the
+    plist EnvironmentVariables at initial launch.  See
+    docs/operations/PLIST_UPDATE_FOR_RELOCK.md §1 (updated 2026-05-06).
+
+# ────────────────────────────────────────────────────────────────
+# 5. Phase B uplift path
+# ────────────────────────────────────────────────────────────────
+phase_B_uplift:
+  trigger_conditions:
+    - "≥1000 ECMWF observed pairs in calibration_pairs_v2 (data_version ecmwf_opendata_*)"
+    - "≥4 weeks since ingest daemon started writing ECMWF snapshots"
+    - "TIGGE Phase 2 cloud download complete (hardens source Platt models)"
+  earliest_plausible: "2026-05-20"
+  cycle_stratified_coverage: "2026-06-01"
+  steps: >
+    1. Extend rebuild_calibration_pairs_v2.py for ecmwf_opendata_* data_version.
+    2. Run OOS evaluator (evaluate_calibration_transfer_oos.py) for cross-domain routes.
+    3. Verify brier_diff ≈ 0 → LIVE_ELIGIBLE for all ECMWF buckets.
+    4. Operator flips ZEUS_CALIBRATION_TRANSFER_OOS_EVAL_ENABLED=true in plist.
+  plan_ref: golden-knitting-wand.md Phase B (separate plan when triggered)
+
+# ────────────────────────────────────────────────────────────────
+# 6. Forbidden patterns
+# ────────────────────────────────────────────────────────────────
+forbidden_patterns:
+  - pattern: synthetic_data
+    description: >
+      Never fabricate calibration_pairs_v2 rows, validated_calibration_transfers
+      rows, or Platt parameters from fictional holdout pairs.  "No synthetic data
+      ever" is a hard constraint (user-confirmed 2026-05-06).
+  - pattern: evidence_rows_with_no_holdout_pairs
+    description: >
+      Do not write validated_calibration_transfers rows with status=LIVE_ELIGIBLE
+      backed by n_pairs < MIN_PAIRS (30).  The evidence-gated path is only
+      activated when real holdout pairs exist.
+  - pattern: audit_approach_2
+    description: >
+      The "Approach 2" from critic-opus audit (fabricate cross-domain holdout pairs
+      to bootstrap OOS rows) is REJECTED.  Physical equivalence makes this
+      unnecessary; real pairs accumulate in 2-4 weeks.
+
+# ────────────────────────────────────────────────────────────────
+# 7. Non-synthetic classification
+# ────────────────────────────────────────────────────────────────
+non_synthetic_classification:
+  verdict: NOT_SYNTHETIC
+  subject: _TRANSFER_SOURCE_BY_OPENDATA_VERSION static mapping
+  rationale: >
+    The mapping routes one valid Platt (fit on TIGGE pairs) to a different
+    data_version key (ecmwf_opendata_*).  It does NOT fabricate data.
+    Both keys name the same physical IFS ensemble; the Platt is legitimate
+    and fit on real observations.  Routing a valid model under a different
+    version key when the underlying ensemble is identical is correct
+    calibration architecture, not synthetic data.
+  distinction: >
+    Synthetic data = fabricated inputs or outputs that were never observed.
+    Static routing = directing a real model fit on real data to serve an
+    equivalent data stream.  These are categorically different.

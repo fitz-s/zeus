@@ -16,7 +16,7 @@
 | `control_overrides` precedence-200 row | `operator:tigge_12z_gap:LIVE_UNSAFE_2026_05_04` active, `entries=true` | cleared (or `effective_until` set) |
 | `config/settings.json::entry_forecast.rollout_mode` | `"blocked"` | non-blocked (e.g. `"active"`) — see §3 |
 | `state/entry_forecast_promotion_evidence.json` | does NOT exist | written with valid evidence — see §3 |
-| `launchctl getenv ZEUS_CALIBRATION_TRANSFER_OOS_EVAL_ENABLED` | `true` (session-level + `~/.zshrc`) | also in plist `EnvironmentVariables` (launchd ignores session env) — see §1 |
+| `launchctl getenv ZEUS_CALIBRATION_TRANSFER_OOS_EVAL_ENABLED` | `true` (session-level + `~/.zshrc`) | **DO NOT SET in plist** — see §1.5; legacy mapping is the launch path |
 | `ZEUS_ENTRY_FORECAST_READINESS_WRITER` in plist | absent | `1` — see §1 |
 | `entry_forecast.source_id` | `ecmwf_open_data` ✅ | `ecmwf_open_data` (no change) |
 | `entry_forecast.source_transport` | `ensemble_snapshots_v2_db_reader` ✅ | (no change) |
@@ -25,19 +25,32 @@
 
 Source plist: `~/Library/LaunchAgents/com.zeus.live-trading.plist.locked-2026-05-04-cycle-asymmetry-platt-retrain.bak`
 
-Add **two** keys inside `<key>EnvironmentVariables</key><dict>`. Alphabetical placement keeps Z-prefix keys ordered; insert between `WU_API_KEY` and `ZEUS_HARVESTER_LIVE_ENABLED`:
+Add **one** key inside `<key>EnvironmentVariables</key><dict>`. Alphabetical placement keeps Z-prefix keys ordered; insert between `WU_API_KEY` and `ZEUS_HARVESTER_LIVE_ENABLED`:
 
 ```xml
-		<key>ZEUS_CALIBRATION_TRANSFER_OOS_EVAL_ENABLED</key>
-		<string>true</string>
 		<key>ZEUS_ENTRY_FORECAST_READINESS_WRITER</key>
 		<string>1</string>
 ```
 
-**Why each one is required**:
+> **DO NOT SET** `ZEUS_CALIBRATION_TRANSFER_OOS_EVAL_ENABLED` at initial launch — see §1.5 below.
 
-1. `ZEUS_CALIBRATION_TRANSFER_OOS_EVAL_ENABLED=true` — without it, `evaluate_calibration_transfer_policy_with_evidence` falls through to the legacy string-mapping in `src/data/calibration_transfer_policy.py:165-189`, silently bypassing the DB-row evidence-gate that 2026-05-05 was built to enforce. `launchctl setenv` and `~/.zshrc` exports do **not** propagate into a launchd-spawned daemon — only the plist `EnvironmentVariables` dict does.
-2. `ZEUS_ENTRY_FORECAST_READINESS_WRITER=1` — without it, `_entry_forecast_readiness_writer_flag_on()` returns `False`, `use_executable_forecast_cutover` is `False`, and the evaluator falls into the `else` branch at `src/engine/evaluator.py:1763-1792`. That branch calls `fetch_ensemble(... model="ecmwf_ifs025" ...)`, which `src/data/ensemble_client.py:149-160` rejects unconditionally for `ecmwf_open_data` because `ingest_class=None`. **Net effect when this flag is missing: 100% of entry candidates get rejected at `SIGNAL_QUALITY` with `SourceNotEnabled`.**
+**Why `ZEUS_ENTRY_FORECAST_READINESS_WRITER=1` is required**:
+
+`ZEUS_ENTRY_FORECAST_READINESS_WRITER=1` — without it, `_entry_forecast_readiness_writer_flag_on()` returns `False`, `use_executable_forecast_cutover` is `False`, and the evaluator falls into the `else` branch at `src/engine/evaluator.py:1763-1792`. That branch calls `fetch_ensemble(... model="ecmwf_ifs025" ...)`, which `src/data/ensemble_client.py:149-160` rejects unconditionally for `ecmwf_open_data` because `ingest_class=None`. **Net effect when this flag is missing: 100% of entry candidates get rejected at `SIGNAL_QUALITY` with `SourceNotEnabled`.**
+
+## §1.5 — Why ZEUS_CALIBRATION_TRANSFER_OOS_EVAL_ENABLED stays unset at launch
+
+**DO NOT add `ZEUS_CALIBRATION_TRANSFER_OOS_EVAL_ENABLED=true` to the plist at initial launch.**
+
+Setting this env-var activates the evidence-gated path (`evaluate_calibration_transfer_policy_with_evidence` with flag=on) which queries `validated_calibration_transfers` for ECMWF `target_source_id` rows.  At launch those rows are absent — ECMWF `calibration_pairs_v2` entries accumulate naturally over ~2-4 weeks post-launch.  The sequence of failures when the flag is prematurely set:
+
+1. `_with_evidence` queries `validated_calibration_transfers` for ECMWF target → finds zero rows.
+2. Missing row → `SHADOW_ONLY` status.
+3. Every ECMWF entry candidate blocked → **silent live-entry kill**.
+
+The correct launch path is the **legacy static mapping** in `evaluate_calibration_transfer_policy` (`src/data/calibration_transfer_policy.py:59`), accessed via the flag-off delegation at lines 161-170. This routes ECMWF Opendata forecasts to their TIGGE Platt models via `_TRANSFER_SOURCE_BY_OPENDATA_VERSION` (lines 38-41), which is correct because ECMWF Opendata and TIGGE archive are the same physical IFS ensemble (TIGGE = +48h archive mirror). Caller-side `live_promotion_approved` is now threaded through (commit 4584c150 + Fix G), so flag-off + caller-True → LIVE_ELIGIBLE for valid candidates.
+
+Phase B (≥2-4 weeks post-launch, once ECMWF pairs have accumulated) is when `ZEUS_CALIBRATION_TRANSFER_OOS_EVAL_ENABLED=true` becomes safe.  See `architecture/ecmwf_opendata_tigge_equivalence_2026_05_06.yaml` §4 and §5 for trigger conditions and upgrade steps.
 
 ## §2 — Plist install + load procedure
 
@@ -76,7 +89,7 @@ grep -E 'DeprecationWarning|SourceNotEnabled|ENTRY_FORECAST_READER_DB_UNAVAILABL
 
 ## §5 — Rollback
 
-If anything in §3 is uncertain at unlock time, set the writer flag back to `0` in the plist and re-run §2. Calibration transfer flag stays `true` regardless — its default-fallback path is the (still-correct) legacy string-mapping; turning it off only matters if validated_calibration_transfers row coverage is insufficient and the operator wants legacy-mapping cross-domain transfers to flow.
+If anything in §3 is uncertain at unlock time, set the writer flag (`ZEUS_ENTRY_FORECAST_READINESS_WRITER`) back to `0` in the plist and re-run §2. The calibration transfer OOS flag (`ZEUS_CALIBRATION_TRANSFER_OOS_EVAL_ENABLED`) is intentionally absent from the plist at launch — do not add it during rollback either. The legacy static-mapping path is the correct default for ECMWF Opendata at launch (see §1.5).
 
 ## Cross-references
 

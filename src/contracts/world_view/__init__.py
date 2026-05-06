@@ -12,7 +12,12 @@ from the trading process. The caller is responsible for connection lifecycle.
 Public API:
     get_latest_observation(world_conn, city, target_date) -> ObservationView | None
     get_settlement_truth(world_conn, city, target_date) -> SettlementView | None
-    get_active_platt_model(world_conn, city, season, metric_identity) -> PlattModelView | None
+    get_active_platt_model(world_conn, city, season, metric_identity, *, cycle=None, source_id=None, horizon_profile=None) -> PlattModelView | None
+        # cycle/source_id/horizon_profile are OPTIONAL (PR #65 Copilot follow-up
+        # 2026-05-06). Default None preserves backward-compat for legacy callers
+        # that pre-date Phase 2 stratification; callers that have the keys
+        # SHOULD pass them so load_platt_model_v2 returns the cycle-matched
+        # bucket rather than the schema-default 00z TIGGE Platt.
     get_latest_forecast(world_conn, city, target_date, lead_days) -> ForecastView | None
 """
 
