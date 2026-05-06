@@ -21,9 +21,15 @@ from typing import Any, Optional
 
 @dataclass
 class PlattModelView:
-    """Read-only view of an active Platt model from world DB.
+    """Read-only typed view of an active Platt model from world DB.
 
-    Mirrors the dict shape returned by load_platt_model_v2.
+    Field naming convention: ``param_A``/``param_B``/``param_C`` (typed-view
+    canonical shape). This deliberately differs from the raw dict returned
+    by ``src.calibration.store.load_platt_model_v2``, which uses bare
+    ``"A"``/``"B"``/``"C"`` keys. The typed-view layer prefixes them to
+    make ``A`` (matrix-style) vs ``param_A`` (named coefficient) explicit
+    at call sites.
+
     Callers must not write back through this object.
     """
     param_A: float
@@ -40,7 +46,16 @@ class PlattModelView:
     data_version: Optional[str]
 
     def as_dict(self) -> dict[str, Any]:
-        """Return dict shape compatible with load_platt_model_v2 callers."""
+        """Return the canonical PlattModelView dict shape (param_A/B/C keys).
+
+        NOT the same as ``load_platt_model_v2``'s raw dict shape (A/B/C keys).
+        PR #65 Copilot follow-up 2026-05-06: docstring previously claimed
+        compatibility with load_platt_model_v2 callers — incorrect; the keys
+        differ deliberately. Callers that need the raw dict shape should
+        call ``load_platt_model_v2`` directly; callers that have a typed
+        ``PlattModelView`` and want a serialisable dict should use this
+        method and consume ``param_A/B/C``.
+        """
         return {
             "param_A": self.param_A,
             "param_B": self.param_B,

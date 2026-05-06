@@ -96,10 +96,10 @@ Phase 2 covers `2024-01-01..2026-01-31` (760-day backfill). When download lanes 
 
 Full procedure: `docs/operations/PLIST_UPDATE_FOR_RELOCK.md`. Summary of the **4 surfaces** that all must align:
 
-1. **Plist `EnvironmentVariables`** — add `ZEUS_CALIBRATION_TRANSFER_OOS_EVAL_ENABLED=true` AND `ZEUS_ENTRY_FORECAST_READINESS_WRITER=1` (both — neither alone unlocks the live entry path).
-2. **`config/settings.json::entry_forecast.rollout_mode`** — change from `"blocked"` to non-blocked.
-3. **`state/entry_forecast_promotion_evidence.json`** — must exist and parse.
-4. **`ensemble_snapshots_v2` + `validated_calibration_transfers` row coverage** — populated by §A and §B chains.
+1. **Plist `EnvironmentVariables`** — add `ZEUS_ENTRY_FORECAST_READINESS_WRITER=1`. **DO NOT** set `ZEUS_CALIBRATION_TRANSFER_OOS_EVAL_ENABLED` at initial launch — see `docs/operations/PLIST_UPDATE_FOR_RELOCK.md` §1.5 and `architecture/ecmwf_opendata_tigge_equivalence_2026_05_06.yaml` §4. The legacy static-mapping path (flag-OFF) is the correct calibration route at launch; flipping the OOS flag prematurely fails closed to SHADOW_ONLY because no `validated_calibration_transfers` rows exist for ECMWF target_source_id yet (Phase B uplift, ~2-4 weeks post-launch).
+2. **`config/settings.json::entry_forecast.rollout_mode`** — change from `"blocked"` to one of `shadow|canary|live` (enum in `src/config.py:160-164`; "active" is NOT a valid value).
+3. **`state/entry_forecast_promotion_evidence.json`** — must exist and parse via `read_promotion_evidence`. Operator-attestation fields (`operator_approval_id`, `g1_evidence_id`, `canary_success_evidence_id`) require operator audit before live; `status_snapshot.status` must equal `LIVE_ELIGIBLE` for the gate to permit live orders.
+4. **`ensemble_snapshots_v2` row coverage** — populated by §A. The `validated_calibration_transfers` rows are NOT required at launch (legacy mapping path); they become required at Phase B when the OOS flag is flipped.
 
 After 1–4, clear the precedence-200 lock:
 ```sql

@@ -503,27 +503,31 @@ def refit_v2(
                 failed_buckets.append(bucket_key)
                 print(f"ERR {bucket_key}: {type(e).__name__}: {e}", flush=True)
                 # Write failure record to refit_bucket_failures for operator triage.
-                # Best-effort: if the failures table doesn't exist yet (schema not
-                # migrated), log and continue — do not let the ledger write kill
-                # the whole run.
-                try:
-                    conn.execute(
-                        """
-                        INSERT INTO refit_bucket_failures
-                            (cluster, season, cycle, source_id, error_class, error_text, ts)
-                        VALUES (?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        (
-                            cluster, season, cycle, source_id,
-                            type(e).__name__, str(e)[:500],
-                            datetime.now(timezone.utc).isoformat(),
-                        ),
-                    )
-                except Exception as ledger_err:
-                    print(
-                        f"WARN: could not write refit_bucket_failures row: {ledger_err}",
-                        flush=True,
-                    )
+                # Gated on `not dry_run` (PR #65 Codex P2 follow-up 2026-05-06):
+                # the outer SAVEPOINT can persist on RELEASE if it began outside
+                # an explicit transaction, so a dry-run preview must NOT mutate
+                # state. Best-effort: if the failures table doesn't exist yet
+                # (schema not migrated), log and continue — do not let the
+                # ledger write kill the whole run.
+                if not dry_run:
+                    try:
+                        conn.execute(
+                            """
+                            INSERT INTO refit_bucket_failures
+                                (cluster, season, cycle, source_id, error_class, error_text, ts)
+                            VALUES (?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            (
+                                cluster, season, cycle, source_id,
+                                type(e).__name__, str(e)[:500],
+                                datetime.now(timezone.utc).isoformat(),
+                            ),
+                        )
+                    except Exception as ledger_err:
+                        print(
+                            f"WARN: could not write refit_bucket_failures row: {ledger_err}",
+                            flush=True,
+                        )
 
         # After loop: check strict mode before committing.
         strict_err: RuntimeError | None = None
@@ -537,20 +541,27 @@ def refit_v2(
                 # visibility, dump the failure summary to stderr BEFORE the
                 # rollback. Operator parses stderr; the DB ledger will be
                 # empty after strict rollback (intentional; documented).
+                # PR #65 Copilot follow-up 2026-05-06: explicit file=sys.stderr
+                # on every print() in this branch — the comment above said
+                # stderr but the calls defaulted to stdout, so any operator
+                # parsing stderr would have missed the rollback summary.
                 print(
                     f"\n=== --strict mode: ROLLING BACK ALL BUCKETS ===",
+                    file=sys.stderr,
                     flush=True,
                 )
                 print(
                     f"Failed buckets ({len(failed_buckets)}):",
+                    file=sys.stderr,
                     flush=True,
                 )
                 for fb in sorted(failed_buckets):
-                    print(f"  ERR {fb}", flush=True)
+                    print(f"  ERR {fb}", file=sys.stderr, flush=True)
                 print(
                     "NOTE: refit_bucket_failures table will be EMPTY after this "
                     "rollback (strict mode discards the ledger along with bucket "
                     "writes). Use these stderr lines for triage.",
+                    file=sys.stderr,
                     flush=True,
                 )
                 # Roll back ALL buckets (including successful ones) so the DB

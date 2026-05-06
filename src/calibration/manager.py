@@ -92,7 +92,15 @@ def get_calibration_pin_config() -> dict:
                 pin["frozen_as_of"] = raw_fao
             elif isinstance(raw_fao, dict):
                 # Cycle-stratified form: {"00": "<ts>", "12": "<ts>"}
-                pin["frozen_as_of"] = {str(k): str(v) for k, v in raw_fao.items()}
+                # PR #65 Copilot follow-up 2026-05-06: preserve None values
+                # rather than stringifying. A null value for a cycle means
+                # "no pin for this cycle; default loader behaviour applies"
+                # — coercing it to the literal string "None" would corrupt
+                # downstream timestamp comparisons.
+                pin["frozen_as_of"] = {
+                    str(k): (None if v is None else str(v))
+                    for k, v in raw_fao.items()
+                }
             if isinstance(pin_cfg.get("model_keys"), dict):
                 pin["model_keys"] = dict(pin_cfg["model_keys"])
     except Exception as exc:  # noqa: BLE001 — fail-open to legacy behavior

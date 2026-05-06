@@ -614,12 +614,17 @@ class TestFixD:
             # Second bucket succeeds (no-op in test)
             stats.buckets_fit += 1
 
+        # PR #65 Codex P2 follow-up 2026-05-06: ledger INSERT is gated on
+        # `not dry_run` so dry-run previews stay read-only. The Fix D
+        # ledger-write contract therefore only applies under live-write
+        # (dry_run=False, force=True). The mocked _fit_bucket does not
+        # actually touch the DB, so this is safe.
         with patch.object(rfmod, "_fit_bucket", side_effect=_mock_fit_bucket):
             stats = refit_v2(
                 conn,
                 metric_identity=HIGH_LOCALDAY_MAX,
-                dry_run=True,
-                force=False,
+                dry_run=False,
+                force=True,
                 strict=False,  # non-strict: bad bucket isolated, others proceed
             )
 
@@ -628,12 +633,51 @@ class TestFixD:
         # Second bucket fit (mock succeeds) — fit count should reflect it
         assert stats.buckets_fit >= 1, f"Expected ≥1 fit bucket, got {stats.buckets_fit}"
         # No RuntimeError propagated — function returned normally
-        # refit_bucket_failures row written for the bad bucket
+        # refit_bucket_failures row written for the bad bucket (live-write only)
         failure_rows = conn.execute("SELECT * FROM refit_bucket_failures").fetchall()
         assert len(failure_rows) >= 1, (
             "Expected a refit_bucket_failures row for the failed bucket (Fix D)"
         )
         assert "Synthetic bucket failure" in failure_rows[0]["error_text"]
+
+    def test_refit_dry_run_does_not_write_failure_ledger(self):
+        """PR #65 Codex P2 (2026-05-06): dry-run preview must NOT write to
+        refit_bucket_failures, even when a bucket fails. The outer SAVEPOINT
+        can persist on RELEASE if it began outside an explicit transaction,
+        so a dry-run-side INSERT would silently mutate the DB.
+        """
+        import scripts.refit_platt_v2 as rfmod
+        from scripts.refit_platt_v2 import refit_v2
+        from src.types.metric_identity import HIGH_LOCALDAY_MAX
+
+        conn = self._make_refit_conn()
+        self._insert_platt_pairs(conn, "US-Northeast", "MAM", n=30)
+
+        def _mock_fit_fail(conn, cluster, season, data_version, cycle,
+                           source_id, horizon_profile, *, metric_identity,
+                           dry_run, stats):
+            raise RuntimeError("Synthetic dry-run failure (must not persist)")
+
+        # Pre-state: ledger empty
+        pre = conn.execute("SELECT COUNT(*) FROM refit_bucket_failures").fetchone()[0]
+        assert pre == 0
+
+        with patch.object(rfmod, "_fit_bucket", side_effect=_mock_fit_fail):
+            stats = refit_v2(
+                conn,
+                metric_identity=HIGH_LOCALDAY_MAX,
+                dry_run=True,
+                force=False,
+                strict=False,
+            )
+
+        # Post-state: ledger MUST still be empty (dry-run preview is read-only)
+        post = conn.execute("SELECT COUNT(*) FROM refit_bucket_failures").fetchone()[0]
+        assert post == 0, (
+            f"Dry-run wrote {post} refit_bucket_failures rows; preview must stay read-only"
+        )
+        # Failure was still counted in stats (in-memory)
+        assert stats.buckets_failed >= 1, "stats.buckets_failed should still reflect the failure"
 
     def test_refit_strict_mode_raises_on_any_failure(self):
         """Fix D: --strict mode raises RuntimeError and rolls back all if any bucket fails."""
