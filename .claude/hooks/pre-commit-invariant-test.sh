@@ -311,8 +311,14 @@ TEST_FILES="tests/test_architecture_contracts.py tests/test_settlement_semantics
 #     architecture/inv_prototype.py + INV_02/INV_07 schema citations
 #     gained ::table.column targets.
 # All 50 prior failures cleared; net delta vs main = +20 passing tests.
-BASELINE_PASSED=678
-BASELINE_SKIPPED=46
+#
+# 2026-05-06 Phase 0.D fossil retire (topology-redesign): 678 → 674 (-4 passed), 46 → 50 (+4 skipped).
+# architecture/digest_profiles.py deleted; test_digest_profiles_equivalence.py
+# 4 tests switch from PASS/FAIL → SKIP (skipif guard already in place per Phase 3 intent).
+# 2 PASS→SKIP (count/ids tests), 2 FAIL→SKIP (byte_for_byte + export_check).
+# Net quality: neutral-to-positive (failures converted to expected skips).
+BASELINE_PASSED=674
+BASELINE_SKIPPED=50
 
 if [ ! -x "$PYTEST_BIN" ]; then
     cat >&2 <<EOF
