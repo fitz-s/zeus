@@ -145,8 +145,8 @@ def derive_phase2_keys_from_ens_result(
     horizon_profile: Optional[str] = None
     try:
         it = ens_result.get("issue_time")
-        if isinstance(it, str) and len(it) >= 13:
-            cycle = it[11:13]
+        if isinstance(it, str):
+            cycle = parse_cycle_from_issue_time(it)
         elif hasattr(it, "hour"):
             cycle = f"{int(it.hour):02d}"
         sid = ens_result.get("source_id")

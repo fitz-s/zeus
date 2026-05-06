@@ -904,15 +904,17 @@ def _write_entry_readiness_for_candidate(
     # off (the default), this transparently falls back to the legacy string-
     # mapping policy — behaviour is byte-identical.  When the flag flips on,
     # the DB row becomes authority and live_promotion_approved is ignored.
+    _dh = decision_time.hour
+    _derived_cycle = "12" if _dh < 6 or _dh >= 18 else "00"
     calibration_decision = evaluate_calibration_transfer_policy_with_evidence(
         config=cfg,
         source_id=cfg.source_id,
         target_source_id=cfg.source_id,
-        source_cycle=None,
-        target_cycle=None,
-        horizon_profile=None,
-        season=None,
-        cluster=None,
+        source_cycle=_derived_cycle,
+        target_cycle=_derived_cycle,
+        horizon_profile="full",
+        season=season_from_date(str(target_local_date), lat=city.lat),
+        cluster=city.cluster,
         metric=temperature_metric.temperature_metric,
         platt_model_key=None,
         conn=conn,
@@ -2775,7 +2777,7 @@ def evaluate_candidate(
                 city.cluster,
                 temperature_metric.temperature_metric,
                 _phase2_horizon_profile or "",
-                "",  # platt_model_key not available on calibrator object; no row → σ=0.0
+                getattr(cal, "_bucket_model_key", None) or "",  # σ lookup; falls back to "" for legacy cal
             ),
         ).fetchone()
         if _sigma_row is not None and _sigma_row[0] == "LIVE_ELIGIBLE":

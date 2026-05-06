@@ -158,6 +158,15 @@ def evaluate_calibration_transfer_policy_with_evidence(
         # The new function signature has no forecast_data_version; infer it
         # from metric so the legacy version-map resolves. Phase X.3 caller
         # update will replace this inference with an explicit argument.
+        #
+        # Fix G (golden-knitting-wand.md Phase 1): pass live_promotion_approved=True
+        # so the legacy path returns LIVE_ELIGIBLE for valid candidates.
+        # Architecture intent: flag-off posture = "operator's blanket approval via
+        # legacy static-mapping" — the TIGGE Platt IS the correct calibrator for
+        # ECMWF Opendata (same physical IFS ensemble; TIGGE = +48h archive mirror).
+        # Without this flag the legacy function defaults to live_promotion_approved=False
+        # (line 64) and returns SHADOW_ONLY at lines 107-115 → silent launch kill.
+        # See architecture/ecmwf_opendata_tigge_equivalence_2026_05_06.yaml §4.
         _fallback_dv = (
             ECMWF_OPENDATA_HIGH_DATA_VERSION
             if metric == "high"
@@ -167,6 +176,7 @@ def evaluate_calibration_transfer_policy_with_evidence(
             config=config,
             source_id=source_id,
             forecast_data_version=_fallback_dv,
+            live_promotion_approved=True,  # flag-off = operator approved via legacy posture
         )
 
     policy_id = config.calibration_policy_id.value

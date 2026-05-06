@@ -12,7 +12,7 @@ from the trading process. The caller is responsible for connection lifecycle.
 Public API:
     get_latest_observation(world_conn, city, target_date) -> ObservationView | None
     get_settlement_truth(world_conn, city, target_date) -> SettlementView | None
-    get_active_platt_model(world_conn, city, season, metric_identity) -> PlattModelView | None
+    get_active_platt_model(world_conn, city, season, metric_identity, *, cycle, source_id, horizon_profile) -> PlattModelView | None
     get_latest_forecast(world_conn, city, target_date, lead_days) -> ForecastView | None
 """
 

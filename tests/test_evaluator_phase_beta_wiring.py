@@ -99,6 +99,7 @@ def test_evaluator_calls_evidence_gated_function(monkeypatch: pytest.MonkeyPatch
     city.name = "London"
     city.timezone = "Europe/London"
     city.cluster = "cluster_a"
+    city.lat = 51.5
     temperature_metric = MagicMock()
     temperature_metric.temperature_metric = "high"
 
