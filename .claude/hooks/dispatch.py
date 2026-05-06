@@ -675,12 +675,531 @@ def _run_advisory_check_phase_close_commit_required(
     )
 
 
+# ---------------------------------------------------------------------------
+# Phase 3.R: 7 legacy shell logics ported into dispatch.py
+# ---------------------------------------------------------------------------
+
+
+def _load_hook_common():
+    """Import hook_common module from sibling path (avoids sys.path pollution)."""
+    import importlib.util as _ilu
+    hc_path = Path(__file__).parent / "hook_common.py"
+    spec = _ilu.spec_from_file_location("hook_common", hc_path)
+    assert spec and spec.loader
+    mod = _ilu.module_from_spec(spec)
+    spec.loader.exec_module(mod)  # type: ignore[union-attr]
+    return mod
+
+
+def _run_blocking_check_invariant_test(
+    payload: dict[str, Any],
+) -> tuple[str, str]:
+    """
+    Run pytest baseline before `git commit`.
+
+    Escape hatches (from pre-commit-invariant-test.sh):
+      1. STRUCTURED_OVERRIDE=BASELINE_RATCHET|MAIN_REGRESSION|COTENANT_SHIM
+      2. Legacy [skip-invariant] marker in command (migration shim, emits migration_warning)
+      3. COMMIT_INVARIANT_TEST_SKIP=1 env var
+      4. .claude/hooks/.invariant_skip sentinel
+      5. .git/skip-invariant-once one-shot sentinel
+    """
+    import re as _re
+
+    command = _command_from_payload(payload)
+    if not command:
+        return "allow", "no_command"
+
+    hc = _load_hook_common()
+    try:
+        subcommands = hc.git_subcommands(command)
+    except ValueError:
+        if hc._raw_mentions_git(command):
+            return "deny", "could_not_parse_git_commit_command"
+        return "allow", "not_git_command"
+
+    if "commit" not in subcommands:
+        return "allow", "not_git_commit"
+
+    # Escape hatch 3: env var
+    if os.environ.get("COMMIT_INVARIANT_TEST_SKIP", "0") == "1":
+        return "allow", "COMMIT_INVARIANT_TEST_SKIP_env"
+
+    # Escape hatch 1: structured overrides
+    new_override = os.environ.get("STRUCTURED_OVERRIDE", "").strip()
+    if new_override in {"BASELINE_RATCHET", "MAIN_REGRESSION", "COTENANT_SHIM"}:
+        return "allow", f"structured_override_{new_override}"
+
+    # Escape hatch 2: legacy [skip-invariant] marker (migration shim)
+    _SKIP_MARKER = "[skip-invariant]"
+    if _SKIP_MARKER in command:
+        try:
+            LOG_DIR.mkdir(parents=True, exist_ok=True)
+            month = datetime.now(timezone.utc).strftime("%Y-%m")
+            warn_entry = {
+                "hook_id": "invariant_test",
+                "event": "PreToolUse",
+                "decision": "allow",
+                "reason": "legacy_skip_invariant_marker",
+                "override_id": None,
+                "session_id": payload.get("session_id"),
+                "agent_id": payload.get("agent_id"),
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "ritual_signal": "migration_warning",
+                "migration_note": (
+                    "[skip-invariant] is deprecated; use STRUCTURED_OVERRIDE=BASELINE_RATCHET. "
+                    "Runway ends 2026-06-06."
+                ),
+            }
+            with (LOG_DIR / f"{month}.jsonl").open("a") as fh:
+                fh.write(json.dumps(warn_entry) + "\n")
+        except OSError:
+            pass
+        return "allow", "legacy_skip_invariant_marker_migration_warning"
+
+    # Escape hatch 4: .invariant_skip sentinel file
+    skip_sentinel = REPO_ROOT / ".claude" / "hooks" / ".invariant_skip"
+    if skip_sentinel.exists():
+        return "allow", "invariant_skip_sentinel_file"
+
+    # Escape hatch 5: .git/skip-invariant-once
+    try:
+        gd_result = subprocess.run(
+            ["git", "rev-parse", "--git-dir"],
+            capture_output=True, text=True, timeout=5, cwd=REPO_ROOT,
+        )
+        git_dir = gd_result.stdout.strip() if gd_result.returncode == 0 else ".git"
+    except (subprocess.TimeoutExpired, OSError):
+        git_dir = ".git"
+    gd_path = Path(git_dir) if Path(git_dir).is_absolute() else REPO_ROOT / git_dir
+    if (gd_path / "skip-invariant-once").exists():
+        return "allow", "skip_invariant_once_sentinel"
+
+    # Find pytest binary (worktree-tolerant)
+    pytest_bin = os.environ.get("ZEUS_HOOK_PYTEST_BIN", "").strip()
+    if not pytest_bin:
+        pytest_bin = str(REPO_ROOT / ".venv" / "bin" / "python")
+        if not Path(pytest_bin).is_file():
+            try:
+                wt_result = subprocess.run(
+                    ["git", "worktree", "list", "--porcelain"],
+                    capture_output=True, text=True, timeout=5, cwd=REPO_ROOT,
+                )
+                main_wt = None
+                for line in wt_result.stdout.splitlines():
+                    if line.startswith("worktree "):
+                        main_wt = line[len("worktree "):].strip()
+                        break
+                if main_wt and main_wt != str(REPO_ROOT):
+                    cand = Path(main_wt) / ".venv" / "bin" / "python"
+                    if cand.is_file():
+                        pytest_bin = str(cand)
+            except (subprocess.TimeoutExpired, OSError):
+                pass
+
+    if not Path(pytest_bin).is_file():
+        return "deny", f"regression_below_baseline__pytest_bin_not_found"
+
+    # Load baseline count
+    baseline_file = REPO_ROOT / ".zeus-invariant-baseline"
+    baseline_passed = 674  # from pre-commit-invariant-test.sh 2026-05-06
+    if baseline_file.exists():
+        try:
+            baseline_passed = int(baseline_file.read_text().strip())
+        except (ValueError, OSError):
+            pass
+
+    # Test file list (mirrors pre-commit-invariant-test.sh)
+    _TEST_FILES = (
+        "tests/test_architecture_contracts.py tests/test_settlement_semantics.py "
+        "tests/test_digest_profiles_equivalence.py tests/test_inv_prototype.py "
+        "tests/test_edge_observation.py tests/test_edge_observation_weekly.py "
+        "tests/test_attribution_drift.py tests/test_attribution_drift_weekly.py "
+        "tests/test_ws_poll_reaction.py tests/test_ws_poll_reaction_weekly.py "
+        "tests/test_calibration_observation.py tests/test_calibration_observation_weekly.py "
+        "tests/test_learning_loop_observation.py tests/test_learning_loop_observation_weekly.py "
+        "tests/test_invariant_citations.py tests/test_identity_column_defaults.py "
+        "tests/test_truth_authority_enum.py tests/test_dynamic_sql_baseline.py "
+        "tests/test_contract_source_fields_baseline.py tests/test_data_rebuild_relationships.py "
+        "tests/test_phase10d_closeout.py tests/test_ensemble_snapshots_bias_corrected_schema.py "
+        "tests/test_tigge_snapshot_p_raw_backfill.py tests/test_db.py "
+        "tests/test_replay_time_provenance.py tests/test_run_replay_cli.py "
+        "tests/test_rebuild_pipeline.py tests/test_calibration_unification.py "
+        "tests/test_p0_hardening.py tests/test_healthcheck.py "
+        "tests/test_assumptions_validation.py tests/test_semantic_linter.py "
+        "tests/test_runtime_guards.py tests/runtime/test_evaluator_oracle_resilience.py"
+    )
+    test_file_list = _TEST_FILES.split()
+
+    try:
+        result = subprocess.run(
+            [pytest_bin, "-m", "pytest"] + test_file_list + ["-q", "--no-header"],
+            capture_output=True, text=True, timeout=180, cwd=REPO_ROOT,
+        )
+    except subprocess.TimeoutExpired:
+        return "deny", "regression_below_baseline__pytest_timed_out"
+    except OSError as exc:
+        return "deny", f"regression_below_baseline__pytest_exec_error"
+
+    import re as _re2
+    def _last_count(word: str, text: str) -> int:
+        matches = _re2.findall(r"(\d+)\s+" + word + r"\b", text)
+        return int(matches[-1]) if matches else 0
+
+    full = result.stdout + result.stderr
+    passed = _last_count("passed", full)
+    failed = _last_count("failed", full)
+    errors = _last_count(r"errors?", full)
+
+    if result.returncode != 0 and failed == 0 and errors == 0:
+        return "deny", "regression_below_baseline__pytest_non_zero_unparseable"
+    if failed > 0 or errors > 0:
+        return "deny", f"regression_below_baseline__{failed}_failed_{errors}_errors"
+    if passed < baseline_passed:
+        return "deny", (
+            f"regression_below_baseline__observed_{passed}_baseline_{baseline_passed}"
+        )
+    return "allow", "invariant_baseline_passed"
+
+
+def _run_blocking_check_secrets_scan(
+    payload: dict[str, Any],
+) -> tuple[str, str]:
+    """
+    Run gitleaks against staged content for `git commit`.
+    Honors SECURITY-FALSE-POSITIVES.md + .gitleaks.toml allowlist.
+    """
+    command = _command_from_payload(payload)
+    if not command:
+        return "allow", "no_command"
+
+    hc = _load_hook_common()
+    try:
+        subcommands = hc.git_subcommands(command)
+    except ValueError:
+        if hc._raw_mentions_git(command):
+            return "deny", "could_not_parse_secrets_scan_command"
+        return "allow", "not_git_command"
+
+    if "commit" not in subcommands:
+        return "allow", "not_git_commit"
+
+    if os.environ.get("SECRETS_SCAN_SKIP", "0") == "1":
+        return "allow", "SECRETS_SCAN_SKIP_env"
+
+    try:
+        unregistered = hc.validate_staged_review_safe_tags(str(REPO_ROOT))
+        if unregistered:
+            return "deny", "secrets_found__unregistered_review_safe_tag"
+    except ValueError:
+        return "deny", "secrets_found__review_safe_registry_error"
+
+    # Locate gitleaks binary
+    gitleaks_bin: str | None = None
+    try:
+        which = subprocess.run(
+            ["which", "gitleaks"], capture_output=True, text=True, timeout=3,
+        )
+        if which.returncode == 0:
+            gitleaks_bin = which.stdout.strip()
+    except (subprocess.TimeoutExpired, OSError):
+        pass
+
+    if gitleaks_bin is None:
+        return "allow", "gitleaks_not_installed_advisory"
+
+    gitleaks_toml = REPO_ROOT / ".gitleaks.toml"
+    cmd = [gitleaks_bin, "protect", "--staged", "--redact", "--no-banner"]
+    if gitleaks_toml.exists():
+        cmd += ["--config", str(gitleaks_toml)]
+
+    try:
+        gl_result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=30, cwd=REPO_ROOT,
+        )
+    except subprocess.TimeoutExpired:
+        return "deny", "secrets_found__gitleaks_timed_out"
+    except OSError:
+        return "allow", "gitleaks_exec_error_advisory"
+
+    if gl_result.returncode != 0:
+        return "deny", "secrets_found__gitleaks_detected_secrets"
+
+    return "allow", "secrets_scan_passed"
+
+
+def _run_blocking_check_cotenant_staging_guard(
+    payload: dict[str, Any],
+) -> tuple[str, str]:
+    """
+    Block broad `git add` (-A, --all, .) in main worktree.
+    Linked worktrees have isolated indexes — safe to broad-stage.
+    """
+    command = _command_from_payload(payload)
+    if not command:
+        return "allow", "no_command"
+
+    if os.environ.get("COTENANT_GUARD_BYPASS", "0") == "1":
+        return "allow", "COTENANT_GUARD_BYPASS_env"
+
+    hc = _load_hook_common()
+    if not hc.git_add_is_broad(command):
+        return "allow", "not_broad_git_add"
+
+    try:
+        gd_result = subprocess.run(
+            ["git", "rev-parse", "--git-dir"],
+            capture_output=True, text=True, timeout=5, cwd=REPO_ROOT,
+        )
+        git_dir = gd_result.stdout.strip() if gd_result.returncode == 0 else ""
+    except (subprocess.TimeoutExpired, OSError):
+        git_dir = ""
+
+    if "/worktrees/" in git_dir:
+        return "allow", "linked_worktree_isolated_index"
+
+    reason = (
+        "BLOCKED: broad staging in main worktree\n\n"
+        "`git add -A`, `--all`, and `.` are blocked in the main worktree "
+        "where a co-tenant agent's uncommitted changes could be absorbed.\n\n"
+        "Stage specific files:\n"
+        "  git add src/foo.py tests/test_foo.py\n\n"
+        "Override:\n"
+        "  STRUCTURED_OVERRIDE=SOLO_AGENT  (no co-tenant active)\n"
+        "  STRUCTURED_OVERRIDE=ISOLATED_WORKTREE  (confirmed linked worktree)"
+    )
+    return "deny", reason
+
+
+def _run_blocking_check_pre_merge_contamination(
+    payload: dict[str, Any],
+) -> tuple[str, str]:
+    """
+    Conflict-first guidance + MERGE_AUDIT_EVIDENCE validation on protected branches.
+    Protected set: main, master, live-launch-*
+    """
+    import re as _re3
+
+    command = _command_from_payload(payload)
+    if not command:
+        return "allow", "no_command"
+
+    hc = _load_hook_common()
+    try:
+        subcommands = hc.git_subcommands(command)
+    except ValueError:
+        if hc._raw_mentions_git(command):
+            return "deny", "could_not_parse_merge_command"
+        subcommands = []
+
+    is_merge = (
+        any(s in subcommands for s in ("merge", "pull", "cherry-pick", "rebase", "am"))
+        or bool(_re3.search(r"gh\s+pr\s+merge", command))
+    )
+    if not is_merge:
+        return "allow", "not_merge_command"
+
+    try:
+        branch_result = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True, text=True, timeout=5, cwd=REPO_ROOT,
+        )
+        current_branch = branch_result.stdout.strip() if branch_result.returncode == 0 else ""
+    except (subprocess.TimeoutExpired, OSError):
+        current_branch = ""
+
+    if not _re3.match(r"^(main|master|live-launch-.+)$", current_branch):
+        return "allow", "not_protected_branch"
+
+    evidence = os.environ.get("MERGE_AUDIT_EVIDENCE", "").strip()
+    if not evidence:
+        # Conflict-first advisory — not a deny (matches legacy shell exit 0)
+        return "allow", "merge_advisory_conflict_first_no_evidence"
+
+    if evidence.startswith("OVERRIDE_"):
+        return "allow", f"merge_audit_operator_override"
+
+    evidence_path = Path(evidence) if Path(evidence).is_absolute() else REPO_ROOT / Path(evidence)
+    if not evidence_path.exists():
+        return "deny", "merge_audit_invalid__evidence_file_not_found"
+
+    content = evidence_path.read_text(errors="replace")
+    for field in ("critic_verdict:", "diff_scope:", "drift_keyword_scan:"):
+        if not any(line.startswith(field) for line in content.splitlines()):
+            return "deny", f"merge_audit_invalid__missing_field_{field.rstrip(':')}"
+
+    import re as _re4
+    m = _re4.search(r"^critic_verdict:\s*(\S+)", content, _re4.MULTILINE)
+    verdict = m.group(1).strip() if m else ""
+    if verdict == "APPROVE":
+        return "allow", "merge_audit_evidence_approved"
+    return "deny", f"merge_audit_invalid__verdict_{verdict}"
+
+
+def _run_advisory_check_post_merge_cleanup(
+    payload: dict[str, Any],
+) -> str | None:
+    """Soft cleanup checklist after `gh pr merge`. ADVISORY — PostToolUse."""
+    import re as _re5
+
+    tool_input = payload.get("tool_input", {})
+    command = tool_input.get("command", "") if isinstance(tool_input, dict) else ""
+    if not command:
+        return None
+
+    if not _re5.search(r"gh\s+pr\s+merge(?:\s|$)", command):
+        return None
+
+    tool_response = payload.get("tool_response", {})
+    exit_code = tool_response.get("exit_code", 0) if isinstance(tool_response, dict) else 0
+    if exit_code != 0:
+        return None
+
+    worktree_lines: list[str] = []
+    try:
+        wt_result = subprocess.run(
+            ["git", "worktree", "list", "--porcelain"],
+            capture_output=True, text=True, timeout=5, cwd=REPO_ROOT,
+        )
+        paths = [
+            line[len("worktree "):].strip()
+            for line in wt_result.stdout.splitlines()
+            if line.startswith("worktree ")
+        ]
+        main_wt = paths[0] if paths else None
+        for p in paths[1:]:
+            if "/tmp/" in p or "/T/" in p:
+                continue
+            worktree_lines.append(f"  worktree: {p}  ->  git worktree remove <path>")
+    except (subprocess.TimeoutExpired, OSError):
+        pass
+
+    wt_section = "\n".join(worktree_lines) if worktree_lines else "  worktrees: only main"
+    return (
+        "\n-- Post-merge cleanup (soft) --\n"
+        f"{wt_section}\n"
+        "  ops packet: delete by default (git = backup); git mv to docs/archives/\n"
+        "    only when packet holds evidence git log can't summarize.\n"
+        "  context: /compact long sessions; rm .omc/state/agent-replay-*.jsonl\n"
+        "    when no recovery active.\n"
+        "------------------------------\n"
+    )
+
+
+def _run_blocking_check_pre_edit_architecture(
+    payload: dict[str, Any],
+) -> tuple[str, str]:
+    """Refuse edit to architecture/** without ARCH_PLAN_EVIDENCE."""
+    file_path = _file_path_from_payload(payload)
+    if not file_path:
+        tool_input = payload.get("tool_input", {})
+        file_path = (
+            tool_input.get("notebook_path", "") if isinstance(tool_input, dict) else ""
+        )
+    if not file_path:
+        return "allow", "no_file_path"
+
+    try:
+        fpath = Path(file_path)
+        if fpath.is_absolute():
+            try:
+                fpath = fpath.relative_to(REPO_ROOT)
+            except ValueError:
+                return "allow", "path_outside_repo"
+        fpath_str = fpath.as_posix()
+    except Exception:
+        return "allow", "path_parse_error"
+
+    if not fpath_str.startswith("architecture/"):
+        return "allow", "not_architecture_path"
+
+    evidence = os.environ.get("ARCH_PLAN_EVIDENCE", "").strip()
+    if evidence:
+        ep = Path(evidence) if Path(evidence).is_absolute() else REPO_ROOT / evidence
+        if ep.exists():
+            return "allow", "arch_plan_evidence_present"
+
+    return "deny", "arch_plan_evidence_missing"
+
+
+def _run_blocking_check_pre_write_capability_gate(
+    payload: dict[str, Any],
+) -> tuple[str, str]:
+    """
+    Topology Gate 1 — refuse writes to hard_kernel_paths without evidence.
+
+    Delegates to src.architecture.gate_edit_time.evaluate() (the authoritative
+    module). Falls back to direct capabilities.yaml scan if the module is
+    not importable (e.g. venv not active).
+    """
+    if os.environ.get("ZEUS_ROUTE_GATE_EDIT", "").lower() == "off":
+        return "allow", "ZEUS_ROUTE_GATE_EDIT_off"
+
+    file_path = _file_path_from_payload(payload)
+    if not file_path:
+        tool_input = payload.get("tool_input", {})
+        file_path = (
+            tool_input.get("notebook_path", "") if isinstance(tool_input, dict) else ""
+        )
+    if not file_path:
+        return "allow", "no_file_path"
+
+    # Primary path: delegate to gate_edit_time module
+    try:
+        import sys as _sys
+        _repo_str = str(REPO_ROOT)
+        if _repo_str not in _sys.path:
+            _sys.path.insert(0, _repo_str)
+        from src.architecture.gate_edit_time import evaluate  # type: ignore[import]
+        allowed, _msg = evaluate([file_path])
+        return ("allow", "capability_gate_passed") if allowed else ("deny", "capability_violation")
+    except Exception:
+        pass
+
+    # Fallback: direct capabilities.yaml hard_kernel_paths check
+    caps_path = REPO_ROOT / "architecture" / "capabilities.yaml"
+    if not caps_path.exists() or yaml is None:
+        return "allow", "capability_gate_fallback_allow"
+
+    try:
+        caps_data = yaml.safe_load(caps_path.read_text())
+    except Exception:
+        return "allow", "capabilities_yaml_parse_error"
+
+    try:
+        fpath = Path(file_path)
+        if fpath.is_absolute():
+            try:
+                fpath = fpath.relative_to(REPO_ROOT)
+            except ValueError:
+                return "allow", "path_outside_repo"
+        fpath_str = fpath.as_posix()
+    except Exception:
+        return "allow", "path_parse_error"
+
+    evidence = os.environ.get("ARCH_PLAN_EVIDENCE", "").strip()
+    evidence_exists = False
+    if evidence:
+        ep = Path(evidence) if Path(evidence).is_absolute() else REPO_ROOT / evidence
+        evidence_exists = ep.exists()
+
+    for cap in caps_data.get("capabilities", []):
+        for kp in cap.get("hard_kernel_paths", []):
+            if fpath_str == kp or fpath_str.startswith(kp.rstrip("/") + "/"):
+                if not evidence_exists:
+                    return "deny", f"capability_violation"
+                return "allow", "capability_gate_passed_with_evidence"
+
+    return "allow", "no_matching_capability"
+
+
 def _run_blocking_check(
     spec: dict[str, Any], payload: dict[str, Any]
 ) -> tuple[str, str]:
     """
     Return (decision, reason) for BLOCKING hooks.
-    Phase 2: real check logic per hook_id.
+    Phase 3.R: all 7 legacy shell logics ported; phase1_stub removed.
+    Unrecognized hook_id -> ("deny", "unknown_hook") per spec.
     """
     hook_id = spec.get("id", "")
 
@@ -688,9 +1207,21 @@ def _run_blocking_check(
         return _run_blocking_check_pre_checkout_uncommitted_overlap(payload)
     elif hook_id == "pre_edit_hooks_protected":
         return _run_blocking_check_pre_edit_hooks_protected(payload)
+    elif hook_id == "invariant_test":
+        return _run_blocking_check_invariant_test(payload)
+    elif hook_id == "secrets_scan":
+        return _run_blocking_check_secrets_scan(payload)
+    elif hook_id == "cotenant_staging_guard":
+        return _run_blocking_check_cotenant_staging_guard(payload)
+    elif hook_id == "pre_merge_contamination":
+        return _run_blocking_check_pre_merge_contamination(payload)
+    elif hook_id == "pre_edit_architecture":
+        return _run_blocking_check_pre_edit_architecture(payload)
+    elif hook_id == "pre_write_capability_gate":
+        return _run_blocking_check_pre_write_capability_gate(payload)
     else:
-        # Phase 1 pass-through for hooks not yet fully implemented
-        return "allow", "phase1_stub"
+        # Unknown BLOCKING hook — fail-closed
+        return "deny", f"unknown_hook"
 
 
 def _run_advisory_check(
@@ -698,7 +1229,8 @@ def _run_advisory_check(
 ) -> str | None:
     """
     Return additionalContext string for ADVISORY hooks, or None.
-    Phase 2: real logic per hook_id.
+    Phase 3.R: all advisory hooks implemented.
+    Unrecognized hook_id -> None (no advisory emitted).
     """
     hook_id = spec.get("id", "")
 
@@ -708,6 +1240,8 @@ def _run_advisory_check(
         return _run_advisory_check_pr_open_monitor_arm(payload)
     elif hook_id == "phase_close_commit_required":
         return _run_advisory_check_phase_close_commit_required(payload)
+    elif hook_id == "post_merge_cleanup":
+        return _run_advisory_check_post_merge_cleanup(payload)
     else:
         return None
 

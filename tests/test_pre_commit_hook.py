@@ -18,6 +18,16 @@ import pytest
 
 # Absolute path to the hook script (repo root / .claude / hooks / ...)
 REPO_ROOT = Path(__file__).parent.parent
+# Phase 3.R (2026-05-06): pre-commit-invariant-test.sh moved to .claude/hooks/legacy/.
+# These tests invoke the legacy shell directly; the canonical gate logic now lives in
+# dispatch.py::_run_blocking_check_invariant_test (tested in test_hook_dispatch_smoke.py).
+# Disposition: xfail with 30d expiry (retire by 2026-06-06 per PLAN §6.5 cutover).
+# See evidence/hook_phase3r_legacy_test_disposition.md.
+_LEGACY_HOOK_PATH = REPO_ROOT / ".claude" / "hooks" / "pre-commit-invariant-test.sh"
+_LEGACY_REASON = (
+    "Legacy shell script moved to .claude/hooks/legacy/ in Phase 3.R (2026-05-06). "
+    "Gate logic ported to dispatch.py. Retire by 2026-06-06 (30d cutover per PLAN §6.5)."
+)
 HOOK = REPO_ROOT / ".claude" / "hooks" / "pre-commit-invariant-test.sh"
 
 SKIP_MARKER = "[skip-invariant]"
@@ -130,6 +140,10 @@ def _run_hook_channel_b(
 
 
 class TestChannelAMarker:
+    @pytest.mark.xfail(
+        reason="legacy shell moved to .claude/hooks/legacy/ in Phase 3.R (2026-05-06); dispatch.py is canonical; retire by 2026-06-06",
+        strict=False,
+    )  # phase3r-legacy-cutover expires 2026-06-06
     def test_marker_in_m_flag_skips(self):
         """Channel A: marker in -m value triggers SKIPPED."""
         cmd = f'git commit -m "bump version {SKIP_MARKER} baseline was already failing"'
@@ -138,6 +152,10 @@ class TestChannelAMarker:
         assert "SKIPPED" in result.stderr
         assert "channel=agent" in result.stderr
 
+    @pytest.mark.xfail(
+        reason="legacy shell moved to .claude/hooks/legacy/ in Phase 3.R (2026-05-06); dispatch.py is canonical; retire by 2026-06-06",
+        strict=False,
+    )  # phase3r-legacy-cutover expires 2026-06-06
     def test_marker_in_heredoc_skips(self):
         """Channel A: marker inside heredoc body triggers SKIPPED."""
         cmd = (
@@ -162,6 +180,10 @@ class TestChannelAMarker:
         # Hook must not have skipped via the marker path
         assert "SKIPPED (marker" not in result.stderr
 
+    @pytest.mark.xfail(
+        reason="legacy shell moved to .claude/hooks/legacy/ in Phase 3.R (2026-05-06); dispatch.py is canonical; retire by 2026-06-06",
+        strict=False,
+    )  # phase3r-legacy-cutover expires 2026-06-06
     def test_non_commit_command_passes_through(self):
         """Channel A: non-git-commit commands exit 0 without running pytest."""
         result = _run_hook_channel_a(command="ls -la")
@@ -175,6 +197,10 @@ class TestChannelAMarker:
 
 
 class TestChannelBMarker:
+    @pytest.mark.xfail(
+        reason="legacy shell moved to .claude/hooks/legacy/ in Phase 3.R (2026-05-06); dispatch.py is canonical; retire by 2026-06-06",
+        strict=False,
+    )  # phase3r-legacy-cutover expires 2026-06-06
     def test_commit_editmsg_fallback_skips(self):
         """Channel B: marker in COMMIT_EDITMSG (interactive editor path) triggers SKIPPED."""
         content = f"Fix something\n\n{SKIP_MARKER} interactive editor commit\n"
@@ -183,6 +209,10 @@ class TestChannelBMarker:
         assert "SKIPPED" in result.stderr
         assert "channel=git" in result.stderr
 
+    @pytest.mark.xfail(
+        reason="legacy shell moved to .claude/hooks/legacy/ in Phase 3.R (2026-05-06); dispatch.py is canonical; retire by 2026-06-06",
+        strict=False,
+    )  # phase3r-legacy-cutover expires 2026-06-06
     def test_commit_editmsg_without_marker_does_not_skip(self):
         """Channel B: COMMIT_EDITMSG without marker does NOT trigger marker SKIPPED.
 
@@ -197,6 +227,10 @@ class TestChannelBMarker:
         )
         assert "SKIPPED (marker" not in result.stderr
 
+    @pytest.mark.xfail(
+        reason="legacy shell moved to .claude/hooks/legacy/ in Phase 3.R (2026-05-06); dispatch.py is canonical; retire by 2026-06-06",
+        strict=False,
+    )  # phase3r-legacy-cutover expires 2026-06-06
     def test_ps_walk_skips_when_marker_in_parent_argv(self):
         """Channel B: marker in parent process argv (ps walk) triggers SKIPPED.
 
@@ -219,6 +253,10 @@ class TestChannelBMarker:
 
 
 class TestSentinelBypass:
+    @pytest.mark.xfail(
+        reason="legacy shell moved to .claude/hooks/legacy/ in Phase 3.R (2026-05-06); dispatch.py is canonical; retire by 2026-06-06",
+        strict=False,
+    )  # phase3r-legacy-cutover expires 2026-06-06
     def test_sentinel_file_skips_channel_b(self):
         """Sentinel .git/skip-invariant-once causes Channel B to skip and auto-delete it."""
         sentinel = REPO_ROOT / ".git" / "skip-invariant-once"
@@ -231,6 +269,10 @@ class TestSentinelBypass:
         assert "SKIPPED" in result.stderr
         assert not sentinel.exists(), "Sentinel should have been auto-deleted"
 
+    @pytest.mark.xfail(
+        reason="legacy shell moved to .claude/hooks/legacy/ in Phase 3.R (2026-05-06); dispatch.py is canonical; retire by 2026-06-06",
+        strict=False,
+    )  # phase3r-legacy-cutover expires 2026-06-06
     def test_env_var_skips_channel_a(self):
         """COMMIT_INVARIANT_TEST_SKIP=1 causes Channel A to skip."""
         cmd = 'git commit -m "test env skip"'
@@ -240,6 +282,10 @@ class TestSentinelBypass:
         assert result.returncode == 0
         assert "SKIPPED" in result.stderr
 
+    @pytest.mark.xfail(
+        reason="legacy shell moved to .claude/hooks/legacy/ in Phase 3.R (2026-05-06); dispatch.py is canonical; retire by 2026-06-06",
+        strict=False,
+    )  # phase3r-legacy-cutover expires 2026-06-06
     def test_env_var_skips_channel_b(self):
         """COMMIT_INVARIANT_TEST_SKIP=1 causes Channel B to skip."""
         result = _run_hook_channel_b(extra_env={"COMMIT_INVARIANT_TEST_SKIP": "1"})
@@ -253,6 +299,10 @@ class TestSentinelBypass:
 
 
 class TestBlockedErrorMessage:
+    @pytest.mark.xfail(
+        reason="legacy shell moved to .claude/hooks/legacy/ in Phase 3.R (2026-05-06); dispatch.py is canonical; retire by 2026-06-06",
+        strict=False,
+    )  # phase3r-legacy-cutover expires 2026-06-06
     def test_blocked_message_mentions_marker_and_sentinel(self):
         """BLOCKED output must mention the marker and sentinel, not only the env var."""
         # Run Channel B with no bypass — will block (pytest runs). We just
@@ -328,6 +378,10 @@ class TestWorktreeVenvDiscovery:
             f"hook did not emit DRY_RUN line; stderr was:\n{stderr}"
         )
 
+    @pytest.mark.xfail(
+        reason="legacy shell moved to .claude/hooks/legacy/ in Phase 3.R (2026-05-06); dispatch.py is canonical; retire by 2026-06-06",
+        strict=False,
+    )  # phase3r-legacy-cutover expires 2026-06-06
     def test_falls_through_to_main_worktree_venv_when_local_venv_missing(self, tmp_path):
         """Run the actual hook in a fresh `git worktree add`-ed sibling
         without `.venv`. The hook's discovery must locate the canonical
@@ -375,6 +429,10 @@ class TestWorktreeVenvDiscovery:
                 capture_output=True,
             )
 
+    @pytest.mark.xfail(
+        reason="legacy shell moved to .claude/hooks/legacy/ in Phase 3.R (2026-05-06); dispatch.py is canonical; retire by 2026-06-06",
+        strict=False,
+    )  # phase3r-legacy-cutover expires 2026-06-06
     def test_operator_override_wins_even_when_local_venv_missing(self, tmp_path):
         """If the operator pinned ZEUS_HOOK_PYTEST_BIN, the fall-through
         must NOT override that choice. The hook's downstream BLOCKED path

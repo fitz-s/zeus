@@ -5,6 +5,12 @@
 # Regression tests for .claude/hooks/post-merge-cleanup-reminder.sh
 # Covers: paths-with-spaces and sibling-prefix worktree listing.
 # Pattern mirrors tests/test_pre_commit_hook.py (subprocess + fixture approach).
+#
+# Phase 3.R (2026-05-06): post-merge-cleanup-reminder.sh moved to .claude/hooks/legacy/.
+# The canonical advisory logic now lives in dispatch.py::_run_advisory_check_post_merge_cleanup
+# (tested in test_hook_dispatch_smoke.py::test_post_merge_cleanup_gh_pr_merge_emits_advisory).
+# Tests below are marked xfail (retire by 2026-06-06 per PLAN §6.5 cutover).
+# See evidence/hook_phase3r_legacy_test_disposition.md.
 
 import json
 import subprocess
@@ -69,6 +75,10 @@ class TestWorktreeListParser:
     use the actual hook binary rather than duplicating parser logic in the test.
     """
 
+    @pytest.mark.xfail(
+        reason="legacy shell moved to .claude/hooks/legacy/ in Phase 3.R (2026-05-06); dispatch.py is canonical; retire by 2026-06-06",
+        strict=False,
+    )  # phase3r-legacy-cutover expires 2026-06-06
     def test_worktree_path_with_embedded_space_is_preserved(self, tmp_path):
         """A linked worktree whose path contains a space must appear intact.
 
@@ -93,6 +103,10 @@ class TestWorktreeListParser:
             f"stdout was:\n{result.stdout}"
         )
 
+    @pytest.mark.xfail(
+        reason="legacy shell moved to .claude/hooks/legacy/ in Phase 3.R (2026-05-06); dispatch.py is canonical; retire by 2026-06-06",
+        strict=False,
+    )  # phase3r-legacy-cutover expires 2026-06-06
     def test_sibling_prefix_worktree_is_not_excluded(self, tmp_path):
         """A linked worktree whose path is a prefix of another must not be
         mistakenly excluded by the main-worktree grep.

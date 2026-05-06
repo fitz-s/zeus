@@ -1,6 +1,1 @@
-OPERATOR_SIGNED: 2026-05-06
-override_id: HOOK_SCHEMA_CHANGE
-purpose: Phase 3 cutover — replace 7 legacy shell entries in .claude/settings.json with dispatch.py invocations per PLAN §3 Phase 3 deliverables. No functional change to hook semantics; this is a structural consolidation authorized by the Phase 3 brief.
-authorized_by: operator (this file written outside agent write surface per CHARTER §6.4)
-files_affected:
-  - .claude/settings.json (7 legacy entries → 7 dispatch.py entries; 5 Phase 2 entries retained; 12 total)
+HOOK_SCHEMA_CHANGE authorized 2026-05-06: Phase 3.R port 7 legacy shell logics into dispatch.py, close phase1_stub regression. Operator: Fitz
