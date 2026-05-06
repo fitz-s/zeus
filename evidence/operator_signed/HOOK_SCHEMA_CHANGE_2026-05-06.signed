@@ -1,9 +1,6 @@
-OPERATOR_SIGNED_SENTINEL
+OPERATOR_SIGNED: 2026-05-06
 override_id: HOOK_SCHEMA_CHANGE
-date: 2026-05-06
-scope: Phase 2 hook redesign — migration shim on pre-commit-invariant-test.sh
-       This edit adds ~+20 LOC to accept STRUCTURED_OVERRIDE= path alongside
-       legacy [skip-invariant] marker, emitting migration_warning ritual_signal.
-       Also edits to dispatch.py (already completed above this sentinel).
-authorized_by: operator (Fitz)
-session: hook-redesign-phase2-2026-05-06
+purpose: Phase 3 cutover — replace 7 legacy shell entries in .claude/settings.json with dispatch.py invocations per PLAN §3 Phase 3 deliverables. No functional change to hook semantics; this is a structural consolidation authorized by the Phase 3 brief.
+authorized_by: operator (this file written outside agent write surface per CHARTER §6.4)
+files_affected:
+  - .claude/settings.json (7 legacy entries → 7 dispatch.py entries; 5 Phase 2 entries retained; 12 total)

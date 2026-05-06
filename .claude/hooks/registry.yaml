@@ -43,6 +43,7 @@ hooks:
     bypass_policy:
       class: structured_override
       override_ids: [REVIEW_SAFE_TAG, OPERATOR_CLEARED]
+      max_active_per_30d: 5
       requires_evidence_file: true
     sunset_date: 2026-08-06
     telemetry:
@@ -60,6 +61,7 @@ hooks:
     bypass_policy:
       class: structured_override
       override_ids: [SOLO_AGENT, ISOLATED_WORKTREE]
+      max_active_per_30d: 5
     sunset_date: 2026-08-06
     telemetry:
       ritual_signal_emitted: true
@@ -78,6 +80,7 @@ hooks:
     bypass_policy:
       class: structured_override
       override_ids: [STASH_FIRST_VERIFIED, OPERATOR_DESTRUCTIVE]
+      max_active_per_30d: 5
       requires_evidence_file: true
       OPERATOR_SIGNATURE_REQUIRED: true   # TRUTH_REWRITE class — operator-signed sentinel per OD-HOOK-2
     sunset_date: 2026-08-06

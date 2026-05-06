@@ -1,31 +1,28 @@
 #!/usr/bin/env bash
 # Created: 2026-05-01
-# Last reused/audited: 2026-05-01
+# Last reused/audited: 2026-05-06
 # Authority basis: ultrareview25_remediation 2026-05-01 P0-2
+#   Phase 3 cutover: delegate to dispatch.py (replaces direct legacy script calls)
+#   docs/operations/task_2026-05-06_hook_redesign/PLAN.md §3 Phase 3
 #
 # git pre-commit orchestrator. Fires on every operator-direct `git commit`
-# (and on agent-channel commits when core.hooksPath is set; the agent path is
-# also separately wired via .claude/settings.json PreToolUse so this is
-# defense-in-depth there).
-#
-# Activation: scripts/install_hooks.sh sets `git config core.hooksPath
-# .claude/hooks` so git looks here for hook names. This file is the named
-# `pre-commit` hook; it delegates to the existing dual-channel scripts.
+# (defense-in-depth: agent commits are also gated via .claude/settings.json
+# PreToolUse hooks).
 #
 # Both sub-checks are required-to-pass. Either one failing aborts the commit.
 
 set -euo pipefail
 
-HOOK_DIR=$(cd "$(dirname "$0")" && pwd)
+REPO_ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 
-# Re-export GIT_INDEX_FILE (git already sets it) so the dual-channel scripts
-# detect they're on the git path even if invoked with a non-canonical basename.
-export GIT_INDEX_FILE="${GIT_INDEX_FILE:-$(git rev-parse --git-path index 2>/dev/null || echo)}"
+# Provide empty JSON payload (git pre-commit has no stdin payload)
+PAYLOAD='{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git commit"}}' 
 
 STATUS=0
 
 run_required_hook() {
-    if "$@"; then
+    local hook_id="$1"
+    if echo "$PAYLOAD" | python3 "${REPO_ROOT}/.claude/hooks/dispatch.py" "$hook_id"; then
         return 0
     else
         local rc=$?
@@ -37,9 +34,9 @@ run_required_hook() {
 }
 
 # Step 1: invariant test baseline
-run_required_hook "${HOOK_DIR}/pre-commit-invariant-test.sh" </dev/null
+run_required_hook invariant_test
 
 # Step 2: secrets scan (gracefully skipped if gitleaks not installed)
-run_required_hook "${HOOK_DIR}/pre-commit-secrets.sh" </dev/null
+run_required_hook secrets_scan
 
 exit $STATUS
