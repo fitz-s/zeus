@@ -10,15 +10,46 @@ Scope: Zeus repo `.claude/hooks/` + `.claude/settings.json` + `.git/hooks/pre-co
 
 ---
 
+## §0.5 Critic-opus amendments (2026-05-06, post ba635a13)
+
+Critic-opus review (`evidence/hook_redesign_critic_opus.md`, agent ac0e874ad47ad8053) returned **GO-WITH-CONDITIONS** with 3 HIGH + 4 MEDIUM + 3 LOW findings. Phase 1 may proceed in parallel-install mode. The following amendments bind:
+
+**Path-prefix correction:** all `docs/evidence/` references in §2.3 + §6.1 + Phase 2 deliverables → `evidence/` (matches repo structure).
+
+**Phase 1 spec hardening (HIGH):**
+- ATTACK 4 — `tests/test_hook_dispatch_smoke.py` MUST: parametrize over `[h["id"] for h in registry.hooks]`; assert `hookEventName == spec["event"]`; assert `permissionDecision in {allow, deny, ask, defer}`; assert advisory hooks emit no `permissionDecision`; assert coverage `len(seen_hook_ids) == len(registry.hooks)`.
+- ATTACK 7 — `dispatch.py::validate_override` MUST: (a) clock-start = `git log -1 --format=%ct <evidence_file>` (immutable provenance); (b) replay protection: `(override_id, evidence_file)` pair counts once toward `max_active_per_30d` regardless of dispatch invocations; (c) `auto_expires_after: never` permitted only for `REVIEW_SAFE_TAG` + `ISOLATED_WORKTREE` with annual operator audit cited in M5 test.
+- ATTACK 8 (OD-HOOK-1 resolved) — `dispatch.py` crash semantics: ADVISORY hooks fail-open (exit 0); BLOCKING hooks fail-closed (exit 2 + stderr `"dispatch.py crash on <hook_id> — operator must --no-verify to proceed"`). Resolution: critic recommendation accepted as principled architectural answer; security gates fail-closed is universally correct.
+
+**Phase 2 spec additions (HIGH):**
+- ATTACK 1 (OD-HOOK-2 resolved) — `OPERATOR_SIGNATURE_REQUIRED` field gates by `reversibility_class`:
+  - `WORKING` / `ARCHIVE`: accept `cat <<EOF` evidence file (low blast radius).
+  - `TRUTH_REWRITE` / `ON_CHAIN`: require `evidence/operator_signed/<override_id>_<date>.signed` sentinel file written outside agent write surface (operator-only path documented in CHARTER §6.4). Mirrors topology redesign's reversibility-class pattern.
+- ATTACK 2 — add `pre_edit_hooks_protected` PreToolUse Edit|Write|MultiEdit|NotebookEdit hook covering `.claude/{settings.json,hooks/**}` with `HOOK_SCHEMA_CHANGE` override class (TRUTH_REWRITE-class → operator-signature required per OD-HOOK-2).
+
+**Phase 2 spec additions (MEDIUM):**
+- ATTACK 9 — `pr_open_monitor_arm` advisory MUST emit sentinel `MONITOR_ARM_REQUIRED:<pr-num>:<expiry-iso>` token in `additionalContext`; companion `Stop` hook checks session activated Monitor referencing `<pr-num>`. Telemetry: `advisory_emitted vs Monitor-actually-armed` becomes measurable.
+- ATTACK 5 sub-finding — Phase 2 brief MUST inventory `hook_common.py` (326 LOC) function-by-function with reuse-or-rewrite verdict before Phase 3 deletion.
+
+**Phase 3 cutover (LOW):**
+- ATTACK 10 — `pre_checkout_uncommitted_overlap` MUST set `subprocess.run(["git", "ls-tree", ...], timeout=5)` to prevent runaway tree-walk hang.
+
+**OD resolutions:**
+- OD-HOOK-1: ADVISORY fail-open + BLOCKING fail-closed (architectural fact — security gates fail-closed).
+- OD-HOOK-2: split by `reversibility_class`; operator-signed sentinel only for TRUTH_REWRITE/ON_CHAIN.
+- OD-HOOK-3: `evidence/` (definitional — repo has `evidence/`, not `docs/evidence/`).
+
+---
+
 ## §1 Problem
 
 ### 1.1 Verified evidence (re-measured 2026-05-06)
 
 | Metric | Briefing claim | Verified | Note |
 |---|---|---|---|
-| `[skip-invariant]` commits, last 60d | 161 | **187** | `git log --all --grep="skip-invariant" --since="60 days ago" --oneline \| wc -l` |
-| `[skip-invariant]` commits, last 30d | — | **187** | every one is in the last 35 days; rate accelerating, not decaying |
-| Daily bypass rate | ~2.7/day | **~3.1/day** | 187/60 |
+| `[skip-invariant]` commits, last 60d | 161 | **188** | `git log --all --grep="skip-invariant" --since="60 days ago" --oneline \| wc -l` (re-measured by critic-opus 2026-05-06; planner reported 187 — off-by-1 reproduction window) |
+| `[skip-invariant]` commits, last 30d | — | **188** | every one is in the last 35 days; rate accelerating, not decaying |
+| Daily bypass rate | ~2.7/day | **~3.1/day** | 188/60 |
 | Hooks LOC | — | 1,337 | `wc -l .claude/hooks/*.{sh,py}` |
 | Hook scripts | — | 8 (7 sh + 1 py shared) | `ls .claude/hooks/` |
 | Documented escape hatches in `pre-commit-invariant-test.sh` | — | **3** (marker, sentinel file, env var) + 1 file-based skip sentinel = 4 | lines 79-126 of that script |
@@ -228,7 +259,7 @@ overrides:
       Phase deliberately raises the pytest baseline (e.g., adds new
       antibody tests). Hook expects the new count; old count is stale.
     requires:
-      evidence_file: docs/evidence/baseline_ratchets/<date>_<phase>.md
+      evidence_file: evidence/baseline_ratchets/<date>_<phase>.md
       fields_required: [old_baseline, new_baseline, justification, phase_id]
       auto_expires_after: 24h
     audit_log: .claude/logs/hook_overrides/baseline_ratchet.jsonl
@@ -238,7 +269,7 @@ overrides:
       origin/main itself failed before this PR began. Reconciling on
       our branch should not be gated by main's pre-existing failures.
     requires:
-      evidence_file: docs/evidence/main_regressions/<date>.md
+      evidence_file: evidence/main_regressions/<date>.md
       fields_required: [main_commit_sha, failing_test_count_on_main, justification]
       auto_expires_after: 7d
     audit_log: .claude/logs/hook_overrides/main_regression.jsonl
@@ -248,7 +279,7 @@ overrides:
       Co-tenant agent's commit pipeline ran while we were mid-phase;
       reconciling its baseline-bump entry into our branch.
     requires:
-      evidence_file: docs/evidence/cotenant_shims/<date>.md
+      evidence_file: evidence/cotenant_shims/<date>.md
       fields_required: [cotenant_commit_sha, justification]
       auto_expires_after: 24h
 
@@ -264,7 +295,7 @@ overrides:
   - id: OPERATOR_CLEARED
     description: One-shot human-cleared finding.
     requires:
-      evidence_file: docs/evidence/secrets_overrides/<date>.md
+      evidence_file: evidence/secrets_overrides/<date>.md
       operator_signature: true
       auto_expires_after: 24h
 
@@ -280,7 +311,7 @@ overrides:
   - id: OPERATOR_DESTRUCTIVE
     description: Operator explicitly accepts uncommitted work loss.
     requires:
-      evidence_file: docs/evidence/destructive_checkouts/<date>.md
+      evidence_file: evidence/destructive_checkouts/<date>.md
       operator_signature: true
       auto_expires_after: 1h
 
@@ -299,7 +330,7 @@ overrides:
   - id: OPERATOR_OVERRIDE
     description: Emergency operator clause; hard ceiling.
     requires:
-      evidence_file: docs/evidence/operator_overrides/<date>.md
+      evidence_file: evidence/operator_overrides/<date>.md
       operator_signature: true
       auto_expires_after: 14d
 ```
@@ -623,7 +654,7 @@ Three phases sized for sonnet executor (~1-2 hours each).
 | `phase_close_commit_required` impl in `dispatch.py` | +50 | §2.8 |
 | `tests/test_pre_checkout_overlap.py` | ~80 | sample git states; assert deny on overlap, allow on disjoint |
 | `tests/test_structured_overrides.py` | ~120 | each override_id exercise; assert evidence-file validation; assert auto-expiry |
-| `docs/evidence/baseline_ratchets/.gitkeep` etc. | n/a | placeholder evidence dirs |
+| `evidence/baseline_ratchets/.gitkeep` etc. | n/a | placeholder evidence dirs |
 | Migration shim: `pre-commit-invariant-test.sh` accepts both `[skip-invariant]` (legacy) AND `STRUCTURED_OVERRIDE=BASELINE_RATCHET` (new); legacy emits `migration_warning` ritual_signal. | +20 to existing | shim period only |
 
 **Exit criteria:**
