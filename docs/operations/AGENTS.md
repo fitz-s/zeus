@@ -114,6 +114,8 @@ make a surface default-read unless `current_state.md` routes it.
 | `task_2026-05-04_zeus_may3_review_remediation/scope.yaml` | packet scope | Plan-finalization scope sidecar; source/script/test implementation requires narrower phase scopes |
 | `task_2026-05-05_topology_noise_repair/` | plan packet container | Scoped plan packet for topology boot-profile and script-route noise repair |
 | `task_2026-05-05_topology_noise_repair/PLAN.md` | topology planning packet | Minimal route evidence for the 2026-05-05 topology noise repair |
+| `task_2026-05-05_object_invariance_mainline/` | closeout packet container | PR67 object-meaning invariance closeout ledger and remaining-mainline alignment |
+| `task_2026-05-05_object_invariance_mainline/PLAN.md` | closeout ledger | PR67 baseline, wave-evidence ledger, review claims, verification debt, and remaining mainline plan |
 | `task_2026-05-05_object_invariance_wave5/` | plan packet container | Planning-lock evidence for object-meaning invariance Wave 5 settlement authority cutover |
 | `task_2026-05-05_object_invariance_wave5/PLAN.md` | topology planning packet | Route evidence for settlement source/result to position settlement authority repair |
 | `task_2026-05-05_object_invariance_wave6/` | plan packet container | Planning-lock evidence for object-meaning invariance Wave 6 command recovery and allocation authority repair |
