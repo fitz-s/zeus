@@ -27,7 +27,8 @@ yaml = import_yaml()
 
 ROOT = Path(__file__).resolve().parents[1]
 TOPOLOGY_PATH = ROOT / "architecture" / "topology.yaml"
-SCHEMA_PATH = ROOT / "architecture" / "topology_schema.yaml"
+# R12 (2026-05-06 Phase 5.B): SCHEMA_PATH deleted — topology_schema.yaml removed.
+# All schema data inlined as module constants below.
 INVARIANTS_PATH = ROOT / "architecture" / "invariants.yaml"
 SOURCE_RATIONALE_PATH = ROOT / "architecture" / "source_rationale.yaml"
 TEST_TOPOLOGY_PATH = ROOT / "architecture" / "test_topology.yaml"
@@ -143,6 +144,120 @@ _NAVIGATION_MODE_POLICY = {
 }
 
 ISSUE_BLOCKING_MODES = tuple(_NAVIGATION_MODE_POLICY)
+
+# ---------------------------------------------------------------------------
+# R12 Phase 5.B — Schema inline constants (formerly topology_schema.yaml)
+# topology_schema.yaml deleted 2026-05-06. These constants are the single source
+# of truth for required fields and contract shapes.
+# ---------------------------------------------------------------------------
+
+# Required top-level keys for architecture/topology.yaml validation.
+SCHEMA_REQUIRED_TOP_LEVEL_KEYS: tuple[str, ...] = (
+    "schema_version",
+    "metadata",
+    "coverage_roots",
+    "root_governed_files",
+    "state_surfaces",
+    "required_active_pointers",
+    "registry_directories",
+    "reference_fact_specs",
+    "digest_profile_selection",
+    "digest_profiles",
+)
+
+# Fields present in TopologyIssue JSON (used by issue_json_contract drift guard).
+SCHEMA_ISSUE_JSON_CONTRACT_LEGACY_FIELDS: tuple[str, ...] = (
+    "code",
+    "path",
+    "message",
+    "severity",
+)
+SCHEMA_ISSUE_JSON_CONTRACT_TYPED_FIELDS: tuple[str, ...] = (
+    "lane",
+    "scope",
+    "owner_manifest",
+    "repair_kind",
+    "blocking_modes",
+    "related_paths",
+    "companion_of",
+    "maturity",
+    "expires_at",
+    "lifecycle_state",
+    "lifecycle_owner",
+    "deferred_until",
+    "invalidation_condition",
+    "confidence",
+    "authority_status",
+    "repair_hint",
+)
+
+# Required fields in a route_card (agent_runtime_contract drift guard).
+SCHEMA_ROUTE_CARD_REQUIRED_FIELDS: tuple[str, ...] = (
+    "schema_version",
+    "authority_status",
+    "mode",
+    "task",
+    "profile",
+    "intent",
+    "task_class",
+    "write_intent",
+    "selection_evidence_class",
+    "needs_typed_intent",
+    "companion_files",
+    "admission_status",
+    "risk_tier",
+    "gate_budget",
+    "next_action",
+    "admitted_files",
+    "out_of_scope_files",
+    "forbidden_hits",
+    "hard_stops",
+    "claims",
+    "expansion_hints",
+    "operation_vector",
+    "operation_vector_sources",
+    "structural_decision_hints",
+    "dominant_driver",
+    "why_not_admitted",
+    "suggested_next_command",
+    "safe_next_files",
+    "blocked_file_reasons",
+    "persistence_target",
+    "merge_conflict_scan",
+    "merge_evidence_required",
+    "provenance_notes",
+    "claim_scope",
+)
+
+
+def load_schema() -> dict[str, Any]:
+    """Return schema data as a dict built from inline constants.
+
+    R12 Phase 5.B: topology_schema.yaml deleted. This function builds an equivalent
+    dict from inlined module constants so legacy callers (tests) continue to work
+    without file I/O. New code should use the SCHEMA_* constants directly.
+    """
+    return {
+        "required_top_level_keys": list(SCHEMA_REQUIRED_TOP_LEVEL_KEYS),
+        "issue_json_contract": {
+            "legacy_fields": {f: "string" for f in SCHEMA_ISSUE_JSON_CONTRACT_LEGACY_FIELDS},
+            "typed_fields": {f: "string" for f in SCHEMA_ISSUE_JSON_CONTRACT_TYPED_FIELDS},
+            "enums": {
+                "repair_kind": sorted(ISSUE_REPAIR_KINDS),
+                "maturity": sorted(ISSUE_MATURITY_VALUES),
+                "lifecycle_state": sorted(ISSUE_LIFECYCLE_STATES),
+                "authority_status": sorted(ISSUE_AUTHORITY_STATUSES),
+                "blocking_modes": list(ISSUE_BLOCKING_MODES),
+            },
+        },
+        "agent_runtime_contract": {
+            "route_card_required_fields": list(SCHEMA_ROUTE_CARD_REQUIRED_FIELDS),
+        },
+        "ownership": {
+            "fact_types": {},   # inlined in topology_doctor_ownership_checks.py constants
+        },
+    }
+
 
 RUNTIME_RISK_GATE_BUDGETS = {
     "T0": {
@@ -296,9 +411,7 @@ def load_topology() -> dict[str, Any]:
     return _load_yaml(TOPOLOGY_PATH)
 
 
-def load_schema() -> dict[str, Any]:
-    return _load_yaml(SCHEMA_PATH)
-
+# load_schema() is defined above with inline constants (R12 Phase 5.B).
 
 def load_invariants() -> dict[str, Any]:
     return _load_yaml(INVARIANTS_PATH)
@@ -673,8 +786,10 @@ def _is_root_scratch(path: Path) -> bool:
     return _registry_checks().is_root_scratch(path)
 
 
-def _check_schema(topology: dict[str, Any], schema: dict[str, Any]) -> list[TopologyIssue]:
-    return _registry_checks().check_schema(sys.modules[__name__], topology, schema)
+def _check_schema(topology: dict[str, Any], schema: dict[str, Any] | None = None) -> list[TopologyIssue]:
+    # R12 Phase 5.B: schema arg ignored — required_top_level_keys now inlined as constant.
+    _schema = {"required_top_level_keys": list(SCHEMA_REQUIRED_TOP_LEVEL_KEYS)}
+    return _registry_checks().check_schema(sys.modules[__name__], topology, _schema)
 
 
 def _check_coverage(topology: dict[str, Any]) -> list[TopologyIssue]:
@@ -792,7 +907,9 @@ def run_strict() -> StrictResult:
 
 
 def run_schema() -> StrictResult:
-    issues = _check_schema(load_topology(), load_schema())
+    # R12 Phase 5.B: load_schema() now returns inline constants; schema arg to
+    # _check_schema is ignored — keeps call site stable for external callers.
+    issues = _check_schema(load_topology())
     return StrictResult(ok=not issues, issues=issues)
 
 

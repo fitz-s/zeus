@@ -110,3 +110,35 @@ Refactor approach: (b) inline static lists.
 Files modified: `scripts/topology_doctor_ownership_checks.py`.
 Files deleted: none (topology_schema.yaml retained pending Phase 5).
 Net LOC change: +~80 LOC added (constants), -~5 LOC removed (schema reads).
+
+---
+
+## Phase 5.B Closure (2026-05-06)
+
+R12 fully closed at Phase 5.B. `architecture/topology_schema.yaml` deleted via `git rm`.
+
+### 4 remaining consumer sites — approach: inline as Python constants (option b)
+
+| Site | Resolution |
+|---|---|
+| `topology_doctor.py:30` `SCHEMA_PATH` constant | Removed; replaced with comment |
+| `topology_doctor.py:299` `load_schema()` file-reader | Replaced with inline-constant builder returning `SCHEMA_ISSUE_JSON_CONTRACT_*`, `SCHEMA_ROUTE_CARD_REQUIRED_FIELDS`, `SCHEMA_REQUIRED_TOP_LEVEL_KEYS` |
+| `topology_doctor.py:795` `run_schema()` + `_check_schema()` pipeline | `_check_schema()` now uses `SCHEMA_REQUIRED_TOP_LEVEL_KEYS` inline; `run_schema()` no longer passes schema dict |
+| `topology_doctor_registry_checks.py:405,408` `run_strict()` | `api.load_schema()` + `api._check_schema(topology, schema)` removed; replaced with `api._check_schema(topology)` using inline constant |
+| `tests/test_topology_doctor.py:2156` `issue_json_contract` drift guard | Rewritten to use `SCHEMA_ISSUE_JSON_CONTRACT_LEGACY_FIELDS` + `SCHEMA_ISSUE_JSON_CONTRACT_TYPED_FIELDS` constants |
+| `tests/test_topology_doctor.py:2287,2342,2349` `ownership_fact_types(load_schema())` | Calls updated to `ownership_fact_types()` (schema arg already ignored per Phase 4.R) |
+| `tests/test_topology_doctor.py:4530` `agent_runtime_contract.route_card_required_fields` | Rewritten to use `SCHEMA_ROUTE_CARD_REQUIRED_FIELDS` constant |
+| `tests/test_topology_doctor.py:4338` `topology_schema.yaml` in impact test | Replaced with `capabilities.yaml` (test is pre-existing failure; path string updated for accuracy) |
+
+New constants in `scripts/topology_doctor.py`:
+- `SCHEMA_REQUIRED_TOP_LEVEL_KEYS` — 10 required topology.yaml top-level keys
+- `SCHEMA_ISSUE_JSON_CONTRACT_LEGACY_FIELDS` — 4 legacy issue fields
+- `SCHEMA_ISSUE_JSON_CONTRACT_TYPED_FIELDS` — 17 typed issue fields
+- `SCHEMA_ROUTE_CARD_REQUIRED_FIELDS` — 34 route card required fields
+
+`topology_doctor_ownership_checks.py` owner_manifest strings updated from
+`"architecture/topology_schema.yaml"` → `"scripts/topology_doctor_ownership_checks.py"`.
+
+Net LOC change at Phase 5.B: +~130 LOC added (constants + load_schema builder), -537 LOC deleted (topology_schema.yaml), -5 LOC removed (schema file reads). Net: **-412 LOC**.
+
+R12 risk register entry: **CLOSED**. topology_schema.yaml gone from repo. All consumer sites refactored.

@@ -96,9 +96,9 @@ def check_ownership_schema(api: Any, schema: dict[str, Any] | None = None) -> li
         return [
             api.issue(
                 "ownership_schema_missing",
-                "architecture/topology_schema.yaml",
+                "scripts/topology_doctor_ownership_checks.py",
                 "missing ownership.fact_types section",
-                owner_manifest="architecture/topology_schema.yaml",
+                owner_manifest="scripts/topology_doctor_ownership_checks.py",
                 repair_kind="propose_owner_manifest",
                 blocking_modes=("strict_full_repo", "closeout"),
             )
@@ -108,9 +108,9 @@ def check_ownership_schema(api: Any, schema: dict[str, Any] | None = None) -> li
             issues.append(
                 api.issue(
                     "ownership_required_field_missing",
-                    f"architecture/topology_schema.yaml:ownership.fact_types.{fact_type}",
+                    f"scripts/topology_doctor_ownership_checks.py:OWNERSHIP_FACT_TYPES.{fact_type}",
                     "ownership fact type value is not a dict",
-                    owner_manifest="architecture/topology_schema.yaml",
+                    owner_manifest="scripts/topology_doctor_ownership_checks.py",
                     repair_kind="propose_owner_manifest",
                     blocking_modes=("strict_full_repo", "closeout"),
                 )
@@ -121,9 +121,9 @@ def check_ownership_schema(api: Any, schema: dict[str, Any] | None = None) -> li
             issues.append(
                 api.issue(
                     "ownership_required_field_missing",
-                    f"architecture/topology_schema.yaml:ownership.fact_types.{fact_type}.{field}",
+                    f"scripts/topology_doctor_ownership_checks.py:OWNERSHIP_FACT_TYPES.{fact_type}.{field}",
                     "ownership fact type missing required field",
-                    owner_manifest="architecture/topology_schema.yaml",
+                    owner_manifest="scripts/topology_doctor_ownership_checks.py",
                     repair_kind="propose_owner_manifest",
                     blocking_modes=("strict_full_repo", "closeout"),
                 )
@@ -133,9 +133,9 @@ def check_ownership_schema(api: Any, schema: dict[str, Any] | None = None) -> li
             issues.append(
                 api.issue(
                     "ownership_canonical_owner_missing",
-                    f"architecture/topology_schema.yaml:ownership.fact_types.{fact_type}",
+                    f"scripts/topology_doctor_ownership_checks.py:OWNERSHIP_FACT_TYPES.{fact_type}",
                     f"canonical owner does not exist: {canonical_owner}",
-                    owner_manifest="architecture/topology_schema.yaml",
+                    owner_manifest="scripts/topology_doctor_ownership_checks.py",
                     repair_kind="propose_owner_manifest",
                     blocking_modes=("strict_full_repo", "closeout"),
                 )
@@ -145,9 +145,9 @@ def check_ownership_schema(api: Any, schema: dict[str, Any] | None = None) -> li
             issues.append(
                 api.issue(
                     "ownership_multiple_canonical_owners",
-                    f"architecture/topology_schema.yaml:ownership.fact_types.{fact_type}",
+                    f"scripts/topology_doctor_ownership_checks.py:OWNERSHIP_FACT_TYPES.{fact_type}",
                     "fact type declares multiple canonical owners",
-                    owner_manifest="architecture/topology_schema.yaml",
+                    owner_manifest="scripts/topology_doctor_ownership_checks.py",
                     repair_kind="propose_owner_manifest",
                     blocking_modes=("strict_full_repo", "closeout"),
                 )
@@ -206,7 +206,7 @@ def check_first_wave_issue_owners(api: Any) -> list[Any]:
                     "ownership_issue_owner_missing",
                     f"scripts/topology_doctor.py:{code}",
                     f"first-wave issue family must set owner_manifest={expected_owner}",
-                    owner_manifest="architecture/topology_schema.yaml",
+                    owner_manifest="scripts/topology_doctor_ownership_checks.py",
                     repair_kind="propose_owner_manifest",
                     blocking_modes=("strict_full_repo", "closeout"),
                 )
