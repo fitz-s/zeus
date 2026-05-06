@@ -431,3 +431,37 @@ adds supplemental reads the digest cannot provide:
 Never run destructive git commands or overwrite unrelated dirty work without
 explicit human approval. Preserve untracked local inputs, runtime artifacts, and
 other packets unless the active packet explicitly governs them.
+
+## 5. Code review tasks
+
+For any code review, PR review, `/review`, ultrareview, or automated review
+task (Claude Code Review, GitHub Copilot Code Review, Codex review,
+manual Claude session):
+
+1. Read root `REVIEW.md` first — self-contained severity model, Tier
+   priority order, large-PR rule, evidence rule, reporting template.
+2. For deeper context, read `docs/review/code_review.md` (canonical
+   long-form doctrine) and `docs/review/review_scope_map.md` (path →
+   tier table).
+3. Review by **runtime-risk surface**, not by GitHub file order.
+   Exhaust Tier 0 (live money / runtime safety) before Tier 1
+   (data / probability / persistence). Tier 3 (docs / agents) only
+   if budget remains.
+4. Default-skip the canonical skip-list in
+   `docs/review/review_scope_map.md` (provenance archives, runtime
+   caches, generated/cache files, etc.) — unless the change
+   demonstrably alters runtime. Do not redefine the skip-list locally.
+5. Cite `architecture/invariants.yaml` invariant IDs (`INV-NN`) when
+   findings touch invariant-protected behavior.
+6. For large PRs, state explicit coverage limits in the review.
+   **Empty findings + partial coverage is not a clean pass** — report
+   as "partial coverage; clean for reviewed slice (X, Y); paths A, B
+   not reviewed; recommend slice review or split PR."
+7. The PR template's "AI Review Scope" section declares author-marked
+   priority paths; trust it before traversing alphabetically.
+8. Severity model is identical across `REVIEW.md`,
+   `docs/review/code_review.md`, `.github/copilot-instructions.md`,
+   and `.github/instructions/*.instructions.md`. Drift between any two
+   is itself an **Important** finding (Tier 3 surface).
+
+The review doctrine surface is owned by `docs/review/AGENTS.md`.
