@@ -140,7 +140,8 @@ def test_no_helper_blocks_unrelated_capability():
 
 
 # ---------------------------------------------------------------------------
-# Assertion 2: every ritual_signal log line is schema-compliant
+# Assertion 2: every ritual_signal log line is schema-compliant and cap_id
+# resolves to capabilities.yaml (Phase 5.A production assertion).
 # ---------------------------------------------------------------------------
 
 _REQUIRED_SIGNAL_FIELDS = {
@@ -153,34 +154,85 @@ _REQUIRED_SIGNAL_FIELDS = {
     "charter_version",
 }
 
+# Gate helpers that predate cap_id field (Phase 4.D gap; their entries lack the
+# field entirely — not a schema violation, just a field-absent older format).
+_HELPERS_WITHOUT_CAP_ID = frozenset({"gate2_live_auth_token", "replay_correctness_gate"})
+
+# Cap IDs emitted by gate_runtime.py Phase 4.D that are not yet in
+# capabilities.yaml (capabilities.yaml has 6 of 16 planned entries; the
+# remaining 10 are Phase 1 carry-forwards tracked in IMPLEMENTATION_PLAN §3).
+# This set must shrink monotonically as capabilities.yaml is extended.
+_PHASE4D_DEFERRED_CAP_IDS: frozenset[str] = frozenset({
+    "calibration_decision_group_write",
+    "calibration_persistence_write",
+    "calibration_rebuild",
+    "decision_artifact_write",
+    "on_chain_mutation",
+    "settlement_rebuild",
+    "venue_command_write",
+})
+
 
 def test_every_invocation_emits_ritual_signal():
-    """ANTI_DRIFT_CHARTER §7 — assertion 2.
+    """ANTI_DRIFT_CHARTER §7 — assertion 2 (Phase 5.A production version).
 
-    Every ritual_signal log line must carry all schema-required fields.
-    Malformed or incomplete lines indicate a helper that does not comply with
-    CHARTER §3 M1 (telemetry-as-output).
+    Every ritual_signal log entry is checked for:
+      (a) schema compliance — all required fields present.
+      (b) cap_id resolution — cap_id (when present) resolves to capabilities.yaml
+          OR is the '(none)' sentinel (no capability matched) OR is a documented
+          Phase 4.D deferred ID (_PHASE4D_DEFERRED_CAP_IDS).
+
+    No new orphaned cap_ids beyond _PHASE4D_DEFERRED_CAP_IDS are permitted.
     """
     entries = _ritual_log_entries(days=30)
 
     if not entries:
-        pytest.skip("No ritual_signal entries in the last 30 days — log not yet populated (Phase 5 wires telemetry)")
+        pytest.skip(
+            "No ritual_signal entries in the last 30 days — "
+            "log not yet populated (Phase 5 wires telemetry)"
+        )
 
-    bad = []
+    caps = _load_capabilities()
+    known_cap_ids = {c["id"] for c in caps}
+
+    schema_violations: list[str] = []
+    orphaned_cap_ids: set[str] = set()
+
     for entry in entries:
         if "_malformed" in entry:
-            bad.append(f"Malformed JSON: {entry['_malformed']!r}")
+            schema_violations.append(f"Malformed JSON: {entry['_malformed']!r}")
             continue
-        missing = _REQUIRED_SIGNAL_FIELDS - set(entry.keys())
+
+        # (a) Schema compliance — only required fields; cap_id is gated per helper.
+        helper = entry.get("helper", "")
+        expected_fields = set(_REQUIRED_SIGNAL_FIELDS)
+        if helper not in _HELPERS_WITHOUT_CAP_ID:
+            # gate_edit_time, gate_commit_time, gate_runtime emit cap_id
+            expected_fields.add("cap_id")
+
+        missing = expected_fields - set(entry.keys())
         if missing:
-            bad.append(
-                f"Entry missing fields {sorted(missing)}: helper={entry.get('helper')!r} "
+            schema_violations.append(
+                f"Entry missing fields {sorted(missing)}: helper={helper!r} "
                 f"task_id={entry.get('task_id')!r}"
             )
 
-    assert not bad, (
+        # (b) cap_id resolution.
+        cap_id = entry.get("cap_id")
+        if cap_id is None or cap_id == "(none)":
+            # Absent or sentinel — OK.
+            continue
+        if cap_id not in known_cap_ids and cap_id not in _PHASE4D_DEFERRED_CAP_IDS:
+            orphaned_cap_ids.add(cap_id)
+
+    assert not schema_violations, (
         "INV-HELP-NOT-GATE: ritual_signal log entries missing required fields:\n"
-        + "\n".join(f"  - {b}" for b in bad)
+        + "\n".join(f"  - {v}" for v in schema_violations)
+    )
+    assert not orphaned_cap_ids, (
+        "INV-HELP-NOT-GATE: ritual_signal log entries reference cap_ids not in "
+        "capabilities.yaml and not in _PHASE4D_DEFERRED_CAP_IDS (new orphans):\n"
+        + "\n".join(f"  - {cid}" for cid in sorted(orphaned_cap_ids))
     )
 
 

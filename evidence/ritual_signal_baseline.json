@@ -1,0 +1,142 @@
+{
+  "generated_at": "2026-05-06T19:34:31.277274+00:00",
+  "log_dir": "/Users/leofitz/.openclaw/workspace-venus/zeus/logs/ritual_signal",
+  "windows": {
+    "24h": {
+      "total": 450,
+      "per_gate": {
+        "replay_correctness_gate": 3,
+        "gate_edit_time": 178,
+        "gate_commit_time": 179,
+        "gate2_live_auth_token": 31,
+        "gate_runtime": 59
+      },
+      "per_cap_id": {
+        "(no_cap_id_field)": 34,
+        "(none)": 80,
+        "control_write": 22,
+        "canonical_position_write": 155,
+        "authority_doc_rewrite": 23,
+        "archive_promotion": 22,
+        "settlement_write": 15,
+        "calibration_persistence_write": 3,
+        "calibration_decision_group_write": 3,
+        "decision_artifact_write": 3,
+        "venue_command_write": 3,
+        "on_chain_mutation": 3,
+        "calibration_rebuild": 3,
+        "settlement_rebuild": 3,
+        "live_venue_submit": 78
+      },
+      "per_decision": {
+        "applied": 29,
+        "allow": 273,
+        "warn": 23,
+        "refuse": 120,
+        "blocked": 5
+      }
+    },
+    "7d": {
+      "total": 450,
+      "per_gate": {
+        "replay_correctness_gate": 3,
+        "gate_edit_time": 178,
+        "gate_commit_time": 179,
+        "gate2_live_auth_token": 31,
+        "gate_runtime": 59
+      },
+      "per_cap_id": {
+        "(no_cap_id_field)": 34,
+        "(none)": 80,
+        "control_write": 22,
+        "canonical_position_write": 155,
+        "authority_doc_rewrite": 23,
+        "archive_promotion": 22,
+        "settlement_write": 15,
+        "calibration_persistence_write": 3,
+        "calibration_decision_group_write": 3,
+        "decision_artifact_write": 3,
+        "venue_command_write": 3,
+        "on_chain_mutation": 3,
+        "calibration_rebuild": 3,
+        "settlement_rebuild": 3,
+        "live_venue_submit": 78
+      },
+      "per_decision": {
+        "applied": 29,
+        "allow": 273,
+        "warn": 23,
+        "refuse": 120,
+        "blocked": 5
+      }
+    },
+    "30d": {
+      "total": 450,
+      "per_gate": {
+        "replay_correctness_gate": 3,
+        "gate_edit_time": 178,
+        "gate_commit_time": 179,
+        "gate2_live_auth_token": 31,
+        "gate_runtime": 59
+      },
+      "per_cap_id": {
+        "(no_cap_id_field)": 34,
+        "(none)": 80,
+        "control_write": 22,
+        "canonical_position_write": 155,
+        "authority_doc_rewrite": 23,
+        "archive_promotion": 22,
+        "settlement_write": 15,
+        "calibration_persistence_write": 3,
+        "calibration_decision_group_write": 3,
+        "decision_artifact_write": 3,
+        "venue_command_write": 3,
+        "on_chain_mutation": 3,
+        "calibration_rebuild": 3,
+        "settlement_rebuild": 3,
+        "live_venue_submit": 78
+      },
+      "per_decision": {
+        "applied": 29,
+        "allow": 273,
+        "warn": 23,
+        "refuse": 120,
+        "blocked": 5
+      }
+    }
+  },
+  "all_time": {
+    "total": 450,
+    "per_gate": {
+      "replay_correctness_gate": 3,
+      "gate_edit_time": 178,
+      "gate_commit_time": 179,
+      "gate2_live_auth_token": 31,
+      "gate_runtime": 59
+    },
+    "per_cap_id": {
+      "(no_cap_id_field)": 34,
+      "(none)": 80,
+      "control_write": 22,
+      "canonical_position_write": 155,
+      "authority_doc_rewrite": 23,
+      "archive_promotion": 22,
+      "settlement_write": 15,
+      "calibration_persistence_write": 3,
+      "calibration_decision_group_write": 3,
+      "decision_artifact_write": 3,
+      "venue_command_write": 3,
+      "on_chain_mutation": 3,
+      "calibration_rebuild": 3,
+      "settlement_rebuild": 3,
+      "live_venue_submit": 78
+    },
+    "per_decision": {
+      "applied": 29,
+      "allow": 273,
+      "warn": 23,
+      "refuse": 120,
+      "blocked": 5
+    }
+  }
+}
