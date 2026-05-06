@@ -991,6 +991,8 @@ def execute_final_intent(
     inputs; those belong upstream of corrected cost-basis construction.
     """
 
+    from src.architecture.gate_runtime import check as _gate_runtime_check
+    _gate_runtime_check("live_venue_submit")
     if not isinstance(intent, FinalExecutionIntent):
         raise TypeError(
             "execute_final_intent requires FinalExecutionIntent, "
@@ -1045,6 +1047,8 @@ def execute_intent(
     with a WARNING log.
     """
 
+    from src.architecture.gate_runtime import check as _gate_runtime_check
+    _gate_runtime_check("live_venue_submit")
     trade_id = str(uuid.uuid4())[:12]
 
     limit_price = intent.limit_price
@@ -1161,6 +1165,8 @@ def execute_exit_order(
       4. submit: client.place_limit_order (SDK call)
       5. ack: append_event SUBMIT_ACKED / SUBMIT_REJECTED / SUBMIT_UNKNOWN
     """
+    from src.architecture.gate_runtime import check as _gate_runtime_check
+    _gate_runtime_check("settlement_write")
     from src.data.polymarket_client import PolymarketClient
     from src.execution.command_bus import IdempotencyKey, IntentKind, VenueCommand, CommandState
     from src.state.venue_command_repo import insert_command, append_event, get_command
@@ -1810,6 +1816,8 @@ def _live_order(
       5. submit: client.place_limit_order (SDK call)
       6. ack: append_event SUBMIT_ACKED / SUBMIT_REJECTED / SUBMIT_UNKNOWN
     """
+    from src.architecture.gate_runtime import check as _gate_runtime_check
+    _gate_runtime_check("live_venue_submit")
     from src.data.polymarket_client import PolymarketClient, V2PreflightError
     from src.execution.command_bus import IdempotencyKey, IntentKind
     from src.state.venue_command_repo import insert_command, append_event

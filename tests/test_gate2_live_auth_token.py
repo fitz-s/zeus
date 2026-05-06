@@ -238,3 +238,23 @@ def test_untyped_for_compat_escape_hatch_records_sunset() -> None:
         f"DeprecationWarning must mention expiry date {_COMPAT_EXPIRES_AT!r}. "
         f"Got: {warning_text!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# R-3 (M-2): K0-1 forgery resistance regression test
+# ---------------------------------------------------------------------------
+
+def test_live_auth_token_unforgeable_via_dict_write():
+    """K0-1 regression test — phantom token must not be constructible via object.__new__ + __dict__.
+
+    Before R-1 (slots=True), object.__new__(LiveAuthToken) produced an instance
+    with a __dict__, allowing arbitrary attribute injection that bypassed the
+    __new__ caller-file guard. With slots=True, __dict__ does not exist on
+    instances, so the write raises AttributeError.
+    """
+    import pytest
+    from src.execution.live_executor import LiveAuthToken
+
+    obj = object.__new__(LiveAuthToken)
+    with pytest.raises(AttributeError):
+        obj.__dict__["_issued_at"] = "2026-01-01T00:00:00+00:00"

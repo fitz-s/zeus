@@ -105,7 +105,7 @@ def _emit_signal(event: str, outcome: str, detail: str = "") -> None:
 # LiveAuthToken -- opaque phantom type
 # ---------------------------------------------------------------------------
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class LiveAuthToken:
     """Opaque phantom token proving a live submission passed all gate checks.
 

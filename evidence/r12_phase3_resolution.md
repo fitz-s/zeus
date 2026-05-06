@@ -85,3 +85,28 @@ The Phase 3 net delete figure remains strongly positive: ≥16,000 LOC deleted f
 
 1. `topology_schema.yaml` deletion requires topology_doctor.py refactor to load capability/reversibility YAML for ownership checks. Phase 4 Gate 1 implementation is the natural forcing function.
 2. `inv_prototype.py` retention is conditional: if Phase 4 introduces a capabilities.yaml-based drift-detection query, migrate `test_inv_prototype.py` assertions to that surface and delete both files.
+
+---
+
+## Phase 4 Remediation — R12 Partial Close (2026-05-06)
+
+R12 partially closed at Phase 4 remediation. Ownership block (option b) inlined into
+`scripts/topology_doctor_ownership_checks.py` as module constants `OWNERSHIP_FACT_TYPES`
+and `OWNERSHIP_MATURITY_VALUES` — 13 ownership call sites resolved from constants;
+`check_module_manifest_maturity()` and `ownership_fact_types()` no longer call
+`api.load_schema()` for ownership data.
+
+FULL `topology_schema.yaml` deletion deferred to Phase 5: schema is also consumed by
+`issue_json_contract` drift guard (test_topology_doctor.py:2156), `agent_runtime_contract`
+route_card_required_fields (test_topology_doctor.py:4530), and `run_schema()` /
+`_check_schema()` which validate topology.yaml `required_top_level_keys`
+(topology_doctor.py:795, topology_doctor_registry_checks.py:408) — approximately 4
+additional consumer sites requiring ~80 source + ~20 test LOC refactor.
+
+Phase 5 brief must include: migrate remaining `load_schema()` consumers to inlined
+constants or capabilities.yaml, then `git rm architecture/topology_schema.yaml`.
+
+Refactor approach: (b) inline static lists.
+Files modified: `scripts/topology_doctor_ownership_checks.py`.
+Files deleted: none (topology_schema.yaml retained pending Phase 5).
+Net LOC change: +~80 LOC added (constants), -~5 LOC removed (schema reads).
