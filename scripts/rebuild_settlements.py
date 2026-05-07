@@ -17,10 +17,15 @@ from __future__ import annotations
 import argparse
 import json
 import sqlite3
+import sys
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
 
 from src.config import cities_by_name
 from src.contracts.exceptions import SettlementPrecisionError
@@ -31,6 +36,7 @@ from src.data.rebuild_validators import (
     validate_observation_for_settlement,
 )
 from src.state.db import get_world_connection
+from src.state.db_writer_lock import WriteClass, db_writer_lock  # noqa: E402
 from src.types.metric_identity import HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN, MetricIdentity
 
 METRIC_IDENTITIES = {
@@ -303,24 +309,27 @@ def main() -> int:
     parser.add_argument("--apply", action="store_true", help="Write rows. Default is dry-run.")
     args = parser.parse_args()
 
-    conn = sqlite3.connect(str(args.db)) if args.db else get_world_connection(write_class="bulk")
-    try:
-        summary = rebuild_settlements_scoped(
-            conn,
-            dry_run=not args.apply,
-            city_filter=args.city_filter,
-            start_date=args.start_date,
-            end_date=args.end_date,
-            temperature_metric=args.temperature_metric,
-        )
-        if args.apply:
-            conn.commit()
-        else:
-            conn.rollback()
-        print(summary)
-        return 0
-    finally:
-        conn.close()
+    from src.state.db import ZEUS_WORLD_DB_PATH  # noqa: PLC0415
+    _lock_path = Path(args.db) if args.db else ZEUS_WORLD_DB_PATH
+    with db_writer_lock(_lock_path, WriteClass.BULK):
+        conn = sqlite3.connect(str(args.db)) if args.db else get_world_connection(write_class="bulk")
+        try:
+            summary = rebuild_settlements_scoped(
+                conn,
+                dry_run=not args.apply,
+                city_filter=args.city_filter,
+                start_date=args.start_date,
+                end_date=args.end_date,
+                temperature_metric=args.temperature_metric,
+            )
+            if args.apply:
+                conn.commit()
+            else:
+                conn.rollback()
+            print(summary)
+            return 0
+        finally:
+            conn.close()
 
 
 if __name__ == "__main__":

@@ -44,28 +44,30 @@ from unittest.mock import patch
 
 # Ensure DB is unpaused before invocation
 import sqlite3
+from src.state.db_writer_lock import WriteClass, db_writer_lock  # noqa: E402
 
 DB_PATH = "state/zeus-world.db"
 NOW_ISO = datetime.now(timezone.utc).isoformat()
 
 
 def _ensure_unpaused():
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute(
-        """
-        INSERT INTO control_overrides_history (
-          override_id, target_type, target_key, action_type, value,
-          issued_by, issued_at, effective_until, reason, precedence,
-          operation, recorded_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            "control_plane:global:entries_paused", "global", "entries", "gate", "false",
-            "control_plane", NOW_ISO, None, "force_cycle_test_pre", 100, "upsert", NOW_ISO,
-        ),
-    )
-    conn.commit()
-    conn.close()
+    with db_writer_lock(DB_PATH, WriteClass.BULK):
+        conn = sqlite3.connect(DB_PATH)
+        conn.execute(
+            """
+            INSERT INTO control_overrides_history (
+              override_id, target_type, target_key, action_type, value,
+              issued_by, issued_at, effective_until, reason, precedence,
+              operation, recorded_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "control_plane:global:entries_paused", "global", "entries", "gate", "false",
+                "control_plane", NOW_ISO, None, "force_cycle_test_pre", 100, "upsert", NOW_ISO,
+            ),
+        )
+        conn.commit()
+        conn.close()
     for f in ("state/auto_pause_failclosed.tombstone", "state/auto_pause_streak.json"):
         try:
             os.remove(f)
