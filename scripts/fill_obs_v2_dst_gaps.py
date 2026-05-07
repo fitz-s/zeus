@@ -66,6 +66,7 @@ from src.data.tier_resolver import (  # noqa: E402
     Tier,
     tier_for_city,
 )
+from src.state.db_writer_lock import WriteClass, db_writer_lock  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -320,31 +321,32 @@ def main(argv: Optional[list[str]] = None) -> int:
         print(f"FATAL: DB not found at {args.db}", file=sys.stderr)
         return 2
 
-    conn = sqlite3.connect(str(args.db))
-    try:
-        gaps = _find_gaps(conn, args.data_version, cities_filter=args.cities)
-        if not gaps:
-            print(f"No Tier 1 gaps < {_MIN_HOURS_PER_DAY} hours/day for "
-                  f"data_version={args.data_version!r}. Nothing to fill.")
-            return 0
-        print(
-            f"Found {len(gaps)} (city, date) gaps under {_MIN_HOURS_PER_DAY} "
-            f"hours/day. Processing via Ogimet{' (DRY-RUN)' if args.dry_run else ''}:"
-        )
-        total_written = 0
-        for city_name, td_str, hours in gaps:
-            target_date = date.fromisoformat(td_str)
-            written = _fill_one_date(
-                conn, city_name, target_date, args.data_version,
-                args.log, args.dry_run,
+    with db_writer_lock(args.db, WriteClass.BULK):
+        conn = sqlite3.connect(str(args.db))
+        try:
+            gaps = _find_gaps(conn, args.data_version, cities_filter=args.cities)
+            if not gaps:
+                print(f"No Tier 1 gaps < {_MIN_HOURS_PER_DAY} hours/day for "
+                      f"data_version={args.data_version!r}. Nothing to fill.")
+                return 0
+            print(
+                f"Found {len(gaps)} (city, date) gaps under {_MIN_HOURS_PER_DAY} "
+                f"hours/day. Processing via Ogimet{' (DRY-RUN)' if args.dry_run else ''}:"
             )
-            mark = "(dry-run)" if args.dry_run else f"wrote {written}"
-            print(f"  {city_name:16s} {td_str} had {hours}h; {mark}")
-            total_written += written
-        print(f"\nTotal rows written: {total_written}")
-        return 0
-    finally:
-        conn.close()
+            total_written = 0
+            for city_name, td_str, hours in gaps:
+                target_date = date.fromisoformat(td_str)
+                written = _fill_one_date(
+                    conn, city_name, target_date, args.data_version,
+                    args.log, args.dry_run,
+                )
+                mark = "(dry-run)" if args.dry_run else f"wrote {written}"
+                print(f"  {city_name:16s} {td_str} had {hours}h; {mark}")
+                total_written += written
+            print(f"\nTotal rows written: {total_written}")
+            return 0
+        finally:
+            conn.close()
 
 
 if __name__ == "__main__":
