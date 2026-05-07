@@ -637,16 +637,73 @@ def _normalize_intent(value: str) -> str:
     return " ".join(value.strip().lower().replace("_", " ").split())
 
 
+# K3: canonical typed_intent_enum values that short-circuit profile selection.
+# Source: architecture/admission_severity.yaml typed_intent_enum (9-value enum).
+# plan_only / audit / hygiene / rebase_keepup admit all requested paths (read-intent);
+# hotfix / create_new / modify_existing / refactor / other use normal profile resolution
+# for admission but are still recognised as canonical (non-invalid) intents.
+_CANONICAL_TYPED_INTENTS: frozenset[str] = frozenset({
+    "plan_only",
+    "create_new",
+    "modify_existing",
+    "refactor",
+    "audit",
+    "hygiene",
+    "hotfix",
+    "rebase_keepup",
+    "other",
+})
+
+# Intents that admit ALL requested paths without a profile match.
+# These are read-only or non-source-modifying intents per admission_severity.yaml.
+_ADMIT_ALL_PATHS_INTENTS: frozenset[str] = frozenset({
+    "plan_only",
+    "audit",
+    "hygiene",
+    "rebase_keepup",
+    "hotfix",
+})
+
+
 def _resolve_typed_intent(intent: str | None, topology: dict[str, Any]) -> dict[str, Any] | None:
     """Resolve an explicit caller intent before free-text scoring.
 
-    `intent` is a digest profile id, not write authorization. Admission still
-    reconciles requested files against profile.allowed_files, so explicit intent
-    cannot bypass forbidden-wins or no-echo invariants.
+    K3 amendment: when intent is a canonical typed_intent_enum value, short-circuit
+    profile selection and return a non-ambiguous resolution. Intents in
+    _ADMIT_ALL_PATHS_INTENTS bypass profile allowed_files entirely (admitted directly).
+    For other canonical intents (create_new, modify_existing, refactor, other), the
+    resolution is non-ambiguous but profile-id is None — _reconcile_admission will
+    use generic fallback and _apply_typed_intent_shortcut promotes to admitted.
+
+    Legacy: when intent matches a digest_profile.id exactly, that profile is selected
+    (unchanged behaviour for profile-id intents).
     """
     if not intent or not intent.strip():
         return None
+
+    # Normalise for comparison: lowercase, spaces collapsed, underscores as spaces.
     wanted = _normalize_intent(intent)
+    wanted_canonical = wanted.replace(" ", "_")  # e.g. "plan only" → "plan_only"
+
+    # K3: canonical typed-intent short-circuit — before profile lookup.
+    if wanted_canonical in _CANONICAL_TYPED_INTENTS:
+        return {
+            "profile_id": None,
+            "selected_by": "typed_intent_short_circuit",
+            "confidence": 1.0,
+            "candidates": [wanted_canonical],
+            "ambiguous": False,
+            "strong_hits": [wanted_canonical],
+            "file_hits": [],
+            "semantic_file_hits": [],
+            "companion_file_hits": [],
+            "shared_file_hits": [],
+            "evidence_class": "typed_intent",
+            "negative_hits": [],
+            "why": [f"K3 typed_intent short-circuit: {wanted_canonical}"],
+        }
+
+    # Legacy: try to match a digest profile id.
     profiles = [
         profile
         for profile in topology.get("digest_profiles", []) or []
@@ -683,7 +740,7 @@ def _resolve_typed_intent(intent: str | None, topology: dict[str, Any]) -> dict[
         "shared_file_hits": [],
         "evidence_class": "typed_intent_invalid",
         "negative_hits": [],
-        "why": [f"typed intent did not match a digest profile: {intent!r}"],
+        "why": [f"typed intent did not match a digest profile or canonical enum: {intent!r}"],
     }
 
 
@@ -1314,6 +1371,62 @@ def _apply_companion_loop_break(
     return new_admission
 
 
+def _apply_typed_intent_shortcut(
+    admission: dict[str, Any],
+    requested: list[str],
+    intent: str | None,
+) -> dict[str, Any]:
+    """K3 fix — upgrade admission to 'admitted' for canonical read-intent typed_intents.
+
+    When the caller passes --intent plan_only (or audit / hygiene / rebase_keepup /
+    hotfix), the intent signals a read-only or non-source-modifying operation. Profile
+    selection cannot select a matching profile because these ids are NOT digest profile
+    ids. As a result, _reconcile_admission returns advisory_only or ambiguous.
+
+    This function short-circuits: if the normalised intent is in _ADMIT_ALL_PATHS_INTENTS
+    and the current admission status is advisory_only / ambiguous / scope_expansion_required,
+    ALL requested files are admitted directly.
+
+    For create_new / modify_existing / refactor / other, this function is a no-op;
+    _apply_companion_loop_break handles create_new admission upgrades via K2.
+
+    Called after _apply_companion_loop_break in build_digest so K2 + K3 compose
+    without conflict.
+    """
+    if not intent:
+        return admission
+
+    normalised = intent.strip().lower().replace("-", "_").replace(" ", "_")
+    if normalised not in _ADMIT_ALL_PATHS_INTENTS:
+        return admission
+
+    upgradeable = {"advisory_only", "ambiguous", "scope_expansion_required"}
+    if admission.get("status") not in upgradeable:
+        return admission
+
+    # Admit all requested files that do not hit global forbidden patterns.
+    # Forbidden-wins invariant is preserved: blocked paths stay out.
+    forbidden_hits = list(admission.get("forbidden_hits") or [])
+    forbidden_set = set(forbidden_hits)
+    admitted_files = [f for f in requested if f not in forbidden_set]
+
+    new_admission = dict(admission)
+    new_admission["status"] = "admitted"
+    new_admission["admitted_files"] = admitted_files
+    new_admission["out_of_scope_files"] = []
+    new_admission["typed_intent_short_circuit"] = True
+
+    why = list((admission.get("decision_basis") or {}).get("why") or [])
+    why.append(
+        f"K3 typed_intent_short_circuit: intent={normalised}; "
+        f"admitted_all_requested_paths={admitted_files}"
+    )
+    new_admission["decision_basis"] = dict(admission.get("decision_basis") or {})
+    new_admission["decision_basis"]["why"] = why
+    new_admission["decision_basis"]["selected_by"] = "typed_intent_short_circuit"
+    return new_admission
+
+
 # ---------------------------------------------------------------------------
 # build_digest (envelope assembly)
 # ---------------------------------------------------------------------------
@@ -1383,6 +1496,10 @@ def build_digest(
         else int(os.environ.get("ZEUS_COMPANION_LOOP_BATCH_CAP", str(_DEFAULT_COMPANION_BATCH_CAP)))
     )
     admission = _apply_companion_loop_break(admission, requested, intent, batch_cap=_batch_cap)
+    # K3 typed_intent short-circuit: admit all paths for read-only canonical intents
+    # (plan_only, audit, hygiene, rebase_keepup, hotfix). Runs after K2 so the two
+    # loop-break mechanisms compose without conflict.
+    admission = _apply_typed_intent_shortcut(admission, requested, intent)
     evidence_class = resolution.get("evidence_class") or resolution.get("selected_by") or "none"
     profile_selection = {
         "selected_by": resolution.get("selected_by"),

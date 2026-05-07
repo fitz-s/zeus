@@ -2934,8 +2934,14 @@ def _admission_typed_issue(
     """Translate an admission denial into a navigation typed issue.
 
     Returns None when admission is admitted/advisory_only; otherwise emits
-    a typed issue (severity=error) so closeout / CI consumers see the
-    route-admission denial alongside repo-health issues.
+    a typed issue whose severity is resolved from admission_severity.yaml
+    (K1 wiring extension: F1 navigation_scope_expansion_required and
+    F2/navigation_route_ambiguous now honour the YAML target_severity).
+
+    Severity resolution:
+      admission_severity.yaml ADVISORY → "advisory"
+      admission_severity.yaml BLOCKING  → "error"
+      <missing>                          → "error" (backward-compat fallback)
     """
     status = admission.get("status", "advisory_only")
     if status in {"admitted", "advisory_only"}:
@@ -2960,8 +2966,16 @@ def _admission_typed_issue(
         message_parts.append(f"forbidden_hits={forbidden_hits}")
     if out_of_scope:
         message_parts.append(f"out_of_scope={out_of_scope}")
+    # K1 extension: resolve severity from admission_severity.yaml instead of
+    # always emitting "error". Blocked paths (forbidden_hits) are always errors
+    # regardless of YAML entry; scope_expansion and ambiguous may be ADVISORY.
+    if forbidden_hits:
+        severity = "error"
+    else:
+        target = _load_admission_severity().get(code, "BLOCKING")
+        severity = "advisory" if target == "ADVISORY" else "error"
     issue: dict[str, Any] = {
-        "severity": "error",
+        "severity": severity,
         "lane": "navigation",
         "code": code,
         "path": primary_path,

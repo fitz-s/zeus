@@ -226,6 +226,26 @@ def _last_commit_ts(branch: str) -> str:
 
 
 @capability("worktree_create", lease=False)
+def cmd_worktree_create_advisory(_args: argparse.Namespace) -> int:
+    """Advisory: emit worktree creation guidance (never auto-creates).
+
+    worktree_create capability owner. Creation is always an explicit operator
+    or agent action (git worktree add). This function emits a structured
+    advisory reminding callers to write a sentinel file after creation.
+    Called by WorktreeCreate hook handler via dispatch.py.
+    """
+    print(json.dumps({
+        "advisory": (
+            "worktree_create: create via `git worktree add -b <branch> <path> <base>`, "
+            "then write a zeus_worktree.yaml sentinel with intent/agent/mode/base/created_at. "
+            "Sentinel is read by SessionStart for cross-worktree visibility."
+        ),
+        "severity": "advisory",
+        "action": "advisory_only_operator_creates",
+    }, indent=2))
+    return 0
+
+
 def cmd_status(_args: argparse.Namespace) -> int:
     """JSON summary: all worktrees, branches, ahead/behind, dirty, PR state, sentinels."""
     porcelain = _git("worktree", "list", "--porcelain")
@@ -361,10 +381,9 @@ def cmd_branch_keepup(_args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 
 
-@capability("workspace_hygiene_audit", lease=False)
-@capability("worktree_post_merge_cleanup", lease=False)
-def cmd_hygiene(_args: argparse.Namespace) -> int:
-    """Advisory list of workspace clutter. NEVER deletes."""
+def _collect_clutter() -> list[dict[str, Any]]:
+    """Shared clutter-collection logic for hygiene audit and post-merge cleanup."""
+    import time
     clutter: list[dict[str, Any]] = []
 
     # backups/ directory
@@ -417,7 +436,6 @@ def cmd_hygiene(_args: argparse.Namespace) -> int:
     porcelain = _git("worktree", "list", "--porcelain")
     worktrees = _parse_worktree_list(porcelain)
     pr_list = _fetch_pr_list()
-    import time
     for wt in worktrees[1:]:  # skip main worktree
         branch = wt.get("branch", "")
         ts = _last_commit_ts(branch) if branch else ""
@@ -449,9 +467,42 @@ def cmd_hygiene(_args: argparse.Namespace) -> int:
                 "advisory": "branch merged into origin/main; consider `git branch -d` after confirming",
             })
 
+    return clutter
+
+
+@capability("workspace_hygiene_audit", lease=False)
+def cmd_hygiene(_args: argparse.Namespace) -> int:
+    """Advisory list of workspace clutter. NEVER deletes.
+
+    workspace_hygiene_audit capability owner.
+    Covers: backups/, *.bak, root-level scratch files, stale agent-replay logs,
+    stale worktrees (>7d no commits + no open PR), merged branches.
+    """
+    clutter = _collect_clutter()
     print(json.dumps({
         "clutter": clutter,
         "count": len(clutter),
+        "action": "advisory_only_never_auto_delete",
+        "severity": "advisory",
+    }, indent=2))
+    return 0
+
+
+@capability("worktree_post_merge_cleanup", lease=False)
+def cmd_post_merge_cleanup(_args: argparse.Namespace) -> int:
+    """Post-merge advisory checklist. NEVER deletes.
+
+    worktree_post_merge_cleanup capability owner.
+    Emits the same clutter advisory as workspace_hygiene_audit, scoped to
+    post-merge context: branch close recommendation, worktree close
+    recommendation, backup/draft sweep recommendation.
+    Composes with .claude/hooks/registry.yaml::post_merge_cleanup hook.
+    """
+    clutter = _collect_clutter()
+    print(json.dumps({
+        "clutter": clutter,
+        "count": len(clutter),
+        "context": "post_merge_cleanup",
         "action": "advisory_only_never_auto_delete",
         "severity": "advisory",
     }, indent=2))

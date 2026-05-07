@@ -243,7 +243,7 @@ def run_scripts(api: Any) -> Any:
     issues: list[Any] = []
 
     for name in sorted(actual - declared):
-        issues.append(api._issue("script_manifest_missing", f"scripts/{name}", "top-level script has no manifest entry"))
+        issues.append(api._issue_with_admission_severity("script_manifest_missing", f"scripts/{name}", "top-level script has no manifest entry"))
     for name in sorted(declared - actual):
         issues.append(api._issue("script_manifest_stale", f"scripts/{name}", "manifest entry has no top-level script"))
 
