@@ -20,13 +20,14 @@ metadata:
 typed_intent_enum:
   - id: plan_only
     description: >
-      Plan-only operation. Reads files; writes ONLY to docs/operations/task_*/PLAN.md
-      or .omc/plans/. No source/test/script edits. Admitted directly without profile
-      match (admission shortcut per K3).
+      Plan-only operation. Reads files; writes ONLY to docs/** or .omc/plans/ or
+      evidence/** or .omc/research/**. No source/test/script edits. Admitted directly
+      without profile match (admission shortcut per K3). Canonical scope per PLAN.md §6:693.
     admits_path_globs:
-      - docs/operations/task_*/PLAN.md
-      - docs/operations/task_*/**/*.md
+      - docs/**
       - .omc/plans/**
+      - evidence/**
+      - .omc/research/**
     blocks_path_globs:
       - src/**
       - tests/**
@@ -68,7 +69,10 @@ typed_intent_enum:
   - id: audit
     description: >
       Read-only audit/investigation. Writes ONLY to evidence/** or .omc/research/**.
-      Source/test/script writes blocked.
+      Source/test/script writes blocked. Canonical scope per PLAN.md §6:693.
+    admits_path_globs:
+      - evidence/**
+      - .omc/research/**
     blocks_path_globs:
       - src/**
       - tests/**
@@ -182,7 +186,7 @@ issue_severity:
 
   - rule_id: AS-05
     code: operations_task_unregistered
-    emitter_path: scripts/topology_doctor_docs_checks.py:431
+    emitter_path: scripts/topology_doctor_docs_checks.py:451
     current_severity: BLOCKING
     target_severity: ADVISORY
     reversibility_class: WORKING
@@ -192,10 +196,11 @@ issue_severity:
       registered in docs/operations/AGENTS.md. K1 demotes to advisory; K2 loop-break
       auto-admits when typed_intent=create_new and diff includes docs/operations/AGENTS.md.
       M1 amendment: F4 is 2-hit (K1+K2); multi-mapping intentional.
+      Line corrected from :431 to :451 per PR #72 critic-opus F4 finding.
 
   - rule_id: AS-06
-    code: test_topology_test_unregistered
-    emitter_path: scripts/topology_doctor_docs_checks.py:431
+    code: test_topology_missing
+    emitter_path: scripts/topology_doctor_test_checks.py:55
     current_severity: BLOCKING
     target_severity: ADVISORY
     reversibility_class: WORKING
@@ -205,6 +210,10 @@ issue_severity:
       architecture/test_topology.yaml, both the new test and the topology entry are
       auto-admitted (silent). F6 is ADVISORY-companion; operator confirmed reasonable
       per PLAN §1.1.
+      F3 fix: code corrected from phantom test_topology_test_unregistered to actual
+      emitter code test_topology_missing (topology_doctor_test_checks.py:55).
+      Emitter wired through _issue_with_admission_severity so ADVISORY designation
+      takes effect.
 
   # ─── K1: naming / write-target severity (F5) ─────────────────────────────────
 

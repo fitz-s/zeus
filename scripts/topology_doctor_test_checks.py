@@ -52,7 +52,7 @@ def run_tests(api: Any) -> Any:
 
     classified_set = set(classified)
     for path in sorted(actual - classified_set):
-        issues.append(api._issue("test_topology_missing", path, "test file has no topology classification"))
+        issues.append(api._issue_with_admission_severity("test_topology_missing", path, "test file has no topology classification"))
     for path in sorted(classified_set - actual):
         issues.append(api._issue("test_topology_stale", path, "classified test file is absent"))
 

@@ -66,16 +66,49 @@ def _glob_match(path: str, pattern: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# F1 fix: blocked_globs per typed_intent — read from admission_severity.yaml
+# F1 fix (round-3): whitelist-driven admission for plan_only and audit.
 #
-# plan_only and audit declare blocks_path_globs in the typed_intent_enum section.
-# _apply_typed_intent_shortcut checks these BEFORE admitting any file, so that
-# src/** (and other blocked patterns) are never admitted for read-only intents.
+# plan_only and audit now declare admits_path_globs in typed_intent_enum.
+# _apply_typed_intent_shortcut ONLY admits paths that match an admits_path_glob.
+# All other requested paths are blocked → out_of_scope_files + blocked_by_intent.
+# Status is advisory_only whenever any path is blocked by the whitelist.
+#
+# Canonical scopes per PLAN.md §6:693:
+#   plan_only: docs/operations/task_*/**,  .omc/plans/**, evidence/**,
+#              .omc/research/**
+#   audit:     evidence/**, .omc/research/**
 # ---------------------------------------------------------------------------
+
+# Read-only intents with whitelist-driven (admits_path_globs) admission.
+# These intents MUST declare admits_path_globs in admission_severity.yaml.
+_WHITELIST_DRIVEN_INTENTS: frozenset[str] = frozenset({"plan_only", "audit"})
+
+
+@lru_cache(maxsize=1)
+def _load_typed_intent_admits_globs() -> dict[str, tuple[str, ...]]:
+    """Return mapping of intent_id -> admitted glob patterns (whitelist).
+
+    Reads architecture/admission_severity.yaml once (cached). Falls back to
+    empty dict — callers treat empty as "no whitelist defined, block all".
+    """
+    if not _ADMISSION_SEVERITY_PATH.exists():
+        return {}
+    try:
+        data = _yaml.safe_load(_ADMISSION_SEVERITY_PATH.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return {}
+    result: dict[str, tuple[str, ...]] = {}
+    for entry in data.get("typed_intent_enum", []):
+        intent_id = entry.get("id")
+        globs = entry.get("admits_path_globs") or []
+        if intent_id and globs:
+            result[intent_id] = tuple(str(g) for g in globs)
+    return result
+
 
 @lru_cache(maxsize=1)
 def _load_typed_intent_blocked_globs() -> dict[str, tuple[str, ...]]:
-    """Return mapping of intent_id -> blocked glob patterns.
+    """Return mapping of intent_id -> blocked glob patterns (blacklist, legacy).
 
     Reads architecture/admission_severity.yaml once (cached). Falls back to
     an empty dict when the file is absent or malformed (safe default: no blocks
@@ -1322,16 +1355,20 @@ def _apply_companion_loop_break(
     if normalized_intent not in _COMPANION_LOOP_INTENTS:
         return admission
 
-    # M4 batch-cap advisory (non-blocking).
+    # F2 fix (PR #72 critic-opus round-3): batch-cap is now a hard gate, not just advisory.
+    # When len(requested) > batch_cap for create_new: emit advisory FIRST, then auto-admit
+    # only the first batch_cap valid pairs; remaining files → out_of_scope_files with
+    # blocked_by_batch_cap reason. Status advisory_only when any file is blocked.
     advisories: list[dict[str, Any]] = list(admission.get("companion_loop_advisories") or [])
-    if len(requested) > batch_cap:
+    batch_cap_exceeded = len(requested) > batch_cap
+    if batch_cap_exceeded:
         advisories.append({
             "code": "companion_loop_batch_advisory",
             "severity": "info",
             "message": (
                 f"requested_files count ({len(requested)}) exceeds companion_loop_batch_cap "
                 f"({batch_cap}). Verify this is not an adversarial batch-add inflation. "
-                "Auto-admit still applies per companion pairs."
+                f"Only first {batch_cap} valid pairs auto-admitted; remainder blocked."
             ),
         })
 
@@ -1373,6 +1410,16 @@ def _apply_companion_loop_break(
             "expected_companion": companion_path,
         })
 
+    # F2 gate: when batch_cap exceeded, cap newly_admitted to first batch_cap entries.
+    # Remaining valid pairs stay in out_of_scope with blocked_by_batch_cap reason.
+    blocked_by_batch_cap: list[str] = []
+    if batch_cap_exceeded and len(newly_admitted) > batch_cap:
+        blocked_by_batch_cap = newly_admitted[batch_cap:]
+        newly_admitted = newly_admitted[:batch_cap]
+        # Also remove blocked companions from companions_to_admit.
+        blocked_set = set(blocked_by_batch_cap)
+        companions_to_admit = {c for c in companions_to_admit if c not in blocked_set}
+
     if not newly_admitted:
         if advisories:
             admission = dict(admission)
@@ -1380,7 +1427,9 @@ def _apply_companion_loop_break(
         return admission
 
     # Promote newly_admitted files out of out_of_scope.
-    remaining_out_of_scope = [f for f in out_of_scope if f not in newly_admitted]
+    # blocked_by_batch_cap files remain in out_of_scope (not admitted).
+    newly_admitted_set = set(newly_admitted)
+    remaining_out_of_scope = [f for f in out_of_scope if f not in newly_admitted_set]
     current_admitted = list(admission.get("admitted_files") or [])
     merged_admitted = current_admitted + newly_admitted
 
@@ -1389,10 +1438,19 @@ def _apply_companion_loop_break(
     new_admission["out_of_scope_files"] = remaining_out_of_scope
     new_admission["companion_loop_break"] = True
     new_admission["auto_admitted"] = newly_admitted
-    new_admission["companion_pair"] = [
-        path for path in newly_admitted
-    ]
+    new_admission["companion_pair"] = list(newly_admitted)
     new_admission["companion_loop_advisories"] = advisories
+
+    # F2: when batch_cap gated some pairs, force advisory_only and record them.
+    if blocked_by_batch_cap:
+        new_admission["status"] = "advisory_only"
+        new_admission["blocked_by_batch_cap"] = blocked_by_batch_cap
+        remaining = len(requested) - batch_cap
+        new_admission["next_action"] = (
+            f"split request: only first {batch_cap} files auto-admitted; "
+            f"rerun with smaller batch for remaining {remaining} files"
+        )
+        return new_admission
 
     # Upgrade status when all out-of-scope files were resolved.
     # Handles both scope_expansion_required and ambiguous (when typed_intent short-circuits
@@ -1424,10 +1482,12 @@ def _apply_typed_intent_shortcut(
     NOT digest profile ids. As a result, _reconcile_admission returns advisory_only or
     ambiguous.
 
-    This function short-circuits: if the normalised intent is in _ADMIT_ALL_PATHS_INTENTS
-    (plan_only, audit) and the current admission status is advisory_only / ambiguous /
-    scope_expansion_required, ALL requested files are admitted directly — UNLESS a file
-    matches a blocked_glob for that intent (checked first via _check_typed_intent_blocked_globs).
+    F1 round-3 (PR #72 critic-opus): for plan_only and audit (whitelist-driven intents),
+    ONLY paths matching admits_path_globs from admission_severity.yaml are admitted.
+    Everything else → out_of_scope_files + blocked_by_intent. Status advisory_only
+    whenever any path is blocked. This enforces PLAN.md §6:693 canonical scopes:
+      plan_only: docs/operations/task_*/***, .omc/plans/**, evidence/**, .omc/research/**
+      audit:     evidence/**, .omc/research/**
 
     hotfix, hygiene, and rebase_keepup are NOT in _ADMIT_ALL_PATHS_INTENTS and go through
     normal profile match.
@@ -1449,41 +1509,44 @@ def _apply_typed_intent_shortcut(
     if admission.get("status") not in upgradeable:
         return admission
 
-    # F1 fix: check blocked_globs for this intent BEFORE admitting any file.
-    # blocked_globs are defined per typed_intent in admission_severity.yaml.
-    # A file matching a blocked glob emits advisory typed_intent_path_outside_scope
-    # and falls through to normal admission (NOT admitted by K3 shortcut).
-    intent_blocked_globs = _load_typed_intent_blocked_globs().get(normalised, ())
-    blocked_by_intent: list[str] = []
-    if intent_blocked_globs:
+    forbidden_hits = set(admission.get("forbidden_hits") or [])
+
+    if normalised in _WHITELIST_DRIVEN_INTENTS:
+        # F1 round-3: whitelist-driven admission — only admits_path_globs pass.
+        # PLAN.md §6:693 defines canonical scopes for plan_only and audit.
+        intent_admits_globs = _load_typed_intent_admits_globs().get(normalised, ())
+        if not intent_admits_globs:
+            # No whitelist defined: block everything (fail-closed).
+            admitted_files: list[str] = []
+            blocked_by_intent: list[str] = [f for f in requested if f not in forbidden_hits]
+        else:
+            admitted_files = [
+                f for f in requested
+                if f not in forbidden_hits
+                and any(_glob_match(f, g) for g in intent_admits_globs)
+            ]
+            blocked_by_intent = [
+                f for f in requested
+                if f not in forbidden_hits
+                and not any(_glob_match(f, g) for g in intent_admits_globs)
+            ]
+    else:
+        # Legacy blacklist path (non-whitelist intents in _ADMIT_ALL_PATHS_INTENTS).
+        intent_blocked_globs = _load_typed_intent_blocked_globs().get(normalised, ())
         blocked_by_intent = [
             f for f in requested
-            if any(_glob_match(f, g) for g in intent_blocked_globs)
-        ]
-
-    # Admit all requested files that do not hit global forbidden patterns
-    # AND do not match the intent's own blocked_globs.
-    # Forbidden-wins invariant is preserved: blocked paths stay out.
-    forbidden_hits = list(admission.get("forbidden_hits") or [])
-    excluded_set = set(forbidden_hits) | set(blocked_by_intent)
-    admitted_files = [f for f in requested if f not in excluded_set]
+            if f not in forbidden_hits
+            and any(_glob_match(f, g) for g in intent_blocked_globs)
+        ] if intent_blocked_globs else []
+        admitted_files = [f for f in requested if f not in forbidden_hits and f not in set(blocked_by_intent)]
 
     new_admission = dict(admission)
-    # PR #72 Codex P1 round-2: status must NOT be "admitted" when any path is
-    # blocked by intent. blocked_by_intent non-empty → advisory_only so that:
-    #   (a) admission_valid claim is blocked (topology_doctor.py line 825 keys off status)
-    #   (b) next_action does NOT say "proceed"
-    # Two sub-cases:
-    #   all-blocked  (admitted_files empty)  → advisory_only
-    #   mixed        (some admitted, some blocked) → advisory_only
-    #   none-blocked (admitted_files == requested) → admitted  [original path]
+    # Status: advisory_only when any path is blocked; admitted only when all pass.
     if blocked_by_intent:
         new_admission["status"] = "advisory_only"
     else:
         new_admission["status"] = "admitted"
     new_admission["admitted_files"] = admitted_files
-    # Files blocked by intent's blocked_globs are out-of-scope; admission_valid
-    # is blocked downstream; agent must re-route or remove blocked paths.
     new_admission["out_of_scope_files"] = blocked_by_intent
     new_admission["typed_intent_short_circuit"] = True
     if blocked_by_intent:
@@ -1493,8 +1556,8 @@ def _apply_typed_intent_shortcut(
                 "code": "typed_intent_path_outside_scope",
                 "path": f,
                 "message": (
-                    f"intent={normalised} blocks path via blocks_path_globs; "
-                    f"file not admitted by K3 shortcut"
+                    f"intent={normalised}: path not in admits_path_globs; "
+                    f"blocked by K3 whitelist contract"
                 ),
                 "severity": "advisory",
             }

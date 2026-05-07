@@ -369,3 +369,70 @@ def test_companion_loop_break_default_batch_cap() -> None:
     assert _DEFAULT_COMPANION_BATCH_CAP == 50, (
         f"Default batch cap must be 50. Got: {_DEFAULT_COMPANION_BATCH_CAP}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Test 10: F2 — batch-cap is a hard gate (PR #72 critic-opus round-3)
+# ---------------------------------------------------------------------------
+
+def test_batch_cap_actually_gates_admission_not_just_advisory() -> None:
+    """F2 (PR #72 critic-opus round-3): batch_cap must GATE admission, not just advise.
+
+    101 files: 51 valid pairs (each scripts/diag_N.py + script_manifest companion)
+    + 50 unpaired stubs. With batch_cap=50, only the first 50 valid pairs are
+    auto-admitted; the 51st pair's parent must appear in blocked_by_batch_cap.
+    Status must be advisory_only (not admitted) when any file is gated.
+
+    Repro from critic: 101 files / 50 valid pairs + 50 unpaired stubs → previously
+    ALL 100 admitted. One manifest line should NOT authorize 100+ scripts.
+    """
+    companion = "architecture/script_manifest.yaml"
+
+    # 51 parent scripts, each a valid pair (companion is in requested).
+    parents = [f"scripts/diag_batch_{i:03d}.py" for i in range(51)]
+    # 50 unpaired stub files (no companion present for these).
+    stubs = [f"scripts/stub_{i:03d}.py" for i in range(50)]
+
+    requested = parents + [companion] + stubs  # 51 + 1 + 50 = 102 files
+    assert len(requested) == 102
+    assert len(requested) > 50  # exceeds batch_cap
+
+    # All parent scripts are out_of_scope (need companion-loop-break to admit).
+    admission = {
+        "status": "scope_expansion_required",
+        "profile_id": "test_profile",
+        "confidence": 0.9,
+        "admitted_files": [],
+        "out_of_scope_files": parents,  # all 51 parents are OOS
+        "forbidden_hits": [],
+        "decision_basis": {"why": []},
+    }
+
+    result = _apply_companion_loop_break(admission, requested, "create_new", batch_cap=50)
+
+    # Only first 50 valid pairs admitted — the 51st must be blocked.
+    admitted = result.get("admitted_files") or []
+    blocked = result.get("blocked_by_batch_cap") or []
+
+    assert len(admitted) <= 50, (
+        f"admitted_files must be ≤ batch_cap=50. Got {len(admitted)}: {admitted[:5]}..."
+    )
+    assert len(blocked) >= 1, (
+        f"blocked_by_batch_cap must have ≥1 entry when 51 valid pairs exceed cap=50. "
+        f"Got: {blocked}"
+    )
+    # Status must NOT be admitted when any file is gated.
+    assert result["status"] == "advisory_only", (
+        f"status must be advisory_only when batch_cap gates files. Got: {result['status']!r}"
+    )
+    # Advisory must still be present.
+    advisories = result.get("companion_loop_advisories") or []
+    batch_advisories = [a for a in advisories if a.get("code") == "companion_loop_batch_advisory"]
+    assert batch_advisories, (
+        f"companion_loop_batch_advisory must be emitted when cap exceeded. Got: {advisories}"
+    )
+    # next_action must guide the operator to split.
+    next_action = result.get("next_action") or ""
+    assert "split" in next_action.lower(), (
+        f"next_action must mention 'split' to guide operator. Got: {next_action!r}"
+    )
