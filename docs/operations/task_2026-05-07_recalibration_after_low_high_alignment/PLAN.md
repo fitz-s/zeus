@@ -476,7 +476,7 @@ LOW OpenData contract-window recovery:
 /Users/leofitz/miniconda3/bin/python scripts/rebuild_calibration_pairs_v2.py \
   --dry-run \
   --temperature-metric low \
-  --data-version ecmwf_opendata_mn2t6_local_calendar_day_min_contract_window_v2 \
+  --data-version ecmwf_opendata_mn2t3_local_calendar_day_min_contract_window_v2 \
   --db /Users/leofitz/.openclaw/workspace-venus/zeus/state/zeus-world.db
 ```
 
