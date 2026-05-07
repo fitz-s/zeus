@@ -43,13 +43,13 @@ Qingdao exists in `config/cities.json` → all 11 dates are silently skipped.
 **Temperature unit**: °C (Celsius, inferred from bin labels).
 **Slug pattern**: `highest-temperature-in-qingdao-on-*`
 
-### Operator decision required
+### RESOLVED 2026-05-07
 
-To backfill these 11 rows, add Qingdao to `config/cities.json` with:
-- aliases: `["qingdao"]`
-- slug_names: `["qingdao"]`
-- settlement_unit: `"C"`
-- settlement_source: appropriate WU station or HKO-equivalent for Qingdao
+Station ZSJG (Jiaodong International, candidate) rejected 400 by WU API.
+Station ZSQD (Liuting Airport) confirmed live: 7/7 smoke days with real daily highs.
 
-If Qingdao is out of scope for live trading, mark it `active: false` — backfill will still run.
-Do NOT add cities.json entry until operator has confirmed WU/HKO station code.
+Actions taken:
+- Added Qingdao to `config/cities.json` with `wu_station: "ZSQD"`, unit C, tier WU_ICAO
+- WU daily backfill: 11 obs rows written (2026-04-27..2026-05-07)
+- Gamma backfill: 11 settlements_v2 rows, all authority=VERIFIED
+- Commit: 8fad09e7 (cities.json + test count updates)
