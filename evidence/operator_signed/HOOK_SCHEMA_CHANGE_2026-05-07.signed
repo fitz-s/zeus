@@ -1,1 +1,0 @@
-HOOK_SCHEMA_CHANGE authorized 2026-05-07: PR #73 cleanup — upgrade pr_create_loc_accumulation ADVISORY→BLOCKING + add URGENT_HOTFIX/BATCHED_CONSOLIDATION/OPERATOR_APPROVED_SMALL_PR overrides. Operator: Fitz (live-session dispatch authorization).

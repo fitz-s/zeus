@@ -1,13 +1,12 @@
 # Created: 2026-05-06
-# Last reused or audited: 2026-05-06
-# Authority basis: docs/operations/task_2026-05-06_hook_redesign/PLAN.md §2.2
-#   + critic-opus §0.5 amendments (evidence/hook_redesign_critic_opus.md)
-# Phase 2: added pre_edit_hooks_protected (ATTACK 2); OPERATOR_SIGNATURE_REQUIRED on TRUTH_REWRITE/ON_CHAIN (OD-HOOK-2)
+# Last reused or audited: 2026-05-07
+# Authority basis: docs/operations/task_2026-05-07_hook_redesign_v2/PLAN.md
+#   BLOCKING tier retired; all hooks ADVISORY-only; bespoke authorization removed.
 
 schema_version: 1
 metadata:
-  charter_version: 1.0.0
-  catalog_size: 15
+  charter_version: 2.0.0
+  catalog_size: 14
   sunset_default: 90d
 
 hooks:
@@ -16,16 +15,9 @@ hooks:
     matcher: Bash
     intent: >
       Run pytest baseline before `git commit` to catch regressions.
-    blocked_when:
-      - regression_below_baseline
-    severity: BLOCKING
-    reversibility_class: TRUTH_REWRITE
-    bypass_policy:
-      class: structured_override
-      override_ids: [BASELINE_RATCHET, MAIN_REGRESSION, COTENANT_SHIM]
-      max_active_per_30d: 5
-      requires_evidence_file: true
-      OPERATOR_SIGNATURE_REQUIRED: false   # WORKING-class evidence accepted (PLAN §0.5 OD-HOOK-2)
+      ADVISORY: emits context; never blocks.
+    blocked_when: []
+    severity: ADVISORY
     sunset_date: 2026-08-06
     telemetry:
       ritual_signal_emitted: true
@@ -36,15 +28,9 @@ hooks:
     matcher: Bash
     intent: >
       Run gitleaks against staged content for `git commit`.
-    blocked_when:
-      - secret_pattern_detected_in_staged
-    severity: BLOCKING
-    reversibility_class: ARCHIVE
-    bypass_policy:
-      class: structured_override
-      override_ids: [REVIEW_SAFE_TAG, OPERATOR_CLEARED]
-      max_active_per_30d: 5
-      requires_evidence_file: true
+      ADVISORY: emits context; never blocks.
+    blocked_when: []
+    severity: ADVISORY
     sunset_date: 2026-08-06
     telemetry:
       ritual_signal_emitted: true
@@ -53,15 +39,10 @@ hooks:
     event: PreToolUse
     matcher: Bash
     intent: >
-      Block broad `git add` in main worktree (co-tenant absorption).
-    blocked_when:
-      - broad_git_add_in_main_worktree
-    severity: BLOCKING
-    reversibility_class: WORKING
-    bypass_policy:
-      class: structured_override
-      override_ids: [SOLO_AGENT, ISOLATED_WORKTREE]
-      max_active_per_30d: 5
+      Warn on broad `git add` in main worktree (co-tenant absorption).
+      ADVISORY: emits context; never blocks.
+    blocked_when: []
+    severity: ADVISORY
     sunset_date: 2026-08-06
     telemetry:
       ritual_signal_emitted: true
@@ -70,19 +51,12 @@ hooks:
     event: PreToolUse
     matcher: Bash
     intent: >
-      Refuse `git checkout <branch>` / `git switch <branch>` when the
+      Warn on `git checkout <branch>` / `git switch <branch>` when the
       working tree has tracked modifications that overlap with the
-      target branch's tree (silent revert risk).
-    blocked_when:
-      - tracked_modifications_overlap_target_branch
-    severity: BLOCKING
-    reversibility_class: TRUTH_REWRITE
-    bypass_policy:
-      class: structured_override
-      override_ids: [STASH_FIRST_VERIFIED, OPERATOR_DESTRUCTIVE]
-      max_active_per_30d: 5
-      requires_evidence_file: true
-      OPERATOR_SIGNATURE_REQUIRED: true   # TRUTH_REWRITE class — operator-signed sentinel per OD-HOOK-2
+      target branch'"'"'s tree (silent revert risk).
+      ADVISORY: emits context; never blocks.
+    blocked_when: []
+    severity: ADVISORY
     sunset_date: 2026-08-06
     telemetry:
       ritual_signal_emitted: true
@@ -91,19 +65,10 @@ hooks:
     event: PreToolUse
     matcher: Bash
     intent: >
-      Block `gh pr create` when <2 commits or <80 LOC since branch base
-      to prevent premature paid-reviewer spend. Structured overrides allow
-      urgent hotfixes, batched-consolidation PRs, and operator-approved
-      small PRs to proceed with evidence.
-    blocked_when:
-      - pr_opened_below_accumulation_threshold
-    severity: BLOCKING
-    reversibility_class: WORKING
-    bypass_policy:
-      class: structured_override
-      override_ids: [URGENT_HOTFIX, BATCHED_CONSOLIDATION, OPERATOR_APPROVED_SMALL_PR]
-      max_active_per_30d: 10
-      requires_evidence_file: true
+      Advisory on `gh pr create` when <2 commits or <80 LOC since branch base.
+      Reminds about paid-reviewer spend. ADVISORY: emits context; never blocks.
+    blocked_when: []
+    severity: ADVISORY
     sunset_date: 2026-08-06
     telemetry:
       ritual_signal_emitted: true
@@ -138,15 +103,9 @@ hooks:
     matcher: Bash
     intent: >
       Conflict-first guidance + MERGE_AUDIT_EVIDENCE validation on
-      protected branches.
-    blocked_when:
-      - merge_audit_evidence_invalid_on_protected_branch
-    severity: BLOCKING
-    reversibility_class: TRUTH_REWRITE
-    bypass_policy:
-      class: structured_override
-      override_ids: [OPERATOR_OVERRIDE]
-      OPERATOR_SIGNATURE_REQUIRED: true   # TRUTH_REWRITE class — operator-signed sentinel per OD-HOOK-2
+      protected branches. ADVISORY: emits context; never blocks.
+    blocked_when: []
+    severity: ADVISORY
     sunset_date: 2026-08-06
     telemetry:
       ritual_signal_emitted: true
@@ -166,15 +125,10 @@ hooks:
     event: PreToolUse
     matcher: "Edit|Write|MultiEdit|NotebookEdit"
     intent: >
-      Refuse edit to architecture/** without ARCH_PLAN_EVIDENCE.
-    blocked_when:
-      - edit_to_architecture_without_evidence
-    severity: BLOCKING
-    reversibility_class: ARCHIVE
-    bypass_policy:
-      class: structured_override
-      override_ids: [OPERATOR_OVERRIDE]
-      requires_evidence_file: true
+      Advisory on edits to architecture/** without ARCH_PLAN_EVIDENCE.
+      ADVISORY: emits context; never blocks.
+    blocked_when: []
+    severity: ADVISORY
     sunset_date: 2026-08-06
     telemetry:
       ritual_signal_emitted: true
@@ -183,56 +137,23 @@ hooks:
     event: PreToolUse
     matcher: "Edit|Write|MultiEdit|NotebookEdit"
     intent: >
-      Topology Gate 1 — refuse writes to blocking-class capability paths.
-    blocked_when:
-      - write_to_blocking_capability_path_without_evidence
-    severity: BLOCKING
-    reversibility_class: cite_capability_class
-    bypass_policy:
-      class: structured_override
-      override_ids: [OPERATOR_OVERRIDE]
-      requires_evidence_file: true
+      Topology Gate 1 advisory -- writes to blocking-class capability paths.
+      ADVISORY: emits context; never blocks.
+    blocked_when: []
+    severity: ADVISORY
     sunset_date: 2026-08-04
     telemetry:
       ritual_signal_emitted: true
-
-  - id: pre_edit_hooks_protected
-    event: PreToolUse
-    matcher: "Edit|Write|MultiEdit|NotebookEdit"
-    intent: >
-      Refuse any edit to .claude/settings.json or .claude/hooks/** without
-      operator-signed authorization. Agents can self-disable gates by editing
-      these files; this hook closes that attack surface (ATTACK 2 / OD-HOOK-2).
-    blocked_when:
-      - edit_to_hook_configuration_without_operator_signed_sentinel
-    severity: BLOCKING
-    reversibility_class: TRUTH_REWRITE
-    bypass_policy:
-      class: structured_override
-      override_ids: [HOOK_SCHEMA_CHANGE]
-      requires_evidence_file: true
-      OPERATOR_SIGNATURE_REQUIRED: true   # TRUTH_REWRITE class — operator-signed sentinel required
-    sunset_date: 2026-08-06
-    telemetry:
-      ritual_signal_emitted: true
-
-  # ── Phase 3 (Navigation Topology v2): worktree lifecycle advisory hooks ──
 
   - id: session_start_visibility
     event: SessionStart
     matcher: "*"
     intent: >
       On session start, invoke worktree_doctor --cross-worktree-visibility and
-      emit a one-line summary of active worktrees + branch + sentinel intent as
-      additionalContext. ADVISORY only — agent reads and decides. Never blocks.
-      Solves the "agent in worktree A doesn't know about worktree B mid-phase"
-      problem without a mutable lock service.
-      Per Navigation Topology v2 PLAN §2.8 / capability cross_worktree_visibility.
+      emit a summary of active worktrees as additionalContext.
+      ADVISORY only - never blocks.
     blocked_when: []
     severity: ADVISORY
-    reversibility_class: WORKING
-    bypass_policy:
-      class: not_required
     sunset_date: 2026-11-07
     telemetry:
       ritual_signal_emitted: true
@@ -243,16 +164,9 @@ hooks:
     matcher: "*"
     intent: >
       After WorktreeCreate event, emit naming policy, scope, and sentinel write
-      advisory as additionalContext. Base policy: one task per worktree; descriptive
-      slug naming; commit per phase before switching. Also triggers sentinel write
-      (zeus_worktree.yaml) at worktree root post-add success (M3 — race delegated
-      to git atomicity). ADVISORY only — never blocks.
-      Per Navigation Topology v2 PLAN §2.7 / capability worktree_create.
+      advisory as additionalContext. ADVISORY only - never blocks.
     blocked_when: []
     severity: ADVISORY
-    reversibility_class: WORKING
-    bypass_policy:
-      class: not_required
     sunset_date: 2026-11-07
     telemetry:
       ritual_signal_emitted: true
@@ -263,16 +177,9 @@ hooks:
     matcher: "*"
     intent: >
       Before WorktreeRemove, emit pre-remove dirty/uncommitted check +
-      branch closure suggestion as additionalContext. Warns if worktree has
-      uncommitted changes or unpushed commits ahead of origin/main. NEVER
-      auto-deletes or blocks (per feedback_commit_per_phase_or_lose_everything.md).
-      ADVISORY only.
-      Per Navigation Topology v2 PLAN §2.8 / capability worktree_create.
+      branch closure suggestion as additionalContext. ADVISORY only.
     blocked_when: []
     severity: ADVISORY
-    reversibility_class: WORKING
-    bypass_policy:
-      class: not_required
     sunset_date: 2026-11-07
     telemetry:
       ritual_signal_emitted: true

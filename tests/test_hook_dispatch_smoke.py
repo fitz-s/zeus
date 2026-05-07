@@ -487,18 +487,26 @@ def test_pre_edit_architecture_non_arch_path_allows() -> None:
     assert _parse_decision(result) != "deny"
 
 
-def test_pre_edit_architecture_without_evidence_denies() -> None:
-    """Edit on architecture/** without ARCH_PLAN_EVIDENCE must deny."""
+def test_pre_edit_architecture_without_evidence_emits_advisory() -> None:
+    """Edit on architecture/** without ARCH_PLAN_EVIDENCE emits advisory context (not deny)."""
     payload = _make_edit_payload("architecture/topology.yaml")
     result = _run_dispatch_env(
         "pre_edit_architecture",
         payload,
         {"ARCH_PLAN_EVIDENCE": ""},
     )
-    decision = _parse_decision(result)
-    assert decision == "deny" or result.returncode == 2, (
-        f"arch edit without evidence must deny; rc={result.returncode} "
-        f"decision={decision!r} stderr={result.stderr!r}"
+    assert result.returncode == 0, (
+        f"advisory hook must exit 0; rc={result.returncode} stderr={result.stderr!r}"
+    )
+    assert _parse_decision(result) != "deny", "advisory hook must not emit deny"
+    try:
+        parsed = json.loads(result.stdout)
+        ctx = parsed.get("hookSpecificOutput", {}).get("additionalContext", "")
+    except Exception:
+        ctx = ""
+    assert ctx, (
+        f"arch edit without evidence must emit additionalContext advisory; "
+        f"stdout={result.stdout!r}"
     )
 
 
@@ -520,17 +528,6 @@ def test_pre_edit_architecture_with_valid_evidence_allows() -> None:
     finally:
         pathlib.Path(evidence_path).unlink(missing_ok=True)
 
-
-def test_pre_edit_architecture_operator_override_allows() -> None:
-    """STRUCTURED_OVERRIDE=OPERATOR_OVERRIDE bypasses evidence requirement."""
-    payload = _make_edit_payload("architecture/capabilities.yaml")
-    result = _run_dispatch_env(
-        "pre_edit_architecture",
-        payload,
-        {"ARCH_PLAN_EVIDENCE": "", "STRUCTURED_OVERRIDE": "OPERATOR_OVERRIDE"},
-    )
-    # Override accepted → exit 0 (either allowed or override logged)
-    assert result.returncode == 0
 
 
 # ---------------------------------------------------------------------------

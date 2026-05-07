@@ -25,17 +25,12 @@
           {
             "type": "command",
             "command": "python3 .claude/hooks/dispatch.py pre_edit_architecture",
-            "description": "[Phase 3 cutover] Block edits to architecture/** without ARCH_PLAN_EVIDENCE env (replaces pre-edit-architecture.sh)"
+            "description": "[hook v2 ADVISORY] Warn on edits to architecture/** without ARCH_PLAN_EVIDENCE env (no deny path; PR #74 retired BLOCKING tier)"
           },
           {
             "type": "command",
             "command": "python3 .claude/hooks/dispatch.py pre_write_capability_gate",
-            "description": "[Phase 3 cutover] Gate 1: refuse writes to blocking-class capability paths without ARCH_PLAN_EVIDENCE (replaces pre-write-capability-gate.sh; sunset 2026-08-04)"
-          },
-          {
-            "type": "command",
-            "command": "python3 .claude/hooks/dispatch.py pre_edit_hooks_protected",
-            "description": "[Phase 2 new] Block edits to .claude/settings.json or .claude/hooks/** without operator-signed sentinel (ATTACK 2 / OD-HOOK-2)"
+            "description": "[hook v2 ADVISORY] Warn on writes to capability-path kernels without ARCH_PLAN_EVIDENCE (no deny path; PR #74 retired BLOCKING tier; sunset 2026-08-04)"
           }
         ]
       },
@@ -45,27 +40,27 @@
           {
             "type": "command",
             "command": "python3 .claude/hooks/dispatch.py invariant_test",
-            "description": "[Phase 3 cutover] Run invariant pytest baseline before any git commit and block on regressions (replaces pre-commit-invariant-test.sh)"
+            "description": "[hook v2 ADVISORY] Warn before git commit when invariant pytest baseline regresses (no deny path; PR #74 retired BLOCKING tier)"
           },
           {
             "type": "command",
             "command": "python3 .claude/hooks/dispatch.py secrets_scan",
-            "description": "[Phase 3 cutover] Run gitleaks against staged content before any git commit; honors .gitleaks.toml allowlist (replaces pre-commit-secrets.sh)"
+            "description": "[hook v2 ADVISORY] Warn before git commit if gitleaks finds secret patterns in staged content (no deny path; PR #74 retired BLOCKING tier)"
           },
           {
             "type": "command",
             "command": "python3 .claude/hooks/dispatch.py pre_merge_contamination",
-            "description": "[Phase 3 cutover] Conflict-first guidance + MERGE_AUDIT_EVIDENCE validation on protected branches (replaces pre-merge-contamination-check.sh)"
+            "description": "[hook v2 ADVISORY] Conflict-first guidance + MERGE_AUDIT_EVIDENCE warning on protected branches (no deny path; PR #74 retired BLOCKING tier)"
           },
           {
             "type": "command",
             "command": "python3 .claude/hooks/dispatch.py cotenant_staging_guard",
-            "description": "[Phase 3 cutover] Block broad git add in main worktree (co-tenant absorption risk) (replaces cotenant-staging-guard.sh)"
+            "description": "[hook v2 ADVISORY] Warn on broad git add in main worktree (co-tenant absorption risk; no deny path; PR #74 retired BLOCKING tier)"
           },
           {
             "type": "command",
             "command": "python3 .claude/hooks/dispatch.py pre_checkout_uncommitted_overlap",
-            "description": "[Phase 2 new] Block git checkout/switch when tracked modifications overlap target branch tree (silent revert prevention)"
+            "description": "[hook v2 ADVISORY] Warn on git checkout/switch when tracked modifications overlap target branch tree (silent revert prevention; no deny path; PR #74 retired BLOCKING tier)"
           },
           {
             "type": "command",
