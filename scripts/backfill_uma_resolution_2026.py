@@ -210,6 +210,38 @@ def _get_block_ts(rpc_url: str, block_number: int) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Price decoder — determines YES vs NO outcome for a UMA Settle event
+# ---------------------------------------------------------------------------
+
+def _decode_price(data_hex: str) -> int:
+    """Extract the int256 price from the ABI-encoded Settle event data field.
+
+    Slot layout (each 32 bytes = 64 hex chars):
+        [0]  identifier (bytes32)
+        [1]  timestamp  (uint256)
+        [2]  offset to ancillaryData (uint256)
+        [3]  price (int256)   ← slot we want
+        [4]  payout (uint256)
+
+    YES outcome: price == 1e18 (10**18)
+    NO outcome:  price == 0
+    Returns 0 on any decode failure.
+    """
+    try:
+        hex_str = data_hex[2:] if data_hex.startswith("0x") else data_hex
+        if len(hex_str) < 256:  # Need at least 4 slots
+            return 0
+        price_hex = hex_str[192:256]  # Slot [3]
+        raw = int(price_hex, 16)
+        # int256 sign handling
+        if raw >= (1 << 255):
+            raw -= (1 << 256)
+        return raw
+    except Exception:
+        return 0
+
+
+# ---------------------------------------------------------------------------
 # Main backfill
 # ---------------------------------------------------------------------------
 
@@ -249,12 +281,21 @@ def run_backfill(*, rpc_url: str, from_block: int, to_block: int, dry_run: bool 
 
         for log in logs:
             try:
-                ancillary_data = decode_ancillary_data(log.get("data") or "0x")
+                data_hex = log.get("data") or "0x"
+                ancillary_data = decode_ancillary_data(data_hex)
                 ad_text = ancillary_data.decode("utf-8", errors="replace")
                 city_name, target_date, temperature_metric = _parse_ancillary_text(ad_text)
                 if city_name is None:
                     continue
                 weather_logs += 1
+
+                # Only write for YES-settled bins (price == 1e18).
+                # Each temperature bin is a separate UMA market; NO bins (price=0)
+                # must not create a settlement row — only the winning bin does.
+                price = _decode_price(data_hex)
+                YES_PRICE = 10 ** 18
+                if price != YES_PRICE:
+                    continue  # NO outcome — skip, the YES bin will be its own event
 
                 city = cities_by_name.get(city_name)
                 if city is None:
@@ -267,9 +308,10 @@ def run_backfill(*, rpc_url: str, from_block: int, to_block: int, dry_run: bool 
                 resolved_at = (datetime.fromtimestamp(block_ts, tz=timezone.utc)
                                if block_ts else datetime.now(timezone.utc))
 
+                # Always write uma_resolution for every YES event
                 resolution = ResolvedMarket(
                     condition_id=condition_id,
-                    resolved_value=0,
+                    resolved_value=price,
                     tx_hash=log.get("transactionHash") or "",
                     block_number=blk,
                     resolved_at_utc=resolved_at,
@@ -287,8 +329,13 @@ def run_backfill(*, rpc_url: str, from_block: int, to_block: int, dry_run: bool 
 
                 pm_bin_lo, pm_bin_hi = _parse_bin_bounds(ad_text)
 
+                # Derive market_slug — required by log_settlement_v2 identity check.
+                # Use a stable canonical form: city_slug-date-metric
+                city_slug = city_name.lower().replace(" ", "_")
+                event_slug = f"uma_backfill_{city_slug}_{target_date}_{temperature_metric}"
+
                 if dry_run:
-                    logger.info("DRY-RUN: %s %s %s bin=[%s,%s] obs=%s cid=%s",
+                    logger.info("DRY-RUN YES: %s %s %s bin=[%s,%s] obs=%s cid=%s",
                                 city_name, target_date, temperature_metric,
                                 pm_bin_lo, pm_bin_hi,
                                 obs_row.get("observed_temp"), condition_id[:12])
@@ -297,7 +344,7 @@ def run_backfill(*, rpc_url: str, from_block: int, to_block: int, dry_run: bool 
 
                 _write_settlement_truth(
                     conn, city, target_date, pm_bin_lo, pm_bin_hi,
-                    event_slug="", obs_row=obs_row,
+                    event_slug=event_slug, obs_row=obs_row,
                     resolved_market_outcomes=None,
                     temperature_metric=temperature_metric,
                 )
