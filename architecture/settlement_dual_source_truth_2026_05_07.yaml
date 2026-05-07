@@ -1,0 +1,72 @@
+# Created: 2026-05-07
+# Last reused or audited: 2026-05-07
+# Authority basis: operator-confirmed via Polymarket platform behavior change 2026-05-07
+#                  commits 1e5615b9 / 68937b27 / 365429e7 (Gamma backfill re-enabled)
+
+title: "Settlement Truth Source — Dual-Source Reality (2026-05-07)"
+authority: "Operator-confirmed via Polymarket platform behavior change"
+status: CURRENT
+
+eras:
+  - era_name: pre_internal_resolver
+    range: "Q4-2025 ... 2026-02-20"
+    canonical_source: uma_optimistic_oracle_v2
+    chain_address: "0xee3afe347d5c74317041e2618c49534daf887c24"  # Polygon mainnet
+    resolution_mechanism: >
+      UMA OO V2 on-chain events. Settlement is triggered by a bond-and-dispute
+      cycle; final value emitted as PriceSettled event. Last UMA block for weather
+      markets: 83,275,667 (~2026-02-20).
+    backfill_path: scripts/backfill_uma_resolution_2026.py
+    rows_in_settlements_v2: 1300  # snapshot 2026-05-07
+    settlements_v2_reconstruction_method: uma_chain_backfill
+
+  - era_name: post_internal_resolver
+    range: "2026-02-21 ... present"
+    canonical_source: polymarket_internal_resolver
+    chain_address: "0x69c47De9D4D3Dad79590d61b9e05918E03775f24"  # Polygon mainnet
+    resolution_mechanism: >
+      Polymarket switched to an internal automatic resolver after block 83,275,667.
+      Discovery signals: market metadata shows negRiskMarketID set and
+      automaticallyResolved=True; UMA chain shows zero PriceSettled events for
+      post-cutover dates. Ground truth is the Gamma API closed-event state
+      (outcomePrices=["1","0"] on YES outcome = YES won).
+    backfill_path: scripts/backfill_settlements_via_gamma_2026.py
+    rows_added_2026_05_07: 2562  # HIGH +2562 (high_gamma_cutover), LOW +125 (2026-04-15+)
+    settlements_v2_reconstruction_method: gamma_backfill
+
+low_market_note: >
+  LOW temperature markets have always used the internal resolver (never UMA OO V2).
+  Their Gamma backfill starts from 2026-04-15 (first closed LOW event confirmed by probe).
+  LOW rows are tagged reconstruction_method=gamma_backfill regardless of date.
+
+forbidden_patterns:
+  - claim: "UMA OO V2 is the canonical settlement source post 2026-02-21"
+    verdict: FALSE — zero on-chain events after block 83,275,667; Gamma is truth
+  - claim: "Gamma polling is forbidden"
+    verdict: FALSE — explicit operator override 2026-05-07 (commit 1e5615b9);
+             Gamma is the only source for post-cutover and all LOW settlements
+  - claim: "settlements_v2 has a single universal source"
+    verdict: FALSE — source is era-dependent; provenance_json.reconstruction_method
+             is the per-row discriminator (uma_chain_backfill vs gamma_backfill)
+  - claim: "silent fallback between sources is acceptable"
+    verdict: FORBIDDEN — every row must carry provenance_json.reconstruction_method
+             so downstream audits can trace truth provenance per row
+
+provenance_field_contract:
+  table: settlements_v2
+  column: provenance_json
+  required_keys:
+    - reconstruction_method   # "uma_chain_backfill" | "gamma_backfill"
+    - writer_script           # which script wrote this row
+    - operator_authorization  # date of authorization (e.g. "2026-05-07")
+  optional_keys:
+    - quarantine_reason       # set when authority=QUARANTINED (no local obs)
+
+references:
+  - architecture/fatal_misreads.yaml  # polymarket_low_market_history_starts_2026_04_15
+  - scripts/backfill_uma_resolution_2026.py
+  - scripts/backfill_settlements_via_gamma_2026.py
+  - docs/operations/UNMATCHED_GAMMA_CITIES_2026_05_07.md
+  - "git:1e5615b9"  # Gamma backfill re-enabled
+  - "git:68937b27"  # DDD v2 live wiring
+  - "git:365429e7"  # Gamma unlock implementation
