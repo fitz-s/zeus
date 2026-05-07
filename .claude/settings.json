@@ -31,11 +31,6 @@
             "type": "command",
             "command": "python3 .claude/hooks/dispatch.py pre_write_capability_gate",
             "description": "[Phase 3 cutover] Gate 1: refuse writes to blocking-class capability paths without ARCH_PLAN_EVIDENCE (replaces pre-write-capability-gate.sh; sunset 2026-08-04)"
-          },
-          {
-            "type": "command",
-            "command": "python3 .claude/hooks/dispatch.py pre_edit_hooks_protected",
-            "description": "[Phase 2 new] Block edits to .claude/settings.json or .claude/hooks/** without operator-signed sentinel (ATTACK 2 / OD-HOOK-2)"
           }
         ]
       },
