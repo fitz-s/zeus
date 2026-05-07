@@ -516,9 +516,16 @@ runtime_artifact_inventory:
     - .omx/plans/*.md
     - .omc/plans/*.md
   rule: >
-    Runtime-local planning artifacts are ignored and not authority. When they
-    contain planning/progress knowledge, this inventory must list the path and
-    disposition so agents do not need to rediscover hidden context.
+    Substantive plans MUST live at docs/operations/task_<YYYY-MM-DD>_<topic>/PLAN.md
+    (admitted via create_new typed_intent). Runtime tool scratch directories
+    (.omc/plans/, .omx/plans/) are scratch_runtime_artifact
+    (architecture/artifact_lifecycle.yaml) and are explicitly blocked by both
+    plan_only and audit typed_intents (architecture/admission_severity.yaml).
+    Files matching runtime_plan_globs are leak signals — when present, this
+    inventory file must list each path with disposition (TO_BE_PACKETIZED |
+    RUNTIME_SCRATCH | DELETE) so the leak is observable and time-bounded. The
+    inventory is a soft tracker; structural rejection lives in
+    admission_severity.yaml.
 
 docs_mode_excluded_roots:
   - path: "docs/archives.zip"

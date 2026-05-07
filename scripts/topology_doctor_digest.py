@@ -73,10 +73,13 @@ def _glob_match(path: str, pattern: str) -> bool:
 # All other requested paths are blocked → out_of_scope_files + blocked_by_intent.
 # Status is advisory_only whenever any path is blocked by the whitelist.
 #
-# Canonical scopes per PLAN.md §6:693:
-#   plan_only: docs/operations/task_*/**,  .omc/plans/**, evidence/**,
-#              .omc/research/**
-#   audit:     evidence/**, .omc/research/**
+# Canonical scopes (admission_severity.yaml::typed_intent_enum):
+#   plan_only: docs/**, evidence/**
+#              (substantive plans → docs/operations/task_<date>_<topic>/PLAN.md)
+#   audit:     evidence/**
+# `.omc/plans/**`, `.omc/research/**`, `.omx/plans/**` are scratch_runtime_artifact
+# and are explicitly blocked — admission rejection is the structural mechanism
+# that prevents leak of substantive design into runtime scratch.
 # ---------------------------------------------------------------------------
 
 # Read-only intents with whitelist-driven (admits_path_globs) admission.
@@ -1495,9 +1498,11 @@ def _apply_typed_intent_shortcut(
     F1 round-3 (PR #72 critic-opus): for plan_only and audit (whitelist-driven intents),
     ONLY paths matching admits_path_globs from admission_severity.yaml are admitted.
     Everything else → out_of_scope_files + blocked_by_intent. Status advisory_only
-    whenever any path is blocked. This enforces PLAN.md §6:693 canonical scopes:
-      plan_only: docs/operations/task_*/***, .omc/plans/**, evidence/**, .omc/research/**
-      audit:     evidence/**, .omc/research/**
+    whenever any path is blocked. Canonical scopes (admission_severity.yaml):
+      plan_only: docs/**, evidence/**  (substantive plans → docs/operations/task_*/PLAN.md)
+      audit:     evidence/**
+    Runtime scratch (.omc/plans/**, .omc/research/**, .omx/plans/**) is explicitly
+    blocked — scratch_runtime_artifact per artifact_lifecycle.yaml.
 
     hotfix, hygiene, and rebase_keepup are NOT in _ADMIT_ALL_PATHS_INTENTS and go through
     normal profile match.
