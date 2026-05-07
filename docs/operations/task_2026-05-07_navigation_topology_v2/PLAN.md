@@ -16,6 +16,39 @@ This PLAN does not request critic dispatch (coordinator handles that). It does n
 
 ---
 
+## §0.5 Critic-opus amendments (2026-05-07, post 9b677c28)
+
+Critic-opus review (`evidence/topology_v2_critic_opus.md`, agent a51e1898d045c26ac) returned **GO-WITH-CONDITIONS** with 0 critical / 2 HIGH / 2 MEDIUM / 4 LOW. proceed_to_phase_1: True. The following amendments bind:
+
+**C3 / D1 resolved (typed_intent enum extension):**
+Enum now `{plan_only, create_new, modify_existing, refactor, audit, hygiene, hotfix, rebase_keepup, other}`. `hotfix` covers urgent fixes; `rebase_keepup` covers branch-keepup-with-main; `other` is explicit fall-through (admission still applies per K1 severity tier).
+
+**C1 / D2 resolved (Phase 2 split):**
+Phase 2 split into Phase 2A (K1 severity demotion only) and Phase 2B (K2 companion-loop-break). Reason: shipping K1 + K2 in one commit means a K2 bug leaves K1's gate-weakening live → strictly worse than starting state. Split delays the demotion until companion-loop-break is verified.
+
+**C2 / D3 resolved (Phase 3 LOC bump):**
+Phase 3 LOC budget 430 → 500. Reason: `.claude/hooks/dispatch.py` (1,363 LOC) currently has zero `SessionStart` / `WorktreeCreate` / `WorktreeRemove` event handlers. The +30 LOC estimate was unrealistic; realistic is +80-120 LOC plus per-event fall-open-on-error tests (per `evidence/hook_redesign_critic_opus_final_v2.md` ATTACK 8 precedent).
+
+**Updated phase plan (4 phases):**
+- Phase 1: stable layer + severity registry (~1.5h, ~430 LOC) — UNCHANGED
+- Phase 2A: K1 severity demotion only (~1h, ~150 LOC) — NEW SPLIT
+- Phase 2B: K2 companion-loop-break (~1h, ~170 LOC) — NEW SPLIT
+- Phase 3: worktree_doctor + dispatch.py SessionStart/WorktreeCreate/WorktreeRemove handlers (~2h, ~500 LOC) — LOC bumped per C2
+
+**Total:** ~5.5h sonnet, ~1,250 LOC. Phase 1 + Phase 3 dispatched in parallel (independent surfaces). Phase 2A sequential after 1; 2B sequential after 2A.
+
+**Minor fixes (M1-M6) bound for executor compliance:**
+- M1: §1.3 — F1 + F4 are 2-hit; multi-mapping intentional (anti-rubber-stamp footnote in PLAN narrative)
+- M2: §2.6 — extend `cross_worktree_visibility.intent` to include staleness audit (no 6th capability)
+- M3: §2.7 — sentinel write happens post-`git worktree add` success; race delegated to git atomicity
+- M4: companion-loop-break — `len(requested) > 50` triggers advisory cap (defends against batch-add inflation; H-R-? mitigation per critic ATTACK 6)
+- M5: §6.5 — Day-90 metric "naming exceptions added per month" tracked
+- M6: §1.x — task-folder count 23 → 24 (off-by-one; one folder added today)
+
+All ODs (D1/D2/D3) resolved by architecture-homework; no operator punt.
+
+---
+
 ## §1 Problem
 
 ### 1.1 Verified evidence (re-measured 2026-05-07)
