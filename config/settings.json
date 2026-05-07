@@ -64,7 +64,11 @@
       "level3": 15
     },
     "transfer_logit_sigma_scale": 4.0,
-    "_transfer_logit_sigma_scale_note": "Chain-rule logit slope at p=0.5 used to map OOS Brier-diff to logit-space σ for cross-domain Platt transfer uncertainty (Phase α, Issue 2.4). Default 4.0. Operator-tunable once OOS Brier-diff corpus is available."
+    "_transfer_logit_sigma_scale_note": "Chain-rule logit slope at p=0.5 used to map OOS Brier-diff to logit-space σ for cross-domain Platt transfer uncertainty (Phase α, Issue 2.4). Default 4.0. Operator-tunable once OOS Brier-diff corpus is available.",
+    "pin": {
+      "cycle_stratified_pin_eligible_after": "2025-06-02",
+      "_pin_eligibility_note": "TIGGE spec v3 §3 Phase 0 #6 / critic v2 A2 BLOCKER: c12 IFS-ENS has NO data on disk for 2024-01-01..2024-06-01 (cloud ground truth §4). Cycle-stratified Platt requires ≥1y rolling 12z corpus, so cycle-stratified pin eligibility floor = 2025-06-02. Frozen-as-of values older than this floor MUST resolve via pooled-cycle config (legacy single-cycle '00' bucket), not cycle-stratified buckets, until the c12 2024-H1 gap is recovered or the floor moves forward."
+    }
   },
   "day0": {
     "n_mc": 10000,
