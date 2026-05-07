@@ -28,6 +28,14 @@ Data version
 HIGH: ``ecmwf_opendata_mx2t6_local_calendar_day_max_v1``
 LOW : ``ecmwf_opendata_mn2t6_local_calendar_day_min_v1``
 
+Note on params (2026-05-07)
+---------------------------
+ECMWF Open Data ``enfo`` stream deprecated ``mx2t6``/``mn2t6`` (6h aggregations).
+Fetch now uses ``mx2t3``/``mn2t3`` (3h native) per authority doc
+``architecture/zeus_grid_resolution_authority_2026_05_07.yaml`` A1+3h.
+Step list is 3h-stride (3, 6, 9 … 240). Data versions are unchanged;
+calibration learns the 3h→6h envelope mapping downstream.
+
 These data_versions are added to ``CANONICAL_ENSEMBLE_DATA_VERSIONS`` in
 ``src/contracts/ensemble_snapshot_provenance.py``. The TIGGE archive
 ``tigge_*_v1`` data_versions remain valid alongside.
@@ -67,22 +75,27 @@ DOWNLOAD_SCRIPT = FIFTY_ONE_ROOT / "scripts" / "download_ecmwf_open_ens.py"
 EXTRACT_SCRIPT = FIFTY_ONE_ROOT / "scripts" / "extract_open_ens_localday.py"
 INGEST_SCRIPT_DIR = PROJECT_ROOT / "scripts"
 
-# Open Data ships hourly steps; we want every 6h boundary up to 240h
-# (inclusive) to cover lead 0..10 days. Steps must be multiples of 6 since
-# mx2t6/mn2t6 are 6-hour aggregations.
-STEP_HOURS = list(range(6, 246, 6))
+# Open Data ships hourly steps; we want every 3h boundary up to 240h
+# (inclusive) to cover lead 0..10 days.
+#
+# Authority: architecture/zeus_grid_resolution_authority_2026_05_07.yaml A1+3h
+# ECMWF Open Data `enfo` stream no longer serves mx2t6/mn2t6 (6h aggregations).
+# The stream now serves mx2t3/mn2t3 (3h aggregations) as the native product.
+# We fetch 3h-native and let calibration learn the 3h→6h envelope mapping
+# downstream. We do NOT re-aggregate to 6h at fetch time (forbidden_patterns).
+STEP_HOURS = list(range(3, 243, 3))  # 3, 6, …, 240 — max 240h matches live_max_step_hours in source_release_calendar.yaml
 
 # Track config — local to this module so the daemon's ingest knob is one
 # clean dict rather than two parallel param lists.
 TRACKS: dict[str, dict] = {
     "mx2t6_high": {
-        "open_data_param": "mx2t6",
+        "open_data_param": "mx2t3",   # was mx2t6; deprecated — API returns ValueError
         "data_version": ECMWF_OPENDATA_HIGH_DATA_VERSION,
         "ingest_track": "mx2t6_high",
         "extract_subdir": "open_ens_mx2t6_localday_max",
     },
     "mn2t6_low": {
-        "open_data_param": "mn2t6",
+        "open_data_param": "mn2t3",   # was mn2t6; deprecated — API returns ValueError
         "data_version": ECMWF_OPENDATA_LOW_DATA_VERSION,
         "ingest_track": "mn2t6_low",
         "extract_subdir": "open_ens_mn2t6_localday_min",
