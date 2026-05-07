@@ -701,6 +701,64 @@ def _warning(code: str, path: str, message: str) -> TopologyIssue:
     return warning(code, path, message)
 
 
+# ---------------------------------------------------------------------------
+# Phase 2A — K1 severity tier runtime wiring (Navigation Topology v2)
+# Read target_severity from architecture/admission_severity.yaml and demote
+# F5 emitter issues from blocking ("error") to advisory when the registry
+# says ADVISORY.  Default: "blocking" when the file is absent or the code
+# is not listed (backward-compat fallback).
+# ---------------------------------------------------------------------------
+
+ADMISSION_SEVERITY_PATH = ROOT / "architecture" / "admission_severity.yaml"
+_SEVERITY_CACHE: dict[str, str] | None = None
+
+
+def _load_admission_severity() -> dict[str, str]:
+    """Return mapping of issue code → target_severity (e.g. 'ADVISORY', 'BLOCKING').
+
+    Reads architecture/admission_severity.yaml once per process (cached in
+    _SEVERITY_CACHE).  Falls back to empty dict (all issues default to
+    blocking) when the file is absent so the legacy code path is preserved.
+
+    Returns:
+        Dict mapping issue code → first target_severity found for that code.
+        When a code appears multiple times (e.g. AS-01 and AS-02 both map
+        navigation_scope_expansion_required), the first entry wins.
+    """
+    global _SEVERITY_CACHE
+    if _SEVERITY_CACHE is not None:
+        return _SEVERITY_CACHE
+    if not ADMISSION_SEVERITY_PATH.exists():
+        _SEVERITY_CACHE = {}
+        return _SEVERITY_CACHE
+    data = yaml.safe_load(ADMISSION_SEVERITY_PATH.read_text(encoding="utf-8")) or {}
+    mapping: dict[str, str] = {}
+    for entry in data.get("issue_severity", []):
+        code_key = entry.get("code")
+        ts = entry.get("target_severity")
+        if code_key and ts and code_key not in mapping:
+            mapping[code_key] = str(ts).upper()
+    _SEVERITY_CACHE = mapping
+    return _SEVERITY_CACHE
+
+
+def _issue_with_admission_severity(code: str, path: str, message: str) -> TopologyIssue:
+    """Emit a TopologyIssue whose severity is resolved from admission_severity.yaml.
+
+    F5 emitter sites call this instead of _issue() so that codes listed as
+    ADVISORY in the YAML produce severity="advisory" rather than severity="error".
+
+    Severity mapping:
+      ADVISORY → "advisory"  (non-blocking; does not count as error)
+      BLOCKING  → "error"    (current default; backward compat)
+      <missing> → "error"    (backward-compat fallback)
+    """
+    target = _load_admission_severity().get(code, "BLOCKING")
+    if target == "ADVISORY":
+        return _make_issue(code, path, message, severity="advisory")
+    return issue(code, path, message)
+
+
 def normalize_runtime_claims(claims: list[str] | tuple[str, ...] | None) -> list[str]:
     if not claims:
         return []
