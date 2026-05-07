@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import sqlite3
 import sys
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -30,9 +31,20 @@ PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.calibration import manager as mgr_module
-from src.calibration.manager import get_calibrator
+from src.calibration.manager import (
+    get_calibration_authority_result,
+    get_calibrator,
+    season_from_date,
+)
+from src.calibration.forecast_calibration_domain import ContractOutcomeDomain
 from src.config import City, calibration_clusters
+from src.contracts.ensemble_snapshot_provenance import (
+    ECMWF_OPENDATA_LOW_CONTRACT_WINDOW_DATA_VERSION,
+    TIGGE_LOW_CONTRACT_WINDOW_DATA_VERSION,
+)
+from src.state.schema.v2_schema import apply_v2_schema
 from src.state.db import init_schema
+from src.types.metric_identity import LOW_LOCALDAY_MIN
 
 
 def _city() -> City:
@@ -45,6 +57,53 @@ def _city() -> City:
         settlement_unit="F",
         cluster="US-Northeast",
         wu_station="KNYC",
+    )
+
+
+def _contract_domain(city: City, *, metric: str = "low") -> ContractOutcomeDomain:
+    return ContractOutcomeDomain(
+        city=city.name,
+        target_local_date=date(2026, 1, 15),
+        city_timezone=city.timezone,
+        temperature_metric=metric,  # type: ignore[arg-type]
+        observation_field="low_temp" if metric == "low" else "high_temp",
+        settlement_source_type="wu_icao",
+        settlement_station_id=city.wu_station,
+        settlement_unit=city.settlement_unit,  # type: ignore[arg-type]
+        settlement_rounding_policy="wmo_half_up",
+        bin_grid_id=f"{city.settlement_unit}_canonical_v1",
+        bin_schema_version="canonical_bin_grid_v1",
+    )
+
+
+def _save_low_v2_model(
+    conn: sqlite3.Connection,
+    *,
+    cluster: str,
+    season: str,
+    data_version: str = LOW_LOCALDAY_MIN.data_version,
+    source_id: str = "tigge_mars",
+    param_A: float = 1.0,
+    n_samples: int = 80,
+) -> None:
+    from src.calibration.store import save_platt_model_v2
+
+    save_platt_model_v2(
+        conn,
+        metric_identity=LOW_LOCALDAY_MIN,
+        cluster=cluster,
+        season=season,
+        data_version=data_version,
+        param_A=param_A,
+        param_B=0.0,
+        param_C=0.0,
+        bootstrap_params=[],
+        n_samples=n_samples,
+        input_space="width_normalized_density",
+        authority="VERIFIED",
+        cycle="00",
+        source_id=source_id,
+        horizon_profile="full",
     )
 
 
@@ -133,3 +192,178 @@ def test_get_calibrator_high_caller_unchanged_post_fix():
     # Both should yield consistent shapes; values may differ but no crash.
     assert isinstance(level_high, int)
     assert isinstance(level_low, int)
+
+
+def test_calibration_authority_result_marks_primary_exact_live_eligible():
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    init_schema(conn)
+    apply_v2_schema(conn)
+    city = _city()
+    season = season_from_date("2026-01-15", lat=city.lat)
+    _save_low_v2_model(conn, cluster=city.cluster, season=season, n_samples=80)
+    conn.commit()
+
+    result = get_calibration_authority_result(
+        conn,
+        city,
+        "2026-01-15",
+        _contract_domain(city),
+        temperature_metric="low",
+        cycle="00",
+        source_id="tigge_mars",
+        horizon_profile="full",
+    )
+
+    assert result.route == "PRIMARY_EXACT"
+    assert result.served_calibration_domain is not None
+    assert result.requested_calibration_domain.matches(result.served_calibration_domain)
+    assert result.live_eligible is True
+    assert result.block_reasons == ()
+
+
+def test_calibration_authority_result_blocks_pool_fallback_live_use():
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    init_schema(conn)
+    apply_v2_schema(conn)
+    city = _city()
+    season = season_from_date("2026-01-15", lat=city.lat)
+    fallback_cluster = next(c for c in calibration_clusters() if c != city.cluster)
+    _save_low_v2_model(conn, cluster=fallback_cluster, season=season, n_samples=80)
+    conn.commit()
+
+    result = get_calibration_authority_result(
+        conn,
+        city,
+        "2026-01-15",
+        _contract_domain(city),
+        temperature_metric="low",
+        cycle="00",
+        source_id="tigge_mars",
+        horizon_profile="full",
+    )
+
+    assert result.route == "COMPATIBLE_FALLBACK"
+    assert result.served_calibration_domain is not None
+    assert result.served_calibration_domain.cluster == fallback_cluster
+    assert result.live_eligible is False
+    assert "fallback_shadow_requires_explicit_compatibility_proof" in result.block_reasons
+    assert "calibration_domain_mismatch:cluster" in result.block_reasons
+
+
+def test_get_calibrator_prefers_tigge_low_contract_window_model_when_present():
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    init_schema(conn)
+    apply_v2_schema(conn)
+    city = _city()
+    season = season_from_date("2026-01-15", lat=city.lat)
+    _save_low_v2_model(
+        conn,
+        cluster=city.cluster,
+        season=season,
+        data_version=LOW_LOCALDAY_MIN.data_version,
+        param_A=1.0,
+    )
+    _save_low_v2_model(
+        conn,
+        cluster=city.cluster,
+        season=season,
+        data_version=TIGGE_LOW_CONTRACT_WINDOW_DATA_VERSION,
+        param_A=2.0,
+    )
+    conn.commit()
+
+    cal, level = get_calibrator(
+        conn,
+        city,
+        "2026-01-15",
+        temperature_metric="low",
+        cycle="00",
+        source_id="tigge_mars",
+        horizon_profile="full",
+    )
+
+    assert cal is not None
+    assert cal.A == 2.0
+    assert cal._bucket_data_version == TIGGE_LOW_CONTRACT_WINDOW_DATA_VERSION
+    assert level < 4
+
+
+def test_get_calibrator_prefers_opendata_low_contract_window_model_when_present():
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    init_schema(conn)
+    apply_v2_schema(conn)
+    city = _city()
+    season = season_from_date("2026-01-15", lat=city.lat)
+    _save_low_v2_model(
+        conn,
+        cluster=city.cluster,
+        season=season,
+        data_version=ECMWF_OPENDATA_LOW_CONTRACT_WINDOW_DATA_VERSION,
+        source_id="ecmwf_open_data",
+        param_A=3.0,
+    )
+    conn.commit()
+
+    cal, _level = get_calibrator(
+        conn,
+        city,
+        "2026-01-15",
+        temperature_metric="low",
+        cycle="00",
+        source_id="ecmwf_open_data",
+        horizon_profile="full",
+    )
+
+    assert cal is not None
+    assert cal.A == 3.0
+    assert cal._bucket_data_version == ECMWF_OPENDATA_LOW_CONTRACT_WINDOW_DATA_VERSION
+
+
+def test_calibration_authority_result_blocks_mismatched_primary_v2_domain(monkeypatch):
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    init_schema(conn)
+    city = _city()
+    season = season_from_date("2026-01-15", lat=city.lat)
+
+    def fake_v2(conn, *, temperature_metric, cluster, season, data_version=None, **_kwargs):
+        return {
+            "n_samples": 80,
+            "input_space": "width_normalized_density",
+            "A": 1.0,
+            "B": 0.0,
+            "C": 0.0,
+            "lead_days_min": 0,
+            "lead_days_max": 14,
+            "model_key": (
+                f"low:DifferentCluster:{season}:{data_version}:"
+                "00:tigge_mars:full:width_normalized_density"
+            ),
+            "bucket_data_version": data_version,
+            "bucket_cycle": "00",
+            "bucket_source_id": "tigge_mars",
+            "bucket_horizon_profile": "full",
+            "bootstrap_params": [],
+        }
+
+    monkeypatch.setattr(mgr_module, "load_platt_model_v2", fake_v2)
+
+    result = get_calibration_authority_result(
+        conn,
+        city,
+        "2026-01-15",
+        _contract_domain(city),
+        temperature_metric="low",
+        cycle="00",
+        source_id="tigge_mars",
+        horizon_profile="full",
+    )
+
+    assert result.route == "BLOCKED"
+    assert result.live_eligible is False
+    assert "primary_v2_domain_mismatch" in result.block_reasons
+    assert "calibration_domain_mismatch:cluster" in result.block_reasons

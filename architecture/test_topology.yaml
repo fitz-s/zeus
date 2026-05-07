@@ -64,6 +64,7 @@ test_trust_policy:
     tests/test_calibration_retrain.py: {created: "2026-04-27", last_used: "2026-04-27"}
     tests/test_executable_ev_replay.py: {created: "2026-05-04", last_used: "2026-05-04"}
     tests/test_forecast_calibration_domain.py: {created: "2026-05-04", last_used: "2026-05-04"}
+    tests/test_low_contract_window_backfill.py: {created: "2026-05-07", last_used: "2026-05-07"}
     tests/test_oracle_posterior.py: {created: "2026-05-04", last_used: "2026-05-04"}
     tests/test_entry_forecast_evaluator_cutover.py: {created: "2026-05-03", last_used: "2026-05-03"}
     tests/test_entry_forecast_promotion_evidence_io.py: {created: "2026-05-03", last_used: "2026-05-03"}
@@ -185,6 +186,8 @@ test_trust_policy:
     tests/test_ws_poll_reaction_weekly.py: {created: "2026-04-29", last_used: "2026-04-29"}
     tests/test_calibration_observation.py: {created: "2026-04-29", last_used: "2026-04-29"}
     tests/test_calibration_observation_weekly.py: {created: "2026-04-29", last_used: "2026-04-29"}
+    tests/test_low_high_alignment_report.py: {created: "2026-05-07", last_used: "2026-05-07"}
+    tests/test_opendata_tigge_equivalence_report.py: {created: "2026-05-07", last_used: "2026-05-07"}
     tests/test_learning_loop_observation.py: {created: "2026-04-29", last_used: "2026-04-29"}
     tests/test_learning_loop_observation_weekly.py: {created: "2026-04-29", last_used: "2026-04-29"}
     tests/test_supervisor_contracts.py: {created: "2026-04-28", last_used: "2026-04-28"}
@@ -258,6 +261,7 @@ categories:
     - tests/test_forecasts_writer_provenance_required.py
     - tests/test_forecast_fetch_plan.py
     - tests/test_forecast_calibration_domain.py
+    - tests/test_low_contract_window_backfill.py
     - tests/test_oracle_posterior.py
     - tests/test_executable_ev_replay.py
     - tests/test_replay_skill_eligibility_filter.py
@@ -519,6 +523,8 @@ categories:
     - tests/test_center_buy_repair.py
     - tests/test_divergence_exit_counterfactual.py
     - tests/test_lead_sigma_evaluation.py
+    - tests/test_low_high_alignment_report.py
+    - tests/test_opendata_tigge_equivalence_report.py
     - tests/test_sigma_floor_evaluation.py
     - tests/test_temporal_closure_evaluation.py
 
