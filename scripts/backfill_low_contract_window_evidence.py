@@ -30,6 +30,7 @@ from src.contracts.ensemble_snapshot_provenance import (
     TIGGE_LOW_CONTRACT_WINDOW_DATA_VERSION,
 )
 from src.contracts.tigge_snapshot_payload import ProvenanceViolation, TiggeSnapshotPayload
+from src.state.db_writer_lock import WriteClass, db_writer_lock  # noqa: E402
 from src.state.schema.v2_schema import apply_v2_schema
 from src.types.metric_identity import LOW_LOCALDAY_MIN
 
@@ -526,36 +527,44 @@ def main() -> int:
     args = parser.parse_args()
 
     dry_run = not args.apply
+    _db_path = Path(args.db_path)
+    _lock_ctx = db_writer_lock(_db_path, WriteClass.BULK) if not dry_run else None
+    if _lock_ctx is not None:
+        _lock_ctx.__enter__()
     try:
-        conn = _connect(Path(args.db_path), dry_run=dry_run)
-    except sqlite3.OperationalError as exc:
-        print(f"ERROR: sqlite3.OperationalError: {exc}", file=sys.stderr)
-        return 1
+        try:
+            conn = _connect(_db_path, dry_run=dry_run)
+        except sqlite3.OperationalError as exc:
+            print(f"ERROR: sqlite3.OperationalError: {exc}", file=sys.stderr)
+            return 1
 
-    try:
-        if not dry_run:
-            apply_v2_schema(conn)
-        per_source = run_backfill(
-            conn=conn,
-            json_root=Path(args.json_root),
-            sources=_select_sources(args.source_family),
-            dry_run=dry_run,
-            force=args.force,
-            cities=set(args.city) if args.city else None,
-            start_date=args.start_date,
-            end_date=args.end_date,
-            cycle=args.cycle,
-            limit=args.limit,
-        )
-        if not dry_run:
-            conn.commit()
-    except Exception as exc:
-        if not dry_run:
-            conn.rollback()
-        print(f"ERROR: {type(exc).__name__}: {exc}", file=sys.stderr)
-        return 1
+        try:
+            if not dry_run:
+                apply_v2_schema(conn)
+            per_source = run_backfill(
+                conn=conn,
+                json_root=Path(args.json_root),
+                sources=_select_sources(args.source_family),
+                dry_run=dry_run,
+                force=args.force,
+                cities=set(args.city) if args.city else None,
+                start_date=args.start_date,
+                end_date=args.end_date,
+                cycle=args.cycle,
+                limit=args.limit,
+            )
+            if not dry_run:
+                conn.commit()
+        except Exception as exc:
+            if not dry_run:
+                conn.rollback()
+            print(f"ERROR: {type(exc).__name__}: {exc}", file=sys.stderr)
+            return 1
+        finally:
+            conn.close()
     finally:
-        conn.close()
+        if _lock_ctx is not None:
+            _lock_ctx.__exit__(None, None, None)
 
     report = {
         "schema_version": 1,

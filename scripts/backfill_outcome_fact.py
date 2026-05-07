@@ -23,6 +23,12 @@ import sqlite3
 import sys
 from pathlib import Path
 
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+
+from src.state.db_writer_lock import WriteClass, db_writer_lock  # noqa: E402
+
 DEFAULT_DB_PATH = Path(__file__).parent.parent / "state" / "zeus.db"
 LEGACY_OUTCOME_FACT_AUTHORITY_SCOPE = "legacy_lifecycle_projection_not_settlement_authority"
 
@@ -173,7 +179,8 @@ if __name__ == "__main__":
     args = parser.parse_args()
     if not args.dry_run and not args.confirm_legacy_outcome_fact_backfill:
         parser.error("--apply requires --confirm-legacy-outcome-fact-backfill")
-    result = backfill(dry_run=args.dry_run, db_path=args.db)
+    with db_writer_lock(args.db, WriteClass.BULK):
+        result = backfill(dry_run=args.dry_run, db_path=args.db)
     if result["status"].startswith("error"):
         print(f"ERROR: {result['status']} at {result['db_path']}", file=sys.stderr)
         sys.exit(1)

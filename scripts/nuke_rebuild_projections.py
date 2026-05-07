@@ -32,6 +32,12 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
+import sys as _sys  # noqa: E402
+if str(REPO_ROOT) not in _sys.path:
+    _sys.path.insert(0, str(REPO_ROOT))
+
+from src.state.db_writer_lock import WriteClass, db_writer_lock  # noqa: E402
+
 TERMINAL_PHASES = frozenset({"settled", "voided", "admin_closed", "quarantined"})
 
 
@@ -139,6 +145,11 @@ def main() -> int:
     )
     args = parser.parse_args()
 
+    with db_writer_lock(args.db_path, WriteClass.BULK):
+        return _run(args)
+
+
+def _run(args) -> int:  # type: ignore[no-untyped-def]
     conn = open_db(args.db_path)
     print(f"== nuke_rebuild_projections db_path={args.db_path} dry_run={args.dry_run}")
 

@@ -35,6 +35,7 @@ PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.state.db import get_world_connection, init_schema
+from src.state.db_writer_lock import WriteClass, db_writer_lock  # noqa: E402
 
 
 # Tables that gain authority='UNVERIFIED' by default
@@ -218,34 +219,38 @@ def main() -> int:
 
     destructive_confirmed = os.environ.get("ZEUS_DESTRUCTIVE_CONFIRMED") == "1"
 
-    if args.db_path:
-        conn = sqlite3.connect(args.db_path)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        init_schema(conn)
-    else:
-        conn = get_world_connection(write_class="bulk")
-        init_schema(conn)
+    from src.state.db import ZEUS_WORLD_DB_PATH  # noqa: PLC0415
+    from pathlib import Path as _Path  # noqa: PLC0415
+    _lock_path = _Path(args.db_path) if args.db_path else ZEUS_WORLD_DB_PATH
+    with db_writer_lock(_lock_path, WriteClass.BULK):
+        if args.db_path:
+            conn = sqlite3.connect(args.db_path)
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA journal_mode=WAL")
+            init_schema(conn)
+        else:
+            conn = get_world_connection(write_class="bulk")
+            init_schema(conn)
 
-    mode = "DRY-RUN" if args.dry_run else "LIVE"
-    destructive_note = " [DESTRUCTIVE=YES]" if destructive_confirmed and not args.dry_run else ""
-    print(f"\n=== migrate_add_authority_column [{mode}{destructive_note}] ===")
+        mode = "DRY-RUN" if args.dry_run else "LIVE"
+        destructive_note = " [DESTRUCTIVE=YES]" if destructive_confirmed and not args.dry_run else ""
+        print(f"\n=== migrate_add_authority_column [{mode}{destructive_note}] ===")
 
-    if not destructive_confirmed:
-        print("  Note: ZEUS_DESTRUCTIVE_CONFIRMED not set. DELETE steps will be skipped.")
+        if not destructive_confirmed:
+            print("  Note: ZEUS_DESTRUCTIVE_CONFIRMED not set. DELETE steps will be skipped.")
 
-    try:
-        summary = run_migration(
-            conn,
-            dry_run=args.dry_run,
-            destructive_confirmed=destructive_confirmed,
-        )
-    except Exception as e:
-        print(f"ERROR: {e}")
+        try:
+            summary = run_migration(
+                conn,
+                dry_run=args.dry_run,
+                destructive_confirmed=destructive_confirmed,
+            )
+        except Exception as e:
+            print(f"ERROR: {e}")
+            conn.close()
+            return 1
+
         conn.close()
-        return 1
-
-    conn.close()
 
     print("\nSteps:")
     for step in summary["steps"]:

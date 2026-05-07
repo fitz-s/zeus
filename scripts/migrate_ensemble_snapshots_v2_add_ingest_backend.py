@@ -39,6 +39,7 @@ ZEUS_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ZEUS_ROOT))
 
 from src.state.db import get_world_connection  # noqa: E402
+from src.state.db_writer_lock import WriteClass, db_writer_lock  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -133,19 +134,22 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     args = build_parser().parse_args(argv)
 
-    if args.db_path:
-        conn = sqlite3.connect(str(args.db_path))
-        conn.row_factory = sqlite3.Row
-    else:
-        conn = get_world_connection()
+    from src.state.db import ZEUS_WORLD_DB_PATH  # noqa: PLC0415
+    _lock_path = args.db_path if args.db_path else ZEUS_WORLD_DB_PATH
+    with db_writer_lock(_lock_path, WriteClass.BULK):
+        if args.db_path:
+            conn = sqlite3.connect(str(args.db_path))
+            conn.row_factory = sqlite3.Row
+        else:
+            conn = get_world_connection()
 
-    try:
-        result = migrate(conn, dry_run=args.dry_run)
-    finally:
         try:
-            conn.close()
-        except sqlite3.Error:
-            pass
+            result = migrate(conn, dry_run=args.dry_run)
+        finally:
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
 
     logger.info("migration result: %s", result)
     return 0

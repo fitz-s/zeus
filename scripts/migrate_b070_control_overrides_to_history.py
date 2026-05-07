@@ -42,6 +42,7 @@ PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.state.db import get_world_connection  # noqa: E402
+from src.state.db_writer_lock import WriteClass, db_writer_lock  # noqa: E402
 
 
 def _object_exists(conn: sqlite3.Connection, name: str, kind: str) -> bool:
@@ -288,20 +289,24 @@ def main(argv: list[str] | None = None) -> int:
 
     destructive_confirmed = os.environ.get("ZEUS_DESTRUCTIVE_CONFIRMED") == "1"
     apply = bool(args.apply)
-    if args.db:
-        conn = sqlite3.connect(args.db)
-        conn.row_factory = sqlite3.Row
-    else:
-        conn = get_world_connection(write_class="bulk")
+    from src.state.db import ZEUS_WORLD_DB_PATH  # noqa: PLC0415
+    from pathlib import Path as _Path  # noqa: PLC0415
+    _lock_path = _Path(args.db) if args.db else ZEUS_WORLD_DB_PATH
+    with db_writer_lock(_lock_path, WriteClass.BULK):
+        if args.db:
+            conn = sqlite3.connect(args.db)
+            conn.row_factory = sqlite3.Row
+        else:
+            conn = get_world_connection(write_class="bulk")
 
-    try:
-        summary = run_migration(
-            conn,
-            apply=apply,
-            destructive_confirmed=destructive_confirmed,
-        )
-    finally:
-        conn.close()
+        try:
+            summary = run_migration(
+                conn,
+                apply=apply,
+                destructive_confirmed=destructive_confirmed,
+            )
+        finally:
+            conn.close()
 
     _print_summary(summary)
     if apply and not destructive_confirmed and summary["legacy_table_present"]:
