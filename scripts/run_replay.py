@@ -207,6 +207,63 @@ def _print_replay_provenance_report(summary) -> None:
     print()
 
 
+def _print_selection_coverage_report(summary) -> None:
+    """Print selection_coverage summary: hit-rate, Brier, Asia/non-Asia split."""
+    sc = summary.limitations.get("selection_coverage") or {}
+    print(f"\n{'='*80}")
+    print(f"Selection Coverage Report — run_id={summary.run_id}")
+    print(f"Date range: {summary.date_range[0]} to {summary.date_range[1]}")
+    print(f"Settlements: {summary.n_settlements} total, {summary.n_replayed} replayed "
+          f"({summary.coverage_pct}% coverage)")
+    print(f"Picks made: {sc.get('n_picks', 0)} / {summary.n_replayed} snapshots")
+    print(f"{'='*80}")
+
+    hit_rate = sc.get("hit_rate")
+    hit_incl = sc.get("hit_rate_including_no_pick")
+    brier = sc.get("brier_aggregate")
+    bss = sc.get("bss_vs_climatology")
+    print(f"Hit rate (picked only):  {hit_rate:.3f}" if hit_rate is not None else "Hit rate (picked only):  N/A")
+    print(f"Hit rate (incl no-pick): {hit_incl:.3f}" if hit_incl is not None else "Hit rate (incl no-pick): N/A")
+    print(f"Brier score (aggregate): {brier:.4f}" if brier is not None else "Brier score (aggregate): N/A")
+    print(f"BSS vs climatology:      {bss:.4f}" if bss is not None else "BSS vs climatology:      N/A")
+    print()
+
+    # Asia/non-Asia split (D3)
+    tz_strat = sc.get("by_timezone_class") or {}
+    if tz_strat:
+        print(f"{'Timezone class':20} {'N':>6} {'Hit%':>8} {'Brier':>8} {'BSS':>8}")
+        print("-" * 54)
+        for cls in ("Asia_star", "non_Asia"):
+            g = tz_strat.get(cls) or {}
+            n = g.get("n_snapshots", 0)
+            hr = g.get("hit_rate")
+            br = g.get("brier")
+            bs = g.get("bss")
+            hr_s = f"{hr:.3f}" if hr is not None else "N/A"
+            br_s = f"{br:.4f}" if br is not None else "N/A"
+            bs_s = f"{bs:.4f}" if bs is not None else "N/A"
+            print(f"{cls:20} {n:>6} {hr_s:>8} {br_s:>8} {bs_s:>8}")
+        print()
+
+    # Per-city breakdown
+    if summary.per_city:
+        print(f"{'City':20} {'Dates':>6} {'Picks':>6} {'Hit%':>8} {'Brier':>8}")
+        print("-" * 52)
+        for cn in sorted(summary.per_city.keys()):
+            s = summary.per_city[cn]
+            hr = s.get("hit_rate")
+            br = s.get("brier")
+            hr_s = f"{hr:.3f}" if hr is not None else "N/A"
+            br_s = f"{br:.4f}" if br is not None else "N/A"
+            print(f"{cn:20} {s['n_dates']:>6} {s['n_picks']:>6} {hr_s:>8} {br_s:>8}")
+        print()
+
+    print("AUTHORITY: APPROXIMATE AUDIT ONLY — not promotion-eligible")
+    print(f"FDR path: {summary.limitations.get('fdr_path', 'unknown')}")
+    print(f"p_market_source: {summary.limitations.get('p_market_source', 'unknown')}")
+    print(f"Results stored in zeus_backtest.db (run_id={summary.run_id})")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Zeus Decision Replay Engine")
     parser.add_argument("--mode", choices=[
@@ -215,8 +272,21 @@ def main():
                             "walk_forward",
                             "wu_settlement_sweep",
                             "trade_history_audit",
+                            "selection_coverage",
                         ],
                         default="audit", help="Replay mode")
+    parser.add_argument(
+        "--p-market",
+        choices=["stored", "uniform", "climatology", "frozen_at_decision"],
+        default="climatology",
+        help="selection_coverage: p_market substitute (default: climatology, strict no-future-leak)",
+    )
+    parser.add_argument(
+        "--override-fdr-alpha",
+        type=float,
+        default=None,
+        help="selection_coverage: override FDR alpha (default: settings edge.fdr_alpha)",
+    )
     parser.add_argument("--start", required=True, help="Start date (YYYY-MM-DD)")
     parser.add_argument("--end", required=True, help="End date (YYYY-MM-DD)")
     parser.add_argument("--override", action="append", default=[],
@@ -253,6 +323,20 @@ def main():
     if overrides:
         print(f"Overrides: {overrides}")
     print(f"{'='*80}\n")
+
+    if args.mode == "selection_coverage":
+        from src.engine.replay_selection_coverage import run_selection_coverage
+        from src.strategy.fdr_filter import DEFAULT_FDR_ALPHA
+        fdr_alpha = args.override_fdr_alpha if args.override_fdr_alpha is not None else DEFAULT_FDR_ALPHA
+        summary = run_selection_coverage(
+            start_date=args.start,
+            end_date=args.end,
+            temperature_metric=args.temperature_metric,
+            fdr_alpha=fdr_alpha,
+            p_market_source=args.p_market,
+        )
+        _print_selection_coverage_report(summary)
+        return
 
     try:
         summary = run_replay(

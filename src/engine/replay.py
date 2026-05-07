@@ -2582,6 +2582,13 @@ def run_replay(
         )
     if mode == TRADE_HISTORY_LANE:
         return run_trade_history_audit(start_date, end_date)
+    if mode == "selection_coverage":
+        from src.engine.replay_selection_coverage import run_selection_coverage
+        return run_selection_coverage(
+            start_date,
+            end_date,
+            temperature_metric=temperature_metric,
+        )
 
     # 2026-05-04 bankroll truth-chain cleanup: replay sizing modes need a
     # bankroll. Doctrine — on-chain wallet is the only truth source. When the
