@@ -383,7 +383,7 @@ def discover_market_events(city_names: list[str], dry_run: bool = False):
     from src.data.market_scanner import find_weather_markets
     from src.state.db import get_world_connection
 
-    conn = get_world_connection()
+    conn = get_world_connection(write_class="bulk")
     city_set = set(city_names)
 
     try:
@@ -494,7 +494,7 @@ def compute_solar_daily(cities: list[NewCity], days: int = 440, dry_run: bool = 
 
     from src.state.db import get_world_connection
 
-    conn = get_world_connection()
+    conn = get_world_connection(write_class="bulk")
     today = date.today()
     inserted = 0
 
@@ -683,7 +683,7 @@ def _print_verification(city_names: list[str]):
     """Print data coverage summary for newly onboarded cities."""
     try:
         from src.state.db import get_world_connection
-        conn = get_world_connection()
+        conn = get_world_connection(write_class="bulk")
 
         logger.info("\nDATA COVERAGE VERIFICATION:")
         logger.info("-" * 60)

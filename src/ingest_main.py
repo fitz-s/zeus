@@ -226,7 +226,7 @@ def _k2_daily_obs_tick():
         if not acquired:
             logger.info("ingest k2_daily_obs_tick skipped_lock_held")
             return
-        conn = get_world_connection()
+        conn = get_world_connection(write_class="bulk")
         try:
             result = daily_tick(conn)
         finally:
@@ -247,7 +247,7 @@ def _k2_hourly_instants_tick():
         if not acquired:
             logger.info("ingest k2_hourly_instants_tick skipped_lock_held")
             return
-        conn = get_world_connection()
+        conn = get_world_connection(write_class="bulk")
         try:
             result = hourly_tick(conn)
         finally:
@@ -268,7 +268,7 @@ def _k2_solar_daily_tick():
         if not acquired:
             logger.info("ingest k2_solar_daily_tick skipped_lock_held")
             return
-        conn = get_world_connection()
+        conn = get_world_connection(write_class="bulk")
         try:
             result = daily_tick(conn)
         finally:
@@ -289,7 +289,7 @@ def _k2_forecasts_daily_tick():
         if not acquired:
             logger.info("ingest k2_forecasts_daily_tick skipped_lock_held")
             return
-        conn = get_world_connection()
+        conn = get_world_connection(write_class="bulk")
         try:
             result = daily_tick(conn)
         finally:
@@ -310,7 +310,7 @@ def _k2_hole_scanner_tick():
         if not acquired:
             logger.info("ingest k2_hole_scanner_tick skipped_lock_held")
             return
-        conn = get_world_connection()
+        conn = get_world_connection(write_class="bulk")
         try:
             scanner = HoleScanner(conn)
             results = scanner.scan_all()
@@ -352,7 +352,7 @@ def _k2_startup_catch_up():
     from src.data.solar_append import daily_tick as solar_daily_tick
     from src.state.db import get_world_connection
 
-    conn = get_world_connection()
+    conn = get_world_connection(write_class="bulk")
     try:
         # ---- Phase 2 probe: capture staleness timestamps BEFORE Phase 1 ----
         # Phase 1 (catch_up_missing) can introduce fresh rows for historical
@@ -618,7 +618,7 @@ def _harvester_truth_writer_tick():
         if not acquired:
             logger.info("ingest harvester_truth_writer_tick skipped_lock_held")
             return
-        conn = get_world_connection()
+        conn = get_world_connection(write_class="bulk")
         try:
             result = write_settlement_truth_for_open_markets(conn)
         finally:
@@ -724,7 +724,7 @@ def _drift_detector_tick():
         if not acquired:
             logger.info("ingest _drift_detector_tick skipped_lock_held")
             return
-        conn = get_world_connection()
+        conn = get_world_connection(write_class="bulk")
         try:
             result = check_and_arm_refit(conn)
             logger.info(
@@ -990,7 +990,7 @@ def _ingest_status_rollup_tick():
         if not acquired:
             logger.info("ingest _ingest_status_rollup_tick skipped_lock_held")
             return
-        conn = get_world_connection()
+        conn = get_world_connection(write_class="bulk")
         try:
             write_ingest_status(conn)
         finally:
@@ -1029,7 +1029,7 @@ def main() -> None:
 
     # Schema init on world DB.
     from src.state.db import init_schema, get_world_connection
-    conn = get_world_connection()
+    conn = get_world_connection(write_class="bulk")
     init_schema(conn)
     conn.close()
     logger.info("init_schema complete")

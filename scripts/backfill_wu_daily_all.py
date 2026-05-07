@@ -713,7 +713,7 @@ def main(argv: list[str] | None = None) -> int:
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 
-    conn = sqlite3.connect(args.db) if args.db else get_world_connection()
+    conn = sqlite3.connect(args.db) if args.db else get_world_connection(write_class="bulk")
     conn.row_factory = sqlite3.Row
     # Enable WAL journal mode so IngestionGuard's `_log_availability_failure`
     # secondary connection can write during backfill writes without BUSY-lock

@@ -224,7 +224,7 @@ def main() -> int:
         conn.execute("PRAGMA journal_mode=WAL")
         init_schema(conn)
     else:
-        conn = get_world_connection()
+        conn = get_world_connection(write_class="bulk")
         init_schema(conn)
 
     mode = "DRY-RUN" if args.dry_run else "LIVE"

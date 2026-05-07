@@ -461,7 +461,9 @@ capabilities:
     hard_kernel_paths:
       - src/execution/harvester.py
       - src/contracts/settlement_semantics.py
-      - src/state/db.py
+      # NOTE: src/state/db.py intentionally NOT listed. db.py hosts only the
+      # per-row write helper log_settlement_v2 (settlement_write capability);
+      # the rebuild driver lives in harvester.py. Phase B fix 2026-05-07.
       - state/zeus_trades.db
       - state/zeus-world.db
     original_intent:

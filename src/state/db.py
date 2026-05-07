@@ -4,14 +4,21 @@ All tables enforce the 4-timestamp constraint where applicable.
 Settlement truth = Polymarket settlement result (spec §1.3).
 """
 
+from __future__ import annotations
+
+import contextlib
 import json
 import logging
 import os
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import TYPE_CHECKING, Iterable, Optional
 
+if TYPE_CHECKING:
+    from src.state.db_writer_lock import WriteClass
+
+from src.architecture.decorators import capability
 from src.config import STATE_DIR, get_mode, state_path
 from src.state.ledger import (
     CANONICAL_POSITION_EVENT_COLUMNS,
@@ -65,8 +72,50 @@ def _zeus_trade_db_path() -> Path:
     return STATE_DIR / "zeus_trades.db"
 
 
-def _connect(db_path: Path) -> sqlite3.Connection:
-    """Low-level connection with standard pragmas."""
+def _resolve_write_class(
+    explicit: WriteClass | str | None = None,
+) -> "WriteClass | None":
+    """Resolve the WriteClass for a connection.
+
+    Order: explicit kwarg > ZEUS_DB_WRITE_CLASS env var > None (Phase 0.5
+    helper surface; callers retrofit in Phase 1+). Returns None when the
+    caller has not opted in — the connection is opened without a flock,
+    matching pre-v4 behavior.
+
+    Per v4 plan §AX3 + §10.4.
+    """
+    from src.state.db_writer_lock import WriteClass  # local import: avoid cycle
+    if explicit is None:
+        env_val = os.environ.get("ZEUS_DB_WRITE_CLASS")
+        if env_val is None:
+            return None
+        try:
+            return WriteClass(env_val.lower())
+        except ValueError:
+            logger.warning(
+                "ZEUS_DB_WRITE_CLASS=%r is not a valid WriteClass; ignoring",
+                env_val,
+            )
+            return None
+    if isinstance(explicit, str):
+        return WriteClass(explicit.lower())
+    return explicit
+
+
+def _connect(
+    db_path: Path,
+    *,
+    write_class: WriteClass | str | None = None,
+) -> sqlite3.Connection:
+    """Low-level connection with standard pragmas.
+
+    Phase 0.5: ``write_class`` kwarg is accepted for caller classification
+    (v4 plan §3.1, §AX3). When None and ``ZEUS_DB_WRITE_CLASS`` env var is
+    unset, behavior is identical to pre-v4. When set (explicit or env), the
+    class is recorded via counter; flock acquisition is reserved for
+    Phase 1+ retrofits where callers wrap the connection lifetime in
+    ``db_writer_lock(...)`` themselves.
+    """
     db_path.parent.mkdir(parents=True, exist_ok=True)
     # T1E: timeout read from ZEUS_DB_BUSY_TIMEOUT_MS env var (ms→s); default 30s.
     timeout_s = _db_busy_timeout_s()
@@ -74,39 +123,124 @@ def _connect(db_path: Path) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
+    resolved = _resolve_write_class(write_class)
+    if resolved is not None:
+        _cnt_inc(f"db_connect_write_class_{resolved.value}_total")
     return conn
 
 
-def get_trade_connection() -> sqlite3.Connection:
+def get_trade_connection(
+    *, write_class: WriteClass | str | None = None,
+) -> sqlite3.Connection:
     """Trade DB connection (zeus_trades.db)."""
-    return _connect(_zeus_trade_db_path())
+    return _connect(_zeus_trade_db_path(), write_class=write_class)
 
 
-def get_world_connection() -> sqlite3.Connection:
+def get_world_connection(
+    *, write_class: WriteClass | str | None = None,
+) -> sqlite3.Connection:
     """Shared world data DB (settlements, calibration, ENS)."""
-    return _connect(ZEUS_WORLD_DB_PATH)
+    return _connect(ZEUS_WORLD_DB_PATH, write_class=write_class)
 
 
-def get_backtest_connection() -> sqlite3.Connection:
+def get_backtest_connection(
+    *, write_class: WriteClass | str | None = None,
+) -> sqlite3.Connection:
     """Derived backtest DB connection.
 
     This DB is a reporting/audit surface only. Live runtime execution must not
     read it as authority or write trade/world truth through it.
     """
-    return _connect(ZEUS_BACKTEST_DB_PATH)
+    return _connect(ZEUS_BACKTEST_DB_PATH, write_class=write_class)
 
 
-def get_trade_connection_with_world() -> sqlite3.Connection:
-    """Trade connection with shared DB ATTACHed for cross-DB joins."""
-    conn = get_trade_connection()
+def get_trade_connection_with_world(
+    *, write_class: WriteClass | str | None = None,
+) -> sqlite3.Connection:
+    """Trade connection with shared DB ATTACHed for cross-DB joins.
+
+    v4 plan §3.1.3: when an explicit ``write_class`` is supplied, the
+    helper records ATTACH order under the canonical alphabetical sort
+    (``risk_state.db < zeus-world.db < zeus_trades.db``) so concurrent
+    cross-DB writers cannot deadlock. Without an explicit class, behavior
+    matches pre-v4 (single ATTACH; no flocks).
+
+    For *flock-acquired* cross-DB writes use the
+    :func:`trade_connection_with_world_flocked` context manager instead;
+    that surface acquires the per-DB writer locks in canonical order before
+    yielding the ATTACHed connection.
+    """
+    from src.state.db_writer_lock import canonical_lock_order
+    resolved = _resolve_write_class(write_class)
+    conn = get_trade_connection(write_class=resolved)
     # Guard: skip ATTACH if 'world' schema already present (connection reuse)
     attached = {row[1] for row in conn.execute("PRAGMA database_list").fetchall()}
     if "world" not in attached:
+        # Canonical order is recorded for telemetry; ATTACH targets are
+        # the same single 'world' schema in this surface but the helper
+        # call exercises the v4 §3.1.3 ordering invariant.
+        if resolved is not None:
+            _ = canonical_lock_order([_zeus_trade_db_path(), ZEUS_WORLD_DB_PATH])
+            _cnt_inc("db_trade_with_world_canonical_order_total")
         try:
             conn.execute("ATTACH DATABASE ? AS world", (str(ZEUS_WORLD_DB_PATH),))
         except sqlite3.OperationalError as exc:
             logger.warning("ATTACH world failed (non-fatal): %r", exc)
     return conn
+
+
+@contextlib.contextmanager
+def trade_connection_with_world_flocked(
+    *,
+    write_class: WriteClass | str = "live",
+):
+    """Context manager: cross-DB write with canonical-order flocks.
+
+    v4 plan §3.1.3 (deadlock-free cross-DB writers). Acquires the per-DB
+    writer locks for ``zeus_trades.db`` and ``zeus-world.db`` in canonical
+    alphabetical order, ATTACHes ``world`` onto a trade connection, yields
+    that connection, and releases the flocks (and connection) on exit.
+
+    Default ``write_class="live"`` matches the dominant call-site shape
+    (riskguard + harvester + settlement commands). Phase 1+ callers
+    retrofit by replacing ``conn = get_trade_connection_with_world()``
+    blocks with ``with trade_connection_with_world_flocked(...) as conn:``.
+    """
+    from src.state.db_writer_lock import (
+        canonical_lock_order,
+        db_writer_lock,
+    )
+    resolved = _resolve_write_class(write_class)
+    if resolved is None:
+        # write_class explicit & non-None — should always resolve.
+        from src.state.db_writer_lock import WriteClass as _WC
+        resolved = _WC.LIVE
+    ordered_paths = canonical_lock_order(
+        [_zeus_trade_db_path(), ZEUS_WORLD_DB_PATH]
+    )
+    # Stack two flock context managers (canonical order) before opening conn.
+    with db_writer_lock(ordered_paths[0], resolved):
+        with db_writer_lock(ordered_paths[1], resolved):
+            conn = get_trade_connection(write_class=resolved)
+            try:
+                attached = {
+                    row[1]
+                    for row in conn.execute("PRAGMA database_list").fetchall()
+                }
+                if "world" not in attached:
+                    conn.execute(
+                        "ATTACH DATABASE ? AS world",
+                        (str(ZEUS_WORLD_DB_PATH),),
+                    )
+                _cnt_inc(
+                    f"db_trade_with_world_flocked_{resolved.value}_total"
+                )
+                yield conn
+            finally:
+                try:
+                    conn.close()
+                except Exception:  # noqa: BLE001 — best-effort close
+                    pass
 
 
 logger = logging.getLogger(__name__)
@@ -131,7 +265,11 @@ def _handle_db_write_lock(exc: sqlite3.OperationalError) -> None:
     )
 
 
-def connect_or_degrade(db_path: Path) -> Optional[sqlite3.Connection]:
+def connect_or_degrade(
+    db_path: Path,
+    *,
+    write_class: WriteClass | str | None = None,
+) -> Optional[sqlite3.Connection]:
     """T1E: Connect to DB; on 'database is locked' degrade to None (read-only cycle).
 
     Used by the live cycle write path. Returns None when the DB is locked so
@@ -139,7 +277,7 @@ def connect_or_degrade(db_path: Path) -> Optional[sqlite3.Connection]:
     Any other OperationalError is re-raised (not a lock timeout).
     """
     try:
-        return _connect(db_path)
+        return _connect(db_path, write_class=write_class)
     except sqlite3.OperationalError as exc:
         if str(exc).startswith("database is locked"):
             _handle_db_write_lock(exc)
@@ -433,7 +571,21 @@ RESOLVED_TOKEN_SUPPRESSION_REASONS = (
 )
 
 
-def get_connection(db_path: Optional[Path] = None) -> sqlite3.Connection:
+def get_connection(
+    db_path: Optional[Path] = None,
+    *,
+    write_class: WriteClass | str | None = "bulk",
+) -> sqlite3.Connection:
+    """Legacy connection helper.
+
+    v4 plan §AX3: default ``write_class="bulk"`` because the surviving
+    callers of this surface are dominated by backfill / replay / etl /
+    audit scripts and the legacy ``zeus.db`` path, all of which are BULK
+    by classification. LIVE call sites must opt in explicitly with
+    ``write_class="live"`` so the v4 flock topology routes them through
+    the LIVE flock once Phase 1 retrofits land. Pass ``write_class=None``
+    to suppress classification entirely (pre-v4 behavior).
+    """
     db_path = db_path or ZEUS_DB_PATH
     db_path.parent.mkdir(parents=True, exist_ok=True)
     # T1E: timeout read from ZEUS_DB_BUSY_TIMEOUT_MS env var (ms→s); default 30s.
@@ -442,6 +594,9 @@ def get_connection(db_path: Optional[Path] = None) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
+    resolved = _resolve_write_class(write_class)
+    if resolved is not None:
+        _cnt_inc(f"db_get_connection_{resolved.value}_total")
     return conn
 
 
@@ -2742,6 +2897,7 @@ def log_forward_market_substrate(
     }
 
 
+@capability("settlement_write", lease=True)
 def log_settlement_v2(
     conn: sqlite3.Connection | None,
     *,

@@ -103,7 +103,7 @@ def _recompute_model_bias(conn: sqlite3.Connection) -> int:
 
 
 def run_etl(*, dry_run: bool = False) -> dict:
-    conn = get_world_connection()
+    conn = get_world_connection(write_class="bulk")
     init_schema(conn)
     before = conn.execute("SELECT COUNT(*) FROM forecast_skill").fetchone()[0]
     # H3 (2026-04-24): pin s.temperature_metric='high' because forecasts

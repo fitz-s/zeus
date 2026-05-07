@@ -555,7 +555,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     cities_by_name = {c.name: c for c in load_cities()}
     run_id = f"ogimet_backfill_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
 
-    conn = get_world_connection() if not args.db else None
+    conn = get_world_connection(write_class="bulk") if not args.db else None
     if args.db:
         import sqlite3
         conn = sqlite3.connect(args.db)

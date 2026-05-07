@@ -58,9 +58,10 @@ TRAILING_LOSS_STATUSES = {
 
 
 def _get_runtime_trade_connection() -> sqlite3.Connection:
+    # v4 plan §AX3: riskguard runtime = LIVE class.
     if get_connection.__module__ != "src.state.db":
         return get_connection()
-    return get_trade_connection_with_world()
+    return get_trade_connection_with_world(write_class="live")
 
 
 def _load_riskguard_capital_metadata() -> tuple[PortfolioState, str]:
@@ -766,7 +767,7 @@ def tick() -> RiskLevel:
     determines risk level, writes to risk_state.db.
     """
     zeus_conn = _get_runtime_trade_connection()
-    risk_conn = get_connection(RISK_DB_PATH)
+    risk_conn = get_connection(RISK_DB_PATH, write_class="live")
     init_risk_db(risk_conn)
 
     previous_row = risk_conn.execute(
@@ -1162,7 +1163,7 @@ def tick_with_portfolio(portfolio: PortfolioState) -> RiskLevel:
     state here. If authority != 'canonical_db', new-entry paths are suppressed
     but monitor / exit / reconciliation lanes run read-only.
     """
-    risk_conn = get_connection(RISK_DB_PATH)
+    risk_conn = get_connection(RISK_DB_PATH, write_class="live")
     init_risk_db(risk_conn)
 
     zeus_conn = _get_runtime_trade_connection()
@@ -1236,7 +1237,7 @@ def get_current_level() -> RiskLevel:
     R4: Fail-closed — if DB error or stale (>5 min), return RED.
     """
     try:
-        conn = get_connection(RISK_DB_PATH)
+        conn = get_connection(RISK_DB_PATH, write_class="live")
         init_risk_db(conn)
         row = conn.execute(
             "SELECT level, checked_at FROM risk_state ORDER BY checked_at DESC LIMIT 1"
@@ -1274,7 +1275,7 @@ def get_force_exit_review() -> bool:
     """
     conn = None
     try:
-        conn = get_connection(RISK_DB_PATH)
+        conn = get_connection(RISK_DB_PATH, write_class="live")
         init_risk_db(conn)
         row = conn.execute(
             "SELECT force_exit_review FROM risk_state ORDER BY checked_at DESC LIMIT 1"

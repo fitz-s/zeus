@@ -116,7 +116,7 @@ def run_backfill(
     overwrite: bool = False,
     dry_run: bool = False,
 ) -> dict:
-    conn = get_world_connection()
+    conn = get_world_connection(write_class="bulk")
     init_schema(conn)
     clauses = ["members_json IS NOT NULL", "members_json != ''"]
     params: list[object] = []

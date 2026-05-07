@@ -108,6 +108,12 @@ def get_calibration_pin_config() -> dict:
                 }
             if isinstance(pin_cfg.get("model_keys"), dict):
                 pin["model_keys"] = dict(pin_cfg["model_keys"])
+            # PR #82 Copilot review: load eligibility floor into cache so
+            # _cycle_stratified_pin_eligibility_floor() reads from the shared
+            # cache instead of re-opening settings.json on every call.
+            floor_val = pin_cfg.get("cycle_stratified_pin_eligible_after")
+            if isinstance(floor_val, str) and floor_val:
+                pin["cycle_stratified_pin_eligible_after"] = floor_val
     except Exception as exc:  # noqa: BLE001 — fail-open to legacy behavior
         logger.warning("calibration pin config load failed: %s; using legacy unpinned behavior", exc)
     _PIN_CONFIG_CACHE = pin
@@ -124,20 +130,18 @@ def _cycle_stratified_pin_eligibility_floor() -> Optional[str]:
     cycle-stratified buckets, until the c12 2024-H1 gap is recovered or the floor
     moves forward.
 
-    Reads ``calibration.pin.cycle_stratified_pin_eligible_after`` from
-    settings.json. Returns None if the key is absent (legacy back-compat — no
-    eligibility gate applied).
+    Reads ``calibration.pin.cycle_stratified_pin_eligible_after`` from the
+    cached pin config (``get_calibration_pin_config``). Returns None if the
+    key is absent (legacy back-compat — no eligibility gate applied).
+
+    PR #82 Copilot review: previously re-read and re-parsed settings.json on
+    every call, bypassing ``_PIN_CONFIG_CACHE``. Now uses the shared cache.
     """
     try:
-        import json as _json
-        from pathlib import Path as _Path
-        cfg_path = _Path(__file__).resolve().parent.parent.parent / "config" / "settings.json"
-        if cfg_path.exists():
-            cfg = _json.loads(cfg_path.read_text())
-            pin_cfg = (cfg.get("calibration") or {}).get("pin") or {}
-            floor = pin_cfg.get("cycle_stratified_pin_eligible_after")
-            if isinstance(floor, str) and floor:
-                return floor
+        pin_cfg = get_calibration_pin_config()
+        floor = pin_cfg.get("cycle_stratified_pin_eligible_after")
+        if isinstance(floor, str) and floor:
+            return floor
     except Exception as exc:  # noqa: BLE001 — fail-open to legacy unpinned behavior
         logger.warning(
             "cycle_stratified_pin_eligible_after read failed: %s; "

@@ -124,7 +124,7 @@ def _live_status(*, runtime_blockers: list[str], archive_gaps: list[str]) -> str
 
 
 def audit_city_data_readiness() -> dict:
-    conn = get_world_connection()
+    conn = get_world_connection(write_class="bulk")
     init_schema(conn)
     tigge_cities = _load_tigge_manifest_cities()
     tigge_coverage = _load_tigge_coverage()

@@ -389,7 +389,7 @@ def main() -> int:
 
     pool_map = {c.name: c for c in ALL_CITIES}
 
-    conn = get_world_connection()
+    conn = get_world_connection(write_class="bulk")
     init_schema(conn)
 
     if args.cities:

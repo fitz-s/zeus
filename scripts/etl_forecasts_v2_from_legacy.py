@@ -234,7 +234,7 @@ def main() -> int:
     if args.db:
         conn = sqlite3.connect(args.db)
     else:
-        conn = get_world_connection()
+        conn = get_world_connection(write_class="bulk")
 
     try:
         summary = run_etl(conn, apply=args.apply, batch=args.batch)

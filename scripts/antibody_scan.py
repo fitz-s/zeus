@@ -87,7 +87,7 @@ def check_pipeline_health(result: ScanResult):
     """
     from src.state.db import get_world_connection
 
-    conn = get_world_connection()
+    conn = get_world_connection(write_class="bulk")
     today = date.today()
     result.checks_run += 1
 
@@ -176,7 +176,7 @@ def check_data_integrity(result: ScanResult):
 
     # Settlement integer precision
     try:
-        conn = get_world_connection()
+        conn = get_world_connection(write_class="bulk")
         r = conn.execute("""
             SELECT COUNT(*) FROM settlements
             WHERE settlement_value IS NOT NULL
@@ -234,7 +234,7 @@ def check_model_health(result: ScanResult):
     """
     from src.state.db import get_world_connection
 
-    conn = get_world_connection()
+    conn = get_world_connection(write_class="bulk")
     result.checks_run += 1
     problems = []
 

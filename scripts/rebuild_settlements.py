@@ -303,7 +303,7 @@ def main() -> int:
     parser.add_argument("--apply", action="store_true", help="Write rows. Default is dry-run.")
     args = parser.parse_args()
 
-    conn = sqlite3.connect(str(args.db)) if args.db else get_world_connection()
+    conn = sqlite3.connect(str(args.db)) if args.db else get_world_connection(write_class="bulk")
     try:
         summary = rebuild_settlements_scoped(
             conn,

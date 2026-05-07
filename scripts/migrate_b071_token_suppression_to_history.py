@@ -244,7 +244,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    conn = get_world_connection()
+    conn = get_world_connection(write_class="bulk")
     try:
         result = migrate(conn, apply=args.apply, drop_legacy=args.drop_legacy)
         print(f"[B071] Result: {result}")

@@ -43,7 +43,7 @@ def world_connection() -> Iterator:
     Closes on exit even if the body raises. Equivalent to the try/finally
     pattern in `src/main.py` tick functions.
     """
-    conn = get_world_connection()
+    conn = get_world_connection(write_class="bulk")
     try:
         yield conn
     finally:

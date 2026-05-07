@@ -467,7 +467,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Source:  {HKO_XML_URL_TEMPLATE.format(year=start.year, month=start.month)} (template)")
     print(f"Station: {HKO_STATION}")
 
-    conn = get_world_connection()
+    conn = get_world_connection(write_class="bulk")
     conn.execute("PRAGMA journal_mode=WAL")
     init_schema(conn)
 
