@@ -74,6 +74,11 @@ def _optional_datetime(payload: dict, *fields: str) -> datetime | None:
     return None
 
 
+def _boundary_policy(payload: dict) -> dict:
+    raw = payload.get("boundary_policy")
+    return raw if isinstance(raw, dict) else {}
+
+
 def _classify_window_attribution(
     *,
     contract_domain: "ContractOutcomeDomain",
@@ -330,9 +335,7 @@ class ForecastToBinEvidence:
                 contributes = False
                 training_allowed = False
                 block_reasons.append("issued_after_relevant_window")
-        boundary_ambiguous = bool(
-            payload.get("boundary_policy", {}).get("boundary_ambiguous", False)
-        )
+        boundary_ambiguous = bool(_boundary_policy(payload).get("boundary_ambiguous", False))
         if boundary_ambiguous:
             attribution_status = "AMBIGUOUS_CROSSES_LOCAL_DAY_BOUNDARY"
             contributes = False

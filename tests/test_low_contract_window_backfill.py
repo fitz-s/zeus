@@ -235,6 +235,24 @@ def test_low_contract_evidence_uses_inner_ranges_not_boundary_envelope():
     assert evidence["forecast_window_end_local"].startswith("2026-06-01T07:00:00")
 
 
+def test_low_contract_evidence_falls_back_to_selected_step_ranges_when_inner_missing():
+    payload = _payload()
+    payload["selected_step_ranges"] = ["54-60"]
+    payload["selected_step_ranges_inner"] = []
+
+    evidence = _contract_evidence_fields(
+        payload,
+        LOW_LOCALDAY_MIN,
+        source_id="tigge_mars",
+    )
+
+    assert evidence["forecast_window_attribution_status"] == "FULLY_INSIDE_TARGET_LOCAL_DAY"
+    assert evidence["contributes_to_target_extrema"] == 1
+    assert json.loads(evidence["forecast_window_block_reasons_json"]) == []
+    assert evidence["forecast_window_start_local"].startswith("2026-06-01T01:00:00")
+    assert evidence["forecast_window_end_local"].startswith("2026-06-01T07:00:00")
+
+
 def test_low_contract_evidence_matches_paris_inner_min_physical_semantics():
     payload = _payload()
     payload.update({
@@ -298,6 +316,21 @@ def test_low_contract_evidence_invalid_timezone_blocks_without_raising():
     assert "invalid_city_timezone" in json.loads(
         evidence["forecast_window_block_reasons_json"]
     )
+
+
+def test_low_contract_evidence_nondict_boundary_policy_does_not_raise():
+    payload = _payload()
+    payload["boundary_policy"] = "malformed"
+
+    evidence = _contract_evidence_fields(
+        payload,
+        LOW_LOCALDAY_MIN,
+        source_id="tigge_mars",
+    )
+
+    assert evidence["forecast_window_attribution_status"] == "FULLY_INSIDE_TARGET_LOCAL_DAY"
+    assert evidence["contributes_to_target_extrema"] == 1
+    assert json.loads(evidence["forecast_window_block_reasons_json"]) == []
 
 
 def test_low_contract_window_backfill_preserves_non_boundary_block_reason(tmp_path: Path):

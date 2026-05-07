@@ -250,12 +250,19 @@ def _parsed_ranges_from_payload_key(payload: dict, key: str) -> list[tuple[int, 
     return ranges
 
 
+def _boundary_policy(payload: dict) -> dict:
+    raw = payload.get("boundary_policy")
+    return raw if isinstance(raw, dict) else {}
+
+
 def _selected_step_ranges(payload: dict) -> list[tuple[int, int]]:
     if _is_low_extrema_payload(payload):
         # LOW local-day minima are constructed from fully-inside windows.  The
         # boundary ranges are quarantine/proof windows used to decide whether a
         # boundary aggregate can win; they are not contributing extrema windows.
         ranges = _parsed_ranges_from_payload_key(payload, "selected_step_ranges_inner")
+        if not ranges:
+            ranges = _parsed_ranges_from_payload_key(payload, "selected_step_ranges")
         return list(dict.fromkeys(ranges))
 
     ranges: list[tuple[int, int]] = []
@@ -402,7 +409,7 @@ def _contract_evidence_fields(
         "forecast_window_block_reasons_json": json.dumps(block_reasons),
     }
     if block_reasons:
-        if bool((payload.get("boundary_policy") or {}).get("boundary_ambiguous", False)):
+        if bool(_boundary_policy(payload).get("boundary_ambiguous", False)):
             block_reasons.append("boundary_ambiguous")
             base["forecast_window_attribution_status"] = "AMBIGUOUS_CROSSES_LOCAL_DAY_BOUNDARY"
             base["forecast_window_block_reasons_json"] = json.dumps(list(dict.fromkeys(block_reasons)))

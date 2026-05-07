@@ -198,6 +198,31 @@ def test_payload_factory_accepts_fully_inside_explicit_window_for_training_shado
     assert evidence.live_allowed is False
 
 
+def test_payload_factory_nondict_boundary_policy_does_not_raise() -> None:
+    evidence = ForecastToBinEvidence.from_snapshot_payload(
+        _contract_domain(),
+        {
+            "forecast_source_id": "tigge_mars",
+            "data_version": "tigge_mn2t6_local_calendar_day_min_v1",
+            "issue_time_utc": "2026-06-09T00:00:00+00:00",
+            "cycle_hour_utc": 0,
+            "horizon_profile": "full",
+            "physical_quantity": "mn2t6",
+            "aggregation_window_hours": 6,
+            "forecast_window_start_utc": "2026-06-09T18:00:00+00:00",
+            "forecast_window_end_utc": "2026-06-10T00:00:00+00:00",
+            "forecast_window_start_local": "2026-06-10T02:00:00+08:00",
+            "forecast_window_end_local": "2026-06-10T08:00:00+08:00",
+            "boundary_policy": "malformed",
+            "causality": {"status": "OK"},
+        },
+    )
+
+    assert evidence.attribution_status == "FULLY_INSIDE_TARGET_LOCAL_DAY"
+    assert evidence.training_allowed is True
+    assert evidence.block_reasons == ()
+
+
 def test_payload_factory_blocks_issue_after_relevant_window() -> None:
     evidence = ForecastToBinEvidence.from_snapshot_payload(
         _contract_domain(),

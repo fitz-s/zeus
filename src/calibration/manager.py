@@ -25,6 +25,10 @@ from src.calibration.store import (
 )
 from src.config import City, calibration_clusters, calibration_maturity_thresholds
 from src.contracts.calibration_bins import F_CANONICAL_GRID, C_CANONICAL_GRID
+from src.contracts.ensemble_snapshot_provenance import (
+    ECMWF_OPENDATA_LOW_CONTRACT_WINDOW_DATA_VERSION,
+    TIGGE_LOW_CONTRACT_WINDOW_DATA_VERSION,
+)
 
 _EXPECTED_GROUP_ROWS = {"F": F_CANONICAL_GRID.n_bins, "C": C_CANONICAL_GRID.n_bins}
 
@@ -224,18 +228,18 @@ def edge_threshold_multiplier(level: int) -> float:
 
 
 def _source_family_for_calibration_source_id(source_id: Optional[str]) -> str | None:
-    if source_id == "tigge_mars":
+    if source_id in {"tigge", "tigge_mars"}:
         return "tigge"
     if source_id == "ecmwf_open_data":
         return "ecmwf_opendata"
     return None
 
 
-def _expected_data_version_for_metric_source(
+def _legacy_data_version_for_metric_source(
     temperature_metric: str,
     source_id: Optional[str],
 ) -> str:
-    """Return the Platt data_version that matches a metric/source request."""
+    """Return the historical metric/source Platt data_version."""
     from src.types.metric_identity import (
         HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN, MetricIdentity,
     )
@@ -253,6 +257,43 @@ def _expected_data_version_for_metric_source(
         if temperature_metric == "high"
         else LOW_LOCALDAY_MIN.data_version
     )
+
+
+def _candidate_data_versions_for_metric_source(
+    temperature_metric: str,
+    source_id: Optional[str],
+) -> tuple[str, ...]:
+    """Return live lookup data_versions in preference order.
+
+    LOW contract-window v2 rows are the recovered authority when a caller
+    provides source provenance.  Legacy LOW remains a fallback candidate so
+    existing buckets do not disappear before the recovered corpus is refit.
+    """
+    legacy_data_version = _legacy_data_version_for_metric_source(
+        temperature_metric, source_id
+    )
+    source_family = _source_family_for_calibration_source_id(source_id)
+    if temperature_metric != "low" or source_family is None:
+        return (legacy_data_version,)
+    if source_family == "ecmwf_opendata":
+        return (
+            ECMWF_OPENDATA_LOW_CONTRACT_WINDOW_DATA_VERSION,
+            legacy_data_version,
+        )
+    if source_family == "tigge":
+        return (
+            TIGGE_LOW_CONTRACT_WINDOW_DATA_VERSION,
+            legacy_data_version,
+        )
+    return (legacy_data_version,)
+
+
+def _expected_data_version_for_metric_source(
+    temperature_metric: str,
+    source_id: Optional[str],
+) -> str:
+    """Return the preferred Platt data_version for a metric/source request."""
+    return _candidate_data_versions_for_metric_source(temperature_metric, source_id)[0]
 
 
 def _cycle_hour_to_int(cycle: Optional[str]) -> int:
@@ -378,9 +419,10 @@ def get_calibration_authority_result(
     )
     season = season_from_date(target_date, lat=city.lat)
     cluster = city.cluster
-    expected_data_version = _expected_data_version_for_metric_source(
+    candidate_data_versions = _candidate_data_versions_for_metric_source(
         temperature_metric, source_id
     )
+    expected_data_version = candidate_data_versions[0]
     requested_source_id = source_id or "tigge_mars"
     requested_horizon = horizon_profile or "full"
     requested_domain = _calibration_domain_from_parts(
@@ -397,18 +439,35 @@ def get_calibration_authority_result(
     primary_frozen, primary_model_key = _resolve_pin_for_bucket(
         temperature_metric, cluster, season, cycle
     )
-    primary_model = load_platt_model_v2(
-        conn,
-        temperature_metric=temperature_metric,
-        cluster=cluster,
-        season=season,
-        data_version=expected_data_version,
-        frozen_as_of=primary_frozen,
-        model_key=primary_model_key,
-        cycle=cycle,
-        source_id=source_id,
-        horizon_profile=horizon_profile,
-    )
+    primary_model = None
+    for expected_data_version in candidate_data_versions:
+        requested_domain = _calibration_domain_from_parts(
+            source_id=requested_source_id,
+            data_version=expected_data_version,
+            cycle=cycle,
+            horizon_profile=requested_horizon,
+            temperature_metric=temperature_metric,
+            cluster=cluster,
+            season=season,
+            input_space="width_normalized_density",
+        )
+        primary_model = load_platt_model_v2(
+            conn,
+            temperature_metric=temperature_metric,
+            cluster=cluster,
+            season=season,
+            data_version=expected_data_version,
+            frozen_as_of=primary_frozen,
+            model_key=primary_model_key,
+            cycle=cycle,
+            source_id=source_id,
+            horizon_profile=horizon_profile,
+        )
+        if (
+            primary_model is not None
+            and primary_model.get("input_space") == "width_normalized_density"
+        ):
+            break
     if primary_model is not None and primary_model.get("input_space") == "width_normalized_density":
         served_domain = _parse_v2_model_key_domain(primary_model.get("model_key"))
         if served_domain is None:
@@ -422,11 +481,23 @@ def get_calibration_authority_result(
                 season=season,
                 input_space=primary_model.get("input_space") or "width_normalized_density",
             )
+        exact_domain = requested_domain.matches(served_domain)
+        block_reasons: tuple[str, ...] = ()
+        route = "PRIMARY_EXACT"
+        if not exact_domain:
+            route = "BLOCKED"
+            block_reasons = (
+                "primary_v2_domain_mismatch",
+                *(
+                    f"calibration_domain_mismatch:{field}"
+                    for field in requested_domain.mismatch_fields(served_domain)
+                ),
+            )
         return _authority_result_for_calibrator(
             contract_domain=contract_domain,
             requested_domain=requested_domain,
             served_domain=served_domain,
-            route="PRIMARY_EXACT",
+            route=route,
             calibrator_model_key=primary_model.get("model_key")
             or (
                 f"{temperature_metric}:{cluster}:{season}:{expected_data_version}:"
@@ -434,8 +505,19 @@ def get_calibration_authority_result(
                 "width_normalized_density"
             ),
             n_samples=int(primary_model.get("n_samples") or 0),
-            block_reasons=(),
+            block_reasons=block_reasons,
         )
+    expected_data_version = candidate_data_versions[0]
+    requested_domain = _calibration_domain_from_parts(
+        source_id=requested_source_id,
+        data_version=expected_data_version,
+        cycle=cycle,
+        horizon_profile=requested_horizon,
+        temperature_metric=temperature_metric,
+        cluster=cluster,
+        season=season,
+        input_space="width_normalized_density",
+    )
 
     cal, level = get_calibrator(
         conn,
@@ -576,9 +658,10 @@ def get_calibrator(
     # the source-family registry — so OpenData live forecasts hit OpenData
     # Platt buckets, not TIGGE-trained ones (BLOCKER 3 fix). Fallback to
     # legacy TIGGE-only constants when source_id is None (back-compat).
-    expected_data_version = _expected_data_version_for_metric_source(
+    candidate_data_versions = _candidate_data_versions_for_metric_source(
         temperature_metric, source_id
     )
+    expected_data_version = candidate_data_versions[0]
 
     # F1 (2026-05-03): resolve config-pinned frozen_as_of + model_key for this
     # bucket. Both default to None → legacy behavior preserved.
@@ -588,18 +671,22 @@ def get_calibrator(
 
     # Try primary bucket — v2 FIRST (metric-aware), then legacy (HIGH BC).
     # Phase 2 (2026-05-04): thread cycle/source_id/horizon_profile into v2 load.
-    model_data = load_platt_model_v2(
-        conn,
-        temperature_metric=temperature_metric,
-        cluster=cluster,
-        season=season,
-        data_version=expected_data_version,
-        frozen_as_of=primary_frozen,
-        model_key=primary_model_key,
-        cycle=cycle,
-        source_id=source_id,
-        horizon_profile=horizon_profile,
-    )
+    model_data = None
+    for expected_data_version in candidate_data_versions:
+        model_data = load_platt_model_v2(
+            conn,
+            temperature_metric=temperature_metric,
+            cluster=cluster,
+            season=season,
+            data_version=expected_data_version,
+            frozen_as_of=primary_frozen,
+            model_key=primary_model_key,
+            cycle=cycle,
+            source_id=source_id,
+            horizon_profile=horizon_profile,
+        )
+        if model_data is not None:
+            break
     if model_data is None and temperature_metric == "high":
         # Legacy fallback only for HIGH — LOW has never existed in legacy
         bk = bucket_key(cluster, season)
@@ -670,18 +757,22 @@ def get_calibrator(
         fb_frozen, fb_model_key = _resolve_pin_for_bucket(
             temperature_metric, fallback_cluster, season, cycle
         )
-        model_data = load_platt_model_v2(
-            conn,
-            temperature_metric=temperature_metric,
-            cluster=fallback_cluster,
-            season=season,
-            data_version=expected_data_version,
-            frozen_as_of=fb_frozen,
-            model_key=fb_model_key,
-            cycle=cycle,
-            source_id=source_id,
-            horizon_profile=horizon_profile,
-        )
+        model_data = None
+        for expected_data_version in candidate_data_versions:
+            model_data = load_platt_model_v2(
+                conn,
+                temperature_metric=temperature_metric,
+                cluster=fallback_cluster,
+                season=season,
+                data_version=expected_data_version,
+                frozen_as_of=fb_frozen,
+                model_key=fb_model_key,
+                cycle=cycle,
+                source_id=source_id,
+                horizon_profile=horizon_profile,
+            )
+            if model_data is not None:
+                break
         if model_data is None and temperature_metric == "high":
             bk_fb = bucket_key(fallback_cluster, season)
             model_data = load_platt_model(conn, bk_fb)
