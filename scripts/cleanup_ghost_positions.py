@@ -22,6 +22,11 @@ from pathlib import Path
 ZEUS_ROOT = Path(__file__).resolve().parent.parent
 DB_PATH = ZEUS_ROOT / "state" / "zeus.db"
 
+if str(ZEUS_ROOT) not in sys.path:
+    sys.path.insert(0, str(ZEUS_ROOT))
+
+from src.state.db_writer_lock import WriteClass, db_writer_lock  # noqa: E402
+
 # City name normalization: trade_decisions uses full names,
 # settlements uses abbreviated names
 CITY_NORMALIZE = {
@@ -106,65 +111,67 @@ def main():
         print(f"ERROR: Database not found at {DB_PATH}", file=sys.stderr)
         sys.exit(1)
 
-    conn = sqlite3.connect(str(DB_PATH))
-    cur = conn.cursor()
-    today = date.today()
+    with db_writer_lock(DB_PATH, WriteClass.BULK):
+        conn = sqlite3.connect(str(DB_PATH))
+        cur = conn.cursor()
+        today = date.today()
 
-    print(f"Ghost Position Cleanup — {'APPLY MODE' if args.apply else 'DRY RUN'}")
-    print(f"Database: {DB_PATH}")
-    print(f"Today: {today}")
-    print()
-
-    ghosts = find_ghosts(cur, today)
-
-    if not ghosts:
-        print("No ghost positions found.")
-        return
-
-    settled_ghosts = [g for g in ghosts if g["settled"]]
-    unresolved_ghosts = [g for g in ghosts if not g["settled"]]
-
-    print(f"Found {len(ghosts)} ghost positions:")
-    print(f"  Market settled: {len(settled_ghosts)}")
-    print(f"  Unresolved (no settlement row): {len(unresolved_ghosts)}")
-    print()
-
-    if settled_ghosts:
-        print("=== SETTLED GHOSTS (will mark 'settled_ghost') ===")
-        for g in settled_ghosts:
-            print(f"  trade_id={g['trade_id']:4d}  city={g['city']:20s}  target={g['target_date']}  {g['bin_label'][:60]}")
-            if args.apply:
-                cur.execute(
-                    "UPDATE trade_decisions SET status='settled_ghost' WHERE trade_id=?",
-                    (g["trade_id"],),
-                )
+        print(f"Ghost Position Cleanup — {'APPLY MODE' if args.apply else 'DRY RUN'}")
+        print(f"Database: {DB_PATH}")
+        print(f"Today: {today}")
         print()
 
-    if unresolved_ghosts:
-        print("=== UNRESOLVED GHOSTS (will mark 'unresolved_ghost') ===")
-        print(f"  NOTE: These markets have no settlement rows. Possible causes:")
-        print(f"    - Settlement harvester hasn't run for dates after 2026-03-30")
-        print(f"    - City name mismatch (trade uses full name, settlements uses abbreviation)")
-        print()
-        for g in unresolved_ghosts:
-            city_note = ""
-            if g["city"] != g["normalized_city"]:
-                city_note = f" (normalized: {g['normalized_city']})"
-            print(f"  trade_id={g['trade_id']:4d}  city={g['city'] or 'UNKNOWN':20s}{city_note}  target={g['target_date']}")
-            if args.apply:
-                cur.execute(
-                    "UPDATE trade_decisions SET status='unresolved_ghost' WHERE trade_id=?",
-                    (g["trade_id"],),
-                )
+        ghosts = find_ghosts(cur, today)
+
+        if not ghosts:
+            print("No ghost positions found.")
+            conn.close()
+            return
+
+        settled_ghosts = [g for g in ghosts if g["settled"]]
+        unresolved_ghosts = [g for g in ghosts if not g["settled"]]
+
+        print(f"Found {len(ghosts)} ghost positions:")
+        print(f"  Market settled: {len(settled_ghosts)}")
+        print(f"  Unresolved (no settlement row): {len(unresolved_ghosts)}")
         print()
 
-    if args.apply:
-        conn.commit()
-        print(f"APPLIED: {len(settled_ghosts)} marked settled_ghost, {len(unresolved_ghosts)} marked unresolved_ghost")
-    else:
-        print("DRY RUN complete. Pass --apply to make changes.")
+        if settled_ghosts:
+            print("=== SETTLED GHOSTS (will mark 'settled_ghost') ===")
+            for g in settled_ghosts:
+                print(f"  trade_id={g['trade_id']:4d}  city={g['city']:20s}  target={g['target_date']}  {g['bin_label'][:60]}")
+                if args.apply:
+                    cur.execute(
+                        "UPDATE trade_decisions SET status='settled_ghost' WHERE trade_id=?",
+                        (g["trade_id"],),
+                    )
+            print()
 
-    conn.close()
+        if unresolved_ghosts:
+            print("=== UNRESOLVED GHOSTS (will mark 'unresolved_ghost') ===")
+            print(f"  NOTE: These markets have no settlement rows. Possible causes:")
+            print(f"    - Settlement harvester hasn't run for dates after 2026-03-30")
+            print(f"    - City name mismatch (trade uses full name, settlements uses abbreviation)")
+            print()
+            for g in unresolved_ghosts:
+                city_note = ""
+                if g["city"] != g["normalized_city"]:
+                    city_note = f" (normalized: {g['normalized_city']})"
+                print(f"  trade_id={g['trade_id']:4d}  city={g['city'] or 'UNKNOWN':20s}{city_note}  target={g['target_date']}")
+                if args.apply:
+                    cur.execute(
+                        "UPDATE trade_decisions SET status='unresolved_ghost' WHERE trade_id=?",
+                        (g["trade_id"],),
+                    )
+            print()
+
+        if args.apply:
+            conn.commit()
+            print(f"APPLIED: {len(settled_ghosts)} marked settled_ghost, {len(unresolved_ghosts)} marked unresolved_ghost")
+        else:
+            print("DRY RUN complete. Pass --apply to make changes.")
+
+        conn.close()
 
 
 if __name__ == "__main__":

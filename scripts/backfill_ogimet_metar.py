@@ -68,7 +68,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.config import City, load_cities  # noqa: E402
-from src.state.db import get_world_connection, init_schema  # noqa: E402
+from src.state.db import ZEUS_WORLD_DB_PATH, get_world_connection, init_schema  # noqa: E402
+from src.state.db_writer_lock import WriteClass, db_writer_lock  # noqa: E402
 from scripts.backfill_completeness import (  # noqa: E402
     add_completeness_args,
     emit_manifest_footer,
@@ -555,37 +556,39 @@ def main(argv: Optional[list[str]] = None) -> int:
     cities_by_name = {c.name: c for c in load_cities()}
     run_id = f"ogimet_backfill_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
 
-    conn = get_world_connection(write_class="bulk") if not args.db else None
-    if args.db:
-        import sqlite3
-        conn = sqlite3.connect(args.db)
-        conn.row_factory = sqlite3.Row
-    init_schema(conn)
+    _lock_path = Path(args.db) if args.db else ZEUS_WORLD_DB_PATH
+    with db_writer_lock(_lock_path, WriteClass.BULK):
+        conn = get_world_connection(write_class="bulk") if not args.db else None
+        if args.db:
+            import sqlite3
+            conn = sqlite3.connect(args.db)
+            conn.row_factory = sqlite3.Row
+        init_schema(conn)
 
-    try:
-        print(f"=== Ogimet backfill run_id={run_id} ===")
-        print(f"range: {start} .. {end}  dry_run={args.dry_run}")
-        print(f"targets: {targets}")
-        summaries = []
-        for name in targets:
-            city = cities_by_name.get(name)
-            if city is None:
-                print(f"  WARN {name}: not in cities.json, skipping")
-                continue
-            target = OGIMET_TARGETS[name]
-            summary = backfill_city(
-                conn, city, target, start, end,
-                dry_run=args.dry_run, run_id=run_id,
-            )
-            summaries.append(summary)
-        print("\n=== Summary ===")
-        for s in summaries:
-            print(
-                f"  {s['city']:12s} written={s['days_written']:4d} "
-                f"skipped={s['days_skipped']:4d}"
-            )
-    finally:
-        conn.close()
+        try:
+            print(f"=== Ogimet backfill run_id={run_id} ===")
+            print(f"range: {start} .. {end}  dry_run={args.dry_run}")
+            print(f"targets: {targets}")
+            summaries = []
+            for name in targets:
+                city = cities_by_name.get(name)
+                if city is None:
+                    print(f"  WARN {name}: not in cities.json, skipping")
+                    continue
+                target = OGIMET_TARGETS[name]
+                summary = backfill_city(
+                    conn, city, target, start, end,
+                    dry_run=args.dry_run, run_id=run_id,
+                )
+                summaries.append(summary)
+            print("\n=== Summary ===")
+            for s in summaries:
+                print(
+                    f"  {s['city']:12s} written={s['days_written']:4d} "
+                    f"skipped={s['days_skipped']:4d}"
+                )
+        finally:
+            conn.close()
 
     total_written = sum(s["days_written"] for s in summaries)
     total_skipped = sum(s["days_skipped"] for s in summaries)

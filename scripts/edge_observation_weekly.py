@@ -47,6 +47,9 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 # any cwd, without requiring PYTHONPATH=. or `python -m scripts.X`.
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
+
+from src.state.db_writer_lock import WriteClass, db_writer_lock  # noqa: E402
+
 DEFAULT_REPORT_DIR = REPO_ROOT / "docs" / "operations" / "edge_observation"
 DEFAULT_DB_PATH = REPO_ROOT / "state" / "zeus-shared.db"
 DEFAULT_TRAILING_WINDOWS = 4   # 1 current + 3 trailing per detect_alpha_decay min_windows
@@ -101,25 +104,26 @@ def run_weekly(
 
     if not db_path.exists():
         raise FileNotFoundError(f"DB not found: {db_path}")
-    conn = sqlite3.connect(str(db_path))
-    conn.row_factory = sqlite3.Row
-    try:
-        # Current window snapshot.
-        snapshot = compute_realized_edge_per_strategy(
-            conn, window_days=window_days, end_date=end_date.isoformat(),
-        )
-        # Per-strategy decay detection over n_windows of edge history.
-        verdicts: dict[str, dict[str, Any]] = {}
-        for sk in STRATEGY_KEYS:
-            history = _build_edge_history(conn, sk, end_date, window_days, n_windows)
-            v = detect_alpha_decay(history, sk)
-            verdicts[sk] = {
-                "kind": v.kind,
-                "severity": v.severity,
-                "evidence": v.evidence,
-            }
-    finally:
-        conn.close()
+    with db_writer_lock(db_path, WriteClass.BULK):
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        try:
+            # Current window snapshot.
+            snapshot = compute_realized_edge_per_strategy(
+                conn, window_days=window_days, end_date=end_date.isoformat(),
+            )
+            # Per-strategy decay detection over n_windows of edge history.
+            verdicts: dict[str, dict[str, Any]] = {}
+            for sk in STRATEGY_KEYS:
+                history = _build_edge_history(conn, sk, end_date, window_days, n_windows)
+                v = detect_alpha_decay(history, sk)
+                verdicts[sk] = {
+                    "kind": v.kind,
+                    "severity": v.severity,
+                    "evidence": v.evidence,
+                }
+        finally:
+            conn.close()
 
     return {
         "report_kind": "edge_observation_weekly",

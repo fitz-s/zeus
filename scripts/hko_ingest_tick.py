@@ -69,6 +69,7 @@ from src.data.observation_instants_v2_writer import (  # noqa: E402
     ObsV2Row,
     insert_rows,
 )
+from src.state.db_writer_lock import WriteClass, db_writer_lock  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -315,27 +316,28 @@ def main(argv: Optional[list[str]] = None) -> int:
         print(f"FATAL: DB not found at {args.db}", file=sys.stderr)
         return 2
 
-    conn = sqlite3.connect(str(args.db))
-    try:
-        tick_result = None
-        project_result = None
-        if not args.project_only:
-            tick_result = tick_accumulator(conn, args.log, dry_run=args.dry_run)
-            print(f"tick: tick_ok={tick_result.get('tick_ok')} "
-                  f"dry_run={args.dry_run}")
-        if not args.tick_only:
-            project_result = project_accumulator_to_v2(
-                conn, args.data_version, args.log, dry_run=args.dry_run,
-            )
-            print(f"project: candidates={project_result['candidates']} "
-                  f"written={project_result['written']} "
-                  f"build_errors={project_result['build_errors']} "
-                  f"dry_run={args.dry_run}")
-        if tick_result is not None and not tick_result.get("tick_ok"):
-            return 1
-        return 0
-    finally:
-        conn.close()
+    with db_writer_lock(args.db, WriteClass.BULK):
+        conn = sqlite3.connect(str(args.db))
+        try:
+            tick_result = None
+            project_result = None
+            if not args.project_only:
+                tick_result = tick_accumulator(conn, args.log, dry_run=args.dry_run)
+                print(f"tick: tick_ok={tick_result.get('tick_ok')} "
+                      f"dry_run={args.dry_run}")
+            if not args.tick_only:
+                project_result = project_accumulator_to_v2(
+                    conn, args.data_version, args.log, dry_run=args.dry_run,
+                )
+                print(f"project: candidates={project_result['candidates']} "
+                      f"written={project_result['written']} "
+                      f"build_errors={project_result['build_errors']} "
+                      f"dry_run={args.dry_run}")
+            if tick_result is not None and not tick_result.get("tick_ok"):
+                return 1
+            return 0
+        finally:
+            conn.close()
 
 
 if __name__ == "__main__":
