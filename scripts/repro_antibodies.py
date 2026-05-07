@@ -60,6 +60,8 @@ STDERR_LOG = Path("/tmp/repro_stderr.log")
 if str(ZEUS_ROOT) not in sys.path:
     sys.path.insert(0, str(ZEUS_ROOT))
 
+from src.state.db_writer_lock import WriteClass, db_writer_lock  # noqa: E402
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -71,25 +73,26 @@ def _now_iso() -> str:
 def _pre_run_cleanup(pre_ts: str) -> None:
     """Ensure the DB has entries_paused=false, remove streak + tombstone files."""
     print("[SETUP] Inserting DB unpause row...")
-    conn = sqlite3.connect(str(DB_PATH))
-    now = _now_iso()
-    conn.execute(
-        """
-        INSERT INTO control_overrides_history
-            (override_id, target_type, target_key, action_type, value,
-             issued_by, issued_at, effective_until, reason, precedence,
-             operation, recorded_at)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
-        """,
-        (
-            "control_plane:global:entries_paused",
-            "global", "entries", "gate", "false",
-            "control_plane", now, None,
-            "pre_repro_cleanup", 100, "upsert", now,
-        ),
-    )
-    conn.commit()
-    conn.close()
+    with db_writer_lock(DB_PATH, WriteClass.BULK):
+        conn = sqlite3.connect(str(DB_PATH))
+        now = _now_iso()
+        conn.execute(
+            """
+            INSERT INTO control_overrides_history
+                (override_id, target_type, target_key, action_type, value,
+                 issued_by, issued_at, effective_until, reason, precedence,
+                 operation, recorded_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                "control_plane:global:entries_paused",
+                "global", "entries", "gate", "false",
+                "control_plane", now, None,
+                "pre_repro_cleanup", 100, "upsert", now,
+            ),
+        )
+        conn.commit()
+        conn.close()
     print(f"[SETUP]   DB unpause row inserted at {now}")
 
     for path in (STREAK_PATH, TOMBSTONE_PATH):
@@ -101,25 +104,26 @@ def _pre_run_cleanup(pre_ts: str) -> None:
 def _post_run_cleanup() -> None:
     """Re-insert unpause row and remove tombstone if test created one."""
     print("[CLEANUP] Re-inserting DB unpause row...")
-    conn = sqlite3.connect(str(DB_PATH))
-    now = _now_iso()
-    conn.execute(
-        """
-        INSERT INTO control_overrides_history
-            (override_id, target_type, target_key, action_type, value,
-             issued_by, issued_at, effective_until, reason, precedence,
-             operation, recorded_at)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
-        """,
-        (
-            "control_plane:global:entries_paused",
-            "global", "entries", "gate", "false",
-            "control_plane", now, None,
-            "post_repro_cleanup", 100, "upsert", now,
-        ),
-    )
-    conn.commit()
-    conn.close()
+    with db_writer_lock(DB_PATH, WriteClass.BULK):
+        conn = sqlite3.connect(str(DB_PATH))
+        now = _now_iso()
+        conn.execute(
+            """
+            INSERT INTO control_overrides_history
+                (override_id, target_type, target_key, action_type, value,
+                 issued_by, issued_at, effective_until, reason, precedence,
+                 operation, recorded_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                "control_plane:global:entries_paused",
+                "global", "entries", "gate", "false",
+                "control_plane", now, None,
+                "post_repro_cleanup", 100, "upsert", now,
+            ),
+        )
+        conn.commit()
+        conn.close()
     print(f"[CLEANUP]  DB unpause row inserted at {now}")
 
     if TOMBSTONE_PATH.exists():

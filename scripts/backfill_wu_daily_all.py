@@ -32,6 +32,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 import requests
 
 from src.state.db import get_world_connection, init_schema
+from src.state.db_writer_lock import WriteClass, db_writer_lock  # noqa: E402
 from src.config import cities_by_name
 from src.data.daily_observation_writer import (
     INSERTED,
@@ -713,60 +714,64 @@ def main(argv: list[str] | None = None) -> int:
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 
-    conn = sqlite3.connect(args.db) if args.db else get_world_connection(write_class="bulk")
-    conn.row_factory = sqlite3.Row
-    # Enable WAL journal mode so IngestionGuard's `_log_availability_failure`
-    # secondary connection can write during backfill writes without BUSY-lock
-    # silent drops. Default rollback journal serializes writers and the
-    # guard's try/except swallowed the BUSY on failure, producing the
-    # observability gap where guard rejections never reached availability_fact.
-    # WAL is SQLite best practice for concurrent-ish access anyway.
-    conn.execute("PRAGMA journal_mode=WAL")
-    init_schema(conn)
+    from src.state.db import ZEUS_WORLD_DB_PATH  # noqa: PLC0415
+    from pathlib import Path as _Path  # noqa: PLC0415
+    _lock_path = _Path(args.db) if args.db else ZEUS_WORLD_DB_PATH
+    with db_writer_lock(_lock_path, WriteClass.BULK):
+        conn = sqlite3.connect(args.db) if args.db else get_world_connection(write_class="bulk")
+        conn.row_factory = sqlite3.Row
+        # Enable WAL journal mode so IngestionGuard's `_log_availability_failure`
+        # secondary connection can write during backfill writes without BUSY-lock
+        # silent drops. Default rollback journal serializes writers and the
+        # guard's try/except swallowed the BUSY on failure, producing the
+        # observability gap where guard rejections never reached availability_fact.
+        # WAL is SQLite best practice for concurrent-ish access anyway.
+        conn.execute("PRAGMA journal_mode=WAL")
+        init_schema(conn)
 
-    if args.cities:
-        targets = args.cities
-    elif args.all:
-        targets = list(CITY_STATIONS.keys())
-    else:
-        # Default: cities without wu_icao_history observations
-        covered = {r[0] for r in conn.execute(
-            "SELECT DISTINCT city FROM observations WHERE source = 'wu_icao_history'"
-        ).fetchall()}
-        targets = [c for c in CITY_STATIONS if c not in covered]
+        if args.cities:
+            targets = args.cities
+        elif args.all:
+            targets = list(CITY_STATIONS.keys())
+        else:
+            # Default: cities without wu_icao_history observations
+            covered = {r[0] for r in conn.execute(
+                "SELECT DISTINCT city FROM observations WHERE source = 'wu_icao_history'"
+            ).fetchall()}
+            targets = [c for c in CITY_STATIONS if c not in covered]
 
-    dry_run = args.dry_run
-    run_id = datetime.now(_tz.utc).strftime("backfill_wu_daily_all_%Y%m%dT%H%M%SZ")
-    if dry_run:
-        print("[DRY RUN] No rows will be written to the DB.")
-    print(
-        f"=== WU ICAO Station History Backfill "
-        f"({len(targets)} cities, {args.days} days, "
-        f"start={args.start_date or 'auto'} end={args.end_date or 'auto'}, "
-        f"run_id={run_id}) ==="
-    )
-
-    results = []
-    for city_name in targets:
-        icao, cc, unit = CITY_STATIONS[city_name]
-        print(f"\n[{city_name}] {icao}:{cc} unit={unit}")
-        r = backfill_city(
-            city_name,
-            args.days,
-            conn,
-            rebuild_run_id=run_id,
-            chunk_days=args.chunk_days,
-            sleep_seconds=args.sleep,
-            missing_only=args.missing_only,
-            dry_run=dry_run,
-            start_date=args.start_date,
-            end_date=args.end_date,
-            replace_station_mismatch=args.replace_station_mismatch,
+        dry_run = args.dry_run
+        run_id = datetime.now(_tz.utc).strftime("backfill_wu_daily_all_%Y%m%dT%H%M%SZ")
+        if dry_run:
+            print("[DRY RUN] No rows will be written to the DB.")
+        print(
+            f"=== WU ICAO Station History Backfill "
+            f"({len(targets)} cities, {args.days} days, "
+            f"start={args.start_date or 'auto'} end={args.end_date or 'auto'}, "
+            f"run_id={run_id}) ==="
         )
-        results.append(r)
-        print(f"  → collected={r['collected']} skip={r['skip']} err={r['err']} guard_rejected={r['guard_rejected']}")
 
-    conn.close()
+        results = []
+        for city_name in targets:
+            icao, cc, unit = CITY_STATIONS[city_name]
+            print(f"\n[{city_name}] {icao}:{cc} unit={unit}")
+            r = backfill_city(
+                city_name,
+                args.days,
+                conn,
+                rebuild_run_id=run_id,
+                chunk_days=args.chunk_days,
+                sleep_seconds=args.sleep,
+                missing_only=args.missing_only,
+                dry_run=dry_run,
+                start_date=args.start_date,
+                end_date=args.end_date,
+                replace_station_mismatch=args.replace_station_mismatch,
+            )
+            results.append(r)
+            print(f"  → collected={r['collected']} skip={r['skip']} err={r['err']} guard_rejected={r['guard_rejected']}")
+
+        conn.close()
 
     if dry_run:
         print("\n=== Dry Run Summary (nothing written) ===")

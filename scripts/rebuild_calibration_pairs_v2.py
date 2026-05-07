@@ -103,6 +103,7 @@ from src.contracts.ensemble_snapshot_provenance import (
 from src.contracts.settlement_semantics import SettlementSemantics
 from src.signal.ensemble_signal import p_raw_vector_from_maxes
 from src.state.db import get_world_connection, init_schema
+from src.state.db_writer_lock import WriteClass, db_writer_lock  # noqa: E402
 from src.state.schema.v2_schema import apply_v2_schema
 from src.types.market import validate_bin_topology
 from src.types.metric_identity import HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN, MetricIdentity
@@ -994,32 +995,36 @@ def main() -> int:
             print(f"ERROR: {type(e).__name__}: {e}", file=sys.stderr)
             return 1
 
-    if args.db_path:
-        conn = sqlite3.connect(args.db_path)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-    else:
-        conn = get_world_connection(write_class="bulk")
-    init_schema(conn)
-    apply_v2_schema(conn)
+    from src.state.db import ZEUS_WORLD_DB_PATH  # noqa: PLC0415
+    from pathlib import Path as _Path  # noqa: PLC0415
+    _lock_path = _Path(args.db_path) if args.db_path else ZEUS_WORLD_DB_PATH
+    with db_writer_lock(_lock_path, WriteClass.BULK):
+        if args.db_path:
+            conn = sqlite3.connect(args.db_path)
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA journal_mode=WAL")
+        else:
+            conn = get_world_connection(write_class="bulk")
+        init_schema(conn)
+        apply_v2_schema(conn)
 
-    try:
-        per_metric = rebuild_all_v2(
-            conn,
-            dry_run=args.dry_run,
-            force=args.force,
-            city_filter=args.city,
-            start_date=args.start_date,
-            end_date=args.end_date,
-            data_version_filter=args.data_version,
-            temperature_metric=args.temperature_metric,
-            n_mc=args.n_mc,
-        )
-    except Exception as e:
-        print(f"ERROR: {type(e).__name__}: {e}", file=sys.stderr)
-        return 1
-    finally:
-        conn.close()
+        try:
+            per_metric = rebuild_all_v2(
+                conn,
+                dry_run=args.dry_run,
+                force=args.force,
+                city_filter=args.city,
+                start_date=args.start_date,
+                end_date=args.end_date,
+                data_version_filter=args.data_version,
+                temperature_metric=args.temperature_metric,
+                n_mc=args.n_mc,
+            )
+        except Exception as e:
+            print(f"ERROR: {type(e).__name__}: {e}", file=sys.stderr)
+            return 1
+        finally:
+            conn.close()
 
     any_refused = any(s.refused for s in per_metric.values())
     return 1 if any_refused else 0
