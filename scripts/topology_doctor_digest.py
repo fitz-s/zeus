@@ -1469,11 +1469,21 @@ def _apply_typed_intent_shortcut(
     admitted_files = [f for f in requested if f not in excluded_set]
 
     new_admission = dict(admission)
-    new_admission["status"] = "admitted"
+    # PR #72 Codex P1 round-2: status must NOT be "admitted" when any path is
+    # blocked by intent. blocked_by_intent non-empty → advisory_only so that:
+    #   (a) admission_valid claim is blocked (topology_doctor.py line 825 keys off status)
+    #   (b) next_action does NOT say "proceed"
+    # Two sub-cases:
+    #   all-blocked  (admitted_files empty)  → advisory_only
+    #   mixed        (some admitted, some blocked) → advisory_only
+    #   none-blocked (admitted_files == requested) → admitted  [original path]
+    if blocked_by_intent:
+        new_admission["status"] = "advisory_only"
+    else:
+        new_admission["status"] = "admitted"
     new_admission["admitted_files"] = admitted_files
-    # Files blocked by intent's blocked_globs fall through to normal admission
-    # (they are not in admitted_files and not in out_of_scope_files — they remain
-    # subject to profile-based admission in a downstream pass).
+    # Files blocked by intent's blocked_globs are out-of-scope; admission_valid
+    # is blocked downstream; agent must re-route or remove blocked paths.
     new_admission["out_of_scope_files"] = blocked_by_intent
     new_admission["typed_intent_short_circuit"] = True
     if blocked_by_intent:

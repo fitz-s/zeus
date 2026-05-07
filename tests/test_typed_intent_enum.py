@@ -23,9 +23,17 @@ ATTACK 3 required fix (D1 resolved).
 from __future__ import annotations
 
 import pathlib
+import sys
+import unittest.mock
+from typing import Any
+from unittest.mock import patch
 
 import pytest
 import yaml
+
+REPO_ROOT_SCRIPTS = pathlib.Path(__file__).parent.parent / "scripts"
+if str(REPO_ROOT_SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT_SCRIPTS))
 
 REPO_ROOT = pathlib.Path(__file__).parent.parent
 ADMISSION_SEVERITY_YAML = REPO_ROOT / "architecture" / "admission_severity.yaml"
@@ -227,4 +235,99 @@ def test_enum_entry_has_sunset_date(intent_id: str, entry: dict) -> None:
     )
     assert entry["sunset_date"] is not None, (
         f"typed_intent_enum entry {intent_id!r} has null sunset_date."
+    )
+
+
+# ---------------------------------------------------------------------------
+# PR #72 Codex P1 round-2: blocked typed-intent paths must not produce admitted
+# ---------------------------------------------------------------------------
+
+def _make_base_admission(status: str = "advisory_only") -> dict[str, Any]:
+    return {
+        "status": status,
+        "admitted_files": [],
+        "out_of_scope_files": [],
+        "forbidden_hits": [],
+        "decision_basis": {"why": [], "selected_by": "test"},
+    }
+
+
+def _shortcut(
+    admission: dict[str, Any],
+    requested: list[str],
+    intent: str,
+    blocked_globs: tuple[str, ...] = ("src/execution/**",),
+) -> dict[str, Any]:
+    """Call _apply_typed_intent_shortcut with patched blocked globs."""
+    import topology_doctor_digest as tdd
+
+    intent_map = {"plan_only": blocked_globs, "audit": blocked_globs}
+    with patch.object(tdd, "_load_typed_intent_blocked_globs", return_value=intent_map):
+        return tdd._apply_typed_intent_shortcut(admission, requested, intent)
+
+
+def test_all_blocked_paths_produce_advisory_only_not_admitted() -> None:
+    """When ALL requested paths are blocked by intent, status MUST be advisory_only.
+
+    PR #72 Codex P1 round-2: _apply_typed_intent_shortcut must not set status=admitted
+    when blocked_by_intent is non-empty and admitted_files is empty.
+    """
+    admission = _make_base_admission("advisory_only")
+    result = _shortcut(
+        admission,
+        requested=["src/execution/live_executor.py"],
+        intent="plan_only",
+    )
+    assert result["status"] != "admitted", (
+        f"status must not be 'admitted' when all paths are blocked; got {result['status']!r}"
+    )
+    assert result["status"] == "advisory_only", (
+        f"expected advisory_only for all-blocked; got {result['status']!r}"
+    )
+    assert result.get("admitted_files") == [], (
+        "admitted_files must be empty when all paths blocked"
+    )
+
+
+def test_mixed_paths_produce_non_admitted_status() -> None:
+    """When some paths admitted and some blocked, status must not be admitted.
+
+    PR #72 Codex P1 round-2: partial admission with blocked_by_intent non-empty
+    must not look like full edit authorization.
+    """
+    admission = _make_base_admission("advisory_only")
+    result = _shortcut(
+        admission,
+        requested=["docs/operations/AGENTS.md", "src/execution/live_executor.py"],
+        intent="plan_only",
+    )
+    assert result["status"] != "admitted", (
+        f"status must not be 'admitted' in mixed state; got {result['status']!r}"
+    )
+    # docs path admitted, src path blocked
+    assert "docs/operations/AGENTS.md" in result.get("admitted_files", []), (
+        "docs path must appear in admitted_files"
+    )
+    assert "src/execution/live_executor.py" in result.get("out_of_scope_files", []), (
+        "blocked src path must appear in out_of_scope_files"
+    )
+
+
+def test_no_blocked_paths_still_admits() -> None:
+    """When no paths are blocked, status remains admitted (regression guard).
+
+    Ensures the fix does not break the clean-path case.
+    """
+    admission = _make_base_admission("advisory_only")
+    result = _shortcut(
+        admission,
+        requested=["docs/operations/AGENTS.md"],
+        intent="plan_only",
+        blocked_globs=("src/execution/**",),  # docs/ does not match
+    )
+    assert result["status"] == "admitted", (
+        f"expected admitted when no paths blocked; got {result['status']!r}"
+    )
+    assert "docs/operations/AGENTS.md" in result.get("admitted_files", []), (
+        "docs path must be in admitted_files"
     )
