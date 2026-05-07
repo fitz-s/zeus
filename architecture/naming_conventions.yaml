@@ -21,6 +21,17 @@ file_naming:
         Durable top-level scripts need stable verb prefixes or an explicit
         exception. One-off probes belong in packet-ephemeral names, not generic
         long-lived script names.
+      severity_tier: BLOCKING
+      severity_tier_override:
+        condition: >
+          When rule_id matches an entry in architecture/admission_severity.yaml
+          with reversibility_class = WORKING (i.e., name change is reversible by
+          ordinary git mv), the effective severity is ADVISORY, not BLOCKING.
+          Authority: architecture/admission_severity.yaml rule_id AS-07
+          (script_long_lived_bad_name target_severity = ADVISORY).
+        applies_to_rule_ids: [AS-07]
+        effective_severity: ADVISORY
+        authority_doc: architecture/admission_severity.yaml
       allowed_prefixes:
         - check_
         - validate_

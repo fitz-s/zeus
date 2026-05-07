@@ -1,0 +1,248 @@
+# Created: 2026-05-07
+# Last reused or audited: 2026-05-07
+# Authority basis: Navigation Topology v2 PLAN §2.2; ULTIMATE_DESIGN §2.3 reversibility classes; sunset 2026-11-07
+
+schema_version: 1
+metadata:
+  charter_version: 1.0.0
+  catalog_size: 18
+  created: 2026-05-07
+  authority_basis: >
+    ULTIMATE_DESIGN §2.3 reversibility classes; Navigation Topology v2 PLAN §2.2;
+    critic-opus evidence/topology_v2_critic_opus.md C3/D1 resolved;
+    sunset 2026-11-07
+  default_severity: ADVISORY
+  default_reversibility_class: WORKING
+  sunset_date: 2026-11-07
+
+# ─── typed_intent enum (C3/D1 amendment: 9 values, hotfix + rebase_keepup + other added) ─
+
+typed_intent_enum:
+  - id: plan_only
+    description: >
+      Plan-only operation. Reads files; writes ONLY to docs/operations/task_*/PLAN.md
+      or .omc/plans/. No source/test/script edits. Admitted directly without profile
+      match (admission shortcut per K3).
+    admits_path_globs:
+      - docs/operations/task_*/PLAN.md
+      - docs/operations/task_*/**/*.md
+      - .omc/plans/**
+    blocks_path_globs:
+      - src/**
+      - tests/**
+      - scripts/**
+    sunset_date: 2026-11-07
+
+  - id: create_new
+    description: >
+      Create a new file (script, test, doc, plan packet, source module).
+      Auto-admits the manifest companion required by mesh-maintenance rule (K2 loop-break).
+      Companion path must also be in --files (never auto-adds a path the agent did not request).
+    admits_path_globs:
+      - scripts/**
+      - tests/test_*.py
+      - docs/operations/task_*/**
+      - src/**
+      - architecture/**
+    companion_auto_admits:
+      - when_path_glob: scripts/**
+        also_admit: architecture/script_manifest.yaml
+      - when_path_glob: tests/test_*.py
+        also_admit: architecture/test_topology.yaml
+      - when_path_glob: docs/operations/task_*/**
+        also_admit: docs/operations/AGENTS.md
+      - when_path_glob: src/**
+        also_admit: architecture/source_rationale.yaml
+    sunset_date: 2026-11-07
+
+  - id: modify_existing
+    description: Modify a file already on disk. Standard allowed_files semantics.
+    sunset_date: 2026-11-07
+
+  - id: refactor
+    description: >
+      Rename / move / restructure existing files. Same as modify_existing plus
+      auto-admit of companion manifest rows for each renamed entry.
+    sunset_date: 2026-11-07
+
+  - id: audit
+    description: >
+      Read-only audit/investigation. Writes ONLY to evidence/** or .omc/research/**.
+      Source/test/script writes blocked.
+    sunset_date: 2026-11-07
+
+  - id: hygiene
+    description: >
+      Cleanup operation (delete dead code, archive promotion, backup sweep).
+      ARCHIVE reversibility class; advisory unless touching TRUTH_REWRITE+ paths.
+    sunset_date: 2026-11-07
+
+  - id: hotfix
+    description: >
+      Emergency fix to a live or critical surface. Bypasses normal companion loops
+      when urgency is declared; admission still applies per K1 severity tier.
+      Distinct from modify_existing: signals urgency and may bypass planning-lock
+      wait. ritual_signal emitted with hotfix: true flag for telemetry.
+    sunset_date: 2026-11-07
+
+  - id: rebase_keepup
+    description: >
+      Branch keep-up-with-main operation (ff, rebase, or merge of origin/main).
+      No source change intended; companion loops do not apply. Decision matrix
+      encoded in worktree_branch_keepup capability. Admission still applies per K1.
+    sunset_date: 2026-11-07
+
+  - id: other
+    description: >
+      Explicit fall-through for any intent that does not match the 8 canonical values.
+      Admission still applies per K1 severity tier. Emits ritual_signal with
+      enum_extension_candidate: true so operator can evaluate whether a new enum
+      value is warranted. Not a shortcut to bypass gates.
+    sunset_date: 2026-11-07
+
+# ─── issue severity registry ─────────────────────────────────────────────────
+#
+# Per K1 structural decision: default_severity = ADVISORY.
+# BLOCKING is reserved for entries whose reversibility_class is TRUTH_REWRITE
+# or ON_CHAIN, or explicitly operator-promoted under evidence/admission_blocking_promotions/.
+#
+# Per K1 invariant: no entry may have target_severity = BLOCKING with
+# reversibility_class = WORKING. Asserted by tests/test_severity_tier_invariant.py.
+#
+# emitter_path:line references verified 2026-05-07 (grep-gate within 10 min per
+# feedback_grep_gate_before_contract_lock.md).
+# ─────────────────────────────────────────────────────────────────────────────
+
+issue_severity:
+
+  # ─── K3: typed-intent / allowlist admission ─────────────────────────────────
+
+  - rule_id: AS-01
+    code: navigation_scope_expansion_required
+    emitter_path: scripts/topology_doctor.py:2053
+    current_severity: BLOCKING
+    target_severity: ADVISORY
+    reversibility_class: WORKING
+    sunset_date: 2026-11-07
+    rationale: >
+      F1 fix. scope_expansion_required fires when a new file is not in allowed_files.
+      For create_new typed-intent, the file cannot be in the list because it does not
+      exist yet. K3 decision: typed-intent short-circuits allowlist semantics.
+      BLOCKING is preserved only when typed_intent=modify_existing AND diff touches
+      TRUTH_REWRITE/ON_CHAIN capability class.
+    blocked_when:
+      typed_intent_in: [modify_existing, refactor]
+      and_diff_touches_capability_class_in: [TRUTH_REWRITE, ON_CHAIN]
+
+  - rule_id: AS-02
+    code: navigation_scope_expansion_required
+    emitter_path: scripts/topology_doctor.py:2883
+    current_severity: BLOCKING
+    target_severity: ADVISORY
+    reversibility_class: WORKING
+    sunset_date: 2026-11-07
+    rationale: >
+      F1 fix (second emitter site — map entry at line 2883). Same reasoning as AS-01.
+      M1 amendment: F1 is 2-hit; multi-mapping intentional (anti-rubber-stamp footnote).
+    blocked_when:
+      typed_intent_in: [modify_existing, refactor]
+      and_diff_touches_capability_class_in: [TRUTH_REWRITE, ON_CHAIN]
+
+  - rule_id: AS-03
+    code: profile_needs_typed_intent
+    emitter_path: scripts/topology_doctor.py:2409
+    current_severity: BLOCKING
+    target_severity: ADVISORY
+    reversibility_class: WORKING
+    sunset_date: 2026-11-07
+    rationale: >
+      F2 fix. Free-form --intent string falls through to generic profile with
+      empty allowed_files. Navigation v2 demotes to advisory: passes
+      needs_typed_intent: true in the ritual_signal but does NOT block admission.
+      Canonical enum short-circuits; non-canonical falls through with advisory warning.
+
+  # ─── K2: companion-loop-break ────────────────────────────────────────────────
+
+  - rule_id: AS-04
+    code: script_manifest_missing
+    emitter_path: scripts/topology_doctor_script_checks.py:246
+    current_severity: BLOCKING
+    target_severity: ADVISORY
+    reversibility_class: WORKING
+    sunset_date: 2026-11-07
+    rationale: >
+      F3 fix. K2 companion-loop-break: when typed_intent=create_new and diff
+      includes architecture/script_manifest.yaml, both the new script and the
+      manifest entry are auto-admitted (silent). Otherwise advisory.
+    blocked_when: null
+
+  - rule_id: AS-05
+    code: operations_task_unregistered
+    emitter_path: scripts/topology_doctor_docs_checks.py:431
+    current_severity: BLOCKING
+    target_severity: ADVISORY
+    reversibility_class: WORKING
+    sunset_date: 2026-11-07
+    rationale: >
+      F4 fix. K1 + K2: operations_task_unregistered fires when task folder not
+      registered in docs/operations/AGENTS.md. K1 demotes to advisory; K2 loop-break
+      auto-admits when typed_intent=create_new and diff includes docs/operations/AGENTS.md.
+      M1 amendment: F4 is 2-hit (K1+K2); multi-mapping intentional.
+
+  - rule_id: AS-06
+    code: test_topology_test_unregistered
+    emitter_path: scripts/topology_doctor_docs_checks.py:431
+    current_severity: BLOCKING
+    target_severity: ADVISORY
+    reversibility_class: WORKING
+    sunset_date: 2026-11-07
+    rationale: >
+      F6 companion. K2 loop-break: when typed_intent=create_new and diff includes
+      architecture/test_topology.yaml, both the new test and the topology entry are
+      auto-admitted (silent). F6 is ADVISORY-companion; operator confirmed reasonable
+      per PLAN §1.1.
+
+  # ─── K1: naming / write-target severity (F5) ─────────────────────────────────
+
+  - rule_id: AS-07
+    code: script_long_lived_bad_name
+    emitter_path: scripts/topology_doctor_script_checks.py:121
+    current_severity: BLOCKING
+    target_severity: ADVISORY
+    reversibility_class: WORKING
+    sunset_date: 2026-11-07
+    rationale: >
+      F5 fix. Name change is reversible by ordinary git mv; severity WORKING.
+      K1 default flip: ADVISORY. Agent receives advisory to rename under
+      naming_conventions.yaml::file_naming.scripts.long_lived.allowed_prefixes
+      or add a documented exception.
+
+  - rule_id: AS-08
+    code: script_diagnostic_forbidden_write_target
+    emitter_path: scripts/topology_doctor_script_checks.py:267
+    current_severity: BLOCKING
+    target_severity: ADVISORY
+    reversibility_class: WORKING
+    sunset_date: 2026-11-07
+    rationale: >
+      F5 fix. Write-target change is reversible by git rm + reroute; severity WORKING.
+      K1 default flip: ADVISORY. Verified at sibling worktree: diagnose_low_high_alignment.py
+      renamed to allowed diagnose_ prefix as workaround; this entry makes the workaround
+      unnecessary going forward.
+
+  # ─── BLOCKING list (intentionally short; TRUTH_REWRITE+ paths only) ──────────
+
+  - rule_id: AS-09
+    code: planning_lock_evidence_missing
+    emitter_path: scripts/topology_doctor_policy_checks.py:259
+    current_severity: BLOCKING
+    target_severity: BLOCKING
+    reversibility_class: TRUTH_REWRITE
+    sunset_date: 2026-11-07
+    rationale: >
+      Planning-lock on src/control/ and src/supervisor_api/ is TRUTH_REWRITE severity.
+      Changes there without plan evidence create non-replayable governance mutations.
+      BLOCKING preserved per K1 (only TRUTH_REWRITE+ stays BLOCKING).
+    blocked_when:
+      diff_touches_path_under: [src/control/, src/supervisor_api/]
+      or_capability_class_in: [ON_CHAIN, TRUTH_REWRITE]

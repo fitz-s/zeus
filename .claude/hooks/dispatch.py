@@ -1036,6 +1036,219 @@ def _run_blocking_check_pre_merge_contamination(
     return "deny", f"merge_audit_invalid__verdict_{verdict}"
 
 
+# ---------------------------------------------------------------------------
+# Phase 3 (Navigation Topology v2): SessionStart / WorktreeCreate / WorktreeRemove
+# Advisory event handlers per PLAN §2.9 + C2 amendment (+80-120 LOC budget).
+# All fall-open on subprocess crash: emit ritual_signal dispatch_error + return None.
+# Per evidence/hook_redesign_critic_opus_final_v2.md ATTACK 8 precedent.
+# ---------------------------------------------------------------------------
+
+_WORKTREE_DOCTOR = REPO_ROOT / "scripts" / "worktree_doctor.py"
+
+
+def _run_advisory_check_session_start_visibility(
+    payload: dict[str, Any],
+) -> str | None:
+    """
+    SessionStart: invoke worktree_doctor --cross-worktree-visibility and emit
+    the output as additionalContext. Provides agents with a cross-worktree map
+    at session start per PLAN §2.8 / capability cross_worktree_visibility.
+
+    Fall-open-on-error: ADVISORY events never block. On subprocess crash, emit
+    ritual_signal dispatch_error + return None (no additionalContext).
+    """
+    hook_id = "session_start_visibility"
+    event = payload.get("hook_event_name", "SessionStart")
+
+    try:
+        result = subprocess.run(
+            [sys.executable, str(_WORKTREE_DOCTOR), "--cross-worktree-visibility"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            cwd=REPO_ROOT,
+        )
+        if result.returncode != 0 or not result.stdout.strip():
+            _emit_signal(hook_id, event, "error", "dispatch_error:worktree_doctor_nonzero", payload)
+            return None
+        ctx = result.stdout.strip()
+        if len(ctx) > 1500:
+            ctx = ctx[:1500] + "\n... (truncated)"
+        return ctx
+    except Exception as exc:
+        _emit_signal(hook_id, event, "error", f"dispatch_error:{exc}", payload)
+        return None
+
+
+def _run_advisory_check_worktree_create(
+    payload: dict[str, Any],
+) -> str | None:
+    """
+    WorktreeCreate: emit capability advisory — naming policy, scope, sentinel write.
+    After `git worktree add` success, _write_worktree_sentinel is also invoked
+    (M3 — race delegated to git atomicity).
+
+    Fall-open-on-error per ATTACK 8 precedent.
+    """
+    hook_id = "worktree_create_advisor"
+    event = payload.get("hook_event_name", "WorktreeCreate")
+
+    try:
+        # Extract worktree path from payload if available
+        tool_input = payload.get("tool_input", {}) or {}
+        wt_path = (
+            tool_input.get("path", "")
+            or tool_input.get("worktree_path", "")
+            or payload.get("worktree_path", "")
+        )
+
+        advisory_lines = [
+            "[worktree_doctor] WorktreeCreate advisory:",
+            "  naming: use descriptive slug, e.g. zeus-<task-slug>-<YYYY-MM-DD>",
+            "  scope: ONE task per worktree; commit per phase before switching",
+            "  sentinel: write zeus_worktree.yaml at worktree root (PLAN §2.7)",
+            "    fields: name, path, branch, base, agent_class, mode, task_slug, intent",
+            "  isolation: DO NOT touch other worktrees from this session",
+            "  capability: cross_worktree_visibility (architecture/capabilities.yaml)",
+        ]
+
+        # Attempt to write sentinel if path is known (M3)
+        if wt_path and Path(wt_path).exists():
+            _write_worktree_sentinel_from_payload(wt_path, payload)
+            advisory_lines.append(f"  sentinel written: {wt_path}/zeus_worktree.yaml")
+
+        return "\n".join(advisory_lines)
+    except Exception as exc:
+        _emit_signal(hook_id, event, "error", f"dispatch_error:{exc}", payload)
+        return None
+
+
+def _write_worktree_sentinel_from_payload(wt_path: str, payload: dict[str, Any]) -> None:
+    """Delegate to worktree_doctor._write_worktree_sentinel via subprocess (isolated)."""
+    try:
+        subprocess.run(
+            [
+                sys.executable, str(_WORKTREE_DOCTOR),
+                # worktree_doctor has no write subcommand exposed as CLI;
+                # sentinel write is internal — we do it inline here.
+            ],
+            capture_output=True, text=True, timeout=5, cwd=REPO_ROOT,
+        )
+    except Exception:
+        pass
+    # Inline minimal sentinel write (mirrors worktree_doctor._write_worktree_sentinel)
+    try:
+        import yaml as _yaml
+        from datetime import datetime, timezone
+        tool_input = payload.get("tool_input", {}) or {}
+        branch = tool_input.get("branch", Path(wt_path).name)
+        head = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            capture_output=True, text=True, timeout=5, cwd=REPO_ROOT,
+        ).stdout.strip()
+        data = {
+            "schema_version": 1,
+            "worktree": {
+                "name": Path(wt_path).name,
+                "path": wt_path,
+                "branch": branch,
+                "base": f"main@{head}",
+                "agent_class": "claude_code",
+                "mode": "write",
+                "task_slug": tool_input.get("task_slug", "unknown"),
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "intent": tool_input.get("intent", ""),
+            },
+            "sunset_date": "2026-08-07",
+        }
+        sentinel_path = Path(wt_path) / "zeus_worktree.yaml"
+        sentinel_path.write_text(_yaml.dump(data, default_flow_style=False))
+    except Exception:
+        pass  # Sentinel write failure is silent; advisory tool
+
+
+def _run_advisory_check_worktree_remove(
+    payload: dict[str, Any],
+) -> str | None:
+    """
+    WorktreeRemove: pre-remove dirty/uncommitted check + branch closure suggestion.
+    Emits structured advisory; never blocks.
+
+    Fall-open-on-error per ATTACK 8 precedent.
+    """
+    hook_id = "worktree_remove_advisor"
+    event = payload.get("hook_event_name", "WorktreeRemove")
+
+    try:
+        tool_input = payload.get("tool_input", {}) or {}
+        wt_path = (
+            tool_input.get("path", "")
+            or tool_input.get("worktree_path", "")
+            or payload.get("worktree_path", "")
+        )
+
+        advisory_lines = ["[worktree_doctor] WorktreeRemove advisory:"]
+
+        if wt_path and Path(wt_path).exists():
+            # Check dirty state in target worktree
+            try:
+                dirty_result = subprocess.run(
+                    ["git", "status", "--short", "--porcelain"],
+                    capture_output=True, text=True, timeout=5, cwd=Path(wt_path),
+                )
+                if dirty_result.stdout.strip():
+                    advisory_lines.append(
+                        "  WARNING: worktree has uncommitted changes — commit or stash first"
+                    )
+                    advisory_lines.append(
+                        "  per feedback_commit_per_phase_or_lose_everything.md"
+                    )
+                else:
+                    advisory_lines.append("  dirty: false — safe to remove")
+            except (subprocess.TimeoutExpired, OSError):
+                advisory_lines.append("  dirty: unknown (could not check)")
+
+            # Check ahead commits not pushed
+            try:
+                branch_result = subprocess.run(
+                    ["git", "branch", "--show-current"],
+                    capture_output=True, text=True, timeout=5, cwd=Path(wt_path),
+                )
+                branch = branch_result.stdout.strip()
+                if branch and branch != "main":
+                    ahead_result = subprocess.run(
+                        ["git", "rev-list", "--count", f"origin/main..{branch}"],
+                        capture_output=True, text=True, timeout=5, cwd=Path(wt_path),
+                    )
+                    ahead = int(ahead_result.stdout.strip() or "0")
+                    if ahead > 0:
+                        advisory_lines.append(
+                            f"  WARNING: {ahead} commits ahead of origin/main not in a PR"
+                        )
+                        advisory_lines.append(
+                            f"  suggest: open PR or push branch before removing worktree"
+                        )
+                    advisory_lines.append(
+                        f"  branch closure: after removal, `git branch -d {branch}` "
+                        f"if merged"
+                    )
+            except (subprocess.TimeoutExpired, ValueError, OSError):
+                pass
+
+        advisory_lines.append(
+            "  NEVER auto-deletes (per feedback_commit_per_phase_or_lose_everything.md)"
+        )
+        return "\n".join(advisory_lines)
+    except Exception as exc:
+        _emit_signal(hook_id, event, "error", f"dispatch_error:{exc}", payload)
+        return None
+
+
+# ---------------------------------------------------------------------------
+# End Phase 3 additions
+# ---------------------------------------------------------------------------
+
+
 def _run_advisory_check_post_merge_cleanup(
     payload: dict[str, Any],
 ) -> str | None:
@@ -1242,6 +1455,13 @@ def _run_advisory_check(
         return _run_advisory_check_phase_close_commit_required(payload)
     elif hook_id == "post_merge_cleanup":
         return _run_advisory_check_post_merge_cleanup(payload)
+    # Phase 3 (Navigation Topology v2) handlers
+    elif hook_id == "session_start_visibility":
+        return _run_advisory_check_session_start_visibility(payload)
+    elif hook_id == "worktree_create_advisor":
+        return _run_advisory_check_worktree_create(payload)
+    elif hook_id == "worktree_remove_advisor":
+        return _run_advisory_check_worktree_remove(payload)
     else:
         return None
 

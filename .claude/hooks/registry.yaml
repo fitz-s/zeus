@@ -7,7 +7,7 @@
 schema_version: 1
 metadata:
   charter_version: 1.0.0
-  catalog_size: 12
+  catalog_size: 15
   sunset_default: 90d
 
 hooks:
@@ -209,3 +209,65 @@ hooks:
     sunset_date: 2026-08-06
     telemetry:
       ritual_signal_emitted: true
+
+  # ── Phase 3 (Navigation Topology v2): worktree lifecycle advisory hooks ──
+
+  - id: session_start_visibility
+    event: SessionStart
+    matcher: "*"
+    intent: >
+      On session start, invoke worktree_doctor --cross-worktree-visibility and
+      emit a one-line summary of active worktrees + branch + sentinel intent as
+      additionalContext. ADVISORY only — agent reads and decides. Never blocks.
+      Solves the "agent in worktree A doesn't know about worktree B mid-phase"
+      problem without a mutable lock service.
+      Per Navigation Topology v2 PLAN §2.8 / capability cross_worktree_visibility.
+    blocked_when: []
+    severity: ADVISORY
+    reversibility_class: WORKING
+    bypass_policy:
+      class: not_required
+    sunset_date: 2026-11-07
+    telemetry:
+      ritual_signal_emitted: true
+    owner_module: scripts/worktree_doctor.py
+
+  - id: worktree_create_advisor
+    event: WorktreeCreate
+    matcher: "*"
+    intent: >
+      After WorktreeCreate event, emit naming policy, scope, and sentinel write
+      advisory as additionalContext. Base policy: one task per worktree; descriptive
+      slug naming; commit per phase before switching. Also triggers sentinel write
+      (zeus_worktree.yaml) at worktree root post-add success (M3 — race delegated
+      to git atomicity). ADVISORY only — never blocks.
+      Per Navigation Topology v2 PLAN §2.7 / capability worktree_create.
+    blocked_when: []
+    severity: ADVISORY
+    reversibility_class: WORKING
+    bypass_policy:
+      class: not_required
+    sunset_date: 2026-11-07
+    telemetry:
+      ritual_signal_emitted: true
+    owner_module: scripts/worktree_doctor.py
+
+  - id: worktree_remove_advisor
+    event: WorktreeRemove
+    matcher: "*"
+    intent: >
+      Before WorktreeRemove, emit pre-remove dirty/uncommitted check +
+      branch closure suggestion as additionalContext. Warns if worktree has
+      uncommitted changes or unpushed commits ahead of origin/main. NEVER
+      auto-deletes or blocks (per feedback_commit_per_phase_or_lose_everything.md).
+      ADVISORY only.
+      Per Navigation Topology v2 PLAN §2.8 / capability worktree_create.
+    blocked_when: []
+    severity: ADVISORY
+    reversibility_class: WORKING
+    bypass_policy:
+      class: not_required
+    sunset_date: 2026-11-07
+    telemetry:
+      ritual_signal_emitted: true
+    owner_module: scripts/worktree_doctor.py

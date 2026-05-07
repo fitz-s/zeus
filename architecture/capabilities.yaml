@@ -1,11 +1,11 @@
 # Created: 2026-05-06
-# Last reused or audited: 2026-05-06
-# Authority basis: ULTIMATE_DESIGN §2.2 sunset 2027-05-06; IMPLEMENTATION_PLAN Phase 0.B
+# Last reused or audited: 2026-05-07
+# Authority basis: ULTIMATE_DESIGN §2.2 sunset 2027-05-06; IMPLEMENTATION_PLAN Phase 0.B; Navigation Topology v2 PLAN §2.6 (Phase 1 +5 worktree-lifecycle entries)
 
 schema_version: 1
 metadata:
   charter_version: 1.0.0
-  catalog_size: 16
+  catalog_size: 21
   created: 2026-05-06
   authority_basis: ULTIMATE_DESIGN §2.2 sunset 2027-05-06
 capabilities:
@@ -475,3 +475,137 @@ capabilities:
       ritual_signal_emitted: true
       latency_budget_ms: 30000
     reversibility_class: TRUTH_REWRITE
+
+  # ─── new: worktree_create (Navigation Topology v2 §2.6) ─────────────────────
+  - id: worktree_create
+    owner_module: scripts/worktree_doctor.py
+    intent: >
+      Create a new git worktree with a per-worktree YAML sentinel declaring
+      intent / agent / mode / base / created_at. The sentinel is read by
+      SessionStart for cross-worktree visibility and by post-merge cleanup
+      for ownership lookup. Creating a worktree is a structural git op;
+      WORKING reversibility class because the worktree can be removed by
+      `git worktree remove` without external state mutation.
+    relationships:
+      protects_invariants: []
+      blocked_when: []
+    hard_kernel_paths:
+      - scripts/worktree_doctor.py
+    original_intent:
+      intent_test: "task creates a new worktree (git worktree add invocation)"
+      does_not_fit: log_and_advisory
+      scope_keywords: [worktree, create, new, parallel, agent, isolation]
+      out_of_scope_keywords: [delete, remove, switch, checkout, prune]
+    sunset_date: 2026-11-07
+    lease_required: false
+    telemetry:
+      ritual_signal_emitted: true
+      latency_budget_ms: 2000
+    reversibility_class: WORKING
+
+  # ─── new: worktree_branch_keepup (Navigation Topology v2 §2.6) ──────────────
+  - id: worktree_branch_keepup
+    owner_module: scripts/worktree_doctor.py
+    intent: >
+      Recommend (NOT auto-execute) the appropriate ff/rebase/merge/close
+      decision after origin/main advances. Decision matrix is encoded as
+      ADVISORY output; the agent reads and decides. Operator's draft
+      proposal §D enumerates the 5 cases; this capability owns the
+      structured recommendation. Does NOT mutate git state; pure read.
+    relationships:
+      protects_invariants: []
+      blocked_when: []
+    hard_kernel_paths:
+      - scripts/worktree_doctor.py
+    original_intent:
+      intent_test: "main has advanced AND current branch is not main"
+      does_not_fit: log_and_advisory
+      scope_keywords: [keepup, rebase, merge, fast-forward, stale, branch]
+      out_of_scope_keywords: [auto-merge, force, push]
+    sunset_date: 2026-11-07
+    lease_required: false
+    telemetry:
+      ritual_signal_emitted: true
+      latency_budget_ms: 1000
+    reversibility_class: WORKING
+
+  # ─── new: worktree_post_merge_cleanup (Navigation Topology v2 §2.6) ─────────
+  - id: worktree_post_merge_cleanup
+    owner_module: scripts/worktree_doctor.py
+    intent: >
+      ADVISORY checklist after `gh pr merge`: branch close recommendation,
+      worktree close recommendation, backup/draft sweep recommendation.
+      NEVER auto-deletes (per feedback_commit_per_phase_or_lose_everything.md).
+      Composes with .claude/hooks/registry.yaml::post_merge_cleanup hook;
+      this capability owns the entry-point script; the hook owns the
+      runtime trigger.
+    relationships:
+      protects_invariants: []
+      blocked_when: []
+    hard_kernel_paths:
+      - scripts/worktree_doctor.py
+    original_intent:
+      intent_test: "task is a successful gh pr merge OR explicit cleanup audit"
+      does_not_fit: log_and_advisory
+      scope_keywords: [cleanup, post_merge, archive, sweep, backup]
+      out_of_scope_keywords: [auto-delete, force-remove]
+    sunset_date: 2026-11-07
+    lease_required: false
+    telemetry:
+      ritual_signal_emitted: true
+      latency_budget_ms: 500
+    reversibility_class: WORKING
+
+  # ─── new: workspace_hygiene_audit (Navigation Topology v2 §2.6) ─────────────
+  - id: workspace_hygiene_audit
+    owner_module: scripts/worktree_doctor.py
+    intent: >
+      ADVISORY audit of workspace clutter: backups/, *.bak files, root-level
+      drafts (e.g., station_migration_alerts.json), stale .omc/state/agent-replay-*.jsonl
+      files. Emits structured advisory; never deletes. Runs under SessionStart
+      and via cron at low frequency.
+    relationships:
+      protects_invariants: []
+      blocked_when: []
+    hard_kernel_paths:
+      - scripts/worktree_doctor.py
+    original_intent:
+      intent_test: "task is a workspace audit / hygiene check OR SessionStart auto-trigger"
+      does_not_fit: log_and_advisory
+      scope_keywords: [hygiene, backup, draft, stale, audit, sweep]
+      out_of_scope_keywords: [auto-delete, force-remove]
+    sunset_date: 2026-11-07
+    lease_required: false
+    telemetry:
+      ritual_signal_emitted: true
+      latency_budget_ms: 300
+    reversibility_class: WORKING
+
+  # ─── new: cross_worktree_visibility (Navigation Topology v2 §2.6) ───────────
+  - id: cross_worktree_visibility
+    owner_module: scripts/worktree_doctor.py
+    intent: >
+      ADVISORY one-line summary of active worktrees + branches + last-commit
+      timestamp + sentinel intent. Injected into agent context via
+      SessionStart additionalContext. Read-only; never mutates worktree state.
+      Solves the "agent in worktree A doesn't know agent in worktree B is
+      mid-phase on the same surface" problem without a mutable lock service.
+      Includes stale worktree advisory: worktrees where last_commit_ts > 30 days
+      and sentinel intent is unfulfilled emit an advisory staleness signal
+      (M2 amendment: staleness audit is part of cross-worktree visibility scope).
+    relationships:
+      protects_invariants: []
+      blocked_when: []
+    hard_kernel_paths:
+      - scripts/worktree_doctor.py
+    original_intent:
+      intent_test: "SessionStart event OR explicit cross-worktree status query"
+      does_not_fit: log_and_advisory
+      scope_keywords: [worktree, status, visibility, parallel, sentinel, staleness]
+      out_of_scope_keywords: [lock, mutex, registry, write]
+    sunset_date: 2026-11-07
+    lease_required: false
+    telemetry:
+      ritual_signal_emitted: true
+      latency_budget_ms: 500
+    reversibility_class: WORKING
