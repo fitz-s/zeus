@@ -282,6 +282,25 @@ scripts:
   backfill_current_market_price_snapshots.py: {class: etl_writer}
   backfill_ens.py: {class: etl_writer}
   backfill_forecast_issue_time.py: {class: repair, dangerous_if_run: true, apply_flag: "--apply", target_db: state/zeus-world.db, dry_run_default: true, read_targets: [state/zeus-world.db], write_targets: [state/zeus-world.db], authority_scope: repair_write, lifecycle: long_lived, status: active, delete_policy: retain_until_superseded, reuse_when: "Backfill forecast_issue_time + availability_provenance for pre-F11 NULL rows. Idempotent — skips already-populated rows. Requires F11.2 schema migration applied first.", do_not_use_when: "Schema migration not applied yet (script raises). All rows already populated.", canonical_command: "python3 scripts/backfill_forecast_issue_time.py [--db PATH] (--dry-run | --apply --confirm-backup | --verify)", external_inputs: [], promotion_barrier: "--apply requires --confirm-backup affirming verified DB backup exists.", required_helpers: [src.data.dissemination_schedules.derive_availability], required_tests: [tests/test_dissemination_schedules.py, tests/test_forecasts_writer_provenance_required.py], unguarded_write_rationale: "Backfills 23,466 rows in single transaction; --apply + --confirm-backup required; uses F11.1 dissemination registry to derive provenance per source."}
+  backfill_uma_resolution_2026.py:
+    class: etl_writer
+    lifecycle: packet_ephemeral
+    status: active
+    authority_scope: ingest_write
+    reuse_when: "One-shot 90-day UMA OO SettlementResolved backfill for condition_ids in market_events_v2. Idempotent on (condition_id, tx_hash) primary key."
+    do_not_use_when: "Polygon RPC URL not configured in settings. uma_resolution already fully populated for window."
+    canonical_command: "python3 scripts/backfill_uma_resolution_2026.py [--from-date YYYY-MM-DD] [--to-date YYYY-MM-DD]"
+    delete_policy: retain_until_superseded
+    read_targets: [state/zeus-world.db]
+    write_targets: [state/zeus-world.db]
+    target_db: state/zeus-world.db
+    dry_run_default: false
+    apply_flag: implicit
+    external_inputs: [Polygon RPC endpoint]
+    dangerous_if_run: false
+    promotion_barrier: none
+    required_helpers: [src.state.uma_resolution_listener]
+    required_tests: [tests/test_uma_resolution_listener.py]
   backfill_hko_daily.py:
     class: etl_writer
     required_helpers: [src.contracts.settlement_semantics.SettlementSemantics, src.data.daily_observation_writer, scripts.backfill_completeness]

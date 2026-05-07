@@ -69,8 +69,18 @@ from src.types.metric_identity import HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN
 # write same-day forecasts to ensemble_snapshots_v2 alongside the TIGGE archive
 # (which has a 48h public embargo and serves only as a 2-day-lagged training
 # backfill). These data_versions are written by src/data/ecmwf_open_data.py.
-ECMWF_OPENDATA_HIGH_DATA_VERSION = "ecmwf_opendata_mx2t6_local_calendar_day_max_v1"
-ECMWF_OPENDATA_LOW_DATA_VERSION = "ecmwf_opendata_mn2t6_local_calendar_day_min_v1"
+#
+# 2026-05-07: ECMWF Open Data enfo stream deprecated mx2t6/mn2t6 (6h sliding
+# aggregations). The stream now serves mx2t3/mn2t3 (3h native). Constants
+# renamed to reflect the new physical quantity. Old mx2t6 versions kept in
+# the allow-list so the 1568 historical rows remain readable.
+ECMWF_OPENDATA_HIGH_DATA_VERSION = "ecmwf_opendata_mx2t3_local_calendar_day_max_v1"
+ECMWF_OPENDATA_LOW_DATA_VERSION = "ecmwf_opendata_mn2t3_local_calendar_day_min_v1"
+
+# Legacy versions (mx2t6 era, written before 2026-05-07). Kept in the
+# allow-list so historical rows in ensemble_snapshots_v2 remain readable.
+_ECMWF_OPENDATA_HIGH_DATA_VERSION_LEGACY = "ecmwf_opendata_mx2t6_local_calendar_day_max_v1"
+_ECMWF_OPENDATA_LOW_DATA_VERSION_LEGACY = "ecmwf_opendata_mn2t6_local_calendar_day_min_v1"
 
 # LOW recovery rows carry persisted contract-window evidence proving that the
 # mn2t6 construction serves the same local-day settlement object.  They remain
@@ -87,8 +97,9 @@ CANONICAL_ENSEMBLE_DATA_VERSIONS: frozenset[str] = frozenset({
     LOW_LOCALDAY_MIN.data_version,
     ECMWF_OPENDATA_HIGH_DATA_VERSION,
     ECMWF_OPENDATA_LOW_DATA_VERSION,
-    TIGGE_LOW_CONTRACT_WINDOW_DATA_VERSION,
-    ECMWF_OPENDATA_LOW_CONTRACT_WINDOW_DATA_VERSION,
+    # Legacy — historical rows only; no new writes use these.
+    _ECMWF_OPENDATA_HIGH_DATA_VERSION_LEGACY,
+    _ECMWF_OPENDATA_LOW_DATA_VERSION_LEGACY,
 })
 
 # M3 (2026-04-24): deprecation alias. The historical name

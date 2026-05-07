@@ -472,8 +472,16 @@ def ingest_json_file(
     model_version: str,
     overwrite: bool,
     source_run_context: SourceRunContext | None = None,
+    ingest_backend: str = "unknown",
 ) -> str:
-    """Ingest one extracted JSON file into ensemble_snapshots_v2. Returns status string."""
+    """Ingest one extracted JSON file into ensemble_snapshots_v2. Returns status string.
+
+    ``ingest_backend`` (TIGGE spec v3 §3 Phase 0 #5 / critic v2 A1 BLOCKER) records
+    the live transport that produced the row: ``'ecds'`` (post-cutover ECDS lanes),
+    ``'webapi'`` (legacy direct webapi route), or ``'unknown'`` (cannot infer).
+    Historic rows pre-2026-05-07 carry ``'unknown'`` because their provenance is
+    unverifiable; new writes MUST pass an explicit value.
+    """
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except Exception as exc:
@@ -529,14 +537,42 @@ def ingest_json_file(
     target_date = str(payload.get("target_date_local", ""))
     issue_time = str(payload.get("issue_time_utc", ""))
 
+    # D1+D3 (TIGGE spec v3 §3 Phase 0 #8 / critic v2 D1+D3 BLOCKER):
+    # manifest-hash-aware existence check. If the incoming payload's
+    # ``manifest_sha256`` differs from the row already in the DB, the row was
+    # produced under a different manifest (city set / coordinate drift /
+    # spec change) and must be REPLACED, not skipped. Pure same-manifest
+    # repeats keep the legacy IGNORE behaviour so re-ingest stays idempotent.
+    payload_manifest_sha = str(payload.get("manifest_sha256", ""))
+    drift_replace = False
     if not overwrite:
         existing = conn.execute(
-            "SELECT 1 FROM ensemble_snapshots_v2 WHERE city=? AND target_date=? "
+            "SELECT manifest_hash, provenance_json FROM ensemble_snapshots_v2 "
+            "WHERE city=? AND target_date=? "
             "AND temperature_metric=? AND issue_time=? AND data_version=?",
             (city, target_date, metric.temperature_metric, issue_time, data_version),
         ).fetchone()
         if existing:
-            return "skipped_exists"
+            db_manifest_sha = ""
+            try:
+                prov = json.loads(existing["provenance_json"]) if existing["provenance_json"] else {}
+                db_manifest_sha = str(prov.get("manifest_sha256", ""))
+            except (json.JSONDecodeError, TypeError, KeyError):
+                db_manifest_sha = ""
+            if (
+                payload_manifest_sha
+                and db_manifest_sha
+                and payload_manifest_sha != db_manifest_sha
+            ):
+                drift_replace = True
+                logger.info(
+                    "manifest_sha drift detected city=%s target=%s issue=%s "
+                    "data_version=%s db_sha=%s payload_sha=%s — REPLACING",
+                    city, target_date, issue_time, data_version,
+                    db_manifest_sha[:12], payload_manifest_sha[:12],
+                )
+            else:
+                return "skipped_exists"
 
     members = _members_list(payload)
     # Use contract-authoritative values — override payload's self-reported fields.
@@ -557,12 +593,23 @@ def ingest_json_file(
     step_horizon_hours = payload.get("step_horizon_hours")
     step_horizon_hours = float(step_horizon_hours) if step_horizon_hours is not None else None
 
+    # 2026-05-07 Codex P2 fix: persist the physical_quantity reported by the
+    # contract-validated payload, not the legacy ``metric.physical_quantity``
+    # constant. Open Data post-cutover (mx2t3/mn2t3) writes a different
+    # physical string than the TIGGE-archive 6h derived quantity; stamping the
+    # row with the legacy 6h string would silently erase 3h identity even
+    # though the contract validated correctly. Fall back to ``metric.physical_quantity``
+    # for legacy paths whose payload omits the field.
+    physical_quantity_for_row = (
+        str(contract_payload.get("physical_quantity") or metric.physical_quantity)
+    )
+
     available_at = source_run_context.available_at_iso() if source_run_context else issue_time
     row = dict(
         city=city,
         target_date=target_date,
         temperature_metric=metric.temperature_metric,
-        physical_quantity=metric.physical_quantity,
+        physical_quantity=physical_quantity_for_row,
         observation_field=metric.observation_field,
         issue_time=issue_time,
         valid_time=target_date,
@@ -588,10 +635,21 @@ def ingest_json_file(
         members_unit=members_unit,
         local_day_start_utc=local_day_start_utc,
         step_horizon_hours=step_horizon_hours,
-        **contract_evidence,
+        ingest_backend=ingest_backend,
     )
 
-    insert_verb = "INSERT OR REPLACE" if overwrite else "INSERT OR IGNORE"
+    # D1+D3: drift_replace promotes the verb to REPLACE when manifest_sha
+    # drift was detected against an existing row. ZEUS_INGEST_FORCE_REPLACE=1
+    # gives the extractor a way to globally force REPLACE without per-row
+    # drift-detect (used when extractor pre-flight has detected manifest drift
+    # affecting any of the 51 cities; see critic v2 D1+D3 BLOCKER).
+    import os as _os
+    force_replace_env = _os.environ.get("ZEUS_INGEST_FORCE_REPLACE", "") == "1"
+    insert_verb = (
+        "INSERT OR REPLACE"
+        if (overwrite or drift_replace or force_replace_env)
+        else "INSERT OR IGNORE"
+    )
 
     def _db_op() -> None:
         conn.execute(
@@ -603,13 +661,7 @@ def ingest_json_file(
              source_run_id, release_calendar_key, source_cycle_time,
              source_release_time, source_available_at, training_allowed, causality_status,
              boundary_ambiguous, ambiguous_member_count, manifest_hash, provenance_json,
-             members_unit, local_day_start_utc, step_horizon_hours, city_timezone,
-             settlement_source_type, settlement_station_id, settlement_unit,
-             settlement_rounding_policy, bin_grid_id, bin_schema_version,
-             forecast_window_start_utc, forecast_window_end_utc,
-             forecast_window_start_local, forecast_window_end_local,
-             forecast_window_local_day_overlap_hours, forecast_window_attribution_status,
-             contributes_to_target_extrema, forecast_window_block_reasons_json)
+             members_unit, local_day_start_utc, step_horizon_hours, ingest_backend)
             VALUES
             (:city, :target_date, :temperature_metric, :physical_quantity, :observation_field,
              :issue_time, :valid_time, :available_at, :fetch_time, :lead_hours,
@@ -617,13 +669,7 @@ def ingest_json_file(
              :source_run_id, :release_calendar_key, :source_cycle_time,
              :source_release_time, :source_available_at, :training_allowed, :causality_status,
              :boundary_ambiguous, :ambiguous_member_count, :manifest_hash, :provenance_json,
-             :members_unit, :local_day_start_utc, :step_horizon_hours, :city_timezone,
-             :settlement_source_type, :settlement_station_id, :settlement_unit,
-             :settlement_rounding_policy, :bin_grid_id, :bin_schema_version,
-             :forecast_window_start_utc, :forecast_window_end_utc,
-             :forecast_window_start_local, :forecast_window_end_local,
-             :forecast_window_local_day_overlap_hours, :forecast_window_attribution_status,
-             :contributes_to_target_extrema, :forecast_window_block_reasons_json)
+             :members_unit, :local_day_start_utc, :step_horizon_hours, :ingest_backend)
             """,
             row,
         )
@@ -643,6 +689,7 @@ def ingest_track(
     overwrite: bool,
     require_files: bool = True,
     source_run_context: SourceRunContext | None = None,
+    ingest_backend: str = "unknown",
 ) -> dict:
     cfg = _TRACK_CONFIGS[track]
     metric: MetricIdentity = cfg["metric"]
@@ -698,6 +745,7 @@ def ingest_track(
             model_version=model_version,
             overwrite=overwrite,
             source_run_context=source_run_context,
+            ingest_backend=ingest_backend,
         )
         if status in counters:
             counters[status] += 1
@@ -737,6 +785,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-require-files", action="store_true",
                         help="Allow zero-file runs (default: fail if no JSON files found)")
     parser.add_argument("--db-path", type=Path, default=None, help="Override DB path")
+    parser.add_argument(
+        "--ingest-backend",
+        choices=("ecds", "webapi", "unknown"),
+        default="unknown",
+        help=(
+            "Live transport tag stored on each row "
+            "(TIGGE spec v3 §3 Phase 0 #5 / critic v2 A1). "
+            "Default 'unknown' for legacy/manual runs."
+        ),
+    )
     return parser
 
 
@@ -765,6 +823,7 @@ def main(argv: list[str] | None = None) -> int:
         cities=set(args.cities) if args.cities else None,
         overwrite=args.overwrite,
         require_files=not args.no_require_files,
+        ingest_backend=args.ingest_backend,
     )
     print(json.dumps(summary, indent=2))
     return 0 if summary.get("errors", 0) == 0 else 2

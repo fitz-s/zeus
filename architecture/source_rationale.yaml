@@ -192,6 +192,18 @@ files:
     zone: K2_runtime
     authority_role: live_daemon_entry
     why: Live-only daemon entry point.
+  src/ingest_main.py:
+    zone: K2_runtime
+    authority_role: ingest_daemon_entry
+    why: Data-ingest daemon entry point. Schedules all K2 observation/forecast/settlement/UMA ingest ticks independent of the trading daemon. No imports from src.engine, src.execution, src.strategy, src.signal, src.control, or src.main.
+    downstream:
+    - src/data/daily_obs_append.py
+    - src/data/hourly_instants_append.py
+    - src/data/forecasts_append.py
+    - src/data/solar_append.py
+    - src/ingest/harvester_truth_writer.py
+    - src/state/uma_resolution_listener.py
+    - scripts/etl_forecast_skill_from_forecasts.py
   src/runtime/bankroll_provider.py:
     zone: K2_runtime
     authority_role: wallet_bankroll_provider

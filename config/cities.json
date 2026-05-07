@@ -915,6 +915,30 @@
       "diurnal_amplitude_c": 7.0
     },
     {
+      "name": "Qingdao",
+      "aliases": [
+        "Qingdao",
+        "青岛"
+      ],
+      "slug_names": [
+        "qingdao"
+      ],
+      "noaa": null,
+      "lat": 36.2661,
+      "lon": 120.3745,
+      "wu_station": "ZSQD",
+      "wu_pws": null,
+      "meteostat_station": null,
+      "airport_name": "Qingdao Liuting International Airport",
+      "country_code": "CN",
+      "settlement_source": "https://www.wunderground.com/history/daily/cn/qingdao/ZSQD",
+      "timezone": "Asia/Shanghai",
+      "cluster": "Qingdao",
+      "unit": "C",
+      "historical_peak_hour": 14.5,
+      "diurnal_amplitude_c": 7.5
+    },
+    {
       "name": "San Francisco",
       "aliases": [
         "San Francisco",

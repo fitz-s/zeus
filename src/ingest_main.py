@@ -445,11 +445,13 @@ def _k2_startup_catch_up():
 
 @_scheduler_job("ingest_opendata_daily_mx2t6")
 def _opendata_mx2t6_cycle():
-    """ECMWF Open Data daily mx2t6 (HIGH track) ingest.
+    """ECMWF Open Data daily HIGH track ingest.
 
     Open Data ENS posts 00Z runs by ~07:00 UTC (latency 6-8h). This job runs
-    at 07:30 UTC and writes ``ecmwf_opendata_mx2t6_local_calendar_day_max_v1``
-    rows to ``ensemble_snapshots_v2``.
+    at 07:30 UTC and writes ``ecmwf_opendata_mx2t3_local_calendar_day_max_v1``
+    rows to ``ensemble_snapshots_v2`` (post-2026-05-07 mx2t3 cutover; the
+    schedule job name retains the legacy ``mx2t6`` slug for back-compat with
+    ops dashboards).
     """
     if _is_source_paused("ecmwf_open_data"):
         logger.info("_opendata_mx2t6_cycle: paused_by_control_plane")
@@ -463,11 +465,13 @@ def _opendata_mx2t6_cycle():
 
 @_scheduler_job("ingest_opendata_daily_mn2t6")
 def _opendata_mn2t6_cycle():
-    """ECMWF Open Data daily mn2t6 (LOW track) ingest.
+    """ECMWF Open Data daily LOW track ingest.
 
-    Runs at 07:35 UTC (5-min offset from mx2t6 to space out downloads). Writes
-    ``ecmwf_opendata_mn2t6_local_calendar_day_min_v1`` rows to
-    ``ensemble_snapshots_v2``.
+    Runs at 07:35 UTC (5-min offset from the HIGH job to space out downloads).
+    Writes ``ecmwf_opendata_mn2t3_local_calendar_day_min_v1`` rows to
+    ``ensemble_snapshots_v2`` (post-2026-05-07 mn2t3 cutover; the schedule
+    job name retains the legacy ``mn2t6`` slug for back-compat with ops
+    dashboards).
     """
     if _is_source_paused("ecmwf_open_data"):
         logger.info("_opendata_mn2t6_cycle: paused_by_control_plane")
@@ -732,6 +736,241 @@ def _drift_detector_tick():
 
 
 # ---------------------------------------------------------------------------
+# Task #2 (2026-05-07): UMA Optimistic Oracle resolution listener tick
+# ---------------------------------------------------------------------------
+
+# Default block-window per tick when no cursor exists yet (operator can override
+# via settings["uma"]["initial_lookback_blocks"]). Polygon mints ~2 blocks/sec
+# → 50 000 blocks ≈ 7h, comfortably wider than UMA's ~14h post-endDate settle
+# latency window for any single tick, but bounded so eth_getLogs does not scan
+# from genesis (PR #82 Copilot review: from_block=0 every tick scans full chain).
+_UMA_DEFAULT_INITIAL_LOOKBACK_BLOCKS = 50_000
+# Max blocks to advance per tick once cursor exists. Provider-friendly chunking;
+# any backlog drains over multiple ticks while keeping each request bounded.
+_UMA_MAX_BLOCKS_PER_TICK = 100_000
+
+
+def _uma_optional_settings() -> tuple[str, str, int, int]:
+    """Read optional uma config without touching ``Settings._data`` private state.
+
+    Returns ``(polygon_rpc_url, oo_contract_address, initial_lookback, max_per_tick)``.
+    Empty strings / 0 means "not configured" — caller treats as default-OFF.
+    """
+    from src.config import settings
+
+    try:
+        uma_cfg = settings["uma"]
+    except KeyError:
+        return ("", "", _UMA_DEFAULT_INITIAL_LOOKBACK_BLOCKS, _UMA_MAX_BLOCKS_PER_TICK)
+    if not isinstance(uma_cfg, dict):
+        return ("", "", _UMA_DEFAULT_INITIAL_LOOKBACK_BLOCKS, _UMA_MAX_BLOCKS_PER_TICK)
+    return (
+        str(uma_cfg.get("polygon_rpc_url", "") or ""),
+        str(uma_cfg.get("oo_contract_address", "") or ""),
+        int(uma_cfg.get("initial_lookback_blocks", _UMA_DEFAULT_INITIAL_LOOKBACK_BLOCKS)),
+        int(uma_cfg.get("max_blocks_per_tick", _UMA_MAX_BLOCKS_PER_TICK)),
+    )
+
+
+@_scheduler_job("ingest_uma_resolution_listener")
+def _uma_resolution_listener_tick():
+    """Poll Polygon RPC for UMA OO Settle events — 5-min interval.
+
+    Reads condition_ids from market_events_v2, then calls poll_uma_resolutions
+    with the configured RPC client. When settings["uma"]["polygon_rpc_url"] is
+    absent or empty, the listener short-circuits (returns [] without writing)
+    per the default-OFF design in uma_resolution_listener.py.
+
+    Block window: the listener uses a persisted last-scanned-block cursor
+    (``uma_resolution_cursor`` table) to scan only new blocks per tick. First
+    tick after enabling: scans the most-recent ``initial_lookback_blocks``
+    (default 50 000 ≈ 7h on Polygon). Subsequent ticks advance the cursor and
+    cap the per-tick window at ``max_blocks_per_tick`` (default 100 000) so
+    backlogged ticks drain incrementally without blowing past RPC log limits.
+
+    Runs on "fast" executor: reads on-chain (HTTP), writes at most 1 row per
+    resolved market — no risk of DB writer starvation against the single-writer
+    default executor pool. Condition_id lookup uses a fresh read-only connection
+    that does not block writers.
+    """
+    from src.state.uma_resolution_listener import (
+        UmaHttpRpcClient,
+        get_last_scanned_block,
+        poll_uma_resolutions,
+        set_last_scanned_block,
+    )
+    from src.state.db import get_world_connection, ZEUS_WORLD_DB_PATH
+    import sqlite3
+
+    # Load optional uma settings (default-OFF when absent).
+    try:
+        polygon_rpc_url, oo_contract_address, initial_lookback, max_per_tick = (
+            _uma_optional_settings()
+        )
+    except Exception as exc:
+        logger.warning("ingest_uma_resolution_listener: settings load failed: %s", exc)
+        return
+
+    if not polygon_rpc_url or not oo_contract_address:
+        logger.debug(
+            "ingest_uma_resolution_listener: no RPC config; listener is default-OFF "
+            "(set settings.uma.polygon_rpc_url + oo_contract_address to activate)"
+        )
+        return
+
+    # Collect tracked condition_ids from market_events_v2 (read-only connection).
+    condition_ids: list[str] = []
+    try:
+        ro_conn = sqlite3.connect(str(ZEUS_WORLD_DB_PATH), timeout=10)
+        ro_conn.row_factory = sqlite3.Row
+        try:
+            rows = ro_conn.execute(
+                "SELECT DISTINCT condition_id FROM market_events_v2 "
+                "WHERE condition_id IS NOT NULL AND condition_id != ''"
+            ).fetchall()
+            condition_ids = [str(r["condition_id"]) for r in rows]
+        finally:
+            ro_conn.close()
+    except Exception as exc:
+        logger.warning("ingest_uma_resolution_listener: condition_id fetch failed: %s", exc)
+        return
+
+    if not condition_ids:
+        logger.debug("ingest_uma_resolution_listener: no tracked condition_ids yet")
+        return
+
+    # Resolve block window via persisted cursor + RPC head, then poll.
+    try:
+        rpc_client = UmaHttpRpcClient(polygon_rpc_url)
+
+        # eth_blockNumber — head of chain.
+        head_block: int | None = None
+        try:
+            import httpx  # type: ignore[import]
+            resp = httpx.post(
+                polygon_rpc_url,
+                json={"jsonrpc": "2.0", "id": 1, "method": "eth_blockNumber", "params": []},
+                timeout=10.0,
+            )
+            resp.raise_for_status()
+            head_hex = resp.json().get("result")
+            if isinstance(head_hex, str):
+                head_block = int(head_hex, 16)
+        except Exception as exc:  # noqa: BLE001 — fail-soft to skip-tick
+            logger.warning("ingest_uma_resolution_listener: eth_blockNumber failed: %s", exc)
+            return
+
+        if not head_block or head_block <= 0:
+            logger.warning("ingest_uma_resolution_listener: invalid head_block=%r", head_block)
+            return
+
+        write_conn = get_world_connection()
+        try:
+            cursor = get_last_scanned_block(write_conn, oo_contract_address)
+            if cursor is None:
+                from_block = max(head_block - initial_lookback, 0)
+            else:
+                from_block = cursor + 1
+            to_block = min(from_block + max_per_tick - 1, head_block)
+
+            if to_block < from_block:
+                logger.debug(
+                    "ingest_uma_resolution_listener: nothing to scan (cursor=%s head=%s)",
+                    cursor, head_block,
+                )
+                return
+
+            resolutions = poll_uma_resolutions(
+                condition_ids=condition_ids,
+                contract_address=oo_contract_address,
+                rpc_client=rpc_client,
+                conn=write_conn,
+                from_block=from_block,
+                to_block=to_block,
+            )
+            # Advance cursor regardless of resolution count — empty windows are
+            # legitimate progress and re-scanning them wastes RPC budget.
+            set_last_scanned_block(write_conn, oo_contract_address, to_block)
+            write_conn.commit()
+            if resolutions:
+                logger.info(
+                    "ingest_uma_resolution_listener: %d new resolution(s) "
+                    "(blocks %d→%d, head=%d)",
+                    len(resolutions), from_block, to_block, head_block,
+                )
+            else:
+                logger.debug(
+                    "ingest_uma_resolution_listener: no new resolutions "
+                    "(blocks %d→%d, head=%d)",
+                    from_block, to_block, head_block,
+                )
+        finally:
+            write_conn.close()
+    except Exception as exc:
+        logger.warning("ingest_uma_resolution_listener tick error: %s", exc)
+
+
+# ---------------------------------------------------------------------------
+# Task #4 (2026-05-07): forecast_skill ETL scheduler tick
+# ---------------------------------------------------------------------------
+
+@_scheduler_job("ingest_etl_forecast_skill")
+def _etl_forecast_skill_tick():
+    """Daily materialization of forecast_skill + model_bias from local forecasts table.
+
+    Runs scripts/etl_forecast_skill_from_forecasts.py as a subprocess so it
+    inherits the venv Python and produces its own log output. Idempotent — the
+    script uses INSERT OR REPLACE; repeated runs are safe.
+
+    Runs on default executor (it opens a write connection to zeus-world.db).
+    """
+    import subprocess
+    venv_python = _etl_subprocess_python()
+    script = Path(__file__).parent.parent / "scripts" / "etl_forecast_skill_from_forecasts.py"
+    if not script.exists():
+        logger.warning("ingest_etl_forecast_skill: script not found at %s", script)
+        return
+    r = subprocess.run(
+        [venv_python, str(script)],
+        capture_output=True, text=True, timeout=300,
+    )
+    output = r.stdout.strip()
+    if output:
+        logger.info("[etl_forecast_skill]\n%s", output[-2000:])
+    if r.returncode != 0:
+        logger.warning(
+            "[etl_forecast_skill] FAILED (exit=%d): %s",
+            r.returncode, r.stderr[-500:] if r.stderr else "",
+        )
+    else:
+        logger.info("[etl_forecast_skill] OK (exit=0)")
+
+
+# ---------------------------------------------------------------------------
+# STALE fix (2026-05-07): market_events_v2 scan tick — feeds from Gamma API
+# so ingest daemon populates market_events_v2 when trading daemon is down.
+# ---------------------------------------------------------------------------
+
+@_scheduler_job("ingest_market_scan")
+def _market_scan_tick():
+    """Periodic Gamma API market scan to keep market_events_v2 fresh.
+
+    find_weather_markets() calls _persist_market_events_to_db internally; it
+    is idempotent (INSERT OR IGNORE on (market_slug, condition_id)).
+    Running this from the ingest daemon ensures market_events_v2 stays updated
+    even when the trading daemon (src/main.py) is paused.
+
+    Runs on default executor (writes to zeus-world.db via _persist_market_events_to_db).
+    """
+    try:
+        from src.data.market_scanner import find_weather_markets
+        markets = find_weather_markets()
+        logger.info("ingest_market_scan: found %d active weather markets", len(markets))
+    except Exception as exc:
+        logger.warning("ingest_market_scan tick error: %s", exc)
+
+
+# ---------------------------------------------------------------------------
 # Phase 2: Ingest status rollup (§2.5) — appended END
 # ---------------------------------------------------------------------------
 
@@ -981,6 +1220,36 @@ def main() -> None:
         seconds=60, id="ingest_heartbeat",
         max_instances=1, coalesce=True,
         executor="fast",
+    )
+
+    # 2026-05-07 Task #2: UMA resolution listener — every 5 minutes.
+    # Runs on "fast" executor: HTTP-bound, writes at most 1 row per resolution,
+    # negligible DB contention vs the single-writer default pool.
+    # Short-circuits when settings.uma.polygon_rpc_url is not configured (default-OFF).
+    _scheduler.add_job(
+        _uma_resolution_listener_tick, "interval",
+        minutes=5, id="ingest_uma_resolution_listener",
+        max_instances=1, coalesce=True,
+        executor="fast",
+    )
+
+    # 2026-05-07 Task #4: forecast_skill ETL — daily at 03:00 UTC.
+    # Subprocess writes to zeus-world.db (forecast_skill, model_bias);
+    # runs on default executor to serialise with other DB writers.
+    _scheduler.add_job(
+        _etl_forecast_skill_tick, "cron",
+        hour=3, minute=0, id="ingest_etl_forecast_skill",
+        max_instances=1, coalesce=True, misfire_grace_time=3600,
+    )
+
+    # 2026-05-07 STALE fix: Gamma market scan — every 30 minutes.
+    # Keeps market_events_v2 fresh when the trading daemon (src/main.py) is paused.
+    # INSERT OR IGNORE makes it idempotent.
+    # Runs on default executor (writes to zeus-world.db via _persist_market_events_to_db).
+    _scheduler.add_job(
+        _market_scan_tick, "interval",
+        minutes=30, id="ingest_market_scan",
+        max_instances=1, coalesce=True,
     )
 
     jobs = [j.id for j in _scheduler.get_jobs()]

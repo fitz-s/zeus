@@ -195,6 +195,18 @@ misreads:
       events with endDate < 2026-04-15 OR coverage extending beyond the
       8-city set may relax this caution. Prove with HTTP response artifacts,
       not from logs/archives that pre-date the 2026-04-28 audit.
+    operator_override_2026_05_07: >
+      Gamma backfill is ALLOWED under operator authorization 2026-05-07.
+      Script: scripts/backfill_settlements_via_gamma_2026.py.
+      Scope: LOW (2026-04-15+) and HIGH post-2026-02-21 (Polymarket switched
+      from UMA OO V2 to internal automatic resolver 0x69c47De9D4D3Dad79590d61b9e05918E03775f24
+      after block 83,275,667). The "forbidden Gamma backfill" restriction is
+      lifted for these two date-bounded gaps. UMA chain-only requirement is
+      preserved for HIGH 2025-01-22..2026-02-20 (already backfilled via
+      scripts/backfill_uma_resolution_2026.py). Backfill executed 2026-05-07:
+      +2562 HIGH rows (range 2026-02-21..2026-05-07), +125 LOW rows
+      (range 2026-04-15..2026-05-07). reconstruction_method=gamma_backfill
+      in provenance_json. Idempotent against existing UMA rows.
     tests:
       - python3 scripts/topology_doctor.py --fatal-misreads --json
     task_classes: [settlement_semantics, source_routing, calibration]
