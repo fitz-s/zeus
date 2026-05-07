@@ -115,3 +115,37 @@ overrides:
       auto_expires_after: 24h
     reversibility_class: TRUTH_REWRITE
     audit_log: .claude/logs/hook_overrides/hook_schema_change.jsonl
+
+  - id: URGENT_HOTFIX
+    description: >
+      PR is a single-purpose urgent fix that cannot wait for accumulation.
+      Requires evidence file stating the incident/issue being addressed and
+      why immediate PR open is necessary.
+    requires:
+      evidence_file: evidence/pr_overrides/<date>_urgent_hotfix.md
+      fields_required: [incident_or_issue, why_immediate, approx_loc, commit_count]
+      auto_expires_after: 4h
+    audit_log: .claude/logs/hook_overrides/urgent_hotfix.jsonl
+
+  - id: BATCHED_CONSOLIDATION
+    description: >
+      PR consolidates multiple independent work streams into one batch
+      to reduce total paid-reviewer invocations across the batch.
+      Requires evidence file listing the constituent streams and LOC summary.
+    requires:
+      evidence_file: evidence/pr_overrides/<date>_batched_consolidation.md
+      fields_required: [constituent_streams, total_loc, total_commits, consolidation_rationale]
+      auto_expires_after: 24h
+    audit_log: .claude/logs/hook_overrides/batched_consolidation.jsonl
+
+  - id: OPERATOR_APPROVED_SMALL_PR
+    description: >
+      Operator has explicitly approved opening a small PR below the
+      accumulation threshold. Use for housekeeping, docs-only, or
+      single-hook changes where accumulation is not applicable.
+    requires:
+      evidence_file: evidence/pr_overrides/<date>_operator_approved_small_pr.md
+      operator_signature: true
+      fields_required: [scope, why_small_pr_acceptable]
+      auto_expires_after: 8h
+    audit_log: .claude/logs/hook_overrides/operator_approved_small_pr.jsonl

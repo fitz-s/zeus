@@ -27,7 +27,7 @@ When executing a phase from `docs/operations/task_*/r3/slice_cards/<phase>.yaml`
 
 ## Closeout (3 steps)
 
-1. Dispatch critic-opus subagent (`.claude/agents/critic-opus.md`) with the diff. If critic flags spirit-mismatch, fix and re-dispatch.
+1. Dispatch critic subagent (`~/.claude/agents/critic.md` — universal; no repo-local override needed) with the diff. If critic flags spirit-mismatch, fix and re-dispatch.
 2. Dispatch verifier subagent (`.claude/agents/verifier.md`) with the test results. If verifier flags coverage gap, address.
 3. Write `learnings/<phase>_<author>_<date>_retro.md`: what changed, what critic/verifier caught, what RULES_TO_CARRY_FORWARD this phase produced.
 

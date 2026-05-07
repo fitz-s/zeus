@@ -129,7 +129,7 @@ architecture/**/AGENTS.md           — architecture-zone routers
 .agents/**                          — repo-local skills, handoff, agent surfaces
 .claude/CLAUDE.md                   — Claude Code session boot
 .claude/skills/**                   — skill bodies
-.claude/agents/**                   — agent definitions (critic-opus, safety-gate, verifier)
+.claude/agents/**                   — agent definitions (safety-gate, verifier; universal critic at ~/.claude/agents/critic.md)
 .claude/hooks/**                    — pre-commit / pre-merge hooks
 .claude/settings.json               — settings (review only when changed)
 .github/copilot-instructions.md     — Copilot review entry point

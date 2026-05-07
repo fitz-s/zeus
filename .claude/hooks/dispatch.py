@@ -560,6 +560,19 @@ def _run_advisory_check_pr_create_loc_accumulation(
     )
 
 
+def _run_blocking_check_pr_create_loc_accumulation(
+    payload: dict[str, Any],
+) -> tuple[str, str]:
+    """BLOCKING wrapper around the accumulation advisory check.
+    Reuses _run_advisory_check_pr_create_loc_accumulation; below-threshold → deny.
+    Overrides (URGENT_HOTFIX / BATCHED_CONSOLIDATION / OPERATOR_APPROVED_SMALL_PR)
+    are detected by main() after this returns deny."""
+    msg = _run_advisory_check_pr_create_loc_accumulation(payload)
+    if msg is None:
+        return "allow", "not_a_pr_open_or_threshold_met"
+    return "deny", msg
+
+
 def _run_advisory_check_pr_open_monitor_arm(
     payload: dict[str, Any],
 ) -> str | None:
@@ -1432,6 +1445,8 @@ def _run_blocking_check(
         return _run_blocking_check_pre_edit_architecture(payload)
     elif hook_id == "pre_write_capability_gate":
         return _run_blocking_check_pre_write_capability_gate(payload)
+    elif hook_id == "pr_create_loc_accumulation":
+        return _run_blocking_check_pr_create_loc_accumulation(payload)
     else:
         # Unknown BLOCKING hook — fail-closed
         return "deny", f"unknown_hook"
