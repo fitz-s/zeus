@@ -732,6 +732,186 @@ def _drift_detector_tick():
 
 
 # ---------------------------------------------------------------------------
+# Task #2 (2026-05-07): UMA Optimistic Oracle resolution listener tick
+# ---------------------------------------------------------------------------
+
+@_scheduler_job("ingest_uma_resolution_listener")
+def _uma_resolution_listener_tick():
+    """Poll Polygon RPC for UMA OO SettlementResolved events — 5-min interval.
+
+    Reads condition_ids from market_events_v2, then calls poll_uma_resolutions
+    with the configured RPC client. When settings["uma"]["polygon_rpc_url"] is
+    absent or empty, the listener short-circuits (returns [] without writing)
+    per the default-OFF design in uma_resolution_listener.py.
+
+    Runs on "fast" executor: reads on-chain (HTTP), writes at most 1 row per
+    resolved market — no risk of DB writer starvation against the single-writer
+    default executor pool. Condition_id lookup uses a fresh read-only connection
+    that does not block writers.
+    """
+    from src.state.uma_resolution_listener import poll_uma_resolutions
+    from src.state.db import get_world_connection, ZEUS_WORLD_DB_PATH
+    import sqlite3
+
+    # Load settings for RPC config.
+    try:
+        from src.config import settings
+        uma_cfg = settings.get("uma", {})
+        polygon_rpc_url = uma_cfg.get("polygon_rpc_url", "")
+        oo_contract_address = uma_cfg.get("oo_contract_address", "")
+    except Exception as exc:
+        logger.warning("ingest_uma_resolution_listener: settings load failed: %s", exc)
+        return
+
+    if not polygon_rpc_url or not oo_contract_address:
+        logger.debug(
+            "ingest_uma_resolution_listener: no RPC config; listener is default-OFF "
+            "(set settings.uma.polygon_rpc_url + oo_contract_address to activate)"
+        )
+        return
+
+    # Collect tracked condition_ids from market_events_v2 (read-only connection).
+    condition_ids: list[str] = []
+    try:
+        ro_conn = sqlite3.connect(str(ZEUS_WORLD_DB_PATH), timeout=10)
+        ro_conn.row_factory = sqlite3.Row
+        try:
+            rows = ro_conn.execute(
+                "SELECT DISTINCT condition_id FROM market_events_v2 "
+                "WHERE condition_id IS NOT NULL AND condition_id != ''"
+            ).fetchall()
+            condition_ids = [str(r["condition_id"]) for r in rows]
+        finally:
+            ro_conn.close()
+    except Exception as exc:
+        logger.warning("ingest_uma_resolution_listener: condition_id fetch failed: %s", exc)
+        return
+
+    if not condition_ids:
+        logger.debug("ingest_uma_resolution_listener: no tracked condition_ids yet")
+        return
+
+    # Wire the HTTP RPC client and poll.
+    try:
+        from src.state.uma_resolution_listener import UmaRpcClient
+        import httpx
+
+        class _UmaHttpRpcClient(UmaRpcClient):
+            """Minimal Polygon eth_getLogs client."""
+
+            def __init__(self, rpc_url: str) -> None:
+                self._rpc_url = rpc_url
+
+            def get_logs(
+                self,
+                *,
+                contract_address: str,
+                topic0: str,
+                condition_ids,
+                from_block: int,
+                to_block=None,
+            ) -> list[dict]:
+                payload = {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "eth_getLogs",
+                    "params": [{
+                        "address": contract_address,
+                        "topics": [topic0],
+                        "fromBlock": hex(from_block),
+                        **({"toBlock": hex(to_block)} if to_block is not None else {}),
+                    }],
+                }
+                resp = httpx.post(self._rpc_url, json=payload, timeout=30.0)
+                resp.raise_for_status()
+                data = resp.json()
+                return data.get("result") or []
+
+        rpc_client = _UmaHttpRpcClient(polygon_rpc_url)
+        write_conn = get_world_connection()
+        try:
+            resolutions = poll_uma_resolutions(
+                condition_ids=condition_ids,
+                contract_address=oo_contract_address,
+                rpc_client=rpc_client,
+                conn=write_conn,
+                from_block=0,
+            )
+            if resolutions:
+                write_conn.commit()
+                logger.info(
+                    "ingest_uma_resolution_listener: %d new resolution(s) observed",
+                    len(resolutions),
+                )
+            else:
+                logger.debug("ingest_uma_resolution_listener: no new resolutions this tick")
+        finally:
+            write_conn.close()
+    except Exception as exc:
+        logger.warning("ingest_uma_resolution_listener tick error: %s", exc)
+
+
+# ---------------------------------------------------------------------------
+# Task #4 (2026-05-07): forecast_skill ETL scheduler tick
+# ---------------------------------------------------------------------------
+
+@_scheduler_job("ingest_etl_forecast_skill")
+def _etl_forecast_skill_tick():
+    """Daily materialization of forecast_skill + model_bias from local forecasts table.
+
+    Runs scripts/etl_forecast_skill_from_forecasts.py as a subprocess so it
+    inherits the venv Python and produces its own log output. Idempotent — the
+    script uses INSERT OR REPLACE; repeated runs are safe.
+
+    Runs on default executor (it opens a write connection to zeus-world.db).
+    """
+    import subprocess
+    venv_python = _etl_subprocess_python()
+    script = Path(__file__).parent.parent / "scripts" / "etl_forecast_skill_from_forecasts.py"
+    if not script.exists():
+        logger.warning("ingest_etl_forecast_skill: script not found at %s", script)
+        return
+    r = subprocess.run(
+        [venv_python, str(script)],
+        capture_output=True, text=True, timeout=300,
+    )
+    output = r.stdout.strip()
+    if output:
+        logger.info("[etl_forecast_skill]\n%s", output[-2000:])
+    if r.returncode != 0:
+        logger.warning(
+            "[etl_forecast_skill] FAILED (exit=%d): %s",
+            r.returncode, r.stderr[-500:] if r.stderr else "",
+        )
+    else:
+        logger.info("[etl_forecast_skill] OK (exit=0)")
+
+
+# ---------------------------------------------------------------------------
+# STALE fix (2026-05-07): market_events_v2 scan tick — feeds from Gamma API
+# so ingest daemon populates market_events_v2 when trading daemon is down.
+# ---------------------------------------------------------------------------
+
+@_scheduler_job("ingest_market_scan")
+def _market_scan_tick():
+    """Periodic Gamma API market scan to keep market_events_v2 fresh.
+
+    find_weather_markets() calls _persist_market_events_to_db internally; it
+    is idempotent (INSERT OR IGNORE on (market_slug, condition_id)).
+    Running this from the ingest daemon ensures market_events_v2 stays updated
+    even when the trading daemon (src/main.py) is paused.
+
+    Runs on default executor (writes to zeus-world.db via _persist_market_events_to_db).
+    """
+    try:
+        from src.data.market_scanner import find_weather_markets
+        markets = find_weather_markets()
+        logger.info("ingest_market_scan: found %d active weather markets", len(markets))
+    except Exception as exc:
+        logger.warning("ingest_market_scan tick error: %s", exc)
+
+
+# ---------------------------------------------------------------------------
 # Phase 2: Ingest status rollup (§2.5) — appended END
 # ---------------------------------------------------------------------------
 
@@ -981,6 +1161,36 @@ def main() -> None:
         seconds=60, id="ingest_heartbeat",
         max_instances=1, coalesce=True,
         executor="fast",
+    )
+
+    # 2026-05-07 Task #2: UMA resolution listener — every 5 minutes.
+    # Runs on "fast" executor: HTTP-bound, writes at most 1 row per resolution,
+    # negligible DB contention vs the single-writer default pool.
+    # Short-circuits when settings.uma.polygon_rpc_url is not configured (default-OFF).
+    _scheduler.add_job(
+        _uma_resolution_listener_tick, "interval",
+        minutes=5, id="ingest_uma_resolution_listener",
+        max_instances=1, coalesce=True,
+        executor="fast",
+    )
+
+    # 2026-05-07 Task #4: forecast_skill ETL — daily at 03:00 UTC.
+    # Subprocess writes to zeus-world.db (forecast_skill, model_bias);
+    # runs on default executor to serialise with other DB writers.
+    _scheduler.add_job(
+        _etl_forecast_skill_tick, "cron",
+        hour=3, minute=0, id="ingest_etl_forecast_skill",
+        max_instances=1, coalesce=True, misfire_grace_time=3600,
+    )
+
+    # 2026-05-07 STALE fix: Gamma market scan — every 30 minutes.
+    # Keeps market_events_v2 fresh when the trading daemon (src/main.py) is paused.
+    # INSERT OR IGNORE makes it idempotent.
+    # Runs on default executor (writes to zeus-world.db via _persist_market_events_to_db).
+    _scheduler.add_job(
+        _market_scan_tick, "interval",
+        minutes=30, id="ingest_market_scan",
+        max_instances=1, coalesce=True,
     )
 
     jobs = [j.id for j in _scheduler.get_jobs()]
