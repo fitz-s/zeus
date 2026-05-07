@@ -604,7 +604,6 @@ cards:
         - docs/operations/**
         - .omx/artifacts/*postclose*
         - .omx/context/*closeout*
-        - .omc/plans/*.md
     downstream_blast_radius:
       - docs/operations/current_state.md
       - docs/operations/AGENTS.md
