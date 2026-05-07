@@ -4641,7 +4641,12 @@ def test_forecast_provider_identity_uses_source_id_not_model_family(monkeypatch)
 
 def test_evaluator_live_path_ignores_shadow_calibration_authority_result(monkeypatch):
     """Shadow authority envelope must not become live evaluator routing."""
-    monkeypatch.setattr(evaluator_module, "get_mode", lambda: "test")
+    monkeypatch.setattr(evaluator_module, "get_mode", lambda: "live")
+    monkeypatch.setattr(
+        evaluator_module,
+        "_live_entry_forecast_config_or_blocker",
+        lambda: (None, None),
+    )
     target_date = "2026-01-15"
     tz = ZoneInfo(NYC.timezone)
     start_local = datetime(2026, 1, 15, 0, 0, tzinfo=tz)

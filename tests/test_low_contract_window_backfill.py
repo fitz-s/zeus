@@ -283,6 +283,57 @@ def test_low_contract_evidence_missing_member_value_blocks_training_authority():
     )
 
 
+def test_low_contract_evidence_invalid_timezone_blocks_without_raising():
+    payload = _payload()
+    payload["timezone"] = "Not/A_Real_Timezone"
+
+    evidence = _contract_evidence_fields(
+        payload,
+        LOW_LOCALDAY_MIN,
+        source_id="tigge_mars",
+    )
+
+    assert evidence["forecast_window_attribution_status"] == "UNKNOWN"
+    assert evidence["contributes_to_target_extrema"] == 0
+    assert "invalid_city_timezone" in json.loads(
+        evidence["forecast_window_block_reasons_json"]
+    )
+
+
+def test_low_contract_window_backfill_preserves_non_boundary_block_reason(tmp_path: Path):
+    conn = _make_db()
+    payload = _payload(boundary_ambiguous=False)
+    payload["members"][3]["value_native_unit"] = None
+    _write_payload(tmp_path, payload)
+    source = LOW_RECOVERY_SOURCES["tigge_mars"]
+
+    reports = run_backfill(
+        conn=conn,
+        json_root=tmp_path,
+        sources=[source],
+        dry_run=False,
+        force=True,
+    )
+
+    assert reports["tigge_mars"].blocked_candidates == 1
+    row = conn.execute(
+        """
+        SELECT training_allowed, causality_status, boundary_ambiguous,
+               forecast_window_attribution_status, forecast_window_block_reasons_json
+        FROM ensemble_snapshots_v2
+        WHERE data_version = ?
+        """,
+        (source.recovery_data_version,),
+    ).fetchone()
+    assert row["training_allowed"] == 0
+    assert row["causality_status"] == "UNKNOWN"
+    assert row["boundary_ambiguous"] == 0
+    assert row["forecast_window_attribution_status"] == "FULLY_INSIDE_TARGET_LOCAL_DAY"
+    assert "missing_member_value_for_contract_extrema" in json.loads(
+        row["forecast_window_block_reasons_json"]
+    )
+
+
 def test_low_contract_window_backfill_ambiguous_window_stays_blocked(tmp_path: Path):
     conn = _make_db()
     _write_payload(tmp_path, _payload(boundary_ambiguous=True))

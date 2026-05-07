@@ -40,7 +40,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -329,7 +329,10 @@ def _forecast_window_from_payload(
     end_step = max(end for _, end in ranges)
     start_utc = issue_time + timedelta(hours=start_step)
     end_utc = issue_time + timedelta(hours=end_step)
-    tz = ZoneInfo(city_timezone)
+    try:
+        tz = ZoneInfo(city_timezone)
+    except (ZoneInfoNotFoundError, ValueError):
+        return {"block_reasons": ["invalid_city_timezone"]}
     return {
         "forecast_window_start_utc": start_utc.isoformat(),
         "forecast_window_end_utc": end_utc.isoformat(),

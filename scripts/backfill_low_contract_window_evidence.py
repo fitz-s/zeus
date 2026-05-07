@@ -270,6 +270,17 @@ def _recovery_causality_status(
     return "UNKNOWN"
 
 
+def _recovery_boundary_ambiguous(*, evidence: dict[str, Any], payload: dict[str, Any]) -> bool:
+    boundary_policy = payload.get("boundary_policy")
+    if isinstance(boundary_policy, dict) and bool(boundary_policy.get("boundary_ambiguous")):
+        return True
+    if bool(payload.get("boundary_ambiguous")):
+        return True
+    return str(evidence.get("forecast_window_attribution_status") or "") == (
+        "AMBIGUOUS_CROSSES_LOCAL_DAY_BOUNDARY"
+    )
+
+
 def _merge_provenance(
     source_row: sqlite3.Row,
     *,
@@ -316,6 +327,7 @@ def _build_recovery_row(
         payload=payload,
         training_allowed=training_allowed,
     )
+    boundary_ambiguous = _recovery_boundary_ambiguous(evidence=evidence, payload=payload)
     row.update({
         "data_version": source.recovery_data_version,
         "observation_field": LOW_LOCALDAY_MIN.observation_field,
@@ -324,7 +336,7 @@ def _build_recovery_row(
         "unit": row.get("unit") or payload.get("unit"),
         "training_allowed": 1 if training_allowed else 0,
         "causality_status": causality_status,
-        "boundary_ambiguous": 0 if training_allowed else 1,
+        "boundary_ambiguous": 1 if boundary_ambiguous else 0,
         "ambiguous_member_count": int(
             (payload.get("boundary_policy") or {}).get("ambiguous_member_count", 0)
         ),
