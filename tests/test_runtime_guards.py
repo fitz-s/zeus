@@ -4639,6 +4639,105 @@ def test_forecast_provider_identity_uses_source_id_not_model_family(monkeypatch)
     assert captured_calibration_lookup["source_id"] == "tigge_mars"
 
 
+def test_evaluator_live_path_ignores_shadow_calibration_authority_result(monkeypatch):
+    """Shadow authority envelope must not become live evaluator routing."""
+    monkeypatch.setattr(evaluator_module, "get_mode", lambda: "test")
+    target_date = "2026-01-15"
+    tz = ZoneInfo(NYC.timezone)
+    start_local = datetime(2026, 1, 15, 0, 0, tzinfo=tz)
+    times = [
+        (start_local + timedelta(hours=i)).astimezone(timezone.utc).isoformat()
+        for i in range(24)
+    ]
+    candidate = MarketCandidate(
+        city=NYC,
+        target_date=target_date,
+        outcomes=_three_outcomes(),
+        hours_since_open=8.0,
+        hours_to_resolution=24.0,
+        discovery_mode=DiscoveryMode.OPENING_HUNT.value,
+    )
+
+    class DummyEnsembleSignal:
+        def __init__(self, *args, **kwargs):
+            self.member_maxes = np.full(51, 40.0)
+            self.member_extrema = self.member_maxes
+            self.bias_corrected = False
+
+        def p_raw_vector(self, bins, n_mc=None):
+            return np.array([0.25, 0.25, 0.25, 0.25])
+
+        def spread(self):
+            return TemperatureDelta(1.0, "F")
+
+        def spread_float(self):
+            return 1.0
+
+        def is_bimodal(self):
+            return False
+
+    class DummyAnalysis:
+        def __init__(self, **kwargs):
+            pass
+
+        def find_edges(self, n_bootstrap=500):
+            return []
+
+        def sigma_context(self):
+            return {"base_sigma": 0.5, "lead_multiplier": 1.1, "spread_multiplier": 1.05, "final_sigma": 0.5775}
+
+        def mean_context(self):
+            return {"offset": 0.0, "lead_days": 1.5}
+
+    def _fetch_ensemble(city, forecast_days=2, model=None, role=None, **kwargs):
+        return {
+            "members_hourly": np.ones((51, len(times))) * 40.0,
+            "times": times,
+            "data_version": HIGH_LOCALDAY_MAX.data_version,
+            **_entry_forecast_evidence(
+                model=model or "ecmwf_ifs025",
+                source_id="tigge",
+                role=role or "entry_primary",
+                issue_time=datetime(2026, 1, 14, 0, tzinfo=timezone.utc),
+                first_valid_time=datetime(2026, 1, 15, 0, tzinfo=timezone.utc),
+                fetch_time=datetime(2026, 1, 14, 6, tzinfo=timezone.utc),
+            ),
+        }
+
+    def _forbidden_authority_result(*args, **kwargs):
+        raise AssertionError("live evaluator must not call shadow CalibrationAuthorityResult path")
+
+    monkeypatch.setattr(evaluator_module, "fetch_ensemble", _fetch_ensemble)
+    monkeypatch.setattr(evaluator_module, "validate_ensemble", lambda *args, **kwargs: True)
+    monkeypatch.setattr(evaluator_module, "EnsembleSignal", DummyEnsembleSignal)
+    monkeypatch.setattr(evaluator_module, "_store_ens_snapshot", lambda *args, **kwargs: "snap-authority-boundary")
+    monkeypatch.setattr(evaluator_module, "_store_snapshot_p_raw", lambda *args, **kwargs: None)
+    _patch_mature_calibration(monkeypatch)
+    monkeypatch.setattr(evaluator_module, "MarketAnalysis", DummyAnalysis)
+    _stub_full_family_scan(monkeypatch)
+    monkeypatch.setattr(evaluator_module, "fdr_filter", lambda edges, fdr_alpha=0.10: list(edges))
+    monkeypatch.setattr(evaluator_module, "get_calibration_authority_result", _forbidden_authority_result, raising=False)
+    import src.calibration.manager as manager_module
+    monkeypatch.setattr(manager_module, "get_calibration_authority_result", _forbidden_authority_result)
+
+    decisions = evaluator_module.evaluate_candidate(
+        candidate,
+        conn=None,
+        portfolio=PortfolioState(bankroll=211.37),
+        clob=type("DummyClob", (), {"get_best_bid_ask": lambda self, token_id: (0.34, 0.36, 20.0, 20.0)})(),
+        limits=evaluator_module.RiskLimits(),
+        decision_time=datetime(2026, 1, 14, 6, 0, tzinfo=timezone.utc),
+    )
+
+    assert len(decisions) == 1
+    assert decisions[0].rejection_stage in {
+        "EDGE_INSUFFICIENT",
+        "FDR_FILTERED",
+        "FDR_FAMILY_SCAN_UNAVAILABLE",
+    }
+    assert "calibration_maturity_level_1" in decisions[0].applied_validations
+
+
 def _insert_runtime_transfer_sigma_row(
     conn: sqlite3.Connection,
     *,
