@@ -121,7 +121,12 @@ def _manifest_hash_from_payload(payload: dict) -> str:
     return hashlib.sha256(canon.encode()).hexdigest()
 
 
-def _provenance_json(payload: dict, metric: MetricIdentity) -> str:
+def _provenance_json(
+    payload: dict,
+    metric: MetricIdentity,
+    *,
+    contract_evidence: dict[str, Any] | None = None,
+) -> str:
     prov = {
         "data_version": payload.get("data_version"),
         "physical_quantity": payload.get("physical_quantity"),
@@ -139,7 +144,8 @@ def _provenance_json(payload: dict, metric: MetricIdentity) -> str:
         "nearest_grid_lon": payload.get("nearest_grid_lon"),
         "nearest_grid_distance_km": payload.get("nearest_grid_distance_km"),
     }
-    evidence = _contract_evidence_fields(
+    # Reuse precomputed evidence when available to avoid duplicate timezone/range parsing.
+    evidence = contract_evidence if contract_evidence is not None else _contract_evidence_fields(
         payload,
         metric,
         source_id=derive_source_id_from_data_version(str(payload.get("data_version", ""))),
@@ -585,7 +591,7 @@ def ingest_json_file(
         metric,
         source_id=source_run_context.source_id if source_run_context else None,
     )
-    prov_json = _provenance_json(payload, metric)
+    prov_json = _provenance_json(payload, metric, contract_evidence=contract_evidence)
     lead_hours = _lead_hours(payload)
     now = _now_utc_iso()
     # R-L: new provenance fields from local-calendar-day extractor (Phase 4.5)
@@ -635,7 +641,7 @@ def ingest_json_file(
         members_unit=members_unit,
         local_day_start_utc=local_day_start_utc,
         step_horizon_hours=step_horizon_hours,
-        ingest_backend=ingest_backend,
+        **contract_evidence,
     )
 
     # D1+D3: drift_replace promotes the verb to REPLACE when manifest_sha
@@ -661,7 +667,13 @@ def ingest_json_file(
              source_run_id, release_calendar_key, source_cycle_time,
              source_release_time, source_available_at, training_allowed, causality_status,
              boundary_ambiguous, ambiguous_member_count, manifest_hash, provenance_json,
-             members_unit, local_day_start_utc, step_horizon_hours, ingest_backend)
+             members_unit, local_day_start_utc, step_horizon_hours, city_timezone,
+             settlement_source_type, settlement_station_id, settlement_unit,
+             settlement_rounding_policy, bin_grid_id, bin_schema_version,
+             forecast_window_start_utc, forecast_window_end_utc,
+             forecast_window_start_local, forecast_window_end_local,
+             forecast_window_local_day_overlap_hours, forecast_window_attribution_status,
+             contributes_to_target_extrema, forecast_window_block_reasons_json)
             VALUES
             (:city, :target_date, :temperature_metric, :physical_quantity, :observation_field,
              :issue_time, :valid_time, :available_at, :fetch_time, :lead_hours,
@@ -669,7 +681,13 @@ def ingest_json_file(
              :source_run_id, :release_calendar_key, :source_cycle_time,
              :source_release_time, :source_available_at, :training_allowed, :causality_status,
              :boundary_ambiguous, :ambiguous_member_count, :manifest_hash, :provenance_json,
-             :members_unit, :local_day_start_utc, :step_horizon_hours, :ingest_backend)
+             :members_unit, :local_day_start_utc, :step_horizon_hours, :city_timezone,
+             :settlement_source_type, :settlement_station_id, :settlement_unit,
+             :settlement_rounding_policy, :bin_grid_id, :bin_schema_version,
+             :forecast_window_start_utc, :forecast_window_end_utc,
+             :forecast_window_start_local, :forecast_window_end_local,
+             :forecast_window_local_day_overlap_hours, :forecast_window_attribution_status,
+             :contributes_to_target_extrema, :forecast_window_block_reasons_json)
             """,
             row,
         )

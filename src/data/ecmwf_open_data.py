@@ -77,15 +77,18 @@ DOWNLOAD_SCRIPT = FIFTY_ONE_ROOT / "scripts" / "download_ecmwf_open_ens.py"
 EXTRACT_SCRIPT = FIFTY_ONE_ROOT / "scripts" / "extract_open_ens_localday.py"
 INGEST_SCRIPT_DIR = PROJECT_ROOT / "scripts"
 
-# Open Data ships hourly steps; we want every 3h boundary up to 240h
-# (inclusive) to cover lead 0..10 days.
+# Open Data ships hourly steps; we want every 3h boundary up to 279h
+# (inclusive) to cover the configured D+10 city-local calendar-day contract
+# horizon across UTC-positive and UTC-negative cities (LOW 282h authority) using
+# the 3h-native stride from A1+3h authority.
 #
-# Authority: architecture/zeus_grid_resolution_authority_2026_05_07.yaml A1+3h
+# Authority: architecture/zeus_grid_resolution_authority_2026_05_07.yaml A1+3h (stride)
+#            LOW 282h horizon (covers UTC-positive cities at D+10 boundary)
 # ECMWF Open Data `enfo` stream no longer serves mx2t6/mn2t6 (6h aggregations).
 # The stream now serves mx2t3/mn2t3 (3h aggregations) as the native product.
 # We fetch 3h-native and let calibration learn the 3h→6h envelope mapping
 # downstream. We do NOT re-aggregate to 6h at fetch time (forbidden_patterns).
-STEP_HOURS = list(range(3, 243, 3))  # 3, 6, …, 240 — max 240h matches live_max_step_hours in source_release_calendar.yaml
+STEP_HOURS = list(range(3, 282, 3))  # 3, 6, …, 279 — 3h stride (A1+3h) + 282h horizon (LOW)
 
 # Track config — local to this module so the daemon's ingest knob is one
 # clean dict rather than two parallel param lists.
