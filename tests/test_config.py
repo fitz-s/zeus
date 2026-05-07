@@ -26,7 +26,7 @@ from src.config import (
     ensemble_unimodal_range_epsilon,
     get_mode,
     load_cities,
-    mode_state_path,
+    runtime_state_path,
     sizing_defaults,
 )
 from src.contracts.settlement_semantics import SettlementSemantics
@@ -36,14 +36,13 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_get_mode_is_live_constant_not_env_authority(monkeypatch):
-    monkeypatch.setenv("ZEUS_MODE", "paper")
+    monkeypatch.setenv("ZEUS_MODE", "legacy_env")
 
     assert get_mode() == "live"
 
 
-def test_mode_state_path_rejects_non_live_runtime_modes():
-    with pytest.raises(ValueError, match="runtime state is live-only"):
-        mode_state_path("status_summary.json", mode="paper")
+def test_runtime_state_path_is_code_authoritative():
+    assert runtime_state_path("status_summary.json") == PROJECT_ROOT / "state" / "status_summary.json"
 
 
 def test_settings_mode_key_is_legacy_optional(tmp_path):
@@ -56,10 +55,8 @@ def test_settings_mode_key_is_legacy_optional(tmp_path):
 
 
 def test_settings_missing_key_raises():
-    # 2026-05-04: capital_base_usd was removed from required keys; pick any
-    # other required key to demonstrate that a config missing required keys
-    # still raises. Using "discovery" (still required) ensures the partial
-    # config below is genuinely missing other required sections.
+    # 2026-05-04: fixed config-bankroll authority was removed from required
+    # keys; use a still-required key to prove missing required sections fail.
     with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
         json.dump({"discovery": {}}, f)
         f.flush()

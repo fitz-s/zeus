@@ -353,7 +353,7 @@ class TestRBSSavePortfolioDegradedRoundtrip:
 
         degraded = PortfolioState(
             positions=[],
-            bankroll=150.0,
+            bankroll=211.37,
             portfolio_loader_degraded=True,
             authority="degraded",
         )
@@ -369,7 +369,7 @@ class TestRBSSavePortfolioDegradedRoundtrip:
         assert data["positions"] == [], (
             f"R-BS.1: positions mangled on degraded save. Got: {data['positions']}"
         )
-        assert data["bankroll"] == 150.0, (
+        assert data["bankroll"] == 211.37, (
             f"R-BS.1: bankroll mangled on degraded save. Got: {data['bankroll']}"
         )
 
@@ -389,7 +389,7 @@ class TestRBSSavePortfolioDegradedRoundtrip:
 
         degraded = PortfolioState(
             positions=[],
-            bankroll=150.0,
+            bankroll=211.37,
             portfolio_loader_degraded=True,
             authority="degraded",
         )

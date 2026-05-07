@@ -1,6 +1,6 @@
 # Created: 2026-03-30
-# Last reused/audited: 2026-04-23
-# Authority basis: midstream verdict v2 2026-04-23 (docs/to-do-list/zeus_midstream_fix_plan_2026-04-23.md T1.a midstream guardian panel)
+# Last reused/audited: 2026-05-05
+# Authority basis: midstream verdict v2 2026-04-23; object-meaning invariance Wave10 cycle_runner ChainState enum/string boundary.
 """Cross-module invariant tests.
 
 These tests verify that modifications to one module's output are
@@ -16,6 +16,83 @@ import pytest
 
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
+
+
+def _ensure_sklearn_stub_for_cycle_runner_import() -> None:
+    try:
+        from sklearn.linear_model import LogisticRegression as _LogisticRegression  # noqa: F401
+        return
+    except ModuleNotFoundError:
+        pass
+
+    import types
+
+    sklearn = types.ModuleType("sklearn")
+    linear_model = types.ModuleType("sklearn.linear_model")
+
+    class LogisticRegression:
+        def __init__(self, *args, **kwargs):
+            self.args = args
+            self.kwargs = kwargs
+
+        def fit(self, X, y):
+            return self
+
+        def predict_proba(self, X):
+            return [[0.5, 0.5] for _ in range(len(X))]
+
+    linear_model.LogisticRegression = LogisticRegression
+    sklearn.linear_model = linear_model
+    sys.modules.setdefault("sklearn", sklearn)
+    sys.modules.setdefault("sklearn.linear_model", linear_model)
+
+
+def test_cycle_runner_quarantine_gate_preserves_chain_state_enum_meaning():
+    """Cycle entry blocking must treat ChainState enum and wire strings identically."""
+    _ensure_sklearn_stub_for_cycle_runner_import()
+
+    from src.contracts.semantic_types import ChainState
+    from src.engine.cycle_runner import _discovery_gates_allow_entries, _has_quarantined_positions
+    from src.riskguard.risk_level import RiskLevel
+    from src.state.portfolio import PortfolioState, Position
+
+    def _position(trade_id: str, chain_state: object) -> Position:
+        return Position(
+            trade_id=trade_id,
+            market_id="m1",
+            city="NYC",
+            cluster="NYC",
+            target_date="2026-04-01",
+            bin_label="39-40°F",
+            direction="buy_yes",
+            chain_state=chain_state,
+        )
+
+    quarantined = _position("chain-state-enum", "quarantined")
+    expired = _position("chain-state-expired", ChainState.QUARANTINE_EXPIRED)
+    synced = _position("chain-state-synced", ChainState.SYNCED)
+    fill_quarantined = _position("fill-quarantine", ChainState.SYNCED)
+    fill_quarantined.state = "quarantined"
+
+    assert quarantined.chain_state is ChainState.QUARANTINED
+    assert _has_quarantined_positions(PortfolioState(positions=[quarantined])) is True
+    assert _has_quarantined_positions(PortfolioState(positions=[expired])) is True
+    assert _has_quarantined_positions(PortfolioState(positions=[fill_quarantined])) is True
+    assert _has_quarantined_positions(PortfolioState(positions=[synced])) is False
+
+    green_gate = {"entry": {"allow_submit": True}}
+    assert _discovery_gates_allow_entries(
+        RiskLevel.GREEN,
+        green_gate,
+        green_gate,
+        has_quarantine=False,
+    ) is True
+    assert _discovery_gates_allow_entries(
+        RiskLevel.GREEN,
+        green_gate,
+        green_gate,
+        has_quarantine=True,
+    ) is False
 
 
 def test_calibration_pairs_use_same_bias_correction_as_live():

@@ -207,7 +207,7 @@ class TestMaterializePositionGate:
             agreement="AGREE",
             edge_context=SimpleNamespace(p_posterior=0.6),
         )
-        portfolio = SimpleNamespace(positions=[], effective_bankroll=150.0)
+        portfolio = SimpleNamespace(positions=[], effective_bankroll=211.37)
         artifact = SimpleNamespace(add_trade=lambda p: None, add_no_trade=lambda p: None)
         tracker = SimpleNamespace(record_entry=lambda pos: None)
         summary = {"candidates": 0, "trades": 0, "no_trades": 0}
@@ -245,7 +245,7 @@ class TestMaterializePositionGate:
             is_strategy_enabled=lambda strategy_name: True,
             _classify_edge_source=lambda mode, edge_obj: "center_buy",
             Position=_FakePosition,
-            settings=SimpleNamespace(mode="paper"),
+            settings=SimpleNamespace(mode="live"),
             logger=MagicMock(),
             _utcnow=lambda: datetime(2026, 4, 3, 0, 5, tzinfo=timezone.utc),
             DiscoveryMode=DiscoveryMode,
@@ -261,9 +261,9 @@ class TestMaterializePositionGate:
             SimpleNamespace(),
             DiscoveryMode.UPDATE_REACTION,
             summary,
-            150.0,
+            211.37,
             datetime(2026, 4, 3, 0, 0, tzinfo=timezone.utc),
-            env="paper",
+            env="live",
             deps=deps,
         )
         return {"portfolio": portfolio, "materialize_calls": materialize_calls}
@@ -439,7 +439,7 @@ class TestWarningSurfaces:
         )
 
         from src.state.portfolio import Position
-        portfolio = SimpleNamespace(positions=[], effective_bankroll=150.0)
+        portfolio = SimpleNamespace(positions=[], effective_bankroll=211.37)
         artifact = SimpleNamespace(add_trade=lambda p: None, add_no_trade=lambda p: None)
         tracker = SimpleNamespace(record_entry=lambda pos: None)
         summary = {"candidates": 0, "trades": 0, "no_trades": 0}
@@ -469,7 +469,7 @@ class TestWarningSurfaces:
             is_strategy_enabled=lambda strategy_name: True,
             _classify_edge_source=lambda mode, edge_obj: "center_buy",
             Position=Position,
-            settings=SimpleNamespace(mode="paper"),
+            settings=SimpleNamespace(mode="live"),
             logger=MagicMock(),
             _utcnow=lambda: datetime(2026, 4, 3, 0, 5, tzinfo=timezone.utc),
             DiscoveryMode=DiscoveryMode,
@@ -485,9 +485,9 @@ class TestWarningSurfaces:
             SimpleNamespace(),
             DiscoveryMode.UPDATE_REACTION,
             summary,
-            150.0,
+            211.37,
             datetime(2026, 4, 3, 0, 0, tzinfo=timezone.utc),
-            env="paper",
+            env="live",
             deps=deps,
         )
 

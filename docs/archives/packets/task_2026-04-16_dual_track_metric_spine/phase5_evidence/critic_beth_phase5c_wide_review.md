@@ -42,7 +42,7 @@ Authority chain re-loaded post-subagent-start. Peer-not-suspect throughout. Zero
 `_forecast_rows_for` SQL at L250-259 now filters `AND temperature_metric = ?` (explicit). Return shape at L283-297 includes `decision_reference_source: Literal["forecasts_table_synthetic"]`, `decision_time_status: Literal["SYNTHETIC_MIDDAY"]`, `agreement: Literal["UNKNOWN"]` on synthetic path. Historical-decision path at L363-364 emits `decision_reference_source: "historical_decision"`, `decision_time_status: "OK"`. Typed-fields contract matches team-lead ruling.
 
 ### L2 — Forbidden Moves
-- **Paper-mode resurrection**: zero new refs.
+- **Obsolete non-live runtime resurrection**: zero new refs.
 - **setdefault on authority**: not introduced.
 - **`decision_time` fabrication in synthetic path (B093 half-1)**: L286 now emits `"decision_time": None` — fabricated midday sentinel removed. R-AW-2 verifies. ✓
 

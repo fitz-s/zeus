@@ -22,7 +22,7 @@ any Polymarket side effect.
 ## 3. Domain model
 
 - `PolymarketV2Adapter`: one adapter seam for V2 placement/cancel/query.
-- `PolymarketV2AdapterProtocol`: the shared live/paper contract that T1 fake
+- `PolymarketV2AdapterProtocol`: the shared live/fake contract that T1 fake
   venues implement for parity tests without credentials, network I/O, or live
   side effects.
 - `VenueSubmissionEnvelope`: immutable submission provenance contract.
@@ -66,7 +66,7 @@ contract.
   unknown-side-effect inputs for executor recovery rather than safe replay.
 - V2 cancel and redeem capabilities are surfaced conservatively: unsupported or
   unverified SDK methods return typed failures instead of falling back to V1.
-- Paper-mode safety tests use `tests/fakes/polymarket_v2.py` to implement the
+- Fake-venue safety tests use `tests/fakes/polymarket_v2.py` to implement the
   same protocol and compare envelope / event schemas against a mock live
   adapter. This does not authorize live submit/cancel/redeem or cutover.
 

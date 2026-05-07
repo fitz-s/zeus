@@ -1,6 +1,6 @@
 # Created: 2026-04-07
-# Last reused/audited: 2026-04-30
-# Lifecycle: created=2026-04-07; last_reviewed=2026-04-30; last_reused=2026-04-30
+# Last reused/audited: 2026-05-06
+# Lifecycle: created=2026-04-07; last_reviewed=2026-05-06; last_reused=2026-05-06
 # Purpose: Protect pricing/probability/execution seam boundaries from bare-float authority drift.
 # Reuse: Reaudit against architecture/invariants.yaml and negative_constraints.yaml before extending.
 # Authority basis: docs/operations/task_2026-04-30_reality_semantics_refactor_package/PHASE_0A_EXECUTION_PLAN.md
@@ -13,7 +13,10 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from src.contracts.execution_intent import FinalExecutionIntent
+from src.contracts.execution_intent import (
+    FinalExecutionIntent,
+    _is_final_intent_recompute_input_name,
+)
 from src.contracts.execution_price import ExecutionPrice, ExecutionPriceContractError
 from src.contracts.expiring_assumption import ExpiringAssumption
 from src.contracts.hold_value import HoldValue, HoldValueCostDeclarationError
@@ -315,6 +318,11 @@ class TestNoBareFloatAtKellyBoundary:
             "cost_basis_id",
             "cost_basis_hash",
         } <= intent_fields
+        assert "forbidden recompute inputs" in inspect.getsource(
+            FinalExecutionIntent.assert_no_recompute_inputs
+        )
+        assert _is_final_intent_recompute_input_name("p_market_vector")
+        assert _is_final_intent_recompute_input_name("edge_context_json")
 
     def test_kelly_size_with_typed_entry_price(self):
         """Kelly accepts typed ExecutionPrice; evaluator owns the wrapping boundary."""

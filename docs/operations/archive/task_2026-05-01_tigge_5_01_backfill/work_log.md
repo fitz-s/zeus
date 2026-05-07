@@ -170,11 +170,11 @@ which fails provenance validation (self-referential, missing causality in the pr
 
 ```bash
 # mx2t6_high (after re-extract with causality fix)
-ZEUS_MODE=live python3 scripts/ingest_grib_to_snapshots.py \
+python3 scripts/ingest_grib_to_snapshots.py \
     --track mx2t6_high --date-from 2026-04-30 --date-to 2026-05-06
 
 # mn2t6_low
-ZEUS_MODE=live python3 scripts/ingest_grib_to_snapshots.py \
+python3 scripts/ingest_grib_to_snapshots.py \
     --track mn2t6_low --date-from 2026-04-30 --date-to 2026-05-06
 ```
 

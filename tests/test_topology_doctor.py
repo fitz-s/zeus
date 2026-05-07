@@ -1,9 +1,9 @@
 """Tests for topology_doctor compiled topology gates."""
 # Created: 2026-04-13
-# Last reused/audited: 2026-05-02
-# Authority basis: docs/operations/task_2026-05-02_review_crash_remediation/PLAN.md Slices 4-5
-# Lifecycle: created=2026-04-13; last_reviewed=2026-04-29; last_reused=2026-04-29
-# Purpose: Regression tests for topology_doctor lanes, CLI parity, and closeout compilation.
+# Last reused/audited: 2026-05-06
+# Authority basis: docs/operations/task_2026-05-02_review_crash_remediation/PLAN.md Slices 4-5; Wave17 object-meaning backfill guard repair.
+# Lifecycle: created=2026-04-13; last_reviewed=2026-05-06; last_reused=2026-05-06
+# Purpose: Regression tests for topology_doctor lanes, CLI parity, closeout compilation, and dangerous script manifest guards.
 # Reuse: Use targeted -k selectors for the lane being changed; inspect current manifest law first.
 
 import pytest
@@ -3078,6 +3078,103 @@ def test_scripts_mode_applies_diagnostic_rules_to_report_writers(monkeypatch):
     assert any(issue.code == "script_diagnostic_forbidden_write_target" for issue in result.issues)
 
 
+def test_backfill_outcome_fact_manifest_declares_legacy_apply_guard():
+    manifest = topology_doctor.load_script_manifest()
+    entry = manifest["scripts"]["backfill_outcome_fact.py"]
+
+    assert entry["class"] == "repair"
+    assert entry["dangerous_if_run"] is True
+    assert entry["dry_run_default"] is True
+    assert entry["apply_flag"] == "--apply"
+    assert entry["target_db"] == "state/zeus.db"
+    assert entry["write_targets"] == ["state/zeus.db"]
+    assert "legacy_lifecycle_projection_not_settlement_authority" in entry["promotion_barrier"]
+    assert "--confirm-legacy-outcome-fact-backfill" in entry["canonical_command"]
+
+
+def test_backfill_outcome_fact_defaults_to_dry_run(tmp_path):
+    from scripts import backfill_outcome_fact
+
+    db_path = tmp_path / "legacy.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """
+        CREATE TABLE outcome_fact (
+            position_id TEXT PRIMARY KEY,
+            strategy_key TEXT,
+            entered_at TEXT,
+            settled_at TEXT,
+            exit_reason TEXT,
+            decision_snapshot_id TEXT,
+            pnl REAL,
+            outcome INTEGER
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE chronicle (
+            trade_id TEXT,
+            timestamp TEXT,
+            event_type TEXT,
+            details_json TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE position_events_legacy (
+            runtime_trade_id TEXT,
+            timestamp TEXT,
+            strategy TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO chronicle (
+            trade_id, timestamp, event_type, details_json
+        ) VALUES (
+            'legacy-pos', '2026-04-01T23:00:00Z', 'SETTLEMENT',
+            '{"pnl": 4.25, "outcome": 1, "decision_snapshot_id": "snap-legacy", "strategy": "center_buy"}'
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO position_events_legacy (
+            runtime_trade_id, timestamp, strategy
+        ) VALUES ('legacy-pos', '2026-04-01T12:00:00Z', 'center_buy')
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    with redirect_stdout(StringIO()):
+        summary = backfill_outcome_fact.backfill(db_path=db_path)
+
+    conn = sqlite3.connect(db_path)
+    count = conn.execute("SELECT COUNT(*) FROM outcome_fact").fetchone()[0]
+    conn.close()
+
+    assert summary["status"] == "dry_run"
+    assert summary["dry_run"] is True
+    assert summary["inserted"] == 1
+    assert summary["authority_scope"] == "legacy_lifecycle_projection_not_settlement_authority"
+    assert count == 0
+
+
+def test_backfill_outcome_fact_missing_db_does_not_create_file(tmp_path):
+    from scripts import backfill_outcome_fact
+
+    db_path = tmp_path / "missing.db"
+
+    summary = backfill_outcome_fact.backfill(db_path=db_path)
+
+    assert summary["status"] == "error_missing_db"
+    assert not db_path.exists()
+
+
 def test_scripts_mode_rejects_long_lived_one_off_script_name(monkeypatch):
     manifest = topology_doctor.load_script_manifest()
     manifest["scripts"]["scratch_probe.py"] = {"class": "utility"}
@@ -4567,6 +4664,25 @@ def test_runtime_claims_appear_in_route_card_and_digest_inputs():
     assert digest["typed_runtime_inputs"]["claims"] == ["admission_valid"]
 
 
+def test_script_route_admits_real_script_and_matching_test_paths():
+    digest = topology_doctor.build_digest(
+        "add or change script: evaluate_calibration_transfer_oos OOS calibration transfer evidence writer",
+        [
+            "scripts/evaluate_calibration_transfer_oos.py",
+            "tests/test_evaluate_calibration_transfer_oos.py",
+            "architecture/script_manifest.yaml",
+            "architecture/naming_conventions.yaml",
+        ],
+        intent="add or change script",
+        write_intent="edit",
+    )
+
+    assert digest["profile"] == "add or change script"
+    assert digest["admission"]["status"] == "admitted"
+    assert "scripts/evaluate_calibration_transfer_oos.py" in digest["admission"]["admitted_files"]
+    assert "tests/test_evaluate_calibration_transfer_oos.py" in digest["admission"]["admitted_files"]
+
+
 def test_runtime_route_card_explains_generic_source_canary_probe():
     digest = topology_doctor.build_digest(
         "change source freshness handling for provider hot-swap for Paris canary readiness only, no live execution",
@@ -5131,6 +5247,19 @@ def test_runtime_route_card_types_capsule_persistence_target():
     assert card["persistence_target"] == "final_response"
     assert card["suggested_next_command"] is None
     assert card["why_not_admitted"] == []
+
+
+def test_runtime_route_card_admits_capsule_improvement_backlog_target():
+    digest = topology_doctor.build_digest(
+        "direct operation feedback capsule: record project-level topology improvement insight",
+        ["architecture/improvement_backlog.yaml"],
+        intent="direct operation feedback capsule",
+        write_intent="edit",
+    )
+
+    assert digest["profile"] == "direct operation feedback capsule"
+    assert digest["admission"]["status"] == "admitted"
+    assert "architecture/improvement_backlog.yaml" in digest["admission"]["admitted_files"]
 
 
 def test_runtime_route_card_types_context_worklog_persistence_target():
@@ -5907,12 +6036,15 @@ def test_task_boot_profiles_mode_validates_semantic_profiles():
     manifest = topology_doctor.load_task_boot_profiles()
     profile_ids = {profile["id"] for profile in manifest["profiles"]}
     source_profile = next(profile for profile in manifest["profiles"] if profile["id"] == "source_routing")
+    agent_runtime = next(profile for profile in manifest["profiles"] if profile["id"] == "agent_runtime")
 
     assert_topology_ok(result)
     assert set(manifest["required_task_classes"]) == profile_ids
     assert "docs/operations/current_source_validity.md" in source_profile["current_fact_surfaces"]
     assert "api_returns_data_not_settlement_correct_source" in source_profile["fatal_misreads"]
     assert source_profile["graph_usage"]["authority_status"] == "derived_not_authority"
+    assert "architecture/topology.yaml" in agent_runtime["required_reads"]
+    assert all("docs/operations/_archive/" not in path for path in agent_runtime["required_reads"])
 
 
 def test_fatal_misreads_mode_validates_semantic_antibodies():

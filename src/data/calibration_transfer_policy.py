@@ -471,19 +471,29 @@ def evaluate_calibration_transfer_policy(
     forecast_data_version: str,
     live_promotion_approved: bool = False,
 ) -> CalibrationTransferDecision:
+    policy_id = config.calibration_policy_id.value
     if os.environ.get("ZEUS_CALIBRATION_TRANSFER_OOS_EVAL_ENABLED", "false").lower() == "true":
         # Flag is on — this legacy path should not be reached except via the
-        # _with_evidence fallback.  If a caller still calls legacy directly,
-        # emit a DeprecationWarning so operators can migrate the callsite.
+        # _with_evidence fallback. If a caller still calls legacy directly,
+        # refuse to honor live_promotion_approved: the evidence row is the
+        # authority once the OOS gate is active.
         warnings.warn(
             "evaluate_calibration_transfer_policy called directly while "
             "ZEUS_CALIBRATION_TRANSFER_OOS_EVAL_ENABLED=true. live_promotion_approved "
-            "is silently ignored by the evidence-gated path. Migrate caller to "
+            "is ignored; direct legacy calls fail closed. Migrate caller to "
             "evaluate_calibration_transfer_policy_with_evidence.",
             DeprecationWarning,
             stacklevel=2,
         )
-    policy_id = config.calibration_policy_id.value
+        return CalibrationTransferDecision(
+            status="BLOCKED",
+            reason_codes=("CALIBRATION_TRANSFER_LEGACY_PATH_DISABLED",),
+            policy_id=policy_id,
+            forecast_data_version=forecast_data_version,
+            calibration_data_version=None,
+            live_promotion_approved=False,
+            note="legacy_disabled_by_oos_evidence_gate",
+        )
     if policy_id != EntryForecastCalibrationPolicyId.ECMWF_OPEN_DATA_USES_TIGGE_LOCALDAY_CAL_V1.value:
         return CalibrationTransferDecision(
             status="BLOCKED",

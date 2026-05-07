@@ -49,7 +49,7 @@ R-AU lands per-spec cross-check inside `_process_snapshot_v2` at L216-222: `if d
 
 ### L2 — Forbidden Moves
 - **Kelvin silent-default**: not touched in fix-pack (covered by 5B contract).
-- **paper-mode resurrection**: `grep -n 'paper' <touched files>` returns zero new paper references. ✓
+- **obsolete non-live runtime resurrection**: `grep -n '<obsolete_non_live>' <touched files>` returns zero new obsolete non-live runtime references. ✓
 - **setdefault on authority**: R-AQ adds `if mode is None: raise ModeMismatchError` as first statement in `read_mode_truth_json` — caller-arg is authority. ✓
 - **bare entry_price at Kelly seam**: out of scope.
 

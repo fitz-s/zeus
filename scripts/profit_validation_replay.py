@@ -44,6 +44,7 @@ logger = logging.getLogger(__name__)
 
 LEGACY_DIAGNOSTIC_COHORT = "legacy_diagnostic"
 CORRECTED_ECONOMICS_COHORT = CORRECTED_EXECUTABLE_PRICING_SEMANTICS_VERSION
+LEGACY_EXIT_TRIGGER_REPLAY_COHORT = "legacy_exit_trigger_diagnostic_only"
 _FILL_GRADE_AUTHORITIES = frozenset({
     FILL_AUTHORITY_VENUE_CONFIRMED_PARTIAL,
     FILL_AUTHORITY_VENUE_CONFIRMED_FULL,
@@ -104,6 +105,18 @@ def require_single_exit_economics_cohort(exit_records: list[dict]) -> str:
     return next(iter(cohorts), LEGACY_DIAGNOSTIC_COHORT)
 
 
+def require_legacy_exit_trigger_replay_cohort(economics_cohort: str) -> str:
+    """Gate the legacy exit-trigger simulator away from corrected semantics."""
+    if economics_cohort == CORRECTED_ECONOMICS_COHORT:
+        raise ValueError(
+            "corrected executable exit cohort cannot be replayed through "
+            "legacy exit_triggers semantics without executable bid/depth authority"
+        )
+    if economics_cohort != LEGACY_DIAGNOSTIC_COHORT:
+        raise ValueError(f"unknown profit replay economics cohort: {economics_cohort}")
+    return LEGACY_EXIT_TRIGGER_REPLAY_COHORT
+
+
 def _corrected_entry_economics(exit_record: dict) -> tuple[float, float] | None:
     if exit_economics_cohort(exit_record) != CORRECTED_ECONOMICS_COHORT:
         return None
@@ -126,6 +139,7 @@ def run_profit_validation_replay():
     portfolio = load_portfolio()
     conn = get_connection()
     economics_cohort = require_single_exit_economics_cohort(portfolio.recent_exits)
+    exit_trigger_replay_cohort = require_legacy_exit_trigger_replay_cohort(economics_cohort)
     
     logger.info(f"Loaded {len(portfolio.recent_exits)} recent exits for historical simulation.")
     
@@ -144,6 +158,7 @@ def run_profit_validation_replay():
         "gross_delta_all_analyzed": 0.0,
         "gross_delta_high_confidence_only": 0.0,
         "economics_cohort": economics_cohort,
+        "exit_trigger_replay_cohort": exit_trigger_replay_cohort,
     }
     
     for exit_record in portfolio.recent_exits:
@@ -343,6 +358,7 @@ def run_profit_validation_replay():
     logger.info(f"Gross Advantage vs V1 Path (All): ${stats['gross_delta_all_analyzed']:.2f}")
     logger.info(f"Gross Advantage vs V1 Path (High Conf): ${stats['gross_delta_high_confidence_only']:.2f}")
     logger.info(f"Economics Cohort: {stats['economics_cohort']}")
+    logger.info(f"Exit Trigger Replay Cohort: {stats['exit_trigger_replay_cohort']}")
 
     # Generate Report File
     report_path = PROJECT_ROOT / "docs" / "reports" / "shadow_replay_report.md"
@@ -357,12 +373,16 @@ def run_profit_validation_replay():
             f.write(f"- Low Confidence Reconstructed: {stats['low_confidence_reconstructed']}\n")
             f.write(f"- Fully Skipped Missing Attributes: {stats['fully_skipped']}\n")
             f.write(f"- Economics Cohort: {stats['economics_cohort']}\n")
+            f.write(f"- Exit Trigger Replay Cohort: {stats['exit_trigger_replay_cohort']}\n")
             f.write(f"\n## Metrics of Decision Output\n")
             f.write(f"- V1 False-Stops Nullified (Position recovered): {stats['v1_false_stops']}\n")
             f.write(f"- V2 Pre-emptive Loss Mitigations (Cut ahead of bleed): {stats['v2_early_cut_losses']}\n")
             f.write(f"### Estimated Gross Advantage Delta (All Analyzed): **${stats['gross_delta_all_analyzed']:.2f}**\n")
             f.write(f"### Estimated Gross Advantage Delta (High Confidence Only): **${stats['gross_delta_high_confidence_only']:.2f}**\n\n")
-            f.write(f"> PR-B.1 Cleanup Signed. False heuristics removed for absolute measurement.\n")
+            f.write(
+                f"> Diagnostic-only legacy exit-trigger replay. No live, learning, "
+                f"calibration, or corrected-economics promotion authority.\n"
+            )
     except Exception as e:
         logger.error(f"Failed to write shadow artifact: {e}")
 

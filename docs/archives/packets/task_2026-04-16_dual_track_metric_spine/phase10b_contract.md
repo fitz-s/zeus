@@ -9,7 +9,7 @@
 
 | Finding | v1 | v2 correction |
 |---|---|---|
-| C1 — B067 `db.py:2571-2745` wrong + "hardcoded env='live' literal" false claim | S6 in scope | **DROPPED**. Grep-verified: `db.py:2265` reads `getattr(pos, "env", "live")` — pos.env with fallback. Paper mode retired → "live" default is correct. Bug description was stale audit memory. |
+| C1 — B067 `db.py:2571-2745` wrong + "hardcoded env='live' literal" false claim | S6 in scope | **DROPPED**. Grep-verified: `db.py:2265` reads `getattr(pos, "env", "live")` — pos.env with fallback. Obsolete non-live runtime retired → "live" default is correct. Bug description was stale audit memory. |
 | C2 — B074 `portfolio.py:741-744` wrong citation; actual sites L789/L855 architect-gated YELLOW | S7 in scope | **DROPPED**. Comment at L849-854 explicitly marks this as architect-decided YELLOW preserving provenance. Not a peacetime fix. Defer to P10C or architect packet. |
 | M1 — S4 "Activate pre-existing stub" — stub is already live testing different semantics | R-CO.1 "activate" | Renamed to **EXTEND**. `test_fdr_family_key_is_canonical` is already live at `tests/test_dual_track_law_stubs.py:195-217` testing scope separation (`h_id != e_id`). New semantics: add metric-aware assertion alongside. |
 | M2 — S2 R4 consumer list overestimated; FDR + Kelly are NOT consumers | "evaluator + FDR + Kelly" | **Singleton**: only `src/engine/evaluator.py` (L1446/L1466/L1529). Plus `scripts/bridge_oracle_to_calibration.py` (one-shot bridge). Blast radius ≤ 3 files. |

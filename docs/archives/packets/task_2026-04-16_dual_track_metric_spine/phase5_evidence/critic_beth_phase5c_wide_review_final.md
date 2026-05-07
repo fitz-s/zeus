@@ -51,7 +51,7 @@ $ grep -n "def run_replay|temperature_metric" src/engine/replay.py | tail -5
 Typed status fields lock: `decision_reference_source ∈ {"historical_decision","forecasts_table_synthetic"}`, `decision_time_status ∈ {"OK","SYNTHETIC_MIDDAY","UNAVAILABLE"}`, `agreement ∈ {"AGREE","DISAGREE","UNKNOWN"}`. Synthetic path at L286-297 correctly emits `agreement="UNKNOWN"`, `decision_time=None` (no fabricated midday). Historical-decision path at L363-364 emits `decision_reference_source="historical_decision"`, `decision_time_status="OK"`. Contract matches handoff §"Phase 5C scope" item 1. PASS.
 
 ## L2 — Forbidden Moves
-- Paper-mode resurrection: zero new refs.
+- Obsolete non-live runtime resurrection: zero new refs.
 - `decision_time` fabrication: removed at L286. R-AW-2 verifies.
 - `setdefault` on authority: not introduced.
 - JSON-before-commit (DT#1): out of scope.

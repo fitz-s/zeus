@@ -5,7 +5,7 @@ to audit *semantic correctness* of the trading system's internal state:
 
 - Event table parity (canonical vs legacy exit events)
 - Position lifecycle phase staleness
-- Mode/env contamination in canonical rows
+- Runtime-state contamination in canonical rows
 - Portfolio loader data-source integrity
 - Trade activity liveness
 
@@ -24,7 +24,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.config import STATE_DIR, get_mode, mode_state_path
+from src.config import STATE_DIR, get_mode, runtime_state_path
 
 
 # Thresholds
@@ -265,7 +265,7 @@ def check_portfolio_loader(conn: sqlite3.Connection) -> dict:
     result["details"]["canonical_open_positions"] = canonical_count
 
     # Count JSON positions
-    json_path = mode_state_path("positions.json")
+    json_path = runtime_state_path("positions.json")
     json_count = 0
     if json_path.exists():
         try:
@@ -307,7 +307,7 @@ def check_trade_liveness() -> dict:
     result = {"check": "trade_activity_liveness", "ok": True, "details": {}}
     mode = _mode()
 
-    status_path = mode_state_path("status_summary.json")
+    status_path = runtime_state_path("status_summary.json")
     if not status_path.exists():
         result["details"]["note"] = "status_summary missing"
         return result

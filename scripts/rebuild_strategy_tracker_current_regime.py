@@ -14,13 +14,13 @@ PROJECT_ROOT = Path(__file__).parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.config import mode_state_path
+from src.config import runtime_state_path
 from src.state.strategy_tracker import StrategyTracker, load_tracker, save_tracker
-from src.state.truth_files import current_mode, read_mode_truth_json
+from src.state.truth_files import current_runtime_state, read_runtime_truth_json
 
 
-def _history_path(mode: str) -> Path:
-    return PROJECT_ROOT / "state" / f"strategy_tracker-{mode}-history.json"
+def _history_path() -> Path:
+    return PROJECT_ROOT / "state" / "strategy_tracker-live-history.json"
 
 
 def _collect_regime_start(portfolio: dict) -> str:
@@ -38,10 +38,10 @@ def _collect_regime_start(portfolio: dict) -> str:
     return min(timestamps) if timestamps else ""
 
 
-def run(mode: str | None = None) -> dict:
-    mode = current_mode(mode)
-    tracker_path = mode_state_path("strategy_tracker.json", mode)
-    history_path = _history_path(mode)
+def run() -> dict:
+    runtime_state = current_runtime_state()
+    tracker_path = runtime_state_path("strategy_tracker.json")
+    history_path = _history_path()
 
     existing_raw = json.loads(tracker_path.read_text()) if tracker_path.exists() else None
     if existing_raw is not None:
@@ -59,7 +59,7 @@ def run(mode: str | None = None) -> dict:
         history_payload["accounting"] = history_accounting
         history_path.write_text(json.dumps(history_payload, ensure_ascii=False, indent=2))
 
-    portfolio, _truth = read_mode_truth_json("positions.json", mode=mode)
+    portfolio, _truth = read_runtime_truth_json("positions.json")
     tracker = StrategyTracker()
 
     for row in portfolio.get("positions", []):
@@ -78,7 +78,7 @@ def run(mode: str | None = None) -> dict:
 
     counts = {name: metrics.count() for name, metrics in tracker.strategies.items()}
     return {
-        "mode": mode,
+        "runtime_state": runtime_state,
         "tracker_path": str(tracker_path),
         "history_archive_path": str(history_path) if existing_raw is not None else None,
         "current_regime_started_at": tracker.accounting["current_regime_started_at"],

@@ -1,7 +1,7 @@
-# Lifecycle: created=2026-04-17; last_reviewed=2026-05-01; last_reused=2026-05-01
-# Purpose: Lock market_scanner provenance and source-contract drift behavior.
+# Lifecycle: created=2026-04-17; last_reviewed=2026-05-06; last_reused=2026-05-06
+# Purpose: Lock market_scanner provenance, source-contract drift behavior, and Venus diagnostic authority labels.
 # Reuse: Inspect src/data/market_scanner.py and scripts/watch_source_contract.py before relying on these assertions.
-# Authority basis: audit bug B017 (STILL_OPEN P1 SD-H), Fitz methodology constraint #4 "Data Provenance > Code Correctness"
+# Authority basis: audit bug B017 (STILL_OPEN P1 SD-H), Fitz methodology constraint #4 "Data Provenance > Code Correctness"; Wave16 object-meaning diagnostic authority repair.
 """B017 relationship tests: market_scanner cache must expose provenance.
 
 These tests pin the cross-module invariant:
@@ -2164,6 +2164,52 @@ class TestSourceContractGate:
                 "chain_state": "synced",
             }
         ]
+
+    def test_venus_sensing_report_labels_fact_tables_as_diagnostic_non_authority(self):
+        from scripts import venus_sensing_report
+
+        conn = sqlite3.connect(":memory:")
+        conn.execute(
+            """
+            CREATE TABLE outcome_fact (
+                position_id TEXT PRIMARY KEY,
+                decision_snapshot_id TEXT,
+                settled_at TEXT,
+                pnl REAL,
+                outcome INTEGER
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE execution_fact (
+                intent_id TEXT PRIMARY KEY,
+                terminal_exec_status TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO outcome_fact (
+                position_id, decision_snapshot_id, settled_at, pnl, outcome
+            ) VALUES ('pos-legacy', 'snap-legacy', '2026-04-01T12:00:00+00:00', 9.5, 1)
+            """
+        )
+        conn.execute(
+            "INSERT INTO execution_fact (intent_id, terminal_exec_status) VALUES ('intent-1', 'filled')"
+        )
+
+        report = venus_sensing_report._collect_fact_tables(conn)
+
+        assert report["outcome_fact"] == 1
+        assert report["execution_fact"] == 1
+        assert report["terminal_execution_fact_rows"] == 1
+        assert report["outcome_fact_authority_scope"] == "legacy_lifecycle_projection_not_settlement_authority"
+        assert report["outcome_fact_learning_eligible"] is False
+        assert report["outcome_fact_promotion_eligible"] is False
+        assert report["settlement_authority_ready_rows"] == 0
+        assert report["authority_status"] == "not_ready"
+        assert report["blocking_reasons"] == ["settlement_authority_ready_rows_missing"]
 
     def test_venus_sensing_report_flags_canonical_empty_legacy_active_conflict(self):
         from scripts import venus_sensing_report

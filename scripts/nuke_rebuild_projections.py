@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
 """Post-nuke projection verifier and rebuilder.
 
-Reads position_events from zeus-{mode}.db, folds each position's event
+Reads position_events from an explicitly provided Zeus DB, folds each position's event
 stream to compute the canonical terminal phase, and aligns
 position_current.phase to match. Also flags any residual duplicate events
 (bug #9 symptom) that the nuke step 2.3 should have removed.
 
 Usage:
-    python3 scripts/nuke_rebuild_projections.py --mode paper
-    python3 scripts/nuke_rebuild_projections.py --mode paper --dry-run
-    python3 scripts/nuke_rebuild_projections.py --mode live
+    python3 scripts/nuke_rebuild_projections.py --db-path state/zeus.db --dry-run
 
 Pre-conditions:
     - Daemons must be stopped (the script takes exclusive writes)
@@ -33,13 +31,11 @@ from collections import defaultdict
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-STATE_DIR = REPO_ROOT / "state"
 
 TERMINAL_PHASES = frozenset({"settled", "voided", "admin_closed", "quarantined"})
 
 
-def open_db(mode: str) -> sqlite3.Connection:
-    db_path = STATE_DIR / f"zeus-{mode}.db"
+def open_db(db_path: Path) -> sqlite3.Connection:
     if not db_path.exists():
         print(f"FATAL: {db_path} does not exist", file=sys.stderr)
         sys.exit(2)
@@ -131,10 +127,10 @@ def apply_phase_updates(
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--mode",
+        "--db-path",
+        type=Path,
         required=True,
-        choices=["paper", "live"],
-        help="Which zeus-{mode}.db to rebuild",
+        help="SQLite DB path to rebuild; no runtime-mode inference is performed",
     )
     parser.add_argument(
         "--dry-run",
@@ -143,8 +139,8 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    conn = open_db(args.mode)
-    print(f"== nuke_rebuild_projections mode={args.mode} dry_run={args.dry_run}")
+    conn = open_db(args.db_path)
+    print(f"== nuke_rebuild_projections db_path={args.db_path} dry_run={args.dry_run}")
 
     integrity = conn.execute("PRAGMA integrity_check").fetchone()[0]
     if integrity != "ok":

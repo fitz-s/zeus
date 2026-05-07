@@ -168,9 +168,9 @@ Tests: `test_bias_corrected_persisted_through_harvest`, `test_bias_corrected_fal
 **Note:** `direction_correct` deferred — can be derived from `market_bin_won + direction + entry_price` when needed; current `market_bin_won` / `position_profitable` split resolves the core ambiguity described in this gap.
 
 ### [FIXED] Control-plane gate drift was a stale summary projection, now cleared (2026-04-06)
-**Location:** `zeus/state/control_plane-paper.json`, `zeus/state/status_summary-paper.json`, status renderer
-**Problem (historical):** The rendered paper summary previously exposed a stale duplicate gate field for `opening_inertia` that disagreed with the control plane.
-**Resolution:** The current paper snapshot no longer shows that split-brain state. `status_summary-paper.json` no longer presents the old stale `strategy_summary.gated` conflict in the latest snapshot, and the canonical gate authority remains the control plane.
+**Location:** `zeus/state/control_plane-legacy.json`, `zeus/state/status_summary-legacy.json`, status renderer
+**Problem (historical):** The rendered legacy diagnostic summary previously exposed a stale duplicate gate field for `opening_inertia` that disagreed with the control plane.
+**Resolution:** The current legacy snapshot no longer shows that split-brain state. `status_summary-legacy.json` no longer presents the old stale `strategy_summary.gated` conflict in the latest snapshot, and the canonical gate authority remains the control plane.
 **Follow-up:** Keep the renderer deriving any future gate projections from the control plane only, and add a regression test if the duplicate field returns.
 
 ### [FIXED] Los Angeles Gamma discovery rejects explicit Milan conflicts (2026-04-13)
@@ -325,7 +325,7 @@ evidence, not an active remediation item.
 tracking was DB/event-derived and no longer wrote or trusted JSON projection
 authority; legacy JSON references were fixture/history hygiene.
 **Location:** `src/state/strategy_tracker.py`, legacy `strategy_tracker-*.json` artifacts.
-**Original problem:** `strategy_tracker-paper.json` could report `opening_inertia`
+**Original problem:** `strategy_tracker-legacy.json` could report `opening_inertia`
 cumulative PnL that was not reconstructible from durable DB/event truth.
 **Antibody deployed:** `StrategyTracker` is now a no-write canonical projection:
 `record_*` methods are no-op compatibility shims, `save_tracker()` does not
@@ -333,21 +333,21 @@ write disk, `load_tracker()` ignores legacy files, and `summary()` derives from
 `query_authoritative_settlement_rows()` / `position_events`.
 **Evidence:** `src/state/strategy_tracker.py` module contract and no-op
 `record_*` / `save_tracker()` implementations.
-**Residual:** Legacy `strategy_tracker-paper.json` references in tests or
+**Residual:** Legacy `strategy_tracker-legacy.json` references in tests or
 historical artifacts remain fixture/archive surfaces. They should not be used as
 runtime or wallet truth.
 
-### [CLOSED — 2026-04-30; archived from MITIGATED] Paper JSON fallback no longer becomes portfolio authority
+### [CLOSED — 2026-04-30; archived from MITIGATED] Legacy JSON fallback no longer becomes portfolio authority
 **Archived from active register:** 2026-04-30.
 **Archive rationale:** As of the 2026-04-30 archive cutover, portfolio loading
 was DB-first and degraded instead of promoting JSON; residual references were
 fixtures/history, not live authority.
 **Location:** `src/state/portfolio.py::load_portfolio`,
 `src/engine/cycle_runtime.py`, `src/riskguard/riskguard.py`.
-**Original problem (filed 2026-04-10):** Paper positions with missing token ids
+**Original problem (filed 2026-04-10):** Legacy positions with missing token ids
 could make canonical projection non-authoritative, after which
 `load_portfolio()` could fall back to stale JSON and let RiskGuard reason over a
-broken paper portfolio as if it were current truth.
+broken legacy portfolio as if it were current truth.
 **Antibody deployed:** `load_portfolio()` is DB-first. If the DB connection or
 projection is not authoritative, it returns a degraded `PortfolioState`
 (`authority="unverified"`, `portfolio_loader_degraded=True`) and suppresses new
@@ -357,7 +357,7 @@ quarantine evidence can still be rehydrated explicitly.
 `tests/test_runtime_guards.py::test_load_portfolio_db_connection_failure_ignores_corrupt_json_and_degrades`,
 `test_load_portfolio_treats_empty_projection_as_canonical_despite_legacy_json`,
 and `tests/test_truth_layer.py::test_load_portfolio_rejects_deprecated_state_file`.
-**Residual:** `positions-paper.json` remains in legacy fixtures/history and
+**Residual:** `positions-legacy.json` remains in legacy fixtures/history and
 truth-surface stale-status tests. Those references are not live portfolio
 authority and can be cleaned in a separate test/docs hygiene packet.
 
@@ -821,4 +821,3 @@ DAY0_CAPTURE has `max_hours_to_resolution` → `min_hours_to_resolution=0` is pa
 **Original problem:** PARTIAL exit status was observed but not materialized; local shares remained unchanged.
 **Structural closure:** T1C added `_apply_partial_exit_fill()` helper which now triggers on PARTIAL status, reducing `position.effective_shares`, updating `cost_basis_usd` with remaining-ratio adjustment, and marking `exit_state='sell_pending'`. Remaining unsold shares are queued for retry. Partial fills now reduce local exposure immediately.
 **Resolved by:** T1C (commit 72e58e3a); closure verified via test_exit_safety.py + test_lifecycle.py partial-fill coverage.
-

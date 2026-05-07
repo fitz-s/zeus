@@ -93,7 +93,7 @@ These bugs require Phase 5 deliverables that are currently in flight (authoritat
 
 - **B069 — ✅ RESOLVED** in Phase 5A commit `977d9ae` (absorbed into truth-authority spine).
 - **B073 — ✅ RESOLVED** in Phase 5A commit `977d9ae` (PortfolioState.authority field + 3 exit paths).
-- **B077 — ✅ RESOLVED** in Phase 5A commit `977d9ae` (ModeMismatchError + mode threading; Zeus stays live-only, paper retired antibody msg in place).
+- **B077 — ✅ RESOLVED** in Phase 5A commit `977d9ae` (ModeMismatchError + mode threading; Zeus stays live-only, obsolete non-live runtime retired antibody msg in place).
 - **B078 — ✅ RESOLVED** in Phase 5B commit (LEGACY_STATE_FILES gains `platt_models_low.json` + `calibration_pairs_low.json`; `build_truth_metadata`/`annotate_truth_payload` accept `temperature_metric` + `data_version` kwargs; fail-closed via `_LOW_LANE_FILES` frozenset when low-lane file lacks metric).
 - **B093 — ⏳ BIFURCATED**: half-1 (sentinel→typed status fields) rides 5C; half-2 (replay query source migration to `historical_forecasts_v2`) DEFERRED to Phase 7 (requires v2 populated).
 
@@ -117,14 +117,14 @@ Bug-fix agent can mark B069/B073/B077/B078 closed. B093 stays open pending Phase
 
 ### B077 — `read_mode_truth_json` ignores `mode` parameter
 - **File**: [src/state/truth_files.py#L101-L102](../../src/state/truth_files.py#L101).
-- **Failure mode today**: The function signature accepts `mode` but delegates to `read_truth_json(mode_state_path(filename))` without threading `mode` into path resolution or authority tagging. Live-vs-paper truth files can collide at the routing layer; a paper caller can be served live truth or vice versa.
+- **Failure mode today**: The function signature accepts `mode` but delegates to `read_truth_json(mode_state_path(filename))` without threading `mode` into path resolution or authority tagging. The historical issue was that caller intent and truth-file authority could collide at the routing layer, allowing a request outside live execution authority to receive live truth.
 - **Expected fix pattern**: Pass `mode` into `mode_state_path(filename, mode=mode)` and into the returned truth metadata (`truth["mode"]` must match the caller's `mode` argument, else raise `ModeMismatchError`). This is the SD-A "mode as first-class routing key" commitment.
 - **DT prerequisite**: Phase 5 SD-A mode-authority propagation (the mode field becomes strict-required on truth metadata).
-- **Verification-after-fix**: Test invokes `read_mode_truth_json("portfolio.json", mode="paper")` against a `live`-tagged file on disk and asserts `ModeMismatchError`; a second test confirms correct-mode reads still succeed and the returned metadata's `mode` round-trips.
+- **Verification-after-fix**: Test retired mode input against a `live`-tagged file on disk and assert `ModeMismatchError`; a second test confirms live reads still succeed and the returned metadata's authority label round-trips.
 
 ### B078 — Truth metadata registry is live-only; low historical lane has no entries
 - **File**: [src/state/truth_files.py#L46-L50](../../src/state/truth_files.py#L46), [L123-L125](../../src/state/truth_files.py#L123), [L174-L179](../../src/state/truth_files.py#L174) (legacy-archive and `LEGACY_STATE_FILES` plumbing).
-- **Failure mode today**: The registry knows `ACTIVE_MODES` for live/paper trading state but has no hooks for Phase 5 low-historical-lane truth files (`platt_models_low`, `calibration_pairs_low`). Phase 5 tools that write those artifacts have nowhere to record `generated_at` / `source_path` / `data_version`, so low-lane provenance dies at the filesystem boundary.
+- **Failure mode today**: The registry knows live trading state but has no hooks for Phase 5 low-historical-lane truth files (`platt_models_low`, `calibration_pairs_low`). Phase 5 tools that write those artifacts have nowhere to record `generated_at` / `source_path` / `data_version`, so low-lane provenance dies at the filesystem boundary.
 - **Expected fix pattern**: Extend `LEGACY_STATE_FILES` and `build_truth_metadata` to cover the new low-lane file set, with `temperature_metric` and `data_version` as required metadata keys. Reads must fail closed when these are missing for files under the low-historical prefix.
 - **DT prerequisite**: Phase 5 low historical lane file layout (defined by the Phase 5 commit that introduces the low-side artifacts).
 - **Verification-after-fix**: Test writes a low-historical-lane truth file, round-trips it through `annotate_truth_payload` / `read_truth_json`, and asserts `temperature_metric="low"` and `data_version` are preserved; a second test asserts a low-lane file missing `temperature_metric` fails closed.

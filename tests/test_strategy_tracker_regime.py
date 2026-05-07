@@ -3,7 +3,36 @@ import json
 from pathlib import Path
 
 import scripts.rebuild_strategy_tracker_current_regime as rebuild
+import src.state.db as db_module
 import src.state.strategy_tracker as strategy_tracker_module
+
+
+def test_strategy_tracker_summary_excludes_metric_unready_settlement_rows(monkeypatch):
+    monkeypatch.setattr(
+        db_module,
+        "query_authoritative_settlement_rows",
+        lambda *_args, **_kwargs: [
+            {
+                "trade_id": "legacy-settle",
+                "strategy": "shoulder_sell",
+                "pnl": 99.0,
+                "metric_ready": False,
+                "settlement_authority": "LEGACY_UNKNOWN",
+            },
+            {
+                "trade_id": "verified-settle",
+                "strategy": "center_buy",
+                "pnl": 4.2,
+                "metric_ready": True,
+                "settlement_authority": "VERIFIED",
+            },
+        ],
+    )
+
+    summary = strategy_tracker_module.StrategyTracker().summary(conn=object())
+
+    assert summary["shoulder_sell"] == {"trades": 0, "pnl": 0.0}
+    assert summary["center_buy"] == {"trades": 1, "pnl": 4.2}
 
 
 @pytest.mark.skip(reason="K1: strategy_tracker migrated to no-op; from_dict/datetime/regime tracking removed")
@@ -11,7 +40,7 @@ def test_rebuild_strategy_tracker_creates_current_regime_and_archives_history(tm
     state_dir = tmp_path / "state"
     state_dir.mkdir()
 
-    tracker_path = state_dir / "strategy_tracker-paper.json"
+    tracker_path = state_dir / "strategy_tracker.json"
     tracker_path.write_text(json.dumps({
         "strategies": {
             "opening_inertia": {
@@ -22,7 +51,7 @@ def test_rebuild_strategy_tracker_creates_current_regime_and_archives_history(tm
         }
     }))
 
-    positions_path = state_dir / "positions-paper.json"
+    positions_path = state_dir / "positions.json"
     positions_path.write_text(json.dumps({
         "positions": [
             {
@@ -48,24 +77,24 @@ def test_rebuild_strategy_tracker_creates_current_regime_and_archives_history(tm
                 "market_id": "real_market",
             }
         ],
-        "truth": {"mode": "paper"},
+        "truth": {"runtime_state": "live"},
     }))
 
     monkeypatch.setattr(rebuild, "PROJECT_ROOT", tmp_path)
-    monkeypatch.setattr(rebuild, "mode_state_path", lambda filename, mode: state_dir / f"{filename[:-5]}-{mode}.json")
+    monkeypatch.setattr(rebuild, "runtime_state_path", lambda filename: state_dir / filename)
     monkeypatch.setattr(
         rebuild,
-        "read_mode_truth_json",
-        lambda filename, mode=None: (json.loads(positions_path.read_text()), {"mode": "paper"}),
+        "read_runtime_truth_json",
+        lambda filename: (json.loads(positions_path.read_text()), {"runtime_state": "live"}),
     )
 
-    report = rebuild.run(mode="paper")
+    report = rebuild.run()
     rebuilt = json.loads(tracker_path.read_text())
-    history = json.loads((state_dir / "strategy_tracker-paper-history.json").read_text())
+    history = json.loads((state_dir / "strategy_tracker-live-history.json").read_text())
 
     assert report["includes_legacy_history"] is False
     assert report["current_regime_started_at"] == "2026-03-31T16:49:28.503175+00:00"
-    assert rebuilt["accounting"]["performance_headline_authority"].endswith("status_summary-paper.json")
+    assert rebuilt["accounting"]["performance_headline_authority"].endswith("status_summary.json")
     assert rebuilt["accounting"]["tracker_role"] == "compatibility_surface"
     assert rebuilt["accounting"]["authority_mode"] == "non_authority_compatibility"
     assert rebuilt["accounting"]["includes_legacy_history"] is False
@@ -199,4 +228,4 @@ def test_tracker_from_dict_normalizes_legacy_compatibility_metadata():
 
     assert tracker.accounting["tracker_role"] == "compatibility_surface"
     assert tracker.accounting["authority_mode"] == "non_authority_compatibility"
-    assert tracker.accounting["performance_headline_authority"].endswith("status_summary-paper.json")
+    assert tracker.accounting["performance_headline_authority"].endswith("status_summary-legacy.json")

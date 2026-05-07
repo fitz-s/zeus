@@ -32,7 +32,7 @@ canonical_db_targets:
   - state/zeus-world.db
   - state/risk_state.db
   - state/zeus.db
-  - state/zeus-paper.db
+  - state/zeus-legacy.db
   - state/zeus-shared.db
 
 diagnostic_allowed_write_targets:
@@ -320,7 +320,7 @@ scripts:
     write_targets: [state/zeus-world.db]
     target_db: state/zeus-world.db
     required_tests: [tests/test_backfill_openmeteo_previous_runs.py, tests/test_forecasts_schema_alignment.py, tests/test_forecast_source_registry.py]
-  backfill_outcome_fact.py: {class: etl_writer, write_targets: [state/zeus_trades.db], target_db: state/zeus_trades.db}
+  backfill_outcome_fact.py: {class: repair, dangerous_if_run: true, dry_run_default: true, apply_flag: "--apply", target_db: state/zeus.db, read_targets: [state/zeus.db], write_targets: [state/zeus.db], authority_scope: repair_write, lifecycle: long_lived, status: active, delete_policy: retain_until_superseded, reuse_when: "Legacy outcome_fact lifecycle projection repair for archived chronicle SETTLEMENT rows only.", do_not_use_when: "No active repair packet, dry-run evidence, verified DB backup, rollback plan, or operator approval. Do not use to create settlement/report/learning authority.", canonical_command: "python3 scripts/backfill_outcome_fact.py [--db PATH] (--dry-run | --apply --confirm-legacy-outcome-fact-backfill)", external_inputs: [], promotion_barrier: "Rows created by this script are legacy_lifecycle_projection_not_settlement_authority and cannot authorize settlement truth, report truth, replay learning, calibration, or live decisions.", required_helpers: [], required_tests: [tests/test_topology_doctor.py], unguarded_write_rationale: "--apply requires --confirm-legacy-outcome-fact-backfill; default mode is dry-run."}
   backfill_probability_traces_from_opportunities.py: {class: etl_writer}
   backfill_solar_openmeteo.py: {class: etl_writer}
   backfill_tigge_snapshot_p_raw.py:
@@ -445,7 +445,7 @@ scripts:
     class: utility
     reason: "Read-only harness-debate audit utility for module_manifest auto-derivability and bidirectional grep evidence; report artifacts are non-authority."
     write_targets: [stdout, temp, docs/operations]
-  nuke_rebuild_projections.py: {class: repair, apply_flag: implicit, target_db: "--mode", unguarded_write_rationale: "Existing repair writes unless --dry-run is provided; manifest marks it dangerous pending hardening."}
+  nuke_rebuild_projections.py: {class: repair, apply_flag: implicit, target_db: "--db-path", unguarded_write_rationale: "Existing repair writes unless --dry-run is provided; manifest marks it dangerous pending hardening."}
   onboard_cities.py: {class: etl_writer, dangerous_if_run: true, apply_flag: implicit, target_db: state/zeus-world.db, unguarded_write_rationale: "Existing onboarding pipeline writes unless --dry-run is provided; manifest marks it dangerous pending hardening."}
   parse_change_log.py: {class: utility}
   post_sequential_fillback.sh: {class: runtime_support, canonical_command: "bash scripts/post_sequential_fillback.sh <sequential_wrapper_pid>"}
@@ -476,6 +476,7 @@ scripts:
     target_db: "--db"
     required_tests: [tests/test_calibration_bins_canonical.py, tests/test_replay_time_provenance.py]
   rebuild_calibration_pairs_v2.py: {class: repair, dangerous_if_run: true, apply_flag: "--force", target_db: state/zeus-world.db, unguarded_write_rationale: "Phase 7A metric-aware v2 rebuild; safety gates enforced via --dry-run default + --no-dry-run + --force requirement.", required_helpers: [".zeus/rebuild_lock.do_not_run_during_live (sentinel check at module load)"], required_tests: [tests/test_rebuild_live_sentinel.py, tests/test_sqlite_busy_timeout.py]}
+  evaluate_calibration_transfer_oos.py: {class: repair, canonical_command: "python3 scripts/evaluate_calibration_transfer_oos.py --dry-run", dangerous_if_run: true, dry_run_default: true, apply_flag: "--no-dry-run", target_db: state/zeus-world.db, write_targets: [state/zeus-world.db], unguarded_write_rationale: "Writes validated_calibration_transfers evidence rows only with --no-dry-run; guarded by daemon-lock precondition but still mutates world DB.", promotion_barrier: "OOS evidence rows cannot authorize live calibration transfer without policy gate flag and operator review.", required_tests: [tests/test_evaluate_calibration_transfer_oos.py]}
   rebuild_settlements.py:
     class: repair
     module_owner: scripts

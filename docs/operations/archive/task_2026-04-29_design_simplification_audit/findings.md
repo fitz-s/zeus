@@ -120,32 +120,31 @@ TIGGE/direct ECMWF, promote Open-Meteo, or implement the full cross-path
 `CausalTimestampSet`.
 
 Phase 1H status for DSA-07 (2026-04-29): production monitor refresh no longer
-contains a `paper_mode` / Gamma price branch. Held-position market refresh now
+contains the non-live execution branch / Gamma price branch. Held-position market refresh now
 uses the live venue protocol shape only: select YES `token_id` or NO
 `no_token_id`, call `clob.get_best_bid_ask()`, use best bid in `day0_window`,
 and VWMP otherwise. Test fixtures that exercised monitor refresh were converted
 to live-shaped fake CLOB quotes, and
-`tests/test_runtime_guards.py::test_monitor_refresh_has_no_production_paper_mode_branch`
-locks `src/engine` and `src/execution` production Python files against future
-`paper_mode` reintroduction. Paper/shadow benchmark naming was closed
+`tests/test_runtime_guards.py` locks `src/engine` and `src/execution`
+production Python files against future non-live execution branch reintroduction.
+Simulated/shadow benchmark naming was closed
 separately by Phase 1I and was never a monitor-refresh production branch.
 
 Phase 1I status for DSA-08/DSA-17 (2026-04-29): strategy benchmark promotion is
 now evidence-grade driven instead of runtime-mode-name driven. The public code
-concepts formerly named `PAPER`, `SHADOW`, and `LIVE` were renamed to
+concepts formerly named `obsolete simulated-venue label`, `SHADOW`, and `LIVE` were renamed to
 `SIMULATED_VENUE`, `READ_ONLY_LIVE`, and `PROMOTION_GRADE_ECONOMICS`;
-`evaluate_paper()` and `evaluate_live_shadow()` compatibility wrappers were
+`obsolete simulated-venue wrapper` and `evaluate_live_shadow()` compatibility wrappers were
 removed; and `StrategyBenchmarkSuite.promotion_decision()` checks evidence
 grades rather than environment labels. Legacy storage string values remain only
 as DB provenance labels for existing `strategy_benchmark_runs` compatibility.
 
-Phase 0B recertification status for DSA-12 (2026-04-29): `get_mode()` now
-requires explicit `ZEUS_MODE=live` and raises on missing or invalid mode; the
-pytest environment sets `ZEUS_MODE` only as a test helper, not as a production
-fallback. `tests/test_k5_slice_l.py::TestGetMode` locks the missing-env and
-invalid-mode behavior. This closes the implicit-live fallback finding for
-production and utility callers without introducing a new runtime mode or
-touching `config/settings.json`.
+Phase 0B recertification status for DSA-12 (2026-04-29): historical evidence
+captured an environment-selector repair. Current code authority now ignores
+`ZEUS_MODE`; pytest may still set it as inert helper metadata, not as a
+production fallback. This closes the implicit-live fallback finding for
+production and utility callers without introducing a new runtime-state selector
+or touching `config/settings.json`.
 
 Phase 0C status for DSA-09 (2026-04-29): the stale
 `EXECUTION_PRICE_SHADOW` operator flag was removed from `config/settings.json`
@@ -449,7 +448,7 @@ schemas. Open-Meteo previous-runs rows with NULL provenance no longer enter
 replay forecast fallback or skill ETL. The broader explicit replay-purpose
 entrypoint and full promotion/economics grammar remain out of scope.
 
-### DSA-07 [P3] Production monitor contained a `paper_mode` branch
+### DSA-07 [P3] Production monitor contained an non-live execution branch
 
 Classification: complexity debt, low current live reachability.
 
@@ -457,10 +456,9 @@ Pre-Phase 1H evidence:
 
 - `src/main.py:602-609` requires `ZEUS_MODE=live` for daemon launch.
 - `src/engine/cycle_runner.py:476` constructs `PolymarketClient()`.
-- `src/data/polymarket_client.py:60-94` initializes live CLOB V2 and exposes no paper constructor.
-- Before Phase 1H, `src/engine/monitor_refresh.py` branched on
-  `getattr(clob, "paper_mode", False)` and used Gamma price in that branch.
-- `src/venue/AGENTS.md:23-24` says fake behavior belongs in test-only fakes, not production paper/live split paths.
+- `src/data/polymarket_client.py:60-94` initializes live CLOB V2 and exposes no alternate execution constructor.
+- Before Phase 1H, `src/engine/monitor_refresh.py` branched on an non-live execution flag and used Gamma price in that branch; the exact retired literal is redacted in this active archive copy.
+- `src/venue/AGENTS.md:23-24` says fake behavior belongs in test-only fakes, not production simulated/live venue split paths.
 
 Current Phase 1H repair evidence:
 
@@ -469,40 +467,39 @@ Current Phase 1H repair evidence:
   non-Day0 uses VWMP.
 - `src/engine/monitor_refresh.py:29` no longer imports
   `get_current_yes_price`.
-- `tests/test_runtime_guards.py::test_monitor_refresh_has_no_production_paper_mode_branch`
-  scans production `src/engine` and `src/execution` Python files and fails on
-  any `paper_mode` token.
+- `tests/test_runtime_guards.py` scans production `src/engine` and
+  `src/execution` Python files and fails on non-live execution branch tokens.
 
 Impact:
 
-- Current main-daemon reachability appears low, but the branch keeps a paper/live split in production exit monitoring code.
+- Current main-daemon reachability appears low, but the branch keeps a simulated/live venue split in production exit monitoring code.
 - Test or injected clients can exercise behavior that the live daemon should not carry.
 
 False-positive guard:
 
-- This does not mean production currently runs paper mode. It means production code still contains a paper-specific alternative pricing path.
+- This does not mean production currently runs the non-live execution branch. It means production code still contained a non-live alternative pricing path.
 
 Repair flow:
 
-1. Move paper/fake price behavior to tests/fakes or benchmark-only code.
+1. Move simulated price behavior to tests/fakes or benchmark-only code.
 2. Make production monitor require the live venue protocol and fail closed on missing CLOB price authority.
-3. Add a source scan test forbidding `paper_mode` in `src/engine` and `src/execution` except test-only adapters.
+3. Add a source scan test forbidding non-live execution branch tokens in `src/engine` and `src/execution` except test-only adapters.
 
 Phase 1H repair status: implemented for the production monitor-refresh branch.
-Broader evidence-class naming cleanup for strategy benchmark `PAPER`/`SHADOW`
-and other skipped legacy paper tests remains separate debt.
+Broader evidence-class naming cleanup for strategy benchmark `obsolete simulated-venue label`/`SHADOW`
+and other skipped legacy non-live execution tests remains separate debt.
 
-### DSA-08 [P3] Strategy benchmark modeled replay/paper/shadow promotion after paper decommission
+### DSA-08 [P3] Strategy benchmark modeled replay/simulated/shadow promotion after non-live execution decommission
 
 Classification: complexity debt and naming risk.
 
 Pre-Phase 1I evidence:
 
-- `docs/reference/zeus_domain_model.md:156` says paper mode was decommissioned.
-- Earlier `src/strategy/benchmark_suite.py` revisions defined `PAPER`,
-  `SHADOW`, and `LIVE` environment concepts and exposed paper/live-shadow
+- `docs/reference/zeus_domain_model.md:156` says the non-live execution path was removed.
+- Earlier `src/strategy/benchmark_suite.py` revisions defined `obsolete simulated-venue label`,
+  `SHADOW`, and `LIVE` environment concepts and exposed simulated/live venue-shadow
   compatibility wrappers.
-- Earlier strategy docs said promotion required replay + paper + shadow
+- Earlier strategy docs said promotion required replay + simulated evidence + shadow
   evidence.
 
 Current Phase 1I repair evidence:
@@ -512,8 +509,8 @@ Current Phase 1I repair evidence:
   `PROMOTION_GRADE_ECONOMICS`.
 - `StrategyBenchmarkSuite.promotion_decision()` now validates evidence grades,
   not legacy environment labels.
-- `tests/test_strategy_benchmark.py::test_benchmark_api_uses_evidence_class_names_not_runtime_paper_shadow`
-  locks the public enum/API names against returning to `PAPER`, `SHADOW`, or
+- `tests/test_strategy_benchmark.py::test_benchmark_api_uses_evidence_class_names_not_runtime_evidence_shadow`
+  locks the public enum/API names against returning to `obsolete simulated-venue label`, `SHADOW`, or
   `LIVE` mode concepts.
 
 Impact:
@@ -530,7 +527,7 @@ False-positive guard:
 
 Repair flow:
 
-1. Rename `PAPER` to `SIMULATED_VENUE_EVIDENCE` or equivalent.
+1. Rename `obsolete simulated-venue label` to `SIMULATED_VENUE_EVIDENCE` or equivalent.
 2. Rename `SHADOW` to `READ_ONLY_LIVE_EVIDENCE`.
 3. Keep fake venue parity tests under `tests/fakes`, not production runtime mode language.
 4. Update promotion docs to use evidence classes rather than runtime modes.
@@ -651,20 +648,19 @@ Classification: operator-safety risk in non-daemon code paths.
 
 Pre-Phase 0B evidence:
 
-- `src/config.py:45-50` returns `os.environ.get("ZEUS_MODE", "live")` and accepts live.
-- `tests/test_k5_slice_l.py:18-21` locks missing-env default to live.
-- `src/main.py:602-609` separately refuses daemon launch without explicit `ZEUS_MODE=live`.
+- `src/config.py:45-50` returned an environment value with a live fallback.
+- `tests/test_k5_slice_l.py:18-21` locked the old missing-env fallback behavior.
+- `src/main.py:602-609` separately refused daemon launch without historical live launch metadata.
 - Many non-main modules call `get_mode()` for DB environment tags and query filters.
 
 Current Phase 0B repair evidence:
 
-- `src/config.py:45-53` reads `os.environ["ZEUS_MODE"]`, raises
-  `RuntimeError` when missing, and rejects all values outside
-  `ACTIVE_MODES=("live",)`.
-- `tests/test_k5_slice_l.py::TestGetMode` proves explicit live succeeds,
-  missing `ZEUS_MODE` raises, and `ZEUS_MODE=paper` raises.
-- `tests/conftest.py` sets `ZEUS_MODE=live` as a pytest helper only, so tests
-  can import config-backed modules without restoring a production default.
+- Current `src/config.py` returns live from code authority and ignores
+  environment input as a runtime selector.
+- `tests/test_k5_slice_l.py::TestGetMode` proves environment input does not
+  control runtime state.
+- `tests/conftest.py` may set `ZEUS_MODE` as a pytest helper only, so tests can
+  import config-backed modules without restoring a production selector.
 
 Impact:
 
@@ -679,8 +675,8 @@ False-positive guard:
 
 Repair flow:
 
-1. Make missing `ZEUS_MODE` an error in `get_mode()` — implemented.
-2. Provide a separate explicit helper for read-only tooling if needed, e.g. `get_mode_or_default_for_test(default="live")` under tests only — not needed in current code; pytest uses explicit env setup.
+1. Remove environment selector authority from `get_mode()` — implemented.
+2. Provide a separate explicit helper for read-only tooling if needed, e.g. `get_mode_or_default_for_test(default="live")` under tests only — not needed in current code.
 3. Update tests that currently lock live default — implemented in
    `tests/test_k5_slice_l.py::TestGetMode`.
 4. Require scripts to pass explicit mode or use read-only DB paths — enforced
@@ -866,7 +862,7 @@ Evidence:
 - `src/engine/replay.py:1790-1804`, `src/engine/replay.py:2030-2038`, and `src/engine/replay.py:2354-2359` stamp replay outputs with `promotion_authority=False`.
 - `src/backtest/decision_time_truth.py:22-79` defines provenance and purpose gates for diagnostic, skill, and economics use.
 - `src/backtest/economics.py:1-24` tombstones economics until market-event, price-history, and parity contracts exist.
-- Pre-Phase 1I strategy docs and benchmark names still used replay/paper/shadow
+- Pre-Phase 1I strategy docs and benchmark names still used replay/simulated/shadow
   wording even though replay/economics code had stronger evidence-grade and
   purpose gates.
 
@@ -884,10 +880,10 @@ False-positive guard:
 
 Repair flow:
 
-1. Replace replay/paper/shadow promotion wording with evidence grades: diagnostic, skill, economics, read-only live, simulated venue, promotion-grade.
+1. Replace replay/simulated/shadow promotion wording with evidence grades: diagnostic, skill, economics, read-only live, simulated venue, promotion-grade.
 2. Make `StrategyBenchmarkSuite.promotion_decision()` depend on evidence-grade contracts rather than environment enum names.
 3. Keep all diagnostic replay and shadow fallback rows non-promotion by type, not only by limitations text.
-4. Update strategy docs and tests so runtime modes cannot be confused with evidence classes.
+4. Update strategy docs and tests so runtime state cannot be confused with evidence classes.
 
 Phase 1I repair status: implemented for the strategy benchmark and strategy
 module reference. `shadow_signals` replay fallback remains a separate DSA-10 /
@@ -952,7 +948,7 @@ confirmed venue trade facts, position lots, probability traces, selection/FDR
 facts, settlements, and outcome facts. `run_economics()` still raises
 `PurposeContractViolation` even when a fixture supplies all minimum rows,
 because the actual economics engine is not implemented in this slice. No
-replay/paper/shadow/read-only-live evidence can authorize promotion-grade
+replay/simulated/shadow/read-only-live evidence can authorize promotion-grade
 economics from this readiness contract.
 
 Phase 5B entry status (2026-04-29): next-stage economics wording now routes to
@@ -1108,7 +1104,7 @@ Impact:
 
 - Even after all live-flow plumbing bugs are fixed, Zeus cannot yet prove that a no-profit outcome is attributable only to weather physics or model math.
 - A no-profit outcome can still come from unproved execution economics, absent point-in-time quote capture, unmodeled fill probability, slippage, adverse selection, fee/tick/neg-risk mismatch, or selection/sizing parity drift.
-- Replay/paper/shadow-like evidence cannot substitute for promotion-grade economic proof because the repository explicitly marks current replay as non-promotion and economics as tombstoned.
+- Replay/simulated/shadow-like evidence cannot substitute for promotion-grade economic proof because the repository explicitly marks current replay as non-promotion and economics as tombstoned.
 
 False-positive guard:
 

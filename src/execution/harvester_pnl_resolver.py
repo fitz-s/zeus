@@ -23,6 +23,15 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 
+def _row_value(row, key: str, index: int, default=None):
+    if hasattr(row, "keys") and key in row.keys():
+        return row[key]
+    try:
+        return row[index]
+    except (IndexError, TypeError):
+        return default
+
+
 def resolve_pnl_for_settled_markets(trade_conn, world_conn) -> dict:
     """Resolve P&L for markets that have been settled in world.settlements.
 
@@ -58,7 +67,8 @@ def resolve_pnl_for_settled_markets(trade_conn, world_conn) -> dict:
     try:
         rows = world_conn.execute(
             """
-            SELECT city, target_date, market_slug, winning_bin, temperature_metric
+            SELECT city, target_date, market_slug, winning_bin, temperature_metric,
+                   authority, settlement_source, settlement_value
             FROM settlements
             WHERE authority = 'VERIFIED'
             ORDER BY settled_at DESC
@@ -103,11 +113,22 @@ def resolve_pnl_for_settled_markets(trade_conn, world_conn) -> dict:
     errors = 0
 
     for row in rows:
-        city_name = row["city"] if hasattr(row, "keys") else row[0]
-        target_date = row["target_date"] if hasattr(row, "keys") else row[1]
-        winning_bin = row["winning_bin"] if hasattr(row, "keys") else row[3]
+        city_name = _row_value(row, "city", 0, "")
+        target_date = _row_value(row, "target_date", 1, "")
+        market_slug = _row_value(row, "market_slug", 2, "")
+        winning_bin = _row_value(row, "winning_bin", 3, "")
+        temperature_metric = _row_value(row, "temperature_metric", 4, "")
+        authority = str(_row_value(row, "authority", 5, "") or "").upper()
+        settlement_source = _row_value(row, "settlement_source", 6, "")
+        settlement_value = _row_value(row, "settlement_value", 7, None)
 
         if not city_name or not target_date or not winning_bin:
+            continue
+        if authority != "VERIFIED":
+            logger.warning(
+                "harvester_pnl_resolver: skipping non-VERIFIED settlement row for %s %s: %s",
+                city_name, target_date, authority,
+            )
             continue
 
         try:
@@ -119,6 +140,12 @@ def resolve_pnl_for_settled_markets(trade_conn, world_conn) -> dict:
                 winning_bin,
                 settlement_records=settlement_records,
                 strategy_tracker=tracker,
+                settlement_authority=authority,
+                settlement_truth_source="world.settlements",
+                settlement_market_slug=str(market_slug or ""),
+                settlement_temperature_metric=str(temperature_metric or ""),
+                settlement_source=str(settlement_source or ""),
+                settlement_value=settlement_value,
             )
             positions_settled += n_settled
             if n_settled > 0:

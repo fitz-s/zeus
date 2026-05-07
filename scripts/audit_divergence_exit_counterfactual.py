@@ -58,10 +58,16 @@ def _winning_price(conn, exit_row: dict) -> float | None:
         SELECT winning_bin, settlement_value
         FROM settlements
         WHERE city = ? AND target_date = ?
+          AND temperature_metric = ?
+          AND authority = 'VERIFIED'
         ORDER BY rowid DESC
         LIMIT 1
         """,
-        (exit_row.get("city"), exit_row.get("target_date")),
+        (
+            exit_row.get("city"),
+            exit_row.get("target_date"),
+            exit_row.get("temperature_metric") or "high",
+        ),
     ).fetchone()
     if settlement is None:
         return None
@@ -93,8 +99,8 @@ def _summarize(samples: list[float]) -> dict:
     return {"count": len(samples), "avg": round(sum(samples) / len(samples), 4)}
 
 
-def run_audit(mode: str = "paper") -> dict:
-    positions_path = state_path("positions.json") if mode is None else PROJECT_ROOT / "state" / f"positions-{mode}.json"
+def run_audit(positions_path: Path | str | None = None) -> dict:
+    positions_path = Path(positions_path) if positions_path is not None else state_path("positions.json")
     state = json.loads(positions_path.read_text())
 
     exits = [
@@ -179,7 +185,6 @@ def run_audit(mode: str = "paper") -> dict:
     conn.close()
 
     return {
-        "mode": mode,
         "positions_source": str(positions_path),
         "divergence_exits_analyzed": len(analyzed),
         "coverage": coverage,
@@ -194,6 +199,11 @@ def run_audit(mode: str = "paper") -> dict:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", default="paper")
+    parser.add_argument(
+        "--positions-path",
+        type=Path,
+        default=None,
+        help="Explicit legacy positions JSON to audit; defaults to the live runtime positions path.",
+    )
     args = parser.parse_args()
-    print(json.dumps(run_audit(mode=args.mode), ensure_ascii=False, indent=2))
+    print(json.dumps(run_audit(positions_path=args.positions_path), ensure_ascii=False, indent=2))

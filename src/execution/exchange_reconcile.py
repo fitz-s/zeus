@@ -147,20 +147,35 @@ def run_reconcile_sweep(
     trade_order_ids: set[str] = set()
     for trade in trades or []:
         raw = _raw(trade)
-        trade_id = _trade_id(raw)
+        venue_trade_id = _trade_id(raw)
+        subject_id = venue_trade_id or _stable_subject("trade", raw)
         order_id = _trade_order_id(raw)
         state = _trade_state(raw)
+        if state is None:
+            findings.append(
+                record_finding(
+                    conn,
+                    kind="unrecorded_trade",
+                    subject_id=subject_id,
+                    context=context,
+                    evidence={
+                        "exchange_trade": raw,
+                        "reason": "exchange_trade_unknown_trade_state",
+                        "raw_state": _first_present(raw, "state", "status", default=None),
+                    },
+                    recorded_at=observed,
+                )
+            )
+            continue
         if order_id and state in {"MATCHED", "MINED", "CONFIRMED"}:
             trade_order_ids.add(order_id)
-        if not trade_id:
-            trade_id = _stable_subject("trade", raw)
         command = local_by_order.get(order_id or "")
         if command is None:
             findings.append(
                 record_finding(
                     conn,
                     kind="unrecorded_trade",
-                    subject_id=trade_id,
+                    subject_id=subject_id,
                     context=context,
                     evidence={
                         "exchange_trade": raw,
@@ -170,7 +185,33 @@ def run_reconcile_sweep(
                 )
             )
             continue
-        _append_linkable_trade_fact_if_missing(conn, command, raw, trade_id, observed)
+        if not venue_trade_id:
+            findings.append(
+                record_finding(
+                    conn,
+                    kind="unrecorded_trade",
+                    subject_id=subject_id,
+                    context=context,
+                    evidence={
+                        "exchange_trade": raw,
+                        "local_command": _command_evidence(command),
+                        "reason": "exchange_trade_missing_venue_trade_identity",
+                    },
+                    recorded_at=observed,
+                )
+            )
+            continue
+        finding = _append_linkable_trade_fact_if_missing(
+            conn,
+            command,
+            raw,
+            venue_trade_id,
+            observed,
+            state=state,
+            context=context,
+        )
+        if finding is not None:
+            findings.append(finding)
 
     for order_id, command in local_by_order.items():
         if order_id in open_order_ids or order_id in trade_order_ids:
@@ -349,15 +390,114 @@ def _append_linkable_trade_fact_if_missing(
     raw: Mapping[str, Any],
     trade_id: str,
     observed_at: datetime,
-) -> None:
-    if conn.execute("SELECT 1 FROM venue_trade_facts WHERE trade_id = ?", (trade_id,)).fetchone():
-        return
+    *,
+    state: str,
+    context: ReconcileContext,
+) -> ReconcileFinding | None:
     from src.state.venue_command_repo import append_event, append_trade_fact, get_command
 
     order_id = _trade_order_id(raw) or str(command["venue_order_id"])
-    filled_size = str(_first_present(raw, "filled_size", "size", "amount", default="0"))
-    fill_price = str(_first_present(raw, "fill_price", "price", default="0"))
-    state = _trade_state(raw)
+    filled_size_raw = _first_present(raw, "filled_size", "size", "amount", default=None)
+    fill_price_raw = _first_present(raw, "fill_price", "price", default=None)
+    missing = _missing_trade_fill_economics(
+        state=state,
+        filled_size=filled_size_raw,
+        fill_price=fill_price_raw,
+    )
+    if missing:
+        return record_finding(
+            conn,
+            kind="unrecorded_trade",
+            subject_id=trade_id,
+            context=context,
+            evidence={
+                "exchange_trade": dict(raw),
+                "local_command": _command_evidence(command),
+                "reason": "exchange_trade_missing_fill_economics",
+                "missing": list(missing),
+            },
+            recorded_at=observed_at,
+        )
+    filled_size = str(filled_size_raw if filled_size_raw is not None else "0")
+    fill_price = str(fill_price_raw if fill_price_raw is not None else "0")
+    latest_fact = _latest_trade_fact_for_trade_id(conn, trade_id)
+    if latest_fact is not None:
+        identity_mismatch = _trade_fact_identity_mismatch(
+            latest_fact,
+            command=command,
+            venue_order_id=order_id,
+        )
+        if identity_mismatch:
+            return record_finding(
+                conn,
+                kind="unrecorded_trade",
+                subject_id=trade_id,
+                context=context,
+                evidence={
+                    "exchange_trade": dict(raw),
+                    "local_command": _command_evidence(command),
+                    "existing_trade_fact": {
+                        "trade_fact_id": latest_fact.get("trade_fact_id"),
+                        "command_id": latest_fact.get("command_id"),
+                        "venue_order_id": latest_fact.get("venue_order_id"),
+                        "state": latest_fact.get("state"),
+                    },
+                    "reason": "exchange_trade_identity_conflict",
+                    "mismatch": identity_mismatch,
+                },
+                recorded_at=observed_at,
+            )
+        same_fill_economics = _same_trade_fill_economics(
+            latest_fact,
+            filled_size=filled_size,
+            fill_price=fill_price,
+        )
+        if same_fill_economics and str(latest_fact.get("state") or "") == state:
+            return None
+        if not same_fill_economics:
+            return record_finding(
+                conn,
+                kind="unrecorded_trade",
+                subject_id=trade_id,
+                context=context,
+                evidence={
+                    "exchange_trade": dict(raw),
+                    "local_command": _command_evidence(command),
+                    "existing_trade_fact": {
+                        "trade_fact_id": latest_fact.get("trade_fact_id"),
+                        "state": latest_fact.get("state"),
+                        "filled_size": latest_fact.get("filled_size"),
+                        "fill_price": latest_fact.get("fill_price"),
+                    },
+                    "reason": "exchange_trade_lifecycle_regression_or_economic_drift",
+                    "incoming_state": state,
+                    "incoming_filled_size": filled_size,
+                    "incoming_fill_price": fill_price,
+                },
+                recorded_at=observed_at,
+            )
+        if not _trade_lifecycle_transition_allowed(str(latest_fact.get("state") or ""), state):
+            return record_finding(
+                conn,
+                kind="unrecorded_trade",
+                subject_id=trade_id,
+                context=context,
+                evidence={
+                    "exchange_trade": dict(raw),
+                    "local_command": _command_evidence(command),
+                    "existing_trade_fact": {
+                        "trade_fact_id": latest_fact.get("trade_fact_id"),
+                        "state": latest_fact.get("state"),
+                        "filled_size": latest_fact.get("filled_size"),
+                        "fill_price": latest_fact.get("fill_price"),
+                    },
+                    "reason": "exchange_trade_lifecycle_regression_or_economic_drift",
+                    "incoming_state": state,
+                    "incoming_filled_size": filled_size,
+                    "incoming_fill_price": fill_price,
+                },
+                recorded_at=observed_at,
+            )
     append_trade_fact(
         conn,
         trade_id=trade_id,
@@ -373,13 +513,13 @@ def _append_linkable_trade_fact_if_missing(
         raw_payload_json=dict(raw),
     )
     if state in {"FAILED", "RETRYING"}:
-        return
+        return None
     latest = get_command(conn, str(command["command_id"]))
     if latest is None:
-        return
+        return None
     event = _fill_event_for_command(latest, filled_size, trade_state=state)
     if event is None:
-        return
+        return None
     try:
         append_event(
             conn,
@@ -398,7 +538,94 @@ def _append_linkable_trade_fact_if_missing(
         # The fact is still append-only venue truth.  Illegal command-state
         # transitions stay fail-closed by not inventing grammar or forcing a
         # local command mutation.
-        return
+        return None
+    return None
+
+
+def _missing_trade_fill_economics(
+    *,
+    state: str,
+    filled_size: Any,
+    fill_price: Any,
+) -> tuple[str, ...]:
+    if state not in {"MATCHED", "MINED", "CONFIRMED"}:
+        return ()
+    missing: list[str] = []
+    if not _positive_decimal(filled_size):
+        missing.append("filled_size")
+    if not _positive_decimal(fill_price):
+        missing.append("fill_price")
+    return tuple(missing)
+
+
+def _positive_decimal(value: Any) -> bool:
+    if value is None or value == "":
+        return False
+    try:
+        decimal = _decimal(value)
+    except (InvalidOperation, ValueError):
+        return False
+    return decimal.is_finite() and decimal > Decimal("0")
+
+
+def _latest_trade_fact_for_trade_id(conn: sqlite3.Connection, trade_id: str) -> dict[str, Any] | None:
+    row = conn.execute(
+        """
+        SELECT *
+          FROM venue_trade_facts
+         WHERE trade_id = ?
+         ORDER BY local_sequence DESC, trade_fact_id DESC
+         LIMIT 1
+        """,
+        (trade_id,),
+    ).fetchone()
+    return dict(row) if row is not None else None
+
+
+def _trade_fact_identity_mismatch(
+    fact: Mapping[str, Any],
+    *,
+    command: Mapping[str, Any],
+    venue_order_id: str,
+) -> list[str]:
+    mismatch: list[str] = []
+    if str(fact.get("command_id") or "") != str(command.get("command_id") or ""):
+        mismatch.append("command_id")
+    if str(fact.get("venue_order_id") or "") != str(venue_order_id or ""):
+        mismatch.append("venue_order_id")
+    return mismatch
+
+
+def _same_trade_fill_economics(
+    fact: Mapping[str, Any],
+    *,
+    filled_size: str,
+    fill_price: str,
+) -> bool:
+    return (
+        _same_decimal_value(fact.get("filled_size"), filled_size)
+        and _same_decimal_value(fact.get("fill_price"), fill_price)
+    )
+
+
+def _same_decimal_value(left: Any, right: Any) -> bool:
+    try:
+        return _decimal(left) == _decimal(right)
+    except (InvalidOperation, ValueError):
+        return False
+
+
+def _trade_lifecycle_transition_allowed(previous: str, current: str) -> bool:
+    if previous == current:
+        return False
+    allowed = {
+        "RETRYING": {"MATCHED", "MINED", "CONFIRMED", "FAILED"},
+        "MATCHED": {"MINED", "CONFIRMED", "FAILED"},
+        "MINED": {"CONFIRMED", "FAILED"},
+        "CONFIRMED": set(),
+        "FAILED": set(),
+    }
+    return current in allowed.get(previous, set())
 
 
 def _fill_event_for_command(
@@ -484,7 +711,12 @@ def _journal_positions_by_token(conn: sqlite3.Connection) -> dict[str, Decimal]:
         SELECT c.token_id, c.side, tf.filled_size
           FROM venue_trade_facts tf
           JOIN venue_commands c ON c.command_id = tf.command_id
-         WHERE tf.state IN ('MATCHED', 'MINED', 'CONFIRMED')
+         WHERE tf.local_sequence = (
+               SELECT MAX(newer.local_sequence)
+                 FROM venue_trade_facts newer
+                WHERE newer.trade_id = tf.trade_id
+         )
+           AND tf.state IN ('MATCHED', 'MINED', 'CONFIRMED')
         """
     ).fetchall()
     out: dict[str, Decimal] = {}
@@ -580,7 +812,7 @@ def _call_optional(adapter: Any, method: str) -> list[Any]:
 def _assert_adapter_read_fresh(adapter: Any, surface: str, observed_at: datetime) -> None:
     freshness = getattr(adapter, "read_freshness", None)
     if not isinstance(freshness, Mapping):
-        return
+        raise ValueError(f"{surface} venue read freshness is unavailable")
     value = freshness.get(surface)
     if value is True:
         return
@@ -589,9 +821,7 @@ def _assert_adapter_read_fresh(adapter: Any, surface: str, observed_at: datetime
         has_fresh = "fresh" in value
         if has_ok and value["ok"] is not True:
             raise ValueError(f"{surface} venue read is not fresh/successful")
-        if has_fresh and value["fresh"] is not True:
-            raise ValueError(f"{surface} venue read is not fresh/successful")
-        if not has_ok and not has_fresh:
+        if not has_fresh or value["fresh"] is not True:
             raise ValueError(f"{surface} venue read is not fresh/successful")
         captured_at = value.get("captured_at") or value.get("observed_at")
         if captured_at is not None and _coerce_dt(captured_at) > observed_at:
@@ -627,9 +857,12 @@ def _trade_order_id(raw: Mapping[str, Any]) -> str | None:
     )
 
 
-def _trade_state(raw: Mapping[str, Any]) -> str:
-    state = str(_first_present(raw, "state", "status", default="MATCHED")).upper()
-    return state if state in _TRADE_FACT_STATES else "MATCHED"
+def _trade_state(raw: Mapping[str, Any]) -> str | None:
+    raw_state = _first_present(raw, "state", "status", default=None)
+    if raw_state is None:
+        return None
+    state = str(raw_state).upper()
+    return state if state in _TRADE_FACT_STATES else None
 
 
 def _first_present(raw: Mapping[str, Any], *keys: str, default: Any = None) -> Any:

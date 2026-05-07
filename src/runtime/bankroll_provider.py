@@ -9,8 +9,8 @@ window so that the riskguard tick (60s cadence) and other consumers can ask
 
 Authority semantics (architect memo §2):
 - The on-chain wallet is the canonical bankroll for trailing-loss math, equity,
-  and drawdown computation. The legacy `capital_base_usd=150` config constant is
-  an entry-sizing safety cap, not a bankroll truth source.
+  and drawdown computation. Retired config-literal capital is not a bankroll
+  truth source.
 
 Behaviour contract (architect memo §7):
 - Fresh cache (age < `max_age_seconds`, default 30s): return cached value with

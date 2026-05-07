@@ -1,9 +1,9 @@
 # Created: 2026-03-30
-# Last reused/audited: 2026-04-25
-# Lifecycle: created=2026-03-30; last_reviewed=2026-04-25; last_reused=2026-04-25
-# Purpose: Protect DB schema bootstrap contracts and daily revision-history DDL.
+# Last reused/audited: 2026-05-06
+# Lifecycle: created=2026-03-30; last_reviewed=2026-05-06; last_reused=2026-05-06
+# Purpose: Protect DB schema bootstrap contracts, daily revision-history DDL, and fact-smoke authority labels.
 # Reuse: Audit touched schema assertions and high-sensitivity skip metadata before closeout.
-# Authority basis: P2 4.4.A2 daily observation revision-history schema packet.
+# Authority basis: P2 4.4.A2 daily observation revision-history schema packet; Wave16 object-meaning fact-smoke authority repair.
 """Tests for database schema initialization."""
 
 import json
@@ -135,6 +135,79 @@ def _create_outcome_fact_table(conn):
         """
     )
     conn.commit()
+
+
+def _insert_current_position_for_fill_authority_view_test(
+    conn,
+    *,
+    position_id: str,
+    submitted_size_usd: float = 25.0,
+    projected_cost_basis_usd: float = 20.0,
+    shares: float = 50.0,
+    entry_price: float = 0.50,
+    mark_price: float = 0.50,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, trade_id, market_id, city, cluster, target_date, bin_label,
+            direction, unit, size_usd, shares, cost_basis_usd, entry_price, p_posterior,
+            last_monitor_prob, last_monitor_edge, last_monitor_market_price,
+            decision_snapshot_id, entry_method, strategy_key, edge_source, discovery_mode,
+            chain_state, token_id, no_token_id, condition_id, order_id, order_status,
+            updated_at, temperature_metric
+        )
+        VALUES (
+            ?, 'active', ?, 'm-fill', 'NYC', 'US-Northeast', '2026-04-01', '39-40°F',
+            'buy_yes', 'F', ?, ?, ?, ?, 0.60,
+            NULL, NULL, ?,
+            'snap-fill', 'ens_member_counting', 'center_buy', 'center_buy', 'opening_hunt',
+            'local_only', 'yes-fill', 'no-fill', 'cond-fill', 'order-fill', 'filled',
+            '2026-04-01T00:00:00+00:00', 'high'
+        )
+        """,
+        (
+            position_id,
+            position_id,
+            submitted_size_usd,
+            shares,
+            projected_cost_basis_usd,
+            entry_price,
+            mark_price,
+        ),
+    )
+
+
+def _insert_entry_execution_fact_for_fill_authority_view_test(
+    conn,
+    *,
+    position_id: str,
+    terminal_exec_status: str,
+    fill_price: float | None = 0.40,
+    shares: float | None = 50.0,
+    filled_at: str | None = "2026-04-01T00:00:03+00:00",
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO execution_fact (
+            intent_id, position_id, decision_id, order_role, strategy_key,
+            posted_at, filled_at, voided_at, submitted_price, fill_price,
+            shares, fill_quality, latency_seconds, venue_status, terminal_exec_status
+        )
+        VALUES (?, ?, 'dec-fill', 'entry', 'center_buy',
+                '2026-04-01T00:00:00+00:00', ?, NULL, 0.50, ?,
+                ?, NULL, NULL, ?, ?)
+        """,
+        (
+            f"{position_id}:entry",
+            position_id,
+            filled_at,
+            fill_price,
+            shares,
+            terminal_exec_status,
+            terminal_exec_status,
+        ),
+    )
 
 
 def test_init_schema_creates_all_tables():
@@ -902,11 +975,84 @@ def test_query_p4_fact_smoke_summary_separates_layers(tmp_path):
     assert summary["availability"]["failure_types"]["rate_limited"] == 1
     assert summary["execution"]["total"] == 1
     assert summary["execution"]["terminal_status_counts"]["filled"] == 1
+    assert summary["execution"]["authority_scope"] == "execution_lifecycle_projection_not_settlement_authority"
     assert summary["outcome"]["total"] == 1
     assert summary["outcome"]["wins"] == 1
+    assert summary["outcome"]["authority_scope"] == "legacy_lifecycle_projection_not_settlement_authority"
+    assert summary["outcome"]["learning_eligible"] is False
+    assert summary["outcome"]["promotion_eligible"] is False
+    assert summary["settlement_authority"]["ready_rows"] == 0
+    assert summary["settlement_authority"]["learning_eligible_rows"] == 0
     assert summary["separation"]["availability_failures"] == 1
     assert summary["separation"]["opportunity_loss_without_availability"] == 1
     assert summary["separation"]["execution_vs_outcome_gap"] == 0
+
+
+def test_query_p4_fact_smoke_summary_separates_verified_settlement_authority(tmp_path):
+    from src.engine.lifecycle_events import build_settlement_canonical_write
+    from src.state.db import append_many_and_project, query_p4_fact_smoke_summary
+    from src.state.portfolio import Position
+
+    conn = get_connection(tmp_path / "test.db")
+    init_schema(conn)
+    _create_execution_fact_table(conn)
+    _create_outcome_fact_table(conn)
+    conn.execute("INSERT INTO execution_fact (intent_id, order_role, terminal_exec_status) VALUES ('exec-1', 'entry', 'filled')")
+    conn.execute(
+        """
+        INSERT INTO outcome_fact (
+            position_id, strategy_key, decision_snapshot_id, pnl, outcome
+        ) VALUES ('legacy-outcome', 'center_buy', 'snap-legacy', 99.0, 1)
+        """
+    )
+    pos = Position(
+        trade_id="verified-settle",
+        market_id="m-verified",
+        city="NYC",
+        cluster="US-Northeast",
+        target_date="2026-04-01",
+        bin_label="39-40°F",
+        direction="buy_yes",
+        unit="F",
+        size_usd=10.0,
+        entry_price=0.40,
+        p_posterior=0.61,
+        decision_snapshot_id="snap-verified",
+        strategy_key="center_buy",
+        strategy="center_buy",
+        edge_source="center_buy",
+        exit_price=1.0,
+        pnl=15.0,
+        exit_reason="SETTLEMENT",
+        last_exit_at="2026-04-01T23:00:00Z",
+        state="settled",
+    )
+    events, projection = build_settlement_canonical_write(
+        pos,
+        winning_bin="39-40°F",
+        won=True,
+        outcome=1,
+        sequence_no=1,
+        phase_before="pending_exit",
+        settlement_authority="VERIFIED",
+        settlement_truth_source="world.settlements",
+        settlement_market_slug="nyc-high-2026-04-01",
+        settlement_temperature_metric="high",
+        settlement_source="WU",
+        settlement_value=40.0,
+    )
+    append_many_and_project(conn, events, projection)
+
+    summary = query_p4_fact_smoke_summary(conn)
+    conn.close()
+
+    assert summary["outcome"]["total"] == 1
+    assert summary["outcome"]["pnl_total"] == pytest.approx(99.0)
+    assert summary["outcome"]["authority_scope"] == "legacy_lifecycle_projection_not_settlement_authority"
+    assert summary["outcome"]["learning_eligible"] is False
+    assert summary["settlement_authority"]["source"] == "position_events_or_decision_log_verified_settlement"
+    assert summary["settlement_authority"]["ready_rows"] == 1
+    assert summary["settlement_authority"]["learning_eligible_rows"] == 1
 
 
 def test_query_p4_fact_smoke_summary_reports_missing_tables_explicitly(tmp_path):
@@ -923,6 +1069,8 @@ def test_query_p4_fact_smoke_summary_reports_missing_tables_explicitly(tmp_path)
     assert summary["availability"]["total"] == 0
     assert summary["execution"]["total"] == 0
     assert summary["outcome"]["total"] == 0
+    assert summary["outcome"]["authority_scope"] == "legacy_lifecycle_projection_not_settlement_authority"
+    assert summary["settlement_authority"]["ready_rows"] == 0
 
 
 def test_ensemble_snapshots_unique_constraint():
@@ -1031,91 +1179,183 @@ def test_load_portfolio_enables_audit_logging(tmp_path):
     assert state.audit_logging_enabled is True
 
 
-@pytest.mark.skip(reason="P9: legacy position_events write path eliminated")
-def test_load_portfolio_prefers_sibling_mode_db_for_unqualified_path(tmp_path, monkeypatch):
-    from src.state.portfolio import load_portfolio
-
-    legacy_db = tmp_path / "zeus.db"
-    paper_db = tmp_path / "zeus-paper.db"
-    path = tmp_path / "missing.json"
-
-    legacy_conn = get_connection(legacy_db)
-    init_schema(legacy_conn)
-    legacy_conn.execute(
-        """
-        INSERT INTO position_current (
-            position_id, phase, trade_id, market_id, city, cluster, target_date, bin_label,
-            direction, unit, size_usd, shares, cost_basis_usd, entry_price, p_posterior,
-            decision_snapshot_id, entry_method, strategy_key, edge_source, discovery_mode,
-            chain_state, order_id, order_status, updated_at, temperature_metric
-        ) VALUES (
-            'legacy-stale', 'active', 'legacy-stale', 'm-legacy', 'NYC', 'US-Northeast', '2099-04-01', '39-40°F',
-            'buy_yes', 'F', 10.0, 20.0, 10.0, 0.4, 0.6,
-            'snap-legacy', 'ens_member_counting', 'opening_inertia', 'opening_inertia', 'opening_hunt',
-            'unknown', '', 'filled', '2099-04-04T00:00:00Z', 'high'
-        )
-        """
+def test_position_current_views_use_fill_authority_current_open_economics(tmp_path):
+    from src.state.db import (
+        query_portfolio_loader_view,
+        query_position_current_status_view,
+        query_strategy_health_snapshot,
+        refresh_strategy_health,
     )
-    legacy_conn.execute(
-        """
-        INSERT INTO position_events_legacy (
-            event_type, runtime_trade_id, position_state, order_id, decision_snapshot_id,
-            city, target_date, market_id, bin_label, direction, strategy, edge_source,
-            source, details_json, timestamp, env
-        ) VALUES (
-            'POSITION_EXIT_RECORDED', 'legacy-stale', 'economically_closed', '', 'snap-legacy',
-            'NYC', '2099-04-01', 'm-legacy', '39-40°F', 'buy_yes', 'opening_inertia', 'opening_inertia',
-            'test', '{}', '2099-04-04T01:00:00Z', 'paper'
-        )
-        """
+
+    conn = get_connection(tmp_path / "fill-authority-views.db")
+    init_schema(conn)
+    _insert_current_position_for_fill_authority_view_test(
+        conn,
+        position_id="fill-authority-pos",
+        submitted_size_usd=25.0,
+        projected_cost_basis_usd=20.0,
+        shares=50.0,
+        entry_price=0.50,
+        mark_price=0.50,
     )
-    legacy_conn.commit()
-    legacy_conn.close()
-
-    paper_conn = get_connection(paper_db)
-    init_schema(paper_conn)
-    paper_conn.execute(
-        """
-        INSERT INTO position_current (
-            position_id, phase, trade_id, market_id, city, cluster, target_date, bin_label,
-            direction, unit, size_usd, shares, cost_basis_usd, entry_price, p_posterior,
-            decision_snapshot_id, entry_method, strategy_key, edge_source, discovery_mode,
-            chain_state, order_id, order_status, updated_at, temperature_metric
-        ) VALUES (
-            'paper-ok', 'active', 'paper-ok', 'm-paper', 'NYC', 'US-Northeast', '2099-04-01', '41-42°F',
-            'buy_yes', 'F', 12.0, 30.0, 12.0, 0.4, 0.61,
-            'snap-paper', 'ens_member_counting', 'center_buy', 'center_buy', 'opening_hunt',
-            'unknown', '', 'filled', '2099-04-04T00:00:00Z', 'high'
-        )
-        """
+    _insert_entry_execution_fact_for_fill_authority_view_test(
+        conn,
+        position_id="fill-authority-pos",
+        terminal_exec_status="filled",
+        fill_price=0.40,
+        shares=50.0,
     )
-    paper_conn.commit()
-    paper_conn.close()
+    conn.commit()
 
-    path.write_text(json.dumps({
-        "positions": [{
-            "trade_id": "paper-ok",
-            "market_id": "m-json",
-            "city": "NYC",
-            "cluster": "US-Northeast",
-            "target_date": "2099-04-01",
-            "bin_label": "41-42°F",
-            "direction": "buy_yes",
-            "unit": "F",
-            "state": "entered",
-            "strategy": "center_buy",
-            "edge_source": "center_buy",
-            "token_id": "json-yes",
-        }],
-        "bankroll": 99.0,
-    }))
+    status_view = query_position_current_status_view(conn)
+    loader_view = query_portfolio_loader_view(conn)
+    refresh = refresh_strategy_health(conn, as_of="2026-04-01T00:05:00+00:00")
+    strategy_snapshot = query_strategy_health_snapshot(
+        conn,
+        now="2026-04-01T00:06:00+00:00",
+        max_age_seconds=300,
+    )
 
-    monkeypatch.setenv("ZEUS_MODE", "paper")
-    state = load_portfolio(path)
+    status_position = status_view["positions"][0]
+    loader_position = loader_view["positions"][0]
+    strategy_row = strategy_snapshot["by_strategy"]["center_buy"]
 
-    assert [pos.trade_id for pos in state.positions] == ["paper-ok"]
-    assert state.positions[0].strategy_key == "center_buy"
-    assert state.bankroll == pytest.approx(99.0)
+    assert status_view["total_exposure_usd"] == pytest.approx(20.0)
+    assert status_position["size_usd"] == pytest.approx(20.0)
+    assert status_position["submitted_size_usd"] == pytest.approx(25.0)
+    assert status_position["effective_cost_basis_usd"] == pytest.approx(20.0)
+    assert status_position["unrealized_pnl"] == pytest.approx(5.0)
+    assert status_position["entry_economics_authority"] == "avg_fill_price"
+    assert status_position["fill_authority"] == "venue_confirmed_full"
+    assert status_position["entry_economics_source"] == "execution_fact"
+
+    assert loader_position["size_usd"] == pytest.approx(20.0)
+    assert loader_position["cost_basis_usd"] == pytest.approx(20.0)
+    assert loader_position["submitted_size_usd"] == pytest.approx(25.0)
+    assert loader_position["entry_price"] == pytest.approx(0.40)
+    assert loader_position["entry_price_avg_fill"] == pytest.approx(0.40)
+    assert loader_position["shares_filled"] == pytest.approx(50.0)
+    assert loader_position["filled_cost_basis_usd"] == pytest.approx(20.0)
+    assert loader_position["entry_fill_verified"] is True
+    assert loader_position["entry_economics_authority"] == "avg_fill_price"
+    assert loader_position["fill_authority"] == "venue_confirmed_full"
+
+    assert refresh["status"] == "refreshed"
+    assert strategy_row["open_exposure_usd"] == pytest.approx(20.0)
+    assert strategy_row["unrealized_pnl"] == pytest.approx(5.0)
+
+    conn.close()
+
+
+def test_position_current_views_do_not_promote_nonfinal_fill_like_execution_fact(tmp_path):
+    from src.state.db import query_portfolio_loader_view, query_position_current_status_view
+
+    conn = get_connection(tmp_path / "nonfinal-fill-authority-views.db")
+    init_schema(conn)
+    _insert_current_position_for_fill_authority_view_test(
+        conn,
+        position_id="nonfinal-fill-pos",
+        submitted_size_usd=25.0,
+        projected_cost_basis_usd=20.0,
+        shares=50.0,
+        entry_price=0.50,
+        mark_price=0.50,
+    )
+    _insert_entry_execution_fact_for_fill_authority_view_test(
+        conn,
+        position_id="nonfinal-fill-pos",
+        terminal_exec_status="pending_fill_authority",
+        fill_price=0.40,
+        shares=50.0,
+        filled_at=None,
+    )
+    conn.commit()
+
+    status_view = query_position_current_status_view(conn)
+    loader_view = query_portfolio_loader_view(conn)
+
+    status_position = status_view["positions"][0]
+    loader_position = loader_view["positions"][0]
+
+    assert status_view["total_exposure_usd"] == pytest.approx(25.0)
+    assert status_position["size_usd"] == pytest.approx(25.0)
+    assert status_position["effective_cost_basis_usd"] == pytest.approx(25.0)
+    assert status_position["submitted_size_usd"] == pytest.approx(25.0)
+    assert status_position["entry_economics_authority"] == "legacy_unknown"
+    assert status_position["fill_authority"] == "none"
+    assert status_position["entry_economics_source"] == "position_current_projection"
+
+    assert loader_position["size_usd"] == pytest.approx(25.0)
+    assert loader_position["cost_basis_usd"] == pytest.approx(20.0)
+    assert loader_position["entry_price"] == pytest.approx(0.50)
+    assert loader_position["entry_fill_verified"] is False
+    assert loader_position["entry_economics_authority"] == "legacy_unknown"
+    assert loader_position["fill_authority"] == "none"
+
+    conn.close()
+
+
+def test_position_current_views_preserve_current_open_reduction_after_partial_exit(tmp_path):
+    from src.state.db import (
+        query_portfolio_loader_view,
+        query_position_current_status_view,
+        query_strategy_health_snapshot,
+        refresh_strategy_health,
+    )
+
+    conn = get_connection(tmp_path / "reduced-open-fill-authority-views.db")
+    init_schema(conn)
+    _insert_current_position_for_fill_authority_view_test(
+        conn,
+        position_id="reduced-open-fill-pos",
+        submitted_size_usd=25.0,
+        projected_cost_basis_usd=10.0,
+        shares=20.0,
+        entry_price=0.50,
+        mark_price=0.60,
+    )
+    _insert_entry_execution_fact_for_fill_authority_view_test(
+        conn,
+        position_id="reduced-open-fill-pos",
+        terminal_exec_status="filled",
+        fill_price=0.50,
+        shares=50.0,
+    )
+    conn.commit()
+
+    status_view = query_position_current_status_view(conn)
+    loader_view = query_portfolio_loader_view(conn)
+    refresh = refresh_strategy_health(conn, as_of="2026-04-01T00:05:00+00:00")
+    strategy_snapshot = query_strategy_health_snapshot(
+        conn,
+        now="2026-04-01T00:06:00+00:00",
+        max_age_seconds=300,
+    )
+
+    status_position = status_view["positions"][0]
+    loader_position = loader_view["positions"][0]
+    strategy_row = strategy_snapshot["by_strategy"]["center_buy"]
+
+    assert status_view["total_exposure_usd"] == pytest.approx(10.0)
+    assert status_position["size_usd"] == pytest.approx(10.0)
+    assert status_position["effective_cost_basis_usd"] == pytest.approx(10.0)
+    assert status_position["filled_cost_basis_usd"] == pytest.approx(25.0)
+    assert status_position["shares"] == pytest.approx(20.0)
+    assert status_position["shares_filled"] == pytest.approx(50.0)
+    assert status_position["unrealized_pnl"] == pytest.approx(2.0)
+
+    assert loader_position["size_usd"] == pytest.approx(10.0)
+    assert loader_position["cost_basis_usd"] == pytest.approx(10.0)
+    assert loader_position["effective_cost_basis_usd"] == pytest.approx(10.0)
+    assert loader_position["filled_cost_basis_usd"] == pytest.approx(25.0)
+    assert loader_position["shares"] == pytest.approx(20.0)
+    assert loader_position["shares_filled"] == pytest.approx(50.0)
+
+    assert refresh["status"] == "refreshed"
+    assert strategy_row["open_exposure_usd"] == pytest.approx(10.0)
+    assert strategy_row["unrealized_pnl"] == pytest.approx(2.0)
+
+    conn.close()
 
 
 def test_log_trade_entry_persists_replay_critical_fields(tmp_path):
@@ -1510,6 +1750,505 @@ def test_log_execution_report_emits_rejected_entry_event(tmp_path):
     assert fact["terminal_exec_status"] == "rejected"
 
 
+def test_log_execution_report_does_not_promote_nonfinal_fill_price(tmp_path):
+    from src.execution.executor import OrderResult
+    from src.state.db import log_execution_report
+    from src.state.portfolio import (
+        ENTRY_ECONOMICS_SUBMITTED_LIMIT,
+        FILL_AUTHORITY_NONE,
+        Position,
+    )
+
+    db_path = tmp_path / "test.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+    _create_execution_fact_table(conn)
+
+    pos = Position(
+        trade_id="rt-exec-nonfinal",
+        market_id="m4",
+        city="NYC",
+        cluster="US-Northeast",
+        target_date="2026-04-01",
+        bin_label="39-40°F",
+        direction="buy_yes",
+        unit="F",
+        size_usd=11.0,
+        entry_price=0.55,
+        entry_price_submitted=0.55,
+        p_posterior=0.60,
+        edge=0.05,
+        shares=20.0,
+        order_posted_at="2026-04-01T01:00:00Z",
+        order_status="filled",
+        state="pending_tracked",
+        strategy_key="center_buy",
+        strategy="center_buy",
+        entry_economics_authority=ENTRY_ECONOMICS_SUBMITTED_LIMIT,
+        fill_authority=FILL_AUTHORITY_NONE,
+    )
+    result = OrderResult(
+        trade_id="rt-exec-nonfinal",
+        status="filled",
+        fill_price=0.60,
+        submitted_price=0.55,
+        shares=20.0,
+        command_state="ACKED",
+    )
+
+    log_execution_report(conn, pos, result, decision_id="dec-nonfinal")
+    conn.commit()
+
+    fact = conn.execute(
+        """
+        SELECT decision_id, filled_at, submitted_price, fill_price, shares, fill_quality,
+               venue_status, terminal_exec_status
+        FROM execution_fact
+        WHERE intent_id = 'rt-exec-nonfinal:entry'
+        """
+    ).fetchone()
+    conn.close()
+
+    assert fact["decision_id"] == "dec-nonfinal"
+    assert fact["filled_at"] is None
+    assert fact["submitted_price"] == pytest.approx(0.55)
+    assert fact["fill_price"] is None
+    assert fact["shares"] is None
+    assert fact["fill_quality"] is None
+    assert fact["venue_status"] == "filled"
+    assert fact["terminal_exec_status"] == "pending_fill_authority"
+
+
+def test_log_execution_report_uses_entry_fill_authority_average_not_limit_price(tmp_path):
+    from src.execution.executor import OrderResult
+    from src.state.db import log_execution_report
+    from src.state.portfolio import (
+        ENTRY_ECONOMICS_AVG_FILL_PRICE,
+        FILL_AUTHORITY_VENUE_CONFIRMED_FULL,
+        Position,
+    )
+
+    db_path = tmp_path / "test.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+    _create_execution_fact_table(conn)
+    shares = 24.39
+    submitted_limit = 0.40
+    avg_fill = 0.41
+
+    pos = Position(
+        trade_id="rt-exec-authority-fill",
+        market_id="m4",
+        city="NYC",
+        cluster="US-Northeast",
+        target_date="2026-04-01",
+        bin_label="39-40°F",
+        direction="buy_yes",
+        unit="F",
+        size_usd=shares * avg_fill,
+        entry_price=submitted_limit,
+        entry_price_submitted=submitted_limit,
+        entry_price_avg_fill=avg_fill,
+        shares=shares,
+        shares_filled=shares,
+        filled_cost_basis_usd=shares * avg_fill,
+        p_posterior=0.60,
+        edge=0.05,
+        order_posted_at="2026-04-01T01:00:00Z",
+        entered_at="2026-04-01T01:00:05Z",
+        order_status="filled",
+        state="entered",
+        strategy_key="center_buy",
+        strategy="center_buy",
+        entry_economics_authority=ENTRY_ECONOMICS_AVG_FILL_PRICE,
+        fill_authority=FILL_AUTHORITY_VENUE_CONFIRMED_FULL,
+    )
+    result = OrderResult(
+        trade_id="rt-exec-authority-fill",
+        status="filled",
+        fill_price=submitted_limit,
+        filled_at="2026-04-01T01:00:05Z",
+        submitted_price=submitted_limit,
+        shares=shares,
+        command_state="FILLED",
+    )
+
+    log_execution_report(conn, pos, result, decision_id="dec-authority-fill")
+    conn.commit()
+
+    fact = conn.execute(
+        """
+        SELECT submitted_price, fill_price, shares, fill_quality, terminal_exec_status
+        FROM execution_fact
+        WHERE intent_id = 'rt-exec-authority-fill:entry'
+        """
+    ).fetchone()
+    conn.close()
+
+    assert fact["submitted_price"] == pytest.approx(submitted_limit)
+    assert fact["fill_price"] == pytest.approx(avg_fill)
+    assert fact["shares"] == pytest.approx(shares)
+    assert fact["fill_quality"] == pytest.approx((avg_fill - submitted_limit) / submitted_limit)
+    assert fact["terminal_exec_status"] == "filled"
+
+
+def test_log_execution_report_clears_stale_nonfinal_fill_telemetry(tmp_path):
+    from src.execution.executor import OrderResult
+    from src.state.db import log_execution_fact, log_execution_report
+    from src.state.portfolio import (
+        ENTRY_ECONOMICS_SUBMITTED_LIMIT,
+        FILL_AUTHORITY_NONE,
+        Position,
+    )
+
+    db_path = tmp_path / "test.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+    _create_execution_fact_table(conn)
+    log_execution_fact(
+        conn,
+        intent_id="rt-exec-stale:entry",
+        position_id="rt-exec-stale",
+        decision_id="old-dec",
+        order_role="entry",
+        strategy_key="center_buy",
+        posted_at="2026-04-01T01:00:00Z",
+        filled_at="2026-04-01T01:00:03Z",
+        submitted_price=0.55,
+        fill_price=0.60,
+        shares=20.0,
+        fill_quality=0.09,
+        latency_seconds=3.0,
+        venue_status="filled",
+        terminal_exec_status="filled",
+    )
+    conn.commit()
+
+    pos = Position(
+        trade_id="rt-exec-stale",
+        market_id="m4",
+        city="NYC",
+        cluster="US-Northeast",
+        target_date="2026-04-01",
+        bin_label="39-40°F",
+        direction="buy_yes",
+        unit="F",
+        size_usd=11.0,
+        entry_price=0.55,
+        entry_price_submitted=0.55,
+        p_posterior=0.60,
+        edge=0.05,
+        shares=20.0,
+        order_posted_at="2026-04-01T01:00:00Z",
+        order_status="filled",
+        state="pending_tracked",
+        strategy_key="center_buy",
+        strategy="center_buy",
+        entry_economics_authority=ENTRY_ECONOMICS_SUBMITTED_LIMIT,
+        fill_authority=FILL_AUTHORITY_NONE,
+    )
+    result = OrderResult(
+        trade_id="rt-exec-stale",
+        status="filled",
+        fill_price=0.61,
+        submitted_price=0.55,
+        shares=21.0,
+        command_state="ACKED",
+    )
+
+    log_execution_report(conn, pos, result, decision_id="dec-nonfinal")
+    conn.commit()
+
+    fact = conn.execute(
+        """
+        SELECT decision_id, filled_at, submitted_price, fill_price, shares, fill_quality,
+               latency_seconds, venue_status, terminal_exec_status
+        FROM execution_fact
+        WHERE intent_id = 'rt-exec-stale:entry'
+        """
+    ).fetchone()
+    conn.close()
+
+    assert fact["decision_id"] == "dec-nonfinal"
+    assert fact["filled_at"] is None
+    assert fact["submitted_price"] == pytest.approx(0.55)
+    assert fact["fill_price"] is None
+    assert fact["shares"] is None
+    assert fact["fill_quality"] is None
+    assert fact["latency_seconds"] is None
+    assert fact["venue_status"] == "filled"
+    assert fact["terminal_exec_status"] == "pending_fill_authority"
+
+
+def test_log_execution_report_clears_stale_pending_fill_like_telemetry(tmp_path):
+    from src.execution.executor import OrderResult
+    from src.state.db import log_execution_fact, log_execution_report, query_p4_fact_smoke_summary
+    from src.state.portfolio import (
+        ENTRY_ECONOMICS_SUBMITTED_LIMIT,
+        FILL_AUTHORITY_NONE,
+        Position,
+    )
+
+    db_path = tmp_path / "test.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+    _create_execution_fact_table(conn)
+    log_execution_fact(
+        conn,
+        intent_id="rt-exec-pending-stale:entry",
+        position_id="rt-exec-pending-stale",
+        decision_id="old-dec",
+        order_role="entry",
+        strategy_key="center_buy",
+        posted_at="2026-04-01T01:00:00Z",
+        filled_at="2026-04-01T01:00:03Z",
+        submitted_price=0.55,
+        fill_price=0.60,
+        shares=20.0,
+        fill_quality=0.09,
+        latency_seconds=3.0,
+        venue_status="filled",
+        terminal_exec_status="filled",
+    )
+    conn.commit()
+
+    pos = Position(
+        trade_id="rt-exec-pending-stale",
+        market_id="m4",
+        city="NYC",
+        cluster="US-Northeast",
+        target_date="2026-04-01",
+        bin_label="39-40°F",
+        direction="buy_yes",
+        unit="F",
+        size_usd=11.0,
+        entry_price=0.55,
+        entry_price_submitted=0.55,
+        p_posterior=0.60,
+        edge=0.05,
+        shares=20.0,
+        order_posted_at="2026-04-01T01:00:00Z",
+        order_status="pending",
+        state="pending_tracked",
+        strategy_key="center_buy",
+        strategy="center_buy",
+        entry_economics_authority=ENTRY_ECONOMICS_SUBMITTED_LIMIT,
+        fill_authority=FILL_AUTHORITY_NONE,
+    )
+    result = OrderResult(
+        trade_id="rt-exec-pending-stale",
+        status="pending",
+        fill_price=0.61,
+        submitted_price=0.55,
+        shares=21.0,
+        command_state="ACKED",
+    )
+
+    log_execution_report(conn, pos, result, decision_id="dec-pending-nonfinal")
+    conn.commit()
+
+    fact = conn.execute(
+        """
+        SELECT decision_id, filled_at, submitted_price, fill_price, shares, fill_quality,
+               latency_seconds, venue_status, terminal_exec_status
+        FROM execution_fact
+        WHERE intent_id = 'rt-exec-pending-stale:entry'
+        """
+    ).fetchone()
+    summary = query_p4_fact_smoke_summary(conn)
+    conn.close()
+
+    assert fact["decision_id"] == "dec-pending-nonfinal"
+    assert fact["filled_at"] is None
+    assert fact["submitted_price"] == pytest.approx(0.55)
+    assert fact["fill_price"] is None
+    assert fact["shares"] is None
+    assert fact["fill_quality"] is None
+    assert fact["latency_seconds"] is None
+    assert fact["venue_status"] == "pending"
+    assert fact["terminal_exec_status"] == "pending_fill_authority"
+    assert summary["execution"]["avg_fill_quality"] is None
+
+
+def test_log_exit_attempt_clears_stale_nonfinal_exit_fill_telemetry(tmp_path):
+    from src.state.db import (
+        log_execution_fact,
+        log_exit_attempt_event,
+        query_p4_fact_smoke_summary,
+    )
+    from src.state.portfolio import Position
+
+    db_path = tmp_path / "test.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+    _create_execution_fact_table(conn)
+    log_execution_fact(
+        conn,
+        intent_id="rt-exit-stale:exit",
+        position_id="rt-exit-stale",
+        decision_id="old-dec",
+        order_role="exit",
+        strategy_key="center_buy",
+        posted_at="2026-04-01T01:00:00Z",
+        filled_at="2026-04-01T01:05:00Z",
+        submitted_price=0.44,
+        fill_price=0.43,
+        shares=25.0,
+        fill_quality=-0.02,
+        latency_seconds=300.0,
+        venue_status="CONFIRMED",
+        terminal_exec_status="filled",
+    )
+    conn.commit()
+
+    pos = Position(
+        trade_id="rt-exit-stale",
+        market_id="m7",
+        city="NYC",
+        cluster="US-Northeast",
+        target_date="2026-04-01",
+        bin_label="39-40°F",
+        direction="buy_yes",
+        unit="F",
+        size_usd=10.0,
+        entry_price=0.40,
+        p_posterior=0.60,
+        edge=0.20,
+        strategy="center_buy",
+        edge_source="center_buy",
+        exit_reason="EDGE_REVERSAL",
+        state="holding",
+        exit_state="sell_pending",
+        shares=25.0,
+        last_exit_order_id="sell-1",
+        last_monitor_market_price=0.44,
+    )
+
+    log_exit_attempt_event(
+        conn,
+        pos,
+        order_id="sell-2",
+        status="placed",
+        current_market_price=0.44,
+        best_bid=0.43,
+        shares=25.0,
+        timestamp="2026-04-01T01:10:00Z",
+    )
+    conn.commit()
+
+    fact = conn.execute(
+        """
+        SELECT filled_at, submitted_price, fill_price, shares, fill_quality,
+               latency_seconds, venue_status, terminal_exec_status
+        FROM execution_fact
+        WHERE intent_id = 'rt-exit-stale:exit'
+        """
+    ).fetchone()
+    summary = query_p4_fact_smoke_summary(conn)
+    conn.close()
+
+    assert fact["filled_at"] is None
+    assert fact["submitted_price"] == pytest.approx(0.44)
+    assert fact["fill_price"] is None
+    assert fact["shares"] is None
+    assert fact["fill_quality"] is None
+    assert fact["latency_seconds"] is None
+    assert fact["venue_status"] == "placed"
+    assert fact["terminal_exec_status"] == "placed"
+    assert summary["execution"]["avg_fill_quality"] is None
+
+
+def test_log_execution_report_clears_stale_missing_status_fill_authority(tmp_path):
+    from src.execution.executor import OrderResult
+    from src.state.db import log_execution_fact, log_execution_report, query_p4_fact_smoke_summary
+    from src.state.portfolio import (
+        ENTRY_ECONOMICS_SUBMITTED_LIMIT,
+        FILL_AUTHORITY_NONE,
+        Position,
+    )
+
+    db_path = tmp_path / "test.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+    _create_execution_fact_table(conn)
+    log_execution_fact(
+        conn,
+        intent_id="rt-exec-missing-status:entry",
+        position_id="rt-exec-missing-status",
+        decision_id="old-dec",
+        order_role="entry",
+        strategy_key="center_buy",
+        posted_at="2026-04-01T01:00:00Z",
+        filled_at="2026-04-01T01:00:03Z",
+        submitted_price=0.55,
+        fill_price=0.60,
+        shares=20.0,
+        fill_quality=0.09,
+        latency_seconds=3.0,
+        venue_status="CONFIRMED",
+        terminal_exec_status="filled",
+    )
+    conn.commit()
+
+    pos = Position(
+        trade_id="rt-exec-missing-status",
+        market_id="m4",
+        city="NYC",
+        cluster="US-Northeast",
+        target_date="2026-04-01",
+        bin_label="39-40°F",
+        direction="buy_yes",
+        unit="F",
+        size_usd=11.0,
+        entry_price=0.55,
+        entry_price_submitted=0.55,
+        p_posterior=0.60,
+        edge=0.05,
+        shares=20.0,
+        order_posted_at="2026-04-01T01:00:00Z",
+        order_status="",
+        state="pending_tracked",
+        strategy_key="center_buy",
+        strategy="center_buy",
+        entry_economics_authority=ENTRY_ECONOMICS_SUBMITTED_LIMIT,
+        fill_authority=FILL_AUTHORITY_NONE,
+    )
+    result = OrderResult(
+        trade_id="rt-exec-missing-status",
+        status="",
+        fill_price=None,
+        submitted_price=0.55,
+        shares=21.0,
+        command_state="ACKED",
+    )
+
+    log_execution_report(conn, pos, result, decision_id="dec-missing-status")
+    conn.commit()
+
+    fact = conn.execute(
+        """
+        SELECT decision_id, filled_at, submitted_price, fill_price, shares, fill_quality,
+               latency_seconds, venue_status, terminal_exec_status
+        FROM execution_fact
+        WHERE intent_id = 'rt-exec-missing-status:entry'
+        """
+    ).fetchone()
+    summary = query_p4_fact_smoke_summary(conn)
+    conn.close()
+
+    assert fact["decision_id"] == "dec-missing-status"
+    assert fact["filled_at"] is None
+    assert fact["submitted_price"] == pytest.approx(0.55)
+    assert fact["fill_price"] is None
+    assert fact["shares"] is None
+    assert fact["fill_quality"] is None
+    assert fact["latency_seconds"] is None
+    assert fact["venue_status"] == "pending_fill_authority"
+    assert fact["terminal_exec_status"] == "pending_fill_authority"
+    assert summary["execution"]["terminal_status_counts"] == {"pending_fill_authority": 1}
+    assert summary["execution"]["avg_fill_quality"] is None
+
+
 @pytest.mark.skip(reason="P9: legacy position_events write path eliminated")
 def test_log_settlement_event_emits_durable_record(tmp_path):
     from src.state.db import log_settlement_event, query_position_events
@@ -1727,6 +2466,10 @@ def test_query_authoritative_settlement_rows_falls_back_to_decision_log(tmp_path
     assert rows[0]["authority_level"] == "legacy_decision_log_fallback"
     assert rows[0]["is_degraded"] is True
     assert rows[0]["canonical_payload_complete"] is False
+    assert rows[0]["metric_ready"] is False
+    assert rows[0]["learning_snapshot_ready"] is False
+    assert rows[0]["settlement_authority"] == "LEGACY_UNKNOWN"
+    assert rows[0]["settlement_truth_source"] == "decision_log"
     assert {
         "winning_bin",
         "position_bin",
@@ -1736,6 +2479,176 @@ def test_query_authoritative_settlement_rows_falls_back_to_decision_log(tmp_path
     }.issubset(set(rows[0]["contract_missing_fields"]))
     assert rows[0]["outcome"] == 1
     assert rows[0]["pnl"] == pytest.approx(12.5)
+
+
+def test_query_authoritative_settlement_rows_accepts_env_keyword_for_portfolio_compat(tmp_path):
+    from src.state.db import query_authoritative_settlement_rows
+
+    conn = get_connection(tmp_path / "settlement-env-compat.db")
+    init_schema(conn)
+
+    assert query_authoritative_settlement_rows(conn, limit=None, env="live") == []
+
+    conn.close()
+
+
+def test_query_authoritative_settlement_rows_requires_verified_settlement_truth(tmp_path):
+    from src.engine.lifecycle_events import build_settlement_canonical_write
+    from src.state.db import append_many_and_project, query_authoritative_settlement_rows
+    from src.state.portfolio import Position
+
+    db_path = tmp_path / "test.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+    pos = Position(
+        trade_id="verified-settle",
+        market_id="m-verified",
+        city="NYC",
+        cluster="US-Northeast",
+        target_date="2026-04-01",
+        bin_label="39-40°F",
+        direction="buy_yes",
+        unit="F",
+        size_usd=10.0,
+        entry_price=0.40,
+        p_posterior=0.61,
+        decision_snapshot_id="snap-verified",
+        strategy_key="center_buy",
+        strategy="center_buy",
+        edge_source="center_buy",
+        exit_price=1.0,
+        pnl=15.0,
+        exit_reason="SETTLEMENT",
+        last_exit_at="2026-04-01T23:00:00Z",
+        state="settled",
+    )
+
+    events, projection = build_settlement_canonical_write(
+        pos,
+        winning_bin="39-40°F",
+        won=True,
+        outcome=1,
+        sequence_no=1,
+        phase_before="pending_exit",
+        settlement_authority="VERIFIED",
+        settlement_truth_source="world.settlements",
+        settlement_market_slug="nyc-high-2026-04-01",
+        settlement_temperature_metric="high",
+        settlement_source="WU",
+        settlement_value=40.0,
+    )
+    append_many_and_project(conn, events, projection)
+    rows = query_authoritative_settlement_rows(conn, limit=10)
+    conn.close()
+
+    assert len(rows) == 1
+    assert rows[0]["source"] == "position_events"
+    assert rows[0]["settlement_authority"] == "VERIFIED"
+    assert rows[0]["settlement_truth_source"] == "world.settlements"
+    assert rows[0]["settlement_temperature_metric"] == "high"
+    assert rows[0]["settlement_value"] == pytest.approx(40.0)
+    assert rows[0]["canonical_payload_complete"] is True
+    assert rows[0]["metric_ready"] is True
+    assert rows[0]["learning_snapshot_ready"] is True
+
+
+def test_query_authoritative_settlement_rows_degrades_settled_event_without_truth_authority(tmp_path):
+    from src.engine.lifecycle_events import build_settlement_canonical_write
+    from src.state.db import append_many_and_project, query_authoritative_settlement_rows
+    from src.state.portfolio import Position
+
+    db_path = tmp_path / "test.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+    pos = Position(
+        trade_id="legacy-shaped-settle",
+        market_id="m-legacy-shaped",
+        city="NYC",
+        cluster="US-Northeast",
+        target_date="2026-04-01",
+        bin_label="39-40°F",
+        direction="buy_yes",
+        unit="F",
+        size_usd=10.0,
+        entry_price=0.40,
+        p_posterior=0.61,
+        decision_snapshot_id="snap-legacy-shaped",
+        strategy_key="center_buy",
+        strategy="center_buy",
+        edge_source="center_buy",
+        exit_price=1.0,
+        pnl=15.0,
+        exit_reason="SETTLEMENT",
+        last_exit_at="2026-04-01T23:00:00Z",
+        state="settled",
+    )
+
+    events, projection = build_settlement_canonical_write(
+        pos,
+        winning_bin="39-40°F",
+        won=True,
+        outcome=1,
+        sequence_no=1,
+        phase_before="pending_exit",
+    )
+    append_many_and_project(conn, events, projection)
+    rows = query_authoritative_settlement_rows(conn, limit=10)
+    conn.close()
+
+    assert len(rows) == 1
+    assert rows[0]["source"] == "position_events"
+    assert rows[0]["settlement_authority"] == "UNKNOWN"
+    assert rows[0]["metric_ready"] is False
+    assert rows[0]["learning_snapshot_ready"] is False
+    assert rows[0]["is_degraded"] is True
+    assert "missing_verified_settlement_truth" in rows[0]["degraded_reason"]
+
+
+def test_query_learning_surface_summary_excludes_metric_unready_settlement_rows(monkeypatch, tmp_path):
+    import src.state.db as db_module
+    from src.state.decision_chain import query_learning_surface_summary
+
+    db_path = tmp_path / "test.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+    monkeypatch.setattr(
+        db_module,
+        "query_authoritative_settlement_rows",
+        lambda *_args, **_kwargs: [
+            {
+                "trade_id": "legacy-settle",
+                "strategy": "shoulder_sell",
+                "pnl": 99.0,
+                "outcome": 1,
+                "metric_ready": False,
+                "is_degraded": True,
+                "settlement_authority": "LEGACY_UNKNOWN",
+            },
+            {
+                "trade_id": "verified-settle",
+                "strategy": "center_buy",
+                "pnl": 4.2,
+                "outcome": 1,
+                "metric_ready": True,
+                "is_degraded": False,
+                "settlement_authority": "VERIFIED",
+            },
+        ],
+    )
+    monkeypatch.setattr(
+        db_module,
+        "query_execution_event_summary",
+        lambda *_args, **_kwargs: {"overall": {}, "by_strategy": {}},
+    )
+
+    summary = query_learning_surface_summary(conn)
+    conn.close()
+
+    assert summary["settlement_sample_size"] == 1
+    assert summary["settlement_degraded_count"] == 1
+    assert "shoulder_sell" not in summary["by_strategy"]
+    assert summary["by_strategy"]["center_buy"]["settlement_count"] == 1
+    assert summary["by_strategy"]["center_buy"]["settlement_pnl"] == pytest.approx(4.2)
 
 
 @pytest.mark.skip(reason="P9: legacy position_events write path eliminated")
@@ -1825,79 +2738,18 @@ def test_query_authoritative_settlement_rows_marks_malformed_position_event(tmp_
     assert "p_posterior" in rows[0]["required_missing_fields"]
 
 
-@pytest.mark.skip(reason="P9: legacy position_events write path eliminated")
-def test_query_authoritative_settlement_rows_filters_by_env(tmp_path):
-    from src.state.db import log_settlement_event, query_authoritative_settlement_rows
-    from src.state.portfolio import Position
-
-    db_path = tmp_path / "test.db"
-    conn = get_connection(db_path)
-    init_schema(conn)
-
-    paper_pos = Position(
-        trade_id="paper-settle",
-        market_id="m-paper",
-        city="NYC",
-        cluster="US-Northeast",
-        target_date="2026-04-01",
-        bin_label="39-40°F",
-        direction="buy_yes",
-        unit="F",
-        size_usd=10.0,
-        entry_price=0.4,
-        p_posterior=0.6,
-        edge=0.2,
-        exit_price=1.0,
-        pnl=6.0,
-        exit_reason="SETTLEMENT",
-        last_exit_at="2026-04-01T23:00:00Z",
-        state="settled",
-        env="paper",
-    )
-    live_pos = Position(
-        trade_id="live-settle",
-        market_id="m-live",
-        city="NYC",
-        cluster="US-Northeast",
-        target_date="2026-04-01",
-        bin_label="41-42°F",
-        direction="buy_yes",
-        unit="F",
-        size_usd=10.0,
-        entry_price=0.4,
-        p_posterior=0.7,
-        edge=0.3,
-        exit_price=1.0,
-        pnl=7.0,
-        exit_reason="SETTLEMENT",
-        last_exit_at="2026-04-01T23:00:00Z",
-        state="settled",
-        env="live",
-    )
-    log_settlement_event(conn, paper_pos, winning_bin="39-40°F", won=True, outcome=1)
-    log_settlement_event(conn, live_pos, winning_bin="41-42°F", won=True, outcome=1)
-    conn.commit()
-
-    paper_rows = query_authoritative_settlement_rows(conn, limit=10, env="paper")
-    live_rows = query_authoritative_settlement_rows(conn, limit=10, env="live")
-    conn.close()
-
-    assert [row["trade_id"] for row in paper_rows] == ["paper-settle"]
-    assert [row["trade_id"] for row in live_rows] == ["live-settle"]
-
-
-def test_query_legacy_settlement_records_filters_by_env(tmp_path):
+def test_query_legacy_settlement_records_reads_live_only_rows(tmp_path):
     from src.state.decision_chain import query_legacy_settlement_records
 
     db_path = tmp_path / "test.db"
     conn = get_connection(db_path)
     init_schema(conn)
 
-    paper_artifact = {
+    diagnostic_artifact = {
         "mode": "settlement",
         "settlements": [
             {
-                "trade_id": "paper-legacy",
+                "trade_id": "diagnostic-legacy",
                 "city": "NYC",
                 "target_date": "2026-04-01",
                 "range_label": "39-40°F",
@@ -1927,7 +2779,7 @@ def test_query_legacy_settlement_records_filters_by_env(tmp_path):
     }
     conn.execute(
         "INSERT INTO decision_log (mode, started_at, completed_at, artifact_json, timestamp, env) VALUES (?, ?, ?, ?, ?, ?)",
-        ("settlement", "2026-04-01T23:00:00Z", "2026-04-01T23:00:00Z", json.dumps(paper_artifact), "2026-04-01T23:00:00Z", "paper"),
+        ("settlement", "2026-04-01T23:00:00Z", "2026-04-01T23:00:00Z", json.dumps(diagnostic_artifact), "2026-04-01T23:00:00Z", "diagnostic"),
     )
     conn.execute(
         "INSERT INTO decision_log (mode, started_at, completed_at, artifact_json, timestamp, env) VALUES (?, ?, ?, ?, ?, ?)",
@@ -1935,12 +2787,10 @@ def test_query_legacy_settlement_records_filters_by_env(tmp_path):
     )
     conn.commit()
 
-    paper_rows = query_legacy_settlement_records(conn, limit=10, env="paper")
-    live_rows = query_legacy_settlement_records(conn, limit=10, env="live")
+    rows = query_legacy_settlement_records(conn, limit=10)
     conn.close()
 
-    assert [row["trade_id"] for row in paper_rows] == ["paper-legacy"]
-    assert [row["trade_id"] for row in live_rows] == ["live-legacy"]
+    assert [row["trade_id"] for row in rows] == ["live-legacy"]
 
 
 @pytest.mark.skip(reason="P9: legacy position_events write path eliminated")
@@ -2010,7 +2860,7 @@ def test_query_settlement_events_latest_wins_by_runtime_trade_id(tmp_path):
     )
     conn.commit()
 
-    rows = query_settlement_events(conn, limit=10, env="paper")
+    rows = query_settlement_events(conn, limit=10)
     conn.close()
 
     assert len(rows) == 1
@@ -2108,7 +2958,7 @@ def test_query_settlement_events_preserves_distinct_trade_ids_when_deduping_dupl
     )
     conn.commit()
 
-    rows = query_settlement_events(conn, limit=10, env="paper")
+    rows = query_settlement_events(conn, limit=10)
     conn.close()
 
     assert sorted(row["runtime_trade_id"] for row in rows) == ["dup-stage", "other-stage"]
@@ -2168,7 +3018,7 @@ def test_query_authoritative_settlement_rows_dedupes_legacy_stage_rows_by_trade_
         )
     conn.commit()
 
-    rows = query_authoritative_settlement_rows(conn, limit=10, env="paper")
+    rows = query_authoritative_settlement_rows(conn, limit=10)
     conn.close()
 
     assert len(rows) == 1
@@ -2196,7 +3046,7 @@ def test_query_execution_event_summary_groups_entry_and_exit_events(tmp_path):
         direction="buy_yes",
         strategy="center_buy",
         edge_source="center_buy",
-        env="paper",
+        env="live",
     )
     log_position_event(conn, "ORDER_ATTEMPTED", pos, details={"status": "pending"}, source="execution")
     log_position_event(conn, "ORDER_FILLED", pos, details={"status": "filled"}, source="execution")
@@ -2204,7 +3054,7 @@ def test_query_execution_event_summary_groups_entry_and_exit_events(tmp_path):
     log_position_event(conn, "EXIT_RETRY_SCHEDULED", pos, details={"status": "retry"}, source="exit_lifecycle")
     conn.commit()
 
-    summary = query_execution_event_summary(conn, env="paper")
+    summary = query_execution_event_summary(conn)
     conn.close()
 
     assert summary["event_sample_size"] == 4
@@ -2215,16 +3065,16 @@ def test_query_execution_event_summary_groups_entry_and_exit_events(tmp_path):
     assert summary["by_strategy"]["center_buy"]["entry_filled"] == 1
 
 
-def test_query_no_trade_cases_filters_by_env(tmp_path):
+def test_query_no_trade_cases_reads_live_only_rows(tmp_path):
     from src.state.decision_chain import query_no_trade_cases
 
     db_path = tmp_path / "test.db"
     conn = get_connection(db_path)
     init_schema(conn)
-    paper_artifact = {
+    diagnostic_artifact = {
         "no_trade_cases": [
             {
-                "decision_id": "paper-1",
+                "decision_id": "diagnostic-1",
                 "city": "NYC",
                 "target_date": "2026-04-01",
                 "range_label": "39-40°F",
@@ -2250,7 +3100,7 @@ def test_query_no_trade_cases_filters_by_env(tmp_path):
     now = datetime.now(timezone.utc).isoformat()
     conn.execute(
         "INSERT INTO decision_log (mode, started_at, completed_at, artifact_json, timestamp, env) VALUES (?, ?, ?, ?, ?, ?)",
-        ("opening_hunt", now, now, json.dumps(paper_artifact), now, "paper"),
+        ("opening_hunt", now, now, json.dumps(diagnostic_artifact), now, "diagnostic"),
     )
     conn.execute(
         "INSERT INTO decision_log (mode, started_at, completed_at, artifact_json, timestamp, env) VALUES (?, ?, ?, ?, ?, ?)",
@@ -2258,12 +3108,10 @@ def test_query_no_trade_cases_filters_by_env(tmp_path):
     )
     conn.commit()
 
-    paper_cases = query_no_trade_cases(conn, hours=24, env="paper")
-    live_cases = query_no_trade_cases(conn, hours=24, env="live")
+    cases = query_no_trade_cases(conn, hours=24)
     conn.close()
 
-    assert [case["decision_id"] for case in paper_cases] == ["paper-1"]
-    assert [case["decision_id"] for case in live_cases] == ["live-1"]
+    assert [case["decision_id"] for case in cases] == ["live-1"]
 
 
 @pytest.mark.skip(reason="P9: legacy position_events write path eliminated")
@@ -2300,7 +3148,7 @@ def test_query_learning_surface_summary_combines_settlement_no_trade_and_executi
                 }
             ),
             now,
-            "paper",
+            "live",
         ),
     )
     pos = Position(
@@ -2319,7 +3167,7 @@ def test_query_learning_surface_summary_combines_settlement_no_trade_and_executi
         exit_reason="SETTLEMENT",
         last_exit_at=now,
         state="settled",
-        env="paper",
+        env="live",
         size_usd=10.0,
         entry_price=0.4,
         p_posterior=0.7,
@@ -2329,7 +3177,7 @@ def test_query_learning_surface_summary_combines_settlement_no_trade_and_executi
     log_position_event(conn, "ORDER_REJECTED", pos, details={"status": "rejected"}, source="execution")
     conn.commit()
 
-    summary = query_learning_surface_summary(conn, env="paper")
+    summary = query_learning_surface_summary(conn)
     conn.close()
 
     assert summary["settlement_sample_size"] == 1
@@ -2388,7 +3236,7 @@ def test_query_no_trade_cases_filters_recent_rows_by_real_timestamp(monkeypatch,
             "2026-04-02T00:01:00+00:00",
             json.dumps(older_artifact),
             "2026-04-02T00:30:00+00:00",
-            "paper",
+            "live",
         ),
     )
     conn.execute(
@@ -2399,13 +3247,13 @@ def test_query_no_trade_cases_filters_recent_rows_by_real_timestamp(monkeypatch,
             "2026-04-02T23:01:00+00:00",
             json.dumps(newer_artifact),
             "2026-04-02T23:15:00+00:00",
-            "paper",
+            "live",
         ),
     )
     conn.commit()
 
     monkeypatch.setattr(decision_chain_module, "datetime", FrozenDatetime)
-    cases = decision_chain_module.query_no_trade_cases(conn, hours=1, env="paper")
+    cases = decision_chain_module.query_no_trade_cases(conn, hours=1)
     conn.close()
 
     assert [case["decision_id"] for case in cases] == ["newer"]
@@ -2457,11 +3305,11 @@ def test_query_learning_surface_summary_respects_current_regime_start(tmp_path):
     }
     conn.execute(
         "INSERT INTO decision_log (mode, started_at, completed_at, artifact_json, timestamp, env) VALUES (?, ?, ?, ?, ?, ?)",
-        ("opening_hunt", old_ts, old_ts, json.dumps(old_artifact), old_ts, "paper"),
+        ("opening_hunt", old_ts, old_ts, json.dumps(old_artifact), old_ts, "live"),
     )
     conn.execute(
         "INSERT INTO decision_log (mode, started_at, completed_at, artifact_json, timestamp, env) VALUES (?, ?, ?, ?, ?, ?)",
-        ("opening_hunt", new_ts, new_ts, json.dumps(new_artifact), new_ts, "paper"),
+        ("opening_hunt", new_ts, new_ts, json.dumps(new_artifact), new_ts, "live"),
     )
 
     old_pos = Position(
@@ -2480,7 +3328,7 @@ def test_query_learning_surface_summary_respects_current_regime_start(tmp_path):
         exit_reason="SETTLEMENT",
         last_exit_at=old_ts,
         state="settled",
-        env="paper",
+        env="live",
         size_usd=10.0,
         entry_price=0.4,
         p_posterior=0.7,
@@ -2502,7 +3350,7 @@ def test_query_learning_surface_summary_respects_current_regime_start(tmp_path):
         exit_reason="SETTLEMENT",
         last_exit_at=new_ts,
         state="settled",
-        env="paper",
+        env="live",
         size_usd=10.0,
         entry_price=0.4,
         p_posterior=0.7,
@@ -2516,7 +3364,6 @@ def test_query_learning_surface_summary_respects_current_regime_start(tmp_path):
 
     summary = query_learning_surface_summary(
         conn,
-        env="paper",
         not_before=current_regime_started_at,
     )
     conn.close()
@@ -2559,7 +3406,7 @@ def test_query_learning_surface_summary_does_not_cap_regime_scoped_samples(tmp_p
         }
         conn.execute(
             "INSERT INTO decision_log (mode, started_at, completed_at, artifact_json, timestamp, env) VALUES (?, ?, ?, ?, ?, ?)",
-            ("opening_hunt", ts, ts, json.dumps(artifact), ts, "paper"),
+            ("opening_hunt", ts, ts, json.dumps(artifact), ts, "live"),
         )
         pos = Position(
             trade_id=f"settle-{i}",
@@ -2577,7 +3424,7 @@ def test_query_learning_surface_summary_does_not_cap_regime_scoped_samples(tmp_p
             exit_reason="SETTLEMENT",
             last_exit_at=ts,
             state="settled",
-            env="paper",
+            env="live",
             size_usd=10.0,
             entry_price=0.4,
             p_posterior=0.7,
@@ -2595,7 +3442,7 @@ def test_query_learning_surface_summary_does_not_cap_regime_scoped_samples(tmp_p
             direction="buy_yes",
             strategy="center_buy",
             edge_source="center_buy",
-            env="paper",
+            env="live",
         )
         log_position_event(
             conn,
@@ -2609,7 +3456,6 @@ def test_query_learning_surface_summary_does_not_cap_regime_scoped_samples(tmp_p
 
     summary = query_learning_surface_summary(
         conn,
-        env="paper",
         not_before=current_regime_started_at,
     )
     conn.close()

@@ -116,7 +116,6 @@ test_trust_policy:
     tests/test_k2_live_ingestion_relationships.py: {created: "2026-04-13", last_used: "2026-04-25"}
     tests/test_k6_slice_n.py: {created: "2026-04-17", last_used: "2026-04-30"}
     tests/test_kelly_cascade_bounds.py: {created: "2026-04-07", last_used: "2026-04-23"}
-    tests/test_kelly_live_safety_cap.py: {created: "2026-04-11", last_used: "2026-04-23"}
     tests/test_live_execution.py: {created: "2026-04-27", last_used: "2026-04-27"}
     tests/test_live_safe_strategies.py: {created: "2026-04-26", last_used: "2026-05-02"}
     tests/test_live_safety_invariants.py: {created: "2026-03-31", last_used: "2026-04-29"}
@@ -342,7 +341,6 @@ categories:
     - tests/test_k2_live_ingestion_relationships.py
     - tests/test_instrument_invariants.py
     - tests/test_kelly_cascade_bounds.py
-    - tests/test_kelly_live_safety_cap.py
     - tests/test_lifecycle.py
     - tests/test_live_safety_invariants.py
     - tests/test_no_bare_float_seams.py
@@ -558,7 +556,6 @@ categories:
     - tests/test_live_safety_invariants.py
     - tests/test_provenance_enforcement.py
     - tests/test_kelly_cascade_bounds.py
-    - tests/test_kelly_live_safety_cap.py
     - tests/test_execution_price.py
     - tests/test_ensemble_signal.py
     - tests/test_calibration_bins_canonical.py
@@ -852,7 +849,7 @@ high_sensitivity_skips:
     reason: Canonical write path and contamination-guard relocation skips remain safety-sensitive.
     skip_count: 3
     reason_patterns:
-      - "paper-mode was removed in Phase2"
+      - "non-live execution was removed in Phase2"
       - "_load_portfolio_from_json_data contamination-guard path are deleted"
     sunset: Must have replacement live-safety antibodies before deletion.
   tests/test_truth_surface_health.py:
@@ -894,16 +891,15 @@ high_sensitivity_skips:
   tests/test_pnl_flow_and_audit.py:
     owner: topology-program
     packet: Packet 5
-    reason: BI-05 and paper-mode skips touch PnL/audit truth boundaries.
-    skip_count: 5
+    reason: BI-05 skips touch PnL/audit truth boundaries.
+    skip_count: 4
     reason_patterns:
       - "BI-05"
-      - "Phase2: paper_mode removed"
     sunset: Resolve after runtime no longer imports forbidden portfolio surfaces.
   tests/test_truth_layer.py:
     owner: topology-program
     packet: Packet 5
-    reason: K1 no-op tracker/paper elimination tests are transitional but truth-layer sensitive.
+    reason: K1 no-op tracker/non-live execution elimination tests are transitional but truth-layer sensitive.
     skip_count: 5
     reason_patterns:
       - "K1: save_tracker is no-op"

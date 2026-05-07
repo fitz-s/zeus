@@ -30,7 +30,7 @@ Primary deliverables hold under their disk-verified claims. P3.1 vocabulary grep
 
 - **L0 / L0.0**: Authority re-loaded from disk (methodology + P1.1/P2.1/P3.1 contract). Peer-not-suspect applied. The fact that executor subagent (Sonnet) wrote most of the code + team-lead committed via P2.1 does not color findings — findings are against CODE STATE ON DISK.
 - **L1 INV/FM**: Triad (delete-side metric filter + write-time metric identity + iteration) lands correctly in the scripts. MetricIdentity type enforces cross-pairing invariant in Python but **not** at the DB schema layer anymore — regression of the antibody surface (CRITICAL / MAJOR per severity dispute below).
-- **L2 Forbidden Moves**: `rebuild_settlements_v2.py` correctly absent (user-ruled OUT OF SCOPE). `--track` / `--metric` CLI flags correctly absent. No paper-mode resurrection. No `Day0LowNowcastSignal.p_vector` tampering. No `cycle_runner.py:180-181` touch. 
+- **L2 Forbidden Moves**: `rebuild_settlements_v2.py` correctly absent (user-ruled OUT OF SCOPE). `--track` / `--metric` CLI flags correctly absent. No obsolete non-live runtime resurrection. No `Day0LowNowcastSignal.p_vector` tampering. No `cycle_runner.py:180-181` touch.
 - **L3 Silent fallbacks**: Schema DEFAULT on `observation_field` IS a silent fallback that the pre-P7A schema explicitly refused via `NOT NULL` without default. Antibody regression.
 - **L4 Source authority preserved at every seam**: Write-time `metric_identity=spec.identity` lands. Read-time `_fetch_verified_observation` hardcodes `high_temp` — seam not closed symmetrically.
 - **L5 Phase boundary**: P6 antibodies (RemainingMemberExtrema type guard, Day0Signal TypeError) untouched. P5 antibodies (per-spec cross-check at L219-224, `assert_data_version_allowed` at L228) retained in rebuild. Absent in backfill (MAJOR-2).
@@ -274,8 +274,8 @@ Let me verify — actually I didn't confirm the exact dry-run early-return locat
 
 **Severity**: CRITICAL. The contract document explicitly states acceptance criterion #3: `bin lookup 永不跨 metric union`. A LOW rebuild that reads HIGH observations IS a cross-metric read. The fact that it currently fails closed via unit-validation is a coincidence of the observation-unit-check code, not an intentional antibody. Any change to the unit tolerance (already "5× nominal skill envelope") or a future LOW-track city where the observation-side extracts `low_temp` onto `high_temp` column (typo-level data-provenance bug) would turn this into silent corruption.
 
-**Realist check**: 
-1. Realistic worst case: Phase 8 shadow activation with LOW observations backfilled — LOW rebuild runs, reads `high_temp` column, either fails closed OR (if the observations table somehow has low values in the high_temp column, e.g. data migration bug) silent-corrupts LOW calibration with LOW values labeled as HIGH. 
+**Realist check**:
+1. Realistic worst case: Phase 8 shadow activation with LOW observations backfilled — LOW rebuild runs, reads `high_temp` column, either fails closed OR (if the observations table somehow has low values in the high_temp column, e.g. data migration bug) silent-corrupts LOW calibration with LOW values labeled as HIGH.
 2. Mitigating factors: Zero-Data Window, fail-closed behavior via unit plausibility check, Phase 8 not imminent.
 3. Detection time: fail-closed path detects at first LOW rebuild invocation (noisy refuse message). Silent-corruption path detects at settlement backtesting (weeks).
 4. **Is this hunting-mode bias?** — Checked: no. The contract explicitly names "bin lookup 永不跨 metric union" as acceptance criterion; the disk state violates it. Not manufactured.

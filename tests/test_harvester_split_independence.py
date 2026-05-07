@@ -227,3 +227,13 @@ def test_harvester_pnl_resolver_does_not_write_world_settlements():
         f"{world_table_hits}.\n"
         f"The trading-side resolver must only READ world.settlements, not write it."
     )
+
+
+def test_harvester_pnl_resolver_passes_verified_world_truth_to_position_settlement():
+    """Static relationship: world.settlements VERIFIED authority reaches _settle_positions."""
+    source = _PNL_RESOLVER.read_text(encoding="utf-8")
+
+    assert "WHERE authority = 'VERIFIED'" in source
+    assert 'settlement_truth_source="world.settlements"' in source
+    assert "settlement_authority=authority" in source
+    assert "settlement_temperature_metric=str(temperature_metric or \"\")" in source

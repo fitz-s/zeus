@@ -22,6 +22,7 @@ from src.data.forecast_source_registry import (
     ForecastSourceSpec,
     SourceNotEnabled,
     active_sources,
+    calibration_source_id_for_lookup,
     gate_source,
     gate_source_role,
     stable_payload_hash,
@@ -119,6 +120,15 @@ def test_gated_source_active_when_artifact_present_AND_env_flag_set(tmp_path) ->
     assert source.source_id == "tigge"
 
 
+def test_calibration_source_id_for_lookup_keeps_bucket_identity_explicit() -> None:
+    assert calibration_source_id_for_lookup("tigge") == "tigge_mars"
+    assert calibration_source_id_for_lookup("tigge_mars") == "tigge_mars"
+    assert calibration_source_id_for_lookup("ecmwf_open_data") == "ecmwf_open_data"
+    assert calibration_source_id_for_lookup("openmeteo_ensemble_ecmwf_ifs025") is None
+    assert calibration_source_id_for_lookup("gfs025") is None
+    assert calibration_source_id_for_lookup(None) is None
+
+
 def test_tigge_gate_closed_does_not_call_fetch(monkeypatch) -> None:
     calls: list[str] = []
 
@@ -181,6 +191,7 @@ def test_tigge_gate_open_routes_through_ingest_not_openmeteo(monkeypatch, tmp_pa
 
 def test_tigge_gate_open_missing_payload_raises_typed_configuration_error(monkeypatch, tmp_path) -> None:
     from src.data import forecast_source_registry
+    from src.data import tigge_client
     from src.data.tigge_client import TIGGEIngestFetchNotConfigured
 
     evidence = (
@@ -191,6 +202,7 @@ def test_tigge_gate_open_missing_payload_raises_typed_configuration_error(monkey
     evidence.parent.mkdir(parents=True)
     evidence.write_text("operator approved fixture\n")
     monkeypatch.setattr(forecast_source_registry, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(tigge_client, "_fetch_db_payload", lambda *args, **kwargs: None)
     monkeypatch.setenv("ZEUS_TIGGE_INGEST_ENABLED", "1")
     ensemble_client._clear_cache()
 
@@ -319,12 +331,12 @@ def test_ensemble_fetch_result_carries_registry_provenance(monkeypatch) -> None:
     result = ensemble_client.fetch_ensemble(
         city,
         forecast_days=1,
-        model="ecmwf_ifs025",
+        model="gfs025",
         role="monitor_fallback",
     )
 
     assert result is not None
-    assert result["source_id"] == "openmeteo_ensemble_ecmwf_ifs025"
+    assert result["source_id"] == "openmeteo_ensemble_gfs025"
     assert result["raw_payload_hash"] == stable_payload_hash(payload)
     assert result["authority_tier"] == "FORECAST"
     assert result["degradation_level"] == "DEGRADED_FORECAST_FALLBACK"

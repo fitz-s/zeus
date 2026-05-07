@@ -8,8 +8,8 @@ NOT pytest — run directly to get PASS/FAIL for each surface invariant.
 Usage:
     python scripts/verify_truth_surfaces.py
 """
-# Lifecycle: created=2026-04-07; last_reviewed=2026-04-30; last_reused=2026-04-30
-# Purpose: Diagnose truth-surface integrity and P0 training-readiness blockers.
+# Lifecycle: created=2026-04-07; last_reviewed=2026-05-06; last_reused=2026-05-06
+# Purpose: Diagnose truth-surface integrity, training-readiness blockers, and fact-table authority labels.
 # Reuse: Inspect docs/operations/current_data_state.md and the active packet receipt before using as closeout evidence.
 
 from __future__ import annotations
@@ -53,6 +53,9 @@ WARN = "WARN"
 
 READY = "READY"
 NOT_READY = "NOT_READY"
+LEGACY_OUTCOME_FACT_AUTHORITY_SCOPE = "legacy_lifecycle_projection_not_settlement_authority"
+SETTLEMENT_AUTHORITY_DIAGNOSTIC_SOURCE = "position_events_or_decision_log_verified_settlement"
+EXECUTION_FACT_AUTHORITY_SCOPE = "execution_lifecycle_projection_not_settlement_authority"
 ELIGIBLE_OBSERVATION_SOURCE_ROLES = frozenset({
     "historical_hourly",
 })
@@ -207,6 +210,133 @@ def _count_params(
     cur.execute(f"SELECT COUNT(*) FROM {table} WHERE {where}", params)
     row = cur.fetchone()
     return int(row[0] if row else 0)
+
+
+def _count_table_rows_if_exists(cur: sqlite3.Cursor, table: str) -> int | None:
+    if not _table_exists(cur, table):
+        return None
+    return _count(cur, table)
+
+
+def _count_terminal_execution_rows(cur: sqlite3.Cursor) -> int | None:
+    if not _table_exists(cur, "execution_fact"):
+        return None
+    columns = _columns(cur, "execution_fact")
+    if "terminal_exec_status" not in columns:
+        return _count(cur, "execution_fact")
+    return _count(
+        cur,
+        "execution_fact",
+        "TRIM(COALESCE(CAST(terminal_exec_status AS TEXT), '')) != ''",
+    )
+
+
+def _settlement_authority_counts(conn: sqlite3.Connection | None) -> dict:
+    if conn is None:
+        return {
+            "settlement_authority_ready_rows": 0,
+            "settlement_learning_eligible_rows": 0,
+            "settlement_degraded_rows": 0,
+            "settlement_authority_error": "missing_connection",
+            "settlement_authority_levels": {},
+        }
+
+    original_row_factory = conn.row_factory
+    try:
+        conn.row_factory = sqlite3.Row
+        from src.state.db import query_authoritative_settlement_rows
+
+        rows = query_authoritative_settlement_rows(conn, limit=None)
+    except Exception as exc:
+        return {
+            "settlement_authority_ready_rows": 0,
+            "settlement_learning_eligible_rows": 0,
+            "settlement_degraded_rows": 0,
+            "settlement_authority_error": str(exc),
+            "settlement_authority_levels": {},
+        }
+    finally:
+        conn.row_factory = original_row_factory
+
+    authority_levels: dict[str, int] = {}
+    ready_rows = 0
+    learning_rows = 0
+    degraded_rows = 0
+    for row in rows:
+        level = str(row.get("authority_level") or "unknown")
+        authority_levels[level] = authority_levels.get(level, 0) + 1
+        if row.get("is_degraded", False):
+            degraded_rows += 1
+        if row.get("metric_ready", False) and not row.get("is_degraded", False):
+            ready_rows += 1
+        if row.get("learning_snapshot_ready", False) and not row.get("is_degraded", False):
+            learning_rows += 1
+
+    return {
+        "settlement_authority_ready_rows": ready_rows,
+        "settlement_learning_eligible_rows": learning_rows,
+        "settlement_degraded_rows": degraded_rows,
+        "settlement_authority_error": "",
+        "settlement_authority_levels": authority_levels,
+    }
+
+
+def build_fact_table_authority_report(cur: sqlite3.Cursor) -> dict:
+    """Classify fact-table counts without promoting legacy outcome rows."""
+    outcome_rows = _count_table_rows_if_exists(cur, "outcome_fact")
+    execution_rows = _count_table_rows_if_exists(cur, "execution_fact")
+    terminal_execution_rows = _count_terminal_execution_rows(cur)
+    settlement_counts = _settlement_authority_counts(getattr(cur, "connection", None))
+
+    blockers = []
+    if execution_rows is None:
+        blockers.append("execution_fact_missing")
+    elif (terminal_execution_rows or 0) <= 0:
+        blockers.append("execution_fact_has_no_terminal_rows")
+    if int(settlement_counts["settlement_authority_ready_rows"]) <= 0:
+        blockers.append("settlement_authority_ready_rows_missing")
+
+    return {
+        "outcome_fact": 0 if outcome_rows is None else outcome_rows,
+        "outcome_fact_present": outcome_rows is not None,
+        "legacy_outcome_fact_rows": 0 if outcome_rows is None else outcome_rows,
+        "outcome_fact_authority_scope": LEGACY_OUTCOME_FACT_AUTHORITY_SCOPE,
+        "outcome_fact_learning_eligible": False,
+        "outcome_fact_promotion_eligible": False,
+        "execution_fact": 0 if execution_rows is None else execution_rows,
+        "execution_fact_present": execution_rows is not None,
+        "terminal_execution_fact_rows": 0 if terminal_execution_rows is None else terminal_execution_rows,
+        "execution_fact_authority_scope": EXECUTION_FACT_AUTHORITY_SCOPE,
+        "settlement_authority_source": SETTLEMENT_AUTHORITY_DIAGNOSTIC_SOURCE,
+        **settlement_counts,
+        "blocking_reasons": blockers,
+        "authority_status": "authority_ready" if not blockers else "not_ready",
+    }
+
+
+def format_fact_table_authority_evidence(report: dict) -> str:
+    return (
+        f"outcome_fact={report['outcome_fact']} "
+        f"(authority={report['outcome_fact_authority_scope']}), "
+        f"execution_fact={report['execution_fact']}, "
+        f"terminal_execution_fact_rows={report['terminal_execution_fact_rows']}, "
+        f"settlement_authority_ready_rows={report['settlement_authority_ready_rows']}, "
+        f"settlement_learning_eligible_rows={report['settlement_learning_eligible_rows']}"
+    )
+
+
+def format_fact_table_authority_detail(report: dict) -> str:
+    parts = [
+        f"settlement_authority_source={report['settlement_authority_source']}",
+        f"execution_fact_authority={report['execution_fact_authority_scope']}",
+        f"outcome_fact_learning_eligible={report['outcome_fact_learning_eligible']}",
+        f"blocking_reasons={report['blocking_reasons']}",
+    ]
+    if report.get("settlement_authority_error"):
+        parts.append(f"settlement_authority_error={report['settlement_authority_error']}")
+    if report.get("settlement_authority_levels"):
+        parts.append(f"settlement_authority_levels={report['settlement_authority_levels']}")
+    return "; ".join(parts)
 
 
 def _blank_or_empty_json_sql(column: str) -> str:
@@ -2950,7 +3080,7 @@ def check_5_settlements_after_mar30(shared_cur) -> tuple[str, str]:
 
 
 def check_6_risk_state_truth_source() -> tuple[str, str]:
-    """risk_state-paper.db latest entry must not have portfolio_truth_source='working_state_fallback'."""
+    """Latest RiskGuard entry must not have portfolio_truth_source='working_state_fallback'."""
     if not RISK_DB.exists():
         return FAIL, f"{RISK_DB} not found"
 
@@ -2983,18 +3113,18 @@ def check_6_risk_state_truth_source() -> tuple[str, str]:
 
 
 def check_7_fact_tables_populated(cur) -> tuple[str, str]:
-    """outcome_fact and execution_fact must each have > 0 rows."""
+    """Settlement authority plus execution projection must be materialized."""
     try:
-        outcome = _scalar(cur, "SELECT COUNT(*) FROM outcome_fact")
-        execution = _scalar(cur, "SELECT COUNT(*) FROM execution_fact")
+        report = build_fact_table_authority_report(cur)
     except sqlite3.OperationalError as exc:
         return FAIL, f"query error: {exc}"
 
-    if outcome is None or execution is None:
-        return FAIL, f"table missing — outcome_fact={outcome}, execution_fact={execution}"
-
-    status = PASS if outcome > 0 and execution > 0 else FAIL
-    return status, f"outcome_fact={outcome}, execution_fact={execution}"
+    status = PASS if report["authority_status"] == "authority_ready" else FAIL
+    detail = (
+        f"{format_fact_table_authority_evidence(report)}; "
+        f"{format_fact_table_authority_detail(report)}"
+    )
+    return status, detail
 
 
 def check_8_no_stale_entered_decisions(cur) -> tuple[str, str]:
@@ -3048,7 +3178,7 @@ def run_checks() -> int:
          check_5_settlements_after_mar30(shared_cur)),
         ("6. risk_state truth_source != working_state_fallback",
          check_6_risk_state_truth_source()),
-        ("7. outcome_fact and execution_fact populated",
+        ("7. settlement authority and execution facts populated",
          check_7_fact_tables_populated(cur)),
         ("8. no stale entered decisions before today",
          check_8_no_stale_entered_decisions(cur)),

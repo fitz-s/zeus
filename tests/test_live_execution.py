@@ -262,29 +262,3 @@ class TestLiveOrderErrorModes:
 
         assert result.status == "pending"  # order succeeded despite alert failure
         assert result.order_id == "ord-ok"
-
-
-class TestModeIsolation:
-    """Tier 5.2 u2014 Mode isolation regression test.
-
-    Even though paper is decommissioned, this test protects Phase 2
-    refactor from accidentally re-introducing cross-mode leakage.
-    """
-
-    @pytest.mark.skip(reason="Phase2: paper_mode param removed")
-    def test_live_order_always_uses_paper_mode_false(self, monkeypatch):
-        """PolymarketClient is ALWAYS constructed with paper_mode=False in _live_order."""
-        captured_paper_mode = []
-
-        def capture_client(paper_mode):
-            captured_paper_mode.append(paper_mode)
-            client = MagicMock()
-            client.place_limit_order.return_value = {"orderID": "test"}
-            return client
-
-        monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", capture_client)
-        monkeypatch.setattr("src.execution.executor.alert_trade", lambda **kw: None)
-
-        _live_order("t1", _make_intent(), shares=1.0)
-
-        assert captured_paper_mode == [False]

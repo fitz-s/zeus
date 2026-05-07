@@ -1,6 +1,6 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-04-30
-# Lifecycle: created=2026-04-27; last_reviewed=2026-04-30; last_reused=2026-04-30
+# Last reused/audited: 2026-05-06
+# Lifecycle: created=2026-04-27; last_reviewed=2026-05-06; last_reused=2026-05-06
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/M4.yaml
 # Purpose: Lock R3 M4 cancel/replace exit mutex, typed cancel outcomes, replacement gates, and CTF preflight.
 # Reuse: Run when exit_safety, executor exit submit, exit_lifecycle cancel retry, venue command transitions, or collateral sell preflight changes.
@@ -45,6 +45,20 @@ def allow_cancel_cutover_for_exit_safety_tests(monkeypatch):
 
 def _ctf_units(shares: float) -> int:
     return int(round(float(shares) * _CTF_SCALE))
+
+
+def _execution_facts(conn, position_id: str) -> list[sqlite3.Row]:
+    return list(
+        conn.execute(
+            """
+            SELECT venue_status, terminal_exec_status, fill_price, shares
+            FROM execution_fact
+            WHERE position_id = ?
+            ORDER BY intent_id
+            """,
+            (position_id,),
+        ).fetchall()
+    )
 
 
 def _fake_submit_result(bound_envelope, *, order_id: str, status: str = "LIVE") -> dict:
@@ -100,6 +114,26 @@ def _allow_risk_allocator_for_exit_tests() -> None:
     )
 
 
+def _enable_exit_submit_prereqs(c, monkeypatch, *, ctf_shares: float = 50.0) -> None:
+    from src.state.collateral_ledger import CollateralLedger, configure_global_ledger
+
+    ledger = CollateralLedger(c)
+    ledger.set_snapshot(_snapshot(pusd=1_000_000_000, ctf={YES_TOKEN: ctf_shares}))
+    configure_global_ledger(ledger)
+    _allow_risk_allocator_for_exit_tests()
+    monkeypatch.setattr("src.control.cutover_guard.assert_submit_allowed", lambda *args, **kwargs: None)
+    monkeypatch.setattr("src.control.heartbeat_supervisor.assert_heartbeat_allows_order_type", lambda *args, **kwargs: None)
+    monkeypatch.setattr("src.control.ws_gap_guard.assert_ws_allows_submit", lambda *args, **kwargs: None)
+
+
+def _clear_exit_submit_prereqs() -> None:
+    from src.risk_allocator import clear_global_allocator
+    from src.state.collateral_ledger import configure_global_ledger
+
+    clear_global_allocator()
+    configure_global_ledger(None)
+
+
 def _ensure_snapshot(
     c,
     *,
@@ -108,6 +142,7 @@ def _ensure_snapshot(
     selected_outcome_token_id: str | None = None,
     outcome_label: str | None = None,
     snapshot_id: str | None = None,
+    raw_orderbook_hash: str = "c" * 64,
     captured_at: datetime = _NOW,
 ) -> str:
     from src.contracts.executable_market_snapshot_v2 import ExecutableMarketSnapshotV2
@@ -158,13 +193,21 @@ def _ensure_snapshot(
             orderbook_depth_jsonb="{}",
             raw_gamma_payload_hash="a" * 64,
             raw_clob_market_info_hash="b" * 64,
-            raw_orderbook_hash="c" * 64,
+            raw_orderbook_hash=raw_orderbook_hash,
             authority_tier="CLOB",
             captured_at=captured_at,
             freshness_deadline=captured_at + timedelta(days=365),
         ),
     )
     return snapshot_id
+
+
+def _snapshot_hash(c, snapshot_id: str) -> str:
+    from src.state.snapshot_repo import get_snapshot
+
+    snapshot = get_snapshot(c, snapshot_id)
+    assert snapshot is not None
+    return snapshot.executable_snapshot_hash
 
 
 def _ensure_envelope(
@@ -573,6 +616,224 @@ def test_exit_lifecycle_partial_fill_reduces_open_position_exposure(conn):
     assert position.nested_fills[-1]["filled_shares"] == pytest.approx(8.0)
     assert position.nested_fills[-1]["remaining_shares"] == pytest.approx(12.0)
     assert position.nested_fills[-1]["realized_pnl"] == pytest.approx(-0.48)
+    facts = _execution_facts(conn, position.trade_id)
+    assert len(facts) == 1
+    assert facts[0]["venue_status"] == "PARTIALLY_MATCHED"
+    assert facts[0]["terminal_exec_status"] == "PARTIALLY_MATCHED"
+    assert facts[0]["fill_price"] == pytest.approx(0.44)
+    assert facts[0]["shares"] == pytest.approx(8.0)
+
+
+def test_exit_lifecycle_confirmed_without_explicit_fill_price_stays_pending(conn):
+    from src.execution import exit_lifecycle
+    from src.state.portfolio import PortfolioState, Position
+
+    position = Position(
+        trade_id="pos-confirmed-no-fill-price",
+        market_id="mkt-confirmed-no-fill-price",
+        city="NYC",
+        cluster="US-Northeast",
+        target_date="2026-04-27",
+        bin_label="50-51°F",
+        direction="buy_yes",
+        size_usd=10.0,
+        entry_price=0.50,
+        shares=20.0,
+        cost_basis_usd=10.0,
+        state="pending_exit",
+        exit_state="sell_pending",
+        last_exit_order_id="ord-confirmed-no-fill-price",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        last_monitor_market_price=0.45,
+        last_monitor_best_bid=0.44,
+    )
+    portfolio = PortfolioState(positions=[position])
+
+    class FakeClob:
+        def get_order_status(self, order_id):
+            assert order_id == "ord-confirmed-no-fill-price"
+            return {
+                "status": "CONFIRMED",
+                "price": "0.44",
+            }
+
+    stats = exit_lifecycle.check_pending_exits(portfolio, FakeClob(), conn=conn)
+
+    assert stats["filled"] == 0
+    assert stats["retried"] == 0
+    assert stats["unchanged"] == 1
+    assert stats["filled_positions"] == []
+    assert position.state == "pending_exit"
+    assert position.exit_state == "sell_pending"
+    assert position.last_exit_error == "missing_exit_fill_price"
+    assert position.shares == pytest.approx(20.0)
+    assert position.size_usd == pytest.approx(10.0)
+    assert position.cost_basis_usd == pytest.approx(10.0)
+    assert position.nested_fills == []
+    assert _execution_facts(conn, position.trade_id) == []
+
+
+def test_exit_lifecycle_partial_without_explicit_fill_price_does_not_reduce_exposure(conn):
+    from src.execution import exit_lifecycle
+    from src.state.portfolio import PortfolioState, Position
+
+    position = Position(
+        trade_id="pos-partial-no-fill-price",
+        market_id="mkt-partial-no-fill-price",
+        city="NYC",
+        cluster="US-Northeast",
+        target_date="2026-04-27",
+        bin_label="50-51°F",
+        direction="buy_yes",
+        size_usd=10.0,
+        entry_price=0.50,
+        shares=20.0,
+        cost_basis_usd=10.0,
+        state="pending_exit",
+        exit_state="sell_pending",
+        last_exit_order_id="ord-partial-no-fill-price",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        last_monitor_market_price=0.45,
+        last_monitor_best_bid=0.44,
+    )
+    portfolio = PortfolioState(positions=[position])
+
+    class FakeClob:
+        def get_order_status(self, order_id):
+            assert order_id == "ord-partial-no-fill-price"
+            return {
+                "status": "PARTIALLY_MATCHED",
+                "remaining_size": "12.00",
+                "matched_size": "8.00",
+                "price": "0.44",
+            }
+
+    stats = exit_lifecycle.check_pending_exits(portfolio, FakeClob(), conn=conn)
+
+    assert stats["filled"] == 0
+    assert stats["retried"] == 0
+    assert stats["unchanged"] == 1
+    assert position.state == "pending_exit"
+    assert position.exit_state == "sell_pending"
+    assert position.last_exit_error == "missing_exit_fill_price"
+    assert position.shares == pytest.approx(20.0)
+    assert position.size_usd == pytest.approx(10.0)
+    assert position.cost_basis_usd == pytest.approx(10.0)
+    assert position.nested_fills == []
+    assert _execution_facts(conn, position.trade_id) == []
+
+
+@pytest.mark.parametrize("field", ["remaining_size", "matched_size"])
+@pytest.mark.parametrize("value", ["NaN", "Infinity"])
+def test_exit_lifecycle_partial_nonfinite_size_does_not_reduce_exposure(conn, field, value):
+    from src.execution import exit_lifecycle
+    from src.state.portfolio import PortfolioState, Position
+
+    position = Position(
+        trade_id=f"pos-partial-nonfinite-{field}-{value}",
+        market_id="mkt-partial-nonfinite-size",
+        city="NYC",
+        cluster="US-Northeast",
+        target_date="2026-04-27",
+        bin_label="50-51°F",
+        direction="buy_yes",
+        size_usd=10.0,
+        entry_price=0.50,
+        shares=20.0,
+        cost_basis_usd=10.0,
+        state="pending_exit",
+        exit_state="sell_pending",
+        last_exit_order_id="ord-partial-nonfinite-size",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        last_monitor_market_price=0.45,
+        last_monitor_best_bid=0.44,
+    )
+    portfolio = PortfolioState(positions=[position])
+    payload = {
+        "status": "PARTIALLY_MATCHED",
+        "remaining_size": "12.00",
+        "matched_size": "8.00",
+        "avgPrice": "0.44",
+    }
+    payload[field] = value
+    if field == "matched_size":
+        payload.pop("remaining_size")
+
+    class FakeClob:
+        def get_order_status(self, order_id):
+            assert order_id == "ord-partial-nonfinite-size"
+            return payload
+
+    stats = exit_lifecycle.check_pending_exits(portfolio, FakeClob(), conn=conn)
+
+    assert stats["filled"] == 0
+    assert stats["retried"] == 0
+    assert stats["unchanged"] == 1
+    assert position.state == "pending_exit"
+    assert position.exit_state == "sell_pending"
+    assert position.shares == pytest.approx(20.0)
+    assert position.size_usd == pytest.approx(10.0)
+    assert position.cost_basis_usd == pytest.approx(10.0)
+    assert position.nested_fills == []
+    assert _execution_facts(conn, position.trade_id) == []
+
+
+@pytest.mark.parametrize("status", ["CONFIRMED", "PARTIALLY_MATCHED"])
+@pytest.mark.parametrize("field", ["avgPrice", "fillPrice"])
+@pytest.mark.parametrize("value", ["NaN", "Infinity", "1.2"])
+def test_exit_lifecycle_invalid_explicit_fill_price_does_not_mutate(conn, status, field, value):
+    from src.execution import exit_lifecycle
+    from src.state.portfolio import PortfolioState, Position
+
+    position = Position(
+        trade_id=f"pos-nonfinite-fill-price-{status}-{field}-{value}",
+        market_id="mkt-nonfinite-fill-price",
+        city="NYC",
+        cluster="US-Northeast",
+        target_date="2026-04-27",
+        bin_label="50-51°F",
+        direction="buy_yes",
+        size_usd=10.0,
+        entry_price=0.50,
+        shares=20.0,
+        cost_basis_usd=10.0,
+        state="pending_exit",
+        exit_state="sell_pending",
+        last_exit_order_id="ord-nonfinite-fill-price",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        last_monitor_market_price=0.45,
+        last_monitor_best_bid=0.44,
+    )
+    portfolio = PortfolioState(positions=[position])
+    payload = {
+        "status": status,
+        "remaining_size": "12.00",
+        "matched_size": "8.00",
+        field: value,
+    }
+
+    class FakeClob:
+        def get_order_status(self, order_id):
+            assert order_id == "ord-nonfinite-fill-price"
+            return payload
+
+    stats = exit_lifecycle.check_pending_exits(portfolio, FakeClob(), conn=conn)
+
+    assert stats["filled"] == 0
+    assert stats["retried"] == 0
+    assert stats["unchanged"] == 1
+    assert stats["filled_positions"] == []
+    assert position.state == "pending_exit"
+    assert position.exit_state == "sell_pending"
+    assert position.last_exit_error == "missing_exit_fill_price"
+    assert position.shares == pytest.approx(20.0)
+    assert position.size_usd == pytest.approx(10.0)
+    assert position.cost_basis_usd == pytest.approx(10.0)
+    assert position.nested_fills == []
 
 
 def test_exit_lifecycle_cancel_after_partial_only_retries_remaining_exposure(conn):
@@ -621,6 +882,12 @@ def test_exit_lifecycle_cancel_after_partial_only_retries_remaining_exposure(con
     assert position.cost_basis_usd == pytest.approx(6.0)
     assert position.nested_fills[-1]["filled_shares"] == pytest.approx(8.0)
     assert position.nested_fills[-1]["remaining_shares"] == pytest.approx(12.0)
+    facts = _execution_facts(conn, position.trade_id)
+    assert len(facts) == 1
+    assert facts[0]["venue_status"] == "CANCELLED"
+    assert facts[0]["terminal_exec_status"] == "CANCELLED"
+    assert facts[0]["fill_price"] == pytest.approx(0.44)
+    assert facts[0]["shares"] == pytest.approx(8.0)
 
 
 def test_two_exit_requests_for_same_position_collapse_into_one_durable_chain(conn, monkeypatch):
@@ -689,6 +956,251 @@ def test_two_exit_requests_for_same_position_collapse_into_one_durable_chain(con
         configure_global_ledger(None)
 
 
+def test_execute_exit_order_rejects_submit_connection_snapshot_hash_drift(monkeypatch):
+    from src.execution.executor import create_exit_order_intent, execute_exit_order
+    from src.state.db import init_schema
+
+    decision_conn = sqlite3.connect(":memory:")
+    decision_conn.row_factory = sqlite3.Row
+    decision_conn.execute("PRAGMA foreign_keys=ON")
+    init_schema(decision_conn)
+    submit_conn = sqlite3.connect(":memory:")
+    submit_conn.row_factory = sqlite3.Row
+    submit_conn.execute("PRAGMA foreign_keys=ON")
+    init_schema(submit_conn)
+    snapshot_id = "snap-exit-drift"
+    _ensure_snapshot(decision_conn, snapshot_id=snapshot_id, raw_orderbook_hash="c" * 64)
+    _ensure_snapshot(submit_conn, snapshot_id=snapshot_id, raw_orderbook_hash="d" * 64)
+    _enable_exit_submit_prereqs(submit_conn, monkeypatch)
+
+    class ClientShouldNotBeConstructed:
+        def __init__(self, *args, **kwargs):  # pragma: no cover - tripwire
+            raise AssertionError("snapshot identity must block before SDK construction")
+
+    monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", ClientShouldNotBeConstructed)
+    try:
+        result = execute_exit_order(
+            create_exit_order_intent(
+                trade_id="pos-exit-drift",
+                token_id=YES_TOKEN,
+                shares=5.0,
+                current_price=0.50,
+                best_bid=0.49,
+                executable_snapshot_id=snapshot_id,
+                executable_snapshot_hash=_snapshot_hash(decision_conn, snapshot_id),
+                executable_snapshot_min_tick_size=Decimal("0.01"),
+                executable_snapshot_min_order_size=Decimal("0.01"),
+                executable_snapshot_neg_risk=False,
+            ),
+            conn=submit_conn,
+            decision_id="exit-drift",
+        )
+
+        assert result.status == "rejected"
+        assert result.reason == "exit_snapshot_identity:snapshot_hash_mismatch"
+        assert submit_conn.execute("SELECT COUNT(*) FROM venue_commands").fetchone()[0] == 0
+    finally:
+        _clear_exit_submit_prereqs()
+        decision_conn.close()
+        submit_conn.close()
+
+
+def test_execute_exit_order_rejects_existing_idempotent_command_with_old_exit_snapshot_identity(conn, monkeypatch):
+    from src.execution.executor import create_exit_order_intent, execute_exit_order
+
+    _enable_exit_submit_prereqs(conn, monkeypatch)
+    calls: list[dict] = []
+
+    class FakeClient:
+        def bind_submission_envelope(self, envelope):
+            self.bound_envelope = envelope
+
+        def place_limit_order(self, **kwargs):
+            calls.append(kwargs)
+            return _fake_submit_result(self.bound_envelope, order_id=f"ord-{len(calls)}")
+
+    monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", FakeClient)
+    try:
+        old_snapshot = _ensure_snapshot(conn, snapshot_id="snap-exit-old")
+        new_snapshot = _ensure_snapshot(conn, snapshot_id="snap-exit-new", raw_orderbook_hash="d" * 64)
+        first = execute_exit_order(
+            create_exit_order_intent(
+                trade_id="pos-exit-idem",
+                token_id=YES_TOKEN,
+                shares=5.0,
+                current_price=0.50,
+                best_bid=0.49,
+                executable_snapshot_id=old_snapshot,
+                executable_snapshot_hash=_snapshot_hash(conn, old_snapshot),
+                executable_snapshot_min_tick_size=Decimal("0.01"),
+                executable_snapshot_min_order_size=Decimal("0.01"),
+                executable_snapshot_neg_risk=False,
+            ),
+            conn=conn,
+            decision_id="exit-idem-stable",
+        )
+        second = execute_exit_order(
+            create_exit_order_intent(
+                trade_id="pos-exit-idem",
+                token_id=YES_TOKEN,
+                shares=5.0,
+                current_price=0.50,
+                best_bid=0.49,
+                executable_snapshot_id=new_snapshot,
+                executable_snapshot_hash=_snapshot_hash(conn, new_snapshot),
+                executable_snapshot_min_tick_size=Decimal("0.01"),
+                executable_snapshot_min_order_size=Decimal("0.01"),
+                executable_snapshot_neg_risk=False,
+            ),
+            conn=conn,
+            decision_id="exit-idem-stable",
+        )
+
+        assert first.status == "pending"
+        assert second.status == "rejected"
+        assert second.reason == "exit_snapshot_identity:existing_command_snapshot_id_mismatch"
+        assert len(calls) == 1
+        assert conn.execute("SELECT COUNT(*) FROM venue_commands WHERE position_id = ?", ("pos-exit-idem",)).fetchone()[0] == 1
+    finally:
+        _clear_exit_submit_prereqs()
+
+
+def test_execute_exit_order_rejects_economic_unknown_with_old_exit_snapshot_identity(conn, monkeypatch):
+    from src.execution.executor import create_exit_order_intent, execute_exit_order
+
+    _enable_exit_submit_prereqs(conn, monkeypatch)
+    calls: list[dict] = []
+
+    class TimeoutClient:
+        def bind_submission_envelope(self, envelope):
+            self.bound_envelope = envelope
+
+        def place_limit_order(self, **kwargs):
+            calls.append(kwargs)
+            raise TimeoutError("submit timed out")
+
+    monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", TimeoutClient)
+    try:
+        old_snapshot = _ensure_snapshot(conn, snapshot_id="snap-exit-unknown-old")
+        new_snapshot = _ensure_snapshot(conn, snapshot_id="snap-exit-unknown-new", raw_orderbook_hash="d" * 64)
+        first = execute_exit_order(
+            create_exit_order_intent(
+                trade_id="pos-exit-unknown",
+                token_id=YES_TOKEN,
+                shares=5.0,
+                current_price=0.50,
+                best_bid=0.49,
+                executable_snapshot_id=old_snapshot,
+                executable_snapshot_hash=_snapshot_hash(conn, old_snapshot),
+                executable_snapshot_min_tick_size=Decimal("0.01"),
+                executable_snapshot_min_order_size=Decimal("0.01"),
+                executable_snapshot_neg_risk=False,
+            ),
+            conn=conn,
+            decision_id="exit-unknown-a",
+        )
+        second = execute_exit_order(
+            create_exit_order_intent(
+                trade_id="pos-exit-unknown",
+                token_id=YES_TOKEN,
+                shares=5.0,
+                current_price=0.50,
+                best_bid=0.49,
+                executable_snapshot_id=new_snapshot,
+                executable_snapshot_hash=_snapshot_hash(conn, new_snapshot),
+                executable_snapshot_min_tick_size=Decimal("0.01"),
+                executable_snapshot_min_order_size=Decimal("0.01"),
+                executable_snapshot_neg_risk=False,
+            ),
+            conn=conn,
+            decision_id="exit-unknown-b",
+        )
+
+        assert first.status == "unknown_side_effect"
+        assert second.status == "rejected"
+        assert second.reason == "exit_snapshot_identity:existing_command_snapshot_id_mismatch"
+        assert len(calls) == 1
+        assert conn.execute("SELECT COUNT(*) FROM venue_commands WHERE position_id = ?", ("pos-exit-unknown",)).fetchone()[0] == 1
+    finally:
+        _clear_exit_submit_prereqs()
+
+
+def test_execute_exit_order_rejects_idempotency_race_with_old_exit_snapshot_identity(conn, monkeypatch):
+    from src.execution.executor import create_exit_order_intent, execute_exit_order
+    import src.state.venue_command_repo as venue_command_repo
+
+    _enable_exit_submit_prereqs(conn, monkeypatch)
+    calls: list[dict] = []
+
+    class FakeClient:
+        def bind_submission_envelope(self, envelope):
+            self.bound_envelope = envelope
+
+        def place_limit_order(self, **kwargs):
+            calls.append(kwargs)
+            return _fake_submit_result(self.bound_envelope, order_id=f"ord-race-{len(calls)}")
+
+    monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", FakeClient)
+    try:
+        old_snapshot = _ensure_snapshot(conn, snapshot_id="snap-exit-race-old")
+        new_snapshot = _ensure_snapshot(conn, snapshot_id="snap-exit-race-new", raw_orderbook_hash="d" * 64)
+        first = execute_exit_order(
+            create_exit_order_intent(
+                trade_id="pos-exit-race",
+                token_id=YES_TOKEN,
+                shares=5.0,
+                current_price=0.50,
+                best_bid=0.49,
+                executable_snapshot_id=old_snapshot,
+                executable_snapshot_hash=_snapshot_hash(conn, old_snapshot),
+                executable_snapshot_min_tick_size=Decimal("0.01"),
+                executable_snapshot_min_order_size=Decimal("0.01"),
+                executable_snapshot_neg_risk=False,
+            ),
+            conn=conn,
+            decision_id="exit-race-stable",
+        )
+        assert first.status == "pending"
+
+        real_find = venue_command_repo.find_command_by_idempotency_key
+        find_calls = {"n": 0}
+
+        def racing_find(c, idem):
+            find_calls["n"] += 1
+            if find_calls["n"] == 1:
+                return None
+            return real_find(c, idem)
+
+        def racing_insert(*args, **kwargs):
+            raise sqlite3.IntegrityError("UNIQUE constraint failed: venue_commands.idempotency_key")
+
+        monkeypatch.setattr(venue_command_repo, "find_command_by_idempotency_key", racing_find)
+        monkeypatch.setattr(venue_command_repo, "insert_command", racing_insert)
+        second = execute_exit_order(
+            create_exit_order_intent(
+                trade_id="pos-exit-race",
+                token_id=YES_TOKEN,
+                shares=5.0,
+                current_price=0.50,
+                best_bid=0.49,
+                executable_snapshot_id=new_snapshot,
+                executable_snapshot_hash=_snapshot_hash(conn, new_snapshot),
+                executable_snapshot_min_tick_size=Decimal("0.01"),
+                executable_snapshot_min_order_size=Decimal("0.01"),
+                executable_snapshot_neg_risk=False,
+            ),
+            conn=conn,
+            decision_id="exit-race-stable",
+        )
+
+        assert second.status == "rejected"
+        assert second.reason == "exit_snapshot_identity:existing_command_snapshot_id_mismatch"
+        assert find_calls["n"] == 2
+        assert len(calls) == 1
+    finally:
+        _clear_exit_submit_prereqs()
+
+
 def test_exit_lifecycle_resolves_latest_fresh_snapshot_for_executor(conn, monkeypatch):
     from src.execution import exit_lifecycle
 
@@ -698,6 +1210,7 @@ def test_exit_lifecycle_resolves_latest_fresh_snapshot_for_executor(conn, monkey
     def fake_execute_exit_order(intent):
         captured.update(
             snapshot_id=intent.executable_snapshot_id,
+            snapshot_hash=intent.executable_snapshot_hash,
             min_tick=intent.executable_snapshot_min_tick_size,
             min_order=intent.executable_snapshot_min_order_size,
             neg_risk=intent.executable_snapshot_neg_risk,
@@ -718,6 +1231,7 @@ def test_exit_lifecycle_resolves_latest_fresh_snapshot_for_executor(conn, monkey
     assert result.status == "pending"
     assert captured == {
         "snapshot_id": snapshot_id,
+        "snapshot_hash": _snapshot_hash(conn, snapshot_id),
         "min_tick": "0.01",
         "min_order": "0.01",
         "neg_risk": False,
@@ -753,6 +1267,7 @@ def test_exit_lifecycle_requires_snapshot_selected_token_for_native_side(conn):
     )
 
     assert context["executable_snapshot_id"] == no_snapshot_id
+    assert context["executable_snapshot_hash"] == _snapshot_hash(conn, no_snapshot_id)
 
 
 def test_live_exit_captures_snapshot_for_held_position_before_sell(conn, monkeypatch):
@@ -841,6 +1356,7 @@ def test_live_exit_captures_snapshot_for_held_position_before_sell(conn, monkeyp
         captured.update(
             decision_id=decision_id,
             snapshot_id=intent.executable_snapshot_id,
+            snapshot_hash=intent.executable_snapshot_hash,
             min_tick=intent.executable_snapshot_min_tick_size,
             min_order=intent.executable_snapshot_min_order_size,
             neg_risk=intent.executable_snapshot_neg_risk,
@@ -871,10 +1387,76 @@ def test_live_exit_captures_snapshot_for_held_position_before_sell(conn, monkeyp
     assert captured == {
         "decision_id": "exit:pos-exit-refresh",
         "snapshot_id": "snap-exit-captured",
+        "snapshot_hash": _snapshot_hash(conn, "snap-exit-captured"),
         "min_tick": "0.01",
         "min_order": "0.01",
         "neg_risk": False,
     }
+
+
+def test_live_exit_quick_confirmed_without_explicit_fill_price_does_not_close(monkeypatch):
+    from src.execution import exit_lifecycle
+    from src.state.portfolio import ExitContext, PortfolioState, Position
+
+    position = Position(
+        trade_id="pos-quick-confirmed-no-fill-price",
+        market_id="condition-test",
+        condition_id="condition-test",
+        city="NYC",
+        cluster="northeast",
+        target_date="2026-04-28",
+        bin_label="50-51°F",
+        direction="buy_yes",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        entry_price=0.50,
+        size_usd=10.0,
+        shares=20.0,
+        cost_basis_usd=10.0,
+    )
+    portfolio = PortfolioState(positions=[position])
+    exit_context = ExitContext(
+        exit_reason="EDGE_REVERSAL",
+        current_market_price=0.50,
+        best_bid=0.49,
+    )
+
+    monkeypatch.setattr(exit_lifecycle, "check_sell_collateral", lambda *args, **kwargs: (True, ""))
+
+    def fake_execute_exit_order(intent, decision_id=""):
+        return exit_lifecycle.OrderResult(
+            trade_id=intent.trade_id,
+            status="pending",
+            order_id="ord-quick-confirmed-no-fill-price",
+            external_order_id="ord-quick-confirmed-no-fill-price",
+        )
+
+    monkeypatch.setattr(exit_lifecycle, "execute_exit_order", fake_execute_exit_order)
+
+    class FakeClob:
+        def get_order_status(self, order_id):
+            assert order_id == "ord-quick-confirmed-no-fill-price"
+            return {
+                "status": "CONFIRMED",
+                "price": "0.49",
+            }
+
+    result = exit_lifecycle.execute_exit(
+        portfolio,
+        position,
+        exit_context,
+        clob=FakeClob(),
+        conn=None,
+    )
+
+    assert result == "sell_pending: order=ord-quick-confirmed-no-fill-price, status=CONFIRMED, missing_fill_price"
+    assert position.state == "pending_exit"
+    assert position.exit_state == "sell_pending"
+    assert position.last_exit_error == "missing_exit_fill_price"
+    assert position.shares == pytest.approx(20.0)
+    assert position.size_usd == pytest.approx(10.0)
+    assert position.cost_basis_usd == pytest.approx(10.0)
+    assert portfolio.positions == [position]
 
 
 def test_exit_snapshot_capture_fails_closed_on_unverified_market_scan(conn, monkeypatch):

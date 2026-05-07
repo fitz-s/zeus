@@ -79,7 +79,7 @@ def test_execute_discovery_phase_passes_target_date_and_decision_time_to_day0_ge
         summary=summary,
         entry_bankroll=0.0,
         decision_time=decision_time,
-        env="paper",
+        env="legacy_env",
         deps=deps,
     )
 
@@ -127,7 +127,7 @@ def test_execute_discovery_phase_falls_back_for_legacy_day0_getter_signature(mon
         summary={"candidates": 0, "no_trades": 0, "trades": 0},
         entry_bankroll=0.0,
         decision_time=datetime(2026, 4, 1, 15, 30, tzinfo=timezone.utc),
-        env="paper",
+        env="legacy_env",
         deps=deps,
     )
 

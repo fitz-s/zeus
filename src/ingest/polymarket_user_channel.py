@@ -1,5 +1,5 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-04-27
+# Last reused/audited: 2026-05-06
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/M3.yaml
 """Polymarket authenticated user-channel ingest (R3 M3).
 
@@ -54,6 +54,7 @@ UNRESOLVED_LOT_STATES = (
     "EXIT_PENDING",
     "QUARANTINED",
 )
+TRADE_FILL_ECONOMICS_STATUSES = {"MATCHED", "MINED", "CONFIRMED"}
 
 
 class WSAuthMissing(RuntimeError):
@@ -122,6 +123,73 @@ def _decimal_str(value: Any, default: str = "0") -> str:
         return str(Decimal(str(value)))
     except (InvalidOperation, TypeError, ValueError):
         return default
+
+
+def _positive_decimal(value: Any) -> bool:
+    if value is None or value == "":
+        return False
+    try:
+        decimal = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        return False
+    return decimal.is_finite() and decimal > Decimal("0")
+
+
+def _missing_trade_fill_economics(status: str, *, size: Any, price: Any) -> tuple[str, ...]:
+    if status not in TRADE_FILL_ECONOMICS_STATUSES:
+        return ()
+    missing: list[str] = []
+    if not _positive_decimal(size):
+        missing.append("filled_size")
+    if not _positive_decimal(price):
+        missing.append("fill_price")
+    return tuple(missing)
+
+
+def _latest_trade_fact_for_trade_id(conn: Any, trade_id: str) -> dict[str, Any] | None:
+    row = conn.execute(
+        """
+        SELECT *
+          FROM venue_trade_facts
+         WHERE trade_id = ?
+         ORDER BY local_sequence DESC, trade_fact_id DESC
+         LIMIT 1
+        """,
+        (trade_id,),
+    ).fetchone()
+    return dict(row) if row is not None else None
+
+
+def _same_decimal_value(left: Any, right: Any) -> bool:
+    try:
+        return Decimal(str(left)) == Decimal(str(right))
+    except (InvalidOperation, TypeError, ValueError):
+        return False
+
+
+def _same_trade_fill_economics(
+    fact: dict[str, Any],
+    *,
+    filled_size: str,
+    fill_price: str,
+) -> bool:
+    return (
+        _same_decimal_value(fact.get("filled_size"), filled_size)
+        and _same_decimal_value(fact.get("fill_price"), fill_price)
+    )
+
+
+def _trade_lifecycle_transition_allowed(previous: str, current: str) -> bool:
+    if previous == current:
+        return False
+    allowed = {
+        "RETRYING": {"MATCHED", "MINED", "CONFIRMED", "FAILED"},
+        "MATCHED": {"MINED", "CONFIRMED", "FAILED"},
+        "MINED": {"CONFIRMED", "FAILED"},
+        "CONFIRMED": set(),
+        "FAILED": set(),
+    }
+    return current in allowed.get(previous, set())
 
 
 def _int_shares(value: Any) -> int:
@@ -499,14 +567,139 @@ class PolymarketUserChannelIngestor:
                 raise ValueError(f"no venue command found for trade order ids={candidates}")
             venue_order_id = str(command.get("venue_order_id") or candidates[0])
             observed = _parse_dt(message.get("timestamp") or message.get("matchtime") or message.get("last_update"))
+            size_raw = message.get("size")
+            price_raw = message.get("price")
+            missing = _missing_trade_fill_economics(status, size=size_raw, price=price_raw)
+            if missing:
+                self._append_command_event_if_legal(
+                    conn,
+                    command["command_id"],
+                    "REVIEW_REQUIRED",
+                    observed,
+                    {
+                        "source": "WS_USER",
+                        "trade_id": trade_id,
+                        "venue_order_id": venue_order_id,
+                        "status": status,
+                        "reason": "ws_trade_missing_fill_economics",
+                        "missing": list(missing),
+                        "semantic_guard": "trade_status_is_not_fill_economics_authority",
+                    },
+                )
+                conn.commit()
+                return {
+                    "trade_fact_id": None,
+                    "command_event": "REVIEW_REQUIRED",
+                    "reason": "ws_trade_missing_fill_economics",
+                    "missing": list(missing),
+                }
+            filled_size = _decimal_str(size_raw, "0")
+            fill_price = _decimal_str(price_raw, "0")
+            latest_fact = _latest_trade_fact_for_trade_id(conn, trade_id)
+            if latest_fact is not None:
+                identity_mismatch = []
+                if str(latest_fact.get("command_id") or "") != str(command.get("command_id") or ""):
+                    identity_mismatch.append("command_id")
+                if str(latest_fact.get("venue_order_id") or "") != str(venue_order_id):
+                    identity_mismatch.append("venue_order_id")
+                if identity_mismatch:
+                    self._append_command_event_if_legal(
+                        conn,
+                        command["command_id"],
+                        "REVIEW_REQUIRED",
+                        observed,
+                        {
+                            "source": "WS_USER",
+                            "trade_id": trade_id,
+                            "venue_order_id": venue_order_id,
+                            "status": status,
+                            "reason": "ws_trade_identity_conflict",
+                            "mismatch": identity_mismatch,
+                            "existing_trade_fact_id": latest_fact.get("trade_fact_id"),
+                            "semantic_guard": "trade_id_must_not_change_command_or_order_identity",
+                        },
+                    )
+                    conn.commit()
+                    return {
+                        "trade_fact_id": None,
+                        "command_event": "REVIEW_REQUIRED",
+                        "reason": "ws_trade_identity_conflict",
+                        "mismatch": identity_mismatch,
+                    }
+                same_fill_economics = _same_trade_fill_economics(
+                    latest_fact,
+                    filled_size=filled_size,
+                    fill_price=fill_price,
+                )
+                if same_fill_economics and str(latest_fact.get("state") or "") == status:
+                    conn.commit()
+                    return {
+                        "trade_fact_id": int(latest_fact["trade_fact_id"]),
+                        "command_event": None,
+                        "reason": "duplicate_trade_fact",
+                    }
+                if status in TRADE_FILL_ECONOMICS_STATUSES and not same_fill_economics:
+                    self._append_command_event_if_legal(
+                        conn,
+                        command["command_id"],
+                        "REVIEW_REQUIRED",
+                        observed,
+                        {
+                            "source": "WS_USER",
+                            "trade_id": trade_id,
+                            "venue_order_id": venue_order_id,
+                            "status": status,
+                            "reason": "ws_trade_lifecycle_regression_or_economic_drift",
+                            "existing_trade_fact_id": latest_fact.get("trade_fact_id"),
+                            "existing_state": latest_fact.get("state"),
+                            "existing_filled_size": latest_fact.get("filled_size"),
+                            "existing_fill_price": latest_fact.get("fill_price"),
+                            "incoming_filled_size": filled_size,
+                            "incoming_fill_price": fill_price,
+                            "semantic_guard": "trade_lifecycle_must_preserve_fill_economics",
+                        },
+                    )
+                    conn.commit()
+                    return {
+                        "trade_fact_id": None,
+                        "command_event": "REVIEW_REQUIRED",
+                        "reason": "ws_trade_lifecycle_regression_or_economic_drift",
+                    }
+                if not _trade_lifecycle_transition_allowed(str(latest_fact.get("state") or ""), status):
+                    self._append_command_event_if_legal(
+                        conn,
+                        command["command_id"],
+                        "REVIEW_REQUIRED",
+                        observed,
+                        {
+                            "source": "WS_USER",
+                            "trade_id": trade_id,
+                            "venue_order_id": venue_order_id,
+                            "status": status,
+                            "reason": "ws_trade_lifecycle_regression_or_economic_drift",
+                            "existing_trade_fact_id": latest_fact.get("trade_fact_id"),
+                            "existing_state": latest_fact.get("state"),
+                            "existing_filled_size": latest_fact.get("filled_size"),
+                            "existing_fill_price": latest_fact.get("fill_price"),
+                            "incoming_filled_size": filled_size,
+                            "incoming_fill_price": fill_price,
+                            "semantic_guard": "trade_lifecycle_must_move_explicitly_forward",
+                        },
+                    )
+                    conn.commit()
+                    return {
+                        "trade_fact_id": None,
+                        "command_event": "REVIEW_REQUIRED",
+                        "reason": "ws_trade_lifecycle_regression_or_economic_drift",
+                    }
             fact_id = append_trade_fact(
                 conn,
                 trade_id=trade_id,
                 venue_order_id=venue_order_id,
                 command_id=command["command_id"],
                 state=status,
-                filled_size=_decimal_str(message.get("size"), "0"),
-                fill_price=_decimal_str(message.get("price"), "0"),
+                filled_size=filled_size,
+                fill_price=fill_price,
                 source="WS_USER",
                 observed_at=observed,
                 venue_timestamp=observed,

@@ -8,7 +8,7 @@ Zeus live posture remains operator-controlled; this file only points agents at
 active work surfaces and current-fact companions.
 
 - Branch observed during 2026-05-02 cleanup: `live-unblock-ws-snapshot-2026-05-01`
-- Runtime entry: `src/main.py` (ZEUS_MODE=live)
+- Runtime entry: `src/main.py` (code-authoritative live runtime state)
 - Posture: live-capable; operator params live in `config/settings.json`
 
 ## Active packet control

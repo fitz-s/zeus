@@ -7,7 +7,7 @@
 - `~/.claude/agent-team-methodology.md` — full, incl. new §"Critic role — critique the TASK, not the TEAMMATE" (2026-04-17 addition).
 - Root `AGENTS.md` incl. §"Function Naming and Reuse Freshness" + `architecture/naming_conventions.yaml`.
 - `docs/authority/zeus_dual_track_architecture.md` §2/§5/§6/§8.
-- `team_lead_handoff.md` post-5A (Zero-Data Golden Window still active; paper mode retired system-wide).
+- `team_lead_handoff.md` post-5A (Zero-Data Golden Window still active; obsolete non-live runtime retired system-wide).
 - `zeus_dt_coordination_handoff.md` — B069/B073/B077 CLOSED at 5A; B078 rides 5B commit; B093 bifurcated.
 - DT v2 package @ `zeus_dual_track_refactor_package_v2_2026-04-16/`, especially `04_CODE_SNIPPETS/ingest_snapshot_contract.py:22-66` (3 quarantine laws) + `08_TIGGE_DUAL_TRACK_INTEGRATION_zh.md §3/§5` (JSON shape + `training_allowed` formula) + `04_CODE_SNIPPETS/rebuild_calibration_pairs_v2.py` (METRIC_SPECS pattern, NOT `--track` flag).
 - Phase 4.5/5A critic products for precedent (STALE_REWRITE on 51-source common, fixture-bypass trap, Kelvin silent-default, authority inversion at sidecar write).
@@ -17,7 +17,7 @@
 - **L0.0 — Peer, not suspect (NEW).** Critique the CODE/TEST/SEAM/INVARIANT. Default hypothesis when disk contradicts a report: concurrent-write → memory-lag → shell artifact → benign mistake → discipline breach (LAST, triple-verified + team-lead concurrence). Language: "the diff shows", "the disk reveals". Fresh bash grep before any "grep reveals X" claim; paste raw output as evidence.
 - **L0** authority re-loaded post-session boundary.
 - **L1** INV-## / FM-## per scoped AGENTS in `scripts/`, `src/state/`, `src/engine/`.
-- **L2** Forbidden Moves: Kelvin silent-default, fixture-bypass, orphan helper, paper-mode anything (retired), polarity swap on MIN boundary.
+- **L2** Forbidden Moves: Kelvin silent-default, fixture-bypass, orphan helper, obsolete non-live runtime anything (retired), polarity swap on MIN boundary.
 - **L3** NC-## / silent fallback / unit assumption (mn2t6 is Kelvin at GRIB level — converter is load-bearing).
 - **L4** Source authority at seams: extractor emits `temperature_metric='low'`, `members_unit` explicit, `causality_status` first-class, `training_allowed` computed not defaulted.
 - **L5** Phase boundary: no Phase 6/7/9 leak; Phase 5A truth-authority seam not regressed (exec-emma's 5B B078 edit is narrow addition, not re-wire).

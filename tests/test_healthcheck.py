@@ -74,7 +74,7 @@ def _status_payload(*, timestamp=None, risk=None, portfolio=None, cycle=None, ex
 def _write_no_trade_artifact(path):
     conn = sqlite3.connect(str(path))
     conn.execute(
-        "CREATE TABLE IF NOT EXISTS decision_log (id INTEGER PRIMARY KEY AUTOINCREMENT, mode TEXT NOT NULL, started_at TEXT NOT NULL, completed_at TEXT, artifact_json TEXT NOT NULL, timestamp TEXT NOT NULL, env TEXT NOT NULL DEFAULT 'paper')"
+        "CREATE TABLE IF NOT EXISTS decision_log (id INTEGER PRIMARY KEY AUTOINCREMENT, mode TEXT NOT NULL, started_at TEXT NOT NULL, completed_at TEXT, artifact_json TEXT NOT NULL, timestamp TEXT NOT NULL, env TEXT NOT NULL DEFAULT 'live')"
     )
     artifact = {
         "mode": "opening_hunt",
@@ -103,13 +103,12 @@ def _write_no_trade_artifact(path):
     }
     conn.execute(
         "INSERT INTO decision_log (mode, started_at, completed_at, artifact_json, timestamp, env) VALUES (?, ?, ?, ?, ?, ?)",
-        ("opening_hunt", "2026-04-02T00:00:00Z", "2026-04-02T00:01:00Z", json.dumps(artifact), datetime.now(timezone.utc).isoformat(), "paper"),
+        ("opening_hunt", "2026-04-02T00:00:00Z", "2026-04-02T00:01:00Z", json.dumps(artifact), datetime.now(timezone.utc).isoformat(), "live"),
     )
     conn.commit()
     conn.close()
 
 
-@pytest.mark.skip(reason="Phase2: paper mode removed")
 def test_healthcheck_uses_mode_qualified_status_and_reports_healthy(monkeypatch, tmp_path):
     status_path = tmp_path / "status_summary-live.json"
     risk_path = tmp_path / "risk_state-live.db"
@@ -288,7 +287,6 @@ def test_healthcheck_is_not_healthy_when_daemon_is_dead(monkeypatch, tmp_path):
     assert healthcheck.exit_code_for(result) == 1
 
 
-@pytest.mark.skip(reason="Phase2: paper mode removed")
 def test_healthcheck_is_not_healthy_when_riskguard_is_missing(monkeypatch, tmp_path):
     status_path = tmp_path / "status_summary-live.json"
     risk_path = tmp_path / "risk_state-live.db"

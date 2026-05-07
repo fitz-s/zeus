@@ -600,6 +600,12 @@ def test_position_lots_reader_uses_latest_append_only_state_and_counts_guards():
         "INSERT INTO venue_commands VALUES ('cmd-2','m2','t2','event-2','SUBMIT_UNKNOWN_SIDE_EFFECT','2026-04-27T00:01:00Z')"
     )
     conn.execute(
+        "INSERT INTO venue_commands VALUES ('cmd-3','m3','t3','event-3','REVIEW_REQUIRED','2026-04-27T00:02:00Z')"
+    )
+    conn.execute(
+        "INSERT INTO venue_commands VALUES ('cmd-4','m4','t4','event-4','UNKNOWN','2026-04-27T00:03:00Z')"
+    )
+    conn.execute(
         """
         INSERT INTO venue_command_events VALUES (
           'evt-1','cmd-2',2,'SUBMIT_REQUESTED',
@@ -629,8 +635,8 @@ def test_position_lots_reader_uses_latest_append_only_state_and_counts_guards():
     assert lots[1].event_id == "event-live"
     assert lots[1].resolution_window == "2026-04-27"
     assert lots[1].correlation_key == "city-nyc"
-    assert unknown_count == 1
-    assert unknown_markets == ("m2",)
+    assert unknown_count == 3
+    assert unknown_markets == ("m2", "m3", "m4")
     assert count_open_reconcile_findings(conn) == 1
 
 

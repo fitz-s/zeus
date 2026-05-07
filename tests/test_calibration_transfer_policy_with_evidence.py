@@ -1,17 +1,24 @@
 # Created: 2026-05-05
 # Last reused/audited: 2026-05-05
+# Lifecycle: created=2026-05-05; last_reviewed=2026-05-05; last_reused=2026-05-05
 # Authority basis: architecture/calibration_transfer_oos_design_2026-05-05.md Phase X.1
+# Purpose: Lock calibration transfer policy evidence row eligibility and policy_id isolation.
+# Reuse: Run when evaluate_calibration_transfer_policy_with_evidence or validated_calibration_transfers reader semantics change.
 """Tests for evaluate_calibration_transfer_policy_with_evidence (Phase X.1 scaffold)."""
 
 from __future__ import annotations
 
+import math
 import sqlite3
 from datetime import datetime, timedelta, timezone
 
 import pytest
 
 from src.config import entry_forecast_config
+from src.contracts.ensemble_snapshot_provenance import ECMWF_OPENDATA_HIGH_DATA_VERSION
 from src.data.calibration_transfer_policy import (
+    POLICY_ECMWF_OPENDATA_USES_TIGGE_LOCALDAY_CAL_V1,
+    evaluate_calibration_transfer_policy,
     evaluate_calibration_transfer_policy_with_evidence,
 )
 from src.state.schema.v2_schema import apply_v2_schema
@@ -27,12 +34,139 @@ def _make_conn() -> sqlite3.Connection:
     return conn
 
 
+def _insert_target_pairs_for_transfer(
+    conn: sqlite3.Connection,
+    *,
+    target_source_id: str = "ecmwf_open_data",
+    target_cycle: str = "00",
+    horizon_profile: str = "full",
+    season: str = "summer",
+    cluster: str = "cluster_a",
+    metric: str = "high",
+    n_pairs: int = 250,
+    brier_target: float = 0.205,
+    recorded_at: str = "2026-01-01T00:00:00",
+) -> None:
+    if n_pairs <= 0 or not (0.0 <= brier_target < 1.0):
+        return
+    p_raw = 1.0 - math.sqrt(brier_target)
+    if not (0.0 < p_raw < 1.0):
+        return
+    total_pairs = n_pairs * 5
+    base_target = datetime(2022, 3, 1, tzinfo=timezone.utc)
+    base_forecast = datetime(2022, 2, 1, tzinfo=timezone.utc)
+    rows = [
+        (
+            i + 1,
+            "test_city",
+            (base_target + timedelta(days=i)).date().isoformat(),
+            metric,
+            "high_temp" if metric == "high" else "low_temp",
+            f"bucket_{i}",
+            p_raw,
+            1,
+            1.0 + float(i % 7),
+            season,
+            cluster,
+            (base_forecast + timedelta(days=i)).isoformat(),
+            f"dg_transfer_{target_source_id}_{target_cycle}_{i}",
+            "v1",
+            target_source_id,
+            target_cycle,
+            horizon_profile,
+            1,
+            "VERIFIED",
+            "OK",
+            recorded_at,
+        )
+        for i in range(total_pairs)
+    ]
+    conn.executemany(
+        """
+        INSERT OR IGNORE INTO calibration_pairs_v2 (
+            pair_id,
+            city, target_date, temperature_metric, observation_field, range_label,
+            p_raw, outcome, lead_days, season, cluster,
+            forecast_available_at, decision_group_id, data_version,
+            source_id, cycle, horizon_profile,
+            training_allowed, authority, causality_status, recorded_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        rows,
+    )
+
+
 def _insert_row(
     conn: sqlite3.Connection,
     *,
     status: str,
-    evaluated_at: datetime,
+    evaluated_at: datetime | str,
+    policy_id: str = POLICY_ECMWF_OPENDATA_USES_TIGGE_LOCALDAY_CAL_V1,
+    source_id: str = "tigge_mars",
+    source_cycle: str = "00",
+    n_pairs: int = 250,
+    brier_source: float = 0.20,
+    brier_target: float = 0.205,
+    brier_diff: float = 0.005,
+    brier_diff_threshold: float = 0.005,
+    platt_model_key: str = "platt_key_1",
+    source_model_n_samples: int = 100,
+    source_model_brier_insample: float | None = None,
+    source_model_authority: str = "VERIFIED",
+    source_model_input_space: str = "raw_probability",
+    source_model_fitted_at: str = "2026-01-01T00:00:00",
+    source_model_recorded_at: str = "2026-01-01T00:00:00",
+    source_model_is_active: int = 1,
+    source_model_param_A: float = 1.0,
+    source_model_param_B: float = 0.0,
+    source_model_param_C: float = 0.0,
+    insert_target_pairs: bool = True,
+    target_pair_recorded_at: str = "2026-01-01T00:00:00",
 ) -> None:
+    evaluated_at_value = (
+        evaluated_at.isoformat() if isinstance(evaluated_at, datetime) else evaluated_at
+    )
+    if source_model_brier_insample is None:
+        source_model_brier_insample = brier_source
+    if insert_target_pairs:
+        _insert_target_pairs_for_transfer(
+            conn,
+            n_pairs=n_pairs,
+            brier_target=brier_target,
+            recorded_at=target_pair_recorded_at,
+        )
+    conn.execute(
+        """
+        INSERT OR REPLACE INTO platt_models_v2 (
+            model_key, temperature_metric, cluster, season, data_version,
+            input_space, param_A, param_B, param_C,
+            bootstrap_params_json, n_samples, brier_insample,
+            fitted_at, is_active, authority,
+            cycle, source_id, horizon_profile, recorded_at
+        ) VALUES (
+            ?, 'high', 'cluster_a', 'summer', 'v1',
+            ?, ?, ?, ?,
+            '[]', ?, ?,
+            ?, ?, ?,
+            ?, ?, 'full', ?
+        )
+        """,
+        (
+            platt_model_key,
+            source_model_input_space,
+            source_model_param_A,
+            source_model_param_B,
+            source_model_param_C,
+            source_model_n_samples,
+            source_model_brier_insample,
+            source_model_fitted_at,
+            source_model_is_active,
+            source_model_authority,
+            source_cycle,
+            source_id,
+            source_model_recorded_at,
+        ),
+    )
     conn.execute(
         """
         INSERT INTO validated_calibration_transfers (
@@ -44,16 +178,28 @@ def _insert_row(
             evidence_window_start, evidence_window_end,
             platt_model_key, evaluated_at
         ) VALUES (
-            'test_policy', 'tigge_mars', 'ecmwf_open_data',
-            '00', '00', 'full',
+            ?, ?, 'ecmwf_open_data',
+            ?, '00', 'full',
             'summer', 'cluster_a', 'high',
-            250, 0.20, 0.21, 0.01,
-            0.005, ?,
+            ?, ?, ?, ?,
+            ?, ?,
             '2025-01-01', '2025-06-01',
-            'platt_key_1', ?
+            ?, ?
         )
         """,
-        (status, evaluated_at.isoformat()),
+        (
+            policy_id,
+            source_id,
+            source_cycle,
+            n_pairs,
+            brier_source,
+            brier_target,
+            brier_diff,
+            brier_diff_threshold,
+            status,
+            platt_model_key,
+            evaluated_at_value,
+        ),
     )
     conn.commit()
 
@@ -144,6 +290,53 @@ def test_no_evidence_row_returns_shadow_only(monkeypatch: pytest.MonkeyPatch) ->
     assert "no_evidence_row" in decision.note
 
 
+def test_wrong_policy_row_returns_shadow_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Rows for another transfer policy cannot authorize the active policy."""
+    monkeypatch.setenv("ZEUS_CALIBRATION_TRANSFER_OOS_EVAL_ENABLED", "true")
+    cfg = entry_forecast_config()
+    conn = _make_conn()
+    now = datetime(2026, 5, 5, 12, 0, 0)
+    _insert_row(
+        conn,
+        status="LIVE_ELIGIBLE",
+        evaluated_at=now - timedelta(days=10),
+        policy_id="test_policy",
+    )
+
+    decision = evaluate_calibration_transfer_policy_with_evidence(
+        config=cfg,
+        conn=conn,
+        **{**_BASE_KWARGS, "now": now},
+    )
+
+    assert decision.status == "SHADOW_ONLY"
+    assert decision.note == "no_evidence_row"
+
+
+def test_wrong_source_row_returns_shadow_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Rows for another calibration source/cycle cannot authorize this transfer."""
+    monkeypatch.setenv("ZEUS_CALIBRATION_TRANSFER_OOS_EVAL_ENABLED", "true")
+    cfg = entry_forecast_config()
+    conn = _make_conn()
+    now = datetime(2026, 5, 5, 12, 0, 0)
+    _insert_row(
+        conn,
+        status="LIVE_ELIGIBLE",
+        evaluated_at=now - timedelta(days=10),
+        source_id="legacy_source",
+        source_cycle="12",
+    )
+
+    decision = evaluate_calibration_transfer_policy_with_evidence(
+        config=cfg,
+        conn=conn,
+        **{**_BASE_KWARGS, "now": now},
+    )
+
+    assert decision.status == "SHADOW_ONLY"
+    assert decision.note == "no_evidence_row"
+
+
 def test_fresh_live_eligible_row_returns_live_eligible(monkeypatch: pytest.MonkeyPatch) -> None:
     """Row with status=LIVE_ELIGIBLE and recent evaluated_at → LIVE_ELIGIBLE."""
     monkeypatch.setenv("ZEUS_CALIBRATION_TRANSFER_OOS_EVAL_ENABLED", "true")
@@ -180,6 +373,245 @@ def test_stale_row_returns_shadow_only(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "stale" in decision.note.lower()
 
 
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"brier_source": 2.0},
+        {"brier_target": -0.1},
+        {"brier_diff": float("inf")},
+        {"brier_diff_threshold": float("inf")},
+        {"n_pairs": 1},
+        {"brier_source": 0.20, "brier_target": 0.21, "brier_diff": 0.50},
+    ],
+)
+def test_invalid_economics_row_returns_shadow_only(
+    monkeypatch: pytest.MonkeyPatch,
+    overrides: dict,
+) -> None:
+    """LIVE status is not authority unless the stored economics also validate."""
+    monkeypatch.setenv("ZEUS_CALIBRATION_TRANSFER_OOS_EVAL_ENABLED", "true")
+    cfg = entry_forecast_config()
+    conn = _make_conn()
+    now = datetime(2026, 5, 5, 12, 0, 0)
+    _insert_row(
+        conn,
+        status="LIVE_ELIGIBLE",
+        evaluated_at=now - timedelta(days=5),
+        **overrides,
+    )
+
+    decision = evaluate_calibration_transfer_policy_with_evidence(
+        config=cfg,
+        conn=conn,
+        **{**_BASE_KWARGS, "now": now},
+    )
+
+    assert decision.status == "SHADOW_ONLY"
+    assert decision.live_promotion_approved is False
+    assert decision.note == "invalid_evidence_row"
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"source_model_n_samples": 1},
+        {"source_model_brier_insample": 0.19},
+        {"source_model_authority": "UNVERIFIED"},
+        {"source_model_input_space": "calibrated_probability"},
+        {"source_model_fitted_at": "2026-05-06T00:00:00"},
+        {"source_model_recorded_at": "2026-05-06T00:00:00"},
+        {"source_model_is_active": 0},
+        {"source_model_param_A": float("inf")},
+        {"source_model_param_B": float("inf")},
+        {"source_model_param_C": float("inf")},
+    ],
+)
+def test_invalid_source_platt_model_returns_shadow_only(
+    monkeypatch: pytest.MonkeyPatch,
+    overrides: dict,
+) -> None:
+    """Transfer rows must still point at the mature source Platt model they scored."""
+    monkeypatch.setenv("ZEUS_CALIBRATION_TRANSFER_OOS_EVAL_ENABLED", "true")
+    cfg = entry_forecast_config()
+    conn = _make_conn()
+    now = datetime(2026, 5, 5, 12, 0, 0)
+    _insert_row(
+        conn,
+        status="LIVE_ELIGIBLE",
+        evaluated_at=now - timedelta(days=5),
+        **overrides,
+    )
+
+    decision = evaluate_calibration_transfer_policy_with_evidence(
+        config=cfg,
+        conn=conn,
+        **{**_BASE_KWARGS, "now": now},
+    )
+
+    assert decision.status == "SHADOW_ONLY"
+    assert decision.live_promotion_approved is False
+    assert decision.note == "invalid_source_platt_evidence"
+
+
+def test_missing_target_cohort_returns_shadow_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Aggregate transfer evidence is not authority without its eligible held-out cohort."""
+    monkeypatch.setenv("ZEUS_CALIBRATION_TRANSFER_OOS_EVAL_ENABLED", "true")
+    cfg = entry_forecast_config()
+    conn = _make_conn()
+    now = datetime(2026, 5, 5, 12, 0, 0)
+    _insert_row(
+        conn,
+        status="LIVE_ELIGIBLE",
+        evaluated_at=now - timedelta(days=5),
+        insert_target_pairs=False,
+    )
+
+    decision = evaluate_calibration_transfer_policy_with_evidence(
+        config=cfg,
+        conn=conn,
+        **{**_BASE_KWARGS, "now": now},
+    )
+
+    assert decision.status == "SHADOW_ONLY"
+    assert decision.live_promotion_approved is False
+    assert decision.note == "invalid_target_cohort_evidence"
+
+
+def test_post_evidence_target_cohort_returns_shadow_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Target rows recorded after transfer evaluation cannot retroactively validate it."""
+    monkeypatch.setenv("ZEUS_CALIBRATION_TRANSFER_OOS_EVAL_ENABLED", "true")
+    cfg = entry_forecast_config()
+    conn = _make_conn()
+    now = datetime(2026, 5, 5, 12, 0, 0)
+    _insert_row(
+        conn,
+        status="LIVE_ELIGIBLE",
+        evaluated_at=now - timedelta(days=5),
+        target_pair_recorded_at="2026-05-06T00:00:00",
+    )
+
+    decision = evaluate_calibration_transfer_policy_with_evidence(
+        config=cfg,
+        conn=conn,
+        **{**_BASE_KWARGS, "now": now},
+    )
+
+    assert decision.status == "SHADOW_ONLY"
+    assert decision.live_promotion_approved is False
+    assert decision.note == "invalid_target_cohort_evidence"
+
+
+def test_malformed_evaluated_at_returns_shadow_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Malformed evidence timestamps cannot crash or authorize live transfer."""
+    monkeypatch.setenv("ZEUS_CALIBRATION_TRANSFER_OOS_EVAL_ENABLED", "true")
+    cfg = entry_forecast_config()
+    conn = _make_conn()
+    now = datetime(2026, 5, 5, 12, 0, 0)
+    _insert_row(
+        conn,
+        status="LIVE_ELIGIBLE",
+        evaluated_at="not-a-time",
+    )
+
+    decision = evaluate_calibration_transfer_policy_with_evidence(
+        config=cfg,
+        conn=conn,
+        **{**_BASE_KWARGS, "now": now},
+    )
+
+    assert decision.status == "SHADOW_ONLY"
+    assert decision.live_promotion_approved is False
+    assert decision.note == "invalid_evidence_time"
+
+
+def test_future_evaluated_at_returns_shadow_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Evidence not available at decision time cannot authorize transfer."""
+    monkeypatch.setenv("ZEUS_CALIBRATION_TRANSFER_OOS_EVAL_ENABLED", "true")
+    cfg = entry_forecast_config()
+    conn = _make_conn()
+    now = datetime(2026, 5, 5, 12, 0, 0)
+    _insert_row(
+        conn,
+        status="LIVE_ELIGIBLE",
+        evaluated_at=now + timedelta(days=1),
+    )
+
+    decision = evaluate_calibration_transfer_policy_with_evidence(
+        config=cfg,
+        conn=conn,
+        **{**_BASE_KWARGS, "now": now},
+    )
+
+    assert decision.status == "SHADOW_ONLY"
+    assert decision.live_promotion_approved is False
+    assert decision.note == "future_evidence_time"
+
+
+def test_pseudo_oos_target_evidence_fails_closed_against_time_blocked_cohort(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A LIVE row is not authority if current time-blocked cohort disagrees."""
+    monkeypatch.setenv("ZEUS_CALIBRATION_TRANSFER_OOS_EVAL_ENABLED", "true")
+    cfg = entry_forecast_config()
+    conn = _make_conn()
+    now = datetime(2026, 5, 5, 12, 0, 0)
+    _insert_row(
+        conn,
+        status="LIVE_ELIGIBLE",
+        evaluated_at=now - timedelta(days=5),
+        n_pairs=200,
+        brier_source=0.09,
+        brier_target=0.09,
+        brier_diff=0.0,
+        source_model_brier_insample=0.09,
+        insert_target_pairs=False,
+    )
+    _insert_target_pairs_for_transfer(conn, n_pairs=200, brier_target=0.81)
+
+    decision = evaluate_calibration_transfer_policy_with_evidence(
+        config=cfg,
+        conn=conn,
+        **{**_BASE_KWARGS, "now": now},
+    )
+
+    assert decision.status == "SHADOW_ONLY"
+    assert decision.live_promotion_approved is False
+    assert decision.note == "invalid_target_cohort_evidence"
+
+
+def test_live_status_with_unsafe_brier_diff_returns_blocked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Consumers re-derive unsafe status from Brier economics instead of trusting status."""
+    monkeypatch.setenv("ZEUS_CALIBRATION_TRANSFER_OOS_EVAL_ENABLED", "true")
+    cfg = entry_forecast_config()
+    conn = _make_conn()
+    now = datetime(2026, 5, 5, 12, 0, 0)
+    _insert_row(
+        conn,
+        status="LIVE_ELIGIBLE",
+        evaluated_at=now - timedelta(days=5),
+        brier_source=0.0,
+        brier_target=0.5,
+        brier_diff=0.5,
+        brier_diff_threshold=0.005,
+    )
+
+    decision = evaluate_calibration_transfer_policy_with_evidence(
+        config=cfg,
+        conn=conn,
+        **{**_BASE_KWARGS, "now": now},
+    )
+
+    assert decision.status == "BLOCKED"
+    assert decision.live_promotion_approved is False
+    assert decision.note == "db_row_transfer_unsafe_by_economics"
+
+
 def test_transfer_unsafe_row_returns_blocked(monkeypatch: pytest.MonkeyPatch) -> None:
     """Row with status=TRANSFER_UNSAFE → BLOCKED."""
     monkeypatch.setenv("ZEUS_CALIBRATION_TRANSFER_OOS_EVAL_ENABLED", "true")
@@ -187,6 +619,34 @@ def test_transfer_unsafe_row_returns_blocked(monkeypatch: pytest.MonkeyPatch) ->
     conn = _make_conn()
     now = datetime(2026, 5, 5, 12, 0, 0)
     _insert_row(conn, status="TRANSFER_UNSAFE", evaluated_at=now - timedelta(days=5))
+
+    decision = evaluate_calibration_transfer_policy_with_evidence(
+        config=cfg,
+        conn=conn,
+        **{**_BASE_KWARGS, "now": now},
+    )
+
+    assert decision.status == "BLOCKED"
+    assert decision.note == "db_row_transfer_unsafe"
+
+
+def test_policy_filter_ignores_wrong_policy_live_row(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A wrong-policy LIVE row must not mask the active policy's unsafe evidence."""
+    monkeypatch.setenv("ZEUS_CALIBRATION_TRANSFER_OOS_EVAL_ENABLED", "true")
+    cfg = entry_forecast_config()
+    conn = _make_conn()
+    now = datetime(2026, 5, 5, 12, 0, 0)
+    _insert_row(
+        conn,
+        status="LIVE_ELIGIBLE",
+        evaluated_at=now - timedelta(days=5),
+        policy_id="test_policy",
+    )
+    _insert_row(
+        conn,
+        status="TRANSFER_UNSAFE",
+        evaluated_at=now - timedelta(days=5),
+    )
 
     decision = evaluate_calibration_transfer_policy_with_evidence(
         config=cfg,
@@ -236,6 +696,102 @@ def test_none_route_keys_return_shadow_only(monkeypatch: pytest.MonkeyPatch) -> 
     assert "insufficient" in decision.note.lower() or "none" in decision.note.lower(), (
         f"Expected 'insufficient' or 'none' in note, got {decision.note!r}"
     )
+
+
+def test_empty_same_domain_identity_does_not_fast_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Empty source/cycle identity is not a real same-domain transfer object."""
+    monkeypatch.setenv("ZEUS_CALIBRATION_TRANSFER_OOS_EVAL_ENABLED", "true")
+    cfg = entry_forecast_config()
+    conn = _make_conn()
+
+    decision = evaluate_calibration_transfer_policy_with_evidence(
+        config=cfg,
+        conn=conn,
+        source_id="",
+        target_source_id="",
+        source_cycle="00",
+        target_cycle="00",
+        horizon_profile="full",
+        season="summer",
+        cluster="cluster_a",
+        metric="high",
+        platt_model_key="platt_key_1",
+        now=datetime(2026, 5, 5, 12, 0, 0),
+    )
+
+    assert decision.status == "SHADOW_ONLY"
+    assert decision.live_promotion_approved is False
+    assert "insufficient" in decision.note.lower() or "none" in decision.note.lower()
+
+
+@pytest.mark.parametrize(
+    "field,db_column",
+    [
+        ("source_id", "source_id"),
+        ("target_source_id", "target_source_id"),
+        ("source_cycle", "source_cycle"),
+        ("target_cycle", "target_cycle"),
+        ("horizon_profile", "horizon_profile"),
+        ("season", "season"),
+        ("cluster", "cluster"),
+        ("platt_model_key", "platt_model_key"),
+    ],
+)
+def test_empty_cross_domain_identity_cannot_match_live_row(
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+    db_column: str,
+) -> None:
+    """A LIVE row with empty identity fields cannot authorize an empty route key."""
+    monkeypatch.setenv("ZEUS_CALIBRATION_TRANSFER_OOS_EVAL_ENABLED", "true")
+    cfg = entry_forecast_config()
+    conn = _make_conn()
+    now = datetime(2026, 5, 5, 12, 0, 0)
+    _insert_row(conn, status="LIVE_ELIGIBLE", evaluated_at=now - timedelta(days=5))
+    assert db_column in {
+        "source_id",
+        "target_source_id",
+        "source_cycle",
+        "target_cycle",
+        "horizon_profile",
+        "season",
+        "cluster",
+        "platt_model_key",
+    }
+    conn.execute(f"UPDATE validated_calibration_transfers SET {db_column} = ''")
+    conn.commit()
+
+    kwargs = {**_BASE_KWARGS, "now": now, field: ""}
+    decision = evaluate_calibration_transfer_policy_with_evidence(
+        config=cfg,
+        conn=conn,
+        **kwargs,
+    )
+
+    assert decision.status == "SHADOW_ONLY"
+    assert decision.live_promotion_approved is False
+    assert "insufficient" in decision.note.lower() or "none" in decision.note.lower()
+
+
+def test_legacy_direct_call_fails_closed_when_oos_gate_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Once the OOS evidence gate is active, legacy live_promotion_approved is not authority."""
+    monkeypatch.setenv("ZEUS_CALIBRATION_TRANSFER_OOS_EVAL_ENABLED", "true")
+    cfg = entry_forecast_config()
+
+    with pytest.warns(DeprecationWarning, match="direct legacy calls fail closed"):
+        decision = evaluate_calibration_transfer_policy(
+            config=cfg,
+            source_id=cfg.source_id,
+            forecast_data_version=ECMWF_OPENDATA_HIGH_DATA_VERSION,
+            live_promotion_approved=True,
+        )
+
+    assert decision.status == "BLOCKED"
+    assert decision.reason_codes == ("CALIBRATION_TRANSFER_LEGACY_PATH_DISABLED",)
+    assert decision.live_promotion_approved is False
+    assert decision.note == "legacy_disabled_by_oos_evidence_gate"
 
 
 def test_live_eligible_db_row_sets_live_promotion_approved(

@@ -38,7 +38,7 @@ Promotion thresholds computed by these modules may be reported in status_summary
 
 Current limitation reality (code-observed, not blanket):
 - Market price linkage: tracked per-subject as `full`, `partial`, or `none` via `_market_price_linkage_limitations()`; PnL availability depends on linkage state
-- Sizing: flat $5 (no active Kelly cascade)
+- Sizing: fixed diagnostic sizing (no active Kelly cascade)
 - Bootstrap/FDR: not applied in replay path
 - Coverage: gaps exist; provenance sources tracked per-outcome
 
@@ -58,7 +58,7 @@ It may NOT:
 
 - Live canonical read cutoff: DONE (P4, commit 1fc14ab)
 - JSON fallback eliminated from live portfolio loader: DONE
-- Paper mode decommissioned: DONE (Phase 1 complete)
+- retired peer execution path decommissioned: DONE (Phase 1 complete)
 - Shadow instrumentation boundary: DECLARED (this doc)
 - Replay demotion: DECLARED (this doc)
 - Live candidate-family FDR: ACTIVE for candidate/market/snapshot tested families; whole-cycle BH is not claimed

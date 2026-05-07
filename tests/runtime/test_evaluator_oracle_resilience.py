@@ -144,7 +144,7 @@ def test_evaluate_candidate_produces_decision_when_oracle_file_missing(monkeypat
     decisions = evaluator_module.evaluate_candidate(
         _candidate(discovery_mode=DiscoveryMode.OPENING_HUNT.value),
         conn=None,
-        portfolio=PortfolioState(bankroll=150.0),
+        portfolio=PortfolioState(bankroll=211.37),
         clob=clob,
         limits=evaluator_module.RiskLimits(min_order_usd=1.0),
         decision_time=TEST_DECISION_TIME,
