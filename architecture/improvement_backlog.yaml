@@ -650,21 +650,3 @@ entries:
       text, tests, registry, and generated-profile cleanup with explicit
       no-live-mutation boundaries, plus a generated-artifact regeneration gate
       for `architecture/digest_profiles.py`.
-
-  - id: P36-2026-05-07
-    title: "Data-source equivalence routes need paired-physics admission"
-    raised_at: "2026-05-07"
-    raised_by: "low-high-alignment-recovery"
-    status: proposed
-    detail_doc: "architecture/ecmwf_opendata_tigge_equivalence_2026_05_06.yaml"
-    notes: >
-      OpenData/TIGGE alignment required proving three different claims that
-      topology did not admit as one route: source-family physical quantity
-      equivalence, same-message paired GRIB evidence, and contract-bin money-path
-      preservation. Generic navigation treated diagnostic scripts, calibration
-      domain structs, schema shadow columns, release-calendar config, and source
-      extraction tooling as separate ambiguous surfaces. Future topology
-      maintenance should add a data-source-equivalence route that admits
-      read-only GRIB probes, diagnostic reports, transfer-policy gates, and
-      external extractor/downloader dry-runs while explicitly blocking live
-      calibration sharing until paired issue/member/step/bin evidence exists.

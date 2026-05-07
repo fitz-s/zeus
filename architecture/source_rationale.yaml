@@ -453,18 +453,6 @@ files:
     zone: K0_frozen_kernel
     authority_role: snapshot_ingest_contract
     why: Declares point-in-time ingest requirements so forecast snapshot writes cannot masquerade as timeless truth.
-  src/contracts/tigge_snapshot_payload.py:
-    zone: K0_frozen_kernel
-    authority_role: extractor_ingest_payload_contract
-    why: Canonical payload boundary between TIGGE/OpenData local-day extrema extractors and ensemble_snapshots_v2 ingest; prevents schema drift across mx2t6/mn2t6 source JSON, causality, boundary, and forecast-window evidence fields.
-    hazards:
-    - SOURCE_INGEST_SCHEMA_DRIFT
-    - LOW_HIGH_METRIC_MIXING
-    downstream:
-    - scripts/ingest_grib_to_snapshots.py
-    - scripts/backfill_low_contract_window_evidence.py
-    gates:
-    - pytest -q tests/test_ingest_grib_law5_antibody.py tests/test_low_contract_window_backfill.py
   src/contracts/tail_treatment.py:
     zone: K0_frozen_kernel
     authority_role: probability_treatment_contract

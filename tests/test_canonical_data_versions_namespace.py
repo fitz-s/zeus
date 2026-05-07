@@ -23,16 +23,16 @@ from src.contracts import ensemble_snapshot_provenance as mod
 from src.types.metric_identity import HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN
 
 
-def test_ensemble_set_contains_metric_tracks_and_source_variants():
-    """CANONICAL_ENSEMBLE_DATA_VERSIONS covers HIGH/LOW source variants."""
+def test_ensemble_set_contains_both_tracks():
+    """CANONICAL_ENSEMBLE_DATA_VERSIONS covers HIGH + LOW metric data_versions."""
     ensemble = mod.CANONICAL_ENSEMBLE_DATA_VERSIONS
     assert HIGH_LOCALDAY_MAX.data_version in ensemble
     assert LOW_LOCALDAY_MIN.data_version in ensemble
-    assert mod.ECMWF_OPENDATA_HIGH_DATA_VERSION in ensemble
-    assert mod.ECMWF_OPENDATA_LOW_DATA_VERSION in ensemble
-    assert mod.TIGGE_LOW_CONTRACT_WINDOW_DATA_VERSION in ensemble
-    assert mod.ECMWF_OPENDATA_LOW_CONTRACT_WINDOW_DATA_VERSION in ensemble
-    assert len(ensemble) == 6
+    assert len(ensemble) == 2, (
+        "Ensemble allowlist should contain exactly the two metric identities "
+        "(HIGH + LOW). Expansion requires explicit packet; accidental growth "
+        "is flagged here."
+    )
 
 
 def test_deprecation_alias_is_identity():

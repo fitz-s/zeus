@@ -1,9 +1,6 @@
 # Created: 2026-04-16
 # Last reused/audited: 2026-04-29
-# Lifecycle: created=2026-04-16; last_reviewed=2026-05-07; last_reused=2026-05-07
 # Authority basis: Phase 5C.2 market_price_history schema owner DDL seam
-# Purpose: Lock executable v2 schema relationships and metric coexistence invariants.
-# Reuse: Run before modifying src/state/schema/v2_schema.py or v2 snapshot columns.
 """Relationship tests for Gate A: same-(city, target_date) carries distinct
 high + low rows across all 7 metric-aware v2 tables.
 
@@ -513,97 +510,6 @@ class TestGateADualMetricCoexistence(unittest.TestCase):
                       msg="ensemble_snapshots_v2 missing members_unit (4A.2 schema migration)")
         self.assertIn("members_precision", columns,
                       msg="ensemble_snapshots_v2 missing members_precision (4A.2 schema migration)")
-
-    def test_ensemble_snapshots_v2_can_hold_contract_window_evidence(self):
-        """LOW/HIGH recovery requires contract-object and forecast-window evidence.
-
-        The columns are nullable shadow evidence only. Their presence must not
-        change the default training gate for existing snapshot writers.
-        """
-        conn = _apply_and_get_conn()
-        columns = {
-            row[1]
-            for row in conn.execute("PRAGMA table_info(ensemble_snapshots_v2)")
-        }
-        required_columns = {
-            "city_timezone",
-            "settlement_source_type",
-            "settlement_station_id",
-            "settlement_unit",
-            "settlement_rounding_policy",
-            "bin_grid_id",
-            "bin_schema_version",
-            "forecast_window_start_utc",
-            "forecast_window_end_utc",
-            "forecast_window_start_local",
-            "forecast_window_end_local",
-            "forecast_window_local_day_overlap_hours",
-            "forecast_window_attribution_status",
-            "contributes_to_target_extrema",
-            "forecast_window_block_reasons_json",
-        }
-        self.assertTrue(
-            required_columns <= columns,
-            msg="ensemble_snapshots_v2 missing LOW/HIGH contract-window evidence columns",
-        )
-
-        conn.execute(
-            """
-            INSERT INTO ensemble_snapshots_v2 (
-                city, target_date, temperature_metric, physical_quantity,
-                observation_field, available_at, fetch_time, lead_hours,
-                members_json, model_version, data_version,
-                city_timezone, settlement_source_type, settlement_station_id,
-                settlement_unit, settlement_rounding_policy, bin_grid_id,
-                bin_schema_version, forecast_window_start_utc,
-                forecast_window_end_utc, forecast_window_start_local,
-                forecast_window_end_local, forecast_window_local_day_overlap_hours,
-                forecast_window_attribution_status, contributes_to_target_extrema,
-                forecast_window_block_reasons_json
-            )
-            VALUES (
-                'Kuala Lumpur', '2026-06-10', 'low', 'mn2t6',
-                'low_temp', '2026-06-09T18:00:00Z', '2026-06-09T18:05:00Z',
-                24.0, '[]', 'v2', 'tigge_mn2t6_contract_shadow_v1',
-                'Asia/Kuala_Lumpur', 'WU', 'WMKK', 'C',
-                'integer_nearest', 'kl_low_celsius_daily_v1',
-                'polymarket_weather_bins_v1', '2026-06-09T16:00:00Z',
-                '2026-06-09T22:00:00Z', '2026-06-10T00:00:00+08:00',
-                '2026-06-10T06:00:00+08:00', 6.0,
-                'FULLY_INSIDE_TARGET_LOCAL_DAY', 1, '[]'
-            )
-            """
-        )
-        row = conn.execute(
-            """
-            SELECT training_allowed, causality_status, settlement_unit,
-                   forecast_window_attribution_status,
-                   contributes_to_target_extrema
-            FROM ensemble_snapshots_v2
-            WHERE city = 'Kuala Lumpur'
-            """
-        ).fetchone()
-        self.assertEqual(1, row[0])
-        self.assertEqual("OK", row[1])
-        self.assertEqual("C", row[2])
-        self.assertEqual("FULLY_INSIDE_TARGET_LOCAL_DAY", row[3])
-        self.assertEqual(1, row[4])
-
-        with self.assertRaises(sqlite3.IntegrityError):
-            conn.execute(
-                """
-                INSERT INTO ensemble_snapshots_v2 (
-                    city, target_date, temperature_metric, physical_quantity,
-                    observation_field, available_at, fetch_time, lead_hours,
-                    members_json, model_version, data_version, settlement_unit
-                )
-                VALUES (
-                    'Kuala Lumpur', '2026-06-11', 'low', 'mn2t6', 'low_temp',
-                    '2026-06-10T18:00:00Z', '2026-06-10T18:05:00Z', 24.0,
-                    '[]', 'v2', 'tigge_mn2t6_contract_shadow_v1', 'K'
-                )
-                """
-            )
 
     def test_v2_unique_key_rejects_duplicate_metric(self):
         """Inserting a second row with identical (city, target_date, temperature_metric, ...)

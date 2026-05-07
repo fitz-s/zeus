@@ -14,7 +14,7 @@ entries:
     metric: high
     period_semantics: max temperature at 2m in previous 6h ending at valid step
     expected_members: 51
-    expected_step_rule: local_day_6h_windows_up_to_276h
+    expected_step_rule: local_day_6h_windows_up_to_240h
     partial_policy: BLOCK_LIVE
     live_authorization: true
     source_transport_required: ensemble_snapshots_v2_db_reader
@@ -25,7 +25,7 @@ entries:
       - cycle_hours_utc: [0, 12]
         horizon_profile: full
         max_step_hours: 360
-        live_max_step_hours: 276
+        live_max_step_hours: 240
         safe_fetch:
           default_lag_minutes: 485
           min_partial_lag_minutes: 400
@@ -54,7 +54,7 @@ entries:
     metric: low
     period_semantics: min temperature at 2m in previous 6h ending at valid step
     expected_members: 51
-    expected_step_rule: local_day_6h_windows_up_to_276h
+    expected_step_rule: local_day_6h_windows_up_to_240h
     partial_policy: BLOCK_LIVE
     live_authorization: true
     source_transport_required: ensemble_snapshots_v2_db_reader
@@ -65,7 +65,7 @@ entries:
       - cycle_hours_utc: [0, 12]
         horizon_profile: full
         max_step_hours: 360
-        live_max_step_hours: 276
+        live_max_step_hours: 240
         safe_fetch:
           default_lag_minutes: 485
           min_partial_lag_minutes: 400

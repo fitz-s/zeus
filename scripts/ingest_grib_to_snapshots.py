@@ -37,27 +37,17 @@ import logging
 import sqlite3
 import sys
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from zoneinfo import ZoneInfo
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.calibration.forecast_calibration_domain import (
-    ContractOutcomeDomain,
-    ContractOutcomeDomainMismatch,
-    ForecastToBinEvidence,
-    derive_source_id_from_data_version,
-)
-from src.config import runtime_cities_by_name
-from src.contracts.calibration_bins import grid_for_city
 from src.contracts.ensemble_snapshot_provenance import (
     assert_data_version_allowed,
     validate_members_unit,
 )
-from src.contracts.settlement_semantics import SettlementSemantics
 from src.contracts.snapshot_ingest_contract import validate_snapshot_contract
 from src.contracts.tigge_snapshot_payload import ProvenanceViolation, TiggeSnapshotPayload
 from src.state.canonical_write import commit_then_export
@@ -139,32 +129,6 @@ def _provenance_json(payload: dict, metric: MetricIdentity) -> str:
         "nearest_grid_lon": payload.get("nearest_grid_lon"),
         "nearest_grid_distance_km": payload.get("nearest_grid_distance_km"),
     }
-    evidence = _contract_evidence_fields(
-        payload,
-        metric,
-        source_id=derive_source_id_from_data_version(str(payload.get("data_version", ""))),
-    )
-    prov["contract_outcome_evidence"] = {
-        key: value
-        for key, value in evidence.items()
-        if key
-        in {
-            "city_timezone",
-            "settlement_source_type",
-            "settlement_station_id",
-            "settlement_unit",
-            "settlement_rounding_policy",
-            "bin_grid_id",
-            "bin_schema_version",
-            "forecast_window_start_utc",
-            "forecast_window_end_utc",
-            "forecast_window_start_local",
-            "forecast_window_end_local",
-            "forecast_window_attribution_status",
-            "contributes_to_target_extrema",
-            "forecast_window_block_reasons_json",
-        }
-    }
     return json.dumps(prov, ensure_ascii=False)
 
 
@@ -187,267 +151,6 @@ def _members_list(payload: dict) -> list[float | None]:
 def _lead_hours(payload: dict) -> float:
     """Compute lead_hours from lead_day (issue_utc to start of target local day)."""
     return float(payload.get("lead_day", 0)) * 24.0
-
-
-def _parse_iso_datetime(value: object) -> datetime | None:
-    if value in (None, ""):
-        return None
-    if isinstance(value, datetime):
-        parsed = value
-    else:
-        try:
-            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-        except ValueError:
-            return None
-    if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=timezone.utc)
-    return parsed
-
-
-def _parse_step_range(value: object) -> tuple[int, int] | None:
-    if isinstance(value, str):
-        parts = value.strip().split("-")
-        if len(parts) != 2:
-            return None
-        try:
-            start, end = int(parts[0]), int(parts[1])
-        except ValueError:
-            return None
-        return (start, end) if start < end else None
-    if isinstance(value, (list, tuple)) and len(value) == 2:
-        try:
-            start, end = int(value[0]), int(value[1])
-        except (TypeError, ValueError):
-            return None
-        return (start, end) if start < end else None
-    if isinstance(value, dict):
-        start_raw = value.get("start_step_hours", value.get("start_step", value.get("start")))
-        end_raw = value.get("end_step_hours", value.get("end_step", value.get("end")))
-        try:
-            start, end = int(start_raw), int(end_raw)
-        except (TypeError, ValueError):
-            return None
-        return (start, end) if start < end else None
-    return None
-
-
-def _is_low_extrema_payload(payload: dict) -> bool:
-    metric = str(payload.get("temperature_metric") or "").strip().lower()
-    physical_quantity = str(payload.get("physical_quantity") or "").strip().lower()
-    short_name = str(payload.get("short_name") or "").strip().lower()
-    return metric == "low" or "mn2t6" in physical_quantity or short_name == "mn2t6"
-
-
-def _parsed_ranges_from_payload_key(payload: dict, key: str) -> list[tuple[int, int]]:
-    ranges: list[tuple[int, int]] = []
-    raw = payload.get(key)
-    if not isinstance(raw, list):
-        return ranges
-    for item in raw:
-        parsed = _parse_step_range(item)
-        if parsed is not None:
-            ranges.append(parsed)
-    return ranges
-
-
-def _selected_step_ranges(payload: dict) -> list[tuple[int, int]]:
-    if _is_low_extrema_payload(payload):
-        # LOW local-day minima are constructed from fully-inside windows.  The
-        # boundary ranges are quarantine/proof windows used to decide whether a
-        # boundary aggregate can win; they are not contributing extrema windows.
-        ranges = _parsed_ranges_from_payload_key(payload, "selected_step_ranges_inner")
-        return list(dict.fromkeys(ranges))
-
-    ranges: list[tuple[int, int]] = []
-    for key in (
-        "selected_step_ranges",
-        "selected_step_ranges_inner",
-    ):
-        ranges.extend(_parsed_ranges_from_payload_key(payload, key))
-    # Preserve order while removing duplicates; payloads can repeat a range
-    # across diagnostic fields.
-    return list(dict.fromkeys(ranges))
-
-
-def _missing_forecast_window_reason(payload: dict) -> str:
-    if _is_low_extrema_payload(payload):
-        return "missing_low_inner_forecast_window_evidence"
-    return "missing_explicit_forecast_window_evidence"
-
-
-def _missing_contract_extrema_member_reasons(payload: dict) -> list[str]:
-    reasons: list[str] = []
-    missing_members = payload.get("missing_members")
-    if isinstance(missing_members, list) and missing_members:
-        reasons.append("missing_forecast_members_for_contract_extrema")
-    members = payload.get("members")
-    if isinstance(members, list) and any(
-        not isinstance(member, dict) or member.get("value_native_unit") is None
-        for member in members
-    ):
-        reasons.append("missing_member_value_for_contract_extrema")
-    return reasons
-
-
-def _forecast_window_from_payload(
-    payload: dict,
-    *,
-    city_timezone: str,
-) -> dict[str, Any]:
-    explicit_start_utc = _parse_iso_datetime(
-        payload.get("forecast_window_start_utc") or payload.get("window_start_utc")
-    )
-    explicit_end_utc = _parse_iso_datetime(
-        payload.get("forecast_window_end_utc") or payload.get("window_end_utc")
-    )
-    explicit_start_local = _parse_iso_datetime(
-        payload.get("forecast_window_start_local") or payload.get("window_start_local")
-    )
-    explicit_end_local = _parse_iso_datetime(
-        payload.get("forecast_window_end_local") or payload.get("window_end_local")
-    )
-    if (
-        explicit_start_utc is not None
-        and explicit_end_utc is not None
-        and explicit_start_local is not None
-        and explicit_end_local is not None
-    ):
-        return {
-            "forecast_window_start_utc": explicit_start_utc.isoformat(),
-            "forecast_window_end_utc": explicit_end_utc.isoformat(),
-            "forecast_window_start_local": explicit_start_local.isoformat(),
-            "forecast_window_end_local": explicit_end_local.isoformat(),
-            "block_reasons": [],
-        }
-
-    issue_time = _parse_iso_datetime(payload.get("issue_time_utc"))
-    ranges = _selected_step_ranges(payload)
-    if issue_time is None or not ranges:
-        return {"block_reasons": [_missing_forecast_window_reason(payload)]}
-
-    start_step = min(start for start, _ in ranges)
-    end_step = max(end for _, end in ranges)
-    start_utc = issue_time + timedelta(hours=start_step)
-    end_utc = issue_time + timedelta(hours=end_step)
-    tz = ZoneInfo(city_timezone)
-    return {
-        "forecast_window_start_utc": start_utc.isoformat(),
-        "forecast_window_end_utc": end_utc.isoformat(),
-        "forecast_window_start_local": start_utc.astimezone(tz).isoformat(),
-        "forecast_window_end_local": end_utc.astimezone(tz).isoformat(),
-        "block_reasons": [],
-    }
-
-
-def _contract_evidence_fields(
-    payload: dict,
-    metric: MetricIdentity,
-    *,
-    source_id: str | None,
-) -> dict[str, Any]:
-    """Build shadow contract/bin/window evidence columns for a snapshot row.
-
-    These fields are evidence only. They do not change ``training_allowed`` and
-    therefore cannot relax LOW Law 1 by themselves.
-    """
-
-    city_name = str(payload.get("city") or "")
-    cities_by_name = runtime_cities_by_name()
-    city = cities_by_name.get(city_name)
-    if city is None:
-        return {
-            "city_timezone": payload.get("timezone"),
-            "settlement_source_type": None,
-            "settlement_station_id": None,
-            "settlement_unit": None,
-            "settlement_rounding_policy": None,
-            "bin_grid_id": None,
-            "bin_schema_version": None,
-            "forecast_window_start_utc": None,
-            "forecast_window_end_utc": None,
-            "forecast_window_start_local": None,
-            "forecast_window_end_local": None,
-            "forecast_window_local_day_overlap_hours": None,
-            "forecast_window_attribution_status": "UNKNOWN",
-            "contributes_to_target_extrema": 0,
-            "forecast_window_block_reasons_json": json.dumps(["unknown_city_for_contract_evidence"]),
-        }
-
-    sem = SettlementSemantics.for_city(city)
-    grid = grid_for_city(city)
-    city_timezone = str(payload.get("timezone") or city.timezone)
-    station_id = city.wu_station or sem.resolution_source
-    target_date = str(payload.get("target_date_local") or payload.get("target_date") or "")
-    window_fields = _forecast_window_from_payload(payload, city_timezone=city_timezone)
-    block_reasons = list(window_fields.pop("block_reasons", []))
-
-    base = {
-        "city_timezone": city_timezone,
-        "settlement_source_type": city.settlement_source_type,
-        "settlement_station_id": station_id,
-        "settlement_unit": city.settlement_unit,
-        "settlement_rounding_policy": sem.rounding_rule,
-        "bin_grid_id": grid.label,
-        "bin_schema_version": "canonical_bin_grid_v1",
-        "forecast_window_start_utc": window_fields.get("forecast_window_start_utc"),
-        "forecast_window_end_utc": window_fields.get("forecast_window_end_utc"),
-        "forecast_window_start_local": window_fields.get("forecast_window_start_local"),
-        "forecast_window_end_local": window_fields.get("forecast_window_end_local"),
-        "forecast_window_local_day_overlap_hours": None,
-        "forecast_window_attribution_status": "UNKNOWN",
-        "contributes_to_target_extrema": 0,
-        "forecast_window_block_reasons_json": json.dumps(block_reasons),
-    }
-    if block_reasons:
-        if bool((payload.get("boundary_policy") or {}).get("boundary_ambiguous", False)):
-            block_reasons.append("boundary_ambiguous")
-            base["forecast_window_attribution_status"] = "AMBIGUOUS_CROSSES_LOCAL_DAY_BOUNDARY"
-            base["forecast_window_block_reasons_json"] = json.dumps(list(dict.fromkeys(block_reasons)))
-        return base
-
-    try:
-        contract_domain = ContractOutcomeDomain(
-            city=city.name,
-            target_local_date=datetime.fromisoformat(target_date).date(),
-            city_timezone=city_timezone,
-            temperature_metric=metric.temperature_metric,
-            observation_field=metric.observation_field,
-            settlement_source_type=city.settlement_source_type,
-            settlement_station_id=station_id,
-            settlement_unit=city.settlement_unit,  # type: ignore[arg-type]
-            settlement_rounding_policy=sem.rounding_rule,
-            bin_grid_id=grid.label,
-            bin_schema_version="canonical_bin_grid_v1",
-        )
-        evidence_payload = dict(payload)
-        evidence_payload.update(window_fields)
-        evidence_payload["forecast_source_id"] = source_id or derive_source_id_from_data_version(
-            str(payload.get("data_version", ""))
-        )
-        evidence_payload.setdefault("data_version", payload.get("data_version"))
-        evidence_payload.setdefault("horizon_profile", "full")
-        if payload.get("issue_time_utc"):
-            issue = _parse_iso_datetime(payload.get("issue_time_utc"))
-            if issue is not None:
-                evidence_payload.setdefault("cycle_hour_utc", issue.hour)
-        evidence = ForecastToBinEvidence.from_snapshot_payload(contract_domain, evidence_payload)
-    except (ValueError, ContractOutcomeDomainMismatch) as exc:
-        block_reasons.append(f"contract_evidence_error:{type(exc).__name__}")
-        base["forecast_window_block_reasons_json"] = json.dumps(block_reasons)
-        return base
-
-    evidence_block_reasons = list(evidence.block_reasons)
-    evidence_block_reasons.extend(_missing_contract_extrema_member_reasons(payload))
-    if not evidence.contributes_to_target_extrema and not evidence_block_reasons:
-        evidence_block_reasons.append(evidence.attribution_status.lower())
-    contributes = evidence.contributes_to_target_extrema and not evidence_block_reasons
-    return {
-        **base,
-        "forecast_window_local_day_overlap_hours": evidence.local_day_overlap_hours,
-        "forecast_window_attribution_status": evidence.attribution_status,
-        "contributes_to_target_extrema": 1 if contributes else 0,
-        "forecast_window_block_reasons_json": json.dumps(evidence_block_reasons),
-    }
 
 
 def _now_utc_iso() -> str:
@@ -534,11 +237,6 @@ def ingest_json_file(
     causality_status = decision.causality_status
     boundary_ambiguous, ambiguous_member_count = _extract_boundary_fields(payload)
     manifest_hash = _manifest_hash_from_payload(payload)
-    contract_evidence = _contract_evidence_fields(
-        payload,
-        metric,
-        source_id=source_run_context.source_id if source_run_context else None,
-    )
     prov_json = _provenance_json(payload, metric)
     lead_hours = _lead_hours(payload)
     now = _now_utc_iso()
@@ -578,7 +276,6 @@ def ingest_json_file(
         members_unit=members_unit,
         local_day_start_utc=local_day_start_utc,
         step_horizon_hours=step_horizon_hours,
-        **contract_evidence,
     )
 
     insert_verb = "INSERT OR REPLACE" if overwrite else "INSERT OR IGNORE"
@@ -593,13 +290,7 @@ def ingest_json_file(
              source_run_id, release_calendar_key, source_cycle_time,
              source_release_time, source_available_at, training_allowed, causality_status,
              boundary_ambiguous, ambiguous_member_count, manifest_hash, provenance_json,
-             members_unit, local_day_start_utc, step_horizon_hours, city_timezone,
-             settlement_source_type, settlement_station_id, settlement_unit,
-             settlement_rounding_policy, bin_grid_id, bin_schema_version,
-             forecast_window_start_utc, forecast_window_end_utc,
-             forecast_window_start_local, forecast_window_end_local,
-             forecast_window_local_day_overlap_hours, forecast_window_attribution_status,
-             contributes_to_target_extrema, forecast_window_block_reasons_json)
+             members_unit, local_day_start_utc, step_horizon_hours)
             VALUES
             (:city, :target_date, :temperature_metric, :physical_quantity, :observation_field,
              :issue_time, :valid_time, :available_at, :fetch_time, :lead_hours,
@@ -607,13 +298,7 @@ def ingest_json_file(
              :source_run_id, :release_calendar_key, :source_cycle_time,
              :source_release_time, :source_available_at, :training_allowed, :causality_status,
              :boundary_ambiguous, :ambiguous_member_count, :manifest_hash, :provenance_json,
-             :members_unit, :local_day_start_utc, :step_horizon_hours, :city_timezone,
-             :settlement_source_type, :settlement_station_id, :settlement_unit,
-             :settlement_rounding_policy, :bin_grid_id, :bin_schema_version,
-             :forecast_window_start_utc, :forecast_window_end_utc,
-             :forecast_window_start_local, :forecast_window_end_local,
-             :forecast_window_local_day_overlap_hours, :forecast_window_attribution_status,
-             :contributes_to_target_extrema, :forecast_window_block_reasons_json)
+             :members_unit, :local_day_start_utc, :step_horizon_hours)
             """,
             row,
         )

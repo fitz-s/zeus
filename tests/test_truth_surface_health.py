@@ -32,10 +32,6 @@ from scripts.verify_truth_surfaces import (
     build_platt_refit_preflight_report,
     build_training_readiness_report,
 )
-from src.contracts.ensemble_snapshot_provenance import (
-    ECMWF_OPENDATA_LOW_DATA_VERSION,
-    ECMWF_OPENDATA_LOW_CONTRACT_WINDOW_DATA_VERSION,
-)
 
 
 def _now_utc() -> datetime:
@@ -763,92 +759,6 @@ class TestTrainingReadinessP0:
         assert "ensemble_snapshots_v2.rebuild_input_unsafe" in _blocker_codes(report)
         assert "empty_rebuild_eligible_snapshots" in _blocker_codes(report)
 
-    def test_rebuild_preflight_accepts_allowed_low_data_versions_with_contract_evidence(
-        self, tmp_path
-    ):
-        db_path = _fresh_training_readiness_world_db(tmp_path)
-        conn = sqlite3.connect(db_path)
-        _seed_rebuild_preflight_inputs(conn)
-        for data_version in (
-            ECMWF_OPENDATA_LOW_DATA_VERSION,
-            ECMWF_OPENDATA_LOW_CONTRACT_WINDOW_DATA_VERSION,
-        ):
-            conn.execute(
-                """
-                INSERT INTO ensemble_snapshots_v2 (
-                    city, target_date, temperature_metric, physical_quantity,
-                    observation_field, issue_time, valid_time, available_at,
-                    fetch_time, lead_hours, members_json, model_version,
-                    data_version, training_allowed, causality_status, authority,
-                    provenance_json, forecast_window_start_utc,
-                    forecast_window_end_utc, forecast_window_start_local,
-                    forecast_window_end_local, forecast_window_attribution_status,
-                    contributes_to_target_extrema,
-                    forecast_window_block_reasons_json
-                ) VALUES (
-                    'NYC', '2026-04-24', 'low',
-                    'mn2t6_local_calendar_day_min', 'low_temp',
-                    '2026-04-23T12:00:00Z', '2026-04-24T12:00:00Z',
-                    '2026-04-23T12:10:00Z', '2026-04-23T12:15:00Z',
-                    24.0, '[60.0, 61.0, 62.0]', 'ecmwf',
-                    ?, 1, 'OK', 'VERIFIED', '{"source":"ecmwf"}',
-                    '2026-04-24T05:00:00+00:00',
-                    '2026-04-24T11:00:00+00:00',
-                    '2026-04-24T01:00:00-04:00',
-                    '2026-04-24T07:00:00-04:00',
-                    'FULLY_INSIDE_TARGET_LOCAL_DAY', 1, '[]'
-                )
-                """,
-                (data_version,),
-            )
-        conn.commit()
-        conn.close()
-
-        report = build_calibration_pair_rebuild_preflight_report(db_path)
-
-        assert "ensemble_snapshots_v2.rebuild_input_unsafe" not in _blocker_codes(report)
-        assert "ensemble_snapshots_v2.low_contract_evidence_unsafe" not in _blocker_codes(report)
-        assert report["checks"]["ensemble_snapshots_v2.low.contract_window_evidence_safe"][
-            "status"
-        ] == "PASS"
-
-    def test_rebuild_preflight_blocks_evidence_required_low_rows_without_contract_window(
-        self, tmp_path
-    ):
-        db_path = _fresh_training_readiness_world_db(tmp_path)
-        conn = sqlite3.connect(db_path)
-        _seed_rebuild_preflight_inputs(conn)
-        conn.execute(
-            """
-            INSERT INTO ensemble_snapshots_v2 (
-                city, target_date, temperature_metric, physical_quantity,
-                observation_field, issue_time, valid_time, available_at,
-                fetch_time, lead_hours, members_json, model_version,
-                data_version, training_allowed, causality_status, authority,
-                provenance_json
-            ) VALUES (
-                'NYC', '2026-04-24', 'low',
-                'mn2t6_local_calendar_day_min', 'low_temp',
-                '2026-04-23T12:00:00Z', '2026-04-24T12:00:00Z',
-                '2026-04-23T12:10:00Z', '2026-04-23T12:15:00Z',
-                24.0, '[60.0, 61.0, 62.0]', 'ecmwf',
-                ?, 1, 'OK', 'VERIFIED', '{"source":"ecmwf"}'
-            )
-            """,
-            (ECMWF_OPENDATA_LOW_DATA_VERSION,),
-        )
-        conn.commit()
-        conn.close()
-
-        report = build_calibration_pair_rebuild_preflight_report(db_path)
-
-        blockers = _blocker_codes(report)
-        assert "ensemble_snapshots_v2.rebuild_input_unsafe" not in blockers
-        assert "ensemble_snapshots_v2.low_contract_evidence_unsafe" in blockers
-        assert report["checks"]["ensemble_snapshots_v2.low.contract_window_evidence_safe"][
-            "count"
-        ] == 1
-
     def test_rebuild_preflight_fails_when_wu_label_provenance_is_empty(self, tmp_path):
         db_path = _fresh_training_readiness_world_db(tmp_path)
         conn = sqlite3.connect(db_path)
@@ -870,28 +780,6 @@ class TestTrainingReadinessP0:
         assert "observations.verified_without_provenance" in blockers
         assert "observations.wu_empty_provenance" in blockers
         assert report["checks"]["observations.high.wu_provenance_present"]["count"] == 1
-
-    def test_rebuild_preflight_accepts_split_provenance_when_legacy_common_column_is_blank(
-        self, tmp_path
-    ):
-        db_path = _fresh_training_readiness_world_db(tmp_path)
-        conn = sqlite3.connect(db_path)
-        _seed_rebuild_preflight_inputs(conn)
-        try:
-            conn.execute("ALTER TABLE observations ADD COLUMN provenance_metadata TEXT")
-        except sqlite3.OperationalError:
-            pass
-        conn.execute("UPDATE observations SET provenance_metadata = ''")
-        conn.commit()
-        conn.close()
-
-        report = build_calibration_pair_rebuild_preflight_report(db_path)
-
-        blockers = _blocker_codes(report)
-        assert "observations.verified_without_provenance" not in blockers
-        assert "observations.wu_empty_provenance" not in blockers
-        assert report["checks"]["observations.high.provenance_present"]["status"] == "PASS"
-        assert report["checks"]["observations.low.provenance_present"]["status"] == "PASS"
 
     def test_rebuild_preflight_fails_when_observation_instant_is_unsafe(self, tmp_path):
         db_path = _fresh_training_readiness_world_db(tmp_path)

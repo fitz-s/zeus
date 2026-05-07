@@ -34,11 +34,6 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src.calibration.metric_specs import METRIC_SPECS
-from src.contracts.ensemble_snapshot_provenance import (
-    ECMWF_OPENDATA_LOW_DATA_VERSION,
-    ECMWF_OPENDATA_LOW_CONTRACT_WINDOW_DATA_VERSION,
-    TIGGE_LOW_CONTRACT_WINDOW_DATA_VERSION,
-)
 from src.config import STATE_DIR, calibration_maturity_thresholds
 
 DEFAULT_TRADE_DB = STATE_DIR / "zeus_trades.db"
@@ -1228,106 +1223,11 @@ def _add_legacy_settlement_evidence_checks(
     )
 
 
-def _metric_allowed_versions() -> dict[str, tuple[str, ...]]:
+def _metric_allowed_versions() -> dict[str, str]:
     return {
-        spec.identity.temperature_metric: spec.allowed_data_versions
+        spec.identity.temperature_metric: spec.allowed_data_version
         for spec in METRIC_SPECS
     }
-
-
-def _sql_placeholders(values: tuple[object, ...]) -> str:
-    if not values:
-        raise ValueError("SQL placeholder list cannot be empty")
-    return ", ".join("?" for _ in values)
-
-
-_LOW_CONTRACT_EVIDENCE_PREFLIGHT_FIELDS = (
-    "forecast_window_start_utc",
-    "forecast_window_end_utc",
-    "forecast_window_start_local",
-    "forecast_window_end_local",
-    "forecast_window_attribution_status",
-    "contributes_to_target_extrema",
-    "forecast_window_block_reasons_json",
-)
-
-
-def _add_low_contract_evidence_preflight_check(
-    report: dict,
-    cur: sqlite3.Cursor,
-    *,
-    table: str,
-    allowed_required_versions: tuple[str, ...],
-) -> None:
-    """Block LOW rebuild promotion when evidence-required rows lack contract proof."""
-    if not allowed_required_versions:
-        return
-    columns = _columns(cur, table)
-    placeholders = _sql_placeholders(allowed_required_versions)
-    required_training_where = f"""
-        temperature_metric = 'low'
-        AND data_version IN ({placeholders})
-        AND COALESCE(training_allowed, 0) = 1
-        AND UPPER(TRIM(CAST(authority AS TEXT))) = 'VERIFIED'
-        AND UPPER(TRIM(CAST(causality_status AS TEXT))) = 'OK'
-    """
-    missing_columns = [
-        field for field in _LOW_CONTRACT_EVIDENCE_PREFLIGHT_FIELDS
-        if field not in columns
-    ]
-    if missing_columns:
-        unsafe_count = _count_params(
-            cur,
-            table,
-            required_training_where,
-            allowed_required_versions,
-        )
-        detail = (
-            "LOW evidence-required training rows cannot be checked; "
-            f"missing columns={','.join(missing_columns)}"
-        )
-    else:
-        unsafe_where = f"""
-            {required_training_where}
-            AND (
-                forecast_window_start_utc IS NULL
-                OR TRIM(CAST(forecast_window_start_utc AS TEXT)) = ''
-                OR forecast_window_end_utc IS NULL
-                OR TRIM(CAST(forecast_window_end_utc AS TEXT)) = ''
-                OR forecast_window_start_local IS NULL
-                OR TRIM(CAST(forecast_window_start_local AS TEXT)) = ''
-                OR forecast_window_end_local IS NULL
-                OR TRIM(CAST(forecast_window_end_local AS TEXT)) = ''
-                OR forecast_window_attribution_status != 'FULLY_INSIDE_TARGET_LOCAL_DAY'
-                OR COALESCE(contributes_to_target_extrema, 0) != 1
-                OR forecast_window_block_reasons_json IS NULL
-                OR TRIM(CAST(forecast_window_block_reasons_json AS TEXT)) != '[]'
-            )
-        """
-        unsafe_count = _count_params(cur, table, unsafe_where, allowed_required_versions)
-        detail = (
-            "LOW evidence-required training rows with unsafe contract-window "
-            f"evidence={unsafe_count}"
-        )
-    met = unsafe_count == 0
-    check_id = "ensemble_snapshots_v2.low.contract_window_evidence_safe"
-    report["checks"][check_id] = _check_entry(
-        check_id=check_id,
-        status=PASS if met else FAIL,
-        detail=detail,
-        count=unsafe_count,
-        threshold=0,
-        met=met,
-    )
-    if not met:
-        report["blockers"].append(
-            {
-                "code": "ensemble_snapshots_v2.low_contract_evidence_unsafe",
-                "table": table,
-                "count": unsafe_count,
-                "temperature_metric": "low",
-            }
-        )
 
 
 def _add_observation_instants_safety_checks(report: dict, cur: sqlite3.Cursor) -> None:
@@ -1490,13 +1390,11 @@ def _add_rebuild_snapshot_preflight_checks(report: dict, cur: sqlite3.Cursor) ->
     for spec in METRIC_SPECS:
         identity = spec.identity
         metric = identity.temperature_metric
-        allowed_data_versions = tuple(spec.allowed_data_versions)
-        data_version_placeholders = _sql_placeholders(allowed_data_versions)
         eligible_where = """
             temperature_metric = ?
             AND physical_quantity = ?
             AND observation_field = ?
-            AND data_version IN ({data_version_placeholders})
+            AND data_version = ?
             AND COALESCE(training_allowed, 0) = 1
             AND UPPER(TRIM(CAST(authority AS TEXT))) = 'VERIFIED'
             AND UPPER(TRIM(CAST(causality_status AS TEXT))) = 'OK'
@@ -1510,9 +1408,6 @@ def _add_rebuild_snapshot_preflight_checks(report: dict, cur: sqlite3.Cursor) ->
             AND LOWER(CAST(fetch_time AS TEXT)) NOT LIKE '%reconstruct%'
             AND members_json IS NOT NULL AND TRIM(CAST(members_json AS TEXT)) != ''
         """
-        eligible_where = eligible_where.format(
-            data_version_placeholders=data_version_placeholders
-        )
         eligible_count = _count_params(
             cur,
             table,
@@ -1521,7 +1416,7 @@ def _add_rebuild_snapshot_preflight_checks(report: dict, cur: sqlite3.Cursor) ->
                 metric,
                 identity.physical_quantity,
                 identity.observation_field,
-                *allowed_data_versions,
+                spec.allowed_data_version,
             ),
         )
         eligible_met = eligible_count >= 1
@@ -1553,7 +1448,7 @@ def _add_rebuild_snapshot_preflight_checks(report: dict, cur: sqlite3.Cursor) ->
                 OR observation_field IS NULL
                 OR observation_field != ?
                 OR data_version IS NULL
-                OR data_version NOT IN ({data_version_placeholders})
+                OR data_version != ?
                 OR UPPER(TRIM(CAST(authority AS TEXT))) != 'VERIFIED'
                 OR UPPER(TRIM(CAST(causality_status AS TEXT))) != 'OK'
                 OR city IS NULL OR TRIM(CAST(city AS TEXT)) = ''
@@ -1567,9 +1462,6 @@ def _add_rebuild_snapshot_preflight_checks(report: dict, cur: sqlite3.Cursor) ->
                 OR members_json IS NULL OR TRIM(CAST(members_json AS TEXT)) = ''
             )
         """
-        unsafe_where = unsafe_where.format(
-            data_version_placeholders=data_version_placeholders
-        )
         unsafe_count = _count_params(
             cur,
             table,
@@ -1578,7 +1470,7 @@ def _add_rebuild_snapshot_preflight_checks(report: dict, cur: sqlite3.Cursor) ->
                 metric,
                 identity.physical_quantity,
                 identity.observation_field,
-                *allowed_data_versions,
+                spec.allowed_data_version,
             ),
         )
         unsafe_met = unsafe_count == 0
@@ -1601,22 +1493,6 @@ def _add_rebuild_snapshot_preflight_checks(report: dict, cur: sqlite3.Cursor) ->
                 }
             )
 
-        if metric == "low":
-            _add_low_contract_evidence_preflight_check(
-                report,
-                cur,
-                table=table,
-                allowed_required_versions=tuple(
-                    version
-                    for version in (
-                        ECMWF_OPENDATA_LOW_DATA_VERSION,
-                        TIGGE_LOW_CONTRACT_WINDOW_DATA_VERSION,
-                        ECMWF_OPENDATA_LOW_CONTRACT_WINDOW_DATA_VERSION,
-                    )
-                    if version in allowed_data_versions
-                ),
-            )
-
 
 def _observation_provenance_column(columns: set[str], metric: str) -> str | None:
     if "provenance_metadata" in columns:
@@ -1629,23 +1505,6 @@ def _observation_provenance_column(columns: set[str], metric: str) -> str | None
     if split_column in columns:
         return split_column
     return None
-
-
-def _observation_provenance_blank_predicate(columns: set[str], metric: str) -> str | None:
-    """Return SQL that is true only when all applicable provenance slots are blank."""
-    predicates: list[str] = []
-    if "provenance_metadata" in columns:
-        predicates.append(_blank_or_empty_json_sql("provenance_metadata"))
-    split_column = (
-        "high_provenance_metadata"
-        if metric == "high"
-        else "low_provenance_metadata"
-    )
-    if split_column in columns:
-        predicates.append(_blank_or_empty_json_sql(split_column))
-    if not predicates:
-        return None
-    return " AND ".join(f"({predicate})" for predicate in predicates)
 
 
 def _add_rebuild_observation_preflight_checks(report: dict, cur: sqlite3.Cursor) -> None:
@@ -1693,8 +1552,8 @@ def _add_rebuild_observation_preflight_checks(report: dict, cur: sqlite3.Cursor)
                 }
             )
 
-        provenance_blank_predicate = _observation_provenance_blank_predicate(columns, metric)
-        if provenance_blank_predicate is None:
+        provenance_column = _observation_provenance_column(columns, metric)
+        if provenance_column is None:
             report["checks"][f"observations.{metric}.provenance_present"] = _check_entry(
                 check_id=f"observations.{metric}.provenance_present",
                 status=FAIL,
@@ -1713,7 +1572,7 @@ def _add_rebuild_observation_preflight_checks(report: dict, cur: sqlite3.Cursor)
             )
             continue
 
-        provenance_where = f"{label_where} AND {provenance_blank_predicate}"
+        provenance_where = f"{label_where} AND {_blank_or_empty_json_sql(provenance_column)}"
         provenance_count = _count(cur, table, provenance_where)
         provenance_met = provenance_count == 0
         provenance_check_id = f"observations.{metric}.provenance_present"

@@ -100,7 +100,7 @@ def test_dst_target_day_required_steps_are_not_24h_assumption() -> None:
     assert duration_hours == 23
 
 
-def test_dplus10_dst_transition_target_day_is_covered_by_full_profile() -> None:
+def test_dplus10_dst_transition_target_day_does_not_exceed_profile_silently() -> None:
     contract = _contract_module()
 
     window = contract.compute_target_local_day_window_utc(
@@ -115,17 +115,17 @@ def test_dplus10_dst_transition_target_day_is_covered_by_full_profile() -> None:
     )
     decision = contract.evaluate_horizon_coverage(
         required_steps=steps,
-        live_max_step_hours=276,
+        live_max_step_hours=240,
     )
 
     duration_hours = int((window.end_utc - window.start_utc).total_seconds() // 3600)
     assert duration_hours == 23
     assert max(steps) > 240
-    assert decision.status == "LIVE_ELIGIBLE"
-    assert "HORIZON_COVERED" in decision.reason_codes
+    assert decision.status == "BLOCKED"
+    assert "SOURCE_RUN_HORIZON_OUT_OF_RANGE" in decision.reason_codes
 
 
-def test_dplus10_required_steps_utc_negative_city_are_covered_by_full_profile() -> None:
+def test_dplus10_required_steps_utc_negative_city_do_not_exceed_profile_silently() -> None:
     contract = _contract_module()
 
     window = contract.compute_target_local_day_window_utc(
@@ -140,16 +140,15 @@ def test_dplus10_required_steps_utc_negative_city_are_covered_by_full_profile() 
     )
     decision = contract.evaluate_horizon_coverage(
         required_steps=steps,
-        live_max_step_hours=276,
+        live_max_step_hours=240,
     )
 
     assert max(steps) > 240
-    assert max(steps) <= 276
-    assert decision.status == "LIVE_ELIGIBLE"
-    assert "HORIZON_COVERED" in decision.reason_codes
+    assert decision.status == "BLOCKED"
+    assert "SOURCE_RUN_HORIZON_OUT_OF_RANGE" in decision.reason_codes
 
 
-def test_dplus10_required_steps_utc_positive_city_are_covered_by_full_profile() -> None:
+def test_dplus10_required_steps_utc_positive_city_do_not_exceed_profile_silently() -> None:
     contract = _contract_module()
 
     window = contract.compute_target_local_day_window_utc(
@@ -164,13 +163,12 @@ def test_dplus10_required_steps_utc_positive_city_are_covered_by_full_profile() 
     )
     decision = contract.evaluate_horizon_coverage(
         required_steps=steps,
-        live_max_step_hours=276,
+        live_max_step_hours=240,
     )
 
     assert max(steps) > 240
-    assert max(steps) <= 276
-    assert decision.status == "LIVE_ELIGIBLE"
-    assert "HORIZON_COVERED" in decision.reason_codes
+    assert decision.status == "BLOCKED"
+    assert "SOURCE_RUN_HORIZON_OUT_OF_RANGE" in decision.reason_codes
 
 
 def test_06z_short_horizon_blocks_dplus10() -> None:

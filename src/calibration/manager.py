@@ -223,293 +223,6 @@ def edge_threshold_multiplier(level: int) -> float:
     return {1: 1.0, 2: 1.5, 3: 2.0, 4: 3.0}[level]
 
 
-def _source_family_for_calibration_source_id(source_id: Optional[str]) -> str | None:
-    if source_id == "tigge_mars":
-        return "tigge"
-    if source_id == "ecmwf_open_data":
-        return "ecmwf_opendata"
-    return None
-
-
-def _expected_data_version_for_metric_source(
-    temperature_metric: str,
-    source_id: Optional[str],
-) -> str:
-    """Return the Platt data_version that matches a metric/source request."""
-    from src.types.metric_identity import (
-        HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN, MetricIdentity,
-    )
-
-    source_family = _source_family_for_calibration_source_id(source_id)
-    if source_id is not None and source_family is not None:
-        try:
-            return MetricIdentity.for_metric_with_source_family(
-                temperature_metric, source_family
-            ).data_version
-        except ValueError:
-            pass
-    return (
-        HIGH_LOCALDAY_MAX.data_version
-        if temperature_metric == "high"
-        else LOW_LOCALDAY_MIN.data_version
-    )
-
-
-def _cycle_hour_to_int(cycle: Optional[str]) -> int:
-    try:
-        return int(str(cycle if cycle is not None else "00"))
-    except (TypeError, ValueError):
-        return 0
-
-
-def _calibration_domain_from_parts(
-    *,
-    source_id: str,
-    data_version: str,
-    cycle: Optional[str],
-    horizon_profile: str,
-    temperature_metric: str,
-    cluster: str,
-    season: str,
-    input_space: str,
-):
-    from src.calibration.forecast_calibration_domain import ForecastCalibrationDomain
-
-    return ForecastCalibrationDomain(
-        source_id=source_id,
-        data_version=data_version,
-        source_cycle_hour_utc=_cycle_hour_to_int(cycle),
-        horizon_profile=horizon_profile,
-        metric=temperature_metric,  # type: ignore[arg-type]
-        cluster=cluster,
-        season=season,
-        input_space=input_space,
-        city_local_cycle_hour=None,
-    )
-
-
-def _parse_v2_model_key_domain(model_key: str | None):
-    if not model_key:
-        return None
-    parts = model_key.split(":")
-    if len(parts) < 8:
-        return None
-    metric, cluster, season, data_version, cycle, source_id, horizon_profile = parts[:7]
-    input_space = ":".join(parts[7:]) or "width_normalized_density"
-    if metric not in ("high", "low"):
-        return None
-    return _calibration_domain_from_parts(
-        source_id=source_id,
-        data_version=data_version,
-        cycle=cycle,
-        horizon_profile=horizon_profile,
-        temperature_metric=metric,
-        cluster=cluster,
-        season=season,
-        input_space=input_space,
-    )
-
-
-def _authority_result_for_calibrator(
-    *,
-    contract_domain,
-    requested_domain,
-    served_domain,
-    route,
-    calibrator_model_key: str | None,
-    n_samples: int,
-    block_reasons: tuple[str, ...],
-):
-    from src.calibration.forecast_calibration_domain import CalibrationAuthorityResult
-
-    exact_domain = served_domain is not None and requested_domain.matches(served_domain)
-    source_cycle_horizon_compatible = exact_domain
-    local_day_construction_compatible = exact_domain
-    climate_compatible = (
-        served_domain is not None
-        and requested_domain.cluster == served_domain.cluster
-    )
-    bin_schema_compatible = exact_domain
-    settlement_semantics_compatible = exact_domain
-    live_eligible = (
-        route == "PRIMARY_EXACT"
-        and exact_domain
-        and not block_reasons
-    )
-    return CalibrationAuthorityResult(
-        contract_domain=contract_domain,
-        requested_calibration_domain=requested_domain,
-        served_calibration_domain=served_domain,
-        route=route,
-        calibrator_model_key=calibrator_model_key,
-        n_eff=n_samples,
-        n_samples=n_samples,
-        bin_schema_compatible=bin_schema_compatible,
-        settlement_semantics_compatible=settlement_semantics_compatible,
-        source_cycle_horizon_compatible=source_cycle_horizon_compatible,
-        local_day_construction_compatible=local_day_construction_compatible,
-        climate_compatible=climate_compatible,
-        live_eligible=live_eligible,
-        block_reasons=block_reasons,
-    )
-
-
-def get_calibration_authority_result(
-    conn,
-    city: City,
-    target_date: str,
-    contract_domain,
-    temperature_metric: Literal["high", "low"] = "high",
-    *,
-    cycle: Optional[str] = None,
-    source_id: Optional[str] = None,
-    horizon_profile: Optional[str] = None,
-):
-    """Return a shadow authority envelope for the calibration read path.
-
-    This intentionally does not replace ``get_calibrator``.  It mirrors the
-    requested domain, exposes the served model domain when it can be proven,
-    and marks fallback/legacy routes as non-live in this envelope unless they
-    are exact primary v2 matches.  Live evaluator wiring can consume this later
-    through an explicit governance slice.
-    """
-    assert temperature_metric in ("high", "low"), (
-        f"Invalid temperature_metric: {temperature_metric!r}"
-    )
-    season = season_from_date(target_date, lat=city.lat)
-    cluster = city.cluster
-    expected_data_version = _expected_data_version_for_metric_source(
-        temperature_metric, source_id
-    )
-    requested_source_id = source_id or "tigge_mars"
-    requested_horizon = horizon_profile or "full"
-    requested_domain = _calibration_domain_from_parts(
-        source_id=requested_source_id,
-        data_version=expected_data_version,
-        cycle=cycle,
-        horizon_profile=requested_horizon,
-        temperature_metric=temperature_metric,
-        cluster=cluster,
-        season=season,
-        input_space="width_normalized_density",
-    )
-
-    primary_frozen, primary_model_key = _resolve_pin_for_bucket(
-        temperature_metric, cluster, season, cycle
-    )
-    primary_model = load_platt_model_v2(
-        conn,
-        temperature_metric=temperature_metric,
-        cluster=cluster,
-        season=season,
-        data_version=expected_data_version,
-        frozen_as_of=primary_frozen,
-        model_key=primary_model_key,
-        cycle=cycle,
-        source_id=source_id,
-        horizon_profile=horizon_profile,
-    )
-    if primary_model is not None and primary_model.get("input_space") == "width_normalized_density":
-        served_domain = _parse_v2_model_key_domain(primary_model.get("model_key"))
-        if served_domain is None:
-            served_domain = _calibration_domain_from_parts(
-                source_id=primary_model.get("bucket_source_id") or requested_source_id,
-                data_version=primary_model.get("bucket_data_version") or expected_data_version,
-                cycle=primary_model.get("bucket_cycle") or cycle,
-                horizon_profile=primary_model.get("bucket_horizon_profile") or requested_horizon,
-                temperature_metric=temperature_metric,
-                cluster=cluster,
-                season=season,
-                input_space=primary_model.get("input_space") or "width_normalized_density",
-            )
-        return _authority_result_for_calibrator(
-            contract_domain=contract_domain,
-            requested_domain=requested_domain,
-            served_domain=served_domain,
-            route="PRIMARY_EXACT",
-            calibrator_model_key=primary_model.get("model_key")
-            or (
-                f"{temperature_metric}:{cluster}:{season}:{expected_data_version}:"
-                f"{cycle or '00'}:{requested_source_id}:{requested_horizon}:"
-                "width_normalized_density"
-            ),
-            n_samples=int(primary_model.get("n_samples") or 0),
-            block_reasons=(),
-        )
-
-    cal, level = get_calibrator(
-        conn,
-        city,
-        target_date,
-        temperature_metric=temperature_metric,
-        cycle=cycle,
-        source_id=source_id,
-        horizon_profile=horizon_profile,
-    )
-    if cal is None or level == 4:
-        from src.calibration.forecast_calibration_domain import CalibrationAuthorityResult
-
-        return CalibrationAuthorityResult(
-            contract_domain=contract_domain,
-            requested_calibration_domain=requested_domain,
-            served_calibration_domain=None,
-            route="RAW_UNCALIBRATED",
-            calibrator_model_key=None,
-            n_eff=0,
-            n_samples=0,
-            bin_schema_compatible=False,
-            settlement_semantics_compatible=False,
-            source_cycle_horizon_compatible=False,
-            local_day_construction_compatible=False,
-            climate_compatible=False,
-            live_eligible=False,
-            block_reasons=("no_verified_calibrator",),
-        )
-
-    model_key = getattr(cal, "_bucket_model_key", None)
-    served_domain = _parse_v2_model_key_domain(model_key)
-    n_samples = int(getattr(cal, "n_samples", 0) or 0)
-    if served_domain is None:
-        served_domain = requested_domain
-        synthetic_key = (
-            f"legacy_v1:{temperature_metric}:{cluster}:{season}"
-            if temperature_metric == "high"
-            else None
-        )
-        return _authority_result_for_calibrator(
-            contract_domain=contract_domain,
-            requested_domain=requested_domain,
-            served_domain=served_domain if synthetic_key is not None else None,
-            route="LEGACY_HIGH_ONLY" if synthetic_key is not None else "BLOCKED",
-            calibrator_model_key=synthetic_key,
-            n_samples=n_samples,
-            block_reasons=("legacy_high_only_shadow_not_live_authorized",)
-            if synthetic_key is not None
-            else ("served_calibration_domain_unproven",),
-        )
-
-    exact_domain = requested_domain.matches(served_domain)
-    route = "PRIMARY_EXACT" if exact_domain else "COMPATIBLE_FALLBACK"
-    block_reasons: tuple[str, ...] = ()
-    if not exact_domain:
-        block_reasons = (
-            "fallback_shadow_requires_explicit_compatibility_proof",
-            *(
-                f"calibration_domain_mismatch:{field}"
-                for field in requested_domain.mismatch_fields(served_domain)
-            ),
-        )
-    return _authority_result_for_calibrator(
-        contract_domain=contract_domain,
-        requested_domain=requested_domain,
-        served_domain=served_domain,
-        route=route,
-        calibrator_model_key=model_key,
-        n_samples=n_samples,
-        block_reasons=block_reasons,
-    )
-
-
 def get_calibrator(
     conn,
     city: City,
@@ -576,9 +289,47 @@ def get_calibrator(
     # the source-family registry — so OpenData live forecasts hit OpenData
     # Platt buckets, not TIGGE-trained ones (BLOCKER 3 fix). Fallback to
     # legacy TIGGE-only constants when source_id is None (back-compat).
-    expected_data_version = _expected_data_version_for_metric_source(
-        temperature_metric, source_id
+    from src.types.metric_identity import (
+        HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN, MetricIdentity,
     )
+    if source_id is not None:
+        # Map source_id back to a source_family that MetricIdentity knows about.
+        if source_id == "tigge_mars":
+            _source_family = "tigge"
+        elif source_id == "ecmwf_open_data":
+            _source_family = "ecmwf_opendata"
+        else:
+            _source_family = None
+        if _source_family is not None:
+            try:
+                expected_data_version = (
+                    MetricIdentity.for_metric_with_source_family(
+                        temperature_metric, _source_family
+                    ).data_version
+                )
+            except ValueError:
+                # Unknown family at this layer → fall back to legacy TIGGE
+                # constants. Caller should still rule out unknown sources at
+                # an earlier rejection gate (UNKNOWN_FORECAST_SOURCE_FAMILY).
+                expected_data_version = (
+                    HIGH_LOCALDAY_MAX.data_version
+                    if temperature_metric == "high"
+                    else LOW_LOCALDAY_MIN.data_version
+                )
+        else:
+            # source_id provided but unknown — legacy fallback (no live route
+            # for this source through cycle-stratified Platt).
+            expected_data_version = (
+                HIGH_LOCALDAY_MAX.data_version
+                if temperature_metric == "high"
+                else LOW_LOCALDAY_MIN.data_version
+            )
+    else:
+        expected_data_version = (
+            HIGH_LOCALDAY_MAX.data_version
+            if temperature_metric == "high"
+            else LOW_LOCALDAY_MIN.data_version
+        )
 
     # F1 (2026-05-03): resolve config-pinned frozen_as_of + model_key for this
     # bucket. Both default to None → legacy behavior preserved.

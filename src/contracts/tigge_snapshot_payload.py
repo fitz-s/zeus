@@ -111,13 +111,6 @@ class TiggeSnapshotPayload:
         selected_step_ranges_boundary: Optional[list] = None,
         # HIGH-track step range
         selected_step_ranges: Optional[list] = None,
-        # Optional explicit 6h forecast-window evidence. Current extractors can
-        # still emit selected_step_ranges only; the ingester derives an envelope
-        # from those ranges when these fields are absent.
-        forecast_window_start_utc: Optional[str] = None,
-        forecast_window_end_utc: Optional[str] = None,
-        forecast_window_start_local: Optional[str] = None,
-        forecast_window_end_local: Optional[str] = None,
     ) -> None:
         self.generated_at = generated_at
         self.data_version = data_version
@@ -158,10 +151,6 @@ class TiggeSnapshotPayload:
         self.selected_step_ranges_inner = selected_step_ranges_inner
         self.selected_step_ranges_boundary = selected_step_ranges_boundary
         self.selected_step_ranges = selected_step_ranges
-        self.forecast_window_start_utc = forecast_window_start_utc
-        self.forecast_window_end_utc = forecast_window_end_utc
-        self.forecast_window_start_local = forecast_window_start_local
-        self.forecast_window_end_local = forecast_window_end_local
 
     def to_json_dict(self) -> dict:
         """Produce a JSON-serializable dict. None fields are omitted."""
@@ -208,10 +197,6 @@ class TiggeSnapshotPayload:
             ("selected_step_ranges_inner", "selected_step_ranges_inner"),
             ("selected_step_ranges_boundary", "selected_step_ranges_boundary"),
             ("selected_step_ranges", "selected_step_ranges"),
-            ("forecast_window_start_utc", "forecast_window_start_utc"),
-            ("forecast_window_end_utc", "forecast_window_end_utc"),
-            ("forecast_window_start_local", "forecast_window_start_local"),
-            ("forecast_window_end_local", "forecast_window_end_local"),
         ]:
             val = getattr(self, attr)
             if val is not None:
@@ -301,10 +286,6 @@ class TiggeSnapshotPayload:
             selected_step_ranges_inner=d.get("selected_step_ranges_inner"),
             selected_step_ranges_boundary=d.get("selected_step_ranges_boundary"),
             selected_step_ranges=d.get("selected_step_ranges"),
-            forecast_window_start_utc=d.get("forecast_window_start_utc"),
-            forecast_window_end_utc=d.get("forecast_window_end_utc"),
-            forecast_window_start_local=d.get("forecast_window_start_local"),
-            forecast_window_end_local=d.get("forecast_window_end_local"),
         )
 
     def validate(self) -> None:

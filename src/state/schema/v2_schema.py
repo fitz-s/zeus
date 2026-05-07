@@ -191,23 +191,6 @@ def apply_v2_schema(conn: sqlite3.Connection) -> None:
                 source_cycle_time TEXT,
                 source_release_time TEXT,
                 source_available_at TEXT,
-                city_timezone TEXT,
-                settlement_source_type TEXT,
-                settlement_station_id TEXT,
-                settlement_unit TEXT
-                    CHECK (settlement_unit IS NULL OR settlement_unit IN ('F', 'C')),
-                settlement_rounding_policy TEXT,
-                bin_grid_id TEXT,
-                bin_schema_version TEXT,
-                forecast_window_start_utc TEXT,
-                forecast_window_end_utc TEXT,
-                forecast_window_start_local TEXT,
-                forecast_window_end_local TEXT,
-                forecast_window_local_day_overlap_hours REAL,
-                forecast_window_attribution_status TEXT,
-                contributes_to_target_extrema INTEGER
-                    CHECK (contributes_to_target_extrema IS NULL OR contributes_to_target_extrema IN (0, 1)),
-                forecast_window_block_reasons_json TEXT,
                 training_allowed INTEGER NOT NULL DEFAULT 1
                     CHECK (training_allowed IN (0, 1)),
                 causality_status TEXT NOT NULL DEFAULT 'OK'
@@ -253,25 +236,6 @@ def apply_v2_schema(conn: sqlite3.Connection) -> None:
             "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN source_cycle_time TEXT",
             "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN source_release_time TEXT",
             "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN source_available_at TEXT",
-            # 2026-05-07 LOW/HIGH alignment recovery: nullable shadow columns for
-            # contract-object and explicit forecast-window evidence. These columns
-            # only make evidence persistable; they do not relax training_allowed or
-            # change live decision authority.
-            "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN city_timezone TEXT",
-            "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN settlement_source_type TEXT",
-            "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN settlement_station_id TEXT",
-            "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN settlement_unit TEXT CHECK (settlement_unit IS NULL OR settlement_unit IN ('F', 'C'))",
-            "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN settlement_rounding_policy TEXT",
-            "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN bin_grid_id TEXT",
-            "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN bin_schema_version TEXT",
-            "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN forecast_window_start_utc TEXT",
-            "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN forecast_window_end_utc TEXT",
-            "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN forecast_window_start_local TEXT",
-            "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN forecast_window_end_local TEXT",
-            "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN forecast_window_local_day_overlap_hours REAL",
-            "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN forecast_window_attribution_status TEXT",
-            "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN contributes_to_target_extrema INTEGER CHECK (contributes_to_target_extrema IS NULL OR contributes_to_target_extrema IN (0, 1))",
-            "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN forecast_window_block_reasons_json TEXT",
         ]:
             try:
                 conn.execute(alter_sql)
