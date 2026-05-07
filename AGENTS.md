@@ -273,8 +273,13 @@ matching. Canonical values: `plan_only`, `audit`, `create_new`, `modify_existing
 
 - `plan_only` and `audit` are **whitelist-driven**: only paths matching their
   `admits_path_globs` are admitted; everything else → `out_of_scope_files` + `advisory_only`.
-  Canonical scopes (PLAN.md §6:693): `plan_only` admits `docs/**`, `.omc/plans/**`,
-  `evidence/**`, `.omc/research/**`; `audit` admits `evidence/**`, `.omc/research/**`.
+  Canonical scopes: `plan_only` admits `docs/**`, `evidence/**`; `audit` admits
+  `evidence/**`. Substantive plans MUST be packetized at
+  `docs/operations/task_<YYYY-MM-DD>_<topic>/PLAN.md` (admitted via `create_new`
+  typed_intent). Runtime tool scratch directories (`.omc/plans/**`,
+  `.omc/research/**`, `.omx/plans/**`) are explicitly **blocked** by both
+  `plan_only` and `audit` — they are `scratch_runtime_artifact`
+  (`architecture/artifact_lifecycle.yaml`) and never plan/research targets.
 - `create_new` / `refactor` trigger K2 companion-loop-break: manifest companion must be
   in `--files` for auto-admit. Batch cap 50 pairs; excess blocked with `blocked_by_batch_cap`.
 - All other intents go through normal profile match with K1 severity tier.

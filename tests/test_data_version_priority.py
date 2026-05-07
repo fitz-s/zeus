@@ -20,6 +20,8 @@ import pytest
 from src.contracts.ensemble_snapshot_provenance import (
     ECMWF_OPENDATA_HIGH_DATA_VERSION,
     ECMWF_OPENDATA_LOW_DATA_VERSION,
+    ECMWF_OPENDATA_LOW_CONTRACT_WINDOW_DATA_VERSION,
+    TIGGE_LOW_CONTRACT_WINDOW_DATA_VERSION,
 )
 from src.data.ecmwf_open_data import data_version_priority_for_metric
 
@@ -33,9 +35,11 @@ def test_priority_order_high():
 
 def test_priority_order_low():
     priority = data_version_priority_for_metric("low")
-    assert priority[0] == ECMWF_OPENDATA_LOW_DATA_VERSION
-    assert priority[1] == "tigge_mn2t6_local_calendar_day_min_v1"
-    assert len(priority) == 2
+    assert priority[0] == ECMWF_OPENDATA_LOW_CONTRACT_WINDOW_DATA_VERSION
+    assert priority[1] == ECMWF_OPENDATA_LOW_DATA_VERSION
+    assert priority[2] == TIGGE_LOW_CONTRACT_WINDOW_DATA_VERSION
+    assert priority[3] == "tigge_mn2t6_local_calendar_day_min_v1"
+    assert len(priority) == 4
 
 
 def test_unknown_metric_raises():

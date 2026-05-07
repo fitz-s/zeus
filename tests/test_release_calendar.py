@@ -43,7 +43,7 @@ def test_cycle_profiles_exist_for_00_12_full_and_06_18_short() -> None:
     assert full_profile is not None
     assert full_profile.cycle_hours_utc == (0, 12)
     assert full_profile.horizon_profile == "full"
-    assert full_profile.live_max_step_hours == 240
+    assert full_profile.live_max_step_hours == 276
     assert full_profile.live_authorization is True
 
     assert short_profile is not None
@@ -58,7 +58,7 @@ def test_full_horizon_selection_requires_00_or_12_cycle() -> None:
         now_utc=_utc(9),
         source_id="ecmwf_open_data",
         track="mx2t6_high",
-        required_max_step_hours=240,
+        required_max_step_hours=276,
     )
 
     assert decision is FetchDecision.FETCH_ALLOWED
@@ -98,7 +98,7 @@ def test_safe_fetch_for_full_horizon_blocks_0730_before_0805() -> None:
         "mx2t6_high",
         _utc(0),
         _utc(7, 30),
-        required_max_step_hours=240,
+        required_max_step_hours=276,
     )
 
     assert decision is FetchDecision.SKIPPED_NOT_RELEASED
@@ -111,12 +111,12 @@ def test_required_target_horizon_is_input_to_safe_fetch() -> None:
         "mx2t6_high",
         _utc(0),
         _utc(9),
-        required_max_step_hours=246,
+        required_max_step_hours=282,
     )
 
     assert decision is FetchDecision.HORIZON_OUT_OF_RANGE
-    assert metadata["required_max_step_hours"] == 246
-    assert metadata["live_max_step_hours"] == 240
+    assert metadata["required_max_step_hours"] == 282
+    assert metadata["live_max_step_hours"] == 276
 
 
 def test_short_horizon_can_fetch_but_not_live_full_horizon() -> None:

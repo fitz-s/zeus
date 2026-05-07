@@ -20,18 +20,24 @@ metadata:
 typed_intent_enum:
   - id: plan_only
     description: >
-      Plan-only operation. Reads files; writes ONLY to docs/** or .omc/plans/ or
-      evidence/** or .omc/research/**. No source/test/script edits. Admitted directly
-      without profile match (admission shortcut per K3). Canonical scope per PLAN.md §6:693.
+      Plan-only operation. Reads files; writes ONLY to docs/** or evidence/**.
+      No source/test/script edits. Substantive plans MUST be packetized at
+      docs/operations/task_<YYYY-MM-DD>_<topic>/PLAN.md. `.omc/plans/`,
+      `.omc/research/`, and `.omx/plans/` are scratch_runtime_artifact (per
+      artifact_lifecycle.yaml) and are NOT plan/research targets — admission
+      rejection is the structural mechanism that prevents leak of substantive
+      design into runtime scratch.
+      Admitted directly without profile match (admission shortcut per K3).
     admits_path_globs:
       - docs/**
-      - .omc/plans/**
       - evidence/**
-      - .omc/research/**
     blocks_path_globs:
       - src/**
       - tests/**
       - scripts/**
+      - .omc/plans/**
+      - .omc/research/**
+      - .omx/plans/**
     sunset_date: 2026-11-07
 
   - id: create_new
@@ -68,15 +74,19 @@ typed_intent_enum:
 
   - id: audit
     description: >
-      Read-only audit/investigation. Writes ONLY to evidence/** or .omc/research/**.
-      Source/test/script writes blocked. Canonical scope per PLAN.md §6:693.
+      Read-only audit/investigation. Writes ONLY to evidence/**.
+      `.omc/research/` is scratch_runtime_artifact and not an audit-write target;
+      audit findings worth preserving belong in evidence/<topic>.md.
+      Source/test/script writes blocked.
     admits_path_globs:
       - evidence/**
-      - .omc/research/**
     blocks_path_globs:
       - src/**
       - tests/**
       - scripts/**
+      - .omc/plans/**
+      - .omc/research/**
+      - .omx/plans/**
     sunset_date: 2026-11-07
 
   - id: hygiene

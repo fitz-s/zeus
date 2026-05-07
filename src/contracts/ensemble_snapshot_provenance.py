@@ -82,6 +82,16 @@ ECMWF_OPENDATA_LOW_DATA_VERSION = "ecmwf_opendata_mn2t3_local_calendar_day_min_v
 _ECMWF_OPENDATA_HIGH_DATA_VERSION_LEGACY = "ecmwf_opendata_mx2t6_local_calendar_day_max_v1"
 _ECMWF_OPENDATA_LOW_DATA_VERSION_LEGACY = "ecmwf_opendata_mn2t6_local_calendar_day_min_v1"
 
+# LOW recovery rows carry persisted contract-window evidence proving that the
+# mn2t6 construction serves the same local-day settlement object.  They remain
+# LOW_LOCALDAY_MIN metric-family rows, not a third metric axis.
+TIGGE_LOW_CONTRACT_WINDOW_DATA_VERSION = (
+    "tigge_mn2t6_local_calendar_day_min_contract_window_v2"
+)
+ECMWF_OPENDATA_LOW_CONTRACT_WINDOW_DATA_VERSION = (
+    "ecmwf_opendata_mn2t6_local_calendar_day_min_contract_window_v2"
+)
+
 CANONICAL_ENSEMBLE_DATA_VERSIONS: frozenset[str] = frozenset({
     HIGH_LOCALDAY_MAX.data_version,
     LOW_LOCALDAY_MIN.data_version,

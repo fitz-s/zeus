@@ -191,6 +191,23 @@ def apply_v2_schema(conn: sqlite3.Connection) -> None:
                 source_cycle_time TEXT,
                 source_release_time TEXT,
                 source_available_at TEXT,
+                city_timezone TEXT,
+                settlement_source_type TEXT,
+                settlement_station_id TEXT,
+                settlement_unit TEXT
+                    CHECK (settlement_unit IS NULL OR settlement_unit IN ('F', 'C')),
+                settlement_rounding_policy TEXT,
+                bin_grid_id TEXT,
+                bin_schema_version TEXT,
+                forecast_window_start_utc TEXT,
+                forecast_window_end_utc TEXT,
+                forecast_window_start_local TEXT,
+                forecast_window_end_local TEXT,
+                forecast_window_local_day_overlap_hours REAL,
+                forecast_window_attribution_status TEXT,
+                contributes_to_target_extrema INTEGER
+                    CHECK (contributes_to_target_extrema IS NULL OR contributes_to_target_extrema IN (0, 1)),
+                forecast_window_block_reasons_json TEXT,
                 training_allowed INTEGER NOT NULL DEFAULT 1
                     CHECK (training_allowed IN (0, 1)),
                 causality_status TEXT NOT NULL DEFAULT 'OK'
