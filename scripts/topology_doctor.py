@@ -1695,6 +1695,7 @@ def build_digest(
     side_effect: str | None = None,
     artifact_target: str | None = None,
     merge_state: str | None = None,
+    companion_loop_batch_cap: int | None = None,
 ) -> dict[str, Any]:
     return _digest_checks().build_digest(
         sys.modules[__name__],
@@ -1709,6 +1710,7 @@ def build_digest(
         side_effect=side_effect,
         artifact_target=artifact_target,
         merge_state=merge_state,
+        companion_loop_batch_cap=companion_loop_batch_cap,
     )
 
 
@@ -2685,6 +2687,7 @@ def run_navigation(
     side_effect: str | None = None,
     artifact_target: str | None = None,
     merge_state: str | None = None,
+    companion_loop_batch_cap: int | None = None,
 ) -> dict[str, Any]:
     checks = {
         "context_budget": run_context_budget(),
@@ -2710,6 +2713,7 @@ def run_navigation(
         side_effect=side_effect,
         artifact_target=artifact_target,
         merge_state=merge_state,
+        companion_loop_batch_cap=companion_loop_batch_cap,
     )
     admission = digest.get("admission") or {}
     admission_status = admission.get("status", "advisory_only")

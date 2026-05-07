@@ -27,6 +27,7 @@ is no longer load-bearing for write authorization. Callers must read
 
 from __future__ import annotations
 
+import os
 import re
 from fnmatch import fnmatch, translate as _fnmatch_translate
 from functools import lru_cache
@@ -1184,6 +1185,136 @@ def _resolved_negative_hits(resolution: dict[str, Any]) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
+# K2 companion-loop-break (Navigation Topology v2 Phase 2B)
+# ---------------------------------------------------------------------------
+
+_COMPANION_LOOP_BREAK_PAIRS: list[tuple[str, str]] = [
+    # (parent_glob, companion_path)
+    ("scripts/**", "architecture/script_manifest.yaml"),
+    ("tests/test_*.py", "architecture/test_topology.yaml"),
+    ("docs/operations/task_*/**", "docs/operations/AGENTS.md"),
+    ("src/**", "architecture/source_rationale.yaml"),
+]
+
+_COMPANION_LOOP_INTENTS = {"create_new", "refactor"}
+
+_DEFAULT_COMPANION_BATCH_CAP = 50
+
+
+def _apply_companion_loop_break(
+    admission: dict[str, Any],
+    requested: list[str],
+    intent: str | None,
+    *,
+    batch_cap: int = _DEFAULT_COMPANION_BATCH_CAP,
+) -> dict[str, Any]:
+    """K2 fix — auto-admit manifest companion when typed_intent is create_new/refactor
+    and the diff already includes both the new file AND its companion path.
+
+    Loop-break for the new-file ↔ manifest-edit ↔ planning-lock cycle (F3/F4/F6).
+
+    Rules:
+    - Only fires when typed_intent ∈ {create_new, refactor}.
+    - Only admits a file if its companion is ALSO in requested (never silently widens).
+    - When parent is in requested but companion is missing, emits advisory companion_missing.
+    - M4 batch-cap: len(requested) > batch_cap → advisory companion_loop_batch_advisory.
+    - Returns admission unchanged when typed_intent does not match (backward compat).
+    """
+    normalized_intent = (intent or "").strip().lower().replace("-", "_").replace(" ", "_")
+    if normalized_intent not in _COMPANION_LOOP_INTENTS:
+        return admission
+
+    # M4 batch-cap advisory (non-blocking).
+    advisories: list[dict[str, Any]] = list(admission.get("companion_loop_advisories") or [])
+    if len(requested) > batch_cap:
+        advisories.append({
+            "code": "companion_loop_batch_advisory",
+            "severity": "info",
+            "message": (
+                f"requested_files count ({len(requested)}) exceeds companion_loop_batch_cap "
+                f"({batch_cap}). Verify this is not an adversarial batch-add inflation. "
+                "Auto-admit still applies per companion pairs."
+            ),
+        })
+
+    out_of_scope: list[str] = list(admission.get("out_of_scope_files") or [])
+    requested_set = set(requested)
+
+    newly_admitted: list[str] = []
+    companion_missing: list[str] = []
+    companions_to_admit: set[str] = set()
+
+    for path in out_of_scope:
+        for parent_glob, companion_path in _COMPANION_LOOP_BREAK_PAIRS:
+            if not fnmatch(path, parent_glob):
+                continue
+            # Parent matches a loop-break pair.
+            if companion_path in requested_set:
+                # Companion present → auto-admit the parent AND the companion.
+                newly_admitted.append(path)
+                companions_to_admit.add(companion_path)
+            else:
+                # Companion absent → emit advisory guidance (not blocking).
+                companion_missing.append(companion_path)
+            break  # first matching pair wins
+
+    # Also admit companion paths that are themselves out-of-scope (common when
+    # the profile has no allowed_files or the ambiguous path includes all requested).
+    for path in out_of_scope:
+        if path in companions_to_admit and path not in newly_admitted:
+            newly_admitted.append(path)
+
+    for companion_path in sorted(set(companion_missing)):
+        advisories.append({
+            "code": "companion_missing",
+            "severity": "info",
+            "message": (
+                f"companion edit not found in --files: {companion_path}. "
+                "Add it to enable companion-loop-break auto-admit."
+            ),
+            "expected_companion": companion_path,
+        })
+
+    if not newly_admitted:
+        if advisories:
+            admission = dict(admission)
+            admission["companion_loop_advisories"] = advisories
+        return admission
+
+    # Promote newly_admitted files out of out_of_scope.
+    remaining_out_of_scope = [f for f in out_of_scope if f not in newly_admitted]
+    current_admitted = list(admission.get("admitted_files") or [])
+    merged_admitted = current_admitted + newly_admitted
+
+    new_admission = dict(admission)
+    new_admission["admitted_files"] = merged_admitted
+    new_admission["out_of_scope_files"] = remaining_out_of_scope
+    new_admission["companion_loop_break"] = True
+    new_admission["auto_admitted"] = newly_admitted
+    new_admission["companion_pair"] = [
+        path for path in newly_admitted
+    ]
+    new_admission["companion_loop_advisories"] = advisories
+
+    # Upgrade status when all out-of-scope files were resolved.
+    # Handles both scope_expansion_required and ambiguous (when typed_intent short-circuits
+    # profile selection but profile lookup fails because typed-intent ids are not digest
+    # profile ids — PLAN §2.3 K3 design).
+    upgradeable_statuses = {"scope_expansion_required", "ambiguous", "advisory_only"}
+    if not remaining_out_of_scope and admission.get("status") in upgradeable_statuses:
+        new_admission["status"] = "admitted"
+        why = list((admission.get("decision_basis") or {}).get("why") or [])
+        why.append(
+            f"companion_loop_break: typed_intent={normalized_intent}; "
+            f"auto_admitted={newly_admitted}"
+        )
+        new_admission["decision_basis"] = dict(admission.get("decision_basis") or {})
+        new_admission["decision_basis"]["why"] = why
+
+    return new_admission
+
+
+# ---------------------------------------------------------------------------
 # build_digest (envelope assembly)
 # ---------------------------------------------------------------------------
 
@@ -1202,6 +1333,7 @@ def build_digest(
     side_effect: str | None = None,
     artifact_target: str | None = None,
     merge_state: str | None = None,
+    companion_loop_batch_cap: int | None = None,
 ) -> dict[str, Any]:
     topology = api.load_topology()
     # Normalize at the kernel boundary: drop None/empty/whitespace, strip
@@ -1243,6 +1375,14 @@ def build_digest(
                 break
 
     admission = _reconcile_admission(selected, requested, resolution, topology, write_intent=write_intent)
+    # K2 companion-loop-break: auto-admit manifest companion when typed_intent=create_new/refactor
+    # and the companion path is also in requested. Non-blocking; falls through unchanged otherwise.
+    _batch_cap = (
+        companion_loop_batch_cap
+        if companion_loop_batch_cap is not None
+        else int(os.environ.get("ZEUS_COMPANION_LOOP_BATCH_CAP", str(_DEFAULT_COMPANION_BATCH_CAP)))
+    )
+    admission = _apply_companion_loop_break(admission, requested, intent, batch_cap=_batch_cap)
     evidence_class = resolution.get("evidence_class") or resolution.get("selected_by") or "none"
     profile_selection = {
         "selected_by": resolution.get("selected_by"),
