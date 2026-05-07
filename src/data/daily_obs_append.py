@@ -70,7 +70,10 @@ import httpx
 # ingest lane (FORBIDDEN per tests/test_ingest_isolation.py post-fix).
 from src.contracts.season import season_from_date
 from src.config import cities_by_name
-from src.data.daily_observation_writer import insert_or_update_current_observation
+from src.data.daily_observation_writer import (
+    insert_or_update_current_observation,
+    write_daily_observation_with_revision,
+)
 from src.data.ingestion_guard import IngestionGuard, IngestionRejected
 # G10 helper-extraction (2026-04-26, con-nyx MAJOR #1): import from canonical
 # location to avoid transitively pulling src.signal into the ingest lane.
@@ -569,7 +572,14 @@ def _write_atom_with_coverage(
     sp = f"sp_write_{id(atom_high)}"
     conn.execute(f"SAVEPOINT {sp}")
     try:
-        insert_or_update_current_observation(conn, atom_high, atom_low)
+        # 2026-05-07 STALE fix: use revision-aware writer so changed rows are
+        # recorded in daily_observation_revisions (previously insert_or_update
+        # overwrote silently with no revision trail). writer tag matches
+        # data_source so revisions are auditable per-source.
+        write_daily_observation_with_revision(
+            conn, atom_high, atom_low,
+            writer=f"daily_obs_append/{data_source}",
+        )
         record_written(
             conn,
             data_table=DataTable.OBSERVATIONS,
