@@ -14,6 +14,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from src.contracts.ensemble_snapshot_provenance import (
+    ECMWF_OPENDATA_LOW_CONTRACT_WINDOW_DATA_VERSION,
+    TIGGE_LOW_CONTRACT_WINDOW_DATA_VERSION,
+)
 from src.types.metric_identity import HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN, MetricIdentity
 
 # 2026-05-01: Open Data ENS data_versions accepted alongside the TIGGE archive
@@ -29,6 +33,8 @@ _ALLOWED_DATA_VERSIONS: dict[str, MetricIdentity] = {
     LOW_LOCALDAY_MIN.data_version: LOW_LOCALDAY_MIN,
     _ECMWF_OPENDATA_HIGH_DATA_VERSION: HIGH_LOCALDAY_MAX,
     _ECMWF_OPENDATA_LOW_DATA_VERSION: LOW_LOCALDAY_MIN,
+    TIGGE_LOW_CONTRACT_WINDOW_DATA_VERSION: LOW_LOCALDAY_MIN,
+    ECMWF_OPENDATA_LOW_CONTRACT_WINDOW_DATA_VERSION: LOW_LOCALDAY_MIN,
 }
 
 
