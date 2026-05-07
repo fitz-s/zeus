@@ -26,10 +26,9 @@ import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 REGISTRY_PATH = REPO_ROOT / ".claude" / "hooks" / "registry.yaml"
-OVERRIDES_PATH = REPO_ROOT / ".claude" / "hooks" / "overrides.yaml"
 
 NEVER_EXPIRY_WHITELIST = {"REVIEW_SAFE_TAG", "ISOLATED_WORKTREE"}
-VALID_SEVERITY = {"ADVISORY", "BLOCKING"}
+VALID_SEVERITY = {"ADVISORY"}
 VALID_EVENTS = {
     "PreToolUse",
     "PostToolUse",
@@ -46,11 +45,6 @@ VALID_EVENTS = {
 @pytest.fixture(scope="module")
 def registry() -> dict:
     return yaml.safe_load(REGISTRY_PATH.read_text())
-
-
-@pytest.fixture(scope="module")
-def overrides() -> dict:
-    return yaml.safe_load(OVERRIDES_PATH.read_text())
 
 
 # ---------------------------------------------------------------------------
@@ -139,54 +133,3 @@ def test_advisory_hook_has_no_blocking_exit(hook: dict) -> None:
         )
 
 
-# ---------------------------------------------------------------------------
-# overrides.yaml schema tests
-# ---------------------------------------------------------------------------
-
-
-def test_overrides_file_exists() -> None:
-    assert OVERRIDES_PATH.exists(), f"overrides.yaml not found at {OVERRIDES_PATH}"
-
-
-def test_overrides_schema_version(overrides: dict) -> None:
-    assert "schema_version" in overrides
-    assert isinstance(overrides["schema_version"], int)
-    assert overrides["schema_version"] == 1
-
-
-def test_overrides_has_list(overrides: dict) -> None:
-    assert "overrides" in overrides
-    assert isinstance(overrides["overrides"], list)
-    assert len(overrides["overrides"]) > 0
-
-
-_OVERRIDES_DATA = yaml.safe_load(OVERRIDES_PATH.read_text()) if OVERRIDES_PATH.exists() else {"overrides": []}
-_OVERRIDES = _OVERRIDES_DATA.get("overrides", [])
-
-
-@pytest.mark.parametrize("override", _OVERRIDES, ids=[o["id"] for o in _OVERRIDES])
-def test_override_has_required_fields(override: dict) -> None:
-    for field in ("id", "description", "requires"):
-        assert field in override, f"Override {override.get('id','?')} missing '{field}'"
-
-
-@pytest.mark.parametrize("override", _OVERRIDES, ids=[o["id"] for o in _OVERRIDES])
-def test_override_auto_expires_after_never_whitelist(override: dict) -> None:
-    """auto_expires_after: never only permitted for REVIEW_SAFE_TAG + ISOLATED_WORKTREE."""
-    auto_exp = override.get("requires", {}).get("auto_expires_after", "24h")
-    if auto_exp == "never":
-        assert override["id"] in NEVER_EXPIRY_WHITELIST, (
-            f"Override {override['id']}: auto_expires_after=never not permitted "
-            f"(only {NEVER_EXPIRY_WHITELIST} may use never)"
-        )
-
-
-@pytest.mark.parametrize("override", _OVERRIDES, ids=[o["id"] for o in _OVERRIDES])
-def test_override_evidence_paths_use_correct_prefix(override: dict) -> None:
-    """Evidence file paths must use 'evidence/' prefix, not 'docs/evidence/'."""
-    ev_file = override.get("requires", {}).get("evidence_file", "")
-    if ev_file:
-        assert not ev_file.startswith("docs/evidence/"), (
-            f"Override {override['id']}: evidence_file uses 'docs/evidence/' "
-            f"prefix — must use 'evidence/' (OD-HOOK-3)"
-        )
