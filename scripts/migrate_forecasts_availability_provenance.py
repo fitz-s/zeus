@@ -26,6 +26,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.backtest.decision_time_truth import AvailabilityProvenance
+from src.state.db_writer_lock import WriteClass, db_writer_lock  # noqa: E402
 
 
 PROVENANCE_VALUES = sorted(p.value for p in AvailabilityProvenance)
@@ -69,26 +70,27 @@ def dry_run(db_path: Path) -> None:
 
 def apply(db_path: Path) -> None:
     print(f"[apply] Target DB: {db_path}")
-    conn = sqlite3.connect(str(db_path))
-    try:
-        if _column_exists(conn):
-            print(f"[apply] availability_provenance already exists; nothing to do.")
-            return
-        before_count = _row_count(conn)
-        print(f"[apply] forecasts row count before: {before_count:,}")
-        conn.execute(
-            f"ALTER TABLE forecasts ADD COLUMN availability_provenance TEXT {CHECK_CLAUSE}"
-        )
-        conn.commit()
-        after_count = _row_count(conn)
-        print(f"[apply] forecasts row count after: {after_count:,}")
-        if before_count != after_count:
-            raise RuntimeError(
-                f"Row count changed during ALTER: {before_count} -> {after_count}"
+    with db_writer_lock(db_path, WriteClass.BULK):
+        conn = sqlite3.connect(str(db_path))
+        try:
+            if _column_exists(conn):
+                print(f"[apply] availability_provenance already exists; nothing to do.")
+                return
+            before_count = _row_count(conn)
+            print(f"[apply] forecasts row count before: {before_count:,}")
+            conn.execute(
+                f"ALTER TABLE forecasts ADD COLUMN availability_provenance TEXT {CHECK_CLAUSE}"
             )
-        print(f"[apply] Column added; all {after_count:,} rows have NULL provenance (expected; backfill via F11.4).")
-    finally:
-        conn.close()
+            conn.commit()
+            after_count = _row_count(conn)
+            print(f"[apply] forecasts row count after: {after_count:,}")
+            if before_count != after_count:
+                raise RuntimeError(
+                    f"Row count changed during ALTER: {before_count} -> {after_count}"
+                )
+            print(f"[apply] Column added; all {after_count:,} rows have NULL provenance (expected; backfill via F11.4).")
+        finally:
+            conn.close()
 
 
 def verify(db_path: Path) -> None:

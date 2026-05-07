@@ -53,6 +53,8 @@ from typing import Optional
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from src.state.db_writer_lock import WriteClass, db_writer_lock  # noqa: E402
+
 logger = logging.getLogger(__name__)
 
 # Columns required by src/state/db.py::init_schema observations CREATE TABLE.
@@ -234,7 +236,10 @@ def main(argv: Optional[list[str]] = None) -> int:
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
-    summary = run_migration(db_path=args.db_path, dry_run=args.dry_run)
+    from src.state.db import ZEUS_WORLD_DB_PATH  # noqa: PLC0415
+    _lock_path = args.db_path if args.db_path else ZEUS_WORLD_DB_PATH
+    with db_writer_lock(_lock_path, WriteClass.BULK):
+        summary = run_migration(db_path=args.db_path, dry_run=args.dry_run)
     print(summary)
     return 0
 
