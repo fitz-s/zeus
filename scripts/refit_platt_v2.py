@@ -66,7 +66,7 @@ from src.types.metric_identity import HIGH_LOCALDAY_MAX, MetricIdentity
 from src.calibration.metric_specs import METRIC_SPECS
 from scripts.verify_truth_surfaces import SHARED_DB, build_platt_refit_preflight_report
 
-_, _, MIN_DECISION_GROUPS = calibration_maturity_thresholds()  # level3 = refit threshold
+_, LOW_LIVE_MIN_DECISION_GROUPS, MIN_DECISION_GROUPS = calibration_maturity_thresholds()
 
 
 @dataclass
@@ -112,6 +112,40 @@ def _append_multi_filter(
     params.extend(values)
 
 
+def _table_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
+    columns: set[str] = set()
+    for row in conn.execute(f"PRAGMA table_info({table_name})"):
+        try:
+            columns.add(str(row["name"]))
+        except (TypeError, IndexError):
+            columns.add(str(row[1]))
+    return columns
+
+
+def _append_optional_dimension_filter(
+    where: list[str],
+    params: list[object],
+    *,
+    column: str,
+    value: str | None,
+    default: str,
+    columns: set[str],
+) -> None:
+    if value is None:
+        return
+    value = str(value)
+    if column in columns:
+        where.append(f"{column} = ?")
+        params.append(value)
+        return
+    if value != default:
+        where.append("1 = 0")
+
+
+def _dimension_expr(columns: set[str], column: str, default: str) -> str:
+    return column if column in columns else f"'{default}'"
+
+
 def _fetch_affected_bucket_keys(
     conn: sqlite3.Connection,
     metric_identity: MetricIdentity,
@@ -122,6 +156,9 @@ def _fetch_affected_bucket_keys(
     cluster_filter: str | None = None,
     season_filter: str | Sequence[str] | None = None,
     data_version_filter: str | None = None,
+    cycle_filter: str | None = None,
+    source_id_filter: str | None = None,
+    horizon_profile_filter: str | None = None,
 ) -> list[tuple[str, str, str, str, str, str]]:
     """Return bucket identities touched by a city/date scoped rebuild.
 
@@ -132,6 +169,7 @@ def _fetch_affected_bucket_keys(
     horizon_profile='full'.
     """
 
+    columns = _table_columns(conn, "calibration_pairs_v2")
     where = [
         "temperature_metric = ?",
         "training_allowed = 1",
@@ -157,9 +195,26 @@ def _fetch_affected_bucket_keys(
     if data_version_filter:
         where.append("data_version = ?")
         params.append(data_version_filter)
+    _append_optional_dimension_filter(
+        where, params, column="cycle", value=cycle_filter, default="00", columns=columns,
+    )
+    _append_optional_dimension_filter(
+        where, params, column="source_id", value=source_id_filter,
+        default="tigge_mars", columns=columns,
+    )
+    _append_optional_dimension_filter(
+        where, params, column="horizon_profile", value=horizon_profile_filter,
+        default="full", columns=columns,
+    )
 
+    cycle_expr = _dimension_expr(columns, "cycle", "00")
+    source_expr = _dimension_expr(columns, "source_id", "tigge_mars")
+    horizon_expr = _dimension_expr(columns, "horizon_profile", "full")
     rows = conn.execute(f"""
-        SELECT DISTINCT cluster, season, data_version, cycle, source_id, horizon_profile
+        SELECT DISTINCT cluster, season, data_version,
+               {cycle_expr} AS cycle,
+               {source_expr} AS source_id,
+               {horizon_expr} AS horizon_profile
         FROM calibration_pairs_v2
         WHERE {" AND ".join(where)}
         ORDER BY cluster, season, data_version, cycle, source_id, horizon_profile
@@ -181,6 +236,7 @@ def _append_bucket_key_filter(
     where: list[str],
     params: list[object],
     bucket_keys: list[tuple[str, str, str, str, str, str]] | None,
+    columns: set[str],
 ) -> None:
     if bucket_keys is None:
         return
@@ -189,11 +245,19 @@ def _append_bucket_key_filter(
         return
     clauses = []
     for cluster, season, data_version, cycle, source_id, horizon_profile in bucket_keys:
-        clauses.append(
-            "(cluster = ? AND season = ? AND data_version = ? "
-            "AND cycle = ? AND source_id = ? AND horizon_profile = ?)"
-        )
-        params.extend([cluster, season, data_version, cycle, source_id, horizon_profile])
+        parts = ["cluster = ?", "season = ?", "data_version = ?"]
+        values: list[object] = [cluster, season, data_version]
+        if "cycle" in columns:
+            parts.append("cycle = ?")
+            values.append(cycle)
+        if "source_id" in columns:
+            parts.append("source_id = ?")
+            values.append(source_id)
+        if "horizon_profile" in columns:
+            parts.append("horizon_profile = ?")
+            values.append(horizon_profile)
+        clauses.append("(" + " AND ".join(parts) + ")")
+        params.extend(values)
     where.append("(" + " OR ".join(clauses) + ")")
 
 
@@ -207,8 +271,12 @@ def _fetch_buckets(
     cluster_filter: str | None = None,
     season_filter: str | Sequence[str] | None = None,
     data_version_filter: str | None = None,
+    cycle_filter: str | None = None,
+    source_id_filter: str | None = None,
+    horizon_profile_filter: str | None = None,
 ) -> list[sqlite3.Row]:
     """Fetch metric-scoped buckets with sufficient maturity from calibration_pairs_v2."""
+    columns = _table_columns(conn, "calibration_pairs_v2")
     affected_keys = None
     if city_filter or start_date or end_date:
         affected_keys = _fetch_affected_bucket_keys(
@@ -220,6 +288,9 @@ def _fetch_buckets(
             cluster_filter=cluster_filter,
             season_filter=season_filter,
             data_version_filter=data_version_filter,
+            cycle_filter=cycle_filter,
+            source_id_filter=source_id_filter,
+            horizon_profile_filter=horizon_profile_filter,
         )
     where = [
         "temperature_metric = ?",
@@ -237,14 +308,31 @@ def _fetch_buckets(
     if data_version_filter:
         where.append("data_version = ?")
         params.append(data_version_filter)
-    _append_bucket_key_filter(where, params, affected_keys)
+    _append_optional_dimension_filter(
+        where, params, column="cycle", value=cycle_filter, default="00", columns=columns,
+    )
+    _append_optional_dimension_filter(
+        where, params, column="source_id", value=source_id_filter,
+        default="tigge_mars", columns=columns,
+    )
+    _append_optional_dimension_filter(
+        where, params, column="horizon_profile", value=horizon_profile_filter,
+        default="full", columns=columns,
+    )
+    _append_bucket_key_filter(where, params, affected_keys, columns)
     params.append(MIN_DECISION_GROUPS)
+    cycle_expr = _dimension_expr(columns, "cycle", "00")
+    source_expr = _dimension_expr(columns, "source_id", "tigge_mars")
+    horizon_expr = _dimension_expr(columns, "horizon_profile", "full")
     return conn.execute(f"""
-        SELECT cluster, season, data_version, cycle, source_id, horizon_profile,
+        SELECT cluster, season, data_version,
+               {cycle_expr} AS cycle,
+               {source_expr} AS source_id,
+               {horizon_expr} AS horizon_profile,
                COUNT(DISTINCT decision_group_id) AS n_eff
         FROM calibration_pairs_v2
         WHERE {" AND ".join(where)}
-        GROUP BY cluster, season, data_version, cycle, source_id, horizon_profile
+        GROUP BY cluster, season, data_version, {cycle_expr}, {source_expr}, {horizon_expr}
         HAVING n_eff >= ?
     """, tuple(params)).fetchall()
 
@@ -259,21 +347,122 @@ def _fetch_pairs_for_bucket(
     horizon_profile: str,
     metric_identity: MetricIdentity,
 ) -> list[sqlite3.Row]:
-    return conn.execute("""
+    columns = _table_columns(conn, "calibration_pairs_v2")
+    where = [
+        "temperature_metric = ?",
+        "training_allowed = 1",
+        "authority = 'VERIFIED'",
+        "cluster = ?",
+        "season = ?",
+        "data_version = ?",
+        "decision_group_id IS NOT NULL",
+        "decision_group_id != ''",
+        "p_raw IS NOT NULL",
+    ]
+    params: list[object] = [
+        metric_identity.temperature_metric,
+        cluster,
+        season,
+        data_version,
+    ]
+    _append_optional_dimension_filter(
+        where, params, column="cycle", value=cycle, default="00", columns=columns,
+    )
+    _append_optional_dimension_filter(
+        where, params, column="source_id", value=source_id,
+        default="tigge_mars", columns=columns,
+    )
+    _append_optional_dimension_filter(
+        where, params, column="horizon_profile", value=horizon_profile,
+        default="full", columns=columns,
+    )
+    return conn.execute(f"""
         SELECT p_raw, lead_days, outcome, range_label, decision_group_id
         FROM calibration_pairs_v2
+        WHERE {" AND ".join(where)}
+    """, tuple(params)).fetchall()
+
+
+def _active_verified_model_exists(
+    conn: sqlite3.Connection,
+    *,
+    metric_identity: MetricIdentity,
+    cluster: str,
+    season: str,
+    data_version: str,
+    cycle: str,
+    source_id: str,
+    horizon_profile: str,
+    input_space: str,
+) -> bool:
+    row = conn.execute(
+        """
+        SELECT 1
+        FROM platt_models_v2
         WHERE temperature_metric = ?
-          AND training_allowed = 1
+          AND cluster = ?
+          AND season = ?
+          AND data_version = ?
+          AND input_space = ?
+          AND cycle = ?
+          AND source_id = ?
+          AND horizon_profile = ?
+          AND is_active = 1
           AND authority = 'VERIFIED'
-          AND cluster = ? AND season = ? AND data_version = ?
-          AND cycle = ? AND source_id = ? AND horizon_profile = ?
-          AND decision_group_id IS NOT NULL
-          AND decision_group_id != ''
-          AND p_raw IS NOT NULL
-    """, (
-        metric_identity.temperature_metric,
-        cluster, season, data_version, cycle, source_id, horizon_profile,
-    )).fetchall()
+        LIMIT 1
+        """,
+        (
+            metric_identity.temperature_metric,
+            cluster,
+            season,
+            data_version,
+            input_space,
+            cycle,
+            source_id,
+            horizon_profile,
+        ),
+    ).fetchone()
+    return row is not None
+
+
+def _delete_active_shadow_model(
+    conn: sqlite3.Connection,
+    *,
+    metric_identity: MetricIdentity,
+    cluster: str,
+    season: str,
+    data_version: str,
+    cycle: str,
+    source_id: str,
+    horizon_profile: str,
+    input_space: str,
+) -> int:
+    result = conn.execute(
+        """
+        DELETE FROM platt_models_v2
+        WHERE temperature_metric = ?
+          AND cluster = ?
+          AND season = ?
+          AND data_version = ?
+          AND input_space = ?
+          AND cycle = ?
+          AND source_id = ?
+          AND horizon_profile = ?
+          AND is_active = 1
+          AND authority != 'VERIFIED'
+        """,
+        (
+            metric_identity.temperature_metric,
+            cluster,
+            season,
+            data_version,
+            input_space,
+            cycle,
+            source_id,
+            horizon_profile,
+        ),
+    )
+    return result.rowcount
 
 
 def _assert_platt_refit_preflight_ready(db_path: Path) -> None:
@@ -349,9 +538,17 @@ def _fit_bucket(
     )
 
     if dry_run:
-        print(f"[dry] {bucket_key:50s} {summary}")
+        intended_authority = (
+            "UNVERIFIED"
+            if (
+                metric_identity.temperature_metric == "low"
+                and n_eff < LOW_LIVE_MIN_DECISION_GROUPS
+            )
+            else "VERIFIED"
+        )
+        print(f"[dry] {bucket_key:50s} {summary} authority={intended_authority}")
         stats.buckets_fit += 1
-        stats.per_bucket[bucket_key] = f"DRY {summary}"
+        stats.per_bucket[bucket_key] = f"DRY {summary} authority={intended_authority}"
         return
 
     # Fit-time inverted-slope guard (2026-05-06 calibration quality report):
@@ -382,18 +579,61 @@ def _fit_bucket(
         stats.per_bucket[bucket_key] = f"QUARANTINED {quarantine_reason} {summary}"
         return
 
-    deactivated = deactivate_model_v2(
-        conn,
-        metric_identity=metric_identity,
-        cluster=cluster,
-        season=season,
-        data_version=data_version,
-        cycle=cycle,
-        source_id=source_id,
-        horizon_profile=horizon_profile,
-        input_space=cal.input_space,
-    )
-    stats.deactivated_rows += deactivated
+    authority = "VERIFIED"
+    label = "OK  "
+    if (
+        metric_identity.temperature_metric == "low"
+        and n_eff < LOW_LIVE_MIN_DECISION_GROUPS
+    ):
+        authority = "UNVERIFIED"
+        label = "SHADOW"
+
+    if authority == "VERIFIED":
+        deactivated = deactivate_model_v2(
+            conn,
+            metric_identity=metric_identity,
+            cluster=cluster,
+            season=season,
+            data_version=data_version,
+            cycle=cycle,
+            source_id=source_id,
+            horizon_profile=horizon_profile,
+            input_space=cal.input_space,
+        )
+        stats.deactivated_rows += deactivated
+    else:
+        if _active_verified_model_exists(
+            conn,
+            metric_identity=metric_identity,
+            cluster=cluster,
+            season=season,
+            data_version=data_version,
+            cycle=cycle,
+            source_id=source_id,
+            horizon_profile=horizon_profile,
+            input_space=cal.input_space,
+        ):
+            print(
+                f"SHADOW-SKIP {bucket_key:50s} {summary} authority=UNVERIFIED "
+                "(existing VERIFIED row preserved)"
+            )
+            stats.buckets_fit += 1
+            stats.per_bucket[bucket_key] = (
+                f"SHADOW-SKIP {summary} authority=UNVERIFIED "
+                "(existing VERIFIED row preserved)"
+            )
+            return
+        stats.deactivated_rows += _delete_active_shadow_model(
+            conn,
+            metric_identity=metric_identity,
+            cluster=cluster,
+            season=season,
+            data_version=data_version,
+            cycle=cycle,
+            source_id=source_id,
+            horizon_profile=horizon_profile,
+            input_space=cal.input_space,
+        )
 
     save_platt_model_v2(
         conn,
@@ -411,12 +651,12 @@ def _fit_bucket(
         n_samples=n_eff,
         brier_insample=brier_insample,
         input_space=cal.input_space,
-        authority="VERIFIED",
+        authority=authority,
     )
 
-    print(f"OK   {bucket_key:50s} {summary}")
+    print(f"{label} {bucket_key:50s} {summary} authority={authority}")
     stats.buckets_fit += 1
-    stats.per_bucket[bucket_key] = f"OK {summary}"
+    stats.per_bucket[bucket_key] = f"{label.strip()} {summary} authority={authority}"
 
 
 @capability("script_repair_write", lease=False)
@@ -434,6 +674,9 @@ def refit_v2(
     cluster_filter: str | None = None,
     season_filter: str | Sequence[str] | None = None,
     data_version_filter: str | None = None,
+    cycle_filter: str | None = None,
+    source_id_filter: str | None = None,
+    horizon_profile_filter: str | None = None,
 ) -> RefitStatsV2:
     stats = RefitStatsV2()
 
@@ -443,14 +686,21 @@ def refit_v2(
     print(f"Mode:           {'DRY-RUN' if dry_run else 'LIVE WRITE'}")
     print(f"MetricIdentity: {metric_identity}")
     seasons_display = ",".join(_normalize_multi_filter(season_filter)) or "*"
-    if city_filter or start_date or end_date or cluster_filter or season_filter or data_version_filter:
+    if (
+        city_filter or start_date or end_date or cluster_filter
+        or season_filter or data_version_filter or cycle_filter
+        or source_id_filter or horizon_profile_filter
+    ):
         print(
             "Bucket filter:   "
             f"city={city_filter or '*'} "
             f"date={start_date or '-inf'}..{end_date or '+inf'} "
             f"cluster={cluster_filter or '*'} "
             f"season={seasons_display} "
-            f"data_version={data_version_filter or '*'}"
+            f"data_version={data_version_filter or '*'} "
+            f"cycle={cycle_filter or '*'} "
+            f"source_id={source_id_filter or '*'} "
+            f"horizon_profile={horizon_profile_filter or '*'}"
         )
     print(f"Min groups:     {MIN_DECISION_GROUPS}")
 
@@ -463,6 +713,9 @@ def refit_v2(
         cluster_filter=cluster_filter,
         season_filter=season_filter,
         data_version_filter=data_version_filter,
+        cycle_filter=cycle_filter,
+        source_id_filter=source_id_filter,
+        horizon_profile_filter=horizon_profile_filter,
     )
     stats.buckets_scanned = len(buckets)
     print(f"Buckets eligible (n_eff >= {MIN_DECISION_GROUPS}): {stats.buckets_scanned}")
@@ -656,6 +909,9 @@ def refit_all_v2(
     cluster_filter: str | None = None,
     season_filter: str | Sequence[str] | None = None,
     data_version_filter: str | None = None,
+    cycle_filter: str | None = None,
+    source_id_filter: str | None = None,
+    horizon_profile_filter: str | None = None,
 ) -> dict[str, RefitStatsV2]:
     """Refit Platt v2 models for ALL METRIC_SPECS in one invocation.
 
@@ -680,6 +936,9 @@ def refit_all_v2(
             cluster_filter=cluster_filter,
             season_filter=season_filter,
             data_version_filter=data_version_filter,
+            cycle_filter=cycle_filter,
+            source_id_filter=source_id_filter,
+            horizon_profile_filter=horizon_profile_filter,
         )
         per_metric[spec.identity.temperature_metric] = stats
     return per_metric
@@ -729,6 +988,9 @@ def main() -> int:
         default=None,
         help="Limit refit to one calibration data_version bucket.",
     )
+    parser.add_argument("--cycle", dest="cycle", default=None, help="Limit refit to one UTC cycle bucket, e.g. 00 or 12.")
+    parser.add_argument("--source-id", dest="source_id", default=None, help="Limit refit to one forecast source bucket.")
+    parser.add_argument("--horizon-profile", dest="horizon_profile", default=None, help="Limit refit to one horizon profile bucket.")
     parser.add_argument(
         "--strict", dest="strict", action="store_true", default=False,
         help=(
@@ -751,9 +1013,11 @@ def main() -> int:
     if args.db_path:
         conn = sqlite3.connect(args.db_path)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout = 600000")
         conn.execute("PRAGMA journal_mode=WAL")
     else:
         conn = get_world_connection()
+        conn.execute("PRAGMA busy_timeout = 600000")
     init_schema(conn)
     apply_v2_schema(conn)
 
@@ -770,6 +1034,9 @@ def main() -> int:
             cluster_filter=args.cluster,
             season_filter=args.season,
             data_version_filter=args.data_version,
+            cycle_filter=args.cycle,
+            source_id_filter=args.source_id,
+            horizon_profile_filter=args.horizon_profile,
         )
     except Exception as e:
         print(f"ERROR: {type(e).__name__}: {e}", file=sys.stderr)

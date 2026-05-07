@@ -149,6 +149,9 @@ make a surface default-read unless `current_state.md` routes it.
 | `task_2026-05-06_calibration_quality_blockers/` | active packet container | 2026-05-06 launch-blocker remediation packet for calibration quality (12 inverted-slope Platts quarantined + fit-time guard) |
 | `task_2026-05-06_calibration_quality_blockers/PLAN.md` | active packet plan | LOW/HIGH calibration alignment recovery plan covering contract-window evidence persistence, recovery snapshot backfill, LOW pair rebuild gates, and calibration authority shadow gating |
 | `task_2026-05-06_calibration_quality_blockers/QUARANTINE_LEDGER.md` | active packet evidence | Ledger of the 12 QUARANTINED platt_models_v2 buckets with reversibility queries and fallback-chain analysis |
+| `task_2026-05-07_recalibration_after_low_high_alignment/` | active packet container | Post-merge LOW/HIGH recalibration packet for contract-window recovery materialization and runtime authority checks |
+| `task_2026-05-07_recalibration_after_low_high_alignment/PLAN.md` | active packet plan | Controlled LOW/HIGH recovery, pair rebuild, Platt refit, authority, and promotion-readiness plan |
+| `task_2026-05-07_recalibration_after_low_high_alignment/REPORT.md` | active packet evidence | Before/after report for TIGGE LOW contract-window recovery snapshots, pairs, Platts, runtime samples, and verification |
 Archived packet evidence (physically moved to `docs/archives/packets/`) is
 listed in `docs/archive_registry.md`; do not re-list those packets here. When
 a packet closes and is archived, remove its row from this registry and the

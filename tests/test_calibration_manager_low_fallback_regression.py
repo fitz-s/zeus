@@ -201,7 +201,13 @@ def test_calibration_authority_result_marks_primary_exact_live_eligible():
     apply_v2_schema(conn)
     city = _city()
     season = season_from_date("2026-01-15", lat=city.lat)
-    _save_low_v2_model(conn, cluster=city.cluster, season=season, n_samples=80)
+    _save_low_v2_model(
+        conn,
+        cluster=city.cluster,
+        season=season,
+        data_version=TIGGE_LOW_CONTRACT_WINDOW_DATA_VERSION,
+        n_samples=80,
+    )
     conn.commit()
 
     result = get_calibration_authority_result(
@@ -244,12 +250,133 @@ def test_calibration_authority_result_blocks_pool_fallback_live_use():
         horizon_profile="full",
     )
 
-    assert result.route == "COMPATIBLE_FALLBACK"
-    assert result.served_calibration_domain is not None
-    assert result.served_calibration_domain.cluster == fallback_cluster
+    assert result.route == "RAW_UNCALIBRATED"
+    assert result.served_calibration_domain is None
     assert result.live_eligible is False
-    assert "fallback_shadow_requires_explicit_compatibility_proof" in result.block_reasons
-    assert "calibration_domain_mismatch:cluster" in result.block_reasons
+    assert result.block_reasons == ("no_verified_calibrator",)
+
+
+def test_get_calibrator_blocks_low_pool_fallback_at_live_read_seam():
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    init_schema(conn)
+    apply_v2_schema(conn)
+    city = _city()
+    season = season_from_date("2026-01-15", lat=city.lat)
+    fallback_cluster = next(c for c in calibration_clusters() if c != city.cluster)
+    _save_low_v2_model(
+        conn,
+        cluster=fallback_cluster,
+        season=season,
+        data_version=TIGGE_LOW_CONTRACT_WINDOW_DATA_VERSION,
+        n_samples=80,
+    )
+    conn.commit()
+
+    cal, level = get_calibrator(
+        conn,
+        city,
+        "2026-01-15",
+        temperature_metric="low",
+        cycle="00",
+        source_id="tigge_mars",
+        horizon_profile="full",
+    )
+
+    assert cal is None
+    assert level == 4
+
+
+def test_get_calibrator_blocks_low_primary_below_live_n_eff_floor():
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    init_schema(conn)
+    apply_v2_schema(conn)
+    city = _city()
+    season = season_from_date("2026-01-15", lat=city.lat)
+    _save_low_v2_model(
+        conn,
+        cluster=city.cluster,
+        season=season,
+        data_version=TIGGE_LOW_CONTRACT_WINDOW_DATA_VERSION,
+        n_samples=49,
+    )
+    conn.commit()
+
+    cal, level = get_calibrator(
+        conn,
+        city,
+        "2026-01-15",
+        temperature_metric="low",
+        cycle="00",
+        source_id="tigge_mars",
+        horizon_profile="full",
+    )
+
+    assert cal is None
+    assert level == 4
+
+
+def test_calibration_authority_result_marks_low_primary_below_floor_shadow_only():
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    init_schema(conn)
+    apply_v2_schema(conn)
+    city = _city()
+    season = season_from_date("2026-01-15", lat=city.lat)
+    _save_low_v2_model(
+        conn,
+        cluster=city.cluster,
+        season=season,
+        data_version=TIGGE_LOW_CONTRACT_WINDOW_DATA_VERSION,
+        n_samples=49,
+    )
+    conn.commit()
+
+    result = get_calibration_authority_result(
+        conn,
+        city,
+        "2026-01-15",
+        _contract_domain(city),
+        temperature_metric="low",
+        cycle="00",
+        source_id="tigge_mars",
+        horizon_profile="full",
+    )
+
+    assert result.route == "PRIMARY_EXACT"
+    assert result.live_eligible is False
+    assert result.block_reasons == ("low_primary_n_eff_below_live_min:49<50",)
+
+
+def test_get_calibrator_does_not_rescue_modern_low_from_legacy_data_version():
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    init_schema(conn)
+    apply_v2_schema(conn)
+    city = _city()
+    season = season_from_date("2026-01-15", lat=city.lat)
+    _save_low_v2_model(
+        conn,
+        cluster=city.cluster,
+        season=season,
+        data_version=LOW_LOCALDAY_MIN.data_version,
+        n_samples=80,
+    )
+    conn.commit()
+
+    cal, level = get_calibrator(
+        conn,
+        city,
+        "2026-01-15",
+        temperature_metric="low",
+        cycle="00",
+        source_id="tigge_mars",
+        horizon_profile="full",
+    )
+
+    assert cal is None
+    assert level == 4
 
 
 def test_get_calibrator_prefers_tigge_low_contract_window_model_when_present():
