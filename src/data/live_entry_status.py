@@ -75,11 +75,15 @@ def count_executable_opendata_rows(conn: sqlite3.Connection, *, config: EntryFor
           AND release_calendar_key IS NOT NULL
           AND source_cycle_time IS NOT NULL
           AND source_release_time IS NOT NULL
-          AND data_version IN (?, ?)
+          AND data_version IN (?, ?, ?, ?)
         """,
         (
             config.source_id,
             config.source_transport.value,
+            # 2026-05-07: mx2t3/mn2t3 active versions
+            "ecmwf_opendata_mx2t3_local_calendar_day_max_v1",
+            "ecmwf_opendata_mn2t3_local_calendar_day_min_v1",
+            # Legacy mx2t6/mn2t6 — historical rows written before 2026-05-07
             "ecmwf_opendata_mx2t6_local_calendar_day_max_v1",
             "ecmwf_opendata_mn2t6_local_calendar_day_min_v1",
         ),

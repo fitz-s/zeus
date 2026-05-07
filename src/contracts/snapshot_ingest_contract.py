@@ -21,14 +21,21 @@ from src.types.metric_identity import HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN, Metri
 # spec — different source-provenance prefix. Both rows can coexist in
 # ensemble_snapshots_v2 for the same (city, target_date, metric); readers use
 # data_version_priority_for_metric() to prefer Open Data when present.
-_ECMWF_OPENDATA_HIGH_DATA_VERSION = "ecmwf_opendata_mx2t6_local_calendar_day_max_v1"
-_ECMWF_OPENDATA_LOW_DATA_VERSION = "ecmwf_opendata_mn2t6_local_calendar_day_min_v1"
+# 2026-05-07: mx2t3/mn2t3 rename. New versions are the active write path.
+# Legacy mx2t6/mn2t6 kept in allow-list so historical rows remain readable.
+_ECMWF_OPENDATA_HIGH_DATA_VERSION = "ecmwf_opendata_mx2t3_local_calendar_day_max_v1"
+_ECMWF_OPENDATA_LOW_DATA_VERSION = "ecmwf_opendata_mn2t3_local_calendar_day_min_v1"
+_ECMWF_OPENDATA_HIGH_DATA_VERSION_LEGACY = "ecmwf_opendata_mx2t6_local_calendar_day_max_v1"
+_ECMWF_OPENDATA_LOW_DATA_VERSION_LEGACY = "ecmwf_opendata_mn2t6_local_calendar_day_min_v1"
 
 _ALLOWED_DATA_VERSIONS: dict[str, MetricIdentity] = {
     HIGH_LOCALDAY_MAX.data_version: HIGH_LOCALDAY_MAX,
     LOW_LOCALDAY_MIN.data_version: LOW_LOCALDAY_MIN,
     _ECMWF_OPENDATA_HIGH_DATA_VERSION: HIGH_LOCALDAY_MAX,
     _ECMWF_OPENDATA_LOW_DATA_VERSION: LOW_LOCALDAY_MIN,
+    # Legacy — historical rows only; no new writes use these.
+    _ECMWF_OPENDATA_HIGH_DATA_VERSION_LEGACY: HIGH_LOCALDAY_MAX,
+    _ECMWF_OPENDATA_LOW_DATA_VERSION_LEGACY: LOW_LOCALDAY_MIN,
 }
 
 

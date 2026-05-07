@@ -1,0 +1,128 @@
+# Zeus Grid Resolution Authority — Plan A
+#
+# Created: 2026-05-07
+# Last reused/audited: 2026-05-07
+# Authority basis: Operator decision 2026-05-07 + scientist quantitative analysis
+#   (.omc/scientist/figures/per_city_brier.csv, per_city_grid.csv)
+# Status: BINDING — applies to all Zeus calibration / live forecast paths
+#
+# WHY THIS DOC EXISTS
+# -------------------
+# Future agents (and the operator months from now) will see Zeus's training
+# corpus at 0.5° and live OpenData at 0.25° and ask: "shouldn't training match
+# live's higher resolution?" — they will reach for "backfill 0.25° TIGGE" or
+# similar synthetic-precision schemes. This document binds the answer.
+
+decision_summary:
+  canonical_grid_resolution: 0.5
+  unit: degrees
+  temporal_granularity:
+    training: 6h  # TIGGE archive native (mx2t6/mn2t6)
+    live: 3h      # ECMWF Opendata native (mx2t3/mn2t3) — DO NOT aggregate up to 6h
+    note: "Train coarser-time + live finer-time is BENIGN single-direction info-loss; calibration learns the 3h→6h envelope mapping at predict-time. The reverse (train fine + live coarse) would be harmful."
+  rationale: |
+    Spatial: ECMWF TIGGE archive natively stores 0.5° (international archive
+    protocol); no 0.25° historical IFS-ENS exists from any retrievable source.
+    Therefore the only resolution where real (non-synthetic) historical training
+    data exists is 0.5°. Live ECMWF Opendata (0.25° native) MUST be downsampled
+    to 0.5° before entering Zeus's calibration / extraction pipeline.
+
+    Temporal: ECMWF Opendata enfo stream DEPRECATED `mx2t6`/`mn2t6` 6h aggregates;
+    only `mx2t3`/`mn2t3` (3h) and `2t` (instantaneous) remain available. API
+    suggests migration to mx2t3. Aggregating live 3h back up to 6h to match
+    training is unnecessary and discards Asia timezone unlock value (60% relative
+    reduction in local-day-boundary ambiguous samples). Verdict per scientist v2
+    analysis (2026-05-07): A1+3h dominates A1 by 3.1 K-equiv composite cost,
+    entirely concentrated in 23 Asia/Pacific cities.
+
+  scenario_chosen: A1+3h
+  scenario_alternatives_rejected:
+    - "A1 (6h-everywhere): superseded by A1+3h after Opendata deprecation finding"
+    - "A2 (3h-everywhere via TIGGE): TIGGE archive does not serve mx2t3 (structural inference, MARS probe pending)"
+    - "A3 (full 3h/0.25° forward-only): correct long-term but requires 16+ months accumulation"
+    - "B (spatial mismatch 0.25°/0.5°): 3.18× Brier degradation per scientist v1; rejected"
+
+forbidden_patterns:
+  - "Backfill 0.25° TIGGE via MARS server-side bilinear (synthetic precision; violates operator no-synthetic-data rule)"
+  - "Use Open-Meteo 0.25° as historical IFS-ENS source (no individual ENS members in their archive)"
+  - "Run Platt with 0.5° training but consume 0.25° live without downsample (Plan B — quantified 3.18× Brier degradation vs Plan A; rejected 2026-05-07)"
+  - "Add a Platt grid_offset/grid_bias term to absorb 0.5°/0.25° mismatch (Plan B variant — same rejection; bias not absorbable without massively increasing dimensionality)"
+  - "Resume the killed Phase-1-0.25° lanes (those lanes were producing bilinear-from-0.5° synthetic data)"
+  - "Aggregate live mx2t3/mn2t3 up to 6h to match TIGGE training granularity (discards Asia timezone unlock; A1+3h chose to NOT do this — 3.1 K-equiv penalty in Asia)"
+  - "Request mx2t6/mn2t6 from ECMWF Opendata enfo stream (DEPRECATED 2026-05-07; API returns 'No index entries' + suggests mx2t3). FIXED 2026-05-07: cloud extract TRACKS dict + data_version rename to mx2t3/mn2t3."
+  - "Maim live ingestion to artificially match a biased training corpus (operator framework: '破坏性对齐 数学合法 工程反直觉'). The right structural fix is canonical aggregation across train+live, not destructive alignment."
+
+quantitative_basis:
+  source: ".omc/scientist/figures/per_city_brier.csv"
+  source_method: ".omc/scientist/figures/per_city_grid.csv (per-city geometry + bias/loss)"
+  plan_a_vs_b:
+    plan_a_mean_brier_delta: 0.0205
+    plan_b_mean_brier_delta: 0.0652
+    ratio_b_over_a: 3.18
+    sensitivity_invariant_in_sigma_ens_range_K: [0.8, 2.0]
+    cities_where_plan_b_is_worse: 39
+    total_cities: 52
+    worst_plan_b_cities:
+      Singapore: 0.2793  # ΔBrier
+      HongKong: 0.2654
+      Miami: 0.1640
+      Houston: 0.1602
+      Lagos: 0.1601
+    worst_plan_a_cities:
+      HongKong: 0.0719
+      Singapore: 0.0635
+  caveat:
+    gradient_classification: "hand-coded climatology bins (5 classes), not measured per-city. ±30% absolute uncertainty on per-city numbers. Verdict invariant under all sensitivity tests."
+    phase_b_sanity_action: "1-day TIGGE 0.5° + Opendata 0.25° GRIB pull at HK / Singapore / Lagos to validate predicted |T_0.5° − T_0.25°| ≈ 1.0–1.6 K. Required before locking implementation."
+
+implementation:
+  training_corpus:
+    source: "TIGGE archive via ECDS (dataset=tigge-forecasts, grid=0.5/0.5)"
+    existing_disk: "1.069 TiB on cloud tigge-runner (mostly c00 complete; c12 partial; some pre-ECDS provenance unverifiable)"
+    backend_provenance:
+      column_required: "ensemble_snapshots_v2.ingest_backend (per critic v2 fix A1, BLOCKER)"
+      values:
+        - "ecds (post 2026-05-07 ECDS-routed lanes)"
+        - "webapi (pre-2026-05-04 WEB-API-routed lanes — partly inferred)"
+        - "unknown (1 TiB historical with no surviving log)"
+
+  live_forecast_path:
+    source_id: "ecmwf_open_data"
+    native_resolution: "0.25 / 0.25"
+    downsample_to: "0.5 / 0.5"
+    method: "4×4 grid-cell mean; cell anchor matched to TIGGE 0.5° anchor"
+    insertion_point: "src/data/ecmwf_open_data.py (CURRENTLY BROKEN — P0) and downstream ensemble extraction"
+    temporal_params: "mx2t3 (param 228026) for HIGH track + mn2t3 (param 228027) for LOW track; NOT mx2t6/mn2t6 (deprecated 2026-05-07)"
+    aggregation_at_predict_time: "calibration learns 3h→6h envelope mapping; do NOT pre-aggregate to 6h before extraction"
+    test_required: "post-downsample lat/lon grid centers must match TIGGE 0.5° gridpoints exactly; mx2t3 step grid 3/6/9/12 must be retrievable from enfo cf+pf"
+
+cycle_stratification_eligibility:
+  c12_2024_h1_gap: "no IFS-ENS c12 data on disk for 2024-01-01 → 2024-06-01 (and prior backfill attempts failed; root cause unknown — possibly account quota or ECDS catalog gap)"
+  cycle_stratified_pin_eligible_after: "2025-06-02"
+  pre_eligibility_policy: "use pooled-cycle Platt (no cycle stratification) for any (city, season) bucket whose training window touches before 2025-06-02"
+  pin_schema_implication: "config/settings.json::calibration.pin must reject cycle-stratified frozen_as_of values pre-2025-06-02"
+
+successor_obligations:
+  - "If you are about to spend more than 1 hour on a 'fix the 0.25° / 0.5° mismatch' task, STOP and re-read this file. The mismatch was solved on 2026-05-07 by Plan A (live downsample). Any plan that brings 0.25° training data back into the picture is suspect."
+  - "If you find a 'free' source of 0.25° historical IFS-ENS individual members, verify it is REAL data and not bilinear-from-0.5° republish. Synthetic precision is forbidden."
+  - "If you are tempted to revisit Plan B (calibration grid_offset term), run the scientist analysis again with measured per-city ERA5 gradients (not classified). The 3.18× number is robust under ±30% gradient uncertainty; bring evidence that meaningfully shifts that ratio."
+  - "If live downsample is later removed (e.g., for a hypothetical 0.25° TIGGE archive becoming available), update this doc and update the Platt corpus simultaneously — never silently."
+
+cross_references:
+  - "architecture/ecmwf_opendata_tigge_equivalence_2026_05_06.yaml (ECMWF physical-ensemble equivalence at the model level; this doc layers grid policy on top)"
+  - "architecture/settlement_dual_source_truth_2026_05_07.yaml (Polymarket UMA + Gamma dual source; orthogonal but same architectural era)"
+  - "AGENTS.md §Probability Chain (must reference A1+3h grid+temporal policy when next edited)"
+  - "docs/operations/TIGGE_DOWNLOAD_SPEC_v3_2026_05_07.md (download spec written under A1+3h authority)"
+  - ".omc/scientist/figures/per_city_brier.csv + per_city_grid.csv (v1 Plan A vs B 量化基础)"
+  - ".omc/scientist/figures/asia_tz_unlock_per_city.csv + scenarios_4way_per_city.csv + scenarios_4way_implementation.csv (v2 reframe to A1+3h 量化)"
+  - "docs/operations/grid_resolution_sanity_check_2026_05_07.md (HK/Singapore/Lagos empirical |T_0.5° - T_0.25°| validation)"
+
+amendment_log:
+  - date: 2026-05-07
+    summary: "Initial Plan A decision (downsample live 0.25°→0.5°)."
+  - date: 2026-05-07
+    summary: "Upgraded to A1+3h after scientist v2: ECMWF Opendata DEPRECATED mx2t6/mn2t6, only mx2t3/mn2t3+2t available. Train 6h + live 3h is benign info-loss direction; aggregating live up to 6h is forbidden (forfeits Asia timezone unlock worth 3.1 K-equiv composite cost)."
+  - date: 2026-05-07
+    summary: "P0 surfaced: src/data/ecmwf_open_data.py still requests deprecated mx2t6 → silently broken since some unknown date. Patch pending (separate scope from this authority doc)."
+  - date: 2026-05-07
+    summary: "Paradox diagnostic verified TIGGE extractor uses all-overlap discipline (line 504-505); 20/20 Tokyo days exact match. A1+3h paradox NULL. Live extractor inner-only asymmetry leaves daily_max unchanged for Asia (boundary windows = local night, never the max). Live patches: cloud extract TRACKS dict + Option 4 data_version rename + test update."
