@@ -132,17 +132,17 @@ def test_target_date_param_is_accepted_and_ignored():
 
 
 def test_schedule_has_51_cities():
-    """Pins the pilot-era city count: 51 cities total.
+    """Pins the city count: 52 cities total after Qingdao addition 2026-05-07.
 
     A change in count is not a bug, but should trip a deliberate update
     to this test alongside a cities.json edit. Zero-cost tripwire.
     """
-    assert len(TIER_SCHEDULE) == 51, f"expected 51 cities, got {len(TIER_SCHEDULE)}"
+    assert len(TIER_SCHEDULE) == 52, f"expected 52 cities, got {len(TIER_SCHEDULE)}"
 
 
 def test_tier_split_matches_plan_v3():
-    """Phase 0 plan v3 declares 47 WU + 3 Ogimet + 1 HKO = 51."""
-    assert len(cities_in_tier(Tier.WU_ICAO)) == 47
+    """Phase 0 plan v3 declares 47 WU + 3 Ogimet + 1 HKO = 51; Qingdao adds 1 WU = 52."""
+    assert len(cities_in_tier(Tier.WU_ICAO)) == 48
     assert len(cities_in_tier(Tier.OGIMET_METAR)) == 3
     assert len(cities_in_tier(Tier.HKO_NATIVE)) == 1
 

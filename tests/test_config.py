@@ -73,13 +73,14 @@ def test_settings_no_fallback_pattern():
 
 def test_cities_load():
     cities = load_cities()
-    assert len(cities) == 51  # 51 cities after global expansion
+    assert len(cities) == 52  # 52 cities after Qingdao addition 2026-05-07
     names = {c.name for c in cities}
     assert "NYC" in names
     assert "London" in names
     assert "Paris" in names
     assert "Seoul" in names
     assert "Austin" in names
+    assert "Qingdao" in names
 
 
 def test_city_settlement_units():
