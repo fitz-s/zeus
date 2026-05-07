@@ -106,6 +106,7 @@ from scripts.backfill_completeness import (  # noqa: E402
     resolve_manifest_path,
     write_manifest,
 )
+from src.state.db_writer_lock import WriteClass, db_writer_lock  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -662,141 +663,142 @@ def main(argv: Optional[list[str]] = None) -> int:
             )
             return 2
 
-    conn = sqlite3.connect(str(args.db))
-    try:
-        # Ensure zeus_meta + observation_instants_v2 schema is current.
-        # Cheap; idempotent; protects against running on a DB that was
-        # never migrated.
-        from src.state.schema.v2_schema import apply_v2_schema
-        apply_v2_schema(conn)
+    with db_writer_lock(args.db, WriteClass.BULK):
+        conn = sqlite3.connect(str(args.db))
+        try:
+            # Ensure zeus_meta + observation_instants_v2 schema is current.
+            # Cheap; idempotent; protects against running on a DB that was
+            # never migrated.
+            from src.state.schema.v2_schema import apply_v2_schema
+            apply_v2_schema(conn)
 
-        all_stats: list[BackfillStats] = []
-        unsupported_cities: list[str] = []
-        for name in args.cities:
-            tier = tier_for_city(name)
-            if tier is Tier.WU_ICAO:
-                stats = _backfill_wu_city(
-                    conn, name, args.start, args.end, args.data_version,
-                    args.log, args.dry_run,
+            all_stats: list[BackfillStats] = []
+            unsupported_cities: list[str] = []
+            for name in args.cities:
+                tier = tier_for_city(name)
+                if tier is Tier.WU_ICAO:
+                    stats = _backfill_wu_city(
+                        conn, name, args.start, args.end, args.data_version,
+                        args.log, args.dry_run,
+                    )
+                elif tier is Tier.OGIMET_METAR:
+                    stats = _backfill_ogimet_city(
+                        conn, name, args.start, args.end, args.data_version,
+                        args.log, args.dry_run,
+                    )
+                elif tier is Tier.HKO_NATIVE:
+                    unsupported_cities.append(name)
+                    print(
+                        f"SKIP: {name} is Tier HKO_NATIVE; backfill not supported "
+                        "(plan v3 Phase 0 deliberately excludes HK — accumulator-"
+                        "only from deploy forward). Use the hko accumulator path.",
+                        file=sys.stderr,
+                    )
+                    continue
+                else:  # pragma: no cover
+                    raise RuntimeError(f"Unknown tier {tier!r} for {name!r}")
+                all_stats.append(stats)
+                logger.info(
+                    "city=%s tier=%s station=%s rows_written=%d rows_raw=%d "
+                    "rows_ready=%d windows=%d/%d_failed",
+                    stats.city, stats.tier, stats.station, stats.rows_written,
+                    stats.rows_raw, stats.rows_ready, stats.windows_attempted,
+                    stats.windows_failed,
                 )
-            elif tier is Tier.OGIMET_METAR:
-                stats = _backfill_ogimet_city(
-                    conn, name, args.start, args.end, args.data_version,
-                    args.log, args.dry_run,
-                )
-            elif tier is Tier.HKO_NATIVE:
-                unsupported_cities.append(name)
                 print(
-                    f"SKIP: {name} is Tier HKO_NATIVE; backfill not supported "
-                    "(plan v3 Phase 0 deliberately excludes HK — accumulator-"
-                    "only from deploy forward). Use the hko accumulator path.",
-                    file=sys.stderr,
+                    f"{stats.city:16s} tier={stats.tier:13s} station={stats.station:6s} "
+                    f"rows={stats.rows_written:7d}  ready={stats.rows_ready:7d}  "
+                    f"raw={stats.rows_raw:7d}  "
+                    f"windows={stats.windows_attempted}/{stats.windows_failed}_failed"
                 )
-                continue
-            else:  # pragma: no cover
-                raise RuntimeError(f"Unknown tier {tier!r} for {name!r}")
-            all_stats.append(stats)
-            logger.info(
-                "city=%s tier=%s station=%s rows_written=%d rows_raw=%d "
-                "rows_ready=%d windows=%d/%d_failed",
-                stats.city, stats.tier, stats.station, stats.rows_written,
-                stats.rows_raw, stats.rows_ready, stats.windows_attempted,
-                stats.windows_failed,
-            )
-            print(
-                f"{stats.city:16s} tier={stats.tier:13s} station={stats.station:6s} "
-                f"rows={stats.rows_written:7d}  ready={stats.rows_ready:7d}  "
-                f"raw={stats.rows_raw:7d}  "
-                f"windows={stats.windows_attempted}/{stats.windows_failed}_failed"
-            )
 
-        # Summary footer
-        total_written = sum(s.rows_written for s in all_stats)
-        total_ready = sum(s.rows_ready for s in all_stats)
-        total_build_errors = sum(s.row_build_errors for s in all_stats)
-        total_empty_windows = sum(s.empty_windows for s in all_stats)
-        total_failed_windows = sum(s.windows_failed for s in all_stats)
-        unsupported_count = len(unsupported_cities)
-        hard_blockers = {
-            "failed_windows": total_failed_windows,
-            "empty_windows": total_empty_windows,
-            "unsupported_cities": unsupported_count,
-        }
-        hard_blocker_count = sum(hard_blockers.values())
-        total_attempted = sum(s.windows_attempted for s in all_stats)
-        completeness = evaluate_completeness(
-            actual_count=total_ready,
-            failed_count=total_build_errors,
-            attempted_count=total_ready + total_build_errors,
-            expected_count=args.expected_count,
-            fail_threshold_percent=args.fail_threshold_percent,
-        )
-        if hard_blocker_count:
-            completeness = dict(completeness)
-            hard_reasons = [
-                name
-                for name, count in hard_blockers.items()
-                if count > 0
-            ]
-            completeness["passed"] = False
-            completeness["exit_code"] = 1
-            completeness["hard_blocker_count"] = hard_blocker_count
-            completeness["hard_blocker_reasons"] = hard_reasons
-            completeness["reasons"] = sorted(
-                set(completeness["reasons"] + ["hard_blocker_present"])
-            )
-        else:
-            completeness["hard_blocker_count"] = 0
-            completeness["hard_blocker_reasons"] = []
-        run_id = f"obs_v2_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
-        manifest_path = resolve_manifest_path(
-            args.completeness_manifest,
-            manifest_prefix=COMPLETENESS_MANIFEST_PREFIX,
-            run_id=run_id,
-        )
-        write_manifest(
-            manifest_path,
-            script_name="backfill_obs_v2.py",
-            run_id=run_id,
-            dry_run=args.dry_run,
-            inputs={
-                "cities": args.cities,
-                "start": args.start,
-                "end": args.end,
-                "data_version": args.data_version,
-                "db": args.db,
-                "log": args.log,
-                "expected_count": args.expected_count,
-                "fail_threshold_percent": args.fail_threshold_percent,
-            },
-            counters={
-                "unit_kind": "obs_v2_row",
-                "rows_written": total_written,
-                "rows_ready": total_ready,
-                "rows_raw": sum(s.rows_raw for s in all_stats),
-                "windows_attempted": total_attempted,
-                "windows_failed": total_failed_windows,
-                "row_build_errors": total_build_errors,
+            # Summary footer
+            total_written = sum(s.rows_written for s in all_stats)
+            total_ready = sum(s.rows_ready for s in all_stats)
+            total_build_errors = sum(s.row_build_errors for s in all_stats)
+            total_empty_windows = sum(s.empty_windows for s in all_stats)
+            total_failed_windows = sum(s.windows_failed for s in all_stats)
+            unsupported_count = len(unsupported_cities)
+            hard_blockers = {
+                "failed_windows": total_failed_windows,
                 "empty_windows": total_empty_windows,
-                "hard_blockers": hard_blockers,
-                "hard_blocker_count": hard_blocker_count,
-                "unsupported_city_count": unsupported_count,
-                "unsupported_cities": unsupported_cities,
-                "city_count": len(all_stats),
-                "per_city": [s.__dict__ for s in all_stats],
-            },
-            completeness=completeness,
-        )
-        print(f"\nTotal rows written: {total_written}")
-        print(f"Total rows ready: {total_ready}")
-        print(f"Total failed windows: {total_failed_windows}")
-        print(f"Total row build errors: {total_build_errors}")
-        print(f"Total empty windows: {total_empty_windows}")
-        print(f"Unsupported cities: {unsupported_count}")
-        emit_manifest_footer(manifest_path, completeness)
-        return int(completeness["exit_code"])
-    finally:
-        conn.close()
+                "unsupported_cities": unsupported_count,
+            }
+            hard_blocker_count = sum(hard_blockers.values())
+            total_attempted = sum(s.windows_attempted for s in all_stats)
+            completeness = evaluate_completeness(
+                actual_count=total_ready,
+                failed_count=total_build_errors,
+                attempted_count=total_ready + total_build_errors,
+                expected_count=args.expected_count,
+                fail_threshold_percent=args.fail_threshold_percent,
+            )
+            if hard_blocker_count:
+                completeness = dict(completeness)
+                hard_reasons = [
+                    name
+                    for name, count in hard_blockers.items()
+                    if count > 0
+                ]
+                completeness["passed"] = False
+                completeness["exit_code"] = 1
+                completeness["hard_blocker_count"] = hard_blocker_count
+                completeness["hard_blocker_reasons"] = hard_reasons
+                completeness["reasons"] = sorted(
+                    set(completeness["reasons"] + ["hard_blocker_present"])
+                )
+            else:
+                completeness["hard_blocker_count"] = 0
+                completeness["hard_blocker_reasons"] = []
+            run_id = f"obs_v2_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
+            manifest_path = resolve_manifest_path(
+                args.completeness_manifest,
+                manifest_prefix=COMPLETENESS_MANIFEST_PREFIX,
+                run_id=run_id,
+            )
+            write_manifest(
+                manifest_path,
+                script_name="backfill_obs_v2.py",
+                run_id=run_id,
+                dry_run=args.dry_run,
+                inputs={
+                    "cities": args.cities,
+                    "start": args.start,
+                    "end": args.end,
+                    "data_version": args.data_version,
+                    "db": args.db,
+                    "log": args.log,
+                    "expected_count": args.expected_count,
+                    "fail_threshold_percent": args.fail_threshold_percent,
+                },
+                counters={
+                    "unit_kind": "obs_v2_row",
+                    "rows_written": total_written,
+                    "rows_ready": total_ready,
+                    "rows_raw": sum(s.rows_raw for s in all_stats),
+                    "windows_attempted": total_attempted,
+                    "windows_failed": total_failed_windows,
+                    "row_build_errors": total_build_errors,
+                    "empty_windows": total_empty_windows,
+                    "hard_blockers": hard_blockers,
+                    "hard_blocker_count": hard_blocker_count,
+                    "unsupported_city_count": unsupported_count,
+                    "unsupported_cities": unsupported_cities,
+                    "city_count": len(all_stats),
+                    "per_city": [s.__dict__ for s in all_stats],
+                },
+                completeness=completeness,
+            )
+            print(f"\nTotal rows written: {total_written}")
+            print(f"Total rows ready: {total_ready}")
+            print(f"Total failed windows: {total_failed_windows}")
+            print(f"Total row build errors: {total_build_errors}")
+            print(f"Total empty windows: {total_empty_windows}")
+            print(f"Unsupported cities: {unsupported_count}")
+            emit_manifest_footer(manifest_path, completeness)
+            return int(completeness["exit_code"])
+        finally:
+            conn.close()
 
 
 if __name__ == "__main__":

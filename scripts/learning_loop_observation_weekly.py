@@ -93,6 +93,8 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from src.state.db_writer_lock import WriteClass, db_writer_lock  # noqa: E402
+
 DEFAULT_REPORT_DIR = REPO_ROOT / "docs" / "operations" / "learning_loop_observation"
 DEFAULT_DB_PATH = REPO_ROOT / "state" / "zeus-shared.db"
 DEFAULT_TRAILING_WINDOWS = 4
@@ -243,53 +245,54 @@ def run_weekly(
 
     overrides = overrides or {}
 
-    conn = sqlite3.connect(str(db_path))
-    conn.row_factory = sqlite3.Row
-    try:
-        # Current-window snapshot.
-        snapshot = compute_learning_loop_state_per_bucket(
-            conn, window_days=window_days, end_date=end_date.isoformat(),
-        )
-        # Per-bucket stall detection over n_windows of state history.
-        verdicts: dict[str, dict[str, Any]] = {}
-        thresholds_used: dict[str, dict[str, float]] = {}
-        drift_detected_map: dict[str, bool | None] = {}
-        for bucket_key, snap in snapshot.items():
-            thresholds = _resolve_bucket_thresholds(snap, overrides=overrides)
-            thresholds_used[bucket_key] = thresholds
-            # Suppress stall detection for insufficient-quality buckets.
-            if snap.get("sample_quality") == "insufficient":
-                verdicts[bucket_key] = {
-                    "kind": "insufficient_data",
-                    "bucket_key": bucket_key,
-                    "stall_kinds": [],
-                    "severity": None,
-                    "evidence": {
-                        "reason": "current_window_sample_quality_insufficient",
-                        "n_pairs_canonical": snap.get("n_pairs_canonical", 0),
-                    },
-                }
-                drift_detected_map[bucket_key] = None
-                continue
-            # CROSS-PACKET ORCHESTRATION: get drift_detected from CALIBRATION.
-            drift_detected = _resolve_drift_detected_for_bucket(
-                conn, bucket_key, end_date, window_days, n_windows,
+    with db_writer_lock(db_path, WriteClass.BULK):
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        try:
+            # Current-window snapshot.
+            snapshot = compute_learning_loop_state_per_bucket(
+                conn, window_days=window_days, end_date=end_date.isoformat(),
             )
-            drift_detected_map[bucket_key] = drift_detected
-            # Build state history + run stall detector.
-            state_history = _build_state_history(
-                conn, bucket_key, end_date, window_days, n_windows,
-            )
-            v = detect_learning_loop_stall(
-                state_history, bucket_key,
-                pair_growth_threshold_multiplier=thresholds["pair_growth"],
-                days_pairs_ready_no_retrain=thresholds["pairs_ready"],
-                days_drift_no_refit=thresholds["drift"],
-                drift_detected=drift_detected,
-            )
-            verdicts[bucket_key] = _verdict_to_dict(v)
-    finally:
-        conn.close()
+            # Per-bucket stall detection over n_windows of state history.
+            verdicts: dict[str, dict[str, Any]] = {}
+            thresholds_used: dict[str, dict[str, float]] = {}
+            drift_detected_map: dict[str, bool | None] = {}
+            for bucket_key, snap in snapshot.items():
+                thresholds = _resolve_bucket_thresholds(snap, overrides=overrides)
+                thresholds_used[bucket_key] = thresholds
+                # Suppress stall detection for insufficient-quality buckets.
+                if snap.get("sample_quality") == "insufficient":
+                    verdicts[bucket_key] = {
+                        "kind": "insufficient_data",
+                        "bucket_key": bucket_key,
+                        "stall_kinds": [],
+                        "severity": None,
+                        "evidence": {
+                            "reason": "current_window_sample_quality_insufficient",
+                            "n_pairs_canonical": snap.get("n_pairs_canonical", 0),
+                        },
+                    }
+                    drift_detected_map[bucket_key] = None
+                    continue
+                # CROSS-PACKET ORCHESTRATION: get drift_detected from CALIBRATION.
+                drift_detected = _resolve_drift_detected_for_bucket(
+                    conn, bucket_key, end_date, window_days, n_windows,
+                )
+                drift_detected_map[bucket_key] = drift_detected
+                # Build state history + run stall detector.
+                state_history = _build_state_history(
+                    conn, bucket_key, end_date, window_days, n_windows,
+                )
+                v = detect_learning_loop_stall(
+                    state_history, bucket_key,
+                    pair_growth_threshold_multiplier=thresholds["pair_growth"],
+                    days_pairs_ready_no_retrain=thresholds["pairs_ready"],
+                    days_drift_no_refit=thresholds["drift"],
+                    drift_detected=drift_detected,
+                )
+                verdicts[bucket_key] = _verdict_to_dict(v)
+        finally:
+            conn.close()
 
     return {
         "report_kind": "learning_loop_observation_weekly",

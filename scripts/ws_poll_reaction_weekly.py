@@ -76,6 +76,9 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 # any cwd, without requiring PYTHONPATH=. or `python -m scripts.X`.
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
+
+from src.state.db_writer_lock import WriteClass, db_writer_lock  # noqa: E402
+
 DEFAULT_REPORT_DIR = REPO_ROOT / "docs" / "operations" / "ws_poll_reaction"
 DEFAULT_DB_PATH = REPO_ROOT / "state" / "zeus-shared.db"
 DEFAULT_TRAILING_WINDOWS = 4   # 1 current + 3 trailing per detect_reaction_gap min_windows
@@ -202,29 +205,30 @@ def run_weekly(
     if per_strategy_thresholds:
         thresholds.update(per_strategy_thresholds)
 
-    conn = sqlite3.connect(str(db_path))
-    conn.row_factory = sqlite3.Row
-    try:
-        # Current-window snapshot.
-        snapshot = compute_reaction_latency_per_strategy(
-            conn, window_days=window_days, end_date=end_date.isoformat(),
-        )
-        # Per-strategy gap detection over n_windows of latency history.
-        verdicts: dict[str, dict[str, Any]] = {}
-        for sk in STRATEGY_KEYS:
-            history = _build_latency_history(conn, sk, end_date, window_days, n_windows)
-            v = detect_reaction_gap(
-                history, sk,
-                gap_threshold_multiplier=thresholds.get(sk, 1.5),
-                critical_ratio_cutoff=critical_ratio_cutoff,
+    with db_writer_lock(db_path, WriteClass.BULK):
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        try:
+            # Current-window snapshot.
+            snapshot = compute_reaction_latency_per_strategy(
+                conn, window_days=window_days, end_date=end_date.isoformat(),
             )
-            verdicts[sk] = _verdict_to_dict(v)
-        # Negative-latency surfacing for current window.
-        negative_latency_count = _compute_negative_latency_count(
-            conn, end_date, window_days,
-        )
-    finally:
-        conn.close()
+            # Per-strategy gap detection over n_windows of latency history.
+            verdicts: dict[str, dict[str, Any]] = {}
+            for sk in STRATEGY_KEYS:
+                history = _build_latency_history(conn, sk, end_date, window_days, n_windows)
+                v = detect_reaction_gap(
+                    history, sk,
+                    gap_threshold_multiplier=thresholds.get(sk, 1.5),
+                    critical_ratio_cutoff=critical_ratio_cutoff,
+                )
+                verdicts[sk] = _verdict_to_dict(v)
+            # Negative-latency surfacing for current window.
+            negative_latency_count = _compute_negative_latency_count(
+                conn, end_date, window_days,
+            )
+        finally:
+            conn.close()
 
     return {
         "report_kind": "ws_poll_reaction_weekly",

@@ -71,6 +71,7 @@ from src.data.observation_instants_v2_writer import (  # noqa: E402
     insert_rows,
 )
 from src.data.tier_resolver import Tier, tier_for_city  # noqa: E402
+from src.state.db_writer_lock import WriteClass, db_writer_lock  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -256,35 +257,36 @@ def main(argv: Optional[list[str]] = None) -> int:
             print(f"FATAL: city {name!r} not in config/cities.json", file=sys.stderr)
             return 2
 
-    conn = sqlite3.connect(str(args.db))
-    try:
-        total_written = 0
-        total_raw = 0
-        failures: list[tuple[str, str]] = []
-        for name in args.cities:
-            written, raw, failure = _fill_one_city(
-                conn, name, args.start, args.end, args.data_version,
-                args.log, args.dry_run,
-            )
-            total_written += written
-            total_raw += raw
-            mark = (
-                f"(dry-run raw={raw})" if args.dry_run
-                else f"wrote {written} / raw {raw}"
-            )
-            if failure:
-                failures.append((name, failure))
-                print(f"  {name:20s} FAILED: {failure}")
-            else:
-                print(f"  {name:20s} {mark}")
-        print(f"\nTotal written: {total_written}")
-        print(f"Total raw fetched: {total_raw}")
-        if failures:
-            print(f"Failures: {failures}")
-            return 1
-        return 0
-    finally:
-        conn.close()
+    with db_writer_lock(args.db, WriteClass.BULK):
+        conn = sqlite3.connect(str(args.db))
+        try:
+            total_written = 0
+            total_raw = 0
+            failures: list[tuple[str, str]] = []
+            for name in args.cities:
+                written, raw, failure = _fill_one_city(
+                    conn, name, args.start, args.end, args.data_version,
+                    args.log, args.dry_run,
+                )
+                total_written += written
+                total_raw += raw
+                mark = (
+                    f"(dry-run raw={raw})" if args.dry_run
+                    else f"wrote {written} / raw {raw}"
+                )
+                if failure:
+                    failures.append((name, failure))
+                    print(f"  {name:20s} FAILED: {failure}")
+                else:
+                    print(f"  {name:20s} {mark}")
+            print(f"\nTotal written: {total_written}")
+            print(f"Total raw fetched: {total_raw}")
+            if failures:
+                print(f"Failures: {failures}")
+                return 1
+            return 0
+        finally:
+            conn.close()
 
 
 if __name__ == "__main__":
