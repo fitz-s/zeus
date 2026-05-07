@@ -94,6 +94,9 @@ from src.contracts.calibration_bins import (
 )
 from src.contracts.ensemble_snapshot_provenance import (
     DataVersionQuarantinedError,
+    ECMWF_OPENDATA_LOW_DATA_VERSION,
+    ECMWF_OPENDATA_LOW_CONTRACT_WINDOW_DATA_VERSION,
+    TIGGE_LOW_CONTRACT_WINDOW_DATA_VERSION,
     assert_data_version_allowed,
     is_quarantined,
 )
@@ -135,6 +138,7 @@ class RebuildStatsV2:
     snapshots_scanned: int = 0
     snapshots_eligible: int = 0
     snapshots_quarantined: int = 0
+    snapshots_contract_evidence_rejected: int = 0
     snapshots_no_observation: int = 0
     snapshots_unit_rejected: int = 0
     snapshots_processed: int = 0
@@ -142,12 +146,14 @@ class RebuildStatsV2:
     pairs_written: int = 0
     pre_delete_v2_pairs: int = 0
     per_city: dict[str, int] = field(default_factory=dict)
+    contract_evidence_rejection_reasons: dict[str, int] = field(default_factory=dict)
 
     def as_dict(self) -> dict:
         return {
             "snapshots_scanned": self.snapshots_scanned,
             "snapshots_eligible": self.snapshots_eligible,
             "snapshots_quarantined": self.snapshots_quarantined,
+            "snapshots_contract_evidence_rejected": self.snapshots_contract_evidence_rejected,
             "snapshots_no_observation": self.snapshots_no_observation,
             "snapshots_unit_rejected": self.snapshots_unit_rejected,
             "snapshots_processed": self.snapshots_processed,
@@ -155,7 +161,116 @@ class RebuildStatsV2:
             "pairs_written": self.pairs_written,
             "pre_delete_v2_pairs": self.pre_delete_v2_pairs,
             "per_city": dict(self.per_city),
+            "contract_evidence_rejection_reasons": dict(self.contract_evidence_rejection_reasons),
         }
+
+
+def _row_value(row: sqlite3.Row, column: str) -> object | None:
+    try:
+        return row[column]
+    except (IndexError, KeyError):
+        return None
+
+
+def _as_nonempty_text(value: object | None) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _decode_reason_list(value: object | None) -> list[str]:
+    if value in (None, ""):
+        return []
+    try:
+        parsed = json.loads(str(value))
+    except json.JSONDecodeError:
+        return ["invalid_forecast_window_block_reasons_json"]
+    if not isinstance(parsed, list):
+        return ["invalid_forecast_window_block_reasons_json"]
+    return [str(item) for item in parsed if str(item).strip()]
+
+
+_LOW_CONTRACT_EVIDENCE_MARKER_FIELDS = (
+    "settlement_unit",
+    "settlement_rounding_policy",
+    "bin_grid_id",
+    "bin_schema_version",
+    "forecast_window_start_utc",
+    "forecast_window_end_utc",
+    "forecast_window_start_local",
+    "forecast_window_end_local",
+    "forecast_window_attribution_status",
+    "contributes_to_target_extrema",
+    "forecast_window_block_reasons_json",
+)
+
+_LOW_CONTRACT_EVIDENCE_REQUIRED_FIELDS = (
+    "observation_field",
+    *_LOW_CONTRACT_EVIDENCE_MARKER_FIELDS,
+)
+
+
+_LOW_CONTRACT_EVIDENCE_REQUIRED_DATA_VERSIONS = frozenset({
+    ECMWF_OPENDATA_LOW_DATA_VERSION,
+    TIGGE_LOW_CONTRACT_WINDOW_DATA_VERSION,
+    ECMWF_OPENDATA_LOW_CONTRACT_WINDOW_DATA_VERSION,
+})
+
+
+def _low_contract_evidence_rejection(
+    snapshot: sqlite3.Row,
+    *,
+    spec: CalibrationMetricSpec,
+) -> str | None:
+    """Return a LOW pair-rebuild block reason, preserving legacy rows.
+
+    Old LOW rows have no persisted contract/window evidence; those stay on the
+    legacy path until a new recovery data version is introduced.  If a row does
+    carry the new shadow evidence, it must prove the same contract-bin outcome
+    before pair generation.  This blocks accidental adjacent-day LOW training
+    even if a row was mistakenly marked ``training_allowed=1`` upstream.
+    """
+    if spec.identity.temperature_metric != "low":
+        return None
+
+    data_version = str(_row_value(snapshot, "data_version") or "")
+    evidence_present = any(
+        _as_nonempty_text(_row_value(snapshot, field)) is not None
+        for field in _LOW_CONTRACT_EVIDENCE_MARKER_FIELDS
+    )
+    if not evidence_present:
+        if data_version in _LOW_CONTRACT_EVIDENCE_REQUIRED_DATA_VERSIONS:
+            return "missing_low_contract_evidence_for_required_data_version"
+        return None
+
+    missing = [
+        field
+        for field in _LOW_CONTRACT_EVIDENCE_REQUIRED_FIELDS
+        if _as_nonempty_text(_row_value(snapshot, field)) is None
+    ]
+    if missing:
+        return "missing_low_contract_evidence:" + ",".join(missing)
+
+    if _row_value(snapshot, "observation_field") != spec.identity.observation_field:
+        return "low_observation_field_mismatch"
+
+    status = _as_nonempty_text(_row_value(snapshot, "forecast_window_attribution_status"))
+    if status != "FULLY_INSIDE_TARGET_LOCAL_DAY":
+        return f"low_window_not_target_full:{status or 'UNKNOWN'}"
+
+    try:
+        contributes = int(_row_value(snapshot, "contributes_to_target_extrema"))
+    except (TypeError, ValueError):
+        return "low_window_contributes_to_target_extrema_invalid"
+    if contributes != 1:
+        return "low_window_does_not_contribute_to_target_extrema"
+
+    block_reasons = _decode_reason_list(_row_value(snapshot, "forecast_window_block_reasons_json"))
+    if block_reasons:
+        return "low_window_block_reasons_present:" + ",".join(block_reasons)
+
+    return None
 
 
 def _fetch_eligible_snapshots_v2(
@@ -164,9 +279,21 @@ def _fetch_eligible_snapshots_v2(
     spec: "CalibrationMetricSpec | None" = None,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
+    data_version_filter: Optional[str] = None,
 ) -> list[sqlite3.Row]:
     """Pull eligible snapshots from ensemble_snapshots_v2 for the given spec."""
-    track = spec.identity.temperature_metric if spec is not None else "high"
+    if spec is None:
+        raise ValueError(
+            "_fetch_eligible_snapshots_v2 requires an explicit CalibrationMetricSpec; "
+            "implicit HIGH default would hide HIGH/LOW recovery routing mistakes."
+        )
+    if data_version_filter and not spec.allows_data_version(data_version_filter):
+        raise DataVersionQuarantinedError(
+            f"rebuild_calibration_pairs_v2: --data-version={data_version_filter!r} "
+            f"is not allowed for {spec.identity.temperature_metric} spec "
+            f"{spec.allowed_data_versions!r}."
+        )
+    track = spec.identity.temperature_metric
     params: list = [track, MIN_TRAINING_DATE]
     where = (
         "WHERE temperature_metric = ? "
@@ -185,9 +312,11 @@ def _fetch_eligible_snapshots_v2(
     if end_date:
         where += " AND target_date <= ?"
         params.append(end_date)
+    if data_version_filter:
+        where += " AND data_version = ?"
+        params.append(data_version_filter)
     sql = f"""
-        SELECT snapshot_id, city, target_date, issue_time, lead_hours,
-               available_at, members_json, data_version
+        SELECT *
         FROM ensemble_snapshots_v2
         {where}
         ORDER BY city, target_date, lead_hours
@@ -230,6 +359,7 @@ def _scoped_pair_predicate(
     city_filter: Optional[str] = None,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
+    data_version_filter: Optional[str] = None,
 ) -> tuple[str, list]:
     where = "bin_source = ? AND temperature_metric = ?"
     params: list = [CANONICAL_BIN_SOURCE_V2, spec.identity.temperature_metric]
@@ -242,6 +372,9 @@ def _scoped_pair_predicate(
     if end_date:
         where += " AND target_date <= ?"
         params.append(end_date)
+    if data_version_filter:
+        where += " AND data_version = ?"
+        params.append(data_version_filter)
     return where, params
 
 
@@ -252,12 +385,14 @@ def _collect_pre_delete_count(
     city_filter: Optional[str] = None,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
+    data_version_filter: Optional[str] = None,
 ) -> int:
     where, params = _scoped_pair_predicate(
         spec=spec,
         city_filter=city_filter,
         start_date=start_date,
         end_date=end_date,
+        data_version_filter=data_version_filter,
     )
     return conn.execute(
         f"SELECT COUNT(*) FROM calibration_pairs_v2 WHERE {where}",
@@ -272,12 +407,14 @@ def _delete_canonical_v2_slice(
     city_filter: Optional[str] = None,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
+    data_version_filter: Optional[str] = None,
 ) -> None:
     where, params = _scoped_pair_predicate(
         spec=spec,
         city_filter=city_filter,
         start_date=start_date,
         end_date=end_date,
+        data_version_filter=data_version_filter,
     )
     conn.execute(
         f"DELETE FROM calibration_pairs_v2 WHERE {where}",
@@ -311,16 +448,28 @@ def _process_snapshot_v2(
     source = ""  # ensemble_snapshots_v2 has no source column; INV-15 gates on data_version prefix
 
     # Per-spec cross-check: write-time defense against cross-metric contamination (R-AU).
-    if data_version != spec.allowed_data_version:
+    if not spec.allows_data_version(data_version):
         raise DataVersionQuarantinedError(
             f"rebuild_calibration_pairs_v2: snapshot data_version={data_version!r} "
-            f"does not match spec.allowed_data_version={spec.allowed_data_version!r}. "
+            f"does not match spec.allowed_data_versions={spec.allowed_data_versions!r}. "
             "Cross-metric contamination refused."
         )
 
     # Quarantine guard (belt-and-suspenders: eligibility query already filters
     # training_allowed=1, but data_version quarantine is a write-time contract)
     assert_data_version_allowed(data_version, context="rebuild_calibration_pairs_v2")
+
+    contract_evidence_rejection = _low_contract_evidence_rejection(snapshot, spec=spec)
+    if contract_evidence_rejection is not None:
+        stats.snapshots_contract_evidence_rejected += 1
+        stats.contract_evidence_rejection_reasons[contract_evidence_rejection] = (
+            stats.contract_evidence_rejection_reasons.get(contract_evidence_rejection, 0) + 1
+        )
+        print(
+            f"  CONTRACT-EVIDENCE-REJECT {city.name}/{target_date}: "
+            f"{contract_evidence_rejection}"
+        )
+        return
 
     obs = _fetch_verified_observation(conn, city.name, target_date, spec=spec)
     if obs is None:
@@ -438,6 +587,59 @@ def _process_snapshot_v2(
     stats.per_city[city.name] = stats.per_city.get(city.name, 0) + pairs_this_snapshot
 
 
+def _dry_run_evaluate_snapshot_v2(
+    conn: sqlite3.Connection,
+    snapshot: sqlite3.Row,
+    city: City,
+    *,
+    spec: CalibrationMetricSpec,
+    stats: RebuildStatsV2,
+) -> None:
+    """Evaluate rebuild gates without writing calibration_pairs_v2 rows."""
+    target_date = snapshot["target_date"]
+    data_version = snapshot["data_version"] or ""
+
+    if not spec.allows_data_version(data_version):
+        raise DataVersionQuarantinedError(
+            f"rebuild_calibration_pairs_v2 dry-run: snapshot data_version={data_version!r} "
+            f"does not match spec.allowed_data_versions={spec.allowed_data_versions!r}."
+        )
+    assert_data_version_allowed(data_version, context="rebuild_calibration_pairs_v2.dry_run")
+
+    contract_evidence_rejection = _low_contract_evidence_rejection(snapshot, spec=spec)
+    if contract_evidence_rejection is not None:
+        stats.snapshots_contract_evidence_rejected += 1
+        stats.contract_evidence_rejection_reasons[contract_evidence_rejection] = (
+            stats.contract_evidence_rejection_reasons.get(contract_evidence_rejection, 0) + 1
+        )
+        return
+
+    obs = _fetch_verified_observation(conn, city.name, target_date, spec=spec)
+    if obs is None:
+        stats.snapshots_no_observation += 1
+        return
+
+    member_maxes = np.asarray(json.loads(snapshot["members_json"]), dtype=float)
+    try:
+        validate_members_unit_plausible(member_maxes, city)
+        sem = SettlementSemantics.for_city(city)
+        settlement_value = sem.assert_settlement_value(
+            float(obs["observed_value"]),
+            context="rebuild_calibration_pairs_v2.dry_run",
+        )
+        validate_members_vs_observation(member_maxes, city, settlement_value)
+    except Exception:
+        stats.snapshots_unit_rejected += 1
+        return
+
+    grid = grid_for_city(city)
+    bins = grid.as_bins()
+    validate_bin_topology(bins)
+    stats.snapshots_processed += 1
+    stats.pairs_written += len(bins)
+    stats.per_city[city.name] = stats.per_city.get(city.name, 0) + len(bins)
+
+
 def rebuild_v2(
     conn: sqlite3.Connection,
     *,
@@ -447,6 +649,7 @@ def rebuild_v2(
     city_filter: Optional[str] = None,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
+    data_version_filter: Optional[str] = None,
     n_mc: Optional[int] = None,
     rng: Optional[np.random.Generator] = None,
 ) -> RebuildStatsV2:
@@ -469,6 +672,8 @@ def rebuild_v2(
         print(f"City filter:       {city_filter}")
     if start_date or end_date:
         print(f"Date filter:       {start_date or '-inf'}..{end_date or '+inf'}")
+    if data_version_filter:
+        print(f"Data version:      {data_version_filter}")
     print(f"Bin source tag:    {CANONICAL_BIN_SOURCE_V2!r}")
     print(f"MetricIdentity:    {spec.identity}")
     print(f"n_mc per snapshot: {n_mc or 'default (ensemble_n_mc())'}")
@@ -479,6 +684,7 @@ def rebuild_v2(
         spec=spec,
         start_date=start_date,
         end_date=end_date,
+        data_version_filter=data_version_filter,
     )
     stats.snapshots_scanned = len(snapshots)
 
@@ -503,13 +709,26 @@ def rebuild_v2(
         city_filter=city_filter,
         start_date=start_date,
         end_date=end_date,
+        data_version_filter=data_version_filter,
     )
     print(f"Existing canonical_v2 pairs (will delete): {stats.pre_delete_v2_pairs}")
 
     if dry_run:
+        for snap in eligible:
+            city = cities_by_name.get(snap["city"])
+            if city is None:
+                continue
+            _dry_run_evaluate_snapshot_v2(
+                conn,
+                snap,
+                city,
+                spec=spec,
+                stats=stats,
+            )
         print()
         print("[dry-run] no DB changes made.")
         _print_rebuild_estimate_v2(eligible)
+        _print_rebuild_gate_stats(stats)
         return stats
 
     if not force:
@@ -562,6 +781,7 @@ def rebuild_v2(
                 city_filter=city_name,
                 start_date=start_date,
                 end_date=end_date,
+                data_version_filter=data_version_filter,
             )
             for snap in city_snaps:
                 _process_snapshot_v2(
@@ -640,6 +860,7 @@ def rebuild_all_v2(
     city_filter: Optional[str] = None,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
+    data_version_filter: Optional[str] = None,
     temperature_metric: str = "all",
     n_mc: Optional[int] = None,
     rng: Optional[np.random.Generator] = None,
@@ -667,6 +888,7 @@ def rebuild_all_v2(
             city_filter=city_filter,
             start_date=start_date,
             end_date=end_date,
+            data_version_filter=data_version_filter,
             n_mc=n_mc,
             rng=rng,
         )
@@ -697,6 +919,20 @@ def _print_rebuild_estimate_v2(eligible: list[sqlite3.Row]) -> None:
     print(f"  Total pairs:      {approx}")
     if unknown_count:
         print(f"  unknown-city snapshots (would be skipped): {unknown_count}")
+
+
+def _print_rebuild_gate_stats(stats: RebuildStatsV2) -> None:
+    print()
+    print("Dry-run gate evaluation:")
+    print(f"  contract-evidence rejected: {stats.snapshots_contract_evidence_rejected}")
+    print(f"  no matching obs:            {stats.snapshots_no_observation}")
+    print(f"  unit/settlement rejected:   {stats.snapshots_unit_rejected}")
+    print(f"  snapshots passing gates:    {stats.snapshots_processed}")
+    print(f"  estimated written pairs:    {stats.pairs_written}")
+    if stats.contract_evidence_rejection_reasons:
+        print("  contract-evidence reasons:")
+        for reason, count in sorted(stats.contract_evidence_rejection_reasons.items()):
+            print(f"    {count:6d}  {reason}")
 
 
 def main() -> int:
@@ -739,6 +975,12 @@ def main() -> int:
         help="Path to the world DB (default: production zeus-world.db).",
     )
     parser.add_argument(
+        "--data-version",
+        dest="data_version",
+        default=None,
+        help="Limit rebuild/delete scope to one ensemble snapshot data_version.",
+    )
+    parser.add_argument(
         "--n-mc", dest="n_mc", type=int, default=None,
         help="Monte Carlo iterations per snapshot (default: ensemble_n_mc() = 10,000).",
     )
@@ -769,6 +1011,7 @@ def main() -> int:
             city_filter=args.city,
             start_date=args.start_date,
             end_date=args.end_date,
+            data_version_filter=args.data_version,
             temperature_metric=args.temperature_metric,
             n_mc=args.n_mc,
         )

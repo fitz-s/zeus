@@ -72,11 +72,23 @@ from src.types.metric_identity import HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN
 ECMWF_OPENDATA_HIGH_DATA_VERSION = "ecmwf_opendata_mx2t6_local_calendar_day_max_v1"
 ECMWF_OPENDATA_LOW_DATA_VERSION = "ecmwf_opendata_mn2t6_local_calendar_day_min_v1"
 
+# LOW recovery rows carry persisted contract-window evidence proving that the
+# mn2t6 construction serves the same local-day settlement object.  They remain
+# LOW_LOCALDAY_MIN metric-family rows, not a third metric axis.
+TIGGE_LOW_CONTRACT_WINDOW_DATA_VERSION = (
+    "tigge_mn2t6_local_calendar_day_min_contract_window_v2"
+)
+ECMWF_OPENDATA_LOW_CONTRACT_WINDOW_DATA_VERSION = (
+    "ecmwf_opendata_mn2t6_local_calendar_day_min_contract_window_v2"
+)
+
 CANONICAL_ENSEMBLE_DATA_VERSIONS: frozenset[str] = frozenset({
     HIGH_LOCALDAY_MAX.data_version,
     LOW_LOCALDAY_MIN.data_version,
     ECMWF_OPENDATA_HIGH_DATA_VERSION,
     ECMWF_OPENDATA_LOW_DATA_VERSION,
+    TIGGE_LOW_CONTRACT_WINDOW_DATA_VERSION,
+    ECMWF_OPENDATA_LOW_CONTRACT_WINDOW_DATA_VERSION,
 })
 
 # M3 (2026-04-24): deprecation alias. The historical name

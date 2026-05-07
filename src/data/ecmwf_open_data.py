@@ -47,6 +47,8 @@ from src.config import PROJECT_ROOT, runtime_cities_by_name
 from src.contracts.ensemble_snapshot_provenance import (
     ECMWF_OPENDATA_HIGH_DATA_VERSION,
     ECMWF_OPENDATA_LOW_DATA_VERSION,
+    ECMWF_OPENDATA_LOW_CONTRACT_WINDOW_DATA_VERSION,
+    TIGGE_LOW_CONTRACT_WINDOW_DATA_VERSION,
 )
 from src.data.forecast_target_contract import (
     build_forecast_target_scope,
@@ -67,10 +69,11 @@ DOWNLOAD_SCRIPT = FIFTY_ONE_ROOT / "scripts" / "download_ecmwf_open_ens.py"
 EXTRACT_SCRIPT = FIFTY_ONE_ROOT / "scripts" / "extract_open_ens_localday.py"
 INGEST_SCRIPT_DIR = PROJECT_ROOT / "scripts"
 
-# Open Data ships hourly steps; we want every 6h boundary up to 240h
-# (inclusive) to cover lead 0..10 days. Steps must be multiples of 6 since
-# mx2t6/mn2t6 are 6-hour aggregations.
-STEP_HOURS = list(range(6, 246, 6))
+# Open Data ships hourly steps; we want every 6h boundary up to 276h
+# (inclusive) to cover the configured D+10 city-local calendar-day contract
+# horizon across UTC-positive and UTC-negative cities. Steps must be multiples
+# of 6 since mx2t6/mn2t6 are 6-hour aggregations.
+STEP_HOURS = list(range(6, 282, 6))
 
 # Track config — local to this module so the daemon's ingest knob is one
 # clean dict rather than two parallel param lists.
@@ -669,14 +672,18 @@ def collect_open_ens_cycle(
 
 
 def data_version_priority_for_metric(temperature_metric: str) -> tuple[str, ...]:
-    """Return read-priority tuple for a given metric: opendata first, TIGGE archive second.
+    """Return read-priority tuple for a given metric.
+
+    HIGH keeps the original OpenData → TIGGE ordering.  LOW prefers rows with
+    contract-window evidence first, then falls back to legacy OpenData/TIGGE
+    rows.  All entries remain in the same HIGH/LOW metric family.
 
     Use this in any reader that wants "freshest source first, fall back to
     archive". Equivalent SQL pattern::
 
         SELECT ... FROM ensemble_snapshots_v2
          WHERE temperature_metric = ?
-           AND data_version IN (?, ?)
+           AND data_version IN (<one placeholder per priority entry>)
          ORDER BY CASE data_version WHEN ? THEN 0 ELSE 1 END, available_at DESC
 
     where the bound parameters are the priority tuple followed by the
@@ -685,7 +692,12 @@ def data_version_priority_for_metric(temperature_metric: str) -> tuple[str, ...]
     if temperature_metric == "high":
         return (ECMWF_OPENDATA_HIGH_DATA_VERSION, "tigge_mx2t6_local_calendar_day_max_v1")
     if temperature_metric == "low":
-        return (ECMWF_OPENDATA_LOW_DATA_VERSION, "tigge_mn2t6_local_calendar_day_min_v1")
+        return (
+            ECMWF_OPENDATA_LOW_CONTRACT_WINDOW_DATA_VERSION,
+            ECMWF_OPENDATA_LOW_DATA_VERSION,
+            TIGGE_LOW_CONTRACT_WINDOW_DATA_VERSION,
+            "tigge_mn2t6_local_calendar_day_min_v1",
+        )
     raise ValueError(f"Unknown temperature_metric {temperature_metric!r}; expected 'high' or 'low'.")
 
 
