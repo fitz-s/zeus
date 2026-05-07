@@ -24,6 +24,10 @@ jobs:
     name: pr-loc-budget (advisory)
     runs-on: ubuntu-latest
     timeout-minutes: 3
+    env:
+      GATE_OWNER: "live-launch infra (Fitz)"
+      GATE_RATIONALE: "Server-side mirror of .claude/hooks/dispatch.py::pr_create_loc_accumulation. Reminds about paid auto-reviewer cost (Copilot + Codex per PR-open / push) when LOC budget unmet. Catches Codex Cloud / Copilot / direct-push PRs the local hook misses."
+      GATE_REVIEW_CONDITION: "Advisory only — never blocking. Review if comment-noise complaints arise or budget thresholds (80 LOC / 2 commits) need tuning. Sunset when a unified pr-policy gate consolidates this plus other PR-shape advisories."
     steps:
       - uses: actions/checkout@v4
         with:
