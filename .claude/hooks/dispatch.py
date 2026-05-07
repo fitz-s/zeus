@@ -313,7 +313,7 @@ def _run_advisory_check_pr_open_monitor_arm(
     elif isinstance(tool_response, str):
         output = tool_response
 
-    pr_num: str = "?"
+    pr_num: str | None = None
     m = re.search(r"#(\d+)", output) or re.search(r"pulls/(\d+)", output)
     if m:
         pr_num = m.group(1)
@@ -321,8 +321,20 @@ def _run_advisory_check_pr_open_monitor_arm(
     from datetime import timedelta
     expiry = datetime.now(timezone.utc) + timedelta(minutes=60)
     expiry_iso = expiry.strftime("%Y-%m-%dT%H:%M:%SZ")
-    monitor_sentinel = f"MONITOR_ARM_REQUIRED:{pr_num}:{expiry_iso}"
 
+    if pr_num is None:
+        # PR number couldn't be parsed from gh output (rare: gh stdout was empty,
+        # truncated, or a non-success exit). Emit a generic advisory rather than
+        # a Monitor command that would resolve to `gh pr checks ?` and fail.
+        return (
+            f"MONITOR_ARM_REQUIRED:unknown:{expiry_iso}\n\n"
+            f"PR opened, but the PR number could not be parsed from the gh output.\n"
+            f"Paid auto-reviewers (Copilot, Codex) still fire within 5-8 min.\n"
+            f"Find the PR number with `gh pr list --head $(git branch --show-current) --json number`\n"
+            f"and arm a Monitor on `gh pr checks <number> --json name,bucket` manually."
+        )
+
+    monitor_sentinel = f"MONITOR_ARM_REQUIRED:{pr_num}:{expiry_iso}"
     return (
         f"{monitor_sentinel}\n\n"
         f"PR opened. Paid auto-reviewers (Copilot, Codex) fire within 5-8 min.\n"

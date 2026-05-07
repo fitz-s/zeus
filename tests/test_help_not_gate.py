@@ -395,14 +395,18 @@ def test_hook_does_not_fire_on_out_of_scope_payload(hook_id: str) -> None:
 def test_hook_coverage_is_complete() -> None:
     """
     Assert that test_hook_does_not_fire_on_out_of_scope_payload covers ALL
-    hook IDs in registry.yaml. Phase 2 must cover 12 hooks total.
+    hook IDs in registry.yaml. Hook v2 (PR #74) retired pre_edit_hooks_protected
+    along with the rest of the BLOCKING tier; coverage floor adjusted to current
+    advisory-only registry size.
     """
-    # 11 from Phase 1 + 1 new (pre_edit_hooks_protected)
-    assert len(_ALL_HOOK_IDS) >= 12, (
-        f"Expected at least 12 hooks in registry.yaml (Phase 2 deliverable); "
+    # Floor: 10 advisory hooks remain after BLOCKING tier retirement
+    # (was 12 in Phase 2; pre_edit_hooks_protected dropped in PR #74).
+    assert len(_ALL_HOOK_IDS) >= 10, (
+        f"Expected at least 10 hooks in registry.yaml; "
         f"found {len(_ALL_HOOK_IDS)}: {_ALL_HOOK_IDS}"
     )
-    # Verify the new Phase 2 hook is present
-    assert "pre_edit_hooks_protected" in _ALL_HOOK_IDS, (
-        "pre_edit_hooks_protected must be in registry.yaml (Phase 2 ATTACK 2 deliverable)"
+    # pre_edit_hooks_protected explicitly retired by hook v2 — see
+    # docs/operations/task_2026-05-07_hook_redesign_v2/PLAN.md.
+    assert "pre_edit_hooks_protected" not in _ALL_HOOK_IDS, (
+        "pre_edit_hooks_protected was retired by PR #74; should not be in registry"
     )
