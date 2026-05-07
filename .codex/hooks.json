@@ -1,0 +1,33 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {"type": "command", "command": "node .codex/hooks/zeus-router.mjs invariant_test"},
+          {"type": "command", "command": "node .codex/hooks/zeus-router.mjs secrets_scan"},
+          {"type": "command", "command": "node .codex/hooks/zeus-router.mjs cotenant_staging_guard"},
+          {"type": "command", "command": "node .codex/hooks/zeus-router.mjs pre_checkout_uncommitted_overlap"},
+          {"type": "command", "command": "node .codex/hooks/zeus-router.mjs pr_create_loc_accumulation"},
+          {"type": "command", "command": "node .codex/hooks/zeus-router.mjs pre_merge_contamination"}
+        ]
+      },
+      {
+        "matcher": "apply_patch",
+        "hooks": [
+          {"type": "command", "command": "node .codex/hooks/zeus-router.mjs pre_edit_architecture"},
+          {"type": "command", "command": "node .codex/hooks/zeus-router.mjs pre_write_capability_gate"}
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {"type": "command", "command": "node .codex/hooks/zeus-router.mjs post_merge_cleanup"},
+          {"type": "command", "command": "node .codex/hooks/zeus-router.mjs pr_open_monitor_arm"}
+        ]
+      }
+    ]
+  }
+}
