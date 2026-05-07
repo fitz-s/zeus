@@ -236,6 +236,13 @@ def apply_v2_schema(conn: sqlite3.Connection) -> None:
             "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN source_cycle_time TEXT",
             "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN source_release_time TEXT",
             "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN source_available_at TEXT",
+            # 2026-05-07 (TIGGE spec v3 §3 Phase 0 #5 / critic v2 A1 BLOCKER):
+            # ingest_backend distinguishes ECDS-routed live writes ('ecds') from
+            # legacy webapi-routed writes ('webapi'). Pre-cutover historical
+            # rows default to 'unknown'. Mirrors the standalone migration script
+            # scripts/migrate_ensemble_snapshots_v2_add_ingest_backend.py so
+            # fresh DBs converge with migrated DBs.
+            "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN ingest_backend TEXT NOT NULL DEFAULT 'unknown'",
         ]:
             try:
                 conn.execute(alter_sql)
