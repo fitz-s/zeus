@@ -355,13 +355,14 @@ def test_wu_settlement_sweep_requires_market_events_for_strict_subjects(tmp_path
     db_path = tmp_path / "wu-preflight.db"
     conn = get_connection(db_path)
     init_schema(conn)
+    # D1: wu_settlement_sweep now reads settlements_v2; fixture updated accordingly
     conn.execute(
         """
-        INSERT INTO settlements (city, target_date, winning_bin, settlement_value, temperature_metric)
-        VALUES ('Paris', '2026-04-03', '12°C', 12.0, 'high')
+        INSERT INTO settlements_v2
+            (city, target_date, temperature_metric, winning_bin, settlement_value, authority)
+        VALUES ('Paris', '2026-04-03', 'high', '12°C', 12.0, 'VERIFIED')
         """
     )
-    _mark_settlements_verified(conn)
     conn.commit()
     conn.close()
 
@@ -382,13 +383,14 @@ def test_wu_settlement_sweep_rejects_wrong_market_event_label(tmp_path, monkeypa
     db_path = tmp_path / "wu-wrong-label.db"
     conn = get_connection(db_path)
     init_schema(conn)
+    # D1: wu_settlement_sweep now reads settlements_v2; fixture updated accordingly
     conn.execute(
         """
-        INSERT INTO settlements (city, target_date, winning_bin, settlement_value, temperature_metric)
-        VALUES ('Paris', '2026-04-03', '12°C', 12.0, 'high')
+        INSERT INTO settlements_v2
+            (city, target_date, temperature_metric, winning_bin, settlement_value, authority)
+        VALUES ('Paris', '2026-04-03', 'high', '12°C', 12.0, 'VERIFIED')
         """
     )
-    _mark_settlements_verified(conn)
     _seed_market_events(conn, "Paris", "2026-04-03", ("99°C",))
     conn.commit()
     conn.close()
@@ -1276,3 +1278,67 @@ def test_trade_history_audit_rejects_snapshot_mismatched_outcome_fact(tmp_path, 
     assert evidence["outcome_fact_decision_snapshot_id"] == "snap-stale"
     assert evidence["outcome_fact_decision_snapshot_matches_position"] is False
     assert evidence["outcome_fact_consumed_as_actual_trade_evidence"] is False
+
+
+# ---------------------------------------------------------------------------
+# T6 — wu_settlement_sweep v2 regression antibody (D1 backward-compat gate)
+# Ensures run_wu_settlement_sweep reads calibration_pairs_v2 + settlements_v2.
+# If the SQL is accidentally reverted to bare calibration_pairs / settlements,
+# this test returns n_settlements=0 (v1 tables are empty on main) and fails.
+# ---------------------------------------------------------------------------
+def test_wu_settlement_sweep_v2_corpus_produces_settlements(tmp_path, monkeypatch):
+    """T6: wu_settlement_sweep reads settlements_v2 + calibration_pairs_v2 (D1 antibody).
+
+    Fixture inserts one VERIFIED settlement into settlements_v2 and a matching
+    calibration_pairs_v2 row. Asserts n_settlements > 0 and mode == 'wu_settlement_sweep'.
+    A revert to bare settlements/calibration_pairs tables would yield n_settlements=0
+    (those tables are empty) and the assertion would catch the regression.
+    """
+    db_path = tmp_path / "wu-v2-antibody.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+
+    # Seed settlements_v2 — one VERIFIED HIGH row for Paris
+    conn.execute(
+        """
+        INSERT INTO settlements_v2
+            (city, target_date, temperature_metric, winning_bin, settlement_value, authority)
+        VALUES ('Paris', '2026-04-10', 'high', '12°C', 12.0, 'VERIFIED')
+        """
+    )
+
+    # Seed calibration_pairs_v2 — matching forecast row for the same city/date
+    conn.execute(
+        """
+        INSERT INTO calibration_pairs_v2
+            (city, target_date, temperature_metric, observation_field,
+             range_label, p_raw, outcome, lead_days, season, cluster,
+             forecast_available_at, data_version, bias_corrected, authority)
+        VALUES ('Paris', '2026-04-10', 'high', 'high_temp',
+                '12°C', 0.85, 1, 1.0, 'MAM', 'Paris',
+                '2026-04-09T08:00:00Z', 'v2', 0, 'VERIFIED')
+        """
+    )
+
+    # Seed market_events so the preflight check passes
+    _seed_market_events(conn, "Paris", "2026-04-10", ("12°C",))
+    conn.commit()
+    conn.close()
+
+    import src.engine.replay as replay_module
+    import src.state.db as db_module
+
+    monkeypatch.setattr(
+        replay_module,
+        "get_trade_connection_with_world",
+        lambda: db_module.get_connection(db_path),
+    )
+
+    summary = run_replay("2026-04-10", "2026-04-10", mode="wu_settlement_sweep")
+
+    assert summary.mode == "wu_settlement_sweep", f"unexpected mode: {summary.mode!r}"
+    assert summary.n_settlements > 0, (
+        "n_settlements=0: wu_settlement_sweep returned no rows — "
+        "likely SQL still reads from bare settlements/calibration_pairs (v1 empty tables). "
+        "Verify D1 port to settlements_v2 + calibration_pairs_v2."
+    )

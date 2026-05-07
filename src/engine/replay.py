@@ -2013,7 +2013,12 @@ def run_wu_settlement_sweep(
     *,
     allow_snapshot_only_reference: bool = False,
 ) -> ReplaySummary:
-    """Run a WU settlement-value sweep into the derived backtest DB."""
+    """Run a WU settlement-value sweep into the derived backtest DB.
+
+    Reads from settlements_v2 (VERIFIED rows, HIGH+LOW) and calibration_pairs_v2.
+    settlements_v2 has 3,290 VERIFIED rows (HIGH+LOW combined); the v1 settlements
+    table has the deprecated corpus and is not read here.
+    """
     run_id = str(uuid.uuid4())[:12]
     conn = get_trade_connection_with_world()
     ctx = ReplayContext(
@@ -2022,13 +2027,12 @@ def run_wu_settlement_sweep(
     )
     rows = conn.execute(
         f"""
-        SELECT city, target_date, settlement_value, winning_bin
-        FROM {ctx._sp}settlements
+        SELECT city, target_date, settlement_value, winning_bin, temperature_metric
+        FROM {ctx._sp}settlements_v2
         WHERE target_date >= ? AND target_date <= ?
-          AND temperature_metric = 'high'
           AND authority = 'VERIFIED'
           AND settlement_value IS NOT NULL
-        ORDER BY target_date, city
+        ORDER BY target_date, city, temperature_metric
         """,
         (start_date, end_date),
     ).fetchall()
@@ -2081,7 +2085,7 @@ def run_wu_settlement_sweep(
             SELECT range_label, p_raw, outcome AS stored_outcome, lead_days,
                    season, cluster, forecast_available_at, decision_group_id,
                    bias_corrected
-            FROM {ctx._sp}calibration_pairs
+            FROM {ctx._sp}calibration_pairs_v2
             WHERE city = ?
               AND target_date = ?
             ORDER BY datetime(forecast_available_at), lead_days, range_label
@@ -2213,7 +2217,7 @@ def run_wu_settlement_sweep(
                 derived_wu_outcome=outcome,
                 truth_source="wu_settlement_value",
                 divergence_status="not_applicable",
-                decision_reference_source="calibration_pairs.forecast_available_at",
+                decision_reference_source="calibration_pairs_v2.forecast_available_at",
                 forecast_reference_id=forecast_reference_id,
                 evidence={
                     "p_raw": round(p_raw, 12),
