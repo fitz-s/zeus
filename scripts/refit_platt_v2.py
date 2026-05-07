@@ -1010,16 +1010,24 @@ def main() -> int:
             print(f"ERROR: {type(e).__name__}: {e}", file=sys.stderr)
             return 1
 
-    if args.db_path:
+    if args.dry_run:
+        # Dry-run: read-only URI connection — no WAL pragma, no schema mutation.
+        db_path_str = args.db_path if args.db_path else str(SHARED_DB)
+        conn = sqlite3.connect(f"file:{db_path_str}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout = 600000")
+    elif args.db_path:
         conn = sqlite3.connect(args.db_path)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA busy_timeout = 600000")
         conn.execute("PRAGMA journal_mode=WAL")
+        init_schema(conn)
+        apply_v2_schema(conn)
     else:
         conn = get_world_connection()
         conn.execute("PRAGMA busy_timeout = 600000")
-    init_schema(conn)
-    apply_v2_schema(conn)
+        init_schema(conn)
+        apply_v2_schema(conn)
 
     try:
         per_metric = refit_all_v2(
