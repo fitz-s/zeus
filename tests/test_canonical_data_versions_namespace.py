@@ -32,7 +32,8 @@ def test_ensemble_set_contains_metric_tracks_and_source_variants():
     assert mod.ECMWF_OPENDATA_LOW_DATA_VERSION in ensemble
     assert mod.TIGGE_LOW_CONTRACT_WINDOW_DATA_VERSION in ensemble
     assert mod.ECMWF_OPENDATA_LOW_CONTRACT_WINDOW_DATA_VERSION in ensemble
-    assert len(ensemble) == 6
+    # 2026-05-07: +1 legacy entry for mn2t6 contract-window historical rows
+    assert len(ensemble) == 7
 
 
 def test_deprecation_alias_is_identity():

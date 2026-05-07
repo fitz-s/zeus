@@ -89,6 +89,7 @@ class BackfillStats:
     files_scanned: int = 0
     payload_rejected: int = 0
     unsupported_data_version: int = 0
+    cycle_filtered: int = 0
     no_matching_snapshot: int = 0
     already_recovered: int = 0
     would_insert: int = 0
@@ -97,6 +98,7 @@ class BackfillStats:
     blocked_candidates: int = 0
     by_attribution_status: dict[str, int] = field(default_factory=dict)
     by_block_reason: dict[str, int] = field(default_factory=dict)
+    by_cycle: dict[str, int] = field(default_factory=dict)
 
     def add_status(self, status: str | None) -> None:
         key = status or "UNKNOWN"
@@ -106,11 +108,16 @@ class BackfillStats:
         for reason in reasons:
             self.by_block_reason[reason] = self.by_block_reason.get(reason, 0) + 1
 
+    def add_cycle(self, cycle: str | None) -> None:
+        key = cycle or "UNKNOWN"
+        self.by_cycle[key] = self.by_cycle.get(key, 0) + 1
+
     def as_dict(self) -> dict[str, Any]:
         return {
             "files_scanned": self.files_scanned,
             "payload_rejected": self.payload_rejected,
             "unsupported_data_version": self.unsupported_data_version,
+            "cycle_filtered": self.cycle_filtered,
             "no_matching_snapshot": self.no_matching_snapshot,
             "already_recovered": self.already_recovered,
             "would_insert": self.would_insert,
@@ -119,6 +126,7 @@ class BackfillStats:
             "blocked_candidates": self.blocked_candidates,
             "by_attribution_status": dict(sorted(self.by_attribution_status.items())),
             "by_block_reason": dict(sorted(self.by_block_reason.items())),
+            "by_cycle": dict(sorted(self.by_cycle.items())),
         }
 
 
@@ -158,6 +166,7 @@ def _iter_json_paths(
 def _parse_payload(path: Path) -> dict[str, Any]:
     raw = json.loads(path.read_text(encoding="utf-8"))
     snapshot = TiggeSnapshotPayload.from_json_dict(raw)
+    snapshot.validate()  # fail-closed: raises ProvenanceViolation on contract violations
     return snapshot.to_json_dict()
 
 
@@ -167,6 +176,15 @@ def _date_in_scope(value: str, *, start_date: str | None, end_date: str | None) 
     if end_date and value > end_date:
         return False
     return True
+
+
+def _payload_cycle(payload: dict[str, Any]) -> str | None:
+    issue_time = str(payload.get("issue_time_utc") or "")
+    if len(issue_time) >= 13:
+        cycle = issue_time[11:13]
+        if cycle.isdigit():
+            return cycle
+    return None
 
 
 def _row_exists(
@@ -338,7 +356,9 @@ def _build_recovery_row(
         "causality_status": causality_status,
         "boundary_ambiguous": 1 if boundary_ambiguous else 0,
         "ambiguous_member_count": int(
-            (payload.get("boundary_policy") or {}).get("ambiguous_member_count", 0)
+            payload["boundary_policy"].get("ambiguous_member_count", 0)
+            if isinstance(payload.get("boundary_policy"), dict)
+            else 0
         ),
         "provenance_json": _merge_provenance(
             source_row,
@@ -442,6 +462,7 @@ def run_backfill(
     cities: set[str] | None = None,
     start_date: str | None = None,
     end_date: str | None = None,
+    cycle: str | None = None,
     limit: int | None = None,
 ) -> dict[str, BackfillStats]:
     if not dry_run and not force:
@@ -461,6 +482,11 @@ def run_backfill(
                 continue
             target_date = str(payload.get("target_date_local") or "")
             if not _date_in_scope(target_date, start_date=start_date, end_date=end_date):
+                continue
+            payload_cycle = _payload_cycle(payload)
+            stats.add_cycle(payload_cycle)
+            if cycle is not None and payload_cycle != cycle:
+                stats.cycle_filtered += 1
                 continue
             process_payload(
                 conn,
@@ -493,6 +519,7 @@ def main() -> int:
     parser.add_argument("--city", action="append", default=None)
     parser.add_argument("--start-date", default=None)
     parser.add_argument("--end-date", default=None)
+    parser.add_argument("--cycle", default=None, help="Limit to one issue UTC cycle, e.g. 00 or 12.")
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--apply", action="store_true", default=False)
     parser.add_argument("--force", action="store_true", default=False)
@@ -517,6 +544,7 @@ def main() -> int:
             cities=set(args.city) if args.city else None,
             start_date=args.start_date,
             end_date=args.end_date,
+            cycle=args.cycle,
             limit=args.limit,
         )
         if not dry_run:
