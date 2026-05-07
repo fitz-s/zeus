@@ -22,10 +22,11 @@ typed_intent_enum:
     description: >
       Plan-only operation. Reads files; writes ONLY to docs/** or evidence/**.
       No source/test/script edits. Substantive plans MUST be packetized at
-      docs/operations/task_<YYYY-MM-DD>_<topic>/PLAN.md. `.omc/plans/` and
-      `.omc/research/` are scratch_runtime_artifact (per artifact_lifecycle.yaml)
-      and are NOT plan/research targets — admission rejection is the structural
-      mechanism that prevents leak of substantive design into runtime scratch.
+      docs/operations/task_<YYYY-MM-DD>_<topic>/PLAN.md. `.omc/plans/`,
+      `.omc/research/`, and `.omx/plans/` are scratch_runtime_artifact (per
+      artifact_lifecycle.yaml) and are NOT plan/research targets — admission
+      rejection is the structural mechanism that prevents leak of substantive
+      design into runtime scratch.
       Admitted directly without profile match (admission shortcut per K3).
     admits_path_globs:
       - docs/**

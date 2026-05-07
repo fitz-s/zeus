@@ -1528,7 +1528,7 @@ def _apply_typed_intent_shortcut(
 
     if normalised in _WHITELIST_DRIVEN_INTENTS:
         # F1 round-3: whitelist-driven admission — only admits_path_globs pass.
-        # PLAN.md §6:693 defines canonical scopes for plan_only and audit.
+        # Canonical scopes: architecture/admission_severity.yaml::typed_intent_enum.
         intent_admits_globs = _load_typed_intent_admits_globs().get(normalised, ())
         if not intent_admits_globs:
             # No whitelist defined: block everything (fail-closed).

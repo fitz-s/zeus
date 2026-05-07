@@ -518,7 +518,7 @@ runtime_artifact_inventory:
   rule: >
     Substantive plans MUST live at docs/operations/task_<YYYY-MM-DD>_<topic>/PLAN.md
     (admitted via create_new typed_intent). Runtime tool scratch directories
-    (.omc/plans/, .omx/plans/) are scratch_runtime_artifact
+    (.omc/plans/, .omc/research/, .omx/plans/) are scratch_runtime_artifact
     (architecture/artifact_lifecycle.yaml) and are explicitly blocked by both
     plan_only and audit typed_intents (architecture/admission_severity.yaml).
     Files matching runtime_plan_globs are leak signals — when present, this
