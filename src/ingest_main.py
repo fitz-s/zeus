@@ -754,9 +754,10 @@ def _uma_resolution_listener_tick():
     import sqlite3
 
     # Load settings for RPC config.
+    # Settings uses __getitem__ not .get(); use _data.get for optional keys.
     try:
         from src.config import settings
-        uma_cfg = settings.get("uma", {})
+        uma_cfg = settings._data.get("uma", {})
         polygon_rpc_url = uma_cfg.get("polygon_rpc_url", "")
         oo_contract_address = uma_cfg.get("oo_contract_address", "")
     except Exception as exc:

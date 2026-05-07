@@ -270,12 +270,13 @@ def main() -> None:
         return
 
     # Resolve RPC config from settings.json if not passed on CLI.
+    # Settings uses __getitem__ not .get(); use _data.get for optional keys.
     rpc_url = args.rpc_url
     contract_address = args.contract_address
     if not rpc_url or not contract_address:
         try:
             from src.config import settings
-            uma_cfg = settings.get("uma", {})
+            uma_cfg = settings._data.get("uma", {})
             rpc_url = rpc_url or uma_cfg.get("polygon_rpc_url", "")
             contract_address = contract_address or uma_cfg.get("oo_contract_address", "")
         except Exception as exc:
