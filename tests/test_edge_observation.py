@@ -74,6 +74,13 @@ def _insert_settled(
         "exit_price": 1.0,
         "pnl": pnl,
         "exit_reason": "SETTLEMENT",
+        # truth-readiness fields required by _settlement_truth_ready (db.py)
+        # so that metric_ready=True and compute_realized_edge_per_strategy
+        # does not skip this row.
+        "settlement_authority": "VERIFIED",
+        "settlement_truth_source": "world.settlements",
+        "settlement_temperature_metric": "high",
+        "settlement_value": 39.0,
     }
     if is_degraded_payload:
         # Make the row degraded by removing required field outcome.

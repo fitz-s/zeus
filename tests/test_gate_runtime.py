@@ -130,3 +130,53 @@ class TestGateRuntimeAllClear:
         assert record["gate_id"] == "gate5_runtime"
         assert record["cap_id"] == "live_venue_submit"
         assert record["decision"] == "allow"
+
+
+class TestGateRuntimeSettlementFreezeBlocksLiveEntry:
+    """Test: ZEUS_SETTLEMENT_FREEZE=1 blocks live_venue_submit (execute_intent / execute_final_intent paths).
+
+    Per capabilities.yaml live_venue_submit.blocked_when: [settlement_window_freeze_active]
+    and ULTIMATE_DESIGN §5 Gate 5 (line 181).  PR #71 Codex P1 fix.
+    """
+
+    def test_settlement_freeze_blocks_live_venue_submit(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+    ) -> None:
+        """ZEUS_SETTLEMENT_FREEZE=1 must raise RuntimeError on live_venue_submit."""
+        monkeypatch.setenv("ZEUS_SETTLEMENT_FREEZE", "1")
+        monkeypatch.delenv("ZEUS_KILL_SWITCH", raising=False)
+        monkeypatch.delenv("ZEUS_RISK_HALT", raising=False)
+
+        from src.architecture import gate_runtime
+        monkeypatch.setattr(gate_runtime, "_RITUAL_SIGNAL_DIR", tmp_path / "ritual_signal")
+
+        with pytest.raises(RuntimeError, match="settlement_window_freeze_active"):
+            gate_runtime.check("live_venue_submit")
+
+    def test_settlement_freeze_true_blocks_live_venue_submit(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+    ) -> None:
+        """ZEUS_SETTLEMENT_FREEZE=true also blocks (all truthy variants)."""
+        monkeypatch.setenv("ZEUS_SETTLEMENT_FREEZE", "true")
+        monkeypatch.delenv("ZEUS_KILL_SWITCH", raising=False)
+        monkeypatch.delenv("ZEUS_RISK_HALT", raising=False)
+
+        from src.architecture import gate_runtime
+        monkeypatch.setattr(gate_runtime, "_RITUAL_SIGNAL_DIR", tmp_path / "ritual_signal")
+
+        with pytest.raises(RuntimeError, match="settlement_window_freeze_active"):
+            gate_runtime.check("live_venue_submit")
+
+    def test_settlement_freeze_off_allows_live_venue_submit(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+    ) -> None:
+        """ZEUS_SETTLEMENT_FREEZE unset does not block live_venue_submit."""
+        monkeypatch.delenv("ZEUS_SETTLEMENT_FREEZE", raising=False)
+        monkeypatch.delenv("ZEUS_KILL_SWITCH", raising=False)
+        monkeypatch.delenv("ZEUS_RISK_HALT", raising=False)
+
+        from src.architecture import gate_runtime
+        monkeypatch.setattr(gate_runtime, "_RITUAL_SIGNAL_DIR", tmp_path / "ritual_signal")
+
+        # Should not raise
+        gate_runtime.check("live_venue_submit")

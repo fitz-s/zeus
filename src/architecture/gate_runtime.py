@@ -95,7 +95,7 @@ _CONDITION_EVALUATORS: dict[str, object] = {
 # Keeping this local (rather than parsing YAML at runtime) avoids I/O on every
 # gate check and makes the gate dependency-free at import time.
 _CAP_BLOCKED_WHEN: dict[str, list[str]] = {
-    "live_venue_submit": ["kill_switch_active", "risk_level_halt"],
+    "live_venue_submit": ["kill_switch_active", "settlement_window_freeze_active", "risk_level_halt"],
     "settlement_write": ["settlement_window_freeze_active"],
     "on_chain_mutation": ["kill_switch_active"],
     "control_write": [],

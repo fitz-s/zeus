@@ -33,6 +33,7 @@ from src.state.portfolio import (
     ENTRY_ECONOMICS_SUBMITTED_LIMIT,
     FILL_AUTHORITY_NONE,
     FILL_AUTHORITY_VENUE_CONFIRMED_FULL,
+    INACTIVE_RUNTIME_STATES,
 )
 
 logger = logging.getLogger(__name__)
@@ -977,9 +978,9 @@ def _orange_favorable_exit_decision(pos, exit_context, exit_decision):
 
 def entry_bankroll_for_cycle(portfolio, clob, *, deps):
     # On-chain wallet balance is the SOLE bankroll truth source for live entry
-    # sizing. Removed 2026-05-04: the prior `min(balance, settings.capital_base_usd)`
-    # truncation hard-clipped the real wallet at the $150 fiction even when
-    # the venue returned a higher value, producing the structural failure
+    # sizing. Removed 2026-05-04: the prior config-literal cap truncation
+    # hard-clipped the real wallet even when the venue returned a higher value,
+    # producing the structural failure
     # documented in docs/operations/task_2026-05-01_bankroll_truth_chain/.
     # Bankroll fallback semantics now live entirely in
     # src.runtime.bankroll_provider (5-min stale-cache window); when the
@@ -1030,15 +1031,9 @@ def materialize_position(candidate, decision, result, portfolio, city, mode, *, 
             f"state={state!r} env={env!r}; entry materialization requires an authoritative bankroll snapshot"
         )
     now = deps._utcnow()
-    fill_price = float(result.fill_price or 0.0)
+    reported_fill_price = float(result.fill_price or 0.0)
     submitted_limit_price = float(result.submitted_price or 0.0)
     fallback_edge_price = float(decision.edge.entry_price or 0.0)
-    entry_price = fill_price or submitted_limit_price or fallback_edge_price
-    shares = float(result.shares or (decision.size_usd / entry_price if entry_price > 0 else 0.0))
-    target_notional_usd = float(decision.size_usd or 0.0)
-    submitted_notional_usd = (
-        shares * submitted_limit_price if submitted_limit_price > 0 and shares > 0 else 0.0
-    )
     corrected_shadow = {}
     try:
         corrected_shadow = (
@@ -1051,7 +1046,29 @@ def materialize_position(candidate, decision, result, portfolio, city, mode, *, 
         corrected_shadow.get("pricing_semantics_version")
         or "legacy_unclassified"
     )
-    if fill_price > 0 and shares > 0:
+    command_state = str(getattr(result, "command_state", "") or "")
+    fill_has_finality = command_state == "FILLED"
+    fill_price = reported_fill_price
+    if reported_fill_price > 0 and not fill_has_finality:
+        logger.warning(
+            "materialize_position: ignoring non-final fill_price for trade_id=%s "
+            "command_state=%s status=%s",
+            getattr(result, "trade_id", ""),
+            command_state or "missing",
+            getattr(result, "status", ""),
+        )
+        fill_price = 0.0
+    entry_price = (
+        fill_price
+        if fill_price > 0 and fill_has_finality
+        else submitted_limit_price or fallback_edge_price
+    )
+    shares = float(result.shares or (decision.size_usd / entry_price if entry_price > 0 else 0.0))
+    target_notional_usd = float(decision.size_usd or 0.0)
+    submitted_notional_usd = (
+        shares * submitted_limit_price if submitted_limit_price > 0 and shares > 0 else 0.0
+    )
+    if fill_price > 0 and shares > 0 and fill_has_finality:
         entry_price_avg_fill = fill_price
         shares_filled = shares
         filled_cost_basis_usd = shares * fill_price
@@ -1267,9 +1284,9 @@ def reconcile_pending_positions(portfolio, clob, tracker, *, deps):
 def _apply_acknowledged_quarantine_clears(portfolio, summary: dict, *, deps, conn=None) -> bool:
     portfolio_dirty = False
     for pos in list(portfolio.positions):
-        if pos.chain_state not in {"quarantined", "quarantine_expired"}:
+        if _position_chain_state_value(pos) not in {"quarantined", "quarantine_expired"}:
             continue
-        token_id = pos.token_id if pos.direction != "buy_no" else pos.no_token_id
+        token_id = pos.token_id if _position_direction_value(pos) != "buy_no" else pos.no_token_id
         if not token_id:
             continue
         if token_id in getattr(portfolio, "ignored_tokens", []):
@@ -1300,9 +1317,32 @@ def _apply_acknowledged_quarantine_clears(portfolio, summary: dict, *, deps, con
     return portfolio_dirty
 
 
+def _semantic_value(value) -> str:
+    return str(getattr(value, "value", value) or "")
+
+
 def _position_state_value(pos) -> str:
-    state = getattr(pos, "state", "")
-    return getattr(state, "value", state) or ""
+    return _semantic_value(getattr(pos, "state", ""))
+
+
+def _position_chain_state_value(pos) -> str:
+    return _semantic_value(getattr(pos, "chain_state", ""))
+
+
+def _position_direction_value(pos) -> str:
+    return _semantic_value(getattr(pos, "direction", ""))
+
+
+def _is_open_crowding_exposure(pos) -> bool:
+    state_value = _position_state_value(pos)
+    chain_state = _position_chain_state_value(pos)
+    if state_value in INACTIVE_RUNTIME_STATES:
+        return False
+    if state_value in {"pending_entry", "pending_tracked"}:
+        return False
+    if chain_state in {"quarantined", "quarantine_expired"}:
+        return False
+    return True
 
 
 def _build_exit_context(
@@ -1332,9 +1372,9 @@ def _build_exit_context(
     # T6.4-phase2 (2026-04-24): thread portfolio context so
     # HoldValue.compute_with_exit_costs can compute correlation-crowding
     # cost over other held positions. Exclude self from the tuple; each
-    # element is (cluster, size_usd, trade_id). When portfolio is None,
-    # falls back to empty tuple / None bankroll — the downstream seam
-    # treats that as "no co-held positions, correlation_crowding=0".
+    # element is (cluster, effective_cost_basis_usd, trade_id). When portfolio
+    # is None, falls back to empty tuple / None bankroll; downstream treats
+    # that as "no co-held positions, correlation_crowding=0".
     portfolio_positions: tuple = ()
     bankroll = None
     if portfolio is not None:
@@ -1344,9 +1384,10 @@ def _build_exit_context(
             bankroll = None
         others = getattr(portfolio, "positions", None) or ()
         portfolio_positions = tuple(
-            (str(p.cluster), float(p.size_usd), str(p.trade_id))
+            (str(p.cluster), float(getattr(p, "effective_cost_basis_usd", 0.0) or 0.0), str(p.trade_id))
             for p in others
             if getattr(p, "trade_id", None) != getattr(pos, "trade_id", None)
+            and _is_open_crowding_exposure(p)
         )
 
     return ExitContext(
@@ -1475,9 +1516,12 @@ def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: 
 
         check_pending_retries(pos, conn=conn)
 
-        if pos.chain_state in {"quarantined", "quarantine_expired"}:
+        if (
+            _position_state_value(pos) == "quarantined"
+            or _position_chain_state_value(pos) in {"quarantined", "quarantine_expired"}
+        ):
             if not pos.admin_exit_reason:
-                pos.admin_exit_reason = quarantine_resolution_reason(pos.chain_state)
+                pos.admin_exit_reason = quarantine_resolution_reason(_position_chain_state_value(pos))
                 pos.exit_reason = pos.admin_exit_reason
                 pos.last_exit_at = deps._utcnow().isoformat() if hasattr(deps, "_utcnow") else datetime.now(timezone.utc).isoformat()
                 portfolio_dirty = True
@@ -1495,7 +1539,7 @@ def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: 
             summary["monitor_skipped_quarantine_resolution"] = summary.get("monitor_skipped_quarantine_resolution", 0) + 1
             continue
 
-        if pos.direction not in {"buy_yes", "buy_no"}:
+        if _position_direction_value(pos) not in {"buy_yes", "buy_no"}:
             artifact.add_monitor_result(
                 deps.MonitorResult(
                     position_id=pos.trade_id,
@@ -1550,7 +1594,7 @@ def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: 
                     legacy_threshold_hours=6.0,
                 )
                 if (_enter_day0
-                        and pos.state in {"entered", "holding"}
+                        and _position_state_value(pos) in {"entered", "holding"}
                         and not getattr(pos, "exit_state", "")):
                     new_state = enter_day0_window_runtime_state(
                         pos.state,
@@ -1768,7 +1812,7 @@ def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: 
             near_settlement = (
                 hours_to_settlement is None
                 or hours_to_settlement <= 6.0
-                or pos.state in {"day0_window", "pending_exit"}
+                or _position_state_value(pos) in {"day0_window", "pending_exit"}
             )
             if near_settlement and not monitor_result_written and "execution failed" not in str(e).lower():
                 summary["monitor_chain_missing"] = summary.get("monitor_chain_missing", 0) + 1
@@ -2706,12 +2750,16 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                                     f"{getattr(city, 'cluster', '') or city.name}:{candidate.target_date}"
                                 ),
                             }
-                            snapshot_best_ask = _reprice_decision_from_executable_snapshot(
-                                conn,
-                                d,
-                                snapshot_fields,
-                                final_intent_context,
-                            )
+                            _reprice_fn = getattr(deps, "reprice_from_snapshot", None)
+                            if callable(_reprice_fn):
+                                snapshot_best_ask = _reprice_fn(conn, d, snapshot_fields, final_intent_context)
+                            else:
+                                snapshot_best_ask = _reprice_decision_from_executable_snapshot(
+                                    conn,
+                                    d,
+                                    snapshot_fields,
+                                    final_intent_context,
+                                )
                         except Exception as exc:
                             summary["no_trades"] += 1
                             rejection_stage = "EXECUTION_FAILED"
@@ -2995,7 +3043,16 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                     _cmd_state = result.command_state  # str | None
                     _cmd_durable = _cmd_state in ("ACKED", "PARTIAL", "FILLED")
                     _cmd_in_flight = _cmd_state in ("SUBMITTING", "UNKNOWN")
-                    if result.status in ("filled", "pending") and _cmd_durable:
+                    runtime_order_status = result.status
+                    if result.status == "filled" and _cmd_state != "FILLED":
+                        logger.warning(
+                            "run_cycle: downgrading non-final filled order result to pending "
+                            "for trade_id=%s command_state=%s",
+                            getattr(result, "trade_id", ""),
+                            _cmd_state or "missing",
+                        )
+                        runtime_order_status = "pending"
+                    if runtime_order_status in ("filled", "pending") and _cmd_durable:
                         pos = materialize_position(
                             candidate,
                             d,
@@ -3003,7 +3060,7 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                             portfolio,
                             city,
                             mode,
-                            state=initial_entry_runtime_state_for_order_status(result.status),
+                            state=initial_entry_runtime_state_for_order_status(runtime_order_status),
                             env=env,
                             bankroll_at_entry=entry_bankroll,
                             deps=deps,

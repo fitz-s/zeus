@@ -421,6 +421,75 @@ def load_source_rationale() -> dict[str, Any]:
     return _load_yaml(SOURCE_RATIONALE_PATH)
 
 
+_CONTEXT_EXPAND_TRIGGERS = [
+    "touched code crosses a zone boundary",
+    "tests fail outside the suggested scope",
+    "implementation needs files not listed in files_may_change",
+    "truth owner, lifecycle, DB, control, risk, or settlement owner is unclear",
+    "reviewer asks about authority or downstream behavior",
+    "target uses a write route not listed in the output",
+]
+
+
+def _source_rationale_for(files: list[str]) -> list[dict[str, Any]]:
+    """Return source_rationale entries for the given file paths.
+
+    Restored from topology_doctor_packet_prefill.py (deleted in phase3 cleanup
+    commit 45f0d40a) because topology_doctor_digest.py calls api._source_rationale_for.
+    """
+    if not files:
+        return []
+    source_map = load_source_rationale()
+    rationale = source_map.get("files") or {}
+    defaults = source_map.get("package_defaults") or {}
+    enriched: list[dict[str, Any]] = []
+    for path in files:
+        if path not in rationale:
+            continue
+        package_default: dict[str, Any] = {}
+        for prefix, values in defaults.items():
+            if path.startswith(f"{prefix}/") and len(prefix) > len(package_default.get("_prefix", "")):
+                package_default = {"_prefix": prefix, **values}
+        package_default.pop("_prefix", None)
+        entry = {**package_default, **rationale[path]}
+        entry.setdefault("upstream", [])
+        entry.setdefault("downstream", [])
+        entry.setdefault("gates", package_default.get("gates", []))
+        enriched.append({"path": path, **entry})
+    return enriched
+
+
+def build_context_assumption(
+    *,
+    profile: str = "",
+    profile_kind: str = "digest_profile",
+    source_entries: list[dict[str, Any]] | None = None,
+    confidence_basis: list[str] | None = None,
+) -> dict[str, Any]:
+    """Build context_assumption envelope.
+
+    Restored from topology_doctor_packet_prefill.py (deleted in phase3 cleanup
+    commit 45f0d40a) because topology_doctor_digest.py calls api.build_context_assumption.
+    """
+    basis = list(confidence_basis or [])
+    if profile:
+        basis.append(profile_kind)
+    entries = source_entries or []
+    if entries:
+        basis.append("source_rationale")
+        if any(not entry.get("upstream") and not entry.get("downstream") for entry in entries):
+            basis.append("missing_relations")
+    if not basis:
+        basis.append("topology_manifest")
+    return {
+        "sufficiency": "provisional_starting_packet",
+        "authority_status": "incomplete_context",
+        "confidence_basis": sorted(dict.fromkeys(basis)),
+        "expand_context_if": _CONTEXT_EXPAND_TRIGGERS,
+        "planning_lock_independent": True,
+    }
+
+
 def load_test_topology() -> dict[str, Any]:
     return _load_yaml(TEST_TOPOLOGY_PATH)
 
