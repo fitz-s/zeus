@@ -1,0 +1,81 @@
+name: pr-policy
+
+# Universal cross-agent equivalent of .claude/hooks/dispatch.py::pr_create_loc_accumulation.
+# Local hook fires *before* `gh pr create` (Claude Code only). CI fires *after*
+# the PR opens, posting a sticky advisory comment when LOC/commit budget unmet.
+# Advisory only — does NOT block merge.
+#
+# Authority basis: same as secrets-scan.yml.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: pr-policy-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  loc-budget:
+    name: pr-loc-budget (advisory)
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Compute LOC + commit budget; post or clear sticky comment
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          STATS=$(git diff --shortstat "${BASE_SHA}..${HEAD_SHA}" 2>/dev/null || echo "")
+          INS=$(echo "$STATS" | grep -oE '[0-9]+ insertion' | head -1 | grep -oE '^[0-9]+' || echo 0)
+          DEL=$(echo "$STATS" | grep -oE '[0-9]+ deletion' | head -1 | grep -oE '^[0-9]+' || echo 0)
+          COMMITS=$(git rev-list --count "${BASE_SHA}..${HEAD_SHA}" 2>/dev/null || echo 0)
+          NET=$((INS + DEL))
+          echo "PR #${PR_NUMBER}: commits=${COMMITS} ins=${INS} del=${DEL} net=${NET}"
+
+          MARKER="<!-- pr-loc-budget-marker -->"
+          EXISTING=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" \
+            --jq "[.[] | select(.body | startswith(\"${MARKER}\")) | .id] | first // empty")
+
+          UNDER_BUDGET=0
+          if [ "$NET" -lt 80 ] || [ "$COMMITS" -lt 2 ]; then
+            UNDER_BUDGET=1
+          fi
+
+          if [ "$UNDER_BUDGET" = "1" ]; then
+            BODY="${MARKER}
+          ## ⚠ pr-loc-budget advisory
+
+          This PR currently has **${COMMITS} commit(s)** and **${NET} LOC** (insertions + deletions).
+
+          Each PR-open and each push triggers paid auto-reviewers (Copilot + Codex). For non-urgent changes, prefer:
+          - Consolidating related work onto the same branch (≥2 commits, ≥80 LOC).
+          - Or accept the cost for a true small/urgent fix and ignore this advisory.
+
+          *Advisory only — does not block merge. Comment auto-clears once budget is met.*"
+            if [ -n "${EXISTING}" ]; then
+              gh api --method PATCH "repos/${REPO}/issues/comments/${EXISTING}" -f body="${BODY}" > /dev/null
+              echo "Updated existing advisory comment id=${EXISTING}"
+            else
+              gh api --method POST "repos/${REPO}/issues/${PR_NUMBER}/comments" -f body="${BODY}" > /dev/null
+              echo "Posted new advisory comment"
+            fi
+          else
+            if [ -n "${EXISTING}" ]; then
+              gh api --method DELETE "repos/${REPO}/issues/comments/${EXISTING}" > /dev/null
+              echo "Cleared advisory comment id=${EXISTING} (budget met)"
+            else
+              echo "Budget met; no prior advisory to clear"
+            fi
+          fi
