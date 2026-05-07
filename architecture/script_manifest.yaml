@@ -620,6 +620,45 @@ scripts:
       authority; no external inputs.
     required_tests: [tests/test_zpkt.py, tests/test_pscb_hook.py]
 
+  worktree_doctor.py:
+    # Created: 2026-05-07
+    # Last reused or audited: 2026-05-07
+    # Authority basis: Navigation Topology v2 PLAN §2.8; sunset 2027-05-07
+    class: runtime_support
+    lifecycle: long_lived
+    status: active
+    authority_scope: operator_runtime_support
+    canonical_command: "python3 scripts/worktree_doctor.py <subcommand>"
+    reason: >
+      ADVISORY-only worktree lifecycle helper. Subcommands: status (JSON of all
+      worktrees, branches, ahead/behind vs origin/main, dirty state, PR state,
+      sentinels), advisory (cross-worktree visibility map for SessionStart),
+      branch-keepup (ff/rebase/merge/close recommendation; NEVER auto-executes),
+      hygiene (workspace clutter list; NEVER deletes). Exit code 0 always.
+      Invoked by .claude/hooks/dispatch.py session_start_visibility hook at
+      session start and by worktree_create_advisor / worktree_remove_advisor hooks.
+      Flag aliases: --status, --hygiene-audit, --cross-worktree-visibility.
+    read_targets: [repo, .git/worktrees]
+    write_targets: [stdout]
+    target_db: null
+    dangerous_if_run: false
+    dry_run_default: true
+    apply_flag: null
+    external_inputs: [git worktree list, gh pr list]
+    delete_policy: retain_until_superseded
+    reuse_when: >
+      Cross-worktree visibility, workspace hygiene audit, or branch keep-up
+      recommendation is needed. Use at SessionStart or explicit operator request.
+      Safe to invoke at any time — read-only and always exits 0.
+    do_not_use_when: >
+      A destructive worktree or branch operation is needed — this script only
+      emits advisory output, it never deletes worktrees, branches, or files.
+    promotion_barrier: >
+      Advisory output only. Never authorizes destructive git operations or
+      canonical DB writes. Operator must execute any destructive ops manually.
+    required_helpers: []
+    required_tests: [tests/test_worktree_doctor.py, tests/test_dispatch_session_start.py]
+
   state_census.py:
     # Created: 2026-05-05
     # Last reused or audited: 2026-05-05

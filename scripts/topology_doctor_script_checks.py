@@ -120,7 +120,7 @@ def check_script_lifecycle(
             )
         if not long_lived_script_name_allowed(api, manifest, name):
             issues.append(
-                api._issue(
+                api._issue_with_admission_severity(
                     "script_long_lived_bad_name",
                     rel,
                     "long-lived script name must use an allowed prefix or a documented naming exception",
@@ -243,7 +243,7 @@ def run_scripts(api: Any) -> Any:
     issues: list[Any] = []
 
     for name in sorted(actual - declared):
-        issues.append(api._issue("script_manifest_missing", f"scripts/{name}", "top-level script has no manifest entry"))
+        issues.append(api._issue_with_admission_severity("script_manifest_missing", f"scripts/{name}", "top-level script has no manifest entry"))
     for name in sorted(declared - actual):
         issues.append(api._issue("script_manifest_stale", f"scripts/{name}", "manifest entry has no top-level script"))
 
@@ -266,7 +266,7 @@ def run_scripts(api: Any) -> Any:
             )
             if forbidden_writes:
                 issues.append(
-                    api._issue(
+                    api._issue_with_admission_severity(
                         "script_diagnostic_forbidden_write_target",
                         rel,
                         f"diagnostic writes forbidden targets {forbidden_writes}",

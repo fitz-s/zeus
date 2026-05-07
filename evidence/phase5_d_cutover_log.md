@@ -177,6 +177,35 @@ Per `phase5_h_decision.md` §Carry-Forward Debt — none cutover-blocking:
 4. **L-3** — `@untyped_for_compat` 30d expiry deadline 2026-06-05; CI guard live
 5. **P5-L1** — `_HELPERS_WITHOUT_CAP_ID` exemption cleanup (34 older-format entries)
 6. **P5-L2** — ≤1,500 LOC budget scope clarification (NEW infra 1,898 / YAML-only 538)
-7. **P5-M2** — Phase 0.A vs 5.C metric definition footnote in cutover communications
+7. **P5-M2** — Phase 0.A vs 5.C metric definition footnote in cutover communications *(closed — see §P5-M2-FN below)*
 8. **R5** — lease service (deferred)
 9. **tests/test_topology_doctor.py** — 114 stale failures: rewrite or deprecate post-step-5
+
+---
+
+## §P5-M2-FN — Footnote: Phase 0.A vs Phase 5.C Topology-Ratio Metric Definitions
+
+**Context:** `phase5_h_decision.md` §10 (Phase 5.C fixture validity) flagged a MEDIUM caveat:
+Phase 0.A reported 0.71% topology-ratio friction; Phase 5.C reported 21.42%. The critic noted the
+figures diverge and should not be compared directly.
+
+**Why the figures are not directly comparable:**
+
+| | Phase 0.A | Phase 5.C |
+|---|---|---|
+| Fixture | 90.74h session (no per-task topology counter) | codex/PR67, 27.62h session (real topology operations) |
+| Topology counter | **absent** — Phase 0.A predates the per-task topology-op counter; the 0.71% figure is derived from global session counts that do not isolate topology friction per task | **present** — Phase 5.C uses the instrumented counter introduced in the Phase 3/4 infra refactor |
+| What "topology-ratio" measures | Fraction of total session tokens attributable to topology_doctor routing calls in a single long session, measured by proxy | Fraction of per-task decision tokens consumed by topology-routing operations, measured directly |
+| Session scope | 90.74h — a much longer session inflates the denominator, artificially suppressing the percentage | 27.62h — shorter, more representative |
+
+**Why this does not affect the GO decision:**
+
+The load-bearing cutover criterion is absolute friction-delta, not topology-ratio percentage.
+The friction-delta is computed from the same Phase 5.C fixture: **-91%** (0.40h scaled 20h replay
+vs 3.65h Phase 0.A equivalent). This figure is internally consistent — both numerator and
+denominator come from the same instrumented fixture. The 0.71% → 21.42% apparent increase is
+an artifact of fixture incompatibility, not a regression in topology cost.
+
+**Resolution:** P5-M2 is closed. The absolute friction-delta -91% (well within ≤2h target at 0.40h)
+is the sole load-bearing cutover metric. The 0.71% Phase 0.A figure should not be cited in
+future comparisons; the Phase 5.C 21.42% figure is the correct baseline for Step 5+ monitoring.

@@ -701,6 +701,65 @@ def _warning(code: str, path: str, message: str) -> TopologyIssue:
     return warning(code, path, message)
 
 
+# ---------------------------------------------------------------------------
+# Phase 2A — K1 severity tier runtime wiring (Navigation Topology v2)
+# Read target_severity from architecture/admission_severity.yaml and demote
+# F5 emitter issues from blocking ("error") to advisory when the registry
+# says ADVISORY.  Default: "blocking" when the file is absent or the code
+# is not listed (backward-compat fallback).
+# ---------------------------------------------------------------------------
+
+ADMISSION_SEVERITY_PATH = ROOT / "architecture" / "admission_severity.yaml"
+_SEVERITY_CACHE: dict[str, str] | None = None
+
+
+def _load_admission_severity() -> dict[str, str]:
+    """Return mapping of issue code → target_severity (e.g. 'ADVISORY', 'BLOCKING').
+
+    Reads architecture/admission_severity.yaml once per process (cached in
+    _SEVERITY_CACHE).  Falls back to empty dict (all issues default to
+    blocking) when the file is absent so the legacy code path is preserved.
+
+    Returns:
+        Dict mapping issue code → first target_severity found for that code.
+        When a code appears multiple times (e.g. AS-01 and AS-02 both map
+        navigation_scope_expansion_required), the first entry wins.
+    """
+    global _SEVERITY_CACHE
+    if _SEVERITY_CACHE is not None:
+        return _SEVERITY_CACHE
+    if not ADMISSION_SEVERITY_PATH.exists():
+        _SEVERITY_CACHE = {}
+        return _SEVERITY_CACHE
+    data = yaml.safe_load(ADMISSION_SEVERITY_PATH.read_text(encoding="utf-8")) or {}
+    mapping: dict[str, str] = {}
+    for entry in data.get("issue_severity", []):
+        code_key = entry.get("code")
+        ts = entry.get("target_severity")
+        if code_key and ts and code_key not in mapping:
+            mapping[code_key] = str(ts).upper()
+    _SEVERITY_CACHE = mapping
+    return _SEVERITY_CACHE
+
+
+def _issue_with_admission_severity(code: str, path: str, message: str) -> TopologyIssue:
+    """Emit a TopologyIssue whose severity is resolved from admission_severity.yaml.
+
+    F5 emitter sites call this instead of _issue() so that codes listed as
+    ADVISORY in the YAML produce severity="warning" + blocking_modes=("global_health",)
+    via the advisory() helper — downstream pipelines only recognise "warning"/"error".
+
+    Severity mapping:
+      ADVISORY → severity="warning" + blocking_modes=("global_health",)  [via advisory()]
+      BLOCKING  → "error"    (current default; backward compat)
+      <missing> → "error"    (backward-compat fallback)
+    """
+    target = _load_admission_severity().get(code, "BLOCKING")
+    if target == "ADVISORY":
+        return advisory(code, path, message)
+    return issue(code, path, message)
+
+
 def normalize_runtime_claims(claims: list[str] | tuple[str, ...] | None) -> list[str]:
     if not claims:
         return []
@@ -1637,6 +1696,7 @@ def build_digest(
     side_effect: str | None = None,
     artifact_target: str | None = None,
     merge_state: str | None = None,
+    companion_loop_batch_cap: int | None = None,
 ) -> dict[str, Any]:
     return _digest_checks().build_digest(
         sys.modules[__name__],
@@ -1651,6 +1711,7 @@ def build_digest(
         side_effect=side_effect,
         artifact_target=artifact_target,
         merge_state=merge_state,
+        companion_loop_batch_cap=companion_loop_batch_cap,
     )
 
 
@@ -2627,6 +2688,7 @@ def run_navigation(
     side_effect: str | None = None,
     artifact_target: str | None = None,
     merge_state: str | None = None,
+    companion_loop_batch_cap: int | None = None,
 ) -> dict[str, Any]:
     checks = {
         "context_budget": run_context_budget(),
@@ -2652,6 +2714,7 @@ def run_navigation(
         side_effect=side_effect,
         artifact_target=artifact_target,
         merge_state=merge_state,
+        companion_loop_batch_cap=companion_loop_batch_cap,
     )
     admission = digest.get("admission") or {}
     admission_status = admission.get("status", "advisory_only")
@@ -2872,8 +2935,14 @@ def _admission_typed_issue(
     """Translate an admission denial into a navigation typed issue.
 
     Returns None when admission is admitted/advisory_only; otherwise emits
-    a typed issue (severity=error) so closeout / CI consumers see the
-    route-admission denial alongside repo-health issues.
+    a typed issue whose severity is resolved from admission_severity.yaml
+    (K1 wiring extension: F1 navigation_scope_expansion_required and
+    F2/navigation_route_ambiguous now honour the YAML target_severity).
+
+    Severity resolution:
+      admission_severity.yaml ADVISORY → "advisory"
+      admission_severity.yaml BLOCKING  → "error"
+      <missing>                          → "error" (backward-compat fallback)
     """
     status = admission.get("status", "advisory_only")
     if status in {"admitted", "advisory_only"}:
@@ -2898,13 +2967,31 @@ def _admission_typed_issue(
         message_parts.append(f"forbidden_hits={forbidden_hits}")
     if out_of_scope:
         message_parts.append(f"out_of_scope={out_of_scope}")
+    # K1 extension: resolve severity from admission_severity.yaml instead of
+    # always emitting "error". Blocked paths (forbidden_hits) are always errors
+    # regardless of YAML entry; scope_expansion and ambiguous may be ADVISORY.
+    # F7: "advisory" is not recognised downstream; use "warning" + blocking_modes
+    # to mirror the advisory() helper contract (canonical enum: topology_doctor.py).
+    if forbidden_hits:
+        severity = "error"
+        blocking_modes: tuple[str, ...] | None = None
+    else:
+        target = _load_admission_severity().get(code, "BLOCKING")
+        if target == "ADVISORY":
+            severity = "warning"
+            blocking_modes = ("global_health",)
+        else:
+            severity = "error"
+            blocking_modes = None
     issue: dict[str, Any] = {
-        "severity": "error",
+        "severity": severity,
         "lane": "navigation",
         "code": code,
         "path": primary_path,
         "message": "; ".join(message_parts),
     }
+    if blocking_modes is not None:
+        issue["blocking_modes"] = blocking_modes
     if schema_version != "1":
         issue["owner_manifest"] = "architecture/topology.yaml"
         issue["repair_kind"] = "scope_expansion"

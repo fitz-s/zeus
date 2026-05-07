@@ -266,6 +266,19 @@ same change.  The capsule MUST NOT widen scope to implement an insight in
 the same change unless the operator explicitly approves — the backlog is the
 queue, not the doer.
 
+**Typed-intent admission shortcut (K3)** — pass `--intent <value>` to short-circuit profile
+matching. Canonical values: `plan_only`, `audit`, `create_new`, `modify_existing`, `refactor`,
+`hygiene`, `hotfix`, `rebase_keepup`, `other`. Full enum and per-intent globs:
+`architecture/admission_severity.yaml` → `typed_intent_enum`.
+
+- `plan_only` and `audit` are **whitelist-driven**: only paths matching their
+  `admits_path_globs` are admitted; everything else → `out_of_scope_files` + `advisory_only`.
+  Canonical scopes (PLAN.md §6:693): `plan_only` admits `docs/**`, `.omc/plans/**`,
+  `evidence/**`, `.omc/research/**`; `audit` admits `evidence/**`, `.omc/research/**`.
+- `create_new` / `refactor` trigger K2 companion-loop-break: manifest companion must be
+  in `--files` for auto-admit. Batch cap 50 pairs; excess blocked with `blocked_by_batch_cap`.
+- All other intents go through normal profile match with K1 severity tier.
+
 **Step 2 — Read the scoped AGENTS.md** for the module you will touch. These
 contain domain rules, common mistakes, and hazard classifications specific to
 that package.

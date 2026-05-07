@@ -104,6 +104,17 @@ def build_parser(description: str | None = None) -> argparse.ArgumentParser:
     parser.add_argument("--merge-state", default=None, help="Typed merge state: clean, narrow_conflict, broad_conflict, high_risk_conflict, unknown")
     parser.add_argument("--claim", action="append", default=[], help="Runtime completion claim to evaluate; repeat for multiple claims")
     parser.add_argument("--zone", default=None, help="Zone selector for --invariants")
+    parser.add_argument(
+        "--companion-loop-batch-cap",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "Advisory threshold for companion-loop-break batch size (default 50). "
+            "When --files contains more than N paths, a companion_loop_batch_advisory "
+            "is emitted (non-blocking). Also settable via ZEUS_COMPANION_LOOP_BATCH_CAP env var."
+        ),
+    )
 
     sub = parser.add_subparsers(dest="command")
     digest = sub.add_parser("digest", help="Emit bounded task topology digest")
@@ -409,6 +420,9 @@ def run_flag_command(api: Any, args: argparse.Namespace) -> int | None:
             if value is not None:
                 key = {"claim": "claims", "mutation_surface": "mutation_surfaces"}.get(field, field)
                 navigation_kwargs[key] = value
+        _batch_cap = getattr(args, "companion_loop_batch_cap", None)
+        if _batch_cap is not None:
+            navigation_kwargs["companion_loop_batch_cap"] = _batch_cap
         if args.issue_schema_version != "1":
             navigation_kwargs["issue_schema_version"] = args.issue_schema_version
         navigation_files = list(args.files or [])

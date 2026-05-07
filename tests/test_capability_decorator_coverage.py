@@ -1,6 +1,6 @@
 # Created: 2026-05-06
-# Last reused or audited: 2026-05-06
-# Authority basis: ULTIMATE_DESIGN §3 lines 266-269; IMPLEMENTATION_PLAN Phase 2 D-2
+# Last reused or audited: 2026-05-07
+# Authority basis: ULTIMATE_DESIGN §3 lines 266-269; IMPLEMENTATION_PLAN Phase 2 D-2; Navigation Topology v2 Phase 1 (+5 worktree-lifecycle caps, Phase 3 deliverable)
 
 """CI lint: every .py hard_kernel_path in capabilities.yaml must carry at
 least one function decorated with @capability(cap_id, ...) matching the
@@ -38,6 +38,11 @@ PHASE_4_DEFERRED_PATHS: set[str] = {
     # Phase 4.C: venue adapter for live_venue_submit capability; file not yet created
     # (capabilities.yaml pre-registers this path; actual kernel is venue_adapter.py)
     "src/venue/polymarket_adapter.py",
+    # Phase 3 deliverable: worktree_doctor.py created in Navigation Topology v2 Phase 3.
+    # The 5 worktree-lifecycle capabilities (worktree_create, worktree_branch_keepup,
+    # worktree_post_merge_cleanup, workspace_hygiene_audit, cross_worktree_visibility)
+    # all reference this path; it does not exist until Phase 3 ships.
+    "scripts/worktree_doctor.py",
 }
 
 # Capabilities whose ALL hard_kernel_paths are non-py (docs, YAML, DB).

@@ -191,15 +191,6 @@ class LiveExecutor(ABC):
         """
         _gate_runtime.check("live_venue_submit")  # Gate 5 delegation — emits ritual_signal
 
-    def _assert_risk_level_allows(self) -> None:
-        """Raise RuntimeError if risk-level halt is active.
-
-        kill_switch_active and risk_level_halt are both checked by
-        gate_runtime.check("live_venue_submit") above. This method retained
-        for call-site compatibility but is now a no-op (gate_runtime.check
-        already covers both conditions in a single call before token mint).
-        """
-
     def _assert_not_frozen(self) -> None:
         """Raise RuntimeError if settlement freeze is active.
 
@@ -217,7 +208,6 @@ class LiveExecutor(ABC):
         token construction; a blocked gate never mints a token.
         """
         self._assert_kill_switch_off()
-        self._assert_risk_level_allows()
         self._assert_not_frozen()
         token = self._mint_token()
         return self._do_submit(order, token)
