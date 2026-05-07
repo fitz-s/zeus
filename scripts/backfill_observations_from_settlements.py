@@ -30,7 +30,7 @@ def _source_name(raw_source: str | None) -> str:
 
 
 def backfill_observations_from_settlements(*, dry_run: bool = False, limit: int | None = None) -> dict:
-    conn = get_world_connection()
+    conn = get_world_connection(write_class="bulk")
     init_schema(conn)
     query = """
         SELECT s.city, s.target_date, s.settlement_value, s.settlement_source

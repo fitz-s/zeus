@@ -185,7 +185,8 @@ class StrategyTracker:
         close_conn = False
         if conn is None:
             try:
-                conn = get_trade_connection()
+                # v4 plan §AX3: strategy_tracker.summary is read-during-live-cycle.
+                conn = get_trade_connection(write_class="live")
                 close_conn = True
             except Exception as exc:
                 logger.warning("strategy_tracker.summary could not open trade conn: %s", exc)

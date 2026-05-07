@@ -302,7 +302,7 @@ def main() -> int:
 
     pool_map = {c.name: c for c in ALL_CITIES}
 
-    conn = get_world_connection()
+    conn = get_world_connection(write_class="bulk")
     conn.execute("PRAGMA journal_mode=WAL")
     init_schema(conn)
 

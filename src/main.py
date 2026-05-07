@@ -121,8 +121,9 @@ def _harvester_cycle():
             return
         try:
             from src.execution.harvester_pnl_resolver import resolve_pnl_for_settled_markets
-            trade_conn = get_trade_connection()
-            world_conn = get_world_connection()
+            # v4 plan §AX3: harvester PnL resolver = LIVE class.
+            trade_conn = get_trade_connection(write_class="live")
+            world_conn = get_world_connection(write_class="live")
             try:
                 result = resolve_pnl_for_settled_markets(trade_conn, world_conn)
             finally:
@@ -675,11 +676,14 @@ def main():
                 _capital_str,
                 settings["sizing"]["kelly_multiplier"] * 100)
 
-    conn = get_world_connection()
+    # v4 plan §AX3: live daemon boot — schema init runs once at startup.
+    # Classify as LIVE so the v4 flock topology routes the (rare) startup
+    # writes through the LIVE flock alongside subsequent runtime writes.
+    conn = get_world_connection(write_class="live")
     init_schema(conn)
 
     # Ensure trade DB has all tables (prevents lazy-creation gaps)
-    trade_conn = get_trade_connection()
+    trade_conn = get_trade_connection(write_class="live")
     init_schema(trade_conn)
     trade_conn.close()
 

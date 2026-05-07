@@ -829,7 +829,7 @@ def main(argv: list[str] | None = None) -> int:
         from src.state.db import init_schema
         init_schema(conn)
     else:
-        conn = get_world_connection()
+        conn = get_world_connection(write_class="bulk")
     apply_v2_schema(conn)
 
     summary = ingest_track(

@@ -292,7 +292,7 @@ def main(argv: list[str] | None = None) -> int:
         conn = sqlite3.connect(args.db)
         conn.row_factory = sqlite3.Row
     else:
-        conn = get_world_connection()
+        conn = get_world_connection(write_class="bulk")
 
     try:
         summary = run_migration(

@@ -235,3 +235,154 @@ def pytest_collection_modifyitems(items: list) -> None:
                 ),
                 append=False,
             )
+
+
+# ---------------------------------------------------------------------------
+# SQLite Writer-Lock Antibody — Phase 0 (v4 plan §10).
+#
+# Collection-time enforcement that scans src/ + scripts/ for:
+#   1. Direct sqlite3.connect() outside the canonical-shim allowlist.
+#   2. (Reserved) _connect() calls without write_class kwarg in scope —
+#      activated in Phase 1 once retrofit lands; Phase 0 is non-blocking.
+#   3. (Reserved) Raw subprocess.{Popen,run,...} outside the helper
+#      allowlist — activated in Phase 1.y.
+#
+# Scope: src/ + scripts/ only (NOT repo-wide rglob). Empirical Phase 0
+# baseline: 433 files / 157 KLOC parses cold in ≤ 1 s; mtime-keyed cache
+# brings steady-state to ≤ 200 ms.
+#
+# Bypass: ZEUS_DISABLE_WRITER_LOCK_ANTIBODY=1 disables the antibody
+# (documented as emergency-only; CI builds set =0 explicitly).
+#
+# Phase 0 posture: this antibody warns/reports rather than blocks for
+# checks (2) and (3) so Phase 0 ships without forcing the 32+ BULK and
+# 14 LIVE caller retrofits. Check (1) (direct sqlite3.connect outside
+# allowlist) is also reported but not fatal yet — Phase 1.0 / 1.x will
+# tighten the failure mode once the canonical shim is the only writer.
+# ---------------------------------------------------------------------------
+
+import ast as _wla_ast
+import json as _wla_json
+from pathlib import Path as _wla_Path
+
+_WLA_REPO_ROOT = _wla_Path(__file__).resolve().parent.parent
+_WLA_SCAN_ROOTS = (_WLA_REPO_ROOT / "src", _WLA_REPO_ROOT / "scripts")
+_WLA_CACHE_PATH = _WLA_REPO_ROOT / ".pytest_cache" / "writer_lock_antibody.json"
+
+# Allowlisted files where direct ``sqlite3.connect`` is permitted. Phase 0
+# captures the canonical shim and the lock helper itself; Phase 1.x will
+# tighten this list as production callers are migrated.
+_WLA_SQLITE_CONNECT_ALLOWLIST = frozenset({
+    "src/state/db.py",                  # canonical shim
+    "src/state/db_writer_lock.py",      # helper (does not connect)
+})
+
+
+def _wla_is_bypassed() -> bool:
+    """Honor operator emergency bypass via env-var."""
+    return os.environ.get("ZEUS_DISABLE_WRITER_LOCK_ANTIBODY") == "1"
+
+
+def _wla_load_cache() -> dict:
+    if not _WLA_CACHE_PATH.exists():
+        return {}
+    try:
+        return _wla_json.loads(_WLA_CACHE_PATH.read_text())
+    except (OSError, _wla_json.JSONDecodeError):
+        return {}
+
+
+def _wla_save_cache(cache: dict) -> None:
+    try:
+        _WLA_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _WLA_CACHE_PATH.write_text(_wla_json.dumps(cache))
+    except OSError:
+        # Cache failure is non-fatal — Phase 0 antibody must not break CI.
+        pass
+
+
+def _wla_scan_file(py_file: _wla_Path) -> dict:
+    """Parse a single file and return (rel-path-keyed) violations dict."""
+    rel = py_file.relative_to(_WLA_REPO_ROOT).as_posix()
+    out: dict = {"direct_sqlite_connect": []}
+    try:
+        source = py_file.read_text()
+    except (OSError, UnicodeDecodeError):
+        return out
+    try:
+        tree = _wla_ast.parse(source, filename=rel)
+    except SyntaxError:
+        return out
+    for node in _wla_ast.walk(tree):
+        if (
+            rel not in _WLA_SQLITE_CONNECT_ALLOWLIST
+            and isinstance(node, _wla_ast.Call)
+            and isinstance(node.func, _wla_ast.Attribute)
+            and node.func.attr == "connect"
+            and isinstance(node.func.value, _wla_ast.Name)
+            and node.func.value.id == "sqlite3"
+        ):
+            out["direct_sqlite_connect"].append(node.lineno)
+    return out
+
+
+def _wla_scan_all() -> dict:
+    """Scan src/ + scripts/ with mtime-keyed cache; return aggregated violations."""
+    cache = _wla_load_cache()
+    new_cache: dict = {}
+    aggregate: dict = {"direct_sqlite_connect": []}
+    for root in _WLA_SCAN_ROOTS:
+        if not root.exists():
+            continue
+        for py_file in root.rglob("*.py"):
+            try:
+                mtime = py_file.stat().st_mtime
+            except OSError:
+                continue
+            rel = py_file.relative_to(_WLA_REPO_ROOT).as_posix()
+            cached = cache.get(rel)
+            if cached and cached.get("mtime") == mtime:
+                violations = cached["violations"]
+            else:
+                violations = _wla_scan_file(py_file)
+            new_cache[rel] = {"mtime": mtime, "violations": violations}
+            for kind, linenos in violations.items():
+                for lineno in linenos:
+                    aggregate.setdefault(kind, []).append(f"{rel}:{lineno}")
+    _wla_save_cache(new_cache)
+    return aggregate
+
+
+def pytest_configure(config) -> None:
+    """Run the writer-lock antibody once at session-configure time.
+
+    Phase 0 posture: report findings via warning, do NOT fail the run. The
+    antibody hardens to a fail-the-run posture in Phase 1.x once production
+    retrofits are in place (plan §5 step 1.x).
+    """
+    if _wla_is_bypassed():
+        config.issue_config_time_warning(
+            UserWarning(
+                "writer-lock antibody bypassed via "
+                "ZEUS_DISABLE_WRITER_LOCK_ANTIBODY=1"
+            ),
+            stacklevel=1,
+        )
+        return
+    aggregate = _wla_scan_all()
+    findings = aggregate.get("direct_sqlite_connect", [])
+    if findings:
+        # Phase 0: report via warning only; not a CI gate yet.
+        # Format the allowlist directly into the message so it stays in
+        # sync with `_WLA_SQLITE_CONNECT_ALLOWLIST` if entries are added
+        # in Phase 1.x (PR #81 review feedback).
+        allowlist_str = ", ".join(sorted(_WLA_SQLITE_CONNECT_ALLOWLIST))
+        config.issue_config_time_warning(
+            UserWarning(
+                "writer-lock antibody (Phase 0 informational): "
+                f"{len(findings)} direct sqlite3.connect() site(s) outside "
+                f"allowlist [{allowlist_str}]. Examples: "
+                f"{findings[:3]}. Phase 1.x will tighten this to fail-CI."
+            ),
+            stacklevel=1,
+        )

@@ -1400,13 +1400,14 @@ def load_portfolio(path: Optional[Path] = None) -> PortfolioState:
         mode_override = current_mode
 
     try:
+        # v4 plan §AX3: portfolio loader runs in the live cycle path.
         trade_db = path.parent / "zeus_trades.db"
         if trade_db.exists():
-            conn = get_connection(trade_db)
+            conn = get_connection(trade_db, write_class="live")
         elif mode_override is not None:
-            conn = get_trade_connection_with_world()
+            conn = get_trade_connection_with_world(write_class="live")
         else:
-            conn = get_connection(path.parent / "zeus.db")
+            conn = get_connection(path.parent / "zeus.db", write_class="live")
     except Exception:
         logger.error(
             "load_portfolio DB connection failed; returning empty portfolio (entries suppressed this cycle)",
@@ -1936,7 +1937,8 @@ def _track_exit(state: PortfolioState, pos: Position) -> None:
     if state.audit_logging_enabled:
         try:
             from src.state.db import get_connection, log_trade_exit
-            conn = get_connection()
+            # v4 plan §AX3: trade exit audit = LIVE (runtime exit path).
+            conn = get_connection(write_class="live")
             log_trade_exit(conn, pos)
             # INFO(DT#1): This commit is exempt from the commit_then_export
             # choke point. The exit audit row is itself the authoritative

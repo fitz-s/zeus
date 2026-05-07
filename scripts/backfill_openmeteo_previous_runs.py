@@ -299,7 +299,7 @@ def _resolve_cities(names: list[str] | None, *, only_missing_forecast_skill: boo
     selected = [cities_by_name[name] for name in names] if names else list(cities)
     if not only_missing_forecast_skill:
         return selected
-    conn = get_world_connection()
+    conn = get_world_connection(write_class="bulk")
     init_schema(conn)
     covered = {
         row[0]
@@ -329,7 +329,7 @@ def run_backfill(
         raise ValueError("start_date must be <= end_date")
 
     selected = _resolve_cities(city_names, only_missing_forecast_skill=only_missing_forecast_skill)
-    conn = get_world_connection()
+    conn = get_world_connection(write_class="bulk")
     init_schema(conn)
     before = conn.execute("SELECT COUNT(*) FROM forecasts").fetchone()[0]
 

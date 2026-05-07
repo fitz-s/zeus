@@ -18,7 +18,7 @@ from src.state.db import get_world_connection, init_schema
 
 
 def main() -> int:
-    conn = get_world_connection()
+    conn = get_world_connection(write_class="bulk")
     init_schema(conn)
 
     # 1. calibration_pairs: cluster := city (each row already has city + cluster)

@@ -564,7 +564,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Source:  {HKO_API_URL}")
     print(f"Station: {HKO_STATION}")
 
-    conn = get_world_connection()
+    conn = get_world_connection(write_class="bulk")
     conn.execute("PRAGMA journal_mode=WAL")
     init_schema(conn)
 

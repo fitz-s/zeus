@@ -46,7 +46,7 @@ def _posterior(row: sqlite3.Row) -> float | None:
 
 
 def run_backfill(*, dry_run: bool = False) -> dict:
-    conn = get_world_connection()
+    conn = get_world_connection(write_class="bulk")
     init_schema(conn)
     rows = conn.execute(
         """

@@ -55,7 +55,7 @@ def run_backfill(*, dry_run: bool = False, min_hours_to_resolution: float = 0.0)
     rows = _snapshot_rows(min_hours_to_resolution=min_hours_to_resolution)
     cities = sorted({row[1] for row in rows})
     if not dry_run and rows:
-        conn = get_world_connection()
+        conn = get_world_connection(write_class="bulk")
         init_schema(conn)
         conn.executemany(
             """

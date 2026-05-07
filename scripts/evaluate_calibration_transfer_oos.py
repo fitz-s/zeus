@@ -661,7 +661,7 @@ def main() -> int:
 
     from src.state.db import get_world_connection
 
-    conn = get_world_connection()
+    conn = get_world_connection(write_class="bulk")
     conn.execute("PRAGMA busy_timeout = 30000")
     logger.info("busy_timeout=30000ms set on connection")
 

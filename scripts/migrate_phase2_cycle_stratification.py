@@ -333,7 +333,7 @@ def main() -> int:
     args = parser.parse_args()
 
     from src.state.db import get_world_connection
-    conn = get_world_connection()
+    conn = get_world_connection(write_class="bulk")
     conn.execute("PRAGMA busy_timeout = 30000")  # 30s wait on lock contention
     logger.info("busy_timeout=30000ms set on connection")
     try:

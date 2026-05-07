@@ -753,7 +753,7 @@ def main() -> int:
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
     else:
-        conn = get_world_connection()
+        conn = get_world_connection(write_class="bulk")
     init_schema(conn)
     apply_v2_schema(conn)
 

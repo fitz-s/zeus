@@ -70,8 +70,12 @@ def get_connection():
 
     Returns a live Connection on success, or None if the DB is transiently
     locked (busy-timeout expired). Any other OperationalError propagates.
+
+    v4 plan §AX3: live trading hot-path; classifies as LIVE so the v4
+    flock topology routes this through the LIVE writer flock once Phase 1
+    retrofits land.
     """
-    conn = connect_or_degrade(_zeus_trade_db_path())
+    conn = connect_or_degrade(_zeus_trade_db_path(), write_class="live")
     if conn is None:
         return None
     # ATTACH world schema (mirrors get_trade_connection_with_world logic).
