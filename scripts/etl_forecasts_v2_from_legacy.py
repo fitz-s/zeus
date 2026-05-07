@@ -66,6 +66,7 @@ PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.state.db import get_world_connection  # noqa: E402
+from src.state.db_writer_lock import WriteClass, db_writer_lock  # noqa: E402
 from src.state.schema.v2_schema import apply_v2_schema  # noqa: E402
 
 logger = logging.getLogger(__name__)
@@ -231,15 +232,17 @@ def main() -> int:
     parser.add_argument("--db", default=None, help="Optional path to world DB.")
     args = parser.parse_args()
 
-    if args.db:
-        conn = sqlite3.connect(args.db)
-    else:
-        conn = get_world_connection(write_class="bulk")
-
-    try:
-        summary = run_etl(conn, apply=args.apply, batch=args.batch)
-    finally:
-        conn.close()
+    from src.state.db import ZEUS_WORLD_DB_PATH  # noqa: PLC0415
+    _lock_path = Path(args.db) if args.db else ZEUS_WORLD_DB_PATH
+    with db_writer_lock(_lock_path, WriteClass.BULK):
+        if args.db:
+            conn = sqlite3.connect(args.db)
+        else:
+            conn = get_world_connection(write_class="bulk")
+        try:
+            summary = run_etl(conn, apply=args.apply, batch=args.batch)
+        finally:
+            conn.close()
 
     _print_summary(summary)
     return 0
