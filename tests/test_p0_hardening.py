@@ -160,7 +160,7 @@ class TestR1DegradedExportNeverVerified:
 
         state = PortfolioState(
             positions=[],
-            bankroll=150.0,
+            bankroll=211.37,
             portfolio_loader_degraded=True,
             authority="degraded",
         )
@@ -817,7 +817,7 @@ class TestRWExecutionTruthWarnings:
 
         portfolio = PortfolioState(
             positions=[self._make_position(state="quarantined", order_id="", trade_id="q-1")],
-            bankroll=150.0,
+            bankroll=211.37,
         )
         warnings = _collect_execution_truth_warnings(portfolio)
         assert len(warnings) == 1
@@ -833,7 +833,7 @@ class TestRWExecutionTruthWarnings:
 
         portfolio = PortfolioState(
             positions=[self._make_position(state="pending_tracked", order_id="", trade_id="p-1")],
-            bankroll=150.0,
+            bankroll=211.37,
         )
         warnings = _collect_execution_truth_warnings(portfolio)
         assert len(warnings) == 1
@@ -854,7 +854,7 @@ class TestRWExecutionTruthWarnings:
                 self._make_position(state="holding", order_id="ord-123", trade_id="a-1"),
                 self._make_position(state="pending_tracked", order_id="ord-456", trade_id="a-2"),
             ],
-            bankroll=150.0,
+            bankroll=211.37,
         )
         warnings = _collect_execution_truth_warnings(portfolio)
         assert warnings == []

@@ -146,6 +146,7 @@ def _insert_unknown_side_effect(
     created_at: datetime | None = None,
     price: float = 0.55,
     size: float = 18.19,
+    final_event: str = "SUBMIT_TIMEOUT_UNKNOWN",
 ) -> None:
     from src.state.venue_command_repo import append_event, insert_command, insert_submission_envelope
     from src.contracts.venue_submission_envelope import VenueSubmissionEnvelope
@@ -215,7 +216,7 @@ def _insert_unknown_side_effect(
         snapshot_checked_at=created.isoformat(),
     )
     append_event(conn, command_id=command_id, event_type="SUBMIT_REQUESTED", occurred_at=created.isoformat())
-    append_event(conn, command_id=command_id, event_type="SUBMIT_TIMEOUT_UNKNOWN", occurred_at=created.isoformat())
+    append_event(conn, command_id=command_id, event_type=final_event, occurred_at=created.isoformat())
     conn.commit()
 
 
@@ -603,9 +604,72 @@ def test_reconciliation_finding_order_converts_unknown_to_acked_or_partial_until
     summary = reconcile_unresolved_commands(conn, client)
     confirmed = conn.execute("SELECT * FROM venue_commands WHERE command_id = ?", ("cmd-m2-confirmed",)).fetchone()
     assert summary["advanced"] >= 1
-    assert confirmed["state"] == "FILLED"
+    assert confirmed["state"] == "REVIEW_REQUIRED"
     assert confirmed["venue_order_id"] == "ord-m2-confirmed"
-    assert "FILL_CONFIRMED" in _events(conn, "cmd-m2-confirmed")
+    assert "REVIEW_REQUIRED" in _events(conn, "cmd-m2-confirmed")
+    assert "FILL_CONFIRMED" not in _events(conn, "cmd-m2-confirmed")
+
+
+def test_review_required_side_effect_still_blocks_same_economic_intent(conn):
+    from src.execution.executor import _live_order
+    from src.state.venue_command_repo import append_event, find_unknown_command_by_economic_intent
+
+    token_id = "tok-m2-review-block"
+    _insert_unknown_side_effect(conn, command_id="cmd-m2-review-block", idem="5" * 32, token_id=token_id)
+    append_event(
+        conn,
+        command_id="cmd-m2-review-block",
+        event_type="REVIEW_REQUIRED",
+        occurred_at=NOW.isoformat(),
+        payload={"reason": "recovery_confirmed_requires_trade_fact"},
+    )
+    conn.commit()
+
+    unresolved = find_unknown_command_by_economic_intent(
+        conn,
+        intent_kind="ENTRY",
+        token_id=token_id,
+        side="BUY",
+        price=0.55,
+        size=18.19,
+    )
+    assert unresolved is not None
+    assert unresolved["state"] == "REVIEW_REQUIRED"
+
+    intent = _make_entry_intent(conn, token_id=token_id)
+    second_client = MagicMock()
+    second_client.v2_preflight.return_value = None
+    with patch("src.data.polymarket_client.PolymarketClient", return_value=second_client):
+        second = _live_order("trade-m2-review-replacement", intent, shares=18.19, conn=conn, decision_id="dec-m2-review-b")
+
+    assert second.status == "unknown_side_effect"
+    assert "economic_intent_duplication" in (second.reason or "")
+    assert second.command_state == "REVIEW_REQUIRED"
+    second_client.place_limit_order.assert_not_called()
+
+
+def test_unknown_state_side_effect_still_blocks_same_economic_intent(conn):
+    from src.state.venue_command_repo import find_unknown_command_by_economic_intent
+
+    token_id = "tok-m2-unknown-block"
+    _insert_unknown_side_effect(
+        conn,
+        command_id="cmd-m2-unknown-block",
+        token_id=token_id,
+        idem="6" * 32,
+        final_event="SUBMIT_UNKNOWN",
+    )
+
+    unresolved = find_unknown_command_by_economic_intent(
+        conn,
+        intent_kind="ENTRY",
+        token_id=token_id,
+        side="BUY",
+        price=0.55,
+        size=18.19,
+    )
+    assert unresolved is not None
+    assert unresolved["state"] == "UNKNOWN"
 
 
 def test_reconciliation_finding_no_order_within_window_permits_safe_replay(conn):

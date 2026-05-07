@@ -32,6 +32,12 @@ import uuid
 from decimal import Decimal, InvalidOperation
 from typing import Any, Iterable, Iterator, Optional
 
+UNRESOLVED_SIDE_EFFECT_STATES: tuple[str, ...] = (
+    "SUBMIT_UNKNOWN_SIDE_EFFECT",
+    "UNKNOWN",
+    "REVIEW_REQUIRED",
+)
+
 
 # ---------------------------------------------------------------------------
 # State transition table (INV-28 / implementation_plan.md §P1.S1)
@@ -1247,12 +1253,14 @@ def find_unknown_command_by_economic_intent(
     size: float,
     exclude_idempotency_key: str | None = None,
 ) -> Optional[dict]:
-    """Find an unresolved unknown-side-effect command with the same economics.
+    """Find an unresolved command with the same economics.
 
     M2 duplicate defense: an actor can change ``decision_id`` and therefore
     derive a different idempotency_key for the same order shape.  While a
     prior post-side-effect submit is still unresolved, the economic intent
     itself (token, side, price, size, intent kind) blocks replacement submits.
+    Recovery/operator-handoff states preserve the same unresolved economic
+    object; they are not allocation or retry clearance.
     """
 
     with _row_factory_as(conn, sqlite3.Row):
@@ -1260,13 +1268,13 @@ def find_unknown_command_by_economic_intent(
             """
             SELECT *
             FROM venue_commands
-            WHERE state = 'SUBMIT_UNKNOWN_SIDE_EFFECT'
+            WHERE state IN (?, ?, ?)
               AND intent_kind = ?
               AND token_id = ?
               AND side = ?
             ORDER BY updated_at DESC, created_at DESC
             """,
-            (intent_kind, token_id, side),
+            (*UNRESOLVED_SIDE_EFFECT_STATES, intent_kind, token_id, side),
         ).fetchall()
     wanted_price = _economic_decimal(price)
     wanted_size = _economic_decimal(size)

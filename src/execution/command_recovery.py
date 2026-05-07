@@ -6,12 +6,14 @@
 At cycle start, scans venue_commands for rows in IN_FLIGHT_STATES and
 reconciles currently-supported side-effect states against venue truth. M2 owns
 SUBMIT_UNKNOWN_SIDE_EFFECT resolution: lookup by known venue_order_id or by
-idempotency-key capability, then convert found orders to ACKED/PARTIAL/FILLED
-or mark safe replay permitted via a terminal SUBMIT_REJECTED payload after the
-window elapses. MATCHED/MINED are optimistic venue observations and stay
-PARTIAL; FILLED is an order observation and only CONFIRMED advances command
-fill finality. Appends durable events that advance state per the §P1.S4
-resolution table. P2/K4 will add chain-truth reconciliation for FILL_CONFIRMED.
+idempotency-key capability, then convert found orders to ACKED/PARTIAL or
+operator REVIEW_REQUIRED, or mark safe replay permitted via a terminal
+SUBMIT_REJECTED payload after the window elapses. MATCHED/MINED/FILLED are
+optimistic venue observations and stay PARTIAL. CONFIRMED order status is not
+fill-economics authority on this command-only recovery path; fill finality must
+flow through explicit venue trade/fill fact paths. Appends durable events that
+advance state per the §P1.S4 resolution table. P2/K4 will add chain-truth
+reconciliation for FILL_CONFIRMED.
 
 Chain reconciliation (FILL_CONFIRMED via on-chain settlement evidence) is OUT
 of scope for P1.S4 — that requires deep chain-state integration. Deferred to
@@ -175,13 +177,19 @@ def _reconcile_row(
                     append_event(
                         conn,
                         command_id=cmd.command_id,
-                        event_type=CommandEventType.FILL_CONFIRMED.value,
+                        event_type=CommandEventType.REVIEW_REQUIRED.value,
                         occurred_at=now,
-                        payload=payload,
+                        payload={
+                            **payload,
+                            "reason": "recovery_confirmed_requires_trade_fact",
+                            "semantic_guard": (
+                                "order_status_confirmed_is_not_fill_economics_authority"
+                            ),
+                        },
                     )
-                    logger.info(
-                        "recovery: command %s SUBMIT_UNKNOWN_SIDE_EFFECT -> FILLED "
-                        "(venue status=%s order %s)",
+                    logger.warning(
+                        "recovery: command %s SUBMIT_UNKNOWN_SIDE_EFFECT -> REVIEW_REQUIRED "
+                        "(venue status=%s order %s; explicit trade fact required)",
                         cmd.command_id, venue_status, venue_order_id,
                     )
                     return "advanced"

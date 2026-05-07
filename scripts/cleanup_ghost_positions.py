@@ -77,7 +77,8 @@ def find_ghosts(cur, today: date):
         settled = False
         if normalized_city and target:
             cur.execute(
-                "SELECT COUNT(*) FROM settlements WHERE city = ? AND target_date = ?",
+                "SELECT COUNT(*) FROM settlements "
+                "WHERE city = ? AND target_date = ? AND authority = 'VERIFIED'",
                 (normalized_city, str(target)),
             )
             settled = cur.fetchone()[0] > 0

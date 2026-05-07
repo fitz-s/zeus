@@ -260,7 +260,7 @@ The full bin set of a market must cover ℤ:
 
 This guarantees every possible `settlement_value` falls in exactly one bin. Because outer bins have `-∞` / `+∞` edges (§5.1), coverage is automatic once the market's inner bins are contiguous.
 
-**If a market's bin set does NOT cover ℤ** (e.g., Polymarket drops the outer bins for some reason, or there's a gap between inner bins), a settlement_value outside the covered range would produce `outcome_yes = 0` for every bin, violating "exactly one winning bin". This is a **market-contract deviation** that must be detected and treated as a data error (log + quarantine the settlement), not silently papered over. `probability_group_integrity` checks this condition.
+**If a market's bin set does NOT cover ℤ** (e.g., Polymarket drops the outer bins for some reason, or there's a gap between inner bins), a settlement_value outside the covered range would produce `outcome_yes = 0` for every bin, violating "exactly one winning bin". This is a **market-contract deviation** that must be detected and treated as a data error (log + quarantine the settlement), not silently glossed over. `probability_group_integrity` checks this condition.
 
 ---
 

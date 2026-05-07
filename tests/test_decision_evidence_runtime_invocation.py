@@ -1,6 +1,9 @@
 # Created: 2026-04-23
-# Last reused/audited: 2026-04-29
+# Last reused/audited: 2026-05-05
+# Lifecycle: created=2026-04-23; last_reviewed=2026-05-05; last_reused=2026-05-05
 # Authority basis: midstream verdict v2 2026-04-23; Phase 1A calibration-maturity gate 2026-04-29
+# Purpose: Lock runtime construction of entry DecisionEvidence on evaluator accept paths.
+# Reuse: Run for evaluator entry decision, day0 accept-path, or DecisionEvidence wiring changes.
 
 """T4.3b DecisionEvidence runtime-invocation antibody.
 
@@ -72,7 +75,7 @@ class _FakeDay0Result:
     a bins-sized array so downstream FDR family scan (which indexes
     p_cal / p_posterior / p_market by bin index) does not overflow."""
 
-    def p_vector(self, bins):
+    def p_vector(self, bins, n_mc=None):
         n = len(bins)
         return np.full(n, 1.0 / n)
 
@@ -116,6 +119,7 @@ class _FakeAnalysis:
                 p_value=0.001,
                 vwmp=0.1,
                 forward_edge=0.1,
+                support_index=0,
             )
         ]
 
@@ -127,8 +131,6 @@ class _FakeAnalysis:
 
 
 class _FakeClob:
-    paper_mode = True
-
     def get_best_bid_ask(self, token_id):
         return (0.1, 0.2, 10.0, 10.0)
 
@@ -218,6 +220,11 @@ def _install_common_mocks(monkeypatch, now: datetime) -> None:
             sources=[],
         ),
     )
+    monkeypatch.setattr(
+        evaluator_module,
+        "_strict_feature_flag",
+        lambda name, default=True: False if name == "ddd_v2_enabled" else default,
+    )
 
 
 def _make_candidate(now: datetime):
@@ -278,14 +285,14 @@ class TestDecisionEvidenceRuntimeInvocation:
         decisions = evaluator_module.evaluate_candidate(
             candidate,
             conn,
-            PortfolioState(bankroll=150.0, positions=[]),
+            PortfolioState(bankroll=211.37, positions=[]),
             _FakeClob(),
             # Drop min_order_usd low enough that the sizing gate ADMITS
             # the edge rather than rejecting it — the critical flip vs
             # tests/test_fdr.py::test_evaluate_candidate_materializes_selection_facts
             # which uses 999999 to force rejection.
             RiskLimits(min_order_usd=0.01),
-            entry_bankroll=150.0,
+            entry_bankroll=211.37,
             decision_time=now,
         )
         conn.close()

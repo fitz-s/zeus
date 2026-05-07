@@ -1,6 +1,6 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-04-30
-# Lifecycle: created=2026-04-27; last_reviewed=2026-04-30; last_reused=2026-04-30
+# Last reused/audited: 2026-05-06
+# Lifecycle: created=2026-04-27; last_reviewed=2026-05-06; last_reused=2026-05-06
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/M5.yaml
 # Purpose: R3 M5 exchange reconciliation sweep antibodies.
 # Reuse: Run when exchange_reconcile, venue facts, findings, heartbeat/cutover reconciliation, or operator finding resolution changes.
@@ -66,6 +66,22 @@ class FakeAdapterWithoutTrades:
 
     def get_positions(self):
         self.calls.append(("get_positions", (), {}))
+        return self.positions
+
+
+class FakeAdapterWithoutFreshness:
+    def __init__(self, *, open_orders=None, trades=None, positions=None):
+        self.open_orders = open_orders or []
+        self.trades = trades or []
+        self.positions = positions or []
+
+    def get_open_orders(self):
+        return self.open_orders
+
+    def get_trades(self):
+        return self.trades
+
+    def get_positions(self):
         return self.positions
 
 
@@ -482,6 +498,314 @@ def test_confirmed_full_size_trade_is_required_for_fill_finality(conn):
     assert conn.execute("SELECT state FROM venue_commands WHERE command_id = 'cmd-m5'").fetchone()["state"] == "FILLED"
 
 
+def test_trade_lifecycle_update_appends_confirmed_after_matched_without_double_counting(conn):
+    from src.execution.exchange_reconcile import run_reconcile_sweep
+
+    seed_command(conn, size=10)
+
+    run_reconcile_sweep(
+        FakeM5Adapter(
+            trades=[trade(trade_id="trade-lifecycle", order_id="ord-m5", size="10", status="MATCHED")]
+        ),
+        conn,
+        context="periodic",
+        observed_at=NOW,
+    )
+    assert conn.execute("SELECT state FROM venue_commands WHERE command_id = 'cmd-m5'").fetchone()["state"] == "PARTIAL"
+
+    second = run_reconcile_sweep(
+        FakeM5Adapter(
+            trades=[
+                trade(
+                    trade_id="trade-lifecycle",
+                    order_id="ord-m5",
+                    size="10.0",
+                    status="CONFIRMED",
+                )
+            ]
+        ),
+        conn,
+        context="periodic",
+        observed_at=NOW + timedelta(seconds=1),
+    )
+
+    trade_rows = conn.execute(
+        """
+        SELECT state, filled_size, local_sequence
+          FROM venue_trade_facts
+         WHERE trade_id = 'trade-lifecycle'
+         ORDER BY local_sequence
+        """
+    ).fetchall()
+    assert [(row["state"], row["local_sequence"]) for row in trade_rows] == [
+        ("MATCHED", 1),
+        ("CONFIRMED", 2),
+    ]
+    assert [finding.kind for finding in second] == []
+    assert event_types(conn)[-1] == "FILL_CONFIRMED"
+    assert conn.execute("SELECT state FROM venue_commands WHERE command_id = 'cmd-m5'").fetchone()["state"] == "FILLED"
+
+    third = run_reconcile_sweep(
+        FakeM5Adapter(
+            trades=[
+                trade(
+                    trade_id="trade-lifecycle",
+                    order_id="ord-m5",
+                    size="10",
+                    status="CONFIRMED",
+                )
+            ],
+            positions=[position(size="10")],
+        ),
+        conn,
+        context="periodic",
+        observed_at=NOW + timedelta(seconds=2),
+    )
+
+    assert conn.execute(
+        "SELECT COUNT(*) FROM venue_trade_facts WHERE trade_id = 'trade-lifecycle'"
+    ).fetchone()[0] == 2
+    assert not any(finding.kind == "position_drift" for finding in third)
+
+
+def test_unknown_trade_status_becomes_finding_not_matched_partial(conn):
+    from src.execution.exchange_reconcile import run_reconcile_sweep
+
+    seed_command(conn, size=10)
+
+    result = run_reconcile_sweep(
+        FakeM5Adapter(
+            open_orders=[order(order_id="ord-m5")],
+            trades=[
+                trade(
+                    trade_id="trade-unknown-state",
+                    order_id="ord-m5",
+                    size="10",
+                    price="0.51",
+                    status="SETTLED",
+                )
+            ],
+        ),
+        conn,
+        context="periodic",
+        observed_at=NOW,
+    )
+
+    assert [finding.kind for finding in result] == ["unrecorded_trade"]
+    assert "exchange_trade_unknown_trade_state" in result[0].evidence_json
+    assert conn.execute("SELECT COUNT(*) FROM venue_trade_facts").fetchone()[0] == 0
+    assert "PARTIAL_FILL_OBSERVED" not in event_types(conn)
+    assert conn.execute("SELECT state FROM venue_commands WHERE command_id = 'cmd-m5'").fetchone()["state"] == "ACKED"
+
+
+def test_trade_lifecycle_regression_after_confirmed_becomes_finding_not_downgrade(conn):
+    from src.execution.exchange_reconcile import run_reconcile_sweep
+
+    seed_command(conn, size=10)
+
+    run_reconcile_sweep(
+        FakeM5Adapter(
+            trades=[trade(trade_id="trade-final", order_id="ord-m5", size="10", status="CONFIRMED")]
+        ),
+        conn,
+        context="periodic",
+        observed_at=NOW,
+    )
+
+    result = run_reconcile_sweep(
+        FakeM5Adapter(
+            trades=[trade(trade_id="trade-final", order_id="ord-m5", size="10", status="FAILED")]
+        ),
+        conn,
+        context="periodic",
+        observed_at=NOW + timedelta(seconds=1),
+    )
+
+    assert [finding.kind for finding in result] == ["unrecorded_trade"]
+    assert "exchange_trade_lifecycle_regression_or_economic_drift" in result[0].evidence_json
+    assert conn.execute(
+        "SELECT COUNT(*) FROM venue_trade_facts WHERE trade_id = 'trade-final'"
+    ).fetchone()[0] == 1
+    assert conn.execute("SELECT state FROM venue_trade_facts WHERE trade_id = 'trade-final'").fetchone()["state"] == "CONFIRMED"
+    assert conn.execute("SELECT state FROM venue_commands WHERE command_id = 'cmd-m5'").fetchone()["state"] == "FILLED"
+
+
+def test_trade_lifecycle_forward_transition_requires_stable_fill_economics(conn):
+    from src.execution.exchange_reconcile import run_reconcile_sweep
+
+    seed_command(conn, size=10)
+
+    run_reconcile_sweep(
+        FakeM5Adapter(
+            trades=[trade(trade_id="trade-economic-drift", order_id="ord-m5", size="5", status="MATCHED")]
+        ),
+        conn,
+        context="periodic",
+        observed_at=NOW,
+    )
+
+    result = run_reconcile_sweep(
+        FakeM5Adapter(
+            trades=[
+                trade(
+                    trade_id="trade-economic-drift",
+                    order_id="ord-m5",
+                    size="10",
+                    status="CONFIRMED",
+                )
+            ],
+            positions=[position(size="5")],
+        ),
+        conn,
+        context="periodic",
+        observed_at=NOW + timedelta(seconds=1),
+    )
+
+    assert [finding.kind for finding in result] == ["unrecorded_trade"]
+    assert "exchange_trade_lifecycle_regression_or_economic_drift" in result[0].evidence_json
+    assert conn.execute(
+        "SELECT COUNT(*) FROM venue_trade_facts WHERE trade_id = 'trade-economic-drift'"
+    ).fetchone()[0] == 1
+    assert conn.execute(
+        "SELECT state, filled_size FROM venue_trade_facts WHERE trade_id = 'trade-economic-drift'"
+    ).fetchone()[:] == ("MATCHED", "5")
+    assert "FILL_CONFIRMED" not in event_types(conn)
+    assert conn.execute("SELECT state FROM venue_commands WHERE command_id = 'cmd-m5'").fetchone()["state"] == "PARTIAL"
+
+
+def test_linked_confirmed_trade_missing_fill_price_becomes_finding_not_fact(conn):
+    from src.execution.exchange_reconcile import run_reconcile_sweep
+
+    seed_command(conn, size=10)
+
+    result = run_reconcile_sweep(
+        FakeM5Adapter(
+            trades=[
+                trade(
+                    trade_id="trade-confirmed-no-price",
+                    order_id="ord-m5",
+                    size="10",
+                    price=None,
+                    status="CONFIRMED",
+                )
+            ]
+        ),
+        conn,
+        context="periodic",
+        observed_at=NOW,
+    )
+
+    assert [finding.kind for finding in result] == ["unrecorded_trade"]
+    assert "exchange_trade_missing_fill_economics" in result[0].evidence_json
+    assert "fill_price" in result[0].evidence_json
+    assert conn.execute("SELECT COUNT(*) FROM venue_trade_facts").fetchone()[0] == 0
+    assert event_types(conn) == ["INTENT_CREATED", "SUBMIT_REQUESTED", "SUBMIT_ACKED"]
+    assert conn.execute("SELECT state FROM venue_commands WHERE command_id = 'cmd-m5'").fetchone()["state"] == "ACKED"
+
+
+def test_linked_confirmed_trade_missing_venue_trade_id_becomes_finding_not_finality(conn):
+    from src.execution.exchange_reconcile import run_reconcile_sweep
+
+    seed_command(conn, size=10)
+
+    result = run_reconcile_sweep(
+        FakeM5Adapter(
+            trades=[
+                trade(
+                    trade_id=None,
+                    order_id="ord-m5",
+                    size="10",
+                    price="0.51",
+                    status="CONFIRMED",
+                )
+            ]
+        ),
+        conn,
+        context="periodic",
+        observed_at=NOW,
+    )
+
+    assert [finding.kind for finding in result] == ["unrecorded_trade"]
+    assert "exchange_trade_missing_venue_trade_identity" in result[0].evidence_json
+    assert conn.execute("SELECT COUNT(*) FROM venue_trade_facts").fetchone()[0] == 0
+    assert event_types(conn) == ["INTENT_CREATED", "SUBMIT_REQUESTED", "SUBMIT_ACKED"]
+    assert conn.execute("SELECT state FROM venue_commands WHERE command_id = 'cmd-m5'").fetchone()["state"] == "ACKED"
+
+
+def test_linked_matched_trade_missing_filled_size_becomes_finding_not_partial(conn):
+    from src.execution.exchange_reconcile import run_reconcile_sweep
+
+    seed_command(conn, size=10)
+
+    result = run_reconcile_sweep(
+        FakeM5Adapter(
+            trades=[
+                trade(
+                    trade_id="trade-matched-no-size",
+                    order_id="ord-m5",
+                    size=None,
+                    price="0.51",
+                    status="MATCHED",
+                )
+            ]
+        ),
+        conn,
+        context="periodic",
+        observed_at=NOW,
+    )
+
+    assert [finding.kind for finding in result] == ["unrecorded_trade"]
+    assert "exchange_trade_missing_fill_economics" in result[0].evidence_json
+    assert "filled_size" in result[0].evidence_json
+    assert conn.execute("SELECT COUNT(*) FROM venue_trade_facts").fetchone()[0] == 0
+    assert "PARTIAL_FILL_OBSERVED" not in event_types(conn)
+    assert conn.execute("SELECT state FROM venue_commands WHERE command_id = 'cmd-m5'").fetchone()["state"] == "ACKED"
+
+
+@pytest.mark.parametrize(
+    ("size", "price", "missing_field"),
+    [
+        ("10", "NaN", "fill_price"),
+        ("10", "Infinity", "fill_price"),
+        ("NaN", "0.51", "filled_size"),
+        ("Infinity", "0.51", "filled_size"),
+    ],
+)
+def test_linked_confirmed_trade_nonfinite_economics_becomes_finding_not_fact(
+    conn,
+    size,
+    price,
+    missing_field,
+):
+    from src.execution.exchange_reconcile import run_reconcile_sweep
+
+    seed_command(conn, size=10)
+
+    result = run_reconcile_sweep(
+        FakeM5Adapter(
+            trades=[
+                trade(
+                    trade_id=f"trade-confirmed-{missing_field}-{size}-{price}",
+                    order_id="ord-m5",
+                    size=size,
+                    price=price,
+                    status="CONFIRMED",
+                )
+            ]
+        ),
+        conn,
+        context="periodic",
+        observed_at=NOW,
+    )
+
+    assert [finding.kind for finding in result] == ["unrecorded_trade"]
+    assert "exchange_trade_missing_fill_economics" in result[0].evidence_json
+    assert missing_field in result[0].evidence_json
+    assert conn.execute("SELECT COUNT(*) FROM venue_trade_facts").fetchone()[0] == 0
+    assert event_types(conn) == ["INTENT_CREATED", "SUBMIT_REQUESTED", "SUBMIT_ACKED"]
+    assert conn.execute("SELECT state FROM venue_commands WHERE command_id = 'cmd-m5'").fetchone()["state"] == "ACKED"
+
+
 def test_stale_or_unsuccessful_venue_reads_are_not_absence_proof(conn):
     from src.execution.exchange_reconcile import run_reconcile_sweep
 
@@ -504,6 +828,35 @@ def test_explicit_fresh_false_is_not_absence_proof(conn):
     append_resting_order_fact(conn)
     adapter = FakeM5Adapter(open_orders=[], trades=[])
     adapter.read_freshness["open_orders"] = {"ok": True, "fresh": False, "captured_at": NOW.isoformat()}
+
+    with pytest.raises(ValueError, match="open_orders venue read is not fresh"):
+        run_reconcile_sweep(adapter, conn, context="periodic", observed_at=NOW)
+
+    assert findings(conn) == []
+    assert conn.execute("SELECT state FROM venue_commands WHERE command_id = 'cmd-m5'").fetchone()["state"] == "ACKED"
+
+
+def test_missing_read_freshness_is_not_absence_proof(conn):
+    from src.execution.exchange_reconcile import run_reconcile_sweep
+
+    seed_command(conn)
+    append_resting_order_fact(conn)
+    adapter = FakeAdapterWithoutFreshness(open_orders=[], trades=[])
+
+    with pytest.raises(ValueError, match="open_orders venue read freshness is unavailable"):
+        run_reconcile_sweep(adapter, conn, context="periodic", observed_at=NOW)
+
+    assert findings(conn) == []
+    assert conn.execute("SELECT state FROM venue_commands WHERE command_id = 'cmd-m5'").fetchone()["state"] == "ACKED"
+
+
+def test_transport_ok_without_explicit_freshness_is_not_absence_proof(conn):
+    from src.execution.exchange_reconcile import run_reconcile_sweep
+
+    seed_command(conn)
+    append_resting_order_fact(conn)
+    adapter = FakeM5Adapter(open_orders=[], trades=[])
+    adapter.read_freshness["open_orders"] = {"ok": True, "captured_at": NOW.isoformat()}
 
     with pytest.raises(ValueError, match="open_orders venue read is not fresh"):
         run_reconcile_sweep(adapter, conn, context="periodic", observed_at=NOW)
@@ -546,7 +899,7 @@ def test_real_adapter_missing_read_surface_is_not_absence_proof(conn):
         client_factory=lambda **_: ClientWithoutReads(),
     )
 
-    with pytest.raises(V2ReadUnavailable):
+    with pytest.raises(ValueError, match="open_orders venue read freshness is unavailable"):
         run_reconcile_sweep(adapter, conn, context="periodic", observed_at=NOW)
 
     assert findings(conn) == []

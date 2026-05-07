@@ -550,7 +550,7 @@ class TestRecoveryResolutionTable:
         assert "PARTIAL_FILL_OBSERVED" in event_types
         assert "FILL_CONFIRMED" not in event_types
 
-    def test_unknown_side_effect_confirmed_reaches_fill_finality(
+    def test_unknown_side_effect_confirmed_requires_trade_fact_review(
         self,
         conn,
     ):
@@ -566,9 +566,15 @@ class TestRecoveryResolutionTable:
         summary = reconcile_unresolved_commands(conn, client)
 
         assert summary["advanced"] == 1
-        assert _get_state(conn, "cmd-001") == "FILLED"
+        assert _get_state(conn, "cmd-001") == "REVIEW_REQUIRED"
         event_types = [e["event_type"] for e in _get_events(conn, "cmd-001")]
-        assert "FILL_CONFIRMED" in event_types
+        assert "REVIEW_REQUIRED" in event_types
+        assert "FILL_CONFIRMED" not in event_types
+        import json
+        review = [e for e in _get_events(conn, "cmd-001") if e["event_type"] == "REVIEW_REQUIRED"][0]
+        payload = json.loads(review["payload_json"])
+        assert payload["reason"] == "recovery_confirmed_requires_trade_fact"
+        assert payload["semantic_guard"] == "order_status_confirmed_is_not_fill_economics_authority"
 
     # Supplementary: summary dict has all expected keys
     def test_summary_has_all_keys(self, conn, mock_client):

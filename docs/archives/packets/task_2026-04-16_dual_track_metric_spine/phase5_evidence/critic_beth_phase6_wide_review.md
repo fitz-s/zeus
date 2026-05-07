@@ -112,7 +112,7 @@ This is the EXACT class of finding I flagged in my own P5→P6 learnings doc §5
 
 - **L0/L0.0**: Authority re-loaded post-subagent-start. Peer-not-suspect applied to self — prior PASS wrong, re-verified. Zero discipline findings on teammates. Team-lead "115 failed" vs my "138 failed" = tier 2 env delta (same category as test_automation_analysis.py WU_API_KEY gating etc.). Not escalating.
 - **L1** INV/FM: RemainingMemberExtrema dataclass invariants sharp. Triad preserved through Day0SignalInputs typed object.
-- **L2** Forbidden Moves: paper-mode not reintroduced. No `--track` flags. No Phase 7/8 scope bundled.
+- **L2** Forbidden Moves: obsolete non-live runtime not reintroduced. No `--track` flags. No Phase 7/8 scope bundled.
 - **L3** Silent fallbacks: `remaining_member_maxes_for_day0` backward-compat alias at day0_window.py:76-90 — vestigial-defense pattern, comment says "Remove after all callsites confirmed updated" (4 test callers still reference it). Not a runtime hazard; forward-log.
 - **L4** Source authority: Router-at-construction enforces HIGH/LOW dispatch. Day0LowNowcastSignal AST-clean.
 - **L5** Phase boundary: no 5A/5B/5C contracts regressed except the Phase 1 R2 antibody (MAJOR-1 above).

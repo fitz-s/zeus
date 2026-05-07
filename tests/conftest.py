@@ -25,14 +25,9 @@ def _bankroll_provider_test_isolation(monkeypatch):
     Polymarket endpoint during pytest collection, AND the module-level cache
     would leak real wallet values across tests.
 
-    Default behaviour: every test gets a deterministic
-    ``BankrollOfRecord(value_usd=150.0, source='polymarket_wallet',
-    authority='canonical')`` as an arbitrary but stable fixture value.
-    Historical note: the 150.0 number predates the 2026-05-04 bankroll
-    truth-chain cleanup (when production stopped relying on the now-removed
-    ``settings.capital_base_usd = 150`` literal). The fixture keeps the same
-    number purely to avoid churn in legacy assertions; it carries no
-    production semantics. Tests that need a different wallet value
+    Default behaviour: every test gets a deterministic non-config wallet
+    fixture with canonical authority. The value is deliberately not tied to
+    historical capital-base settings; tests that need a different wallet value
     monkeypatch ``src.runtime.bankroll_provider.current`` over this default.
     Live fetches are explicitly forbidden — ``_fetch_balance`` raises if any
     path slips through the default.
@@ -45,7 +40,7 @@ def _bankroll_provider_test_isolation(monkeypatch):
 
     def _default_current(**_kwargs):
         return bankroll_provider.BankrollOfRecord(
-            value_usd=150.0,
+            value_usd=211.37,
             fetched_at=datetime.now(timezone.utc).isoformat(),
             source="polymarket_wallet",
             authority="canonical",

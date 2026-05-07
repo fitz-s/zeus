@@ -14,6 +14,7 @@ CycleRunner does not contain exit business logic.
 """
 
 import logging
+import math
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -133,6 +134,7 @@ def place_sell_order(
     current_price: float,
     best_bid: float | None = None,
     executable_snapshot_id: str = "",
+    executable_snapshot_hash: str = "",
     executable_snapshot_min_tick_size: str | None = None,
     executable_snapshot_min_order_size: str | None = None,
     executable_snapshot_neg_risk: bool | None = None,
@@ -147,6 +149,7 @@ def place_sell_order(
         current_price=current_price,
         best_bid=best_bid,
         executable_snapshot_id=executable_snapshot_id,
+        executable_snapshot_hash=executable_snapshot_hash,
         executable_snapshot_min_tick_size=executable_snapshot_min_tick_size,
         executable_snapshot_min_order_size=executable_snapshot_min_order_size,
         executable_snapshot_neg_risk=executable_snapshot_neg_risk,
@@ -640,9 +643,16 @@ def _execute_live_exit(
 
         # Quick fill check (non-blocking — next cycle does full check)
         if order_id and clob:
-            status, _ = _check_order_fill(clob, order_id)
+            status, status_payload = _check_order_fill(clob, order_id)
             if status in FILL_STATUSES:
-                actual_price = _extract_fill_price(sell_result, current_market_price, best_bid)
+                actual_price = _extract_fill_price(status_payload)
+                if actual_price is None:
+                    _mark_exit_fill_economics_missing(
+                        position,
+                        status=status,
+                        order_id=order_id,
+                    )
+                    return f"sell_pending: order={order_id}, status={status}, missing_fill_price"
                 phase_before = _canonical_phase_before_for_economic_close(position)
                 closed = compute_economic_close(portfolio, position.trade_id, actual_price, exit_context.exit_reason)
                 if closed is not None:
@@ -768,8 +778,14 @@ def _latest_exit_snapshot_context(
         conn.row_factory = saved
     if row is None:
         return {}
+    from src.state.snapshot_repo import get_snapshot
+
+    snapshot_id = str(row["snapshot_id"])
+    snapshot = get_snapshot(conn, snapshot_id)
+    snapshot_hash = str(snapshot.executable_snapshot_hash or "") if snapshot is not None else ""
     return {
-        "executable_snapshot_id": str(row["snapshot_id"]),
+        "executable_snapshot_id": snapshot_id,
+        "executable_snapshot_hash": snapshot_hash,
         "executable_snapshot_min_tick_size": str(row["min_tick_size"]),
         "executable_snapshot_min_order_size": str(row["min_order_size"]),
         "executable_snapshot_neg_risk": bool(row["neg_risk"]),
@@ -865,8 +881,13 @@ def _latest_or_capture_exit_snapshot_context(
                 token_id,
             )
             return {}
+        from src.state.snapshot_repo import get_snapshot
+
+        snapshot = get_snapshot(conn, snapshot_id)
+        snapshot_hash = str(snapshot.executable_snapshot_hash or "") if snapshot is not None else ""
         return {
             "executable_snapshot_id": snapshot_id,
+            "executable_snapshot_hash": snapshot_hash,
             "executable_snapshot_min_tick_size": fields.get("executable_snapshot_min_tick_size"),
             "executable_snapshot_min_order_size": fields.get("executable_snapshot_min_order_size"),
             "executable_snapshot_neg_risk": fields.get("executable_snapshot_neg_risk"),
@@ -889,10 +910,30 @@ def _payload_decimal(payload: object, *keys: str) -> Decimal | None:
         if value in (None, ""):
             continue
         try:
-            return Decimal(str(value))
+            decimal = Decimal(str(value))
         except (InvalidOperation, ValueError):
             continue
+        if decimal.is_finite():
+            return decimal
     return None
+
+
+def _payload_has_invalid_decimal(payload: object, *keys: str) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    for key in keys:
+        if key not in payload:
+            continue
+        value = payload.get(key)
+        if value in (None, ""):
+            continue
+        try:
+            decimal = Decimal(str(value))
+        except (InvalidOperation, ValueError):
+            return True
+        if not decimal.is_finite():
+            return True
+    return False
 
 
 def _partial_exit_delta(
@@ -903,19 +944,8 @@ def _partial_exit_delta(
 ) -> tuple[float, float] | None:
     """Return (newly_filled_shares, remaining_shares) for a partial exit fill."""
 
-    open_shares = Decimal(str(max(0.0, float(current_open_shares))))
-    if open_shares <= 0:
-        return None
-    remaining = _payload_decimal(
-        payload,
-        "remaining_size",
-        "remainingSize",
-        "remaining",
-        "open_size",
-        "openSize",
-    )
-    cumulative_filled = _payload_decimal(
-        payload,
+    remaining_keys = ("remaining_size", "remainingSize", "remaining", "open_size", "openSize")
+    cumulative_keys = (
         "filled_size",
         "filledSize",
         "matched_size",
@@ -923,6 +953,13 @@ def _partial_exit_delta(
         "filled",
         "matched",
     )
+    if _payload_has_invalid_decimal(payload, *remaining_keys, *cumulative_keys):
+        return None
+    open_shares = Decimal(str(max(0.0, float(current_open_shares))))
+    if open_shares <= 0:
+        return None
+    remaining = _payload_decimal(payload, *remaining_keys)
+    cumulative_filled = _payload_decimal(payload, *cumulative_keys)
     if remaining is None and cumulative_filled is not None:
         remaining = open_shares - cumulative_filled
     if remaining is None:
@@ -988,6 +1025,35 @@ def _apply_partial_exit_fill(
         position.cost_basis_usd = original_cost * remaining_ratio
     position.exit_state = "sell_pending"
     return True
+
+
+def _log_partial_exit_execution_fact(
+    conn: sqlite3.Connection,
+    position: Position,
+    *,
+    status: str,
+    fill_price: float,
+    filled_shares: float,
+) -> None:
+    from src.state.db import log_execution_fact
+
+    log_execution_fact(
+        conn,
+        intent_id=f"{getattr(position, 'trade_id', '')}:exit",
+        position_id=getattr(position, "trade_id", ""),
+        order_role="exit",
+        strategy_key=str(
+            getattr(position, "strategy_key", "")
+            or getattr(position, "strategy", "")
+            or ""
+        )
+        or None,
+        filled_at=_utcnow().isoformat(),
+        fill_price=fill_price,
+        shares=filled_shares,
+        venue_status=status or "PARTIAL",
+        terminal_exec_status=status or "PARTIAL",
+    )
 
 
 def check_pending_exits(
@@ -1060,11 +1126,15 @@ def check_pending_exits(
 
         if status in FILL_STATUSES:
             # Filled! Close the position.
-            actual_price = _extract_fill_price(
-                status_payload,
-                pos.last_monitor_market_price or pos.entry_price,
-                getattr(pos, "last_monitor_best_bid", None),
-            )
+            actual_price = _extract_fill_price(status_payload)
+            if actual_price is None:
+                _mark_exit_fill_economics_missing(
+                    pos,
+                    status=status,
+                    order_id=pos.last_exit_order_id,
+                )
+                stats["unchanged"] += 1
+                continue
             exit_reason = pos.exit_reason or "DEFERRED_SELL_FILL"
             phase_before = _canonical_phase_before_for_economic_close(pos)
             closed = compute_economic_close(portfolio, pos.trade_id, actual_price, exit_reason)
@@ -1106,19 +1176,22 @@ def check_pending_exits(
             )
             if partial:
                 filled_shares, remaining_shares = partial
-                actual_price = _extract_fill_price(
-                    status_payload,
-                    pos.last_monitor_market_price or pos.entry_price,
-                    getattr(pos, "last_monitor_best_bid", None),
-                )
-                partial_applied = _apply_partial_exit_fill(
-                    pos,
-                    filled_shares=filled_shares,
-                    remaining_shares=remaining_shares,
-                    fill_price=actual_price,
-                    order_id=pos.last_exit_order_id,
-                    status=status,
-                )
+                actual_price = _extract_fill_price(status_payload)
+                if actual_price is None:
+                    _mark_exit_fill_economics_missing(
+                        pos,
+                        status=status,
+                        order_id=pos.last_exit_order_id,
+                    )
+                else:
+                    partial_applied = _apply_partial_exit_fill(
+                        pos,
+                        filled_shares=filled_shares,
+                        remaining_shares=remaining_shares,
+                        fill_price=actual_price,
+                        order_id=pos.last_exit_order_id,
+                        status=status,
+                    )
                 if partial_applied and conn is not None:
                     log_exit_attempt_event(
                         conn,
@@ -1132,8 +1205,17 @@ def check_pending_exits(
                             "semantic_event": "EXIT_ORDER_PARTIAL_FILL_OBSERVED",
                             "filled_shares": filled_shares,
                             "remaining_shares": remaining_shares,
+                            "fill_price": actual_price,
                         },
                     )
+                    if status not in VOID_STATUSES:
+                        _log_partial_exit_execution_fact(
+                            conn,
+                            pos,
+                            status=status or "PARTIAL",
+                            fill_price=actual_price,
+                            filled_shares=filled_shares,
+                        )
             if status in VOID_STATUSES:
                 _mark_exit_retry(pos, reason=f"SELL_{status}", error=status)
                 if conn is not None:
@@ -1145,6 +1227,14 @@ def check_pending_exits(
                         error=status,
                     )
                     log_exit_retry_event(conn, pos, reason=f"SELL_{status}", error=status)
+                    if partial_applied and actual_price is not None:
+                        _log_partial_exit_execution_fact(
+                            conn,
+                            pos,
+                            status=status or "PARTIAL",
+                            fill_price=actual_price,
+                            filled_shares=filled_shares,
+                        )
                 stats["retried"] += 1
             elif partial_applied:
                 stats["unchanged"] += 1
@@ -1236,7 +1326,7 @@ def _coerce_sell_result(trade_id: str, sell_result: OrderResult | dict) -> Order
             submitted_price=sell_result.get("price"),
             shares=sell_result.get("shares"),
             venue_status=str(sell_result.get("status") or "placed"),
-            fill_price=sell_result.get("avgPrice") or sell_result.get("avg_price") or sell_result.get("price"),
+            fill_price=_first_explicit_fill_price(sell_result),
             reason="sell order posted",
             order_role="exit",
         )
@@ -1264,22 +1354,49 @@ def _serialize_sell_result(sell_result: OrderResult | dict) -> dict:
 
 def _extract_fill_price(
     sell_result: OrderResult | dict | object,
-    current_market_price: float,
-    best_bid: Optional[float] = None,
-) -> float:
-    """Extract actual fill price from sell result. Fall back to best_bid or market."""
+) -> Optional[float]:
+    """Extract explicit venue fill price only."""
     if isinstance(sell_result, OrderResult) and sell_result.fill_price not in (None, ""):
-        try:
-            return float(sell_result.fill_price)
-        except (TypeError, ValueError):
-            pass
-    for key in ("avgPrice", "avg_price", "price"):
-        if isinstance(sell_result, dict) and key in sell_result and sell_result[key] not in (None, ""):
-            try:
-                return float(sell_result[key])
-            except (TypeError, ValueError):
-                continue
-    return best_bid if best_bid is not None else current_market_price
+        return _positive_finite_float(sell_result.fill_price)
+    if isinstance(sell_result, dict):
+        return _first_explicit_fill_price(sell_result)
+    return None
+
+
+def _first_explicit_fill_price(payload: dict) -> Optional[float]:
+    for key in ("avgPrice", "avg_price", "fillPrice", "fill_price"):
+        if key in payload and payload[key] not in (None, ""):
+            value = _positive_finite_float(payload[key])
+            if value is not None:
+                return value
+    return None
+
+
+def _positive_finite_float(value: object) -> Optional[float]:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(numeric) or numeric <= 0.0 or numeric > 1.0:
+        return None
+    return numeric
+
+
+def _mark_exit_fill_economics_missing(
+    position: Position,
+    *,
+    status: str,
+    order_id: str,
+) -> None:
+    _mark_pending_exit(position)
+    position.exit_state = "sell_pending"
+    position.last_exit_error = "missing_exit_fill_price"
+    logger.error(
+        "Exit fill price missing for %s order=%s status=%s; holding pending exit",
+        position.trade_id,
+        order_id,
+        status,
+    )
 
 
 def _mark_exit_retry(

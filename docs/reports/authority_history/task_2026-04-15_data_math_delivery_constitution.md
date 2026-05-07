@@ -36,7 +36,7 @@ This packet exists to:
   - authority lineage must remain `VERIFIED`-aware.
 
 - Stale authority cleanup:
-  - remove active paper-mode support claims,
+  - remove active non-live execution support claims,
   - remove stale replay limitation prose,
   - remove stale alpha-override route claims.
 

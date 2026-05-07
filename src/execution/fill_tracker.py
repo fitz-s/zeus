@@ -11,7 +11,9 @@ before CLOB fill verification resolves. Do not create a third semantic owner.
 import hashlib
 import json
 import logging
+import math
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 from types import SimpleNamespace
 from typing import Any, Optional
 
@@ -22,7 +24,9 @@ from src.state.lifecycle_manager import (
 from src.state.portfolio import (
     CORRECTED_EXECUTABLE_PRICING_SEMANTICS_VERSION,
     ENTRY_ECONOMICS_AVG_FILL_PRICE,
+    ENTRY_ECONOMICS_OPTIMISTIC_MATCH_PRICE,
     FILL_AUTHORITY_CANCELLED_REMAINDER,
+    FILL_AUTHORITY_NONE,
     FILL_AUTHORITY_OPTIMISTIC_SUBMITTED,
     FILL_AUTHORITY_VENUE_CONFIRMED_FULL,
     FILL_AUTHORITY_VENUE_CONFIRMED_PARTIAL,
@@ -34,9 +38,13 @@ from src.state.portfolio import (
 logger = logging.getLogger(__name__)
 
 FILL_STATUSES = frozenset({"CONFIRMED"})
-OPTIMISTIC_FILL_STATUSES = frozenset({"MATCHED", "FILLED"})
+OPTIMISTIC_FILL_STATUSES = frozenset({"MATCHED", "MINED", "FILLED"})
 PARTIAL_FILL_STATUSES = frozenset({"PARTIAL", "PARTIALLY_MATCHED", "PARTIALLY_FILLED"})
 CANCEL_STATUSES = frozenset({"CANCELLED", "CANCELED", "EXPIRED", "REJECTED"})
+FILL_AUTHORITY_QUARANTINE_REVIEW_REQUIRED = "FILL_AUTHORITY_QUARANTINE_REVIEW_REQUIRED"
+FILL_LEDGER_QUARANTINE_REVIEW_REQUIRED = "FILL_LEDGER_QUARANTINE_REVIEW_REQUIRED"
+FILL_CANONICAL_WRITE_QUARANTINE_REVIEW_REQUIRED = "FILL_CANONICAL_WRITE_QUARANTINE_REVIEW_REQUIRED"
+VOID_CANONICAL_WRITE_QUARANTINE_REVIEW_REQUIRED = "VOID_CANONICAL_WRITE_QUARANTINE_REVIEW_REQUIRED"
 
 # Void pending entries after this many cycles without resolution
 MAX_PENDING_CYCLES_WITHOUT_ORDER_ID = 2
@@ -106,11 +114,10 @@ def _resolve_now(now: datetime | None, deps=None) -> datetime:
 
 
 def _fill_statuses(deps=None):
-    statuses = frozenset(getattr(deps, "PENDING_FILL_STATUSES", FILL_STATUSES))
-    # Older runtime deps exported MATCHED/FILLED as fill statuses. Keep those
-    # stale constants from bypassing the explicit optimistic-finality branch,
-    # but never let stale deps remove CONFIRMED as the only success terminal.
-    return (statuses | FILL_STATUSES) - OPTIMISTIC_FILL_STATUSES - PARTIAL_FILL_STATUSES
+    # Older runtime deps exported MATCHED/FILLED/MINED as fill statuses. Fill
+    # success is intentionally not dependency-extensible: only CONFIRMED may
+    # promote full fill authority.
+    return FILL_STATUSES
 
 
 def _cancel_statuses(deps=None):
@@ -118,11 +125,13 @@ def _cancel_statuses(deps=None):
 
 
 def _optimistic_fill_statuses(deps=None):
-    return getattr(deps, "PENDING_OPTIMISTIC_FILL_STATUSES", OPTIMISTIC_FILL_STATUSES)
+    statuses = frozenset(getattr(deps, "PENDING_OPTIMISTIC_FILL_STATUSES", OPTIMISTIC_FILL_STATUSES))
+    return statuses | OPTIMISTIC_FILL_STATUSES
 
 
 def _partial_fill_statuses(deps=None):
-    return getattr(deps, "PENDING_PARTIAL_FILL_STATUSES", PARTIAL_FILL_STATUSES)
+    statuses = frozenset(getattr(deps, "PENDING_PARTIAL_FILL_STATUSES", PARTIAL_FILL_STATUSES))
+    return statuses | PARTIAL_FILL_STATUSES
 
 
 def _parse_iso(value: str | None) -> datetime | None:
@@ -224,7 +233,11 @@ def _maybe_log_execution_fill(
             pos,
             SimpleNamespace(
                 status=execution_status,
-                fill_price=getattr(pos, "entry_price", None),
+                fill_price=(
+                    getattr(pos, "entry_price_avg_fill", None)
+                    if getattr(pos, "has_fill_economics_authority", False)
+                    else getattr(pos, "entry_price", None)
+                ),
                 filled_at=getattr(pos, "entered_at", None),
                 submitted_price=submitted_price,
                 shares=shares,
@@ -257,7 +270,7 @@ def _maybe_append_venue_fill_observation(
     Order polling often exposes order facts without trade identity. We record
     those order facts when a venue command is linkable, but never synthesize a
     trade id. Trade facts and lots are written only when the payload carries
-    explicit trade identity.
+    explicit trade identity and explicit fill economics.
     """
     if deps is None or not hasattr(deps, "get_connection"):
         return True
@@ -292,6 +305,15 @@ def _maybe_append_venue_fill_observation(
         payload_dict = payload if isinstance(payload, dict) else {"raw": payload}
         payload_hash = _payload_hash(payload_dict)
         trade_id = _extract_trade_id(payload_dict)
+        explicit_trade_status = _first_text(
+            payload_dict,
+            "trade_status",
+            "tradeStatus",
+            "trade_state",
+            "tradeState",
+        )
+        trade_state = _trade_fact_state_for_status(status, payload_dict)
+        unsupported_explicit_trade_status = bool(explicit_trade_status and trade_state is None)
         order_fact_state = _order_fact_state_for_status(status)
         order_fact_id = None
         if order_fact_state is not None:
@@ -309,11 +331,26 @@ def _maybe_append_venue_fill_observation(
                 raw_payload_json=payload_dict,
             )
             if not trade_id:
+                confirmed_without_trade = str(status or "").upper() == "CONFIRMED"
                 event_type = (
-                    "FILL_CONFIRMED"
-                    if str(status or "").upper() == "CONFIRMED"
+                    "REVIEW_REQUIRED"
+                    if confirmed_without_trade or unsupported_explicit_trade_status
                     else "PARTIAL_FILL_OBSERVED"
                 )
+                reason_payload = {}
+                if confirmed_without_trade:
+                    reason_payload = {
+                        "reason": "poll_confirmed_requires_trade_fact",
+                        "semantic_guard": (
+                            "order_status_confirmed_is_not_fill_economics_authority"
+                        ),
+                    }
+                elif unsupported_explicit_trade_status:
+                    reason_payload = {
+                        "reason": "poll_unknown_trade_status",
+                        "incoming_trade_status": explicit_trade_status,
+                        "semantic_guard": "unknown_trade_lifecycle_is_not_fill_progress_authority",
+                    }
                 try:
                     append_event(
                         conn,
@@ -325,22 +362,135 @@ def _maybe_append_venue_fill_observation(
                             "venue_order_id": order_id,
                             "order_fact_id": order_fact_id,
                             "status": status,
+                            **reason_payload,
                         },
                     )
                 except ValueError:
                     pass
+                if unsupported_explicit_trade_status:
+                    conn.commit()
+                    return False
 
-        trade_state = _trade_fact_state_for_status(status, payload_dict)
         trade_fact_id = None
-        if trade_id and trade_state:
+        if trade_id and unsupported_explicit_trade_status:
+            try:
+                append_event(
+                    conn,
+                    command_id=str(command["command_id"]),
+                    event_type="REVIEW_REQUIRED",
+                    occurred_at=observed_at.isoformat(),
+                    payload={
+                        "source": "REST",
+                        "venue_order_id": order_id,
+                        "trade_id": trade_id,
+                        "status": status,
+                        "reason": "poll_unknown_trade_status",
+                        "incoming_trade_status": explicit_trade_status,
+                        "semantic_guard": "unknown_trade_lifecycle_is_not_fill_progress_authority",
+                    },
+                )
+            except ValueError:
+                pass
+            conn.commit()
+            return False
+        if trade_id and trade_state and _has_explicit_fill_economics(
+            shares=shares,
+            fill_price=fill_price,
+        ):
+            filled_size = _decimal_str(shares, "0")
+            fill_price_s = _decimal_str(fill_price, "0")
+            latest_fact = _latest_trade_fact_for_trade_id(conn, trade_id)
+            if latest_fact is not None:
+                identity_mismatch = []
+                if str(latest_fact.get("command_id") or "") != str(command.get("command_id") or ""):
+                    identity_mismatch.append("command_id")
+                if str(latest_fact.get("venue_order_id") or "") != str(order_id):
+                    identity_mismatch.append("venue_order_id")
+                if identity_mismatch:
+                    _append_trade_lifecycle_review_required(
+                        conn,
+                        append_event=append_event,
+                        command=command,
+                        order_id=order_id,
+                        trade_id=trade_id,
+                        trade_state=trade_state,
+                        observed_at=observed_at,
+                        latest_fact=latest_fact,
+                        reason="poll_trade_identity_conflict",
+                        payload_extra={"mismatch": identity_mismatch},
+                    )
+                    conn.commit()
+                    return False
+                same_fill_economics = _same_trade_fill_economics(
+                    latest_fact,
+                    filled_size=filled_size,
+                    fill_price=fill_price_s,
+                )
+                if (
+                    same_fill_economics
+                    and trade_state in {"FAILED", "RETRYING"}
+                    and str(latest_fact.get("state") or "") == trade_state
+                ):
+                    _append_trade_lifecycle_review_required(
+                        conn,
+                        append_event=append_event,
+                        command=command,
+                        order_id=order_id,
+                        trade_id=trade_id,
+                        trade_state=trade_state,
+                        observed_at=observed_at,
+                        latest_fact=latest_fact,
+                        reason="poll_trade_status_not_fill_authority",
+                    )
+                    conn.commit()
+                    return False
+                if same_fill_economics and str(latest_fact.get("state") or "") == trade_state:
+                    conn.commit()
+                    return True
+                if not same_fill_economics:
+                    _append_trade_lifecycle_review_required(
+                        conn,
+                        append_event=append_event,
+                        command=command,
+                        order_id=order_id,
+                        trade_id=trade_id,
+                        trade_state=trade_state,
+                        observed_at=observed_at,
+                        latest_fact=latest_fact,
+                        reason="poll_trade_lifecycle_regression_or_economic_drift",
+                        payload_extra={
+                            "incoming_filled_size": filled_size,
+                            "incoming_fill_price": fill_price_s,
+                        },
+                    )
+                    conn.commit()
+                    return False
+                if not _trade_lifecycle_transition_allowed(str(latest_fact.get("state") or ""), trade_state):
+                    _append_trade_lifecycle_review_required(
+                        conn,
+                        append_event=append_event,
+                        command=command,
+                        order_id=order_id,
+                        trade_id=trade_id,
+                        trade_state=trade_state,
+                        observed_at=observed_at,
+                        latest_fact=latest_fact,
+                        reason="poll_trade_lifecycle_regression_or_economic_drift",
+                        payload_extra={
+                            "incoming_filled_size": filled_size,
+                            "incoming_fill_price": fill_price_s,
+                        },
+                    )
+                    conn.commit()
+                    return False
             trade_fact_id = append_trade_fact(
                 conn,
                 trade_id=trade_id,
                 venue_order_id=order_id,
                 command_id=str(command["command_id"]),
                 state=trade_state,
-                filled_size=_decimal_str(shares, "0"),
-                fill_price=_decimal_str(fill_price, "0"),
+                filled_size=filled_size,
+                fill_price=fill_price_s,
                 source="REST",
                 observed_at=observed_at,
                 venue_timestamp=_payload_timestamp(payload_dict),
@@ -350,6 +500,27 @@ def _maybe_append_venue_fill_observation(
                 block_number=_extract_int(payload_dict, "block_number", "blockNumber"),
                 confirmation_count=_extract_int(payload_dict, "confirmation_count", "confirmationCount"),
             )
+            if trade_state in {"FAILED", "RETRYING"}:
+                try:
+                    append_event(
+                        conn,
+                        command_id=str(command["command_id"]),
+                        event_type="REVIEW_REQUIRED",
+                        occurred_at=observed_at.isoformat(),
+                        payload={
+                            "source": "REST",
+                            "venue_order_id": order_id,
+                            "trade_id": trade_id,
+                            "trade_fact_id": trade_fact_id,
+                            "status": trade_state,
+                            "reason": "poll_trade_status_not_fill_authority",
+                            "semantic_guard": "failed_or_retrying_trade_is_not_fill_progress_authority",
+                        },
+                    )
+                except ValueError:
+                    pass
+                conn.commit()
+                return False
             lot_state = {
                 "MATCHED": "OPTIMISTIC_EXPOSURE",
                 "CONFIRMED": "CONFIRMED_EXPOSURE",
@@ -443,9 +614,191 @@ def _apply_entry_fill_economics(
     pos.shares_filled = float(shares)
     pos.filled_cost_basis_usd = filled_cost_basis
     pos.shares_remaining = max(0.0, submitted_shares - float(shares))
-    pos.entry_economics_authority = ENTRY_ECONOMICS_AVG_FILL_PRICE
+    pos.entry_economics_authority = (
+        ENTRY_ECONOMICS_OPTIMISTIC_MATCH_PRICE
+        if fill_authority == FILL_AUTHORITY_OPTIMISTIC_SUBMITTED
+        else ENTRY_ECONOMICS_AVG_FILL_PRICE
+    )
     pos.fill_authority = fill_authority
     _refresh_corrected_economics_eligibility(pos)
+
+
+def _has_explicit_fill_economics(
+    *,
+    shares: float | None,
+    fill_price: float | None,
+) -> bool:
+    return _positive_finite(shares) and _positive_finite(fill_price)
+
+
+def _latest_trade_fact_for_trade_id(conn, trade_id: str) -> dict | None:
+    row = conn.execute(
+        """
+        SELECT *
+          FROM venue_trade_facts
+         WHERE trade_id = ?
+         ORDER BY local_sequence DESC, trade_fact_id DESC
+         LIMIT 1
+        """,
+        (trade_id,),
+    ).fetchone()
+    return dict(row) if row is not None else None
+
+
+def _same_decimal_value(left, right) -> bool:
+    try:
+        return Decimal(str(left)) == Decimal(str(right))
+    except (InvalidOperation, TypeError, ValueError):
+        return False
+
+
+def _same_trade_fill_economics(fact: dict, *, filled_size: str, fill_price: str) -> bool:
+    return (
+        _same_decimal_value(fact.get("filled_size"), filled_size)
+        and _same_decimal_value(fact.get("fill_price"), fill_price)
+    )
+
+
+def _trade_lifecycle_transition_allowed(previous: str, current: str) -> bool:
+    if previous == current:
+        return False
+    allowed = {
+        "RETRYING": {"MATCHED", "MINED", "CONFIRMED", "FAILED"},
+        "MATCHED": {"MINED", "CONFIRMED", "FAILED"},
+        "MINED": {"CONFIRMED", "FAILED"},
+        "CONFIRMED": set(),
+        "FAILED": set(),
+    }
+    return current in allowed.get(previous, set())
+
+
+def _append_trade_lifecycle_review_required(
+    conn,
+    *,
+    append_event,
+    command: dict,
+    order_id: str,
+    trade_id: str,
+    trade_state: str,
+    observed_at: datetime,
+    latest_fact: dict,
+    reason: str,
+    payload_extra: dict | None = None,
+) -> None:
+    try:
+        append_event(
+            conn,
+            command_id=str(command["command_id"]),
+            event_type="REVIEW_REQUIRED",
+            occurred_at=observed_at.isoformat(),
+            payload={
+                "source": "REST",
+                "venue_order_id": order_id,
+                "trade_id": trade_id,
+                "status": trade_state,
+                "reason": reason,
+                "existing_trade_fact_id": latest_fact.get("trade_fact_id"),
+                "existing_state": latest_fact.get("state"),
+                "existing_filled_size": latest_fact.get("filled_size"),
+                "existing_fill_price": latest_fact.get("fill_price"),
+                "semantic_guard": "trade_lifecycle_must_preserve_identity_and_fill_economics",
+                **(payload_extra or {}),
+            },
+        )
+    except ValueError:
+        pass
+
+
+def _extract_explicit_fill_price(payload) -> Optional[float]:
+    """Extract venue fill price fields only.
+
+    Generic order ``price`` is intentionally excluded: on order-status polling
+    it can denote submitted limit price, not realized fill price.
+    """
+    return _extract_float(payload, "avgPrice", "avg_price", "fillPrice", "fill_price")
+
+
+def _quarantine_missing_fill_economics(
+    pos: Position,
+    *,
+    status: str,
+    missing: tuple[str, ...],
+) -> tuple[str, bool, bool]:
+    _mark_entry_quarantined(
+        pos,
+        reason=FILL_AUTHORITY_QUARANTINE_REVIEW_REQUIRED,
+        order_status=f"{str(status or 'fill').lower()}_missing_fill_economics",
+    )
+    pos.entry_fill_verified = False
+    pos.fill_authority = FILL_AUTHORITY_NONE
+    _refresh_corrected_economics_eligibility(pos)
+    logger.error(
+        "Fill economics missing for %s status=%s missing=%s; quarantining pending entry",
+        getattr(pos, "trade_id", ""),
+        status,
+        ",".join(missing),
+    )
+    return "still_pending", True, False
+
+
+def _quarantine_missing_fill_authority(
+    pos: Position,
+    *,
+    status: str,
+    missing: tuple[str, ...],
+) -> tuple[str, bool, bool]:
+    reason = "_".join(missing) if missing else "authority"
+    _mark_entry_quarantined(
+        pos,
+        reason=FILL_AUTHORITY_QUARANTINE_REVIEW_REQUIRED,
+        order_status=f"{str(status or 'fill').lower()}_missing_{reason}",
+    )
+    pos.entry_fill_verified = False
+    pos.fill_authority = FILL_AUTHORITY_NONE
+    _refresh_corrected_economics_eligibility(pos)
+    logger.error(
+        "Fill authority missing for %s status=%s missing=%s; quarantining pending entry",
+        getattr(pos, "trade_id", ""),
+        status,
+        ",".join(missing),
+    )
+    return "still_pending", True, False
+
+
+def _semantic_value(value) -> str:
+    return str(getattr(value, "value", value) or "")
+
+
+def _mark_entry_quarantined(pos: Position, *, reason: str, order_status: str) -> None:
+    pos.state = "quarantined"
+    pos.admin_exit_reason = reason
+    pos.exit_reason = reason
+    pos.order_status = order_status
+
+
+def _is_entry_quarantined(pos: Position) -> bool:
+    return _semantic_value(getattr(pos, "state", "")) == "quarantined"
+
+
+def _missing_fill_economics(
+    *,
+    fill_price: float | None,
+    shares: float | None,
+) -> tuple[str, ...]:
+    missing: list[str] = []
+    if not _positive_finite(fill_price):
+        missing.append("fill_price")
+    if not _positive_finite(shares):
+        missing.append("filled_size")
+    return tuple(missing)
+
+
+def _positive_finite(value: float | None) -> bool:
+    try:
+        numeric = float(value or 0.0)
+    except (TypeError, ValueError):
+        return False
+    return math.isfinite(numeric) and numeric > 0.0
 
 
 def _refresh_corrected_economics_eligibility(pos: Position) -> None:
@@ -466,12 +819,16 @@ def _mark_entry_filled(
     deps=None,
 ) -> tuple[str, bool, bool]:
     submitted_price = pos.entry_price
-    fill_price = _extract_float(payload, "avgPrice", "avg_price", "price") or pos.entry_price
-    shares = _extract_filled_shares(payload, allow_order_size_fallback=True)
-    if shares is None and getattr(pos, "shares", 0) not in (None, 0):
-        shares = float(getattr(pos, "shares"))
-    if shares is None and fill_price > 0:
-        shares = pos.size_usd / fill_price
+    fill_price = _extract_explicit_fill_price(payload)
+    shares = _extract_filled_shares(payload, allow_order_size_fallback=False)
+    trade_id = _extract_trade_id(payload if isinstance(payload, dict) else {})
+    missing = _missing_fill_economics(fill_price=fill_price, shares=shares)
+    if missing:
+        return _quarantine_missing_fill_economics(
+            pos,
+            status=str(order_status or execution_status or "filled").upper(),
+            missing=missing,
+        )
 
     ledger_ok = _maybe_append_venue_fill_observation(
         pos,
@@ -483,8 +840,18 @@ def _mark_entry_filled(
         deps=deps,
     )
     if not ledger_ok:
-        pos.state = "quarantine_fill_failed"
+        _mark_entry_quarantined(
+            pos,
+            reason=FILL_LEDGER_QUARANTINE_REVIEW_REQUIRED,
+            order_status="fill_ledger_write_failed",
+        )
         return "still_pending", True, False
+    if not trade_id:
+        return _quarantine_missing_fill_authority(
+            pos,
+            status=str(order_status or execution_status or "filled").upper(),
+            missing=("trade_identity",),
+        )
 
     _apply_entry_fill_economics(
         pos,
@@ -522,8 +889,13 @@ def _mark_entry_filled(
     lc_ok = _maybe_update_trade_lifecycle(pos, deps=deps)
     cf_ok = _maybe_emit_canonical_entry_fill(pos, deps=deps)
     if not lc_ok or not cf_ok:
-        pos.state = "quarantine_fill_failed"
-        
+        _mark_entry_quarantined(
+            pos,
+            reason=FILL_CANONICAL_WRITE_QUARANTINE_REVIEW_REQUIRED,
+            order_status="fill_canonical_write_failed",
+        )
+        return "still_pending", True, False
+
     _maybe_log_execution_fill(
         pos,
         submitted_price=submitted_price,
@@ -544,10 +916,17 @@ def _record_partial_entry_observed(
     *,
     deps=None,
 ) -> tuple[str, bool, bool]:
-    fill_price = _extract_float(payload, "avgPrice", "avg_price", "price") or pos.entry_price
+    fill_price = _extract_explicit_fill_price(payload)
     shares = _extract_filled_shares(payload, allow_order_size_fallback=False)
     if shares is None or shares <= 0:
         return _update_pending_status(pos, "partial")
+    missing = _missing_fill_economics(fill_price=fill_price, shares=shares)
+    if missing:
+        return _quarantine_missing_fill_economics(
+            pos,
+            status="PARTIALLY_MATCHED",
+            missing=missing,
+        )
 
     ledger_ok = _maybe_append_venue_fill_observation(
         pos,
@@ -559,7 +938,11 @@ def _record_partial_entry_observed(
         deps=deps,
     )
     if not ledger_ok:
-        pos.state = "quarantine_fill_failed"
+        _mark_entry_quarantined(
+            pos,
+            reason=FILL_LEDGER_QUARANTINE_REVIEW_REQUIRED,
+            order_status="partial_fill_ledger_write_failed",
+        )
         return "still_pending", True, False
 
     _apply_entry_fill_economics(
@@ -590,10 +973,17 @@ def _record_optimistic_entry_observed(
     status: str,
     deps=None,
 ) -> tuple[str, bool, bool]:
-    fill_price = _extract_float(payload, "avgPrice", "avg_price", "price") or pos.entry_price
+    fill_price = _extract_explicit_fill_price(payload)
     shares = _extract_filled_shares(payload, allow_order_size_fallback=False)
     if shares is None or shares <= 0:
         return _update_pending_status(pos, status.lower())
+    missing = _missing_fill_economics(fill_price=fill_price, shares=shares)
+    if missing:
+        return _quarantine_missing_fill_economics(
+            pos,
+            status=status,
+            missing=missing,
+        )
 
     ledger_ok = _maybe_append_venue_fill_observation(
         pos,
@@ -605,7 +995,11 @@ def _record_optimistic_entry_observed(
         deps=deps,
     )
     if not ledger_ok:
-        pos.state = "quarantine_fill_failed"
+        _mark_entry_quarantined(
+            pos,
+            reason=FILL_LEDGER_QUARANTINE_REVIEW_REQUIRED,
+            order_status="optimistic_fill_ledger_write_failed",
+        )
         return "still_pending", True, False
 
     _apply_entry_fill_economics(
@@ -648,7 +1042,12 @@ def _mark_entry_voided(
         
     lc_ok = _maybe_update_trade_lifecycle(target, deps=deps)
     if not lc_ok:
-        target.state = "quarantine_void_failed"
+        _mark_entry_quarantined(
+            target,
+            reason=VOID_CANONICAL_WRITE_QUARANTINE_REVIEW_REQUIRED,
+            order_status="void_canonical_write_failed",
+        )
+        return "still_pending", True, False
         
     return "voided", True, False
 
@@ -691,6 +1090,23 @@ def _check_entry_fill(
         return "still_pending", False, False
 
     if status in _fill_statuses(deps):
+        trade_status_conflict = _nonfinal_trade_status_for_confirmed_order(payload)
+        if trade_status_conflict:
+            if trade_status_conflict in _optimistic_fill_statuses(deps) or trade_status_conflict == "MINED":
+                if _extract_filled_shares(payload, allow_order_size_fallback=False) is None:
+                    return _update_pending_status(pos, trade_status_conflict.lower())
+                return _record_optimistic_entry_observed(
+                    pos,
+                    payload,
+                    now,
+                    status=trade_status_conflict,
+                    deps=deps,
+                )
+            return _quarantine_missing_fill_authority(
+                pos,
+                status=f"{status}_TRADE_{trade_status_conflict}",
+                missing=("confirmed_trade_status",),
+            )
         return _mark_entry_filled(
             pos,
             payload,
@@ -714,7 +1130,7 @@ def _check_entry_fill(
 
     if status in _partial_fill_statuses(deps):
         outcome, dirty, tracker_dirty = _record_partial_entry_observed(pos, payload, now, deps=deps)
-        if getattr(pos, "state", "") == "quarantine_fill_failed":
+        if _is_entry_quarantined(pos):
             return outcome, dirty, tracker_dirty
         if _pending_order_timed_out(pos, now):
             cancel_succeeded = _cancel_order_remainder(pos, clob, deps=deps)
@@ -739,7 +1155,7 @@ def _check_entry_fill(
         tracker_dirty = False
         if _extract_filled_shares(payload, allow_order_size_fallback=False):
             outcome, dirty, tracker_dirty = _record_partial_entry_observed(pos, payload, now, deps=deps)
-            if getattr(pos, "state", "") == "quarantine_fill_failed":
+            if _is_entry_quarantined(pos):
                 return outcome, dirty, tracker_dirty
         if _position_has_observed_exposure(pos):
             pos.fill_authority = FILL_AUTHORITY_CANCELLED_REMAINDER
@@ -914,6 +1330,16 @@ def _trade_fact_state_for_status(status: str, payload: dict) -> str | None:
     if normalized in {"MATCHED", "MINED", "CONFIRMED", "RETRYING", "FAILED"}:
         return normalized
     return None
+
+
+def _nonfinal_trade_status_for_confirmed_order(payload: Any) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+    trade_status = _first_text(payload, "trade_status", "tradeStatus", "trade_state", "tradeState")
+    normalized = str(trade_status or "").upper()
+    if not normalized or normalized == "CONFIRMED":
+        return None
+    return normalized
 
 
 def _extract_trade_id(payload: dict) -> str | None:

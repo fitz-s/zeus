@@ -19,10 +19,14 @@ sigmoid latches onto noise). Live serving these would lose money.
    Reversible: `UPDATE platt_models_v2 SET authority='VERIFIED' WHERE …`.
 
 2. **Code fit-time guard**: `scripts/refit_platt_v2.py::_fit_bucket`
-   now checks `cal.A < 0` post-fit and saves with
-   `authority='QUARANTINED'` (instead of `VERIFIED`). Future bad fits
-   never go live; operator must explicitly review and either accept the
-   fallback or refit with tighter regularisation.
+   now checks `cal.A < 0` post-fit and **skips both `deactivate_model_v2`
+   and `save_platt_model_v2`** — the previously-VERIFIED row (if any) is
+   preserved intact (PR #70 Copilot review fix). The run increments
+   `stats.buckets_quarantined` and logs a `QUAR` line with the reason.
+   No DB row is written for the bad fit; no existing VERIFIED calibrator
+   is overwritten. Future bad fits never downgrade live serving to the
+   fallback chain; operator must review the log and either accept the
+   existing fallback or refit with tighter regularisation.
 
 3. **Threshold rationale**: `A < 0` (strict inversion) is the
    unambiguous pathology. `A in [0, 0.3)` is weak but mathematically

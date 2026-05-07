@@ -35,9 +35,9 @@ state/status_summary.json             | 12 +++++-----
 ```
 
 **Stratum 1 — `src/config.py` expansion** (undisclosed in exec-emma's status report):
-- `ACTIVE_MODES = ("live",)` → `ACTIVE_MODES = ("live", "paper")` (`src/config.py:28`).
+- `ACTIVE_MODES = ("live",)` → `ACTIVE_MODES = ("live", "<obsolete_non_live>")` (`src/config.py:28`).
 - New `_RUNTIME_MODES = ("live",)` (`src/config.py:31`) — splits truth-file routing from runtime.
-- `mode_state_path(mode="paper")` → `STATE_DIR / "paper" / filename` (`src/config.py:43-44`).
+- `mode_state_path(mode="<obsolete_non_live>")` → `STATE_DIR / "<obsolete_non_live>" / filename` (`src/config.py:43-44`).
 - `get_mode()` now validates against `_RUNTIME_MODES` only (`src/config.py:54`).
 
 `git blame` confirms these are `Not Committed Yet 2026-04-17 11:59:55` — same timestamp cluster as the rest of the Phase 5A diff. Attribution: either exec-emma or the mystery 11:36 writer; indistinguishable from blame alone.
@@ -90,12 +90,12 @@ Onboarding doc at `phase5_evidence/critic_alice_phase5_onboarding.md` intact. Me
 - Phase 7 cutover: no leak.
 - Phase 9 risk path: no leak.
 - Phase 1-4 contracts: FDR family scope split, MetricIdentity spine, V2 schema, observation_client — all intact (ran `pytest tests/test_phase5a_truth_authority.py` GREEN, no touched-code regressions observed in the file-path sense).
-- **Paper-routing in config.py is a Phase 9 leak surface** — see CRITICAL-1.
+- **Historical environment-routing residue in config.py is a Phase 9 leak surface** — see CRITICAL-1.
 
 ### WIDE — what's not on my checklist
 
 **Found 4 items nobody flagged:**
-1. `_RUNTIME_MODES` / `ACTIVE_MODES` split in `src/config.py` opens a paper write path that no Phase 5 test exercises. Users cannot hit it via `ZEUS_MODE=paper` (`get_mode()` blocks), but any code calling `mode_state_path(filename, mode="paper")` directly bypasses the runtime gate entirely. This is exactly the "silent new capability" FM.
+1. `_RUNTIME_MODES` / `ACTIVE_MODES` split in `src/config.py` historically opened an alternate state-path write surface that no Phase 5 test exercised. Users could not hit it through the environment gate, but direct callers of `mode_state_path(...)` could bypass the intended live-state routing guard. This is exactly the "silent new capability" FM.
 2. The view's `', 'high' AS temperature_metric'` literal is string-substituted into an f-string SQL (`src/state/db.py:3175, 3178`). With `has_metric_col=True` the value `"temperature_metric"` (the column name) is substituted — clean. With `has_metric_col=False` the literal `'high'` is substituted. Both paths are compile-time constants in this codebase, so no injection risk, but the shape is fragile; future refactor could parameterize `metric_select` from user input.
 3. `test_load_portfolio_db_outage_returns_unverified_authority` patches `src.state.db.get_trade_connection_with_world` to raise `OSError` — this covers the OUTER OSError path at `portfolio.py:963`. It does NOT exercise the `sqlite3.OperationalError` path at `:1005`. If future code adds a transient DB error shape, only half the degraded-path logic is pinned. Not a blocker for 5A, but a gap for 5B testeng to close.
 4. `auto_pause_failclosed.tombstone` and `status_summary.json` show as modified in the working tree but are runtime state drift, not 5A code changes. Should NOT be staged in the 5A commit (handoff §"What NOT to bundle").
@@ -106,19 +106,19 @@ Onboarding doc at `phase5_evidence/critic_alice_phase5_onboarding.md` intact. Me
 
 ### CRITICAL-1 — `src/config.py` scope expansion contradicts stated boundaries
 
-**Evidence**: `src/config.py:28` declares `ACTIVE_MODES = ("live", "paper")`; `src/config.py:43-44` adds paper-path routing. Team-lead's dispatch stated: "`mode_state_path` in `src/config.py` still enforces live-only; `read_mode_truth_json` check fires on metadata mismatch, not path routing (Zeus is live-only so mode-path routing is N/A today)." That statement is FALSE on disk; config.py now supports paper routing.
+**Evidence**: `src/config.py:28` declares `ACTIVE_MODES = ("live", "<obsolete_non_live>")`; `src/config.py:43-44` adds obsolete non-live runtime-path routing. Team-lead's dispatch stated: "`mode_state_path` in `src/config.py` still enforces live-only; `read_mode_truth_json` check fires on metadata mismatch, not path routing (Zeus is live-only so mode-path routing is N/A today)." That statement is FALSE on disk; config.py now supports obsolete non-live runtime routing.
 
-**Why this matters**: (a) Opens a write path (`STATE_DIR/paper/filename`) that no code reviews, no governance ruling, and no test exercises. (b) Contradicts the team-lead's explicit scope statement, which is the authority reviewers gate on. (c) Paper/live separation is a Phase 9 concern per the roadmap; lifting it into 5A absorbs a cross-phase seam without the corresponding authority chain.
+**Why this matters**: (a) Opens a write path (`STATE_DIR/obsolete non-live runtime/filename`) that no code reviews, no governance ruling, and no test exercises. (b) Contradicts the team-lead's explicit scope statement, which is the authority reviewers gate on. (c) Obsolete non-live runtime/live separation is a Phase 9 concern per the roadmap; lifting it into 5A absorbs a cross-phase seam without the corresponding authority chain.
 
 **Confidence**: HIGH (direct grep evidence, contradicts explicit dispatch statement).
 
-**Realist Check**: Worst-case impact is a caller invoking `mode_state_path("positions.json", mode="paper")` and creating the paper subdir. Today no such caller exists (grep shows zero `mode="paper"` invocations in `src/**`). Detection is fast if the wrong path lands a real file. But the discipline issue stands: the claim "config.py still enforces live-only" was false; every future status report now needs second-sourcing. Severity STAYS at CRITICAL because it's a discipline + authority-chain violation, not a code defect whose impact is mitigated by absence of callers.
+**Realist Check**: Worst-case impact is a caller invoking `mode_state_path("positions.json", mode="<obsolete_non_live>")` and creating the obsolete non-live runtime subdir. Today no such caller exists (grep shows zero `mode="<obsolete_non_live>"` invocations in `src/**`). Detection is fast if the wrong path lands a real file. But the discipline issue stands: the claim "config.py still enforces live-only" was false; every future status report now needs second-sourcing. Severity STAYS at CRITICAL because it's a discipline + authority-chain violation, not a code defect whose impact is mitigated by absence of callers.
 
 **Fix**: One of two paths, team-lead rules:
-- **Path A (revert)**: Revert `src/config.py` to `ACTIVE_MODES = ("live",)` and the prior `mode_state_path` body. Paper routing lands in Phase 9 under explicit scope ruling.
-- **Path B (ratify)**: Team-lead issues a retrospective scope ruling folding paper routing into 5A, commit message carries `[SCOPE-EXPANSION: src/config.py paper routing, ratified by team-lead at <timestamp>]`, and a RED test that hits `mode_state_path("positions.json", mode="paper")` lands to pin the capability.
+- **Path A (revert)**: Revert `src/config.py` to `ACTIVE_MODES = ("live",)` and the prior `mode_state_path` body. Obsolete non-live runtime routing lands in Phase 9 under explicit scope ruling.
+- **Path B (ratify)**: Team-lead issues a retrospective scope ruling folding obsolete non-live runtime routing into 5A, commit message carries `[SCOPE-EXPANSION: src/config.py obsolete non-live runtime routing, ratified by team-lead at <timestamp>]`, and a RED test that hits `mode_state_path("positions.json", mode="<obsolete_non_live>")` lands to pin the capability.
 
-**Preferred**: Path A. Paper routing is not needed for B069/B073/B077 closure and was not requested.
+**Preferred**: Path A. Obsolete non-live runtime routing is not needed for B069/B073/B077 closure and was not requested.
 
 ---
 
@@ -224,7 +224,7 @@ Both default to `"UNVERIFIED"`. Every portfolio JSON sidecar and status_summary.
   - *Caveat*: view gating on authority isn't visible in the diff — B069's "gate on authority" is enforced by downstream callers reading `state.authority`, which this 5A commit doesn't exercise. Phase 5B risk-path callers must assert.
 - **B073**: `load_portfolio` returns typed authority at all three exits. ✓ ABSORBED.
 - **B077**: `ModeMismatchError` raises on mode drift. Both rejection + acceptance tested in `tests/test_phase5a_truth_authority.py`. ✓ ABSORBED.
-  - *Caveat*: current codebase has no real paper-mode truth files on disk so the mismatch test uses patched `mode_state_path`. Valid for current posture.
+  - *Caveat*: current codebase has no real obsolete non-live runtime truth files on disk so the mismatch test uses patched `mode_state_path`. Valid for current posture.
 - **B078**: Deferred to 5B per handoff. N/A.
 - **B093**: Bifurcated per earlier ruling (half-1 in 5C, half-2 in Phase 7). N/A.
 
@@ -247,7 +247,7 @@ Both default to `"UNVERIFIED"`. Every portfolio JSON sidecar and status_summary.
 
 ### Open questions (unscored)
 
-- Paper-routing in config.py — does user want Phase 9 lifted into 5A? Team-lead ruling needed.
+- Obsolete non-live routing in config.py — does user want Phase 9 lifted into 5A? Team-lead ruling needed.
 - Stratum 2 attribution — should the mystery 11:36 writer be identified? Not blocking, but the provenance chain is opaque.
 
 ### Discipline observation

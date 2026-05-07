@@ -43,7 +43,7 @@ The audit used a layered money-path model:
 4. Fallback semantics: Day0 observation chain, tier resolver, replay diagnostic fallback, feature flags.
 5. Market/execution truth: Gamma event identity, CLOB snapshot authority, venue command grammar, fill facts, exposure lots, and chain reconciliation.
 6. Risk/capability gates: cutover guard, risk levels, portfolio governor, heartbeat, WS gap, collateral, and source degradation.
-7. Mode and venue residue: live-only boot gate, paper-mode branches, benchmark fake venue, shadow telemetry.
+7. Mode and venue residue: live-only boot gate, non-live execution branches, benchmark fake venue, shadow telemetry.
 8. Evidence checks: local DB read-only counts and official provider documentation.
 9. False-positive control: each finding labels whether it is a live blocker, semantic risk, complexity debt, or an explicit non-issue boundary.
 

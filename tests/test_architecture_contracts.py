@@ -959,7 +959,7 @@ def test_canonical_bootstrap_is_not_runtime_ready_for_legacy_position_event_help
     class _Pos:
         trade_id = "legacy-rt-1"
         state = "active"
-        env = "paper"
+        env = "legacy_env"
         city = "NYC"
         target_date = "2026-04-03"
         market_id = "mkt-1"
@@ -1054,7 +1054,7 @@ def test_db_exposes_canonical_transaction_boundary_helpers():
 
 def test_replay_parity_reports_projection_vs_legacy_export(tmp_path):
     db_path = tmp_path / "zeus.db"
-    legacy_path = tmp_path / "positions-paper.json"
+    legacy_path = tmp_path / "positions-legacy.json"
 
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
@@ -1169,7 +1169,7 @@ def test_replay_parity_on_init_schema_bootstrap_advances_beyond_missing_tables(
     from src.state.db import init_schema
 
     db_path = tmp_path / "zeus.db"
-    legacy_path = tmp_path / "positions-paper.json"
+    legacy_path = tmp_path / "positions-legacy.json"
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     init_schema(conn)
@@ -1197,13 +1197,13 @@ def test_replay_parity_on_init_schema_bootstrap_advances_beyond_missing_tables(
 
 
 @pytest.mark.skip(reason="P9/Phase2: legacy position_events_legacy or backfill eliminated")
-def test_open_position_canonical_backfill_seeds_legacy_paper_positions_and_advances_parity(
+def test_open_position_canonical_backfill_seeds_legacy_positions_and_advances_parity(
     tmp_path,
 ):
     from src.state.db import init_schema
 
     db_path = tmp_path / "zeus.db"
-    legacy_path = tmp_path / "positions-paper.json"
+    legacy_path = tmp_path / "positions-legacy.json"
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     init_schema(conn)
@@ -1212,25 +1212,25 @@ def test_open_position_canonical_backfill_seeds_legacy_paper_positions_and_advan
     pos1 = asdict(_runtime_position(state="entered", chain_state="unknown"))
     pos1.update(
         {
-            "trade_id": "paper-open-1",
+            "trade_id": "legacy-open-1",
             "strategy_key": "opening_inertia",
             "strategy": "opening_inertia",
             "edge_source": "opening_inertia",
             "discovery_mode": "opening_hunt",
-            "env": "paper",
+            "env": "legacy_env",
         }
     )
     pos2 = asdict(_runtime_position(state="entered", chain_state="unknown"))
     pos2.update(
         {
-            "trade_id": "paper-open-2",
+            "trade_id": "legacy-open-2",
             "market_id": "mkt-2",
             "bin_label": "41-42°F",
             "strategy_key": "opening_inertia",
             "strategy": "opening_inertia",
             "edge_source": "opening_inertia",
             "discovery_mode": "opening_hunt",
-            "env": "paper",
+            "env": "legacy_env",
         }
     )
     legacy_path.write_text(json.dumps({"positions": [pos1, pos2]}))
@@ -1247,14 +1247,14 @@ def test_open_position_canonical_backfill_seeds_legacy_paper_positions_and_advan
         capture_output=True,
         text=True,
         check=False,
-        env={**os.environ, "ZEUS_MODE": "paper"},
+        env={**os.environ, "ZEUS_MODE": "legacy_env"},
     )
 
     assert run.returncode == 0
     payload = json.loads(run.stdout)
     assert payload["status"] == "seeded"
     assert payload["seeded_count"] == 2
-    assert sorted(payload["seeded_trade_ids"]) == ["paper-open-1", "paper-open-2"]
+    assert sorted(payload["seeded_trade_ids"]) == ["legacy-open-1", "legacy-open-2"]
 
     parity = subprocess.run(
         [
@@ -1280,7 +1280,7 @@ def test_open_position_canonical_backfill_seeds_legacy_paper_positions_and_advan
 @pytest.mark.skip(reason="P9/Phase2: legacy position_events_legacy or backfill eliminated")
 def test_open_position_canonical_backfill_reports_missing_canonical_tables(tmp_path):
     db_path = tmp_path / "zeus.db"
-    legacy_path = tmp_path / "positions-paper.json"
+    legacy_path = tmp_path / "positions-legacy.json"
     sqlite3.connect(str(db_path)).close()
     legacy_path.write_text(
         json.dumps(
@@ -1304,7 +1304,7 @@ def test_open_position_canonical_backfill_reports_missing_canonical_tables(tmp_p
         capture_output=True,
         text=True,
         check=False,
-        env={**os.environ, "ZEUS_MODE": "paper"},
+        env={**os.environ, "ZEUS_MODE": "legacy_env"},
     )
 
     assert run.returncode == 0
@@ -1321,7 +1321,7 @@ def test_open_position_canonical_backfill_is_idempotent_for_already_seeded_posit
     from src.state.db import init_schema
 
     db_path = tmp_path / "zeus.db"
-    legacy_path = tmp_path / "positions-paper.json"
+    legacy_path = tmp_path / "positions-legacy.json"
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     init_schema(conn)
@@ -1330,12 +1330,12 @@ def test_open_position_canonical_backfill_is_idempotent_for_already_seeded_posit
     pos = asdict(_runtime_position(state="entered", chain_state="unknown"))
     pos.update(
         {
-            "trade_id": "paper-open-1",
+            "trade_id": "legacy-open-1",
             "strategy_key": "opening_inertia",
             "strategy": "opening_inertia",
             "edge_source": "opening_inertia",
             "discovery_mode": "opening_hunt",
-            "env": "paper",
+            "env": "legacy_env",
         }
     )
     legacy_path.write_text(json.dumps({"positions": [pos]}))
@@ -1348,7 +1348,7 @@ def test_open_position_canonical_backfill_is_idempotent_for_already_seeded_posit
         "--positions",
         str(legacy_path),
     ]
-    env = {**os.environ, "ZEUS_MODE": "paper"}
+    env = {**os.environ, "ZEUS_MODE": "legacy_env"}
     first = subprocess.run(
         command, capture_output=True, text=True, check=False, env=env
     )
@@ -1370,7 +1370,7 @@ def test_open_position_canonical_backfill_is_idempotent_for_already_seeded_posit
 def test_open_position_canonical_backfill_fails_loud_for_pending_exit_positions():
     from src.state.db import (
         apply_architecture_kernel_schema,
-        backfill_open_legacy_paper_positions,
+        backfill_open_legacy_positions,
     )
 
     conn = sqlite3.connect(":memory:")
@@ -1382,7 +1382,7 @@ def test_open_position_canonical_backfill_fails_loud_for_pending_exit_positions(
         exit_state="sell_pending",
         chain_state="exit_pending_missing",
     )
-    pending_exit.env = "paper"
+    pending_exit.env = "legacy_env"
     pending_exit.strategy_key = "opening_inertia"
     pending_exit.strategy = "opening_inertia"
     pending_exit.edge_source = "opening_inertia"
@@ -1392,7 +1392,7 @@ def test_open_position_canonical_backfill_fails_loud_for_pending_exit_positions(
         ValueError,
         match="entry canonical builder only supports pending/active entry states",
     ):
-        backfill_open_legacy_paper_positions(conn, [pending_exit])
+        backfill_open_legacy_positions(conn, [pending_exit])
 
     assert conn.execute("SELECT COUNT(*) FROM position_events").fetchone()[0] == 0
     assert conn.execute("SELECT COUNT(*) FROM position_current").fetchone()[0] == 0
@@ -4057,7 +4057,7 @@ def _discovery_phase_harness(*, conn: sqlite3.Connection):
         command_state="ACKED",  # P1.S5 INV-32: required for materialize_position gate
     )
 
-    portfolio = SimpleNamespace(positions=[], effective_bankroll=150.0)
+    portfolio = SimpleNamespace(positions=[], effective_bankroll=211.37)
     artifact = _Artifact()
     tracker = _Tracker()
     summary = {"candidates": 0, "trades": 0, "no_trades": 0}
@@ -4088,7 +4088,7 @@ def _discovery_phase_harness(*, conn: sqlite3.Connection):
         is_strategy_enabled=lambda strategy_name: True,
         _classify_edge_source=lambda mode, edge_obj: "center_buy",
         Position=Position,
-        settings=SimpleNamespace(mode="paper"),
+        settings=SimpleNamespace(mode="live"),
         logger=_Logger(),
         _utcnow=lambda: datetime(2026, 4, 3, 0, 5, tzinfo=timezone.utc),
         DiscoveryMode=DiscoveryMode,
@@ -4104,9 +4104,9 @@ def _discovery_phase_harness(*, conn: sqlite3.Connection):
         SimpleNamespace(),
         DiscoveryMode.UPDATE_REACTION,
         summary,
-        150.0,
+        211.37,
         datetime(2026, 4, 3, 0, 0, tzinfo=timezone.utc),
-        env="paper",
+        env="live",
         deps=deps,
     )
 

@@ -1,41 +1,10 @@
 import json
-from pathlib import Path
 
 import pytest
 
-import src.state.truth_files as truth_files
-from src.state.portfolio import DeprecatedStateFileError, PortfolioState, load_portfolio, save_portfolio
-from src.state.strategy_tracker import StrategyTracker, load_tracker, save_tracker
-
-
-@pytest.mark.skip(reason="K1: save_tracker is no-op; paper tracker files eliminated")
-def test_deprecate_legacy_state_files_archives_and_tombstones(tmp_path, monkeypatch):
-    archive_dir = tmp_path / "archive"
-    legacy_dir = tmp_path / "state"
-    legacy_dir.mkdir()
-
-    def _legacy(name: str) -> Path:
-        return legacy_dir / name
-
-    def _mode(name: str, mode: str | None = None) -> Path:
-        mode = mode or "paper"
-        stem, ext = name.rsplit(".", 1)
-        return legacy_dir / f"{stem}-{mode}.{ext}"
-
-    monkeypatch.setattr(truth_files, "legacy_state_path", _legacy)
-    monkeypatch.setattr(truth_files, "mode_state_path", _mode)
-    monkeypatch.setattr(truth_files, "LEGACY_ARCHIVE_DIR", archive_dir)
-
-    old_path = legacy_dir / "positions.json"
-    old_path.write_text(json.dumps({"positions": [{"trade_id": "old"}]}))
-
-    result = truth_files.ensure_legacy_state_tombstone("positions.json")
-    tombstone = json.loads(old_path.read_text())
-
-    assert result["archived"] is True
-    assert tombstone["truth"]["deprecated"] is True
-    assert tombstone["truth"]["replacement_paths"]["paper"].endswith("positions-paper.json")
-    assert any(p.name.startswith("positions.json.") for p in archive_dir.iterdir())
+from src.state.portfolio import DeprecatedStateFileError, load_portfolio
+import src.state.db as db_module
+from src.state.strategy_tracker import StrategyTracker
 
 
 def test_load_portfolio_rejects_deprecated_state_file(tmp_path):
@@ -47,68 +16,33 @@ def test_load_portfolio_rejects_deprecated_state_file(tmp_path):
     with pytest.raises(DeprecatedStateFileError):
         load_portfolio(path)
 
-
-@pytest.mark.skip(reason="K1: save_tracker is no-op; paper tracker files eliminated")
-def test_load_tracker_rejects_deprecated_state_file(tmp_path):
-    path = tmp_path / "strategy_tracker.json"
-    path.write_text(json.dumps({
-        "error": "deprecated",
-        "truth": {"deprecated": True},
-    }))
-    with pytest.raises(RuntimeError, match="deprecated legacy truth file"):
-        load_tracker(path)
-
-
-@pytest.mark.skip(reason="K1: save_tracker is no-op; paper tracker files eliminated")
-def test_portfolio_and_tracker_save_truth_metadata(tmp_path):
-    portfolio_path = tmp_path / "positions-paper.json"
-    tracker_path = tmp_path / "strategy_tracker-paper.json"
-
-    save_portfolio(PortfolioState(), portfolio_path)
-    save_tracker(StrategyTracker(), tracker_path)
-
-    portfolio_data = json.loads(portfolio_path.read_text())
-    tracker_data = json.loads(tracker_path.read_text())
-
-    assert portfolio_data["truth"]["deprecated"] is False
-    assert portfolio_data["truth"]["source_path"] == str(portfolio_path)
-    assert tracker_data["truth"]["deprecated"] is False
-    assert tracker_data["truth"]["source_path"] == str(tracker_path)
-    assert tracker_data["accounting"]["tracker_role"] == "compatibility_surface"
-    assert tracker_data["accounting"]["authority_mode"] == "non_authority_compatibility"
-
-
-@pytest.mark.skip(reason="K1: save_tracker is no-op; paper tracker files eliminated")
-def test_save_tracker_normalizes_stale_compatibility_metadata(tmp_path):
-    tracker_path = tmp_path / "strategy_tracker-paper.json"
-    tracker = StrategyTracker()
-    tracker.accounting["tracker_role"] = "attribution_surface"
-    tracker.accounting.pop("authority_mode", None)
-
-    save_tracker(tracker, tracker_path)
-
-    tracker_data = json.loads(tracker_path.read_text())
-    assert tracker_data["accounting"]["tracker_role"] == "compatibility_surface"
-    assert tracker_data["accounting"]["authority_mode"] == "non_authority_compatibility"
-
-
-@pytest.mark.skip(reason="K1: save_tracker is no-op; paper tracker files eliminated")
-def test_strategy_tracker_summary_exposes_only_trade_count_and_pnl():
+def test_strategy_tracker_summary_exposes_only_trade_count_and_pnl(monkeypatch):
+    monkeypatch.setattr(
+        db_module,
+        "query_authoritative_settlement_rows",
+        lambda *_args, **_kwargs: [
+            {
+                "trade_id": "t1",
+                "strategy": "opening_inertia",
+                "pnl": 2.5,
+                "metric_ready": True,
+            }
+        ],
+    )
     tracker = StrategyTracker()
     tracker.record_trade({
-        "trade_id": "t1",
+        "trade_id": "ignored-legacy-shim",
         "strategy": "opening_inertia",
-        "pnl": 2.5,
+        "pnl": 99.0,
     })
 
-    summary = tracker.summary()
+    summary = tracker.summary(conn=object())
 
     assert summary["opening_inertia"] == {"trades": 1, "pnl": 2.5}
     assert "win_rate" not in summary["opening_inertia"]
     assert summary["shoulder_sell"] == {"trades": 0, "pnl": 0}
     assert "win_rate" not in summary["shoulder_sell"]
-    assert tracker.to_dict()["strategies"]["opening_inertia"]["trades"][0]["trade_id"] == "t1"
-    assert "trades" in tracker.to_dict()["strategies"]["opening_inertia"]
+    assert tracker.to_dict()["strategies"]["opening_inertia"]["trades"] == []
     assert "win_rate" not in tracker.to_dict()["strategies"]["opening_inertia"]
 
 

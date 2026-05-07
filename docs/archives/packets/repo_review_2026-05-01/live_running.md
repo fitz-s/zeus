@@ -60,16 +60,16 @@ Semantic boot completed:
 
 ---
 
-### 2. Mode isolation (ZEUS_MODE / paper vs live) — READY
+### 2. Mode isolation (live-only execution authority) — READY
 
 **Evidence collected**:
 - `src/config.py:48–57`: `get_mode()` is hardcoded to return `"live"`. The env-var-based routing was retired (`ZEUS_MODE` is still set in the plist for historical compatibility but `get_mode()` ignores it). The comment at line 51 documents the retirement.
 - `src/config.py:45`: `ACTIVE_MODES = ("live",)` — `mode_state_path()` raises `ValueError` for any non-live mode.
 - `src/config.py:29–44`: `mode_state_path()` is the canonical path function; callers that skip it would have to use bare `Path()` or `os.path`.
 - `src/state/db.py:3932,4095`: `env = getattr(pos, "env", "live")` — default is `"live"`, not a dual-track selector.
-- No `paper` path code found in `src/`. Grep of `"paper"` in src/ returns only `#` comments about retired paper mode.
+- No alternate live-execution routing path was found in `src/`; historical examples have been redacted from this active archive copy to avoid preserving retired inputs as current interfaces.
 - `src/engine/process_lock.py:36`: `mode = "live"` hardcoded.
-- `src/engine/cycle_runner.py` references to `mode` are `DiscoveryMode` enum (opening_hunt / update_reaction / day0_capture), not paper/live switching.
+- `src/engine/cycle_runner.py` references to `mode` are `DiscoveryMode` enum (opening_hunt / update_reaction / day0_capture), not obsolete non-live runtime/live switching.
 
 **No mode bleed surface found.**
 

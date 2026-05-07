@@ -1,9 +1,9 @@
 # Created: 2026-03-31
-# Lifecycle: created=2026-03-31; last_reviewed=2026-05-01; last_reused=2026-05-01
+# Lifecycle: created=2026-03-31; last_reviewed=2026-05-05; last_reused=2026-05-05
 # Purpose: Lock live-money safety invariants across fill, exit, chain, and P&L flows.
 # Reuse: Run for execution finality, live exit, chain reconciliation, and safety invariant changes.
-# Last reused/audited: 2026-05-01
-# Authority basis: midstream verdict v2 2026-04-23 (docs/to-do-list/zeus_midstream_fix_plan_2026-04-23.md T1.a midstream guardian panel)
+# Last reused/audited: 2026-05-05
+# Authority basis: midstream verdict v2 2026-04-23; object-meaning invariance Wave10 runtime state and fill-authority exposure boundary.
 """Live safety invariant tests: relationship tests, not function tests.
 
 These verify cross-module relationships that prevent ghost positions,
@@ -13,8 +13,10 @@ GOLDEN RULE: economic close is ONLY created after CONFIRMED fill truth.
 """
 
 import logging
+import json
 import math
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -43,11 +45,63 @@ from src.control.control_plane import (
     write_commands,
 )
 from src.state.portfolio import (
+    ENTRY_ECONOMICS_AVG_FILL_PRICE,
+    ENTRY_ECONOMICS_LEGACY_UNKNOWN,
+    ENTRY_ECONOMICS_OPTIMISTIC_MATCH_PRICE,
+    ENTRY_ECONOMICS_SUBMITTED_LIMIT,
     ExitDecision,
+    FILL_AUTHORITY_NONE,
+    FILL_AUTHORITY_OPTIMISTIC_SUBMITTED,
+    FILL_AUTHORITY_VENUE_CONFIRMED_PARTIAL,
+    FILL_AUTHORITY_VENUE_CONFIRMED_FULL,
     Position,
     PortfolioState,
     close_position,
 )
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_harvester_scheduler_fails_closed_without_legacy_integrated_fallback():
+    """Trading daemon must not fall back to integrated truth-writing harvester."""
+    source = (ROOT / "src" / "main.py").read_text(encoding="utf-8")
+
+    assert "from src.execution.harvester import run_harvester" not in source
+    assert "result = run_harvester()" not in source
+    assert "resolver_unavailable_fail_closed" in source
+
+
+def test_settlement_readers_filter_verified_authority_before_downstream_use():
+    """Replay, monitor, and world-view reads must not consume quarantined settlement values."""
+    replay_source = (ROOT / "src" / "engine" / "replay.py").read_text(encoding="utf-8")
+    monitor_source = (ROOT / "src" / "engine" / "monitor_refresh.py").read_text(encoding="utf-8")
+    world_view_source = (
+        ROOT / "src" / "contracts" / "world_view" / "settlements.py"
+    ).read_text(encoding="utf-8")
+
+    assert replay_source.count("authority = 'VERIFIED'") >= 4
+    assert "AND authority = 'VERIFIED' LIMIT 1" in monitor_source
+    assert "AND authority = 'VERIFIED'" in world_view_source
+
+
+def test_operator_scripts_filter_verified_settlement_rows_before_outputs_or_backfills():
+    """Operator script reads of settlement truth must not promote quarantined rows."""
+    snippets = {
+        "scripts/backfill_ens.py": "AND s.authority = 'VERIFIED'",
+        "scripts/backfill_observations_from_settlements.py": "AND s.authority = 'VERIFIED'",
+        "scripts/backfill_wu_daily_all.py": "AND authority = 'VERIFIED'",
+        "scripts/audit_city_data_readiness.py": "AND s.authority = 'VERIFIED'",
+        "scripts/audit_divergence_exit_counterfactual.py": "AND authority = 'VERIFIED'",
+        "scripts/baseline_experiment.py": "WHERE authority = 'VERIFIED'",
+        "scripts/audit_replay_fidelity.py": "AND authority = 'VERIFIED'",
+        "scripts/cleanup_ghost_positions.py": "AND authority = 'VERIFIED'",
+        "scripts/etl_forecast_skill_from_forecasts.py": "AND s.authority = 'VERIFIED'",
+        "scripts/etl_historical_forecasts.py": "AND s.authority = 'VERIFIED'",
+    }
+
+    for rel_path, snippet in snippets.items():
+        source = (ROOT / rel_path).read_text(encoding="utf-8")
+        assert snippet in source, rel_path
 
 
 def _make_position(**overrides) -> Position:
@@ -213,6 +267,7 @@ def test_fill_tracker_keeps_confirmed_entry_local_only_until_chain_seen():
     clob = _make_clob(order_status="CONFIRMED")
     clob.get_order_status.return_value = {
         "status": "CONFIRMED",
+        "trade_id": "trade-buy-123",
         "avgPrice": 0.44,
         "filledSize": 25.0,
     }
@@ -276,6 +331,7 @@ def test_confirmed_fill_survives_stale_deps_fill_statuses():
     clob = _make_clob(order_status="CONFIRMED")
     clob.get_order_status.return_value = {
         "status": "CONFIRMED",
+        "trade_id": "trade-buy-stale-deps",
         "avgPrice": 0.44,
         "filledSize": 25.0,
     }
@@ -290,6 +346,321 @@ def test_confirmed_fill_survives_stale_deps_fill_statuses():
     assert pos.state == "entered"
     assert pos.entry_fill_verified is True
     assert pos.order_status == "confirmed"
+
+
+def test_confirmed_without_explicit_fill_price_quarantines_entry():
+    """CONFIRMED order status is not fill economics without venue fill price."""
+    from src.execution.fill_tracker import check_pending_entries
+
+    pos = _make_position(
+        state="pending_tracked",
+        order_id="buy_123",
+        entry_order_id="buy_123",
+        entry_fill_verified=False,
+        entered_at="",
+        size_usd=10.0,
+        entry_price=0.40,
+        shares=25.0,
+        cost_basis_usd=10.0,
+    )
+    portfolio = _make_portfolio(pos)
+    clob = _make_clob(order_status="CONFIRMED")
+    clob.get_order_status.return_value = {
+        "status": "CONFIRMED",
+        "filledSize": 25.0,
+    }
+
+    stats = check_pending_entries(portfolio, clob)
+
+    assert stats["entered"] == 0
+    assert stats["still_pending"] == 1
+    assert pos.state == "quarantined"
+    assert pos.admin_exit_reason == "FILL_AUTHORITY_QUARANTINE_REVIEW_REQUIRED"
+    assert pos.order_status == "confirmed_missing_fill_economics"
+    assert pos.entry_fill_verified is False
+    assert pos.entered_at == ""
+    assert pos.entry_price == pytest.approx(0.40)
+    assert pos.entry_price_avg_fill == 0.0
+    assert pos.shares_filled == 0.0
+    assert pos.filled_cost_basis_usd == 0.0
+    assert pos.size_usd == pytest.approx(10.0)
+    assert pos.cost_basis_usd == pytest.approx(10.0)
+    assert pos.fill_authority == FILL_AUTHORITY_NONE
+    assert pos.entry_economics_authority == ENTRY_ECONOMICS_LEGACY_UNKNOWN
+    assert pos.has_fill_economics_authority is False
+    from src.state.portfolio import has_same_city_range_open, total_exposure_usd
+
+    assert total_exposure_usd(portfolio) == 0.0
+    assert has_same_city_range_open(portfolio, pos.city, pos.bin_label) is False
+
+
+def test_confirmed_without_trade_identity_quarantines_entry():
+    """Order-only CONFIRMED is not executable fill finality."""
+    from src.execution.fill_tracker import check_pending_entries
+
+    pos = _make_position(
+        state="pending_tracked",
+        order_id="buy_123",
+        entry_order_id="buy_123",
+        entry_fill_verified=False,
+        entered_at="",
+        size_usd=10.0,
+        entry_price=0.40,
+        shares=25.0,
+        cost_basis_usd=10.0,
+    )
+    portfolio = _make_portfolio(pos)
+    clob = _make_clob(order_status="CONFIRMED")
+    clob.get_order_status.return_value = {
+        "status": "CONFIRMED",
+        "avgPrice": 0.44,
+        "filledSize": 25.0,
+    }
+
+    stats = check_pending_entries(portfolio, clob)
+
+    assert stats["entered"] == 0
+    assert stats["still_pending"] == 1
+    assert pos.state == "quarantined"
+    assert pos.order_status == "confirmed_missing_trade_identity"
+    assert pos.entry_fill_verified is False
+    assert pos.entered_at == ""
+    assert pos.shares_filled == 0.0
+    assert pos.filled_cost_basis_usd == 0.0
+    assert pos.fill_authority == FILL_AUTHORITY_NONE
+    assert pos.has_fill_economics_authority is False
+
+
+def test_confirmed_without_trade_identity_marks_command_review_not_filled(tmp_path):
+    """Order-only CONFIRMED must not advance the durable command to FILLED."""
+    from src.execution.fill_tracker import check_pending_entries
+    from src.state.db import get_connection, init_schema
+
+    db_path = tmp_path / "zeus.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+    conn.execute(
+        """
+        INSERT INTO venue_commands (
+            command_id, snapshot_id, envelope_id, position_id, decision_id,
+            idempotency_key, intent_kind, market_id, token_id, side, size, price,
+            venue_order_id, state, last_event_id, created_at, updated_at,
+            review_required_reason
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "cmd-confirmed-no-trade",
+            "snap-confirmed-no-trade",
+            "env-confirmed-no-trade",
+            "runtime-confirmed-no-trade",
+            "dec-confirmed-no-trade",
+            "idem-confirmed-no-trade",
+            "ENTRY",
+            "condition-confirmed-no-trade",
+            "tok_yes_confirmed_no_trade",
+            "BUY",
+            25.0,
+            0.44,
+            "buy_123",
+            "ACKED",
+            None,
+            "2026-04-29T12:00:00+00:00",
+            "2026-04-29T12:00:00+00:00",
+            None,
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    class Deps:
+        @staticmethod
+        def get_connection():
+            return get_connection(db_path)
+
+    pos = _make_position(
+        trade_id="runtime-confirmed-no-trade",
+        state="pending_tracked",
+        order_id="buy_123",
+        entry_order_id="buy_123",
+        entry_fill_verified=False,
+        entered_at="",
+        size_usd=10.0,
+        entry_price=0.40,
+        shares=25.0,
+        cost_basis_usd=10.0,
+    )
+    portfolio = _make_portfolio(pos)
+    clob = _make_clob(order_status="CONFIRMED")
+    clob.get_order_status.return_value = {
+        "status": "CONFIRMED",
+        "avgPrice": 0.44,
+        "filledSize": 25.0,
+    }
+
+    stats = check_pending_entries(
+        portfolio,
+        clob,
+        deps=Deps,
+        now=datetime(2026, 4, 29, 12, 1, tzinfo=timezone.utc),
+    )
+
+    assert stats["entered"] == 0
+    assert stats["still_pending"] == 1
+    assert pos.state == "quarantined"
+    conn = get_connection(db_path)
+    command_state = conn.execute(
+        "SELECT state FROM venue_commands WHERE command_id = 'cmd-confirmed-no-trade'"
+    ).fetchone()["state"]
+    event_types = [
+        row["event_type"]
+        for row in conn.execute(
+            """
+            SELECT event_type
+              FROM venue_command_events
+             WHERE command_id = 'cmd-confirmed-no-trade'
+             ORDER BY sequence_no
+            """
+        ).fetchall()
+    ]
+    review_payload = conn.execute(
+        """
+        SELECT payload_json
+          FROM venue_command_events
+         WHERE command_id = 'cmd-confirmed-no-trade'
+           AND event_type = 'REVIEW_REQUIRED'
+         LIMIT 1
+        """
+    ).fetchone()["payload_json"]
+    conn.close()
+
+    assert command_state == "REVIEW_REQUIRED"
+    assert "REVIEW_REQUIRED" in event_types
+    assert "FILL_CONFIRMED" not in event_types
+    assert "poll_confirmed_requires_trade_fact" in review_payload
+    assert "order_status_confirmed_is_not_fill_economics_authority" in review_payload
+
+
+def test_confirmed_without_explicit_filled_size_quarantines_entry():
+    """CONFIRMED fill price alone must not invent shares from order size."""
+    from src.execution.fill_tracker import check_pending_entries
+
+    pos = _make_position(
+        state="pending_tracked",
+        order_id="buy_123",
+        entry_order_id="buy_123",
+        entry_fill_verified=False,
+        entered_at="",
+        size_usd=10.0,
+        entry_price=0.40,
+        shares=25.0,
+        cost_basis_usd=10.0,
+    )
+    portfolio = _make_portfolio(pos)
+    clob = _make_clob(order_status="CONFIRMED")
+    clob.get_order_status.return_value = {
+        "status": "CONFIRMED",
+        "avgPrice": 0.44,
+    }
+
+    stats = check_pending_entries(portfolio, clob)
+
+    assert stats["entered"] == 0
+    assert stats["still_pending"] == 1
+    assert pos.state == "quarantined"
+    assert pos.order_status == "confirmed_missing_fill_economics"
+    assert pos.entry_fill_verified is False
+    assert pos.entered_at == ""
+    assert pos.shares == pytest.approx(25.0)
+    assert pos.shares_filled == 0.0
+    assert pos.filled_cost_basis_usd == 0.0
+    assert pos.size_usd == pytest.approx(10.0)
+    assert pos.cost_basis_usd == pytest.approx(10.0)
+    assert pos.fill_authority == FILL_AUTHORITY_NONE
+    assert pos.has_fill_economics_authority is False
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("avgPrice", math.nan),
+        ("avgPrice", math.inf),
+        ("filledSize", math.nan),
+        ("filledSize", math.inf),
+    ],
+)
+def test_confirmed_with_nonfinite_fill_economics_quarantines_entry(field, value):
+    """Non-finite venue economics are not executable fill evidence."""
+    from src.execution.fill_tracker import check_pending_entries
+
+    pos = _make_position(
+        state="pending_tracked",
+        order_id="buy_123",
+        entry_order_id="buy_123",
+        entry_fill_verified=False,
+        entered_at="",
+        size_usd=10.0,
+        entry_price=0.40,
+        shares=25.0,
+        cost_basis_usd=10.0,
+    )
+    portfolio = _make_portfolio(pos)
+    clob = _make_clob(order_status="CONFIRMED")
+    payload = {
+        "status": "CONFIRMED",
+        "avgPrice": 0.44,
+        "filledSize": 25.0,
+    }
+    payload[field] = value
+    clob.get_order_status.return_value = payload
+
+    stats = check_pending_entries(portfolio, clob)
+
+    assert stats["entered"] == 0
+    assert stats["still_pending"] == 1
+    assert pos.state == "quarantined"
+    assert pos.order_status == "confirmed_missing_fill_economics"
+    assert pos.entry_fill_verified is False
+    assert pos.entered_at == ""
+    assert pos.shares_filled == 0.0
+    assert pos.filled_cost_basis_usd == 0.0
+    assert pos.fill_authority == FILL_AUTHORITY_NONE
+    assert pos.has_fill_economics_authority is False
+
+
+def test_matched_with_filled_size_but_missing_fill_price_quarantines_entry():
+    """Optimistic fill observations need fill price before economics authority."""
+    from src.execution.fill_tracker import check_pending_entries
+
+    pos = _make_position(
+        state="pending_tracked",
+        entry_order_id="buy_123",
+        entry_fill_verified=False,
+        entered_at="",
+        size_usd=10.0,
+        entry_price=0.40,
+        shares=0.0,
+        cost_basis_usd=0.0,
+    )
+    portfolio = _make_portfolio(pos)
+    clob = _make_clob(order_status="MATCHED")
+    clob.get_order_status.return_value = {
+        "status": "MATCHED",
+        "filledSize": 12.0,
+        "price": 0.44,
+    }
+
+    stats = check_pending_entries(portfolio, clob)
+
+    assert stats["entered"] == 0
+    assert stats["still_pending"] == 1
+    assert pos.state == "quarantined"
+    assert pos.order_status == "matched_missing_fill_economics"
+    assert pos.entry_fill_verified is False
+    assert pos.shares == 0.0
+    assert pos.shares_filled == 0.0
+    assert pos.cost_basis_usd == 0.0
+    assert pos.filled_cost_basis_usd == 0.0
+    assert pos.fill_authority == FILL_AUTHORITY_NONE
 
 
 def test_legacy_polling_matched_maps_numeric_live_runtime_id_to_optimistic_lot(tmp_path):
@@ -401,6 +772,9 @@ def test_legacy_polling_matched_maps_numeric_live_runtime_id_to_optimistic_lot(t
     assert pos.order_status == "matched"
     assert pos.entry_fill_verified is False
     assert pos.entered_at == ""
+    assert pos.entry_economics_authority == ENTRY_ECONOMICS_OPTIMISTIC_MATCH_PRICE
+    assert pos.fill_authority == FILL_AUTHORITY_OPTIMISTIC_SUBMITTED
+    assert pos.has_fill_economics_authority is False
 
     conn = get_connection(db_path)
     order_states = [r["state"] for r in conn.execute("SELECT state FROM venue_order_facts").fetchall()]
@@ -423,6 +797,940 @@ def test_legacy_polling_matched_maps_numeric_live_runtime_id_to_optimistic_lot(t
     assert exec_row is None
     assert canonical_events == []
     assert calibration_rows == []
+
+
+def test_legacy_polling_failed_trade_status_is_not_fill_progress_authority(tmp_path):
+    """Order-level MATCHED cannot turn a FAILED trade object into exposure."""
+    from src.execution.fill_tracker import check_pending_entries
+    from src.state.db import get_connection, init_schema
+    from src.state.venue_command_repo import load_calibration_trade_facts
+
+    db_path = tmp_path / "zeus.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+    conn.execute(
+        """
+        INSERT INTO venue_commands (
+            command_id, snapshot_id, envelope_id, position_id, decision_id,
+            idempotency_key, intent_kind, market_id, token_id, side, size, price,
+            venue_order_id, state, last_event_id, created_at, updated_at,
+            review_required_reason
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "cmd-failed-trade",
+            "snap-failed-trade",
+            "env-failed-trade",
+            "123456789088",
+            "dec-failed-trade",
+            "idem-failed-trade",
+            "ENTRY",
+            "condition-failed-trade",
+            "tok_yes_failed_trade",
+            "BUY",
+            20.0,
+            0.40,
+            "buy_failed_trade",
+            "ACKED",
+            None,
+            "2026-04-29T12:00:00+00:00",
+            "2026-04-29T12:00:00+00:00",
+            None,
+        ),
+    )
+    conn.execute(
+        """
+        INSERT INTO trade_decisions (
+            market_id, bin_label, direction, size_usd, price, timestamp,
+            p_raw, p_posterior, edge, ci_lower, ci_upper, kelly_fraction,
+            status, runtime_trade_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "condition-failed-trade",
+            "60-65",
+            "buy_yes",
+            20.0,
+            0.40,
+            "2026-04-29T12:00:00+00:00",
+            0.55,
+            0.55,
+            0.15,
+            0.50,
+            0.60,
+            0.0,
+            "pending_tracked",
+            "123456789088",
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    class Deps:
+        @staticmethod
+        def get_connection():
+            return get_connection(db_path)
+
+    pos = _make_position(
+        trade_id="123456789088",
+        state="pending_tracked",
+        entry_order_id="buy_failed_trade",
+        entry_fill_verified=False,
+        entered_at="",
+        size_usd=20.0,
+        entry_price=0.40,
+        shares=0.0,
+        cost_basis_usd=0.0,
+        strategy_key="center_buy",
+        strategy="center_buy",
+    )
+    portfolio = _make_portfolio(pos)
+    clob = _make_clob(order_status="MATCHED")
+    clob.get_order_status.return_value = {
+        "status": "MATCHED",
+        "trade_id": "trade-poll-failed",
+        "trade_status": "FAILED",
+        "avgPrice": 0.42,
+        "filledSize": 12.0,
+        "timestamp": "2026-04-29T12:01:00+00:00",
+    }
+
+    stats = check_pending_entries(
+        portfolio,
+        clob,
+        deps=Deps,
+        now=datetime(2026, 4, 29, 12, 1, tzinfo=timezone.utc),
+    )
+
+    assert stats["entered"] == 0
+    assert stats["still_pending"] == 1
+    assert pos.state == "quarantined"
+    assert pos.order_status == "optimistic_fill_ledger_write_failed"
+    assert pos.entry_fill_verified is False
+    assert pos.fill_authority == FILL_AUTHORITY_NONE
+    assert pos.has_fill_economics_authority is False
+    assert pos.shares == 0.0
+    assert pos.cost_basis_usd == 0.0
+
+    conn = get_connection(db_path)
+    trade_rows = conn.execute(
+        "SELECT state, filled_size FROM venue_trade_facts ORDER BY local_sequence"
+    ).fetchall()
+    lot_rows = conn.execute("SELECT position_id, state FROM position_lots").fetchall()
+    command_state = conn.execute(
+        "SELECT state FROM venue_commands WHERE command_id = 'cmd-failed-trade'"
+    ).fetchone()["state"]
+    event_types = [
+        r["event_type"]
+        for r in conn.execute(
+            """
+            SELECT event_type
+              FROM venue_command_events
+             WHERE command_id = 'cmd-failed-trade'
+             ORDER BY sequence_no
+            """
+        ).fetchall()
+    ]
+    canonical_events = conn.execute(
+        "SELECT event_type FROM position_events WHERE position_id = ?",
+        ("123456789088",),
+    ).fetchall()
+    calibration_rows = load_calibration_trade_facts(conn)
+    conn.close()
+
+    assert [(row["state"], row["filled_size"]) for row in trade_rows] == [("FAILED", "12.0")]
+    assert lot_rows == []
+    assert command_state == "REVIEW_REQUIRED"
+    assert "REVIEW_REQUIRED" in event_types
+    assert "PARTIAL_FILL_OBSERVED" not in event_types
+    assert "FILL_CONFIRMED" not in event_types
+    assert canonical_events == []
+    assert calibration_rows == []
+
+
+def test_legacy_polling_duplicate_failed_trade_fact_still_fails_closed(tmp_path):
+    """An existing FAILED fact must not make polling's idempotent path authorize fill."""
+    from src.execution.fill_tracker import check_pending_entries
+    from src.state.db import get_connection, init_schema
+    from src.state.venue_command_repo import append_trade_fact, load_calibration_trade_facts
+
+    db_path = tmp_path / "zeus.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+    conn.execute(
+        """
+        INSERT INTO venue_commands (
+            command_id, snapshot_id, envelope_id, position_id, decision_id,
+            idempotency_key, intent_kind, market_id, token_id, side, size, price,
+            venue_order_id, state, last_event_id, created_at, updated_at,
+            review_required_reason
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "cmd-dup-failed-trade",
+            "snap-dup-failed-trade",
+            "env-dup-failed-trade",
+            "123456789077",
+            "dec-dup-failed-trade",
+            "idem-dup-failed-trade",
+            "ENTRY",
+            "condition-dup-failed-trade",
+            "tok_yes_dup_failed_trade",
+            "BUY",
+            20.0,
+            0.40,
+            "buy_dup_failed_trade",
+            "ACKED",
+            None,
+            "2026-04-29T12:00:00+00:00",
+            "2026-04-29T12:00:00+00:00",
+            None,
+        ),
+    )
+    conn.execute(
+        """
+        INSERT INTO trade_decisions (
+            market_id, bin_label, direction, size_usd, price, timestamp,
+            p_raw, p_posterior, edge, ci_lower, ci_upper, kelly_fraction,
+            status, runtime_trade_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "condition-dup-failed-trade",
+            "60-65",
+            "buy_yes",
+            20.0,
+            0.40,
+            "2026-04-29T12:00:00+00:00",
+            0.55,
+            0.55,
+            0.15,
+            0.50,
+            0.60,
+            0.0,
+            "pending_tracked",
+            "123456789077",
+        ),
+    )
+    append_trade_fact(
+        conn,
+        trade_id="trade-poll-dup-failed",
+        venue_order_id="buy_dup_failed_trade",
+        command_id="cmd-dup-failed-trade",
+        state="FAILED",
+        filled_size="12.0",
+        fill_price="0.42",
+        source="WS_USER",
+        observed_at=datetime(2026, 4, 29, 12, 0, tzinfo=timezone.utc),
+        raw_payload_hash="0" * 64,
+        raw_payload_json={"source": "preexisting"},
+    )
+    conn.commit()
+    conn.close()
+
+    class Deps:
+        @staticmethod
+        def get_connection():
+            return get_connection(db_path)
+
+    pos = _make_position(
+        trade_id="123456789077",
+        state="pending_tracked",
+        entry_order_id="buy_dup_failed_trade",
+        entry_fill_verified=False,
+        entered_at="",
+        size_usd=20.0,
+        entry_price=0.40,
+        shares=0.0,
+        cost_basis_usd=0.0,
+        strategy_key="center_buy",
+        strategy="center_buy",
+    )
+    portfolio = _make_portfolio(pos)
+    clob = _make_clob(order_status="MATCHED")
+    clob.get_order_status.return_value = {
+        "status": "MATCHED",
+        "trade_id": "trade-poll-dup-failed",
+        "trade_status": "FAILED",
+        "avgPrice": 0.42,
+        "filledSize": 12.0,
+        "timestamp": "2026-04-29T12:01:00+00:00",
+    }
+
+    stats = check_pending_entries(
+        portfolio,
+        clob,
+        deps=Deps,
+        now=datetime(2026, 4, 29, 12, 1, tzinfo=timezone.utc),
+    )
+
+    assert stats["entered"] == 0
+    assert stats["still_pending"] == 1
+    assert pos.state == "quarantined"
+    assert pos.order_status == "optimistic_fill_ledger_write_failed"
+    assert pos.entry_fill_verified is False
+    assert pos.fill_authority == FILL_AUTHORITY_NONE
+    assert pos.has_fill_economics_authority is False
+    assert pos.shares == 0.0
+    assert pos.cost_basis_usd == 0.0
+
+    conn = get_connection(db_path)
+    trade_rows = conn.execute(
+        "SELECT state, filled_size FROM venue_trade_facts ORDER BY local_sequence"
+    ).fetchall()
+    lot_rows = conn.execute("SELECT position_id, state FROM position_lots").fetchall()
+    event_types = [
+        r["event_type"]
+        for r in conn.execute(
+            """
+            SELECT event_type
+              FROM venue_command_events
+             WHERE command_id = 'cmd-dup-failed-trade'
+             ORDER BY sequence_no
+            """
+        ).fetchall()
+    ]
+    calibration_rows = load_calibration_trade_facts(conn)
+    conn.close()
+
+    assert [(row["state"], row["filled_size"]) for row in trade_rows] == [("FAILED", "12.0")]
+    assert lot_rows == []
+    assert "REVIEW_REQUIRED" in event_types
+    assert "PARTIAL_FILL_OBSERVED" not in event_types
+    assert "FILL_CONFIRMED" not in event_types
+    assert calibration_rows == []
+
+
+def test_legacy_polling_unknown_trade_status_fails_closed(tmp_path):
+    """Explicit unsupported trade lifecycle evidence cannot become local exposure."""
+    from src.execution.fill_tracker import check_pending_entries
+    from src.state.db import get_connection, init_schema
+    from src.state.venue_command_repo import load_calibration_trade_facts
+
+    db_path = tmp_path / "zeus.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+    conn.execute(
+        """
+        INSERT INTO venue_commands (
+            command_id, snapshot_id, envelope_id, position_id, decision_id,
+            idempotency_key, intent_kind, market_id, token_id, side, size, price,
+            venue_order_id, state, last_event_id, created_at, updated_at,
+            review_required_reason
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "cmd-unknown-trade",
+            "snap-unknown-trade",
+            "env-unknown-trade",
+            "123456789066",
+            "dec-unknown-trade",
+            "idem-unknown-trade",
+            "ENTRY",
+            "condition-unknown-trade",
+            "tok_yes_unknown_trade",
+            "BUY",
+            20.0,
+            0.40,
+            "buy_unknown_trade",
+            "ACKED",
+            None,
+            "2026-04-29T12:00:00+00:00",
+            "2026-04-29T12:00:00+00:00",
+            None,
+        ),
+    )
+    conn.execute(
+        """
+        INSERT INTO trade_decisions (
+            market_id, bin_label, direction, size_usd, price, timestamp,
+            p_raw, p_posterior, edge, ci_lower, ci_upper, kelly_fraction,
+            status, runtime_trade_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "condition-unknown-trade",
+            "60-65",
+            "buy_yes",
+            20.0,
+            0.40,
+            "2026-04-29T12:00:00+00:00",
+            0.55,
+            0.55,
+            0.15,
+            0.50,
+            0.60,
+            0.0,
+            "pending_tracked",
+            "123456789066",
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    class Deps:
+        @staticmethod
+        def get_connection():
+            return get_connection(db_path)
+
+    pos = _make_position(
+        trade_id="123456789066",
+        state="pending_tracked",
+        entry_order_id="buy_unknown_trade",
+        entry_fill_verified=False,
+        entered_at="",
+        size_usd=20.0,
+        entry_price=0.40,
+        shares=0.0,
+        cost_basis_usd=0.0,
+        strategy_key="center_buy",
+        strategy="center_buy",
+    )
+    portfolio = _make_portfolio(pos)
+    clob = _make_clob(order_status="MATCHED")
+    clob.get_order_status.return_value = {
+        "status": "MATCHED",
+        "trade_id": "trade-poll-unknown",
+        "trade_status": "WEIRD_STATE",
+        "avgPrice": 0.42,
+        "filledSize": 12.0,
+        "timestamp": "2026-04-29T12:01:00+00:00",
+    }
+
+    stats = check_pending_entries(
+        portfolio,
+        clob,
+        deps=Deps,
+        now=datetime(2026, 4, 29, 12, 1, tzinfo=timezone.utc),
+    )
+
+    assert stats["entered"] == 0
+    assert stats["still_pending"] == 1
+    assert pos.state == "quarantined"
+    assert pos.order_status == "optimistic_fill_ledger_write_failed"
+    assert pos.entry_fill_verified is False
+    assert pos.fill_authority == FILL_AUTHORITY_NONE
+    assert pos.has_fill_economics_authority is False
+    assert pos.shares == 0.0
+    assert pos.cost_basis_usd == 0.0
+
+    conn = get_connection(db_path)
+    assert conn.execute("SELECT COUNT(*) FROM venue_trade_facts").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM position_lots").fetchone()[0] == 0
+    event_types = [
+        r["event_type"]
+        for r in conn.execute(
+            """
+            SELECT event_type
+              FROM venue_command_events
+             WHERE command_id = 'cmd-unknown-trade'
+             ORDER BY sequence_no
+            """
+        ).fetchall()
+    ]
+    canonical_events = conn.execute(
+        "SELECT event_type FROM position_events WHERE position_id = ?",
+        ("123456789066",),
+    ).fetchall()
+    calibration_rows = load_calibration_trade_facts(conn)
+    conn.close()
+
+    assert "REVIEW_REQUIRED" in event_types
+    assert "PARTIAL_FILL_OBSERVED" not in event_types
+    assert "FILL_CONFIRMED" not in event_types
+    assert canonical_events == []
+    assert calibration_rows == []
+
+
+def test_legacy_polling_trade_lifecycle_requires_stable_fill_economics(tmp_path):
+    """Same trade_id cannot change filled size when MATCHED later becomes CONFIRMED."""
+    from src.execution.fill_tracker import check_pending_entries
+    from src.state.db import get_connection, init_schema
+    from src.state.venue_command_repo import load_calibration_trade_facts
+
+    db_path = tmp_path / "zeus.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+    conn.execute(
+        """
+        INSERT INTO venue_commands (
+            command_id, snapshot_id, envelope_id, position_id, decision_id,
+            idempotency_key, intent_kind, market_id, token_id, side, size, price,
+            venue_order_id, state, last_event_id, created_at, updated_at,
+            review_required_reason
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "cmd-drift",
+            "snap-drift",
+            "env-drift",
+            "123456789099",
+            "dec-drift",
+            "idem-drift",
+            "ENTRY",
+            "condition-drift",
+            "tok_yes_drift",
+            "BUY",
+            20.0,
+            0.40,
+            "buy_drift",
+            "ACKED",
+            None,
+            "2026-04-29T12:00:00+00:00",
+            "2026-04-29T12:00:00+00:00",
+            None,
+        ),
+    )
+    conn.execute(
+        """
+        INSERT INTO trade_decisions (
+            market_id, bin_label, direction, size_usd, price, timestamp,
+            p_raw, p_posterior, edge, ci_lower, ci_upper, kelly_fraction,
+            status, runtime_trade_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "condition-drift",
+            "60-65",
+            "buy_yes",
+            20.0,
+            0.40,
+            "2026-04-29T12:00:00+00:00",
+            0.55,
+            0.55,
+            0.15,
+            0.50,
+            0.60,
+            0.0,
+            "pending_tracked",
+            "123456789099",
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    class Deps:
+        @staticmethod
+        def get_connection():
+            return get_connection(db_path)
+
+    pos = _make_position(
+        trade_id="123456789099",
+        state="pending_tracked",
+        entry_order_id="buy_drift",
+        entry_fill_verified=False,
+        entered_at="",
+        size_usd=20.0,
+        entry_price=0.40,
+        shares=0.0,
+        cost_basis_usd=0.0,
+        strategy_key="center_buy",
+        strategy="center_buy",
+    )
+    portfolio = _make_portfolio(pos)
+    clob = _make_clob(order_status="MATCHED")
+    clob.get_order_status.return_value = {
+        "status": "MATCHED",
+        "trade_id": "trade-poll-drift",
+        "trade_status": "MATCHED",
+        "avgPrice": 0.42,
+        "filledSize": 12.0,
+        "timestamp": "2026-04-29T12:01:00+00:00",
+    }
+    check_pending_entries(
+        portfolio,
+        clob,
+        deps=Deps,
+        now=datetime(2026, 4, 29, 12, 1, tzinfo=timezone.utc),
+    )
+
+    clob.get_order_status.return_value = {
+        "status": "CONFIRMED",
+        "trade_id": "trade-poll-drift",
+        "trade_status": "CONFIRMED",
+        "avgPrice": 0.42,
+        "filledSize": 20.0,
+        "timestamp": "2026-04-29T12:02:00+00:00",
+    }
+    stats = check_pending_entries(
+        portfolio,
+        clob,
+        deps=Deps,
+        now=datetime(2026, 4, 29, 12, 2, tzinfo=timezone.utc),
+    )
+
+    assert stats["entered"] == 0
+    assert stats["still_pending"] == 1
+    assert pos.state == "quarantined"
+    assert pos.entry_fill_verified is False
+    assert pos.fill_authority != FILL_AUTHORITY_VENUE_CONFIRMED_FULL
+    assert pos.has_fill_economics_authority is False
+
+    conn = get_connection(db_path)
+    trade_rows = conn.execute(
+        "SELECT state, filled_size FROM venue_trade_facts ORDER BY local_sequence"
+    ).fetchall()
+    event_types = [
+        r["event_type"]
+        for r in conn.execute(
+            """
+            SELECT event_type
+              FROM venue_command_events
+             WHERE command_id = 'cmd-drift'
+             ORDER BY sequence_no
+            """
+        ).fetchall()
+    ]
+    calibration_rows = load_calibration_trade_facts(conn)
+    conn.close()
+
+    assert [(row["state"], row["filled_size"]) for row in trade_rows] == [("MATCHED", "12.0")]
+    assert "REVIEW_REQUIRED" in event_types
+    assert "FILL_CONFIRMED" not in event_types
+    assert calibration_rows == []
+
+
+def test_confirmed_order_with_matched_trade_status_stays_optimistic_not_full_fill(tmp_path):
+    """Order CONFIRMED cannot override a non-final trade status into fill authority."""
+    from src.execution.fill_tracker import check_pending_entries
+    from src.state.db import get_connection, init_schema
+
+    db_path = tmp_path / "zeus.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+    conn.execute(
+        """
+        INSERT INTO venue_commands (
+            command_id, snapshot_id, envelope_id, position_id, decision_id,
+            idempotency_key, intent_kind, market_id, token_id, side, size, price,
+            venue_order_id, state, last_event_id, created_at, updated_at,
+            review_required_reason
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "cmd-confirmed-match",
+            "snap-confirmed-match",
+            "env-confirmed-match",
+            "runtime-confirmed-match",
+            "dec-confirmed-match",
+            "idem-confirmed-match",
+            "ENTRY",
+            "condition-confirmed-match",
+            "tok_yes_confirmed_match",
+            "BUY",
+            20.0,
+            0.40,
+            "buy_123",
+            "ACKED",
+            None,
+            "2026-04-29T12:00:00+00:00",
+            "2026-04-29T12:00:00+00:00",
+            None,
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    class Deps:
+        @staticmethod
+        def get_connection():
+            return get_connection(db_path)
+
+    pos = _make_position(
+        trade_id="runtime-confirmed-match",
+        state="pending_tracked",
+        order_id="buy_123",
+        entry_order_id="buy_123",
+        entry_fill_verified=False,
+        entered_at="",
+        size_usd=20.0,
+        entry_price=0.40,
+        shares=0.0,
+        cost_basis_usd=0.0,
+    )
+    portfolio = _make_portfolio(pos)
+    clob = _make_clob(order_status="CONFIRMED")
+    clob.get_order_status.return_value = {
+        "status": "CONFIRMED",
+        "trade_id": "trade-confirmed-match",
+        "trade_status": "MATCHED",
+        "avgPrice": 0.42,
+        "filledSize": 12.0,
+        "timestamp": "2026-04-29T12:01:00+00:00",
+    }
+
+    stats = check_pending_entries(
+        portfolio,
+        clob,
+        deps=Deps,
+        now=datetime(2026, 4, 29, 12, 1, tzinfo=timezone.utc),
+    )
+
+    assert stats["entered"] == 0
+    assert stats["still_pending"] == 1
+    assert pos.state == "pending_tracked"
+    assert pos.order_status == "matched"
+    assert pos.entry_fill_verified is False
+    assert pos.entered_at == ""
+    assert pos.entry_economics_authority == ENTRY_ECONOMICS_OPTIMISTIC_MATCH_PRICE
+    assert pos.fill_authority == FILL_AUTHORITY_OPTIMISTIC_SUBMITTED
+    assert pos.fill_authority != FILL_AUTHORITY_VENUE_CONFIRMED_FULL
+    assert pos.has_fill_economics_authority is False
+
+    conn = get_connection(db_path)
+    trade_states = [r["state"] for r in conn.execute("SELECT state FROM venue_trade_facts").fetchall()]
+    event_types = [
+        r["event_type"]
+        for r in conn.execute(
+            """
+            SELECT event_type
+              FROM venue_command_events
+             WHERE command_id = 'cmd-confirmed-match'
+             ORDER BY sequence_no
+            """
+        ).fetchall()
+    ]
+    conn.close()
+
+    assert trade_states == ["MATCHED"]
+    assert "PARTIAL_FILL_OBSERVED" in event_types
+    assert "FILL_CONFIRMED" not in event_types
+
+
+def test_stale_deps_mined_fill_status_stays_optimistic_not_full_fill(tmp_path):
+    """Stale deps cannot extend the fill-success set with MINED."""
+    from src.execution.fill_tracker import check_pending_entries
+    from src.state.db import get_connection, init_schema
+
+    db_path = tmp_path / "zeus.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+    conn.execute(
+        """
+        INSERT INTO venue_commands (
+            command_id, snapshot_id, envelope_id, position_id, decision_id,
+            idempotency_key, intent_kind, market_id, token_id, side, size, price,
+            venue_order_id, state, last_event_id, created_at, updated_at,
+            review_required_reason
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "cmd-mined-stale",
+            "snap-mined-stale",
+            "env-mined-stale",
+            "runtime-mined-stale",
+            "dec-mined-stale",
+            "idem-mined-stale",
+            "ENTRY",
+            "condition-mined-stale",
+            "tok_yes_mined_stale",
+            "BUY",
+            20.0,
+            0.40,
+            "buy_123",
+            "ACKED",
+            None,
+            "2026-04-29T12:00:00+00:00",
+            "2026-04-29T12:00:00+00:00",
+            None,
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    class StaleDeps:
+        PENDING_FILL_STATUSES = {"MATCHED", "MINED", "FILLED"}
+
+        @staticmethod
+        def get_connection():
+            return get_connection(db_path)
+
+    pos = _make_position(
+        trade_id="runtime-mined-stale",
+        state="pending_tracked",
+        order_id="buy_123",
+        entry_order_id="buy_123",
+        entry_fill_verified=False,
+        entered_at="",
+        size_usd=20.0,
+        entry_price=0.40,
+        shares=0.0,
+        cost_basis_usd=0.0,
+    )
+    portfolio = _make_portfolio(pos)
+    clob = _make_clob(order_status="MINED")
+    clob.get_order_status.return_value = {
+        "status": "MINED",
+        "trade_id": "trade-mined-stale",
+        "trade_status": "MINED",
+        "avgPrice": 0.42,
+        "filledSize": 12.0,
+        "timestamp": "2026-04-29T12:01:00+00:00",
+    }
+
+    stats = check_pending_entries(
+        portfolio,
+        clob,
+        deps=StaleDeps,
+        now=datetime(2026, 4, 29, 12, 1, tzinfo=timezone.utc),
+    )
+
+    assert stats["entered"] == 0
+    assert stats["still_pending"] == 1
+    assert pos.state == "pending_tracked"
+    assert pos.order_status == "mined"
+    assert pos.entry_fill_verified is False
+    assert pos.entry_economics_authority == ENTRY_ECONOMICS_OPTIMISTIC_MATCH_PRICE
+    assert pos.fill_authority == FILL_AUTHORITY_OPTIMISTIC_SUBMITTED
+    assert pos.fill_authority != FILL_AUTHORITY_VENUE_CONFIRMED_FULL
+    assert pos.has_fill_economics_authority is False
+
+    conn = get_connection(db_path)
+    trade_states = [r["state"] for r in conn.execute("SELECT state FROM venue_trade_facts").fetchall()]
+    lot_rows = conn.execute("SELECT position_id, state FROM position_lots").fetchall()
+    event_types = [
+        r["event_type"]
+        for r in conn.execute(
+            """
+            SELECT event_type
+              FROM venue_command_events
+             WHERE command_id = 'cmd-mined-stale'
+             ORDER BY sequence_no
+            """
+        ).fetchall()
+    ]
+    conn.close()
+
+    assert trade_states == ["MINED"]
+    assert lot_rows == []
+    assert "PARTIAL_FILL_OBSERVED" in event_types
+    assert "FILL_CONFIRMED" not in event_types
+
+
+def test_deps_path_missing_fill_price_writes_no_fill_authority_surfaces(tmp_path):
+    """A linkable order with size-only fill evidence must not contaminate U2 facts."""
+    from src.execution.fill_tracker import check_pending_entries
+    from src.state.db import get_connection, init_schema
+    from src.state.venue_command_repo import load_calibration_trade_facts
+
+    db_path = tmp_path / "zeus.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+    conn.execute(
+        """
+        INSERT INTO venue_commands (
+            command_id, snapshot_id, envelope_id, position_id, decision_id,
+            idempotency_key, intent_kind, market_id, token_id, side, size, price,
+            venue_order_id, state, last_event_id, created_at, updated_at,
+            review_required_reason
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "cmd-size-only",
+            "snap-size-only",
+            "env-size-only",
+            "123456789012",
+            "dec-live-size-only",
+            "idem-size-only",
+            "ENTRY",
+            "condition-size-only",
+            "tok_yes_001",
+            "BUY",
+            20.0,
+            0.40,
+            "buy_123",
+            "ACKED",
+            None,
+            "2026-04-29T12:00:00+00:00",
+            "2026-04-29T12:00:00+00:00",
+            None,
+        ),
+    )
+    conn.execute(
+        """
+        INSERT INTO trade_decisions (
+            market_id, bin_label, direction, size_usd, price, timestamp,
+            p_raw, p_posterior, edge, ci_lower, ci_upper, kelly_fraction,
+            status, runtime_trade_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "condition-size-only",
+            "60-65",
+            "buy_yes",
+            20.0,
+            0.40,
+            "2026-04-29T12:00:00+00:00",
+            0.55,
+            0.55,
+            0.15,
+            0.50,
+            0.60,
+            0.0,
+            "pending_tracked",
+            "123456789012",
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    class Deps:
+        @staticmethod
+        def get_connection():
+            return get_connection(db_path)
+
+    pos = _make_position(
+        trade_id="123456789012",
+        state="pending_tracked",
+        entry_order_id="buy_123",
+        entry_fill_verified=False,
+        entered_at="",
+        size_usd=20.0,
+        entry_price=0.40,
+        shares=0.0,
+        cost_basis_usd=0.0,
+        strategy_key="center_buy",
+        strategy="center_buy",
+    )
+    portfolio = _make_portfolio(pos)
+    clob = _make_clob(order_status="MATCHED")
+    clob.get_order_status.return_value = {
+        "status": "MATCHED",
+        "trade_id": "trade-size-only",
+        "trade_status": "MATCHED",
+        "filledSize": 12.0,
+        "price": 0.42,
+        "timestamp": "2026-04-29T12:01:00+00:00",
+    }
+
+    stats = check_pending_entries(
+        portfolio,
+        clob,
+        deps=Deps,
+        now=datetime(2026, 4, 29, 12, 1, tzinfo=timezone.utc),
+    )
+
+    assert stats["entered"] == 0
+    assert stats["still_pending"] == 1
+    assert pos.state == "quarantined"
+    assert pos.order_status == "matched_missing_fill_economics"
+    assert pos.entry_fill_verified is False
+    assert pos.fill_authority == FILL_AUTHORITY_NONE
+    assert pos.has_fill_economics_authority is False
+
+    conn = get_connection(db_path)
+    assert conn.execute("SELECT COUNT(*) FROM venue_trade_facts").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM position_lots").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM execution_fact").fetchone()[0] == 0
+    assert conn.execute(
+        """
+        SELECT COUNT(*)
+          FROM venue_command_events
+         WHERE event_type IN ('PARTIAL_FILL_OBSERVED', 'FILL_CONFIRMED')
+        """
+    ).fetchone()[0] == 0
+    assert load_calibration_trade_facts(conn) == []
+    conn.close()
 
 
 def test_partial_remainder_cancel_preserves_filled_exposure():
@@ -481,6 +1789,48 @@ def test_partial_remainder_cancel_preserves_filled_exposure():
     assert pos.cost_basis_usd == pytest.approx(12.0 * 0.42)
     assert pos.order_status == "partial_remainder_cancelled"
     clob.cancel_order.assert_called_once_with("buy_123")
+
+
+def test_partial_with_filled_size_but_missing_fill_price_quarantines_entry():
+    """Partial size evidence is not enough to assign cost basis or exposure grade."""
+    from src.execution.fill_tracker import check_pending_entries
+
+    pos = _make_position(
+        state="pending_tracked",
+        entry_order_id="buy_123",
+        entry_fill_verified=False,
+        entered_at="",
+        size_usd=20.0,
+        entry_price=0.40,
+        shares=0.0,
+        cost_basis_usd=0.0,
+    )
+    portfolio = _make_portfolio(pos)
+    clob = _make_clob(order_status="PARTIAL")
+    clob.get_order_status.return_value = {
+        "status": "PARTIAL",
+        "filledSize": 12.0,
+        "price": 0.42,
+    }
+
+    stats = check_pending_entries(
+        portfolio,
+        clob,
+        now=datetime(2026, 4, 29, 12, 0, tzinfo=timezone.utc),
+    )
+
+    assert stats["entered"] == 0
+    assert stats["voided"] == 0
+    assert stats["still_pending"] == 1
+    assert pos.state == "quarantined"
+    assert pos.order_status == "partially_matched_missing_fill_economics"
+    assert pos.entry_fill_verified is False
+    assert pos.shares == 0.0
+    assert pos.shares_filled == 0.0
+    assert pos.cost_basis_usd == 0.0
+    assert pos.filled_cost_basis_usd == 0.0
+    assert pos.fill_authority == FILL_AUTHORITY_NONE
+    clob.cancel_order.assert_not_called()
 
 
 def test_chain_reconciliation_rescues_pending_tracked_fill(tmp_path):
@@ -886,35 +2236,6 @@ def test_backoff_exhausted_holds_to_settlement():
     assert pos.state != "voided"
 
 
-# ---- Test 6: Paper exit does not use sell order ----
-
-@pytest.mark.skip(reason="T1.c-audit 2026-04-23: KEEP_LEGITIMATE — paper-mode was removed in Phase2 (canonical-only execution). This test validates deprecated paper-path behavior; retained as documentation antibody of the removed contract. Un-skip verified failure as expected (cannot exercise removed code path). Do not un-skip; promote to OBSOLETE_DELETE if plan ever decides retire the documentation antibody.")
-def test_paper_exit_does_not_use_sell_order():
-    """Paper mode: direct close_position, no CLOB interaction."""
-    pos = _make_position(state="holding")
-    portfolio = _make_portfolio(pos)
-    clob = _make_clob()
-
-    with patch("src.execution.exit_lifecycle.place_sell_order") as mock_sell:
-        outcome = execute_exit(
-            portfolio=portfolio,
-            position=pos,
-            exit_context=ExitContext(
-                exit_reason="EDGE_REVERSAL",
-                current_market_price=0.45,
-                best_bid=0.45,
-            ),
-            clob=clob,
-        )
-
-    # No sell order should have been placed
-    mock_sell.assert_not_called()
-    # Position should be economically closed, not settled
-    assert "paper_exit" in outcome
-    assert pos in portfolio.positions
-    assert pos.state == "economically_closed"
-
-
 # ---- Test 7: Collateral check blocks underfunded sell ----
 
 def test_collateral_check_blocks_underfunded_sell():
@@ -950,15 +2271,12 @@ def test_quarantine_expires_after_48h():
 
 def test_quarantine_expired_blocks_new_entries_until_resolved():
     """Quarantine-expired positions still block discovery until authoritative resolution."""
+    from src.engine.cycle_runner import _has_quarantined_positions
+
     pos = _make_position(chain_state="quarantine_expired")
     portfolio = _make_portfolio(pos)
 
-    has_quarantine = any(
-        p.chain_state in {"quarantined", "quarantine_expired"}
-        for p in portfolio.positions
-    )
-
-    assert has_quarantine is True
+    assert _has_quarantined_positions(portfolio) is True
 
 
 def test_monitoring_marks_quarantine_for_admin_resolution_once(monkeypatch):
@@ -1028,6 +2346,61 @@ def test_monitoring_marks_quarantine_for_admin_resolution_once(monkeypatch):
     assert pos.admin_exit_reason == QUARANTINE_REVIEW_REQUIRED
     assert summary["quarantine_resolution_marked"] == 1
     assert summary["monitor_skipped_quarantine_resolution"] == 2
+
+
+def test_monitoring_skips_fill_authority_quarantine_without_chain_quarantine(monkeypatch):
+    """Fill-authority quarantine is a non-trading state even when chain_state is not quarantined."""
+    from src.engine import cycle_runtime
+
+    pos = _make_position(
+        state="quarantined",
+        chain_state="local_only",
+        admin_exit_reason="FILL_AUTHORITY_QUARANTINE_REVIEW_REQUIRED",
+        exit_reason="FILL_AUTHORITY_QUARANTINE_REVIEW_REQUIRED",
+    )
+    portfolio = _make_portfolio(pos)
+
+    class Tracker:
+        def record_exit(self, position):
+            raise AssertionError("fill-authority quarantine should not be exited by monitor loop")
+
+    monitor_results = []
+    artifact = type("Artifact", (), {"add_monitor_result": lambda self, result: monitor_results.append(result)})()
+    summary = {"monitors": 0, "exits": 0}
+    deps = type(
+        "Deps",
+        (),
+        {
+            "MonitorResult": type("MonitorResult", (), {"__init__": lambda self, **kwargs: self.__dict__.update(kwargs)}),
+            "logger": logging.getLogger("test_fill_authority_quarantine_monitor_skip"),
+            "cities_by_name": {},
+            "_utcnow": staticmethod(lambda: datetime(2026, 4, 1, 5, 30, tzinfo=timezone.utc)),
+            "has_acknowledged_quarantine_clear": staticmethod(lambda token_id: False),
+        },
+    )
+
+    monkeypatch.setattr(
+        "src.engine.monitor_refresh.refresh_position",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("fill-authority quarantine must not reach monitor refresh")
+        ),
+    )
+
+    portfolio_dirty, tracker_dirty = cycle_runtime.execute_monitoring_phase(
+        None,
+        object(),
+        portfolio,
+        artifact,
+        Tracker(),
+        summary,
+        deps=deps,
+    )
+
+    assert portfolio_dirty is False
+    assert tracker_dirty is False
+    assert summary["monitor_skipped_quarantine_resolution"] == 1
+    assert summary["monitors"] == 0
+    assert monitor_results[0].exit_reason == "FILL_AUTHORITY_QUARANTINE_REVIEW_REQUIRED"
 
 
 def test_quarantine_expired_marks_distinct_admin_resolution_reason(monkeypatch):
@@ -1730,6 +3103,738 @@ def test_exit_authority_fails_closed_on_stale_monitor_inputs():
     assert "current_market_price_is_fresh" in decision.reason
 
 
+def test_day0_stale_probability_does_not_authorize_observation_reversal():
+    """Stale model evidence must not become Day0 observation authority."""
+    pos = _make_position(direction="buy_yes", size_usd=5.0, entry_price=0.40, entry_ci_width=0.02)
+
+    decision = pos.evaluate_exit(
+        ExitContext(
+            fresh_prob=0.25,
+            fresh_prob_is_fresh=False,
+            current_market_price=0.55,
+            current_market_price_is_fresh=True,
+            best_bid=0.54,
+            hours_to_settlement=4.0,
+            position_state="day0_window",
+            day0_active=True,
+        )
+    )
+
+    assert decision.should_exit is False
+    assert decision.reason == "INCOMPLETE_EXIT_CONTEXT (missing=fresh_prob_is_fresh)"
+    assert "day0_probability_authority_blocked" in decision.applied_validations
+    assert decision.trigger != "DAY0_OBSERVATION_REVERSAL"
+
+
+def test_day0_observation_exit_requires_executable_best_bid_not_price_proxy():
+    """Current market price is not executable sell proceeds for Day0 exit EV."""
+    pos = _make_position(direction="buy_yes", size_usd=5.0, entry_price=0.40, entry_ci_width=0.02)
+
+    decision = pos.evaluate_exit(
+        ExitContext(
+            fresh_prob=0.25,
+            fresh_prob_is_fresh=True,
+            current_market_price=0.55,
+            current_market_price_is_fresh=True,
+            best_bid=None,
+            hours_to_settlement=4.0,
+            position_state="day0_window",
+            day0_active=True,
+        )
+    )
+
+    assert decision.should_exit is False
+    assert decision.reason == "INCOMPLETE_EXIT_CONTEXT (missing=best_bid)"
+    assert "best_bid_unavailable" in decision.applied_validations
+    assert "best_bid_proxy_from_current_market_price" not in decision.applied_validations
+
+
+@pytest.mark.parametrize("bad_bid", [math.nan, math.inf, -math.inf])
+def test_day0_observation_exit_requires_finite_executable_best_bid(bad_bid):
+    pos = _make_position(direction="buy_yes", size_usd=5.0, entry_price=0.40, entry_ci_width=0.02)
+
+    decision = pos.evaluate_exit(
+        ExitContext(
+            fresh_prob=0.25,
+            fresh_prob_is_fresh=True,
+            current_market_price=0.55,
+            current_market_price_is_fresh=True,
+            best_bid=bad_bid,
+            hours_to_settlement=4.0,
+            position_state="day0_window",
+            day0_active=True,
+        )
+    )
+
+    assert decision.should_exit is False
+    assert decision.reason == "INCOMPLETE_EXIT_CONTEXT (missing=best_bid)"
+    assert "best_bid_unavailable" in decision.applied_validations
+
+
+def test_day0_force_exit_without_model_probability_still_requires_executable_best_bid():
+    """Non-model Day0 exits cannot fall through to diagnostic price execution."""
+    pos = _make_position(direction="buy_yes", size_usd=5.0, entry_price=0.40, entry_ci_width=0.02)
+
+    decision = pos.evaluate_exit(
+        ExitContext(
+            fresh_prob=0.25,
+            fresh_prob_is_fresh=False,
+            current_market_price=0.55,
+            current_market_price_is_fresh=True,
+            best_bid=None,
+            hours_to_settlement=0.5,
+            position_state="day0_window",
+            day0_active=True,
+        )
+    )
+
+    assert decision.should_exit is False
+    assert decision.reason == "INCOMPLETE_EXIT_CONTEXT (missing=fresh_prob_is_fresh,best_bid)"
+    assert "best_bid_unavailable" in decision.applied_validations
+    assert "model_probability_authority_not_required:settlement_imminent" not in decision.applied_validations
+
+
+@pytest.mark.parametrize("direction", ["buy_yes", "buy_no"])
+@pytest.mark.parametrize("bad_bid", [None, math.nan, math.inf, -math.inf])
+def test_day0_fresh_probability_force_exit_requires_finite_executable_best_bid(direction, bad_bid):
+    pos = _make_position(direction=direction, size_usd=5.0, entry_price=0.40, entry_ci_width=0.02)
+
+    decision = pos.evaluate_exit(
+        ExitContext(
+            fresh_prob=0.25,
+            fresh_prob_is_fresh=True,
+            current_market_price=0.55,
+            current_market_price_is_fresh=True,
+            best_bid=bad_bid,
+            hours_to_settlement=0.5,
+            position_state="day0_window",
+            day0_active=True,
+        )
+    )
+
+    assert decision.should_exit is False
+    assert decision.reason == "INCOMPLETE_EXIT_CONTEXT (missing=best_bid)"
+    assert "best_bid_unavailable" in decision.applied_validations
+    assert decision.trigger != "SETTLEMENT_IMMINENT"
+
+
+def test_day0_monitor_context_missing_bid_cannot_reach_submit_decision():
+    """Monitor fields must preserve missing executable bid through exit decision."""
+    from types import SimpleNamespace
+
+    from src.engine.cycle_runtime import _build_exit_context
+
+    pos = _make_position(direction="buy_yes", size_usd=5.0, entry_price=0.40, entry_ci_width=0.02)
+    pos.state = "day0_window"
+    pos.last_monitor_prob_is_fresh = True
+    pos.last_monitor_market_price = 0.55
+    pos.last_monitor_market_price_is_fresh = True
+    pos.last_monitor_best_bid = None
+    pos.last_monitor_best_ask = 0.56
+    pos.last_monitor_market_vig = 1.0
+    pos.last_monitor_whale_toxicity = True
+    pos.chain_state = "synced"
+
+    edge_ctx = SimpleNamespace(
+        p_posterior=0.25,
+        p_market=[0.55],
+        divergence_score=0.0,
+        market_velocity_1h=0.0,
+    )
+
+    exit_context = _build_exit_context(
+        pos,
+        edge_ctx,
+        hours_to_settlement=0.5,
+        ExitContext=ExitContext,
+    )
+    decision = pos.evaluate_exit(exit_context)
+
+    assert exit_context.best_bid is None
+    assert decision.should_exit is False
+    assert decision.reason == "INCOMPLETE_EXIT_CONTEXT (missing=best_bid)"
+    assert decision.trigger == ""
+
+
+def test_day0_stale_probability_bypass_tokens_are_not_produced_by_source():
+    """Legacy Day0 authority-waiver labels must not reappear in runtime source."""
+    forbidden = {
+        "day0_stale_prob_authority_waived",
+        "stale_prob_substitution",
+        "best_bid_proxy_from_current_market_price",
+        "best_bid_proxy_tick_discount",
+    }
+    offenders: dict[str, list[str]] = {}
+    for path in (ROOT / "src").rglob("*.py"):
+        text = path.read_text()
+        hits = sorted(token for token in forbidden if token in text)
+        if hits:
+            offenders[str(path.relative_to(ROOT))] = hits
+
+    assert offenders == {}
+
+
+def test_legacy_exit_triggers_api_is_not_used_by_live_runtime_source():
+    """Live monitor/exit decisions must route through ExitContext authority."""
+    offenders: list[str] = []
+    for path in (ROOT / "src").rglob("*.py"):
+        rel = path.relative_to(ROOT).as_posix()
+        if rel == "src/execution/exit_triggers.py":
+            continue
+        if "evaluate_exit_triggers" in path.read_text():
+            offenders.append(rel)
+
+    assert offenders == []
+
+
+def test_exit_ev_gate_uses_fill_authority_shares_for_hold_value(monkeypatch):
+    """Confirmed fill shares, not submitted notional math, feed live exit EV cost gates."""
+    pos = _make_position(
+        direction="buy_yes",
+        size_usd=100.0,
+        entry_price=0.50,
+        shares=200.0,
+        cost_basis_usd=100.0,
+        entry_ci_width=0.02,
+        shares_filled=10.0,
+        filled_cost_basis_usd=5.0,
+        entry_price_avg_fill=0.50,
+        entry_economics_authority=ENTRY_ECONOMICS_AVG_FILL_PRICE,
+        fill_authority=FILL_AUTHORITY_VENUE_CONFIRMED_FULL,
+    )
+    pos.neg_edge_count = 2
+    captured: dict[str, float] = {}
+
+    def capture_crowding(**kwargs):
+        captured["shares"] = kwargs["shares"]
+        return 0.0
+
+    monkeypatch.setattr("src.state.portfolio.hold_value_exit_costs_enabled", lambda: True)
+    monkeypatch.setattr("src.state.portfolio._compute_exit_correlation_crowding", capture_crowding)
+
+    decision = pos.evaluate_exit(
+        ExitContext(
+            fresh_prob=0.10,
+            fresh_prob_is_fresh=True,
+            current_market_price=0.50,
+            current_market_price_is_fresh=True,
+            best_bid=0.49,
+            hours_to_settlement=4.0,
+            position_state="holding",
+            day0_active=False,
+        )
+    )
+
+    assert "ev_gate" in decision.applied_validations
+    assert captured["shares"] == pytest.approx(pos.effective_shares)
+    assert captured["shares"] != pytest.approx(pos.size_usd / pos.entry_price)
+
+
+def test_buy_no_exit_ev_gate_uses_fill_authority_shares_for_hold_value(monkeypatch):
+    """Buy-no exit EV gates preserve fill-authority shares too."""
+    pos = _make_position(
+        direction="buy_no",
+        size_usd=100.0,
+        entry_price=0.50,
+        shares=200.0,
+        cost_basis_usd=100.0,
+        entry_ci_width=0.02,
+        shares_filled=10.0,
+        filled_cost_basis_usd=5.0,
+        entry_price_avg_fill=0.50,
+        entry_economics_authority=ENTRY_ECONOMICS_AVG_FILL_PRICE,
+        fill_authority=FILL_AUTHORITY_VENUE_CONFIRMED_FULL,
+    )
+    pos.neg_edge_count = 2
+    captured: dict[str, float] = {}
+
+    def capture_crowding(**kwargs):
+        captured["shares"] = kwargs["shares"]
+        return 0.0
+
+    monkeypatch.setattr("src.state.portfolio.hold_value_exit_costs_enabled", lambda: True)
+    monkeypatch.setattr("src.state.portfolio._compute_exit_correlation_crowding", capture_crowding)
+
+    decision = pos._buy_no_exit(
+        forward_edge=-0.40,
+        current_p_posterior=0.10,
+        current_market_price=0.50,
+        best_bid=0.49,
+        hours_to_settlement=None,
+        day0_active=False,
+        applied=[],
+    )
+
+    assert "ev_gate" in decision.applied_validations
+    assert captured["shares"] == pytest.approx(pos.effective_shares)
+    assert captured["shares"] != pytest.approx(pos.size_usd / pos.entry_price)
+
+
+def test_exit_micro_position_hold_uses_fill_authority_cost_basis():
+    """Micro-position hold is about actual held cost basis, not stale submitted size."""
+    pos = _make_position(
+        direction="buy_yes",
+        size_usd=100.0,
+        entry_price=0.50,
+        shares=200.0,
+        cost_basis_usd=100.0,
+        entry_ci_width=0.02,
+        shares_filled=1.0,
+        filled_cost_basis_usd=0.50,
+        entry_price_avg_fill=0.50,
+        entry_economics_authority=ENTRY_ECONOMICS_AVG_FILL_PRICE,
+        fill_authority=FILL_AUTHORITY_VENUE_CONFIRMED_FULL,
+    )
+    pos.neg_edge_count = 2
+
+    decision = pos.evaluate_exit(
+        ExitContext(
+            fresh_prob=0.10,
+            fresh_prob_is_fresh=True,
+            current_market_price=0.50,
+            current_market_price_is_fresh=True,
+            best_bid=0.49,
+            hours_to_settlement=4.0,
+            position_state="holding",
+            day0_active=False,
+        )
+    )
+
+    assert decision.should_exit is False
+    assert "micro_position_hold" in decision.applied_validations
+
+
+def test_partial_exit_fill_reduces_effective_open_fill_authority_exposure():
+    """Partial exit changes current open exposure without rewriting entry-fill evidence."""
+    from src.execution.exit_lifecycle import _apply_partial_exit_fill
+
+    pos = _make_position(
+        direction="buy_yes",
+        size_usd=10.0,
+        entry_price=0.50,
+        shares=20.0,
+        cost_basis_usd=10.0,
+        shares_filled=20.0,
+        filled_cost_basis_usd=10.0,
+        entry_price_avg_fill=0.50,
+        entry_economics_authority=ENTRY_ECONOMICS_AVG_FILL_PRICE,
+        fill_authority=FILL_AUTHORITY_VENUE_CONFIRMED_FULL,
+    )
+
+    changed = _apply_partial_exit_fill(
+        pos,
+        filled_shares=5.0,
+        remaining_shares=15.0,
+        fill_price=0.70,
+        order_id="sell-partial-1",
+        status="PARTIAL",
+    )
+
+    assert changed is True
+    assert pos.shares_filled == pytest.approx(20.0)
+    assert pos.filled_cost_basis_usd == pytest.approx(10.0)
+    assert pos.effective_shares == pytest.approx(15.0)
+    assert pos.effective_cost_basis_usd == pytest.approx(7.5)
+
+
+def test_duplicate_fill_aggregation_updates_fill_authority_open_exposure():
+    """Merging duplicate open fills must aggregate fill-grade economics, not submitted size."""
+    from src.state.portfolio import add_position
+
+    existing = _make_position(
+        trade_id="agg-existing",
+        token_id="yes-shared",
+        direction="buy_yes",
+        size_usd=100.0,
+        entry_price=0.50,
+        shares=200.0,
+        cost_basis_usd=100.0,
+        shares_filled=10.0,
+        filled_cost_basis_usd=5.0,
+        entry_price_avg_fill=0.50,
+        entry_economics_authority=ENTRY_ECONOMICS_AVG_FILL_PRICE,
+        fill_authority=FILL_AUTHORITY_VENUE_CONFIRMED_FULL,
+    )
+    incoming = _make_position(
+        trade_id="agg-incoming",
+        token_id="yes-shared",
+        direction="buy_yes",
+        size_usd=100.0,
+        entry_price=0.50,
+        shares=8.0,
+        cost_basis_usd=4.0,
+        shares_filled=8.0,
+        filled_cost_basis_usd=4.0,
+        entry_price_avg_fill=0.50,
+        entry_economics_authority=ENTRY_ECONOMICS_AVG_FILL_PRICE,
+        fill_authority=FILL_AUTHORITY_VENUE_CONFIRMED_FULL,
+    )
+    portfolio = _make_portfolio(existing)
+
+    add_position(portfolio, incoming)
+
+    assert portfolio.positions == [existing]
+    assert existing.shares_filled == pytest.approx(18.0)
+    assert existing.filled_cost_basis_usd == pytest.approx(9.0)
+    assert existing.effective_shares == pytest.approx(18.0)
+    assert existing.effective_cost_basis_usd == pytest.approx(9.0)
+    assert existing.size_usd == pytest.approx(9.0)
+
+
+def test_mixed_authority_duplicate_keeps_fill_slice_separate():
+    """Fill-grade economics must not be absorbed into a legacy same-token aggregate."""
+    from src.state.portfolio import add_position
+
+    legacy = _make_position(
+        trade_id="legacy-existing",
+        token_id="yes-shared",
+        direction="buy_yes",
+        size_usd=100.0,
+        entry_price=0.50,
+        shares=200.0,
+        cost_basis_usd=100.0,
+    )
+    confirmed = _make_position(
+        trade_id="fill-incoming",
+        token_id="yes-shared",
+        direction="buy_yes",
+        size_usd=100.0,
+        entry_price=0.50,
+        shares=200.0,
+        cost_basis_usd=100.0,
+        shares_filled=10.0,
+        filled_cost_basis_usd=5.0,
+        entry_price_avg_fill=0.50,
+        entry_economics_authority=ENTRY_ECONOMICS_AVG_FILL_PRICE,
+        fill_authority=FILL_AUTHORITY_VENUE_CONFIRMED_FULL,
+    )
+    portfolio = _make_portfolio(legacy)
+
+    add_position(portfolio, confirmed)
+
+    assert portfolio.positions == [legacy, confirmed]
+    assert legacy.has_fill_economics_authority is False
+    assert confirmed.has_fill_economics_authority is True
+    assert confirmed.effective_shares == pytest.approx(10.0)
+    assert confirmed.effective_cost_basis_usd == pytest.approx(5.0)
+    assert legacy.nested_fills == []
+
+
+def test_same_order_update_cannot_regress_fill_authority_to_legacy():
+    """Same-order idempotent updates must be monotonic for fill economics authority."""
+    from src.state.portfolio import add_position
+
+    existing = _make_position(
+        trade_id="same-order-existing",
+        order_id="entry-order-1",
+        entry_order_id="entry-order-1",
+        token_id="yes-shared",
+        direction="buy_yes",
+        state="holding",
+        order_status="filled",
+        entry_fill_verified=True,
+        entered_at="2026-04-01T06:00:00Z",
+        size_usd=5.0,
+        entry_price=0.50,
+        shares=10.0,
+        cost_basis_usd=5.0,
+        shares_filled=10.0,
+        filled_cost_basis_usd=5.0,
+        entry_price_avg_fill=0.50,
+        entry_economics_authority=ENTRY_ECONOMICS_AVG_FILL_PRICE,
+        fill_authority=FILL_AUTHORITY_VENUE_CONFIRMED_FULL,
+    )
+    stale = _make_position(
+        trade_id="same-order-stale",
+        order_id="entry-order-1",
+        entry_order_id="entry-order-1",
+        token_id="yes-shared",
+        direction="buy_yes",
+        state="pending_tracked",
+        order_status="pending",
+        entry_fill_verified=False,
+        size_usd=100.0,
+        entry_price=0.50,
+        shares=200.0,
+        cost_basis_usd=100.0,
+        entry_economics_authority=ENTRY_ECONOMICS_SUBMITTED_LIMIT,
+        fill_authority=FILL_AUTHORITY_NONE,
+    )
+    portfolio = _make_portfolio(existing)
+
+    add_position(portfolio, stale)
+
+    assert portfolio.positions == [existing]
+    assert existing.has_fill_economics_authority is True
+    assert existing.fill_authority == FILL_AUTHORITY_VENUE_CONFIRMED_FULL
+    assert existing.entry_economics_authority == ENTRY_ECONOMICS_AVG_FILL_PRICE
+    assert existing.entry_fill_verified is True
+    assert existing.state == "holding"
+    assert existing.order_status == "filled"
+    assert existing.effective_shares == pytest.approx(10.0)
+    assert existing.effective_cost_basis_usd == pytest.approx(5.0)
+    assert "same_order_fill_authority_regression_blocked" in existing.applied_validations
+
+
+def test_same_order_update_cannot_regress_full_fill_to_partial_fill():
+    """Same-order fill evidence must be monotonic even inside fill-grade states."""
+    from src.state.portfolio import add_position
+
+    existing = _make_position(
+        trade_id="same-order-full",
+        order_id="entry-order-2",
+        entry_order_id="entry-order-2",
+        token_id="yes-shared",
+        direction="buy_yes",
+        state="holding",
+        order_status="filled",
+        entry_fill_verified=True,
+        entered_at="2026-04-01T06:00:00Z",
+        size_usd=5.0,
+        entry_price=0.50,
+        shares=10.0,
+        cost_basis_usd=5.0,
+        shares_filled=10.0,
+        filled_cost_basis_usd=5.0,
+        entry_price_avg_fill=0.50,
+        entry_economics_authority=ENTRY_ECONOMICS_AVG_FILL_PRICE,
+        fill_authority=FILL_AUTHORITY_VENUE_CONFIRMED_FULL,
+    )
+    stale_partial = _make_position(
+        trade_id="same-order-partial-stale",
+        order_id="entry-order-2",
+        entry_order_id="entry-order-2",
+        token_id="yes-shared",
+        direction="buy_yes",
+        state="holding",
+        order_status="partial",
+        entry_fill_verified=True,
+        size_usd=2.5,
+        entry_price=0.50,
+        shares=5.0,
+        cost_basis_usd=2.5,
+        shares_filled=5.0,
+        filled_cost_basis_usd=2.5,
+        entry_price_avg_fill=0.50,
+        entry_economics_authority=ENTRY_ECONOMICS_AVG_FILL_PRICE,
+        fill_authority=FILL_AUTHORITY_VENUE_CONFIRMED_PARTIAL,
+    )
+    portfolio = _make_portfolio(existing)
+
+    add_position(portfolio, stale_partial)
+
+    assert portfolio.positions == [existing]
+    assert existing.fill_authority == FILL_AUTHORITY_VENUE_CONFIRMED_FULL
+    assert existing.order_status == "filled"
+    assert existing.shares_filled == pytest.approx(10.0)
+    assert existing.filled_cost_basis_usd == pytest.approx(5.0)
+    assert existing.effective_shares == pytest.approx(10.0)
+    assert existing.effective_cost_basis_usd == pytest.approx(5.0)
+    assert "same_order_fill_authority_regression_blocked" in existing.applied_validations
+
+
+def test_whale_toxicity_uses_fill_authority_cost_basis_not_submitted_size(monkeypatch, tmp_path):
+    """Adjacent pressure threshold must use actual filled exposure after correction."""
+    from src.engine import monitor_refresh
+    from src.state.db import get_connection, init_schema
+
+    now = datetime(2026, 4, 30, 12, tzinfo=timezone.utc)
+    conn = get_connection(tmp_path / "whale-fill-authority.db")
+    init_schema(conn)
+    conn.execute(
+        """
+        INSERT INTO token_price_log (token_id, price, timestamp)
+        VALUES (?, ?, ?)
+        """,
+        ("yes-above", 0.40, (now - timedelta(hours=2)).isoformat()),
+    )
+    conn.commit()
+    pos = _make_position(
+        market_id="m1",
+        token_id="yes-held",
+        direction="buy_yes",
+        size_usd=100.0,
+        entry_price=0.50,
+        shares=200.0,
+        cost_basis_usd=100.0,
+        shares_filled=10.0,
+        filled_cost_basis_usd=5.0,
+        entry_price_avg_fill=0.50,
+        entry_economics_authority=ENTRY_ECONOMICS_AVG_FILL_PRICE,
+        fill_authority=FILL_AUTHORITY_VENUE_CONFIRMED_FULL,
+    )
+
+    class BookClob:
+        def get_best_bid_ask(self, token_id):
+            return {"yes-above": (0.50, 0.52, 60.0, 10.0)}[token_id]
+
+    siblings = [
+        {"market_id": "m-below", "range_low": 37, "range_high": 38, "token_id": "yes-below"},
+        {"market_id": "m1", "range_low": 39, "range_high": 40, "token_id": "yes-held"},
+        {"market_id": "m-above", "range_low": 41, "range_high": 42, "token_id": "yes-above"},
+    ]
+    monkeypatch.setattr(monitor_refresh, "get_sibling_outcomes", lambda market_id: siblings)
+    monkeypatch.setattr(monitor_refresh, "get_last_scan_authority", lambda: "VERIFIED")
+
+    result = monitor_refresh._detect_whale_toxicity_from_orderbook(
+        conn,
+        BookClob(),
+        pos,
+        held_best_bid=0.40,
+        held_best_ask=0.43,
+        now=now,
+    )
+
+    conn.close()
+    assert result is True
+    assert "whale_toxicity_available:adjacent_orderbook_pressure" in pos.applied_validations
+
+
+def test_runtime_exit_context_uses_fill_authority_cost_basis_for_crowding_exposure():
+    """Runtime portfolio context must preserve corrected cost basis into exit crowding."""
+    from types import SimpleNamespace
+
+    from src.engine.cycle_runtime import _build_exit_context
+
+    pos = _make_position(trade_id="self-pos", state="holding")
+    pos.last_monitor_prob_is_fresh = True
+    pos.last_monitor_market_price = 0.50
+    pos.last_monitor_market_price_is_fresh = True
+    pos.last_monitor_best_bid = 0.49
+    pos.chain_state = "synced"
+
+    other = _make_position(
+        trade_id="other-pos",
+        cluster="Great Lakes",
+        size_usd=100.0,
+        entry_price=0.50,
+        shares=200.0,
+        cost_basis_usd=100.0,
+        shares_filled=10.0,
+        filled_cost_basis_usd=5.0,
+        entry_price_avg_fill=0.50,
+        entry_economics_authority=ENTRY_ECONOMICS_AVG_FILL_PRICE,
+        fill_authority=FILL_AUTHORITY_VENUE_CONFIRMED_FULL,
+    )
+    closed = _make_position(trade_id="closed-pos", state="economically_closed", size_usd=1000.0)
+    quarantined = _make_position(
+        trade_id="quarantined-pos",
+        state="quarantined",
+        chain_state="quarantined",
+        size_usd=1000.0,
+    )
+    pending_entry = _make_position(trade_id="pending-entry-pos", state="pending_tracked", size_usd=1000.0)
+    portfolio = SimpleNamespace(bankroll=200.0, positions=[pos, other, closed, quarantined, pending_entry])
+    edge_ctx = SimpleNamespace(
+        p_posterior=0.10,
+        p_market=[0.50],
+        divergence_score=0.0,
+        market_velocity_1h=0.0,
+    )
+
+    exit_context = _build_exit_context(
+        pos,
+        edge_ctx,
+        hours_to_settlement=4.0,
+        ExitContext=ExitContext,
+        portfolio=portfolio,
+    )
+
+    assert exit_context.portfolio_positions == (
+        (other.cluster, other.effective_cost_basis_usd, other.trade_id),
+    )
+    assert exit_context.portfolio_positions[0][1] != pytest.approx(other.size_usd)
+
+
+def test_legacy_exit_triggers_use_fill_authority_shares(monkeypatch):
+    """Legacy diagnostic exit API must not revive submitted-size share math."""
+    from types import SimpleNamespace
+
+    from src.execution import exit_triggers
+
+    pos = _make_position(
+        direction="buy_yes",
+        size_usd=100.0,
+        entry_price=0.50,
+        shares=200.0,
+        cost_basis_usd=100.0,
+        entry_ci_width=0.02,
+        shares_filled=10.0,
+        filled_cost_basis_usd=5.0,
+        entry_price_avg_fill=0.50,
+        entry_economics_authority=ENTRY_ECONOMICS_AVG_FILL_PRICE,
+        fill_authority=FILL_AUTHORITY_VENUE_CONFIRMED_FULL,
+    )
+    pos.neg_edge_count = 2
+    captured: dict[str, float] = {}
+
+    def capture_hold_value(shares, current_p_posterior):
+        captured["shares"] = shares
+        return SimpleNamespace(net_value=0.0)
+
+    monkeypatch.setattr(exit_triggers, "_declared_zero_cost_hold_value", capture_hold_value)
+    edge_ctx = SimpleNamespace(forward_edge=-0.40, ci_width=0.02)
+
+    signal = exit_triggers._evaluate_buy_yes_exit(pos, edge_ctx, best_bid=0.49)
+
+    assert signal is not None
+    assert captured["shares"] == pytest.approx(pos.effective_shares)
+    assert captured["shares"] != pytest.approx(pos.size_usd / pos.entry_price)
+
+
+def test_legacy_buy_no_exit_triggers_use_fill_authority_shares(monkeypatch):
+    """Legacy buy-no diagnostic path must preserve corrected shares."""
+    from types import SimpleNamespace
+
+    from src.execution import exit_triggers
+
+    pos = _make_position(
+        direction="buy_no",
+        size_usd=100.0,
+        entry_price=0.50,
+        shares=200.0,
+        cost_basis_usd=100.0,
+        entry_ci_width=0.02,
+        shares_filled=10.0,
+        filled_cost_basis_usd=5.0,
+        entry_price_avg_fill=0.50,
+        entry_economics_authority=ENTRY_ECONOMICS_AVG_FILL_PRICE,
+        fill_authority=FILL_AUTHORITY_VENUE_CONFIRMED_FULL,
+    )
+    pos.neg_edge_count = 2
+    captured: dict[str, float] = {}
+
+    def capture_hold_value(shares, current_p_posterior):
+        captured["shares"] = shares
+        return SimpleNamespace(net_value=0.0)
+
+    monkeypatch.setattr(exit_triggers, "_declared_zero_cost_hold_value", capture_hold_value)
+    edge_ctx = SimpleNamespace(forward_edge=-0.40, ci_width=0.02, p_posterior=0.10)
+
+    signal = exit_triggers._evaluate_buy_no_exit(
+        pos,
+        edge_ctx,
+        hours_to_settlement=None,
+        best_bid=0.49,
+    )
+
+    assert signal is not None
+    assert captured["shares"] == pytest.approx(pos.effective_shares)
+    assert captured["shares"] != pytest.approx(pos.size_usd / pos.entry_price)
+
+
+def test_exit_paths_do_not_recompute_fill_authority_shares_from_legacy_price():
+    """Static relationship check for corrected economics flowing into exit decisions."""
+    portfolio_source = (ROOT / "src" / "state" / "portfolio.py").read_text(encoding="utf-8")
+    exit_triggers_source = (ROOT / "src" / "execution" / "exit_triggers.py").read_text(encoding="utf-8")
+    cycle_runtime_source = (ROOT / "src" / "engine" / "cycle_runtime.py").read_text(encoding="utf-8")
+
+    assert "position.size_usd / position.entry_price" not in exit_triggers_source
+    assert portfolio_source.count("self.size_usd / self.entry_price") == 1
+    assert "if self.size_usd < 1.0" not in portfolio_source
+    assert "(str(p.cluster), float(p.size_usd), str(p.trade_id))" not in cycle_runtime_source
+
+
 def test_buy_yes_edge_exit_requires_best_bid():
     pos = _make_position(direction="buy_yes", size_usd=5.0, entry_price=0.40, entry_ci_width=0.02)
 
@@ -1959,36 +4064,11 @@ def test_stranded_exit_intent_recovered():
 
 def test_position_carries_env():
     """Every position must carry its env provenance."""
-    pos = _make_position(env="paper")
-    assert pos.env == "paper"
+    pos = _make_position(env="legacy_env")
+    assert pos.env == "legacy_env"
 
     pos_live = _make_position(env="live")
     assert pos_live.env == "live"
-
-
-@pytest.mark.skip(reason="T1.c-followup 2026-04-23: OBSOLETE_BY_ARCHITECTURE — src/state/portfolio.py::load_portfolio is now DB-first (query_portfolio_loader_view from canonical DB), with env carried on each row (src/state/portfolio.py:155 `env: str = \"live\"` axiom). JSON fallback + _load_portfolio_from_json_data contamination-guard path are deleted. The test validates a dead architecture; no canonical-loader analog needed because env-filtering happens at the query layer per-row. The 'run loader in paper mode, expect RuntimeError on live position' scenario does not exist in the DB-first canonical path. No RELOCATE; keep OBSOLETE with this marker until someone explicitly decides to delete-or-document-in-antibody-inventory.")
-def test_contamination_guard_blocks_wrong_env():
-    """Loading a live position into paper portfolio (or vice versa) must fail."""
-    from src.state.portfolio import load_portfolio, save_portfolio
-    import tempfile
-    from pathlib import Path
-
-    # Create a portfolio with a "live" position
-    pos = _make_position(env="live")
-    portfolio = _make_portfolio(pos)
-
-    # Save to temp file
-    tmp = Path(tempfile.mktemp(suffix=".json"))
-    try:
-        save_portfolio(portfolio, tmp)
-
-        # Loading in paper mode (settings.mode == "paper") should raise
-        # because the position has env="live"
-        with pytest.raises(RuntimeError, match="live position"):  # PortfolioModeError deleted (Phase 1)
-            load_portfolio(tmp)
-    finally:
-        tmp.unlink(missing_ok=True)
-
 
 def test_state_path_resolves_directly():
     """Phase 2: state_path returns STATE_DIR/filename directly (mode prefix eliminated)."""
@@ -1996,28 +4076,31 @@ def test_state_path_resolves_directly():
     path = state_path("positions.json")
     assert path == STATE_DIR / "positions.json"
     assert "-live" not in path.name
-    assert "-paper" not in path.name
+    assert "-" not in path.stem
 
 
-@pytest.mark.skip(reason="T1.c-followup 2026-04-23: OBSOLETE_BY_ARCHITECTURE — src/state/portfolio.py::load_portfolio is now DB-first (query_portfolio_loader_view from canonical DB), with env carried on each row (src/state/portfolio.py:155 `env: str = \"live\"` axiom). JSON fallback + _load_portfolio_from_json_data contamination-guard path are deleted. The test validates a dead architecture; no canonical-loader analog needed because env-filtering happens at the query layer per-row. The 'run loader in paper mode, expect RuntimeError on live position' scenario does not exist in the DB-first canonical path. No RELOCATE; keep OBSOLETE with this marker until someone explicitly decides to delete-or-document-in-antibody-inventory.")
-def test_empty_env_positions_pass_guard():
-    """Positions with empty env (legacy) should pass the contamination guard."""
-    pos = _make_position(env="")
-    portfolio = _make_portfolio(pos)
+def test_save_portfolio_strips_terminal_enum_states(tmp_path):
+    """Derived JSON active-position cache must not retain enum-backed terminal phases."""
+    from src.state.portfolio import save_portfolio
 
-    # Empty env should not trigger guard (backward compat for legacy data)
-    import tempfile
-    from pathlib import Path
-    from src.state.portfolio import load_portfolio, save_portfolio
+    active = _make_position(trade_id="active-json", state="holding")
+    settled = _make_position(trade_id="settled-json", state="holding")
+    settled.state = LifecycleState.SETTLED
+    portfolio = _make_portfolio(active, settled)
+    output = tmp_path / "positions.json"
 
-    tmp = Path(tempfile.mktemp(suffix=".json"))
-    try:
-        save_portfolio(portfolio, tmp)
-        loaded = load_portfolio(tmp)
-        assert len(loaded.positions) == 1
-    finally:
-        tmp.unlink(missing_ok=True)
+    save_portfolio(portfolio, output)
 
+    payload = json.loads(output.read_text())
+    assert [row["trade_id"] for row in payload["positions"]] == ["active-json"]
+
+
+def test_fill_tracker_does_not_emit_legacy_nonvocabulary_quarantine_states():
+    """Fill authority quarantine must use legal lifecycle vocabulary only."""
+    source = (Path(__file__).resolve().parents[1] / "src" / "execution" / "fill_tracker.py").read_text()
+
+    assert "quarantine_fill_failed" not in source
+    assert "quarantine_void_failed" not in source
 
 # ---------------------------------------------------------------------------
 # B041 relationship tests: fill_tracker typed error taxonomy (SD-B)

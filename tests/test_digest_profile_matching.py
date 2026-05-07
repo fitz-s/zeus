@@ -336,6 +336,168 @@ def test_phase4a_f13_realistic_wording_routes_to_selection_parity_profile():
     assert "tests/test_fdr.py" in digest["admission"]["admitted_files"]
 
 
+def test_object_meaning_settlement_authority_cutover_routes_to_wave5_profile():
+    digest = build_digest(
+        "object-meaning invariance wave 5: verified settlement truth before position settlement",
+        [
+            "docs/operations/task_2026-05-05_object_invariance_wave5/PLAN.md",
+            "architecture/topology.yaml",
+            "architecture/digest_profiles.py",
+            "architecture/source_rationale.yaml",
+            "src/main.py",
+            "src/execution/harvester.py",
+            "src/execution/harvester_pnl_resolver.py",
+            "src/engine/lifecycle_events.py",
+            "src/calibration/drift_detector.py",
+            "src/riskguard/riskguard.py",
+            "src/state/db.py",
+            "src/state/decision_chain.py",
+            "src/state/portfolio.py",
+            "src/state/strategy_tracker.py",
+            "src/engine/replay.py",
+            "scripts/etl_forecast_skill_from_forecasts.py",
+            "scripts/etl_historical_forecasts.py",
+            "tests/test_harvester_split_independence.py",
+            "tests/test_harvester_metric_identity.py",
+            "tests/test_live_safety_invariants.py",
+            "tests/test_drift_detector_threshold.py",
+            "tests/test_riskguard.py",
+            "tests/test_db.py",
+            "tests/test_backtest_outcome_comparison.py",
+            "tests/test_cross_module_relationships.py",
+            "tests/test_strategy_tracker_regime.py",
+        ],
+        write_intent="edit",
+    )
+
+    assert digest["profile"] == "object meaning settlement authority cutover"
+    assert digest["admission"]["status"] == "admitted"
+    for path in [
+        "src/main.py",
+        "architecture/topology.yaml",
+        "architecture/digest_profiles.py",
+        "src/execution/harvester.py",
+        "src/execution/harvester_pnl_resolver.py",
+        "src/engine/lifecycle_events.py",
+        "src/calibration/drift_detector.py",
+        "src/riskguard/riskguard.py",
+        "src/state/db.py",
+        "src/state/decision_chain.py",
+        "src/state/portfolio.py",
+        "src/state/strategy_tracker.py",
+        "src/engine/replay.py",
+        "scripts/etl_forecast_skill_from_forecasts.py",
+        "scripts/etl_historical_forecasts.py",
+        "tests/test_backtest_outcome_comparison.py",
+        "tests/test_cross_module_relationships.py",
+    ]:
+        assert path in digest["admission"]["admitted_files"]
+
+
+def test_object_meaning_settlement_authority_cutover_blocks_live_side_effect_scope():
+    digest = build_digest(
+        "object meaning settlement authority cutover with forbidden state and settlement contract edits",
+        [
+            "src/execution/harvester.py",
+            "state/zeus-world.db",
+            "src/contracts/settlement_semantics.py",
+        ],
+        write_intent="edit",
+    )
+
+    assert digest["profile"] == "object meaning settlement authority cutover"
+    assert digest["admission"]["status"] == "blocked"
+    assert "state/zeus-world.db" in digest["admission"]["forbidden_hits"]
+    assert "src/contracts/settlement_semantics.py" in digest["admission"]["forbidden_hits"]
+
+
+def test_object_meaning_calibration_transfer_oos_evidence_routes_to_wave18_profile():
+    digest = build_digest(
+        "object-meaning invariance wave 18: time-blocked calibration transfer evidence "
+        "must reject row-modulo pseudo-OOS for validated_calibration_transfers time basis",
+        [
+            "docs/operations/task_2026-05-05_object_invariance_wave18/PLAN.md",
+            "docs/operations/AGENTS.md",
+            "scripts/evaluate_calibration_transfer_oos.py",
+            "src/data/calibration_transfer_policy.py",
+            "tests/test_evaluate_calibration_transfer_oos.py",
+            "tests/test_calibration_transfer_policy_with_evidence.py",
+        ],
+        write_intent="edit",
+    )
+
+    assert digest["profile"] == "object meaning calibration transfer oos evidence"
+    assert digest["admission"]["status"] == "admitted"
+    for path in [
+        "scripts/evaluate_calibration_transfer_oos.py",
+        "src/data/calibration_transfer_policy.py",
+        "tests/test_evaluate_calibration_transfer_oos.py",
+        "tests/test_calibration_transfer_policy_with_evidence.py",
+    ]:
+        assert path in digest["admission"]["admitted_files"]
+
+
+def test_object_meaning_operator_status_bankroll_semantics_routes_to_wave12_profile():
+    digest = build_digest(
+        "object-meaning invariance wave 12: status_summary wallet equity semantics "
+        "effective_bankroll wallet truth not wallet plus PnL",
+        [
+            "docs/operations/task_2026-05-05_object_invariance_wave12/PLAN.md",
+            "docs/operations/AGENTS.md",
+            "scripts/equity_curve.py",
+            "src/observability/status_summary.py",
+            "tests/test_backtest_skill_economics.py",
+            "tests/test_phase10b_dt_seam_cleanup.py",
+            "tests/test_pnl_flow_and_audit.py",
+            "architecture/improvement_backlog.yaml",
+        ],
+        write_intent="edit",
+    )
+
+    assert digest["profile"] == "object meaning operator status bankroll semantics"
+    assert digest["admission"]["status"] == "admitted"
+    admitted = set(digest["admission"]["admitted_files"])
+    assert "docs/operations/AGENTS.md" in admitted
+    assert "scripts/equity_curve.py" in admitted
+    assert "src/observability/status_summary.py" in admitted
+    assert "tests/test_backtest_skill_economics.py" in admitted
+    assert "tests/test_phase10b_dt_seam_cleanup.py" in admitted
+    assert "tests/test_pnl_flow_and_audit.py" in admitted
+    assert "architecture/improvement_backlog.yaml" in admitted
+    assert "src/riskguard/**" in digest["forbidden_files"]
+
+
+def test_object_meaning_riskguard_loader_provenance_semantics_routes_to_wave13_profile():
+    digest = build_digest(
+        "object-meaning invariance wave 13: RiskGuard portfolio loader fill-authority "
+        "current-open economics provenance preservation",
+        [
+            "docs/operations/task_2026-05-05_object_invariance_wave13/PLAN.md",
+            "docs/operations/AGENTS.md",
+            "src/riskguard/riskguard.py",
+            "tests/test_riskguard.py",
+            "architecture/topology.yaml",
+            "architecture/digest_profiles.py",
+            "architecture/improvement_backlog.yaml",
+        ],
+        write_intent="edit",
+    )
+
+    assert digest["profile"] == "object meaning riskguard loader provenance semantics"
+    assert digest["admission"]["status"] == "admitted"
+    admitted = set(digest["admission"]["admitted_files"])
+    assert "docs/operations/task_2026-05-05_object_invariance_wave13/PLAN.md" in admitted
+    assert "docs/operations/AGENTS.md" in admitted
+    assert "src/riskguard/riskguard.py" in admitted
+    assert "tests/test_riskguard.py" in admitted
+    assert "architecture/topology.yaml" in admitted
+    assert "architecture/digest_profiles.py" in admitted
+    assert "architecture/improvement_backlog.yaml" in admitted
+    assert "src/riskguard/policy.py" in digest["forbidden_files"]
+    assert "src/risk_allocator/**" in digest["forbidden_files"]
+    assert "src/state/**" in digest["forbidden_files"]
+
+
 def test_pricing_semantics_authority_cutover_routes_to_refactor_profile():
     digest = build_digest(
         "pricing semantics authority cutover Phase 0/A reality semantics "
@@ -397,6 +559,7 @@ def test_pricing_semantics_authority_cutover_admits_monitor_quote_split_safety_t
             "src/engine/monitor_refresh.py",
             "tests/test_runtime_guards.py",
             "tests/test_live_safety_invariants.py",
+            "tests/test_day0_exit_gate.py",
         ],
     )
 
@@ -405,6 +568,7 @@ def test_pricing_semantics_authority_cutover_admits_monitor_quote_split_safety_t
     assert "src/engine/monitor_refresh.py" in digest["admission"]["admitted_files"]
     assert "tests/test_runtime_guards.py" in digest["admission"]["admitted_files"]
     assert "tests/test_live_safety_invariants.py" in digest["admission"]["admitted_files"]
+    assert "tests/test_day0_exit_gate.py" in digest["admission"]["admitted_files"]
 
 
 def test_pricing_semantics_authority_cutover_admits_f06_client_envelope_first_packet():
@@ -1169,10 +1333,10 @@ def test_dsa13_canonical_snapshot_authority_blocks_live_side_effect_scope():
     assert {"src/venue/polymarket_v2_adapter.py", "state/zeus-world.db"} <= forbidden
 
 
-def test_phase1h_paper_mode_residue_routes_to_cleanup_profile():
+def test_phase1h_live_quote_residue_routes_to_cleanup_profile():
     digest = build_digest(
-        "Phase 1H paper mode residue cleanup DSA-07 paper mode residue cleanup "
-        "remove production paper_mode branch from monitor_refresh no live venue "
+        "Phase 1H live quote authority cleanup DSA-07 live quote authority cleanup "
+        "remove production Gamma price branch from monitor_refresh no live venue "
         "side effects no production DB mutation no Paris config edit",
         [
             "src/engine/monitor_refresh.py",
@@ -1186,7 +1350,7 @@ def test_phase1h_paper_mode_residue_routes_to_cleanup_profile():
         ],
     )
 
-    assert digest["profile"] == "phase 1H paper mode residue cleanup"
+    assert digest["profile"] == "phase 1H live quote authority cleanup"
     assert digest["admission"]["status"] == "admitted"
     assert "src/engine/monitor_refresh.py" in digest["admission"]["admitted_files"]
     assert "tests/test_runtime_guards.py" in digest["admission"]["admitted_files"]
@@ -1196,7 +1360,7 @@ def test_phase1h_paper_mode_residue_routes_to_cleanup_profile():
 
 def test_phase1h_slash_hyphen_wording_routes_to_cleanup_profile():
     digest = build_digest(
-        "Phase 1H / DSA-07 paper-mode residue cleanup remove Gamma monitor "
+        "Phase 1H / DSA-07 live quote authority cleanup remove Gamma monitor "
         "price path and require native NO-token quote no live venue side "
         "effects no production DB mutation",
         [
@@ -1211,7 +1375,7 @@ def test_phase1h_slash_hyphen_wording_routes_to_cleanup_profile():
         ],
     )
 
-    assert digest["profile"] == "phase 1H paper mode residue cleanup"
+    assert digest["profile"] == "phase 1H live quote authority cleanup"
     assert digest["admission"]["status"] == "admitted"
     assert "src/engine/monitor_refresh.py" in digest["admission"]["admitted_files"]
     assert "tests/test_bootstrap_symmetry.py" in digest["admission"]["admitted_files"]
@@ -1457,10 +1621,10 @@ def test_dsa08_dsa17_evidence_grade_cleanup_routes_to_a1_profile():
     assert "architecture/digest_profiles.py" in digest["admission"]["admitted_files"]
 
 
-def test_dsa12_zeus_mode_retirement_routes_to_phase0b_profile():
+def test_dsa12_zeus_mode_selector_cleanup_routes_to_phase0b_profile():
     digest = build_digest(
-        "DSA-12 retired ZEUS_MODE live-only cleanup; get_mode ignores ZEUS_MODE "
-        "and defaults to live; no production DB mutation; no Paris config edit",
+        "DSA-12 ZEUS_MODE compatibility cleanup; get_mode ignores ZEUS_MODE "
+        "and returns live; no production DB mutation; no Paris config edit",
         [
             "src/config.py",
             "tests/test_k5_slice_l.py",
@@ -1472,7 +1636,7 @@ def test_dsa12_zeus_mode_retirement_routes_to_phase0b_profile():
         ],
     )
 
-    assert digest["profile"] == "phase 0b zeus mode retirement"
+    assert digest["profile"] == "phase 0b zeus mode selector cleanup"
     assert digest["admission"]["status"] == "admitted"
     assert "src/config.py" in digest["admission"]["admitted_files"]
     assert "tests/test_k5_slice_l.py" in digest["admission"]["admitted_files"]

@@ -192,6 +192,13 @@ files:
     zone: K2_runtime
     authority_role: live_daemon_entry
     why: Live-only daemon entry point.
+  src/runtime/bankroll_provider.py:
+    zone: K2_runtime
+    authority_role: wallet_bankroll_provider
+    why: Preserves wallet-equity identity for runtime/reporting consumers and rejects retired config-literal capital as bankroll authority.
+    downstream:
+    - src/observability/status_summary.py
+    - src/riskguard/riskguard.py
   src/config.py:
     zone: K2_runtime
     authority_role: runtime_config_seed
@@ -436,6 +443,12 @@ files:
     - src/signal/day0_signal.py
     - src/signal/ensemble_signal.py
     - src/strategy/market_analysis.py
+  src/contracts/world_view/settlements.py:
+    zone: K0_frozen_kernel
+    authority_role: settlement_world_view_accessor
+    why: Read-only world settlement accessor; must preserve VERIFIED authority and temperature-metric identity before exposing settlement truth to callers.
+    downstream:
+    - src/execution/harvester_pnl_resolver.py
   src/contracts/snapshot_ingest_contract.py:
     zone: K0_frozen_kernel
     authority_role: snapshot_ingest_contract
@@ -1199,6 +1212,15 @@ files:
     - canonical_position_write
     downstream:
     - src/main.py
+  src/execution/harvester_pnl_resolver.py:
+    zone: K2_runtime
+    authority_role: settlement_pnl_resolver
+    why: Trading-side resolver that reads VERIFIED world settlement truth and settles matching trade-side positions without writing world truth.
+    write_routes:
+    - canonical_position_write
+    downstream:
+    - src/main.py
+    - src/execution/harvester.py
   src/signal/AGENTS.md:
     zone: docs
     authority_role: registry
@@ -1305,6 +1327,16 @@ files:
     zone: K3_extension
     authority_role: calibration_drift_detection
     why: Detects calibration degradation over time.
+  src/calibration/drift_detector.py:
+    zone: K3_extension
+    authority_role: calibration_retrain_drift_evidence
+    why: Scheduled drift/retrain evidence reader; must consume only VERIFIED settlement truth with explicit temperature_metric before recommending refit.
+    hazards:
+    - CALIBRATION_FAMILY_MIXING
+    - DERIVED_ONLY
+    downstream:
+    - src/calibration/retrain_trigger_v2.py
+    - src/ingest_main.py
   src/calibration/effective_sample_size.py:
     zone: K3_extension
     authority_role: decision_group_sample_accounting

@@ -50,12 +50,12 @@ def run():
         edge_source="mock"
     )
     
-    logger.info(f"Initiating Mock Paper Entry for {city} | Trade: {trade_id}")
+    logger.info(f"Initiating mock simulated entry for {city} | Trade: {trade_id}")
     add_position(portfolio, pos)
     log_trade_entry(conn, pos)
     
     # Fake Exit
-    logger.info(f"Triggering Mock Paper Exit for {city} | Trade: {trade_id}")
+    logger.info(f"Triggering mock simulated exit for {city} | Trade: {trade_id}")
     closed = close_position(portfolio, trade_id, exit_price=0.55, exit_reason="MOCK_PROFIT_TEST")
     
     if closed:

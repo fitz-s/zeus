@@ -42,7 +42,7 @@ import logging
 from pathlib import Path
 from typing import Any, Optional
 
-from src.config import STATE_DIR, get_mode, state_path
+from src.config import STATE_DIR, state_path
 
 logger = logging.getLogger(__name__)
 
@@ -193,17 +193,15 @@ class StrategyTracker:
 
         try:
             try:
-                rows = query_authoritative_settlement_rows(
-                    conn,
-                    limit=None,
-                    env=get_mode(),
-                )
+                rows = query_authoritative_settlement_rows(conn, limit=None)
             except Exception as exc:
                 logger.warning("strategy_tracker.summary settlement query failed: %s", exc)
                 return blank
 
             seen_trade_ids: set[str] = set()
             for row in rows:
+                if not row.get("metric_ready", False):
+                    continue
                 trade_id = str(row.get("trade_id") or "")
                 if not trade_id or trade_id in seen_trade_ids:
                     continue

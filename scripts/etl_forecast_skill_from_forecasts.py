@@ -130,9 +130,10 @@ def run_etl(*, dry_run: bool = False) -> dict:
             s.settlement_value
         FROM forecasts f
         JOIN settlements s
-          ON s.city = f.city
+         ON s.city = f.city
          AND s.target_date = f.target_date
          AND s.temperature_metric = 'high'
+         AND s.authority = 'VERIFIED'
         WHERE f.forecast_high IS NOT NULL
           AND f.lead_days IS NOT NULL
           AND s.settlement_value IS NOT NULL

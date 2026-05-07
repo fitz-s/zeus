@@ -42,10 +42,9 @@ def kelly_size(
         ExecutionPriceContractError if the price is not suitable for Kelly
         sizing). Bare floats are forbidden at this boundary (P10E).
 
-    Per-trade safety cap was removed 2026-05-04 along with
-    ``live_safety_cap_usd``. Per-cycle exposure discipline now lives in
-    posture / RiskGuard / max-exposure gates only (see
-    ``config/settings.json::_bankroll_doctrine_2026_05_04``).
+    Per-trade safety-cap authority was removed 2026-05-04. Per-cycle
+    exposure discipline now lives in posture / RiskGuard / max-exposure gates
+    only (see ``config/settings.json::_bankroll_doctrine_2026_05_04``).
     """
     # DT#5 P10E: strict — assert_kelly_safe() runs unconditionally.
     entry_price.assert_kelly_safe()

@@ -835,7 +835,6 @@ class TestSelectionFamilySubstrate:
         fee_rate_tokens = []
 
         class FakeClob:
-            paper_mode = True
             calls = []
 
             def get_best_bid_ask(self, token_id):
@@ -955,10 +954,10 @@ class TestSelectionFamilySubstrate:
         decisions = evaluator_module.evaluate_candidate(
             candidate,
             conn,
-            PortfolioState(bankroll=150.0, positions=[]),
+            PortfolioState(bankroll=211.37, positions=[]),
             FakeClob(),
             RiskLimits(min_order_usd=999999.0),
-            entry_bankroll=150.0,
+            entry_bankroll=211.37,
             decision_time=now,
         )
         family_count = conn.execute("SELECT COUNT(*) FROM selection_family_fact").fetchone()[0]
@@ -1070,8 +1069,6 @@ class TestSelectionFamilySubstrate:
                 ]
 
         class FakeClob:
-            paper_mode = True
-
             def get_best_bid_ask(self, token_id):
                 return (0.1, 0.2, 10.0, 10.0)
 
@@ -1186,10 +1183,10 @@ class TestSelectionFamilySubstrate:
         decisions = evaluator_module.evaluate_candidate(
             candidate,
             conn,
-            PortfolioState(bankroll=150.0, positions=[]),
+            PortfolioState(bankroll=211.37, positions=[]),
             FakeClob(),
             RiskLimits(min_order_usd=1.0),
-            entry_bankroll=150.0,
+            entry_bankroll=211.37,
             decision_time=now,
         )
         conn.close()
@@ -1296,8 +1293,6 @@ class TestSelectionFamilySubstrate:
                 ]
 
         class FakeClob:
-            paper_mode = True
-
             def get_best_bid_ask(self, token_id):
                 return (0.1, 0.2, 10.0, 10.0)
 
@@ -1414,10 +1409,10 @@ class TestSelectionFamilySubstrate:
         decisions = evaluator_module.evaluate_candidate(
             candidate,
             conn,
-            PortfolioState(bankroll=150.0, positions=[]),
+            PortfolioState(bankroll=211.37, positions=[]),
             FakeClob(),
             RiskLimits(min_order_usd=1.0),
-            entry_bankroll=150.0,
+            entry_bankroll=211.37,
             decision_time=now,
         )
         conn.close()
@@ -1505,8 +1500,6 @@ class TestSelectionFamilySubstrate:
                 return (-0.2, -0.01, 0.001) if idx == 0 else (-0.1, 0.1, 0.5)
 
         class FakeClob:
-            paper_mode = True
-
             def get_best_bid_ask(self, token_id):
                 return (0.1, 0.2, 10.0, 10.0)
 
@@ -1632,10 +1625,10 @@ class TestSelectionFamilySubstrate:
         decisions = evaluator_module.evaluate_candidate(
             candidate,
             conn,
-            PortfolioState(bankroll=150.0, positions=[]),
+            PortfolioState(bankroll=211.37, positions=[]),
             FakeClob(),
             RiskLimits(min_order_usd=999999.0),
-            entry_bankroll=150.0,
+            entry_bankroll=211.37,
             decision_time=now,
         )
         conn.close()

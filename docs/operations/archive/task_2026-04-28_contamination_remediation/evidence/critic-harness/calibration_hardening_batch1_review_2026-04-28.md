@@ -208,7 +208,7 @@ Notable rigor:
 - INV-09 orthogonality verified via grep on 5 schema constraint sites (DEGRADED absent from all platt_models* CHECK constraints)
 - INV-15 enforcement direction verified (write-path only; readers untouched)
 - Bidirectional grep proves zero cross-module coupling to live calibration K3 surfaces
-- ZEUS_MODE=live env requirement caught + handled (executor correctly notes this is required for the test runner)
+- Historical test-runner environment setup note was caught and handled; current runtime mode authority lives in code, not in that environment setting.
 
 I have NOT written "narrow scope self-validating" or "pattern proven." This is the FIRST batch of the FOURTH packet on HIGH-RISK live calibration substrate; I attacked harder than usual and found 2 honest LOW nuances.
 

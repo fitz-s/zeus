@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-# Lifecycle: created=2026-04-07; last_reviewed=2026-04-30; last_reused=2026-04-30
-# Purpose: Venus daemon-independent sensing report, including source-contract drift watch and quarantine.
+# Lifecycle: created=2026-04-07; last_reviewed=2026-05-06; last_reused=2026-05-06
+# Purpose: Venus daemon-independent sensing report, including source-contract drift watch, quarantine, and diagnostic authority labels.
 # Reuse: Run from Venus/cron for runtime truth sensing; inspect architecture/script_manifest.yaml before changing write targets.
 """Venus sensing report generator.
 
@@ -308,13 +308,25 @@ def _collect_source_contract_watch() -> dict:
 
 
 def _collect_fact_tables(conn: sqlite3.Connection) -> dict:
-    outcome = 0
-    execution = 0
-    if _table_exists(conn, "outcome_fact"):
-        outcome = _scalar(conn.cursor(), "SELECT COUNT(*) FROM outcome_fact") or 0
-    if _table_exists(conn, "execution_fact"):
-        execution = _scalar(conn.cursor(), "SELECT COUNT(*) FROM execution_fact") or 0
-    return {"outcome_fact": outcome, "execution_fact": execution}
+    from scripts.verify_truth_surfaces import build_fact_table_authority_report
+
+    report = build_fact_table_authority_report(conn.cursor())
+    return {
+        "outcome_fact": report["outcome_fact"],
+        "execution_fact": report["execution_fact"],
+        "terminal_execution_fact_rows": report["terminal_execution_fact_rows"],
+        "outcome_fact_authority_scope": report["outcome_fact_authority_scope"],
+        "outcome_fact_learning_eligible": report["outcome_fact_learning_eligible"],
+        "outcome_fact_promotion_eligible": report["outcome_fact_promotion_eligible"],
+        "execution_fact_authority_scope": report["execution_fact_authority_scope"],
+        "settlement_authority_source": report["settlement_authority_source"],
+        "settlement_authority_ready_rows": report["settlement_authority_ready_rows"],
+        "settlement_learning_eligible_rows": report["settlement_learning_eligible_rows"],
+        "settlement_degraded_rows": report["settlement_degraded_rows"],
+        "settlement_authority_levels": report["settlement_authority_levels"],
+        "authority_status": report["authority_status"],
+        "blocking_reasons": report["blocking_reasons"],
+    }
 
 
 def _collect_truth_surfaces(conn: sqlite3.Connection) -> dict:

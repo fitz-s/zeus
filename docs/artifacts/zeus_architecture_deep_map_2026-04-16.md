@@ -304,7 +304,7 @@ Latin America: Panama City=MPMG
 
 ```python
 # Entry point
-main()                              # ZEUS_MODE=live validation, APScheduler setup
+main()                              # code-authoritative live runtime state, APScheduler setup
 run_single_cycle()                  # One-shot test (all modes + harvester)
 
 # Scheduled jobs
@@ -603,7 +603,7 @@ Typed semantic boundaries preventing drift between subsystems:
 ## 11. Settings Configuration (config/settings.json)
 
 ```
-Capital: $150 base, $5 live safety cap, $5 smoke test cap
+Capital: wallet bankroll provider; no fixed config capital, per-trade cap, or smoke-test cap in current live sizing authority
 Mode: "live"
 Ensemble: ECMWF IFS 0.25° (51 members) primary, GFS 0.25° (31 members) crosscheck
 Monte Carlo: n_mc=5000 per cycle
@@ -749,7 +749,7 @@ Layer 4: Runtime readiness (needs Layer 3)
 `generate_calibration_pairs.py`, `rebuild_calibration_pairs_canonical.py`, `rebuild_calibration.py`, `refit_platt.py`, `validate_dynamic_alpha.py`, `baseline_experiment.py`, `investigate_ecmwf_bias.py`, `build_correlation_matrix.py`
 
 ### Audit / Monitoring
-`audit_architecture_alignment.py`, `audit_city_data_readiness.py`, `audit_divergence_counterfactual.py`, `audit_divergence_exit_counterfactual.py`, `audit_divergence_hindsight.py`, `audit_divergence_postchange.py`, `audit_divergence_thresholds.py`, `audit_paper_explainability.py`, `audit_polymarket_city_settlement.py`, `audit_realtime_pnl.py`, `audit_replay_completeness.py`, `audit_replay_fidelity.py`, `audit_time_semantics.py`, `data_completeness_audit.py`, `automation_analysis.py`, `check_advisory_gates.py`, `check_daemon_heartbeat.py`, `check_kernel_manifests.py`, `check_module_boundaries.py`, `check_work_packets.py`, `semantic_linter.py`, `verify_truth_surfaces.py`, `diagnose_truth_surfaces.py`, `diagnose_center_buy_failure.py`, `validate_assumptions.py`
+`audit_architecture_alignment.py`, `audit_city_data_readiness.py`, `audit_divergence_counterfactual.py`, `audit_divergence_exit_counterfactual.py`, `audit_divergence_hindsight.py`, `audit_divergence_postchange.py`, `audit_divergence_thresholds.py`, `audit_simulated_execution_explainability.py`, `audit_polymarket_city_settlement.py`, `audit_realtime_pnl.py`, `audit_replay_completeness.py`, `audit_replay_fidelity.py`, `audit_time_semantics.py`, `data_completeness_audit.py`, `automation_analysis.py`, `check_advisory_gates.py`, `check_daemon_heartbeat.py`, `check_kernel_manifests.py`, `check_module_boundaries.py`, `check_work_packets.py`, `semantic_linter.py`, `verify_truth_surfaces.py`, `diagnose_truth_surfaces.py`, `diagnose_center_buy_failure.py`, `validate_assumptions.py`
 
 ### Topology Doctor (meta-system)
 `topology_doctor.py`, `topology_doctor_artifact_checks.py`, `topology_doctor_cli.py`, `topology_doctor_closeout.py`, `topology_doctor_context_pack.py`, `topology_doctor_core_map.py`, `topology_doctor_data_rebuild_checks.py`, `topology_doctor_digest.py`, `topology_doctor_docs_checks.py`, `topology_doctor_map_maintenance.py`, `topology_doctor_packet_prefill.py`, `topology_doctor_policy_checks.py`, `topology_doctor_receipt_checks.py`, `topology_doctor_reference_checks.py`, `topology_doctor_registry_checks.py`, `topology_doctor_script_checks.py`, `topology_doctor_source_checks.py`, `topology_doctor_test_checks.py`
@@ -761,7 +761,7 @@ Layer 4: Runtime readiness (needs Layer 3)
 `migrate_add_authority_column.py`, `migrate_cluster_to_city.py`, `migrate_to_isolated_dbs.py`, `nuke_rebuild_projections.py`, `deprecate_legacy_state_files.py`
 
 ### Operations
-`live_smoke_test.py`, `healthcheck.py`, `deep_heartbeat.py`, `heartbeat_dispatcher.py`, `force_lifecycle.py`, `cleanup_ghost_positions.py`, `apply_recommended_controls.py`, `analyze_paper_trading.py`, `venus_autonomy_gate.py`, `venus_sensing_report.py`, `equity_curve.py`, `generate_monthly_bounds.py`, `parse_change_log.py`, `rebuild_strategy_tracker_current_regime.py`, `rebuild_settlements.py`, `refresh_paper_runtime_artifacts.py`
+`live_smoke_test.py`, `healthcheck.py`, `deep_heartbeat.py`, `heartbeat_dispatcher.py`, `force_lifecycle.py`, `cleanup_ghost_positions.py`, `apply_recommended_controls.py`, `analyze_simulated_execution.py`, `venus_autonomy_gate.py`, `venus_sensing_report.py`, `equity_curve.py`, `generate_monthly_bounds.py`, `parse_change_log.py`, `rebuild_strategy_tracker_current_regime.py`, `rebuild_settlements.py`, `refresh_legacy_runtime_artifacts.py`
 
 ### System
 `_verify_isolation.py`, `_yaml_bootstrap.py`, `antibody_scan.py`
@@ -1057,7 +1057,7 @@ Base Kelly:
       Drawdown:               × max(0.0, 1 - drawdown/max_drawdown)
     INV-05: multiplier MUST NOT reach 0 or NaN → raise ValueError
 
-  safety_cap: clipped to $5 (live_safety_cap_usd)
+  exposure gates: no per-trade cap; RiskGuard/posture/max-exposure checks run after Kelly
   
   Execution price correction (EXECUTION_PRICE_SHADOW=true):
     Fee-adjusted entry price replaces raw market price for Kelly input
@@ -1345,8 +1345,8 @@ Position entered March 19 (DJF) settling March 21 (MAM) uses different calibrati
 ### TB-4. Year Boundary Lead Days
 For UTC+13 cities (Auckland), `lead_days_to_date_start` at year boundary can produce off-by-one. "2027-01-01" target at "2026-12-31 23:00 UTC" → lead≈0, but local date is already Jan 1.
 
-### TB-5. `smoke_test_portfolio_cap_usd` Never Removed
-`cycle_runner.py` L230-243: Comment says "Remove after first full lifecycle observed." Permanent entry blocker if cap is reached and nobody remembers it exists.
+### TB-5. Temporary Smoke Cap Removed
+The former first-lifecycle smoke cap is no longer a live cycle gate. Current entry discipline is wallet bankroll, RiskGuard, posture, and max-exposure authority.
 
 ### TB-6. Harvester Hourly vs Real-Time Settlement
 Harvester runs every 1 hour. Position settling at minute 1 won't be processed for up to 59 minutes. During this window, `monitor_refresh` still runs on the settled position, potentially triggering exits on a position that no longer exists on-chain.

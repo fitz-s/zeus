@@ -49,4 +49,4 @@ Dated local/cloud operational snapshots are evidence-only and route through
   secrets, or dated progress diaries into durable runbooks.
 - Preserve local operational evidence as artifacts when it may still matter to
   an active packet.
-- Do not reintroduce paper mode as a peer execution context.
+- Do not reintroduce non-live execution as a peer execution context.

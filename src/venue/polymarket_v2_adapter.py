@@ -98,9 +98,9 @@ class HeartbeatAck:
 
 @runtime_checkable
 class PolymarketV2AdapterProtocol(Protocol):
-    """Shared live/paper venue adapter contract.
+    """Shared live/fake venue adapter contract.
 
-    T1 fake venues implement this protocol so paper tests exercise the same
+    T1 fake venues implement this protocol so parity tests exercise the same
     call surface as the live V2 adapter without credentials or network I/O.
     """
 

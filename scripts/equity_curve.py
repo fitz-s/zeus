@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-# Lifecycle: created=2026-04-30; last_reviewed=2026-04-30; last_reused=2026-04-30
+# Lifecycle: created=2026-04-30; last_reviewed=2026-05-05; last_reused=2026-05-05
 # Purpose: Build a live-runtime equity curve from current truth files.
 # Reuse: Run after live-only truth-file helper changes or equity report routing changes.
-"""Build a mode-aware equity curve from current truth files."""
+"""Build an equity curve from current live runtime truth files."""
 
 from __future__ import annotations
 
@@ -35,7 +35,7 @@ from src.state.portfolio import (
     FILL_AUTHORITY_VENUE_CONFIRMED_FULL,
     FILL_AUTHORITY_VENUE_CONFIRMED_PARTIAL,
 )
-from src.state.truth_files import current_mode, read_mode_truth_json
+from src.state.truth_files import current_runtime_state, read_runtime_truth_json
 
 
 OUT = PROJECT_ROOT / "equity_curve.png"
@@ -66,6 +66,15 @@ def _positive_number(value) -> bool:
         return float(value or 0.0) > 0.0
     except (TypeError, ValueError):
         return False
+
+
+def _required_number(value, field: str) -> float:
+    if value is None:
+        raise ValueError(f"status_summary portfolio.{field} is missing")
+    try:
+        return float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"status_summary portfolio.{field} is not numeric") from exc
 
 
 def _exit_economics_cohort(row: dict) -> str:
@@ -104,15 +113,19 @@ def _single_exit_economics_cohort(rows: list[dict]) -> tuple[str, dict[str, int]
     return next(iter(counts), LEGACY_DIAGNOSTIC_COHORT), counts
 
 
-def build_equity_curve(mode: str) -> dict:
-    status, status_truth = read_mode_truth_json("status_summary.json", mode=mode)
-    portfolio, portfolio_truth = read_mode_truth_json("positions.json", mode=mode)
-    _tracker, tracker_truth = read_mode_truth_json("strategy_tracker.json", mode=mode)
+def build_equity_curve() -> dict:
+    runtime_state = current_runtime_state()
+    status, status_truth = read_runtime_truth_json("status_summary.json")
+    portfolio, portfolio_truth = read_runtime_truth_json("positions.json")
+    _tracker, tracker_truth = read_runtime_truth_json("strategy_tracker.json")
 
-    initial = float(status["portfolio"]["initial_bankroll"])
-    realized_now = float(status["portfolio"]["realized_pnl"])
-    unrealized_now = float(status["portfolio"]["unrealized_pnl"])
-    total_now = float(status["portfolio"]["effective_bankroll"])
+    portfolio_status = status["portfolio"]
+    initial = _required_number(portfolio_status.get("initial_bankroll"), "initial_bankroll")
+    realized_now = _required_number(portfolio_status.get("realized_pnl"), "realized_pnl")
+    unrealized_now = _required_number(portfolio_status.get("unrealized_pnl"), "unrealized_pnl")
+    total_pnl_now = _required_number(portfolio_status.get("total_pnl"), "total_pnl")
+    bankroll_now = _required_number(portfolio_status.get("effective_bankroll"), "effective_bankroll")
+    performance_equity_now = initial + total_pnl_now
 
     recent_exits = sorted(
         [
@@ -148,17 +161,19 @@ def build_equity_curve(mode: str) -> dict:
         ).strip()
         events.append((ts, initial + running_realized, label))
 
-    events.append((generated_at, total_now, f"Current {total_now:+.2f}"))
+    events.append((generated_at, performance_equity_now, f"Current PnL {total_pnl_now:+.2f}"))
     events.sort(key=lambda row: row[0])
 
-    return_pct = (total_now / initial - 1.0) * 100.0 if initial > 0 else 0.0
+    return_pct = (total_pnl_now / initial) * 100.0 if initial > 0 else 0.0
     report = {
-        "mode": mode,
+        "runtime_state": runtime_state,
         "initial_bankroll": initial,
         "realized_pnl": realized_now,
         "unrealized_pnl": unrealized_now,
-        "total_pnl": total_now - initial,
-        "bankroll": total_now,
+        "total_pnl": total_pnl_now,
+        "bankroll": bankroll_now,
+        "bankroll_object_identity": portfolio_status.get("bankroll_object_identity", "unknown"),
+        "performance_equity": performance_equity_now,
         "return_pct": round(return_pct, 2),
         "status_truth": status_truth,
         "portfolio_truth": portfolio_truth,
@@ -181,21 +196,21 @@ def build_equity_curve(mode: str) -> dict:
     ax.fill_between(times, initial, equity, step="post", alpha=0.12, color="#00D4AA")
     ax.axhline(initial, color="red", linewidth=1.2, linestyle="--", alpha=0.6, label=f"Initial ${initial:.2f}")
     ax.axhline(initial + realized_now, color="steelblue", linewidth=1.2, linestyle=":", alpha=0.7, label=f"Realized ${initial + realized_now:.2f}")
-    ax.axhline(total_now, color="#00D4AA", linewidth=1.2, linestyle="-", alpha=0.8, label=f"Total ${total_now:.2f}")
+    ax.axhline(performance_equity_now, color="#00D4AA", linewidth=1.2, linestyle="-", alpha=0.8, label=f"Performance ${performance_equity_now:.2f}")
 
-    ax.set_title(f"Zeus {mode} Equity Curve", fontsize=14, fontweight="bold")
-    ax.set_ylabel("Bankroll (USD)", fontsize=11)
+    ax.set_title(f"Zeus {runtime_state} Equity Curve", fontsize=14, fontweight="bold")
+    ax.set_ylabel("Performance Equity (USD)", fontsize=11)
     ax.xaxis.set_major_formatter(mdates.DateFormatter("%m-%d %H:%M"))
     plt.xticks(rotation=30, fontsize=8)
     ax.grid(True, alpha=0.2)
     ax.legend(loc="upper left", fontsize=9)
 
     summary = (
-        f"env={mode} | generated_at={status_truth.get('generated_at')} | "
+        f"runtime_state={runtime_state} | generated_at={status_truth.get('generated_at')} | "
         f"status_source={status_truth.get('source_path')} | "
         f"status_stale_age_seconds={status_truth.get('stale_age_seconds')} | "
         f"realized=${realized_now:.2f} | unrealized=${unrealized_now:.2f} | "
-        f"total=${total_now:.2f} | return={return_pct:+.1f}%"
+        f"total_pnl=${total_pnl_now:.2f} | bankroll=${bankroll_now:.2f} | return={return_pct:+.1f}%"
     )
     ax.text(0.5, -0.16, summary, transform=ax.transAxes, ha="center", fontsize=9, color="dimgray")
 
@@ -206,11 +221,9 @@ def build_equity_curve(mode: str) -> dict:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", default=None)
-    args = parser.parse_args()
+    parser.parse_args()
 
-    mode = current_mode(args.mode)
-    report = build_equity_curve(mode)
+    report = build_equity_curve()
     print(json.dumps(report, ensure_ascii=False, indent=2))
 
 

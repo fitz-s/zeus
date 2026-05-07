@@ -57,7 +57,10 @@ def _make_in_memory_db() -> sqlite3.Connection:
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             city TEXT NOT NULL,
             target_date TEXT NOT NULL,
-            outcome_value REAL
+            outcome_value REAL,
+            settlement_value REAL,
+            authority TEXT NOT NULL DEFAULT 'VERIFIED',
+            temperature_metric TEXT NOT NULL DEFAULT 'high'
         );
 
         CREATE TABLE platt_models_v2 (
@@ -78,12 +81,22 @@ def _insert_calibration_pairs(conn, city: str, n: int, p_raw: float, outcome: in
     from datetime import date, timedelta
     start = date.fromisoformat(base_date)
     rows = []
+    settlement_rows = []
     for i in range(n):
         d = (start + timedelta(days=i)).isoformat()
         rows.append((city, d, outcome, p_raw, "JJA", "VERIFIED"))
+        settlement_rows.append((city, d, float(outcome), float(outcome), "VERIFIED", "high"))
     conn.executemany(
         "INSERT INTO calibration_pairs (city, target_date, outcome, p_raw, season, authority) VALUES (?,?,?,?,?,?)",
         rows,
+    )
+    conn.executemany(
+        """
+        INSERT INTO settlements (
+            city, target_date, outcome_value, settlement_value, authority, temperature_metric
+        ) VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        settlement_rows,
     )
     conn.commit()
 
@@ -246,6 +259,28 @@ class TestComputeDriftReturnsOk:
         assert report.recommendation == "OK"
         assert report.n_settlements_in_window == 0
         assert "No settlements" in report.message
+
+
+def test_drift_detector_ignores_unverified_or_wrong_metric_settlement_evidence():
+    conn = _make_in_memory_db()
+    _insert_calibration_pairs(conn, "MetricCity", 3, p_raw=0.9, outcome=1)
+    conn.execute(
+        "UPDATE settlements SET authority = 'UNVERIFIED' WHERE target_date = '2026-04-01'"
+    )
+    conn.execute(
+        "UPDATE settlements SET temperature_metric = 'low' WHERE target_date = '2026-04-02'"
+    )
+    conn.commit()
+
+    report = compute_drift(
+        conn,
+        city="MetricCity",
+        season="JJA",
+        metric_identity=HIGH_LOCALDAY_MAX,
+        window_days=365,
+    )
+
+    assert report.n_settlements_in_window == 1
 
 
 # ---------------------------------------------------------------------------

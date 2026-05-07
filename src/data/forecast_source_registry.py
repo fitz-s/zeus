@@ -242,6 +242,29 @@ def source_id_for_ensemble_model(model: str | None) -> str:
     return ENSEMBLE_MODEL_SOURCE_MAP.get(key, key)
 
 
+_CALIBRATION_LOOKUP_SOURCE_ID_BY_FORECAST_SOURCE_ID: dict[str, str] = {
+    "tigge": "tigge_mars",
+    "tigge_mars": "tigge_mars",
+    "ecmwf_open_data": "ecmwf_open_data",
+}
+
+
+def calibration_source_id_for_lookup(source_id: str | None) -> str | None:
+    """Map forecast-source identity to the Platt bucket source axis.
+
+    Forecast evidence keeps its provider/source id (`tigge`,
+    `ecmwf_open_data`, fallback provider ids, etc.). Platt v2 lookup uses a
+    narrower bucket identity. Returning None means the forecast source has no
+    live calibration bucket authority and callers must not rely on schema
+    defaults or legacy Platt fallback as if it did.
+    """
+
+    key = str(source_id or "").strip().lower()
+    if not key:
+        return None
+    return _CALIBRATION_LOOKUP_SOURCE_ID_BY_FORECAST_SOURCE_ID.get(key)
+
+
 def _env_enabled(flag_name: str, environ: Mapping[str, str]) -> bool:
     return str(environ.get(flag_name, "")).strip().lower() in {"1", "true", "yes", "on"}
 

@@ -61,6 +61,7 @@ file_naming:
         code_review_graph_mcp_readonly.py: Zeus-safe Code Review Graph MCP facade; intentionally omits source-writing apply_refactor
         edge_observation_weekly.py: packet-reviewed weekly edge-observation runner; noun-first name retained to match `edge_observation` package/operator terminology
         equity_curve.py: established diagnostic report command
+        evaluate_calibration_transfer_oos.py: established calibration-transfer OOS evidence writer name retained to match validated_calibration_transfers and operator-facing policy terminology
         force_lifecycle.py: established repair command name; dangerous and packet-gated
         fill_obs_v2_dst_gaps.py: established obs_v2 targeted fill helper; fill_ prefix kept for explicit gap-repair semantics
         fill_obs_v2_meteostat.py: established obs_v2 bulk fill helper; fill_ prefix kept for explicit source-specific repair semantics

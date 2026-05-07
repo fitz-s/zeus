@@ -1,17 +1,20 @@
 #!/usr/bin/env python3
-"""Backfill outcome_fact from chronicle SETTLEMENT events.
+"""Backfill legacy outcome_fact from chronicle SETTLEMENT events.
 
-The SD-2 fix ensures future settlements write to outcome_fact.
-This script backfills the 19 historical settlements that pre-dated SD-2.
+This script writes legacy lifecycle projection rows only. Rows it creates do
+not carry settlement authority, report authority, or learning eligibility.
 
 Linkage:
     chronicle.trade_id  ->  position_events_legacy.runtime_trade_id
     chronicle.trade_id is used as position_id in outcome_fact
 
 Run:
-    python3 scripts/backfill_outcome_fact.py
     python3 scripts/backfill_outcome_fact.py --dry-run
+    python3 scripts/backfill_outcome_fact.py --apply --confirm-legacy-outcome-fact-backfill
 """
+# Lifecycle: created=2026-04-07; last_reviewed=2026-05-06; last_reused=2026-05-06
+# Purpose: Repair legacy outcome_fact lifecycle projections behind explicit apply guard.
+# Reuse: Do not run without an active repair packet, dry-run evidence, DB backup, and rollback plan.
 from __future__ import annotations
 
 import argparse
@@ -20,7 +23,8 @@ import sqlite3
 import sys
 from pathlib import Path
 
-DB_PATH = Path(__file__).parent.parent / "state" / "zeus.db"
+DEFAULT_DB_PATH = Path(__file__).parent.parent / "state" / "zeus.db"
+LEGACY_OUTCOME_FACT_AUTHORITY_SCOPE = "legacy_lifecycle_projection_not_settlement_authority"
 
 
 def _get_strategy_key(conn: sqlite3.Connection, trade_id: str) -> str | None:
@@ -45,15 +49,31 @@ def _get_entered_at(conn: sqlite3.Connection, trade_id: str) -> str | None:
     return row["timestamp"] if row else None
 
 
-def backfill(dry_run: bool = False) -> None:
-    conn = sqlite3.connect(DB_PATH)
+def backfill(*, dry_run: bool = True, db_path: Path = DEFAULT_DB_PATH) -> dict:
+    if not db_path.exists():
+        return {
+            "status": "error_missing_db",
+            "dry_run": dry_run,
+            "db_path": str(db_path),
+            "authority_scope": LEGACY_OUTCOME_FACT_AUTHORITY_SCOPE,
+        }
+    conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
+    print(
+        "WARNING: outcome_fact is a legacy lifecycle projection "
+        f"({LEGACY_OUTCOME_FACT_AUTHORITY_SCOPE}); it is not settlement authority."
+    )
 
     # Verify outcome_fact exists
     tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     if "outcome_fact" not in tables:
-        print("ERROR: outcome_fact table does not exist", file=sys.stderr)
-        sys.exit(1)
+        conn.close()
+        return {
+            "status": "error_missing_outcome_fact",
+            "dry_run": dry_run,
+            "db_path": str(db_path),
+            "authority_scope": LEGACY_OUTCOME_FACT_AUTHORITY_SCOPE,
+        }
 
     settlements = conn.execute(
         "SELECT trade_id, timestamp, details_json FROM chronicle WHERE event_type='SETTLEMENT'"
@@ -126,10 +146,34 @@ def backfill(dry_run: bool = False) -> None:
     if not dry_run and inserted > 0:
         total = conn.execute("SELECT COUNT(*) FROM outcome_fact").fetchone()[0]
         print(f"outcome_fact total rows now: {total}")
+    summary = {
+        "status": "dry_run" if dry_run else ("applied" if errors == 0 else "applied_with_errors"),
+        "dry_run": dry_run,
+        "db_path": str(db_path),
+        "authority_scope": LEGACY_OUTCOME_FACT_AUTHORITY_SCOPE,
+        "inserted": inserted,
+        "skipped": skipped,
+        "errors": errors,
+    }
+    conn.close()
+    return summary
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Backfill outcome_fact from chronicle")
-    parser.add_argument("--dry-run", action="store_true", help="Print what would be inserted without writing")
+    parser = argparse.ArgumentParser(description="Backfill legacy outcome_fact lifecycle projections from chronicle")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--dry-run", dest="dry_run", action="store_true", default=True, help="Print what would be inserted without writing")
+    mode.add_argument("--apply", dest="dry_run", action="store_false", help="Write legacy outcome_fact rows")
+    parser.add_argument("--db", type=Path, default=DEFAULT_DB_PATH, help="Trade DB path")
+    parser.add_argument(
+        "--confirm-legacy-outcome-fact-backfill",
+        action="store_true",
+        help="Required with --apply; confirms operator-approved dry-run, backup, and rollback plan",
+    )
     args = parser.parse_args()
-    backfill(dry_run=args.dry_run)
+    if not args.dry_run and not args.confirm_legacy_outcome_fact_backfill:
+        parser.error("--apply requires --confirm-legacy-outcome-fact-backfill")
+    result = backfill(dry_run=args.dry_run, db_path=args.db)
+    if result["status"].startswith("error"):
+        print(f"ERROR: {result['status']} at {result['db_path']}", file=sys.stderr)
+        sys.exit(1)

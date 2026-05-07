@@ -230,3 +230,423 @@ entries:
       Build scripts/register_test_topology.py that supplies the
       ARCH_PLAN_EVIDENCE contract correctly. Operator decision needed:
       tighten the hook (fewer bypasses) or relax for routine entries.
+
+  - id: P14-2026-05-05
+    title: "Authority-row producer predicate mirror checklist"
+    raised_at: "2026-05-05"
+    raised_by: "capsule@object-meaning-invariance-wave3"
+    status: proposed
+    detail_doc: "current chat: Zeus object-meaning invariance wave 3"
+    notes: >
+      Wave 3 critic loop repeatedly found the same repair class in
+      validated_calibration_transfers: a writer predicate was fixed, but
+      legacy or contaminated rows could still authorize downstream consumers
+      until the reader re-proved the predicate. Codify a checklist for any
+      aggregate authority row: consumer gates must mirror producer predicates
+      for source identity, active/verified authority, executable parameter
+      validity, maturity/sample basis, generation time, target cohort
+      eligibility, target cohort time, and recomputed economics. This should
+      become a review checklist or static test template before future
+      report/replay/learning authority tables are promoted.
+
+  - id: P15-2026-05-05
+    title: "Semantic boot classes need navigation route parity"
+    raised_at: "2026-05-05"
+    raised_by: "object-meaning-invariance-wave4"
+    status: proposed
+    detail_doc: "current chat: Zeus object-meaning invariance wave 4"
+    notes: >
+      Wave 4 semantic bootstrap correctly admitted task_class=day0_monitoring
+      and surfaced current source/data proof questions, but navigation had no
+      equivalent day0_monitoring intent. Generic navigation and the
+      modify-execution/lifecycle profile did not admit the actual
+      behavior-owning boundary set (`src/state/portfolio.py` plus
+      `tests/test_day0_exit_gate.py`); the work had to route through
+      pricing-semantics authority cutover after adding the missing Day0 test.
+      Deep object-meaning audits need route parity among semantic boot task
+      classes, digest/navigation intents, behavior-owning tests, and
+      cross-module boundary file admission so agents do not misclassify
+      topology friction as architecture/design work.
+
+  - id: P16-2026-05-05
+    title: "Object-meaning wave routes need downstream contamination sweep cohorts"
+    raised_at: "2026-05-05"
+    raised_by: "object-meaning-invariance-wave5"
+    status: proposed
+    detail_doc: "current chat: Zeus object-meaning invariance wave 5"
+    notes: >
+      Wave 5 started with settlement/harvester/db/replay admission but the
+      actual invariant boundary also reached RiskGuard realized exits,
+      decision_chain learning summaries, strategy_tracker attribution,
+      forecast-skill ETL writers, and calibration drift/retrain evidence.
+      The profile had to be expanded mid-wave, and source_rationale was
+      missing for an active scheduled drift detector. Future object-meaning
+      profiles should include explicit downstream contamination cohorts for
+      risk, report/export, replay, learning/calibration, ETL, legacy fallback,
+      operator scripts, and topology self-maintenance companion files so the
+      route guides the required sweep instead of reporting true consumers as
+      scope expansion noise.
+
+  - id: P17-2026-05-05
+    title: "Object-meaning routes need shared persistence-helper admission"
+    raised_at: "2026-05-05"
+    raised_by: "object-meaning-invariance-wave7"
+    status: proposed
+    detail_doc: "current chat: Zeus object-meaning invariance wave 7"
+    notes: >
+      Wave 7 found source-identity drift at the calibration bucket boundary:
+      live/replay/harvester callers could avoid schema-default TIGGE
+      materialization, but the shared persistence helper
+      src/calibration/store.py::add_calibration_pair_v2 and the dangerous
+      repair script scripts/rebuild_calibration_pairs_v2.py were not admitted
+      by available object-meaning/source/replay/script routes. Future profiles
+      should admit the common helper and active long-lived repair script when
+      the invariant failure is a schema/helper default that can relabel an
+      unsupported object as an authoritative bucket. Otherwise agents can fix
+      each consumer while the defaulting mechanism remains a topology-blocked
+      compatibility hazard.
+
+  - id: P18-2026-05-05
+    title: "Fill-finality object routes need materialization and telemetry parity"
+    raised_at: "2026-05-05"
+    raised_by: "object-meaning-invariance-wave8"
+    status: proposed
+    detail_doc: "docs/operations/task_2026-05-05_object_invariance_wave8/PLAN.md"
+    notes: >
+      Wave 8 found a single fill-authority invariant spanning
+      cycle_runtime materialization, fill_tracker optimistic exposure,
+      execution_fact telemetry, harvester settlement P&L, and tests. The
+      `r3 fill finality ledger implementation` profile admitted fill-tracker
+      tests but not `src/engine/cycle_runtime.py`, while broad Wave8 routes
+      initially landed in generic/advisory high-fanout mode. The semantic
+      bootstrap vocabulary also lacks a pricing task class even though the
+      usable navigation route is pricing-semantics, and a critic-repair source
+      slice emitted merge-conflict-first metadata for a non-merge edit. Future
+      fill-finality object-meaning routes should admit the complete crossing:
+      OrderResult/venue observations -> Position entry economics ->
+      execution_fact -> settlement/report/learning gates, explicitly flag
+      dependency-extensible status sets as authority drift risks, plus
+      semantic-boot class parity and plan packet registry maintenance needed
+      to avoid `operations_task_unregistered` noise during bounded audit
+      waves.
+
+  - id: P19-2026-05-05
+    title: "Semantic antibody proof-path maintenance needs an admitted route"
+    raised_at: "2026-05-05"
+    raised_by: "object-meaning-invariance-wave9"
+    status: proposed
+    detail_doc: "current chat: Zeus object-meaning invariance wave 9"
+    notes: >
+      Wave 9 used day0_monitoring semantic bootstrap for an exit-economics
+      boundary and found `python3 scripts/topology_doctor.py --fatal-misreads
+      --json` failing because
+      architecture/fatal_misreads.yaml::polymarket_low_market_history_starts_2026_04_15
+      points at missing LOW-backfill packet proof files. The repo still has
+      current_data_state and known_gaps_archive claims, but the referenced
+      packet directory is absent. Attempts to route a narrow proof-path repair
+      through direct feedback capsule and topology graph runtime profiles did
+      not admit architecture/fatal_misreads.yaml. Future topology work should
+      add a specific semantic-antibody maintenance route that admits
+      fatal_misreads proof-file corrections, current-fact doc pointer updates,
+      and the focused topology tests required to keep semantic boot gates
+      runnable without broad architecture freelancing.
+
+  - id: P20-2026-05-05
+    title: "Object-meaning waves need multi-profile boundary admission"
+    raised_at: "2026-05-05"
+    raised_by: "object-meaning-invariance-wave10"
+    status: proposed
+    detail_doc: "current chat: Zeus object-meaning invariance wave 10"
+    notes: >
+      Wave 10 selected the current-open fill-authority economics -> risk
+      exposure boundary. The pricing-semantics route admitted portfolio and
+      cycle_runtime repairs but rejected cycle_runner.py even though the same
+      enum/string ChainState invariant controlled the live entry quarantine
+      gate downstream of the repaired exposure helper. A second
+      modify-pipeline route admitted cycle_runner plus a cross-module test.
+      Future object-meaning routes should support explicit multi-profile
+      boundary admission for one invariant class, preserving each profile's
+      forbidden files while avoiding noisy stop/re-route cycles for active
+      downstream consumers discovered during the required contamination sweep.
+
+  - id: P21-2026-05-05
+    title: "Object-invariance DB read-model routes need protective consumer admission"
+    raised_at: "2026-05-05"
+    raised_by: "object-meaning-invariance-wave11"
+    status: proposed
+    detail_doc: "docs/operations/task_2026-05-05_object_invariance_wave11/PLAN.md"
+    notes: >
+      Wave 11 selected the fill-authority current-open economics ->
+      canonical DB read-model -> RiskGuard/status/report boundary. The
+      `pricing semantics authority cutover` profile admitted `src/state/db.py`
+      and DB tests, but rejected `src/riskguard/riskguard.py`,
+      `src/observability/status_summary.py`, and `tests/test_riskguard.py`.
+      The fallback `modify risk or strategy` route matched RiskGuard but did
+      not admit the primary `src/riskguard/riskguard.py` consumer. This left
+      the safe repair path limited to DB-view numeric compatibility while
+      provenance propagation into protective/reporting consumers remained a
+      route-blocked residual. Future object-invariance routes should admit
+      producer read models and protective/reporting consumers together when
+      the same live-money economic object crosses that boundary, while still
+      preserving no-live-mutation and no-schema-migration constraints.
+
+  - id: P22-2026-05-05
+    title: "Status/read-model object-invariance routes need semantic admission plus clean packet registry"
+    raised_at: "2026-05-05"
+    raised_by: "object-meaning-invariance-wave12"
+    status: implementing
+    detail_doc: "docs/operations/task_2026-05-05_object_invariance_wave12/PLAN.md"
+    notes: >
+      Wave 12 selected the RiskGuard bankroll-of-record -> status_summary
+      operator read-model boundary. Existing status_summary profiles were
+      historical-slice-specific (execution capability, canonical snapshot, v2
+      row counts), so topology returned generic/advisory for a real
+      bankroll/equity object-meaning repair. Adding the Wave12 packet then
+      exposed stale docs/operations/AGENTS.md rows for archived/missing packet
+      paths as hard navigation blockers. The repair adds a narrow
+      object-meaning operator status bankroll semantics route and cleans the
+      stale operations registry rows; future topology maintenance should keep
+      high-fanout derived read-model profiles semantic enough for live-money
+      object boundaries and keep active packet registries physically aligned
+      before they block unrelated admitted routes.
+
+  - id: P23-2026-05-05
+    title: "RiskGuard object-invariance routes need mapper-seam admission and semantic boot support"
+    raised_at: "2026-05-05"
+    raised_by: "object-meaning-invariance-wave13"
+    status: implementing
+    detail_doc: "docs/operations/task_2026-05-05_object_invariance_wave13/PLAN.md"
+    notes: >
+      Wave 13 selected the canonical DB portfolio loader fill-authority
+      economics -> RiskGuard protective Position boundary. The generic
+      `modify risk or strategy` profile selected on `src/riskguard/riskguard.py`
+      but admitted only `tests/test_riskguard.py`, blocking the mapper seam
+      that needed repair. `semantic-bootstrap --task-class risk` also failed
+      because `risk` is not a supported task class, despite RiskGuard being a
+      K1 live-money protective boundary. A narrow Wave13 profile now admits
+      the mapper/test/packet companion surfaces while explicitly forbidding
+      risk policy, risk allocator, state/schema, engine/execution, DB mutation,
+      and live side effects. Future topology maintenance should add first-class
+      semantic boot support for protective risk boundaries and avoid profiles
+      that can select a source file without admitting the safe bounded edit.
+
+  - id: P24-2026-05-05
+    title: "Settlement-authority routes need bypass-sweep admission for protective fallbacks"
+    raised_at: "2026-05-05"
+    raised_by: "object-meaning-invariance-wave14"
+    status: proposed
+    detail_doc: "docs/operations/task_2026-05-05_object_invariance_wave14/PLAN.md"
+    notes: >
+      Wave 14 initially admitted the verified-settlement -> strategy_health
+      read-model repair, but the required downstream contamination sweep found
+      an active RiskGuard realized-PnL bypass through `_current_mode_realized_exits`
+      and `PortfolioState.recent_exits`. A second, more explicit route admitted
+      `src/riskguard/riskguard.py`, while the same profile rejected the legacy
+      K5 helper tests. Future settlement-authority/object-invariance profiles
+      should include active protective fallback seams in the same admitted
+      boundary and provide an explicit compatibility path for legacy helper tests
+      when the live repair must preserve default-call behavior.
+
+  - id: P25-2026-05-05
+    title: "Status-summary object routes need non-bankroll derived metric admission"
+    raised_at: "2026-05-05"
+    raised_by: "object-meaning-invariance-wave14"
+    status: proposed
+    detail_doc: "docs/operations/task_2026-05-05_object_invariance_wave14/PLAN.md"
+    notes: >
+      Wave 14 critic found `status_summary.strategy.*.settlement_*` silently
+      overwritten by learning-surface settlement metrics. The settlement-authority
+      profile rejected `src/observability/status_summary.py` and
+      `tests/test_pnl_flow_and_audit.py`; the only admitted status route was
+      `object meaning operator status bankroll semantics`, whose laws are
+      wallet/bankroll-specific rather than general derived metric identity.
+      Future status-summary object-invariance routes should admit non-bankroll
+      derived metric fields such as strategy settlement windows, learning/report
+      cohorts, and provenance namespacing without requiring a semantically
+      adjacent but mismatched bankroll route.
+
+  - id: P26-2026-05-05
+    title: "Semantic boot profiles must not depend on missing archive packet bodies"
+    raised_at: "2026-05-05"
+    raised_by: "topology-noise-repair"
+    status: implementing
+    detail_doc: "docs/operations/task_2026-05-05_topology_noise_repair/PLAN.md"
+    notes: >
+      `python3 scripts/topology_doctor.py --task-boot-profiles` failed because
+      `architecture/task_boot_profiles.yaml::agent_runtime.required_reads`
+      referenced a physically missing archived plan body. Archive bodies are
+      historical evidence, not stable current boot authority. The current repair
+      points that profile at existing topology authority surfaces; future semantic
+      boot profiles should prefer current machine-checkable authority or an archive
+      registry pointer over cold packet bodies that may be physically moved.
+
+  - id: P27-2026-05-05
+    title: "Object-meaning routes need active relationship-antibody admission"
+    raised_at: "2026-05-05"
+    raised_by: "object-meaning-invariance-wave17"
+    status: implementing
+    detail_doc: "docs/operations/task_2026-05-05_object_invariance_wave17/PLAN.md"
+    notes: >
+      Wave 17 repaired the `outcome_fact` producer but critic found an active
+      cross-module relationship test still requiring `outcome_fact` as settlement
+      PnL authority. The settlement-authority route had to be expanded to admit
+      the relationship antibody itself. Future object-meaning routes should admit
+      producer code plus active relationship/report/replay antibodies that can
+      re-promote legacy semantics, so corrected source paths and their guards are
+      maintained under the same invariant boundary.
+
+  - id: P28-2026-05-05
+    title: "Calibration-transfer object routes need writer-reader-test admission"
+    raised_at: "2026-05-05"
+    raised_by: "object-meaning-invariance-wave18"
+    status: implementing
+    detail_doc: "docs/operations/task_2026-05-05_object_invariance_wave18/PLAN.md"
+    notes: >
+      Wave 18 selected a statistical-evidence -> live calibration-transfer
+      eligibility boundary. Semantic bootstrap supported the calibration task,
+      but navigation had no profile that admitted the OOS writer script, the
+      `src/data` policy reader, and the relationship tests together. A narrow
+      object-meaning calibration-transfer-OOS profile was added. Future topology
+      maintenance should treat statistical evidence producers and live/shadow
+      policy readers as one boundary when the evidence can affect
+      LIVE_ELIGIBLE/SHADOW_ONLY/BLOCKED decisions.
+
+  - id: P29-2026-05-05
+    title: "Pricing-semantics routes need venue-command insertion-gate admission"
+    raised_at: "2026-05-05"
+    raised_by: "object-meaning-invariance-wave19"
+    status: proposed
+    detail_doc: "docs/operations/task_2026-05-05_object_invariance_wave19/PLAN.md"
+    notes: >
+      Wave 19 selected the `FinalExecutionIntent` -> legacy executor -> venue
+      command submit boundary. The existing pricing-semantics route admitted
+      contracts, executor, and tests, but rejected `src/state/venue_command_repo.py`
+      even though the route law depends on the single venue-command insertion
+      gate preserving executable snapshot identity. This forced the repair to
+      enforce corrected snapshot/cost-basis identity in the admitted executor
+      boundary rather than at the canonical insertion seam. Future topology
+      maintenance should admit the insertion gate for pricing-semantics
+      identity repairs while still forbidding schema migration and production
+      DB mutation.
+
+  - id: P30-2026-05-05
+    title: "Execution/pricing object-invariance needs semantic boot and packet admission"
+    raised_at: "2026-05-05"
+    raised_by: "object-meaning-invariance-wave19"
+    status: proposed
+    detail_doc: "docs/operations/task_2026-05-05_object_invariance_wave19/PLAN.md"
+    notes: >
+      `semantic-bootstrap --task-class execution` failed with
+      `semantic_bootstrap_unknown_task_class`, despite this being a direct
+      live-money execution/pricing boundary. The operations-packet registration
+      navigation also rejected the new Wave19 packet path as unclassified before
+      it existed, and `omx explore` was unavailable without Rust/cargo or a
+      prebuilt harness. Future workflow maintenance should add a first-class
+      execution/pricing semantic boot class, a route for planned object-invariance
+      packet creation, and a non-Rust fallback or prebuilt harness for mandatory
+      read-only repository exploration.
+
+  - id: P31-2026-05-05
+    title: "Exchange-reconciliation routes need downstream tests and live check paths"
+    raised_at: "2026-05-05"
+    raised_by: "object-meaning-invariance-wave21"
+    status: proposed
+    detail_doc: "docs/operations/task_2026-05-05_object_invariance_wave21/PLAN.md"
+    notes: >
+      Wave 21 repaired venue-read freshness authority for M5 exchange
+      reconciliation. The exact M5 navigation admitted exchange reconciliation,
+      exit lifecycle, venue command, and `tests/test_exchange_reconcile.py`, but
+      rejected `tests/test_exit_safety.py` even though cancel-unknown exit
+      recovery is a downstream consumer of absence findings. The semantic boot
+      command also lacked an `exchange_reconciliation` task class, and the
+      documented R3 drift-check path pointed to a missing packet-local wrapper
+      while `scripts/r3_drift_check.py` delegated to that same missing path.
+      Future topology maintenance should admit downstream recovery tests for
+      reconciliation-object repairs, add an exchange-reconciliation semantic
+      boot class, and keep executable live-check paths synchronized with packet
+      documentation.
+
+  - id: P32-2026-05-05
+    title: "Trade-fact object routes need multi-producer packet admission"
+    raised_at: "2026-05-05"
+    raised_by: "object-meaning-invariance-wave22"
+    status: proposed
+    detail_doc: "docs/operations/current_state.md"
+    notes: >
+      Wave 22 repaired the same `venue_trade_facts` object-meaning invariant in
+      two active producers: M5 REST exchange reconciliation and M3 user-channel
+      WebSocket ingest. Topology admitted each profile separately, but it did
+      not provide one object-invariance route that recognized the shared
+      persistence table, downstream consumers, and relationship tests as one
+      semantic boundary. The attempted Wave22 plan packet path was also rejected
+      as a missing unclassified docs path, and registering it first created a
+      stale-registry error until reverted. Future topology maintenance should
+      add a route for planned object-invariance packet creation and a
+      multi-producer route shape for shared fact tables such as
+      `venue_trade_facts`, where corrected semantics are incomplete if another
+      admitted producer can still materialize the old meaning.
+
+  - id: P33-2026-05-05
+    title: "Fill-authority routes need downstream antibody test admission"
+    raised_at: "2026-05-05"
+    raised_by: "object-meaning-invariance-wave23"
+    status: proposed
+    detail_doc: "docs/operations/current_state.md"
+    notes: >
+      Wave 23 repaired the polling fill-tracker producer for the shared
+      `venue_trade_facts` invariant. The pricing/F09 fill-authority route
+      admitted `src/execution/fill_tracker.py` and
+      `tests/test_live_safety_invariants.py`, but rejected
+      `tests/test_command_recovery.py` and
+      `tests/test_provenance_5_projections.py` even though command recovery
+      and projection/report-style readers are downstream antibody checks for
+      whether a drifted trade fact can still become full-fill authority,
+      position lots, reporting truth, or learning truth. Future topology
+      maintenance should admit producer code plus the downstream recovery and
+      projection relationship tests that can re-materialize old fill meaning,
+      without expanding the route into live DB mutation, backfill, or report
+      publication authority.
+
+  - id: P34-2026-05-05
+    title: "Canonical settlement env routes need state-truth admission"
+    raised_at: "2026-05-05"
+    raised_by: "object-meaning-invariance-wave24"
+    status: proposed
+    detail_doc: "docs/operations/current_state.md"
+    notes: >
+      Wave 24 read-only selection found a high-risk environment-authority
+      boundary: canonical `position_events` writes are inserted through a fixed
+      column list that does not carry `env`, while legacy schema reconciliation
+      adds `env TEXT NOT NULL DEFAULT 'live'`; settlement readers also expose
+      `query_settlement_events(..., env=...)` without filtering canonical
+      position events by environment. This can let non-live execution/replay settlement
+      events materialize as live report, risk, or learning rows if canonical
+      settlement writes occur outside live. The available settlement/replay/
+      backfill routes rejected `src/state/ledger.py`, `src/state/db.py`, and
+      relationship tests as out of scope, and semantic bootstrap lacks a
+      `settlement` task class. Future topology maintenance should add a
+      state-truth route for canonical settlement/report/learning env repairs,
+      with explicit schema/no-live-DB-mutation boundaries and downstream
+      report/learning antibody tests.
+
+  - id: P35-2026-05-06
+    title: "Topology needs a retired-object housekeeping route"
+    raised_at: "2026-05-06"
+    raised_by: "non-live execution-housekeeping"
+    status: proposed
+    detail_doc: "docs/operations/current_state.md"
+    notes: >
+      Retiring the non-live execution concept and fixed-capital test fiction was
+      a cross-surface housekeeping task: it needed to delete or relabel
+      production comments, tests, scripts, generated topology profiles, active
+      docs, reports, and cold evidence wording without granting live venue,
+      production DB, migration, backfill, or report-publication authority.
+      The generic navigation route classified the task as ambiguous and blocked
+      all candidate files, while existing semantic routes were designed for
+      feature/logic changes rather than concept retirement. It also surfaced a
+      missing source-rationale admission for `src/runtime/bankroll_provider.py`,
+      which this cleanup registered directly. Future topology maintenance
+      should add a first-class retired-object/housekeeping route that admits
+      text, tests, registry, and generated-profile cleanup with explicit
+      no-live-mutation boundaries, plus a generated-artifact regeneration gate
+      for `architecture/digest_profiles.py`.

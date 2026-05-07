@@ -719,9 +719,9 @@ Available for Phase 6:
 
 Still active. v2 tables zero rows. No real ingest/batch extraction. Smoke ≤1 GRIB → `/tmp/`. Structural fixes free. User lifts when Phase 8 shadow opens.
 
-## Paper mode retired (STANDING antibody)
+## Obsolete non-live runtime retired (STANDING antibody)
 
-`ACTIVE_MODES=("live",)` in `src/config.py`. Antibody msg in `mode_state_path`. **DO NOT re-add paper mode.**
+`ACTIVE_MODES=("live",)` in `src/config.py`. Antibody msg in `mode_state_path`. **DO NOT re-add obsolete non-live runtime.**
 
 ## Phase 6 opening brief sketch (for team upon re-engagement)
 
@@ -751,7 +751,7 @@ If `~/.claude/teams/zeus-dual-upgrade-v3/` is gone (OMC patch failed):
 
 - Don't trust teammate claims without single-quick disk-verify on critical path.
 - Don't over-verify — single check, not spiral. Multi-agent disk settling is real.
-- Don't re-add paper mode.
+- Don't re-add obsolete non-live runtime.
 - Don't push full-batch extraction without user approval.
 - Don't decouple `evaluator.py:825` fix from Phase 6 guard removal.
 - Don't bundle Phase 6 with Phase 7 scope (keep commits atomic).

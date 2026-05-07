@@ -2,7 +2,7 @@
 # Lifecycle: created=2026-04-27; last_reviewed=2026-04-30; last_reused=2026-04-30
 # Purpose: R3 M3 Polymarket user-channel WS ingest and fail-closed gap guard antibodies.
 # Reuse: Run when user WebSocket ingest, U2 venue facts, or submit gap guards change.
-# Last reused/audited: 2026-05-02
+# Last reused/audited: 2026-05-06
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/M3.yaml;
 #                  PR 37 review: clean-reconnect proof ignores resolved history
 #                  while preserving active side-effect state.
@@ -276,6 +276,157 @@ def test_confirmed_event_finalizes_trade_and_permits_canonical_pnl(conn):
     assert _command_state(conn) == "FILLED"
 
 
+def test_duplicate_trade_messages_are_idempotent_at_latest_lifecycle_state(conn):
+    ingestor = _ingestor(conn)
+    ingestor.handle_message(_trade_message("MATCHED"))
+    matched_duplicate = ingestor.handle_message(_trade_message("MATCHED"))
+    ingestor.handle_message(_trade_message("CONFIRMED", transaction_hash="0xconfirmed", confirmation_count=3))
+    confirmed_duplicate = ingestor.handle_message(
+        _trade_message("CONFIRMED", transaction_hash="0xconfirmed", confirmation_count=3)
+    )
+
+    assert matched_duplicate["reason"] == "duplicate_trade_fact"
+    assert confirmed_duplicate["reason"] == "duplicate_trade_fact"
+    assert [r["state"] for r in _rows(conn, "venue_trade_facts")] == ["MATCHED", "CONFIRMED"]
+    assert [r["state"] for r in _rows(conn, "position_lots")] == [
+        "OPTIMISTIC_EXPOSURE",
+        "CONFIRMED_EXPOSURE",
+    ]
+    events = [
+        r["event_type"]
+        for r in conn.execute(
+            "SELECT event_type FROM venue_command_events WHERE command_id = 'cmd-ws' ORDER BY sequence_no"
+        )
+    ]
+    assert events == [
+        "INTENT_CREATED",
+        "SUBMIT_REQUESTED",
+        "SUBMIT_ACKED",
+        "PARTIAL_FILL_OBSERVED",
+        "FILL_CONFIRMED",
+    ]
+
+
+def test_confirmed_trade_regression_requires_review_not_failed_fact(conn):
+    ingestor = _ingestor(conn)
+    ingestor.handle_message(_trade_message("CONFIRMED", transaction_hash="0xconfirmed", confirmation_count=3))
+
+    result = ingestor.handle_message(_trade_message("FAILED", transaction_hash="0xfailed"))
+
+    assert result["command_event"] == "REVIEW_REQUIRED"
+    assert result["reason"] == "ws_trade_lifecycle_regression_or_economic_drift"
+    assert [r["state"] for r in _rows(conn, "venue_trade_facts")] == ["CONFIRMED"]
+    assert [r["state"] for r in _rows(conn, "position_lots")] == ["CONFIRMED_EXPOSURE"]
+    assert load_calibration_trade_facts(conn)[0]["state"] == "CONFIRMED"
+    assert _command_state(conn) == "REVIEW_REQUIRED"
+
+
+def test_trade_lifecycle_forward_transition_requires_stable_fill_economics(conn):
+    ingestor = _ingestor(conn)
+    ingestor.handle_message(_trade_message("MATCHED", size="5"))
+
+    result = ingestor.handle_message(
+        _trade_message("CONFIRMED", size="10", transaction_hash="0xconfirmed", confirmation_count=3)
+    )
+
+    assert result["command_event"] == "REVIEW_REQUIRED"
+    assert result["reason"] == "ws_trade_lifecycle_regression_or_economic_drift"
+    assert [(r["state"], r["filled_size"]) for r in _rows(conn, "venue_trade_facts")] == [
+        ("MATCHED", "5")
+    ]
+    assert [r["state"] for r in _rows(conn, "position_lots")] == ["OPTIMISTIC_EXPOSURE"]
+    assert load_calibration_trade_facts(conn) == []
+    assert _command_state(conn) == "REVIEW_REQUIRED"
+
+
+def test_same_trade_id_different_order_requires_review_not_rebinding(conn):
+    ingestor = _ingestor(conn)
+    ingestor.handle_message(_trade_message("MATCHED"))
+    insert_submission_envelope(conn, _envelope(), envelope_id="env-other")
+    insert_command(
+        conn,
+        command_id="cmd-other",
+        snapshot_id="snap-ws",
+        envelope_id="env-other",
+        position_id="2",
+        decision_id="dec-other",
+        idempotency_key="idem-cmd-other",
+        intent_kind="ENTRY",
+        market_id="condition-ws",
+        token_id="yes-token-ws",
+        side="BUY",
+        size=10.0,
+        price=0.50,
+        created_at=NOW.isoformat(),
+        snapshot_checked_at=NOW,
+        expected_min_tick_size=Decimal("0.01"),
+        expected_min_order_size=Decimal("5"),
+        expected_neg_risk=False,
+        venue_order_id="ord-other",
+    )
+    append_event(conn, command_id="cmd-other", event_type="SUBMIT_REQUESTED", occurred_at=NOW.isoformat())
+    append_event(
+        conn,
+        command_id="cmd-other",
+        event_type="SUBMIT_ACKED",
+        occurred_at=NOW.isoformat(),
+        payload={"venue_order_id": "ord-other"},
+    )
+    other_order = "ord-other"
+    result = ingestor.handle_message(
+        _trade_message(
+            "CONFIRMED",
+            taker_order_id=other_order,
+            maker_orders=[{"order_id": other_order}],
+        )
+    )
+
+    assert result["command_event"] == "REVIEW_REQUIRED"
+    assert result["reason"] == "ws_trade_identity_conflict"
+    assert [r["venue_order_id"] for r in _rows(conn, "venue_trade_facts")] == ["ord-ws"]
+
+
+@pytest.mark.parametrize(
+    ("overrides", "missing_field"),
+    [
+        ({"price": None}, "fill_price"),
+        ({"price": "0"}, "fill_price"),
+        ({"size": None}, "filled_size"),
+        ({"size": "0"}, "filled_size"),
+    ],
+)
+def test_confirmed_trade_without_positive_fill_economics_requires_review_not_finality(conn, overrides, missing_field):
+    result = _ingestor(conn).handle_message(
+        _trade_message("CONFIRMED", transaction_hash="0xconfirmed", confirmation_count=3, **overrides)
+    )
+
+    assert result["command_event"] == "REVIEW_REQUIRED"
+    assert result["reason"] == "ws_trade_missing_fill_economics"
+    assert missing_field in result["missing"]
+    assert _rows(conn, "venue_trade_facts") == []
+    assert _rows(conn, "position_lots") == []
+    assert _command_state(conn) == "REVIEW_REQUIRED"
+    events = [
+        r["event_type"]
+        for r in conn.execute(
+            "SELECT event_type FROM venue_command_events WHERE command_id = 'cmd-ws' ORDER BY sequence_no"
+        )
+    ]
+    assert "REVIEW_REQUIRED" in events
+    assert "FILL_CONFIRMED" not in events
+
+
+def test_matched_trade_without_positive_fill_economics_requires_review_not_optimistic_lot(conn):
+    result = _ingestor(conn).handle_message(_trade_message("MATCHED", size=None))
+
+    assert result["command_event"] == "REVIEW_REQUIRED"
+    assert result["reason"] == "ws_trade_missing_fill_economics"
+    assert "filled_size" in result["missing"]
+    assert _rows(conn, "venue_trade_facts") == []
+    assert _rows(conn, "position_lots") == []
+    assert _command_state(conn) == "REVIEW_REQUIRED"
+
+
 def test_exit_sell_confirmed_trade_does_not_mint_positive_exposure_lot(conn):
     """EXIT/SELL WS trade facts confirm venue side effects but are not entries."""
     conn.execute(
@@ -313,6 +464,54 @@ def test_failed_after_mined_quarantines_optimistic_projection(conn):
 
     assert [r["state"] for r in _rows(conn, "position_lots")] == ["OPTIMISTIC_EXPOSURE", "QUARANTINED"]
     assert [r["state"] for r in _rows(conn, "venue_trade_facts")] == ["MINED", "FAILED"]
+
+
+@pytest.mark.parametrize("previous_status", ["MATCHED", "MINED"])
+def test_failed_without_fill_economics_after_fill_observation_rolls_back_optimistic_projection(conn, previous_status):
+    ingestor = _ingestor(conn)
+    previous = _trade_message(previous_status)
+    if previous_status == "MINED":
+        previous.update(transaction_hash="0xmined", confirmation_count=0)
+    ingestor.handle_message(previous)
+    failed = _trade_message("FAILED", transaction_hash="0xfailed")
+    failed.pop("size")
+    failed.pop("price")
+
+    result = ingestor.handle_message(failed)
+
+    assert result["trade_fact_id"]
+    assert result["command_event"] is None
+    assert [r["state"] for r in _rows(conn, "venue_trade_facts")] == [previous_status, "FAILED"]
+    lots = _rows(conn, "position_lots")
+    assert [r["state"] for r in lots] == ["OPTIMISTIC_EXPOSURE", "QUARANTINED"]
+    assert lots[-1]["source_trade_fact_id"] == result["trade_fact_id"]
+
+
+def test_retrying_without_fill_economics_after_matched_uses_lifecycle_guard_not_economic_drift(conn):
+    ingestor = _ingestor(conn)
+    ingestor.handle_message(_trade_message("MATCHED"))
+    retrying = _trade_message("RETRYING")
+    retrying.pop("size")
+    retrying.pop("price")
+
+    result = ingestor.handle_message(retrying)
+
+    assert result["command_event"] == "REVIEW_REQUIRED"
+    assert result["reason"] == "ws_trade_lifecycle_regression_or_economic_drift"
+    assert [r["state"] for r in _rows(conn, "venue_trade_facts")] == ["MATCHED"]
+    assert [r["state"] for r in _rows(conn, "position_lots")] == ["OPTIMISTIC_EXPOSURE"]
+    payload = json.loads(
+        conn.execute(
+            """
+            SELECT payload_json
+              FROM venue_command_events
+             WHERE event_type = 'REVIEW_REQUIRED'
+             ORDER BY sequence_no DESC
+             LIMIT 1
+            """
+        ).fetchone()["payload_json"]
+    )
+    assert payload["semantic_guard"] == "trade_lifecycle_must_move_explicitly_forward"
 
 
 def test_websocket_disconnect_triggers_reconcile_sweep_marker_and_blocks_submit(conn):

@@ -432,6 +432,12 @@ def build_settlement_canonical_write(
     sequence_no: int,
     phase_before: str,
     source_module: str = "src.execution.harvester",
+    settlement_authority: str = "UNKNOWN",
+    settlement_truth_source: str = "",
+    settlement_market_slug: str = "",
+    settlement_temperature_metric: str = "",
+    settlement_source: str = "",
+    settlement_value: object | None = None,
 ) -> tuple[list[dict], dict]:
     projection = build_position_current_projection(position)
     if projection["phase"] != SETTLED:
@@ -452,6 +458,12 @@ def build_settlement_canonical_write(
             "exit_price": getattr(position, "exit_price", None),
             "pnl": getattr(position, "pnl", None),
             "exit_reason": getattr(position, "exit_reason", ""),
+            "settlement_authority": str(settlement_authority or "UNKNOWN"),
+            "settlement_truth_source": str(settlement_truth_source or ""),
+            "settlement_market_slug": str(settlement_market_slug or ""),
+            "settlement_temperature_metric": str(settlement_temperature_metric or ""),
+            "settlement_source": str(settlement_source or ""),
+            "settlement_value": settlement_value,
         },
         default=str,
         sort_keys=True,

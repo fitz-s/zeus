@@ -21,7 +21,7 @@
 | Active router status | `task_2026-05-02_full_launch_audit/` and `task_2026-05-02_strategy_update_execution_plan/` are now registered in `docs/operations/AGENTS.md` | Future agents can route these packet surfaces without topology hidden-doc failures. |
 | Current data fact drift | `current_data_state.md` still describes harvester live writes as dormant, while `REMAINING_TASKS.md` records `ZEUS_HARVESTER_LIVE_ENABLED=1` propagated | Any settlement/learning/harvester claim requires fresh current-data reconciliation before implementation. |
 | Source-contract caution | Paris remains a current source-contract quarantine/caution path in `current_source_validity.md` | Any live strategy gate must block affected Paris city/date/metric candidates until release evidence is complete. |
-| Bankroll truth | `config/settings.json` still carries `capital_base_usd: 150`; `$5` live caps mask the structural debt | Do not lift caps or claim bankroll truth until a separate truth-chain packet lands. |
+| Bankroll truth | `config/settings.json` still carries `capital_base_usd: retired fixed-capital literal`; `$5` live caps mask the structural debt | Do not lift caps or claim bankroll truth until a separate truth-chain packet lands. |
 | Resolved live ops receipts | `REMAINING_TASKS.md` marks riskguard fail-closed/flapping, data-ingest catch-up, and 15-minute opening cadence restart as done/resolved | Treat these as receipt-verification items, not fresh strategy implementation blockers. |
 
 ### 0.2 Strategy authority surfaces
@@ -259,6 +259,6 @@ Operator decisions needed in this order:
 These are NOT strategy design — they're operational/infrastructure issues, see `REMAINING_TASKS.md`:
 - Data-ingest daemon resilience (sonnet currently working)
 - Riskguard daemon DB+proxy errors
-- $150 hardcode bankroll fiction
+- retired fixed-capital literal hardcode bankroll fiction
 - TIGGE backfill failure
 - Fail-closed gate audit follow-ups (PhysicalBounds, ExpiringAssumption)

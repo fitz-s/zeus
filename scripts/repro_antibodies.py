@@ -293,7 +293,7 @@ def _phase1_pra() -> tuple[bool, list[str]]:
             mode, summary,
             entry_bankroll=100.0,
             decision_time=decision_time,
-            env="paper",
+            env="legacy_env",
             deps=deps,
         )
         print(f"[PHASE-1]   execute_discovery_phase returned. candidates={summary.get('candidates')}")

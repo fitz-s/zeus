@@ -3,7 +3,7 @@
 
 This is a runtime-readiness backfill, not a historical market replay. It records
 the latest YES-side Gamma price for every currently discoverable weather bin so
-newly onboarded cities are not blank in paper data readiness before evaluator
+newly onboarded cities are not blank in diagnostic data readiness before evaluator
 cycles naturally visit them.
 """
 from __future__ import annotations

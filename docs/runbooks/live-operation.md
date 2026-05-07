@@ -36,12 +36,12 @@ These appear in logs and are **normal** during Phase 1:
 
 ### Operator-visible metadata (NOT decision inputs)
 
-- `capped_by_safety_cap`: logged when a position size was clipped by `live_safety_cap_usd`. This is an audit field for the operator. It does NOT feed back into any signal or decision. Do not treat it as a strategy output.
+- Wallet bankroll source/status: operator metadata showing whether live bankroll truth was available. It does not override RiskGuard or exposure gates.
 - `reason_code` in control state: operational metadata. Describes why a gate was set or cleared. It is not a truth surface and does not govern trading. See `docs/authority/zeus_current_delivery.md` and `docs/authority/zeus_current_architecture.md` for control state authority rules.
 
 ### Config key note
 
-There are no `paper_*` counterparts to `live_*` config keys. Zeus is live-only; backtest evaluates and shadow observes, but neither is a peer execution mode. A key named `live_safety_cap_usd` is live execution policy, not a paper-mode setting.
+There are no non-live counterparts to live config keys. Zeus is live-only; backtest evaluates and shadow observes, but neither is a peer execution mode. Per-trade sizing caps are not live config authority; exposure discipline is enforced by wallet bankroll, RiskGuard, posture, executable-price, and max-exposure gates.
 
 ---
 
@@ -78,7 +78,7 @@ launchctl unload ~/Library/LaunchAgents/com.openclaw.zeus-live.plist
 4. If stopped manually: confirm positions are intact:
 
 ```bash
-ZEUS_MODE=live python - <<'EOF'
+python - <<'EOF'
 from src.state.db import get_trade_connection, load_portfolio
 from src.config import state_path
 conn = get_trade_connection()
@@ -91,7 +91,7 @@ EOF
 5. Once confirmed safe, restart:
 
 ```bash
-ZEUS_MODE=live nohup python -m src.main >> logs/zeus-live.log 2>&1 &
+nohup python -m src.main >> logs/zeus-live.log 2>&1 &
 echo $! > state/zeus-live.pid
 ```
 
@@ -151,7 +151,7 @@ The position is removed from the active portfolio. Review whether the original o
 Positions on-chain but not in local portfolio are quarantined (Rule 3). They expire after 48h and become eligible for exit evaluation. Review via:
 
 ```bash
-ZEUS_MODE=live python - <<'EOF'
+python - <<'EOF'
 from src.state.db import get_trade_connection
 conn = get_trade_connection()
 rows = conn.execute("SELECT position_id, phase FROM position_current WHERE phase='quarantined'").fetchall()

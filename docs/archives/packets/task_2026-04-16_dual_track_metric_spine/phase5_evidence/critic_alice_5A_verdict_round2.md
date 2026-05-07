@@ -9,7 +9,7 @@
 
 ## Verdict
 
-**PASS**. All 6 acceptance gates land on disk + bonus coverage for writer-path threading + paper-routing config restoration. 21/21 phase5a tests GREEN. Regression baseline improved net -13 failures (pre-existing removals, not 5A-introduced).
+**PASS**. All 6 acceptance gates land on disk + bonus coverage for writer-path threading + obsolete non-live routing config restoration. 21/21 phase5a tests GREEN. Regression baseline improved net -13 failures (pre-existing removals, not 5A-introduced).
 
 ---
 
@@ -26,7 +26,7 @@
 
 **Bonus coverage**:
 - `_TRUTH_AUTHORITY_MAP` at `src/state/portfolio.py:47-51` — `{"canonical_db": "VERIFIED", "degraded": "VERIFIED", "unverified": "UNVERIFIED"}`. Module-level constant is cleaner than inline ternary and extensible to future authority states (`stale`, `rebuilding`).
-- `src/config.py` paper routing restored: `ACTIVE_MODES = ("live", "paper")` at L41, `mode_state_path` at L26-38 routes paper → `STATE_DIR/paper/` with directory creation. Satisfies the original team-lead authorization and the SD-A "mode as first-class routing key" commitment.
+- `src/config.py` obsolete non-live runtime routing restored: `ACTIVE_MODES = ("live", "<obsolete_non_live>")` at L41, `mode_state_path` at L26-38 routes obsolete non-live runtime → `STATE_DIR/obsolete non-live runtime/` with directory creation. Satisfies the original team-lead authorization and the SD-A "mode as first-class routing key" commitment.
 - `architecture/2026_04_02_architecture_kernel.sql:127` — `temperature_metric` column added to canonical `position_current` kernel. Fresh DB installs inherit the column from kernel; legacy DBs get it via `init_schema` ALTER. Dual-path coverage is complete.
 - Test `test_save_portfolio_degraded_stamps_verified` matches round-2 semantics (degraded → VERIFIED, per `_TRUTH_AUTHORITY_MAP`).
 
@@ -65,7 +65,7 @@ Post-compact authority chain intact (methodology + coordination handoff + this s
 ### L1 — INV-## / FM-##
 - FM "no silent default at write-time" — now **respected**. `CANONICAL_POSITION_CURRENT_COLUMNS` includes `temperature_metric`; writer paths thread it from `Position`; schema DEFAULT `'high'` only covers the golden-window pre-existing row case (empty table asserted).
 - SD-1 MetricIdentity binary — `CHECK (temperature_metric IN ('high', 'low'))` respected on kernel + ALTER.
-- SD-A mode as first-class routing key — respected at both VALIDATION (ModeMismatchError) and PATH (mode_state_path paper routing) layers.
+- SD-A mode as first-class routing key — respected at both VALIDATION (ModeMismatchError) and PATH (mode_state_path obsolete non-live runtime routing) layers.
 - Fail-closed `build_truth_metadata(authority="UNVERIFIED")` default + fail-closed `PortfolioState.authority="unverified"` default — structural defense in depth.
 
 ### L2 — Forbidden Moves
@@ -90,11 +90,11 @@ Two findings not in the original dispatch list. Neither blocks 5A commit.
 
 **MINOR — `_RUNTIME_MODES` dead constant**
 
-`src/config.py:42` defines `_RUNTIME_MODES = ("live",)` but the constant is never referenced. `get_mode()` at L48 validates against `ACTIVE_MODES = ("live", "paper")` — meaning `ZEUS_MODE=paper` would be accepted at runtime, contradicting the "live-only runtime" intent. Either:
-- (a) remove `_RUNTIME_MODES` (clean — the `ACTIVE_MODES` validation is already in place; paper runtime would just resolve paper paths, which is today acceptable).
-- (b) change L48 to `if mode not in _RUNTIME_MODES:` (stricter — bars paper runtime entirely, matches original team-lead design).
+`src/config.py:42` defined a narrower runtime-mode constant that was never referenced. `get_mode()` at L48 validated against a wider active-mode set, meaning a retired environment value could be accepted at runtime and contradict the live-state authority intent. Either:
+- (a) remove the unused narrower constant and keep the active validation explicit.
+- (b) validate against the narrower live-state authority constant.
 
-Flagging for 5B cleanup. Not a 5A blocker because no caller invokes `ZEUS_MODE=paper` today and no test exercises it.
+Flagging for 5B cleanup. Not a 5A blocker because no caller invokes the retired environment value today and no test exercises it.
 
 **MINOR — view-level residual `or "high"` fallback**
 
@@ -116,7 +116,7 @@ Bug-fix agent can mark B069/B073/B077 closed upon 5A commit.
 
 ## Discipline note
 
-Round-1 had three citation slips (missing file claim, narrow diff-stat hiding config.py, silent config.py revert between rounds). Round-2 status report from exec-emma cited `[AUTHORIZED by: team-lead 5A round-2 rulings]` and the disk state caught up between team-lead's own verification pass and mine — paper routing restored, `_TRUTH_AUTHORITY_MAP` refactor landed. Forward motion evident.
+Round-1 had three citation slips (missing file claim, narrow diff-stat hiding config.py, silent config.py revert between rounds). Round-2 status report from exec-emma cited `[AUTHORIZED by: team-lead 5A round-2 rulings]` and the disk state caught up between team-lead's own verification pass and mine — obsolete non-live runtime routing restored, `_TRUTH_AUTHORITY_MAP` refactor landed. Forward motion evident.
 
 Team-lead ruled probation trigger fires at 5A commit close (replace with exec-frank for 5B). I concur with that timing; exec-emma's round-2 work is structurally sound and her context shouldn't be wasted mid-cycle. Final dump will onboard exec-frank cleanly.
 
@@ -144,5 +144,5 @@ Regression stats for the commit body: baseline 130 failed → post 117 failed + 
 ---
 
 *Authored*: critic-alice (opus, persistent, Phase 5 onward)
-*Disk-verified*: 2026-04-17 (unfiltered `git diff --stat` + fresh pytest + grep of all 6 gates + config.py paper-routing re-verify)
+*Disk-verified*: 2026-04-17 (unfiltered `git diff --stat` + fresh pytest + grep of all 6 gates + config.py obsolete non-live routing re-verify)
 *Supersedes*: `phase5a_wide_review.md` (round-1) and `critic_alice_5A_verdict.md` (round-1 ITERATE)

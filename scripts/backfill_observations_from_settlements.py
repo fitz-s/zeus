@@ -37,6 +37,7 @@ def backfill_observations_from_settlements(*, dry_run: bool = False, limit: int 
         FROM settlements s
         WHERE s.settlement_value IS NOT NULL
           AND s.temperature_metric = 'high'
+          AND s.authority = 'VERIFIED'
           AND NOT EXISTS (
               SELECT 1
               FROM observations o

@@ -148,6 +148,9 @@ def connect_or_degrade(db_path: Path) -> Optional[sqlite3.Connection]:
 
 
 CANONICAL_POSITION_SETTLED_CONTRACT_VERSION = "position_settled.v1"
+LEGACY_OUTCOME_FACT_AUTHORITY_SCOPE = "legacy_lifecycle_projection_not_settlement_authority"
+SETTLEMENT_AUTHORITY_DIAGNOSTIC_SOURCE = "position_events_or_decision_log_verified_settlement"
+EXECUTION_FACT_AUTHORITY_SCOPE = "execution_lifecycle_projection_not_settlement_authority"
 CANONICAL_POSITION_SETTLED_DETAIL_FIELDS = (
     "contract_version",
     "winning_bin",
@@ -158,7 +161,17 @@ CANONICAL_POSITION_SETTLED_DETAIL_FIELDS = (
     "exit_price",
     "pnl",
     "exit_reason",
+    "settlement_authority",
+    "settlement_truth_source",
+    "settlement_market_slug",
+    "settlement_temperature_metric",
+    "settlement_source",
+    "settlement_value",
 )
+SETTLEMENT_METRIC_READY_TRUTH_SOURCES = frozenset({
+    "world.settlements",
+    "harvester_live_verified_settlement",
+})
 AUTHORITATIVE_SETTLEMENT_ROW_REQUIRED_FIELDS = (
     "trade_id",
     "city",
@@ -177,6 +190,10 @@ OPEN_EXPOSURE_PHASES = (
     "pending_exit",
     "unknown",
 )
+ENTRY_ECONOMICS_LEGACY_UNKNOWN = "legacy_unknown"
+ENTRY_ECONOMICS_AVG_FILL_PRICE = "avg_fill_price"
+FILL_AUTHORITY_NONE = "none"
+FILL_AUTHORITY_VENUE_CONFIRMED_FULL = "venue_confirmed_full"
 TERMINAL_TRADE_DECISION_STATUSES = frozenset(
     {
         "exited",
@@ -4074,6 +4091,7 @@ def log_execution_fact(
     latency_seconds: float | None = None,
     venue_status: str | None = None,
     terminal_exec_status: str | None = None,
+    clear_fill_fields: bool = False,
 ) -> dict:
     if conn is None:
         logger.info("Execution fact write skipped: no connection")
@@ -4096,23 +4114,34 @@ def log_execution_fact(
     ).fetchone()
 
     stored_posted_at = posted_at or (current["posted_at"] if current else None)
-    stored_filled_at = filled_at or (current["filled_at"] if current else None)
     stored_voided_at = voided_at or (current["voided_at"] if current else None)
     stored_submitted_price = submitted_price if submitted_price is not None else (current["submitted_price"] if current else None)
-    stored_fill_price = fill_price if fill_price is not None else (current["fill_price"] if current else None)
-    stored_shares = shares if shares is not None else (current["shares"] if current else None)
-    stored_fill_quality = fill_quality if fill_quality is not None else (current["fill_quality"] if current else None)
     stored_venue_status = venue_status if venue_status not in (None, "") else (current["venue_status"] if current else None)
     stored_terminal_status = terminal_exec_status if terminal_exec_status not in (None, "") else (current["terminal_exec_status"] if current else None)
     stored_decision_id = decision_id if decision_id not in (None, "") else (current["decision_id"] if current else None)
     stored_strategy_key = strategy_key if strategy_key not in (None, "") else (current["strategy_key"] if current else None)
 
-    if latency_seconds is None and stored_posted_at and stored_filled_at:
-        posted_dt = _parse_iso_timestamp(stored_posted_at)
-        filled_dt = _parse_iso_timestamp(stored_filled_at)
-        if posted_dt is not None and filled_dt is not None:
-            latency_seconds = max(0.0, (filled_dt - posted_dt).total_seconds())
-    stored_latency_seconds = latency_seconds if latency_seconds is not None else (current["latency_seconds"] if current else None)
+    if clear_fill_fields:
+        stored_filled_at = None
+        stored_fill_price = None
+        stored_shares = None
+        stored_fill_quality = None
+        stored_latency_seconds = None
+        if terminal_exec_status in (None, ""):
+            stored_terminal_status = "pending_fill_authority"
+        if venue_status in (None, ""):
+            stored_venue_status = stored_terminal_status
+    else:
+        stored_filled_at = filled_at or (current["filled_at"] if current else None)
+        stored_fill_price = fill_price if fill_price is not None else (current["fill_price"] if current else None)
+        stored_shares = shares if shares is not None else (current["shares"] if current else None)
+        stored_fill_quality = fill_quality if fill_quality is not None else (current["fill_quality"] if current else None)
+        if latency_seconds is None and stored_posted_at and stored_filled_at:
+            posted_dt = _parse_iso_timestamp(stored_posted_at)
+            filled_dt = _parse_iso_timestamp(stored_filled_at)
+            if posted_dt is not None and filled_dt is not None:
+                latency_seconds = max(0.0, (filled_dt - posted_dt).total_seconds())
+        stored_latency_seconds = latency_seconds if latency_seconds is not None else (current["latency_seconds"] if current else None)
 
     conn.execute(
         """
@@ -4355,34 +4384,70 @@ def log_execution_report(conn: sqlite3.Connection, pos, result, *, decision_id: 
     if not getattr(pos, "trade_id", ""):
         return
     submitted_price = getattr(result, "submitted_price", None)
-    fill_price = getattr(result, "fill_price", None)
+    reported_fill_price = getattr(result, "fill_price", None)
+    reported_shares = getattr(result, "shares", None)
+    status = str(getattr(result, "status", "") or "")
+    command_state = str(getattr(result, "command_state", "") or "")
+    order_role = str(getattr(result, "order_role", "") or "entry")
+    entry_fill_authority = order_role == "entry" and bool(
+        getattr(pos, "has_fill_economics_authority", False)
+    )
+    fill_has_finality = (
+        command_state == "FILLED"
+        or bool(getattr(result, "filled_at", None))
+        or entry_fill_authority
+    )
+    fill_price = reported_fill_price if fill_has_finality else None
+    shares = reported_shares if fill_has_finality else None
+    if entry_fill_authority:
+        authority_price = _finite_float_or_zero(getattr(pos, "entry_price_avg_fill", None))
+        authority_shares = _finite_float_or_zero(getattr(pos, "shares_filled", None))
+        authority_cost = _finite_float_or_zero(getattr(pos, "filled_cost_basis_usd", None))
+        if authority_price <= 0.0 and authority_cost > 0.0 and authority_shares > 0.0:
+            authority_price = authority_cost / authority_shares
+        if authority_price > 0.0:
+            fill_price = authority_price
+        if authority_shares > 0.0:
+            shares = authority_shares
     fill_quality = None
-    if fill_price not in (None, 0) and submitted_price not in (None, 0):
+    if fill_has_finality and fill_price not in (None, 0) and submitted_price not in (None, 0):
         try:
             fill_quality = (float(fill_price) - float(submitted_price)) / float(submitted_price)
         except (TypeError, ValueError, ZeroDivisionError):
             fill_quality = None
-    if fill_quality is None:
+    if fill_quality is None and fill_has_finality:
         fill_quality = getattr(pos, "fill_quality", None)
 
     details = {
-        "status": getattr(result, "status", ""),
+        "status": status,
         "reason": getattr(result, "reason", None),
         "submitted_price": submitted_price,
         "fill_price": fill_price,
-        "shares": getattr(result, "shares", None),
+        "reported_fill_price_ignored": (
+            reported_fill_price if reported_fill_price not in (None, 0) and not fill_has_finality else None
+        ),
+        "shares": shares,
+        "reported_shares_ignored": (
+            reported_shares if reported_shares is not None and not fill_has_finality else None
+        ),
         "timeout_seconds": getattr(result, "timeout_seconds", None),
         "fill_quality": fill_quality,
         "order_status": getattr(pos, "order_status", ""),
     }
-    status = getattr(result, "status", "")
-    order_role = str(getattr(result, "order_role", "") or "entry")
     event_timestamp = (
-        getattr(result, "filled_at", None)
+        (getattr(result, "filled_at", None) if fill_has_finality else None)
         or getattr(pos, "order_posted_at", None)
         or datetime.now(timezone.utc).isoformat()
     )
     terminal_exec_status = status or None
+    if not fill_has_finality and (
+        status.lower() in {"filled", "confirmed"}
+        or reported_fill_price not in (None, 0)
+        or reported_shares is not None
+        or not status
+    ):
+        terminal_exec_status = "pending_fill_authority"
+    clear_fill_fields = not fill_has_finality
     voided_at = event_timestamp if status in {"rejected", "cancelled", "canceled"} else None
     posted_at = (
         getattr(pos, "order_posted_at", None)
@@ -4401,14 +4466,15 @@ def log_execution_report(conn: sqlite3.Connection, pos, result, *, decision_id: 
         order_role=order_role,
         strategy_key=str(getattr(pos, "strategy_key", "") or getattr(pos, "strategy", "") or "") or None,
         posted_at=posted_at,
-        filled_at=getattr(result, "filled_at", None) if status == "filled" else None,
+        filled_at=getattr(result, "filled_at", None) if status == "filled" and fill_has_finality else None,
         voided_at=voided_at,
         submitted_price=submitted_price,
         fill_price=fill_price,
-        shares=getattr(result, "shares", None),
+        shares=shares,
         fill_quality=fill_quality,
         venue_status=str(getattr(result, "venue_status", "") or getattr(pos, "order_status", "") or status or "") or None,
         terminal_exec_status=terminal_exec_status,
+        clear_fill_fields=clear_fill_fields,
     )
 
 
@@ -4595,6 +4661,18 @@ def _coerce_settlement_int(value) -> Optional[int]:
         return None
 
 
+def _settlement_truth_ready(normalized: dict) -> bool:
+    authority = str(normalized.get("settlement_authority") or "").strip().upper()
+    source = str(normalized.get("settlement_truth_source") or "").strip()
+    metric = str(normalized.get("settlement_temperature_metric") or "").strip().lower()
+    return (
+        authority == "VERIFIED"
+        and source in SETTLEMENT_METRIC_READY_TRUTH_SOURCES
+        and metric in {"high", "low"}
+        and normalized.get("settlement_value") is not None
+    )
+
+
 
 
 def _normalize_position_settlement_event(event: dict) -> Optional[dict]:
@@ -4622,6 +4700,12 @@ def _normalize_position_settlement_event(event: dict) -> Optional[dict]:
         "won": details.get("won"),
         "exit_price": _coerce_settlement_float(details.get("exit_price")),
         "exit_reason": str(details.get("exit_reason") or ""),
+        "settlement_authority": str(details.get("settlement_authority") or "UNKNOWN").upper(),
+        "settlement_truth_source": str(details.get("settlement_truth_source") or ""),
+        "settlement_market_slug": str(details.get("settlement_market_slug") or ""),
+        "settlement_temperature_metric": str(details.get("settlement_temperature_metric") or ""),
+        "settlement_source": str(details.get("settlement_source") or ""),
+        "settlement_value": _coerce_settlement_float(details.get("settlement_value")),
         "source": "position_events",
         "authority_level": "durable_event",
         "contract_version": str(
@@ -4639,7 +4723,7 @@ def _normalize_position_settlement_event(event: dict) -> Optional[dict]:
             "degraded_reason": f"missing_required_fields:{','.join(missing_required)}",
             "contract_missing_fields": contract_missing_fields,
             "canonical_payload_complete": not contract_missing_fields,
-            "learning_snapshot_ready": bool(normalized["decision_snapshot_id"]),
+            "learning_snapshot_ready": False,
             "metric_ready": False,
             "authority_level": "durable_event_malformed",
             "required_missing_fields": missing_required,
@@ -4653,13 +4737,16 @@ def _normalize_position_settlement_event(event: dict) -> Optional[dict]:
         )
     if not normalized["decision_snapshot_id"]:
         degraded_reasons.append("missing_decision_snapshot_id")
+    truth_ready = _settlement_truth_ready(normalized)
+    if not truth_ready:
+        degraded_reasons.append("missing_verified_settlement_truth")
     normalized.update({
         "is_degraded": bool(degraded_reasons),
         "degraded_reason": "; ".join(degraded_reasons),
         "contract_missing_fields": contract_missing_fields,
         "canonical_payload_complete": not contract_missing_fields,
-        "learning_snapshot_ready": bool(normalized["decision_snapshot_id"]),
-        "metric_ready": True,
+        "learning_snapshot_ready": bool(normalized["decision_snapshot_id"]) and truth_ready,
+        "metric_ready": truth_ready,
         "required_missing_fields": [],
     })
     return normalized
@@ -4701,7 +4788,6 @@ def query_settlement_events(
     *,
     city: str | None = None,
     target_date: str | None = None,
-    env: str | None = None,
     not_before: str | None = None,
 ) -> list[dict]:
     """Load recent canonical SETTLED events from the durable event spine."""
@@ -4760,15 +4846,21 @@ def query_authoritative_settlement_rows(
     env: str | None = None,
     not_before: str | None = None,
 ) -> list[dict]:
-    """Prefer stage-level settlement events, then fall back to legacy decision_log blobs."""
-    stage_events = query_settlement_events(
-        conn,
-        limit=limit,
-        city=city,
-        target_date=target_date,
-        env=env,
-        not_before=not_before,
-    )
+    """Prefer stage-level settlement events, then fall back to legacy decision_log blobs.
+
+    ``env`` is retained for legacy ``decision_log`` compatibility. Canonical
+    ``position_events`` rows do not carry env; DB-level authority separation is
+    the remaining Wave24 repair surface.
+    """
+    stage_events = []
+    if _table_exists(conn, "position_events") and _table_exists(conn, "position_current"):
+        stage_events = query_settlement_events(
+            conn,
+            limit=limit,
+            city=city,
+            target_date=target_date,
+            not_before=not_before,
+        )
     normalized_stage = [
         normalized
         for event in stage_events
@@ -4778,6 +4870,8 @@ def query_authoritative_settlement_rows(
         return normalized_stage[:limit] if limit is not None else normalized_stage
 
     from src.state.decision_chain import query_legacy_settlement_records
+    if not _table_exists(conn, "decision_log"):
+        return []
     legacy_rows = query_legacy_settlement_records(
         conn,
         limit=limit,
@@ -4819,6 +4913,11 @@ def refresh_strategy_health(
     optional_tables = ("outcome_fact", "execution_fact", "risk_actions")
     missing_required_tables = [table for table in required_tables if not _table_exists(conn, table)]
     missing_optional_tables = [table for table in optional_tables if not _table_exists(conn, table)]
+    settlement_authority_missing_tables = []
+    if not _table_exists(conn, "position_events"):
+        settlement_authority_missing_tables.append("position_events")
+        if not _table_exists(conn, "decision_log"):
+            settlement_authority_missing_tables.append("decision_log")
     refresh_time = as_of or datetime.now(timezone.utc).isoformat()
     if missing_required_tables:
         return {
@@ -4828,6 +4927,7 @@ def refresh_strategy_health(
             "as_of": refresh_time,
             "missing_required_tables": missing_required_tables,
             "missing_optional_tables": missing_optional_tables,
+            "settlement_authority_missing_tables": settlement_authority_missing_tables,
             "omitted_fields": [
                 "risk_level",
                 "brier_30d",
@@ -4835,58 +4935,74 @@ def refresh_strategy_health(
             ],
         }
 
-    position_rows = conn.execute(
-        f"""
-        SELECT
+    position_view = query_position_current_status_view(conn)
+    position_metrics: dict[str, dict[str, float]] = {}
+    for position in position_view.get("positions", []):
+        strategy_key = str(position.get("strategy") or "unclassified")
+        bucket = position_metrics.setdefault(
             strategy_key,
-            SUM(COALESCE(size_usd, 0.0)) AS open_exposure_usd,
-            SUM(
-                CASE
-                    WHEN shares IS NOT NULL
-                     AND last_monitor_market_price IS NOT NULL
-                     AND cost_basis_usd IS NOT NULL
-                    THEN (shares * last_monitor_market_price) - cost_basis_usd
-                    ELSE 0.0
-                END
-            ) AS unrealized_pnl
-        FROM position_current
-        WHERE phase IN ({", ".join("?" for _ in OPEN_EXPOSURE_PHASES)})
-        GROUP BY strategy_key
-        """,
-        OPEN_EXPOSURE_PHASES,
-    ).fetchall()
+            {
+                "open_exposure_usd": 0.0,
+                "unrealized_pnl": 0.0,
+            },
+        )
+        bucket["open_exposure_usd"] += float(
+            position.get("effective_cost_basis_usd")
+            if position.get("effective_cost_basis_usd") is not None
+            else position.get("size_usd", 0.0)
+            or 0.0
+        )
+        bucket["unrealized_pnl"] += float(position.get("unrealized_pnl", 0.0) or 0.0)
     position_metrics = {
-        str(row["strategy_key"]): {
-            "open_exposure_usd": round(float(row["open_exposure_usd"] or 0.0), 2),
-            "unrealized_pnl": round(float(row["unrealized_pnl"] or 0.0), 2),
+        strategy_key: {
+            "open_exposure_usd": round(float(bucket.get("open_exposure_usd", 0.0) or 0.0), 2),
+            "unrealized_pnl": round(float(bucket.get("unrealized_pnl", 0.0) or 0.0), 2),
         }
-        for row in position_rows
+        for strategy_key, bucket in position_metrics.items()
     }
 
     settled_cutoff = _shift_iso_timestamp(refresh_time, days=30)
+    settled_cutoff_dt = _parse_iso_timestamp(settled_cutoff)
     settlement_metrics: dict[str, dict] = {}
-    if "outcome_fact" not in missing_optional_tables:
-        settlement_rows = conn.execute(
-            """
-            SELECT
-                strategy_key,
-                COUNT(*) AS settled_trades_30d,
-                SUM(COALESCE(pnl, 0.0)) AS realized_pnl_30d,
-                SUM(CASE WHEN outcome = 1 THEN 1 ELSE 0 END) AS wins
-            FROM outcome_fact
-            WHERE settled_at IS NOT NULL
-              AND settled_at >= ?
-            GROUP BY strategy_key
-            """,
-            (settled_cutoff,),
-        ).fetchall()
-        for row in settlement_rows:
-            trade_count = int(row["settled_trades_30d"] or 0)
-            settlement_metrics[str(row["strategy_key"])] = {
-                "settled_trades_30d": trade_count,
-                "realized_pnl_30d": round(float(row["realized_pnl_30d"] or 0.0), 2),
-                "win_rate_30d": round(float(row["wins"] or 0) / trade_count, 4) if trade_count else None,
-            }
+    settlement_rows = query_authoritative_settlement_rows(conn, limit=None)
+    settlement_degraded_rows = 0
+    for settlement_row in settlement_rows:
+        if settlement_row.get("is_degraded", False):
+            settlement_degraded_rows += 1
+        if not settlement_row.get("metric_ready", False):
+            continue
+        settled_at = str(settlement_row.get("settled_at") or "")
+        settled_at_dt = _parse_iso_timestamp(settled_at)
+        if not settled_at:
+            continue
+        if settled_cutoff_dt is not None:
+            if settled_at_dt is None or settled_at_dt < settled_cutoff_dt:
+                continue
+        elif settled_at < settled_cutoff:
+            continue
+        strategy_key = str(settlement_row.get("strategy") or "unclassified")
+        bucket = settlement_metrics.setdefault(
+            strategy_key,
+            {
+                "settled_trades_30d": 0,
+                "realized_pnl_30d": 0.0,
+                "wins": 0,
+            },
+        )
+        bucket["settled_trades_30d"] += 1
+        bucket["realized_pnl_30d"] += float(settlement_row.get("pnl") or 0.0)
+        if int(settlement_row.get("outcome") or 0) == 1:
+            bucket["wins"] += 1
+    settlement_metrics = {
+        strategy_key: {
+            "settled_trades_30d": int(bucket["settled_trades_30d"]),
+            "realized_pnl_30d": round(float(bucket["realized_pnl_30d"]), 2),
+            "win_rate_30d": round(float(bucket["wins"]) / int(bucket["settled_trades_30d"]), 4)
+            if int(bucket["settled_trades_30d"])
+            else None,
+        }
+        for strategy_key, bucket in settlement_metrics.items()
+    }
 
     execution_cutoff = _shift_iso_timestamp(refresh_time, days=14)
     execution_metrics: dict[str, dict] = {}
@@ -4994,7 +5110,13 @@ def refresh_strategy_health(
             ),
         )
         rows_written += 1
-    refresh_status = "refreshed" if rows_written else "refreshed_empty"
+    settlement_authority_degraded = bool(
+        settlement_authority_missing_tables or settlement_degraded_rows
+    )
+    if rows_written:
+        refresh_status = "refreshed_degraded" if settlement_authority_degraded else "refreshed"
+    else:
+        refresh_status = "refreshed_empty_degraded" if settlement_authority_degraded else "refreshed_empty"
     return {
         "status": refresh_status,
         "table": "strategy_health",
@@ -5002,6 +5124,8 @@ def refresh_strategy_health(
         "as_of": refresh_time,
         "missing_required_tables": missing_required_tables,
         "missing_optional_tables": missing_optional_tables,
+        "settlement_authority_missing_tables": settlement_authority_missing_tables,
+        "settlement_degraded_rows": settlement_degraded_rows,
         "omitted_fields": [
             "risk_level",
             "brier_30d",
@@ -5124,6 +5248,7 @@ def query_position_current_status_view(conn: sqlite3.Connection | None) -> dict:
     ).fetchall()
     trade_ids = [str(row["trade_id"] or row["position_id"] or "") for row in rows]
     transitional_hints = _query_transitional_position_hints(conn, trade_ids)
+    fill_hints = _query_entry_execution_fill_hints(conn, trade_ids)
 
     positions: list[dict] = []
     strategy_open_counts: dict[str, int] = {}
@@ -5140,14 +5265,21 @@ def query_position_current_status_view(conn: sqlite3.Connection | None) -> dict:
             continue
         trade_id = str(row["trade_id"] or row["position_id"] or "")
         hints = transitional_hints.get(trade_id, {})
+        fill_economics = _position_current_effective_entry_economics(
+            row,
+            fill_hints.get(trade_id),
+        )
         chain_state = str(row["chain_state"] or "unknown")
         exit_state = str(hints.get("exit_state") or "none")
-        entry_fill_verified = bool(hints.get("entry_fill_verified", False))
+        entry_fill_verified = bool(
+            hints.get("entry_fill_verified", False)
+            or fill_economics["entry_fill_verified"]
+        )
         admin_exit_reason = str(hints.get("admin_exit_reason") or "")
         day0_entered_at = str(hints.get("day0_entered_at") or "")
-        shares = float(row["shares"] or 0.0)
+        shares = float(fill_economics["effective_shares"] or 0.0)
         mark_price = row["last_monitor_market_price"]
-        cost_basis_usd = row["cost_basis_usd"]
+        cost_basis_usd = fill_economics["pnl_cost_basis_usd"]
         unrealized_pnl = 0.0
         if shares and mark_price is not None and cost_basis_usd is not None:
             unrealized_pnl = round((shares * float(mark_price)) - float(cost_basis_usd), 2)
@@ -5163,9 +5295,19 @@ def query_position_current_status_view(conn: sqlite3.Connection | None) -> dict:
                 "exit_state": exit_state,
                 "entry_fill_verified": entry_fill_verified,
                 "admin_exit_reason": admin_exit_reason,
-                "size_usd": float(row["size_usd"] or 0.0),
+                "size_usd": float(fill_economics["effective_cost_basis_usd"] or 0.0),
+                "submitted_size_usd": float(fill_economics["submitted_size_usd"] or 0.0),
+                "effective_cost_basis_usd": float(fill_economics["effective_cost_basis_usd"] or 0.0),
+                "entry_economics_authority": fill_economics["entry_economics_authority"],
+                "fill_authority": fill_economics["fill_authority"],
+                "entry_economics_source": fill_economics["entry_economics_source"],
+                "entry_price_avg_fill": float(fill_economics["entry_price_avg_fill"] or 0.0),
+                "shares_filled": float(fill_economics["shares_filled"] or 0.0),
+                "filled_cost_basis_usd": float(fill_economics["filled_cost_basis_usd"] or 0.0),
+                "execution_fact_intent_id": fill_economics["execution_fact_intent_id"],
+                "execution_fact_filled_at": fill_economics["execution_fact_filled_at"],
                 "shares": shares,
-                "entry_price": row["entry_price"],
+                "entry_price": fill_economics["effective_entry_price"],
                 "edge": None,
                 "bin_label": str(row["bin_label"] or ""),
                 "decision_snapshot_id": str(row["decision_snapshot_id"] or ""),
@@ -5182,7 +5324,7 @@ def query_position_current_status_view(conn: sqlite3.Connection | None) -> dict:
         strategy_open_counts[strategy_key] = strategy_open_counts.get(strategy_key, 0) + 1
         chain_state_counts[chain_state] = chain_state_counts.get(chain_state, 0) + 1
         exit_state_counts[exit_state] = exit_state_counts.get(exit_state, 0) + 1
-        total_exposure_usd += float(row["size_usd"] or 0.0)
+        total_exposure_usd += float(fill_economics["effective_cost_basis_usd"] or 0.0)
         total_unrealized_pnl += unrealized_pnl
         if not entry_fill_verified:
             unverified_entries += 1
@@ -5256,12 +5398,17 @@ def query_portfolio_loader_view(conn: sqlite3.Connection | None, *, temperature_
 
     trade_ids = [str(row["trade_id"] or row["position_id"] or "") for row in rows]
     transitional_hints = _query_transitional_position_hints(conn, trade_ids)
+    fill_hints = _query_entry_execution_fill_hints(conn, trade_ids)
 
     positions: list[dict] = []
     for row in rows:
         trade_id = str(row["trade_id"] or row["position_id"] or "")
         phase = str(row["phase"] or "")
         hints = transitional_hints.get(trade_id, {})
+        fill_economics = _position_current_effective_entry_economics(
+            row,
+            fill_hints.get(trade_id),
+        )
         runtime_state = PORTFOLIO_LOADER_PHASE_TO_RUNTIME_STATE.get(phase, phase)
         positions.append(
             {
@@ -5273,10 +5420,21 @@ def query_portfolio_loader_view(conn: sqlite3.Connection | None, *, temperature_
                 "bin_label": row["bin_label"],
                 "direction": row["direction"],
                 "unit": row["unit"],
-                "size_usd": row["size_usd"],
-                "shares": row["shares"],
-                "cost_basis_usd": row["cost_basis_usd"],
-                "entry_price": row["entry_price"],
+                "size_usd": fill_economics["effective_cost_basis_usd"],
+                "submitted_size_usd": fill_economics["submitted_size_usd"],
+                "shares": fill_economics["effective_shares"],
+                "cost_basis_usd": fill_economics["pnl_cost_basis_usd"],
+                "projection_cost_basis_usd": fill_economics["projection_cost_basis_usd"],
+                "entry_price": fill_economics["effective_entry_price"],
+                "entry_price_avg_fill": fill_economics["entry_price_avg_fill"],
+                "shares_filled": fill_economics["shares_filled"],
+                "filled_cost_basis_usd": fill_economics["filled_cost_basis_usd"],
+                "effective_cost_basis_usd": fill_economics["effective_cost_basis_usd"],
+                "entry_economics_authority": fill_economics["entry_economics_authority"],
+                "fill_authority": fill_economics["fill_authority"],
+                "entry_economics_source": fill_economics["entry_economics_source"],
+                "execution_fact_intent_id": fill_economics["execution_fact_intent_id"],
+                "execution_fact_filled_at": fill_economics["execution_fact_filled_at"],
                 "p_posterior": row["p_posterior"],
                 "last_monitor_prob": float(row["last_monitor_prob"] or 0.0),
                 "last_monitor_edge": float(row["last_monitor_edge"] or 0.0),
@@ -5299,7 +5457,10 @@ def query_portfolio_loader_view(conn: sqlite3.Connection | None, *, temperature_
                 "day0_entered_at": str(hints.get("day0_entered_at") or ""),
                 "exit_state": str(hints.get("exit_state") or ""),
                 "admin_exit_reason": str(hints.get("admin_exit_reason") or ""),
-                "entry_fill_verified": bool(hints.get("entry_fill_verified", False)),
+                "entry_fill_verified": bool(
+                    hints.get("entry_fill_verified", False)
+                    or fill_economics["entry_fill_verified"]
+                ),
                 "temperature_metric": str(row["temperature_metric"] or "high"),
             }
         )
@@ -5703,6 +5864,148 @@ def _parse_boolish_text(raw: str) -> bool:
     raise ValueError(f"unsupported boolish value in DB: {raw!r}")
 
 
+def _finite_float_or_zero(value) -> float:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    if numeric != numeric or numeric in (float("inf"), float("-inf")):
+        return 0.0
+    return numeric
+
+
+def _query_entry_execution_fill_hints(
+    conn: sqlite3.Connection,
+    trade_ids: list[str],
+) -> dict[str, dict]:
+    """Return confirmed entry fill economics from canonical execution facts.
+
+    `position_current` lacks durable fill-authority columns. This read-side
+    enrichment is intentionally narrower than a schema migration: it consumes
+    only terminal filled entry execution facts with filled_at + positive price
+    and shares, then leaves legacy/projection rows explicitly non-fill-grade.
+    """
+    if not trade_ids or not _table_exists(conn, "execution_fact"):
+        return {}
+    columns = _table_columns(conn, "execution_fact")
+    required = {
+        "intent_id",
+        "position_id",
+        "order_role",
+        "filled_at",
+        "posted_at",
+        "fill_price",
+        "shares",
+        "terminal_exec_status",
+        "venue_status",
+    }
+    if not required.issubset(columns):
+        return {}
+    normalized_trade_ids = sorted({str(trade_id or "") for trade_id in trade_ids if str(trade_id or "")})
+    if not normalized_trade_ids:
+        return {}
+    placeholders = ", ".join("?" for _ in normalized_trade_ids)
+    rows = conn.execute(
+        f"""
+        SELECT position_id, intent_id, filled_at, posted_at, fill_price, shares,
+               terminal_exec_status, venue_status
+        FROM execution_fact
+        WHERE position_id IN ({placeholders})
+          AND order_role = 'entry'
+          AND lower(COALESCE(terminal_exec_status, '')) = 'filled'
+          AND filled_at IS NOT NULL
+          AND COALESCE(fill_price, 0.0) > 0.0
+          AND COALESCE(shares, 0.0) > 0.0
+        ORDER BY position_id,
+                 COALESCE(filled_at, posted_at, '') DESC,
+                 intent_id DESC
+        """,
+        normalized_trade_ids,
+    ).fetchall()
+    hints: dict[str, dict] = {}
+    for row in rows:
+        trade_id = str(row["position_id"] or "")
+        if not trade_id or trade_id in hints:
+            continue
+        fill_price = _finite_float_or_zero(row["fill_price"])
+        shares = _finite_float_or_zero(row["shares"])
+        filled_cost_basis_usd = fill_price * shares
+        if fill_price <= 0.0 or shares <= 0.0 or filled_cost_basis_usd <= 0.0:
+            continue
+        hints[trade_id] = {
+            "entry_price_avg_fill": fill_price,
+            "shares_filled": shares,
+            "filled_cost_basis_usd": filled_cost_basis_usd,
+            "entry_economics_authority": ENTRY_ECONOMICS_AVG_FILL_PRICE,
+            "fill_authority": FILL_AUTHORITY_VENUE_CONFIRMED_FULL,
+            "entry_fill_verified": True,
+            "entry_economics_source": "execution_fact",
+            "execution_fact_intent_id": str(row["intent_id"] or ""),
+            "execution_fact_filled_at": str(row["filled_at"] or ""),
+            "execution_fact_venue_status": str(row["venue_status"] or ""),
+        }
+    return hints
+
+
+def _position_current_effective_entry_economics(row, fill_hint: dict | None) -> dict:
+    submitted_size_usd = _finite_float_or_zero(row["size_usd"])
+    projection_shares = _finite_float_or_zero(row["shares"])
+    projection_cost_basis_usd = _finite_float_or_zero(row["cost_basis_usd"])
+    projection_entry_price = _finite_float_or_zero(row["entry_price"])
+
+    if fill_hint:
+        filled_cost_basis_usd = _finite_float_or_zero(fill_hint.get("filled_cost_basis_usd"))
+        filled_shares = _finite_float_or_zero(fill_hint.get("shares_filled"))
+        avg_fill_price = _finite_float_or_zero(fill_hint.get("entry_price_avg_fill"))
+        effective_cost_basis_usd = filled_cost_basis_usd
+        if projection_cost_basis_usd > 0.0:
+            effective_cost_basis_usd = min(projection_cost_basis_usd, filled_cost_basis_usd)
+        effective_shares = filled_shares
+        if projection_shares > 0.0:
+            effective_shares = min(projection_shares, filled_shares)
+        effective_entry_price = avg_fill_price
+        if effective_entry_price <= 0.0 and effective_cost_basis_usd > 0.0 and effective_shares > 0.0:
+            effective_entry_price = effective_cost_basis_usd / effective_shares
+        return {
+            "submitted_size_usd": submitted_size_usd,
+            "projection_cost_basis_usd": projection_cost_basis_usd,
+            "effective_cost_basis_usd": effective_cost_basis_usd,
+            "effective_shares": effective_shares,
+            "pnl_cost_basis_usd": effective_cost_basis_usd,
+            "effective_entry_price": effective_entry_price,
+            "entry_price_avg_fill": avg_fill_price,
+            "shares_filled": filled_shares,
+            "filled_cost_basis_usd": filled_cost_basis_usd,
+            "entry_economics_authority": ENTRY_ECONOMICS_AVG_FILL_PRICE,
+            "fill_authority": FILL_AUTHORITY_VENUE_CONFIRMED_FULL,
+            "entry_economics_source": str(fill_hint.get("entry_economics_source") or "execution_fact"),
+            "entry_fill_verified": True,
+            "execution_fact_intent_id": str(fill_hint.get("execution_fact_intent_id") or ""),
+            "execution_fact_filled_at": str(fill_hint.get("execution_fact_filled_at") or ""),
+            "execution_fact_venue_status": str(fill_hint.get("execution_fact_venue_status") or ""),
+        }
+
+    pnl_cost_basis_usd = projection_cost_basis_usd if projection_cost_basis_usd > 0.0 else submitted_size_usd
+    return {
+        "submitted_size_usd": submitted_size_usd,
+        "projection_cost_basis_usd": projection_cost_basis_usd,
+        "effective_cost_basis_usd": submitted_size_usd,
+        "effective_shares": projection_shares,
+        "pnl_cost_basis_usd": pnl_cost_basis_usd,
+        "effective_entry_price": projection_entry_price,
+        "entry_price_avg_fill": 0.0,
+        "shares_filled": 0.0,
+        "filled_cost_basis_usd": 0.0,
+        "entry_economics_authority": ENTRY_ECONOMICS_LEGACY_UNKNOWN,
+        "fill_authority": FILL_AUTHORITY_NONE,
+        "entry_economics_source": "position_current_projection",
+        "entry_fill_verified": False,
+        "execution_fact_intent_id": "",
+        "execution_fact_filled_at": "",
+        "execution_fact_venue_status": "",
+    }
+
+
 
 
 
@@ -5764,6 +6067,41 @@ def _query_transitional_position_hints(
     return hints
 
 
+def _settlement_authority_smoke_summary(conn: sqlite3.Connection) -> dict:
+    original_row_factory = conn.row_factory
+    try:
+        conn.row_factory = sqlite3.Row
+        rows = query_authoritative_settlement_rows(conn, limit=None)
+    finally:
+        conn.row_factory = original_row_factory
+    ready_rows = 0
+    learning_rows = 0
+    degraded_rows = 0
+    authority_levels: dict[str, int] = {}
+    for row in rows:
+        level = str(row.get("authority_level") or "unknown")
+        authority_levels[level] = authority_levels.get(level, 0) + 1
+        if row.get("is_degraded", False):
+            degraded_rows += 1
+        if row.get("metric_ready", False) and not row.get("is_degraded", False):
+            ready_rows += 1
+        if row.get("learning_snapshot_ready", False) and not row.get("is_degraded", False):
+            learning_rows += 1
+
+    surface_available = (
+        (_table_exists(conn, "position_events") and _table_exists(conn, "position_current"))
+        or _table_exists(conn, "decision_log")
+    )
+    return {
+        "source": SETTLEMENT_AUTHORITY_DIAGNOSTIC_SOURCE,
+        "surface_available": surface_available,
+        "ready_rows": ready_rows,
+        "learning_eligible_rows": learning_rows,
+        "degraded_rows": degraded_rows,
+        "authority_levels": authority_levels,
+    }
+
+
 def query_p4_fact_smoke_summary(conn: sqlite3.Connection) -> dict:
     missing_tables = [
         table
@@ -5774,8 +6112,21 @@ def query_p4_fact_smoke_summary(conn: sqlite3.Connection) -> dict:
         "missing_tables": missing_tables,
         "opportunity": {"total": 0, "trade_eligible": 0, "no_trade": 0, "availability_tagged": 0},
         "availability": {"total": 0, "failure_types": {}},
-        "execution": {"total": 0, "terminal_status_counts": {}, "avg_fill_quality": None},
-        "outcome": {"total": 0, "wins": 0, "pnl_total": 0.0},
+        "execution": {
+            "total": 0,
+            "terminal_status_counts": {},
+            "avg_fill_quality": None,
+            "authority_scope": EXECUTION_FACT_AUTHORITY_SCOPE,
+        },
+        "outcome": {
+            "total": 0,
+            "wins": 0,
+            "pnl_total": 0.0,
+            "authority_scope": LEGACY_OUTCOME_FACT_AUTHORITY_SCOPE,
+            "learning_eligible": False,
+            "promotion_eligible": False,
+        },
+        "settlement_authority": _settlement_authority_smoke_summary(conn),
         "separation": {
             "opportunity_loss_without_availability": 0,
             "availability_failures": 0,
@@ -5829,6 +6180,7 @@ def query_p4_fact_smoke_summary(conn: sqlite3.Connection) -> dict:
             "total": int(row["total"] or 0),
             "terminal_status_counts": status_counts,
             "avg_fill_quality": float(row["avg_fill_quality"]) if row["avg_fill_quality"] is not None else None,
+            "authority_scope": EXECUTION_FACT_AUTHORITY_SCOPE,
         }
 
     if "outcome_fact" not in missing_tables:
@@ -5844,6 +6196,9 @@ def query_p4_fact_smoke_summary(conn: sqlite3.Connection) -> dict:
             "total": int(row["total"] or 0),
             "wins": int(row["wins"] or 0),
             "pnl_total": float(row["pnl_total"] or 0.0),
+            "authority_scope": LEGACY_OUTCOME_FACT_AUTHORITY_SCOPE,
+            "learning_eligible": False,
+            "promotion_eligible": False,
         }
     summary["separation"]["execution_vs_outcome_gap"] = max(
         0,
@@ -5855,7 +6210,6 @@ def query_p4_fact_smoke_summary(conn: sqlite3.Connection) -> dict:
 def query_execution_event_summary(
     conn: sqlite3.Connection,
     *,
-    env: str | None = None,
     limit: int | None = 500,
     not_before: str | None = None,
 ) -> dict:
@@ -5956,19 +6310,18 @@ def log_exit_lifecycle_event(
         "EXIT_ORDER_VOIDED",
         "EXIT_RETRY_SCHEDULED",
         "EXIT_BACKOFF_EXHAUSTED",
-        "EXIT_FILL_CHECKED",
-        "EXIT_FILL_CONFIRMED",
     }:
         terminal_exec_status = None
         voided_at = None
         filled_at = None
+        exit_has_fill_finality = event_type == "EXIT_ORDER_FILLED"
         if event_type == "EXIT_ORDER_FILLED":
             terminal_exec_status = "filled"
             filled_at = timestamp or getattr(pos, "last_exit_at", None) or datetime.now(timezone.utc).isoformat()
         elif event_type in {"EXIT_RETRY_SCHEDULED", "EXIT_BACKOFF_EXHAUSTED", "EXIT_ORDER_REJECTED", "EXIT_ORDER_VOIDED"}:
             terminal_exec_status = str(payload.get("status") or getattr(pos, "exit_state", "") or "rejected")
             voided_at = timestamp or datetime.now(timezone.utc).isoformat()
-        elif event_type in {"EXIT_ORDER_ATTEMPTED", "EXIT_ORDER_POSTED", "EXIT_FILL_CHECKED", "EXIT_FILL_CONFIRMED"}:
+        elif event_type in {"EXIT_ORDER_ATTEMPTED", "EXIT_ORDER_POSTED"}:
             terminal_exec_status = str(payload.get("status") or status or "pending")
         posted_at = (
             timestamp
@@ -5992,15 +6345,20 @@ def log_exit_lifecycle_event(
             position_id=getattr(pos, "trade_id", ""),
             order_role="exit",
             strategy_key=str(getattr(pos, "strategy_key", "") or getattr(pos, "strategy", "") or "") or None,
-            posted_at=posted_at if event_type in {"EXIT_ORDER_POSTED", "EXIT_ORDER_ATTEMPTED", "EXIT_FILL_CHECKED", "EXIT_FILL_CONFIRMED"} else None,
+            posted_at=posted_at if event_type in {"EXIT_ORDER_POSTED", "EXIT_ORDER_ATTEMPTED"} else None,
             filled_at=filled_at,
             voided_at=voided_at,
             submitted_price=submitted_price,
-            fill_price=payload.get("fill_price"),
-            shares=payload.get("shares") if payload.get("shares") is not None else getattr(pos, "effective_shares", getattr(pos, "shares", None)),
+            fill_price=payload.get("fill_price") if exit_has_fill_finality else None,
+            shares=(
+                payload.get("shares")
+                if payload.get("shares") is not None
+                else getattr(pos, "effective_shares", getattr(pos, "shares", None))
+            ) if exit_has_fill_finality else None,
             fill_quality=None,
             venue_status=str(payload.get("status") or status or "") or None,
             terminal_exec_status=terminal_exec_status,
+            clear_fill_fields=not exit_has_fill_finality,
         )
 
 

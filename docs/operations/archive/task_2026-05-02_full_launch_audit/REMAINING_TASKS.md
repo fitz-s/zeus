@@ -9,7 +9,7 @@
 
 - **PR #46 MERGED** `595c93bb` into main (2026-05-03 20:43 CDT). **PR #47 MERGED** `cd882ee9` into main (2026-05-03 20:45 CDT). main = `cd882ee9`.
 - `config/settings.json:entry_forecast.rollout_mode = "blocked"` — Phase C commit `b9350930` (phase-C-4+5: dead-knob removal) reset rollout_mode from the cb4beb6c "live" flip back to "blocked".
-- **Bankroll truth chain P0 + $150 hardcode both RESOLVED** in commit `43e745b2` (Bankroll truth-chain cleanup: kill the $150 fiction). `capital_base_usd` removed from config and all 11 production sites; on-chain wallet is sole source. Daemons need restart for fix to take effect.
+- **Bankroll truth chain P0 + retired fixed-capital literal hardcode both RESOLVED** in commit `43e745b2` (Bankroll truth-chain cleanup: kill the retired fixed-capital literal fiction). `capital_base_usd` removed from config and all 11 production sites; on-chain wallet is sole source. Daemons need restart for fix to take effect.
 - **DDD v2** landed within PR #46 (commits `c9c444ef` Two-Rail trigger redesign, `b719d199` live wiring, `650136bd` Paris re-inclusion).
 - Phase A remediation: done (`5acdb3a8`). Phase B: done (`f9aca68e`). Phase C: done (`8c3876f7`, `b9350930`, `49de7965`, `734012fa`, `433737c4`).
 - Rollout gate `evaluate_entry_forecast_rollout_gate` is now wired behind `ZEUS_ENTRY_FORECAST_ROLLOUT_GATE` env flag (Phase C-1). Entry readiness writer behind `ZEUS_ENTRY_FORECAST_READINESS_WRITER` flag (Phase C-3).
@@ -136,11 +136,11 @@ These are real structural problems where a band-aid would just kick the can:
 | #29, #30 | PR #41 P1 fixes | Done |
 | #31 | Hook redesign | Done |
 | #34 | Sonnet PR review fixes | Done |
-| #35 | $150 hardcode root cause finding | Done — finding moved to §G; subsequently fixed in PR #46 |
+| #35 | retired fixed-capital literal hardcode root cause finding | Done — finding moved to §G; subsequently fixed in PR #46 |
 | **PR #46** | healthcheck-riskguard-live-label + bankroll fix + DDD v2 | Merged `595c93bb` (2026-05-03 20:43 CDT) |
 | **PR #47** | live entry forecast target coverage contract | Merged `cd882ee9` (2026-05-03 20:45 CDT) |
-| **Bankroll truth chain P0** | $150 fiction eliminated; on-chain wallet sole source | `43e745b2` — all 11 production sites updated; `capital_base_usd` removed from config |
-| **$150 capital_base_usd hardcode** | Structural fix applied (not a band-aid) | Same commit `43e745b2` — `portfolio.py`, `riskguard.py`, `cycle_runtime.py`, `evaluator.py`, `replay.py`, `status_summary.py`, `main.py`, `config.py` |
+| **Bankroll truth chain P0** | retired fixed-capital literal fiction eliminated; on-chain wallet sole source | `43e745b2` — all 11 production sites updated; `capital_base_usd` removed from config |
+| **retired fixed-capital literal capital_base_usd hardcode** | Structural fix applied (not a band-aid) | Same commit `43e745b2` — `portfolio.py`, `riskguard.py`, `cycle_runtime.py`, `evaluator.py`, `replay.py`, `status_summary.py`, `main.py`, `config.py` |
 | **DDD v2** | Two-Rail trigger redesign | `c9c444ef`/`b719d199`/`650136bd` in PR #46 |
 | #36 | Wait for first opening_hunt cycle | Deleted (premise was wrong) |
 | #37, #38, #51, #52, #53, #55 | Strategy design gaps | Moved to `STRATEGIES_AND_GAPS.md` |
@@ -164,7 +164,7 @@ Concrete tasks available for pickup without operator/daemon conflict:
 ## Summary
 
 - **main = `cd882ee9`** (PR #46 + PR #47 merged 2026-05-03 evening CDT).
-- **Bankroll truth chain RESOLVED**: $150 fiction eliminated in `43e745b2`; on-chain wallet is sole source. **Daemons need restart** for this to take effect in live.
+- **Bankroll truth chain RESOLVED**: retired fixed-capital literal fiction eliminated in `43e745b2`; on-chain wallet is sole source. **Daemons need restart** for this to take effect in live.
 - **`entry_forecast.rollout_mode = "blocked"`** (Phase C-4+5 dead-knob removal reset from cb4beb6c "live" flip).
 - **DDD v2 live**: Two-Rail trigger + p05 floor + linear curve landed in PR #46.
 - **Next major workstreams**: daemon restart post-bankroll-fix, opening-hunt entry data contract, strategy update execution.

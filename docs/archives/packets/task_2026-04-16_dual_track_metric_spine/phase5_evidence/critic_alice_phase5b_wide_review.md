@@ -22,7 +22,7 @@ Contract module at `src/contracts/snapshot_ingest_contract.py:34-88` enforces `_
 ### L2 — Forbidden Moves
 - Kelvin silent-default: **BLOCKED** at contract L50-52 (`MISSING_MEMBERS_UNIT` rejection). ✓
 - Fixture-bypass: R-AO spy pattern on `save_platt_model_v2`/`deactivate_model_v2` mocks side-effects, calls real `refit_v2` entry — correct shape (covered in pre-review). ✓
-- Paper-mode anything: `grep -n 'paper' scripts/ src/contracts/ src/state/truth_files.py` returns zero new paper references. ✓
+- Obsolete non-live runtime anything: `grep -n '<obsolete_non_live>' scripts/ src/contracts/ src/state/truth_files.py` returns zero new obsolete non-live runtime references. ✓
 - MIN polarity-swap without rethink: **traced manually** — `classify_boundary_low` at `scripts/extract_tigge_mn2t6_localday_min.py:108-119` computes `boundary_ambiguous = boundary_min <= inner_min`, treats `inner_min=None + boundary_min≠None` as ambiguous. Synthetic trace (`inner=5.0, boundary=4.5 → ambiguous=True`) confirms the cross-midnight steal semantics. Not a blind flip of MAX logic. ✓
 
 ### L3 — Silent fallbacks

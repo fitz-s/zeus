@@ -111,10 +111,10 @@ def _get_settlements_window(
 ) -> list[dict]:
     """Return settlement rows in the window, ordered by target_date."""
     temperature_metric = metric_identity.temperature_metric
-    # settlements table columns: city, target_date, outcome_value, p_raw, authority
-    # We need outcomes (1/0) and p_raw. outcome_value is the resolved temperature;
-    # the settlement truth is that the market outcome is whether p_raw was correct.
-    # For Brier score we want the calibration_pairs that match the settlement window.
+    # Drift/retrain evidence must preserve the same settlement object identity
+    # as live settlement readers: VERIFIED source truth and explicit high/low
+    # metric. A calibration_pair without matching settlement authority is not
+    # enough to recommend refit.
     since_param = since_iso or window_cutoff_iso
     try:
         cur = world_conn.execute(
@@ -124,10 +124,12 @@ def _get_settlements_window(
             JOIN settlements s ON (cp.city = s.city AND cp.target_date = s.target_date)
             WHERE cp.city = ?
               AND cp.target_date >= ?
-              AND (cp.authority = 'VERIFIED' OR cp.authority = 'UNVERIFIED')
+              AND cp.authority = 'VERIFIED'
+              AND s.authority = 'VERIFIED'
+              AND s.temperature_metric = ?
             ORDER BY cp.target_date
             """,
-            (city, since_param),
+            (city, since_param, temperature_metric),
         )
         rows = cur.fetchall()
         if rows:
@@ -135,47 +137,7 @@ def _get_settlements_window(
     except Exception as exc:
         logger.debug("calibration_pairs+settlements join failed for %s: %s", city, exc)
 
-    # Fallback: just calibration_pairs without settlement join
-    try:
-        cur = world_conn.execute(
-            """
-            SELECT outcome, p_raw
-            FROM calibration_pairs
-            WHERE city = ? AND target_date >= ?
-              AND (authority = 'VERIFIED' OR authority = 'UNVERIFIED')
-            ORDER BY target_date
-            """,
-            (city, since_param),
-        )
-        rows = cur.fetchall()
-        return [{"outcome": r[0], "p_raw": r[1]} for r in rows]
-    except Exception as exc:
-        logger.debug("calibration_pairs fallback failed for %s: %s", city, exc)
-
     return []
-
-
-def _get_settlements_window_simple(
-    world_conn,
-    *,
-    city: str,
-    window_cutoff_iso: str,
-) -> list[dict]:
-    """Simplified settlement fetch without join (for drift count)."""
-    try:
-        cur = world_conn.execute(
-            """
-            SELECT outcome, p_raw
-            FROM calibration_pairs
-            WHERE city = ? AND target_date >= ?
-            ORDER BY target_date
-            """,
-            (city, window_cutoff_iso),
-        )
-        return [{"outcome": r[0], "p_raw": r[1]} for r in cur.fetchall()]
-    except Exception as exc:
-        logger.debug("settlement window simple query failed for %s: %s", city, exc)
-        return []
 
 
 def _get_baseline_brier(
@@ -194,15 +156,22 @@ def _get_baseline_brier(
     baseline_start = (
         datetime.now(timezone.utc) - timedelta(days=baseline_days)
     ).date().isoformat()
+    temperature_metric = metric_identity.temperature_metric
     try:
         cur = world_conn.execute(
             """
-            SELECT outcome, p_raw
-            FROM calibration_pairs
-            WHERE city = ? AND target_date >= ? AND target_date < ?
-            ORDER BY target_date
+            SELECT cp.outcome, cp.p_raw
+            FROM calibration_pairs cp
+            JOIN settlements s ON (cp.city = s.city AND cp.target_date = s.target_date)
+            WHERE cp.city = ?
+              AND cp.target_date >= ?
+              AND cp.target_date < ?
+              AND cp.authority = 'VERIFIED'
+              AND s.authority = 'VERIFIED'
+              AND s.temperature_metric = ?
+            ORDER BY cp.target_date
             """,
-            (city, baseline_start, window_cutoff_iso),
+            (city, baseline_start, window_cutoff_iso, temperature_metric),
         )
         rows = cur.fetchall()
         if not rows:
@@ -237,8 +206,12 @@ def compute_drift(
     window_cutoff = (now - timedelta(days=window_days)).date().isoformat()
 
     # Get recent settlements for window Brier
-    rows = _get_settlements_window_simple(
-        world_conn, city=city, window_cutoff_iso=window_cutoff
+    rows = _get_settlements_window(
+        world_conn,
+        city=city,
+        metric_identity=metric_identity,
+        since_iso=None,
+        window_cutoff_iso=window_cutoff,
     )
     n_in_window = len(rows)
 

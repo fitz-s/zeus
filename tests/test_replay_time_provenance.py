@@ -60,7 +60,7 @@ def test_replay_context_uses_actual_trade_snapshot_reference(tmp_path):
         (market_id, bin_label, direction, size_usd, price, timestamp, forecast_snapshot_id,
          p_raw, p_posterior, edge, ci_lower, ci_upper, kelly_fraction, status, edge_source, env)
         VALUES ('mkt', '39-40°F', 'buy_yes', 5.0, 0.4, '2026-03-31T12:00:00+00:00', 11,
-                0.6, 0.6, 0.2, 0.55, 0.65, 0.0, 'entered', 'center_buy', 'paper')
+                0.6, 0.6, 0.2, 0.55, 0.65, 0.0, 'entered', 'center_buy', 'legacy_env')
         """
     )
 
@@ -136,7 +136,7 @@ def test_replay_context_prefers_v2_snapshot_for_decision_reference(tmp_path):
         (market_id, bin_label, direction, size_usd, price, timestamp, forecast_snapshot_id,
          p_raw, p_posterior, edge, ci_lower, ci_upper, kelly_fraction, status, edge_source, env)
         VALUES ('mkt', '39-40°F', 'buy_yes', 5.0, 0.4, '2026-03-31T12:00:00+00:00', 111,
-                0.8, 0.8, 0.2, 0.75, 0.85, 0.0, 'entered', 'center_buy', 'paper')
+                0.8, 0.8, 0.2, 0.75, 0.85, 0.0, 'entered', 'center_buy', 'legacy_env')
         """
     )
 
@@ -225,7 +225,7 @@ def test_replay_context_reads_main_trade_decisions_with_attached_world_v2_snapsh
         (market_id, bin_label, direction, size_usd, price, timestamp, forecast_snapshot_id,
          p_raw, p_posterior, edge, ci_lower, ci_upper, kelly_fraction, status, edge_source, env)
         VALUES ('mkt', '39-40°F', 'buy_yes', 5.0, 0.4, '2026-03-31T12:00:00+00:00', 211,
-                0.7, 0.7, 0.2, 0.65, 0.75, 0.0, 'entered', 'center_buy', 'paper')
+                0.7, 0.7, 0.2, 0.65, 0.75, 0.0, 'entered', 'center_buy', 'legacy_env')
         """
     )
 
@@ -265,7 +265,7 @@ def test_replay_context_falls_back_to_decision_log_no_trade_snapshot_reference(t
         INSERT INTO decision_log (mode, started_at, completed_at, artifact_json, timestamp, env)
         VALUES ('opening_hunt', '2026-04-01T12:00:00+00:00', '2026-04-01T12:01:00+00:00',
                 '{"mode":"opening_hunt","started_at":"2026-04-01T12:00:00+00:00","completed_at":"2026-04-01T12:01:00+00:00","skipped_reason":"","trade_cases":[],"no_trade_cases":[{"decision_id":"d1","city":"London","target_date":"2026-04-02","range_label":"12°C","direction":"buy_yes","rejection_stage":"EDGE_INSUFFICIENT","rejection_reasons":["x"],"best_edge":0.0,"model_prob":0.4,"market_price":0.5,"decision_snapshot_id":"21","selected_method":"ens_member_counting","applied_validations":["ens_fetch"],"bin_labels":["12°C"],"p_raw_vector":[1.0],"p_cal_vector":[1.0],"p_market_vector":[0.5],"timestamp":"2026-04-01T12:00:30+00:00"}],"monitor_results":[],"summary":{}}',
-                '2026-04-01T12:01:00+00:00', 'paper')
+                '2026-04-01T12:01:00+00:00', 'legacy_env')
         """
     )
     ctx = ReplayContext(conn)

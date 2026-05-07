@@ -37,26 +37,33 @@ def get_settlement_truth(
     world_conn: sqlite3.Connection,
     city: str,
     target_date: date | str,
+    temperature_metric: str = "high",
 ) -> Optional[SettlementView]:
     """Return settlement truth for (city, target_date) from world DB.
 
     world_conn must already be open — caller manages lifecycle.
-    Returns None if no settlement row exists.
+    ``temperature_metric`` is the high/low physical quantity identity for the
+    requested market family; callers outside the high-temperature default must
+    pass it explicitly.
+    Returns None if no VERIFIED settlement row exists for the requested
+    temperature metric, and rows for other metrics are intentionally ignored.
     """
     target_date_str = str(target_date)
 
     try:
         row = world_conn.execute(
             """
-            SELECT city, target_date, settlement_value, outcome,
-                   source, authority, data_version, settled_at,
-                   range_label, winning_bin
+            SELECT city, target_date, settlement_value, NULL AS outcome,
+                   settlement_source AS source, authority, data_version, settled_at,
+                   winning_bin AS range_label, winning_bin
               FROM settlements
              WHERE city = ? AND target_date = ?
+               AND temperature_metric = ?
+               AND authority = 'VERIFIED'
              ORDER BY settled_at DESC
              LIMIT 1
             """,
-            (city, target_date_str),
+            (city, target_date_str, temperature_metric),
         ).fetchone()
     except sqlite3.OperationalError:
         return None

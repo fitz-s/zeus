@@ -216,6 +216,363 @@ def _entry_decision_source_component(intent: ExecutionIntent) -> dict:
     )
 
 
+def _corrected_entry_identity_details(intent: ExecutionIntent) -> dict[str, str] | None:
+    snapshot_hash = _json_safe_string(getattr(intent, "executable_snapshot_hash", ""), "")
+    cost_basis_id = _json_safe_string(getattr(intent, "executable_cost_basis_id", ""), "")
+    cost_basis_hash = _json_safe_string(getattr(intent, "executable_cost_basis_hash", ""), "")
+    pricing_version = _json_safe_string(getattr(intent, "pricing_semantics_version", ""), "")
+    snapshot_id = _json_safe_string(getattr(intent, "executable_snapshot_id", ""), "")
+    has_corrected_identity = any(
+        (snapshot_hash, cost_basis_id, cost_basis_hash, pricing_version)
+    )
+    if not has_corrected_identity:
+        return None
+    return {
+        "snapshot_id": snapshot_id,
+        "snapshot_hash": snapshot_hash,
+        "cost_basis_id": cost_basis_id,
+        "cost_basis_hash": cost_basis_hash,
+        "pricing_semantics_version": pricing_version,
+    }
+
+
+def _corrected_entry_identity_component(
+    conn: sqlite3.Connection,
+    intent: ExecutionIntent,
+) -> dict:
+    """Verify corrected FinalExecutionIntent identity survived the legacy envelope."""
+
+    details = _corrected_entry_identity_details(intent)
+    if details is None:
+        return _capability_component(
+            "corrected_execution_identity",
+            reason="legacy_execution_intent",
+        )
+
+    from src.contracts.execution_intent import CORRECTED_PRICING_SEMANTICS_VERSION
+
+    snapshot_id = details["snapshot_id"]
+    snapshot_hash = details["snapshot_hash"]
+    cost_basis_id = details["cost_basis_id"]
+    cost_basis_hash = details["cost_basis_hash"]
+    pricing_version = details["pricing_semantics_version"]
+    missing = [
+        name
+        for name, value in details.items()
+        if name != "pricing_semantics_version" and not value
+    ]
+    if missing:
+        return _capability_component(
+            "corrected_execution_identity",
+            allowed=False,
+            reason="missing_corrected_execution_identity",
+            missing=",".join(missing),
+            **details,
+        )
+    if pricing_version != CORRECTED_PRICING_SEMANTICS_VERSION:
+        return _capability_component(
+            "corrected_execution_identity",
+            allowed=False,
+            reason="unsupported_pricing_semantics_version",
+            **details,
+        )
+    if len(snapshot_hash) != 64 or len(cost_basis_hash) != 64:
+        return _capability_component(
+            "corrected_execution_identity",
+            allowed=False,
+            reason="invalid_identity_hash",
+            **details,
+        )
+    expected_cost_basis_id = f"cost_basis:{cost_basis_hash[:16]}"
+    if cost_basis_id != expected_cost_basis_id:
+        return _capability_component(
+            "corrected_execution_identity",
+            allowed=False,
+            reason="cost_basis_id_hash_mismatch",
+            expected_cost_basis_id=expected_cost_basis_id,
+            **details,
+        )
+
+    from src.state.snapshot_repo import get_snapshot
+
+    try:
+        snapshot = get_snapshot(conn, snapshot_id)
+    except sqlite3.OperationalError as exc:
+        return _capability_component(
+            "corrected_execution_identity",
+            allowed=False,
+            reason="snapshot_lookup_unavailable",
+            error=str(exc),
+            **details,
+        )
+    if snapshot is None:
+        return _capability_component(
+            "corrected_execution_identity",
+            allowed=False,
+            reason="snapshot_missing",
+            **details,
+        )
+    actual_hash = str(snapshot.executable_snapshot_hash or "")
+    if actual_hash != snapshot_hash:
+        return _capability_component(
+            "corrected_execution_identity",
+            allowed=False,
+            reason="snapshot_hash_mismatch",
+            actual_snapshot_hash=actual_hash,
+            **details,
+        )
+    return _capability_component(
+        "corrected_execution_identity",
+        **details,
+    )
+
+
+def _corrected_identity_from_command_events(
+    conn: sqlite3.Connection,
+    command_id: str,
+) -> dict[str, str] | None:
+    from src.state.venue_command_repo import list_events
+
+    events = list_events(conn, command_id)
+    for event in reversed(events):
+        if event.get("event_type") != "SUBMIT_REQUESTED":
+            continue
+        payload = event.get("payload_json")
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except ValueError:
+                return None
+        if not isinstance(payload, dict):
+            return None
+        capability = payload.get("execution_capability")
+        if not isinstance(capability, dict):
+            return None
+        components = capability.get("components")
+        if not isinstance(components, list):
+            return None
+        for component in components:
+            if not isinstance(component, dict):
+                continue
+            if component.get("component") != "corrected_execution_identity":
+                continue
+            details = component.get("details")
+            if not isinstance(details, dict):
+                return None
+            return {
+                "snapshot_id": _json_safe_string(details.get("snapshot_id"), ""),
+                "snapshot_hash": _json_safe_string(details.get("snapshot_hash"), ""),
+                "cost_basis_id": _json_safe_string(details.get("cost_basis_id"), ""),
+                "cost_basis_hash": _json_safe_string(details.get("cost_basis_hash"), ""),
+                "pricing_semantics_version": _json_safe_string(
+                    details.get("pricing_semantics_version"),
+                    "",
+                ),
+            }
+    return None
+
+
+def _corrected_existing_command_mismatch_reason(
+    conn: sqlite3.Connection,
+    intent: ExecutionIntent,
+    existing_command: dict,
+) -> str | None:
+    expected = _corrected_entry_identity_details(intent)
+    if expected is None:
+        return None
+    command_id = _json_safe_string(existing_command.get("command_id"), "")
+    if not command_id:
+        return "existing_command_missing_command_id"
+    existing_snapshot_id = _json_safe_string(existing_command.get("snapshot_id"), "")
+    if existing_snapshot_id and existing_snapshot_id != expected["snapshot_id"]:
+        return "existing_command_snapshot_id_mismatch"
+    observed = _corrected_identity_from_command_events(conn, command_id)
+    if observed is None:
+        return "existing_command_missing_corrected_identity"
+    for field_name, expected_value in expected.items():
+        if observed.get(field_name) != expected_value:
+            return f"existing_command_{field_name}_mismatch"
+    return None
+
+
+def _reject_corrected_existing_command_mismatch(
+    *,
+    trade_id: str,
+    intent: ExecutionIntent,
+    shares: float,
+    idem_value: str,
+    reason: str,
+) -> "OrderResult":
+    return OrderResult(
+        trade_id=trade_id,
+        status="rejected",
+        reason=f"corrected_execution_identity:{reason}",
+        submitted_price=intent.limit_price,
+        shares=shares,
+        order_role="entry",
+        idempotency_key=idem_value,
+    )
+
+
+def _exit_snapshot_identity_details(intent) -> dict[str, str] | None:
+    snapshot_hash = _json_safe_string(getattr(intent, "executable_snapshot_hash", ""), "")
+    if not snapshot_hash:
+        return None
+    return {
+        "snapshot_id": _json_safe_string(getattr(intent, "executable_snapshot_id", ""), ""),
+        "snapshot_hash": snapshot_hash,
+    }
+
+
+def _exit_snapshot_identity_component(
+    conn: sqlite3.Connection,
+    intent,
+) -> dict:
+    """Verify corrected exit executable snapshot identity survived to submit."""
+
+    details = _exit_snapshot_identity_details(intent)
+    if details is None:
+        return _capability_component(
+            "exit_snapshot_identity",
+            reason="legacy_exit_order_intent",
+        )
+
+    snapshot_id = details["snapshot_id"]
+    snapshot_hash = details["snapshot_hash"]
+    missing = [name for name, value in details.items() if not value]
+    if missing:
+        return _capability_component(
+            "exit_snapshot_identity",
+            allowed=False,
+            reason="missing_exit_snapshot_identity",
+            missing=",".join(missing),
+            **details,
+        )
+    if len(snapshot_hash) != 64:
+        return _capability_component(
+            "exit_snapshot_identity",
+            allowed=False,
+            reason="invalid_snapshot_hash",
+            **details,
+        )
+
+    from src.state.snapshot_repo import get_snapshot
+
+    try:
+        snapshot = get_snapshot(conn, snapshot_id)
+    except sqlite3.OperationalError as exc:
+        return _capability_component(
+            "exit_snapshot_identity",
+            allowed=False,
+            reason="snapshot_lookup_unavailable",
+            error=str(exc),
+            **details,
+        )
+    if snapshot is None:
+        return _capability_component(
+            "exit_snapshot_identity",
+            allowed=False,
+            reason="snapshot_missing",
+            **details,
+        )
+    actual_hash = str(snapshot.executable_snapshot_hash or "")
+    if actual_hash != snapshot_hash:
+        return _capability_component(
+            "exit_snapshot_identity",
+            allowed=False,
+            reason="snapshot_hash_mismatch",
+            actual_snapshot_hash=actual_hash,
+            **details,
+        )
+    return _capability_component(
+        "exit_snapshot_identity",
+        **details,
+    )
+
+
+def _exit_snapshot_identity_from_command_events(
+    conn: sqlite3.Connection,
+    command_id: str,
+) -> dict[str, str] | None:
+    from src.state.venue_command_repo import list_events
+
+    events = list_events(conn, command_id)
+    for event in reversed(events):
+        if event.get("event_type") != "SUBMIT_REQUESTED":
+            continue
+        payload = event.get("payload_json")
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except ValueError:
+                return None
+        if not isinstance(payload, dict):
+            return None
+        capability = payload.get("execution_capability")
+        if not isinstance(capability, dict):
+            return None
+        components = capability.get("components")
+        if not isinstance(components, list):
+            return None
+        for component in components:
+            if not isinstance(component, dict):
+                continue
+            if component.get("component") != "exit_snapshot_identity":
+                continue
+            details = component.get("details")
+            if not isinstance(details, dict):
+                return None
+            return {
+                "snapshot_id": _json_safe_string(details.get("snapshot_id"), ""),
+                "snapshot_hash": _json_safe_string(details.get("snapshot_hash"), ""),
+            }
+    return None
+
+
+def _exit_existing_command_mismatch_reason(
+    conn: sqlite3.Connection,
+    intent,
+    existing_command: dict,
+) -> str | None:
+    expected = _exit_snapshot_identity_details(intent)
+    if expected is None:
+        return None
+    command_id = _json_safe_string(existing_command.get("command_id"), "")
+    if not command_id:
+        return "existing_command_missing_command_id"
+    existing_snapshot_id = _json_safe_string(existing_command.get("snapshot_id"), "")
+    if existing_snapshot_id and existing_snapshot_id != expected["snapshot_id"]:
+        return "existing_command_snapshot_id_mismatch"
+    observed = _exit_snapshot_identity_from_command_events(conn, command_id)
+    if observed is None:
+        return "existing_command_missing_exit_snapshot_identity"
+    for field_name, expected_value in expected.items():
+        if observed.get(field_name) != expected_value:
+            return f"existing_command_{field_name}_mismatch"
+    return None
+
+
+def _reject_exit_existing_command_mismatch(
+    *,
+    trade_id: str,
+    intent,
+    shares: float,
+    limit_price: float,
+    idem_value: str,
+    reason: str,
+) -> "OrderResult":
+    return OrderResult(
+        trade_id=trade_id,
+        status="rejected",
+        reason=f"exit_snapshot_identity:{reason}",
+        submitted_price=limit_price,
+        shares=shares,
+        order_role="exit",
+        intent_id=getattr(intent, "intent_id", None),
+        idempotency_key=idem_value,
+    )
+
+
 def _exit_decision_source_component() -> dict:
     return _capability_component(
         "decision_source_integrity",
@@ -542,6 +899,7 @@ class ExitOrderIntent:
     intent_id: Optional[str] = None
     idempotency_key: Optional[str] = None
     executable_snapshot_id: str = ""
+    executable_snapshot_hash: str = ""
     executable_snapshot_min_tick_size: Decimal | str | None = None
     executable_snapshot_min_order_size: Decimal | str | None = None
     executable_snapshot_neg_risk: bool | None = None
@@ -963,6 +1321,10 @@ def _legacy_entry_intent_from_final(
         timeout_seconds=_final_intent_timeout_seconds(intent),
         decision_edge=0.0,
         executable_snapshot_id=intent.snapshot_id,
+        executable_snapshot_hash=intent.snapshot_hash,
+        executable_cost_basis_id=intent.cost_basis_id,
+        executable_cost_basis_hash=intent.cost_basis_hash,
+        pricing_semantics_version=intent.pricing_semantics_version,
         executable_snapshot_min_tick_size=intent.tick_size,
         executable_snapshot_min_order_size=intent.min_order_size,
         executable_snapshot_neg_risk=intent.neg_risk,
@@ -1027,7 +1389,7 @@ def execute_final_intent(
 
 def execute_intent(
     intent: ExecutionIntent,
-    edge_vwmp: float,  # Phase 2: remove this parameter (dead after _paper_fill deletion)
+    edge_vwmp: float,  # Phase 2: remove this parameter (dead after simulated fill deletion)
     label: str,
     conn: Optional[sqlite3.Connection] = None,
     decision_id: str = "",
@@ -1070,6 +1432,7 @@ def create_exit_order_intent(
     current_price: float,
     best_bid: Optional[float] = None,
     executable_snapshot_id: str = "",
+    executable_snapshot_hash: str = "",
     executable_snapshot_min_tick_size: Decimal | str | None = None,
     executable_snapshot_min_order_size: Decimal | str | None = None,
     executable_snapshot_neg_risk: bool | None = None,
@@ -1085,6 +1448,7 @@ def create_exit_order_intent(
         intent_id=f"{trade_id}:exit",
         idempotency_key=f"{trade_id}:exit:{token_id}",
         executable_snapshot_id=executable_snapshot_id,
+        executable_snapshot_hash=executable_snapshot_hash,
         executable_snapshot_min_tick_size=executable_snapshot_min_tick_size,
         executable_snapshot_min_order_size=executable_snapshot_min_order_size,
         executable_snapshot_neg_risk=executable_snapshot_neg_risk,
@@ -1252,6 +1616,28 @@ def execute_exit_order(
             effective_decision_id,
         )
     try:
+        exit_snapshot_identity_component = _exit_snapshot_identity_component(conn, intent)
+        if not exit_snapshot_identity_component.get("allowed"):
+            reason = str(
+                exit_snapshot_identity_component.get("reason")
+                or "exit_snapshot_identity_failed"
+            )
+            logger.warning(
+                "execute_exit_order: exit snapshot identity blocked submit "
+                "for trade_id=%s: %s",
+                intent.trade_id,
+                reason,
+            )
+            return OrderResult(
+                trade_id=intent.trade_id,
+                status="rejected",
+                reason=f"exit_snapshot_identity:{reason}",
+                submitted_price=limit_price,
+                shares=shares,
+                order_role="exit",
+                intent_id=intent.intent_id,
+                idempotency_key=idem.value,
+            )
         order_type = _select_risk_allocator_order_type(conn, intent.executable_snapshot_id)
         heartbeat_component = _assert_heartbeat_allows_submit(order_type)
         ws_gap_component = _assert_ws_gap_allows_submit(intent.token_id)
@@ -1273,6 +1659,27 @@ def execute_exit_order(
         )
         pre_lookup_row = find_command_by_idempotency_key(conn, idem.value)
         if pre_lookup_row is not None:
+            exit_existing_mismatch = _exit_existing_command_mismatch_reason(
+                conn,
+                intent,
+                pre_lookup_row,
+            )
+            if exit_existing_mismatch is not None:
+                logger.warning(
+                    "execute_exit_order: idempotency fast path blocked by "
+                    "exit snapshot identity mismatch for trade_id=%s idem=%s: %s",
+                    intent.trade_id,
+                    idem.value,
+                    exit_existing_mismatch,
+                )
+                return _reject_exit_existing_command_mismatch(
+                    trade_id=intent.trade_id,
+                    intent=intent,
+                    shares=shares,
+                    limit_price=limit_price,
+                    idem_value=idem.value,
+                    reason=exit_existing_mismatch,
+                )
             logger.info(
                 "execute_exit_order: pre-submit lookup found existing command for "
                 "idem=%s trade_id=%s — skipping submit",
@@ -1297,6 +1704,27 @@ def execute_exit_order(
             exclude_idempotency_key=idem.value,
         )
         if economic_unknown_row is not None:
+            exit_existing_mismatch = _exit_existing_command_mismatch_reason(
+                conn,
+                intent,
+                economic_unknown_row,
+            )
+            if exit_existing_mismatch is not None:
+                logger.warning(
+                    "execute_exit_order: economic-unknown fast path blocked by "
+                    "exit snapshot identity mismatch for trade_id=%s idem=%s: %s",
+                    intent.trade_id,
+                    idem.value,
+                    exit_existing_mismatch,
+                )
+                return _reject_exit_existing_command_mismatch(
+                    trade_id=intent.trade_id,
+                    intent=intent,
+                    shares=shares,
+                    limit_price=limit_price,
+                    idem_value=idem.value,
+                    reason=exit_existing_mismatch,
+                )
             logger.warning(
                 "execute_exit_order: same economic intent is already unresolved as "
                 "unknown_side_effect (idem=%s trade_id=%s)",
@@ -1421,6 +1849,7 @@ def execute_exit_order(
                             collateral_component,
                             _capability_component("replacement_sell_guard"),
                             _exit_decision_source_component(),
+                            exit_snapshot_identity_component,
                             _capability_component("executable_snapshot_gate"),
                         ],
                     ),
@@ -1451,6 +1880,27 @@ def execute_exit_order(
             )
             existing_row = find_command_by_idempotency_key(conn, idem.value)
             if existing_row is not None:
+                exit_existing_mismatch = _exit_existing_command_mismatch_reason(
+                    conn,
+                    intent,
+                    existing_row,
+                )
+                if exit_existing_mismatch is not None:
+                    logger.warning(
+                        "execute_exit_order: idempotency race fallback blocked by "
+                        "exit snapshot identity mismatch for trade_id=%s idem=%s: %s",
+                        intent.trade_id,
+                        idem.value,
+                        exit_existing_mismatch,
+                    )
+                    return _reject_exit_existing_command_mismatch(
+                        trade_id=intent.trade_id,
+                        intent=intent,
+                        shares=shares,
+                        limit_price=limit_price,
+                        idem_value=idem.value,
+                        reason=exit_existing_mismatch,
+                    )
                 return _orderresult_from_existing(
                     VenueCommand.from_row(existing_row),
                     trade_id=intent.trade_id,
@@ -1871,6 +2321,27 @@ def _live_order(
             effective_decision_id,
         )
     try:  # outer: ensures conn is closed when _own_conn (HIGH fix)
+        corrected_identity_component = _corrected_entry_identity_component(conn, intent)
+        if not corrected_identity_component.get("allowed"):
+            reason = str(
+                corrected_identity_component.get("reason")
+                or "corrected_identity_failed"
+            )
+            logger.warning(
+                "_live_order: corrected execution identity blocked entry submit "
+                "for trade_id=%s: %s",
+                trade_id,
+                reason,
+            )
+            return OrderResult(
+                trade_id=trade_id,
+                status="rejected",
+                reason=f"corrected_execution_identity:{reason}",
+                submitted_price=intent.limit_price,
+                shares=shares,
+                order_role="entry",
+                idempotency_key=idem.value,
+            )
         order_type = _select_risk_allocator_order_type(conn, intent.executable_snapshot_id)
         raw_submit_order_type = getattr(intent, "submit_order_type", None)
         submit_order_type = raw_submit_order_type if isinstance(raw_submit_order_type, str) else None
@@ -1902,6 +2373,26 @@ def _live_order(
         from src.execution.command_bus import VenueCommand
         pre_lookup_row = find_command_by_idempotency_key(conn, idem.value)
         if pre_lookup_row is not None:
+            corrected_existing_mismatch = _corrected_existing_command_mismatch_reason(
+                conn,
+                intent,
+                pre_lookup_row,
+            )
+            if corrected_existing_mismatch is not None:
+                logger.warning(
+                    "_live_order: idempotency fast path blocked by corrected "
+                    "identity mismatch for trade_id=%s idem=%s: %s",
+                    trade_id,
+                    idem.value,
+                    corrected_existing_mismatch,
+                )
+                return _reject_corrected_existing_command_mismatch(
+                    trade_id=trade_id,
+                    intent=intent,
+                    shares=shares,
+                    idem_value=idem.value,
+                    reason=corrected_existing_mismatch,
+                )
             logger.info(
                 "_live_order: pre-submit lookup found existing command for "
                 "idem=%s trade_id=%s — skipping submit",
@@ -1926,6 +2417,26 @@ def _live_order(
             exclude_idempotency_key=idem.value,
         )
         if economic_unknown_row is not None:
+            corrected_existing_mismatch = _corrected_existing_command_mismatch_reason(
+                conn,
+                intent,
+                economic_unknown_row,
+            )
+            if corrected_existing_mismatch is not None:
+                logger.warning(
+                    "_live_order: economic-unknown fast path blocked by corrected "
+                    "identity mismatch for trade_id=%s idem=%s: %s",
+                    trade_id,
+                    idem.value,
+                    corrected_existing_mismatch,
+                )
+                return _reject_corrected_existing_command_mismatch(
+                    trade_id=trade_id,
+                    intent=intent,
+                    shares=shares,
+                    idem_value=idem.value,
+                    reason=corrected_existing_mismatch,
+                )
             logger.warning(
                 "_live_order: same economic intent is already unresolved as "
                 "unknown_side_effect (idem=%s trade_id=%s)",
@@ -2029,6 +2540,7 @@ def _live_order(
                             ws_gap_component,
                             collateral_component,
                             decision_source_component,
+                            corrected_identity_component,
                             _capability_component("executable_snapshot_gate"),
                         ],
                     ),
@@ -2060,6 +2572,26 @@ def _live_order(
             )
             existing_row = find_command_by_idempotency_key(conn, idem.value)
             if existing_row is not None:
+                corrected_existing_mismatch = _corrected_existing_command_mismatch_reason(
+                    conn,
+                    intent,
+                    existing_row,
+                )
+                if corrected_existing_mismatch is not None:
+                    logger.warning(
+                        "_live_order: idempotency race fallback blocked by corrected "
+                        "identity mismatch for trade_id=%s idem=%s: %s",
+                        trade_id,
+                        idem.value,
+                        corrected_existing_mismatch,
+                    )
+                    return _reject_corrected_existing_command_mismatch(
+                        trade_id=trade_id,
+                        intent=intent,
+                        shares=shares,
+                        idem_value=idem.value,
+                        reason=corrected_existing_mismatch,
+                    )
                 return _orderresult_from_existing(
                     VenueCommand.from_row(existing_row),
                     trade_id=trade_id,

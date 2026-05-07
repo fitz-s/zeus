@@ -171,6 +171,7 @@ def _compute_model_skill(conn):
           ON f.city = s.city
          AND f.target_date = s.target_date
          AND s.temperature_metric = 'high'
+         AND s.authority = 'VERIFIED'
         WHERE f.lead_days = 1
           AND s.settlement_value IS NOT NULL
     """).fetchall()
