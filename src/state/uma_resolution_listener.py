@@ -1,6 +1,7 @@
 # Created: 2026-05-04
-# Last reused/audited: 2026-05-04
+# Last reused/audited: 2026-05-07
 # Authority basis: docs/operations/task_2026-05-04_oracle_kelly_evidence_rebuild/PLAN.md §A5 (UMA on-chain Settle listener) + Bug review Finding F (phase observability boundary, distinguish onchain_resolved from heuristic POST_TRADING).
+# Parser fix 2026-05-07: condition_id derived from ancillaryData+requester via CTF keccak formula (topics[1] is requester addr, not conditionId). blockTimestamp fetched via eth_getBlockByNumber (not in eth_getLogs response).
 """UMA Optimistic Oracle resolution listener.
 
 Pre-A5 the cycle runtime collapsed POST_TRADING and RESOLVED into one
@@ -78,18 +79,117 @@ from typing import Iterable, Optional, Sequence
 logger = logging.getLogger(__name__)
 
 
-# UMA Optimistic Oracle V2 ``SettlementResolved`` event signature.
-# Hex prefix is what eth_getLogs filters on (topic[0]).
+def _keccak256(data: bytes) -> bytes:
+    """keccak256 hash via eth_hash (installed in venv). Raises ImportError if missing."""
+    from eth_hash.auto import keccak  # type: ignore[import]
+    return keccak(data)
+
+
+def derive_condition_id(requester: str, ancillary_data: bytes) -> str:
+    """Derive the Polymarket conditionId from a UMA Settle event.
+
+    Formula (CTF Adapter):
+        questionId  = keccak256(ancillaryData)
+        conditionId = keccak256(abi.encodePacked(requester_addr_20, questionId_32, uint256(2)_32))
+
+    Parameters
+    ----------
+    requester:
+        The requester address from topics[1] of the Settle event (20-byte hex, with or
+        without 0x prefix).  This is the CTF adapter address, not a condition_id.
+    ancillary_data:
+        Raw ancillaryData bytes decoded from the ABI-encoded ``data`` field of the log.
+
+    Returns
+    -------
+    str
+        Lower-case hex condition_id prefixed with "0x".
+
+    Raises
+    ------
+    ValueError
+        If requester is malformed or eth_hash is unavailable.
+    """
+    # Normalise requester to 20 raw bytes
+    addr = requester.lower().removeprefix("0x")
+    if len(addr) == 64:
+        # Full 32-byte padded topic (e.g. "0x000000000000000000000000<20-byte-addr>")
+        addr = addr[-40:]
+    if len(addr) != 40:
+        raise ValueError(f"derive_condition_id: requester hex is {len(addr)} chars, expected 40: {requester!r}")
+    requester_bytes = bytes.fromhex(addr)
+
+    question_id = _keccak256(ancillary_data)  # 32 bytes
+    outcome_slot_count = (2).to_bytes(32, "big")  # uint256(2)
+    packed = requester_bytes + question_id + outcome_slot_count
+    condition_id_bytes = _keccak256(packed)
+    return "0x" + condition_id_bytes.hex()
+
+
+def decode_ancillary_data(data_hex: str) -> bytes:
+    """Decode the ancillaryData bytes from an ABI-encoded UMA Settle ``data`` field.
+
+    The Settle event non-indexed payload is ABI-encoded as:
+        (bytes32 identifier, uint256 timestamp, bytes ancillaryData, int256 price, uint256 payout)
+
+    Slot layout (each slot = 32 bytes = 64 hex chars):
+        [0]  identifier  (bytes32)
+        [1]  timestamp   (uint256)
+        [2]  offset to ancillaryData (uint256, relative to start of data)
+        [3]  price       (int256)
+        [4]  payout      (uint256)
+        [offset/32] length of ancillaryData
+        [offset/32 + 1 .. ] ancillaryData bytes (padded to 32-byte boundary)
+
+    Parameters
+    ----------
+    data_hex:
+        Full ``data`` field value from the eth_getLogs entry (with or without "0x").
+
+    Returns
+    -------
+    bytes
+        Raw ancillaryData bytes.  Returns b"" on any decode failure (caller
+        should log + skip rather than propagate).
+    """
+    try:
+        hex_str = data_hex[2:] if data_hex.startswith("0x") else data_hex
+        if len(hex_str) < 320:  # Need at least 5 slots
+            return b""
+        offset = int(hex_str[128:192], 16)  # slot [2] = byte offset of ancillaryData
+        ad_pos = offset * 2  # convert byte offset to hex-char offset
+        if len(hex_str) < ad_pos + 64:
+            return b""
+        ad_len = int(hex_str[ad_pos:ad_pos + 64], 16)
+        if ad_len == 0:
+            return b""
+        ad_hex = hex_str[ad_pos + 64: ad_pos + 64 + ad_len * 2]
+        if len(ad_hex) < ad_len * 2:
+            return b""
+        return bytes.fromhex(ad_hex)
+    except Exception:
+        return b""
+
+
+# UMA Optimistic Oracle V2 ``Settle`` event signature.
+# Verified 2026-05-07 via eth_getLogs on Polygon + UMA Finder contract:
+#   Finder(0x09aea4b2242abC8bb4BB78D537A67a245A7bEC64).getImplementationAddress("OptimisticOracleV2")
+#   => 0xee3afe347d5c74317041e2618c49534daf887c24  (OO V2 on Polygon)
+# Event: Settle(address indexed requester, address indexed proposer,
+#               address indexed disputer, bytes32 identifier,
+#               uint256 timestamp, bytes ancillaryData, int256 price, uint256 payout)
+# keccak256("Settle(address,address,address,bytes32,uint256,bytes,int256,uint256)")
+#   = 0x3f384afb4bd9f0aef0298c80399950011420eb33b0e1a750b20966270247b9a0
+# Confirmed live: 5700+ Wunderground weather market settlements found in 90-day scan.
+# NOTE: topics[0]=sig, topics[1]=requester (CTF adapter), topics[2]=proposer,
+#       topics[3]=disputer. condition_id is NOT in topics — derived from
+#       ancillaryData + requester via CTF adapter's internal questionId mapping.
+#       Backfill condition_id extraction requires that mapping layer (see PLAN §A5).
 # IF Polymarket migrates to OO V3 or renames the event, update HERE +
 # the matching test in tests/test_uma_resolution_listener.py.
-UMA_OO_SETTLE_EVENT_NAME: str = "SettlementResolved"
+UMA_OO_SETTLE_EVENT_NAME: str = "Settle"
 UMA_OO_SETTLE_EVENT_SIGNATURE: str = (
-    # Placeholder — operator MUST verify against the live UMA OO contract
-    # before flipping the listener on. The signature is keccak256 of
-    # the canonical event signature; computed offline.
-    # Tracked as a config knob so a v3 migration doesn't require a code
-    # patch + redeploy.
-    "0x0000000000000000000000000000000000000000000000000000000000000000"
+    "0x3f384afb4bd9f0aef0298c80399950011420eb33b0e1a750b20966270247b9a0"
 )
 
 
@@ -140,23 +240,125 @@ class UmaRpcClient(ABC):
         """Return raw log entries matching the filter. Must NOT raise on
         empty result; an empty list is the no-resolutions case."""
 
+    @abstractmethod
+    def get_block_timestamp(self, block_number: int) -> int:
+        """Return the Unix timestamp (seconds) for ``block_number``.
+
+        Production: eth_getBlockByNumber RPC call.
+        Tests: return a synthetic value.
+        Must NOT raise — return 0 on failure (caller treats as unknown).
+        """
+
+
+class UmaHttpRpcClient(UmaRpcClient):
+    """Production Polygon JSON-RPC client using httpx.
+
+    Fetches UMA OO Settle events via eth_getLogs and block timestamps
+    via eth_getBlockByNumber (Tenderly/public RPC does not include
+    blockTimestamp in eth_getLogs responses).
+
+    Block timestamps are cached by block number to minimise RPC round-trips
+    when many events share the same block (common for batch Settle calls).
+    """
+
+    def __init__(self, rpc_url: str, *, timeout: float = 30.0) -> None:
+        self._rpc_url = rpc_url
+        self._timeout = timeout
+        self._block_ts_cache: dict[int, int] = {}
+
+    def _post(self, payload: dict) -> dict:
+        import httpx  # type: ignore[import]
+        resp = httpx.post(self._rpc_url, json=payload, timeout=self._timeout)
+        resp.raise_for_status()
+        return resp.json()
+
+    def get_logs(
+        self,
+        *,
+        contract_address: str,
+        topic0: str,
+        condition_ids: Sequence[str],
+        from_block: int,
+        to_block: Optional[int] = None,
+    ) -> list[dict]:
+        """eth_getLogs for the Settle event over [from_block, to_block].
+
+        ``condition_ids`` is unused at the RPC level — Polymarket Settle events
+        do not index condition_id as a topic. The caller (poll or backfill)
+        must filter by matching derived condition_ids after parse_settle_event().
+        """
+        params: dict = {
+            "address": contract_address,
+            "topics": [topic0],
+            "fromBlock": hex(from_block),
+        }
+        if to_block is not None:
+            params["toBlock"] = hex(to_block)
+        payload = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "eth_getLogs",
+            "params": [params],
+        }
+        try:
+            result = self._post(payload)
+            logs = result.get("result") or []
+            if not isinstance(logs, list):
+                logger.warning("UmaHttpRpcClient.get_logs: unexpected result type %s", type(logs))
+                return []
+            return logs
+        except Exception as exc:
+            logger.warning("UmaHttpRpcClient.get_logs failed: %s", exc)
+            return []
+
+    def get_block_timestamp(self, block_number: int) -> int:
+        """Fetch block timestamp via eth_getBlockByNumber, cached by block."""
+        if block_number in self._block_ts_cache:
+            return self._block_ts_cache[block_number]
+        payload = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "eth_getBlockByNumber",
+            "params": [hex(block_number), False],
+        }
+        try:
+            result = self._post(payload)
+            block = result.get("result") or {}
+            ts_raw = block.get("timestamp", "0x0")
+            ts = int(ts_raw, 16) if isinstance(ts_raw, str) else int(ts_raw)
+            self._block_ts_cache[block_number] = ts
+            return ts
+        except Exception as exc:
+            logger.warning("UmaHttpRpcClient.get_block_timestamp(%d) failed: %s", block_number, exc)
+            return 0
+
 
 # ── parser ─────────────────────────────────────────────────────────── #
 
 
-def parse_settle_event(log_entry: dict) -> ResolvedMarket:
+def parse_settle_event(
+    log_entry: dict,
+    *,
+    block_timestamp: Optional[int] = None,
+) -> ResolvedMarket:
     """Decode a raw eth_getLogs entry into a ``ResolvedMarket``.
 
-    Expects the canonical Polygon log shape::
+    Bug fixes (2026-05-07):
+    1. condition_id is derived from ancillaryData + requester (topics[1] is the
+       requester address, NOT the condition_id — the CTF adapter stores condition_id
+       as keccak256(encodePacked(requester, questionId, 2))).
+    2. blockTimestamp is NOT returned by eth_getLogs on Polygon/Tenderly — caller
+       must supply it via the ``block_timestamp`` parameter (fetched separately
+       via eth_getBlockByNumber).
 
-        {
-          "address": "0x...",
-          "topics": ["0x<sig>", "0x<condition_id_indexed>", ...],
-          "data": "0x<encoded payload>",
-          "blockNumber": "0x<hex>",
-          "transactionHash": "0x...",
-          "blockTimestamp": <int seconds>,
-        }
+    Parameters
+    ----------
+    log_entry:
+        Raw dict from eth_getLogs.
+    block_timestamp:
+        Unix timestamp (seconds) of the block, fetched via eth_getBlockByNumber.
+        Required — raises ValueError if None and not present in log_entry
+        (kept as optional so tests that pre-inject blockTimestamp still pass).
 
     Raises ``ValueError`` on shape mismatch — caller should log + skip
     rather than fabricate fields.
@@ -167,32 +369,38 @@ def parse_settle_event(log_entry: dict) -> ResolvedMarket:
     topics = log_entry.get("topics") or []
     if not topics or len(topics) < 2:
         raise ValueError(
-            f"log_entry must have at least 2 topics (sig + indexed condition_id); "
+            f"log_entry must have at least 2 topics (sig + indexed requester); "
             f"got {len(topics)}"
         )
 
-    # topics[1] is the indexed condition_id (32-byte left-padded hex).
-    condition_id = str(topics[1]).lower()
-    if not condition_id.startswith("0x"):
-        condition_id = "0x" + condition_id
-
-    data_field = log_entry.get("data", "0x")
-    # Resolved value is in the trailing 32 bytes of the data field for
-    # binary markets; for weather markets it's a 256-bit signed int.
-    # The exact decoding depends on the Polymarket OO version — caller
-    # MUST verify against the production contract before relying on
-    # this parser. Today we extract the trailing 32 bytes as int.
+    # topics[1] = requester address (CTF adapter), padded to 32 bytes.
+    # condition_id is derived via CTF formula: keccak256(encodePacked(requester, questionId, 2))
+    requester_topic = str(topics[1])
+    data_field = str(log_entry.get("data") or "0x")
+    ancillary_data = decode_ancillary_data(data_field)
     try:
-        if isinstance(data_field, str) and data_field.startswith("0x"):
-            data_hex = data_field[2:]
-        else:
-            data_hex = str(data_field)
-        if not data_hex:
-            resolved_value = 0
-        else:
-            # Last 32 bytes (= 64 hex chars).
-            tail = data_hex[-64:].zfill(64)
+        condition_id = derive_condition_id(requester_topic, ancillary_data)
+    except (ValueError, ImportError) as exc:
+        raise ValueError(f"condition_id derivation failed: {exc}") from exc
+
+    # Resolved value: price field, slot [3] in the ABI-encoded data (int256).
+    # For weather markets, price is the temperature bin boundary encoded as
+    # a scaled integer; for binary YES/NO markets it is 0 or 1e18.
+    try:
+        hex_str = data_field[2:] if data_field.startswith("0x") else data_field
+        if len(hex_str) >= 256:
+            # slot [3] = chars 192..256
+            price_hex = hex_str[192:256]
+            raw_int = int(price_hex, 16)
+            # int256 sign handling: if high bit set, it's negative
+            if raw_int >= (1 << 255):
+                raw_int -= (1 << 256)
+            resolved_value = raw_int
+        elif hex_str:
+            tail = hex_str[-64:].zfill(64)
             resolved_value = int(tail, 16)
+        else:
+            resolved_value = 0
     except (TypeError, ValueError) as exc:
         raise ValueError(f"resolved_value decode failed: {exc}") from exc
 
@@ -208,20 +416,25 @@ def parse_settle_event(log_entry: dict) -> ResolvedMarket:
     if not tx_hash:
         raise ValueError("transactionHash missing")
 
-    block_ts = log_entry.get("blockTimestamp")
-    if isinstance(block_ts, int):
-        resolved_at_utc = datetime.fromtimestamp(block_ts, tz=timezone.utc)
-    elif isinstance(block_ts, str):
-        # Hex (Polygon-format) or decimal — try both.
-        try:
-            ts_int = int(block_ts, 16) if block_ts.startswith("0x") else int(block_ts)
-        except ValueError as exc:
-            raise ValueError(f"blockTimestamp unparseable: {block_ts!r}") from exc
-        resolved_at_utc = datetime.fromtimestamp(ts_int, tz=timezone.utc)
-    else:
-        raise ValueError(
-            f"blockTimestamp missing or wrong type: {type(block_ts).__name__}"
-        )
+    # blockTimestamp: prefer explicit parameter, then log_entry field (for test compatibility),
+    # then raise (eth_getLogs does NOT return blockTimestamp on Polygon/Tenderly).
+    ts_source = block_timestamp
+    if ts_source is None:
+        block_ts = log_entry.get("blockTimestamp")
+        if isinstance(block_ts, int):
+            ts_source = block_ts
+        elif isinstance(block_ts, str):
+            try:
+                ts_source = int(block_ts, 16) if block_ts.startswith("0x") else int(block_ts)
+            except ValueError as exc:
+                raise ValueError(f"blockTimestamp unparseable: {block_ts!r}") from exc
+        else:
+            raise ValueError(
+                "blockTimestamp not available: eth_getLogs does not return blockTimestamp "
+                "on Polygon. Caller must fetch via eth_getBlockByNumber and pass as "
+                "block_timestamp parameter."
+            )
+    resolved_at_utc = datetime.fromtimestamp(ts_source, tz=timezone.utc)
 
     return ResolvedMarket(
         condition_id=condition_id,
@@ -360,7 +573,22 @@ def poll_uma_resolutions(
     resolutions: list[ResolvedMarket] = []
     for log_entry in raw_logs:
         try:
-            resolution = parse_settle_event(log_entry)
+            # Fetch block timestamp separately — eth_getLogs on Polygon/Tenderly
+            # does not include blockTimestamp in the response (bug fix 2026-05-07).
+            block_number_raw = log_entry.get("blockNumber", "0x0")
+            if isinstance(block_number_raw, str) and block_number_raw.startswith("0x"):
+                blk = int(block_number_raw, 16)
+            elif isinstance(block_number_raw, int):
+                blk = block_number_raw
+            else:
+                blk = 0
+            block_ts = rpc_client.get_block_timestamp(blk) if blk else 0
+
+            resolution = parse_settle_event(log_entry, block_timestamp=block_ts or None)
+
+            # Filter: only keep logs whose derived condition_id is tracked
+            if cond_list and resolution.condition_id not in cond_list:
+                continue
         except ValueError as exc:
             logger.warning(
                 "uma_resolution_listener: skipped malformed log entry: %s "
