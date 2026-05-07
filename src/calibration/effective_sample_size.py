@@ -13,6 +13,7 @@ SHADOW_ONLY: bool = True  # ZDM-02: explicitly advisory-only; must never enter e
 import sqlite3
 from dataclasses import dataclass
 
+from src.architecture.decorators import capability, protects
 from src.config import calibration_maturity_thresholds, cities_by_name
 
 
@@ -316,6 +317,8 @@ def summarize_maturity_shadow(groups: list[CalibrationDecisionGroup]) -> list[di
     return out
 
 
+@capability("calibration_decision_group_write", lease=True)
+@protects("INV-15", "INV-21")
 def write_decision_groups(
     conn: sqlite3.Connection,
     groups: list[CalibrationDecisionGroup],

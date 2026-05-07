@@ -21,13 +21,26 @@ from __future__ import annotations
 
 import pytest
 
-from scripts.topology_doctor_digest import (
-    _compile_glob,
-    _glob_match,
-    _matches_any,
-    _normalize_paths,
-)
+try:
+    from scripts.topology_doctor_digest import (
+        _compile_glob,
+        _glob_match,
+        _matches_any,
+        _normalize_paths,
+    )
+    _DIGEST_AVAILABLE = True
+except ModuleNotFoundError:
+    # topology_doctor_digest.py deleted in Phase 3 (ULTIMATE_DESIGN §9.1).
+    # Tests that depend on its private helpers are skipped post-deletion.
+    _DIGEST_AVAILABLE = False
+    _compile_glob = _glob_match = _matches_any = _normalize_paths = None  # type: ignore[assignment]
+
 from scripts.topology_doctor import build_digest, run_navigation
+
+_skip_if_no_digest = pytest.mark.skipif(
+    not _DIGEST_AVAILABLE,
+    reason="topology_doctor_digest.py deleted in Phase 3 (ULTIMATE_DESIGN §9.1)",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -81,6 +94,7 @@ def test_modify_topology_kernel_blocks_unrelated_writes():
 # P2 fix: input normalization
 # ---------------------------------------------------------------------------
 
+@_skip_if_no_digest
 class TestNormalizePaths:
     def test_drops_empty_strings(self):
         assert _normalize_paths(["", "src/foo.py", ""]) == ["src/foo.py"]
@@ -185,6 +199,7 @@ def test_replay_profile_strong_phrase_still_admits():
 # P2 fix: glob cache and equality fast-path
 # ---------------------------------------------------------------------------
 
+@_skip_if_no_digest
 class TestGlobCache:
     def test_compile_glob_returns_same_object(self):
         # The lru_cache must produce the same compiled pattern object on

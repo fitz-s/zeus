@@ -1,0 +1,477 @@
+# Created: 2026-05-06
+# Last reused or audited: 2026-05-06
+# Authority basis: ULTIMATE_DESIGN §2.2 sunset 2027-05-06; IMPLEMENTATION_PLAN Phase 0.B
+
+schema_version: 1
+metadata:
+  charter_version: 1.0.0
+  catalog_size: 16
+  created: 2026-05-06
+  authority_basis: ULTIMATE_DESIGN §2.2 sunset 2027-05-06
+capabilities:
+
+  # ─── seeded from source_rationale.yaml::write_routes::canonical_position_write ─
+  - id: canonical_position_write
+    owner_module: src/state/ledger.py
+    intent: >
+      Write canonical position events to the ledger (state/zeus_trades.db). This is
+      the sole authority for appending lifecycle-affecting position facts;
+      all downstream projections (src/state/projection.py) read from this
+      surface. Mutations here are TRUTH_REWRITE severity because rollback
+      requires a full Chronicler replay rebuild.
+    relationships:
+      protects_invariants: [INV-04, INV-08]
+      blocked_when:
+        - settlement_window_freeze_active
+    hard_kernel_paths:
+      - src/state/ledger.py
+      - src/state/projection.py
+      - src/state/lifecycle_manager.py
+      - state/zeus_trades.db
+    original_intent:
+      intent_test: "diff touches ledger.py or lifecycle_manager or position projection"
+      does_not_fit: log_and_advisory
+      scope_keywords: [position, ledger, lifecycle, projection, append]
+      out_of_scope_keywords: [paper, replay, backtest, mock]
+    sunset_date: 2027-05-06
+    lease_required: true
+    telemetry:
+      ritual_signal_emitted: true
+      latency_budget_ms: 100
+    reversibility_class: TRUTH_REWRITE
+
+  # ─── seeded from source_rationale.yaml::write_routes::control_write ─
+  - id: control_write
+    owner_module: src/control/control_plane.py
+    intent: >
+      Write governance-plane control events (kill switch, risk-level changes,
+      freeze activations) through the control plane. This is the sole surface
+      authorized to mutate live-runtime governance state; external contracts
+      are expressed via src/supervisor_api/contracts.py. Severity WORKING
+      because control writes are reversible by a subsequent control event.
+    relationships:
+      protects_invariants: [INV-05, INV-21]
+      blocked_when: []
+    hard_kernel_paths:
+      - src/control/control_plane.py
+      - src/supervisor_api/contracts.py
+    original_intent:
+      intent_test: "diff touches control_plane.py or supervisor_api contracts"
+      does_not_fit: log_and_advisory
+      scope_keywords: [control, kill_switch, freeze, risk_level, governance]
+      out_of_scope_keywords: [paper, replay, backtest, mock]
+    sunset_date: 2027-05-06
+    lease_required: false
+    telemetry:
+      ritual_signal_emitted: true
+      latency_budget_ms: 50
+    reversibility_class: WORKING
+
+  # ─── seeded from source_rationale.yaml::write_routes::settlement_write ─
+  - id: settlement_write
+    owner_module: src/execution/harvester.py
+    rounding_law_module: src/contracts/settlement_semantics.py
+    db_gate_module: src/state/db.py
+    intent: >
+      Write canonical settlement values (DR-33-A live-enabled path).
+      Harvester is the sole live writer; SettlementSemantics.assert_settlement_value
+      gates every row; INV-14 row identity (temperature_metric, physical_quantity,
+      observation_field, data_version) must be satisfied before commit.
+      Rollback requires Chronicler replay; severity TRUTH_REWRITE.
+    relationships:
+      protects_invariants: [INV-02, INV-14]
+      # OD-R-3 (operator decision 2026-05-06): kill_switch_active intentionally
+      # NOT in blocked_when. Settlement is post-trade truth-recording; kill
+      # switch is for outgoing venue commands (covered by live_venue_submit).
+      # Replay rebuild covers any divergence. See evidence/phase5_h_decision.md
+      # attack-pattern 10 for the spec-ambiguity rationale (§2.2 example vs
+      # §8 row 7) and the operator's choice (option B keep current spec).
+      blocked_when:
+        - settlement_window_freeze_active
+    hard_kernel_paths:
+      - src/execution/harvester.py
+      - src/contracts/settlement_semantics.py
+      - src/state/db.py
+      - state/zeus_trades.db
+      - state/zeus-world.db
+    original_intent:
+      intent_test: "diff touches harvester or settlement contract"
+      does_not_fit: log_and_advisory
+      scope_keywords: [settlement, harvester, oracle, hko, wmo]
+      out_of_scope_keywords: [paper, replay, backtest, mock]
+    sunset_date: 2027-05-06
+    lease_required: true
+    telemetry:
+      ritual_signal_emitted: true
+      latency_budget_ms: 200
+    reversibility_class: TRUTH_REWRITE
+
+  # ─── seeded from source_rationale.yaml::write_routes::backtest_diagnostic_write ─
+  - id: backtest_diagnostic_write
+    owner_module: src/engine/replay.py
+    intent: >
+      Write diagnostic backtest results to state/zeus_backtest.db. Scope is
+      SKILL and DIAGNOSTIC backtest purposes only; ECONOMICS purpose is
+      tombstoned. This surface carries no promotion authority; results are
+      read-model facts for operator inspection and do not flow into live
+      calibration or settlement without an explicit governance packet.
+    relationships:
+      protects_invariants: [INV-04]
+      blocked_when: []
+    hard_kernel_paths:
+      - src/engine/replay.py
+      - state/zeus_backtest.db
+    original_intent:
+      intent_test: "diff touches replay.py or backtest DB write path"
+      does_not_fit: log_and_advisory
+      scope_keywords: [backtest, replay, diagnostic, skill, economics]
+      out_of_scope_keywords: [paper, mock, live_promotion]
+    sunset_date: 2027-05-06
+    lease_required: false
+    telemetry:
+      ritual_signal_emitted: true
+      latency_budget_ms: 500
+    reversibility_class: WORKING
+
+  # ─── seeded from source_rationale.yaml::write_routes::calibration_persistence_write ─
+  - id: calibration_persistence_write
+    owner_module: src/calibration/store.py
+    intent: >
+      Write calibration model rows (calibration_pairs, platt_models tables).
+      Every settlement value written here must use the WMO helper; the
+      decision_group_id must remain stable across writes. This is a
+      TRUTH_REWRITE capability because downstream probability signals depend
+      directly on these rows, and rollback requires replay-correctness rebuild.
+    relationships:
+      protects_invariants: [INV-15, INV-21]
+      blocked_when:
+        - calibration_rebuild_in_progress
+    hard_kernel_paths:
+      - src/calibration/store.py
+      - state/zeus_trades.db
+    original_intent:
+      intent_test: "diff touches calibration store.py or platt_models write path"
+      does_not_fit: log_and_advisory
+      scope_keywords: [calibration, platt, store, model, decision_group]
+      out_of_scope_keywords: [paper, replay, backtest, mock]
+    sunset_date: 2027-05-06
+    lease_required: true
+    telemetry:
+      ritual_signal_emitted: true
+      latency_budget_ms: 300
+    reversibility_class: TRUTH_REWRITE
+
+  # ─── seeded from source_rationale.yaml::write_routes::calibration_decision_group_write ─
+  - id: calibration_decision_group_write
+    owner_module: src/calibration/effective_sample_size.py
+    intent: >
+      Write calibration_decision_group and associated calibration_pairs rows
+      in additive/shadow accounting mode. Promotion to canonical authority
+      requires an explicit governance packet; this capability is never
+      self-promoting. Separation from calibration_persistence_write prevents
+      shadow accounting from contaminating the live calibration surface.
+    relationships:
+      protects_invariants: [INV-15, INV-21]
+      blocked_when:
+        - calibration_rebuild_in_progress
+    hard_kernel_paths:
+      - src/calibration/effective_sample_size.py
+      - state/zeus_trades.db
+    original_intent:
+      intent_test: "diff touches effective_sample_size.py or decision_group write path"
+      does_not_fit: log_and_advisory
+      scope_keywords: [calibration, decision_group, effective_sample_size, shadow]
+      out_of_scope_keywords: [paper, replay, backtest, mock, promotion]
+    sunset_date: 2027-05-06
+    lease_required: true
+    telemetry:
+      ritual_signal_emitted: true
+      latency_budget_ms: 300
+    reversibility_class: TRUTH_REWRITE
+
+  # ─── seeded from source_rationale.yaml::write_routes::decision_artifact_write ─
+  - id: decision_artifact_write
+    owner_module: src/state/decision_chain.py
+    intent: >
+      Append decision artifacts (decision_log table) as evidence and read-model
+      facts. Decision artifacts are not lifecycle authority; they record what
+      happened, not what should happen. Writes here are TRUTH_REWRITE because
+      the decision chain is a canonical audit trail and replay-correctness
+      depends on its integrity.
+    relationships:
+      protects_invariants: [INV-04, INV-08]
+      blocked_when: []
+    hard_kernel_paths:
+      - src/state/decision_chain.py
+      - state/zeus_trades.db
+    original_intent:
+      intent_test: "diff touches decision_chain.py or decision_log write path"
+      does_not_fit: log_and_advisory
+      scope_keywords: [decision, artifact, chain, evidence, log]
+      out_of_scope_keywords: [paper, replay, backtest, mock]
+    sunset_date: 2027-05-06
+    lease_required: true
+    telemetry:
+      ritual_signal_emitted: true
+      latency_budget_ms: 100
+    reversibility_class: TRUTH_REWRITE
+
+  # ─── seeded from source_rationale.yaml::write_routes::venue_command_write ─
+  - id: venue_command_write
+    owner_module: src/state/venue_command_repo.py
+    intent: >
+      Append venue command events and manage collateral reservation terminal-release
+      atomically (venue_commands + venue_command_events tables). The atomic
+      append-and-release must never be split across transactions. WORKING severity
+      because commands are superseded by subsequent commands and do not require
+      replay to reverse.
+    relationships:
+      protects_invariants: [INV-21, INV-04]
+      blocked_when:
+        - kill_switch_active
+    hard_kernel_paths:
+      - src/state/venue_command_repo.py
+      - state/zeus_trades.db
+    original_intent:
+      intent_test: "diff touches venue_command_repo.py or venue command event path"
+      does_not_fit: log_and_advisory
+      scope_keywords: [venue, command, collateral, reservation, atomic]
+      out_of_scope_keywords: [paper, replay, backtest, mock]
+    sunset_date: 2027-05-06
+    lease_required: false
+    telemetry:
+      ritual_signal_emitted: true
+      latency_budget_ms: 100
+    reversibility_class: WORKING
+
+  # ─── seeded from source_rationale.yaml::write_routes::script_repair_write ─
+  - id: script_repair_write
+    owner_module: scripts/refit_platt_v2.py
+    intent: >
+      Write outputs from repair and refit scripts (scripts/**). Every script
+      invocation must carry dry-run/apply metadata as required by the scripts
+      manifest packet. WORKING severity because scripts operate on local working
+      surfaces reversible by ordinary means; they do not directly write canonical
+      DB tables.
+    relationships:
+      protects_invariants: [INV-04]
+      blocked_when: []
+    hard_kernel_paths:
+      - scripts/refit_platt_v2.py
+    original_intent:
+      intent_test: "diff touches scripts/** with write or apply semantics"
+      does_not_fit: log_and_advisory
+      scope_keywords: [script, repair, refit, dry_run, apply]
+      out_of_scope_keywords: [paper, mock]
+    sunset_date: 2027-05-06
+    lease_required: false
+    telemetry:
+      ritual_signal_emitted: true
+      latency_budget_ms: 5000
+    reversibility_class: WORKING
+
+  # ─── new: live_venue_submit ─
+  - id: live_venue_submit
+    owner_module: src/execution/executor.py
+    intent: >
+      Submit a real order to a live venue. Single boundary at which
+      LiveAuthToken phantom must be present.
+    relationships:
+      protects_invariants: [INV-21, INV-04]
+      blocked_when:
+        - kill_switch_active
+        - settlement_window_freeze_active
+        - risk_level_RED
+    hard_kernel_paths:
+      - src/execution/executor.py
+      - src/execution/venue_adapter.py  # Phase 4 deliverable — created when LiveAuthToken phantom + ABC split lands; entry pre-registers the path so the route function can recognize the future hard kernel from day 1
+      - src/execution/live_executor.py  # Phase 4 deliverable — created when LiveAuthToken phantom + ABC split lands; entry pre-registers the path so the route function can recognize the future hard kernel from day 1
+    original_intent:
+      intent_test: "diff touches live executor or venue adapter submit path"
+      does_not_fit: refuse_with_advice
+      scope_keywords: [live, submit, order, venue]
+      out_of_scope_keywords: [shadow, paper, replay, simulate, mock, dry-run]
+    sunset_date: 2027-05-06
+    lease_required: true
+    telemetry:
+      ritual_signal_emitted: true
+      latency_budget_ms: 50
+    reversibility_class: ON_CHAIN
+
+  # ─── new: on_chain_mutation ─
+  - id: on_chain_mutation
+    owner_module: src/execution/executor.py
+    intent: >
+      Any write that results in an on-chain state change beyond a single order
+      submit, including position reconciliation, void-on-divergence actions, and
+      chain-confirmed fill acknowledgments. Distinct from live_venue_submit
+      because the mutation persists externally after the local process exits.
+      No rollback path exists; severity ON_CHAIN.
+    relationships:
+      protects_invariants: [INV-21, INV-04]
+      blocked_when:
+        - kill_switch_active
+        - risk_level_RED
+    hard_kernel_paths:
+      - src/execution/executor.py
+      - src/execution/exchange_reconcile.py
+      - src/execution/settlement_commands.py
+      - state/zeus_trades.db
+    original_intent:
+      intent_test: "diff touches chain reconciliation, fill acknowledgment, void-on-divergence path, or on-chain redeem"
+      does_not_fit: refuse_with_advice
+      scope_keywords: [chain, reconcile, fill, void, on_chain]
+      out_of_scope_keywords: [shadow, paper, replay, simulate, mock, dry-run]
+    sunset_date: 2027-05-06
+    lease_required: true
+    telemetry:
+      ritual_signal_emitted: true
+      latency_budget_ms: 50
+    reversibility_class: ON_CHAIN
+
+  # ─── new: authority_doc_rewrite ─
+  - id: authority_doc_rewrite
+    owner_module: docs/operations/AGENTS.md
+    intent: >
+      Rewrite or materially alter an authority document (AGENTS.md,
+      LIVE_LAUNCH_HANDOFF.md, invariants.yaml, source_rationale.yaml, or any
+      doc whose authority_role is executable_law or registry). ARCHIVE severity
+      because authority docs are provenance records; rollback requires git
+      revert. Protects against authority confusion where an archived doc is
+      silently treated as truth.
+    relationships:
+      protects_invariants: [INV-10]
+      blocked_when: []
+    hard_kernel_paths:
+      - docs/operations/AGENTS.md
+      - docs/operations/LIVE_LAUNCH_HANDOFF.md
+      - architecture/invariants.yaml
+      - architecture/source_rationale.yaml
+    original_intent:
+      intent_test: "diff touches an authority doc or registry-role file"
+      does_not_fit: log_and_advisory
+      scope_keywords: [authority, doc, registry, agents, handoff, invariants]
+      out_of_scope_keywords: [paper, replay, backtest, mock]
+    sunset_date: 2027-05-06
+    lease_required: false
+    telemetry:
+      ritual_signal_emitted: true
+      latency_budget_ms: 200
+    reversibility_class: ARCHIVE
+
+  # ─── new: archive_promotion ─
+  - id: archive_promotion
+    owner_module: docs/operations/AGENTS.md
+    intent: >
+      Move a file from an active surface to the historical archive
+      (docs/operations/historical/ or equivalent). Archive promotion is
+      irreversible by ordinary agent means; rollback requires git revert and
+      must carry evidence that the promoted artifact is superseded by a
+      current-authority replacement.
+    relationships:
+      protects_invariants: [INV-10]
+      blocked_when: []
+    hard_kernel_paths:
+      - docs/operations/AGENTS.md
+      - architecture/source_rationale.yaml
+    original_intent:
+      intent_test: "diff moves or renames a file into a historical or archive directory"
+      does_not_fit: log_and_advisory
+      scope_keywords: [archive, promote, historical, supersede, move]
+      out_of_scope_keywords: [paper, replay, backtest, mock]
+    sunset_date: 2027-05-06
+    lease_required: false
+    telemetry:
+      ritual_signal_emitted: true
+      latency_budget_ms: 200
+    reversibility_class: ARCHIVE
+
+  # ─── new: source_validity_flip ─
+  - id: source_validity_flip
+    owner_module: src/contracts/world_view/__init__.py
+    intent: >
+      Flip the validity flag of a data source (world_view, calibration transfer
+      policy, or data_version sentinel). TRUTH_REWRITE because downstream
+      probability signals treat source validity as a gate; flipping incorrectly
+      poisons the entire computation chain. Protects INV-04 (strategy_key
+      governance) and INV-06 (data source authority).
+    relationships:
+      protects_invariants: [INV-04, INV-06]
+      blocked_when:
+        - calibration_rebuild_in_progress
+    hard_kernel_paths:
+      - src/contracts/world_view/__init__.py
+      - src/contracts/world_view/calibration.py
+      - src/data/calibration_transfer_policy.py
+    original_intent:
+      intent_test: "diff touches world_view validity, calibration transfer policy, or data_version sentinel"
+      does_not_fit: log_and_advisory
+      scope_keywords: [validity, source, flip, world_view, transfer_policy, data_version]
+      out_of_scope_keywords: [paper, replay, backtest, mock]
+    sunset_date: 2027-05-06
+    lease_required: true
+    telemetry:
+      ritual_signal_emitted: true
+      latency_budget_ms: 100
+    reversibility_class: TRUTH_REWRITE
+
+  # ─── new: calibration_rebuild ─
+  - id: calibration_rebuild
+    owner_module: src/calibration/manager.py
+    intent: >
+      Trigger a full rebuild of the calibration model family from the canonical
+      observation surface. Distinct from calibration_persistence_write (which
+      appends individual rows); a rebuild recomputes and overwrites the entire
+      platt_models and calibration_pairs family for a strategy_key. Protects
+      family-separation invariants and replay-correctness for Platt monotonicity.
+    relationships:
+      protects_invariants: [INV-15, INV-21]
+      blocked_when:
+        - settlement_window_freeze_active
+    hard_kernel_paths:
+      - src/calibration/manager.py
+      - src/calibration/store.py
+      - state/zeus_trades.db
+    original_intent:
+      intent_test: "diff triggers or modifies full calibration rebuild logic"
+      does_not_fit: log_and_advisory
+      scope_keywords: [calibration, rebuild, recompute, platt, family, full]
+      out_of_scope_keywords: [paper, replay, backtest, mock]
+    sunset_date: 2027-05-06
+    lease_required: true
+    telemetry:
+      ritual_signal_emitted: true
+      latency_budget_ms: 10000
+    reversibility_class: TRUTH_REWRITE
+
+  # ─── new: settlement_rebuild ─
+  - id: settlement_rebuild
+    owner_module: src/execution/harvester.py
+    intent: >
+      Recompute and overwrite canonical settlement rows for a historical window
+      (P-E reconstruction or harvester re-run). Distinct from settlement_write
+      (which appends a single new row); a rebuild may touch multiple rows
+      identified by INV-14 identity (temperature_metric, physical_quantity,
+      observation_field, data_version). Rollback requires Chronicler replay;
+      severity TRUTH_REWRITE.
+    relationships:
+      protects_invariants: [INV-02, INV-14]
+      blocked_when:
+        - settlement_window_freeze_active
+    hard_kernel_paths:
+      - src/execution/harvester.py
+      - src/contracts/settlement_semantics.py
+      - src/state/db.py
+      - state/zeus_trades.db
+      - state/zeus-world.db
+    original_intent:
+      intent_test: "diff touches settlement rebuild, P-E reconstruction, or harvester re-run path"
+      does_not_fit: refuse_with_advice
+      scope_keywords: [settlement, rebuild, reconstruction, recompute, historical]
+      out_of_scope_keywords: [paper, replay, backtest, mock]
+    sunset_date: 2027-05-06
+    lease_required: true
+    telemetry:
+      ritual_signal_emitted: true
+      latency_budget_ms: 30000
+    reversibility_class: TRUTH_REWRITE

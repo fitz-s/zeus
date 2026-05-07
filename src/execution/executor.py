@@ -1,6 +1,7 @@
 """Order executor: limit-order-only execution engine. Spec §6.4.
 
-Live mode only: places limit orders via Polymarket CLOB API.
+Gate 2 routing: routes to LiveExecutor (via venue_adapter) when ZEUS_MODE=live,
+else routes to ShadowExecutor for paper/replay/backtest paths.
 
 Key rules:
 - Limit orders ONLY (never market orders)
@@ -20,7 +21,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
-from typing import Optional
+from typing import Any, Optional
 
 from src.config import get_mode, settings
 from src.riskguard.discord_alerts import alert_trade
@@ -40,6 +41,7 @@ from src.contracts.execution_price import (
     ExecutionPriceContractError,
 )
 from src.types import BinEdge
+from src.architecture.decorators import capability, protects
 from src.state.db import get_connection, get_trade_connection_with_world
 
 logger = logging.getLogger(__name__)
@@ -1336,6 +1338,8 @@ def _legacy_entry_intent_from_final(
     )
 
 
+@capability("live_venue_submit", lease=True)
+@protects("INV-21", "INV-04")
 def execute_final_intent(
     intent: FinalExecutionIntent,
     conn: Optional[sqlite3.Connection] = None,
@@ -1349,6 +1353,8 @@ def execute_final_intent(
     inputs; those belong upstream of corrected cost-basis construction.
     """
 
+    from src.architecture.gate_runtime import check as _gate_runtime_check
+    _gate_runtime_check("live_venue_submit")
     if not isinstance(intent, FinalExecutionIntent):
         raise TypeError(
             "execute_final_intent requires FinalExecutionIntent, "
@@ -1403,6 +1409,8 @@ def execute_intent(
     with a WARNING log.
     """
 
+    from src.architecture.gate_runtime import check as _gate_runtime_check
+    _gate_runtime_check("live_venue_submit")
     trade_id = str(uuid.uuid4())[:12]
 
     limit_price = intent.limit_price
@@ -1457,6 +1465,27 @@ def create_exit_order_intent(
 
 
 
+def submit_order(order: Any, *, mode: Optional[str] = None) -> Any:
+    """Gate 2 top-level router: live path uses VenueAdapterExecutor, shadow uses ShadowExecutorImpl.
+
+    C-4 shim: routes based on ZEUS_MODE env var (or explicit mode kwarg).
+    Live callers should prefer execute_final_intent / execute_intent directly;
+    this shim exists for backwards-compat call sites that cannot yet pass a token.
+
+    @untyped_for_compat is NOT applied here because this shim is new code, not
+    a legacy site.  Deprecated callers should migrate to the typed ABC paths.
+    """
+    from src.config import get_mode as _get_mode
+
+    resolved_mode = mode or _get_mode()
+    if resolved_mode == "live":
+        from src.execution.venue_adapter import VenueAdapterExecutor
+        return VenueAdapterExecutor().submit(order)
+    else:
+        from src.execution.shadow_executor import ShadowExecutorImpl
+        return ShadowExecutorImpl().submit(order)
+
+
 def place_sell_order(
     token_id: str,
     shares: float,
@@ -1500,6 +1529,8 @@ def execute_exit_order(
       4. submit: client.place_limit_order (SDK call)
       5. ack: append_event SUBMIT_ACKED / SUBMIT_REJECTED / SUBMIT_UNKNOWN
     """
+    from src.architecture.gate_runtime import check as _gate_runtime_check
+    _gate_runtime_check("settlement_write")
     from src.data.polymarket_client import PolymarketClient
     from src.execution.command_bus import IdempotencyKey, IntentKind, VenueCommand, CommandState
     from src.state.venue_command_repo import insert_command, append_event, get_command
@@ -2235,6 +2266,8 @@ def _live_order(
       5. submit: client.place_limit_order (SDK call)
       6. ack: append_event SUBMIT_ACKED / SUBMIT_REJECTED / SUBMIT_UNKNOWN
     """
+    from src.architecture.gate_runtime import check as _gate_runtime_check
+    _gate_runtime_check("live_venue_submit")
     from src.data.polymarket_client import PolymarketClient, V2PreflightError
     from src.execution.command_bus import IdempotencyKey, IntentKind
     from src.state.venue_command_repo import insert_command, append_event

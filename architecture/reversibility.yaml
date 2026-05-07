@@ -1,0 +1,68 @@
+# Created: 2026-05-06
+# Last reused or audited: 2026-05-06
+# Authority basis: ULTIMATE_DESIGN §2.3 sunset 2027-05-06; IMPLEMENTATION_PLAN Phase 1
+
+schema_version: 1
+metadata:
+  created: 2026-05-06
+  authority_basis: ULTIMATE_DESIGN §2.3 sunset 2027-05-06; IMPLEMENTATION_PLAN Phase 1
+  enforcement_note: >
+    Every capability in capabilities.yaml carries a reversibility_class field
+    that references one of the four classes defined here. Severity determines
+    the default enforcement posture and lease requirements.
+
+reversibility_classes:
+
+  - id: ON_CHAIN
+    severity: 4
+    anchor_capability: live_venue_submit
+    description: >
+      Writes that result in on-chain state changes (order submission, fill
+      acknowledgment, void-on-divergence). No local rollback path exists;
+      reversal requires a counter-transaction at the venue. The highest
+      severity class — enforcement_default is blocking for any diff touching
+      the anchor capability without an active lease.
+    enforcement_default: blocking
+    rollback_path: counter_transaction_at_venue
+    sunset_date: 2027-05-06
+    examples:
+      - live_venue_submit
+      - on_chain_mutation
+
+  - id: TRUTH_REWRITE
+    severity: 3
+    anchor_capability: settlement_write
+    description: >
+      Writes to canonical authority tables (settlement, calibration, position
+      ledger, decision chain). Rollback requires a full Chronicler replay
+      rebuild. Downstream probability signals and position projections depend
+      directly on these rows; incorrect writes propagate silently.
+    enforcement_default: blocking
+    rollback_path: chronicler_replay_rebuild
+    sunset_date: 2027-05-06
+    examples:
+      - settlement_write
+      - canonical_position_write
+
+  - id: ARCHIVE
+    severity: 2
+    anchor_capability: authority_doc_rewrite
+    description: >
+      Rewrites or promotions of authority documents. Rollback requires git revert.
+    enforcement_default: advisory_with_evidence_required
+    rollback_path: git_revert
+    sunset_date: 2027-05-06
+    examples:
+      - authority_doc_rewrite
+      - archive_promotion
+
+  - id: WORKING
+    severity: 1
+    anchor_capability: control_write
+    description: >
+      Writes to local working surfaces that are reversible by ordinary means.
+    enforcement_default: advisory
+    rollback_path: ordinary_reversal
+    sunset_date: 2027-05-06
+    examples:
+      - control_write

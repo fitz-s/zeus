@@ -1,0 +1,11 @@
+{
+  "window_60d_count": 161,
+  "window_30d_count": 161,
+  "rate_per_day_30d": 32.2,
+  "note_effective_window_days": 5,
+  "note_plan_baseline_rate_per_day": 2.6,
+  "classified_legitimate_30d": 27,
+  "classified_bypass_30d": 19,
+  "classified_sample_size": 46,
+  "examples_bypass": ["1d9a367d", "4fc327fa", "ee94539f"]
+}

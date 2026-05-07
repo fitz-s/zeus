@@ -32,6 +32,8 @@ import uuid
 from decimal import Decimal, InvalidOperation
 from typing import Any, Iterable, Iterator, Optional
 
+from src.architecture.decorators import capability, protects
+
 UNRESOLVED_SIDE_EFFECT_STATES: tuple[str, ...] = (
     "SUBMIT_UNKNOWN_SIDE_EFFECT",
     "UNKNOWN",
@@ -416,6 +418,8 @@ def insert_submission_envelope(
     return envelope_id_value
 
 
+@capability("venue_command_write", lease=False)
+@protects("INV-21", "INV-04")
 def insert_command(
     conn: sqlite3.Connection,
     *,

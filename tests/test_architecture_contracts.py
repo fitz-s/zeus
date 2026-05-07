@@ -3971,6 +3971,33 @@ def test_cycle_runtime_entry_path_keeps_legacy_write_before_canonical_helper():
     assert "_dual_write_canonical_entry_if_available(" in snippet
 
 
+def _stub_reprice_from_snapshot(conn, d, fields, ctx):
+    """Stub for reprice_from_snapshot used in _discovery_phase_harness.
+
+    Populates d.tokens["executable_snapshot_reprice"] and d.final_execution_intent
+    with all fields required by the is_live_env guard in execute_discovery_phase
+    (cycle_runtime.py lines 2817-2867). Returns d.edge.entry_price as best ask.
+    """
+    from types import SimpleNamespace
+
+    intent_id = "stub-intent-1"
+    price_str = str(d.edge.entry_price)
+    d.tokens["executable_snapshot_reprice"] = {
+        "live_submit_authority": True,
+        "final_execution_intent_id": intent_id,
+        "corrected_candidate_limit_price": price_str,
+        "corrected_pricing_shadow": {
+            "sweep_submitted_shares": "20",
+            "sweep_filled_shares": "20",
+        },
+    }
+    d.final_execution_intent = SimpleNamespace(
+        hypothesis_id=intent_id,
+        final_limit_price=d.edge.entry_price,
+    )
+    return d.edge.entry_price
+
+
 def _discovery_phase_harness(*, conn: sqlite3.Connection):
     from datetime import datetime, timezone
     from types import SimpleNamespace
@@ -4093,6 +4120,27 @@ def _discovery_phase_harness(*, conn: sqlite3.Connection):
         _utcnow=lambda: datetime(2026, 4, 3, 0, 5, tzinfo=timezone.utc),
         DiscoveryMode=DiscoveryMode,
         NoTradeCase=SimpleNamespace,
+        # Stub for _select_final_submit_order_type: avoids _select_risk_allocator_order_type
+        # which requires a configured allocator (not available in unit-test harness).
+        select_final_order_type=lambda conn, snapshot_id: "GTC",
+        # Stub for reprice_from_snapshot: bypasses _reprice_decision_from_executable_snapshot
+        # which requires a live executable_market_snapshots row with MAX_SNAPSHOT_AGE_SECONDS=5.
+        # Populates d.tokens["executable_snapshot_reprice"] and d.final_execution_intent
+        # with all fields required by the is_live_env guard in execute_discovery_phase.
+        reprice_from_snapshot=_stub_reprice_from_snapshot,
+        # Stub for execute_final_intent: satisfies the live-path execution call.
+        # Requires trade_id and command_state="FILLED" so materialize_position runs
+        # (cycle_runtime.py line 3043-3055: _cmd_durable requires ACKED/PARTIAL/FILLED).
+        execute_final_intent=lambda intent, conn=None, decision_id=None, snapshot_conn=None: SimpleNamespace(
+            trade_id="trade-1",
+            order_id="ord-1",
+            status="filled",
+            fill_price=0.5,
+            submitted_price=0.5,
+            shares=20.0,
+            command_state="FILLED",
+            timeout_seconds=None,
+        ),
     )
 
     execute_discovery_phase(

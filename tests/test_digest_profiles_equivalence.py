@@ -32,6 +32,15 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 TOPOLOGY = REPO_ROOT / "architecture" / "topology.yaml"
 EXPORT = REPO_ROOT / "architecture" / "digest_profiles.py"
 
+# Phase 3 deletion: both the YAML block and the Python mirror are removed in
+# ULTIMATE_DESIGN §9.1 Phase 3. Once deleted, these equivalence tests have no
+# subject and are skipped rather than errored.
+_DIGEST_PROFILES_EXIST = EXPORT.exists()
+_skip_if_deleted = pytest.mark.skipif(
+    not _DIGEST_PROFILES_EXIST,
+    reason="architecture/digest_profiles.py deleted in Phase 3 (ULTIMATE_DESIGN §9.1)",
+)
+
 
 def _load_yaml_profiles() -> list[dict]:
     import yaml
@@ -44,6 +53,7 @@ def _load_python_profiles() -> list[dict]:
     return PROFILES
 
 
+@_skip_if_deleted
 def test_digest_profiles_count_matches():
     """RELATIONSHIP: same number of profiles in YAML and Python mirror."""
     yaml_profiles = _load_yaml_profiles()
@@ -54,6 +64,7 @@ def test_digest_profiles_count_matches():
     )
 
 
+@_skip_if_deleted
 def test_digest_profiles_ids_match():
     """RELATIONSHIP: every YAML profile id appears in Python mirror, same order."""
     yaml_ids = [p.get("id") for p in _load_yaml_profiles()]
@@ -64,6 +75,7 @@ def test_digest_profiles_ids_match():
     )
 
 
+@_skip_if_deleted
 def test_digest_profiles_byte_for_byte_equivalent():
     """RELATIONSHIP: complete content equivalence between YAML and Python.
 
@@ -81,6 +93,7 @@ def test_digest_profiles_byte_for_byte_equivalent():
     )
 
 
+@_skip_if_deleted
 def test_digest_profiles_export_check_passes():
     """RELATIONSHIP: scripts/digest_profiles_export.py --check returns 0.
 

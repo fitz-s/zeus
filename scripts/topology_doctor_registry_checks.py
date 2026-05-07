@@ -402,10 +402,11 @@ def check_wmo_gate(api: Any) -> list[Any]:
 
 def run_strict(api: Any) -> Any:
     topology = api.load_topology()
-    schema = api.load_schema()
+    # R12 Phase 5.B: load_schema() / _check_schema(topology, schema) removed.
+    # _check_schema now uses inlined SCHEMA_REQUIRED_TOP_LEVEL_KEYS constant.
     tracked = api._git_ls_files()
     issues: list[Any] = []
-    issues.extend(api._check_schema(topology, schema))
+    issues.extend(api._check_schema(topology))
     issues.extend(api._check_coverage(topology))
     issues.extend(api._check_active_pointers(topology))
     issues.extend(api._check_registries(topology, tracked))

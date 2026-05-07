@@ -7,8 +7,13 @@
         "hooks": [
           {
             "type": "command",
-            "command": ".claude/hooks/post-merge-cleanup-reminder.sh",
-            "description": "Soft cleanup checklist after gh pr merge / git merge: worktree removal, ops packet lifecycle (delete-by-default), context compact, agent-replay pruning"
+            "command": "python3 .claude/hooks/dispatch.py post_merge_cleanup",
+            "description": "[Phase 3 cutover] Soft cleanup checklist after gh pr merge (replaces post-merge-cleanup-reminder.sh)"
+          },
+          {
+            "type": "command",
+            "command": "python3 .claude/hooks/dispatch.py pr_open_monitor_arm",
+            "description": "[Phase 2 new] After successful gh pr create or gh pr ready, emit additionalContext to arm Monitor + MONITOR_ARM_REQUIRED sentinel (ATTACK 9)"
           }
         ]
       }
@@ -19,8 +24,18 @@
         "hooks": [
           {
             "type": "command",
-            "command": ".claude/hooks/pre-edit-architecture.sh",
-            "description": "Block edits to architecture/** without ARCH_PLAN_EVIDENCE env (round2_verdict.md §4.1 #5)"
+            "command": "python3 .claude/hooks/dispatch.py pre_edit_architecture",
+            "description": "[Phase 3 cutover] Block edits to architecture/** without ARCH_PLAN_EVIDENCE env (replaces pre-edit-architecture.sh)"
+          },
+          {
+            "type": "command",
+            "command": "python3 .claude/hooks/dispatch.py pre_write_capability_gate",
+            "description": "[Phase 3 cutover] Gate 1: refuse writes to blocking-class capability paths without ARCH_PLAN_EVIDENCE (replaces pre-write-capability-gate.sh; sunset 2026-08-04)"
+          },
+          {
+            "type": "command",
+            "command": "python3 .claude/hooks/dispatch.py pre_edit_hooks_protected",
+            "description": "[Phase 2 new] Block edits to .claude/settings.json or .claude/hooks/** without operator-signed sentinel (ATTACK 2 / OD-HOOK-2)"
           }
         ]
       },
@@ -29,23 +44,45 @@
         "hooks": [
           {
             "type": "command",
-            "command": ".claude/hooks/pre-commit-invariant-test.sh",
-            "description": "Run invariant pytest baseline before any `git commit` and block on regressions vs LIVE baseline 656/46/0 (round2_verdict.md §4.1 #5)"
+            "command": "python3 .claude/hooks/dispatch.py invariant_test",
+            "description": "[Phase 3 cutover] Run invariant pytest baseline before any git commit and block on regressions (replaces pre-commit-invariant-test.sh)"
           },
           {
             "type": "command",
-            "command": ".claude/hooks/pre-commit-secrets.sh",
-            "description": "Run gitleaks against staged content before any `git commit`; honors .gitleaks.toml allowlist + SECURITY-FALSE-POSITIVES.md (ultrareview25_remediation 2026-05-01 P0-2 — parity with operator-direct git pre-commit hook; gracefully skips if gitleaks not on PATH)"
+            "command": "python3 .claude/hooks/dispatch.py secrets_scan",
+            "description": "[Phase 3 cutover] Run gitleaks against staged content before any git commit; honors .gitleaks.toml allowlist (replaces pre-commit-secrets.sh)"
           },
           {
             "type": "command",
-            "command": ".claude/hooks/pre-merge-contamination-check.sh",
-            "description": "Advise conflict-first handling for git merge/pull/cherry-pick/rebase/am on protected branches; validate MERGE_AUDIT_EVIDENCE only for escalated broad/high-risk conflict surfaces"
+            "command": "python3 .claude/hooks/dispatch.py pre_merge_contamination",
+            "description": "[Phase 3 cutover] Conflict-first guidance + MERGE_AUDIT_EVIDENCE validation on protected branches (replaces pre-merge-contamination-check.sh)"
           },
           {
             "type": "command",
-            "command": ".claude/hooks/cotenant-staging-guard.sh",
-            "description": "Block git add -A/--all/. in main worktree (co-tenant absorption risk). Linked worktrees have isolated indexes and are always allowed. Bypass: COTENANT_GUARD_BYPASS=1"
+            "command": "python3 .claude/hooks/dispatch.py cotenant_staging_guard",
+            "description": "[Phase 3 cutover] Block broad git add in main worktree (co-tenant absorption risk) (replaces cotenant-staging-guard.sh)"
+          },
+          {
+            "type": "command",
+            "command": "python3 .claude/hooks/dispatch.py pre_checkout_uncommitted_overlap",
+            "description": "[Phase 2 new] Block git checkout/switch when tracked modifications overlap target branch tree (silent revert prevention)"
+          },
+          {
+            "type": "command",
+            "command": "python3 .claude/hooks/dispatch.py pr_create_loc_accumulation",
+            "description": "[Phase 2 new] Advisory: warn when gh pr create invoked with <2 commits or <80 LOC since base (paid auto-reviewer cost)"
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 .claude/hooks/dispatch.py phase_close_commit_required",
+            "description": "[Phase 2 new] Advisory: when phase-class subagent returns with tracked uncommitted changes, emit commit reminder"
           }
         ]
       }

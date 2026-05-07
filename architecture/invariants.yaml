@@ -9,6 +9,10 @@ invariants:
       semgrep_rule_ids: [zeus-no-direct-close-from-engine]
       tests:
         - tests/test_architecture_contracts.py::test_negative_constraints_include_no_local_close
+    capability_tags: []
+    relationship_tests: []
+    sunset_date: 2027-05-06
+
   - id: INV-02
     # CITATION_REPAIR 2026-04-28: tests: block added per SIDECAR-2 audit. Tests
     # already existed in tests/test_architecture_contracts.py (lifecycle phase
@@ -26,6 +30,12 @@ invariants:
       tests:
         - tests/test_architecture_contracts.py::test_lifecycle_phase_kernel_accepts_current_canonical_builder_folds
         - tests/test_architecture_contracts.py::test_lifecycle_phase_kernel_rejects_illegal_fold
+    capability_tags: 
+      - settlement_rebuild
+      - settlement_write
+    relationship_tests: []
+    sunset_date: 2027-05-06
+
   - id: INV-03
     zones: [K0_frozen_kernel]
     statement: Canonical authority is append-first and projection-backed.
@@ -36,6 +46,10 @@ invariants:
         - architecture/2026_04_02_architecture_kernel.sql
       scripts:
         - scripts/replay_parity.py
+    capability_tags: []
+    relationship_tests: []
+    sunset_date: 2027-05-06
+
   - id: INV-04
     zones: [K1_governance, K3_extension]
     statement: strategy_key is the sole governance key.
@@ -46,6 +60,18 @@ invariants:
         - architecture/2026_04_02_architecture_kernel.sql
       tests:
         - tests/test_architecture_contracts.py::test_strategy_key_manifest_is_frozen
+    capability_tags: 
+      - backtest_diagnostic_write
+      - canonical_position_write
+      - decision_artifact_write
+      - live_venue_submit
+      - on_chain_mutation
+      - script_repair_write
+      - source_validity_flip
+      - venue_command_write
+    relationship_tests: []
+    sunset_date: 2027-05-06
+
   - id: INV-05
     zones: [K1_governance, K3_extension]
     statement: Risk must change behavior.
@@ -54,6 +80,11 @@ invariants:
       spec_sections: [3, P3]
       tests:
         - tests/test_architecture_contracts.py::test_risk_actions_exist_in_schema
+    capability_tags: 
+      - control_write
+    relationship_tests: []
+    sunset_date: 2027-05-06
+
   - id: INV-06
     zones: [K0_frozen_kernel, K2_runtime, K3_extension]
     statement: Point-in-time truth beats hindsight truth.
@@ -63,6 +94,12 @@ invariants:
       negative_constraints: [NC-05]
       tests:
         - tests/test_cross_module_invariants.py::test_inv03_harvester_prefers_decision_snapshot_over_latest
+    capability_tags: 
+      - source_validity_flip
+    relationship_tests: 
+      - tests/test_cross_module_invariants.py::test_inv03_harvester_prefers_decision_snapshot_over_latest
+    sunset_date: 2027-05-06
+
   - id: INV-07
     zones: [K0_frozen_kernel]
     statement: Lifecycle grammar is finite and authoritative.
@@ -72,6 +109,10 @@ invariants:
       schema:
         - architecture/2026_04_02_architecture_kernel.sql
       semgrep_rule_ids: [zeus-no-direct-phase-assignment]
+    capability_tags: []
+    relationship_tests: []
+    sunset_date: 2027-05-06
+
   - id: INV-08
     zones: [K0_frozen_kernel]
     statement: Canonical write path has one transaction boundary.
@@ -80,6 +121,12 @@ invariants:
       spec_sections: [3, P0.3, P1, 19]
       scripts:
         - scripts/check_kernel_manifests.py
+    capability_tags: 
+      - canonical_position_write
+      - decision_artifact_write
+    relationship_tests: []
+    sunset_date: 2027-05-06
+
   - id: INV-09
     # CITATION_REPAIR 2026-04-28: tests added per R3 verdict round3_verdict.md §1 #5 LOCKED CALIBRATION_HARDENING (Week 13) precondition. Existing tests across 3 files already enforce the "missing data → first-class fact" invariant via 4 distinct enforcement surfaces: (a) data_coverage table status='MISSING' as queryable state with allowed transitions (src/state/data_coverage.py); (b) trace_status='degraded_missing_vectors' as explicit row-level fact (src/state/db.py:2164); (c) opportunity_loss_without_availability separation count (src/state/db.py:4455+ via summary["separation"]); (d) AuthorityTier='DEGRADED' CHECK constraint enforcement (src/state/collateral_ledger.py:46). This commit adds the tests: block — BATCH D pattern (schema-citation gap, not enforcement gap; methodology §5.X case study; same as INV-15 + INV-16/17 reverts).
     zones: [K2_runtime, K3_extension]
@@ -99,6 +146,12 @@ invariants:
         - tests/test_runtime_guards.py::test_load_portfolio_rehydrates_chain_only_quarantine_fact_when_projection_degraded
         - tests/test_runtime_guards.py::test_partial_stale_policy_uses_degraded_json_fallback
         - tests/test_collateral_ledger.py::test_authority_tier_DEGRADED_when_chain_unreachable
+    capability_tags: []
+    relationship_tests: 
+      - tests/test_k2_live_ingestion_relationships.py::test_R6_scanner_missing_flipped_to_written_by_append
+      - tests/test_k2_live_ingestion_relationships.py::test_R9_written_cannot_be_downgraded_to_missing
+    sunset_date: 2027-05-06
+
   - id: INV-10
     zones: [K1_governance]
     statement: LLM output is never authority.
@@ -109,6 +162,74 @@ invariants:
         - scripts/check_work_packets.py
       docs:
         - architecture/self_check/zero_context_entry.md
+    capability_tags: 
+      - archive_promotion
+      - authority_doc_rewrite
+    relationship_tests: []
+    sunset_date: 2027-05-06
+
+
+  - id: INV-11
+    # DEFINITION: 2026-05-06 — promoted from r9_inv_gap_audit.md (definition gap,
+    # not a reference gap). INV-11 was cited in src/contracts/AGENTS.md:27,
+    # tests/test_reality_contracts.py:4,33,236, architecture/test_topology.yaml:877
+    # but had no formal invariants.yaml entry. Formal definition added Phase 2.
+    zones: [K2_runtime, K3_extension]
+    statement: >
+      All blocking RealityContractVerifier contracts must be verified before trade
+      evaluation begins. External assumption contracts (tick_size, drift_detection,
+      and any p10-infra-registered blocking contract) must pass verification;
+      a failed blocking contract must halt evaluation for that cycle.
+    why: >
+      RealityContractVerifier is the boundary between Zeus's internal model and
+      live market reality. Allowing trade evaluation to proceed past a failed
+      blocking contract means decisions are made on assumptions that have been
+      violated — silent garbage in, confident garbage out.
+    enforced_by:
+      spec_sections: [P10]
+      tests:
+        - tests/test_reality_contracts.py::TestBlockingContractsVerifiedBeforeTrade::test_stale_blocking_contract_skips_cycle
+        - tests/test_reality_contracts.py::TestTickSizeEnforcedOnOrderRounding::test_tick_size_reality_contract_exists
+        - tests/test_reality_contracts.py::TestDriftDetectionGeneratesAntibody::test_drift_event_produces_antibody
+    capability_tags: [live_venue_submit]
+    relationship_tests:
+      - tests/test_reality_contracts.py::TestBlockingContractsVerifiedBeforeTrade::test_stale_blocking_contract_skips_cycle
+      - tests/test_reality_contracts.py::TestTickSizeEnforcedOnOrderRounding::test_tick_size_reality_contract_exists
+      - tests/test_reality_contracts.py::TestDriftDetectionGeneratesAntibody::test_drift_event_produces_antibody
+    sunset_date: 2027-05-06
+
+  - id: INV-12
+    # DEFINITION: 2026-05-06 — promoted from r9_inv_gap_audit.md (definition gap,
+    # not a reference gap). INV-12 was cited in src/contracts/execution_price.py:11,91,126,
+    # src/contracts/AGENTS.md:19,64, src/strategy/AGENTS.md:34,
+    # tests/test_no_bare_float_seams.py:7,200,204,281,
+    # tests/test_reality_contracts.py:5,139, architecture/test_topology.yaml:802
+    # but had no formal invariants.yaml entry. Formal definition added Phase 2.
+    zones: [K1_governance, K2_runtime, K3_extension]
+    statement: >
+      Bare floats are forbidden at Kelly/exit seam boundaries. Every probability
+      or price value crossing a module boundary (signal->strategy, strategy->executor)
+      must carry typed provenance — either as ExecutionPrice or EdgeContext.
+      Passing a raw float at these boundaries is a contract violation (INV-12/D3).
+    why: >
+      Raw floats are semantically opaque: a float of 0.6 cannot be distinguished
+      as a calibrated posterior, a market implied probability, or an edge-adjusted
+      probability without its type wrapper. Losing provenance at the boundary makes
+      attribution, audit, and correctness guarantees impossible.
+    enforced_by:
+      spec_sections: [P9.7]
+      negative_constraints: [NC-20, NC-21]
+      tests:
+        - tests/test_no_bare_float_seams.py::TestVigTreatmentSeam::test_model_only_posterior_rejects_raw_market_quote_vector
+        - tests/test_no_bare_float_seams.py::TestVigTreatmentSeam::test_corrected_prior_mode_rejects_raw_vwmp_vector
+        - tests/test_no_bare_float_seams.py::TestNoBareFloatAtKellyBoundary::test_implied_probability_fails_kelly_safe
+        - tests/test_reality_contracts.py::TestFeeIncludedInEdgeCalculation::test_fee_applied_before_kelly_in_evaluator
+    capability_tags: [canonical_position_write, decision_artifact_write, calibration_persistence_write]
+    relationship_tests:
+      - tests/test_no_bare_float_seams.py::TestVigTreatmentSeam::test_model_only_posterior_rejects_raw_market_quote_vector
+      - tests/test_no_bare_float_seams.py::TestNoBareFloatAtKellyBoundary::test_implied_probability_fails_kelly_safe
+    sunset_date: 2027-05-06
+
   - id: INV-21
     zones: [K2_runtime, K3_extension]
     statement: Kelly sizing requires an executable-price distribution, not a bare static entry_price.
@@ -119,6 +240,17 @@ invariants:
       semgrep_rule_ids: [zeus-no-bare-entry-price-kelly]
       tests:
         - tests/test_dual_track_law_stubs.py::test_kelly_input_carries_distributional_info
+    capability_tags: 
+      - calibration_decision_group_write
+      - calibration_persistence_write
+      - calibration_rebuild
+      - control_write
+      - live_venue_submit
+      - on_chain_mutation
+      - venue_command_write
+    relationship_tests: []
+    sunset_date: 2027-05-06
+
   - id: INV-14
     # CITATION_REPAIR 2026-04-28: tests: block added per SIDECAR-2 audit. Tests
     # already existed in tests/test_canonical_position_current_schema_alignment.py
@@ -140,6 +272,12 @@ invariants:
         - tests/test_canonical_position_current_schema_alignment.py::test_kernel_sql_position_current_declares_temperature_metric
         - tests/test_canonical_position_current_schema_alignment.py::test_canonical_constants_match_kernel_sql_position_current_columns
         - tests/test_dual_track_law_stubs.py::test_settlements_metric_identity_requires_non_null_and_unique_per_metric
+    capability_tags: 
+      - settlement_rebuild
+      - settlement_write
+    relationship_tests: []
+    sunset_date: 2027-05-06
+
   - id: INV-15
     # CITATION_REPAIR 2026-04-28: tests added per R3 verdict round3_verdict.md §1 #5 LOCKED CALIBRATION_HARDENING (Week 13) precondition. Existing tests in tests/test_phase4_rebuild.py (TestINV15SourceWhitelistGate) + tests/test_harvester_high_calibration_v2_route.py already enforce the source whitelist gate at src/calibration/store.py:117 (_resolve_training_allowed checks data_version prefix against _TRAINING_ALLOWED_SOURCES = {'tigge', 'ecmwf_ens'} + normalization of whitespace/case per docstring 'TIGGE_' or ' tigge_...' don't bypass). This commit adds the tests: block — BATCH D pattern (schema-citation gap, not enforcement gap; methodology §5.X case study). NUANCE: INV-15 statement is about canonical cycle identity; tests verify the source whitelist gate which transitively enforces cycle identity (only whitelisted sources carry verified issue_time provenance per spec §14). Indirect proxy relationship; acceptable per round-2 verdict §K3 antibody-contract retention.
     zones: [K2_runtime]
@@ -158,6 +296,13 @@ invariants:
         - tests/test_phase4_rebuild.py::TestINV15SourceWhitelistGate::test_source_with_trailing_space_is_normalized
         - tests/test_phase4_rebuild.py::TestINV15SourceWhitelistGate::test_data_version_with_leading_space_is_rejected
         - tests/test_harvester_high_calibration_v2_route.py::test_v2_pair_training_allowed_respects_inv15
+    capability_tags: 
+      - calibration_decision_group_write
+      - calibration_persistence_write
+      - calibration_rebuild
+    relationship_tests: []
+    sunset_date: 2027-05-06
+
   - id: INV-16
     # CITATION_REPAIR 2026-04-28: PRUNE_CANDIDATE marker REVERTED per critic-harness BATCH C cross-batch audit (docs/archives/packets/task_2026-04-27_harness_debate/evidence/critic-harness/batch_C_review_2026-04-28.md §INV-16 finding). The R1+R2+R3 verdicts based the prose-as-law claim on opponent's grep-of-`tests:`-field-only audit, which missed that 3 relationship tests for this invariant ALREADY EXIST in tests/test_phase6_causality_status.py (file docstring: "Relationship tests for Phase 6 INV-16 causality_status enforcement"). The schema-citation gap was real; the enforcement gap was imaginary.
     zones: [K2_runtime]
@@ -170,6 +315,10 @@ invariants:
         - tests/test_phase6_causality_status.py::TestCausalityStatusRejectAxis::test_evaluator_has_causality_status_reject_gate_for_low_track
         - tests/test_phase6_causality_status.py::TestCausalityStatusRejectAxis::test_causality_status_reject_is_distinct_from_observation_unavailable
         - tests/test_phase6_causality_status.py::TestCausalityStatusRejectAxis::test_day0_observation_context_carries_causality_status
+    capability_tags: []
+    relationship_tests: []
+    sunset_date: 2027-05-06
+
   - id: INV-17
     # CITATION_REPAIR 2026-04-28: PRUNE_CANDIDATE marker REVERTED per critic-harness BATCH C cross-batch audit. The R1+R2+R3 verdicts based the prose-as-law claim on opponent's grep-of-`tests:`-field-only audit, which missed that 6 relationship tests for this invariant ALREADY EXIST in tests/test_dt1_commit_ordering.py (file docstring: "Relationship tests for DT#1 / INV-17: DB authority writes commit BEFORE derived JSON exports fire"). The schema-citation gap was real; the enforcement gap was imaginary.
     zones: [K0_frozen_kernel, K2_runtime]
@@ -185,6 +334,16 @@ invariants:
         - tests/test_dt1_commit_ordering.py::TestCommitThenExportJsonFailure::test_commit_then_export_json_failure_after_commit
         - tests/test_dt1_commit_ordering.py::TestSavePortfolioRecoveryContract::test_save_portfolio_persists_last_committed_artifact_id
         - tests/test_dt1_commit_ordering.py::TestSavePortfolioRecoveryContract::test_load_portfolio_detects_stale_json_when_db_newer
+    capability_tags: []
+    relationship_tests: 
+      - tests/test_dt1_commit_ordering.py::TestCommitThenExportHappyPath::test_commit_then_export_happy_path
+      - tests/test_dt1_commit_ordering.py::TestCommitThenExportHappyPath::test_commit_then_export_fires_all_json_exports_in_order
+      - tests/test_dt1_commit_ordering.py::TestCommitThenExportDbFailure::test_commit_then_export_db_failure_suppresses_json
+      - tests/test_dt1_commit_ordering.py::TestCommitThenExportJsonFailure::test_commit_then_export_json_failure_after_commit
+      - tests/test_dt1_commit_ordering.py::TestSavePortfolioRecoveryContract::test_save_portfolio_persists_last_committed_artifact_id
+      - tests/test_dt1_commit_ordering.py::TestSavePortfolioRecoveryContract::test_load_portfolio_detects_stale_json_when_db_newer
+    sunset_date: 2027-05-06
+
   - id: INV-18
     zones: [K2_runtime]
     statement: Chain reconciliation state is three-valued — CHAIN_SYNCED / CHAIN_EMPTY / CHAIN_UNKNOWN — and void decisions require CHAIN_EMPTY.
@@ -193,6 +352,10 @@ invariants:
       spec_sections: [19]
       tests:
         - tests/test_dual_track_law_stubs.py::test_chain_reconciliation_three_state_machine
+    capability_tags: []
+    relationship_tests: []
+    sunset_date: 2027-05-06
+
   - id: INV-19
     zones: [K1_governance, K2_runtime]
     statement: RED risk level must cancel all pending orders and sweep active positions toward exit; advisory-only RED is forbidden.
@@ -201,6 +364,10 @@ invariants:
       spec_sections: [17]
       tests:
         - tests/test_dual_track_law_stubs.py::test_red_triggers_active_position_sweep
+    capability_tags: []
+    relationship_tests: []
+    sunset_date: 2027-05-06
+
   - id: INV-20
     zones: [K2_runtime]
     statement: Authority-loss must preserve monitor/exit/reconciliation paths in read-only mode; raising RuntimeError that kills the entire cycle on authority-loss is forbidden.
@@ -209,6 +376,10 @@ invariants:
       spec_sections: [21]
       tests:
         - tests/test_dual_track_law_stubs.py::test_load_portfolio_degrades_gracefully_on_authority_loss
+    capability_tags: []
+    relationship_tests: []
+    sunset_date: 2027-05-06
+
   - id: INV-13
     zones: [K2_runtime, K3_extension]
     statement: >
@@ -221,6 +392,10 @@ invariants:
         - tests/test_provenance_enforcement.py::TestUnregisteredConstantRaises::test_unregistered_constant_raises
         - tests/test_provenance_enforcement.py::TestAllStrategyConstantsRegistered::test_kelly_constants_in_registry
     severity: P1
+    capability_tags: []
+    relationship_tests: []
+    sunset_date: 2027-05-06
+
   - id: INV-22
     zones: [K1_governance, K2_runtime]
     statement: "make_family_id() must resolve to one canonical family grammar across every call site. strategy_key is either always part of the family key or never part of it; per-path drift is forbidden. Enforcement intent: one choke-point helper + test asserting every call site delegates to it."
@@ -231,6 +406,10 @@ invariants:
       semgrep_rule_ids: [zeus-no-fdr-family-key-drift]
       tests:
         - tests/test_dual_track_law_stubs.py::test_fdr_family_key_is_canonical
+    capability_tags: []
+    relationship_tests: []
+    sunset_date: 2027-05-06
+
   - id: INV-23
     zones: [K2_runtime]
     statement: A degraded portfolio projection must never export authority="VERIFIED"; the export must use a distinct non-VERIFIED label.
@@ -247,6 +426,10 @@ invariants:
       tests:
         - tests/test_p0_hardening.py::TestR1DegradedExportNeverVerified::test_truth_authority_map_does_not_collapse_degraded_to_verified
         - tests/test_p0_hardening.py::TestR1DegradedExportNeverVerified::test_save_portfolio_degraded_does_not_export_verified
+    capability_tags: []
+    relationship_tests: []
+    sunset_date: 2027-05-06
+
   - id: INV-24
     zones: [K2_runtime]
     statement: place_limit_order is gateway-only; non-gateway call sites are forbidden.
@@ -256,6 +439,10 @@ invariants:
       semgrep_rule_ids: [zeus-place-limit-order-gateway-only]
       tests:
         - tests/test_p0_hardening.py::test_place_limit_order_gateway_only
+    capability_tags: []
+    relationship_tests: []
+    sunset_date: 2027-05-06
+
   - id: INV-25
     zones: [K2_runtime]
     statement: When V2 endpoint preflight fails, no live place_limit_order call may be issued for that cycle.
@@ -265,6 +452,10 @@ invariants:
         - tests/test_p0_hardening.py::TestR2V2PreflightBlocksPlacement::test_v2_preflight_blocks_placement
         - tests/test_p0_hardening.py::TestR2V2PreflightBlocksPlacement::test_v2_preflight_success_does_not_block
         - tests/test_p0_hardening.py::TestR2V2PreflightBlocksPlacement::test_v2_preflight_fails_when_sdk_lacks_get_ok
+    capability_tags: []
+    relationship_tests: []
+    sunset_date: 2027-05-06
+
   - id: INV-26
     zones: [K2_runtime]
     statement: runtime_posture is read-only at runtime; the entry-decision path must consult it; non-NORMAL posture blocks new entry irrespective of risk_level.
@@ -273,6 +464,10 @@ invariants:
       tests:
         - tests/test_p0_hardening.py::TestR3RuntimePostureBlocksEntry::test_cycle_runner_posture_gate_blocks_with_reason
         - tests/test_p0_hardening.py::test_runtime_posture_yaml_present
+    capability_tags: []
+    relationship_tests: []
+    sunset_date: 2027-05-06
+
   - id: INV-29
     zones: [K2_runtime]
     statement: VenueCommand and IdempotencyKey are frozen dataclasses; CommandState,
@@ -345,6 +540,10 @@ invariants:
         - tests/test_command_bus_types.py::TestRepoTypeAlignment::test_transitions_state_keys_are_valid_command_states
         - tests/test_command_bus_types.py::TestRepoTypeAlignment::test_transitions_event_keys_are_valid_command_events
         - tests/test_command_bus_types.py::TestRepoTypeAlignment::test_inflight_states_match_repo_unresolved_filter
+    capability_tags: []
+    relationship_tests: []
+    sunset_date: 2027-05-06
+
   - id: INV-27
     zones: [K2_runtime]
     statement: Cycle summary must surface execution-truth warnings for portfolio positions in execution-unsafe states (quarantined without order_id, pending_* without order_id). Surfacing is observability-only and does NOT block entries.
@@ -355,6 +554,10 @@ invariants:
         - tests/test_p0_hardening.py::TestRWExecutionTruthWarnings::test_pending_state_without_order_id_surfaces_warning
         - tests/test_p0_hardening.py::TestRWExecutionTruthWarnings::test_clean_portfolio_emits_no_warnings_key
         - tests/test_p0_hardening.py::TestRWExecutionTruthWarnings::test_warnings_do_not_block_entries
+    capability_tags: []
+    relationship_tests: []
+    sunset_date: 2027-05-06
+
   - id: INV-28
     zones: [K0_frozen_kernel, K2_runtime]
     statement: Every venue order side effect (place_limit_order / cancel) must be
@@ -371,6 +574,10 @@ invariants:
         - tests/test_venue_command_repo.py::TestInsertCommandAtomicWithIntentCreatedEvent::test_rollback_on_mid_transaction_failure
         - tests/test_venue_command_repo.py::TestAppendEventStateTransitionIsGrammarChecked::test_illegal_transition_raises_value_error
         - tests/test_venue_command_repo.py::TestIdempotencyKeyUniquenessEnforced::test_duplicate_key_raises_integrity_error
+    capability_tags: []
+    relationship_tests: []
+    sunset_date: 2027-05-06
+
   - id: INV-30
     zones: [K2_runtime]
     statement: client.place_limit_order MUST be preceded by a venue_commands row
@@ -395,6 +602,10 @@ invariants:
         - tests/test_executor_command_split.py::test_synthetic_decision_id_emits_warning
         - tests/test_executor_db_target.py::TestExecutorDbTarget::test_live_order_writes_command_to_trades_db
         - tests/test_executor_db_target.py::TestExecutorDbTarget::test_exit_order_writes_command_to_trades_db
+    capability_tags: []
+    relationship_tests: []
+    sunset_date: 2027-05-06
+
   - id: INV-31
     zones: [K2_runtime]
     statement: Cycle start must scan venue_commands for unresolved states (SUBMITTING,
@@ -415,6 +626,10 @@ invariants:
         - tests/test_command_recovery.py::TestRecoveryResolutionTable::test_review_required_is_skipped
         - tests/test_command_recovery.py::TestRecoveryResolutionTable::test_venue_lookup_exception_leaves_state
         - tests/test_command_recovery.py::TestRecoveryCycleIntegration::test_cycle_runner_calls_recovery
+    capability_tags: []
+    relationship_tests: []
+    sunset_date: 2027-05-06
+
   - id: INV-32
     zones: [K2_runtime]
     statement: Position authority (materialize_position) advances ONLY after the
@@ -431,6 +646,10 @@ invariants:
         - tests/test_discovery_idempotency.py::TestMaterializePositionGate::test_materialize_skipped_for_submitting_command
         - tests/test_discovery_idempotency.py::TestMaterializePositionGate::test_materialize_skipped_for_unknown_command
         - tests/test_discovery_idempotency.py::TestMaterializePositionGate::test_materialize_runs_for_acked_command
+    capability_tags: []
+    relationship_tests: []
+    sunset_date: 2027-05-06
+
   - id: INV-33
     zones: [K2_runtime, K3_extension]
     statement: Corrected posterior construction must consume calibrated model belief plus either no market input or a named complete MarketPriorDistribution; raw executable quote/VWMP vectors are legacy-only.
@@ -441,6 +660,10 @@ invariants:
         - tests/test_no_bare_float_seams.py::TestVigTreatmentSeam::test_model_only_posterior_rejects_raw_market_quote_vector
         - tests/test_no_bare_float_seams.py::TestVigTreatmentSeam::test_corrected_prior_mode_rejects_raw_vwmp_vector
         - tests/test_no_bare_float_seams.py::TestVigTreatmentSeam::test_corrected_prior_mode_requires_named_market_prior_identity
+    capability_tags: []
+    relationship_tests: []
+    sunset_date: 2027-05-06
+
   - id: INV-34
     zones: [K2_runtime, K3_extension]
     statement: Corrected Kelly/FDR sizing authority must use executable cost-basis economics, not implied probability or a fee-adjusted probability relabeled as cost.
@@ -450,6 +673,10 @@ invariants:
       tests:
         - tests/test_no_bare_float_seams.py::TestNoBareFloatAtKellyBoundary::test_implied_probability_fails_kelly_safe
         - tests/test_no_bare_float_seams.py::TestNoBareFloatAtKellyBoundary::test_fee_adjusted_implied_probability_fails_corrected_kelly_authority
+    capability_tags: []
+    relationship_tests: []
+    sunset_date: 2027-05-06
+
   - id: INV-35
     zones: [K2_runtime]
     statement: Corrected FinalExecutionIntent contract shape must be submit-ready without posterior, VWMP, BinEdge, p_market, or entry_price recompute inputs.
@@ -458,6 +685,10 @@ invariants:
       negative_constraints: [NC-22]
       tests:
         - tests/test_no_bare_float_seams.py::TestNoBareFloatAtKellyBoundary::test_final_execution_intent_excludes_probability_and_quote_recompute_inputs
+    capability_tags: []
+    relationship_tests: []
+    sunset_date: 2027-05-06
+
   - id: INV-36
     zones: [K2_runtime]
     statement: Monitor and exit lanes must keep held-token quote/proceeds separate from posterior belief; sparse held-token market observations cannot become corrected posterior priors.
@@ -466,3 +697,6 @@ invariants:
       negative_constraints: [NC-23]
       tests:
         - tests/test_no_bare_float_seams.py::TestNoBareFloatInExitTriggerThresholds::test_monitor_bootstrap_refresh_keeps_held_quote_out_of_corrected_posterior
+    capability_tags: []
+    relationship_tests: []
+    sunset_date: 2027-05-06

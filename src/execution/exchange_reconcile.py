@@ -17,6 +17,8 @@ from decimal import Decimal, InvalidOperation
 from hashlib import sha256
 from typing import Any, Literal, Mapping, Optional
 
+from src.architecture.decorators import capability, protects
+
 FindingKind = Literal[
     "exchange_ghost_order",
     "local_orphan_order",
@@ -91,6 +93,8 @@ def init_exchange_reconcile_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(_SCHEMA)
 
 
+@capability("on_chain_mutation", lease=True)
+@protects("INV-21", "INV-04")
 def run_reconcile_sweep(
     adapter: Any,
     conn: sqlite3.Connection,

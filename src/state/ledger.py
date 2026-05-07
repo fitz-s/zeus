@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 import sqlite3
 
+from src.architecture.decorators import capability, protects
 from src.state.projection import (
     CANONICAL_POSITION_CURRENT_COLUMNS,
     ordered_values,
@@ -205,6 +206,8 @@ def apply_architecture_kernel_schema(conn: sqlite3.Connection) -> None:
     assert_canonical_transaction_schema(conn)
 
 
+@capability("canonical_position_write", lease=True)
+@protects("INV-04", "INV-08")
 def append_many_and_project(
     conn: sqlite3.Connection, events: list[dict], projection: dict
 ) -> None:

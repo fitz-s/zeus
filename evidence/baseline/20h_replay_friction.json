@@ -1,0 +1,9 @@
+{
+  "session_path": ".claude/projects/-Users-leofitz--openclaw-workspace-venus-zeus/bccc8776-2487-4170-8893-8201d976c157.jsonl",
+  "session_duration_hours": 90.74,
+  "topology_invocations": 54,
+  "total_tool_calls": 7581,
+  "estimated_friction_hours": 0.14,
+  "fixture_status": "found",
+  "note": "Largest available session (90.74h); briefing 20h session not isolable as discrete JSONL. Friction estimated as 20h × (54/7581) = 0.14h. Token-cost friction path not captured by invocation count — see .md for full analysis."
+}

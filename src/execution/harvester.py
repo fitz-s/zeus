@@ -44,6 +44,7 @@ from src.state.db import (
     query_settlement_events,
     record_token_suppression,
 )
+from src.architecture.decorators import capability, protects
 from src.state.canonical_write import commit_then_export
 from src.state.portfolio import (
     ENTRY_ECONOMICS_CORRECTED_COST_BASIS,
@@ -1128,6 +1129,9 @@ def _extract_all_bin_labels(event: dict) -> list[str]:
 
 
 
+@capability("settlement_write", lease=True)
+@capability("settlement_rebuild", lease=True)
+@protects("INV-02", "INV-14")
 def _write_settlement_truth(
     conn,
     city: City,

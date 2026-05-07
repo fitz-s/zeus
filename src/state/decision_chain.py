@@ -10,6 +10,7 @@ from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
+from src.architecture.decorators import capability, protects
 from src.config import get_mode
 from src.contracts.semantic_types import Direction, RejectionStage, DirectionAlias
 
@@ -191,7 +192,9 @@ class SettlementRecord:
     contract_version: str = LEGACY_SETTLEMENT_CONTRACT_VERSION
 
 
-def store_artifact(conn, artifact: CycleArtifact) -> "int | None":
+@capability("decision_artifact_write", lease=True)
+@protects("INV-04", "INV-08")
+def store_artifact(conn, artifact: CycleArtifact, env: str = "") -> "int | None":
     """Store cycle artifact to decision_log table.
 
     Returns the inserted row's decision_log.id (for DT#1 / INV-17 tracking),

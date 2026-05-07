@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Literal, Optional
 
 import numpy as np
 
+from src.architecture.decorators import capability, protects
 from src.state.db import get_world_connection
 from src.state.schema_introspection import has_columns
 
@@ -550,6 +551,8 @@ def save_platt_model(
     ))
 
 
+@capability("calibration_persistence_write", lease=True)
+@protects("INV-15", "INV-21")
 def save_platt_model_v2(
     conn: sqlite3.Connection,
     *,

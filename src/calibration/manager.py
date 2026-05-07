@@ -14,6 +14,7 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
+from src.architecture.decorators import capability, protects
 from src.calibration.platt import ExtendedPlattCalibrator, calibrate_and_normalize
 from src.calibration.store import (
     get_pairs_for_bucket,
@@ -620,6 +621,8 @@ def _canonical_pair_groups_valid(pairs: list[dict], *, unit: str | None = None) 
     return True
 
 
+@capability("calibration_rebuild", lease=True)
+@protects("INV-15", "INV-21")
 def maybe_refit_bucket(conn, city: City, target_date: str) -> bool:
     """Refit the city's cluster-season bucket if enough fresh pairs now exist."""
     season = season_from_date(target_date, lat=city.lat)

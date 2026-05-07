@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
+from src.architecture.decorators import capability, protects
 from src.calibration.forecast_calibration_domain import ForecastCalibrationDomain
 from src.config import (
     EntryForecastCalibrationPolicyId,
@@ -461,6 +462,8 @@ def target_transfer_cohort_evidence_valid(
     )
 
 
+@capability("source_validity_flip", lease=True)
+@protects("INV-04", "INV-06")
 def evaluate_calibration_transfer_policy(
     *,
     config: EntryForecastConfig,

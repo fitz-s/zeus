@@ -1,0 +1,117 @@
+# Created: 2026-05-06
+# Last reused or audited: 2026-05-06
+# Authority basis: docs/operations/task_2026-05-06_hook_redesign/PLAN.md §2.3
+#   + critic-opus §0.5 amendments (evidence/hook_redesign_critic_opus.md)
+# Phase 2: added HOOK_SCHEMA_CHANGE (ATTACK 2 / OD-HOOK-2); OPERATOR_SIGNATURE_REQUIRED for TRUTH_REWRITE class
+# Note: all evidence_file paths use `evidence/` prefix (OD-HOOK-3 resolved)
+
+schema_version: 1
+overrides:
+  - id: BASELINE_RATCHET
+    description: >
+      Phase deliberately raises the pytest baseline (e.g., adds new
+      antibody tests). Hook expects the new count; old count is stale.
+    requires:
+      evidence_file: evidence/baseline_ratchets/<date>_<phase>.md
+      fields_required: [old_baseline, new_baseline, justification, phase_id]
+      auto_expires_after: 24h
+    audit_log: .claude/logs/hook_overrides/baseline_ratchet.jsonl
+
+  - id: MAIN_REGRESSION
+    description: >
+      origin/main itself failed before this PR began. Reconciling on
+      our branch should not be gated by main's pre-existing failures.
+    requires:
+      evidence_file: evidence/main_regressions/<date>.md
+      fields_required: [main_commit_sha, failing_test_count_on_main, justification]
+      auto_expires_after: 7d
+    audit_log: .claude/logs/hook_overrides/main_regression.jsonl
+
+  - id: COTENANT_SHIM
+    description: >
+      Co-tenant agent's commit pipeline ran while we were mid-phase;
+      reconciling its baseline-bump entry into our branch.
+    requires:
+      evidence_file: evidence/cotenant_shims/<date>.md
+      fields_required: [cotenant_commit_sha, justification]
+      auto_expires_after: 24h
+    audit_log: .claude/logs/hook_overrides/cotenant_shim.jsonl
+
+  - id: REVIEW_SAFE_TAG
+    description: >
+      Inline [REVIEW-SAFE: <TAG>] tag exists, registered in
+      SECURITY-FALSE-POSITIVES.md and .gitleaks.toml allowlist.
+    requires:
+      inline_tag_present: true
+      registry_lookup: SECURITY-FALSE-POSITIVES.md
+      auto_expires_after: never
+    audit_log: .claude/logs/hook_overrides/review_safe_tag.jsonl
+
+  - id: OPERATOR_CLEARED
+    description: >
+      One-shot human-cleared finding.
+    requires:
+      evidence_file: evidence/secrets_overrides/<date>.md
+      operator_signature: true
+      auto_expires_after: 24h
+    audit_log: .claude/logs/hook_overrides/operator_cleared.jsonl
+
+  - id: STASH_FIRST_VERIFIED
+    description: >
+      Operator has stashed; pre-checkout overlap is acknowledged and
+      recoverable. Hook accepts after `git stash list` shows >=1 stash
+      whose timestamp is within 60s.
+    requires:
+      git_stash_list_recent: 60s
+      auto_expires_after: 5m
+    audit_log: .claude/logs/hook_overrides/stash_first_verified.jsonl
+
+  - id: OPERATOR_DESTRUCTIVE
+    description: >
+      Operator explicitly accepts uncommitted work loss.
+    requires:
+      evidence_file: evidence/destructive_checkouts/<date>.md
+      operator_signature: true
+      auto_expires_after: 1h
+    audit_log: .claude/logs/hook_overrides/operator_destructive.jsonl
+
+  - id: SOLO_AGENT
+    description: >
+      No co-tenant active; main-worktree broad-stage is safe.
+    requires:
+      orchestrator_active_agents: 1
+      auto_expires_after: 1h
+    audit_log: .claude/logs/hook_overrides/solo_agent.jsonl
+
+  - id: ISOLATED_WORKTREE
+    description: >
+      cwd is a linked worktree (isolated index).
+    requires:
+      git_dir_path_contains: "/worktrees/"
+      auto_expires_after: never
+    audit_log: .claude/logs/hook_overrides/isolated_worktree.jsonl
+
+  - id: OPERATOR_OVERRIDE
+    description: >
+      Emergency operator clause; hard ceiling.
+    requires:
+      evidence_file: evidence/operator_overrides/<date>.md
+      operator_signature: true
+      auto_expires_after: 14d
+    audit_log: .claude/logs/hook_overrides/operator_override.jsonl
+
+  - id: HOOK_SCHEMA_CHANGE
+    description: >
+      Authorized change to .claude/settings.json or .claude/hooks/** by the
+      operator. TRUTH_REWRITE-class: requires operator-signed sentinel file
+      at evidence/operator_signed/<override_id>_<date>.signed written outside
+      agent write surface (ATTACK 2 / OD-HOOK-2). Reversibility: any edit
+      to the hook configuration system is a TRUTH_REWRITE — the sentinel
+      prevents agents from self-disabling gates.
+    requires:
+      evidence_file: evidence/hook_schema_changes/<date>.md
+      operator_signed_sentinel: evidence/operator_signed/HOOK_SCHEMA_CHANGE_<date>.signed
+      operator_signature: true
+      auto_expires_after: 24h
+    reversibility_class: TRUTH_REWRITE
+    audit_log: .claude/logs/hook_overrides/hook_schema_change.jsonl

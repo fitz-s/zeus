@@ -27,7 +27,8 @@ yaml = import_yaml()
 
 ROOT = Path(__file__).resolve().parents[1]
 TOPOLOGY_PATH = ROOT / "architecture" / "topology.yaml"
-SCHEMA_PATH = ROOT / "architecture" / "topology_schema.yaml"
+# R12 (2026-05-06 Phase 5.B): SCHEMA_PATH deleted — topology_schema.yaml removed.
+# All schema data inlined as module constants below.
 INVARIANTS_PATH = ROOT / "architecture" / "invariants.yaml"
 SOURCE_RATIONALE_PATH = ROOT / "architecture" / "source_rationale.yaml"
 TEST_TOPOLOGY_PATH = ROOT / "architecture" / "test_topology.yaml"
@@ -143,6 +144,120 @@ _NAVIGATION_MODE_POLICY = {
 }
 
 ISSUE_BLOCKING_MODES = tuple(_NAVIGATION_MODE_POLICY)
+
+# ---------------------------------------------------------------------------
+# R12 Phase 5.B — Schema inline constants (formerly topology_schema.yaml)
+# topology_schema.yaml deleted 2026-05-06. These constants are the single source
+# of truth for required fields and contract shapes.
+# ---------------------------------------------------------------------------
+
+# Required top-level keys for architecture/topology.yaml validation.
+SCHEMA_REQUIRED_TOP_LEVEL_KEYS: tuple[str, ...] = (
+    "schema_version",
+    "metadata",
+    "coverage_roots",
+    "root_governed_files",
+    "state_surfaces",
+    "required_active_pointers",
+    "registry_directories",
+    "reference_fact_specs",
+    "digest_profile_selection",
+    "digest_profiles",
+)
+
+# Fields present in TopologyIssue JSON (used by issue_json_contract drift guard).
+SCHEMA_ISSUE_JSON_CONTRACT_LEGACY_FIELDS: tuple[str, ...] = (
+    "code",
+    "path",
+    "message",
+    "severity",
+)
+SCHEMA_ISSUE_JSON_CONTRACT_TYPED_FIELDS: tuple[str, ...] = (
+    "lane",
+    "scope",
+    "owner_manifest",
+    "repair_kind",
+    "blocking_modes",
+    "related_paths",
+    "companion_of",
+    "maturity",
+    "expires_at",
+    "lifecycle_state",
+    "lifecycle_owner",
+    "deferred_until",
+    "invalidation_condition",
+    "confidence",
+    "authority_status",
+    "repair_hint",
+)
+
+# Required fields in a route_card (agent_runtime_contract drift guard).
+SCHEMA_ROUTE_CARD_REQUIRED_FIELDS: tuple[str, ...] = (
+    "schema_version",
+    "authority_status",
+    "mode",
+    "task",
+    "profile",
+    "intent",
+    "task_class",
+    "write_intent",
+    "selection_evidence_class",
+    "needs_typed_intent",
+    "companion_files",
+    "admission_status",
+    "risk_tier",
+    "gate_budget",
+    "next_action",
+    "admitted_files",
+    "out_of_scope_files",
+    "forbidden_hits",
+    "hard_stops",
+    "claims",
+    "expansion_hints",
+    "operation_vector",
+    "operation_vector_sources",
+    "structural_decision_hints",
+    "dominant_driver",
+    "why_not_admitted",
+    "suggested_next_command",
+    "safe_next_files",
+    "blocked_file_reasons",
+    "persistence_target",
+    "merge_conflict_scan",
+    "merge_evidence_required",
+    "provenance_notes",
+    "claim_scope",
+)
+
+
+def load_schema() -> dict[str, Any]:
+    """Return schema data as a dict built from inline constants.
+
+    R12 Phase 5.B: topology_schema.yaml deleted. This function builds an equivalent
+    dict from inlined module constants so legacy callers (tests) continue to work
+    without file I/O. New code should use the SCHEMA_* constants directly.
+    """
+    return {
+        "required_top_level_keys": list(SCHEMA_REQUIRED_TOP_LEVEL_KEYS),
+        "issue_json_contract": {
+            "legacy_fields": {f: "string" for f in SCHEMA_ISSUE_JSON_CONTRACT_LEGACY_FIELDS},
+            "typed_fields": {f: "string" for f in SCHEMA_ISSUE_JSON_CONTRACT_TYPED_FIELDS},
+            "enums": {
+                "repair_kind": sorted(ISSUE_REPAIR_KINDS),
+                "maturity": sorted(ISSUE_MATURITY_VALUES),
+                "lifecycle_state": sorted(ISSUE_LIFECYCLE_STATES),
+                "authority_status": sorted(ISSUE_AUTHORITY_STATUSES),
+                "blocking_modes": list(ISSUE_BLOCKING_MODES),
+            },
+        },
+        "agent_runtime_contract": {
+            "route_card_required_fields": list(SCHEMA_ROUTE_CARD_REQUIRED_FIELDS),
+        },
+        "ownership": {
+            "fact_types": {},   # inlined in topology_doctor_ownership_checks.py constants
+        },
+    }
+
 
 RUNTIME_RISK_GATE_BUDGETS = {
     "T0": {
@@ -296,9 +411,7 @@ def load_topology() -> dict[str, Any]:
     return _load_yaml(TOPOLOGY_PATH)
 
 
-def load_schema() -> dict[str, Any]:
-    return _load_yaml(SCHEMA_PATH)
-
+# load_schema() is defined above with inline constants (R12 Phase 5.B).
 
 def load_invariants() -> dict[str, Any]:
     return _load_yaml(INVARIANTS_PATH)
@@ -306,6 +419,75 @@ def load_invariants() -> dict[str, Any]:
 
 def load_source_rationale() -> dict[str, Any]:
     return _load_yaml(SOURCE_RATIONALE_PATH)
+
+
+_CONTEXT_EXPAND_TRIGGERS = [
+    "touched code crosses a zone boundary",
+    "tests fail outside the suggested scope",
+    "implementation needs files not listed in files_may_change",
+    "truth owner, lifecycle, DB, control, risk, or settlement owner is unclear",
+    "reviewer asks about authority or downstream behavior",
+    "target uses a write route not listed in the output",
+]
+
+
+def _source_rationale_for(files: list[str]) -> list[dict[str, Any]]:
+    """Return source_rationale entries for the given file paths.
+
+    Restored from topology_doctor_packet_prefill.py (deleted in phase3 cleanup
+    commit 45f0d40a) because topology_doctor_digest.py calls api._source_rationale_for.
+    """
+    if not files:
+        return []
+    source_map = load_source_rationale()
+    rationale = source_map.get("files") or {}
+    defaults = source_map.get("package_defaults") or {}
+    enriched: list[dict[str, Any]] = []
+    for path in files:
+        if path not in rationale:
+            continue
+        package_default: dict[str, Any] = {}
+        for prefix, values in defaults.items():
+            if path.startswith(f"{prefix}/") and len(prefix) > len(package_default.get("_prefix", "")):
+                package_default = {"_prefix": prefix, **values}
+        package_default.pop("_prefix", None)
+        entry = {**package_default, **rationale[path]}
+        entry.setdefault("upstream", [])
+        entry.setdefault("downstream", [])
+        entry.setdefault("gates", package_default.get("gates", []))
+        enriched.append({"path": path, **entry})
+    return enriched
+
+
+def build_context_assumption(
+    *,
+    profile: str = "",
+    profile_kind: str = "digest_profile",
+    source_entries: list[dict[str, Any]] | None = None,
+    confidence_basis: list[str] | None = None,
+) -> dict[str, Any]:
+    """Build context_assumption envelope.
+
+    Restored from topology_doctor_packet_prefill.py (deleted in phase3 cleanup
+    commit 45f0d40a) because topology_doctor_digest.py calls api.build_context_assumption.
+    """
+    basis = list(confidence_basis or [])
+    if profile:
+        basis.append(profile_kind)
+    entries = source_entries or []
+    if entries:
+        basis.append("source_rationale")
+        if any(not entry.get("upstream") and not entry.get("downstream") for entry in entries):
+            basis.append("missing_relations")
+    if not basis:
+        basis.append("topology_manifest")
+    return {
+        "sufficiency": "provisional_starting_packet",
+        "authority_status": "incomplete_context",
+        "confidence_basis": sorted(dict.fromkeys(basis)),
+        "expand_context_if": _CONTEXT_EXPAND_TRIGGERS,
+        "planning_lock_independent": True,
+    }
 
 
 def load_test_topology() -> dict[str, Any]:
@@ -673,8 +855,10 @@ def _is_root_scratch(path: Path) -> bool:
     return _registry_checks().is_root_scratch(path)
 
 
-def _check_schema(topology: dict[str, Any], schema: dict[str, Any]) -> list[TopologyIssue]:
-    return _registry_checks().check_schema(sys.modules[__name__], topology, schema)
+def _check_schema(topology: dict[str, Any], schema: dict[str, Any] | None = None) -> list[TopologyIssue]:
+    # R12 Phase 5.B: schema arg ignored — required_top_level_keys now inlined as constant.
+    _schema = {"required_top_level_keys": list(SCHEMA_REQUIRED_TOP_LEVEL_KEYS)}
+    return _registry_checks().check_schema(sys.modules[__name__], topology, _schema)
 
 
 def _check_coverage(topology: dict[str, Any]) -> list[TopologyIssue]:
@@ -792,7 +976,9 @@ def run_strict() -> StrictResult:
 
 
 def run_schema() -> StrictResult:
-    issues = _check_schema(load_topology(), load_schema())
+    # R12 Phase 5.B: load_schema() now returns inline constants; schema arg to
+    # _check_schema is ignored — keeps call site stable for external callers.
+    issues = _check_schema(load_topology())
     return StrictResult(ok=not issues, issues=issues)
 
 
@@ -1117,98 +1303,6 @@ def build_code_impact_graph(files: list[str], task: str = "") -> dict[str, Any]:
 
 def build_graph_appendix(files: list[str], task: str | None = None) -> dict[str, Any]:
     return _code_review_graph_checks().build_graph_appendix(sys.modules[__name__], files, task=task)
-
-
-def _packet_prefill_checks():
-    try:
-        from scripts import topology_doctor_packet_prefill
-    except ModuleNotFoundError:  # direct script execution from scripts/
-        import topology_doctor_packet_prefill
-
-    return topology_doctor_packet_prefill
-
-
-CONTEXT_EXPAND_TRIGGERS = _packet_prefill_checks().CONTEXT_EXPAND_TRIGGERS
-
-
-def _source_rationale_for(files: list[str]) -> list[dict[str, Any]]:
-    return _packet_prefill_checks().source_rationale_for(sys.modules[__name__], files)
-
-
-def build_context_assumption(
-    *,
-    profile: str = "",
-    profile_kind: str = "digest_profile",
-    source_entries: list[dict[str, Any]] | None = None,
-    confidence_basis: list[str] | None = None,
-) -> dict[str, Any]:
-    return _packet_prefill_checks().build_context_assumption(
-        profile=profile,
-        profile_kind=profile_kind,
-        source_entries=source_entries,
-        confidence_basis=confidence_basis,
-    )
-
-
-def _normalize_scope(scope: str | None) -> str:
-    return _packet_prefill_checks().normalize_scope(scope)
-
-
-def _scope_is_file(scope: str) -> bool:
-    return _packet_prefill_checks().scope_is_file(sys.modules[__name__], scope)
-
-
-def _scope_agent_path(scope: str) -> str | None:
-    return _packet_prefill_checks().scope_agent_path(sys.modules[__name__], scope)
-
-
-def _zones_for_scope(scope: str) -> list[str]:
-    return _packet_prefill_checks().zones_for_scope(sys.modules[__name__], scope)
-
-
-def _zones_for_files(files: list[str]) -> list[str]:
-    return _packet_prefill_checks().zones_for_files(sys.modules[__name__], files)
-
-
-def _packet_zones(scope: str, files: list[str]) -> list[str]:
-    return _packet_prefill_checks().packet_zones(sys.modules[__name__], scope, files)
-
-
-def _invariants_for_zones(zones: list[str]) -> list[dict[str, Any]]:
-    return _packet_prefill_checks().invariants_for_zones(sys.modules[__name__], zones)
-
-
-def build_invariants_slice(zone: str | None = None) -> dict[str, Any]:
-    return _packet_prefill_checks().build_invariants_slice(sys.modules[__name__], zone)
-
-
-def _files_may_not_change(zones_touched: list[str]) -> list[str]:
-    return _packet_prefill_checks().files_may_not_change(sys.modules[__name__], zones_touched)
-
-
-def _package_gates(scope: str, files: list[str]) -> list[str]:
-    return _packet_prefill_checks().package_gates(sys.modules[__name__], scope, files)
-
-
-def _tests_for_packet(scope: str, files: list[str]) -> list[str]:
-    return _packet_prefill_checks().tests_for_packet(sys.modules[__name__], scope, files)
-
-
-def build_packet_prefill(
-    *,
-    packet_type: str,
-    task: str,
-    scope: str = "",
-    files: list[str] | None = None,
-) -> dict[str, Any]:
-    return _packet_prefill_checks().build_packet_prefill(
-        sys.modules[__name__],
-        packet_type=packet_type,
-        task=task,
-        scope=scope,
-        files=files,
-    )
-
 
 
 def _context_pack_checks():

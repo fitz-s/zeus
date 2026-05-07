@@ -1,0 +1,42 @@
+# Created: 2026-05-06
+# Last reused or audited: 2026-05-06
+# Authority basis: ANTI_DRIFT_CHARTER §9; OD-2 resolution at Phase 0.H
+# CLOSED: 2026-05-06 — gate closed by completion (path-equivalence sub-case b),
+#   not by expiry. See evidence/od2_gate_closure.md for full rationale.
+closed_at: 2026-05-06
+closure_evidence: evidence/od2_gate_closure.md
+override:
+  rule: phase_0_h_acceptance_table_row_4
+  rule_text: "Shadow router agreement ≥7d at ≥90%"
+  reason: |
+    Phase 0.F shadow router smoke-tested cleanly but the agreement classifier
+    persists at NEW_ONLY because the legacy topology_doctor `--route-card-only`
+    output does not emit capability names. The ≥7d clock is not reachable
+    until the classifier is calibrated. Per Phase 0.H critic OD-2 verdict and
+    operator decision, the smoke-test record is accepted as Phase-0 floor on
+    condition that:
+
+      1. classifier-calibration is owned by Phase 1 implementer with a
+         specific deliverable: `scripts/topology_route_shadow.py` either
+         (a) parses capability names from legacy output (likely requires
+         topology_doctor patch), or (b) introduces a structural-equivalence
+         comparison that does not depend on capability-name string match.
+      2. ≥7d/≥90% gate is moved from Phase 0.H to Phase 3 (the structural
+         deletion of digest_profiles.py / topology_doctor*.py). Phase 3 will
+         not ship the deletion until the gate is satisfied.
+
+  operator_signature: "Fitz 2026-05-06"
+  scope: phase_0_h_row_4_shadow_agreement
+  evidence:
+    - evidence/phase0_h_decision.md (Phase 0.H critic verdict §H-2 finding)
+    - evidence/shadow_router/agreement_2026-05-06.jsonl (smoke-test artifact)
+    - .claude/orchestrator/runs/topology-redesign-2026-05-06/state/invariants.jsonl
+      (OD-2 resolution carry-forward)
+  expiry: 2026-08-06
+  next_action_at_expiry: |
+    If the calibrated classifier and the 7d/≥90% gate are not in place at
+    Phase 3 dispatch (latest 2026-08-06), this override expires and Phase 3
+    structural deletions cannot proceed. Operator must either re-issue the
+    override (with evidence the calibration work is in flight) or roll back
+    Phase 0.D (fossil retire) which currently rides on this gate's deferred
+    status.

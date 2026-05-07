@@ -2750,12 +2750,16 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                                     f"{getattr(city, 'cluster', '') or city.name}:{candidate.target_date}"
                                 ),
                             }
-                            snapshot_best_ask = _reprice_decision_from_executable_snapshot(
-                                conn,
-                                d,
-                                snapshot_fields,
-                                final_intent_context,
-                            )
+                            _reprice_fn = getattr(deps, "reprice_from_snapshot", None)
+                            if callable(_reprice_fn):
+                                snapshot_best_ask = _reprice_fn(conn, d, snapshot_fields, final_intent_context)
+                            else:
+                                snapshot_best_ask = _reprice_decision_from_executable_snapshot(
+                                    conn,
+                                    d,
+                                    snapshot_fields,
+                                    final_intent_context,
+                                )
                         except Exception as exc:
                             summary["no_trades"] += 1
                             rejection_stage = "EXECUTION_FAILED"

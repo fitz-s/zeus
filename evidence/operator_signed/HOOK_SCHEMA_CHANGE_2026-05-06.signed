@@ -1,0 +1,1 @@
+HOOK_SCHEMA_CHANGE authorized 2026-05-06: Phase 3.R port 7 legacy shell logics into dispatch.py, close phase1_stub regression. Operator: Fitz
