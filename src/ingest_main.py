@@ -445,11 +445,13 @@ def _k2_startup_catch_up():
 
 @_scheduler_job("ingest_opendata_daily_mx2t6")
 def _opendata_mx2t6_cycle():
-    """ECMWF Open Data daily mx2t6 (HIGH track) ingest.
+    """ECMWF Open Data daily HIGH track ingest.
 
     Open Data ENS posts 00Z runs by ~07:00 UTC (latency 6-8h). This job runs
-    at 07:30 UTC and writes ``ecmwf_opendata_mx2t6_local_calendar_day_max_v1``
-    rows to ``ensemble_snapshots_v2``.
+    at 07:30 UTC and writes ``ecmwf_opendata_mx2t3_local_calendar_day_max_v1``
+    rows to ``ensemble_snapshots_v2`` (post-2026-05-07 mx2t3 cutover; the
+    schedule job name retains the legacy ``mx2t6`` slug for back-compat with
+    ops dashboards).
     """
     if _is_source_paused("ecmwf_open_data"):
         logger.info("_opendata_mx2t6_cycle: paused_by_control_plane")
@@ -463,11 +465,13 @@ def _opendata_mx2t6_cycle():
 
 @_scheduler_job("ingest_opendata_daily_mn2t6")
 def _opendata_mn2t6_cycle():
-    """ECMWF Open Data daily mn2t6 (LOW track) ingest.
+    """ECMWF Open Data daily LOW track ingest.
 
-    Runs at 07:35 UTC (5-min offset from mx2t6 to space out downloads). Writes
-    ``ecmwf_opendata_mn2t6_local_calendar_day_min_v1`` rows to
-    ``ensemble_snapshots_v2``.
+    Runs at 07:35 UTC (5-min offset from the HIGH job to space out downloads).
+    Writes ``ecmwf_opendata_mn2t3_local_calendar_day_min_v1`` rows to
+    ``ensemble_snapshots_v2`` (post-2026-05-07 mn2t3 cutover; the schedule
+    job name retains the legacy ``mn2t6`` slug for back-compat with ops
+    dashboards).
     """
     if _is_source_paused("ecmwf_open_data"):
         logger.info("_opendata_mn2t6_cycle: paused_by_control_plane")
@@ -735,31 +739,74 @@ def _drift_detector_tick():
 # Task #2 (2026-05-07): UMA Optimistic Oracle resolution listener tick
 # ---------------------------------------------------------------------------
 
+# Default block-window per tick when no cursor exists yet (operator can override
+# via settings["uma"]["initial_lookback_blocks"]). Polygon mints ~2 blocks/sec
+# → 50 000 blocks ≈ 7h, comfortably wider than UMA's ~14h post-endDate settle
+# latency window for any single tick, but bounded so eth_getLogs does not scan
+# from genesis (PR #82 Copilot review: from_block=0 every tick scans full chain).
+_UMA_DEFAULT_INITIAL_LOOKBACK_BLOCKS = 50_000
+# Max blocks to advance per tick once cursor exists. Provider-friendly chunking;
+# any backlog drains over multiple ticks while keeping each request bounded.
+_UMA_MAX_BLOCKS_PER_TICK = 100_000
+
+
+def _uma_optional_settings() -> tuple[str, str, int, int]:
+    """Read optional uma config without touching ``Settings._data`` private state.
+
+    Returns ``(polygon_rpc_url, oo_contract_address, initial_lookback, max_per_tick)``.
+    Empty strings / 0 means "not configured" — caller treats as default-OFF.
+    """
+    from src.config import settings
+
+    try:
+        uma_cfg = settings["uma"]
+    except KeyError:
+        return ("", "", _UMA_DEFAULT_INITIAL_LOOKBACK_BLOCKS, _UMA_MAX_BLOCKS_PER_TICK)
+    if not isinstance(uma_cfg, dict):
+        return ("", "", _UMA_DEFAULT_INITIAL_LOOKBACK_BLOCKS, _UMA_MAX_BLOCKS_PER_TICK)
+    return (
+        str(uma_cfg.get("polygon_rpc_url", "") or ""),
+        str(uma_cfg.get("oo_contract_address", "") or ""),
+        int(uma_cfg.get("initial_lookback_blocks", _UMA_DEFAULT_INITIAL_LOOKBACK_BLOCKS)),
+        int(uma_cfg.get("max_blocks_per_tick", _UMA_MAX_BLOCKS_PER_TICK)),
+    )
+
+
 @_scheduler_job("ingest_uma_resolution_listener")
 def _uma_resolution_listener_tick():
-    """Poll Polygon RPC for UMA OO SettlementResolved events — 5-min interval.
+    """Poll Polygon RPC for UMA OO Settle events — 5-min interval.
 
     Reads condition_ids from market_events_v2, then calls poll_uma_resolutions
     with the configured RPC client. When settings["uma"]["polygon_rpc_url"] is
     absent or empty, the listener short-circuits (returns [] without writing)
     per the default-OFF design in uma_resolution_listener.py.
 
+    Block window: the listener uses a persisted last-scanned-block cursor
+    (``uma_resolution_cursor`` table) to scan only new blocks per tick. First
+    tick after enabling: scans the most-recent ``initial_lookback_blocks``
+    (default 50 000 ≈ 7h on Polygon). Subsequent ticks advance the cursor and
+    cap the per-tick window at ``max_blocks_per_tick`` (default 100 000) so
+    backlogged ticks drain incrementally without blowing past RPC log limits.
+
     Runs on "fast" executor: reads on-chain (HTTP), writes at most 1 row per
     resolved market — no risk of DB writer starvation against the single-writer
     default executor pool. Condition_id lookup uses a fresh read-only connection
     that does not block writers.
     """
-    from src.state.uma_resolution_listener import poll_uma_resolutions
+    from src.state.uma_resolution_listener import (
+        UmaHttpRpcClient,
+        get_last_scanned_block,
+        poll_uma_resolutions,
+        set_last_scanned_block,
+    )
     from src.state.db import get_world_connection, ZEUS_WORLD_DB_PATH
     import sqlite3
 
-    # Load settings for RPC config.
-    # Settings uses __getitem__ not .get(); use _data.get for optional keys.
+    # Load optional uma settings (default-OFF when absent).
     try:
-        from src.config import settings
-        uma_cfg = settings._data.get("uma", {})
-        polygon_rpc_url = uma_cfg.get("polygon_rpc_url", "")
-        oo_contract_address = uma_cfg.get("oo_contract_address", "")
+        polygon_rpc_url, oo_contract_address, initial_lookback, max_per_tick = (
+            _uma_optional_settings()
+        )
     except Exception as exc:
         logger.warning("ingest_uma_resolution_listener: settings load failed: %s", exc)
         return
@@ -792,60 +839,71 @@ def _uma_resolution_listener_tick():
         logger.debug("ingest_uma_resolution_listener: no tracked condition_ids yet")
         return
 
-    # Wire the HTTP RPC client and poll.
+    # Resolve block window via persisted cursor + RPC head, then poll.
     try:
-        from src.state.uma_resolution_listener import UmaRpcClient
-        import httpx
+        rpc_client = UmaHttpRpcClient(polygon_rpc_url)
 
-        class _UmaHttpRpcClient(UmaRpcClient):
-            """Minimal Polygon eth_getLogs client."""
+        # eth_blockNumber — head of chain.
+        head_block: int | None = None
+        try:
+            import httpx  # type: ignore[import]
+            resp = httpx.post(
+                polygon_rpc_url,
+                json={"jsonrpc": "2.0", "id": 1, "method": "eth_blockNumber", "params": []},
+                timeout=10.0,
+            )
+            resp.raise_for_status()
+            head_hex = resp.json().get("result")
+            if isinstance(head_hex, str):
+                head_block = int(head_hex, 16)
+        except Exception as exc:  # noqa: BLE001 — fail-soft to skip-tick
+            logger.warning("ingest_uma_resolution_listener: eth_blockNumber failed: %s", exc)
+            return
 
-            def __init__(self, rpc_url: str) -> None:
-                self._rpc_url = rpc_url
+        if not head_block or head_block <= 0:
+            logger.warning("ingest_uma_resolution_listener: invalid head_block=%r", head_block)
+            return
 
-            def get_logs(
-                self,
-                *,
-                contract_address: str,
-                topic0: str,
-                condition_ids,
-                from_block: int,
-                to_block=None,
-            ) -> list[dict]:
-                payload = {
-                    "jsonrpc": "2.0",
-                    "id": 1,
-                    "method": "eth_getLogs",
-                    "params": [{
-                        "address": contract_address,
-                        "topics": [topic0],
-                        "fromBlock": hex(from_block),
-                        **({"toBlock": hex(to_block)} if to_block is not None else {}),
-                    }],
-                }
-                resp = httpx.post(self._rpc_url, json=payload, timeout=30.0)
-                resp.raise_for_status()
-                data = resp.json()
-                return data.get("result") or []
-
-        rpc_client = _UmaHttpRpcClient(polygon_rpc_url)
         write_conn = get_world_connection()
         try:
+            cursor = get_last_scanned_block(write_conn, oo_contract_address)
+            if cursor is None:
+                from_block = max(head_block - initial_lookback, 0)
+            else:
+                from_block = cursor + 1
+            to_block = min(from_block + max_per_tick - 1, head_block)
+
+            if to_block < from_block:
+                logger.debug(
+                    "ingest_uma_resolution_listener: nothing to scan (cursor=%s head=%s)",
+                    cursor, head_block,
+                )
+                return
+
             resolutions = poll_uma_resolutions(
                 condition_ids=condition_ids,
                 contract_address=oo_contract_address,
                 rpc_client=rpc_client,
                 conn=write_conn,
-                from_block=0,
+                from_block=from_block,
+                to_block=to_block,
             )
+            # Advance cursor regardless of resolution count — empty windows are
+            # legitimate progress and re-scanning them wastes RPC budget.
+            set_last_scanned_block(write_conn, oo_contract_address, to_block)
+            write_conn.commit()
             if resolutions:
-                write_conn.commit()
                 logger.info(
-                    "ingest_uma_resolution_listener: %d new resolution(s) observed",
-                    len(resolutions),
+                    "ingest_uma_resolution_listener: %d new resolution(s) "
+                    "(blocks %d→%d, head=%d)",
+                    len(resolutions), from_block, to_block, head_block,
                 )
             else:
-                logger.debug("ingest_uma_resolution_listener: no new resolutions this tick")
+                logger.debug(
+                    "ingest_uma_resolution_listener: no new resolutions "
+                    "(blocks %d→%d, head=%d)",
+                    from_block, to_block, head_block,
+                )
         finally:
             write_conn.close()
     except Exception as exc:

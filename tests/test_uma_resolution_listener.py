@@ -395,3 +395,73 @@ class TestPollUmaResolutions:
         found = lookup_resolution(mem_conn, cid)
         assert found is not None
         assert found.condition_id == cid
+
+
+# ---------------------------------------------------------------------------
+# PR #82 review fix: last-scanned-block cursor (avoid genesis re-scan)
+# ---------------------------------------------------------------------------
+
+
+class TestLastScannedBlockCursor:
+    """Cursor primitives used by ingest_main's UMA tick to bound eth_getLogs."""
+
+    def test_returns_none_when_no_row_exists(self, mem_conn):
+        from src.state.uma_resolution_listener import get_last_scanned_block
+        assert get_last_scanned_block(mem_conn, "0xabc") is None
+
+    def test_set_then_get_roundtrip(self, mem_conn):
+        from src.state.uma_resolution_listener import (
+            get_last_scanned_block, set_last_scanned_block,
+        )
+        set_last_scanned_block(mem_conn, "0xABC123", 81_500_000)
+        # Address is normalised to lowercase so cross-tick lookups stay stable.
+        assert get_last_scanned_block(mem_conn, "0xabc123") == 81_500_000
+        assert get_last_scanned_block(mem_conn, "0xABC123") == 81_500_000
+
+    def test_upsert_overwrites(self, mem_conn):
+        from src.state.uma_resolution_listener import (
+            get_last_scanned_block, set_last_scanned_block,
+        )
+        addr = "0xee3afe347d5c74317041e2618c49534daf887c24"
+        set_last_scanned_block(mem_conn, addr, 70_000_000)
+        set_last_scanned_block(mem_conn, addr, 81_500_000)
+        assert get_last_scanned_block(mem_conn, addr) == 81_500_000
+
+    def test_per_contract_isolation(self, mem_conn):
+        """Cursor is keyed by contract_address; OO V2 vs OO V3 stay separate."""
+        from src.state.uma_resolution_listener import (
+            get_last_scanned_block, set_last_scanned_block,
+        )
+        set_last_scanned_block(mem_conn, "0xaaaa", 1_000_000)
+        set_last_scanned_block(mem_conn, "0xbbbb", 2_000_000)
+        assert get_last_scanned_block(mem_conn, "0xaaaa") == 1_000_000
+        assert get_last_scanned_block(mem_conn, "0xbbbb") == 2_000_000
+
+
+class TestKeccakImportFailureSurface:
+    """_keccak256 must surface a ValueError (not ImportError) when eth_hash
+    is unavailable, matching ``derive_condition_id``'s docstring contract."""
+
+    def test_keccak_missing_raises_value_error(self):
+        import builtins
+        import importlib
+        import sys
+        from src.state import uma_resolution_listener as mod
+
+        # Hide eth_hash so the import-inside-_keccak256 fails.
+        real_import = builtins.__import__
+        def fake_import(name, *args, **kwargs):
+            if name == "eth_hash.auto" or name.startswith("eth_hash"):
+                raise ImportError("simulated: eth_hash missing")
+            return real_import(name, *args, **kwargs)
+
+        # Ensure no cached module short-circuits the import.
+        cached = {k: sys.modules[k] for k in list(sys.modules) if k.startswith("eth_hash")}
+        for k in cached:
+            del sys.modules[k]
+        try:
+            with patch("builtins.__import__", side_effect=fake_import):
+                with pytest.raises(ValueError, match="eth_hash unavailable"):
+                    mod._keccak256(b"x")
+        finally:
+            sys.modules.update(cached)

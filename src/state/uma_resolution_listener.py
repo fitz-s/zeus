@@ -80,8 +80,19 @@ logger = logging.getLogger(__name__)
 
 
 def _keccak256(data: bytes) -> bytes:
-    """keccak256 hash via eth_hash (installed in venv). Raises ImportError if missing."""
-    from eth_hash.auto import keccak  # type: ignore[import]
+    """keccak256 hash via eth_hash (installed in venv).
+
+    Raises ``ValueError`` if eth_hash is not installed. The wrapper converts
+    the underlying ``ImportError`` so callers (e.g. ``derive_condition_id``)
+    have a single failure mode to catch — see the docstring of
+    ``derive_condition_id`` which documents ``ValueError`` only.
+    """
+    try:
+        from eth_hash.auto import keccak  # type: ignore[import]
+    except ImportError as exc:
+        raise ValueError(
+            "eth_hash unavailable; cannot derive UMA condition_id keccak256 hash"
+        ) from exc
     return keccak(data)
 
 
@@ -492,6 +503,62 @@ def record_resolution(conn: sqlite3.Connection, resolution: ResolvedMarket) -> N
             resolution.resolved_value,
             resolution.resolved_at_utc.isoformat(),
             json.dumps(resolution.raw_log, sort_keys=True, default=str),
+            datetime.now(timezone.utc).isoformat(),
+        ),
+    )
+
+
+# ── cursor: last-scanned block ─────────────────────────────────────── #
+#
+# eth_getLogs from genesis on every tick is O(chain) and gets rate-limited /
+# crashes RPC nodes. We persist a per-(contract_address) cursor so the daemon
+# tick only scans the new range since the previous successful poll.
+
+
+def init_uma_cursor_schema(conn: sqlite3.Connection) -> None:
+    """Create the ``uma_resolution_cursor`` table if missing. Idempotent."""
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS uma_resolution_cursor (
+            contract_address TEXT PRIMARY KEY,
+            last_scanned_block INTEGER NOT NULL,
+            updated_at_utc TEXT NOT NULL
+        );
+        """
+    )
+
+
+def get_last_scanned_block(
+    conn: sqlite3.Connection, contract_address: str
+) -> Optional[int]:
+    """Return the last successfully-scanned block for ``contract_address``,
+    or ``None`` if no cursor row exists yet (caller decides initial value)."""
+    init_uma_cursor_schema(conn)
+    row = conn.execute(
+        "SELECT last_scanned_block FROM uma_resolution_cursor WHERE contract_address = ?",
+        (contract_address.lower(),),
+    ).fetchone()
+    if row is None:
+        return None
+    return int(row[0])
+
+
+def set_last_scanned_block(
+    conn: sqlite3.Connection, contract_address: str, block_number: int
+) -> None:
+    """Upsert the last-scanned block cursor. Caller commits the connection."""
+    init_uma_cursor_schema(conn)
+    conn.execute(
+        """
+        INSERT INTO uma_resolution_cursor (contract_address, last_scanned_block, updated_at_utc)
+        VALUES (?, ?, ?)
+        ON CONFLICT(contract_address) DO UPDATE SET
+            last_scanned_block = excluded.last_scanned_block,
+            updated_at_utc = excluded.updated_at_utc
+        """,
+        (
+            contract_address.lower(),
+            int(block_number),
             datetime.now(timezone.utc).isoformat(),
         ),
     )
