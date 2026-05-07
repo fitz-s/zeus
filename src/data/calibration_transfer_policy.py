@@ -33,6 +33,8 @@ from src.config import (
 from src.contracts.ensemble_snapshot_provenance import (
     ECMWF_OPENDATA_HIGH_DATA_VERSION,
     ECMWF_OPENDATA_LOW_DATA_VERSION,
+    _ECMWF_OPENDATA_HIGH_DATA_VERSION_LEGACY,
+    _ECMWF_OPENDATA_LOW_DATA_VERSION_LEGACY,
 )
 from src.types.metric_identity import HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN
 
@@ -46,9 +48,18 @@ TRANSFER_OOS_HOLDOUT_FRACTION = 0.2
 # Maps OpenData forecast data_version → TIGGE calibration data_version.
 # Used by legacy evaluate_calibration_transfer_policy to resolve which
 # Platt model family to apply when serving OpenData forecasts.
+# 2026-05-07: Legacy mx2t6/mn2t6 keys added as bridge so the 1,568 stale
+# ensemble_snapshots_v2 rows (and 477 LIVE_ELIGIBLE readiness rows tagged
+# with legacy versions) still resolve a Platt during the mx2t3/mn2t3
+# transition. Legacy keys map to the same tigge_* calibration target as
+# the new keys — physical identity is identical (same IFS ensemble member
+# temperature extraction; only aggregation window changed from 6h to 3h).
 _TRANSFER_SOURCE_BY_OPENDATA_VERSION: dict[str, str] = {
     ECMWF_OPENDATA_HIGH_DATA_VERSION: HIGH_LOCALDAY_MAX.data_version,
     ECMWF_OPENDATA_LOW_DATA_VERSION: LOW_LOCALDAY_MIN.data_version,
+    # Legacy bridge — mx2t6/mn2t6 era rows written before 2026-05-07.
+    _ECMWF_OPENDATA_HIGH_DATA_VERSION_LEGACY: HIGH_LOCALDAY_MAX.data_version,
+    _ECMWF_OPENDATA_LOW_DATA_VERSION_LEGACY: LOW_LOCALDAY_MIN.data_version,
 }
 
 
