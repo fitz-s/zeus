@@ -17,6 +17,8 @@ from dataclasses import dataclass
 from src.contracts.ensemble_snapshot_provenance import (
     ECMWF_OPENDATA_LOW_CONTRACT_WINDOW_DATA_VERSION,
     TIGGE_LOW_CONTRACT_WINDOW_DATA_VERSION,
+    _ECMWF_OPENDATA_HIGH_DATA_VERSION_LEGACY,
+    _ECMWF_OPENDATA_LOW_DATA_VERSION_LEGACY,
 )
 from src.types.metric_identity import HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN, MetricIdentity
 
@@ -38,8 +40,8 @@ from src.types.metric_identity import HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN, Metri
 # floor. Per-quantity MetricIdentity restores 3h identity end-to-end.
 _ECMWF_OPENDATA_HIGH_DATA_VERSION = "ecmwf_opendata_mx2t3_local_calendar_day_max_v1"
 _ECMWF_OPENDATA_LOW_DATA_VERSION = "ecmwf_opendata_mn2t3_local_calendar_day_min_v1"
-_ECMWF_OPENDATA_HIGH_DATA_VERSION_LEGACY = "ecmwf_opendata_mx2t6_local_calendar_day_max_v1"
-_ECMWF_OPENDATA_LOW_DATA_VERSION_LEGACY = "ecmwf_opendata_mn2t6_local_calendar_day_min_v1"
+# Legacy versions imported from canonical source (ensemble_snapshot_provenance.py:82-83).
+# Local re-definitions removed 2026-05-07; use the imported names above.
 
 # 3h native derived-quantity MetricIdentity (Open Data post-cutover).
 # These differ from HIGH_LOCALDAY_MAX / LOW_LOCALDAY_MIN only in
@@ -66,6 +68,11 @@ _ALLOWED_DATA_VERSIONS: dict[str, MetricIdentity] = {
     _ECMWF_OPENDATA_LOW_DATA_VERSION: LOW_LOCALDAY_MIN,
     TIGGE_LOW_CONTRACT_WINDOW_DATA_VERSION: LOW_LOCALDAY_MIN,
     ECMWF_OPENDATA_LOW_CONTRACT_WINDOW_DATA_VERSION: LOW_LOCALDAY_MIN,
+    # Legacy bridge — mx2t6/mn2t6 era rows written before 2026-05-07.
+    # Physical quantity "mx2t6_local_calendar_day_max" / "mn2t6_local_calendar_day_min"
+    # matches HIGH_LOCALDAY_MAX / LOW_LOCALDAY_MIN respectively (6h TIGGE identity).
+    _ECMWF_OPENDATA_HIGH_DATA_VERSION_LEGACY: HIGH_LOCALDAY_MAX,
+    _ECMWF_OPENDATA_LOW_DATA_VERSION_LEGACY: LOW_LOCALDAY_MIN,
 }
 
 
