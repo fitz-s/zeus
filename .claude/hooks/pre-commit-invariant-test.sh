@@ -1,0 +1,1 @@
+legacy/pre-commit-invariant-test.sh

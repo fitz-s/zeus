@@ -207,19 +207,9 @@ _STALE_TOPOLOGY_DOCTOR_TESTS = frozenset({
     "test_core_map_forbidden_phrase_guard_catches_round_variant",
     "test_core_map_relationship_test_requires_locator",
     "test_core_map_rejects_reference_doc_authority_node",
-    "test_pre_commit_secrets_blocks_unregistered_review_safe_tag",
-    "test_pre_commit_secrets_blocks_unregistered_review_safe_without_gitleaks",
-    "test_pre_commit_secrets_accepts_review_safe_tag_registered_in_same_commit",
-    "test_pre_commit_secrets_audits_staged_requirements_blob_not_worktree",
-    "test_hook_pre_merge_F3_detector_catches_evil_inputs",
-    "test_hook_pre_merge_F13_blocks_commented_critic_verdict",
-    "test_hook_pre_merge_F13_accepts_real_verdict_with_comment_companion",
-    "test_hook_pre_merge_accepts_verdict_with_trailing_comment",
-    "test_hook_pre_merge_blocks_revise_verdict",
-    "test_hook_pre_merge_F17_OVERRIDE_docstring_matches_implementation",
-    "test_hook_pre_merge_F17_OVERRIDE_writes_durable_log_on_protected_branch",
-    "test_hook_pre_merge_git_channel_override_logs_non_empty_command_context",
-    "test_hook_pre_merge_F13_blocks_yaml_nested_critic_verdict_spoof",
+    # NOTE: test_pre_commit_secrets_* and test_hook_pre_merge_* are intentionally
+    # NOT in this set. Those tests cover active dispatch.py hook logic changed in
+    # PR #72 and must remain live. Only context_pack import-residue tests belong here.
 })
 
 

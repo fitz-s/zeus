@@ -760,7 +760,11 @@ def _resolve_typed_intent(intent: str | None, topology: dict[str, Any]) -> dict[
     wanted_canonical = wanted.replace(" ", "_")  # e.g. "plan only" → "plan_only"
 
     # K3: canonical typed-intent short-circuit — before profile lookup.
-    if wanted_canonical in _CANONICAL_TYPED_INTENTS:
+    # Only fires for read-only intents (_ADMIT_ALL_PATHS_INTENTS: plan_only, audit).
+    # Edit intents (modify_existing, hotfix, refactor, create_new, etc.) are canonical
+    # but must fall through to normal profile matching so their allowed_files scoping
+    # applies. Returning None here lets build_digest do a full profile match.
+    if wanted_canonical in _ADMIT_ALL_PATHS_INTENTS:
         return {
             "profile_id": None,
             "selected_by": "typed_intent_short_circuit",
@@ -776,6 +780,10 @@ def _resolve_typed_intent(intent: str | None, topology: dict[str, Any]) -> dict[
             "negative_hits": [],
             "why": [f"K3 typed_intent short-circuit: {wanted_canonical}"],
         }
+    # Non-read-only canonical intents: recognized as valid (not invalid) but do not
+    # short-circuit. Return None so build_digest proceeds to profile-id matching.
+    if wanted_canonical in _CANONICAL_TYPED_INTENTS:
+        return None
 
     # Legacy: try to match a digest profile id.
     profiles = [
@@ -1453,10 +1461,12 @@ def _apply_companion_loop_break(
         return new_admission
 
     # Upgrade status when all out-of-scope files were resolved.
-    # Handles both scope_expansion_required and ambiguous (when typed_intent short-circuits
-    # profile selection but profile lookup fails because typed-intent ids are not digest
-    # profile ids — PLAN §2.3 K3 design).
-    upgradeable_statuses = {"scope_expansion_required", "ambiguous", "advisory_only"}
+    # Only scope_expansion_required and ambiguous are upgradeable here.
+    # advisory_only is intentionally excluded: it is set either by K3 whitelist
+    # enforcement (plan_only/audit blocked paths — must remain non-admitted) or by
+    # K2's own batch_cap gate above (also final). Upgrading advisory_only here would
+    # allow K2 to silently re-admit paths that K3 blocked.
+    upgradeable_statuses = {"scope_expansion_required", "ambiguous"}
     if not remaining_out_of_scope and admission.get("status") in upgradeable_statuses:
         new_admission["status"] = "admitted"
         why = list((admission.get("decision_basis") or {}).get("why") or [])
