@@ -117,8 +117,8 @@ typed_intent_enum:
 # Per K1 invariant: no entry may have target_severity = BLOCKING with
 # reversibility_class = WORKING. Asserted by tests/test_severity_tier_invariant.py.
 #
-# emitter_path:line references verified 2026-05-07 (grep-gate within 10 min per
-# feedback_grep_gate_before_contract_lock.md).
+# emitter_path:line references verified 2026-05-07, AS-01/02/03 corrected 2026-05-07
+# (grep-gate within 10 min per feedback_grep_gate_before_contract_lock.md).
 # ─────────────────────────────────────────────────────────────────────────────
 
 issue_severity:
@@ -127,7 +127,7 @@ issue_severity:
 
   - rule_id: AS-01
     code: navigation_scope_expansion_required
-    emitter_path: scripts/topology_doctor.py:2053
+    emitter_path: scripts/topology_doctor.py:2114
     current_severity: BLOCKING
     target_severity: ADVISORY
     reversibility_class: WORKING
@@ -144,7 +144,7 @@ issue_severity:
 
   - rule_id: AS-02
     code: navigation_scope_expansion_required
-    emitter_path: scripts/topology_doctor.py:2883
+    emitter_path: scripts/topology_doctor.py:2952
     current_severity: BLOCKING
     target_severity: ADVISORY
     reversibility_class: WORKING
@@ -158,7 +158,7 @@ issue_severity:
 
   - rule_id: AS-03
     code: profile_needs_typed_intent
-    emitter_path: scripts/topology_doctor.py:2409
+    emitter_path: scripts/topology_doctor.py:2470
     current_severity: BLOCKING
     target_severity: ADVISORY
     reversibility_class: WORKING
@@ -247,7 +247,7 @@ issue_severity:
 
   - rule_id: AS-09
     code: planning_lock_evidence_missing
-    emitter_path: scripts/topology_doctor_policy_checks.py:259
+    emitter_path: scripts/topology_doctor_policy_checks.py:311
     current_severity: BLOCKING
     target_severity: BLOCKING
     reversibility_class: TRUTH_REWRITE

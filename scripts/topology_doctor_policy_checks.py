@@ -308,7 +308,7 @@ def run_planning_lock(api: Any, changed_files: list[str], plan_evidence: str | N
     if triggers and not valid_plan_evidence(api, plan_evidence):
         for path, reason in sorted(triggers.items()):
             issues.append(
-                api._issue(
+                api._issue_with_admission_severity(
                     "planning_lock_required",
                     path,
                     f"planning lock triggered by {reason}; pass --plan-evidence with a valid plan/current-state file",
@@ -316,7 +316,7 @@ def run_planning_lock(api: Any, changed_files: list[str], plan_evidence: str | N
             )
         if plan_evidence:
             issues.append(
-                api._issue(
+                api._issue_with_admission_severity(
                     "planning_lock_evidence_invalid",
                     plan_evidence,
                     "plan evidence path does not exist or is not in an approved planning/evidence directory",
