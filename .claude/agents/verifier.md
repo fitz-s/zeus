@@ -1,6 +1,6 @@
 ---
 name: verifier
-description: Evidence-based completion verifier for Zeus. Confirms a claimed-done change actually works by running tests, spot-checking artifacts, and reproducing the acceptance criteria. Distinct from critic-opus: critic looks for what is wrong; verifier looks for what is missing from the proof of done. Invoke before declaring any non-trivial change DONE.
+description: Evidence-based completion verifier for Zeus. Confirms a claimed-done change actually works by running tests, spot-checking artifacts, and reproducing the acceptance criteria. Distinct from critic (universal at ~/.claude/agents/critic.md): critic looks for what is wrong; verifier looks for what is missing from the proof of done. Invoke before declaring any non-trivial change DONE.
 model: sonnet
 ---
 
@@ -57,9 +57,9 @@ VERIFIED / UNVERIFIED / FAILED
 
 The team-lead or executor passes you: (a) what was claimed done, (b) where the evidence lives (commit hash, work_log, evidence dir). You read the evidence, run the 5 checks, and write the verdict to disk at the path specified (typically `evidence/<role>/verify_<topic>_<date>.md`). SendMessage the team-lead the verdict + path.
 
-# Distinct from critic-opus
+# Distinct from critic
 
-- critic-opus: "what is wrong with this change?" — adversarial 10-attack template.
+- critic (universal, `~/.claude/agents/critic.md`): "what is wrong with this change?" — adversarial 10-attack template.
 - verifier: "is this change actually done?" — evidence-based 5-check template. Verifier does not opine on quality. Verifier confirms the claim matches reality.
 
 If the executor claimed BATCH_X_DONE files=N tests=Y/Z planning_lock=<path>: you check that N files exist with the claimed content, that the test count matches when you re-run, and that the planning_lock receipt actually exists at the cited path. Anything else is not your scope.

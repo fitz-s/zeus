@@ -26,7 +26,7 @@ A reusable, multi-round, evidence-driven debate process for evaluating any non-t
 - You don't have time for ~70 min of structured cycle
 - Your model setup cannot support 3+ longlast teammates concurrently
 
-**ROI signal**: a 3-round cycle for a 100h+ implementation decision is high-ROI. The same cycle for a 10h decision is overkill — use single-shot critic-opus instead.
+**ROI signal**: a 3-round cycle for a 100h+ implementation decision is high-ROI. The same cycle for a 10h decision is overkill — use a single-shot universal critic (`~/.claude/agents/critic.md`) instead.
 
 ---
 
@@ -764,7 +764,7 @@ See `docs/operations/task_2026-04-27_harness_debate/{verdict,round2_verdict,roun
 
 If full debate is overkill, use:
 1. Write the proposal in own context
-2. Dispatch ONE critic-opus subagent with 10-attack template
+2. Dispatch ONE universal critic subagent (`~/.claude/agents/critic.md`) with 10-attack template
 3. Read critic's response
 4. Decide based on critic verdict + own judgment
 

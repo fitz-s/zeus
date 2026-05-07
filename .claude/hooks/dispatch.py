@@ -176,11 +176,20 @@ def validate_override(
     evidence_rel: str | None = requires.get("evidence_file")
     evidence_path: Path | None = None
     if evidence_rel:
-        # Replace template placeholders with a wildcard-style check
         if "<" in evidence_rel:
-            # Template path — cannot validate existence without concrete date/id;
-            # Phase 2 will fill in concrete resolution. In Phase 1, accept.
-            pass
+            # Template path — resolve <…> placeholders to glob "*" wildcards
+            # and require >= 1 matching file. Closes Codex P2 (PR #73): the
+            # prior Phase-1 stub auto-accepted any template path, allowing
+            # STRUCTURED_OVERRIDE to bypass blocking hooks with no evidence.
+            # Backlog #56: also enforce `fields_required` + `operator_signature`
+            # by parsing the evidence file body — currently unimplemented.
+            import re as _re_glob
+            glob_pat = _re_glob.sub(r"<[^>]+>", "*", evidence_rel)
+            matches = list(REPO_ROOT.glob(glob_pat))
+            if not matches:
+                return False
+            # Use the most-recent matching file for expiry/replay tracking.
+            evidence_path = max(matches, key=lambda p: p.stat().st_mtime)
         else:
             evidence_path = REPO_ROOT / evidence_rel
             if not evidence_path.exists():
@@ -519,7 +528,7 @@ def _run_advisory_check_pr_create_loc_accumulation(
         import re as re2
         loc_match = re2.findall(r"(\d+)\s+insertion", shortstat_result.stdout)
         del_match = re2.findall(r"(\d+)\s+deletion", shortstat_result.stdout)
-        loc = int(loc_match[-1]) + int(del_match[-1]) if loc_match and del_match else 0
+        loc = (int(loc_match[-1]) if loc_match else 0) + (int(del_match[-1]) if del_match else 0)
     except (subprocess.TimeoutExpired, ValueError, OSError):
         loc = 0
 
@@ -558,6 +567,19 @@ def _run_advisory_check_pr_create_loc_accumulation(
         f"on this branch, hold the PR open until accumulation reaches the threshold.\n\n"
         f"This is advisory; not blocking."
     )
+
+
+def _run_blocking_check_pr_create_loc_accumulation(
+    payload: dict[str, Any],
+) -> tuple[str, str]:
+    """BLOCKING wrapper around the accumulation advisory check.
+    Reuses _run_advisory_check_pr_create_loc_accumulation; below-threshold → deny.
+    Overrides (URGENT_HOTFIX / BATCHED_CONSOLIDATION / OPERATOR_APPROVED_SMALL_PR)
+    are detected by main() after this returns deny."""
+    msg = _run_advisory_check_pr_create_loc_accumulation(payload)
+    if msg is None:
+        return "allow", "not_a_pr_open_or_threshold_met"
+    return "deny", msg
 
 
 def _run_advisory_check_pr_open_monitor_arm(
@@ -1432,6 +1454,8 @@ def _run_blocking_check(
         return _run_blocking_check_pre_edit_architecture(payload)
     elif hook_id == "pre_write_capability_gate":
         return _run_blocking_check_pre_write_capability_gate(payload)
+    elif hook_id == "pr_create_loc_accumulation":
+        return _run_blocking_check_pr_create_loc_accumulation(payload)
     else:
         # Unknown BLOCKING hook — fail-closed
         return "deny", f"unknown_hook"

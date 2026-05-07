@@ -91,13 +91,19 @@ hooks:
     event: PreToolUse
     matcher: Bash
     intent: >
-      Advise (not block) when `gh pr create` is invoked with <2 commits
-      or <80 LOC since branch base — accumulating reduces paid auto-reviews.
-    blocked_when: []
-    severity: ADVISORY
+      Block `gh pr create` when <2 commits or <80 LOC since branch base
+      to prevent premature paid-reviewer spend. Structured overrides allow
+      urgent hotfixes, batched-consolidation PRs, and operator-approved
+      small PRs to proceed with evidence.
+    blocked_when:
+      - pr_opened_below_accumulation_threshold
+    severity: BLOCKING
     reversibility_class: WORKING
     bypass_policy:
-      class: not_required
+      class: structured_override
+      override_ids: [URGENT_HOTFIX, BATCHED_CONSOLIDATION, OPERATOR_APPROVED_SMALL_PR]
+      max_active_per_30d: 10
+      requires_evidence_file: true
     sunset_date: 2026-08-06
     telemetry:
       ritual_signal_emitted: true
