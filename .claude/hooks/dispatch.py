@@ -176,11 +176,20 @@ def validate_override(
     evidence_rel: str | None = requires.get("evidence_file")
     evidence_path: Path | None = None
     if evidence_rel:
-        # Replace template placeholders with a wildcard-style check
         if "<" in evidence_rel:
-            # Template path — cannot validate existence without concrete date/id;
-            # Phase 2 will fill in concrete resolution. In Phase 1, accept.
-            pass
+            # Template path — resolve <…> placeholders to glob "*" wildcards
+            # and require >= 1 matching file. Closes Codex P2 (PR #73): the
+            # prior Phase-1 stub auto-accepted any template path, allowing
+            # STRUCTURED_OVERRIDE to bypass blocking hooks with no evidence.
+            # Backlog #56: also enforce `fields_required` + `operator_signature`
+            # by parsing the evidence file body — currently unimplemented.
+            import re as _re_glob
+            glob_pat = _re_glob.sub(r"<[^>]+>", "*", evidence_rel)
+            matches = list(REPO_ROOT.glob(glob_pat))
+            if not matches:
+                return False
+            # Use the most-recent matching file for expiry/replay tracking.
+            evidence_path = max(matches, key=lambda p: p.stat().st_mtime)
         else:
             evidence_path = REPO_ROOT / evidence_rel
             if not evidence_path.exists():
@@ -519,7 +528,7 @@ def _run_advisory_check_pr_create_loc_accumulation(
         import re as re2
         loc_match = re2.findall(r"(\d+)\s+insertion", shortstat_result.stdout)
         del_match = re2.findall(r"(\d+)\s+deletion", shortstat_result.stdout)
-        loc = int(loc_match[-1]) + int(del_match[-1]) if loc_match and del_match else 0
+        loc = (int(loc_match[-1]) if loc_match else 0) + (int(del_match[-1]) if del_match else 0)
     except (subprocess.TimeoutExpired, ValueError, OSError):
         loc = 0
 
