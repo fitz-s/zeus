@@ -16,15 +16,97 @@ Exit criteria (PLAN §3 Phase 3):
 
 from __future__ import annotations
 
+import io
 import json
 import subprocess
 import sys
+import types
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = REPO_ROOT / "scripts" / "worktree_doctor.py"
+
+# ---------------------------------------------------------------------------
+# Module-level import of worktree_doctor for fixture-based tests (F8)
+# ---------------------------------------------------------------------------
+if str(REPO_ROOT / "scripts") not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT / "scripts"))
+
+import worktree_doctor as _wt_mod  # noqa: E402
+
+# Fake porcelain output: 3 known worktrees (CI-stable, not real-state-dependent)
+_FAKE_PORCELAIN = """\
+worktree /fake/zeus
+HEAD aabbccdd00000000000000000000000000000000
+branch refs/heads/main
+
+worktree /fake/worktrees/zeus-cleanup-debt
+HEAD 1122334400000000000000000000000000000000
+branch refs/heads/cleanup-debt-2026-05-07
+
+worktree /fake/worktrees/zeus-low-high
+HEAD aabbccdd00000000000000000000000000000000
+branch refs/heads/low-high-alignment-recovery-2026-05-07
+
+"""
+
+_FAKE_AHEAD_BEHIND = "0\n"  # rev-list count → 0 for all
+
+
+def _fake_git(*args: str, cwd: Path = REPO_ROOT) -> str:  # noqa: ARG001
+    """Stub for worktree_doctor._git: returns canned data for known commands."""
+    cmd = list(args)
+    if cmd[:3] == ["worktree", "list", "--porcelain"]:
+        return _FAKE_PORCELAIN
+    if cmd[:2] == ["rev-list", "--count"]:
+        return _FAKE_AHEAD_BEHIND
+    if cmd[:2] == ["status", "--short"]:
+        return ""  # clean
+    if cmd[:2] == ["log", "-1"]:
+        return "1746000000\n"
+    if cmd[:2] == ["rev-parse", "--short"]:
+        return "aabbccd\n"
+    return ""
+
+
+def _fake_gh(*args: str) -> str:  # noqa: ARG001
+    """Stub for worktree_doctor._gh: returns empty PR list."""
+    return "[]"
+
+
+def _cmd_status_with_fixture() -> dict:
+    """Call cmd_status() with _git/_gh patched; capture stdout; return parsed JSON."""
+
+    class _FakeArgs:
+        pass
+
+    buf = io.StringIO()
+    with (
+        patch.object(_wt_mod, "_git", side_effect=_fake_git),
+        patch.object(_wt_mod, "_gh", side_effect=_fake_gh),
+        patch("builtins.print", side_effect=lambda *a, **k: buf.write(" ".join(str(x) for x in a) + "\n")),
+    ):
+        _wt_mod.cmd_status(_FakeArgs())
+    return json.loads(buf.getvalue())
+
+
+def _cmd_advisory_with_fixture() -> str:
+    """Call cmd_advisory() with _git patched; capture stdout; return text output."""
+
+    class _FakeArgs:
+        pass
+
+    buf = io.StringIO()
+    with (
+        patch.object(_wt_mod, "_git", side_effect=_fake_git),
+        patch.object(_wt_mod, "_gh", side_effect=_fake_gh),
+        patch("builtins.print", side_effect=lambda *a, **k: buf.write(" ".join(str(x) for x in a) + "\n")),
+    ):
+        _wt_mod.cmd_advisory(_FakeArgs())
+    return buf.getvalue()
 
 
 def _run(*args: str, cwd: Path = REPO_ROOT) -> subprocess.CompletedProcess:
@@ -102,19 +184,17 @@ def test_status_worktrees_have_required_fields() -> None:
 
 
 def test_status_shows_three_worktrees() -> None:
-    """Current repo has 3 active worktrees; --status must list all 3."""
-    result = _run("--status")
-    data = json.loads(result.stdout)
+    """cmd_status must list all 3 worktrees from the fixture (CI-stable, not real-state)."""
+    data = _cmd_status_with_fixture()
     count = len(data["worktrees"])
     assert count >= 3, (
-        f"Expected >= 3 worktrees (main + cleanup-debt + low-high-alignment); got {count}"
+        f"Expected >= 3 worktrees from fixture (main + cleanup-debt + low-high); got {count}"
     )
 
 
 def test_status_ahead_behind_present() -> None:
-    """Each worktree entry includes ahead_of_origin_main and behind_origin_main."""
-    result = _run("--status")
-    data = json.loads(result.stdout)
+    """Each worktree entry includes ahead_of_origin_main and behind_origin_main (fixture)."""
+    data = _cmd_status_with_fixture()
     for wt in data["worktrees"]:
         assert "ahead_of_origin_main" in wt, f"ahead_of_origin_main missing: {wt}"
         assert "behind_origin_main" in wt, f"behind_origin_main missing: {wt}"
@@ -123,12 +203,9 @@ def test_status_ahead_behind_present() -> None:
 
 
 def test_status_current_worktree_dirty_is_bool() -> None:
-    """The is_current worktree must have dirty as a bool."""
-    result = _run("--status")
-    data = json.loads(result.stdout)
-    current_entries = [wt for wt in data["worktrees"] if wt.get("is_current")]
-    assert current_entries, "No is_current=True entry found in --status output"
-    for wt in current_entries:
+    """Every worktree entry must have dirty as a bool (fixture; is_current may be False for all)."""
+    data = _cmd_status_with_fixture()
+    for wt in data["worktrees"]:
         assert isinstance(wt["dirty"], bool), f"dirty must be bool, got {type(wt['dirty'])}"
 
 
@@ -152,17 +229,16 @@ def test_advisory_non_empty() -> None:
 
 
 def test_advisory_mentions_three_worktrees() -> None:
-    """Advisory output must mention all 3 worktree paths or branches."""
-    result = _run("--cross-worktree-visibility")
-    output = result.stdout
+    """Advisory output must mention all 3 fixture worktrees (CI-stable, not real-state)."""
+    output = _cmd_advisory_with_fixture()
     # At minimum the header line mentions the count
     assert "Active worktrees" in output or "worktree" in output.lower(), (
         f"Expected worktree summary; got: {output!r}"
     )
-    # 3 worktrees should appear as indented entries
+    # 3 fixture worktrees should appear as indented [branch] entries
     lines_with_bracket = [l for l in output.splitlines() if l.strip().startswith("[")]
     assert len(lines_with_bracket) >= 3, (
-        f"Expected >= 3 worktree entries; found {len(lines_with_bracket)}\n{output}"
+        f"Expected >= 3 worktree entries from fixture; found {len(lines_with_bracket)}\n{output}"
     )
 
 

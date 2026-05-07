@@ -526,6 +526,7 @@ def main() -> int:
     sub.add_parser("advisory", help="Cross-worktree visibility map for SessionStart")
     sub.add_parser("branch-keepup", help="Recommend ff/rebase/merge/close for current branch")
     sub.add_parser("hygiene", help="Advisory list of workspace clutter (never deletes)")
+    sub.add_parser("post-merge-cleanup", help="Post-merge advisory checklist (never deletes)")
 
     # Flag aliases for task-brief compatibility
     ap.add_argument("--status", action="store_true", help="Alias for 'status' subcommand")
@@ -548,6 +549,7 @@ def main() -> int:
         "advisory": cmd_advisory,
         "branch-keepup": cmd_branch_keepup,
         "hygiene": cmd_hygiene,
+        "post-merge-cleanup": cmd_post_merge_cleanup,
     }
 
     if args.cmd not in dispatch:

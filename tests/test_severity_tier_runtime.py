@@ -5,12 +5,14 @@
 """Phase 2A runtime tests: K1 severity demotion wiring via admission_severity.yaml.
 
 Verifies that the two F5 emitter sites in topology_doctor_script_checks.py consult
-admission_severity.yaml at runtime and emit issues with severity="advisory" (NOT
-severity="error" / "blocking") for WORKING-class codes.
+admission_severity.yaml at runtime and emit issues with severity="warning" +
+blocking_modes=("global_health",) (NOT severity="error" / "blocking") for
+WORKING-class codes.  The downstream issue pipeline only recognises "warning"/"error";
+"advisory" was not a valid severity value (F6/F7 fix).
 
 Test matrix:
-  1. script_long_lived_bad_name (F5, AS-07) → severity="advisory"
-  2. script_diagnostic_forbidden_write_target (F5, AS-08) → severity="advisory"
+  1. script_long_lived_bad_name (F5, AS-07) → severity="warning", blocking_modes contains "global_health"
+  2. script_diagnostic_forbidden_write_target (F5, AS-08) → severity="warning", blocking_modes contains "global_health"
   3. planning_lock_evidence_missing (AS-09, TRUTH_REWRITE) → severity="error" (still BLOCKING)
   4. Backward compat: code NOT in admission_severity.yaml → severity="error" (legacy default)
 
@@ -74,12 +76,13 @@ def _make_minimal_api() -> MagicMock:
 # ---------------------------------------------------------------------------
 
 def test_f5_bad_name_emits_advisory() -> None:
-    """F5/AS-07: script_long_lived_bad_name must emit severity='advisory' at runtime.
+    """F5/AS-07: script_long_lived_bad_name must emit severity='warning' + blocking_modes at runtime.
 
     Simulate check_script_lifecycle() being called for a long-lived script whose
     name does not match any allowed prefix or exception.  The checker calls
     api._issue_with_admission_severity('script_long_lived_bad_name', ...) which
-    must resolve ADVISORY from admission_severity.yaml and set severity='advisory'.
+    must resolve ADVISORY from admission_severity.yaml and set severity='warning'
+    with blocking_modes=("global_health",) via the advisory() helper (F6 fix).
 
     Emitter site: scripts/topology_doctor_script_checks.py:121-128.
     """
@@ -121,10 +124,15 @@ def test_f5_bad_name_emits_advisory() -> None:
         f"Got issues: {[i.code for i in issues]}"
     )
     for issue in bad_name_issues:
-        assert issue.severity == "advisory", (
-            f"script_long_lived_bad_name must emit severity='advisory' (F5/AS-07 K1 demotion). "
+        assert issue.severity == "warning", (
+            f"script_long_lived_bad_name must emit severity='warning' (F6/F7 fix: advisory() helper). "
             f"Got severity={issue.severity!r}. "
-            "Check that _issue_with_admission_severity reads ADVISORY from admission_severity.yaml."
+            "Check that _issue_with_admission_severity calls advisory() which returns severity='warning'."
+        )
+        bm = issue.blocking_modes or ()
+        assert "global_health" in bm, (
+            f"script_long_lived_bad_name must have blocking_modes containing 'global_health'. "
+            f"Got blocking_modes={bm!r}."
         )
 
 
@@ -133,12 +141,13 @@ def test_f5_bad_name_emits_advisory() -> None:
 # ---------------------------------------------------------------------------
 
 def test_f5_forbidden_write_target_emits_advisory() -> None:
-    """F5/AS-08: script_diagnostic_forbidden_write_target must emit severity='advisory'.
+    """F5/AS-08: script_diagnostic_forbidden_write_target must emit severity='warning' + blocking_modes.
 
     Simulate run_scripts() checking a diagnostic script whose write_targets include
     a path not in diagnostic_allowed_write_targets.  The checker calls
     api._issue_with_admission_severity('script_diagnostic_forbidden_write_target', ...)
-    which must emit severity='advisory' per AS-08.
+    which must emit severity='warning' with blocking_modes=("global_health",) per AS-08
+    via the advisory() helper (F6 fix).
 
     Emitter site: scripts/topology_doctor_script_checks.py:267-274.
     """
@@ -182,10 +191,15 @@ def test_f5_forbidden_write_target_emits_advisory() -> None:
         f"Got issues: {[i.code for i in result.issues]}"
     )
     for issue in forbidden_issues:
-        assert issue.severity == "advisory", (
-            f"script_diagnostic_forbidden_write_target must emit severity='advisory' "
-            f"(F5/AS-08 K1 demotion). Got severity={issue.severity!r}. "
-            "Check that _issue_with_admission_severity reads ADVISORY from admission_severity.yaml."
+        assert issue.severity == "warning", (
+            f"script_diagnostic_forbidden_write_target must emit severity='warning' "
+            f"(F6/F7 fix: advisory() helper). Got severity={issue.severity!r}. "
+            "Check that _issue_with_admission_severity calls advisory() which returns severity='warning'."
+        )
+        bm = issue.blocking_modes or ()
+        assert "global_health" in bm, (
+            f"script_diagnostic_forbidden_write_target must have blocking_modes containing 'global_health'. "
+            f"Got blocking_modes={bm!r}."
         )
 
 
@@ -284,8 +298,9 @@ def test_f5_advisory_not_counted_as_error() -> None:
     """Advisory issues must not be counted in error tallies.
 
     The run_scripts() code paths that count blocking errors check
-    issue.severity == 'error'.  An advisory issue (severity='advisory') must
-    not increment the error count, confirming the K1 demotion has runtime effect.
+    issue.severity == 'error'.  An advisory issue (F6/F7 fix: severity='warning'
+    + blocking_modes=("global_health",)) must not increment the error count,
+    confirming the K1 demotion has runtime effect.
     """
     _reset_severity_cache()
 
@@ -298,8 +313,12 @@ def test_f5_advisory_not_counted_as_error() -> None:
         "script_long_lived_bad_name must NOT have severity='error' after K1 demotion. "
         f"Got severity={issue.severity!r}."
     )
-    assert issue.severity == "advisory", (
-        f"Expected severity='advisory', got {issue.severity!r}."
+    assert issue.severity == "warning", (
+        f"Expected severity='warning' (advisory() helper, F6 fix), got {issue.severity!r}."
+    )
+    bm = issue.blocking_modes or ()
+    assert "global_health" in bm, (
+        f"Expected blocking_modes to contain 'global_health'; got {bm!r}."
     )
     # Simulate the blocking count logic from topology_doctor.py line ~2602
     is_blocking = (issue.severity == "error")

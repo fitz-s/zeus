@@ -746,16 +746,17 @@ def _issue_with_admission_severity(code: str, path: str, message: str) -> Topolo
     """Emit a TopologyIssue whose severity is resolved from admission_severity.yaml.
 
     F5 emitter sites call this instead of _issue() so that codes listed as
-    ADVISORY in the YAML produce severity="advisory" rather than severity="error".
+    ADVISORY in the YAML produce severity="warning" + blocking_modes=("global_health",)
+    via the advisory() helper — downstream pipelines only recognise "warning"/"error".
 
     Severity mapping:
-      ADVISORY → "advisory"  (non-blocking; does not count as error)
+      ADVISORY → severity="warning" + blocking_modes=("global_health",)  [via advisory()]
       BLOCKING  → "error"    (current default; backward compat)
       <missing> → "error"    (backward-compat fallback)
     """
     target = _load_admission_severity().get(code, "BLOCKING")
     if target == "ADVISORY":
-        return _make_issue(code, path, message, severity="advisory")
+        return advisory(code, path, message)
     return issue(code, path, message)
 
 
@@ -2969,11 +2970,19 @@ def _admission_typed_issue(
     # K1 extension: resolve severity from admission_severity.yaml instead of
     # always emitting "error". Blocked paths (forbidden_hits) are always errors
     # regardless of YAML entry; scope_expansion and ambiguous may be ADVISORY.
+    # F7: "advisory" is not recognised downstream; use "warning" + blocking_modes
+    # to mirror the advisory() helper contract (canonical enum: topology_doctor.py).
     if forbidden_hits:
         severity = "error"
+        blocking_modes: tuple[str, ...] | None = None
     else:
         target = _load_admission_severity().get(code, "BLOCKING")
-        severity = "advisory" if target == "ADVISORY" else "error"
+        if target == "ADVISORY":
+            severity = "warning"
+            blocking_modes = ("global_health",)
+        else:
+            severity = "error"
+            blocking_modes = None
     issue: dict[str, Any] = {
         "severity": severity,
         "lane": "navigation",
@@ -2981,6 +2990,8 @@ def _admission_typed_issue(
         "path": primary_path,
         "message": "; ".join(message_parts),
     }
+    if blocking_modes is not None:
+        issue["blocking_modes"] = blocking_modes
     if schema_version != "1":
         issue["owner_manifest"] = "architecture/topology.yaml"
         issue["repair_kind"] = "scope_expansion"

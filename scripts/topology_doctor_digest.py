@@ -31,7 +31,18 @@ import os
 import re
 from fnmatch import fnmatch, translate as _fnmatch_translate
 from functools import lru_cache
+from pathlib import Path
 from typing import Any, Iterable
+
+try:
+    from _yaml_bootstrap import import_yaml
+except ImportError:
+    from scripts._yaml_bootstrap import import_yaml
+
+_yaml = import_yaml()
+
+_DIGEST_ROOT = Path(__file__).resolve().parents[1]
+_ADMISSION_SEVERITY_PATH = _DIGEST_ROOT / "architecture" / "admission_severity.yaml"
 
 
 # ---------------------------------------------------------------------------
@@ -52,6 +63,37 @@ def _glob_match(path: str, pattern: str) -> bool:
     if not pattern:
         return False
     return _compile_glob(pattern).match(path) is not None
+
+
+# ---------------------------------------------------------------------------
+# F1 fix: blocked_globs per typed_intent — read from admission_severity.yaml
+#
+# plan_only and audit declare blocks_path_globs in the typed_intent_enum section.
+# _apply_typed_intent_shortcut checks these BEFORE admitting any file, so that
+# src/** (and other blocked patterns) are never admitted for read-only intents.
+# ---------------------------------------------------------------------------
+
+@lru_cache(maxsize=1)
+def _load_typed_intent_blocked_globs() -> dict[str, tuple[str, ...]]:
+    """Return mapping of intent_id -> blocked glob patterns.
+
+    Reads architecture/admission_severity.yaml once (cached). Falls back to
+    an empty dict when the file is absent or malformed (safe default: no blocks
+    beyond the pre-existing forbidden_hits mechanism).
+    """
+    if not _ADMISSION_SEVERITY_PATH.exists():
+        return {}
+    try:
+        data = _yaml.safe_load(_ADMISSION_SEVERITY_PATH.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return {}
+    result: dict[str, tuple[str, ...]] = {}
+    for entry in data.get("typed_intent_enum", []):
+        intent_id = entry.get("id")
+        globs = entry.get("blocks_path_globs") or []
+        if intent_id and globs:
+            result[intent_id] = tuple(str(g) for g in globs)
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -639,9 +681,9 @@ def _normalize_intent(value: str) -> str:
 
 # K3: canonical typed_intent_enum values that short-circuit profile selection.
 # Source: architecture/admission_severity.yaml typed_intent_enum (9-value enum).
-# plan_only / audit / hygiene / rebase_keepup admit all requested paths (read-intent);
-# hotfix / create_new / modify_existing / refactor / other use normal profile resolution
-# for admission but are still recognised as canonical (non-invalid) intents.
+# plan_only / audit admit all requested paths (pure read-only intents; blocked_globs apply).
+# hygiene / hotfix / rebase_keepup / create_new / modify_existing / refactor / other use
+# normal profile resolution for admission but are still recognised as canonical (non-invalid).
 _CANONICAL_TYPED_INTENTS: frozenset[str] = frozenset({
     "plan_only",
     "create_new",
@@ -656,12 +698,11 @@ _CANONICAL_TYPED_INTENTS: frozenset[str] = frozenset({
 
 # Intents that admit ALL requested paths without a profile match.
 # These are read-only or non-source-modifying intents per admission_severity.yaml.
+# NOTE: hotfix and rebase_keepup are NOT in this set — they have scope and must
+# go through normal profile match. Only pure read-only intents bypass admission.
 _ADMIT_ALL_PATHS_INTENTS: frozenset[str] = frozenset({
     "plan_only",
     "audit",
-    "hygiene",
-    "rebase_keepup",
-    "hotfix",
 })
 
 
@@ -1378,14 +1419,18 @@ def _apply_typed_intent_shortcut(
 ) -> dict[str, Any]:
     """K3 fix — upgrade admission to 'admitted' for canonical read-intent typed_intents.
 
-    When the caller passes --intent plan_only (or audit / hygiene / rebase_keepup /
-    hotfix), the intent signals a read-only or non-source-modifying operation. Profile
-    selection cannot select a matching profile because these ids are NOT digest profile
-    ids. As a result, _reconcile_admission returns advisory_only or ambiguous.
+    When the caller passes --intent plan_only or audit, the intent signals a read-only
+    operation. Profile selection cannot select a matching profile because these ids are
+    NOT digest profile ids. As a result, _reconcile_admission returns advisory_only or
+    ambiguous.
 
     This function short-circuits: if the normalised intent is in _ADMIT_ALL_PATHS_INTENTS
-    and the current admission status is advisory_only / ambiguous / scope_expansion_required,
-    ALL requested files are admitted directly.
+    (plan_only, audit) and the current admission status is advisory_only / ambiguous /
+    scope_expansion_required, ALL requested files are admitted directly — UNLESS a file
+    matches a blocked_glob for that intent (checked first via _check_typed_intent_blocked_globs).
+
+    hotfix, hygiene, and rebase_keepup are NOT in _ADMIT_ALL_PATHS_INTENTS and go through
+    normal profile match.
 
     For create_new / modify_existing / refactor / other, this function is a no-op;
     _apply_companion_loop_break handles create_new admission upgrades via K2.
@@ -1404,22 +1449,52 @@ def _apply_typed_intent_shortcut(
     if admission.get("status") not in upgradeable:
         return admission
 
-    # Admit all requested files that do not hit global forbidden patterns.
+    # F1 fix: check blocked_globs for this intent BEFORE admitting any file.
+    # blocked_globs are defined per typed_intent in admission_severity.yaml.
+    # A file matching a blocked glob emits advisory typed_intent_path_outside_scope
+    # and falls through to normal admission (NOT admitted by K3 shortcut).
+    intent_blocked_globs = _load_typed_intent_blocked_globs().get(normalised, ())
+    blocked_by_intent: list[str] = []
+    if intent_blocked_globs:
+        blocked_by_intent = [
+            f for f in requested
+            if any(_glob_match(f, g) for g in intent_blocked_globs)
+        ]
+
+    # Admit all requested files that do not hit global forbidden patterns
+    # AND do not match the intent's own blocked_globs.
     # Forbidden-wins invariant is preserved: blocked paths stay out.
     forbidden_hits = list(admission.get("forbidden_hits") or [])
-    forbidden_set = set(forbidden_hits)
-    admitted_files = [f for f in requested if f not in forbidden_set]
+    excluded_set = set(forbidden_hits) | set(blocked_by_intent)
+    admitted_files = [f for f in requested if f not in excluded_set]
 
     new_admission = dict(admission)
     new_admission["status"] = "admitted"
     new_admission["admitted_files"] = admitted_files
-    new_admission["out_of_scope_files"] = []
+    # Files blocked by intent's blocked_globs fall through to normal admission
+    # (they are not in admitted_files and not in out_of_scope_files — they remain
+    # subject to profile-based admission in a downstream pass).
+    new_admission["out_of_scope_files"] = blocked_by_intent
     new_admission["typed_intent_short_circuit"] = True
+    if blocked_by_intent:
+        new_admission["typed_intent_blocked_files"] = blocked_by_intent
+        new_admission["typed_intent_blocked_advisory"] = [
+            {
+                "code": "typed_intent_path_outside_scope",
+                "path": f,
+                "message": (
+                    f"intent={normalised} blocks path via blocks_path_globs; "
+                    f"file not admitted by K3 shortcut"
+                ),
+                "severity": "advisory",
+            }
+            for f in blocked_by_intent
+        ]
 
     why = list((admission.get("decision_basis") or {}).get("why") or [])
     why.append(
         f"K3 typed_intent_short_circuit: intent={normalised}; "
-        f"admitted_all_requested_paths={admitted_files}"
+        f"admitted={admitted_files}; blocked_by_intent={blocked_by_intent}"
     )
     new_admission["decision_basis"] = dict(admission.get("decision_basis") or {})
     new_admission["decision_basis"]["why"] = why

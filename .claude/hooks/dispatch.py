@@ -1124,27 +1124,27 @@ def _run_advisory_check_worktree_create(
 
 
 def _write_worktree_sentinel_from_payload(wt_path: str, payload: dict[str, Any]) -> None:
-    """Delegate to worktree_doctor._write_worktree_sentinel via subprocess (isolated)."""
-    try:
-        subprocess.run(
-            [
-                sys.executable, str(_WORKTREE_DOCTOR),
-                # worktree_doctor has no write subcommand exposed as CLI;
-                # sentinel write is internal — we do it inline here.
-            ],
-            capture_output=True, text=True, timeout=5, cwd=REPO_ROOT,
-        )
-    except Exception:
-        pass
+    """Write zeus_worktree.yaml sentinel directly (no subprocess).
+
+    F4 fix: the previous implementation invoked worktree_doctor with no args
+    (which prints help and exits), so no sentinel was ever written. The inline
+    write path is the correct approach; the subprocess call is removed.
+
+    F5 fix: git rev-parse --short HEAD is run with cwd=wt_path (the newly-
+    created worktree) so the base SHA reflects the worktree's HEAD, not the
+    parent repo's HEAD.
+    """
     # Inline minimal sentinel write (mirrors worktree_doctor._write_worktree_sentinel)
     try:
         import yaml as _yaml
         from datetime import datetime, timezone
         tool_input = payload.get("tool_input", {}) or {}
         branch = tool_input.get("branch", Path(wt_path).name)
+        # F5: use wt_path as cwd so HEAD resolves to the new worktree's commit,
+        # not the parent repo's HEAD.
         head = subprocess.run(
             ["git", "rev-parse", "--short", "HEAD"],
-            capture_output=True, text=True, timeout=5, cwd=REPO_ROOT,
+            capture_output=True, text=True, timeout=5, cwd=wt_path,
         ).stdout.strip()
         data = {
             "schema_version": 1,

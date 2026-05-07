@@ -69,6 +69,10 @@ typed_intent_enum:
     description: >
       Read-only audit/investigation. Writes ONLY to evidence/** or .omc/research/**.
       Source/test/script writes blocked.
+    blocks_path_globs:
+      - src/**
+      - tests/**
+      - scripts/**
     sunset_date: 2026-11-07
 
   - id: hygiene
