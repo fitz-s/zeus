@@ -69,16 +69,19 @@ jobs:
 
           *Advisory only — does not block merge. Comment auto-clears once budget is met.*"
             if [ -n "${EXISTING}" ]; then
-              gh api --method PATCH "repos/${REPO}/issues/comments/${EXISTING}" -f body="${BODY}" > /dev/null
-              echo "Updated existing advisory comment id=${EXISTING}"
+              gh api --method PATCH "repos/${REPO}/issues/comments/${EXISTING}" -f body="${BODY}" > /dev/null \
+                && echo "Updated existing advisory comment id=${EXISTING}" \
+                || echo "WARN: comment PATCH failed (read-only token, e.g. fork PR); advisory skipped, exiting 0"
             else
-              gh api --method POST "repos/${REPO}/issues/${PR_NUMBER}/comments" -f body="${BODY}" > /dev/null
-              echo "Posted new advisory comment"
+              gh api --method POST "repos/${REPO}/issues/${PR_NUMBER}/comments" -f body="${BODY}" > /dev/null \
+                && echo "Posted new advisory comment" \
+                || echo "WARN: comment POST failed (read-only token, e.g. fork PR); advisory skipped, exiting 0"
             fi
           else
             if [ -n "${EXISTING}" ]; then
-              gh api --method DELETE "repos/${REPO}/issues/comments/${EXISTING}" > /dev/null
-              echo "Cleared advisory comment id=${EXISTING} (budget met)"
+              gh api --method DELETE "repos/${REPO}/issues/comments/${EXISTING}" > /dev/null \
+                && echo "Cleared advisory comment id=${EXISTING} (budget met)" \
+                || echo "WARN: comment DELETE failed (read-only token); advisory orphaned, exiting 0"
             else
               echo "Budget met; no prior advisory to clear"
             fi
