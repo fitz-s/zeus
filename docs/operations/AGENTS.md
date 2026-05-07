@@ -146,6 +146,8 @@ make a surface default-read unless `current_state.md` routes it.
 | `task_2026-05-05_object_invariance_wave20/PLAN.md` | topology planning packet | Route evidence for exit snapshot hash preservation through execute_exit_order retry/recovery paths |
 | `task_2026-05-05_object_invariance_wave21/` | plan packet container | Planning-lock evidence for object-meaning invariance Wave 21 exchange-reconcile freshness authority repair |
 | `task_2026-05-05_object_invariance_wave21/PLAN.md` | topology planning packet | Route evidence for venue-read freshness authority before M5 absence findings |
+| `task_2026-05-06_calibration_quality_blockers/` | active packet container | 2026-05-06 launch-blocker remediation packet for calibration quality (12 inverted-slope Platts quarantined + fit-time guard) |
+| `task_2026-05-06_calibration_quality_blockers/QUARANTINE_LEDGER.md` | active packet evidence | Ledger of the 12 QUARANTINED platt_models_v2 buckets with reversibility queries and fallback-chain analysis |
 Archived packet evidence (physically moved to `docs/archives/packets/`) is
 listed in `docs/archive_registry.md`; do not re-list those packets here. When
 a packet closes and is archived, remove its row from this registry and the

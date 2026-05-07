@@ -917,7 +917,7 @@ def test_chain_reconciliation_updates_live_position_from_chain(monkeypatch, tmp_
     monkeypatch.setattr(cycle_runner, "get_current_level", lambda: RiskLevel.GREEN)
     monkeypatch.setattr(cycle_runner, "get_connection", lambda: get_connection(db_path))
     monkeypatch.setattr(cycle_runner, "load_portfolio", lambda: portfolio)
-    monkeypatch.setattr("src.state.db.get_trade_connection_with_world", lambda mode: get_connection(db_path))
+    monkeypatch.setattr("src.state.db.get_trade_connection_with_world", lambda *_: get_connection(db_path))
     monkeypatch.setattr(cycle_runner, "save_portfolio", lambda state, *args, **kwargs: None)
     monkeypatch.setattr(cycle_runner, "PolymarketClient", DummyClob)
     monkeypatch.setattr(cycle_runner, "get_tracker", lambda: StrategyTracker())
@@ -1588,7 +1588,7 @@ def test_trade_and_no_trade_artifacts_carry_replay_reference_fields(monkeypatch,
 
     monkeypatch.setattr(cycle_runner, "get_current_level", lambda: RiskLevel.GREEN)
     monkeypatch.setattr(cycle_runner, "get_connection", lambda: get_connection(db_path))
-    monkeypatch.setattr("src.state.db.get_trade_connection_with_world", lambda mode: get_connection(db_path))
+    monkeypatch.setattr("src.state.db.get_trade_connection_with_world", lambda *_: get_connection(db_path))
     monkeypatch.setattr(cycle_runner, "load_portfolio", lambda: portfolio)
     monkeypatch.setattr(cycle_runner, "save_portfolio", lambda state, *args, **kwargs: None)
     monkeypatch.setattr(cycle_runner, "PolymarketClient", DummyClob)
@@ -5124,7 +5124,7 @@ def test_execute_discovery_phase_logs_rejected_live_entry_telemetry(monkeypatch,
 
     monkeypatch.setattr(cycle_runner, "get_current_level", lambda: RiskLevel.GREEN)
     monkeypatch.setattr(cycle_runner, "get_connection", lambda: get_connection(db_path))
-    monkeypatch.setattr("src.state.db.get_trade_connection_with_world", lambda mode: get_connection(db_path))
+    monkeypatch.setattr("src.state.db.get_trade_connection_with_world", lambda *_: get_connection(db_path))
     monkeypatch.setattr(cycle_runner, "load_portfolio", lambda: portfolio)
     monkeypatch.setattr(cycle_runner, "save_portfolio", lambda state, *args, **kwargs: None)
     monkeypatch.setattr(cycle_runner, "PolymarketClient", DummyClob)
@@ -6803,7 +6803,7 @@ def test_load_portfolio_prefers_position_current_when_projection_exists(tmp_path
     path = tmp_path / "positions-live.json"
     conn = get_connection(db_path)
     init_schema(conn)
-    monkeypatch.setattr("src.state.db.get_trade_connection_with_world", lambda mode: get_connection(db_path))
+    monkeypatch.setattr("src.state.db.get_trade_connection_with_world", lambda *_: get_connection(db_path))
     conn.execute(
         """
         INSERT INTO position_current (
@@ -6870,7 +6870,7 @@ def test_load_portfolio_reads_token_identity_from_position_current(tmp_path, mon
     path = tmp_path / "positions-live.json"
     conn = get_connection(db_path)
     init_schema(conn)
-    monkeypatch.setattr("src.state.db.get_trade_connection_with_world", lambda mode: get_connection(db_path))
+    monkeypatch.setattr("src.state.db.get_trade_connection_with_world", lambda *_: get_connection(db_path))
     conn.execute(
         """
         INSERT INTO position_current (
@@ -7320,7 +7320,7 @@ def test_load_portfolio_treats_empty_projection_as_canonical_empty(tmp_path, mon
     path = tmp_path / "positions-live.json"
     conn = get_connection(db_path)
     init_schema(conn)
-    monkeypatch.setattr("src.state.db.get_trade_connection_with_world", lambda mode: get_connection(db_path))
+    monkeypatch.setattr("src.state.db.get_trade_connection_with_world", lambda *_: get_connection(db_path))
     conn.close()
 
     path.write_text(json.dumps({
@@ -7353,7 +7353,7 @@ def test_load_portfolio_treats_empty_projection_as_canonical_despite_legacy_json
     path = tmp_path / "positions-live.json"
     conn = get_connection(db_path)
     init_schema(conn)
-    monkeypatch.setattr("src.state.db.get_trade_connection_with_world", lambda mode: get_connection(db_path))
+    monkeypatch.setattr("src.state.db.get_trade_connection_with_world", lambda *_: get_connection(db_path))
     conn.commit()
     conn.close()
 
