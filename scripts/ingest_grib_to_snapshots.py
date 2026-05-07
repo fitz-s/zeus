@@ -281,12 +281,23 @@ def ingest_json_file(
     step_horizon_hours = payload.get("step_horizon_hours")
     step_horizon_hours = float(step_horizon_hours) if step_horizon_hours is not None else None
 
+    # 2026-05-07 Codex P2 fix: persist the physical_quantity reported by the
+    # contract-validated payload, not the legacy ``metric.physical_quantity``
+    # constant. Open Data post-cutover (mx2t3/mn2t3) writes a different
+    # physical string than the TIGGE-archive 6h derived quantity; stamping the
+    # row with the legacy 6h string would silently erase 3h identity even
+    # though the contract validated correctly. Fall back to ``metric.physical_quantity``
+    # for legacy paths whose payload omits the field.
+    physical_quantity_for_row = (
+        str(contract_payload.get("physical_quantity") or metric.physical_quantity)
+    )
+
     available_at = source_run_context.available_at_iso() if source_run_context else issue_time
     row = dict(
         city=city,
         target_date=target_date,
         temperature_metric=metric.temperature_metric,
-        physical_quantity=metric.physical_quantity,
+        physical_quantity=physical_quantity_for_row,
         observation_field=metric.observation_field,
         issue_time=issue_time,
         valid_time=target_date,

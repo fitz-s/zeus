@@ -53,12 +53,15 @@ def _make_opendata_high_payload(
     return {
         "generated_at": "2026-05-01T08:00:00+00:00",
         "data_version": ECMWF_OPENDATA_HIGH_DATA_VERSION,
-        "physical_quantity": "mx2t6_local_calendar_day_max",
-        "param": "mx2t6",
+        # 2026-05-07 mx2t3 cutover: payload now reports the 3h native physical
+        # identity. Snapshot ingest contract maps data_version → MetricIdentity
+        # whose physical_quantity matches; mismatched payloads are rejected.
+        "physical_quantity": "mx2t3_local_calendar_day_max",
+        "param": "mx2t3",
         "paramId": 121,
-        "short_name": "mx2t6",
+        "short_name": "mx2t3",
         "step_type": "max",
-        "aggregation_window_hours": 6,
+        "aggregation_window_hours": 3,
         "city": "London",
         "lat": 51.4775,
         "lon": -0.4614,
@@ -216,7 +219,7 @@ def test_collect_open_ens_cycle_writes_authority_chain_readable_by_live_reader(t
         city_timezone="Europe/London",
         target_local_date=date(2026, 5, 2),
         temperature_metric="high",
-        physical_quantity="mx2t6_local_calendar_day_max",
+        physical_quantity="mx2t3_local_calendar_day_max",
         observation_field="high_temp",
         data_version=ECMWF_OPENDATA_HIGH_DATA_VERSION,
         source_id="ecmwf_open_data",

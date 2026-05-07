@@ -17,23 +17,51 @@ from dataclasses import dataclass
 from src.types.metric_identity import HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN, MetricIdentity
 
 # 2026-05-01: Open Data ENS data_versions accepted alongside the TIGGE archive
-# data_versions. Same physical_quantity / temperature_metric / observation_field
-# spec — different source-provenance prefix. Both rows can coexist in
-# ensemble_snapshots_v2 for the same (city, target_date, metric); readers use
+# data_versions. Same temperature_metric / observation_field spec — different
+# source-provenance prefix. Both rows can coexist in ensemble_snapshots_v2 for
+# the same (city, target_date, metric); readers use
 # data_version_priority_for_metric() to prefer Open Data when present.
 # 2026-05-07: mx2t3/mn2t3 rename. New versions are the active write path.
 # Legacy mx2t6/mn2t6 kept in allow-list so historical rows remain readable.
+#
+# 2026-05-07 Codex P2 fix: dedicate MetricIdentity instances for the 3h
+# native derived quantity ("mx2t3_local_calendar_day_max" /
+# "mn2t3_local_calendar_day_min"). The cloud extract patch (see
+# docs/operations/CLOUD_EXTRACT_PATCH_2026_05_07.md) writes these strings
+# into payload.physical_quantity. Mapping the new data_versions to the
+# legacy 6h MetricIdentity caused PHYSICAL_QUANTITY_MISMATCH on every
+# correctly-tagged 3h row, dropping post-cutover Open Data rows on the
+# floor. Per-quantity MetricIdentity restores 3h identity end-to-end.
 _ECMWF_OPENDATA_HIGH_DATA_VERSION = "ecmwf_opendata_mx2t3_local_calendar_day_max_v1"
 _ECMWF_OPENDATA_LOW_DATA_VERSION = "ecmwf_opendata_mn2t3_local_calendar_day_min_v1"
 _ECMWF_OPENDATA_HIGH_DATA_VERSION_LEGACY = "ecmwf_opendata_mx2t6_local_calendar_day_max_v1"
 _ECMWF_OPENDATA_LOW_DATA_VERSION_LEGACY = "ecmwf_opendata_mn2t6_local_calendar_day_min_v1"
 
+# 3h native derived-quantity MetricIdentity (Open Data post-cutover).
+# These differ from HIGH_LOCALDAY_MAX / LOW_LOCALDAY_MIN only in
+# (physical_quantity, data_version); the temperature_metric and
+# observation_field stay identical so all downstream calibration /
+# replay readers treat them as the same logical track.
+_HIGH_LOCALDAY_MAX_OPENDATA_3H = MetricIdentity(
+    temperature_metric="high",
+    physical_quantity="mx2t3_local_calendar_day_max",
+    observation_field="high_temp",
+    data_version=_ECMWF_OPENDATA_HIGH_DATA_VERSION,
+)
+_LOW_LOCALDAY_MIN_OPENDATA_3H = MetricIdentity(
+    temperature_metric="low",
+    physical_quantity="mn2t3_local_calendar_day_min",
+    observation_field="low_temp",
+    data_version=_ECMWF_OPENDATA_LOW_DATA_VERSION,
+)
+
 _ALLOWED_DATA_VERSIONS: dict[str, MetricIdentity] = {
     HIGH_LOCALDAY_MAX.data_version: HIGH_LOCALDAY_MAX,
     LOW_LOCALDAY_MIN.data_version: LOW_LOCALDAY_MIN,
-    _ECMWF_OPENDATA_HIGH_DATA_VERSION: HIGH_LOCALDAY_MAX,
-    _ECMWF_OPENDATA_LOW_DATA_VERSION: LOW_LOCALDAY_MIN,
-    # Legacy — historical rows only; no new writes use these.
+    # Open Data post-cutover (mx2t3/mn2t3) — 3h native physical identity preserved.
+    _ECMWF_OPENDATA_HIGH_DATA_VERSION: _HIGH_LOCALDAY_MAX_OPENDATA_3H,
+    _ECMWF_OPENDATA_LOW_DATA_VERSION: _LOW_LOCALDAY_MIN_OPENDATA_3H,
+    # Legacy mx2t6/mn2t6 Open Data — historical rows only; no new writes.
     _ECMWF_OPENDATA_HIGH_DATA_VERSION_LEGACY: HIGH_LOCALDAY_MAX,
     _ECMWF_OPENDATA_LOW_DATA_VERSION_LEGACY: LOW_LOCALDAY_MIN,
 }
