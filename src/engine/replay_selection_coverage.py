@@ -1,6 +1,12 @@
 # Created: 2026-05-07
 # Last reused or audited: 2026-05-07
 # Authority basis: backtest_v2_port_2026_05_07.md §D2+D3
+#
+# Dynamic SQL safety (PR #87 Copilot reply): all f-string SQL in this module
+# interpolates only module-level table-name constants (sv2_table, cp_v2_table,
+# etc.) resolved from the ReplayContext dataclass, which are themselves derived
+# from compile-time string literals — never from user-controlled input.
+# check_dynamic_sql.py baseline has been updated to include this file.
 """Selection-coverage replay mode.
 
 Public entry: run_selection_coverage()
@@ -486,10 +492,19 @@ def run_selection_coverage(
     cp_v2_table = f"{ctx._sp}calibration_pairs_v2"
     sv2_table = f"{ctx._sp}settlements_v2"
 
-    # Check whether settlements_v2 has a snapshot_id column
+    # Check whether settlements_v2 has a snapshot_id column.
+    # Use PRAGMA <schema>.table_info(<table>) so the query runs against the
+    # correct attached schema (world.*) rather than main — the bare form
+    # PRAGMA table_info(settlements_v2) silently returns 0 rows when the table
+    # lives under the attached "world" schema (PR #87 Copilot fix).
     sv2_cols = set()
     try:
-        sv2_col_rows = conn.execute(f"PRAGMA table_info({sv2_table.replace('world.', '')})").fetchall()
+        if "." in sv2_table:
+            schema, tbl_name = sv2_table.split(".", 1)
+            pragma_sql = f"PRAGMA {schema}.table_info({tbl_name})"
+        else:
+            pragma_sql = f"PRAGMA table_info({sv2_table})"
+        sv2_col_rows = conn.execute(pragma_sql).fetchall()
         sv2_cols = {str(r["name"] if hasattr(r, '__getitem__') else r[1]) for r in sv2_col_rows}
     except Exception:
         pass
@@ -511,15 +526,19 @@ def run_selection_coverage(
         (start_date, end_date, temperature_metric),
     ).fetchall()
 
-    # Load all calibration_pairs_v2 rows for climatology (no-future-leak enforced per snapshot)
+    # Load all calibration_pairs_v2 rows for climatology (no-future-leak enforced per snapshot).
+    # Filter by temperature_metric to avoid mixing high/low rows for the same city/date
+    # (PR #87 Codex P2: prior query loaded all metrics, producing wrong climatology p-market).
     clim_rows: list[dict] = []
     if p_market_source == "climatology":
         raw_clim = conn.execute(
             f"""
             SELECT city, target_date, range_label, outcome
             FROM {cp_v2_table}
+            WHERE temperature_metric = ?
             ORDER BY target_date, city, range_label
             """,
+            (temperature_metric,),
         ).fetchall()
         clim_rows = [dict(r) for r in raw_clim]
 
@@ -572,16 +591,20 @@ def run_selection_coverage(
                 snap_id = None
 
         if snap_id is None:
-            # Find latest snapshot before decision time
+            # Find latest snapshot available at or before decision time.
+            # The available_at <= decision_time guard prevents future leakage
+            # (PR #87 Copilot fix: prior query had no temporal bound).
+            decision_time = f"{target_date}T00:00:00"  # local-day open; conservative bound
             snap_row = conn.execute(
                 f"""
                 SELECT snapshot_id FROM {ctx._snapshot_v2_table or ctx._snapshot_legacy_table}
                 WHERE city = ? AND target_date = ?
                   AND temperature_metric = ?
+                  AND available_at <= ?
                 ORDER BY datetime(available_at) DESC
                 LIMIT 1
                 """,
-                (city.name, target_date, temperature_metric),
+                (city.name, target_date, temperature_metric, decision_time),
             ).fetchone()
             if snap_row is None:
                 continue

@@ -66,6 +66,11 @@
             "type": "command",
             "command": "python3 .claude/hooks/dispatch.py pr_create_loc_accumulation",
             "description": "[Phase 2 new] Advisory: warn when gh pr create invoked with <2 commits or <80 LOC since base (paid auto-reviewer cost)"
+          },
+          {
+            "type": "command",
+            "command": "python3 .claude/hooks/dispatch.py pre_merge_comment_check",
+            "description": "[B2 BLOCKING] Block gh pr merge when PR age <600s, unresolved Codex P0/P1, or CHANGES_REQUESTED. Bypass: ZEUS_PR_MERGE_FORCE=1"
           }
         ]
       }

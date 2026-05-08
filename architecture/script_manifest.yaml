@@ -694,6 +694,34 @@ scripts:
     required_helpers: []
     required_tests: [tests/test_worktree_doctor.py, tests/test_dispatch_session_start.py]
 
+  migrate_backtest_runs_lane_constraint_2026_05_07.py:
+    # Created: 2026-05-07
+    # Authority basis: PR #87 fix — selection_coverage lane omitted from
+    #   backtest_runs + backtest_outcome_comparison CHECK constraints.
+    class: migration
+    lifecycle: packet_ephemeral
+    status: active
+    authority_scope: migration_write
+    target_db: state/zeus_backtest.db
+    dry_run_default: true
+    apply_flag: implicit_when_no_dry_run
+    dangerous_if_run: false
+    read_targets: [state/zeus_backtest.db]
+    write_targets: [state/zeus_backtest.db]
+    external_inputs: []
+    delete_policy: retain_until_superseded
+    reuse_when: >
+      backtest_runs or backtest_outcome_comparison CHECK constraint is missing
+      'selection_coverage' lane. Idempotent — detects via sqlite_master inspection
+      and exits as no-op if already migrated.
+    do_not_use_when: >
+      DB does not exist yet (noop_db_not_found), or migration already applied
+      (noop_already_migrated). Do not run against zeus-world.db.
+    canonical_command: "python3 scripts/migrate_backtest_runs_lane_constraint_2026_05_07.py [--dry-run] [--db PATH]"
+    promotion_barrier: none
+    required_helpers: []
+    required_tests: [tests/test_backtest_runs_schema_lane_allowlist.py]
+
   state_census.py:
     # Created: 2026-05-05
     # Last reused or audited: 2026-05-05

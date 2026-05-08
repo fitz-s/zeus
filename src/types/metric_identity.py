@@ -94,9 +94,12 @@ class MetricIdentity:
                 f"Unknown source_family for high-localday-max: {source_family!r}. "
                 f"Expected one of {sorted(_HIGH_DATA_VERSION_BY_SOURCE_FAMILY.keys())!r}."
             )
+        pq = _HIGH_PHYSICAL_QUANTITY_BY_SOURCE_FAMILY.get(
+            source_family, "mx2t6_local_calendar_day_max"
+        )
         return cls(
             temperature_metric="high",
-            physical_quantity="mx2t6_local_calendar_day_max",
+            physical_quantity=pq,
             observation_field="high_temp",
             data_version=dv,
         )
@@ -110,9 +113,12 @@ class MetricIdentity:
                 f"Unknown source_family for low-localday-min: {source_family!r}. "
                 f"Expected one of {sorted(_LOW_DATA_VERSION_BY_SOURCE_FAMILY.keys())!r}."
             )
+        pq = _LOW_PHYSICAL_QUANTITY_BY_SOURCE_FAMILY.get(
+            source_family, "mn2t6_local_calendar_day_min"
+        )
         return cls(
             temperature_metric="low",
-            physical_quantity="mn2t6_local_calendar_day_min",
+            physical_quantity=pq,
             observation_field="low_temp",
             data_version=dv,
         )
@@ -142,6 +148,18 @@ _HIGH_DATA_VERSION_BY_SOURCE_FAMILY: dict[str, str] = {
 _LOW_DATA_VERSION_BY_SOURCE_FAMILY: dict[str, str] = {
     "tigge": "tigge_mn2t6_local_calendar_day_min_v1",
     "ecmwf_opendata": "ecmwf_opendata_mn2t3_local_calendar_day_min_v1",
+}
+
+# Source-family → physical_quantity registry (PR #85 Copilot: physical_quantity
+# must match the native ECMWF product — mx2t3/mn2t3 for ecmwf_opendata, not
+# mx2t6/mn2t6 which are TIGGE 6h aggregations).
+_HIGH_PHYSICAL_QUANTITY_BY_SOURCE_FAMILY: dict[str, str] = {
+    "tigge": "mx2t6_local_calendar_day_max",
+    "ecmwf_opendata": "mx2t3_local_calendar_day_max",
+}
+_LOW_PHYSICAL_QUANTITY_BY_SOURCE_FAMILY: dict[str, str] = {
+    "tigge": "mn2t6_local_calendar_day_min",
+    "ecmwf_opendata": "mn2t3_local_calendar_day_min",
 }
 
 

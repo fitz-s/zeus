@@ -112,6 +112,10 @@ _BASELINE_PER_FILE: dict[str, int] = {
     "src/engine/ddd_wiring.py": 1,
     "src/engine/evaluator.py": 14,
     "src/engine/replay.py": 14,
+    # 6 f-string SQL sites: all interpolate module-level table-name constants
+    # (sv2_table, cp_v2_table, etc.) from ReplayContext — no user-controlled
+    # input. Added at PR #87 follow-up baseline bump (2026-05-08).
+    "src/engine/replay_selection_coverage.py": 6,
     "src/execution/harvester.py": 5,
     "src/execution/settlement_commands.py": 4,
     "src/ingest/harvester_truth_writer.py": 1,

@@ -40,19 +40,20 @@ if _FLAG in sys.argv:
     sys.argv.remove(_FLAG)
 
 from datetime import datetime, timezone
+from pathlib import Path
 from unittest.mock import patch
 
 # Ensure DB is unpaused before invocation
 import sqlite3
 from src.state.db_writer_lock import WriteClass, db_writer_lock  # noqa: E402
 
-DB_PATH = "state/zeus-world.db"
+DB_PATH = Path("state/zeus-world.db")
 NOW_ISO = datetime.now(timezone.utc).isoformat()
 
 
 def _ensure_unpaused():
     with db_writer_lock(DB_PATH, WriteClass.BULK):
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(str(DB_PATH))
         conn.execute(
             """
             INSERT INTO control_overrides_history (

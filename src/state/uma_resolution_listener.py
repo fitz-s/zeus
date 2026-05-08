@@ -248,8 +248,14 @@ class UmaRpcClient(ABC):
         from_block: int,
         to_block: Optional[int] = None,
     ) -> list[dict]:
-        """Return raw log entries matching the filter. Must NOT raise on
-        empty result; an empty list is the no-resolutions case."""
+        """Return raw log entries matching the filter.
+
+        Returns an empty list when the window contains no matching logs
+        (legitimate empty result — caller must not advance cursor on raise).
+        Raises RuntimeError on RPC transport errors or malformed responses so
+        the caller can distinguish fetch failure from a legitimately empty
+        block window (PR #84 Codex P1: cursor must not advance after error).
+        """
 
     @abstractmethod
     def get_block_timestamp(self, block_number: int) -> int:
@@ -316,11 +322,15 @@ class UmaHttpRpcClient(UmaRpcClient):
             logs = result.get("result") or []
             if not isinstance(logs, list):
                 logger.warning("UmaHttpRpcClient.get_logs: unexpected result type %s", type(logs))
-                return []
+                raise RuntimeError(
+                    f"UmaHttpRpcClient.get_logs: unexpected result type {type(logs)}"
+                )
             return logs
+        except RuntimeError:
+            raise
         except Exception as exc:
             logger.warning("UmaHttpRpcClient.get_logs failed: %s", exc)
-            return []
+            raise RuntimeError(f"UmaHttpRpcClient.get_logs RPC error: {exc}") from exc
 
     def get_block_timestamp(self, block_number: int) -> int:
         """Fetch block timestamp via eth_getBlockByNumber, cached by block."""

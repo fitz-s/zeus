@@ -552,7 +552,12 @@ def ingest_json_file(
     # repeats keep the legacy IGNORE behaviour so re-ingest stays idempotent.
     payload_manifest_sha = str(payload.get("manifest_sha256", ""))
     drift_replace = False
-    if not overwrite:
+    # ZEUS_INGEST_FORCE_REPLACE must be read before the existence check so it
+    # can bypass the skipped_exists short-circuit (PR #85 Copilot: env-var was
+    # evaluated after the early return, making it a no-op in the common case).
+    import os as _os
+    force_replace_env = _os.environ.get("ZEUS_INGEST_FORCE_REPLACE", "") == "1"
+    if not overwrite and not force_replace_env:
         existing = conn.execute(
             "SELECT manifest_hash, provenance_json FROM ensemble_snapshots_v2 "
             "WHERE city=? AND target_date=? "
@@ -646,12 +651,9 @@ def ingest_json_file(
     )
 
     # D1+D3: drift_replace promotes the verb to REPLACE when manifest_sha
-    # drift was detected against an existing row. ZEUS_INGEST_FORCE_REPLACE=1
-    # gives the extractor a way to globally force REPLACE without per-row
-    # drift-detect (used when extractor pre-flight has detected manifest drift
-    # affecting any of the 51 cities; see critic v2 D1+D3 BLOCKER).
-    import os as _os
-    force_replace_env = _os.environ.get("ZEUS_INGEST_FORCE_REPLACE", "") == "1"
+    # drift was detected against an existing row. force_replace_env is set above
+    # (before existence check) so ZEUS_INGEST_FORCE_REPLACE=1 bypasses the
+    # skipped_exists short-circuit (PR #85 fix).
     insert_verb = (
         "INSERT OR REPLACE"
         if (overwrite or drift_replace or force_replace_env)

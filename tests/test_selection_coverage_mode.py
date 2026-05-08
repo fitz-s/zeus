@@ -11,6 +11,7 @@ NOT the legacy find_edges + fdr_filter path.
 
 import sqlite3
 import json
+from datetime import date, timedelta
 from typing import Optional
 from unittest.mock import MagicMock, patch, call
 import pytest
@@ -57,7 +58,8 @@ def _make_in_memory_db(cities: list[dict]) -> sqlite3.Connection:
             cluster TEXT,
             forecast_available_at TEXT,
             decision_group_id TEXT,
-            bias_corrected INTEGER
+            bias_corrected INTEGER,
+            temperature_metric TEXT DEFAULT 'high'
         );
         CREATE TABLE settlements_v2 (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -88,6 +90,10 @@ def _insert_settlement(conn, city, target_date, settlement_value, winning_bin, m
 
 def _insert_snapshot(conn, city, target_date, snapshot_id, p_raw, lead_hours=72.0, metric="high"):
     # members_json: 1D list of 50 member max values (MarketAnalysis requires 1D)
+    # available_at must be BEFORE decision_time (target_date T00:00:00) so the
+    # production-side filter `available_at <= decision_time` picks this snapshot.
+    # Use (target_date - 1 day) at 12:00Z as the available_at value.
+    prev_date = (date.fromisoformat(target_date) - timedelta(days=1)).isoformat()
     conn.execute(
         """INSERT INTO ensemble_snapshots_v2
            (snapshot_id, city, target_date, available_at, fetch_time, issue_time, valid_time,
@@ -95,9 +101,9 @@ def _insert_snapshot(conn, city, target_date, snapshot_id, p_raw, lead_hours=72.
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             snapshot_id, city, target_date,
-            f"{target_date}T06:00:00Z",
-            f"{target_date}T06:00:00Z",
-            f"{target_date}T00:00:00",
+            f"{prev_date}T12:00:00Z",
+            f"{prev_date}T12:00:00Z",
+            f"{prev_date}T00:00:00",
             f"{target_date}T12:00:00",
             lead_hours, 3.0, 0, "ecmwf",
             json.dumps([20.0] * 50),  # 1D member maxes
@@ -107,14 +113,14 @@ def _insert_snapshot(conn, city, target_date, snapshot_id, p_raw, lead_hours=72.
     )
 
 
-def _insert_calibration_pair(conn, city, target_date, range_label, p_raw, outcome, lead_days=3.0):
+def _insert_calibration_pair(conn, city, target_date, range_label, p_raw, outcome, lead_days=3.0, metric="high"):
     conn.execute(
         """INSERT INTO calibration_pairs_v2
            (city, target_date, range_label, p_raw, outcome, lead_days, season, cluster,
-            forecast_available_at, decision_group_id, bias_corrected)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            forecast_available_at, decision_group_id, bias_corrected, temperature_metric)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (city, target_date, range_label, p_raw, outcome, lead_days, "JJA", city,
-         f"{target_date}T06:00:00Z", "default", 0),
+         f"{target_date}T06:00:00Z", "default", 0, metric),
     )
 
 
