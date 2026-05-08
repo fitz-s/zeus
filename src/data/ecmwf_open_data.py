@@ -47,6 +47,7 @@ import logging
 import subprocess
 import sys
 import hashlib
+import time
 from contextlib import nullcontext
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -466,20 +467,31 @@ def _run_subprocess(args: list[str], *, label: str, timeout: int) -> dict:
     except subprocess.TimeoutExpired as exc:
         logger.error("ecmwf_open_data %s: TIMEOUT after %ds", label, timeout)
         return {"label": label, "ok": False, "error": f"timeout after {timeout}s",
-                "stderr_tail": str(exc)[-300:]}
+                "stderr_tail": str(exc)[-4096:]}
     except FileNotFoundError as exc:
         return {"label": label, "ok": False, "error": f"script not found: {exc}",
                 "stderr_tail": ""}
+    stderr_full = result.stderr or ""
     if result.returncode != 0:
         logger.warning("ecmwf_open_data %s: rc=%d stderr_tail=%s",
-                       label, result.returncode, (result.stderr or "")[-300:])
+                       label, result.returncode, stderr_full[-4096:])
     return {
         "label": label,
         "ok": result.returncode == 0,
         "returncode": result.returncode,
-        "stdout_tail": (result.stdout or "")[-400:],
-        "stderr_tail": (result.stderr or "")[-400:],
+        "stdout_tail": (result.stdout or "")[-4096:],
+        "stderr_tail": stderr_full[-4096:],
     }
+
+
+def _write_stderr_dump(dump_path: Path, stderr: str) -> None:
+    """Write full stderr to a postmortem file under tmp/. Silently no-ops on error."""
+    try:
+        dump_path.parent.mkdir(parents=True, exist_ok=True)
+        dump_path.write_text(stderr, encoding="utf-8")
+        logger.info("ecmwf_open_data: stderr dump written to %s", dump_path)
+    except OSError as exc:
+        logger.warning("ecmwf_open_data: could not write stderr dump to %s: %s", dump_path, exc)
 
 
 def collect_open_ens_cycle(
@@ -487,7 +499,7 @@ def collect_open_ens_cycle(
     track: str = "mx2t6_high",
     run_date: Optional[date] = None,
     run_hour: Optional[int] = None,
-    download_timeout_seconds: int = 600,
+    download_timeout_seconds: int = 1500,  # was 600 — empirical full-fetch 609.6s for 71 steps × 51 members × 1.5GB
     extract_timeout_seconds: int = 900,
     skip_download: bool = False,
     skip_extract: bool = False,
@@ -570,20 +582,65 @@ def collect_open_ens_cycle(
     stages: list[dict] = []
 
     if not skip_download:
-        download = runner(
-            [
-                _conda_python(),
-                str(DOWNLOAD_SCRIPT),
-                "--date", cycle_date.isoformat(),
-                "--run-hour", str(cycle_hour),
-                "--step", *[str(s) for s in STEP_HOURS],
-                "--param", cfg["open_data_param"],
-                "--source", "ecmwf",
-                "--output-path", str(output_path),
-            ],
-            label=f"download_{track}",
-            timeout=download_timeout_seconds,
+        _download_args = [
+            _conda_python(),
+            str(DOWNLOAD_SCRIPT),
+            "--date", cycle_date.isoformat(),
+            "--run-hour", str(cycle_hour),
+            "--step", *[str(s) for s in STEP_HOURS],
+            "--param", cfg["open_data_param"],
+            "--source", "ecmwf",
+            "--output-path", str(output_path),
+        ]
+        _stderr_dump = (
+            PROJECT_ROOT
+            / "tmp"
+            / f"ecmwf_open_data_{cycle_date.isoformat()}_{cycle_hour:02d}z_{track}.stderr.txt"
         )
+        # Bounded retry: attempt 1 immediately, attempt 2 after 60s, attempt 3 after 180s.
+        # A 404 on a grid-valid step means data not yet published → SKIPPED_NOT_RELEASED (no retry).
+        # All other rc!=0 are retryable (transient network, rate-limit, timeout).
+        _retry_delays = [0, 60, 180]
+        download = None
+        for _attempt, _delay in enumerate(_retry_delays, start=1):
+            if _delay > 0:
+                logger.info(
+                    "ecmwf_open_data download_%s: retry attempt %d/%d after %ds sleep",
+                    track, _attempt, len(_retry_delays), _delay,
+                )
+                time.sleep(_delay)
+            download = runner(
+                _download_args,
+                label=f"download_{track}",
+                timeout=download_timeout_seconds,
+            )
+            if download["ok"]:
+                break
+            # Distinguish 404 on grid-valid step (not-yet-released) from other failures.
+            _stderr = download.get("stderr_tail", "") or ""
+            _is_404 = "404" in _stderr or "Not Found" in _stderr
+            if _is_404 and "No index entries" not in _stderr:
+                logger.warning(
+                    "ecmwf_open_data download_%s: 404 on grid-valid step — SKIPPED_NOT_RELEASED (attempt %d)",
+                    track, _attempt,
+                )
+                _write_stderr_dump(_stderr_dump, _stderr)
+                stages.append(download)
+                return {
+                    "status": "skipped_not_released",
+                    "track": track,
+                    "data_version": cfg["data_version"],
+                    "stages": stages,
+                    "snapshots_inserted": 0,
+                }
+            if _attempt < len(_retry_delays):
+                logger.warning(
+                    "ecmwf_open_data download_%s: rc=%d on attempt %d/%d — will retry",
+                    track, download.get("returncode", -1), _attempt, len(_retry_delays),
+                )
+        # Write stderr dump on final failure (any rc!=0 after all retries).
+        if not download["ok"]:
+            _write_stderr_dump(_stderr_dump, download.get("stderr_tail", "") or "")
         stages.append(download)
         if not download["ok"]:
             return {
