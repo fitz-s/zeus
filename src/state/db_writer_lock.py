@@ -389,8 +389,12 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
     {
         "src/state/db.py",  # canonical shim
         "src/state/db_writer_lock.py",  # this file — does not connect
-        # Phase 1.y will add additional allowlist entries (e.g.
-        # scripts/verify_truth_surfaces.py during AX2 retrofit).
+        # Track A.6 (#246): daemon-path raw-connect sites — annotated below.
+        # These are NOT in the world-db BULK lock universe; each is either
+        # read-only or writes a separate DB (risk_state.db).
+        "src/ingest_main.py",           # RO: reads condition_id for UMA listener, no write
+        "src/observability/status_summary.py",  # RO: status dashboard read-only
+        "src/riskguard/discord_alerts.py",  # WRITE risk_state.db only; not in world-db BULK lock universe
     }
 )
 

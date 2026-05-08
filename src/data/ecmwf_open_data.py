@@ -47,6 +47,7 @@ import logging
 import subprocess
 import sys
 import hashlib
+from contextlib import nullcontext
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -66,7 +67,8 @@ from src.data.forecast_target_contract import (
 from src.data.producer_readiness import build_producer_readiness_for_scope
 from src.data.forecast_source_registry import gate_source, gate_source_role
 from src.data.release_calendar import FetchDecision, select_source_run_for_target_horizon
-from src.state.db import get_world_connection as get_connection
+from src.state.db import get_world_connection as get_connection, ZEUS_WORLD_DB_PATH
+from src.state.db_writer_lock import WriteClass, db_writer_lock
 from src.state.source_run_coverage_repo import write_source_run_coverage
 from src.state.source_run_repo import write_source_run
 
@@ -606,64 +608,70 @@ def collect_open_ens_cycle(
     # caller passes ``conn=None`` and we open the world DB.
     own_conn = conn is None
     if own_conn:
-        conn = get_connection()
-    try:
-        # Make scripts/ importable so we can call ingest_track.
-        if str(INGEST_SCRIPT_DIR) not in sys.path:
-            sys.path.insert(0, str(INGEST_SCRIPT_DIR))
-        from ingest_grib_to_snapshots import SourceRunContext, ingest_track as _ingest  # type: ignore
-        from src.state.db import init_schema
-
-        init_schema(conn)
-        # The opendata extract writes JSON files to a different subdir than
-        # TIGGE — reuse the same ingester by passing the parent directory and
-        # the matching track name, and override the json_subdir lookup via the
-        # _TRACK_CONFIGS dict. Cleanest in-process integration: temporarily
-        # rebind the json_subdir for this call.
-        import ingest_grib_to_snapshots as _module  # type: ignore
-
-        original_subdir = _module._TRACK_CONFIGS[cfg["ingest_track"]]["json_subdir"]
-        _module._TRACK_CONFIGS[cfg["ingest_track"]]["json_subdir"] = cfg["extract_subdir"]
-        try:
-            summary = _ingest(
-                track=cfg["ingest_track"],
-                json_root=FIFTY_ONE_ROOT / "raw",
-                conn=conn,
-                date_from=None,
-                date_to=None,
-                cities=None,
-                overwrite=True,
-                require_files=False,
-                source_run_context=SourceRunContext(
-                    source_id=SOURCE_ID,
-                    source_transport="ensemble_snapshots_v2_db_reader",
-                    source_run_id=source_run_id,
-                    release_calendar_key=release_calendar_key,
-                    source_cycle_time=source_cycle_time,
-                    source_release_time=source_release_time,
-                    source_available_at=source_release_time,
-                ),
-            )
-        finally:
-            _module._TRACK_CONFIGS[cfg["ingest_track"]]["json_subdir"] = original_subdir
-        status = _status_for_ingest_summary(summary)
-        authority_computed_at = (now_utc or datetime.now(timezone.utc)).astimezone(timezone.utc)
-        authority_summary = _write_source_authority_chain(
-            conn,
-            summary=summary,
-            status=status,
-            source_run_id=source_run_id,
-            source_cycle_time=source_cycle_time,
-            source_release_time=source_release_time,
-            release_calendar_key=release_calendar_key,
-            forecast_track=forecast_track,
-            data_version=cfg["data_version"],
-            computed_at=authority_computed_at,
-        )
-        conn.commit()
-    finally:
+        _lock_ctx = db_writer_lock(ZEUS_WORLD_DB_PATH, WriteClass.BULK)
+    else:
+        # Injected connection (test seam with in-memory sqlite) — skip file lock.
+        _lock_ctx = nullcontext()
+    with _lock_ctx:
         if own_conn:
-            conn.close()
+            conn = get_connection()
+        try:
+            # Make scripts/ importable so we can call ingest_track.
+            if str(INGEST_SCRIPT_DIR) not in sys.path:
+                sys.path.insert(0, str(INGEST_SCRIPT_DIR))
+            from ingest_grib_to_snapshots import SourceRunContext, ingest_track as _ingest  # type: ignore
+            from src.state.db import init_schema
+
+            init_schema(conn)
+            # The opendata extract writes JSON files to a different subdir than
+            # TIGGE — reuse the same ingester by passing the parent directory and
+            # the matching track name, and override the json_subdir lookup via the
+            # _TRACK_CONFIGS dict. Cleanest in-process integration: temporarily
+            # rebind the json_subdir for this call.
+            import ingest_grib_to_snapshots as _module  # type: ignore
+
+            original_subdir = _module._TRACK_CONFIGS[cfg["ingest_track"]]["json_subdir"]
+            _module._TRACK_CONFIGS[cfg["ingest_track"]]["json_subdir"] = cfg["extract_subdir"]
+            try:
+                summary = _ingest(
+                    track=cfg["ingest_track"],
+                    json_root=FIFTY_ONE_ROOT / "raw",
+                    conn=conn,
+                    date_from=None,
+                    date_to=None,
+                    cities=None,
+                    overwrite=True,
+                    require_files=False,
+                    source_run_context=SourceRunContext(
+                        source_id=SOURCE_ID,
+                        source_transport="ensemble_snapshots_v2_db_reader",
+                        source_run_id=source_run_id,
+                        release_calendar_key=release_calendar_key,
+                        source_cycle_time=source_cycle_time,
+                        source_release_time=source_release_time,
+                        source_available_at=source_release_time,
+                    ),
+                )
+            finally:
+                _module._TRACK_CONFIGS[cfg["ingest_track"]]["json_subdir"] = original_subdir
+            status = _status_for_ingest_summary(summary)
+            authority_computed_at = (now_utc or datetime.now(timezone.utc)).astimezone(timezone.utc)
+            authority_summary = _write_source_authority_chain(
+                conn,
+                summary=summary,
+                status=status,
+                source_run_id=source_run_id,
+                source_cycle_time=source_cycle_time,
+                source_release_time=source_release_time,
+                release_calendar_key=release_calendar_key,
+                forecast_track=forecast_track,
+                data_version=cfg["data_version"],
+                computed_at=authority_computed_at,
+            )
+            conn.commit()
+        finally:
+            if own_conn:
+                conn.close()
 
     stages = [
         *stages,

@@ -57,6 +57,9 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
+from src.state.db import ZEUS_WORLD_DB_PATH
+from src.state.db_writer_lock import WriteClass, db_writer_lock
+
 logger = logging.getLogger(__name__)
 
 
@@ -359,27 +362,28 @@ def _ingest_track(
         logger.error("tigge_pipeline %s: import failed: %s", label, exc)
         return {"label": label, "ok": False, "error": f"import failed: {exc}"}
 
-    conn = get_world_connection()
-    try:
-        apply_v2_schema(conn)
+    with db_writer_lock(ZEUS_WORLD_DB_PATH, WriteClass.BULK):
+        conn = get_world_connection()
         try:
-            summary = _ingest_track_fn(
-                track=track,
-                json_root=RAW_ROOT,
-                conn=conn,
-                date_from=date_from.isoformat(),
-                date_to=date_to.isoformat(),
-                cities=None,
-                overwrite=False,
-                # Allow zero-file runs during catch-up (download stage may skip
-                # already-present files; extract may not produce new JSONs).
-                require_files=False,
-            )
-        except Exception as exc:
-            logger.error("tigge_pipeline %s: ingest_track raised: %s", label, exc)
-            return {"label": label, "ok": False, "error": str(exc)}
-    finally:
-        conn.close()
+            apply_v2_schema(conn)
+            try:
+                summary = _ingest_track_fn(
+                    track=track,
+                    json_root=RAW_ROOT,
+                    conn=conn,
+                    date_from=date_from.isoformat(),
+                    date_to=date_to.isoformat(),
+                    cities=None,
+                    overwrite=False,
+                    # Allow zero-file runs during catch-up (download stage may skip
+                    # already-present files; extract may not produce new JSONs).
+                    require_files=False,
+                )
+            except Exception as exc:
+                logger.error("tigge_pipeline %s: ingest_track raised: %s", label, exc)
+                return {"label": label, "ok": False, "error": str(exc)}
+        finally:
+            conn.close()
 
     return {
         "label": label,
