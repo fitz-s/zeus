@@ -3603,6 +3603,9 @@ digest_profiles:
       - "forward substrate production for DSA-19"
       - "market_events_v2 market_price_history producer"
       - "forward market substrate production"
+      - "market source-proof persistence"
+      - "market source proof facts"
+      - "source_contract audit facts"
     match_policy:
       strong_phrases:
         - "Phase 5C upstream forward substrate production"
@@ -3639,6 +3642,9 @@ digest_profiles:
         - "forward substrate production for DSA-19"
         - "market_events_v2 market_price_history producer"
         - "forward market substrate production"
+        - "market source-proof persistence"
+        - "market source proof facts"
+        - "source_contract audit facts"
       weak_terms:
         - "market_events_v2"
         - "market_price_history"

@@ -28,6 +28,7 @@ from src.state.ledger import (
 )
 from src.state.projection import CANONICAL_POSITION_CURRENT_COLUMNS, POSITION_EVENT_ENVS
 from src.state.collateral_ledger import init_collateral_schema
+from src.state.market_topology_repo import write_market_topology_state
 from src.state.snapshot_repo import init_snapshot_schema
 from src.observability.counters import increment as _cnt_inc
 
@@ -2525,6 +2526,33 @@ _FORWARD_MARKET_REQUIRED_TABLES = (
     "market_events_v2",
     "market_price_history",
 )
+_MARKET_SOURCE_CONTRACT_TOPOLOGY_TABLES = ("market_topology_state",)
+_MARKET_TOPOLOGY_STATE_REQUIRED_COLUMNS = (
+    "topology_id",
+    "scope_key",
+    "market_family",
+    "event_id",
+    "condition_id",
+    "question_id",
+    "city_id",
+    "city_timezone",
+    "target_local_date",
+    "temperature_metric",
+    "physical_quantity",
+    "observation_field",
+    "data_version",
+    "token_ids_json",
+    "bin_topology_hash",
+    "gamma_captured_at",
+    "gamma_updated_at",
+    "source_contract_status",
+    "source_contract_reason",
+    "authority_status",
+    "status",
+    "expires_at",
+    "provenance_json",
+    "recorded_at",
+)
 _SETTLEMENT_V2_COLUMNS = (
     "city",
     "target_date",
@@ -2987,6 +3015,166 @@ def log_forward_market_substrate(
     return {
         "status": status,
         "tables": _FORWARD_MARKET_REQUIRED_TABLES,
+        **counts,
+    }
+
+
+def log_market_source_contract_topology_facts(
+    conn: sqlite3.Connection | None,
+    *,
+    markets: Iterable[dict],
+    recorded_at: str,
+    scan_authority: str,
+) -> dict:
+    """Persist scanner source-contract proof into market_topology_state.
+
+    The writer is explicit-connection only. It does not open the default DB,
+    create tables, migrate schema, commit, or change market eligibility.
+    """
+    if conn is None:
+        return {"status": "skipped_no_connection", "tables": _MARKET_SOURCE_CONTRACT_TOPOLOGY_TABLES}
+
+    if str(scan_authority or "").strip().upper() != "VERIFIED":
+        return {
+            "status": "refused_degraded_authority",
+            "tables": _MARKET_SOURCE_CONTRACT_TOPOLOGY_TABLES,
+            "scan_authority": scan_authority,
+        }
+
+    recorded_at_value = _forward_clean_str(recorded_at)
+    if recorded_at_value is None:
+        return {"status": "refused_missing_recorded_at", "tables": _MARKET_SOURCE_CONTRACT_TOPOLOGY_TABLES}
+
+    missing_tables = [
+        table for table in _MARKET_SOURCE_CONTRACT_TOPOLOGY_TABLES if not _table_exists(conn, table)
+    ]
+    if missing_tables:
+        return {
+            "status": "skipped_missing_tables",
+            "tables": _MARKET_SOURCE_CONTRACT_TOPOLOGY_TABLES,
+            "missing_tables": tuple(missing_tables),
+        }
+
+    missing_columns = tuple(
+        sorted(set(_MARKET_TOPOLOGY_STATE_REQUIRED_COLUMNS) - _table_columns(conn, "market_topology_state"))
+    )
+    if missing_columns:
+        return {
+            "status": "skipped_invalid_schema",
+            "tables": _MARKET_SOURCE_CONTRACT_TOPOLOGY_TABLES,
+            "missing_columns": {"market_topology_state": missing_columns},
+        }
+
+    counts = {
+        "topology_rows_written": 0,
+        "markets_skipped_missing_facts": 0,
+        "markets_skipped_source_contract_status": 0,
+        "outcomes_skipped_missing_facts": 0,
+    }
+
+    for market in markets:
+        if not isinstance(market, dict):
+            counts["markets_skipped_missing_facts"] += 1
+            continue
+        source_contract = market.get("source_contract") or {}
+        if not isinstance(source_contract, dict):
+            counts["markets_skipped_source_contract_status"] += 1
+            continue
+        source_contract_status = _forward_clean_str(source_contract.get("status"))
+        if source_contract_status != "MATCH":
+            counts["markets_skipped_source_contract_status"] += 1
+            continue
+
+        market_slug = _forward_clean_str(market.get("slug"))
+        event_id = _forward_clean_str(market.get("event_id"))
+        city_obj = market.get("city")
+        city_name = _forward_city_name(city_obj)
+        city_timezone = _forward_clean_str(
+            market.get("city_timezone") or getattr(city_obj, "timezone", None)
+        )
+        target_date = _forward_clean_str(market.get("target_date"))
+        temperature_metric = _forward_metric(market.get("temperature_metric"))
+        if not (market_slug and city_name and target_date and temperature_metric):
+            counts["markets_skipped_missing_facts"] += 1
+            continue
+
+        data_version = _forward_clean_str(market.get("data_version")) or "gamma_source_contract_v1"
+        observation_field = (
+            "daily_max_temperature" if temperature_metric == "high" else "daily_min_temperature"
+        )
+        resolution_sources = list(source_contract.get("resolution_sources") or market.get("resolution_sources") or [])
+
+        for outcome in market.get("outcomes") or ():
+            if not isinstance(outcome, dict):
+                counts["outcomes_skipped_missing_facts"] += 1
+                continue
+            condition_id = _forward_clean_str(outcome.get("condition_id"))
+            if condition_id is None:
+                counts["outcomes_skipped_missing_facts"] += 1
+                continue
+            question_id = _forward_clean_str(outcome.get("question_id"))
+            token_ids = [
+                token_id
+                for token_id in (
+                    _forward_clean_str(outcome.get("token_id")),
+                    _forward_clean_str(outcome.get("no_token_id")),
+                )
+                if token_id is not None
+            ]
+            provenance = {
+                "writer": "log_market_source_contract_topology_facts",
+                "source": "gamma_market_scanner",
+                "recorded_at": recorded_at_value,
+                "market_slug": market_slug,
+                "event_id": event_id,
+                "event_slug": market_slug,
+                "condition_id": condition_id,
+                "question_id": question_id,
+                "outcome_title": _forward_clean_str(outcome.get("title")),
+                "city": city_name,
+                "target_date": target_date,
+                "temperature_metric": temperature_metric,
+                "resolution_sources": resolution_sources,
+                "source_contract": source_contract,
+            }
+            topology_id = "market_source_contract:{}:{}:{}:{}:{}".format(
+                market_slug,
+                condition_id,
+                city_name,
+                target_date,
+                temperature_metric,
+            )
+            write_market_topology_state(
+                conn,
+                topology_id=topology_id,
+                market_family="weather_temperature",
+                condition_id=condition_id,
+                status="CURRENT",
+                source_contract_status="MATCH",
+                authority_status="VERIFIED",
+                event_id=event_id,
+                question_id=question_id,
+                city_id=city_name,
+                city_timezone=city_timezone,
+                target_local_date=target_date,
+                temperature_metric=temperature_metric,
+                physical_quantity="temperature",
+                observation_field=observation_field,
+                data_version=data_version,
+                token_ids_json=token_ids,
+                source_contract_reason=_forward_clean_str(source_contract.get("reason")),
+                provenance_json=provenance,
+            )
+            conn.execute(
+                "UPDATE market_topology_state SET recorded_at = ? WHERE topology_id = ?",
+                (recorded_at_value, topology_id),
+            )
+            counts["topology_rows_written"] += 1
+
+    status = "written" if counts["topology_rows_written"] else "skipped_no_valid_rows"
+    return {
+        "status": status,
+        "tables": _MARKET_SOURCE_CONTRACT_TOPOLOGY_TABLES,
         **counts,
     }
 

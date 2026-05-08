@@ -1,4 +1,7 @@
-# Lifecycle: created=2026-04-17; last_reviewed=2026-05-06; last_reused=2026-05-06
+# Created: 2026-04-17
+# Last reused or audited: 2026-05-08
+# Authority basis: AGENTS.md money path; S1 market source-proof persistence via market_topology_state.
+# Lifecycle: created=2026-04-17; last_reviewed=2026-05-06; last_reused=2026-05-08
 # Purpose: Lock market_scanner provenance, source-contract drift behavior, and Venus diagnostic authority labels.
 # Reuse: Inspect src/data/market_scanner.py and scripts/watch_source_contract.py before relying on these assertions.
 # Authority basis: audit bug B017 (STILL_OPEN P1 SD-H), Fitz methodology constraint #4 "Data Provenance > Code Correctness"; Wave16 object-meaning diagnostic authority repair.
@@ -17,6 +20,7 @@ state between cases (conftest-free isolation).
 from __future__ import annotations
 
 import json
+import inspect
 import re
 import sqlite3
 import sys
@@ -39,7 +43,11 @@ from src.data.market_scanner import (
     get_last_scan_authority,
 )
 from src.state import db as state_db
-from src.state.db import log_executable_snapshot_market_price_linkage, log_forward_market_substrate
+from src.state.db import (
+    log_executable_snapshot_market_price_linkage,
+    log_forward_market_substrate,
+    log_market_source_contract_topology_facts,
+)
 from src.state.schema.v2_schema import apply_v2_schema
 from src.state.snapshot_repo import init_snapshot_schema, insert_snapshot
 
@@ -267,6 +275,13 @@ def _make_full_linkage_conn() -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     apply_v2_schema(conn)
     init_snapshot_schema(conn)
+    return conn
+
+
+def _make_market_topology_conn() -> sqlite3.Connection:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    state_db.init_schema(conn)
     return conn
 
 
@@ -977,6 +992,23 @@ class TestSourceContractGate:
             ms.runtime_config,
             "runtime_cities",
             lambda: ms.runtime_config.load_cities(),
+        )
+        pending_record = {
+            "city": "Paris",
+            "status": "pending_release",
+            "from_source_contract": {
+                "source_families": ["wu_icao"],
+                "station_ids": ["LFPG"],
+            },
+            "to_source_contract": {
+                "source_families": ["wu_icao"],
+                "station_ids": ["LFPB"],
+            },
+        }
+        monkeypatch.setattr(
+            ms,
+            "_configured_pending_source_conversions",
+            lambda: {"Paris": pending_record},
         )
         event = _gamma_temperature_event(
             title="Highest temperature in Paris on May 1?",
@@ -2328,6 +2360,210 @@ class TestExecutableConditionIdsForUserChannelWS:
 
 class TestForwardMarketSubstrateProducer:
     """Forward substrate writer is explicit, authority-gated, and idempotent."""
+
+    def test_market_source_contract_wu_match_persists_to_topology_state(self):
+        parsed = _parse_event(
+            _gamma_temperature_event(),
+            datetime(2026, 4, 28, tzinfo=timezone.utc),
+            min_hours=0.0,
+        )
+        assert parsed is not None
+        assert parsed["source_contract"]["status"] == "MATCH"
+
+        conn = _make_market_topology_conn()
+
+        result = log_market_source_contract_topology_facts(
+            conn,
+            markets=[parsed],
+            recorded_at="2026-04-28T16:00:00Z",
+            scan_authority="VERIFIED",
+        )
+
+        assert result["status"] == "written"
+        assert result["topology_rows_written"] == len(parsed["outcomes"])
+        row = conn.execute(
+            """
+            SELECT source_contract_status, authority_status, status, provenance_json, recorded_at
+            FROM market_topology_state
+            WHERE condition_id = 'cond1'
+            """
+        ).fetchone()
+        assert row is not None
+        assert row["source_contract_status"] == "MATCH"
+        assert row["authority_status"] == "VERIFIED"
+        assert row["status"] == "CURRENT"
+        assert row["recorded_at"] == "2026-04-28T16:00:00Z"
+        provenance = json.loads(row["provenance_json"])
+        assert provenance["source_contract"]["source_family"] == "wu_icao"
+        assert provenance["source_contract"]["station_id"] == "KLAX"
+        assert provenance["resolution_sources"] == [
+            "https://www.wunderground.com/history/daily/us/ca/los-angeles/KLAX"
+        ]
+        assert provenance["writer"] == "log_market_source_contract_topology_facts"
+
+    def test_market_source_contract_hko_match_persists_without_station_id(self):
+        parsed = _parse_event(
+            _gamma_temperature_event(
+                title="Highest temperature in Hong Kong on May 1?",
+                slug="highest-temperature-in-hong-kong-on-may-1-2026",
+                question="Will the high temperature in Hong Kong be 27°C or higher?",
+                resolution_source=None,
+                description=(
+                    "This market resolves according to Hong Kong Observatory data: "
+                    "https://www.weather.gov.hk/en/cis/climat.htm"
+                ),
+            ),
+            datetime(2026, 4, 30, tzinfo=timezone.utc),
+            min_hours=0.0,
+        )
+        assert parsed is not None
+        assert parsed["source_contract"]["source_family"] == "hko"
+        assert parsed["source_contract"]["station_id"] is None
+
+        conn = _make_market_topology_conn()
+
+        result = log_market_source_contract_topology_facts(
+            conn,
+            markets=[parsed],
+            recorded_at="2026-04-30T16:00:00Z",
+            scan_authority="VERIFIED",
+        )
+
+        assert result["status"] == "written"
+        row = conn.execute(
+            """
+            SELECT provenance_json
+            FROM market_topology_state
+            WHERE condition_id = 'cond1'
+            """
+        ).fetchone()
+        provenance = json.loads(row["provenance_json"])
+        assert provenance["source_contract"]["source_family"] == "hko"
+        assert provenance["source_contract"]["station_id"] is None
+        assert "weather.gov.hk" in provenance["resolution_sources"][0]
+
+    @pytest.mark.parametrize("authority", ["STALE", "EMPTY_FALLBACK", "", None])
+    def test_market_source_contract_refuses_degraded_scan_authority(self, authority):
+        parsed = _parse_event(
+            _gamma_temperature_event(),
+            datetime(2026, 4, 28, tzinfo=timezone.utc),
+            min_hours=0.0,
+        )
+        conn = _make_market_topology_conn()
+
+        result = log_market_source_contract_topology_facts(
+            conn,
+            markets=[parsed],
+            recorded_at="2026-04-28T16:00:00Z",
+            scan_authority=authority,
+        )
+
+        assert result["status"] == "refused_degraded_authority"
+        assert conn.execute("SELECT COUNT(*) FROM market_topology_state").fetchone()[0] == 0
+
+    def test_market_source_contract_skips_missing_table_without_opening_default_db(
+        self, monkeypatch
+    ):
+        monkeypatch.setattr(
+            state_db,
+            "get_connection",
+            lambda *_a, **_kw: pytest.fail("writer must not open a default DB"),
+        )
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+
+        result = log_market_source_contract_topology_facts(
+            conn,
+            markets=[_forward_market()],
+            recorded_at="2026-04-28T16:00:00Z",
+            scan_authority="VERIFIED",
+        )
+
+        assert result["status"] == "skipped_missing_tables"
+        assert result["missing_tables"] == ("market_topology_state",)
+        assert conn.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table'"
+        ).fetchone()[0] == 0
+
+    def test_market_source_contract_refuses_schema_without_recorded_at(self):
+        parsed = _parse_event(
+            _gamma_temperature_event(),
+            datetime(2026, 4, 28, tzinfo=timezone.utc),
+            min_hours=0.0,
+        )
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.execute(
+            """
+            CREATE TABLE market_topology_state (
+                topology_id TEXT,
+                scope_key TEXT,
+                market_family TEXT,
+                event_id TEXT,
+                condition_id TEXT,
+                question_id TEXT,
+                city_id TEXT,
+                city_timezone TEXT,
+                target_local_date TEXT,
+                temperature_metric TEXT,
+                physical_quantity TEXT,
+                observation_field TEXT,
+                data_version TEXT,
+                token_ids_json TEXT,
+                bin_topology_hash TEXT,
+                gamma_captured_at TEXT,
+                gamma_updated_at TEXT,
+                source_contract_status TEXT,
+                source_contract_reason TEXT,
+                authority_status TEXT,
+                status TEXT,
+                expires_at TEXT,
+                provenance_json TEXT
+            )
+            """
+        )
+
+        result = log_market_source_contract_topology_facts(
+            conn,
+            markets=[parsed],
+            recorded_at="2026-04-28T16:00:00Z",
+            scan_authority="VERIFIED",
+        )
+
+        assert result["status"] == "skipped_invalid_schema"
+        assert result["missing_columns"] == {"market_topology_state": ("recorded_at",)}
+
+    def test_market_source_contract_non_match_is_not_persisted(self):
+        parsed = _parse_event(
+            _gamma_temperature_event(),
+            datetime(2026, 4, 28, tzinfo=timezone.utc),
+            min_hours=0.0,
+        )
+        parsed["source_contract"] = {
+            **parsed["source_contract"],
+            "status": "MISMATCH",
+            "reason": "test mismatch",
+        }
+        conn = _make_market_topology_conn()
+
+        result = log_market_source_contract_topology_facts(
+            conn,
+            markets=[parsed],
+            recorded_at="2026-04-28T16:00:00Z",
+            scan_authority="VERIFIED",
+        )
+
+        assert result["status"] == "skipped_no_valid_rows"
+        assert result["markets_skipped_source_contract_status"] == 1
+        assert conn.execute("SELECT COUNT(*) FROM market_topology_state").fetchone()[0] == 0
+
+    def test_cycle_runtime_wires_market_source_contract_topology_writer(self):
+        from src.engine import cycle_runtime
+
+        source = inspect.getsource(cycle_runtime.execute_discovery_phase)
+
+        assert "log_market_source_contract_topology_facts" in source
+        assert "market_source_contract_topology_status" in source
 
     def test_forward_substrate_writes_verified_scanner_rows_without_unblocking_economics(
         self, monkeypatch

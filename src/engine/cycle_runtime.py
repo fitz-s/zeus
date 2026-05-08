@@ -2071,6 +2071,40 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
             deps.logger.warning("Forward market substrate degraded: %s", result)
             summary["degraded"] = True
 
+        try:
+            from src.state.db import log_market_source_contract_topology_facts
+
+            source_contract_result = log_market_source_contract_topology_facts(
+                conn,
+                markets=markets_to_record,
+                recorded_at=decision_time.isoformat(),
+                scan_authority=authority,
+            )
+        except Exception as exc:
+            deps.logger.warning("Market source-contract topology write failed: %s", exc)
+            summary["market_source_contract_topology_status"] = "error"
+            summary["market_source_contract_topology_error"] = str(exc)
+            summary["degraded"] = True
+            return
+
+        source_contract_status = str(source_contract_result.get("status", "") or "")
+        summary["market_source_contract_topology_status"] = source_contract_status
+        for key in (
+            "topology_rows_written",
+            "markets_skipped_missing_facts",
+            "markets_skipped_source_contract_status",
+            "outcomes_skipped_missing_facts",
+        ):
+            if key in source_contract_result:
+                summary[f"market_source_contract_topology_{key}"] = int(
+                    source_contract_result.get(key) or 0
+                )
+        if source_contract_status in {"skipped_missing_tables", "skipped_invalid_schema"}:
+            deps.logger.warning(
+                "Market source-contract topology degraded: %s", source_contract_result
+            )
+            summary["degraded"] = True
+
     def _execution_snapshot_fields(tokens: dict) -> dict:
         tokens = tokens or {}
         return {
