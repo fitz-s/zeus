@@ -103,6 +103,7 @@ from src.contracts.ensemble_snapshot_provenance import (
 from src.contracts.settlement_semantics import SettlementSemantics
 from src.signal.ensemble_signal import p_raw_vector_from_maxes
 from src.state.db import get_world_connection, init_schema
+from src.state.db_writer_lock import WriteClass, db_writer_lock  # noqa: E402
 from src.state.schema.v2_schema import apply_v2_schema
 from src.types.market import validate_bin_topology
 from src.types.metric_identity import HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN, MetricIdentity
@@ -1117,40 +1118,82 @@ def main() -> int:
             print(f"ERROR: {type(e).__name__}: {e}", file=sys.stderr)
             return 1
 
-    if args.db_path:
-        conn = sqlite3.connect(args.db_path)
+    # M3 (PR #93 critic): --dry-run is read-only. Open with mode=ro URI,
+    # skip schema init, skip PRAGMA journal_mode=WAL, and skip the bulk
+    # writer lock entirely (no writers compete with a read-only opener).
+    if args.dry_run:
+        if args.db_path:
+            uri_path = Path(args.db_path).resolve().as_uri().replace("file://", "file:")
+            conn = sqlite3.connect(f"{uri_path}?mode=ro", uri=True)
+        else:
+            from src.state.db import ZEUS_WORLD_DB_PATH  # noqa: PLC0415
+            uri_path = Path(ZEUS_WORLD_DB_PATH).resolve().as_uri().replace("file://", "file:")
+            conn = sqlite3.connect(f"{uri_path}?mode=ro", uri=True)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA busy_timeout = 600000")
-        conn.execute("PRAGMA journal_mode=WAL")
-    else:
-        conn = get_world_connection()
-        conn.execute("PRAGMA busy_timeout = 600000")
-    init_schema(conn)
-    apply_v2_schema(conn)
+        try:
+            per_metric = rebuild_all_v2(
+                conn,
+                dry_run=args.dry_run,
+                force=args.force,
+                city_filter=args.city,
+                start_date=args.start_date,
+                end_date=args.end_date,
+                data_version_filter=args.data_version,
+                temperature_metric=args.temperature_metric,
+                cycle_filter=args.cycle,
+                source_id_filter=args.source_id,
+                horizon_profile_filter=args.horizon_profile,
+                n_mc=args.n_mc,
+            )
+        except Exception as e:
+            print(f"ERROR: {type(e).__name__}: {e}", file=sys.stderr)
+            return 1
+        finally:
+            conn.close()
+        any_refused = any(s.refused for s in per_metric.values())
+        return 1 if any_refused else 0
 
-    try:
-        per_metric = rebuild_all_v2(
-            conn,
-            dry_run=args.dry_run,
-            force=args.force,
-            city_filter=args.city,
-            start_date=args.start_date,
-            end_date=args.end_date,
-            data_version_filter=args.data_version,
-            temperature_metric=args.temperature_metric,
-            cycle_filter=args.cycle,
-            source_id_filter=args.source_id,
-            horizon_profile_filter=args.horizon_profile,
-            n_mc=args.n_mc,
-        )
-    except Exception as e:
-        print(f"ERROR: {type(e).__name__}: {e}", file=sys.stderr)
-        return 1
-    finally:
-        conn.close()
+    # PR #86 retrofit (CRITICAL — preserved across PR #93 rebase): wrap the
+    # entire write path in db_writer_lock(BULK).
+    from src.state.db import ZEUS_WORLD_DB_PATH  # noqa: PLC0415
+    from pathlib import Path as _Path  # noqa: PLC0415
+    _lock_path = _Path(args.db_path) if args.db_path else ZEUS_WORLD_DB_PATH
+    with db_writer_lock(_lock_path, WriteClass.BULK):
+        if args.db_path:
+            conn = sqlite3.connect(args.db_path)
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA busy_timeout = 600000")
+            conn.execute("PRAGMA journal_mode=WAL")
+        else:
+            conn = get_world_connection(write_class="bulk")
+            conn.execute("PRAGMA busy_timeout = 600000")
+        init_schema(conn)
+        apply_v2_schema(conn)
 
-    any_refused = any(s.refused for s in per_metric.values())
-    return 1 if any_refused else 0
+        try:
+            per_metric = rebuild_all_v2(
+                conn,
+                dry_run=args.dry_run,
+                force=args.force,
+                city_filter=args.city,
+                start_date=args.start_date,
+                end_date=args.end_date,
+                data_version_filter=args.data_version,
+                temperature_metric=args.temperature_metric,
+                cycle_filter=args.cycle,
+                source_id_filter=args.source_id,
+                horizon_profile_filter=args.horizon_profile,
+                n_mc=args.n_mc,
+            )
+        except Exception as e:
+            print(f"ERROR: {type(e).__name__}: {e}", file=sys.stderr)
+            return 1
+        finally:
+            conn.close()
+
+        any_refused = any(s.refused for s in per_metric.values())
+        return 1 if any_refused else 0
 
 
 if __name__ == "__main__":

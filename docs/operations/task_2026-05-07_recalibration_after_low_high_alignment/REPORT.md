@@ -6,6 +6,16 @@ Branch: `low-high-recalibration-structure-2026-05-07`
 
 Production DB: `/Users/leofitz/.openclaw/workspace-venus/zeus/state/zeus-world.db`
 
+> **M1 clarification (PR #93 critic, 2026-05-07)** — The 175 production
+> `VERIFIED` LOW Platt rows referenced below were materialized in the prior
+> `low-high-recalibration-structure-2026-05-07` worktree session by the PR #80
+> agent (production refit committed 2026-05-07; commit history on that branch).
+> This PR (#93) does NOT re-run the production refit. It documents the recovery
+> outcome and tightens the gates (preflight required-column check, source/cycle
+> stratification, LOW purity at the live read seam) that should govern any
+> future refit. Treat the "After this run" column as a description of state
+> already on disk, not as evidence of work performed by this PR.
+
 ## Executive Result
 
 The TIGGE/MARS LOW contract-window recovery is now materialized for both 00Z

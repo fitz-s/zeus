@@ -108,10 +108,63 @@ def get_calibration_pin_config() -> dict:
                 }
             if isinstance(pin_cfg.get("model_keys"), dict):
                 pin["model_keys"] = dict(pin_cfg["model_keys"])
+            # PR #82 Copilot review: load eligibility floor into cache so
+            # _cycle_stratified_pin_eligibility_floor() reads from the shared
+            # cache instead of re-opening settings.json on every call.
+            floor_val = pin_cfg.get("cycle_stratified_pin_eligible_after")
+            if isinstance(floor_val, str) and floor_val:
+                pin["cycle_stratified_pin_eligible_after"] = floor_val
     except Exception as exc:  # noqa: BLE001 — fail-open to legacy behavior
         logger.warning("calibration pin config load failed: %s; using legacy unpinned behavior", exc)
     _PIN_CONFIG_CACHE = pin
     return pin
+
+
+def _cycle_stratified_pin_eligibility_floor() -> Optional[str]:
+    """Return the cycle-stratified pin eligibility floor date (YYYY-MM-DD) or None.
+
+    Critic v2 A2 BLOCKER: c12 IFS-ENS has NO data on disk for 2024-01-01..2024-06-01
+    (per cloud ground truth §4 / TIGGE spec v3 §3 Phase 0 #6). Cycle-stratified Platt
+    requires ≥1y rolling 12z corpus, so any frozen_as_of older than the floor MUST
+    be resolved through pooled-cycle config (legacy single-cycle '00' bucket), not
+    cycle-stratified buckets, until the c12 2024-H1 gap is recovered or the floor
+    moves forward.
+
+    Reads ``calibration.pin.cycle_stratified_pin_eligible_after`` from the
+    cached pin config (``get_calibration_pin_config``). Returns None if the
+    key is absent (legacy back-compat — no eligibility gate applied).
+
+    PR #82 Copilot review: previously re-read and re-parsed settings.json on
+    every call, bypassing ``_PIN_CONFIG_CACHE``. Now uses the shared cache.
+    """
+    try:
+        pin_cfg = get_calibration_pin_config()
+        floor = pin_cfg.get("cycle_stratified_pin_eligible_after")
+        if isinstance(floor, str) and floor:
+            return floor
+    except Exception as exc:  # noqa: BLE001 — fail-open to legacy unpinned behavior
+        logger.warning(
+            "cycle_stratified_pin_eligible_after read failed: %s; "
+            "no eligibility gate applied (legacy behavior)",
+            exc,
+        )
+    return None
+
+
+def _frozen_as_of_below_floor(frozen_as_of: Optional[str], floor: Optional[str]) -> bool:
+    """Return True iff frozen_as_of is strictly older than the eligibility floor.
+
+    Both dates are compared lexically on the leading ``YYYY-MM-DD`` prefix
+    (ISO-8601 compatible). Either side being None / empty returns False
+    (no gate).
+    """
+    if not frozen_as_of or not floor:
+        return False
+    fao_date = str(frozen_as_of)[:10]
+    floor_date = str(floor)[:10]
+    if not fao_date or not floor_date:
+        return False
+    return fao_date < floor_date
 
 
 def _resolve_pin_for_bucket(
@@ -125,12 +178,35 @@ def _resolve_pin_for_bucket(
     Fix C (golden-knitting-wand.md Phase 1): if ``frozen_as_of`` in the pin
     config is a dict (cycle-stratified), resolve per ``cycle``; if it is a
     scalar string, apply it to all cycles (back-compat).
+
+    A2 (critic v2 BLOCKER): if the resolved cycle-stratified ``frozen_as_of``
+    is older than ``calibration.pin.cycle_stratified_pin_eligible_after``, fall
+    back to the pooled-cycle pin (legacy single-cycle '00' bucket / scalar form)
+    so callers don't request a cycle-stratified Platt that has no training
+    corpus on the older side of the eligibility floor.
     """
     pin = get_calibration_pin_config()
     key = f"{temperature_metric}:{cluster}:{season}:{cycle}"
     raw_fao = pin.get("frozen_as_of")
     if isinstance(raw_fao, dict):
         frozen_as_of = raw_fao.get(cycle)  # None if this cycle has no pin
+        # A2 eligibility gate: cycle-stratified pin with frozen_as_of below
+        # the floor → degrade to pooled-cycle. Pooled-cycle resolution prefers
+        # the literal "pooled" key; if absent, falls back to the "00" key
+        # (legacy single-cycle bucket); if also absent, leaves frozen_as_of as
+        # the original cycle-specific value (no degrade possible).
+        floor = _cycle_stratified_pin_eligibility_floor()
+        if _frozen_as_of_below_floor(frozen_as_of, floor):
+            pooled_fao = raw_fao.get("pooled") or raw_fao.get("00")
+            if pooled_fao:
+                logger.info(
+                    "cycle_stratified_pin_eligibility_degrade cycle=%s "
+                    "cluster=%s season=%s metric=%s frozen_as_of=%s floor=%s "
+                    "→ pooled-cycle frozen_as_of=%s",
+                    cycle, cluster, season, temperature_metric,
+                    frozen_as_of, floor, pooled_fao,
+                )
+                frozen_as_of = pooled_fao
     else:
         frozen_as_of = raw_fao  # scalar or None — legacy back-compat
     return frozen_as_of, pin.get("model_keys", {}).get(key)
@@ -270,6 +346,12 @@ def _candidate_data_versions_for_metric_source(
     modern source-tagged requests: a live forecast with source/cycle/horizon
     provenance must not be rescued by a metric-only historical LOW bucket whose
     local-day construction law is not the same contract-window authority.
+
+    Doctrine: see ``config/settings.json::_low_purity_doctrine_2026_05_07``
+    (operator-approved, PR #93). LOW has no contract-bin-preserving fallback
+    proof yet; missing/UNVERIFIED/QUARANTINED/low-n LOW buckets surface as
+    RAW_UNCALIBRATED at the live read seam rather than silently borrowing a
+    legacy or sibling-cluster Platt transform.
     """
     legacy_data_version = _legacy_data_version_for_metric_source(
         temperature_metric, source_id
