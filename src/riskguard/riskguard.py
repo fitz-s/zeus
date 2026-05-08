@@ -13,7 +13,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from src.config import settings, STATE_DIR
+from src.config import settings, STATE_DIR, get_mode
 from src.riskguard.discord_alerts import alert_halt, alert_resume, alert_warning
 from src.riskguard.metrics import (
     brier_score,
@@ -437,6 +437,7 @@ def _current_mode_realized_exits(
     conn: sqlite3.Connection,
     *,
     settlement_rows: list[dict] | None = None,
+    env: str | None = None,
 ) -> tuple[list[dict], str, bool]:
     """Returns (exits, source_name, degraded)."""
     if conn is None:
@@ -485,6 +486,7 @@ def _current_mode_realized_exits(
 
     # Degradation: outcome_fact unavailable, falling back to chronicle
     logger.warning("outcome_fact unavailable — degrading realized exits to chronicle")
+    chronicle_env = str(env or get_mode()).strip()
     try:
         rows = conn.execute(
             """
@@ -509,7 +511,7 @@ def _current_mode_realized_exits(
               )
             ORDER BY timestamp DESC
             """,
-            (env, env),
+            (chronicle_env, chronicle_env),
         ).fetchall()
     except sqlite3.OperationalError:
         rows = []

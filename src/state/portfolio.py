@@ -55,6 +55,8 @@ CANONICAL_STRATEGY_KEYS = {
     "opening_inertia",
 }
 
+POSITION_ENV_UNKNOWN = "unknown_env"
+
 POSITIONS_PATH = state_path("positions.json")
 
 # Portfolio authority labels are a separate grammar from observation authority.
@@ -268,8 +270,9 @@ class Position:
     unit: str = "F"  # Blueprint v2: carried, never inferred
     temperature_metric: Literal["high", "low"] = "high"  # carried from market at entry
 
-    # Provenance: which environment created this position (set once, never changed)
-    env: str = "live"  # live-only (Phase 1 axiom)
+    # Provenance: which environment created this position (set once, never changed).
+    # Missing provenance is non-authoritative; live writers must pass env explicitly.
+    env: str = POSITION_ENV_UNKNOWN
 
     # Probability (always in held-side space — flipped exactly once at creation)
     size_usd: float = 0.0
@@ -1173,7 +1176,7 @@ def _load_portfolio_from_json_data(data: dict, *, current_mode: str) -> Portfoli
             continue
         filtered = {k: v for k, v in p.items() if k in position_fields}
         if "env" not in p:
-            filtered["env"] = "unknown_env"
+            filtered["env"] = POSITION_ENV_UNKNOWN
         pos = Position(**filtered)
         if not pos.strategy_key and pos.strategy in CANONICAL_STRATEGY_KEYS:
             pos.strategy_key = pos.strategy
@@ -1266,7 +1269,7 @@ def _position_from_projection_row(row: dict, *, current_mode: str) -> Position:
         # env originally created the position. Preserve the row's env when
         # present; fall back to the 'unknown_env' sentinel otherwise and
         # let downstream authority consumers mark the row UNVERIFIED.
-        env=str(row.get("env") or "unknown_env"),
+        env=str(row.get("env") or POSITION_ENV_UNKNOWN),
         size_usd=_load_d6_field(row, "size_usd"),
         shares=_load_d6_field(row, "shares"),
         cost_basis_usd=_load_d6_field(row, "cost_basis_usd"),

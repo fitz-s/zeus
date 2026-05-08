@@ -1,8 +1,8 @@
 """Runtime guard and live-cycle wiring tests."""
-# Lifecycle: created=2026-04-28; last_reviewed=2026-05-06; last_reused=2026-05-06
+# Lifecycle: created=2026-04-28; last_reviewed=2026-05-07; last_reused=2026-05-07
 # Created: 2026-04-28
-# Last reused/audited: 2026-05-06
-# Authority basis: task_2026-04-28_contamination_remediation Batch G; Phase 1B ENS snapshot persistence; Phase 1D forecast source policy; PR #56 MarketPhaseEvidence sidecar propagation.
+# Last reused/audited: 2026-05-07
+# Authority basis: task_2026-04-28_contamination_remediation Batch G; Phase 1B ENS snapshot persistence; Phase 1D forecast source policy; PR #56 MarketPhaseEvidence sidecar propagation; Wave26 explicit position env authority.
 # Purpose: Lock runtime guard and live-cycle wiring contracts.
 # Reuse: Run for runtime guard, live-only cleanup, and cycle wiring changes.
 
@@ -414,6 +414,7 @@ def _position(**kwargs) -> Position:
         target_date="2026-04-01",
         bin_label="39-40°F",
         direction="buy_yes",
+        env="live",
         unit="F",
         size_usd=10.0,
         entry_price=0.40,

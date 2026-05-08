@@ -1,3 +1,9 @@
+# Created: 2026-04-17
+# Last reused/audited: 2026-05-08
+# Lifecycle: created=2026-04-17; last_reviewed=2026-05-08; last_reused=2026-05-08
+# Authority basis: object-meaning invariance Wave26 rescue audit compatibility; PR90 gitleaks fixture hygiene.
+# Purpose: Guard rescue_events_v2 schema and chain reconciliation dual-write audit compatibility.
+# Reuse: Run after rescue_events_v2 schema, chain reconciliation rescue, or rescue audit compatibility changes.
 """B063: rescue_events_v2 audit table tests.
 
 Verifies the new rescue_events_v2 DDL, log_rescue_event helper, and
@@ -240,6 +246,87 @@ class TestEmitRescueEventIntegration(unittest.TestCase):
         )
         conn.commit()
         return conn
+
+    def _make_canonical_conn(self) -> sqlite3.Connection:
+        from src.state.db import init_schema
+
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        init_schema(conn)
+        return conn
+
+    def test_canonical_position_events_schema_does_not_suppress_rescue_v2(self) -> None:
+        """Canonical position_events no longer has the legacy payload/event
+        shape; a skipped legacy CHAIN_RESCUE_AUDIT write must not suppress
+        the structured rescue_events_v2 authority row.
+        """
+        from src.engine.lifecycle_events import build_entry_canonical_write
+        from src.state.chain_reconciliation import ChainPosition, reconcile
+        from src.state.db import append_many_and_project
+        from src.state.portfolio import Position, PortfolioState
+
+        conn = self._make_canonical_conn()
+        position = Position(
+            trade_id="t-canonical-rescue-v2",
+            market_id="m-canonical-rescue-v2",
+            city="NYC",
+            cluster="US-Northeast",
+            target_date="2026-04-17",
+            bin_label="39-40°F",
+            direction="buy_yes",
+            unit="F",
+            env="live",
+            size_usd=10.0,
+            entry_price=0.40,
+            p_posterior=0.61,
+            decision_snapshot_id="snap-canonical-rescue-v2",
+            strategy_key="center_buy",
+            strategy="center_buy",
+            edge_source="center_buy",
+            order_id="ord-canonical-rescue-v2",
+            entry_order_id="ord-canonical-rescue-v2",
+            order_status="pending",
+            order_posted_at="2026-04-17T10:00:00Z",
+            state="pending_tracked",
+            chain_state="local_only",
+            token_id="t1",
+        )
+        events, projection = build_entry_canonical_write(
+            position,
+            decision_id="dec-canonical-rescue-v2",
+            source_module="tests.test_b063_rescue_events_v2",
+        )
+        append_many_and_project(conn, events, projection)
+
+        stats = reconcile(
+            PortfolioState(positions=[position]),
+            [
+                ChainPosition(
+                    token_id="t1",
+                    size=25.0,
+                    avg_price=0.44,
+                    cost=11.0,
+                    condition_id="cond-canonical-rescue-v2",
+                )
+            ],
+            conn=conn,
+        )
+
+        self.assertEqual(stats["rescued_pending"], 1)
+        rescue_row = conn.execute(
+            """
+            SELECT trade_id, authority
+            FROM rescue_events_v2
+            WHERE trade_id = ? AND authority = ?
+            """,
+            ("t-canonical-rescue-v2", "VERIFIED"),
+        ).fetchone()
+        self.assertIsNotNone(rescue_row)
+        legacy_count = conn.execute(
+            "SELECT COUNT(*) AS c FROM position_events WHERE event_type = ?",
+            ("CHAIN_RESCUE_AUDIT",),
+        ).fetchone()["c"]
+        self.assertEqual(legacy_count, 0)
 
     def test_verified_when_position_has_valid_metric(self) -> None:
         """Position materialized through MetricIdentity spine → VERIFIED.

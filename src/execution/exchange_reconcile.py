@@ -18,6 +18,7 @@ from hashlib import sha256
 from typing import Any, Literal, Mapping, Optional
 
 from src.architecture.decorators import capability, protects
+from src.state.venue_command_repo import trade_fact_has_positive_fill_economics
 
 FindingKind = Literal[
     "exchange_ghost_order",
@@ -708,7 +709,7 @@ def _exchange_positions_by_token(positions: list[Any]) -> dict[str, Decimal]:
 def _journal_positions_by_token(conn: sqlite3.Connection) -> dict[str, Decimal]:
     rows = conn.execute(
         """
-        SELECT c.token_id, c.side, tf.filled_size
+        SELECT c.token_id, c.side, tf.filled_size, tf.fill_price
           FROM venue_trade_facts tf
           JOIN venue_commands c ON c.command_id = tf.command_id
          WHERE tf.local_sequence = (
@@ -721,6 +722,8 @@ def _journal_positions_by_token(conn: sqlite3.Connection) -> dict[str, Decimal]:
     ).fetchall()
     out: dict[str, Decimal] = {}
     for row in rows:
+        if not trade_fact_has_positive_fill_economics(row):
+            continue
         token = str(row["token_id"])
         signed = _decimal(row["filled_size"])
         if str(row["side"]).upper() == "SELL":

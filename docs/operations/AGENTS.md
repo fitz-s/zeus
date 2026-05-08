@@ -146,6 +146,12 @@ make a surface default-read unless `current_state.md` routes it.
 | `task_2026-05-05_object_invariance_wave20/PLAN.md` | topology planning packet | Route evidence for exit snapshot hash preservation through execute_exit_order retry/recovery paths |
 | `task_2026-05-05_object_invariance_wave21/` | plan packet container | Planning-lock evidence for object-meaning invariance Wave 21 exchange-reconcile freshness authority repair |
 | `task_2026-05-05_object_invariance_wave21/PLAN.md` | topology planning packet | Route evidence for venue-read freshness authority before M5 absence findings |
+| `task_2026-05-07_object_invariance_wave24/` | plan packet container | Planning-lock evidence for object-meaning invariance Wave 24 canonical settlement environment authority repair |
+| `task_2026-05-07_object_invariance_wave24/PLAN.md` | topology planning packet | Route evidence and verification for preserving canonical settlement env across position_events and settlement readers |
+| `task_2026-05-07_object_invariance_wave25/` | plan packet container | Planning-lock evidence for object-meaning invariance Wave 25 confirmed trade fact economics authority repair |
+| `task_2026-05-07_object_invariance_wave25/PLAN.md` | topology planning packet | Route evidence for preserving positive finite fill economics through venue_trade_facts, calibration retrain, and economics readiness consumers |
+| `task_2026-05-07_object_invariance_wave26/` | plan packet container | Planning-lock evidence for object-meaning invariance Wave 26 canonical position event environment authority repair |
+| `task_2026-05-07_object_invariance_wave26/PLAN.md` | topology planning packet | Route evidence for requiring explicit position_events env before canonical lifecycle persistence |
 | `task_2026-05-06_calibration_quality_blockers/` | active packet container | 2026-05-06 launch-blocker remediation packet for calibration quality (12 inverted-slope Platts quarantined + fit-time guard) |
 | `task_2026-05-06_calibration_quality_blockers/PLAN.md` | active packet plan | LOW/HIGH calibration alignment recovery plan covering contract-window evidence persistence, recovery snapshot backfill, LOW pair rebuild gates, and calibration authority shadow gating |
 | `task_2026-05-06_calibration_quality_blockers/QUARANTINE_LEDGER.md` | active packet evidence | Ledger of the 12 QUARANTINED platt_models_v2 buckets with reversibility queries and fallback-chain analysis |

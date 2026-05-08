@@ -1,7 +1,7 @@
-# Lifecycle: created=2026-04-28; last_reviewed=2026-05-05; last_reused=2026-05-06
+# Lifecycle: created=2026-04-28; last_reviewed=2026-05-08; last_reused=2026-05-08
 # Created: 2026-04-28
-# Last reused/audited: 2026-05-06
-# Authority basis: docs/operations/task_2026-04-27_backtest_first_principles_review/01_backtest_upgrade_design.md
+# Last reused/audited: 2026-05-08
+# Authority basis: docs/operations/task_2026-05-07_object_invariance_wave25/PLAN.md; PR90 invalid-schema readiness review fix.
 # Purpose: Guard backtest economics tombstone behavior and report/replay cohort gates.
 # Reuse: Run after backtest purpose, economics readiness, or report/replay cohort changes.
 """Antibodies for S4 (economics tombstone) and S2 (skill purpose enforcement).
@@ -35,6 +35,25 @@ from scripts.profit_validation_replay import (
     require_single_exit_economics_cohort,
     require_legacy_exit_trigger_replay_cohort,
 )
+
+
+def _create_venue_trade_facts_table(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        "CREATE TABLE venue_trade_facts (state TEXT, filled_size TEXT, fill_price TEXT)"
+    )
+
+
+def _insert_confirmed_trade_fact(
+    conn: sqlite3.Connection,
+    *,
+    filled_size: str = "1",
+    fill_price: str = "0.42",
+) -> None:
+    conn.execute(
+        "INSERT INTO venue_trade_facts (state, filled_size, fill_price) "
+        "VALUES ('CONFIRMED', ?, ?)",
+        (filled_size, fill_price),
+    )
 
 
 def _corrected_exit_row(**overrides):
@@ -153,7 +172,7 @@ def test_economics_readiness_reports_missing_connection():
 def test_economics_readiness_reports_missing_and_empty_substrate():
     conn = sqlite3.connect(":memory:")
     conn.execute("CREATE TABLE market_events_v2 (id INTEGER PRIMARY KEY, outcome TEXT)")
-    conn.execute("CREATE TABLE venue_trade_facts (state TEXT)")
+    _create_venue_trade_facts_table(conn)
     conn.execute("INSERT INTO venue_trade_facts (state) VALUES ('MATCHED')")
 
     readiness = check_economics_readiness(conn)
@@ -168,6 +187,59 @@ def test_economics_readiness_reports_missing_and_empty_substrate():
     assert "economics_engine_not_implemented" in readiness.blockers
 
 
+def test_economics_readiness_requires_confirmed_trade_fill_economics():
+    conn = sqlite3.connect(":memory:")
+    _create_venue_trade_facts_table(conn)
+    _insert_confirmed_trade_fact(conn, filled_size="0")
+
+    readiness = check_economics_readiness(conn)
+    conn.close()
+
+    assert readiness.ready is False
+    assert "no_confirmed_venue_trade_facts" not in readiness.blockers
+    assert "malformed_confirmed_venue_trade_facts_fill_economics" in readiness.blockers
+    assert "no_confirmed_venue_trade_facts_with_fill_economics" in readiness.blockers
+
+
+def test_economics_readiness_rejects_mixed_confirmed_trade_fill_economics():
+    conn = sqlite3.connect(":memory:")
+    _create_venue_trade_facts_table(conn)
+    _insert_confirmed_trade_fact(conn, filled_size="1", fill_price="0.42")
+    _insert_confirmed_trade_fact(conn, filled_size="2", fill_price="0")
+
+    readiness = check_economics_readiness(conn)
+    conn.close()
+
+    assert readiness.ready is False
+    assert "no_confirmed_venue_trade_facts_with_fill_economics" not in readiness.blockers
+    assert "malformed_confirmed_venue_trade_facts_fill_economics" in readiness.blockers
+
+
+def test_economics_readiness_rejects_confirmed_trade_lifecycle_only_schema():
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE venue_trade_facts (state TEXT)")
+    conn.execute("INSERT INTO venue_trade_facts (state) VALUES ('CONFIRMED')")
+
+    readiness = check_economics_readiness(conn)
+    conn.close()
+
+    assert readiness.ready is False
+    assert "venue_trade_facts_lacks_fill_economics_contract" in readiness.blockers
+
+
+def test_economics_readiness_reports_invalid_trade_fact_schema_without_empty_substrate():
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE venue_trade_facts (filled_size TEXT, fill_price TEXT)")
+    conn.execute("INSERT INTO venue_trade_facts (filled_size, fill_price) VALUES ('1', '0.42')")
+
+    readiness = check_economics_readiness(conn)
+    conn.close()
+
+    assert readiness.ready is False
+    assert "invalid_schema:venue_trade_facts.state" in readiness.blockers
+    assert "no_confirmed_venue_trade_facts" not in readiness.blockers
+
+
 def test_economics_readiness_requires_neg_risk_snapshot_fact():
     conn = sqlite3.connect(":memory:")
     conn.execute("CREATE TABLE market_events_v2 (id INTEGER PRIMARY KEY, outcome TEXT)")
@@ -176,7 +248,7 @@ def test_economics_readiness_requires_neg_risk_snapshot_fact():
         "CREATE TABLE executable_market_snapshots ("
         "min_tick_size TEXT, min_order_size TEXT, fee_details_json TEXT, raw_orderbook_hash TEXT)"
     )
-    conn.execute("CREATE TABLE venue_trade_facts (state TEXT)")
+    _create_venue_trade_facts_table(conn)
     conn.execute("CREATE TABLE position_lots (state TEXT)")
     conn.execute("CREATE TABLE probability_trace_fact (decision_snapshot_id TEXT)")
     conn.execute("CREATE TABLE trade_decisions (decision_snapshot_id TEXT)")
@@ -191,7 +263,7 @@ def test_economics_readiness_requires_neg_risk_snapshot_fact():
         "(min_tick_size, min_order_size, fee_details_json, raw_orderbook_hash) "
         "VALUES ('0.01', '5', '{}', 'hash-orderbook')"
     )
-    conn.execute("INSERT INTO venue_trade_facts (state) VALUES ('CONFIRMED')")
+    _insert_confirmed_trade_fact(conn)
     conn.execute("INSERT INTO position_lots (state) VALUES ('CONFIRMED_EXPOSURE')")
     conn.execute("INSERT INTO probability_trace_fact (decision_snapshot_id) VALUES ('snap-1')")
     conn.execute("INSERT INTO trade_decisions (decision_snapshot_id) VALUES ('snap-1')")
@@ -248,7 +320,7 @@ def test_economics_readiness_full_substrate_still_blocks_until_engine_implemente
         "CREATE TABLE executable_market_snapshots ("
         "min_tick_size TEXT, min_order_size TEXT, fee_details_json TEXT, neg_risk INTEGER, raw_orderbook_hash TEXT)"
     )
-    conn.execute("CREATE TABLE venue_trade_facts (state TEXT)")
+    _create_venue_trade_facts_table(conn)
     conn.execute("CREATE TABLE position_lots (state TEXT)")
     conn.execute("CREATE TABLE probability_trace_fact (decision_snapshot_id TEXT)")
     conn.execute("CREATE TABLE trade_decisions (decision_snapshot_id TEXT)")
@@ -267,7 +339,7 @@ def test_economics_readiness_full_substrate_still_blocks_until_engine_implemente
         "(min_tick_size, min_order_size, fee_details_json, neg_risk, raw_orderbook_hash) "
         "VALUES ('0.01', '5', '{}', 0, 'hash-orderbook')"
     )
-    conn.execute("INSERT INTO venue_trade_facts (state) VALUES ('CONFIRMED')")
+    _insert_confirmed_trade_fact(conn)
     conn.execute("INSERT INTO position_lots (state) VALUES ('CONFIRMED_EXPOSURE')")
     conn.execute("INSERT INTO probability_trace_fact (decision_snapshot_id) VALUES ('snap-1')")
     conn.execute("INSERT INTO trade_decisions (decision_snapshot_id) VALUES ('snap-1')")

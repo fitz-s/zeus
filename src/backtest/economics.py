@@ -16,6 +16,7 @@ from sqlite3 import Connection
 from typing import NoReturn
 
 from src.backtest.purpose import PurposeContractViolation
+from src.state.venue_command_repo import trade_fact_has_positive_fill_economics
 
 
 REQUIRED_ECONOMICS_TABLES: tuple[str, ...] = (
@@ -50,6 +51,10 @@ _OUTCOME_FACT_AUTHORITY_COLUMNS = frozenset({
     "settlement_authority",
     "evidence_class",
     "learning_eligible",
+})
+_TRADE_FACT_FILL_ECONOMICS_COLUMNS = frozenset({
+    "filled_size",
+    "fill_price",
 })
 
 
@@ -90,6 +95,24 @@ def _count_rows(conn: Connection, table: str, where_sql: str | None = None) -> i
     return int(conn.execute(query).fetchone()[0])
 
 
+def _confirmed_trade_fact_fill_economics_counts(conn: Connection) -> tuple[int, int]:
+    rows = conn.execute(
+        """
+        SELECT filled_size, fill_price
+          FROM venue_trade_facts
+         WHERE state = 'CONFIRMED'
+        """
+    ).fetchall()
+    valid = sum(
+        1
+        for filled_size, fill_price in rows
+        if trade_fact_has_positive_fill_economics(
+            {"filled_size": filled_size, "fill_price": fill_price}
+        )
+    )
+    return valid, len(rows) - valid
+
+
 def check_economics_readiness(conn: Connection | None) -> EconomicsReadiness:
     """Return the structural unblock state for promotion-grade economics.
 
@@ -120,8 +143,25 @@ def check_economics_readiness(conn: Connection | None) -> EconomicsReadiness:
 
     if "venue_trade_facts" in existing_tables:
         try:
-            if _count_rows(conn, "venue_trade_facts", "state = 'CONFIRMED'") <= 0:
-                blockers.append("no_confirmed_venue_trade_facts")
+            columns = _table_columns(conn, "venue_trade_facts")
+            if "state" not in columns:
+                blockers.append("invalid_schema:venue_trade_facts.state")
+            else:
+                confirmed_trade_facts = _count_rows(
+                    conn,
+                    "venue_trade_facts",
+                    "state = 'CONFIRMED'",
+                )
+                if confirmed_trade_facts <= 0:
+                    blockers.append("no_confirmed_venue_trade_facts")
+                elif not _TRADE_FACT_FILL_ECONOMICS_COLUMNS.issubset(columns):
+                    blockers.append("venue_trade_facts_lacks_fill_economics_contract")
+                else:
+                    valid_confirmed, invalid_confirmed = _confirmed_trade_fact_fill_economics_counts(conn)
+                    if invalid_confirmed > 0:
+                        blockers.append("malformed_confirmed_venue_trade_facts_fill_economics")
+                    if valid_confirmed <= 0:
+                        blockers.append("no_confirmed_venue_trade_facts_with_fill_economics")
         except Exception:
             blockers.append("invalid_schema:venue_trade_facts.state")
 

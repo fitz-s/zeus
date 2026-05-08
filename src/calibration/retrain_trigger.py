@@ -285,7 +285,10 @@ def load_confirmed_corpus(conn: sqlite3.Connection, corpus_filter: CorpusFilter)
         raise UnsafeCorpusFilter(
             "calibration retrain corpus may consume only CONFIRMED venue_trade_facts"
         )
-    rows = load_calibration_trade_facts(conn, states=corpus_filter.states)
+    try:
+        rows = load_calibration_trade_facts(conn, states=corpus_filter.states)
+    except ValueError as exc:
+        raise UnsafeCorpusFilter(str(exc)) from exc
     if corpus_filter.observed_at_start is not None:
         rows = [row for row in rows if str(row.get("observed_at", "")) >= corpus_filter.observed_at_start]
     if corpus_filter.observed_at_end is not None:

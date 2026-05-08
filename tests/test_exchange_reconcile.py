@@ -1,7 +1,7 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-05-06
-# Lifecycle: created=2026-04-27; last_reviewed=2026-05-06; last_reused=2026-05-06
-# Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/M5.yaml
+# Last reused/audited: 2026-05-07
+# Lifecycle: created=2026-04-27; last_reviewed=2026-05-07; last_reused=2026-05-07
+# Authority basis: docs/operations/task_2026-05-07_object_invariance_wave25/PLAN.md
 # Purpose: R3 M5 exchange reconciliation sweep antibodies.
 # Reuse: Run when exchange_reconcile, venue facts, findings, heartbeat/cutover reconciliation, or operator finding resolution changes.
 """R3 M5 exchange-reconciliation findings and trade-fact tests."""
@@ -969,6 +969,52 @@ def test_position_drift_finding_distinguishes_legitimate_from_real(conn):
     assert [finding.subject_id for finding in position_findings] == [drift_token]
     assert "journal_size" in position_findings[0].evidence_json
     assert "exchange_size" in position_findings[0].evidence_json
+
+
+def test_position_journal_ignores_confirmed_trade_without_fill_economics(conn):
+    from src.execution.exchange_reconcile import run_reconcile_sweep
+
+    malformed_token = "malformed-confirmed-token"
+    seed_command(
+        conn,
+        command_id="cmd-malformed-confirmed",
+        venue_order_id="ord-malformed-confirmed",
+        token_id=malformed_token,
+    )
+    conn.execute(
+        """
+        INSERT INTO venue_trade_facts (
+            trade_id, venue_order_id, command_id, state, filled_size,
+            fill_price, source, observed_at, local_sequence,
+            raw_payload_hash, raw_payload_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "trade-malformed-confirmed",
+            "ord-malformed-confirmed",
+            "cmd-malformed-confirmed",
+            "CONFIRMED",
+            "10",
+            "0",
+            "CHAIN",
+            NOW.isoformat(),
+            1,
+            "f" * 64,
+            '{"state":"CONFIRMED","source":"direct-sql-test"}',
+        ),
+    )
+
+    result = run_reconcile_sweep(
+        FakeM5Adapter(positions=[position(token_id=malformed_token, size="10")]),
+        conn,
+        context="periodic",
+        observed_at=NOW,
+    )
+
+    position_findings = [finding for finding in result if finding.kind == "position_drift"]
+    assert [finding.subject_id for finding in position_findings] == [malformed_token]
+    assert '"journal_size":"0"' in position_findings[0].evidence_json
+    assert '"exchange_size":"10"' in position_findings[0].evidence_json
 
 
 def test_heartbeat_suspected_cancel_finding_emitted_after_heartbeat_loss(conn):

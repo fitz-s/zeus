@@ -7,6 +7,7 @@ from src.architecture.decorators import capability, protects
 from src.state.projection import (
     CANONICAL_POSITION_CURRENT_COLUMNS,
     ordered_values,
+    normalize_position_event_env,
     require_payload_fields,
     table_columns,
     upsert_position_current,
@@ -37,6 +38,7 @@ CANONICAL_POSITION_EVENT_COLUMNS = (
     "idempotency_key",
     "venue_status",
     "source_module",
+    "env",
     "payload_json",
 )
 
@@ -244,15 +246,21 @@ def append_many_and_project(
     require_payload_fields(
         projection, CANONICAL_POSITION_CURRENT_COLUMNS, label="projection"
     )
+    prepared_events: list[dict] = []
     for idx, event in enumerate(events, 1):
+        prepared = dict(event)
+        if prepared.get("env") in (None, ""):
+            raise ValueError("canonical position event missing env")
+        prepared["env"] = normalize_position_event_env(prepared["env"])
         require_payload_fields(
-            event, CANONICAL_POSITION_EVENT_COLUMNS, label=f"event[{idx}]"
+            prepared, CANONICAL_POSITION_EVENT_COLUMNS, label=f"event[{idx}]"
         )
-    validate_event_projection_batch(events, projection)
+        prepared_events.append(prepared)
+    validate_event_projection_batch(prepared_events, projection)
     sp_name = f"sp_ampp_{secrets.token_hex(6)}"
     conn.execute(f"SAVEPOINT {sp_name}")
     try:
-        for event in events:
+        for event in prepared_events:
             conn.execute(
                 f"""
                 INSERT INTO position_events ({", ".join(CANONICAL_POSITION_EVENT_COLUMNS)})

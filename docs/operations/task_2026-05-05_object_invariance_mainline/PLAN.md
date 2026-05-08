@@ -60,7 +60,9 @@ from a separate topology branch before the next object-invariance stage.
 | 21 | Venue read freshness -> exchange reconciliation absence findings/recovery | `docs/operations/task_2026-05-05_object_invariance_wave21/PLAN.md` | Repaired | APPROVE recorded | Wider batch check blocked by missing `apscheduler`, missing `sklearn`, and stale R3 drift-check path |
 | 22 | Shared `venue_trade_facts` invariant across M5 REST and M3 user-channel producers | `architecture/improvement_backlog.yaml` P32 plus branch source/tests | Implementation present, but no wave packet | Evidence incomplete for standalone review | Before next stage, create a proper packet/addendum if reviewers need wave-level proof; do not treat backlog text alone as closure |
 | 23 | Polling fill-tracker producer for shared `venue_trade_facts` invariant | `architecture/improvement_backlog.yaml` P33 plus branch source/tests | Implementation present, but no wave packet | Evidence incomplete for standalone review | Before next stage, create a proper packet/addendum if reviewers need wave-level proof; downstream command/projection tests were a route gap |
-| 24 | Canonical settlement environment authority in `position_events` / settlement readers | `architecture/improvement_backlog.yaml` P34 | Read-only selection only | Not repaired | Highest-priority remaining mainline wave after PR67 and topology redesign merge |
+| 24 | Canonical settlement environment authority in `position_events` / settlement readers | `docs/operations/task_2026-05-07_object_invariance_wave24/PLAN.md` | Repaired in continuation branch | APPROVE recorded | Historical physical DB rows were not audited, relabeled, or backfilled; requires separate operator-approved dry-run plan |
+| 25 | Confirmed trade fact economics authority | `docs/operations/task_2026-05-07_object_invariance_wave25/PLAN.md` | Repaired in continuation branch | REVISE then APPROVE recorded | Existing physical DB rows were not audited or relabeled |
+| 26 | Canonical position event environment authority through lifecycle builders and portfolio loader | `docs/operations/task_2026-05-07_object_invariance_wave26/PLAN.md` | Repaired in continuation branch | REVISE twice, then APPROVE recorded | Existing physical DB rows were not audited, relabeled, or backfilled |
 
 ## PR67 Review Claims
 
@@ -78,6 +80,14 @@ The PR67 review claim is narrow:
 - Wave 24 is not repaired in PR67 and is the first high-risk remaining
   invariant wave for the next stage.
 
+Continuation branch update, 2026-05-08:
+
+- Waves 24, 25, and 26 are now repaired in
+  `object-invariance-mainline-2026-05-07`.
+- All three remain source/test repairs only. They do not mutate live/prod DBs,
+  backfill/relabel historical rows, harvest settlement, publish reports, or
+  authorize live unlock.
+
 ## Verification Debt That Does Not Block Opening Review
 
 These are known branch-review debts, not live-unlock blockers:
@@ -90,18 +100,19 @@ These are known branch-review debts, not live-unlock blockers:
 - Topology route friction is intentionally left for the operator's separate
   topology redesign branch.
 
-## Remaining Mainline After PR67 Review
+## Remaining Mainline After Wave24-26 Continuation
 
-Do not start these on PR67 unless the reviewer explicitly asks for a targeted
-fix:
+Do not start these on this branch unless the reviewer explicitly asks for a
+targeted fix:
 
-1. Wave24 canonical settlement environment authority repair.
-2. Proper packet/addendum for Wave22 and Wave23, if review requires standalone
+1. Proper packet/addendum for Wave22 and Wave23, if review requires standalone
    evidence rather than source/test diff inspection.
-3. Full shared `venue_trade_facts` downstream sweep across command recovery,
+2. Full shared `venue_trade_facts` downstream sweep across command recovery,
    fill authority, position lots, reports, replay, and learning after topology
    admits multi-producer object routes.
-4. Monitor/exit probability side-semantics wave.
+3. Monitor/exit probability side-semantics wave.
+4. Historical physical-DB contamination audit for Wave24/Wave25/Wave26 rows,
+   if the operator approves a dry-run plus rollback/relabel plan.
 5. Settlement/report/replay/learning contamination sweep after the env repair.
 6. Front-of-pipeline source/calibration remaining pass.
 

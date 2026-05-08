@@ -10,6 +10,7 @@ from src.state.lifecycle_manager import (
     fold_lifecycle_phase,
     phase_for_runtime_position,
 )
+from src.state.projection import normalize_position_event_env
 
 CANONICAL_POSITION_SETTLED_CONTRACT_VERSION = "position_settled.v1"
 
@@ -46,6 +47,13 @@ def _strategy_key(position: Any) -> str:
     if not strategy_key:
         raise ValueError("missing strategy_key for canonical lifecycle builder")
     return strategy_key
+
+
+def _position_env(position: Any) -> str:
+    raw_env = getattr(position, "env", None)
+    if raw_env in (None, ""):
+        raise ValueError("position missing env for canonical lifecycle builder")
+    return normalize_position_event_env(raw_env)
 
 
 def canonical_phase_for_position(position: Any) -> str:
@@ -186,6 +194,7 @@ def _entry_event(
         "idempotency_key": f"{trade_id}:{slug}",
         "venue_status": _nullable(getattr(position, "order_status", "")),
         "source_module": source_module,
+        "env": _position_env(position),
         "payload_json": _entry_event_payload(
             position,
             phase_after=phase_after,
@@ -371,6 +380,7 @@ def build_day0_window_entered_canonical_write(
         "idempotency_key": f"{trade_id}:{slug}",
         "venue_status": _nullable(getattr(position, "order_status", "")),
         "source_module": source_module,
+        "env": _position_env(position),
         "payload_json": json.dumps(payload, default=str, sort_keys=True),
     }
 
@@ -486,6 +496,7 @@ def build_settlement_canonical_write(
         "idempotency_key": f"{getattr(position, 'trade_id')}:settled:{sequence_no}",
         "venue_status": None,
         "source_module": source_module,
+        "env": _position_env(position),
         "payload_json": payload,
     }
     return [event], projection
@@ -526,6 +537,7 @@ def build_economic_close_canonical_write(
         "idempotency_key": f"{getattr(position, 'trade_id')}:exit_filled:{sequence_no}",
         "venue_status": _nullable(getattr(position, "order_status", "")),
         "source_module": source_module,
+        "env": _position_env(position),
         "payload_json": json.dumps(
             {
                 "exit_price": getattr(position, "exit_price", None),
@@ -602,6 +614,7 @@ def build_reconciliation_rescue_canonical_write(
         "idempotency_key": f"{getattr(position, 'trade_id')}:chain_synced:{sequence_no}",
         "venue_status": _nullable(getattr(position, "order_status", "")),
         "source_module": source_module,
+        "env": _position_env(position),
         "payload_json": payload,
     }
     return [event], projection
@@ -655,6 +668,7 @@ def build_chain_size_corrected_canonical_write(
         "idempotency_key": f"{getattr(position, 'trade_id')}:chain_size_corrected:{sequence_no}",
         "venue_status": None,
         "source_module": source_module,
+        "env": _position_env(position),
         "payload_json": payload,
     }
     return [event], projection
@@ -720,6 +734,7 @@ def build_chain_quarantined_canonical_write(
         "idempotency_key": f"{getattr(position, 'trade_id')}:chain_quarantined:{sequence_no}",
         "venue_status": None,
         "source_module": source_module,
+        "env": _position_env(position),
         "payload_json": payload,
     }
     projection["strategy_key"] = strategy_key
