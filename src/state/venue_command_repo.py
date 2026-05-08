@@ -226,6 +226,60 @@ def trade_fact_has_positive_fill_economics(row: Mapping[str, Any] | sqlite3.Row)
     ) and _positive_finite_decimal_text(_row_value(row, "fill_price"))
 
 
+def _optimistic_source_trade_fact_ids_for_failed_trade(
+    conn: sqlite3.Connection,
+    *,
+    trade_id: str,
+) -> list[int]:
+    with _row_factory_as(conn, sqlite3.Row):
+        rows = conn.execute(
+            """
+            SELECT DISTINCT lot.source_trade_fact_id
+              FROM position_lots lot
+              JOIN venue_trade_facts tf
+                ON tf.trade_fact_id = lot.source_trade_fact_id
+             WHERE tf.trade_id = ?
+               AND tf.state IN ('MATCHED', 'MINED')
+               AND lot.state = 'OPTIMISTIC_EXPOSURE'
+               AND NOT EXISTS (
+                   SELECT 1
+                     FROM position_lots quarantined
+                     JOIN venue_trade_facts failed
+                       ON failed.trade_fact_id = quarantined.source_trade_fact_id
+                    WHERE quarantined.position_id = lot.position_id
+                      AND quarantined.state = 'QUARANTINED'
+                      AND failed.trade_id = tf.trade_id
+                      AND failed.state = 'FAILED'
+               )
+             ORDER BY lot.source_trade_fact_id
+            """,
+            (trade_id,),
+        ).fetchall()
+    return [int(row["source_trade_fact_id"]) for row in rows]
+
+
+def _rollback_optimistic_lots_for_failed_trade(
+    conn: sqlite3.Connection,
+    *,
+    trade_id: str,
+    failed_trade_fact_id: int,
+    state_changed_at: str | datetime.datetime,
+) -> int:
+    rolled_back = 0
+    for source_trade_fact_id in _optimistic_source_trade_fact_ids_for_failed_trade(
+        conn,
+        trade_id=trade_id,
+    ):
+        rollback_optimistic_lot_for_failed_trade(
+            conn,
+            source_trade_fact_id=source_trade_fact_id,
+            failed_trade_fact_id=failed_trade_fact_id,
+            state_changed_at=state_changed_at,
+        )
+        rolled_back += 1
+    return rolled_back
+
+
 def _assert_position_lot_trade_fact_authority(
     conn: sqlite3.Connection,
     *,
@@ -1169,6 +1223,13 @@ def append_trade_fact(
             observed_at=observed_at_s,
             venue_timestamp=venue_timestamp_s,
         )
+        if state == "FAILED":
+            _rollback_optimistic_lots_for_failed_trade(
+                conn,
+                trade_id=trade_id,
+                failed_trade_fact_id=fact_id,
+                state_changed_at=observed_at_s,
+            )
     return fact_id
 
 
@@ -1334,11 +1395,25 @@ def rollback_optimistic_lot_for_failed_trade(
         raise ValueError("no OPTIMISTIC_EXPOSURE lot found for failed trade rollback")
     if failed is None:
         raise ValueError("failed_trade_fact_id must reference a FAILED trade fact")
+    existing = conn.execute(
+        """
+        SELECT lot_id
+          FROM position_lots
+         WHERE position_id = ?
+           AND state = 'QUARANTINED'
+           AND source_trade_fact_id = ?
+         ORDER BY lot_id DESC
+         LIMIT 1
+        """,
+        (lot["position_id"], failed_trade_fact_id),
+    ).fetchone()
+    if existing is not None:
+        return int(existing[0])
     return append_position_lot(
         conn,
         position_id=int(lot["position_id"]),
         state="QUARANTINED",
-        shares=int(lot["shares"]),
+        shares=str(lot["shares"]),
         entry_price_avg=str(lot["entry_price_avg"]),
         exit_price_avg=lot["exit_price_avg"],
         source_command_id=lot["source_command_id"],

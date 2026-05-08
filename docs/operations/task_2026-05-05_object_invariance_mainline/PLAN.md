@@ -58,15 +58,15 @@ from a separate topology branch before the next object-invariance stage.
 | 19 | `FinalExecutionIntent` -> legacy entry intent -> venue command/SDK submit | `docs/operations/task_2026-05-05_object_invariance_wave19/PLAN.md` | Repaired | REVISE twice, then APPROVE recorded | One runtime-guards check blocked by missing local `sklearn`; no Wave19 code executed in that blocked run |
 | 20 | Exit snapshot context -> exit order intent -> venue command/retry recovery | `docs/operations/task_2026-05-05_object_invariance_wave20/PLAN.md` | Repaired | REVISE then APPROVE recorded | No scoped residual after partial-cancel fill evidence repair |
 | 21 | Venue read freshness -> exchange reconciliation absence findings/recovery | `docs/operations/task_2026-05-05_object_invariance_wave21/PLAN.md` | Repaired | APPROVE recorded | Wider batch check blocked by missing `apscheduler`, missing `sklearn`, and stale R3 drift-check path |
-| 22 | Shared `venue_trade_facts` invariant across M5 REST and M3 user-channel producers | `architecture/improvement_backlog.yaml` P32 plus branch source/tests | Implementation present, but no wave packet | Evidence incomplete for standalone review | Before next stage, create a proper packet/addendum if reviewers need wave-level proof; do not treat backlog text alone as closure |
-| 23 | Polling fill-tracker producer for shared `venue_trade_facts` invariant | `architecture/improvement_backlog.yaml` P33 plus branch source/tests | Implementation present, but no wave packet | Evidence incomplete for standalone review | Before next stage, create a proper packet/addendum if reviewers need wave-level proof; downstream command/projection tests were a route gap |
+| 22 | Shared `venue_trade_facts` invariant across M5 REST and M3 user-channel producers | `architecture/improvement_backlog.yaml` P32 plus branch source/tests; `docs/operations/task_2026-05-08_object_invariance_remaining_mainline/PLAN.md` | Packetized in remaining-mainline packet; FAILED lifecycle rollback extension repaired | Source/test evidence packetized; no retroactive critic verdict invented for original wave; critic APPROVE recorded for FAILED rollback extension | Local physical DB audit found no relevant contamination in `state/zeus_trades.db`; no DB writes, relabels, or backfills performed |
+| 23 | Polling fill-tracker producer for shared `venue_trade_facts` invariant | `architecture/improvement_backlog.yaml` P33 plus branch source/tests; `docs/operations/task_2026-05-08_object_invariance_remaining_mainline/PLAN.md` | Packetized in remaining-mainline packet; polling FAILED/RETRYING lifecycle gap repaired | Source/test evidence packetized; no retroactive critic verdict invented for original wave; critic APPROVE recorded for FAILED rollback extension | Downstream command/projection/risk-reader tests now cover the failed-after-match rollback path; existing DB mutation remains operator-gated |
 | 24 | Canonical settlement environment authority in `position_events` / settlement readers | `docs/operations/task_2026-05-07_object_invariance_wave24/PLAN.md` | Repaired in continuation branch | APPROVE recorded | Historical physical DB rows were not audited, relabeled, or backfilled; requires separate operator-approved dry-run plan |
 | 25 | Confirmed trade fact economics authority | `docs/operations/task_2026-05-07_object_invariance_wave25/PLAN.md` | Repaired in continuation branch | REVISE then APPROVE recorded | Existing physical DB rows were not audited or relabeled |
 | 26 | Canonical position event environment authority through lifecycle builders and portfolio loader | `docs/operations/task_2026-05-07_object_invariance_wave26/PLAN.md` | Repaired in continuation branch | REVISE twice, then APPROVE recorded | Existing physical DB rows were not audited, relabeled, or backfilled |
-| 27 | `venue_trade_facts` -> `position_lots` active exposure authority | `docs/operations/task_2026-05-08_object_invariance_wave27/PLAN.md` | Repaired in mainline-next branch | Local focused verification recorded; critic not yet run for multi-wave batch | Existing physical DB rows were not audited, relabeled, or backfilled |
-| 28 | Monitor-current native posterior -> exit trigger hold-value EV gate | `docs/operations/task_2026-05-08_object_invariance_wave28/PLAN.md` | Repaired in mainline-next branch | Critic APPROVE recorded | No DB rows touched; no venue side effects; report/replay/learning consumers remain separate sweep |
-| 29 | Monitor loop skip/error path -> `MonitorResult` reporting probability authority | `docs/operations/task_2026-05-08_object_invariance_wave29/PLAN.md` | Repaired in mainline-next branch | Bundled Wave29/Wave30 critic APPROVE recorded | No DB rows touched; riskguard/read-model residuals remain separate sweep |
-| 30 | `position_current` -> portfolio loader monitor probability read-model authority | `docs/operations/task_2026-05-08_object_invariance_wave30/PLAN.md` | Repaired in mainline-next branch; PR97 follow-up closes RiskGuard duplicate loader residual | Bundled Wave29/Wave30 critic APPROVE recorded | No DB rows touched; historical physical rows/artifacts and already-numeric legacy/default `0.0` values remain unaudited |
+| 27 | `venue_trade_facts` -> `position_lots` active exposure authority | `docs/operations/task_2026-05-08_object_invariance_wave27/PLAN.md`; `docs/operations/task_2026-05-08_object_invariance_remaining_mainline/PLAN.md` | Repaired in mainline-next branch; FAILED rollback and risk-reader residuals closed in remaining-mainline packet | Focused verification plus remaining-mainline critic APPROVE recorded | Local physical DB audit found no relevant failed-trade active-lot contamination; no DB writes, relabels, or backfills performed |
+| 28 | Monitor-current native posterior -> exit trigger hold-value EV gate | `docs/operations/task_2026-05-08_object_invariance_wave28/PLAN.md`; `docs/operations/task_2026-05-08_object_invariance_remaining_mainline/PLAN.md` | Repaired in mainline-next branch | Critic APPROVE recorded; downstream consumer sweep packetized | No DB rows touched; no venue side effects; no report/replay/learning bypass found in scoped sweep |
+| 29 | Monitor loop skip/error path -> `MonitorResult` reporting probability authority | `docs/operations/task_2026-05-08_object_invariance_wave29/PLAN.md`; `docs/operations/task_2026-05-08_object_invariance_remaining_mainline/PLAN.md` | Repaired in mainline-next branch | Bundled Wave29/Wave30 critic APPROVE recorded; downstream consumer sweep packetized | No DB rows touched; no remaining RiskGuard/read-model residual found after PR97 follow-up |
+| 30 | `position_current` -> portfolio loader monitor probability read-model authority | `docs/operations/task_2026-05-08_object_invariance_wave30/PLAN.md`; `docs/operations/task_2026-05-08_object_invariance_remaining_mainline/PLAN.md` | Repaired in mainline-next branch; PR97 follow-up closes RiskGuard duplicate loader residual | Bundled Wave29/Wave30 critic APPROVE recorded; downstream consumer sweep packetized | No DB rows touched; historical physical rows/artifacts remain operator-gated |
 
 ## PR67 Review Claims
 
@@ -106,19 +106,18 @@ These are known branch-review debts, not live-unlock blockers:
 
 ## Remaining Mainline After Wave24-26 Continuation
 
-Do not start these on this branch unless the reviewer explicitly asks for a
-targeted fix:
+The remaining source/test/audit items are closed for PR97 scope by
+`docs/operations/task_2026-05-08_object_invariance_remaining_mainline/PLAN.md`.
+This is not a live unlock and not physical data cleanup authority.
 
-1. Proper packet/addendum for Wave22 and Wave23, if review requires standalone
-   evidence rather than source/test diff inspection.
-2. Full shared `venue_trade_facts` downstream sweep across command recovery,
-   fill authority, position lots, reports, replay, and learning after topology
-   admits multi-producer object routes.
-3. Monitor/exit probability side-semantics wave.
-4. Historical physical-DB contamination audit for Wave24/Wave25/Wave26 rows,
-   if the operator approves a dry-run plus rollback/relabel plan.
-5. Settlement/report/replay/learning contamination sweep after the env repair.
-6. Front-of-pipeline source/calibration remaining pass.
+| Item | Closeout status | Evidence |
+|---|---|---|
+| Wave22/Wave23 packet/addendum | CLOSED | Remaining-mainline packet records source/test truth without inventing historical critic verdicts. |
+| Shared `venue_trade_facts` downstream sweep | CLOSED FOR SCOPED SOURCE/TEST | FAILED lifecycle producer gaps and risk-reader bypass repaired; calibration/report/replay/learning readers swept. |
+| Monitor/exit probability side-semantics | CLOSED FOR PR97 SCOPE | Waves 28-30 plus PR97 RiskGuard follow-up preserve missing/stale probability authority through exit/report/read-model paths. |
+| Historical physical-DB contamination audit | CLOSED READ-ONLY | Local `state/zeus_trades.db` probes found no relevant contamination; any production or canonical cleanup remains OPERATOR_DECISION_REQUIRED. |
+| Settlement/report/replay/learning contamination sweep | CLOSED FOR SOURCE/TEST | Authoritative settlement readers remain env-gated; `outcome_fact` remains diagnostic/non-learning/non-promotion. |
+| Front-of-pipeline source/calibration pass | CLOSED READ-ONLY | Current-fact surfaces were within 14-day staleness on 2026-05-08; source/calibration guards were inspected without mutation. |
 
 Continuation branch update, 2026-05-08:
 

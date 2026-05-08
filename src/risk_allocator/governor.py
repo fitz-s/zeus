@@ -32,7 +32,7 @@ ExposureState = Literal[
     "QUARANTINED",
 ]
 
-_ACTIVE_EXPOSURE_STATES = {"OPTIMISTIC_EXPOSURE", "CONFIRMED_EXPOSURE", "EXIT_PENDING", "QUARANTINED"}
+_ACTIVE_EXPOSURE_STATES = {"OPTIMISTIC_EXPOSURE", "CONFIRMED_EXPOSURE", "EXIT_PENDING"}
 _CLOSED_EXPOSURE_STATES = {"ECONOMICALLY_CLOSED_OPTIMISTIC", "ECONOMICALLY_CLOSED_CONFIRMED", "SETTLED"}
 _UNRESOLVED_SIDE_EFFECT_STATES = {
     "SUBMIT_UNKNOWN_SIDE_EFFECT",
@@ -536,10 +536,10 @@ def load_position_lots(conn: Any) -> tuple[ExposureLot, ...]:
           ON latest.position_id = lot.position_id
          AND latest.max_sequence = lot.local_sequence
         LEFT JOIN venue_commands cmd ON cmd.command_id = lot.source_command_id
-        WHERE lot.state NOT IN (
-          'ECONOMICALLY_CLOSED_OPTIMISTIC',
-          'ECONOMICALLY_CLOSED_CONFIRMED',
-          'SETTLED'
+        WHERE lot.state IN (
+          'OPTIMISTIC_EXPOSURE',
+          'CONFIRMED_EXPOSURE',
+          'EXIT_PENDING'
         )
         ORDER BY lot.position_id, lot.lot_id
         """

@@ -40,6 +40,7 @@ logger = logging.getLogger(__name__)
 FILL_STATUSES = frozenset({"CONFIRMED"})
 OPTIMISTIC_FILL_STATUSES = frozenset({"MATCHED", "MINED", "FILLED"})
 PARTIAL_FILL_STATUSES = frozenset({"PARTIAL", "PARTIALLY_MATCHED", "PARTIALLY_FILLED"})
+TRADE_FILL_ECONOMICS_STATUSES = frozenset({"MATCHED", "MINED", "CONFIRMED"})
 CANCEL_STATUSES = frozenset({"CANCELLED", "CANCELED", "EXPIRED", "REJECTED"})
 FILL_AUTHORITY_QUARANTINE_REVIEW_REQUIRED = "FILL_AUTHORITY_QUARANTINE_REVIEW_REQUIRED"
 FILL_LEDGER_QUARANTINE_REVIEW_REQUIRED = "FILL_LEDGER_QUARANTINE_REVIEW_REQUIRED"
@@ -393,9 +394,13 @@ def _maybe_append_venue_fill_observation(
                 pass
             conn.commit()
             return False
-        if trade_id and trade_state and _has_explicit_fill_economics(
+        trade_state_requires_fill_economics = trade_state in TRADE_FILL_ECONOMICS_STATUSES
+        has_explicit_fill_economics = _has_explicit_fill_economics(
             shares=shares,
             fill_price=fill_price,
+        )
+        if trade_id and trade_state and (
+            has_explicit_fill_economics or not trade_state_requires_fill_economics
         ):
             filled_size = _decimal_str(shares, "0")
             fill_price_s = _decimal_str(fill_price, "0")
@@ -421,6 +426,42 @@ def _maybe_append_venue_fill_observation(
                     )
                     conn.commit()
                     return False
+                if not trade_state_requires_fill_economics:
+                    if str(latest_fact.get("state") or "") == trade_state:
+                        _append_trade_lifecycle_review_required(
+                            conn,
+                            append_event=append_event,
+                            command=command,
+                            order_id=order_id,
+                            trade_id=trade_id,
+                            trade_state=trade_state,
+                            observed_at=observed_at,
+                            latest_fact=latest_fact,
+                            reason="poll_trade_status_not_fill_authority",
+                        )
+                        conn.commit()
+                        return False
+                    if not _trade_lifecycle_transition_allowed(
+                        str(latest_fact.get("state") or ""),
+                        trade_state,
+                    ):
+                        _append_trade_lifecycle_review_required(
+                            conn,
+                            append_event=append_event,
+                            command=command,
+                            order_id=order_id,
+                            trade_id=trade_id,
+                            trade_state=trade_state,
+                            observed_at=observed_at,
+                            latest_fact=latest_fact,
+                            reason="poll_trade_lifecycle_regression_or_economic_drift",
+                            payload_extra={
+                                "incoming_filled_size": filled_size,
+                                "incoming_fill_price": fill_price_s,
+                            },
+                        )
+                        conn.commit()
+                        return False
                 same_fill_economics = _same_trade_fill_economics(
                     latest_fact,
                     filled_size=filled_size,
@@ -447,7 +488,7 @@ def _maybe_append_venue_fill_observation(
                 if same_fill_economics and str(latest_fact.get("state") or "") == trade_state:
                     conn.commit()
                     return True
-                if not same_fill_economics:
+                if trade_state_requires_fill_economics and not same_fill_economics:
                     _append_trade_lifecycle_review_required(
                         conn,
                         append_event=append_event,
@@ -801,6 +842,45 @@ def _positive_finite(value: float | None) -> bool:
     return math.isfinite(numeric) and numeric > 0.0
 
 
+def _non_fill_progress_trade_state(payload: Any, status: str) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+    trade_state = _trade_fact_state_for_status(status, payload)
+    if trade_state and trade_state not in TRADE_FILL_ECONOMICS_STATUSES:
+        return trade_state
+    return None
+
+
+def _record_non_fill_progress_trade_if_present(
+    pos: Position,
+    payload: Any,
+    now: datetime,
+    *,
+    status: str,
+    deps=None,
+    order_status_on_failure: str,
+) -> tuple[str, bool, bool] | None:
+    if _non_fill_progress_trade_state(payload, status) is None:
+        return None
+    ledger_ok = _maybe_append_venue_fill_observation(
+        pos,
+        payload,
+        status=status,
+        shares=_extract_filled_shares(payload, allow_order_size_fallback=False),
+        fill_price=_extract_explicit_fill_price(payload),
+        observed_at=now,
+        deps=deps,
+    )
+    if not ledger_ok:
+        _mark_entry_quarantined(
+            pos,
+            reason=FILL_LEDGER_QUARANTINE_REVIEW_REQUIRED,
+            order_status=order_status_on_failure,
+        )
+        return "still_pending", True, False
+    return None
+
+
 def _refresh_corrected_economics_eligibility(pos: Position) -> None:
     pos.corrected_executable_economics_eligible = (
         pos.has_fill_economics_authority
@@ -822,18 +902,29 @@ def _mark_entry_filled(
     fill_price = _extract_explicit_fill_price(payload)
     shares = _extract_filled_shares(payload, allow_order_size_fallback=False)
     trade_id = _extract_trade_id(payload if isinstance(payload, dict) else {})
+    observed_status = str(order_status or execution_status or "filled").upper()
+    non_fill_progress = _record_non_fill_progress_trade_if_present(
+        pos,
+        payload,
+        now,
+        status=observed_status,
+        deps=deps,
+        order_status_on_failure="fill_ledger_write_failed",
+    )
+    if non_fill_progress is not None:
+        return non_fill_progress
     missing = _missing_fill_economics(fill_price=fill_price, shares=shares)
     if missing:
         return _quarantine_missing_fill_economics(
             pos,
-            status=str(order_status or execution_status or "filled").upper(),
+            status=observed_status,
             missing=missing,
         )
 
     ledger_ok = _maybe_append_venue_fill_observation(
         pos,
         payload,
-        status=str(order_status or execution_status or "filled").upper(),
+        status=observed_status,
         shares=shares,
         fill_price=fill_price,
         observed_at=now,
@@ -849,7 +940,7 @@ def _mark_entry_filled(
     if not trade_id:
         return _quarantine_missing_fill_authority(
             pos,
-            status=str(order_status or execution_status or "filled").upper(),
+            status=observed_status,
             missing=("trade_identity",),
         )
 
@@ -918,6 +1009,16 @@ def _record_partial_entry_observed(
 ) -> tuple[str, bool, bool]:
     fill_price = _extract_explicit_fill_price(payload)
     shares = _extract_filled_shares(payload, allow_order_size_fallback=False)
+    non_fill_progress = _record_non_fill_progress_trade_if_present(
+        pos,
+        payload,
+        now,
+        status="PARTIALLY_MATCHED",
+        deps=deps,
+        order_status_on_failure="partial_fill_ledger_write_failed",
+    )
+    if non_fill_progress is not None:
+        return non_fill_progress
     if shares is None or shares <= 0:
         return _update_pending_status(pos, "partial")
     missing = _missing_fill_economics(fill_price=fill_price, shares=shares)
@@ -975,6 +1076,16 @@ def _record_optimistic_entry_observed(
 ) -> tuple[str, bool, bool]:
     fill_price = _extract_explicit_fill_price(payload)
     shares = _extract_filled_shares(payload, allow_order_size_fallback=False)
+    non_fill_progress = _record_non_fill_progress_trade_if_present(
+        pos,
+        payload,
+        now,
+        status=status,
+        deps=deps,
+        order_status_on_failure="optimistic_fill_ledger_write_failed",
+    )
+    if non_fill_progress is not None:
+        return non_fill_progress
     if shares is None or shares <= 0:
         return _update_pending_status(pos, status.lower())
     missing = _missing_fill_economics(fill_price=fill_price, shares=shares)
@@ -1102,6 +1213,16 @@ def _check_entry_fill(
                     status=trade_status_conflict,
                     deps=deps,
                 )
+            non_fill_progress = _record_non_fill_progress_trade_if_present(
+                pos,
+                payload,
+                now,
+                status=status,
+                deps=deps,
+                order_status_on_failure="fill_ledger_write_failed",
+            )
+            if non_fill_progress is not None:
+                return non_fill_progress
             return _quarantine_missing_fill_authority(
                 pos,
                 status=f"{status}_TRADE_{trade_status_conflict}",
@@ -1118,7 +1239,10 @@ def _check_entry_fill(
         )
 
     if status in _optimistic_fill_statuses(deps):
-        if _extract_filled_shares(payload, allow_order_size_fallback=False) is None:
+        if (
+            _extract_filled_shares(payload, allow_order_size_fallback=False) is None
+            and _non_fill_progress_trade_state(payload, status) is None
+        ):
             return _update_pending_status(pos, status.lower())
         return _record_optimistic_entry_observed(
             pos,

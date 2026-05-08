@@ -3,7 +3,7 @@
 # Purpose: U2 antibodies for 5 raw provenance projections and CONFIRMED-only training.
 # Reuse: Run when venue command, order fact, trade fact, position lot, settlement provenance, or calibration ingestion changes.
 # Last reused/audited: 2026-05-08
-# Authority basis: docs/operations/task_2026-05-08_object_invariance_wave27/PLAN.md
+# Authority basis: docs/operations/task_2026-05-08_object_invariance_remaining_mainline/PLAN.md
 """U2 raw provenance schema tests for five distinct projections."""
 
 from __future__ import annotations
@@ -918,7 +918,7 @@ def test_optimistic_exposure_rolled_back_on_FAILED_trade(conn):
         venue_order_id="ord-u2",
         command_id=command_id,
         state="MATCHED",
-        filled_size="10",
+        filled_size="10.5",
         fill_price="0.50",
         source="WS_USER",
         observed_at=NOW.isoformat(),
@@ -929,7 +929,7 @@ def test_optimistic_exposure_rolled_back_on_FAILED_trade(conn):
         conn,
         position_id=1,
         state="OPTIMISTIC_EXPOSURE",
-        shares=10,
+        shares="10.5",
         entry_price_avg="0.50",
         source_command_id=command_id,
         source_trade_fact_id=matched_fact_id,
@@ -942,8 +942,8 @@ def test_optimistic_exposure_rolled_back_on_FAILED_trade(conn):
         venue_order_id="ord-u2",
         command_id=command_id,
         state="FAILED",
-        filled_size="10",
-        fill_price="0.50",
+        filled_size="0",
+        fill_price="0",
         source="CHAIN",
         observed_at=(NOW + timedelta(seconds=2)).isoformat(),
         raw_payload_hash=HASH_B,
@@ -957,13 +957,19 @@ def test_optimistic_exposure_rolled_back_on_FAILED_trade(conn):
         state_changed_at=(NOW + timedelta(seconds=3)).isoformat(),
     )
 
-    states = [
-        r["state"]
-        for r in conn.execute(
-            "SELECT state FROM position_lots WHERE position_id = 1 ORDER BY lot_id"
-        )
+    rows = conn.execute(
+        """
+        SELECT state, shares, source_trade_fact_id
+          FROM position_lots
+         WHERE position_id = 1
+         ORDER BY lot_id
+        """
+    ).fetchall()
+    assert [(r["state"], r["shares"]) for r in rows] == [
+        ("OPTIMISTIC_EXPOSURE", "10.5"),
+        ("QUARANTINED", "10.5"),
     ]
-    assert states == ["OPTIMISTIC_EXPOSURE", "QUARANTINED"]
+    assert rows[-1]["source_trade_fact_id"] == failed_fact_id
 
 
 def test_full_provenance_chain_reconstructable(conn):

@@ -1,5 +1,7 @@
-# Lifecycle: created=2026-04-27; last_reviewed=2026-05-01; last_reused=2026-05-01
-# Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/A2.yaml
+# Created: 2026-04-27
+# Last reused/audited: 2026-05-08
+# Lifecycle: created=2026-04-27; last_reviewed=2026-05-01; last_reused=2026-05-08
+# Authority basis: docs/operations/task_2026-05-08_object_invariance_remaining_mainline/PLAN.md
 # Purpose: Lock INV-NEW-R RiskAllocator / PortfolioGovernor cap and kill-switch behavior.
 # Reuse: Run for A2 allocator/governor, executor pre-submit, and live-readiness gate changes.
 """R3 A2 RiskAllocator + PortfolioGovernor acceptance tests."""
@@ -622,6 +624,12 @@ def test_position_lots_reader_uses_latest_append_only_state_and_counts_guards():
     )
     conn.execute(
         "INSERT INTO position_lots (position_id,state,shares,entry_price_avg,source_command_id,source,raw_payload_json,local_sequence) VALUES (2,'OPTIMISTIC_EXPOSURE',20,'0.25','cmd-2','WS_USER','{\"resolution_window\":\"day0\",\"correlation_key\":\"city-nyc\"}',1)"
+    )
+    conn.execute(
+        "INSERT INTO position_lots (position_id,state,shares,entry_price_avg,source_command_id,source,raw_payload_json,local_sequence) VALUES (3,'OPTIMISTIC_EXPOSURE',30,'0.25','cmd-3','WS_USER','{}',1)"
+    )
+    conn.execute(
+        "INSERT INTO position_lots (position_id,state,shares,entry_price_avg,source_command_id,source,raw_payload_json,local_sequence) VALUES (3,'QUARANTINED',30,'0.25','cmd-3','CHAIN','{\"reason\":\"failed_trade_rollback\"}',2)"
     )
     conn.execute("INSERT INTO exchange_reconcile_findings (finding_id, resolved_at) VALUES (1, NULL)")
 

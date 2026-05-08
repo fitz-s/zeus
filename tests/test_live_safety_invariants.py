@@ -3,7 +3,7 @@
 # Purpose: Lock live-money safety invariants across fill, exit, chain, and P&L flows.
 # Reuse: Run for execution finality, live exit, chain reconciliation, and safety invariant changes.
 # Last reused/audited: 2026-05-08
-# Authority basis: midstream verdict v2 2026-04-23; object-meaning invariance Wave28 monitor posterior authority.
+# Authority basis: midstream verdict v2 2026-04-23; docs/operations/task_2026-05-08_object_invariance_remaining_mainline/PLAN.md
 """Live safety invariant tests: relationship tests, not function tests.
 
 These verify cross-module relationships that prevent ghost positions,
@@ -947,6 +947,183 @@ def test_legacy_polling_failed_trade_status_is_not_fill_progress_authority(tmp_p
     assert "FILL_CONFIRMED" not in event_types
     assert canonical_events == []
     assert calibration_rows == []
+
+
+def test_legacy_polling_failed_without_fill_economics_rolls_back_optimistic_lot(tmp_path):
+    """FAILED trade lifecycle evidence must close prior optimistic exposure."""
+    from src.execution.fill_tracker import check_pending_entries
+    from src.state.db import get_connection, init_schema
+    from src.state.venue_command_repo import append_position_lot, append_trade_fact
+
+    db_path = tmp_path / "zeus.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+    conn.execute(
+        """
+        INSERT INTO venue_commands (
+            command_id, snapshot_id, envelope_id, position_id, decision_id,
+            idempotency_key, intent_kind, market_id, token_id, side, size, price,
+            venue_order_id, state, last_event_id, created_at, updated_at,
+            review_required_reason
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "cmd-failed-no-econ",
+            "snap-failed-no-econ",
+            "env-failed-no-econ",
+            "123456789089",
+            "dec-failed-no-econ",
+            "idem-failed-no-econ",
+            "ENTRY",
+            "condition-failed-no-econ",
+            "tok_yes_failed_no_econ",
+            "BUY",
+            20.0,
+            0.40,
+            "buy_failed_no_econ",
+            "ACKED",
+            None,
+            "2026-04-29T12:00:00+00:00",
+            "2026-04-29T12:00:00+00:00",
+            None,
+        ),
+    )
+    conn.execute(
+        """
+        INSERT INTO trade_decisions (
+            market_id, bin_label, direction, size_usd, price, timestamp,
+            p_raw, p_posterior, edge, ci_lower, ci_upper, kelly_fraction,
+            status, runtime_trade_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "condition-failed-no-econ",
+            "60-65",
+            "buy_yes",
+            20.0,
+            0.40,
+            "2026-04-29T12:00:00+00:00",
+            0.55,
+            0.55,
+            0.15,
+            0.50,
+            0.60,
+            0.0,
+            "pending_tracked",
+            "123456789089",
+        ),
+    )
+    matched_fact_id = append_trade_fact(
+        conn,
+        trade_id="trade-poll-failed-no-econ",
+        venue_order_id="buy_failed_no_econ",
+        command_id="cmd-failed-no-econ",
+        state="MATCHED",
+        filled_size="12.5",
+        fill_price="0.42",
+        source="REST",
+        observed_at="2026-04-29T12:00:30+00:00",
+        raw_payload_hash="0" * 64,
+        raw_payload_json={"trade_status": "MATCHED"},
+    )
+    append_position_lot(
+        conn,
+        position_id=123456789089,
+        state="OPTIMISTIC_EXPOSURE",
+        shares="12.5",
+        entry_price_avg="0.42",
+        source_command_id="cmd-failed-no-econ",
+        source_trade_fact_id=matched_fact_id,
+        captured_at="2026-04-29T12:00:30+00:00",
+        state_changed_at="2026-04-29T12:00:30+00:00",
+        source="REST",
+        observed_at="2026-04-29T12:00:30+00:00",
+        raw_payload_json={"trade_status": "MATCHED"},
+    )
+    conn.commit()
+    conn.close()
+
+    class Deps:
+        @staticmethod
+        def get_connection():
+            return get_connection(db_path)
+
+    pos = _make_position(
+        trade_id="123456789089",
+        state="pending_tracked",
+        entry_order_id="buy_failed_no_econ",
+        entry_fill_verified=False,
+        entered_at="",
+        size_usd=20.0,
+        entry_price=0.40,
+        shares=0.0,
+        cost_basis_usd=0.0,
+        strategy_key="center_buy",
+        strategy="center_buy",
+    )
+    portfolio = _make_portfolio(pos)
+    clob = _make_clob(order_status="MATCHED")
+    clob.get_order_status.return_value = {
+        "status": "MATCHED",
+        "trade_id": "trade-poll-failed-no-econ",
+        "trade_status": "FAILED",
+        "timestamp": "2026-04-29T12:01:00+00:00",
+    }
+
+    stats = check_pending_entries(
+        portfolio,
+        clob,
+        deps=Deps,
+        now=datetime(2026, 4, 29, 12, 1, tzinfo=timezone.utc),
+    )
+
+    assert stats["entered"] == 0
+    assert stats["still_pending"] == 1
+    assert pos.state == "quarantined"
+    assert pos.has_fill_economics_authority is False
+
+    conn = get_connection(db_path)
+    trade_rows = conn.execute(
+        """
+        SELECT trade_fact_id, state, filled_size, fill_price
+          FROM venue_trade_facts
+         ORDER BY local_sequence
+        """
+    ).fetchall()
+    lot_rows = conn.execute(
+        """
+        SELECT state, shares, source_trade_fact_id
+          FROM position_lots
+         WHERE position_id = ?
+         ORDER BY lot_id
+        """,
+        (123456789089,),
+    ).fetchall()
+    event_types = [
+        r["event_type"]
+        for r in conn.execute(
+            """
+            SELECT event_type
+              FROM venue_command_events
+             WHERE command_id = 'cmd-failed-no-econ'
+             ORDER BY sequence_no
+            """
+        ).fetchall()
+    ]
+    conn.close()
+
+    assert [(r["state"], r["filled_size"], r["fill_price"]) for r in trade_rows] == [
+        ("MATCHED", "12.5", "0.42"),
+        ("FAILED", "0", "0"),
+    ]
+    assert [(r["state"], r["shares"]) for r in lot_rows] == [
+        ("OPTIMISTIC_EXPOSURE", "12.5"),
+        ("QUARANTINED", "12.5"),
+    ]
+    assert lot_rows[-1]["source_trade_fact_id"] == trade_rows[-1]["trade_fact_id"]
+    assert "REVIEW_REQUIRED" in event_types
+    assert "PARTIAL_FILL_OBSERVED" not in event_types
+    assert "FILL_CONFIRMED" not in event_types
 
 
 def test_legacy_polling_duplicate_failed_trade_fact_still_fails_closed(tmp_path):
