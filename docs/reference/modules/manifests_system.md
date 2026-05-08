@@ -4,7 +4,7 @@
 
 ## Purpose
 
-The manifests system explains which machine-readable file owns which governance fact so agents do not create parallel registries or duplicate truth. It is a reference map for ownership; the canonical machine matrix now lives in `architecture/topology_schema.yaml` under `ownership.fact_types`, and enforcement remains in topology-doctor checks/tests.
+The manifests system explains which machine-readable file owns which governance fact so agents do not create parallel registries or duplicate truth. It is a reference map for ownership; schema constants live in `scripts/topology_doctor.py` (see `SCHEMA_REQUIRED_TOP_LEVEL_KEYS`), the canonical ownership matrix lives in `scripts/topology_doctor_ownership_checks.py` (see `OWNERSHIP_FACT_TYPES` and sibling constants), and enforcement remains in topology-doctor checks/tests.
 
 ## Authority anchors
 
@@ -14,13 +14,13 @@ The manifests system explains which machine-readable file owns which governance 
 - `architecture/source_rationale.yaml`, `test_topology.yaml`, and `script_manifest.yaml` own source/test/script classification respectively.
 - `architecture/map_maintenance.yaml` owns companion-update rules.
 - `architecture/code_review_graph_protocol.yaml` owns graph-use protocol.
-- `architecture/topology_schema.yaml` owns compiled topology and typed issue contracts.
+- `scripts/topology_doctor.py` inline schema constants own compiled topology and typed issue contracts (formerly `architecture/topology_schema.yaml`, retired in PR #71).
 
 ## How it works
 
 Each manifest should own a fact type, not merely a path prefix. Reference books may explain those facts but must not become alternate registries. When two manifests appear to describe the same fact, the intended repair is to identify the canonical owner, leave cross-references as pointers, and add a validator only after ownership is explicit.
 
-The canonical ownership matrix is the `ownership.fact_types` section in `architecture/topology_schema.yaml`. This book intentionally does not duplicate the matrix rows; it explains how to use that schema without becoming a second registry.
+The canonical ownership matrix is the `OWNERSHIP_FACT_TYPES` constant in `scripts/topology_doctor_ownership_checks.py`. This book intentionally does not duplicate the matrix rows; it explains how to use that schema without becoming a second registry.
 
 ## Hidden obligations
 
@@ -35,7 +35,7 @@ The canonical ownership matrix is the `ownership.fact_types` section in `archite
 - A new YAML row is added to the easiest manifest rather than the owning manifest.
 - A reference book repeats machine rows and drifts from the manifest.
 - Agents fix live repo-health drift by rewriting broad registries outside packet scope.
-- A generated graph/context-pack fact is promoted into manifest authority without semantic boot.
+- A generated graph or navigation context fact is promoted into manifest authority without semantic boot.
 
 ## Repair routes
 

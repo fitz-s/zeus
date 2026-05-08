@@ -47,6 +47,7 @@ import logging
 import subprocess
 import sys
 import hashlib
+from contextlib import nullcontext
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -66,7 +67,8 @@ from src.data.forecast_target_contract import (
 from src.data.producer_readiness import build_producer_readiness_for_scope
 from src.data.forecast_source_registry import gate_source, gate_source_role
 from src.data.release_calendar import FetchDecision, select_source_run_for_target_horizon
-from src.state.db import get_world_connection as get_connection
+from src.state.db import get_world_connection as get_connection, ZEUS_WORLD_DB_PATH
+from src.state.db_writer_lock import WriteClass, db_writer_lock
 from src.state.source_run_coverage_repo import write_source_run_coverage
 from src.state.source_run_repo import write_source_run
 
@@ -77,10 +79,18 @@ DOWNLOAD_SCRIPT = FIFTY_ONE_ROOT / "scripts" / "download_ecmwf_open_ens.py"
 EXTRACT_SCRIPT = FIFTY_ONE_ROOT / "scripts" / "extract_open_ens_localday.py"
 INGEST_SCRIPT_DIR = PROJECT_ROOT / "scripts"
 
-# Open Data ships hourly steps; we want every 3h boundary up to 279h
-# (inclusive) to cover the configured D+10 city-local calendar-day contract
-# horizon across UTC-positive and UTC-negative cities (LOW 282h authority) using
-# the 3h-native stride from A1+3h authority.
+# ECMWF Open Data ENS dissemination grid (enfo cf/pf, mx2t3/mn2t3/2t):
+#   0–144h by 3h, then 150–360h by 6h.
+# Note: the underlying IFS model produces hourly steps 0–90h and 3h steps
+#       93–144h (per https://www.ecmwf.int/en/forecasts/datasets/set-iii),
+#       but Open Data subsamples to the 3h/6h grid above. Hourly steps are
+#       only available via MARS, which Zeus does not use.
+# Period-aligned params: mx2t3/mn2t3 valid at every disseminated step;
+#       mx2t6/mn2t6 (deprecated 2026-05-07) were valid only at 6h multiples.
+# We request 3h steps through 144h, then 6h steps through 282h.
+# 282h is the LOW D+10 authority ceiling from
+#   architecture/zeus_grid_resolution_authority_2026_05_07.yaml (LOW 282h horizon).
+# Only requesting disseminated steps avoids silent "No index entries" fetch failures.
 #
 # Authority: architecture/zeus_grid_resolution_authority_2026_05_07.yaml A1+3h (stride)
 #            LOW 282h horizon (covers UTC-positive cities at D+10 boundary)
@@ -88,10 +98,15 @@ INGEST_SCRIPT_DIR = PROJECT_ROOT / "scripts"
 # The stream now serves mx2t3/mn2t3 (3h aggregations) as the native product.
 # We fetch 3h-native and let calibration learn the 3h→6h envelope mapping
 # downstream. We do NOT re-aggregate to 6h at fetch time (forbidden_patterns).
-STEP_HOURS = list(range(3, 279, 3))  # 3, 6, …, 276 — 3h stride (A1+3h) + 276h live_max (LOW)
-# Authority: source_release_calendar.yaml ecmwf_open_data live_max_step_hours=276.
-# 279h was out of bounds; steps must be ≤ live_max so select_source_run_for_target_horizon
-# does not return HORIZON_OUT_OF_RANGE (PR #85 Codex P1).
+STEP_HOURS = (
+    list(range(3, 147, 3))    # 3, 6, …, 144 — 3h stride (A1+3h native grid)
+    + list(range(150, 285, 6))  # 150, 156, …, 282 — 6h stride (published ENS beyond 144h)
+)
+# Authority: source_release_calendar.yaml ecmwf_open_data live_max_step_hours=282.
+# Grid: ECMWF Open Data ENS serves 3h steps 0–144h and 6h steps 150–360h for cf/pf.
+# 282h covers D+10 for all cities including UTC+12 (max required step ≈ 252h).
+# Raised from 276 → 282 (fix/#134) to unblock 100 BLOCKED readiness rows for
+# 2026-05-13/14 requiring steps 228–252h. Closes #134.
 
 # Track config — local to this module so the daemon's ingest knob is one
 # clean dict rather than two parallel param lists.
@@ -606,64 +621,70 @@ def collect_open_ens_cycle(
     # caller passes ``conn=None`` and we open the world DB.
     own_conn = conn is None
     if own_conn:
-        conn = get_connection()
-    try:
-        # Make scripts/ importable so we can call ingest_track.
-        if str(INGEST_SCRIPT_DIR) not in sys.path:
-            sys.path.insert(0, str(INGEST_SCRIPT_DIR))
-        from ingest_grib_to_snapshots import SourceRunContext, ingest_track as _ingest  # type: ignore
-        from src.state.db import init_schema
-
-        init_schema(conn)
-        # The opendata extract writes JSON files to a different subdir than
-        # TIGGE — reuse the same ingester by passing the parent directory and
-        # the matching track name, and override the json_subdir lookup via the
-        # _TRACK_CONFIGS dict. Cleanest in-process integration: temporarily
-        # rebind the json_subdir for this call.
-        import ingest_grib_to_snapshots as _module  # type: ignore
-
-        original_subdir = _module._TRACK_CONFIGS[cfg["ingest_track"]]["json_subdir"]
-        _module._TRACK_CONFIGS[cfg["ingest_track"]]["json_subdir"] = cfg["extract_subdir"]
-        try:
-            summary = _ingest(
-                track=cfg["ingest_track"],
-                json_root=FIFTY_ONE_ROOT / "raw",
-                conn=conn,
-                date_from=None,
-                date_to=None,
-                cities=None,
-                overwrite=True,
-                require_files=False,
-                source_run_context=SourceRunContext(
-                    source_id=SOURCE_ID,
-                    source_transport="ensemble_snapshots_v2_db_reader",
-                    source_run_id=source_run_id,
-                    release_calendar_key=release_calendar_key,
-                    source_cycle_time=source_cycle_time,
-                    source_release_time=source_release_time,
-                    source_available_at=source_release_time,
-                ),
-            )
-        finally:
-            _module._TRACK_CONFIGS[cfg["ingest_track"]]["json_subdir"] = original_subdir
-        status = _status_for_ingest_summary(summary)
-        authority_computed_at = (now_utc or datetime.now(timezone.utc)).astimezone(timezone.utc)
-        authority_summary = _write_source_authority_chain(
-            conn,
-            summary=summary,
-            status=status,
-            source_run_id=source_run_id,
-            source_cycle_time=source_cycle_time,
-            source_release_time=source_release_time,
-            release_calendar_key=release_calendar_key,
-            forecast_track=forecast_track,
-            data_version=cfg["data_version"],
-            computed_at=authority_computed_at,
-        )
-        conn.commit()
-    finally:
+        _lock_ctx = db_writer_lock(ZEUS_WORLD_DB_PATH, WriteClass.BULK)
+    else:
+        # Injected connection (test seam with in-memory sqlite) — skip file lock.
+        _lock_ctx = nullcontext()
+    with _lock_ctx:
         if own_conn:
-            conn.close()
+            conn = get_connection()
+        try:
+            # Make scripts/ importable so we can call ingest_track.
+            if str(INGEST_SCRIPT_DIR) not in sys.path:
+                sys.path.insert(0, str(INGEST_SCRIPT_DIR))
+            from ingest_grib_to_snapshots import SourceRunContext, ingest_track as _ingest  # type: ignore
+            from src.state.db import init_schema
+
+            init_schema(conn)
+            # The opendata extract writes JSON files to a different subdir than
+            # TIGGE — reuse the same ingester by passing the parent directory and
+            # the matching track name, and override the json_subdir lookup via the
+            # _TRACK_CONFIGS dict. Cleanest in-process integration: temporarily
+            # rebind the json_subdir for this call.
+            import ingest_grib_to_snapshots as _module  # type: ignore
+
+            original_subdir = _module._TRACK_CONFIGS[cfg["ingest_track"]]["json_subdir"]
+            _module._TRACK_CONFIGS[cfg["ingest_track"]]["json_subdir"] = cfg["extract_subdir"]
+            try:
+                summary = _ingest(
+                    track=cfg["ingest_track"],
+                    json_root=FIFTY_ONE_ROOT / "raw",
+                    conn=conn,
+                    date_from=None,
+                    date_to=None,
+                    cities=None,
+                    overwrite=True,
+                    require_files=False,
+                    source_run_context=SourceRunContext(
+                        source_id=SOURCE_ID,
+                        source_transport="ensemble_snapshots_v2_db_reader",
+                        source_run_id=source_run_id,
+                        release_calendar_key=release_calendar_key,
+                        source_cycle_time=source_cycle_time,
+                        source_release_time=source_release_time,
+                        source_available_at=source_release_time,
+                    ),
+                )
+            finally:
+                _module._TRACK_CONFIGS[cfg["ingest_track"]]["json_subdir"] = original_subdir
+            status = _status_for_ingest_summary(summary)
+            authority_computed_at = (now_utc or datetime.now(timezone.utc)).astimezone(timezone.utc)
+            authority_summary = _write_source_authority_chain(
+                conn,
+                summary=summary,
+                status=status,
+                source_run_id=source_run_id,
+                source_cycle_time=source_cycle_time,
+                source_release_time=source_release_time,
+                release_calendar_key=release_calendar_key,
+                forecast_track=forecast_track,
+                data_version=cfg["data_version"],
+                computed_at=authority_computed_at,
+            )
+            conn.commit()
+        finally:
+            if own_conn:
+                conn.close()
 
     stages = [
         *stages,

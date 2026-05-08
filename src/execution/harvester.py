@@ -1196,21 +1196,29 @@ def _write_settlement_truth(
         if rounded is not None and math.isfinite(rounded):
             # Containment check (point/range/shoulder-aware)
             contained = False
-            if pm_bin_lo is not None and pm_bin_hi is not None:
-                contained = pm_bin_lo <= rounded <= pm_bin_hi
-            elif pm_bin_lo is None and pm_bin_hi is not None:
-                contained = rounded <= pm_bin_hi
-            elif pm_bin_hi is None and pm_bin_lo is not None:
-                contained = rounded >= pm_bin_lo
-            if contained:
-                authority = "VERIFIED"
+            if pm_bin_lo is None and pm_bin_hi is None:
+                # No bin info at all — synthetic backfill or slug with no winning
+                # outcome. Record rounded value for audit but do not classify as
+                # "obs_outside_bin" — that reason implies a bin existed and the
+                # obs fell outside it. Fix #231 (Cluster B, 181 rows).
                 settlement_value = rounded
-                winning_bin = _canonical_bin_label(pm_bin_lo, pm_bin_hi, city.settlement_unit)
-                reason = None
+                reason = "harvester_live_no_bin_info"
             else:
-                # Quarantined — preserve rounded as evidence
-                settlement_value = rounded
-                reason = "harvester_live_obs_outside_bin"
+                if pm_bin_lo is not None and pm_bin_hi is not None:
+                    contained = pm_bin_lo <= rounded <= pm_bin_hi
+                elif pm_bin_lo is None and pm_bin_hi is not None:
+                    contained = rounded <= pm_bin_hi
+                elif pm_bin_hi is None and pm_bin_lo is not None:
+                    contained = rounded >= pm_bin_lo
+                if contained:
+                    authority = "VERIFIED"
+                    settlement_value = rounded
+                    winning_bin = _canonical_bin_label(pm_bin_lo, pm_bin_hi, city.settlement_unit)
+                    reason = None
+                else:
+                    # Quarantined — preserve rounded as evidence
+                    settlement_value = rounded
+                    reason = "harvester_live_obs_outside_bin"
 
     provenance = {
         "writer": "harvester_live_dr33",

@@ -244,6 +244,10 @@ test_trust_policy:
     tests/test_harvester_settlement_redeem.py: {created: "2026-05-05", last_used: "2026-05-05"}
     tests/test_harvester_learning_authority.py: {created: "2026-05-05", last_used: "2026-05-05"}
     tests/test_final_sdk_envelope_persistence.py: {created: "2026-05-05", last_used: "2026-05-05"}
+    tests/test_harvester_truth_writer_null_bin.py: {created: "2026-05-08", last_used: "2026-05-08"}
+    # fix/#134 — ECMWF Open Data STEP_HOURS D+10 horizon extension antibodies.
+    tests/test_ecmwf_open_data_step_hours.py: {created: "2026-05-08", last_used: "2026-05-08"}
+    tests/test_forecast_target_contract_horizon.py: {created: "2026-05-08", last_used: "2026-05-08"}
 
 categories:
   core_law_antibody:
@@ -317,6 +321,8 @@ categories:
     - tests/test_opendata_release_calendar_selection.py
     - tests/test_opendata_writes_v2_table.py
     - tests/test_opendata_future_target_contract.py
+    - tests/test_ecmwf_open_data_step_hours.py
+    - tests/test_forecast_target_contract_horizon.py
     - tests/test_readiness_state.py
     - tests/test_release_calendar.py
     - tests/test_job_run_schema.py
@@ -404,6 +410,7 @@ categories:
     - tests/test_executor_db_target.py
     - tests/test_executor_typed_boundary.py
     - tests/test_harvester_dr33_live_enablement.py
+    - tests/test_harvester_truth_writer_null_bin.py
     - tests/test_no_deprecated_make_family_id_calls.py
     - tests/test_parse_canonical_bin_label.py
     - tests/test_pe_reconstruction_relationships.py
@@ -1276,3 +1283,24 @@ test_metadata:
       logged in BATCH_DONE_T2F).
     created: 2026-05-05
     last_reused_or_audited: 2026-05-05
+
+  tests/test_settlement_semantics_f_to_c.py:
+    modules: [ingest, contracts, settlement]
+    category: core_law_antibody
+    profile: fix262_london_f_to_c
+    blocks_commit: true
+    asserted_invariants:
+      - F-BIN-C-CITY-CONTAINMENT-USES-CONVERTED-BOUNDS
+      - WINNING-BIN-LABEL-REFLECTS-EFFECTIVE-UNIT
+    source_under_test:
+      - src/ingest/harvester_truth_writer.py
+    law_dependencies:
+      - docs/operations/task_2026-05-08_262_london_f_to_c/RUN.md
+    notes: >
+      9 antibody tests for fix #262 (Cluster A: 317 London rows quarantined because
+      2025 Polymarket questions used F bins but London is a C city). Tests cover:
+      F->C conversion path (T1-T2), C+C and F+F controls (T3-T4), _detect_bin_unit
+      unit detection (T5-T7), _f_to_c arithmetic (T8), open-shoulder regression (T9).
+      T1 also asserts winning_bin label uses converted C bounds (P1 fix).
+    created: 2026-05-08
+    last_reused_or_audited: 2026-05-08

@@ -369,7 +369,6 @@ profiles:
       - AGENTS.md
       - workspace_map.md
       - architecture/topology.yaml
-      - architecture/topology_schema.yaml
       - architecture/context_pack_profiles.yaml
     current_fact_surfaces:
       - docs/operations/current_state.md
@@ -377,7 +376,7 @@ profiles:
       - id: admission_remains_authority
         question: "Does admission.status remain the sole write-authority signal?"
         evidence:
-          - architecture/topology_schema.yaml
+          - scripts/topology_doctor.py
           - scripts/topology_doctor_digest.py
       - id: runtime_guidance_not_authority
         question: "Is workflow/skill/work-ethic guidance emitted as generated context rather than repo law?"
@@ -402,6 +401,5 @@ profiles:
       use_for: [optional review order, optional impact hints]
       not_for: [semantic truth, source validity, packet authority, write authorization]
     verification_gates:
-      - python3 scripts/topology_doctor.py --context-packs --json
       - python3 scripts/topology_doctor.py --task-boot-profiles --json
       - python3 scripts/topology_doctor.py --schema
