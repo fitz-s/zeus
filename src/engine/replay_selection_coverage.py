@@ -51,7 +51,6 @@ from src.strategy.fdr_filter import DEFAULT_FDR_ALPHA
 from src.strategy.market_analysis_family_scan import FullFamilyHypothesis, scan_full_hypothesis_family
 from src.strategy.selection_family import apply_familywise_fdr, make_hypothesis_family_id
 from src.types import Bin
-from src.types.temperature import TemperatureDelta
 
 logger = logging.getLogger(__name__)
 
@@ -111,14 +110,41 @@ def _compute_climatology_p_market(
     return result
 
 
+def _uniform_brier_baseline(n_bins: int) -> float:
+    """Compute expected Brier score for a uniform forecast over n_bins.
+
+    For a uniform forecast p_i = 1/n over n bins with one correct bin:
+      BS_clim = (1/n) * (1 - 1/n)^2 + (n-1)/n * (0 - 1/n)^2
+             = (1/n)(1 - 1/n)^2 + (n-1)/n * (1/n)^2
+             = (1/n)[(1-1/n)^2 + (n-1)/n * (1/n)]   ... averaged over n bins
+    Mean per-bin Brier = (1/n)*(1-1/n)^2 + (n-1)*(1/n)*(1/n)^2  -- this is per bin, summed / n
+    Full formula: sum_i (p_i - o_i)^2 / n  averaged across draws where one bin wins:
+      = (1/n)*(1-1/n)^2 + ((n-1)/n)*(1/n)^2
+    """
+    if n_bins <= 0:
+        return 0.24  # safe fallback
+    n = float(n_bins)
+    return (1.0 / n) * (1.0 - 1.0 / n) ** 2 + ((n - 1.0) / n) * (1.0 / n) ** 2
+
+
+def _bss_for_snapshot(brier: float, n_bins: int) -> float:
+    """Per-snapshot BSS = 1 - brier / clim_brier(n_bins)."""
+    clim = _uniform_brier_baseline(n_bins)
+    if clim <= 0.0:
+        return 0.0
+    return 1.0 - brier / clim
+
+
 def _build_timezone_stratification(rows: list[dict]) -> dict:
     """Build Asia_star / non_Asia stratification from snapshot result rows.
 
-    Each row must have: city, hit (int|None), brier (float|None), timezone_class (str).
+    Each row must have: city, hit (int|None), brier (float|None),
+    n_bins (int), timezone_class (str).
+    BSS is computed per-snapshot using n_bins-aware baseline, then averaged.
     """
     groups: dict[str, dict] = {
-        "Asia_star": {"n_snapshots": 0, "hits": [], "briers": []},
-        "non_Asia": {"n_snapshots": 0, "hits": [], "briers": []},
+        "Asia_star": {"n_snapshots": 0, "hits": [], "briers": [], "bss_vals": []},
+        "non_Asia": {"n_snapshots": 0, "hits": [], "briers": [], "bss_vals": []},
     }
     for row in rows:
         cls = str(row.get("timezone_class") or "non_Asia")
@@ -128,21 +154,19 @@ def _build_timezone_stratification(rows: list[dict]) -> dict:
         if hit is not None:
             groups[key]["hits"].append(int(hit))
         brier = row.get("brier")
+        n_bins = int(row.get("n_bins") or 5)
         if brier is not None:
             groups[key]["briers"].append(float(brier))
+            groups[key]["bss_vals"].append(_bss_for_snapshot(float(brier), n_bins))
 
     result = {}
     for cls, g in groups.items():
         hits = g["hits"]
         briers = g["briers"]
+        bss_vals = g["bss_vals"]
         hit_rate = float(sum(hits) / len(hits)) if hits else None
         brier_mean = float(sum(briers) / len(briers)) if briers else None
-        # BSS vs climatology baseline (uniform brier = sum((1/n)*(1-1/n)^2 + ...) ≈ 0.2 for 5 bins)
-        # Simplified: BSS = 1 - brier_mean / clim_brier, clim_brier set to 0.24 (5-bin uniform)
-        bss = None
-        if brier_mean is not None:
-            clim_brier = 0.24
-            bss = round(1.0 - brier_mean / clim_brier, 4)
+        bss = round(float(sum(bss_vals) / len(bss_vals)), 4) if bss_vals else None
         result[cls] = {
             "n_snapshots": g["n_snapshots"],
             "hit_rate": hit_rate,
@@ -190,6 +214,8 @@ def _score_one_snapshot(
         "snapshot_id": snapshot_id,
         "hit": None,
         "brier": None,
+        "n_bins": 0,
+        "lead_days": 0.0,
         "picked_labels": [],
         "winning_bin": winning_bin,
         "missing_reason": "",
@@ -219,6 +245,7 @@ def _score_one_snapshot(
         return base_result
 
     lead_days = lead_hours / 24.0
+    base_result["lead_days"] = lead_days
     p_raw_json = snapshot_row["p_raw_json"]
     try:
         p_raw_stored = json.loads(p_raw_json) if isinstance(p_raw_json, str) else p_raw_json
@@ -267,6 +294,7 @@ def _score_one_snapshot(
         )
         for lbl in labels
     ]
+    base_result["n_bins"] = len(bins)
 
     bin_probs_raw = np.array(p_raw_stored, dtype=float)
 
@@ -278,7 +306,6 @@ def _score_one_snapshot(
     ) = _replay_calibration_lookup_keys(snap_dict)
 
     target_d = date.fromisoformat(target_date)
-    from src.calibration.manager import season_from_month
     season = season_from_month(target_d.month, lat=city.lat)
 
     if not override_platt and cal_supported:
@@ -325,10 +352,8 @@ def _score_one_snapshot(
     else:
         p_market = np.full(n, 1.0 / n, dtype=float)
 
-    # -- Construct p_posterior (MODEL_ONLY: alpha=1.0 => p_posterior = p_cal)
-    # MODEL_ONLY_POSTERIOR_MODE sets alpha to 1.0 (model only, no market fusion)
-    from src.strategy.market_fusion import MODEL_ONLY_POSTERIOR_MODE, compute_alpha
-    alpha = 1.0  # MODEL_ONLY: ignore market
+    # MODEL_ONLY_POSTERIOR_MODE: alpha=1.0, p_posterior = p_cal (no market fusion)
+    alpha = 1.0
 
     # Build MarketAnalysis
     spread_val = float(snapshot_row["spread"] or 3.0)
@@ -575,12 +600,15 @@ def run_selection_coverage(
 
         # Accumulate per-city
         if city.name not in per_city:
-            per_city[city.name] = {"n_dates": 0, "hits": [], "briers": [], "n_picks": 0}
+            per_city[city.name] = {"n_dates": 0, "hits": [], "briers": [], "bss_vals": [], "n_picks": 0}
         per_city[city.name]["n_dates"] += 1
         if result["hit"] is not None:
             per_city[city.name]["hits"].append(result["hit"])
-        if result["brier"] is not None:
-            per_city[city.name]["briers"].append(result["brier"])
+        r_brier = result["brier"]
+        r_n_bins = int(result.get("n_bins") or 5)
+        if r_brier is not None:
+            per_city[city.name]["briers"].append(r_brier)
+            per_city[city.name]["bss_vals"].append(_bss_for_snapshot(r_brier, r_n_bins))
         if result["picked_labels"]:
             per_city[city.name]["n_picks"] += 1
 
@@ -613,22 +641,72 @@ def run_selection_coverage(
     # -- Build summary metrics
     all_hits = [r["hit"] for r in snapshot_results if r["hit"] is not None]
     all_briers = [r["brier"] for r in snapshot_results if r["brier"] is not None]
+    all_bss_vals = [
+        _bss_for_snapshot(r["brier"], int(r.get("n_bins") or 5))
+        for r in snapshot_results
+        if r["brier"] is not None
+    ]
     n_picks = sum(1 for r in snapshot_results if r["picked_labels"])
 
     hit_rate = float(sum(all_hits) / len(all_hits)) if all_hits else None
     brier_mean = float(sum(all_briers) / len(all_briers)) if all_briers else None
-    bss = round(1.0 - brier_mean / 0.24, 4) if brier_mean is not None else None
+    bss = round(float(sum(all_bss_vals) / len(all_bss_vals)), 4) if all_bss_vals else None
 
-    # Per-city summary (only cities with >=5 settled dates)
+    # -- Lead-day bucketing (FIX 4)
+    def _lead_bucket(ld: float) -> str:
+        if ld <= 1.5:
+            return "1"
+        elif ld <= 2.5:
+            return "2"
+        elif ld <= 3.5:
+            return "3"
+        elif ld <= 5.5:
+            return "4-5"
+        elif ld <= 7.5:
+            return "6-7"
+        else:
+            return "8+"
+
+    lead_bucket_data: dict[str, dict] = {}
+    for r in snapshot_results:
+        ld = float(r.get("lead_days") or 0.0)
+        bucket = _lead_bucket(ld)
+        if bucket not in lead_bucket_data:
+            lead_bucket_data[bucket] = {"n": 0, "hits": [], "briers": [], "bss_vals": []}
+        lead_bucket_data[bucket]["n"] += 1
+        if r["hit"] is not None:
+            lead_bucket_data[bucket]["hits"].append(r["hit"])
+        rb = r["brier"]
+        rn = int(r.get("n_bins") or 5)
+        if rb is not None:
+            lead_bucket_data[bucket]["briers"].append(rb)
+            lead_bucket_data[bucket]["bss_vals"].append(_bss_for_snapshot(rb, rn))
+
+    by_lead_day: dict[str, dict] = {}
+    for bkt in ["1", "2", "3", "4-5", "6-7", "8+"]:
+        g = lead_bucket_data.get(bkt, {"n": 0, "hits": [], "briers": [], "bss_vals": []})
+        h = g["hits"]
+        b = g["briers"]
+        bv = g["bss_vals"]
+        by_lead_day[bkt] = {
+            "n": g["n"],
+            "hit_rate": float(sum(h) / len(h)) if h else None,
+            "brier": float(sum(b) / len(b)) if b else None,
+            "bss": round(float(sum(bv) / len(bv)), 4) if bv else None,
+        }
+
+    # Per-city summary
     per_city_summary = {}
     for cn, stats in per_city.items():
         hits = stats["hits"]
         briers = stats["briers"]
+        bss_vals = stats["bss_vals"]
         per_city_summary[cn] = {
             "n_dates": stats["n_dates"],
             "n_picks": stats["n_picks"],
             "hit_rate": float(sum(hits) / len(hits)) if hits else None,
             "brier": float(sum(briers) / len(briers)) if briers else None,
+            "bss": round(float(sum(bss_vals) / len(bss_vals)), 4) if bss_vals else None,
         }
 
     # Asia/non-Asia stratification (D3)
@@ -650,6 +728,7 @@ def run_selection_coverage(
         "brier_aggregate": brier_mean,
         "bss_vs_climatology": bss,
         "by_timezone_class": tz_strat,
+        "by_lead_day": by_lead_day,
     }
 
     _insert_backtest_run(backtest_conn, summary)

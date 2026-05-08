@@ -228,34 +228,72 @@ def _print_selection_coverage_report(summary) -> None:
     print(f"BSS vs climatology:      {bss:.4f}" if bss is not None else "BSS vs climatology:      N/A")
     print()
 
+    N_MIN = 5  # suppress metrics for groups with fewer than this many settled dates
+
     # Asia/non-Asia split (D3)
     tz_strat = sc.get("by_timezone_class") or {}
+    insufficient_tz = False
     if tz_strat:
         print(f"{'Timezone class':20} {'N':>6} {'Hit%':>8} {'Brier':>8} {'BSS':>8}")
         print("-" * 54)
         for cls in ("Asia_star", "non_Asia"):
             g = tz_strat.get(cls) or {}
             n = g.get("n_snapshots", 0)
+            if n < N_MIN:
+                insufficient_tz = True
+                print(f"{cls:20} {n:>6} {'N/A*':>8} {'N/A*':>8} {'N/A*':>8}")
+            else:
+                hr = g.get("hit_rate")
+                br = g.get("brier")
+                bs = g.get("bss")
+                hr_s = f"{hr:.3f}" if hr is not None else "N/A"
+                br_s = f"{br:.4f}" if br is not None else "N/A"
+                bs_s = f"{bs:.4f}" if bs is not None else "N/A"
+                print(f"{cls:20} {n:>6} {hr_s:>8} {br_s:>8} {bs_s:>8}")
+        if insufficient_tz:
+            print("  * INSUFFICIENT N (<5 settled dates)")
+        print()
+
+    # Lead-day breakdown (FIX 4)
+    by_lead = sc.get("by_lead_day") or {}
+    if by_lead:
+        print(f"{'Lead days':10} {'N':>6} {'Hit%':>8} {'Brier':>8} {'BSS':>8}")
+        print("-" * 46)
+        for bkt in ["1", "2", "3", "4-5", "6-7", "8+"]:
+            g = by_lead.get(bkt) or {}
+            n = g.get("n", 0)
+            if n == 0:
+                continue
             hr = g.get("hit_rate")
             br = g.get("brier")
             bs = g.get("bss")
             hr_s = f"{hr:.3f}" if hr is not None else "N/A"
             br_s = f"{br:.4f}" if br is not None else "N/A"
             bs_s = f"{bs:.4f}" if bs is not None else "N/A"
-            print(f"{cls:20} {n:>6} {hr_s:>8} {br_s:>8} {bs_s:>8}")
+            print(f"{bkt:10} {n:>6} {hr_s:>8} {br_s:>8} {bs_s:>8}")
         print()
 
     # Per-city breakdown
+    insufficient_city = False
     if summary.per_city:
-        print(f"{'City':20} {'Dates':>6} {'Picks':>6} {'Hit%':>8} {'Brier':>8}")
-        print("-" * 52)
+        print(f"{'City':20} {'Dates':>6} {'Picks':>6} {'Hit%':>8} {'Brier':>8} {'BSS':>8}")
+        print("-" * 62)
         for cn in sorted(summary.per_city.keys()):
             s = summary.per_city[cn]
-            hr = s.get("hit_rate")
-            br = s.get("brier")
-            hr_s = f"{hr:.3f}" if hr is not None else "N/A"
-            br_s = f"{br:.4f}" if br is not None else "N/A"
-            print(f"{cn:20} {s['n_dates']:>6} {s['n_picks']:>6} {hr_s:>8} {br_s:>8}")
+            n = s["n_dates"]
+            if n < N_MIN:
+                insufficient_city = True
+                print(f"{cn:20} {n:>6} {s['n_picks']:>6} {'N/A*':>8} {'N/A*':>8} {'N/A*':>8}")
+            else:
+                hr = s.get("hit_rate")
+                br = s.get("brier")
+                bs = s.get("bss")
+                hr_s = f"{hr:.3f}" if hr is not None else "N/A"
+                br_s = f"{br:.4f}" if br is not None else "N/A"
+                bs_s = f"{bs:.4f}" if bs is not None else "N/A"
+                print(f"{cn:20} {n:>6} {s['n_picks']:>6} {hr_s:>8} {br_s:>8} {bs_s:>8}")
+        if insufficient_city:
+            print("  * INSUFFICIENT N (<5 settled dates)")
         print()
 
     print("AUTHORITY: APPROXIMATE AUDIT ONLY — not promotion-eligible")
@@ -286,6 +324,22 @@ def main():
         type=float,
         default=None,
         help="selection_coverage: override FDR alpha (default: settings edge.fdr_alpha)",
+    )
+    parser.add_argument(
+        "--kelly-multiplier",
+        type=float,
+        default=0.5,
+        help="selection_coverage: Kelly multiplier (recorded in limitations; unused in coverage scoring)",
+    )
+    parser.add_argument(
+        "--override-platt",
+        action="store_true",
+        help="selection_coverage: skip Platt calibration; use p_raw directly",
+    )
+    parser.add_argument(
+        "--no-ddd",
+        action="store_true",
+        help="selection_coverage: disable DDD v2 gate (gate is off by default; flag is a no-op reserved for future use)",
     )
     parser.add_argument("--start", required=True, help="Start date (YYYY-MM-DD)")
     parser.add_argument("--end", required=True, help="End date (YYYY-MM-DD)")
@@ -333,7 +387,9 @@ def main():
             end_date=args.end,
             temperature_metric=args.temperature_metric,
             fdr_alpha=fdr_alpha,
+            kelly_multiplier=args.kelly_multiplier,
             p_market_source=args.p_market,
+            override_platt=args.override_platt,
         )
         _print_selection_coverage_report(summary)
         return

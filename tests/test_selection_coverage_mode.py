@@ -381,6 +381,97 @@ class TestT5AsiaStratification:
 
 
 # ---------------------------------------------------------------------------
+# T6 — lead-day bucket reporting
+# ---------------------------------------------------------------------------
+
+class TestT6LeadDayBuckets:
+    """T6: by_lead_day present in summary with correct bucket keys and counts."""
+
+    def test_lead_day_buckets_present(self):
+        """summary.limitations.selection_coverage.by_lead_day has all required keys."""
+        from src.engine.replay_selection_coverage import run_selection_coverage
+
+        conn = _make_in_memory_db([])
+        city_name = "Amsterdam"
+        p_raw = [0.10, 0.70, 0.20]
+        labels = _REAL_LABELS[:len(p_raw)]
+
+        # Insert two snapshots with different lead_hours so they land in different buckets:
+        # snapshot 3001: lead_hours=48 -> lead_days=2.0 -> bucket "2"
+        # snapshot 3002: lead_hours=96 -> lead_days=4.0 -> bucket "4-5"
+        for snap_id, target_date, lead_hours in [
+            (3001, "2025-07-01", 48.0),
+            (3002, "2025-07-02", 96.0),
+        ]:
+            _insert_snapshot(conn, city_name, target_date, snap_id, p_raw, lead_hours=lead_hours)
+            for rl in labels:
+                _insert_calibration_pair(conn, city_name, target_date, rl, 0.33, 0)
+                _insert_market_event(conn, city_name, target_date, rl)
+            _insert_settlement(conn, city_name, target_date, 22.0, labels[1])
+        conn.commit()
+
+        with patch("src.engine.replay_selection_coverage.get_trade_connection_with_world", return_value=conn), \
+             patch("src.engine.replay_selection_coverage.get_backtest_connection") as mock_bc, \
+             patch("src.engine.replay_selection_coverage.init_backtest_schema"):
+            mock_bc.return_value = MagicMock()
+
+            summary = run_selection_coverage(
+                "2025-07-01", "2025-07-02",
+                temperature_metric="high",
+                fdr_alpha=0.10,
+                kelly_multiplier=0.5,
+                p_market_source="uniform",
+                override_platt=False,
+            )
+
+        sc = summary.limitations.get("selection_coverage") or {}
+        by_lead = sc.get("by_lead_day")
+        assert by_lead is not None, "by_lead_day must be present in selection_coverage limitations"
+
+        # All required bucket keys must be present
+        for bkt in ["1", "2", "3", "4-5", "6-7", "8+"]:
+            assert bkt in by_lead, f"bucket '{bkt}' missing from by_lead_day"
+
+        # Each bucket entry must have n, hit_rate, brier, bss keys
+        for bkt, g in by_lead.items():
+            assert "n" in g, f"bucket {bkt!r} missing 'n'"
+            assert "hit_rate" in g, f"bucket {bkt!r} missing 'hit_rate'"
+            assert "brier" in g, f"bucket {bkt!r} missing 'brier'"
+            assert "bss" in g, f"bucket {bkt!r} missing 'bss'"
+
+        # The two snapshots should land in non-overlapping buckets with n>0
+        bucket_2 = by_lead.get("2", {})
+        bucket_45 = by_lead.get("4-5", {})
+        assert bucket_2.get("n", 0) >= 1, "bucket '2' should have at least 1 snapshot (lead_hours=48)"
+        assert bucket_45.get("n", 0) >= 1, "bucket '4-5' should have at least 1 snapshot (lead_hours=96)"
+
+
+class TestFix2BssBinCountAware:
+    """FIX 2: BSS must use bin-count-aware uniform baseline, not hardcoded 0.24."""
+
+    def test_bss_bin_count_aware(self):
+        """_uniform_brier_baseline(3) != _uniform_brier_baseline(5); BSS reflects actual n_bins."""
+        from src.engine.replay_selection_coverage import _uniform_brier_baseline, _bss_for_snapshot
+
+        # For n=5: clim = (1/5)*(4/5)^2 + (4/5)*(1/5)^2 = 0.128 + 0.032 = 0.16
+        clim5 = _uniform_brier_baseline(5)
+        assert abs(clim5 - 0.16) < 1e-9, f"clim_brier(5) should be 0.16, got {clim5}"
+
+        # For n=3: clim = (1/3)*(2/3)^2 + (2/3)*(1/3)^2 = 4/27 + 2/27 = 6/27 ≈ 0.2222
+        clim3 = _uniform_brier_baseline(3)
+        assert abs(clim3 - 6.0 / 27.0) < 1e-9, f"clim_brier(3) should be ~0.2222, got {clim3}"
+
+        # Same raw Brier yields different BSS for different bin counts
+        raw_brier = 0.1
+        bss5 = _bss_for_snapshot(raw_brier, 5)
+        bss3 = _bss_for_snapshot(raw_brier, 3)
+        assert bss5 != bss3, "BSS must differ for different bin counts with same raw Brier"
+        # BSS5 = 1 - 0.1/0.16 = -0.375; BSS3 = 1 - 0.1/(6/27) ≈ -0.45
+        assert abs(bss5 - (1.0 - raw_brier / clim5)) < 1e-9
+        assert abs(bss3 - (1.0 - raw_brier / clim3)) < 1e-9
+
+
+# ---------------------------------------------------------------------------
 # T7 — no world.db writes from selection_coverage
 # ---------------------------------------------------------------------------
 
