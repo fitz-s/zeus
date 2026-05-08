@@ -783,7 +783,10 @@ class TestRefitPlattV2LowMetricIsolation:
                 authority TEXT DEFAULT 'VERIFIED',
                 cluster TEXT,
                 season TEXT,
-                decision_group_id TEXT
+                decision_group_id TEXT,
+                cycle TEXT DEFAULT '00',
+                source_id TEXT DEFAULT 'tigge_mars',
+                horizon_profile TEXT DEFAULT 'full'
             );
             CREATE TABLE platt_models_v2 (
                 model_id TEXT PRIMARY KEY,

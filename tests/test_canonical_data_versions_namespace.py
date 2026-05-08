@@ -32,8 +32,12 @@ def test_ensemble_set_contains_metric_tracks_and_source_variants():
     assert mod.ECMWF_OPENDATA_LOW_DATA_VERSION in ensemble
     assert mod.TIGGE_LOW_CONTRACT_WINDOW_DATA_VERSION in ensemble
     assert mod.ECMWF_OPENDATA_LOW_CONTRACT_WINDOW_DATA_VERSION in ensemble
-    # 2026-05-07: +1 legacy entry for mn2t6 contract-window historical rows
-    assert len(ensemble) == 7
+    # 2026-05-08: frozenset has 9 entries — 6 named constants + 3 legacy
+    # bridge entries (_ECMWF_OPENDATA_HIGH_DATA_VERSION_LEGACY,
+    # _ECMWF_OPENDATA_LOW_DATA_VERSION_LEGACY,
+    # _ECMWF_OPENDATA_LOW_CONTRACT_WINDOW_DATA_VERSION_LEGACY) added for
+    # historical row compatibility per PR #85.
+    assert len(ensemble) == 9
 
 
 def test_deprecation_alias_is_identity():
