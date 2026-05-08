@@ -45,14 +45,25 @@ def test_step_hours_max_is_282() -> None:
     )
 
 
-def test_step_hours_stride_is_3h() -> None:
-    """All consecutive STEP_HOURS must differ by 3h (A1+3h authority)."""
+def test_step_hours_grid_structure() -> None:
+    """STEP_HOURS must match the published ENS step grid: 3h stride 3–144h, 6h stride 150–282h.
+
+    ECMWF Open Data enfo cf/pf publishes mx2t3/mn2t3 at:
+      0–144h by 3h, then 150–360h by 6h.
+    Requesting off-grid steps causes fetch failures (Codex P2, PR #94).
+    """
     steps = sorted(STEP_HOURS)
-    for i in range(1, len(steps)):
-        assert steps[i] - steps[i - 1] == 3, (
-            f"STEP_HOURS stride broken at index {i}: "
-            f"{steps[i-1]}h → {steps[i]}h (expected 3h step)"
-        )
+    # Partition at the grid boundary
+    low_part = [s for s in steps if s <= 144]
+    high_part = [s for s in steps if s >= 150]
+    # 3h segment: 3, 6, …, 144
+    assert low_part == list(range(3, 145, 3)), (
+        f"Expected 3h steps 3–144, got {low_part[:5]}…{low_part[-5:]}"
+    )
+    # 6h segment: 150, 156, …, 282
+    assert high_part == list(range(150, 283, 6)), (
+        f"Expected 6h steps 150–282, got {high_part[:5]}…{high_part[-5:]}"
+    )
 
 
 def test_step_hours_starts_at_3() -> None:

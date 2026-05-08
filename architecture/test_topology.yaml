@@ -245,6 +245,9 @@ test_trust_policy:
     tests/test_harvester_learning_authority.py: {created: "2026-05-05", last_used: "2026-05-05"}
     tests/test_final_sdk_envelope_persistence.py: {created: "2026-05-05", last_used: "2026-05-05"}
     tests/test_harvester_truth_writer_null_bin.py: {created: "2026-05-08", last_used: "2026-05-08"}
+    # fix/#134 — ECMWF Open Data STEP_HOURS D+10 horizon extension antibodies.
+    tests/test_ecmwf_open_data_step_hours.py: {created: "2026-05-08", last_used: "2026-05-08"}
+    tests/test_forecast_target_contract_horizon.py: {created: "2026-05-08", last_used: "2026-05-08"}
 
 categories:
   core_law_antibody:
@@ -318,6 +321,8 @@ categories:
     - tests/test_opendata_release_calendar_selection.py
     - tests/test_opendata_writes_v2_table.py
     - tests/test_opendata_future_target_contract.py
+    - tests/test_ecmwf_open_data_step_hours.py
+    - tests/test_forecast_target_contract_horizon.py
     - tests/test_readiness_state.py
     - tests/test_release_calendar.py
     - tests/test_job_run_schema.py
