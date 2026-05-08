@@ -7,6 +7,7 @@ Settlement truth = Polymarket settlement result (spec §1.3).
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import logging
 import os
@@ -1585,6 +1586,50 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
         CREATE INDEX IF NOT EXISTS idx_market_topology_status_expiry
             ON market_topology_state(status, expires_at);
 
+        CREATE TABLE IF NOT EXISTS source_contract_audit_events (
+            audit_id TEXT PRIMARY KEY,
+            checked_at_utc TEXT NOT NULL,
+            scan_authority TEXT NOT NULL CHECK (scan_authority IN (
+                'VERIFIED','FIXTURE','STALE_CACHE','EMPTY_FALLBACK','NEVER_FETCHED'
+            )),
+            report_status TEXT CHECK (report_status IS NULL OR report_status IN (
+                'OK','WARN','ALERT','DATA_UNAVAILABLE'
+            )),
+            severity TEXT NOT NULL CHECK (severity IN ('OK','WARN','ALERT','DATA_UNAVAILABLE')),
+            event_id TEXT,
+            slug TEXT,
+            title TEXT,
+            city TEXT,
+            target_date TEXT,
+            temperature_metric TEXT CHECK (temperature_metric IS NULL OR temperature_metric IN ('high','low')),
+            source_contract_status TEXT NOT NULL CHECK (source_contract_status IN (
+                'MATCH','MISSING','AMBIGUOUS','MISMATCH','UNSUPPORTED','UNKNOWN','QUARANTINED'
+            )),
+            source_contract_reason TEXT,
+            configured_source_family TEXT,
+            configured_station_id TEXT,
+            observed_source_family TEXT,
+            observed_station_id TEXT,
+            resolution_sources_json TEXT NOT NULL DEFAULT '[]',
+            source_contract_json TEXT NOT NULL DEFAULT '{}',
+            payload_hash TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_source_contract_audit_city_date
+            ON source_contract_audit_events(city, target_date, temperature_metric, checked_at_utc);
+        CREATE INDEX IF NOT EXISTS idx_source_contract_audit_status
+            ON source_contract_audit_events(source_contract_status, severity, checked_at_utc);
+        CREATE TRIGGER IF NOT EXISTS source_contract_audit_events_no_update
+        BEFORE UPDATE ON source_contract_audit_events
+        BEGIN
+          SELECT RAISE(ABORT, 'source_contract_audit_events is append-only');
+        END;
+        CREATE TRIGGER IF NOT EXISTS source_contract_audit_events_no_delete
+        BEFORE DELETE ON source_contract_audit_events
+        BEGIN
+          SELECT RAISE(ABORT, 'source_contract_audit_events is append-only');
+        END;
+
         -- Availability/outage fact log (observability — kernel §availability_fact)
         CREATE TABLE IF NOT EXISTS availability_fact (
             availability_id TEXT PRIMARY KEY,
@@ -2553,6 +2598,53 @@ _MARKET_TOPOLOGY_STATE_REQUIRED_COLUMNS = (
     "provenance_json",
     "recorded_at",
 )
+_SOURCE_CONTRACT_AUDIT_TABLES = ("source_contract_audit_events",)
+_SOURCE_CONTRACT_AUDIT_REQUIRED_COLUMNS = (
+    "audit_id",
+    "checked_at_utc",
+    "scan_authority",
+    "report_status",
+    "severity",
+    "event_id",
+    "slug",
+    "title",
+    "city",
+    "target_date",
+    "temperature_metric",
+    "source_contract_status",
+    "source_contract_reason",
+    "configured_source_family",
+    "configured_station_id",
+    "observed_source_family",
+    "observed_station_id",
+    "resolution_sources_json",
+    "source_contract_json",
+    "payload_hash",
+    "created_at",
+)
+_SOURCE_CONTRACT_AUDIT_AUTHORITIES = frozenset({
+    "VERIFIED",
+    "FIXTURE",
+    "STALE_CACHE",
+    "EMPTY_FALLBACK",
+    "NEVER_FETCHED",
+})
+_SOURCE_CONTRACT_AUDIT_SEVERITIES = frozenset({
+    "OK",
+    "WARN",
+    "ALERT",
+    "DATA_UNAVAILABLE",
+})
+_SOURCE_CONTRACT_AUDIT_REPORT_STATUSES = _SOURCE_CONTRACT_AUDIT_SEVERITIES
+_SOURCE_CONTRACT_AUDIT_STATUSES = frozenset({
+    "MATCH",
+    "MISSING",
+    "AMBIGUOUS",
+    "MISMATCH",
+    "UNSUPPORTED",
+    "UNKNOWN",
+    "QUARANTINED",
+})
 _SETTLEMENT_V2_COLUMNS = (
     "city",
     "target_date",
@@ -3175,6 +3267,169 @@ def log_market_source_contract_topology_facts(
     return {
         "status": status,
         "tables": _MARKET_SOURCE_CONTRACT_TOPOLOGY_TABLES,
+        **counts,
+    }
+
+
+def append_source_contract_audit_events(
+    conn: sqlite3.Connection | None,
+    *,
+    report: dict,
+) -> dict:
+    """Append source-contract watch evidence without affecting eligibility."""
+    if conn is None:
+        return {"status": "skipped_no_connection", "tables": _SOURCE_CONTRACT_AUDIT_TABLES}
+    if not isinstance(report, dict):
+        return {"status": "refused_invalid_report", "tables": _SOURCE_CONTRACT_AUDIT_TABLES}
+
+    missing_tables = [
+        table for table in _SOURCE_CONTRACT_AUDIT_TABLES if not _table_exists(conn, table)
+    ]
+    if missing_tables:
+        return {
+            "status": "skipped_missing_tables",
+            "tables": _SOURCE_CONTRACT_AUDIT_TABLES,
+            "missing_tables": tuple(missing_tables),
+        }
+
+    missing_columns = tuple(
+        sorted(
+            set(_SOURCE_CONTRACT_AUDIT_REQUIRED_COLUMNS)
+            - _table_columns(conn, "source_contract_audit_events")
+        )
+    )
+    if missing_columns:
+        return {
+            "status": "skipped_invalid_schema",
+            "tables": _SOURCE_CONTRACT_AUDIT_TABLES,
+            "missing_columns": {"source_contract_audit_events": missing_columns},
+        }
+
+    checked_at_utc = _forward_clean_str(report.get("checked_at_utc"))
+    scan_authority = _forward_clean_str(report.get("authority"))
+    if checked_at_utc is None or scan_authority is None:
+        return {"status": "refused_missing_scan_metadata", "tables": _SOURCE_CONTRACT_AUDIT_TABLES}
+    if scan_authority not in _SOURCE_CONTRACT_AUDIT_AUTHORITIES:
+        return {
+            "status": "refused_invalid_scan_authority",
+            "tables": _SOURCE_CONTRACT_AUDIT_TABLES,
+            "scan_authority": scan_authority,
+        }
+    events = report.get("events") or []
+    if not isinstance(events, list):
+        return {"status": "refused_invalid_report", "tables": _SOURCE_CONTRACT_AUDIT_TABLES}
+
+    counts = {
+        "audit_rows_inserted": 0,
+        "audit_rows_unchanged": 0,
+        "events_skipped_missing_facts": 0,
+        "events_refused_invalid_facts": 0,
+    }
+    report_status = _forward_clean_str(report.get("status"))
+    if report_status is not None and report_status not in _SOURCE_CONTRACT_AUDIT_REPORT_STATUSES:
+        return {
+            "status": "refused_invalid_report_status",
+            "tables": _SOURCE_CONTRACT_AUDIT_TABLES,
+            "report_status": report_status,
+        }
+
+    for event in events:
+        if not isinstance(event, dict):
+            counts["events_skipped_missing_facts"] += 1
+            continue
+        source_contract = event.get("source_contract") or {}
+        if not isinstance(source_contract, dict):
+            counts["events_skipped_missing_facts"] += 1
+            continue
+        event_id = _forward_clean_str(event.get("event_id") or event.get("slug"))
+        source_contract_status = _forward_clean_str(source_contract.get("status")) or "UNKNOWN"
+        severity = _forward_clean_str(event.get("severity")) or "WARN"
+        if event_id is None:
+            counts["events_skipped_missing_facts"] += 1
+            continue
+        if severity not in _SOURCE_CONTRACT_AUDIT_SEVERITIES:
+            counts["events_refused_invalid_facts"] += 1
+            continue
+        if source_contract_status not in _SOURCE_CONTRACT_AUDIT_STATUSES:
+            counts["events_refused_invalid_facts"] += 1
+            continue
+
+        resolution_sources = list(source_contract.get("resolution_sources") or [])
+        resolution_sources_json = json.dumps(
+            resolution_sources,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        )
+        source_contract_json = json.dumps(
+            source_contract,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        )
+        payload = {
+            "checked_at_utc": checked_at_utc,
+            "scan_authority": scan_authority,
+            "report_status": report_status,
+            "event_id": event_id,
+            "slug": _forward_clean_str(event.get("slug")),
+            "city": _forward_clean_str(event.get("city")),
+            "target_date": _forward_clean_str(event.get("target_date")),
+            "temperature_metric": _forward_metric(event.get("temperature_metric")),
+            "severity": severity,
+            "source_contract": source_contract,
+        }
+        payload_hash = hashlib.sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+        ).hexdigest()
+        audit_id = hashlib.sha256(
+            f"{checked_at_utc}|{event_id}|{payload_hash}".encode("utf-8")
+        ).hexdigest()
+        cursor = conn.execute(
+            """
+            INSERT OR IGNORE INTO source_contract_audit_events (
+                audit_id, checked_at_utc, scan_authority, report_status, severity,
+                event_id, slug, title, city, target_date, temperature_metric,
+                source_contract_status, source_contract_reason,
+                configured_source_family, configured_station_id,
+                observed_source_family, observed_station_id,
+                resolution_sources_json, source_contract_json, payload_hash
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                audit_id,
+                checked_at_utc,
+                scan_authority,
+                report_status,
+                severity,
+                event_id,
+                _forward_clean_str(event.get("slug")),
+                _forward_clean_str(event.get("title")),
+                _forward_clean_str(event.get("city")),
+                _forward_clean_str(event.get("target_date")),
+                _forward_metric(event.get("temperature_metric")),
+                source_contract_status,
+                _forward_clean_str(source_contract.get("reason")),
+                _forward_clean_str(source_contract.get("configured_source_family")),
+                _forward_clean_str(source_contract.get("configured_station_id")),
+                _forward_clean_str(source_contract.get("source_family")),
+                _forward_clean_str(source_contract.get("station_id")),
+                resolution_sources_json,
+                source_contract_json,
+                payload_hash,
+            ),
+        )
+        if cursor.rowcount:
+            counts["audit_rows_inserted"] += 1
+        else:
+            counts["audit_rows_unchanged"] += 1
+
+    status = "written" if counts["audit_rows_inserted"] else "skipped_no_valid_rows"
+    if counts["audit_rows_unchanged"] and not counts["audit_rows_inserted"]:
+        status = "unchanged"
+    return {
+        "status": status,
+        "tables": _SOURCE_CONTRACT_AUDIT_TABLES,
         **counts,
     }
 

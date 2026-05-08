@@ -158,3 +158,52 @@ Source-conversion fixture follow-up:
 - `TestSourceContractGate::test_pending_source_conversion_blocks_config_only_reentry` was failing because the current `config/cities.json` has already converted Paris to LFPB and has no pending conversion entries.
 - The test now constructs its pending-conversion fixture explicitly instead of depending on live config history.
 - Full `tests/test_market_scanner_provenance.py`: 76 passed.
+
+## 2026-05-08 - S1 Current-Fact Slice Committed, Critic Found Audit Gap
+
+Commit:
+- `be50279a fix(topology): persist market source proof facts`.
+
+Critic verdict after commit: FAIL for phase closeout.
+
+Blocking findings:
+- MATCH/current source-proof facts now persist, but non-MATCH source-contract evidence still was not persisted.
+- `market_topology_state` is a current-state upsert surface, not point-in-time audit history.
+- Rejected Gamma events are dropped before the discovery runtime writer sees them, so non-MATCH evidence must be captured from the watch/report path instead of changing market eligibility.
+
+Design decision:
+- Keep `market_topology_state` for accepted MATCH current facts.
+- Add append-only `source_contract_audit_events` for watch-source-contract report facts.
+- Drive non-MATCH audit persistence from `scripts/watch_source_contract.py::analyze_events()` reports.
+- Do not alter `_parse_event()` market eligibility, executable discovery behavior, or production DB defaults.
+
+## 2026-05-08 - S1 Append-Only Source-Contract Audit Implemented
+
+Operator-go/dry-run/apply guard:
+- Operator-go came from the user's approval to continue fixing this branch after the current-fact commit and to use critic-grade phase evaluation before closeout.
+- Dry-run guard remains default behavior: `watch_source_contract.py` does not write audit facts unless `--audit-db-path PATH` is explicitly supplied.
+- Apply guard: audit writes require an explicit SQLite path and write only to that path; tests prove no DB file is created without the flag.
+- Rollback plan: audit persistence is append-only in the supplied DB path. Roll back by restoring/removing that explicit audit DB file from backup/snapshot; the code path does not mutate market eligibility, quarantine release state, or production DBs by default.
+
+Changes made:
+- Added source-contract audit routing phrases to `source contract auto conversion runtime`.
+- Regenerated `architecture/digest_profiles.py`.
+- Updated script manifest metadata for `--audit-db-path PATH`.
+- Added `source_contract_audit_events` with no-update/no-delete triggers in `src/state/db.py`.
+- Added `append_source_contract_audit_events(conn, report=...)` as an explicit-connection writer with no implicit default DB open and no implicit commit.
+- Added `--audit-db-path PATH` to `scripts/watch_source_contract.py`, wiring it to initialize schema and append audit facts only for the explicit path.
+- Added relationship tests proving MISMATCH watch reports append audit rows, duplicate scan writes are idempotent, later scans append a second row, UPDATE/DELETE are blocked, no default DB is opened, no audit DB file is created without the explicit flag, and discovery eligibility remains rejected for the same MISMATCH event.
+- Added validation so invalid audit authorities/severities/statuses are refused before insert instead of being inserted or hidden as duplicate `INSERT OR IGNORE` results.
+- Compact alert output now carries `audit_persistence` metadata when an explicit audit DB path is used.
+
+Verification:
+- `tests/test_market_scanner_provenance.py::TestSourceContractAuditPersistence`: 5 passed.
+- `tests/test_market_scanner_provenance.py tests/test_digest_profile_matching.py`: 199 passed.
+- `scripts/digest_profiles_export.py --check`: OK.
+- `python3 -m py_compile scripts/watch_source_contract.py src/state/db.py`: OK.
+- Topology navigation for `source contract audit facts append-only watch_source_contract persistence no production DB mutation without explicit audit DB path`: admitted under `source contract auto conversion runtime`, T4, with all touched files admitted.
+
+Closure evidence:
+- Final critic verdict for this S1 audit follow-up: PASS.
+- Residual noted risk: empty/zero-event scans create the explicit audit DB/schema but no scan-level row. This does not block the S1 scoped requirement to persist rejected/non-MATCH source-contract event evidence.
+- Committed in the branch as `fix(source): persist source contract audit facts`.

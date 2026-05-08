@@ -239,6 +239,24 @@ def test_source_contract_auto_conversion_routes_to_runtime_profile():
     assert "tests/test_market_scanner_provenance.py" in digest["admission"]["admitted_files"]
 
 
+def test_source_contract_audit_facts_routes_to_runtime_profile():
+    digest = build_digest(
+        "source contract audit facts append-only watch_source_contract persistence "
+        "no production DB mutation without explicit audit DB path",
+        [
+            "scripts/watch_source_contract.py",
+            "src/state/db.py",
+            "tests/test_market_scanner_provenance.py",
+        ],
+    )
+
+    assert digest["profile"] == "source contract auto conversion runtime"
+    assert digest["admission"]["status"] == "admitted"
+    assert "scripts/watch_source_contract.py" in digest["admission"]["admitted_files"]
+    assert "src/state/db.py" in digest["admission"]["admitted_files"]
+    assert "tests/test_market_scanner_provenance.py" in digest["admission"]["admitted_files"]
+
+
 def test_r3_u2_raw_provenance_routes_to_u2_profile_not_heartbeat():
     """U2 shares broad R3 packet docs paths with earlier phases; strong U2
     phrases must win over Z3's broad docs file-pattern hit so state/schema

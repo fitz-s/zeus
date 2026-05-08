@@ -44,6 +44,7 @@ from src.data.market_scanner import (
 )
 from src.state import db as state_db
 from src.state.db import (
+    append_source_contract_audit_events,
     log_executable_snapshot_market_price_linkage,
     log_forward_market_substrate,
     log_market_source_contract_topology_facts,
@@ -1035,7 +1036,6 @@ class TestSourceContractGate:
         assert pending["status"] == "pending_release"
         assert ms.is_city_source_quarantined("Paris", path=quarantine_path) is True
         assert ms.find_weather_markets(min_hours_to_resolution=0.0) == []
-
     def test_source_quarantine_release_requires_conversion_evidence_refs(self, tmp_path):
         quarantine_path = tmp_path / "source_contract_quarantine.json"
         ms.upsert_source_contract_quarantine(
@@ -2291,6 +2291,239 @@ class TestSourceContractGate:
 
         assert called["trade"] is True
         assert "_error" not in report
+
+
+class TestSourceContractAuditPersistence:
+    """Source-contract watch evidence is append-only and non-eligibility-changing."""
+
+    def test_source_contract_audit_appends_mismatch_without_changing_eligibility(
+        self, monkeypatch
+    ):
+        from scripts.watch_source_contract import analyze_events
+
+        event = _gamma_temperature_event(
+            title="Highest temperature in Paris on May 1?",
+            slug="highest-temperature-in-paris-on-may-1-2026",
+            question="Will the high temperature in Paris be 20°C or higher?",
+            resolution_source=(
+                "https://www.wunderground.com/history/daily/fr/"
+                "paris/LFPG"
+            ),
+        )
+        checked_at = datetime(2026, 5, 1, 16, 0, tzinfo=timezone.utc)
+        report = analyze_events([event], checked_at_utc=checked_at, authority="VERIFIED")
+        assert report["status"] == "ALERT"
+        assert report["events"][0]["source_contract"]["status"] == "MISMATCH"
+
+        conn = _make_market_topology_conn()
+        result = append_source_contract_audit_events(conn, report=report)
+
+        assert result["status"] == "written"
+        assert result["audit_rows_inserted"] == 1
+        row = conn.execute(
+            """
+            SELECT checked_at_utc, scan_authority, severity, source_contract_status,
+                   configured_station_id, observed_station_id, resolution_sources_json,
+                   source_contract_json
+            FROM source_contract_audit_events
+            """
+        ).fetchone()
+        assert row["checked_at_utc"] == checked_at.isoformat()
+        assert row["scan_authority"] == "VERIFIED"
+        assert row["severity"] == "ALERT"
+        assert row["source_contract_status"] == "MISMATCH"
+        assert row["configured_station_id"] == "LFPB"
+        assert row["observed_station_id"] == "LFPG"
+        assert json.loads(row["resolution_sources_json"]) == [
+            "https://www.wunderground.com/history/daily/fr/paris/LFPG"
+        ]
+        source_contract = json.loads(row["source_contract_json"])
+        assert source_contract["reason"] == "station 'LFPG' != configured 'LFPB'"
+        assert conn.execute("SELECT COUNT(*) FROM market_topology_state").fetchone()[0] == 0
+
+        monkeypatch.setattr(ms, "_get_active_events", lambda: [event])
+        assert ms.find_weather_markets(min_hours_to_resolution=0.0) == []
+
+    def test_source_contract_audit_is_append_only_per_scan(self):
+        from scripts.watch_source_contract import analyze_events
+
+        event = _gamma_temperature_event(
+            title="Highest temperature in Paris on May 1?",
+            slug="highest-temperature-in-paris-on-may-1-2026",
+            question="Will the high temperature in Paris be 20°C or higher?",
+            resolution_source=(
+                "https://www.wunderground.com/history/daily/fr/"
+                "paris/LFPG"
+            ),
+        )
+        conn = _make_market_topology_conn()
+        first = analyze_events(
+            [event],
+            checked_at_utc=datetime(2026, 5, 1, 16, 0, tzinfo=timezone.utc),
+            authority="VERIFIED",
+        )
+        second = analyze_events(
+            [event],
+            checked_at_utc=datetime(2026, 5, 1, 17, 0, tzinfo=timezone.utc),
+            authority="VERIFIED",
+        )
+
+        assert append_source_contract_audit_events(conn, report=first)["audit_rows_inserted"] == 1
+        assert append_source_contract_audit_events(conn, report=first)["audit_rows_unchanged"] == 1
+        assert append_source_contract_audit_events(conn, report=second)["audit_rows_inserted"] == 1
+        assert conn.execute("SELECT COUNT(*) FROM source_contract_audit_events").fetchone()[0] == 2
+
+        with pytest.raises(sqlite3.DatabaseError):
+            conn.execute("UPDATE source_contract_audit_events SET severity = 'OK'")
+        with pytest.raises(sqlite3.DatabaseError):
+            conn.execute("DELETE FROM source_contract_audit_events")
+
+    def test_source_contract_audit_skips_missing_table_without_opening_default_db(
+        self, monkeypatch
+    ):
+        monkeypatch.setattr(
+            state_db,
+            "get_connection",
+            lambda *_a, **_kw: pytest.fail("audit writer must not open a default DB"),
+        )
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+
+        result = append_source_contract_audit_events(
+            conn,
+            report={
+                "status": "ALERT",
+                "checked_at_utc": "2026-05-01T16:00:00+00:00",
+                "authority": "VERIFIED",
+                "events": [],
+            },
+        )
+
+        assert result["status"] == "skipped_missing_tables"
+        assert result["missing_tables"] == ("source_contract_audit_events",)
+        assert conn.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table'"
+        ).fetchone()[0] == 0
+
+    def test_source_contract_audit_refuses_invalid_values(self):
+        from scripts.watch_source_contract import analyze_events
+
+        event = _gamma_temperature_event(
+            title="Highest temperature in Paris on May 1?",
+            slug="highest-temperature-in-paris-on-may-1-2026",
+            question="Will the high temperature in Paris be 20°C or higher?",
+            resolution_source=(
+                "https://www.wunderground.com/history/daily/fr/"
+                "paris/LFPG"
+            ),
+        )
+        report = analyze_events(
+            [event],
+            checked_at_utc=datetime(2026, 5, 1, 16, 0, tzinfo=timezone.utc),
+            authority="VERIFIED",
+        )
+        conn = _make_market_topology_conn()
+
+        invalid_authority = dict(report)
+        invalid_authority["authority"] = "BOGUS"
+        assert append_source_contract_audit_events(
+            conn, report=invalid_authority
+        )["status"] == "refused_invalid_scan_authority"
+
+        invalid_severity = dict(report)
+        invalid_severity["events"] = [dict(report["events"][0], severity="BOGUS")]
+        result = append_source_contract_audit_events(conn, report=invalid_severity)
+        assert result["status"] == "skipped_no_valid_rows"
+        assert result["events_refused_invalid_facts"] == 1
+        assert result["audit_rows_unchanged"] == 0
+        assert conn.execute("SELECT COUNT(*) FROM source_contract_audit_events").fetchone()[0] == 0
+
+        invalid_report_status = dict(report)
+        invalid_report_status["status"] = "BOGUS"
+        assert append_source_contract_audit_events(
+            conn, report=invalid_report_status
+        )["status"] == "refused_invalid_report_status"
+
+    def test_watch_source_contract_persists_audit_only_with_explicit_db_path(
+        self, tmp_path, capsys
+    ):
+        from scripts.watch_source_contract import main as watch_source_contract_main
+
+        event = _gamma_temperature_event(
+            title="Highest temperature in Paris on May 1?",
+            slug="highest-temperature-in-paris-on-may-1-2026",
+            question="Will the high temperature in Paris be 20°C or higher?",
+            resolution_source=(
+                "https://www.wunderground.com/history/daily/fr/"
+                "paris/LFPG"
+            ),
+        )
+        fixture_path = tmp_path / "gamma_events.json"
+        fixture_path.write_text(json.dumps([event]), encoding="utf-8")
+        audit_db_path = tmp_path / "source_contract_audit.db"
+
+        exit_code = watch_source_contract_main(
+            [
+                "--fixture",
+                str(fixture_path),
+                "--json",
+                "--report-only",
+                "--fail-on",
+                "DATA_UNAVAILABLE",
+            ]
+        )
+        assert exit_code == 0
+        assert audit_db_path.exists() is False
+        capsys.readouterr()
+
+        exit_code = watch_source_contract_main(
+            [
+                "--fixture",
+                str(fixture_path),
+                "--json",
+                "--compact-alerts",
+                "--report-only",
+                "--audit-db-path",
+                str(audit_db_path),
+                "--fail-on",
+                "DATA_UNAVAILABLE",
+            ]
+        )
+
+        assert exit_code == 0
+        output = json.loads(capsys.readouterr().out)
+        assert output["audit_persistence"]["status"] == "written"
+        conn = sqlite3.connect(audit_db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            row = conn.execute(
+                """
+                SELECT scan_authority, source_contract_status, observed_station_id
+                FROM source_contract_audit_events
+                """
+            ).fetchone()
+        finally:
+            conn.close()
+        assert row["scan_authority"] == "FIXTURE"
+        assert row["source_contract_status"] == "MISMATCH"
+        assert row["observed_station_id"] == "LFPG"
+
+        text_audit_db_path = tmp_path / "source_contract_audit_text.db"
+        exit_code = watch_source_contract_main(
+            [
+                "--fixture",
+                str(fixture_path),
+                "--compact-alerts",
+                "--report-only",
+                "--audit-db-path",
+                str(text_audit_db_path),
+                "--fail-on",
+                "DATA_UNAVAILABLE",
+            ]
+        )
+        assert exit_code == 0
+        text_output = capsys.readouterr().out
+        assert "audit: status=written inserted=1 unchanged=0" in text_output
 
 
 class TestExecutableConditionIdsForUserChannelWS:

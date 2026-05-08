@@ -24,6 +24,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src.data import market_scanner as ms  # noqa: E402
+from src.state import db as state_db  # noqa: E402
 
 
 SEVERITY_RANK = {
@@ -277,6 +278,7 @@ def build_compact_alert_report(
             "actions": quarantine_actions,
             "mode": "read_only_no_write" if report_only else "write_on_alert",
         },
+        "audit_persistence": report.get("audit_persistence"),
         "model_reporting_contract": [
             "Only alert_events are ALERT-affected market subjects.",
             "Do not infer affected cities from summary counts, event ordering, or truncated tail text.",
@@ -526,6 +528,21 @@ def fetch_active_events() -> tuple[list[dict[str, Any]], str]:
     return list(snapshot.events), snapshot.authority
 
 
+def persist_audit_report(
+    report: dict[str, Any], *, audit_db_path: Path | None
+) -> dict[str, Any] | None:
+    if audit_db_path is None:
+        return None
+    conn = state_db.get_connection(audit_db_path, write_class="bulk")
+    try:
+        state_db.init_schema(conn)
+        result = state_db.append_source_contract_audit_events(conn, report=report)
+        conn.commit()
+        return {**result, "db_path": str(audit_db_path)}
+    finally:
+        conn.close()
+
+
 def exit_code_for_report(report: dict[str, Any], *, fail_on: str) -> int:
     status = str(report.get("status") or "DATA_UNAVAILABLE")
     if SEVERITY_RANK[status] < SEVERITY_RANK[fail_on]:
@@ -582,6 +599,15 @@ def render_compact_alert_text(report: dict[str, Any]) -> str:
         "quarantine: "
         f"mode={quarantine.get('mode')} written={quarantine.get('written')}"
     )
+    audit_persistence = report.get("audit_persistence") or {}
+    if audit_persistence:
+        lines.append(
+            "audit: "
+            f"status={audit_persistence.get('status')} "
+            f"inserted={audit_persistence.get('audit_rows_inserted')} "
+            f"unchanged={audit_persistence.get('audit_rows_unchanged')} "
+            f"db_path={audit_persistence.get('db_path')}"
+        )
     for event in report.get("alert_events", []):
         contract = event.get("source_contract") or {}
         lines.append(
@@ -626,6 +652,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--quarantine-path",
         type=Path,
         help="Override source-contract quarantine state path",
+    )
+    parser.add_argument(
+        "--audit-db-path",
+        type=Path,
+        help="Explicit SQLite DB path for append-only source-contract audit facts",
     )
     parser.add_argument(
         "--release-city",
@@ -723,6 +754,9 @@ def main(argv: list[str] | None = None) -> int:
                 "next_actions": ["Do not rely on source monitor output until Gamma fetch recovers."],
                 "quarantine_actions": [],
             }
+            audit_result = persist_audit_report(report, audit_db_path=args.audit_db_path)
+            if audit_result is not None:
+                report["audit_persistence"] = audit_result
             output_report = (
                 build_compact_alert_report(report, report_only=args.report_only)
                 if args.compact_alerts
@@ -750,6 +784,9 @@ def main(argv: list[str] | None = None) -> int:
         if args.report_only
         else apply_source_quarantines(report, quarantine_path=args.quarantine_path)
     )
+    audit_result = persist_audit_report(report, audit_db_path=args.audit_db_path)
+    if audit_result is not None:
+        report["audit_persistence"] = audit_result
     output_report = (
         build_compact_alert_report(report, report_only=args.report_only)
         if args.compact_alerts

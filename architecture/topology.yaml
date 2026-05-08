@@ -986,6 +986,10 @@ digest_profiles:
         - "source_contract_auto_convert"
         - "source conversion cron"
         - "settlement source transition controller"
+        - "source contract audit facts"
+        - "source-contract audit facts"
+        - "source_contract audit events"
+        - "source contract audit persistence"
       weak_terms:
         - "source contract"
         - "settlement source"
@@ -993,6 +997,8 @@ digest_profiles:
         - "cron"
         - "discord"
         - "date scope"
+        - "audit facts"
+        - "audit events"
       negative_phrases:
         - "live readiness"
         - "live_readiness_check"
@@ -1002,12 +1008,18 @@ digest_profiles:
     semantic_file_patterns:
       - "scripts/source_contract_auto_convert.py"
       - "docs/archives/packets/task_2026-04-30_source_auto_conversion/**"
+      - "scripts/watch_source_contract.py"
+      - "src/state/db.py"
     match:
       - "source contract auto conversion"
       - "source-contract auto-conversion"
       - "source_contract_auto_convert"
       - "source conversion cron"
       - "settlement source transition controller"
+      - "source contract audit facts"
+      - "source-contract audit facts"
+      - "source_contract audit events"
+      - "source contract audit persistence"
     required_law:
       - "Source auto-conversion defaults to quarantine/plan/dry-run; Phase B may mutate config/cities.json and scoped world DB truth only under explicit --execute-apply, cron lock, same-provider WU proof, backup/DB path evidence, and complete release evidence refs."
       - "Same-provider WU station changes require deterministic thresholds and singular observed/configured station proof before any auto-confirmed plan."
@@ -1027,6 +1039,7 @@ digest_profiles:
       - "scripts/rebuild_calibration_pairs_v2.py"
       - "scripts/refit_platt_v2.py"
       - "src/data/market_scanner.py"
+      - "src/state/db.py"
       - "src/config.py"
       - "config/cities.json"
       - "tests/test_market_scanner_provenance.py"
