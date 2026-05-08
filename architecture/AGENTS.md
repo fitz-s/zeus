@@ -78,6 +78,7 @@ Changes here are architecture or governance changes, never “just docs.”
 | `scope_schema.json` | JSON Schema for Zeus packet scope.yaml sidecar; machine-read by zpkt and pre-commit hook |
 | `digest_profiles.py` | Auto-generated digest profiles for topology_doctor — DO NOT EDIT BY HAND; regenerated from topology.yaml |
 | `paris_station_resolution_2026-05-01.yaml` | Operator decision 2026-05-01: Paris Polymarket settlement station is LFPB (not LFPG) |
+| `data_sources_registry_2026_05_08.yaml` | BINDING authoritative registry of all 12 external data sources Zeus consumes (forecast, observation, settlement, market); created 2026-05-08; includes [VERIFIED]/[INFERRED] tags, forbidden patterns FP-01..FP-10, and cross-references to all binding architecture docs |
 
 ## Subdirectory navigation
 
