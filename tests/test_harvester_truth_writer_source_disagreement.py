@@ -89,20 +89,6 @@ def _make_city_f() -> City:
     )
 
 
-def _make_city_c() -> City:
-    return City(
-        name="London",
-        lat=51.5074,
-        lon=-0.1278,
-        timezone="Europe/London",
-        settlement_unit="C",
-        cluster="London",
-        wu_station="EGLL",
-        country_code="GB",
-        settlement_source_type="wu_icao",
-    )
-
-
 def _obs(val: float, unit: str = "F") -> dict:
     return {
         "id": 1,

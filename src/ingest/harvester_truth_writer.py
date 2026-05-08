@@ -385,7 +385,22 @@ def _write_settlement_truth(
                         effective_bin_lo if effective_bin_lo is not None else 0.0,
                         effective_bin_hi if effective_bin_hi is not None else 0.0,
                     )
-                if effective_bin_lo is not None and effective_bin_hi is not None:
+                # Fix #264: Polymarket C bins are INTEGER. After F->C conversion
+                # bounds are floats (e.g. 48F -> 8.888C). Snap via WMO half-up so
+                # containment operates on integers. Closed bin: obs in {lo_int, hi_int}.
+                # Open-shoulder: integer inequality (obs <= hi_int or obs >= lo_int).
+                if bin_unit_converted:
+                    if effective_bin_lo is not None:
+                        effective_bin_lo = math.floor(effective_bin_lo + 0.5)
+                    if effective_bin_hi is not None:
+                        effective_bin_hi = math.floor(effective_bin_hi + 0.5)
+                    if effective_bin_lo is not None and effective_bin_hi is not None:
+                        contained = rounded in {effective_bin_lo, effective_bin_hi}
+                    elif effective_bin_lo is None and effective_bin_hi is not None:
+                        contained = rounded <= effective_bin_hi
+                    elif effective_bin_hi is None and effective_bin_lo is not None:
+                        contained = rounded >= effective_bin_lo
+                elif effective_bin_lo is not None and effective_bin_hi is not None:
                     contained = effective_bin_lo <= rounded <= effective_bin_hi
                 elif effective_bin_lo is None and effective_bin_hi is not None:
                     contained = rounded <= effective_bin_hi

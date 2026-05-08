@@ -93,8 +93,7 @@ def _canonical_bin_label(lo: Optional[float], hi: Optional[float], unit: str) ->
 
 
 def _wmo_half_up(val: float) -> float:
-    import numpy as np
-    return float(np.floor(val + 0.5))
+    return float(math.floor(val + 0.5))
 
 
 def _containment_check(
@@ -218,13 +217,32 @@ def _process_row(row: dict) -> Optional[dict]:
         )
 
     rounded = _wmo_half_up(float(settlement_value))
-    contained = _containment_check(rounded, effective_lo, effective_hi)
+
+    # Fix #264: Polymarket C bins are INTEGER. After F->C conversion bounds are
+    # floats (e.g. 48F -> 8.888C). Snap both edges via WMO half-up so containment
+    # operates on integers. Closed bin: obs in {lo_int, hi_int}. Open-shoulder: inequality.
+    if bin_unit_converted:
+        if effective_lo is not None:
+            effective_lo = _wmo_half_up(effective_lo)
+        if effective_hi is not None:
+            effective_hi = _wmo_half_up(effective_hi)
+        if effective_lo is not None and effective_hi is not None:
+            contained = rounded in {effective_lo, effective_hi}
+        elif effective_lo is None and effective_hi is not None:
+            contained = rounded <= effective_hi
+        elif effective_hi is None and effective_lo is not None:
+            contained = rounded >= effective_lo
+        else:
+            contained = False
+    else:
+        contained = _containment_check(rounded, effective_lo, effective_hi)
 
     return {
         "settlement_id": row["settlement_id"],
         "city": row["city"],
         "target_date": row["target_date"],
         "temperature_metric": row["temperature_metric"],
+        "market_slug": row.get("market_slug"),
         "contained": contained,
         "bin_unit_converted": bin_unit_converted,
         "pm_bin_unit": pm_bin_unit,
@@ -251,19 +269,41 @@ def _apply_update(conn, result: dict, backfilled_at: str) -> None:
     prov["backfilled_via"] = BACKFILL_TAG
     prov["backfilled_at"] = backfilled_at
 
+    prov_json = json.dumps(prov, sort_keys=True, default=str)
+
+    # Primary: canonical settlements_v2 (INV-17 authority source)
     conn.execute("""
         UPDATE settlements_v2
         SET authority = 'VERIFIED',
             winning_bin = ?,
             provenance_json = ?
         WHERE settlement_id = ?
-    """, (
-        result["winning_bin"],
-        json.dumps(prov, sort_keys=True, default=str),
-        result["settlement_id"],
-    ))
+    """, (result["winning_bin"], prov_json, result["settlement_id"]))
+
+    # Derived: legacy settlements (harvester_pnl_resolver reads FROM settlements
+    # WHERE authority='VERIFIED' -- must stay in sync, fix P1)
+    city = result["city"]
+    target_date = result["target_date"]
+    market_slug = result.get("market_slug")
+    if market_slug:
+        conn.execute("""
+            UPDATE settlements
+            SET authority = 'VERIFIED',
+                winning_bin = ?,
+                provenance_json = ?
+            WHERE city = ? AND target_date = ? AND market_slug = ?
+        """, (result["winning_bin"], prov_json, city, target_date, market_slug))
+    else:
+        conn.execute("""
+            UPDATE settlements
+            SET authority = 'VERIFIED',
+                winning_bin = ?,
+                provenance_json = ?
+            WHERE city = ? AND target_date = ?
+        """, (result["winning_bin"], prov_json, city, target_date))
+
     logger.info(
-        "  UPDATED %s %s %s → VERIFIED winning_bin=%s (bin_converted=%s)",
+        "  UPDATED %s %s %s -> VERIFIED winning_bin=%s (bin_converted=%s)",
         result["city"], result["target_date"], result["temperature_metric"],
         result["winning_bin"], result["bin_unit_converted"],
     )
