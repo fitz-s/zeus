@@ -314,6 +314,157 @@ def _run_advisory_check_pr_create_loc_accumulation(
     return _BLOCK_SENTINEL
 
 
+def _run_advisory_check_pre_merge_comment_check(
+    payload: dict[str, Any],
+) -> str | None:
+    """BLOCKING on `gh pr merge <PR#>` when:
+    - PR age < 600s (auto-reviewers haven't had time to fire)
+    - Unresolved Codex P0/P1 review thread exists
+    - Any review state == CHANGES_REQUESTED (and not dismissed)
+    Bypass: ZEUS_PR_MERGE_FORCE=1 -> emit warning and allow.
+    ADVISORY (not blocking) for unresolved Codex P2 threads.
+    COMMENTED state reviews never block (Copilot summary posts).
+    """
+    command = _command_from_payload(payload)
+    if not command:
+        return None
+
+    import re
+    m = re.search(r"gh\s+pr\s+merge\s+(\d+)", command)
+    if not m:
+        return None
+
+    pr_num = m.group(1)
+    bypass_active = os.environ.get("ZEUS_PR_MERGE_FORCE", "").strip() == "1"
+
+    block_reasons: list[str] = []
+    advisory_notes: list[str] = []
+    owner: str = ""
+    repo_name: str = ""
+
+    # -- PR age gate ----------------------------------------------------------
+    try:
+        pr_view = subprocess.run(
+            ["gh", "pr", "view", pr_num, "--json", "createdAt"],
+            capture_output=True, text=True, timeout=15, cwd=REPO_ROOT,
+        )
+        if pr_view.returncode == 0:
+            import json as _json
+            from datetime import datetime as _dt, timezone as _tz
+            pr_data = _json.loads(pr_view.stdout)
+            created_at_str = pr_data.get("createdAt", "")
+            if created_at_str:
+                created_at = _dt.fromisoformat(created_at_str.replace("Z", "+00:00"))
+                pr_age_s = (_dt.now(_tz.utc) - created_at).total_seconds()
+                if pr_age_s < 600:
+                    block_reasons.append(
+                        f"PR age {int(pr_age_s)}s < 600s; wait for auto-reviewers (5-8 min typical)"
+                    )
+    except (subprocess.TimeoutExpired, OSError, ValueError, KeyError):
+        pass
+
+    # -- GraphQL review threads (Codex P0/P1 = block, P2 = advisory) ----------
+    try:
+        repo_result = subprocess.run(
+            ["gh", "repo", "view", "--json", "owner,name"],
+            capture_output=True, text=True, timeout=10, cwd=REPO_ROOT,
+        )
+        if repo_result.returncode == 0:
+            import json as _json
+            repo_data = _json.loads(repo_result.stdout)
+            owner = repo_data.get("owner", {}).get("login", "")
+            repo_name = repo_data.get("name", "")
+
+            gql_query = (
+                "{ repository(owner: \"%s\", name: \"%s\") {"
+                " pullRequest(number: %s) {"
+                " reviewThreads(first: 100) { nodes { isResolved"
+                " comments(first: 5) { nodes { author { login } body } } } } } } }"
+            ) % (owner, repo_name, pr_num)
+
+            gql_result = subprocess.run(
+                ["gh", "api", "graphql", "-f", f"query={gql_query}"],
+                capture_output=True, text=True, timeout=20, cwd=REPO_ROOT,
+            )
+            if gql_result.returncode == 0:
+                gql_data = _json.loads(gql_result.stdout)
+                threads = (
+                    gql_data.get("data", {})
+                    .get("repository", {})
+                    .get("pullRequest", {})
+                    .get("reviewThreads", {})
+                    .get("nodes", [])
+                )
+                for thread in threads:
+                    if thread.get("isResolved"):
+                        continue
+                    for comment in thread.get("comments", {}).get("nodes", []):
+                        author = (comment.get("author") or {}).get("login", "")
+                        body = comment.get("body", "")
+                        if author != "chatgpt-codex-connector[bot]":
+                            continue
+                        if "P0 Badge" in body or "P1 Badge" in body:
+                            snippet = body[:120].replace("\n", " ")
+                            block_reasons.append(
+                                f"Unresolved Codex P0/P1 thread: {snippet!r}"
+                            )
+                        elif "P2 Badge" in body:
+                            snippet = body[:80].replace("\n", " ")
+                            advisory_notes.append(f"Unresolved Codex P2: {snippet!r}")
+    except (subprocess.TimeoutExpired, OSError, ValueError, KeyError):
+        pass
+
+    # -- CHANGES_REQUESTED reviews --------------------------------------------
+    try:
+        reviews_result = subprocess.run(
+            ["gh", "api", f"repos/{owner}/{repo_name}/pulls/{pr_num}/reviews",
+             "--jq", "[.[] | {state: .state, login: .user.login}]"],
+            capture_output=True, text=True, timeout=15, cwd=REPO_ROOT,
+        )
+        if reviews_result.returncode == 0:
+            import json as _json
+            reviews = _json.loads(reviews_result.stdout or "[]")
+            # Track latest state per reviewer
+            latest: dict[str, str] = {}
+            for rv in reviews:
+                login = rv.get("login", "")
+                state = rv.get("state", "")
+                if login and state:
+                    latest[login] = state
+            for login, state in latest.items():
+                if state == "CHANGES_REQUESTED":
+                    block_reasons.append(
+                        f"CHANGES_REQUESTED review from {login} (not dismissed)"
+                    )
+    except (subprocess.TimeoutExpired, OSError, ValueError):
+        pass
+
+    # -- Build response -------------------------------------------------------
+    if not block_reasons and not advisory_notes:
+        return None
+
+    if block_reasons:
+        block_text = (
+            f"BLOCKED: gh pr merge {pr_num} — merge gate failed:\n"
+            + "\n".join(f"  - {r}" for r in block_reasons)
+        )
+        if advisory_notes:
+            block_text += "\nAdvisory (non-blocking):\n" + "\n".join(
+                f"  - {n}" for n in advisory_notes
+            )
+        if bypass_active:
+            return (
+                f"WARNING (ZEUS_PR_MERGE_FORCE bypass active): merge gate would block:\n"
+                + "\n".join(f"  - {r}" for r in block_reasons)
+                + "\nMerge allowed via ZEUS_PR_MERGE_FORCE=1."
+            )
+        print(block_text, file=sys.stderr)
+        return _BLOCK_SENTINEL
+
+    # Only advisory notes, no block reasons
+    return "ADVISORY: " + "; ".join(advisory_notes)
+
+
 def _run_advisory_check_pr_open_monitor_arm(
     payload: dict[str, Any],
 ) -> str | None:
@@ -725,6 +876,7 @@ _ADVISORY_HANDLERS: dict[str, Any] = {
     "cotenant_staging_guard": _run_advisory_check_cotenant_staging_guard,
     "pre_checkout_uncommitted_overlap": _run_advisory_check_pre_checkout_uncommitted_overlap,
     "pr_create_loc_accumulation": _run_advisory_check_pr_create_loc_accumulation,
+    "pre_merge_comment_check": _run_advisory_check_pre_merge_comment_check,
     "pr_open_monitor_arm": _run_advisory_check_pr_open_monitor_arm,
     "phase_close_commit_required": _run_advisory_check_phase_close_commit_required,
     "pre_merge_contamination": _run_advisory_check_pre_merge_contamination,

@@ -75,6 +75,25 @@ hooks:
     telemetry:
       ritual_signal_emitted: true
 
+  - id: pre_merge_comment_check
+    event: PreToolUse
+    matcher: Bash
+    intent: >
+      BLOCKING on `gh pr merge <N>` when: PR age < 600s (auto-reviewers not yet fired);
+      unresolved Codex P0/P1 review thread exists; or any review state is
+      CHANGES_REQUESTED (non-dismissed). Codex P2 threads emit advisory only.
+      COMMENTED state reviews never block (Copilot always posts summaries).
+      Bypass: ZEUS_PR_MERGE_FORCE=1 degrades to warning-only.
+    blocked_when:
+      - pr_age_seconds < 600
+      - unresolved_codex_p0_or_p1_thread == true
+      - changes_requested_review_not_dismissed == true
+    severity: BLOCKING
+    bypass_env: ZEUS_PR_MERGE_FORCE
+    sunset_date: 2026-08-06
+    telemetry:
+      ritual_signal_emitted: true
+
   - id: pr_open_monitor_arm
     event: PostToolUse
     matcher: Bash
