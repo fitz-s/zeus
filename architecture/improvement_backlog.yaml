@@ -668,3 +668,22 @@ entries:
       read-only GRIB probes, diagnostic reports, transfer-policy gates, and
       external extractor/downloader dry-runs while explicitly blocking live
       calibration sharing until paired issue/member/step/bin evidence exists.
+
+  - id: P37-2026-05-07
+    title: "Object-invariance routes need cross-boundary state-truth admission"
+    raised_at: "2026-05-07"
+    raised_by: "object-meaning-invariance-wave26"
+    status: proposed
+    detail_doc: "docs/operations/task_2026-05-07_object_invariance_wave26/PLAN.md"
+    notes: >
+      Wave 26 repaired one state-truth object boundary across
+      `position_events.env`, lifecycle builders, portfolio materialization,
+      settlement readers, rescue audit compatibility, and relationship tests.
+      Topology repeatedly classified the work as generic plan-only/T3 and
+      rejected high-fanout but necessary files such as `src/state/db.py`,
+      `src/state/ledger.py`, `src/state/portfolio.py`, kernel SQL, and
+      cross-boundary tests. Future topology maintenance should add a
+      first-class object-invariance/state-truth route that admits producer,
+      persistence, loader, reader, and relationship-test slices together while
+      explicitly blocking live DB mutation, backfill, report publication,
+      settlement harvest, and venue/account side effects.

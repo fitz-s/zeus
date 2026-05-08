@@ -64,9 +64,17 @@ CREATE TABLE IF NOT EXISTS position_events (
     idempotency_key TEXT UNIQUE,
     venue_status TEXT,
     source_module TEXT NOT NULL,
+    env TEXT NOT NULL CHECK (env IN ('live','test','replay','backtest','shadow')),
     payload_json TEXT NOT NULL,
     UNIQUE(position_id, sequence_no)
 );
+
+CREATE TRIGGER IF NOT EXISTS trg_position_events_require_env
+BEFORE INSERT ON position_events
+WHEN NEW.env IS NULL OR TRIM(NEW.env) = ''
+BEGIN
+    SELECT RAISE(FAIL, 'position_events.env is required');
+END;
 
 CREATE TRIGGER IF NOT EXISTS trg_position_events_no_update
 BEFORE UPDATE ON position_events

@@ -1,9 +1,9 @@
 # Created: 2026-03-30
-# Last reused/audited: 2026-05-06
-# Lifecycle: created=2026-03-30; last_reviewed=2026-05-06; last_reused=2026-05-06
+# Last reused/audited: 2026-05-08
+# Lifecycle: created=2026-03-30; last_reviewed=2026-05-08; last_reused=2026-05-08
 # Purpose: Protect DB schema bootstrap contracts, daily revision-history DDL, and fact-smoke authority labels.
 # Reuse: Audit touched schema assertions and high-sensitivity skip metadata before closeout.
-# Authority basis: P2 4.4.A2 daily observation revision-history schema packet; Wave16 object-meaning fact-smoke authority repair.
+# Authority basis: P2 4.4.A2 daily observation revision-history schema packet; Wave16 object-meaning fact-smoke authority repair; PR90 latest-event env authority review fix.
 """Tests for database schema initialization."""
 
 import json
@@ -1013,6 +1013,7 @@ def test_query_p4_fact_smoke_summary_separates_verified_settlement_authority(tmp
         target_date="2026-04-01",
         bin_label="39-40°F",
         direction="buy_yes",
+        env="live",
         unit="F",
         size_usd=10.0,
         entry_price=0.40,
@@ -1295,6 +1296,74 @@ def test_position_current_views_do_not_promote_nonfinal_fill_like_execution_fact
     conn.close()
 
 
+def test_portfolio_loader_missing_projection_env_stays_unknown_until_builder_rejects(tmp_path):
+    from src.engine.lifecycle_events import build_entry_canonical_write
+    from src.state.db import query_portfolio_loader_view
+    from src.state.portfolio import _position_from_projection_row, POSITION_ENV_UNKNOWN
+
+    conn = get_connection(tmp_path / "portfolio-loader-missing-env.db")
+    init_schema(conn)
+    _insert_current_position_for_fill_authority_view_test(
+        conn,
+        position_id="loader-missing-env",
+        submitted_size_usd=25.0,
+        projected_cost_basis_usd=20.0,
+        shares=50.0,
+        entry_price=0.50,
+        mark_price=0.50,
+    )
+    conn.commit()
+
+    loader_view = query_portfolio_loader_view(conn)
+    conn.close()
+
+    loader_position = loader_view["positions"][0]
+    assert loader_position["env"] == POSITION_ENV_UNKNOWN
+    position = _position_from_projection_row(loader_position, current_mode="live")
+    assert position.env == POSITION_ENV_UNKNOWN
+    position.entered_at = "2026-04-01T00:00:00+00:00"
+    with pytest.raises(ValueError, match="position event env='unknown_env' is invalid"):
+        build_entry_canonical_write(
+            position,
+            decision_id="dec-loader-missing-env",
+            source_module="tests.test_db",
+        )
+
+
+def test_portfolio_loader_latest_missing_event_env_does_not_promote_older_env(tmp_path):
+    from src.state.db import query_portfolio_loader_view
+    from src.state.portfolio import POSITION_ENV_UNKNOWN
+
+    conn = get_connection(tmp_path / "portfolio-loader-latest-missing-event-env.db")
+    init_schema(conn)
+    _insert_current_position_for_fill_authority_view_test(
+        conn,
+        position_id="loader-latest-missing-event-env",
+        submitted_size_usd=25.0,
+        projected_cost_basis_usd=20.0,
+        shares=50.0,
+        entry_price=0.50,
+        mark_price=0.50,
+    )
+    conn.execute("DROP TABLE position_events")
+    conn.execute("CREATE TABLE position_events (position_id TEXT, sequence_no INTEGER, env TEXT)")
+    conn.execute(
+        "INSERT INTO position_events (position_id, sequence_no, env) VALUES (?, ?, ?)",
+        ("loader-latest-missing-event-env", 1, "live"),
+    )
+    conn.execute(
+        "INSERT INTO position_events (position_id, sequence_no, env) VALUES (?, ?, ?)",
+        ("loader-latest-missing-event-env", 2, None),
+    )
+    conn.commit()
+
+    loader_view = query_portfolio_loader_view(conn)
+    conn.close()
+
+    loader_position = loader_view["positions"][0]
+    assert loader_position["env"] == POSITION_ENV_UNKNOWN
+
+
 def test_position_current_views_preserve_current_open_reduction_after_partial_exit(tmp_path):
     from src.state.db import (
         query_portfolio_loader_view,
@@ -1383,6 +1452,7 @@ def test_log_trade_entry_persists_replay_critical_fields(tmp_path):
         target_date="2026-04-01",
         bin_label="39-40°F",
         direction="buy_yes",
+        env="live",
         unit="F",
         size_usd=10.0,
         entry_price=0.40,
@@ -1452,6 +1522,7 @@ def test_log_trade_entry_emits_position_event(tmp_path):
         target_date="2026-04-01",
         bin_label="39-40°F",
         direction="buy_yes",
+        env="live",
         unit="F",
         size_usd=10.0,
         entry_price=0.40,
@@ -1588,6 +1659,7 @@ def test_update_trade_lifecycle_emits_position_event(tmp_path):
         target_date="2026-04-01",
         bin_label="39-40°F",
         direction="buy_yes",
+        env="live",
         unit="F",
         size_usd=15.0,
         entry_price=0.41,
@@ -2492,6 +2564,212 @@ def test_query_authoritative_settlement_rows_accepts_env_keyword_for_portfolio_c
     conn.close()
 
 
+def test_query_authoritative_settlement_rows_filters_canonical_position_events_by_env(tmp_path):
+    from src.engine.lifecycle_events import build_settlement_canonical_write
+    from src.state.db import append_many_and_project, query_authoritative_settlement_rows
+    from src.state.portfolio import Position
+
+    conn = get_connection(tmp_path / "settlement-env-filter.db")
+    init_schema(conn)
+    pos = Position(
+        trade_id="replay-settle",
+        market_id="m-replay",
+        city="NYC",
+        cluster="US-Northeast",
+        target_date="2026-04-01",
+        bin_label="39-40°F",
+        direction="buy_yes",
+        env="replay",
+        unit="F",
+        size_usd=10.0,
+        entry_price=0.40,
+        p_posterior=0.61,
+        decision_snapshot_id="snap-replay",
+        strategy_key="center_buy",
+        strategy="center_buy",
+        edge_source="center_buy",
+        exit_price=1.0,
+        pnl=15.0,
+        exit_reason="SETTLEMENT",
+        last_exit_at="2026-04-01T23:00:00Z",
+        state="settled",
+    )
+
+    events, projection = build_settlement_canonical_write(
+        pos,
+        winning_bin="39-40°F",
+        won=True,
+        outcome=1,
+        sequence_no=1,
+        phase_before="pending_exit",
+        settlement_authority="VERIFIED",
+        settlement_truth_source="world.settlements",
+        settlement_market_slug="nyc-high-2026-04-01",
+        settlement_temperature_metric="high",
+        settlement_source="WU",
+        settlement_value=40.0,
+    )
+    append_many_and_project(conn, events, projection)
+
+    assert query_authoritative_settlement_rows(conn, limit=None) == []
+    assert query_authoritative_settlement_rows(conn, limit=None, env="live") == []
+    replay_rows = query_authoritative_settlement_rows(conn, limit=None, env="replay")
+    conn.close()
+
+    assert len(replay_rows) == 1
+    assert replay_rows[0]["trade_id"] == "replay-settle"
+    assert replay_rows[0]["env"] == "replay"
+    assert replay_rows[0]["learning_snapshot_ready"] is True
+
+
+def test_append_many_and_project_requires_env_for_canonical_position_events(tmp_path):
+    from src.engine.lifecycle_events import build_settlement_canonical_write
+    from src.state.db import append_many_and_project
+    from src.state.portfolio import Position
+
+    conn = get_connection(tmp_path / "settlement-missing-env.db")
+    init_schema(conn)
+    pos = Position(
+        trade_id="missing-env-settle",
+        market_id="m-missing-env",
+        city="NYC",
+        cluster="US-Northeast",
+        target_date="2026-04-01",
+        bin_label="39-40°F",
+        direction="buy_yes",
+        env="live",
+        unit="F",
+        size_usd=10.0,
+        entry_price=0.40,
+        p_posterior=0.61,
+        decision_snapshot_id="snap-missing-env",
+        strategy_key="center_buy",
+        strategy="center_buy",
+        edge_source="center_buy",
+        exit_price=1.0,
+        pnl=15.0,
+        exit_reason="SETTLEMENT",
+        last_exit_at="2026-04-01T23:00:00Z",
+        state="settled",
+    )
+    events, projection = build_settlement_canonical_write(
+        pos,
+        winning_bin="39-40°F",
+        won=True,
+        outcome=1,
+        sequence_no=1,
+        phase_before="pending_exit",
+    )
+    events[0].pop("env")
+
+    with pytest.raises(ValueError, match="canonical position event missing env"):
+        append_many_and_project(conn, events, projection)
+
+    assert conn.execute("SELECT COUNT(*) FROM position_events").fetchone()[0] == 0
+    conn.close()
+
+
+def test_lifecycle_builder_rejects_position_without_explicit_env():
+    from src.engine.lifecycle_events import build_entry_canonical_write
+    from src.state.portfolio import Position, POSITION_ENV_UNKNOWN
+
+    pos = Position(
+        trade_id="implicit-env-entry",
+        market_id="m-implicit-env",
+        city="NYC",
+        cluster="US-Northeast",
+        target_date="2026-04-01",
+        bin_label="39-40°F",
+        direction="buy_yes",
+        unit="F",
+        size_usd=10.0,
+        entry_price=0.40,
+        p_posterior=0.61,
+        decision_snapshot_id="snap-implicit-env",
+        strategy_key="center_buy",
+        strategy="center_buy",
+        edge_source="center_buy",
+        order_id="ord-implicit-env",
+        order_status="pending",
+        order_posted_at="2026-04-01T12:00:00Z",
+        state="pending_tracked",
+    )
+
+    assert pos.env == POSITION_ENV_UNKNOWN
+    with pytest.raises(ValueError, match="position event env='unknown_env' is invalid"):
+        build_entry_canonical_write(
+            pos,
+            decision_id="dec-implicit-env",
+            source_module="tests.test_db",
+        )
+
+
+def test_append_many_and_project_rejects_missing_env_for_non_settlement_events(tmp_path):
+    from src.state.db import append_many_and_project
+
+    conn = get_connection(tmp_path / "entry-missing-env.db")
+    init_schema(conn)
+    event = {
+        "event_id": "evt-missing-entry-env",
+        "position_id": "pos-missing-entry-env",
+        "event_version": 1,
+        "sequence_no": 1,
+        "event_type": "ENTRY_ORDER_POSTED",
+        "occurred_at": "2026-05-07T00:00:00Z",
+        "phase_before": None,
+        "phase_after": "pending_entry",
+        "strategy_key": "center_buy",
+        "decision_id": "dec-missing-entry-env",
+        "snapshot_id": "snap-missing-entry-env",
+        "order_id": None,
+        "command_id": None,
+        "caused_by": None,
+        "idempotency_key": "idem-missing-entry-env",
+        "venue_status": None,
+        "source_module": "tests.test_db",
+        "payload_json": "{}",
+    }
+    projection = {
+        "position_id": "pos-missing-entry-env",
+        "phase": "pending_entry",
+        "trade_id": "pos-missing-entry-env",
+        "market_id": "m-entry-env",
+        "city": "NYC",
+        "cluster": "US-Northeast",
+        "target_date": "2026-04-01",
+        "bin_label": "39-40°F",
+        "direction": "buy_yes",
+        "unit": "F",
+        "size_usd": 10.0,
+        "shares": 20.0,
+        "cost_basis_usd": 10.0,
+        "entry_price": 0.5,
+        "p_posterior": 0.6,
+        "last_monitor_prob": 0.6,
+        "last_monitor_edge": 0.1,
+        "last_monitor_market_price": 0.5,
+        "decision_snapshot_id": "snap-missing-entry-env",
+        "entry_method": "test",
+        "strategy_key": "center_buy",
+        "edge_source": "center_buy",
+        "discovery_mode": "opening_hunt",
+        "chain_state": "local_only",
+        "token_id": "yes-token",
+        "no_token_id": "no-token",
+        "condition_id": "condition",
+        "order_id": None,
+        "order_status": None,
+        "updated_at": "2026-05-07T00:00:00Z",
+        "temperature_metric": "high",
+    }
+
+    with pytest.raises(ValueError, match="canonical position event missing env"):
+        append_many_and_project(conn, [event], projection)
+
+    assert conn.execute("SELECT COUNT(*) FROM position_events").fetchone()[0] == 0
+    conn.close()
+
+
 def test_query_authoritative_settlement_rows_requires_verified_settlement_truth(tmp_path):
     from src.engine.lifecycle_events import build_settlement_canonical_write
     from src.state.db import append_many_and_project, query_authoritative_settlement_rows
@@ -2508,6 +2786,7 @@ def test_query_authoritative_settlement_rows_requires_verified_settlement_truth(
         target_date="2026-04-01",
         bin_label="39-40°F",
         direction="buy_yes",
+        env="live",
         unit="F",
         size_usd=10.0,
         entry_price=0.40,
@@ -2568,6 +2847,7 @@ def test_query_authoritative_settlement_rows_degrades_settled_event_without_trut
         target_date="2026-04-01",
         bin_label="39-40°F",
         direction="buy_yes",
+        env="live",
         unit="F",
         size_usd=10.0,
         entry_price=0.40,

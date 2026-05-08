@@ -1,7 +1,7 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-04-27
-# Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/F2.yaml
-# Lifecycle: created=2026-04-27; last_reviewed=2026-04-27; last_reused=2026-04-27
+# Last reused/audited: 2026-05-07
+# Authority basis: docs/operations/task_2026-05-07_object_invariance_wave25/PLAN.md
+# Lifecycle: created=2026-04-27; last_reviewed=2026-05-07; last_reused=2026-05-07
 # Purpose: Lock R3 F2 operator-gated calibration retrain/promotion wiring.
 # Reuse: Run when changing calibration retrain gates, corpus filters, frozen-replay promotion, or CONFIRMED trade-fact training seams.
 """R3 F2 tests for operator-gated calibration retrain wiring."""
@@ -29,6 +29,11 @@ from src.calibration.retrain_trigger import (
     load_confirmed_corpus,
     status,
     trigger_retrain,
+)
+
+TEST_MODEL_KEY = (
+    "high:US-Northeast:DJF:test_retrain_v1:00:tigge_mars:"
+    "full:width_normalized_density"
 )
 
 
@@ -77,8 +82,11 @@ def _create_platt_models_v2(conn: sqlite3.Connection) -> None:
           authority TEXT NOT NULL DEFAULT 'UNVERIFIED'
               CHECK (authority IN ('VERIFIED','UNVERIFIED','QUARANTINED')),
           bucket_key TEXT,
+          cycle TEXT NOT NULL DEFAULT '00',
+          source_id TEXT NOT NULL DEFAULT 'tigge_mars',
+          horizon_profile TEXT NOT NULL DEFAULT 'full',
           recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-          UNIQUE(temperature_metric, cluster, season, data_version, input_space, is_active)
+          UNIQUE(temperature_metric, cluster, season, data_version, input_space, is_active, cycle, source_id, horizon_profile)
         )
         """
     )
@@ -90,14 +98,17 @@ def _seed_active_platt_model(conn: sqlite3.Connection) -> None:
         INSERT INTO platt_models_v2 (
           model_key, temperature_metric, cluster, season, data_version,
           input_space, param_A, param_B, param_C, bootstrap_params_json,
-          n_samples, brier_insample, fitted_at, is_active, authority
+          n_samples, brier_insample, fitted_at, is_active, authority,
+          cycle, source_id, horizon_profile
         ) VALUES (
-          'high:US-Northeast:DJF:test_retrain_v1:width_normalized_density',
+          ?,
           'high', 'US-Northeast', 'DJF', 'test_retrain_v1',
           'width_normalized_density', 0.9, 0.0, 0.1, '[]',
-          10, 0.20, '2026-04-26T00:00:00+00:00', 1, 'VERIFIED'
+          10, 0.20, '2026-04-26T00:00:00+00:00', 1, 'VERIFIED',
+          '00', 'tigge_mars', 'full'
         )
-        """
+        """,
+        (TEST_MODEL_KEY,),
     )
 
 
@@ -125,19 +136,23 @@ def _insert_trade(
     seq: int,
     *,
     raw_payload_json: str | None = None,
+    filled_size: str = "1",
+    fill_price: str = "0.42",
 ) -> None:
     conn.execute(
         """
         INSERT INTO venue_trade_facts (
           trade_id, venue_order_id, command_id, state, filled_size, fill_price,
           source, observed_at, local_sequence, raw_payload_hash, raw_payload_json
-        ) VALUES (?, ?, ?, ?, '1', '0.42', 'CHAIN', ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, 'CHAIN', ?, ?, ?, ?)
         """,
         (
             f"trade-{seq}",
             f"order-{seq}",
             f"cmd-{seq}",
             state,
+            filled_size,
+            fill_price,
             f"2026-04-27T00:0{seq}:00+00:00",
             seq,
             f"hash-{seq}",
@@ -264,6 +279,14 @@ def test_confirmed_corpus_missing_identity_fails_closed():
         load_confirmed_corpus(conn, _filter())
 
 
+def test_confirmed_corpus_missing_fill_economics_fails_closed():
+    conn = _conn()
+    _insert_trade(conn, "CONFIRMED", 1, filled_size="0")
+
+    with pytest.raises(UnsafeCorpusFilter, match="positive finite fill economics"):
+        load_confirmed_corpus(conn, _filter())
+
+
 def test_frozen_replay_failure_blocks_promotion(tmp_path):
     artifact = _decision_artifact(tmp_path)
     conn = _conn()
@@ -340,8 +363,9 @@ def test_frozen_replay_pass_replaces_existing_live_platt_row(tmp_path):
         """
         SELECT param_A, param_B, param_C, n_samples, authority
           FROM platt_models_v2
-         WHERE model_key = 'high:US-Northeast:DJF:test_retrain_v1:width_normalized_density'
-        """
+         WHERE model_key = ?
+        """,
+        (TEST_MODEL_KEY,),
     ).fetchall()
     assert len(live_rows) == 1
     assert live_rows[0]["param_A"] == pytest.approx(1.1)

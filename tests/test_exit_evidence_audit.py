@@ -1,6 +1,6 @@
 # Created: 2026-04-23
-# Last reused/audited: 2026-04-23
-# Authority basis: midstream verdict v2 2026-04-23 (docs/to-do-list/zeus_midstream_fix_plan_2026-04-23.md T4.2-Phase1 exit-side DecisionEvidence audit-only symmetry check, D4 MITIGATED gate)
+# Last reused/audited: 2026-05-07
+# Authority basis: midstream verdict v2 2026-04-23 (docs/to-do-list/zeus_midstream_fix_plan_2026-04-23.md T4.2-Phase1 exit-side DecisionEvidence audit-only symmetry check, D4 MITIGATED gate); Wave26 canonical position event env authority
 
 """T4.2-Phase1 exit-side DecisionEvidence audit antibodies.
 
@@ -57,6 +57,7 @@ def _runtime_position(
         target_date="2026-04-03",
         bin_label="39-40°F",
         direction="buy_yes",
+        env="live",
         unit="F",
         size_usd=10.0,
         entry_price=0.5,
@@ -101,10 +102,10 @@ def _raw_insert_entry_posted(conn: sqlite3.Connection, trade_id: str, payload_js
             event_id, position_id, event_version, sequence_no, event_type,
             occurred_at, phase_before, phase_after, strategy_key,
             decision_id, snapshot_id, order_id, command_id, caused_by,
-            idempotency_key, venue_status, source_module, payload_json
+            idempotency_key, venue_status, source_module, env, payload_json
         ) VALUES (?, ?, 1, 2, 'ENTRY_ORDER_POSTED', ?, 'pending_entry',
                   'pending_entry', 'center_buy', 'dec-raw', NULL, NULL,
-                  NULL, NULL, ?, NULL, 'src.test.raw', ?)
+                  NULL, NULL, ?, NULL, 'src.test.raw', 'live', ?)
         """,
         (
             f"{trade_id}:entry_order_posted",
@@ -124,10 +125,10 @@ def _raw_insert_position_open_intent(conn: sqlite3.Connection, trade_id: str, pa
             event_id, position_id, event_version, sequence_no, event_type,
             occurred_at, phase_before, phase_after, strategy_key,
             decision_id, snapshot_id, order_id, command_id, caused_by,
-            idempotency_key, venue_status, source_module, payload_json
+            idempotency_key, venue_status, source_module, env, payload_json
         ) VALUES (?, ?, 1, 1, 'POSITION_OPEN_INTENT', ?, NULL,
                   'pending_entry', 'center_buy', 'dec-raw', NULL, NULL,
-                  NULL, NULL, ?, NULL, 'src.test.raw', ?)
+                  NULL, NULL, ?, NULL, 'src.test.raw', 'live', ?)
         """,
         (
             f"{trade_id}:position_open_intent",

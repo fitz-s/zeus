@@ -2,6 +2,11 @@ from __future__ import annotations
 
 import sqlite3
 
+from src.architecture.decorators import capability
+
+
+POSITION_EVENT_ENVS = ("live", "test", "replay", "backtest", "shadow")
+
 
 CANONICAL_POSITION_CURRENT_COLUMNS = (
     "position_id",
@@ -36,6 +41,13 @@ CANONICAL_POSITION_CURRENT_COLUMNS = (
     "updated_at",
     "temperature_metric",
 )
+
+
+def normalize_position_event_env(value: object, *, default: str | None = None) -> str:
+    env = str(value if value not in (None, "") else (default or "")).strip().lower()
+    if env not in POSITION_EVENT_ENVS:
+        raise ValueError(f"position event env={env!r} is invalid")
+    return env
 
 
 def ordered_values(payload: dict, columns: tuple[str, ...]) -> tuple:
@@ -84,6 +96,7 @@ def validate_event_projection_batch(events: list[dict], projection: dict) -> Non
         raise ValueError("event/projection phase mismatch")
 
 
+@capability("canonical_position_write", lease=True)
 def upsert_position_current(conn: sqlite3.Connection, projection: dict) -> None:
     conn.execute(
         f"""

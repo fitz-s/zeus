@@ -1,6 +1,6 @@
 # Created: 2026-05-05
-# Last reused or audited: 2026-05-05
-# Authority basis: docs/operations/task_2026-05-04_zeus_may3_review_remediation/phases/T1BD/phase.json
+# Last reused or audited: 2026-05-07
+# Authority basis: object-meaning invariance Wave26 explicit position env authority.
 """Relationship tests: chain-reconciliation D6-field freeze for corrected-eligible positions.
 
 Fitz methodology: relationship test first. These tests assert the cross-module
@@ -44,6 +44,7 @@ def _make_position(
         target_date="2026-05-01",
         bin_label="39-40F",
         direction="buy_yes",
+        env="live",
         unit="F",
         size_usd=size_usd,
         entry_price=entry_price,

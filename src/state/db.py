@@ -25,7 +25,7 @@ from src.state.ledger import (
     apply_architecture_kernel_schema,
     append_many_and_project,
 )
-from src.state.projection import CANONICAL_POSITION_CURRENT_COLUMNS
+from src.state.projection import CANONICAL_POSITION_CURRENT_COLUMNS, POSITION_EVENT_ENVS
 from src.state.collateral_ledger import init_collateral_schema
 from src.state.snapshot_repo import init_snapshot_schema
 from src.observability.counters import increment as _cnt_inc
@@ -1755,14 +1755,18 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
     except sqlite3.OperationalError:
         pass
 
-    # Provenance: env column on trade-facing tables (Decision 2)
-    # Existing rows default to 'live' — Zeus is designed only for live.
-    _env_tables = ["trade_decisions", "chronicle", "decision_log", "position_events"]
+    # Provenance: env column on trade-facing tables (Decision 2).
+    # Existing non-event rows default to 'live' for legacy compatibility.
+    _env_tables = ["trade_decisions", "chronicle", "decision_log"]
     for table in _env_tables:
         try:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN env TEXT NOT NULL DEFAULT 'live';")
         except sqlite3.OperationalError:
             pass  # Column already exists
+    try:
+        conn.execute("ALTER TABLE position_events ADD COLUMN env TEXT;")
+    except sqlite3.OperationalError:
+        pass  # Column already exists
             
     try:
         conn.execute("ALTER TABLE trade_decisions ADD COLUMN edge_source TEXT;")
@@ -4470,7 +4474,7 @@ def log_outcome_fact(
 def log_trade_entry(conn: sqlite3.Connection, pos) -> None:
     """Evidence spine: Log explicitly at entry for replay reconstruction."""
     if False: _ = pos.entry_method; _ = pos.selected_method  # Semantic Provenance Guard
-    env = getattr(pos, "env", "live")
+    env = getattr(pos, "env", "unknown_env") or "unknown_env"
     status = "pending_tracked" if getattr(pos, "state", "") == "pending_tracked" else "entered"
     timestamp = getattr(pos, "order_posted_at", "") if status == "pending_tracked" else getattr(pos, "entered_at", "")
     filled_at = getattr(pos, "entered_at", None) if status == "entered" else None
@@ -4670,7 +4674,7 @@ def log_trade_exit(conn: sqlite3.Connection, pos) -> None:
     if False: _ = pos.entry_method; _ = pos.selected_method  # Semantic Provenance Guard
     try:
         from datetime import datetime
-        env = getattr(pos, "env", "live")
+        env = getattr(pos, "env", "unknown_env") or "unknown_env"
         status = "voided" if getattr(pos, "state", "") == "voided" else "exited"
         values = (
             pos.market_id, pos.bin_label, pos.direction, pos.size_usd, pos.entry_price, pos.last_exit_at or datetime.now(timezone.utc).isoformat(),
@@ -4862,6 +4866,7 @@ def _normalize_position_settlement_event(event: dict) -> Optional[dict]:
         "settlement_temperature_metric": str(details.get("settlement_temperature_metric") or ""),
         "settlement_source": str(details.get("settlement_source") or ""),
         "settlement_value": _coerce_settlement_float(details.get("settlement_value")),
+        "env": str(event.get("env") or ""),
         "source": "position_events",
         "authority_level": "durable_event",
         "contract_version": str(
@@ -4927,7 +4932,7 @@ def query_position_events(conn: sqlite3.Connection, runtime_trade_id: str, limit
                source_module AS source,
                payload_json AS details_json,
                occurred_at AS timestamp,
-               NULL AS env
+               env
         FROM position_events
         WHERE position_id = ?
         ORDER BY sequence_no ASC
@@ -4944,10 +4949,16 @@ def query_settlement_events(
     *,
     city: str | None = None,
     target_date: str | None = None,
+    env: str | None = None,
     not_before: str | None = None,
 ) -> list[dict]:
     """Load recent canonical SETTLED events from the durable event spine."""
-    filters = ["e.event_type = 'SETTLED'"]
+    from src.state.projection import normalize_position_event_env
+
+    query_env = normalize_position_event_env(env, default=get_mode())
+    event_filters = ["event_type = 'SETTLED'", "env = ?"]
+    event_params: list[object] = [query_env]
+    filters: list[str] = []
     params: list[object] = []
     if city is not None:
         filters.append("pc.city = ?")
@@ -4956,9 +4967,10 @@ def query_settlement_events(
         filters.append("pc.target_date = ?")
         params.append(target_date)
     if not_before is not None:
-        filters.append("e.occurred_at >= ?")
-        params.append(not_before)
-    where_clause = " AND ".join(filters)
+        event_filters.append("occurred_at >= ?")
+        event_params.append(not_before)
+    event_where_clause = " AND ".join(event_filters)
+    where_clause = " AND ".join(["rn = 1", *filters])
     query = f"""
         SELECT e.event_type,
                e.position_id AS runtime_trade_id,
@@ -4975,17 +4987,18 @@ def query_settlement_events(
                e.source_module AS source,
                e.payload_json AS details_json,
                e.occurred_at AS timestamp,
-               NULL AS env
+               e.env
         FROM (
             SELECT *,
                    ROW_NUMBER() OVER (PARTITION BY position_id ORDER BY sequence_no DESC) AS rn
             FROM position_events
-            WHERE event_type = 'SETTLED'
+            WHERE {event_where_clause}
         ) e
         LEFT JOIN position_current pc ON pc.position_id = e.position_id
-        WHERE rn = 1 AND {where_clause}
+        WHERE {where_clause}
         ORDER BY e.occurred_at DESC
         """
+    params = event_params + params
     if limit is not None:
         query += "\n        LIMIT ?"
         params.append(limit)
@@ -5004,9 +5017,8 @@ def query_authoritative_settlement_rows(
 ) -> list[dict]:
     """Prefer stage-level settlement events, then fall back to legacy decision_log blobs.
 
-    ``env`` is retained for legacy ``decision_log`` compatibility. Canonical
-    ``position_events`` rows do not carry env; DB-level authority separation is
-    the remaining Wave24 repair surface.
+    ``env`` gates both canonical ``position_events`` and legacy
+    ``decision_log`` rows. Missing canonical env is not live authority.
     """
     stage_events = []
     if _table_exists(conn, "position_events") and _table_exists(conn, "position_current"):
@@ -5015,6 +5027,7 @@ def query_authoritative_settlement_rows(
             limit=limit,
             city=city,
             target_date=target_date,
+            env=env,
             not_before=not_before,
         )
     normalized_stage = [
@@ -5502,6 +5515,42 @@ def query_position_current_status_view(conn: sqlite3.Connection | None) -> dict:
     }
 
 
+def _latest_position_event_envs(
+    conn: sqlite3.Connection,
+    position_ids: list[str],
+) -> dict[str, str]:
+    if not position_ids:
+        return {}
+    if not _table_exists(conn, "position_events"):
+        return {}
+    if "env" not in _table_columns(conn, "position_events"):
+        return {}
+    placeholders = ", ".join(["?"] * len(position_ids))
+    rows = conn.execute(
+        f"""
+        SELECT position_id, env
+        FROM (
+            SELECT position_id,
+                   env,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY position_id
+                       ORDER BY sequence_no DESC
+                   ) AS rn
+            FROM position_events
+            WHERE position_id IN ({placeholders})
+        )
+        WHERE rn = 1
+        """,
+        tuple(position_ids),
+    ).fetchall()
+    envs: dict[str, str] = {}
+    for row in rows:
+        env = str(row["env"] or "").strip().lower()
+        if env in POSITION_EVENT_ENVS:
+            envs[str(row["position_id"])] = env
+    return envs
+
+
 def query_portfolio_loader_view(conn: sqlite3.Connection | None, *, temperature_metric: str | None = None) -> dict:
     if conn is None:
         return {
@@ -5531,6 +5580,12 @@ def query_portfolio_loader_view(conn: sqlite3.Connection | None, *, temperature_
         where_clause = "WHERE temperature_metric = ?"
         params = (temperature_metric,)
 
+    position_current_env_expr = (
+        "env"
+        if "env" in actual_cols
+        else "NULL AS env"
+    )
+
     rows = conn.execute(
         f"""
         SELECT position_id, phase, trade_id, market_id, city, cluster, target_date, bin_label,
@@ -5538,7 +5593,7 @@ def query_portfolio_loader_view(conn: sqlite3.Connection | None, *, temperature_
                last_monitor_prob, last_monitor_edge, last_monitor_market_price,
                decision_snapshot_id, entry_method, strategy_key, edge_source, discovery_mode,
                chain_state, token_id, no_token_id, condition_id, order_id, order_status, updated_at,
-               temperature_metric
+               temperature_metric, {position_current_env_expr}
         FROM position_current {where_clause}
         ORDER BY updated_at DESC, position_id
         """,
@@ -5553,6 +5608,8 @@ def query_portfolio_loader_view(conn: sqlite3.Connection | None, *, temperature_
         }
 
     trade_ids = [str(row["trade_id"] or row["position_id"] or "") for row in rows]
+    position_ids = [str(row["position_id"] or row["trade_id"] or "") for row in rows]
+    event_envs = _latest_position_event_envs(conn, position_ids)
     transitional_hints = _query_transitional_position_hints(conn, trade_ids)
     fill_hints = _query_entry_execution_fill_hints(conn, trade_ids)
 
@@ -5566,6 +5623,7 @@ def query_portfolio_loader_view(conn: sqlite3.Connection | None, *, temperature_
             fill_hints.get(trade_id),
         )
         runtime_state = PORTFOLIO_LOADER_PHASE_TO_RUNTIME_STATE.get(phase, phase)
+        explicit_env = str(row["env"] or event_envs.get(str(row["position_id"] or "")) or "unknown_env")
         positions.append(
             {
                 "trade_id": trade_id,
@@ -5608,7 +5666,7 @@ def query_portfolio_loader_view(conn: sqlite3.Connection | None, *, temperature_
                 "order_id": str(row["order_id"] or ""),
                 "order_status": str(row["order_status"] or ""),
                 "state": runtime_state,
-                "env": get_mode(),
+                "env": explicit_env,
                 "entered_at": str(hints.get("entered_at") or ""),
                 "day0_entered_at": str(hints.get("day0_entered_at") or ""),
                 "exit_state": str(hints.get("exit_state") or ""),
@@ -6219,7 +6277,7 @@ def _query_transitional_position_hints(
             status = details.get("status")
             if status not in (None, ""):
                 bucket["exit_state"] = str(status)
-        # env is not in canonical position_events; mode isolation is at DB level
+        # Non-settlement lifecycle hints are env-filtered by their caller scope.
     return hints
 
 

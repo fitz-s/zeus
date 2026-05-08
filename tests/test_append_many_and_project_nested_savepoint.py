@@ -1,7 +1,8 @@
 # Created: 2026-04-24
-# Last reused/audited: 2026-04-24
+# Last reused/audited: 2026-05-07
 # Authority basis: DR-33-B (data-readiness-tail) atomicity refactor of
-# `src/state/ledger.py::append_many_and_project`. Replaces pre-DR-33-B
+# `src/state/ledger.py::append_many_and_project`. Reused for Wave26 canonical
+# event env authority while preserving the DR-33-B savepoint contract. Replaces pre-DR-33-B
 # `with conn:` with explicit SAVEPOINT so callers that already hold an
 # outer SAVEPOINT can invoke this function without silent release per
 # memory rule L30.
@@ -61,6 +62,7 @@ def _canonical_event(position_id: str, event_type: str = "ENTRY_ORDER_POSTED",
         "idempotency_key": f"idem-{position_id}-{sequence_no}",
         "venue_status": None,
         "source_module": "tests.test_dr33b_nested_savepoint",
+        "env": "live",
         "payload_json": "{}",
     }
 

@@ -1,7 +1,7 @@
 # Created: 2026-04-28
-# Last reused/audited: 2026-05-05
-# Authority basis: docs/operations/task_2026-04-28_contamination_remediation/plan.md; task_2026-04-29 Phase 1A/1B evaluator gates.
-# Lifecycle: created=2026-04-28; last_reviewed=2026-05-05; last_reused=2026-05-05
+# Last reused/audited: 2026-05-07
+# Authority basis: docs/operations/task_2026-04-28_contamination_remediation/plan.md; task_2026-04-29 Phase 1A/1B evaluator gates; docs/operations/task_2026-05-07_object_invariance_wave24/PLAN.md.
+# Lifecycle: created=2026-04-28; last_reviewed=2026-05-07; last_reused=2026-05-07
 # Purpose: Cross-module P&L flow, CI-threshold, status-summary bankroll, and hardcoded-audit tests.
 # Reuse: Run after P&L/status-summary/riskguard/reporting boundary changes.
 """Cross-module P&L flow, CI-threshold, and hardcoded-audit tests."""
@@ -127,8 +127,8 @@ def _insert_source_correct_harvester_obs(
     conn.execute(
         """
         INSERT INTO observations (
-            city, target_date, source, high_temp, unit, fetched_at, authority
-        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            city, target_date, source, high_temp, unit, station_id, fetched_at, authority
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             city.name,
@@ -136,6 +136,7 @@ def _insert_source_correct_harvester_obs(
             "wu_icao_history",
             high_temp,
             city.settlement_unit,
+            city.wu_station,
             "2026-04-01T23:00:00Z",
             "VERIFIED",
         ),
@@ -155,6 +156,7 @@ def _enable_live_harvester_test_path(monkeypatch, *, mock_lookup: bool = False) 
         *,
         event_slug="",
         obs_row=None,
+        **_kwargs,
     ):
         assert obs_row is not None
         assert obs_row["source"] == "wu_icao_history"
@@ -174,7 +176,7 @@ def _enable_live_harvester_test_path(monkeypatch, *, mock_lookup: bool = False) 
         monkeypatch.setattr(
             harvester_module,
             "_lookup_settlement_obs",
-            lambda conn, city, target_date: {
+            lambda conn, city, target_date, **_kwargs: {
                 "id": 1,
                 "source": "wu_icao_history",
                 "high_temp": 40.0,
@@ -444,7 +446,7 @@ def _insert_snapshot(
     p_raw: list[float],
     *,
     issue_time: str = "2026-03-30T00:00:00Z",
-    data_version: str = "live_v1",
+    data_version: str = "tigge_mx2t6_local_calendar_day_max_v1",
     temperature_metric: str = "high",
 ) -> str:
     conn.execute(
@@ -473,8 +475,46 @@ def _insert_snapshot(
         ),
     )
     row = conn.execute("SELECT last_insert_rowid() AS snapshot_id").fetchone()
+    snapshot_id = int(row["snapshot_id"])
+    physical_quantity = (
+        "mn2t6_local_calendar_day_min"
+        if temperature_metric == "low"
+        else "mx2t6_local_calendar_day_max"
+    )
+    observation_field = "low_temp" if temperature_metric == "low" else "high_temp"
+    conn.execute(
+        """
+        INSERT INTO ensemble_snapshots_v2
+        (snapshot_id, city, target_date, temperature_metric, physical_quantity,
+         observation_field, issue_time, valid_time, available_at, fetch_time,
+         lead_hours, members_json, p_raw_json, spread, is_bimodal, model_version,
+         data_version, training_allowed, causality_status)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            snapshot_id,
+            city,
+            target_date,
+            temperature_metric,
+            physical_quantity,
+            observation_field,
+            issue_time,
+            f"{target_date}T12:00:00Z",
+            "2026-03-30T01:00:00Z",
+            "2026-03-30T01:00:00Z",
+            48.0,
+            json.dumps([40.0] * 51),
+            json.dumps(p_raw),
+            2.0,
+            0,
+            "ecmwf_ifs025",
+            data_version,
+            1,
+            "OK",
+        ),
+    )
     conn.commit()
-    return str(row["snapshot_id"])
+    return str(snapshot_id)
 
 
 def _make_ens_result_with_evidence(
@@ -2893,7 +2933,7 @@ def test_inv_daily_loss_enforced(monkeypatch, tmp_path):
         recent_exits=[_recent_exit(-13.0)],
     )
 
-    def _fake_get_connection(path=None):
+    def _fake_get_connection(path=None, **_kwargs):
         if path == riskguard_module.RISK_DB_PATH:
             return get_connection(risk_db)
         return get_connection(zeus_db)
@@ -2945,7 +2985,7 @@ def test_inv_riskguard_does_not_promote_legacy_settlement_pnl(monkeypatch, tmp_p
 
     portfolio = PortfolioState(bankroll=211.37)
 
-    def _fake_get_connection(path=None):
+    def _fake_get_connection(path=None, **_kwargs):
         if path == riskguard_module.RISK_DB_PATH:
             return get_connection(risk_db)
         return get_connection(zeus_db)
@@ -3002,7 +3042,7 @@ def test_inv_status_summary_does_not_promote_legacy_realized_truth(monkeypatch, 
     conn.commit()  # Fix B: store_settlement_records no longer commits internally.
     conn.close()
 
-    def _fake_get_connection(path=None):
+    def _fake_get_connection(path=None, **_kwargs):
         if path == riskguard_module.RISK_DB_PATH:
             return get_connection(risk_db)
         return get_connection(zeus_db)
@@ -3064,7 +3104,7 @@ def test_inv_settlement_flows_to_brier(monkeypatch, tmp_path):
     conn.commit()  # Fix B: store_settlement_records no longer commits internally.
     conn.close()
 
-    def _fake_get_connection(path=None):
+    def _fake_get_connection(path=None, **_kwargs):
         if path == riskguard_module.RISK_DB_PATH:
             return get_connection(risk_db)
         return get_connection(zeus_db)
@@ -3127,10 +3167,10 @@ def test_inv_riskguard_prefers_canonical_position_events_settlement_source(monke
     conn.execute("""
         INSERT INTO position_events
         (event_id, position_id, event_version, sequence_no, event_type,
-         occurred_at, strategy_key, source_module, payload_json)
-        VALUES (?,?,?,?,?,?,?,?,?)
+         occurred_at, strategy_key, source_module, env, payload_json)
+        VALUES (?,?,?,?,?,?,?,?,?,?)
     """, ("rt-settle-auth:settled:1", "rt-settle-auth", 1, 1, "SETTLED",
-           "2026-04-01T23:00:00+00:00", "center_buy", "src.state.db",
+           "2026-04-01T23:00:00+00:00", "center_buy", "src.state.db", "live",
            _json.dumps({
                "contract_version": "position_settled.v1",
                "winning_bin": "39-40°F",
@@ -3141,11 +3181,17 @@ def test_inv_riskguard_prefers_canonical_position_events_settlement_source(monke
                "exit_price": 1.0,
                "pnl": 15.0,
                "exit_reason": "SETTLEMENT",
+               "settlement_authority": "VERIFIED",
+               "settlement_truth_source": "world.settlements",
+               "settlement_market_slug": "nyc-high-2026-04-01",
+               "settlement_temperature_metric": "high",
+               "settlement_source": "WU",
+               "settlement_value": 40.0,
            })))
     conn.commit()
     conn.close()
 
-    def _fake_get_connection(path=None):
+    def _fake_get_connection(path=None, **_kwargs):
         if path == riskguard_module.RISK_DB_PATH:
             return get_connection(risk_db)
         return get_connection(zeus_db)
@@ -3207,7 +3253,7 @@ def test_inv_riskguard_falls_back_to_legacy_settlement_source(monkeypatch, tmp_p
     conn.commit()  # Fix B: store_settlement_records no longer commits internally.
     conn.close()
 
-    def _fake_get_connection(path=None):
+    def _fake_get_connection(path=None, **_kwargs):
         if path == riskguard_module.RISK_DB_PATH:
             return get_connection(risk_db)
         return get_connection(zeus_db)
@@ -3755,10 +3801,10 @@ def test_inv_harvester_prefers_durable_snapshot_over_open_portfolio(monkeypatch,
     conn.execute("""
         INSERT INTO position_events
         (event_id, position_id, event_version, sequence_no, event_type,
-         occurred_at, strategy_key, snapshot_id, source_module, payload_json)
-        VALUES (?,?,?,?,?,?,?,?,?,?)
+         occurred_at, strategy_key, snapshot_id, source_module, env, payload_json)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?)
     """, ("trade-durable-preferred:settled:1", "trade-durable-preferred", 1, 1, "SETTLED",
-           "2026-04-01T23:00:00+00:00", "center_buy", durable_snapshot_id, "src.state.db",
+           "2026-04-01T23:00:00+00:00", "center_buy", durable_snapshot_id, "src.state.db", "live",
            _json.dumps({
                "contract_version": "position_settled.v1",
                "winning_bin": "39-40°F",
@@ -3769,6 +3815,12 @@ def test_inv_harvester_prefers_durable_snapshot_over_open_portfolio(monkeypatch,
                "exit_price": 1.0,
                "pnl": 15.0,
                "exit_reason": "SETTLEMENT",
+               "settlement_authority": "VERIFIED",
+               "settlement_truth_source": "world.settlements",
+               "settlement_market_slug": "nyc-high-2026-04-01",
+               "settlement_temperature_metric": "high",
+               "settlement_source": "WU",
+               "settlement_value": 40.0,
            })))
     _insert_source_correct_harvester_obs(conn)
     conn.commit()

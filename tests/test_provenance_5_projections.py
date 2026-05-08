@@ -1,9 +1,9 @@
 # Created: 2026-04-27
-# Lifecycle: created=2026-04-27; last_reviewed=2026-04-27; last_reused=2026-04-27
+# Lifecycle: created=2026-04-27; last_reviewed=2026-05-07; last_reused=2026-05-07
 # Purpose: U2 antibodies for 5 raw provenance projections and CONFIRMED-only training.
 # Reuse: Run when venue command, order fact, trade fact, position lot, settlement provenance, or calibration ingestion changes.
-# Last reused/audited: 2026-04-27
-# Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/U2.yaml
+# Last reused/audited: 2026-05-07
+# Authority basis: docs/operations/task_2026-05-07_object_invariance_wave25/PLAN.md
 """U2 raw provenance schema tests for five distinct projections."""
 
 from __future__ import annotations
@@ -322,6 +322,53 @@ def test_trade_facts_split_MATCHED_MINED_CONFIRMED_RETRYING_FAILED(conn):
         )
 
 
+def test_fill_progress_trade_facts_require_positive_finite_economics(conn):
+    _, _, command_id = _seed_snapshot_envelope_command(conn)
+
+    for seq, state in enumerate(("MATCHED", "MINED", "CONFIRMED"), start=1):
+        with pytest.raises(ValueError, match="positive finite fill economics"):
+            append_trade_fact(
+                conn,
+                trade_id=f"trade-invalid-fill-{state.lower()}",
+                venue_order_id="ord-u2",
+                command_id=command_id,
+                state=state,
+                filled_size="0" if state != "CONFIRMED" else "NaN",
+                fill_price="0.50",
+                source="CHAIN" if state in {"MINED", "CONFIRMED"} else "WS_USER",
+                observed_at=(NOW + timedelta(seconds=20 + seq)).isoformat(),
+                raw_payload_hash=HASH_C,
+                raw_payload_json={"state": state},
+            )
+
+    assert conn.execute("SELECT COUNT(*) FROM venue_trade_facts").fetchone()[0] == 0
+
+
+def test_failed_and_retrying_trade_facts_allow_non_fill_economics(conn):
+    _, _, command_id = _seed_snapshot_envelope_command(conn)
+
+    for seq, state in enumerate(("RETRYING", "FAILED"), start=1):
+        append_trade_fact(
+            conn,
+            trade_id=f"trade-non-fill-{state.lower()}",
+            venue_order_id="ord-u2",
+            command_id=command_id,
+            state=state,
+            filled_size="0",
+            fill_price="0",
+            source="WS_USER",
+            observed_at=(NOW + timedelta(seconds=30 + seq)).isoformat(),
+            raw_payload_hash=HASH_D,
+            raw_payload_json={"state": state},
+        )
+
+    states = [
+        row["state"]
+        for row in conn.execute("SELECT state FROM venue_trade_facts ORDER BY trade_fact_id")
+    ]
+    assert states == ["RETRYING", "FAILED"]
+
+
 def test_position_lots_optimistic_vs_confirmed_split(conn):
     _, _, command_id = _seed_snapshot_envelope_command(conn)
     matched_fact_id = append_trade_fact(
@@ -409,6 +456,35 @@ def test_calibration_training_filters_for_CONFIRMED_only(conn):
 
     with pytest.raises(ValueError, match="CONFIRMED"):
         load_calibration_trade_facts(conn, states=["MATCHED", "MINED"])
+
+
+def test_calibration_training_rejects_confirmed_without_fill_economics(conn):
+    _, _, command_id = _seed_snapshot_envelope_command(conn)
+    conn.execute(
+        """
+        INSERT INTO venue_trade_facts (
+            trade_id, venue_order_id, command_id, state, filled_size,
+            fill_price, source, observed_at, local_sequence,
+            raw_payload_hash, raw_payload_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "trade-confirmed-bad-economics",
+            "ord-u2",
+            command_id,
+            "CONFIRMED",
+            "0",
+            "0.50",
+            "CHAIN",
+            NOW.isoformat(),
+            1,
+            HASH_E,
+            json.dumps({"state": "CONFIRMED"}),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="positive finite fill economics"):
+        load_calibration_trade_facts(conn)
 
 
 def test_optimistic_exposure_rolled_back_on_FAILED_trade(conn):

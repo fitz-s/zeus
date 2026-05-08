@@ -1,7 +1,7 @@
 # Created: 2026-03-30
-# Last reused/audited: 2026-05-05
-# Authority basis: docs/operations/task_2026-04-28_contamination_remediation/plan.md Batch D RiskGuard test-law remediation.
-# Lifecycle: created=2026-03-30; last_reviewed=2026-05-05; last_reused=2026-05-05
+# Last reused/audited: 2026-05-08
+# Authority basis: docs/operations/task_2026-04-28_contamination_remediation/plan.md Batch D RiskGuard test-law remediation; Wave26 verification-noise helper alignment; PR90 current-env fallback review fix.
+# Lifecycle: created=2026-03-30; last_reviewed=2026-05-08; last_reused=2026-05-08
 # Purpose: Guard RiskGuard protective metrics, policy resolution, source authority, and portfolio loader invariants.
 # Reuse: Run after RiskGuard risk details, portfolio loader, settlement source, bankroll, or risk-action changes.
 """Tests for RiskGuard metrics, policy resolution, and risk levels."""
@@ -192,6 +192,7 @@ def _append_verified_settlement_event(
         target_date="2026-04-01",
         bin_label="39-40°F",
         direction="buy_yes",
+        env="live",
         unit="F",
         size_usd=10.0,
         entry_price=0.4,
@@ -324,7 +325,6 @@ def test_current_mode_realized_exits_prefers_verified_settlements_over_outcome_f
 
     exits, source, degraded = riskguard_module._current_mode_realized_exits(
         conn,
-        env="live",
         settlement_rows=settlement_rows,
     )
 
@@ -360,13 +360,57 @@ def test_current_mode_realized_exits_blocks_degraded_settlement_rows_without_out
 
     exits, source, degraded = riskguard_module._current_mode_realized_exits(
         conn,
-        env="live",
         settlement_rows=settlement_rows,
     )
 
     assert source == "authoritative_settlement_rows"
     assert degraded is True
     assert exits == []
+
+
+def test_current_mode_realized_exits_chronicle_fallback_filters_current_env(monkeypatch):
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE chronicle (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_type TEXT NOT NULL,
+            trade_id INTEGER,
+            timestamp TEXT NOT NULL,
+            details_json TEXT NOT NULL,
+            env TEXT NOT NULL
+        )
+        """
+    )
+    for env, pnl in (("live", 99.0), ("test", 4.25)):
+        conn.execute(
+            """
+            INSERT INTO chronicle (event_type, trade_id, timestamp, details_json, env)
+            VALUES ('SETTLEMENT', 101, '2026-04-03T12:00:00+00:00', ?, ?)
+            """,
+            (
+                json.dumps(
+                    {
+                        "city": "NYC",
+                        "range_label": "39-40°F",
+                        "target_date": "2026-04-01",
+                        "direction": "buy_yes",
+                        "exit_reason": "SETTLEMENT",
+                        "pnl": pnl,
+                    }
+                ),
+                env,
+            ),
+        )
+    monkeypatch.setattr(riskguard_module, "get_mode", lambda: "test")
+
+    exits, source, degraded = riskguard_module._current_mode_realized_exits(conn)
+    conn.close()
+
+    assert source == "chronicle_dedup"
+    assert degraded is True
+    assert [exit_row["pnl"] for exit_row in exits] == [4.25]
 
 
 def _insert_risk_state_row(
@@ -464,7 +508,7 @@ def _mock_trailing_loss_tick(
     unrealized_pnl: float = 0.0,
     portfolio: PortfolioState | None = None,
 ) -> None:
-    def _fake_get_connection(path=None):
+    def _fake_get_connection(path=None, **_kwargs):
         if path == riskguard_module.RISK_DB_PATH:
             return get_connection(risk_db)
         return get_connection(zeus_db)
@@ -561,7 +605,7 @@ class TestRiskGuardSettlementSource:
         zeus_db = tmp_path / "zeus.db"
         risk_db = tmp_path / "risk_state.db"
 
-        def _fake_get_connection(path=None):
+        def _fake_get_connection(path=None, **_kwargs):
             if path == riskguard_module.RISK_DB_PATH:
                 return get_connection(risk_db)
             return get_connection(zeus_db)
@@ -739,7 +783,7 @@ class TestRiskGuardSettlementSource:
         zeus_db = tmp_path / "zeus.db"
         risk_db = tmp_path / "risk_state.db"
 
-        def _fake_get_connection(path=None):
+        def _fake_get_connection(path=None, **_kwargs):
             if path == riskguard_module.RISK_DB_PATH:
                 return get_connection(risk_db)
             return get_connection(zeus_db)
@@ -794,7 +838,7 @@ class TestRiskGuardSettlementSource:
         zeus_db = tmp_path / "zeus.db"
         risk_db = tmp_path / "risk_state.db"
 
-        def _fake_get_connection(path=None):
+        def _fake_get_connection(path=None, **_kwargs):
             if path == riskguard_module.RISK_DB_PATH:
                 return get_connection(risk_db)
             return get_connection(zeus_db)
@@ -870,7 +914,7 @@ class TestRiskGuardSettlementSource:
         zeus_db = tmp_path / "zeus.db"
         risk_db = tmp_path / "risk_state.db"
 
-        def _fake_get_connection(path=None):
+        def _fake_get_connection(path=None, **_kwargs):
             if path == riskguard_module.RISK_DB_PATH:
                 return get_connection(risk_db)
             return get_connection(zeus_db)
@@ -897,7 +941,7 @@ class TestRiskGuardSettlementSource:
     def test_get_current_level_fails_closed_when_risk_state_has_no_rows(self, monkeypatch, tmp_path):
         risk_db = tmp_path / "risk_state.db"
 
-        def _fake_get_connection(path=None):
+        def _fake_get_connection(path=None, **_kwargs):
             return get_connection(risk_db)
 
         monkeypatch.setattr(riskguard_module, "get_connection", _fake_get_connection)
@@ -910,7 +954,7 @@ class TestRiskGuardSettlementSource:
         zeus_db = tmp_path / "zeus.db"
         risk_db = tmp_path / "risk_state.db"
 
-        def _fake_get_connection(path=None):
+        def _fake_get_connection(path=None, **_kwargs):
             if path == riskguard_module.RISK_DB_PATH:
                 return get_connection(risk_db)
             return get_connection(zeus_db)
@@ -939,7 +983,7 @@ class TestRiskGuardSettlementSource:
         zeus_db = tmp_path / "zeus.db"
         risk_db = tmp_path / "risk_state.db"
 
-        def _fake_get_connection(path=None):
+        def _fake_get_connection(path=None, **_kwargs):
             if path == riskguard_module.RISK_DB_PATH:
                 return get_connection(risk_db)
             return get_connection(zeus_db)
@@ -967,7 +1011,7 @@ class TestRiskGuardSettlementSource:
         zeus_db = tmp_path / "zeus.db"
         risk_db = tmp_path / "risk_state.db"
 
-        def _fake_get_connection(path=None):
+        def _fake_get_connection(path=None, **_kwargs):
             if path == riskguard_module.RISK_DB_PATH:
                 return get_connection(risk_db)
             return get_connection(zeus_db)
@@ -1000,7 +1044,7 @@ class TestRiskGuardSettlementSource:
         zeus_db = tmp_path / "zeus.db"
         risk_db = tmp_path / "risk_state.db"
 
-        def _fake_get_connection(path=None):
+        def _fake_get_connection(path=None, **_kwargs):
             if path == riskguard_module.RISK_DB_PATH:
                 return get_connection(risk_db)
             return get_connection(zeus_db)
@@ -1021,24 +1065,24 @@ class TestRiskGuardSettlementSource:
         conn.execute("""
             INSERT INTO position_events
             (event_id, position_id, event_version, sequence_no, event_type,
-             occurred_at, strategy_key, source_module, payload_json)
-            VALUES (?,?,?,?,?,?,?,?,?)
+             occurred_at, strategy_key, source_module, env, payload_json)
+            VALUES (?,?,?,?,?,?,?,?,?,?)
         """, ("exec-1:intent:1", "exec-1", 1, 1, "POSITION_OPEN_INTENT",
-               "2026-04-01T10:00:00Z", "center_buy", "test", '{}'))
+               "2026-04-01T10:00:00Z", "center_buy", "test", "live", '{}'))
         conn.execute("""
             INSERT INTO position_events
             (event_id, position_id, event_version, sequence_no, event_type,
-             occurred_at, strategy_key, source_module, payload_json)
-            VALUES (?,?,?,?,?,?,?,?,?)
+             occurred_at, strategy_key, source_module, env, payload_json)
+            VALUES (?,?,?,?,?,?,?,?,?,?)
         """, ("exec-1:filled:2", "exec-1", 1, 2, "ENTRY_ORDER_FILLED",
-               "2026-04-01T10:01:00Z", "center_buy", "test", '{}'))
+               "2026-04-01T10:01:00Z", "center_buy", "test", "live", '{}'))
         conn.execute("""
             INSERT INTO position_events
             (event_id, position_id, event_version, sequence_no, event_type,
-             occurred_at, strategy_key, source_module, payload_json)
-            VALUES (?,?,?,?,?,?,?,?,?)
+             occurred_at, strategy_key, source_module, env, payload_json)
+            VALUES (?,?,?,?,?,?,?,?,?,?)
         """, ("exec-2:rejected:1", "exec-2", 1, 1, "ENTRY_ORDER_REJECTED",
-               "2026-04-01T10:02:00Z", "opening_inertia", "test", '{}'))
+               "2026-04-01T10:02:00Z", "opening_inertia", "test", "live", '{}'))
         conn.commit()
         conn.close()
 
@@ -1060,7 +1104,7 @@ class TestRiskGuardSettlementSource:
         zeus_db = tmp_path / "zeus.db"
         risk_db = tmp_path / "risk_state.db"
 
-        def _fake_get_connection(path=None):
+        def _fake_get_connection(path=None, **_kwargs):
             if path == riskguard_module.RISK_DB_PATH:
                 return get_connection(risk_db)
             return get_connection(zeus_db)
@@ -1568,7 +1612,7 @@ class TestStrategyPolicyResolver:
         zeus_db = tmp_path / "zeus.db"
         risk_db = tmp_path / "risk_state.db"
 
-        def _fake_get_connection(path=None):
+        def _fake_get_connection(path=None, **_kwargs):
             if path == riskguard_module.RISK_DB_PATH:
                 return get_connection(risk_db)
             return get_connection(zeus_db)
@@ -1590,11 +1634,11 @@ class TestStrategyPolicyResolver:
             conn.execute("""
                 INSERT INTO position_events
                 (event_id, position_id, event_version, sequence_no, event_type,
-                 occurred_at, strategy_key, source_module, payload_json)
-                VALUES (?,?,?,?,?,?,?,?,?)
+                 occurred_at, strategy_key, source_module, env, payload_json)
+                VALUES (?,?,?,?,?,?,?,?,?,?)
             """, (f"reject-{i}:rejected:1", f"reject-{i}", 1, 1,
                    "ENTRY_ORDER_REJECTED", "2026-04-01T10:00:00Z",
-                   "center_buy", "test", '{}'))
+                   "center_buy", "test", "live", '{}'))
         conn.commit()
         conn.close()
 
@@ -1620,7 +1664,7 @@ class TestStrategyPolicyResolver:
         zeus_db = tmp_path / "zeus.db"
         risk_db = tmp_path / "risk_state.db"
 
-        def _fake_get_connection(path=None):
+        def _fake_get_connection(path=None, **_kwargs):
             if path == riskguard_module.RISK_DB_PATH:
                 return get_connection(risk_db)
             return get_connection(zeus_db)
@@ -1658,7 +1702,7 @@ class TestStrategyPolicyResolver:
         zeus_db = tmp_path / "zeus.db"
         risk_db = tmp_path / "risk_state.db"
 
-        def _fake_get_connection(path=None):
+        def _fake_get_connection(path=None, **_kwargs):
             if path == riskguard_module.RISK_DB_PATH:
                 return get_connection(risk_db)
             return get_connection(zeus_db)
@@ -1711,7 +1755,7 @@ class TestStrategyPolicyResolver:
         zeus_db = tmp_path / "zeus.db"
         risk_db = tmp_path / "risk_state.db"
 
-        def _fake_get_connection(path=None):
+        def _fake_get_connection(path=None, **_kwargs):
             if path == riskguard_module.RISK_DB_PATH:
                 return get_connection(risk_db)
             return get_connection(zeus_db)
@@ -1766,7 +1810,7 @@ class TestStrategyPolicyResolver:
         zeus_db = tmp_path / "zeus.db"
         risk_db = tmp_path / "risk_state.db"
 
-        def _fake_get_connection(path=None):
+        def _fake_get_connection(path=None, **_kwargs):
             if path == riskguard_module.RISK_DB_PATH:
                 return get_connection(risk_db)
             return get_connection(zeus_db)
@@ -1816,7 +1860,7 @@ class TestStrategyPolicyResolver:
         zeus_db = tmp_path / "zeus.db"
         risk_db = tmp_path / "risk_state.db"
 
-        def _fake_get_connection(path=None):
+        def _fake_get_connection(path=None, **_kwargs):
             if path == riskguard_module.RISK_DB_PATH:
                 return get_connection(risk_db)
             return get_connection(zeus_db)
@@ -1850,7 +1894,7 @@ class TestStrategyPolicyResolver:
         zeus_db = tmp_path / "zeus.db"
         risk_db = tmp_path / "risk_state.db"
 
-        def _fake_get_connection(path=None):
+        def _fake_get_connection(path=None, **_kwargs):
             if path == riskguard_module.RISK_DB_PATH:
                 return get_connection(risk_db)
             return get_connection(zeus_db)
@@ -1881,7 +1925,7 @@ class TestStrategyPolicyResolver:
         zeus_db = tmp_path / "zeus.db"
         risk_db = tmp_path / "risk_state.db"
 
-        def _fake_get_connection(path=None):
+        def _fake_get_connection(path=None, **_kwargs):
             if path == riskguard_module.RISK_DB_PATH:
                 return get_connection(risk_db)
             return get_connection(zeus_db)
@@ -1935,7 +1979,7 @@ class TestStrategyPolicyResolver:
         zeus_db = tmp_path / "zeus.db"
         risk_db = tmp_path / "risk_state.db"
 
-        def _fake_get_connection(path=None):
+        def _fake_get_connection(path=None, **_kwargs):
             if path == riskguard_module.RISK_DB_PATH:
                 return get_connection(risk_db)
             return get_connection(zeus_db)
@@ -2282,7 +2326,7 @@ def test_tick_records_strategy_health_refresh_metadata(monkeypatch, tmp_path):
     zeus_db = tmp_path / "zeus.db"
     risk_db = tmp_path / "risk_state.db"
 
-    def _fake_get_connection(path=None):
+    def _fake_get_connection(path=None, **_kwargs):
         if path == riskguard_module.RISK_DB_PATH:
             return get_connection(risk_db)
         return get_connection(zeus_db)

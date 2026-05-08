@@ -363,12 +363,22 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
             # the legacy row recorded. Capture once, use twice.
             _rescue_ts = datetime.now(timezone.utc).isoformat()
             try:
-                conn.execute(
-                    "INSERT INTO position_events (position_id, sequence_no, event_type, occurred_at, payload, source_module) "
-                    "VALUES (?, (SELECT COALESCE(MAX(sequence_no),0)+1 FROM position_events WHERE position_id=?), ?, ?, ?, ?)",
-                    (
+                columns = {
+                    str(row[1])
+                    for row in conn.execute("PRAGMA table_info(position_events)").fetchall()
+                }
+                if "payload" in columns:
+                    insert_columns = [
+                        "position_id",
+                        "sequence_no",
+                        "event_type",
+                        "occurred_at",
+                        "payload",
+                        "source_module",
+                    ]
+                    values = [
                         getattr(position, "trade_id", ""),
-                        getattr(position, "trade_id", ""),
+                        _next_canonical_sequence_no(getattr(position, "trade_id", "")),
                         "CHAIN_RESCUE_AUDIT",
                         _rescue_ts,
                         json.dumps({
@@ -376,19 +386,25 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                             "shares": getattr(position, "shares", 0.0),
                             "entry_price": getattr(position, "entry_price", 0.0)
                         }),
-                        "src.state.chain_reconciliation_audit"
+                        "src.state.chain_reconciliation_audit",
+                    ]
+                    if "env" in columns:
+                        insert_columns.append("env")
+                        values.append(str(getattr(position, "env", "unknown_env") or "unknown_env"))
+                    conn.execute(
+                        f"""
+                        INSERT INTO position_events ({", ".join(insert_columns)})
+                        VALUES ({", ".join(["?"] * len(insert_columns))})
+                        """,
+                        tuple(values),
                     )
-                )
-                # B063: also append the Phase 2 v2 audit row. This row
-                # carries temperature_metric + causality_status + provenance
-                # authority, which the legacy CHAIN_RESCUE_AUDIT row above
-                # does NOT. Dual-write pattern: keep the legacy row for
-                # existing consumers (test_live_safety_invariants, etc.),
-                # add rescue_events_v2 for the new audit contract.
-                #
-                # Authority resolution lives in the module-level
-                # `resolve_rescue_authority` helper so live code and tests
-                # share the same rule (no copy-paste drift).
+            except Exception as e:
+                logger.warning(f"Failed to durability-log legacy rescue event: {e}")
+            try:
+                # B063: append the Phase 2 v2 audit row independently of the
+                # legacy CHAIN_RESCUE_AUDIT row. Canonical position_events no
+                # longer accepts the legacy event shape, and that compatibility
+                # miss must not suppress the structured authority-bearing row.
                 _metric, _authority, _authority_source = resolve_rescue_authority(position)
                 log_rescue_event(
                     conn,
@@ -402,12 +418,8 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                     authority=_authority,
                     authority_source=_authority_source,
                 )
-                # INFO(DT#1): This commit is exempt from the commit_then_export
-                # choke point. The CHAIN_RESCUE_AUDIT row is itself the
-                # authoritative observability record (not a derived export),
-                # and durability must survive a subsequent cycle crash.
-                # rescue_events_v2 inherits the same exemption rule — it is
-                # an authoritative audit record, not a derived export.
+                # INFO(DT#1): rescue_events_v2 is an authoritative audit
+                # record, not a derived export, so durability is allowed here.
                 conn.commit()
             except Exception as e:
                 logger.error(f"Failed to durability-log rescue event: {e}")

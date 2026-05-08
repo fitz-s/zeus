@@ -30,7 +30,7 @@ import json
 import sqlite3
 import uuid
 from decimal import Decimal, InvalidOperation
-from typing import Any, Iterable, Iterator, Optional
+from typing import Any, Iterable, Iterator, Mapping, Optional
 
 from src.architecture.decorators import capability, protects
 
@@ -152,6 +152,7 @@ _ORDER_FACT_STATES = frozenset(
     }
 )
 _TRADE_FACT_STATES = frozenset({"MATCHED", "MINED", "CONFIRMED", "RETRYING", "FAILED"})
+_TRADE_FILL_ECONOMICS_STATES = frozenset({"MATCHED", "MINED", "CONFIRMED"})
 _POSITION_LOT_STATES = frozenset(
     {
         "OPTIMISTIC_EXPOSURE",
@@ -174,6 +175,28 @@ def _new_id() -> str:
 
 def _row_to_dict(row: sqlite3.Row) -> dict:
     return dict(row)
+
+
+def _positive_finite_decimal_text(value: Any) -> bool:
+    try:
+        parsed = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        return False
+    return parsed.is_finite() and parsed > 0
+
+
+def _row_value(row: Mapping[str, Any] | sqlite3.Row, key: str) -> Any:
+    if isinstance(row, sqlite3.Row):
+        return row[key]
+    return row.get(key)
+
+
+def trade_fact_has_positive_fill_economics(row: Mapping[str, Any] | sqlite3.Row) -> bool:
+    """Return whether a venue trade fact carries executable fill economics."""
+
+    return _positive_finite_decimal_text(
+        _row_value(row, "filled_size")
+    ) and _positive_finite_decimal_text(_row_value(row, "fill_price"))
 
 
 def _payload_default(value):
@@ -972,6 +995,13 @@ def append_trade_fact(
     state = _require_nonempty("state", state)
     if state not in _TRADE_FACT_STATES:
         raise ValueError(f"trade fact state={state!r} is invalid")
+    if state in _TRADE_FILL_ECONOMICS_STATES and not (
+        _positive_finite_decimal_text(filled_size)
+        and _positive_finite_decimal_text(fill_price)
+    ):
+        raise ValueError(
+            f"{state} trade fact requires positive finite fill economics"
+        )
     source = _validate_source(source)
     observed_at_s = _validate_observed_at(observed_at)
     venue_timestamp_s = (
@@ -1151,6 +1181,16 @@ def load_calibration_trade_facts(
         rows = conn.execute(
             "SELECT * FROM venue_trade_facts WHERE state = 'CONFIRMED' ORDER BY observed_at, trade_fact_id"
         ).fetchall()
+    invalid = [
+        str(row["trade_fact_id"] or row["trade_id"] or "?")
+        for row in rows
+        if not trade_fact_has_positive_fill_economics(row)
+    ]
+    if invalid:
+        raise ValueError(
+            "confirmed calibration trade facts missing positive finite fill economics: "
+            + ", ".join(invalid[:5])
+        )
     return [_row_to_dict(row) for row in rows]
 
 

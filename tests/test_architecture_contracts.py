@@ -1,9 +1,9 @@
 # Created: 2026-04-02
-# Last reused/audited: 2026-04-25
-# Lifecycle: created=2026-04-02; last_reviewed=2026-04-25; last_reused=2026-04-25
+# Last reused/audited: 2026-05-07
+# Lifecycle: created=2026-04-02; last_reviewed=2026-05-07; last_reused=2026-05-07
 # Purpose: Protect architecture/schema contracts and high-sensitivity DB bootstrap invariants.
 # Reuse: Audit touched assertions against architecture manifests and scoped AGENTS before extending.
-# Authority basis: midstream verdict v2 2026-04-23 (docs/to-do-list/zeus_midstream_fix_plan_2026-04-23.md T1.a midstream guardian panel)
+# Authority basis: midstream verdict v2 2026-04-23 (docs/to-do-list/zeus_midstream_fix_plan_2026-04-23.md T1.a midstream guardian panel); Wave26 canonical position event env authority
 from __future__ import annotations
 
 import json
@@ -504,6 +504,7 @@ def _canonical_event() -> dict:
         "idempotency_key": "idem-1",
         "venue_status": None,
         "source_module": "test",
+        "env": "live",
         "payload_json": "{}",
     }
 
@@ -542,6 +543,33 @@ def _canonical_projection() -> dict:
         "updated_at": "2026-04-03T00:00:00Z",
         "temperature_metric": "high",
     }
+
+
+def test_position_events_direct_insert_requires_explicit_env():
+    from src.state.db import apply_architecture_kernel_schema
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    apply_architecture_kernel_schema(conn)
+
+    event = dict(_canonical_event())
+    event.pop("env")
+    columns = tuple(event.keys())
+
+    with pytest.raises(
+        sqlite3.IntegrityError,
+        match="position_events.env is required|NOT NULL constraint failed",
+    ):
+        conn.execute(
+            f"""
+            INSERT INTO position_events ({", ".join(columns)})
+            VALUES ({", ".join(["?"] * len(columns))})
+            """,
+            tuple(event[column] for column in columns),
+        )
+
+    assert conn.execute("SELECT COUNT(*) FROM position_events").fetchone()[0] == 0
+    conn.close()
 
 
 def _create_execution_fact_table(conn):
@@ -1457,6 +1485,7 @@ def _runtime_position(
         target_date="2026-04-03",
         bin_label="39-40°F",
         direction="buy_yes",
+        env="live",
         unit="F",
         size_usd=10.0,
         entry_price=0.5,
@@ -3189,8 +3218,8 @@ def test_reconciliation_pending_fill_path_fails_loudly_when_canonical_projection
         INSERT INTO position_events (
             event_id, position_id, event_version, sequence_no, event_type, occurred_at,
             phase_before, phase_after, strategy_key, decision_id, snapshot_id, order_id,
-            command_id, caused_by, idempotency_key, venue_status, source_module, payload_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            command_id, caused_by, idempotency_key, venue_status, source_module, env, payload_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             "evt-missing-projection",
@@ -3210,6 +3239,7 @@ def test_reconciliation_pending_fill_path_fails_loudly_when_canonical_projection
             "idem-missing-projection",
             None,
             "test",
+            "live",
             "{}",
         ),
     )

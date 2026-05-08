@@ -2,8 +2,8 @@
 # Lifecycle: created=2026-03-31; last_reviewed=2026-05-05; last_reused=2026-05-05
 # Purpose: Lock live-money safety invariants across fill, exit, chain, and P&L flows.
 # Reuse: Run for execution finality, live exit, chain reconciliation, and safety invariant changes.
-# Last reused/audited: 2026-05-05
-# Authority basis: midstream verdict v2 2026-04-23; object-meaning invariance Wave10 runtime state and fill-authority exposure boundary.
+# Last reused/audited: 2026-05-07
+# Authority basis: midstream verdict v2 2026-04-23; object-meaning invariance Wave26 explicit position env authority.
 """Live safety invariant tests: relationship tests, not function tests.
 
 These verify cross-module relationships that prevent ghost positions,
@@ -124,6 +124,7 @@ def _make_position(**overrides) -> Position:
         token_id="tok_yes_001",
         no_token_id="tok_no_001",
         unit="F",
+        env="live",
     )
     defaults.update(overrides)
     return Position(**defaults)
