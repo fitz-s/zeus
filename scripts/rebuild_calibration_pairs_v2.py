@@ -173,6 +173,58 @@ def _row_value(row: sqlite3.Row, column: str) -> object | None:
         return None
 
 
+def _table_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
+    columns: set[str] = set()
+    for row in conn.execute(f"PRAGMA table_info({table_name})"):
+        try:
+            columns.add(str(row["name"]))
+        except (TypeError, IndexError):
+            columns.add(str(row[1]))
+    return columns
+
+
+def _append_optional_column_filter(
+    where_parts: list[str],
+    params: list[object],
+    *,
+    column: str,
+    value: str | None,
+    default: str,
+    columns: set[str],
+) -> None:
+    if value is None:
+        return
+    if column in columns:
+        where_parts.append(f"{column} = ?")
+        params.append(value)
+    elif value != default:
+        where_parts.append("1 = 0")
+
+
+def _snapshot_cycle_expr() -> str:
+    return "substr(issue_time, 12, 2)"
+
+
+def _snapshot_source_id_expr(columns: set[str]) -> str:
+    source_column = (
+        "NULLIF(TRIM(source_id), '')"
+        if "source_id" in columns
+        else "NULL"
+    )
+    return (
+        f"COALESCE({source_column}, "
+        "CASE WHEN data_version LIKE 'ecmwf_opendata_%' "
+        "THEN 'ecmwf_open_data' ELSE 'tigge_mars' END)"
+    )
+
+
+def _snapshot_horizon_profile_expr() -> str:
+    return (
+        "CASE WHEN substr(issue_time, 12, 2) IN ('00', '12') "
+        "THEN 'full' ELSE 'short' END"
+    )
+
+
 def _as_nonempty_text(value: object | None) -> str | None:
     if value is None:
         return None
@@ -281,6 +333,9 @@ def _fetch_eligible_snapshots_v2(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     data_version_filter: Optional[str] = None,
+    cycle_filter: Optional[str] = None,
+    source_id_filter: Optional[str] = None,
+    horizon_profile_filter: Optional[str] = None,
 ) -> list[sqlite3.Row]:
     """Pull eligible snapshots from ensemble_snapshots_v2 for the given spec."""
     if spec is None:
@@ -295,6 +350,7 @@ def _fetch_eligible_snapshots_v2(
             f"{spec.allowed_data_versions!r}."
         )
     track = spec.identity.temperature_metric
+    columns = _table_columns(conn, "ensemble_snapshots_v2")
     params: list = [track, MIN_TRAINING_DATE]
     where = (
         "WHERE temperature_metric = ? "
@@ -316,6 +372,15 @@ def _fetch_eligible_snapshots_v2(
     if data_version_filter:
         where += " AND data_version = ?"
         params.append(data_version_filter)
+    if cycle_filter:
+        where += f" AND {_snapshot_cycle_expr()} = ?"
+        params.append(cycle_filter)
+    if source_id_filter:
+        where += f" AND {_snapshot_source_id_expr(columns)} = ?"
+        params.append(source_id_filter)
+    if horizon_profile_filter:
+        where += f" AND {_snapshot_horizon_profile_expr()} = ?"
+        params.append(horizon_profile_filter)
     sql = f"""
         SELECT *
         FROM ensemble_snapshots_v2
@@ -356,27 +421,44 @@ def _fetch_verified_observation(
 
 def _scoped_pair_predicate(
     *,
+    conn: sqlite3.Connection,
     spec: CalibrationMetricSpec,
     city_filter: Optional[str] = None,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     data_version_filter: Optional[str] = None,
+    cycle_filter: Optional[str] = None,
+    source_id_filter: Optional[str] = None,
+    horizon_profile_filter: Optional[str] = None,
 ) -> tuple[str, list]:
-    where = "bin_source = ? AND temperature_metric = ?"
+    columns = _table_columns(conn, "calibration_pairs_v2")
+    where_parts = ["bin_source = ?", "temperature_metric = ?"]
     params: list = [CANONICAL_BIN_SOURCE_V2, spec.identity.temperature_metric]
     if city_filter:
-        where += " AND city = ?"
+        where_parts.append("city = ?")
         params.append(city_filter)
     if start_date:
-        where += " AND target_date >= ?"
+        where_parts.append("target_date >= ?")
         params.append(start_date)
     if end_date:
-        where += " AND target_date <= ?"
+        where_parts.append("target_date <= ?")
         params.append(end_date)
     if data_version_filter:
-        where += " AND data_version = ?"
+        where_parts.append("data_version = ?")
         params.append(data_version_filter)
-    return where, params
+    _append_optional_column_filter(
+        where_parts, params, column="cycle", value=cycle_filter,
+        default="00", columns=columns,
+    )
+    _append_optional_column_filter(
+        where_parts, params, column="source_id", value=source_id_filter,
+        default="tigge_mars", columns=columns,
+    )
+    _append_optional_column_filter(
+        where_parts, params, column="horizon_profile", value=horizon_profile_filter,
+        default="full", columns=columns,
+    )
+    return " AND ".join(where_parts), params
 
 
 def _collect_pre_delete_count(
@@ -387,13 +469,20 @@ def _collect_pre_delete_count(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     data_version_filter: Optional[str] = None,
+    cycle_filter: Optional[str] = None,
+    source_id_filter: Optional[str] = None,
+    horizon_profile_filter: Optional[str] = None,
 ) -> int:
     where, params = _scoped_pair_predicate(
+        conn=conn,
         spec=spec,
         city_filter=city_filter,
         start_date=start_date,
         end_date=end_date,
         data_version_filter=data_version_filter,
+        cycle_filter=cycle_filter,
+        source_id_filter=source_id_filter,
+        horizon_profile_filter=horizon_profile_filter,
     )
     return conn.execute(
         f"SELECT COUNT(*) FROM calibration_pairs_v2 WHERE {where}",
@@ -409,13 +498,20 @@ def _delete_canonical_v2_slice(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     data_version_filter: Optional[str] = None,
+    cycle_filter: Optional[str] = None,
+    source_id_filter: Optional[str] = None,
+    horizon_profile_filter: Optional[str] = None,
 ) -> None:
     where, params = _scoped_pair_predicate(
+        conn=conn,
         spec=spec,
         city_filter=city_filter,
         start_date=start_date,
         end_date=end_date,
         data_version_filter=data_version_filter,
+        cycle_filter=cycle_filter,
+        source_id_filter=source_id_filter,
+        horizon_profile_filter=horizon_profile_filter,
     )
     conn.execute(
         f"DELETE FROM calibration_pairs_v2 WHERE {where}",
@@ -651,6 +747,9 @@ def rebuild_v2(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     data_version_filter: Optional[str] = None,
+    cycle_filter: Optional[str] = None,
+    source_id_filter: Optional[str] = None,
+    horizon_profile_filter: Optional[str] = None,
     n_mc: Optional[int] = None,
     rng: Optional[np.random.Generator] = None,
 ) -> RebuildStatsV2:
@@ -675,6 +774,12 @@ def rebuild_v2(
         print(f"Date filter:       {start_date or '-inf'}..{end_date or '+inf'}")
     if data_version_filter:
         print(f"Data version:      {data_version_filter}")
+    if cycle_filter:
+        print(f"Cycle filter:      {cycle_filter}")
+    if source_id_filter:
+        print(f"Source filter:     {source_id_filter}")
+    if horizon_profile_filter:
+        print(f"Horizon filter:    {horizon_profile_filter}")
     print(f"Bin source tag:    {CANONICAL_BIN_SOURCE_V2!r}")
     print(f"MetricIdentity:    {spec.identity}")
     print(f"n_mc per snapshot: {n_mc or 'default (ensemble_n_mc())'}")
@@ -686,6 +791,9 @@ def rebuild_v2(
         start_date=start_date,
         end_date=end_date,
         data_version_filter=data_version_filter,
+        cycle_filter=cycle_filter,
+        source_id_filter=source_id_filter,
+        horizon_profile_filter=horizon_profile_filter,
     )
     stats.snapshots_scanned = len(snapshots)
 
@@ -711,6 +819,9 @@ def rebuild_v2(
         start_date=start_date,
         end_date=end_date,
         data_version_filter=data_version_filter,
+        cycle_filter=cycle_filter,
+        source_id_filter=source_id_filter,
+        horizon_profile_filter=horizon_profile_filter,
     )
     print(f"Existing canonical_v2 pairs (will delete): {stats.pre_delete_v2_pairs}")
 
@@ -783,6 +894,9 @@ def rebuild_v2(
                 start_date=start_date,
                 end_date=end_date,
                 data_version_filter=data_version_filter,
+                cycle_filter=cycle_filter,
+                source_id_filter=source_id_filter,
+                horizon_profile_filter=horizon_profile_filter,
             )
             for snap in city_snaps:
                 _process_snapshot_v2(
@@ -863,6 +977,9 @@ def rebuild_all_v2(
     end_date: Optional[str] = None,
     data_version_filter: Optional[str] = None,
     temperature_metric: str = "all",
+    cycle_filter: Optional[str] = None,
+    source_id_filter: Optional[str] = None,
+    horizon_profile_filter: Optional[str] = None,
     n_mc: Optional[int] = None,
     rng: Optional[np.random.Generator] = None,
 ) -> dict[str, RebuildStatsV2]:
@@ -890,6 +1007,9 @@ def rebuild_all_v2(
             start_date=start_date,
             end_date=end_date,
             data_version_filter=data_version_filter,
+            cycle_filter=cycle_filter,
+            source_id_filter=source_id_filter,
+            horizon_profile_filter=horizon_profile_filter,
             n_mc=n_mc,
             rng=rng,
         )
@@ -981,6 +1101,9 @@ def main() -> int:
         default=None,
         help="Limit rebuild/delete scope to one ensemble snapshot data_version.",
     )
+    parser.add_argument("--cycle", dest="cycle", default=None, help="Limit rebuild/delete scope to one UTC cycle bucket, e.g. 00 or 12.")
+    parser.add_argument("--source-id", dest="source_id", default=None, help="Limit rebuild/delete scope to one forecast source bucket.")
+    parser.add_argument("--horizon-profile", dest="horizon_profile", default=None, help="Limit rebuild/delete scope to one horizon profile bucket.")
     parser.add_argument(
         "--n-mc", dest="n_mc", type=int, default=None,
         help="Monte Carlo iterations per snapshot (default: ensemble_n_mc() = 10,000).",
@@ -995,6 +1118,44 @@ def main() -> int:
             print(f"ERROR: {type(e).__name__}: {e}", file=sys.stderr)
             return 1
 
+    # M3 (PR #93 critic): --dry-run is read-only. Open with mode=ro URI,
+    # skip schema init, skip PRAGMA journal_mode=WAL, and skip the bulk
+    # writer lock entirely (no writers compete with a read-only opener).
+    if args.dry_run:
+        if args.db_path:
+            uri_path = Path(args.db_path).resolve().as_uri().replace("file://", "file:")
+            conn = sqlite3.connect(f"{uri_path}?mode=ro", uri=True)
+        else:
+            from src.state.db import ZEUS_WORLD_DB_PATH  # noqa: PLC0415
+            uri_path = Path(ZEUS_WORLD_DB_PATH).resolve().as_uri().replace("file://", "file:")
+            conn = sqlite3.connect(f"{uri_path}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout = 600000")
+        try:
+            per_metric = rebuild_all_v2(
+                conn,
+                dry_run=args.dry_run,
+                force=args.force,
+                city_filter=args.city,
+                start_date=args.start_date,
+                end_date=args.end_date,
+                data_version_filter=args.data_version,
+                temperature_metric=args.temperature_metric,
+                cycle_filter=args.cycle,
+                source_id_filter=args.source_id,
+                horizon_profile_filter=args.horizon_profile,
+                n_mc=args.n_mc,
+            )
+        except Exception as e:
+            print(f"ERROR: {type(e).__name__}: {e}", file=sys.stderr)
+            return 1
+        finally:
+            conn.close()
+        any_refused = any(s.refused for s in per_metric.values())
+        return 1 if any_refused else 0
+
+    # PR #86 retrofit (CRITICAL — preserved across PR #93 rebase): wrap the
+    # entire write path in db_writer_lock(BULK).
     from src.state.db import ZEUS_WORLD_DB_PATH  # noqa: PLC0415
     from pathlib import Path as _Path  # noqa: PLC0415
     _lock_path = _Path(args.db_path) if args.db_path else ZEUS_WORLD_DB_PATH
@@ -1002,9 +1163,11 @@ def main() -> int:
         if args.db_path:
             conn = sqlite3.connect(args.db_path)
             conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA busy_timeout = 600000")
             conn.execute("PRAGMA journal_mode=WAL")
         else:
             conn = get_world_connection(write_class="bulk")
+            conn.execute("PRAGMA busy_timeout = 600000")
         init_schema(conn)
         apply_v2_schema(conn)
 
@@ -1018,6 +1181,9 @@ def main() -> int:
                 end_date=args.end_date,
                 data_version_filter=args.data_version,
                 temperature_metric=args.temperature_metric,
+                cycle_filter=args.cycle,
+                source_id_filter=args.source_id,
+                horizon_profile_filter=args.horizon_profile,
                 n_mc=args.n_mc,
             )
         except Exception as e:
@@ -1026,8 +1192,8 @@ def main() -> int:
         finally:
             conn.close()
 
-    any_refused = any(s.refused for s in per_metric.values())
-    return 1 if any_refused else 0
+        any_refused = any(s.refused for s in per_metric.values())
+        return 1 if any_refused else 0
 
 
 if __name__ == "__main__":
