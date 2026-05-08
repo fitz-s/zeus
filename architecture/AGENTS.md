@@ -41,7 +41,6 @@ Changes here are architecture or governance changes, never “just docs.”
 | `zones.yaml` | Zone definitions with import rules (K0-K4) |
 | `negative_constraints.yaml` | 10 negative constraint definitions |
 | `maturity_model.yaml` | Maturity model definitions |
-| `topology_schema.yaml` | Schema for compiled topology graph nodes, enums, and strict issue codes |
 | `topology.yaml` | Initial compiled topology graph for root/src/tests/scripts/docs/config/CI/state/runtime/shadow surfaces |
 | `source_rationale.yaml` | Per-file rationale map for tracked `src/**` files, hazards, and write-route cards |
 | `test_topology.yaml` | Test-suite topology manifest: law gate, categories, high-sensitivity skips, reverse-antibody status |
@@ -52,7 +51,7 @@ Changes here are architecture or governance changes, never “just docs.”
 | `artifact_lifecycle.yaml` | Artifact classification and minimum work-record contract |
 | `context_budget.yaml` | Context budget and maintenance cadence for keeping entry maps/digests slim |
 | `module_manifest.yaml` | Machine registry for dense module books, module routers, and module-level law/current-fact/test links; now includes R3 CutoverGuard, venue adapter, user-channel ingest, strategy benchmark, and risk allocator/governor routes |
-| `context_pack_profiles.yaml` | Task-shaped context-pack profiles for generated agent work packets |
+| `context_pack_profiles.yaml` | Registry of digest profile context routes; consumed by digest emission. Standalone context-pack/semantic-bootstrap subcommands retired in PR #71 — use `--navigation --task-class`. |
 | `task_boot_profiles.yaml` | Question-first semantic boot profiles for source/settlement/hourly/Day0/calibration/docs/graph tasks |
 | `fatal_misreads.yaml` | Machine-readable fatal semantic shortcut antibodies |
 | `city_truth_contract.yaml` | Stable city/source/date truth contract schema and evidence taxonomy |

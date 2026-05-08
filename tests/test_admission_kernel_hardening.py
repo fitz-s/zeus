@@ -71,7 +71,6 @@ def test_modify_topology_kernel_admits_admission_files():
             "scripts/topology_doctor.py",
             "scripts/topology_doctor_digest.py",
             "architecture/topology.yaml",
-            "architecture/topology_schema.yaml",
             "tests/test_digest_admission_policy.py",
         ],
     )

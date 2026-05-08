@@ -1364,33 +1364,6 @@ def build_graph_appendix(files: list[str], task: str | None = None) -> dict[str,
     return _code_review_graph_checks().build_graph_appendix(sys.modules[__name__], files, task=task)
 
 
-def _context_pack_checks():
-    try:
-        from scripts import topology_doctor_context_pack
-    except ModuleNotFoundError:  # direct script execution from scripts/
-        import topology_doctor_context_pack
-
-    return topology_doctor_context_pack
-
-
-def build_impact(files: list[str]) -> dict[str, Any]:
-    return _context_pack_checks().build_impact(sys.modules[__name__], files)
-
-
-def _context_pack_profiles() -> dict[str, dict[str, Any]]:
-    return _context_pack_checks().context_pack_profiles(sys.modules[__name__])
-
-
-def run_context_packs() -> StrictResult:
-    return _context_pack_checks().run_context_packs(sys.modules[__name__])
-
-
-def run_module_books() -> StrictResult:
-    return _context_pack_checks().run_module_books(sys.modules[__name__])
-
-
-def run_module_manifest() -> StrictResult:
-    return _context_pack_checks().run_module_manifest(sys.modules[__name__])
 
 
 def _artifact_checks():
@@ -1485,177 +1458,6 @@ def run_closeout(
         issue_schema_version=issue_schema_version,
     )
 
-
-
-def _strict_result_summary(result: StrictResult) -> dict[str, Any]:
-    return _context_pack_checks().strict_result_summary(sys.modules[__name__], result)
-
-
-def _route_health_for_context_pack(files: list[str]) -> dict[str, Any]:
-    return _context_pack_checks().route_health_for_context_pack(sys.modules[__name__], files)
-
-
-def _repo_health_for_context_pack() -> dict[str, Any]:
-    return _context_pack_checks().repo_health_for_context_pack(sys.modules[__name__])
-
-
-def _proof_claims_for_files(files: list[str]) -> list[dict[str, Any]]:
-    return _context_pack_checks().proof_claims_for_files(sys.modules[__name__], files)
-
-
-def _lore_summary(card: dict[str, Any], *, reason: str) -> dict[str, Any]:
-    return _context_pack_checks().lore_summary(card, reason=reason)
-
-
-def _layered_history_lore(task: str, files: list[str]) -> dict[str, Any]:
-    return _context_pack_checks().layered_history_lore(sys.modules[__name__], task, files)
-
-
-def _context_pack_contract_surfaces(impact: dict[str, Any], claims: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return _context_pack_checks().context_pack_contract_surfaces(impact, claims)
-
-
-def _context_pack_coverage_gaps(impact: dict[str, Any], files: list[str]) -> list[dict[str, Any]]:
-    return _context_pack_checks().context_pack_coverage_gaps(impact, files)
-
-
-def _context_pack_downstream_risks(impact: dict[str, Any]) -> list[dict[str, Any]]:
-    return _context_pack_checks().context_pack_downstream_risks(impact)
-
-
-def _context_pack_questions(
-    profile: dict[str, Any],
-    impact: dict[str, Any],
-    claims: list[dict[str, Any]],
-    gaps: list[dict[str, Any]],
-) -> list[str]:
-    return _context_pack_checks().context_pack_questions(profile, impact, claims, gaps)
-
-
-def _debug_red_green_checks(
-    *,
-    files: list[str],
-    impact: dict[str, Any],
-    claims: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    return _context_pack_checks().debug_red_green_checks(files=files, impact=impact, claims=claims)
-
-
-def _debug_suspected_boundaries(
-    impact: dict[str, Any],
-    claims: list[dict[str, Any]],
-    gaps: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    return _context_pack_checks().debug_suspected_boundaries(impact, claims, gaps)
-
-
-def build_debug_context_pack(task: str, files: list[str]) -> dict[str, Any]:
-    return _context_pack_checks().build_debug_context_pack(sys.modules[__name__], task, files)
-
-
-def _looks_like_package_review(task: str, files: list[str]) -> bool:
-    return _context_pack_checks().looks_like_package_review(sys.modules[__name__], task, files)
-
-
-def _looks_like_debug(task: str, files: list[str]) -> bool:
-    return _context_pack_checks().looks_like_debug(sys.modules[__name__], task, files)
-
-
-def _infer_task_class(task: str, files: list[str]) -> str | None:
-    return _context_pack_checks().infer_task_class(sys.modules[__name__], task, files)
-
-
-def build_semantic_bootstrap(task_class: str, *, task: str = "", files: list[str] | None = None) -> dict[str, Any]:
-    return _context_pack_checks().build_semantic_bootstrap(
-        sys.modules[__name__],
-        task_class,
-        task=task,
-        files=files or [],
-    )
-
-
-def build_package_review_context_pack(task: str, files: list[str]) -> dict[str, Any]:
-    return _context_pack_checks().build_package_review_context_pack(sys.modules[__name__], task, files)
-
-
-def build_context_pack(
-    pack_type: str,
-    *,
-    task: str,
-    files: list[str],
-    task_class: str | None = None,
-    intent: str | None = None,
-    write_intent: str | None = None,
-    claims: list[str] | None = None,
-) -> dict[str, Any]:
-    return _context_pack_checks().build_context_pack(
-        sys.modules[__name__],
-        pack_type,
-        task=task,
-        files=files,
-        task_class=task_class,
-        intent=intent,
-        write_intent=write_intent,
-        claims=claims,
-    )
-
-
-
-def _core_map_checks():
-    try:
-        from scripts import topology_doctor_core_map
-    except ModuleNotFoundError:  # direct script execution from scripts/
-        import topology_doctor_core_map
-
-    return topology_doctor_core_map
-
-
-def _core_map_profiles() -> dict[str, dict[str, Any]]:
-    return _core_map_checks().core_map_profiles(sys.modules[__name__])
-
-
-def _source_entry_by_path() -> dict[str, dict[str, Any]]:
-    return _core_map_checks().source_entry_by_path(sys.modules[__name__])
-
-
-def _validate_proof_target_exists(target: dict[str, Any]) -> bool:
-    return _core_map_checks().validate_proof_target_exists(sys.modules[__name__], target)
-
-
-def _locator_exists(path: str, locator: str | None) -> bool:
-    return _core_map_checks().locator_exists(sys.modules[__name__], path, locator)
-
-
-def _proof_contains(path: str, needle: str) -> bool:
-    return _core_map_checks().proof_contains(sys.modules[__name__], path, needle)
-
-
-def _edge_proof_status(
-    edge: dict[str, Any],
-    *,
-    node_ids: set[str],
-    node_files: dict[str, str],
-    source_entries: dict[str, dict[str, Any]],
-) -> tuple[str, str | None]:
-    return _core_map_checks().edge_proof_status(
-        sys.modules[__name__],
-        edge,
-        node_ids=node_ids,
-        node_files=node_files,
-        source_entries=source_entries,
-    )
-
-
-def _core_map_forbidden_hits(payload: dict[str, Any], phrases: list[Any]) -> list[str]:
-    return _core_map_checks().core_map_forbidden_hits(payload, phrases)
-
-
-def build_core_map(profile_id: str) -> dict[str, Any]:
-    return _core_map_checks().build_core_map(sys.modules[__name__], profile_id)
-
-
-def run_core_maps() -> StrictResult:
-    return _core_map_checks().run_core_maps(sys.modules[__name__])
 
 
 def _digest_checks():
@@ -2738,11 +2540,7 @@ def run_navigation(
         if "graph_impact_validated" in requested_claims
         else None
     )
-    semantic_bootstrap = (
-        build_semantic_bootstrap(task_class, task=task, files=requested_paths)
-        if "semantic_boot_answered" in requested_claims and task_class
-        else None
-    )
+    semantic_bootstrap = None
     claim_evaluation = build_runtime_claim_evaluation(
         requested_claims,
         admission_status=admission_status,
@@ -2838,97 +2636,6 @@ def run_navigation(
     }
 
 
-def build_runtime_packet(
-    *,
-    task: str,
-    files: list[str] | None = None,
-    intent: str | None = None,
-    task_class: str | None = None,
-    write_intent: str | None = None,
-    role: str | None = None,
-    claims: list[str] | None = None,
-    operation_stage: str | None = None,
-    mutation_surfaces: list[str] | None = None,
-    side_effect: str | None = None,
-    artifact_target: str | None = None,
-    merge_state: str | None = None,
-    route_card_only: bool = False,
-) -> dict[str, Any]:
-    target_files = files or []
-    navigation = run_navigation(
-        task,
-        target_files,
-        intent=intent,
-        task_class=task_class,
-        write_intent=write_intent,
-        claims=claims,
-        operation_stage=operation_stage,
-        mutation_surfaces=mutation_surfaces,
-        side_effect=side_effect,
-        artifact_target=artifact_target,
-        merge_state=merge_state,
-    )
-    if route_card_only:
-        return {"ok": navigation["ok"], "route_card": navigation["route_card"]}
-
-    semantic_bootstrap = (
-        build_semantic_bootstrap(task_class, task=task, files=target_files)
-        if task_class
-        else None
-    )
-    role_context = None
-    if role and target_files:
-        role_context = build_context_pack(
-            role,
-            task=task,
-            files=target_files,
-            task_class=task_class,
-            intent=intent,
-            write_intent=write_intent,
-            claims=claims,
-        )
-
-    route_card = navigation.get("route_card") or {}
-    dispatch_guidance = {
-        "authority_status": "generated_dispatch_guidance_not_authority",
-        "default_mode": "solo",
-        "parallelism_rule": (
-            "Use subagents only for independent bounded tasks when explicitly "
-            "authorized by the user or when OMX team runtime is active."
-        ),
-        "role_prompt_shape": [
-            "authority reads and topology command",
-            "single task objective",
-            "owned files and non-goals",
-            "invariants that must not move",
-            "required verification and rollback note",
-            "preserve unrelated dirty work",
-        ],
-        "team_threshold": "consider team mode only for four or more independent lanes with shared verification",
-    }
-    return {
-        "ok": navigation["ok"],
-        "authority_status": "generated_runtime_packet_not_authority",
-        "task": task,
-        "files": target_files,
-        "route_card": route_card,
-        "admission": navigation.get("admission", {}),
-        "claim_evaluation": navigation.get("claim_evaluation", {}),
-        "semantic_bootstrap": semantic_bootstrap,
-        "role_context": role_context,
-        "dispatch_guidance": dispatch_guidance,
-        "gate_budget": route_card.get("gate_budget"),
-        "artifact_treatment_hints": [
-            "keep scratch analysis out of authority surfaces",
-            "promote stable lessons through manifests, module books, tests, or source",
-            "record durable packet evidence only when an active gate or handoff consumes it",
-            "close complete operations with a compact feedback capsule in the final response or an already-required packet surface",
-            "make topology capsule notes diagnostic: route/admission/risk, semantic match, help, friction, next delta or none_observed",
-            "route direct feedback with intent 'direct operation feedback capsule'; do not persist it under .omx/context",
-        ],
-    }
-
-
 def _admission_typed_issue(
     admission: dict[str, Any], schema_version: str
 ) -> dict[str, Any] | None:
@@ -2996,11 +2703,6 @@ def _admission_typed_issue(
         issue["owner_manifest"] = "architecture/topology.yaml"
         issue["repair_kind"] = "scope_expansion"
     return issue
-
-
-
-def build_compiled_topology() -> dict[str, Any]:
-    return _core_map_checks().build_compiled_topology(sys.modules[__name__])
 
 
 def format_issues(issues: list[TopologyIssue]) -> str:

@@ -3,7 +3,7 @@ schema_version: 1
 # endorsed inlining the 6-line summary into root AGENTS.md "Code Review Graph"
 # section as authoritative). This file is retained as a stub to preserve the
 # topology_doctor `--code-review-graph-protocol` validator (5 scripts depend on
-# the field shape: scripts/topology_doctor*.py + architecture/topology_schema.yaml
+# the field shape: scripts/topology_doctor*.py
 # issue codes `code_review_graph_protocol_*`). Full removal requires patching
 # those 5 scripts (~150 LOC) and is deferred to a separate script-aware batch.
 # READ AGENTS.md root §Code Review Graph for the authoritative 6-line summary.
@@ -30,7 +30,7 @@ stages:
   - id: semantic_boot
     order: 1
     required: true
-    command: python3 scripts/topology_doctor.py semantic-bootstrap --task-class <class> --task "<task>" --files <files> --json
+    command: python3 scripts/topology_doctor.py --navigation --task-class <class> --task "<task>" --files <files> --json
     purpose: "Lock task class, current facts, fatal misreads, and required proof questions before graph use."
   - id: graph_context
     order: 2
@@ -70,5 +70,5 @@ forbidden_uses:
 
 verification_gates:
   - python3 scripts/topology_doctor.py --code-review-graph-protocol --json
-  - python3 scripts/topology_doctor.py semantic-bootstrap --task-class graph_review --task "graph review" --files scripts/topology_doctor.py --json
+  - python3 scripts/topology_doctor.py --navigation --task-class graph_review --task "graph review" --files scripts/topology_doctor.py --json
   - code-review-graph status --repo <repo-root>

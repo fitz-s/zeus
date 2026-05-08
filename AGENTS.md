@@ -331,19 +331,19 @@ it is not a current per-city truth table.
 
 ### Additional topology commands
 
+- `python3 scripts/topology_doctor.py --navigation --task "<task>" --intent <intent> --write-intent <write-intent> --files <files>` — typed-intent navigation, the canonical pre-edit gate
 - `python3 scripts/topology_doctor.py --planning-lock --changed-files <files>` — check if changes require planning evidence
 - `python3 scripts/topology_doctor.py --map-maintenance --changed-files <files>` — check companion registry updates
 - `python3 scripts/topology_doctor.py --code-review-graph-status --json` — Code Review Graph freshness
-- `python3 scripts/topology_doctor.py impact --files <files>` — source impact summary
-- `python3 scripts/topology_doctor.py context-pack --task "<task>" --files <files>` — full agent context packet
 
 ### Code Review Graph
 
 Two stages. Stage 1 (required): semantic boot via
-`python3 scripts/topology_doctor.py semantic-bootstrap --task-class <class>
---task "<task>" --files <files> --json` — locks task class, current facts,
-fatal misreads, and required proof questions. Stage 2 (optional): graph
-context via `python3 scripts/topology_doctor.py --code-review-graph-status
+`python3 scripts/topology_doctor.py --navigation --task-class <class>
+--task "<task>" --files <files> --json` — emits typed-intent admission,
+current facts, fatal-misread guards, and required proof questions in one
+payload. Stage 2 (optional): graph context via
+`python3 scripts/topology_doctor.py --code-review-graph-status
 --changed-files <files> --json` — file discovery, callers, impacted tests,
 blast radius, review order. Stage 2 NEVER supplies semantic truth, source
 validity, current facts, or authority rank. Prefer official upstream

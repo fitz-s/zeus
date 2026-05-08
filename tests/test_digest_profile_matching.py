@@ -1774,7 +1774,6 @@ def test_actual_profile_resolver_stability_diff_does_not_route_to_live_readiness
         [
             "architecture/digest_profiles.py",
             "architecture/topology.yaml",
-            "architecture/topology_schema.yaml",
             "docs/operations/AGENTS.md",
             "docs/archives/packets/task_2026-04-29_topology_profile_resolver_stability/plan.md",
             "docs/archives/packets/task_2026-04-29_topology_profile_resolver_stability/receipt.json",

@@ -13,7 +13,6 @@ The Code Review Graph is derived structural context for Zeus. It helps reviewers
 - `.code-review-graph/graph.db` is tracked derived context, not law.
 - `.code-review-graph/README.md` describes local graph artifact posture.
 - `scripts/topology_doctor_code_review_graph.py` checks graph status.
-- `scripts/topology_doctor_context_pack.py` may include bounded graph appendices.
 
 ## How it works
 
@@ -29,7 +28,7 @@ Graph usage has two stages. Stage 1 is semantic boot: identify task class, autho
 - Graph status includes a generated health card with DB tracking, branch/head
   parity, changed-file coverage, sidecar parity, claim invalidation, and refresh
   instruction fields.
-- `requires_graph_evidence` stays `false` on existing context-pack profiles; stale or missing graph is advisory unless a future profile explicitly opts in.
+- `requires_graph_evidence` stays `false` on existing digest profiles; stale or missing graph is advisory unless a future profile explicitly opts in.
 - Closeout may pass with stale graph when the packet does not claim graph
   impact and does not directly change graph artifacts. Passing
   `--claim graph_impact_validated` makes graph freshness a blocker for that
@@ -47,7 +46,7 @@ Graph usage has two stages. Stage 1 is semantic boot: identify task class, autho
 ## Repair routes
 
 - Use `refresh_graph` only for graph freshness/coverage issues.
-- Use context-pack graph appendices for small derived explanations, not authority claims.
+- Use `--navigation` graph context appendices for small derived explanations, not authority claims.
 - Keep graph checks claim-scoped unless task boot profiles require them.
 - Prefer official `code-review-graph status/update/watch` operations over repo-local inventions.
 

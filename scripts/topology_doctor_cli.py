@@ -32,9 +32,6 @@ def build_parser(description: str | None = None) -> argparse.ArgumentParser:
     parser.add_argument("--artifact-lifecycle", action="store_true", help="Run artifact lifecycle/classification checks")
     parser.add_argument("--work-record", action="store_true", help="Check that repo-changing work has a short work record")
     parser.add_argument("--change-receipts", action="store_true", help="Check high-risk route/change receipts")
-    parser.add_argument("--context-packs", action="store_true", help="Run context-pack profile checks")
-    parser.add_argument("--module-books", action="store_true", help="Check module-book registration and launcher routing")
-    parser.add_argument("--module-manifest", action="store_true", help="Check module manifest coherence and target paths")
     parser.add_argument("--ownership", action="store_true", help="Check manifest fact ownership and issue owner metadata")
     parser.add_argument("--current-state-receipt-bound", action="store_true", help="Check current_state receipt-bound pointer integrity")
     parser.add_argument("--agents-coherence", action="store_true", help="Check scoped AGENTS prose against machine maps")
@@ -47,7 +44,6 @@ def build_parser(description: str | None = None) -> argparse.ArgumentParser:
     parser.add_argument("--code-review-graph-protocol", action="store_true", help="Check two-stage Code Review Graph protocol")
     parser.add_argument("--reference-replacement", action="store_true", help="Check reference replacement matrix")
     parser.add_argument("--core-claims", action="store_true", help="Check proof-backed core claim registry")
-    parser.add_argument("--core-maps", action="store_true", help="Check core-map profile compilation")
     parser.add_argument("--naming-conventions", action="store_true", help="Check canonical file/function naming map")
     parser.add_argument("--freshness-metadata", action="store_true", help="Check changed scripts/tests for lifecycle freshness headers")
     parser.add_argument("--code-review-graph-status", action="store_true", help="Check local Code Review Graph cache freshness")
@@ -131,39 +127,12 @@ def build_parser(description: str | None = None) -> argparse.ArgumentParser:
     digest.add_argument("--claim", action="append", default=[], help="Runtime completion claim to include in the route card")
     digest.add_argument("--json", action="store_true", help="Emit JSON")
 
-    runtime = sub.add_parser("runtime", help="Emit composed agent runtime packet")
-    runtime.add_argument("--task", required=True, help="Task statement")
-    runtime.add_argument("--files", nargs="*", default=[], help="Files in scope")
-    runtime.add_argument("--intent", default=None, help="Typed digest profile id")
-    runtime.add_argument("--task-class", default=None, help="Typed semantic boot task class")
-    runtime.add_argument("--write-intent", default=None, help="Runtime write intent: read_only, edit, apply, live, production")
-    runtime.add_argument("--operation-stage", default=None, help="Typed operation stage")
-    runtime.add_argument("--mutation-surface", action="append", default=[], help="Typed mutation surface; repeat for multiple surfaces")
-    runtime.add_argument("--side-effect", default=None, help="Typed side effect")
-    runtime.add_argument("--artifact-target", default=None, help="Typed artifact target")
-    runtime.add_argument("--merge-state", default=None, help="Typed merge state")
-    runtime.add_argument("--role", choices=["explorer", "executor", "critic", "verifier"], default=None, help="Optional role context pack")
-    runtime.add_argument("--claim", action="append", default=[], help="Runtime completion claim to evaluate")
-    runtime.add_argument("--route-card-only", action="store_true", help="Emit only route card wrapper")
-    runtime.add_argument("--json", action="store_true", help="Emit JSON")
-
     packet = sub.add_parser("packet", help="Emit prefilled packet front matter from topology scope")
     packet.add_argument("--packet-type", default="refactor", choices=["refactor"], help="Packet template type")
     packet.add_argument("--scope", default="", help="Directory or file scope")
     packet.add_argument("--files", nargs="*", default=[], help="Concrete files in scope")
     packet.add_argument("--task", default="", help="Task statement")
     packet.add_argument("--json", action="store_true", help="Emit JSON")
-
-    impact = sub.add_parser("impact", help="Emit provisional source impact summary")
-    impact.add_argument("--files", nargs="+", required=True, help="Source files to inspect")
-    impact.add_argument("--json", action="store_true", help="Emit JSON")
-
-    core_map = sub.add_parser("core-map", help="Emit generated core working map")
-    core_map.add_argument("--profile", required=True, help="Core-map profile id")
-    core_map.add_argument("--json", action="store_true", help="Emit JSON")
-
-    compiled_topology = sub.add_parser("compiled-topology", help="Emit derived compiled topology read model")
-    compiled_topology.add_argument("--json", action="store_true", help="Emit JSON")
 
     closeout = sub.add_parser("closeout", help="Emit compiled closeout result for a scoped change set")
     closeout.add_argument("--changed-files", nargs="*", default=[], help="Files in the closeout scope; omitted prefers staged files, else uses git status")
@@ -179,24 +148,6 @@ def build_parser(description: str | None = None) -> argparse.ArgumentParser:
         default=argparse.SUPPRESS,
         help="Issue JSON schema version for closeout issue payloads",
     )
-
-    context_pack = sub.add_parser("context-pack", help="Emit task-shaped agent context packet")
-    context_pack.add_argument(
-        "--pack-type",
-        default="auto",
-        choices=["auto", "package_review", "debug", "explorer", "executor", "critic", "verifier"],
-        help="Context-pack profile",
-    )
-    context_pack.add_argument("--task", required=True, help="Task statement")
-    context_pack.add_argument("--files", nargs="+", required=True, help="Files in the reviewed package")
-    context_pack.add_argument("--task-class", default=None, help="Optional semantic boot task class")
-    context_pack.add_argument("--json", action="store_true", help="Emit JSON")
-
-    semantic_bootstrap = sub.add_parser("semantic-bootstrap", help="Emit task-class semantic bootstrap")
-    semantic_bootstrap.add_argument("--task-class", required=True, help="Semantic boot task class")
-    semantic_bootstrap.add_argument("--task", default="", help="Task statement")
-    semantic_bootstrap.add_argument("--files", nargs="*", default=[], help="Files in scope")
-    semantic_bootstrap.add_argument("--json", action="store_true", help="Emit JSON")
 
     current_state = sub.add_parser("current-state", help="Emit generated current_state candidate from receipt")
     current_state.add_argument("--from-receipt", required=True, help="Receipt JSON path")
@@ -350,9 +301,6 @@ def run_flag_command(api: Any, args: argparse.Namespace) -> int | None:
         ("history_lore", api.run_history_lore),
         ("context_budget", api.run_context_budget),
         ("artifact_lifecycle", api.run_artifact_lifecycle),
-        ("context_packs", api.run_context_packs),
-        ("module_books", api.run_module_books),
-        ("module_manifest", api.run_module_manifest),
         ("ownership", api.run_ownership),
         ("current_state_receipt_bound", api.run_current_state_receipt_bound),
         ("agents_coherence", api.run_agents_coherence),
@@ -365,7 +313,6 @@ def run_flag_command(api: Any, args: argparse.Namespace) -> int | None:
         ("code_review_graph_protocol", api.run_code_review_graph_protocol),
         ("reference_replacement", api.run_reference_replacement),
         ("core_claims", api.run_core_claims),
-        ("core_maps", api.run_core_maps),
         ("naming_conventions", api.run_naming_conventions),
     ]
     for attr, fn in commands:
@@ -511,24 +458,6 @@ def run_subcommand(api: Any, args: argparse.Namespace, parser: argparse.Argument
             as_json=args.json,
         )
         return 0
-    if args.command == "runtime":
-        payload = api.build_runtime_packet(
-            task=args.task,
-            files=args.files,
-            intent=args.intent,
-            task_class=args.task_class,
-            write_intent=args.write_intent,
-            operation_stage=args.operation_stage,
-            mutation_surfaces=args.mutation_surface,
-            side_effect=args.side_effect,
-            artifact_target=args.artifact_target,
-            merge_state=args.merge_state,
-            role=args.role,
-            claims=args.claim,
-            route_card_only=args.route_card_only,
-        )
-        render_payload(api, payload, as_json=args.json)
-        return 0 if payload.get("ok") else 1
     if args.command == "packet":
         payload = api.build_packet_prefill(
             packet_type=args.packet_type,
@@ -537,20 +466,6 @@ def run_subcommand(api: Any, args: argparse.Namespace, parser: argparse.Argument
             files=args.files,
         )
         render_payload(api, payload, as_json=args.json)
-        return 0
-    if args.command == "impact":
-        render_payload(api, api.build_impact(args.files), as_json=args.json)
-        return 0
-    if args.command == "core-map":
-        try:
-            payload = api.build_core_map(args.profile)
-        except ValueError as exc:
-            print(f"core-map failed: {exc}", file=sys.stderr)
-            return 1
-        render_payload(api, payload, as_json=args.json)
-        return 0 if not payload.get("invalid") else 1
-    if args.command == "compiled-topology":
-        render_payload(api, api.build_compiled_topology(), as_json=args.json)
         return 0
     if args.command == "closeout":
         payload = api.run_closeout(
@@ -610,18 +525,6 @@ def run_subcommand(api: Any, args: argparse.Namespace, parser: argparse.Argument
                         f"(blocking={summary['blocking_count']}, warnings={summary['warning_count']})"
                     )
         return 0 if payload["ok"] else 1
-    if args.command == "context-pack":
-        try:
-            payload = api.build_context_pack(args.pack_type, task=args.task, files=args.files, task_class=args.task_class)
-        except ValueError as exc:
-            print(f"context-pack failed: {exc}", file=sys.stderr)
-            return 1
-        render_payload(api, payload, as_json=args.json)
-        return 0
-    if args.command == "semantic-bootstrap":
-        payload = api.build_semantic_bootstrap(args.task_class, task=args.task, files=args.files)
-        render_payload(api, payload, as_json=args.json)
-        return 0 if payload.get("ok") else 1
     if args.command == "current-state":
         payload = api.build_current_state_candidate(args.from_receipt)
         render_payload(api, payload, as_json=args.json)

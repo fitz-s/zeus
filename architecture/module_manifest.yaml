@@ -23,7 +23,7 @@ placeholder_policy:
   law_dependencies: "Populate in P1/P2 from active law and machine manifests."
   current_fact_dependencies: "Populate only where a module genuinely depends on time-bound operational facts."
   required_tests: "Populate with load-bearing current tests, not exhaustive catalogs."
-  graph_appendix_status: "Tracked-only placeholder until graph/context-pack support lands."
+  graph_appendix_status: "Tracked-only placeholder; graph appendices stay derived context, never authority."
   archive_extraction_status: "Tracked-only placeholder until archive extraction review lands."
 
 modules:
@@ -720,7 +720,6 @@ modules:
       - scripts/topology_doctor.py
     law_dependencies:
       - architecture/topology.yaml
-      - architecture/topology_schema.yaml
       - docs/authority/zeus_current_delivery.md
     current_fact_dependencies:
       - docs/operations/current_state.md

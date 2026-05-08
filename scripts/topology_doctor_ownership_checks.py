@@ -2,8 +2,8 @@
 # Lifecycle: created=2026-04-25; last_reviewed=2026-04-25; last_reused=2026-05-06
 # Purpose: Validate manifest fact-type ownership and module-manifest maturity.
 # Reuse: fact_types and maturity_values are inlined as module constants (R12 option b).
-# R12 (2026-05-06): ownership block inlined from topology_schema.yaml; schema consumers
-#   for issue_json_contract / agent_runtime_contract remain in topology_schema.yaml
+# R12 (2026-05-06): ownership block inlined from topology_schema.yaml; that file was
+#   deleted in the same cleanup. Schema consumers now read inline constants in topology_doctor.py.
 #   pending Phase 5 full deletion.
 
 from __future__ import annotations
