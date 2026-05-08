@@ -65,10 +65,12 @@ hooks:
     event: PreToolUse
     matcher: Bash
     intent: >
-      Advisory on `gh pr create` when <2 commits or <80 LOC since branch base.
-      Reminds about paid-reviewer spend. ADVISORY: emits context; never blocks.
-    blocked_when: []
-    severity: ADVISORY
+      BLOCKING when commits < 2 AND LOC < 80 since branch base (both conditions).
+      Reminds about paid-reviewer spend. Bypass: ZEUS_PR_ALLOW_TINY=1 (degrades to advisory).
+    blocked_when:
+      - commits_since_base < 2 AND loc_since_base < 80
+    severity: BLOCKING
+    bypass_env: ZEUS_PR_ALLOW_TINY
     sunset_date: 2026-08-06
     telemetry:
       ritual_signal_emitted: true

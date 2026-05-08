@@ -41,6 +41,10 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 REGISTRY_PATH = REPO_ROOT / ".claude" / "hooks" / "registry.yaml"
 LOG_DIR = REPO_ROOT / ".claude" / "logs" / "hook_signal"
 
+# Sentinel returned by a blocking check to signal the main dispatcher to exit 2.
+# The blocking check writes the human-readable reason to stderr before returning this.
+_BLOCK_SENTINEL = "__BLOCK__"
+
 
 # ---------------------------------------------------------------------------
 # YAML loading
@@ -222,7 +226,8 @@ def _run_advisory_check_pr_create_loc_accumulation(
     payload: dict[str, Any],
 ) -> str | None:
     """
-    Advisory for `gh pr create` / `gh pr ready` when commits < 2 OR LOC < 80.
+    BLOCKING when commits < 2 AND LOC < 80 (both conditions must be true to block).
+    Bypass: set ZEUS_PR_ALLOW_TINY=1 to degrade to advisory-only.
     Command-head anchored regex prevents self-DoS on echo/heredoc content.
     """
     command = _command_from_payload(payload)
@@ -233,6 +238,8 @@ def _run_advisory_check_pr_create_loc_accumulation(
     # Anchored to command head: optional leading env VAR=val pairs, then gh pr create|ready
     if not re.search(r"^\s*(?:env\s+\S+\s+)*gh\s+pr\s+(create|ready)\b", command):
         return None
+
+    bypass_active = os.environ.get("ZEUS_PR_ALLOW_TINY", "").strip() == "1"
 
     # Count commits since base
     try:
@@ -277,22 +284,34 @@ def _run_advisory_check_pr_create_loc_accumulation(
     COMMIT_THRESHOLD = 2
     LOC_THRESHOLD = 80
 
-    if commit_count >= COMMIT_THRESHOLD and loc >= LOC_THRESHOLD:
+    # Both conditions must be true to trigger the block: too few commits AND too little LOC
+    is_tiny = commit_count < COMMIT_THRESHOLD and loc < LOC_THRESHOLD
+    if not is_tiny:
         return None
 
-    return (
-        f"ADVISORY: PR open about to fire paid auto-reviewers (Copilot + Codex\n"
-        f"+ ultrareview within 5-8 min). Current accumulation:\n"
+    if bypass_active:
+        return (
+            f"ADVISORY (ZEUS_PR_ALLOW_TINY bypass active): PR open with small accumulation:\n"
+            f"   commits since base: {commit_count} (threshold: {COMMIT_THRESHOLD})\n"
+            f"   LOC since base:     {loc} (threshold: {LOC_THRESHOLD})\n"
+            f"   pushes already:     {push_count}\n"
+            f"Block bypassed via ZEUS_PR_ALLOW_TINY=1."
+        )
+
+    # BLOCKING: write reason to stderr and signal caller to exit 2
+    block_msg = (
+        f"BLOCKED: PR open rejected — tiny accumulation (commits={commit_count} < {COMMIT_THRESHOLD}"
+        f" AND LOC={loc} < {LOC_THRESHOLD}).\n"
+        f"Paid auto-reviewers (Copilot + Codex + ultrareview) fire within 5-8 min.\n"
+        f"Per feedback_accumulate_changes_before_pr_open.md (verified 2026-05-04):\n"
         f"   commits since base: {commit_count}\n"
         f"   LOC since base:     {loc}\n"
         f"   pushes already:     {push_count}\n\n"
-        f"Per feedback_accumulate_changes_before_pr_open.md (verified 2026-05-04):\n"
-        f"PRs should open at >={COMMIT_THRESHOLD} commits and >={LOC_THRESHOLD} LOC unless\n"
-        f"explicitly approved for a quick fix. If this open is intentional\n"
-        f"(urgent fix, isolated bug), proceed. If you have more pending work\n"
-        f"on this branch, hold the PR open until accumulation reaches the threshold.\n\n"
-        f"This is advisory; not blocking."
+        f"Accumulate more work on this branch, OR set ZEUS_PR_ALLOW_TINY=1 to bypass."
     )
+    print(block_msg, file=sys.stderr)
+    # Return sentinel so dispatch main can detect blocking intent
+    return _BLOCK_SENTINEL
 
 
 def _run_advisory_check_pr_open_monitor_arm(
@@ -804,6 +823,10 @@ def main(hook_id: str) -> int:
 
     try:
         ctx = _run_advisory_check(spec, payload)
+        if ctx == _BLOCK_SENTINEL:
+            # Blocking check: reason already written to stderr by the check function.
+            _emit_signal(hook_id, event, "block", "blocking_check", payload)
+            return 2
         _emit_signal(hook_id, event, "allow", "advisory_check", payload)
         if ctx:
             return _emit_advisory(hook_id, event, ctx)
