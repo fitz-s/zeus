@@ -1,0 +1,944 @@
+# Created: 2026-05-08
+# Last reused or audited: 2026-05-08
+# Authority basis: source code audit (src/data/*, src/ingest/*, scripts/),
+#   architecture/*.yaml doctrine docs, config/source_release_calendar.yaml,
+#   config/cities.json (52 cities), config/settings.json,
+#   architecture/settlement_dual_source_truth_2026_05_07.yaml,
+#   architecture/zeus_grid_resolution_authority_2026_05_07.yaml,
+#   architecture/ecmwf_opendata_tigge_equivalence_2026_05_06.yaml,
+#   docs/operations/task_2026-05-08_100_blocked_horizon_audit/RUN.md,
+#   ECMWF official docs (WebFetch verified 2026-05-08),
+#   Open-Meteo docs (WebFetch verified 2026-05-08),
+#   HKO opendata API (WebFetch verified 2026-05-08),
+#   Ogimet METAR endpoint (WebFetch verified 2026-05-08)
+#
+# PURPOSE
+# -------
+# Authoritative one-stop registry of every data source Zeus consumes.
+# Future agents and the operator must NOT re-discover these. Check here first.
+#
+# VERIFICATION LEGEND
+# -------------------
+# [VERIFIED]  — confirmed by WebFetch, source code, or binding architecture doc
+# [INFERRED]  — derived from code / config / pattern; not primary-source confirmed
+#
+# WHEN TO RE-AUDIT
+# ----------------
+# - Any new city onboarded to config/cities.json
+# - Polymarket changes settlement source for a city (see cities.json _settlement_source_discipline)
+# - ECMWF releases changes to enfo stream parameters or step grid
+# - Open-Meteo API changes rate limits or endpoint URLs
+# - WU API key rotates or endpoint changes
+# - HKO retires or replaces any dataType endpoint
+# - Any new source_id appears in source_release_calendar.yaml
+# - TIGGE MARS archive access method changes (ecmwfapi vs ECDS)
+
+---
+document_id: data_sources_registry_2026_05_08
+schema_version: "1.0"
+created_date: "2026-05-08"
+last_audited: "2026-05-08"
+status: BINDING
+when_to_re_audit: "See header WHEN TO RE-AUDIT section above"
+
+# ============================================================
+# FORECAST SOURCES
+# ============================================================
+
+sources:
+
+  # ----------------------------------------------------------
+  # 1. ECMWF Open Data — IFS-ENS (Live Forecast)
+  # ----------------------------------------------------------
+  - id: ecmwf_open_data
+    display_name: "ECMWF Open Data — IFS-ENS (enfo stream)"
+    category: forecast
+    publisher: "ECMWF (https://www.ecmwf.int)"
+    authority_urls:
+      - "https://www.ecmwf.int/en/forecasts/datasets/set-iii"  # [VERIFIED] WebFetch 2026-05-08
+      - "https://confluence.ecmwf.int/display/DAC/Dissemination+schedule"  # [VERIFIED] WebFetch 2026-05-08
+      - "https://github.com/ecmwf/ecmwf-opendata"
+
+    publication_schedule:
+      cycle_hours_utc: [0, 6, 12, 18]  # [VERIFIED] "4 daily runs: 00, 06, 12 and 18 UTC" — ECMWF set-iii page
+      publication_lag:
+        # [VERIFIED] WebFetch 2026-05-08 from confluence.ecmwf.int/display/DAC/Dissemination+schedule:
+        # "Reports arrive 6:40 to 8:01 hours following initialization."
+        # "Forecast Day 0 06:40... Forecast Day 15 07:40... Derived products Step 0 to 240 07:41... Step 246 to 360 08:01"
+        description: >
+          00/12 UTC cycles: first products at cycle_time + 6h40m; full
+          step 0–360 complete by cycle_time + 8h01m. Zeus uses
+          safe_fetch default_lag_minutes=485 (8h05m) per
+          config/source_release_calendar.yaml — verified empirically
+          to avoid requesting before the full batch is available.
+          Single-batch dissemination: all steps arrive together, not
+          step-by-step. Catch-up before T+7h40m returns 404 universally.
+        safe_fetch_lag_minutes_default: 485  # [VERIFIED] config/source_release_calendar.yaml:9
+        safe_fetch_lag_minutes_min_partial: 400  # [VERIFIED] config/source_release_calendar.yaml:10
+        max_source_lag_seconds: 108000  # 30h [VERIFIED] config/source_release_calendar.yaml:12
+      cycle_specific_notes:
+        "00_12": "full_horizon cycles — max step 360h, live_max_step_hours=282 [VERIFIED]"
+        "06_18": "short horizon only — max step 144h, live_authorization=false beyond 144h [VERIFIED]"
+
+    what_is_published:
+      parameters_used_by_zeus:
+        - >
+          mx2t3 (paramId 228026): Maximum 2m temperature in last 3 hours.
+          [VERIFIED] ECMWF set-iii page: "Maximum temperature at 2 metres
+          in the last 3 hours (mx2t3)". Zeus code: src/data/ecmwf_open_data.py:116
+          TRACKS dict open_data_param="mx2t3".
+        - >
+          mn2t3 (paramId 228027): Minimum 2m temperature in last 3 hours.
+          [VERIFIED] ECMWF set-iii page: "Minimum temperature at 2 metres
+          in the last 3 hours (mn2t3)". Zeus code: src/data/ecmwf_open_data.py:121
+          TRACKS dict open_data_param="mn2t3".
+      deprecated_unused:
+        - >
+          mx2t6 / mn2t6 (6h aggregates): DEPRECATED 2026-05-07 by ECMWF.
+          API returns "No index entries" when requested.
+          [VERIFIED] architecture/zeus_grid_resolution_authority_2026_05_07.yaml:
+          "ECMWF Opendata enfo stream DEPRECATED `mx2t6`/`mn2t6` 6h aggregates;
+          only `mx2t3`/`mn2t3` (3h) and `2t` (instantaneous) remain available."
+          FORBIDDEN: do not request mx2t6/mn2t6 from enfo stream.
+      physical_resolution: "0.25° native (live); downsampled to 0.5° before Zeus calibration"
+      members: 51  # "50 perturbed + 1 control (cf + pf)" [INFERRED from standard ENS config]
+      step_temporal_resolution:
+        description: >
+          [VERIFIED] ECMWF set-iii page: "hourly until step 90, then 3-hourly
+          from 93 to 144, then 6-hourly thereafter."
+          Zeus requests: 3h stride 3–144h, 6h stride 150–282h.
+        zeus_step_list: "3,6,...,144 (3h stride) then 150,156,...,282 (6h stride)"
+        zeus_step_list_code: "src/data/ecmwf_open_data.py:102-105 STEP_HOURS"
+
+    scope_and_range:
+      step_grid_zeus: "0 to 144 by 3h; 150 to 282 by 6h (00/12 cycles, live path)"  # [VERIFIED] ecmwf_open_data.py:102-105
+      max_horizon_used_by_zeus: "282h"  # [VERIFIED] RUN.md fix/#134 2026-05-08; source_release_calendar.yaml live_max_step_hours=282
+      max_horizon_rationale: "D+10 + buffer for UTC+12 cities (max required step ≈ 252h for D+10)"
+      spatial_extent: "Global"
+      downsample_policy: >
+        Live 0.25° must be downsampled to 0.5° before Zeus calibration/extraction.
+        Method: 4×4 grid-cell mean; cell anchor matched to TIGGE 0.5° anchor.
+        [VERIFIED] architecture/zeus_grid_resolution_authority_2026_05_07.yaml
+        live_forecast_path.downsample_to = "0.5 / 0.5"
+      historical_availability: >
+        Live only (no public archive). For historical training use TIGGE archive.
+        [VERIFIED] ecmwf_opendata_tigge_equivalence_2026_05_06.yaml:
+        "OpenData is the live dissemination channel; TIGGE is the delayed archive channel."
+
+    zeus_consumption:
+      transport: >
+        ecmwf-opendata Python client (ecmwf.opendata) → GRIB2 download via
+        https://data.ecmwf.int/forecasts/ [VERIFIED] src/data/source_health_probe.py:262-263
+      ingest_path:
+        - "daemon: src/data/ecmwf_open_data.py::collect_open_ens_cycle() [VERIFIED ecmwf_open_data.py:1]"
+        - "download subprocess: '51 source data/scripts/download_ecmwf_open_ens.py' [VERIFIED ecmwf_open_data.py:80]"
+        - "extract subprocess: '51 source data/scripts/extract_open_ens_localday.py' [VERIFIED ecmwf_open_data.py:81]"
+        - "ingest: scripts/ingest_grib_to_snapshots.py::ingest_track() [VERIFIED ecmwf_open_data.py:23]"
+        - "release calendar: config/source_release_calendar.yaml entries ecmwf_open_data_mx2t6_high / ecmwf_open_data_mn2t6_low [VERIFIED]"
+      target_table: "ensemble_snapshots_v2 (per-cycle, per-member, per-step, per-city, per-local-date)"
+      data_version_pattern:
+        HIGH: "ecmwf_opendata_mx2t6_local_calendar_day_max_v1"  # [VERIFIED] ecmwf_open_data.py:28-29; contracts/ensemble_snapshot_provenance.py
+        LOW: "ecmwf_opendata_mn2t6_local_calendar_day_min_v1"   # [VERIFIED] ecmwf_open_data.py:29; contracts/ensemble_snapshot_provenance.py
+        disambiguation_note: >
+          WARNING: these data_version strings contain 'mx2t6'/'mn2t6' as LEGACY
+          calendar identifiers only. They do NOT grant permission to request
+          mx2t6/mn2t6 from the ECMWF enfo stream (deprecated 2026-05-07).
+          Actual fetched parameters are mx2t3/mn2t3 (3h native). Calendar_id
+          naming predates the deprecation and was not renamed to avoid DB
+          migration overhead. See FP-01 below.
+      source_id_code: "ecmwf_open_data"  # [VERIFIED] ecmwf_open_data.py:129
+      source_health_probe: "_probe_ecmwf_open_data in src/data/source_health_probe.py:256"
+      failure_modes:
+        - "HTTP 404 before T+7h40m: single-batch dissemination not yet available"
+        - "ECMWF rate limit: server limited to 500 simultaneous connections (ecmwf-opendata README)"
+        - "mx2t6/mn2t6 request: returns 'No index entries' — deprecated 2026-05-07"
+        - "STEP_HOURS mismatch: steps beyond live_max_step_hours cause SOURCE_RUN_HORIZON_OUT_OF_RANGE blocking (fix/#134 raised 276→282h)"
+
+    related_authority_docs:
+      - "architecture/zeus_grid_resolution_authority_2026_05_07.yaml (grid policy, forbidden patterns)"
+      - "architecture/ecmwf_opendata_tigge_equivalence_2026_05_06.yaml (physical ensemble equivalence)"
+      - "architecture/settlement_dual_source_truth_2026_05_07.yaml (Polymarket settlement — orthogonal)"
+      - "config/source_release_calendar.yaml (safe-fetch timing, cycle profiles)"
+      - "docs/operations/task_2026-05-08_100_blocked_horizon_audit/RUN.md (fix/#134: STEP_HOURS 276→282)"
+
+  # ----------------------------------------------------------
+  # 2. ECMWF TIGGE Archive — IFS-ENS (Training / Backfill)
+  # ----------------------------------------------------------
+  - id: tigge_mars
+    display_name: "ECMWF TIGGE Archive — IFS-ENS via MARS/ECDS"
+    category: forecast
+    publisher: "ECMWF / TIGGE consortium (https://confluence.ecmwf.int/display/TIGGE)"
+    authority_urls:
+      - "https://confluence.ecmwf.int/display/TIGGE"
+      - "https://ecds.ecmwf.int/datasets/tigge-forecasts"  # [VERIFIED] correct ECDS TIGGE dataset page (not ERA5)
+
+    publication_schedule:
+      cycle_hours_utc: [0, 12]  # [VERIFIED] config/source_release_calendar.yaml:107 (entry source_id=tigge; codebase uses tigge_mars — aliased in tigge_pipeline.py SOURCE_ID and source_health_probe.py:44)
+      publication_lag:
+        description: >
+          Archive channel: +48h post-cycle-init public embargo.
+          [VERIFIED] ecmwf_opendata_tigge_equivalence_2026_05_06.yaml:
+          "TIGGE is the delayed archive channel (+48h post-cycle-init)."
+          Access via MARS credentials in ~/.ecmwfapirc or ECDS API key.
+      access_mechanism: "MARS retrieval via ecmwfapi.ECMWFDataServer() reading ~/.ecmwfapirc"
+
+    what_is_published:
+      parameters_used_by_zeus:
+        - >
+          mx2t6 (paramId 121, stepType=max): Maximum 2m temperature in last 6h.
+          [VERIFIED] ecmwf_opendata_tigge_equivalence_2026_05_06.yaml erratum:
+          "TIGGE mx2t6 paramId 121 stepType=max; mn2t6 paramId 122 stepType=min".
+          NOTE: mx2t6 IS available from TIGGE archive (not deprecated there).
+        - "mn2t6 (paramId 122, stepType=min): Minimum 2m temperature in last 6h."
+      physical_resolution: "0.5° native (international archive protocol)"  # [VERIFIED] zeus_grid_resolution_authority_2026_05_07.yaml
+      members: 51
+      step_temporal_resolution: "6h (mx2t6/mn2t6 native grid)"
+
+    scope_and_range:
+      max_horizon: "360h (step 0–360 by 6h for 00/12 cycles)"  # [INFERRED]
+      spatial_extent: "Global (0.5° grid)"
+      historical_availability: >
+        Full archive from ~2006 onwards.
+        Local disk: 1.069 TiB on cloud tigge-runner (c00 mostly complete;
+        c12 partial; c12 2024-01-01 → 2024-06-01 GAP — root cause unknown).
+        [VERIFIED] zeus_grid_resolution_authority_2026_05_07.yaml implementation.training_corpus
+      c12_gap_note: >
+        NO IFS-ENS c12 data on disk for 2024-01-01 → 2024-06-01.
+        Cycle-stratified Platt pin eligibility floor = 2025-06-02.
+        [VERIFIED] zeus_grid_resolution_authority_2026_05_07.yaml cycle_stratification_eligibility
+
+    zeus_consumption:
+      transport: >
+        ecmwfapi.ECMWFDataServer() via MARS retrieval;
+        credentials in ~/.ecmwfapirc.
+        [VERIFIED] src/data/tigge_pipeline.py:18 + source_health_probe.py:344
+      ingest_path:
+        - "orchestrator: src/data/tigge_pipeline.py::run_tigge_daily_cycle() [VERIFIED tigge_pipeline.py:1]"
+        - "download subprocess: '51 source data/scripts/tigge_(mx|mn)2t6_download_resumable.py' [VERIFIED tigge_pipeline.py:71-73]"
+        - "extract subprocess: '51 source data/scripts/extract_tigge_(mx|mn)2t6_localday_(max|min).py' [VERIFIED tigge_pipeline.py:73]"
+        - "ingest: scripts/ingest_grib_to_snapshots.py::ingest_track() [VERIFIED tigge_pipeline.py:36]"
+        - "live stub (dormant): src/data/tigge_client.py — gate: ZEUS_TIGGE_INGEST_ENABLED env flag [VERIFIED tigge_client.py:31]"
+      target_table: "ensemble_snapshots_v2"
+      data_version_pattern:
+        HIGH: "tigge_mx2t6_local_calendar_day_max_v1"  # [INFERRED from ecmwf_opendata_tigge_equivalence_2026_05_06.yaml code_anchors]
+        LOW:  "tigge_mn2t6_local_calendar_day_min_v1"
+      source_id_code: "tigge_mars"  # [VERIFIED] tigge_pipeline.py:80; source_health_probe.py:44
+      source_health_probe: "_probe_tigge_mars in src/data/source_health_probe.py:328 (credential file + scheduler job status)"
+      role: >
+        Training / backfill ONLY. Not live-serving authority.
+        Live-calibration transfer from TIGGE Platt to OpenData forecasts
+        requires paired equivalence evidence (see ecmwf_opendata_tigge_equivalence_2026_05_06.yaml).
+      release_calendar_status: >
+        config/source_release_calendar.yaml calendar_id=tigge_archive_backfill:
+        live_authorization=false, backfill_only=true, partial_policy=SHADOW_ONLY.
+      failure_modes:
+        - "MARS credentials missing/invalid: CRITICAL log + tigge_mars source paused"
+        - "ECDS catalog gap: c12 2024-H1 confirmed absent from disk"
+        - "MARS retrieval latency: minutes-scale per run (never called from source_health probe)"
+
+    related_authority_docs:
+      - "architecture/ecmwf_opendata_tigge_equivalence_2026_05_06.yaml"
+      - "architecture/zeus_grid_resolution_authority_2026_05_07.yaml"
+      - "config/source_release_calendar.yaml (tigge_archive_backfill entry)"
+
+  # ----------------------------------------------------------
+  # 3. Open-Meteo Archive API (Hourly Observation Instants + Solar)
+  # ----------------------------------------------------------
+  - id: openmeteo_archive
+    display_name: "Open-Meteo Archive API"
+    category: observation
+    publisher: "Open-Meteo (https://open-meteo.com)"
+    authority_urls:
+      - "https://open-meteo.com/en/docs"  # [VERIFIED] WebFetch 2026-05-08
+      - "https://archive-api.open-meteo.com/v1/archive"
+
+    publication_schedule:
+      description: >
+        Historical archive updated with ~1-5 day lag for recent data.
+        Non-commercial free tier with undisclosed numeric rate limit.
+        [VERIFIED] WebFetch open-meteo.com/en/docs 2026-05-08:
+        "Non-Commercial usage tier; use the Past Days feature to access
+        archived forecasts." Zeus implements explicit quota tracking
+        (src/data/openmeteo_quota.py) with 429 retry handling.
+      safe_fetch_lag_minutes: 720  # [VERIFIED] config/source_release_calendar.yaml:84
+      max_source_lag_seconds: 172800  # 48h [VERIFIED] config/source_release_calendar.yaml:85
+
+    what_is_published:
+      parameters_used_by_zeus:
+        - "temperature_2m (hourly): 2m air temperature in °C or °F [VERIFIED] src/data/hourly_instants_append.py:116"
+        - "sunrise, sunset (daily): astronomical sunrise/sunset times [VERIFIED] src/data/solar_append.py:41"
+        - "temperature_2m_max, temperature_2m_min (daily): daily extrema [INFERRED from archive API docs]"
+      base_url: "https://archive-api.open-meteo.com/v1/archive"  # [VERIFIED] src/data/openmeteo_client.py:23
+
+    scope_and_range:
+      spatial_coverage: "Global grid-snap (~1–11 km grid depending on model)"
+      temporal_coverage: "Historical from ~1940 (ERA5 reanalysis backend)"
+      freshness_caveat: >
+        Recent data (last 1-5 days) may lag. This source is used for
+        historical backfill and live hourly instants (previous 24-48h),
+        NOT for settlement-day real-time data.
+
+    zeus_consumption:
+      transport: "httpx.get with retry + 429 handling; quota tracked in memory"
+      ingest_path:
+        - "live hourly: src/data/hourly_instants_append.py::hourly_tick() [VERIFIED hourly_instants_append.py:1]"
+        - "solar: src/data/solar_append.py::daily_tick() [VERIFIED solar_append.py:1]"
+        - "backfill: scripts/backfill_hourly_openmeteo.py [INFERRED from hourly_instants_append.py:92]"
+        - "backfill solar: scripts/backfill_solar_openmeteo.py [INFERRED from solar_append.py:24]"
+        - "shared client: src/data/openmeteo_client.py::fetch() [VERIFIED openmeteo_client.py:1]"
+        - "quota guard: src/data/openmeteo_quota.py::quota_tracker [VERIFIED openmeteo_client.py:14]"
+      target_tables:
+        - "observation_instants (hourly, legacy)"
+        - "observation_instants_v2 (hourly, current) [VERIFIED hourly_instants_append.py:1]"
+        - "solar_daily [VERIFIED solar_append.py:51]"
+      source_tag_code: "openmeteo_archive_hourly [VERIFIED hourly_instants_append.py:65]; openmeteo_archive_solar [VERIFIED solar_append.py:51]"
+      source_health_probe: "_probe_open_meteo_archive in src/data/source_health_probe.py:71"
+      canonical_ids:
+        # Naming variants across the codebase — all refer to this source:
+        health_probe_key: "open_meteo_archive"        # [VERIFIED] source_health_probe.py:38 (open_meteo with underscore after open)
+        data_version_hourly: "openmeteo_archive_hourly"   # [VERIFIED] hourly_instants_append.py:65 (no underscore after open)
+        data_version_solar: "openmeteo_archive_solar"     # [VERIFIED] solar_append.py:51
+        source_id_registry: "openmeteo_archive"            # this registry id
+        # NOTE: health probe uses open_meteo_archive (underscore after "open");
+        # ingest data_version tags use openmeteo_archive_* (no underscore). Same source.
+      failure_modes:
+        - "HTTP 429 rate limit: handled via retry with Retry-After header"
+        - "Quota exhaustion: RuntimeError from quota_tracker.can_call()"
+        - "Recent-data lag: last 1-5 days may be missing; normal for live use"
+      live_authorization: false  # NOT a settlement source; observation only [VERIFIED tier_resolver.py:64]
+
+    related_authority_docs:
+      - "config/source_release_calendar.yaml (openmeteo_previous_runs_best_match entry)"
+      - "architecture/source_rationale.yaml (src/data/openmeteo_client.py entry)"
+
+  # ----------------------------------------------------------
+  # 4. Open-Meteo Previous Runs API (Shadow Forecast)
+  # ----------------------------------------------------------
+  - id: openmeteo_previous_runs
+    display_name: "Open-Meteo Previous Runs API (shadow forecast)"
+    category: forecast
+    publisher: "Open-Meteo (https://open-meteo.com)"
+    authority_urls:
+      - "https://previous-runs-api.open-meteo.com/v1/forecast"
+
+    publication_schedule:
+      description: >
+        Reconstructed previous-run forecast availability. Re-distributor;
+        upstream model varies per request. RECONSTRUCTED provenance tier.
+        [VERIFIED] src/data/dissemination_schedules.py:98-103:
+        "openmeteo_previous_runs: RECONSTRUCTED, schedule_url=https://open-meteo.com/en/docs"
+      safe_fetch_lag_minutes: 720  # [VERIFIED] config/source_release_calendar.yaml:84
+      provenance: "RECONSTRUCTED"  # [VERIFIED] dissemination_schedules.py:100
+
+    what_is_published:
+      description: "Reconstructed previous-run model forecasts via Open-Meteo's redistribution"
+      base_url: "https://previous-runs-api.open-meteo.com/v1/forecast"  # [VERIFIED] openmeteo_client.py:24
+
+    zeus_consumption:
+      transport: "httpx.get via src/data/openmeteo_client.py"
+      ingest_path:
+        - "live forecasts: src/data/forecasts_append.py (Open-Meteo previous-runs track) [INFERRED from dissemination_schedules.py]"
+        - "shared client: src/data/openmeteo_client.py::fetch() [VERIFIED]"
+      live_authorization: false  # SHADOW_ONLY [VERIFIED] config/source_release_calendar.yaml:98
+      target_table: "forecasts (source='openmeteo_previous_runs')"
+      release_calendar_status: >
+        config/source_release_calendar.yaml calendar_id=openmeteo_previous_runs_best_match:
+        partial_policy=SHADOW_ONLY, live_authorization=false.
+
+    related_authority_docs:
+      - "config/source_release_calendar.yaml (openmeteo_previous_runs_best_match entry)"
+      - "architecture/source_rationale.yaml (src/data/openmeteo_client.py entry)"
+
+# ============================================================
+# OBSERVATION SOURCES
+# ============================================================
+
+  # ----------------------------------------------------------
+  # 5. Weather Underground ICAO (Primary Observation — 48 cities)
+  # ----------------------------------------------------------
+  - id: wu_icao_history
+    display_name: "Weather Underground ICAO Historical Observations"
+    category: observation
+    publisher: "The Weather Company / IBM (https://www.wunderground.com)"
+    authority_urls:
+      - "https://api.weather.com/v1/location/{ICAO}:9:{CC}/observations/historical.json"
+      - "https://www.wunderground.com/history/daily/{CC}/{city}/{ICAO}"
+
+    publication_schedule:
+      description: >
+        Near-real-time METAR-cadence (~30 min) observations. Historical endpoint
+        returns sub-hourly observations for any past date. Live daily updates
+        available within hours of each reading.
+        Zeus fetches at local peak+4h window per city schedule
+        (src/data/wu_scheduler.py). Public API key used (not secret).
+      api_key_note: >
+        Uses WU public web key _WU_PUBLIC_WEB_KEY embedded in WU's own
+        browser UI. NOT a secret. [VERIFIED] src/data/daily_obs_append.py:117
+        "Operator ruling 2026-04-21: wu key 是公开的."
+
+    what_is_published:
+      parameters_used_by_zeus:
+        - "temp (°C or °F per unit_code): instantaneous temperature at observation time"
+        - "valid_time_gmt: UTC epoch of observation"
+      aggregation: >
+        Zeus aggregates sub-hourly METAR observations into local-day max/min
+        by bucketing all temp values to local-date using ZoneInfo, then taking
+        MAX(temp) / MIN(temp) per city × local_date.
+        [VERIFIED] src/data/daily_obs_append.py:234-246 _fetch_wu_icao_daily_highs_lows()
+
+    scope_and_range:
+      cities_count: 48  # [VERIFIED] python3 count: 48 wu_icao cities in config/cities.json
+      coverage_type: "Per-ICAO-station point observation"
+      endpoint_url_pattern: "https://api.weather.com/v1/location/{ICAO}:9:{CC}/observations/historical.json"  # [VERIFIED] daily_obs_append.py:119
+
+    zeus_consumption:
+      transport: "httpx.get with WU_API_KEY (public fallback) + WU_HEADERS [VERIFIED daily_obs_append.py:117-122]"
+      ingest_path:
+        - "live daily: src/data/daily_obs_append.py::append_wu_city() + daily_tick() [VERIFIED daily_obs_append.py:40]"
+        - "live hourly: src/data/wu_hourly_client.py::fetch_wu_hourly() [VERIFIED wu_hourly_client.py:1]"
+        - "schedule: src/data/wu_scheduler.py::WuDailyScheduler [VERIFIED daily_obs_append.py:34]"
+        - "backfill daily: scripts/backfill_wu_daily_all.py [VERIFIED daily_obs_append.py:11]"
+        - "meteostat fallback: src/data/meteostat_bulk_client.py (sparse WU stations, historical only) [VERIFIED wu_hourly_client.py:42]"
+        - "source_health probe: src/data/source_health_probe.py::_probe_wu_pws() [VERIFIED source_health_probe.py:113]"
+      target_tables:
+        - "observations (daily high/low per city × local_date)"
+        - "observation_instants_v2 (hourly per city × utc_hour)"
+      source_tag_code: "wu_icao_history [VERIFIED daily_obs_append.py:126; wu_hourly_client.py:63]"
+      data_version_pattern: "wu_icao_history_v1 [VERIFIED ingest/harvester_truth_writer.py:44]"
+      settlement_authority: >
+        PRIMARY settlement source for 48 cities (settlement_source_type='wu_icao').
+        [VERIFIED] config/cities.json python count: 48 wu_icao cities.
+      failure_modes:
+        - "HTTP 401/403: API key rejected (public key may rotate)"
+        - "HTTP 429: rate limit (retry_after embargo)"
+        - "Empty observations: city has no data for date (legitimate gap)"
+        - "Station change: Polymarket may change ICAO for a city without notice (see cities.json _settlement_source_discipline)"
+
+    related_authority_docs:
+      - "config/cities.json (ICAO station per city, settlement_source_type)"
+      - "docs/operations/current_source_validity.md (provider audit)"
+      - "architecture/city_truth_contract.yaml"
+
+  # ----------------------------------------------------------
+  # 6. Meteostat Bulk CDN Archive (WU Sparse Station Fallback)
+  # ----------------------------------------------------------
+  - id: meteostat_bulk
+    display_name: "Meteostat Bulk CDN Hourly Archive (sparse station fallback)"
+    category: observation
+    publisher: "Meteostat (https://meteostat.net)"
+    authority_urls:
+      - "https://bulk.meteostat.net/v2/hourly/{WMO}.csv.gz"
+      - "https://bulk.meteostat.net/v2/stations/full.json.gz"
+
+    publication_schedule:
+      description: >
+        Static CDN gzip CSV archives. One file per WMO station, full history
+        in single download. No documented rate limit. Parallel-safe (static CDN).
+        [VERIFIED] src/data/meteostat_bulk_client.py:7-9:
+        "No authentication. No documented rate limit. Parallel-safe (static CDN
+        files, not dynamic endpoints)."
+      freshness_caveat: >
+        [VERIFIED] meteostat_bulk_client.py:20-21: "Meteostat bulk files lag
+        real-time by weeks to months; verify the last-date empirically before
+        using on live dates." Per empirical check 2026-04-22: cutoff dates
+        range from 2025-07-27 (DNMM Lagos) to 2026-03-15 (FACT Cape Town).
+
+    what_is_published:
+      format: "Gzip CSV: date,hour,temp_C,dewpoint_C,rhum_pct,prcp_mm,snow_mm,wdir_deg,wspd_kmh,wpgt_kmh,pres_hPa,tsun_min,coco"
+      parameters_used_by_zeus: "temp_C: hourly mean temperature in °C"
+      aggregation_note: >
+        One row per UTC hour (hourly-aggregated, not sub-hourly).
+        Extremum semantics: max == min == value per row (no sub-hourly spread).
+        [VERIFIED] meteostat_bulk_client.py:22-24.
+
+    scope_and_range:
+      icao_wmo_mapping: "ICAO → WMO mapping verified 2026-04-22 for Zeus city list [VERIFIED meteostat_bulk_client.py:71]"
+      stations_used: >
+        Sparse WU stations lacking sub-hourly METAR data. Currently: KATL, KAUS,
+        KDAL, KBKF (Denver), KHOU, KLAX, KMIA, KLGA, and ~37 additional stations
+        [VERIFIED] meteostat_bulk_client.py:72 ICAO_TO_WMO dict.
+      known_gap: "Shanghai ZSPD has no Meteostat archive — WU + Ogimet only [VERIFIED meteostat_bulk_client.py:69]"
+      coverage_range: "Often back to 1940s-80s per station [VERIFIED meteostat_bulk_client.py:10]"
+
+    zeus_consumption:
+      transport: "httpx.get gzip CSV, no auth [VERIFIED meteostat_bulk_client.py:47-48]"
+      ingest_path:
+        - "hourly backfill: src/data/wu_hourly_client.py calls src/data/meteostat_bulk_client.py [VERIFIED wu_hourly_client.py:42]"
+        - "created: src/data/meteostat_bulk_client.py (Created 2026-04-22) [VERIFIED meteostat_bulk_client.py:1]"
+      target_table: "observation_instants_v2 (via wu_hourly_client routing)"
+      role: "Historical fill for sparse WU ICAO stations; NOT a live feed"
+      failure_modes:
+        - "HTTP 200 with empty CSV: station not in Meteostat catalog"
+        - "Data lag: archive may be months behind for some stations"
+
+  # ----------------------------------------------------------
+  # 7. Ogimet METAR (NOAA-settled cities: Istanbul, Moscow, Tel Aviv)
+  # ----------------------------------------------------------
+  - id: ogimet_metar
+    display_name: "Ogimet METAR Historical (NOAA-settled cities)"
+    category: observation
+    publisher: "Ogimet (https://www.ogimet.com) — mirrors NOAA METAR bulletins"
+    authority_urls:
+      - "https://www.ogimet.com/cgi-bin/getmetar"  # [VERIFIED] WebFetch 2026-05-08; ogimet_hourly_client.py:58
+
+    publication_schedule:
+      description: >
+        Mirror of NOAA METAR bulletins (including off-hour SPECI at extremes).
+        Near-real-time for current observations; full historical archive.
+        [VERIFIED] ogimet_hourly_client.py:7: "Wraps https://www.ogimet.com/cgi-bin/getmetar
+        which mirrors NOAA METAR bulletins (including off-hour SPECI at extremes)."
+      rate_limit: >
+        [VERIFIED] ogimet_hourly_client.py:68-70:
+        "Ogimet documents a rate limit of 'one query per remote IP every 20s'
+        (HTTP 501 response: 'your quota limit for slow queries rate').
+        We sleep 21s between requests."
+        Max chunk: 30 days per HTTP request.
+      chunk_days: 30  # [VERIFIED] ogimet_hourly_client.py:65
+
+    what_is_published:
+      format: "METAR text strings: ICAO,year,month,day,hour,minute then full METAR string [VERIFIED WebFetch ogimet 2026-05-08]"
+      parameters_used_by_zeus: "Temperature and dewpoint from METAR T/D group (°C native)"
+      unit: "°C native (METAR standard) [VERIFIED ogimet_hourly_client.py:24]"
+      aggregation: >
+        Extremum-preserving: each UTC hour bucket emits max/min across
+        ALL raw METAR/SPECI reports in that bucket (including off-hour SPECI peaks).
+        [VERIFIED] ogimet_hourly_client.py:11-19.
+
+    scope_and_range:
+      cities_using_this_source:
+        - "Istanbul (LTFM) — settlement_source_type='noaa'"
+        - "Moscow (UUWW) — settlement_source_type='noaa'"
+        - "Tel Aviv (LLBG) — settlement_source_type='noaa'"
+      cities_count: 3  # [VERIFIED] config/cities.json python count + tier_resolver.py:38
+      endpoint_url: "https://www.ogimet.com/cgi-bin/getmetar?icao={ICAO}&begin={YYYYMMDDHHMM}&end={YYYYMMDDHHMM}"
+
+    zeus_consumption:
+      transport: >
+        httpx with IPv4-forced transport (local_address="0.0.0.0") to avoid
+        IPv6 SYN_SENT stalls. [VERIFIED] ogimet_hourly_client.py:52-53.
+      ingest_path:
+        - "live hourly: src/data/wu_hourly_client.py routes OGIMET_METAR tier to ogimet_hourly_client [VERIFIED wu_hourly_client.py:42]"
+        - "client: src/data/ogimet_hourly_client.py::fetch_ogimet_hourly() [VERIFIED ogimet_hourly_client.py:1]"
+        - "backfill: scripts/backfill_ogimet_metar.py [INFERRED from ogimet_hourly_client.py:80 METAR_TEMP_RE comment]"
+        - "source_health probe: src/data/source_health_probe.py::_probe_ogimet() [VERIFIED source_health_probe.py:214]"
+      target_table: "observation_instants_v2"
+      source_tag_code: "ogimet_metar [INFERRED from tier_resolver.py OGIMET_METAR tier]"
+      data_version_pattern: "ogimet_metar_v1 [VERIFIED ingest/harvester_truth_writer.py:47]"
+      settlement_authority: >
+        PRIMARY settlement source for 3 NOAA-settled cities (Istanbul, Moscow, Tel Aviv).
+        [VERIFIED] tier_resolver.py:38: settlement_source_type='noaa' → Tier.OGIMET_METAR.
+      failure_modes:
+        - "HTTP 501: rate limit exceeded (21s inter-request delay mitigation)"
+        - "IPv6 SYN_SENT hang: fixed by forcing IPv4 transport"
+        - "No-data response: returns HTTP 200 with empty body (not an error)"
+
+    related_authority_docs:
+      - "architecture/city_truth_contract.yaml"
+      - "config/cities.json (noaa cities: Istanbul LTFM, Moscow UUWW, Tel Aviv LLBG)"
+      - "docs/operations/current_source_validity.md"
+
+  # ----------------------------------------------------------
+  # 8. Hong Kong Observatory Open Data API
+  # ----------------------------------------------------------
+  - id: hko_daily_api
+    display_name: "Hong Kong Observatory (HKO) Open Data API"
+    category: observation
+    publisher: "Hong Kong Observatory (https://data.weather.gov.hk)"
+    authority_urls:
+      - "https://data.weather.gov.hk/weatherAPI/opendata/opendata.php"  # [VERIFIED] daily_obs_append.py:278; WebFetch 2026-05-08
+      - "https://data.weather.gov.hk/weatherAPI/opendata/weather.php"   # [VERIFIED] daily_obs_append.py:279 (realtime)
+
+    publication_schedule:
+      description: >
+        Monthly climate data via CLMMAXT/CLMMINT endpoints. Real-time
+        hourly via rhrread endpoint. Monthly data updated incrementally
+        with completeness flag ("C" = complete, "#" = incomplete, "***" = unavailable).
+        [VERIFIED] daily_obs_append.py:290-301 _fetch_hko_month().
+      endpoints:
+        monthly_max: "dataType=CLMMAXT — Daily Maximum Temperature"  # [VERIFIED] WebFetch HKO API 2026-05-08
+        monthly_min: "dataType=CLMMINT — Daily Minimum Temperature"
+        realtime_hourly: "dataType=rhrread via weather.php — latest hourly reading"
+      incompleteness_handling: >
+        Incomplete-flag days ("#"/"***") are pinned as LEGITIMATE_GAP, not retried.
+        [VERIFIED] daily_obs_append.py:25.
+
+    what_is_published:
+      parameters_used_by_zeus: "Daily max/min temperature in °C at HKO headquarters (Observatory Road, Tsim Sha Tsui)"
+      response_fields: "年/Year, 月/Month, 日/Day, 數值/Value, 數據完整性/data Completeness [VERIFIED WebFetch 2026-05-08]"
+      station: "HKO (Hong Kong Observatory headquarters) [VERIFIED daily_obs_append.py:280]"
+
+    scope_and_range:
+      cities_using_this_source: ["Hong Kong"]
+      cities_count: 1  # [VERIFIED] config/cities.json + tier_resolver.py:39
+      unit: "°C (Celsius) [VERIFIED cities.json Hong Kong unit='C']"
+      settlement_note: >
+        HKO is the authoritative Polymarket settlement source for HK.
+        VHHH airport (which WU would hit under ICAO key) differs from HKO
+        HQ by 1-3°C due to urban heat island — HK must NEVER use WU lane.
+        [VERIFIED] daily_obs_append.py:15-17.
+        Anti-pattern A6: "HK must route hko_hourly_accumulator, never VHHH"
+        [VERIFIED] source_rationale.yaml src/data/observation_instants_v2_writer.py entry.
+
+    zeus_consumption:
+      transport: "httpx.get with retry (2 retries, 3s backoff) [VERIFIED daily_obs_append.py:284-285]"
+      ingest_path:
+        - "live monthly: src/data/daily_obs_append.py::append_hko_months() [VERIFIED daily_obs_append.py:43]"
+        - "live realtime accumulator: src/data/daily_obs_append.py::_accumulate_hko_reading() [VERIFIED daily_obs_append.py:365]"
+        - "daemon entry: src/data/daily_obs_append.py::daily_tick() [VERIFIED daily_obs_append.py:47]"
+        - "backfill: scripts/backfill_hko_daily.py [VERIFIED daily_obs_append.py:37]"
+        - "source_health probe: src/data/source_health_probe.py::_probe_hko() [VERIFIED source_health_probe.py:165]"
+      target_table: "observations (daily)"
+      source_tag_code: "hko_daily_api [VERIFIED daily_obs_append.py:282]; hko_realtime_api [VERIFIED daily_obs_append.py:283]"
+      data_version_pattern: "hko_daily_api_v1 [VERIFIED ingest/harvester_truth_writer.py:45]"
+      settlement_authority: >
+        PRIMARY settlement source for Hong Kong (settlement_source_type='hko').
+        [VERIFIED] config/cities.json python count: 1 hko city.
+      failure_modes:
+        - "Incompleteness flags (#/***): month not yet finalized — written as LEGITIMATE_GAP"
+        - "HTTP error: retry with exponential backoff (2 attempts, 3s backoff)"
+        - "Legacy cis/statClim HTML endpoint retired by HKO early 2026 (404) — now using opendata API [VERIFIED source_health_probe.py:168-172]"
+
+    related_authority_docs:
+      - "architecture/city_truth_contract.yaml"
+      - "architecture/fatal_misreads.yaml (HKO oracle truncation bias)"
+      - "config/cities.json (Hong Kong entry, unit='C', settlement_source_type='hko')"
+
+# ============================================================
+# SETTLEMENT SOURCES
+# ============================================================
+
+  # ----------------------------------------------------------
+  # 9. Polymarket UMA Optimistic Oracle V2 (pre-2026-02-21 settlement)
+  # ----------------------------------------------------------
+  - id: polymarket_uma_oo_v2
+    display_name: "Polymarket UMA Optimistic Oracle V2 (pre-2026-02-21)"
+    category: settlement
+    publisher: "UMA Protocol / Risk Labs (https://uma.xyz)"
+    authority_urls:
+      - "https://polygonscan.com/address/0xee3afe347d5c74317041e2618c49534daf887c24"
+      - "https://docs.uma.xyz"
+
+    publication_schedule:
+      description: >
+        On-chain settlement events. UMA OO V2 PriceSettled event emitted after
+        bond-and-dispute cycle. Last UMA block for weather markets: 83,275,667
+        (~2026-02-20). [VERIFIED] architecture/settlement_dual_source_truth_2026_05_07.yaml
+        era pre_internal_resolver.
+      era: "Q4-2025 ... 2026-02-20"
+
+    what_is_published:
+      description: "PriceSettled on-chain events — final resolved temperature values for Polymarket weather markets"
+      chain: "Polygon mainnet"
+      contract_address: "0xee3afe347d5c74317041e2618c49534daf887c24"  # [VERIFIED] settlement_dual_source_truth_2026_05_07.yaml
+
+    scope_and_range:
+      applicable_era: "Q4-2025 through 2026-02-20 (block 83,275,667)"
+      rows_in_settlements_v2: 1300  # [VERIFIED] settlement_dual_source_truth_2026_05_07.yaml snapshot 2026-05-07
+      reconstruction_method: "uma_chain_backfill"
+
+    zeus_consumption:
+      transport: "Polygon RPC via scripts/backfill_uma_resolution_2026.py (one-time backfill)"
+      ingest_path:
+        - "backfill: scripts/backfill_uma_resolution_2026.py [VERIFIED settlement_dual_source_truth_2026_05_07.yaml:19]"
+        - "live listener (optional): src/state/uma_resolution_listener.py [VERIFIED source_rationale.yaml]"
+      target_table: "settlements_v2 (provenance_json.reconstruction_method='uma_chain_backfill')"
+      current_status: >
+        HISTORICAL ONLY. Zero PriceSettled events after block 83,275,667.
+        Polymarket switched to internal resolver post-2026-02-21.
+        [VERIFIED] settlement_dual_source_truth_2026_05_07.yaml era post_internal_resolver.
+
+    related_authority_docs:
+      - "architecture/settlement_dual_source_truth_2026_05_07.yaml"
+
+  # ----------------------------------------------------------
+  # 10. Polymarket Gamma API (settlement + market metadata, 2026-02-21+)
+  # ----------------------------------------------------------
+  - id: polymarket_gamma
+    display_name: "Polymarket Gamma API (settlement, market metadata, event discovery)"
+    category: settlement
+    publisher: "Polymarket (https://polymarket.com)"
+    authority_urls:
+      - "https://gamma-api.polymarket.com"  # [VERIFIED] src/data/market_scanner.py:38
+
+    publication_schedule:
+      description: >
+        REST API with current market state. Settlement: closed events with
+        outcomePrices=["1","0"] (YES won) or ["0","1"] (NO won).
+        Market scanner called every cycle by trading daemon.
+        [VERIFIED] src/data/market_scanner.py:1-7: "Queries Polymarket's Gamma
+        API for temperature events. Parses bin structure, token IDs, and prices."
+      settlement_era: "2026-02-21 ... present (internal resolver era)"
+
+    what_is_published:
+      endpoints_used:
+        - "GET /events?tag_slug=weather — discover active weather markets [INFERRED from market_scanner.py:38]"
+        - "GET /markets?condition_id={id} — individual market details [INFERRED]"
+      fields_of_interest:
+        - "outcomePrices: settlement result [VERIFIED settlement_dual_source_truth_2026_05_07.yaml]"
+        - "automaticallyResolved: boolean flag for internal resolver era"
+        - "negRiskMarketID: present for internal resolver markets"
+        - "resolutionSource: points to settlement weather source URL"
+        - "question, volume, condition_id, tokenIds [VERIFIED WebFetch gamma-api 2026-05-08]"
+
+    scope_and_range:
+      applicable_era:
+        settlement: "2026-02-21 ... present"
+        market_metadata: "all active/closed markets (full history)"
+      rows_added_2026_05_07: 2562  # HIGH +2562 [VERIFIED] settlement_dual_source_truth_2026_05_07.yaml
+      low_market_note: >
+        LOW temperature markets have always used internal resolver (never UMA OO V2).
+        LOW Gamma backfill starts from 2026-04-15 (first closed LOW event confirmed).
+        [VERIFIED] settlement_dual_source_truth_2026_05_07.yaml low_market_note.
+
+    zeus_consumption:
+      transport: "httpx.get; src/data/market_scanner.py [VERIFIED market_scanner.py:1]"
+      ingest_path:
+        - "market discovery: src/data/market_scanner.py::scan_markets() [VERIFIED market_scanner.py:1]"
+        - "settlement backfill: scripts/backfill_settlements_via_gamma_2026.py [VERIFIED settlement_dual_source_truth_2026_05_07.yaml:33]"
+        - "live settlement: src/ingest/harvester_truth_writer.py [VERIFIED harvester_truth_writer.py:1]"
+        - "live harvester: src/execution/harvester.py [VERIFIED source_rationale.yaml settlement_write route]"
+      target_tables:
+        - "settlements_v2 (provenance_json.reconstruction_method='gamma_backfill') [VERIFIED settlement_dual_source_truth_2026_05_07.yaml]"
+        - "market_events_v2 (event metadata, condition_ids)"
+        - "snapshot_repo (ExecutableMarketSnapshotV2) [VERIFIED src/state/snapshot_repo.py]"
+      settlement_authority: >
+        CANONICAL settlement source for all markets post-2026-02-21, and all LOW
+        markets regardless of date. [VERIFIED settlement_dual_source_truth_2026_05_07.yaml.
+        Operator-confirmed 2026-05-07 (commit 1e5615b9).
+      failure_modes:
+        - "Stale authority: market_scanner returns STALE or EMPTY_FALLBACK on network failure"
+        - "Missing LOW markets: first closed LOW event 2026-04-15 (no earlier LOW data)"
+
+    related_authority_docs:
+      - "architecture/settlement_dual_source_truth_2026_05_07.yaml"
+      - "architecture/source_rationale.yaml (src/data/market_scanner.py; src/data/polymarket_client.py)"
+
+# ============================================================
+# MARKET / TRADING SOURCES
+# ============================================================
+
+  # ----------------------------------------------------------
+  # 11. Polymarket CLOB API (order book, live trading)
+  # ----------------------------------------------------------
+  - id: polymarket_clob
+    display_name: "Polymarket CLOB API (order book, live trading)"
+    category: market
+    publisher: "Polymarket (https://polymarket.com)"
+    authority_urls:
+      - "https://clob.polymarket.com"  # [VERIFIED] src/data/polymarket_client.py:28
+      - "https://data-api.polymarket.com"  # [VERIFIED] polymarket_client.py:29
+
+    what_is_published:
+      description: "Live CLOB order book, market prices, fill events, account balances"
+      transport_types:
+        - "REST API (order placement, cancel, query) via CLOB_BASE"
+        - "WebSocket (authenticated user channel) via src/ingest/polymarket_user_channel.py"
+      authentication: "ECDSA wallet signature via py-clob-client SDK; credentials via macOS Keychain"
+
+    zeus_consumption:
+      transport: "httpx + py-clob-client SDK; INV-24 call-stack guard enforces placement only via executor.py"
+      ingest_path:
+        - "market data: src/data/polymarket_client.py [VERIFIED polymarket_client.py:1]"
+        - "live placement: src/execution/executor.py → src/venue/polymarket_v2_adapter.py [VERIFIED source_rationale.yaml]"
+        - "user WS channel: src/ingest/polymarket_user_channel.py [VERIFIED source_rationale.yaml]"
+        - "heartbeat: src/control/heartbeat_supervisor.py [VERIFIED source_rationale.yaml]"
+      target_tables:
+        - "venue_commands (orders, fills)"
+        - "token_price_log (price ticks)"
+        - "position_current (via projection)"
+      safety_constraints:
+        - "INV-24: place_limit_order only callable from executor.py [VERIFIED polymarket_client.py:44-56]"
+        - "INV-25: v2_preflight() gate before placement"
+        - "WS gap guard: blocks new submits when authenticated WS truth is stale [VERIFIED source_rationale.yaml]"
+
+    related_authority_docs:
+      - "architecture/negative_constraints.yaml (NC-16: callstack guard)"
+      - "architecture/invariants.yaml (INV-24, INV-25)"
+      - "architecture/source_rationale.yaml (src/data/polymarket_client.py; src/venue/polymarket_v2_adapter.py)"
+
+  # ----------------------------------------------------------
+  # 12. Polymarket Data API (historical fills, market analytics)
+  # ----------------------------------------------------------
+  - id: polymarket_data_api
+    display_name: "Polymarket Data API (historical fills + analytics)"
+    category: market
+    publisher: "Polymarket (https://polymarket.com)"
+    authority_urls:
+      - "https://data-api.polymarket.com"  # [VERIFIED] src/data/polymarket_client.py:29
+
+    publication_schedule:
+      description: >
+        REST API for historical trade fills, market analytics, and position
+        history. Distinct from CLOB API (order placement) and Gamma API
+        (market metadata/settlement). Rate limits undocumented.
+        [VERIFIED] polymarket_client.py:29 DATA_API_BASE constant.
+      availability: "Near-real-time; recent fills typically available within minutes"
+
+    what_is_published:
+      description: "Historical trade fills, market-level volume analytics, account position snapshots"
+      endpoints_used:
+        - "GET /activity — fill history per market [INFERRED polymarket_client.py:29]"
+        - "GET /positions — current position snapshot [INFERRED]"
+
+    scope_and_range:
+      coverage: "All active and historically settled Polymarket markets"
+      temporal: "Full history; near-real-time for recent fills"
+
+    zeus_consumption:
+      transport: "httpx.get; DATA_API_BASE='https://data-api.polymarket.com' [VERIFIED polymarket_client.py:29]"
+      ingest_path:
+        - "fill history queries: src/data/polymarket_client.py [VERIFIED polymarket_client.py:1]"
+        - "shared with CLOB client: same module, different base URL"
+      target_tables:
+        - "venue_commands (fill reconciliation)"
+        - "position_current (via projection)"
+      failure_modes:
+        - "HTTP 429: rate limit (retry with backoff)"
+        - "Empty response: no fills in query window (legitimate gap)"
+
+    related_authority_docs:
+      - "architecture/source_rationale.yaml (src/data/polymarket_client.py)"
+      - "architecture/negative_constraints.yaml (INV-24 applies to CLOB placement, not data-api reads)"
+
+# ============================================================
+# CROSS-REFERENCE INDEX
+# ============================================================
+
+cross_references:
+  architecture_docs:
+    - path: "architecture/zeus_grid_resolution_authority_2026_05_07.yaml"
+      relevance: "Binding: grid policy for ECMWF Open Data (0.5° downsample, mx2t3 only)"
+    - path: "architecture/ecmwf_opendata_tigge_equivalence_2026_05_06.yaml"
+      relevance: "Binding: physical equivalence between Open Data and TIGGE; calibration transfer gate"
+    - path: "architecture/settlement_dual_source_truth_2026_05_07.yaml"
+      relevance: "Binding: UMA vs Gamma era split for settlement truth"
+    - path: "architecture/city_truth_contract.yaml"
+      relevance: "Per-city settlement source routing rules"
+    - path: "config/source_release_calendar.yaml"
+      relevance: "Safe-fetch timing, cycle profiles, live_authorization flags per source"
+    - path: "config/cities.json"
+      relevance: "Per-city: ICAO station, settlement_source_type, timezone, unit"
+    - path: "architecture/invariants.yaml"
+      relevance: "INV-24 (CLOB callstack guard), INV-17 (DB-before-JSON authority)"
+    - path: "architecture/fatal_misreads.yaml"
+      relevance: "HKO oracle truncation, low market history start date"
+    - path: "architecture/source_rationale.yaml"
+      relevance: "Per-file authority roles for all src/data/* modules"
+
+  operations_docs:
+    - path: "docs/operations/task_2026-05-08_100_blocked_horizon_audit/RUN.md"
+      relevance: "ECMWF step grid extension 276→282h (fix/#134)"
+    - path: "docs/operations/current_source_validity.md"
+      relevance: "Provider audit status (audited 2026-05-03)"
+    - path: "docs/operations/task_2026-04-23_authority_kernel_gamechanger/receipt.json"
+      relevance: "Source authority kernel receipt"
+
+  code_anchors:
+    - "src/data/ecmwf_open_data.py — ECMWF Open Data fetch + ingest pipeline"
+    - "src/data/tigge_pipeline.py — TIGGE daily download + extract + ingest"
+    - "src/data/tigge_client.py — dormant TIGGE ingest stub (F3)"
+    - "src/data/daily_obs_append.py — WU ICAO + HKO daily observation ingest"
+    - "src/data/wu_hourly_client.py — WU ICAO sub-hourly METAR client"
+    - "src/data/ogimet_hourly_client.py — Ogimet METAR client (Istanbul/Moscow/Tel Aviv)"
+    - "src/data/meteostat_bulk_client.py — Meteostat CDN bulk archive client"
+    - "src/data/hourly_instants_append.py — Open-Meteo hourly observation append"
+    - "src/data/solar_append.py — Open-Meteo sunrise/sunset append"
+    - "src/data/market_scanner.py — Polymarket Gamma market discovery + settlement scan"
+    - "src/data/polymarket_client.py — Polymarket CLOB + Data API client"
+    - "src/data/source_health_probe.py — upstream source health probe loop"
+    - "src/data/openmeteo_client.py — shared Open-Meteo HTTP client"
+    - "src/data/dissemination_schedules.py — per-source forecast dissemination schedule registry"
+    - "src/data/tier_resolver.py — city → observation source tier mapping"
+    - "src/data/release_calendar.py — source release calendar query layer"
+    - "src/ingest/harvester_truth_writer.py — ingest-side settlement truth writer"
+    - "config/source_release_calendar.yaml — safe-fetch timing per source"
+    - "scripts/backfill_uma_resolution_2026.py — UMA chain backfill"
+    - "scripts/backfill_settlements_via_gamma_2026.py — Gamma settlement backfill"
+
+# ============================================================
+# FORBIDDEN PATTERNS
+# ============================================================
+
+forbidden_patterns:
+  - id: FP-01
+    description: >
+      Do NOT request mx2t6 or mn2t6 from ECMWF Open Data enfo stream.
+      These 6h aggregates were DEPRECATED 2026-05-07. API returns
+      "No index entries". Use mx2t3/mn2t3 (3h native) only.
+      NOTE: data_version strings containing 'mx2t6'/'mn2t6' are legacy
+      calendar identifiers — not permission to request those parameters.
+      See ecmwf_open_data.data_version_pattern.disambiguation_note above.
+    source_id: ecmwf_open_data
+    binding_doc: "architecture/zeus_grid_resolution_authority_2026_05_07.yaml forbidden_patterns[6]"
+
+  - id: FP-02
+    description: >
+      Do NOT use UMA OO V2 as settlement source for markets after block
+      83,275,667 (~2026-02-21). Zero on-chain PriceSettled events exist
+      post-cutover. Gamma API is the only truth source for post-cutover
+      and ALL LOW markets.
+    source_id: polymarket_uma_oo_v2
+    binding_doc: "architecture/settlement_dual_source_truth_2026_05_07.yaml forbidden_patterns[0]"
+
+  - id: FP-03
+    description: >
+      Do NOT use VHHH airport WU data for Hong Kong settlement.
+      HKO headquarters (HKO_STATION='HKO') differs by 1-3°C from airport.
+      Hong Kong must ALWAYS route through hko_daily_api, never wu_icao.
+    source_id: hko_daily_api
+    binding_doc: "src/data/daily_obs_append.py:15-17; src/data/tier_resolver.py:39 Tier.HKO_NATIVE; source_rationale.yaml antibody A6"
+
+  - id: FP-04
+    description: >
+      Do NOT consume ECMWF Open Data at 0.25° without downsampling to 0.5°
+      before entering Zeus calibration pipeline. 0.25° training data does not
+      exist in TIGGE archive. Silent mismatch degrades Brier by 3.18× vs Plan A.
+    source_id: ecmwf_open_data
+    binding_doc: "architecture/zeus_grid_resolution_authority_2026_05_07.yaml forbidden_patterns[3]"
+
+  - id: FP-05
+    description: >
+      Do NOT treat Open-Meteo archive as a settlement source. It is a
+      redistribution / grid-snap source, not the authoritative station reading.
+      Observation source MUST match settlement source (P1 invariant).
+    source_id: openmeteo_archive
+    binding_doc: "architecture/source_rationale.yaml src/data/tier_resolver.py — no OpenMeteo Tier-4 escape hatch"
+
+  - id: FP-06
+    description: >
+      Do NOT place CLOB limit orders from any caller except src/execution/executor.py.
+      INV-24 runtime callstack guard enforces this. Extending the allowlist requires
+      updating both polymarket_client.py AND architecture/ast_rules/semgrep_zeus.yml.
+    source_id: polymarket_clob
+    binding_doc: "architecture/negative_constraints.yaml NC-16; src/data/polymarket_client.py:44-56"
+
+  - id: FP-07
+    description: >
+      Do NOT use Meteostat bulk archive for live settlement dates (recent data).
+      Archive lags real-time by weeks to months. Use only for historical backfill
+      of sparse WU ICAO stations.
+    source_id: meteostat_bulk
+    binding_doc: "src/data/meteostat_bulk_client.py:20-21"
+
+  - id: FP-08
+    description: >
+      Do NOT infer settlement from observation data alone. Settlement authority
+      comes from Polymarket Gamma API (post-2026-02-21) or UMA OO V2 chain
+      (pre-2026-02-21). Observation data feeds calibration, not settlement truth.
+    binding_doc: "architecture/settlement_dual_source_truth_2026_05_07.yaml; architecture/source_rationale.yaml settlement_write route"
+
+  - id: FP-09
+    description: >
+      Do NOT request ECMWF Open Data steps beyond 282h (max_step_hours).
+      Steps 150–282 use 6h stride (disseminated 6h grid beyond 144h). Steps
+      beyond 282h are not used by Zeus even if technically available.
+    source_id: ecmwf_open_data
+    binding_doc: "src/data/ecmwf_open_data.py:102-110 STEP_HOURS; config/source_release_calendar.yaml live_max_step_hours=282"
+
+  - id: FP-10
+    description: >
+      Do NOT aggregate live mx2t3/mn2t3 up to 6h to match TIGGE training
+      granularity. This is explicitly forbidden (A1+3h decision) — it discards
+      Asia timezone unlock worth 3.1 K-equiv composite cost.
+    source_id: ecmwf_open_data
+    binding_doc: "architecture/zeus_grid_resolution_authority_2026_05_07.yaml forbidden_patterns[5]"
