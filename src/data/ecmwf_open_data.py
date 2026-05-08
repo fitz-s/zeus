@@ -466,8 +466,9 @@ def _run_subprocess(args: list[str], *, label: str, timeout: int) -> dict:
         result = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired as exc:
         logger.error("ecmwf_open_data %s: TIMEOUT after %ds", label, timeout)
+        partial_stderr = (exc.stderr or "") if isinstance(exc.stderr, str) else ""
         return {"label": label, "ok": False, "error": f"timeout after {timeout}s",
-                "stderr_tail": str(exc)[-4096:]}
+                "stderr_tail": partial_stderr[-4096:]}
     except FileNotFoundError as exc:
         return {"label": label, "ok": False, "error": f"script not found: {exc}",
                 "stderr_tail": ""}
@@ -485,7 +486,7 @@ def _run_subprocess(args: list[str], *, label: str, timeout: int) -> dict:
 
 
 def _write_stderr_dump(dump_path: Path, stderr: str) -> None:
-    """Write full stderr to a postmortem file under tmp/. Silently no-ops on error."""
+    """Write stderr tail (up to 4096 chars) to a postmortem file under tmp/. Silently no-ops on error."""
     try:
         dump_path.parent.mkdir(parents=True, exist_ok=True)
         dump_path.write_text(stderr, encoding="utf-8")
@@ -597,10 +598,12 @@ def collect_open_ens_cycle(
             / "tmp"
             / f"ecmwf_open_data_{cycle_date.isoformat()}_{cycle_hour:02d}z_{track}.stderr.txt"
         )
-        # Bounded retry: attempt 1 immediately, attempt 2 after 60s, attempt 3 after 180s.
+        # Bounded retry: attempt 1 immediately, attempt 2 after 60s.
+        # Worst-case wall time: 1500 + 60 + 1500 = 3060s (~51 min), leaving margin before
+        # the LOW job's misfire_grace_time expires (~55 min after HIGH fires at 07:30 UTC).
         # A 404 on a grid-valid step means data not yet published → SKIPPED_NOT_RELEASED (no retry).
         # All other rc!=0 are retryable (transient network, rate-limit, timeout).
-        _retry_delays = [0, 60, 180]
+        _retry_delays = [0, 60]
         download = None
         for _attempt, _delay in enumerate(_retry_delays, start=1):
             if _delay > 0:

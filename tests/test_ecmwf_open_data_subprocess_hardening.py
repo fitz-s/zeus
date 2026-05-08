@@ -20,7 +20,6 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
-import pytest
 
 from src.data.ecmwf_open_data import collect_open_ens_cycle
 
@@ -50,7 +49,7 @@ def _404_result(label: str, *, no_index: bool = False) -> dict:
     return {"label": label, "ok": False, "returncode": 1, "stdout_tail": "", "stderr_tail": stderr}
 
 
-def _make_conn(tmp_path: Path):
+def _make_conn():
     """In-memory SQLite connection with Zeus schema — used for retry-success tests."""
     from src.state.db import init_schema
     from src.state.schema.v2_schema import apply_v2_schema
@@ -121,7 +120,7 @@ def test_subprocess_retry_succeeds_on_second_attempt(tmp_path, monkeypatch) -> N
             return _fail_result(label, stderr="connection reset by peer")
         return _ok_result(label)
 
-    conn = _make_conn(tmp_path)
+    conn = _make_conn()
     with patch("src.data.ecmwf_open_data.time.sleep"):  # suppress real sleep
         result = _run_download_only(runner, conn=conn, monkeypatch=monkeypatch, tmp_path=tmp_path)
 
@@ -134,7 +133,7 @@ def test_subprocess_retry_succeeds_on_second_attempt(tmp_path, monkeypatch) -> N
 
 
 def test_subprocess_retry_exhausts() -> None:
-    """rc=1 on all 3 attempts → download_failed."""
+    """rc=1 on all 2 attempts → download_failed."""
     call_count = 0
 
     def runner(args, *, label: str, timeout: int) -> dict:
@@ -148,10 +147,10 @@ def test_subprocess_retry_exhausts() -> None:
         result = _run_download_only(runner)
 
     assert result["status"] == "download_failed", (
-        f"Expected download_failed after 3 retries, got {result['status']!r}"
+        f"Expected download_failed after 2 retries, got {result['status']!r}"
     )
-    assert call_count == 3, (
-        f"Expected exactly 3 runner calls (3 retries), got {call_count}"
+    assert call_count == 2, (
+        f"Expected exactly 2 runner calls (2 retries), got {call_count}"
     )
 
 
@@ -201,8 +200,8 @@ def test_no_index_entries_404_is_retried_not_skipped() -> None:
         "A 404 with 'No index entries' (off-grid step) must not be SKIPPED_NOT_RELEASED; "
         "it should be treated as a retryable failure."
     )
-    # All 3 retries fire before exhaustion.
-    assert call_count == 3, (
-        f"Expected 3 retry calls for 'No index entries' 404, got {call_count}"
+    # Both retries fire before exhaustion.
+    assert call_count == 2, (
+        f"Expected 2 retry calls for 'No index entries' 404, got {call_count}"
     )
     assert result["status"] == "download_failed"
