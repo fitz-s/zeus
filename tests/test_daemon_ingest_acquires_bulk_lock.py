@@ -63,14 +63,18 @@ def test_tigge_ingest_track_acquires_bulk_lock():
     """BULK lock acquired with correct args inside _ingest_track (daemon path)."""
     from src.data import tigge_pipeline
 
-    lock_calls: list = []
+    # Shared event log to verify ordering: lock must be entered BEFORE
+    # get_world_connection() is called (plan §Change 1 ordering constraint).
+    event_log: list = []
 
     @contextmanager
     def _fake_lock(db_path, write_class):
-        lock_calls.append((db_path, write_class))
+        event_log.append(("lock_enter", db_path, write_class))
         yield
+        event_log.append(("lock_exit",))
 
     def _fake_get_world_connection():
+        event_log.append(("conn_opened",))
         return sqlite3.connect(":memory:")
 
     def _fake_apply_v2_schema(conn):
@@ -95,10 +99,28 @@ def test_tigge_ingest_track_acquires_bulk_lock():
         )
 
     assert result.get("ok") is True, f"_ingest_track returned: {result}"
-    assert len(lock_calls) == 1, f"Expected 1 lock call, got {lock_calls}"
-    db_path_arg, wc_arg = lock_calls[0]
+
+    # Verify lock was acquired with correct args.
+    lock_entries = [e for e in event_log if isinstance(e, tuple) and e[0] == "lock_enter"]
+    assert len(lock_entries) == 1, f"Expected 1 lock acquisition, got {event_log}"
+    _, db_path_arg, wc_arg = lock_entries[0]
     assert db_path_arg == ZEUS_WORLD_DB_PATH, f"Wrong DB path locked: {db_path_arg}"
     assert wc_arg == WriteClass.BULK, f"Expected BULK, got {wc_arg}"
+
+    # Verify lock was entered BEFORE the connection was opened (ordering constraint).
+    event_types = [e[0] for e in event_log]
+    lock_idx = event_types.index("lock_enter")
+    conn_idx = event_types.index("conn_opened")
+    assert lock_idx < conn_idx, (
+        f"Ordering violation: lock entered at position {lock_idx} but conn "
+        f"opened at position {conn_idx}. Full log: {event_log}"
+    )
+    # Verify conn was opened BEFORE the lock was released (conn closed inside lock).
+    lock_exit_idx = event_types.index("lock_exit")
+    assert conn_idx < lock_exit_idx, (
+        f"Ordering violation: conn opened at {conn_idx} but lock released at "
+        f"{lock_exit_idx}. Full log: {event_log}"
+    )
 
 
 # ---------------------------------------------------------------------------

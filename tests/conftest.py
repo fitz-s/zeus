@@ -292,9 +292,10 @@ _WLA_SQLITE_CONNECT_ALLOWLIST = frozenset({
     # --- src/ daemon sites: pending Track A.6 (#246) ---
     "src/data/market_scanner.py",                   # pending_track_a6
     # src/ingest_main.py, src/observability/status_summary.py,
-    # src/riskguard/discord_alerts.py — resolved in Track A.6 (#246):
-    # annotated in SQLITE_CONNECT_ALLOWLIST (db_writer_lock.py) with
-    # read-only / separate-DB rationale; removed from conftest pending list.
+    # src/riskguard/discord_alerts.py — reclassified in Track A.6 (#246) from
+    # pending_track_a6 to permanent exemptions: each is either read-only on the
+    # world DB or writes a separate DB (risk_state.db). Rationale comments are
+    # co-located in SQLITE_CONNECT_ALLOWLIST inside src/state/db_writer_lock.py.
     "src/ingest_main.py",                           # RO: reads condition_id for UMA listener (Track A.6 #246)
     "src/observability/status_summary.py",          # RO: status dashboard read-only (Track A.6 #246)
     "src/riskguard/discord_alerts.py",              # WRITE risk_state.db only; not world-db BULK scope (Track A.6 #246)
