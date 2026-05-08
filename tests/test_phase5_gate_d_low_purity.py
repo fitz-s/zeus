@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS ensemble_snapshots_v2 (
     members_unit TEXT NOT NULL DEFAULT 'degC',
     training_allowed INTEGER NOT NULL DEFAULT 1,
     issue_time TEXT,
+    source_id TEXT,
     available_at TEXT,
     lead_hours REAL,
     causality_status TEXT DEFAULT 'OK',
@@ -54,7 +55,9 @@ CREATE TABLE IF NOT EXISTS calibration_pairs_v2 (
     range_label TEXT, p_raw REAL, outcome INTEGER, lead_days REAL, season TEXT,
     cluster TEXT, forecast_available_at TEXT, settlement_value REAL,
     decision_group_id TEXT, bias_corrected INTEGER, authority TEXT, bin_source TEXT,
-    data_version TEXT, training_allowed INTEGER, causality_status TEXT, snapshot_id INTEGER
+    data_version TEXT, training_allowed INTEGER, causality_status TEXT, snapshot_id INTEGER,
+    cycle TEXT DEFAULT '00', source_id TEXT DEFAULT 'tigge_mars',
+    horizon_profile TEXT DEFAULT 'full'
 )
 """
 
@@ -444,6 +447,166 @@ class TestGateDLowPurityIsolation:
             "SELECT data_version FROM calibration_pairs_v2 ORDER BY data_version"
         ).fetchall()
         assert [row["data_version"] for row in remaining] == [LOW_LOCALDAY_MIN.data_version]
+
+    def test_R_AZ_2c2_rebuild_stratification_filters_scope_fetch_and_delete(self):
+        from scripts.rebuild_calibration_pairs_v2 import (
+            CANONICAL_BIN_SOURCE_V2,
+            METRIC_SPECS,
+            _delete_canonical_v2_slice,
+            _fetch_eligible_snapshots_v2,
+        )
+        from src.contracts.ensemble_snapshot_provenance import (
+            ECMWF_OPENDATA_LOW_CONTRACT_WINDOW_DATA_VERSION,
+        )
+        from src.types.metric_identity import LOW_LOCALDAY_MIN
+
+        conn = _make_gate_d_db()
+        conn.executemany(
+            """
+            INSERT INTO ensemble_snapshots_v2 (
+                city, target_date, temperature_metric, physical_quantity, data_version,
+                members_unit, training_allowed, issue_time, source_id, available_at,
+                lead_hours, causality_status, authority, members_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    "Chicago",
+                    "2026-06-02",
+                    "low",
+                    LOW_LOCALDAY_MIN.physical_quantity,
+                    ECMWF_OPENDATA_LOW_CONTRACT_WINDOW_DATA_VERSION,
+                    "degC",
+                    1,
+                    "2026-05-31T00:00:00Z",
+                    "ecmwf_open_data",
+                    "2026-05-31T14:00:00Z",
+                    48.0,
+                    "OK",
+                    "VERIFIED",
+                    json.dumps([290.0 + i * 0.01 for i in range(51)]),
+                ),
+                (
+                    "Chicago",
+                    "2026-06-03",
+                    "low",
+                    LOW_LOCALDAY_MIN.physical_quantity,
+                    ECMWF_OPENDATA_LOW_CONTRACT_WINDOW_DATA_VERSION,
+                    "degC",
+                    1,
+                    "2026-06-01T12:00:00Z",
+                    "ecmwf_open_data",
+                    "2026-06-01T14:00:00Z",
+                    48.0,
+                    "OK",
+                    "VERIFIED",
+                    json.dumps([290.0 + i * 0.01 for i in range(51)]),
+                ),
+            ],
+        )
+        conn.executemany(
+            """
+            INSERT INTO calibration_pairs_v2 (
+                city, target_date, temperature_metric, range_label, p_raw,
+                outcome, lead_days, season, cluster, forecast_available_at,
+                settlement_value, decision_group_id, authority, bin_source,
+                data_version, training_allowed, causality_status, snapshot_id,
+                cycle, source_id, horizon_profile
+            ) VALUES (
+                'Chicago', ?, 'low', ?, 0.5, 1, 2.0, 'summer', 'Chicago',
+                '2026-05-31T14:00:00Z', 18.0, ?, 'VERIFIED', ?, ?, 1, 'OK',
+                ?, ?, ?, ?
+            )
+            """,
+            [
+                (
+                    "2026-06-01",
+                    "legacy",
+                    "legacy",
+                    CANONICAL_BIN_SOURCE_V2,
+                    LOW_LOCALDAY_MIN.data_version,
+                    1,
+                    "12",
+                    "tigge_mars",
+                    "full",
+                ),
+                (
+                    "2026-06-02",
+                    "recovery_00",
+                    "recovery_00",
+                    CANONICAL_BIN_SOURCE_V2,
+                    ECMWF_OPENDATA_LOW_CONTRACT_WINDOW_DATA_VERSION,
+                    2,
+                    "00",
+                    "ecmwf_open_data",
+                    "full",
+                ),
+                (
+                    "2026-06-03",
+                    "recovery_12",
+                    "recovery_12",
+                    CANONICAL_BIN_SOURCE_V2,
+                    ECMWF_OPENDATA_LOW_CONTRACT_WINDOW_DATA_VERSION,
+                    3,
+                    "12",
+                    "ecmwf_open_data",
+                    "full",
+                ),
+            ],
+        )
+
+        low_spec = METRIC_SPECS[1]
+        eligible = _fetch_eligible_snapshots_v2(
+            conn,
+            city_filter=None,
+            spec=low_spec,
+            data_version_filter=ECMWF_OPENDATA_LOW_CONTRACT_WINDOW_DATA_VERSION,
+            cycle_filter="00",
+            source_id_filter="ecmwf_open_data",
+            horizon_profile_filter="full",
+        )
+        assert [row["target_date"] for row in eligible] == ["2026-06-02"]
+
+        _delete_canonical_v2_slice(
+            conn,
+            spec=low_spec,
+            data_version_filter=ECMWF_OPENDATA_LOW_CONTRACT_WINDOW_DATA_VERSION,
+            cycle_filter="00",
+            source_id_filter="ecmwf_open_data",
+            horizon_profile_filter="full",
+        )
+        remaining = conn.execute(
+            """
+            SELECT target_date, data_version, cycle, source_id, horizon_profile
+            FROM calibration_pairs_v2
+            ORDER BY target_date
+            """
+        ).fetchall()
+        assert [
+            (
+                row["target_date"],
+                row["data_version"],
+                row["cycle"],
+                row["source_id"],
+                row["horizon_profile"],
+            )
+            for row in remaining
+        ] == [
+            (
+                "2026-06-01",
+                LOW_LOCALDAY_MIN.data_version,
+                "12",
+                "tigge_mars",
+                "full",
+            ),
+            (
+                "2026-06-03",
+                ECMWF_OPENDATA_LOW_CONTRACT_WINDOW_DATA_VERSION,
+                "12",
+                "ecmwf_open_data",
+                "full",
+            ),
+        ]
 
     def test_R_AZ_2c3_rebuild_dry_run_evaluates_low_contract_and_observation_gates(self):
         from scripts.rebuild_calibration_pairs_v2 import METRIC_SPECS, rebuild_v2

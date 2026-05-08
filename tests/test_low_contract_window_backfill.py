@@ -85,13 +85,13 @@ def _payload(
     }
 
 
-def _write_payload(root: Path, payload: dict) -> Path:
+def _write_payload(root: Path, payload: dict, *, suffix: str = "") -> Path:
     path = (
         root
         / "tigge_ecmwf_ens_mn2t6_localday_min"
         / "chicago"
         / "20260530"
-        / "tigge_ecmwf_ens_mn2t6_localday_min_target_2026-06-01_lead_2.json"
+        / f"tigge_ecmwf_ens_mn2t6_localday_min_target_2026-06-01_lead_2{suffix}.json"
     )
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload), encoding="utf-8")
@@ -157,6 +157,30 @@ def test_low_contract_window_backfill_dry_run_does_not_write(tmp_path: Path):
     assert stats.training_candidates == 1
     assert stats.inserted == 0
     assert _recovery_count(conn) == 0
+
+
+def test_low_contract_window_backfill_cycle_filter_counts_and_skips(tmp_path: Path):
+    conn = _make_db()
+    _write_payload(tmp_path, _payload(), suffix="_00")
+    payload_12 = _payload()
+    payload_12["issue_time_utc"] = "2026-05-30T12:00:00+00:00"
+    _write_payload(tmp_path, payload_12, suffix="_12")
+
+    reports = run_backfill(
+        conn=conn,
+        json_root=tmp_path,
+        sources=[LOW_RECOVERY_SOURCES["tigge_mars"]],
+        dry_run=True,
+        force=False,
+        cycle="00",
+    )
+
+    stats = reports["tigge_mars"]
+    assert stats.files_scanned == 2
+    assert stats.by_cycle == {"00": 1, "12": 1}
+    assert stats.cycle_filtered == 1
+    assert stats.would_insert == 1
+    assert stats.no_matching_snapshot == 0
 
 
 def test_low_contract_window_backfill_default_raw_root_handles_linked_worktree(
