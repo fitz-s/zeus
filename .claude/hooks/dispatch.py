@@ -241,19 +241,35 @@ def _run_advisory_check_pr_create_loc_accumulation(
 
     bypass_active = os.environ.get("ZEUS_PR_ALLOW_TINY", "").strip() == "1"
 
-    # Count commits since base
+    # Count commits/LOC since the merge-base with the target branch (not @{u}).
+    # Codex P2 fix: @{u} resolves to the remote topic branch itself after push,
+    # so rev-list/diff against it counts only *unpushed* local work — a fully
+    # accumulated pushed branch looks like 0 commits / 0 LOC and falsely blocks.
+    # Instead, find the target branch from gh pr view (or fall back to origin/main)
+    # and use `git merge-base` to anchor the comparison.
     try:
-        base_result = subprocess.run(
-            ["git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
-            capture_output=True, text=True, timeout=5, cwd=REPO_ROOT,
+        pr_base_result = subprocess.run(
+            ["gh", "pr", "view", "--json", "baseRefName", "--jq", ".baseRefName"],
+            capture_output=True, text=True, timeout=10, cwd=REPO_ROOT,
         )
-        base_ref = base_result.stdout.strip() if base_result.returncode == 0 else "origin/main"
+        if pr_base_result.returncode == 0 and pr_base_result.stdout.strip():
+            target_branch = f"origin/{pr_base_result.stdout.strip()}"
+        else:
+            target_branch = "origin/main"
     except (subprocess.TimeoutExpired, OSError):
-        return None
+        target_branch = "origin/main"
+
+    try:
+        merge_base = subprocess.run(
+            ["git", "merge-base", "HEAD", target_branch],
+            capture_output=True, text=True, timeout=5, cwd=REPO_ROOT,
+        ).stdout.strip() or target_branch
+    except (subprocess.TimeoutExpired, OSError, ValueError):
+        merge_base = target_branch
 
     try:
         commit_count = int(subprocess.run(
-            ["git", "rev-list", "--count", f"{base_ref}..HEAD"],
+            ["git", "rev-list", "--count", f"{merge_base}..HEAD"],
             capture_output=True, text=True, timeout=5, cwd=REPO_ROOT,
         ).stdout.strip() or "0")
     except (subprocess.TimeoutExpired, ValueError, OSError):
@@ -261,7 +277,7 @@ def _run_advisory_check_pr_create_loc_accumulation(
 
     try:
         shortstat = subprocess.run(
-            ["git", "diff", "--shortstat", f"{base_ref}..HEAD"],
+            ["git", "diff", "--shortstat", f"{merge_base}..HEAD"],
             capture_output=True, text=True, timeout=5, cwd=REPO_ROOT,
         ).stdout
         ins = re.findall(r"(\d+)\s+insertion", shortstat)
@@ -319,10 +335,12 @@ def _run_advisory_check_pre_merge_comment_check(
 ) -> str | None:
     """BLOCKING on `gh pr merge <PR#>` when:
     - PR age < 600s (auto-reviewers haven't had time to fire)
-    - Unresolved Codex P0/P1 review thread exists
+    - ANY unresolved review thread exists (B2 strict: all-threads-resolved)
     - Any review state == CHANGES_REQUESTED (and not dismissed)
     Bypass: ZEUS_PR_MERGE_FORCE=1 -> emit warning and allow.
-    ADVISORY (not blocking) for unresolved Codex P2 threads.
+    B2 strict mode: previously Codex P2 was advisory-only; now ALL unresolved
+    threads (any author, any badge) are blocking. This PR is subject to its own
+    B2 gate: every thread on this PR must be resolved before merge.
     COMMENTED state reviews never block (Copilot summary posts).
     """
     command = _command_from_payload(payload)
@@ -330,7 +348,8 @@ def _run_advisory_check_pre_merge_comment_check(
         return None
 
     import re
-    m = re.search(r"gh\s+pr\s+merge\s+(\d+)", command)
+    # Anchored to word boundary: prevent false-positive on echo/heredoc containing this text
+    m = re.search(r"(?:^|\s)gh\s+pr\s+merge\s+(\d+)(?:\s|$)", command)
     if not m:
         return None
 
@@ -360,10 +379,14 @@ def _run_advisory_check_pre_merge_comment_check(
                     block_reasons.append(
                         f"PR age {int(pr_age_s)}s < 600s; wait for auto-reviewers (5-8 min typical)"
                     )
-    except (subprocess.TimeoutExpired, OSError, ValueError, KeyError):
-        pass
+    except (subprocess.TimeoutExpired, OSError, ValueError, KeyError) as _e:
+        # ALLOW on probe failure (transient gh outage); log so operators can diagnose.
+        print(f"[pre_merge_comment_check] PR-age probe failed ({_e!r}); allowing (fail-open).", file=sys.stderr)
 
-    # -- GraphQL review threads (Codex P0/P1 = block, P2 = advisory) ----------
+    # -- GraphQL review threads (B2 strict: ALL unresolved = block) ----------
+    # B2 strict mode: block on ANY unresolved review thread, regardless of author
+    # or badge tier. Codex P0/P1 emit a specific label; all others get a generic
+    # "unresolved thread" message. Bypass: ZEUS_PR_MERGE_FORCE=1.
     try:
         repo_result = subprocess.run(
             ["gh", "repo", "view", "--json", "owner,name"],
@@ -398,21 +421,32 @@ def _run_advisory_check_pre_merge_comment_check(
                 for thread in threads:
                     if thread.get("isResolved"):
                         continue
-                    for comment in thread.get("comments", {}).get("nodes", []):
-                        author = (comment.get("author") or {}).get("login", "")
-                        body = comment.get("body", "")
-                        if author != "chatgpt-codex-connector[bot]":
-                            continue
+                    # B2 strict: every unresolved thread is a blocker
+                    first_comment = (
+                        thread.get("comments", {}).get("nodes", [{}])[0]
+                        if thread.get("comments", {}).get("nodes")
+                        else {}
+                    )
+                    author = (first_comment.get("author") or {}).get("login", "unknown")
+                    body = first_comment.get("body", "")
+                    snippet = body[:80].replace("\n", " ")
+                    if author == "chatgpt-codex-connector[bot]":
                         if "P0 Badge" in body or "P1 Badge" in body:
-                            snippet = body[:120].replace("\n", " ")
                             block_reasons.append(
                                 f"Unresolved Codex P0/P1 thread: {snippet!r}"
                             )
-                        elif "P2 Badge" in body:
-                            snippet = body[:80].replace("\n", " ")
-                            advisory_notes.append(f"Unresolved Codex P2: {snippet!r}")
-    except (subprocess.TimeoutExpired, OSError, ValueError, KeyError):
-        pass
+                        else:
+                            # P2 or other Codex badge — B2 strict: block (previously advisory)
+                            block_reasons.append(
+                                f"Unresolved Codex thread (@{author}): {snippet!r}"
+                            )
+                    else:
+                        block_reasons.append(
+                            f"Unresolved review thread (@{author}): {snippet!r}"
+                        )
+    except (subprocess.TimeoutExpired, OSError, ValueError, KeyError) as _e:
+        # ALLOW on probe failure; log to stderr so operators can diagnose transient issues.
+        print(f"[pre_merge_comment_check] review-thread probe failed ({_e!r}); allowing (fail-open).", file=sys.stderr)
 
     # -- CHANGES_REQUESTED reviews --------------------------------------------
     try:
@@ -436,8 +470,9 @@ def _run_advisory_check_pre_merge_comment_check(
                     block_reasons.append(
                         f"CHANGES_REQUESTED review from {login} (not dismissed)"
                     )
-    except (subprocess.TimeoutExpired, OSError, ValueError):
-        pass
+    except (subprocess.TimeoutExpired, OSError, ValueError) as _e:
+        # ALLOW on probe failure; log to stderr so operators can diagnose.
+        print(f"[pre_merge_comment_check] reviews probe failed ({_e!r}); allowing (fail-open).", file=sys.stderr)
 
     # -- Build response -------------------------------------------------------
     if not block_reasons and not advisory_notes:

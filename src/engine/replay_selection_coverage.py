@@ -600,7 +600,7 @@ def run_selection_coverage(
                 SELECT snapshot_id FROM {ctx._snapshot_v2_table or ctx._snapshot_legacy_table}
                 WHERE city = ? AND target_date = ?
                   AND temperature_metric = ?
-                  AND available_at <= ?
+                  AND datetime(available_at) <= datetime(?)
                 ORDER BY datetime(available_at) DESC
                 LIMIT 1
                 """,

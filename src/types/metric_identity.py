@@ -94,9 +94,7 @@ class MetricIdentity:
                 f"Unknown source_family for high-localday-max: {source_family!r}. "
                 f"Expected one of {sorted(_HIGH_DATA_VERSION_BY_SOURCE_FAMILY.keys())!r}."
             )
-        pq = _HIGH_PHYSICAL_QUANTITY_BY_SOURCE_FAMILY.get(
-            source_family, "mx2t6_local_calendar_day_max"
-        )
+        pq = _HIGH_PHYSICAL_QUANTITY_BY_SOURCE_FAMILY[source_family]
         return cls(
             temperature_metric="high",
             physical_quantity=pq,
@@ -113,9 +111,7 @@ class MetricIdentity:
                 f"Unknown source_family for low-localday-min: {source_family!r}. "
                 f"Expected one of {sorted(_LOW_DATA_VERSION_BY_SOURCE_FAMILY.keys())!r}."
             )
-        pq = _LOW_PHYSICAL_QUANTITY_BY_SOURCE_FAMILY.get(
-            source_family, "mn2t6_local_calendar_day_min"
-        )
+        pq = _LOW_PHYSICAL_QUANTITY_BY_SOURCE_FAMILY[source_family]
         return cls(
             temperature_metric="low",
             physical_quantity=pq,

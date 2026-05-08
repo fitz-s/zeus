@@ -65,7 +65,7 @@
           {
             "type": "command",
             "command": "python3 .claude/hooks/dispatch.py pr_create_loc_accumulation",
-            "description": "[Phase 2 new] Advisory: warn when gh pr create invoked with <2 commits or <80 LOC since base (paid auto-reviewer cost)"
+            "description": "[A1 BLOCKING] Block gh pr create/ready when commits < 2 AND LOC < 80 since merge-base (both conditions required). Bypass: ZEUS_PR_ALLOW_TINY=1"
           },
           {
             "type": "command",
