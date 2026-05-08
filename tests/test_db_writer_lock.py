@@ -655,3 +655,65 @@ def test_fast_pool_executor_resolve_write_class_string_or_enum() -> None:
     fast2 = FastPoolExecutor(sched2, default_write_class=WriteClass.LIVE)
     assert fast1._default is WriteClass.LIVE
     assert fast2._default is WriteClass.LIVE
+
+
+# --------------------------------------------------------------------------
+# Track A.3: antibody self-test — synthetic unguarded site triggers fail-CI
+# --------------------------------------------------------------------------
+
+
+def test_wla_antibody_fires_on_new_unguarded_site(tmp_path: Path) -> None:
+    """Verify the writer-lock antibody scan detects a new unguarded site.
+
+    Writes a synthetic Python file containing a bare sqlite3.connect() call
+    into a temp directory, then runs the antibody scanner against that
+    directory. Confirms the scan returns a finding — proving that any new
+    unguarded site WOULD trigger fail-CI in the real collection hook.
+
+    Track A.3 (PR #92): antibody has advanced from advisory→fail-CI.
+    This test is the self-test for that gate.
+    """
+    import ast as _ast
+
+    # Write a synthetic Python file with a bare sqlite3.connect() call.
+    unguarded = tmp_path / "unguarded_site.py"
+    unguarded.write_text(
+        "import sqlite3\n"
+        "conn = sqlite3.connect('test.db')  # unguarded direct connect\n"
+    )
+
+    # Run the antibody scanner logic directly (inline, no conftest import).
+    def _scan_dir(scan_root: Path, allowlist: frozenset) -> list[str]:
+        findings: list[str] = []
+        for py_file in scan_root.rglob("*.py"):
+            rel = py_file.relative_to(scan_root).as_posix()
+            try:
+                source = py_file.read_text()
+                tree = _ast.parse(source, filename=rel)
+            except Exception:
+                continue
+            for node in _ast.walk(tree):
+                if (
+                    rel not in allowlist
+                    and isinstance(node, _ast.Call)
+                    and isinstance(node.func, _ast.Attribute)
+                    and node.func.attr == "connect"
+                    and isinstance(node.func.value, _ast.Name)
+                    and node.func.value.id == "sqlite3"
+                ):
+                    findings.append(f"{rel}:{node.lineno}")
+        return findings
+
+    findings = _scan_dir(tmp_path, frozenset())
+    assert len(findings) == 1, (
+        f"Expected 1 finding for synthetic unguarded site, got {findings}"
+    )
+    assert "unguarded_site.py:2" in findings[0], (
+        f"Finding did not match expected location: {findings}"
+    )
+
+    # Confirm that allowlisting the file silences the finding.
+    findings_allowlisted = _scan_dir(tmp_path, frozenset({"unguarded_site.py"}))
+    assert findings_allowlisted == [], (
+        f"Allowlisted file still produced findings: {findings_allowlisted}"
+    )

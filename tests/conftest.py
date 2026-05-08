@@ -238,12 +238,12 @@ def pytest_collection_modifyitems(items: list) -> None:
 
 
 # ---------------------------------------------------------------------------
-# SQLite Writer-Lock Antibody — Phase 0 (v4 plan §10).
+# SQLite Writer-Lock Antibody — Track A.3 (v4 plan §10).
 #
 # Collection-time enforcement that scans src/ + scripts/ for:
 #   1. Direct sqlite3.connect() outside the canonical-shim allowlist.
 #   2. (Reserved) _connect() calls without write_class kwarg in scope —
-#      activated in Phase 1 once retrofit lands; Phase 0 is non-blocking.
+#      activated in Phase 1 once retrofit lands.
 #   3. (Reserved) Raw subprocess.{Popen,run,...} outside the helper
 #      allowlist — activated in Phase 1.y.
 #
@@ -254,11 +254,11 @@ def pytest_collection_modifyitems(items: list) -> None:
 # Bypass: ZEUS_DISABLE_WRITER_LOCK_ANTIBODY=1 disables the antibody
 # (documented as emergency-only; CI builds set =0 explicitly).
 #
-# Phase 0 posture: this antibody warns/reports rather than blocks for
-# checks (2) and (3) so Phase 0 ships without forcing the 32+ BULK and
-# 14 LIVE caller retrofits. Check (1) (direct sqlite3.connect outside
-# allowlist) is also reported but not fatal yet — Phase 1.0 / 1.x will
-# tighten the failure mode once the canonical shim is the only writer.
+# Track A.3 posture (PR #92): check (1) is now FAIL-CI.  Any new
+# sqlite3.connect() site outside this allowlist fails the test run
+# immediately, preventing unreviewed direct connections from landing.
+# Add to allowlist only with a cited reason (read_only / pending_track_a6
+# / already_guarded).
 # ---------------------------------------------------------------------------
 
 import ast as _wla_ast
@@ -269,12 +269,95 @@ _WLA_REPO_ROOT = _wla_Path(__file__).resolve().parent.parent
 _WLA_SCAN_ROOTS = (_WLA_REPO_ROOT / "src", _WLA_REPO_ROOT / "scripts")
 _WLA_CACHE_PATH = _WLA_REPO_ROOT / ".pytest_cache" / "writer_lock_antibody.json"
 
-# Allowlisted files where direct ``sqlite3.connect`` is permitted. Phase 0
-# captures the canonical shim and the lock helper itself; Phase 1.x will
-# tighten this list as production callers are migrated.
+# Allowlisted files where direct ``sqlite3.connect`` is permitted.
+#
+# Reason tags used in comments:
+#   canonical_shim      — the canonical DB helper; direct connect is the point
+#   read_only           — file contains only SELECT queries; verified PR #86
+#   read_only_ro_uri    — file uses sqlite3.connect("file:...?mode=ro", uri=True)
+#   in_memory_only      — file connects only to ":memory:" (no on-disk writes)
+#   already_guarded     — call is inside a db_writer_lock() context (repro_antibodies)
+#   pending_track_a6    — daemon-level src/ site; full retrofit deferred to Track A.6 (#246)
+#   pending_track_a6_scripts — write script not yet retrofit; deferred to Track A.6 batch
+#   deferred_nonmechanical   — verify_truth_surfaces: non-mechanical rewrite, separate phase
+#
 _WLA_SQLITE_CONNECT_ALLOWLIST = frozenset({
-    "src/state/db.py",                  # canonical shim
-    "src/state/db_writer_lock.py",      # helper (does not connect)
+    # --- canonical infrastructure ---
+    "src/state/db.py",                              # canonical_shim
+    # NOTE: src/state/db_writer_lock.py is intentionally NOT allowlisted. The file
+    # has no sqlite3.connect() call sites today; if a future edit introduces one,
+    # the antibody SHOULD fire so this module stays a coordination layer (not a
+    # connect path). Allowlisting a no-connect file would weaken the gate.
+
+    # --- src/ daemon sites: pending Track A.6 (#246) ---
+    "src/data/market_scanner.py",                   # pending_track_a6
+    "src/ingest_main.py",                           # pending_track_a6
+    "src/observability/status_summary.py",          # pending_track_a6
+    "src/riskguard/discord_alerts.py",              # pending_track_a6
+
+    # --- read-only scripts: verified SELECT-only, named in PR #86 ---
+    "scripts/attribution_drift_weekly.py",          # read_only (PR #86)
+    "scripts/audit_divergence_exit_counterfactual.py",  # read_only (PR #86)
+    "scripts/audit_realtime_pnl.py",               # read_only (PR #86)
+    "scripts/bridge_oracle_to_calibration.py",      # read_only (PR #86)
+    "scripts/build_correlation_matrix.py",          # read_only (PR #86)
+    "scripts/compare_diurnal_v1_v2.py",            # read_only (PR #86)
+    "scripts/deep_heartbeat.py",                    # read_only (PR #86)
+    "scripts/healthcheck.py",                       # read_only (PR #86)
+    "scripts/replay_parity.py",                     # read_only (PR #86)
+    "scripts/venus_sensing_report.py",              # read_only (PR #86)
+
+    # --- additional read-only / ro-URI scripts ---
+    "scripts/audit_observation_instants_v2.py",     # read_only (SELECT-only, no INSERT/UPDATE/DELETE)
+    "scripts/calibration_observation_weekly.py",    # read_only_ro_uri
+    "scripts/ddd_v1_v2_replay.py",                 # read_only_ro_uri
+    "scripts/diagnose_low_high_alignment.py",       # read_only (SELECT-only)
+    "scripts/diagnose_truth_surfaces.py",           # read_only (SELECT-only, no INSERT/UPDATE/DELETE)
+    "scripts/edge_observation_weekly.py",           # read_only_ro_uri
+    "scripts/generate_monthly_bounds.py",           # read_only_ro_uri
+    "scripts/learning_loop_observation_weekly.py",  # read_only_ro_uri
+    "scripts/produce_activation_evidence.py",       # in_memory_only (":memory:" only)
+    "scripts/replay_correctness_gate.py",           # read_only (SELECT-only)
+    "scripts/state_census.py",                      # read_only_ro_uri
+    "scripts/topology_doctor_code_review_graph.py", # read_only_ro_uri
+    "scripts/ws_poll_reaction_weekly.py",           # read_only_ro_uri
+
+    # --- repro_antibodies.py: mixed; all sites verified safe ---
+    # Lines 77,108: inside db_writer_lock() context (already_guarded)
+    # Lines 369,448: SELECT-only reads (read_only)
+    # Line 543: ":memory:" only (in_memory_only)
+    "scripts/repro_antibodies.py",                  # already_guarded + read_only + in_memory_only
+
+    # --- write scripts: pending Track A.6 batch retrofit ---
+    "scripts/backfill_forecast_issue_time.py",      # pending_track_a6_scripts
+    "scripts/backfill_low_contract_window_evidence.py",  # pending_track_a6_scripts
+    "scripts/backfill_obs_v2.py",                   # pending_track_a6_scripts
+    "scripts/backfill_ogimet_metar.py",             # pending_track_a6_scripts
+    "scripts/backfill_outcome_fact.py",             # pending_track_a6_scripts
+    "scripts/backfill_tigge_snapshot_p_raw_v2.py",  # pending_track_a6_scripts
+    "scripts/backfill_wu_daily_all.py",             # pending_track_a6_scripts
+    "scripts/cleanup_ghost_positions.py",           # pending_track_a6_scripts
+    "scripts/etl_forecasts_v2_from_legacy.py",      # pending_track_a6_scripts
+    "scripts/fill_obs_v2_dst_gaps.py",              # pending_track_a6_scripts
+    "scripts/fill_obs_v2_meteostat.py",             # pending_track_a6_scripts
+    "scripts/force_cycle_with_healthy_gates.py",    # pending_track_a6_scripts
+    "scripts/hko_ingest_tick.py",                   # pending_track_a6_scripts
+    "scripts/ingest_grib_to_snapshots.py",          # pending_track_a6_scripts
+    "scripts/migrate_add_authority_column.py",      # pending_track_a6_scripts
+    "scripts/migrate_b070_control_overrides_to_history.py",  # pending_track_a6_scripts
+    "scripts/migrate_backtest_runs_lane_constraint_2026_05_07.py",  # pending_track_a6_scripts
+    "scripts/migrate_ensemble_snapshots_v2_add_ingest_backend.py",  # pending_track_a6_scripts
+    "scripts/migrate_forecasts_availability_provenance.py",  # pending_track_a6_scripts
+    "scripts/migrate_observations_k1.py",           # pending_track_a6_scripts
+    "scripts/nuke_rebuild_projections.py",          # pending_track_a6_scripts
+    "scripts/rebuild_calibration_pairs_canonical.py",  # pending_track_a6_scripts
+    "scripts/rebuild_calibration_pairs_v2.py",      # pending_track_a6_scripts
+    "scripts/rebuild_settlements.py",               # pending_track_a6_scripts
+    "scripts/reevaluate_readiness_2026_05_07.py",   # pending_track_a6_scripts
+    "scripts/refit_platt_v2.py",                    # pending_track_a6_scripts
+
+    # --- deferred non-mechanical rewrite (separate phase, cited PR #86) ---
+    "scripts/verify_truth_surfaces.py",             # deferred_nonmechanical (PR #86)
 })
 
 
@@ -356,9 +439,10 @@ def _wla_scan_all() -> dict:
 def pytest_configure(config) -> None:
     """Run the writer-lock antibody once at session-configure time.
 
-    Phase 0 posture: report findings via warning, do NOT fail the run. The
-    antibody hardens to a fail-the-run posture in Phase 1.x once production
-    retrofits are in place (plan §5 step 1.x).
+    Track A.3 posture (PR #92): FAIL-CI on any direct sqlite3.connect()
+    outside the allowlist.  Advisory→fail-CI upgrade per Track A plan.
+    Add to _WLA_SQLITE_CONNECT_ALLOWLIST with a cited reason tag to
+    suppress a specific site during staged rollout.
     """
     if _wla_is_bypassed():
         config.issue_config_time_warning(
@@ -372,17 +456,14 @@ def pytest_configure(config) -> None:
     aggregate = _wla_scan_all()
     findings = aggregate.get("direct_sqlite_connect", [])
     if findings:
-        # Phase 0: report via warning only; not a CI gate yet.
-        # Format the allowlist directly into the message so it stays in
-        # sync with `_WLA_SQLITE_CONNECT_ALLOWLIST` if entries are added
-        # in Phase 1.x (PR #81 review feedback).
-        allowlist_str = ", ".join(sorted(_WLA_SQLITE_CONNECT_ALLOWLIST))
-        config.issue_config_time_warning(
-            UserWarning(
-                "writer-lock antibody (Phase 0 informational): "
-                f"{len(findings)} direct sqlite3.connect() site(s) outside "
-                f"allowlist [{allowlist_str}]. Examples: "
-                f"{findings[:3]}. Phase 1.x will tighten this to fail-CI."
-            ),
-            stacklevel=1,
+        # Track A.3: fail-CI — any unallowlisted site is a hard error.
+        allowlist_size = len(_WLA_SQLITE_CONNECT_ALLOWLIST)
+        raise pytest.UsageError(
+            f"writer-lock antibody (Track A.3 FAIL-CI): "
+            f"{len(findings)} direct sqlite3.connect() site(s) outside "
+            f"allowlist ({allowlist_size} entries). "
+            f"Add to _WLA_SQLITE_CONNECT_ALLOWLIST in tests/conftest.py "
+            f"with a cited reason tag (read_only / pending_track_a6 / etc). "
+            f"Violations: {findings[:5]}"
+            + (f" ... and {len(findings) - 5} more" if len(findings) > 5 else "")
         )

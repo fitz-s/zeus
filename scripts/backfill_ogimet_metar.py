@@ -56,7 +56,6 @@ import json
 import re
 import sys
 import time
-from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -558,8 +557,10 @@ def main(argv: Optional[list[str]] = None) -> int:
     run_id = f"ogimet_backfill_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
 
     _lock_path = Path(args.db) if args.db else ZEUS_WORLD_DB_PATH
-    # Skip writer lock in dry-run: no DB writes occur (PR #86 Copilot fix).
-    lock_ctx = db_writer_lock(_lock_path, WriteClass.BULK) if not args.dry_run else nullcontext()
+    # Always hold the writer lock across init_schema — Codex P2 fix (PR #91 follow-up):
+    # dry-run still calls init_schema(conn) which runs CREATE TABLE / migration DDL,
+    # so skipping the lock in dry-run allows concurrent writers to race schema changes.
+    lock_ctx = db_writer_lock(_lock_path, WriteClass.BULK)
     with lock_ctx:
         conn = get_world_connection(write_class="bulk") if not args.db else None
         if args.db:
