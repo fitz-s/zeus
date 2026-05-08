@@ -566,7 +566,7 @@ def _etl_recalibrate():
 
 def _etl_recalibrate_body():
     """Inner body for ETL recalibration — shared with lock wrapper."""
-    import subprocess
+    from src.state.db_writer_lock import WriteClass, subprocess_run_with_write_class
     venv_python = _etl_subprocess_python()
     scripts_dir = Path(__file__).parent.parent / "scripts"
     results = {}
@@ -579,8 +579,9 @@ def _etl_recalibrate_body():
         script_path = scripts_dir / script
         if script_path.exists():
             try:
-                r = subprocess.run(
+                r = subprocess_run_with_write_class(
                     [venv_python, str(script_path)],
+                    WriteClass.BULK,
                     capture_output=True, text=True, timeout=300,
                 )
                 results[script] = "OK" if r.returncode == 0 else f"FAIL: {r.stderr[-200:]}"
@@ -591,9 +592,10 @@ def _etl_recalibrate_body():
     results["platt_refit"] = "SKIP: run explicit post-fillback canonical refit"
 
     try:
-        r = subprocess.run(
+        r = subprocess_run_with_write_class(
             [venv_python, str(scripts_dir / "run_replay.py"),
              "--mode", "audit", "--start", "2025-01-01", "--end", "2099-12-31"],
+            WriteClass.BULK,
             capture_output=True, text=True, timeout=600,
         )
         results["replay_audit"] = "OK" if r.returncode == 0 else "FAIL"
@@ -924,14 +926,15 @@ def _etl_forecast_skill_tick():
 
     Runs on default executor (it opens a write connection to zeus-world.db).
     """
-    import subprocess
+    from src.state.db_writer_lock import WriteClass, subprocess_run_with_write_class
     venv_python = _etl_subprocess_python()
     script = Path(__file__).parent.parent / "scripts" / "etl_forecast_skill_from_forecasts.py"
     if not script.exists():
         logger.warning("ingest_etl_forecast_skill: script not found at %s", script)
         return
-    r = subprocess.run(
+    r = subprocess_run_with_write_class(
         [venv_python, str(script)],
+        WriteClass.BULK,
         capture_output=True, text=True, timeout=300,
     )
     output = r.stdout.strip()

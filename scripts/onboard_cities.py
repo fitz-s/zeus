@@ -46,6 +46,8 @@ from zoneinfo import ZoneInfo
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from src.state.db_writer_lock import WriteClass, subprocess_run_with_write_class  # noqa: E402
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(message)s",
@@ -577,8 +579,9 @@ def run_script(step: dict, city_names: list[str], dry_run: bool = False) -> bool
     logger.info("  Running: %s", " ".join(cmd[-4:]))
     start = time.time()
     try:
-        result = subprocess.run(
+        result = subprocess_run_with_write_class(
             cmd,
+            WriteClass.BULK,
             cwd=str(PROJECT_ROOT),
             capture_output=True,
             text=True,

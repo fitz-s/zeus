@@ -35,6 +35,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts import watch_source_contract  # noqa: E402
+from src.state.db_writer_lock import WriteClass, subprocess_run_with_write_class  # noqa: E402
 from src.config import CONFIG_DIR, load_cities, state_path  # noqa: E402
 from src.contracts.season import season_from_date  # noqa: E402
 from src.data import market_scanner as ms  # noqa: E402
@@ -1546,8 +1547,9 @@ def backup_world_db(db_path: Path, *, evidence_root: Path) -> dict[str, Any]:
 
 def _run_command(command: list[str], *, cwd: Path, artifact_path: Path) -> dict[str, Any]:
     started = _utcnow()
-    completed = subprocess.run(
+    completed = subprocess_run_with_write_class(
         [str(part) for part in command],
+        WriteClass.BULK,
         cwd=str(cwd),
         text=True,
         capture_output=True,
