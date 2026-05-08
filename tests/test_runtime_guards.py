@@ -516,6 +516,7 @@ def test_monitor_quote_refresh_changes_exit_price_not_posterior_dispatch(monkeyp
 
     def _recompute(position, current_p_market, registry, **context):
         dispatched_market_inputs.append(float(current_p_market))
+        monitor_refresh._set_monitor_probability_fresh(position, True)
         return 0.63
 
     monkeypatch.setattr(monitor_refresh, "recompute_native_probability", _recompute)
@@ -550,11 +551,11 @@ def test_monitor_quote_refresh_survives_microstructure_log_failure(monkeypatch):
 
     monkeypatch.setattr("src.state.db.log_microstructure", _raise_log_failure)
     monkeypatch.setattr(monitor_refresh, "_detect_whale_toxicity_from_orderbook", lambda *args, **kwargs: False)
-    monkeypatch.setattr(
-        monitor_refresh,
-        "recompute_native_probability",
-        lambda position, current_p_market, registry, **context: 0.63,
-    )
+    def _recompute(position, current_p_market, registry, **context):
+        monitor_refresh._set_monitor_probability_fresh(position, True)
+        return 0.63
+
+    monkeypatch.setattr(monitor_refresh, "recompute_native_probability", _recompute)
 
     pos = _position(entry_price=0.44, p_posterior=0.58)
     edge_ctx = monitor_refresh.refresh_position(
@@ -601,6 +602,7 @@ def test_refresh_position_support_topology_stale_blocks_exit_probability(monkeyp
 
     assert pos.last_monitor_prob == pytest.approx(0.41)
     assert pos.last_monitor_prob_is_fresh is False
+    assert not np.isfinite(pos.last_monitor_edge)
     assert "support_topology_stale" in pos.applied_validations
     assert not np.isfinite(edge_ctx.p_posterior)
     assert not np.isfinite(edge_ctx.forward_edge)

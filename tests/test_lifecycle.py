@@ -1,16 +1,20 @@
-# Lifecycle: created=2025-10-01; last_reviewed=2026-04-30; last_reused=2026-04-30
+# Created: 2025-10-01
+# Lifecycle: created=2025-10-01; last_reviewed=2026-05-08; last_reused=2026-05-08
 # Purpose: Exit-trigger + harvester lifecycle regression tests — covers
 #          position exit detection, harvest_settlement default-HIGH routing
 #          through calibration_pairs_v2 after C5 (2026-04-24), and p_raw
 #          skip behavior when ensemble signal is absent.
-# Reuse: Referenced by regression suite; last touched 2026-04-24 for C5
+# Reuse: Referenced by regression suite; last touched 2026-05-08 for Wave28
 #        (HIGH→v2 route). Apply v2 schema in test fixtures when asserting
 #        post-harvest pair rows.
+# Last reused/audited: 2026-05-08
+# Authority basis: docs/operations/task_2026-05-08_object_invariance_wave28/PLAN.md
 """Tests for exit triggers and harvester."""
 
 import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -138,6 +142,86 @@ class TestExitTriggers:
         signal = evaluate_exit_triggers(pos, _make_edge_context(0.30, 0.40))
         assert signal is not None
         assert signal.trigger == "EDGE_REVERSAL"
+
+    def test_buy_yes_ev_gate_uses_current_edge_context_posterior(self, monkeypatch):
+        """Monitor-current posterior must survive into the buy-yes hold EV gate."""
+        import src.execution.exit_triggers as exit_triggers
+
+        pos = _make_position(p_posterior=0.90)
+        pos.neg_edge_count = 1
+        captured: dict[str, float] = {}
+
+        def capture_hold_value(shares, current_p_posterior):
+            captured["posterior"] = current_p_posterior
+            return SimpleNamespace(net_value=0.0)
+
+        monkeypatch.setattr(exit_triggers, "_declared_zero_cost_hold_value", capture_hold_value)
+        ctx = _make_edge_context(p_posterior=0.10, entry_price=0.50)
+
+        signal = evaluate_exit_triggers(pos, ctx, best_bid=0.49)
+
+        assert signal is not None
+        assert signal.trigger == "EDGE_REVERSAL"
+        assert captured["posterior"] == pytest.approx(ctx.p_posterior)
+        assert captured["posterior"] != pytest.approx(pos.p_posterior)
+
+    def test_monitor_current_posterior_flows_to_buy_yes_ev_gate(self, monkeypatch):
+        """refresh_position -> exit trigger must preserve the fresh monitor posterior."""
+        import src.execution.exit_triggers as exit_triggers
+
+        pos = _make_position(entry_price=0.12, p_posterior=0.90)
+        pos.neg_edge_count = 1
+        captured: dict[str, float] = {}
+
+        def fresh_refresh(position, *, conn, city, target_d):
+            position.selected_method = position.entry_method
+            position.applied_validations = ["fresh_ens_fetch"]
+            return 0.05, position, True
+
+        def capture_hold_value(shares, current_p_posterior):
+            captured["posterior"] = current_p_posterior
+            return SimpleNamespace(net_value=0.0)
+
+        monkeypatch.setattr(monitor_refresh, "monitor_probability_refresh", fresh_refresh)
+        monkeypatch.setattr(monitor_refresh, "monitor_quote_refresh", lambda conn, clob, position: None)
+        monkeypatch.setattr(monitor_refresh, "_detect_whale_toxicity_from_orderbook", lambda *args, **kwargs: False)
+        monkeypatch.setattr(exit_triggers, "_declared_zero_cost_hold_value", capture_hold_value)
+
+        edge_ctx = monitor_refresh.refresh_position(None, None, pos)
+        signal = evaluate_exit_triggers(pos, edge_ctx, hours_to_settlement=24.0, best_bid=0.49)
+
+        assert edge_ctx.p_posterior == pytest.approx(0.05)
+        assert edge_ctx.p_posterior != pytest.approx(pos.p_posterior)
+        assert signal is not None
+        assert signal.trigger == "EDGE_REVERSAL"
+        assert captured["posterior"] == pytest.approx(0.05)
+
+    def test_stale_monitor_probability_cannot_drive_exit(self, monkeypatch):
+        """Stale monitor probability remains non-authoritative at the exit seam."""
+        pos = _make_position(entry_price=0.12, p_posterior=0.90, last_monitor_prob=0.41)
+        pos.neg_edge_count = 1
+
+        def stale_refresh(position, *, conn, city, target_d):
+            position.selected_method = position.entry_method
+            position.applied_validations = ["fresh_ens_fetch", "missing_observation_timestamp"]
+            return position.p_posterior, position, False
+
+        monkeypatch.setattr(monitor_refresh, "monitor_probability_refresh", stale_refresh)
+        monkeypatch.setattr(monitor_refresh, "monitor_quote_refresh", lambda conn, clob, position: None)
+        monkeypatch.setattr(monitor_refresh, "_detect_whale_toxicity_from_orderbook", lambda *args, **kwargs: False)
+
+        edge_ctx = monitor_refresh.refresh_position(None, None, pos)
+        signal = evaluate_exit_triggers(pos, edge_ctx, hours_to_settlement=24.0, best_bid=0.49)
+
+        assert pos.last_monitor_prob == pytest.approx(0.41)
+        assert pos.last_monitor_prob_is_fresh is False
+        assert not np.isfinite(pos.last_monitor_edge)
+        assert "monitor_probability_stale" in pos.applied_validations
+        assert not np.isfinite(edge_ctx.p_posterior)
+        assert not np.isfinite(edge_ctx.forward_edge)
+        assert not np.isfinite(edge_ctx.ci_width)
+        assert signal is None
+        assert pos.neg_edge_count == 1
 
     def test_edge_reversal_resets_on_recovery(self):
         """If edge recovers between checks, counter resets."""

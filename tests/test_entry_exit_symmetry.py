@@ -1,6 +1,6 @@
 # Created: 2026-04-07
-# Last reused/audited: 2026-04-23
-# Authority basis: midstream verdict v2 2026-04-23 (docs/to-do-list/zeus_midstream_fix_plan_2026-04-23.md T1.a midstream guardian panel)
+# Last reused/audited: 2026-05-08
+# Authority basis: docs/operations/task_2026-05-08_object_invariance_wave28/PLAN.md
 """Tests for entry-exit epistemic symmetry. §P9.7, D4.
 
 Entry: bootstrap n=200+ with BH-FDR α=0.10.
@@ -77,6 +77,7 @@ class TestCurrentExitUsesConsecutiveCycles:
         position.direction = "buy_no"
         position.neg_edge_count = 1
         position.size_usd = 10.0
+        position.effective_cost_basis_usd = 10.0
         position.entry_ci_width = 0.10
 
         ctx = _make_edge_context(

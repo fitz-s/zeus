@@ -64,6 +64,7 @@ from a separate topology branch before the next object-invariance stage.
 | 25 | Confirmed trade fact economics authority | `docs/operations/task_2026-05-07_object_invariance_wave25/PLAN.md` | Repaired in continuation branch | REVISE then APPROVE recorded | Existing physical DB rows were not audited or relabeled |
 | 26 | Canonical position event environment authority through lifecycle builders and portfolio loader | `docs/operations/task_2026-05-07_object_invariance_wave26/PLAN.md` | Repaired in continuation branch | REVISE twice, then APPROVE recorded | Existing physical DB rows were not audited, relabeled, or backfilled |
 | 27 | `venue_trade_facts` -> `position_lots` active exposure authority | `docs/operations/task_2026-05-08_object_invariance_wave27/PLAN.md` | Repaired in mainline-next branch | Local focused verification recorded; critic not yet run for multi-wave batch | Existing physical DB rows were not audited, relabeled, or backfilled |
+| 28 | Monitor-current native posterior -> exit trigger hold-value EV gate | `docs/operations/task_2026-05-08_object_invariance_wave28/PLAN.md` | Repaired in mainline-next branch | Critic APPROVE recorded | No DB rows touched; no venue side effects; report/replay/learning consumers remain separate sweep |
 
 ## PR67 Review Claims
 
@@ -128,6 +129,10 @@ Continuation branch update, 2026-05-08:
   lot producers are covered by focused tests, but report/replay/learning
   contamination sweep remains a separate read/consumer pass and existing DB rows
   were not audited.
+- Wave 28 repaired the monitor-current posterior authority seam for legacy exit
+  triggers: buy-yes EV gating now consumes `EdgeContext.p_posterior`, and stale
+  or unknown monitor probability refreshes materialize as non-authoritative
+  probability/edge/CI fields instead of masquerading as current posterior.
 
 ## Stop Conditions
 

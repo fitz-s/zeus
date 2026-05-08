@@ -2,8 +2,8 @@
 # Lifecycle: created=2026-03-31; last_reviewed=2026-05-05; last_reused=2026-05-05
 # Purpose: Lock live-money safety invariants across fill, exit, chain, and P&L flows.
 # Reuse: Run for execution finality, live exit, chain reconciliation, and safety invariant changes.
-# Last reused/audited: 2026-05-07
-# Authority basis: midstream verdict v2 2026-04-23; object-meaning invariance Wave26 explicit position env authority.
+# Last reused/audited: 2026-05-08
+# Authority basis: midstream verdict v2 2026-04-23; object-meaning invariance Wave28 monitor posterior authority.
 """Live safety invariant tests: relationship tests, not function tests.
 
 These verify cross-module relationships that prevent ghost positions,
@@ -2723,6 +2723,7 @@ def test_same_cycle_day0_crossing_refreshes_through_day0_semantics(monkeypatch):
         observed_methods.append(position.entry_method)
         position.selected_method = position.entry_method
         position.applied_validations = [position.entry_method]
+        monitor_refresh._set_monitor_probability_fresh(position, True)
         return 0.52
 
     monkeypatch.setattr(monitor_refresh, "recompute_native_probability", fake_recompute)
@@ -2792,6 +2793,7 @@ def test_day0_window_refresh_uses_day0_observation_semantics(monkeypatch):
         observed_methods.append(position.entry_method)
         position.selected_method = position.entry_method
         position.applied_validations = [position.entry_method]
+        monitor_refresh._set_monitor_probability_fresh(position, True)
         return 0.52
 
     monkeypatch.setattr(monitor_refresh, "recompute_native_probability", fake_recompute)
@@ -2837,6 +2839,7 @@ def test_day0_window_live_refresh_uses_best_bid_not_vwmp(monkeypatch):
         observed_markets.append(current_p_market)
         position.selected_method = position.entry_method
         position.applied_validations = [position.entry_method]
+        monitor_refresh._set_monitor_probability_fresh(position, True)
         return 0.52
 
     monkeypatch.setattr(monitor_refresh, "recompute_native_probability", fake_recompute)
@@ -2853,8 +2856,8 @@ def test_day0_window_live_refresh_uses_best_bid_not_vwmp(monkeypatch):
     assert observed_markets[0] != pytest.approx(edge_ctx.p_market[0])
 
 
-def test_day0_refresh_fallback_keeps_probability_stale(monkeypatch):
-    """Day0 fallback may reuse stored probability, but it must not relabel it fresh."""
+def test_day0_refresh_fallback_keeps_probability_non_authoritative(monkeypatch):
+    """Day0 fallback must not relabel stored probability as current exit authority."""
     from src.contracts import EntryMethod
     from src.engine import monitor_refresh
 
@@ -2865,6 +2868,7 @@ def test_day0_refresh_fallback_keeps_probability_stale(monkeypatch):
         entry_method=EntryMethod.ENS_MEMBER_COUNTING.value,
         selected_method="",
         p_posterior=0.61,
+        last_monitor_prob=0.41,
         last_monitor_prob_is_fresh=True,
         applied_validations=["alpha_posterior"],
     )
@@ -2894,10 +2898,13 @@ def test_day0_refresh_fallback_keeps_probability_stale(monkeypatch):
     assert pos.selected_method == EntryMethod.DAY0_OBSERVATION.value
     assert pos.last_monitor_market_price == pytest.approx(0.41)
     assert pos.last_monitor_market_price_is_fresh is True
-    assert pos.last_monitor_prob == pytest.approx(0.61)
+    assert pos.last_monitor_prob == pytest.approx(0.41)
     assert pos.last_monitor_prob_is_fresh is False
-    assert edge_ctx.p_posterior == pytest.approx(0.61)
+    assert not np.isfinite(pos.last_monitor_edge)
+    assert not np.isfinite(edge_ctx.p_posterior)
+    assert not np.isfinite(edge_ctx.forward_edge)
     assert "missing_observation_timestamp" in pos.applied_validations
+    assert "monitor_probability_stale" in pos.applied_validations
 
 
 # ---- Bonus: Quarantine does NOT expire before 48h ----
@@ -3771,16 +3778,19 @@ def test_legacy_exit_triggers_use_fill_authority_shares(monkeypatch):
 
     def capture_hold_value(shares, current_p_posterior):
         captured["shares"] = shares
+        captured["posterior"] = current_p_posterior
         return SimpleNamespace(net_value=0.0)
 
     monkeypatch.setattr(exit_triggers, "_declared_zero_cost_hold_value", capture_hold_value)
-    edge_ctx = SimpleNamespace(forward_edge=-0.40, ci_width=0.02)
+    edge_ctx = SimpleNamespace(forward_edge=-0.40, ci_width=0.02, p_posterior=0.10)
 
     signal = exit_triggers._evaluate_buy_yes_exit(pos, edge_ctx, best_bid=0.49)
 
     assert signal is not None
     assert captured["shares"] == pytest.approx(pos.effective_shares)
     assert captured["shares"] != pytest.approx(pos.size_usd / pos.entry_price)
+    assert captured["posterior"] == pytest.approx(edge_ctx.p_posterior)
+    assert captured["posterior"] != pytest.approx(pos.p_posterior)
 
 
 def test_legacy_buy_no_exit_triggers_use_fill_authority_shares(monkeypatch):
