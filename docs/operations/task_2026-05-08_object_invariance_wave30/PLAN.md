@@ -24,7 +24,7 @@ Authority surfaces:
 
 - Canonical projection query: `src/state/db.py::query_portfolio_loader_view`.
 - Position object loader: `src/state/portfolio.py::_position_from_projection_row` already preserves raw `last_monitor_prob` and `last_monitor_edge`.
-- Riskguard has a separate duplicate row loader and remains out of scope because topology did not admit `src/riskguard/riskguard.py` for this wave.
+- Riskguard had a separate duplicate row loader and was out of scope during the original Wave30 route because topology did not admit `src/riskguard/riskguard.py`; PR97 follow-up after PR99 topology cleanup repaired that residual.
 
 ## Phase 1 - Boundary Selection
 
@@ -33,7 +33,7 @@ Candidates after Wave29:
 | Boundary | Live-money relevance | Material values | Bypass/legacy risk | Patch safety |
 | --- | --- | --- | --- | --- |
 | `position_current` -> portfolio loader view | Can corrupt monitor/report/risk inputs | `last_monitor_prob`, `last_monitor_edge` | `NULL` was coerced to numeric `0.0` in `src/state/db.py` | Safe source/test repair |
-| riskguard duplicate loader | Can corrupt risk posture interpretation | same fields | separate `float(row or 0.0)` in `src/riskguard/riskguard.py` | Defer; route blocked this file |
+| riskguard duplicate loader | Can corrupt risk posture interpretation | same fields | separate `float(row or 0.0)` in `src/riskguard/riskguard.py` | Repaired in PR97 follow-up after PR99 topology cleanup |
 | historical projection rows | Can contain legacy zeros | physical DB rows | requires audit/relabel/backfill | Operator decision required |
 
 Selected: `position_current` -> portfolio loader view because topology admitted `src/state/db.py` and tests, and this removes the central canonical read-model zero-fill.
@@ -115,7 +115,7 @@ Durable mechanism:
 
 - Central canonical portfolio loader view no longer fabricates monitor probability/edge zeros for missing evidence.
 - Existing `src/state/portfolio.py::_position_from_projection_row` already forwards row values without zero-filling these fields.
-- Residual: `src/riskguard/riskguard.py` has a separate duplicate loader that still coerces missing monitor fields to `0.0`; topology did not admit that file in this wave.
+- Residual closed in PR97 follow-up after PR99 topology cleanup: `src/riskguard/riskguard.py` no longer coerces missing monitor fields to `0.0`; the RiskGuard protective `Position` mapper preserves missing evidence as `None`.
 - Historical physical rows and decision artifacts were not audited/backfilled/relabelled.
 
 ## Critic Loop
@@ -124,13 +124,13 @@ Durable mechanism:
   - Confirmed `query_portfolio_loader_view()` preserves missing/non-finite monitor evidence as `None`.
   - Confirmed `src/state/portfolio.py::_position_from_projection_row` forwards those values without re-zeroing.
   - Confirmed tests prove a producer/read-model boundary relationship (`NULL -> None`) rather than a function-only snapshot.
-  - Residuals outside this wave: riskguard duplicate loader, historical physical rows/artifacts, already-numeric legacy/default `0.0` values, and `MonitorResult` type annotation cleanup.
+  - Residuals outside this wave after PR97 follow-up: historical physical rows/artifacts, already-numeric legacy/default `0.0` values, and `MonitorResult` type annotation cleanup.
 
 ## Stop Conditions
 
 Stop and request operator decision if repair requires:
 
 - DB migration/backfill/relabel;
-- touching riskguard duplicate loader without admitted route;
+- touching riskguard duplicate loader without admitted route (closed by PR97 follow-up after PR99 topology cleanup);
 - changing portfolio dataclass defaults globally;
 - publishing reports or promoting replay/diagnostic rows into authority.

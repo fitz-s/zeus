@@ -66,7 +66,7 @@ from a separate topology branch before the next object-invariance stage.
 | 27 | `venue_trade_facts` -> `position_lots` active exposure authority | `docs/operations/task_2026-05-08_object_invariance_wave27/PLAN.md` | Repaired in mainline-next branch | Local focused verification recorded; critic not yet run for multi-wave batch | Existing physical DB rows were not audited, relabeled, or backfilled |
 | 28 | Monitor-current native posterior -> exit trigger hold-value EV gate | `docs/operations/task_2026-05-08_object_invariance_wave28/PLAN.md` | Repaired in mainline-next branch | Critic APPROVE recorded | No DB rows touched; no venue side effects; report/replay/learning consumers remain separate sweep |
 | 29 | Monitor loop skip/error path -> `MonitorResult` reporting probability authority | `docs/operations/task_2026-05-08_object_invariance_wave29/PLAN.md` | Repaired in mainline-next branch | Bundled Wave29/Wave30 critic APPROVE recorded | No DB rows touched; riskguard/read-model residuals remain separate sweep |
-| 30 | `position_current` -> portfolio loader monitor probability read-model authority | `docs/operations/task_2026-05-08_object_invariance_wave30/PLAN.md` | Repaired in mainline-next branch | Bundled Wave29/Wave30 critic APPROVE recorded | No DB rows touched; riskguard duplicate loader remains separate sweep |
+| 30 | `position_current` -> portfolio loader monitor probability read-model authority | `docs/operations/task_2026-05-08_object_invariance_wave30/PLAN.md` | Repaired in mainline-next branch; PR97 follow-up closes RiskGuard duplicate loader residual | Bundled Wave29/Wave30 critic APPROVE recorded | No DB rows touched; historical physical rows/artifacts and already-numeric legacy/default `0.0` values remain unaudited |
 
 ## PR67 Review Claims
 
@@ -142,6 +142,10 @@ Continuation branch update, 2026-05-08:
 - Wave 30 repaired the central `position_current` portfolio loader view so
   missing `last_monitor_prob` and `last_monitor_edge` remain missing instead of
   being coerced into real numeric `0.0` evidence.
+- PR97 follow-up after PR99 topology cleanup repaired the RiskGuard duplicate
+  loader residual: `src/riskguard/riskguard.py` now preserves missing
+  `last_monitor_prob` / `last_monitor_edge` as non-authoritative `None` when
+  materializing protective `Position` objects from `position_current`.
 
 ## Stop Conditions
 
