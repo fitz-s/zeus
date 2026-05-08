@@ -56,6 +56,7 @@ import json
 import re
 import sys
 import time
+from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -557,15 +558,18 @@ def main(argv: Optional[list[str]] = None) -> int:
     run_id = f"ogimet_backfill_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
 
     _lock_path = Path(args.db) if args.db else ZEUS_WORLD_DB_PATH
-    with db_writer_lock(_lock_path, WriteClass.BULK):
+    # Skip writer lock in dry-run: no DB writes occur (PR #86 Copilot fix).
+    lock_ctx = db_writer_lock(_lock_path, WriteClass.BULK) if not args.dry_run else nullcontext()
+    with lock_ctx:
         conn = get_world_connection(write_class="bulk") if not args.db else None
         if args.db:
             import sqlite3
             conn = sqlite3.connect(args.db)
             conn.row_factory = sqlite3.Row
-        init_schema(conn)
-
         try:
+            # init_schema inside try/finally so conn is always closed on error
+            # (PR #86 Copilot fix: previously init_schema ran before the try).
+            init_schema(conn)
             print(f"=== Ogimet backfill run_id={run_id} ===")
             print(f"range: {start} .. {end}  dry_run={args.dry_run}")
             print(f"targets: {targets}")

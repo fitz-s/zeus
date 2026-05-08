@@ -47,6 +47,7 @@ import json
 import logging
 import sqlite3
 import sys
+from contextlib import nullcontext
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
@@ -321,7 +322,10 @@ def main(argv: Optional[list[str]] = None) -> int:
         print(f"FATAL: DB not found at {args.db}", file=sys.stderr)
         return 2
 
-    with db_writer_lock(args.db, WriteClass.BULK):
+    # Skip writer lock in dry-run: no DB writes occur, so holding an exclusive
+    # flock would unnecessarily block other bulk writers (PR #86 Copilot fix).
+    lock_ctx = db_writer_lock(args.db, WriteClass.BULK) if not args.dry_run else nullcontext()
+    with lock_ctx:
         conn = sqlite3.connect(str(args.db))
         try:
             gaps = _find_gaps(conn, args.data_version, cities_filter=args.cities)

@@ -70,7 +70,7 @@ from src.data.tier_resolver import (  # noqa: E402
     allowed_sources_for_city,
     tier_for_city,
 )
-from src.state.db_writer_lock import WriteClass, db_writer_lock  # noqa: E402
+# db_writer_lock removed: this script is read-only (PR #86 Copilot fix)
 
 DEFAULT_DB_PATH = _REPO_ROOT / "state" / "zeus-world.db"
 DEFAULT_GAPS_ALLOWLIST_PATH = (
@@ -452,30 +452,29 @@ def main(argv: Optional[list[str]] = None) -> int:
         print(f"FATAL: DB not found at {args.db}", file=sys.stderr)
         return 2
 
-    with db_writer_lock(args.db, WriteClass.BULK):
-        conn = sqlite3.connect(str(args.db))
-        try:
-            # Confirm schema exists before querying.
-            (tbl,) = conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' "
-                "AND name='observation_instants_v2' LIMIT 1"
-            ).fetchone() or (None,)
-            if tbl is None:
-                print(
-                    "FATAL: observation_instants_v2 table missing; run "
-                    "apply_v2_schema first.",
-                    file=sys.stderr,
-                )
-                return 2
-            allowlist = _load_gaps_allowlist(args.gaps_allowlist)
-            report = _build_report(
-                conn,
-                args.data_version,
-                args.min_expected,
-                gaps_allowlist=allowlist,
+    conn = sqlite3.connect(f"file:{args.db}?mode=ro", uri=True)
+    try:
+        # Confirm schema exists before querying.
+        (tbl,) = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' "
+            "AND name='observation_instants_v2' LIMIT 1"
+        ).fetchone() or (None,)
+        if tbl is None:
+            print(
+                "FATAL: observation_instants_v2 table missing; run "
+                "apply_v2_schema first.",
+                file=sys.stderr,
             )
-        finally:
-            conn.close()
+            return 2
+        allowlist = _load_gaps_allowlist(args.gaps_allowlist)
+        report = _build_report(
+            conn,
+            args.data_version,
+            args.min_expected,
+            gaps_allowlist=allowlist,
+        )
+    finally:
+        conn.close()
 
     if args.json:
         json.dump(report, sys.stdout, indent=2)

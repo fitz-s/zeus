@@ -82,7 +82,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from src.state.db_writer_lock import WriteClass, db_writer_lock  # noqa: E402
+# db_writer_lock removed: this script is read-only (PR #86 Copilot fix)
 
 DEFAULT_REPORT_DIR = REPO_ROOT / "docs" / "operations" / "calibration_observation"
 DEFAULT_DB_PATH = REPO_ROOT / "state" / "zeus-shared.db"
@@ -185,43 +185,42 @@ def run_weekly(
 
     overrides = overrides or {}
 
-    with db_writer_lock(db_path, WriteClass.BULK):
-        conn = sqlite3.connect(str(db_path))
-        conn.row_factory = sqlite3.Row
-        try:
-            # Current-window snapshot.
-            snapshot = compute_platt_parameter_snapshot_per_bucket(
-                conn, window_days=window_days, end_date=end_date.isoformat(),
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    try:
+        # Current-window snapshot.
+        snapshot = compute_platt_parameter_snapshot_per_bucket(
+            conn, window_days=window_days, end_date=end_date.isoformat(),
+        )
+        # Per-bucket drift detection over n_windows of parameter history.
+        verdicts: dict[str, dict[str, Any]] = {}
+        thresholds_used: dict[str, float] = {}
+        for bucket_key, snap in snapshot.items():
+            threshold = _resolve_bucket_threshold(snap, overrides=overrides)
+            thresholds_used[bucket_key] = threshold
+            # Suppress drift detection for insufficient-quality buckets.
+            if snap.get("sample_quality") == "insufficient":
+                verdicts[bucket_key] = {
+                    "kind": "insufficient_data",
+                    "bucket_key": bucket_key,
+                    "severity": None,
+                    "evidence": {
+                        "reason": "current_window_sample_quality_insufficient",
+                        "n_samples": snap.get("n_samples", 0),
+                    },
+                }
+                continue
+            history = _build_parameter_history(
+                conn, bucket_key, end_date, window_days, n_windows,
             )
-            # Per-bucket drift detection over n_windows of parameter history.
-            verdicts: dict[str, dict[str, Any]] = {}
-            thresholds_used: dict[str, float] = {}
-            for bucket_key, snap in snapshot.items():
-                threshold = _resolve_bucket_threshold(snap, overrides=overrides)
-                thresholds_used[bucket_key] = threshold
-                # Suppress drift detection for insufficient-quality buckets.
-                if snap.get("sample_quality") == "insufficient":
-                    verdicts[bucket_key] = {
-                        "kind": "insufficient_data",
-                        "bucket_key": bucket_key,
-                        "severity": None,
-                        "evidence": {
-                            "reason": "current_window_sample_quality_insufficient",
-                            "n_samples": snap.get("n_samples", 0),
-                        },
-                    }
-                    continue
-                history = _build_parameter_history(
-                    conn, bucket_key, end_date, window_days, n_windows,
-                )
-                v = detect_parameter_drift(
-                    history, bucket_key,
-                    drift_threshold_multiplier=threshold,
-                    critical_ratio_cutoff=critical_ratio_cutoff,
-                )
-                verdicts[bucket_key] = _verdict_to_dict(v)
-        finally:
-            conn.close()
+            v = detect_parameter_drift(
+                history, bucket_key,
+                drift_threshold_multiplier=threshold,
+                critical_ratio_cutoff=critical_ratio_cutoff,
+            )
+            verdicts[bucket_key] = _verdict_to_dict(v)
+    finally:
+        conn.close()
 
     return {
         "report_kind": "calibration_observation_weekly",
