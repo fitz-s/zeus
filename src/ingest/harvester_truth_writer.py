@@ -357,7 +357,9 @@ def _write_settlement_truth(
                 if contained:
                     authority = "VERIFIED"
                     settlement_value = rounded
-                    winning_bin = _canonical_bin_label(pm_bin_lo, pm_bin_hi, city.settlement_unit)
+                    # Use effective (possibly converted) bin bounds for the label so
+                    # "40-41°F bin, London C city" → "4-5°C" not "40-41°C" (fix #262 P1).
+                    winning_bin = _canonical_bin_label(effective_bin_lo, effective_bin_hi, city.settlement_unit)
                     reason = None
                 else:
                     settlement_value = rounded

@@ -1283,3 +1283,24 @@ test_metadata:
       logged in BATCH_DONE_T2F).
     created: 2026-05-05
     last_reused_or_audited: 2026-05-05
+
+  tests/test_settlement_semantics_f_to_c.py:
+    modules: [ingest, contracts, settlement]
+    category: core_law_antibody
+    profile: fix262_london_f_to_c
+    blocks_commit: true
+    asserted_invariants:
+      - F-BIN-C-CITY-CONTAINMENT-USES-CONVERTED-BOUNDS
+      - WINNING-BIN-LABEL-REFLECTS-EFFECTIVE-UNIT
+    source_under_test:
+      - src/ingest/harvester_truth_writer.py
+    law_dependencies:
+      - docs/operations/task_2026-05-08_262_london_f_to_c/RUN.md
+    notes: >
+      9 antibody tests for fix #262 (Cluster A: 317 London rows quarantined because
+      2025 Polymarket questions used F bins but London is a C city). Tests cover:
+      F->C conversion path (T1-T2), C+C and F+F controls (T3-T4), _detect_bin_unit
+      unit detection (T5-T7), _f_to_c arithmetic (T8), open-shoulder regression (T9).
+      T1 also asserts winning_bin label uses converted C bounds (P1 fix).
+    created: 2026-05-08
+    last_reused_or_audited: 2026-05-08

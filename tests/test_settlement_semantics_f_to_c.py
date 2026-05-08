@@ -165,6 +165,13 @@ def test_f_bin_c_city_obs_in_converted_range_is_verified():
         "5C is 41F exactly, which is the top of bin [40-41F] = [4.44-5.0C]."
     )
     assert result["reason"] is None
+    # P1 regression: winning_bin label must reflect converted C bounds, not original F values.
+    # _canonical_bin_label(4.444, 5.0, "C") -> "4-5°C" (rounds to int)
+    assert result["winning_bin"] == "4-5°C", (
+        f"winning_bin label must use converted C bounds (fix #262 P1), "
+        f"got {result['winning_bin']!r}. "
+        "40-41°F bin in London (C city) should label as '4-5°C', not '40-41°C'."
+    )
 
 
 # ---------------------------------------------------------------------------
