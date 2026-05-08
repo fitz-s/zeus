@@ -30,8 +30,8 @@ stages:
   - id: semantic_boot
     order: 1
     required: true
-    command: python3 scripts/topology_doctor.py --navigation --task-class <class> --task "<task>" --files <files> --json
-    purpose: "Lock task class, current facts, fatal misreads, and required proof questions before graph use."
+    command: python3 scripts/topology_doctor.py --navigation --task "<task>" --intent <intent> --write-intent <write-intent> --files <files> --json
+    purpose: "Establish typed-intent admission and risk tier before graph use. Task-class semantic boot reads task_boot_profiles.yaml + fatal_misreads.yaml directly (post-PR-#71 — standalone reader retired)."
   - id: graph_context
     order: 2
     required: false

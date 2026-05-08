@@ -4,7 +4,7 @@
 
 ## Purpose
 
-The manifests system explains which machine-readable file owns which governance fact so agents do not create parallel registries or duplicate truth. It is a reference map for ownership; the canonical machine matrix lives as inline constants in `scripts/topology_doctor.py` (see `SCHEMA_REQUIRED_TOP_LEVEL_KEYS` and the `ownership.*` constants), and enforcement remains in topology-doctor checks/tests.
+The manifests system explains which machine-readable file owns which governance fact so agents do not create parallel registries or duplicate truth. It is a reference map for ownership; schema constants live in `scripts/topology_doctor.py` (see `SCHEMA_REQUIRED_TOP_LEVEL_KEYS`), the canonical ownership matrix lives in `scripts/topology_doctor_ownership_checks.py` (see `OWNERSHIP_FACT_TYPES` and sibling constants), and enforcement remains in topology-doctor checks/tests.
 
 ## Authority anchors
 

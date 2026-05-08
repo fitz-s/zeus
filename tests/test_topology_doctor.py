@@ -3747,11 +3747,6 @@ def test_navigation_includes_context_assumption():
 
 
 
-@pytest.mark.skip(reason="DEV-1 (Phase 4.A): build_packet_prefill removed — see test_refactor_packet_prefill_for_engine_scope skip rationale")
-def test_refactor_packet_prefill_keeps_file_scope_literal():
-    pass  # formerly tested file-scope literal preservation in build_packet_prefill
-
-
 def test_navigation_route_card_summarizes_admission_and_risk(monkeypatch):
     ok = topology_doctor.StrictResult(ok=True, issues=[])
 

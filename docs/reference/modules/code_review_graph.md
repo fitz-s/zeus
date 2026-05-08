@@ -46,7 +46,7 @@ Graph usage has two stages. Stage 1 is semantic boot: identify task class, autho
 ## Repair routes
 
 - Use `refresh_graph` only for graph freshness/coverage issues.
-- Use `--navigation` graph context appendices for small derived explanations, not authority claims.
+- Use `--code-review-graph-status` graph context appendices for small derived explanations, not authority claims.
 - Keep graph checks claim-scoped unless task boot profiles require them.
 - Prefer official `code-review-graph status/update/watch` operations over repo-local inventions.
 

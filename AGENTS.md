@@ -338,11 +338,15 @@ it is not a current per-city truth table.
 
 ### Code Review Graph
 
-Two stages. Stage 1 (required): semantic boot via
-`python3 scripts/topology_doctor.py --navigation --task-class <class>
---task "<task>" --files <files> --json` — emits typed-intent admission,
-current facts, fatal-misread guards, and required proof questions in one
-payload. Stage 2 (optional): graph context via
+Three stages. Stage 1 (required): typed-intent admission via
+`python3 scripts/topology_doctor.py --navigation --task "<task>"
+--intent <intent> --write-intent <write-intent> --files <files> --json`
+— emits admission status, risk tier, gate budget, and blocking reasons.
+Stage 1.5 (required for new task classes): read
+`architecture/task_boot_profiles.yaml` and `architecture/fatal_misreads.yaml`
+directly for the relevant task class — these are the canonical semantic-boot
+data sources (the standalone `semantic-bootstrap` reader was retired in PR #71).
+Stage 2 (optional): graph context via
 `python3 scripts/topology_doctor.py --code-review-graph-status
 --changed-files <files> --json` — file discovery, callers, impacted tests,
 blast radius, review order. Stage 2 NEVER supplies semantic truth, source

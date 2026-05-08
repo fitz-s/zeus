@@ -127,13 +127,6 @@ def build_parser(description: str | None = None) -> argparse.ArgumentParser:
     digest.add_argument("--claim", action="append", default=[], help="Runtime completion claim to include in the route card")
     digest.add_argument("--json", action="store_true", help="Emit JSON")
 
-    packet = sub.add_parser("packet", help="Emit prefilled packet front matter from topology scope")
-    packet.add_argument("--packet-type", default="refactor", choices=["refactor"], help="Packet template type")
-    packet.add_argument("--scope", default="", help="Directory or file scope")
-    packet.add_argument("--files", nargs="*", default=[], help="Concrete files in scope")
-    packet.add_argument("--task", default="", help="Task statement")
-    packet.add_argument("--json", action="store_true", help="Emit JSON")
-
     closeout = sub.add_parser("closeout", help="Emit compiled closeout result for a scoped change set")
     closeout.add_argument("--changed-files", nargs="*", default=[], help="Files in the closeout scope; omitted prefers staged files, else uses git status")
     closeout.add_argument("--plan-evidence", default=None, help="Plan/current-state evidence path")
@@ -457,15 +450,6 @@ def run_subcommand(api: Any, args: argparse.Namespace, parser: argparse.Argument
             ),
             as_json=args.json,
         )
-        return 0
-    if args.command == "packet":
-        payload = api.build_packet_prefill(
-            packet_type=args.packet_type,
-            task=args.task,
-            scope=args.scope,
-            files=args.files,
-        )
-        render_payload(api, payload, as_json=args.json)
         return 0
     if args.command == "closeout":
         payload = api.run_closeout(
