@@ -11,7 +11,7 @@ The topology doctor is Zeus's executable routing and closeout compiler. It reads
 - `AGENTS.md` defines the mandatory topology-navigation workflow.
 - `workspace_map.md` defines visibility classes and default read order.
 - `architecture/topology.yaml` defines coverage roots and digest inputs.
-- `architecture/topology_schema.yaml` defines compiled topology and issue JSON contracts.
+- `scripts/topology_doctor.py` inline schema constants define compiled topology and issue JSON contracts (formerly `architecture/topology_schema.yaml`, retired in PR #71).
 - `architecture/map_maintenance.yaml`, `artifact_lifecycle.yaml`, and `change_receipt_schema.yaml` define closeout companions.
 - `tests/test_topology_doctor.py` is the regression surface for topology-doctor behavior.
 
@@ -76,7 +76,7 @@ bounded impact summary without pretending every file is source.
 - Global docs/source/test drift blocks a narrow route and causes agents to either stop prematurely or over-edit unrelated files.
 - Strict repo-health output is mistaken for scoped closeout and hides packet evidence gaps.
 - Topology issues stay too flat to route repair ownership, causing manifest fixes to become manual guesswork.
-- A graph or context-pack appendix is treated as authority rather than derived context.
+- A graph or navigation context appendix is treated as authority rather than derived context.
 - Process controls become bureaucratic when every stale warning blocks every
   task instead of only the claim that depends on it.
 - Generic fixes become bureaucratic when file-only uncertainty is reported as

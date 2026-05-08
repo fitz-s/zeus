@@ -429,8 +429,10 @@ def run_closeout(
         issue_schema_version=issue_schema_version,
     )
     blocking_issues = blocking_issues + warning_lifecycle_result["blocking_issues"]
-    compiled = api.build_compiled_topology()
-    telemetry = compiled.get("telemetry") or {}
+    # R12 (PR #71) retired build_compiled_topology along with topology_doctor_core_map.py.
+    # Telemetry slot retained for closeout payload backward compat; live counts now come from
+    # the per-lane checks themselves rather than the compiled-topology read model.
+    telemetry: dict = {}
     return {
         "ok": not blocking_issues,
         "authority_status": "generated_closeout_not_authority",
