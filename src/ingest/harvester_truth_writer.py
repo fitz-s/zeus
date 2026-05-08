@@ -289,20 +289,28 @@ def _write_settlement_truth(
 
         if rounded is not None and math.isfinite(rounded):
             contained = False
-            if pm_bin_lo is not None and pm_bin_hi is not None:
-                contained = pm_bin_lo <= rounded <= pm_bin_hi
-            elif pm_bin_lo is None and pm_bin_hi is not None:
-                contained = rounded <= pm_bin_hi
-            elif pm_bin_hi is None and pm_bin_lo is not None:
-                contained = rounded >= pm_bin_lo
-            if contained:
-                authority = "VERIFIED"
+            if pm_bin_lo is None and pm_bin_hi is None:
+                # No bin information available — cannot evaluate containment.
+                # Record the observation value but quarantine with a distinct reason
+                # so data consumers can distinguish "obs outside known bin" from
+                # "no bin was provided at all" (e.g. uma_backfill synthetic slugs).
                 settlement_value = rounded
-                winning_bin = _canonical_bin_label(pm_bin_lo, pm_bin_hi, city.settlement_unit)
-                reason = None
+                reason = "harvester_live_no_bin_info"
             else:
-                settlement_value = rounded
-                reason = "harvester_live_obs_outside_bin"
+                if pm_bin_lo is not None and pm_bin_hi is not None:
+                    contained = pm_bin_lo <= rounded <= pm_bin_hi
+                elif pm_bin_lo is None and pm_bin_hi is not None:
+                    contained = rounded <= pm_bin_hi
+                elif pm_bin_hi is None and pm_bin_lo is not None:
+                    contained = rounded >= pm_bin_lo
+                if contained:
+                    authority = "VERIFIED"
+                    settlement_value = rounded
+                    winning_bin = _canonical_bin_label(pm_bin_lo, pm_bin_hi, city.settlement_unit)
+                    reason = None
+                else:
+                    settlement_value = rounded
+                    reason = "harvester_live_obs_outside_bin"
 
     provenance = {
         "writer": "harvester_truth_writer_dr33",
