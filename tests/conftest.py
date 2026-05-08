@@ -284,7 +284,10 @@ _WLA_CACHE_PATH = _WLA_REPO_ROOT / ".pytest_cache" / "writer_lock_antibody.json"
 _WLA_SQLITE_CONNECT_ALLOWLIST = frozenset({
     # --- canonical infrastructure ---
     "src/state/db.py",                              # canonical_shim
-    "src/state/db_writer_lock.py",                  # canonical_shim (does not connect)
+    # NOTE: src/state/db_writer_lock.py is intentionally NOT allowlisted. The file
+    # has no sqlite3.connect() call sites today; if a future edit introduces one,
+    # the antibody SHOULD fire so this module stays a coordination layer (not a
+    # connect path). Allowlisting a no-connect file would weaken the gate.
 
     # --- src/ daemon sites: pending Track A.6 (#246) ---
     "src/data/market_scanner.py",                   # pending_track_a6
