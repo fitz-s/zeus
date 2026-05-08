@@ -79,12 +79,18 @@ DOWNLOAD_SCRIPT = FIFTY_ONE_ROOT / "scripts" / "download_ecmwf_open_ens.py"
 EXTRACT_SCRIPT = FIFTY_ONE_ROOT / "scripts" / "extract_open_ens_localday.py"
 INGEST_SCRIPT_DIR = PROJECT_ROOT / "scripts"
 
-# ECMWF Open Data ENS published step grid for enfo cf/pf (mx2t3/mn2t3):
+# ECMWF Open Data ENS dissemination grid (enfo cf/pf, mx2t3/mn2t3/2t):
 #   0–144h by 3h, then 150–360h by 6h.
+# Note: the underlying IFS model produces hourly steps 0–90h and 3h steps
+#       93–144h (per https://www.ecmwf.int/en/forecasts/datasets/set-iii),
+#       but Open Data subsamples to the 3h/6h grid above. Hourly steps are
+#       only available via MARS, which Zeus does not use.
+# Period-aligned params: mx2t3/mn2t3 valid at every disseminated step;
+#       mx2t6/mn2t6 (deprecated 2026-05-07) were valid only at 6h multiples.
 # We request 3h steps through 144h, then 6h steps through 282h.
 # 282h is the LOW D+10 authority ceiling from
 #   architecture/zeus_grid_resolution_authority_2026_05_07.yaml (LOW 282h horizon).
-# Only requesting published steps avoids fetch failures for unavailable lead times.
+# Only requesting disseminated steps avoids silent "No index entries" fetch failures.
 #
 # Authority: architecture/zeus_grid_resolution_authority_2026_05_07.yaml A1+3h (stride)
 #            LOW 282h horizon (covers UTC-positive cities at D+10 boundary)
