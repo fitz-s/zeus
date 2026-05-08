@@ -152,6 +152,8 @@ make a surface default-read unless `current_state.md` routes it.
 | `task_2026-05-08_object_invariance_wave28/PLAN.md` | topology planning packet | Route evidence for monitor-current native posterior preservation through exit trigger hold-value EV gates |
 | `task_2026-05-08_object_invariance_wave29/` | plan packet container | Planning-lock evidence for object-meaning invariance Wave 29 monitor result reporting probability authority repair |
 | `task_2026-05-08_object_invariance_wave29/PLAN.md` | topology planning packet | Route evidence for preventing skipped/error monitor results from reporting stale probabilities as fresh |
+| `task_2026-05-08_object_invariance_wave30/` | plan packet container | Planning-lock evidence for object-meaning invariance Wave 30 position_current monitor probability read-model authority repair |
+| `task_2026-05-08_object_invariance_wave30/PLAN.md` | topology planning packet | Route evidence for preserving missing monitor probability and edge through canonical portfolio loader view |
 | `task_2026-05-06_calibration_quality_blockers/` | active packet container | 2026-05-06 launch-blocker remediation packet for calibration quality (12 inverted-slope Platts quarantined + fit-time guard) |
 | `task_2026-05-06_calibration_quality_blockers/PLAN.md` | active packet plan | LOW/HIGH calibration alignment recovery plan covering contract-window evidence persistence, recovery snapshot backfill, LOW pair rebuild gates, and calibration authority shadow gating |
 | `task_2026-05-06_calibration_quality_blockers/QUARANTINE_LEDGER.md` | active packet evidence | Ledger of the 12 QUARANTINED platt_models_v2 buckets with reversibility queries and fallback-chain analysis |

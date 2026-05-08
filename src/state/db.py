@@ -5740,8 +5740,8 @@ def query_portfolio_loader_view(conn: sqlite3.Connection | None, *, temperature_
                 "execution_fact_intent_id": fill_economics["execution_fact_intent_id"],
                 "execution_fact_filled_at": fill_economics["execution_fact_filled_at"],
                 "p_posterior": row["p_posterior"],
-                "last_monitor_prob": float(row["last_monitor_prob"] or 0.0),
-                "last_monitor_edge": float(row["last_monitor_edge"] or 0.0),
+                "last_monitor_prob": _finite_float_or_none(row["last_monitor_prob"]),
+                "last_monitor_edge": _finite_float_or_none(row["last_monitor_edge"]),
                 "last_monitor_market_price": row["last_monitor_market_price"],
                 "decision_snapshot_id": str(row["decision_snapshot_id"] or ""),
                 "entry_method": str(row["entry_method"] or ""),
@@ -6175,6 +6175,16 @@ def _finite_float_or_zero(value) -> float:
         return 0.0
     if numeric != numeric or numeric in (float("inf"), float("-inf")):
         return 0.0
+    return numeric
+
+
+def _finite_float_or_none(value) -> float | None:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    if numeric != numeric or numeric in (float("inf"), float("-inf")):
+        return None
     return numeric
 
 

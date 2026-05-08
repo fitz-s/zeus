@@ -129,7 +129,10 @@ Required proof:
 
 ## Critic Loop
 
-- Pending. If Wave29 is bundled with another reporting/read-model repair, run critic after several findings and patches per original goal.
+- Bundled Wave29/Wave30 critic verdict: APPROVE.
+  - Confirmed skipped/error monitor paths emit absent evidence rather than stale position fallbacks.
+  - Confirmed normal monitor result reporting requires current edge context, finite values, and `last_monitor_prob_is_fresh`.
+  - Residuals outside this wave: riskguard duplicate loader, historical artifacts, numeric legacy/default `0.0` values, and `MonitorResult` type annotation cleanup.
 
 ## Stop Conditions
 

@@ -65,7 +65,8 @@ from a separate topology branch before the next object-invariance stage.
 | 26 | Canonical position event environment authority through lifecycle builders and portfolio loader | `docs/operations/task_2026-05-07_object_invariance_wave26/PLAN.md` | Repaired in continuation branch | REVISE twice, then APPROVE recorded | Existing physical DB rows were not audited, relabeled, or backfilled |
 | 27 | `venue_trade_facts` -> `position_lots` active exposure authority | `docs/operations/task_2026-05-08_object_invariance_wave27/PLAN.md` | Repaired in mainline-next branch | Local focused verification recorded; critic not yet run for multi-wave batch | Existing physical DB rows were not audited, relabeled, or backfilled |
 | 28 | Monitor-current native posterior -> exit trigger hold-value EV gate | `docs/operations/task_2026-05-08_object_invariance_wave28/PLAN.md` | Repaired in mainline-next branch | Critic APPROVE recorded | No DB rows touched; no venue side effects; report/replay/learning consumers remain separate sweep |
-| 29 | Monitor loop skip/error path -> `MonitorResult` reporting probability authority | `docs/operations/task_2026-05-08_object_invariance_wave29/PLAN.md` | Repaired in mainline-next branch | Local focused verification recorded; critic pending if bundled with next reporting wave | No DB rows touched; read-model/riskguard loaders remain separate sweep |
+| 29 | Monitor loop skip/error path -> `MonitorResult` reporting probability authority | `docs/operations/task_2026-05-08_object_invariance_wave29/PLAN.md` | Repaired in mainline-next branch | Bundled Wave29/Wave30 critic APPROVE recorded | No DB rows touched; riskguard/read-model residuals remain separate sweep |
+| 30 | `position_current` -> portfolio loader monitor probability read-model authority | `docs/operations/task_2026-05-08_object_invariance_wave30/PLAN.md` | Repaired in mainline-next branch | Bundled Wave29/Wave30 critic APPROVE recorded | No DB rows touched; riskguard duplicate loader remains separate sweep |
 
 ## PR67 Review Claims
 
@@ -138,6 +139,9 @@ Continuation branch update, 2026-05-08:
   monitor results now emit no `fresh_prob`/`fresh_edge` instead of falling back
   to stale `Position.p_posterior`, previous `last_monitor_prob`, or previous
   `last_monitor_edge`.
+- Wave 30 repaired the central `position_current` portfolio loader view so
+  missing `last_monitor_prob` and `last_monitor_edge` remain missing instead of
+  being coerced into real numeric `0.0` evidence.
 
 ## Stop Conditions
 
