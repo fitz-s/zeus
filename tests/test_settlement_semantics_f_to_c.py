@@ -295,7 +295,7 @@ def test_open_shoulder_f_bin_c_city_hi_only_contained():
 def test_f_bin_integer_snap_47_48_obs_9_is_verified():
     """ANTIBODY fix #264: [47,48]F -> {8,9}C integer set. obs=9 IS contained.
 
-    Float containment: 9 <= 8.888 -> False (BUG).
+    Float containment: 9 <= floor(48*5/9 - 32*5/9) = 9 <= 8.888 -> False (BUG).
     Integer-snap: floor(8.888+0.5)=9, {8,9}, 9 in {8,9} -> True (CORRECT).
     """
     conn = _make_world_conn()
@@ -307,10 +307,12 @@ def test_f_bin_integer_snap_47_48_obs_9_is_verified():
         pm_bin_unit="F",
     )
     assert result["authority"] == "VERIFIED", (
-        f"Expected VERIFIED: [47,48]F -> {{8,9}}C, obs=9 in set. "
+        f"Expected VERIFIED: [47,48]F -> {{8,9}}C integer set, obs=9 is in set. "
         f"Got {result['authority']!r}, reason={result['reason']!r}. (fix #264)"
     )
-    assert result["winning_bin"] == "8-9\xb0C"
+    assert result["winning_bin"] == "8-9°C", (
+        f"winning_bin should be '8-9°C' after integer-snap, got {result['winning_bin']!r}"
+    )
 
 
 def test_f_bin_integer_snap_40_41_obs_5_is_verified():
@@ -327,7 +329,7 @@ def test_f_bin_integer_snap_40_41_obs_5_is_verified():
         f"Expected VERIFIED: [40,41]F -> {{4,5}}C, obs=5 in set. "
         f"Got {result['authority']!r}, reason={result['reason']!r}."
     )
-    assert result["winning_bin"] == "4-5\xb0C"
+    assert result["winning_bin"] == "4-5°C"
 
 
 def test_f_bin_integer_snap_40_41_obs_6_is_outside():

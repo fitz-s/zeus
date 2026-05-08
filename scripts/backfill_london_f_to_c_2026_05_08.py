@@ -218,9 +218,10 @@ def _process_row(row: dict) -> Optional[dict]:
 
     rounded = _wmo_half_up(float(settlement_value))
 
-    # Fix #264: Polymarket C bins are INTEGER. After F->C conversion bounds are
-    # floats (e.g. 48F -> 8.888C). Snap both edges via WMO half-up so containment
-    # operates on integers. Closed bin: obs in {lo_int, hi_int}. Open-shoulder: inequality.
+    # Fix #264: Polymarket °C bins are INTEGER. After F→C conversion the bounds
+    # are floats (e.g. 48°F → 8.888°C). Snap both edges via WMO half-up so that
+    # containment operates on integers, matching Polymarket's settlement grid.
+    # Closed bin: obs in {lo_int, hi_int}. Open-shoulder: inequality on snapped edge.
     if bin_unit_converted:
         if effective_lo is not None:
             effective_lo = _wmo_half_up(effective_lo)
@@ -254,7 +255,12 @@ def _process_row(row: dict) -> Optional[dict]:
 
 
 def _apply_update(conn, result: dict, backfilled_at: str) -> None:
-    """Update a row to VERIFIED with provenance metadata."""
+    """Update a row to VERIFIED with provenance metadata.
+
+    Writes to both settlements_v2 (canonical, INV-17) and legacy settlements
+    table (read by harvester_pnl_resolver.py FROM settlements WHERE authority='VERIFIED').
+    Both writes occur in the same transaction (caller holds db_writer_lock).
+    """
     row = conn.execute(
         "SELECT provenance_json FROM settlements_v2 WHERE settlement_id = ?",
         (result["settlement_id"],),
@@ -280,8 +286,8 @@ def _apply_update(conn, result: dict, backfilled_at: str) -> None:
         WHERE settlement_id = ?
     """, (result["winning_bin"], prov_json, result["settlement_id"]))
 
-    # Derived: legacy settlements (harvester_pnl_resolver reads FROM settlements
-    # WHERE authority='VERIFIED' -- must stay in sync, fix P1)
+    # Derived: legacy settlements table (harvester_pnl_resolver reads FROM settlements
+    # WHERE authority='VERIFIED' — must stay in sync, fix P1)
     city = result["city"]
     target_date = result["target_date"]
     market_slug = result.get("market_slug")
@@ -303,7 +309,7 @@ def _apply_update(conn, result: dict, backfilled_at: str) -> None:
         """, (result["winning_bin"], prov_json, city, target_date))
 
     logger.info(
-        "  UPDATED %s %s %s -> VERIFIED winning_bin=%s (bin_converted=%s)",
+        "  UPDATED %s %s %s → VERIFIED winning_bin=%s (bin_converted=%s)",
         result["city"], result["target_date"], result["temperature_metric"],
         result["winning_bin"], result["bin_unit_converted"],
     )

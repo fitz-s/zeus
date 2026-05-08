@@ -746,3 +746,34 @@ scripts:
     promotion_barrier: Diagnostic output cannot authorize canonical DB writes.
     required_helpers: []
     required_tests: [tests/test_state_census.py]
+
+  backfill_london_f_to_c_2026_05_08.py:
+    # Created: 2026-05-08
+    # Authority basis: docs/operations/task_2026-05-08_post_merge_full_chain/TASK.md
+    #   Phase D — re-derive containment for London settlements_v2 rows quarantined
+    #   before fix #262/#264. Applies integer-snap (fix #264) during re-evaluation.
+    class: repair
+    lifecycle: packet_ephemeral
+    status: active
+    authority_scope: repair_write
+    target_db: state/zeus-world.db
+    dry_run_default: true
+    apply_flag: "--apply"
+    dangerous_if_run: true
+    read_targets: [state/zeus-world.db]
+    write_targets: [state/zeus-world.db]
+    external_inputs: []
+    delete_policy: retain_until_superseded
+    canonical_command: "python3 scripts/backfill_london_f_to_c_2026_05_08.py [--apply]"
+    reuse_when: >
+      Phase D: re-derive containment for London settlements_v2 rows quarantined before
+      fix #262/#264. Idempotent via backfilled_via tag. Apply only after PR #100 merges.
+    do_not_use_when: >
+      PR #100 not yet merged. Already run (all candidates have
+      backfilled_via=backfill_london_f_to_c_2026_05_08). Do not run while daemon is mid-write.
+    promotion_barrier: >
+      Requires operator approval for --apply. Do NOT apply while daemon is mid-write.
+    required_helpers: [src.state.db_writer_lock.db_writer_lock, src.state.db.ZEUS_WORLD_DB_PATH]
+    required_tests: [tests/test_settlement_semantics_f_to_c.py]
+    packet: docs/operations/task_2026-05-08_post_merge_full_chain/TASK.md
+    fix_refs: ["#262", "#263", "#264"]

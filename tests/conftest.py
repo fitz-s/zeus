@@ -227,7 +227,7 @@ _WLA_SQLITE_CONNECT_ALLOWLIST = frozenset({
 
     # --- write scripts: pending Track A.6 batch retrofit ---
     "scripts/backfill_forecast_issue_time.py",      # pending_track_a6_scripts
-    "scripts/backfill_london_f_to_c_2026_05_08.py",  # pending_track_a6_scripts (fix #263 Phase D)
+    "scripts/backfill_london_f_to_c_2026_05_08.py", # pending_track_a6_scripts (fix #262/#263/#264 repair; under db_writer_lock for writes)
     "scripts/backfill_low_contract_window_evidence.py",  # pending_track_a6_scripts
     "scripts/backfill_obs_v2.py",                   # pending_track_a6_scripts
     "scripts/backfill_ogimet_metar.py",             # pending_track_a6_scripts
