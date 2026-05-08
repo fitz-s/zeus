@@ -248,6 +248,8 @@ test_trust_policy:
     # fix/#134 — ECMWF Open Data STEP_HOURS D+10 horizon extension antibodies.
     tests/test_ecmwf_open_data_step_hours.py: {created: "2026-05-08", last_used: "2026-05-08"}
     tests/test_forecast_target_contract_horizon.py: {created: "2026-05-08", last_used: "2026-05-08"}
+    # F1 subprocess hardening — retry + timeout + stderr (REPORT §6.2).
+    tests/test_ecmwf_open_data_subprocess_hardening.py: {created: "2026-05-08", last_used: "2026-05-08"}
 
 categories:
   core_law_antibody:
