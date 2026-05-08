@@ -2264,7 +2264,7 @@ def init_backtest_schema(conn: Optional[sqlite3.Connection] = None) -> None:
         CREATE TABLE IF NOT EXISTS backtest_runs (
             run_id TEXT PRIMARY KEY,
             lane TEXT NOT NULL CHECK (
-                lane IN ('wu_settlement_sweep', 'trade_history_audit')
+                lane IN ('wu_settlement_sweep', 'trade_history_audit', 'selection_coverage')
             ),
             started_at TEXT NOT NULL,
             completed_at TEXT,
@@ -2280,7 +2280,7 @@ def init_backtest_schema(conn: Optional[sqlite3.Connection] = None) -> None:
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             run_id TEXT NOT NULL,
             lane TEXT NOT NULL CHECK (
-                lane IN ('wu_settlement_sweep', 'trade_history_audit')
+                lane IN ('wu_settlement_sweep', 'trade_history_audit', 'selection_coverage')
             ),
             subject_id TEXT NOT NULL,
             subject_kind TEXT NOT NULL,
@@ -2304,7 +2304,16 @@ def init_backtest_schema(conn: Optional[sqlite3.Connection] = None) -> None:
                     'wu_missing',
                     'bin_unparseable',
                     'ambiguous_subject',
-                    'orphan_trade_decision'
+                    'orphan_trade_decision',
+                    'scored',
+                    'no_snapshot',
+                    'no_day0_nowcast_excluded',
+                    'invalid_p_raw_json',
+                    'empty_p_raw',
+                    'label_count_mismatch',
+                    'no_clob_best_bid',
+                    'fdr_scan_failed',
+                    'no_hypotheses'
                 )
             ),
             decision_reference_source TEXT,
