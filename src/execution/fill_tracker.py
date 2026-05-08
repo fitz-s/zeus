@@ -536,7 +536,7 @@ def _maybe_append_venue_fill_observation(
                     conn,
                     position_id=position_id,
                     state=lot_state,
-                    shares=_int_shares(shares),
+                    shares=filled_size,
                     entry_price_avg=_decimal_str(fill_price, "0"),
                     source_command_id=str(command["command_id"]),
                     source_trade_fact_id=trade_fact_id,
@@ -1304,13 +1304,6 @@ def _decimal_str(value: Any, default: str | None = None) -> str | None:
     if value is None:
         return default
     return str(value)
-
-
-def _int_shares(value: Any) -> int:
-    try:
-        return int(round(float(value or 0)))
-    except (TypeError, ValueError):
-        return 0
 
 
 def _order_fact_state_for_status(status: str) -> str | None:

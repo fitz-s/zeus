@@ -527,7 +527,7 @@ def init_provenance_projection_schema(conn: sqlite3.Connection) -> None:
             'EXIT_PENDING','ECONOMICALLY_CLOSED_OPTIMISTIC',
             'ECONOMICALLY_CLOSED_CONFIRMED','SETTLED','QUARANTINED'
           )),
-          shares INTEGER NOT NULL,
+          shares TEXT NOT NULL,
           entry_price_avg TEXT NOT NULL,
           exit_price_avg TEXT,
           source_command_id TEXT REFERENCES venue_commands(command_id),

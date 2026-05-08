@@ -53,6 +53,27 @@ def _make_edge_context(p_posterior: float, entry_price: float) -> EdgeContext:
     )
 
 
+def _make_non_authoritative_edge_context(*, market_velocity_1h: float = 0.0) -> EdgeContext:
+    """Build a degraded monitor context whose probability fields are not authority."""
+    dummy_vec = np.array([1.0])
+    return EdgeContext(
+        p_raw=dummy_vec,
+        p_cal=dummy_vec,
+        p_market=dummy_vec,
+        p_posterior=np.nan,
+        forward_edge=np.nan,
+        alpha=0.55,
+        confidence_band_upper=np.nan,
+        confidence_band_lower=np.nan,
+        entry_provenance=EntryMethod.ENS_MEMBER_COUNTING,
+        decision_snapshot_id="test-snap-degraded",
+        n_edges_found=1,
+        n_edges_after_fdr=1,
+        market_velocity_1h=market_velocity_1h,
+        divergence_score=0.0,
+    )
+
+
 NYC = City(
     name="NYC", lat=40.7772, lon=-73.8726,
     timezone="America/New_York", cluster="US-Northeast",
@@ -222,6 +243,31 @@ class TestExitTriggers:
         assert not np.isfinite(edge_ctx.ci_width)
         assert signal is None
         assert pos.neg_edge_count == 1
+
+    def test_missing_probability_authority_does_not_block_flash_crash_exit(self):
+        """Quote/velocity safety evidence must survive missing monitor probability."""
+        pos = _make_position()
+        signal = evaluate_exit_triggers(
+            pos,
+            _make_non_authoritative_edge_context(market_velocity_1h=-0.20),
+            hours_to_settlement=24.0,
+        )
+
+        assert signal is not None
+        assert signal.trigger == "FLASH_CRASH_PANIC"
+
+    def test_missing_probability_authority_does_not_block_vig_extreme_exit(self):
+        """Market-vig safety evidence is not probability authority and remains live."""
+        pos = _make_position()
+        signal = evaluate_exit_triggers(
+            pos,
+            _make_non_authoritative_edge_context(),
+            hours_to_settlement=24.0,
+            market_vig=1.10,
+        )
+
+        assert signal is not None
+        assert signal.trigger == "VIG_EXTREME"
 
     def test_edge_reversal_resets_on_recovery(self):
         """If edge recovers between checks, counter resets."""

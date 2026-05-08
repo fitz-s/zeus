@@ -445,6 +445,18 @@ def test_matched_trade_without_positive_fill_economics_requires_review_not_optim
     assert _command_state(conn) == "REVIEW_REQUIRED"
 
 
+def test_fractional_matched_trade_preserves_exact_lot_size(conn):
+    """WS trade filled_size and position_lot shares remain the same venue object."""
+    result = _ingestor(conn).handle_message(_trade_message("MATCHED", size="5.25"))
+
+    assert result["trade_fact_id"]
+    trade_fact = _rows(conn, "venue_trade_facts")[0]
+    lot = _rows(conn, "position_lots")[0]
+    assert Decimal(trade_fact["filled_size"]) == Decimal("5.25")
+    assert Decimal(str(lot["shares"])) == Decimal("5.25")
+    assert Decimal(str(lot["shares"])) == Decimal(trade_fact["filled_size"])
+
+
 def test_exit_sell_confirmed_trade_does_not_mint_positive_exposure_lot(conn):
     """EXIT/SELL WS trade facts confirm venue side effects but are not entries."""
     conn.execute(

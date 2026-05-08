@@ -202,6 +202,16 @@ def _decimal_text_equal(left: Any, right: Any) -> bool:
     )
 
 
+def _finite_decimal_text(value: Any) -> str:
+    try:
+        parsed = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError) as exc:
+        raise ValueError("position lot shares must be a finite decimal") from exc
+    if not parsed.is_finite():
+        raise ValueError("position lot shares must be a finite decimal")
+    return format(parsed, "f")
+
+
 def _row_value(row: Mapping[str, Any] | sqlite3.Row, key: str) -> Any:
     if isinstance(row, sqlite3.Row):
         return row[key]
@@ -1167,7 +1177,7 @@ def append_position_lot(
     *,
     position_id: int,
     state: str,
-    shares: int,
+    shares: int | float | str | Decimal,
     entry_price_avg: str,
     captured_at: str | datetime.datetime,
     state_changed_at: str | datetime.datetime,
@@ -1188,13 +1198,14 @@ def append_position_lot(
     captured_at_s = _validate_observed_at(captured_at)
     state_changed_at_s = _validate_observed_at(state_changed_at)
     observed_at_s = _validate_observed_at(observed_at or state_changed_at_s)
+    shares_text = _finite_decimal_text(shares)
     venue_timestamp_s = (
         _validate_observed_at(venue_timestamp) if venue_timestamp is not None else None
     )
     source_command_id, source_trade_fact_id = _assert_position_lot_trade_fact_authority(
         conn,
         lot_state=state,
-        shares=shares,
+        shares=shares_text,
         entry_price_avg=entry_price_avg,
         source_command_id=source_command_id,
         source_trade_fact_id=source_trade_fact_id,
@@ -1202,7 +1213,7 @@ def append_position_lot(
     payload_for_hash = raw_payload_json if raw_payload_json is not None else {
         "position_id": position_id,
         "state": state,
-        "shares": shares,
+        "shares": shares_text,
         "entry_price_avg": entry_price_avg,
         "exit_price_avg": exit_price_avg,
         "source_command_id": source_command_id,
@@ -1233,7 +1244,7 @@ def append_position_lot(
             (
                 int(position_id),
                 state,
-                int(shares),
+                shares_text,
                 str(entry_price_avg),
                 str(exit_price_avg) if exit_price_avg is not None else None,
                 source_command_id,

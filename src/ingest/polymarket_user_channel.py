@@ -1,5 +1,5 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-05-06
+# Last reused/audited: 2026-05-08
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/M3.yaml
 """Polymarket authenticated user-channel ingest (R3 M3).
 
@@ -190,13 +190,6 @@ def _trade_lifecycle_transition_allowed(previous: str, current: str) -> bool:
         "FAILED": set(),
     }
     return current in allowed.get(previous, set())
-
-
-def _int_shares(value: Any) -> int:
-    try:
-        return int(Decimal(str(value)).to_integral_value())
-    except (InvalidOperation, TypeError, ValueError):
-        return 0
 
 
 def _condition_id(message: dict[str, Any]) -> str:
@@ -769,7 +762,7 @@ class PolymarketUserChannelIngestor:
             conn,
             position_id=position_id,
             state=state,
-            shares=_int_shares(message.get("size")),
+            shares=_decimal_str(message.get("size"), "0"),
             entry_price_avg=_decimal_str(message.get("price"), "0"),
             source_command_id=command["command_id"],
             source_trade_fact_id=trade_fact_id,

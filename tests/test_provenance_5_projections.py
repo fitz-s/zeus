@@ -433,6 +433,68 @@ def test_position_lots_optimistic_vs_confirmed_split(conn):
     assert rows[1]["source_trade_fact_id"] == confirmed_fact_id
 
 
+def test_position_lots_preserve_fractional_trade_fact_size_authority(conn):
+    """position_lots.shares preserves the venue filled_size economic object."""
+    shares_column = {
+        row["name"]: row["type"]
+        for row in conn.execute("PRAGMA table_info(position_lots)").fetchall()
+    }["shares"]
+    assert shares_column.upper() == "TEXT"
+
+    _, _, command_id = _seed_snapshot_envelope_command(conn)
+    matched_fact_id = append_trade_fact(
+        conn,
+        trade_id="trade-fractional-matched",
+        venue_order_id="ord-u2",
+        command_id=command_id,
+        state="MATCHED",
+        filled_size="10.25",
+        fill_price="0.50",
+        source="WS_USER",
+        observed_at=NOW.isoformat(),
+        raw_payload_hash=HASH_A,
+        raw_payload_json={"state": "MATCHED", "size": "10.25"},
+    )
+
+    append_position_lot(
+        conn,
+        position_id=1,
+        state="OPTIMISTIC_EXPOSURE",
+        shares="10.25",
+        entry_price_avg="0.50",
+        source_command_id=command_id,
+        source_trade_fact_id=matched_fact_id,
+        captured_at=NOW.isoformat(),
+        state_changed_at=NOW.isoformat(),
+    )
+
+    row = conn.execute(
+        """
+        SELECT lot.shares, trade.filled_size
+          FROM position_lots lot
+          JOIN venue_trade_facts trade
+            ON trade.trade_fact_id = lot.source_trade_fact_id
+         WHERE lot.source_trade_fact_id = ?
+        """,
+        (matched_fact_id,),
+    ).fetchone()
+    assert Decimal(str(row["shares"])) == Decimal("10.25")
+    assert Decimal(str(row["shares"])) == Decimal(row["filled_size"])
+
+    with pytest.raises(ValueError, match="shares must equal"):
+        append_position_lot(
+            conn,
+            position_id=1,
+            state="OPTIMISTIC_EXPOSURE",
+            shares=10,
+            entry_price_avg="0.50",
+            source_command_id=command_id,
+            source_trade_fact_id=matched_fact_id,
+            captured_at=NOW.isoformat(),
+            state_changed_at=NOW.isoformat(),
+        )
+
+
 def test_active_exposure_lots_require_state_compatible_trade_fact_authority(conn):
     _, _, command_id = _seed_snapshot_envelope_command(conn)
     matched_fact_id = append_trade_fact(

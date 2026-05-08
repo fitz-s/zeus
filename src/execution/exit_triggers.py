@@ -94,14 +94,35 @@ def evaluate_exit_triggers(
             urgency="immediate",
         )
 
+    # Quote-only safety exits stay active when probability refresh is degraded.
+    if current_edge_context.market_velocity_1h <= -0.15:
+        return ExitSignal(
+            trade_id=position.trade_id,
+            trigger="FLASH_CRASH_PANIC",
+            reason=f"Adverse market velocity {current_edge_context.market_velocity_1h:.2f}/hr detected",
+            urgency="immediate"
+        )
+
+    # Layer 8: Micro-position hold (< $1 never sold, hold to settlement)
+    if position.effective_cost_basis_usd < 1.0:
+        return None
+
+    # 4. VIG_EXTREME
+    if market_vig > 1.08 or market_vig < 0.92:
+        return ExitSignal(
+            trade_id=position.trade_id,
+            trigger="VIG_EXTREME",
+            reason=f"Market vig={market_vig:.3f} outside [0.92, 1.08]",
+        )
+
     if not _edge_context_has_probability_authority(current_edge_context):
         logger.info(
-            "Exit probability authority unavailable for %s; holding",
+            "Exit probability authority unavailable for %s; holding probability-dependent triggers",
             position.trade_id,
         )
         return None
 
-    # Phase 3 Hard-Trigger Metrics (Microstructure deterioration)
+    # Phase 3 Hard-Trigger Metrics (Model/probability-dependent deterioration)
     if current_edge_context.divergence_score >= divergence_hard_threshold():
         return ExitSignal(
             trade_id=position.trade_id,
@@ -122,18 +143,6 @@ def evaluate_exit_triggers(
             ),
             urgency="immediate",
         )
-        
-    if current_edge_context.market_velocity_1h <= -0.15:
-        return ExitSignal(
-            trade_id=position.trade_id,
-            trigger="FLASH_CRASH_PANIC",
-            reason=f"Adverse market velocity {current_edge_context.market_velocity_1h:.2f}/hr detected",
-            urgency="immediate"
-        )
-
-    # Layer 8: Micro-position hold (< $1 never sold, hold to settlement)
-    if position.effective_cost_basis_usd < 1.0:
-        return None
 
     # Compute forward edge natively extracted from bounded context object
     forward_edge = current_edge_context.forward_edge
@@ -154,14 +163,6 @@ def evaluate_exit_triggers(
 
     if exit_signal is not None:
         return exit_signal
-
-    # 4. VIG_EXTREME
-    if market_vig > 1.08 or market_vig < 0.92:
-        return ExitSignal(
-            trade_id=position.trade_id,
-            trigger="VIG_EXTREME",
-            reason=f"Market vig={market_vig:.3f} outside [0.92, 1.08]",
-        )
 
     return None
 
