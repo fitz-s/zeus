@@ -674,8 +674,6 @@ def test_wla_antibody_fires_on_new_unguarded_site(tmp_path: Path) -> None:
     This test is the self-test for that gate.
     """
     import ast as _ast
-    import importlib.util
-    import sys
 
     # Write a synthetic Python file with a bare sqlite3.connect() call.
     unguarded = tmp_path / "unguarded_site.py"
