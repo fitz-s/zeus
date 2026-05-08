@@ -245,9 +245,13 @@ test_trust_policy:
     tests/test_harvester_learning_authority.py: {created: "2026-05-05", last_used: "2026-05-05"}
     tests/test_final_sdk_envelope_persistence.py: {created: "2026-05-05", last_used: "2026-05-05"}
     tests/test_harvester_truth_writer_null_bin.py: {created: "2026-05-08", last_used: "2026-05-08"}
+    # fix/#263 — SOURCE_DISAGREEMENT isolation layer.
+    tests/test_harvester_truth_writer_source_disagreement.py: {created: "2026-05-08", last_used: "2026-05-08"}
     # fix/#134 — ECMWF Open Data STEP_HOURS D+10 horizon extension antibodies.
     tests/test_ecmwf_open_data_step_hours.py: {created: "2026-05-08", last_used: "2026-05-08"}
     tests/test_forecast_target_contract_horizon.py: {created: "2026-05-08", last_used: "2026-05-08"}
+    # F1 subprocess hardening — retry + timeout + stderr (REPORT §6.2).
+    tests/test_ecmwf_open_data_subprocess_hardening.py: {created: "2026-05-08", last_used: "2026-05-08"}
 
 categories:
   core_law_antibody:
@@ -411,6 +415,7 @@ categories:
     - tests/test_executor_typed_boundary.py
     - tests/test_harvester_dr33_live_enablement.py
     - tests/test_harvester_truth_writer_null_bin.py
+    - tests/test_harvester_truth_writer_source_disagreement.py
     - tests/test_no_deprecated_make_family_id_calls.py
     - tests/test_parse_canonical_bin_label.py
     - tests/test_pe_reconstruction_relationships.py
@@ -1302,5 +1307,30 @@ test_metadata:
       F->C conversion path (T1-T2), C+C and F+F controls (T3-T4), _detect_bin_unit
       unit detection (T5-T7), _f_to_c arithmetic (T8), open-shoulder regression (T9).
       T1 also asserts winning_bin label uses converted C bounds (P1 fix).
+    created: 2026-05-08
+    last_reused_or_audited: 2026-05-08
+
+  tests/test_harvester_truth_writer_source_disagreement.py:
+    modules: [ingest, contracts, settlement]
+    category: core_law_antibody
+    profile: fix263_source_disagreement_isolation
+    blocks_commit: true
+    asserted_invariants:
+      - SOURCE-DISAGREEMENT-WITHIN-TOLERANCE-DISTINCT-FROM-OBS-OUTSIDE-BIN
+      - NULL-BIN-PRECEDENCE-UNAFFECTED-BY-DISAGREEMENT-LOGIC
+    source_under_test:
+      - src/ingest/harvester_truth_writer.py
+      - config/settings.json
+    law_dependencies:
+      - docs/operations/task_2026-05-08_post_merge_full_chain/TASK.md
+    notes: >
+      7 antibody tests for fix #263 SOURCE_DISAGREEMENT isolation layer.
+      T1: both agree + bin contains -> VERIFIED. T2: obs within tolerance of bin edge
+      (just misses) -> SOURCE_DISAGREEMENT. T3: obs far outside bin -> obs_outside_bin.
+      T4: null-bin precedence regression guard -> no_bin_info. T5: open-shoulder
+      hi=None within tolerance -> SOURCE_DISAGREEMENT. T6: obs exactly at tolerance
+      boundary (inclusive) -> SOURCE_DISAGREEMENT. T7: obs one unit beyond tolerance
+      -> obs_outside_bin. Tolerance is config-driven from
+      config/settings.json::settlement.disagreement_tolerance_celsius (default 1.0).
     created: 2026-05-08
     last_reused_or_audited: 2026-05-08

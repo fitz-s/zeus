@@ -282,6 +282,6 @@ def test_collect_open_ens_cycle_default_extract_timeout_is_live_sized(tmp_path: 
 
     assert result["status"] == "empty_ingest"
     assert calls == [
-        {"label": "download_mx2t6_high", "timeout": 600},
+        {"label": "download_mx2t6_high", "timeout": 1500},
         {"label": "extract_mx2t6_high", "timeout": 900},
     ]
