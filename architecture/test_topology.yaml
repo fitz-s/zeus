@@ -244,6 +244,7 @@ test_trust_policy:
     tests/test_harvester_settlement_redeem.py: {created: "2026-05-05", last_used: "2026-05-05"}
     tests/test_harvester_learning_authority.py: {created: "2026-05-05", last_used: "2026-05-05"}
     tests/test_final_sdk_envelope_persistence.py: {created: "2026-05-05", last_used: "2026-05-05"}
+    tests/test_harvester_truth_writer_null_bin.py: {created: "2026-05-08", last_used: "2026-05-08"}
 
 categories:
   core_law_antibody:
@@ -404,6 +405,7 @@ categories:
     - tests/test_executor_db_target.py
     - tests/test_executor_typed_boundary.py
     - tests/test_harvester_dr33_live_enablement.py
+    - tests/test_harvester_truth_writer_null_bin.py
     - tests/test_no_deprecated_make_family_id_calls.py
     - tests/test_parse_canonical_bin_label.py
     - tests/test_pe_reconstruction_relationships.py

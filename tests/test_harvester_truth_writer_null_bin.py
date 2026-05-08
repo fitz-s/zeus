@@ -1,5 +1,5 @@
 # Created: 2026-05-08
-# Last reused or audited: 2026-05-08
+# Last reused/audited: 2026-05-08
 # Authority basis: docs/operations/task_2026-05-08_obs_outside_bin_audit/RUN.md
 #   Fix #231 — Cluster B: null-bin rows misclassified as obs_outside_bin.
 """Antibody: _write_settlement_truth null-bin misclassification.
@@ -20,10 +20,7 @@ Tests:
 """
 from __future__ import annotations
 
-import json
 import sqlite3
-
-import pytest
 
 from src.config import City
 from src.ingest.harvester_truth_writer import _write_settlement_truth
