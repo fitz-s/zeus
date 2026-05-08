@@ -63,6 +63,7 @@ from a separate topology branch before the next object-invariance stage.
 | 24 | Canonical settlement environment authority in `position_events` / settlement readers | `docs/operations/task_2026-05-07_object_invariance_wave24/PLAN.md` | Repaired in continuation branch | APPROVE recorded | Historical physical DB rows were not audited, relabeled, or backfilled; requires separate operator-approved dry-run plan |
 | 25 | Confirmed trade fact economics authority | `docs/operations/task_2026-05-07_object_invariance_wave25/PLAN.md` | Repaired in continuation branch | REVISE then APPROVE recorded | Existing physical DB rows were not audited or relabeled |
 | 26 | Canonical position event environment authority through lifecycle builders and portfolio loader | `docs/operations/task_2026-05-07_object_invariance_wave26/PLAN.md` | Repaired in continuation branch | REVISE twice, then APPROVE recorded | Existing physical DB rows were not audited, relabeled, or backfilled |
+| 27 | `venue_trade_facts` -> `position_lots` active exposure authority | `docs/operations/task_2026-05-08_object_invariance_wave27/PLAN.md` | Repaired in mainline-next branch | Local focused verification recorded; critic not yet run for multi-wave batch | Existing physical DB rows were not audited, relabeled, or backfilled |
 
 ## PR67 Review Claims
 
@@ -115,6 +116,18 @@ targeted fix:
    if the operator approves a dry-run plus rollback/relabel plan.
 5. Settlement/report/replay/learning contamination sweep after the env repair.
 6. Front-of-pipeline source/calibration remaining pass.
+
+Continuation branch update, 2026-05-08:
+
+- Wave 27 repaired the central `venue_trade_facts -> position_lots` active
+  exposure authority seam. New active exposure lots must now reference a
+  state-compatible trade fact with positive fill economics and matching command
+  id; direct SQL inserts into the canonical schema are blocked by insert
+  triggers.
+- Remaining item 2 is reduced, not closed globally: command recovery and active
+  lot producers are covered by focused tests, but report/replay/learning
+  contamination sweep remains a separate read/consumer pass and existing DB rows
+  were not audited.
 
 ## Stop Conditions
 

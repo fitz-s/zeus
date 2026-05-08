@@ -12,6 +12,7 @@ import logging
 import os
 import sqlite3
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import TYPE_CHECKING, Iterable, Optional
 
@@ -123,6 +124,7 @@ def _connect(
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
+    _install_connection_functions(conn)
     resolved = _resolve_write_class(write_class)
     if resolved is not None:
         _cnt_inc(f"db_connect_write_class_{resolved.value}_total")
@@ -354,6 +356,39 @@ PORTFOLIO_LOADER_PHASE_TO_RUNTIME_STATE = {
 }
 
 
+def _positive_finite_decimal_text(value: object) -> int:
+    try:
+        parsed = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        return 0
+    return int(parsed.is_finite() and parsed > 0)
+
+
+def _decimal_text_equal(left: object, right: object) -> int:
+    try:
+        left_parsed = Decimal(str(left))
+        right_parsed = Decimal(str(right))
+    except (InvalidOperation, TypeError, ValueError):
+        return 0
+    return int(
+        left_parsed.is_finite()
+        and right_parsed.is_finite()
+        and left_parsed == right_parsed
+    )
+
+
+def _install_connection_functions(conn: sqlite3.Connection) -> None:
+    functions = (
+        ("zeus_positive_decimal_text", 1, _positive_finite_decimal_text),
+        ("zeus_decimal_text_equal", 2, _decimal_text_equal),
+    )
+    for name, arity, func in functions:
+        try:
+            conn.create_function(name, arity, func, deterministic=True)
+        except TypeError:
+            conn.create_function(name, arity, func)
+
+
 def init_provenance_projection_schema(conn: sqlite3.Connection) -> None:
     """Create U2 raw-provenance projection tables and legacy migrations.
 
@@ -362,6 +397,7 @@ def init_provenance_projection_schema(conn: sqlite3.Connection) -> None:
     these tables, but they must not mutate historical provenance.
     """
 
+    _install_connection_functions(conn)
     conn.executescript(
         """
         CREATE TABLE IF NOT EXISTS venue_submission_envelopes (
@@ -510,6 +546,50 @@ def init_provenance_projection_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_position_lots_state ON position_lots (state, position_id);
         CREATE INDEX IF NOT EXISTS idx_position_lots_trade ON position_lots (source_trade_fact_id);
 
+        CREATE TRIGGER IF NOT EXISTS position_lots_optimistic_trade_authority
+        BEFORE INSERT ON position_lots
+        WHEN NEW.state = 'OPTIMISTIC_EXPOSURE'
+        BEGIN
+          SELECT RAISE(ABORT, 'OPTIMISTIC_EXPOSURE requires MATCHED/MINED source trade fact authority')
+          WHERE NOT EXISTS (
+            SELECT 1
+              FROM venue_trade_facts tf
+              JOIN venue_commands cmd
+                ON cmd.command_id = tf.command_id
+             WHERE tf.trade_fact_id = NEW.source_trade_fact_id
+               AND tf.command_id = NEW.source_command_id
+               AND UPPER(COALESCE(cmd.intent_kind, '')) = 'ENTRY'
+               AND UPPER(COALESCE(cmd.side, '')) = 'BUY'
+               AND tf.state IN ('MATCHED','MINED')
+               AND zeus_positive_decimal_text(tf.filled_size) = 1
+               AND zeus_positive_decimal_text(tf.fill_price) = 1
+               AND zeus_decimal_text_equal(tf.filled_size, NEW.shares) = 1
+               AND zeus_decimal_text_equal(tf.fill_price, NEW.entry_price_avg) = 1
+          );
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS position_lots_confirmed_trade_authority
+        BEFORE INSERT ON position_lots
+        WHEN NEW.state = 'CONFIRMED_EXPOSURE'
+        BEGIN
+          SELECT RAISE(ABORT, 'CONFIRMED_EXPOSURE requires CONFIRMED source trade fact authority')
+          WHERE NOT EXISTS (
+            SELECT 1
+              FROM venue_trade_facts tf
+              JOIN venue_commands cmd
+                ON cmd.command_id = tf.command_id
+             WHERE tf.trade_fact_id = NEW.source_trade_fact_id
+               AND tf.command_id = NEW.source_command_id
+               AND UPPER(COALESCE(cmd.intent_kind, '')) = 'ENTRY'
+               AND UPPER(COALESCE(cmd.side, '')) = 'BUY'
+               AND tf.state = 'CONFIRMED'
+               AND zeus_positive_decimal_text(tf.filled_size) = 1
+               AND zeus_positive_decimal_text(tf.fill_price) = 1
+               AND zeus_decimal_text_equal(tf.filled_size, NEW.shares) = 1
+               AND zeus_decimal_text_equal(tf.fill_price, NEW.entry_price_avg) = 1
+          );
+        END;
+
         CREATE TRIGGER IF NOT EXISTS position_lots_no_update
         BEFORE UPDATE ON position_lots
         BEGIN
@@ -594,6 +674,7 @@ def get_connection(
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
+    _install_connection_functions(conn)
     resolved = _resolve_write_class(write_class)
     if resolved is not None:
         _cnt_inc(f"db_get_connection_{resolved.value}_total")
