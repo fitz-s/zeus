@@ -90,10 +90,12 @@ INGEST_SCRIPT_DIR = PROJECT_ROOT / "scripts"
 # The stream now serves mx2t3/mn2t3 (3h aggregations) as the native product.
 # We fetch 3h-native and let calibration learn the 3h→6h envelope mapping
 # downstream. We do NOT re-aggregate to 6h at fetch time (forbidden_patterns).
-STEP_HOURS = list(range(3, 279, 3))  # 3, 6, …, 276 — 3h stride (A1+3h) + 276h live_max (LOW)
-# Authority: source_release_calendar.yaml ecmwf_open_data live_max_step_hours=276.
-# 279h was out of bounds; steps must be ≤ live_max so select_source_run_for_target_horizon
-# does not return HORIZON_OUT_OF_RANGE (PR #85 Codex P1).
+STEP_HOURS = list(range(3, 285, 3))  # 3, 6, …, 282 — 3h stride (A1+3h) + 282h live_max (LOW D+10)
+# Authority: source_release_calendar.yaml ecmwf_open_data live_max_step_hours=282.
+# 282h covers D+10 for UTC+12 cities (max required step ≈ 252h + 6h buffer to 282h per LOW
+# authority). Steps must be ≤ live_max so select_source_run_for_target_horizon does not
+# return HORIZON_OUT_OF_RANGE. Raised from 276 → 282 (fix/#134) to unblock 100 BLOCKED
+# readiness rows for 2026-05-13/14 requiring steps 228–252h. Closes #134.
 
 # Track config — local to this module so the daemon's ingest knob is one
 # clean dict rather than two parallel param lists.
