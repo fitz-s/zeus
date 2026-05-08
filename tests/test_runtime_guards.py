@@ -9566,6 +9566,8 @@ def test_orange_risk_exits_favorable_position_through_monitor_lifecycle(monkeypa
     assert summary["exits"] == 1
     assert artifact.monitor_results[0].should_exit is True
     assert artifact.monitor_results[0].exit_reason == "ORANGE_FAVORABLE_EXIT"
+    assert artifact.monitor_results[0].fresh_prob == pytest.approx(0.62)
+    assert artifact.monitor_results[0].fresh_edge == pytest.approx(0.21)
     assert captured["exit_context"].exit_reason == "ORANGE_FAVORABLE_EXIT"
     assert captured["position"].exit_trigger == "ORANGE_FAVORABLE_EXIT"
     assert "orange_favorable_bid_gate" in pos.applied_validations
@@ -9672,6 +9674,8 @@ def test_orange_risk_does_not_override_incomplete_exit_context(monkeypatch):
     assert summary["exits"] == 0
     assert artifact.monitor_results[0].should_exit is False
     assert artifact.monitor_results[0].exit_reason.startswith("INCOMPLETE_EXIT_CONTEXT")
+    assert artifact.monitor_results[0].fresh_prob is None
+    assert artifact.monitor_results[0].fresh_edge is None
 
 
 def test_yellow_risk_does_not_take_favorable_exit(monkeypatch):
@@ -9751,6 +9755,8 @@ def test_monitor_refresh_failure_near_settlement_is_operator_visible(monkeypatch
     assert summary["monitor_chain_missing_reasons"][0]["reason"] == "refresh_failed:RuntimeError"
     assert len(artifact.monitor_results) == 1
     assert artifact.monitor_results[0].exit_reason == "MONITOR_CHAIN_MISSING:refresh_failed:RuntimeError"
+    assert artifact.monitor_results[0].fresh_prob is None
+    assert artifact.monitor_results[0].fresh_edge is None
 
 
 def test_monitor_refresh_failure_far_from_settlement_is_not_chain_missing(monkeypatch):
@@ -9813,6 +9819,8 @@ def test_incomplete_exit_context_near_settlement_escalates_monitor_chain(monkeyp
     )
     assert len(artifact.monitor_results) == 1
     assert artifact.monitor_results[0].exit_reason.startswith("INCOMPLETE_EXIT_CONTEXT")
+    assert artifact.monitor_results[0].fresh_prob is None
+    assert artifact.monitor_results[0].fresh_edge is None
 
 
 def test_monitor_execution_failure_does_not_become_chain_missing(monkeypatch):
@@ -9891,6 +9899,8 @@ def test_time_context_failure_near_active_position_escalates_monitor_chain(monke
     assert summary["monitor_chain_missing_reasons"][0]["reason"].startswith("time_context_failed")
     assert len(artifact.monitor_results) == 1
     assert artifact.monitor_results[0].exit_reason.startswith("MONITOR_CHAIN_MISSING:time_context_failed")
+    assert artifact.monitor_results[0].fresh_prob is None
+    assert artifact.monitor_results[0].fresh_edge is None
 
 
 def test_monitoring_phase_persists_live_exit_telemetry_chain_with_canonical_entry_baseline(monkeypatch, tmp_path):

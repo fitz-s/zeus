@@ -1345,6 +1345,28 @@ def _is_open_crowding_exposure(pos) -> bool:
     return True
 
 
+def _finite_float_or_none(value):
+    try:
+        value_f = float(value)
+    except (TypeError, ValueError):
+        return None
+    return value_f if math.isfinite(value_f) else None
+
+
+def _current_monitor_result_probability_and_edge(pos, edge_ctx=None) -> tuple[float | None, float | None]:
+    """Return current-cycle monitor probability/edge only when authority is fresh."""
+
+    if edge_ctx is None or not bool(getattr(pos, "last_monitor_prob_is_fresh", False)):
+        return None, None
+    fresh_prob = _finite_float_or_none(getattr(edge_ctx, "p_posterior", None))
+    fresh_edge = _finite_float_or_none(getattr(edge_ctx, "forward_edge", None))
+    if fresh_edge is None:
+        fresh_edge = _finite_float_or_none(getattr(pos, "last_monitor_edge", None))
+    if fresh_prob is None:
+        return None, None
+    return fresh_prob, fresh_edge
+
+
 def _build_exit_context(
     pos,
     edge_ctx,
@@ -1529,8 +1551,8 @@ def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: 
             artifact.add_monitor_result(
                 deps.MonitorResult(
                     position_id=pos.trade_id,
-                    fresh_prob=pos.last_monitor_prob or pos.p_posterior,
-                    fresh_edge=pos.last_monitor_edge,
+                    fresh_prob=None,
+                    fresh_edge=None,
                     should_exit=False,
                     exit_reason=pos.admin_exit_reason,
                     neg_edge_count=pos.neg_edge_count,
@@ -1543,8 +1565,8 @@ def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: 
             artifact.add_monitor_result(
                 deps.MonitorResult(
                     position_id=pos.trade_id,
-                    fresh_prob=pos.last_monitor_prob or pos.p_posterior,
-                    fresh_edge=pos.last_monitor_edge,
+                    fresh_prob=None,
+                    fresh_edge=None,
                     should_exit=False,
                     exit_reason="UNKNOWN_DIRECTION",
                     neg_edge_count=pos.neg_edge_count,
@@ -1688,11 +1710,12 @@ def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: 
                     exit_reason,
                 )
 
+            monitor_fresh_prob, monitor_fresh_edge = _current_monitor_result_probability_and_edge(pos, edge_ctx)
             artifact.add_monitor_result(
                 deps.MonitorResult(
                     position_id=pos.trade_id,
-                    fresh_prob=edge_ctx.p_posterior,
-                    fresh_edge=pos.last_monitor_edge,
+                    fresh_prob=monitor_fresh_prob,
+                    fresh_edge=monitor_fresh_edge,
                     should_exit=should_exit,
                     exit_reason=exit_reason,
                     neg_edge_count=pos.neg_edge_count,
@@ -1823,8 +1846,8 @@ def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: 
                 artifact.add_monitor_result(
                     deps.MonitorResult(
                         position_id=pos.trade_id,
-                        fresh_prob=pos.last_monitor_prob or pos.p_posterior,
-                        fresh_edge=pos.last_monitor_edge,
+                        fresh_prob=None,
+                        fresh_edge=None,
                         should_exit=False,
                         exit_reason=f"MONITOR_CHAIN_MISSING:{reason_prefix}",
                         neg_edge_count=pos.neg_edge_count,

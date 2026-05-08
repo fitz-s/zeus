@@ -2331,6 +2331,8 @@ def test_monitoring_marks_quarantine_for_admin_resolution_once(monkeypatch):
     assert summary["monitors"] == 0
     assert len(monitor_results) == 1
     assert monitor_results[0].exit_reason == QUARANTINE_REVIEW_REQUIRED
+    assert monitor_results[0].fresh_prob is None
+    assert monitor_results[0].fresh_edge is None
 
     portfolio_dirty, tracker_dirty = cycle_runtime.execute_monitoring_phase(
         None,
@@ -2402,6 +2404,65 @@ def test_monitoring_skips_fill_authority_quarantine_without_chain_quarantine(mon
     assert summary["monitor_skipped_quarantine_resolution"] == 1
     assert summary["monitors"] == 0
     assert monitor_results[0].exit_reason == "FILL_AUTHORITY_QUARANTINE_REVIEW_REQUIRED"
+    assert monitor_results[0].fresh_prob is None
+    assert monitor_results[0].fresh_edge is None
+
+
+def test_monitoring_unknown_direction_report_has_no_fresh_probability(monkeypatch):
+    """Skipped unknown-direction monitor results must not report stale probability."""
+    from src.engine import cycle_runtime
+
+    pos = _make_position(direction="unknown", chain_state="synced")
+    pos.p_posterior = 0.99
+    pos.last_monitor_prob = 0.88
+    pos.last_monitor_edge = 0.77
+    pos.last_monitor_prob_is_fresh = True
+    portfolio = _make_portfolio(pos)
+
+    class Tracker:
+        def record_exit(self, position):
+            raise AssertionError("unknown direction should not exit")
+
+    monitor_results = []
+    artifact = type("Artifact", (), {"add_monitor_result": lambda self, result: monitor_results.append(result)})()
+    summary = {"monitors": 0, "exits": 0}
+    deps = type(
+        "Deps",
+        (),
+        {
+            "MonitorResult": type("MonitorResult", (), {"__init__": lambda self, **kwargs: self.__dict__.update(kwargs)}),
+            "logger": logging.getLogger("test_unknown_direction_monitor_report"),
+            "cities_by_name": {},
+            "_utcnow": staticmethod(lambda: datetime(2026, 4, 1, 5, 30, tzinfo=timezone.utc)),
+            "has_acknowledged_quarantine_clear": staticmethod(lambda token_id: False),
+        },
+    )
+
+    monkeypatch.setattr(
+        "src.engine.monitor_refresh.refresh_position",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("unknown direction must not reach monitor refresh")
+        ),
+    )
+
+    portfolio_dirty, tracker_dirty = cycle_runtime.execute_monitoring_phase(
+        None,
+        object(),
+        portfolio,
+        artifact,
+        Tracker(),
+        summary,
+        deps=deps,
+    )
+
+    assert portfolio_dirty is False
+    assert tracker_dirty is False
+    assert summary["monitor_skipped_unknown_direction"] == 1
+    assert summary["monitors"] == 0
+    assert len(monitor_results) == 1
+    assert monitor_results[0].exit_reason == "UNKNOWN_DIRECTION"
+    assert monitor_results[0].fresh_prob is None
+    assert monitor_results[0].fresh_edge is None
 
 
 def test_quarantine_expired_marks_distinct_admin_resolution_reason(monkeypatch):
@@ -2451,6 +2512,8 @@ def test_quarantine_expired_marks_distinct_admin_resolution_reason(monkeypatch):
     assert pos.exit_reason == QUARANTINE_EXPIRED_REVIEW_REQUIRED
     assert len(monitor_results) == 1
     assert monitor_results[0].exit_reason == QUARANTINE_EXPIRED_REVIEW_REQUIRED
+    assert monitor_results[0].fresh_prob is None
+    assert monitor_results[0].fresh_edge is None
 
 
 def test_monitoring_transitions_holding_position_into_day0_window(monkeypatch):

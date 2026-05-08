@@ -65,6 +65,7 @@ from a separate topology branch before the next object-invariance stage.
 | 26 | Canonical position event environment authority through lifecycle builders and portfolio loader | `docs/operations/task_2026-05-07_object_invariance_wave26/PLAN.md` | Repaired in continuation branch | REVISE twice, then APPROVE recorded | Existing physical DB rows were not audited, relabeled, or backfilled |
 | 27 | `venue_trade_facts` -> `position_lots` active exposure authority | `docs/operations/task_2026-05-08_object_invariance_wave27/PLAN.md` | Repaired in mainline-next branch | Local focused verification recorded; critic not yet run for multi-wave batch | Existing physical DB rows were not audited, relabeled, or backfilled |
 | 28 | Monitor-current native posterior -> exit trigger hold-value EV gate | `docs/operations/task_2026-05-08_object_invariance_wave28/PLAN.md` | Repaired in mainline-next branch | Critic APPROVE recorded | No DB rows touched; no venue side effects; report/replay/learning consumers remain separate sweep |
+| 29 | Monitor loop skip/error path -> `MonitorResult` reporting probability authority | `docs/operations/task_2026-05-08_object_invariance_wave29/PLAN.md` | Repaired in mainline-next branch | Local focused verification recorded; critic pending if bundled with next reporting wave | No DB rows touched; read-model/riskguard loaders remain separate sweep |
 
 ## PR67 Review Claims
 
@@ -133,6 +134,10 @@ Continuation branch update, 2026-05-08:
   triggers: buy-yes EV gating now consumes `EdgeContext.p_posterior`, and stale
   or unknown monitor probability refreshes materialize as non-authoritative
   probability/edge/CI fields instead of masquerading as current posterior.
+- Wave 29 repaired the direct reporting bypass left by Wave28: skipped/error
+  monitor results now emit no `fresh_prob`/`fresh_edge` instead of falling back
+  to stale `Position.p_posterior`, previous `last_monitor_prob`, or previous
+  `last_monitor_edge`.
 
 ## Stop Conditions
 
