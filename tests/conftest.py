@@ -291,9 +291,13 @@ _WLA_SQLITE_CONNECT_ALLOWLIST = frozenset({
 
     # --- src/ daemon sites: pending Track A.6 (#246) ---
     "src/data/market_scanner.py",                   # pending_track_a6
-    "src/ingest_main.py",                           # pending_track_a6
-    "src/observability/status_summary.py",          # pending_track_a6
-    "src/riskguard/discord_alerts.py",              # pending_track_a6
+    # src/ingest_main.py, src/observability/status_summary.py,
+    # src/riskguard/discord_alerts.py — resolved in Track A.6 (#246):
+    # annotated in SQLITE_CONNECT_ALLOWLIST (db_writer_lock.py) with
+    # read-only / separate-DB rationale; removed from conftest pending list.
+    "src/ingest_main.py",                           # RO: reads condition_id for UMA listener (Track A.6 #246)
+    "src/observability/status_summary.py",          # RO: status dashboard read-only (Track A.6 #246)
+    "src/riskguard/discord_alerts.py",              # WRITE risk_state.db only; not world-db BULK scope (Track A.6 #246)
 
     # --- read-only scripts: verified SELECT-only, named in PR #86 ---
     "scripts/attribution_drift_weekly.py",          # read_only (PR #86)
