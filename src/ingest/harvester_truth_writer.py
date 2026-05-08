@@ -20,6 +20,7 @@ import json
 import logging
 import math
 import os
+import re
 import sqlite3
 from datetime import datetime, timezone
 from typing import Optional
@@ -63,6 +64,28 @@ _TRAINING_FORECAST_SOURCES = frozenset({"tigge", "ecmwf_ens"})
 
 def _metric_identity_for(temperature_metric: str | MetricIdentity) -> MetricIdentity:
     return MetricIdentity.from_raw(temperature_metric)
+
+
+def _detect_bin_unit(question: str) -> Optional[str]:
+    """Detect temperature unit ('F' or 'C') from a Polymarket market question string.
+
+    Returns 'F', 'C', or None if no unit symbol found. Used to detect pre-2026
+    London Gamma markets that were posed in degrees F even though London is now
+    configured as a degrees C city (fix #262).
+
+    Checks for degrees F before degrees C -- if both appear (should not happen in
+    practice for a single-unit question), F takes precedence defensively.
+    """
+    if re.search(r"\xb0[Ff]", question):
+        return "F"
+    if re.search(r"\xb0[Cc]", question):
+        return "C"
+    return None
+
+
+def _f_to_c(val: float) -> float:
+    """Convert Fahrenheit to Celsius: (F - 32) x 5/9."""
+    return (val - 32.0) * 5.0 / 9.0
 
 
 def _canonical_bin_label(lo: Optional[float], hi: Optional[float], unit: str) -> Optional[str]:
@@ -248,12 +271,18 @@ def _write_settlement_truth(
     obs_row: Optional[dict] = None,
     resolved_market_outcomes: Optional[list[dict]] = None,
     temperature_metric: str | MetricIdentity = "high",
+    pm_bin_unit: Optional[str] = None,
 ) -> dict:
     """Write canonical-authority settlement truth to settlements table.
 
     This is an ingest-side copy of harvester.py:_write_settlement_truth.
     Writes ONLY to world_conn (settlements, settlements_v2, market_events_v2).
-    Does NOT commit — caller owns transaction boundary.
+    Does NOT commit -- caller owns transaction boundary.
+
+    pm_bin_unit: the unit of pm_bin_lo/pm_bin_hi as parsed from the market question
+        ('F' or 'C'). When pm_bin_unit='F' and city.settlement_unit='C', the bin
+        bounds are converted F->C before containment check (fix #262: pre-2026
+        London markets were posed in F; London is now a C city).
     """
     db_source_type = _SOURCE_TYPE_MAP.get(city.settlement_source_type, city.settlement_source_type.upper())
     data_version = _HARVESTER_LIVE_DATA_VERSION.get(
@@ -267,6 +296,7 @@ def _write_settlement_truth(
     winning_bin: Optional[str] = None
     reason: Optional[str] = None
     rounding_rule: str = "wmo_half_up"
+    bin_unit_converted: bool = False
 
     observation_value = (
         obs_row.get(metric_identity.observation_field)
@@ -290,19 +320,40 @@ def _write_settlement_truth(
         if rounded is not None and math.isfinite(rounded):
             contained = False
             if pm_bin_lo is None and pm_bin_hi is None:
-                # No bin information available — cannot evaluate containment.
+                # No bin information available -- cannot evaluate containment.
                 # Record the observation value but quarantine with a distinct reason
                 # so data consumers can distinguish "obs outside known bin" from
                 # "no bin was provided at all" (e.g. uma_backfill synthetic slugs).
                 settlement_value = rounded
                 reason = "harvester_live_no_bin_info"
             else:
-                if pm_bin_lo is not None and pm_bin_hi is not None:
-                    contained = pm_bin_lo <= rounded <= pm_bin_hi
-                elif pm_bin_lo is None and pm_bin_hi is not None:
-                    contained = rounded <= pm_bin_hi
-                elif pm_bin_hi is None and pm_bin_lo is not None:
-                    contained = rounded >= pm_bin_lo
+                # Fix #262: pre-2026 London Gamma markets were posed in degrees F
+                # (bin values like 40-41 are F). London is now configured as a C city.
+                # Convert bin bounds to C before containment so the check operates in
+                # matching units. Applies whenever pm_bin_unit differs from
+                # city.settlement_unit (F bin vs C city is the only live case).
+                effective_bin_lo = pm_bin_lo
+                effective_bin_hi = pm_bin_hi
+                if pm_bin_unit == "F" and city.settlement_unit == "C":
+                    if effective_bin_lo is not None:
+                        effective_bin_lo = _f_to_c(effective_bin_lo)
+                    if effective_bin_hi is not None:
+                        effective_bin_hi = _f_to_c(effective_bin_hi)
+                    bin_unit_converted = True
+                    logger.debug(
+                        "harvester_truth_writer: bin unit mismatch for %s %s -- "
+                        "converted F bin [%s, %s] -> C [%.4f, %.4f] (fix #262)",
+                        city.name, target_date,
+                        pm_bin_lo, pm_bin_hi,
+                        effective_bin_lo if effective_bin_lo is not None else 0.0,
+                        effective_bin_hi if effective_bin_hi is not None else 0.0,
+                    )
+                if effective_bin_lo is not None and effective_bin_hi is not None:
+                    contained = effective_bin_lo <= rounded <= effective_bin_hi
+                elif effective_bin_lo is None and effective_bin_hi is not None:
+                    contained = rounded <= effective_bin_hi
+                elif effective_bin_hi is None and effective_bin_lo is not None:
+                    contained = rounded >= effective_bin_lo
                 if contained:
                     authority = "VERIFIED"
                     settlement_value = rounded
@@ -324,6 +375,8 @@ def _write_settlement_truth(
         "event_slug": event_slug or None,
         "pm_bin_lo": pm_bin_lo,
         "pm_bin_hi": pm_bin_hi,
+        "pm_bin_unit": pm_bin_unit,
+        "bin_unit_converted": bin_unit_converted,
         "unit": city.settlement_unit,
         "settlement_source_type": db_source_type,
         "temperature_metric": metric_identity.temperature_metric,
@@ -539,12 +592,18 @@ def write_settlement_truth_for_open_markets(
                 settlements_written += 1
                 continue
 
+            # Detect the unit of the winning bin from its market question text.
+            # Pre-2026 London markets used F bins; London is now a C city.
+            # _write_settlement_truth converts F->C when units mismatch (fix #262).
+            winning_bin_unit = _detect_bin_unit(winning.get("range_label", ""))
+
             _write_settlement_truth(
                 world_conn, city, target_date, pm_bin_lo, pm_bin_hi,
                 event_slug=event.get("slug", ""),
                 obs_row=obs_row,
                 resolved_market_outcomes=resolved_market_outcomes,
                 temperature_metric=temperature_metric,
+                pm_bin_unit=winning_bin_unit,
             )
             settlements_written += 1
 
