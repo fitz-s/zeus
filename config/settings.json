@@ -139,6 +139,10 @@
     "correlation_crowding_rate": 0.0,
     "_correlation_crowding_rate_note": "T6.4-phase2 correlation-crowding cost rate. Cost model: crowding_cost_usd = rate × correlated_exposure_ratio × shares × best_bid. rate=0.01 means 1% of exit notional per unit of correlated exposure across other held positions. Default 0.0 = no-op (safe default — feature-flag OFF preserves pre-T6.4-phase2 behavior even when HOLD_VALUE_EXIT_COSTS flips ON). Operator raises after T6.3-followup-1 replay audit measures should_exit sensitivity. HARDCODED until live-readiness B3 corpus."
   },
+  "settlement": {
+    "disagreement_tolerance_celsius": 1.0,
+    "_disagreement_tolerance_note": "Max absolute difference (°C) between settlement_value (UMA-resolved) and observation_value (WU-derived) to classify as SOURCE_DISAGREEMENT rather than genuine obs_outside_bin. Added 2026-05-08 for fix #263."
+  },
   "riskguard": {
     "brier_yellow": 0.25,
     "brier_orange": 0.3,

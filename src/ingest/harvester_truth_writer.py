@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-04-30; last_reviewed=2026-04-30; last_reused=never
+# Lifecycle: created=2026-04-30; last_reviewed=2026-05-08; last_reused=2026-05-08
 # Authority basis: docs/operations/task_2026-04-30_two_system_independence/design.md §5 Phase 1.5
 """Ingest-side settlement truth writer (Phase 1.5 harvester split).
 
@@ -24,6 +24,43 @@ import re
 import sqlite3
 from datetime import datetime, timezone
 from typing import Optional
+
+# Default SOURCE_DISAGREEMENT tolerance (°C). Overridden by
+# config/settings.json::settlement.disagreement_tolerance_celsius (fix #263).
+_DEFAULT_DISAGREEMENT_TOLERANCE_C = 1.0
+
+
+def _disagreement_tolerance() -> float:
+    """Read disagreement tolerance from settings.json; fall back to 1.0°C."""
+    try:
+        import json as _json
+        from src.config import PROJECT_ROOT
+        cfg_path = PROJECT_ROOT / "config" / "settings.json"
+        with open(cfg_path) as _f:
+            _cfg = _json.load(_f)
+        return float(
+            _cfg.get("settlement", {}).get(
+                "disagreement_tolerance_celsius", _DEFAULT_DISAGREEMENT_TOLERANCE_C
+            )
+        )
+    except Exception:
+        return _DEFAULT_DISAGREEMENT_TOLERANCE_C
+
+
+def _nearest_bin_edge_distance(rounded: float, lo: Optional[float], hi: Optional[float]) -> float:
+    """Absolute distance (in bin units) from rounded to the nearest bin boundary.
+
+    For a closed bin [lo, hi]: min distance to lo or hi.
+    For open-shoulder lo-only (hi=None): distance to lo.
+    For open-shoulder hi-only (lo=None): distance to hi.
+    Returns inf if both are None (caller should not reach here in that case).
+    """
+    distances = []
+    if lo is not None:
+        distances.append(abs(rounded - lo))
+    if hi is not None:
+        distances.append(abs(rounded - hi))
+    return min(distances) if distances else math.inf
 
 from src.config import City, cities_by_name
 from src.contracts.settlement_semantics import SettlementSemantics
@@ -348,7 +385,22 @@ def _write_settlement_truth(
                         effective_bin_lo if effective_bin_lo is not None else 0.0,
                         effective_bin_hi if effective_bin_hi is not None else 0.0,
                     )
-                if effective_bin_lo is not None and effective_bin_hi is not None:
+                # Fix #264: Polymarket C bins are INTEGER. After F->C conversion
+                # bounds are floats (e.g. 48F -> 8.888C). Snap via WMO half-up so
+                # containment operates on integers. Closed bin: obs in {lo_int, hi_int}.
+                # Open-shoulder: integer inequality (obs <= hi_int or obs >= lo_int).
+                if bin_unit_converted:
+                    if effective_bin_lo is not None:
+                        effective_bin_lo = math.floor(effective_bin_lo + 0.5)
+                    if effective_bin_hi is not None:
+                        effective_bin_hi = math.floor(effective_bin_hi + 0.5)
+                    if effective_bin_lo is not None and effective_bin_hi is not None:
+                        contained = rounded in {effective_bin_lo, effective_bin_hi}
+                    elif effective_bin_lo is None and effective_bin_hi is not None:
+                        contained = rounded <= effective_bin_hi
+                    elif effective_bin_hi is None and effective_bin_lo is not None:
+                        contained = rounded >= effective_bin_lo
+                elif effective_bin_lo is not None and effective_bin_hi is not None:
                     contained = effective_bin_lo <= rounded <= effective_bin_hi
                 elif effective_bin_lo is None and effective_bin_hi is not None:
                     contained = rounded <= effective_bin_hi
@@ -363,7 +415,27 @@ def _write_settlement_truth(
                     reason = None
                 else:
                     settlement_value = rounded
-                    reason = "harvester_live_obs_outside_bin"
+                    # Fix #263: distinguish SOURCE_DISAGREEMENT from genuine
+                    # obs_outside_bin. If the obs rounds to within ±tolerance of
+                    # the nearest bin edge (i.e. one source passes, the other
+                    # just misses due to measurement/rounding variance), emit a
+                    # distinct quarantine reason so operators can triage separately.
+                    # "Both outside bin" scenario: obs is far from the bin — keep
+                    # obs_outside_bin. When only one source fails containment and
+                    # they are within tolerance, emit source_disagreement.
+                    _tol = _disagreement_tolerance()
+                    _dist = _nearest_bin_edge_distance(
+                        rounded, effective_bin_lo, effective_bin_hi
+                    )
+                    if _dist <= _tol:
+                        reason = "harvester_source_disagreement_within_tolerance"
+                        logger.debug(
+                            "harvester_truth_writer: source disagreement %s %s — "
+                            "obs=%.1f nearest_bin_edge_dist=%.2f tol=%.1f (fix #263)",
+                            city.name, target_date, rounded, _dist, _tol,
+                        )
+                    else:
+                        reason = "harvester_live_obs_outside_bin"
 
     provenance = {
         "writer": "harvester_truth_writer_dr33",

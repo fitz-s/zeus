@@ -286,3 +286,65 @@ def test_open_shoulder_f_bin_c_city_hi_only_contained():
         f"Expected VERIFIED for open-shoulder hi-only after F->C conversion, "
         f"got {result['authority']!r}. reason={result['reason']!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# T10-T12: Integer-snap containment (fix #264)
+# ---------------------------------------------------------------------------
+
+def test_f_bin_integer_snap_47_48_obs_9_is_verified():
+    """ANTIBODY fix #264: [47,48]F -> {8,9}C integer set. obs=9 IS contained.
+
+    Float containment: 9 <= 8.888 -> False (BUG).
+    Integer-snap: floor(8.888+0.5)=9, {8,9}, 9 in {8,9} -> True (CORRECT).
+    """
+    conn = _make_world_conn()
+    city = _london_city()
+    result = _write_settlement_truth(
+        conn, city, "2025-01-25", 47.0, 48.0,
+        event_slug="london-high-2025-01-25",
+        obs_row=_obs_c(9.0),
+        pm_bin_unit="F",
+    )
+    assert result["authority"] == "VERIFIED", (
+        f"Expected VERIFIED: [47,48]F -> {{8,9}}C, obs=9 in set. "
+        f"Got {result['authority']!r}, reason={result['reason']!r}. (fix #264)"
+    )
+    assert result["winning_bin"] == "8-9\xb0C"
+
+
+def test_f_bin_integer_snap_40_41_obs_5_is_verified():
+    """REGRESSION fix #264: [40,41]F -> {4,5}C. obs=5 in set -> VERIFIED."""
+    conn = _make_world_conn()
+    city = _london_city()
+    result = _write_settlement_truth(
+        conn, city, "2025-04-06", 40.0, 41.0,
+        event_slug="london-high-2025-04-06",
+        obs_row=_obs_c(5.0),
+        pm_bin_unit="F",
+    )
+    assert result["authority"] == "VERIFIED", (
+        f"Expected VERIFIED: [40,41]F -> {{4,5}}C, obs=5 in set. "
+        f"Got {result['authority']!r}, reason={result['reason']!r}."
+    )
+    assert result["winning_bin"] == "4-5\xb0C"
+
+
+def test_f_bin_integer_snap_40_41_obs_6_is_outside():
+    """BOUNDARY fix #264: [40,41]F -> {4,5}C. obs=6 not in set -> QUARANTINED."""
+    conn = _make_world_conn()
+    city = _london_city()
+    result = _write_settlement_truth(
+        conn, city, "2025-04-07", 40.0, 41.0,
+        event_slug="london-high-2025-04-07",
+        obs_row=_obs_c(6.0),
+        pm_bin_unit="F",
+    )
+    assert result["authority"] == "QUARANTINED", (
+        f"Expected QUARANTINED: [40,41]F -> {{4,5}}C, obs=6 not in set. "
+        f"Got {result['authority']!r}."
+    )
+    assert result["reason"] in (
+        "harvester_source_disagreement_within_tolerance",
+        "harvester_live_obs_outside_bin",
+    )
