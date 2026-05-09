@@ -290,3 +290,41 @@ Critic follow-up:
 Open before closeout:
 - Run final critic-grade review for the S3 relationship and status-summary semantics.
 - If critic passes or returns only non-blocking residuals, commit this S3 slice.
+
+## 2026-05-09 - S4 Price/Orderbook Evidence Report Implemented, Pending Critic
+
+Scope:
+- S4 is a read/report surface only: price-only Gamma/scanner evidence vs executable-snapshot-backed CLOB/orderbook evidence.
+- Price evidence comes from `market_price_history`; executable backing is counted only when a full-linkage price row has a matching `executable_market_snapshots.snapshot_id`.
+- `token_price_log` is reported as an optional legacy count when present, not as executable venue authority.
+- No schema changes, executor behavior changes, engine changes, venue side effects, production DB writes, source routing changes, or live strategy changes were made.
+
+Reality evidence:
+- Local `state/zeus_trades.db` and `state/zeus-world.db` in this repair worktree remain zero-byte scratch DBs; current-data evidence could not show live price/orderbook table counts.
+- The missing-table condition is covered as derived `query_error`/source-error status rather than treated as a runtime fact.
+- Schema/code evidence was read from `src/state/schema/v2_schema.py`, `src/state/db.py`, `src/backtest/economics.py`, existing market-scanner provenance tests, and status-summary wiring.
+
+Topology:
+- Added `s4 price orderbook evidence report implementation` so natural S4 wording routes out of `generic`.
+- Regenerated `architecture/digest_profiles.py`.
+- Added route-regression coverage in `tests/test_digest_profile_matching.py`.
+- Final navigation result for the changed S4 file set: admitted, T3.
+
+Changes made:
+- Added `src/observability/price_evidence_report.py` with `build_price_evidence_report()`.
+- The report keeps `price_only`, `full_linkage_rows`, and `executable_snapshot_backed` separate, with `authority: derived_operator_visibility`.
+- Full-linkage rows without a matching executable snapshot are surfaced via `full_linkage_without_executable_snapshot` rather than counted as executable-backed evidence.
+- Wired the report into `src/observability/status_summary.py` as top-level `price_evidence`, outside `cycle`.
+- Added relationship tests proving price-only rows do not imply executable backing, full linkage requires a snapshot row, full linkage with a matching snapshot counts as executable-backed, mixed price-only/snapshot-backed rows keep modes separate, invalid full-linkage rows do not count as executable-backed, empty tables certify empty state, missing tables degrade to `query_error`, and missing snapshot orderbook columns degrade to `partial`.
+
+Verification:
+- Focused S4 suite (`tests/test_digest_profile_matching.py::test_s4_price_orderbook_evidence_report_routes_to_status_profile`, `tests/test_price_evidence_report.py`, and `tests/test_phase10b_dt_seam_cleanup.py -k 'price_evidence'`): 8 passed, 31 deselected before critic follow-up; 11 passed, 30 deselected after adding mixed-mode/invalid-full-linkage/partial-schema coverage.
+- Final focused/status sweep including S2/S3 neighboring status-summary regressions: 17 passed, 25 deselected.
+- `python3 -m py_compile src/observability/price_evidence_report.py src/observability/status_summary.py tests/test_price_evidence_report.py tests/test_phase10b_dt_seam_cleanup.py tests/test_digest_profile_matching.py architecture/digest_profiles.py`: OK.
+- `scripts/digest_profiles_export.py --check`: OK.
+- Final topology navigation for the S4 file set: admitted, T3.
+- VS Code diagnostics on touched source/test files: no errors.
+
+Open before closeout:
+- Critic verdict: PASS. Non-blocking suggestions were addressed by removing an unused incomplete test helper, preserving a schema-shaped status-summary fallback, and adding mixed-mode/invalid-full-linkage/partial-schema tests.
+- Run final focused gates and commit this S4 slice.

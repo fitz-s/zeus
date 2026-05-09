@@ -837,6 +837,170 @@ class TestRCPV2RowCountSensor:
         assert status["calibration_serving"]["authority"] == "derived_operator_visibility"
         assert "calibration_serving" not in status["cycle"]
 
+    def test_status_summary_exposes_s4_price_evidence(self, tmp_path, monkeypatch):
+        """S4 price evidence visibility stays top-level derived telemetry."""
+        from src.observability import status_summary as status_summary_module
+
+        status_path = tmp_path / "status_summary.json"
+        positions_path = tmp_path / "positions.json"
+        positions_path.write_text(json.dumps({"updated_at": "2026-05-09T00:00:00+00:00", "positions": []}))
+        price_evidence = {
+            "schema_version": 1,
+            "status": "observed",
+            "authority": "derived_operator_visibility",
+            "counts": {
+                "market_price_history_rows": 2,
+                "token_price_log_rows": 0,
+                "executable_market_snapshots_rows": 1,
+                "executable_orderbook_snapshot_rows": 1,
+                "invalid_full_linkage_rows": 0,
+                "full_linkage_without_snapshot_rows": 0,
+            },
+            "modes": {
+                "price_only": {"row_count": 1, "token_count": 1, "source_counts": {"GAMMA_SCANNER": 1}},
+                "full_linkage_rows": {"row_count": 1, "token_count": 1, "source_counts": {"CLOB_ORDERBOOK": 1}},
+                "executable_snapshot_backed": {"row_count": 1, "token_count": 1, "source_counts": {"CLOB_ORDERBOOK": 1}},
+            },
+            "blockers": [],
+            "source_errors": [],
+        }
+
+        class DummyConn:
+            def close(self):
+                return None
+
+        monkeypatch.setattr(status_summary_module, "STATUS_PATH", status_path)
+        monkeypatch.setattr(status_summary_module, "LEGACY_POSITIONS_PATH", positions_path)
+        monkeypatch.setattr(status_summary_module, "_get_risk_level", lambda: "GREEN")
+        monkeypatch.setattr(status_summary_module, "_get_risk_details", lambda: {})
+        monkeypatch.setattr(status_summary_module, "get_trade_connection_with_world", lambda: DummyConn())
+        monkeypatch.setattr(
+            status_summary_module,
+            "query_position_current_status_view",
+            lambda conn: {
+                "status": "empty",
+                "positions": [],
+                "open_positions": 0,
+                "total_exposure_usd": 0.0,
+                "unrealized_pnl": 0.0,
+                "strategy_open_counts": {},
+                "chain_state_counts": {},
+                "exit_state_counts": {},
+                "unverified_entries": 0,
+                "day0_positions": 0,
+            },
+        )
+        monkeypatch.setattr(
+            status_summary_module,
+            "query_strategy_health_snapshot",
+            lambda conn, now=None: {"status": "fresh", "by_strategy": {}, "stale_strategy_keys": []},
+        )
+        monkeypatch.setattr(status_summary_module, "query_execution_event_summary", lambda conn, not_before=None: {"overall": {}})
+        monkeypatch.setattr(status_summary_module, "query_learning_surface_summary", lambda conn, not_before=None: {"by_strategy": {}})
+        monkeypatch.setattr(status_summary_module, "query_lifecycle_funnel_report", lambda conn, not_before=None: self._empty_lifecycle_funnel())
+        monkeypatch.setattr(status_summary_module, "build_calibration_serving_status", lambda conn: self._empty_calibration_serving())
+        monkeypatch.setattr(status_summary_module, "build_price_evidence_report", lambda conn: price_evidence)
+        monkeypatch.setattr(status_summary_module, "query_no_trade_cases", lambda conn, hours=24: [])
+        monkeypatch.setattr(status_summary_module, "_get_execution_capability_status", lambda: {})
+        monkeypatch.setattr(status_summary_module, "is_entries_paused", lambda: False)
+        monkeypatch.setattr(status_summary_module, "get_entries_pause_source", lambda: None)
+        monkeypatch.setattr(status_summary_module, "get_entries_pause_reason", lambda: None)
+        monkeypatch.setattr(status_summary_module, "get_edge_threshold_multiplier", lambda: 1.0)
+        monkeypatch.setattr(status_summary_module, "strategy_gates", lambda: {})
+        monkeypatch.setattr(status_summary_module, "recommended_autosafe_commands_from_status", lambda status: [])
+        monkeypatch.setattr(status_summary_module, "recommended_commands_from_status", lambda status, include_review_required=True: [])
+        monkeypatch.setattr(status_summary_module, "review_required_commands_from_status", lambda status: [])
+
+        status_summary_module.write_status({"mode": "opening_hunt", "risk_level": "GREEN", "wallet_balance_usd": 211.37})
+        status = json.loads(status_path.read_text())
+
+        assert status["price_evidence"] == price_evidence
+        assert status["price_evidence"]["authority"] == "derived_operator_visibility"
+        assert "price_evidence" not in status["cycle"]
+
+    @pytest.mark.parametrize(
+        ("evidence_status", "expected_issue"),
+        [
+            ("query_error", "price_evidence_summary_unavailable"),
+            ("partial", "price_evidence_summary_partial"),
+        ],
+    )
+    def test_status_summary_surfaces_price_evidence_degradation(
+        self,
+        tmp_path,
+        monkeypatch,
+        evidence_status,
+        expected_issue,
+    ):
+        """S4 price evidence degradation is visible as infrastructure telemetry."""
+        from src.observability import status_summary as status_summary_module
+
+        status_path = tmp_path / "status_summary.json"
+        positions_path = tmp_path / "positions.json"
+        positions_path.write_text(json.dumps({"updated_at": "2026-05-09T00:00:00+00:00", "positions": []}))
+        price_evidence = {
+            "schema_version": 1,
+            "status": evidence_status,
+            "authority": "derived_operator_visibility",
+            "counts": {},
+            "modes": {},
+            "blockers": [],
+            "source_errors": [{"source": "market_price_history", "error": "missing_table"}],
+        }
+
+        class DummyConn:
+            def close(self):
+                return None
+
+        monkeypatch.setattr(status_summary_module, "STATUS_PATH", status_path)
+        monkeypatch.setattr(status_summary_module, "LEGACY_POSITIONS_PATH", positions_path)
+        monkeypatch.setattr(status_summary_module, "_get_risk_level", lambda: "GREEN")
+        monkeypatch.setattr(status_summary_module, "_get_risk_details", lambda: {})
+        monkeypatch.setattr(status_summary_module, "get_trade_connection_with_world", lambda: DummyConn())
+        monkeypatch.setattr(
+            status_summary_module,
+            "query_position_current_status_view",
+            lambda conn: {
+                "status": "ok",
+                "positions": [],
+                "open_positions": 0,
+                "total_exposure_usd": 0.0,
+                "unrealized_pnl": 0.0,
+                "strategy_open_counts": {},
+                "chain_state_counts": {},
+                "exit_state_counts": {},
+                "unverified_entries": 0,
+                "day0_positions": 0,
+            },
+        )
+        monkeypatch.setattr(
+            status_summary_module,
+            "query_strategy_health_snapshot",
+            lambda conn, now=None: {"status": "fresh", "by_strategy": {}, "stale_strategy_keys": []},
+        )
+        monkeypatch.setattr(status_summary_module, "query_execution_event_summary", lambda conn, not_before=None: {"overall": {}})
+        monkeypatch.setattr(status_summary_module, "query_learning_surface_summary", lambda conn, not_before=None: {"by_strategy": {}})
+        monkeypatch.setattr(status_summary_module, "query_lifecycle_funnel_report", lambda conn, not_before=None: self._empty_lifecycle_funnel())
+        monkeypatch.setattr(status_summary_module, "build_calibration_serving_status", lambda conn: self._empty_calibration_serving())
+        monkeypatch.setattr(status_summary_module, "build_price_evidence_report", lambda conn: price_evidence)
+        monkeypatch.setattr(status_summary_module, "query_no_trade_cases", lambda conn, hours=24: [])
+        monkeypatch.setattr(status_summary_module, "_get_execution_capability_status", lambda: {})
+        monkeypatch.setattr(status_summary_module, "is_entries_paused", lambda: False)
+        monkeypatch.setattr(status_summary_module, "get_entries_pause_source", lambda: None)
+        monkeypatch.setattr(status_summary_module, "get_entries_pause_reason", lambda: None)
+        monkeypatch.setattr(status_summary_module, "get_edge_threshold_multiplier", lambda: 1.0)
+        monkeypatch.setattr(status_summary_module, "strategy_gates", lambda: {})
+        monkeypatch.setattr(status_summary_module, "recommended_autosafe_commands_from_status", lambda status: [])
+        monkeypatch.setattr(status_summary_module, "recommended_commands_from_status", lambda status, include_review_required=True: [])
+        monkeypatch.setattr(status_summary_module, "review_required_commands_from_status", lambda status: [])
+
+        status_summary_module.write_status({"mode": "opening_hunt", "risk_level": "GREEN", "wallet_balance_usd": 211.37})
+        status = json.loads(status_path.read_text())
+
+        assert status["price_evidence"] == price_evidence
+        assert status["risk"]["infrastructure_level"] == "YELLOW"
+        assert expected_issue in status["risk"]["infrastructure_issues"]
+
     @pytest.mark.parametrize(
         ("serving_status", "expected_issue"),
         [
