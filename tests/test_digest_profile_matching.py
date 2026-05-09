@@ -835,6 +835,26 @@ def test_s3_calibration_serving_status_routes_to_status_profile():
     assert "tests/test_phase10b_dt_seam_cleanup.py" in admitted
 
 
+def test_s4_price_orderbook_evidence_report_routes_to_status_profile():
+    digest = build_digest(
+        "S4 price/orderbook evidence report price-only vs executable-snapshot-backed evidence modes derived price evidence visibility",
+        [
+            "src/observability/price_evidence_report.py",
+            "src/observability/status_summary.py",
+            "tests/test_price_evidence_report.py",
+            "tests/test_phase10b_dt_seam_cleanup.py",
+        ],
+    )
+
+    assert digest["profile"] == "s4 price orderbook evidence report implementation"
+    assert digest["admission"]["status"] == "admitted"
+    admitted = set(digest["admission"]["admitted_files"])
+    assert "src/observability/price_evidence_report.py" in admitted
+    assert "src/observability/status_summary.py" in admitted
+    assert "tests/test_price_evidence_report.py" in admitted
+    assert "tests/test_phase10b_dt_seam_cleanup.py" in admitted
+
+
 def test_paris_source_boundary_evidence_routes_to_docs_only_profile():
     digest = build_digest(
         "Paris source-boundary evidence recording LFPG LFPB no config edit "

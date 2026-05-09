@@ -22,6 +22,10 @@ from src.control.control_plane import (
 )
 from src.control.gate_decision import reason_refuted
 from src.observability.calibration_serving_status import build_calibration_serving_status
+from src.observability.price_evidence_report import (
+    build_price_evidence_error_report,
+    build_price_evidence_report,
+)
 from src.state.decision_chain import query_learning_surface_summary, query_lifecycle_funnel_report
 from src.state.db import (
     get_trade_connection_with_world,
@@ -756,6 +760,7 @@ def write_status(cycle_summary: dict = None) -> None:
         },
         "execution_capability": _get_execution_capability_status(),
         "calibration_serving": {},
+        "price_evidence": {},
         "learning": {},
         "lifecycle_funnel": {},
         "no_trade": {},
@@ -879,6 +884,7 @@ def write_status(cycle_summary: dict = None) -> None:
             conn,
             not_before=current_regime_started_at or None,
         )
+        status["price_evidence"] = build_price_evidence_report(conn)
         recent_no_trades = query_no_trade_cases(conn, hours=24)
         stage_counts: dict[str, int] = {}
         for case in recent_no_trades:
@@ -900,6 +906,10 @@ def write_status(cycle_summary: dict = None) -> None:
             "authority": "derived_operator_visibility",
             "error": "lifecycle_funnel_summary_unavailable",
         }
+        status["price_evidence"] = build_price_evidence_error_report(
+            "status_summary",
+            "price_evidence_summary_unavailable",
+        )
         status["no_trade"] = {"error": "no_trade_summary_unavailable"}
     finally:
         if conn is not None:
@@ -933,6 +943,11 @@ def write_status(cycle_summary: dict = None) -> None:
         consistency_issues.append("lifecycle_funnel_summary_unavailable")
     elif lifecycle_funnel_status == "partial":
         consistency_issues.append("lifecycle_funnel_summary_partial")
+    price_evidence_status = str((status.get("price_evidence", {}) or {}).get("status") or "")
+    if price_evidence_status == "query_error":
+        consistency_issues.append("price_evidence_summary_unavailable")
+    elif price_evidence_status == "partial":
+        consistency_issues.append("price_evidence_summary_partial")
     if status.get("no_trade", {}).get("error"):
         consistency_issues.append("no_trade_summary_unavailable")
     monitor_chain_missing = int((cycle_summary or {}).get("monitor_chain_missing", 0) or 0)
