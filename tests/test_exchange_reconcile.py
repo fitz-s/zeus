@@ -18,6 +18,7 @@ from src.venue.polymarket_v2_adapter import OrderState, PositionFact, TradeFact
 
 NOW = datetime(2026, 4, 27, 19, 30, tzinfo=timezone.utc)
 YES_TOKEN = "yes-token-m5"
+_DEFAULT_FILL_PRICE = object()
 
 
 @pytest.fixture
@@ -96,6 +97,9 @@ def trade(
     size="5",
     price="0.50",
     status="MATCHED",
+    include_price: bool = True,
+    include_fill_price: bool = True,
+    fill_price=_DEFAULT_FILL_PRICE,
     **raw,
 ):
     payload = {
@@ -104,10 +108,13 @@ def trade(
         "orderID": order_id,
         "order_id": order_id,
         "size": size,
-        "price": price,
         "status": status,
         **raw,
     }
+    if include_price:
+        payload["price"] = price
+    if include_fill_price:
+        payload["fill_price"] = price if fill_price is _DEFAULT_FILL_PRICE else fill_price
     return TradeFact(raw=payload)
 
 
@@ -310,7 +317,16 @@ def append_resting_order_fact(c, *, command_id="cmd-m5", venue_order_id="ord-m5"
     )
 
 
-def append_trade_fact(c, *, command_id="cmd-m5", venue_order_id="ord-m5", token_id=YES_TOKEN, trade_id="trade-local", size="10"):
+def append_trade_fact(
+    c,
+    *,
+    command_id="cmd-m5",
+    venue_order_id="ord-m5",
+    token_id=YES_TOKEN,
+    trade_id="trade-local",
+    size="10",
+    state="CONFIRMED",
+):
     from src.state.venue_command_repo import append_trade_fact as append
 
     append(
@@ -318,13 +334,18 @@ def append_trade_fact(c, *, command_id="cmd-m5", venue_order_id="ord-m5", token_
         trade_id=trade_id,
         venue_order_id=venue_order_id,
         command_id=command_id,
-        state="CONFIRMED",
+        state=state,
         filled_size=size,
         fill_price="0.50",
         source="REST",
         observed_at=NOW,
-        raw_payload_hash=hashlib.sha256(f"{trade_id}:{token_id}:{size}".encode()).hexdigest(),
-        raw_payload_json={"trade_id": trade_id, "order_id": venue_order_id, "size": size},
+        raw_payload_hash=hashlib.sha256(f"{trade_id}:{token_id}:{size}:{state}".encode()).hexdigest(),
+        raw_payload_json={
+            "trade_id": trade_id,
+            "order_id": venue_order_id,
+            "size": size,
+            "state": state,
+        },
     )
 
 
@@ -743,8 +764,11 @@ def test_trade_lifecycle_forward_transition_requires_stable_fill_economics(conn)
         observed_at=NOW + timedelta(seconds=1),
     )
 
-    assert [finding.kind for finding in result] == ["unrecorded_trade"]
+    assert [finding.kind for finding in result] == ["unrecorded_trade", "position_drift"]
     assert "exchange_trade_lifecycle_regression_or_economic_drift" in result[0].evidence_json
+    assert '"journal_size":"0"' in result[1].evidence_json
+    assert '"optimistic_journal_size":"5"' in result[1].evidence_json
+    assert '"reason":"exchange_position_differs_from_confirmed_trade_facts"' in result[1].evidence_json
     assert conn.execute(
         "SELECT COUNT(*) FROM venue_trade_facts WHERE trade_id = 'trade-economic-drift'"
     ).fetchone()[0] == 1
@@ -783,6 +807,68 @@ def test_linked_confirmed_trade_missing_fill_price_becomes_finding_not_fact(conn
     assert conn.execute("SELECT COUNT(*) FROM venue_trade_facts").fetchone()[0] == 0
     assert event_types(conn) == ["INTENT_CREATED", "SUBMIT_REQUESTED", "SUBMIT_ACKED"]
     assert conn.execute("SELECT state FROM venue_commands WHERE command_id = 'cmd-m5'").fetchone()["state"] == "ACKED"
+
+
+def test_linked_confirmed_trade_generic_price_is_not_fill_authority(conn):
+    from src.execution.exchange_reconcile import run_reconcile_sweep
+
+    seed_command(conn, size=10)
+
+    result = run_reconcile_sweep(
+        FakeM5Adapter(
+            trades=[
+                trade(
+                    trade_id="trade-confirmed-generic-price",
+                    order_id="ord-m5",
+                    size="10",
+                    price="0.51",
+                    status="CONFIRMED",
+                    include_fill_price=False,
+                )
+            ]
+        ),
+        conn,
+        context="periodic",
+        observed_at=NOW,
+    )
+
+    assert [finding.kind for finding in result] == ["unrecorded_trade"]
+    assert "exchange_trade_missing_fill_economics" in result[0].evidence_json
+    assert '"fill_price"' in result[0].evidence_json
+    assert conn.execute("SELECT COUNT(*) FROM venue_trade_facts").fetchone()[0] == 0
+    assert event_types(conn) == ["INTENT_CREATED", "SUBMIT_REQUESTED", "SUBMIT_ACKED"]
+    assert conn.execute("SELECT state FROM venue_commands WHERE command_id = 'cmd-m5'").fetchone()["state"] == "ACKED"
+
+
+def test_linked_confirmed_trade_explicit_fill_price_records_fill_authority(conn):
+    from src.execution.exchange_reconcile import run_reconcile_sweep
+
+    seed_command(conn, size=10)
+
+    result = run_reconcile_sweep(
+        FakeM5Adapter(
+            trades=[
+                trade(
+                    trade_id="trade-confirmed-explicit-fill",
+                    order_id="ord-m5",
+                    size="10",
+                    price="0.49",
+                    status="CONFIRMED",
+                    fill_price="0.51",
+                )
+            ]
+        ),
+        conn,
+        context="periodic",
+        observed_at=NOW,
+    )
+
+    assert result == []
+    assert conn.execute(
+        "SELECT state, filled_size, fill_price FROM venue_trade_facts"
+    ).fetchone()[:] == ("CONFIRMED", "10", "0.51")
+    assert event_types(conn)[-1] == "FILL_CONFIRMED"
+    assert conn.execute("SELECT state FROM venue_commands WHERE command_id = 'cmd-m5'").fetchone()["state"] == "FILLED"
 
 
 def test_linked_confirmed_trade_missing_venue_trade_id_becomes_finding_not_finality(conn):
@@ -1051,6 +1137,45 @@ def test_position_drift_finding_distinguishes_legitimate_from_real(conn):
     assert [finding.subject_id for finding in position_findings] == [drift_token]
     assert "journal_size" in position_findings[0].evidence_json
     assert "exchange_size" in position_findings[0].evidence_json
+
+
+def test_position_drift_compares_exchange_to_confirmed_not_optimistic(conn):
+    from src.execution.exchange_reconcile import run_reconcile_sweep
+
+    optimistic_token = "optimistic-position-token"
+    seed_command(
+        conn,
+        command_id="cmd-optimistic",
+        venue_order_id="ord-optimistic",
+        token_id=optimistic_token,
+    )
+    append_trade_fact(
+        conn,
+        command_id="cmd-optimistic",
+        venue_order_id="ord-optimistic",
+        token_id=optimistic_token,
+        trade_id="trade-optimistic",
+        size="10",
+        state="MATCHED",
+    )
+
+    result = run_reconcile_sweep(
+        FakeM5Adapter(positions=[position(token_id=optimistic_token, size="10")]),
+        conn,
+        context="periodic",
+        observed_at=NOW,
+    )
+
+    position_findings = [finding for finding in result if finding.kind == "position_drift"]
+    assert [finding.subject_id for finding in position_findings] == [optimistic_token]
+    evidence = position_findings[0].evidence_json
+    assert '"exchange_size":"10"' in evidence
+    assert '"journal_size":"0"' in evidence
+    assert '"confirmed_journal_size":"0"' in evidence
+    assert '"optimistic_journal_size":"10"' in evidence
+    assert '"journal_evidence_class":"confirmed_trade_facts"' in evidence
+    assert '"optimistic_evidence_class":"matched_or_mined_trade_facts"' in evidence
+    assert '"reason":"exchange_position_differs_from_confirmed_trade_facts"' in evidence
 
 
 def test_position_journal_ignores_confirmed_trade_without_fill_economics(conn):

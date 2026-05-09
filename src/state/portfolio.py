@@ -248,6 +248,42 @@ FILL_AUTHORITY_RANK = {
 }
 
 
+def _finite_float_or_zero(value: object) -> float:
+    try:
+        result = float(value or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+    return result if math.isfinite(result) else 0.0
+
+
+def fill_authority_effective_open_cost_basis(
+    *,
+    current_open_cost: object,
+    current_open_shares: object,
+    entry_fill_cost: object,
+    entry_fill_shares: object,
+) -> float:
+    """Derive current open cost from fill authority without capping real fills.
+
+    A lower current/projection cost is authoritative only when the current open
+    share count proves that part of the filled entry slice has been sold.
+    Otherwise the venue-confirmed fill cost remains the open cost basis.
+    """
+
+    fill_cost = _finite_float_or_zero(entry_fill_cost)
+    fill_shares = _finite_float_or_zero(entry_fill_shares)
+    open_shares = _finite_float_or_zero(current_open_shares)
+    open_cost = _finite_float_or_zero(current_open_cost)
+
+    if fill_cost <= 0.0:
+        return open_cost if open_cost > 0.0 else 0.0
+    if fill_shares <= 0.0 or open_shares <= 0.0:
+        return fill_cost
+    if open_shares < fill_shares:
+        return fill_cost * (open_shares / fill_shares)
+    return fill_cost
+
+
 @dataclass
 class Position:
     """A held trading position — stateful entity that owns its exit logic.
@@ -410,7 +446,17 @@ class Position:
 
 
     @property
+    def is_pending_entry_without_fill_authority(self) -> bool:
+        state_value = self.state.value if isinstance(self.state, LifecycleState) else str(self.state)
+        return (
+            state_value == LifecycleState.PENDING_TRACKED.value
+            and not self.has_fill_economics_authority
+        )
+
+    @property
     def effective_shares(self) -> float:
+        if self.is_pending_entry_without_fill_authority:
+            return 0.0
         if self.has_fill_economics_authority:
             current_open_shares = float(self.shares or 0.0)
             entry_fill_shares = float(self.shares_filled or 0.0)
@@ -425,12 +471,15 @@ class Position:
 
     @property
     def effective_cost_basis_usd(self) -> float:
+        if self.is_pending_entry_without_fill_authority:
+            return 0.0
         if self.has_fill_economics_authority:
-            current_open_cost = float(self.cost_basis_usd or 0.0)
-            entry_fill_cost = float(self.filled_cost_basis_usd or 0.0)
-            if current_open_cost > 0:
-                return min(current_open_cost, entry_fill_cost)
-            return entry_fill_cost
+            return fill_authority_effective_open_cost_basis(
+                current_open_cost=self.cost_basis_usd,
+                current_open_shares=self.shares,
+                entry_fill_cost=self.filled_cost_basis_usd,
+                entry_fill_shares=self.shares_filled,
+            )
         return self.cost_basis_usd if self.cost_basis_usd > 0 else self.size_usd
 
     @property
@@ -1577,7 +1626,7 @@ def add_position(state: PortfolioState, pos: Position) -> None:
     """Add a position. Dedup: merge if same token+direction already open."""
     if pos.shares <= 0 and pos.entry_price > 0:
         pos.shares = pos.size_usd / pos.entry_price
-    if pos.cost_basis_usd <= 0:
+    if pos.cost_basis_usd <= 0 and not pos.is_pending_entry_without_fill_authority:
         pos.cost_basis_usd = pos.size_usd
 
     for existing in state.positions:

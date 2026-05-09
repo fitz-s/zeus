@@ -687,3 +687,22 @@ entries:
       persistence, loader, reader, and relationship-test slices together while
       explicitly blocking live DB mutation, backfill, report publication,
       settlement harvest, and venue/account side effects.
+
+  - id: P38-2026-05-08
+    title: "Edit-time capability gates need dry semantic classification"
+    raised_at: "2026-05-08"
+    raised_by: "object-meaning-invariance-waves41-42"
+    status: proposed
+    detail_doc: "docs/operations/task_2026-05-08_object_invariance_wave42/PLAN.md"
+    notes: >
+      Waves 41-42 were no-live-side-effect repairs to payload interpretation
+      and fail-closed settlement-economics guards, but edit-time advisory gates
+      classified the touched execution/harvester files as on-chain mutation or
+      settlement truth rewrite surfaces before considering the actual diff.
+      Planning-lock and focused tests handled the real safety boundary, but the
+      edit-time signal was noisy. Future topology maintenance should add a dry
+      semantic classification layer for capability gates: distinguish code that
+      calls venue/DB mutation paths from code that only tightens preconditions,
+      parsing, or tests around those paths, while preserving hard blocks for
+      live/prod data mutation, migrations, settlement harvest, redemption, and
+      venue/account side effects.

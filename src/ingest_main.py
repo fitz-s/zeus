@@ -574,7 +574,6 @@ def _etl_recalibrate_body():
     for script in [
         "etl_diurnal_curves.py",
         "etl_temp_persistence.py",
-        "etl_hourly_observations.py",
     ]:
         script_path = scripts_dir / script
         if script_path.exists():

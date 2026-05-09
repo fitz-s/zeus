@@ -1,7 +1,7 @@
 """Runtime guard and live-cycle wiring tests."""
-# Lifecycle: created=2026-04-28; last_reviewed=2026-05-07; last_reused=2026-05-07
+# Lifecycle: created=2026-04-28; last_reviewed=2026-05-09; last_reused=2026-05-09
 # Created: 2026-04-28
-# Last reused/audited: 2026-05-07
+# Last reused/audited: 2026-05-09
 # Authority basis: task_2026-04-28_contamination_remediation Batch G; Phase 1B ENS snapshot persistence; Phase 1D forecast source policy; PR #56 MarketPhaseEvidence sidecar propagation; Wave26 explicit position env authority.
 # Purpose: Lock runtime guard and live-cycle wiring contracts.
 # Reuse: Run for runtime guard, live-only cleanup, and cycle wiring changes.
@@ -28,11 +28,16 @@ import src.engine.evaluator as evaluator_module
 import src.execution.exit_lifecycle as exit_lifecycle_module
 from src.backtest.economics import check_economics_readiness
 from src.data.observation_client import Day0ObservationContext
-from src.config import City, settings
+from src.config import City, calibration_batch_rebuild_n_mc, ensemble_n_mc, settings
 from src.control import control_plane as control_plane_module
 from src.data.ecmwf_open_data import DATA_VERSION, collect_open_ens_cycle
+from src.data.calibration_transfer_policy import (
+    CANONICAL_CALIBRATION_PAIR_BIN_SOURCE,
+    _rebuild_complete_sentinel_key_for_transfer_evidence,
+)
 from src.data.openmeteo_quota import DAILY_LIMIT, HARD_THRESHOLD, OpenMeteoQuotaTracker
 from src.contracts import EdgeContext, EntryMethod, SettlementSemantics
+from src.contracts.decision_evidence import DecisionEvidence
 from src.engine.discovery_mode import DiscoveryMode
 from src.engine.time_context import lead_days_to_date_start
 from src.engine.evaluator import EdgeDecision, MarketCandidate
@@ -45,6 +50,7 @@ from src.state.schema.v2_schema import apply_v2_schema
 from src.state.decision_chain import CycleArtifact, NoTradeCase, query_learning_surface_summary, store_artifact
 from src.state.chain_reconciliation import ChainPosition, reconcile
 from src.state.portfolio import (
+    CORRECTED_EXECUTABLE_PRICING_SEMANTICS_VERSION,
     DeprecatedStateFileError,
     ENTRY_ECONOMICS_AVG_FILL_PRICE,
     ENTRY_ECONOMICS_SUBMITTED_LIMIT,
@@ -55,6 +61,7 @@ from src.state.portfolio import (
     FILL_AUTHORITY_VENUE_CONFIRMED_PARTIAL,
     PortfolioState,
     Position,
+    add_position,
     city_exposure_for_bankroll,
     cluster_exposure_for_bankroll,
     has_same_city_range_open,
@@ -642,6 +649,7 @@ def _insert_executable_snapshot(
     ask_size: str = "100",
     orderbook_depth: dict | None = None,
     captured_at: datetime | None = None,
+    fee_details: dict | None = None,
 ) -> None:
     from src.contracts.executable_market_snapshot_v2 import ExecutableMarketSnapshotV2
     from src.state.snapshot_repo import insert_snapshot
@@ -670,7 +678,7 @@ def _insert_executable_snapshot(
             sports_start_at=None,
             min_tick_size=Decimal("0.01"),
             min_order_size=Decimal("5"),
-            fee_details={"source": "test", "fee_rate_bps": 0},
+            fee_details=fee_details or {"source": "test", "fee_rate_bps": 0},
             token_map_raw={"YES": yes_token_id, "NO": no_token_id},
             rfqe=None,
             neg_risk=False,
@@ -2522,6 +2530,7 @@ def test_executable_snapshot_repricing_updates_edge_and_size(tmp_path):
         no_token_id="no1",
         top_bid="0.20",
         top_ask="0.30",
+        fee_details={"feeRate": "0.03", "source": "test_snapshot_taker_fee"},
     )
     edge = _edge()
     decision = EdgeDecision(
@@ -2548,7 +2557,7 @@ def test_executable_snapshot_repricing_updates_edge_and_size(tmp_path):
         edge_context_json=json.dumps({"forward_edge": edge.forward_edge, "p_posterior": edge.p_posterior}),
         sizing_bankroll=100.0,
         kelly_multiplier_used=0.25,
-        execution_fee_rate=0.0,
+        execution_fee_rate=0.03,
     )
 
     best_ask = cycle_runtime._reprice_decision_from_executable_snapshot(
@@ -2564,7 +2573,8 @@ def test_executable_snapshot_repricing_updates_edge_and_size(tmp_path):
     assert decision.edge.edge == pytest.approx(0.22)
     assert decision.edge_context.forward_edge == pytest.approx(0.22)
     assert json.loads(decision.edge_context_json)["forward_edge"] == pytest.approx(0.22)
-    assert decision.size_usd == pytest.approx((0.47 - 0.25) / (1 - 0.25) * 0.25 * 100.0)
+    passive_maker_size = (0.47 - 0.25) / (1 - 0.25) * 0.25 * 100.0
+    assert decision.size_usd == pytest.approx(passive_maker_size)
     assert "executable_snapshot_repriced" in decision.applied_validations
     assert "corrected_pricing_shadow_built" in decision.applied_validations
     reprice = decision.tokens["executable_snapshot_reprice"]
@@ -2586,6 +2596,9 @@ def test_executable_snapshot_repricing_updates_edge_and_size(tmp_path):
     assert shadow["snapshot_hash"] != reprice["raw_orderbook_hash"]
     assert shadow["candidate_final_limit_price"] == "0.23"
     assert shadow["candidate_fee_adjusted_execution_price"] == "0.23"
+    assert float(shadow["candidate_size_usd"]) == pytest.approx(passive_maker_size)
+    assert shadow["fee_rate"] == "0"
+    assert shadow["fee_source"] == "post_only_maker_fee_exempt:test_snapshot_taker_fee"
     assert shadow["sweep_attempted"] is False
     assert shadow["sweep_depth_status"] == "NOT_MARKETABLE_PASSIVE_LIMIT"
     assert shadow["unsupported_reason"] == "PASSIVE_LIMIT_REQUIRES_POST_ONLY_OR_MAKER_ONLY_SUBMIT"
@@ -2638,6 +2651,7 @@ def test_executable_snapshot_repricing_can_cross_ask_inside_slippage_budget(tmp_
         no_token_id="no1",
         top_bid="0.40",
         top_ask="0.41",
+        fee_details={"feeRate": "0.03", "source": "test_snapshot_taker_fee"},
     )
     edge = _edge()
     decision = EdgeDecision(
@@ -2650,7 +2664,7 @@ def test_executable_snapshot_repricing_can_cross_ask_inside_slippage_budget(tmp_
         decision_snapshot_id="decision-snap-tight-ask",
         sizing_bankroll=100.0,
         kelly_multiplier_used=0.25,
-        execution_fee_rate=0.0,
+        execution_fee_rate=0.03,
     )
 
     best_ask = cycle_runtime._reprice_decision_from_executable_snapshot(
@@ -2662,13 +2676,21 @@ def test_executable_snapshot_repricing_can_cross_ask_inside_slippage_budget(tmp_
 
     assert best_ask == pytest.approx(0.41)
     assert decision.edge.vwmp == pytest.approx(0.405)
-    assert decision.size_usd == pytest.approx((0.47 - 0.41) / (1 - 0.41) * 0.25 * 100.0)
+    taker_fee_price = 0.41 + 0.03 * 0.41 * (1 - 0.41)
+    assert decision.size_usd == pytest.approx(
+        (0.47 - taker_fee_price) / (1 - taker_fee_price) * 0.25 * 100.0
+    )
     reprice = decision.tokens["executable_snapshot_reprice"]
     assert reprice["best_ask_slippage_bps"] == pytest.approx((0.41 - 0.405) / 0.405 * 10_000.0)
     assert reprice["best_ask_blocked_by_slippage"] is False
     assert reprice["final_limit_price"] == pytest.approx(0.41)
     assert reprice["corrected_pricing_shadow"]["candidate_final_limit_price"] == "0.41"
-    assert reprice["corrected_pricing_shadow"]["candidate_fee_adjusted_execution_price"] == "0.41"
+    assert (
+        reprice["corrected_pricing_shadow"]["candidate_fee_adjusted_execution_price"]
+        == "0.417257"
+    )
+    assert reprice["corrected_pricing_shadow"]["fee_rate"] == "0.03"
+    assert reprice["corrected_pricing_shadow"]["fee_source"] == "test_snapshot_taker_fee"
     assert reprice["corrected_pricing_shadow"]["sweep_attempted"] is True
     assert reprice["corrected_pricing_shadow"]["sweep_depth_status"] == "PASS"
     assert reprice["corrected_pricing_shadow"]["sweep_book_side"] == "asks"
@@ -4414,6 +4436,75 @@ def test_day0_monitor_refresh_rejects_stale_observation_before_fetch(monkeypatch
     assert any("stale" in item for item in applied)
 
 
+def test_day0_monitor_refresh_degrades_on_malformed_solar_daily_rootpage(monkeypatch):
+    from src.engine import monitor_refresh
+
+    position = types.SimpleNamespace(
+        temperature_metric="high",
+        bin_label="40-41°F",
+        unit="F",
+        market_id="m-day0",
+        direction="buy_yes",
+        p_posterior=0.31,
+        selected_method="day0_observation",
+        entry_method="day0_observation",
+    )
+    city = types.SimpleNamespace(
+        name="NYC",
+        lat=40.7772,
+        timezone="America/New_York",
+        cluster="NYC",
+        settlement_unit="F",
+        settlement_source_type="wu_icao",
+        wu_station="KLGA",
+    )
+    monkeypatch.setattr(
+        monitor_refresh,
+        "_fetch_day0_observation",
+        lambda *args, **kwargs: types.SimpleNamespace(
+            high_so_far=41.0,
+            low_so_far=39.0,
+            current_temp=40.5,
+            source="wu_api",
+            observation_time=datetime.now(timezone.utc).isoformat(),
+        ),
+    )
+    monkeypatch.setattr(
+        monitor_refresh,
+        "fetch_ensemble",
+        lambda *args, **kwargs: {
+            "members_hourly": np.ones((51, 24)),
+            "times": ["2026-04-01T00:00:00Z"] * 24,
+            "fetch_time": datetime(2026, 4, 1, 12, tzinfo=timezone.utc),
+            "source_id": "openmeteo_ensemble_ecmwf_ifs025",
+            "forecast_source_role": "monitor_fallback",
+            "degradation_level": "DEGRADED_FORECAST_FALLBACK",
+            "n_members": 51,
+        },
+    )
+    monkeypatch.setattr(monitor_refresh, "validate_ensemble", lambda result: True)
+    monkeypatch.setattr(
+        "src.state.db.get_world_connection",
+        lambda: (_ for _ in ()).throw(
+            sqlite3.DatabaseError(
+                "malformed database schema (solar_daily) - invalid rootpage"
+            )
+        ),
+    )
+
+    posterior, applied = monitor_refresh._refresh_day0_observation(
+        position=position,
+        current_p_market=0.50,
+        conn=None,
+        city=city,
+        target_d=date(2026, 4, 1),
+    )
+
+    assert posterior == pytest.approx(position.p_posterior)
+    assert applied == ["day0_observation", "fresh_ens_fetch", "missing_solar_context"]
+    assert getattr(position, monitor_refresh._MONITOR_PROBABILITY_FRESH_ATTR) is False
+
+
 def test_evaluator_uses_configured_primary_and_crosscheck_models(monkeypatch):
     monkeypatch.setattr(evaluator_module, "get_mode", lambda: "test")
     monkeypatch.setitem(settings["ensemble"], "primary", "tigge")
@@ -4778,6 +4869,7 @@ def _insert_runtime_transfer_sigma_row(
     source_model_param_C: float = 0.0,
     insert_target_pairs: bool = True,
     target_pair_recorded_at: str = "2026-01-01T00:00:00",
+    target_rebuild_status: str | None = "complete",
 ) -> None:
     evaluated_at = evaluated_at or datetime(2026, 5, 5, 12, 0, tzinfo=timezone.utc)
     if source_model_brier_insample is None:
@@ -4826,6 +4918,48 @@ def _insert_runtime_transfer_sigma_row(
                 """,
                 target_rows,
             )
+            if target_rebuild_status is not None:
+                resolved_n_mc = calibration_batch_rebuild_n_mc()
+                key = _rebuild_complete_sentinel_key_for_transfer_evidence(
+                    metric=metric,
+                    target_source_id=target_source_id,
+                    target_cycle=target_cycle,
+                    horizon_profile=horizon_profile,
+                    n_mc=resolved_n_mc,
+                )
+                conn.execute(
+                    """
+                    INSERT INTO zeus_meta (key, value, updated_at)
+                    VALUES (?, ?, CURRENT_TIMESTAMP)
+                    ON CONFLICT(key) DO UPDATE SET
+                        value = excluded.value,
+                        updated_at = CURRENT_TIMESTAMP
+                    """,
+                    (
+                        key,
+                        json.dumps(
+                            {
+                                "status": target_rebuild_status,
+                                "completed": target_rebuild_status == "complete",
+                                "recorded_at": evaluated_at.isoformat(),
+                                "temperature_metric": metric,
+                                "bin_source": CANONICAL_CALIBRATION_PAIR_BIN_SOURCE,
+                                "scope": {
+                                    "city": None,
+                                    "start_date": None,
+                                    "end_date": None,
+                                    "data_version": None,
+                                    "cycle": target_cycle,
+                                    "source_id": target_source_id,
+                                    "horizon_profile": horizon_profile,
+                                    "n_mc": resolved_n_mc,
+                                },
+                                "stats": {},
+                            },
+                            sort_keys=True,
+                        ),
+                    ),
+                )
     conn.execute(
         """
         INSERT OR REPLACE INTO platt_models_v2 (
@@ -4984,6 +5118,7 @@ def test_transfer_sigma_uses_fully_scoped_live_evidence() -> None:
         ({"source_model_param_C": float("inf")}, {}),
         ({"insert_target_pairs": False}, {}),
         ({"target_pair_recorded_at": "2026-05-06T00:00:00"}, {}),
+        ({"target_rebuild_status": "in_progress"}, {}),
     ],
 )
 def test_transfer_sigma_rejects_wrong_or_invalid_evidence(
@@ -6668,14 +6803,20 @@ def test_materialize_position_splits_submitted_target_from_fill_authority():
     )
 
     assert pos.target_notional_usd == pytest.approx(11.0)
+    assert pos.entry_price == 0.0
+    assert pos.cost_basis_usd == 0.0
+    assert pos.shares == 0.0
     assert pos.entry_price_submitted == pytest.approx(0.55)
     assert pos.submitted_notional_usd == pytest.approx(11.0)
     assert pos.shares_submitted == pytest.approx(20.0)
+    assert pos.shares_remaining == pytest.approx(20.0)
     assert pos.entry_economics_authority == ENTRY_ECONOMICS_SUBMITTED_LIMIT
     assert pos.fill_authority == FILL_AUTHORITY_NONE
     assert pos.entry_price_avg_fill == 0.0
     assert pos.shares_filled == 0.0
     assert pos.filled_cost_basis_usd == 0.0
+    assert pos.effective_shares == 0.0
+    assert pos.effective_cost_basis_usd == 0.0
     assert pos.corrected_executable_economics_eligible is False
     assert pos.has_fill_economics_authority is False
 
@@ -6729,13 +6870,18 @@ def test_materialize_position_rejects_reported_fill_price_without_command_finali
 
     assert pos.entry_economics_authority == ENTRY_ECONOMICS_SUBMITTED_LIMIT
     assert pos.fill_authority == FILL_AUTHORITY_NONE
-    assert pos.entry_price == pytest.approx(0.55)
+    assert pos.entry_price == 0.0
+    assert pos.cost_basis_usd == 0.0
+    assert pos.shares == 0.0
     assert pos.entry_price_submitted == pytest.approx(0.55)
-    assert pos.shares == pytest.approx(20.0)
+    assert pos.shares_submitted == pytest.approx(20.0)
+    assert pos.shares_remaining == pytest.approx(20.0)
     assert pos.submitted_notional_usd == pytest.approx(11.0)
     assert pos.entry_price_avg_fill == 0.0
     assert pos.shares_filled == 0.0
     assert pos.filled_cost_basis_usd == 0.0
+    assert pos.effective_shares == 0.0
+    assert pos.effective_cost_basis_usd == 0.0
     assert pos.has_fill_economics_authority is False
 
 
@@ -6792,6 +6938,43 @@ def test_materialize_position_accepts_fill_price_only_with_command_finality():
     assert pos.shares_filled == pytest.approx(20.0)
     assert pos.filled_cost_basis_usd == pytest.approx(12.0)
     assert pos.has_fill_economics_authority is True
+
+
+def test_pending_submitted_only_position_does_not_gain_open_economics_in_portfolio():
+    pos = Position(
+        trade_id="pending-submitted-only",
+        market_id="m1",
+        city="New York",
+        cluster="US",
+        target_date="2026-04-01",
+        bin_label="55-56°F",
+        direction="buy_yes",
+        size_usd=11.0,
+        entry_price=0.0,
+        cost_basis_usd=0.0,
+        shares=0.0,
+        target_notional_usd=11.0,
+        submitted_notional_usd=11.0,
+        entry_price_submitted=0.55,
+        shares_submitted=20.0,
+        shares_remaining=20.0,
+        p_posterior=0.60,
+        state="pending_tracked",
+        strategy_key="center_buy",
+        entry_economics_authority=ENTRY_ECONOMICS_SUBMITTED_LIMIT,
+        fill_authority=FILL_AUTHORITY_NONE,
+    )
+    state = PortfolioState()
+
+    add_position(state, pos)
+
+    stored = state.positions[0]
+    assert stored.cost_basis_usd == 0.0
+    assert stored.shares == 0.0
+    assert stored.effective_cost_basis_usd == 0.0
+    assert stored.effective_shares == 0.0
+    assert stored.submitted_notional_usd == pytest.approx(11.0)
+    assert total_exposure_usd(state) == 0.0
 
 
 def test_materialize_position_rejects_missing_strategy_key():
@@ -6870,13 +7053,15 @@ def test_execution_stub_does_not_reinvent_strategy_without_strategy_key():
     assert stub.strategy == ""
 
 
-def test_load_portfolio_backfills_strategy_key_from_legacy_strategy(tmp_path):
-    # Create empty sibling DB so load_portfolio uses it (empty → JSON fallback)
+def test_load_portfolio_backfills_strategy_key_from_legacy_strategy(tmp_path, monkeypatch):
+    # Create empty sibling DB so load_portfolio uses it (empty → canonical)
     # instead of falling through to the production DB.
     sibling_db = tmp_path / "zeus-live.db"
     conn = get_connection(sibling_db)
     init_schema(conn)
     conn.close()
+
+    monkeypatch.setattr("src.state.db.get_trade_connection_with_world", lambda *_, **__: get_connection(sibling_db))
 
     path = tmp_path / "positions-live.json"
     path.write_text(json.dumps({
@@ -8238,6 +8423,7 @@ def test_day0_observation_path_rejects_missing_solar_context(monkeypatch):
     assert len(decisions) == 1
     assert decisions[0].should_trade is False
     assert decisions[0].rejection_stage == "SIGNAL_QUALITY"
+    assert decisions[0].availability_status == "DATA_STALE"
     assert "Solar/DST context unavailable for Day0" in decisions[0].rejection_reasons[0]
 
 
@@ -9856,7 +10042,7 @@ def test_monitor_execution_failure_does_not_become_chain_missing(monkeypatch):
     monkeypatch.setattr(
         Position,
         "evaluate_exit",
-        lambda self, exit_context: ExitDecision(True, "EDGE_REVERSAL", trigger="EDGE_REVERSAL"),
+        lambda self, exit_context: ExitDecision(True, "SETTLEMENT_IMMINENT", trigger="SETTLEMENT_IMMINENT"),
     )
     monkeypatch.setattr("src.execution.exit_lifecycle.build_exit_intent", lambda *args, **kwargs: object())
     monkeypatch.setattr(
@@ -9877,7 +10063,185 @@ def test_monitor_execution_failure_does_not_become_chain_missing(monkeypatch):
     assert summary["monitor_failed"] == 1
     assert "monitor_chain_missing" not in summary
     assert len(artifact.monitor_results) == 1
-    assert artifact.monitor_results[0].exit_reason == "EDGE_REVERSAL"
+    assert artifact.monitor_results[0].exit_reason == "SETTLEMENT_IMMINENT"
+
+
+def _entry_decision_evidence() -> DecisionEvidence:
+    return DecisionEvidence(
+        evidence_type="entry",
+        statistical_method="bootstrap_ci_bh_fdr",
+        sample_size=5000,
+        confidence_level=0.10,
+        fdr_corrected=True,
+        consecutive_confirmations=1,
+    )
+
+
+def _patch_fresh_exit_refresh(monkeypatch) -> None:
+    def _refresh_position(conn, clob, refreshed_pos):
+        refreshed_pos.last_monitor_market_price = 0.46
+        refreshed_pos.last_monitor_market_price_is_fresh = True
+        refreshed_pos.last_monitor_best_bid = 0.45
+        refreshed_pos.last_monitor_best_ask = 0.47
+        refreshed_pos.last_monitor_prob = 0.41
+        refreshed_pos.last_monitor_prob_is_fresh = True
+        return types.SimpleNamespace(
+            p_market=np.array([0.46]),
+            p_posterior=0.41,
+            divergence_score=0.0,
+            market_velocity_1h=0.0,
+            forward_edge=-0.07,
+        )
+
+    monkeypatch.setattr("src.engine.monitor_refresh.refresh_position", _refresh_position)
+
+
+def test_d4_gate_blocks_asymmetric_statistical_exit_before_execution(monkeypatch, tmp_path):
+    db_path = tmp_path / "zeus.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+    pos = _position(
+        trade_id="d4-asymmetry",
+        state="holding",
+        target_date="2026-04-03",
+        entry_method="ens_member_counting",
+    )
+
+    from src.engine.lifecycle_events import build_entry_canonical_write
+    from src.state.db import append_many_and_project
+
+    entry_events, entry_projection = build_entry_canonical_write(
+        pos,
+        decision_id="decision-d4-asymmetry",
+        source_module="tests/test_runtime_guards:d4_gate",
+        decision_evidence=_entry_decision_evidence(),
+    )
+    append_many_and_project(conn, entry_events, entry_projection)
+
+    portfolio = PortfolioState(positions=[pos])
+    artifact = CycleArtifact(mode="opening_hunt", started_at="2026-04-01T20:00:00Z")
+    summary = {"monitors": 0, "exits": 0}
+    _patch_fresh_exit_refresh(monkeypatch)
+    monkeypatch.setattr(
+        Position,
+        "evaluate_exit",
+        lambda self, exit_context: ExitDecision(True, "EDGE_REVERSAL", trigger="EDGE_REVERSAL"),
+    )
+    monkeypatch.setattr(
+        "src.execution.exit_lifecycle.execute_exit",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("D4-blocked exit must not execute")),
+    )
+
+    p_dirty, t_dirty = cycle_runtime.execute_monitoring_phase(
+        conn=conn,
+        clob=types.SimpleNamespace(),
+        portfolio=portfolio,
+        artifact=artifact,
+        tracker=StrategyTracker(),
+        summary=summary,
+        deps=_monitor_chain_deps(datetime(2026, 4, 1, 20, 0, tzinfo=timezone.utc)),
+    )
+
+    assert p_dirty is True
+    assert t_dirty is False
+    assert summary["monitors"] == 1
+    assert summary["exits"] == 0
+    assert summary["exit_evidence_gate_blocked"] == 1
+    assert summary["exit_evidence_asymmetry_blocked"] == 1
+    assert artifact.monitor_results[0].should_exit is False
+    assert artifact.monitor_results[0].exit_reason == "EXIT_EVIDENCE_ASYMMETRY_BLOCKED"
+    assert pos.exit_trigger == ""
+    assert pos.exit_reason == ""
+    conn.close()
+
+
+def test_d4_gate_blocks_statistical_exit_without_entry_evidence(monkeypatch, tmp_path):
+    db_path = tmp_path / "zeus.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+    pos = _position(
+        trade_id="d4-missing-entry",
+        state="holding",
+        target_date="2026-04-03",
+        entry_method="ens_member_counting",
+    )
+    portfolio = PortfolioState(positions=[pos])
+    artifact = CycleArtifact(mode="opening_hunt", started_at="2026-04-01T20:00:00Z")
+    summary = {"monitors": 0, "exits": 0}
+    _patch_fresh_exit_refresh(monkeypatch)
+    monkeypatch.setattr(
+        Position,
+        "evaluate_exit",
+        lambda self, exit_context: ExitDecision(True, "BUY_NO_EDGE_EXIT", trigger="BUY_NO_EDGE_EXIT"),
+    )
+    monkeypatch.setattr(
+        "src.execution.exit_lifecycle.execute_exit",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("missing-entry D4 exit must not execute")),
+    )
+
+    cycle_runtime.execute_monitoring_phase(
+        conn=conn,
+        clob=types.SimpleNamespace(),
+        portfolio=portfolio,
+        artifact=artifact,
+        tracker=StrategyTracker(),
+        summary=summary,
+        deps=_monitor_chain_deps(datetime(2026, 4, 1, 20, 0, tzinfo=timezone.utc)),
+    )
+
+    assert summary["exits"] == 0
+    assert summary["exit_evidence_gate_blocked"] == 1
+    assert summary["exit_evidence_missing_blocked"] == 1
+    assert artifact.monitor_results[0].should_exit is False
+    assert artifact.monitor_results[0].exit_reason == (
+        "INCOMPLETE_EXIT_EVIDENCE:ENTRY_DECISION_EVIDENCE_MISSING"
+    )
+    assert pos.exit_trigger == ""
+    assert pos.exit_reason == ""
+    conn.close()
+
+
+def test_d4_gate_does_not_block_force_majeure_exit(monkeypatch):
+    pos = _position(
+        trade_id="d4-force-majeure",
+        state="holding",
+        target_date="2026-04-03",
+        entry_method="ens_member_counting",
+    )
+    portfolio = PortfolioState(positions=[pos])
+    artifact = CycleArtifact(mode="opening_hunt", started_at="2026-04-01T20:00:00Z")
+    summary = {"monitors": 0, "exits": 0}
+    captured = {}
+    _patch_fresh_exit_refresh(monkeypatch)
+    monkeypatch.setattr(
+        Position,
+        "evaluate_exit",
+        lambda self, exit_context: ExitDecision(True, "SETTLEMENT_IMMINENT", trigger="SETTLEMENT_IMMINENT"),
+    )
+
+    def _execute_exit(**kwargs):
+        captured["exit_context"] = kwargs["exit_context"]
+        captured["position"] = kwargs["position"]
+        return "sell_pending: settlement"
+
+    monkeypatch.setattr("src.execution.exit_lifecycle.execute_exit", _execute_exit)
+
+    cycle_runtime.execute_monitoring_phase(
+        conn=None,
+        clob=types.SimpleNamespace(),
+        portfolio=portfolio,
+        artifact=artifact,
+        tracker=StrategyTracker(),
+        summary=summary,
+        deps=_monitor_chain_deps(datetime(2026, 4, 1, 20, 0, tzinfo=timezone.utc)),
+    )
+
+    assert summary["exits"] == 1
+    assert "exit_evidence_gate_blocked" not in summary
+    assert artifact.monitor_results[0].should_exit is True
+    assert artifact.monitor_results[0].exit_reason == "SETTLEMENT_IMMINENT"
+    assert captured["exit_context"].exit_reason == "SETTLEMENT_IMMINENT"
+    assert captured["position"].exit_trigger == "SETTLEMENT_IMMINENT"
 
 
 def test_time_context_failure_near_active_position_escalates_monitor_chain(monkeypatch):
@@ -10020,10 +10384,10 @@ def test_monitoring_phase_persists_live_exit_telemetry_chain_with_canonical_entr
         captured["context"] = exit_context
         return ExitDecision(
             True,
-            "forward edge failed",
+            "SETTLEMENT_IMMINENT",
             selected_method=self.selected_method or self.entry_method,
             applied_validations=list(self.applied_validations),
-            trigger="EDGE_REVERSAL",
+            trigger="SETTLEMENT_IMMINENT",
         )
 
     monkeypatch.setattr(Position, "evaluate_exit", _evaluate_exit)
@@ -10106,15 +10470,15 @@ def test_monitoring_phase_persists_live_exit_telemetry_chain_with_canonical_entr
     assert fill_event["order_id"] == "sell-order-1"
     assert fill_event["strategy"] == "opening_inertia"
     assert fill_event["decision_snapshot_id"] == "snap-live-exit"
-    assert fill_event["details"]["exit_reason"] == "forward edge failed"
+    assert fill_event["details"]["exit_reason"] == "SETTLEMENT_IMMINENT"
     assert fill_event["details"]["fill_price"] == pytest.approx(0.46)
     assert fill_event["details"]["best_bid"] == pytest.approx(0.46)
     assert fill_event["details"]["current_market_price"] == pytest.approx(0.46)
 
     assert pos.state == "economically_closed"
     assert pos.exit_state == "sell_filled"
-    assert pos.exit_trigger == "EDGE_REVERSAL"
-    assert pos.exit_reason == "forward edge failed"
+    assert pos.exit_trigger == "SETTLEMENT_IMMINENT"
+    assert pos.exit_reason == "SETTLEMENT_IMMINENT"
     assert pos.last_exit_order_id == "sell-order-1"
     assert pos.last_monitor_prob == pytest.approx(0.41)
     assert pos.last_monitor_market_price == pytest.approx(0.46)
@@ -11109,6 +11473,29 @@ def test_settlement_economics_rejects_submitted_only_position_authority():
     )
 
     assert _settlement_economics_for_position(fill_authoritative) == pytest.approx((20.0, 10.6))
+
+
+def test_settlement_economics_rejects_corrected_marker_without_fill_authority():
+    from src.execution.harvester import _settlement_economics_for_position
+
+    corrected_without_fill = _position(
+        entry_price=0.55,
+        shares=20.0,
+        size_usd=11.0,
+        cost_basis_usd=11.0,
+        target_notional_usd=11.0,
+        submitted_notional_usd=11.0,
+        entry_price_submitted=0.55,
+        shares_submitted=20.0,
+        pricing_semantics_version=CORRECTED_EXECUTABLE_PRICING_SEMANTICS_VERSION,
+        corrected_executable_economics_eligible=True,
+        entry_cost_basis_hash="a" * 64,
+        execution_cost_basis_version=CORRECTED_EXECUTABLE_PRICING_SEMANTICS_VERSION,
+        fill_authority=FILL_AUTHORITY_NONE,
+    )
+
+    with pytest.raises(ValueError, match="fill-derived economics"):
+        _settlement_economics_for_position(corrected_without_fill)
 
 
 def test_lifecycle_kernel_maps_entry_runtime_states_for_order_status():

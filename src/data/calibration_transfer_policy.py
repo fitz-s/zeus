@@ -15,6 +15,7 @@ until PR #56's evidence stack fully covers the OpenData transfer surface.
 
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 import warnings
@@ -28,6 +29,7 @@ from src.calibration.forecast_calibration_domain import ForecastCalibrationDomai
 from src.config import (
     EntryForecastCalibrationPolicyId,
     EntryForecastConfig,
+    calibration_batch_rebuild_n_mc,
     calibration_maturity_thresholds,
 )
 from src.contracts.ensemble_snapshot_provenance import (
@@ -44,6 +46,8 @@ _, _, MIN_SOURCE_PLATT_SAMPLES = calibration_maturity_thresholds()
 MIN_TRANSFER_LEAD_DAYS = 1.0
 MAX_TRANSFER_LEAD_DAYS = 7.0
 TRANSFER_OOS_HOLDOUT_FRACTION = 0.2
+CALIBRATION_PAIRS_REBUILD_COMPLETE_META_PREFIX = "calibration_pairs_v2_rebuild_complete"
+CANONICAL_CALIBRATION_PAIR_BIN_SOURCE = "canonical_v2"
 
 # Maps OpenData forecast data_version → TIGGE calibration data_version.
 # Used by legacy evaluate_calibration_transfer_policy to resolve which
@@ -127,6 +131,163 @@ def _parse_evidence_time(value: object) -> datetime | None:
 def _nonempty_transfer_text(value: object) -> str | None:
     text = str(value or "").strip()
     return text or None
+
+
+def _rebuild_scope_part(value: object | None) -> str:
+    text = "" if value is None else str(value).strip()
+    return text or "all"
+
+
+def _rebuild_complete_sentinel_key_for_transfer_evidence(
+    *,
+    metric: str,
+    target_source_id: str | None,
+    target_cycle: str | None,
+    horizon_profile: str | None,
+    city_filter: str | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    data_version_filter: str | None = None,
+    n_mc: int | None = None,
+) -> str:
+    """Return the zeus_meta rebuild sentinel key for transfer target evidence.
+
+    This mirrors scripts/rebuild_calibration_pairs_v2.py without importing a
+    script module from the runtime policy path.
+    """
+
+    return ":".join(
+        [
+            CALIBRATION_PAIRS_REBUILD_COMPLETE_META_PREFIX,
+            f"metric={metric}",
+            f"bin_source={CANONICAL_CALIBRATION_PAIR_BIN_SOURCE}",
+            f"city={_rebuild_scope_part(city_filter)}",
+            f"start={_rebuild_scope_part(start_date)}",
+            f"end={_rebuild_scope_part(end_date)}",
+            f"data_version={_rebuild_scope_part(data_version_filter)}",
+            f"cycle={_rebuild_scope_part(target_cycle)}",
+            f"source_id={_rebuild_scope_part(target_source_id)}",
+            f"horizon={_rebuild_scope_part(horizon_profile)}",
+            f"n_mc={_rebuild_scope_part(n_mc)}",
+        ]
+    )
+
+
+def _scope_value_covers(scope_value: object, actual_value: str) -> bool:
+    text = _rebuild_scope_part(scope_value)
+    return text == "all" or text == actual_value
+
+
+def _scope_value_is_unfiltered(scope_value: object) -> bool:
+    return _rebuild_scope_part(scope_value) == "all"
+
+
+def _scope_n_mc_matches(scope_value: object, expected_n_mc: int) -> bool:
+    text = _rebuild_scope_part(scope_value)
+    return text == str(expected_n_mc)
+
+
+def _sentinel_route_overlaps(
+    scope: dict[str, object],
+    *,
+    target_source_id: str,
+    target_cycle: str,
+    horizon_profile: str,
+) -> bool:
+    return (
+        _scope_value_covers(scope.get("source_id"), target_source_id)
+        and _scope_value_covers(scope.get("cycle"), target_cycle)
+        and _scope_value_covers(scope.get("horizon_profile"), horizon_profile)
+    )
+
+
+def _sentinel_scope_covers_entire_transfer_cohort(
+    scope: dict[str, object],
+    *,
+    target_source_id: str,
+    target_cycle: str,
+    horizon_profile: str,
+    expected_n_mc: int,
+) -> bool:
+    return (
+        _sentinel_route_overlaps(
+            scope,
+            target_source_id=target_source_id,
+            target_cycle=target_cycle,
+            horizon_profile=horizon_profile,
+        )
+        and _scope_value_is_unfiltered(scope.get("city"))
+        and _scope_value_is_unfiltered(scope.get("start_date"))
+        and _scope_value_is_unfiltered(scope.get("end_date"))
+        and _scope_value_is_unfiltered(scope.get("data_version"))
+        and _scope_n_mc_matches(scope.get("n_mc"), expected_n_mc)
+    )
+
+
+def calibration_pairs_rebuild_complete_for_transfer_evidence(
+    conn: sqlite3.Connection,
+    *,
+    metric: str,
+    target_source_id: str,
+    target_cycle: str,
+    horizon_profile: str,
+    rebuild_n_mc: int | None = None,
+) -> bool:
+    """Return True only when target OOS cohort rows have complete rebuild evidence.
+
+    Transfer evidence consumes all eligible ``calibration_pairs_v2`` rows for
+    the target route. A partial city/date/data_version rebuild cannot authorize
+    that aggregate cohort. Any overlapping incomplete sentinel fails closed so
+    an old all-scope complete row cannot mask a current partial rebuild.
+    """
+
+    expected_n_mc = (
+        int(rebuild_n_mc)
+        if rebuild_n_mc is not None
+        else calibration_batch_rebuild_n_mc()
+    )
+    prefix = f"{CALIBRATION_PAIRS_REBUILD_COMPLETE_META_PREFIX}:metric={metric}:"
+    try:
+        rows = conn.execute(
+            "SELECT value FROM zeus_meta WHERE key LIKE ?",
+            (f"{prefix}%",),
+        ).fetchall()
+    except sqlite3.Error:
+        return False
+
+    covering_complete_found = False
+    for row in rows:
+        raw_value = row["value"] if isinstance(row, sqlite3.Row) else row[0]
+        try:
+            payload = json.loads(raw_value)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return False
+        if payload.get("temperature_metric") != metric:
+            continue
+        if payload.get("bin_source") != CANONICAL_CALIBRATION_PAIR_BIN_SOURCE:
+            continue
+        raw_scope = payload.get("scope")
+        if not isinstance(raw_scope, dict):
+            return False
+        if not _sentinel_route_overlaps(
+            raw_scope,
+            target_source_id=target_source_id,
+            target_cycle=target_cycle,
+            horizon_profile=horizon_profile,
+        ):
+            continue
+        if payload.get("status") != "complete" or payload.get("completed") is not True:
+            return False
+        if _sentinel_scope_covers_entire_transfer_cohort(
+            raw_scope,
+            target_source_id=target_source_id,
+            target_cycle=target_cycle,
+            horizon_profile=horizon_profile,
+            expected_n_mc=expected_n_mc,
+        ):
+            covering_complete_found = True
+
+    return covering_complete_found
 
 
 def select_time_blocked_transfer_pairs(
@@ -361,6 +522,14 @@ def target_transfer_cohort_evidence_valid(
     expected_target = _finite_brier(brier_target)
     expected_diff = _finite_transfer_float(brier_diff)
     if expected_source is None or expected_target is None or expected_diff is None:
+        return False
+    if not calibration_pairs_rebuild_complete_for_transfer_evidence(
+        conn,
+        metric=metric,
+        target_source_id=target_source_id,
+        target_cycle=target_cycle,
+        horizon_profile=horizon_profile,
+    ):
         return False
     try:
         model = conn.execute(

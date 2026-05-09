@@ -1,6 +1,6 @@
 # Created: 2026-04-30
-# Last reused/audited: 2026-04-30
-# Lifecycle: created=2026-04-30; last_reviewed=2026-04-30; last_reused=never
+# Last reused/audited: 2026-05-08
+# Lifecycle: created=2026-04-30; last_reviewed=2026-05-08; last_reused=2026-05-08
 # Purpose: Antibody for BLOCKER #2 (architect audit 2026-04-30) — evaluator entry
 #          path must pass n_mc explicitly to p_vector / p_raw_vector calls so
 #          that runtime n_mc never gets pinned to an import-time DEFAULT_N_MC

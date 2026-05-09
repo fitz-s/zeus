@@ -585,7 +585,7 @@ def apply_v2_schema(conn: sqlite3.Connection) -> None:
         # fleet-atomic flip sets value='v1.wu-native'.
         #
         # Rationale: downstream readers (diurnal_curves, temp_persistence,
-        # monitor_refresh, etl_hourly_observations) modify to SELECT FROM
+        # monitor_refresh) modify to SELECT FROM
         # observation_instants_current in Phase 1. Pre-Phase-2 the view is
         # empty, so readers fall back to legacy observation_instants. Phase 2
         # is a single UPDATE zeus_meta SET value='v1.wu-native' — atomic

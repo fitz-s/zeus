@@ -1,6 +1,6 @@
 # Created: 2026-04-29
-# Last reused/audited: 2026-04-29
-# Lifecycle: created=2026-04-29; last_reviewed=2026-04-30; last_reused=2026-04-30
+# Last reused/audited: 2026-05-08
+# Lifecycle: created=2026-04-29; last_reviewed=2026-05-08; last_reused=2026-05-08
 # Purpose: Lock live runtime Monte Carlo precision floors and assumptions/config synchronization.
 # Reuse: Run for runtime probability-chain config, settings.json, assumptions.json, or LAW 4 changes.
 # Authority basis: docs/reference/zeus_calibration_weighting_authority.md LAW 4
@@ -29,6 +29,8 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+
+import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SETTINGS_PATH = PROJECT_ROOT / "config" / "settings.json"
@@ -71,7 +73,10 @@ def test_assumptions_registry_in_sync_with_settings():
     data-provenance failure.
     """
     settings = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
-    assumptions = json.loads((PROJECT_ROOT / "state" / "assumptions.json").read_text(encoding="utf-8"))
+    assumptions_path = PROJECT_ROOT / "state" / "assumptions.json"
+    if not assumptions_path.exists():
+        pytest.skip("state/assumptions.json is runtime-local and absent in this worktree")
+    assumptions = json.loads(assumptions_path.read_text(encoding="utf-8"))
 
     assert assumptions["signal"]["mc_count_entry"] == settings["ensemble"]["n_mc"], (
         f"Assumption drift: assumptions.signal.mc_count_entry="

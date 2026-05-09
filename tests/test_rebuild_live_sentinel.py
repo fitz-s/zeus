@@ -1,5 +1,6 @@
-# Created: 2026-05-05
-# Last reused or audited: 2026-05-05
+# Lifecycle: created=2026-05-05; last_reviewed=2026-05-08; last_reused=2026-05-08
+# Purpose: Tests for calibration rebuild/refit sentinel, transaction sharding, and isolated write-target guards.
+# Reuse: Run for calibration rebuild/refit script changes that affect write authorization, rebuild sentinels, or DB lock behavior.
 # Authority basis: docs/operations/task_2026-05-04_zeus_may3_review_remediation/phases/T1E/phase.json
 """Tests for T1E rebuild sentinel check and transaction sharding.
 
@@ -9,6 +10,10 @@ Invariants asserted:
     any sqlite3.connect call.
   T1E-REBUILD-TRANSACTION-SHARDED: rebuild_v2 commits per (city, metric) bucket.
     commit() call count is > 1 for a multi-city rebuild.
+  T1E-REBUILD-COMPLETE-SENTINEL: a live rebuild scope is marked in_progress
+    before bucket commits and complete only after all post-write gates pass.
+  T1E-REFIT-REBUILD-COMPLETE-GATE: live Platt refit refuses to promote
+    calibration_pairs_v2 unless the exact rebuild scope is complete.
 
 Tests:
   test_rebuild_refuses_during_live_subprocess   — sentinel present → sys.exit(1) via subprocess
@@ -23,10 +28,12 @@ then import/reload. The subprocess test verifies the real exit(1) path.
 from __future__ import annotations
 
 import importlib
+import json
 import sqlite3
 import subprocess
 import sys
 import types
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -35,6 +42,11 @@ import pytest
 
 REPO_ROOT = Path(__file__).parent.parent
 SCRIPT_PATH = REPO_ROOT / "scripts" / "rebuild_calibration_pairs_v2.py"
+_REFIT_IMPORT_MODULES = (
+    "scripts.refit_platt_v2",
+    "src.calibration.manager",
+    "src.calibration.platt",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -77,6 +89,37 @@ def rebuild_mod():
 
     sys.modules[mod_name] = mod
     return mod
+
+
+def _import_refit_mod_with_sklearn_stub():
+    previous_modules = {name: sys.modules.get(name) for name in _REFIT_IMPORT_MODULES}
+    for name in _REFIT_IMPORT_MODULES:
+        sys.modules.pop(name, None)
+
+    sklearn_mod = types.ModuleType("sklearn")
+    linear_model_mod = types.ModuleType("sklearn.linear_model")
+
+    class DummyLogisticRegression:
+        pass
+
+    linear_model_mod.LogisticRegression = DummyLogisticRegression
+    with patch.dict(
+        sys.modules,
+        {
+            "sklearn": sklearn_mod,
+            "sklearn.linear_model": linear_model_mod,
+        },
+    ):
+        mod = importlib.import_module("scripts.refit_platt_v2")
+    return mod, previous_modules
+
+
+def _restore_refit_import_modules(previous_modules):
+    for name in _REFIT_IMPORT_MODULES:
+        if previous_modules[name] is None:
+            sys.modules.pop(name, None)
+        else:
+            sys.modules[name] = previous_modules[name]
 
 
 # ---------------------------------------------------------------------------
@@ -204,6 +247,202 @@ def test_check_live_sentinel_exits_when_present(rebuild_mod, tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# W35-CALIBRATION-WRITER-ISOLATION
+# ---------------------------------------------------------------------------
+
+def test_rebuild_write_target_guard_rejects_default_and_shared_world(rebuild_mod, tmp_path):
+    """Write-mode rebuild must name an isolated DB, not the live shared world DB."""
+    from src.state.db import ZEUS_WORLD_DB_PATH
+
+    with pytest.raises(RuntimeError, match="requires --db"):
+        rebuild_mod._resolve_isolated_calibration_write_db_path(
+            None,
+            script_name="rebuild_calibration_pairs_v2.py",
+        )
+
+    with pytest.raises(RuntimeError, match="canonical shared world DB"):
+        rebuild_mod._resolve_isolated_calibration_write_db_path(
+            str(ZEUS_WORLD_DB_PATH),
+            script_name="rebuild_calibration_pairs_v2.py",
+        )
+
+    shared_alias = tmp_path / "shared-world-alias.db"
+    try:
+        shared_alias.symlink_to(ZEUS_WORLD_DB_PATH)
+    except OSError:
+        shared_alias = None
+    if shared_alias is not None:
+        with pytest.raises(RuntimeError, match="canonical shared world DB"):
+            rebuild_mod._resolve_isolated_calibration_write_db_path(
+                str(shared_alias),
+                script_name="rebuild_calibration_pairs_v2.py",
+            )
+
+    isolated = tmp_path / "calibration_pairs_stage.db"
+    assert (
+        rebuild_mod._resolve_isolated_calibration_write_db_path(
+            str(isolated),
+            script_name="rebuild_calibration_pairs_v2.py",
+        )
+        == isolated.resolve()
+    )
+
+
+def test_rebuild_write_mode_without_isolated_db_fails_before_connect(rebuild_mod):
+    """Default live write path fails closed before any sqlite write connection."""
+    with (
+        patch.object(sys, "argv", ["rebuild_calibration_pairs_v2.py", "--no-dry-run", "--force"]),
+        patch("sqlite3.connect", side_effect=AssertionError("must not connect")),
+    ):
+        assert rebuild_mod.main() == 1
+
+
+def test_rebuild_write_mode_with_isolated_db_reaches_existing_write_seam(rebuild_mod, tmp_path):
+    """An explicit isolated DB may use the existing write path under the bulk lock."""
+    isolated = tmp_path / "calibration_pairs_stage.db"
+    mock_conn = MagicMock(spec=sqlite3.Connection)
+    lock_calls = []
+
+    def fake_lock(path, write_class):
+        @contextmanager
+        def _cm():
+            lock_calls.append((Path(path), write_class))
+            yield
+
+        return _cm()
+
+    with (
+        patch.object(
+            sys,
+            "argv",
+            [
+                "rebuild_calibration_pairs_v2.py",
+                "--no-dry-run",
+                "--force",
+                "--db",
+                str(isolated),
+            ],
+        ),
+        patch.object(rebuild_mod, "_assert_rebuild_preflight_ready", return_value=None),
+        patch.object(rebuild_mod, "db_writer_lock", side_effect=fake_lock),
+        patch("sqlite3.connect", return_value=mock_conn) as connect,
+        patch.object(rebuild_mod, "init_schema", return_value=None),
+        patch.object(rebuild_mod, "apply_v2_schema", return_value=None),
+        patch.object(
+            rebuild_mod,
+            "rebuild_all_v2",
+            return_value={"high": types.SimpleNamespace(refused=False)},
+        ),
+    ):
+        assert rebuild_mod.main() == 0
+
+    connect.assert_called_once_with(isolated.resolve())
+    assert lock_calls == [(isolated.resolve(), rebuild_mod.WriteClass.BULK)]
+
+
+def test_refit_write_target_guard_rejects_default_and_shared_world(tmp_path):
+    """Write-mode refit must name an isolated DB, not the live shared world DB."""
+    from src.state.db import ZEUS_WORLD_DB_PATH
+
+    refit_mod, previous_modules = _import_refit_mod_with_sklearn_stub()
+    try:
+        with pytest.raises(RuntimeError, match="requires --db"):
+            refit_mod._resolve_isolated_calibration_write_db_path(
+                None,
+                script_name="refit_platt_v2.py",
+            )
+
+        with pytest.raises(RuntimeError, match="canonical shared world DB"):
+            refit_mod._resolve_isolated_calibration_write_db_path(
+                str(ZEUS_WORLD_DB_PATH),
+                script_name="refit_platt_v2.py",
+            )
+
+        shared_alias = tmp_path / "shared-world-alias.db"
+        try:
+            shared_alias.symlink_to(ZEUS_WORLD_DB_PATH)
+        except OSError:
+            shared_alias = None
+        if shared_alias is not None:
+            with pytest.raises(RuntimeError, match="canonical shared world DB"):
+                refit_mod._resolve_isolated_calibration_write_db_path(
+                    str(shared_alias),
+                    script_name="refit_platt_v2.py",
+                )
+
+        isolated = tmp_path / "platt_stage.db"
+        assert (
+            refit_mod._resolve_isolated_calibration_write_db_path(
+                str(isolated),
+                script_name="refit_platt_v2.py",
+            )
+            == isolated.resolve()
+        )
+    finally:
+        _restore_refit_import_modules(previous_modules)
+
+
+def test_refit_write_mode_without_isolated_db_fails_before_connect():
+    """Default live refit fails closed before any sqlite write connection."""
+    refit_mod, previous_modules = _import_refit_mod_with_sklearn_stub()
+    try:
+        with (
+            patch.object(sys, "argv", ["refit_platt_v2.py", "--no-dry-run", "--force"]),
+            patch("sqlite3.connect", side_effect=AssertionError("must not connect")),
+        ):
+            assert refit_mod.main() == 1
+    finally:
+        _restore_refit_import_modules(previous_modules)
+
+
+def test_refit_write_mode_with_isolated_db_reaches_existing_write_seam(tmp_path):
+    """An explicit isolated DB may use the existing refit write path under the bulk lock."""
+    isolated = tmp_path / "platt_stage.db"
+    mock_conn = MagicMock(spec=sqlite3.Connection)
+    lock_calls = []
+
+    def fake_lock(path, write_class):
+        @contextmanager
+        def _cm():
+            lock_calls.append((Path(path), write_class))
+            yield
+
+        return _cm()
+
+    refit_mod, previous_modules = _import_refit_mod_with_sklearn_stub()
+    try:
+        with (
+            patch.object(
+                sys,
+                "argv",
+                [
+                    "refit_platt_v2.py",
+                    "--no-dry-run",
+                    "--force",
+                    "--db",
+                    str(isolated),
+                ],
+            ),
+            patch.object(refit_mod, "_assert_platt_refit_preflight_ready", return_value=None),
+            patch.object(refit_mod, "db_writer_lock", side_effect=fake_lock),
+            patch("sqlite3.connect", return_value=mock_conn) as connect,
+            patch.object(refit_mod, "init_schema", return_value=None),
+            patch.object(refit_mod, "apply_v2_schema", return_value=None),
+            patch.object(
+                refit_mod,
+                "refit_all_v2",
+                return_value={"high": types.SimpleNamespace(refused=False)},
+            ),
+        ):
+            assert refit_mod.main() == 0
+    finally:
+        _restore_refit_import_modules(previous_modules)
+
+    connect.assert_called_once_with(isolated.resolve())
+    assert lock_calls == [(isolated.resolve(), refit_mod.WriteClass.BULK)]
+
+
+# ---------------------------------------------------------------------------
 # T1E-REBUILD-TRANSACTION-SHARDED
 # ---------------------------------------------------------------------------
 
@@ -325,3 +564,416 @@ def test_rebuild_all_v2_no_outer_savepoint(rebuild_mod):
         f"rebuild_all_v2 should not issue v2_rebuild_all SAVEPOINT (T1E sharding). "
         f"Found: {savepoint_all}"
     )
+
+
+# ---------------------------------------------------------------------------
+# T1E-REBUILD-COMPLETE-SENTINEL
+# ---------------------------------------------------------------------------
+
+def _sentinel_statuses(mock_conn) -> list[str]:
+    statuses: list[str] = []
+    for call in mock_conn.execute.call_args_list:
+        args = call.args
+        if not args or "zeus_meta" not in str(args[0]):
+            continue
+        params = args[1]
+        payload = json.loads(params[1])
+        statuses.append(payload["status"])
+    return statuses
+
+
+def test_rebuild_marks_scope_in_progress_then_complete(rebuild_mod):
+    """A successful live rebuild writes complete only after bucket success."""
+    from src.calibration.metric_specs import METRIC_SPECS
+    from src.config import cities_by_name
+
+    high_spec = next(s for s in METRIC_SPECS if s.identity.temperature_metric == "high")
+    city_a = next(iter(cities_by_name.keys()))
+
+    mock_conn = MagicMock(spec=sqlite3.Connection)
+    mock_conn.execute = MagicMock(return_value=MagicMock())
+    mock_conn.commit = MagicMock()
+
+    class FakeRow(dict):
+        pass
+
+    rows = [
+        FakeRow({"city": city_a, "data_version": high_spec.allowed_data_version, "snapshot_id": "s-ok"}),
+    ]
+
+    def successful_process(_conn, _snap, city, *, spec, n_mc, rng, stats):
+        stats.snapshots_processed += 1
+        stats.pairs_written += 3
+        stats.per_city[city.name] = 3
+
+    with (
+        patch.object(rebuild_mod, "_fetch_eligible_snapshots_v2", return_value=rows),
+        patch.object(rebuild_mod, "_collect_pre_delete_count", return_value=0),
+        patch.object(rebuild_mod, "_delete_canonical_v2_slice", return_value=None),
+        patch.object(rebuild_mod, "is_quarantined", return_value=False),
+        patch.object(rebuild_mod, "_process_snapshot_v2", side_effect=successful_process),
+        patch.object(rebuild_mod, "cities_by_name", {city_a: cities_by_name[city_a]}),
+    ):
+        stats = rebuild_mod.rebuild_v2(
+            mock_conn,
+            dry_run=False,
+            force=True,
+            spec=high_spec,
+            n_mc=10000,
+        )
+
+    assert stats.pairs_written == 3
+    assert _sentinel_statuses(mock_conn) == ["in_progress", "complete"]
+    assert mock_conn.commit.call_count >= 3, (
+        "Expected durable in_progress sentinel, bucket commit, and complete sentinel commit"
+    )
+
+
+def test_rebuild_validation_failure_leaves_scope_in_progress_not_complete(rebuild_mod):
+    """A partial/failed rebuild must not leave a stale complete sentinel."""
+    from src.calibration.metric_specs import METRIC_SPECS
+    from src.config import cities_by_name
+
+    high_spec = next(s for s in METRIC_SPECS if s.identity.temperature_metric == "high")
+    city_a = next(iter(cities_by_name.keys()))
+
+    mock_conn = MagicMock(spec=sqlite3.Connection)
+    mock_conn.execute = MagicMock(return_value=MagicMock())
+    mock_conn.commit = MagicMock()
+
+    class FakeRow(dict):
+        pass
+
+    rows = [
+        FakeRow({"city": city_a, "data_version": high_spec.allowed_data_version, "snapshot_id": "s-zero"}),
+    ]
+
+    with (
+        patch.object(rebuild_mod, "_fetch_eligible_snapshots_v2", return_value=rows),
+        patch.object(rebuild_mod, "_collect_pre_delete_count", return_value=0),
+        patch.object(rebuild_mod, "_delete_canonical_v2_slice", return_value=None),
+        patch.object(rebuild_mod, "is_quarantined", return_value=False),
+        patch.object(rebuild_mod, "_process_snapshot_v2", return_value=None),
+        patch.object(rebuild_mod, "cities_by_name", {city_a: cities_by_name[city_a]}),
+    ):
+        with pytest.raises(RuntimeError, match="zero pairs"):
+            rebuild_mod.rebuild_v2(
+                mock_conn,
+                dry_run=False,
+                force=True,
+                spec=high_spec,
+            )
+
+    assert _sentinel_statuses(mock_conn) == ["in_progress"]
+
+
+def test_assert_rebuild_complete_sentinel_fails_closed_until_complete(rebuild_mod):
+    """Consumers have a fail-closed helper for exact-scope rebuild completion."""
+    from src.calibration.metric_specs import METRIC_SPECS
+
+    high_spec = next(s for s in METRIC_SPECS if s.identity.temperature_metric == "high")
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE zeus_meta (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    stats = rebuild_mod.RebuildStatsV2(snapshots_processed=1, pairs_written=1)
+
+    try:
+        with pytest.raises(RuntimeError, match="missing rebuild_complete sentinel"):
+            rebuild_mod.assert_rebuild_complete_sentinel(conn, spec=high_spec, n_mc=10000)
+
+        rebuild_mod._write_rebuild_status_sentinel(
+            conn,
+            status="in_progress",
+            spec=high_spec,
+            stats=stats,
+            city_filter=None,
+            start_date=None,
+            end_date=None,
+            data_version_filter=None,
+            cycle_filter=None,
+            source_id_filter=None,
+            horizon_profile_filter=None,
+            n_mc=10000,
+        )
+        with pytest.raises(RuntimeError, match="not complete"):
+            rebuild_mod.assert_rebuild_complete_sentinel(conn, spec=high_spec, n_mc=10000)
+
+        rebuild_mod._write_rebuild_status_sentinel(
+            conn,
+            status="complete",
+            spec=high_spec,
+            stats=stats,
+            city_filter=None,
+            start_date=None,
+            end_date=None,
+            data_version_filter=None,
+            cycle_filter=None,
+            source_id_filter=None,
+            horizon_profile_filter=None,
+            n_mc=10000,
+        )
+        payload = rebuild_mod.assert_rebuild_complete_sentinel(conn, spec=high_spec, n_mc=10000)
+        assert payload["status"] == "complete"
+        assert payload["completed"] is True
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize(
+    "mutate,match",
+    [
+        (
+            lambda payload: payload.update({"temperature_metric": "low"}),
+            "payload metric mismatch",
+        ),
+        (
+            lambda payload: payload.update({"bin_source": "legacy_v1"}),
+            "payload bin_source mismatch",
+        ),
+        (
+            lambda payload: payload["scope"].update({"n_mc": 5000}),
+            "payload scope.n_mc mismatch",
+        ),
+    ],
+)
+def test_assert_rebuild_complete_sentinel_rejects_payload_contamination(
+    rebuild_mod,
+    mutate,
+    match: str,
+) -> None:
+    """A matching zeus_meta key is not authority if its payload denotes another object."""
+    from src.calibration.metric_specs import METRIC_SPECS
+
+    high_spec = next(s for s in METRIC_SPECS if s.identity.temperature_metric == "high")
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE zeus_meta (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    stats = rebuild_mod.RebuildStatsV2(snapshots_processed=1, pairs_written=1)
+
+    try:
+        key = rebuild_mod._write_rebuild_status_sentinel(
+            conn,
+            status="complete",
+            spec=high_spec,
+            stats=stats,
+            city_filter=None,
+            start_date=None,
+            end_date=None,
+            data_version_filter=None,
+            cycle_filter=None,
+            source_id_filter=None,
+            horizon_profile_filter=None,
+            n_mc=10000,
+        )
+        payload = json.loads(conn.execute("SELECT value FROM zeus_meta WHERE key = ?", (key,)).fetchone()["value"])
+        mutate(payload)
+        conn.execute(
+            "UPDATE zeus_meta SET value = ? WHERE key = ?",
+            (json.dumps(payload, sort_keys=True), key),
+        )
+
+        with pytest.raises(RuntimeError, match=match):
+            rebuild_mod.assert_rebuild_complete_sentinel(conn, spec=high_spec, n_mc=10000)
+    finally:
+        conn.close()
+
+
+def test_refit_live_write_requires_complete_rebuild_sentinel_before_model_promotion():
+    """A partial rebuilt pair set cannot be promoted into Platt model authority."""
+    from src.types.metric_identity import HIGH_LOCALDAY_MAX
+
+    refit_mod, previous_modules = _import_refit_mod_with_sklearn_stub()
+    mock_conn = MagicMock(spec=sqlite3.Connection)
+    bucket = {
+        "cluster": "US-Northeast",
+        "season": "DJF",
+        "data_version": HIGH_LOCALDAY_MAX.data_version,
+        "cycle": "00",
+        "source_id": "tigge_mars",
+        "horizon_profile": "full",
+    }
+
+    try:
+        with (
+            patch.object(refit_mod, "_fetch_buckets", return_value=[bucket]),
+            patch.object(
+                refit_mod,
+                "_assert_rebuild_complete_for_refit_source",
+                side_effect=RuntimeError("missing rebuild_complete sentinel"),
+            ) as assert_sentinel,
+            patch.object(refit_mod, "_fit_bucket", side_effect=AssertionError("must not fit")),
+        ):
+            with pytest.raises(RuntimeError, match="missing rebuild_complete sentinel"):
+                refit_mod.refit_v2(
+                    mock_conn,
+                    metric_identity=HIGH_LOCALDAY_MAX,
+                    dry_run=False,
+                    force=True,
+                    city_filter="NYC",
+                    start_date="2026-01-01",
+                    end_date="2026-01-31",
+                    data_version_filter=HIGH_LOCALDAY_MAX.data_version,
+                    cycle_filter="00",
+                    source_id_filter="tigge_mars",
+                    horizon_profile_filter="full",
+                    rebuild_n_mc=10000,
+                )
+
+        assert_sentinel.assert_called_once()
+        kwargs = assert_sentinel.call_args.kwargs
+        assert kwargs["metric_identity"] == HIGH_LOCALDAY_MAX
+        assert kwargs["city_filter"] == "NYC"
+        assert kwargs["start_date"] == "2026-01-01"
+        assert kwargs["end_date"] == "2026-01-31"
+        assert kwargs["data_version_filter"] == HIGH_LOCALDAY_MAX.data_version
+        assert kwargs["cycle_filter"] == "00"
+        assert kwargs["source_id_filter"] == "tigge_mars"
+        assert kwargs["horizon_profile_filter"] == "full"
+        assert kwargs["rebuild_n_mc"] == 10000
+        mock_conn.execute.assert_not_called()
+    finally:
+        _restore_refit_import_modules(previous_modules)
+
+
+def test_refit_dry_run_can_inspect_without_rebuild_complete_sentinel():
+    """Dry-run remains a non-promoting inspection path and does not require sentinel authority."""
+    from src.types.metric_identity import HIGH_LOCALDAY_MAX
+
+    refit_mod, previous_modules = _import_refit_mod_with_sklearn_stub()
+    mock_conn = MagicMock(spec=sqlite3.Connection)
+
+    try:
+        with (
+            patch.object(refit_mod, "_fetch_buckets", return_value=[]),
+            patch.object(
+                refit_mod,
+                "_assert_rebuild_complete_for_refit_source",
+                side_effect=AssertionError("dry-run must not require rebuild sentinel"),
+            ) as assert_sentinel,
+        ):
+            stats = refit_mod.refit_v2(
+                mock_conn,
+                metric_identity=HIGH_LOCALDAY_MAX,
+                dry_run=True,
+                force=False,
+            )
+
+        assert stats.refused is True
+        assert_sentinel.assert_not_called()
+        mock_conn.execute.assert_not_called()
+    finally:
+        _restore_refit_import_modules(previous_modules)
+
+
+def test_refit_accepts_covering_complete_rebuild_scope_but_blocks_in_progress_any_n_mc(rebuild_mod):
+    """All-scope complete can cover a narrow refit unless that physical corpus is rebuilding."""
+    from src.calibration.metric_specs import METRIC_SPECS
+    from src.config import calibration_batch_rebuild_n_mc
+    from src.types.metric_identity import HIGH_LOCALDAY_MAX
+
+    high_spec = next(s for s in METRIC_SPECS if s.identity.temperature_metric == "high")
+    refit_mod, previous_modules = _import_refit_mod_with_sklearn_stub()
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE zeus_meta (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    stats = rebuild_mod.RebuildStatsV2(snapshots_processed=2, pairs_written=4)
+
+    try:
+        rebuild_mod._write_rebuild_status_sentinel(
+            conn,
+            status="complete",
+            spec=high_spec,
+            stats=stats,
+            city_filter=None,
+            start_date=None,
+            end_date=None,
+            data_version_filter=None,
+            cycle_filter=None,
+            source_id_filter=None,
+            horizon_profile_filter=None,
+            n_mc=calibration_batch_rebuild_n_mc(),
+        )
+
+        payload = refit_mod._assert_rebuild_complete_for_refit_source(
+            conn,
+            metric_identity=HIGH_LOCALDAY_MAX,
+            city_filter="NYC",
+            start_date="2026-01-01",
+            end_date="2026-01-31",
+            data_version_filter=HIGH_LOCALDAY_MAX.data_version,
+            cycle_filter="00",
+            source_id_filter="tigge_mars",
+            horizon_profile_filter="full",
+            rebuild_n_mc=None,
+        )
+        assert payload["status"] == "complete"
+
+        rebuild_mod._write_rebuild_status_sentinel(
+            conn,
+            status="in_progress",
+            spec=high_spec,
+            stats=stats,
+            city_filter="NYC",
+            start_date="2026-01-01",
+            end_date="2026-01-31",
+            data_version_filter=HIGH_LOCALDAY_MAX.data_version,
+            cycle_filter="00",
+            source_id_filter="tigge_mars",
+            horizon_profile_filter="full",
+            n_mc=5000,
+        )
+
+        with pytest.raises(RuntimeError, match="overlapping rebuild_complete sentinel"):
+            refit_mod._assert_rebuild_complete_for_refit_source(
+                conn,
+                metric_identity=HIGH_LOCALDAY_MAX,
+                city_filter=None,
+                start_date=None,
+                end_date=None,
+                data_version_filter=None,
+                cycle_filter=None,
+                source_id_filter=None,
+                horizon_profile_filter=None,
+                rebuild_n_mc=None,
+            )
+
+        with pytest.raises(RuntimeError, match="overlapping rebuild_complete sentinel"):
+            refit_mod._assert_rebuild_complete_for_refit_source(
+                conn,
+                metric_identity=HIGH_LOCALDAY_MAX,
+                city_filter="NYC",
+                start_date="2026-01-01",
+                end_date="2026-01-31",
+                data_version_filter=HIGH_LOCALDAY_MAX.data_version,
+                cycle_filter="00",
+                source_id_filter="tigge_mars",
+                horizon_profile_filter="full",
+                rebuild_n_mc=None,
+            )
+    finally:
+        conn.close()
+        _restore_refit_import_modules(previous_modules)

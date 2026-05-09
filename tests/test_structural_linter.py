@@ -1,3 +1,6 @@
+# Created: 2026-03-31
+# Last reused/audited: 2026-05-08
+# Authority basis: Semantic linter structural antibodies; Wave38 dead hourly-observations ETL deletion
 import ast
 from pathlib import Path
 from scripts.semantic_linter import SemanticAnalyzer
@@ -164,7 +167,9 @@ def test_time_sensitive_etl_no_longer_reads_legacy_observations_local_hour():
     repo = Path(__file__).parent.parent
     violations = []
 
-    for rel in ["scripts/etl_hourly_observations.py", "scripts/etl_diurnal_curves.py"]:
+    assert not (repo / "scripts/etl_hourly_observations.py").exists()
+
+    for rel in ["scripts/etl_diurnal_curves.py"]:
         path = repo / rel
         text = path.read_text(encoding="utf-8")
         if "FROM observations" in text and "local_hour" in text:

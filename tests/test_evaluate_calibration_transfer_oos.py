@@ -1,6 +1,6 @@
 # Created: 2026-05-05
-# Last reused/audited: 2026-05-05
-# Lifecycle: created=2026-05-05; last_reviewed=2026-05-05; last_reused=2026-05-05
+# Last reused/audited: 2026-05-08
+# Lifecycle: created=2026-05-05; last_reviewed=2026-05-08; last_reused=2026-05-08
 # Authority basis: architecture/calibration_transfer_oos_design_2026-05-05.md Phase X.2
 # Purpose: Lock OOS calibration-transfer evidence eligibility and non-promotion behavior.
 # Reuse: Run when calibration_pairs_v2 eligibility, validated_calibration_transfers, or OOS transfer policy evidence changes.
@@ -14,6 +14,11 @@ from datetime import date, datetime, timedelta, timezone
 import pytest
 
 from scripts import evaluate_calibration_transfer_oos as oos_script
+from src.config import calibration_batch_rebuild_n_mc
+from src.data.calibration_transfer_policy import (
+    CANONICAL_CALIBRATION_PAIR_BIN_SOURCE,
+    _rebuild_complete_sentinel_key_for_transfer_evidence,
+)
 from src.state.schema.v2_schema import apply_v2_schema
 from scripts.evaluate_calibration_transfer_oos import (
     DEFAULT_BRIER_DIFF_THRESHOLD,
@@ -34,6 +39,59 @@ def _make_conn() -> sqlite3.Connection:
 
 
 _NOW = datetime(2026, 5, 5, 12, 0, 0, tzinfo=timezone.utc)
+
+
+def _write_rebuild_sentinel(
+    conn: sqlite3.Connection,
+    *,
+    metric: str = "high",
+    source_id: str = "ecmwf_open_data",
+    cycle: str = "00",
+    horizon_profile: str = "full",
+    status: str = "complete",
+    n_mc: int | None = None,
+) -> None:
+    resolved_n_mc = calibration_batch_rebuild_n_mc() if n_mc is None else n_mc
+    key = _rebuild_complete_sentinel_key_for_transfer_evidence(
+        metric=metric,
+        target_source_id=source_id,
+        target_cycle=cycle,
+        horizon_profile=horizon_profile,
+        n_mc=resolved_n_mc,
+    )
+    conn.execute(
+        """
+        INSERT INTO zeus_meta (key, value, updated_at)
+        VALUES (?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(key) DO UPDATE SET
+            value = excluded.value,
+            updated_at = CURRENT_TIMESTAMP
+        """,
+        (
+            key,
+            json.dumps(
+                {
+                    "status": status,
+                    "completed": status == "complete",
+                    "recorded_at": _NOW.isoformat(),
+                    "temperature_metric": metric,
+                    "bin_source": CANONICAL_CALIBRATION_PAIR_BIN_SOURCE,
+                    "scope": {
+                        "city": None,
+                        "start_date": None,
+                        "end_date": None,
+                        "data_version": None,
+                        "cycle": cycle,
+                        "source_id": source_id,
+                        "horizon_profile": horizon_profile,
+                        "n_mc": resolved_n_mc,
+                    },
+                    "stats": {},
+                },
+                sort_keys=True,
+            ),
+        ),
+    )
 
 
 def _insert_platt_model(
@@ -102,6 +160,7 @@ def _insert_pairs(
     authority: str = "VERIFIED",
     causality_status: str = "OK",
     lead_days: float | None = None,
+    rebuild_status: str | None = "complete",
 ) -> None:
     """Insert n pairs with deterministic pair_ids starting at start_pair_id.
 
@@ -147,6 +206,15 @@ def _insert_pairs(
         """,
         rows,
     )
+    if rebuild_status is not None:
+        _write_rebuild_sentinel(
+            conn,
+            metric=metric,
+            source_id=source_id,
+            cycle=cycle,
+            horizon_profile=horizon_profile,
+            status=rebuild_status,
+        )
     conn.commit()
 
 
@@ -296,6 +364,27 @@ def test_live_eligible_status() -> None:
     row = _fetch_row(conn, "m_eligible")
     assert row["status"] == "LIVE_ELIGIBLE"
     assert row["brier_diff"] <= DEFAULT_BRIER_DIFF_THRESHOLD
+
+
+def test_live_write_skips_transfer_when_rebuild_sentinel_incomplete() -> None:
+    """OOS writer cannot stamp evidence from a partially rebuilt target cohort."""
+    conn = _make_conn()
+    _insert_platt_model(
+        conn, model_key="m_incomplete_rebuild", source_id="tigge_mars", cycle="00",
+        param_A=1.0, param_B=0.0, param_C=0.0, brier_insample=0.09,
+    )
+    _insert_pairs(
+        conn, source_id="ecmwf_open_data", cycle="00",
+        season="summer", cluster="cl_a", metric="high",
+        n=1000, p_raw=0.7, outcome=1, rebuild_status="in_progress",
+    )
+
+    summary = run_oos_evaluation(conn, now=_NOW, dry_run=False)
+
+    assert summary["rows_written"] == 0
+    assert summary["candidate_routes_evaluated"] == 0
+    assert summary["rebuild_incomplete_skipped"] == 1
+    assert _count_rows(conn) == 0
 
 
 def test_time_blocked_holdout_uses_latest_decision_groups_not_pair_id_modulo() -> None:

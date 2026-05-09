@@ -76,10 +76,6 @@ CALIBRATION_PAIRS_SELECT_ALLOWLIST: frozenset[str] = frozenset({
     "retrain_trigger_v2.py",  # src/calibration/retrain_trigger_v2.py — K2_struct approved
 })
 
-HOURLY_OBSERVATIONS_SELECT_ALLOWLIST: frozenset[str] = frozenset({
-    "scripts/etl_hourly_observations.py",  # compatibility writer for the legacy table
-})
-
 # H3 (2026-04-24): forbid bare SELECT FROM/JOIN settlements without a
 # `temperature_metric` predicate. `settlements` is dual-track (high|low);
 # any reader that filters by (city, target_date) without pinning the metric
@@ -530,53 +526,13 @@ def _sql_call_literal_args(content: str) -> list[tuple[int, int, str]]:
     return literals
 
 
-def _is_evidence_hourly_observations_view_statement(sql: str) -> bool:
-    view_header_pattern = re.compile(
-        r"\bcreate\s+(?:temp(?:orary)?\s+)?view\s+"
-        r"(?:if\s+not\s+exists\s+)?v_evidence_hourly_observations\b",
-        re.IGNORECASE,
-    )
-    exact_view_pattern = re.compile(
-        r"create\s+(?:temp(?:orary)?\s+)?view\s+"
-        r"(?:if\s+not\s+exists\s+)?v_evidence_hourly_observations\s+as\s+"
-        r"select\s+id\s*,\s*city\s*,\s*obs_date\s*,\s*obs_hour\s*,\s*"
-        r"temp\s*,\s*temp_unit\s*,\s*source\s+from\s+"
-        r"(?:main\s*\.\s*)?hourly_observations",
-        re.IGNORECASE,
-    )
-    table_ref_pattern = re.compile(
-        r"\b(?:from|join)\s+(?:main\s*\.\s*)?hourly_observations\b",
-        re.IGNORECASE,
-    )
-    matched_view_statement = False
-    for statement in sql.split(";"):
-        normalized = re.sub(r"\s+", " ", statement).strip().lower()
-        if not normalized or not table_ref_pattern.search(normalized):
-            continue
-        view_header = view_header_pattern.search(normalized)
-        if not view_header:
-            return False
-        prefix = normalized[: view_header.start()]
-        if table_ref_pattern.search(prefix):
-            return False
-        if not exact_view_pattern.fullmatch(normalized[view_header.start() :]):
-            return False
-        matched_view_statement = True
-    return matched_view_statement
-
-
 def _check_legacy_hourly_observations_select(py_file: Path, content: str) -> list[str]:
-    """P0 containment: forbid bare canonical reads from hourly_observations.
+    """P0 containment: forbid the dead hourly-observation compatibility surface.
 
-    `hourly_observations` is a lossy compatibility table. Canonical training,
-    replay, and live paths must use v2/evidence adapters instead.
+    `hourly_observations` and `v_evidence_hourly_observations` are lossy local-
+    hour compatibility objects. Canonical training, replay, and live paths must
+    use DST-aware observation instants or derived diurnal surfaces instead.
     """
-    try:
-        repo_relative = py_file.resolve().relative_to(Path(__file__).resolve().parents[1]).as_posix()
-    except ValueError:
-        repo_relative = py_file.as_posix()
-    if repo_relative in HOURLY_OBSERVATIONS_SELECT_ALLOWLIST:
-        return []
     if "migrations" in py_file.parts or "tests" in py_file.parts:
         return []
 
@@ -590,9 +546,15 @@ def _check_legacy_hourly_observations_select(py_file: Path, content: str) -> lis
     )
     sql_identifier = r'(?:[A-Za-z_][A-Za-z0-9_]*|"[^"]+"|`[^`]+`|\[[^\]]+\])'
     optional_schema = rf"(?:{sql_identifier}\s*\.\s*)?"
-    table_ref = r'(?:"hourly_observations"|`hourly_observations`|\[hourly_observations\]|hourly_observations)'
+    legacy_ref = (
+        r'(?:"(?:hourly_observations|v_evidence_hourly_observations)"|'
+        r'`(?:hourly_observations|v_evidence_hourly_observations)`|'
+        r'\[(?:hourly_observations|v_evidence_hourly_observations)\]|'
+        r'(?:hourly_observations|v_evidence_hourly_observations))'
+    )
     pattern = re.compile(
-        rf"\b(FROM|JOIN)\s+{optional_schema}{table_ref}(?=\W|$)",
+        rf"(?:\b(FROM|JOIN|INTO|UPDATE)\s+{optional_schema}{legacy_ref}|"
+        rf"\b(TABLE|VIEW)\s+(?:IF\s+(?:NOT\s+)?EXISTS\s+)?{optional_schema}{legacy_ref})(?=\W|$)",
         re.IGNORECASE | re.MULTILINE,
     )
     violations = []
@@ -601,17 +563,10 @@ def _check_legacy_hourly_observations_select(py_file: Path, content: str) -> lis
     for match in pattern.finditer(stripped_content):
         lineno = stripped_content[:match.start()].count("\n") + 1
         line = source_lines[lineno - 1] if lineno <= len(source_lines) else ""
-        statement_start = stripped_content.rfind(";", 0, match.start()) + 1
-        statement_end = stripped_content.find(";", match.end())
-        if statement_end == -1:
-            statement_end = len(stripped_content)
-        statement = stripped_content[statement_start:statement_end]
-        if _is_evidence_hourly_observations_view_statement(statement):
-            continue
         violations.append(
             f"{py_file}:{lineno}:\n"
-            "  [ERROR] P0_unsafe_table: bare read from legacy hourly_observations.\n"
-            "  Use a v2 eligibility surface or an explicit evidence adapter instead.\n"
+            "  [ERROR] P0_unsafe_table: legacy hourly_observations compatibility surface is forbidden.\n"
+            "  Use observation_instants_v2/current or a DST-aware derived surface instead.\n"
             f"  Line: {line.rstrip()}\n"
         )
         violation_lines.add(lineno)
@@ -622,13 +577,11 @@ def _check_legacy_hourly_observations_select(py_file: Path, content: str) -> lis
         normalized_sql = re.sub(r"/\*.*?\*/", " ", sql, flags=re.DOTALL)
         if not pattern.search(normalized_sql):
             continue
-        if _is_evidence_hourly_observations_view_statement(normalized_sql):
-            continue
         line = source_lines[start_lineno - 1] if start_lineno <= len(source_lines) else ""
         violations.append(
             f"{py_file}:{start_lineno}:\n"
-            "  [ERROR] P0_unsafe_table: bare read from legacy hourly_observations.\n"
-            "  Use a v2 eligibility surface or an explicit evidence adapter instead.\n"
+            "  [ERROR] P0_unsafe_table: legacy hourly_observations compatibility surface is forbidden.\n"
+            "  Use observation_instants_v2/current or a DST-aware derived surface instead.\n"
             f"  Line: {line.rstrip()}\n"
         )
         violation_lines.add(start_lineno)

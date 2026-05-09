@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-04-16; last_reviewed=2026-04-24; last_reused=2026-04-24
+# Lifecycle: created=2026-04-16; last_reviewed=2026-05-08; last_reused=2026-05-08
 # Purpose: Refit metric-aware Platt v2 models behind dry-run and preflight gates.
 # Reuse: Inspect architecture/script_manifest.yaml and active packet receipt before live writes.
 
@@ -21,14 +21,19 @@ USAGE:
     # Dry-run (default, safe):
     python scripts/refit_platt_v2.py
 
-    # Live write (requires --no-dry-run --force):
-    python scripts/refit_platt_v2.py --no-dry-run --force
+    # Isolated write (requires --db plus --no-dry-run --force):
+    python scripts/refit_platt_v2.py --db /tmp/platt_stage.db --no-dry-run --force
 
 SAFETY GATES:
 - ``--dry-run`` is the default. ``--no-dry-run`` alone does not write.
 - Requires ``--force`` in addition to ``--no-dry-run`` for live write.
+- Write mode refuses the canonical shared world DB; pass an explicit isolated
+  staging DB with ``--db`` before promotion evidence is produced.
 - Minimum 15 distinct decision_group_id values per bucket (maturity gate).
 - SAVEPOINT rollback on any exception (including per-bucket fit failures).
+- Live refit refuses to promote rebuilt calibration pairs unless the exact
+  rebuild scope has a complete ``zeus_meta`` sentinel. Dry-run may inspect
+  pairs but cannot write models.
 - Does not touch legacy ``platt_models`` table.
 - Metric-scoped: only reads/writes temperature_metric='high'. Low-track rows
   are invisible to this script (Phase 5 will run an identical script with
@@ -52,20 +57,22 @@ PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.architecture.decorators import capability, protects
-from src.calibration.manager import maturity_level, regularization_for_level
-from src.calibration.platt import ExtendedPlattCalibrator
 from src.calibration.store import (
     deactivate_model_v2,
     infer_bin_width_from_label,
     save_platt_model_v2,
 )
-from src.config import calibration_maturity_thresholds, calibration_n_bootstrap
-from src.state.db import get_world_connection, init_schema
+from src.config import (
+    calibration_batch_rebuild_n_mc,
+    calibration_maturity_thresholds,
+    calibration_n_bootstrap,
+)
+from src.state.db import init_schema
 from src.state.db_writer_lock import WriteClass, db_writer_lock  # noqa: E402
 from src.state.schema.v2_schema import apply_v2_schema
 from src.types.metric_identity import HIGH_LOCALDAY_MAX, MetricIdentity
 from src.calibration.metric_specs import METRIC_SPECS
-from scripts.verify_truth_surfaces import SHARED_DB, build_platt_refit_preflight_report
+from scripts.verify_truth_surfaces import build_platt_refit_preflight_report
 
 _, LOW_LIVE_MIN_DECISION_GROUPS, MIN_DECISION_GROUPS = calibration_maturity_thresholds()
 
@@ -87,6 +94,25 @@ def _validate_p_raw_domain(bucket_key: str, p_raw: np.ndarray) -> None:
         raise RuntimeError(
             f"refit_platt_v2 refused to fit {bucket_key}: p_raw outside [0, 1]"
         )
+
+
+def maturity_level(n_pairs: int) -> int:
+    level1, level2, level3 = calibration_maturity_thresholds()
+    if n_pairs >= level1:
+        return 1
+    if n_pairs >= level2:
+        return 2
+    if n_pairs >= level3:
+        return 3
+    return 4
+
+
+def regularization_for_level(level: int) -> float:
+    if level <= 2:
+        return 1.0
+    if level == 3:
+        return 0.1
+    raise ValueError(f"Level {level}: no Platt — use P_raw directly")
 
 
 def _normalize_multi_filter(value: str | Sequence[str] | None) -> list[str]:
@@ -121,6 +147,84 @@ def _table_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
         except (TypeError, IndexError):
             columns.add(str(row[1]))
     return columns
+
+
+def _metric_spec_for_identity(metric_identity: MetricIdentity):
+    for spec in METRIC_SPECS:
+        if spec.identity == metric_identity:
+            return spec
+    raise ValueError(f"unsupported metric identity for refit: {metric_identity!r}")
+
+
+def _assert_rebuild_complete_for_refit_source(
+    conn: sqlite3.Connection,
+    *,
+    metric_identity: MetricIdentity,
+    city_filter: str | None,
+    start_date: str | None,
+    end_date: str | None,
+    data_version_filter: str | None,
+    cycle_filter: str | None,
+    source_id_filter: str | None,
+    horizon_profile_filter: str | None,
+    rebuild_n_mc: int | None,
+) -> dict[str, object]:
+    """Fail closed before live refit can promote partial rebuilt pairs."""
+
+    from scripts.rebuild_calibration_pairs_v2 import (
+        assert_no_overlapping_incomplete_rebuild_sentinel,
+        assert_rebuild_complete_sentinel,
+    )
+
+    spec = _metric_spec_for_identity(metric_identity)
+    resolved_n_mc = (
+        int(rebuild_n_mc)
+        if rebuild_n_mc is not None
+        else calibration_batch_rebuild_n_mc()
+    )
+    exact_scope = {
+        "city_filter": city_filter,
+        "start_date": start_date,
+        "end_date": end_date,
+        "data_version_filter": data_version_filter,
+        "cycle_filter": cycle_filter,
+        "source_id_filter": source_id_filter,
+        "horizon_profile_filter": horizon_profile_filter,
+        "n_mc": resolved_n_mc,
+    }
+    assert_no_overlapping_incomplete_rebuild_sentinel(conn, spec=spec, **exact_scope)
+    try:
+        return assert_rebuild_complete_sentinel(conn, spec=spec, **exact_scope)
+    except RuntimeError as exc:
+        if "missing rebuild_complete sentinel" not in str(exc):
+            raise
+        has_narrowing_filter = any(
+            exact_scope[name] is not None
+            for name in (
+                "city_filter",
+                "start_date",
+                "end_date",
+                "data_version_filter",
+                "cycle_filter",
+                "source_id_filter",
+                "horizon_profile_filter",
+            )
+        )
+        if not has_narrowing_filter:
+            raise
+
+    return assert_rebuild_complete_sentinel(
+        conn,
+        spec=spec,
+        city_filter=None,
+        start_date=None,
+        end_date=None,
+        data_version_filter=None,
+        cycle_filter=None,
+        source_id_filter=None,
+        horizon_profile_filter=None,
+        n_mc=resolved_n_mc,
+    )
 
 
 def _append_optional_dimension_filter(
@@ -476,6 +580,37 @@ def _assert_platt_refit_preflight_ready(db_path: Path) -> None:
         )
 
 
+def _resolve_isolated_calibration_write_db_path(
+    db_path: str | Path | None,
+    *,
+    script_name: str,
+) -> Path:
+    """Resolve and validate the write-mode DB target for calibration bulk jobs."""
+    from src.state.db import ZEUS_WORLD_DB_PATH  # noqa: PLC0415
+
+    if db_path is None:
+        raise RuntimeError(
+            f"{script_name} write mode requires --db pointing at an isolated "
+            "staging calibration DB; refusing to default to the canonical "
+            "shared world DB."
+        )
+    resolved = Path(db_path).expanduser().resolve()
+    shared_world = Path(ZEUS_WORLD_DB_PATH).expanduser().resolve()
+    same_physical_file = False
+    if resolved.exists() and shared_world.exists():
+        try:
+            same_physical_file = resolved.samefile(shared_world)
+        except OSError:
+            same_physical_file = False
+    if resolved == shared_world or same_physical_file:
+        raise RuntimeError(
+            f"{script_name} write mode refuses the canonical shared world DB "
+            f"({shared_world}); use an isolated staging calibration DB and a "
+            "separate operator-approved promotion path."
+        )
+    return resolved
+
+
 def _fit_bucket(
     conn: sqlite3.Connection,
     cluster: str,
@@ -514,6 +649,8 @@ def _fit_bucket(
     decision_group_ids = np.array(
         [p["decision_group_id"] for p in pairs], dtype=object
     )
+
+    from src.calibration.platt import ExtendedPlattCalibrator
 
     cal = ExtendedPlattCalibrator()
     reg_C = regularization_for_level(maturity_level(n_eff))
@@ -678,6 +815,7 @@ def refit_v2(
     cycle_filter: str | None = None,
     source_id_filter: str | None = None,
     horizon_profile_filter: str | None = None,
+    rebuild_n_mc: int | None = None,
 ) -> RefitStatsV2:
     stats = RefitStatsV2()
 
@@ -705,6 +843,11 @@ def refit_v2(
         )
     print(f"Min groups:     {MIN_DECISION_GROUPS}")
 
+    if not dry_run and not force:
+        raise RuntimeError(
+            "--no-dry-run requires --force for the live write path."
+        )
+
     buckets = _fetch_buckets(
         conn,
         metric_identity,
@@ -729,9 +872,18 @@ def refit_v2(
         )
         return stats
 
-    if not dry_run and not force:
-        raise RuntimeError(
-            "--no-dry-run requires --force for the live write path."
+    if not dry_run:
+        _assert_rebuild_complete_for_refit_source(
+            conn,
+            metric_identity=metric_identity,
+            city_filter=city_filter,
+            start_date=start_date,
+            end_date=end_date,
+            data_version_filter=data_version_filter,
+            cycle_filter=cycle_filter,
+            source_id_filter=source_id_filter,
+            horizon_profile_filter=horizon_profile_filter,
+            rebuild_n_mc=rebuild_n_mc,
         )
 
     failed_buckets: list[str] = []
@@ -913,6 +1065,7 @@ def refit_all_v2(
     cycle_filter: str | None = None,
     source_id_filter: str | None = None,
     horizon_profile_filter: str | None = None,
+    rebuild_n_mc: int | None = None,
 ) -> dict[str, RefitStatsV2]:
     """Refit Platt v2 models for ALL METRIC_SPECS in one invocation.
 
@@ -940,6 +1093,7 @@ def refit_all_v2(
             cycle_filter=cycle_filter,
             source_id_filter=source_id_filter,
             horizon_profile_filter=horizon_profile_filter,
+            rebuild_n_mc=rebuild_n_mc,
         )
         per_metric[spec.identity.temperature_metric] = stats
     return per_metric
@@ -993,6 +1147,13 @@ def main() -> int:
     parser.add_argument("--source-id", dest="source_id", default=None, help="Limit refit to one forecast source bucket.")
     parser.add_argument("--horizon-profile", dest="horizon_profile", default=None, help="Limit refit to one horizon profile bucket.")
     parser.add_argument(
+        "--rebuild-n-mc",
+        dest="rebuild_n_mc",
+        type=int,
+        default=None,
+        help="Monte Carlo scope used by the source rebuild sentinel; omit for rebuild default.",
+    )
+    parser.add_argument(
         "--strict", dest="strict", action="store_true", default=False,
         help=(
             "Fix D: fail-fast mode — if ANY bucket fails, roll back ALL buckets "
@@ -1003,10 +1164,18 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    db_path_for_preflight = Path(args.db_path) if args.db_path else SHARED_DB
+    write_db_path: Path | None = None
     if not args.dry_run:
         try:
-            _assert_platt_refit_preflight_ready(db_path_for_preflight)
+            write_db_path = _resolve_isolated_calibration_write_db_path(
+                args.db_path,
+                script_name="refit_platt_v2.py",
+            )
+        except Exception as e:
+            print(f"ERROR: {type(e).__name__}: {e}", file=sys.stderr)
+            return 1
+        try:
+            _assert_platt_refit_preflight_ready(write_db_path)
         except Exception as e:
             print(f"ERROR: {type(e).__name__}: {e}", file=sys.stderr)
             return 1
@@ -1040,6 +1209,7 @@ def main() -> int:
                 cycle_filter=args.cycle,
                 source_id_filter=args.source_id,
                 horizon_profile_filter=args.horizon_profile,
+                rebuild_n_mc=args.rebuild_n_mc,
             )
         except Exception as e:
             print(f"ERROR: {type(e).__name__}: {e}", file=sys.stderr)
@@ -1049,21 +1219,12 @@ def main() -> int:
         any_refused = any(s.refused for s in per_metric.values())
         return 1 if any_refused else 0
 
-    # PR #86 retrofit (CRITICAL — preserved across PR #93 rebase): wrap the
-    # entire write path in db_writer_lock(BULK) so this script does not race
-    # the live monitor or other bulk jobs against the shared world DB.
-    from src.state.db import ZEUS_WORLD_DB_PATH  # noqa: PLC0415
-    from pathlib import Path as _Path  # noqa: PLC0415
-    _lock_path = _Path(args.db_path) if args.db_path else ZEUS_WORLD_DB_PATH
-    with db_writer_lock(_lock_path, WriteClass.BULK):
-        if args.db_path:
-            conn = sqlite3.connect(args.db_path)
-            conn.row_factory = sqlite3.Row
-            conn.execute("PRAGMA busy_timeout = 600000")
-            conn.execute("PRAGMA journal_mode=WAL")
-        else:
-            conn = get_world_connection(write_class="bulk")
-            conn.execute("PRAGMA busy_timeout = 600000")
+    assert write_db_path is not None
+    with db_writer_lock(write_db_path, WriteClass.BULK):
+        conn = sqlite3.connect(write_db_path)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout = 600000")
+        conn.execute("PRAGMA journal_mode=WAL")
         init_schema(conn)
         apply_v2_schema(conn)
 
@@ -1083,6 +1244,7 @@ def main() -> int:
                 cycle_filter=args.cycle,
                 source_id_filter=args.source_id,
                 horizon_profile_filter=args.horizon_profile,
+                rebuild_n_mc=args.rebuild_n_mc,
             )
         except Exception as e:
             print(f"ERROR: {type(e).__name__}: {e}", file=sys.stderr)

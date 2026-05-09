@@ -1,4 +1,8 @@
+# Created: pre-Phase-0
+# Last reused/audited: 2026-05-08
+# Authority basis: Day0 solar/DST context contract; Wave39 malformed solar_daily rootpage degrade antibody
 from datetime import date, datetime, timezone
+import sqlite3
 from unittest.mock import patch, MagicMock
 from src.signal.diurnal import get_peak_hour_context, build_day0_temporal_context
 
@@ -227,3 +231,21 @@ def test_build_day0_temporal_context_handles_cross_timezone_target_date(mock_get
     assert ctx.dst_active is False
     assert ctx.utc_offset_minutes == 540
     assert ctx.current_local_timestamp.date() == date(2026, 4, 2)
+
+
+@patch('src.state.db.get_world_connection')
+def test_build_day0_temporal_context_degrades_on_malformed_solar_daily_rootpage(mock_get_conn):
+    """A corrupted solar_daily object is missing authority, not a tradable SolarDay."""
+    mock_get_conn.side_effect = sqlite3.DatabaseError(
+        "malformed database schema (solar_daily) - invalid rootpage"
+    )
+
+    ctx = build_day0_temporal_context(
+        "Miami",
+        date(2026, 4, 1),
+        "America/New_York",
+        observation_time="2026-04-01T13:45:00+00:00",
+        observation_source="wu_api",
+    )
+
+    assert ctx is None

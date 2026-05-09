@@ -115,12 +115,14 @@ criteria:
   dst_historical_rebuild:
     status: target_not_certified
     source: docs/operations/known_gaps.md#CRITICAL-DST-Timezone
-    protects: [scripts/etl_hourly_observations.py, scripts/etl_diurnal_curves.py, src/signal/diurnal.py]
+    protects: [scripts/etl_diurnal_curves.py, src/signal/diurnal.py]
     required_tests: []
     certification_gate: "Historical diurnal aggregates rebuilt from zone-aware local timestamps for all DST cities."
     blocks_live_math_certification: true
     note: >
-      ZDM-04: This criterion exists as a non-certification marker. The rebuild
+      ZDM-04: This criterion exists as a non-certification marker. The dead
+      hourly_observations compatibility writer has been removed; this criterion
+      now protects the remaining DST-sensitive diurnal surface. The rebuild
       itself is NOT authorized — only preflight audit and certification prep.
 
 rebuilt_row_contract:

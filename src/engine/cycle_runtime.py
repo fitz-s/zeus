@@ -77,10 +77,11 @@ NATIVE_BUY_NO_LIVE_PROMOTION_VALIDATION = "native_buy_no_live_promotion_approved
 _FORWARD_PRICE_LINKAGE_OK_STATUSES = frozenset({"inserted", "unchanged"})
 
 
-# T4.2-Phase1 2026-04-23 (D4 audit-only): exit triggers whose statistical
-# burden (2 consecutive negative cycles, no FDR correction) is weaker than
-# the entry-side burden (bootstrap CI + BH-FDR). DecisionEvidence symmetry
-# audit fires on these and only these.
+# D4: exit triggers whose statistical burden (2 consecutive negative cycles,
+# no FDR correction) is weaker than the entry-side burden (bootstrap CI +
+# BH-FDR). These are statistical hypotheses; force-majeure exits are excluded
+# because their evidence class is market/risk/settlement authority, not
+# entry-vs-exit statistical symmetry.
 #
 # Excluded triggers and their rationale:
 # - SETTLEMENT_IMMINENT / WHALE_TOXICITY / MODEL_DIVERGENCE_PANIC /
@@ -91,15 +92,137 @@ _FORWARD_PRICE_LINKAGE_OK_STATUSES = frozenset({"inserted", "unchanged"})
 # - DAY0_OBSERVATION_REVERSAL — single-cycle observation-authority exit
 #   fired when Day0 forward-edge drops below threshold while
 #   day0_active=True. It does NOT use a consecutive_confirmations gate,
-#   so the Phase1 weak-exit evidence template (sample_size=2,
-#   consecutive_confirmations=2) would misrepresent its actual burden and
-#   pollute the Phase1 audit_log_false_positive_rate metric. Phase3 may
-#   introduce an observation-grade evidence variant; out of Phase1 scope.
+#   so the statistical weak-exit evidence template (sample_size=2,
+#   consecutive_confirmations=2) would misrepresent its actual burden.
+#   A future wave may introduce an observation-grade evidence variant.
 _D4_ASYMMETRIC_EXIT_TRIGGERS = frozenset({
     "EDGE_REVERSAL",
     "BUY_NO_EDGE_EXIT",
     "BUY_NO_NEAR_EXIT",
 })
+
+
+def _deps_utcnow_iso(deps) -> str:
+    utcnow = getattr(deps, "_utcnow", None)
+    if utcnow is not None:
+        try:
+            return utcnow().isoformat()
+        except Exception:
+            pass
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _record_exit_evidence_gate_block(
+    summary: dict,
+    deps,
+    *,
+    trade_id: str,
+    trigger: str,
+    reason: str,
+    entry_evidence: DecisionEvidence | None = None,
+    exit_evidence: DecisionEvidence | None = None,
+    error: str | None = None,
+) -> tuple[bool, str]:
+    summary["exit_evidence_gate_blocked"] = summary.get("exit_evidence_gate_blocked", 0) + 1
+    if reason.startswith("EXIT_EVIDENCE_ASYMMETRY"):
+        summary["exit_evidence_asymmetry_blocked"] = (
+            summary.get("exit_evidence_asymmetry_blocked", 0) + 1
+        )
+    else:
+        summary["exit_evidence_missing_blocked"] = (
+            summary.get("exit_evidence_missing_blocked", 0) + 1
+        )
+    summary.setdefault("exit_evidence_gate_blocked_positions", []).append(
+        {
+            "position_id": trade_id,
+            "trigger": trigger,
+            "reason": reason,
+        }
+    )
+    payload = {
+        "trigger": trigger,
+        "trade_id": trade_id,
+        "reason": reason,
+        "timestamp": _deps_utcnow_iso(deps),
+    }
+    if entry_evidence is not None:
+        payload["entry_evidence_envelope"] = entry_evidence.to_json()
+    if exit_evidence is not None:
+        payload["exit_evidence_envelope"] = exit_evidence.to_json()
+    if error:
+        payload["error"] = error
+    deps.logger.warning("exit_evidence_gate_blocked " + json.dumps(payload, sort_keys=True))
+    return False, reason
+
+
+def _exit_evidence_gate_allows_statistical_exit(
+    *,
+    conn,
+    pos,
+    exit_trigger: str,
+    summary: dict,
+    deps,
+) -> tuple[bool, str | None]:
+    if exit_trigger not in _D4_ASYMMETRIC_EXIT_TRIGGERS:
+        return True, None
+    if conn is None:
+        return _record_exit_evidence_gate_block(
+            summary,
+            deps,
+            trade_id=pos.trade_id,
+            trigger=exit_trigger,
+            reason="INCOMPLETE_EXIT_EVIDENCE:ENTRY_DECISION_EVIDENCE_DB_MISSING",
+        )
+
+    exit_evidence = DecisionEvidence(
+        evidence_type="exit",
+        statistical_method="consecutive_confirmation",
+        sample_size=2,
+        # No exit-side alpha/FDR exists for these triggers today; the semantic
+        # absence is represented by fdr_corrected=False.
+        confidence_level=1.0,
+        fdr_corrected=False,
+        consecutive_confirmations=2,
+    )
+    try:
+        from src.state.decision_chain import load_entry_evidence
+
+        entry_evidence = load_entry_evidence(conn, pos.trade_id)
+    except Exception as exc:
+        return _record_exit_evidence_gate_block(
+            summary,
+            deps,
+            trade_id=pos.trade_id,
+            trigger=exit_trigger,
+            reason="INCOMPLETE_EXIT_EVIDENCE:ENTRY_DECISION_EVIDENCE_LOAD_FAILED",
+            exit_evidence=exit_evidence,
+            error=str(exc),
+        )
+    if entry_evidence is None:
+        return _record_exit_evidence_gate_block(
+            summary,
+            deps,
+            trade_id=pos.trade_id,
+            trigger=exit_trigger,
+            reason="INCOMPLETE_EXIT_EVIDENCE:ENTRY_DECISION_EVIDENCE_MISSING",
+            exit_evidence=exit_evidence,
+        )
+    try:
+        exit_evidence.assert_symmetric_with(entry_evidence)
+    except EvidenceAsymmetryError as asym:
+        return _record_exit_evidence_gate_block(
+            summary,
+            deps,
+            trade_id=pos.trade_id,
+            trigger=exit_trigger,
+            reason="EXIT_EVIDENCE_ASYMMETRY_BLOCKED",
+            entry_evidence=entry_evidence,
+            exit_evidence=exit_evidence,
+            error=str(asym),
+        )
+
+    summary["exit_evidence_gate_passed"] = summary.get("exit_evidence_gate_passed", 0) + 1
+    return True, None
 
 
 def _resolve_strategy_key(decision) -> str:
@@ -451,6 +574,7 @@ def _attach_corrected_pricing_authority(
             else _decimal_payload(final_intent.submitted_shares)
         ),
         "fee_rate": _decimal_payload(cost_basis.worst_case_fee_rate),
+        "fee_source": cost_basis.fee_source,
         "neg_risk": cost_basis.neg_risk,
         "posterior_distribution_id": hypothesis.posterior_distribution_id,
         "market_prior_id": hypothesis.market_prior_id,
@@ -567,13 +691,15 @@ def _reprice_decision_from_executable_snapshot(
 
     sizing_bankroll = float(getattr(decision, "sizing_bankroll", 0.0) or 0.0)
     kelly_multiplier = float(getattr(decision, "kelly_multiplier_used", 0.0) or 0.0)
-    fee_rate = float(getattr(decision, "execution_fee_rate", 0.0) or 0.0)
+    taker_fee_rate = float(getattr(decision, "execution_fee_rate", 0.0) or 0.0)
     if sizing_bankroll <= 0.0 or kelly_multiplier <= 0.0:
         raise ValueError("EXECUTABLE_REPRICE_REJECTED: missing sizing context")
+    # The first candidate is a passive maker limit. If the book supports an
+    # immediate fill, the marketable branch below resizes with taker fees.
     repriced_size_at_snapshot_vwmp = _size_at_execution_price_boundary(
         p_posterior=float(decision.edge.p_posterior),
         entry_price=float(snapshot_vwmp),
-        fee_rate=fee_rate,
+        fee_rate=0.0,
         sizing_bankroll=sizing_bankroll,
         kelly_multiplier=kelly_multiplier,
     )
@@ -607,7 +733,7 @@ def _reprice_decision_from_executable_snapshot(
         size_at_depth_limit = _size_at_execution_price_boundary(
             p_posterior=float(decision.edge.p_posterior),
             entry_price=depth_sweep_limit_float,
-            fee_rate=fee_rate,
+            fee_rate=taker_fee_rate,
             sizing_bankroll=sizing_bankroll,
             kelly_multiplier=kelly_multiplier,
         )
@@ -1058,20 +1184,28 @@ def materialize_position(candidate, decision, result, portfolio, city, mode, *, 
             getattr(result, "status", ""),
         )
         fill_price = 0.0
-    entry_price = (
-        fill_price
-        if fill_price > 0 and fill_has_finality
-        else submitted_limit_price or fallback_edge_price
+    submitted_price_basis = submitted_limit_price or fallback_edge_price
+    submitted_shares = float(
+        result.shares
+        or (
+            decision.size_usd / submitted_price_basis
+            if submitted_price_basis > 0
+            else 0.0
+        )
     )
-    shares = float(result.shares or (decision.size_usd / entry_price if entry_price > 0 else 0.0))
     target_notional_usd = float(decision.size_usd or 0.0)
     submitted_notional_usd = (
-        shares * submitted_limit_price if submitted_limit_price > 0 and shares > 0 else 0.0
+        submitted_shares * submitted_limit_price
+        if submitted_limit_price > 0 and submitted_shares > 0
+        else 0.0
     )
-    if fill_price > 0 and shares > 0 and fill_has_finality:
+    if fill_price > 0 and submitted_shares > 0 and fill_has_finality:
+        entry_price = fill_price
+        shares = submitted_shares
+        cost_basis_usd = shares * fill_price
         entry_price_avg_fill = fill_price
         shares_filled = shares
-        filled_cost_basis_usd = shares * fill_price
+        filled_cost_basis_usd = cost_basis_usd
         shares_remaining = 0.0
         entry_economics_authority = ENTRY_ECONOMICS_AVG_FILL_PRICE
         fill_authority = FILL_AUTHORITY_VENUE_CONFIRMED_FULL
@@ -1079,10 +1213,13 @@ def materialize_position(candidate, decision, result, portfolio, city, mode, *, 
             pricing_semantics_version == CORRECTED_EXECUTABLE_PRICING_SEMANTICS_VERSION
         )
     else:
+        entry_price = 0.0
+        shares = 0.0
+        cost_basis_usd = 0.0
         entry_price_avg_fill = 0.0
         shares_filled = 0.0
         filled_cost_basis_usd = 0.0
-        shares_remaining = shares
+        shares_remaining = submitted_shares
         entry_economics_authority = (
             ENTRY_ECONOMICS_SUBMITTED_LIMIT
             if submitted_limit_price > 0
@@ -1111,13 +1248,13 @@ def materialize_position(candidate, decision, result, portfolio, city, mode, *, 
         p_posterior=decision.edge.p_posterior,
         edge=decision.edge.edge,
         shares=shares,
-        cost_basis_usd=filled_cost_basis_usd or decision.size_usd,
+        cost_basis_usd=cost_basis_usd,
         target_notional_usd=target_notional_usd,
         submitted_notional_usd=submitted_notional_usd,
         filled_cost_basis_usd=filled_cost_basis_usd,
         entry_price_submitted=submitted_limit_price,
         entry_price_avg_fill=entry_price_avg_fill,
-        shares_submitted=shares,
+        shares_submitted=submitted_shares,
         shares_filled=shares_filled,
         shares_remaining=shares_remaining,
         entry_cost_basis_id=str(corrected_shadow.get("cost_basis_id") or ""),
@@ -1238,7 +1375,7 @@ def _dual_write_canonical_entry_if_available(
 ) -> bool:
     # T4.1b 2026-04-23 (D4 Option E): `decision_evidence` threads through
     # to `build_entry_canonical_write` so the ENTRY_ORDER_POSTED payload
-    # carries the `decision_evidence_envelope` sidecar for T4.2-Phase1
+    # carries the `decision_evidence_envelope` sidecar for T4.2/Wave31
     # exit-side read-back via `json_extract(payload_json,
     # '$.decision_evidence_envelope')`. Remains None on paths that do not
     # originate from an accept-path `EdgeDecision` (e.g. test harnesses);
@@ -1693,6 +1830,18 @@ def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: 
                 exit_decision = orange_decision
             should_exit = exit_decision.should_exit
             exit_reason = exit_decision.reason
+            if should_exit:
+                exit_trigger = exit_decision.trigger or exit_reason
+                gate_allowed, gate_reason = _exit_evidence_gate_allows_statistical_exit(
+                    conn=conn,
+                    pos=pos,
+                    exit_trigger=exit_trigger,
+                    summary=summary,
+                    deps=deps,
+                )
+                if not gate_allowed:
+                    should_exit = False
+                    exit_reason = gate_reason or "INCOMPLETE_EXIT_EVIDENCE"
             if exit_reason.startswith("INCOMPLETE_EXIT_CONTEXT"):
                 summary["monitor_incomplete_exit_context"] = summary.get("monitor_incomplete_exit_context", 0) + 1
                 if hours_to_settlement is not None and hours_to_settlement <= 6.0:
@@ -1730,80 +1879,6 @@ def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: 
                 pos.exit_divergence_score = edge_ctx.divergence_score
                 pos.exit_market_velocity_1h = edge_ctx.market_velocity_1h
                 pos.exit_forward_edge = edge_ctx.forward_edge
-                # T4.2-Phase1 2026-04-23 (D4 audit-only symmetry check):
-                # for the three statistically-asymmetric exit triggers
-                # (EDGE_REVERSAL, BUY_NO_EDGE_EXIT, BUY_NO_NEAR_EXIT —
-                # each uses 2 consecutive cycles with no FDR vs entry's
-                # bootstrap CI + BH-FDR), load the entry evidence
-                # envelope (written by T4.1b on ENTRY_ORDER_POSTED),
-                # construct the current exit evidence reflecting the
-                # weak 2-cycle burden, and call
-                # DecisionEvidence.assert_symmetric_with. On
-                # EvidenceAsymmetryError, emit a structured JSON warning
-                # log so Phase1 can measure audit_log_false_positive_rate
-                # over the 7-day gate to T4.2-Phase2. NEVER blocks the
-                # exit. Force-majeure triggers (SETTLEMENT_IMMINENT /
-                # WHALE_TOXICITY / MODEL_DIVERGENCE_PANIC /
-                # FLASH_CRASH_PANIC / RED_FORCE_EXIT / VIG_EXTREME /
-                # DAY0_OBSERVATION_REVERSAL) skip — symmetry does not
-                # apply to non-statistical exits.
-                if pos.exit_trigger in _D4_ASYMMETRIC_EXIT_TRIGGERS and conn is not None:
-                    try:
-                        from src.state.decision_chain import load_entry_evidence
-                        entry_evidence = load_entry_evidence(conn, pos.trade_id)
-                        if entry_evidence is not None:
-                            exit_evidence = DecisionEvidence(
-                                evidence_type="exit",
-                                statistical_method="consecutive_confirmation",
-                                sample_size=2,
-                                # no FDR on exit — confidence_level=1.0 is
-                                # a contract-satisfying placeholder per
-                                # __post_init__ (0, 1] bound; the semantic
-                                # "no alpha" is expressed by
-                                # fdr_corrected=False below.
-                                confidence_level=1.0,
-                                fdr_corrected=False,
-                                consecutive_confirmations=2,
-                            )
-                            try:
-                                exit_evidence.assert_symmetric_with(entry_evidence)
-                            except EvidenceAsymmetryError as asym:
-                                deps.logger.warning(
-                                    "exit_evidence_asymmetry "
-                                    + json.dumps(
-                                        {
-                                            "trigger": pos.exit_trigger,
-                                            "trade_id": pos.trade_id,
-                                            "entry_evidence_envelope": entry_evidence.to_json(),
-                                            "exit_evidence_envelope": exit_evidence.to_json(),
-                                            "error": str(asym),
-                                            "timestamp": deps._utcnow().isoformat(),
-                                        },
-                                        sort_keys=True,
-                                    )
-                                )
-                                summary["exit_evidence_asymmetry_audit"] = (
-                                    summary.get("exit_evidence_asymmetry_audit", 0) + 1
-                                )
-                    except Exception as audit_exc:
-                        # Audit MUST NOT block the exit. Emit the same
-                        # `<key> + json.dumps({...}, sort_keys=True)` shape
-                        # as the asymmetry path so Phase2's FP-rate
-                        # aggregator has one parse path, not two.
-                        deps.logger.warning(
-                            "exit_evidence_audit_skipped "
-                            + json.dumps(
-                                {
-                                    "trade_id": pos.trade_id,
-                                    "reason": str(audit_exc),
-                                    "timestamp": deps._utcnow().isoformat(),
-                                },
-                                sort_keys=True,
-                            )
-                        )
-                        summary["exit_evidence_audit_skipped"] = (
-                            summary.get("exit_evidence_audit_skipped", 0) + 1
-                        )
                 exit_intent = build_exit_intent(
                     pos,
                     replace(exit_context, exit_reason=exit_reason),

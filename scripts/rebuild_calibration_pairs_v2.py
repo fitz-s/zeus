@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-04-16; last_reviewed=2026-04-24; last_reused=2026-04-24
+# Lifecycle: created=2026-04-16; last_reviewed=2026-05-08; last_reused=2026-05-08
 # Purpose: Rebuild metric-aware calibration_pairs_v2 behind dry-run and preflight gates.
 # Reuse: Inspect architecture/script_manifest.yaml and active packet receipt before live writes.
 
@@ -24,8 +24,8 @@ USAGE:
     # Dry-run (default, safe):
     python scripts/rebuild_calibration_pairs_v2.py
 
-    # Live write (requires --no-dry-run --force):
-    python scripts/rebuild_calibration_pairs_v2.py --no-dry-run --force
+    # Isolated write (requires --db plus --no-dry-run --force):
+    python scripts/rebuild_calibration_pairs_v2.py --db /tmp/calibration_stage.db --no-dry-run --force
 
     # Single city (development):
     python scripts/rebuild_calibration_pairs_v2.py --dry-run --city NYC --n-mc 1000
@@ -33,9 +33,16 @@ USAGE:
 SAFETY GATES:
 - ``--dry-run`` is the default. ``--no-dry-run`` alone does not write — ``--force``
   is required in addition.
+- Write mode refuses the canonical shared world DB; pass an explicit isolated
+  staging DB with ``--db`` before promotion evidence is produced.
 - Delete is keyed on ``bin_source='canonical_v2'`` equality; legacy rows are never
   touched.
-- Entire rebuild runs inside one SAVEPOINT; any exception rolls back.
+- Each (city, metric) bucket runs inside one SAVEPOINT and commits
+  independently to bound writer-lock duration.
+- Live writes mark the current rebuild scope ``in_progress`` in ``zeus_meta``
+  before bucket commits and mark it ``complete`` only after all post-write gates
+  pass. Consumers must refuse a rebuilt scope unless the complete sentinel is
+  present for that exact scope.
 - Quarantined snapshots (``is_quarantined(data_version)``) are skipped and counted.
 - ``>30%`` no-observation ratio → abort.
 - Zero pairs written → abort.
@@ -82,10 +89,10 @@ PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.calibration.decision_group import compute_id
-from src.calibration.manager import season_from_date
 from src.calibration.metric_specs import CalibrationMetricSpec, METRIC_SPECS
 from src.calibration.store import add_calibration_pair_v2
-from src.config import City, cities_by_name
+from src.config import City, calibration_batch_rebuild_n_mc, cities_by_name
+from src.contracts.season import season_from_date
 from src.contracts.calibration_bins import (
     UnitProvenanceError,
     grid_for_city,
@@ -102,13 +109,12 @@ from src.contracts.ensemble_snapshot_provenance import (
 )
 from src.contracts.settlement_semantics import SettlementSemantics
 from src.signal.ensemble_signal import p_raw_vector_from_maxes
-from src.state.db import get_world_connection, init_schema
+from src.state.db import init_schema
 from src.state.db_writer_lock import WriteClass, db_writer_lock  # noqa: E402
 from src.state.schema.v2_schema import apply_v2_schema
 from src.types.market import validate_bin_topology
 from src.types.metric_identity import HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN, MetricIdentity
 from scripts.verify_truth_surfaces import (
-    SHARED_DB,
     build_calibration_pair_rebuild_preflight_report,
 )
 
@@ -130,6 +136,7 @@ def iter_training_snapshots(conn: sqlite3.Connection, spec: CalibrationMetricSpe
 
 
 CANONICAL_BIN_SOURCE_V2 = "canonical_v2"
+REBUILD_COMPLETE_META_PREFIX = "calibration_pairs_v2_rebuild_complete"
 
 MIN_TRAINING_DATE = "2024-01-01"
 
@@ -223,6 +230,445 @@ def _snapshot_horizon_profile_expr() -> str:
         "CASE WHEN substr(issue_time, 12, 2) IN ('00', '12') "
         "THEN 'full' ELSE 'short' END"
     )
+
+
+def _scope_part(value: object | None) -> str:
+    text = "" if value is None else str(value).strip()
+    return text or "all"
+
+
+def _rebuild_complete_sentinel_key(
+    *,
+    spec: CalibrationMetricSpec,
+    city_filter: str | None,
+    start_date: str | None,
+    end_date: str | None,
+    data_version_filter: str | None,
+    cycle_filter: str | None,
+    source_id_filter: str | None,
+    horizon_profile_filter: str | None,
+    n_mc: int | None,
+) -> str:
+    """Return the exact zeus_meta key for a rebuild completion scope."""
+
+    return ":".join(
+        [
+            REBUILD_COMPLETE_META_PREFIX,
+            f"metric={spec.identity.temperature_metric}",
+            f"bin_source={CANONICAL_BIN_SOURCE_V2}",
+            f"city={_scope_part(city_filter)}",
+            f"start={_scope_part(start_date)}",
+            f"end={_scope_part(end_date)}",
+            f"data_version={_scope_part(data_version_filter)}",
+            f"cycle={_scope_part(cycle_filter)}",
+            f"source_id={_scope_part(source_id_filter)}",
+            f"horizon={_scope_part(horizon_profile_filter)}",
+            f"n_mc={_scope_part(n_mc)}",
+        ]
+    )
+
+
+def _rebuild_sentinel_expected_scope(
+    *,
+    city_filter: str | None,
+    start_date: str | None,
+    end_date: str | None,
+    data_version_filter: str | None,
+    cycle_filter: str | None,
+    source_id_filter: str | None,
+    horizon_profile_filter: str | None,
+    n_mc: int | None,
+) -> dict[str, object | None]:
+    return {
+        "city": city_filter,
+        "start_date": start_date,
+        "end_date": end_date,
+        "data_version": data_version_filter,
+        "cycle": cycle_filter,
+        "source_id": source_id_filter,
+        "horizon_profile": horizon_profile_filter,
+        "n_mc": n_mc,
+    }
+
+
+def _rebuild_sentinel_scope_from_key(key: str) -> dict[str, object | None] | None:
+    parts = key.split(":")
+    if len(parts) != 11 or parts[0] != REBUILD_COMPLETE_META_PREFIX:
+        return None
+    values: dict[str, str] = {}
+    for part in parts[1:]:
+        if "=" not in part:
+            return None
+        name, value = part.split("=", 1)
+        values[name] = value
+    required = {
+        "metric",
+        "bin_source",
+        "city",
+        "start",
+        "end",
+        "data_version",
+        "cycle",
+        "source_id",
+        "horizon",
+        "n_mc",
+    }
+    if set(values) != required:
+        return None
+
+    def _unpart(value: str) -> str | None:
+        return None if value == "all" else value
+
+    return {
+        "temperature_metric": values["metric"],
+        "bin_source": values["bin_source"],
+        "city": _unpart(values["city"]),
+        "start_date": _unpart(values["start"]),
+        "end_date": _unpart(values["end"]),
+        "data_version": _unpart(values["data_version"]),
+        "cycle": _unpart(values["cycle"]),
+        "source_id": _unpart(values["source_id"]),
+        "horizon_profile": _unpart(values["horizon"]),
+        "n_mc": _unpart(values["n_mc"]),
+    }
+
+
+def _scope_scalar_overlaps(left: object | None, right: object | None) -> bool:
+    left_part = _scope_part(left)
+    right_part = _scope_part(right)
+    return left_part == "all" or right_part == "all" or left_part == right_part
+
+
+def _date_range_overlaps(
+    left_start: object | None,
+    left_end: object | None,
+    right_start: object | None,
+    right_end: object | None,
+) -> bool:
+    left_start_s = None if _scope_part(left_start) == "all" else str(left_start)
+    left_end_s = None if _scope_part(left_end) == "all" else str(left_end)
+    right_start_s = None if _scope_part(right_start) == "all" else str(right_start)
+    right_end_s = None if _scope_part(right_end) == "all" else str(right_end)
+    if left_start_s is not None and right_end_s is not None and left_start_s > right_end_s:
+        return False
+    if right_start_s is not None and left_end_s is not None and right_start_s > left_end_s:
+        return False
+    return True
+
+
+def _rebuild_sentinel_scope_overlaps(
+    sentinel_scope: dict[str, object | None],
+    expected_scope: dict[str, object | None],
+    *,
+    include_n_mc: bool = True,
+) -> bool:
+    return (
+        _scope_scalar_overlaps(sentinel_scope.get("city"), expected_scope.get("city"))
+        and _scope_scalar_overlaps(
+            sentinel_scope.get("data_version"), expected_scope.get("data_version")
+        )
+        and _scope_scalar_overlaps(sentinel_scope.get("cycle"), expected_scope.get("cycle"))
+        and _scope_scalar_overlaps(
+            sentinel_scope.get("source_id"), expected_scope.get("source_id")
+        )
+        and _scope_scalar_overlaps(
+            sentinel_scope.get("horizon_profile"), expected_scope.get("horizon_profile")
+        )
+        and (
+            not include_n_mc
+            or _scope_part(sentinel_scope.get("n_mc")) == _scope_part(expected_scope.get("n_mc"))
+        )
+        and _date_range_overlaps(
+            sentinel_scope.get("start_date"),
+            sentinel_scope.get("end_date"),
+            expected_scope.get("start_date"),
+            expected_scope.get("end_date"),
+        )
+    )
+
+
+def _load_rebuild_sentinel_payload(raw_value: object, *, key: str) -> dict[str, object]:
+    try:
+        payload = json.loads(str(raw_value))
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"invalid rebuild_complete sentinel payload for {key}") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"invalid rebuild_complete sentinel payload for {key}")
+    return payload
+
+
+def _validate_rebuild_sentinel_payload(
+    payload: dict[str, object],
+    *,
+    key: str,
+    spec: CalibrationMetricSpec,
+    expected_scope: dict[str, object | None],
+) -> None:
+    if payload.get("temperature_metric") != spec.identity.temperature_metric:
+        raise RuntimeError(f"rebuild_complete sentinel payload metric mismatch for {key}")
+    if payload.get("bin_source") != CANONICAL_BIN_SOURCE_V2:
+        raise RuntimeError(f"rebuild_complete sentinel payload bin_source mismatch for {key}")
+    metric_identity = payload.get("metric_identity")
+    if not isinstance(metric_identity, dict):
+        raise RuntimeError(f"rebuild_complete sentinel payload metric_identity missing for {key}")
+    expected_identity = {
+        "physical_quantity": spec.identity.physical_quantity,
+        "observation_field": spec.identity.observation_field,
+        "temperature_metric": spec.identity.temperature_metric,
+    }
+    for field, expected in expected_identity.items():
+        if metric_identity.get(field) != expected:
+            raise RuntimeError(
+                f"rebuild_complete sentinel payload metric_identity.{field} mismatch for {key}"
+            )
+    scope = payload.get("scope")
+    if not isinstance(scope, dict):
+        raise RuntimeError(f"rebuild_complete sentinel payload scope missing for {key}")
+    for field, expected in expected_scope.items():
+        if _scope_part(scope.get(field)) != _scope_part(expected):
+            raise RuntimeError(
+                f"rebuild_complete sentinel payload scope.{field} mismatch for {key}"
+            )
+
+
+def _rebuild_sentinel_payload(
+    *,
+    status: str,
+    spec: CalibrationMetricSpec,
+    stats: RebuildStatsV2,
+    city_filter: str | None,
+    start_date: str | None,
+    end_date: str | None,
+    data_version_filter: str | None,
+    cycle_filter: str | None,
+    source_id_filter: str | None,
+    horizon_profile_filter: str | None,
+    n_mc: int | None,
+) -> dict[str, object]:
+    return {
+        "status": status,
+        "completed": status == "complete",
+        "recorded_at": datetime.now(timezone.utc).isoformat(),
+        "temperature_metric": spec.identity.temperature_metric,
+        "metric_identity": {
+            "physical_quantity": spec.identity.physical_quantity,
+            "observation_field": spec.identity.observation_field,
+            "temperature_metric": spec.identity.temperature_metric,
+        },
+        "bin_source": CANONICAL_BIN_SOURCE_V2,
+        "scope": {
+            "city": city_filter,
+            "start_date": start_date,
+            "end_date": end_date,
+            "data_version": data_version_filter,
+            "cycle": cycle_filter,
+            "source_id": source_id_filter,
+            "horizon_profile": horizon_profile_filter,
+            "n_mc": n_mc,
+        },
+        "stats": stats.as_dict(),
+    }
+
+
+def _write_rebuild_status_sentinel(
+    conn: sqlite3.Connection,
+    *,
+    status: str,
+    spec: CalibrationMetricSpec,
+    stats: RebuildStatsV2,
+    city_filter: str | None,
+    start_date: str | None,
+    end_date: str | None,
+    data_version_filter: str | None,
+    cycle_filter: str | None,
+    source_id_filter: str | None,
+    horizon_profile_filter: str | None,
+    n_mc: int | None,
+) -> str:
+    """Persist current rebuild status for the exact scope in zeus_meta.
+
+    This deliberately overwrites any previous ``complete`` sentinel with
+    ``in_progress`` before the first bucket commit.  Otherwise a crash during a
+    later rebuild could leave an old complete row beside a partial new corpus.
+    """
+
+    if status not in {"in_progress", "complete"}:
+        raise ValueError(f"invalid rebuild sentinel status: {status!r}")
+    key = _rebuild_complete_sentinel_key(
+        spec=spec,
+        city_filter=city_filter,
+        start_date=start_date,
+        end_date=end_date,
+        data_version_filter=data_version_filter,
+        cycle_filter=cycle_filter,
+        source_id_filter=source_id_filter,
+        horizon_profile_filter=horizon_profile_filter,
+        n_mc=n_mc,
+    )
+    payload = _rebuild_sentinel_payload(
+        status=status,
+        spec=spec,
+        stats=stats,
+        city_filter=city_filter,
+        start_date=start_date,
+        end_date=end_date,
+        data_version_filter=data_version_filter,
+        cycle_filter=cycle_filter,
+        source_id_filter=source_id_filter,
+        horizon_profile_filter=horizon_profile_filter,
+        n_mc=n_mc,
+    )
+    conn.execute(
+        """
+        INSERT INTO zeus_meta (key, value, updated_at)
+        VALUES (?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(key) DO UPDATE SET
+            value = excluded.value,
+            updated_at = CURRENT_TIMESTAMP
+        """,
+        (key, json.dumps(payload, sort_keys=True)),
+    )
+    return key
+
+
+def assert_rebuild_complete_sentinel(
+    conn: sqlite3.Connection,
+    *,
+    spec: CalibrationMetricSpec,
+    city_filter: str | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    data_version_filter: str | None = None,
+    cycle_filter: str | None = None,
+    source_id_filter: str | None = None,
+    horizon_profile_filter: str | None = None,
+    n_mc: int | None = None,
+) -> dict[str, object]:
+    """Return the complete sentinel payload or fail closed for this scope."""
+
+    key = _rebuild_complete_sentinel_key(
+        spec=spec,
+        city_filter=city_filter,
+        start_date=start_date,
+        end_date=end_date,
+        data_version_filter=data_version_filter,
+        cycle_filter=cycle_filter,
+        source_id_filter=source_id_filter,
+        horizon_profile_filter=horizon_profile_filter,
+        n_mc=n_mc,
+    )
+    row = conn.execute(
+        "SELECT value FROM zeus_meta WHERE key = ?",
+        (key,),
+    ).fetchone()
+    if row is None:
+        raise RuntimeError(f"missing rebuild_complete sentinel for {key}")
+    raw_value = row["value"] if isinstance(row, sqlite3.Row) else row[0]
+    payload = _load_rebuild_sentinel_payload(raw_value, key=key)
+    expected_scope = _rebuild_sentinel_expected_scope(
+        city_filter=city_filter,
+        start_date=start_date,
+        end_date=end_date,
+        data_version_filter=data_version_filter,
+        cycle_filter=cycle_filter,
+        source_id_filter=source_id_filter,
+        horizon_profile_filter=horizon_profile_filter,
+        n_mc=n_mc,
+    )
+    _validate_rebuild_sentinel_payload(
+        payload,
+        key=key,
+        spec=spec,
+        expected_scope=expected_scope,
+    )
+    if payload.get("status") != "complete" or payload.get("completed") is not True:
+        raise RuntimeError(
+            f"rebuild_complete sentinel for {key} is not complete: "
+            f"{payload.get('status')!r}"
+        )
+    return payload
+
+
+def assert_no_overlapping_incomplete_rebuild_sentinel(
+    conn: sqlite3.Connection,
+    *,
+    spec: CalibrationMetricSpec,
+    city_filter: str | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    data_version_filter: str | None = None,
+    cycle_filter: str | None = None,
+    source_id_filter: str | None = None,
+    horizon_profile_filter: str | None = None,
+    n_mc: int | None = None,
+) -> None:
+    """Fail closed if any overlapping rebuild scope is not complete."""
+
+    expected_scope = _rebuild_sentinel_expected_scope(
+        city_filter=city_filter,
+        start_date=start_date,
+        end_date=end_date,
+        data_version_filter=data_version_filter,
+        cycle_filter=cycle_filter,
+        source_id_filter=source_id_filter,
+        horizon_profile_filter=horizon_profile_filter,
+        n_mc=n_mc,
+    )
+    key_prefix = (
+        f"{REBUILD_COMPLETE_META_PREFIX}:"
+        f"metric={spec.identity.temperature_metric}:"
+        f"bin_source={CANONICAL_BIN_SOURCE_V2}:"
+    )
+    rows = conn.execute(
+        "SELECT key, value FROM zeus_meta WHERE key LIKE ?",
+        (f"{key_prefix}%",),
+    ).fetchall()
+    for row in rows:
+        key = row["key"] if isinstance(row, sqlite3.Row) else row[0]
+        raw_value = row["value"] if isinstance(row, sqlite3.Row) else row[1]
+        key_scope = _rebuild_sentinel_scope_from_key(str(key))
+        if key_scope is None:
+            raise RuntimeError(f"invalid rebuild_complete sentinel key: {key}")
+        if key_scope.get("temperature_metric") != spec.identity.temperature_metric:
+            continue
+        if key_scope.get("bin_source") != CANONICAL_BIN_SOURCE_V2:
+            continue
+        if not _rebuild_sentinel_scope_overlaps(
+            key_scope,
+            expected_scope,
+            include_n_mc=False,
+        ):
+            continue
+        payload = _load_rebuild_sentinel_payload(raw_value, key=str(key))
+        _validate_rebuild_sentinel_payload(
+            payload,
+            key=str(key),
+            spec=spec,
+            expected_scope={
+                "city": key_scope.get("city"),
+                "start_date": key_scope.get("start_date"),
+                "end_date": key_scope.get("end_date"),
+                "data_version": key_scope.get("data_version"),
+                "cycle": key_scope.get("cycle"),
+                "source_id": key_scope.get("source_id"),
+                "horizon_profile": key_scope.get("horizon_profile"),
+                "n_mc": key_scope.get("n_mc"),
+            },
+        )
+        is_complete = payload.get("status") == "complete" and payload.get("completed") is True
+        if is_complete:
+            if not _rebuild_sentinel_scope_overlaps(
+                key_scope,
+                expected_scope,
+                include_n_mc=True,
+            ):
+                continue
+            continue
+        if not is_complete:
+            raise RuntimeError(
+                f"overlapping rebuild_complete sentinel for {key} is not complete: "
+                f"{payload.get('status')!r}"
+            )
 
 
 def _as_nonempty_text(value: object | None) -> str | None:
@@ -529,6 +975,37 @@ def _assert_rebuild_preflight_ready(db_path: Path) -> None:
         )
 
 
+def _resolve_isolated_calibration_write_db_path(
+    db_path: str | Path | None,
+    *,
+    script_name: str,
+) -> Path:
+    """Resolve and validate the write-mode DB target for calibration bulk jobs."""
+    from src.state.db import ZEUS_WORLD_DB_PATH  # noqa: PLC0415
+
+    if db_path is None:
+        raise RuntimeError(
+            f"{script_name} write mode requires --db pointing at an isolated "
+            "staging calibration DB; refusing to default to the canonical "
+            "shared world DB."
+        )
+    resolved = Path(db_path).expanduser().resolve()
+    shared_world = Path(ZEUS_WORLD_DB_PATH).expanduser().resolve()
+    same_physical_file = False
+    if resolved.exists() and shared_world.exists():
+        try:
+            same_physical_file = resolved.samefile(shared_world)
+        except OSError:
+            same_physical_file = False
+    if resolved == shared_world or same_physical_file:
+        raise RuntimeError(
+            f"{script_name} write mode refuses the canonical shared world DB "
+            f"({shared_world}); use an isolated staging calibration DB and a "
+            "separate operator-approved promotion path."
+        )
+    return resolved
+
+
 def _process_snapshot_v2(
     conn: sqlite3.Connection,
     snapshot: sqlite3.Row,
@@ -759,6 +1236,9 @@ def rebuild_v2(
     writer-lock-hold duration to one city's write volume rather than the full
     rebuild. Replaces the previous monolithic outer SAVEPOINT design.
     """
+    effective_n_mc = (
+        int(n_mc) if n_mc is not None else calibration_batch_rebuild_n_mc()
+    )
     if rng is None:
         rng = np.random.default_rng()
 
@@ -782,7 +1262,7 @@ def rebuild_v2(
         print(f"Horizon filter:    {horizon_profile_filter}")
     print(f"Bin source tag:    {CANONICAL_BIN_SOURCE_V2!r}")
     print(f"MetricIdentity:    {spec.identity}")
-    print(f"n_mc per snapshot: {n_mc or 'default (ensemble_n_mc())'}")
+    print(f"n_mc per snapshot: {effective_n_mc}")
 
     snapshots = _fetch_eligible_snapshots_v2(
         conn,
@@ -878,6 +1358,23 @@ def rebuild_v2(
             f"Refusing v2 rebuild: {missing_city_count} snapshots had unknown city; rolling back."
         )
 
+    sentinel_key = _write_rebuild_status_sentinel(
+        conn,
+        status="in_progress",
+        spec=spec,
+        stats=stats,
+        city_filter=city_filter,
+        start_date=start_date,
+        end_date=end_date,
+        data_version_filter=data_version_filter,
+        cycle_filter=cycle_filter,
+        source_id_filter=source_id_filter,
+        horizon_profile_filter=horizon_profile_filter,
+        n_mc=effective_n_mc,
+    )
+    conn.commit()
+    print(f"Rebuild sentinel: {sentinel_key} -> in_progress")
+
     start = time.monotonic()
     for city_name, city_snaps in sorted(city_buckets.items()):
         city = cities_by_name[city_name]
@@ -902,7 +1399,7 @@ def rebuild_v2(
                 _process_snapshot_v2(
                     conn, snap, city,
                     spec=spec,
-                    n_mc=n_mc,
+                    n_mc=effective_n_mc,
                     rng=rng,
                     stats=stats,
                 )
@@ -950,6 +1447,23 @@ def rebuild_v2(
         raise RuntimeError(
             "Refusing v2 rebuild: zero pairs written; rolling back."
         )
+
+    sentinel_key = _write_rebuild_status_sentinel(
+        conn,
+        status="complete",
+        spec=spec,
+        stats=stats,
+        city_filter=city_filter,
+        start_date=start_date,
+        end_date=end_date,
+        data_version_filter=data_version_filter,
+        cycle_filter=cycle_filter,
+        source_id_filter=source_id_filter,
+        horizon_profile_filter=horizon_profile_filter,
+        n_mc=effective_n_mc,
+    )
+    conn.commit()
+    print(f"Rebuild sentinel: {sentinel_key} -> complete")
 
     print()
     print("=" * 70)
@@ -1106,14 +1620,25 @@ def main() -> int:
     parser.add_argument("--horizon-profile", dest="horizon_profile", default=None, help="Limit rebuild/delete scope to one horizon profile bucket.")
     parser.add_argument(
         "--n-mc", dest="n_mc", type=int, default=None,
-        help="Monte Carlo iterations per snapshot (default: ensemble_n_mc() = 10,000).",
+        help=(
+            "Monte Carlo iterations per snapshot "
+            "(default: calibration_batch_rebuild_n_mc() = 1,000)."
+        ),
     )
     args = parser.parse_args()
 
-    db_path_for_preflight = Path(args.db_path) if args.db_path else SHARED_DB
+    write_db_path: Path | None = None
     if not args.dry_run:
         try:
-            _assert_rebuild_preflight_ready(db_path_for_preflight)
+            write_db_path = _resolve_isolated_calibration_write_db_path(
+                args.db_path,
+                script_name="rebuild_calibration_pairs_v2.py",
+            )
+        except Exception as e:
+            print(f"ERROR: {type(e).__name__}: {e}", file=sys.stderr)
+            return 1
+        try:
+            _assert_rebuild_preflight_ready(write_db_path)
         except Exception as e:
             print(f"ERROR: {type(e).__name__}: {e}", file=sys.stderr)
             return 1
@@ -1156,18 +1681,12 @@ def main() -> int:
 
     # PR #86 retrofit (CRITICAL — preserved across PR #93 rebase): wrap the
     # entire write path in db_writer_lock(BULK).
-    from src.state.db import ZEUS_WORLD_DB_PATH  # noqa: PLC0415
-    from pathlib import Path as _Path  # noqa: PLC0415
-    _lock_path = _Path(args.db_path) if args.db_path else ZEUS_WORLD_DB_PATH
-    with db_writer_lock(_lock_path, WriteClass.BULK):
-        if args.db_path:
-            conn = sqlite3.connect(args.db_path)
-            conn.row_factory = sqlite3.Row
-            conn.execute("PRAGMA busy_timeout = 600000")
-            conn.execute("PRAGMA journal_mode=WAL")
-        else:
-            conn = get_world_connection(write_class="bulk")
-            conn.execute("PRAGMA busy_timeout = 600000")
+    assert write_db_path is not None
+    with db_writer_lock(write_db_path, WriteClass.BULK):
+        conn = sqlite3.connect(write_db_path)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout = 600000")
+        conn.execute("PRAGMA journal_mode=WAL")
         init_schema(conn)
         apply_v2_schema(conn)
 

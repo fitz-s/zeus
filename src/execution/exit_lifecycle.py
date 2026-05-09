@@ -300,10 +300,10 @@ def _dual_write_canonical_economic_close_if_available(
         # captured `DecisionEvidence` (the decision frame predates the
         # T4.1b accept-path wiring). Emit the `decision_evidence_reason`
         # sentinel "backfill_legacy_position" into the ENTRY_ORDER_POSTED
-        # payload so T4.2-Phase1 exit-side audit can distinguish
-        # missing-because-legacy from missing-because-bug. Without this
-        # sentinel, audit_log_false_positive_rate would flag every legacy
-        # position's exit as an asymmetry violation during Phase1 rollout.
+        # payload so the Wave31 D4 hard gate and post-hoc investigation can
+        # distinguish missing-because-legacy from missing-because-bug. Without
+        # this sentinel, every legacy position would look like a bug-level
+        # missing-evidence case.
         entry_snapshot = copy.copy(position)
         entry_snapshot.state = "entered"
         entry_snapshot.exit_state = ""

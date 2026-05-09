@@ -1200,33 +1200,6 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
             UNIQUE(city, source, utc_timestamp)
         );
 
-        -- Legacy compatibility table derived from observation_instants.
-        -- New time-sensitive logic must prefer observation_instants/diurnal tables.
-        CREATE TABLE IF NOT EXISTS hourly_observations (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            city TEXT NOT NULL,
-            obs_date TEXT NOT NULL,
-            obs_hour INTEGER NOT NULL,
-            temp REAL NOT NULL,
-            temp_unit TEXT NOT NULL,
-            source TEXT NOT NULL,
-            UNIQUE(city, obs_date, obs_hour, source)
-        );
-
-        -- Evidence-only adapter for legacy hourly rows. This view deliberately
-        -- mirrors legacy columns without claiming UTC/timezone/provenance safety.
-        DROP VIEW IF EXISTS v_evidence_hourly_observations;
-        CREATE VIEW v_evidence_hourly_observations AS
-            SELECT
-                id,
-                city,
-                obs_date,
-                obs_hour,
-                temp,
-                temp_unit,
-                source
-            FROM hourly_observations;
-
         -- Daily sunrise/sunset context for Day0 and DST-aware timing
         CREATE TABLE IF NOT EXISTS solar_daily (
             city TEXT NOT NULL,
@@ -6705,18 +6678,24 @@ def _query_entry_execution_fill_hints(
 
 
 def _position_current_effective_entry_economics(row, fill_hint: dict | None) -> dict:
+    from src.state.portfolio import fill_authority_effective_open_cost_basis
+
     submitted_size_usd = _finite_float_or_zero(row["size_usd"])
     projection_shares = _finite_float_or_zero(row["shares"])
     projection_cost_basis_usd = _finite_float_or_zero(row["cost_basis_usd"])
     projection_entry_price = _finite_float_or_zero(row["entry_price"])
+    phase = str(row["phase"] or "")
 
     if fill_hint:
         filled_cost_basis_usd = _finite_float_or_zero(fill_hint.get("filled_cost_basis_usd"))
         filled_shares = _finite_float_or_zero(fill_hint.get("shares_filled"))
         avg_fill_price = _finite_float_or_zero(fill_hint.get("entry_price_avg_fill"))
-        effective_cost_basis_usd = filled_cost_basis_usd
-        if projection_cost_basis_usd > 0.0:
-            effective_cost_basis_usd = min(projection_cost_basis_usd, filled_cost_basis_usd)
+        effective_cost_basis_usd = fill_authority_effective_open_cost_basis(
+            current_open_cost=projection_cost_basis_usd,
+            current_open_shares=projection_shares,
+            entry_fill_cost=filled_cost_basis_usd,
+            entry_fill_shares=filled_shares,
+        )
         effective_shares = filled_shares
         if projection_shares > 0.0:
             effective_shares = min(projection_shares, filled_shares)
@@ -6740,6 +6719,26 @@ def _position_current_effective_entry_economics(row, fill_hint: dict | None) -> 
             "execution_fact_intent_id": str(fill_hint.get("execution_fact_intent_id") or ""),
             "execution_fact_filled_at": str(fill_hint.get("execution_fact_filled_at") or ""),
             "execution_fact_venue_status": str(fill_hint.get("execution_fact_venue_status") or ""),
+        }
+
+    if phase == "pending_entry":
+        return {
+            "submitted_size_usd": submitted_size_usd,
+            "projection_cost_basis_usd": projection_cost_basis_usd,
+            "effective_cost_basis_usd": 0.0,
+            "effective_shares": 0.0,
+            "pnl_cost_basis_usd": 0.0,
+            "effective_entry_price": 0.0,
+            "entry_price_avg_fill": 0.0,
+            "shares_filled": 0.0,
+            "filled_cost_basis_usd": 0.0,
+            "entry_economics_authority": ENTRY_ECONOMICS_LEGACY_UNKNOWN,
+            "fill_authority": FILL_AUTHORITY_NONE,
+            "entry_economics_source": "pending_entry_without_fill_authority",
+            "entry_fill_verified": False,
+            "execution_fact_intent_id": "",
+            "execution_fact_filled_at": "",
+            "execution_fact_venue_status": "",
         }
 
     pnl_cost_basis_usd = projection_cost_basis_usd if projection_cost_basis_usd > 0.0 else submitted_size_usd

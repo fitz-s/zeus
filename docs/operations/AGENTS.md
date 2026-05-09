@@ -154,6 +154,28 @@ make a surface default-read unless `current_state.md` routes it.
 | `task_2026-05-08_object_invariance_wave29/PLAN.md` | topology planning packet | Route evidence for preventing skipped/error monitor results from reporting stale probabilities as fresh |
 | `task_2026-05-08_object_invariance_wave30/` | plan packet container | Planning-lock evidence for object-meaning invariance Wave 30 position_current monitor probability read-model authority repair |
 | `task_2026-05-08_object_invariance_wave30/PLAN.md` | topology planning packet | Route evidence for preserving missing monitor probability and edge through canonical portfolio loader view |
+| `task_2026-05-08_object_invariance_wave31/` | plan packet container | Planning-lock evidence for object-meaning invariance Wave 31 D4 exit evidence hard gate repair |
+| `task_2026-05-08_object_invariance_wave31/PLAN.md` | topology planning packet | Route evidence for preventing weak statistical exit evidence from becoming executable sell intent |
+| `task_2026-05-08_object_invariance_wave32/` | plan packet container | Planning-lock evidence for object-meaning invariance Wave 32 venue fill cost-basis continuity repair |
+| `task_2026-05-08_object_invariance_wave32/PLAN.md` | topology planning packet | Route evidence for preserving venue-confirmed fill cost through portfolio loader and Position effective exposure |
+| `task_2026-05-08_object_invariance_wave33/` | plan packet container | Planning-lock evidence for object-meaning invariance Wave 33 passive maker fee authority repair |
+| `task_2026-05-08_object_invariance_wave33/PLAN.md` | topology planning packet | Route evidence for preventing post-only passive maker-only cost basis from carrying market taker fee |
+| `task_2026-05-08_object_invariance_wave34/` | plan packet container | Planning-lock evidence for object-meaning invariance Wave 34 replay execution-cost continuity repair |
+| `task_2026-05-08_object_invariance_wave34/PLAN.md` | topology planning packet | Route evidence for preserving fee-adjusted replay execution cost through shares and PnL |
+| `task_2026-05-08_object_invariance_wave35/` | plan packet container | Planning-lock evidence for object-meaning invariance Wave 35 calibration bulk writer isolation repair |
+| `task_2026-05-08_object_invariance_wave35/PLAN.md` | topology planning packet | Route evidence for preventing rebuild/refit bulk calibration writes from defaulting to canonical live world DB |
+| `task_2026-05-08_object_invariance_wave36/` | plan packet container | Planning-lock evidence for object-meaning invariance Wave 36 pending entry economics authority repair |
+| `task_2026-05-08_object_invariance_wave36/PLAN.md` | topology planning packet | Route evidence for preventing pending submitted/model economics from masquerading as fill-authoritative position cost basis |
+| `task_2026-05-08_object_invariance_wave37/` | plan packet container | Planning-lock evidence for object-meaning invariance Wave 37 calibration weighting LAW antibody triage |
+| `task_2026-05-08_object_invariance_wave37/PLAN.md` | topology planning packet | Route evidence separating safe calibration weighting LAW antibodies from schema/data-layer blocked LAW implementation work |
+| `task_2026-05-08_object_invariance_wave38/` | plan packet container | Planning-lock evidence for object-meaning invariance Wave 38 dead hourly-observations compatibility-surface deletion |
+| `task_2026-05-08_object_invariance_wave38/PLAN.md` | topology planning packet | Route evidence for deleting stale `hourly_observations` table/view/script constructibility without mutating canonical DB data |
+| `task_2026-05-08_object_invariance_wave39/` | plan packet container | Planning-lock evidence for object-meaning invariance Wave 39 `solar_daily` malformed-rootpage Day0 degrade antibody |
+| `task_2026-05-08_object_invariance_wave39/PLAN.md` | topology planning packet | Route evidence for proving malformed `solar_daily` rootpage degrades Day0 evaluator/monitor paths without DB mutation |
+| `task_2026-05-08_object_invariance_wave41/` | plan packet container | Planning-lock evidence for object-meaning invariance Wave 41 explicit fill-price authority repair |
+| `task_2026-05-08_object_invariance_wave41/PLAN.md` | topology planning packet | Route evidence for preventing generic exchange `price` from becoming venue-confirmed fill economics |
+| `task_2026-05-08_object_invariance_wave42/` | plan packet container | Planning-lock evidence for object-meaning invariance Wave 42 harvester corrected-economics fail-closed repair |
+| `task_2026-05-08_object_invariance_wave42/PLAN.md` | topology planning packet | Route evidence for preventing corrected-marked positions without fill authority from using legacy settlement P&L fallback |
 | `task_2026-05-08_object_invariance_remaining_mainline/` | closeout packet container | Remaining object-meaning invariance mainline closeout packet for Wave22/23 evidence, failed-trade rollback repair, downstream sweep, and read-only contamination audit |
 | `task_2026-05-08_object_invariance_remaining_mainline/PLAN.md` | closeout ledger | Evidence and verification for remaining mainline closure; not live unlock, data mutation authority, backfill, relabel, or report-publication authority |
 | `task_2026-05-06_calibration_quality_blockers/` | active packet container | 2026-05-06 launch-blocker remediation packet for calibration quality (12 inverted-slope Platts quarantined + fit-time guard) |

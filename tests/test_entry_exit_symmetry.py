@@ -1,6 +1,6 @@
 # Created: 2026-04-07
 # Last reused/audited: 2026-05-08
-# Authority basis: docs/operations/task_2026-05-08_object_invariance_wave28/PLAN.md
+# Authority basis: docs/operations/task_2026-05-08_object_invariance_wave28/PLAN.md; docs/operations/task_2026-05-08_object_invariance_wave31/PLAN.md
 """Tests for entry-exit epistemic symmetry. §P9.7, D4.
 
 Entry: bootstrap n=200+ with BH-FDR α=0.10.
@@ -235,7 +235,7 @@ class TestExitCannotUseWeakerEvidenceThanEntry:
 class TestDecisionEvidenceStaticCallSitePresence:
     """AST-walk presence tests — D4 contract call sites must survive
     refactors. Antibody against silent removal or rerouting of the
-    T4.1b entry-path construction and T4.2-Phase1 exit-audit wiring."""
+    T4.1b entry-path construction and T4.2 exit-gate wiring."""
 
     @staticmethod
     def _source_tree(path: str):
@@ -276,7 +276,7 @@ class TestDecisionEvidenceStaticCallSitePresence:
         DecisionEvidence(evidence_type="entry", ...) somewhere (the
         T4.1b accept-path wiring at L1700+). If this fails, a refactor
         silently removed or relocated the construction — T4.1b /
-        T4.2-Phase1 read path will begin returning None entry evidence
+        T4.2 read path will begin returning None entry evidence
         in production."""
         tree = self._source_tree("src/engine/evaluator.py")
         hits = self._decision_evidence_calls_with_type(tree, evidence_type="entry")
@@ -287,26 +287,25 @@ class TestDecisionEvidenceStaticCallSitePresence:
             "should_trade=True EdgeDecision construction."
         )
 
-    def test_cycle_runtime_constructs_exit_evidence_for_audit(self):
+    def test_cycle_runtime_constructs_exit_evidence_for_gate(self):
         """src/engine/cycle_runtime.py must construct
         DecisionEvidence(evidence_type="exit", ...) for the
-        T4.2-Phase1 symmetry audit. Absence means the exit-side weak-
-        burden fabrication was silently dropped and the D4 audit trail
-        is no longer being generated."""
+        T4.2 symmetry gate. Absence means the exit-side weak-burden
+        comparison was silently dropped and D4 statistical exits can bypass
+        the gate."""
         tree = self._source_tree("src/engine/cycle_runtime.py")
         hits = self._decision_evidence_calls_with_type(tree, evidence_type="exit")
         assert hits, (
             "src/engine/cycle_runtime.py must contain "
-            'DecisionEvidence(evidence_type="exit", ...) — T4.2-Phase1 '
-            "audit-only wrapper around pos.evaluate_exit."
+            'DecisionEvidence(evidence_type="exit", ...) — T4.2 '
+            "hard gate around pos.evaluate_exit."
         )
 
     def test_cycle_runtime_invokes_assert_symmetric_with(self):
         """src/engine/cycle_runtime.py must invoke
         `<exit_evidence>.assert_symmetric_with(entry_evidence)` at
-        least once — the T4.2-Phase1 symmetry gate. Phase2 will flip
-        the surrounding try/except; if this call is removed, Phase2's
-        hard-fail path will never reach the assertion."""
+        least once — the T4.2 symmetry gate. If this call is removed,
+        weak statistical exits can again become executable sell intents."""
         import ast
         tree = self._source_tree("src/engine/cycle_runtime.py")
         hits: list[int] = []
@@ -320,6 +319,5 @@ class TestDecisionEvidenceStaticCallSitePresence:
         assert hits, (
             "src/engine/cycle_runtime.py must invoke "
             "exit_evidence.assert_symmetric_with(entry_evidence) — "
-            "the T4.2-Phase1 D4 audit gate that Phase2 will escalate "
-            "to hard-fail."
+            "the T4.2 D4 hard gate."
         )

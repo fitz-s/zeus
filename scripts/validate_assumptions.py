@@ -87,23 +87,18 @@ def run_validation() -> dict:
         checks.append("monitor_refresh MC counts are sourced from config helpers")
 
     # B4 Phase 6 (2026-05-01) + PR #35 critic MAJOR-1 follow-up (2026-05-02):
-    # The two time-semantic ETLs (etl_diurnal_curves.py, etl_hourly_observations.py)
-    # are launched by `src/ingest_main.py` (the ingest daemon), not `src/main.py`
-    # (the trading daemon). The original check looked at the wrong file and was
-    # silently blinded when the diurnal subsystem moved out of trading-daemon
-    # startup. Phase 6 deleted the check entirely; this slice restores it
-    # against the correct file so the canary still fires if ingest_main.py
-    # ever stops kicking off these ETLs.
+    # The DST-aware diurnal ETL is launched by `src/ingest_main.py` (the ingest
+    # daemon), not `src/main.py` (the trading daemon). The original check looked
+    # at the wrong file and was silently blinded when the diurnal subsystem moved
+    # out of trading-daemon startup. The dead lossy hourly compatibility ETL was
+    # removed in Wave38; only canonical time-semantic sync remains required here.
     #
     # Why ingest_main.py is the right anchor: see src/ingest_main.py:472-485
     # (subprocess loop over scripts/etl_*.py). Output tables (diurnal_curves,
     # observation_instants) are read at runtime by src/signal/diurnal.py and
     # src/data/ingest_status_writer.py.
     ingest_main_source = INGEST_MAIN_PATH.read_text(encoding="utf-8")
-    for required_script in (
-        "etl_diurnal_curves.py",
-        "etl_hourly_observations.py",
-    ):
+    for required_script in ("etl_diurnal_curves.py",):
         if required_script not in ingest_main_source:
             mismatches.append(
                 f"ingest daemon missing required script {required_script}"

@@ -1461,7 +1461,8 @@ def _replay_one_settlement(
     from src.calibration.manager import get_calibrator
     from src.strategy.fdr_filter import fdr_filter
     from src.strategy.kelly import dynamic_kelly_mult
-    from src.engine.evaluator import _size_at_execution_price_boundary, _default_weather_fee_rate
+    from src.engine.evaluator import _default_weather_fee_rate, _size_at_execution_price_boundary
+    from src.contracts.execution_price import polymarket_fee
     from src.strategy.market_analysis import MarketAnalysis
     from src.strategy.market_fusion import MODEL_ONLY_POSTERIOR_MODE, compute_alpha
     from src.calibration.manager import season_from_month
@@ -1672,6 +1673,10 @@ def _replay_one_settlement(
             # ExecutionPrice (fee-adjusted) rather than a bare float.
             # _default_weather_fee_rate() mirrors the live-evaluation path.
             _replay_fee_rate = _default_weather_fee_rate()
+            _replay_execution_price = edge.entry_price + polymarket_fee(
+                edge.entry_price,
+                fee_rate=_replay_fee_rate,
+            )
             size_usd = _size_at_execution_price_boundary(
                 p_posterior=edge.p_posterior,
                 entry_price=edge.entry_price,
@@ -1712,6 +1717,7 @@ def _replay_one_settlement(
                     "fdr_filter",
                     *provenance_validations,
                     "kelly_sizing",
+                    "replay_execution_cost_fee_adjusted",
                     "market_price_linked" if market_price_linked else "market_price_unavailable",
                 ],
             )
@@ -1721,7 +1727,11 @@ def _replay_one_settlement(
 
             if should_trade and edge.entry_price > 0:
                 would_trade = True
-                shares = size_usd / edge.entry_price if edge.entry_price > 0 else 0.0
+                shares = (
+                    size_usd / _replay_execution_price
+                    if _replay_execution_price > 0
+                    else 0.0
+                )
                 round_fn = SettlementSemantics.for_city(city).round_values if city else None
                 won = derive_outcome_from_settlement_value(
                     settlement_value,

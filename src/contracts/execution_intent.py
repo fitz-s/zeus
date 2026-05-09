@@ -83,6 +83,7 @@ _FINAL_INTENT_FORBIDDEN_RECOMPUTE_PREFIXES = (
     "edge_context",
     "legacy_edge",
 )
+_POST_ONLY_MAKER_FEE_SOURCE_PREFIX = "post_only_maker_fee_exempt"
 
 
 _HEX_CHARS = frozenset("0123456789abcdefABCDEF")
@@ -261,6 +262,33 @@ def _fee_adjusted_price(
     if direction.startswith("sell_"):
         return expected_fill_price_before_fee - fee
     raise ValueError(f"unsupported execution direction {direction!r}")
+
+
+def _applicable_platform_fee_rate(
+    *,
+    order_policy: str,
+    snapshot_fee_rate: Decimal,
+) -> Decimal:
+    if order_policy == "post_only_passive_limit":
+        return Decimal("0")
+    return snapshot_fee_rate
+
+
+def _fee_source_for_order_policy(
+    *,
+    order_policy: str,
+    snapshot_fee_source: str,
+) -> str:
+    if order_policy == "post_only_passive_limit":
+        source = str(snapshot_fee_source or "").strip() or "snapshot_fee_details"
+        return f"{_POST_ONLY_MAKER_FEE_SOURCE_PREFIX}:{source}"
+    return snapshot_fee_source
+
+
+def _has_post_only_maker_fee_source(value: Any) -> bool:
+    text = str(value or "").strip()
+    prefix = f"{_POST_ONLY_MAKER_FEE_SOURCE_PREFIX}:"
+    return text.startswith(prefix) and bool(text[len(prefix):].strip())
 
 
 def _adverse_slippage_bps(
@@ -779,14 +807,22 @@ class ExecutableCostBasis:
                 else "UNVERIFIED"
             )
         fee_details = dict(snapshot.fee_details)
-        fee_rate = _as_decimal(
+        snapshot_fee_rate = _as_decimal(
             fee_rate_fraction_from_details(fee_details),
-            "worst_case_fee_rate",
+            "snapshot_fee_rate",
         )
-        fee_source = str(
+        snapshot_fee_source = str(
             fee_details.get("fee_rate_source_field")
             or fee_details.get("source")
             or "snapshot_fee_details"
+        )
+        fee_rate = _applicable_platform_fee_rate(
+            order_policy=order_policy,
+            snapshot_fee_rate=snapshot_fee_rate,
+        )
+        fee_source = _fee_source_for_order_policy(
+            order_policy=order_policy,
+            snapshot_fee_source=snapshot_fee_source,
         )
         expected_fill = _as_decimal(
             expected_fill_price_before_fee,
@@ -946,6 +982,16 @@ class ExecutableCostBasis:
             final_limit_price=self.final_limit_price,
         )
         _require_unit_interval_closed(self.worst_case_fee_rate, "worst_case_fee_rate")
+        if self.order_policy == "post_only_passive_limit":
+            if self.worst_case_fee_rate != Decimal("0"):
+                raise ValueError(
+                    "post_only_passive_limit maker-only cost basis requires zero "
+                    "applicable platform fee rate"
+                )
+            if not _has_post_only_maker_fee_source(self.fee_source):
+                raise ValueError(
+                    "post_only_passive_limit fee_source must preserve maker fee exemption"
+                )
         expected_fee_adjusted = _fee_adjusted_price(
             expected_fill_price_before_fee=self.expected_fill_price_before_fee,
             fee_rate=self.worst_case_fee_rate,
@@ -1420,6 +1466,14 @@ class FinalExecutionIntent:
             self.fee_adjusted_execution_price,
             "fee_adjusted_execution_price",
         )
+        if (
+            self.order_policy == "post_only_passive_limit"
+            and self.fee_rate != Decimal("0")
+        ):
+            raise ValueError(
+                "post_only_passive_limit maker-only final intent requires zero "
+                "applicable platform fee rate"
+            )
         expected_fee_adjusted = _fee_adjusted_price(
             expected_fill_price_before_fee=self.expected_fill_price_before_fee,
             fee_rate=self.fee_rate,

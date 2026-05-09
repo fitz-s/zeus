@@ -1,7 +1,7 @@
 # Created: 2026-04-23
-# Last reused/audited: 2026-05-05
-# Lifecycle: created=2026-04-23; last_reviewed=2026-05-05; last_reused=2026-05-05
-# Authority basis: midstream verdict v2 2026-04-23; Phase 1A calibration-maturity gate 2026-04-29
+# Last reused/audited: 2026-05-08
+# Lifecycle: created=2026-04-23; last_reviewed=2026-05-08; last_reused=2026-05-08
+# Authority basis: midstream verdict v2 2026-04-23; Phase 1A calibration-maturity gate 2026-04-29; Wave31 D4 hard gate
 # Purpose: Lock runtime construction of entry DecisionEvidence on evaluator accept paths.
 # Reuse: Run for evaluator entry decision, day0 accept-path, or DecisionEvidence wiring changes.
 
@@ -24,7 +24,7 @@ construction, this test fires immediately.
 Paired with:
 - T4.1b static emission tests (``tests/test_decision_evidence_entry_emission.py``)
 - T4.1a primitive round-trip tests (``tests/test_decision_evidence_persistence.py``)
-- T4.2-Phase1 exit-side audit tests (``tests/test_exit_evidence_audit.py``)
+- T4.2 exit-side hard-gate tests (``tests/test_exit_evidence_audit.py``)
 """
 
 from __future__ import annotations

@@ -1,6 +1,6 @@
 # Created: 2026-04-23
-# Last reused/audited: 2026-04-23
-# Authority basis: midstream verdict v2 2026-04-23 (docs/to-do-list/zeus_midstream_fix_plan_2026-04-23.md T4.1b DecisionEvidence entry-event emission, D4 Option E)
+# Last reused/audited: 2026-05-08
+# Authority basis: midstream verdict v2 2026-04-23 (docs/to-do-list/zeus_midstream_fix_plan_2026-04-23.md T4.1b DecisionEvidence entry-event emission, D4 Option E); Wave31 D4 hard gate
 
 """T4.1b DecisionEvidence entry-event emission antibodies.
 
@@ -13,16 +13,16 @@ and the canonical position_events.payload_json sidecar:
 - POSITION_OPEN_INTENT and ENTRY_ORDER_FILLED payloads do NOT carry either
   sidecar key (scope boundary per T4.0 Option E design).
 - Legacy backfill from src/execution/exit_lifecycle.py emits
-  ``decision_evidence_reason="backfill_legacy_position"`` so T4.2-Phase1
-  exit-side audit can distinguish missing-because-legacy from
-  missing-because-bug.
+  ``decision_evidence_reason="backfill_legacy_position"`` so the Wave31
+  exit-side hard gate and post-hoc investigation can distinguish
+  missing-because-legacy from missing-because-bug.
 - build_entry_fill_only_canonical_write (fill_tracker path) never emits
   either key — fill-only detection runs after the decision frame has
   released, so there is no evidence to attach.
 - Default call (no evidence, no reason) preserves the pre-slice payload
   key set byte-identically.
 
-Read-side pattern demonstrated (T4.2-Phase1 readiness):
+Read-side pattern demonstrated (T4.2/Wave31 readiness):
 ``json_extract(payload_json, '$.decision_evidence_envelope')`` returns the
 envelope JSON string directly, ready for ``DecisionEvidence.from_json``
 consumption — no dict-re-serialization step.
@@ -58,6 +58,7 @@ def _runtime_position(
         target_date="2026-04-03",
         bin_label="39-40°F",
         direction="buy_yes",
+        env="live",
         unit="F",
         size_usd=10.0,
         entry_price=0.5,
@@ -170,7 +171,7 @@ class TestRoundTripRehydration:
         assert rehydrated == original
 
     def test_read_side_pattern_simulates_json_extract(self):
-        """Exit-side T4.2-Phase1 retrieval pattern in SQL:
+        """Exit-side T4.2/Wave31 retrieval pattern in SQL:
           json_extract(payload_json, '$.decision_evidence_envelope')
           → DecisionEvidence.from_json(raw_string)
 
