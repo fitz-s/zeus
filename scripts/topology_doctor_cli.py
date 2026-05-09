@@ -4,7 +4,7 @@ Keep command parsing and rendering here; keep topology checks/builders in
 topology_doctor.py until golden-output parity is strong enough for deeper
 module extraction.
 """
-# Lifecycle: created=2026-04-15; last_reviewed=2026-04-16; last_reused=2026-04-16
+# Lifecycle: created=2026-04-15; last_reviewed=2026-04-16; last_reused=2026-05-09
 # Purpose: Parse topology_doctor CLI flags and render checker payloads.
 # Reuse: Inspect topology_doctor.py facade exports before adding new CLI lanes.
 
@@ -196,6 +196,24 @@ def _print_route_card(card: dict[str, Any]) -> None:
         print("- out_of_scope_files:")
         for path in card["out_of_scope_files"]:
             print(f"  - {path}")
+    if card.get("primary_blocker"):
+        blocker = card["primary_blocker"]
+        print("- primary_blocker:")
+        print(f"  code: {blocker.get('code')}")
+        print(f"  message: {blocker.get('message')}")
+        if blocker.get("paths"):
+            print("  paths:")
+            for path in blocker["paths"]:
+                print(f"    - {path}")
+    if card.get("route_candidates"):
+        print("- route_candidates:")
+        for candidate in card["route_candidates"]:
+            selected = " selected" if candidate.get("selected") else ""
+            print(f"  - {candidate.get('rank')}: {candidate.get('profile')}{selected}")
+    if card.get("mandatory_companion_files"):
+        print("- mandatory_companion_files:")
+        for companion in card["mandatory_companion_files"]:
+            print(f"  - {companion.get('path')} -> {companion.get('companion')}")
     budget = card.get("gate_budget") or {}
     if budget:
         print(f"- gate_budget: {budget.get('label')}")
@@ -209,7 +227,7 @@ def _print_route_card(card: dict[str, Any]) -> None:
         print("- expansion_hints:")
         for hint in card["expansion_hints"]:
             print(f"  - {hint}")
-    if card.get("why_not_admitted"):
+    if card.get("why_not_admitted") and not card.get("primary_blocker"):
         print("- why_not_admitted:")
         for reason in card["why_not_admitted"]:
             print(f"  - {reason}")

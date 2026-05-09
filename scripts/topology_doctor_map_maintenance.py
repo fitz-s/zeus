@@ -1,5 +1,5 @@
 """Map-maintenance checker family for topology_doctor."""
-# Lifecycle: created=2026-04-14; last_reviewed=2026-04-29; last_reused=2026-04-29
+# Lifecycle: created=2026-04-14; last_reviewed=2026-04-29; last_reused=2026-05-09
 # Purpose: Check changed-file companion registry requirements for map-maintenance closeout.
 # Reuse: Keep packet-local evidence rules narrow; do not require broad docs companions for covered descendants.
 
@@ -116,7 +116,7 @@ def run_map_maintenance(api: Any, changed_files: list[str] | None = None, mode: 
                 )
             ],
         )
-    issue_fn = api._issue if mode_spec.get("blocking") else api._warning
+    issue_fn = api.issue if mode_spec.get("blocking") else api.warning
     try:
         changes = api._map_maintenance_changes(changed_files or [])
     except api.subprocess.CalledProcessError as exc:
@@ -151,6 +151,10 @@ def run_map_maintenance(api: Any, changed_files: list[str] | None = None, mode: 
                             "map_maintenance_companion_missing",
                             path,
                             f"{kind} file requires companion update {companion} ({rule.get('id')})",
+                            owner_manifest="architecture/map_maintenance.yaml",
+                            repair_kind="update_companion",
+                            related_paths=(companion,),
+                            companion_of=path,
                         )
                     )
     blocking = [issue for issue in issues if issue.severity == "error"]

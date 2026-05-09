@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Topology doctor for Zeus's compiled agent-navigation graph."""
-# Lifecycle: created=2026-04-13; last_reviewed=2026-04-30; last_reused=2026-04-30
+# Lifecycle: created=2026-04-13; last_reviewed=2026-04-30; last_reused=2026-05-09
 # Purpose: Main facade for compiled topology, navigation, and closeout checks.
 # Reuse: Prefer adding narrow checker-family modules instead of expanding this facade directly.
 
@@ -204,6 +204,9 @@ SCHEMA_ROUTE_CARD_REQUIRED_FIELDS: tuple[str, ...] = (
     "selection_evidence_class",
     "needs_typed_intent",
     "companion_files",
+    "primary_blocker",
+    "route_candidates",
+    "mandatory_companion_files",
     "admission_status",
     "risk_tier",
     "gate_budget",
@@ -1907,6 +1910,8 @@ def _route_card_next_action(
             return "stop until explicit operator-go, dry-run evidence, apply guard, and rollback plan exist"
         return "proceed with admitted files and focused verification"
     if admission_status == "advisory_only":
+        if risk_tier == "T0":
+            return "read-only orientation; no edit admission granted or required"
         if operation_stage == "plan":
             return (
                 "planning only: use requested files as read-only impact context, "
@@ -1934,6 +1939,11 @@ def _route_card_expansion_hints(
             "do not edit until requested files are admitted",
         ]
     if admission_status == "advisory_only":
+        if risk_tier == "T0":
+            return [
+                "use this route card as orientation only",
+                "run a separate edit/apply navigation route before changing files",
+            ]
         if operation_stage == "plan":
             return [
                 "treat requested files as impact context, not edit permission",
@@ -1978,6 +1988,104 @@ def _route_card_why_not_admitted(admission: dict[str, Any]) -> list[str]:
     if status not in {"admitted", "advisory_only"}:
         reasons.insert(0, f"admission_status={status}")
     return list(dict.fromkeys(reasons))
+
+
+def _route_card_primary_blocker(
+    *,
+    status: str,
+    admission: dict[str, Any],
+    why_not_admitted: list[str],
+    risk_tier: str,
+    write_intent: str | None,
+) -> dict[str, Any] | None:
+    if status == "admitted":
+        return None
+    normalized_write_intent = (write_intent or "").strip().lower().replace("-", "_").replace(" ", "_")
+    selected_by = str((admission.get("decision_basis") or {}).get("selected_by") or "")
+    if status in {"ambiguous", "route_contract_conflict"} or selected_by == "typed_intent_invalid":
+        causal_reason = next(
+            (reason for reason in why_not_admitted if not reason.startswith("admission_status=")),
+            why_not_admitted[0] if why_not_admitted else "route admission is ambiguous",
+        )
+        return {
+            "code": selected_by or f"admission_{status or 'unknown'}",
+            "message": causal_reason,
+            "paths": list(admission.get("out_of_scope_files") or []) + list(admission.get("forbidden_hits") or []),
+        }
+    if risk_tier == "T0" or normalized_write_intent in {"read_only", "readonly", "none"}:
+        return None
+    forbidden = list(admission.get("forbidden_hits") or [])
+    if forbidden:
+        return {
+            "code": "forbidden_files",
+            "message": "requested files matched forbidden route surfaces",
+            "paths": forbidden,
+        }
+    out_of_scope = list(admission.get("out_of_scope_files") or [])
+    if out_of_scope:
+        return {
+            "code": "out_of_scope_files",
+            "message": "requested files are not admitted by the selected route",
+            "paths": out_of_scope,
+        }
+    if why_not_admitted:
+        return {
+            "code": "admission_not_granted",
+            "message": why_not_admitted[0],
+            "paths": [],
+        }
+    return {
+        "code": f"admission_{status or 'unknown'}",
+        "message": "route did not grant edit admission",
+        "paths": [],
+    }
+
+
+def _route_card_route_candidates(profile: str, profile_selection: dict[str, Any]) -> list[dict[str, Any]]:
+    candidates = [str(candidate) for candidate in profile_selection.get("candidates") or [] if str(candidate)]
+    if not candidates and profile:
+        candidates = [profile]
+    out: list[dict[str, Any]] = []
+    for index, candidate in enumerate(candidates[:3], start=1):
+        out.append({"rank": index, "profile": candidate, "selected": candidate == profile})
+    return out
+
+
+def _route_card_mandatory_companion_files(files: list[str]) -> list[dict[str, Any]]:
+    if not files:
+        return []
+    try:
+        result = run_map_maintenance(files, mode="advisory")
+    except Exception as exc:  # pragma: no cover - defensive route-card rendering
+        return [
+            {
+                "path": "<map_maintenance>",
+                "companion": None,
+                "reason": f"map-maintenance unavailable: {exc}",
+            }
+        ]
+    companions: list[dict[str, Any]] = []
+    seen: set[tuple[str, str | None]] = set()
+    for issue_item in result.issues:
+        if issue_item.code != "map_maintenance_companion_missing":
+            continue
+        related = list(issue_item.related_paths or ())
+        if not related:
+            match = re.search(r"companion update ([^ ]+)", issue_item.message)
+            related = [match.group(1)] if match else []
+        for companion in related or [None]:
+            key = (issue_item.path, companion)
+            if key in seen:
+                continue
+            seen.add(key)
+            companions.append(
+                {
+                    "path": issue_item.path,
+                    "companion": companion,
+                    "reason": issue_item.message,
+                }
+            )
+    return companions
 
 
 def _route_card_safe_next_files(task: str, profile: str, admission: dict[str, Any]) -> list[str]:
@@ -2307,6 +2415,7 @@ def build_runtime_route_card(
     persistence_target = _route_card_persistence_target(profile, task, list(files or []), operation_vector)
     merge_conflict_scan = _route_card_merge_conflict_scan(operation_vector)
     merge_evidence_required = _route_card_merge_evidence_required(operation_vector)
+    why_not_admitted = _route_card_why_not_admitted(admission)
     return {
         "schema_version": "1",
         "authority_status": "generated_route_card_not_authority",
@@ -2320,6 +2429,15 @@ def build_runtime_route_card(
         "needs_typed_intent": bool(profile_selection.get("needs_typed_intent")),
         "companion_files": list(profile_selection.get("companion_file_hits") or [])
         + list(profile_selection.get("shared_file_hits") or []),
+        "primary_blocker": _route_card_primary_blocker(
+            status=status,
+            admission=admission,
+            why_not_admitted=why_not_admitted,
+            risk_tier=risk_tier,
+            write_intent=write_intent,
+        ),
+        "route_candidates": _route_card_route_candidates(profile, profile_selection),
+        "mandatory_companion_files": _route_card_mandatory_companion_files(list(files or [])),
         "admission_status": status,
         "risk_tier": risk_tier,
         "gate_budget": gate_budget,
@@ -2344,7 +2462,7 @@ def build_runtime_route_card(
             merge_evidence_required=merge_evidence_required,
             operation_vector=operation_vector,
         ),
-        "why_not_admitted": _route_card_why_not_admitted(admission),
+        "why_not_admitted": why_not_admitted,
         "suggested_next_command": _route_card_suggested_next_command(
             task=task,
             profile=profile,

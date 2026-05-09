@@ -1,6 +1,6 @@
 """Tests for topology_doctor compiled topology gates."""
 # Created: 2026-04-13
-# Last reused/audited: 2026-05-06
+# Last reused/audited: 2026-05-09
 # Authority basis: docs/operations/task_2026-05-02_review_crash_remediation/PLAN.md Slices 4-5; Wave17 object-meaning backfill guard repair.
 # Lifecycle: created=2026-04-13; last_reviewed=2026-05-06; last_reused=2026-05-06
 # Purpose: Regression tests for topology_doctor lanes, CLI parity, closeout compilation, and dangerous script manifest guards.
@@ -1595,6 +1595,11 @@ def test_map_maintenance_requires_test_topology_for_new_test_file(monkeypatch):
     assert not result.ok
     assert any(issue.code == "map_maintenance_companion_missing" for issue in result.issues)
     assert any("architecture/test_topology.yaml" in issue.message for issue in result.issues)
+    companion_issue = next(issue for issue in result.issues if issue.code == "map_maintenance_companion_missing")
+    assert companion_issue.owner_manifest == "architecture/map_maintenance.yaml"
+    assert companion_issue.repair_kind == "update_companion"
+    assert companion_issue.related_paths == ("architecture/test_topology.yaml",)
+    assert companion_issue.companion_of == "tests/test_new_behavior.py"
 
 
 def test_map_maintenance_allows_new_test_file_when_companion_present(monkeypatch):
@@ -3811,6 +3816,71 @@ def test_runtime_route_card_contract_matches_schema():
     assert "structural_decision_hints" in card
 
 
+def test_runtime_route_card_first_screen_contract_for_high_fanout_file():
+    digest = topology_doctor.build_digest(
+        "fix evaluator behavior",
+        ["src/engine/evaluator.py"],
+        write_intent="edit",
+    )
+    card = digest["route_card"]
+
+    assert digest["profile_selection"]["selected_by"] == "high_fanout_file_only"
+    assert card["primary_blocker"] == {
+        "code": "out_of_scope_files",
+        "message": "requested files are not admitted by the selected route",
+        "paths": ["src/engine/evaluator.py"],
+    }
+    assert 1 <= len(card["route_candidates"]) <= 3
+    assert card["route_candidates"][0]["profile"] == digest["profile_selection"]["candidates"][0]
+    assert card["mandatory_companion_files"] == []
+
+
+def test_runtime_route_card_surfaces_new_test_companion_before_pr(monkeypatch):
+    monkeypatch.setattr(
+        topology_doctor,
+        "_map_maintenance_changes",
+        lambda files: {"tests/test_new_behavior.py": "added"},
+    )
+
+    digest = topology_doctor.build_digest(
+        "add new behavior test",
+        ["tests/test_new_behavior.py"],
+        write_intent="edit",
+    )
+    companions = digest["route_card"]["mandatory_companion_files"]
+
+    assert companions == [
+        {
+            "path": "tests/test_new_behavior.py",
+            "companion": "architecture/test_topology.yaml",
+            "reason": "added file requires companion update architecture/test_topology.yaml (test_file_registry)",
+        }
+    ]
+
+
+def test_route_card_only_human_output_prefers_primary_blocker_over_full_trace():
+    buffer = StringIO()
+    with redirect_stdout(buffer):
+        exit_code = topology_doctor.main(
+            [
+                "--navigation",
+                "--route-card-only",
+                "--task",
+                "fix evaluator behavior",
+                "--write-intent",
+                "edit",
+                "--files",
+                "src/engine/evaluator.py",
+            ]
+        )
+
+    output = buffer.getvalue()
+    assert exit_code == 0
+    assert "primary_blocker:" in output
+    assert "route_candidates:" in output
+    assert "why_not_admitted:" not in output
+
+
 def test_runtime_claims_appear_in_route_card_and_digest_inputs():
     digest = topology_doctor.build_digest(
         "agent runtime route card contract",
@@ -4163,6 +4233,12 @@ def test_runtime_route_card_types_capsule_persistence_target():
     assert card["persistence_target"] == "final_response"
     assert card["suggested_next_command"] is None
     assert card["why_not_admitted"] == []
+    assert card["primary_blocker"] is None
+    assert card["next_action"] == "read-only orientation; no edit admission granted or required"
+    assert card["expansion_hints"] == [
+        "use this route card as orientation only",
+        "run a separate edit/apply navigation route before changing files",
+    ]
 
 
 def test_runtime_route_card_admits_capsule_improvement_backlog_target():
@@ -4236,6 +4312,8 @@ def test_invalid_typed_navigation_intent_blocks_without_profile_fallback(monkeyp
     assert payload["ok"] is False
     assert payload["digest"]["profile"] == "generic"
     assert payload["route_card"]["admission_status"] == "ambiguous"
+    assert payload["route_card"]["primary_blocker"]["code"] == "typed_intent_invalid"
+    assert "typed intent did not match" in payload["route_card"]["primary_blocker"]["message"]
     assert payload["route_card"]["needs_typed_intent"] is True
     assert payload["route_card"]["next_action"] == "stop; pass typed --intent or narrow the task wording"
     assert payload["direct_blockers"][0]["code"] == "navigation_route_ambiguous"

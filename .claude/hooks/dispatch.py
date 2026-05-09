@@ -222,13 +222,90 @@ def _run_advisory_check_pre_checkout_uncommitted_overlap(
     )
 
 
+def _agent_authored_loc_in_range(merge_base: str, head: str) -> tuple[int, int, int]:
+    """Compute (total_loc, self_authored_loc, commit_count) for the range merge_base..head.
+
+    self_authored_loc subtracts carry-over commits whose body lacks a
+    `Co-Authored-By: Claude` line — those are operator's local-main commits
+    the agent's branch picked up at branch-time, not agent contribution.
+    The hook uses self_authored_loc for the threshold decision so the agent
+    is judged on its own work, not on what its branch dragged along.
+    See architecture/agent_pr_discipline_2026_05_09.md.
+    """
+    import re
+    try:
+        commit_count = int(subprocess.run(
+            ["git", "rev-list", "--count", f"{merge_base}..{head}"],
+            capture_output=True, text=True, timeout=5, cwd=REPO_ROOT,
+        ).stdout.strip() or "0")
+    except (subprocess.TimeoutExpired, ValueError, OSError):
+        commit_count = 0
+
+    try:
+        shortstat = subprocess.run(
+            ["git", "diff", "--shortstat", f"{merge_base}..{head}"],
+            capture_output=True, text=True, timeout=5, cwd=REPO_ROOT,
+        ).stdout
+        ins = re.findall(r"(\d+)\s+insertion", shortstat)
+        dels = re.findall(r"(\d+)\s+deletion", shortstat)
+        total_loc = (int(ins[-1]) if ins else 0) + (int(dels[-1]) if dels else 0)
+    except (subprocess.TimeoutExpired, ValueError, OSError):
+        total_loc = 0
+
+    self_loc = total_loc
+    try:
+        log = subprocess.run(
+            ["git", "log", f"{merge_base}..{head}", "--format=%H%x1f%B%x1e"],
+            capture_output=True, text=True, timeout=10, cwd=REPO_ROOT,
+        ).stdout
+        agent_shas: list[str] = []
+        carry_shas: list[str] = []
+        for entry in log.split("\x1e"):
+            entry = entry.strip()
+            if not entry or "\x1f" not in entry:
+                continue
+            sha, body = entry.split("\x1f", 1)
+            sha = sha.strip()
+            if not sha:
+                continue
+            if "Co-Authored-By: Claude" in body:
+                agent_shas.append(sha)
+            else:
+                carry_shas.append(sha)
+        # If we found a mix, recompute self_loc as the sum of agent-only commits.
+        if agent_shas and carry_shas:
+            self_loc = 0
+            for sha in agent_shas:
+                stat = subprocess.run(
+                    ["git", "show", "--shortstat", "--format=", sha],
+                    capture_output=True, text=True, timeout=5, cwd=REPO_ROOT,
+                ).stdout
+                ins = re.findall(r"(\d+)\s+insertion", stat)
+                dels = re.findall(r"(\d+)\s+deletion", stat)
+                self_loc += (int(ins[-1]) if ins else 0) + (int(dels[-1]) if dels else 0)
+        elif not agent_shas:
+            # Pure carry-over (no agent commits) — agent contribution is zero.
+            self_loc = 0
+        # else: pure agent work — self_loc == total_loc, leave it.
+    except (subprocess.TimeoutExpired, OSError):
+        # Fall back to total_loc on git failure rather than block falsely.
+        pass
+
+    return total_loc, self_loc, commit_count
+
+
 def _run_advisory_check_pr_create_loc_accumulation(
     payload: dict[str, Any],
 ) -> str | None:
     """
-    BLOCKING when commits < 2 AND LOC < 80 (both conditions must be true to block).
+    BLOCKING when self-authored LOC < 300 since merge-base.
     Bypass: set ZEUS_PR_ALLOW_TINY=1 to degrade to advisory-only.
-    Command-head anchored regex prevents self-DoS on echo/heredoc content.
+
+    The block message is intentionally long. It explains the cost
+    economics so the agent can reason about whether to continue
+    accumulating, bundle adjacent work, or document a bypass — rather
+    than discovering the rule by trial-and-error and treating it as
+    an obstacle to route around. See architecture/agent_pr_discipline_2026_05_09.md.
     """
     command = _command_from_payload(payload)
     if not command:
@@ -241,12 +318,9 @@ def _run_advisory_check_pr_create_loc_accumulation(
 
     bypass_active = os.environ.get("ZEUS_PR_ALLOW_TINY", "").strip() == "1"
 
-    # Count commits/LOC since the merge-base with the target branch (not @{u}).
-    # Codex P2 fix: @{u} resolves to the remote topic branch itself after push,
-    # so rev-list/diff against it counts only *unpushed* local work — a fully
-    # accumulated pushed branch looks like 0 commits / 0 LOC and falsely blocks.
-    # Instead, find the target branch from gh pr view (or fall back to origin/main)
-    # and use `git merge-base` to anchor the comparison.
+    # Resolve the target branch from the (possibly already-open) PR view, falling
+    # back to origin/main. Using merge-base anchors the comparison correctly even
+    # when @{u} is the topic branch itself after push (Codex P2 fix carryover).
     try:
         pr_base_result = subprocess.run(
             ["gh", "pr", "view", "--json", "baseRefName", "--jq", ".baseRefName"],
@@ -267,24 +341,7 @@ def _run_advisory_check_pr_create_loc_accumulation(
     except (subprocess.TimeoutExpired, OSError, ValueError):
         merge_base = target_branch
 
-    try:
-        commit_count = int(subprocess.run(
-            ["git", "rev-list", "--count", f"{merge_base}..HEAD"],
-            capture_output=True, text=True, timeout=5, cwd=REPO_ROOT,
-        ).stdout.strip() or "0")
-    except (subprocess.TimeoutExpired, ValueError, OSError):
-        commit_count = 0
-
-    try:
-        shortstat = subprocess.run(
-            ["git", "diff", "--shortstat", f"{merge_base}..HEAD"],
-            capture_output=True, text=True, timeout=5, cwd=REPO_ROOT,
-        ).stdout
-        ins = re.findall(r"(\d+)\s+insertion", shortstat)
-        dels = re.findall(r"(\d+)\s+deletion", shortstat)
-        loc = (int(ins[-1]) if ins else 0) + (int(dels[-1]) if dels else 0)
-    except (subprocess.TimeoutExpired, ValueError, OSError):
-        loc = 0
+    total_loc, self_loc, commit_count = _agent_authored_loc_in_range(merge_base, "HEAD")
 
     try:
         push_count = sum(
@@ -297,36 +354,74 @@ def _run_advisory_check_pr_create_loc_accumulation(
     except (subprocess.TimeoutExpired, OSError):
         push_count = 0
 
-    COMMIT_THRESHOLD = 2
-    LOC_THRESHOLD = 80
+    LOC_THRESHOLD = 300
 
-    # Both conditions must be true to trigger the block: too few commits AND too little LOC
-    is_tiny = commit_count < COMMIT_THRESHOLD and loc < LOC_THRESHOLD
+    is_tiny = self_loc < LOC_THRESHOLD
     if not is_tiny:
         return None
 
+    state_block = (
+        f"   commits since base:    {commit_count}\n"
+        f"   total LOC since base:  {total_loc}\n"
+        f"   self-authored LOC:     {self_loc}        (threshold: {LOC_THRESHOLD})\n"
+        f"   pushes already:        {push_count}\n"
+    )
+
     if bypass_active:
         return (
-            f"ADVISORY (ZEUS_PR_ALLOW_TINY bypass active): PR open with small accumulation:\n"
-            f"   commits since base: {commit_count} (threshold: {COMMIT_THRESHOLD})\n"
-            f"   LOC since base:     {loc} (threshold: {LOC_THRESHOLD})\n"
-            f"   pushes already:     {push_count}\n"
-            f"Block bypassed via ZEUS_PR_ALLOW_TINY=1."
+            "ADVISORY (ZEUS_PR_ALLOW_TINY bypass active): PR open with small self-authored accumulation.\n"
+            f"{state_block}"
+            "Document the bypass reason in the PR body so reviewers understand why the rule was suspended.\n"
+            "Reference: architecture/agent_pr_discipline_2026_05_09.md"
         )
 
-    # BLOCKING: write reason to stderr and signal caller to exit 2
+    # BLOCKING: educational message — the rule is downstream of the cost facts;
+    # state the facts so the agent reasons rather than rote-bypasses.
     block_msg = (
-        f"BLOCKED: PR open rejected — tiny accumulation (commits={commit_count} < {COMMIT_THRESHOLD}"
-        f" AND LOC={loc} < {LOC_THRESHOLD}).\n"
-        f"Paid auto-reviewers (Copilot + Codex + ultrareview) fire within 5-8 min.\n"
-        f"Per feedback_accumulate_changes_before_pr_open.md (verified 2026-05-04):\n"
-        f"   commits since base: {commit_count}\n"
-        f"   LOC since base:     {loc}\n"
-        f"   pushes already:     {push_count}\n\n"
-        f"Accumulate more work on this branch, OR set ZEUS_PR_ALLOW_TINY=1 to bypass."
+        f"BLOCKED: `gh pr create` declined — self-authored accumulation below 300 LOC.\n"
+        f"\n"
+        f"Why this exists (please reason through it; the rule is downstream of these facts):\n"
+        f"\n"
+        f"1. Each `gh pr create` and each `git push` to an open PR triggers paid auto-reviewers\n"
+        f"   (Copilot + Codex) within 5-8 min. The cost is paid per fire, regardless of diff size —\n"
+        f"   a 50-LOC PR pays the same per-event cost as a 1000-LOC PR.\n"
+        f"\n"
+        f"2. The reviewers run on a senior model tier. Spending senior cognition on a small diff is\n"
+        f"   the same waste shape as spending opus on file-location grep work — high-tier capacity\n"
+        f"   is fungible, and the marginal value of a senior pass on a tiny diff is small.\n"
+        f"\n"
+        f"3. Therefore: bundling related work into one PR is dominant. Ten 50-LOC PRs cost ~10x one\n"
+        f"   500-LOC PR for the same total review work.\n"
+        f"\n"
+        f"4. The 300 LOC line is calibrated against the auto-reviewer cost curve. Below it the marginal\n"
+        f"   benefit of an extra reviewer pass is consistently dominated by the marginal benefit of\n"
+        f"   waiting and bundling.\n"
+        f"\n"
+        f"Current state (anchor your decision in this):\n"
+        f"{state_block}"
+        f"\n"
+        f"Decision tree:\n"
+        f"  A. More related work to do? -> Continue committing on this branch until self-authored LOC\n"
+        f"     reaches 300; open one PR with a multi-section description.\n"
+        f"  B. Genuinely isolated one-off? -> Audit the assumption (most one-offs have neighbors:\n"
+        f"     same module's other latent bugs, the test file's gaps, the doc that should also update).\n"
+        f"     If still isolated AND urgent, set ZEUS_PR_ALLOW_TINY=1 and JUSTIFY in the PR body.\n"
+        f"  C. Multiple PRs queued in this session? -> STOP. Combine. Each PR-open is a fresh fire.\n"
+        f"     Stacked branches with one PR at the tip works too.\n"
+        f"  D. Operator told you to ship NOW? -> Use the bypass; cite the operator directive in the\n"
+        f"     PR body so reviewers understand why the rule was suspended.\n"
+        f"\n"
+        f"Reasoning failure mode this prevents:\n"
+        f"  Agent fixes 50-LOC bug -> opens PR (cost X). Notices related 50-LOC issue -> opens another\n"
+        f"  PR (cost X). Repeat * N. Total: N * X. Bundled: ~X. Opening N PRs is not 'being responsive' —\n"
+        f"  it's burning N-1 reviewer fires that produced no marginal signal.\n"
+        f"\n"
+        f"Authority: architecture/agent_pr_discipline_2026_05_09.md\n"
+        f"Memory:    feedback_pr_300_loc_threshold_with_education.md\n"
+        f"\n"
+        f"Bypass: ZEUS_PR_ALLOW_TINY=1 (degrades to advisory; document reason in PR body)."
     )
     print(block_msg, file=sys.stderr)
-    # Return sentinel so dispatch main can detect blocking intent
     return _BLOCK_SENTINEL
 
 
