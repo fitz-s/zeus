@@ -106,3 +106,42 @@ def test_evaluate_horizon_coverage_old_240_limit_blocks_d10() -> None:
         "Old 240h limit should have blocked these steps — "
         "this test anchors that the 276→282h extension is load-bearing."
     )
+
+
+def test_download_output_path_filename_under_name_max() -> None:
+    """Download filename must stay under NAME_MAX (255 bytes) on every supported FS.
+
+    Regression anchor for the PR #94 fallout discovered 2026-05-09: extending
+    STEP_HOURS from ~24 entries to 70 made the previous filename (joined steps
+    with '-') ~280 bytes long, blowing NAME_MAX on APFS/HFS+ and triggering
+    OSError 63 "File name too long" at write time. Every Open Data download
+    from 2026-05-08 onward failed at byte 0. Filename now uses a short signature
+    (range + count + sha8); this test enforces the bound stays satisfied even
+    if STEP_HOURS grows further.
+    """
+    from datetime import date
+
+    from src.data.ecmwf_open_data import _download_output_path
+
+    path = _download_output_path(run_date=date(2026, 5, 9), run_hour=0, param="mx2t3")
+    name_bytes = len(path.name.encode("utf-8"))
+    assert name_bytes < 255, (
+        f"Download filename is {name_bytes} bytes — exceeds NAME_MAX (255). "
+        f"Filename: {path.name}"
+    )
+
+
+def test_step_hours_signature_is_stable() -> None:
+    """Signature must be deterministic so cached GRIB files are reusable across restarts.
+
+    The signature embeds min/max/count plus a sha8 of the comma-joined steps.
+    Same STEP_HOURS → same signature → same filename → cache hit.
+    """
+    from src.data.ecmwf_open_data import _step_hours_signature
+
+    a = _step_hours_signature()
+    b = _step_hours_signature()
+    assert a == b
+    # Format invariants: starts with min, contains 'to', count marker 'n', sha8 marker 'h'
+    assert a.startswith(f"{min(STEP_HOURS)}to{max(STEP_HOURS)}_n{len(STEP_HOURS)}_h")
+    assert len(a.split("_h")[-1]) == 8  # 8-hex-char digest

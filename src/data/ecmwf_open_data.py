@@ -142,15 +142,31 @@ def _conda_python() -> str:
     return sys.executable
 
 
+def _step_hours_signature() -> str:
+    """Compact filename-safe signature of STEP_HOURS.
+
+    Encodes range + count + sha8 to stay under NAME_MAX (255 bytes on macOS,
+    HFS+/APFS) regardless of grid size. Joining all 70+ steps with '-'
+    produced a ~280-byte filename and crashed the download with OSError 63
+    "File name too long" at write time — every Open Data fetch from 2026-05-08
+    onward failed at byte 0 because of this. The signature stays stable per
+    STEP_HOURS configuration so cached files are reusable across restarts.
+    """
+    import hashlib
+    sig = ",".join(str(value) for value in STEP_HOURS)
+    digest = hashlib.sha256(sig.encode()).hexdigest()[:8]
+    return f"{min(STEP_HOURS)}to{max(STEP_HOURS)}_n{len(STEP_HOURS)}_h{digest}"
+
+
 def _download_output_path(*, run_date: date, run_hour: int, param: str) -> Path:
-    steps = "-".join(str(value) for value in STEP_HOURS)
+    steps_sig = _step_hours_signature()
     return (
         FIFTY_ONE_ROOT
         / "raw"
         / "ecmwf_open_ens"
         / "ecmwf"
         / run_date.strftime("%Y%m%d")
-        / f"open_ens_{run_date.strftime('%Y%m%d')}_{run_hour:02d}z_steps_{steps}_params_{param}.grib2"
+        / f"open_ens_{run_date.strftime('%Y%m%d')}_{run_hour:02d}z_steps_{steps_sig}_params_{param}.grib2"
     )
 
 
