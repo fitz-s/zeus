@@ -268,7 +268,19 @@ def _agent_authored_loc_in_range(merge_base: str, head: str) -> tuple[int, int, 
             sha = sha.strip()
             if not sha:
                 continue
-            if "Co-Authored-By: Claude" in body:
+            # Restrict match to the actual trailer section (last paragraph).
+            # git-interpret-trailers treats the last blank-line-separated
+            # paragraph as the trailer block (RFC 5322 / git convention).
+            # Searching the full body misclassifies operator commits that
+            # quote "Co-Authored-By: Claude" in discussion text.
+            paragraphs = [p.strip() for p in body.split("\n\n") if p.strip()]
+            trailer_block = paragraphs[-1] if paragraphs else ""
+            trailer_lines = [ln.strip() for ln in trailer_block.splitlines()]
+            is_agent = any(
+                ln.startswith("Co-Authored-By:") and "Claude" in ln
+                for ln in trailer_lines
+            )
+            if is_agent:
                 agent_shas.append(sha)
             else:
                 carry_shas.append(sha)
@@ -312,8 +324,13 @@ def _run_advisory_check_pr_create_loc_accumulation(
         return None
 
     import re
-    # Anchored to command head: optional leading env VAR=val pairs, then gh pr create|ready
-    if not re.search(r"^\s*(?:env\s+\S+\s+)*gh\s+pr\s+(create|ready)\b", command):
+    # Anchored to command head: optional leading inline VAR=val or `env VAR=val` pairs,
+    # then gh pr create|ready. Catches both `env VAR=val gh pr create` AND the more
+    # common inline form `VAR=val gh pr create`.
+    if not re.search(
+        r"^\s*(?:(?:env\s+)?[A-Z_][A-Z0-9_]*=\S+\s+)*gh\s+pr\s+(create|ready)\b",
+        command,
+    ):
         return None
 
     bypass_active = os.environ.get("ZEUS_PR_ALLOW_TINY", "").strip() == "1"
@@ -417,7 +434,7 @@ def _run_advisory_check_pr_create_loc_accumulation(
         f"  it's burning N-1 reviewer fires that produced no marginal signal.\n"
         f"\n"
         f"Authority: architecture/agent_pr_discipline_2026_05_09.md\n"
-        f"Memory:    feedback_pr_300_loc_threshold_with_education.md\n"
+        f"Session memory (operator side, not a repo file): feedback_pr_300_loc_threshold_with_education.md\n"
         f"\n"
         f"Bypass: ZEUS_PR_ALLOW_TINY=1 (degrades to advisory; document reason in PR body)."
     )
