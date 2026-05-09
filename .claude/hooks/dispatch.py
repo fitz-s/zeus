@@ -619,6 +619,111 @@ def _run_advisory_check_pre_merge_comment_check(
     return "ADVISORY: " + "; ".join(advisory_notes)
 
 
+def _run_advisory_check_pr_thread_reply_waste(
+    payload: dict[str, Any],
+) -> str | None:
+    """ADVISORY when command looks like posting a thread reply on a PR review.
+
+    Principle 2 backstop: the fix-commit IS the response. Agents must not post
+    reply text on bot review threads. This hook fires when a command matches
+    a known reply-posting surface and emits an educational message pointing back
+    to Principle 2 of architecture/agent_pr_discipline_2026_05_09.md.
+
+    Severity: ADVISORY (no new blockers per redesign constraint).
+    Bypass: ZEUS_PR_REPLY_ALLOW=1 for DEFER one-liners and operator-directed
+    clarifications.
+
+    Detection surfaces:
+      - gh pr comment <N>                                 (top-level PR comment)
+      - gh api graphql ... addPullRequestReviewThreadReply
+      - gh api graphql ... addPullRequestReviewComment   (older mutation form)
+      - gh api repos/.../pulls/.../comments  with POST/body flag
+      - gh api repos/.../issues/.../comments with POST/body flag
+
+    Allow-pass (must NOT trigger):
+      - gh api repos/.../pulls/.../comments  GET (list — no POST flag)
+      - gh api graphql ... resolveReviewThread           (correct usage)
+      - gh pr review                                     (formal review submission)
+    """
+    command = _command_from_payload(payload)
+    if not command:
+        return None
+
+    import re
+
+    # --- Detection patterns ---------------------------------------------------
+
+    # 1. gh pr comment <number>
+    if re.search(r"(?:^|\s)gh\s+pr\s+comment\s+\d+", command):
+        matched = True
+    # 2. GraphQL addPullRequestReviewThreadReply
+    elif "addPullRequestReviewThreadReply" in command:
+        matched = True
+    # 3. GraphQL addPullRequestReviewComment (older form)
+    elif "addPullRequestReviewComment" in command:
+        matched = True
+    # 4. REST pulls/.../comments with POST or body flag
+    elif re.search(r"repos/[^/]+/[^/]+/pulls/\d+/comments", command) and re.search(
+        r"-X\s+POST|--method\s+POST|-[fF]\s+body=|-[fF]\s*body\s*=", command
+    ):
+        matched = True
+    # 5. REST issues/.../comments with POST or body flag (PR-as-issue surface)
+    elif re.search(r"repos/[^/]+/[^/]+/issues/\d+/comments", command) and re.search(
+        r"-X\s+POST|--method\s+POST|-[fF]\s+body=|-[fF]\s*body\s*=", command
+    ):
+        matched = True
+    else:
+        matched = False
+
+    # --- Allow-pass overrides -------------------------------------------------
+    if matched:
+        # resolveReviewThread is correct usage — always allow
+        if "resolveReviewThread" in command:
+            return None
+        # gh pr review is a formal review submission, not a thread reply
+        if re.search(r"(?:^|\s)gh\s+pr\s+review\b", command):
+            return None
+
+    if not matched:
+        return None
+
+    # --- Bypass check ---------------------------------------------------------
+    bypass_active = os.environ.get("ZEUS_PR_REPLY_ALLOW", "").strip() == "1"
+
+    advisory_msg = (
+        "ADVISORY (Principle 2 — architecture/agent_pr_discipline_2026_05_09.md):\n"
+        "  This command looks like posting a thread reply on a PR review.\n"
+        "\n"
+        "  Principle 2 hard rule: the fix-commit IS the response.\n"
+        "  Do NOT post reply text on bot review threads.\n"
+        "  The bot doesn't read replies; the human reads the fix-commit via the\n"
+        "  resolved thread. Reply tokens are pure waste.\n"
+        "\n"
+        "  Correct workflow:\n"
+        "    1. Classify the thread (BUG/STYLE_NIT/MISUNDERSTANDING/NOISE/OUT_OF_SCOPE)\n"
+        "    2. BUG/STYLE_NIT -> apply the fix as a commit; then resolve the thread:\n"
+        "         gh api graphql -f query='mutation{resolveReviewThread(input:{threadId:\"...\"}){thread{isResolved}}}'\n"
+        "    3. MISUNDERSTANDING/NOISE -> resolve directly (no commit, no reply)\n"
+        "    4. OUT_OF_SCOPE -> one-line reply ONLY: 'Tracked in #N' then resolve\n"
+        "\n"
+        "  If this is the DEFER one-liner ('Tracked in #N') or an operator-directed\n"
+        "  clarification, set ZEUS_PR_REPLY_ALLOW=1 to acknowledge and proceed.\n"
+        "\n"
+        "  Bypass: ZEUS_PR_REPLY_ALLOW=1"
+    )
+
+    if bypass_active:
+        return (
+            "ADVISORY (ZEUS_PR_REPLY_ALLOW bypass active — Principle 2):\n"
+            "  Proceeding with thread reply. Permitted uses: DEFER one-liner\n"
+            "  ('Tracked in #N') or operator-directed clarification. One line only;\n"
+            "  never quote the bot body or paraphrase the fix.\n"
+            "  Reference: architecture/agent_pr_discipline_2026_05_09.md § Principle 2"
+        )
+
+    return advisory_msg
+
+
 def _run_advisory_check_pr_open_monitor_arm(
     payload: dict[str, Any],
 ) -> str | None:
@@ -1031,6 +1136,7 @@ _ADVISORY_HANDLERS: dict[str, Any] = {
     "pre_checkout_uncommitted_overlap": _run_advisory_check_pre_checkout_uncommitted_overlap,
     "pr_create_loc_accumulation": _run_advisory_check_pr_create_loc_accumulation,
     "pre_merge_comment_check": _run_advisory_check_pre_merge_comment_check,
+    "pr_thread_reply_waste": _run_advisory_check_pr_thread_reply_waste,
     "pr_open_monitor_arm": _run_advisory_check_pr_open_monitor_arm,
     "phase_close_commit_required": _run_advisory_check_phase_close_commit_required,
     "pre_merge_contamination": _run_advisory_check_pre_merge_contamination,

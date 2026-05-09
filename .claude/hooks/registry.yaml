@@ -6,7 +6,7 @@
 schema_version: 1
 metadata:
   charter_version: 2.0.0
-  catalog_size: 15
+  catalog_size: 16
   sunset_default: 90d
 
 hooks:
@@ -98,6 +98,25 @@ hooks:
     severity: BLOCKING
     bypass_env: ZEUS_PR_MERGE_FORCE
     sunset_date: 2026-08-06
+    telemetry:
+      ritual_signal_emitted: true
+
+  - id: pr_thread_reply_waste
+    event: PreToolUse
+    matcher: Bash
+    intent: >
+      Principle 2 backstop (architecture/agent_pr_discipline_2026_05_09.md § Principle 2).
+      ADVISORY on commands that post thread reply text to PR review threads: gh pr comment,
+      GraphQL addPullRequestReviewThreadReply / addPullRequestReviewComment, REST
+      pulls/.../comments POST, issues/.../comments POST. The fix-commit IS the response;
+      agents must not post reply paragraphs on bot threads. Allow-pass: resolveReviewThread
+      mutation (correct usage), gh pr review (formal submission), GET list calls.
+      Bypass: ZEUS_PR_REPLY_ALLOW=1 for DEFER one-liners ('Tracked in #N') and
+      operator-directed clarifications.
+    blocked_when: []
+    severity: ADVISORY
+    bypass_env: ZEUS_PR_REPLY_ALLOW
+    sunset_date: 2026-08-09
     telemetry:
       ritual_signal_emitted: true
 
