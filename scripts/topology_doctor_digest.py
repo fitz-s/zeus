@@ -21,7 +21,7 @@ The legacy top-level `allowed_files` is preserved as a mirror of
 is no longer load-bearing for write authorization. Callers must read
 `admission.admitted_files` and `admission.status`.
 """
-# Lifecycle: created=2026-04-15; last_reviewed=2026-04-25; last_reused=2026-04-25
+# Lifecycle: created=2026-04-15; last_reviewed=2026-04-25; last_reused=2026-05-09
 # Purpose: Build bounded topology digests with explicit admission reconciliation.
 # Reuse: Keep profile suggestion and admission decision separate. Do not merge.
 
@@ -505,6 +505,94 @@ def _collect_evidence(
         "shared_companion_patterns": shared_patterns,
         "per_profile": per_profile,
     }
+
+
+def _candidate_reason(candidate: dict[str, Any]) -> str:
+    fragments: list[str] = []
+    if candidate.get("strong_hits"):
+        fragments.append("phrases: " + ", ".join(candidate["strong_hits"][:3]))
+    if candidate.get("semantic_file_hits"):
+        fragments.append("semantic files: " + ", ".join(candidate["semantic_file_hits"][:3]))
+    if candidate.get("weak_hits"):
+        fragments.append("weak terms: " + ", ".join(candidate["weak_hits"][:3]))
+    if candidate.get("companion_file_hits"):
+        fragments.append("companion files: " + ", ".join(candidate["companion_file_hits"][:3]))
+    if candidate.get("shared_file_hits"):
+        fragments.append("shared files: " + ", ".join(candidate["shared_file_hits"][:3]))
+    return "; ".join(fragments) or "matched profile evidence"
+
+
+def _selected_route_detail(resolution: dict[str, Any]) -> dict[str, Any]:
+    selected_by = str(resolution.get("selected_by") or "selected_route")
+    why = [str(reason) for reason in resolution.get("why") or [] if str(reason)]
+    return {
+        "rank": 1,
+        "profile": str(resolution.get("profile_id") or ""),
+        "selected": True,
+        "score": resolution.get("confidence", 0),
+        "evidence_class": resolution.get("evidence_class") or selected_by,
+        "reason": why[0] if why else f"selected by {selected_by}",
+        "strong_hits": list(resolution.get("strong_hits") or [])[:3],
+        "semantic_file_hits": list(resolution.get("semantic_file_hits") or [])[:3],
+        "companion_file_hits": list(resolution.get("companion_file_hits") or [])[:3],
+        "shared_file_hits": list(resolution.get("shared_file_hits") or [])[:3],
+    }
+
+
+def _rerank_route_candidate_details(details: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for detail in details:
+        profile = str(detail.get("profile") or "")
+        if not profile or profile in seen:
+            continue
+        seen.add(profile)
+        item = dict(detail)
+        item["rank"] = len(out) + 1
+        out.append(item)
+        if len(out) >= 3:
+            break
+    return out
+
+
+def _route_candidate_details(evidence: dict[str, Any], resolution: dict[str, Any]) -> list[dict[str, Any]]:
+    selected_profile = str(resolution.get("profile_id") or "")
+    candidates = [
+        candidate
+        for candidate in evidence.get("per_profile") or []
+        if candidate.get("score", 0) > 0 and not candidate.get("negative_hits")
+    ]
+    candidates.sort(key=lambda item: item.get("score", 0), reverse=True)
+    details: list[dict[str, Any]] = []
+    for index, candidate in enumerate(candidates[:3], start=1):
+        profile_id = str(candidate.get("profile_id") or "")
+        details.append(
+            {
+                "rank": index,
+                "profile": profile_id,
+                "selected": bool(selected_profile and profile_id == selected_profile),
+                "score": candidate.get("score", 0),
+                "evidence_class": candidate.get("evidence_class"),
+                "reason": _candidate_reason(candidate),
+                "strong_hits": list(candidate.get("strong_hits") or [])[:3],
+                "semantic_file_hits": list(candidate.get("semantic_file_hits") or [])[:3],
+                "companion_file_hits": list(candidate.get("companion_file_hits") or [])[:3],
+                "shared_file_hits": list(candidate.get("shared_file_hits") or [])[:3],
+            }
+        )
+    if not selected_profile:
+        return _rerank_route_candidate_details(details)
+    selected_index = next(
+        (index for index, detail in enumerate(details) if detail.get("profile") == selected_profile),
+        None,
+    )
+    if selected_index is None:
+        details.insert(0, _selected_route_detail(resolution))
+    else:
+        selected = details.pop(selected_index)
+        selected["selected"] = True
+        details.insert(0, selected)
+    return _rerank_route_candidate_details(details)
 
 
 def _weak_selectable(evidence: dict[str, Any]) -> bool:
@@ -1668,6 +1756,7 @@ def build_digest(
         "selected_by": resolution.get("selected_by"),
         "confidence": resolution.get("confidence", 0.0),
         "candidates": list(resolution.get("candidates") or []),
+        "route_candidate_details": _route_candidate_details(evidence, resolution),
         "evidence_class": evidence_class,
         "semantic_file_hits": list(resolution.get("semantic_file_hits") or []),
         "companion_file_hits": list(resolution.get("companion_file_hits") or []),
