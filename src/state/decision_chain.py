@@ -120,8 +120,8 @@ class NoTradeCase:
 class MonitorResult:
     """Per-position per-cycle exit evaluation record."""
     position_id: str
-    fresh_prob: float
-    fresh_edge: float
+    fresh_prob: float | None
+    fresh_edge: float | None
     should_exit: bool
     exit_reason: str = ""
     neg_edge_count: int = 0
