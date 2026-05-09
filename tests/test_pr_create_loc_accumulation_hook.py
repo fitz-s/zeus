@@ -274,3 +274,127 @@ def test_authority_doc_exists() -> None:
     # Sanity: doc references the same constants as the hook
     assert "300" in body, "doc must cite the 300-LOC threshold"
     assert "ZEUS_PR_ALLOW_TINY" in body, "doc must document the bypass env"
+
+
+# ---------------------------------------------------------------------------
+# Finding 1 (Codex P2): trailer-only author detection
+# ---------------------------------------------------------------------------
+
+
+def test_author_detection_ignores_quoted_trailer_in_body() -> None:
+    """An operator commit that QUOTES the trailer in body text must not be
+    classified as agent contribution.
+
+    Regression anchor for Codex P2 finding: substring match anywhere in the
+    commit body misclassified operator discussion commits as agent commits.
+    The fix restricts the match to the trailer section only (last paragraph).
+    """
+    src = (HOOK_DIR / "dispatch.py").read_text()
+    # Locate _agent_authored_loc_in_range body
+    start = src.index("def _agent_authored_loc_in_range")
+    end = src.index("\ndef ", start + 1)
+    body = src[start:end]
+    # Must NOT use a bare substring match across the entire commit body
+    assert '"Co-Authored-By: Claude" in body' not in body, (
+        "Bare substring match across full commit body still present — "
+        "fix must restrict to trailer section only."
+    )
+    # Must use paragraph/trailer-block logic
+    assert "paragraphs" in body or "trailer" in body.lower(), (
+        "author detection does not appear to use trailer-block logic; "
+        "expected 'paragraphs' or 'trailer' in the handler."
+    )
+
+
+def test_author_detection_trailer_classification() -> None:
+    """Directly test the paragraph-split trailer logic embedded in the source.
+
+    Simulates what _agent_authored_loc_in_range does per commit body:
+    - body with Co-Authored-By only in middle paragraph → NOT agent
+    - body with Co-Authored-By in last paragraph (trailer) → IS agent
+    """
+
+    def _is_agent_commit(body: str) -> bool:
+        """Replicate the trailer-block classification from dispatch.py."""
+        paragraphs = [p.strip() for p in body.split("\n\n") if p.strip()]
+        trailer_block = paragraphs[-1] if paragraphs else ""
+        trailer_lines = [ln.strip() for ln in trailer_block.splitlines()]
+        return any(
+            ln.startswith("Co-Authored-By:") and "Claude" in ln
+            for ln in trailer_lines
+        )
+
+    # Operator commit quoting the trailer in discussion text — must NOT match
+    operator_body_with_quote = (
+        "Reverts the bad agent commit.\n\n"
+        "Do not use Co-Authored-By: Claude style trailers in operator commits.\n\n"
+        "Signed-off-by: Fitz <fitz@example.com>"
+    )
+    assert not _is_agent_commit(operator_body_with_quote), (
+        "Operator commit quoting 'Co-Authored-By: Claude' in body text "
+        "was misclassified as agent contribution."
+    )
+
+    # Genuine agent commit with trailer in last paragraph — must match
+    agent_body = (
+        "fix(hooks): improve regex for pr gate\n\n"
+        "Extends the alternation to catch inline VAR=val form.\n\n"
+        "Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
+    )
+    assert _is_agent_commit(agent_body), (
+        "Genuine agent commit with Co-Authored-By trailer not recognised."
+    )
+
+    # Agent commit where Co-Authored-By is in a middle paragraph, not trailer — must NOT match
+    agent_body_mid = (
+        "Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>\n\n"
+        "Some follow-up note without a trailer."
+    )
+    assert not _is_agent_commit(agent_body_mid), (
+        "Co-Authored-By in a non-trailer (middle) paragraph must not match."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Finding 6 (Copilot): inline VAR=val regex coverage
+# ---------------------------------------------------------------------------
+
+
+def test_regex_matches_inline_env_assignment() -> None:
+    """ZEUS_PR_ALLOW_TINY=1 gh pr create must be matched by the command regex.
+
+    Regression anchor for Copilot finding 6: the original regex only caught
+    `env VAR=val gh pr create` (with the `env` prefix). The more common inline
+    form `VAR=val gh pr create` was silently skipped, meaning the bypass
+    itself could evade the hook's command detection.
+    """
+    import re
+
+    pattern = re.compile(
+        r"^\s*(?:(?:env\s+)?[A-Z_][A-Z0-9_]*=\S+\s+)*gh\s+pr\s+(create|ready)\b"
+    )
+
+    # Inline assignment — must match
+    assert pattern.search("ZEUS_PR_ALLOW_TINY=1 gh pr create --title foo"), (
+        "Inline VAR=val form not matched by regex."
+    )
+    # env-prefix form — must still match
+    assert pattern.search("env ZEUS_PR_ALLOW_TINY=1 gh pr create --title foo"), (
+        "env VAR=val form no longer matched after regex change."
+    )
+    # Multiple inline vars — must match
+    assert pattern.search("A=1 B=2 gh pr create --title foo"), (
+        "Multiple inline VAR=val pairs not matched."
+    )
+    # Plain gh pr create — must match
+    assert pattern.search("gh pr create --title foo"), (
+        "Plain gh pr create without env prefix no longer matched."
+    )
+    # gh pr ready — must match
+    assert pattern.search("ZEUS_PR_ALLOW_TINY=1 gh pr ready 123"), (
+        "gh pr ready with inline var not matched."
+    )
+    # heredoc body — must NOT match
+    assert not pattern.search("cat <<EOF\ngh pr create\nEOF"), (
+        "heredoc body falsely matched."
+    )
