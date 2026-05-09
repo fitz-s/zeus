@@ -1062,7 +1062,10 @@ def test_order_policy_requires_matching_depth_proof():
         ValueError,
         match="post_only_passive_limit cost basis requires",
     ):
-        _buy_no_cost_basis(order_policy="post_only_passive_limit")
+        _buy_no_cost_basis(
+            order_policy="post_only_passive_limit",
+            fee_adjusted_execution_price=None,
+        )
 
     passive = _buy_no_cost_basis(
         use_sweep=False,
@@ -1073,6 +1076,32 @@ def test_order_policy_requires_matching_depth_proof():
     )
     assert passive.depth_proof_source == "PASSIVE_LIMIT"
     assert passive.order_policy == "post_only_passive_limit"
+    assert passive.worst_case_fee_rate == Decimal("0")
+    assert passive.fee_adjusted_execution_price == Decimal("0.50")
+    assert passive.fee_source == "post_only_maker_fee_exempt:test"
+
+    with pytest.raises(
+        ValueError,
+        match="fee_adjusted_execution_price does not match snapshot fee metadata",
+    ):
+        _buy_no_cost_basis(
+            use_sweep=False,
+            order_policy="post_only_passive_limit",
+            depth_status="NOT_MARKETABLE_PASSIVE_LIMIT",
+            expected_fill_price_before_fee=Decimal("0.50"),
+            fee_adjusted_execution_price=Decimal("0.5075"),
+        )
+
+    with pytest.raises(ValueError, match="maker-only cost basis"):
+        replace(
+            passive,
+            worst_case_fee_rate=Decimal("0.03"),
+            fee_adjusted_execution_price=Decimal("0.5075"),
+        )
+    with pytest.raises(ValueError, match="fee_source must preserve maker fee exemption"):
+        replace(passive, fee_source="post_only_maker_fee_exempt")
+    with pytest.raises(ValueError, match="fee_source must preserve maker fee exemption"):
+        replace(passive, fee_source="post_only_maker_fee_exempt:")
 
     with pytest.raises(ValueError, match="passive-only depth proof"):
         _buy_no_cost_basis(
@@ -1249,6 +1278,7 @@ def test_passive_limit_candidate_cost_basis_requires_maker_only_before_submit_in
         use_sweep=False,
         order_policy="post_only_passive_limit",
         depth_status="NOT_MARKETABLE_PASSIVE_LIMIT",
+        fee_adjusted_execution_price=None,
     )
     hypothesis = _hypothesis(cost_basis)
 
@@ -1470,6 +1500,43 @@ def test_final_execution_intent_recomputes_fee_adjusted_price_at_boundary():
             tick_size=cost_basis.tick_size,
             min_order_size=cost_basis.min_order_size,
             fee_rate=cost_basis.worst_case_fee_rate,
+            neg_risk=cost_basis.neg_risk,
+        )
+
+
+def test_final_execution_intent_rejects_taker_fee_on_post_only_passive_policy():
+    cost_basis = _buy_no_cost_basis(
+        use_sweep=False,
+        order_policy="post_only_passive_limit",
+        depth_status="NOT_MARKETABLE_PASSIVE_LIMIT",
+        expected_fill_price_before_fee=Decimal("0.50"),
+        fee_adjusted_execution_price=None,
+    )
+    hypothesis = _hypothesis(cost_basis)
+
+    with pytest.raises(ValueError, match="maker-only final intent"):
+        FinalExecutionIntent(
+            hypothesis_id=hypothesis.fdr_hypothesis_id,
+            selected_token_id=cost_basis.selected_token_id,
+            direction=cost_basis.direction,
+            size_kind=cost_basis.requested_size_kind,
+            size_value=cost_basis.requested_size_value,
+            submitted_shares=Decimal("10"),
+            final_limit_price=cost_basis.final_limit_price,
+            expected_fill_price_before_fee=cost_basis.expected_fill_price_before_fee,
+            fee_adjusted_execution_price=Decimal("0.5075"),
+            order_policy=cost_basis.order_policy,
+            order_type="GTC",
+            post_only=True,
+            cancel_after=None,
+            snapshot_id=cost_basis.quote_snapshot_id,
+            snapshot_hash=cost_basis.quote_snapshot_hash,
+            cost_basis_id=cost_basis.cost_basis_id,
+            cost_basis_hash=cost_basis.cost_basis_hash,
+            max_slippage_bps=Decimal("200"),
+            tick_size=cost_basis.tick_size,
+            min_order_size=cost_basis.min_order_size,
+            fee_rate=Decimal("0.03"),
             neg_risk=cost_basis.neg_risk,
         )
 

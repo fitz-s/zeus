@@ -39,9 +39,11 @@ authoritative machine registry is `architecture/test_topology.yaml`.
 | `test_attribution_drift_weekly.py` | End-to-end runner antibody for attribution drift batch-3 weekly dispatch (created 2026-04-28) |
 | `test_calibration_observation.py` | Cross-module antibody: Platt parameter drift monitoring per R3 §1 #2 CALIBRATION_HARDENING packet (created 2026-04-29) |
 | `test_calibration_observation_weekly.py` | End-to-end runner antibody for calibration hardening batch-3 weekly dispatch (created 2026-04-29) |
+| `test_calibration_weighting_laws.py` | Calibration weighting LAW safe-subset antibodies for per-city LOW opt-out, batch rebuild n_mc default, forbidden temp-delta weighting, per-bucket rebuild savepoints, and no per-city alpha tuning (created 2026-05-08) |
 | `test_control_plane_dual_consumer.py` | Antibody #14: control_plane.json dual consumer — ingest_main.py must contain control_plane read pattern (two-system independence; created 2026-04-30) |
 | `test_data_freshness_gate.py` | Antibody #6: freshness gate three-branch behavior — FRESH/STALE/ABSENT (two-system independence; created 2026-04-30) |
 | `test_data_version_priority.py` | Antibody: opendata data_version preferred over TIGGE when both rows exist for same (city, target_date, metric) (created 2026-05-01) |
+| `test_diurnal.py` | Day0 solar/DST context relationship tests, including malformed `solar_daily` rootpage degrade behavior (audited 2026-05-08) |
 | `test_drift_detector_threshold.py` | Antibody #SC-6: drift detector threshold tests (two-system independence; created 2026-04-30) |
 | `test_dual_run_lock_obeyed.py` | Antibody #11: dual-run file lock race test (two-system independence; created 2026-04-30) |
 | `test_dynamic_sql_baseline.py` | Pytest wrapper for check_dynamic_sql.py; security antibody for f-string SQL interpolations (created 2026-05-01) |

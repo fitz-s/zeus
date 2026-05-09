@@ -254,6 +254,15 @@ def test_fill_tracker_keeps_confirmed_entry_local_only_until_chain_seen():
         entry_fill_verified=False,
         entered_at="",
         chain_state="unknown",
+        size_usd=10.0,
+        entry_price=0.0,
+        cost_basis_usd=0.0,
+        shares=0.0,
+        target_notional_usd=10.0,
+        submitted_notional_usd=10.0,
+        entry_price_submitted=0.40,
+        shares_submitted=25.0,
+        shares_remaining=25.0,
     )
     portfolio = _make_portfolio(pos)
 
@@ -287,6 +296,8 @@ def test_fill_tracker_keeps_confirmed_entry_local_only_until_chain_seen():
     assert pos.size_usd == pytest.approx(11.0)
     assert pos.cost_basis_usd == pytest.approx(11.0)
     assert pos.fill_quality == pytest.approx(0.10)
+    assert pos.entry_price_submitted == pytest.approx(0.40)
+    assert pos.entry_price_avg_fill == pytest.approx(0.44)
     assert tracker.entries == ["test_001"]
 
 
@@ -3650,6 +3661,27 @@ def test_exit_micro_position_hold_uses_fill_authority_cost_basis():
 
     assert decision.should_exit is False
     assert "micro_position_hold" in decision.applied_validations
+
+
+def test_full_open_fill_authority_cost_basis_can_exceed_projection_without_cap():
+    """A venue-confirmed full-open fill is not capped by target/projection cost."""
+    pos = _make_position(
+        direction="buy_yes",
+        size_usd=10.0,
+        entry_price=0.51,
+        shares=20.0,
+        cost_basis_usd=10.0,
+        last_monitor_market_price=0.60,
+        shares_filled=20.0,
+        filled_cost_basis_usd=10.2,
+        entry_price_avg_fill=0.51,
+        entry_economics_authority=ENTRY_ECONOMICS_AVG_FILL_PRICE,
+        fill_authority=FILL_AUTHORITY_VENUE_CONFIRMED_FULL,
+    )
+
+    assert pos.effective_shares == pytest.approx(20.0)
+    assert pos.effective_cost_basis_usd == pytest.approx(10.2)
+    assert pos.unrealized_pnl == pytest.approx(1.8)
 
 
 def test_partial_exit_fill_reduces_effective_open_fill_authority_exposure():

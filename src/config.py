@@ -97,6 +97,7 @@ class City:
     # HKO and Taiwan CWA where the underlying sensor is materially more
     # precise than airport AWOS.
     instrument_noise_override: Optional[float] = None
+    weighted_low_calibration_eligible: bool = True
     noaa_office: Optional[str] = None
     noaa_gridX: Optional[int] = None
     noaa_gridY: Optional[int] = None
@@ -281,6 +282,17 @@ def load_cities(path: Optional[Path] = None) -> list[City]:
                 raise KeyError(
                     f"City {name!r} missing required field {required_field!r}"
                 )
+        if "weighted_low_calibration_eligible" not in c:
+            raise KeyError(
+                f"City {name!r} missing required field "
+                "'weighted_low_calibration_eligible'"
+            )
+        weighted_low_calibration_eligible = c["weighted_low_calibration_eligible"]
+        if type(weighted_low_calibration_eligible) is not bool:
+            raise TypeError(
+                f"City {name!r} field 'weighted_low_calibration_eligible' "
+                "must be a JSON boolean"
+            )
         if lat is None or lon is None:
             raise KeyError(
                 f"City {name!r} missing lat/lon "
@@ -314,6 +326,7 @@ def load_cities(path: Optional[Path] = None) -> list[City]:
                     if c.get("instrument_noise_override") is not None
                     else None
                 ),
+                weighted_low_calibration_eligible=weighted_low_calibration_eligible,
                 noaa_office=noaa_office,
                 noaa_gridX=noaa_gx,
                 noaa_gridY=noaa_gy,
@@ -499,6 +512,17 @@ def ensemble_crosscheck_model() -> str:
 
 def ensemble_n_mc() -> int:
     return int(settings["ensemble"]["n_mc"])
+
+
+def calibration_batch_rebuild_n_mc() -> int:
+    """Default MC count for offline calibration-pair rebuilds.
+
+    LAW 4 separates aggregate training rebuild precision from live per-trade
+    runtime precision. Batch rebuilds can rely on many-pair averaging; live
+    runtime decisions must continue to use ``ensemble_n_mc()``.
+    """
+
+    return 1000
 
 
 def day0_n_mc() -> int:

@@ -2,7 +2,8 @@
 
 **NOTE:** Closed entries moved to docs/to-do-list/known_gaps_archive.md on 2026-05-01 (per 2026-04-30 recheck)
 **Location note:** Active known gaps moved from `docs/operations/known_gaps.md` to this to-do-list surface on 2026-05-02.
-**Last main-aligned:** 2026-05-04 (main = `cd882ee9`; no new OPEN items closed by PR #46/47; added calibration improvement backlog from session 59195a96)
+**Last main-aligned:** 2026-05-08 (closed stale headings and small blockers
+moved to archive; active blockers realigned; `climate_zone` left as future work)
 
 每个 gap 是一个 belief-reality mismatch。每个 gap 的终态：变成 antibody（test/type/code）→ FIXED。
 如果一个 gap 包含 "proposed antibody"，下一步就是实现它。
@@ -20,7 +21,12 @@ failed.
 
 ## CRITICAL: SQLite 单写者锁导致 live daemon 崩溃 (2026-05-04)
 
-**Status:** OPEN — 今天已发生：live daemon 3次崩溃，实际交易窗口丢失。
+**Status:** PARTIALLY FIXED — Wave35 prevents
+`rebuild_calibration_pairs_v2.py` and `refit_platt_v2.py` write mode from
+defaulting to the canonical shared `zeus-world.db`; they now require an explicit
+isolated `--db` target and reject the live shared world DB before opening a
+write connection. Full calibration DB physical isolation and promotion tooling
+remain open architecture work.
 **First observed:** 2026-05-04
 **Root cause:** SQLite 单写者模型。WAL 模式允许并发读，但同一时刻只有一个写者可以持有写锁。`rebuild_calibration_pairs_v2.py` 跑了 30+ 分钟写事务，任何需要写锁的操作（包括 `init_schema()`）都会等待或超时崩溃。
 
@@ -40,6 +46,13 @@ failed.
 3. **事务分片**：rebuild 脚本改为分批 commit（每 N 城市一个事务），降低单次持锁时长——降低概率，但不消除竞争。
 
 **Proposed antibody:** DB 物理隔离（option 2）是唯一能使"rebuild 时 live daemon 崩溃"这一错误类别不可能发生的结构决策。Options 1/3 是降险措施。
+**Antibody deployed (2026-05-08 Wave35):** rebuild/refit bulk calibration
+writers no longer silently target `state/zeus-world.db` in write mode. Dry-run
+read-only inspection can still use canonical world truth, but `--no-dry-run`
+requires `--db <isolated staging DB>` and refuses the canonical shared world DB.
+This closes the accidental default live-lock path for those two scripts; it does
+not authorize rebuild/refit execution, live DB mutation, promotion, migration,
+or live unlock.
 **Blocks:** live daemon 稳定性；任何需要在 live 时段运行 rebuild 的操作。
 
 ---
@@ -52,541 +65,211 @@ failed.
 -> learning/observability.
 **Audit posture:** Read-only gap register. Each entry is an open belief-reality mismatch; resolution requires code/test/type antibody.
 
-### Current non-Paris repair overlay (2026-04-30)
+### 2026-05-08 active gap realignment
 
-This overlay is current for non-Paris blocker status in the active worktree.
-Where it conflicts with older `OPEN` headings below, this overlay supersedes
-the older heading until those historical entries are individually archived.
-Paris `LFPG`/`LFPB` source mismatch remains excluded and open under the
-dedicated Paris entry.
+This section replaces the older 2026-04-30 overlay plus stale `[OPEN]`
+headings. Resolved headings were moved to
+`docs/to-do-list/known_gaps_archive.md` under
+`2026-05-08 — Active known-gaps realignment closures`.
 
-**Code-path blockers closed or fail-closed by current source + tests:**
+**Out of this wave:** `s3 — climate_zone field missing from config/cities.json`
+is future calibration taxonomy work. Keep it visible, but do not spend this
+wave on it.
 
-- Day0 non-Paris observation authority: executable Day0 observation is now
-  settlement-source-bound by default, unsupported settlement sources fail
-  closed instead of using WU/IEM/Open-Meteo fallback as executable truth, WU
-  station ids are preserved/checked, WU epoch timestamps parse as fresh when
-  current, and stale/coverage-invalid Day0 observations block entry or degrade
-  monitor refresh to stale evidence.
-- Forecast/vector validity: local-day ENS non-finite values, non-finite member
-  extrema, invalid probability vectors, and invalid model-agreement vectors now
-  fail closed before posterior/edge construction.
-- Executable snapshot identity: entry snapshot capture/threading is present,
-  and held-position exits now reuse a fresh snapshot or capture a new
-  VERIFIED Gamma + CLOB executable snapshot before sell intent creation;
-  stale/unverified/missing capture still fails closed through the executor U1
-  gate.
-- V2 submit provenance: live placement requires a bound U1-derived submission
-  envelope; compatibility `legacy:` envelopes are not accepted on the normal
-  live path, and final SDK submission envelopes are persisted and linked from
-  `SUBMIT_ACKED`.
-- Risk behavior: effective `RiskLevel.RED` now triggers the RED sweep even when
-  `force_exit_review` is false; ORANGE favorable exits require complete exit
-  authority and net-favorable economics rather than acting like YELLOW or
-  gross break-even.
-- Fill/exposure truth: entry partial-fill remainder cancel preserves observed
-  exposure, exit partial fills reduce local remaining shares/cost basis and
-  retries only unsold residual exposure, and existing `FILLED` command
-  idempotency collisions preserve `order_id`/`external_order_id`.
-- Settlement/learning: harvester settlement lookup is metric/source/station
-  aware, LOW settlement writes use LOW identity, pending-exit residual exposure
-  can settle, and calibration-pair learning preserves actual snapshot/source
-  lineage instead of rebranding live/Open-Meteo p_raw as TIGGE training rows.
-- Economics/evidence gates: calibration maturity Level 4 blocks before edge
-  selection, collateral buy/sell preflight rejects stale snapshots, current
-  CLOB `base_fee` shapes are canonicalized into fee fractions with provenance,
-  day0-capture no longer inherits the scanner's non-Day0 min-hour filter, and
-  v2 row-count observability prefers world-qualified tables over empty trade
-  shadows.
-- Monitor microstructure: held YES positions now compute
-  `last_monitor_whale_toxicity` from VERIFIED sibling-bin metadata plus fresh
-  adjacent CLOB top-book pressure. The detector distinguishes available-clear,
-  available-toxic, not-applicable `buy_no`, and unknown market-fact states in
-  monitor provenance.
+**Closed entries:** moved to the archive section named above. Do not treat the
+removed headings as active blockers unless new current-code evidence proves the
+antibody failed.
 
-**Remaining non-Paris open items for live trading:**
+**Remaining small blockers to investigate/repair first:**
 
-- Calibration tables/models must be populated or uncalibrated strategies must
-  remain explicitly blocked; live evidence must prove P&L after
-  fees/slippage/fill drag before strategy promotion.
-- RED direct venue side-effect SLA is intentionally not implemented inside
-  `cycle_runner`; the current architecture records durable cancel proxy intent
-  and uses the normal command/execution seams. If the operator requires
-  immediate venue `cancel_order()` from RED itself, that is a separate
-  live-side-effect packet with explicit operator-go, not a docs-only repair.
-- True market-wide print-level "whale sweep" remains intentionally not claimed:
-  Zeus's current V2 adapter exposes `get_trades`, and Polymarket documents that
-  surface as authenticated account trade history. Public market-trade event
-  methods are a separate feed and are not wired into this repo path. The live
-  code claim is now narrower: orderbook-adjacent pressure detection from fresh
-  sibling CLOB books. A future print-level detector would require a separate
-  market-stream feed and evidence packet, not a local monitor patch.
+1. **Calibration/live-lock proof path:** active lock remains the TIGGE
+   00z/12z asymmetry plus missing staged live-smoke evidence. Repair order:
+   prove current Platt/calibration promotion state, add or verify staged-smoke
+   evidence, and keep uncalibrated strategies blocked.
+   **2026-05-08 read-only rebuild-authority note:** the T1E sentinel repair
+   does not by itself prove current Platt math wrong or require an immediate
+   emergency rebuild. Read-only inspection of the authoritative
+   `/Users/leofitz/.openclaw/workspace-venus/zeus/state/zeus-world.db` found
+   active `platt_models_v2` rows and existing `validated_calibration_transfers`
+   rows, but zero `calibration_pairs_v2_rebuild_complete:*` sentinel rows in
+   `zeus_meta`. Therefore existing models are not automatically invalidated by
+   this code repair, but any future live refit, calibration-transfer OOS
+   authority, or promotion-grade proof under the new gate requires a controlled
+   daemon-locked/offline rebuild that writes the completion sentinel first.
+2. **Source/settlement current-fact refresh:** HK broad HKO caution, WU website
+   daily-summary vs API-hourly mismatch, Taipei historical source transitions,
+   and DST historical rebuild live-certification remain active until fresh
+   source/data evidence closes or narrows them.
+   **Data-layer handling rule (2026-05-08):** do not code-patch these into
+   apparent truth. Each item needs an offline/current-fact packet with source
+   evidence, target-date scope, isolated DB or read-only proof, checksums or row
+   counts, dry-run output, and rollback/non-promotion plan before any canonical
+   data mutation, rebuild, refetch, settlement relabel, calibration refit, or
+   learning/report promotion.
+3. **RED direct venue side-effect SLA:** current `cycle_runner` records durable
+   RED intent and uses normal execution seams; direct in-cycle venue
+   `cancel_order()` / sweep submission is not implemented and requires a
+   live-side-effect packet with explicit operator-go.
+4. **D4 entry/exit evidence symmetry:** Wave31 closes the live-execution
+   invariant: weak statistical exits now fail closed before exit intent. Residual
+   work is strategy-quality, not live-submit permission: implement stronger
+   exit-side evidence instead of holding/reviewing weak triggers.
+5. **D3 execution-cost residual:** Kelly boundary now requires typed
+   `ExecutionPrice`. Wave32 closes the venue-confirmed full-open fill cost cap
+   in portfolio read models. Wave36 closes the pending-entry residual where
+   submitted/model economics could populate open position `entry_price`,
+   `cost_basis_usd`, effective portfolio exposure, or `position_current`
+   read-model economics before fill authority. Wave41 closes the reconcile
+   residual where generic exchange `price` could become realized `fill_price`.
+   Wave42 closes the harvester residual where corrected-marked positions
+   without fill authority could fall back to legacy settlement P&L. Remaining
+   work is typed cost-basis continuity across deeper read-model, replay/report,
+   and learning boundaries.
+6. **Low-priority cleanup/unknowns:** Wave38 removes future
+   `hourly_observations` constructibility and scheduling. Existing DB-file
+   physical residue, if present, remains a data-layer cleanup requiring a
+   migration/backup/rollback packet. Wave39 verified malformed `solar_daily`
+   rootpage degrade behavior. Wave40 refreshed Open-Meteo quota evidence:
+   Zeus has process-local 429/quota guards, but not a workspace-wide quota
+   authority. ACP router status is archived/out-of-scope for Zeus code.
 
-**Verification snapshot for this overlay:** focused non-Paris suites passed on
-2026-04-30: `tests/test_exit_safety.py` (20), `tests/test_runtime_guards.py`
-(178), `tests/test_day0_runtime_observation_context.py` +
-`tests/test_model_agreement.py` + `tests/test_ensemble_signal.py` +
-`tests/test_market_analysis.py` (88), collateral/executor command suites (94,
-1 skipped), V2 adapter/snapshot suites (66), harvester suites (60),
-HK/model-agreement alpha boundary (12), RED/structural-linter gates (9),
-monitor whale-toxicity unit coverage plus monitor-to-exit seams
-(`tests/test_lifecycle.py` 14, selected `tests/test_runtime_guards.py` 2,
-selected `tests/test_live_safety_invariants.py` 4), and
-calibration-maturity focused checks (2). No live venue side effects or
-production DB mutation were performed.
+**Remaining work classification after Waves 35-42:**
+
+| Item | Current class | Why it is not a small code cleanup |
+| --- | --- | --- |
+| Calibration DB physical isolation / promotion tooling | architecture + data-layer | Needs storage topology, promotion authority, dry-run/rollback, and no live DB mutation without operator-go. |
+| RED direct venue side-effect SLA | live side-effect | Would call venue/account mutation paths; requires explicit operator-go, fake/live dry-run evidence, and rollback/block-state design. |
+| DST historical diurnal rebuild certification | data rebuild | Requires offline historical rebuild/certification from zone-aware timestamps; no canonical backfill/relabel authorized here. |
+| HK/WU/Taipei settlement-source mismatches | external source/current-fact audit + data-layer | Must be resolved from external settlement-source evidence per date before any row can be relabeled, learned from, or promoted. |
+| D3 remaining typed execution-cost continuity | partial architecture/source | Waves 41-42 closed two active contamination paths; residual work is deeper read-model/replay/report/learning continuity and any external venue fee/liquidity-role evidence. |
+| D4 stronger exit evidence | strategy/evidence architecture | Wave31 makes weak exits fail closed; building symmetric exit evidence requires new external-reality-valid evidence, not a one-line fix. |
+| s4 precision-weight continuity | schema/data-layer | Requires `precision_weight` schema/read/write path, rebuild/refit cohorting, and compatibility policy for legacy rows. |
+| Physical `hourly_observations` residue | destructive DB cleanup | Source constructibility is gone; physical drop still needs DB inventory, backup, dry-run SQL, and rollback. |
+| Open-Meteo quota contention | workspace-boundary operational gap | Zeus core fetch paths use a process-local tracker; quota/cooldown is still not a shared workspace authority, and source-health probing can spend quota outside that tracker. |
+
+### 2026-05-08 broad open-gap exploration record
+
+Read-only exploration after the small-blocker repair wave narrows the remaining
+work as follows:
+
+1. **D4 exit evidence hard gate: live-execution path closed by Wave31.** Entry
+   `DecisionEvidence` exists and is persisted for new canonical entries.
+   `cycle_runtime` now blocks `EDGE_REVERSAL`, `BUY_NO_EDGE_EXIT`, and
+   `BUY_NO_NEAR_EXIT` before monitor result/executable intent when entry
+   evidence is missing or the current exit burden is weaker. Residual: build an
+   external-reality-valid stronger exit evidence contract rather than relying on
+   hold/review for weak statistical triggers.
+2. **D3 execution-cost continuity: active contamination paths narrowed.** Kelly and final submit
+   seams now use typed executable-price/snapshot guards, and fill authority
+   fields exist. Wave32 closed the active read-model case where a full-open
+   venue-confirmed fill cost could be capped by `position_current` projection
+   cost; partial-exit open slices remain proportional to remaining shares.
+   Wave36 closed the pending-entry no-fill case: submitted limit/model price and
+   target notional now remain submitted/target fields and no longer become
+   effective open economics in `materialize_position`, `PortfolioState`, or the
+   DB status/loader views. Wave41 closed the exchange-reconcile case where a
+   generic exchange `price` could be promoted into `venue_trade_facts.fill_price`.
+   Wave42 closed the harvester case where corrected-marked positions without
+   fill authority could settle through legacy `size_usd / entry_price` P&L.
+   Residual: the cost object still does not survive as one typed lineage through
+   read-model, replay/report, and learning consumers, and some diagnostic paths
+   still reason from bare `entry_price` floats when corrected fill/executable
+   cost authority is absent.
+3. **Calibration proof path remains certification-blocked, not emergency
+   invalidated.** Active Platt rows exist, but future live refit,
+   calibration-transfer OOS promotion, or promotion-grade proof must consume the
+   new complete rebuild sentinel. The `s4` calibration weighting LAW antibody
+   suite is now split: Wave37 closes the safe code/config/static subset, while
+   row-level `precision_weight` antibodies remain blocked on a schema/data
+   packet. `s7` n_mc=10000 rebuild remains a future purity/certification
+   rebuild, ideally after `s8` vectorization.
+4. **Source/settlement current facts are partially refreshed but not closed.**
+   A read-only `watch_source_contract.py --json --compact-alerts --report-only`
+   probe on 2026-05-08 returned `authority=VERIFIED`, `status=OK`, 168 checked
+   configured active temperature markets, and zero WARN/ALERT source-contract
+   drift events. This narrows active market station drift only; it does not close
+   HK 03-13/03-14 HKO audit mismatch, WU website daily-summary vs API-hourly
+   historical mismatches, Taipei per-date source transitions, or DST historical
+   rebuild certification.
+   Required data-layer follow-up:
+   - HK/HKO: collect authoritative HKO settlement-source evidence for the exact
+     affected target dates, compare against persisted settlement/observation
+     rows, and keep any mismatch quarantined until an operator-approved offline
+     relabel/rebuild packet exists.
+   - WU daily-summary vs API hourly: prove which WU surface Polymarket used for
+     each affected market and date before using API-hourly maxima/minima as
+     settlement or learning authority. If the website daily summary differs,
+     legacy rows must be cohort-tagged or rebuilt offline, not silently reused.
+   - Taipei: build per-date source-role evidence across the historical
+     transition window before any transfer, calibration, or settlement-learning
+     rows can become promotion-grade.
+   - DST historical aggregates: certify rebuild from zone-aware timestamps for
+     affected DST cities before promotion-grade Day0/diurnal calibration claims.
+     Runtime clock correctness alone is insufficient proof that historical
+     materializations are clean.
+5. **RED direct side-effect remains operator-go scope.** RED/force-exit now marks
+   active positions for sweep and can emit durable CANCEL proxy commands before
+   normal command recovery. It still deliberately does not call venue
+   `cancel_order()` / submit sells directly inside `_execute_force_exit_sweep`;
+   that belongs to a live-side-effect packet with dry-run and rollback evidence.
+6. **Do not treat deep architecture gaps as cleanup.** Harvester Stage-2
+   canonical learning is architecture work. Wave38 closed the low-risk
+   `hourly_observations` runtime compatibility cleanup at source/schema/test
+   level; physical DB-file deletion remains data-layer work and is tracked
+   separately below. Wave39 verified malformed `solar_daily` rootpage degrade
+   behavior without attempting physical DB repair.
 
 ### Money-path coverage verdict
 
 | Money path segment | Current verdict | Primary blockers |
 |---|---|---|
-| Contract semantics | PARTIAL | Paris station/source mismatch remains excluded/open; non-Paris source truth still needs fresh pre-live audit |
-| Source truth | PARTIAL | current source validity must be refreshed before live claims; Paris remains quarantined; no production DB mutation was performed in this repair |
-| Forecast signal | PARTIAL | local code now fails closed on non-finite/invalid vectors; live trading still needs current source/data evidence and promotion-grade calibration evidence |
-| Calibration | BLOCKED | current calibration model/pair evidence is not promotion-grade; uncalibrated or Level 4 paths must remain blocked or explicitly degraded |
-| Edge construction | PARTIAL | Day0 discovery windows, fee-rate parsing, Level 4 maturity gating, and multi-bin `buy_no` reachability are locally repaired; live economics still require staged P&L after fees/slippage/fill drag |
+| Contract semantics | PARTIAL | Paris is closed; HK/WU/Taipei/DST source semantics still need fresh current-fact evidence |
+| Source truth | PARTIAL | current source validity must be refreshed before live claims; HK and Taipei remain caution paths |
+| Forecast signal | PARTIAL | local finite/vector gates are closed; live trading still needs current source/data evidence and promotion-grade calibration evidence |
+| Calibration | BLOCKED | TIGGE cycle asymmetry and calibration promotion evidence remain live-lock blockers |
+| Edge construction | PARTIAL | local gate repairs are closed; live economics still require staged P&L after fees/slippage/fill drag |
 | Execution intent | PARTIAL | entry and held-exit executable snapshot paths are locally wired/fail-closed; live evidence still needs staged scan -> snapshot -> command insertion |
 | Venue submission | PARTIAL | normal live path is bound to U1/final SDK submission provenance; legacy compatibility helpers are not deploy evidence |
-| Risk/control | PARTIAL | RED/ORANGE behavior is locally executable/fail-closed; direct venue cancel from `cycle_runner` is intentionally a separate live-side-effect SLA decision |
-| Fill/holding | PARTIAL | CONFIRMED-only finality, entry/exit partial materialization, and filled-command order-id recovery are locally repaired; residual drift-journal split is not a live-entry blocker |
-| Monitoring/exit | PARTIAL | LOW monitor/Day0 and exit partial fills are locally repaired; whale-toxicity is now orderbook-adjacent pressure, not true all-market print-sweep detection |
-| Settlement/learning | PARTIAL | harvester HIGH/LOW metric/source/station lineage and pending-exit settlement are locally repaired; live harvester flag and production writes remain operator-gated |
-| Observability | PARTIAL | v2 row-count shadow-table false alarm is closed; broader live-readiness projections remain non-authority |
+| Risk/control | PARTIAL | RED/ORANGE local behavior is repaired; direct venue cancel/sweep from RED itself is a separate operator-go SLA |
+| Fill/holding | PARTIAL | command finality and optimistic-vs-confirmed drift journal separation are locally repaired; live proof still belongs to staged evidence |
+| Monitoring/exit | PARTIAL | D4 live-execution invariant closed by Wave31; residual strategy-quality work is stronger exit evidence. Whale-toxicity remains orderbook-adjacent pressure, not true all-market print-sweep detection |
+| Settlement/learning | PARTIAL | harvester lineage repairs are local; live harvester flag and production writes remain operator-gated |
+| Observability | PARTIAL | readiness projections are non-authority; staged-live-smoke evidence is still missing |
 
-### [OPEN P1] No production executable snapshot producer/refresher was found
-
-**Location:** `src/state/snapshot_repo.py`, `src/engine/cycle_runtime.py`,
-`src/execution/exit_lifecycle.py::_latest_exit_snapshot_context`.
-**Original problem:** The executable snapshot gate is present, but repository search found
-`ExecutableMarketSnapshotV2(...)` construction and `insert_snapshot(...)` calls
-only in tests and the snapshot repository module, not in a live runtime producer.
-Exit lifecycle also expects the latest fresh `executable_market_snapshots` row
-by token and returns an empty context when none exists, deliberately letting the
-executor fail closed. Current audit DBs had zero `executable_market_snapshots`.
-**Active residual:** Entry-side snapshot production/threading is now present,
-but held-position exit still depends on a previously-created fresh snapshot row.
-Both entry and exit can still remain blocked when the live snapshot table is
-empty; the unresolved owner is the exit-token refresher / producer symmetry.
-**2026-04-30 recheck:** The entry side now has `capture_executable_market_snapshot()`
-in `src/data/market_scanner.py`, `cycle_runtime` calls it when live entry lacks
-snapshot facts, and runtime tests prove capture/commit before executor intent.
-This gap remains open for the exit/held-position side: `_latest_exit_snapshot_context()`
-can consume a fresh row by selected token, but no symmetric exit-token refresher
-was found in the live monitoring/exit path.
-**False-positive boundary:** This is a static/runtime-inventory finding. A
-producer outside `src/` or outside the current branch would invalidate it only if
-it writes the canonical `executable_market_snapshots` table with fresh Gamma/CLOB
-facts before entry and exit decisions.
-**Proposed remediation:**
-1. Add or identify the single production owner for executable snapshot creation.
-2. Build snapshots from fresh market metadata, token ids, orderbook state, min
-   tick, min order, fee/neg-risk facts, and freshness deadline.
-3. Refresh snapshots for both candidate entry tokens and held-position exit
-   tokens before intent creation.
-4. Make missing snapshot a structured no-trade/no-exit-side-effect state with
-   operator-visible reason, not a hidden downstream executor rejection.
-5. Add an integration test proving a real market scan creates a usable snapshot
-   and a stale/missing snapshot blocks both entry and exit command insertion.
-**Acceptance evidence:** A live dry-run shows non-empty fresh
-`executable_market_snapshots`, entry/exit intents cite those ids, and no command
-can use a stale or test-only snapshot.
-
-### [OPEN P1] RED force-exit sweep is proxy-only, not venue cancel/sell
+### [OPEN P1] RED direct venue side-effect SLA remains outside `cycle_runner`
 
 **Location:** `src/engine/cycle_runner.py::_execute_force_exit_sweep`,
 `src/execution/command_recovery.py`, `tests/test_riskguard_red_durable_cmd.py`.
-**Problem:** Architecture law says RED must cancel pending orders and exit all
-positions immediately. The cycle sweep marks `exit_reason="red_force_exit"` and,
-when enough context exists, inserts durable `CANCEL` proxy commands. Its own
-docstring states it does not post sell orders in-cycle and remains
-side-effect-free. Command recovery later observes `CANCEL_PENDING` by polling
-venue state, but does not call `cancel_order()` for still-active orders; it
-waits for an already-missing or terminal order to appear as cancelled.
-**Impact:** A live RED state can look compliant in local summaries while pending
-orders and active exposure remain at the venue until normal monitor/exit
-machinery happens to act. That is a control-plane design gap, not a modeling
-error.
-**False-positive boundary:** If a separate currently active runtime consumes
-these proxy commands and performs the venue cancel/sell side effects, this
-finding must be narrowed to that consumer's SLA. No such production consumer was
-identified in this audit slice.
-**Proposed remediation:**
-1. Define the RED action contract as an executable command flow, not only a
-   lifecycle mark.
-2. On RED, immediately cancel live pending entry/exit orders with venue
-   `cancel_order()` or a proven command worker that does so within a bounded SLA.
-3. Submit exit/sweep sell orders for active filled exposure through the certified
-   executable snapshot path, with explicit fallback when no safe bid exists.
-4. Persist separate facts for cancel requested, cancel acked, sell submitted,
-   sell filled, and residual exposure.
-5. Add a fail-closed test with a fake venue proving RED invokes cancel/sell side
-   effects or records an actionable `RED_SWEEP_BLOCKED` state.
-**Acceptance evidence:** In a RED dry-run with pending and active positions,
-venue cancel/sell methods or their certified command-worker equivalents are
-called exactly once per eligible exposure, and residual exposure is visible until
-confirmed closed.
+**Problem:** Effective RED now triggers the local sweep path, but the cycle
+remains side-effect-free: it records durable cancel/sweep intent and relies on
+the normal command/execution seams. It does not itself call venue
+`cancel_order()` or submit sell orders in the RED cycle.
+**Impact:** If operator law requires bounded immediate venue side effects from
+RED itself, Zeus can look locally compliant while pending orders or active
+exposure still wait for downstream execution workers.
+**Repair boundary:** This is not a docs-only repair. Direct venue mutation needs
+explicit operator-go, dry-run evidence, rollback plan, and a fake-venue
+relationship test proving RED produces exactly one cancel/sell action or a
+visible `RED_SWEEP_BLOCKED` state per eligible exposure.
 
-### [OPEN P1] Fail-closed RED causes do not trigger force-exit sweep
+### Current small-blocker repair plan
 
-**Location:** `src/riskguard/riskguard.py::get_current_level`,
-`get_force_exit_review`, and `src/engine/cycle_runner.py` risk gating.
-**Problem:** `get_current_level()` returns RED fail-closed when risk state is
-missing, stale, or unreadable. The cycle only calls the sweep when
-`get_force_exit_review()` is true. That flag is persisted only when
-`daily_loss_level == RED`, and `get_force_exit_review()` returns false when no
-row exists. The result is an entry block for some RED causes, not the documented
-RED cancel/sweep behavior.
-**Impact:** The most infrastructure-sensitive RED states, such as stale
-RiskGuard or missing risk DB rows, can stop entries while leaving existing venue
-orders/exposure unmanaged. RED action semantics depend on the cause of RED even
-though the documented risk level contract does not.
-**False-positive boundary:** Daily-loss RED does set `force_exit_review=1`.
-This finding concerns RED from staleness, missing rows, DB-read errors, or other
-component levels that raise the overall risk level without setting that flag.
-**Proposed remediation:**
-1. Derive force-exit behavior from effective `RiskLevel.RED`, not only the
-   daily-loss flag.
-2. Preserve reason codes so operators can distinguish daily-loss RED from
-   infrastructure fail-closed RED.
-3. For infrastructure RED, decide whether immediate venue sweep or
-   authority-limited safe cancel is required; encode that policy explicitly.
-4. Make no-row/stale-row behavior conservative for both entry block and existing
-   exposure handling.
-5. Add tests for daily-loss RED, stale RiskGuard RED, no-row RED, and DB-error
-   RED.
-**Acceptance evidence:** Every effective RED scenario produces either executed
-cancel/sweep actions or an explicit, alerting `RED_ACTION_BLOCKED` state with no
-silent entry-block-only mode.
-
-### [OPEN P2] ORANGE risk currently behaves like entry-block-only YELLOW
-
-**Location:** `src/riskguard/risk_level.py::LEVEL_ACTIONS`,
-`src/engine/cycle_runner.py` entry gating, `tests/test_runtime_guards.py`.
-**Problem:** The risk law says ORANGE means no new entries and exit positions at
-favorable prices. Runtime gating treats YELLOW, ORANGE, RED, and
-DATA_DEGRADED uniformly for entry blocking, while monitoring continues normally.
-No separate ORANGE path was identified that actively scans held exposure for
-favorable exit opportunities beyond ordinary exit triggers.
-**Impact:** ORANGE does not appear to have an enforceable runtime behavior
-distinct from YELLOW. That can leave expected de-risking unrealized during
-elevated but non-RED risk.
-**False-positive boundary:** Existing monitor/exit logic may independently exit
-positions when normal economics trigger. The gap is that ORANGE itself does not
-appear to lower or override exit thresholds as documented.
-**Proposed remediation:**
-1. Define "favorable price" in executable terms: minimum bid, max slippage,
-   expected value floor, or break-even threshold.
-2. Thread ORANGE state into exit evaluation so held positions are offered for
-   sale when the favorable-price rule is met.
-3. Keep YELLOW and ORANGE distinct in summary reason codes and tests.
-4. Add fixtures proving ORANGE exits a favorable held position while YELLOW only
-   blocks entries and monitors.
-**Acceptance evidence:** ORANGE produces deterministic favorable-exit intents
-for qualifying held positions and no longer has identical behavior to YELLOW.
-
-### [MITIGATED 2026-04-30; RESIDUAL P2] M5 exchange reconciliation no longer promotes non-final trades to filled commands
-
-**Location:** `src/execution/exchange_reconcile.py::run_reconcile_sweep`,
-`src/execution/exchange_reconcile.py::_append_linkable_trade_fact_if_missing`,
-`src/execution/exchange_reconcile.py::_fill_event_for_command`,
-`src/execution/exchange_reconcile.py::_journal_positions_by_token`.
-**Original problem:** REST/M5 reconciliation recorded `MATCHED`, `MINED`, and
-`CONFIRMED` as linkable trade facts, then emitted `FILL_CONFIRMED` when
-`filled_size >= command.size` even if the trade state was only `MATCHED`/`MINED`.
-**Antibody deployed:** `_fill_event_for_command()` now returns
-`PARTIAL_FILL_OBSERVED` for every non-`CONFIRMED` trade state; only
-`CONFIRMED` plus filled-size coverage can emit `FILL_CONFIRMED`.
-**Evidence:** `src/execution/exchange_reconcile.py::_fill_event_for_command`,
-`tests/test_command_recovery.py` finality coverage, and the first-principles
-finality relationship tests in `tests/test_cross_module_relationships.py`.
-**Residual:** `_journal_positions_by_token()` still counts `MATCHED`, `MINED`,
-and `CONFIRMED` in the position journal used for drift comparison. That residual
-is a separate optimistic-vs-confirmed drift-view packet; it is not a command
-finality blocker because non-`CONFIRMED` facts no longer emit `FILL_CONFIRMED`.
-**Acceptance evidence:** A full-size REST/M5 `MATCHED` fact no longer moves a
-command to `FILLED`; only `CONFIRMED` does. Future drift evidence should name
-whether it compared optimistic or confirmed exposure.
-
-### [OPEN P2] Collateral preflight accepts arbitrarily stale snapshots
-
-**Location:** `src/state/collateral_ledger.py::CollateralLedger.snapshot`,
-`src/state/collateral_ledger.py::buy_preflight`,
-`src/state/collateral_ledger.py::sell_preflight`,
-`src/engine/cycle_runtime.py::entry_bankroll_for_cycle`,
-`src/execution/executor.py::_assert_collateral_allows_buy`,
-`src/execution/executor.py::_assert_collateral_allows_sell`.
-**Problem:** `CollateralSnapshot` stores `captured_at`, but `buy_preflight()`
-and `sell_preflight()` check only authority tier, balances, allowances, and
-reservations. They do not reject stale snapshots. Cycle startup and
-entry-bankroll refresh normally update the global ledger, but monitoring/exit
-lanes can continue after a wallet refresh failure and executor preflight can
-reuse an older process-global snapshot.
-**Read-only reproduction:** A `CollateralLedger` loaded with a
-`CHAIN` snapshot captured at `2000-01-01T00:00:00+00:00` returned `True` for
-both `buy_preflight()` and `sell_preflight()` when balances/allowances were
-numerically sufficient.
-**Impact:** Live submit can pass Zeus' preflight against stale pUSD or CTF
-inventory. The venue may still reject insufficient collateral, but Zeus would
-have crossed local command persistence and possibly submit-side-effect
-boundaries using stale account truth.
-**False-positive boundary:** The main entry path does refresh wallet balance
-before discovery, so this is not proof every entry uses stale collateral. The
-gap is the absence of a preflight freshness invariant at the executor boundary,
-especially for exit/recovery paths and failed wallet-refresh cycles.
-**Proposed remediation:**
-1. Add a collateral freshness deadline or max-age policy to snapshots.
-2. Make buy/sell preflight fail closed on stale, missing, or degraded
-   collateral truth.
-3. Refresh collateral on the same path, or immediately before, command
-   persistence when the snapshot is stale.
-4. Add tests for stale buy and stale sell snapshots, plus the
-   entry-bankroll-failure/exit-submit path.
-**Acceptance evidence:** A stale `CHAIN` snapshot fails preflight with a
-specific `collateral_snapshot_stale` reason, and executor tests prove stale
-collateral cannot reach command persistence or SDK contact.
-
-### [OPEN P1] ENS local-day NaNs can pass validation and create false posterior edges
-
-**Location:** `src/data/ensemble_client.py::validate_ensemble`,
-`src/signal/ensemble_signal.py::member_maxes_for_target_date`,
-`src/signal/ensemble_signal.py::p_raw_vector_from_maxes`,
-`src/signal/model_agreement.py::model_agreement`,
-`src/strategy/market_fusion.py::compute_posterior`,
-`src/strategy/market_analysis.py::MarketAnalysis.find_edges`.
-**Problem:** `validate_ensemble()` rejects only when more than half of the
-entire hourly matrix is NaN. That can pass a forecast where every member has a
-NaN inside the selected local target-day slice. `member_maxes_for_target_date()`
-then uses plain `.max()` / `.min()`, so one NaN in the local-day slice makes
-that member's daily extremum NaN. `p_raw_vector_from_maxes()` bins the rounded
-NaN values into no bin and returns an all-zero probability vector when total
-mass is zero. `model_agreement()` receives the zero vector, `jensenshannon()`
-returns NaN, and the comparison chain classifies the result as
-`SOFT_DISAGREE` rather than failing closed. In complete markets with sub-1.0
-raw price totals, `compute_posterior()` can then normalize market prices and
-create positive YES edges even though `p_model` is `0.0`.
-**Read-only reproduction:** A 51x24 ENS matrix with one NaN per member in the
-target local day passed `validate_ensemble=True`, produced
-`member_extrema_nan_count=51 of 51`, and returned
-`p_raw=[0.0, 0.0, 0.0]`. A `MarketAnalysis` constructed with that zero
-`p_cal`, `p_market=[0.30,0.30,0.30]`, and NaN member extrema produced
-positive tail `buy_yes` edges with `p_model=0.0`, `edge=0.075`,
-`ci_lower=0.075`, and `p_value=0.0`.
-**Impact:** A provider data-quality defect can cross from weather ingestion into
-edge construction without a deterministic no-trade. This is not just a missing
-audit row: it can produce false alpha from market-vig normalization and tail
-alpha scaling while the actual model probability vector is invalid.
-**False-positive boundary:** This requires NaNs in the selected local-day slice,
-not arbitrary isolated NaNs outside the traded day. If Open-Meteo never emits
-such partial-hour NaNs in production, the live trigger probability is lower, but
-the code contract is still wrong because the validator is global-matrix based
-while the trading quantity is local-day extrema.
-**Proposed remediation:**
-1. Validate finite values after selecting the exact local target-day slice and
-   before computing per-member extrema.
-2. Use an explicit missing-data policy: either reject any member with NaN inside
-   the local-day slice, or drop members only if the remaining member count still
-   meets the configured minimum.
-3. Add a probability-simplex gate after every p_raw/p_cal computation:
-   finite, non-negative, and sum within tolerance of 1.0 for complete bin
-   families. Failure must produce a structured no-trade.
-4. Make `model_agreement()` reject non-finite or non-normalized vectors instead
-   of classifying NaN JSD as `SOFT_DISAGREE`.
-5. Make `MarketAnalysis` refuse non-finite member extrema and invalid p_raw/p_cal
-   before posterior/CI construction.
-**Acceptance evidence:** A local-day NaN fixture fails closed before alpha,
-posterior, or bootstrap; a complete finite fixture still produces a normalized
-p_raw vector; `model_agreement(np.zeros(...), valid_gfs)` raises or returns an
-explicit invalid-signal no-trade, never `SOFT_DISAGREE`.
-
-### [OPEN P1] Day0 stale/epoch observations can still produce tradeable p_raw
-
-**Location:** `src/data/observation_client.py::_fetch_wu_observation`,
-`src/data/observation_client.py::_select_local_day_samples`,
-`src/signal/forecast_uncertainty.py::day0_nowcast_context`,
-`src/signal/day0_signal.py::Day0Signal`, `src/engine/evaluator.py` Day0 path.
-**Problem:** WU, the priority Day0 settlement-source path for WU cities, stores
-`valid_time_gmt` as the raw `Day0ObservationContext.observation_time` epoch.
-`build_day0_temporal_context()` can parse that epoch for solar/remaining-hour
-context, but `day0_nowcast_context()` only parses ISO strings and catches only
-`ValueError`; therefore a fresh WU epoch observation gets
-`age_hours=None`, `freshness_factor=0.0`, and `fresh_observation=False`.
-Separately, provider sample selection requires only "target local day and not in
-the future"; there is no minimum sample count, coverage-from-local-midnight
-threshold, maximum observation age gate, or source-lag fail-closed check before
-Day0 p_raw is accepted. Staleness only expands sigma and reduces blending; it
-does not block entry.
-**Read-only reproduction:** With `current_utc_timestamp` equal to the WU epoch's
-actual time, `day0_nowcast_context(observation_source='wu_api',
-observation_time=<epoch>)` returned `age_hours=None`, `freshness_factor=0.0`,
-`fresh_observation=False`, while the same timestamp as ISO returned
-`age_hours=0.0`, `freshness_factor=1.0`, `fresh_observation=True`. A
-`Day0Signal` using the WU epoch still returned normalized `p_raw=[0.0,1.0,0.0]`
-with `sum=1.0`.
-**Impact:** The same-day observation edge can be built from a primary provider
-timestamp that the freshness model declares stale or from a provider response with
-insufficient coverage. That turns weather-data delay into a soft model parameter
-instead of a live-money authority gate, so Zeus can trade Day0 when the observed
-high/low-so-far is not proven current enough to anchor the contract.
-**False-positive boundary:** This does not prove every WU API response is delayed
-or sparse. It proves the live path has no hard freshness/coverage invariant and
-that the currently returned WU epoch timestamp format is misinterpreted by the
-freshness function.
-**Proposed remediation:**
-1. Normalize `Day0ObservationContext.observation_time` to an aware UTC
-   `datetime`/ISO string at provider boundaries, while retaining raw provider
-   timestamp and `obs_id` as separate audit fields.
-2. Add a Day0 observation authority gate before `Day0Signal`: max age by source,
-   minimum sample count, minimum coverage since local midnight or an explicit
-   provider daily-summary fact, and matching station/source identity.
-3. Make stale/unknown-age observations produce structured no-trade for new
-   entries; monitoring may degrade to read-only with explicit stale-observation
-   provenance instead of generating fresh exit alpha.
-4. Thread the same freshness/coverage verdict into LOW Day0 and monitor-refresh
-   paths, not just HIGH entry.
-5. Add fixtures for fresh WU epoch, stale ISO, sparse sample set, delayed provider
-   response, and Open-Meteo fallback to prove only authority-fresh observations can
-   produce tradeable Day0 p_raw.
-**Acceptance evidence:** A fresh WU epoch observation is parsed as fresh; stale or
-coverage-insufficient Day0 observations reject entry before p_raw/calibration;
-monitor artifacts explicitly show stale-observation read-only degradation.
-
-
-### Repair sequencing proposal
-
-Do not fix these as isolated one-line patches. The safe sequence is:
-
-1. **No-go guard preservation:** Keep live deployment blocked until readiness,
-   bankroll, egress, executable snapshot, and calibration evidence are all
-   present. Any repair that removes a fail-closed gate must include a stronger
-   replacement gate in the same packet.
-2. **Contract/source audit first:** Refresh Gamma resolutionSource for all
-   active HIGH/LOW weather markets, resolve Paris `LFPB/LFPG`, close the
-   HK Day0 HKO-vs-VHHH route, and update source routing or quarantine policy
-   before touching calibration or trading.
-3. **Discovery-mode window closure:** Repair `day0_capture` time-window ownership
-   before validating Day0 alpha, so <6h markets can actually reach the evaluator
-   and >6h markets are rejected once with explicit provenance.
-4. **Day0 observation authority:** Normalize provider timestamps, require
-   station/source identity, max-age, minimum sample coverage, and explicit
-   stale-observation no-trade/read-only behavior before any Day0 p_raw can be
-   tradeable.
-5. **Forecast signal validity:** Keep the Open-Meteo empty-snapshot antibody in
-   place and finish local-day finite-extrema plus probability-simplex gates for
-   p_raw/p_cal. This must land before learning/harvester or live tradings.
-6. **Market discovery authority:** CLOSED 2026-04-30 for scan-authority gating
-   and closed/non-accepting child filtering. Residual source validity belongs to
-   the contract/source audit and Day0 observation authority items.
-7. **Executable identity closure:** Entry-side snapshot capture/threading is
-   present. Add symmetric exit snapshot refresh/production and eliminate
-   compatibility placeholders from live V2 submit.
-8. **Execution economics closure:** Repair live CLOB fee-rate parsing, unit
-   conversion, and fee evidence before claiming Kelly sizing reflects current
-   Polymarket costs.
-9. **Execution price-shape closure:** Entry VWMP tick alignment and entry
-   `max_slippage` enforcement are CLOSED 2026-04-30. Remaining economics work is
-   live fee evidence and realized execution-cost attribution. Every configured
-   execution budget must be behavior-changing or explicitly removed.
-10. **Venue submission provenance closure:** Persist the final SDK submit
-   envelope/result as append-only canonical evidence and link it to the command
-   ack, so pre-submit intent evidence and post-submit side-effect evidence are
-   both durable.
-11. **LOW semantic closure:** CLOSED 2026-04-30 for LOW monitor metric threading
-   and LOW Day0 shoulder/rich-context handling. Remaining LOW risk is under the
-   source-role/station/freshness Day0 observation authority gap.
-12. **Calibration maturity semantics:** CLOSED 2026-04-30 for local executable
-   selection: Level 4 raw-probability buckets block before edge selection. Live
-   promotion still requires populated calibration evidence.
-13. **Strategy direction reachability:** CLOSED 2026-04-30 for native
-   multi-bin `buy_no` source/test reachability. Residual live tradings still
-   require calibration/P&L evidence and operator promotion gates.
-14. **Calibration readiness:** Populate and validate metric-aware calibration
-   pairs/models only after source/snapshot lineage is clean. Until then,
-   `p_cal=p_raw` must remain an explicit no-go or degraded strategy state, not
-   a silent "calibrated" surface.
-15. **Risk-action closure:** CLOSED 2026-04-30 for local semantics: RED sweep
-   actuation and ORANGE favorable-exit intent creation are covered by tests.
-   Direct venue cancel inside `cycle_runner` remains a separate operator-go SLA.
-16. **Partial-fill lifecycle and fill finality:** CLOSED 2026-04-30 for local
-   entry/exit materialization and CONFIRMED-only finality. Remaining
-   optimistic-vs-confirmed drift journaling is a reconciliation/audit refinement.
-17. **Collateral freshness closure:** CLOSED 2026-04-30 for buy/sell executor
-   preflight freshness rejection.
-18. **Filled-command recovery closure:** CLOSED 2026-04-30 for `FILLED`
-   command recovery preserving order ids.
-19. **Monitor microstructure closure:** CLOSED 2026-04-30 for the claimed local
-   behavior: orderbook-adjacent pressure is fed into monitor-to-exit provenance.
-   True all-market trade-print whale-sweep detection is not claimed without a
-   future market-stream feed.
-20. **Settlement/learning closure:** CLOSED 2026-04-30 for local HIGH/LOW
-   metric/source/station lineage, pending-exit residual settlement, and
-   decision-snapshot/source lineage in calibration pairs. Live harvester writes
-   remain feature-flag/operator gated.
-21. **Observability repair:** CLOSED 2026-04-30 for v2 row-count world-vs-trade
-   shadow qualification. Status remains a projection, not deploy authority.
-22. **End-to-end proof:** Run an end-to-end dry-run that exercises
-    market scan -> snapshot -> decision -> command insert -> V2 envelope ->
-    user-channel or polling finality -> position projection -> monitor exit
-    without venue side effects unless operator gates explicitly authorize them.
-
-### Required acceptance coverage before live trading
-
-- Unit tests for every patched seam above.
-- Integration test for candidate -> decision -> executable snapshot -> command
-  insertion.
-- Fixture-backed Gamma/source tests for Paris station identity and HK HKO Day0
-  station routing. Open-shoulder and mixed closed-child coverage is archived as
-  closed 2026-04-30.
-- Discovery-mode window tests proving `day0_capture` reaches <6h markets, rejects
-  >6h markets once, and does not inherit the scanner's non-Day0 minimum-hour
-  default.
-- Day0 observation authority tests proving WU epoch timestamps parse as fresh
-  when current, stale timestamps block entry, sparse/coverage-insufficient
-  samples fail closed, and monitor paths degrade read-only with provenance.
-- DB migration/projection tests proving non-empty `decision_snapshot_id` and
-  p_raw persistence.
-- ENS data-quality tests proving local-day NaNs, all-zero p_raw, non-finite
-  p_cal, and non-normalized model-agreement inputs fail closed before posterior
-  or bootstrap edge construction.
-- Strategy reachability tests proving every advertised live strategy family has
-  at least one executable decision path. Weather multi-bin shoulder-sell /
-  `buy_no` source reachability is covered by the 2026-04-30 native-NO tests;
-  live-alpha promotion still requires calibration/P&L evidence.
-- Partial-fill lifecycle tests proving `PARTIAL -> CANCELLED remainder` leaves
-  an active position for the filled shares and does not create a chain-unknown
-  quarantine for the same token.
-- Command-recovery finality tests proving `MINED` and `MATCHED` do not emit
-  `FILL_CONFIRMED` unless followed by `CONFIRMED` or a typed order-finality
-  source.
-- Exit partial-fill lifecycle tests proving realized partial sells reduce
-  remaining shares and retries sell only the unsold remainder.
-- Risk-action tests proving RED causes execute or block with alerting cancel/sweep
-  semantics, and ORANGE produces favorable-exit intents under its documented rule.
-- Production executable-snapshot producer tests proving fresh snapshots are
-  created/refreshed before both entry and exit commands; entry coverage exists,
-  exit refresher coverage remains active.
-- Execution-budget tests proving dynamic limit price improvement cannot exceed
-  the configured slippage budget without explicit override evidence.
-- Fee-rate API compatibility tests proving current `base_fee` responses parse
-  into the correct fee formula units and malformed fee responses fail closed with
-  explicit provenance.
-- Tick-quantization tests for entry are archived as closed 2026-04-30; keep
-  regression coverage when changing execution price planning.
-- Venue-submission provenance tests proving the final SDK envelope/result is
-  durably appended and linked to `SUBMIT_ACKED`, not only returned transiently
-  from `PolymarketClient.place_limit_order()`.
-- Monitor microstructure tests proving orderbook-adjacent whale-toxicity is fed
-  by fresh sibling CLOB facts, behavior-changing when toxic, clear when
-  pressure is absent, and unknown when scan/orderbook authority is insufficient.
-- Harvester settlement tests proving HIGH/LOW metric identity, VERIFIED
-  source/station enforcement, and settlement terminalization of pending-exit
-  residual exposure.
-- Calibration-learning lineage tests proving live/Open-Meteo p_raw cannot be
-  stored as TIGGE `training_allowed=1` rows and that every training row carries a
-  non-null decision snapshot id.
-- Status-summary tests with attached world/trade DB name collisions.
-- Current data evidence showing non-empty metric-aware Platt models/pairs or a
-  deliberate strategy gate that blocks uncalibrated live entries.
-- Calibration-maturity tests proving Level 4 either blocks entry or applies the
-  documented stricter edge threshold before executable decision creation.
+1. **Investigate before code:** use bounded read-only slices for source truth,
+   calibration/rebuild, execution/risk, and low-priority cleanup. Do not touch
+   `climate_zone` in this wave.
+2. **Patch only non-live-mutating blockers first:** Wave31 closed the D4
+   hard-gate live-execution invariant. Waves41-42 narrowed D3 execution-cost
+   continuity at the reconcile and harvester seams. RED direct venue side
+   effects are not eligible without operator-go for live-side-effect work.
+3. **Verification per blocker:** each repair needs a relationship test or static
+   semantic check at the boundary it claims to protect. Function-local tests are
+   insufficient for these gaps.
+4. **Downstream sweep:** after each repair, search monitor, exit, settlement,
+   replay, report/export, learning/calibration, legacy/fallback paths for the
+   old meaning before marking the gap closed.
+5. **Do not use readiness green as deploy proof:** `live_readiness_check.py`
+   gates are necessary but not sufficient; staged-live-smoke evidence and
+   operator live-money deploy-go remain separate.
 
 ### Websearch policy for this audit family
 
@@ -610,13 +293,13 @@ series structural boundary is archived in `docs/to-do-list/known_gaps_archive.md
 
 ### [OPEN — NOT LIVE-CERTIFIED] Historical diurnal aggregates still need DST-safe rebuild cleanup
 **Certification status:** This gap blocks live math certification. The DST historical rebuild has NOT been executed and historical data derived from pre-fix aggregates is NOT certified for promotion. See `architecture/data_rebuild_topology.yaml` → `dst_historical_rebuild`.
-**Location:** `scripts/etl_hourly_observations.py`, `scripts/etl_diurnal_curves.py`, `src/signal/diurnal.py`
+**Location:** `scripts/etl_diurnal_curves.py`, `src/signal/diurnal.py`
 **Problem:** The old London 2025-03-30 hour=1 evidence is stale. ETL/runtime is now partially DST-aware, but historical `diurnal_curves` materializations may still need to be rebuilt from true zone-aware local timestamps.
 **Runtime mismatch:** `get_current_local_hour()` in `diurnal.py` already uses `ZoneInfo` and is DST-aware. The remaining risk is stale pre-fix aggregates/backfill, not the runtime clock itself.
-**Impact:** Day0 `diurnal_peak_confidence` can still drift if old hourly/diurnal tables remain in circulation. NYC (EDT/EST), Chicago (CDT/CST), London (BST/GMT), Paris (CEST/CET) should be revalidated after rebuild; Tokyo, Seoul, Shanghai remain safe (no DST).
+**Impact:** Day0 `diurnal_peak_confidence` can still drift if old diurnal materializations remain in circulation. NYC (EDT/EST), Chicago (CDT/CST), London (BST/GMT), Paris (CEST/CET) should be revalidated after rebuild; Tokyo, Seoul, Shanghai remain safe (no DST).
 **Proposed antibody:**
-1. Verify every ETL/backfill path derives `obs_hour` from zone-aware local timestamps.
-2. Rebuild historical `hourly_observations` / `diurnal_curves` materializations from the corrected path.
+1. Verify every remaining ETL/backfill path derives local-hour inputs from zone-aware local timestamps.
+2. Rebuild historical `diurnal_curves` materializations from the corrected path.
 3. Keep `test_diurnal_curves_hour_is_dst_aware` (or equivalent) to guard spring-forward/fall-back behavior.
 **Cities affected:** DST cities only until the historical rebuild is proven clean.
 
@@ -636,8 +319,9 @@ Instrument-level antibodies all closed (MC count parity / CI-aware exit /
 hours_since_open / MODEL_DIVERGENCE_PANIC threshold). See
 `docs/to-do-list/known_gaps_archive.md` → "CRITICAL: Exit/Entry Epistemic Asymmetry".
 
-The structural relationship gap remains OPEN as **D4** under "MEDIUM-CRITICAL:
-Cross-Layer Epistemic Fragmentation" below.
+The structural relationship gap is now **PARTIAL** as **D4** under
+"MEDIUM-CRITICAL: Cross-Layer Epistemic Fragmentation" below: live execution
+fails closed, but stronger statistical exit evidence remains future work.
 
 ---
 
@@ -651,11 +335,44 @@ Quality".
 
 ## MEDIUM: Data Confidence
 
-### [STALE-UNVERIFIED] Open-Meteo quota contention is workspace-wide, not Zeus-only
-**Location:** Zeus + `51 source data` + Rainstorm-era ingestion loops
-**Problem (filed 2026-04-03):** Workspace has shared data agents that can cause `429 Too Many Requests` on Open-Meteo, causing Zeus to misdiagnose quota issues.
-**Status (2026-04-06):** All recent Open-Meteo API calls in the log show `HTTP/1.1 200 OK` with no 429 errors. Harvester ran successfully (`settlements_found=141`) but created 0 pairs — the failure mode appears to be Stage-2 bootstrap, not quota exhaustion. This gap may be less active than initially feared.
-**Proposed antibody:** 建立 workspace-wide quota coordination：至少要有共享计数 / cooldown / update watermark，或者明确调度隔离，让 Zeus 的交易路径优先于后台数据 agent。
+### [OPEN — WORKSPACE-BOUNDARY] Open-Meteo quota/cooldown is process-local, not workspace-authoritative
+**Location:** `src/data/openmeteo_quota.py`,
+`src/data/openmeteo_client.py`, `src/data/ensemble_client.py`,
+`src/data/observation_client.py`, `src/data/source_health_probe.py`;
+external co-tenants such as `51 source data` / Rainstorm-era ingestion loops
+remain outside this repository.
+**Problem (filed 2026-04-03, refreshed 2026-05-08):** Open-Meteo quota and
+429 cooldown are real provider/account/IP/workspace constraints, but Zeus
+currently models them as process-local state. `OpenMeteoQuotaTracker` keeps
+`_count` and `_blocked_until` in memory per Python process. Core Zeus fetchers
+consult that tracker, but another daemon/process/workspace can spend the same
+provider quota without updating this process, and `source_health_probe` performs
+a direct `httpx.get()` archive probe outside the shared tracker path.
+**Current evidence:** `openmeteo_client.fetch()` checks
+`quota_tracker.can_call()`, records successful calls, and engages cooldown on
+HTTP 429. `ensemble_client` and `observation_client` also use
+`quota_tracker`. `tests/test_runtime_guards.py` covers warning, hard block,
+reset, and 429 cooldown behavior for one tracker instance. No current repo
+evidence proves a persisted/shared quota ledger across Zeus processes or
+non-Zeus co-tenants.
+**Object-meaning failure:** downstream trading/source-health consumers may
+treat "Open-Meteo quota available" as a Zeus-local boolean, while the real
+object is a shared external quota/cooldown interval. That changes source
+authority and time-validity meaning across process/workspace boundaries.
+**Current live-money posture:** not a direct order/execution bug. It can still
+corrupt source-health diagnosis or cause unnecessary degraded/fallback states if
+co-tenants burn quota or trigger a provider cooldown that Zeus did not observe.
+**Required antibody:** a workspace-authoritative quota/cooldown ledger or lease
+with UTC-day reset, endpoint class, retry-after/cooldown interval, and atomic
+cross-process updates. `source_health_probe` must either consume the shared
+client/ledger or run under an explicit small probe budget. Relationship tests
+must prove two independent tracker instances share count/cooldown state and
+that health probing cannot bypass the ledger.
+**Repair boundary:** do not implement this as an in-memory tweak. A real fix
+needs a small runtime-governance design for where the shared ledger lives
+(`state/` DB vs lockfile vs daemon-local service), crash recovery semantics,
+and whether non-Zeus co-tenants can or must participate. No live external
+traffic or provider-load test is authorized by this gap entry.
 
 (2 FIXED entries on persistence_anomaly + 2 CLOSED 2026-04-15 entries on
 alpha_overrides / harvester bias correction archived to
@@ -665,13 +382,9 @@ alpha_overrides / harvester bias correction archived to
 
 ## CRITICAL: Settlement Source Mismatch (2026-04-16 smoke test)
 
-### [OPEN] HK: SettlementSemantics uses WMO half-up, but PM resolution uses floor (bin containment)
-**Location:** `src/contracts/settlement_semantics.py` → `for_city()` → non-WU path
-**Problem:** PM HK description says: "resolve to the temperature range that **contains** the highest temperature... temperatures in Celsius to **one decimal place**." HKO Daily Extract returns 0.1°C precision (e.g., 27.8°C). PM maps 27.8 into "27°C" bin via floor containment: 27 ≤ 27.8 < 28. Our `SettlementSemantics` uses `precision=1.0` + `rounding_rule="wmo_half_up"`, giving `floor(27.8+0.5)=28` — wrong bin.
-**Evidence:** Floor fixes 3/3 HKO-period mismatches (03-18, 03-24, 03-29) with 0 regressions against 16 total HK PM markets. All 11 existing matches preserved under floor.
-**Impact:** HK is the only city with decimal-precision raw values (all WU cities return integers where floor=WMO). This is an architecture-level change: modifying `SettlementSemantics.for_city()` for HKO rounding affects the probability chain (ENS → noise → settlement rounding → bin assignment).
-**Fix scope:** Change `rounding_rule` to `"floor"` for `settlement_source_type == "hko"` in `SettlementSemantics.for_city()`. Requires system constitution review since WMO half-up is stated as universal law in AGENTS.md line 49 and line 117.
-**Blocked by:** System constitution review — AGENTS.md says "Settlement: WMO asymmetric half-up rounding" as universal. HKO is an exception where PM uses containment semantics instead.
+HKO rounding/containment is closed in code and archived in
+`docs/to-do-list/known_gaps_archive.md`. The remaining HK issue is source/audit
+authority for specific historical dates, not rounding arithmetic.
 
 ### [OPEN] HK 03-13, 03-14: unresolved HKO source/audit mismatch; no WU ICAO route
 **Problem:** Earlier packet language claimed a WU/VHHH Airport route. Operator correction 2026-04-28 supersedes that: Hong Kong has no WU ICAO route in Zeus. We have HKO Observatory data and the two early dates remain unresolved source/audit mismatches until fresh operator-approved primary-source evidence proves the settlement source.
@@ -742,28 +455,24 @@ cycle_runner._execute_monitoring_phase()
 ```
 
 ### Key Cross-Module Relationships
-1. **Entry 和 monitor 必须用相同的 MC count** — FIXED (both 5000)
-2. **Entry 和 monitor 必须用相同的 SettlementSemantics** — FIXED (for_city)
-3. **Entry uses bootstrap CI, monitor now emits coherent conservative bounds for exit logic** — PARTIALLY CLOSED
-4. **Entry and monitor both use real hours_since_open semantics** — FIXED
-5. **Evaluator 传 Bin.unit，monitor_refresh 传 Bin.unit** — FIXED (both use position.unit)
-6. **Harvester 和 evaluator 的 bias correction 设置不同步** — OPEN gap
-7. **Canonical settlement payload path is authoritative** — FIXED (canonical path landed; no stale OPEN claim remains)
-8. **`status_summary` runtime truth is lane-specific and enum-normalized** — FIXED (no mixed `ChainState.UNKNOWN` vs `unknown` truth)
+
+Historical closed relationships are in `known_gaps_archive.md`. Active
+cross-module relationship work remaining in this file is limited to:
+
+1. D3 typed execution-cost meaning surviving evaluator -> Kelly -> fill/exit/
+   replay/report boundaries.
+2. D4 stronger exit evidence construction after Wave31 hard gate.
+3. Source/settlement current-fact boundaries for HK, WU daily-summary, Taipei,
+   and DST historical rebuild certification.
 
 ---
 
 ## Tooling / Operator Health
 
-### [STALE-UNVERIFIED] CycleRunner fails on malformed `solar_daily` schema rootpage
-**Location:** `zeus/state/zeus.db` / the day0 capture path that reads `solar_daily`
-**Problem (filed 2026-04-02):** A legacy diagnostic cycle failed with `malformed database schema (solar_daily) - invalid rootpage`. The monitor path was reading a broken SQLite object and the cycle aborted instead of degrading cleanly.
-**Status (2026-04-06):** The latest `opening_hunt` cycles completed without this error appearing in the log. Not confirmed fixed — may have been intermittent or masked by a different cycle mode. Requires a deliberate `day0_capture` run to verify.
-**Proposed antibody:** Add an explicit schema/integrity check before day0 capture and fail closed with a structured error (plus a repair/migration path) instead of letting SQLite rootpage corruption surface mid-cycle.
-
-(3 closed entries on strategy_tracker JSON authority, Healthcheck assumptions,
-and Day0 stale probability waiver archived to `docs/to-do-list/known_gaps_archive.md` →
-"Tooling / Operator Health".)
+All current closed entries for strategy_tracker JSON authority, Healthcheck
+assumptions, Day0 stale probability waiver, and malformed `solar_daily`
+rootpage degrade behavior are archived in
+`docs/to-do-list/known_gaps_archive.md` → "Tooling / Operator Health".
 
 ---
 
@@ -790,11 +499,9 @@ and Day0 stale probability waiver archived to `docs/to-do-list/known_gaps_archiv
 **Antibody deployed:** `run_harvester()` now runs a Stage-2 DB-shape preflight after settled events are fetched and before per-event learning work starts. If runtime support tables are missing, it returns `stage2_status='skipped_db_shape_preflight'` with missing trade/shared table lists and skips only Stage-2 snapshot/calibration/refit work; event parsing and settlement handling still run. Legacy `decision_log` settlement-record storage degrades when that table is absent instead of crashing the cycle.
 **Residual:** This is a structured skip, not a migration. It does not create calibration pairs on canonical-only bootstrap DBs, rebuild `p_raw_json`, or replace legacy Stage-2 helpers with a fully canonical learning path.
 
-### [OPEN] ACP router fallback chain is recovering after failure, not stabilizing before dispatch
-**Source:** `evolution/router-audit/2026-04-08-router-audit.md`
-**Problem:** The current router can classify `auth`, `timeout`, and `network` failures, but dispatch still happens before allowlist/auth/timeout hard prechecks. Result: the fallback chain keeps switching to another failure surface instead of a known-good surface.
-**Impact:** Window-level timeout clusters, invalid auth tokens, and Discord gateway/network failures can cascade across the routing stack.
-**Proposed antibody:** Add a deterministic pre-dispatch gate for allowlist/auth/timeout, then run semantic routing only over candidates that already passed preflight.
+ACP router fallback-chain work is closed for Zeus scope and archived in
+`docs/to-do-list/known_gaps_archive.md`; no `src/` or `tests/` Zeus consumer was
+found in the 2026-05-08 realignment.
 
 (5 FIXED entries on settlement CI guard / buy-yes proxy / settlement won
 ambiguity / control-plane gate drift / LA Gamma Milan / Heartbeat cron RED
@@ -826,13 +533,29 @@ Six design gaps identified at the signal→strategy→execution boundary. The si
 **Problem:** `BinEdge.entry_price = p_market[i]` (implied probability from mid-price), but actual execution price = ask + taker fee (5%) + slippage. Kelly sizing uses the implied probability as the cost basis, systematically oversizing positions because the real cost is higher.
 **Impact:** Every Kelly-sized position is larger than it should be. The magnitude depends on spread width and fee structure.
 **Mitigation deployed (2026-04-13; DSA-09 cleanup 2026-04-29):** `evaluator.py` wraps entry price as `ExecutionPrice`, queries token-specific CLOB fee rate when available, and computes `polymarket_fee(p) = fee_rate × p × (1-p)` before Kelly. The fee-adjusted path is now unconditional; the stale `EXECUTION_PRICE_SHADOW` rollback flag was removed from `settings.json` after the shadow-off branch was deleted.
-**Remaining antibody:** Carry typed execution cost beyond evaluator, and connect market-specific tick size, neg-risk, and realized fill/slippage reconciliation.
+**Mitigation deployed (2026-05-08 Wave32):** `src/state/db.py` and `src/state/portfolio.py` now preserve venue-confirmed full-open fill cost above `position_current` projection/target cost while keeping partial-exit open slices reduced by remaining share ratio.
+**Mitigation deployed (2026-05-08 Wave41):** `src/execution/exchange_reconcile.py`
+no longer treats a generic exchange `price` field as realized fill authority
+when appending missing linkable trade facts. Only explicit fill-price fields
+(`avgPrice`, `avg_price`, `fillPrice`, `fill_price`) can populate
+`venue_trade_facts.fill_price`; confirmed/matched/mined trades with only
+generic `price` now produce an `exchange_trade_missing_fill_economics` finding
+and do not trigger fill-finality events.
+**Mitigation deployed (2026-05-08 Wave42):** `src/execution/harvester.py`
+now rejects settlement P&L economics when a position carries corrected
+executable economics markers but lacks fill-derived authority. Legacy fallback
+remains available only for unclassified legacy rows; corrected rows fail closed
+instead of reusing ambiguous `size_usd / entry_price` economics.
+**Remaining antibody:** Carry typed execution cost beyond evaluator, and connect
+market-specific tick size, neg-risk, realized fill/slippage reconciliation, and
+persisted fee/liquidity-role authority through read-model, replay, report, and
+learning consumers.
 
-### [OPEN] D4 — Entry-exit epistemic asymmetry (CRITICAL)
+### [PARTIAL] D4 — Entry-exit epistemic asymmetry (LIVE-EXECUTION MITIGATED)
 **Location:** `src/engine/evaluator.py` (entry), `src/execution/exit_triggers.py` (exit)
-**Problem:** Entry requires BH FDR α=0.10 + bootstrap CI + `ci_lower > 0` — high statistical burden. Exit requires only 2-cycle confirmation — low statistical burden. The system admits edges cautiously but exits aggressively, killing true edges via noise before they mature.
-**Cross-reference:** Several specific manifestations of this asymmetry are tracked in the "Exit/Entry Epistemic Asymmetry" section above (MC count mismatch [FIXED], CI-aware exit [FIXED], hours_since_open [FIXED], divergence threshold [FIXED]). This gap tracks the *structural* asymmetry: entry and exit should share a symmetric `DecisionEvidence` contract with comparable statistical burden.
-**Proposed antibody:** Entry and exit share the same `DecisionEvidence` contract type with symmetric statistical burden. Exit reversal requires bootstrap-grade evidence, not just 2 consecutive point-estimate checks.
+**Problem:** Entry requires BH FDR α=0.10 + bootstrap CI + `ci_lower > 0` — high statistical burden. Legacy statistical exit triggers used only 2-cycle confirmation — low statistical burden.
+**Mitigation deployed (2026-05-08 Wave31):** `src/engine/cycle_runtime.py` now gates `EDGE_REVERSAL`, `BUY_NO_EDGE_EXIT`, and `BUY_NO_NEAR_EXIT` before `MonitorResult`, `build_exit_intent()`, or `execute_exit()`. Missing entry evidence or weaker exit evidence degrades to hold/review; non-statistical force-majeure exits are not blocked by D4.
+**Residual antibody:** Build an exit-side evidence contract with external-reality-valid statistical authority so ordinary statistical exits can proceed on evidence that is symmetric with entry, instead of relying on the fail-closed hold/review path.
 
 (D5 / D6 / Day0-canonical-event closed entries archived to
 `docs/to-do-list/known_gaps_archive.md` → "MEDIUM-CRITICAL: Cross-Layer Epistemic
@@ -844,20 +567,73 @@ Fragmentation (D1–D6)".)
 
 Items explicitly queued as future/open in session 59195a96, not in prior gap register. Non-blocking to live trading in current state. Source: `.claude/tasks/59195a96-*/3.json`, `4.json`, `6.json`, `7.json`, `8.json`.
 
-### [OPEN] s3 — climate_zone field missing from config/cities.json
+### [DEFERRED — FUTURE] s3 — climate_zone field missing from config/cities.json
 
 **Authority:** LAW 6 in `docs/reference/zeus_calibration_weighting_authority.md`.
-**Problem:** 51 cities lack a `climate_zone` enum field. Required enum values: `tropical_monsoon_coastal | temperate_coastal_frontal | inland_continental | high_altitude_arid`. Without this field, LAW 6 cluster-level α tuning (PoC v6, task s6) is unrunnable, and any weighting that partitions by climate zone silently falls back to uniform treatment.
-**Next step:** Propose mapping for all 51 cities → operator review before writing to config. Do not write the field without operator sign-off on the taxonomy.
+**Problem:** Current city config still lacks `climate_zone`. This is future
+calibration taxonomy work, not part of the 2026-05-08 small-blocker wave.
+**Next step:** Propose mapping for all current cities → operator review before
+writing to config. Do not write the field without operator sign-off on the
+taxonomy.
 **Blocks:** s6 (PoC v6 cluster-level α tuning).
 
-### [OPEN] s4 — 11 antibody tests for calibration weighting LAW
+### [PARTIAL — DATA-LAYER BLOCKED] s4 — Calibration weighting LAW antibodies
 
 **Authority:** `docs/reference/zeus_calibration_weighting_authority.md`.
-**Problem:** No systematic antibody test suite exists for the calibration weighting laws. Any regression in LAW enforcement is invisible without tests.
-**Required tests (from spec):**
-`test_calibration_weight_continuity`, `test_per_city_weighting_eligibility`, `test_no_temp_delta_weight_in_production`, `test_weight_floor_nonzero_for_ambig_only`, `test_high_track_unaffected_by_low_law`, `test_rebuild_n_mc_default_bounded`, `test_runtime_n_mc_floor`, `test_rebuild_per_track_savepoint`, `test_no_per_city_alpha_tuning`, + 2 more per spec.
-**Next step:** Implement all 11 as pytest fixtures in `tests/test_calibration_weighting_laws.py`.
+**Problem:** The original backlog framed this as "add 11 tests", but Wave37
+found two distinct object classes: safe code/config/static antibodies that can
+be enforced now, and row-level calibration-weight semantics that require schema,
+ingest, rebuild, refit, historical-row cohorting, and promotion-policy work.
+
+**Wave37 safe-subset antibodies deployed:** `tests/test_calibration_weighting_laws.py`
+now protects:
+
+- `test_per_city_weighting_eligibility`: every `config/cities.json` city has
+  explicit `weighted_low_calibration_eligible`; PoC-v5 LAW2 opt-out cities are
+  false (`Jakarta`, `Busan`, `Hong Kong`, `NYC`, `Houston`, `Chicago`,
+  `Guangzhou`, `Beijing`) and all others true.
+- `test_no_temp_delta_magnitude_weighting_in_production`: targeted production
+  calibration/strategy sources must not introduce LAW3-disallowed
+  temperature-delta magnitude weighting.
+- `test_rebuild_n_mc_default_bounded`: offline calibration-pair rebuild default
+  is `calibration_batch_rebuild_n_mc() == 1000`, separate from runtime
+  `ensemble_n_mc() == 10000`; explicit CLI override remains allowed.
+- `test_rebuild_uses_per_city_metric_savepoint_not_outer_monolith`: rebuild
+  code must keep per-city/metric savepoints and must not restore an outer
+  monolithic rebuild savepoint.
+- `test_no_per_city_alpha_tuning_in_production`: targeted production
+  calibration/strategy sources must not introduce per-city alpha tuning.
+
+Existing antibodies also cover the runtime side of LAW4:
+`tests/test_runtime_n_mc_floor.py` and `tests/test_evaluator_explicit_n_mc.py`
+pin runtime MC floor and explicit evaluator/monitor n_mc threading.
+
+**Still open — data-layer packet required:** do not attempt to green-test these
+without an approved schema/data plan:
+
+- `test_calibration_weight_continuity`: current `ensemble_snapshots_v2` and
+  `calibration_pairs_v2` still use binary `training_allowed`; there is no
+  persisted `precision_weight REAL CHECK (0 <= precision_weight <= 1)`.
+- `test_weight_floor_nonzero_for_ambig_only`: current LOW ingest can still
+  collapse `boundary_ambiguous=True` to `training_allowed=False`; the future
+  fix must compute a continuous floor (`WEIGHT_FLOOR = 0.05`) when causality,
+  horizon, and member completeness are satisfied.
+- `test_high_track_unaffected_by_low_law`: cannot be asserted as
+  `precision_weight=1` for HIGH until the precision-weight field exists and
+  HIGH rows are explicitly cohort-tagged under that schema.
+
+**Required future packet:** add `precision_weight` to the snapshot/pair training
+authority path; define compatibility semantics for legacy `training_allowed`
+rows; update `snapshot_ingest_contract`, rebuild selection, Platt fitting
+sample weights, refit/promotion gates, replay/report/learning cohorting, and
+data-quality assertions; run only against an isolated DB with dry-run row
+counts/checksums and a rollback/non-promotion plan. No canonical DB migration,
+backfill, refit, promotion, relabel, or learning/report promotion is authorized
+by the Wave37 safe subset.
+
+**Deferred by operator scope:** `test_climate_zone_present` and
+`test_cluster_alpha_map_finite` remain under s3/s6. The user explicitly kept
+`climate_zone` as future taxonomy work; do not add it without operator review.
 
 ### [OPEN — blocked by s3] s6 — PoC v6 cluster-level α tuning
 
@@ -869,6 +645,16 @@ Items explicitly queued as future/open in session 59195a96, not in prior gap reg
 ### [DEFERRED] s7 — Re-rebuild calibration_pairs_v2 at n_mc=10000
 
 **Problem:** Current `calibration_pairs_v2` was built with `n_mc=5000` (training time budget) but `p_raw_vector_from_maxes` at runtime uses `n_mc=10000`. This creates a ~10⁻³σ Platt fit asymmetry. Undetectable in practice but technically impure: the Platt model was fitted on a slightly different distribution than the one it scores at runtime.
+**2026-05-08 assessment:** This remains a future purity/certification rebuild,
+not an immediate repair triggered by the T1E sentinel patch. The new sentinel
+gate changes promotion authority: a future rebuild/refit or OOS transfer
+promotion must produce and consume a complete `calibration_pairs_v2_rebuild_complete`
+sentinel, but the absence of that sentinel does not silently relabel existing
+active Platt rows as mathematically wrong. Wave37 separated the ordinary batch
+rebuild default from runtime precision: default rebuilds now use n_mc=1000 per
+LAW4, while this future symmetry rebuild must pass explicit `--n-mc 10000` and
+downstream `--rebuild-n-mc 10000` evidence if the operator chooses to certify
+runtime-training MC symmetry.
 **Cost:** ~32 hours at n_mc=10000 with current Python loop. Feasible only after s8 (vectorize MC loop, 10-100× speedup).
 **Prerequisite:** s8 must land first to make the cost feasible.
 **Defer until:** live deployment is stable and s8 is complete.
@@ -895,47 +681,31 @@ to architect when the window opens.
 18 `scripts/backfill_*.py` scripts remain ad-hoc. No live trading impact.
 Scope a unification package when convenient.
 
-### [LOW] `hourly_observations` is dead — schedule deletion (2026-05-02)
+### [OPEN — DATA-LAYER APPROVAL REQUIRED] Physical `hourly_observations` residue may remain in existing DB files
 
-**Status:** OPEN, deletion candidate.
-**Location:** `state/zeus-world.db.hourly_observations`,
-`scripts/etl_hourly_observations.py`, view `v_evidence_hourly_observations`,
-`src/state/db.py:853-876`.
-**Finding:** Audit on 2026-05-02 confirmed `hourly_observations` has zero
-runtime consumers in `src/`. `scripts/semantic_linter.py:568-630` actively
-forbids any bare `SELECT FROM hourly_observations` (P0_unsafe_table). The
-canonical hourly truth path is `observation_instants_v2` (via direct queries
-or the `observation_instants_current` data-version view). The legacy table is
-populated only by `scripts/etl_hourly_observations.py`, which goes stale
-between backfill runs and creates cosmetic divergence vs `obs_v2`.
-**Impact:** None on live trading, calibration, monitor, exit, or settlement —
-all those read `observation_instants_v2`. Risk is purely cosmetic (audit/evidence
-trail divergence).
-**Proposed antibody:** Delete `hourly_observations` + `v_evidence_hourly_observations`
-+ `etl_hourly_observations.py`, update `src/state/db.py` schema init, and
-remove the semantic-linter rule that guards the dead table. Defer until next
-schema-cleanup pass; audit any open evidence/audit packets that still cite
-`v_evidence_hourly_observations` first.
-
----
-
-## T1E C-3 — rebuild_calibration_pairs_v2 partial-commit semantic (LOW)
-
-**Added:** 2026-05-05
-**Authority:** docs/operations/task_2026-05-04_zeus_may3_review_remediation/phases/T1E/phase.json C-3 LOW
-**Status:** OPEN, operator-noted, no live risk.
-
-**Finding:** `scripts/rebuild_calibration_pairs_v2.py` shards commits per
-`(city, metric)` bucket (T1E-REBUILD-TRANSACTION-SHARDED invariant). If the
-process is interrupted mid-run, already-committed buckets are durably written
-while remaining buckets are not. The rebuilt DB may therefore hold a partial
-result set across buckets. This is not a crash risk and does not affect live
-trading (rebuild runs offline, result is swapped in atomically via sentinel
-gate). However, an interrupted rebuild would require a manual re-run to
-produce a complete calibration DB.
-
-**Proposed antibody:** Add an explicit `rebuild_complete` sentinel row written
-in the final commit after all buckets succeed. Any consumer that opens the
-rebuilt DB should check for this sentinel before use; absence indicates an
-incomplete rebuild and the consumer should refuse to swap. Defer until next
-rebuild pipeline hardening pass.
+**Status:** OPEN only for physical canonical-DB cleanup. Wave38 removes future
+constructibility and all repo-level scheduler/writer/schema/view paths, but it
+does not mutate existing `state/zeus-world.db` files.
+**Location:** Existing SQLite files may still contain
+`hourly_observations` and/or `v_evidence_hourly_observations` if they were
+initialized before Wave38. Source constructibility was removed from
+`src/state/db.py`; `scripts/etl_hourly_observations.py` was deleted; linter/tests
+now block reintroduction.
+**Why this remains:** Dropping live/world DB tables or views is a destructive
+data-layer operation and requires explicit operator approval, DB inventory,
+dry-run SQL, backup path, rollback path, and proof no open evidence/audit packet
+needs the historical rows. This wave intentionally did not run `DROP TABLE`,
+`DROP VIEW`, migrations, backfills, or canonical DB writes.
+**Current live-money impact:** No known live trading, calibration, monitor,
+exit, settlement, replay, or learning path can create or consume the legacy
+object after Wave38. Residual risk is artifact confusion if an operator or
+future tool manually inspects an old DB file and treats the legacy table/view as
+current hourly truth.
+**Required future packet:** `OPERATOR_DECISION_REQUIRED` data-cleanup packet
+with:
+1. inventory query over every target DB path, read-only first;
+2. dependent packet/evidence audit for any remaining manual references;
+3. dry-run `DROP VIEW IF EXISTS v_evidence_hourly_observations; DROP TABLE IF EXISTS hourly_observations;`;
+4. backup/rollback procedure and post-migration schema assertions;
+5. no promotion of legacy rows into `observation_instants_v2`, reports, replay,
+   calibration, or learning authority.

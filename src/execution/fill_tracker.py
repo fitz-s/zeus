@@ -898,7 +898,10 @@ def _mark_entry_filled(
     execution_status: str = "filled",
     deps=None,
 ) -> tuple[str, bool, bool]:
-    submitted_price = pos.entry_price
+    submitted_price = (
+        getattr(pos, "entry_price_submitted", 0.0)
+        or getattr(pos, "entry_price", 0.0)
+    )
     fill_price = _extract_explicit_fill_price(payload)
     shares = _extract_filled_shares(payload, allow_order_size_fallback=False)
     trade_id = _extract_trade_id(payload if isinstance(payload, dict) else {})

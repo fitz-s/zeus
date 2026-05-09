@@ -1,12 +1,16 @@
 """Replay settlement-value outcome antibodies."""
-# Lifecycle: created=2026-04-25; last_reviewed=2026-04-25; last_reused=2026-05-06
+# Lifecycle: created=2026-04-25; last_reviewed=2026-05-08; last_reused=2026-05-08
 # Purpose: Lock WU settlement-value replay scoring against winning-bin and market-event fixture drift.
 # Reuse: Pair with tests/test_run_replay_cli.py when changing replay settlement queries.
 # Authority basis: P3 usage-path residual guards packet; replay settlement-value outcome antibodies.
 from __future__ import annotations
 import json
 import sqlite3
+from types import SimpleNamespace
 
+import pytest
+
+from src.contracts.execution_price import polymarket_fee
 from src.engine import replay as replay_module
 from src.engine.replay import derive_outcome_from_settlement_value
 from src.state.db import get_connection, init_backtest_schema, init_schema
@@ -223,6 +227,122 @@ def test_wu_sweep_flags_invalid_probability_groups(tmp_path, monkeypatch):
     assert skill["top_bin_total"] == 0
     assert skill["top_bin_accuracy"] is None
     assert skill["valid_group_forecast_skill"]["forecast_skill_rows"] == 0
+
+
+def test_replay_pnl_uses_fee_adjusted_execution_cost_for_share_count(tmp_path, monkeypatch):
+    db_path = tmp_path / "replay-fee-adjusted-pnl.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+    conn.execute(
+        """
+        INSERT INTO settlements (city, target_date, winning_bin, settlement_value, temperature_metric)
+        VALUES ('NYC', '2026-04-03', '39-40°F', 40.0, 'high')
+        """
+    )
+    _mark_settlements_verified(conn)
+    conn.execute(
+        """
+        INSERT INTO ensemble_snapshots
+        (snapshot_id, city, target_date, issue_time, valid_time, available_at, fetch_time,
+         lead_hours, members_json, p_raw_json, spread, is_bimodal, model_version, data_version, temperature_metric)
+        VALUES (81, 'NYC', '2026-04-03', '2026-04-02T00:00:00Z', '2026-04-03T00:00:00Z',
+                '2026-04-02T08:00:00Z', '2026-04-02T08:05:00Z', 24.0,
+                '[39.0, 42.0]', '[0.9, 0.1]', 1.0, 0, 'ecmwf', 'v1', 'high')
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO calibration_pairs
+        (city, target_date, range_label, p_raw, outcome, lead_days, season, cluster,
+         forecast_available_at, settlement_value)
+        VALUES
+        ('NYC', '2026-04-03', '39-40°F', 0.9, 1, 1.0, 'MAM', 'US-Northeast',
+         '2026-04-02T08:00:00Z', 40.0),
+        ('NYC', '2026-04-03', '41-42°F', 0.1, 0, 1.0, 'MAM', 'US-Northeast',
+         '2026-04-02T08:00:00Z', 40.0)
+        """
+    )
+    _seed_market_event(conn, city="NYC", target_date="2026-04-03", range_label="39-40°F")
+    _seed_market_event(conn, city="NYC", target_date="2026-04-03", range_label="41-42°F")
+    conn.execute(
+        """
+        INSERT INTO decision_log (mode, started_at, completed_at, artifact_json, timestamp, env)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "opening_hunt",
+            "2026-04-02T08:10:00+00:00",
+            "2026-04-02T08:11:00+00:00",
+            """{
+              "trade_cases": [{
+                "trade_id": "replay-fee-cost",
+                "city": "NYC",
+                "target_date": "2026-04-03",
+                "range_label": "39-40°F",
+                "direction": "buy_yes",
+                "decision_snapshot_id": "81",
+                "bin_labels": ["39-40°F", "41-42°F"],
+                "p_raw_vector": [0.9, 0.1],
+                "p_cal_vector": [0.9, 0.1],
+                "p_market_vector": [0.5, 0.5],
+                "alpha": 0.0,
+                "market_hours_open": 1.0,
+                "agreement": "AGREE",
+                "timestamp": "2026-04-02T08:10:00+00:00"
+              }]
+            }""",
+            "2026-04-02T08:11:00+00:00",
+            "live",
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    import src.state.db as db_module
+    import src.strategy.fdr_filter as fdr_module
+    import src.strategy.kelly as kelly_module
+    import src.strategy.market_analysis as market_analysis_module
+
+    class FakeMarketAnalysis:
+        def __init__(self, *args, **kwargs):
+            self.bins = kwargs["bins"]
+
+        def find_edges(self, n_bootstrap):
+            return [
+                SimpleNamespace(
+                    bin=self.bins[0],
+                    direction="buy_yes",
+                    edge=0.40,
+                    p_posterior=0.90,
+                    entry_price=0.50,
+                    ci_lower=0.20,
+                    ci_upper=0.60,
+                )
+            ]
+
+    monkeypatch.setattr(replay_module, "get_trade_connection_with_world", lambda: db_module.get_connection(db_path))
+    monkeypatch.setattr(market_analysis_module, "MarketAnalysis", FakeMarketAnalysis)
+    monkeypatch.setattr(fdr_module, "fdr_filter", lambda edges: edges)
+    monkeypatch.setattr(kelly_module, "dynamic_kelly_mult", lambda **kwargs: 1.0)
+
+    summary = replay_module.run_replay(
+        "2026-04-03",
+        "2026-04-03",
+        mode="audit",
+        sizing_bankroll=100.0,
+    )
+
+    decision = summary.outcomes[0].replay_decisions[0]
+    fee_adjusted_price = 0.50 + polymarket_fee(0.50, fee_rate=0.05)
+    expected_size = (0.90 - fee_adjusted_price) / (1 - fee_adjusted_price) * 100.0
+    expected_pnl = expected_size / fee_adjusted_price - expected_size
+    bare_price_pnl = expected_size / 0.50 - expected_size
+
+    assert decision.should_trade is True
+    assert decision.size_usd == pytest.approx(expected_size, abs=0.0001)
+    assert summary.replay_total_pnl == pytest.approx(round(expected_pnl, 2))
+    assert summary.replay_total_pnl != pytest.approx(round(bare_price_pnl, 2))
+    assert "replay_execution_cost_fee_adjusted" in decision.applied_validations
 
 
 def test_trade_history_audit_uses_position_metric_for_settlement_match(tmp_path, monkeypatch):

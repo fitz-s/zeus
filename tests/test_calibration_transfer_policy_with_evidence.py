@@ -1,6 +1,6 @@
 # Created: 2026-05-05
-# Last reused/audited: 2026-05-05
-# Lifecycle: created=2026-05-05; last_reviewed=2026-05-05; last_reused=2026-05-05
+# Last reused/audited: 2026-05-08
+# Lifecycle: created=2026-05-05; last_reviewed=2026-05-08; last_reused=2026-05-08
 # Authority basis: architecture/calibration_transfer_oos_design_2026-05-05.md Phase X.1
 # Purpose: Lock calibration transfer policy evidence row eligibility and policy_id isolation.
 # Reuse: Run when evaluate_calibration_transfer_policy_with_evidence or validated_calibration_transfers reader semantics change.
@@ -8,16 +8,19 @@
 
 from __future__ import annotations
 
+import json
 import math
 import sqlite3
 from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from src.config import entry_forecast_config
+from src.config import calibration_batch_rebuild_n_mc, entry_forecast_config
 from src.contracts.ensemble_snapshot_provenance import ECMWF_OPENDATA_HIGH_DATA_VERSION
 from src.data.calibration_transfer_policy import (
+    CANONICAL_CALIBRATION_PAIR_BIN_SOURCE,
     POLICY_ECMWF_OPENDATA_USES_TIGGE_LOCALDAY_CAL_V1,
+    _rebuild_complete_sentinel_key_for_transfer_evidence,
     evaluate_calibration_transfer_policy,
     evaluate_calibration_transfer_policy_with_evidence,
 )
@@ -34,6 +37,59 @@ def _make_conn() -> sqlite3.Connection:
     return conn
 
 
+def _write_rebuild_sentinel(
+    conn: sqlite3.Connection,
+    *,
+    metric: str = "high",
+    source_id: str = "ecmwf_open_data",
+    cycle: str = "00",
+    horizon_profile: str = "full",
+    status: str = "complete",
+    n_mc: int | None = None,
+) -> None:
+    resolved_n_mc = calibration_batch_rebuild_n_mc() if n_mc is None else n_mc
+    key = _rebuild_complete_sentinel_key_for_transfer_evidence(
+        metric=metric,
+        target_source_id=source_id,
+        target_cycle=cycle,
+        horizon_profile=horizon_profile,
+        n_mc=resolved_n_mc,
+    )
+    conn.execute(
+        """
+        INSERT INTO zeus_meta (key, value, updated_at)
+        VALUES (?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(key) DO UPDATE SET
+            value = excluded.value,
+            updated_at = CURRENT_TIMESTAMP
+        """,
+        (
+            key,
+            json.dumps(
+                {
+                    "status": status,
+                    "completed": status == "complete",
+                    "recorded_at": "2026-05-05T12:00:00+00:00",
+                    "temperature_metric": metric,
+                    "bin_source": CANONICAL_CALIBRATION_PAIR_BIN_SOURCE,
+                    "scope": {
+                        "city": None,
+                        "start_date": None,
+                        "end_date": None,
+                        "data_version": None,
+                        "cycle": cycle,
+                        "source_id": source_id,
+                        "horizon_profile": horizon_profile,
+                        "n_mc": resolved_n_mc,
+                    },
+                    "stats": {},
+                },
+                sort_keys=True,
+            ),
+        ),
+    )
+
+
 def _insert_target_pairs_for_transfer(
     conn: sqlite3.Connection,
     *,
@@ -46,6 +102,7 @@ def _insert_target_pairs_for_transfer(
     n_pairs: int = 250,
     brier_target: float = 0.205,
     recorded_at: str = "2026-01-01T00:00:00",
+    rebuild_status: str | None = "complete",
 ) -> None:
     if n_pairs <= 0 or not (0.0 <= brier_target < 1.0):
         return
@@ -94,6 +151,15 @@ def _insert_target_pairs_for_transfer(
         """,
         rows,
     )
+    if rebuild_status is not None:
+        _write_rebuild_sentinel(
+            conn,
+            metric=metric,
+            source_id=target_source_id,
+            cycle=target_cycle,
+            horizon_profile=horizon_profile,
+            status=rebuild_status,
+        )
 
 
 def _insert_row(
@@ -122,6 +188,7 @@ def _insert_row(
     source_model_param_C: float = 0.0,
     insert_target_pairs: bool = True,
     target_pair_recorded_at: str = "2026-01-01T00:00:00",
+    target_rebuild_status: str | None = "complete",
 ) -> None:
     evaluated_at_value = (
         evaluated_at.isoformat() if isinstance(evaluated_at, datetime) else evaluated_at
@@ -134,6 +201,7 @@ def _insert_row(
             n_pairs=n_pairs,
             brier_target=brier_target,
             recorded_at=target_pair_recorded_at,
+            rebuild_status=target_rebuild_status,
         )
     conn.execute(
         """
@@ -353,6 +421,34 @@ def test_fresh_live_eligible_row_returns_live_eligible(monkeypatch: pytest.Monke
 
     assert decision.status == "LIVE_ELIGIBLE"
     assert decision.note == "db_row_live_eligible"
+
+
+@pytest.mark.parametrize("target_rebuild_status", [None, "in_progress"])
+def test_live_eligible_row_requires_complete_target_rebuild_sentinel(
+    monkeypatch: pytest.MonkeyPatch,
+    target_rebuild_status: str | None,
+) -> None:
+    """OOS transfer rows cannot become live authority from partial target pairs."""
+    monkeypatch.setenv("ZEUS_CALIBRATION_TRANSFER_OOS_EVAL_ENABLED", "true")
+    cfg = entry_forecast_config()
+    conn = _make_conn()
+    now = datetime(2026, 5, 5, 12, 0, 0)
+    _insert_row(
+        conn,
+        status="LIVE_ELIGIBLE",
+        evaluated_at=now - timedelta(days=10),
+        target_rebuild_status=target_rebuild_status,
+    )
+
+    decision = evaluate_calibration_transfer_policy_with_evidence(
+        config=cfg,
+        conn=conn,
+        **{**_BASE_KWARGS, "now": now},
+    )
+
+    assert decision.status == "SHADOW_ONLY"
+    assert decision.live_promotion_approved is False
+    assert decision.note == "invalid_target_cohort_evidence"
 
 
 def test_stale_row_returns_shadow_only(monkeypatch: pytest.MonkeyPatch) -> None:

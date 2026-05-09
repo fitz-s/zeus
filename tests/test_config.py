@@ -1,5 +1,5 @@
 # Created: pre-Phase-0
-# Last reused/audited: 2026-04-30
+# Last reused/audited: 2026-05-08
 # Authority basis: Phase 10 DT-close B001 config contract + first-principles ZEUS_MODE cleanup 2026-04-30
 """Tests for config loader and city metadata."""
 
@@ -13,6 +13,7 @@ import pytest
 from src.config import (
     ALL_CLUSTERS,
     Settings,
+    calibration_batch_rebuild_n_mc,
     calibration_clusters,
     calibration_maturity_thresholds,
     day0_n_mc,
@@ -108,6 +109,29 @@ def test_city_clusters():
     assert set(calibration_clusters()) == set(ALL_CLUSTERS)
 
 
+def test_city_weighted_low_calibration_eligibility_is_explicit():
+    cities = load_cities()
+    by_name = {c.name: c for c in cities}
+    opt_out = {
+        "Jakarta",
+        "Busan",
+        "Hong Kong",
+        "NYC",
+        "Houston",
+        "Chicago",
+        "Guangzhou",
+        "Beijing",
+    }
+
+    false_cities = {
+        name
+        for name, city in by_name.items()
+        if not city.weighted_low_calibration_eligible
+    }
+    assert false_cities == opt_out
+    assert all(isinstance(city.weighted_low_calibration_eligible, bool) for city in cities)
+
+
 def test_city_without_explicit_cluster_is_rejected(tmp_path):
     path = tmp_path / "cities.json"
     path.write_text(json.dumps({
@@ -199,6 +223,12 @@ def test_signal_constants_are_single_sourced_from_settings():
     assert BIMODAL_GAP_RATIO == ensemble_bimodal_gap_ratio()
     assert BOUNDARY_WINDOW == ensemble_boundary_window()
     assert UNIMODAL_RANGE_EPSILON == ensemble_unimodal_range_epsilon()
+
+
+def test_batch_calibration_rebuild_n_mc_is_separate_from_runtime_n_mc():
+    assert calibration_batch_rebuild_n_mc() == 1000
+    assert 100 <= calibration_batch_rebuild_n_mc() <= 2000
+    assert calibration_batch_rebuild_n_mc() < ensemble_n_mc()
 
 
 def test_day0_constants_are_single_sourced_from_settings():
@@ -295,21 +325,52 @@ def test_market_scanner_short_aliases_do_not_match_inside_other_city_names():
     ).name == "Los Angeles"
 
 
-def _gamma_temperature_event(*, title: str, slug: str, question: str, **extra):
+def _support_complement_question(question: str) -> str:
+    if "68°F or higher" in question:
+        return question.replace("68°F or higher", "67°F or below")
+    if "20°C or higher" in question:
+        return question.replace("20°C or higher", "19°C or below")
+    raise AssertionError(f"no support complement for question {question!r}")
+
+
+def _gamma_temperature_event(
+    *,
+    title: str,
+    slug: str,
+    question: str,
+    complete_support: bool = False,
+    **extra,
+):
+    markets = [
+        {
+            "id": "market-city-sanity",
+            "conditionId": "condition-city-sanity",
+            "question": question,
+            "clobTokenIds": json.dumps(["yes-token", "no-token"]),
+            "outcomePrices": json.dumps([0.4, 0.6]),
+            "closed": False,
+            "active": True,
+            "acceptingOrders": True,
+            "enableOrderBook": True,
+        }
+    ]
+    if complete_support:
+        markets.insert(
+            0,
+            {
+                "id": "market-city-sanity-left",
+                "conditionId": "condition-city-sanity-left",
+                "question": _support_complement_question(question),
+                "clobTokenIds": json.dumps([]),
+                "outcomePrices": json.dumps([]),
+            },
+        )
     event = {
         "id": "event-city-sanity",
         "title": title,
         "slug": slug,
         "endDate": "2026-04-13T23:59:00Z",
-        "markets": [
-            {
-                "id": "market-city-sanity",
-                "conditionId": "condition-city-sanity",
-                "question": question,
-                "clobTokenIds": json.dumps(["yes-token", "no-token"]),
-                "outcomePrices": json.dumps([0.4, 0.6]),
-            }
-        ],
+        "markets": markets,
     }
     event.update(extra)
     return event
@@ -364,13 +425,15 @@ def test_market_scanner_accepts_la_event_with_la_station_metadata():
         slug="highest-temperature-in-los-angeles-on-april-13-2026",
         question="Will the high temperature in Los Angeles be 68°F or higher?",
         resolutionSource="Los Angeles International Airport KLAX",
+        complete_support=True,
     )
 
     parsed = _parse_event(event, datetime(2026, 4, 13, tzinfo=timezone.utc), 0.0)
 
     assert parsed is not None
     assert parsed["city"].name == "Los Angeles"
-    assert parsed["outcomes"][0]["range_low"] == pytest.approx(68.0)
+    executable = [outcome for outcome in parsed["outcomes"] if outcome["executable"]]
+    assert executable[0]["range_low"] == pytest.approx(68.0)
 
 
 def test_market_scanner_accepts_self_consistent_configured_city_metadata():
@@ -385,6 +448,7 @@ def test_market_scanner_accepts_self_consistent_configured_city_metadata():
             slug=f"highest-temperature-in-{slug_city}-on-april-13-2026",
             question=f"Will the high temperature in {city.name} be {temp_label} or higher?",
             resolutionSource=f"{city.airport_name} {city.wu_station}",
+            complete_support=True,
         )
 
         parsed = _parse_event(event, datetime(2026, 4, 13, tzinfo=timezone.utc), 0.0)

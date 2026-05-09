@@ -1,9 +1,12 @@
+# Created: 2026-04-13
+# Last reused/audited: 2026-05-08
+# Authority basis: K2_struct static semantics + Wave38 dead hourly-observations compatibility-surface deletion
 """Tests for scripts/semantic_linter.py K2_struct rule.
 
 Verifies that the linter detects bare FROM calibration_pairs queries
 outside the allowlist (src/calibration/store.py, migrations/).
 """
-# Lifecycle: created=2026-04-13; last_reviewed=2026-04-25; last_reused=2026-04-25
+# Lifecycle: created=2026-04-13; last_reviewed=2026-05-08; last_reused=2026-05-08
 # Purpose: Protect static semantic-linter antibodies for unsafe table/query usage.
 # Reuse: Inspect architecture/test_topology.yaml and scripts/semantic_linter.py allowlists before extending.
 from __future__ import annotations
@@ -322,8 +325,8 @@ def test_linter_detects_format_map_hourly_observations_query(tmp_path):
     assert "P0_unsafe_table" in violations[0]
 
 
-def test_linter_allows_evidence_hourly_view_reference(tmp_path):
-    """Evidence adapters may reference an explicit evidence view name."""
+def test_linter_rejects_deleted_evidence_hourly_view_reference(tmp_path):
+    """The deleted evidence view cannot become a compatibility escape hatch."""
     adapter_file = tmp_path / "adapter.py"
     adapter_file.write_text(
         'rows = conn.execute("SELECT * FROM v_evidence_hourly_observations")\n'
@@ -331,11 +334,12 @@ def test_linter_allows_evidence_hourly_view_reference(tmp_path):
     violations = _check_legacy_hourly_observations_select(
         adapter_file, adapter_file.read_text()
     )
-    assert violations == []
+    assert len(violations) == 1
+    assert "P0_unsafe_table" in violations[0]
 
 
-def test_linter_allows_evidence_hourly_view_definition(tmp_path):
-    """The schema may create the explicit evidence adapter over legacy rows."""
+def test_linter_rejects_deleted_evidence_hourly_view_definition(tmp_path):
+    """The schema must not recreate the deleted evidence adapter."""
     schema_file = tmp_path / "db_schema.py"
     schema_file.write_text(
         'conn.executescript("""\n'
@@ -348,7 +352,43 @@ def test_linter_allows_evidence_hourly_view_definition(tmp_path):
     violations = _check_legacy_hourly_observations_select(
         schema_file, schema_file.read_text()
     )
-    assert violations == []
+    assert violations
+    assert all("P0_unsafe_table" in violation for violation in violations)
+
+
+def test_linter_rejects_hourly_observations_table_definition(tmp_path):
+    """The deleted compatibility table must not be reintroduced by schema DDL."""
+    schema_file = tmp_path / "db_schema.py"
+    schema_file.write_text(
+        'conn.executescript("""\n'
+        'CREATE TABLE IF NOT EXISTS hourly_observations (\n'
+        '    city TEXT NOT NULL,\n'
+        '    obs_hour INTEGER NOT NULL\n'
+        ');\n'
+        '""")\n'
+    )
+
+    violations = _check_legacy_hourly_observations_select(
+        schema_file, schema_file.read_text()
+    )
+
+    assert violations
+    assert all("P0_unsafe_table" in violation for violation in violations)
+
+
+def test_linter_rejects_hourly_observations_writes(tmp_path):
+    """The deleted compatibility table must not receive new materialized rows."""
+    writer_file = tmp_path / "writer.py"
+    writer_file.write_text(
+        'conn.execute("INSERT INTO hourly_observations (city, obs_hour) VALUES (?, ?)")\n'
+    )
+
+    violations = _check_legacy_hourly_observations_select(
+        writer_file, writer_file.read_text()
+    )
+
+    assert len(violations) == 1
+    assert "P0_unsafe_table" in violations[0]
 
 
 def test_linter_rejects_filtered_evidence_hourly_view_definition(tmp_path):
@@ -365,7 +405,7 @@ def test_linter_rejects_filtered_evidence_hourly_view_definition(tmp_path):
     violations = _check_legacy_hourly_observations_select(
         schema_file, schema_file.read_text()
     )
-    assert len(violations) == 1
+    assert violations
     assert "P0_unsafe_table" in violations[0]
 
 
@@ -383,7 +423,7 @@ def test_linter_rejects_joined_evidence_hourly_view_definition(tmp_path):
     violations = _check_legacy_hourly_observations_select(
         schema_file, schema_file.read_text()
     )
-    assert len(violations) == 1
+    assert violations
     assert "P0_unsafe_table" in violations[0]
 
 
@@ -401,17 +441,18 @@ def test_linter_rejects_bare_hourly_read_after_evidence_view_definition(tmp_path
     violations = _check_legacy_hourly_observations_select(
         bad_file, bad_file.read_text()
     )
-    assert len(violations) == 1
-    assert "P0_unsafe_table" in violations[0]
-    assert "SELECT * FROM hourly_observations" in violations[0]
+    assert violations
+    assert any("P0_unsafe_table" in violation for violation in violations)
+    assert any("SELECT * FROM hourly_observations" in violation for violation in violations)
 
 
-def test_linter_allows_hourly_observations_compatibility_writer(tmp_path):
-    """The legacy compatibility writer remains allowlisted by exact filename."""
+def test_linter_rejects_deleted_hourly_observations_compatibility_writer(tmp_path):
+    """The deleted compatibility writer path no longer bypasses P0_unsafe_table."""
     writer_file = PROJECT_ROOT / "scripts" / "etl_hourly_observations.py"
     content = 'rows = conn.execute("SELECT * FROM hourly_observations")\n'
     violations = _check_legacy_hourly_observations_select(writer_file, content)
-    assert violations == []
+    assert len(violations) == 1
+    assert "P0_unsafe_table" in violations[0]
 
 
 def test_linter_does_not_allow_hourly_observations_by_basename_only(tmp_path):
@@ -760,5 +801,28 @@ def test_canonical_paths_do_not_read_bare_hourly_observations():
         violations.extend(
             _check_legacy_hourly_observations_select(py_file, py_file.read_text())
         )
+
+    assert violations == []
+
+
+def test_runtime_paths_do_not_reintroduce_hourly_observations_surface():
+    """The deleted compatibility surface must not be recreated by src/ or scripts/."""
+    forbidden = (
+        "hourly_observations",
+        "v_evidence_hourly_observations",
+        "etl_hourly_observations.py",
+    )
+    ignored = {
+        PROJECT_ROOT / "scripts" / "semantic_linter.py",
+    }
+    violations = []
+    for root in [PROJECT_ROOT / "src", PROJECT_ROOT / "scripts"]:
+        for py_file in sorted(root.rglob("*.py")):
+            if py_file in ignored or "migrations" in py_file.parts:
+                continue
+            text = py_file.read_text(encoding="utf-8")
+            for needle in forbidden:
+                if needle in text:
+                    violations.append(f"{py_file.relative_to(PROJECT_ROOT)} contains {needle}")
 
     assert violations == []

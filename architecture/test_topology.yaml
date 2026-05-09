@@ -60,6 +60,7 @@ test_trust_policy:
     tests/test_calibration_pairs_v2_metric_linter.py: {created: "2026-04-26", last_used: "2026-04-26"}
     tests/test_calibration_store_metric_required.py: {created: "2026-04-26", last_used: "2026-04-26"}
     tests/test_calibration_transfer_policy.py: {created: "2026-05-03", last_used: "2026-05-03"}
+    tests/test_calibration_weighting_laws.py: {created: "2026-05-08", last_used: "2026-05-08"}
     tests/test_calibration_v2_fallback_alerting.py: {created: "2026-04-26", last_used: "2026-04-26"}
     tests/test_calibration_retrain.py: {created: "2026-04-27", last_used: "2026-04-27"}
     tests/test_executable_ev_replay.py: {created: "2026-05-04", last_used: "2026-05-04"}
@@ -74,7 +75,7 @@ test_trust_policy:
     tests/test_entry_forecast_shadow.py: {created: "2026-05-03", last_used: "2026-05-03"}
     tests/test_ensemble_snapshots_v2_executable_schema.py: {created: "2026-05-03", last_used: "2026-05-03"}
     tests/test_ensemble_snapshots_bias_corrected_schema.py: {created: "2026-04-26", last_used: "2026-04-26"}
-    tests/test_evaluator_explicit_n_mc.py: {created: "2026-04-30", last_used: "2026-04-30"}
+    tests/test_evaluator_explicit_n_mc.py: {created: "2026-04-30", last_used: "2026-05-08"}
     tests/test_evaluator_strategy_key_failclosed.py: {created: "2026-05-02", last_used: "2026-05-02"}
     tests/test_evaluator_metric_normalizer_failclosed.py: {created: "2026-04-26", last_used: "2026-04-26"}
     tests/test_execution_intent_typed_slippage.py: {created: "2026-04-26", last_used: "2026-04-26"}
@@ -84,7 +85,7 @@ test_trust_policy:
     # P5-1 + P5-3 (PR #19 closeout completion, 2026-04-26):
     tests/test_realized_fill_at_receipt.py: {created: "2026-04-26", last_used: "2026-04-26"}
     tests/test_evaluate_candidate_metric_integration.py: {created: "2026-04-26", last_used: "2026-04-26"}
-    tests/test_architecture_contracts.py: {created: "2026-04-02", last_used: "2026-04-23"}
+    tests/test_architecture_contracts.py: {created: "2026-04-02", last_used: "2026-05-08"}
     tests/test_backfill_completeness_guardrails.py: {created: "2026-04-25", last_used: "2026-04-25"}
     tests/test_backfill_scripts_match_live_config.py: {created: "2026-04-21", last_used: "2026-04-25"}
     tests/test_backtest_settlement_value_outcome.py: {created: "2026-04-25", last_used: "2026-04-25"}
@@ -96,6 +97,7 @@ test_trust_policy:
     tests/test_day0_exit_gate.py: {created: "2026-04-07", last_used: "2026-04-23"}
     tests/test_decision_evidence_entry_emission.py: {created: "2026-04-23", last_used: "2026-04-23"}
     tests/test_decision_evidence_persistence.py: {created: "2026-04-23", last_used: "2026-04-23"}
+    tests/test_diurnal.py: {created: "pre-Phase-0", last_used: "2026-05-08"}
     tests/test_diurnal_curves_empty_hk_handled.py: {created: "2026-04-23", last_used: "2026-04-23"}
     tests/test_db.py: {created: "2026-03-30", last_used: "2026-04-25"}
     tests/test_dt1_savepoint_integration.py: {created: "2026-04-20", last_used: "2026-04-20"}
@@ -149,7 +151,9 @@ test_trust_policy:
     tests/test_pre_live_integration.py: {created: "2026-04-29", last_used: "2026-04-29"}
     tests/test_provenance_enforcement.py: {created: "2026-04-07", last_used: "2026-04-23"}
     tests/test_proxy_health.py: {created: "2026-04-21", last_used: "2026-04-21"}
-    tests/test_semantic_linter.py: {created: "2026-04-13", last_used: "2026-04-25"}
+    tests/test_semantic_linter.py: {created: "2026-04-13", last_used: "2026-05-08"}
+    tests/test_structural_linter.py: {created: "2026-03-31", last_used: "2026-05-08"}
+    tests/test_world_writer_boundary.py: {created: "2026-04-30", last_used: "2026-05-08"}
     tests/test_tier_resolver.py: {created: "2026-04-21", last_used: "2026-04-21"}
     tests/test_topology_doctor.py: {created: "2026-04-13", last_used: "2026-04-28"}
     tests/test_truth_surface_health.py: {created: "2026-04-07", last_used: "2026-04-25"}
@@ -171,7 +175,7 @@ test_trust_policy:
     tests/test_run_replay_cli.py: {created: "2026-04-25", last_used: "2026-04-29"}
     tests/test_riskguard.py: {created: "2026-03-30", last_used: "2026-04-28"}
     tests/test_runtime_guards.py: {created: "2026-04-28", last_used: "2026-05-02"}
-    tests/test_runtime_n_mc_floor.py: {created: "2026-04-29", last_used: "2026-04-30"}
+    tests/test_runtime_n_mc_floor.py: {created: "2026-04-29", last_used: "2026-05-08"}
     tests/test_schema_v2_gate_a.py: {created: "2026-04-16", last_used: "2026-04-29"}
     tests/test_settlements_authority_trigger.py: {created: "2026-04-23", last_used: "2026-04-23"}
     tests/test_settlements_verified_row_integrity.py: {created: "2026-04-23", last_used: "2026-04-23"}
@@ -209,7 +213,7 @@ test_trust_policy:
     tests/test_unknown_side_effect.py: {created: "2026-04-27", last_used: "2026-04-30"}
     tests/test_user_channel_ingest.py: {created: "2026-04-27", last_used: "2026-04-27"}
     tests/test_exit_safety.py: {created: "2026-04-27", last_used: "2026-04-27"}
-    tests/test_exchange_reconcile.py: {created: "2026-04-27", last_used: "2026-04-27"}
+    tests/test_exchange_reconcile.py: {created: "2026-04-27", last_used: "2026-05-08"}
     tests/test_settlement_commands.py: {created: "2026-04-27", last_used: "2026-04-27"}
     tests/test_fake_polymarket_venue.py: {created: "2026-04-27", last_used: "2026-04-27"}
     tests/test_strategy_benchmark.py: {created: "2026-04-27", last_used: "2026-04-27"}
@@ -280,6 +284,7 @@ categories:
     - tests/test_load_platt_v2_data_version_filter.py
     - tests/test_cities_config_authoritative.py
     - tests/test_config.py
+    - tests/test_calibration_weighting_laws.py
     - tests/test_runtime_n_mc_floor.py
     - tests/test_evaluator_explicit_n_mc.py
     - tests/test_evaluator_strategy_key_failclosed.py
@@ -1191,6 +1196,30 @@ test_metadata:
       .zeus/rebuild_lock.do_not_run_during_live exists; sqlite3.connect is
       never called. Asserts rebuild_v2 shards commits per (city, metric)
       bucket: conn.commit() call count >= city_count for a single metric spec.
+
+  tests/test_calibration_weighting_laws.py:
+    modules: [calibration, config, scripts]
+    category: core_law_antibody
+    profile: calibration_weighting_law_safe_subset
+    blocks_commit: true
+    asserted_invariants:
+      - CALIBRATION-WEIGHTING-LAW2-CITY-ELIGIBILITY
+      - CALIBRATION-WEIGHTING-LAW3-FORBIDDEN-MOVES
+      - CALIBRATION-WEIGHTING-LAW4-BATCH-NMC
+      - CALIBRATION-WEIGHTING-LAW5-SHARDED-REBUILD
+    source_under_test:
+      - config/cities.json
+      - src/config.py
+      - scripts/rebuild_calibration_pairs_v2.py
+      - scripts/refit_platt_v2.py
+      - src/data/calibration_transfer_policy.py
+    law_dependencies:
+      - docs/reference/zeus_calibration_weighting_authority.md
+      - docs/operations/task_2026-05-08_object_invariance_wave37/PLAN.md
+    notes: >
+      Safe-subset antibodies for calibration weighting LAW clauses that do not
+      require schema migration or historical data rebuild. Precision-weight
+      continuity remains a detailed known gap until the data layer supports it.
 
   tests/test_final_sdk_envelope_persistence.py:
     modules: [execution]

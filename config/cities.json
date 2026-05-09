@@ -23,7 +23,8 @@
       "cluster": "Amsterdam",
       "unit": "C",
       "historical_peak_hour": 14.5,
-      "diurnal_amplitude_c": 7.5
+      "diurnal_amplitude_c": 7.5,
+      "weighted_low_calibration_eligible": true
     },
     {
       "name": "Ankara",
@@ -46,7 +47,8 @@
       "cluster": "Ankara",
       "unit": "C",
       "historical_peak_hour": 15.2,
-      "diurnal_amplitude_c": 11.5
+      "diurnal_amplitude_c": 11.5,
+      "weighted_low_calibration_eligible": true
     },
     {
       "name": "Atlanta",
@@ -73,7 +75,8 @@
       "cluster": "Atlanta",
       "unit": "F",
       "historical_peak_hour": 17.6,
-      "diurnal_amplitude_f": 17.3
+      "diurnal_amplitude_f": 17.3,
+      "weighted_low_calibration_eligible": true
     },
     {
       "name": "Auckland",
@@ -96,7 +99,8 @@
       "cluster": "Auckland",
       "unit": "C",
       "historical_peak_hour": 14.0,
-      "diurnal_amplitude_c": 6.5
+      "diurnal_amplitude_c": 6.5,
+      "weighted_low_calibration_eligible": true
     },
     {
       "name": "Austin",
@@ -123,7 +127,8 @@
       "cluster": "Austin",
       "unit": "F",
       "historical_peak_hour": 17.7,
-      "diurnal_amplitude_f": 18.0
+      "diurnal_amplitude_f": 18.0,
+      "weighted_low_calibration_eligible": true
     },
     {
       "name": "Beijing",
@@ -147,7 +152,8 @@
       "cluster": "Beijing",
       "unit": "C",
       "historical_peak_hour": 15.0,
-      "diurnal_amplitude_c": 10.5
+      "diurnal_amplitude_c": 10.5,
+      "weighted_low_calibration_eligible": false
     },
     {
       "name": "Buenos Aires",
@@ -172,7 +178,8 @@
       "cluster": "Buenos Aires",
       "unit": "C",
       "historical_peak_hour": 15.5,
-      "diurnal_amplitude_c": 9.0
+      "diurnal_amplitude_c": 9.0,
+      "weighted_low_calibration_eligible": true
     },
     {
       "name": "Busan",
@@ -196,7 +203,8 @@
       "cluster": "Busan",
       "unit": "C",
       "historical_peak_hour": 14.5,
-      "diurnal_amplitude_c": 7.5
+      "diurnal_amplitude_c": 7.5,
+      "weighted_low_calibration_eligible": false
     },
     {
       "name": "Cape Town",
@@ -219,7 +227,8 @@
       "cluster": "Cape Town",
       "unit": "C",
       "historical_peak_hour": 14.5,
-      "diurnal_amplitude_c": 8.0
+      "diurnal_amplitude_c": 8.0,
+      "weighted_low_calibration_eligible": true
     },
     {
       "name": "Chengdu",
@@ -242,7 +251,8 @@
       "cluster": "Chengdu",
       "unit": "C",
       "historical_peak_hour": 15.0,
-      "diurnal_amplitude_c": 7.0
+      "diurnal_amplitude_c": 7.0,
+      "weighted_low_calibration_eligible": true
     },
     {
       "name": "Chicago",
@@ -269,7 +279,8 @@
       "cluster": "Chicago",
       "unit": "F",
       "historical_peak_hour": 16.4,
-      "diurnal_amplitude_f": 15.0
+      "diurnal_amplitude_f": 15.0,
+      "weighted_low_calibration_eligible": false
     },
     {
       "name": "Chongqing",
@@ -292,7 +303,8 @@
       "cluster": "Chongqing",
       "unit": "C",
       "historical_peak_hour": 15.2,
-      "diurnal_amplitude_c": 6.8
+      "diurnal_amplitude_c": 6.8,
+      "weighted_low_calibration_eligible": true
     },
     {
       "name": "Dallas",
@@ -319,7 +331,8 @@
       "cluster": "Dallas",
       "unit": "F",
       "historical_peak_hour": 17.7,
-      "diurnal_amplitude_f": 18.6
+      "diurnal_amplitude_f": 18.6,
+      "weighted_low_calibration_eligible": true
     },
     {
       "name": "Denver",
@@ -346,7 +359,8 @@
       "cluster": "Denver",
       "unit": "F",
       "historical_peak_hour": 16.1,
-      "diurnal_amplitude_f": 18.4
+      "diurnal_amplitude_f": 18.4,
+      "weighted_low_calibration_eligible": true
     },
     {
       "name": "Guangzhou",
@@ -370,7 +384,8 @@
       "cluster": "Guangzhou",
       "unit": "C",
       "historical_peak_hour": 14.5,
-      "diurnal_amplitude_c": 7.0
+      "diurnal_amplitude_c": 7.0,
+      "weighted_low_calibration_eligible": false
     },
     {
       "name": "Helsinki",
@@ -393,7 +408,8 @@
       "cluster": "Helsinki",
       "unit": "C",
       "historical_peak_hour": 14.0,
-      "diurnal_amplitude_c": 8.0
+      "diurnal_amplitude_c": 8.0,
+      "weighted_low_calibration_eligible": true
     },
     {
       "name": "Hong Kong",
@@ -421,7 +437,8 @@
       "unit": "C",
       "historical_peak_hour": 14.5,
       "diurnal_amplitude_c": 6.2,
-      "instrument_noise_override": 0.1
+      "instrument_noise_override": 0.1,
+      "weighted_low_calibration_eligible": false
     },
     {
       "name": "Houston",
@@ -448,7 +465,8 @@
       "cluster": "Houston",
       "unit": "F",
       "historical_peak_hour": 17.4,
-      "diurnal_amplitude_f": 15.2
+      "diurnal_amplitude_f": 15.2,
+      "weighted_low_calibration_eligible": false
     },
     {
       "name": "Istanbul",
@@ -472,7 +490,8 @@
       "unit": "C",
       "historical_peak_hour": 15.0,
       "diurnal_amplitude_c": 8.5,
-      "settlement_source_type": "noaa"
+      "settlement_source_type": "noaa",
+      "weighted_low_calibration_eligible": true
     },
     {
       "name": "Jakarta",
@@ -495,7 +514,8 @@
       "cluster": "Jakarta",
       "unit": "C",
       "historical_peak_hour": 13.5,
-      "diurnal_amplitude_c": 5.0
+      "diurnal_amplitude_c": 5.0,
+      "weighted_low_calibration_eligible": false
     },
     {
       "name": "Jeddah",
@@ -519,7 +539,8 @@
       "cluster": "Jeddah",
       "unit": "C",
       "historical_peak_hour": 14.5,
-      "diurnal_amplitude_c": 7.0
+      "diurnal_amplitude_c": 7.0,
+      "weighted_low_calibration_eligible": true
     },
     {
       "name": "Karachi",
@@ -542,7 +563,8 @@
       "cluster": "Karachi",
       "unit": "C",
       "historical_peak_hour": 15.0,
-      "diurnal_amplitude_c": 9.0
+      "diurnal_amplitude_c": 9.0,
+      "weighted_low_calibration_eligible": true
     },
     {
       "name": "Kuala Lumpur",
@@ -566,7 +588,8 @@
       "cluster": "Kuala Lumpur",
       "unit": "C",
       "historical_peak_hour": 14.5,
-      "diurnal_amplitude_c": 5.0
+      "diurnal_amplitude_c": 5.0,
+      "weighted_low_calibration_eligible": true
     },
     {
       "name": "Lagos",
@@ -589,7 +612,8 @@
       "cluster": "Lagos",
       "unit": "C",
       "historical_peak_hour": 14.0,
-      "diurnal_amplitude_c": 5.5
+      "diurnal_amplitude_c": 5.5,
+      "weighted_low_calibration_eligible": true
     },
     {
       "name": "London",
@@ -612,7 +636,8 @@
       "cluster": "London",
       "unit": "C",
       "historical_peak_hour": 14.0,
-      "diurnal_amplitude_c": 7.4
+      "diurnal_amplitude_c": 7.4,
+      "weighted_low_calibration_eligible": true
     },
     {
       "name": "Los Angeles",
@@ -641,7 +666,8 @@
       "cluster": "Los Angeles",
       "unit": "F",
       "historical_peak_hour": 18.1,
-      "diurnal_amplitude_f": 11.1
+      "diurnal_amplitude_f": 11.1,
+      "weighted_low_calibration_eligible": true
     },
     {
       "name": "Lucknow",
@@ -664,7 +690,8 @@
       "cluster": "Lucknow",
       "unit": "C",
       "historical_peak_hour": 14.8,
-      "diurnal_amplitude_c": 12.0
+      "diurnal_amplitude_c": 12.0,
+      "weighted_low_calibration_eligible": true
     },
     {
       "name": "Madrid",
@@ -687,7 +714,8 @@
       "cluster": "Madrid",
       "unit": "C",
       "historical_peak_hour": 16.0,
-      "diurnal_amplitude_c": 12.0
+      "diurnal_amplitude_c": 12.0,
+      "weighted_low_calibration_eligible": true
     },
     {
       "name": "Manila",
@@ -710,7 +738,8 @@
       "cluster": "Manila",
       "unit": "C",
       "historical_peak_hour": 14.0,
-      "diurnal_amplitude_c": 6.5
+      "diurnal_amplitude_c": 6.5,
+      "weighted_low_calibration_eligible": true
     },
     {
       "name": "Mexico City",
@@ -735,7 +764,8 @@
       "cluster": "Mexico City",
       "unit": "C",
       "historical_peak_hour": 15.5,
-      "diurnal_amplitude_c": 11.0
+      "diurnal_amplitude_c": 11.0,
+      "weighted_low_calibration_eligible": true
     },
     {
       "name": "Miami",
@@ -762,7 +792,8 @@
       "cluster": "Miami",
       "unit": "F",
       "historical_peak_hour": 17.3,
-      "diurnal_amplitude_f": 12.1
+      "diurnal_amplitude_f": 12.1,
+      "weighted_low_calibration_eligible": true
     },
     {
       "name": "Milan",
@@ -786,7 +817,8 @@
       "cluster": "Milan",
       "unit": "C",
       "historical_peak_hour": 15.0,
-      "diurnal_amplitude_c": 9.0
+      "diurnal_amplitude_c": 9.0,
+      "weighted_low_calibration_eligible": true
     },
     {
       "name": "Moscow",
@@ -810,7 +842,8 @@
       "unit": "C",
       "historical_peak_hour": 15.0,
       "diurnal_amplitude_c": 9.5,
-      "settlement_source_type": "noaa"
+      "settlement_source_type": "noaa",
+      "weighted_low_calibration_eligible": true
     },
     {
       "name": "Munich",
@@ -834,7 +867,8 @@
       "cluster": "Munich",
       "unit": "C",
       "historical_peak_hour": 14.8,
-      "diurnal_amplitude_c": 8.5
+      "diurnal_amplitude_c": 8.5,
+      "weighted_low_calibration_eligible": true
     },
     {
       "name": "NYC",
@@ -865,7 +899,8 @@
       "cluster": "NYC",
       "unit": "F",
       "historical_peak_hour": 15.8,
-      "diurnal_amplitude_f": 11.0
+      "diurnal_amplitude_f": 11.0,
+      "weighted_low_calibration_eligible": false
     },
     {
       "name": "Panama City",
@@ -889,7 +924,8 @@
       "cluster": "Panama City",
       "unit": "C",
       "historical_peak_hour": 14.0,
-      "diurnal_amplitude_c": 4.5
+      "diurnal_amplitude_c": 4.5,
+      "weighted_low_calibration_eligible": true
     },
     {
       "name": "Paris",
@@ -912,7 +948,8 @@
       "cluster": "Paris",
       "unit": "C",
       "historical_peak_hour": 14.5,
-      "diurnal_amplitude_c": 7.0
+      "diurnal_amplitude_c": 7.0,
+      "weighted_low_calibration_eligible": true
     },
     {
       "name": "Qingdao",
@@ -936,7 +973,8 @@
       "cluster": "Qingdao",
       "unit": "C",
       "historical_peak_hour": 14.5,
-      "diurnal_amplitude_c": 7.5
+      "diurnal_amplitude_c": 7.5,
+      "weighted_low_calibration_eligible": true
     },
     {
       "name": "San Francisco",
@@ -965,7 +1003,8 @@
       "cluster": "San Francisco",
       "unit": "F",
       "historical_peak_hour": 16.7,
-      "diurnal_amplitude_f": 11.9
+      "diurnal_amplitude_f": 11.9,
+      "weighted_low_calibration_eligible": true
     },
     {
       "name": "Sao Paulo",
@@ -990,7 +1029,8 @@
       "cluster": "Sao Paulo",
       "unit": "C",
       "historical_peak_hour": 15.0,
-      "diurnal_amplitude_c": 8.5
+      "diurnal_amplitude_c": 8.5,
+      "weighted_low_calibration_eligible": true
     },
     {
       "name": "Seattle",
@@ -1017,7 +1057,8 @@
       "cluster": "Seattle",
       "unit": "F",
       "historical_peak_hour": 13.8,
-      "diurnal_amplitude_f": 12.2
+      "diurnal_amplitude_f": 12.2,
+      "weighted_low_calibration_eligible": true
     },
     {
       "name": "Seoul",
@@ -1040,7 +1081,8 @@
       "cluster": "Seoul",
       "unit": "C",
       "historical_peak_hour": 14.8,
-      "diurnal_amplitude_c": 8.2
+      "diurnal_amplitude_c": 8.2,
+      "weighted_low_calibration_eligible": true
     },
     {
       "name": "Shanghai",
@@ -1063,7 +1105,8 @@
       "cluster": "Shanghai",
       "unit": "C",
       "historical_peak_hour": 14.6,
-      "diurnal_amplitude_c": 7.8
+      "diurnal_amplitude_c": 7.8,
+      "weighted_low_calibration_eligible": true
     },
     {
       "name": "Shenzhen",
@@ -1087,7 +1130,8 @@
       "cluster": "Shenzhen",
       "unit": "C",
       "historical_peak_hour": 14.3,
-      "diurnal_amplitude_c": 6.8
+      "diurnal_amplitude_c": 6.8,
+      "weighted_low_calibration_eligible": true
     },
     {
       "name": "Singapore",
@@ -1111,7 +1155,8 @@
       "cluster": "Singapore",
       "unit": "C",
       "historical_peak_hour": 14.0,
-      "diurnal_amplitude_c": 5.5
+      "diurnal_amplitude_c": 5.5,
+      "weighted_low_calibration_eligible": true
     },
     {
       "name": "Taipei",
@@ -1136,7 +1181,8 @@
       "historical_peak_hour": 14.5,
       "diurnal_amplitude_c": 6.5,
       "settlement_source_type": "wu_icao",
-      "instrument_noise_override": 0.1
+      "instrument_noise_override": 0.1,
+      "weighted_low_calibration_eligible": true
     },
     {
       "name": "Tel Aviv",
@@ -1162,7 +1208,8 @@
       "unit": "C",
       "historical_peak_hour": 14.5,
       "diurnal_amplitude_c": 7.5,
-      "settlement_source_type": "noaa"
+      "settlement_source_type": "noaa",
+      "weighted_low_calibration_eligible": true
     },
     {
       "name": "Tokyo",
@@ -1185,7 +1232,8 @@
       "cluster": "Tokyo",
       "unit": "C",
       "historical_peak_hour": 14.7,
-      "diurnal_amplitude_c": 7.6
+      "diurnal_amplitude_c": 7.6,
+      "weighted_low_calibration_eligible": true
     },
     {
       "name": "Toronto",
@@ -1209,7 +1257,8 @@
       "cluster": "Toronto",
       "unit": "C",
       "historical_peak_hour": 15.5,
-      "diurnal_amplitude_c": 9.0
+      "diurnal_amplitude_c": 9.0,
+      "weighted_low_calibration_eligible": true
     },
     {
       "name": "Warsaw",
@@ -1233,7 +1282,8 @@
       "cluster": "Warsaw",
       "unit": "C",
       "historical_peak_hour": 14.8,
-      "diurnal_amplitude_c": 8.8
+      "diurnal_amplitude_c": 8.8,
+      "weighted_low_calibration_eligible": true
     },
     {
       "name": "Wellington",
@@ -1256,7 +1306,8 @@
       "cluster": "Wellington",
       "unit": "C",
       "historical_peak_hour": 14.0,
-      "diurnal_amplitude_c": 5.5
+      "diurnal_amplitude_c": 5.5,
+      "weighted_low_calibration_eligible": true
     },
     {
       "name": "Wuhan",
@@ -1279,7 +1330,8 @@
       "cluster": "Wuhan",
       "unit": "C",
       "historical_peak_hour": 15.0,
-      "diurnal_amplitude_c": 8.0
+      "diurnal_amplitude_c": 8.0,
+      "weighted_low_calibration_eligible": true
     }
   ],
   "_source_contract_pending_conversions": [],

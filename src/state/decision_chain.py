@@ -562,7 +562,7 @@ def load_entry_evidence(
 ):
     """Load the entry-time DecisionEvidence envelope from position_events.
 
-    T4.2-Phase1 (D4 audit-only read side, pairs with T4.1b write side at
+    T4.2/Wave31 D4 gate read side (pairs with T4.1b write side at
     ``src/engine/lifecycle_events.py``): scans the canonical event stream
     for the earliest ``ENTRY_ORDER_POSTED`` event on ``runtime_trade_id``,
     extracts the ``decision_evidence_envelope`` key from its parsed
@@ -578,12 +578,11 @@ def load_entry_evidence(
     - Payload is malformed or the envelope fails from_json validation
       (``UnknownContractVersionError`` / ``ValueError``).
 
-    T4.2-Phase1 callers treat None as "skip symmetry audit" — the
-    asymmetry signal is only meaningful when both entry and exit evidence
-    exist. Legacy positions and backfilled events have known-missing
-    evidence by design, distinguishable via the reason sentinel when
-    needed (T4.2-Phase2 exit gate will use the sentinel to separate
-    ``missing-because-legacy`` from ``missing-because-bug``).
+    Wave31 callers treat None as insufficient authority for statistical D4
+    exits; cycle_runtime blocks those exits before intent construction.
+    Legacy positions and backfilled events have known-missing evidence by
+    design, distinguishable via the reason sentinel when post-hoc investigation
+    needs to separate ``missing-because-legacy`` from ``missing-because-bug``.
     """
     from src.contracts.decision_evidence import (
         DecisionEvidence,

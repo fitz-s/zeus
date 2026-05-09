@@ -53,6 +53,8 @@ _OPEN_LOCAL_STATES = frozenset(
 )
 _OPEN_ORDER_FACT_STATES = frozenset({"LIVE", "RESTING", "CANCEL_UNKNOWN"})
 _TRADE_FACT_STATES = frozenset({"MATCHED", "MINED", "CONFIRMED", "RETRYING", "FAILED"})
+_CONFIRMED_POSITION_FACT_STATES = frozenset({"CONFIRMED"})
+_OPTIMISTIC_POSITION_FACT_STATES = frozenset({"MATCHED", "MINED"})
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS exchange_reconcile_findings (
@@ -357,13 +359,21 @@ def _record_position_drift_findings(
     observed_at: datetime,
 ) -> list[ReconcileFinding]:
     exchange = _exchange_positions_by_token(positions)
-    journal = _journal_positions_by_token(conn)
-    tokens = sorted(set(exchange) | set(journal))
+    confirmed_journal = _journal_positions_by_token(
+        conn,
+        states=_CONFIRMED_POSITION_FACT_STATES,
+    )
+    optimistic_journal = _journal_positions_by_token(
+        conn,
+        states=_OPTIMISTIC_POSITION_FACT_STATES,
+    )
+    tokens = sorted(set(exchange) | set(confirmed_journal))
     findings: list[ReconcileFinding] = []
     for token in tokens:
         exchange_size = exchange.get(token, Decimal("0"))
-        journal_size = journal.get(token, Decimal("0"))
-        if exchange_size == journal_size:
+        confirmed_size = confirmed_journal.get(token, Decimal("0"))
+        optimistic_size = optimistic_journal.get(token, Decimal("0"))
+        if exchange_size == confirmed_size:
             continue
         if _has_recent_filled_suppression(conn, token, observed_at):
             continue
@@ -376,8 +386,12 @@ def _record_position_drift_findings(
                 evidence={
                     "token_id": token,
                     "exchange_size": str(exchange_size),
-                    "journal_size": str(journal_size),
-                    "reason": "exchange_position_differs_from_journal_trade_facts",
+                    "journal_size": str(confirmed_size),
+                    "confirmed_journal_size": str(confirmed_size),
+                    "optimistic_journal_size": str(optimistic_size),
+                    "journal_evidence_class": "confirmed_trade_facts",
+                    "optimistic_evidence_class": "matched_or_mined_trade_facts",
+                    "reason": "exchange_position_differs_from_confirmed_trade_facts",
                 },
                 recorded_at=observed_at,
             )
@@ -399,7 +413,7 @@ def _append_linkable_trade_fact_if_missing(
 
     order_id = _trade_order_id(raw) or str(command["venue_order_id"])
     filled_size_raw = _first_present(raw, "filled_size", "size", "amount", default=None)
-    fill_price_raw = _first_present(raw, "fill_price", "price", default=None)
+    fill_price_raw = _first_explicit_fill_price(raw)
     missing = _missing_trade_fill_economics(
         state=state,
         filled_size=filled_size_raw,
@@ -541,6 +555,10 @@ def _append_linkable_trade_fact_if_missing(
         # local command mutation.
         return None
     return None
+
+
+def _first_explicit_fill_price(raw: Mapping[str, Any]) -> Any:
+    return _first_present(raw, "avgPrice", "avg_price", "fillPrice", "fill_price", default=None)
 
 
 def _missing_trade_fill_economics(
@@ -706,9 +724,17 @@ def _exchange_positions_by_token(positions: list[Any]) -> dict[str, Decimal]:
     return out
 
 
-def _journal_positions_by_token(conn: sqlite3.Connection) -> dict[str, Decimal]:
+def _journal_positions_by_token(
+    conn: sqlite3.Connection,
+    *,
+    states: frozenset[str],
+) -> dict[str, Decimal]:
+    if not states:
+        return {}
+    selected_states = tuple(sorted(states))
+    placeholders = ", ".join("?" for _ in selected_states)
     rows = conn.execute(
-        """
+        f"""
         SELECT c.token_id, c.side, tf.filled_size, tf.fill_price
           FROM venue_trade_facts tf
           JOIN venue_commands c ON c.command_id = tf.command_id
@@ -717,8 +743,9 @@ def _journal_positions_by_token(conn: sqlite3.Connection) -> dict[str, Decimal]:
                  FROM venue_trade_facts newer
                 WHERE newer.trade_id = tf.trade_id
          )
-           AND tf.state IN ('MATCHED', 'MINED', 'CONFIRMED')
-        """
+           AND tf.state IN ({placeholders})
+        """,
+        selected_states,
     ).fetchall()
     out: dict[str, Decimal] = {}
     for row in rows:

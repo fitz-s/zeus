@@ -18,9 +18,9 @@ Guard layer selection for hourly readings:
   "after the target date" by construction.
 
 K1-C port: 2026-04-13. Replaces the pre-K1 version that hardcoded DST
-fields to 0 and silently swallowed every INSERT exception. The derived
-table `hourly_observations` is auto-rebuilt from `observation_instants`
-via `scripts/etl_hourly_observations.py` at the end of the run.
+fields to 0 and silently swallowed every INSERT exception. `observation_instants`
+is the canonical hourly surface; no lossy local-hour compatibility table is
+rebuilt after this run.
 
 Usage:
     cd zeus && python scripts/backfill_hourly_openmeteo.py --all-zeus --days 832
@@ -446,21 +446,12 @@ def main() -> int:
                 print(f"  {s['city']:20s} inserted={s['inserted']:>6} "
                       f"guard_rej={rej_total}")
 
-    # ETL follow-up — only if not dry-run and something was actually written
     if not args.dry_run:
         total_inserted = sum(s["inserted"] for s in all_stats)
-        if total_inserted > 0:
-            print(f"\n--- Rebuilding hourly_observations from observation_instants ---")
-            try:
-                from scripts.etl_hourly_observations import run_etl
-                run_etl()
-            except Exception as e:
-                logger.error("etl_hourly_observations follow-up failed: %s", e)
-                return 1
-        else:
-            print("\nNo rows inserted; skipping ETL follow-up.")
+        if total_inserted == 0:
+            print("\nNo rows inserted.")
     else:
-        print("\n[DRY RUN] Skipping etl_hourly_observations follow-up.")
+        print("\n[DRY RUN] No canonical hourly rows were written.")
 
     return 0
 

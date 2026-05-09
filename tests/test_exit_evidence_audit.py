@@ -1,17 +1,15 @@
 # Created: 2026-04-23
 # Last reused/audited: 2026-05-07
-# Authority basis: midstream verdict v2 2026-04-23 (docs/to-do-list/zeus_midstream_fix_plan_2026-04-23.md T4.2-Phase1 exit-side DecisionEvidence audit-only symmetry check, D4 MITIGATED gate); Wave26 canonical position event env authority
+# Authority basis: midstream verdict v2 2026-04-23 (docs/to-do-list/zeus_midstream_fix_plan_2026-04-23.md T4.2 exit-side DecisionEvidence symmetry check); Wave26 canonical position event env authority; Wave31 D4 hard gate
 
-"""T4.2-Phase1 exit-side DecisionEvidence audit antibodies.
+"""T4.2 exit-side DecisionEvidence symmetry antibodies.
 
-Phase1 ships the audit-only D4 symmetry check. The
-DecisionEvidence.assert_symmetric_with invocation fires on the three
+The D4 symmetry gate fires on the three
 statistically-asymmetric exit triggers (EDGE_REVERSAL / BUY_NO_EDGE_EXIT /
 BUY_NO_NEAR_EXIT) when a position has a captured entry envelope (written
-by T4.1b). On EvidenceAsymmetryError the audit LOGS a structured JSON
-warning (aggregated over 7 days as ``audit_log_false_positive_rate``) and
-the exit proceeds. Phase2 (T4.2-Phase2) will flip the try/except to
-hard-fail weak exits once the 7-day rate satisfies the ≤ 0.05 gate.
+by T4.1b). On EvidenceAsymmetryError, missing entry evidence, or load failure,
+runtime monitor degrades to hold/review before any exit intent is built.
+Force-majeure exits are not part of this statistical symmetry class.
 
 Coverage:
 - load_entry_evidence read path from position_events.payload_json
@@ -23,7 +21,7 @@ Coverage:
   strong entry (5000-bootstrap CI + BH-FDR) raises EvidenceAsymmetryError
   with messages naming both the sample_size gap and the FDR gap
 - Symmetric strong exit does not raise
-- Phase1 exit-evidence construction satisfies DecisionEvidence
+- Exit-evidence construction satisfies DecisionEvidence
   __post_init__ invariants
 """
 
@@ -277,7 +275,7 @@ class TestD4AsymmetryDetection:
         )
         exit_strong.assert_symmetric_with(entry)
 
-    def test_phase1_weak_exit_construction_is_contract_valid(self):
+    def test_weak_exit_construction_is_contract_valid(self):
         ev = _exit_evidence_weak()
         assert ev.evidence_type == "exit"
         assert ev.sample_size == 2

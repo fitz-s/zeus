@@ -137,8 +137,8 @@ def _entry_event_payload(
     # `json_extract(payload_json, '$.decision_evidence_envelope')` then
     # `DecisionEvidence.from_json(...)`); `decision_evidence_reason`
     # records a known-missing-evidence context (e.g. legacy-position
-    # backfill) so T4.2-Phase1 exit-side audit can distinguish
-    # missing-because-legacy from missing-because-bug.
+    # backfill) so the Wave31 D4 hard gate and post-hoc investigation can
+    # distinguish missing-because-legacy from missing-because-bug.
     payload: dict[str, Any] = {
         "city": getattr(position, "city", ""),
         "target_date": getattr(position, "target_date", ""),

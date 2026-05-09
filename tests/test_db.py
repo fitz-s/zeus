@@ -141,6 +141,8 @@ def _insert_current_position_for_fill_authority_view_test(
     conn,
     *,
     position_id: str,
+    phase: str = "active",
+    order_status: str = "filled",
     submitted_size_usd: float = 25.0,
     projected_cost_basis_usd: float = 20.0,
     shares: float = 50.0,
@@ -158,22 +160,24 @@ def _insert_current_position_for_fill_authority_view_test(
             updated_at, temperature_metric
         )
         VALUES (
-            ?, 'active', ?, 'm-fill', 'NYC', 'US-Northeast', '2026-04-01', '39-40°F',
+            ?, ?, ?, 'm-fill', 'NYC', 'US-Northeast', '2026-04-01', '39-40°F',
             'buy_yes', 'F', ?, ?, ?, ?, 0.60,
             NULL, NULL, ?,
             'snap-fill', 'ens_member_counting', 'center_buy', 'center_buy', 'opening_hunt',
-            'local_only', 'yes-fill', 'no-fill', 'cond-fill', 'order-fill', 'filled',
+            'local_only', 'yes-fill', 'no-fill', 'cond-fill', 'order-fill', ?,
             '2026-04-01T00:00:00+00:00', 'high'
         )
         """,
         (
             position_id,
+            phase,
             position_id,
             submitted_size_usd,
             shares,
             projected_cost_basis_usd,
             entry_price,
             mark_price,
+            order_status,
         ),
     )
 
@@ -1248,6 +1252,110 @@ def test_position_current_views_use_fill_authority_current_open_economics(tmp_pa
     conn.close()
 
 
+def test_position_current_views_do_not_cap_full_open_fill_cost_to_projection(tmp_path):
+    from src.state.db import (
+        query_portfolio_loader_view,
+        query_position_current_status_view,
+        query_strategy_health_snapshot,
+        refresh_strategy_health,
+    )
+
+    conn = get_connection(tmp_path / "full-open-fill-cost-above-projection.db")
+    init_schema(conn)
+    _insert_current_position_for_fill_authority_view_test(
+        conn,
+        position_id="full-open-cost-pos",
+        submitted_size_usd=10.0,
+        projected_cost_basis_usd=10.0,
+        shares=20.0,
+        entry_price=0.50,
+        mark_price=0.60,
+    )
+    _insert_entry_execution_fact_for_fill_authority_view_test(
+        conn,
+        position_id="full-open-cost-pos",
+        terminal_exec_status="filled",
+        fill_price=0.51,
+        shares=20.0,
+    )
+    conn.commit()
+
+    status_view = query_position_current_status_view(conn)
+    loader_view = query_portfolio_loader_view(conn)
+    refresh = refresh_strategy_health(conn, as_of="2026-04-01T00:05:00+00:00")
+    strategy_snapshot = query_strategy_health_snapshot(
+        conn,
+        now="2026-04-01T00:06:00+00:00",
+        max_age_seconds=300,
+    )
+
+    status_position = status_view["positions"][0]
+    loader_position = loader_view["positions"][0]
+    strategy_row = strategy_snapshot["by_strategy"]["center_buy"]
+
+    assert status_view["total_exposure_usd"] == pytest.approx(10.2)
+    assert status_position["size_usd"] == pytest.approx(10.2)
+    assert status_position["submitted_size_usd"] == pytest.approx(10.0)
+    assert status_position["effective_cost_basis_usd"] == pytest.approx(10.2)
+    assert status_position["unrealized_pnl"] == pytest.approx(1.8)
+    assert status_position["entry_economics_authority"] == "avg_fill_price"
+    assert status_position["fill_authority"] == "venue_confirmed_full"
+
+    assert loader_position["size_usd"] == pytest.approx(10.2)
+    assert loader_position["cost_basis_usd"] == pytest.approx(10.2)
+    assert loader_position["projection_cost_basis_usd"] == pytest.approx(10.0)
+    assert loader_position["entry_price"] == pytest.approx(0.51)
+    assert loader_position["shares"] == pytest.approx(20.0)
+    assert loader_position["shares_filled"] == pytest.approx(20.0)
+    assert loader_position["filled_cost_basis_usd"] == pytest.approx(10.2)
+    assert loader_position["effective_cost_basis_usd"] == pytest.approx(10.2)
+    assert loader_position["entry_fill_verified"] is True
+
+    assert refresh["status"] == "refreshed"
+    assert strategy_row["open_exposure_usd"] == pytest.approx(10.2)
+    assert strategy_row["unrealized_pnl"] == pytest.approx(1.8)
+
+    conn.close()
+
+
+def test_position_current_views_missing_open_shares_do_not_reduce_fill_cost(tmp_path):
+    from src.state.db import query_portfolio_loader_view, query_position_current_status_view
+
+    conn = get_connection(tmp_path / "missing-open-shares-fill-cost.db")
+    init_schema(conn)
+    _insert_current_position_for_fill_authority_view_test(
+        conn,
+        position_id="missing-open-shares-cost-pos",
+        submitted_size_usd=10.0,
+        projected_cost_basis_usd=10.0,
+        shares=0.0,
+        entry_price=0.50,
+        mark_price=0.60,
+    )
+    _insert_entry_execution_fact_for_fill_authority_view_test(
+        conn,
+        position_id="missing-open-shares-cost-pos",
+        terminal_exec_status="filled",
+        fill_price=0.51,
+        shares=20.0,
+    )
+    conn.commit()
+
+    status_view = query_position_current_status_view(conn)
+    loader_view = query_portfolio_loader_view(conn)
+
+    status_position = status_view["positions"][0]
+    loader_position = loader_view["positions"][0]
+
+    assert status_position["effective_cost_basis_usd"] == pytest.approx(10.2)
+    assert status_position["shares"] == pytest.approx(20.0)
+    assert loader_position["effective_cost_basis_usd"] == pytest.approx(10.2)
+    assert loader_position["shares"] == pytest.approx(20.0)
+    assert loader_position["filled_cost_basis_usd"] == pytest.approx(10.2)
+
+    conn.close()
+
+
 def test_position_current_views_do_not_promote_nonfinal_fill_like_execution_fact(tmp_path):
     from src.state.db import query_portfolio_loader_view, query_position_current_status_view
 
@@ -1294,6 +1402,50 @@ def test_position_current_views_do_not_promote_nonfinal_fill_like_execution_fact
     assert loader_position["fill_authority"] == "none"
 
     conn.close()
+
+
+def test_position_current_pending_entry_without_fill_authority_is_not_open_exposure(tmp_path):
+    from src.state.db import query_portfolio_loader_view, query_position_current_status_view
+
+    conn = get_connection(tmp_path / "pending-entry-no-fill-authority.db")
+    init_schema(conn)
+    _insert_current_position_for_fill_authority_view_test(
+        conn,
+        position_id="pending-entry-no-fill",
+        phase="pending_entry",
+        order_status="pending",
+        submitted_size_usd=25.0,
+        projected_cost_basis_usd=20.0,
+        shares=50.0,
+        entry_price=0.50,
+        mark_price=0.50,
+    )
+    conn.commit()
+
+    status_view = query_position_current_status_view(conn)
+    loader_view = query_portfolio_loader_view(conn)
+    conn.close()
+
+    status_position = status_view["positions"][0]
+    loader_position = loader_view["positions"][0]
+
+    assert status_view["total_exposure_usd"] == 0.0
+    assert status_position["submitted_size_usd"] == pytest.approx(25.0)
+    assert status_position["size_usd"] == 0.0
+    assert status_position["effective_cost_basis_usd"] == 0.0
+    assert status_position["shares"] == 0.0
+    assert status_position["entry_price"] == 0.0
+    assert status_position["entry_economics_authority"] == "legacy_unknown"
+    assert status_position["fill_authority"] == "none"
+    assert status_position["entry_economics_source"] == "pending_entry_without_fill_authority"
+
+    assert loader_position["submitted_size_usd"] == pytest.approx(25.0)
+    assert loader_position["size_usd"] == 0.0
+    assert loader_position["cost_basis_usd"] == 0.0
+    assert loader_position["entry_price"] == 0.0
+    assert loader_position["shares"] == 0.0
+    assert loader_position["entry_fill_verified"] is False
+    assert loader_position["entry_economics_source"] == "pending_entry_without_fill_authority"
 
 
 def test_portfolio_loader_missing_projection_env_stays_unknown_until_builder_rejects(tmp_path):

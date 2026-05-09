@@ -47,6 +47,7 @@ from src.state.db import (
 from src.architecture.decorators import capability, protects
 from src.state.canonical_write import commit_then_export
 from src.state.portfolio import (
+    CORRECTED_EXECUTABLE_PRICING_SEMANTICS_VERSION,
     ENTRY_ECONOMICS_CORRECTED_COST_BASIS,
     ENTRY_ECONOMICS_MODEL_EDGE_PRICE,
     ENTRY_ECONOMICS_OPTIMISTIC_MATCH_PRICE,
@@ -75,7 +76,14 @@ def _settlement_economics_for_position(pos) -> tuple[float, float]:
     if getattr(pos, "has_fill_economics_authority", False):
         return float(pos.effective_shares), float(pos.effective_cost_basis_usd)
     authority = str(getattr(pos, "entry_economics_authority", "") or "")
-    if authority in _NON_FILL_ENTRY_ECONOMICS_AUTHORITIES:
+    corrected_marked = (
+        bool(getattr(pos, "corrected_executable_economics_eligible", False))
+        or str(getattr(pos, "pricing_semantics_version", "") or "")
+        == CORRECTED_EXECUTABLE_PRICING_SEMANTICS_VERSION
+        or bool(str(getattr(pos, "entry_cost_basis_hash", "") or "").strip())
+        or bool(str(getattr(pos, "execution_cost_basis_version", "") or "").strip())
+    )
+    if authority in _NON_FILL_ENTRY_ECONOMICS_AUTHORITIES or corrected_marked:
         raise ValueError(
             "settlement P&L requires fill-derived economics; "
             f"entry_economics_authority={authority!r} "

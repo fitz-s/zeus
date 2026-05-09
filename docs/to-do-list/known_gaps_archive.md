@@ -821,3 +821,236 @@ DAY0_CAPTURE has `max_hours_to_resolution` → `min_hours_to_resolution=0` is pa
 **Original problem:** PARTIAL exit status was observed but not materialized; local shares remained unchanged.
 **Structural closure:** T1C added `_apply_partial_exit_fill()` helper which now triggers on PARTIAL status, reducing `position.effective_shares`, updating `cost_basis_usd` with remaining-ratio adjustment, and marking `exit_state='sell_pending'`. Remaining unsold shares are queued for retry. Partial fills now reduce local exposure immediately.
 **Resolved by:** T1C (commit 72e58e3a); closure verified via test_exit_safety.py + test_lifecycle.py partial-fill coverage.
+
+---
+
+## 2026-05-08 — Active known-gaps realignment closures
+
+These entries were still visible as active or contradictory notes in
+`docs/to-do-list/known_gaps.md`. The 2026-05-08 realignment rechecked them
+against current source/tests/docs and moved the closed items here so the active
+worklist only carries live gaps, residuals, deferred work, or unknowns.
+
+### [CLOSED — 2026-05-08] Production executable snapshot producer/refresher exists for entry and held exits
+
+**Original active heading:** `[OPEN P1] No production executable snapshot producer/refresher was found`.
+**Original problem:** Earlier static inventory found snapshot gates but no live
+producer/refresher for production entry or held-position exit paths.
+**Structural closure:** Entry snapshot capture/threading exists, and held exits
+can reuse a fresh snapshot or capture a fresh VERIFIED Gamma + CLOB executable
+snapshot before sell intent creation through `exit_lifecycle`.
+**Evidence:** `src/execution/exit_lifecycle.py` captures exit snapshots when no
+fresh row exists; `src/data/market_scanner.py` owns executable snapshot capture;
+the active worklist now keeps only staged dry-run evidence as a deploy proof,
+not a code-path missing-producer gap.
+**Residual:** live unlock still needs staged scan -> snapshot -> command
+evidence, but that is deploy proof, not an active missing-code-path blocker.
+
+### [CLOSED — 2026-05-08] Effective RED now triggers sweep even without `force_exit_review`
+
+**Original active heading:** `[OPEN P1] Fail-closed RED causes do not trigger force-exit sweep`.
+**Original problem:** Earlier cycle gating appeared to sweep only when
+`get_force_exit_review()` was true, leaving infrastructure RED states as
+entry-block-only.
+**Structural closure:** Current `cycle_runner` triggers the local RED sweep on
+effective `risk_level == RiskLevel.RED`, including stale/no-row/DB-error RED
+paths that do not set the daily-loss force-exit flag.
+**Evidence:** `src/engine/cycle_runner.py` RED branch checks effective risk
+level; `tests/test_riskguard_red_durable_cmd.py` covers RED sweep behavior when
+`force_exit_review` is false.
+**Residual:** direct venue cancel/sell side-effect SLA remains active in
+`known_gaps.md`; this closure only covers local RED sweep invocation.
+
+### [CLOSED — 2026-05-08] ORANGE has a favorable-exit path distinct from YELLOW
+
+**Original active heading:** `[OPEN P2] ORANGE risk currently behaves like entry-block-only YELLOW`.
+**Original problem:** ORANGE appeared to block entries while leaving held
+positions to ordinary monitor logic, making it indistinguishable from YELLOW.
+**Structural closure:** Current runtime has `_orange_favorable_exit_decision`
+and invokes it during monitoring, with tests covering favorable and unfavorable
+cases.
+**Evidence:** `src/engine/cycle_runtime.py::_orange_favorable_exit_decision`;
+`tests/test_runtime_guards.py` ORANGE favorable-exit coverage.
+
+### [CLOSED — 2026-05-08] Collateral preflight rejects stale snapshots
+
+**Original active heading:** `[OPEN P2] Collateral preflight accepts arbitrarily stale snapshots`.
+**Original problem:** Buy/sell preflight could pass against numerically
+sufficient but stale account truth.
+**Structural closure:** `CollateralLedger` buy/sell preflight now asserts
+snapshot freshness and raises on stale or future timestamps before command or
+SDK boundaries.
+**Evidence:** `src/state/collateral_ledger.py::_assert_snapshot_fresh` is called
+from both buy and sell preflights.
+
+### [CLOSED — 2026-05-08] ENS local-day non-finite values fail closed before posterior/edge construction
+
+**Original active heading:** `[OPEN P1] ENS local-day NaNs can pass validation and create false posterior edges`.
+**Original problem:** NaNs inside the selected local-day slice could propagate
+into all-zero probabilities and false posterior edges.
+**Structural closure:** Local-day values and member extrema are now checked for
+finite values before p_raw/posterior use.
+**Evidence:** `src/signal/ensemble_signal.py` finite checks around local-day
+values and member extrema; model/vector tests remain the regression antibody.
+
+### [CLOSED — 2026-05-08] Day0 stale/epoch observations cannot silently become tradeable fresh `p_raw`
+
+**Original active heading:** `[OPEN P1] Day0 stale/epoch observations can still produce tradeable p_raw`.
+**Original problem:** WU epoch timestamps and sparse/stale provider samples
+could degrade freshness while still producing tradeable Day0 probabilities.
+**Structural closure:** Executable Day0 observations are source-bound, WU epoch
+timestamps parse as fresh when current, and stale or coverage-invalid Day0
+observations block entry or degrade monitor refresh to stale/read-only evidence.
+**Evidence:** Day0 runtime observation context tests and live-safety invariant
+tests cover fresh epoch parsing, stale entry blocking, and monitor degradation.
+
+### [CLOSED — 2026-05-08] HK HKO settlement rounding uses containment/truncation, not WMO half-up
+
+**Original active heading:** `[OPEN] HK: SettlementSemantics uses WMO half-up, but PM resolution uses floor`.
+**Original problem:** HKO raw values are decimal Celsius and Polymarket bin
+containment maps values such as 27.8°C into the 27°C bin, unlike WMO half-up.
+**Structural closure:** HKO settlement semantics now use the HKO-specific
+`oracle_truncate` rounding rule instead of generic WMO half-up.
+**Evidence:** `src/contracts/settlement_semantics.py` selects
+`rounding_rule="oracle_truncate"` for HKO; `tests/test_hk_settlement_floor_rounding.py`
+covers HK containment examples.
+**Residual:** HK 03-13/03-14 source-audit evidence remains active; do not add a
+WU/VHHH alias to close that separate source-authority gap.
+
+### [CLOSED — 2026-05-08] Paris LFPG/LFPB source mismatch is no longer an active blocker
+
+**Original stale note:** active overlay text still said Paris was excluded/open.
+**Original problem:** Paris markets transitioned from LFPG to LFPB and source
+config/backfill/calibration needed conversion.
+**Structural closure:** The conversion is already archived as closed: Paris
+config uses LFPB, LFPG legacy rows were removed/quarantined as applicable,
+LFPB rows were backfilled, and Platt models were refit.
+**Evidence:** `docs/operations/current_source_validity.md` records the completed
+Paris conversion; the closed record lives above as
+`[CLOSED P1 — 2026-05-03] Paris config uses LFPG while current markets resolve on LFPB`.
+
+### [CLOSED — 2026-05-08] ACP router fallback chain is out of Zeus runtime scope
+
+**Original active heading:** `[OPEN] ACP router fallback chain is recovering after failure, not stabilizing before dispatch`.
+**Original problem:** An OpenClaw/ACP routing stack could dispatch before
+allowlist/auth/timeout prechecks.
+**Closure:** Repo search found only docs/packet references and no Zeus `src/` or
+`tests/` consumer. This is not a Zeus live-money runtime gap.
+**Disposition:** Keep any real ACP repair in its owning routing repo; do not
+carry it in Zeus `known_gaps.md`.
+
+### [CLOSED — 2026-05-08] T1E rebuilt calibration scope now carries an exact completion sentinel
+
+**Original active heading:** `T1E C-3 — rebuild_calibration_pairs_v2 partial-commit semantic (LOW)`.
+**Original problem:** `scripts/rebuild_calibration_pairs_v2.py` commits each
+`(city, metric)` bucket independently. An interrupted rebuild could leave
+already-committed buckets beside missing buckets, and a downstream opener had no
+authoritative exact-scope marker distinguishing complete from partial rebuilt DB
+state.
+**Structural closure:** live rebuild writes now overwrite the exact rebuild
+scope in `zeus_meta` to `in_progress` before the first bucket commit and mark it
+`complete` only after all post-write gates pass. `assert_rebuild_complete_sentinel()`
+fails closed when the exact-scope sentinel is absent or still in-progress.
+Live `refit_platt_v2.py` checks that sentinel before it can promote
+`calibration_pairs_v2` rows into `platt_models_v2`; dry-run remains
+non-promoting inspection. Narrow refit scopes may use a covering all-scope
+complete sentinel, but any overlapping `in_progress` sentinel blocks promotion
+before exact or covering completion is accepted. The refit/rebuild consumer also
+validates sentinel payload metric identity, bin source, scope, and `n_mc` against
+the key it is consuming, so a contaminated `zeus_meta` row cannot authorize a
+different rebuilt object by carrying only `status="complete"`.
+Post-critic hardening extends the same completion proof to calibration-transfer
+OOS evidence: non-dry-run `evaluate_calibration_transfer_oos.py` skips
+cross-domain writes when the target route lacks a complete rebuild sentinel,
+and `evaluate_calibration_transfer_policy_with_evidence()` refuses to turn an
+existing `validated_calibration_transfers` row into `LIVE_ELIGIBLE` unless the
+target cohort's `calibration_pairs_v2` source is still covered by a complete
+rebuild sentinel. Any overlapping in-progress sentinel fails closed so an old
+covering complete row cannot mask a current partial rebuild.
+**Evidence:** `scripts/rebuild_calibration_pairs_v2.py` sentinel helpers,
+`scripts/refit_platt_v2.py` live-refit gate, and
+`tests/test_rebuild_live_sentinel.py` relationship tests prove
+in-progress-before-bucket, no complete marker after validation failure,
+fail-closed consumer behavior, resolved `n_mc` provenance, covering-scope
+semantics, payload self-consistency, overlapping-in-progress blocking, and no
+Platt model promotion from an incomplete source scope.
+`tests/test_evaluate_calibration_transfer_oos.py` and
+`tests/test_calibration_transfer_policy_with_evidence.py` prove the OOS writer
+and reader cannot materialize live-eligible transfer evidence from a partial or
+unproven target rebuild scope.
+**Residual:** This does not authorize running rebuild during live trading or
+swap a rebuilt DB into live truth. It only makes partial rebuilt scope detection
+machine-checkable.
+
+### [CLOSED — 2026-05-08] M5 position drift separates confirmed journal truth from optimistic exposure
+
+**Original active heading:** `[MITIGATED 2026-04-30; RESIDUAL P2] M5 exchange reconciliation no longer promotes non-final trades to filled commands`.
+**Original residual:** command finality was repaired, but
+`_journal_positions_by_token()` still counted `MATCHED`, `MINED`, and
+`CONFIRMED` together in the drift comparison surface, allowing an optimistic
+trade fact to be treated as the same position object as confirmed journal truth.
+**Structural closure:** position drift now builds separate confirmed and
+optimistic journals. Exchange position comparison uses only latest
+`CONFIRMED` trade facts; evidence separately reports `confirmed_journal_size`,
+back-compatible `journal_size`, `optimistic_journal_size`, and both evidence
+classes.
+**Evidence:** `src/execution/exchange_reconcile.py::_record_position_drift_findings`
+and `tests/test_exchange_reconcile.py::test_position_drift_compares_exchange_to_confirmed_not_optimistic`.
+The economic-drift lifecycle test also proves a blocked confirmed transition can
+emit both the trade-lifecycle finding and a confirmed-journal position drift
+instead of silently accepting the optimistic MATCHED exposure as final truth.
+**Residual:** This is read-only reconciliation evidence. It does not mutate
+venue state or promote optimistic lots to confirmed positions.
+
+### [CLOSED — 2026-05-08] `hourly_observations` compatibility surface is no longer constructible or scheduled
+
+**Original active heading:** `[LOW] hourly_observations is dead — schedule deletion`.
+**Original problem:** `hourly_observations` was a lossy local-hour compatibility
+table populated by `scripts/etl_hourly_observations.py` from
+`observation_instants_current`, with an evidence view
+`v_evidence_hourly_observations`. Runtime consumers had already moved to
+`observation_instants_v2`/`observation_instants_current`, but schema init,
+ingest/backfill hooks, tests, and linter exceptions still preserved the stale
+object as if it were a valid evidence surface.
+**Structural closure:** Wave38 removes the table/view DDL from `src/state/db.py`,
+deletes `scripts/etl_hourly_observations.py`, removes ingest/backfill/assumption
+hooks, removes manifest/topology references to the deleted writer, and converts
+the semantic linter from compatibility-allowlist mode to fail-closed
+no-reintroduction mode for both `hourly_observations` and
+`v_evidence_hourly_observations`.
+**Evidence:** `tests/test_architecture_contracts.py` now asserts `init_schema()`
+does not create the table or evidence view. `tests/test_semantic_linter.py`
+proves deleted table/view reads/DDL and the old writer path are rejected, and
+that runtime `src/`/`scripts/` code does not reintroduce the strings outside the
+linter itself. `tests/test_structural_linter.py` asserts the deleted ETL script
+stays absent. `tests/test_world_writer_boundary.py` removes the writer from the
+world-DB write allowlist.
+**Residual:** Physical legacy tables/views may still exist inside already
+initialized DB files. Dropping those is a destructive data-layer operation and
+is tracked as an active `OPERATOR_DECISION_REQUIRED` known gap with dry-run,
+backup, rollback, and dependency-audit requirements.
+
+### [CLOSED — 2026-05-08] `solar_daily` malformed rootpage degrades Day0 authority
+
+**Original active heading:** `[STALE-UNVERIFIED] CycleRunner fails on malformed solar_daily schema rootpage`.
+**Original problem:** A legacy diagnostic cycle had seen SQLite raise
+`malformed database schema (solar_daily) - invalid rootpage` during a Day0 path,
+and the open question was whether that malformed DB object could crash the
+cycle or be treated as valid solar/DST context.
+**Structural closure:** Wave39 verified the existing runtime shape: a
+`solar_daily` read failure is not a valid `SolarDay`; it returns no Day0
+temporal context. Evaluator Day0 candidates degrade to `DATA_STALE` before
+probability-vector construction, and held-position monitor refresh preserves
+the prior posterior with `missing_solar_context` instead of producing fresh
+probability.
+**Evidence:** `tests/test_diurnal.py::test_build_day0_temporal_context_degrades_on_malformed_solar_daily_rootpage`
+injects the historical SQLite error string and asserts no Day0 temporal context
+is produced. `tests/test_runtime_guards.py::test_day0_observation_path_rejects_missing_solar_context`
+asserts evaluator rejection is `SIGNAL_QUALITY` / `DATA_STALE`.
+`tests/test_runtime_guards.py::test_day0_monitor_refresh_degrades_on_malformed_solar_daily_rootpage`
+asserts monitor refresh returns the prior posterior, marks probability stale,
+and emits `missing_solar_context`.
+**Residual:** This is behavior verification, not DB repair. If a canonical DB
+file physically contains a corrupt rootpage, physical repair still requires a
+separate operator-approved data-layer packet with inventory, backup, dry-run,
+and rollback. No such mutation was run.

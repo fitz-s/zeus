@@ -1,6 +1,6 @@
 # Created: 2026-05-05
-# Last reused/audited: 2026-05-05
-# Lifecycle: created=2026-05-05; last_reviewed=2026-05-05; last_reused=2026-05-05
+# Last reused/audited: 2026-05-08
+# Lifecycle: created=2026-05-05; last_reviewed=2026-05-08; last_reused=2026-05-08
 # Authority basis: architecture/calibration_transfer_oos_design_2026-05-05.md Phase X.2
 # Purpose: Evaluate out-of-sample calibration-transfer evidence without promoting it to live authority.
 # Reuse: Run in --dry-run by default; use --no-dry-run only under daemon-lock/operator-gated evidence production.
@@ -55,7 +55,10 @@ ZEUS_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ZEUS_ROOT))
 
 from src.config import calibration_maturity_thresholds
-from src.data.calibration_transfer_policy import select_time_blocked_transfer_pairs
+from src.data.calibration_transfer_policy import (
+    calibration_pairs_rebuild_complete_for_transfer_evidence,
+    select_time_blocked_transfer_pairs,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -512,6 +515,7 @@ def run_oos_evaluation(
     }
 
     stats["refresh_skipped"] = 0
+    stats["rebuild_incomplete_skipped"] = 0
 
     for model in models:
         source_domain = (model["source_id"], model["cycle"])
@@ -544,6 +548,24 @@ def run_oos_evaluation(
                 logger.debug(
                     "refresh skip (fresh row within %dd): model=%s target=(%s,%s)",
                     staleness_days, model["model_key"], tgt_source_id, tgt_cycle,
+                )
+                continue
+
+            if not dry_run and not calibration_pairs_rebuild_complete_for_transfer_evidence(
+                conn,
+                metric=model["metric"],
+                target_source_id=tgt_source_id,
+                target_cycle=tgt_cycle,
+                horizon_profile=model["horizon_profile"],
+            ):
+                stats["rebuild_incomplete_skipped"] += 1
+                logger.warning(
+                    "rebuild-incomplete skip: model=%s target=(%s,%s) metric=%s horizon=%s",
+                    model["model_key"],
+                    tgt_source_id,
+                    tgt_cycle,
+                    model["metric"],
+                    model["horizon_profile"],
                 )
                 continue
 

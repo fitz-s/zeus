@@ -1,5 +1,7 @@
-# Lifecycle: created=2026-04-30; last_reviewed=2026-04-30; last_reused=never
-# Authority basis: docs/operations/task_2026-04-30_two_system_independence/design.md §6 antibody #2
+# Created: 2026-04-30
+# Last reused/audited: 2026-05-08
+# Authority basis: docs/operations/task_2026-04-30_two_system_independence/design.md §6 antibody #2; Wave38 dead hourly-observations writer deletion
+# Lifecycle: created=2026-04-30; last_reviewed=2026-05-08; last_reused=2026-05-08
 """Antibody #2 — World-DB write boundary enforcement.
 
 Only allowlisted modules may contain INSERT INTO / UPDATE / DELETE FROM
@@ -59,7 +61,6 @@ ALLOWLISTED_WRITE_MODULES: frozenset[str] = frozenset(
         # ETL scripts (operator-run offline; not daemon-scheduled)
         "scripts/etl_diurnal_curves.py",
         "scripts/etl_temp_persistence.py",
-        "scripts/etl_hourly_observations.py",
         "scripts/etl_historical_forecasts.py",
         "scripts/etl_forecast_skill_from_forecasts.py",
         "scripts/etl_asos_wu_offset.py",
@@ -129,6 +130,14 @@ def _scan_python_files() -> list[Path]:
                 if "__pycache__" not in p.parts
             )
     return sorted(files)
+
+
+def test_deleted_hourly_observations_writer_not_allowlisted():
+    """Wave38: deleted lossy compatibility writer must stay out of write allowlists."""
+    deleted_writer = "scripts/etl_hourly_observations.py"
+
+    assert deleted_writer not in ALLOWLISTED_WRITE_MODULES
+    assert not (PROJECT_ROOT / deleted_writer).exists()
 
 
 def _file_contains_write_and_table(py_path: Path) -> tuple[bool, list[str]]:

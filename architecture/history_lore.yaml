@@ -1022,8 +1022,10 @@ cards:
       gates:
         - rg DST tests before closing the rebuild packet
     residual_risk: >
-      This remains open until historical hourly_observations/diurnal_curves are
-      rebuilt or proven clean for NYC, Chicago, London, and Paris.
+      This remains open until historical diurnal_curves are rebuilt or proven
+      clean for NYC, Chicago, London, and Paris. The deleted
+      hourly_observations compatibility surface may still physically exist in
+      old DB files, but it is no longer a source/scheduler route.
     invalidation_condition: >
       Close only with rebuild evidence over DST transition dates and a regression
       test for spring-forward/fall-back local-hour behavior.
@@ -1031,7 +1033,6 @@ cards:
       task_terms: [DST, timezone, diurnal, day0, hourly observations, WU scheduler, local hour]
       file_patterns:
         - src/signal/diurnal.py
-        - scripts/etl_hourly_observations.py
         - scripts/etl_diurnal_curves.py
         - src/data/wu_scheduler.py
         - src/data/ingestion_guard.py
