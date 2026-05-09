@@ -245,3 +245,48 @@ Closure evidence:
 - Final critic verdict after fixes: PASS.
 - Residual noted risk: lifecycle funnel is an operator read model and can double-count if an upstream fault writes both a no-trade case and a position intent for the same market. The report exposes relationships and source errors but does not enforce writer mutual exclusion.
 - Ready to commit this S2 slice.
+
+## 2026-05-09 - S3 Calibration Serving Status Implemented, Pending Critic
+
+Scope:
+- S3 is a read/report surface only: forecast producer readiness vs calibration readiness by derived serving bucket.
+- Producer evidence comes from `readiness_state` rows where `strategy_key='producer_readiness'`.
+- Calibration evidence comes from `calibration_pairs_v2` VERIFIED/training-allowed rows and active VERIFIED `platt_models_v2` rows.
+- No schema changes, forecast ingestion changes, calibration refits, calibration promotion, executor changes, venue changes, or production DB writes were made.
+
+Reality evidence:
+- Local `state/zeus_trades.db` and `state/zeus-world.db` in this repair worktree are zero-byte scratch DBs; current-data evidence could not show live counts.
+- The missing-table/empty-current-state condition is covered as derived `query_error`/source-error status rather than a hard runtime assumption.
+- Schema/code evidence was read from `readiness_repo.py`, `live_entry_status.py`, `calibration/store.py`, `calibration/manager.py`, and `schema/v2_schema.py`.
+
+Topology:
+- Added `s3 calibration serving status implementation` so natural S3 wording routes out of `generic`.
+- Regenerated `architecture/digest_profiles.py`.
+- Added route-regression coverage in `tests/test_digest_profile_matching.py`.
+- Final navigation/planning-lock result for the changed S3 file set: admitted, T3, `topology check ok`.
+
+Changes made:
+- Added `src/observability/calibration_serving_status.py` with `build_calibration_serving_status()`.
+- The report keeps `forecast_ready`, `calibration_ready`, and `trade_ready` separate per bucket, with `authority: derived_operator_visibility`.
+- Wired the report into `src/observability/status_summary.py` as top-level `calibration_serving`, outside `cycle`.
+- Added relationship tests proving producer-ready/missing-calibration, unverified calibration evidence, calibration-ready/forecast-blocked, both-ready, expired producer readiness, and missing-table behavior.
+
+Verification:
+- Focused S3 suite (`tests/test_digest_profile_matching.py::test_s3_calibration_serving_status_routes_to_status_profile`, `tests/test_calibration_serving_status.py`, and `tests/test_phase10b_dt_seam_cleanup.py -k 'calibration_serving'`): 12 passed, 27 deselected.
+- `tests/test_phase10b_dt_seam_cleanup.py -k 'status' --maxfail=1`: 12 passed, 18 deselected.
+- `python3 -m py_compile src/observability/calibration_serving_status.py src/observability/status_summary.py tests/test_calibration_serving_status.py tests/test_phase10b_dt_seam_cleanup.py tests/test_digest_profile_matching.py architecture/digest_profiles.py`: OK.
+- `scripts/digest_profiles_export.py --check`: OK.
+- VS Code diagnostics on touched source/test files: no errors.
+
+Critic follow-up:
+- Initial critic verdict: REVISE.
+- Blocking finding: new implementation/test files are untracked until explicitly staged; commit step must include `src/observability/calibration_serving_status.py` and `tests/test_calibration_serving_status.py` as added files.
+- Finding 1: producer `latest_*` telemetry could be overwritten by older rows within the same bucket.
+- Fix 1: preserve first row from `ORDER BY computed_at DESC`; regression coverage added for newest-row telemetry.
+- Finding 2: calibration-serving `query_error`/`partial` degradation lacked infrastructure telemetry tests.
+- Fix 2: status-summary tests now cover both `calibration_serving_summary_unavailable` and `calibration_serving_summary_partial` as YELLOW infrastructure issues.
+- Final cleanup: removed an unused report constant and added certified-empty coverage for all expected tables present with no rows.
+
+Open before closeout:
+- Run final critic-grade review for the S3 relationship and status-summary semantics.
+- If critic passes or returns only non-blocking residuals, commit this S3 slice.

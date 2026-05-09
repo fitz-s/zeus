@@ -815,6 +815,26 @@ def test_s2_lifecycle_funnel_report_routes_to_status_profile():
     assert "tests/test_phase10b_dt_seam_cleanup.py" in admitted
 
 
+def test_s3_calibration_serving_status_routes_to_status_profile():
+    digest = build_digest(
+        "S3 calibration serving status surface report forecast readiness vs calibration readiness by serving bucket derived operator visibility",
+        [
+            "src/observability/calibration_serving_status.py",
+            "src/observability/status_summary.py",
+            "tests/test_calibration_serving_status.py",
+            "tests/test_phase10b_dt_seam_cleanup.py",
+        ],
+    )
+
+    assert digest["profile"] == "s3 calibration serving status implementation"
+    assert digest["admission"]["status"] == "admitted"
+    admitted = set(digest["admission"]["admitted_files"])
+    assert "src/observability/calibration_serving_status.py" in admitted
+    assert "src/observability/status_summary.py" in admitted
+    assert "tests/test_calibration_serving_status.py" in admitted
+    assert "tests/test_phase10b_dt_seam_cleanup.py" in admitted
+
+
 def test_paris_source_boundary_evidence_routes_to_docs_only_profile():
     digest = build_digest(
         "Paris source-boundary evidence recording LFPG LFPB no config edit "

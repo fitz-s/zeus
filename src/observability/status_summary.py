@@ -21,6 +21,7 @@ from src.control.control_plane import (
     strategy_gates,
 )
 from src.control.gate_decision import reason_refuted
+from src.observability.calibration_serving_status import build_calibration_serving_status
 from src.state.decision_chain import query_learning_surface_summary, query_lifecycle_funnel_report
 from src.state.db import (
     get_trade_connection_with_world,
@@ -754,6 +755,7 @@ def write_status(cycle_summary: dict = None) -> None:
             "fdr_fallback_fired": bool((cycle_summary or {}).get("fdr_fallback_fired", False)),
         },
         "execution_capability": _get_execution_capability_status(),
+        "calibration_serving": {},
         "learning": {},
         "lifecycle_funnel": {},
         "no_trade": {},
@@ -872,6 +874,7 @@ def write_status(cycle_summary: dict = None) -> None:
             conn,
             not_before=current_regime_started_at or None,
         )
+        status["calibration_serving"] = build_calibration_serving_status(conn)
         status["lifecycle_funnel"] = query_lifecycle_funnel_report(
             conn,
             not_before=current_regime_started_at or None,
@@ -887,6 +890,11 @@ def write_status(cycle_summary: dict = None) -> None:
     except Exception:
         status["execution"] = {"error": "execution_summary_unavailable"}
         status["learning"] = {"error": "learning_summary_unavailable"}
+        status["calibration_serving"] = {
+            "status": "query_error",
+            "authority": "derived_operator_visibility",
+            "error": "calibration_serving_summary_unavailable",
+        }
         status["lifecycle_funnel"] = {
             "status": "query_error",
             "authority": "derived_operator_visibility",
@@ -915,6 +923,11 @@ def write_status(cycle_summary: dict = None) -> None:
         consistency_issues.append("execution_summary_unavailable")
     if status.get("learning", {}).get("error"):
         consistency_issues.append("learning_summary_unavailable")
+    calibration_serving_status = str((status.get("calibration_serving", {}) or {}).get("status") or "")
+    if calibration_serving_status == "query_error":
+        consistency_issues.append("calibration_serving_summary_unavailable")
+    elif calibration_serving_status == "partial":
+        consistency_issues.append("calibration_serving_summary_partial")
     lifecycle_funnel_status = str((status.get("lifecycle_funnel", {}) or {}).get("status") or "")
     if lifecycle_funnel_status == "query_error":
         consistency_issues.append("lifecycle_funnel_summary_unavailable")
