@@ -28,7 +28,13 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 REGISTRY_PATH = REPO_ROOT / ".claude" / "hooks" / "registry.yaml"
 
 NEVER_EXPIRY_WHITELIST = {"REVIEW_SAFE_TAG", "ISOLATED_WORKTREE"}
-VALID_SEVERITY = {"ADVISORY"}
+# Severity tiers: ADVISORY emits context only; BLOCKING returns exit 2 to deny
+# the tool call. The 2026-05-06 redesign retired most BLOCKING hooks but kept
+# pr_create_loc_accumulation + pre_merge_comment_check intentionally because
+# the cost/safety asymmetry on those events justifies a hard stop. The
+# registry comment ("BLOCKING tier retired") refers to the wholesale removal
+# of advisory→blocking promotions, not the elimination of the tier itself.
+VALID_SEVERITY = {"ADVISORY", "BLOCKING"}
 VALID_EVENTS = {
     "PreToolUse",
     "PostToolUse",

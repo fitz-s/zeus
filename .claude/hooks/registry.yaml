@@ -6,7 +6,7 @@
 schema_version: 1
 metadata:
   charter_version: 2.0.0
-  catalog_size: 14
+  catalog_size: 15
   sunset_default: 90d
 
 hooks:
@@ -65,10 +65,15 @@ hooks:
     event: PreToolUse
     matcher: Bash
     intent: >
-      BLOCKING when commits < 2 AND LOC < 80 since branch base (both conditions).
-      Reminds about paid-reviewer spend. Bypass: ZEUS_PR_ALLOW_TINY=1 (degrades to advisory).
+      BLOCKING when self-authored LOC < 300 since merge-base. Self-authored excludes
+      carry-over commits (no `Co-Authored-By: Claude` line) so operator's local-main
+      commits picked up by the agent's branch don't inflate the count. Block message
+      is educational: explains paid auto-reviewer cost economics + tier-mismatch
+      waste so the agent reasons rather than rote-bypasses. See
+      architecture/agent_pr_discipline_2026_05_09.md. Bypass: ZEUS_PR_ALLOW_TINY=1
+      (degrades to advisory; document the bypass reason in the PR body).
     blocked_when:
-      - commits_since_base < 2 AND loc_since_base < 80
+      - self_authored_loc_since_base < 300
     severity: BLOCKING
     bypass_env: ZEUS_PR_ALLOW_TINY
     sunset_date: 2026-08-06

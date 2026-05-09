@@ -29,7 +29,7 @@ REQUIRED_FIELDS = {"hook_id", "event", "decision", "reason", "ts"}
 OPTIONAL_FIELDS = {"override_id", "session_id", "agent_id", "ritual_signal", "migration_note"}
 ALL_FIELDS = REQUIRED_FIELDS | OPTIONAL_FIELDS
 
-VALID_DECISIONS = {"allow", "deny", "error"}
+VALID_DECISIONS = {"allow", "deny", "error", "block"}
 
 
 def _make_signal_line(
