@@ -162,6 +162,34 @@ def test_navigation_cli_accepts_operation_vector_fields():
     assert payload["route_card"]["persistence_target"] == "final_response"
 
 
+def test_preflight_cli_alias_emits_route_card_only_json():
+    args = [
+        "--preflight",
+        "--json",
+        "--task",
+        "agent runtime navigation preflight alias",
+        "--changed-files",
+        "scripts/topology_doctor_cli.py",
+        "--intent",
+        "topology graph agent runtime upgrade",
+        "--task-class",
+        "agent_runtime",
+        "--write-intent",
+        "edit",
+    ]
+
+    payload = run_cli_json(args)
+    expected = topology_doctor.run_navigation(
+        "agent runtime navigation preflight alias",
+        ["scripts/topology_doctor_cli.py"],
+        intent="topology graph agent runtime upgrade",
+        task_class="agent_runtime",
+        write_intent="edit",
+    )
+
+    assert payload == {"ok": expected["ok"], "route_card": expected["route_card"]}
+
+
 
 @pytest.mark.live_topology
 def test_cli_json_parity_for_current_state_candidate_command():
@@ -3832,6 +3860,9 @@ def test_runtime_route_card_first_screen_contract_for_high_fanout_file():
     }
     assert 1 <= len(card["route_candidates"]) <= 3
     assert card["route_candidates"][0]["profile"] == digest["profile_selection"]["candidates"][0]
+    assert card["route_candidates"][0]["evidence_class"] == "semantic_file"
+    assert "src/engine/evaluator.py" in card["route_candidates"][0]["reason"]
+    assert card["route_candidates"][0]["semantic_file_hits"] == ["src/engine/evaluator.py"]
     assert card["mandatory_companion_files"] == []
 
 
@@ -3856,6 +3887,33 @@ def test_runtime_route_card_surfaces_new_test_companion_before_pr(monkeypatch):
             "reason": "added file requires companion update architecture/test_topology.yaml (test_file_registry)",
         }
     ]
+
+
+def test_runtime_route_card_keeps_operation_vector_selected_route_first():
+    digest = topology_doctor.build_digest(
+        "source canary recovery",
+        ["src/control/freshness_gate.py", "src/engine/cycle_runner.py"],
+        write_intent="edit",
+    )
+    first = digest["route_card"]["route_candidates"][0]
+
+    assert digest["profile"] == "source canary readiness hot-swap"
+    assert first["profile"] == "source canary readiness hot-swap"
+    assert first["selected"] is True
+
+
+def test_runtime_route_card_keeps_typed_intent_selected_route_first():
+    digest = topology_doctor.build_digest(
+        "fix evaluator behavior",
+        ["src/engine/evaluator.py"],
+        intent="evaluator script import bridge",
+        write_intent="edit",
+    )
+    first = digest["route_card"]["route_candidates"][0]
+
+    assert digest["profile"] == "evaluator script import bridge"
+    assert first["profile"] == "evaluator script import bridge"
+    assert first["selected"] is True
 
 
 def test_route_card_only_human_output_prefers_primary_blocker_over_full_trace():

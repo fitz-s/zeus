@@ -6,7 +6,7 @@
 schema_version: 1
 metadata:
   charter_version: 2.0.0
-  catalog_size: 15
+  catalog_size: 16
   sunset_default: 90d
 
 hooks:
@@ -65,13 +65,13 @@ hooks:
     event: PreToolUse
     matcher: Bash
     intent: >
+      Principle 1 backstop (architecture/agent_pr_discipline_2026_05_09.md).
       BLOCKING when self-authored LOC < 300 since merge-base. Self-authored excludes
       carry-over commits (no `Co-Authored-By: Claude` line) so operator's local-main
       commits picked up by the agent's branch don't inflate the count. Block message
-      is educational: explains paid auto-reviewer cost economics + tier-mismatch
-      waste so the agent reasons rather than rote-bypasses. See
-      architecture/agent_pr_discipline_2026_05_09.md. Bypass: ZEUS_PR_ALLOW_TINY=1
-      (degrades to advisory; document the bypass reason in the PR body).
+      explains paid auto-reviewer cost economics (P1) and lists sibling principles
+      P2/P3/P4 so the agent reasons about the full workflow, not just the LOC gate.
+      Bypass: ZEUS_PR_ALLOW_TINY=1 (degrades to advisory; document reason in PR body).
     blocked_when:
       - self_authored_loc_since_base < 300
     severity: BLOCKING
@@ -84,18 +84,39 @@ hooks:
     event: PreToolUse
     matcher: Bash
     intent: >
+      Principle 2 backstop (architecture/agent_pr_discipline_2026_05_09.md).
       BLOCKING on `gh pr merge <N>` when: PR age < 600s (auto-reviewers not yet fired);
-      unresolved Codex P0/P1 review thread exists; or any review state is
-      CHANGES_REQUESTED (non-dismissed). Codex P2 threads emit advisory only.
-      COMMENTED state reviews never block (Copilot always posts summaries).
-      Bypass: ZEUS_PR_MERGE_FORCE=1 degrades to warning-only.
+      ANY unresolved review thread exists (B2 strict: all threads, any author, any severity);
+      or any review state is CHANGES_REQUESTED (non-dismissed). Block message opens with
+      "skipped Principle 2" framing and reminds agent: fix-commit IS the response, no
+      thread replies. Bypass: ZEUS_PR_MERGE_FORCE=1 — requires per-thread disposition
+      (APPLIED/DISMISSED/DEFERRED) documented in PR body.
     blocked_when:
       - pr_age_seconds < 600
-      - unresolved_codex_p0_or_p1_thread == true
+      - unresolved_review_thread_count > 0
       - changes_requested_review_not_dismissed == true
     severity: BLOCKING
     bypass_env: ZEUS_PR_MERGE_FORCE
     sunset_date: 2026-08-06
+    telemetry:
+      ritual_signal_emitted: true
+
+  - id: pr_thread_reply_waste
+    event: PreToolUse
+    matcher: Bash
+    intent: >
+      Principle 2 backstop (architecture/agent_pr_discipline_2026_05_09.md § Principle 2).
+      ADVISORY on commands that post thread reply text to PR review threads: gh pr comment,
+      GraphQL addPullRequestReviewThreadReply / addPullRequestReviewComment, REST
+      pulls/.../comments POST, issues/.../comments POST. The fix-commit IS the response;
+      agents must not post reply paragraphs on bot threads. Allow-pass: resolveReviewThread
+      mutation (correct usage), gh pr review (formal submission), GET list calls.
+      Bypass: ZEUS_PR_REPLY_ALLOW=1 for DEFER one-liners ('Tracked in #N') and
+      operator-directed clarifications.
+    blocked_when: []
+    severity: ADVISORY
+    bypass_env: ZEUS_PR_REPLY_ALLOW
+    sunset_date: 2026-08-09
     telemetry:
       ritual_signal_emitted: true
 

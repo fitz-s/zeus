@@ -2042,6 +2042,9 @@ def _route_card_primary_blocker(
 
 
 def _route_card_route_candidates(profile: str, profile_selection: dict[str, Any]) -> list[dict[str, Any]]:
+    details = profile_selection.get("route_candidate_details") or []
+    if details:
+        return [dict(candidate) for candidate in details[:3]]
     candidates = [str(candidate) for candidate in profile_selection.get("candidates") or [] if str(candidate)]
     if not candidates and profile:
         candidates = [profile]

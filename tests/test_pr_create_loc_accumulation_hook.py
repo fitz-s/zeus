@@ -274,3 +274,271 @@ def test_authority_doc_exists() -> None:
     # Sanity: doc references the same constants as the hook
     assert "300" in body, "doc must cite the 300-LOC threshold"
     assert "ZEUS_PR_ALLOW_TINY" in body, "doc must document the bypass env"
+
+
+# ---------------------------------------------------------------------------
+# Four-principle block message — redesign antibodies (2026-05-09)
+# ---------------------------------------------------------------------------
+
+
+def test_block_message_lists_all_four_principles(monkeypatch, capsys) -> None:
+    """Block message must name all four principles by label (P1-P4).
+
+    Redesign requirement: the pr_create gate message surfaces sibling
+    principles P2/P3/P4 so the agent reasons about the full workflow,
+    not just the LOC threshold.
+    """
+    monkeypatch.delenv("ZEUS_PR_ALLOW_TINY", raising=False)
+    monkeypatch.setattr(
+        dispatch,
+        "_agent_authored_loc_in_range",
+        lambda mb, head: (50, 50, 1),
+    )
+    payload = _mk_payload("gh pr create --title test --body test")
+    result = _handler(payload)
+    captured = capsys.readouterr()
+    msg = captured.err
+    assert result == _BLOCK
+
+    # Each principle must appear by name in the message
+    import re
+    for label in ("P2", "P3", "P4"):
+        assert label in msg, (
+            f"Block message must reference principle {label!r}; "
+            f"message excerpt:\n{msg[:1200]}"
+        )
+    # Principle 1 is the gate itself — the message must name Principle 1 as well
+    assert "Principle 1" in msg or "P1" in msg, (
+        f"Block message must reference Principle 1 framing; "
+        f"message excerpt:\n{msg[:1200]}"
+    )
+
+
+def test_block_message_does_not_reference_deleted_lifecycle_doc(monkeypatch, capsys) -> None:
+    """Block message must NOT reference pr_lifecycle_2026_05_09.md (deleted doc).
+
+    That file has been removed; any surviving reference is a dead citation.
+    """
+    monkeypatch.delenv("ZEUS_PR_ALLOW_TINY", raising=False)
+    monkeypatch.setattr(
+        dispatch,
+        "_agent_authored_loc_in_range",
+        lambda mb, head: (50, 50, 1),
+    )
+    payload = _mk_payload("gh pr create --title test --body test")
+    _handler(payload)
+    captured = capsys.readouterr()
+    msg = captured.err
+    assert "pr_lifecycle_2026_05_09" not in msg, (
+        "Block message references the deleted pr_lifecycle doc; remove the reference.\n"
+        f"message excerpt:\n{msg[:1200]}"
+    )
+
+
+def test_block_message_lists_four_memory_entry_filenames(monkeypatch, capsys) -> None:
+    """Block message must list all four memory entry filenames.
+
+    Redesign requirement: the memory section replaces the single
+    'feedback_pr_300_loc_threshold_with_education.md' reference with
+    all four entries so a fresh-session agent knows the full memory surface.
+    """
+    monkeypatch.delenv("ZEUS_PR_ALLOW_TINY", raising=False)
+    monkeypatch.setattr(
+        dispatch,
+        "_agent_authored_loc_in_range",
+        lambda mb, head: (50, 50, 1),
+    )
+    payload = _mk_payload("gh pr create --title test --body test")
+    _handler(payload)
+    captured = capsys.readouterr()
+    msg = captured.err
+
+    expected_entries = [
+        "feedback_pr_300_loc_threshold_with_education.md",
+        "feedback_pr_unit_of_work_not_loc.md",
+        "feedback_pr_bot_comments_are_bug_reports.md",
+        "feedback_pr_original_executor_continuity.md",
+    ]
+    for entry in expected_entries:
+        assert entry in msg, (
+            f"Block message missing memory entry {entry!r}.\n"
+            f"message excerpt:\n{msg[:1500]}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Finding 1 (Codex P2): trailer-only author detection
+# ---------------------------------------------------------------------------
+
+
+def test_author_detection_ignores_quoted_trailer_in_body() -> None:
+    """An operator commit that QUOTES the trailer in body text must not be
+    classified as agent contribution.
+
+    Regression anchor for Codex P2 finding: substring match anywhere in the
+    commit body misclassified operator discussion commits as agent commits.
+    The fix restricts the match to the trailer section only (last paragraph).
+    """
+    src = (HOOK_DIR / "dispatch.py").read_text()
+    # Locate _agent_authored_loc_in_range body
+    start = src.index("def _agent_authored_loc_in_range")
+    end = src.index("\ndef ", start + 1)
+    body = src[start:end]
+    # Must NOT use a bare substring match across the entire commit body
+    assert '"Co-Authored-By: Claude" in body' not in body, (
+        "Bare substring match across full commit body still present — "
+        "fix must restrict to trailer section only."
+    )
+    # Must use paragraph/trailer-block logic
+    assert "paragraphs" in body or "trailer" in body.lower(), (
+        "author detection does not appear to use trailer-block logic; "
+        "expected 'paragraphs' or 'trailer' in the handler."
+    )
+
+
+def test_author_detection_trailer_classification() -> None:
+    """Directly test the paragraph-split trailer logic embedded in the source.
+
+    Simulates what _agent_authored_loc_in_range does per commit body:
+    - body with Co-Authored-By only in middle paragraph → NOT agent
+    - body with Co-Authored-By in last paragraph (trailer) → IS agent
+    """
+
+    def _is_agent_commit(body: str) -> bool:
+        """Replicate the trailer-block classification from dispatch.py."""
+        paragraphs = [p.strip() for p in body.split("\n\n") if p.strip()]
+        trailer_block = paragraphs[-1] if paragraphs else ""
+        trailer_lines = [ln.strip() for ln in trailer_block.splitlines()]
+        return any(
+            ln.startswith("Co-Authored-By:") and "Claude" in ln
+            for ln in trailer_lines
+        )
+
+    # Operator commit quoting the trailer in discussion text — must NOT match
+    operator_body_with_quote = (
+        "Reverts the bad agent commit.\n\n"
+        "Do not use Co-Authored-By: Claude style trailers in operator commits.\n\n"
+        "Signed-off-by: Fitz <fitz@example.com>"
+    )
+    assert not _is_agent_commit(operator_body_with_quote), (
+        "Operator commit quoting 'Co-Authored-By: Claude' in body text "
+        "was misclassified as agent contribution."
+    )
+
+    # Genuine agent commit with trailer in last paragraph — must match
+    agent_body = (
+        "fix(hooks): improve regex for pr gate\n\n"
+        "Extends the alternation to catch inline VAR=val form.\n\n"
+        "Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
+    )
+    assert _is_agent_commit(agent_body), (
+        "Genuine agent commit with Co-Authored-By trailer not recognised."
+    )
+
+    # Agent commit where Co-Authored-By is in a middle paragraph, not trailer — must NOT match
+    agent_body_mid = (
+        "Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>\n\n"
+        "Some follow-up note without a trailer."
+    )
+    assert not _is_agent_commit(agent_body_mid), (
+        "Co-Authored-By in a non-trailer (middle) paragraph must not match."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Finding 6 (Copilot): inline VAR=val regex coverage
+# ---------------------------------------------------------------------------
+
+
+def test_regex_matches_inline_env_assignment() -> None:
+    """ZEUS_PR_ALLOW_TINY=1 gh pr create must be matched by the command regex.
+
+    Regression anchor for Copilot finding 6: the original regex only caught
+    `env VAR=val gh pr create` (with the `env` prefix). The more common inline
+    form `VAR=val gh pr create` was silently skipped, meaning the bypass
+    itself could evade the hook's command detection.
+    """
+    import re
+
+    pattern = re.compile(
+        r"^\s*(?:(?:env\s+)?[A-Z_][A-Z0-9_]*=\S+\s+)*gh\s+pr\s+(create|ready)\b"
+    )
+
+    # Inline assignment — must match
+    assert pattern.search("ZEUS_PR_ALLOW_TINY=1 gh pr create --title foo"), (
+        "Inline VAR=val form not matched by regex."
+    )
+    # env-prefix form — must still match
+    assert pattern.search("env ZEUS_PR_ALLOW_TINY=1 gh pr create --title foo"), (
+        "env VAR=val form no longer matched after regex change."
+    )
+    # Multiple inline vars — must match
+    assert pattern.search("A=1 B=2 gh pr create --title foo"), (
+        "Multiple inline VAR=val pairs not matched."
+    )
+    # Plain gh pr create — must match
+    assert pattern.search("gh pr create --title foo"), (
+        "Plain gh pr create without env prefix no longer matched."
+    )
+    # gh pr ready — must match
+    assert pattern.search("ZEUS_PR_ALLOW_TINY=1 gh pr ready 123"), (
+        "gh pr ready with inline var not matched."
+    )
+    # heredoc body — must NOT match
+    assert not pattern.search("cat <<EOF\ngh pr create\nEOF"), (
+        "heredoc body falsely matched."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Codex P2 fix (2026-05-09): inline bypass assignment must degrade to advisory
+# ---------------------------------------------------------------------------
+
+
+def test_inline_env_bypass_degrades_to_advisory(monkeypatch) -> None:
+    """ZEUS_PR_ALLOW_TINY=1 gh pr create must degrade to advisory, not block.
+
+    Regression anchor for Codex P2 finding: when the bypass variable is
+    supplied as an inline shell assignment (`ZEUS_PR_ALLOW_TINY=1 gh pr create`)
+    rather than a real env export, the hook process does NOT inherit the variable
+    via os.environ. The handler must parse inline assignments from the command
+    string as a secondary bypass source so the agent's documented bypass path
+    actually works.
+    """
+    monkeypatch.delenv("ZEUS_PR_ALLOW_TINY", raising=False)  # no process-env bypass
+    monkeypatch.setattr(
+        dispatch,
+        "_agent_authored_loc_in_range",
+        lambda mb, head: (50, 50, 1),  # below threshold — would block without bypass
+    )
+    # Inline assignment form — bypass must be detected from the command string
+    payload = _mk_payload("ZEUS_PR_ALLOW_TINY=1 gh pr create --title test")
+    result = _handler(payload)
+    assert result is not None, (
+        "Inline ZEUS_PR_ALLOW_TINY=1 must degrade to advisory, not return None"
+    )
+    assert result != _BLOCK, (
+        "Inline ZEUS_PR_ALLOW_TINY=1 must not return BLOCK sentinel — "
+        "handler must detect the bypass from the command string, not only os.environ"
+    )
+    assert "ADVISORY" in result, f"Bypass result must be advisory text; got: {result!r}"
+
+
+def test_env_prefix_bypass_degrades_to_advisory(monkeypatch) -> None:
+    """env ZEUS_PR_ALLOW_TINY=1 gh pr create must also degrade to advisory.
+
+    Covers the `env VAR=val cmd` shell form in addition to the bare inline form.
+    """
+    monkeypatch.delenv("ZEUS_PR_ALLOW_TINY", raising=False)
+    monkeypatch.setattr(
+        dispatch,
+        "_agent_authored_loc_in_range",
+        lambda mb, head: (50, 50, 1),
+    )
+    payload = _mk_payload("env ZEUS_PR_ALLOW_TINY=1 gh pr create --title test")
+    result = _handler(payload)
+    assert result is not None
+    assert result != _BLOCK, (
+        "env ZEUS_PR_ALLOW_TINY=1 form must not block — inline env parse must catch it"
+    )
+    assert "ADVISORY" in result

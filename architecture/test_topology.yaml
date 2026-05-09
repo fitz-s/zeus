@@ -239,6 +239,8 @@ test_trust_policy:
     tests/test_forecast_source_registry.py: {created: "2026-04-27", last_used: "2026-04-29"}
     tests/test_tigge_ingest.py: {created: "2026-04-27", last_used: "2026-04-27"}
     tests/test_pscb_hook.py: {created: "2026-04-25", last_used: "2026-04-25"}
+    # PR #106 followup — pr_create_loc_accumulation hook antibody tests.
+    tests/test_pr_create_loc_accumulation_hook.py: {created: "2026-05-09", last_used: "2026-05-09"}
     tests/test_no_synthetic_provenance_marker.py: {created: "2026-04-28", last_used: "2026-04-28"}
     tests/test_settlements_physical_quantity_invariant.py: {created: "2026-04-28", last_used: "2026-04-28"}
     tests/test_settlement_commands_schema.py: {created: "2026-05-04", last_used: "2026-05-04"}
@@ -558,6 +560,7 @@ categories:
     - tests/test_zpkt.py
     - tests/test_z0_plan_lock.py
     - tests/test_pscb_hook.py
+    - tests/test_pr_create_loc_accumulation_hook.py
 
   # Midstream guardian panel — the 15 test files whose invariant-protection
   # role depends on current test-currency (dated provenance header + recent

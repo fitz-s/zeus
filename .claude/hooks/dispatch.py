@@ -268,7 +268,19 @@ def _agent_authored_loc_in_range(merge_base: str, head: str) -> tuple[int, int, 
             sha = sha.strip()
             if not sha:
                 continue
-            if "Co-Authored-By: Claude" in body:
+            # Restrict match to the actual trailer section (last paragraph).
+            # git-interpret-trailers treats the last blank-line-separated
+            # paragraph as the trailer block (RFC 5322 / git convention).
+            # Searching the full body misclassifies operator commits that
+            # quote "Co-Authored-By: Claude" in discussion text.
+            paragraphs = [p.strip() for p in body.split("\n\n") if p.strip()]
+            trailer_block = paragraphs[-1] if paragraphs else ""
+            trailer_lines = [ln.strip() for ln in trailer_block.splitlines()]
+            is_agent = any(
+                ln.startswith("Co-Authored-By:") and "Claude" in ln
+                for ln in trailer_lines
+            )
+            if is_agent:
                 agent_shas.append(sha)
             else:
                 carry_shas.append(sha)
@@ -312,11 +324,33 @@ def _run_advisory_check_pr_create_loc_accumulation(
         return None
 
     import re
-    # Anchored to command head: optional leading env VAR=val pairs, then gh pr create|ready
-    if not re.search(r"^\s*(?:env\s+\S+\s+)*gh\s+pr\s+(create|ready)\b", command):
+    # Anchored to command head: optional leading inline VAR=val or `env VAR=val` pairs,
+    # then gh pr create|ready. Catches both `env VAR=val gh pr create` AND the more
+    # common inline form `VAR=val gh pr create`.
+    if not re.search(
+        r"^\s*(?:(?:env\s+)?[A-Z_][A-Z0-9_]*=\S+\s+)*gh\s+pr\s+(create|ready)\b",
+        command,
+    ):
         return None
 
-    bypass_active = os.environ.get("ZEUS_PR_ALLOW_TINY", "").strip() == "1"
+    # Check bypass from both process env AND inline shell assignment prefix.
+    # An inline `ZEUS_PR_ALLOW_TINY=1 gh pr create` does NOT export the variable
+    # into the hook process environment, so os.environ alone misses it. Parse the
+    # leading VAR=val pairs from the command string as a secondary source.
+    inline_env: dict[str, str] = {}
+    inline_m = re.match(
+        r"^\s*(?:env\s+)?((?:[A-Z_][A-Z0-9_]*=\S+\s+)+)",
+        command,
+    )
+    if inline_m:
+        for pair in inline_m.group(1).split():
+            if "=" in pair:
+                k, _, v = pair.partition("=")
+                inline_env[k] = v
+    bypass_active = (
+        os.environ.get("ZEUS_PR_ALLOW_TINY", "").strip() == "1"
+        or inline_env.get("ZEUS_PR_ALLOW_TINY", "").strip() == "1"
+    )
 
     # Resolve the target branch from the (possibly already-open) PR view, falling
     # back to origin/main. Using merge-base anchors the comparison correctly even
@@ -380,44 +414,35 @@ def _run_advisory_check_pr_create_loc_accumulation(
     block_msg = (
         f"BLOCKED: `gh pr create` declined — self-authored accumulation below 300 LOC.\n"
         f"\n"
-        f"Why this exists (please reason through it; the rule is downstream of these facts):\n"
+        f"Three sibling principles govern the full PR workflow (authority: architecture/agent_pr_discipline_2026_05_09.md):\n"
+        f"  P2: Bot comments are bug reports; the fix-commit IS the response — no thread replies.\n"
+        f"  P3: Original-executor continuity — whoever wrote the commits handles the review loop.\n"
+        f"  P4: Teach reasoning, not rules — hooks are backstops; the authority doc is the spec.\n"
         f"\n"
-        f"1. Each `gh pr create` and each `git push` to an open PR triggers paid auto-reviewers\n"
-        f"   (Copilot + Codex) within 5-8 min. The cost is paid per fire, regardless of diff size —\n"
-        f"   a 50-LOC PR pays the same per-event cost as a 1000-LOC PR.\n"
-        f"\n"
-        f"2. The reviewers run on a senior model tier. Spending senior cognition on a small diff is\n"
-        f"   the same waste shape as spending opus on file-location grep work — high-tier capacity\n"
-        f"   is fungible, and the marginal value of a senior pass on a tiny diff is small.\n"
-        f"\n"
-        f"3. Therefore: bundling related work into one PR is dominant. Ten 50-LOC PRs cost ~10x one\n"
-        f"   500-LOC PR for the same total review work.\n"
-        f"\n"
-        f"4. The 300 LOC line is calibrated against the auto-reviewer cost curve. Below it the marginal\n"
-        f"   benefit of an extra reviewer pass is consistently dominated by the marginal benefit of\n"
-        f"   waiting and bundling.\n"
+        f"Principle 1 (this gate) — cost economics (reason through it; the rule is downstream):\n"
+        f"  - Each `gh pr create` / push to an open PR triggers paid auto-reviewers (Copilot + Codex)\n"
+        f"    within 5-8 min. Cost is per-fire regardless of diff size: 50-LOC pays the same as 1000-LOC.\n"
+        f"  - Reviewers run on a senior model tier; spending senior cognition on tiny diffs is the same\n"
+        f"    waste shape as spending opus on file-location grep work.\n"
+        f"  - Bundling is dominant: ten 50-LOC PRs cost ~10x one 500-LOC PR for identical review work.\n"
+        f"  - 300 LOC calibrated against observed bot-comment signal: PRs <300 LOC averaged <0.3\n"
+        f"    actionable findings per fire; PRs >=300 LOC averaged >=2.\n"
         f"\n"
         f"Current state (anchor your decision in this):\n"
         f"{state_block}"
         f"\n"
         f"Decision tree:\n"
-        f"  A. More related work to do? -> Continue committing on this branch until self-authored LOC\n"
-        f"     reaches 300; open one PR with a multi-section description.\n"
-        f"  B. Genuinely isolated one-off? -> Audit the assumption (most one-offs have neighbors:\n"
-        f"     same module's other latent bugs, the test file's gaps, the doc that should also update).\n"
-        f"     If still isolated AND urgent, set ZEUS_PR_ALLOW_TINY=1 and JUSTIFY in the PR body.\n"
-        f"  C. Multiple PRs queued in this session? -> STOP. Combine. Each PR-open is a fresh fire.\n"
-        f"     Stacked branches with one PR at the tip works too.\n"
-        f"  D. Operator told you to ship NOW? -> Use the bypass; cite the operator directive in the\n"
-        f"     PR body so reviewers understand why the rule was suspended.\n"
-        f"\n"
-        f"Reasoning failure mode this prevents:\n"
-        f"  Agent fixes 50-LOC bug -> opens PR (cost X). Notices related 50-LOC issue -> opens another\n"
-        f"  PR (cost X). Repeat * N. Total: N * X. Bundled: ~X. Opening N PRs is not 'being responsive' —\n"
-        f"  it's burning N-1 reviewer fires that produced no marginal signal.\n"
+        f"  A. More related work to do? -> Continue committing on this branch; open one PR when ready.\n"
+        f"  B. Genuinely isolated one-off? -> Audit the assumption (same module's other latent bugs,\n"
+        f"     test file gaps, doc that should also update). If still isolated AND urgent, set\n"
+        f"     ZEUS_PR_ALLOW_TINY=1 and JUSTIFY in the PR body.\n"
+        f"  C. Multiple PRs queued? -> STOP. Combine. Each PR-open is a fresh fire.\n"
+        f"  D. Operator said ship NOW? -> Use the bypass; cite the directive in the PR body.\n"
         f"\n"
         f"Authority: architecture/agent_pr_discipline_2026_05_09.md\n"
-        f"Memory:    feedback_pr_300_loc_threshold_with_education.md\n"
+        f"Session memory (operator side): feedback_pr_300_loc_threshold_with_education.md,\n"
+        f"  feedback_pr_unit_of_work_not_loc.md, feedback_pr_bot_comments_are_bug_reports.md,\n"
+        f"  feedback_pr_original_executor_continuity.md\n"
         f"\n"
         f"Bypass: ZEUS_PR_ALLOW_TINY=1 (degrades to advisory; document reason in PR body)."
     )
@@ -575,8 +600,19 @@ def _run_advisory_check_pre_merge_comment_check(
 
     if block_reasons:
         block_text = (
-            f"BLOCKED: gh pr merge {pr_num} — merge gate failed:\n"
+            f"BLOCKED: gh pr merge {pr_num} — this fires when an agent skipped Principle 2\n"
+            f"  (architecture/agent_pr_discipline_2026_05_09.md § Principle 2).\n"
+            f"\n"
+            f"Principle 2: bot comments are bug reports; the fix-commit IS the response.\n"
+            f"  Hard rule: do NOT post reply text on bot threads. Classify each thread\n"
+            f"  (BUG/STYLE_NIT/MISUNDERSTANDING/NOISE/OUT_OF_SCOPE), apply fixes as commits,\n"
+            f"  resolve threads via resolveReviewThread mutation. The fix-commit IS the response.\n"
+            f"\n"
+            f"Unresolved threads blocking merge:\n"
             + "\n".join(f"  - {r}" for r in block_reasons)
+            + f"\n\nFor each thread: read -> classify -> fix (commit) or dismiss -> resolve via GraphQL:\n"
+            f"  gh api graphql -f query='mutation{{resolveReviewThread(input:{{threadId:\"...\"}}){{thread{{isResolved}}}}}}'\n"
+            f"Then push and let bots re-fire. Merge only when unresolved count = 0.\n"
         )
         if advisory_notes:
             block_text += "\nAdvisory (non-blocking):\n" + "\n".join(
@@ -584,15 +620,125 @@ def _run_advisory_check_pre_merge_comment_check(
             )
         if bypass_active:
             return (
-                f"WARNING (ZEUS_PR_MERGE_FORCE bypass active): merge gate would block:\n"
+                f"WARNING (ZEUS_PR_MERGE_FORCE bypass active — Principle 2 skipped):\n"
+                f"  architecture/agent_pr_discipline_2026_05_09.md § Principle 2 requires\n"
+                f"  every thread to be processed before merge. Bypass accepted; you MUST\n"
+                f"  document per-thread disposition in the PR body:\n"
+                f"    APPLIED in commit <sha> / DISMISSED <reason> / DEFERRED to issue #N\n"
+                f"  Threads that would have blocked:\n"
                 + "\n".join(f"  - {r}" for r in block_reasons)
-                + "\nMerge allowed via ZEUS_PR_MERGE_FORCE=1."
+                + f"\nMerge allowed via ZEUS_PR_MERGE_FORCE=1."
             )
         print(block_text, file=sys.stderr)
         return _BLOCK_SENTINEL
 
     # Only advisory notes, no block reasons
     return "ADVISORY: " + "; ".join(advisory_notes)
+
+
+def _run_advisory_check_pr_thread_reply_waste(
+    payload: dict[str, Any],
+) -> str | None:
+    """ADVISORY when command looks like posting a thread reply on a PR review.
+
+    Principle 2 backstop: the fix-commit IS the response. Agents must not post
+    reply text on bot review threads. This hook fires when a command matches
+    a known reply-posting surface and emits an educational message pointing back
+    to Principle 2 of architecture/agent_pr_discipline_2026_05_09.md.
+
+    Severity: ADVISORY (no new blockers per redesign constraint).
+    Bypass: ZEUS_PR_REPLY_ALLOW=1 for DEFER one-liners and operator-directed
+    clarifications.
+
+    Detection surfaces:
+      - gh pr comment <N>                                 (top-level PR comment)
+      - gh api graphql ... addPullRequestReviewThreadReply
+      - gh api graphql ... addPullRequestReviewComment   (older mutation form)
+      - gh api repos/.../pulls/.../comments  with POST/body flag
+      - gh api repos/.../issues/.../comments with POST/body flag
+
+    Allow-pass (must NOT trigger):
+      - gh api repos/.../pulls/.../comments  GET (list — no POST flag)
+      - gh api graphql ... resolveReviewThread           (correct usage)
+      - gh pr review                                     (formal review submission)
+    """
+    command = _command_from_payload(payload)
+    if not command:
+        return None
+
+    import re
+
+    # --- Detection patterns ---------------------------------------------------
+
+    # 1. gh pr comment <number>
+    if re.search(r"(?:^|\s)gh\s+pr\s+comment\s+\d+", command):
+        matched = True
+    # 2. GraphQL addPullRequestReviewThreadReply
+    elif "addPullRequestReviewThreadReply" in command:
+        matched = True
+    # 3. GraphQL addPullRequestReviewComment (older form)
+    elif "addPullRequestReviewComment" in command:
+        matched = True
+    # 4. REST pulls/.../comments with POST or body flag
+    elif re.search(r"repos/[^/]+/[^/]+/pulls/\d+/comments", command) and re.search(
+        r"-X\s+POST|--method\s+POST|-[fF]\s+body=|-[fF]\s*body\s*=", command
+    ):
+        matched = True
+    # 5. REST issues/.../comments with POST or body flag (PR-as-issue surface)
+    elif re.search(r"repos/[^/]+/[^/]+/issues/\d+/comments", command) and re.search(
+        r"-X\s+POST|--method\s+POST|-[fF]\s+body=|-[fF]\s*body\s*=", command
+    ):
+        matched = True
+    else:
+        matched = False
+
+    # --- Allow-pass overrides -------------------------------------------------
+    if matched:
+        # resolveReviewThread is correct usage — always allow
+        if "resolveReviewThread" in command:
+            return None
+        # gh pr review is a formal review submission, not a thread reply
+        if re.search(r"(?:^|\s)gh\s+pr\s+review\b", command):
+            return None
+
+    if not matched:
+        return None
+
+    # --- Bypass check ---------------------------------------------------------
+    bypass_active = os.environ.get("ZEUS_PR_REPLY_ALLOW", "").strip() == "1"
+
+    advisory_msg = (
+        "ADVISORY (Principle 2 — architecture/agent_pr_discipline_2026_05_09.md):\n"
+        "  This command looks like posting a thread reply on a PR review.\n"
+        "\n"
+        "  Principle 2 hard rule: the fix-commit IS the response.\n"
+        "  Do NOT post reply text on bot review threads.\n"
+        "  The bot doesn't read replies; the human reads the fix-commit via the\n"
+        "  resolved thread. Reply tokens are pure waste.\n"
+        "\n"
+        "  Correct workflow:\n"
+        "    1. Classify the thread (BUG/STYLE_NIT/MISUNDERSTANDING/NOISE/OUT_OF_SCOPE)\n"
+        "    2. BUG/STYLE_NIT -> apply the fix as a commit; then resolve the thread:\n"
+        "         gh api graphql -f query='mutation{resolveReviewThread(input:{threadId:\"...\"}){thread{isResolved}}}'\n"
+        "    3. MISUNDERSTANDING/NOISE -> resolve directly (no commit, no reply)\n"
+        "    4. OUT_OF_SCOPE -> one-line reply ONLY: 'Tracked in #N' then resolve\n"
+        "\n"
+        "  If this is the DEFER one-liner ('Tracked in #N') or an operator-directed\n"
+        "  clarification, set ZEUS_PR_REPLY_ALLOW=1 to acknowledge and proceed.\n"
+        "\n"
+        "  Bypass: ZEUS_PR_REPLY_ALLOW=1"
+    )
+
+    if bypass_active:
+        return (
+            "ADVISORY (ZEUS_PR_REPLY_ALLOW bypass active — Principle 2):\n"
+            "  Proceeding with thread reply. Permitted uses: DEFER one-liner\n"
+            "  ('Tracked in #N') or operator-directed clarification. One line only;\n"
+            "  never quote the bot body or paraphrase the fix.\n"
+            "  Reference: architecture/agent_pr_discipline_2026_05_09.md § Principle 2"
+        )
+
+    return advisory_msg
 
 
 def _run_advisory_check_pr_open_monitor_arm(
@@ -1007,6 +1153,7 @@ _ADVISORY_HANDLERS: dict[str, Any] = {
     "pre_checkout_uncommitted_overlap": _run_advisory_check_pre_checkout_uncommitted_overlap,
     "pr_create_loc_accumulation": _run_advisory_check_pr_create_loc_accumulation,
     "pre_merge_comment_check": _run_advisory_check_pre_merge_comment_check,
+    "pr_thread_reply_waste": _run_advisory_check_pr_thread_reply_waste,
     "pr_open_monitor_arm": _run_advisory_check_pr_open_monitor_arm,
     "phase_close_commit_required": _run_advisory_check_phase_close_commit_required,
     "pre_merge_contamination": _run_advisory_check_pre_merge_contamination,

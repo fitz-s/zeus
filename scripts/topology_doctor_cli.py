@@ -55,6 +55,7 @@ def build_parser(description: str | None = None) -> argparse.ArgumentParser:
         help="Map-maintenance severity mode",
     )
     parser.add_argument("--navigation", action="store_true", help="Run default navigation health and task digest")
+    parser.add_argument("--preflight", action="store_true", help="Alias for --navigation --route-card-only; emit compact agent pre-edit route card")
     parser.add_argument("--route-card-only", action="store_true", help="With --navigation, emit only the first-screen route card")
     parser.add_argument("--strict-health", action="store_true", help="Make --navigation fail on any repo-health error")
     parser.add_argument(
@@ -209,7 +210,10 @@ def _print_route_card(card: dict[str, Any]) -> None:
         print("- route_candidates:")
         for candidate in card["route_candidates"]:
             selected = " selected" if candidate.get("selected") else ""
-            print(f"  - {candidate.get('rank')}: {candidate.get('profile')}{selected}")
+            evidence = candidate.get("evidence_class") or "evidence"
+            score = candidate.get("score")
+            score_text = f" score={score:.2f}" if isinstance(score, (int, float)) else ""
+            print(f"  - {candidate.get('rank')}: {candidate.get('profile')}{selected} [{evidence}{score_text}]")
     if card.get("mandatory_companion_files"):
         print("- mandatory_companion_files:")
         for companion in card["mandatory_companion_files"]:
@@ -359,6 +363,9 @@ def run_flag_command(api: Any, args: argparse.Namespace) -> int | None:
         result = api.run_code_review_graph_status(args.changed_files)
         api._print_strict(result, as_json=args.json, summary_only=args.summary_only, issue_schema_version=args.issue_schema_version)
         return 0 if result.ok else 1
+    if args.preflight:
+        args.navigation = True
+        args.route_card_only = True
     if args.navigation:
         navigation_kwargs = {"strict_health": args.strict_health}
         for field in (
