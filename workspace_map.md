@@ -75,6 +75,7 @@ Prefer these over prose when they exist:
 | `architecture/fatal_misreads.yaml` | Machine-readable semantic shortcut antibodies |
 | `architecture/city_truth_contract.yaml` | Stable city/source/date truth contract schema; not a current truth table |
 | `architecture/code_review_graph_protocol.yaml` | Two-stage Code Review Graph use protocol; graph remains derived context |
+| `architecture/agent_pr_discipline_2026_05_09.md` | Agent PR discipline: 300-LOC threshold, auto-reviewer cost economics, author detection, bypass protocol |
 
 ## Do not default-read
 
