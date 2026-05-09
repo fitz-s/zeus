@@ -53,8 +53,11 @@ is starving. The cost is implicit but real.
   comments in the 2026-04 / 2026-05 cohort: PRs ≥ 300 LOC averaged
   ≥ 2 actionable findings per fire; PRs < 300 LOC averaged < 0.3.
 
-The number is empirical, not arbitrary, and is held in registry.yaml as
-the single source of truth.
+The number is empirical, not arbitrary. The integer threshold is held in
+`.claude/hooks/registry.yaml` as the live source of truth for the hook
+runtime; this document is the canonical source for the reasoning and
+decision tree (and references that integer, but does not restate it as
+a separate authority).
 
 ## Decision tree for a candidate PR open
 
@@ -100,8 +103,13 @@ and get counted in the PR diff. They are not the agent's contribution
 and should not count toward the 300 LOC threshold.
 
 Heuristic the hook uses:
-- a commit's body contains `Co-Authored-By: Claude` → agent contribution
+- a commit's **trailer block** (last paragraph of the message body, per
+  git-interpret-trailers convention) contains a line starting with
+  `Co-Authored-By:` that also includes `Claude` → agent contribution
 - otherwise → carry-over (operator's local work the branch picked up)
+
+The match is restricted to the trailer block to avoid misclassifying
+operator commits that quote the trailer in discussion text.
 
 The hook reports both `total LOC since base` (what reviewers see) and
 `self-authored LOC` (what counts toward the threshold). Block decision
@@ -150,8 +158,12 @@ re-evaluates rather than just reads-the-error-and-bypasses.
 ## Updating this document
 
 If the cost economics change (e.g. bot pricing model changes, threshold
-calibration shifts), update this file AND `registry.yaml` AND the hook
-source AND `feedback_pr_300_loc_threshold_with_education.md` together.
-The doc is the canonical source; the hook source must reference it; the
-memory entry must summarize it for future agents that read memory before
-hitting the hook.
+calibration shifts), update this file AND `.claude/hooks/registry.yaml`
+AND the hook source together.
+This doc is canonical for reasoning and decision tree.
+`.claude/hooks/registry.yaml` is canonical for the integer threshold
+value (the hook reads it at runtime).
+Both must stay consistent: a drift between them is a bug.
+The operator session memory entry `feedback_pr_300_loc_threshold_with_education.md`
+(not a repo file) should also be updated so future agents reading memory
+before hitting the hook see current values.
