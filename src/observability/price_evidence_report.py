@@ -17,18 +17,24 @@ _FULL_LINKAGE_SOURCES = (
 _MARKET_PRICE_HISTORY_REQUIRED_COLUMNS = frozenset({
     "market_price_linkage",
     "source",
+    "token_id",
     "best_bid",
     "best_ask",
     "raw_orderbook_hash",
     "snapshot_id",
     "condition_id",
 })
-_SNAPSHOT_REQUIRED_COLUMNS = frozenset({"snapshot_id"})
+_SNAPSHOT_REQUIRED_COLUMNS = frozenset({
+    "snapshot_id",
+    "condition_id",
+    "selected_outcome_token_id",
+})
 _SNAPSHOT_ORDERBOOK_COLUMNS = frozenset({
     "orderbook_top_bid",
     "orderbook_top_ask",
     "raw_orderbook_hash",
 })
+PRICE_EVIDENCE_RECENT_ROW_LIMIT = 10_000
 
 
 def _empty_report(status: str, *, source_errors: list[dict[str, Any]] | None = None) -> dict[str, Any]:
@@ -49,9 +55,32 @@ def _empty_report(status: str, *, source_errors: list[dict[str, Any]] | None = N
             "full_linkage_rows": {"row_count": 0, "token_count": 0, "source_counts": {}},
             "executable_snapshot_backed": {"row_count": 0, "token_count": 0, "source_counts": {}},
         },
+        "scan": {
+            "market_price_history": {
+                "strategy": "latest_rowid_window",
+                "row_limit": PRICE_EVIDENCE_RECENT_ROW_LIMIT,
+                "max_rowid": None,
+                "start_rowid": None,
+            },
+            "executable_market_snapshots": {
+                "strategy": "latest_rowid_window",
+                "row_limit": PRICE_EVIDENCE_RECENT_ROW_LIMIT,
+                "max_rowid": None,
+                "start_rowid": None,
+            },
+        },
         "blockers": [],
         "source_errors": source_errors or [],
     }
+
+
+def build_price_evidence_error_report(source: str, error: str) -> dict[str, Any]:
+    report = _empty_report(
+        "query_error",
+        source_errors=[{"source": source, "error": error}],
+    )
+    report["error"] = error
+    return report
 
 
 def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
@@ -71,6 +100,28 @@ def _count(conn: sqlite3.Connection, table: str, where_sql: str | None = None) -
     if where_sql:
         query += f" WHERE {where_sql}"
     return int(conn.execute(query).fetchone()[0] or 0)
+
+
+def _rowid_high_water(conn: sqlite3.Connection, table: str) -> int:
+    row = conn.execute(f"SELECT MAX(rowid) FROM {table}").fetchone()
+    return max(0, int(row[0])) if row and row[0] is not None else 0
+
+
+def _window_start_rowid(max_rowid: int) -> int | None:
+    if max_rowid <= 0:
+        return None
+    return max(1, max_rowid - int(PRICE_EVIDENCE_RECENT_ROW_LIMIT) + 1)
+
+
+def _rowid_window_where(alias: str, start_rowid: int | None) -> str | None:
+    if start_rowid is None:
+        return None
+    prefix = f"{alias}." if alias else ""
+    return f"{prefix}rowid >= {int(start_rowid)}"
+
+
+def _and_where(*clauses: str | None) -> str:
+    return " AND ".join(f"({clause})" for clause in clauses if clause)
 
 
 def _distinct_count(conn: sqlite3.Connection, table: str, column: str, where_sql: str | None = None) -> int:
@@ -130,7 +181,18 @@ def _snapshot_backed_where() -> str:
         _full_linkage_where("mph")
         + " AND EXISTS ("
         + "SELECT 1 FROM executable_market_snapshots ems "
-        + "WHERE ems.snapshot_id = mph.snapshot_id)"
+        + "WHERE "
+        + _matching_snapshot_facts_where()
+        + ")"
+    )
+
+
+def _matching_snapshot_facts_where() -> str:
+    return (
+        "ems.snapshot_id = mph.snapshot_id "
+        "AND ems.condition_id = mph.condition_id "
+        "AND ems.selected_outcome_token_id = mph.token_id "
+        "AND ems.raw_orderbook_hash = mph.raw_orderbook_hash"
     )
 
 
@@ -178,13 +240,35 @@ def build_price_evidence_report(conn: sqlite3.Connection | None) -> dict[str, An
     if source_errors:
         return _empty_report("query_error", source_errors=source_errors)
 
+    price_high_water = _rowid_high_water(conn, "market_price_history")
+    price_start_rowid = _window_start_rowid(price_high_water)
+    price_window_where = _rowid_window_where("", price_start_rowid)
+    price_window_where_mph = _rowid_window_where("mph", price_start_rowid)
+    snapshot_high_water = _rowid_high_water(conn, "executable_market_snapshots")
+    snapshot_start_rowid = _window_start_rowid(snapshot_high_water)
+    snapshot_window_where = _rowid_window_where("", snapshot_start_rowid)
+
     counts: dict[str, int | None] = {
-        "market_price_history_rows": _count(conn, "market_price_history"),
-        "token_price_log_rows": _count(conn, "token_price_log") if _table_exists(conn, "token_price_log") else None,
-        "executable_market_snapshots_rows": _count(conn, "executable_market_snapshots"),
+        "market_price_history_rows": price_high_water,
+        "token_price_log_rows": _rowid_high_water(conn, "token_price_log") if _table_exists(conn, "token_price_log") else None,
+        "executable_market_snapshots_rows": snapshot_high_water,
         "executable_orderbook_snapshot_rows": None,
         "invalid_full_linkage_rows": None,
         "full_linkage_without_snapshot_rows": None,
+    }
+    scan = {
+        "market_price_history": {
+            "strategy": "latest_rowid_window",
+            "row_limit": PRICE_EVIDENCE_RECENT_ROW_LIMIT,
+            "max_rowid": price_high_water,
+            "start_rowid": price_start_rowid,
+        },
+        "executable_market_snapshots": {
+            "strategy": "latest_rowid_window",
+            "row_limit": PRICE_EVIDENCE_RECENT_ROW_LIMIT,
+            "max_rowid": snapshot_high_water,
+            "start_rowid": snapshot_start_rowid,
+        },
     }
 
     snapshot_orderbook_columns_missing = sorted(_SNAPSHOT_ORDERBOOK_COLUMNS - snapshot_columns)
@@ -198,32 +282,67 @@ def build_price_evidence_report(conn: sqlite3.Connection | None) -> dict[str, An
         counts["executable_orderbook_snapshot_rows"] = _count(
             conn,
             "executable_market_snapshots",
-            _snapshot_orderbook_where(),
+            _and_where(_snapshot_orderbook_where(), snapshot_window_where),
         )
 
-    price_only_where = "LOWER(COALESCE(market_price_linkage, '')) = 'price_only'"
-    full_linkage_where = _full_linkage_where()
-    snapshot_backed_where = _snapshot_backed_where()
-    raw_full_where = "LOWER(COALESCE(market_price_linkage, '')) = 'full'"
+    price_only_where = _and_where(
+        "LOWER(COALESCE(market_price_linkage, '')) = 'price_only'",
+        price_window_where,
+    )
+    full_linkage_where = _and_where(_full_linkage_where(), price_window_where)
+    snapshot_backed_where = _and_where(_snapshot_backed_where(), price_window_where_mph)
+    raw_full_where = _and_where(
+        "LOWER(COALESCE(market_price_linkage, '')) = 'full'",
+        price_window_where,
+    )
+    full_linkage_without_snapshot_where = _and_where(
+        _full_linkage_where("mph"),
+        price_window_where_mph,
+    )
 
     price_only_count = _count(conn, "market_price_history", price_only_where)
     full_linkage_count = _count(conn, "market_price_history", full_linkage_where)
     raw_full_count = _count(conn, "market_price_history", raw_full_where)
-    executable_snapshot_backed_count = int(
-        conn.execute(
-            f"SELECT COUNT(*) FROM market_price_history mph WHERE {snapshot_backed_where}"
-        ).fetchone()[0]
-        or 0
-    )
-    full_linkage_without_snapshot = int(
-        conn.execute(
-            f"SELECT COUNT(*) FROM market_price_history mph WHERE {_full_linkage_where('mph')} "
-            "AND NOT EXISTS ("
-            "SELECT 1 FROM executable_market_snapshots ems "
-            "WHERE ems.snapshot_id = mph.snapshot_id)"
-        ).fetchone()[0]
-        or 0
-    )
+    if snapshot_orderbook_columns_missing:
+        executable_snapshot_backed_count = 0
+        executable_snapshot_backed_token_count = 0
+        executable_snapshot_backed_source_counts: dict[str, int] = {}
+        full_linkage_without_snapshot: int | None = None
+    else:
+        executable_snapshot_backed_count = int(
+            conn.execute(
+                f"SELECT COUNT(*) FROM market_price_history mph WHERE {snapshot_backed_where}"
+            ).fetchone()[0]
+            or 0
+        )
+        full_linkage_without_snapshot = int(
+            conn.execute(
+                f"SELECT COUNT(*) FROM market_price_history mph WHERE {full_linkage_without_snapshot_where} "
+                "AND NOT EXISTS ("
+                "SELECT 1 FROM executable_market_snapshots ems "
+                "WHERE "
+                f"{_matching_snapshot_facts_where()})"
+            ).fetchone()[0]
+            or 0
+        )
+        executable_snapshot_backed_token_count = int(
+            conn.execute(
+                f"SELECT COUNT(DISTINCT mph.token_id) FROM market_price_history mph WHERE {snapshot_backed_where}"
+            ).fetchone()[0]
+            or 0
+        )
+        executable_snapshot_backed_source_counts = {
+            str(row[0]): int(row[1] or 0)
+            for row in conn.execute(
+                f"""
+                SELECT COALESCE(NULLIF(mph.source, ''), 'unknown') AS source, COUNT(*) AS count
+                  FROM market_price_history mph
+                 WHERE {snapshot_backed_where}
+                 GROUP BY COALESCE(NULLIF(mph.source, ''), 'unknown')
+                 ORDER BY source
+                """
+            ).fetchall()
+        }
     invalid_full_linkage_count = max(0, raw_full_count - full_linkage_count)
     counts["invalid_full_linkage_rows"] = invalid_full_linkage_count
     counts["full_linkage_without_snapshot_rows"] = full_linkage_without_snapshot
@@ -241,31 +360,19 @@ def build_price_evidence_report(conn: sqlite3.Connection | None) -> dict[str, An
         },
         "executable_snapshot_backed": {
             "row_count": executable_snapshot_backed_count,
-            "token_count": int(
-                conn.execute(
-                    f"SELECT COUNT(DISTINCT mph.token_id) FROM market_price_history mph WHERE {snapshot_backed_where}"
-                ).fetchone()[0]
-                or 0
-            ),
-            "source_counts": {
-                str(row[0]): int(row[1] or 0)
-                for row in conn.execute(
-                    f"""
-                    SELECT COALESCE(NULLIF(mph.source, ''), 'unknown') AS source, COUNT(*) AS count
-                      FROM market_price_history mph
-                     WHERE {snapshot_backed_where}
-                     GROUP BY COALESCE(NULLIF(mph.source, ''), 'unknown')
-                     ORDER BY source
-                    """
-                ).fetchall()
-            },
+            "token_count": executable_snapshot_backed_token_count,
+            "source_counts": executable_snapshot_backed_source_counts,
         },
     }
 
     blockers: list[str] = []
-    if counts["market_price_history_rows"] and executable_snapshot_backed_count <= 0:
+    if (
+        not snapshot_orderbook_columns_missing
+        and counts["market_price_history_rows"]
+        and executable_snapshot_backed_count <= 0
+    ):
         blockers.append("no_executable_snapshot_backed_price_rows")
-    if full_linkage_without_snapshot > 0:
+    if full_linkage_without_snapshot is not None and full_linkage_without_snapshot > 0:
         blockers.append("full_linkage_without_executable_snapshot")
     if invalid_full_linkage_count > 0:
         blockers.append("invalid_full_linkage_rows")
@@ -288,6 +395,7 @@ def build_price_evidence_report(conn: sqlite3.Connection | None) -> dict[str, An
         "authority": AUTHORITY,
         "counts": counts,
         "modes": modes,
+        "scan": scan,
         "blockers": blockers,
         "source_errors": source_errors,
     }

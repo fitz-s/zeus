@@ -143,6 +143,7 @@ test_trust_policy:
     tests/test_phase8_shadow_code.py: {created: "2026-04-18", last_used: "2026-04-25"}
     tests/test_phase9c_gate_f_prep.py: {created: "2026-04-19", last_used: "2026-04-29"}
     tests/test_phase10b_dt_seam_cleanup.py: {created: "2026-04-19", last_used: "2026-04-29"}
+    tests/test_price_evidence_report.py: {created: "2026-05-09", last_used: "2026-05-09"}
     tests/test_platt.py: {created: "2026-03-30", last_used: "2026-04-23"}
     tests/test_platt_bootstrap_equivalence.py: {created: "2026-04-29", last_used: "2026-04-30"}
     tests/test_pnl_flow_and_audit.py: {created: "2026-04-28", last_used: "2026-04-29"}
@@ -394,6 +395,7 @@ categories:
     - tests/test_wallet_source.py
     - tests/test_phase10a_hygiene.py
     - tests/test_phase10b_dt_seam_cleanup.py
+    - tests/test_price_evidence_report.py
     - tests/test_b066_quarantine_sentinel_ids.py
     - tests/test_b070_control_overrides_history_v2.py
     - tests/test_metric_identity_spine.py

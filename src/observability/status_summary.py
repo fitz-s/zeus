@@ -22,7 +22,10 @@ from src.control.control_plane import (
 )
 from src.control.gate_decision import reason_refuted
 from src.observability.calibration_serving_status import build_calibration_serving_status
-from src.observability.price_evidence_report import build_price_evidence_report
+from src.observability.price_evidence_report import (
+    build_price_evidence_error_report,
+    build_price_evidence_report,
+)
 from src.state.decision_chain import query_learning_surface_summary, query_lifecycle_funnel_report
 from src.state.db import (
     get_trade_connection_with_world,
@@ -903,16 +906,10 @@ def write_status(cycle_summary: dict = None) -> None:
             "authority": "derived_operator_visibility",
             "error": "lifecycle_funnel_summary_unavailable",
         }
-        status["price_evidence"] = {
-            "schema_version": 1,
-            "status": "query_error",
-            "authority": "derived_operator_visibility",
-            "counts": {},
-            "modes": {},
-            "blockers": [],
-            "source_errors": [{"source": "status_summary", "error": "price_evidence_summary_unavailable"}],
-            "error": "price_evidence_summary_unavailable",
-        }
+        status["price_evidence"] = build_price_evidence_error_report(
+            "status_summary",
+            "price_evidence_summary_unavailable",
+        )
         status["no_trade"] = {"error": "no_trade_summary_unavailable"}
     finally:
         if conn is not None:
