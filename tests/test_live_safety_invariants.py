@@ -2,8 +2,8 @@
 # Lifecycle: created=2026-03-31; last_reviewed=2026-05-05; last_reused=2026-05-05
 # Purpose: Lock live-money safety invariants across fill, exit, chain, and P&L flows.
 # Reuse: Run for execution finality, live exit, chain reconciliation, and safety invariant changes.
-# Last reused/audited: 2026-05-07
-# Authority basis: midstream verdict v2 2026-04-23; object-meaning invariance Wave26 explicit position env authority.
+# Last reused/audited: 2026-05-08
+# Authority basis: midstream verdict v2 2026-04-23; docs/operations/task_2026-05-08_object_invariance_remaining_mainline/PLAN.md
 """Live safety invariant tests: relationship tests, not function tests.
 
 These verify cross-module relationships that prevent ghost positions,
@@ -947,6 +947,183 @@ def test_legacy_polling_failed_trade_status_is_not_fill_progress_authority(tmp_p
     assert "FILL_CONFIRMED" not in event_types
     assert canonical_events == []
     assert calibration_rows == []
+
+
+def test_legacy_polling_failed_without_fill_economics_rolls_back_optimistic_lot(tmp_path):
+    """FAILED trade lifecycle evidence must close prior optimistic exposure."""
+    from src.execution.fill_tracker import check_pending_entries
+    from src.state.db import get_connection, init_schema
+    from src.state.venue_command_repo import append_position_lot, append_trade_fact
+
+    db_path = tmp_path / "zeus.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+    conn.execute(
+        """
+        INSERT INTO venue_commands (
+            command_id, snapshot_id, envelope_id, position_id, decision_id,
+            idempotency_key, intent_kind, market_id, token_id, side, size, price,
+            venue_order_id, state, last_event_id, created_at, updated_at,
+            review_required_reason
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "cmd-failed-no-econ",
+            "snap-failed-no-econ",
+            "env-failed-no-econ",
+            "123456789089",
+            "dec-failed-no-econ",
+            "idem-failed-no-econ",
+            "ENTRY",
+            "condition-failed-no-econ",
+            "tok_yes_failed_no_econ",
+            "BUY",
+            20.0,
+            0.40,
+            "buy_failed_no_econ",
+            "ACKED",
+            None,
+            "2026-04-29T12:00:00+00:00",
+            "2026-04-29T12:00:00+00:00",
+            None,
+        ),
+    )
+    conn.execute(
+        """
+        INSERT INTO trade_decisions (
+            market_id, bin_label, direction, size_usd, price, timestamp,
+            p_raw, p_posterior, edge, ci_lower, ci_upper, kelly_fraction,
+            status, runtime_trade_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "condition-failed-no-econ",
+            "60-65",
+            "buy_yes",
+            20.0,
+            0.40,
+            "2026-04-29T12:00:00+00:00",
+            0.55,
+            0.55,
+            0.15,
+            0.50,
+            0.60,
+            0.0,
+            "pending_tracked",
+            "123456789089",
+        ),
+    )
+    matched_fact_id = append_trade_fact(
+        conn,
+        trade_id="trade-poll-failed-no-econ",
+        venue_order_id="buy_failed_no_econ",
+        command_id="cmd-failed-no-econ",
+        state="MATCHED",
+        filled_size="12.5",
+        fill_price="0.42",
+        source="REST",
+        observed_at="2026-04-29T12:00:30+00:00",
+        raw_payload_hash="0" * 64,
+        raw_payload_json={"trade_status": "MATCHED"},
+    )
+    append_position_lot(
+        conn,
+        position_id=123456789089,
+        state="OPTIMISTIC_EXPOSURE",
+        shares="12.5",
+        entry_price_avg="0.42",
+        source_command_id="cmd-failed-no-econ",
+        source_trade_fact_id=matched_fact_id,
+        captured_at="2026-04-29T12:00:30+00:00",
+        state_changed_at="2026-04-29T12:00:30+00:00",
+        source="REST",
+        observed_at="2026-04-29T12:00:30+00:00",
+        raw_payload_json={"trade_status": "MATCHED"},
+    )
+    conn.commit()
+    conn.close()
+
+    class Deps:
+        @staticmethod
+        def get_connection():
+            return get_connection(db_path)
+
+    pos = _make_position(
+        trade_id="123456789089",
+        state="pending_tracked",
+        entry_order_id="buy_failed_no_econ",
+        entry_fill_verified=False,
+        entered_at="",
+        size_usd=20.0,
+        entry_price=0.40,
+        shares=0.0,
+        cost_basis_usd=0.0,
+        strategy_key="center_buy",
+        strategy="center_buy",
+    )
+    portfolio = _make_portfolio(pos)
+    clob = _make_clob(order_status="MATCHED")
+    clob.get_order_status.return_value = {
+        "status": "MATCHED",
+        "trade_id": "trade-poll-failed-no-econ",
+        "trade_status": "FAILED",
+        "timestamp": "2026-04-29T12:01:00+00:00",
+    }
+
+    stats = check_pending_entries(
+        portfolio,
+        clob,
+        deps=Deps,
+        now=datetime(2026, 4, 29, 12, 1, tzinfo=timezone.utc),
+    )
+
+    assert stats["entered"] == 0
+    assert stats["still_pending"] == 1
+    assert pos.state == "quarantined"
+    assert pos.has_fill_economics_authority is False
+
+    conn = get_connection(db_path)
+    trade_rows = conn.execute(
+        """
+        SELECT trade_fact_id, state, filled_size, fill_price
+          FROM venue_trade_facts
+         ORDER BY local_sequence
+        """
+    ).fetchall()
+    lot_rows = conn.execute(
+        """
+        SELECT state, shares, source_trade_fact_id
+          FROM position_lots
+         WHERE position_id = ?
+         ORDER BY lot_id
+        """,
+        (123456789089,),
+    ).fetchall()
+    event_types = [
+        r["event_type"]
+        for r in conn.execute(
+            """
+            SELECT event_type
+              FROM venue_command_events
+             WHERE command_id = 'cmd-failed-no-econ'
+             ORDER BY sequence_no
+            """
+        ).fetchall()
+    ]
+    conn.close()
+
+    assert [(r["state"], r["filled_size"], r["fill_price"]) for r in trade_rows] == [
+        ("MATCHED", "12.5", "0.42"),
+        ("FAILED", "0", "0"),
+    ]
+    assert [(r["state"], r["shares"]) for r in lot_rows] == [
+        ("OPTIMISTIC_EXPOSURE", "12.5"),
+        ("QUARANTINED", "12.5"),
+    ]
+    assert lot_rows[-1]["source_trade_fact_id"] == trade_rows[-1]["trade_fact_id"]
+    assert "REVIEW_REQUIRED" in event_types
+    assert "PARTIAL_FILL_OBSERVED" not in event_types
+    assert "FILL_CONFIRMED" not in event_types
 
 
 def test_legacy_polling_duplicate_failed_trade_fact_still_fails_closed(tmp_path):
@@ -2331,6 +2508,8 @@ def test_monitoring_marks_quarantine_for_admin_resolution_once(monkeypatch):
     assert summary["monitors"] == 0
     assert len(monitor_results) == 1
     assert monitor_results[0].exit_reason == QUARANTINE_REVIEW_REQUIRED
+    assert monitor_results[0].fresh_prob is None
+    assert monitor_results[0].fresh_edge is None
 
     portfolio_dirty, tracker_dirty = cycle_runtime.execute_monitoring_phase(
         None,
@@ -2402,6 +2581,65 @@ def test_monitoring_skips_fill_authority_quarantine_without_chain_quarantine(mon
     assert summary["monitor_skipped_quarantine_resolution"] == 1
     assert summary["monitors"] == 0
     assert monitor_results[0].exit_reason == "FILL_AUTHORITY_QUARANTINE_REVIEW_REQUIRED"
+    assert monitor_results[0].fresh_prob is None
+    assert monitor_results[0].fresh_edge is None
+
+
+def test_monitoring_unknown_direction_report_has_no_fresh_probability(monkeypatch):
+    """Skipped unknown-direction monitor results must not report stale probability."""
+    from src.engine import cycle_runtime
+
+    pos = _make_position(direction="unknown", chain_state="synced")
+    pos.p_posterior = 0.99
+    pos.last_monitor_prob = 0.88
+    pos.last_monitor_edge = 0.77
+    pos.last_monitor_prob_is_fresh = True
+    portfolio = _make_portfolio(pos)
+
+    class Tracker:
+        def record_exit(self, position):
+            raise AssertionError("unknown direction should not exit")
+
+    monitor_results = []
+    artifact = type("Artifact", (), {"add_monitor_result": lambda self, result: monitor_results.append(result)})()
+    summary = {"monitors": 0, "exits": 0}
+    deps = type(
+        "Deps",
+        (),
+        {
+            "MonitorResult": type("MonitorResult", (), {"__init__": lambda self, **kwargs: self.__dict__.update(kwargs)}),
+            "logger": logging.getLogger("test_unknown_direction_monitor_report"),
+            "cities_by_name": {},
+            "_utcnow": staticmethod(lambda: datetime(2026, 4, 1, 5, 30, tzinfo=timezone.utc)),
+            "has_acknowledged_quarantine_clear": staticmethod(lambda token_id: False),
+        },
+    )
+
+    monkeypatch.setattr(
+        "src.engine.monitor_refresh.refresh_position",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("unknown direction must not reach monitor refresh")
+        ),
+    )
+
+    portfolio_dirty, tracker_dirty = cycle_runtime.execute_monitoring_phase(
+        None,
+        object(),
+        portfolio,
+        artifact,
+        Tracker(),
+        summary,
+        deps=deps,
+    )
+
+    assert portfolio_dirty is False
+    assert tracker_dirty is False
+    assert summary["monitor_skipped_unknown_direction"] == 1
+    assert summary["monitors"] == 0
+    assert len(monitor_results) == 1
+    assert monitor_results[0].exit_reason == "UNKNOWN_DIRECTION"
+    assert monitor_results[0].fresh_prob is None
+    assert monitor_results[0].fresh_edge is None
 
 
 def test_quarantine_expired_marks_distinct_admin_resolution_reason(monkeypatch):
@@ -2451,6 +2689,8 @@ def test_quarantine_expired_marks_distinct_admin_resolution_reason(monkeypatch):
     assert pos.exit_reason == QUARANTINE_EXPIRED_REVIEW_REQUIRED
     assert len(monitor_results) == 1
     assert monitor_results[0].exit_reason == QUARANTINE_EXPIRED_REVIEW_REQUIRED
+    assert monitor_results[0].fresh_prob is None
+    assert monitor_results[0].fresh_edge is None
 
 
 def test_monitoring_transitions_holding_position_into_day0_window(monkeypatch):
@@ -2723,6 +2963,7 @@ def test_same_cycle_day0_crossing_refreshes_through_day0_semantics(monkeypatch):
         observed_methods.append(position.entry_method)
         position.selected_method = position.entry_method
         position.applied_validations = [position.entry_method]
+        monitor_refresh._set_monitor_probability_fresh(position, True)
         return 0.52
 
     monkeypatch.setattr(monitor_refresh, "recompute_native_probability", fake_recompute)
@@ -2792,6 +3033,7 @@ def test_day0_window_refresh_uses_day0_observation_semantics(monkeypatch):
         observed_methods.append(position.entry_method)
         position.selected_method = position.entry_method
         position.applied_validations = [position.entry_method]
+        monitor_refresh._set_monitor_probability_fresh(position, True)
         return 0.52
 
     monkeypatch.setattr(monitor_refresh, "recompute_native_probability", fake_recompute)
@@ -2837,6 +3079,7 @@ def test_day0_window_live_refresh_uses_best_bid_not_vwmp(monkeypatch):
         observed_markets.append(current_p_market)
         position.selected_method = position.entry_method
         position.applied_validations = [position.entry_method]
+        monitor_refresh._set_monitor_probability_fresh(position, True)
         return 0.52
 
     monkeypatch.setattr(monitor_refresh, "recompute_native_probability", fake_recompute)
@@ -2853,8 +3096,8 @@ def test_day0_window_live_refresh_uses_best_bid_not_vwmp(monkeypatch):
     assert observed_markets[0] != pytest.approx(edge_ctx.p_market[0])
 
 
-def test_day0_refresh_fallback_keeps_probability_stale(monkeypatch):
-    """Day0 fallback may reuse stored probability, but it must not relabel it fresh."""
+def test_day0_refresh_fallback_keeps_probability_non_authoritative(monkeypatch):
+    """Day0 fallback must not relabel stored probability as current exit authority."""
     from src.contracts import EntryMethod
     from src.engine import monitor_refresh
 
@@ -2865,6 +3108,7 @@ def test_day0_refresh_fallback_keeps_probability_stale(monkeypatch):
         entry_method=EntryMethod.ENS_MEMBER_COUNTING.value,
         selected_method="",
         p_posterior=0.61,
+        last_monitor_prob=0.41,
         last_monitor_prob_is_fresh=True,
         applied_validations=["alpha_posterior"],
     )
@@ -2894,10 +3138,13 @@ def test_day0_refresh_fallback_keeps_probability_stale(monkeypatch):
     assert pos.selected_method == EntryMethod.DAY0_OBSERVATION.value
     assert pos.last_monitor_market_price == pytest.approx(0.41)
     assert pos.last_monitor_market_price_is_fresh is True
-    assert pos.last_monitor_prob == pytest.approx(0.61)
+    assert pos.last_monitor_prob == pytest.approx(0.41)
     assert pos.last_monitor_prob_is_fresh is False
-    assert edge_ctx.p_posterior == pytest.approx(0.61)
+    assert not np.isfinite(pos.last_monitor_edge)
+    assert not np.isfinite(edge_ctx.p_posterior)
+    assert not np.isfinite(edge_ctx.forward_edge)
     assert "missing_observation_timestamp" in pos.applied_validations
+    assert "monitor_probability_stale" in pos.applied_validations
 
 
 # ---- Bonus: Quarantine does NOT expire before 48h ----
@@ -3771,16 +4018,19 @@ def test_legacy_exit_triggers_use_fill_authority_shares(monkeypatch):
 
     def capture_hold_value(shares, current_p_posterior):
         captured["shares"] = shares
+        captured["posterior"] = current_p_posterior
         return SimpleNamespace(net_value=0.0)
 
     monkeypatch.setattr(exit_triggers, "_declared_zero_cost_hold_value", capture_hold_value)
-    edge_ctx = SimpleNamespace(forward_edge=-0.40, ci_width=0.02)
+    edge_ctx = SimpleNamespace(forward_edge=-0.40, ci_width=0.02, p_posterior=0.10)
 
     signal = exit_triggers._evaluate_buy_yes_exit(pos, edge_ctx, best_bid=0.49)
 
     assert signal is not None
     assert captured["shares"] == pytest.approx(pos.effective_shares)
     assert captured["shares"] != pytest.approx(pos.size_usd / pos.entry_price)
+    assert captured["posterior"] == pytest.approx(edge_ctx.p_posterior)
+    assert captured["posterior"] != pytest.approx(pos.p_posterior)
 
 
 def test_legacy_buy_no_exit_triggers_use_fill_authority_shares(monkeypatch):

@@ -779,6 +779,52 @@ class TestRiskGuardSettlementSource:
         assert pos.unrealized_pnl == pytest.approx(5.0)
         assert total_exposure_usd(portfolio) == pytest.approx(20.0)
 
+    def test_portfolio_loader_missing_monitor_evidence_stays_non_authoritative(self, monkeypatch, tmp_path):
+        zeus_db = tmp_path / "zeus.db"
+        conn = get_connection(zeus_db)
+        from src.state.db import init_schema
+
+        init_schema(conn)
+        _insert_position_current(
+            conn,
+            position_id="db-pos-missing-monitor",
+            strategy_key="center_buy",
+            size_usd=25.0,
+            shares=12.0,
+            cost_basis_usd=25.0,
+            last_monitor_market_price=2.5,
+        )
+        conn.commit()
+
+        monkeypatch.setattr(
+            riskguard_module,
+            "load_portfolio",
+            lambda: PortfolioState(
+                bankroll=211.37,
+                positions=[
+                    Position(
+                        trade_id="metadata-pos",
+                        market_id="m-test",
+                        city="NYC",
+                        cluster="NYC",
+                        target_date="2026-04-01",
+                        bin_label="39-40°F",
+                        direction="buy_yes",
+                    )
+                ],
+            ),
+        )
+
+        portfolio, truth = riskguard_module._load_riskguard_portfolio_truth(conn)
+        pos = portfolio.positions[0]
+
+        assert truth["source"] == "position_current"
+        assert pos.last_monitor_prob is None
+        assert pos.last_monitor_edge is None
+        assert pos.last_monitor_prob != 0.0
+        assert pos.last_monitor_edge != 0.0
+        assert pos.last_monitor_market_price == pytest.approx(2.5)
+
     def test_tick_does_not_use_metadata_recent_exits_without_authoritative_settlements(self, monkeypatch, tmp_path):
         zeus_db = tmp_path / "zeus.db"
         risk_db = tmp_path / "risk_state.db"

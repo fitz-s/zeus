@@ -7,11 +7,13 @@ Settlement truth = Polymarket settlement result (spec §1.3).
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import logging
 import os
 import sqlite3
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import TYPE_CHECKING, Iterable, Optional
 
@@ -27,6 +29,7 @@ from src.state.ledger import (
 )
 from src.state.projection import CANONICAL_POSITION_CURRENT_COLUMNS, POSITION_EVENT_ENVS
 from src.state.collateral_ledger import init_collateral_schema
+from src.state.market_topology_repo import write_market_topology_state
 from src.state.snapshot_repo import init_snapshot_schema
 from src.observability.counters import increment as _cnt_inc
 
@@ -123,6 +126,7 @@ def _connect(
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
+    _install_connection_functions(conn)
     resolved = _resolve_write_class(write_class)
     if resolved is not None:
         _cnt_inc(f"db_connect_write_class_{resolved.value}_total")
@@ -354,6 +358,39 @@ PORTFOLIO_LOADER_PHASE_TO_RUNTIME_STATE = {
 }
 
 
+def _positive_finite_decimal_text(value: object) -> int:
+    try:
+        parsed = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        return 0
+    return int(parsed.is_finite() and parsed > 0)
+
+
+def _decimal_text_equal(left: object, right: object) -> int:
+    try:
+        left_parsed = Decimal(str(left))
+        right_parsed = Decimal(str(right))
+    except (InvalidOperation, TypeError, ValueError):
+        return 0
+    return int(
+        left_parsed.is_finite()
+        and right_parsed.is_finite()
+        and left_parsed == right_parsed
+    )
+
+
+def _install_connection_functions(conn: sqlite3.Connection) -> None:
+    functions = (
+        ("zeus_positive_decimal_text", 1, _positive_finite_decimal_text),
+        ("zeus_decimal_text_equal", 2, _decimal_text_equal),
+    )
+    for name, arity, func in functions:
+        try:
+            conn.create_function(name, arity, func, deterministic=True)
+        except TypeError:
+            conn.create_function(name, arity, func)
+
+
 def init_provenance_projection_schema(conn: sqlite3.Connection) -> None:
     """Create U2 raw-provenance projection tables and legacy migrations.
 
@@ -362,6 +399,7 @@ def init_provenance_projection_schema(conn: sqlite3.Connection) -> None:
     these tables, but they must not mutate historical provenance.
     """
 
+    _install_connection_functions(conn)
     conn.executescript(
         """
         CREATE TABLE IF NOT EXISTS venue_submission_envelopes (
@@ -491,7 +529,7 @@ def init_provenance_projection_schema(conn: sqlite3.Connection) -> None:
             'EXIT_PENDING','ECONOMICALLY_CLOSED_OPTIMISTIC',
             'ECONOMICALLY_CLOSED_CONFIRMED','SETTLED','QUARANTINED'
           )),
-          shares INTEGER NOT NULL,
+          shares TEXT NOT NULL,
           entry_price_avg TEXT NOT NULL,
           exit_price_avg TEXT,
           source_command_id TEXT REFERENCES venue_commands(command_id),
@@ -509,6 +547,50 @@ def init_provenance_projection_schema(conn: sqlite3.Connection) -> None:
         );
         CREATE INDEX IF NOT EXISTS idx_position_lots_state ON position_lots (state, position_id);
         CREATE INDEX IF NOT EXISTS idx_position_lots_trade ON position_lots (source_trade_fact_id);
+
+        CREATE TRIGGER IF NOT EXISTS position_lots_optimistic_trade_authority
+        BEFORE INSERT ON position_lots
+        WHEN NEW.state = 'OPTIMISTIC_EXPOSURE'
+        BEGIN
+          SELECT RAISE(ABORT, 'OPTIMISTIC_EXPOSURE requires MATCHED/MINED source trade fact authority')
+          WHERE NOT EXISTS (
+            SELECT 1
+              FROM venue_trade_facts tf
+              JOIN venue_commands cmd
+                ON cmd.command_id = tf.command_id
+             WHERE tf.trade_fact_id = NEW.source_trade_fact_id
+               AND tf.command_id = NEW.source_command_id
+               AND UPPER(COALESCE(cmd.intent_kind, '')) = 'ENTRY'
+               AND UPPER(COALESCE(cmd.side, '')) = 'BUY'
+               AND tf.state IN ('MATCHED','MINED')
+               AND zeus_positive_decimal_text(tf.filled_size) = 1
+               AND zeus_positive_decimal_text(tf.fill_price) = 1
+               AND zeus_decimal_text_equal(tf.filled_size, NEW.shares) = 1
+               AND zeus_decimal_text_equal(tf.fill_price, NEW.entry_price_avg) = 1
+          );
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS position_lots_confirmed_trade_authority
+        BEFORE INSERT ON position_lots
+        WHEN NEW.state = 'CONFIRMED_EXPOSURE'
+        BEGIN
+          SELECT RAISE(ABORT, 'CONFIRMED_EXPOSURE requires CONFIRMED source trade fact authority')
+          WHERE NOT EXISTS (
+            SELECT 1
+              FROM venue_trade_facts tf
+              JOIN venue_commands cmd
+                ON cmd.command_id = tf.command_id
+             WHERE tf.trade_fact_id = NEW.source_trade_fact_id
+               AND tf.command_id = NEW.source_command_id
+               AND UPPER(COALESCE(cmd.intent_kind, '')) = 'ENTRY'
+               AND UPPER(COALESCE(cmd.side, '')) = 'BUY'
+               AND tf.state = 'CONFIRMED'
+               AND zeus_positive_decimal_text(tf.filled_size) = 1
+               AND zeus_positive_decimal_text(tf.fill_price) = 1
+               AND zeus_decimal_text_equal(tf.filled_size, NEW.shares) = 1
+               AND zeus_decimal_text_equal(tf.fill_price, NEW.entry_price_avg) = 1
+          );
+        END;
 
         CREATE TRIGGER IF NOT EXISTS position_lots_no_update
         BEFORE UPDATE ON position_lots
@@ -594,6 +676,7 @@ def get_connection(
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
+    _install_connection_functions(conn)
     resolved = _resolve_write_class(write_class)
     if resolved is not None:
         _cnt_inc(f"db_get_connection_{resolved.value}_total")
@@ -1502,6 +1585,50 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
             ON market_topology_state(city_id, city_timezone, target_local_date, temperature_metric, market_family, condition_id);
         CREATE INDEX IF NOT EXISTS idx_market_topology_status_expiry
             ON market_topology_state(status, expires_at);
+
+        CREATE TABLE IF NOT EXISTS source_contract_audit_events (
+            audit_id TEXT PRIMARY KEY,
+            checked_at_utc TEXT NOT NULL,
+            scan_authority TEXT NOT NULL CHECK (scan_authority IN (
+                'VERIFIED','FIXTURE','STALE_CACHE','EMPTY_FALLBACK','NEVER_FETCHED'
+            )),
+            report_status TEXT CHECK (report_status IS NULL OR report_status IN (
+                'OK','WARN','ALERT','DATA_UNAVAILABLE'
+            )),
+            severity TEXT NOT NULL CHECK (severity IN ('OK','WARN','ALERT','DATA_UNAVAILABLE')),
+            event_id TEXT,
+            slug TEXT,
+            title TEXT,
+            city TEXT,
+            target_date TEXT,
+            temperature_metric TEXT CHECK (temperature_metric IS NULL OR temperature_metric IN ('high','low')),
+            source_contract_status TEXT NOT NULL CHECK (source_contract_status IN (
+                'MATCH','MISSING','AMBIGUOUS','MISMATCH','UNSUPPORTED','UNKNOWN','QUARANTINED'
+            )),
+            source_contract_reason TEXT,
+            configured_source_family TEXT,
+            configured_station_id TEXT,
+            observed_source_family TEXT,
+            observed_station_id TEXT,
+            resolution_sources_json TEXT NOT NULL DEFAULT '[]',
+            source_contract_json TEXT NOT NULL DEFAULT '{}',
+            payload_hash TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_source_contract_audit_city_date
+            ON source_contract_audit_events(city, target_date, temperature_metric, checked_at_utc);
+        CREATE INDEX IF NOT EXISTS idx_source_contract_audit_status
+            ON source_contract_audit_events(source_contract_status, severity, checked_at_utc);
+        CREATE TRIGGER IF NOT EXISTS source_contract_audit_events_no_update
+        BEFORE UPDATE ON source_contract_audit_events
+        BEGIN
+          SELECT RAISE(ABORT, 'source_contract_audit_events is append-only');
+        END;
+        CREATE TRIGGER IF NOT EXISTS source_contract_audit_events_no_delete
+        BEFORE DELETE ON source_contract_audit_events
+        BEGIN
+          SELECT RAISE(ABORT, 'source_contract_audit_events is append-only');
+        END;
 
         -- Availability/outage fact log (observability — kernel §availability_fact)
         CREATE TABLE IF NOT EXISTS availability_fact (
@@ -2444,6 +2571,80 @@ _FORWARD_MARKET_REQUIRED_TABLES = (
     "market_events_v2",
     "market_price_history",
 )
+_MARKET_SOURCE_CONTRACT_TOPOLOGY_TABLES = ("market_topology_state",)
+_MARKET_TOPOLOGY_STATE_REQUIRED_COLUMNS = (
+    "topology_id",
+    "scope_key",
+    "market_family",
+    "event_id",
+    "condition_id",
+    "question_id",
+    "city_id",
+    "city_timezone",
+    "target_local_date",
+    "temperature_metric",
+    "physical_quantity",
+    "observation_field",
+    "data_version",
+    "token_ids_json",
+    "bin_topology_hash",
+    "gamma_captured_at",
+    "gamma_updated_at",
+    "source_contract_status",
+    "source_contract_reason",
+    "authority_status",
+    "status",
+    "expires_at",
+    "provenance_json",
+    "recorded_at",
+)
+_SOURCE_CONTRACT_AUDIT_TABLES = ("source_contract_audit_events",)
+_SOURCE_CONTRACT_AUDIT_REQUIRED_COLUMNS = (
+    "audit_id",
+    "checked_at_utc",
+    "scan_authority",
+    "report_status",
+    "severity",
+    "event_id",
+    "slug",
+    "title",
+    "city",
+    "target_date",
+    "temperature_metric",
+    "source_contract_status",
+    "source_contract_reason",
+    "configured_source_family",
+    "configured_station_id",
+    "observed_source_family",
+    "observed_station_id",
+    "resolution_sources_json",
+    "source_contract_json",
+    "payload_hash",
+    "created_at",
+)
+_SOURCE_CONTRACT_AUDIT_AUTHORITIES = frozenset({
+    "VERIFIED",
+    "FIXTURE",
+    "STALE_CACHE",
+    "EMPTY_FALLBACK",
+    "NEVER_FETCHED",
+})
+_SOURCE_CONTRACT_AUDIT_SEVERITIES = frozenset({
+    "OK",
+    "WARN",
+    "ALERT",
+    "DATA_UNAVAILABLE",
+})
+_SOURCE_CONTRACT_AUDIT_REPORT_STATUSES = _SOURCE_CONTRACT_AUDIT_SEVERITIES
+_SOURCE_CONTRACT_AUDIT_STATUSES = frozenset({
+    "MATCH",
+    "MISSING",
+    "AMBIGUOUS",
+    "MISMATCH",
+    "UNSUPPORTED",
+    "UNKNOWN",
+    "QUARANTINED",
+})
 _SETTLEMENT_V2_COLUMNS = (
     "city",
     "target_date",
@@ -2906,6 +3107,329 @@ def log_forward_market_substrate(
     return {
         "status": status,
         "tables": _FORWARD_MARKET_REQUIRED_TABLES,
+        **counts,
+    }
+
+
+def log_market_source_contract_topology_facts(
+    conn: sqlite3.Connection | None,
+    *,
+    markets: Iterable[dict],
+    recorded_at: str,
+    scan_authority: str,
+) -> dict:
+    """Persist scanner source-contract proof into market_topology_state.
+
+    The writer is explicit-connection only. It does not open the default DB,
+    create tables, migrate schema, commit, or change market eligibility.
+    """
+    if conn is None:
+        return {"status": "skipped_no_connection", "tables": _MARKET_SOURCE_CONTRACT_TOPOLOGY_TABLES}
+
+    if str(scan_authority or "").strip().upper() != "VERIFIED":
+        return {
+            "status": "refused_degraded_authority",
+            "tables": _MARKET_SOURCE_CONTRACT_TOPOLOGY_TABLES,
+            "scan_authority": scan_authority,
+        }
+
+    recorded_at_value = _forward_clean_str(recorded_at)
+    if recorded_at_value is None:
+        return {"status": "refused_missing_recorded_at", "tables": _MARKET_SOURCE_CONTRACT_TOPOLOGY_TABLES}
+
+    missing_tables = [
+        table for table in _MARKET_SOURCE_CONTRACT_TOPOLOGY_TABLES if not _table_exists(conn, table)
+    ]
+    if missing_tables:
+        return {
+            "status": "skipped_missing_tables",
+            "tables": _MARKET_SOURCE_CONTRACT_TOPOLOGY_TABLES,
+            "missing_tables": tuple(missing_tables),
+        }
+
+    missing_columns = tuple(
+        sorted(set(_MARKET_TOPOLOGY_STATE_REQUIRED_COLUMNS) - _table_columns(conn, "market_topology_state"))
+    )
+    if missing_columns:
+        return {
+            "status": "skipped_invalid_schema",
+            "tables": _MARKET_SOURCE_CONTRACT_TOPOLOGY_TABLES,
+            "missing_columns": {"market_topology_state": missing_columns},
+        }
+
+    counts = {
+        "topology_rows_written": 0,
+        "markets_skipped_missing_facts": 0,
+        "markets_skipped_source_contract_status": 0,
+        "outcomes_skipped_missing_facts": 0,
+    }
+
+    for market in markets:
+        if not isinstance(market, dict):
+            counts["markets_skipped_missing_facts"] += 1
+            continue
+        source_contract = market.get("source_contract") or {}
+        if not isinstance(source_contract, dict):
+            counts["markets_skipped_source_contract_status"] += 1
+            continue
+        source_contract_status = _forward_clean_str(source_contract.get("status"))
+        if source_contract_status != "MATCH":
+            counts["markets_skipped_source_contract_status"] += 1
+            continue
+
+        market_slug = _forward_clean_str(market.get("slug"))
+        event_id = _forward_clean_str(market.get("event_id"))
+        city_obj = market.get("city")
+        city_name = _forward_city_name(city_obj)
+        city_timezone = _forward_clean_str(
+            market.get("city_timezone") or getattr(city_obj, "timezone", None)
+        )
+        target_date = _forward_clean_str(market.get("target_date"))
+        temperature_metric = _forward_metric(market.get("temperature_metric"))
+        if not (market_slug and city_name and target_date and temperature_metric):
+            counts["markets_skipped_missing_facts"] += 1
+            continue
+
+        data_version = _forward_clean_str(market.get("data_version")) or "gamma_source_contract_v1"
+        observation_field = (
+            "daily_max_temperature" if temperature_metric == "high" else "daily_min_temperature"
+        )
+        resolution_sources = list(source_contract.get("resolution_sources") or market.get("resolution_sources") or [])
+
+        for outcome in market.get("outcomes") or ():
+            if not isinstance(outcome, dict):
+                counts["outcomes_skipped_missing_facts"] += 1
+                continue
+            condition_id = _forward_clean_str(outcome.get("condition_id"))
+            if condition_id is None:
+                counts["outcomes_skipped_missing_facts"] += 1
+                continue
+            question_id = _forward_clean_str(outcome.get("question_id"))
+            token_ids = [
+                token_id
+                for token_id in (
+                    _forward_clean_str(outcome.get("token_id")),
+                    _forward_clean_str(outcome.get("no_token_id")),
+                )
+                if token_id is not None
+            ]
+            provenance = {
+                "writer": "log_market_source_contract_topology_facts",
+                "source": "gamma_market_scanner",
+                "recorded_at": recorded_at_value,
+                "market_slug": market_slug,
+                "event_id": event_id,
+                "event_slug": market_slug,
+                "condition_id": condition_id,
+                "question_id": question_id,
+                "outcome_title": _forward_clean_str(outcome.get("title")),
+                "city": city_name,
+                "target_date": target_date,
+                "temperature_metric": temperature_metric,
+                "resolution_sources": resolution_sources,
+                "source_contract": source_contract,
+            }
+            topology_id = "market_source_contract:{}:{}:{}:{}:{}".format(
+                market_slug,
+                condition_id,
+                city_name,
+                target_date,
+                temperature_metric,
+            )
+            write_market_topology_state(
+                conn,
+                topology_id=topology_id,
+                market_family="weather_temperature",
+                condition_id=condition_id,
+                status="CURRENT",
+                source_contract_status="MATCH",
+                authority_status="VERIFIED",
+                event_id=event_id,
+                question_id=question_id,
+                city_id=city_name,
+                city_timezone=city_timezone,
+                target_local_date=target_date,
+                temperature_metric=temperature_metric,
+                physical_quantity="temperature",
+                observation_field=observation_field,
+                data_version=data_version,
+                token_ids_json=token_ids,
+                source_contract_reason=_forward_clean_str(source_contract.get("reason")),
+                provenance_json=provenance,
+            )
+            conn.execute(
+                "UPDATE market_topology_state SET recorded_at = ? WHERE topology_id = ?",
+                (recorded_at_value, topology_id),
+            )
+            counts["topology_rows_written"] += 1
+
+    status = "written" if counts["topology_rows_written"] else "skipped_no_valid_rows"
+    return {
+        "status": status,
+        "tables": _MARKET_SOURCE_CONTRACT_TOPOLOGY_TABLES,
+        **counts,
+    }
+
+
+def append_source_contract_audit_events(
+    conn: sqlite3.Connection | None,
+    *,
+    report: dict,
+) -> dict:
+    """Append source-contract watch evidence without affecting eligibility."""
+    if conn is None:
+        return {"status": "skipped_no_connection", "tables": _SOURCE_CONTRACT_AUDIT_TABLES}
+    if not isinstance(report, dict):
+        return {"status": "refused_invalid_report", "tables": _SOURCE_CONTRACT_AUDIT_TABLES}
+
+    missing_tables = [
+        table for table in _SOURCE_CONTRACT_AUDIT_TABLES if not _table_exists(conn, table)
+    ]
+    if missing_tables:
+        return {
+            "status": "skipped_missing_tables",
+            "tables": _SOURCE_CONTRACT_AUDIT_TABLES,
+            "missing_tables": tuple(missing_tables),
+        }
+
+    missing_columns = tuple(
+        sorted(
+            set(_SOURCE_CONTRACT_AUDIT_REQUIRED_COLUMNS)
+            - _table_columns(conn, "source_contract_audit_events")
+        )
+    )
+    if missing_columns:
+        return {
+            "status": "skipped_invalid_schema",
+            "tables": _SOURCE_CONTRACT_AUDIT_TABLES,
+            "missing_columns": {"source_contract_audit_events": missing_columns},
+        }
+
+    checked_at_utc = _forward_clean_str(report.get("checked_at_utc"))
+    scan_authority = _forward_clean_str(report.get("authority"))
+    if checked_at_utc is None or scan_authority is None:
+        return {"status": "refused_missing_scan_metadata", "tables": _SOURCE_CONTRACT_AUDIT_TABLES}
+    if scan_authority not in _SOURCE_CONTRACT_AUDIT_AUTHORITIES:
+        return {
+            "status": "refused_invalid_scan_authority",
+            "tables": _SOURCE_CONTRACT_AUDIT_TABLES,
+            "scan_authority": scan_authority,
+        }
+    events = report.get("events") or []
+    if not isinstance(events, list):
+        return {"status": "refused_invalid_report", "tables": _SOURCE_CONTRACT_AUDIT_TABLES}
+
+    counts = {
+        "audit_rows_inserted": 0,
+        "audit_rows_unchanged": 0,
+        "events_skipped_missing_facts": 0,
+        "events_refused_invalid_facts": 0,
+    }
+    report_status = _forward_clean_str(report.get("status"))
+    if report_status is not None and report_status not in _SOURCE_CONTRACT_AUDIT_REPORT_STATUSES:
+        return {
+            "status": "refused_invalid_report_status",
+            "tables": _SOURCE_CONTRACT_AUDIT_TABLES,
+            "report_status": report_status,
+        }
+
+    for event in events:
+        if not isinstance(event, dict):
+            counts["events_skipped_missing_facts"] += 1
+            continue
+        source_contract = event.get("source_contract") or {}
+        if not isinstance(source_contract, dict):
+            counts["events_skipped_missing_facts"] += 1
+            continue
+        event_id = _forward_clean_str(event.get("event_id") or event.get("slug"))
+        source_contract_status = _forward_clean_str(source_contract.get("status")) or "UNKNOWN"
+        severity = _forward_clean_str(event.get("severity")) or "WARN"
+        if event_id is None:
+            counts["events_skipped_missing_facts"] += 1
+            continue
+        if severity not in _SOURCE_CONTRACT_AUDIT_SEVERITIES:
+            counts["events_refused_invalid_facts"] += 1
+            continue
+        if source_contract_status not in _SOURCE_CONTRACT_AUDIT_STATUSES:
+            counts["events_refused_invalid_facts"] += 1
+            continue
+
+        resolution_sources = list(source_contract.get("resolution_sources") or [])
+        resolution_sources_json = json.dumps(
+            resolution_sources,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        )
+        source_contract_json = json.dumps(
+            source_contract,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        )
+        payload = {
+            "checked_at_utc": checked_at_utc,
+            "scan_authority": scan_authority,
+            "report_status": report_status,
+            "event_id": event_id,
+            "slug": _forward_clean_str(event.get("slug")),
+            "city": _forward_clean_str(event.get("city")),
+            "target_date": _forward_clean_str(event.get("target_date")),
+            "temperature_metric": _forward_metric(event.get("temperature_metric")),
+            "severity": severity,
+            "source_contract": source_contract,
+        }
+        payload_hash = hashlib.sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+        ).hexdigest()
+        audit_id = hashlib.sha256(
+            f"{checked_at_utc}|{event_id}|{payload_hash}".encode("utf-8")
+        ).hexdigest()
+        cursor = conn.execute(
+            """
+            INSERT OR IGNORE INTO source_contract_audit_events (
+                audit_id, checked_at_utc, scan_authority, report_status, severity,
+                event_id, slug, title, city, target_date, temperature_metric,
+                source_contract_status, source_contract_reason,
+                configured_source_family, configured_station_id,
+                observed_source_family, observed_station_id,
+                resolution_sources_json, source_contract_json, payload_hash
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                audit_id,
+                checked_at_utc,
+                scan_authority,
+                report_status,
+                severity,
+                event_id,
+                _forward_clean_str(event.get("slug")),
+                _forward_clean_str(event.get("title")),
+                _forward_clean_str(event.get("city")),
+                _forward_clean_str(event.get("target_date")),
+                _forward_metric(event.get("temperature_metric")),
+                source_contract_status,
+                _forward_clean_str(source_contract.get("reason")),
+                _forward_clean_str(source_contract.get("configured_source_family")),
+                _forward_clean_str(source_contract.get("configured_station_id")),
+                _forward_clean_str(source_contract.get("source_family")),
+                _forward_clean_str(source_contract.get("station_id")),
+                resolution_sources_json,
+                source_contract_json,
+                payload_hash,
+            ),
+        )
+        if cursor.rowcount:
+            counts["audit_rows_inserted"] += 1
+        else:
+            counts["audit_rows_unchanged"] += 1
+
+    status = "written" if counts["audit_rows_inserted"] else "skipped_no_valid_rows"
+    if counts["audit_rows_unchanged"] and not counts["audit_rows_inserted"]:
+        status = "unchanged"
+    return {
+        "status": status,
+        "tables": _SOURCE_CONTRACT_AUDIT_TABLES,
         **counts,
     }
 
@@ -5659,8 +6183,8 @@ def query_portfolio_loader_view(conn: sqlite3.Connection | None, *, temperature_
                 "execution_fact_intent_id": fill_economics["execution_fact_intent_id"],
                 "execution_fact_filled_at": fill_economics["execution_fact_filled_at"],
                 "p_posterior": row["p_posterior"],
-                "last_monitor_prob": float(row["last_monitor_prob"] or 0.0),
-                "last_monitor_edge": float(row["last_monitor_edge"] or 0.0),
+                "last_monitor_prob": _finite_float_or_none(row["last_monitor_prob"]),
+                "last_monitor_edge": _finite_float_or_none(row["last_monitor_edge"]),
                 "last_monitor_market_price": row["last_monitor_market_price"],
                 "decision_snapshot_id": str(row["decision_snapshot_id"] or ""),
                 "entry_method": str(row["entry_method"] or ""),
@@ -6094,6 +6618,16 @@ def _finite_float_or_zero(value) -> float:
         return 0.0
     if numeric != numeric or numeric in (float("inf"), float("-inf")):
         return 0.0
+    return numeric
+
+
+def _finite_float_or_none(value) -> float | None:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    if numeric != numeric or numeric in (float("inf"), float("-inf")):
+        return None
     return numeric
 
 

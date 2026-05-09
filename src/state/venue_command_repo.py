@@ -1,6 +1,6 @@
 # Created: 2026-04-26
-# Last reused/audited: 2026-04-26
-# Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md §P1.S1
+# Last reused/audited: 2026-05-08
+# Authority basis: docs/operations/task_2026-05-08_object_invariance_wave27/PLAN.md
 """Durable command journal — append-only repo API for venue_commands / venue_command_events.
 
 Public API:
@@ -164,6 +164,10 @@ _POSITION_LOT_STATES = frozenset(
         "QUARANTINED",
     }
 )
+_POSITION_LOT_EXPOSURE_TRADE_STATES = {
+    "OPTIMISTIC_EXPOSURE": frozenset({"MATCHED", "MINED"}),
+    "CONFIRMED_EXPOSURE": frozenset({"CONFIRMED"}),
+}
 _PROVENANCE_SUBJECT_TYPES = frozenset(
     {"command", "order", "trade", "lot", "settlement", "wrap_unwrap", "heartbeat"}
 )
@@ -185,6 +189,29 @@ def _positive_finite_decimal_text(value: Any) -> bool:
     return parsed.is_finite() and parsed > 0
 
 
+def _decimal_text_equal(left: Any, right: Any) -> bool:
+    try:
+        left_parsed = Decimal(str(left))
+        right_parsed = Decimal(str(right))
+    except (InvalidOperation, TypeError, ValueError):
+        return False
+    return (
+        left_parsed.is_finite()
+        and right_parsed.is_finite()
+        and left_parsed == right_parsed
+    )
+
+
+def _finite_decimal_text(value: Any) -> str:
+    try:
+        parsed = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError) as exc:
+        raise ValueError("position lot shares must be a finite decimal") from exc
+    if not parsed.is_finite():
+        raise ValueError("position lot shares must be a finite decimal")
+    return format(parsed, "f")
+
+
 def _row_value(row: Mapping[str, Any] | sqlite3.Row, key: str) -> Any:
     if isinstance(row, sqlite3.Row):
         return row[key]
@@ -197,6 +224,136 @@ def trade_fact_has_positive_fill_economics(row: Mapping[str, Any] | sqlite3.Row)
     return _positive_finite_decimal_text(
         _row_value(row, "filled_size")
     ) and _positive_finite_decimal_text(_row_value(row, "fill_price"))
+
+
+def _optimistic_source_trade_fact_ids_for_failed_trade(
+    conn: sqlite3.Connection,
+    *,
+    trade_id: str,
+) -> list[int]:
+    with _row_factory_as(conn, sqlite3.Row):
+        rows = conn.execute(
+            """
+            SELECT DISTINCT lot.source_trade_fact_id
+              FROM position_lots lot
+              JOIN venue_trade_facts tf
+                ON tf.trade_fact_id = lot.source_trade_fact_id
+             WHERE tf.trade_id = ?
+               AND tf.state IN ('MATCHED', 'MINED')
+               AND lot.state = 'OPTIMISTIC_EXPOSURE'
+               AND NOT EXISTS (
+                   SELECT 1
+                     FROM position_lots quarantined
+                     JOIN venue_trade_facts failed
+                       ON failed.trade_fact_id = quarantined.source_trade_fact_id
+                    WHERE quarantined.position_id = lot.position_id
+                      AND quarantined.state = 'QUARANTINED'
+                      AND failed.trade_id = tf.trade_id
+                      AND failed.state = 'FAILED'
+               )
+             ORDER BY lot.source_trade_fact_id
+            """,
+            (trade_id,),
+        ).fetchall()
+    return [int(row["source_trade_fact_id"]) for row in rows]
+
+
+def _rollback_optimistic_lots_for_failed_trade(
+    conn: sqlite3.Connection,
+    *,
+    trade_id: str,
+    failed_trade_fact_id: int,
+    state_changed_at: str | datetime.datetime,
+) -> int:
+    rolled_back = 0
+    for source_trade_fact_id in _optimistic_source_trade_fact_ids_for_failed_trade(
+        conn,
+        trade_id=trade_id,
+    ):
+        rollback_optimistic_lot_for_failed_trade(
+            conn,
+            source_trade_fact_id=source_trade_fact_id,
+            failed_trade_fact_id=failed_trade_fact_id,
+            state_changed_at=state_changed_at,
+        )
+        rolled_back += 1
+    return rolled_back
+
+
+def _assert_position_lot_trade_fact_authority(
+    conn: sqlite3.Connection,
+    *,
+    lot_state: str,
+    shares: Any,
+    entry_price_avg: Any,
+    source_command_id: str | None,
+    source_trade_fact_id: int | None,
+) -> tuple[str | None, int | None]:
+    """Validate active exposure lots preserve venue trade-fact authority."""
+
+    allowed_trade_states = _POSITION_LOT_EXPOSURE_TRADE_STATES.get(lot_state)
+    if allowed_trade_states is None:
+        return source_command_id, source_trade_fact_id
+
+    if source_trade_fact_id is None:
+        raise ValueError(f"{lot_state} position lot requires source_trade_fact_id")
+    try:
+        fact_id = int(source_trade_fact_id)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{lot_state} source_trade_fact_id must be an integer") from exc
+    if fact_id <= 0:
+        raise ValueError(f"{lot_state} source_trade_fact_id must be positive")
+
+    command_id = _require_nonempty(
+        f"{lot_state} source_command_id",
+        source_command_id,
+    )
+    with _row_factory_as(conn, sqlite3.Row):
+        trade_fact = conn.execute(
+            """
+            SELECT
+              tf.*,
+              cmd.intent_kind AS source_command_intent_kind,
+              cmd.side AS source_command_side
+            FROM venue_trade_facts tf
+            JOIN venue_commands cmd
+              ON cmd.command_id = tf.command_id
+            WHERE tf.trade_fact_id = ?
+            """,
+            (fact_id,),
+        ).fetchone()
+    if trade_fact is None:
+        raise ValueError(
+            f"{lot_state} source_trade_fact_id must reference venue_trade_facts and venue_commands"
+        )
+
+    trade_state = str(trade_fact["state"] or "")
+    if trade_state not in allowed_trade_states:
+        expected = ", ".join(sorted(allowed_trade_states))
+        raise ValueError(
+            f"{lot_state} requires trade fact state in {{{expected}}}; got {trade_state!r}"
+        )
+    if str(trade_fact["command_id"]) != command_id:
+        raise ValueError(
+            f"{lot_state} source_command_id must match source trade fact command_id"
+        )
+    intent_kind = str(trade_fact["source_command_intent_kind"] or "").upper()
+    side = str(trade_fact["source_command_side"] or "").upper()
+    if intent_kind != "ENTRY" or side != "BUY":
+        raise ValueError(f"{lot_state} requires ENTRY BUY source command")
+    if not trade_fact_has_positive_fill_economics(trade_fact):
+        raise ValueError(
+            f"{lot_state} source trade fact requires positive finite fill economics"
+        )
+    if not _decimal_text_equal(shares, trade_fact["filled_size"]):
+        raise ValueError(
+            f"{lot_state} shares must equal source trade fact filled_size"
+        )
+    if not _decimal_text_equal(entry_price_avg, trade_fact["fill_price"]):
+        raise ValueError(
+            f"{lot_state} entry_price_avg must equal source trade fact fill_price"
+        )
+    return command_id, fact_id
 
 
 def _payload_default(value):
@@ -1066,6 +1223,13 @@ def append_trade_fact(
             observed_at=observed_at_s,
             venue_timestamp=venue_timestamp_s,
         )
+        if state == "FAILED":
+            _rollback_optimistic_lots_for_failed_trade(
+                conn,
+                trade_id=trade_id,
+                failed_trade_fact_id=fact_id,
+                state_changed_at=observed_at_s,
+            )
     return fact_id
 
 
@@ -1074,7 +1238,7 @@ def append_position_lot(
     *,
     position_id: int,
     state: str,
-    shares: int,
+    shares: int | float | str | Decimal,
     entry_price_avg: str,
     captured_at: str | datetime.datetime,
     state_changed_at: str | datetime.datetime,
@@ -1095,13 +1259,22 @@ def append_position_lot(
     captured_at_s = _validate_observed_at(captured_at)
     state_changed_at_s = _validate_observed_at(state_changed_at)
     observed_at_s = _validate_observed_at(observed_at or state_changed_at_s)
+    shares_text = _finite_decimal_text(shares)
     venue_timestamp_s = (
         _validate_observed_at(venue_timestamp) if venue_timestamp is not None else None
+    )
+    source_command_id, source_trade_fact_id = _assert_position_lot_trade_fact_authority(
+        conn,
+        lot_state=state,
+        shares=shares_text,
+        entry_price_avg=entry_price_avg,
+        source_command_id=source_command_id,
+        source_trade_fact_id=source_trade_fact_id,
     )
     payload_for_hash = raw_payload_json if raw_payload_json is not None else {
         "position_id": position_id,
         "state": state,
-        "shares": shares,
+        "shares": shares_text,
         "entry_price_avg": entry_price_avg,
         "exit_price_avg": exit_price_avg,
         "source_command_id": source_command_id,
@@ -1132,7 +1305,7 @@ def append_position_lot(
             (
                 int(position_id),
                 state,
-                int(shares),
+                shares_text,
                 str(entry_price_avg),
                 str(exit_price_avg) if exit_price_avg is not None else None,
                 source_command_id,
@@ -1222,11 +1395,25 @@ def rollback_optimistic_lot_for_failed_trade(
         raise ValueError("no OPTIMISTIC_EXPOSURE lot found for failed trade rollback")
     if failed is None:
         raise ValueError("failed_trade_fact_id must reference a FAILED trade fact")
+    existing = conn.execute(
+        """
+        SELECT lot_id
+          FROM position_lots
+         WHERE position_id = ?
+           AND state = 'QUARANTINED'
+           AND source_trade_fact_id = ?
+         ORDER BY lot_id DESC
+         LIMIT 1
+        """,
+        (lot["position_id"], failed_trade_fact_id),
+    ).fetchone()
+    if existing is not None:
+        return int(existing[0])
     return append_position_lot(
         conn,
         position_id=int(lot["position_id"]),
         state="QUARANTINED",
-        shares=int(lot["shares"]),
+        shares=str(lot["shares"]),
         entry_price_avg=str(lot["entry_price_avg"]),
         exit_price_avg=lot["exit_price_avg"],
         source_command_id=lot["source_command_id"],

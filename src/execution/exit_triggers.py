@@ -8,6 +8,7 @@ position's direction. For buy_yes: P(YES). For buy_no: P(NO). Never flip interna
 """
 
 import logging
+import math
 from dataclasses import dataclass
 from typing import Optional
 
@@ -27,6 +28,21 @@ from src.state.portfolio import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _is_finite_number(value) -> bool:
+    try:
+        return math.isfinite(float(value))
+    except (TypeError, ValueError):
+        return False
+
+
+def _edge_context_has_probability_authority(current_edge_context: EdgeContext) -> bool:
+    return (
+        _is_finite_number(getattr(current_edge_context, "p_posterior", None))
+        and _is_finite_number(getattr(current_edge_context, "forward_edge", None))
+        and _is_finite_number(getattr(current_edge_context, "ci_width", None))
+    )
 
 
 def _declared_zero_cost_hold_value(shares: float, current_p_posterior: float) -> HoldValue:
@@ -78,7 +94,35 @@ def evaluate_exit_triggers(
             urgency="immediate",
         )
 
-    # Phase 3 Hard-Trigger Metrics (Microstructure deterioration)
+    # Quote-only safety exits stay active when probability refresh is degraded.
+    if current_edge_context.market_velocity_1h <= -0.15:
+        return ExitSignal(
+            trade_id=position.trade_id,
+            trigger="FLASH_CRASH_PANIC",
+            reason=f"Adverse market velocity {current_edge_context.market_velocity_1h:.2f}/hr detected",
+            urgency="immediate"
+        )
+
+    # Layer 8: Micro-position hold (< $1 never sold, hold to settlement)
+    if position.effective_cost_basis_usd < 1.0:
+        return None
+
+    # 4. VIG_EXTREME
+    if market_vig > 1.08 or market_vig < 0.92:
+        return ExitSignal(
+            trade_id=position.trade_id,
+            trigger="VIG_EXTREME",
+            reason=f"Market vig={market_vig:.3f} outside [0.92, 1.08]",
+        )
+
+    if not _edge_context_has_probability_authority(current_edge_context):
+        logger.info(
+            "Exit probability authority unavailable for %s; holding probability-dependent triggers",
+            position.trade_id,
+        )
+        return None
+
+    # Phase 3 Hard-Trigger Metrics (Model/probability-dependent deterioration)
     if current_edge_context.divergence_score >= divergence_hard_threshold():
         return ExitSignal(
             trade_id=position.trade_id,
@@ -99,18 +143,6 @@ def evaluate_exit_triggers(
             ),
             urgency="immediate",
         )
-        
-    if current_edge_context.market_velocity_1h <= -0.15:
-        return ExitSignal(
-            trade_id=position.trade_id,
-            trigger="FLASH_CRASH_PANIC",
-            reason=f"Adverse market velocity {current_edge_context.market_velocity_1h:.2f}/hr detected",
-            urgency="immediate"
-        )
-
-    # Layer 8: Micro-position hold (< $1 never sold, hold to settlement)
-    if position.effective_cost_basis_usd < 1.0:
-        return None
 
     # Compute forward edge natively extracted from bounded context object
     forward_edge = current_edge_context.forward_edge
@@ -132,14 +164,6 @@ def evaluate_exit_triggers(
     if exit_signal is not None:
         return exit_signal
 
-    # 4. VIG_EXTREME
-    if market_vig > 1.08 or market_vig < 0.92:
-        return ExitSignal(
-            trade_id=position.trade_id,
-            trigger="VIG_EXTREME",
-            reason=f"Market vig={market_vig:.3f} outside [0.92, 1.08]",
-        )
-
     return None
 
 
@@ -150,6 +174,8 @@ def _evaluate_buy_yes_exit(
 ) -> Optional[ExitSignal]:
     """Buy-yes exit: standard 2-consecutive-cycle EDGE_REVERSAL with EV gate."""
     if False: _ = position.entry_method
+    if not _edge_context_has_probability_authority(current_edge_context):
+        return None
     forward_edge = current_edge_context.forward_edge
     evidence_edge = conservative_forward_edge(forward_edge, current_edge_context.ci_width)
 
@@ -167,7 +193,10 @@ def _evaluate_buy_yes_exit(
     if best_bid is not None:
         shares = position.effective_shares
         net_sell = shares * best_bid
-        net_hold = _declared_zero_cost_hold_value(shares, position.p_posterior).net_value
+        net_hold = _declared_zero_cost_hold_value(
+            shares,
+            current_edge_context.p_posterior,
+        ).net_value
         if net_sell <= net_hold:
             logger.info("EV gate: sell $%.2f <= hold EV $%.2f — HOLD despite reversal",
                         net_sell, net_hold)
@@ -198,6 +227,8 @@ def _evaluate_buy_no_exit(
     Threshold scales with uncertainty (deeper reversal needed for noisy cities).
     """
     if False: _ = position.entry_method  # Semantic provenance guard
+    if not _edge_context_has_probability_authority(current_edge_context):
+        return None
     forward_edge = current_edge_context.forward_edge
     evidence_edge = conservative_forward_edge(forward_edge, current_edge_context.ci_width)
     edge_threshold = buy_no_edge_threshold(position.entry_ci_width)

@@ -516,6 +516,7 @@ def test_monitor_quote_refresh_changes_exit_price_not_posterior_dispatch(monkeyp
 
     def _recompute(position, current_p_market, registry, **context):
         dispatched_market_inputs.append(float(current_p_market))
+        monitor_refresh._set_monitor_probability_fresh(position, True)
         return 0.63
 
     monkeypatch.setattr(monitor_refresh, "recompute_native_probability", _recompute)
@@ -550,11 +551,11 @@ def test_monitor_quote_refresh_survives_microstructure_log_failure(monkeypatch):
 
     monkeypatch.setattr("src.state.db.log_microstructure", _raise_log_failure)
     monkeypatch.setattr(monitor_refresh, "_detect_whale_toxicity_from_orderbook", lambda *args, **kwargs: False)
-    monkeypatch.setattr(
-        monitor_refresh,
-        "recompute_native_probability",
-        lambda position, current_p_market, registry, **context: 0.63,
-    )
+    def _recompute(position, current_p_market, registry, **context):
+        monitor_refresh._set_monitor_probability_fresh(position, True)
+        return 0.63
+
+    monkeypatch.setattr(monitor_refresh, "recompute_native_probability", _recompute)
 
     pos = _position(entry_price=0.44, p_posterior=0.58)
     edge_ctx = monitor_refresh.refresh_position(
@@ -601,6 +602,7 @@ def test_refresh_position_support_topology_stale_blocks_exit_probability(monkeyp
 
     assert pos.last_monitor_prob == pytest.approx(0.41)
     assert pos.last_monitor_prob_is_fresh is False
+    assert not np.isfinite(pos.last_monitor_edge)
     assert "support_topology_stale" in pos.applied_validations
     assert not np.isfinite(edge_ctx.p_posterior)
     assert not np.isfinite(edge_ctx.forward_edge)
@@ -918,7 +920,7 @@ def test_chain_reconciliation_updates_live_position_from_chain(monkeypatch, tmp_
     monkeypatch.setattr(cycle_runner, "get_current_level", lambda: RiskLevel.GREEN)
     monkeypatch.setattr(cycle_runner, "get_connection", lambda: get_connection(db_path))
     monkeypatch.setattr(cycle_runner, "load_portfolio", lambda: portfolio)
-    monkeypatch.setattr("src.state.db.get_trade_connection_with_world", lambda *_: get_connection(db_path))
+    monkeypatch.setattr("src.state.db.get_trade_connection_with_world", lambda *_, **__: get_connection(db_path))
     monkeypatch.setattr(cycle_runner, "save_portfolio", lambda state, *args, **kwargs: None)
     monkeypatch.setattr(cycle_runner, "PolymarketClient", DummyClob)
     monkeypatch.setattr(cycle_runner, "get_tracker", lambda: StrategyTracker())
@@ -1589,7 +1591,7 @@ def test_trade_and_no_trade_artifacts_carry_replay_reference_fields(monkeypatch,
 
     monkeypatch.setattr(cycle_runner, "get_current_level", lambda: RiskLevel.GREEN)
     monkeypatch.setattr(cycle_runner, "get_connection", lambda: get_connection(db_path))
-    monkeypatch.setattr("src.state.db.get_trade_connection_with_world", lambda *_: get_connection(db_path))
+    monkeypatch.setattr("src.state.db.get_trade_connection_with_world", lambda *_, **__: get_connection(db_path))
     monkeypatch.setattr(cycle_runner, "load_portfolio", lambda: portfolio)
     monkeypatch.setattr(cycle_runner, "save_portfolio", lambda state, *args, **kwargs: None)
     monkeypatch.setattr(cycle_runner, "PolymarketClient", DummyClob)
@@ -4781,6 +4783,7 @@ def _insert_runtime_transfer_sigma_row(
     if source_model_brier_insample is None:
         source_model_brier_insample = brier_source
     if insert_target_pairs and n_pairs > 0 and 0.0 <= brier_target < 1.0:
+        target_pair_count = max(n_pairs * 5, n_pairs)
         p_raw = 1.0 - float(np.sqrt(brier_target))
         if 0.0 < p_raw < 1.0:
             target_rows = [
@@ -4788,6 +4791,7 @@ def _insert_runtime_transfer_sigma_row(
                     5 * (i + 1),
                     "test_city",
                     f"2026-03-{(i % 28) + 1:02d}",
+                    f"transfer_dg_{i}",
                     metric,
                     "high_temp" if metric == "high" else "low_temp",
                     f"bucket_{i}",
@@ -4806,18 +4810,19 @@ def _insert_runtime_transfer_sigma_row(
                     "OK",
                     target_pair_recorded_at,
                 )
-                for i in range(n_pairs)
+                for i in range(target_pair_count)
             ]
             conn.executemany(
                 """
                 INSERT OR IGNORE INTO calibration_pairs_v2 (
                     pair_id,
-                    city, target_date, temperature_metric, observation_field, range_label,
+                    city, target_date, decision_group_id,
+                    temperature_metric, observation_field, range_label,
                     p_raw, outcome, lead_days, season, cluster,
                     forecast_available_at, data_version,
                     source_id, cycle, horizon_profile,
                     training_allowed, authority, causality_status, recorded_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 target_rows,
             )
@@ -5229,7 +5234,7 @@ def test_execute_discovery_phase_logs_rejected_live_entry_telemetry(monkeypatch,
 
     monkeypatch.setattr(cycle_runner, "get_current_level", lambda: RiskLevel.GREEN)
     monkeypatch.setattr(cycle_runner, "get_connection", lambda: get_connection(db_path))
-    monkeypatch.setattr("src.state.db.get_trade_connection_with_world", lambda *_: get_connection(db_path))
+    monkeypatch.setattr("src.state.db.get_trade_connection_with_world", lambda *_, **__: get_connection(db_path))
     monkeypatch.setattr(cycle_runner, "load_portfolio", lambda: portfolio)
     monkeypatch.setattr(cycle_runner, "save_portfolio", lambda state, *args, **kwargs: None)
     monkeypatch.setattr(cycle_runner, "PolymarketClient", DummyClob)
@@ -6896,11 +6901,11 @@ def test_load_portfolio_backfills_strategy_key_from_legacy_strategy(tmp_path):
     state = load_portfolio(path)
 
     # P4 (Tier 2.1): JSON fallback deleted. DB projection is empty in this
-    # test fixture, so load_portfolio returns degraded empty portfolio.
+    # test fixture, so load_portfolio returns canonical empty portfolio.
     # strategy_key backfilling was a JSON-path feature; canonical DB path
     # stores strategy_key directly in position_current.
     assert state.positions == []
-    assert state.portfolio_loader_degraded is True
+    assert state.portfolio_loader_degraded is False
 
 
 def test_load_portfolio_prefers_position_current_when_projection_exists(tmp_path, monkeypatch):
@@ -6908,7 +6913,7 @@ def test_load_portfolio_prefers_position_current_when_projection_exists(tmp_path
     path = tmp_path / "positions-live.json"
     conn = get_connection(db_path)
     init_schema(conn)
-    monkeypatch.setattr("src.state.db.get_trade_connection_with_world", lambda *_: get_connection(db_path))
+    monkeypatch.setattr("src.state.db.get_trade_connection_with_world", lambda *_, **__: get_connection(db_path))
     conn.execute(
         """
         INSERT INTO position_current (
@@ -6961,6 +6966,8 @@ def test_load_portfolio_prefers_position_current_when_projection_exists(tmp_path
     assert state.positions[0].state == "entered"
     assert state.positions[0].token_id == ""
     assert state.positions[0].no_token_id == ""
+    assert state.positions[0].last_monitor_prob is None
+    assert state.positions[0].last_monitor_edge is None
     # 2026-05-04 bankroll truth-chain cleanup: PortfolioState.bankroll defaults
     # to 0.0 ("uninitialized — ask bankroll_provider"). load_portfolio() no
     # longer seeds from retired config-literal capital.
@@ -6975,7 +6982,7 @@ def test_load_portfolio_reads_token_identity_from_position_current(tmp_path, mon
     path = tmp_path / "positions-live.json"
     conn = get_connection(db_path)
     init_schema(conn)
-    monkeypatch.setattr("src.state.db.get_trade_connection_with_world", lambda *_: get_connection(db_path))
+    monkeypatch.setattr("src.state.db.get_trade_connection_with_world", lambda *_, **__: get_connection(db_path))
     conn.execute(
         """
         INSERT INTO position_current (
@@ -7331,8 +7338,9 @@ def test_load_portfolio_reads_recent_exits_from_authoritative_settlement_rows(tm
         INSERT INTO position_events (
             event_id, position_id, event_version, sequence_no, event_type, occurred_at,
             phase_before, phase_after, strategy_key, decision_id, snapshot_id, order_id,
-            command_id, caused_by, idempotency_key, venue_status, source_module, payload_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            command_id, caused_by, idempotency_key, venue_status, source_module, payload_json,
+            env
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             "evt-recent-exit",
@@ -7353,6 +7361,7 @@ def test_load_portfolio_reads_recent_exits_from_authoritative_settlement_rows(tm
             None,
             "test",
             json.dumps(payload),
+            "live",
         ),
     )
     conn.commit()
@@ -7425,7 +7434,7 @@ def test_load_portfolio_treats_empty_projection_as_canonical_empty(tmp_path, mon
     path = tmp_path / "positions-live.json"
     conn = get_connection(db_path)
     init_schema(conn)
-    monkeypatch.setattr("src.state.db.get_trade_connection_with_world", lambda *_: get_connection(db_path))
+    monkeypatch.setattr("src.state.db.get_trade_connection_with_world", lambda *_, **__: get_connection(db_path))
     conn.close()
 
     path.write_text(json.dumps({
@@ -7458,7 +7467,7 @@ def test_load_portfolio_treats_empty_projection_as_canonical_despite_legacy_json
     path = tmp_path / "positions-live.json"
     conn = get_connection(db_path)
     init_schema(conn)
-    monkeypatch.setattr("src.state.db.get_trade_connection_with_world", lambda *_: get_connection(db_path))
+    monkeypatch.setattr("src.state.db.get_trade_connection_with_world", lambda *_, **__: get_connection(db_path))
     conn.commit()
     conn.close()
 
@@ -9564,6 +9573,8 @@ def test_orange_risk_exits_favorable_position_through_monitor_lifecycle(monkeypa
     assert summary["exits"] == 1
     assert artifact.monitor_results[0].should_exit is True
     assert artifact.monitor_results[0].exit_reason == "ORANGE_FAVORABLE_EXIT"
+    assert artifact.monitor_results[0].fresh_prob == pytest.approx(0.62)
+    assert artifact.monitor_results[0].fresh_edge == pytest.approx(0.21)
     assert captured["exit_context"].exit_reason == "ORANGE_FAVORABLE_EXIT"
     assert captured["position"].exit_trigger == "ORANGE_FAVORABLE_EXIT"
     assert "orange_favorable_bid_gate" in pos.applied_validations
@@ -9670,6 +9681,8 @@ def test_orange_risk_does_not_override_incomplete_exit_context(monkeypatch):
     assert summary["exits"] == 0
     assert artifact.monitor_results[0].should_exit is False
     assert artifact.monitor_results[0].exit_reason.startswith("INCOMPLETE_EXIT_CONTEXT")
+    assert artifact.monitor_results[0].fresh_prob is None
+    assert artifact.monitor_results[0].fresh_edge is None
 
 
 def test_yellow_risk_does_not_take_favorable_exit(monkeypatch):
@@ -9749,6 +9762,8 @@ def test_monitor_refresh_failure_near_settlement_is_operator_visible(monkeypatch
     assert summary["monitor_chain_missing_reasons"][0]["reason"] == "refresh_failed:RuntimeError"
     assert len(artifact.monitor_results) == 1
     assert artifact.monitor_results[0].exit_reason == "MONITOR_CHAIN_MISSING:refresh_failed:RuntimeError"
+    assert artifact.monitor_results[0].fresh_prob is None
+    assert artifact.monitor_results[0].fresh_edge is None
 
 
 def test_monitor_refresh_failure_far_from_settlement_is_not_chain_missing(monkeypatch):
@@ -9811,6 +9826,8 @@ def test_incomplete_exit_context_near_settlement_escalates_monitor_chain(monkeyp
     )
     assert len(artifact.monitor_results) == 1
     assert artifact.monitor_results[0].exit_reason.startswith("INCOMPLETE_EXIT_CONTEXT")
+    assert artifact.monitor_results[0].fresh_prob is None
+    assert artifact.monitor_results[0].fresh_edge is None
 
 
 def test_monitor_execution_failure_does_not_become_chain_missing(monkeypatch):
@@ -9889,6 +9906,8 @@ def test_time_context_failure_near_active_position_escalates_monitor_chain(monke
     assert summary["monitor_chain_missing_reasons"][0]["reason"].startswith("time_context_failed")
     assert len(artifact.monitor_results) == 1
     assert artifact.monitor_results[0].exit_reason.startswith("MONITOR_CHAIN_MISSING:time_context_failed")
+    assert artifact.monitor_results[0].fresh_prob is None
+    assert artifact.monitor_results[0].fresh_edge is None
 
 
 def test_monitoring_phase_persists_live_exit_telemetry_chain_with_canonical_entry_baseline(monkeypatch, tmp_path):

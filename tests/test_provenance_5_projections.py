@@ -2,8 +2,8 @@
 # Lifecycle: created=2026-04-27; last_reviewed=2026-05-07; last_reused=2026-05-07
 # Purpose: U2 antibodies for 5 raw provenance projections and CONFIRMED-only training.
 # Reuse: Run when venue command, order fact, trade fact, position lot, settlement provenance, or calibration ingestion changes.
-# Last reused/audited: 2026-05-07
-# Authority basis: docs/operations/task_2026-05-07_object_invariance_wave25/PLAN.md
+# Last reused/audited: 2026-05-08
+# Authority basis: docs/operations/task_2026-05-08_object_invariance_remaining_mainline/PLAN.md
 """U2 raw provenance schema tests for five distinct projections."""
 
 from __future__ import annotations
@@ -433,6 +433,429 @@ def test_position_lots_optimistic_vs_confirmed_split(conn):
     assert rows[1]["source_trade_fact_id"] == confirmed_fact_id
 
 
+def test_position_lots_preserve_fractional_trade_fact_size_authority(conn):
+    """position_lots.shares preserves the venue filled_size economic object."""
+    shares_column = {
+        row["name"]: row["type"]
+        for row in conn.execute("PRAGMA table_info(position_lots)").fetchall()
+    }["shares"]
+    assert shares_column.upper() == "TEXT"
+
+    _, _, command_id = _seed_snapshot_envelope_command(conn)
+    matched_fact_id = append_trade_fact(
+        conn,
+        trade_id="trade-fractional-matched",
+        venue_order_id="ord-u2",
+        command_id=command_id,
+        state="MATCHED",
+        filled_size="10.25",
+        fill_price="0.50",
+        source="WS_USER",
+        observed_at=NOW.isoformat(),
+        raw_payload_hash=HASH_A,
+        raw_payload_json={"state": "MATCHED", "size": "10.25"},
+    )
+
+    append_position_lot(
+        conn,
+        position_id=1,
+        state="OPTIMISTIC_EXPOSURE",
+        shares="10.25",
+        entry_price_avg="0.50",
+        source_command_id=command_id,
+        source_trade_fact_id=matched_fact_id,
+        captured_at=NOW.isoformat(),
+        state_changed_at=NOW.isoformat(),
+    )
+
+    row = conn.execute(
+        """
+        SELECT lot.shares, trade.filled_size
+          FROM position_lots lot
+          JOIN venue_trade_facts trade
+            ON trade.trade_fact_id = lot.source_trade_fact_id
+         WHERE lot.source_trade_fact_id = ?
+        """,
+        (matched_fact_id,),
+    ).fetchone()
+    assert Decimal(str(row["shares"])) == Decimal("10.25")
+    assert Decimal(str(row["shares"])) == Decimal(row["filled_size"])
+
+    with pytest.raises(ValueError, match="shares must equal"):
+        append_position_lot(
+            conn,
+            position_id=1,
+            state="OPTIMISTIC_EXPOSURE",
+            shares=10,
+            entry_price_avg="0.50",
+            source_command_id=command_id,
+            source_trade_fact_id=matched_fact_id,
+            captured_at=NOW.isoformat(),
+            state_changed_at=NOW.isoformat(),
+        )
+
+
+def test_active_exposure_lots_require_state_compatible_trade_fact_authority(conn):
+    _, _, command_id = _seed_snapshot_envelope_command(conn)
+    matched_fact_id = append_trade_fact(
+        conn,
+        trade_id="trade-authority-matched",
+        venue_order_id="ord-u2",
+        command_id=command_id,
+        state="MATCHED",
+        filled_size="10",
+        fill_price="0.50",
+        source="WS_USER",
+        observed_at=NOW.isoformat(),
+        raw_payload_hash=HASH_A,
+        raw_payload_json={"state": "MATCHED"},
+    )
+    confirmed_fact_id = append_trade_fact(
+        conn,
+        trade_id="trade-authority-confirmed",
+        venue_order_id="ord-u2",
+        command_id=command_id,
+        state="CONFIRMED",
+        filled_size="10",
+        fill_price="0.50",
+        tx_hash="0xconfirmed",
+        block_number=123,
+        confirmation_count=12,
+        source="CHAIN",
+        observed_at=(NOW + timedelta(seconds=1)).isoformat(),
+        raw_payload_hash=HASH_B,
+        raw_payload_json={"state": "CONFIRMED"},
+    )
+
+    with pytest.raises(ValueError, match="requires source_trade_fact_id"):
+        append_position_lot(
+            conn,
+            position_id=1,
+            state="CONFIRMED_EXPOSURE",
+            shares=10,
+            entry_price_avg="0.50",
+            source_command_id=command_id,
+            captured_at=NOW.isoformat(),
+            state_changed_at=NOW.isoformat(),
+        )
+
+    with pytest.raises(ValueError, match="CONFIRMED_EXPOSURE requires trade fact state"):
+        append_position_lot(
+            conn,
+            position_id=1,
+            state="CONFIRMED_EXPOSURE",
+            shares=10,
+            entry_price_avg="0.50",
+            source_command_id=command_id,
+            source_trade_fact_id=matched_fact_id,
+            captured_at=NOW.isoformat(),
+            state_changed_at=NOW.isoformat(),
+        )
+
+    with pytest.raises(ValueError, match="OPTIMISTIC_EXPOSURE requires trade fact state"):
+        append_position_lot(
+            conn,
+            position_id=1,
+            state="OPTIMISTIC_EXPOSURE",
+            shares=10,
+            entry_price_avg="0.50",
+            source_command_id=command_id,
+            source_trade_fact_id=confirmed_fact_id,
+            captured_at=NOW.isoformat(),
+            state_changed_at=NOW.isoformat(),
+        )
+
+    _insert_command(conn, command_id="cmd-other")
+    with pytest.raises(ValueError, match="source_command_id must match"):
+        append_position_lot(
+            conn,
+            position_id=1,
+            state="CONFIRMED_EXPOSURE",
+            shares=10,
+            entry_price_avg="0.50",
+            source_command_id="cmd-other",
+            source_trade_fact_id=confirmed_fact_id,
+            captured_at=NOW.isoformat(),
+            state_changed_at=NOW.isoformat(),
+        )
+
+    bad_fact_id = conn.execute(
+        """
+        INSERT INTO venue_trade_facts (
+            trade_id, venue_order_id, command_id, state, filled_size,
+            fill_price, source, observed_at, local_sequence,
+            raw_payload_hash, raw_payload_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "trade-authority-bad-economics",
+            "ord-u2",
+            command_id,
+            "CONFIRMED",
+            "0",
+            "0.50",
+            "CHAIN",
+            NOW.isoformat(),
+            1,
+            HASH_C,
+            json.dumps({"state": "CONFIRMED"}),
+        ),
+    ).lastrowid
+    with pytest.raises(ValueError, match="positive finite fill economics"):
+        append_position_lot(
+            conn,
+            position_id=1,
+            state="CONFIRMED_EXPOSURE",
+            shares=10,
+            entry_price_avg="0.50",
+            source_command_id=command_id,
+            source_trade_fact_id=int(bad_fact_id),
+            captured_at=NOW.isoformat(),
+            state_changed_at=NOW.isoformat(),
+        )
+
+    with pytest.raises(ValueError, match="shares must equal"):
+        append_position_lot(
+            conn,
+            position_id=1,
+            state="CONFIRMED_EXPOSURE",
+            shares=999,
+            entry_price_avg="0.50",
+            source_command_id=command_id,
+            source_trade_fact_id=confirmed_fact_id,
+            captured_at=NOW.isoformat(),
+            state_changed_at=NOW.isoformat(),
+        )
+
+    with pytest.raises(ValueError, match="entry_price_avg must equal"):
+        append_position_lot(
+            conn,
+            position_id=1,
+            state="OPTIMISTIC_EXPOSURE",
+            shares=10,
+            entry_price_avg="0.99",
+            source_command_id=command_id,
+            source_trade_fact_id=matched_fact_id,
+            captured_at=NOW.isoformat(),
+            state_changed_at=NOW.isoformat(),
+        )
+
+    conn.execute(
+        "UPDATE venue_commands SET intent_kind = 'EXIT', side = 'SELL' WHERE command_id = ?",
+        (command_id,),
+    )
+    with pytest.raises(ValueError, match="ENTRY BUY"):
+        append_position_lot(
+            conn,
+            position_id=1,
+            state="CONFIRMED_EXPOSURE",
+            shares=10,
+            entry_price_avg="0.50",
+            source_command_id=command_id,
+            source_trade_fact_id=confirmed_fact_id,
+            captured_at=NOW.isoformat(),
+            state_changed_at=NOW.isoformat(),
+        )
+
+
+def test_position_lots_schema_rejects_direct_active_exposure_without_trade_authority(conn):
+    _, _, command_id = _seed_snapshot_envelope_command(conn)
+
+    with pytest.raises(sqlite3.IntegrityError, match="OPTIMISTIC_EXPOSURE requires"):
+        conn.execute(
+            """
+            INSERT INTO position_lots (
+                position_id, state, shares, entry_price_avg, source_command_id,
+                captured_at, state_changed_at, source, observed_at,
+                local_sequence, raw_payload_hash, raw_payload_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                1,
+                "OPTIMISTIC_EXPOSURE",
+                10,
+                "0.50",
+                command_id,
+                NOW.isoformat(),
+                NOW.isoformat(),
+                "WS_USER",
+                NOW.isoformat(),
+                1,
+                HASH_A,
+                "{}",
+            ),
+        )
+
+    confirmed_fact_id = append_trade_fact(
+        conn,
+        trade_id="trade-schema-confirmed",
+        venue_order_id="ord-u2",
+        command_id=command_id,
+        state="CONFIRMED",
+        filled_size="10",
+        fill_price="0.50",
+        source="CHAIN",
+        observed_at=NOW.isoformat(),
+        raw_payload_hash=HASH_B,
+        raw_payload_json={"state": "CONFIRMED"},
+    )
+    with pytest.raises(sqlite3.IntegrityError, match="OPTIMISTIC_EXPOSURE requires"):
+        conn.execute(
+            """
+            INSERT INTO position_lots (
+                position_id, state, shares, entry_price_avg, source_command_id,
+                source_trade_fact_id, captured_at, state_changed_at, source,
+                observed_at, local_sequence, raw_payload_hash, raw_payload_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                1,
+                "OPTIMISTIC_EXPOSURE",
+                10,
+                "0.50",
+                command_id,
+                confirmed_fact_id,
+                NOW.isoformat(),
+                NOW.isoformat(),
+                "WS_USER",
+                NOW.isoformat(),
+                1,
+                HASH_C,
+                "{}",
+            ),
+        )
+
+    with pytest.raises(sqlite3.IntegrityError, match="CONFIRMED_EXPOSURE requires"):
+        conn.execute(
+            """
+            INSERT INTO position_lots (
+                position_id, state, shares, entry_price_avg, source_command_id,
+                source_trade_fact_id, captured_at, state_changed_at, source,
+                observed_at, local_sequence, raw_payload_hash, raw_payload_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                1,
+                "CONFIRMED_EXPOSURE",
+                999,
+                "0.50",
+                command_id,
+                confirmed_fact_id,
+                NOW.isoformat(),
+                NOW.isoformat(),
+                "CHAIN",
+                NOW.isoformat(),
+                1,
+                HASH_A,
+                "{}",
+            ),
+        )
+
+    with pytest.raises(sqlite3.IntegrityError, match="CONFIRMED_EXPOSURE requires"):
+        conn.execute(
+            """
+            INSERT INTO position_lots (
+                position_id, state, shares, entry_price_avg, source_command_id,
+                source_trade_fact_id, captured_at, state_changed_at, source,
+                observed_at, local_sequence, raw_payload_hash, raw_payload_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                1,
+                "CONFIRMED_EXPOSURE",
+                10,
+                "0.99",
+                command_id,
+                confirmed_fact_id,
+                NOW.isoformat(),
+                NOW.isoformat(),
+                "CHAIN",
+                NOW.isoformat(),
+                1,
+                HASH_B,
+                "{}",
+            ),
+        )
+
+    bad_fact_id = conn.execute(
+        """
+        INSERT INTO venue_trade_facts (
+            trade_id, venue_order_id, command_id, state, filled_size,
+            fill_price, source, observed_at, local_sequence,
+            raw_payload_hash, raw_payload_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "trade-schema-bad-economics",
+            "ord-u2",
+            command_id,
+            "MATCHED",
+            "10bad",
+            "0.50",
+            "WS_USER",
+            NOW.isoformat(),
+            1,
+            HASH_D,
+            json.dumps({"state": "MATCHED"}),
+        ),
+    ).lastrowid
+    with pytest.raises(sqlite3.IntegrityError, match="OPTIMISTIC_EXPOSURE requires"):
+        conn.execute(
+            """
+            INSERT INTO position_lots (
+                position_id, state, shares, entry_price_avg, source_command_id,
+                source_trade_fact_id, captured_at, state_changed_at, source,
+                observed_at, local_sequence, raw_payload_hash, raw_payload_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                1,
+                "OPTIMISTIC_EXPOSURE",
+                10,
+                "0.50",
+                command_id,
+                int(bad_fact_id),
+                NOW.isoformat(),
+                NOW.isoformat(),
+                "WS_USER",
+                NOW.isoformat(),
+                1,
+                HASH_E,
+                "{}",
+            ),
+        )
+
+    conn.execute(
+        "UPDATE venue_commands SET intent_kind = 'EXIT', side = 'SELL' WHERE command_id = ?",
+        (command_id,),
+    )
+    with pytest.raises(sqlite3.IntegrityError, match="CONFIRMED_EXPOSURE requires"):
+        conn.execute(
+            """
+            INSERT INTO position_lots (
+                position_id, state, shares, entry_price_avg, source_command_id,
+                source_trade_fact_id, captured_at, state_changed_at, source,
+                observed_at, local_sequence, raw_payload_hash, raw_payload_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                1,
+                "CONFIRMED_EXPOSURE",
+                10,
+                "0.50",
+                command_id,
+                confirmed_fact_id,
+                NOW.isoformat(),
+                NOW.isoformat(),
+                "CHAIN",
+                NOW.isoformat(),
+                1,
+                HASH_C,
+                "{}",
+            ),
+        )
+
+
 def test_calibration_training_filters_for_CONFIRMED_only(conn):
     _, _, command_id = _seed_snapshot_envelope_command(conn)
     for state in ("MATCHED", "MINED", "CONFIRMED"):
@@ -495,7 +918,7 @@ def test_optimistic_exposure_rolled_back_on_FAILED_trade(conn):
         venue_order_id="ord-u2",
         command_id=command_id,
         state="MATCHED",
-        filled_size="10",
+        filled_size="10.5",
         fill_price="0.50",
         source="WS_USER",
         observed_at=NOW.isoformat(),
@@ -506,7 +929,7 @@ def test_optimistic_exposure_rolled_back_on_FAILED_trade(conn):
         conn,
         position_id=1,
         state="OPTIMISTIC_EXPOSURE",
-        shares=10,
+        shares="10.5",
         entry_price_avg="0.50",
         source_command_id=command_id,
         source_trade_fact_id=matched_fact_id,
@@ -519,8 +942,8 @@ def test_optimistic_exposure_rolled_back_on_FAILED_trade(conn):
         venue_order_id="ord-u2",
         command_id=command_id,
         state="FAILED",
-        filled_size="10",
-        fill_price="0.50",
+        filled_size="0",
+        fill_price="0",
         source="CHAIN",
         observed_at=(NOW + timedelta(seconds=2)).isoformat(),
         raw_payload_hash=HASH_B,
@@ -534,13 +957,19 @@ def test_optimistic_exposure_rolled_back_on_FAILED_trade(conn):
         state_changed_at=(NOW + timedelta(seconds=3)).isoformat(),
     )
 
-    states = [
-        r["state"]
-        for r in conn.execute(
-            "SELECT state FROM position_lots WHERE position_id = 1 ORDER BY lot_id"
-        )
+    rows = conn.execute(
+        """
+        SELECT state, shares, source_trade_fact_id
+          FROM position_lots
+         WHERE position_id = 1
+         ORDER BY lot_id
+        """
+    ).fetchall()
+    assert [(r["state"], r["shares"]) for r in rows] == [
+        ("OPTIMISTIC_EXPOSURE", "10.5"),
+        ("QUARANTINED", "10.5"),
     ]
-    assert states == ["OPTIMISTIC_EXPOSURE", "QUARANTINED"]
+    assert rows[-1]["source_trade_fact_id"] == failed_fact_id
 
 
 def test_full_provenance_chain_reconstructable(conn):

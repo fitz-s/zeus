@@ -1108,16 +1108,14 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
 
     Blueprint v2 §7 Layer 1: uses same method as entry (p_raw_vector with MC noise).
     Returns: EdgeContext wrapping both fresh market and semantic provenance.
-    Falls back to stored values if refresh fails.
+    Missing probability authority materializes as non-finite probability fields.
     """
     current_p_market = (
         pos.last_monitor_market_price
         if pos.last_monitor_market_price is not None
         else pos.entry_price
     )
-    current_p_posterior = pos.p_posterior
-    support_topology_stale = False
-
+    current_p_posterior = float("nan")
     if pos.direction not in {"buy_yes", "buy_no"}:
         logger.warning("Skipping refresh for %s: unknown direction %r", pos.trade_id, pos.direction)
         raise ValueError(f"Unknown direction {pos.direction} for trade {pos.trade_id}")
@@ -1148,7 +1146,7 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
 
     try:
         target_d = date.fromisoformat(pos.target_date)
-        current_p_posterior, refresh_pos, prob_refresh_is_fresh = monitor_probability_refresh(
+        refreshed_p_posterior, refresh_pos, prob_refresh_is_fresh = monitor_probability_refresh(
             pos,
             conn=conn,
             city=city,
@@ -1161,22 +1159,29 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
         if _bootstrap_ctx is not None:
             setattr(pos, "_bootstrap_context", _bootstrap_ctx)
 
-        # Persist monitor state on Position
-        pos.last_monitor_prob_is_fresh = True if prob_refresh_is_fresh is None else bool(prob_refresh_is_fresh)
-        support_topology_stale = (
-            not pos.last_monitor_prob_is_fresh
-            and "support_topology_stale" in pos.applied_validations
-        )
-        if support_topology_stale:
-            current_p_posterior = float("nan")
-        else:
+        # Persist monitor state on Position only when the producer explicitly
+        # attests freshness. Stored entry-time posterior is not a current
+        # monitor probability and must not be relabeled as such.
+        pos.last_monitor_prob_is_fresh = prob_refresh_is_fresh is True
+        if pos.last_monitor_prob_is_fresh:
+            current_p_posterior = float(refreshed_p_posterior)
             pos.last_monitor_prob = current_p_posterior
             pos.last_monitor_edge = current_p_posterior - current_p_market
+        else:
+            current_p_posterior = float("nan")
+            pos.last_monitor_edge = float("nan")
+            _append_monitor_validation(pos, "monitor_probability_stale")
+            if prob_refresh_is_fresh is None:
+                _append_monitor_validation(pos, "monitor_probability_authority_unknown")
         if not market_refreshed:
             pos.last_monitor_market_price = current_p_market
 
     except Exception as e:
         logger.debug("ENS refresh failed for %s: %s", pos.trade_id, e)
+        pos.last_monitor_prob_is_fresh = False
+        current_p_posterior = float("nan")
+        pos.last_monitor_edge = float("nan")
+        _append_monitor_validation(pos, "monitor_probability_refresh_failed")
 
     pos.last_monitor_whale_toxicity = _detect_whale_toxicity_from_orderbook(
         conn,
@@ -1186,7 +1191,15 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
         held_best_ask=pos.last_monitor_best_ask,
     )
 
-    divergence_score = abs(current_p_posterior - current_p_market)
+    probability_authority_available = (
+        pos.last_monitor_prob_is_fresh
+        and np.isfinite(current_p_posterior)
+    )
+    divergence_score = (
+        abs(current_p_posterior - current_p_market)
+        if probability_authority_available
+        else float("nan")
+    )
     market_velocity_1h = 0.0
 
     # Try fetching 1h velocity if we know the token
@@ -1206,7 +1219,11 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
             logger.debug("Failed to calculate market velocity for %s: %s", pos.trade_id, e)
 
     # Wrap into verified EdgeContext
-    current_forward_edge = current_p_posterior - current_p_market
+    current_forward_edge = (
+        current_p_posterior - current_p_market
+        if probability_authority_available
+        else float("nan")
+    )
 
     # A1: Recompute bootstrap CI from fresh data (symmetric with entry path).
     # Slice P3.2 + P3-fix3 (post-review critic Major #2, 2026-04-26): when
@@ -1231,7 +1248,7 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
     ci_lower = current_forward_edge - _entry_ci_half
     ci_upper = current_forward_edge + _entry_ci_half
     bootstrap_ctx = getattr(pos, "_bootstrap_context", None)
-    if support_topology_stale:
+    if not probability_authority_available:
         ci_lower = float("nan")
         ci_upper = float("nan")
     elif bootstrap_ctx is None or len(bootstrap_ctx.get("bins", []) if bootstrap_ctx else []) <= 1:
@@ -1241,7 +1258,7 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
             getattr(pos, "trade_id", "?"),
             getattr(pos, "entry_ci_width", 0.0),
         )
-    if support_topology_stale:
+    if not probability_authority_available:
         pass
     elif bootstrap_ctx is not None and len(bootstrap_ctx["bins"]) > 1:
         try:

@@ -146,6 +146,16 @@ make a surface default-read unless `current_state.md` routes it.
 | `task_2026-05-05_object_invariance_wave20/PLAN.md` | topology planning packet | Route evidence for exit snapshot hash preservation through execute_exit_order retry/recovery paths |
 | `task_2026-05-05_object_invariance_wave21/` | plan packet container | Planning-lock evidence for object-meaning invariance Wave 21 exchange-reconcile freshness authority repair |
 | `task_2026-05-05_object_invariance_wave21/PLAN.md` | topology planning packet | Route evidence for venue-read freshness authority before M5 absence findings |
+| `task_2026-05-08_object_invariance_wave27/` | plan packet container | Planning-lock evidence for object-meaning invariance Wave 27 trade-fact to position-lot exposure authority repair |
+| `task_2026-05-08_object_invariance_wave27/PLAN.md` | topology planning packet | Route evidence for state-compatible venue trade facts before active `position_lots` exposure authority |
+| `task_2026-05-08_object_invariance_wave28/` | plan packet container | Planning-lock evidence for object-meaning invariance Wave 28 monitor posterior to exit EV gate repair |
+| `task_2026-05-08_object_invariance_wave28/PLAN.md` | topology planning packet | Route evidence for monitor-current native posterior preservation through exit trigger hold-value EV gates |
+| `task_2026-05-08_object_invariance_wave29/` | plan packet container | Planning-lock evidence for object-meaning invariance Wave 29 monitor result reporting probability authority repair |
+| `task_2026-05-08_object_invariance_wave29/PLAN.md` | topology planning packet | Route evidence for preventing skipped/error monitor results from reporting stale probabilities as fresh |
+| `task_2026-05-08_object_invariance_wave30/` | plan packet container | Planning-lock evidence for object-meaning invariance Wave 30 position_current monitor probability read-model authority repair |
+| `task_2026-05-08_object_invariance_wave30/PLAN.md` | topology planning packet | Route evidence for preserving missing monitor probability and edge through canonical portfolio loader view |
+| `task_2026-05-08_object_invariance_remaining_mainline/` | closeout packet container | Remaining object-meaning invariance mainline closeout packet for Wave22/23 evidence, failed-trade rollback repair, downstream sweep, and read-only contamination audit |
+| `task_2026-05-08_object_invariance_remaining_mainline/PLAN.md` | closeout ledger | Evidence and verification for remaining mainline closure; not live unlock, data mutation authority, backfill, relabel, or report-publication authority |
 | `task_2026-05-06_calibration_quality_blockers/` | active packet container | 2026-05-06 launch-blocker remediation packet for calibration quality (12 inverted-slope Platts quarantined + fit-time guard) |
 | `task_2026-05-06_calibration_quality_blockers/PLAN.md` | active packet plan | LOW/HIGH calibration alignment recovery plan covering contract-window evidence persistence, recovery snapshot backfill, LOW pair rebuild gates, and calibration authority shadow gating |
 | `task_2026-05-06_calibration_quality_blockers/QUARANTINE_LEDGER.md` | active packet evidence | Ledger of the 12 QUARANTINED platt_models_v2 buckets with reversibility queries and fallback-chain analysis |

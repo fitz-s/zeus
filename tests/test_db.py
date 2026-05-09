@@ -10,7 +10,7 @@ import json
 import sqlite3
 import tempfile
 import types
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 import pytest
@@ -3392,6 +3392,242 @@ def test_query_no_trade_cases_reads_live_only_rows(tmp_path):
     conn.close()
 
     assert [case["decision_id"] for case in cases] == ["live-1"]
+
+
+def _insert_s2_position_event(
+    conn,
+    *,
+    position_id: str,
+    sequence_no: int,
+    event_type: str,
+    occurred_at: str,
+    strategy_key: str = "center_buy",
+    phase_before: str | None = None,
+    phase_after: str | None = None,
+    order_id: str | None = None,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO position_events (
+            event_id, position_id, event_version, sequence_no, event_type,
+            occurred_at, phase_before, phase_after, strategy_key, decision_id,
+            snapshot_id, order_id, command_id, caused_by, idempotency_key,
+            venue_status, source_module, env, payload_json
+        ) VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            f"{position_id}:{sequence_no}:{event_type.lower()}",
+            position_id,
+            sequence_no,
+            event_type,
+            occurred_at,
+            phase_before,
+            phase_after,
+            strategy_key,
+            f"decision-{position_id}",
+            f"snapshot-{position_id}",
+            order_id,
+            None,
+            None,
+            f"{position_id}:{sequence_no}:{event_type.lower()}",
+            None,
+            "tests.test_db",
+            "live",
+            json.dumps({"test_surface": "s2_lifecycle_funnel"}),
+        ),
+    )
+
+
+def test_query_lifecycle_funnel_report_certifies_event_no_trade_chain(tmp_path):
+    from src.state.decision_chain import query_lifecycle_funnel_report
+
+    db_path = tmp_path / "test.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+    now = "2026-05-08T16:00:00+00:00"
+    conn.execute(
+        "INSERT INTO decision_log (mode, started_at, completed_at, artifact_json, timestamp, env) VALUES (?, ?, ?, ?, ?, ?)",
+        (
+            "opening_hunt",
+            now,
+            now,
+            json.dumps(
+                {
+                    "no_trade_cases": [
+                        {
+                            "decision_id": "nt-edge",
+                            "strategy": "center_buy",
+                            "rejection_stage": "EDGE_INSUFFICIENT",
+                        }
+                    ]
+                }
+            ),
+            now,
+            "live",
+        ),
+    )
+    _insert_s2_position_event(
+        conn,
+        position_id="filled-1",
+        sequence_no=1,
+        event_type="POSITION_OPEN_INTENT",
+        occurred_at=now,
+        phase_after="pending_entry",
+    )
+    _insert_s2_position_event(
+        conn,
+        position_id="filled-1",
+        sequence_no=2,
+        event_type="ENTRY_ORDER_POSTED",
+        occurred_at=now,
+        phase_before="pending_entry",
+        phase_after="pending_entry",
+        order_id="order-filled-1",
+    )
+    _insert_s2_position_event(
+        conn,
+        position_id="filled-1",
+        sequence_no=3,
+        event_type="ENTRY_ORDER_FILLED",
+        occurred_at=now,
+        phase_before="pending_entry",
+        phase_after="active",
+        order_id="order-filled-1",
+    )
+    _insert_s2_position_event(
+        conn,
+        position_id="filled-1",
+        sequence_no=4,
+        event_type="SETTLED",
+        occurred_at=now,
+        phase_before="active",
+        phase_after="settled",
+        order_id="order-filled-1",
+    )
+    _insert_s2_position_event(
+        conn,
+        position_id="pending-1",
+        sequence_no=1,
+        event_type="POSITION_OPEN_INTENT",
+        occurred_at=now,
+        phase_after="pending_entry",
+        strategy_key="opening_inertia",
+    )
+    _insert_s2_position_event(
+        conn,
+        position_id="pending-1",
+        sequence_no=2,
+        event_type="ENTRY_ORDER_POSTED",
+        occurred_at=now,
+        phase_before="pending_entry",
+        phase_after="pending_entry",
+        strategy_key="opening_inertia",
+        order_id="order-pending-1",
+    )
+    _insert_s2_position_event(
+        conn,
+        position_id="rejected-1",
+        sequence_no=1,
+        event_type="POSITION_OPEN_INTENT",
+        occurred_at=now,
+        phase_after="pending_entry",
+    )
+    _insert_s2_position_event(
+        conn,
+        position_id="rejected-1",
+        sequence_no=2,
+        event_type="ENTRY_ORDER_REJECTED",
+        occurred_at=now,
+        phase_before="pending_entry",
+        phase_after="voided",
+    )
+    conn.commit()
+
+    report = query_lifecycle_funnel_report(conn, not_before="2026-05-08T00:00:00+00:00")
+    conn.close()
+
+    assert report["status"] == "observed"
+    assert report["counts"] == {
+        "evaluated": 4,
+        "selected": 3,
+        "rejected": 2,
+        "submitted": 2,
+        "filled": 1,
+        "learned": 1,
+    }
+    assert report["rejection_breakdown"] == {
+        "pre_entry_no_trade": 1,
+        "post_selection_entry_rejected": 1,
+    }
+    assert report["relationships"] == {
+        "selected_lte_evaluated": True,
+        "submitted_lte_selected": True,
+        "filled_lte_submitted": True,
+        "learned_lte_filled": True,
+    }
+    assert report["by_strategy"]["center_buy"]["evaluated"] == 3
+    assert report["by_strategy"]["center_buy"]["rejected"] == 2
+    assert report["by_strategy"]["opening_inertia"]["submitted"] == 1
+    assert report["certification"]["empty_trade_tables_certified"] is False
+    assert report["authority"] == "derived_operator_visibility"
+
+
+def test_query_lifecycle_funnel_report_certifies_empty_state(tmp_path):
+    from src.state.decision_chain import query_lifecycle_funnel_report
+
+    db_path = tmp_path / "test.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+
+    report = query_lifecycle_funnel_report(conn, not_before="2026-05-08T00:00:00+00:00")
+    conn.close()
+
+    assert report["status"] == "certified_empty"
+    assert report["counts"] == {
+        "evaluated": 0,
+        "selected": 0,
+        "rejected": 0,
+        "submitted": 0,
+        "filled": 0,
+        "learned": 0,
+    }
+    assert report["certification"]["empty_trade_tables_certified"] is True
+    assert report["source_errors"] == []
+
+
+def test_query_lifecycle_funnel_report_applies_hours_to_position_events(tmp_path):
+    from src.state.decision_chain import query_lifecycle_funnel_report
+
+    db_path = tmp_path / "test.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+    recent = datetime.now(timezone.utc).isoformat()
+    old = (datetime.now(timezone.utc) - timedelta(hours=72)).isoformat()
+
+    _insert_s2_position_event(
+        conn,
+        position_id="recent-1",
+        sequence_no=1,
+        event_type="POSITION_OPEN_INTENT",
+        occurred_at=recent,
+        phase_after="pending_entry",
+    )
+    _insert_s2_position_event(
+        conn,
+        position_id="old-1",
+        sequence_no=1,
+        event_type="POSITION_OPEN_INTENT",
+        occurred_at=old,
+        phase_after="pending_entry",
+    )
+    conn.commit()
+
+    report = query_lifecycle_funnel_report(conn, hours=24, not_before=None)
+    conn.close()
+
+    assert report["counts"]["evaluated"] == 1
+    assert report["counts"]["selected"] == 1
+    assert report["by_strategy"]["center_buy"]["evaluated"] == 1
 
 
 @pytest.mark.skip(reason="P9: legacy position_events write path eliminated")

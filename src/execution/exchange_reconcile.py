@@ -455,7 +455,7 @@ def _append_linkable_trade_fact_if_missing(
         )
         if same_fill_economics and str(latest_fact.get("state") or "") == state:
             return None
-        if not same_fill_economics:
+        if state in {"MATCHED", "MINED", "CONFIRMED"} and not same_fill_economics:
             return record_finding(
                 conn,
                 kind="unrecorded_trade",

@@ -2,10 +2,11 @@
 # Lifecycle: created=2026-04-27; last_reviewed=2026-04-30; last_reused=2026-04-30
 # Purpose: R3 M3 Polymarket user-channel WS ingest and fail-closed gap guard antibodies.
 # Reuse: Run when user WebSocket ingest, U2 venue facts, or submit gap guards change.
-# Last reused/audited: 2026-05-06
+# Last reused/audited: 2026-05-08
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/M3.yaml;
 #                  PR 37 review: clean-reconnect proof ignores resolved history
-#                  while preserving active side-effect state.
+#                  while preserving active side-effect state;
+#                  docs/operations/task_2026-05-08_object_invariance_wave27/PLAN.md.
 """M3: user-channel WS messages become U2 facts; gaps block new submit."""
 
 from __future__ import annotations
@@ -26,6 +27,7 @@ from src.state.snapshot_repo import insert_snapshot
 from src.state.venue_command_repo import (
     append_event,
     append_position_lot,
+    append_trade_fact,
     insert_command,
     insert_submission_envelope,
     load_calibration_trade_facts,
@@ -158,6 +160,22 @@ def _seed_acknowledged_command(c) -> None:
     append_event(c, command_id="cmd-ws", event_type="SUBMIT_REQUESTED", occurred_at=NOW.isoformat())
     append_event(c, command_id="cmd-ws", event_type="SUBMIT_ACKED", occurred_at=NOW.isoformat())
     c.commit()
+
+
+def _seed_lot_trade_fact(c, *, state: str, trade_id: str) -> int:
+    return append_trade_fact(
+        c,
+        trade_id=trade_id,
+        venue_order_id="ord-ws",
+        command_id="cmd-ws",
+        state=state,
+        filled_size="1",
+        fill_price="0.50",
+        source="CHAIN" if state == "CONFIRMED" else "WS_USER",
+        observed_at=NOW,
+        raw_payload_hash=HASH_A,
+        raw_payload_json={"state": state, "fixture": "position_lot_authority"},
+    )
 
 
 def _ingestor(c, gaps: list | None = None) -> PolymarketUserChannelIngestor:
@@ -425,6 +443,18 @@ def test_matched_trade_without_positive_fill_economics_requires_review_not_optim
     assert _rows(conn, "venue_trade_facts") == []
     assert _rows(conn, "position_lots") == []
     assert _command_state(conn) == "REVIEW_REQUIRED"
+
+
+def test_fractional_matched_trade_preserves_exact_lot_size(conn):
+    """WS trade filled_size and position_lot shares remain the same venue object."""
+    result = _ingestor(conn).handle_message(_trade_message("MATCHED", size="5.25"))
+
+    assert result["trade_fact_id"]
+    trade_fact = _rows(conn, "venue_trade_facts")[0]
+    lot = _rows(conn, "position_lots")[0]
+    assert Decimal(trade_fact["filled_size"]) == Decimal("5.25")
+    assert Decimal(str(lot["shares"])) == Decimal("5.25")
+    assert Decimal(str(lot["shares"])) == Decimal(trade_fact["filled_size"])
 
 
 def test_exit_sell_confirmed_trade_does_not_mint_positive_exposure_lot(conn):
@@ -721,6 +751,11 @@ def test_subscribe_reconnect_with_settled_lot_history_clears_m5_requirement(conn
 
 def test_subscribe_reconnect_with_confirmed_exposure_preserves_m5_requirement(conn):
     conn.execute("UPDATE venue_commands SET state = 'FILLED' WHERE command_id = 'cmd-ws'")
+    trade_fact_id = _seed_lot_trade_fact(
+        conn,
+        state="CONFIRMED",
+        trade_id="trade-gap-confirmed",
+    )
     append_position_lot(
         conn,
         position_id=99,
@@ -728,6 +763,7 @@ def test_subscribe_reconnect_with_confirmed_exposure_preserves_m5_requirement(co
         shares=1,
         entry_price_avg="0.50",
         source_command_id="cmd-ws",
+        source_trade_fact_id=trade_fact_id,
         captured_at=NOW,
         state_changed_at=NOW,
     )
@@ -750,6 +786,11 @@ def test_subscribe_reconnect_with_confirmed_exposure_preserves_m5_requirement(co
 
 def test_subscribe_reconnect_with_unresolved_lot_preserves_m5_requirement(conn):
     conn.execute("UPDATE venue_commands SET state = 'FILLED' WHERE command_id = 'cmd-ws'")
+    trade_fact_id = _seed_lot_trade_fact(
+        conn,
+        state="MATCHED",
+        trade_id="trade-gap-matched",
+    )
     append_position_lot(
         conn,
         position_id=99,
@@ -757,6 +798,7 @@ def test_subscribe_reconnect_with_unresolved_lot_preserves_m5_requirement(conn):
         shares=1,
         entry_price_avg="0.50",
         source_command_id="cmd-ws",
+        source_trade_fact_id=trade_fact_id,
         captured_at=NOW,
         state_changed_at=NOW,
     )

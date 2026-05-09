@@ -57,6 +57,18 @@ TRAILING_LOSS_STATUSES = {
 }
 
 
+def _finite_float_or_none(value):
+    if value is None:
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    if parsed != parsed or parsed in (float("inf"), float("-inf")):
+        return None
+    return parsed
+
+
 def _get_runtime_trade_connection() -> sqlite3.Connection:
     # v4 plan §AX3: riskguard runtime = LIVE class.
     if get_connection.__module__ != "src.state.db":
@@ -127,8 +139,8 @@ def _portfolio_position_from_loader_row(row: dict) -> Position:
         no_token_id=str(row.get("no_token_id") or ""),
         condition_id=str(row.get("condition_id") or ""),
         exit_state=str(row.get("exit_state") or ""),
-        last_monitor_prob=float(row.get("last_monitor_prob") or 0.0),
-        last_monitor_edge=float(row.get("last_monitor_edge") or 0.0),
+        last_monitor_prob=_finite_float_or_none(row.get("last_monitor_prob")),
+        last_monitor_edge=_finite_float_or_none(row.get("last_monitor_edge")),
         last_monitor_market_price=row.get("last_monitor_market_price"),
         admin_exit_reason=str(row.get("admin_exit_reason") or ""),
         entry_fill_verified=bool(row.get("entry_fill_verified", False)),

@@ -7,6 +7,9 @@ cannot collide with safety-critical profiles like "modify data ingestion".
 
 These cases come directly from §15 of docs/reference/Zeus_Apr25_review.md.
 """
+# Created: 2026-04-25
+# Last reused or audited: 2026-05-08
+# Authority basis: AGENTS.md topology routing; phase 5 forward substrate producer phrase maintenance.
 # Lifecycle: created=2026-04-25; last_reviewed=2026-05-01; last_reused=2026-05-01
 # Purpose: Lock the new word-boundary + denylist + veto profile resolver against
 # regression to the legacy substring matcher.
@@ -233,6 +236,24 @@ def test_source_contract_auto_conversion_routes_to_runtime_profile():
     assert digest["profile"] == "source contract auto conversion runtime"
     assert digest["admission"]["status"] == "admitted"
     assert "scripts/source_contract_auto_convert.py" in digest["admission"]["admitted_files"]
+    assert "tests/test_market_scanner_provenance.py" in digest["admission"]["admitted_files"]
+
+
+def test_source_contract_audit_facts_routes_to_runtime_profile():
+    digest = build_digest(
+        "source contract audit facts append-only watch_source_contract persistence "
+        "no production DB mutation without explicit audit DB path",
+        [
+            "scripts/watch_source_contract.py",
+            "src/state/db.py",
+            "tests/test_market_scanner_provenance.py",
+        ],
+    )
+
+    assert digest["profile"] == "source contract auto conversion runtime"
+    assert digest["admission"]["status"] == "admitted"
+    assert "scripts/watch_source_contract.py" in digest["admission"]["admitted_files"]
+    assert "src/state/db.py" in digest["admission"]["admitted_files"]
     assert "tests/test_market_scanner_provenance.py" in digest["admission"]["admitted_files"]
 
 
@@ -753,6 +774,65 @@ def test_phase5c3_runtime_wiring_side_effect_wording_is_not_admitted(task):
         digest["profile"] != "phase 5 forward substrate producer implementation"
         or digest["admission"]["status"] != "admitted"
     )
+
+
+def test_s1_market_source_proof_phrase_routes_to_forward_substrate_producer():
+    digest = build_digest(
+        "S1 market source-proof persistence for already-parsed Gamma "
+        "source_contract audit facts; no schema migration; no production DB writes",
+        [
+            "src/data/market_scanner.py",
+            "src/state/db.py",
+            "tests/test_market_scanner_provenance.py",
+        ],
+    )
+
+    assert digest["profile"] == "phase 5 forward substrate producer implementation"
+    assert digest["admission"]["status"] == "admitted"
+    admitted = set(digest["admission"]["admitted_files"])
+    assert "src/data/market_scanner.py" in admitted
+    assert "src/state/db.py" in admitted
+    assert "tests/test_market_scanner_provenance.py" in admitted
+
+
+def test_s2_lifecycle_funnel_report_routes_to_status_profile():
+    digest = build_digest(
+        "S2 lifecycle funnel report read-only evaluated selected rejected submitted filled learned certified lifecycle state",
+        [
+            "src/state/decision_chain.py",
+            "src/observability/status_summary.py",
+            "tests/test_db.py",
+            "tests/test_phase10b_dt_seam_cleanup.py",
+        ],
+    )
+
+    assert digest["profile"] == "s2 lifecycle funnel report implementation"
+    assert digest["admission"]["status"] == "admitted"
+    admitted = set(digest["admission"]["admitted_files"])
+    assert "src/state/decision_chain.py" in admitted
+    assert "src/observability/status_summary.py" in admitted
+    assert "tests/test_db.py" in admitted
+    assert "tests/test_phase10b_dt_seam_cleanup.py" in admitted
+
+
+def test_s3_calibration_serving_status_routes_to_status_profile():
+    digest = build_digest(
+        "S3 calibration serving status surface report forecast readiness vs calibration readiness by serving bucket derived operator visibility",
+        [
+            "src/observability/calibration_serving_status.py",
+            "src/observability/status_summary.py",
+            "tests/test_calibration_serving_status.py",
+            "tests/test_phase10b_dt_seam_cleanup.py",
+        ],
+    )
+
+    assert digest["profile"] == "s3 calibration serving status implementation"
+    assert digest["admission"]["status"] == "admitted"
+    admitted = set(digest["admission"]["admitted_files"])
+    assert "src/observability/calibration_serving_status.py" in admitted
+    assert "src/observability/status_summary.py" in admitted
+    assert "tests/test_calibration_serving_status.py" in admitted
+    assert "tests/test_phase10b_dt_seam_cleanup.py" in admitted
 
 
 def test_paris_source_boundary_evidence_routes_to_docs_only_profile():
