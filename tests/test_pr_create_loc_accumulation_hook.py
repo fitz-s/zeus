@@ -277,6 +277,96 @@ def test_authority_doc_exists() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Four-principle block message — redesign antibodies (2026-05-09)
+# ---------------------------------------------------------------------------
+
+
+def test_block_message_lists_all_four_principles(monkeypatch, capsys) -> None:
+    """Block message must name all four principles by label (P1-P4).
+
+    Redesign requirement: the pr_create gate message surfaces sibling
+    principles P2/P3/P4 so the agent reasons about the full workflow,
+    not just the LOC threshold.
+    """
+    monkeypatch.delenv("ZEUS_PR_ALLOW_TINY", raising=False)
+    monkeypatch.setattr(
+        dispatch,
+        "_agent_authored_loc_in_range",
+        lambda mb, head: (50, 50, 1),
+    )
+    payload = _mk_payload("gh pr create --title test --body test")
+    result = _handler(payload)
+    captured = capsys.readouterr()
+    msg = captured.err
+    assert result == _BLOCK
+
+    # Each principle must appear by name in the message
+    import re
+    for label in ("P2", "P3", "P4"):
+        assert label in msg, (
+            f"Block message must reference principle {label!r}; "
+            f"message excerpt:\n{msg[:1200]}"
+        )
+    # Principle 1 is the gate itself — the message must name Principle 1 as well
+    assert "Principle 1" in msg or "P1" in msg, (
+        f"Block message must reference Principle 1 framing; "
+        f"message excerpt:\n{msg[:1200]}"
+    )
+
+
+def test_block_message_does_not_reference_deleted_lifecycle_doc(monkeypatch, capsys) -> None:
+    """Block message must NOT reference pr_lifecycle_2026_05_09.md (deleted doc).
+
+    That file has been removed; any surviving reference is a dead citation.
+    """
+    monkeypatch.delenv("ZEUS_PR_ALLOW_TINY", raising=False)
+    monkeypatch.setattr(
+        dispatch,
+        "_agent_authored_loc_in_range",
+        lambda mb, head: (50, 50, 1),
+    )
+    payload = _mk_payload("gh pr create --title test --body test")
+    _handler(payload)
+    captured = capsys.readouterr()
+    msg = captured.err
+    assert "pr_lifecycle_2026_05_09" not in msg, (
+        "Block message references the deleted pr_lifecycle doc; remove the reference.\n"
+        f"message excerpt:\n{msg[:1200]}"
+    )
+
+
+def test_block_message_lists_four_memory_entry_filenames(monkeypatch, capsys) -> None:
+    """Block message must list all four memory entry filenames.
+
+    Redesign requirement: the memory section replaces the single
+    'feedback_pr_300_loc_threshold_with_education.md' reference with
+    all four entries so a fresh-session agent knows the full memory surface.
+    """
+    monkeypatch.delenv("ZEUS_PR_ALLOW_TINY", raising=False)
+    monkeypatch.setattr(
+        dispatch,
+        "_agent_authored_loc_in_range",
+        lambda mb, head: (50, 50, 1),
+    )
+    payload = _mk_payload("gh pr create --title test --body test")
+    _handler(payload)
+    captured = capsys.readouterr()
+    msg = captured.err
+
+    expected_entries = [
+        "feedback_pr_300_loc_threshold_with_education.md",
+        "feedback_pr_unit_of_work_not_loc.md",
+        "feedback_pr_bot_comments_are_bug_reports.md",
+        "feedback_pr_original_executor_continuity.md",
+    ]
+    for entry in expected_entries:
+        assert entry in msg, (
+            f"Block message missing memory entry {entry!r}.\n"
+            f"message excerpt:\n{msg[:1500]}"
+        )
+
+
+# ---------------------------------------------------------------------------
 # Finding 1 (Codex P2): trailer-only author detection
 # ---------------------------------------------------------------------------
 

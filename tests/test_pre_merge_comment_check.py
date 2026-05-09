@@ -312,3 +312,164 @@ class TestT5BypassEnv:
             result = _check(payload)
         assert result != _BLOCK
         assert result is not None
+
+
+# ---------------------------------------------------------------------------
+# T6: Copilot inline suggestion (non-Codex author) -> BLOCK (B2 strict)
+# ---------------------------------------------------------------------------
+
+class TestT6CopilotInlineSuggestion:
+    def _copilot_thread(self, resolved: bool) -> dict:
+        return {
+            "isResolved": resolved,
+            "comments": {
+                "nodes": [
+                    {
+                        "author": {"login": "copilot[bot]"},
+                        "body": "Consider renaming this variable for clarity.",
+                    }
+                ]
+            },
+        }
+
+    def test_unresolved_copilot_suggestion_blocks(self):
+        """Unresolved Copilot inline suggestion -> BLOCK (B2 strict: any author)."""
+        payload = _payload(42)
+        threads = [self._copilot_thread(resolved=False)]
+        responses = [
+            (0, _pr_view_output(700)),
+            (0, _repo_view_output()),
+            (0, _gql_output(threads)),
+            (0, _reviews_output([])),
+        ]
+        with patch("subprocess.run", side_effect=_make_run_side_effect(responses)), \
+             patch("sys.stderr"):
+            result = _check(payload)
+        assert result == _BLOCK, f"Expected BLOCK for unresolved Copilot suggestion, got {result!r}"
+
+    def test_resolved_copilot_suggestion_does_not_block(self):
+        """Resolved Copilot inline suggestion -> no block."""
+        payload = _payload(42)
+        threads = [self._copilot_thread(resolved=True)]
+        responses = [
+            (0, _pr_view_output(700)),
+            (0, _repo_view_output()),
+            (0, _gql_output(threads)),
+            (0, _reviews_output([])),
+        ]
+        with patch("subprocess.run", side_effect=_make_run_side_effect(responses)):
+            result = _check(payload)
+        assert result is None, f"Resolved Copilot suggestion must not block; got {result!r}"
+
+
+# ---------------------------------------------------------------------------
+# T7: Unresolved Codex P2 thread -> BLOCK (B2 strict mode)
+# ---------------------------------------------------------------------------
+
+class TestT7UnresolvedCodexP2:
+    def test_unresolved_p2_blocks(self):
+        """Unresolved Codex P2 thread -> BLOCK (B2 strict: was advisory-only before)."""
+        payload = _payload(42)
+        threads = [_codex_thread(resolved=False, badge="P2")]
+        responses = [
+            (0, _pr_view_output(700)),
+            (0, _repo_view_output()),
+            (0, _gql_output(threads)),
+            (0, _reviews_output([])),
+        ]
+        with patch("subprocess.run", side_effect=_make_run_side_effect(responses)), \
+             patch("sys.stderr"):
+            result = _check(payload)
+        assert result == _BLOCK, f"Expected BLOCK for unresolved Codex P2 (B2 strict), got {result!r}"
+
+    def test_resolved_p2_does_not_block(self):
+        """Resolved Codex P2 thread -> no block."""
+        payload = _payload(42)
+        threads = [_codex_thread(resolved=True, badge="P2")]
+        responses = [
+            (0, _pr_view_output(700)),
+            (0, _repo_view_output()),
+            (0, _gql_output(threads)),
+            (0, _reviews_output([])),
+        ]
+        with patch("subprocess.run", side_effect=_make_run_side_effect(responses)):
+            result = _check(payload)
+        assert result is None, f"Resolved P2 must not block; got {result!r}"
+
+
+# ---------------------------------------------------------------------------
+# T8: Educational message content (Principle 2 anchoring)
+# ---------------------------------------------------------------------------
+
+import io as _io
+import sys as _sys
+
+def _capture_block_message(payload, responses) -> str:
+    """Run the check, capture stderr, return the stderr text."""
+    buf = _io.StringIO()
+    with patch("subprocess.run", side_effect=_make_run_side_effect(responses)), \
+         patch.object(_sys, "stderr", buf):
+        result = _check(payload)
+    assert result == _BLOCK, f"Expected BLOCK sentinel; got {result!r}"
+    return buf.getvalue()
+
+
+class TestT8EducationalMessageContent:
+    def _responses_with_unresolved_copilot(self):
+        thread = {
+            "isResolved": False,
+            "comments": {
+                "nodes": [{"author": {"login": "copilot[bot]"}, "body": "Suggestion here."}]
+            },
+        }
+        return [
+            (0, _pr_view_output(700)),
+            (0, _repo_view_output()),
+            (0, _gql_output([thread])),
+            (0, _reviews_output([])),
+        ]
+
+    def test_block_message_contains_principle_2_anchor(self):
+        """Block message must contain 'Principle 2' string."""
+        msg = _capture_block_message(_payload(42), self._responses_with_unresolved_copilot())
+        assert "Principle 2" in msg, (
+            f"Block message must reference 'Principle 2'; message:\n{msg}"
+        )
+
+    def test_block_message_contains_authority_doc_link(self):
+        """Block message must cite architecture/agent_pr_discipline_2026_05_09.md."""
+        msg = _capture_block_message(_payload(42), self._responses_with_unresolved_copilot())
+        assert "agent_pr_discipline_2026_05_09.md" in msg, (
+            f"Block message must cite the authority doc; message:\n{msg}"
+        )
+
+    def test_block_message_contains_fix_commit_is_response(self):
+        """Block message must include the 'fix-commit IS the response' phrase."""
+        msg = _capture_block_message(_payload(42), self._responses_with_unresolved_copilot())
+        assert "fix-commit IS the response" in msg, (
+            f"Block message must state 'fix-commit IS the response'; message:\n{msg}"
+        )
+
+    def test_bypass_message_contains_per_thread_disposition(self):
+        """Bypass message (ZEUS_PR_MERGE_FORCE=1) must instruct per-thread disposition."""
+        payload = _payload(42)
+        thread = {
+            "isResolved": False,
+            "comments": {
+                "nodes": [{"author": {"login": "copilot[bot]"}, "body": "Fix this."}]
+            },
+        }
+        responses = [
+            (0, _pr_view_output(700)),
+            (0, _repo_view_output()),
+            (0, _gql_output([thread])),
+            (0, _reviews_output([])),
+        ]
+        with patch("subprocess.run", side_effect=_make_run_side_effect(responses)), \
+             patch.dict(os.environ, {"ZEUS_PR_MERGE_FORCE": "1"}):
+            result = _check(payload)
+        assert result != _BLOCK, "bypass must not return BLOCK sentinel"
+        assert result is not None
+        assert "per-thread disposition" in result or "disposition" in result, (
+            f"Bypass message must include per-thread disposition guidance; got:\n{result}"
+        )
