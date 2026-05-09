@@ -7053,13 +7053,15 @@ def test_execution_stub_does_not_reinvent_strategy_without_strategy_key():
     assert stub.strategy == ""
 
 
-def test_load_portfolio_backfills_strategy_key_from_legacy_strategy(tmp_path):
-    # Create empty sibling DB so load_portfolio uses it (empty → JSON fallback)
+def test_load_portfolio_backfills_strategy_key_from_legacy_strategy(tmp_path, monkeypatch):
+    # Create empty sibling DB so load_portfolio uses it (empty → canonical)
     # instead of falling through to the production DB.
     sibling_db = tmp_path / "zeus-live.db"
     conn = get_connection(sibling_db)
     init_schema(conn)
     conn.close()
+
+    monkeypatch.setattr("src.state.db.get_trade_connection_with_world", lambda *_, **__: get_connection(sibling_db))
 
     path = tmp_path / "positions-live.json"
     path.write_text(json.dumps({
