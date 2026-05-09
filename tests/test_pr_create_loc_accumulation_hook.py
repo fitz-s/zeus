@@ -488,3 +488,57 @@ def test_regex_matches_inline_env_assignment() -> None:
     assert not pattern.search("cat <<EOF\ngh pr create\nEOF"), (
         "heredoc body falsely matched."
     )
+
+
+# ---------------------------------------------------------------------------
+# Codex P2 fix (2026-05-09): inline bypass assignment must degrade to advisory
+# ---------------------------------------------------------------------------
+
+
+def test_inline_env_bypass_degrades_to_advisory(monkeypatch) -> None:
+    """ZEUS_PR_ALLOW_TINY=1 gh pr create must degrade to advisory, not block.
+
+    Regression anchor for Codex P2 finding: when the bypass variable is
+    supplied as an inline shell assignment (`ZEUS_PR_ALLOW_TINY=1 gh pr create`)
+    rather than a real env export, the hook process does NOT inherit the variable
+    via os.environ. The handler must parse inline assignments from the command
+    string as a secondary bypass source so the agent's documented bypass path
+    actually works.
+    """
+    monkeypatch.delenv("ZEUS_PR_ALLOW_TINY", raising=False)  # no process-env bypass
+    monkeypatch.setattr(
+        dispatch,
+        "_agent_authored_loc_in_range",
+        lambda mb, head: (50, 50, 1),  # below threshold — would block without bypass
+    )
+    # Inline assignment form — bypass must be detected from the command string
+    payload = _mk_payload("ZEUS_PR_ALLOW_TINY=1 gh pr create --title test")
+    result = _handler(payload)
+    assert result is not None, (
+        "Inline ZEUS_PR_ALLOW_TINY=1 must degrade to advisory, not return None"
+    )
+    assert result != _BLOCK, (
+        "Inline ZEUS_PR_ALLOW_TINY=1 must not return BLOCK sentinel — "
+        "handler must detect the bypass from the command string, not only os.environ"
+    )
+    assert "ADVISORY" in result, f"Bypass result must be advisory text; got: {result!r}"
+
+
+def test_env_prefix_bypass_degrades_to_advisory(monkeypatch) -> None:
+    """env ZEUS_PR_ALLOW_TINY=1 gh pr create must also degrade to advisory.
+
+    Covers the `env VAR=val cmd` shell form in addition to the bare inline form.
+    """
+    monkeypatch.delenv("ZEUS_PR_ALLOW_TINY", raising=False)
+    monkeypatch.setattr(
+        dispatch,
+        "_agent_authored_loc_in_range",
+        lambda mb, head: (50, 50, 1),
+    )
+    payload = _mk_payload("env ZEUS_PR_ALLOW_TINY=1 gh pr create --title test")
+    result = _handler(payload)
+    assert result is not None
+    assert result != _BLOCK, (
+        "env ZEUS_PR_ALLOW_TINY=1 form must not block — inline env parse must catch it"
+    )
+    assert "ADVISORY" in result

@@ -333,7 +333,24 @@ def _run_advisory_check_pr_create_loc_accumulation(
     ):
         return None
 
-    bypass_active = os.environ.get("ZEUS_PR_ALLOW_TINY", "").strip() == "1"
+    # Check bypass from both process env AND inline shell assignment prefix.
+    # An inline `ZEUS_PR_ALLOW_TINY=1 gh pr create` does NOT export the variable
+    # into the hook process environment, so os.environ alone misses it. Parse the
+    # leading VAR=val pairs from the command string as a secondary source.
+    inline_env: dict[str, str] = {}
+    inline_m = re.match(
+        r"^\s*(?:env\s+)?((?:[A-Z_][A-Z0-9_]*=\S+\s+)+)",
+        command,
+    )
+    if inline_m:
+        for pair in inline_m.group(1).split():
+            if "=" in pair:
+                k, _, v = pair.partition("=")
+                inline_env[k] = v
+    bypass_active = (
+        os.environ.get("ZEUS_PR_ALLOW_TINY", "").strip() == "1"
+        or inline_env.get("ZEUS_PR_ALLOW_TINY", "").strip() == "1"
+    )
 
     # Resolve the target branch from the (possibly already-open) PR view, falling
     # back to origin/main. Using merge-base anchors the comparison correctly even
