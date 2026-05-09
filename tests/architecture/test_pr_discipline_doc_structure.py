@@ -118,6 +118,32 @@ class TestMemoryEntryReferences:
 # Deleted doc not referenced
 # ---------------------------------------------------------------------------
 
+class TestBackstopHooksSection:
+    """Authority doc must document all three backstop hooks."""
+
+    EXPECTED_HOOKS = [
+        "pr_create_loc_accumulation",
+        "pre_merge_comment_check",
+        "pr_thread_reply_waste",
+    ]
+
+    def test_exactly_three_backstop_hooks_documented(self):
+        """Backstop hooks section must reference all three hook ids."""
+        text = _doc_text()
+        missing = [h for h in self.EXPECTED_HOOKS if h not in text]
+        assert not missing, (
+            f"Authority doc missing backstop hook reference(s): {missing}\n"
+            f"Add a '### `<hook_id>`' entry in the Backstop hooks section."
+        )
+
+    @pytest.mark.parametrize("hook_id", EXPECTED_HOOKS)
+    def test_backstop_hook_referenced(self, hook_id: str):
+        """Each backstop hook id must appear in the authority doc."""
+        assert hook_id in _doc_text(), (
+            f"Hook '{hook_id}' not referenced in authority doc backstop section."
+        )
+
+
 class TestDeletedDocNotReferenced:
     def test_authority_doc_does_not_reference_deleted_lifecycle(self):
         """Authority doc must NOT reference the deleted pr_lifecycle_2026_05_09.md."""

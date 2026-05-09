@@ -4,7 +4,8 @@ Created: 2026-05-09
 Last extended: 2026-05-09
 Authority basis: operator directive 2026-05-09 (post PR #105/#106 — "first-principles, not blockers; teach not enforce")
 Hooks (backstops only): `.claude/hooks/dispatch.py::_run_advisory_check_pr_create_loc_accumulation`,
-  `.claude/hooks/dispatch.py::_run_advisory_check_pre_merge_comment_check`
+  `.claude/hooks/dispatch.py::_run_advisory_check_pre_merge_comment_check`,
+  `.claude/hooks/dispatch.py::_run_advisory_check_pr_thread_reply_waste`
 Registry: `.claude/hooks/registry.yaml` (hook metadata and bypass envs)
 
 ## TL;DR
@@ -406,6 +407,27 @@ NOISE/OUT_OF_SCOPE), apply fixes, resolve threads, THEN merge."
 The bypass is for genuine emergencies (production breakage, security) where
 the cost of waiting outweighs the cost of re-opening for follow-up. It is
 NOT for cases where the agent wants to avoid thread processing.
+
+### `pr_thread_reply_waste` (Principle 2 advisory backstop)
+
+Triggers on commands that post thread reply text to PR review threads:
+- `gh pr comment <N>` (top-level PR comment)
+- GraphQL `addPullRequestReviewThreadReply` or `addPullRequestReviewComment`
+- REST `pulls/.../comments` or `issues/.../comments` with a POST/body flag
+
+Allow-pass exceptions (never triggers on):
+- `resolveReviewThread` mutation — this IS the correct action
+- `gh pr review` — formal review submission, not a thread reply
+- REST `pulls/.../comments` GET (list calls)
+
+**Severity:** ADVISORY (no new blockers per redesign constraint).
+**Advisory message points to:** this document, Principle 2; states "fix-commit
+IS the response"; shows the `resolveReviewThread` mutation as the correct action.
+**Bypass:** `ZEUS_PR_REPLY_ALLOW=1` for DEFER one-liners (`"Tracked in #N"`) and
+operator-directed clarifications.
+**Reading the advisory:** "I was about to post reply text on a thread — the correct
+action is to apply the fix as a commit and resolve the thread via the mutation.
+If this is a DEFER one-liner, set `ZEUS_PR_REPLY_ALLOW=1`."
 
 ---
 
