@@ -207,3 +207,41 @@ Closure evidence:
 - Final critic verdict for this S1 audit follow-up: PASS.
 - Residual noted risk: empty/zero-event scans create the explicit audit DB/schema but no scan-level row. This does not block the S1 scoped requirement to persist rejected/non-MATCH source-contract event evidence.
 - Committed in the branch as `fix(source): persist source contract audit facts`.
+
+## 2026-05-08 - S2 Lifecycle Funnel Report Implemented and Critic-Fixed
+
+Scope:
+- S2 is a read/report surface only: evaluated -> selected -> rejected/submitted -> filled -> learned.
+- Canonical event evidence is `position_events`; pre-entry rejection evidence is `decision_log.no_trade_cases`.
+- No schema changes, executor changes, lifecycle writer changes, venue changes, or production DB writes were made.
+
+Topology:
+- Added `s2 lifecycle funnel report implementation` so natural S2 wording routes out of `generic`.
+- Regenerated `architecture/digest_profiles.py`.
+- Added route-regression coverage in `tests/test_digest_profile_matching.py`.
+- Final navigation/planning-lock result for the changed S2 file set: admitted, T3, `topology check ok`.
+
+Changes made:
+- Added `query_lifecycle_funnel_report()` in `src/state/decision_chain.py`.
+- The report derives counts for `evaluated`, `selected`, `rejected`, `submitted`, `filled`, and `learned`.
+- The report includes relationship booleans, rejection breakdown, by-strategy counts, source errors, and `authority: derived_operator_visibility`.
+- Wired the report into `src/observability/status_summary.py` as top-level `lifecycle_funnel`, outside `cycle`.
+- Moved the status-summary S2 test into `tests/test_phase10b_dt_seam_cleanup.py` because `tests/test_pnl_flow_and_audit.py` cannot collect locally without `apscheduler`.
+
+Verification:
+- Combined focused S2 suite (`tests/test_db.py -k 'lifecycle_funnel'`, `tests/test_phase10b_dt_seam_cleanup.py -k 'status' --maxfail=1`, and S2 route regression): 11 passed, 88 deselected.
+- `python3 -m py_compile src/state/decision_chain.py src/observability/status_summary.py tests/test_db.py tests/test_phase10b_dt_seam_cleanup.py tests/test_digest_profile_matching.py architecture/digest_profiles.py`: OK.
+- `scripts/digest_profiles_export.py --check`: OK.
+- Final topology navigation/planning-lock after critic fixes: admitted, T3, `topology check ok`.
+
+Critic follow-up:
+- Initial critic verdict: WARN, not FAIL.
+- Finding 1: `hours` bounded `decision_log.no_trade_cases` but not `position_events` when `not_before` was absent.
+- Fix 1: `query_lifecycle_funnel_report()` now applies the `hours` window to `position_events` when no explicit `not_before` cutoff is supplied; regression coverage added.
+- Finding 2: lifecycle funnel query degradation did not surface in `risk.consistency_check` / `infrastructure_issues`.
+- Fix 2: `status_summary.py` now surfaces `query_error` as `lifecycle_funnel_summary_unavailable` and `partial` as `lifecycle_funnel_summary_partial`; regression coverage added for YELLOW infrastructure telemetry.
+
+Closure evidence:
+- Final critic verdict after fixes: PASS.
+- Residual noted risk: lifecycle funnel is an operator read model and can double-count if an upstream fault writes both a no-trade case and a position intent for the same market. The report exposes relationships and source errors but does not enforce writer mutual exclusion.
+- Ready to commit this S2 slice.

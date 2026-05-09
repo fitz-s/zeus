@@ -795,6 +795,26 @@ def test_s1_market_source_proof_phrase_routes_to_forward_substrate_producer():
     assert "tests/test_market_scanner_provenance.py" in admitted
 
 
+def test_s2_lifecycle_funnel_report_routes_to_status_profile():
+    digest = build_digest(
+        "S2 lifecycle funnel report read-only evaluated selected rejected submitted filled learned certified lifecycle state",
+        [
+            "src/state/decision_chain.py",
+            "src/observability/status_summary.py",
+            "tests/test_db.py",
+            "tests/test_phase10b_dt_seam_cleanup.py",
+        ],
+    )
+
+    assert digest["profile"] == "s2 lifecycle funnel report implementation"
+    assert digest["admission"]["status"] == "admitted"
+    admitted = set(digest["admission"]["admitted_files"])
+    assert "src/state/decision_chain.py" in admitted
+    assert "src/observability/status_summary.py" in admitted
+    assert "tests/test_db.py" in admitted
+    assert "tests/test_phase10b_dt_seam_cleanup.py" in admitted
+
+
 def test_paris_source_boundary_evidence_routes_to_docs_only_profile():
     digest = build_digest(
         "Paris source-boundary evidence recording LFPG LFPB no config edit "

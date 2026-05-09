@@ -415,6 +415,21 @@ class TestRCPV2RowCountSensor:
         conn.commit()
         return conn
 
+    def _empty_lifecycle_funnel(self):
+        return {
+            "status": "certified_empty",
+            "authority": "derived_operator_visibility",
+            "counts": {
+                "evaluated": 0,
+                "selected": 0,
+                "rejected": 0,
+                "submitted": 0,
+                "filled": 0,
+                "learned": 0,
+            },
+            "source_errors": [],
+        }
+
     def test_r_cp_1_v2_row_counts_queries_actual_tables(self):
         """R-CP.1: _get_v2_row_counts returns real table row signals."""
         from src.observability.status_summary import _get_v2_row_counts
@@ -646,6 +661,7 @@ class TestRCPV2RowCountSensor:
         monkeypatch.setattr(status_summary_module, "query_execution_event_summary", lambda conn, not_before=None: {"overall": {}})
         monkeypatch.setattr(status_summary_module, "query_learning_surface_summary", lambda conn, not_before=None: {"by_strategy": {}})
         monkeypatch.setattr(status_summary_module, "query_no_trade_cases", lambda conn, hours=24: [])
+        monkeypatch.setattr(status_summary_module, "query_lifecycle_funnel_report", lambda conn, not_before=None: self._empty_lifecycle_funnel())
         monkeypatch.setattr(status_summary_module, "_get_execution_capability_status", lambda: {})
         monkeypatch.setattr(status_summary_module, "is_entries_paused", lambda: False)
         monkeypatch.setattr(status_summary_module, "get_entries_pause_source", lambda: None)
@@ -666,6 +682,154 @@ class TestRCPV2RowCountSensor:
         ]
         assert status["risk"]["infrastructure_level"] == "RED"
         assert "legacy_positions_json_conflicts_with_canonical_empty" in status["risk"]["infrastructure_issues"]
+
+    def test_status_summary_exposes_s2_lifecycle_funnel(self, tmp_path, monkeypatch):
+        """S2 visibility stays a derived status block, not a cycle authority."""
+        from src.observability import status_summary as status_summary_module
+
+        status_path = tmp_path / "status_summary.json"
+        positions_path = tmp_path / "positions.json"
+        positions_path.write_text(json.dumps({"updated_at": "2026-05-08T00:00:00+00:00", "positions": []}))
+        lifecycle_funnel = {
+            "status": "observed",
+            "authority": "derived_operator_visibility",
+            "counts": {
+                "evaluated": 4,
+                "selected": 3,
+                "rejected": 2,
+                "submitted": 2,
+                "filled": 1,
+                "learned": 1,
+            },
+        }
+
+        class DummyConn:
+            def close(self):
+                return None
+
+        monkeypatch.setattr(status_summary_module, "STATUS_PATH", status_path)
+        monkeypatch.setattr(status_summary_module, "LEGACY_POSITIONS_PATH", positions_path)
+        monkeypatch.setattr(status_summary_module, "_get_risk_level", lambda: "GREEN")
+        monkeypatch.setattr(status_summary_module, "_get_risk_details", lambda: {})
+        monkeypatch.setattr(status_summary_module, "get_trade_connection_with_world", lambda: DummyConn())
+        monkeypatch.setattr(
+            status_summary_module,
+            "query_position_current_status_view",
+            lambda conn: {
+                "status": "empty",
+                "positions": [],
+                "open_positions": 0,
+                "total_exposure_usd": 0.0,
+                "unrealized_pnl": 0.0,
+                "strategy_open_counts": {},
+                "chain_state_counts": {},
+                "exit_state_counts": {},
+                "unverified_entries": 0,
+                "day0_positions": 0,
+            },
+        )
+        monkeypatch.setattr(
+            status_summary_module,
+            "query_strategy_health_snapshot",
+            lambda conn, now=None: {"status": "fresh", "by_strategy": {}, "stale_strategy_keys": []},
+        )
+        monkeypatch.setattr(status_summary_module, "query_execution_event_summary", lambda conn, not_before=None: {"overall": {}})
+        monkeypatch.setattr(status_summary_module, "query_learning_surface_summary", lambda conn, not_before=None: {"by_strategy": {}})
+        monkeypatch.setattr(status_summary_module, "query_no_trade_cases", lambda conn, hours=24: [])
+        monkeypatch.setattr(status_summary_module, "query_lifecycle_funnel_report", lambda conn, not_before=None: lifecycle_funnel)
+        monkeypatch.setattr(status_summary_module, "_get_execution_capability_status", lambda: {})
+        monkeypatch.setattr(status_summary_module, "is_entries_paused", lambda: False)
+        monkeypatch.setattr(status_summary_module, "get_entries_pause_source", lambda: None)
+        monkeypatch.setattr(status_summary_module, "get_entries_pause_reason", lambda: None)
+        monkeypatch.setattr(status_summary_module, "get_edge_threshold_multiplier", lambda: 1.0)
+        monkeypatch.setattr(status_summary_module, "strategy_gates", lambda: {})
+        monkeypatch.setattr(status_summary_module, "recommended_autosafe_commands_from_status", lambda status: [])
+        monkeypatch.setattr(status_summary_module, "recommended_commands_from_status", lambda status, include_review_required=True: [])
+        monkeypatch.setattr(status_summary_module, "review_required_commands_from_status", lambda status: [])
+
+        status_summary_module.write_status({"mode": "opening_hunt", "risk_level": "GREEN"})
+        status = json.loads(status_path.read_text())
+
+        assert status["lifecycle_funnel"] == lifecycle_funnel
+        assert status["lifecycle_funnel"]["authority"] == "derived_operator_visibility"
+        assert "lifecycle_funnel" not in status["cycle"]
+
+    @pytest.mark.parametrize(
+        ("funnel_status", "expected_issue"),
+        [
+            ("query_error", "lifecycle_funnel_summary_unavailable"),
+            ("partial", "lifecycle_funnel_summary_partial"),
+        ],
+    )
+    def test_status_summary_surfaces_lifecycle_funnel_degradation(
+        self,
+        tmp_path,
+        monkeypatch,
+        funnel_status,
+        expected_issue,
+    ):
+        """S2 status degradation is visible as infrastructure telemetry."""
+        from src.observability import status_summary as status_summary_module
+
+        status_path = tmp_path / "status_summary.json"
+        positions_path = tmp_path / "positions.json"
+        positions_path.write_text(json.dumps({"updated_at": "2026-05-08T00:00:00+00:00", "positions": []}))
+        lifecycle_funnel = {
+            "status": funnel_status,
+            "authority": "derived_operator_visibility",
+            "source_errors": [{"source": "position_events", "error_type": "OperationalError"}],
+        }
+
+        class DummyConn:
+            def close(self):
+                return None
+
+        monkeypatch.setattr(status_summary_module, "STATUS_PATH", status_path)
+        monkeypatch.setattr(status_summary_module, "LEGACY_POSITIONS_PATH", positions_path)
+        monkeypatch.setattr(status_summary_module, "_get_risk_level", lambda: "GREEN")
+        monkeypatch.setattr(status_summary_module, "_get_risk_details", lambda: {})
+        monkeypatch.setattr(status_summary_module, "get_trade_connection_with_world", lambda: DummyConn())
+        monkeypatch.setattr(
+            status_summary_module,
+            "query_position_current_status_view",
+            lambda conn: {
+                "status": "ok",
+                "positions": [],
+                "open_positions": 0,
+                "total_exposure_usd": 0.0,
+                "unrealized_pnl": 0.0,
+                "strategy_open_counts": {},
+                "chain_state_counts": {},
+                "exit_state_counts": {},
+                "unverified_entries": 0,
+                "day0_positions": 0,
+            },
+        )
+        monkeypatch.setattr(
+            status_summary_module,
+            "query_strategy_health_snapshot",
+            lambda conn, now=None: {"status": "fresh", "by_strategy": {}, "stale_strategy_keys": []},
+        )
+        monkeypatch.setattr(status_summary_module, "query_execution_event_summary", lambda conn, not_before=None: {"overall": {}})
+        monkeypatch.setattr(status_summary_module, "query_learning_surface_summary", lambda conn, not_before=None: {"by_strategy": {}})
+        monkeypatch.setattr(status_summary_module, "query_no_trade_cases", lambda conn, hours=24: [])
+        monkeypatch.setattr(status_summary_module, "query_lifecycle_funnel_report", lambda conn, not_before=None: lifecycle_funnel)
+        monkeypatch.setattr(status_summary_module, "_get_execution_capability_status", lambda: {})
+        monkeypatch.setattr(status_summary_module, "is_entries_paused", lambda: False)
+        monkeypatch.setattr(status_summary_module, "get_entries_pause_source", lambda: None)
+        monkeypatch.setattr(status_summary_module, "get_entries_pause_reason", lambda: None)
+        monkeypatch.setattr(status_summary_module, "get_edge_threshold_multiplier", lambda: 1.0)
+        monkeypatch.setattr(status_summary_module, "strategy_gates", lambda: {})
+        monkeypatch.setattr(status_summary_module, "recommended_autosafe_commands_from_status", lambda status: [])
+        monkeypatch.setattr(status_summary_module, "recommended_commands_from_status", lambda status, include_review_required=True: [])
+        monkeypatch.setattr(status_summary_module, "review_required_commands_from_status", lambda status: [])
+
+        status_summary_module.write_status({"mode": "opening_hunt", "risk_level": "GREEN", "wallet_balance_usd": 211.37})
+        status = json.loads(status_path.read_text())
+
+        assert status["lifecycle_funnel"] == lifecycle_funnel
+        assert status["risk"]["infrastructure_level"] == "YELLOW"
+        assert expected_issue in status["risk"]["infrastructure_issues"]
 
     def test_bankroll_semantics_status_keeps_pnl_out_of_effective_bankroll(self, tmp_path, monkeypatch):
         """Relationship: wallet-equity bankroll is not recomputed from analytics PnL."""
@@ -728,6 +892,7 @@ class TestRCPV2RowCountSensor:
         monkeypatch.setattr(status_summary_module, "query_execution_event_summary", lambda conn, not_before=None: {"overall": {}})
         monkeypatch.setattr(status_summary_module, "query_learning_surface_summary", lambda conn, not_before=None: {"by_strategy": {}})
         monkeypatch.setattr(status_summary_module, "query_no_trade_cases", lambda conn, hours=24: [])
+        monkeypatch.setattr(status_summary_module, "query_lifecycle_funnel_report", lambda conn, not_before=None: self._empty_lifecycle_funnel())
         monkeypatch.setattr(status_summary_module, "_get_execution_capability_status", lambda: {})
         monkeypatch.setattr(status_summary_module, "is_entries_paused", lambda: False)
         monkeypatch.setattr(status_summary_module, "get_entries_pause_source", lambda: None)
@@ -810,6 +975,7 @@ class TestRCPV2RowCountSensor:
         monkeypatch.setattr(status_summary_module, "query_execution_event_summary", lambda conn, not_before=None: {"overall": {}})
         monkeypatch.setattr(status_summary_module, "query_learning_surface_summary", lambda conn, not_before=None: {"by_strategy": {}})
         monkeypatch.setattr(status_summary_module, "query_no_trade_cases", lambda conn, hours=24: [])
+        monkeypatch.setattr(status_summary_module, "query_lifecycle_funnel_report", lambda conn, not_before=None: self._empty_lifecycle_funnel())
         monkeypatch.setattr(status_summary_module, "_get_execution_capability_status", lambda: {})
         monkeypatch.setattr(status_summary_module, "is_entries_paused", lambda: False)
         monkeypatch.setattr(status_summary_module, "get_entries_pause_source", lambda: None)
@@ -883,6 +1049,7 @@ class TestRCPV2RowCountSensor:
         monkeypatch.setattr(status_summary_module, "query_execution_event_summary", lambda conn, not_before=None: {"overall": {}})
         monkeypatch.setattr(status_summary_module, "query_learning_surface_summary", lambda conn, not_before=None: {"by_strategy": {}})
         monkeypatch.setattr(status_summary_module, "query_no_trade_cases", lambda conn, hours=24: [])
+        monkeypatch.setattr(status_summary_module, "query_lifecycle_funnel_report", lambda conn, not_before=None: self._empty_lifecycle_funnel())
         monkeypatch.setattr(status_summary_module, "_get_execution_capability_status", lambda: {})
         monkeypatch.setattr(status_summary_module, "is_entries_paused", lambda: False)
         monkeypatch.setattr(status_summary_module, "get_entries_pause_source", lambda: None)

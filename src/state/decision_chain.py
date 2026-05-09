@@ -556,6 +556,132 @@ def query_learning_surface_summary(
     }
 
 
+def query_lifecycle_funnel_report(
+    conn,
+    *,
+    hours: int = 24,
+    not_before: str | None = None,
+) -> dict:
+    """Derived operator visibility for evaluated -> selected -> rejected/submitted -> filled -> learned."""
+    stage_keys = ("evaluated", "selected", "rejected", "submitted", "filled", "learned")
+    counts = {key: 0 for key in stage_keys}
+    rejection_breakdown = {
+        "pre_entry_no_trade": 0,
+        "post_selection_entry_rejected": 0,
+    }
+    by_strategy: dict[str, dict] = {}
+    source_errors: list[dict] = []
+
+    def _bucket(strategy: str) -> dict:
+        key = strategy or "unclassified"
+        return by_strategy.setdefault(key, {stage: 0 for stage in stage_keys})
+
+    def _strategy_from_case(case: dict) -> str:
+        strategy = str(case.get("strategy_key") or case.get("strategy") or "").strip()
+        if strategy:
+            return strategy
+        if str(case.get("availability_status") or "").strip():
+            return "__availability_unattributed__"
+        return "unclassified"
+
+    try:
+        no_trade_cases = query_no_trade_cases(conn, hours=hours, not_before=not_before)
+    except Exception as exc:
+        no_trade_cases = []
+        source_errors.append({
+            "source": "decision_log.no_trade_cases",
+            "error_type": type(exc).__name__,
+            "error": str(exc),
+        })
+
+    for case in no_trade_cases:
+        strategy_bucket = _bucket(_strategy_from_case(case))
+        counts["evaluated"] += 1
+        counts["rejected"] += 1
+        rejection_breakdown["pre_entry_no_trade"] += 1
+        strategy_bucket["evaluated"] += 1
+        strategy_bucket["rejected"] += 1
+
+    event_mapping = {
+        "POSITION_OPEN_INTENT": ("evaluated", "selected"),
+        "ENTRY_ORDER_POSTED": ("submitted",),
+        "ENTRY_ORDER_FILLED": ("filled",),
+        "ENTRY_ORDER_REJECTED": ("rejected",),
+        "SETTLED": ("learned",),
+    }
+    event_rows = []
+    try:
+        filters = []
+        params: list[object] = []
+        if not_before is not None:
+            filters.append("occurred_at >= ?")
+            params.append(not_before)
+        else:
+            cutoff_dt = datetime.now(timezone.utc) - timedelta(hours=hours)
+            filters.append("occurred_at >= ?")
+            params.append(cutoff_dt.isoformat())
+        where_clause = ("WHERE " + " AND ".join(filters)) if filters else ""
+        event_rows = conn.execute(
+            f"""
+            SELECT event_type, strategy_key
+            FROM position_events
+            {where_clause}
+            ORDER BY occurred_at DESC, sequence_no DESC
+            """,
+            params,
+        ).fetchall()
+    except Exception as exc:
+        source_errors.append({
+            "source": "position_events",
+            "error_type": type(exc).__name__,
+            "error": str(exc),
+        })
+
+    for row in event_rows:
+        try:
+            event_type = str(row["event_type"])
+            strategy = str(row["strategy_key"] or "unclassified")
+        except (TypeError, KeyError, IndexError):
+            event_type = str(row[0]) if row else ""
+            strategy = str(row[1] or "unclassified") if row and len(row) > 1 else "unclassified"
+        stages = event_mapping.get(event_type)
+        if stages is None:
+            continue
+        strategy_bucket = _bucket(strategy)
+        if event_type == "ENTRY_ORDER_REJECTED":
+            rejection_breakdown["post_selection_entry_rejected"] += 1
+        for stage in stages:
+            counts[stage] += 1
+            strategy_bucket[stage] += 1
+
+    relationships = {
+        "selected_lte_evaluated": counts["selected"] <= counts["evaluated"],
+        "submitted_lte_selected": counts["submitted"] <= counts["selected"],
+        "filled_lte_submitted": counts["filled"] <= counts["submitted"],
+        "learned_lte_filled": counts["learned"] <= counts["filled"],
+    }
+    observed_total = sum(counts.values())
+    if source_errors:
+        status = "partial" if observed_total else "query_error"
+    else:
+        status = "observed" if observed_total else "certified_empty"
+
+    return {
+        "status": status,
+        "authority": "derived_operator_visibility",
+        "counts": counts,
+        "rejection_breakdown": rejection_breakdown,
+        "relationships": relationships,
+        "by_strategy": by_strategy,
+        "certification": {
+            "empty_trade_tables_certified": observed_total == 0 and not source_errors,
+            "canonical_event_source": "position_events",
+            "no_trade_source": "decision_log.no_trade_cases",
+        },
+        "source_errors": source_errors,
+    }
+
+
 def load_entry_evidence(
     conn,
     runtime_trade_id: str,
