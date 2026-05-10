@@ -84,7 +84,7 @@ def _glob_match(path: str, pattern: str) -> bool:
 
 # Read-only intents with whitelist-driven (admits_path_globs) admission.
 # These intents MUST declare admits_path_globs in admission_severity.yaml.
-_WHITELIST_DRIVEN_INTENTS: frozenset[str] = frozenset({"plan_only", "audit"})
+_WHITELIST_DRIVEN_INTENTS: frozenset[str] = frozenset({"plan_only", "audit", "docs_instruction"})
 
 
 @lru_cache(maxsize=1)
@@ -804,7 +804,7 @@ def _normalize_intent(value: str) -> str:
 
 
 # K3: canonical typed_intent_enum values that short-circuit profile selection.
-# Source: architecture/admission_severity.yaml typed_intent_enum (9-value enum).
+# Source: architecture/admission_severity.yaml typed_intent_enum.
 # plan_only / audit admit all requested paths (pure read-only intents; blocked_globs apply).
 # hygiene / hotfix / rebase_keepup / create_new / modify_existing / refactor / other use
 # normal profile resolution for admission but are still recognised as canonical (non-invalid).
@@ -814,6 +814,7 @@ _CANONICAL_TYPED_INTENTS: frozenset[str] = frozenset({
     "modify_existing",
     "refactor",
     "audit",
+    "docs_instruction",
     "hygiene",
     "hotfix",
     "rebase_keepup",
@@ -827,6 +828,7 @@ _CANONICAL_TYPED_INTENTS: frozenset[str] = frozenset({
 _ADMIT_ALL_PATHS_INTENTS: frozenset[str] = frozenset({
     "plan_only",
     "audit",
+    "docs_instruction",
 })
 
 

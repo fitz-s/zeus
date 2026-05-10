@@ -184,6 +184,8 @@ make a surface default-read unless `current_state.md` routes it.
 | `task_2026-05-07_recalibration_after_low_high_alignment/` | active packet container | Post-merge LOW/HIGH recalibration packet for contract-window recovery materialization and runtime authority checks |
 | `task_2026-05-07_recalibration_after_low_high_alignment/PLAN.md` | active packet plan | Controlled LOW/HIGH recovery, pair rebuild, Platt refit, authority, and promotion-readiness plan |
 | `task_2026-05-07_recalibration_after_low_high_alignment/REPORT.md` | active packet evidence | Before/after report for TIGGE LOW contract-window recovery snapshots, pairs, Platts, runtime samples, and verification |
+| `task_2026-05-09_copilot_agent_sync/` | plan packet container | Planning packet for synchronizing Claude Code/OMC subagent, hook, and workflow discipline into Copilot/VS Code agent workflows |
+| `task_2026-05-09_copilot_agent_sync/PLAN.md` | topology planning packet | Route evidence and phased design for Copilot/VS Code agent sync, MCP/tool bridge, hook adapter, and OpenClaw delegation |
 Archived packet evidence (physically moved to `docs/archives/packets/`) is
 listed in `docs/archive_registry.md`; do not re-list those packets here. When
 a packet closes and is archived, remove its row from this registry and the

@@ -190,6 +190,92 @@ def test_preflight_cli_alias_emits_route_card_only_json():
     assert payload == {"ok": expected["ok"], "route_card": expected["route_card"]}
 
 
+def test_preflight_cli_exits_nonzero_for_advisory_docs_instruction_block():
+    buffer = StringIO()
+    with redirect_stdout(buffer):
+        exit_code = topology_doctor.main(
+            [
+                "--preflight",
+                "--intent",
+                "docs_instruction",
+                "--task",
+                "edit copilot path scoped instruction",
+                "--write-intent",
+                "edit",
+                "--files",
+                ".github/instructions/agent-workflow.instructions.md",
+                "scripts/topology_doctor_digest.py",
+            ]
+        )
+
+    output = buffer.getvalue()
+    assert exit_code == 1
+    assert "admission_status: advisory_only" in output
+    assert "primary_blocker:" in output
+
+
+def test_preflight_cli_preserves_direct_claim_blockers():
+    buffer = StringIO()
+    with redirect_stdout(buffer):
+        exit_code = topology_doctor.main(
+            [
+                "--preflight",
+                "--json",
+                "--intent",
+                "copilot instruction docs sync",
+                "--task",
+                "edit copilot path scoped instruction",
+                "--write-intent",
+                "edit",
+                "--files",
+                ".github/instructions/agent-workflow.instructions.md",
+                "--claim",
+                "live_side_effect_authorized",
+            ]
+        )
+
+    payload = json.loads(buffer.getvalue())
+    assert exit_code == 1
+    assert payload["ok"] is False
+    assert payload["route_card"]["admission_status"] == "admitted"
+    assert payload["route_card"]["primary_blocker"] == {
+        "code": "runtime_claim_blocked",
+        "message": "explicit operator-go evidence is not present",
+        "paths": ["<runtime-claim:live_side_effect_authorized>"],
+    }
+
+
+def test_preflight_cli_preserves_unknown_claim_blockers():
+    buffer = StringIO()
+    with redirect_stdout(buffer):
+        exit_code = topology_doctor.main(
+            [
+                "--preflight",
+                "--json",
+                "--intent",
+                "copilot instruction docs sync",
+                "--task",
+                "edit copilot path scoped instruction",
+                "--write-intent",
+                "edit",
+                "--files",
+                ".github/instructions/agent-workflow.instructions.md",
+                "--claim",
+                "unknown_preflight_claim",
+            ]
+        )
+
+    payload = json.loads(buffer.getvalue())
+    assert exit_code == 1
+    assert payload["ok"] is False
+    assert payload["route_card"]["admission_status"] == "admitted"
+    assert payload["route_card"]["primary_blocker"] == {
+        "code": "runtime_claim_blocked",
+        "message": "unknown runtime claim",
+        "paths": ["<runtime-claim:unknown_preflight_claim>"],
+    }
+
+
 
 @pytest.mark.live_topology
 def test_cli_json_parity_for_current_state_candidate_command():
@@ -3914,6 +4000,77 @@ def test_runtime_route_card_keeps_typed_intent_selected_route_first():
     assert digest["profile"] == "evaluator script import bridge"
     assert first["profile"] == "evaluator script import bridge"
     assert first["selected"] is True
+
+
+def test_github_instruction_file_routes_without_phrase_retry():
+    digest = topology_doctor.build_digest(
+        "VS Code agent workflow sync",
+        [".github/instructions/agent-workflow.instructions.md"],
+        write_intent="edit",
+    )
+
+    assert digest["profile"] == "copilot instruction docs sync"
+    assert digest["admission"]["status"] == "admitted"
+    assert digest["profile_selection"]["evidence_class"] == "semantic_file"
+    assert ".github/instructions/agent-workflow.instructions.md" in digest["admission"]["admitted_files"]
+
+
+def test_github_instruction_route_does_not_admit_tooling_siblings_by_default():
+    digest = topology_doctor.build_digest(
+        "edit copilot path scoped instruction",
+        [".github/instructions/agent-workflow.instructions.md", "scripts/topology_doctor_digest.py"],
+        write_intent="edit",
+    )
+
+    assert digest["profile"] == "copilot instruction docs sync"
+    assert digest["admission"]["status"] == "blocked"
+    assert digest["admission"]["admitted_files"] == []
+    assert digest["admission"]["forbidden_hits"] == ["scripts/topology_doctor_digest.py"]
+
+
+def test_global_copilot_instruction_file_routes_without_explicit_intent():
+    digest = topology_doctor.build_digest(
+        "update copilot instruction",
+        [".github/copilot-instructions.md"],
+        write_intent="edit",
+    )
+
+    assert digest["profile"] == "copilot instruction docs sync"
+    assert digest["admission"]["status"] == "admitted"
+    assert ".github/copilot-instructions.md" in digest["admission"]["admitted_files"]
+
+
+def test_copilot_instruction_docs_gate_preserves_profile_route():
+    digest = topology_doctor.build_digest(
+        "edit copilot path scoped instruction",
+        [".github/instructions/agent-workflow.instructions.md"],
+        write_intent="edit",
+    )
+
+    assert digest["profile"] == "copilot instruction docs sync"
+    assert "--intent 'copilot instruction docs sync'" in digest["gates"][0]
+    assert "--intent docs_instruction" not in digest["gates"][0]
+
+
+def test_docs_instruction_typed_intent_whitelist_admits_only_instruction_docs():
+    admitted = topology_doctor.build_digest(
+        "edit copilot path scoped instruction",
+        [".github/instructions/agent-workflow.instructions.md"],
+        intent="docs_instruction",
+        write_intent="edit",
+    )
+    blocked = topology_doctor.build_digest(
+        "edit copilot path scoped instruction and routing law",
+        [".github/instructions/agent-workflow.instructions.md", "architecture/topology.yaml"],
+        intent="docs_instruction",
+        write_intent="edit",
+    )
+
+    assert admitted["admission"]["status"] == "admitted"
+    assert admitted["admission"]["typed_intent_short_circuit"] is True
+    assert blocked["admission"]["status"] == "advisory_only"
+    assert blocked["admission"]["admitted_files"] == [".github/instructions/agent-workflow.instructions.md"]
+    assert blocked["admission"]["out_of_scope_files"] == ["architecture/topology.yaml"]
 
 
 def test_route_card_only_human_output_prefers_primary_blocker_over_full_trace():
