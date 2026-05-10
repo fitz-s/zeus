@@ -297,6 +297,35 @@ def _extract_resolved_market_outcomes(event: dict) -> list[dict]:
     return outcomes
 
 
+def _disagreement_tolerance() -> float:
+    """Tolerance (in settlement units) for SOURCE_DISAGREEMENT classification (fix #263).
+
+    If the rounded obs is within this distance of the nearest bin edge, the
+    quarantine reason is 'harvester_source_disagreement_within_tolerance' rather
+    than 'harvester_live_obs_outside_bin'.  1.0 unit = one settlement integer step.
+    """
+    return 1.0
+
+
+def _nearest_bin_edge_distance(
+    rounded: float,
+    effective_bin_lo: Optional[float],
+    effective_bin_hi: Optional[float],
+) -> float:
+    """Return the distance from rounded obs to the nearest bin boundary (fix #263).
+
+    For a closed bin [lo, hi]: min(|obs - lo|, |obs - hi|).
+    For an open-shoulder bin (lo only or hi only): distance to the single edge.
+    Returns float('inf') when no bin bounds are available.
+    """
+    distances: list[float] = []
+    if effective_bin_lo is not None:
+        distances.append(abs(rounded - effective_bin_lo))
+    if effective_bin_hi is not None:
+        distances.append(abs(rounded - effective_bin_hi))
+    return min(distances) if distances else float("inf")
+
+
 def _write_settlement_truth(
     conn,
     city: City,
@@ -385,10 +414,11 @@ def _write_settlement_truth(
                         effective_bin_lo if effective_bin_lo is not None else 0.0,
                         effective_bin_hi if effective_bin_hi is not None else 0.0,
                     )
-                # Fix #264: Polymarket C bins are INTEGER. After F->C conversion
-                # bounds are floats (e.g. 48F -> 8.888C). Snap via WMO half-up so
-                # containment operates on integers. Closed bin: obs in {lo_int, hi_int}.
-                # Open-shoulder: integer inequality (obs <= hi_int or obs >= lo_int).
+                # Fix #264: Polymarket °C bins are INTEGER. After F→C conversion
+                # bin bounds are floats (e.g. 48°F → 8.888°C). Snap both edges via
+                # WMO half-up before containment so float precision does not cause
+                # false negatives. Closed bin: obs in {lo_int, hi_int}.
+                # Open-shoulder: obs <= snapped_hi  or  obs >= snapped_lo.
                 if bin_unit_converted:
                     if effective_bin_lo is not None:
                         effective_bin_lo = math.floor(effective_bin_lo + 0.5)

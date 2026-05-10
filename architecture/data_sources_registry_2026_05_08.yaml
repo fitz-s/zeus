@@ -801,6 +801,41 @@ sources:
       - "architecture/negative_constraints.yaml (INV-24 applies to CLOB placement, not data-api reads)"
 
 # ============================================================
+# INFRASTRUCTURE / HEALTH SOURCES
+# ============================================================
+
+  # ----------------------------------------------------------
+  # 13. Source Health Probe (internal monitoring)
+  # ----------------------------------------------------------
+  - id: source_health_probe
+    display_name: "Internal Source Health Probe (zeus monitoring)"
+    category: other
+    publisher: "Zeus internal (src/data/source_health_probe.py)"
+    authority_urls: []
+
+    publication_schedule:
+      description: >
+        Runs every 10 minutes by ingest daemon. Probes each upstream with
+        short timeout (default 10s). Writes atomically to state/source_health.json.
+        [VERIFIED] src/data/source_health_probe.py:9-16.
+      probe_interval_minutes: 10
+      output_file: "state/source_health.json"
+
+    what_is_published:
+      probed_sources:
+        - "open_meteo_archive [VERIFIED source_health_probe.py:38]"
+        - "wu_pws [VERIFIED source_health_probe.py:39]"
+        - "hko [VERIFIED source_health_probe.py:40]"
+        - "ogimet [VERIFIED source_health_probe.py:41]"
+        - "ecmwf_open_data [VERIFIED source_health_probe.py:42]"
+        - "noaa [VERIFIED source_health_probe.py:43]"
+        - "tigge_mars [VERIFIED source_health_probe.py:44]"
+      per_source_fields: "last_success_at, last_failure_at, consecutive_failures, degraded_since, latency_ms, error"
+
+    zeus_consumption:
+      role: "Health monitoring — not a data feed. Operator alerting input."
+
+# ============================================================
 # CROSS-REFERENCE INDEX
 # ============================================================
 

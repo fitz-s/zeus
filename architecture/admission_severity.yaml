@@ -5,7 +5,7 @@
 schema_version: 1
 metadata:
   charter_version: 1.0.0
-  catalog_size: 18
+  catalog_size: 19
   created: 2026-05-07
   authority_basis: >
     ULTIMATE_DESIGN §2.3 reversibility classes; Navigation Topology v2 PLAN §2.2;
@@ -15,7 +15,7 @@ metadata:
   default_reversibility_class: WORKING
   sunset_date: 2026-11-07
 
-# ─── typed_intent enum (C3/D1 amendment: 9 values, hotfix + rebase_keepup + other added) ─
+# ─── typed_intent enum (C3/D1 amendment + docs_instruction route) ─
 
 typed_intent_enum:
   - id: plan_only
@@ -87,6 +87,28 @@ typed_intent_enum:
       - .omc/plans/**
       - .omc/research/**
       - .omx/plans/**
+    sunset_date: 2026-11-07
+
+  - id: docs_instruction
+    description: >
+      Edit agent-facing instruction documents such as Copilot path-scoped
+      instructions. Writes ONLY to instruction/reference/review docs and
+      evidence. This is a docs/workflow route, not permission to mutate runtime,
+      topology law, source, tests, or scripts.
+    admits_path_globs:
+      - .github/instructions/**
+      - .github/copilot-instructions.md
+      - REVIEW.md
+      - docs/review/**
+      - docs/reference/**
+      - evidence/**
+    blocks_path_globs:
+      - src/**
+      - tests/**
+      - scripts/**
+      - architecture/topology.yaml
+      - architecture/digest_profiles.py
+      - architecture/admission_severity.yaml
     sunset_date: 2026-11-07
 
   - id: hygiene

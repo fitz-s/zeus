@@ -184,6 +184,33 @@ make a surface default-read unless `current_state.md` routes it.
 | `task_2026-05-07_recalibration_after_low_high_alignment/` | active packet container | Post-merge LOW/HIGH recalibration packet for contract-window recovery materialization and runtime authority checks |
 | `task_2026-05-07_recalibration_after_low_high_alignment/PLAN.md` | active packet plan | Controlled LOW/HIGH recovery, pair rebuild, Platt refit, authority, and promotion-readiness plan |
 | `task_2026-05-07_recalibration_after_low_high_alignment/REPORT.md` | active packet evidence | Before/after report for TIGGE LOW contract-window recovery snapshots, pairs, Platts, runtime samples, and verification |
+| `task_2026-05-08_100_blocked_horizon_audit/` | packet evidence container | Evidence packet for ECMWF blocked-horizon audit around missing 2026-05-08 forecast horizons |
+| `task_2026-05-08_100_blocked_horizon_audit/RUN.md` | packet evidence | Run record for blocked-horizon audit and source-run horizon findings |
+| `task_2026-05-08_alignment_safe_implementation/` | plan packet container | Safe implementation plan for alignment repair work following deep alignment audit |
+| `task_2026-05-08_alignment_safe_implementation/PLAN.md` | topology planning packet | Scoped implementation plan for alignment repair without widening authority surfaces |
+| `task_2026-05-08_deep_alignment_audit/` | audit packet container | Deep audit packet for alignment/data-source integrity risks |
+| `task_2026-05-08_deep_alignment_audit/PLAN.md` | audit plan | Multi-phase audit plan for alignment failure modes and repair route selection |
+| `task_2026-05-08_ecmwf_publication_strategy/` | packet evidence container | ECMWF publication strategy packet for safe-fetch timing and source-publication constraints |
+| `task_2026-05-08_ecmwf_publication_strategy/TASK.md` | packet task | Task definition for ECMWF publication strategy review |
+| `task_2026-05-08_ecmwf_publication_strategy/REPORT.md` | packet report | Findings report for ECMWF publication timing and operational strategy |
+| `task_2026-05-08_ecmwf_step_grid_scientist_eval/` | packet evidence container | Scientist evaluation packet for ECMWF step-grid behavior |
+| `task_2026-05-08_ecmwf_step_grid_scientist_eval/REPORT.md` | packet report | Evaluation report for ECMWF step-grid source behavior and implications |
+| `task_2026-05-08_low_recalibration_residue_pr/` | packet evidence container | LOW recalibration residue packet for PR residue and closeout evidence |
+| `task_2026-05-08_low_recalibration_residue_pr/RUN.md` | packet evidence | Run record for LOW recalibration residue verification |
+| `task_2026-05-08_phase_b_download_root_cause/` | packet evidence container | Phase B download root-cause investigation packet |
+| `task_2026-05-08_phase_b_download_root_cause/DOSSIER.md` | investigation dossier | Root-cause dossier for Phase B download failure modes |
+| `task_2026-05-08_post_merge_full_chain/` | packet evidence container | Post-merge full-chain operation packet for source/backfill validation |
+| `task_2026-05-08_post_merge_full_chain/TASK.md` | packet task | Task definition for post-merge full-chain checks |
+| `task_2026-05-08_post_merge_full_chain/RUN.md` | packet evidence | Run record for post-merge full-chain checks and outcomes |
+| `task_2026-05-08_track_a6_run/` | packet evidence container | Track A.6 execution evidence packet |
+| `task_2026-05-08_track_a6_run/RUN.md` | packet evidence | Run record for Track A.6 execution and findings |
+| `task_2026-05-09_daemon_restart_and_backfill/` | packet evidence container | Daemon restart and backfill operation packet |
+| `task_2026-05-09_daemon_restart_and_backfill/TASK.md` | packet task | Task definition for daemon restart and ECMWF backfill |
+| `task_2026-05-09_daemon_restart_and_backfill/RUN.md` | packet evidence | Run record for daemon restart/backfill execution |
+| `task_2026-05-09_workflow_redesign_plan/` | plan packet container | Workflow redesign planning packet for PR discipline and topology friction reduction |
+| `task_2026-05-09_workflow_redesign_plan/PLAN.md` | topology planning packet | Plan for workflow redesign, PR discipline, and topology route improvements |
+| `task_2026-05-09_copilot_agent_sync/` | plan packet container | Planning packet for synchronizing Claude Code/OMC subagent, hook, and workflow discipline into Copilot/VS Code agent workflows |
+| `task_2026-05-09_copilot_agent_sync/PLAN.md` | topology planning packet | Route evidence and phased design for Copilot/VS Code agent sync, MCP/tool bridge, hook adapter, and OpenClaw delegation |
 Archived packet evidence (physically moved to `docs/archives/packets/`) is
 listed in `docs/archive_registry.md`; do not re-list those packets here. When
 a packet closes and is archived, remove its row from this registry and the

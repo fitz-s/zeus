@@ -403,12 +403,29 @@ def run_flag_command(api: Any, args: argparse.Namespace) -> int | None:
             navigation_files = changed_files
         payload = api.run_navigation(args.task or "general navigation", navigation_files, **navigation_kwargs)
         if args.route_card_only:
-            route_payload = {"ok": payload["ok"], "route_card": payload.get("route_card") or {}}
+            route_card = dict(payload.get("route_card") or {})
+            direct_blockers = list(payload.get("direct_blockers") or [])
+            if args.preflight and direct_blockers and not route_card.get("primary_blocker"):
+                blocker = direct_blockers[0]
+                blocker_path = blocker.get("path")
+                route_card["primary_blocker"] = {
+                    "code": blocker.get("code", "direct_blocker"),
+                    "message": blocker.get("message", "navigation direct blocker"),
+                    "paths": [blocker_path] if blocker_path else [],
+                }
+            route_ok = bool(payload["ok"])
+            if args.preflight:
+                route_ok = (
+                    bool(payload["ok"])
+                    and route_card.get("admission_status") == "admitted"
+                    and not route_card.get("primary_blocker")
+                )
+            route_payload = {"ok": route_ok, "route_card": route_card}
             if args.json:
                 print(json.dumps(route_payload, indent=2))
             else:
                 _print_route_card(route_payload["route_card"])
-            return 0 if payload["ok"] else 1
+            return 0 if route_ok else 1
         if args.json:
             print(json.dumps(payload, indent=2))
         else:
