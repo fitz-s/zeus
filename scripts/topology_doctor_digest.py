@@ -66,12 +66,13 @@ def _glob_match(path: str, pattern: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# F1 fix (round-3): whitelist-driven admission for plan_only and audit.
+# F1 fix (round-3): whitelist-driven admission for plan_only, audit, and docs_instruction.
 #
 # plan_only and audit now declare admits_path_globs in typed_intent_enum.
-# _apply_typed_intent_shortcut ONLY admits paths that match an admits_path_glob.
-# All other requested paths are blocked → out_of_scope_files + blocked_by_intent.
-# Status is advisory_only whenever any path is blocked by the whitelist.
+# _apply_typed_intent_shortcut ONLY admits paths that match an admits_path_glob
+# and do not match blocks_path_globs. All other requested paths are blocked →
+# out_of_scope_files + blocked_by_intent. Status is advisory_only whenever any
+# path is blocked by the whitelist or blacklist.
 #
 # Canonical scopes (admission_severity.yaml::typed_intent_enum):
 #   plan_only: docs/**, evidence/**
@@ -821,10 +822,12 @@ _CANONICAL_TYPED_INTENTS: frozenset[str] = frozenset({
     "other",
 })
 
-# Intents that admit ALL requested paths without a profile match.
-# These are read-only or non-source-modifying intents per admission_severity.yaml.
+# Intents that short-circuit profile matching through typed-intent admission.
+# Whitelist-driven members admit only admits_path_globs and still honor
+# blocks_path_globs from admission_severity.yaml.
 # NOTE: hotfix and rebase_keepup are NOT in this set — they have scope and must
-# go through normal profile match. Only pure read-only intents bypass admission.
+# go through normal profile match. Only pure read-only / docs-instruction intents
+# bypass profile selection.
 _ADMIT_ALL_PATHS_INTENTS: frozenset[str] = frozenset({
     "plan_only",
     "audit",
@@ -837,7 +840,8 @@ def _resolve_typed_intent(intent: str | None, topology: dict[str, Any]) -> dict[
 
     K3 amendment: when intent is a canonical typed_intent_enum value, short-circuit
     profile selection and return a non-ambiguous resolution. Intents in
-    _ADMIT_ALL_PATHS_INTENTS bypass profile allowed_files entirely (admitted directly).
+    _ADMIT_ALL_PATHS_INTENTS bypass profile allowed_files and use typed-intent
+    admission rules from admission_severity.yaml.
     For other canonical intents (create_new, modify_existing, refactor, other), the
     resolution is non-ambiguous but profile-id is None — _reconcile_admission will
     use generic fallback and _apply_typed_intent_shortcut promotes to admitted.
@@ -1617,9 +1621,17 @@ def _apply_typed_intent_shortcut(
     forbidden_hits = set(admission.get("forbidden_hits") or [])
 
     if normalised in _WHITELIST_DRIVEN_INTENTS:
-        # F1 round-3: whitelist-driven admission — only admits_path_globs pass.
+        # F1 round-3: whitelist-driven admission — only admits_path_globs pass,
+        # and blocks_path_globs wins if future config introduces overlap.
         # Canonical scopes: architecture/admission_severity.yaml::typed_intent_enum.
         intent_admits_globs = _load_typed_intent_admits_globs().get(normalised, ())
+        intent_blocked_globs = _load_typed_intent_blocked_globs().get(normalised, ())
+        blocked_by_glob = [
+            f for f in requested
+            if f not in forbidden_hits
+            and any(_glob_match(f, g) for g in intent_blocked_globs)
+        ] if intent_blocked_globs else []
+        blocked_by_glob_set = set(blocked_by_glob)
         if not intent_admits_globs:
             # No whitelist defined: block everything (fail-closed).
             admitted_files: list[str] = []
@@ -1628,13 +1640,16 @@ def _apply_typed_intent_shortcut(
             admitted_files = [
                 f for f in requested
                 if f not in forbidden_hits
+                and f not in blocked_by_glob_set
                 and any(_glob_match(f, g) for g in intent_admits_globs)
             ]
-            blocked_by_intent = [
+            outside_whitelist = [
                 f for f in requested
                 if f not in forbidden_hits
+                and f not in blocked_by_glob_set
                 and not any(_glob_match(f, g) for g in intent_admits_globs)
             ]
+            blocked_by_intent = list(dict.fromkeys(blocked_by_glob + outside_whitelist))
     else:
         # Legacy blacklist path (non-whitelist intents in _ADMIT_ALL_PATHS_INTENTS).
         intent_blocked_globs = _load_typed_intent_blocked_globs().get(normalised, ())
@@ -1661,8 +1676,8 @@ def _apply_typed_intent_shortcut(
                 "code": "typed_intent_path_outside_scope",
                 "path": f,
                 "message": (
-                    f"intent={normalised}: path not in admits_path_globs; "
-                    f"blocked by K3 whitelist contract"
+                    f"intent={normalised}: path not admitted by typed-intent "
+                    f"admits_path_globs or matched blocks_path_globs; blocked by K3 contract"
                 ),
                 "severity": "advisory",
             }

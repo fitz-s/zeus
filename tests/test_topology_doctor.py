@@ -4074,6 +4074,32 @@ def test_docs_instruction_typed_intent_whitelist_admits_only_instruction_docs():
     assert blocked["admission"]["out_of_scope_files"] == ["architecture/topology.yaml"]
 
 
+def test_whitelist_driven_typed_intent_respects_block_globs(monkeypatch):
+    from scripts import topology_doctor_digest
+
+    monkeypatch.setattr(
+        topology_doctor_digest,
+        "_load_typed_intent_admits_globs",
+        lambda: {"docs_instruction": ("docs/reference/**",)},
+    )
+    monkeypatch.setattr(
+        topology_doctor_digest,
+        "_load_typed_intent_blocked_globs",
+        lambda: {"docs_instruction": ("docs/reference/blocked.md",)},
+    )
+
+    digest = topology_doctor.build_digest(
+        "edit copilot path scoped instruction",
+        ["docs/reference/blocked.md"],
+        intent="docs_instruction",
+        write_intent="edit",
+    )
+
+    assert digest["admission"]["status"] == "advisory_only"
+    assert digest["admission"]["admitted_files"] == []
+    assert digest["admission"]["typed_intent_blocked_files"] == ["docs/reference/blocked.md"]
+
+
 def test_route_card_only_human_output_prefers_primary_blocker_over_full_trace():
     buffer = StringIO()
     with redirect_stdout(buffer):
