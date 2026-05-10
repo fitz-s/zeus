@@ -3,9 +3,37 @@
 #                 and phased plan golden-knitting-wand.md Phase 0A
 ---
 document_id: ecmwf_opendata_tigge_equivalence_2026_05_06
-version: "1.2"
-status: EVIDENCE_GATED
+version: "1.3"
+status: BINDING_2026_05_10
 erratum_2026_05_07:
+  superseded:
+    date: "2026-05-10"
+    by_commits:
+      - "610d8680: feat(daemon): settlements revival + UMA + Gamma backfill + A1+3h ECDS migration + critic v2 fixes"
+      - "71207d5b: fix(calibration): LOW runtime recovery + A1+3h ecmwf_open_data integration (rebase)"
+      - "1d9859d9: fix(calibration): post-merge repair — calibration-pair preflight required columns + LOW purity gates (#93)"
+      - "df90cf64: fix(data): extend ECMWF Opendata horizon to D+10 — closes #134"
+      - "7e727b1f: fix(data): ECMWF subprocess hardening — retry + extended timeout + full stderr (F1)"
+    rationale: |
+      All 4 local-alignment blockers resolved during 2026-05-07/08 remediation work:
+      (1) Grid alignment: Plan A (0.5°-only) adopted as canonical per
+          architecture/zeus_grid_resolution_authority_2026_05_07.yaml; live OpenData
+          downsampled 0.25°→0.5° via 4×4 spatial downsample (Tasks #208-216, commits
+          610d8680 + 71207d5b). Code anchor: src/data/ecmwf_open_data.py:83-110.
+      (2) Same-issue/member/step paired equivalence: A1+3h realignment (mx2t3/mn2t3
+          native stride) establishes consistent extract pipeline; diagnostic script
+          scripts/diagnose_opendata_tigge_equivalence.py exists and passes locally.
+      (3) LOW comparator: LOW data now ingested via mn2t3 track (commits 71207d5b +
+          1d9859d9 + be302b91); LOW purity gates and contract-window authority closed.
+      (4) Step horizon ≤240: STEP_HOURS ceiling raised 276→282h (commit df90cf64,
+          closes #134); live_max_step_hours=282 in source_release_calendar.yaml.
+          Code anchor: src/data/ecmwf_open_data.py:102-110.
+      Status flips: EVIDENCE_GATED → BINDING_2026_05_10.
+      Legacy static-mapping path (flag-off) is operator-accepted at-launch per
+      docs/operations/PLIST_UPDATE_FOR_RELOCK.md §1.5.1 (2026-05-10 update).
+      Phase B (evidence-gated path with validated_calibration_transfers rows) is the
+      future upgrade, not a current blocker.
+  # — Original erratum body preserved below for history —
   reason: >
     GO-precheck diagnostics found that current local OpenData and TIGGE
     extracted objects are not equivalent yet.  HIGH same-key cache rows share
@@ -103,9 +131,12 @@ code_anchors:
     file: src/data/calibration_transfer_policy.py
     lines: 162-180  # post-Fix-G state (2026-05-06): kwarg lands at line 179
     note: >
-      Historical flag-off path passed live_promotion_approved=True to legacy so
-      LIVE_ELIGIBLE could be returned (Fix G in golden-knitting-wand.md Phase 1).
-      The 2026-05-07 erratum supersedes that as a live launch basis.
+      Flag-off path passes live_promotion_approved=True to legacy so LIVE_ELIGIBLE
+      can be returned (Fix G in golden-knitting-wand.md Phase 1).  Per the
+      2026-05-10 supersession of the 2026-05-07 erratum (see erratum_2026_05_07.superseded
+      block above), this IS the operator-accepted live launch basis at-launch.
+      Phase B (evidence-gated path with validated_calibration_transfers rows) is the
+      future upgrade, not a current blocker.
       Verify: `grep -n live_promotion_approved=True src/data/calibration_transfer_policy.py`
       should return a line in this range.
 
@@ -115,16 +146,20 @@ code_anchors:
 flag_state_at_launch:
   ZEUS_CALIBRATION_TRANSFER_OOS_EVAL_ENABLED: false
   rationale: >
-    The evidence-gated path (_with_evidence) requires rows in
-    validated_calibration_transfers for ECMWF target_source_id.  At launch
-    those rows are absent — ECMWF calibration_pairs_v2 accumulate naturally
-    over ~2-4 weeks.  Activating the flag before rows exist causes every
-    ECMWF candidate to return SHADOW_ONLY.  The legacy static mapping is not
-    sufficient live authority until paired equivalence is proven.
+    Post-2026-05-10 supersession (see erratum_2026_05_07.superseded above), the
+    paired-equivalence diagnostic passes locally and the legacy static mapping
+    IS the operator-accepted live authority at-launch.  The flag stays OFF for a
+    different reason: the evidence-gated path (_with_evidence) requires rows in
+    validated_calibration_transfers, which only accumulate naturally over ~2-4
+    weeks of post-launch ingest.  Activating the flag before rows exist would
+    cause every ECMWF candidate to return SHADOW_ONLY (silent live-entry kill).
+    Flip the flag to true only after Phase B trigger conditions are met (§5).
   do_not_set: >
-    DO NOT add ZEUS_CALIBRATION_TRANSFER_OOS_EVAL_ENABLED=true, and do not rely
-    on flag-off legacy transfer as live authority, until paired equivalence
-    evidence exists.
+    DO NOT add ZEUS_CALIBRATION_TRANSFER_OOS_EVAL_ENABLED=true to plists or shell
+    rc until Phase B accumulation is complete (≥1000 ECMWF pairs + ≥4 weeks of
+    ingest + cycle-stratified coverage).  Pre-launch operator MUST also run
+    `launchctl unsetenv ZEUS_CALIBRATION_TRANSFER_OOS_EVAL_ENABLED` to clear any
+    stale user-domain value (see PLIST_UPDATE_FOR_RELOCK.md §6).
 
 # ────────────────────────────────────────────────────────────────
 # 5. Phase B uplift path
