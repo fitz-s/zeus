@@ -25,6 +25,89 @@ Do not port Claude Code hooks directly into Copilot. Build a three-layer sync:
 
 Copilot should be a workspace UI and lightweight orchestrator. OpenClaw/Claude Code remains the durable multi-agent engine for long-running work, persistent teams, and child-agent orchestration.
 
+## First-Principles Dispatch Design
+
+Verdict after critic/architect review: `ADD_LIGHT_DISPATCH`.
+
+Copilot's workflow is not Claude Code's workflow. Claude Code has native
+`Task`/`Team` semantics and OMC model routing; Copilot should not simulate that
+inside VS Code prompts. The objective is narrower: Copilot does bounded local
+work itself, then sends a small typed handoff envelope to OpenClaw when durable
+memory, parallel workers, independent review, or premium reasoning is actually
+needed.
+
+Non-goals:
+
+- No fake Copilot-native subagents.
+- No prompt-layer global model optimizer.
+- No hook/finalization parity mixed into dispatch.
+- No `agentId="copilot"` ACP enablement until auth/allowlist smoke tests prove
+  the runtime exists.
+
+Minimal handoff envelope:
+
+```json
+{
+  "runtime": "acp",
+  "agentId": "claude|codex|gemini",
+  "omcRole": "explore|executor|critic|verifier|document-specialist",
+  "task": "single concrete objective",
+  "workspaceRoot": "/abs/workspace",
+  "cwd": "/abs/cwd",
+  "route": {
+    "admittedFiles": ["..."],
+    "outOfScopeFiles": ["..."],
+    "writeIntent": "read_only|edit",
+    "riskClass": "low|medium|high"
+  },
+  "inputs": {
+    "authorityPacketPaths": ["..."],
+    "artifactPaths": ["..."]
+  },
+  "budget": {
+    "maxWorkers": 1,
+    "maxRounds": 1,
+    "maxOutputTokens": 4000
+  }
+}
+```
+
+Role first, model second:
+
+| Work type | Default route | Escalation route |
+| --- | --- | --- |
+| Broad search / file finding | `explore` on cheapest long-context model such as Haiku-class | Medium model only if evidence conflicts |
+| Standard implementation | `executor` on Sonnet/GPT-5-class coding model | Opus/Gemini Pro only for cross-module design or repeated failure |
+| Review / adversarial critique | `critic` on medium reasoning model | Opus/Gemini Pro for high-blast-radius governance/runtime changes |
+| Verification | `verifier` with executable checks first | Premium model only for semantic proof gaps |
+| External docs/API ambiguity | `document-specialist` on cheap retrieval model | Medium model if docs conflict |
+
+Escalate only when one of these is true:
+
+- The cheap worker cannot answer from the bounded authority packet and admitted
+  files.
+- Evidence conflicts across code, tests, docs, or data.
+- The task crosses module boundaries or touches high-risk Zeus surfaces.
+- One cheap pass plus one repair pass still leaves material ambiguity.
+- The requested output requires design judgment rather than search/synthesis.
+
+Parallelize only read-only or independently reviewable work. Good fan-out:
+2-3 `explore` workers for independent search questions, or `critic` plus
+`verifier` after an implementation artifact exists. Do not run multiple
+executors against the same file surface, and do not spawn premium workers just
+because a premium model is available.
+
+Token controls:
+
+- Send route cards and file paths, not repo narratives.
+- Use `context-bridge.mjs` for bounded authority packets.
+- Do not replay chat history unless it contains requirements not captured on
+  disk.
+- Require worker outputs to be short structured findings, evidence, and next
+  action.
+- Let OpenClaw/OMC own provider-specific model choice; Copilot only states role,
+  risk, budget, and escalation constraints.
+
 ## Subagent Mapping
 
 | Claude / Zeus construct | Copilot / VS Code equivalent | Design rule |
@@ -169,10 +252,20 @@ Copilot-only isolation:
 - Rule0 closeout enforcement applies only to Copilot agent runtimes: VS Code
   Copilot agent mode, a future OpenClaw ACP `agentId="copilot"`, or a wrapper
   explicitly configured with `runtime="copilot"`.
+- Enforcement must be centralized at the top-level host/finalizer boundary, not
+  distributed into every agent prompt. A prompt-only rule cannot simultaneously
+  guarantee that an undisciplined main agent asks and that delegated workers
+  never ask.
 - It must not install Claude Code hooks, Codex hooks, global OpenClaw dispatch
   hooks, or OMC `Task`/`Team` behavior changes.
 - Non-Copilot runtimes return `SKIPPED_NON_COPILOT_AGENT`; they do not block,
   ask, or mutate their closeout behavior.
+- Delegated Copilot workers/subagents return `SKIPPED_DELEGATED_AGENT`; they do
+  not ask the user because their response audience is the parent agent, not the
+  operator. Only the top-level, user-facing Copilot session may run Rule0.
+- Missing top-level/user-facing metadata blocks with
+  `BLOCKED_RULE0_MISSING_TOP_LEVEL_CONTEXT`; the bridge must not ask by default
+  when it cannot prove the current response is the top-level operator closeout.
 - The VS Code adapter must make runtime selection explicit in its invocation
   context, not infer it from repository path alone. Zeus running inside VS Code
   is not sufficient; the current responding agent must be Copilot.
@@ -182,16 +275,22 @@ Adapter plan:
 1. Define `isCopilotAgent(context)` with positive evidence only: explicit
   runtime id, VS Code Copilot chat participant id, or OpenClaw ACP
   `agentId="copilot"`.
-2. Implement a wrapper boundary such as
-  `copilotRule0Closeout({ runtime, draftSummary, nextQuestion, choices })`.
-  It returns `SKIPPED_NON_COPILOT_AGENT` unless `isCopilotAgent` is true.
-3. Inside the Copilot branch, call the VS Code UI adapter
+2. Implement a top-level host/finalizer boundary such as
+  `copilotRule0Closeout({ runtime, invocationKind, responseAudience,
+  parentAgentId, agentDepth, draftSummary, nextQuestion, choices })`. It returns
+  `SKIPPED_NON_COPILOT_AGENT` unless `isCopilotAgent` is true, and
+  `SKIPPED_DELEGATED_AGENT` for subagent/worker/internal parent-agent returns.
+3. The wrapper must inject `responseAudience="user"` and
+  `invocationKind="top-level"` only for the root user-facing closeout; worker
+  result paths must be marked with parent/delegated context or bypass Rule0.
+4. Inside the top-level Copilot branch, call the VS Code UI adapter
   (`showInformationMessage` or `showQuickPick`) and pass the result into
   `rule0-before-final.mjs` as the injected ask adapter.
-4. Add tests for three relationships: Copilot runtime asks and returns
-  `askReceipt`; non-Copilot runtime skips without side effects; missing VS Code
-  UI adapter blocks only the Copilot runtime.
-5. Keep Claude Code, Codex, and OpenClaw global router files out of scope unless
+5. Add tests for four relationships: top-level Copilot asks and returns
+  `askReceipt`; delegated Copilot skips without side effects; non-Copilot
+  runtime skips without side effects; missing VS Code UI adapter blocks only the
+  top-level Copilot runtime.
+6. Keep Claude Code, Codex, and OpenClaw global router files out of scope unless
   the operator explicitly asks for per-agent variants later.
 - Harness adapter: if ACP or a VS Code extension can observe finalization,
   wrap final response emission with this tool. Missing `askReceipt` is
@@ -523,8 +622,10 @@ history.
 7. After file adds/deletes/renames, run `zeus_map_maintenance` before commit/closeout.
 8. For broad search, implementation, critic, verifier, or multi-step work, delegate through OpenClaw rather than pretending Copilot has native subagents.
 9. Run focused route checks and `zeus_verify_claim` before saying done.
-10. Before any terminal answer, call `ask_user` / `#askQuestions` through
-  `rule0_before_final`; do not substitute a prose-only final question.
+10. Before any top-level, user-facing terminal closeout, call `ask_user` /
+  `#askQuestions` through `rule0_before_final`; do not substitute a prose-only
+  final question. Delegated workers/subagents return to the parent agent without
+  calling ask-user.
 
 Stop before live/prod/data side effects unless the operator explicitly approves.
 ```
@@ -583,10 +684,14 @@ End-to-end dry run:
 
 ### OpenClaw root
 
+- `.github/copilot-instructions.md`: updated with global role-first/model-second subagent dispatch rules for any Copilot agent.
 - `plugin-skills/vscode-copilot-sync/SKILL.md`: user-facing workflow for syncing Copilot with OpenClaw/Zeus.
 - `plugin-skills/vscode-copilot-sync/rule0-before-final.mjs`: implemented Rule0 ask-before-final bridge primitive.
 - `plugin-skills/vscode-copilot-sync/mcp-server.mjs`: deferred; when built, use the official SDK or a verified transport and add subprocess interoperability tests.
-- `plugin-skills/vscode-copilot-sync/context-bridge.mjs`: reads workspace authority docs and emits bounded prompt packets.
+- `plugin-skills/vscode-copilot-sync/context-bridge.mjs`: implemented read-only bridge that reads workspace authority docs and emits bounded prompt packets.
+- `plugin-skills/vscode-copilot-sync/zeus-route.mjs`: implemented read-only wrapper around `topology_doctor.py --navigation --json`.
+- `plugin-skills/vscode-copilot-sync/zeus-gates.mjs`: implemented read-only planning-lock/map-maintenance wrapper.
+- `plugin-skills/vscode-copilot-sync/dispatch-envelope.mjs`: implemented role-first/model-tier-second handoff envelope builder.
 - `openclaw.json`: add `copilot` to ACP `allowedAgents` only after a smoke test proves auth and command availability.
 - VS Code user prompts folder: optional reusable prompt files, not authority.
 
@@ -605,7 +710,12 @@ End-to-end dry run:
 - [ ] Phase 2 - MCP/CLI bridge
   - Files: OpenClaw `plugin-skills/vscode-copilot-sync/**`.
   - What: implement read-only wrappers first: route, safety-gate dry run, session status, authority context packet.
-  - Rule0 seed implemented: `rule0-before-final.mjs` validates question shape, calls injected ask adapter, returns `askReceipt`, and blocks missing ask/tool states.
+  - Rule0 seed implemented: `rule0-before-final.mjs` validates question shape, skips non-Copilot runtimes with `SKIPPED_NON_COPILOT_AGENT`, calls injected ask adapter, returns `askReceipt`, and blocks missing ask/tool states for Copilot runtimes.
+  - Authority context bridge implemented: `context-bridge.mjs` reads only explicit workspace-relative authority files, caps bytes per file, and refuses path traversal.
+  - Route bridge implemented: `zeus-route.mjs` wraps `topology_doctor.py --navigation --json` with explicit workspace root and relative file validation.
+  - Safety-gate wrappers implemented: `zeus-gates.mjs` wraps planning-lock and map-maintenance in JSON mode with relative changed-file validation.
+  - Dispatch envelope implemented: `dispatch-envelope.mjs` maps work type to OMC role and model tier, ignores premium-model requests without evidence triggers, caps read-only fanout at 3 and edit fanout at 1.
+  - Global Copilot dispatch rule implemented: root `.github/copilot-instructions.md` now tells any Copilot agent when to use cheap explore workers, standard executors, critic/verifier roles, and premium escalation.
   - MCP exposure deferred after critic review: do not present a pseudo-MCP JSON-RPC wrapper as enforcement without a real client/transport proof.
   - Verification: JSON schema tests and Zeus topology route smoke tests.
 

@@ -51,10 +51,15 @@ operator decision.
 
 ## Rule 0 Ask Gate
 
-Before any response that would otherwise conclude the task or conversation,
-call the available ask-user tool (`ask_user`, `#askQuestions`, or VS Code
-`askQuestions`) with one concrete next question. A prose-only final question is
-not enough.
+Before any top-level, user-facing Copilot response that would otherwise conclude
+the task or conversation, call the available ask-user tool (`ask_user`,
+`#askQuestions`, or VS Code `askQuestions`) with one concrete next question. A
+prose-only final question is not enough. Delegated Copilot workers/subagents
+must return their result to the parent agent without calling ask-user.
+
+The reliable enforcement point is the top-level host/finalizer wrapper, not a
+worker prompt. If a Copilot run cannot positively identify itself as the
+top-level user-facing session, it must not call ask-user.
 
 Bridge seed: OpenClaw root `plugin-skills/vscode-copilot-sync/rule0-before-final.mjs`.
 

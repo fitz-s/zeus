@@ -1,0 +1,31 @@
+To ensure the stability of our systems and to preserve resources for our operational activities (network, compute, etc.), access to the open-data portal is limited to 500 simultaneous connections. This limit helps us guarantee reliable service for our operational users, especially during periods of high demand. For added reliability, the open-data is replicated across AWS, Azure, and Google Cloud. If you experience difficulties accessing the portal directly, you can also retrieve the data from these cloud platforms.
+Traceback (most recent call last):
+  File "/Users/leofitz/.openclaw/workspace-venus/51 source data/scripts/download_ecmwf_open_ens.py", line 106, in <module>
+    raise SystemExit(main())
+                     ~~~~^^
+  File "/Users/leofitz/.openclaw/workspace-venus/51 source data/scripts/download_ecmwf_open_ens.py", line 93, in main
+    summary = download_open_ens(
+        date_value=date_value,
+    ...<4 lines>...
+        output_path=output_path,
+    )
+  File "/Users/leofitz/.openclaw/workspace-venus/51 source data/scripts/download_ecmwf_open_ens.py", line 38, in download_open_ens
+    client.retrieve(
+    ~~~~~~~~~~~~~~~^
+        date=int(date_value.strftime("%Y%m%d")),
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<5 lines>...
+        target=str(output_path),
+        ^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/Users/leofitz/miniconda3/lib/python3.14/site-packages/ecmwf/opendata/client.py", line 193, in retrieve
+    result = self._get_urls(request, target=target, use_index=True, **kwargs)
+  File "/Users/leofitz/miniconda3/lib/python3.14/site-packages/ecmwf/opendata/client.py", line 303, in _get_urls
+    data_urls = self.get_parts(data_urls, for_index)
+  File "/Users/leofitz/miniconda3/lib/python3.14/site-packages/ecmwf/opendata/client.py", line 324, in get_parts
+    r.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~^^
+  File "/Users/leofitz/miniconda3/lib/python3.14/site-packages/requests/models.py", line 1026, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 404 Client Error: Not Found for url: https://data.ecmwf.int/forecasts/20260504/12z/ifs/0p25/enfo/20260504120000-3h-enfo-ef.index

@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # Created: 2026-05-04
-# Last reused/audited: 2026-05-04
+# Last reused/audited: 2026-05-08
 # Authority basis: PR #55 follow-up — operator directive 2026-05-04 (no 2023
 #                  backfill; chain extract on cloud after Phase A completes).
 #
 # cloud_tigge_autochain.sh — runs ON the GCE tigge-runner instance.
 #
 # Watches the 10 download lanes (5 accounts × 2 metrics × cycle=12z) and,
-# when ALL lanes report status="completed" in their status JSON, kicks off
+# when ALL lanes report status="complete" or "completed" in their status JSON, kicks off
 # cycle-aware extract (mn2t6 + mx2t6) directly on cloud — no rsync, no
 # Phase B 2023 download.  Reuses the documented extract entrypoints from
 # POSTDOWNLOAD_CHAIN.md §2.
@@ -42,8 +42,10 @@ log() {
 
 all_lanes_complete() {
     local incomplete=0
-    for f in "$ROOT"/tmp/tigge_*_download_status_a*_cycle12z.json; do
+    local f
+    while IFS= read -r f; do
         if [[ ! -f "$f" ]]; then
+            log "lane missing: $f"
             incomplete=$((incomplete + 1))
             continue
         fi
@@ -56,15 +58,57 @@ try:
 except Exception as exc:
     print('error', file=sys.stderr)
 " "$f" 2>/dev/null || echo "unknown")
-        # 2026-05-05 fix: lane writers emit status="complete" (no -d).
-        # Accept both forms; treat anything else as incomplete. Pre-fix, this
-        # check rejected "complete" → autochain stalled 28h despite all 10
-        # lanes done. See post-mortem in PR #61.
         if [[ "$status" != "complete" && "$status" != "completed" ]]; then
+            log "lane incomplete: $(basename "$f") status=$status"
             incomplete=$((incomplete + 1))
         fi
-    done
+    done < <(lane_status_files)
     return $incomplete
+}
+
+lane_status_for() {
+    local track="$1"
+    local lane="$2"
+    local candidate
+
+    if [[ "$lane" == "a1" ]]; then
+        # a1 was launched before the cycle suffix fix and has the full-range
+        # completion in the unsuffixed file. Keep cycle variants as fallback
+        # for future relaunches.
+        for candidate in \
+            "$ROOT/tmp/tigge_${track}_download_status_${lane}.json" \
+            "$ROOT/tmp/tigge_${track}_download_status_${lane}_cycle${EXTRACT_CYCLE}z_cycle${EXTRACT_CYCLE}z.json" \
+            "$ROOT/tmp/tigge_${track}_download_status_${lane}_cycle${EXTRACT_CYCLE}z.json"; do
+            [[ -f "$candidate" ]] && { printf '%s\n' "$candidate"; return; }
+        done
+        printf '%s\n' "$ROOT/tmp/tigge_${track}_download_status_${lane}.json"
+        return
+    fi
+
+    # The downloader itself namespaces status_path by cycle. If the launcher
+    # already provided _cycle12z, the live file becomes _cycle12z_cycle12z.
+    # Prefer that active file, then fall back for older launchers.
+    for candidate in \
+        "$ROOT/tmp/tigge_${track}_download_status_${lane}_cycle${EXTRACT_CYCLE}z_cycle${EXTRACT_CYCLE}z.json" \
+        "$ROOT/tmp/tigge_${track}_download_status_${lane}_cycle${EXTRACT_CYCLE}z.json" \
+        "$ROOT/tmp/tigge_${track}_download_status_${lane}.json"; do
+        [[ -f "$candidate" ]] && { printf '%s\n' "$candidate"; return; }
+    done
+    printf '%s\n' "$ROOT/tmp/tigge_${track}_download_status_${lane}_cycle${EXTRACT_CYCLE}z_cycle${EXTRACT_CYCLE}z.json"
+}
+
+lane_status_files() {
+    if [[ -n "${TIGGE_STATUS_FILES:-}" ]]; then
+        tr ':' '\n' <<<"$TIGGE_STATUS_FILES"
+        return
+    fi
+
+    local track lane
+    for track in mn2t6 mx2t6; do
+        for lane in a1 a2 a3 a4 a5; do
+            lane_status_for "$track" "$lane"
+        done
+    done
 }
 
 kick_extract() {
