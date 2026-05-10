@@ -4048,6 +4048,7 @@ def test_copilot_instruction_docs_gate_preserves_profile_route():
     )
 
     assert digest["profile"] == "copilot instruction docs sync"
+    assert "--write-intent edit" in digest["gates"][0]
     assert "--intent 'copilot instruction docs sync'" in digest["gates"][0]
     assert "--intent docs_instruction" not in digest["gates"][0]
 

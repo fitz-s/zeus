@@ -601,8 +601,8 @@ PROFILES: list[dict] = [ { 'id': 'change settlement rounding',
                          'architecture/admission_severity.yaml',
                          'docs/authority/**',
                          'state/*.db'],
-    'gates': [ "python3 scripts/topology_doctor.py --preflight --intent 'copilot instruction docs sync' --files "
-               '<files>',
+    'gates': [ "python3 scripts/topology_doctor.py --preflight --write-intent edit --intent 'copilot instruction docs "
+               "sync' --files <files>",
                'python3 scripts/topology_doctor.py --map-maintenance --map-maintenance-mode advisory --changed-files '
                '<files>'],
     'downstream': ['AGENTS.md', '.claude/CLAUDE.md', 'docs/operations/AGENTS.md'],
