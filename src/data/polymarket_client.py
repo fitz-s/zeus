@@ -621,7 +621,13 @@ class PolymarketClient:
         return positions
 
     def get_balance(self) -> float:
-        """Get pUSD balance through the Z4 CollateralLedger."""
+        """Get pUSD balance through the Z4 CollateralLedger.
+
+        Connection discipline (2026-05-10 leak fix): get_trade_connection_with_world()
+        ATTACHes zeus-world.db; conn must be closed after use. Prior to this fix
+        conn was never closed, producing +2 zeus-world.db fds per bankroll_provider
+        tick (one per riskguard tick = 60s accumulation rate).
+        """
         warnings.warn(
             "PolymarketClient.get_balance() is a compatibility wrapper; "
             "live balance queries route through CollateralLedger.",
@@ -632,11 +638,14 @@ class PolymarketClient:
         from src.state.db import get_trade_connection_with_world
 
         conn = get_trade_connection_with_world()
-        ledger = CollateralLedger(conn)
-        snapshot = ledger.refresh(self._ensure_v2_adapter())
-        conn.commit()
-        configure_global_ledger(ledger)
-        return snapshot.pusd_balance_micro / 1_000_000
+        try:
+            ledger = CollateralLedger(conn)
+            snapshot = ledger.refresh(self._ensure_v2_adapter())
+            conn.commit()
+            configure_global_ledger(ledger)
+            return snapshot.pusd_balance_micro / 1_000_000
+        finally:
+            conn.close()
 
     def redeem(self, condition_id: str) -> Optional[dict]:
         """Redeem winning shares for USDC after settlement.

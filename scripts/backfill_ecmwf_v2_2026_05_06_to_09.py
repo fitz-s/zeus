@@ -47,6 +47,8 @@ CYCLES: list[tuple[date, int]] = [
     (date(2026, 5, 8), 0),
     (date(2026, 5, 8), 12),
     (date(2026, 5, 9), 0),
+    (date(2026, 5, 9), 12),  # added 2026-05-10 — released ~19:40 UTC
+    (date(2026, 5, 10), 0),  # added 2026-05-10 — released ~07:40 UTC, fetched by daemon startup
 ]
 TRACK_NAMES = ["mx2t6_high", "mn2t6_low"]
 

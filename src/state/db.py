@@ -684,10 +684,23 @@ def get_connection(
 
 
 def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
-    """Create all Zeus tables. Idempotent."""
+    """Create all Zeus tables. Idempotent.
+
+    # Fix (task #200, 2026-05-10): PRAGMA busy_timeout must be re-applied at the
+    # start of init_schema. Python's sqlite3.connect(timeout=N) installs a C-level
+    # busy handler, but sqlite3.executescript() resets that handler to NULL before
+    # running its SQL. Every executescript() call in this function (there are ~6)
+    # wipes the timeout, leaving subsequent conn.execute() calls with no wait budget.
+    # Re-applying PRAGMA busy_timeout here covers the entire init_schema call including
+    # apply_v2_schema. Source: ZEUS_DB_BUSY_TIMEOUT_MS env var (ms), default 30 s.
+    """
     own_conn = conn is None
     if own_conn:
         conn = get_connection()
+
+    # Re-apply busy_timeout: executescript() resets the C-level busy handler.
+    _busy_ms = int(os.environ.get("ZEUS_DB_BUSY_TIMEOUT_MS", "30000"))
+    conn.execute(f"PRAGMA busy_timeout = {_busy_ms}")
 
     conn.executescript("""
         -- Inherited from legacy predecessor: settlement outcomes
@@ -1742,7 +1755,14 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
     # T1A: DDL single-source — delegate to schema owner to avoid duplication.
     from src.execution.settlement_commands import SETTLEMENT_COMMAND_SCHEMA
     conn.executescript(SETTLEMENT_COMMAND_SCHEMA)
-    
+
+    # task #200 (2026-05-10): executescript() resets the C-level busy handler.
+    # Re-apply after the last executescript() so all subsequent conn.execute()
+    # calls (ALTER loops, apply_v2_schema) wait under contention instead of
+    # failing immediately. apply_v2_schema also sets this independently as a
+    # belt-and-suspenders guard for callers that bypass init_schema.
+    conn.execute(f"PRAGMA busy_timeout = {int(os.environ.get('ZEUS_DB_BUSY_TIMEOUT_MS', '30000'))}")
+
     # Safe Schema evolution for phase 3 attribution
     for col in ["entry_alpha_usd", "execution_slippage_usd", "exit_timing_usd", "risk_throttling_usd", "settlement_edge_usd"]:
         try:
