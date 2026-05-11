@@ -20,8 +20,18 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
 
 from src.data.ecmwf_open_data import collect_open_ens_cycle
+
+# Marker for tests that exercised the deleted subprocess download path.
+# Superseded 2026-05-11 by parallel SDK fetch (test_ecmwf_open_data_parallel_fetch.py).
+# Using skip (not xfail) — test bodies would hang on real HTTP connections
+# since the subprocess download path they exercised no longer exists.
+_SUBPROCESS_SUPERSEDED = pytest.mark.skip(
+    reason="Superseded 2026-05-11: subprocess download path deleted. "
+    "Parallel SDK _fetch_impl path tested in test_ecmwf_open_data_parallel_fetch.py.",
+)
 
 
 UTC = timezone.utc
@@ -109,6 +119,7 @@ def _run_download_only(runner_fn, *, conn=None, monkeypatch=None, tmp_path=None)
 # (b) retry tests
 # ---------------------------------------------------------------------------
 
+@_SUBPROCESS_SUPERSEDED
 def test_subprocess_retry_succeeds_on_second_attempt(tmp_path, monkeypatch) -> None:
     """rc=1 on attempt 1, rc=0 on attempt 2 → result ok (not download_failed)."""
     call_count = 0
@@ -132,6 +143,7 @@ def test_subprocess_retry_succeeds_on_second_attempt(tmp_path, monkeypatch) -> N
     assert call_count == 2, f"Expected exactly 2 runner calls (1 fail + 1 success), got {call_count}"
 
 
+@_SUBPROCESS_SUPERSEDED
 def test_subprocess_retry_exhausts() -> None:
     """rc=1 on all 2 attempts → download_failed."""
     call_count = 0
@@ -158,6 +170,7 @@ def test_subprocess_retry_exhausts() -> None:
 # (b) 404 classification tests
 # ---------------------------------------------------------------------------
 
+@_SUBPROCESS_SUPERSEDED
 def test_skipped_not_released_on_grid_valid_404() -> None:
     """404 without 'No index entries' on a grid-valid step → SKIPPED_NOT_RELEASED (no retry)."""
     call_count = 0
@@ -181,6 +194,7 @@ def test_skipped_not_released_on_grid_valid_404() -> None:
     )
 
 
+@_SUBPROCESS_SUPERSEDED
 def test_no_index_entries_404_is_retried_not_skipped() -> None:
     """404 with 'No index entries' (off-grid step) → treated as retryable, not SKIPPED_NOT_RELEASED."""
     call_count = 0

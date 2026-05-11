@@ -258,8 +258,12 @@ test_trust_policy:
     # fix/#134 — ECMWF Open Data STEP_HOURS D+10 horizon extension antibodies.
     tests/test_ecmwf_open_data_step_hours.py: {created: "2026-05-08", last_used: "2026-05-08"}
     tests/test_forecast_target_contract_horizon.py: {created: "2026-05-08", last_used: "2026-05-08"}
-    # F1 subprocess hardening — retry + timeout + stderr (REPORT §6.2).
-    tests/test_ecmwf_open_data_subprocess_hardening.py: {created: "2026-05-08", last_used: "2026-05-08"}
+    # F1 subprocess hardening — retry + timeout + stderr (REPORT §6.2). Superseded 2026-05-11.
+    tests/test_ecmwf_open_data_subprocess_hardening.py: {created: "2026-05-08", last_used: "2026-05-11"}
+    # PLAN v3 Candidate H — parallel SDK fetch per-step boundaries + partial-cycle source_run contract.
+    tests/test_ecmwf_open_data_parallel_fetch.py: {created: "2026-05-11", last_used: "2026-05-11"}
+    # PLAN v3 §5.5 — cross-track filename collision regression (mx2t6_high vs mn2t6_low per-step isolation).
+    tests/test_ecmwf_open_data_collect_cycle.py: {created: "2026-05-11", last_used: "2026-05-11"}
 
 categories:
   core_law_antibody:
@@ -335,6 +339,8 @@ categories:
     - tests/test_opendata_writes_v2_table.py
     - tests/test_opendata_future_target_contract.py
     - tests/test_ecmwf_open_data_step_hours.py
+    - tests/test_ecmwf_open_data_parallel_fetch.py
+    - tests/test_ecmwf_open_data_collect_cycle.py
     - tests/test_forecast_target_contract_horizon.py
     - tests/test_readiness_state.py
     - tests/test_release_calendar.py
