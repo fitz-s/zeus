@@ -12,9 +12,11 @@ Replaces the legacy 2t-instantaneous + ensemble_snapshots (v1) write path.
 
 Pipeline
 --------
-1. Download single GRIB containing all 51 members × 60 step hours for the
-   requested run (mx2t6 OR mn2t6 per call) via
-   ``51 source data/scripts/download_ecmwf_open_ens.py``.
+1. Download single GRIB containing all 51 members × 71 step hours for the
+   requested run (mx2t6 OR mn2t6 per call) via in-process parallel SDK
+   fetches at per-step file granularity (``_fetch_one_step`` +
+   ``ThreadPoolExecutor(max_workers=5)``), concatenated on success.
+   Refactored 2026-05-11 per PLAN docs/operations/task_2026-05-11_ecmwf_download_replacement/PLAN.md.
 2. Run ``51 source data/scripts/extract_open_ens_localday.py`` to produce
    per-(city, target_local_date, lead_day) JSON records that conform to the
    TiggeSnapshotPayload contract.
