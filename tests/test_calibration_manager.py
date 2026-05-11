@@ -958,3 +958,139 @@ class TestGetCalibrator:
 
         assert cal is None
         assert level == 4
+
+
+class TestTiggeOpendataBridge:
+    """Train-vs-live bridge: HIGH + ecmwf_opendata source falls back to
+    tigge_*_v1 Platt when OpenData-keyed Platt is missing. LOW does NOT
+    (purity doctrine ``_low_purity_doctrine_2026_05_07``). 2026-05-11.
+    """
+
+    def _v2_conn(self, tmp_path, name="bridge"):
+        from src.state.schema.v2_schema import apply_v2_schema
+
+        db_path = tmp_path / f"test_{name}.db"
+        conn = get_connection(db_path)
+        init_schema(conn)
+        apply_v2_schema(conn)
+        return conn
+
+    def _save_high_tigge_v2(self, conn, cluster, season):
+        from src.calibration.store import save_platt_model_v2
+        from src.types.metric_identity import HIGH_LOCALDAY_MAX
+
+        save_platt_model_v2(
+            conn,
+            metric_identity=HIGH_LOCALDAY_MAX,
+            cluster=cluster,
+            season=season,
+            data_version=HIGH_LOCALDAY_MAX.data_version,  # tigge_mx2t6_local_calendar_day_max_v1
+            param_A=1.0,
+            param_B=0.0,
+            param_C=0.0,
+            bootstrap_params=[(1.0, 0.0, 0.0)] * 5,
+            n_samples=200,
+            input_space="width_normalized_density",
+            authority="VERIFIED",
+            cycle="00",
+            source_id="tigge_mars",
+            horizon_profile="full",
+        )
+        conn.commit()
+
+    def test_opendata_high_falls_back_to_tigge_platt(self, tmp_path):
+        """HIGH + ecmwf_opendata + only TIGGE Platt present → returns the
+        TIGGE-keyed calibrator, not None. Reproduces production state today:
+        1197 tigge_* rows, 0 ecmwf_opendata_* rows."""
+        conn = self._v2_conn(tmp_path, "high_bridge")
+        season = season_from_date("2026-01-15", lat=NYC.lat)
+        self._save_high_tigge_v2(conn, NYC.cluster, season)
+
+        cal, level = get_calibrator(
+            conn,
+            NYC,
+            "2026-01-15",
+            temperature_metric="high",
+            cycle="12",
+            source_id="ecmwf_open_data",
+            horizon_profile="full",
+        )
+        conn.close()
+
+        assert cal is not None, (
+            "HIGH + ecmwf_opendata caller must fall back to TIGGE Platt "
+            "when OpenData-keyed Platt is missing (train-vs-live bridge 2026-05-11)."
+        )
+        # The loaded model should carry tigge bucket attrs.
+        assert getattr(cal, "_bucket_data_version", None) == \
+            "tigge_mx2t6_local_calendar_day_max_v1"
+        assert getattr(cal, "_bucket_source_id", None) == "tigge_mars"
+        assert isinstance(level, int) and level >= 1
+
+    def test_opendata_low_does_not_fall_back_to_tigge(self, tmp_path):
+        """LOW + ecmwf_opendata + only TIGGE LOW Platt present → returns
+        None (no fallback). Purity doctrine ``_low_purity_doctrine_2026_05_07``
+        forbids cross-source rescue for LOW."""
+        from src.calibration.store import save_platt_model_v2
+        from src.types.metric_identity import LOW_LOCALDAY_MIN
+
+        conn = self._v2_conn(tmp_path, "low_no_bridge")
+        season = season_from_date("2026-01-15", lat=NYC.lat)
+        # Seed a TIGGE-keyed LOW Platt; the bridge MUST NOT serve it to an
+        # ecmwf_opendata LOW caller.
+        save_platt_model_v2(
+            conn,
+            metric_identity=LOW_LOCALDAY_MIN,
+            cluster=NYC.cluster,
+            season=season,
+            data_version=LOW_LOCALDAY_MIN.data_version,
+            param_A=1.0,
+            param_B=0.0,
+            param_C=0.0,
+            bootstrap_params=[(1.0, 0.0, 0.0)] * 5,
+            n_samples=200,
+            input_space="width_normalized_density",
+            authority="VERIFIED",
+            cycle="00",
+            source_id="tigge_mars",
+            horizon_profile="full",
+        )
+        conn.commit()
+
+        cal, level = get_calibrator(
+            conn,
+            NYC,
+            "2026-01-15",
+            temperature_metric="low",
+            cycle="12",
+            source_id="ecmwf_open_data",
+            horizon_profile="full",
+        )
+        conn.close()
+
+        assert cal is None, (
+            "LOW + ecmwf_opendata MUST NOT fall back to TIGGE Platt "
+            "(_low_purity_doctrine_2026_05_07). Got non-None calibrator."
+        )
+        assert level == 4
+
+    def test_candidate_data_versions_high_opendata_has_tigge_fallback(self):
+        from src.calibration.manager import _candidate_data_versions_for_metric_source
+
+        candidates = _candidate_data_versions_for_metric_source(
+            "high", "ecmwf_open_data"
+        )
+        assert candidates == (
+            "ecmwf_opendata_mx2t3_local_calendar_day_max_v1",
+            "tigge_mx2t6_local_calendar_day_max_v1",
+        )
+
+    def test_candidate_data_versions_low_opendata_no_tigge_fallback(self):
+        from src.calibration.manager import _candidate_data_versions_for_metric_source
+
+        candidates = _candidate_data_versions_for_metric_source(
+            "low", "ecmwf_open_data"
+        )
+        assert len(candidates) == 1
+        assert candidates[0].startswith("ecmwf_opendata_")
+        assert not any(c.startswith("tigge_") for c in candidates)
