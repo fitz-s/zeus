@@ -16,8 +16,10 @@ touch "$LAST_STATE_FILE" "$LAST_TICK_FILE"
 
 while true; do
   output=$(.venv/bin/python scripts/live_health_probe.py 2>&1)
-  # Extract the flags= component as the state signature
-  state_sig=$(echo "$output" | grep -oE 'flags=[^ ]+' | head -1)
+  # Extract the flags= component as state signature, but STRIP numeric drift
+  # (e.g., cycle_stale=3131s → cycle_stale) so we emit only on flag-set
+  # transitions, not on value drift between identical underlying states.
+  state_sig=$(echo "$output" | grep -oE 'flags=[^ ]+' | head -1 | sed -E 's/=[0-9]+s?//g')
   last_state=$(cat "$LAST_STATE_FILE" 2>/dev/null)
   now_epoch=$(date +%s)
   last_tick=$(cat "$LAST_TICK_FILE" 2>/dev/null || echo 0)
