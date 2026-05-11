@@ -211,6 +211,11 @@ make a surface default-read unless `current_state.md` routes it.
 | `task_2026-05-09_workflow_redesign_plan/PLAN.md` | topology planning packet | Plan for workflow redesign, PR discipline, and topology route improvements |
 | `task_2026-05-09_copilot_agent_sync/` | plan packet container | Planning packet for synchronizing Claude Code/OMC subagent, hook, and workflow discipline into Copilot/VS Code agent workflows |
 | `task_2026-05-09_copilot_agent_sync/PLAN.md` | topology planning packet | Route evidence and phased design for Copilot/VS Code agent sync, MCP/tool bridge, hook adapter, and OpenClaw delegation |
+| `task_2026-05-10_live_readiness_world_authority/` | plan packet container | Planning packet for repairing live executable forecast DB namespace/authority shadowing without mutating runtime DBs |
+| `task_2026-05-10_live_readiness_world_authority/PLAN.md` | topology planning packet | Critic-gated plan for world-owned producer/source/ensemble reads, trade-local entry readiness, observability alignment, and safe branch work |
+| `task_2026-05-10_live_readiness_world_authority/scope.yaml` | packet scope | Scope sidecar for docs-only planning on existing dirty branch; implementation requires separate navigation and critic approval |
+| `task_2026-05-10_live_readiness_world_authority/CRITIC_REVIEW.md` | packet review evidence | Multi-angle critic verdict and required plan revisions before implementation |
+| `task_2026-05-10_live_readiness_world_authority/PROBE_2026-05-10.md` | read-only probe evidence | Live runtime probe after implementation; identifies remaining mx2t3 producer-readiness/data-chain blocker |
 Archived packet evidence (physically moved to `docs/archives/packets/`) is
 listed in `docs/archive_registry.md`; do not re-list those packets here. When
 a packet closes and is archived, remove its row from this registry and the

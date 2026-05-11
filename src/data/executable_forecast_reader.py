@@ -11,11 +11,16 @@ from typing import Any
 from src.data.producer_readiness import PRODUCER_READINESS_STRATEGY_KEY
 from src.data.forecast_target_contract import ForecastTargetScope
 from src.state.readiness_repo import get_entry_readiness
-from src.state.source_run_repo import get_source_run
-from src.state.source_run_coverage_repo import get_source_run_coverage
 
 UTC = timezone.utc
 SOURCE_TRANSPORT = "ensemble_snapshots_v2_db_reader"
+WORLD_SCHEMA = "world"
+WORLD_OWNED_TABLES = frozenset({
+    "ensemble_snapshots_v2",
+    "readiness_state",
+    "source_run",
+    "source_run_coverage",
+})
 
 
 @dataclass(frozen=True)
@@ -175,6 +180,54 @@ def _readiness_reasons(value: object) -> tuple[str, ...]:
     return tuple(str(reason) for reason in reasons if str(reason))
 
 
+def _table_exists(conn: sqlite3.Connection, *, schema: str, table: str) -> bool:
+    if schema not in {"main", WORLD_SCHEMA} or table not in WORLD_OWNED_TABLES:
+        raise ValueError("unsupported executable forecast authority table")
+    if not _schema_attached(conn, schema):
+        return False
+    row = conn.execute(
+        f"SELECT 1 FROM {schema}.sqlite_master WHERE type = 'table' AND name = ? LIMIT 1",
+        (table,),
+    ).fetchone()
+    return row is not None
+
+
+def _schema_attached(conn: sqlite3.Connection, schema: str) -> bool:
+    return schema == "main" or any(row[1] == schema for row in conn.execute("PRAGMA database_list"))
+
+
+def _world_owned_table(conn: sqlite3.Connection, table: str) -> str | None:
+    if table not in WORLD_OWNED_TABLES:
+        raise ValueError("unsupported executable forecast authority table")
+    if not _schema_attached(conn, WORLD_SCHEMA):
+        return table
+    if _table_exists(conn, schema=WORLD_SCHEMA, table=table):
+        return f"{WORLD_SCHEMA}.{table}"
+    return None
+
+
+def _source_run_coverage_by_id(conn: sqlite3.Connection, coverage_id: str) -> dict[str, Any] | None:
+    table = _world_owned_table(conn, "source_run_coverage")
+    if table is None:
+        return None
+    row = conn.execute(
+        f"SELECT * FROM {table} WHERE coverage_id = ?",
+        (coverage_id,),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def _source_run_by_id(conn: sqlite3.Connection, source_run_id: str) -> dict[str, Any] | None:
+    table = _world_owned_table(conn, "source_run")
+    if table is None:
+        return None
+    row = conn.execute(
+        f"SELECT * FROM {table} WHERE source_run_id = ?",
+        (source_run_id,),
+    ).fetchone()
+    return dict(row) if row else None
+
+
 def _is_live_readiness(row: dict[str, Any], *, now_utc: datetime) -> str | None:
     if row.get("status") != "LIVE_ELIGIBLE":
         return (_readiness_reasons(row.get("reason_codes_json")) or ("READINESS_NOT_LIVE_ELIGIBLE",))[0]
@@ -197,9 +250,12 @@ def _latest_producer_readiness(
     source_id: str,
     track: str,
 ) -> dict[str, Any] | None:
+    table = _world_owned_table(conn, "readiness_state")
+    if table is None:
+        return None
     row = conn.execute(
-        """
-        SELECT * FROM readiness_state
+        f"""
+        SELECT * FROM {table}
         WHERE scope_type = 'city_metric'
           AND strategy_key = ?
           AND city_id = ?
@@ -238,7 +294,7 @@ def _coverage_for_producer(
         dependency_json = {}
     coverage_id = dependency_json.get("coverage_id")
     if coverage_id:
-        return get_source_run_coverage(conn, str(coverage_id))
+        return _source_run_coverage_by_id(conn, str(coverage_id))
     return None
 
 
@@ -267,6 +323,9 @@ def read_executable_forecast_snapshot(
     now_utc: datetime | None = None,
 ) -> ExecutableForecastReadResult:
     source_run_filter = "AND source_run_id = ?" if source_run_id is not None else ""
+    table = _world_owned_table(conn, "ensemble_snapshots_v2")
+    if table is None:
+        return ExecutableForecastReadResult("BLOCKED", "NO_EXECUTABLE_FORECAST_ROWS_FOR_TARGET")
     params: list[Any] = [
         scope.city_name,
         scope.target_local_date.isoformat(),
@@ -287,7 +346,7 @@ def read_executable_forecast_snapshot(
             -- with missing linkage land here and are rejected by the post-check
             -- with FORECAST_SOURCE_LINKAGE_MISSING (reachable reason code)
             -- instead of being silently filtered as NO_EXECUTABLE_FORECAST_ROWS_FOR_TARGET.
-            SELECT * FROM ensemble_snapshots_v2
+            SELECT * FROM {table}
             WHERE city = ?
               AND target_date = ?
               AND temperature_metric = ?
@@ -428,7 +487,7 @@ def read_executable_forecast(
     if expected_members <= 0 or observed_members < expected_members:
         return ExecutableForecastBundleResult("BLOCKED", "MISSING_EXPECTED_MEMBERS")
 
-    source_run = get_source_run(conn, str(coverage["source_run_id"]))
+    source_run = _source_run_by_id(conn, str(coverage["source_run_id"]))
     if source_run is None:
         return ExecutableForecastBundleResult("BLOCKED", "SOURCE_RUN_MISSING")
     if source_run.get("status") != "SUCCESS":
