@@ -700,3 +700,21 @@ invariants:
     capability_tags: []
     relationship_tests: []
     sunset_date: 2027-05-06
+
+  - id: INV-Harvester-Liveness
+    scope: src/ingest/harvester_truth_writer.py, src/execution/harvester.py
+    statement: >
+      Live harvester ticks fetch closed Polymarket events bounded to
+      endDate >= now - 30 days. Settlements for markets that closed
+      >30 days ago are NOT serviced by the live tick path; they require
+      operator-invoked scripts/backfill_harvester_settlements.py.
+    rationale: >
+      Polymarket settlement typically completes within hours of market
+      close. A market closed >30 days that the harvester has not yet
+      written is a stuck market, not an in-horizon settlement task --
+      enlarging the live tick window cannot self-heal that case (HTTP
+      + DB time both blow up) and risks single-writer queue starvation.
+      The cap separates "in-horizon live work" from "operator-attended
+      backfill", a structural decision per Fitz S1.
+    basis: docs/operations/task_2026-05-11_ingest_starvation_refactor/PLAN.md S9
+    added: 2026-05-11

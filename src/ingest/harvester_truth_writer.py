@@ -22,12 +22,20 @@ import math
 import os
 import re
 import sqlite3
-from datetime import datetime, timezone
+import time
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 # Default SOURCE_DISAGREEMENT tolerance (°C). Overridden by
 # config/settings.json::settlement.disagreement_tolerance_celsius (fix #263).
 _DEFAULT_DISAGREEMENT_TOLERANCE_C = 1.0
+
+# Harvester paginator antibody (PLAN §D.1/D.3, critic v4 ACCEPT 2026-05-11).
+# Hard-coded module-private constants; no kwargs path exists to relax them.
+# Backfill (scripts/backfill_harvester_settlements.py) uses its own loop.
+_CLOSED_EVENTS_CUTOFF_DAYS = 30          # live scope: only events closed ≤30d ago
+_CLOSED_EVENTS_MAX_WALL_SECONDS = 120    # mandatory wall-cap antibody (Fitz §3)
+_CLOSED_EVENTS_PAGE_LIMIT = 100          # ingest twin page size
 
 
 def _disagreement_tolerance() -> float:
@@ -232,6 +240,11 @@ def _lookup_settlement_obs(
 def _fetch_open_settling_markets() -> list[dict]:
     """Poll Gamma API for recently settled weather markets (world-side only).
 
+    Bounded paginator: fetches closed events in descending endDate order and
+    stops once the oldest event in a page crosses the 30-day cutoff window.
+    A mandatory wall-cap fires unconditionally at _CLOSED_EVENTS_MAX_WALL_SECONDS
+    regardless of Gamma API ordering behaviour (Fitz §3 antibody).
+
     Returns list of settled event dicts.  Returns [] on any HTTP failure.
     """
     try:
@@ -241,30 +254,68 @@ def _fetch_open_settling_markets() -> list[dict]:
         logger.warning("harvester_truth_writer: market_scanner or httpx not available")
         return []
 
+    cutoff_iso = (
+        datetime.now(timezone.utc) - timedelta(days=_CLOSED_EVENTS_CUTOFF_DAYS)
+    ).isoformat()
+    start_wall = time.monotonic()
     results: list[dict] = []
     offset = 0
-    limit = 100
+
     while True:
+        if time.monotonic() - start_wall > _CLOSED_EVENTS_MAX_WALL_SECONDS:
+            logger.warning(
+                "harvester_truth_writer paginator: wall-cap %.0fs hit at offset=%d; truncating",
+                _CLOSED_EVENTS_MAX_WALL_SECONDS,
+                offset,
+            )
+            break
         try:
-            url = f"{GAMMA_BASE}/events"
             resp = httpx.get(
-                url,
-                params={"closed": "true", "limit": limit, "offset": offset},
+                f"{GAMMA_BASE}/events",
+                params={
+                    "closed": "true",
+                    "limit": _CLOSED_EVENTS_PAGE_LIMIT,
+                    "offset": offset,
+                    "order": "endDate",
+                    "ascending": "false",
+                },
                 timeout=30.0,
             )
             resp.raise_for_status()
             batch = resp.json()
-            if not batch:
-                break
-            results.extend(batch)
-            if len(batch) < limit:
-                break
-            offset += limit
         except Exception as exc:
             if offset == 0:
                 logger.warning("harvester_truth_writer: Gamma fetch failed: %s", exc)
             break
-    return results
+
+        if not batch:
+            break
+
+        results.extend(batch)
+        oldest_end = min(
+            (m.get("endDate", "") for m in batch if m.get("endDate")),
+            default="",
+        )
+        if oldest_end and oldest_end < cutoff_iso:
+            break  # absorb this page; dedup downstream
+        if len(batch) < _CLOSED_EVENTS_PAGE_LIMIT:
+            break
+        offset += _CLOSED_EVENTS_PAGE_LIMIT
+
+    # Dedup at event grain by (conditionId or id).
+    # Downstream INSERT OR IGNORE is the authoritative uniqueness guard;
+    # this set is an HTTP-cost optimisation only (PLAN §D.1).
+    seen: set[str] = set()
+    deduped: list[dict] = []
+    for ev in results:
+        key = str(ev.get("conditionId") or ev.get("id") or "")
+        if not key:
+            deduped.append(ev)
+            continue
+        if key not in seen:
+            seen.add(key)
+            deduped.append(ev)
+    return deduped
 
 
 def _extract_resolved_market_outcomes(event: dict) -> list[dict]:

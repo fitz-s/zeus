@@ -1116,6 +1116,7 @@ def main() -> None:
         _harvester_truth_writer_tick, "cron",
         minute=45, id="ingest_harvester_truth_writer",
         max_instances=1, coalesce=True, misfire_grace_time=1800,
+        executor="fast",
     )
     _scheduler.add_job(
         _automation_analysis_cycle, "cron",
