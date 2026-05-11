@@ -1,6 +1,6 @@
 # Created: prior; restructured 2026-05-01
-# Last reused/audited: 2026-05-03
-# Authority basis: Operator directive 2026-05-01 + PLAN_v4 Phase 5A release-calendar source-run selection.
+# Last reused/audited: 2026-05-11
+# Authority basis: PLAN docs/operations/task_2026-05-11_ecmwf_download_replacement/PLAN.md
 #   ECMWF Open Data has ~6-8h latency (vs. TIGGE's 48h public embargo) so it
 #   is the live-trading source for same-day forecasts. Rows must land in
 #   ensemble_snapshots_v2 with the canonical local-calendar-day data_version
@@ -44,14 +44,18 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import subprocess
 import sys
 import hashlib
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import nullcontext
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
+
+import requests
 
 from src.config import PROJECT_ROOT, runtime_cities_by_name
 from src.contracts.ensemble_snapshot_provenance import (
@@ -76,7 +80,8 @@ from src.state.source_run_repo import write_source_run
 logger = logging.getLogger(__name__)
 
 FIFTY_ONE_ROOT = PROJECT_ROOT.parent / "51 source data"
-DOWNLOAD_SCRIPT = FIFTY_ONE_ROOT / "scripts" / "download_ecmwf_open_ens.py"
+# DOWNLOAD_SCRIPT deleted 2026-05-11: replaced by in-process parallel SDK fetch
+# (see PLAN docs/operations/task_2026-05-11_ecmwf_download_replacement/PLAN.md)
 EXTRACT_SCRIPT = FIFTY_ONE_ROOT / "scripts" / "extract_open_ens_localday.py"
 INGEST_SCRIPT_DIR = PROJECT_ROOT / "scripts"
 
@@ -136,6 +141,16 @@ MODEL_VERSION = "ecmwf_open_data"
 # 404 on any mirror means upstream hasn't released — no point rotating (mirrors sync
 # within 5s of origin, measured 2026-05-11).
 _DOWNLOAD_SOURCES: tuple[str, ...] = ("aws", "google", "ecmwf")
+
+# Parallel-fetch constants (antibody-style: no call-site kwargs).
+# Single-writer antibody: SQLite writes are PROHIBITED inside worker threads —
+# HTTP fetch only; all DB writes happen on the main thread after futures complete.
+_DOWNLOAD_MAX_WORKERS: int = 5
+_PER_STEP_TIMEOUT_SECONDS: int = 90
+_PER_STEP_MAX_RETRIES: int = 3
+_PER_STEP_RETRY_AFTER: int = 10
+# 404 → NOT_RELEASED (no retry); all others below trigger retry then failover.
+_RETRYABLE_HTTP: frozenset[int] = frozenset({500, 502, 503, 504, 408, 429})
 
 
 def _conda_python() -> str:
@@ -292,7 +307,18 @@ def _write_source_authority_chain(
     forecast_track: str,
     data_version: str,
     computed_at: datetime,
+    download_observed_steps: list[int] | None = None,
+    download_partial_run: bool | None = None,
+    download_reason_code: str | None = None,
 ) -> dict[str, int | str | None]:
+    """Write source_run + coverage rows for a completed ingest cycle.
+
+    download_observed_steps: when provided (PARTIAL cycles), overrides the
+    ingest-derived observed_steps approximation (line 309 below) with the
+    ground-truth step list from the download phase. This ensures
+    forecast_target_contract.evaluate_producer_coverage:184
+    (missing_steps = expected - observed) receives the accurate per-step set.
+    """
     rows = _snapshot_rows_for_source_run(
         conn,
         source_run_id=source_run_id,
@@ -306,7 +332,20 @@ def _write_source_authority_chain(
         for row in rows
         if row.get("step_horizon_hours") is not None
     ]
-    observed_steps = [step for step in STEP_HOURS if observed_step_horizons and step <= min(observed_step_horizons)]
+    # download_observed_steps (from parallel fetch) takes precedence over the
+    # ingest-derived approximation: ingest computes steps from step_horizon_hours
+    # (a per-row high-water mark), which can overstate when far-horizon steps
+    # are absent. The download phase knows exactly which steps were fetched.
+    if download_observed_steps is not None:
+        observed_steps = list(download_observed_steps)
+        if download_partial_run is not None:
+            partial_run = download_partial_run
+            source_run_completeness = "PARTIAL" if partial_run else source_run_completeness
+            source_run_status = "PARTIAL" if partial_run else source_run_status
+        if download_reason_code is not None:
+            reason_code = download_reason_code
+    else:
+        observed_steps = [step for step in STEP_HOURS if observed_step_horizons and step <= min(observed_step_horizons)]
 
     write_source_run(
         conn,
@@ -483,6 +522,89 @@ def _write_source_authority_chain(
     }
 
 
+def _fetch_one_step(
+    *,
+    cycle_date: date,
+    cycle_hour: int,
+    param: str,
+    step: int,
+    output_dir: Path,
+    mirrors: tuple[str, ...],
+) -> tuple[str, Any]:
+    """Fetch a single step for one param into a per-step canonical file.
+
+    Returns (status, detail) where status is one of:
+      "OK"           — file written and atomic-renamed; detail = Path
+      "NOT_RELEASED" — 404 on all mirrors; detail = None
+      "FAILED"       — retry budget exhausted; detail = error string
+
+    Per-step file naming uses param to avoid cross-track collision when
+    mx2t6_high (param=mx2t3) and mn2t6_low (param=mn2t3) run concurrently
+    (src/ingest_main.py:1133-1142, minute=30 vs minute=35; worst-case
+    2 × _DOWNLOAD_MAX_WORKERS in flight on the same output_dir).
+
+    Single-writer antibody: NO SQLite writes in this function — HTTP only.
+    All DB writes occur on the main thread after all futures complete.
+    """
+    canonical = output_dir / f".step{step:03d}_{param}.grib2"
+    partial   = canonical.with_suffix(".grib2.partial")
+    if canonical.exists() and canonical.stat().st_size > 0:
+        return ("OK", canonical)   # resume: already fetched in a prior attempt
+
+    from ecmwf.opendata import Client  # imported here: conda env only on main interpreter
+
+    last_err: str | None = None
+    for mirror in mirrors:
+        for attempt in range(_PER_STEP_MAX_RETRIES):
+            try:
+                Client(source=mirror).retrieve(
+                    date=int(cycle_date.strftime("%Y%m%d")),
+                    time=cycle_hour,
+                    stream="enfo",
+                    type=["cf", "pf"],
+                    step=[step],
+                    param=[param],
+                    target=str(partial),
+                )
+                os.replace(str(partial), str(canonical))   # atomic rename
+                return ("OK", canonical)
+            except requests.HTTPError as exc:
+                code = getattr(exc.response, "status_code", None)
+                if code == 404:
+                    # 404 means upstream has not published this step yet.
+                    # All mirrors sync within ~5 s of origin, so rotating
+                    # mirrors won't help — return immediately.
+                    return ("NOT_RELEASED", None)
+                if code in _RETRYABLE_HTTP:
+                    last_err = f"HTTP_{code}_mirror_{mirror}_attempt_{attempt}"
+                    time.sleep(_PER_STEP_RETRY_AFTER)
+                    continue
+                last_err = f"HTTP_{code}_mirror_{mirror}"
+                break   # non-retryable; try next mirror
+            except (requests.ConnectionError, requests.Timeout) as exc:
+                last_err = f"NET_{type(exc).__name__}_mirror_{mirror}_attempt_{attempt}"
+                time.sleep(_PER_STEP_RETRY_AFTER)
+                continue
+            except Exception as exc:  # noqa: BLE001
+                last_err = f"ERR_{type(exc).__name__}_mirror_{mirror}"
+                break   # unexpected; try next mirror
+    return ("FAILED", last_err or "EXHAUSTED")
+
+
+def _concat_steps(ok_steps: list[int], param: str, output_dir: Path, output_path: Path) -> None:
+    """Concatenate per-step GRIB2 files into the canonical output_path.
+
+    GRIB2 is self-delimiting; step order does not affect extractor correctness
+    (REL-1, REL-6). We write in ascending step order for determinism.
+    """
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(output_path, "wb") as out:
+        for step in sorted(ok_steps):
+            step_file = output_dir / f".step{step:03d}_{param}.grib2"
+            if step_file.exists():
+                out.write(step_file.read_bytes())
+
+
 def _run_subprocess(args: list[str], *, label: str, timeout: int) -> dict:
     logger.info("ecmwf_open_data %s: %s", label, " ".join(args[:6]) + " ...")
     try:
@@ -523,12 +645,13 @@ def collect_open_ens_cycle(
     track: str = "mx2t6_high",
     run_date: Optional[date] = None,
     run_hour: Optional[int] = None,
-    download_timeout_seconds: int = 1500,  # was 600 — empirical full-fetch 609.6s for 71 steps × 51 members × 1.5GB
+    download_timeout_seconds: int = 1500,  # kept for API compat; parallel fetch uses _PER_STEP_TIMEOUT_SECONDS
     extract_timeout_seconds: int = 900,
     skip_download: bool = False,
     skip_extract: bool = False,
     conn=None,
     _runner=None,
+    _fetch_impl=None,  # test seam: replaces _fetch_one_step; callable with same signature
     now_utc: datetime | None = None,
 ) -> dict:
     """Download + extract + ingest one Open Data ENS run for one track.
@@ -605,61 +728,117 @@ def collect_open_ens_cycle(
     )
     stages: list[dict] = []
 
+    # download_observed_steps / _partial_cycle track which steps were actually
+    # fetched so _write_source_authority_chain can set the authoritative
+    # observed_steps_json and partial_run flag on the source_run row.
+    download_observed_steps: list[int] | None = None
+    _partial_cycle: bool = False
+    _download_reason_code: str | None = None
+
     if not skip_download:
-        _stderr_dump = (
-            PROJECT_ROOT
-            / "tmp"
-            / f"ecmwf_open_data_{cycle_date.isoformat()}_{cycle_hour:02d}z_{track}.stderr.txt"
+        fetch_fn = _fetch_impl or _fetch_one_step
+        output_dir = output_path.parent
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        # Dispatch one future per step.  _DOWNLOAD_MAX_WORKERS=5 is a module
+        # constant; no call-site kwarg (antibody: makes per-step parallelism
+        # category structurally module-owned, not caller-configured).
+        # Single-writer antibody: fetch_fn does HTTP only; no SQLite writes.
+        tasks = [(s, cfg["open_data_param"]) for s in STEP_HOURS]
+        results: dict[int, tuple[str, Any]] = {}
+        with ThreadPoolExecutor(max_workers=_DOWNLOAD_MAX_WORKERS) as ex:
+            fut2step = {
+                ex.submit(
+                    fetch_fn,
+                    cycle_date=cycle_date,
+                    cycle_hour=cycle_hour,
+                    param=p,
+                    step=s,
+                    output_dir=output_dir,
+                    mirrors=_DOWNLOAD_SOURCES,
+                ): s
+                for s, p in tasks
+            }
+            for fut in as_completed(fut2step):
+                step = fut2step[fut]
+                try:
+                    results[step] = fut.result()
+                except Exception as exc:  # noqa: BLE001
+                    results[step] = ("FAILED", f"UNCAUGHT_{type(exc).__name__}: {exc}")
+
+        ok_steps       = sorted(s for s, (st, _) in results.items() if st == "OK")
+        released_404   = sorted(s for s, (st, _) in results.items() if st == "NOT_RELEASED")
+        failed_steps   = sorted(s for s, (st, _) in results.items() if st == "FAILED")
+
+        logger.info(
+            "ecmwf_open_data parallel_fetch %s: ok=%d not_released=%d failed=%d mirror_first_try=aws",
+            track, len(ok_steps), len(released_404), len(failed_steps),
         )
-        # Mirror failover: aws (CDN, 3× faster) → google (CDN, backup) → ecmwf (origin, fallback).
-        # ECMWF direct portal has a 500-simultaneous-connection limit; aws/google mirrors
-        # sync within 5s of origin (measured 2026-05-11). On 404: upstream not yet published;
-        # all mirrors will 404 too, so break immediately (no rotation).
-        download = None
-        for _source in _DOWNLOAD_SOURCES:
-            _download_args = [
-                _conda_python(),
-                str(DOWNLOAD_SCRIPT),
-                "--date", cycle_date.isoformat(),
-                "--run-hour", str(cycle_hour),
-                "--step", *[str(s) for s in STEP_HOURS],
-                "--param", cfg["open_data_param"],
-                "--source", _source,
-                "--output-path", str(output_path),
-            ]
-            download = runner(
-                _download_args,
-                label=f"download_{track}_{_source}",
-                timeout=download_timeout_seconds,
+
+        # --- Early-return branches: FAILED and pure-NOT_RELEASED only ---
+        # SUCCESS and PARTIAL fall through to extract+ingest below.
+
+        if failed_steps:
+            reason = ";".join(
+                f"step{s}:{results[s][1]}" for s in failed_steps[:5]
             )
-            if download["ok"]:
-                break
-            # Distinguish 404 on grid-valid step (not-yet-released) from other failures.
-            _stderr = download.get("stderr_tail", "") or ""
-            _is_404 = "404" in _stderr or "Not Found" in _stderr
-            if _is_404 and "No index entries" not in _stderr:
-                logger.warning(
-                    "ecmwf_open_data download_%s: 404 on source=%s — upstream not yet released, skipping mirrors",
-                    track, _source,
+            _write_stderr_dump(
+                PROJECT_ROOT / "tmp"
+                / f"ecmwf_open_data_{cycle_date.isoformat()}_{cycle_hour:02d}z_{track}.stderr.txt",
+                reason,
+            )
+            # Write source_run FAILED row directly (no ingest will run).
+            computed_at = (now_utc or datetime.now(timezone.utc)).astimezone(timezone.utc)
+            try:
+                _sr_conn = conn
+                _sr_own = _sr_conn is None
+                if _sr_own:
+                    from src.state.db import get_world_connection as _gwc
+                    _sr_conn = _gwc()
+                _sr_lock = (
+                    db_writer_lock(ZEUS_WORLD_DB_PATH, WriteClass.BULK)
+                    if _sr_own else None
                 )
-                _write_stderr_dump(_stderr_dump, _stderr)
-                stages.append(download)
-                return {
-                    "status": "skipped_not_released",
-                    "track": track,
-                    "data_version": cfg["data_version"],
-                    "stages": stages,
-                    "snapshots_inserted": 0,
-                }
-            logger.warning(
-                "ecmwf_open_data download_%s: failed on source=%s (rc=%s), trying next mirror",
-                track, _source, download.get("returncode", download.get("rc", -1)),
-            )
-        # Write stderr dump on final failure (any rc!=0 after all mirrors exhausted).
-        if not download["ok"]:
-            _write_stderr_dump(_stderr_dump, download.get("stderr_tail", "") or "")
-        stages.append(download)
-        if not download["ok"]:
+                with (_sr_lock if _sr_lock is not None else nullcontext()):
+                    write_source_run(
+                        _sr_conn,
+                        source_run_id=source_run_id,
+                        source_id=SOURCE_ID,
+                        track=forecast_track,
+                        release_calendar_key=release_calendar_key,
+                        source_cycle_time=source_cycle_time,
+                        source_issue_time=source_cycle_time,
+                        source_release_time=source_release_time,
+                        source_available_at=source_release_time,
+                        fetch_started_at=computed_at,
+                        fetch_finished_at=computed_at,
+                        captured_at=computed_at,
+                        imported_at=computed_at,
+                        data_version=cfg["data_version"],
+                        expected_members=51,
+                        observed_members=0,
+                        expected_steps_json=STEP_HOURS,
+                        observed_steps_json=ok_steps,
+                        expected_count=0,
+                        observed_count=0,
+                        completeness_status="MISSING",
+                        partial_run=False,
+                        status="FAILED",
+                        reason_code=reason[:500],
+                    )
+                    if _sr_own:
+                        _sr_conn.commit()
+                        _sr_conn.close()
+            except Exception as _sr_exc:  # noqa: BLE001
+                logger.warning("ecmwf_open_data: could not write FAILED source_run: %s", _sr_exc)
+            stages.append({
+                "label": f"download_parallel_{track}",
+                "ok": False,
+                "status": "FAILED",
+                "ok_steps": ok_steps,
+                "failed_steps": failed_steps,
+                "not_released_steps": released_404,
+            })
             return {
                 "status": "download_failed",
                 "track": track,
@@ -667,6 +846,87 @@ def collect_open_ens_cycle(
                 "stages": stages,
                 "snapshots_inserted": 0,
             }
+
+        if not ok_steps and released_404:
+            # Pure NOT_RELEASED: no usable steps at all.
+            reason = f"NOT_RELEASED_STEPS={released_404}"
+            computed_at = (now_utc or datetime.now(timezone.utc)).astimezone(timezone.utc)
+            try:
+                _sr_conn = conn
+                _sr_own = _sr_conn is None
+                if _sr_own:
+                    from src.state.db import get_world_connection as _gwc
+                    _sr_conn = _gwc()
+                _sr_lock = (
+                    db_writer_lock(ZEUS_WORLD_DB_PATH, WriteClass.BULK)
+                    if _sr_own else None
+                )
+                with (_sr_lock if _sr_lock is not None else nullcontext()):
+                    write_source_run(
+                        _sr_conn,
+                        source_run_id=source_run_id,
+                        source_id=SOURCE_ID,
+                        track=forecast_track,
+                        release_calendar_key=release_calendar_key,
+                        source_cycle_time=source_cycle_time,
+                        source_issue_time=source_cycle_time,
+                        source_release_time=source_release_time,
+                        source_available_at=source_release_time,
+                        fetch_started_at=computed_at,
+                        fetch_finished_at=computed_at,
+                        captured_at=computed_at,
+                        imported_at=computed_at,
+                        data_version=cfg["data_version"],
+                        expected_members=51,
+                        observed_members=0,
+                        expected_steps_json=STEP_HOURS,
+                        observed_steps_json=[],
+                        expected_count=0,
+                        observed_count=0,
+                        completeness_status="NOT_RELEASED",
+                        partial_run=False,
+                        status="SKIPPED_NOT_RELEASED",
+                        reason_code=reason[:500],
+                    )
+                    if _sr_own:
+                        _sr_conn.commit()
+                        _sr_conn.close()
+            except Exception as _sr_exc:  # noqa: BLE001
+                logger.warning("ecmwf_open_data: could not write SKIPPED_NOT_RELEASED source_run: %s", _sr_exc)
+            stages.append({
+                "label": f"download_parallel_{track}",
+                "ok": False,
+                "status": "SKIPPED_NOT_RELEASED",
+                "ok_steps": [],
+                "failed_steps": [],
+                "not_released_steps": released_404,
+            })
+            return {
+                "status": "skipped_not_released",
+                "track": track,
+                "data_version": cfg["data_version"],
+                "stages": stages,
+                "snapshots_inserted": 0,
+            }
+
+        # SUCCESS (no released_404, no failed) OR PARTIAL (some OK + some 404).
+        # Both fall through to extract+ingest.  _write_source_authority_chain
+        # will receive download_observed_steps so it can set partial_run correctly.
+        _partial_cycle = bool(released_404)
+        _download_reason_code = f"NOT_RELEASED_STEPS={released_404}" if _partial_cycle else None
+        download_observed_steps = ok_steps
+
+        # Concat per-step files into the canonical output_path for the extractor.
+        _concat_steps(ok_steps, cfg["open_data_param"], output_dir, output_path)
+
+        stages.append({
+            "label": f"download_parallel_{track}",
+            "ok": True,
+            "status": "PARTIAL" if _partial_cycle else "SUCCESS",
+            "ok_steps": ok_steps,
+            "failed_steps": [],
+            "not_released_steps": released_404,
+        })
 
     if not skip_extract:
         extract = runner(
@@ -754,6 +1014,12 @@ def collect_open_ens_cycle(
                 forecast_track=forecast_track,
                 data_version=cfg["data_version"],
                 computed_at=authority_computed_at,
+                # Pass download ground-truth so source_run.observed_steps_json
+                # reflects actual fetched steps, not an ingest-derived approximation.
+                # evaluate_producer_coverage:184 uses this for per-step MISSING detection.
+                download_observed_steps=download_observed_steps,
+                download_partial_run=_partial_cycle if download_observed_steps is not None else None,
+                download_reason_code=_download_reason_code,
             )
             conn.commit()
         finally:

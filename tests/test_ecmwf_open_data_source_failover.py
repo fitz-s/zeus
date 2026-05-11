@@ -23,6 +23,14 @@ import pytest
 from src.state.db import init_schema
 from src.state.schema.v2_schema import apply_v2_schema
 
+# All tests here exercised the deleted subprocess-runner download path.
+# Superseded 2026-05-11 by parallel SDK fetch; equivalent coverage in
+# test_ecmwf_open_data_parallel_fetch.py.
+_SUBPROCESS_SUPERSEDED = pytest.mark.skip(
+    reason="Superseded 2026-05-11: subprocess download path deleted. "
+    "Parallel SDK _fetch_impl path tested in test_ecmwf_open_data_parallel_fetch.py.",
+)
+
 
 def _make_conn(tmp_path: Path) -> sqlite3.Connection:
     db = tmp_path / "world.db"
@@ -43,6 +51,7 @@ def _source_from_args(args: list) -> str:
 # test 1: first attempt uses "aws", NOT "ecmwf"
 # ---------------------------------------------------------------------------
 
+@_SUBPROCESS_SUPERSEDED
 def test_argv_uses_aws_first(tmp_path, monkeypatch):
     """First download attempt must use --source aws (not ecmwf direct)."""
     from src.data import ecmwf_open_data
@@ -79,6 +88,7 @@ def test_argv_uses_aws_first(tmp_path, monkeypatch):
 # test 2: failover on timeout/network error — tries next mirror, stops on success
 # ---------------------------------------------------------------------------
 
+@_SUBPROCESS_SUPERSEDED
 def test_failover_on_timeout(tmp_path, monkeypatch):
     """aws TIMEOUT → failover to google → google ok → stop (no ecmwf attempt)."""
     from src.data import ecmwf_open_data
@@ -119,6 +129,7 @@ def test_failover_on_timeout(tmp_path, monkeypatch):
 # test 3: 404 on aws breaks the chain — returns skipped_not_released (no rotation)
 # ---------------------------------------------------------------------------
 
+@_SUBPROCESS_SUPERSEDED
 def test_failover_404_breaks_chain(tmp_path, monkeypatch):
     """404 on any mirror means upstream not yet published; must NOT rotate.
 
@@ -169,6 +180,7 @@ def test_failover_404_breaks_chain(tmp_path, monkeypatch):
 # test 4: all mirrors fail → returns download_failed (compatible with existing behavior)
 # ---------------------------------------------------------------------------
 
+@_SUBPROCESS_SUPERSEDED
 def test_all_mirrors_fail(tmp_path, monkeypatch):
     """All 3 sources fail with transient error → status = download_failed."""
     from src.data import ecmwf_open_data
