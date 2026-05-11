@@ -212,6 +212,49 @@ def _resolve_pin_for_bucket(
     return frozen_as_of, pin.get("model_keys", {}).get(key)
 
 
+_V2_TIGGE_FALLBACK_RESCUE_SEEN: set = set()
+
+
+def _emit_v2_tigge_fallback_rescue_warning(
+    *,
+    city: str,
+    metric: str,
+    target_date: str,
+    cluster: str,
+    season: str,
+    data_version_used: str,
+    reason: str = "opendata_platt_missing",
+) -> None:
+    """Emit a deduplicated WARNING when a HIGH+ecmwf_opendata lookup falls back
+    to a TIGGE-archive-keyed Platt model (2026-05-11 train-vs-live bridge).
+
+    Production state today (2026-05-11) has 1197 tigge_* Platt rows and 0
+    ecmwf_opendata_* Platt rows. Live forecasts via the OpenData source path
+    would otherwise fall through to uncalibrated probability; this fallback
+    loads the TIGGE-trained calibrator at the runtime read seam, but does NOT
+    promote anything to LIVE_ELIGIBLE — that decision is still owned by
+    ``evaluate_calibration_transfer_policy_with_evidence``
+    (src/data/calibration_transfer_policy.py). The tag
+    ``calibration_v2_tigge_fallback_rescue`` is stable for log aggregation.
+
+    Dedup key is (city, cluster, season, metric, data_version_used) per
+    process lifetime — one fact, one alert, no spam.
+    """
+    key = (city, cluster, season, metric, data_version_used)
+    if key in _V2_TIGGE_FALLBACK_RESCUE_SEEN:
+        return
+    _V2_TIGGE_FALLBACK_RESCUE_SEEN.add(key)
+    logger.warning(
+        "calibration_v2_tigge_fallback_rescue city=%s metric=%s "
+        "target_date=%s cluster=%s season=%s data_version_used=%s reason=%s "
+        "(opendata-keyed Platt missing; loaded TIGGE-archive-trained "
+        "calibrator at runtime read seam. LIVE_ELIGIBLE promotion still "
+        "gated by evaluate_calibration_transfer_policy_with_evidence. "
+        "Per-(city,cluster,season,metric,data_version) dedup.)",
+        city, metric, target_date, cluster, season, data_version_used, reason,
+    )
+
+
 def _emit_v2_legacy_fallback_warning(
     path: str, cluster: str, season: str, metric: str
 ) -> None:
@@ -341,22 +384,38 @@ def _candidate_data_versions_for_metric_source(
 ) -> tuple[str, ...]:
     """Return live lookup data_versions in preference order.
 
-    LOW contract-window v2 rows are the recovered authority when a caller
-    provides source provenance.  Do not append the legacy LOW data_version for
-    modern source-tagged requests: a live forecast with source/cycle/horizon
-    provenance must not be rescued by a metric-only historical LOW bucket whose
-    local-day construction law is not the same contract-window authority.
+    HIGH + ecmwf_opendata: returns a two-element tuple
+    ``(ecmwf_opendata_<metric>_v1, tigge_<metric>_v1)`` so the live entry
+    forecast path (source_id='ecmwf_open_data') can fall back to TIGGE-archive-
+    trained Platt models when no OpenData-keyed Platt row exists. Production
+    state today (2026-05-11) has 1197 tigge_* Platt rows and 0 ecmwf_opendata_*
+    Platt rows; without this bridge live always falls through to uncalibrated.
+    LIVE_ELIGIBLE promotion is still gated downstream by
+    evaluate_calibration_transfer_policy_with_evidence — this fallback only
+    affects the runtime calibrator load.
 
-    Doctrine: see ``config/settings.json::_low_purity_doctrine_2026_05_07``
-    (operator-approved, PR #93). LOW has no contract-bin-preserving fallback
-    proof yet; missing/UNVERIFIED/QUARANTINED/low-n LOW buckets surface as
-    RAW_UNCALIBRATED at the live read seam rather than silently borrowing a
-    legacy or sibling-cluster Platt transform.
+    LOW + ecmwf_opendata / tigge: returns a single-element tuple. LOW has NO
+    cross-source fallback per ``config/settings.json::_low_purity_doctrine_2026_05_07``
+    (operator-approved, PR #93). LOW contract-window v2 rows are the recovered
+    authority when a caller provides source provenance.  Do not append the
+    legacy LOW data_version for modern source-tagged requests: a live forecast
+    with source/cycle/horizon provenance must not be rescued by a metric-only
+    historical LOW bucket whose local-day construction law is not the same
+    contract-window authority. Missing/UNVERIFIED/QUARANTINED/low-n LOW buckets
+    surface as RAW_UNCALIBRATED at the live read seam rather than silently
+    borrowing a legacy or sibling-cluster Platt transform.
     """
     legacy_data_version = _legacy_data_version_for_metric_source(
         temperature_metric, source_id
     )
     source_family = _source_family_for_calibration_source_id(source_id)
+    if temperature_metric == "high" and source_family == "ecmwf_opendata":
+        # HIGH-only TIGGE fallback bridge (2026-05-11). Primary OpenData-keyed
+        # candidate first; TIGGE-archive-keyed candidate second. Doctrine
+        # asymmetry documented above — LOW must not enter this branch.
+        from src.types.metric_identity import MetricIdentity
+        tigge_high_dv = MetricIdentity.for_high_localday_max("tigge").data_version
+        return (legacy_data_version, tigge_high_dv)
     if temperature_metric != "low" or source_family is None:
         return (legacy_data_version,)
     if source_family == "ecmwf_opendata":
@@ -764,8 +823,28 @@ def get_calibrator(
 
     # Try primary bucket — v2 FIRST (metric-aware), then legacy (HIGH BC).
     # Phase 2 (2026-05-04): thread cycle/source_id/horizon_profile into v2 load.
+    # 2026-05-11 train-vs-live bridge: when a HIGH + ecmwf_opendata caller's
+    # OpenData-keyed Platt is missing, the iterator advances to a TIGGE-keyed
+    # candidate. TIGGE rows are stored under the legacy stratification schema
+    # (cycle='00', source_id='tigge_mars', horizon_profile='full'); the
+    # OpenData-derived stratification keys would never match. Reset to TIGGE
+    # defaults ONLY for that bridge case (opendata primary → tigge fallback).
+    # Native tigge callers with explicit cycle/source_id keep them. LOW path
+    # never enters this branch (doctrine asymmetry in candidate function).
+    _is_opendata_to_tigge_bridge = (
+        len(candidate_data_versions) > 1
+        and candidate_data_versions[0].startswith("ecmwf_opendata_")
+    )
     model_data = None
+    tigge_rescue_data_version = None
     for expected_data_version in candidate_data_versions:
+        if (
+            _is_opendata_to_tigge_bridge
+            and expected_data_version.startswith("tigge_")
+        ):
+            lookup_cycle, lookup_source_id, lookup_horizon = "00", "tigge_mars", "full"
+        else:
+            lookup_cycle, lookup_source_id, lookup_horizon = cycle, source_id, horizon_profile
         model_data = load_platt_model_v2(
             conn,
             temperature_metric=temperature_metric,
@@ -774,12 +853,26 @@ def get_calibrator(
             data_version=expected_data_version,
             frozen_as_of=primary_frozen,
             model_key=primary_model_key,
-            cycle=cycle,
-            source_id=source_id,
-            horizon_profile=horizon_profile,
+            cycle=lookup_cycle,
+            source_id=lookup_source_id,
+            horizon_profile=lookup_horizon,
         )
         if model_data is not None:
+            if (
+                _is_opendata_to_tigge_bridge
+                and expected_data_version.startswith("tigge_")
+            ):
+                tigge_rescue_data_version = expected_data_version
             break
+    if tigge_rescue_data_version is not None:
+        _emit_v2_tigge_fallback_rescue_warning(
+            city=city.name,
+            metric=temperature_metric,
+            target_date=target_date,
+            cluster=cluster,
+            season=season,
+            data_version_used=tigge_rescue_data_version,
+        )
     if model_data is None and temperature_metric == "high":
         # Legacy fallback only for HIGH — LOW has never existed in legacy
         bk = bucket_key(cluster, season)
@@ -872,7 +965,15 @@ def get_calibrator(
             temperature_metric, fallback_cluster, season, cycle
         )
         model_data = None
+        season_pool_tigge_rescue_dv = None
         for expected_data_version in candidate_data_versions:
+            if (
+                _is_opendata_to_tigge_bridge
+                and expected_data_version.startswith("tigge_")
+            ):
+                lookup_cycle, lookup_source_id, lookup_horizon = "00", "tigge_mars", "full"
+            else:
+                lookup_cycle, lookup_source_id, lookup_horizon = cycle, source_id, horizon_profile
             model_data = load_platt_model_v2(
                 conn,
                 temperature_metric=temperature_metric,
@@ -881,12 +982,26 @@ def get_calibrator(
                 data_version=expected_data_version,
                 frozen_as_of=fb_frozen,
                 model_key=fb_model_key,
-                cycle=cycle,
-                source_id=source_id,
-                horizon_profile=horizon_profile,
+                cycle=lookup_cycle,
+                source_id=lookup_source_id,
+                horizon_profile=lookup_horizon,
             )
             if model_data is not None:
+                if (
+                    _is_opendata_to_tigge_bridge
+                    and expected_data_version.startswith("tigge_")
+                ):
+                    season_pool_tigge_rescue_dv = expected_data_version
                 break
+        if season_pool_tigge_rescue_dv is not None:
+            _emit_v2_tigge_fallback_rescue_warning(
+                city=city.name,
+                metric=temperature_metric,
+                target_date=target_date,
+                cluster=fallback_cluster,
+                season=season,
+                data_version_used=season_pool_tigge_rescue_dv,
+            )
         if model_data is None and temperature_metric == "high":
             bk_fb = bucket_key(fallback_cluster, season)
             model_data = load_platt_model(conn, bk_fb)
