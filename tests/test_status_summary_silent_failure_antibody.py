@@ -106,3 +106,30 @@ class TestCollateralSilentFailureAntibody:
         assert details.get("authority_tier") == "DEGRADED", (
             f"expected authority_tier='DEGRADED' on loader failure, got: {details}"
         )
+
+
+@pytest.mark.parametrize("loader_name,component_name", [
+    ("_cutover_summary", "cutover_guard"),
+    ("_heartbeat_summary", "heartbeat_supervisor"),
+    ("_ws_gap_summary", "ws_gap_guard"),
+    ("_risk_allocator_summary", "risk_allocator_global"),
+])
+def test_loader_exception_propagates_to_component(loader_name, component_name):
+    db_lock_exc = sqlite3.OperationalError(f"db locked: {loader_name}")
+    with patch(f"src.observability.status_summary.{loader_name}", side_effect=db_lock_exc):
+        result = _get_execution_capability_status()
+
+    # Find component across entry/exit components lists
+    comp = None
+    for action in ("entry", "exit"):
+        for c in result.get(action, {}).get("components", []):
+            if c.get("component") == component_name:
+                comp = c
+                break
+        if comp:
+            break
+
+    assert comp is not None, f"{component_name} not found"
+    details = comp.get("details", {})
+    assert details.get("error_type") == "OperationalError", details
+    assert details.get("loader_failed") is True, details
