@@ -676,11 +676,16 @@ def main():
                 _capital_str,
                 settings["sizing"]["kelly_multiplier"] * 100)
 
-    # v4 plan §AX3: live daemon boot — schema init runs once at startup.
-    # Classify as LIVE so the v4 flock topology routes the (rare) startup
-    # writes through the LIVE flock alongside subsequent runtime writes.
-    conn = get_world_connection(write_class="live")
-    init_schema(conn)
+    # Daemon is a read-only consumer of world DB. Schema authority belongs to
+    # ingest (src/ingest_main.py owns init_schema on world; sentinel gate at
+    # _startup_world_schema_ready_check() below enforces ingest-first boot).
+    # Opening without write_class avoids the v4 LIVE flock and never acquires
+    # a SQLite writer lock for read-only ops below — so a concurrent ingest
+    # or backfill cannot starve daemon startup.
+    conn = get_world_connection()
+    # Read-only smoke: confirm world DB is reachable. The sentinel gate at
+    # line ~708 is the authoritative schema-readiness check.
+    conn.execute("SELECT COUNT(*) FROM settlements LIMIT 1").fetchone()
 
     # Ensure trade DB has all tables (prevents lazy-creation gaps)
     trade_conn = get_trade_connection(write_class="live")
