@@ -310,7 +310,15 @@ def _safe_component(component: str, loader) -> dict:
             component,
             allowed=False,
             reason="summary_unavailable",
-            details={"error_type": type(exc).__name__, "error": str(exc)},
+            details={
+                "error_type": type(exc).__name__,
+                "error": str(exc),
+                # Sentinel fields so downstream component builders (e.g. _collateral_component)
+                # can distinguish "loader failed / DB locked" from "genuinely unconfigured".
+                "configured": False,
+                "authority_tier": "DEGRADED",
+                "loader_failed": True,
+            },
         )
 
 
@@ -442,16 +450,25 @@ def _collateral_component(payload: dict, *, collateral: str) -> dict:
     configured = bool(payload.get("configured", False)) if isinstance(payload, dict) else False
     authority_tier = str(payload.get("authority_tier") or "UNKNOWN")
     allowed = configured and authority_tier != "DEGRADED"
+    details: dict = {
+        "collateral": collateral,
+        "configured": configured,
+        "authority_tier": authority_tier,
+        "captured_at": payload.get("captured_at"),
+    }
+    # Propagate loader-failure fields set by _safe_component so operators can
+    # distinguish "DB locked at load time" from "genuinely unconfigured".
+    if isinstance(payload, dict) and payload.get("loader_failed"):
+        details["loader_failed"] = True
+        if "error_type" in payload:
+            details["error_type"] = payload["error_type"]
+        if "error" in payload:
+            details["error"] = payload["error"]
     return _capability_component(
         "collateral_ledger_global",
         allowed=allowed,
         reason=str(payload.get("reason") or ("allowed" if allowed else "blocked")),
-        details={
-            "collateral": collateral,
-            "configured": configured,
-            "authority_tier": authority_tier,
-            "captured_at": payload.get("captured_at"),
-        },
+        details=details,
     )
 
 
