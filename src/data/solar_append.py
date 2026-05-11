@@ -292,7 +292,10 @@ def daily_tick(
 
     totals = {"cities_processed": 0, "fetched": 0, "inserted": 0, "fetch_errors": 0}
     start_d = now_utc.date()
-    end_d = start_d + timedelta(days=future_days)
+    # archive-api.open-meteo.com rejects end_date > today (HTTP 400).
+    # Cap at today; sunrise/sunset for future dates must use a different
+    # endpoint if ever needed. Verified empirically 2026-05-10.
+    end_d = min(start_d + timedelta(days=future_days), now_utc.date())
     for city in cities:
         stats = append_solar_window(
             city, start_d, end_d, conn, rebuild_run_id=rebuild_run_id,
