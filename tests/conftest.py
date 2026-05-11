@@ -254,6 +254,7 @@ _WLA_SQLITE_CONNECT_ALLOWLIST = frozenset({
     "scripts/rebuild_settlements.py",               # pending_track_a6_scripts
     "scripts/reevaluate_readiness_2026_05_07.py",   # pending_track_a6_scripts
     "scripts/refit_platt_v2.py",                    # pending_track_a6_scripts
+    "scripts/_zeus_emergency_k2_obs_backfill_2026_05_10.py",  # pending_track_a6_scripts (emergency K2 obs backfill)
 
     # --- deferred non-mechanical rewrite (separate phase, cited PR #86) ---
     "scripts/verify_truth_surfaces.py",             # deferred_nonmechanical (PR #86)
