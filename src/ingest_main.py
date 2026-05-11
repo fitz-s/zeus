@@ -1170,11 +1170,18 @@ def main() -> None:
 
     # Open Data boot-time catch-up — fires once at daemon start so a fresh
     # ingest doesn't wait until the next 07:30 cron tick to backfill.
+    # Runs on "fast" executor so it is not blocked behind _tigge_startup_catch_up
+    # on the single default-worker thread. The GRIB download/extract stages are
+    # network/disk bound with no DB writes; the ingest stage acquires db_writer_lock
+    # (fcntl.flock) independently, so running on fast executor is safe.
+    # Fix: 2026-05-10 — root cause of OpenData ingest stall: TIGGE MARS download
+    # (~3-30 min) occupied the only default worker, blocking OpenData indefinitely.
     _scheduler.add_job(
         _opendata_startup_catch_up, "date",
         run_date=_dt_now.now(),
         id="ingest_opendata_startup_catch_up",
         max_instances=1, coalesce=True, misfire_grace_time=None,
+        executor="fast",
     )
 
     # Phase 2: source health probe every 10 minutes (§2.1) — APPENDED END

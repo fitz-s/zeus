@@ -4,6 +4,14 @@ Runs as a SEPARATE process with its own 60-second tick.
 Reads authoritative settlement records from zeus.db, writes to risk_state.db,
 and emits durable risk actions into zeus.db when the canonical table exists.
 Graduated response: GREEN → YELLOW → ORANGE → RED.
+
+# Created: (pre-audit)
+# Last reused or audited: 2026-05-10
+# Authority basis: connection-leak audit 2026-05-10 — 51 open zeus-world.db-wal
+#   handles observed on PID 18538. Root cause: tick() and tick_with_portfolio()
+#   opened zeus_conn / risk_conn without try/finally, so any exception in the
+#   tick body left both connections dangling. Fixed by wrapping tick bodies in
+#   try/finally to guarantee conn.close() on every exit path.
 """
 
 import json
@@ -779,395 +787,400 @@ def tick() -> RiskLevel:
 
     Reads recent trade data from zeus.db, computes metrics,
     determines risk level, writes to risk_state.db.
+
+    Connection discipline (2026-05-10 leak fix): zeus_conn and risk_conn are
+    opened once and closed in a finally block. Prior to this fix, any
+    exception mid-tick left both handles open; with a 60s tick and recurring
+    errors this produced 51+ accumulated zeus-world.db-wal reader handles
+    (observed on PID 18538), blocking all WAL writers (data-ingest, live-trading).
     """
     zeus_conn = _get_runtime_trade_connection()
     risk_conn = get_connection(RISK_DB_PATH, write_class="live")
-    init_risk_db(risk_conn)
+    try:
+        init_risk_db(risk_conn)
 
-    previous_row = risk_conn.execute(
-        "SELECT level FROM risk_state ORDER BY checked_at DESC LIMIT 1"
-    ).fetchone()
-    previous_level = RiskLevel(previous_row["level"]) if previous_row else None
+        previous_row = risk_conn.execute(
+            "SELECT level FROM risk_state ORDER BY checked_at DESC LIMIT 1"
+        ).fetchone()
+        previous_level = RiskLevel(previous_row["level"]) if previous_row else None
 
-    thresholds = settings["riskguard"]
-    portfolio, portfolio_truth = _load_riskguard_portfolio_truth(zeus_conn)
+        thresholds = settings["riskguard"]
+        portfolio, portfolio_truth = _load_riskguard_portfolio_truth(zeus_conn)
 
-    # P0-A bankroll truth chain (architect memo §7): trailing-loss math must
-    # use the on-chain wallet, NOT the config constant routed through
-    # PortfolioState.bankroll. When the wallet is unreachable AND no fresh
-    # cache exists, fail-closed at DATA_DEGRADED rather than silently falling
-    # back to retired config-literal capital.
-    bankroll_of_record = bankroll_provider.current()
-    if bankroll_of_record is None:
-        now_ts = datetime.now(timezone.utc).isoformat()
-        risk_conn.execute(
-            """
-            INSERT INTO risk_state (level, brier, accuracy, win_rate, details_json, checked_at, force_exit_review)
-            VALUES (?, NULL, NULL, NULL, ?, ?, 0)
-            """,
-            (
-                RiskLevel.DATA_DEGRADED.value,
-                json.dumps({
-                    "status": "bankroll_provider_unavailable",
-                    "bankroll_truth": {
-                        "source": "polymarket_wallet",
-                        "value_usd": None,
-                        "fetched_at": None,
-                        "staleness_seconds": None,
-                        "cached": False,
-                        "reason": "wallet query failed and no fresh cache",
-                    },
-                }),
-                now_ts,
-            ),
+        # P0-A bankroll truth chain (architect memo §7): trailing-loss math must
+        # use the on-chain wallet, NOT the config constant routed through
+        # PortfolioState.bankroll. When the wallet is unreachable AND no fresh
+        # cache exists, fail-closed at DATA_DEGRADED rather than silently falling
+        # back to retired config-literal capital.
+        bankroll_of_record = bankroll_provider.current()
+        if bankroll_of_record is None:
+            now_ts = datetime.now(timezone.utc).isoformat()
+            risk_conn.execute(
+                """
+                INSERT INTO risk_state (level, brier, accuracy, win_rate, details_json, checked_at, force_exit_review)
+                VALUES (?, NULL, NULL, NULL, ?, ?, 0)
+                """,
+                (
+                    RiskLevel.DATA_DEGRADED.value,
+                    json.dumps({
+                        "status": "bankroll_provider_unavailable",
+                        "bankroll_truth": {
+                            "source": "polymarket_wallet",
+                            "value_usd": None,
+                            "fetched_at": None,
+                            "staleness_seconds": None,
+                            "cached": False,
+                            "reason": "wallet query failed and no fresh cache",
+                        },
+                    }),
+                    now_ts,
+                ),
+            )
+            risk_conn.commit()
+            logger.error(
+                "RiskGuard tick fail-closed: bankroll_provider unavailable (no fresh cache)",
+            )
+            return RiskLevel.DATA_DEGRADED
+
+        current_bankroll_usd = float(bankroll_of_record.value_usd)
+        settlement_rows = query_authoritative_settlement_rows(zeus_conn, limit=50)
+        settlement_row_storage_sources = sorted({str(r.get("source", "unknown")) for r in settlement_rows})
+        settlement_storage_source = (
+            settlement_row_storage_sources[0]
+            if len(settlement_row_storage_sources) == 1
+            else ("mixed" if settlement_row_storage_sources else "none")
         )
+        settlement_authority_levels: dict[str, int] = {}
+        degraded_rows = 0
+        learning_snapshot_ready_count = 0
+        canonical_payload_complete_count = 0
+        metric_ready_rows = []
+        for row in settlement_rows:
+            authority_level = str(row.get("authority_level", "unknown"))
+            settlement_authority_levels[authority_level] = settlement_authority_levels.get(authority_level, 0) + 1
+            if row.get("is_degraded", False):
+                degraded_rows += 1
+            if row.get("learning_snapshot_ready", False):
+                learning_snapshot_ready_count += 1
+            if row.get("canonical_payload_complete", False):
+                canonical_payload_complete_count += 1
+            if row.get("metric_ready", True) and row.get("p_posterior") is not None and row.get("outcome") is not None:
+                metric_ready_rows.append(row)
+
+        realized_exits, realized_truth_source, realized_degraded = _current_mode_realized_exits(
+            zeus_conn,
+            settlement_rows=settlement_rows,
+        )
+        portfolio = replace(portfolio, recent_exits=realized_exits)
+
+        p_forecasts = [float(r["p_posterior"]) for r in metric_ready_rows]
+        outcomes = [int(r["outcome"]) for r in metric_ready_rows]
+        strategy_settlement_summary = _strategy_settlement_summary(metric_ready_rows)
+        entry_execution_summary = _entry_execution_summary(zeus_conn)
+        try:
+            tracker = load_tracker()
+            tracker_summary = tracker.summary()
+            edge_compression_alerts = tracker.edge_compression_check()
+            tracker_accounting = dict(getattr(tracker, "accounting", {}))
+            strategy_tracker_error = ""
+        except Exception as exc:
+            tracker_summary = {}
+            edge_compression_alerts = []
+            tracker_accounting = {}
+            strategy_tracker_error = str(exc)
+
+        # Compute metrics from authoritative settlement rows only.
+        b_score = brier_score(p_forecasts, outcomes) if p_forecasts else 0.0
+        d_accuracy = directional_accuracy(p_forecasts, outcomes) if p_forecasts else 0.5
+
+        # Evaluate levels
+        brier_level = evaluate_brier(b_score, thresholds) if p_forecasts else RiskLevel.GREEN
+        settlement_quality_level = RiskLevel.GREEN
+        if settlement_rows and not metric_ready_rows:
+            settlement_quality_level = RiskLevel.RED
+        elif degraded_rows > 0:
+            settlement_quality_level = RiskLevel.YELLOW
+        execution_quality_level = RiskLevel.GREEN
+        execution_overall = entry_execution_summary["overall"]
+        execution_observed = execution_overall["filled"] + execution_overall["rejected"]
+        recommended_control_reasons: dict[str, list[str]] = {}
+        recommended_strategy_gate_reasons: dict[str, list[str]] = {}
+        if execution_overall["fill_rate"] is not None and execution_observed >= 10 and execution_overall["fill_rate"] < 0.3:
+            execution_quality_level = RiskLevel.YELLOW
+            _append_reason(
+                recommended_control_reasons,
+                "tighten_risk",
+                f"execution_decay(fill_rate={execution_overall['fill_rate']}, observed={execution_observed})",
+            )
+        strategy_signal_level = RiskLevel.YELLOW if (edge_compression_alerts or strategy_tracker_error) else RiskLevel.GREEN
+        for alert in edge_compression_alerts:
+            if not alert.startswith("EDGE_COMPRESSION: "):
+                continue
+            strategy = alert.split(": ", 1)[1].split(" edge", 1)[0]
+            _append_reason(recommended_strategy_gate_reasons, strategy, "edge_compression")
+        for strategy, bucket in entry_execution_summary.get("by_strategy", {}).items():
+            observed = bucket["filled"] + bucket["rejected"]
+            fill_rate = bucket.get("fill_rate")
+            if fill_rate is not None and observed >= 10 and fill_rate < 0.3:
+                _append_reason(
+                    recommended_strategy_gate_reasons,
+                    strategy,
+                    f"execution_decay(fill_rate={fill_rate}, observed={observed})",
+                )
+        recommended_strategy_gates = sorted(recommended_strategy_gate_reasons)
+        recommended_controls = []
+        if execution_quality_level == RiskLevel.YELLOW:
+            recommended_controls.append("tighten_risk")
+        if recommended_strategy_gates:
+            recommended_controls.append("review_strategy_gates")
+            review_gate_reasons = [
+                f"{strategy}:{'|'.join(sorted(recommended_strategy_gate_reasons.get(strategy, [])))}"
+                for strategy in recommended_strategy_gates
+            ]
+            recommended_control_reasons["review_strategy_gates"] = review_gate_reasons
+
+        # Refresh and query strategy health FIRST to compute canonical PnL
+        now = datetime.now(timezone.utc).isoformat()
+        durable_action_status = _sync_riskguard_strategy_gate_actions(
+            zeus_conn,
+            recommended_strategy_gate_reasons,
+            issued_at=now,
+        )
+        strategy_health_refresh = refresh_strategy_health(zeus_conn, as_of=now)
+        strategy_health_snapshot = query_strategy_health_snapshot(
+            zeus_conn,
+            now=now,
+        )
+
+        total_realized_pnl = sum(bucket.get("realized_pnl_30d", 0.0) for bucket in strategy_health_snapshot.get("by_strategy", {}).values())
+        total_unrealized_pnl = sum(bucket.get("unrealized_pnl", 0.0) for bucket in strategy_health_snapshot.get("by_strategy", {}).values())
+
+        if total_unrealized_pnl == 0.0 and strategy_health_snapshot.get("status") in ("missing_table", "empty", "fresh", "stale"):
+            # Fallback for unrealized PnL
+            total_unrealized_pnl = sum(float(getattr(p, "unrealized_pnl", 0.0)) for p in getattr(portfolio, "positions", []))
+
+        total_pnl = total_realized_pnl + total_unrealized_pnl
+        settlement_authority_missing_tables = list(
+            strategy_health_refresh.get("settlement_authority_missing_tables", [])
+        )
+        if settlement_authority_missing_tables:
+            realized_degraded = True
+
+        # P0-A correction (followup_design.md §2.1, §7 Definition A):
+        # current_equity = wallet_balance_usd ONLY. Do NOT add total_pnl — realized
+        # PnL is already in the on-chain wallet (cash-settled exits move balance);
+        # adding it again double-counts. Unrealized PnL is not live bankroll
+        # authority and is excluded from equity by definition. The retired path used
+        # config-literal capital plus total_pnl, which was a synthetic equity object.
+        # Now: wallet (real, no math).
+        current_total_value = round(current_bankroll_usd, 2)
+        daily_loss_snapshot = _trailing_loss_snapshot(
+            risk_conn,
+            now=now,
+            lookback=timedelta(hours=24),
+            current_equity=current_total_value,
+            initial_bankroll=current_bankroll_usd,
+            threshold_pct=float(thresholds["max_daily_loss_pct"]),
+        )
+        weekly_loss_snapshot = _trailing_loss_snapshot(
+            risk_conn,
+            now=now,
+            lookback=timedelta(days=7),
+            current_equity=current_total_value,
+            initial_bankroll=current_bankroll_usd,
+            threshold_pct=float(thresholds["max_weekly_loss_pct"]),
+        )
+        daily_loss = daily_loss_snapshot["loss"]
+        weekly_loss = weekly_loss_snapshot["loss"]
+        daily_loss_level = daily_loss_snapshot["level"]
+        weekly_loss_level = weekly_loss_snapshot["level"]
+
+        level = overall_level(
+            brier_level,
+            settlement_quality_level,
+            execution_quality_level,
+            strategy_signal_level,
+            daily_loss_level,
+            weekly_loss_level,
+        )
+
+        # B5: force_exit_review when daily loss reaches RED
+        force_exit_review = 1 if daily_loss_level == RiskLevel.RED else 0
+
+        risk_conn.execute("""
+            INSERT INTO risk_state (level, brier, accuracy, win_rate, details_json, checked_at, force_exit_review)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (
+            level.value, b_score, d_accuracy, None,
+            json.dumps({
+                "brier_level": brier_level.value,
+                "settlement_quality_level": settlement_quality_level.value,
+                "execution_quality_level": execution_quality_level.value,
+                "strategy_signal_level": strategy_signal_level.value,
+                "daily_loss_level": daily_loss_level.value,
+                "weekly_loss_level": weekly_loss_level.value,
+                "daily_loss": None if daily_loss is None else round(float(daily_loss), 2),
+                "weekly_loss": None if weekly_loss is None else round(float(weekly_loss), 2),
+                "daily_loss_status": daily_loss_snapshot["status"],
+                "weekly_loss_status": weekly_loss_snapshot["status"],
+                "daily_loss_source": daily_loss_snapshot["source"],
+                "weekly_loss_source": weekly_loss_snapshot["source"],
+                "daily_loss_reference": daily_loss_snapshot["reference"],
+                "weekly_loss_reference": weekly_loss_snapshot["reference"],
+                # P0-A: this field is now the on-chain wallet snapshot used as
+                # equity base for trailing-loss math (architect memo §7), NOT the
+                # config-constant fiction the legacy field name implies.
+                "initial_bankroll": round(current_bankroll_usd, 2),
+                # Cutover-day guard (followup_design.md §6.2, §7 hazard #3):
+                # this provenance marker tells `_trailing_loss_reference` to skip
+                # pre-cutover rows whose `effective_bankroll` came from retired
+                # config-literal capital.
+                # New rows after this code lands carry "polymarket_wallet"; old rows
+                # have no `bankroll_truth_source` field at all → filtered out.
+                "bankroll_truth_source": "polymarket_wallet",
+                "bankroll_truth": {
+                    "value_usd": round(current_bankroll_usd, 2),
+                    "source": bankroll_of_record.source,
+                    "authority": bankroll_of_record.authority,
+                    "fetched_at": bankroll_of_record.fetched_at,
+                    "staleness_seconds": round(float(bankroll_of_record.staleness_seconds), 3),
+                    "cached": bool(bankroll_of_record.cached),
+                },
+                "daily_baseline_total": round(portfolio.daily_baseline_total, 2),
+                "weekly_baseline_total": round(portfolio.weekly_baseline_total, 2),
+                "realized_pnl": round(total_realized_pnl, 2),
+                "realized_pnl_source": "strategy_health.realized_pnl_30d",
+                "realized_pnl_window_days": 30,
+                "unrealized_pnl": round(total_unrealized_pnl, 2),
+                "total_pnl": round(total_pnl, 2),
+                "effective_bankroll": round(current_total_value, 2),
+                "portfolio_truth_source": portfolio_truth["source"],
+                "portfolio_loader_status": portfolio_truth["loader_status"],
+                "portfolio_fallback_active": portfolio_truth["fallback_active"],
+                "portfolio_fallback_reason": portfolio_truth["fallback_reason"],
+                "portfolio_position_count": portfolio_truth["position_count"],
+                "portfolio_capital_source": portfolio_truth.get("capital_source", "unknown"),
+                "realized_truth_source": realized_truth_source,
+                "realized_degraded": realized_degraded,
+                "settlement_sample_size": len(p_forecasts),
+                "settlement_storage_source": settlement_storage_source,
+                "settlement_row_storage_sources": settlement_row_storage_sources,
+                "settlement_authority_levels": settlement_authority_levels,
+                "settlement_degraded_row_count": degraded_rows,
+                "settlement_learning_snapshot_ready_count": learning_snapshot_ready_count,
+                "settlement_canonical_payload_complete_count": canonical_payload_complete_count,
+                "settlement_metric_ready_count": len(metric_ready_rows),
+                # K2 rename (bug #3): this field is the PROBABILITY-SIDE directional
+                # hit rate computed from brier forecasts (did p>0.5 match the
+                # outcome?). It is NOT the same as trade profitability rate, which
+                # lives inside strategy_settlement_summary as per-strategy
+                # 'trade_profitability_rate'. The previous bare 'accuracy' key
+                # collided in name with the per-strategy rate and caused LLM
+                # reporters to copy 0.8947 as 'win rate'.
+                "probability_directional_accuracy": round(d_accuracy, 4),
+                "strategy_settlement_summary": strategy_settlement_summary,
+                "entry_execution_summary": entry_execution_summary,
+                "strategy_tracker_summary": tracker_summary,
+                "strategy_edge_compression_alerts": edge_compression_alerts,
+                "strategy_tracker_accounting": tracker_accounting,
+                "strategy_tracker_error": strategy_tracker_error,
+                "recommended_strategy_gates": recommended_strategy_gates,
+                "recommended_strategy_gate_reasons": {
+                    strategy: sorted(reasons)
+                    for strategy, reasons in sorted(recommended_strategy_gate_reasons.items())
+                },
+                "recommended_controls": recommended_controls,
+                "recommended_control_reasons": {
+                    control: list(reasons)
+                    for control, reasons in sorted(recommended_control_reasons.items())
+                },
+                "durable_risk_action_emission_status": durable_action_status["status"],
+                "durable_risk_action_emitted_count": durable_action_status["emitted_count"],
+                "durable_risk_action_expired_count": durable_action_status["expired_count"],
+                "strategy_health_refresh_status": strategy_health_refresh["status"],
+                "strategy_health_rows_written": strategy_health_refresh.get("rows_written", 0),
+                "strategy_health_missing_required_tables": list(strategy_health_refresh.get("missing_required_tables", [])),
+                "strategy_health_missing_optional_tables": list(strategy_health_refresh.get("missing_optional_tables", [])),
+                "strategy_health_settlement_authority_missing_tables": settlement_authority_missing_tables,
+                "strategy_health_omitted_fields": list(strategy_health_refresh.get("omitted_fields", [])),
+                "strategy_health_snapshot_status": strategy_health_snapshot["status"],
+                "strategy_health_stale_strategy_keys": list(strategy_health_snapshot.get("stale_strategy_keys", [])),
+            }),
+            now,
+            force_exit_review,
+        ))
+        zeus_conn.commit()
         risk_conn.commit()
+
+        try:
+            if level == RiskLevel.RED:
+                failed_rules = []
+                if brier_level == RiskLevel.RED:
+                    failed_rules.append({
+                        "name": "brier",
+                        "value": round(b_score, 4),
+                        "threshold": thresholds["brier_red"],
+                        "detail": f"accuracy={d_accuracy:.4f}",
+                    })
+                if settlement_quality_level == RiskLevel.RED:
+                    failed_rules.append({
+                        "name": "settlement_quality",
+                        "value": 0,
+                        "threshold": 1,
+                        "detail": f"storage_source={settlement_storage_source}",
+                    })
+                if daily_loss_level == RiskLevel.RED:
+                    failed_rules.append({
+                        "name": "daily_loss_pct",
+                        "value": round(float(daily_loss or 0.0), 4),
+                        "threshold": thresholds["max_daily_loss_pct"],
+                        "detail": f"effective_bankroll={current_total_value:.2f}",
+                    })
+                if weekly_loss_level == RiskLevel.RED:
+                    failed_rules.append({
+                        "name": "weekly_loss_pct",
+                        "value": round(float(weekly_loss or 0.0), 4),
+                        "threshold": thresholds["max_weekly_loss_pct"],
+                        "detail": f"effective_bankroll={current_total_value:.2f}",
+                    })
+                alert_halt(failed_rules or [{
+                    "name": "riskguard",
+                    "value": 1,
+                    "threshold": 0,
+                    "detail": f"level={level.value}",
+                }])
+            elif previous_level == RiskLevel.RED and level == RiskLevel.GREEN:
+                alert_resume("rules cleared")
+            elif level == RiskLevel.YELLOW:
+                if brier_level == RiskLevel.YELLOW:
+                    alert_warning("Brier score", round(b_score, 4), thresholds["brier_yellow"], detail=f"accuracy={d_accuracy:.4f}")
+                if execution_quality_level == RiskLevel.YELLOW:
+                    alert_warning(
+                        "Execution fill rate",
+                        round(execution_overall.get("fill_rate", 0.0), 4) if execution_overall.get("fill_rate") is not None else 0.0,
+                        0.3,
+                        detail=f"observed={execution_observed}",
+                    )
+                if settlement_quality_level == RiskLevel.YELLOW:
+                    alert_warning("Settlement quality", float(degraded_rows), 1.0, detail=f"storage_source={settlement_storage_source}")
+                if strategy_signal_level == RiskLevel.YELLOW:
+                    alert_warning("Strategy signal", float(len(edge_compression_alerts)), 1.0, detail=strategy_tracker_error or "edge_compression_alerts_present")
+            elif level == RiskLevel.DATA_DEGRADED:
+                if daily_loss_level == RiskLevel.DATA_DEGRADED:
+                    alert_warning("Daily Loss Monitoring", 0.0, 0.0, detail="DATA_DEGRADED: Missing trailing loss baseline")
+                if weekly_loss_level == RiskLevel.DATA_DEGRADED:
+                    alert_warning("Weekly Loss Monitoring", 0.0, 0.0, detail="DATA_DEGRADED: Missing trailing loss baseline")
+        except Exception as exc:
+            logger.warning("Discord alert emission failed: %s", exc)
+
+        if level != RiskLevel.GREEN:
+            logger.warning("RiskGuard level: %s (storage_source=%s, Brier=%.3f, Accuracy=%.1f%%)",
+                           level.value, settlement_storage_source, b_score, d_accuracy * 100)
+
+        return level
+    finally:
         zeus_conn.close()
         risk_conn.close()
-        logger.error(
-            "RiskGuard tick fail-closed: bankroll_provider unavailable (no fresh cache)",
-        )
-        return RiskLevel.DATA_DEGRADED
-
-    current_bankroll_usd = float(bankroll_of_record.value_usd)
-    settlement_rows = query_authoritative_settlement_rows(zeus_conn, limit=50)
-    settlement_row_storage_sources = sorted({str(r.get("source", "unknown")) for r in settlement_rows})
-    settlement_storage_source = (
-        settlement_row_storage_sources[0]
-        if len(settlement_row_storage_sources) == 1
-        else ("mixed" if settlement_row_storage_sources else "none")
-    )
-    settlement_authority_levels: dict[str, int] = {}
-    degraded_rows = 0
-    learning_snapshot_ready_count = 0
-    canonical_payload_complete_count = 0
-    metric_ready_rows = []
-    for row in settlement_rows:
-        authority_level = str(row.get("authority_level", "unknown"))
-        settlement_authority_levels[authority_level] = settlement_authority_levels.get(authority_level, 0) + 1
-        if row.get("is_degraded", False):
-            degraded_rows += 1
-        if row.get("learning_snapshot_ready", False):
-            learning_snapshot_ready_count += 1
-        if row.get("canonical_payload_complete", False):
-            canonical_payload_complete_count += 1
-        if row.get("metric_ready", True) and row.get("p_posterior") is not None and row.get("outcome") is not None:
-            metric_ready_rows.append(row)
-
-    realized_exits, realized_truth_source, realized_degraded = _current_mode_realized_exits(
-        zeus_conn,
-        settlement_rows=settlement_rows,
-    )
-    portfolio = replace(portfolio, recent_exits=realized_exits)
-
-    p_forecasts = [float(r["p_posterior"]) for r in metric_ready_rows]
-    outcomes = [int(r["outcome"]) for r in metric_ready_rows]
-    strategy_settlement_summary = _strategy_settlement_summary(metric_ready_rows)
-    entry_execution_summary = _entry_execution_summary(zeus_conn)
-    try:
-        tracker = load_tracker()
-        tracker_summary = tracker.summary()
-        edge_compression_alerts = tracker.edge_compression_check()
-        tracker_accounting = dict(getattr(tracker, "accounting", {}))
-        strategy_tracker_error = ""
-    except Exception as exc:
-        tracker_summary = {}
-        edge_compression_alerts = []
-        tracker_accounting = {}
-        strategy_tracker_error = str(exc)
-
-    # Compute metrics from authoritative settlement rows only.
-    b_score = brier_score(p_forecasts, outcomes) if p_forecasts else 0.0
-    d_accuracy = directional_accuracy(p_forecasts, outcomes) if p_forecasts else 0.5
-
-    # Evaluate levels
-    brier_level = evaluate_brier(b_score, thresholds) if p_forecasts else RiskLevel.GREEN
-    settlement_quality_level = RiskLevel.GREEN
-    if settlement_rows and not metric_ready_rows:
-        settlement_quality_level = RiskLevel.RED
-    elif degraded_rows > 0:
-        settlement_quality_level = RiskLevel.YELLOW
-    execution_quality_level = RiskLevel.GREEN
-    execution_overall = entry_execution_summary["overall"]
-    execution_observed = execution_overall["filled"] + execution_overall["rejected"]
-    recommended_control_reasons: dict[str, list[str]] = {}
-    recommended_strategy_gate_reasons: dict[str, list[str]] = {}
-    if execution_overall["fill_rate"] is not None and execution_observed >= 10 and execution_overall["fill_rate"] < 0.3:
-        execution_quality_level = RiskLevel.YELLOW
-        _append_reason(
-            recommended_control_reasons,
-            "tighten_risk",
-            f"execution_decay(fill_rate={execution_overall['fill_rate']}, observed={execution_observed})",
-        )
-    strategy_signal_level = RiskLevel.YELLOW if (edge_compression_alerts or strategy_tracker_error) else RiskLevel.GREEN
-    for alert in edge_compression_alerts:
-        if not alert.startswith("EDGE_COMPRESSION: "):
-            continue
-        strategy = alert.split(": ", 1)[1].split(" edge", 1)[0]
-        _append_reason(recommended_strategy_gate_reasons, strategy, "edge_compression")
-    for strategy, bucket in entry_execution_summary.get("by_strategy", {}).items():
-        observed = bucket["filled"] + bucket["rejected"]
-        fill_rate = bucket.get("fill_rate")
-        if fill_rate is not None and observed >= 10 and fill_rate < 0.3:
-            _append_reason(
-                recommended_strategy_gate_reasons,
-                strategy,
-                f"execution_decay(fill_rate={fill_rate}, observed={observed})",
-            )
-    recommended_strategy_gates = sorted(recommended_strategy_gate_reasons)
-    recommended_controls = []
-    if execution_quality_level == RiskLevel.YELLOW:
-        recommended_controls.append("tighten_risk")
-    if recommended_strategy_gates:
-        recommended_controls.append("review_strategy_gates")
-        review_gate_reasons = [
-            f"{strategy}:{'|'.join(sorted(recommended_strategy_gate_reasons.get(strategy, [])))}"
-            for strategy in recommended_strategy_gates
-        ]
-        recommended_control_reasons["review_strategy_gates"] = review_gate_reasons
-
-    # Refresh and query strategy health FIRST to compute canonical PnL
-    now = datetime.now(timezone.utc).isoformat()
-    durable_action_status = _sync_riskguard_strategy_gate_actions(
-        zeus_conn,
-        recommended_strategy_gate_reasons,
-        issued_at=now,
-    )
-    strategy_health_refresh = refresh_strategy_health(zeus_conn, as_of=now)
-    strategy_health_snapshot = query_strategy_health_snapshot(
-        zeus_conn,
-        now=now,
-    )
-
-    total_realized_pnl = sum(bucket.get("realized_pnl_30d", 0.0) for bucket in strategy_health_snapshot.get("by_strategy", {}).values())
-    total_unrealized_pnl = sum(bucket.get("unrealized_pnl", 0.0) for bucket in strategy_health_snapshot.get("by_strategy", {}).values())
-
-    if total_unrealized_pnl == 0.0 and strategy_health_snapshot.get("status") in ("missing_table", "empty", "fresh", "stale"):
-        # Fallback for unrealized PnL
-        total_unrealized_pnl = sum(float(getattr(p, "unrealized_pnl", 0.0)) for p in getattr(portfolio, "positions", []))
-
-    total_pnl = total_realized_pnl + total_unrealized_pnl
-    settlement_authority_missing_tables = list(
-        strategy_health_refresh.get("settlement_authority_missing_tables", [])
-    )
-    if settlement_authority_missing_tables:
-        realized_degraded = True
-
-    # P0-A correction (followup_design.md §2.1, §7 Definition A):
-    # current_equity = wallet_balance_usd ONLY. Do NOT add total_pnl — realized
-    # PnL is already in the on-chain wallet (cash-settled exits move balance);
-    # adding it again double-counts. Unrealized PnL is not live bankroll
-    # authority and is excluded from equity by definition. The retired path used
-    # config-literal capital plus total_pnl, which was a synthetic equity object.
-    # Now: wallet (real, no math).
-    current_total_value = round(current_bankroll_usd, 2)
-    daily_loss_snapshot = _trailing_loss_snapshot(
-        risk_conn,
-        now=now,
-        lookback=timedelta(hours=24),
-        current_equity=current_total_value,
-        initial_bankroll=current_bankroll_usd,
-        threshold_pct=float(thresholds["max_daily_loss_pct"]),
-    )
-    weekly_loss_snapshot = _trailing_loss_snapshot(
-        risk_conn,
-        now=now,
-        lookback=timedelta(days=7),
-        current_equity=current_total_value,
-        initial_bankroll=current_bankroll_usd,
-        threshold_pct=float(thresholds["max_weekly_loss_pct"]),
-    )
-    daily_loss = daily_loss_snapshot["loss"]
-    weekly_loss = weekly_loss_snapshot["loss"]
-    daily_loss_level = daily_loss_snapshot["level"]
-    weekly_loss_level = weekly_loss_snapshot["level"]
-
-    level = overall_level(
-        brier_level,
-        settlement_quality_level,
-        execution_quality_level,
-        strategy_signal_level,
-        daily_loss_level,
-        weekly_loss_level,
-    )
-
-    # B5: force_exit_review when daily loss reaches RED
-    force_exit_review = 1 if daily_loss_level == RiskLevel.RED else 0
-
-    risk_conn.execute("""
-        INSERT INTO risk_state (level, brier, accuracy, win_rate, details_json, checked_at, force_exit_review)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-    """, (
-        level.value, b_score, d_accuracy, None,
-        json.dumps({
-            "brier_level": brier_level.value,
-            "settlement_quality_level": settlement_quality_level.value,
-            "execution_quality_level": execution_quality_level.value,
-            "strategy_signal_level": strategy_signal_level.value,
-            "daily_loss_level": daily_loss_level.value,
-            "weekly_loss_level": weekly_loss_level.value,
-            "daily_loss": None if daily_loss is None else round(float(daily_loss), 2),
-            "weekly_loss": None if weekly_loss is None else round(float(weekly_loss), 2),
-            "daily_loss_status": daily_loss_snapshot["status"],
-            "weekly_loss_status": weekly_loss_snapshot["status"],
-            "daily_loss_source": daily_loss_snapshot["source"],
-            "weekly_loss_source": weekly_loss_snapshot["source"],
-            "daily_loss_reference": daily_loss_snapshot["reference"],
-            "weekly_loss_reference": weekly_loss_snapshot["reference"],
-            # P0-A: this field is now the on-chain wallet snapshot used as
-            # equity base for trailing-loss math (architect memo §7), NOT the
-            # config-constant fiction the legacy field name implies.
-            "initial_bankroll": round(current_bankroll_usd, 2),
-            # Cutover-day guard (followup_design.md §6.2, §7 hazard #3):
-            # this provenance marker tells `_trailing_loss_reference` to skip
-            # pre-cutover rows whose `effective_bankroll` came from retired
-            # config-literal capital.
-            # New rows after this code lands carry "polymarket_wallet"; old rows
-            # have no `bankroll_truth_source` field at all → filtered out.
-            "bankroll_truth_source": "polymarket_wallet",
-            "bankroll_truth": {
-                "value_usd": round(current_bankroll_usd, 2),
-                "source": bankroll_of_record.source,
-                "authority": bankroll_of_record.authority,
-                "fetched_at": bankroll_of_record.fetched_at,
-                "staleness_seconds": round(float(bankroll_of_record.staleness_seconds), 3),
-                "cached": bool(bankroll_of_record.cached),
-            },
-            "daily_baseline_total": round(portfolio.daily_baseline_total, 2),
-            "weekly_baseline_total": round(portfolio.weekly_baseline_total, 2),
-            "realized_pnl": round(total_realized_pnl, 2),
-            "realized_pnl_source": "strategy_health.realized_pnl_30d",
-            "realized_pnl_window_days": 30,
-            "unrealized_pnl": round(total_unrealized_pnl, 2),
-            "total_pnl": round(total_pnl, 2),
-            "effective_bankroll": round(current_total_value, 2),
-            "portfolio_truth_source": portfolio_truth["source"],
-            "portfolio_loader_status": portfolio_truth["loader_status"],
-            "portfolio_fallback_active": portfolio_truth["fallback_active"],
-            "portfolio_fallback_reason": portfolio_truth["fallback_reason"],
-            "portfolio_position_count": portfolio_truth["position_count"],
-            "portfolio_capital_source": portfolio_truth.get("capital_source", "unknown"),
-            "realized_truth_source": realized_truth_source,
-            "realized_degraded": realized_degraded,
-            "settlement_sample_size": len(p_forecasts),
-            "settlement_storage_source": settlement_storage_source,
-            "settlement_row_storage_sources": settlement_row_storage_sources,
-            "settlement_authority_levels": settlement_authority_levels,
-            "settlement_degraded_row_count": degraded_rows,
-            "settlement_learning_snapshot_ready_count": learning_snapshot_ready_count,
-            "settlement_canonical_payload_complete_count": canonical_payload_complete_count,
-            "settlement_metric_ready_count": len(metric_ready_rows),
-            # K2 rename (bug #3): this field is the PROBABILITY-SIDE directional
-            # hit rate computed from brier forecasts (did p>0.5 match the
-            # outcome?). It is NOT the same as trade profitability rate, which
-            # lives inside strategy_settlement_summary as per-strategy
-            # 'trade_profitability_rate'. The previous bare 'accuracy' key
-            # collided in name with the per-strategy rate and caused LLM
-            # reporters to copy 0.8947 as 'win rate'.
-            "probability_directional_accuracy": round(d_accuracy, 4),
-            "strategy_settlement_summary": strategy_settlement_summary,
-            "entry_execution_summary": entry_execution_summary,
-            "strategy_tracker_summary": tracker_summary,
-            "strategy_edge_compression_alerts": edge_compression_alerts,
-            "strategy_tracker_accounting": tracker_accounting,
-            "strategy_tracker_error": strategy_tracker_error,
-            "recommended_strategy_gates": recommended_strategy_gates,
-            "recommended_strategy_gate_reasons": {
-                strategy: sorted(reasons)
-                for strategy, reasons in sorted(recommended_strategy_gate_reasons.items())
-            },
-            "recommended_controls": recommended_controls,
-            "recommended_control_reasons": {
-                control: list(reasons)
-                for control, reasons in sorted(recommended_control_reasons.items())
-            },
-            "durable_risk_action_emission_status": durable_action_status["status"],
-            "durable_risk_action_emitted_count": durable_action_status["emitted_count"],
-            "durable_risk_action_expired_count": durable_action_status["expired_count"],
-            "strategy_health_refresh_status": strategy_health_refresh["status"],
-            "strategy_health_rows_written": strategy_health_refresh.get("rows_written", 0),
-            "strategy_health_missing_required_tables": list(strategy_health_refresh.get("missing_required_tables", [])),
-            "strategy_health_missing_optional_tables": list(strategy_health_refresh.get("missing_optional_tables", [])),
-            "strategy_health_settlement_authority_missing_tables": settlement_authority_missing_tables,
-            "strategy_health_omitted_fields": list(strategy_health_refresh.get("omitted_fields", [])),
-            "strategy_health_snapshot_status": strategy_health_snapshot["status"],
-            "strategy_health_stale_strategy_keys": list(strategy_health_snapshot.get("stale_strategy_keys", [])),
-        }),
-        now,
-        force_exit_review,
-    ))
-    zeus_conn.commit()
-    risk_conn.commit()
-
-    zeus_conn.close()
-    risk_conn.close()
-
-    try:
-        if level == RiskLevel.RED:
-            failed_rules = []
-            if brier_level == RiskLevel.RED:
-                failed_rules.append({
-                    "name": "brier",
-                    "value": round(b_score, 4),
-                    "threshold": thresholds["brier_red"],
-                    "detail": f"accuracy={d_accuracy:.4f}",
-                })
-            if settlement_quality_level == RiskLevel.RED:
-                failed_rules.append({
-                    "name": "settlement_quality",
-                    "value": 0,
-                    "threshold": 1,
-                    "detail": f"storage_source={settlement_storage_source}",
-                })
-            if daily_loss_level == RiskLevel.RED:
-                failed_rules.append({
-                    "name": "daily_loss_pct",
-                    "value": round(float(daily_loss or 0.0), 4),
-                    "threshold": thresholds["max_daily_loss_pct"],
-                    "detail": f"effective_bankroll={current_total_value:.2f}",
-                })
-            if weekly_loss_level == RiskLevel.RED:
-                failed_rules.append({
-                    "name": "weekly_loss_pct",
-                    "value": round(float(weekly_loss or 0.0), 4),
-                    "threshold": thresholds["max_weekly_loss_pct"],
-                    "detail": f"effective_bankroll={current_total_value:.2f}",
-                })
-            alert_halt(failed_rules or [{
-                "name": "riskguard",
-                "value": 1,
-                "threshold": 0,
-                "detail": f"level={level.value}",
-            }])
-        elif previous_level == RiskLevel.RED and level == RiskLevel.GREEN:
-            alert_resume("rules cleared")
-        elif level == RiskLevel.YELLOW:
-            if brier_level == RiskLevel.YELLOW:
-                alert_warning("Brier score", round(b_score, 4), thresholds["brier_yellow"], detail=f"accuracy={d_accuracy:.4f}")
-            if execution_quality_level == RiskLevel.YELLOW:
-                alert_warning(
-                    "Execution fill rate",
-                    round(execution_overall.get("fill_rate", 0.0), 4) if execution_overall.get("fill_rate") is not None else 0.0,
-                    0.3,
-                    detail=f"observed={execution_observed}",
-                )
-            if settlement_quality_level == RiskLevel.YELLOW:
-                alert_warning("Settlement quality", float(degraded_rows), 1.0, detail=f"storage_source={settlement_storage_source}")
-            if strategy_signal_level == RiskLevel.YELLOW:
-                alert_warning("Strategy signal", float(len(edge_compression_alerts)), 1.0, detail=strategy_tracker_error or "edge_compression_alerts_present")
-        elif level == RiskLevel.DATA_DEGRADED:
-            if daily_loss_level == RiskLevel.DATA_DEGRADED:
-                alert_warning("Daily Loss Monitoring", 0.0, 0.0, detail="DATA_DEGRADED: Missing trailing loss baseline")
-            if weekly_loss_level == RiskLevel.DATA_DEGRADED:
-                alert_warning("Weekly Loss Monitoring", 0.0, 0.0, detail="DATA_DEGRADED: Missing trailing loss baseline")
-    except Exception as exc:
-        logger.warning("Discord alert emission failed: %s", exc)
-
-    if level != RiskLevel.GREEN:
-        logger.warning("RiskGuard level: %s (storage_source=%s, Brier=%.3f, Accuracy=%.1f%%)",
-                       level.value, settlement_storage_source, b_score, d_accuracy * 100)
-
-    return level
 
 
 def tick_with_portfolio(portfolio: PortfolioState) -> RiskLevel:
@@ -1176,73 +1189,76 @@ def tick_with_portfolio(portfolio: PortfolioState) -> RiskLevel:
     Callers that have already checked portfolio.authority can pass the degraded
     state here. If authority != 'canonical_db', new-entry paths are suppressed
     but monitor / exit / reconciliation lanes run read-only.
+
+    Connection discipline: both connections closed in finally so exceptions
+    never leave dangling handles (same leak fix as tick(), 2026-05-10).
     """
     risk_conn = get_connection(RISK_DB_PATH, write_class="live")
-    init_risk_db(risk_conn)
-
     zeus_conn = _get_runtime_trade_connection()
-    now = datetime.now(timezone.utc).isoformat()
+    try:
+        init_risk_db(risk_conn)
 
-    if portfolio.authority != "canonical_db":
-        logger.warning(
-            "tick_with_portfolio: portfolio authority=%r (degraded) — new-entry paths suppressed",
-            portfolio.authority,
+        now = datetime.now(timezone.utc).isoformat()
+
+        if portfolio.authority != "canonical_db":
+            logger.warning(
+                "tick_with_portfolio: portfolio authority=%r (degraded) — new-entry paths suppressed",
+                portfolio.authority,
+            )
+
+        thresholds = settings["riskguard"]
+        settlement_rows = query_authoritative_settlement_rows(zeus_conn, limit=50)
+
+        # P0-A second callsite (followup_design.md §2.4, §7 hazard #2):
+        # tick_with_portfolio is the graceful-degradation entry used by callers
+        # that have already loaded a portfolio. Trailing-loss math here was
+        # reading `portfolio.bankroll` (= config-constant fiction). Same DEF A
+        # rewire as tick(): on-chain wallet for both equity AND threshold base,
+        # no PnL math added. Fail-closed at DATA_DEGRADED if wallet unreachable.
+        bankroll_of_record = bankroll_provider.current()
+        if bankroll_of_record is None:
+            logger.error(
+                "RiskGuard tick_with_portfolio fail-closed: bankroll_provider unavailable",
+            )
+            return RiskLevel.DATA_DEGRADED
+
+        current_bankroll_usd = float(bankroll_of_record.value_usd)
+        current_equity = current_bankroll_usd
+        initial_bankroll = current_bankroll_usd
+
+        daily_loss_snapshot = _trailing_loss_snapshot(
+            risk_conn,
+            now=now,
+            lookback=timedelta(hours=24),
+            current_equity=current_equity,
+            initial_bankroll=initial_bankroll,
+            threshold_pct=float(thresholds["max_daily_loss_pct"]),
+        )
+        weekly_loss_snapshot = _trailing_loss_snapshot(
+            risk_conn,
+            now=now,
+            lookback=timedelta(days=7),
+            current_equity=current_equity,
+            initial_bankroll=initial_bankroll,
+            threshold_pct=float(thresholds["max_weekly_loss_pct"]),
         )
 
-    thresholds = settings["riskguard"]
-    settlement_rows = query_authoritative_settlement_rows(zeus_conn, limit=50)
+        daily_loss_level = daily_loss_snapshot["level"]
+        weekly_loss_level = weekly_loss_snapshot["level"]
 
-    # P0-A second callsite (followup_design.md §2.4, §7 hazard #2):
-    # tick_with_portfolio is the graceful-degradation entry used by callers
-    # that have already loaded a portfolio. Trailing-loss math here was
-    # reading `portfolio.bankroll` (= config-constant fiction). Same DEF A
-    # rewire as tick(): on-chain wallet for both equity AND threshold base,
-    # no PnL math added. Fail-closed at DATA_DEGRADED if wallet unreachable.
-    bankroll_of_record = bankroll_provider.current()
-    if bankroll_of_record is None:
-        logger.error(
-            "RiskGuard tick_with_portfolio fail-closed: bankroll_provider unavailable",
+        level = overall_level(
+            RiskLevel.DATA_DEGRADED if portfolio.portfolio_loader_degraded else RiskLevel.GREEN,
+            RiskLevel.GREEN,
+            RiskLevel.GREEN,
+            RiskLevel.GREEN,
+            daily_loss_level,
+            weekly_loss_level,
         )
+
+        return level
+    finally:
         zeus_conn.close()
         risk_conn.close()
-        return RiskLevel.DATA_DEGRADED
-
-    current_bankroll_usd = float(bankroll_of_record.value_usd)
-    current_equity = current_bankroll_usd
-    initial_bankroll = current_bankroll_usd
-
-    daily_loss_snapshot = _trailing_loss_snapshot(
-        risk_conn,
-        now=now,
-        lookback=timedelta(hours=24),
-        current_equity=current_equity,
-        initial_bankroll=initial_bankroll,
-        threshold_pct=float(thresholds["max_daily_loss_pct"]),
-    )
-    weekly_loss_snapshot = _trailing_loss_snapshot(
-        risk_conn,
-        now=now,
-        lookback=timedelta(days=7),
-        current_equity=current_equity,
-        initial_bankroll=initial_bankroll,
-        threshold_pct=float(thresholds["max_weekly_loss_pct"]),
-    )
-
-    daily_loss_level = daily_loss_snapshot["level"]
-    weekly_loss_level = weekly_loss_snapshot["level"]
-
-    level = overall_level(
-        RiskLevel.DATA_DEGRADED if portfolio.portfolio_loader_degraded else RiskLevel.GREEN,
-        RiskLevel.GREEN,
-        RiskLevel.GREEN,
-        RiskLevel.GREEN,
-        daily_loss_level,
-        weekly_loss_level,
-    )
-
-    zeus_conn.close()
-    risk_conn.close()
-    return level
 
 
 def get_current_level() -> RiskLevel:

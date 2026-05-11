@@ -245,7 +245,13 @@ def source_id_for_ensemble_model(model: str | None) -> str:
 _CALIBRATION_LOOKUP_SOURCE_ID_BY_FORECAST_SOURCE_ID: dict[str, str] = {
     "tigge": "tigge_mars",
     "tigge_mars": "tigge_mars",
-    "ecmwf_open_data": "ecmwf_open_data",
+    # ECMWF Opendata IS the TIGGE archive's live channel — same physical IFS
+    # ensemble per architecture/ecmwf_opendata_tigge_equivalence_2026_05_06.yaml.
+    # Calibration bucket axis routes through TIGGE Platt models (599+195 active,
+    # source_id='tigge_mars' in platt_models_v2). Identity-mapping this to
+    # 'ecmwf_open_data' produces 0 hits at platt_models_v2 lookup → silent
+    # SHADOW_ONLY. Fixed 2026-05-10 (operator: 接线错误).
+    "ecmwf_open_data": "tigge_mars",
 }
 
 

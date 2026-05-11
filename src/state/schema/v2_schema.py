@@ -13,9 +13,14 @@ Contract:
   writes to it actively. model_skill cleanup is deferred to a later phase.
 - Creates 8 v2 tables per the DDL sketch + architect refinements from
   docs/operations/task_2026-04-16_dual_track_metric_spine/phase2_evidence/opener_digest.md
+
+# Created: 2026-05-10
+# Last reused or audited: 2026-05-10
+# Authority basis: task #200 (Fix SQLite live-vs-ingest contention design failure)
 """
 from __future__ import annotations
 
+import os
 import sqlite3
 
 
@@ -24,7 +29,18 @@ def apply_v2_schema(conn: sqlite3.Connection) -> None:
 
     Safe to call on both zeus-world.db and zeus_trades.db.
     Safe to call multiple times — all DDL uses IF NOT EXISTS / IF EXISTS.
+
+    # Fix (task #200, 2026-05-10): Re-apply PRAGMA busy_timeout at the start of
+    # this function. Python's sqlite3.executescript() resets the C-level busy
+    # handler that sqlite3.connect(timeout=N) installs, so any subsequent
+    # conn.execute() on the same connection has no wait budget and fails
+    # immediately on lock contention. Restoring busy_timeout here makes
+    # apply_v2_schema robust regardless of what ran on *conn* before it.
+    # ZEUS_DB_BUSY_TIMEOUT_MS default matches db.py _db_busy_timeout_s() (30 s).
     """
+    _busy_timeout_ms = int(os.environ.get("ZEUS_DB_BUSY_TIMEOUT_MS", "30000"))
+    conn.execute(f"PRAGMA busy_timeout = {_busy_timeout_ms}")
+
     # Save foreign_keys state before touching anything
     (fk_before,) = conn.execute("PRAGMA foreign_keys").fetchone()
 
