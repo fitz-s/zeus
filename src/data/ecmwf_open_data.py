@@ -130,6 +130,13 @@ SOURCE_ID = "ecmwf_open_data"
 FORECAST_SOURCE_ROLE = "diagnostic"
 MODEL_VERSION = "ecmwf_open_data"
 
+# ECMWF Open Data is replicated across multiple mirrors. AWS empirically 3× faster
+# than ecmwf direct portal (which has a 500-simultaneous-connection limit per
+# ECMWF docs). Order: aws (CDN, fastest), google (CDN, backup), ecmwf (origin, fallback).
+# 404 on any mirror means upstream hasn't released — no point rotating (mirrors sync
+# within 5s of origin, measured 2026-05-11).
+_DOWNLOAD_SOURCES: tuple[str, ...] = ("aws", "google", "ecmwf")
+
 
 def _conda_python() -> str:
     """Path to the conda interpreter that has ``ecmwf.opendata`` + eccodes installed.
@@ -599,38 +606,30 @@ def collect_open_ens_cycle(
     stages: list[dict] = []
 
     if not skip_download:
-        _download_args = [
-            _conda_python(),
-            str(DOWNLOAD_SCRIPT),
-            "--date", cycle_date.isoformat(),
-            "--run-hour", str(cycle_hour),
-            "--step", *[str(s) for s in STEP_HOURS],
-            "--param", cfg["open_data_param"],
-            "--source", "ecmwf",
-            "--output-path", str(output_path),
-        ]
         _stderr_dump = (
             PROJECT_ROOT
             / "tmp"
             / f"ecmwf_open_data_{cycle_date.isoformat()}_{cycle_hour:02d}z_{track}.stderr.txt"
         )
-        # Bounded retry: attempt 1 immediately, attempt 2 after 60s.
-        # Worst-case wall time: 1500 + 60 + 1500 = 3060s (~51 min), leaving margin before
-        # the LOW job's misfire_grace_time expires (~55 min after HIGH fires at 07:30 UTC).
-        # A 404 on a grid-valid step means data not yet published → SKIPPED_NOT_RELEASED (no retry).
-        # All other rc!=0 are retryable (transient network, rate-limit, timeout).
-        _retry_delays = [0, 60]
+        # Mirror failover: aws (CDN, 3× faster) → google (CDN, backup) → ecmwf (origin, fallback).
+        # ECMWF direct portal has a 500-simultaneous-connection limit; aws/google mirrors
+        # sync within 5s of origin (measured 2026-05-11). On 404: upstream not yet published;
+        # all mirrors will 404 too, so break immediately (no rotation).
         download = None
-        for _attempt, _delay in enumerate(_retry_delays, start=1):
-            if _delay > 0:
-                logger.info(
-                    "ecmwf_open_data download_%s: retry attempt %d/%d after %ds sleep",
-                    track, _attempt, len(_retry_delays), _delay,
-                )
-                time.sleep(_delay)
+        for _source in _DOWNLOAD_SOURCES:
+            _download_args = [
+                _conda_python(),
+                str(DOWNLOAD_SCRIPT),
+                "--date", cycle_date.isoformat(),
+                "--run-hour", str(cycle_hour),
+                "--step", *[str(s) for s in STEP_HOURS],
+                "--param", cfg["open_data_param"],
+                "--source", _source,
+                "--output-path", str(output_path),
+            ]
             download = runner(
                 _download_args,
-                label=f"download_{track}",
+                label=f"download_{track}_{_source}",
                 timeout=download_timeout_seconds,
             )
             if download["ok"]:
@@ -640,8 +639,8 @@ def collect_open_ens_cycle(
             _is_404 = "404" in _stderr or "Not Found" in _stderr
             if _is_404 and "No index entries" not in _stderr:
                 logger.warning(
-                    "ecmwf_open_data download_%s: 404 on grid-valid step — SKIPPED_NOT_RELEASED (attempt %d)",
-                    track, _attempt,
+                    "ecmwf_open_data download_%s: 404 on source=%s — upstream not yet released, skipping mirrors",
+                    track, _source,
                 )
                 _write_stderr_dump(_stderr_dump, _stderr)
                 stages.append(download)
@@ -652,12 +651,11 @@ def collect_open_ens_cycle(
                     "stages": stages,
                     "snapshots_inserted": 0,
                 }
-            if _attempt < len(_retry_delays):
-                logger.warning(
-                    "ecmwf_open_data download_%s: rc=%d on attempt %d/%d — will retry",
-                    track, download.get("returncode", -1), _attempt, len(_retry_delays),
-                )
-        # Write stderr dump on final failure (any rc!=0 after all retries).
+            logger.warning(
+                "ecmwf_open_data download_%s: failed on source=%s (rc=%s), trying next mirror",
+                track, _source, download.get("returncode", download.get("rc", -1)),
+            )
+        # Write stderr dump on final failure (any rc!=0 after all mirrors exhausted).
         if not download["ok"]:
             _write_stderr_dump(_stderr_dump, download.get("stderr_tail", "") or "")
         stages.append(download)
