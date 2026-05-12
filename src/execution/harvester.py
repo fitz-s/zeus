@@ -36,7 +36,7 @@ from src.state.decision_chain import (
     store_settlement_records,
 )
 from src.state.db import (
-    get_world_connection,
+    get_forecasts_connection,
     get_trade_connection,
     log_market_event_outcomes_v2,
     log_settlement_event,
@@ -172,10 +172,11 @@ _HARVESTER_STAGE2_TRADE_TABLES = (
     "chronicle",
 )
 _HARVESTER_STAGE2_SHARED_TABLES = (
-    "ensemble_snapshots",
-    "calibration_pairs",
-    "calibration_decision_group",
-    "platt_models",
+    # K1 (2026-05-11): shared_conn is now forecasts_conn; check v2 tables that
+    # live on forecasts.db. Legacy v1 (ensemble_snapshots, calibration_pairs)
+    # remain on world.db and are not checked here post-migration.
+    "ensemble_snapshots_v2",
+    "calibration_pairs_v2",
 )
 
 _TRAINING_FORECAST_SOURCES = frozenset({"tigge", "ecmwf_ens"})
@@ -678,7 +679,7 @@ def run_harvester() -> dict:
     # Split connections: trade DB for position/settlement events, shared DB for
     # ensemble snapshots and calibration pairs.
     trade_conn = get_trade_connection()
-    shared_conn = get_world_connection()
+    shared_conn = get_forecasts_connection()
     portfolio = load_portfolio()
 
     settled_events = _fetch_settled_events()

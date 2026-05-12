@@ -3448,7 +3448,7 @@ def test_inv_harvester_triggers_refit(monkeypatch, tmp_path):
 
     _hconn = get_connection(db_path)
     monkeypatch.setattr(harvester_module, "get_trade_connection", lambda: _hconn)
-    monkeypatch.setattr(harvester_module, "get_world_connection", lambda: _hconn)
+    monkeypatch.setattr(harvester_module, "get_forecasts_connection", lambda: _hconn)
     monkeypatch.setattr(
         harvester_module,
         "load_portfolio",
@@ -3502,7 +3502,7 @@ def test_harvester_stage2_preflight_skips_canonical_bootstrap_shape(
 
     hconn = get_connection(db_path)
     monkeypatch.setattr(harvester_module, "get_trade_connection", lambda: hconn)
-    monkeypatch.setattr(harvester_module, "get_world_connection", lambda: hconn)
+    monkeypatch.setattr(harvester_module, "get_forecasts_connection", lambda: hconn)
     monkeypatch.setattr(
         harvester_module,
         "load_portfolio",
@@ -3607,7 +3607,7 @@ def test_inv_harvester_falls_back_to_open_portfolio_snapshot_when_no_durable_set
 
     _hconn = get_connection(db_path)
     monkeypatch.setattr(harvester_module, "get_trade_connection", lambda: _hconn)
-    monkeypatch.setattr(harvester_module, "get_world_connection", lambda: _hconn)
+    monkeypatch.setattr(harvester_module, "get_forecasts_connection", lambda: _hconn)
     monkeypatch.setattr(
         harvester_module,
         "load_portfolio",
@@ -3709,7 +3709,7 @@ def test_inv_harvester_uses_legacy_decision_log_snapshot_before_open_portfolio(m
 
     _hconn = get_connection(db_path)
     monkeypatch.setattr(harvester_module, "get_trade_connection", lambda: _hconn)
-    monkeypatch.setattr(harvester_module, "get_world_connection", lambda: _hconn)
+    monkeypatch.setattr(harvester_module, "get_forecasts_connection", lambda: _hconn)
     monkeypatch.setattr(
         harvester_module,
         "load_portfolio",
@@ -3853,7 +3853,7 @@ def test_inv_harvester_prefers_durable_snapshot_over_open_portfolio(monkeypatch,
 
     _hconn = get_connection(db_path)
     monkeypatch.setattr(harvester_module, "get_trade_connection", lambda: _hconn)
-    monkeypatch.setattr(harvester_module, "get_world_connection", lambda: _hconn)
+    monkeypatch.setattr(harvester_module, "get_forecasts_connection", lambda: _hconn)
     monkeypatch.setattr(
         harvester_module,
         "load_portfolio",
@@ -4002,7 +4002,7 @@ def test_inv_harvester_marks_partial_context_resolution(monkeypatch, tmp_path):
 
     _hconn = get_connection(db_path)
     monkeypatch.setattr(harvester_module, "get_trade_connection", lambda: _hconn)
-    monkeypatch.setattr(harvester_module, "get_world_connection", lambda: _hconn)
+    monkeypatch.setattr(harvester_module, "get_forecasts_connection", lambda: _hconn)
     monkeypatch.setattr(harvester_module, "load_portfolio", lambda: PortfolioState(bankroll=211.37, positions=[]))
     monkeypatch.setattr(harvester_module, "save_portfolio", lambda *args, **kwargs: None)
     monkeypatch.setattr(harvester_module, "get_tracker", lambda: StrategyTracker())
