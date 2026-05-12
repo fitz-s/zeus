@@ -587,9 +587,14 @@ def _fetch_one_step(
                 last_err = f"NET_{type(exc).__name__}_mirror_{mirror}_attempt_{attempt}"
                 time.sleep(_PER_STEP_RETRY_AFTER)
                 continue
-            except Exception as exc:  # noqa: BLE001
-                last_err = f"ERR_{type(exc).__name__}_mirror_{mirror}"
-                break   # unexpected; try next mirror
+            except OSError as exc:
+                # disk/path errors during atomic rename or partial-file write
+                last_err = f"OS_{type(exc).__name__}_mirror_{mirror}"
+                break   # unexpected at filesystem layer; try next mirror
+            # ImportError, AttributeError, TypeError, etc. propagate to the
+            # ThreadPoolExecutor future; main thread surfaces them in logs.
+            # Antibody 2026-05-11: silent-swallow of ModuleNotFoundError caused
+            # post-deploy 23ms-fast-fail with no traceback.
     return ("FAILED", last_err or "EXHAUSTED")
 
 
