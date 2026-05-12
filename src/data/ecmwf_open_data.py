@@ -74,7 +74,7 @@ from src.data.forecast_target_contract import (
 from src.data.producer_readiness import build_producer_readiness_for_scope
 from src.data.forecast_source_registry import gate_source, gate_source_role
 from src.data.release_calendar import FetchDecision, select_source_run_for_target_horizon
-from src.state.db import get_world_connection as get_connection, ZEUS_WORLD_DB_PATH
+from src.state.db import get_forecasts_connection as get_connection, ZEUS_FORECASTS_DB_PATH
 from src.state.db_writer_lock import WriteClass, db_writer_lock
 from src.state.source_run_coverage_repo import write_source_run_coverage
 from src.state.source_run_repo import write_source_run
@@ -810,10 +810,10 @@ def collect_open_ens_cycle(
                 _sr_conn = conn
                 _sr_own = _sr_conn is None
                 if _sr_own:
-                    from src.state.db import get_world_connection as _gwc
-                    _sr_conn = _gwc()
+                    from src.state.db import get_forecasts_connection as _gfc
+                    _sr_conn = _gfc()
                 _sr_lock = (
-                    db_writer_lock(ZEUS_WORLD_DB_PATH, WriteClass.BULK)
+                    db_writer_lock(ZEUS_FORECASTS_DB_PATH, WriteClass.BULK)
                     if _sr_own else None
                 )
                 with (_sr_lock if _sr_lock is not None else nullcontext()):
@@ -872,10 +872,10 @@ def collect_open_ens_cycle(
                 _sr_conn = conn
                 _sr_own = _sr_conn is None
                 if _sr_own:
-                    from src.state.db import get_world_connection as _gwc
-                    _sr_conn = _gwc()
+                    from src.state.db import get_forecasts_connection as _gfc
+                    _sr_conn = _gfc()
                 _sr_lock = (
-                    db_writer_lock(ZEUS_WORLD_DB_PATH, WriteClass.BULK)
+                    db_writer_lock(ZEUS_FORECASTS_DB_PATH, WriteClass.BULK)
                     if _sr_own else None
                 )
                 with (_sr_lock if _sr_lock is not None else nullcontext()):
@@ -969,10 +969,10 @@ def collect_open_ens_cycle(
 
     # Ingest stage — import in-process, share a single connection so the
     # caller's test fixture (in-memory sqlite) is honored. Production
-    # caller passes ``conn=None`` and we open the world DB.
+    # caller passes ``conn=None`` and we open the forecasts DB (K1 split).
     own_conn = conn is None
     if own_conn:
-        _lock_ctx = db_writer_lock(ZEUS_WORLD_DB_PATH, WriteClass.BULK)
+        _lock_ctx = db_writer_lock(ZEUS_FORECASTS_DB_PATH, WriteClass.BULK)
     else:
         # Injected connection (test seam with in-memory sqlite) — skip file lock.
         _lock_ctx = nullcontext()

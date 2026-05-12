@@ -602,9 +602,9 @@ def _persist_market_events_to_db(results: list[dict], db_path: str | Path | None
     if not results:
         return 0
 
-    from src.state.db import ZEUS_WORLD_DB_PATH  # local import to avoid circular dependency
+    from src.state.db import ZEUS_FORECASTS_DB_PATH  # local import to avoid circular dependency
 
-    resolved_path = Path(db_path) if db_path is not None else ZEUS_WORLD_DB_PATH
+    resolved_path = Path(db_path) if db_path is not None else ZEUS_FORECASTS_DB_PATH
     inserted = 0
     try:
         conn = sqlite3.connect(str(resolved_path), timeout=30)
