@@ -33,7 +33,15 @@ def _sqlite_master_hash(conn: sqlite3.Connection) -> str:
 # ---------------------------------------------------------------------------
 
 def test_rel1_no_hot_path_init_schema():
-    """init_schema( must only appear in src/main.py (boot) and src/state/db.py (def)."""
+    """init_schema( must only appear in boot paths and src/state/db.py (def).
+
+    Boot paths (allowed):
+      - src/main.py        — trade daemon boot, owns trade DB init
+      - src/ingest_main.py — ingest daemon boot, owns world DB init (task #6
+                             removed it from src/main.py:679-683, so this is
+                             the SOLE world-DB upgrade caller)
+    Hot-path callers must use assert_schema_current(conn) instead.
+    """
     import subprocess
     result = subprocess.run(
         ["grep", "-rn", "init_schema(", "src/"],
@@ -42,12 +50,13 @@ def test_rel1_no_hot_path_init_schema():
         cwd="/Users/leofitz/.openclaw/workspace-venus/zeus",
     )
     lines = [l for l in result.stdout.strip().splitlines() if l]
-    # Allowed sites only: src/main.py (boot keep) and src/state/db.py (def)
+    ALLOWED = ("src/main.py", "src/ingest_main.py", "src/state/db.py")
     for line in lines:
         path = line.split(":")[0]
-        assert path in ("src/main.py", "src/state/db.py"), (
+        assert path in ALLOWED, (
             f"Unexpected init_schema( call site: {line}\n"
-            "Hot-path callers must use assert_schema_current(conn) instead."
+            f"Hot-path callers must use assert_schema_current(conn) instead.\n"
+            f"Allowed boot-path sites: {ALLOWED}"
         )
 
 
