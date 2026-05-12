@@ -419,18 +419,20 @@ def test_concat_order_step_ascending(tmp_path):
 # test 8: REL-3 — per-step independence (one failed step does not block others)
 # ---------------------------------------------------------------------------
 
-def test_thread_safety_max_workers_5(tmp_path, monkeypatch):
-    """All 5 workers run concurrently; step independence holds (REL-3).
+def test_thread_safety_max_workers_2(tmp_path, monkeypatch):
+    """Workers=2 + token bucket; step independence holds (REL-3).
 
-    Verifies _DOWNLOAD_MAX_WORKERS=5 is the module constant (antibody: no
-    call-site kwargs). Each fetch_impl call is independent; one step returning
-    FAILED does NOT prevent other steps from returning OK.
+    Verifies _DOWNLOAD_MAX_WORKERS=2 is the module constant (D1 throttle
+    antibody: reduced from 5 to 2 to lower burst concurrency against AWS S3;
+    token bucket is the primary rate control). Each fetch_impl call is
+    independent; one step returning FAILED does NOT prevent other steps from
+    returning OK.
     """
     import src.data.ecmwf_open_data as mod
     from src.data.ecmwf_open_data import _DOWNLOAD_MAX_WORKERS
 
-    assert _DOWNLOAD_MAX_WORKERS == 5, (
-        f"_DOWNLOAD_MAX_WORKERS must be 5 (antibody constant), got {_DOWNLOAD_MAX_WORKERS}"
+    assert _DOWNLOAD_MAX_WORKERS == 2, (
+        f"_DOWNLOAD_MAX_WORKERS must be 2 (D1 throttle antibody), got {_DOWNLOAD_MAX_WORKERS}"
     )
 
     steps_fetched: list[int] = []
@@ -467,4 +469,49 @@ def test_thread_safety_max_workers_5(tmp_path, monkeypatch):
     # Step 6 failed → FAILED result (only one failed, no ok_steps mix with FAILED)
     assert result["status"] == "download_failed", (
         f"Expected download_failed when any step fails; got {result['status']!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# test 9: token bucket rate limiter (D1 throttle antibody)
+# ---------------------------------------------------------------------------
+
+def test_token_bucket_limits_rate():
+    """_TokenBucket: N+1 acquires in rapid succession sleep at least once.
+
+    Verifies the bucket actually throttles bursts. We use a high rate (1000
+    rps) so the test completes in milliseconds, but drain the bucket first
+    so the (N+1)th acquire must wait a predictable gap.
+    """
+    from src.data.ecmwf_open_data import _TokenBucket
+    import time
+
+    rate = 10.0  # 10 rps → 0.1s per token
+    bucket = _TokenBucket(rate)
+
+    # Drain the bucket fully (it starts with `rate` tokens)
+    for _ in range(int(rate)):
+        bucket.acquire()
+
+    # Now the bucket is empty; next acquire must sleep ~0.1s
+    t0 = time.monotonic()
+    bucket.acquire()
+    elapsed = time.monotonic() - t0
+
+    # Allow generous headroom (CI jitter), but must be >10ms to prove throttling
+    assert elapsed >= 0.05, (
+        f"Token bucket did not throttle: elapsed={elapsed:.3f}s < 0.05s — bucket is not rate-limiting"
+    )
+
+
+def test_token_bucket_default_rps():
+    """Module-level _fetch_bucket defaults to ZEUS_ECMWF_RPS=4.0 rps."""
+    from src.data.ecmwf_open_data import _DOWNLOAD_RPS, _fetch_bucket
+
+    assert _DOWNLOAD_RPS == 4.0, (
+        f"Default RPS must be 4.0 (D1 throttle), got {_DOWNLOAD_RPS}"
+    )
+    assert isinstance(_fetch_bucket._rate, float), "Bucket rate must be float"
+    assert _fetch_bucket._rate == _DOWNLOAD_RPS, (
+        f"Bucket rate {_fetch_bucket._rate} != _DOWNLOAD_RPS {_DOWNLOAD_RPS}"
     )
