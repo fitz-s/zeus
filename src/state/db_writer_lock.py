@@ -64,9 +64,10 @@ class WriteClass(str, enum.Enum):
     BULK = "bulk"
 
 
-# Six lock-file slots: 3 DBs × 2 classes (per plan §3.1.2).
+# Eight lock-file slots: 4 DBs × 2 classes (per plan §3.1.2 + K1 split 2026-05-11).
 # Lock files live alongside the DB they guard. The path layout matches the
 # plan ("state/<db>.writer-lock.{live,bulk}") relative to the DB directory.
+# K1 adds: state/zeus-forecasts.db.writer-lock.{live,bulk} (2 new slots).
 _LOCK_FILE_SUFFIX = {
     WriteClass.LIVE: ".writer-lock.live",
     WriteClass.BULK: ".writer-lock.bulk",
@@ -416,6 +417,7 @@ SUBPROCESS_NO_DB_ALLOWLIST: frozenset[tuple[str, int]] = frozenset()
 # cross-DB workloads.
 CROSS_DB_CANONICAL_ORDER: tuple[str, ...] = (
     "risk_state.db",
+    "zeus-forecasts.db",  # K1 split 2026-05-11: inserted alphabetically between risk_state and zeus-world
     "zeus-world.db",
     "zeus_trades.db",
 )
