@@ -591,6 +591,16 @@ def _fetch_one_step(
                 # disk/path errors during atomic rename or partial-file write
                 last_err = f"OS_{type(exc).__name__}_mirror_{mirror}"
                 break   # unexpected at filesystem layer; try next mirror
+            except ValueError as exc:
+                # SDK raises ValueError("Cannot find index entries matching ...")
+                # when the requested step is absent from the .index file
+                # (step not yet published). All mirrors sync from the same
+                # index — rotating won't help. PLAN v3 §5.1 expected HTTP 404
+                # here, but multiurl resolves the index BEFORE the byte-range
+                # GET, so a missing step manifests as ValueError, not HTTPError.
+                if "Cannot find index entries matching" in str(exc):
+                    return ("NOT_RELEASED", None)
+                raise   # Unknown ValueError — propagate
             # ImportError, AttributeError, TypeError, etc. propagate to the
             # ThreadPoolExecutor future; main thread surfaces them in logs.
             # Antibody 2026-05-11: silent-swallow of ModuleNotFoundError caused
