@@ -2459,17 +2459,37 @@ def _create_source_run(conn: sqlite3.Connection) -> None:
     """)
 
 
+_FORECAST_TABLES = (
+    "ensemble_snapshots_v2",
+    "source_run",
+    "observations",
+    "settlements",
+    "calibration_pairs_v2",
+    "settlements_v2",
+    "market_events_v2",
+)
+
+
 def init_schema_forecasts(conn: sqlite3.Connection) -> None:
     """Create all 7 forecast-class tables on zeus-forecasts.db. Idempotent.
 
+    Schema-replication strategy (Option A, 2026-05-11 schema-drift antibody):
+    Instead of maintaining parallel CREATE TABLE DDL that diverges from world.db
+    via ALTER TABLE migrations over time, we ATTACH world.db read-only and copy
+    its sqlite_master CREATE TABLE + CREATE INDEX statements directly.  This
+    guarantees byte-identical schema parity regardless of past or future ALTERs
+    applied to world.db.
+
+    Fresh-deploy fallback: if world.db does not exist yet (e.g., test env that
+    only bootstraps forecasts.db), we fall back to the static _create_*
+    helpers.  The fallback DDL must stay in sync manually; the ATTACH path is
+    the authoritative production path.
+
     Tables owned by this DB post-K1 migration:
-      settlements, observations, source_run  (from db.py)
-      settlements_v2, market_events_v2, ensemble_snapshots_v2,
-      calibration_pairs_v2  (from v2_schema.py)
+      ensemble_snapshots_v2, source_run, observations, settlements,
+      calibration_pairs_v2, settlements_v2, market_events_v2
 
     Sets PRAGMA user_version = SCHEMA_FORECASTS_VERSION as the final step.
-    Safe to call on an empty DB (fresh-deploy bootstrap) or on an existing DB
-    (idempotent: CREATE IF NOT EXISTS / duplicate-column suppression).
 
     K1 split 2026-05-11 — do NOT call init_schema() on the forecasts conn;
     that would create world-class tables on the wrong DB.
@@ -2477,25 +2497,65 @@ def init_schema_forecasts(conn: sqlite3.Connection) -> None:
     _busy_ms = int(os.environ.get("ZEUS_DB_BUSY_TIMEOUT_MS", "30000"))
     conn.execute(f"PRAGMA busy_timeout = {_busy_ms}")
 
-    # 3 legacy-origin forecast tables (previously in init_schema executescript)
-    _create_settlements(conn)
-    _create_observations(conn)
-    _create_source_run(conn)
+    world_path = str(ZEUS_WORLD_DB_PATH)
+    if ZEUS_WORLD_DB_PATH.exists():
+        # --- Production path: replicate schema from world.db sqlite_master ---
+        conn.execute(f"ATTACH DATABASE '{world_path}' AS world_src")
+        try:
+            for tbl in _FORECAST_TABLES:
+                row = conn.execute(
+                    "SELECT sql FROM world_src.sqlite_master"
+                    " WHERE type='table' AND name=?",
+                    (tbl,),
+                ).fetchone()
+                if row and row[0]:
+                    # sqlite_master sql is always "CREATE TABLE …"; make idempotent
+                    ddl = row[0].replace(
+                        "CREATE TABLE ", "CREATE TABLE IF NOT EXISTS ", 1
+                    )
+                    conn.execute(ddl)
 
-    # 4 v2 forecast tables (previously in apply_v2_schema)
-    from src.state.schema.v2_schema import (
-        _create_settlements_v2,
-        _create_market_events_v2,
-        _create_ensemble_snapshots_v2,
-        _create_calibration_pairs_v2,
-    )
-    _create_settlements_v2(conn)
-    _create_market_events_v2(conn)
-    _create_ensemble_snapshots_v2(conn)
-    _create_calibration_pairs_v2(conn)
+            for tbl in _FORECAST_TABLES:
+                for (sql,) in conn.execute(
+                    "SELECT sql FROM world_src.sqlite_master"
+                    " WHERE type='index' AND tbl_name=? AND sql IS NOT NULL",
+                    (tbl,),
+                ).fetchall():
+                    idx_ddl = sql.replace(
+                        "CREATE INDEX ", "CREATE INDEX IF NOT EXISTS ", 1
+                    ).replace(
+                        "CREATE UNIQUE INDEX ", "CREATE UNIQUE INDEX IF NOT EXISTS ", 1
+                    )
+                    conn.execute(idx_ddl)
+        finally:
+            conn.execute("DETACH DATABASE world_src")
+    else:
+        # --- Fresh-deploy fallback: static helpers (must stay in sync manually) ---
+        import logging as _logging
+        _logging.getLogger(__name__).warning(
+            "init_schema_forecasts: world.db not found at %s; "
+            "falling back to static DDL helpers.  Schema may drift from "
+            "production world.db if ALTER TABLE migrations were not applied.",
+            world_path,
+        )
+        _create_settlements(conn)
+        _create_observations(conn)
+        _create_source_run(conn)
+
+        from src.state.schema.v2_schema import (
+            _create_settlements_v2,
+            _create_market_events_v2,
+            _create_ensemble_snapshots_v2,
+            _create_calibration_pairs_v2,
+        )
+        _create_settlements_v2(conn)
+        _create_market_events_v2(conn)
+        _create_ensemble_snapshots_v2(conn)
+        _create_calibration_pairs_v2(conn)
 
     # Mark schema current — MUST be last (partial failure must not mark ready).
     conn.execute(f"PRAGMA user_version = {SCHEMA_FORECASTS_VERSION}")
+    conn.commit()
 
 
 def init_schema_world_only(conn: Optional[sqlite3.Connection] = None) -> None:
