@@ -2,16 +2,19 @@
 # Authority basis: docs/operations/task_2026-04-30_two_system_independence/design.md §5 Phase 1.5
 """Trading-side P&L resolver (Phase 1.5 harvester split).
 
-Reads world.settlements via get_world_connection() (read-only).
+Reads forecasts.settlements via get_forecasts_connection() (read-only).
 Writes trade.decision_log via store_settlement_records() and settles positions
 via _settle_positions() — both are trading-side operations.
 
 Design invariants:
-- Does NOT write to settlements, settlements_v2, market_events_v2, or any world table.
-- If world.settlements has no new rows, returns awaiting_truth_writer status.
+- Does NOT write to settlements, settlements_v2, market_events_v2, or any forecast table.
+- If forecasts.settlements has no new rows, returns awaiting_truth_writer status.
 - Feature-flagged: ZEUS_HARVESTER_LIVE_ENABLED must equal "1" or function is a no-op.
 - May import from src.execution.harvester (trading side, no circular reference).
 - Does NOT import from src.ingest_main or scripts.ingest.*.
+
+K1 (2026-05-11): settlements moved from zeus-world.db to zeus-forecasts.db.
+Callers pass get_forecasts_connection() as the second argument.
 """
 
 from __future__ import annotations
@@ -32,18 +35,19 @@ def _row_value(row, key: str, index: int, default=None):
         return default
 
 
-def resolve_pnl_for_settled_markets(trade_conn, world_conn) -> dict:
-    """Resolve P&L for markets that have been settled in world.settlements.
+def resolve_pnl_for_settled_markets(trade_conn, forecasts_conn) -> dict:
+    """Resolve P&L for markets that have been settled in forecasts.settlements.
 
-    Reads settled rows from world.settlements that have not yet been processed
+    Reads settled rows from forecasts.settlements that have not yet been processed
     by the trading side. Settles matching positions and writes decision_log rows.
 
     Parameters
     ----------
     trade_conn:
         Connection returned by get_trade_connection(). All trade-side writes go here.
-    world_conn:
-        Connection returned by get_world_connection(). Read-only access to settlements.
+    forecasts_conn:
+        Connection returned by get_forecasts_connection(). Read-only access to settlements.
+        K1 (2026-05-11): settlements moved from zeus-world.db to zeus-forecasts.db.
 
     Returns
     -------
@@ -65,7 +69,7 @@ def resolve_pnl_for_settled_markets(trade_conn, world_conn) -> dict:
 
     # Read settled rows from world.settlements (VERIFIED authority only).
     try:
-        rows = world_conn.execute(
+        rows = forecasts_conn.execute(
             """
             SELECT city, target_date, market_slug, winning_bin, temperature_metric,
                    authority, settlement_source, settlement_value
