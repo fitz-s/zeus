@@ -83,8 +83,12 @@ def get_connection():
         attached = {row[1] for row in conn.execute("PRAGMA database_list").fetchall()}
         if "world" not in attached:
             conn.execute("ATTACH DATABASE ? AS world", (str(ZEUS_WORLD_DB_PATH),))
+        # K1 (2026-05-11): ATTACH forecasts DB so evaluator cross-DB joins work.
+        if "forecasts" not in attached:
+            from src.state.db import ZEUS_FORECASTS_DB_PATH
+            conn.execute("ATTACH DATABASE ? AS forecasts", (str(ZEUS_FORECASTS_DB_PATH),))
     except sqlite3.OperationalError as exc:
-        logger.warning("ATTACH world failed (non-fatal): %r", exc)
+        logger.warning("ATTACH world/forecasts failed (non-fatal): %r", exc)
     return conn
 from src.state.decision_chain import CycleArtifact, MonitorResult, NoTradeCase, store_artifact
 from src.state.portfolio import (

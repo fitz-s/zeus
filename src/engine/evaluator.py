@@ -3800,6 +3800,17 @@ def _ensemble_snapshots_table(conn) -> str:
 
 
 def _ensemble_snapshots_v2_table(conn) -> str:
+    # K1 (2026-05-11): ensemble_snapshots_v2 moved to zeus-forecasts.db.
+    # Check forecasts schema first (post-migration), then world (pre-migration
+    # fallback), then unqualified (unit-test stubs without ATTACH).
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM forecasts.sqlite_master WHERE type = 'table' AND name = 'ensemble_snapshots_v2'"
+        ).fetchone()
+        if row is not None:
+            return "forecasts.ensemble_snapshots_v2"
+    except Exception:
+        pass
     try:
         row = conn.execute(
             "SELECT 1 FROM world.sqlite_master WHERE type = 'table' AND name = 'ensemble_snapshots_v2'"

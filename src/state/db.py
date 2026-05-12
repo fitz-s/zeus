@@ -206,6 +206,14 @@ def get_trade_connection_with_world(
             conn.execute("ATTACH DATABASE ? AS world", (str(ZEUS_WORLD_DB_PATH),))
         except sqlite3.OperationalError as exc:
             logger.warning("ATTACH world failed (non-fatal): %r", exc)
+    # K1 (2026-05-11): also ATTACH forecasts DB so cross-DB joins on
+    # ensemble_snapshots_v2 / settlements / settlements_v2 / market_events_v2
+    # remain possible from trade-conn query paths (evaluator, replay).
+    if "forecasts" not in attached:
+        try:
+            conn.execute("ATTACH DATABASE ? AS forecasts", (str(ZEUS_FORECASTS_DB_PATH),))
+        except sqlite3.OperationalError as exc:
+            logger.warning("ATTACH forecasts failed (non-fatal): %r", exc)
     return conn
 
 
