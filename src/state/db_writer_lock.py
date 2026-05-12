@@ -1,9 +1,11 @@
 # Created: 2026-05-07
-# Last reused/audited: 2026-05-07
+# Last reused or audited: 2026-05-12
 # Authority basis: .omc/plans/sqlite_contention_structural_design_v4_2026_05_07.md
 #                  §3.1 (mechanism), §3.1.2 (per-DB flock topology),
 #                  §3.1.5 (BulkChunker dual-channel watchdog),
 #                  §3.1.7 (subprocess helper).
+#                  architect K=3 structural decisions / AGENTS.md money path
+#                  (K3 2026-05-12: BulkChunker yields LIVE at chunk boundary).
 """SQLite writer-lock helpers — Phase 0 of v4 plan.
 
 Phase 0 lands the helper surface only. No production caller is migrated by
@@ -181,6 +183,7 @@ class BulkChunker:
     DEFAULT_CHUNK_MS = 50
     DEFAULT_CHUNK_ROWS = 2_000
     DEFAULT_WATCHDOG_S = 30
+    DEFAULT_LIVE_YIELD_SLEEP_S = 0.05
 
     def __init__(
         self,
@@ -191,6 +194,9 @@ class BulkChunker:
         chunk_rows: int = DEFAULT_CHUNK_ROWS,
         watchdog_s: int = DEFAULT_WATCHDOG_S,
         watchdog_poll_s: float = 1.0,
+        db_path: Path | None = None,
+        bulk_lock_fd: int | None = None,
+        live_yield_sleep_s: float = DEFAULT_LIVE_YIELD_SLEEP_S,
     ) -> None:
         self.conn = conn
         self.caller_module = caller_module
@@ -207,6 +213,15 @@ class BulkChunker:
         self._fence_started_at: float | None = None
         self._fence_label: str | None = None
         self._watchdog_thread: threading.Thread | None = None
+        # K3 2026-05-12: optional wiring so yield_if_live_contended() can
+        # detect a LIVE waiter and briefly release the bulk fcntl + commit
+        # the current SQLite chunk (the operative move that lets a LIVE
+        # BEGIN IMMEDIATE slot in instead of waiting for the whole bulk
+        # cycle). When db_path is None the chunker stays in Phase-0
+        # cooperative-only mode and is a no-op on this axis.
+        self._db_path = db_path
+        self._bulk_lock_fd = bulk_lock_fd
+        self._live_yield_sleep_s = live_yield_sleep_s
 
     # -- context-manager lifecycle (v4 MF5 §3.1.5) --
 
@@ -241,15 +256,107 @@ class BulkChunker:
         """Cooperative yield-point; main thread MUST call between chunks.
 
         Raises ``BulkChunkerNotPolledError`` if the watchdog has fired.
+
+        K3 (2026-05-12) — if ``db_path`` was supplied at construction, this
+        method probes the per-DB LIVE flock non-blocking. When a LIVE
+        caller is currently holding the LIVE lock (i.e. is mid-write or
+        about to ``BEGIN IMMEDIATE`` against the same SQLite file), the
+        BULK chunker:
+
+          1. ``commit_chunk()`` — release SQLite's engine-level write lock
+             (the operative move; without this, fcntl shuffling does not
+             help LIVE acquire the SQLite write lock).
+          2. release the bulk fcntl (if ``bulk_lock_fd`` provided) so
+             other BULK callers queued behind us can fair-share.
+          3. brief jitter sleep (``live_yield_sleep_s``) to let LIVE
+             complete its short transaction.
+          4. re-acquire the bulk fcntl in blocking mode.
+
+        Without ``db_path``/``bulk_lock_fd`` the method retains its Phase-0
+        cooperative-only watchdog behaviour (back-compatible).
         """
         self._raise_if_aborted()
         with self._lock:
             self._last_yield_at = time.monotonic()
         _cnt_inc("db_chunker_yield_check_total")
-        # NOTE: The actual "poll live flock; commit_chunk + release bulk
-        # flock if a LIVE caller is waiting" body is a Phase 1 retrofit
-        # (see plan §3.1, §5 step 1.x). Phase 0 lands only the watchdog
-        # cooperative-poll surface that callers MUST call.
+        if self._db_path is None:
+            return
+        if self._fence_active:
+            # Inside a cross-table fence, atomicity wins — never break the
+            # chunk mid-fence even if LIVE is contending.
+            return
+        if self._is_live_contended():
+            self._yield_to_live()
+
+    # -- K3 helpers --
+
+    def _is_live_contended(self) -> bool:
+        """Non-blocking probe of the LIVE fcntl. True iff a LIVE caller holds it."""
+        assert self._db_path is not None
+        live_lock_path = _lock_file_path(self._db_path, WriteClass.LIVE)
+        try:
+            live_fd = os.open(str(live_lock_path), os.O_RDWR | os.O_CREAT, 0o644)
+        except OSError:
+            return False
+        try:
+            try:
+                fcntl.flock(live_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                # LIVE is currently held — that's our "waiter / active LIVE
+                # work" signal. Treat as contention.
+                _cnt_inc("db_chunker_live_contended_total")
+                return True
+            # We got it; LIVE is idle. Release immediately.
+            try:
+                fcntl.flock(live_fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+            return False
+        finally:
+            try:
+                os.close(live_fd)
+            except OSError:
+                pass
+
+    def _yield_to_live(self) -> None:
+        """Release SQLite + bulk fcntl, sleep, re-acquire."""
+        # 1. Operative SQLite release.
+        self.commit_chunk()
+        # 2. Bulk fcntl yield (optional; only when caller provided fd).
+        bulk_fd = self._bulk_lock_fd
+        released = False
+        if bulk_fd is not None:
+            try:
+                fcntl.flock(bulk_fd, fcntl.LOCK_UN)
+                released = True
+            except OSError as unlock_exc:
+                logger.warning(
+                    "BulkChunker(%s) failed to release bulk fcntl for LIVE "
+                    "yield: %r",
+                    self.caller_module,
+                    unlock_exc,
+                )
+        _cnt_inc("db_chunker_live_yield_total")
+        # 3. Brief sleep so LIVE has room to acquire the SQLite write lock.
+        time.sleep(self._live_yield_sleep_s)
+        # 4. Re-acquire bulk fcntl (blocking) if we released it.
+        if released and bulk_fd is not None:
+            try:
+                fcntl.flock(bulk_fd, fcntl.LOCK_EX)
+            except OSError as relock_exc:
+                # If re-acquire fails the chunker is in an inconsistent
+                # state; raise so the BULK run aborts cleanly rather than
+                # silently continuing without the bulk lock held.
+                _cnt_inc("db_chunker_live_yield_relock_failed_total")
+                raise RuntimeError(
+                    f"BulkChunker({self.caller_module}) failed to re-acquire "
+                    f"bulk fcntl after LIVE yield: {relock_exc!r}"
+                ) from relock_exc
+        # Reset the watchdog clock — yielding to LIVE is the opposite of
+        # "stalled bulk work", and we don't want the watchdog to fire on
+        # the sleep we just performed.
+        with self._lock:
+            self._last_yield_at = time.monotonic()
 
     def commit_chunk(self) -> None:
         """Commit the current chunk and let a fresh TX open lazily.
@@ -329,6 +436,85 @@ class BulkChunker:
                     # Main thread is already in shutdown; harmless.
                     pass
                 return  # watchdog's job is done; exit thread.
+
+
+# --------------------------------------------------------------------------
+# K3 (2026-05-12) — convenience: bulk fcntl + chunker with LIVE-yield wiring
+# --------------------------------------------------------------------------
+
+
+@contextmanager
+def bulk_lock_with_chunker(
+    db_path: Path,
+    conn: Any,
+    *,
+    caller_module: str,
+    chunk_ms: int = BulkChunker.DEFAULT_CHUNK_MS,
+    chunk_rows: int = BulkChunker.DEFAULT_CHUNK_ROWS,
+    watchdog_s: int = BulkChunker.DEFAULT_WATCHDOG_S,
+    watchdog_poll_s: float = 1.0,
+    live_yield_sleep_s: float = BulkChunker.DEFAULT_LIVE_YIELD_SLEEP_S,
+) -> Iterator[BulkChunker]:
+    """Open the BULK fcntl + wrap a ``BulkChunker`` with LIVE-yield wiring.
+
+    This is the K3 (2026-05-12) entry point for BULK callers that want
+    cooperative LIVE-yield behaviour at chunk boundaries. The convenience
+    helper owns the fcntl FD and threads it through the chunker so the
+    chunker can release-then-reacquire the bulk fcntl when a LIVE writer
+    appears mid-cycle.
+
+    Compare to the older pattern::
+
+        with db_writer_lock(db_path, WriteClass.BULK):
+            with BulkChunker(conn, caller_module=...) as ch:
+                ...
+
+    which does NOT yield to LIVE (the fcntl FD is opaque to the chunker).
+
+    The new pattern::
+
+        with bulk_lock_with_chunker(db_path, conn, caller_module=...) as ch:
+            for batch in batches:
+                conn.executemany(...)
+                ch.yield_if_live_contended()
+                ch.commit_chunk()
+
+    Honors the same lifecycle guarantees as the underlying primitives
+    (watchdog thread joined on exit; bulk fcntl released on exit).
+    """
+    lock_path = _lock_file_path(db_path, WriteClass.BULK)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            chunker = BulkChunker(
+                conn,
+                caller_module=caller_module,
+                chunk_ms=chunk_ms,
+                chunk_rows=chunk_rows,
+                watchdog_s=watchdog_s,
+                watchdog_poll_s=watchdog_poll_s,
+                db_path=db_path,
+                bulk_lock_fd=fd,
+                live_yield_sleep_s=live_yield_sleep_s,
+            )
+            with chunker:
+                yield chunker
+        finally:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            except OSError as unlock_exc:
+                logger.warning(
+                    "bulk_lock_with_chunker unlock failed for %s: %r",
+                    lock_path,
+                    unlock_exc,
+                )
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
 
 
 # --------------------------------------------------------------------------
