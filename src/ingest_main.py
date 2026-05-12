@@ -1168,14 +1168,27 @@ def main() -> None:
         max_instances=1, coalesce=True, misfire_grace_time=None,
     )
 
-    # TIGGE boot-time catch-up — fires once at daemon start to fill missed days
-    # (capped at src.data.tigge_pipeline.MAX_LOOKBACK_DAYS).
-    _scheduler.add_job(
-        _tigge_startup_catch_up, "date",
-        run_date=_dt_now.now(),
-        id="ingest_tigge_startup_catch_up",
-        max_instances=1, coalesce=True, misfire_grace_time=None,
-    )
+    # TIGGE boot-time catch-up REMOVED 2026-05-11 (K1 structural fix per
+    # analyst aa28d70b8cceae626 + architect add8334a4c5803f11).
+    #
+    # Rationale: TIGGE feeds the Platt TRAINING set offline (rebuild + refit
+    # are operator-driven scripts, never daemon-driven). Live trading reads
+    # the pre-fit `platt_models_v2` table — never raw TIGGE snapshots
+    # (verified at src/engine/monitor_refresh.py:136 + src/calibration/store.py:690).
+    # Boot catch-up's only function was filling gaps in the 14:00 daily backfill.
+    #
+    # Cost: keeping it = 3-30 min × N daemon restarts/year of live-trading
+    # freshness loss while TIGGE holds db_writer_lock(WORLD_DB, BULK).
+    # Cost of removing: at most 7 T-2 issue dates missing per outage,
+    # recoverable via `python -m src.data.tigge_pipeline ... --target-date YYYY-MM-DD`
+    # operator backfill. The 14:00 daily cron (kept) advances the rolling edge.
+    #
+    # Empirical motivation: 2026-05-11 daemon restart wedged the open_ens 12Z
+    # cycle for 35+ min behind this catch-up's db_writer_lock hold.
+    #
+    # If future operator needs an immediate TIGGE backfill on boot, run the
+    # scheduled `_tigge_archive_backfill_cycle` manually or invoke
+    # `run_tigge_daily_cycle(target_date=...)` directly.
 
     # Open Data boot-time catch-up — fires once at daemon start so a fresh
     # ingest doesn't wait until the next 07:30 cron tick to backfill.
