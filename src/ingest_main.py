@@ -639,12 +639,12 @@ def _harvester_truth_writer_tick():
     """
     from src.data.dual_run_lock import acquire_lock
     from src.ingest.harvester_truth_writer import write_settlement_truth_for_open_markets
-    from src.state.db import get_world_connection
+    from src.state.db import get_forecasts_connection
     with acquire_lock("harvester_truth") as acquired:
         if not acquired:
             logger.info("ingest harvester_truth_writer_tick skipped_lock_held")
             return
-        conn = get_world_connection(write_class="bulk")
+        conn = get_forecasts_connection(write_class="bulk")
         try:
             result = write_settlement_truth_for_open_markets(conn)
         finally:
