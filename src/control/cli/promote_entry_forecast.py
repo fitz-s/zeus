@@ -1,5 +1,5 @@
 # Created: 2026-05-12
-# Last reused/audited: 2026-05-14
+# Last reused/audited: 2026-05-12
 # Authority basis: Operator CLI for write_promotion_evidence flow — replaces
 # hand-crafted Python invocations referenced in
 # src/control/entry_forecast_promotion_evidence_io.py:129 (write_promotion_evidence).
@@ -71,7 +71,6 @@ from src.data.live_entry_status import build_live_entry_forecast_status  # noqa:
 ROLLOUT_MODE_ENV = "ZEUS_ENTRY_FORECAST_ROLLOUT_MODE"
 LAUNCHD_LABEL = "com.zeus.live-trading"
 ARM_SCRIPT = "scripts/arm_live_mode.sh"
-SETTINGS_PATH = _PROJECT_ROOT / "config" / "settings.json"
 
 OPERATOR_APPROVAL_PATTERN = re.compile(r"^OPS-\d{4}-\d{2}-\d{2}-")
 
@@ -190,12 +189,9 @@ def _validate_propose_inputs(
             f"--operator-approval-id must match {OPERATOR_APPROVAL_PATTERN.pattern!r}; "
             f"got {operator_approval_id!r}"
         )
-    # Accept any non-empty string: documented identifiers like "g1-2026-05-14" or
-    # "g1-report-1" are valid; the persisted schema and rollout gate only require
-    # non-empty (entry_forecast_rollout.py:49).  File-path existence check removed
-    # per Codex review (PR #113 thread PRRC_kwDOR0ZtZc7BUf8f).
-    if not g1_evidence_id.strip():
-        errors.append(f"--g1-evidence-id must be a non-empty identifier; got {g1_evidence_id!r}")
+    g1_path = Path(g1_evidence_id)
+    if not g1_path.exists():
+        errors.append(f"--g1-evidence-id must be an existing file path; got {g1_evidence_id!r}")
     return errors
 
 
@@ -243,49 +239,15 @@ def cmd_propose(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 
 
-def _read_settings_rollout_mode(settings_path: Path) -> str | None:
-    """Return the on-disk entry_forecast.rollout_mode value, or None on any error."""
-    try:
-        data = json.loads(settings_path.read_text())
-        return data.get("entry_forecast", {}).get("rollout_mode")
-    except Exception:
-        return None
-
-
 def cmd_flip_mode(args: argparse.Namespace) -> int:
     target_mode = args.target_mode
     cfg = entry_forecast_config()
-    current_mode = cfg.rollout_mode.value  # may be env-overridden
+    current_mode = cfg.rollout_mode.value
     env_mode = os.environ.get(ROLLOUT_MODE_ENV)
-
-    settings_path = Path(args.settings_path) if args.settings_path else SETTINGS_PATH
-    ondisk_mode = _read_settings_rollout_mode(settings_path)
 
     print(f"=== flip-mode {current_mode!r} -> {target_mode!r} ===")
     print(f"  config rollout_mode  : {current_mode}")
     print(f"  {ROLLOUT_MODE_ENV}: {env_mode if env_mode is not None else '<unset>'}")
-    if ondisk_mode is not None:
-        print(f"  settings.json rollout_mode: {ondisk_mode!r}")
-
-    # Bug fix (Copilot thread 2): when env override is active, --commit rewrites
-    # settings.json from its on-disk value, not the env-overridden value. Surface
-    # the divergence and validate both transitions; refuse without --force.
-    if env_mode is not None and ondisk_mode is not None and env_mode != ondisk_mode:
-        print(
-            f"WARNING: env override ({env_mode!r}) differs from settings.json ({ondisk_mode!r}). "
-            f"--commit will rewrite settings.json {ondisk_mode!r} -> {target_mode!r}, "
-            f"NOT {env_mode!r} -> {target_mode!r}.",
-            file=sys.stderr,
-        )
-        # Also validate the on-disk transition, not just the env-overridden one.
-        ondisk_allowed = ALLOWED_TRANSITIONS.get(ondisk_mode, set())
-        if target_mode not in ondisk_allowed and not args.force:
-            print(
-                f"ERROR: settings.json transition {ondisk_mode!r} -> {target_mode!r} not allowed "
-                f"(allowed: {sorted(ondisk_allowed)}). Resolve env/settings divergence or use --force.",
-                file=sys.stderr,
-            )
-            return 2
 
     allowed = ALLOWED_TRANSITIONS.get(current_mode, set())
     if target_mode not in allowed and not args.force:
@@ -342,65 +304,7 @@ def cmd_flip_mode(args: argparse.Namespace) -> int:
     print(f"  # also update config/settings.json -> entry_forecast.rollout_mode = {target_mode!r}")
     print(f"  launchctl kickstart -k gui/$(id -u)/{LAUNCHD_LABEL}")
     print()
-
-    if args.commit:
-        rc = _rewrite_settings_rollout_mode(settings_path, target_mode)
-        if rc != 0:
-            return rc
-        # Bug fix (Copilot thread 1): _rewrite_settings_rollout_mode returns 0 on
-        # both actual write AND no-op (value already equals target_mode). Use the
-        # pre-read ondisk_mode to distinguish — print "WROTE" only when a real
-        # mutation occurred.
-        if ondisk_mode == target_mode:
-            # Already at target — no-op was already announced by _rewrite_settings_rollout_mode.
-            return 0
-        print(f"WROTE {settings_path} (entry_forecast.rollout_mode -> {target_mode!r})")
-        print(
-            f"REMINDER: env var + launchctl NOT touched. Run them manually if needed."
-        )
-        return 0
-
-    print(f"DRY-RUN: settings.json NOT modified. Re-run with --commit to write.")
-    print(f"NOTE: this CLI never execs launchctl or {ARM_SCRIPT}.")
-    return 0
-
-
-def _rewrite_settings_rollout_mode(settings_path: Path, target_mode: str) -> int:
-    """Atomically rewrite settings.json so entry_forecast.rollout_mode=target_mode.
-
-    Preserves all other keys + key ordering. Refuses to write if the file
-    does not parse, lacks ``entry_forecast``, or already has the target value
-    (no-op success).
-    """
-    if not settings_path.exists():
-        print(f"ERROR: settings file not found: {settings_path}", file=sys.stderr)
-        return 1
-    try:
-        raw = settings_path.read_text()
-        data = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        print(f"ERROR: settings.json invalid JSON ({exc}); refusing to write", file=sys.stderr)
-        return 1
-    if not isinstance(data, dict) or "entry_forecast" not in data:
-        print(
-            "ERROR: settings.json has no 'entry_forecast' block; refusing to write",
-            file=sys.stderr,
-        )
-        return 1
-    ef = data["entry_forecast"]
-    if not isinstance(ef, dict) or "rollout_mode" not in ef:
-        print(
-            "ERROR: settings.json entry_forecast has no 'rollout_mode'; refusing to write",
-            file=sys.stderr,
-        )
-        return 1
-    current = ef["rollout_mode"]
-    if current == target_mode:
-        print(f"NO-OP: settings.json entry_forecast.rollout_mode already {target_mode!r}")
-        return 0
-    ef["rollout_mode"] = target_mode
-    payload = json.dumps(data, indent=2) + "\n"
-    _atomic_write_text(settings_path, payload)
+    print(f"NOTE: this CLI does NOT exec these commands or {ARM_SCRIPT}. Run them manually.")
     return 0
 
 
@@ -528,7 +432,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Build promotion evidence from CLI flags + DB-derived status_snapshot.",
     )
     p_propose.add_argument("--operator-approval-id", required=True)
-    p_propose.add_argument("--g1-evidence-id", required=True, help="non-empty G1 evidence identifier (e.g. g1-2026-05-14, g1-report-1, or a file path)")
+    p_propose.add_argument("--g1-evidence-id", required=True, help="path to G1 evidence file")
     p_propose.add_argument("--canary-success-evidence-id", default=None)
     p_propose.add_argument(
         "--no-calibration-approved",
@@ -548,16 +452,6 @@ def build_parser() -> argparse.ArgumentParser:
     p_flip.add_argument("target_mode", choices=["shadow", "canary", "live"])
     p_flip.add_argument("--force", action="store_true", help="bypass transition / decision checks")
     p_flip.add_argument("--evidence-path", default=None, help="override evidence JSON path")
-    p_flip.add_argument(
-        "--commit",
-        action="store_true",
-        help="actually rewrite config/settings.json entry_forecast.rollout_mode (default dry-run)",
-    )
-    p_flip.add_argument(
-        "--settings-path",
-        default=None,
-        help="override settings.json path (for tests / staging dirs)",
-    )
     p_flip.set_defaults(func=cmd_flip_mode)
 
     # unarm
