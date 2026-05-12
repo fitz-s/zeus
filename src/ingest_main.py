@@ -1029,12 +1029,14 @@ def main() -> None:
     from src.data.proxy_health import bypass_dead_proxy_env_vars
     bypass_dead_proxy_env_vars()
 
-    # Schema init on world DB.
-    from src.state.db import init_schema, get_world_connection
+    # Schema currency check on world DB (boot-once discipline: ingest daemon
+    # owns world DB init via src/state/db.py:686; assert_schema_current fails
+    # loud if init_schema was not run, triggering launchd respawn).
+    from src.state.db import assert_schema_current, get_world_connection
     conn = get_world_connection(write_class="bulk")
-    init_schema(conn)
+    assert_schema_current(conn)
     conn.close()
-    logger.info("init_schema complete")
+    logger.info("assert_schema_current: world DB schema is current")
 
     # Write sentinel BEFORE scheduler.start() (design §4.2).
     _write_world_schema_ready_sentinel()
