@@ -476,6 +476,22 @@ def _startup_world_schema_ready_check() -> None:
     Mirrors _startup_freshness_check retry pattern (30 × 10s = 5 min).
     Fail-closed: raises SystemExit if sentinel absent after retries or written_at > 24h old.
     This is the Phase 2→Phase 3 enforcement promotion per architect audit A-2.
+
+    K1 split 2026-05-11: this function now delegates to _startup_db_schema_ready_check,
+    which checks BOTH world and forecasts sentinels. Kept for API compat; do not remove.
+    """
+    _startup_db_schema_ready_check()
+
+
+def _startup_db_schema_ready_check() -> None:
+    """K1 split 2026-05-11: wait for BOTH world_schema_ready + forecasts_schema_ready sentinels.
+
+    Replaces _startup_world_schema_ready_check (retained above as a thin shim for
+    call sites that haven't been updated yet). Both sentinels are written by the
+    ingest daemon's boot path (§5.7); either missing means ingest has not completed
+    its schema initialization for that DB class.
+
+    Retry pattern: 30 × 10s = 5 min (mirrors _startup_freshness_check).
     """
     import json
     import time
@@ -483,11 +499,18 @@ def _startup_world_schema_ready_check() -> None:
     from src.config import STATE_DIR
     from src.control.freshness_gate import BOOT_RETRY_INTERVAL_SECONDS, BOOT_RETRY_MAX_ATTEMPTS
 
-    sentinel_path = STATE_DIR / "world_schema_ready.json"
+    sentinels = [
+        (STATE_DIR / "world_schema_ready.json", "world"),
+        (STATE_DIR / "forecasts_schema_ready.json", "forecasts"),
+    ]
     max_age = timedelta(hours=24)
 
     for attempt in range(1, BOOT_RETRY_MAX_ATTEMPTS + 1):
-        if sentinel_path.exists():
+        missing = []
+        for sentinel_path, label in sentinels:
+            if not sentinel_path.exists():
+                missing.append(label)
+                continue
             try:
                 data = json.loads(sentinel_path.read_text())
                 written_at_str = data.get("written_at", "")
@@ -495,30 +518,34 @@ def _startup_world_schema_ready_check() -> None:
                 age = datetime.now(timezone.utc) - written_at
                 if age > max_age:
                     raise SystemExit(
-                        f"FATAL: world_schema_ready.json is {age.total_seconds()/3600:.1f}h old "
+                        f"FATAL: {sentinel_path.name} is {age.total_seconds()/3600:.1f}h old "
                         f"(max 24h). Is com.zeus.data-ingest running? "
                         f"Check: launchctl list com.zeus.data-ingest"
                     )
                 logger.info(
-                    "world_schema_ready sentinel OK: schema_version=%s written_at=%s",
-                    data.get("schema_version", "unknown"),
+                    "%s_schema_ready sentinel OK: written_at=%s",
+                    label,
                     written_at_str,
                 )
-                return
             except SystemExit:
                 raise
             except Exception as exc:
-                logger.warning("world_schema_ready sentinel parse error: %s — retrying", exc)
-                sentinel_path = STATE_DIR / "world_schema_ready.json"
+                logger.warning("%s_schema_ready sentinel parse error: %s — retrying", label, exc)
+                missing.append(label)
+
+        if not missing:
+            return  # Both sentinels valid.
+
         if attempt < BOOT_RETRY_MAX_ATTEMPTS:
             logger.info(
-                "world_schema_ready sentinel absent at boot — retry %d/%d in %ds",
-                attempt, BOOT_RETRY_MAX_ATTEMPTS, BOOT_RETRY_INTERVAL_SECONDS,
+                "DB schema sentinels missing=%s at boot — retry %d/%d in %ds",
+                missing, attempt, BOOT_RETRY_MAX_ATTEMPTS, BOOT_RETRY_INTERVAL_SECONDS,
             )
             time.sleep(BOOT_RETRY_INTERVAL_SECONDS)
 
     raise SystemExit(
-        "FATAL: ingest daemon must boot first; world_schema_ready sentinel not found within 5 min. "
+        "FATAL: ingest daemon must boot first; one or more DB schema sentinels not found "
+        "within 5 min (world_schema_ready.json + forecasts_schema_ready.json). "
         "Check: launchctl list com.zeus.data-ingest"
     )
 
