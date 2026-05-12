@@ -1029,14 +1029,20 @@ def main() -> None:
     from src.data.proxy_health import bypass_dead_proxy_env_vars
     bypass_dead_proxy_env_vars()
 
-    # Schema currency check on world DB (boot-once discipline: ingest daemon
-    # owns world DB init via src/state/db.py:686; assert_schema_current fails
-    # loud if init_schema was not run, triggering launchd respawn).
-    from src.state.db import assert_schema_current, get_world_connection
+    # World DB boot-once init (ingest daemon owns this — task #6 removed it
+    # from src/main.py:679-683; this is the ONLY caller that upgrades world DB
+    # to current SCHEMA_VERSION). init_schema runs all DDL + sets PRAGMA
+    # user_version = SCHEMA_VERSION at the end. Subsequent hot-path callers
+    # (ecmwf_open_data.py, hole_scanner.py) use assert_schema_current (≤1ms).
+    # Antibody 2026-05-11: PLAN R1 v2 incorrectly classified this as "boot-once
+    # duplicate"; it's actually the SOLE world-DB upgrade path. Reverted from
+    # assert_schema_current after launchd respawn crash loop (SchemaOutOfDateError).
+    from src.state.db import init_schema, get_world_connection
     conn = get_world_connection(write_class="bulk")
-    assert_schema_current(conn)
+    init_schema(conn)
+    conn.commit()
     conn.close()
-    logger.info("assert_schema_current: world DB schema is current")
+    logger.info("init_schema(world): boot-once upgrade complete")
 
     # Write sentinel BEFORE scheduler.start() (design §4.2).
     _write_world_schema_ready_sentinel()
