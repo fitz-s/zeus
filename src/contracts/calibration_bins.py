@@ -101,13 +101,25 @@ class UnitProvenanceError(Exception):
 _F_PLAUSIBLE_RANGE = (-50.0, 140.0)
 _C_PLAUSIBLE_RANGE = (-50.0, 55.0)
 
-# Maximum |median(members) - observation| tolerated at 24h–7d lead. Real
-# TIGGE 24h forecast error is ~2-5 °F / 1-3 °C; 7d lead is ~6-10 °F / 3-5 °C.
-# These thresholds are ~5× the 7d upper bound so they never false-positive
-# on genuine high-error days, but catch cross-unit contamination (°F
-# values written into a °C city produces offsets >30 °F worth).
-_F_VS_OBS_MAX_OFFSET = 40.0  # °F
-_C_VS_OBS_MAX_OFFSET = 22.0  # °C
+# Maximum |median(members) - observation| tolerated at 24h–7d lead.
+#
+# These tolerances are RELATIVE — `tol = max(floor, k * ensemble_spread)`.
+# Rationale:
+#   - Real TIGGE forecast misses on extreme-weather days (e.g. Helsinki
+#     2024-01-21: obs=-25 °C, member median=-2 °C, offset=22.6 °C — a
+#     VERIFIED Wunderground ICAO record of an arctic cold-snap that ECMWF
+#     missed) produce wide ensemble spread because the ensemble disagrees
+#     about whether the cold front passes. Spread → ~10-15 °C in such cases.
+#   - Cross-unit contamination produces a CONSTANT offset across all
+#     members, so spread stays normal (~3-8 °C) while offset is large.
+#   - Therefore: scale tolerance by ensemble spread (k=4×), with a low
+#     absolute floor that protects against narrow-spread contamination.
+#   - Absolute floor remains generous (10 °C / 18 °F) so 24h-1d typical
+#     forecasts (~1-3 °C / 2-5 °F error) never trip even with collapsed
+#     spread.
+_F_VS_OBS_MAX_OFFSET_FLOOR = 18.0       # °F absolute floor
+_C_VS_OBS_MAX_OFFSET_FLOOR = 10.0       # °C absolute floor
+_VS_OBS_SPREAD_MULTIPLIER = 4.0         # tol = max(floor, k * (max-min))
 
 
 @dataclass(frozen=True)
@@ -389,21 +401,25 @@ def validate_members_vs_observation(
 
     median = float(np.median(arr))
     offset = abs(median - float(observed_value))
+    spread = float(arr.max() - arr.min()) if arr.size > 1 else 0.0
     if city.settlement_unit == "F":
-        tol = _F_VS_OBS_MAX_OFFSET
+        floor = _F_VS_OBS_MAX_OFFSET_FLOOR
     elif city.settlement_unit == "C":
-        tol = _C_VS_OBS_MAX_OFFSET
+        floor = _C_VS_OBS_MAX_OFFSET_FLOOR
     else:
         raise UnitProvenanceError(
             f"City {city.name!r} has unknown settlement_unit "
             f"{city.settlement_unit!r}"
         )
+    tol = max(floor, _VS_OBS_SPREAD_MULTIPLIER * spread)
 
     if offset > tol:
         raise UnitProvenanceError(
             f"City {city.name!r}: member median={median:.2f} vs observation="
             f"{observed_value:.2f} offset={offset:.2f} {city.settlement_unit} "
-            f"exceeds tolerance {tol:.1f}. This is far outside any plausible "
+            f"exceeds tolerance {tol:.1f} (floor={floor:.1f}, "
+            f"spread={spread:.2f}, k={_VS_OBS_SPREAD_MULTIPLIER}). "
+            f"This is far outside any plausible "
             f"TIGGE forecast error at 24h-7d lead and strongly suggests "
             f"cross-unit contamination between members_json and the "
             f"observation's unit."
