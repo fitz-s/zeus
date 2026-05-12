@@ -395,6 +395,7 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         "src/ingest_main.py",           # RO: reads condition_id for UMA listener, no write
         "src/observability/status_summary.py",  # RO: status dashboard read-only
         "src/riskguard/discord_alerts.py",  # WRITE risk_state.db only; not in world-db BULK lock universe
+        "scripts/promote_calibration_v2_stage_to_prod.py",  # RO inspect/verify; RW only with --commit
     }
 )
 

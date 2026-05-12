@@ -496,6 +496,26 @@ scripts:
     required_tests: [tests/test_calibration_bins_canonical.py, tests/test_replay_time_provenance.py]
   rebuild_calibration_pairs_v2.py: {class: repair, dangerous_if_run: true, dry_run_default: true, apply_flag: "--db <isolated-staging-db> --no-dry-run --force", target_db: explicit_isolated_staging_db, read_targets: [state/zeus-world.db, explicit_isolated_staging_db], write_targets: [explicit_isolated_staging_db], unguarded_write_rationale: "Phase 7A metric-aware v2 rebuild; dry-run may inspect canonical world DB read-only, but write mode fails closed unless --db names an isolated staging DB and refuses canonical state/zeus-world.db.", promotion_barrier: "Isolated calibration_pairs_v2 output is not live calibration authority and cannot be promoted without separate operator-approved promotion evidence.", required_helpers: [".zeus/rebuild_lock.do_not_run_during_live (sentinel check at module load)", "scripts/rebuild_calibration_pairs_v2.py::_resolve_isolated_calibration_write_db_path"], required_tests: [tests/test_rebuild_live_sentinel.py, tests/test_sqlite_busy_timeout.py]}
   evaluate_calibration_transfer_oos.py: {class: repair, canonical_command: "python3 scripts/evaluate_calibration_transfer_oos.py --dry-run", dangerous_if_run: true, dry_run_default: true, apply_flag: "--no-dry-run", target_db: state/zeus-world.db, write_targets: [state/zeus-world.db], unguarded_write_rationale: "Writes validated_calibration_transfers evidence rows only with --no-dry-run; guarded by daemon-lock precondition but still mutates world DB.", promotion_barrier: "OOS evidence rows cannot authorize live calibration transfer without policy gate flag and operator review.", required_tests: [tests/test_evaluate_calibration_transfer_oos.py]}
+  promote_calibration_v2_stage_to_prod.py:
+    class: repair
+    status: active
+    lifecycle: long_lived
+    authority_scope: repair_write
+    reuse_when: "Promote calibration_pairs_v2 + platt_models_v2 from an isolated STAGE_DB into production state/zeus-world.db after rebuild_calibration_pairs_v2.py reports complete sentinels. Dry-run by default; --commit gated by sentinel completeness, schema-compatibility, STAGE rows>0, atomic gzipped backup, BEGIN IMMEDIATE, PRAGMA integrity_check, ROLLBACK on failure."
+    do_not_use_when: "Rebuild sentinels still in_progress; STAGE/PROD column sets diverge; STAGE has 0 rows for the requested data_versions; no operator-approved promotion evidence."
+    canonical_command: "python3 scripts/promote_calibration_v2_stage_to_prod.py {inspect|promote|verify} --stage-db PATH [--prod-db state/zeus-world.db] [--metrics CSV] [--include-pairs] [--null-snapshot-id] [--commit]"
+    dangerous_if_run: true
+    apply_flag: "--commit"
+    target_db: state/zeus-world.db
+    read_targets: [explicit_isolated_staging_db, state/zeus-world.db]
+    write_targets: [state/zeus-world.db]
+    dry_run_default: true
+    external_inputs: []
+    promotion_barrier: "--commit requires (a) sentinel-completeness for all requested metrics, (b) STAGE/PROD identical column sets, (c) STAGE rows>0 for tables being promoted, (d) atomic gzipped backup written to state/backups/ before any DELETE, (e) PRAGMA integrity_check==ok before COMMIT (else ROLLBACK)."
+    required_helpers: []
+    required_tests: [tests/test_promote_calibration_v2_stage_to_prod.py]
+    delete_policy: retain_until_superseded
+    unguarded_write_rationale: "PROD writes only inside --commit, under BEGIN IMMEDIATE with full rollback on any failure; backup is gzipped SQL dump; safety gates: --allow-incomplete and --allow-empty-stage explicit overrides."
   rebuild_settlements.py:
     class: repair
     module_owner: scripts
