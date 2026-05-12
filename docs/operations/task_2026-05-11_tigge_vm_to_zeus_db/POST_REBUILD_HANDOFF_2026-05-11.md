@@ -73,8 +73,8 @@ git merge --no-ff fix/calibration-tigge-opendata-bridge-2026-05-11
 | 2a | **CRITICAL — diagnose ECMWF open-data ingest leg.** Last `producer_readiness` row written 2026-05-04. Daemon `com.zeus.data-ingest` (PID `19635`) running but open-data branch silent 6+ days. TIGGE leg unaffected. | unknown | operator |
 | 2b | Trigger one fresh ECMWF open-data ingest cycle. This writes new `producer_readiness` rows (`expires_at` future) — clears both `PRODUCER_READINESS_EXPIRED` and `SOURCE_RUN_HORIZON_OUT_OF_RANGE` (HORIZON requires longer-step run; verify `--max-step` covers full required horizon) | one ECMWF cycle | operator |
 | 3 | Run `python scripts/live_readiness_check.py` from project root. Expect exit 0. Capture printed `g1_evidence_id` filename. | minutes | operator |
-| 4 | Hand-construct `write_promotion_evidence(...)` call in Python REPL or one-off script. **No CLI wrapper exists** — see `src/control/entry_forecast_promotion_evidence_io.py:129` for `EntryForecastPromotionEvidence` constructor. Required: `operator_approval_id`, `g1_evidence_id` (from step 3), `calibration_promotion_approved=True`, `canary_success_evidence_id`, `status_snapshot=build_live_entry_forecast_status(conn, config=cfg)`. | minutes | operator |
-| 5 | Set `EntryForecastConfig.rollout_mode=canary` env first, restart `com.zeus.live-trading` daemon (`launchctl kickstart -k gui/$(id -u)/com.zeus.live-trading`). Monitor canary. After success: capture `canary_success_evidence_id`, re-write evidence file with that field set, then flip env to `live` and restart again. | seconds + daemon restart | operator |
+| 4 | Use the new operator CLI (commit `4d661014`):<br>`python -m src.control.cli.promote_entry_forecast propose --operator-approval-id OPS-2026-MM-DD-NN --g1-evidence-id <path-from-step-3> [--canary-success-evidence-id ID] --commit`<br>Without `--commit` it dry-runs and prints proposed JSON for review. With `--commit` atomically writes `state/entry_forecast_promotion_evidence.json`. | minutes | operator |
+| 5 | Flip rollout mode in `config/settings.json` (canonical source — **NOT an env var**; `ZEUS_ENTRY_FORECAST_ROLLOUT_MODE` is not wired today). Use:<br>`python -m src.control.cli.promote_entry_forecast flip-mode canary` (dry-run; prints what to change + daemon kickstart command). Edit `config/settings.json` `entry_forecast.rollout_mode="canary"`, restart `launchctl kickstart -k gui/$(id -u)/com.zeus.live-trading`. After canary success: re-run `propose --commit` with `--canary-success-evidence-id`, then `flip-mode live` (CLI refuses without canary evidence). | seconds + daemon restart | operator |
 | 6 | Live-trading daemon's next evaluator tick (~30s cycle): reads fresh evidence (atomic-write inode rotation invalidates `lru_cache` per `entry_forecast_promotion_evidence_io.py:146-256`). `evaluate_entry_forecast_rollout_gate` returns `LIVE_ELIGIBLE`. Orders submit. | seconds | (auto) |
 
 ## TIME-WINDOW RISK
@@ -108,6 +108,8 @@ git merge --no-ff fix/calibration-tigge-opendata-bridge-2026-05-11
 - [scripts/rebuild_calibration_pairs_v2.py](scripts/rebuild_calibration_pairs_v2.py) — modified, committed in `dfbd36c5`
 - [src/calibration/manager.py](src/calibration/manager.py) — modified, committed in `cd93c1bd`
 - [tests/test_calibration_manager.py](tests/test_calibration_manager.py) — added, committed in `cd93c1bd`
+- [src/control/cli/promote_entry_forecast.py](src/control/cli/promote_entry_forecast.py) — operator CLI, committed in `4d661014`
+- [tests/test_promote_entry_forecast_cli.py](tests/test_promote_entry_forecast_cli.py) — committed in `4d661014` (8/8 pass)
 - [tmp/task6_v3_full_rebuild_2026_05_11.sh](tmp/task6_v3_full_rebuild_2026_05_11.sh) — rebuild orchestration script (gitignored)
 - [tmp/task6_v3_platt_refit_2026_05_11.sh](tmp/task6_v3_platt_refit_2026_05_11.sh) — refit orchestration script (gitignored)
 - This handoff doc
@@ -116,5 +118,6 @@ git merge --no-ff fix/calibration-tigge-opendata-bridge-2026-05-11
 
 - ECMWF open-data ingest leg root-cause (silent 6+ days)
 - STAGE_DB → production calibration promotion script
-- Operator CLI wrapper for `write_promotion_evidence` (currently hand-crafted Python)
+- ~~Operator CLI wrapper for `write_promotion_evidence`~~ ✅ done in `4d661014`
+- `ZEUS_ENTRY_FORECAST_ROLLOUT_MODE` env var is NOT wired today — `entry_forecast_config()` reads `config/settings.json` only. CLI prints the env var line as a hint AND a `# also update config/settings.json` reminder. If env override is wanted, requires change in `src/config.py:entry_forecast_config()`.
 - GCP refund opener — drafted at `~/.openclaw/ops/google_cloud_billing_refund_appeal_2026-05-11.md` but not sent
