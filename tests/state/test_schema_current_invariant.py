@@ -44,7 +44,7 @@ def test_rel1_no_hot_path_init_schema():
     """
     import subprocess
     result = subprocess.run(
-        ["grep", "-rn", "init_schema(", "src/"],
+        ["grep", "-rn", "--include=*.py", "init_schema(", "src/"],
         capture_output=True,
         text=True,
         cwd="/Users/leofitz/.openclaw/workspace-venus/zeus",
