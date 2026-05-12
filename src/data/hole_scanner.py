@@ -563,10 +563,10 @@ def main() -> int:
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
-    from src.state.db import get_world_connection, init_schema
+    from src.state.db import get_world_connection, assert_schema_current
 
     conn = get_world_connection()
-    init_schema(conn)
+    assert_schema_current(conn)
 
     if args.report:
         _cli_report(conn)
