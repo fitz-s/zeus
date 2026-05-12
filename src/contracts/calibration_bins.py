@@ -104,27 +104,41 @@ _C_PLAUSIBLE_RANGE = (-50.0, 55.0)
 # Maximum |median(members) - observation| tolerated at 24h–7d lead.
 #
 # These tolerances are RELATIVE — `tol = min(cap, max(floor, k * ensemble_spread))`.
-# Rationale:
-#   - Real TIGGE forecast misses on extreme-weather days (e.g. Helsinki
-#     2024-01-21: obs=-25 °C, member median=-2 °C, offset=22.6 °C — a
-#     VERIFIED Wunderground ICAO record of an arctic cold-snap that ECMWF
-#     missed) produce wide ensemble spread because the ensemble disagrees
-#     about whether the cold front passes. Spread → ~10-15 °C in such cases.
-#   - Cross-unit contamination produces a CONSTANT offset across all
-#     members, so spread stays normal (~3-8 °C) while offset is large.
-#   - Therefore: scale tolerance by ensemble spread (k=4×), with a low
-#     absolute floor that protects against narrow-spread contamination.
-#   - Absolute floor remains generous (10 °C / 18 °F) so 24h-1d typical
-#     forecasts (~1-3 °C / 2-5 °F error) never trip even with collapsed
-#     spread.
-#   - Absolute CAP closes the wide-spread cross-unit leak: e.g. °C members
-#     [0,10,20,30,40] in an °F city against obs=75 °F have spread=40 and
-#     offset=55; without a cap, k*spread=160 would let it through.
-#     Real arctic misses observed in Helsinki/Moscow/Toronto 2024-2026
-#     have offset ≤ ~26 °C / ~47 °F. Cap of 28 °C / 50 °F leaves margin
-#     while still rejecting contamination cases.
-_F_VS_OBS_MAX_OFFSET_FLOOR = 18.0       # °F absolute floor
-_C_VS_OBS_MAX_OFFSET_FLOOR = 10.0       # °C absolute floor
+#
+# 2026-05-12 floor revision (post-c8bb645a / post-Codex-P1 #111 empirical review):
+#   The c8bb645a relative-tolerance fix assumed real cold-snap misses
+#   produce WIDE ensemble spread (so `k * spread` dominates the floor).
+#   Production rebuild on 2026-05-12 (PR #111 follow-up) disproved that
+#   assumption: real confident-wrong arctic / extreme-cold misses have
+#   NARROW spread (1.5–2.5 °C) because the ensemble is confidently warm
+#   and reality is suddenly cold. The floor must therefore be wide enough
+#   to admit these confident-wrong cases on its own. Empirical rejects:
+#     Helsinki/2024-01-21:  offset=22.64 °C, spread=1.85 °C (arctic snap)
+#     Munich/2026-01-12:    offset=10.89 °C, spread=2.07 °C
+#     Moscow/2024-01-14:    offset=11.96 °C, spread=1.51 °C
+#     London/2025-01-05:    offset=10.02 °C, spread=1.76 °C
+#     Helsinki/2026-01-06:  offset=13.07 °C, spread=2.64 °C
+#     Houston/2026-04-23:   offset=33.62 °F, spread=1.53 °F (April cold front)
+#     Denver/2024-03-19:    offset=18.55 °F, spread=3.90 °F
+#
+# Trade-off: bumping floors weakens unit-error detection sensitivity, but
+# canonical unit confusion still produces large offsets:
+#   - °C-in-°F city (e.g. 20 °C interpreted as 20 °F vs obs 70 °F): ~50 °F offset
+#   - °F-in-°C city (e.g. 70 °F interpreted as 70 °C vs obs 20 °C): ~50 °C offset
+# So 25 °C / 40 °F floors still catch canonical unit errors with margin.
+#
+# The absolute CAP (Codex P1 #111) closes the wide-spread cross-unit leak:
+# °C members [0,10,20,30,40] in an °F city against obs=75 °F have spread=40
+# and offset=55; without a cap, k*spread=160 would let it through. With
+# cap = 50 °F (28 °C), tol stays bounded and contamination is rejected.
+# floor ≤ cap invariant: 25 ≤ 28 (°C), 40 ≤ 50 (°F).
+#
+# True structural fix (deferred): newtype `Celsius`/`Fahrenheit` so unit
+# mixing is a TypeError at construction. Until then, this validator is a
+# best-effort runtime guard that intentionally errs on the side of
+# admitting extreme-weather data over false-positive unit rejection.
+_F_VS_OBS_MAX_OFFSET_FLOOR = 40.0       # °F absolute floor (was 18 pre-2026-05-12)
+_C_VS_OBS_MAX_OFFSET_FLOOR = 25.0       # °C absolute floor (was 10 pre-2026-05-12)
 _F_VS_OBS_MAX_OFFSET_CAP = 50.0         # °F absolute upper cap (Codex P1 #111)
 _C_VS_OBS_MAX_OFFSET_CAP = 28.0         # °C absolute upper cap (Codex P1 #111)
 _VS_OBS_SPREAD_MULTIPLIER = 4.0         # tol = min(cap, max(floor, k * (max-min)))

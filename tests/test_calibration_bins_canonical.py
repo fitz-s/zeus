@@ -731,15 +731,18 @@ def test_R12b_obs_anchor_allows_arctic_cold_snap_miss():
     would pass — typical ensemble behaviour for arctic cold-snap misses.
 
     The earlier flat 22 °C tolerance false-positively rejected this real
-    extreme-weather day. The relative tolerance (k=4 × ensemble spread,
-    floor=10 °C) accepts it because the ensemble spread is wide.
+    extreme-weather day. The 2026-05-12 floor revision (C floor 10 → 25)
+    accepts it directly via the floor — earlier wide-spread justification
+    proved empirically wrong (real cold-snap misses have NARROW spread,
+    not wide; see calibration_bins.py docstring).
 
     See ``logs/...task6_v3_full_rebuild_*.log`` for the original failure
     that motivated this regression test.
     """
     # Members that disagree about the cold-front passage (-12..+5 °C, spread=17)
     members_arctic_miss = np.array([-12.0, -8.0, -2.0, 1.0, 5.0])
-    # k × spread = 4 × 17 = 68 °C (capped at 28); offset = |-2 - (-25)| = 23 °C → must PASS
+    # k × spread = 4 × 17 = 68 °C; tol = min(28, max(25, 68)) = 28 °C;
+    # offset = |-2 - (-25)| = 23 °C → 23 < 28 → must PASS
     validate_members_vs_observation(members_arctic_miss, HELSINKI_C, -25.0)
 
 
@@ -749,12 +752,58 @@ def test_R12b_obs_anchor_caps_wide_spread_against_cross_unit_leak():
 
     Scenario: °C-valued members [0, 10, 20, 30, 40] mistakenly passed in
     for an °F city with obs=75 °F. spread=40, median=20, offset=55.
-    Without the absolute cap, tol = max(18, 4*40) = 160 → PASS (BAD).
+    Without the absolute cap, tol = max(40, 4*40) = 160 → PASS (BAD).
     With cap = 50 °F, tol = min(50, 160) = 50 → REJECT (correct).
     """
     c_values_in_f_city = np.array([0.0, 10.0, 20.0, 30.0, 40.0])  # °C in °F slot
     with pytest.raises(UnitProvenanceError, match=r"exceeds tolerance"):
         validate_members_vs_observation(c_values_in_f_city, NYC_F, 75.0)
+
+
+def test_R12b_obs_anchor_allows_confident_wrong_cold_snap_2026_05_12():
+    """Regression for 2026-05-12 LOW rebuild failure: empirical production
+    rejects had NARROW ensemble spread (1.5–2.5 °C) with confidently-wrong
+    forecasts on extreme-cold days. The original wide-spread assumption in
+    ``validate_members_vs_observation`` (relative-tolerance k=4×spread)
+    failed because k * 1.85 = 7.4 °C did not exceed the old 10 °C floor.
+
+    The 2026-05-12 floor revision (C floor 25 °C / F floor 40 °F) admits
+    these without weakening canonical unit-error detection (which produces
+    >50 °C / >50 °F offsets).
+
+    Cases reproduced from the production failure log:
+        Helsinki/2024-01-21:  members≈-2 ± narrow, obs=-25, offset=22.6 °C
+        Helsinki/2026-01-06:  members≈-7.9 ± narrow, obs=-21, offset=13.1 °C
+        Munich/2026-01-12:    members≈-2.1 ± narrow, obs=-13, offset=10.9 °C
+        Houston/2026-04-23:   members≈70.6 ± narrow, obs=37, offset=33.6 °F
+    """
+    # Helsinki: tight cluster around -2 °C (spread ~1.85), obs -25 °C
+    helsinki_members = np.array([-3.0, -2.5, -2.0, -1.5, -1.15])
+    validate_members_vs_observation(helsinki_members, HELSINKI_C, -25.0)
+
+    # Munich-like (PARIS_C as generic °C city): cluster near -2 °C, obs -13 °C
+    munich_members = np.array([-3.0, -2.5, -2.1, -1.7, -1.0])
+    validate_members_vs_observation(munich_members, PARIS_C, -13.0)
+
+    # Houston (°F city): cluster near 70 °F, obs 37 °F (April cold front)
+    houston_members = np.array([69.85, 70.3, 70.62, 70.95, 71.4])
+    validate_members_vs_observation(houston_members, NYC_F, 37.0)
+
+
+def test_R12b_obs_anchor_still_rejects_canonical_unit_errors_post_2026_05_12():
+    """Confirms the bumped floors (C 25 / F 40) still catch canonical unit
+    errors. Both directions must reject."""
+    # °C values (15-25) shipped into a °F city with obs=75 °F → offset ~55 °F
+    # under new floor 40 °F, cap 50 °F → tol=40 → still REJECT
+    c_in_f = np.array([15.0, 18.0, 22.0, 20.0, 17.0])
+    with pytest.raises(UnitProvenanceError, match=r"exceeds tolerance"):
+        validate_members_vs_observation(c_in_f, NYC_F, 75.0)
+
+    # °F values (65-75) shipped into a °C city with obs=20 °C → offset ~50 °C
+    # under new floor 25 °C, cap 28 °C → tol=28 → still REJECT
+    f_in_c = np.array([65.0, 70.0, 75.0, 68.0, 72.0])
+    with pytest.raises(UnitProvenanceError, match=r"exceeds tolerance"):
+        validate_members_vs_observation(f_in_c, HELSINKI_C, 20.0)
 
 
 # ---------------------------------------------------------------------------
