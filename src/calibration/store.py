@@ -19,7 +19,6 @@ from typing import TYPE_CHECKING, Literal, Optional
 import numpy as np
 
 from src.architecture.decorators import capability, protects
-from src.state.db import get_world_connection
 from src.state.schema_introspection import has_columns
 
 if TYPE_CHECKING:
@@ -225,6 +224,7 @@ def _resolve_training_allowed(source: str, data_version: str, requested: bool) -
     return requested
 
 
+@capability("calibration_rebuild")
 def add_calibration_pair_v2(
     conn: sqlite3.Connection,
     city: str,
