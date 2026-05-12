@@ -293,6 +293,10 @@ def _create_calibration_pairs_v2(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_calibration_pairs_v2_city_date_metric
             ON calibration_pairs_v2(city, target_date, temperature_metric)
     """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_calibration_pairs_v2_refit_core
+            ON calibration_pairs_v2(temperature_metric, data_version, training_allowed, authority)
+    """)
 
 
 def apply_v2_schema(conn: sqlite3.Connection, *, forecast_tables: bool = True) -> None:

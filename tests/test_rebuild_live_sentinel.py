@@ -298,16 +298,23 @@ def test_rebuild_write_mode_without_isolated_db_fails_before_connect(rebuild_mod
 
 
 def test_rebuild_write_mode_with_isolated_db_reaches_existing_write_seam(rebuild_mod, tmp_path):
-    """An explicit isolated DB may use the existing write path under the bulk lock."""
+    """An explicit isolated DB may use the existing write path under the bulk lock.
+
+    K3 retrofit (2026-05-12): rebuild_calibration_pairs_v2 now wraps its
+    write path in ``bulk_lock_with_chunker(...)`` (cooperative LIVE-yield)
+    rather than the bare ``db_writer_lock(BULK)`` context. The lock-seam
+    invariant is unchanged (BULK fcntl held during the write path); only
+    the helper symbol moved.
+    """
     isolated = tmp_path / "calibration_pairs_stage.db"
     mock_conn = MagicMock(spec=sqlite3.Connection)
     lock_calls = []
 
-    def fake_lock(path, write_class):
+    def fake_bulk_lock_with_chunker(path, conn, *, caller_module, **kwargs):
         @contextmanager
         def _cm():
-            lock_calls.append((Path(path), write_class))
-            yield
+            lock_calls.append((Path(path), caller_module))
+            yield MagicMock(name="BulkChunker")
 
         return _cm()
 
@@ -324,7 +331,11 @@ def test_rebuild_write_mode_with_isolated_db_reaches_existing_write_seam(rebuild
             ],
         ),
         patch.object(rebuild_mod, "_assert_rebuild_preflight_ready", return_value=None),
-        patch.object(rebuild_mod, "db_writer_lock", side_effect=fake_lock),
+        patch.object(
+            rebuild_mod,
+            "bulk_lock_with_chunker",
+            side_effect=fake_bulk_lock_with_chunker,
+        ),
         patch("sqlite3.connect", return_value=mock_conn) as connect,
         patch.object(rebuild_mod, "init_schema", return_value=None),
         patch.object(rebuild_mod, "apply_v2_schema", return_value=None),
@@ -337,7 +348,9 @@ def test_rebuild_write_mode_with_isolated_db_reaches_existing_write_seam(rebuild
         assert rebuild_mod.main() == 0
 
     connect.assert_called_once_with(isolated.resolve())
-    assert lock_calls == [(isolated.resolve(), rebuild_mod.WriteClass.BULK)]
+    assert lock_calls == [
+        (isolated.resolve(), "scripts.rebuild_calibration_pairs_v2"),
+    ]
 
 
 def test_refit_write_target_guard_rejects_default_and_shared_world(tmp_path):
