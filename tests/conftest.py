@@ -264,6 +264,10 @@ _WLA_SQLITE_CONNECT_ALLOWLIST = frozenset({
 
     # --- K1 forecast DB split migration script (2026-05-11) ---
     "scripts/migrate_world_to_forecasts.py",         # k1_migration: operator-mediated bulk copy to zeus-forecasts.db; not runtime daemon
+
+    # --- K1 workload-class split promotion scripts (2026-05-12; PR #112 Option (c)) ---
+    "scripts/promote_platt_models_v2.py",            # operator-mediated STAGE->PROD; RW only with --commit (zeus-world.db); BEGIN IMMEDIATE + rollback
+    "scripts/promote_calibration_pairs_v2.py",       # operator-mediated STAGE->PROD; RW only with --commit (zeus-forecasts.db); BEGIN IMMEDIATE + rollback
 })
 
 
