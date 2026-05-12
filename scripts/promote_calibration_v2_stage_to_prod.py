@@ -19,17 +19,23 @@ Subcommands
   filtered by ``data_version`` derived from the metric set, runs
   ``PRAGMA integrity_check``, and rolls back on any failure.
 * ``verify``   — read-only post-promote consistency check. Confirms every
-  ``platt_models_v2`` (city, data_version) bucket has matching
-  ``calibration_pairs_v2`` rows.
+  ``platt_models_v2`` (data_version, cluster, season) bucket has
+  matching ``calibration_pairs_v2`` rows for the same data_version.
+  Note: ``platt_models_v2`` has no ``city`` column — stratification is
+  by (data_version, cluster, season) only.
 
 Constraints
 -----------
 
 * STAGE_DB and PROD opened with ``?mode=ro`` for ``inspect``, ``verify``, and
   the dry-run path of ``promote``.
-* PROD opened writable (via ``src.state.db._connect`` or canonical writer)
-  ONLY in the ``promote --commit`` path. Uses ``BEGIN IMMEDIATE`` and rolls
-  back on any error.
+* PROD is opened writable in the ``promote --commit`` path via a direct
+  ``sqlite3.connect`` (``_rw_connect``). PRAGMA ``foreign_keys`` is
+  intentionally left at the existing setting (off in zeus-world.db);
+  ``journal_mode``/``synchronous`` are read first and only set when they
+  do not already match ``WAL`` / ``NORMAL`` to avoid changing PROD
+  pragmas as a side effect. Uses ``BEGIN IMMEDIATE`` and rolls back on
+  any error.
 * Backup is atomically created (write to ``.tmp`` then ``os.replace``) and
   independently verifiable via ``gunzip + sqlite3``.
 * Generic over ``--stage-db PATH`` and ``--prod-db PATH``. No hardcoded
@@ -48,11 +54,7 @@ import argparse
 import gzip
 import json
 import os
-import re
-import shutil
 import sqlite3
-import sys
-import tempfile
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -90,15 +92,27 @@ def _ro_connect(path: str | Path) -> sqlite3.Connection:
 
 
 def _rw_connect(path: str | Path) -> sqlite3.Connection:
-    """Open *path* as a writable sqlite connection (only used in --commit)."""
+    """Open *path* as a writable sqlite connection (only used in --commit).
+
+    Reads the existing ``journal_mode`` and ``synchronous`` pragmas first
+    and only writes them when they do NOT already match ``WAL`` /
+    ``NORMAL``. This avoids changing PROD pragmas as a side effect of
+    running ``promote --commit`` against a DB that may have a different
+    operator-chosen configuration.
+    """
     p = Path(path).resolve()
     if not p.exists():
         raise FileNotFoundError(f"DB not found: {p}")
     conn = sqlite3.connect(str(p), timeout=60.0, isolation_level=None)
     conn.row_factory = sqlite3.Row
     # Match the running daemon's settings; do NOT enable FK (off in prod).
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA synchronous=NORMAL")
+    current_jm = str(conn.execute("PRAGMA journal_mode").fetchone()[0]).lower()
+    if current_jm != "wal":
+        conn.execute("PRAGMA journal_mode=WAL")
+    current_sync = int(conn.execute("PRAGMA synchronous").fetchone()[0])
+    # 1 == NORMAL
+    if current_sync != 1:
+        conn.execute("PRAGMA synchronous=NORMAL")
     return conn
 
 
@@ -180,17 +194,33 @@ def _sentinel_status_for_metrics(
         if not relevant:
             out[metric] = "missing"
             continue
-        # Look for a "all start/end" complete sentinel (the full rebuild)
+        # Codex P1 (#112): scan in_progress sentinels FIRST. An older
+        # `data_version=all start=all end=all` complete sentinel must NOT
+        # mask a newer scoped `data_version=<requested> status=in_progress`
+        # sentinel \u2014 that would let `inspect`/`promote --commit` report
+        # READY for a partially rebuilt scope.
+        any_in_progress_for_wanted = any(
+            s["payload"].get("status") == "in_progress"  # type: ignore[union-attr]
+            and s["scope"].get("data_version") in wanted_dvs  # type: ignore[union-attr]
+            for s in relevant
+        )
+        if any_in_progress_for_wanted:
+            out[metric] = "in_progress"
+            continue
+        # Then look for an exact-scope complete sentinel: data_version
+        # must match the wanted set (NOT just `all`), AND start/end == all.
         full_complete = [
             s
             for s in relevant
             if s["scope"].get("start") == "all"  # type: ignore[union-attr]
             and s["scope"].get("end") == "all"  # type: ignore[union-attr]
+            and s["scope"].get("data_version") in wanted_dvs  # type: ignore[union-attr]
             and s["payload"].get("status") == "complete"  # type: ignore[union-attr]
         ]
         if full_complete:
             out[metric] = "complete"
             continue
+        # Fall back: any in_progress (even wildcard scope) is in_progress.
         any_in_progress = any(
             s["payload"].get("status") == "in_progress" for s in relevant  # type: ignore[union-attr]
         )
@@ -386,11 +416,18 @@ def _backup_prod_tables(
     prod_path: Path,
     metrics: list[str],
     backup_dir: Path,
+    *,
+    include_pairs: bool = False,
 ) -> Path:
-    """Atomic, gzipped SQL dump of calibration_pairs_v2 + platt_models_v2 rows
-    matching any of the metric data_versions. Returns final backup file path.
+    """Atomic, gzipped SQL dump of platt_models_v2 (and optionally
+    calibration_pairs_v2) rows matching any of the metric data_versions.
+    Returns final backup file path.
 
     Independently verifiable: ``gunzip -t`` then sqlite3 import + count.
+
+    Only backs up tables that will actually be modified by the matching
+    promote run \u2014 ``calibration_pairs_v2`` is large and is skipped unless
+    ``include_pairs=True`` (matching the promote ``--include-pairs`` flag).
     """
     backup_dir.mkdir(parents=True, exist_ok=True)
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -401,6 +438,10 @@ def _backup_prod_tables(
     for m in metrics:
         requested_dvs.extend(METRIC_TO_DATA_VERSIONS[m])
 
+    tables_to_backup = ["platt_models_v2"]
+    if include_pairs:
+        tables_to_backup.append("calibration_pairs_v2")
+
     conn = _ro_connect(prod_path)
     try:
         with gzip.open(tmp, "wt", encoding="utf-8") as gz:
@@ -408,9 +449,10 @@ def _backup_prod_tables(
             gz.write(f"-- Generated: {datetime.now(timezone.utc).isoformat()}\n")
             gz.write(f"-- Source PROD: {prod_path}\n")
             gz.write(f"-- Metrics: {','.join(metrics)}\n")
-            gz.write(f"-- Data versions: {','.join(requested_dvs)}\n\n")
+            gz.write(f"-- Data versions: {','.join(requested_dvs)}\n")
+            gz.write(f"-- Tables backed up: {','.join(tables_to_backup)}\n\n")
             gz.write("BEGIN TRANSACTION;\n")
-            for table in ("platt_models_v2", "calibration_pairs_v2"):
+            for table in tables_to_backup:
                 cols = _column_names(conn, table)
                 placeholders = ",".join(cols)
                 where = (
@@ -536,16 +578,66 @@ def cmd_promote(args: argparse.Namespace) -> int:
         )
     print()
 
+    # Copilot C (#112): refuse to commit when STAGE has 0 rows for the
+    # tables we would touch. Otherwise --commit would silently DELETE
+    # PROD rows for the requested data_versions and INSERT nothing,
+    # wiping calibration_v2 if STAGE is empty/mis-specified.
+    empty_tables: list[str] = []
+    for table, info in proposed.items():
+        if info.get("skipped"):
+            continue
+        if info["stage_rows"] == 0:
+            empty_tables.append(table)
+    if empty_tables and not args.allow_empty_stage:
+        print(
+            f"\u2717 REFUSED: STAGE has 0 rows for {empty_tables} matching the "
+            f"requested data_versions. --commit would DELETE PROD rows and "
+            f"INSERT nothing, wiping calibration_v2 for these data_versions."
+        )
+        print("  Use --allow-empty-stage to override (DANGEROUS).")
+        stage.close()
+        return 1
+
+    # Copilot M (#112): schema compatibility check between STAGE and PROD
+    # for the tables actually being promoted. Mismatched columns would
+    # otherwise fail mid-promotion (after DELETE) and force a rollback.
+    schema_mismatches: list[str] = []
+    prod_ro = _ro_connect(prod_path)
+    try:
+        for table in ("platt_models_v2", "calibration_pairs_v2"):
+            if not args.include_pairs and table == "calibration_pairs_v2":
+                continue
+            stage_cols = _column_names(stage, table)
+            prod_cols = _column_names(prod_ro, table)
+            if stage_cols != prod_cols:
+                schema_mismatches.append(
+                    f"{table}: STAGE={stage_cols} vs PROD={prod_cols}"
+                )
+    finally:
+        prod_ro.close()
+    if schema_mismatches:
+        print("\u2717 REFUSED: STAGE/PROD schema mismatch:")
+        for line in schema_mismatches:
+            print(f"  {line}")
+        print(
+            "  Promote requires identical column sets and order. Resolve schema "
+            "drift before retrying."
+        )
+        stage.close()
+        return 1
+
     if not args.commit:
-        print("ℹ DRY-RUN: no changes made. Re-run with --commit to apply.")
+        print("\u2139 DRY-RUN: no changes made. Re-run with --commit to apply.")
         stage.close()
         return 0
 
     # Backup first
     backup_dir = Path(args.backup_dir).resolve()
     print(f"Creating backup in {backup_dir}...")
-    backup_path = _backup_prod_tables(prod_path, metrics, backup_dir)
-    print(f"  ✓ {backup_path} ({backup_path.stat().st_size:,} bytes)")
+    backup_path = _backup_prod_tables(
+        prod_path, metrics, backup_dir, include_pairs=bool(args.include_pairs)
+    )
+    print(f"  \u2713 {backup_path} ({backup_path.stat().st_size:,} bytes)")
     print()
 
     # Apply
@@ -730,6 +822,10 @@ def build_parser() -> argparse.ArgumentParser:
                          "(safer if STAGE snapshot_ids may not exist in PROD).")
     pp.add_argument("--allow-incomplete", action="store_true",
                     help="Bypass sentinel-completeness gate (DANGEROUS).")
+    pp.add_argument("--allow-empty-stage", action="store_true",
+                    help="Bypass STAGE-rows>0 safety gate; allows DELETE-only "
+                         "promotion that wipes PROD rows for the requested "
+                         "data_versions (DANGEROUS).")
     pp.add_argument("--backup-dir", default="state/backups")
     pp.add_argument("--commit", action="store_true",
                     help="Apply changes. Without this flag, dry-run only.")

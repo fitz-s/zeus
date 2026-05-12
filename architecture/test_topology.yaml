@@ -91,6 +91,7 @@ test_trust_policy:
     tests/test_backtest_settlement_value_outcome.py: {created: "2026-04-25", last_used: "2026-04-25"}
     tests/test_bug100_k1_k2_structural.py: {created: "2026-04-21", last_used: "2026-04-21"}
     tests/test_calibration_bins_canonical.py: {created: "2026-04-14", last_used: "2026-04-23"}
+    tests/test_promote_calibration_v2_stage_to_prod.py: {created: "2026-05-12", last_used: "2026-05-12"}
     tests/test_canonical_position_current_schema_alignment.py: {created: "2026-04-23", last_used: "2026-04-23"}
     tests/test_center_buy_repair.py: {created: "2026-04-29", last_used: "2026-04-29"}
     tests/test_cross_module_invariants.py: {created: "2026-03-30", last_used: "2026-04-23"}

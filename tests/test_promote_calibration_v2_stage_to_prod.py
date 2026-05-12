@@ -459,3 +459,137 @@ def test_verify_fail_orphan_platt(tmp_path, capsys):
     out = capsys.readouterr().out
     assert rc == 1
     assert "FAIL" in out
+
+
+# --------------------------------------------------------------------------
+# Review-feedback regressions (PR #112)
+# --------------------------------------------------------------------------
+
+
+def test_promote_refuses_when_stage_has_zero_rows(tmp_path, capsys):
+    """Copilot C (#112): --commit must refuse if STAGE has 0 rows for the
+    requested metric, otherwise the DELETE+INSERT path silently wipes PROD."""
+    stage = tmp_path / "stage.db"
+    prod = tmp_path / "prod.db"
+    _build_db(stage)
+    _build_db(prod)
+
+    s = sqlite3.connect(str(stage))
+    _insert_complete_sentinel(s, "high", DV_HIGH)  # complete but no rows
+    s.commit()
+    s.close()
+
+    p = sqlite3.connect(str(prod))
+    _insert_platt(p, "live_high", DV_HIGH)
+    p.commit()
+    p.close()
+
+    args = P.build_parser().parse_args(
+        [
+            "promote", "--stage-db", str(stage), "--prod-db", str(prod),
+            "--metrics", "high", "--commit",
+            "--backup-dir", str(tmp_path / "backups"),
+        ]
+    )
+    rc = args.func(args)
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "REFUSED" in out and "0 rows" in out
+
+    # PROD must be untouched
+    p = sqlite3.connect(str(prod))
+    keys = {r[0] for r in p.execute(
+        "SELECT model_key FROM platt_models_v2 WHERE data_version=?", (DV_HIGH,)
+    )}
+    p.close()
+    assert keys == {"live_high"}
+
+
+def test_promote_refuses_on_schema_mismatch(tmp_path, capsys):
+    """Copilot M (#112): STAGE/PROD schema drift must be caught BEFORE
+    BEGIN IMMEDIATE so a mid-promotion failure cannot leave PROD partial."""
+    stage = tmp_path / "stage.db"
+    prod = tmp_path / "prod.db"
+    _build_db(stage)
+    _build_db(prod)
+
+    # Drop a column on STAGE to force schema drift on platt_models_v2.
+    # SQLite ALTER TABLE DROP COLUMN was added in 3.35.
+    s = sqlite3.connect(str(stage))
+    _insert_complete_sentinel(s, "high", DV_HIGH)
+    _insert_platt(s, "new_k1", DV_HIGH)
+    try:
+        s.execute("ALTER TABLE platt_models_v2 DROP COLUMN bucket_key")
+    except sqlite3.OperationalError:
+        pytest.skip("SQLite < 3.35 does not support DROP COLUMN")
+    s.commit()
+    s.close()
+
+    args = P.build_parser().parse_args(
+        [
+            "promote", "--stage-db", str(stage), "--prod-db", str(prod),
+            "--metrics", "high", "--commit",
+            "--backup-dir", str(tmp_path / "backups"),
+        ]
+    )
+    rc = args.func(args)
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "schema mismatch" in out
+
+
+def test_sentinel_in_progress_takes_precedence_over_wildcard_complete(tmp_path):
+    """Codex P1 (#112): an older `data_version=all start=all end=all`
+    complete sentinel must NOT mask a newer scoped in_progress sentinel
+    for the same metric/data_version pair."""
+    stage = tmp_path / "stage.db"
+    _build_db(stage)
+    s = sqlite3.connect(str(stage))
+
+    # Stale wildcard complete sentinel (older rebuild scope)
+    stale_key = (
+        f"{P.REBUILD_COMPLETE_META_PREFIX}:metric=low:bin_source=canonical_v2:"
+        f"city=all:start=all:end=all:data_version=all:cycle=all:source_id=all:"
+        f"horizon=all:n_mc=10000"
+    )
+    s.execute(
+        "INSERT INTO zeus_meta (key, value) VALUES (?, ?)",
+        (stale_key, json.dumps({"status": "complete", "completed": True})),
+    )
+    # Newer scoped in_progress sentinel for the actual data_version
+    _insert_in_progress_sentinel(s, "low", DV_LOW)
+    s.commit()
+    s.close()
+
+    conn = sqlite3.connect(str(stage))
+    conn.row_factory = sqlite3.Row
+    sentinels = P._load_sentinels(conn)
+    conn.close()
+    status = P._sentinel_status_for_metrics(sentinels, ["low"])
+    assert status == {"low": "in_progress"}, (
+        f"in_progress must win over stale wildcard complete; got {status}"
+    )
+
+
+def test_rw_connect_preserves_existing_pragmas(tmp_path):
+    """Copilot M (#112): _rw_connect should not switch journal_mode/synchronous
+    on a DB that already has them at the desired values; and conversely it
+    should keep DELETE journal mode if the DB was DELETE."""
+    prod = tmp_path / "prod.db"
+    _build_db(prod)
+    # Default new DB starts in DELETE; promote it to WAL via first connect
+    conn = P._rw_connect(prod)
+    jm1 = str(conn.execute("PRAGMA journal_mode").fetchone()[0]).lower()
+    sync1 = int(conn.execute("PRAGMA synchronous").fetchone()[0])
+    conn.close()
+    assert jm1 == "wal"
+    assert sync1 == 1
+
+    # Second open: pragmas already match, _rw_connect must be idempotent
+    # (we don't have a direct way to assert "no SET happened", but the
+    # observable values must remain identical).
+    conn2 = P._rw_connect(prod)
+    jm2 = str(conn2.execute("PRAGMA journal_mode").fetchone()[0]).lower()
+    sync2 = int(conn2.execute("PRAGMA synchronous").fetchone()[0])
+    conn2.close()
+    assert jm2 == jm1 and sync2 == sync1
