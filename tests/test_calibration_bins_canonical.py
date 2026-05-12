@@ -105,6 +105,10 @@ PARIS_C = _FakeCity(
     "Paris", "C", wu_station="LFPB", cluster="Paris", lat=48.85, lon=2.35,
     timezone="Europe/Paris",
 )
+HELSINKI_C = _FakeCity(
+    "Helsinki", "C", wu_station="EFHK", cluster="Helsinki",
+    lat=60.17, lon=24.94, timezone="Europe/Helsinki",
+)
 CHICAGO_F = _FakeCity(
     "Chicago", "F", wu_station="KORD", cluster="Chicago", lat=41.98, lon=-87.9,
     timezone="America/Chicago",
@@ -735,8 +739,22 @@ def test_R12b_obs_anchor_allows_arctic_cold_snap_miss():
     """
     # Members that disagree about the cold-front passage (-12..+5 °C, spread=17)
     members_arctic_miss = np.array([-12.0, -8.0, -2.0, 1.0, 5.0])
-    # k × spread = 4 × 17 = 68 °C; offset = |-2 - (-25)| = 23 °C → must PASS
-    validate_members_vs_observation(members_arctic_miss, PARIS_C, -25.0)
+    # k × spread = 4 × 17 = 68 °C (capped at 28); offset = |-2 - (-25)| = 23 °C → must PASS
+    validate_members_vs_observation(members_arctic_miss, HELSINKI_C, -25.0)
+
+
+def test_R12b_obs_anchor_caps_wide_spread_against_cross_unit_leak():
+    """Regression for Codex P1 (#111): wide-spread cross-unit contamination
+    must still trip even though `k * spread` would otherwise be huge.
+
+    Scenario: °C-valued members [0, 10, 20, 30, 40] mistakenly passed in
+    for an °F city with obs=75 °F. spread=40, median=20, offset=55.
+    Without the absolute cap, tol = max(18, 4*40) = 160 → PASS (BAD).
+    With cap = 50 °F, tol = min(50, 160) = 50 → REJECT (correct).
+    """
+    c_values_in_f_city = np.array([0.0, 10.0, 20.0, 30.0, 40.0])  # °C in °F slot
+    with pytest.raises(UnitProvenanceError, match=r"exceeds tolerance"):
+        validate_members_vs_observation(c_values_in_f_city, NYC_F, 75.0)
 
 
 # ---------------------------------------------------------------------------

@@ -103,7 +103,7 @@ _C_PLAUSIBLE_RANGE = (-50.0, 55.0)
 
 # Maximum |median(members) - observation| tolerated at 24h–7d lead.
 #
-# These tolerances are RELATIVE — `tol = max(floor, k * ensemble_spread)`.
+# These tolerances are RELATIVE — `tol = min(cap, max(floor, k * ensemble_spread))`.
 # Rationale:
 #   - Real TIGGE forecast misses on extreme-weather days (e.g. Helsinki
 #     2024-01-21: obs=-25 °C, member median=-2 °C, offset=22.6 °C — a
@@ -117,9 +117,17 @@ _C_PLAUSIBLE_RANGE = (-50.0, 55.0)
 #   - Absolute floor remains generous (10 °C / 18 °F) so 24h-1d typical
 #     forecasts (~1-3 °C / 2-5 °F error) never trip even with collapsed
 #     spread.
+#   - Absolute CAP closes the wide-spread cross-unit leak: e.g. °C members
+#     [0,10,20,30,40] in an °F city against obs=75 °F have spread=40 and
+#     offset=55; without a cap, k*spread=160 would let it through.
+#     Real arctic misses observed in Helsinki/Moscow/Toronto 2024-2026
+#     have offset ≤ ~26 °C / ~47 °F. Cap of 28 °C / 50 °F leaves margin
+#     while still rejecting contamination cases.
 _F_VS_OBS_MAX_OFFSET_FLOOR = 18.0       # °F absolute floor
 _C_VS_OBS_MAX_OFFSET_FLOOR = 10.0       # °C absolute floor
-_VS_OBS_SPREAD_MULTIPLIER = 4.0         # tol = max(floor, k * (max-min))
+_F_VS_OBS_MAX_OFFSET_CAP = 50.0         # °F absolute upper cap (Codex P1 #111)
+_C_VS_OBS_MAX_OFFSET_CAP = 28.0         # °C absolute upper cap (Codex P1 #111)
+_VS_OBS_SPREAD_MULTIPLIER = 4.0         # tol = min(cap, max(floor, k * (max-min)))
 
 
 @dataclass(frozen=True)
@@ -365,21 +373,24 @@ def validate_members_vs_observation(
     daily-max values (0-30 °C) fall inside the F plausible range [-50, 140],
     so a °C-in-°F leak would pass the univariate median check silently.
     This function anchors the plausibility test to the observation for
-    the same (city, target_date) — if the median of member values differs
-    from the observation by more than a generous forecast-error tolerance
-    it can only be a unit mismatch, not a bad forecast.
+    the same (city, target_date) and uses a relative tolerance scaled by
+    the ensemble spread:
 
-    Tolerances are ~5× the nominal 7-day TIGGE skill envelope, chosen to
-    never false-positive on real extreme-weather days but to catch
-    cross-unit contamination unambiguously (°C values in a °F city produce
-    offsets >30 °F worth; °F values in a °C city produce offsets >20 °C
-    worth).
+        tol = min(cap, max(floor, k * (max(members) - min(members))))
+
+    where (per ``city.settlement_unit``) ``floor=10/18``, ``cap=28/50``,
+    and ``k=_VS_OBS_SPREAD_MULTIPLIER`` (4). Rationale lives at the
+    module-level constants ``_C_VS_OBS_MAX_OFFSET_*``; see the comment
+    block there for the Helsinki/contamination calibration that picked
+    these numbers.
 
     Rationale for layering two checks:
         - ``validate_members_unit_plausible`` catches Kelvin leaks and
           far-out-of-range values without needing an observation.
         - ``validate_members_vs_observation`` catches °C-in-°F (and
-          vice-versa) by using the observation as the unit anchor.
+          vice-versa) by using the observation as the unit anchor; the
+          relative-tolerance form admits real arctic misses while the
+          absolute cap still rejects wide-spread cross-unit values.
         - Both run per-snapshot in the rebuild script; a snapshot must
           pass both or it is unit-rejected.
     """
@@ -404,21 +415,24 @@ def validate_members_vs_observation(
     spread = float(arr.max() - arr.min()) if arr.size > 1 else 0.0
     if city.settlement_unit == "F":
         floor = _F_VS_OBS_MAX_OFFSET_FLOOR
+        cap = _F_VS_OBS_MAX_OFFSET_CAP
     elif city.settlement_unit == "C":
         floor = _C_VS_OBS_MAX_OFFSET_FLOOR
+        cap = _C_VS_OBS_MAX_OFFSET_CAP
     else:
         raise UnitProvenanceError(
             f"City {city.name!r} has unknown settlement_unit "
             f"{city.settlement_unit!r}"
         )
-    tol = max(floor, _VS_OBS_SPREAD_MULTIPLIER * spread)
+    tol = min(cap, max(floor, _VS_OBS_SPREAD_MULTIPLIER * spread))
 
     if offset > tol:
         raise UnitProvenanceError(
             f"City {city.name!r}: member median={median:.2f} vs observation="
             f"{observed_value:.2f} offset={offset:.2f} {city.settlement_unit} "
             f"exceeds tolerance {tol:.1f} (floor={floor:.1f}, "
-            f"spread={spread:.2f}, k={_VS_OBS_SPREAD_MULTIPLIER}). "
+            f"spread={spread:.2f}, k={_VS_OBS_SPREAD_MULTIPLIER}, "
+            f"cap={cap:.1f}). "
             f"This is far outside any plausible "
             f"TIGGE forecast error at 24h-7d lead and strongly suggests "
             f"cross-unit contamination between members_json and the "
