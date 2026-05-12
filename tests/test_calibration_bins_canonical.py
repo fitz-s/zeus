@@ -720,6 +720,25 @@ def test_R12b_obs_anchor_rejects_empty_members():
         validate_members_vs_observation(np.array([]), NYC_F, 70.0)
 
 
+def test_R12b_obs_anchor_allows_arctic_cold_snap_miss():
+    """Regression: Helsinki 2024-01-21 had a VERIFIED Wunderground ICAO
+    record of obs=-25 °C while the ECMWF ensemble member median was -2 °C
+    (offset 22.6 °C). Members disagreed widely about whether the cold front
+    would pass — typical ensemble behaviour for arctic cold-snap misses.
+
+    The earlier flat 22 °C tolerance false-positively rejected this real
+    extreme-weather day. The relative tolerance (k=4 × ensemble spread,
+    floor=10 °C) accepts it because the ensemble spread is wide.
+
+    See ``logs/...task6_v3_full_rebuild_*.log`` for the original failure
+    that motivated this regression test.
+    """
+    # Members that disagree about the cold-front passage (-12..+5 °C, spread=17)
+    members_arctic_miss = np.array([-12.0, -8.0, -2.0, 1.0, 5.0])
+    # k × spread = 4 × 17 = 68 °C; offset = |-2 - (-25)| = 23 °C → must PASS
+    validate_members_vs_observation(members_arctic_miss, PARIS_C, -25.0)
+
+
 # ---------------------------------------------------------------------------
 # R14 — ensemble_snapshots data_version quarantine contract
 # ---------------------------------------------------------------------------
