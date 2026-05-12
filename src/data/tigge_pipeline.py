@@ -57,7 +57,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
-from src.state.db import ZEUS_WORLD_DB_PATH
+from src.state.db import ZEUS_FORECASTS_DB_PATH
 from src.state.db_writer_lock import WriteClass, db_writer_lock
 
 logger = logging.getLogger(__name__)
@@ -150,11 +150,11 @@ def _max_issue_date_in_db() -> Optional[date]:
     Returns None if the table is empty / missing or no TIGGE rows present.
     """
     try:
-        from src.state.db import get_world_connection
+        from src.state.db import get_forecasts_connection
     except Exception as exc:
-        logger.warning("tigge_pipeline: cannot import get_world_connection: %s", exc)
+        logger.warning("tigge_pipeline: cannot import get_forecasts_connection: %s", exc)
         return None
-    conn = get_world_connection()
+    conn = get_forecasts_connection()
     try:
         try:
             row = conn.execute(
@@ -356,14 +356,14 @@ def _ingest_track(
         if str(scripts_dir) not in sys.path:
             sys.path.insert(0, str(scripts_dir))
         from ingest_grib_to_snapshots import ingest_track as _ingest_track_fn  # type: ignore
-        from src.state.db import get_world_connection
+        from src.state.db import get_forecasts_connection
         from src.state.schema.v2_schema import apply_v2_schema
     except Exception as exc:
         logger.error("tigge_pipeline %s: import failed: %s", label, exc)
         return {"label": label, "ok": False, "error": f"import failed: {exc}"}
 
-    with db_writer_lock(ZEUS_WORLD_DB_PATH, WriteClass.BULK):
-        conn = get_world_connection()
+    with db_writer_lock(ZEUS_FORECASTS_DB_PATH, WriteClass.BULK):
+        conn = get_forecasts_connection()
         try:
             apply_v2_schema(conn)
             try:
