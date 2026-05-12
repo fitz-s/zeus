@@ -192,6 +192,7 @@ _WLA_SQLITE_CONNECT_ALLOWLIST = frozenset({
     "src/observability/status_summary.py",          # RO: status dashboard read-only (Track A.6 #246)
     "src/riskguard/discord_alerts.py",              # WRITE risk_state.db only; not world-db BULK scope (Track A.6 #246)
     "scripts/promote_calibration_v2_stage_to_prod.py",  # ro_uri_for_inspect_verify (mixed: ?mode=ro for inspect/verify; writable only with --commit)
+    "src/control/cli/promote_entry_forecast.py",    # read_only_ro_uri (operator CLI; opens world-db with mode=ro)
 
     # --- read-only scripts: verified SELECT-only, named in PR #86 ---
     "scripts/attribution_drift_weekly.py",          # read_only (PR #86)
