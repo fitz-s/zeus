@@ -209,6 +209,31 @@ def _write_world_schema_ready_sentinel() -> None:
     logger.info("Wrote world_schema_ready sentinel: schema_version=%s", schema_version)
 
 
+def _write_forecasts_schema_ready_sentinel() -> None:
+    """Atomically write state/forecasts_schema_ready.json after init_schema_forecasts succeeds.
+
+    K1 split 2026-05-11: paired with _write_world_schema_ready_sentinel so that
+    _startup_db_schema_ready_check (main.py) waits for BOTH before proceeding.
+    """
+    from src.config import state_path
+    from src.state.db import SCHEMA_FORECASTS_VERSION
+
+    payload = {
+        "written_at": datetime.now(timezone.utc).isoformat(),
+        "schema_forecasts_version": SCHEMA_FORECASTS_VERSION,
+        "ingest_pid": os.getpid(),
+        "init_schema_forecasts_returned_ok": True,
+    }
+    path = state_path("forecasts_schema_ready.json")
+    tmp = Path(str(path) + ".tmp")
+    tmp.write_text(json.dumps(payload))
+    tmp.replace(path)
+    logger.info(
+        "Wrote forecasts_schema_ready sentinel: SCHEMA_FORECASTS_VERSION=%d",
+        SCHEMA_FORECASTS_VERSION,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Ingest tick functions
 # ---------------------------------------------------------------------------
@@ -1034,18 +1059,48 @@ def main() -> None:
     # to current SCHEMA_VERSION). init_schema runs all DDL + sets PRAGMA
     # user_version = SCHEMA_VERSION at the end. Subsequent hot-path callers
     # (ecmwf_open_data.py, hole_scanner.py) use assert_schema_current (≤1ms).
+    # K1 split 2026-05-11 (§5.7 + §5.7.1):
+    # World-class tables stay on zeus-world.db via init_schema_world_only.
+    # Forecast-class tables move to zeus-forecasts.db via init_schema_forecasts.
+    # §5.7.1 fresh-deploy bootstrap: if zeus-forecasts.db does not exist,
+    # init_schema_forecasts creates it and logs a WARNING so the operator
+    # knows to run scripts/migrate_world_to_forecasts.py.
+    #
     # Antibody 2026-05-11: PLAN R1 v2 incorrectly classified this as "boot-once
     # duplicate"; it's actually the SOLE world-DB upgrade path. Reverted from
     # assert_schema_current after launchd respawn crash loop (SchemaOutOfDateError).
-    from src.state.db import init_schema, get_world_connection
-    conn = get_world_connection(write_class="bulk")
-    init_schema(conn)
-    conn.commit()
-    conn.close()
-    logger.info("init_schema(world): boot-once upgrade complete")
+    from src.state.db import (
+        init_schema_world_only,
+        init_schema_forecasts,
+        get_world_connection,
+        get_forecasts_connection,
+        ZEUS_FORECASTS_DB_PATH,
+    )
+    world_conn = get_world_connection(write_class="bulk")
+    init_schema_world_only(world_conn)
+    world_conn.commit()
+    world_conn.close()
+    logger.info("init_schema_world_only: boot-once world-class upgrade complete")
 
-    # Write sentinel BEFORE scheduler.start() (design §4.2).
+    # §5.7.1: detect fresh-deploy (zeus-forecasts.db does not exist).
+    _forecasts_fresh = not ZEUS_FORECASTS_DB_PATH.exists()
+    forecasts_conn = get_forecasts_connection(write_class="bulk")
+    init_schema_forecasts(forecasts_conn)  # idempotent: no-op on existing, full CREATE on fresh
+    forecasts_conn.commit()
+    forecasts_conn.close()
+    if _forecasts_fresh:
+        logger.warning(
+            "init_schema_forecasts: fresh-deploy bootstrap created "
+            "state/zeus-forecasts.db with empty schema — operator must "
+            "run scripts/migrate_world_to_forecasts.py before forecast "
+            "reads from zeus-forecasts.db will find data"
+        )
+    logger.info("init_schema_forecasts: boot-once forecasts-class upgrade complete")
+
+    # Write BOTH sentinels BEFORE scheduler.start() (design §4.2).
+    # _startup_db_schema_ready_check (main.py) waits for world + forecasts.
     _write_world_schema_ready_sentinel()
+    _write_forecasts_schema_ready_sentinel()
 
     # SIGTERM → graceful shutdown.
     signal.signal(signal.SIGTERM, _graceful_shutdown)
