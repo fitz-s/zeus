@@ -173,6 +173,9 @@ test_trust_policy:
     tests/test_parse_canonical_bin_label.py: {created: "2026-04-23", last_used: "2026-04-23"}
     tests/test_realized_fill.py: {created: "2026-04-23", last_used: "2026-04-23"}
     tests/test_rebuild_pipeline.py: {created: "2026-04-12", last_used: "2026-04-28"}
+    # K1 workload-class DB split promotion scripts (2026-05-12; PR #112 Option c)
+    tests/test_promote_platt_models_v2.py: {created: "2026-05-12", last_used: "2026-05-12"}
+    tests/test_promote_calibration_pairs_v2.py: {created: "2026-05-12", last_used: "2026-05-12"}
     tests/test_replay_time_provenance.py: {created: "2026-04-25", last_used: "2026-04-29"}
     tests/test_run_replay_cli.py: {created: "2026-04-25", last_used: "2026-04-29"}
     tests/test_riskguard.py: {created: "2026-03-30", last_used: "2026-04-28"}

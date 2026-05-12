@@ -584,6 +584,11 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         "src/riskguard/discord_alerts.py",  # WRITE risk_state.db only; not in world-db BULK lock universe
         "scripts/promote_calibration_v2_stage_to_prod.py",  # RO inspect/verify; RW only with --commit
         "src/control/cli/promote_entry_forecast.py",  # RO: operator CLI opens world-db with mode=ro
+        # K1 workload-class split (2026-05-12): PR #112 Option (c) split of
+        # the original single-script design. Each handles RO inspect/verify;
+        # RW only with --commit, gated by BEGIN IMMEDIATE + rollback semantics.
+        "scripts/promote_platt_models_v2.py",       # RO inspect/verify; RW only with --commit (zeus-world.db)
+        "scripts/promote_calibration_pairs_v2.py",  # RO inspect/verify; RW only with --commit (zeus-forecasts.db)
     }
 )
 
