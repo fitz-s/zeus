@@ -695,7 +695,12 @@ def ingest_json_file(
             row,
         )
 
-    commit_then_export(conn, db_op=_db_op)
+    # 2026-05-11 antibody: defer_commit=True so the outer ingest_track loop
+    # commits ONCE per batch (not 364x per cycle). Per debug root cause:
+    # per-row conn.commit() on a 39 GB world DB = 50ms-1s fsync × 364 = 5-10
+    # min wedge. INV-17 vacuously satisfied here: this caller produces no
+    # json_exports per row.
+    commit_then_export(conn, db_op=_db_op, defer_commit=True)
     return "written"
 
 
@@ -736,44 +741,57 @@ def ingest_track(
 
     counters: dict[str, int] = {"written": 0, "skipped_exists": 0, "parse_error": 0, "other": 0}
 
-    for path in all_json:
-        # City filter: path structure is <subdir>/<city-slug>/<date>/<filename>
-        if cities:
-            city_slug_dir = path.parts[-3] if len(path.parts) >= 3 else ""
-            if city_slug_dir not in {c.lower().replace(" ", "-") for c in cities}:
-                continue
-
-        # Date filter on target_date embedded in filename
-        if date_from or date_to:
-            name = path.stem
-            try:
-                # filename contains target_YYYY-MM-DD_lead_N
-                target_part = [p for p in name.split("_") if "-" in p and len(p) == 10]
-                if not target_part:
-                    raise ValueError("no date in filename")
-                tdate = target_part[0]
-                if date_from and tdate < date_from:
+    # 2026-05-11 antibody: batch-commit the per-file loop. Inner
+    # ingest_json_file calls commit_then_export(..., defer_commit=True);
+    # we commit ONCE at the end. Per debug session: per-row conn.commit()
+    # on 39 GB world DB = 50ms-1s fsync × 364 = 5-10 min wedge — collapsed
+    # to a single commit at loop exit.
+    try:
+        for path in all_json:
+            # City filter: path structure is <subdir>/<city-slug>/<date>/<filename>
+            if cities:
+                city_slug_dir = path.parts[-3] if len(path.parts) >= 3 else ""
+                if city_slug_dir not in {c.lower().replace(" ", "-") for c in cities}:
                     continue
-                if date_to and tdate > date_to:
-                    continue
-            except Exception:
-                pass
 
-        status = ingest_json_file(
-            conn,
-            path,
-            metric=metric,
-            model_version=model_version,
-            overwrite=overwrite,
-            source_run_context=source_run_context,
-            ingest_backend=ingest_backend,
-        )
-        if status in counters:
-            counters[status] += 1
-        elif status == "written":
-            counters["written"] += 1
-        else:
-            counters["other"] += 1
+            # Date filter on target_date embedded in filename
+            if date_from or date_to:
+                name = path.stem
+                try:
+                    # filename contains target_YYYY-MM-DD_lead_N
+                    target_part = [p for p in name.split("_") if "-" in p and len(p) == 10]
+                    if not target_part:
+                        raise ValueError("no date in filename")
+                    tdate = target_part[0]
+                    if date_from and tdate < date_from:
+                        continue
+                    if date_to and tdate > date_to:
+                        continue
+                except Exception:
+                    pass
+
+            status = ingest_json_file(
+                conn,
+                path,
+                metric=metric,
+                model_version=model_version,
+                overwrite=overwrite,
+                source_run_context=source_run_context,
+                ingest_backend=ingest_backend,
+            )
+            if status in counters:
+                counters[status] += 1
+            elif status == "written":
+                counters["written"] += 1
+            else:
+                counters["other"] += 1
+        conn.commit()
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
 
     return {
         "track": track,
