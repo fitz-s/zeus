@@ -70,7 +70,7 @@ def test_rel2_pragma_unchanged_on_partial_init_failure(monkeypatch):
 
     conn = sqlite3.connect(":memory:")
 
-    def _boom(c):
+    def _boom(c, **kwargs):
         raise RuntimeError("simulated _apply_v2_schema failure")
 
     monkeypatch.setattr(_db, "_apply_v2_schema", _boom, raising=False)
