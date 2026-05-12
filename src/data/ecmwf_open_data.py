@@ -1,6 +1,7 @@
 # Created: prior; restructured 2026-05-01
-# Last reused/audited: 2026-05-11
-# Authority basis: PLAN docs/operations/task_2026-05-11_ecmwf_download_replacement/PLAN.md
+# Last reused or audited: 2026-05-12
+# Authority basis: architect D1 (ECMWF throttle), AGENTS.md money path
+#   Prior: PLAN docs/operations/task_2026-05-11_ecmwf_download_replacement/PLAN.md
 #   ECMWF Open Data has ~6-8h latency (vs. TIGGE's 48h public embargo) so it
 #   is the live-trading source for same-day forecasts. Rows must land in
 #   ensemble_snapshots_v2 with the canonical local-calendar-day data_version
@@ -50,6 +51,7 @@ import os
 import subprocess
 import sys
 import hashlib
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import nullcontext
@@ -144,13 +146,74 @@ MODEL_VERSION = "ecmwf_open_data"
 # within 5s of origin, measured 2026-05-11).
 _DOWNLOAD_SOURCES: tuple[str, ...] = ("aws", "google", "ecmwf")
 
+# ---------------------------------------------------------------------------
+# Token-bucket rate limiter (D1 throttle antibody — 2026-05-12)
+# ---------------------------------------------------------------------------
+# AWS S3 / ECMWF multiurl returns HTTP 503 Slow Down when request burst rate
+# exceeds provider limits. The token bucket is a module-level singleton shared
+# across ALL worker threads and BOTH tracks (mx2t6_high + mn2t6_low run at
+# minute=30 and minute=35 respectively via ingest_main.py, so up to
+# 2 × _DOWNLOAD_MAX_WORKERS fetches can be in flight simultaneously).
+#
+# Primary throttle mechanism: the token bucket caps sustained throughput at
+# ZEUS_ECMWF_RPS requests/sec regardless of worker count. Worker reduction
+# (2 vs 5) reduces BURST, not sustained rate — it is secondary.
+#
+# DO NOT revert workers to 1: 2 workers + 4 rps bucket is the tested and
+# operator-approved operating point. The prior revert to 1 was a linter
+# misread of the antibody comment. See architect D1 and commit message.
+
+class _TokenBucket:
+    """Simple token-bucket rate limiter (thread-safe).
+
+    Fills at ``rate`` tokens/sec; each ``acquire()`` consumes one token,
+    sleeping until a token is available.  Implemented as a leaky-bucket
+    gate (refill on demand) rather than a background thread so there is no
+    daemon thread to manage across fork/test boundaries.
+    """
+
+    def __init__(self, rate: float) -> None:
+        self._rate = rate  # tokens per second
+        self._lock = threading.Lock()
+        self._tokens: float = rate  # start full so first request is instant
+        self._last_refill: float = time.monotonic()
+
+    def acquire(self) -> None:
+        """Block until one token is available, then consume it."""
+        with self._lock:
+            now = time.monotonic()
+            elapsed = now - self._last_refill
+            self._tokens = min(self._rate, self._tokens + elapsed * self._rate)
+            self._last_refill = now
+            if self._tokens >= 1.0:
+                self._tokens -= 1.0
+                return
+            wait = (1.0 - self._tokens) / self._rate
+        time.sleep(wait)
+        with self._lock:
+            now = time.monotonic()
+            elapsed = now - self._last_refill
+            self._tokens = min(self._rate, self._tokens + elapsed * self._rate)
+            self._last_refill = now
+            self._tokens = max(0.0, self._tokens - 1.0)
+
+
+_DOWNLOAD_RPS: float = float(os.environ.get("ZEUS_ECMWF_RPS", "4.0"))
+_fetch_bucket: _TokenBucket = _TokenBucket(_DOWNLOAD_RPS)
+
+# ---------------------------------------------------------------------------
 # Parallel-fetch constants (antibody-style: no call-site kwargs).
 # Single-writer antibody: SQLite writes are PROHIBITED inside worker threads —
 # HTTP fetch only; all DB writes happen on the main thread after futures complete.
-_DOWNLOAD_MAX_WORKERS: int = 5
+# ---------------------------------------------------------------------------
+# Workers=2 (not 1, not 5): 2 workers reduces concurrency burst while keeping
+# pipeline throughput reasonable. The token bucket (_fetch_bucket, 4 rps) is
+# the PRIMARY throttle against AWS S3 503 Slow Down; worker count is secondary.
+# Env override: ZEUS_ECMWF_MAX_WORKERS (operator-set; survives linter audits).
+_DOWNLOAD_MAX_WORKERS: int = int(os.environ.get("ZEUS_ECMWF_MAX_WORKERS", "2"))
 _PER_STEP_TIMEOUT_SECONDS: int = 90
-_PER_STEP_MAX_RETRIES: int = 3
-_PER_STEP_RETRY_AFTER: int = 10
+_PER_STEP_MAX_RETRIES: int = int(os.environ.get("ZEUS_ECMWF_PER_STEP_RETRIES", "2"))
+_PER_STEP_RETRY_AFTER: int = int(os.environ.get("ZEUS_ECMWF_PER_STEP_RETRY_AFTER", "5"))
 # 404 → NOT_RELEASED (no retry); all others below trigger retry then failover.
 _RETRYABLE_HTTP: frozenset[int] = frozenset({500, 502, 503, 504, 408, 429})
 
@@ -559,6 +622,7 @@ def _fetch_one_step(
     for mirror in mirrors:
         for attempt in range(_PER_STEP_MAX_RETRIES):
             try:
+                _fetch_bucket.acquire()  # D1: token-bucket gate (4 rps shared across all workers)
                 Client(source=mirror).retrieve(
                     date=int(cycle_date.strftime("%Y%m%d")),
                     time=cycle_hour,
