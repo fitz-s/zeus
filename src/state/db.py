@@ -728,7 +728,7 @@ def get_connection(
 # CI hook scripts/check_schema_version.py diffs the sqlite_master hash of
 # a fresh-init DB against tests/state/_schema_pinned_hash.txt and fails
 # the PR if SCHEMA_VERSION did not change in lockstep.
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 def init_schema(
@@ -914,7 +914,7 @@ def init_schema(
             model_version TEXT NOT NULL,
             data_version TEXT NOT NULL,
             authority TEXT NOT NULL DEFAULT 'VERIFIED',
-            temperature_metric TEXT NOT NULL,
+            temperature_metric TEXT NOT NULL DEFAULT 'high',
             -- Slice P2-B1 (PR #19 phase 2, 2026-04-26): bias_corrected
             -- declared explicitly. Pre-fix, the column was added only via
             -- the ALTER TABLE migration block below, so fresh init_schema
@@ -2004,8 +2004,9 @@ def init_schema(
     ]:
         try:
             conn.execute(ddl)
-        except sqlite3.OperationalError:
-            pass
+        except sqlite3.OperationalError as exc:
+            if "duplicate column" not in str(exc).lower():
+                raise
 
     # P-B (2026-04-23): INV-14 identity spine + provenance vehicle on settlements.
     # Plan: docs/operations/task_2026-04-23_data_readiness_remediation/evidence/pb_schema_plan.md
@@ -2026,8 +2027,9 @@ def init_schema(
     ]:
         try:
             conn.execute(ddl)
-        except sqlite3.OperationalError:
-            pass
+        except sqlite3.OperationalError as exc:
+            if "duplicate column" not in str(exc).lower():
+                raise
 
     # REOPEN-2 (2026-04-24, data-readiness-tail): settlements UNIQUE migration.
     # Pre-REOPEN-2 schema: UNIQUE(city, target_date) — structurally blocks
@@ -2260,8 +2262,9 @@ def init_schema(
             "ALTER TABLE position_current ADD COLUMN temperature_metric TEXT NOT NULL DEFAULT 'high' "
             "CHECK (temperature_metric IN ('high', 'low'));"
         )
-    except sqlite3.OperationalError:
-        pass  # Column already exists — idempotent re-run
+    except sqlite3.OperationalError as exc:
+        if "duplicate column" not in str(exc).lower():
+            raise  # Column already exists — idempotent re-run
 
     # B091 lower half: add decision_time_status column to selection_family_fact.
     # Additive column — safe on existing DBs (idempotent; OperationalError = already present).
@@ -2269,8 +2272,9 @@ def init_schema(
         conn.execute(
             "ALTER TABLE selection_family_fact ADD COLUMN decision_time_status TEXT;"
         )
-    except sqlite3.OperationalError:
-        pass  # Column already exists — idempotent re-run
+    except sqlite3.OperationalError as exc:
+        if "duplicate column" not in str(exc).lower():
+            raise  # Column already exists — idempotent re-run
 
     # P10D S3 (eve C2 inversion): add temperature_metric to legacy ensemble_snapshots.
     # ensemble_snapshots_v2 has zero runtime writers; skipping legacy writes for LOW
@@ -2281,8 +2285,9 @@ def init_schema(
         conn.execute(
             "ALTER TABLE ensemble_snapshots ADD COLUMN temperature_metric TEXT NOT NULL DEFAULT 'high';"
         )
-    except sqlite3.OperationalError:
-        pass  # Column already exists — idempotent re-run
+    except sqlite3.OperationalError as exc:
+        if "duplicate column" not in str(exc).lower():
+            raise  # Column already exists — idempotent re-run
 
     # Phase 2: apply v2 schema (idempotent — safe to run on every boot).
     from src.state.schema.v2_schema import apply_v2_schema as _apply_v2_schema

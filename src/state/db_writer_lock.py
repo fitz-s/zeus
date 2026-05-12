@@ -583,8 +583,6 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         "src/observability/status_summary.py",  # RO: status dashboard read-only
         "src/riskguard/discord_alerts.py",  # WRITE risk_state.db only; not in world-db BULK lock universe
         "src/control/cli/promote_entry_forecast.py",  # RO: operator CLI opens world-db with mode=ro
-        "scripts/promote_calibration_v2_stage_to_prod.py",  # RO inspect/verify; RW only with --commit
-        "src/control/cli/promote_entry_forecast.py",  # RO: operator CLI opens world-db with mode=ro
         # K1 workload-class split (2026-05-12): PR #112 Option (c) split of
         # the original single-script design. Each handles RO inspect/verify;
         # RW only with --commit, gated by BEGIN IMMEDIATE + rollback semantics.

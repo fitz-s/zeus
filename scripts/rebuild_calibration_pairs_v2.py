@@ -110,7 +110,10 @@ from src.contracts.ensemble_snapshot_provenance import (
 from src.contracts.settlement_semantics import SettlementSemantics
 from src.signal.ensemble_signal import p_raw_vector_from_maxes
 from src.state.db import init_schema
-from src.state.db_writer_lock import WriteClass, db_writer_lock  # noqa: E402
+from src.state.db_writer_lock import (  # noqa: E402
+    BulkChunker,
+    bulk_lock_with_chunker,
+)
 from src.state.schema.v2_schema import apply_v2_schema
 from src.types.market import validate_bin_topology
 from src.types.metric_identity import HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN, MetricIdentity
@@ -1324,6 +1327,7 @@ def rebuild_v2(
     db_path: Optional[Path] = None,
     workers: int = 1,
     mc_seed_base: Optional[int] = None,
+    chunker: Optional[BulkChunker] = None,
 ) -> RebuildStatsV2:
     """Run the v2 rebuild end-to-end, sharded per (city, metric) bucket.
 
@@ -1543,6 +1547,13 @@ def rebuild_v2(
 
             # Commit after each (city, metric) bucket — bounded writer-lock hold.
             conn.commit()
+            # K3 (2026-05-12): cooperative LIVE-yield at per-bucket chunk boundary.
+            # When BULK rebuild is running under bulk_lock_with_chunker, this
+            # probes the LIVE flock non-blocking and releases-then-reacquires
+            # the bulk fcntl if a LIVE writer is mid-transaction. No-op when
+            # chunker is None (preserves legacy callers + parallel path).
+            if chunker is not None:
+                chunker.yield_if_live_contended()
 
     # Post-all-cities validation.
     #
@@ -1645,6 +1656,7 @@ def rebuild_all_v2(
     db_path: Optional[Path] = None,
     workers: int = 1,
     mc_seed_base: Optional[int] = None,
+    chunker: Optional[BulkChunker] = None,
 ) -> dict[str, RebuildStatsV2]:
     """Rebuild calibration_pairs_v2 for all METRIC_SPECS.
 
@@ -1678,6 +1690,7 @@ def rebuild_all_v2(
             db_path=db_path,
             workers=workers,
             mc_seed_base=mc_seed_base,
+            chunker=chunker,
         )
         per_metric[spec.identity.temperature_metric] = stats
 
@@ -1846,43 +1859,52 @@ def main() -> int:
         any_refused = any(s.refused for s in per_metric.values())
         return 1 if any_refused else 0
 
-    # PR #86 retrofit (CRITICAL — preserved across PR #93 rebase): wrap the
-    # entire write path in db_writer_lock(BULK).
+    # K3 retrofit (2026-05-12): bulk_lock_with_chunker replaces the bare
+    # db_writer_lock(BULK) wrap. The chunker probes the LIVE flock at every
+    # per-(city, metric) bucket commit and releases-then-reacquires the bulk
+    # fcntl when a LIVE writer is mid-transaction. Preserves PR #86's
+    # write-path lock invariant while adding cooperative LIVE-yield semantics.
     assert write_db_path is not None
-    with db_writer_lock(write_db_path, WriteClass.BULK):
-        conn = sqlite3.connect(write_db_path)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA busy_timeout = 600000")
-        conn.execute("PRAGMA journal_mode=WAL")
-        init_schema(conn)
-        apply_v2_schema(conn)
+    conn = sqlite3.connect(write_db_path)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout = 600000")
+    conn.execute("PRAGMA journal_mode=WAL")
+    init_schema(conn)
+    apply_v2_schema(conn)
 
-        try:
-            per_metric = rebuild_all_v2(
-                conn,
-                dry_run=args.dry_run,
-                force=args.force,
-                city_filter=args.city,
-                start_date=args.start_date,
-                end_date=args.end_date,
-                data_version_filter=args.data_version,
-                temperature_metric=args.temperature_metric,
-                cycle_filter=args.cycle,
-                source_id_filter=args.source_id,
-                horizon_profile_filter=args.horizon_profile,
-                n_mc=args.n_mc,
-                db_path=write_db_path,
-                workers=args.workers,
-                mc_seed_base=args.mc_seed_base,
-            )
-        except Exception as e:
-            print(f"ERROR: {type(e).__name__}: {e}", file=sys.stderr)
-            return 1
-        finally:
-            conn.close()
+    try:
+        with bulk_lock_with_chunker(
+            write_db_path,
+            conn,
+            caller_module="scripts.rebuild_calibration_pairs_v2",
+        ) as chunker:
+            try:
+                per_metric = rebuild_all_v2(
+                    conn,
+                    dry_run=args.dry_run,
+                    force=args.force,
+                    city_filter=args.city,
+                    start_date=args.start_date,
+                    end_date=args.end_date,
+                    data_version_filter=args.data_version,
+                    temperature_metric=args.temperature_metric,
+                    cycle_filter=args.cycle,
+                    source_id_filter=args.source_id,
+                    horizon_profile_filter=args.horizon_profile,
+                    n_mc=args.n_mc,
+                    db_path=write_db_path,
+                    workers=args.workers,
+                    mc_seed_base=args.mc_seed_base,
+                    chunker=chunker,
+                )
+            except Exception as e:
+                print(f"ERROR: {type(e).__name__}: {e}", file=sys.stderr)
+                return 1
+    finally:
+        conn.close()
 
-        any_refused = any(s.refused for s in per_metric.values())
-        return 1 if any_refused else 0
+    any_refused = any(s.refused for s in per_metric.values())
+    return 1 if any_refused else 0
 
 
 if __name__ == "__main__":

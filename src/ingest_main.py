@@ -1072,6 +1072,7 @@ def main() -> None:
     from src.state.db import (
         init_schema_world_only,
         init_schema_forecasts,
+        assert_schema_current_forecasts,
         get_world_connection,
         get_forecasts_connection,
         ZEUS_FORECASTS_DB_PATH,
@@ -1086,6 +1087,7 @@ def main() -> None:
     _forecasts_fresh = not ZEUS_FORECASTS_DB_PATH.exists()
     forecasts_conn = get_forecasts_connection(write_class="bulk")
     init_schema_forecasts(forecasts_conn)  # idempotent: no-op on existing, full CREATE on fresh
+    assert_schema_current_forecasts(forecasts_conn)
     forecasts_conn.commit()
     forecasts_conn.close()
     if _forecasts_fresh:
