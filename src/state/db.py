@@ -127,6 +127,13 @@ def _connect(
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
+    # 2026-05-12 antibody (cold-cache K3 partial fix): bump page cache to 1 GB
+    # so the hot working set of large forecast tables stays resident across
+    # cycles. Default is ~2 MB which is fatal for 35 GB forecasts.db cold-cache
+    # B-tree descent. ZEUS_DB_CACHE_KB env var overrides; -1048576 = 1 GiB.
+    # Per-connection, so independent for trade/world/forecasts/backtest.
+    cache_kb = int(os.environ.get("ZEUS_DB_CACHE_KB", "1048576"))
+    conn.execute(f"PRAGMA cache_size = -{cache_kb}")
     _install_connection_functions(conn)
     resolved = _resolve_write_class(write_class)
     if resolved is not None:
@@ -700,6 +707,13 @@ def get_connection(
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
+    # 2026-05-12 antibody (cold-cache K3 partial fix): bump page cache to 1 GB
+    # so the hot working set of large forecast tables stays resident across
+    # cycles. Default is ~2 MB which is fatal for 35 GB forecasts.db cold-cache
+    # B-tree descent. ZEUS_DB_CACHE_KB env var overrides; -1048576 = 1 GiB.
+    # Per-connection, so independent for trade/world/forecasts/backtest.
+    cache_kb = int(os.environ.get("ZEUS_DB_CACHE_KB", "1048576"))
+    conn.execute(f"PRAGMA cache_size = -{cache_kb}")
     _install_connection_functions(conn)
     resolved = _resolve_write_class(write_class)
     if resolved is not None:
