@@ -124,8 +124,8 @@ def staged_world_db(tmp_path: Path, monkeypatch):
         c.row_factory = sqlite3.Row
         return c
 
-    monkeypatch.setattr(state_db, "get_world_connection", _fake_get_world_connection)
-    monkeypatch.setattr(tdf, "get_world_connection", _fake_get_world_connection)
+    monkeypatch.setattr(state_db, "get_forecasts_connection", _fake_get_world_connection)
+    monkeypatch.setattr(tdf, "get_forecasts_connection", _fake_get_world_connection)
     return db_path
 
 
@@ -182,8 +182,8 @@ def test_db_payload_returns_none_when_no_rows(fake_city, tmp_path, monkeypatch):
         c.row_factory = sqlite3.Row
         return c
 
-    monkeypatch.setattr(state_db, "get_world_connection", _fake_conn)
-    monkeypatch.setattr(tdf, "get_world_connection", _fake_conn)
+    monkeypatch.setattr(state_db, "get_forecasts_connection", _fake_conn)
+    monkeypatch.setattr(tdf, "get_forecasts_connection", _fake_conn)
 
     from src.data.tigge_client import _fetch_db_payload
 

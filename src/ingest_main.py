@@ -825,7 +825,7 @@ def _uma_resolution_listener_tick():
         poll_uma_resolutions,
         set_last_scanned_block,
     )
-    from src.state.db import get_world_connection, ZEUS_WORLD_DB_PATH
+    from src.state.db import get_world_connection, ZEUS_FORECASTS_DB_PATH
     import sqlite3
 
     # Load optional uma settings (default-OFF when absent).
@@ -844,10 +844,10 @@ def _uma_resolution_listener_tick():
         )
         return
 
-    # Collect tracked condition_ids from market_events_v2 (read-only connection).
+    # Collect tracked condition_ids from market_events_v2 (read-only, forecasts DB post-K1).
     condition_ids: list[str] = []
     try:
-        ro_conn = sqlite3.connect(str(ZEUS_WORLD_DB_PATH), timeout=10)
+        ro_conn = sqlite3.connect(str(ZEUS_FORECASTS_DB_PATH), timeout=10)
         ro_conn.row_factory = sqlite3.Row
         try:
             rows = ro_conn.execute(
