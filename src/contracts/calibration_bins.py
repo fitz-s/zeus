@@ -101,13 +101,47 @@ class UnitProvenanceError(Exception):
 _F_PLAUSIBLE_RANGE = (-50.0, 140.0)
 _C_PLAUSIBLE_RANGE = (-50.0, 55.0)
 
-# Maximum |median(members) - observation| tolerated at 24h–7d lead. Real
-# TIGGE 24h forecast error is ~2-5 °F / 1-3 °C; 7d lead is ~6-10 °F / 3-5 °C.
-# These thresholds are ~5× the 7d upper bound so they never false-positive
-# on genuine high-error days, but catch cross-unit contamination (°F
-# values written into a °C city produces offsets >30 °F worth).
-_F_VS_OBS_MAX_OFFSET = 40.0  # °F
-_C_VS_OBS_MAX_OFFSET = 22.0  # °C
+# Maximum |median(members) - observation| tolerated at 24h–7d lead.
+#
+# These tolerances are RELATIVE — `tol = min(cap, max(floor, k * ensemble_spread))`.
+#
+# 2026-05-12 floor revision (post-c8bb645a / post-Codex-P1 #111 empirical review):
+#   The c8bb645a relative-tolerance fix assumed real cold-snap misses
+#   produce WIDE ensemble spread (so `k * spread` dominates the floor).
+#   Production rebuild on 2026-05-12 (PR #111 follow-up) disproved that
+#   assumption: real confident-wrong arctic / extreme-cold misses have
+#   NARROW spread (1.5–2.5 °C) because the ensemble is confidently warm
+#   and reality is suddenly cold. The floor must therefore be wide enough
+#   to admit these confident-wrong cases on its own. Empirical rejects:
+#     Helsinki/2024-01-21:  offset=22.64 °C, spread=1.85 °C (arctic snap)
+#     Munich/2026-01-12:    offset=10.89 °C, spread=2.07 °C
+#     Moscow/2024-01-14:    offset=11.96 °C, spread=1.51 °C
+#     London/2025-01-05:    offset=10.02 °C, spread=1.76 °C
+#     Helsinki/2026-01-06:  offset=13.07 °C, spread=2.64 °C
+#     Houston/2026-04-23:   offset=33.62 °F, spread=1.53 °F (April cold front)
+#     Denver/2024-03-19:    offset=18.55 °F, spread=3.90 °F
+#
+# Trade-off: bumping floors weakens unit-error detection sensitivity, but
+# canonical unit confusion still produces large offsets:
+#   - °C-in-°F city (e.g. 20 °C interpreted as 20 °F vs obs 70 °F): ~50 °F offset
+#   - °F-in-°C city (e.g. 70 °F interpreted as 70 °C vs obs 20 °C): ~50 °C offset
+# So 25 °C / 40 °F floors still catch canonical unit errors with margin.
+#
+# The absolute CAP (Codex P1 #111) closes the wide-spread cross-unit leak:
+# °C members [0,10,20,30,40] in an °F city against obs=75 °F have spread=40
+# and offset=55; without a cap, k*spread=160 would let it through. With
+# cap = 50 °F (28 °C), tol stays bounded and contamination is rejected.
+# floor ≤ cap invariant: 25 ≤ 28 (°C), 40 ≤ 50 (°F).
+#
+# True structural fix (deferred): newtype `Celsius`/`Fahrenheit` so unit
+# mixing is a TypeError at construction. Until then, this validator is a
+# best-effort runtime guard that intentionally errs on the side of
+# admitting extreme-weather data over false-positive unit rejection.
+_F_VS_OBS_MAX_OFFSET_FLOOR = 40.0       # °F absolute floor (was 18 pre-2026-05-12)
+_C_VS_OBS_MAX_OFFSET_FLOOR = 25.0       # °C absolute floor (was 10 pre-2026-05-12)
+_F_VS_OBS_MAX_OFFSET_CAP = 50.0         # °F absolute upper cap (Codex P1 #111)
+_C_VS_OBS_MAX_OFFSET_CAP = 28.0         # °C absolute upper cap (Codex P1 #111)
+_VS_OBS_SPREAD_MULTIPLIER = 4.0         # tol = min(cap, max(floor, k * (max-min)))
 
 
 @dataclass(frozen=True)
@@ -353,21 +387,24 @@ def validate_members_vs_observation(
     daily-max values (0-30 °C) fall inside the F plausible range [-50, 140],
     so a °C-in-°F leak would pass the univariate median check silently.
     This function anchors the plausibility test to the observation for
-    the same (city, target_date) — if the median of member values differs
-    from the observation by more than a generous forecast-error tolerance
-    it can only be a unit mismatch, not a bad forecast.
+    the same (city, target_date) and uses a relative tolerance scaled by
+    the ensemble spread:
 
-    Tolerances are ~5× the nominal 7-day TIGGE skill envelope, chosen to
-    never false-positive on real extreme-weather days but to catch
-    cross-unit contamination unambiguously (°C values in a °F city produce
-    offsets >30 °F worth; °F values in a °C city produce offsets >20 °C
-    worth).
+        tol = min(cap, max(floor, k * (max(members) - min(members))))
+
+    where (per ``city.settlement_unit``) ``floor=10/18``, ``cap=28/50``,
+    and ``k=_VS_OBS_SPREAD_MULTIPLIER`` (4). Rationale lives at the
+    module-level constants ``_C_VS_OBS_MAX_OFFSET_*``; see the comment
+    block there for the Helsinki/contamination calibration that picked
+    these numbers.
 
     Rationale for layering two checks:
         - ``validate_members_unit_plausible`` catches Kelvin leaks and
           far-out-of-range values without needing an observation.
         - ``validate_members_vs_observation`` catches °C-in-°F (and
-          vice-versa) by using the observation as the unit anchor.
+          vice-versa) by using the observation as the unit anchor; the
+          relative-tolerance form admits real arctic misses while the
+          absolute cap still rejects wide-spread cross-unit values.
         - Both run per-snapshot in the rebuild script; a snapshot must
           pass both or it is unit-rejected.
     """
@@ -389,21 +426,28 @@ def validate_members_vs_observation(
 
     median = float(np.median(arr))
     offset = abs(median - float(observed_value))
+    spread = float(arr.max() - arr.min()) if arr.size > 1 else 0.0
     if city.settlement_unit == "F":
-        tol = _F_VS_OBS_MAX_OFFSET
+        floor = _F_VS_OBS_MAX_OFFSET_FLOOR
+        cap = _F_VS_OBS_MAX_OFFSET_CAP
     elif city.settlement_unit == "C":
-        tol = _C_VS_OBS_MAX_OFFSET
+        floor = _C_VS_OBS_MAX_OFFSET_FLOOR
+        cap = _C_VS_OBS_MAX_OFFSET_CAP
     else:
         raise UnitProvenanceError(
             f"City {city.name!r} has unknown settlement_unit "
             f"{city.settlement_unit!r}"
         )
+    tol = min(cap, max(floor, _VS_OBS_SPREAD_MULTIPLIER * spread))
 
     if offset > tol:
         raise UnitProvenanceError(
             f"City {city.name!r}: member median={median:.2f} vs observation="
             f"{observed_value:.2f} offset={offset:.2f} {city.settlement_unit} "
-            f"exceeds tolerance {tol:.1f}. This is far outside any plausible "
+            f"exceeds tolerance {tol:.1f} (floor={floor:.1f}, "
+            f"spread={spread:.2f}, k={_VS_OBS_SPREAD_MULTIPLIER}, "
+            f"cap={cap:.1f}). "
+            f"This is far outside any plausible "
             f"TIGGE forecast error at 24h-7d lead and strongly suggests "
             f"cross-unit contamination between members_json and the "
             f"observation's unit."

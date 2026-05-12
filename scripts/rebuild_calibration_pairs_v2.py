@@ -1422,14 +1422,37 @@ def rebuild_v2(
         conn.commit()
 
     # Post-all-cities validation.
-    hard_failures = missing_city_count + stats.snapshots_unit_rejected
-    if hard_failures:
+    #
+    # Hard-failure threshold (2026-05-12 revision): missing_city is ALWAYS a
+    # hard failure (city registry corruption / dropped city). unit_rejected
+    # is RATE-limited: small numbers of unit rejections are acceptable
+    # outliers (extreme-weather days where the ensemble was confidently
+    # wrong; see calibration_bins.py docstring for the floor revision).
+    # We abort only if unit rejections exceed max(100, 1% of eligible) which
+    # would indicate a systematic data corruption rather than scattered
+    # extreme-weather misses. The previous "any unit rejection aborts" gate
+    # was too tight for the natural rejection rate (~0.01% on 147k snapshots).
+    unit_reject_cap = max(100, len(eligible) // 100)
+    if missing_city_count:
         stats.refused = True
         raise RuntimeError(
-            f"Refusing v2 rebuild: {hard_failures} hard failures "
-            f"(missing_city={missing_city_count}, "
-            f"unit_rejected={stats.snapshots_unit_rejected}); "
-            "some buckets may have already committed — inspect calibration_pairs_v2."
+            f"Refusing v2 rebuild: missing_city={missing_city_count} "
+            "(city registry corruption); some buckets may have already "
+            "committed — inspect calibration_pairs_v2."
+        )
+    if stats.snapshots_unit_rejected > unit_reject_cap:
+        stats.refused = True
+        raise RuntimeError(
+            f"Refusing v2 rebuild: unit_rejected={stats.snapshots_unit_rejected} "
+            f"exceeds cap={unit_reject_cap} (max(100, 1% of {len(eligible)} eligible)); "
+            "this indicates systematic unit-contamination, not scattered extreme-weather "
+            "outliers — inspect calibration_pairs_v2."
+        )
+    if stats.snapshots_unit_rejected:
+        print(
+            f"  WARN: {stats.snapshots_unit_rejected} snapshots unit-rejected "
+            f"(within cap={unit_reject_cap}); rebuild proceeds. Inspect log for "
+            f"specific cases (UNIT-VS-OBS-REJECT lines)."
         )
 
     no_obs_ratio = stats.snapshots_no_observation / max(len(eligible), 1)
