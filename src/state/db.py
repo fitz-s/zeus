@@ -36,6 +36,7 @@ from src.observability.counters import increment as _cnt_inc
 
 ZEUS_DB_PATH = STATE_DIR / "zeus.db"  # LEGACY — remove after Phase 4
 ZEUS_WORLD_DB_PATH = STATE_DIR / "zeus-world.db"  # Shared world data (settlements, calibration, ENS)
+ZEUS_FORECASTS_DB_PATH = STATE_DIR / "zeus-forecasts.db"  # K1 split 2026-05-11: forecast/harvester-truth class
 ZEUS_BACKTEST_DB_PATH = STATE_DIR / "zeus_backtest.db"  # Derived audit output; never runtime authority
 RISK_DB_PATH = STATE_DIR / "risk_state.db"  # Single risk DB (live-only)
 
@@ -145,6 +146,21 @@ def get_world_connection(
 ) -> sqlite3.Connection:
     """Shared world data DB (settlements, calibration, ENS)."""
     return _connect(ZEUS_WORLD_DB_PATH, write_class=write_class)
+
+
+def get_forecasts_connection(
+    *, write_class: WriteClass | str | None = None,
+) -> sqlite3.Connection:
+    """Forecast/harvester-truth co-transactional class DB (zeus-forecasts.db).
+
+    Owns: ensemble_snapshots_v2, source_run, observations, settlements,
+          settlements_v2, market_events_v2, calibration_pairs_v2.
+    Lock files: state/zeus-forecasts.db.writer-lock.{bulk,live}.
+
+    K1 split 2026-05-11: physically separate flock from zeus-world.db so
+    BULK forecast ingest cannot starve LIVE/world writes (K1 contention fix).
+    """
+    return _connect(ZEUS_FORECASTS_DB_PATH, write_class=write_class)
 
 
 def get_backtest_connection(
@@ -693,8 +709,19 @@ def get_connection(
 SCHEMA_VERSION = 1
 
 
-def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
+def init_schema(
+    conn: Optional[sqlite3.Connection] = None,
+    *,
+    _v2_forecast_tables: bool = True,
+) -> None:
     """Create all Zeus tables. Idempotent.
+
+    Args:
+        _v2_forecast_tables: Internal kwarg used by init_schema_world_only.
+            When False, passes forecast_tables=False to apply_v2_schema so the
+            4 v2 forecast-class tables are not created on the world conn
+            post-K1 migration. Default True preserves existing behavior.
+            K1 split 2026-05-11.
 
     # Fix (task #200, 2026-05-10): PRAGMA busy_timeout must be re-applied at the
     # start of init_schema. Python's sqlite3.connect(timeout=N) installs a C-level
@@ -2237,7 +2264,7 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
 
     # Phase 2: apply v2 schema (idempotent — safe to run on every boot).
     from src.state.schema.v2_schema import apply_v2_schema as _apply_v2_schema
-    _apply_v2_schema(conn)
+    _apply_v2_schema(conn, forecast_tables=_v2_forecast_tables)
     conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
     if own_conn:
@@ -2257,6 +2284,246 @@ def assert_schema_current(conn: sqlite3.Connection) -> None:
         raise SchemaOutOfDateError(
             f"PRAGMA user_version={v}, SCHEMA_VERSION={SCHEMA_VERSION}; "
             "boot init_schema did not run, or migration missing."
+        )
+
+
+# ---------------------------------------------------------------------------
+# K1 forecast DB split — 2026-05-11
+# ---------------------------------------------------------------------------
+# SCHEMA_FORECASTS_VERSION: bumped whenever any of the 7 forecast-class table
+# DDL changes (settlements, observations, source_run in db.py; settlements_v2,
+# market_events_v2, ensemble_snapshots_v2, calibration_pairs_v2 in v2_schema.py).
+SCHEMA_FORECASTS_VERSION: int = 1
+
+
+def _create_settlements(conn: sqlite3.Connection) -> None:
+    """Create settlements table + indexes + ALTERs. Idempotent.
+
+    K1 forecast-class table. DDL mirrors the executescript block in init_schema;
+    uses conn.execute() so it can run standalone on zeus-forecasts.db.
+    """
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS settlements (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            city TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            market_slug TEXT,
+            winning_bin TEXT,
+            settlement_value REAL,
+            settlement_source TEXT,
+            settled_at TEXT,
+            authority TEXT NOT NULL DEFAULT 'UNVERIFIED'
+                CHECK (authority IN ('VERIFIED', 'UNVERIFIED', 'QUARANTINED')),
+            pm_bin_lo REAL,
+            pm_bin_hi REAL,
+            unit TEXT,
+            settlement_source_type TEXT,
+            temperature_metric TEXT
+                CHECK (temperature_metric IS NULL OR temperature_metric IN ('high','low')),
+            physical_quantity TEXT,
+            observation_field TEXT
+                CHECK (observation_field IS NULL OR observation_field IN ('high_temp','low_temp')),
+            data_version TEXT,
+            provenance_json TEXT,
+            UNIQUE(city, target_date, temperature_metric)
+        )
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_settlements_city_date
+            ON settlements(city, target_date)
+    """)
+
+
+def _create_observations(conn: sqlite3.Connection) -> None:
+    """Create observations table + index. Idempotent. K1 forecast-class table."""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS observations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            city TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            source TEXT NOT NULL,
+            high_temp REAL,
+            low_temp REAL,
+            unit TEXT NOT NULL,
+            station_id TEXT,
+            fetched_at TEXT,
+            high_raw_value REAL,
+            high_raw_unit TEXT CHECK (high_raw_unit IN ('F', 'C', 'K')),
+            high_target_unit TEXT CHECK (high_target_unit IN ('F', 'C')),
+            low_raw_value REAL,
+            low_raw_unit TEXT CHECK (low_raw_unit IN ('F', 'C', 'K')),
+            low_target_unit TEXT CHECK (low_target_unit IN ('F', 'C')),
+            high_fetch_utc TEXT,
+            high_local_time TEXT,
+            high_collection_window_start_utc TEXT,
+            high_collection_window_end_utc TEXT,
+            low_fetch_utc TEXT,
+            low_local_time TEXT,
+            low_collection_window_start_utc TEXT,
+            low_collection_window_end_utc TEXT,
+            timezone TEXT,
+            utc_offset_minutes INTEGER,
+            dst_active INTEGER CHECK (dst_active IN (0, 1)),
+            is_ambiguous_local_hour INTEGER CHECK (is_ambiguous_local_hour IN (0, 1)),
+            is_missing_local_hour INTEGER CHECK (is_missing_local_hour IN (0, 1)),
+            hemisphere TEXT CHECK (hemisphere IN ('N', 'S')),
+            season TEXT CHECK (season IN ('DJF', 'MAM', 'JJA', 'SON')),
+            month INTEGER CHECK (month BETWEEN 1 AND 12),
+            rebuild_run_id TEXT,
+            data_source_version TEXT,
+            authority TEXT NOT NULL DEFAULT 'UNVERIFIED'
+                CHECK (authority IN ('VERIFIED', 'UNVERIFIED', 'QUARANTINED')),
+            high_provenance_metadata TEXT,
+            low_provenance_metadata TEXT,
+            UNIQUE(city, target_date, source)
+        )
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_observations_city_date
+            ON observations(city, target_date, source)
+    """)
+
+
+def _create_source_run(conn: sqlite3.Connection) -> None:
+    """Create source_run table + indexes. Idempotent. K1 forecast-class table."""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS source_run (
+            source_run_id TEXT PRIMARY KEY,
+            source_id TEXT NOT NULL,
+            track TEXT NOT NULL,
+            release_calendar_key TEXT NOT NULL,
+            ingest_mode TEXT NOT NULL CHECK (ingest_mode IN (
+                'SCHEDULED_LIVE','BOOT_CATCHUP','HOLE_BACKFILL','ARCHIVE_BACKFILL'
+            )),
+            origin_mode TEXT NOT NULL CHECK (origin_mode IN (
+                'SCHEDULED_LIVE','BOOT_CATCHUP','HOLE_BACKFILL','ARCHIVE_BACKFILL'
+            )),
+            source_cycle_time TEXT NOT NULL,
+            source_issue_time TEXT,
+            source_release_time TEXT,
+            source_available_at TEXT,
+            fetch_started_at TEXT,
+            fetch_finished_at TEXT,
+            captured_at TEXT,
+            imported_at TEXT,
+            valid_time_start TEXT,
+            valid_time_end TEXT,
+            target_local_date TEXT,
+            city_id TEXT,
+            city_timezone TEXT,
+            temperature_metric TEXT
+                CHECK (temperature_metric IS NULL OR temperature_metric IN ('high','low')),
+            physical_quantity TEXT,
+            observation_field TEXT,
+            data_version TEXT,
+            expected_members INTEGER,
+            observed_members INTEGER,
+            expected_steps_json TEXT NOT NULL DEFAULT '[]',
+            observed_steps_json TEXT NOT NULL DEFAULT '[]',
+            expected_count INTEGER,
+            observed_count INTEGER,
+            completeness_status TEXT NOT NULL CHECK (completeness_status IN (
+                'COMPLETE','PARTIAL','MISSING','NOT_RELEASED'
+            )),
+            partial_run INTEGER NOT NULL DEFAULT 0 CHECK (partial_run IN (0,1)),
+            raw_payload_hash TEXT,
+            manifest_hash TEXT,
+            status TEXT NOT NULL CHECK (status IN (
+                'RUNNING','SUCCESS','FAILED','PARTIAL','SKIPPED_NOT_RELEASED'
+            )),
+            reason_code TEXT,
+            recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            CHECK (partial_run = 0 OR completeness_status = 'PARTIAL')
+        )
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_source_run_source_cycle
+            ON source_run(source_id, track, source_cycle_time)
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_source_run_scope
+            ON source_run(city_id, city_timezone, target_local_date,
+                          temperature_metric, data_version)
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_source_run_status
+            ON source_run(status, completeness_status, source_cycle_time)
+    """)
+
+
+def init_schema_forecasts(conn: sqlite3.Connection) -> None:
+    """Create all 7 forecast-class tables on zeus-forecasts.db. Idempotent.
+
+    Tables owned by this DB post-K1 migration:
+      settlements, observations, source_run  (from db.py)
+      settlements_v2, market_events_v2, ensemble_snapshots_v2,
+      calibration_pairs_v2  (from v2_schema.py)
+
+    Sets PRAGMA user_version = SCHEMA_FORECASTS_VERSION as the final step.
+    Safe to call on an empty DB (fresh-deploy bootstrap) or on an existing DB
+    (idempotent: CREATE IF NOT EXISTS / duplicate-column suppression).
+
+    K1 split 2026-05-11 — do NOT call init_schema() on the forecasts conn;
+    that would create world-class tables on the wrong DB.
+    """
+    _busy_ms = int(os.environ.get("ZEUS_DB_BUSY_TIMEOUT_MS", "30000"))
+    conn.execute(f"PRAGMA busy_timeout = {_busy_ms}")
+
+    # 3 legacy-origin forecast tables (previously in init_schema executescript)
+    _create_settlements(conn)
+    _create_observations(conn)
+    _create_source_run(conn)
+
+    # 4 v2 forecast tables (previously in apply_v2_schema)
+    from src.state.schema.v2_schema import (
+        _create_settlements_v2,
+        _create_market_events_v2,
+        _create_ensemble_snapshots_v2,
+        _create_calibration_pairs_v2,
+    )
+    _create_settlements_v2(conn)
+    _create_market_events_v2(conn)
+    _create_ensemble_snapshots_v2(conn)
+    _create_calibration_pairs_v2(conn)
+
+    # Mark schema current — MUST be last (partial failure must not mark ready).
+    conn.execute(f"PRAGMA user_version = {SCHEMA_FORECASTS_VERSION}")
+
+
+def init_schema_world_only(conn: Optional[sqlite3.Connection] = None) -> None:
+    """Create world-class tables on zeus-world.db. Idempotent.
+
+    Delegates to init_schema(_v2_forecast_tables=False) so the 4 v2
+    forecast-class tables (settlements_v2, market_events_v2,
+    ensemble_snapshots_v2, calibration_pairs_v2) are not re-created on the
+    world conn post-K1 migration. The world executescript block still contains
+    settlements/observations/source_run CREATE IF NOT EXISTS — those are
+    idempotent no-ops post-migration after §5.4 renames them away.
+
+    This function replaces the init_schema(world_conn) call at
+    src/ingest_main.py:1042 after §5.4 migration runs (§5.10 sequencing).
+    Do NOT wire into ingest_main before §5.4 completes.
+
+    K1 split 2026-05-11.
+    """
+    init_schema(conn, _v2_forecast_tables=False)
+
+
+def assert_schema_current_forecasts(conn: sqlite3.Connection) -> None:
+    """O(1) currency check for zeus-forecasts.db.
+
+    Mirrors assert_schema_current for the forecast DB. Called at boot by
+    ingest daemon after init_schema_forecasts completes, and by hot-path
+    callers (calibration, observation writer, etc.) as a ≤1 ms guard.
+
+    K1 split 2026-05-11.
+    """
+    v = conn.execute("PRAGMA user_version").fetchone()[0]
+    if v != SCHEMA_FORECASTS_VERSION:
+        raise SchemaOutOfDateError(
+            f"forecasts user_version={v}, "
+            f"SCHEMA_FORECASTS_VERSION={SCHEMA_FORECASTS_VERSION}; "
+            "init_schema_forecasts did not run at boot, or migration missing."
         )
 
 
