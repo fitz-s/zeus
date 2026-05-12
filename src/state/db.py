@@ -683,6 +683,16 @@ def get_connection(
     return conn
 
 
+# Last reused or audited: 2026-05-11
+# Authority basis: PLAN docs/operations/task_2026-05-11_init_schema_boot_invariant/PLAN.md
+# Schema currency sentinel. Bump on EVERY DDL change in this file OR in
+# init_provenance_projection_schema (:1729) OR apply_v2_schema (:2222).
+# CI hook scripts/check_schema_version.py diffs the sqlite_master hash of
+# a fresh-init DB against tests/state/_schema_pinned_hash.txt and fails
+# the PR if SCHEMA_VERSION did not change in lockstep.
+SCHEMA_VERSION = 1
+
+
 def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
     """Create all Zeus tables. Idempotent.
 
@@ -2043,6 +2053,14 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
                 )
             conn.execute("DROP TABLE settlements")
             conn.execute("ALTER TABLE settlements_migrated RENAME TO settlements")
+            # REOPEN-2 idempotency: DROP TABLE above silently drops
+            # idx_settlements_city_date; recreate it inside this migration
+            # block so REL-3b (legacy-DB second-run hash stability) holds.
+            # Fresh DBs take this index via the executescript at db.py:1310.
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_settlements_city_date"
+                " ON settlements(city, target_date)"
+            )
     except sqlite3.OperationalError:
         # Fresh DBs where settlements doesn't exist yet fall through to
         # CREATE TABLE IF NOT EXISTS above (which now declares new UNIQUE).
@@ -2220,10 +2238,26 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
     # Phase 2: apply v2 schema (idempotent — safe to run on every boot).
     from src.state.schema.v2_schema import apply_v2_schema as _apply_v2_schema
     _apply_v2_schema(conn)
+    conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
     if own_conn:
         conn.commit()
         conn.close()
+
+
+class SchemaOutOfDateError(RuntimeError):
+    """PRAGMA user_version != SCHEMA_VERSION."""
+
+
+def assert_schema_current(conn: sqlite3.Connection) -> None:
+    """O(1) currency check (page-1 metadata).
+    Boot: trade DB src/main.py:692, world DB src/ingest_main.py:1035."""
+    v = conn.execute("PRAGMA user_version").fetchone()[0]
+    if v != SCHEMA_VERSION:
+        raise SchemaOutOfDateError(
+            f"PRAGMA user_version={v}, SCHEMA_VERSION={SCHEMA_VERSION}; "
+            "boot init_schema did not run, or migration missing."
+        )
 
 
 _CALIBRATION_DECISION_GROUP_DDL = """
