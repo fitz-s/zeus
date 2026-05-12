@@ -260,7 +260,11 @@ _WLA_SQLITE_CONNECT_ALLOWLIST = frozenset({
 
     # --- deferred non-mechanical rewrite (separate phase, cited PR #86) ---
     "scripts/verify_truth_surfaces.py",             # deferred_nonmechanical (PR #86)
+
+    # --- K1 forecast DB split migration script (2026-05-11) ---
+    "scripts/migrate_world_to_forecasts.py",         # k1_migration: operator-mediated bulk copy to zeus-forecasts.db; not runtime daemon
 })
+
 
 
 def _wla_is_bypassed() -> bool:
