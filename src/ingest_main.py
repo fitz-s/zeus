@@ -1149,15 +1149,27 @@ def main() -> None:
         max_instances=1, coalesce=True, misfire_grace_time=3600,
     )
 
-    # TIGGE archive backfill — 14:00 UTC, target = today - 2 days (post-embargo).
-    # Distinct from the live Open Data feed; serves the Platt training set and
-    # historical audit trail. Renamed from ingest_tigge_daily so health
-    # dashboards and operators see the role explicitly.
-    _scheduler.add_job(
-        _tigge_archive_backfill_cycle, "cron",
-        hour=14, minute=0, id="ingest_tigge_archive_backfill",
-        max_instances=1, coalesce=True, misfire_grace_time=3600,
-    )
+    # TIGGE archive backfill REMOVED from data daemon 2026-05-11 (K1 structural
+    # fix per analyst aa28d70b8cceae626 + architect add8334a4c5803f11).
+    #
+    # TIGGE is NOT load-bearing for live trading. Live trading reads
+    # platt_models_v2 (pre-fit Platt artifact) at src/calibration/store.py:690+,
+    # never raw TIGGE snapshots. TIGGE only feeds the offline training pipeline
+    # (rebuild_calibration_pairs_v2.py + refit_platt_v2.py — both
+    # operator-driven, never daemon-driven).
+    #
+    # Co-tenanting TIGGE's high-latency BULK writer with the live-trading
+    # critical path on a single shared world DB is the K1 design failure that
+    # caused the 2026-05-11 wedge (open_ens 12Z cycle blocked 35+ min behind
+    # TIGGE startup catch-up holding db_writer_lock).
+    #
+    # TIGGE backfill is now operator-driven. To advance the rolling edge:
+    #   python -m src.data.tigge_pipeline --target-date YYYY-MM-DD
+    # See `local_post_extract_chain.sh` for the canonical operator workflow
+    # (rebuild + refit run on tigge_stage_*.db; world DB is never locked).
+    #
+    # Future refactor: TIGGE pipeline runs in its own process writing to its
+    # own DB, merges into world DB during a maintenance window.
 
     # Boot-time catch-up fires immediately via 'date' trigger.
     from datetime import datetime as _dt_now
