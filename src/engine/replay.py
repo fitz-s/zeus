@@ -2473,7 +2473,7 @@ def run_trade_history_audit(start_date: str, end_date: str) -> ReplaySummary:
         settlement = conn.execute(
             """
             SELECT settlement_value
-            FROM world.settlements
+            FROM forecasts.settlements
             WHERE city = ? AND target_date = ? AND temperature_metric = ?
               AND authority = 'VERIFIED'
             """,
