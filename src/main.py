@@ -114,7 +114,7 @@ def _harvester_cycle():
     harvester path, which can derive and write settlement truth in the same lane.
     """
     from src.data.dual_run_lock import acquire_lock
-    from src.state.db import get_trade_connection, get_world_connection
+    from src.state.db import get_trade_connection, get_forecasts_connection
     with acquire_lock("harvester_pnl") as acquired:
         if not acquired:
             logger.info("harvester_pnl_resolver skipped_lock_held")
@@ -122,13 +122,14 @@ def _harvester_cycle():
         try:
             from src.execution.harvester_pnl_resolver import resolve_pnl_for_settled_markets
             # v4 plan §AX3: harvester PnL resolver = LIVE class.
+            # K1 (2026-05-11): settlements → zeus-forecasts.db; pass forecasts conn.
             trade_conn = get_trade_connection(write_class="live")
-            world_conn = get_world_connection(write_class="live")
+            forecasts_conn = get_forecasts_connection(write_class="live")
             try:
-                result = resolve_pnl_for_settled_markets(trade_conn, world_conn)
+                result = resolve_pnl_for_settled_markets(trade_conn, forecasts_conn)
             finally:
                 trade_conn.close()
-                world_conn.close()
+                forecasts_conn.close()
         except ImportError as exc:
             logger.error(
                 "harvester_pnl_resolver unavailable; refusing legacy run_harvester fallback: %s",
