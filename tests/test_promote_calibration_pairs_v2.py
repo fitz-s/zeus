@@ -364,6 +364,45 @@ def test_promote_creates_verifiable_backup(tmp_path, capsys):
         bk.close()
 
 
+def test_promote_skip_backup_writes_no_artifact(tmp_path, capsys):
+    """--skip-backup must omit the .db artifact and emit a clear notice."""
+    stage = tmp_path / "stage.db"
+    prod = tmp_path / "prod.db"
+    _build_db(stage)
+    _build_db(prod)
+    s = sqlite3.connect(str(stage))
+    _insert_complete_sentinel(s, "high", DV_HIGH)
+    _insert_pair(s, "Tokyo", DV_HIGH, pair_id=1001)
+    s.commit()
+    s.close()
+    p = sqlite3.connect(str(prod))
+    _insert_pair(p, "OldCity", DV_HIGH, pair_id=1)
+    p.commit()
+    p.close()
+
+    backup_dir = tmp_path / "backups"
+    args = P.build_parser().parse_args([
+        "promote", "--stage-db", str(stage), "--prod-db", str(prod),
+        "--metrics", "high", "--commit", "--skip-backup",
+        "--backup-dir", str(backup_dir),
+    ])
+    rc = args.func(args)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "SKIPPING backup" in out, f"missing --skip-backup notice: {out!r}"
+    # No .db artifact must appear in backup_dir under --skip-backup
+    backups = list(backup_dir.glob("*.db"))
+    assert backups == [], f"--skip-backup must not write .db: {backups}"
+    # And the promotion must still have applied
+    p = sqlite3.connect(str(prod))
+    high_cities = {r[0] for r in p.execute(
+        "SELECT city FROM calibration_pairs_v2 WHERE data_version = ?",
+        (DV_HIGH,),
+    )}
+    p.close()
+    assert high_cities == {"Tokyo"}
+
+
 def test_promote_rollback_on_integrity_failure(tmp_path, capsys, monkeypatch):
     stage = tmp_path / "stage.db"
     prod = tmp_path / "prod.db"

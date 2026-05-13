@@ -622,12 +622,21 @@ def cmd_promote(args: argparse.Namespace) -> int:
         stage.close()
         return 0
 
-    # Backup first
+    # Backup first (unless --skip-backup).
     backup_dir = Path(args.backup_dir).resolve()
-    print(f"Creating backup in {backup_dir}...")
-    backup_path = _backup_prod_tables(prod_path, metrics, backup_dir)
-    print(f"  + {backup_path} ({backup_path.stat().st_size:,} bytes)")
-    print()
+    if getattr(args, "skip_backup", False):
+        backup_path = None
+        print(
+            f"i SKIPPING backup (--skip-backup). Recovery source: "
+            f"STAGE_DB={stage_path}; existing gzipped backups under "
+            f"{backup_dir} remain available."
+        )
+        print()
+    else:
+        print(f"Creating backup in {backup_dir}...")
+        backup_path = _backup_prod_tables(prod_path, metrics, backup_dir)
+        print(f"  + {backup_path} ({backup_path.stat().st_size:,} bytes)")
+        print()
 
     # Close the read-only STAGE handle BEFORE writable promote opens
     # PROD with ATTACH. The ATTACH path re-opens STAGE read-only via
@@ -709,11 +718,20 @@ def cmd_promote(args: argparse.Namespace) -> int:
                 prod_rw.execute("ROLLBACK")
                 print()
                 print(f"x ROLLBACK due to: {exc}")
-                print(f"  Backup is at: {backup_path}")
-                print(
-                    "  Restore via: gunzip -c BACKUP | sqlite3 PROD_DB"
-                    " (after manually clearing affected data_versions)"
-                )
+                if backup_path is not None:
+                    print(f"  Backup is at: {backup_path}")
+                    print(
+                        "  Restore via the .db artifact:"
+                        " ATTACH '<backup.db>' AS bak;"
+                        " INSERT INTO calibration_pairs_v2"
+                        " SELECT * FROM bak.calibration_pairs_v2;"
+                    )
+                else:
+                    print(
+                        "  --skip-backup was set; recovery source is STAGE_DB"
+                        f" ({stage_path}). Pre-existing gzipped backups under"
+                        f" {Path(args.backup_dir).resolve()} remain available."
+                    )
                 raise
         finally:
             # DETACH inside the outer try so we always release STAGE
@@ -843,6 +861,14 @@ def build_parser() -> argparse.ArgumentParser:
                          "promotion that wipes PROD rows for the requested "
                          "data_versions (DANGEROUS).")
     pp.add_argument("--backup-dir", default="state/backups")
+    pp.add_argument("--skip-backup", action="store_true",
+                    help="Skip the pre-promotion .db backup of PROD "
+                         "calibration_pairs_v2. Use only when STAGE_DB is a "
+                         "verified recovery source AND disk space is tight "
+                         "(the backup VACUUM INTO step alone needs ~PROD_SIZE "
+                         "GB free + transient scratch). Existing gzipped "
+                         "backups under --backup-dir remain available as "
+                         "older fallbacks. DANGEROUS without that fallback.")
     pp.add_argument("--commit", action="store_true",
                     help="Apply changes. Without this flag, dry-run only.")
     pp.set_defaults(func=cmd_promote)
