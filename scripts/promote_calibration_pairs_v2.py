@@ -1,6 +1,9 @@
 # Created: 2026-05-12
-# Last reused or audited: 2026-05-12
+# Last reused or audited: 2026-05-13
 # Authority basis: K1 workload-class DB split; PR #112 Option (c) split.
+# 2026-05-13: Replaced Python row-by-row promote loop with ATTACH+SQL
+# bulk path (INSERT INTO ... SELECT FROM stage.calibration_pairs_v2)
+# after first attempt blocked on 83M-row workload (6.6k rows/sec ~= 3.5h).
 # STAGE_DB -> production zeus-forecasts.db promotion of calibration_pairs_v2
 # artifacts produced by scripts/rebuild_calibration_pairs_v2.py.
 # All mutations are gated by --commit; default behavior is dry-run with
@@ -569,77 +572,104 @@ def cmd_promote(args: argparse.Namespace) -> int:
     print(f"  + {backup_path} ({backup_path.stat().st_size:,} bytes)")
     print()
 
+    # Close the read-only STAGE handle BEFORE writable promote opens
+    # PROD with ATTACH. The ATTACH path re-opens STAGE read-only via
+    # the writable PROD connection, so holding a second handle is
+    # wasteful and risks lock contention if STAGE were ever modified
+    # concurrently. (Stage cols already captured above.)
+    cols = _column_names(stage, TARGET_TABLE)
+    stage.close()
+    col_list = ",".join(cols)
+    # Build the SELECT column expression. With --null-snapshot-id, the
+    # snapshot_id column is emitted as a literal NULL via SQL instead of
+    # the source column, so the ATTACH path matches the legacy Python
+    # null-snapshot semantics row-for-row without a per-row branch.
+    select_exprs = [f"NULL AS {c}" if (args.null_snapshot_id and c == "snapshot_id") else c
+                    for c in cols]
+    select_list = ",".join(select_exprs)
+    dv_placeholders = ",".join("?" * len(requested_dvs))
+
     # Apply
-    print("Opening PROD writable...")
+    print("Opening PROD writable + ATTACH STAGE read-only...")
     prod_rw = _rw_connect(prod_path)
     try:
-        prod_rw.execute("BEGIN IMMEDIATE")
+        # ATTACH STAGE_DB read-only on the same connection so the
+        # INSERT...SELECT can stream rows DB-to-DB without round-tripping
+        # through Python. The mode=ro URI ensures the ATTACH cannot
+        # mutate STAGE even by accident.
+        stage_uri = f"file:{stage_path}?mode=ro"
+        prod_rw.execute("ATTACH DATABASE ? AS stage", (stage_uri,))
         try:
-            cols = _column_names(stage, TARGET_TABLE)
-            placeholders = ",".join("?" for _ in cols)
-            col_list = ",".join(cols)
-            # Delete
-            deleted = prod_rw.execute(
-                f"DELETE FROM {TARGET_TABLE} WHERE data_version IN "
-                f"({','.join('?' * len(requested_dvs))})",
-                tuple(requested_dvs),
-            ).rowcount
-            print(f"  {TARGET_TABLE}: deleted {deleted:,} rows")
-            # Insert
-            cur = stage.execute(
-                f"SELECT {col_list} FROM {TARGET_TABLE} WHERE data_version IN "
-                f"({','.join('?' * len(requested_dvs))})",
-                tuple(requested_dvs),
-            )
-            inserted = 0
-            batch: list[tuple] = []
-            for row in cur:
-                rec = tuple(row)
-                if args.null_snapshot_id:
-                    # NULL out snapshot_id column
-                    idx = cols.index("snapshot_id")
-                    rec = rec[:idx] + (None,) + rec[idx + 1 :]
-                batch.append(rec)
-                if len(batch) >= 5000:
-                    prod_rw.executemany(
-                        f"INSERT INTO {TARGET_TABLE} ({col_list}) VALUES ({placeholders})",
-                        batch,
+            prod_rw.execute("BEGIN IMMEDIATE")
+            try:
+                # Verify ATTACHed STAGE schema matches PROD's. Defensive:
+                # we already checked above via separate connections but
+                # the ATTACH-side view is what the INSERT actually uses,
+                # and a STAGE that diverged between checks would corrupt
+                # the SELECT projection.
+                stage_attach_cols = [
+                    row[1] for row in
+                    prod_rw.execute("PRAGMA stage.table_info(calibration_pairs_v2)").fetchall()
+                ]
+                if stage_attach_cols != cols:
+                    raise RuntimeError(
+                        f"ATTACH stage.{TARGET_TABLE} column drift: "
+                        f"expected {cols}, got {stage_attach_cols}"
                     )
-                    inserted += len(batch)
-                    batch.clear()
-            if batch:
-                prod_rw.executemany(
-                    f"INSERT INTO {TARGET_TABLE} ({col_list}) VALUES ({placeholders})",
-                    batch,
-                )
-                inserted += len(batch)
-            print(f"  {TARGET_TABLE}: inserted {inserted:,} rows")
 
-            # Integrity check (extracted for testability)
-            print("Running PRAGMA integrity_check...")
-            ic_status = _run_integrity_check(prod_rw)
-            if ic_status != "ok":
-                raise RuntimeError(
-                    f"integrity_check FAILED: {ic_status}; rolling back."
-                )
-            print(f"  + {ic_status}")
+                # Delete: same scoping as legacy path.
+                deleted = prod_rw.execute(
+                    f"DELETE FROM {TARGET_TABLE} WHERE data_version IN ({dv_placeholders})",
+                    tuple(requested_dvs),
+                ).rowcount
+                print(f"  {TARGET_TABLE}: deleted {deleted:,} rows")
 
-            prod_rw.execute("COMMIT")
-            print()
-            print("+ PROMOTION COMMITTED")
-        except Exception as exc:
-            prod_rw.execute("ROLLBACK")
-            print()
-            print(f"x ROLLBACK due to: {exc}")
-            print(f"  Backup is at: {backup_path}")
-            print(
-                "  Restore via: gunzip -c BACKUP | sqlite3 PROD_DB"
-                " (after manually clearing affected data_versions)"
-            )
-            raise
+                # Bulk INSERT...SELECT from ATTACHed STAGE. SQLite executes
+                # this entirely inside its own engine: no Python row
+                # iteration, no executemany batching, no per-row branch.
+                cur = prod_rw.execute(
+                    f"INSERT INTO {TARGET_TABLE} ({col_list}) "
+                    f"SELECT {select_list} FROM stage.{TARGET_TABLE} "
+                    f"WHERE data_version IN ({dv_placeholders})",
+                    tuple(requested_dvs),
+                )
+                inserted = cur.rowcount
+                print(f"  {TARGET_TABLE}: inserted {inserted:,} rows")
+
+                # Integrity check (extracted for testability)
+                print("Running PRAGMA integrity_check...")
+                ic_status = _run_integrity_check(prod_rw)
+                if ic_status != "ok":
+                    raise RuntimeError(
+                        f"integrity_check FAILED: {ic_status}; rolling back."
+                    )
+                print(f"  + {ic_status}")
+
+                prod_rw.execute("COMMIT")
+                print()
+                print("+ PROMOTION COMMITTED")
+            except Exception as exc:
+                prod_rw.execute("ROLLBACK")
+                print()
+                print(f"x ROLLBACK due to: {exc}")
+                print(f"  Backup is at: {backup_path}")
+                print(
+                    "  Restore via: gunzip -c BACKUP | sqlite3 PROD_DB"
+                    " (after manually clearing affected data_versions)"
+                )
+                raise
+        finally:
+            # DETACH inside the outer try so we always release STAGE
+            # whether the BEGIN/COMMIT branch succeeded or rolled back.
+            try:
+                prod_rw.execute("DETACH DATABASE stage")
+            except sqlite3.OperationalError:
+                # ATTACH may have failed before BEGIN — DETACH would
+                # then raise "no such database: stage". Swallow to keep
+                # the outer error context.
+                pass
     finally:
         prod_rw.close()
-        stage.close()
 
     print()
     print("=== Final PROD row counts ===")
