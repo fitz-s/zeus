@@ -64,7 +64,6 @@ Constraints
 from __future__ import annotations
 
 import argparse
-import gzip
 import json
 import os
 import sqlite3
@@ -387,67 +386,106 @@ def _backup_prod_tables(
     metrics: list[str],
     backup_dir: Path,
 ) -> Path:
-    """Atomic, gzipped SQL dump of calibration_pairs_v2 rows matching any of
-    the metric data_versions. Returns final backup file path.
+    """Atomic, bit-exact backup of PROD ``calibration_pairs_v2`` rows
+    matching any of the metric data_versions. Returns final backup
+    file path.
 
-    Independently verifiable: ``gunzip -t`` then sqlite3 import + count.
+    2026-05-13: Replaced gzipped per-row SQL dump with ``VACUUM INTO``
+    (single-statement SQLite engine bulk copy) followed by an in-place
+    trim of non-target tables/rows. On the 35 GB PROD DB the legacy
+    Python row-by-row gzip path projected ~11h wall-clock; VACUUM INTO
+    runs at SSD bandwidth (~10-15 min for full PROD). The result is a
+    standalone ``.db`` file restorable via:
+
+        sqlite3 PROD_DB \\
+          "ATTACH '<backup.db>' AS bak; \\
+           DELETE FROM calibration_pairs_v2 WHERE data_version IN (...); \\
+           INSERT INTO calibration_pairs_v2 SELECT * FROM bak.calibration_pairs_v2;"
+
+    Atomicity: VACUUM INTO writes to a ``.tmp`` path that we move into
+    place only after the trim+VACUUM succeeds. Independently
+    verifiable: ``sqlite3 backup.db "PRAGMA integrity_check"``.
     """
     backup_dir.mkdir(parents=True, exist_ok=True)
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    final = backup_dir / f"zeus-forecasts.db.calibration_pairs_v2_pre_promotion_{ts}.sql.gz"
-    tmp = final.with_suffix(final.suffix + ".tmp")
+    final = backup_dir / f"zeus-forecasts.db.calibration_pairs_v2_pre_promotion_{ts}.db"
+    tmp = final.with_suffix(".db.tmp")
+    # VACUUM INTO refuses to write to an existing file. Clear any prior
+    # tmp from a killed run; the final path is timestamped so it cannot
+    # collide.
+    if tmp.exists():
+        tmp.unlink()
 
     requested_dvs: list[str] = []
     for m in metrics:
         requested_dvs.extend(METRIC_TO_DATA_VERSIONS[m])
+    dv_placeholders = ",".join("?" * len(requested_dvs))
 
     conn = _ro_connect(prod_path)
     try:
-        with gzip.open(tmp, "wt", encoding="utf-8") as gz:
-            gz.write("-- Zeus calibration_pairs_v2 pre-promotion backup\n")
-            gz.write(f"-- Generated: {datetime.now(timezone.utc).isoformat()}\n")
-            gz.write(f"-- Source PROD: {prod_path}\n")
-            gz.write(f"-- Metrics: {','.join(metrics)}\n")
-            gz.write(f"-- Data versions: {','.join(requested_dvs)}\n")
-            gz.write(f"-- Tables backed up: {TARGET_TABLE}\n\n")
-            gz.write("BEGIN TRANSACTION;\n")
-            cols = _column_names(conn, TARGET_TABLE)
-            placeholders = ",".join(cols)
-            where = (
-                f"WHERE data_version IN ({','.join('?' * len(requested_dvs))})"
-            )
-            cur = conn.execute(
-                f"SELECT {placeholders} FROM {TARGET_TABLE} {where}",
-                tuple(requested_dvs),
-            )
-            row_count = 0
-            for row in cur:
-                vals = [_sql_literal(v) for v in row]
-                gz.write(
-                    f"INSERT INTO {TARGET_TABLE} ({placeholders}) VALUES ({','.join(vals)});\n"
-                )
-                row_count += 1
-            gz.write(f"-- {TARGET_TABLE}: {row_count} rows backed up\n")
-            gz.write("COMMIT;\n")
+        # Single-statement bulk copy. SQLite streams pages directly;
+        # no Python row iteration. Output is a fully-formed SQLite DB
+        # with the same schema as PROD.
+        conn.execute("VACUUM INTO ?", (str(tmp),))
     finally:
         conn.close()
 
+    # Trim the backup: keep ONLY TARGET_TABLE rows whose data_version
+    # is in scope, drop every other table. We keep zeus_meta (sentinel
+    # archive — useful for forensics) but drop other large tables to
+    # bring the backup down to roughly the size of the target rows.
+    trim = sqlite3.connect(str(tmp))
+    try:
+        keep_tables = {TARGET_TABLE, "zeus_meta"}
+        # Drop indexes/triggers/views referencing non-kept tables first
+        # to avoid cascading errors. sqlite_master lists everything.
+        others = [
+            row[0] for row in trim.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE type='table' AND name NOT IN ({}) "
+                "AND name NOT LIKE 'sqlite_%'".format(
+                    ",".join(f"'{t}'" for t in keep_tables)
+                )
+            )
+        ]
+        for t in others:
+            trim.execute(f"DROP TABLE IF EXISTS \"{t}\"")
+        # Scope TARGET_TABLE rows
+        trim.execute(
+            f"DELETE FROM {TARGET_TABLE} WHERE data_version NOT IN ({dv_placeholders})",
+            tuple(requested_dvs),
+        )
+        trim.commit()
+        # Reclaim space + verify integrity. VACUUM here is on a small
+        # post-trim DB so it's fast.
+        trim.execute("VACUUM")
+        ic = trim.execute("PRAGMA integrity_check").fetchone()[0]
+        if str(ic) != "ok":
+            raise RuntimeError(
+                f"Backup integrity check failed: {ic} for {tmp}"
+            )
+        # Record provenance metadata in zeus_meta. Idempotent under
+        # INSERT OR REPLACE.
+        meta_key = "calibration_pairs_v2_backup_provenance"
+        meta_value = json.dumps({
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "source_prod": str(prod_path),
+            "metrics": list(metrics),
+            "data_versions": requested_dvs,
+            "tool": "promote_calibration_pairs_v2.py",
+        })
+        # Ensure zeus_meta exists in the trimmed backup. PROD already
+        # has it (sentinels live there) so VACUUM INTO carried it.
+        trim.execute(
+            "INSERT OR REPLACE INTO zeus_meta (key, value) VALUES (?, ?)",
+            (meta_key, meta_value),
+        )
+        trim.commit()
+    finally:
+        trim.close()
+
     os.replace(tmp, final)
-    # Verify gzip integrity
-    with gzip.open(final, "rb") as fh:
-        head = fh.read(64)
-    if not head.startswith(b"-- Zeus calibration_pairs_v2 pre-promotion"):
-        raise RuntimeError(f"Backup integrity check failed: bad header in {final}")
     return final
-
-
-def _sql_literal(value: object) -> str:
-    if value is None:
-        return "NULL"
-    if isinstance(value, (int, float)):
-        return repr(value)
-    s = str(value).replace("'", "''")
-    return f"'{s}'"
 
 
 # --------------------------------------------------------------------------

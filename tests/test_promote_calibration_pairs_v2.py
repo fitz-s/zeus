@@ -13,7 +13,6 @@ on zeus-world.db and is covered by tests/test_promote_platt_models_v2.py).
 
 from __future__ import annotations
 
-import gzip
 import hashlib
 import json
 import sqlite3
@@ -311,21 +310,58 @@ def test_promote_creates_verifiable_backup(tmp_path, capsys):
     capsys.readouterr()
     assert rc == 0
 
-    # Filename must be zeus-forecasts.db.calibration_pairs_v2_pre_promotion_*.sql.gz
-    # (K1: forecasts DB; sibling script writes zeus-world.db.platt_models_v2_*).
+    # 2026-05-13: Backup format changed from .sql.gz dump to .db (SQLite
+    # VACUUM INTO) for ~50x speed on 35 GB PROD. Filename now ends
+    # in .db; restorable via ATTACH + INSERT...SELECT.
     backups = list(
-        backup_dir.glob("zeus-forecasts.db.calibration_pairs_v2_pre_promotion_*.sql.gz")
+        backup_dir.glob("zeus-forecasts.db.calibration_pairs_v2_pre_promotion_*.db")
     )
     assert len(backups) == 1, f"expected 1 backup, got {backups}"
     backup = backups[0]
-    # Verify gzip integrity
-    with gzip.open(backup, "rt") as fh:
-        content = fh.read()
-    assert "ToBeBackedUpCity" in content, "Backup must contain pre-promotion row"
-    assert "BEGIN TRANSACTION;" in content
-    assert "COMMIT;" in content
-    # Backup must NOT include platt_models_v2 (lives on zeus-world.db).
-    assert "platt_models_v2" not in content
+
+    # Open the backup as an actual SQLite DB and verify it contains
+    # the pre-promotion row in calibration_pairs_v2 scoped to the
+    # requested data_versions.
+    bk = sqlite3.connect(str(backup))
+    try:
+        ic = bk.execute("PRAGMA integrity_check").fetchone()[0]
+        assert ic == "ok", f"backup integrity_check = {ic}"
+        cities = {
+            r[0] for r in bk.execute(
+                "SELECT city FROM calibration_pairs_v2 WHERE data_version = ?",
+                (DV_HIGH,),
+            )
+        }
+        assert "ToBeBackedUpCity" in cities, (
+            f"Backup must contain pre-promotion row; got {cities}"
+        )
+        # Scope guard: backup must NOT contain rows for any other
+        # data_version (the trim step deletes them).
+        other = bk.execute(
+            "SELECT COUNT(*) FROM calibration_pairs_v2 WHERE data_version != ?",
+            (DV_HIGH,),
+        ).fetchone()[0]
+        assert other == 0, (
+            f"Backup must be scoped to requested data_versions; "
+            f"found {other} rows with other data_versions"
+        )
+        # Backup must NOT include platt_models_v2 (lives on zeus-world.db).
+        platt_tables = bk.execute(
+            "SELECT COUNT(*) FROM sqlite_master "
+            "WHERE type='table' AND name='platt_models_v2'"
+        ).fetchone()[0]
+        assert platt_tables == 0, "Backup must not contain platt_models_v2"
+        # Provenance metadata must be written by the backup function.
+        prov_row = bk.execute(
+            "SELECT value FROM zeus_meta WHERE key = ?",
+            ("calibration_pairs_v2_backup_provenance",),
+        ).fetchone()
+        assert prov_row is not None, "Backup must record provenance in zeus_meta"
+        prov = json.loads(prov_row[0])
+        assert prov["tool"] == "promote_calibration_pairs_v2.py"
+        assert DV_HIGH in prov["data_versions"]
+    finally:
+        bk.close()
 
 
 def test_promote_rollback_on_integrity_failure(tmp_path, capsys, monkeypatch):
