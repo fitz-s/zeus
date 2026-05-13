@@ -456,9 +456,28 @@ def _backup_prod_tables(
             tuple(requested_dvs),
         )
         trim.commit()
-        # Reclaim space + verify integrity. VACUUM here is on a small
-        # post-trim DB so it's fast.
-        trim.execute("VACUUM")
+        # Drop user-defined indexes on TARGET_TABLE to shrink the
+        # backup artifact. Restoration via ATTACH+INSERT lands rows in
+        # PROD which has its own indexes; the backup does not need
+        # them. ``sqlite_autoindex_*`` indexes (PRIMARY KEY / UNIQUE)
+        # are owned by SQLite and cannot be dropped without redefining
+        # the table -- skip them.
+        idx_rows = list(trim.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' "
+            "AND tbl_name=? AND name NOT LIKE 'sqlite_autoindex_%'",
+            (TARGET_TABLE,),
+        ))
+        for (idx_name,) in idx_rows:
+            trim.execute(f'DROP INDEX IF EXISTS "{idx_name}"')
+        trim.commit()
+        # Verify integrity post-DELETE+DROP INDEX. We intentionally
+        # skip the post-DELETE VACUUM: SQLite's VACUUM copies the
+        # entire DB to ``$TMPDIR/etilqs_*`` scratch then renames over
+        # the source, which on a near-full disk fails with
+        # SQLITE_FULL. The backup file is correct without VACUUM (just
+        # larger than ideal -- it carries free pages from the DELETEd
+        # rows and dropped indexes). The contents are what matters for
+        # restore, not the file size.
         ic = trim.execute("PRAGMA integrity_check").fetchone()[0]
         if str(ic) != "ok":
             raise RuntimeError(
