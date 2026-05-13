@@ -38,13 +38,11 @@ NOW_UTC = datetime(2026, 5, 11, 9, 0, tzinfo=UTC)
 # ---------------------------------------------------------------------------
 
 def _make_conn() -> sqlite3.Connection:
-    from src.state.db import init_schema
-    from src.state.schema.v2_schema import apply_v2_schema
+    from src.state.db import init_schema_forecasts
 
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
-    init_schema(conn)
-    apply_v2_schema(conn)
+    init_schema_forecasts(conn)
     return conn
 
 
