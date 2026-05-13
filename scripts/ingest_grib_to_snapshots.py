@@ -60,6 +60,7 @@ from src.contracts.ensemble_snapshot_provenance import (
 from src.contracts.settlement_semantics import SettlementSemantics
 from src.contracts.snapshot_ingest_contract import validate_snapshot_contract
 from src.contracts.tigge_snapshot_payload import ProvenanceViolation, TiggeSnapshotPayload
+from src.runtime.timeout_guard import run_with_timeout
 from src.state.canonical_write import commit_then_export
 from src.state.db import get_world_connection
 from src.state.db_writer_lock import WriteClass, db_writer_lock  # noqa: E402
@@ -729,7 +730,20 @@ def ingest_track(
         logger.warning(msg)
         return {"error": f"json_root_missing: {subdir}", "written": 0, "skipped": 0, "errors": 0}
 
-    all_json = sorted(subdir.rglob("*.json"))
+    # ECMWF hang antibody #2 (2026-05-13) — fail-loud on a stalled rglob.
+    # Witnessed 2026-05-12: daemon held the forecasts.db BULK writer-lock
+    # for 12h with WAL=0 bytes (no SQL frame ever opened). One of the
+    # plausible blockers is ``subdir.rglob("*.json")`` against a stale
+    # ``51 source data`` mount.  ``signal.alarm`` is not usable here
+    # (APScheduler ThreadPoolExecutor → non-main thread); the helper
+    # uses a one-shot ThreadPoolExecutor to bound wall-clock cost.
+    # The wedged thread leaks until daemon restart — by design; the
+    # win is converting a 12h silent hold into a loud TimeoutError.
+    all_json = run_with_timeout(
+        lambda: sorted(subdir.rglob("*.json")),
+        seconds=30.0,
+        label="rglob_json_scan",
+    )
 
     # MAJOR-2: fail-loud if no JSON files found — silent zero-row runs mask missing extraction step.
     if require_files and not all_json:

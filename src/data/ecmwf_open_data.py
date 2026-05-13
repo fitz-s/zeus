@@ -76,7 +76,11 @@ from src.data.forecast_target_contract import (
 from src.data.producer_readiness import build_producer_readiness_for_scope
 from src.data.forecast_source_registry import gate_source, gate_source_role
 from src.data.release_calendar import FetchDecision, select_source_run_for_target_horizon
-from src.state.db import get_forecasts_connection as get_connection, ZEUS_FORECASTS_DB_PATH
+from src.state.db import (
+    ZEUS_FORECASTS_DB_PATH,
+    assert_schema_current_forecasts,
+    get_forecasts_connection as get_connection,
+)
 from src.state.db_writer_lock import WriteClass, db_writer_lock
 from src.state.source_run_coverage_repo import write_source_run_coverage
 from src.state.source_run_repo import write_source_run
@@ -88,6 +92,19 @@ FIFTY_ONE_ROOT = PROJECT_ROOT.parent / "51 source data"
 # (see PLAN docs/operations/task_2026-05-11_ecmwf_download_replacement/PLAN.md)
 EXTRACT_SCRIPT = FIFTY_ONE_ROOT / "scripts" / "extract_open_ens_localday.py"
 INGEST_SCRIPT_DIR = PROJECT_ROOT / "scripts"
+
+# ECMWF hang antibody #1 (2026-05-13) — eager-import ingest_grib_to_snapshots
+# at module load so the first ``collect_open_ens_cycle`` call cannot block
+# on first-time module init while holding the forecasts.db BULK writer-lock.
+# Witnessed 2026-05-12 13:31 PDT: daemon held BULK flock for 12h with WAL=0
+# bytes (no SQL write ever opened) — see /tmp/zeus_ecmwf_critic_review.md.
+if str(INGEST_SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(INGEST_SCRIPT_DIR))
+import ingest_grib_to_snapshots as _ingest_grib_module  # type: ignore  # noqa: E402
+from ingest_grib_to_snapshots import (  # type: ignore  # noqa: E402
+    SourceRunContext as _ingest_grib_SourceRunContext,
+    ingest_track as _ingest_grib_ingest_track,
+)
 
 # ECMWF Open Data ENS dissemination grid (enfo cf/pf, mx2t3/mn2t3/2t):
 #   0–144h by 3h, then 150–360h by 6h.
@@ -1046,27 +1063,46 @@ def collect_open_ens_cycle(
         # Injected connection (test seam with in-memory sqlite) — skip file lock.
         _lock_ctx = nullcontext()
     with _lock_ctx:
+        # ECMWF hang antibody #3 (2026-05-13) — boundary INFO logs at every
+        # transition inside the BULK lock so the next 12h hang has a log
+        # line pinpointing the failing stage. Witnessed 2026-05-12 13:31
+        # PDT silence; see /tmp/zeus_ecmwf_critic_review.md.
+        _ingest_t0 = time.monotonic()
+        logger.info(
+            "ingest_stage: lock_acquired track=%s source_run_id=%s",
+            track,
+            source_run_id,
+        )
         if own_conn:
             conn = get_connection()
         try:
-            # Make scripts/ importable so we can call ingest_track.
-            if str(INGEST_SCRIPT_DIR) not in sys.path:
-                sys.path.insert(0, str(INGEST_SCRIPT_DIR))
-            from ingest_grib_to_snapshots import SourceRunContext, ingest_track as _ingest  # type: ignore
-            from src.state.db import assert_schema_current_forecasts
-
             assert_schema_current_forecasts(conn)
+            logger.info(
+                "ingest_stage: schema_ok track=%s elapsed_ms=%d",
+                track,
+                int((time.monotonic() - _ingest_t0) * 1000),
+            )
             # The opendata extract writes JSON files to a different subdir than
             # TIGGE — reuse the same ingester by passing the parent directory and
             # the matching track name, and override the json_subdir lookup via the
             # _TRACK_CONFIGS dict. Cleanest in-process integration: temporarily
             # rebind the json_subdir for this call.
-            import ingest_grib_to_snapshots as _module  # type: ignore
-
-            original_subdir = _module._TRACK_CONFIGS[cfg["ingest_track"]]["json_subdir"]
-            _module._TRACK_CONFIGS[cfg["ingest_track"]]["json_subdir"] = cfg["extract_subdir"]
+            # NOTE 2026-05-13: ingest_grib_to_snapshots is now eager-imported at
+            # module top (antibody #1); we reference _ingest_grib_module rather
+            # than re-running the import inside the BULK lock.
+            original_subdir = _ingest_grib_module._TRACK_CONFIGS[cfg["ingest_track"]]["json_subdir"]
+            _ingest_grib_module._TRACK_CONFIGS[cfg["ingest_track"]]["json_subdir"] = cfg["extract_subdir"]
             try:
-                summary = _ingest(
+                # Boundary marker — rglob happens inside ingest_track. We log
+                # before/after at this layer so the daemon log shows the
+                # entry/exit boundary even if rglob hangs (and the timeout
+                # guard in ingest_track raises).
+                logger.info(
+                    "ingest_stage: rglob_start track=%s subdir=%s",
+                    track,
+                    cfg["extract_subdir"],
+                )
+                summary = _ingest_grib_ingest_track(
                     track=cfg["ingest_track"],
                     json_root=FIFTY_ONE_ROOT / "raw",
                     conn=conn,
@@ -1075,7 +1111,7 @@ def collect_open_ens_cycle(
                     cities=None,
                     overwrite=True,
                     require_files=False,
-                    source_run_context=SourceRunContext(
+                    source_run_context=_ingest_grib_SourceRunContext(
                         source_id=SOURCE_ID,
                         source_transport="ensemble_snapshots_v2_db_reader",
                         source_run_id=source_run_id,
@@ -1085,8 +1121,15 @@ def collect_open_ens_cycle(
                         source_available_at=source_release_time,
                     ),
                 )
+                logger.info(
+                    "ingest_stage: rglob_end track=%s written=%s skipped_exists=%s parse_error=%s",
+                    track,
+                    summary.get("written"),
+                    summary.get("skipped_exists"),
+                    summary.get("parse_error"),
+                )
             finally:
-                _module._TRACK_CONFIGS[cfg["ingest_track"]]["json_subdir"] = original_subdir
+                _ingest_grib_module._TRACK_CONFIGS[cfg["ingest_track"]]["json_subdir"] = original_subdir
             status = _status_for_ingest_summary(summary)
             authority_computed_at = (now_utc or datetime.now(timezone.utc)).astimezone(timezone.utc)
             authority_summary = _write_source_authority_chain(
@@ -1107,7 +1150,18 @@ def collect_open_ens_cycle(
                 download_partial_run=_partial_cycle if download_observed_steps is not None else None,
                 download_reason_code=_download_reason_code,
             )
+            logger.info(
+                "ingest_stage: commit_start track=%s status=%s",
+                track,
+                status,
+            )
             conn.commit()
+            logger.info(
+                "ingest_stage: commit_end track=%s status=%s total_ms=%d",
+                track,
+                status,
+                int((time.monotonic() - _ingest_t0) * 1000),
+            )
         finally:
             if own_conn:
                 conn.close()
