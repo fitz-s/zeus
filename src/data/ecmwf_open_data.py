@@ -1023,6 +1023,11 @@ def collect_open_ens_cycle(
         )
         stages.append(extract)
         if not extract["ok"]:
+            _write_stderr_dump(
+                PROJECT_ROOT / "tmp"
+                / f"ecmwf_open_data_{cycle_date.isoformat()}_{cycle_hour:02d}z_{track}.extract_stderr.txt",
+                extract.get("stderr_tail", ""),
+            )
             return {
                 "status": "extract_failed",
                 "track": track,
