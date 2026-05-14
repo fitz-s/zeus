@@ -1,7 +1,7 @@
 # Created: prior; restructured 2026-05-01
-# Last reused or audited: 2026-05-12
-# Authority basis: architect D1 (ECMWF throttle), AGENTS.md money path
-#   Prior: PLAN docs/operations/task_2026-05-11_ecmwf_download_replacement/PLAN.md
+# Last reused/audited: 2026-05-14
+# Authority basis: docs/operations/task_2026-05-14_data_daemon_live_efficiency/DATA_DAEMON_LIVE_EFFICIENCY_REFACTOR_PLAN.md
+#   Phase 1 HTTP 429 Retry-After handling + fetch timing contract.
 #   ECMWF Open Data has ~6-8h latency (vs. TIGGE's 48h public embargo) so it
 #   is the live-trading source for same-day forecasts. Rows must land in
 #   ensemble_snapshots_v2 with the canonical local-calendar-day data_version
@@ -13,11 +13,9 @@ Replaces the legacy 2t-instantaneous + ensemble_snapshots (v1) write path.
 
 Pipeline
 --------
-1. Download single GRIB containing all 51 members × 71 step hours for the
-   requested run (mx2t6 OR mn2t6 per call) via in-process parallel SDK
-   fetches at per-step file granularity (``_fetch_one_step`` +
-   ``ThreadPoolExecutor(max_workers=5)``), concatenated on success.
-   Refactored 2026-05-11 per PLAN docs/operations/task_2026-05-11_ecmwf_download_replacement/PLAN.md.
+1. Download single GRIB containing all 51 members × 60 step hours for the
+   requested run (mx2t6 OR mn2t6 per call) via
+   ``51 source data/scripts/download_ecmwf_open_ens.py``.
 2. Run ``51 source data/scripts/extract_open_ens_localday.py`` to produce
    per-(city, target_local_date, lead_day) JSON records that conform to the
    TiggeSnapshotPayload contract.
@@ -47,19 +45,17 @@ from __future__ import annotations
 
 import json
 import logging
-import os
+import math
+import re
 import subprocess
 import sys
 import hashlib
-import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import nullcontext
 from datetime import date, datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, Optional
-
-import requests
 
 from src.config import PROJECT_ROOT, runtime_cities_by_name
 from src.contracts.ensemble_snapshot_provenance import (
@@ -76,11 +72,7 @@ from src.data.forecast_target_contract import (
 from src.data.producer_readiness import build_producer_readiness_for_scope
 from src.data.forecast_source_registry import gate_source, gate_source_role
 from src.data.release_calendar import FetchDecision, select_source_run_for_target_horizon
-from src.state.db import (
-    ZEUS_FORECASTS_DB_PATH,
-    assert_schema_current_forecasts,
-    get_forecasts_connection as get_connection,
-)
+from src.state.db import get_world_connection as get_connection, ZEUS_WORLD_DB_PATH
 from src.state.db_writer_lock import WriteClass, db_writer_lock
 from src.state.source_run_coverage_repo import write_source_run_coverage
 from src.state.source_run_repo import write_source_run
@@ -88,23 +80,9 @@ from src.state.source_run_repo import write_source_run
 logger = logging.getLogger(__name__)
 
 FIFTY_ONE_ROOT = PROJECT_ROOT.parent / "51 source data"
-# DOWNLOAD_SCRIPT deleted 2026-05-11: replaced by in-process parallel SDK fetch
-# (see PLAN docs/operations/task_2026-05-11_ecmwf_download_replacement/PLAN.md)
+DOWNLOAD_SCRIPT = FIFTY_ONE_ROOT / "scripts" / "download_ecmwf_open_ens.py"
 EXTRACT_SCRIPT = FIFTY_ONE_ROOT / "scripts" / "extract_open_ens_localday.py"
 INGEST_SCRIPT_DIR = PROJECT_ROOT / "scripts"
-
-# ECMWF hang antibody #1 (2026-05-13) — eager-import ingest_grib_to_snapshots
-# at module load so the first ``collect_open_ens_cycle`` call cannot block
-# on first-time module init while holding the forecasts.db BULK writer-lock.
-# Witnessed 2026-05-12 13:31 PDT: daemon held BULK flock for 12h with WAL=0
-# bytes (no SQL write ever opened) — see /tmp/zeus_ecmwf_critic_review.md.
-if str(INGEST_SCRIPT_DIR) not in sys.path:
-    sys.path.insert(0, str(INGEST_SCRIPT_DIR))
-import ingest_grib_to_snapshots as _ingest_grib_module  # type: ignore  # noqa: E402
-from ingest_grib_to_snapshots import (  # type: ignore  # noqa: E402
-    SourceRunContext as _ingest_grib_SourceRunContext,
-    ingest_track as _ingest_grib_ingest_track,
-)
 
 # ECMWF Open Data ENS dissemination grid (enfo cf/pf, mx2t3/mn2t3/2t):
 #   0–144h by 3h, then 150–360h by 6h.
@@ -155,84 +133,13 @@ TRACKS: dict[str, dict] = {
 SOURCE_ID = "ecmwf_open_data"
 FORECAST_SOURCE_ROLE = "diagnostic"
 MODEL_VERSION = "ecmwf_open_data"
-
-# ECMWF Open Data is replicated across multiple mirrors. AWS empirically 3× faster
-# than ecmwf direct portal (which has a 500-simultaneous-connection limit per
-# ECMWF docs). Order: aws (CDN, fastest), google (CDN, backup), ecmwf (origin, fallback).
-# 404 on any mirror means upstream hasn't released — no point rotating (mirrors sync
-# within 5s of origin, measured 2026-05-11).
-_DOWNLOAD_SOURCES: tuple[str, ...] = ("aws", "google", "ecmwf")
-
-# ---------------------------------------------------------------------------
-# Token-bucket rate limiter (D1 throttle antibody — 2026-05-12)
-# ---------------------------------------------------------------------------
-# AWS S3 / ECMWF multiurl returns HTTP 503 Slow Down when request burst rate
-# exceeds provider limits. The token bucket is a module-level singleton shared
-# across ALL worker threads and BOTH tracks (mx2t6_high + mn2t6_low run at
-# minute=30 and minute=35 respectively via ingest_main.py, so up to
-# 2 × _DOWNLOAD_MAX_WORKERS fetches can be in flight simultaneously).
-#
-# Primary throttle mechanism: the token bucket caps sustained throughput at
-# ZEUS_ECMWF_RPS requests/sec regardless of worker count. Worker reduction
-# (2 vs 5) reduces BURST, not sustained rate — it is secondary.
-#
-# DO NOT revert workers to 1: 2 workers + 4 rps bucket is the tested and
-# operator-approved operating point. The prior revert to 1 was a linter
-# misread of the antibody comment. See architect D1 and commit message.
-
-class _TokenBucket:
-    """Simple token-bucket rate limiter (thread-safe).
-
-    Fills at ``rate`` tokens/sec; each ``acquire()`` consumes one token,
-    sleeping until a token is available.  Implemented as a leaky-bucket
-    gate (refill on demand) rather than a background thread so there is no
-    daemon thread to manage across fork/test boundaries.
-    """
-
-    def __init__(self, rate: float) -> None:
-        self._rate = rate  # tokens per second
-        self._lock = threading.Lock()
-        self._tokens: float = rate  # start full so first request is instant
-        self._last_refill: float = time.monotonic()
-
-    def acquire(self) -> None:
-        """Block until one token is available, then consume it."""
-        with self._lock:
-            now = time.monotonic()
-            elapsed = now - self._last_refill
-            self._tokens = min(self._rate, self._tokens + elapsed * self._rate)
-            self._last_refill = now
-            if self._tokens >= 1.0:
-                self._tokens -= 1.0
-                return
-            wait = (1.0 - self._tokens) / self._rate
-        time.sleep(wait)
-        with self._lock:
-            now = time.monotonic()
-            elapsed = now - self._last_refill
-            self._tokens = min(self._rate, self._tokens + elapsed * self._rate)
-            self._last_refill = now
-            self._tokens = max(0.0, self._tokens - 1.0)
-
-
-_DOWNLOAD_RPS: float = float(os.environ.get("ZEUS_ECMWF_RPS", "4.0"))
-_fetch_bucket: _TokenBucket = _TokenBucket(_DOWNLOAD_RPS)
-
-# ---------------------------------------------------------------------------
-# Parallel-fetch constants (antibody-style: no call-site kwargs).
-# Single-writer antibody: SQLite writes are PROHIBITED inside worker threads —
-# HTTP fetch only; all DB writes happen on the main thread after futures complete.
-# ---------------------------------------------------------------------------
-# Workers=2 (not 1, not 5): 2 workers reduces concurrency burst while keeping
-# pipeline throughput reasonable. The token bucket (_fetch_bucket, 4 rps) is
-# the PRIMARY throttle against AWS S3 503 Slow Down; worker count is secondary.
-# Env override: ZEUS_ECMWF_MAX_WORKERS (operator-set; survives linter audits).
-_DOWNLOAD_MAX_WORKERS: int = int(os.environ.get("ZEUS_ECMWF_MAX_WORKERS", "2"))
-_PER_STEP_TIMEOUT_SECONDS: int = 90
-_PER_STEP_MAX_RETRIES: int = int(os.environ.get("ZEUS_ECMWF_PER_STEP_RETRIES", "2"))
-_PER_STEP_RETRY_AFTER: int = int(os.environ.get("ZEUS_ECMWF_PER_STEP_RETRY_AFTER", "5"))
-# 404 → NOT_RELEASED (no retry); all others below trigger retry then failover.
-_RETRYABLE_HTTP: frozenset[int] = frozenset({500, 502, 503, 504, 408, 429})
+OPENDATA_DAEMON_LOCK_KEY = "ecmwf_open_data"
+DEFAULT_DOWNLOAD_RETRY_DELAY_SECONDS = 60
+MAX_DOWNLOAD_ATTEMPTS = 2
+_RETRY_AFTER_HEADER_RE = re.compile(r"(?im)^\s*retry-after\s*:\s*(?P<value>[^\r\n]+)")
+_RETRY_AFTER_TEXT_RE = re.compile(
+    r"(?i)\bretry[- ]after(?:\s+|[=:]\s*)(?P<value>\d+(?:\.\d+)?)\b"
+)
 
 
 def _conda_python() -> str:
@@ -292,6 +199,66 @@ def _status_for_ingest_summary(summary: dict) -> str:
     if written == 0 and skipped == 0:
         return "empty_ingest"
     return "ok"
+
+
+def _parse_retry_after_seconds(value: object, *, now_utc: datetime) -> int | None:
+    """Parse HTTP Retry-After seconds from a header value or direct test seam."""
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        if math.isfinite(value) and value >= 0:
+            return int(math.ceil(value))
+        return None
+
+    text = str(value).strip().strip('"')
+    if not text:
+        return None
+    if re.fullmatch(r"\d+(?:\.\d+)?", text):
+        return int(math.ceil(float(text)))
+
+    try:
+        retry_at = parsedate_to_datetime(text)
+    except (TypeError, ValueError, IndexError, OverflowError):
+        return None
+    if retry_at.tzinfo is None:
+        retry_at = retry_at.replace(tzinfo=timezone.utc)
+    now = now_utc.astimezone(timezone.utc)
+    return int(math.ceil(max(0.0, (retry_at.astimezone(timezone.utc) - now).total_seconds())))
+
+
+def _retry_after_response_time_utc() -> datetime:
+    """Clock seam for HTTP-date Retry-After calculations."""
+    return datetime.now(timezone.utc)
+
+
+def _retry_after_seconds_from_download(download: dict, *, now_utc: datetime) -> int | None:
+    for key in ("retry_after_seconds", "retry_after", "Retry-After"):
+        parsed = _parse_retry_after_seconds(download.get(key), now_utc=now_utc)
+        if parsed is not None:
+            return parsed
+
+    stderr = str(download.get("stderr_tail", "") or "")
+    for match in _RETRY_AFTER_HEADER_RE.finditer(stderr):
+        parsed = _parse_retry_after_seconds(match.group("value"), now_utc=now_utc)
+        if parsed is not None:
+            return parsed
+    for match in _RETRY_AFTER_TEXT_RE.finditer(stderr):
+        parsed = _parse_retry_after_seconds(match.group("value"), now_utc=now_utc)
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _download_retry_delay_seconds(
+    download: dict,
+    *,
+    fallback_seconds: int,
+    response_time_utc: datetime,
+) -> int:
+    retry_after = _retry_after_seconds_from_download(download, now_utc=response_time_utc)
+    if retry_after is not None:
+        return retry_after
+    return fallback_seconds
 
 
 def _stable_id(prefix: str, *parts: object) -> str:
@@ -389,18 +356,7 @@ def _write_source_authority_chain(
     forecast_track: str,
     data_version: str,
     computed_at: datetime,
-    download_observed_steps: list[int] | None = None,
-    download_partial_run: bool | None = None,
-    download_reason_code: str | None = None,
 ) -> dict[str, int | str | None]:
-    """Write source_run + coverage rows for a completed ingest cycle.
-
-    download_observed_steps: when provided (PARTIAL cycles), overrides the
-    ingest-derived observed_steps approximation (line 309 below) with the
-    ground-truth step list from the download phase. This ensures
-    forecast_target_contract.evaluate_producer_coverage:184
-    (missing_steps = expected - observed) receives the accurate per-step set.
-    """
     rows = _snapshot_rows_for_source_run(
         conn,
         source_run_id=source_run_id,
@@ -414,20 +370,7 @@ def _write_source_authority_chain(
         for row in rows
         if row.get("step_horizon_hours") is not None
     ]
-    # download_observed_steps (from parallel fetch) takes precedence over the
-    # ingest-derived approximation: ingest computes steps from step_horizon_hours
-    # (a per-row high-water mark), which can overstate when far-horizon steps
-    # are absent. The download phase knows exactly which steps were fetched.
-    if download_observed_steps is not None:
-        observed_steps = list(download_observed_steps)
-        if download_partial_run is not None:
-            partial_run = download_partial_run
-            source_run_completeness = "PARTIAL" if partial_run else source_run_completeness
-            source_run_status = "PARTIAL" if partial_run else source_run_status
-        if download_reason_code is not None:
-            reason_code = download_reason_code
-    else:
-        observed_steps = [step for step in STEP_HOURS if observed_step_horizons and step <= min(observed_step_horizons)]
+    observed_steps = [step for step in STEP_HOURS if observed_step_horizons and step <= min(observed_step_horizons)]
 
     write_source_run(
         conn,
@@ -604,105 +547,6 @@ def _write_source_authority_chain(
     }
 
 
-def _fetch_one_step(
-    *,
-    cycle_date: date,
-    cycle_hour: int,
-    param: str,
-    step: int,
-    output_dir: Path,
-    mirrors: tuple[str, ...],
-) -> tuple[str, Any]:
-    """Fetch a single step for one param into a per-step canonical file.
-
-    Returns (status, detail) where status is one of:
-      "OK"           — file written and atomic-renamed; detail = Path
-      "NOT_RELEASED" — 404 on all mirrors; detail = None
-      "FAILED"       — retry budget exhausted; detail = error string
-
-    Per-step file naming uses param to avoid cross-track collision when
-    mx2t6_high (param=mx2t3) and mn2t6_low (param=mn2t3) run concurrently
-    (src/ingest_main.py:1133-1142, minute=30 vs minute=35; worst-case
-    2 × _DOWNLOAD_MAX_WORKERS in flight on the same output_dir).
-
-    Single-writer antibody: NO SQLite writes in this function — HTTP only.
-    All DB writes occur on the main thread after all futures complete.
-    """
-    canonical = output_dir / f".step{step:03d}_{param}.grib2"
-    partial   = canonical.with_suffix(".grib2.partial")
-    if canonical.exists() and canonical.stat().st_size > 0:
-        return ("OK", canonical)   # resume: already fetched in a prior attempt
-
-    from ecmwf.opendata import Client  # imported here: conda env only on main interpreter
-
-    last_err: str | None = None
-    for mirror in mirrors:
-        for attempt in range(_PER_STEP_MAX_RETRIES):
-            try:
-                _fetch_bucket.acquire()  # D1: token-bucket gate (4 rps shared across all workers)
-                Client(source=mirror).retrieve(
-                    date=int(cycle_date.strftime("%Y%m%d")),
-                    time=cycle_hour,
-                    stream="enfo",
-                    type=["cf", "pf"],
-                    step=[step],
-                    param=[param],
-                    target=str(partial),
-                )
-                os.replace(str(partial), str(canonical))   # atomic rename
-                return ("OK", canonical)
-            except requests.HTTPError as exc:
-                code = getattr(exc.response, "status_code", None)
-                if code == 404:
-                    # 404 means upstream has not published this step yet.
-                    # All mirrors sync within ~5 s of origin, so rotating
-                    # mirrors won't help — return immediately.
-                    return ("NOT_RELEASED", None)
-                if code in _RETRYABLE_HTTP:
-                    last_err = f"HTTP_{code}_mirror_{mirror}_attempt_{attempt}"
-                    time.sleep(_PER_STEP_RETRY_AFTER)
-                    continue
-                last_err = f"HTTP_{code}_mirror_{mirror}"
-                break   # non-retryable; try next mirror
-            except (requests.ConnectionError, requests.Timeout) as exc:
-                last_err = f"NET_{type(exc).__name__}_mirror_{mirror}_attempt_{attempt}"
-                time.sleep(_PER_STEP_RETRY_AFTER)
-                continue
-            except OSError as exc:
-                # disk/path errors during atomic rename or partial-file write
-                last_err = f"OS_{type(exc).__name__}_mirror_{mirror}"
-                break   # unexpected at filesystem layer; try next mirror
-            except ValueError as exc:
-                # SDK raises ValueError("Cannot find index entries matching ...")
-                # when the requested step is absent from the .index file
-                # (step not yet published). All mirrors sync from the same
-                # index — rotating won't help. PLAN v3 §5.1 expected HTTP 404
-                # here, but multiurl resolves the index BEFORE the byte-range
-                # GET, so a missing step manifests as ValueError, not HTTPError.
-                if "Cannot find index entries matching" in str(exc):
-                    return ("NOT_RELEASED", None)
-                raise   # Unknown ValueError — propagate
-            # ImportError, AttributeError, TypeError, etc. propagate to the
-            # ThreadPoolExecutor future; main thread surfaces them in logs.
-            # Antibody 2026-05-11: silent-swallow of ModuleNotFoundError caused
-            # post-deploy 23ms-fast-fail with no traceback.
-    return ("FAILED", last_err or "EXHAUSTED")
-
-
-def _concat_steps(ok_steps: list[int], param: str, output_dir: Path, output_path: Path) -> None:
-    """Concatenate per-step GRIB2 files into the canonical output_path.
-
-    GRIB2 is self-delimiting; step order does not affect extractor correctness
-    (REL-1, REL-6). We write in ascending step order for determinism.
-    """
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(output_path, "wb") as out:
-        for step in sorted(ok_steps):
-            step_file = output_dir / f".step{step:03d}_{param}.grib2"
-            if step_file.exists():
-                out.write(step_file.read_bytes())
-
-
 def _run_subprocess(args: list[str], *, label: str, timeout: int) -> dict:
     logger.info("ecmwf_open_data %s: %s", label, " ".join(args[:6]) + " ...")
     try:
@@ -743,13 +587,12 @@ def collect_open_ens_cycle(
     track: str = "mx2t6_high",
     run_date: Optional[date] = None,
     run_hour: Optional[int] = None,
-    download_timeout_seconds: int = 1500,  # kept for API compat; parallel fetch uses _PER_STEP_TIMEOUT_SECONDS
+    download_timeout_seconds: int = 1500,  # was 600 — empirical full-fetch 609.6s for 71 steps × 51 members × 1.5GB
     extract_timeout_seconds: int = 900,
     skip_download: bool = False,
     skip_extract: bool = False,
     conn=None,
     _runner=None,
-    _fetch_impl=None,  # test seam: replaces _fetch_one_step; callable with same signature
     now_utc: datetime | None = None,
 ) -> dict:
     """Download + extract + ingest one Open Data ENS run for one track.
@@ -775,6 +618,12 @@ def collect_open_ens_cycle(
         raise ValueError(f"Unknown track {track!r}; expected one of {sorted(TRACKS)}")
     cfg = TRACKS[track]
     runner = _runner or _run_subprocess
+    cycle_started = time.monotonic()
+    timing_ms: dict[str, int] = {"retry_sleep_seconds": 0}
+
+    def _finish_timing() -> dict[str, int]:
+        timing_ms["total_ms"] = int(max(0.0, (time.monotonic() - cycle_started) * 1000))
+        return dict(timing_ms)
 
     source_spec = gate_source(SOURCE_ID)
     gate_source_role(source_spec, FORECAST_SOURCE_ROLE)
@@ -794,6 +643,7 @@ def collect_open_ens_cycle(
                 "selection": selection_metadata,
                 "stages": [],
                 "snapshots_inserted": 0,
+                "timing_ms": _finish_timing(),
             }
         selected_cycle = selection_metadata["selected_cycle_time"]
         if not isinstance(selected_cycle, datetime):
@@ -826,211 +676,92 @@ def collect_open_ens_cycle(
     )
     stages: list[dict] = []
 
-    # download_observed_steps / _partial_cycle track which steps were actually
-    # fetched so _write_source_authority_chain can set the authoritative
-    # observed_steps_json and partial_run flag on the source_run row.
-    download_observed_steps: list[int] | None = None
-    _partial_cycle: bool = False
-    _download_reason_code: str | None = None
-
     if not skip_download:
-        fetch_fn = _fetch_impl or _fetch_one_step
-        output_dir = output_path.parent
-        output_dir.mkdir(parents=True, exist_ok=True)
-
-        # Dispatch one future per step.  _DOWNLOAD_MAX_WORKERS=5 is a module
-        # constant; no call-site kwarg (antibody: makes per-step parallelism
-        # category structurally module-owned, not caller-configured).
-        # Single-writer antibody: fetch_fn does HTTP only; no SQLite writes.
-        tasks = [(s, cfg["open_data_param"]) for s in STEP_HOURS]
-        results: dict[int, tuple[str, Any]] = {}
-        with ThreadPoolExecutor(max_workers=_DOWNLOAD_MAX_WORKERS) as ex:
-            fut2step = {
-                ex.submit(
-                    fetch_fn,
-                    cycle_date=cycle_date,
-                    cycle_hour=cycle_hour,
-                    param=p,
-                    step=s,
-                    output_dir=output_dir,
-                    mirrors=_DOWNLOAD_SOURCES,
-                ): s
-                for s, p in tasks
-            }
-            for fut in as_completed(fut2step, timeout=_PER_STEP_TIMEOUT_SECONDS * len(tasks)):
-                step = fut2step[fut]
-                try:
-                    results[step] = fut.result(timeout=_PER_STEP_TIMEOUT_SECONDS)
-                except Exception as exc:  # noqa: BLE001
-                    results[step] = ("FAILED", f"UNCAUGHT_{type(exc).__name__}: {exc}")
-            # Mark any steps not reached (stalled futures) as FAILED.
-            for fut, step in fut2step.items():
-                if step not in results:
-                    results[step] = ("FAILED", "STEP_TIMEOUT")
-
-        ok_steps       = sorted(s for s, (st, _) in results.items() if st == "OK")
-        released_404   = sorted(s for s, (st, _) in results.items() if st == "NOT_RELEASED")
-        failed_steps   = sorted(s for s, (st, _) in results.items() if st == "FAILED")
-
-        logger.info(
-            "ecmwf_open_data parallel_fetch %s: ok=%d not_released=%d failed=%d mirror_first_try=aws",
-            track, len(ok_steps), len(released_404), len(failed_steps),
+        download_started = time.monotonic()
+        _download_args = [
+            _conda_python(),
+            str(DOWNLOAD_SCRIPT),
+            "--date", cycle_date.isoformat(),
+            "--run-hour", str(cycle_hour),
+            "--step", *[str(s) for s in STEP_HOURS],
+            "--param", cfg["open_data_param"],
+            "--source", "ecmwf",
+            "--output-path", str(output_path),
+        ]
+        _stderr_dump = (
+            PROJECT_ROOT
+            / "tmp"
+            / f"ecmwf_open_data_{cycle_date.isoformat()}_{cycle_hour:02d}z_{track}.stderr.txt"
         )
-
-        # --- Early-return branches: FAILED and pure-NOT_RELEASED only ---
-        # SUCCESS and PARTIAL fall through to extract+ingest below.
-
-        if failed_steps:
-            reason = ";".join(
-                f"step{s}:{results[s][1]}" for s in failed_steps[:5]
-            )
-            _write_stderr_dump(
-                PROJECT_ROOT / "tmp"
-                / f"ecmwf_open_data_{cycle_date.isoformat()}_{cycle_hour:02d}z_{track}.stderr.txt",
-                reason,
-            )
-            # Write source_run FAILED row directly (no ingest will run).
-            computed_at = (now_utc or datetime.now(timezone.utc)).astimezone(timezone.utc)
-            try:
-                _sr_conn = conn
-                _sr_own = _sr_conn is None
-                if _sr_own:
-                    from src.state.db import get_forecasts_connection as _gfc
-                    _sr_conn = _gfc()
-                _sr_lock = (
-                    db_writer_lock(ZEUS_FORECASTS_DB_PATH, WriteClass.BULK)
-                    if _sr_own else None
+        # Bounded retry: attempt 1 immediately, attempt 2 after provider Retry-After
+        # when present, otherwise after the 60s local fallback.
+        # A 404 on a grid-valid step means data not yet published → SKIPPED_NOT_RELEASED (no retry).
+        # All other rc!=0 are retryable (transient network, rate-limit, timeout).
+        # No sleep occurs after the final failed attempt.
+        download = None
+        _next_retry_delay = 0
+        for _attempt in range(1, MAX_DOWNLOAD_ATTEMPTS + 1):
+            if _next_retry_delay > 0:
+                logger.info(
+                    "ecmwf_open_data download_%s: retry attempt %d/%d after %ds sleep",
+                    track, _attempt, MAX_DOWNLOAD_ATTEMPTS, _next_retry_delay,
                 )
-                with (_sr_lock if _sr_lock is not None else nullcontext()):
-                    write_source_run(
-                        _sr_conn,
-                        source_run_id=source_run_id,
-                        source_id=SOURCE_ID,
-                        track=forecast_track,
-                        release_calendar_key=release_calendar_key,
-                        source_cycle_time=source_cycle_time,
-                        source_issue_time=source_cycle_time,
-                        source_release_time=source_release_time,
-                        source_available_at=source_release_time,
-                        fetch_started_at=computed_at,
-                        fetch_finished_at=computed_at,
-                        captured_at=computed_at,
-                        imported_at=computed_at,
-                        data_version=cfg["data_version"],
-                        expected_members=51,
-                        observed_members=0,
-                        expected_steps_json=STEP_HOURS,
-                        observed_steps_json=ok_steps,
-                        expected_count=0,
-                        observed_count=0,
-                        completeness_status="MISSING",
-                        partial_run=False,
-                        status="FAILED",
-                        reason_code=reason[:500],
-                    )
-                    if _sr_own:
-                        _sr_conn.commit()
-                        _sr_conn.close()
-            except Exception as _sr_exc:  # noqa: BLE001
-                logger.warning("ecmwf_open_data: could not write FAILED source_run: %s", _sr_exc)
-            stages.append({
-                "label": f"download_parallel_{track}",
-                "ok": False,
-                "status": "FAILED",
-                "ok_steps": ok_steps,
-                "failed_steps": failed_steps,
-                "not_released_steps": released_404,
-            })
+                timing_ms["retry_sleep_seconds"] += _next_retry_delay
+                time.sleep(_next_retry_delay)
+            download = runner(
+                _download_args,
+                label=f"download_{track}",
+                timeout=download_timeout_seconds,
+            )
+            download = {**download, "attempt": _attempt}
+            if download["ok"]:
+                break
+            # Distinguish 404 on grid-valid step (not-yet-released) from other failures.
+            _stderr = download.get("stderr_tail", "") or ""
+            _is_404 = "404" in _stderr or "Not Found" in _stderr
+            if _is_404 and "No index entries" not in _stderr:
+                timing_ms["download_ms"] = int(max(0.0, (time.monotonic() - download_started) * 1000))
+                logger.warning(
+                    "ecmwf_open_data download_%s: 404 on grid-valid step — SKIPPED_NOT_RELEASED (attempt %d)",
+                    track, _attempt,
+                )
+                _write_stderr_dump(_stderr_dump, _stderr)
+                stages.append(download)
+                return {
+                    "status": "skipped_not_released",
+                    "track": track,
+                    "data_version": cfg["data_version"],
+                    "stages": stages,
+                    "snapshots_inserted": 0,
+                    "timing_ms": _finish_timing(),
+                }
+            if _attempt < MAX_DOWNLOAD_ATTEMPTS:
+                _next_retry_delay = _download_retry_delay_seconds(
+                    download,
+                    fallback_seconds=DEFAULT_DOWNLOAD_RETRY_DELAY_SECONDS,
+                    response_time_utc=_retry_after_response_time_utc(),
+                )
+                logger.warning(
+                    "ecmwf_open_data download_%s: rc=%d on attempt %d/%d — will retry after %ds",
+                    track, download.get("returncode", -1), _attempt, MAX_DOWNLOAD_ATTEMPTS, _next_retry_delay,
+                )
+        # Write stderr dump on final failure (any rc!=0 after all retries).
+        if not download["ok"]:
+            _write_stderr_dump(_stderr_dump, download.get("stderr_tail", "") or "")
+        stages.append(download)
+        timing_ms["download_ms"] = int(max(0.0, (time.monotonic() - download_started) * 1000))
+        if not download["ok"]:
             return {
                 "status": "download_failed",
                 "track": track,
                 "data_version": cfg["data_version"],
                 "stages": stages,
                 "snapshots_inserted": 0,
+                "timing_ms": _finish_timing(),
             }
-
-        if not ok_steps and released_404:
-            # Pure NOT_RELEASED: no usable steps at all.
-            reason = f"NOT_RELEASED_STEPS={released_404}"
-            computed_at = (now_utc or datetime.now(timezone.utc)).astimezone(timezone.utc)
-            try:
-                _sr_conn = conn
-                _sr_own = _sr_conn is None
-                if _sr_own:
-                    from src.state.db import get_forecasts_connection as _gfc
-                    _sr_conn = _gfc()
-                _sr_lock = (
-                    db_writer_lock(ZEUS_FORECASTS_DB_PATH, WriteClass.BULK)
-                    if _sr_own else None
-                )
-                with (_sr_lock if _sr_lock is not None else nullcontext()):
-                    write_source_run(
-                        _sr_conn,
-                        source_run_id=source_run_id,
-                        source_id=SOURCE_ID,
-                        track=forecast_track,
-                        release_calendar_key=release_calendar_key,
-                        source_cycle_time=source_cycle_time,
-                        source_issue_time=source_cycle_time,
-                        source_release_time=source_release_time,
-                        source_available_at=source_release_time,
-                        fetch_started_at=computed_at,
-                        fetch_finished_at=computed_at,
-                        captured_at=computed_at,
-                        imported_at=computed_at,
-                        data_version=cfg["data_version"],
-                        expected_members=51,
-                        observed_members=0,
-                        expected_steps_json=STEP_HOURS,
-                        observed_steps_json=[],
-                        expected_count=0,
-                        observed_count=0,
-                        completeness_status="NOT_RELEASED",
-                        partial_run=False,
-                        status="SKIPPED_NOT_RELEASED",
-                        reason_code=reason[:500],
-                    )
-                    if _sr_own:
-                        _sr_conn.commit()
-                        _sr_conn.close()
-            except Exception as _sr_exc:  # noqa: BLE001
-                logger.warning("ecmwf_open_data: could not write SKIPPED_NOT_RELEASED source_run: %s", _sr_exc)
-            stages.append({
-                "label": f"download_parallel_{track}",
-                "ok": False,
-                "status": "SKIPPED_NOT_RELEASED",
-                "ok_steps": [],
-                "failed_steps": [],
-                "not_released_steps": released_404,
-            })
-            return {
-                "status": "skipped_not_released",
-                "track": track,
-                "data_version": cfg["data_version"],
-                "stages": stages,
-                "snapshots_inserted": 0,
-            }
-
-        # SUCCESS (no released_404, no failed) OR PARTIAL (some OK + some 404).
-        # Both fall through to extract+ingest.  _write_source_authority_chain
-        # will receive download_observed_steps so it can set partial_run correctly.
-        _partial_cycle = bool(released_404)
-        _download_reason_code = f"NOT_RELEASED_STEPS={released_404}" if _partial_cycle else None
-        download_observed_steps = ok_steps
-
-        # Concat per-step files into the canonical output_path for the extractor.
-        _concat_steps(ok_steps, cfg["open_data_param"], output_dir, output_path)
-
-        stages.append({
-            "label": f"download_parallel_{track}",
-            "ok": True,
-            "status": "PARTIAL" if _partial_cycle else "SUCCESS",
-            "ok_steps": ok_steps,
-            "failed_steps": [],
-            "not_released_steps": released_404,
-        })
 
     if not skip_extract:
+        extract_started = time.monotonic()
         extract = runner(
             [
                 _conda_python(),
@@ -1043,70 +774,49 @@ def collect_open_ens_cycle(
             timeout=extract_timeout_seconds,
         )
         stages.append(extract)
+        timing_ms["extract_ms"] = int(max(0.0, (time.monotonic() - extract_started) * 1000))
         if not extract["ok"]:
-            _write_stderr_dump(
-                PROJECT_ROOT / "tmp"
-                / f"ecmwf_open_data_{cycle_date.isoformat()}_{cycle_hour:02d}z_{track}.extract_stderr.txt",
-                extract.get("stderr_tail", ""),
-            )
             return {
                 "status": "extract_failed",
                 "track": track,
                 "data_version": cfg["data_version"],
                 "stages": stages,
                 "snapshots_inserted": 0,
+                "timing_ms": _finish_timing(),
             }
 
     # Ingest stage — import in-process, share a single connection so the
     # caller's test fixture (in-memory sqlite) is honored. Production
-    # caller passes ``conn=None`` and we open the forecasts DB (K1 split).
+    # caller passes ``conn=None`` and we open the world DB.
     own_conn = conn is None
     if own_conn:
-        _lock_ctx = db_writer_lock(ZEUS_FORECASTS_DB_PATH, WriteClass.BULK)
+        _lock_ctx = db_writer_lock(ZEUS_WORLD_DB_PATH, WriteClass.BULK)
     else:
         # Injected connection (test seam with in-memory sqlite) — skip file lock.
         _lock_ctx = nullcontext()
+    ingest_started = time.monotonic()
     with _lock_ctx:
-        # ECMWF hang antibody #3 (2026-05-13) — boundary INFO logs at every
-        # transition inside the BULK lock so the next 12h hang has a log
-        # line pinpointing the failing stage. Witnessed 2026-05-12 13:31
-        # PDT silence; see /tmp/zeus_ecmwf_critic_review.md.
-        _ingest_t0 = time.monotonic()
-        logger.info(
-            "ingest_stage: lock_acquired track=%s source_run_id=%s",
-            track,
-            source_run_id,
-        )
         if own_conn:
             conn = get_connection()
         try:
-            assert_schema_current_forecasts(conn)
-            logger.info(
-                "ingest_stage: schema_ok track=%s elapsed_ms=%d",
-                track,
-                int((time.monotonic() - _ingest_t0) * 1000),
-            )
+            # Make scripts/ importable so we can call ingest_track.
+            if str(INGEST_SCRIPT_DIR) not in sys.path:
+                sys.path.insert(0, str(INGEST_SCRIPT_DIR))
+            from ingest_grib_to_snapshots import SourceRunContext, ingest_track as _ingest  # type: ignore
+            from src.state.db import init_schema
+
+            init_schema(conn)
             # The opendata extract writes JSON files to a different subdir than
             # TIGGE — reuse the same ingester by passing the parent directory and
             # the matching track name, and override the json_subdir lookup via the
             # _TRACK_CONFIGS dict. Cleanest in-process integration: temporarily
             # rebind the json_subdir for this call.
-            # NOTE 2026-05-13: ingest_grib_to_snapshots is now eager-imported at
-            # module top (antibody #1); we reference _ingest_grib_module rather
-            # than re-running the import inside the BULK lock.
-            original_subdir = _ingest_grib_module._TRACK_CONFIGS[cfg["ingest_track"]]["json_subdir"]
-            _ingest_grib_module._TRACK_CONFIGS[cfg["ingest_track"]]["json_subdir"] = cfg["extract_subdir"]
+            import ingest_grib_to_snapshots as _module  # type: ignore
+
+            original_subdir = _module._TRACK_CONFIGS[cfg["ingest_track"]]["json_subdir"]
+            _module._TRACK_CONFIGS[cfg["ingest_track"]]["json_subdir"] = cfg["extract_subdir"]
             try:
-                # Boundary marker — rglob happens inside ingest_track. We log
-                # before/after at this layer so the daemon log shows the
-                # entry/exit boundary even if rglob hangs (and the timeout
-                # guard in ingest_track raises).
-                logger.info(
-                    "ingest_stage: rglob_start track=%s subdir=%s",
-                    track,
-                    cfg["extract_subdir"],
-                )
-                summary = _ingest_grib_ingest_track(
+                summary = _ingest(
                     track=cfg["ingest_track"],
                     json_root=FIFTY_ONE_ROOT / "raw",
                     conn=conn,
@@ -1115,7 +825,7 @@ def collect_open_ens_cycle(
                     cities=None,
                     overwrite=True,
                     require_files=False,
-                    source_run_context=_ingest_grib_SourceRunContext(
+                    source_run_context=SourceRunContext(
                         source_id=SOURCE_ID,
                         source_transport="ensemble_snapshots_v2_db_reader",
                         source_run_id=source_run_id,
@@ -1125,15 +835,8 @@ def collect_open_ens_cycle(
                         source_available_at=source_release_time,
                     ),
                 )
-                logger.info(
-                    "ingest_stage: rglob_end track=%s written=%s skipped_exists=%s parse_error=%s",
-                    track,
-                    summary.get("written"),
-                    summary.get("skipped_exists"),
-                    summary.get("parse_error"),
-                )
             finally:
-                _ingest_grib_module._TRACK_CONFIGS[cfg["ingest_track"]]["json_subdir"] = original_subdir
+                _module._TRACK_CONFIGS[cfg["ingest_track"]]["json_subdir"] = original_subdir
             status = _status_for_ingest_summary(summary)
             authority_computed_at = (now_utc or datetime.now(timezone.utc)).astimezone(timezone.utc)
             authority_summary = _write_source_authority_chain(
@@ -1147,28 +850,12 @@ def collect_open_ens_cycle(
                 forecast_track=forecast_track,
                 data_version=cfg["data_version"],
                 computed_at=authority_computed_at,
-                # Pass download ground-truth so source_run.observed_steps_json
-                # reflects actual fetched steps, not an ingest-derived approximation.
-                # evaluate_producer_coverage:184 uses this for per-step MISSING detection.
-                download_observed_steps=download_observed_steps,
-                download_partial_run=_partial_cycle if download_observed_steps is not None else None,
-                download_reason_code=_download_reason_code,
-            )
-            logger.info(
-                "ingest_stage: commit_start track=%s status=%s",
-                track,
-                status,
             )
             conn.commit()
-            logger.info(
-                "ingest_stage: commit_end track=%s status=%s total_ms=%d",
-                track,
-                status,
-                int((time.monotonic() - _ingest_t0) * 1000),
-            )
         finally:
             if own_conn:
                 conn.close()
+    timing_ms["ingest_ms"] = int(max(0.0, (time.monotonic() - ingest_started) * 1000))
 
     stages = [
         *stages,
@@ -1191,6 +878,7 @@ def collect_open_ens_cycle(
         "snapshots_skipped": int(summary.get("skipped", 0)),
         **authority_summary,
         "stages": stages,
+        "timing_ms": _finish_timing(),
     }
 
 

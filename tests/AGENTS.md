@@ -49,6 +49,7 @@ authoritative machine registry is `architecture/test_topology.yaml`.
 | `test_dynamic_sql_baseline.py` | Pytest wrapper for check_dynamic_sql.py; security antibody for f-string SQL interpolations (created 2026-05-01) |
 | `test_edge_observation.py` | Cross-module antibody: alpha-decay tracker per strategy_key per R3 §1 #2 EDGE_OBSERVATION packet (created 2026-04-28) |
 | `test_edge_observation_weekly.py` | End-to-end runner antibody for edge observation batch-3 weekly dispatch (created 2026-04-28) |
+| `test_forecast_live_daemon.py` | Relationship antibody: forecast-live daemon owns only OpenData forecast jobs and shares the OpenData lock with legacy ingest during rollout (created 2026-05-14) |
 | `test_harvester_split_independence.py` | Antibody #12: structural boundary between ingest-side settlement harvester and trading lane (created 2026-04-30) |
 | `test_heartbeat_dual_coverage.py` | Antibody #15: heartbeat sensor must monitor BOTH daemon heartbeat files (two-system independence; created 2026-04-30) |
 | `test_identity_column_defaults.py` | Pytest wrapper for check_identity_column_defaults.py; INV-14 identity-column DEFAULT antibody (created 2026-05-01) |

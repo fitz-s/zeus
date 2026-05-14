@@ -34,7 +34,7 @@ Use it after `AGENTS.md` to answer two questions quickly:
 | `src/venue/` | Live venue adapter boundary | `src/venue/AGENTS.md`, `docs/reference/modules/venue.md` |
 | `src/strategy/` | Strategy, benchmark, FDR/Kelly, and candidate-stub boundary | `src/strategy/AGENTS.md`, `docs/reference/modules/strategy.md` |
 | `src/risk_allocator/` | R3 A2 capital allocation, cap policy, governor state, and kill-switch enforcement | `src/risk_allocator/AGENTS.md`, `docs/reference/modules/riskguard.md` |
-| `src/ingest/` | Runtime event-stream ingest boundary | `src/ingest/AGENTS.md`, `docs/reference/modules/ingest.md` |
+| `src/ingest/` | Runtime event-stream ingest and forecast-live producer boundary | `src/ingest/AGENTS.md`, `docs/reference/modules/ingest.md` |
 | `tests/` | Regression and law gates, including test-only fakes and integration antibodies | `tests/AGENTS.md`, `architecture/test_topology.yaml` |
 | `scripts/` | Operator, ETL, audit, and enforcement tools | `scripts/AGENTS.md`, `architecture/script_manifest.yaml` |
 | `docs/authority/` | Durable architecture and delivery law only | `docs/authority/AGENTS.md` |
@@ -70,7 +70,7 @@ Prefer these over prose when they exist:
 | `architecture/context_budget.yaml` | Boot-surface budget and maintenance cadence |
 | `architecture/change_receipt_schema.yaml` | Route-receipt contract |
 | `architecture/docs_registry.yaml` | Docs classification and default-read registry |
-| `architecture/module_manifest.yaml` | Machine registry for module books, module routers, module-level dependencies, high-risk control routes such as CutoverGuard, and the R3 venue adapter boundary |
+| `architecture/module_manifest.yaml` | Machine registry for module books, module routers, module-level dependencies, high-risk control routes such as CutoverGuard, the R3 venue adapter boundary, and forecast-live data-daemon entrypoints |
 | `architecture/task_boot_profiles.yaml` | Question-first semantic boot profiles by task class |
 | `architecture/fatal_misreads.yaml` | Machine-readable semantic shortcut antibodies |
 | `architecture/city_truth_contract.yaml` | Stable city/source/date truth contract schema; not a current truth table |

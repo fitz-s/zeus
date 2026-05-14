@@ -1,5 +1,6 @@
-# Lifecycle: created=2026-04-30; last_reviewed=2026-05-03; last_reused=2026-05-03
-# Authority basis: docs/operations/task_2026-04-30_two_system_independence/design.md §5 Phase 1 + PLAN_v4 Phase 5A source-run selection.
+# Lifecycle: created=2026-04-30; last_reviewed=2026-05-14; last_reused=2026-05-14
+# Authority basis: docs/operations/task_2026-05-14_data_daemon_live_efficiency/DATA_DAEMON_LIVE_EFFICIENCY_REFACTOR_PLAN.md
+#   Phase 2 legacy OpenData mutual exclusion with forecast-live-daemon.
 """Zeus data-ingest daemon entry point.
 
 Runs all K2 ingest jobs and supporting cycles on an independent APScheduler.
@@ -30,16 +31,14 @@ import signal
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-
-from apscheduler.schedulers.blocking import BlockingScheduler
-from apscheduler.executors.pool import ThreadPoolExecutor as _APSchedulerThreadPoolExecutor
+from typing import Any
 
 logger = logging.getLogger("zeus.ingest")
 
 # ---------------------------------------------------------------------------
 # Module-level scheduler reference for SIGTERM handler
 # ---------------------------------------------------------------------------
-_scheduler: BlockingScheduler | None = None
+_scheduler: Any | None = None
 
 
 def _graceful_shutdown(signum, frame) -> None:
@@ -207,31 +206,6 @@ def _write_world_schema_ready_sentinel() -> None:
     tmp.write_text(json.dumps(payload))
     tmp.replace(path)
     logger.info("Wrote world_schema_ready sentinel: schema_version=%s", schema_version)
-
-
-def _write_forecasts_schema_ready_sentinel() -> None:
-    """Atomically write state/forecasts_schema_ready.json after init_schema_forecasts succeeds.
-
-    K1 split 2026-05-11: paired with _write_world_schema_ready_sentinel so that
-    _startup_db_schema_ready_check (main.py) waits for BOTH before proceeding.
-    """
-    from src.config import state_path
-    from src.state.db import SCHEMA_FORECASTS_VERSION
-
-    payload = {
-        "written_at": datetime.now(timezone.utc).isoformat(),
-        "schema_forecasts_version": SCHEMA_FORECASTS_VERSION,
-        "ingest_pid": os.getpid(),
-        "init_schema_forecasts_returned_ok": True,
-    }
-    path = state_path("forecasts_schema_ready.json")
-    tmp = Path(str(path) + ".tmp")
-    tmp.write_text(json.dumps(payload))
-    tmp.replace(path)
-    logger.info(
-        "Wrote forecasts_schema_ready sentinel: SCHEMA_FORECASTS_VERSION=%d",
-        SCHEMA_FORECASTS_VERSION,
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -478,11 +452,7 @@ def _opendata_mx2t6_cycle():
     schedule job name retains the legacy ``mx2t6`` slug for back-compat with
     ops dashboards).
     """
-    if _is_source_paused("ecmwf_open_data"):
-        logger.info("_opendata_mx2t6_cycle: paused_by_control_plane")
-        return {"status": "paused_by_control_plane", "source": "ecmwf_open_data"}
-    from src.data.ecmwf_open_data import collect_open_ens_cycle
-    result = collect_open_ens_cycle(track="mx2t6_high")
+    result = _run_opendata_track("mx2t6_high")
     logger.info("ECMWF Open Data mx2t6: %s",
                 {k: v for k, v in result.items() if k != "stages"})
     return result
@@ -498,14 +468,31 @@ def _opendata_mn2t6_cycle():
     job name retains the legacy ``mn2t6`` slug for back-compat with ops
     dashboards).
     """
-    if _is_source_paused("ecmwf_open_data"):
-        logger.info("_opendata_mn2t6_cycle: paused_by_control_plane")
-        return {"status": "paused_by_control_plane", "source": "ecmwf_open_data"}
-    from src.data.ecmwf_open_data import collect_open_ens_cycle
-    result = collect_open_ens_cycle(track="mn2t6_low")
+    result = _run_opendata_track("mn2t6_low")
     logger.info("ECMWF Open Data mn2t6: %s",
                 {k: v for k, v in result.items() if k != "stages"})
     return result
+
+
+def _run_opendata_track(
+    track: str,
+    *,
+    _locks_dir_override: Path | None = None,
+    _collector=None,
+) -> dict:
+    """Legacy ingest-main OpenData wrapper kept mutually exclusive with forecast-live-daemon."""
+    from src.data.ecmwf_open_data import OPENDATA_DAEMON_LOCK_KEY, SOURCE_ID, collect_open_ens_cycle
+    from src.data.dual_run_lock import acquire_lock
+
+    if _is_source_paused(SOURCE_ID):
+        logger.info("_run_opendata_track(%s): paused_by_control_plane", track)
+        return {"status": "paused_by_control_plane", "source": SOURCE_ID, "track": track}
+    with acquire_lock(OPENDATA_DAEMON_LOCK_KEY, _locks_dir_override=_locks_dir_override) as acquired:
+        if not acquired:
+            logger.info("_run_opendata_track(%s): skipped_lock_held", track)
+            return {"status": "skipped_lock_held", "source": SOURCE_ID, "track": track}
+        collector = _collector or collect_open_ens_cycle
+        return collector(track=track)
 
 
 @_scheduler_job("ingest_opendata_startup_catch_up")
@@ -516,12 +503,8 @@ def _opendata_startup_catch_up():
     full-horizon source run for both tracks. Re-runs after a brief restart are
     nearly idempotent thanks to ``INSERT OR IGNORE``.
     """
-    if _is_source_paused("ecmwf_open_data"):
-        logger.info("_opendata_startup_catch_up: paused_by_control_plane")
-        return
-    from src.data.ecmwf_open_data import collect_open_ens_cycle
     for track in ("mx2t6_high", "mn2t6_low"):
-        result = collect_open_ens_cycle(track=track)
+        result = _run_opendata_track(track)
         logger.info("Open Data startup catch-up %s: %s", track,
                     {k: v for k, v in result.items() if k != "stages"})
 
@@ -639,12 +622,12 @@ def _harvester_truth_writer_tick():
     """
     from src.data.dual_run_lock import acquire_lock
     from src.ingest.harvester_truth_writer import write_settlement_truth_for_open_markets
-    from src.state.db import get_forecasts_connection
+    from src.state.db import get_world_connection
     with acquire_lock("harvester_truth") as acquired:
         if not acquired:
             logger.info("ingest harvester_truth_writer_tick skipped_lock_held")
             return
-        conn = get_forecasts_connection(write_class="bulk")
+        conn = get_world_connection(write_class="bulk")
         try:
             result = write_settlement_truth_for_open_markets(conn)
         finally:
@@ -825,7 +808,7 @@ def _uma_resolution_listener_tick():
         poll_uma_resolutions,
         set_last_scanned_block,
     )
-    from src.state.db import get_world_connection, ZEUS_FORECASTS_DB_PATH
+    from src.state.db import get_world_connection, ZEUS_WORLD_DB_PATH
     import sqlite3
 
     # Load optional uma settings (default-OFF when absent).
@@ -844,10 +827,10 @@ def _uma_resolution_listener_tick():
         )
         return
 
-    # Collect tracked condition_ids from market_events_v2 (read-only, forecasts DB post-K1).
+    # Collect tracked condition_ids from market_events_v2 (read-only connection).
     condition_ids: list[str] = []
     try:
-        ro_conn = sqlite3.connect(str(ZEUS_FORECASTS_DB_PATH), timeout=10)
+        ro_conn = sqlite3.connect(str(ZEUS_WORLD_DB_PATH), timeout=10)
         ro_conn.row_factory = sqlite3.Row
         try:
             rows = ro_conn.execute(
@@ -1030,6 +1013,8 @@ def _ingest_status_rollup_tick():
 
 def main() -> None:
     global _scheduler
+    from apscheduler.executors.pool import ThreadPoolExecutor as _APSchedulerThreadPoolExecutor
+    from apscheduler.schedulers.blocking import BlockingScheduler
 
     logging.basicConfig(
         level=logging.INFO,
@@ -1054,55 +1039,15 @@ def main() -> None:
     from src.data.proxy_health import bypass_dead_proxy_env_vars
     bypass_dead_proxy_env_vars()
 
-    # World DB boot-once init (ingest daemon owns this — task #6 removed it
-    # from src/main.py:679-683; this is the ONLY caller that upgrades world DB
-    # to current SCHEMA_VERSION). init_schema runs all DDL + sets PRAGMA
-    # user_version = SCHEMA_VERSION at the end. Subsequent hot-path callers
-    # (ecmwf_open_data.py, hole_scanner.py) use assert_schema_current (≤1ms).
-    # K1 split 2026-05-11 (§5.7 + §5.7.1):
-    # World-class tables stay on zeus-world.db via init_schema_world_only.
-    # Forecast-class tables move to zeus-forecasts.db via init_schema_forecasts.
-    # §5.7.1 fresh-deploy bootstrap: if zeus-forecasts.db does not exist,
-    # init_schema_forecasts creates it and logs a WARNING so the operator
-    # knows to run scripts/migrate_world_to_forecasts.py.
-    #
-    # Antibody 2026-05-11: PLAN R1 v2 incorrectly classified this as "boot-once
-    # duplicate"; it's actually the SOLE world-DB upgrade path. Reverted from
-    # assert_schema_current after launchd respawn crash loop (SchemaOutOfDateError).
-    from src.state.db import (
-        init_schema_world_only,
-        init_schema_forecasts,
-        assert_schema_current_forecasts,
-        get_world_connection,
-        get_forecasts_connection,
-        ZEUS_FORECASTS_DB_PATH,
-    )
-    world_conn = get_world_connection(write_class="bulk")
-    init_schema_world_only(world_conn)
-    world_conn.commit()
-    world_conn.close()
-    logger.info("init_schema_world_only: boot-once world-class upgrade complete")
+    # Schema init on world DB.
+    from src.state.db import init_schema, get_world_connection
+    conn = get_world_connection(write_class="bulk")
+    init_schema(conn)
+    conn.close()
+    logger.info("init_schema complete")
 
-    # §5.7.1: detect fresh-deploy (zeus-forecasts.db does not exist).
-    _forecasts_fresh = not ZEUS_FORECASTS_DB_PATH.exists()
-    forecasts_conn = get_forecasts_connection(write_class="bulk")
-    init_schema_forecasts(forecasts_conn)  # idempotent: no-op on existing, full CREATE on fresh
-    assert_schema_current_forecasts(forecasts_conn)
-    forecasts_conn.commit()
-    forecasts_conn.close()
-    if _forecasts_fresh:
-        logger.warning(
-            "init_schema_forecasts: fresh-deploy bootstrap created "
-            "state/zeus-forecasts.db with empty schema — operator must "
-            "run scripts/migrate_world_to_forecasts.py before forecast "
-            "reads from zeus-forecasts.db will find data"
-        )
-    logger.info("init_schema_forecasts: boot-once forecasts-class upgrade complete")
-
-    # Write BOTH sentinels BEFORE scheduler.start() (design §4.2).
-    # _startup_db_schema_ready_check (main.py) waits for world + forecasts.
+    # Write sentinel BEFORE scheduler.start() (design §4.2).
     _write_world_schema_ready_sentinel()
-    _write_forecasts_schema_ready_sentinel()
 
     # SIGTERM → graceful shutdown.
     signal.signal(signal.SIGTERM, _graceful_shutdown)
@@ -1181,7 +1126,6 @@ def main() -> None:
         _harvester_truth_writer_tick, "cron",
         minute=45, id="ingest_harvester_truth_writer",
         max_instances=1, coalesce=True, misfire_grace_time=1800,
-        executor="fast",
     )
     _scheduler.add_job(
         _automation_analysis_cycle, "cron",
@@ -1206,27 +1150,15 @@ def main() -> None:
         max_instances=1, coalesce=True, misfire_grace_time=3600,
     )
 
-    # TIGGE archive backfill REMOVED from data daemon 2026-05-11 (K1 structural
-    # fix per analyst aa28d70b8cceae626 + architect add8334a4c5803f11).
-    #
-    # TIGGE is NOT load-bearing for live trading. Live trading reads
-    # platt_models_v2 (pre-fit Platt artifact) at src/calibration/store.py:690+,
-    # never raw TIGGE snapshots. TIGGE only feeds the offline training pipeline
-    # (rebuild_calibration_pairs_v2.py + refit_platt_v2.py — both
-    # operator-driven, never daemon-driven).
-    #
-    # Co-tenanting TIGGE's high-latency BULK writer with the live-trading
-    # critical path on a single shared world DB is the K1 design failure that
-    # caused the 2026-05-11 wedge (open_ens 12Z cycle blocked 35+ min behind
-    # TIGGE startup catch-up holding db_writer_lock).
-    #
-    # TIGGE backfill is now operator-driven. To advance the rolling edge:
-    #   python -m src.data.tigge_pipeline --target-date YYYY-MM-DD
-    # See `local_post_extract_chain.sh` for the canonical operator workflow
-    # (rebuild + refit run on tigge_stage_*.db; world DB is never locked).
-    #
-    # Future refactor: TIGGE pipeline runs in its own process writing to its
-    # own DB, merges into world DB during a maintenance window.
+    # TIGGE archive backfill — 14:00 UTC, target = today - 2 days (post-embargo).
+    # Distinct from the live Open Data feed; serves the Platt training set and
+    # historical audit trail. Renamed from ingest_tigge_daily so health
+    # dashboards and operators see the role explicitly.
+    _scheduler.add_job(
+        _tigge_archive_backfill_cycle, "cron",
+        hour=14, minute=0, id="ingest_tigge_archive_backfill",
+        max_instances=1, coalesce=True, misfire_grace_time=3600,
+    )
 
     # Boot-time catch-up fires immediately via 'date' trigger.
     from datetime import datetime as _dt_now
@@ -1237,42 +1169,22 @@ def main() -> None:
         max_instances=1, coalesce=True, misfire_grace_time=None,
     )
 
-    # TIGGE boot-time catch-up REMOVED 2026-05-11 (K1 structural fix per
-    # analyst aa28d70b8cceae626 + architect add8334a4c5803f11).
-    #
-    # Rationale: TIGGE feeds the Platt TRAINING set offline (rebuild + refit
-    # are operator-driven scripts, never daemon-driven). Live trading reads
-    # the pre-fit `platt_models_v2` table — never raw TIGGE snapshots
-    # (verified at src/engine/monitor_refresh.py:136 + src/calibration/store.py:690).
-    # Boot catch-up's only function was filling gaps in the 14:00 daily backfill.
-    #
-    # Cost: keeping it = 3-30 min × N daemon restarts/year of live-trading
-    # freshness loss while TIGGE holds db_writer_lock(WORLD_DB, BULK).
-    # Cost of removing: at most 7 T-2 issue dates missing per outage,
-    # recoverable via `python -m src.data.tigge_pipeline ... --target-date YYYY-MM-DD`
-    # operator backfill. The 14:00 daily cron (kept) advances the rolling edge.
-    #
-    # Empirical motivation: 2026-05-11 daemon restart wedged the open_ens 12Z
-    # cycle for 35+ min behind this catch-up's db_writer_lock hold.
-    #
-    # If future operator needs an immediate TIGGE backfill on boot, run the
-    # scheduled `_tigge_archive_backfill_cycle` manually or invoke
-    # `run_tigge_daily_cycle(target_date=...)` directly.
+    # TIGGE boot-time catch-up — fires once at daemon start to fill missed days
+    # (capped at src.data.tigge_pipeline.MAX_LOOKBACK_DAYS).
+    _scheduler.add_job(
+        _tigge_startup_catch_up, "date",
+        run_date=_dt_now.now(),
+        id="ingest_tigge_startup_catch_up",
+        max_instances=1, coalesce=True, misfire_grace_time=None,
+    )
 
     # Open Data boot-time catch-up — fires once at daemon start so a fresh
     # ingest doesn't wait until the next 07:30 cron tick to backfill.
-    # Runs on "fast" executor so it is not blocked behind _tigge_startup_catch_up
-    # on the single default-worker thread. The GRIB download/extract stages are
-    # network/disk bound with no DB writes; the ingest stage acquires db_writer_lock
-    # (fcntl.flock) independently, so running on fast executor is safe.
-    # Fix: 2026-05-10 — root cause of OpenData ingest stall: TIGGE MARS download
-    # (~3-30 min) occupied the only default worker, blocking OpenData indefinitely.
     _scheduler.add_job(
         _opendata_startup_catch_up, "date",
         run_date=_dt_now.now(),
         id="ingest_opendata_startup_catch_up",
         max_instances=1, coalesce=True, misfire_grace_time=None,
-        executor="fast",
     )
 
     # Phase 2: source health probe every 10 minutes (§2.1) — APPENDED END

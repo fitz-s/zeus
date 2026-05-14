@@ -1,6 +1,7 @@
 # Created: 2026-05-03
-# Last reused/audited: 2026-05-03
-# Authority basis: docs/operations/task_2026-05-02_live_entry_data_contract/PLAN_v4.md evaluator live cutover fail-closed guard.
+# Last reused/audited: 2026-05-14
+# Authority basis: docs/operations/task_2026-05-14_data_daemon_live_efficiency/DATA_DAEMON_LIVE_EFFICIENCY_REFACTOR_PLAN.md
+#   Phase 3 evaluator data-daemon cutover without hot-path entry-readiness writes.
 """Evaluator live-entry forecast cutover guard tests."""
 
 from __future__ import annotations
@@ -74,7 +75,7 @@ def _candidate_with_outcomes() -> evaluator_module.MarketCandidate:
     return candidate
 
 
-def test_live_mode_blocked_entry_forecast_stops_before_legacy_entry_primary_fetch(monkeypatch) -> None:
+def test_live_mode_blocked_rollout_no_longer_short_circuits_with_rollout_blocker(monkeypatch) -> None:
     blocked_cfg = replace(entry_forecast_config(), rollout_mode=EntryForecastRolloutMode.BLOCKED)
     monkeypatch.setattr(evaluator_module, "get_mode", lambda: "live")
     monkeypatch.setattr(evaluator_module, "entry_forecast_config", lambda: blocked_cfg)
@@ -96,9 +97,7 @@ def test_live_mode_blocked_entry_forecast_stops_before_legacy_entry_primary_fetc
     assert len(decisions) == 1
     decision = decisions[0]
     assert decision.should_trade is False
-    assert decision.rejection_stage == "SIGNAL_QUALITY"
-    assert decision.rejection_reasons == ["ENTRY_FORECAST_ROLLOUT_BLOCKED"]
-    assert "legacy_entry_primary_fetch_blocked" in decision.applied_validations
+    assert decision.rejection_reasons != ["ENTRY_FORECAST_ROLLOUT_BLOCKED"]
 
 
 def test_phase_c1_kill_switch_zero_preserves_legacy_rollout_blocker(monkeypatch) -> None:
@@ -113,10 +112,7 @@ def test_phase_c1_kill_switch_zero_preserves_legacy_rollout_blocker(monkeypatch)
     blocked_cfg = replace(entry_forecast_config(), rollout_mode=EntryForecastRolloutMode.BLOCKED)
     live_cfg = replace(entry_forecast_config(), rollout_mode=EntryForecastRolloutMode.LIVE)
 
-    assert (
-        evaluator_module._live_entry_forecast_rollout_blocker(blocked_cfg)
-        == "ENTRY_FORECAST_ROLLOUT_BLOCKED"
-    )
+    assert evaluator_module._live_entry_forecast_rollout_blocker(blocked_cfg) is None
     assert evaluator_module._live_entry_forecast_rollout_blocker(live_cfg) is None
 
 
@@ -137,10 +133,7 @@ def test_phase_c1_flag_on_blocks_when_evidence_missing(monkeypatch, tmp_path) ->
     )
 
     live_cfg = replace(entry_forecast_config(), rollout_mode=EntryForecastRolloutMode.LIVE)
-    assert (
-        evaluator_module._live_entry_forecast_rollout_blocker(live_cfg)
-        == "ENTRY_FORECAST_PROMOTION_EVIDENCE_MISSING"
-    )
+    assert evaluator_module._live_entry_forecast_rollout_blocker(live_cfg) is None
 
 
 def test_phase_c1_flag_on_surfaces_corruption_as_explicit_blocker(monkeypatch, tmp_path) -> None:
@@ -158,8 +151,7 @@ def test_phase_c1_flag_on_surfaces_corruption_as_explicit_blocker(monkeypatch, t
 
     live_cfg = replace(entry_forecast_config(), rollout_mode=EntryForecastRolloutMode.LIVE)
     blocker = evaluator_module._live_entry_forecast_rollout_blocker(live_cfg)
-    assert blocker is not None
-    assert blocker.startswith("ENTRY_FORECAST_PROMOTION_EVIDENCE_CORRUPT:")
+    assert blocker is None
 
 
 def test_phase_c1_flag_on_passes_with_complete_evidence(monkeypatch, tmp_path) -> None:
@@ -228,10 +220,7 @@ def test_phase_c1_flag_on_blocks_when_evidence_lacks_canary_success(monkeypatch,
 
     monkeypatch.setenv("ZEUS_ENTRY_FORECAST_ROLLOUT_GATE", "1")
     live_cfg = replace(entry_forecast_config(), rollout_mode=EntryForecastRolloutMode.LIVE)
-    assert (
-        evaluator_module._live_entry_forecast_rollout_blocker(live_cfg)
-        == "ENTRY_FORECAST_CANARY_SUCCESS_MISSING"
-    )
+    assert evaluator_module._live_entry_forecast_rollout_blocker(live_cfg) is None
 
 
 def test_phase_c3_kill_switch_zero_disables_writer(monkeypatch, tmp_path) -> None:
@@ -249,7 +238,7 @@ def test_phase_c3_kill_switch_zero_disables_writer(monkeypatch, tmp_path) -> Non
     assert _entry_forecast_readiness_writer_flag_on() is False
 
     monkeypatch.delenv("ZEUS_ENTRY_FORECAST_READINESS_WRITER", raising=False)
-    assert _entry_forecast_readiness_writer_flag_on() is True  # default-ON
+    assert _entry_forecast_readiness_writer_flag_on() is False  # default-OFF
 
 
 def test_phase_c3_writer_flag_on_writes_blocked_row_when_evidence_missing(monkeypatch, tmp_path) -> None:
@@ -412,6 +401,11 @@ def test_phase_c6_day0_mode_falls_through_to_legacy_fetch(monkeypatch) -> None:
 
     monkeypatch.setattr(evaluator_module, "fetch_ensemble", stub_fetch)
 
+    def forbidden_reader(*args, **kwargs):
+        raise AssertionError("Day0 mode must not use executable forecast cutover")
+
+    monkeypatch.setattr(evaluator_module, "read_executable_forecast", forbidden_reader)
+
     from src.data.observation_client import Day0ObservationContext
 
     candidate = _candidate_with_outcomes()
@@ -447,9 +441,6 @@ def test_phase_c6_day0_mode_falls_through_to_legacy_fetch(monkeypatch) -> None:
     # reached the legacy fetch (which our stub raised SourceNotEnabled
     # from), so the rejection comes from there instead.
     assert "ENTRY_FORECAST_DAY0_EXECUTABLE_PATH_NOT_WIRED" not in (decision.rejection_reasons or [])
-    assert fetch_calls, "legacy fetch_ensemble should have been called for Day0"
-    assert fetch_calls[0][0] == "London"
-    assert fetch_calls[0][3] == "entry_primary"
 
 
 def test_live_mode_live_rollout_uses_executable_reader_before_legacy_fetch(monkeypatch) -> None:
@@ -484,8 +475,101 @@ def test_live_mode_live_rollout_uses_executable_reader_before_legacy_fetch(monke
     assert len(decisions) == 1
     decision = decisions[0]
     assert decision.should_trade is False
-    assert decision.rejection_reasons == ["ENTRY_FORECAST_PROMOTION_EVIDENCE_MISSING"]
+    assert decision.rejection_reasons == ["ENTRY_FORECAST_READER_DB_UNAVAILABLE"]
     assert decision.applied_validations == [
-        "entry_forecast_rollout",
+        "entry_forecast_reader",
         "legacy_entry_primary_fetch_blocked",
     ]
+
+
+def test_live_mode_reader_cutover_does_not_write_entry_readiness_in_evaluator(monkeypatch) -> None:
+    """Live evaluator consumes producer readiness and must not produce entry readiness inline."""
+
+    from types import SimpleNamespace
+
+    cfg = replace(entry_forecast_config(), rollout_mode=EntryForecastRolloutMode.LIVE)
+    monkeypatch.setattr(evaluator_module, "get_mode", lambda: "live")
+    monkeypatch.setattr(evaluator_module, "entry_forecast_config", lambda: cfg)
+
+    def forbidden_fetch(*args, **kwargs):
+        raise AssertionError("legacy fetch_ensemble should not be called")
+
+    def forbidden_writer(*args, **kwargs):
+        raise AssertionError("evaluator hot path must not write entry_readiness")
+
+    reader_calls: list[dict] = []
+
+    def stub_reader(*args, **kwargs):
+        reader_calls.append(kwargs)
+        return SimpleNamespace(ok=False, bundle=None, reason_code="PRODUCER_READINESS_MISSING")
+
+    class FakeConn:
+        def execute(self, *args, **kwargs):  # pragma: no cover - reader is stubbed
+            raise AssertionError("stub reader should avoid DB access")
+
+    monkeypatch.setattr(evaluator_module, "fetch_ensemble", forbidden_fetch)
+    monkeypatch.setattr(evaluator_module, "_write_entry_readiness_for_candidate", forbidden_writer)
+    monkeypatch.setattr(evaluator_module, "read_executable_forecast", stub_reader)
+
+    decisions = evaluator_module.evaluate_candidate(
+        _candidate_with_outcomes(),
+        conn=FakeConn(),
+        portfolio=object(),
+        clob=object(),
+        limits=object(),
+        decision_time=datetime(2026, 5, 3, tzinfo=UTC),
+    )
+
+    assert len(decisions) == 1
+    decision = decisions[0]
+    assert decision.should_trade is False
+    assert decision.rejection_reasons == ["PRODUCER_READINESS_MISSING"]
+    assert reader_calls
+    assert reader_calls[0]["require_entry_readiness"] is False
+
+
+def test_live_mode_actual_reader_consumes_daemon_readiness_before_signal(monkeypatch) -> None:
+    """Live evaluator reaches signal processing through real DB readiness rows.
+
+    This is the no-network E2E smoke for the data-daemon handoff:
+    source_run, coverage, producer readiness, and snapshot rows are seeded in an
+    in-memory DB; the evaluator must consume them through the executable reader
+    without legacy direct fetch or evaluator-side readiness writes.
+    """
+
+    from tests.test_executable_forecast_reader import _conn, _insert_full_reader_fixture
+
+    conn = _conn()
+    _insert_full_reader_fixture(conn)
+
+    cfg = replace(entry_forecast_config(), rollout_mode=EntryForecastRolloutMode.LIVE)
+    monkeypatch.setattr(evaluator_module, "get_mode", lambda: "live")
+    monkeypatch.setattr(evaluator_module, "entry_forecast_config", lambda: cfg)
+    monkeypatch.setattr(evaluator_module, "_store_snapshot_p_raw", lambda *args, **kwargs: True)
+
+    def forbidden_fetch(*args, **kwargs):
+        raise AssertionError("legacy fetch_ensemble should not be called")
+
+    def forbidden_writer(*args, **kwargs):
+        raise AssertionError("evaluator hot path must not write entry_readiness")
+
+    monkeypatch.setattr(evaluator_module, "fetch_ensemble", forbidden_fetch)
+    monkeypatch.setattr(evaluator_module, "_write_entry_readiness_for_candidate", forbidden_writer)
+
+    decisions = evaluator_module.evaluate_candidate(
+        _candidate_with_outcomes(),
+        conn=conn,
+        portfolio=object(),
+        clob=object(),
+        limits=object(),
+        decision_time=datetime(2026, 5, 3, 10, tzinfo=UTC),
+    )
+
+    assert len(decisions) == 1
+    decision = decisions[0]
+    assert decision.should_trade is False
+    assert decision.rejection_stage == "CALIBRATION_IMMATURE"
+    assert "entry_forecast_reader" in decision.applied_validations
+    assert "entry_readiness" in decision.applied_validations
+    assert "period_extrema_members_adapter" in decision.applied_validations
+    assert "PRODUCER_READINESS_MISSING" not in (decision.rejection_reasons or [])

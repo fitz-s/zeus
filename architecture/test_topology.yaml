@@ -67,7 +67,7 @@ test_trust_policy:
     tests/test_forecast_calibration_domain.py: {created: "2026-05-04", last_used: "2026-05-04"}
     tests/test_low_contract_window_backfill.py: {created: "2026-05-07", last_used: "2026-05-07"}
     tests/test_oracle_posterior.py: {created: "2026-05-04", last_used: "2026-05-04"}
-    tests/test_entry_forecast_evaluator_cutover.py: {created: "2026-05-03", last_used: "2026-05-03"}
+    tests/test_entry_forecast_evaluator_cutover.py: {created: "2026-05-03", last_used: "2026-05-14"}
     tests/test_entry_forecast_promotion_evidence_io.py: {created: "2026-05-03", last_used: "2026-05-03"}
     tests/test_entry_readiness_writer.py: {created: "2026-05-03", last_used: "2026-05-03"}
     tests/test_entry_forecast_chain_relationship.py: {created: "2026-05-03", last_used: "2026-05-03"}
@@ -91,6 +91,7 @@ test_trust_policy:
     tests/test_backtest_settlement_value_outcome.py: {created: "2026-04-25", last_used: "2026-04-25"}
     tests/test_bug100_k1_k2_structural.py: {created: "2026-04-21", last_used: "2026-04-21"}
     tests/test_calibration_bins_canonical.py: {created: "2026-04-14", last_used: "2026-04-23"}
+    tests/test_promote_calibration_v2_stage_to_prod.py: {created: "2026-05-12", last_used: "2026-05-12"}
     tests/test_canonical_position_current_schema_alignment.py: {created: "2026-04-23", last_used: "2026-04-23"}
     tests/test_center_buy_repair.py: {created: "2026-04-29", last_used: "2026-04-29"}
     tests/test_cross_module_invariants.py: {created: "2026-03-30", last_used: "2026-04-23"}
@@ -172,9 +173,6 @@ test_trust_policy:
     tests/test_parse_canonical_bin_label.py: {created: "2026-04-23", last_used: "2026-04-23"}
     tests/test_realized_fill.py: {created: "2026-04-23", last_used: "2026-04-23"}
     tests/test_rebuild_pipeline.py: {created: "2026-04-12", last_used: "2026-04-28"}
-    # K1 workload-class DB split promotion scripts (2026-05-12; PR #112 Option c)
-    tests/test_promote_platt_models_v2.py: {created: "2026-05-12", last_used: "2026-05-12"}
-    tests/test_promote_calibration_pairs_v2.py: {created: "2026-05-12", last_used: "2026-05-12"}
     tests/test_replay_time_provenance.py: {created: "2026-04-25", last_used: "2026-04-29"}
     tests/test_run_replay_cli.py: {created: "2026-04-25", last_used: "2026-04-29"}
     tests/test_riskguard.py: {created: "2026-03-30", last_used: "2026-04-28"}
@@ -224,7 +222,7 @@ test_trust_policy:
     tests/test_risk_allocator.py: {created: "2026-04-27", last_used: "2026-04-27"}
     tests/test_live_readiness_gates.py: {created: "2026-04-27", last_used: "2026-04-27"}
     tests/test_entry_forecast_config.py: {created: "2026-05-03", last_used: "2026-05-03"}
-    tests/test_executable_forecast_reader.py: {created: "2026-05-03", last_used: "2026-05-03"}
+    tests/test_executable_forecast_reader.py: {created: "2026-05-03", last_used: "2026-05-14"}
     tests/test_ingest_boot_time_semantics.py: {created: "2026-05-02", last_used: "2026-05-02"}
     tests/test_ingest_grib_source_run_context.py: {created: "2026-05-03", last_used: "2026-05-03"}
     tests/test_live_entry_status.py: {created: "2026-05-03", last_used: "2026-05-03"}
@@ -260,12 +258,9 @@ test_trust_policy:
     # fix/#134 — ECMWF Open Data STEP_HOURS D+10 horizon extension antibodies.
     tests/test_ecmwf_open_data_step_hours.py: {created: "2026-05-08", last_used: "2026-05-08"}
     tests/test_forecast_target_contract_horizon.py: {created: "2026-05-08", last_used: "2026-05-08"}
-    # F1 subprocess hardening — retry + timeout + stderr (REPORT §6.2). Superseded 2026-05-11.
-    tests/test_ecmwf_open_data_subprocess_hardening.py: {created: "2026-05-08", last_used: "2026-05-11"}
-    # PLAN v3 Candidate H — parallel SDK fetch per-step boundaries + partial-cycle source_run contract.
-    tests/test_ecmwf_open_data_parallel_fetch.py: {created: "2026-05-11", last_used: "2026-05-11"}
-    # PLAN v3 §5.5 — cross-track filename collision regression (mx2t6_high vs mn2t6_low per-step isolation).
-    tests/test_ecmwf_open_data_collect_cycle.py: {created: "2026-05-11", last_used: "2026-05-11"}
+    # F1 subprocess hardening — retry + timeout + stderr (REPORT §6.2).
+    tests/test_ecmwf_open_data_subprocess_hardening.py: {created: "2026-05-08", last_used: "2026-05-14"}
+    tests/test_forecast_live_daemon.py: {created: "2026-05-14", last_used: "2026-05-14"}
 
 categories:
   core_law_antibody:
@@ -340,9 +335,9 @@ categories:
     - tests/test_opendata_release_calendar_selection.py
     - tests/test_opendata_writes_v2_table.py
     - tests/test_opendata_future_target_contract.py
+    - tests/test_ecmwf_open_data_subprocess_hardening.py
+    - tests/test_forecast_live_daemon.py
     - tests/test_ecmwf_open_data_step_hours.py
-    - tests/test_ecmwf_open_data_parallel_fetch.py
-    - tests/test_ecmwf_open_data_collect_cycle.py
     - tests/test_forecast_target_contract_horizon.py
     - tests/test_readiness_state.py
     - tests/test_release_calendar.py
@@ -712,6 +707,10 @@ law_gate:
       - tests/test_opendata_release_calendar_selection.py
       - tests/test_opendata_writes_v2_table.py
       - tests/test_opendata_future_target_contract.py
+      - tests/test_ecmwf_open_data_subprocess_hardening.py
+      - tests/test_forecast_live_daemon.py
+      - tests/test_ecmwf_open_data_step_hours.py
+      - tests/test_forecast_target_contract_horizon.py
       - tests/test_producer_readiness_builder.py
       - tests/test_readiness_state.py
       - tests/test_release_calendar.py
@@ -731,6 +730,7 @@ law_gate:
       - src/data/live_entry_status.py
       - scripts/ingest_grib_to_snapshots.py
       - scripts/healthcheck.py
+      - src/ingest/forecast_live_daemon.py
       - src/data/ecmwf_open_data.py
       - src/data/producer_readiness.py
       - src/data/release_calendar.py

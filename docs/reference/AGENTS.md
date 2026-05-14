@@ -77,7 +77,7 @@ which module reference matters.
 | `modules/engine.md` | Dense engine orchestration / replay / sequencing module book |
 | `modules/data.md` | Dense source-routing / ingest / data-versioning module book |
 | `modules/venue.md` | Dense Polymarket V2 adapter / submission provenance module book |
-| `modules/ingest.md` | Dense user-channel ingest / U2 fact append bridge module book |
+| `modules/ingest.md` | Dense user-channel ingest / U2 fact append bridge / forecast-live producer module book |
 | `modules/execution.md` | Dense live execution / command / exit / settlement and pre-submit gate module book |
 | `modules/riskguard.md` | Dense riskguard and R3 A2 risk-allocator/governor module book |
 | `modules/topology_system.md` | Dense topology-system reference for machine routing and manifest law |

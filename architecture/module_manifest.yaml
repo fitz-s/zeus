@@ -271,10 +271,12 @@ modules:
     zone: source
     authority_role: runtime_event_ingest
     high_risk_files:
+      - src/ingest/forecast_live_daemon.py
       - src/ingest/polymarket_user_channel.py
       - src/control/ws_gap_guard.py
       - src/state/venue_command_repo.py
     public_entry_files:
+      - src/ingest/forecast_live_daemon.py
       - src/ingest/polymarket_user_channel.py
     law_dependencies:
       - architecture/invariants.yaml
@@ -283,6 +285,7 @@ modules:
       - docs/operations/task_2026-04-26_ultimate_plan/r3/reference_excerpts/polymarket_user_ws_2026-04-27.md
       - docs/operations/task_2026-04-26_ultimate_plan/r3/operator_decisions/INDEX.md
     required_tests:
+      - tests/test_forecast_live_daemon.py
       - tests/test_user_channel_ingest.py
       - tests/test_digest_profile_matching.py::test_r3_m3_user_channel_routes_to_m3_profile
     graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
