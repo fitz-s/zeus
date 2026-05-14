@@ -1,6 +1,11 @@
 # Created: 2026-03-26
-# Last reused/audited: 2026-05-03
+# Last reused/audited: 2026-05-14
 # Authority basis: Phase 4B audited GRIB ingest + PLAN_v4 Phase 6 SourceRunContext linkage.
+#   2026-05-14: added intra-`ingest_track` boundary logs to localize the
+#   2026-05-13 ECMWF wedge (no rglob_end after rglob_start at 17:16:44 PDT,
+#   WAL=0 bytes — wedge is somewhere between rglob and first INSERT or in
+#   the per-file loop). Diagnostic; not a fix. Expected to pinpoint the
+#   wedge on the next ingest cycle.
 # Lifecycle: created=2026-03-26; last_reviewed=2026-05-03; last_reused=2026-05-03
 # Purpose: Audited GRIB→ensemble_snapshots_v2 ingestor (Phase 4B / task #53);
 #          applies INV-14 identity spine and Law 5 causality gate before INSERT.
@@ -36,6 +41,7 @@ import json
 import logging
 import sqlite3
 import sys
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -745,6 +751,17 @@ def ingest_track(
         label="rglob_json_scan",
     )
 
+    # 2026-05-14 ECMWF wedge diagnostic — boundary logs (#A): rglob completed.
+    # Pairs with `ingest_stage: rglob_start` in ecmwf_open_data.py. If
+    # `rglob_start` fires but `ingest_track: rglob_done` does NOT, the wedge
+    # is in rglob itself (and run_with_timeout should now raise TimeoutError
+    # loud — see 2026-05-14 fix in src/runtime/timeout_guard.py).
+    logger.info(
+        "ingest_track: rglob_done track=%s files=%d",
+        track,
+        len(all_json),
+    )
+
     # MAJOR-2: fail-loud if no JSON files found — silent zero-row runs mask missing extraction step.
     if require_files and not all_json:
         raise FileNotFoundError(
@@ -760,8 +777,22 @@ def ingest_track(
     # we commit ONCE at the end. Per debug session: per-row conn.commit()
     # on 39 GB world DB = 50ms-1s fsync × 364 = 5-10 min wedge — collapsed
     # to a single commit at loop exit.
+    #
+    # 2026-05-14 ECMWF wedge diagnostic — boundary logs (#B): loop start.
+    # If `rglob_done` fires but `loop_start` does NOT, the wedge is between
+    # them (rare — just len() and dict init). If `loop_start` fires but
+    # `loop_progress i=10/...` does NOT, the wedge is in the FIRST 10 files
+    # (likely ingest_json_file on file 0). If `loop_progress` advances
+    # then stalls, we know the exact range. If `loop_end` fires but
+    # `commit_done` does NOT, the wedge is in `conn.commit()` (H3).
+    logger.info(
+        "ingest_track: loop_start track=%s files=%d",
+        track,
+        len(all_json),
+    )
+    _loop_t0 = time.monotonic()
     try:
-        for path in all_json:
+        for _idx, path in enumerate(all_json):
             # City filter: path structure is <subdir>/<city-slug>/<date>/<filename>
             if cities:
                 city_slug_dir = path.parts[-3] if len(path.parts) >= 3 else ""
@@ -799,7 +830,41 @@ def ingest_track(
                 counters["written"] += 1
             else:
                 counters["other"] += 1
+
+            # 2026-05-14 ECMWF wedge diagnostic — boundary logs (#C): per-10 progress.
+            # On a 2945-file scan this emits ~295 lines, acceptable noise.
+            # If progress stops at i=K, the wedge is in files K..K+9.
+            if (_idx + 1) % 10 == 0:
+                logger.info(
+                    "ingest_track: loop_progress track=%s i=%d/%d elapsed_ms=%d written=%d skipped=%d",
+                    track,
+                    _idx + 1,
+                    len(all_json),
+                    int((time.monotonic() - _loop_t0) * 1000),
+                    counters["written"],
+                    counters["skipped_exists"],
+                )
+        # 2026-05-14 ECMWF wedge diagnostic — boundary logs (#D): loop end.
+        logger.info(
+            "ingest_track: loop_end track=%s files=%d written=%d skipped=%d parse_error=%d elapsed_ms=%d",
+            track,
+            len(all_json),
+            counters["written"],
+            counters["skipped_exists"],
+            counters["parse_error"],
+            int((time.monotonic() - _loop_t0) * 1000),
+        )
+        # 2026-05-14 ECMWF wedge diagnostic — boundary logs (#E): commit boundary.
+        # If `loop_end` fires but `commit_done` does NOT, H3 confirmed:
+        # the final conn.commit() is wedged (e.g. fsync on the 51 GB DB).
+        _commit_t0 = time.monotonic()
+        logger.info("ingest_track: commit_start track=%s", track)
         conn.commit()
+        logger.info(
+            "ingest_track: commit_done track=%s elapsed_ms=%d",
+            track,
+            int((time.monotonic() - _commit_t0) * 1000),
+        )
     except Exception:
         try:
             conn.rollback()
