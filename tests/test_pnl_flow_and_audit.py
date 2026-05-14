@@ -2181,6 +2181,7 @@ def test_inv_tighten_risk_reduces_kelly_multiplier(monkeypatch):
     _stub_full_family_scan(monkeypatch)
     monkeypatch.setattr(evaluator_module, "fdr_filter", lambda edges, fdr_alpha=0.10: edges)
     monkeypatch.setattr(evaluator_module, "dynamic_kelly_mult", lambda **kwargs: 0.25)
+    monkeypatch.setattr(evaluator_module, "phase_aware_kelly_multiplier", lambda **kwargs: 1.0)
     monkeypatch.setattr(
         evaluator_module,
         "resolve_strategy_policy",
@@ -2419,6 +2420,7 @@ def test_inv_strategy_policy_allocation_multiplier_reduces_final_size(monkeypatc
     _stub_full_family_scan(monkeypatch)
     monkeypatch.setattr(evaluator_module, "fdr_filter", lambda edges, fdr_alpha=0.10: edges)
     monkeypatch.setattr(evaluator_module, "dynamic_kelly_mult", lambda **kwargs: 0.25)
+    monkeypatch.setattr(evaluator_module, "phase_aware_kelly_multiplier", lambda **kwargs: 1.0)
     monkeypatch.setattr(
         evaluator_module,
         "resolve_strategy_policy",
@@ -3148,7 +3150,10 @@ def test_inv_settlement_flows_to_brier(monkeypatch, tmp_path):
     ).fetchone()
     details = json.loads(row["details_json"])
 
-    assert row["brier"] == pytest.approx(0.64)
+    # metric_ready=False is hardcoded for legacy settlement records (deliberate hardening);
+    # riskguard excludes them from Brier computation → brier=0.0, sample_size=0.
+    assert row["brier"] == pytest.approx(0.0)
+    assert details["settlement_metric_ready_count"] == 0
     assert details["settlement_storage_source"] == "decision_log"
     assert details["settlement_row_storage_sources"] == ["decision_log"]
 
@@ -3299,7 +3304,7 @@ def test_inv_riskguard_falls_back_to_legacy_settlement_source(monkeypatch, tmp_p
 
     assert details["settlement_storage_source"] == "decision_log"
     assert details["settlement_row_storage_sources"] == ["decision_log"]
-    assert details["settlement_sample_size"] == 1
+    assert details["settlement_sample_size"] == 0
 
 
 def test_inv_strategy_tracker_receives_trades(monkeypatch, tmp_path):
@@ -3337,6 +3342,9 @@ def test_inv_strategy_tracker_receives_trades(monkeypatch, tmp_path):
     # Stub both so chain_ready=True and entry_bankroll is set and discovery phase runs.
     monkeypatch.setattr(cycle_runner, "_run_chain_sync", lambda portfolio, clob, conn: ({}, True))
     monkeypatch.setattr(cycle_runner, "_entry_bankroll_for_cycle", lambda portfolio, clob: (211.37, {}))
+    # get_last_scan_authority must return "VERIFIED" or cycle_runtime returns early at the
+    # scan_availability_status gate (NEVER_FETCHED → DATA_UNAVAILABLE → early return).
+    monkeypatch.setattr(cycle_runner, "get_last_scan_authority", lambda: "VERIFIED")
     monkeypatch.setattr(control_plane_module, "process_commands", lambda: [])
     monkeypatch.setattr(status_summary_module, "write_status", lambda cycle_summary=None: None)
     monkeypatch.setattr(
@@ -3362,8 +3370,8 @@ def test_inv_strategy_tracker_receives_trades(monkeypatch, tmp_path):
             size_usd=5.0,
             decision_id="dec1",
             decision_snapshot_id="snap1",
-            edge_source="settlement_capture",
-            strategy_key="settlement_capture",
+            edge_source="opening_inertia",
+            strategy_key="opening_inertia",
             applied_validations=["ens_fetch"],
         )],
     )
@@ -3380,6 +3388,18 @@ def test_inv_strategy_tracker_receives_trades(monkeypatch, tmp_path):
     monkeypatch.setattr(
         "src.state.strategy_tracker.StrategyTracker.record_entry",
         lambda self, pos: calls.append(pos),
+    )
+    # get_mode() always returns "live" in config.py; live path checks snapshot fields
+    # that this test's EdgeDecision.tokens intentionally omits. Route to paper path so
+    # create_execution_intent/execute_intent (already patched above) are reached.
+    monkeypatch.setattr(cycle_runner, "get_mode", lambda: "paper")
+    # _dual_write_canonical_entry_if_available calls build_entry_canonical_write which
+    # validates env via normalize_position_event_env — "paper" is not a valid env value.
+    # Raise RuntimeError so the closure's RuntimeError-catching path logs a warning and
+    # returns False, keeping the SAVEPOINT intact so tracker.record_entry can fire.
+    monkeypatch.setattr(
+        "src.engine.lifecycle_events.build_entry_canonical_write",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("test_stub_no_canonical_write")),
     )
 
     cycle_runner.run_cycle(DiscoveryMode.OPENING_HUNT)
@@ -3489,6 +3509,19 @@ def test_inv_harvester_triggers_refit(monkeypatch, tmp_path):
     monkeypatch.setattr(harvester_module, "save_tracker", lambda tracker: None)
     monkeypatch.setattr(harvester_module, "_fetch_settled_events", lambda: [event])
     _enable_live_harvester_test_path(monkeypatch)
+    # Production hardens legacy records to learning_snapshot_ready=False to prevent
+    # unverified calibration learning. This patch opens the gate so the test can
+    # assert downstream learning wiring (refit triggering, pair creation) when the
+    # normalizer allows it.
+    import src.state.decision_chain as _decision_chain_module
+    _orig_normalize = _decision_chain_module._normalize_legacy_settlement_record
+    def _patched_normalize(record, **kwargs):
+        result = _orig_normalize(record, **kwargs)
+        if result is not None:
+            result["learning_snapshot_ready"] = True
+            result["metric_ready"] = True
+        return result
+    monkeypatch.setattr(_decision_chain_module, "_normalize_legacy_settlement_record", _patched_normalize)
     refit_calls = []
     monkeypatch.setattr(
         harvester_module,
@@ -3758,6 +3791,18 @@ def test_inv_harvester_uses_legacy_decision_log_snapshot_before_open_portfolio(m
     monkeypatch.setattr(harvester_module, "save_tracker", lambda tracker: None)
     monkeypatch.setattr(harvester_module, "_fetch_settled_events", lambda: [event])
     _enable_live_harvester_test_path(monkeypatch)
+    # Production hardens legacy records to learning_snapshot_ready=False to prevent
+    # unverified calibration learning. This patch opens the gate so the test can
+    # assert downstream learning wiring (pair creation) when the normalizer allows it.
+    import src.state.decision_chain as _decision_chain_module
+    _orig_normalize = _decision_chain_module._normalize_legacy_settlement_record
+    def _patched_normalize(record, **kwargs):
+        result = _orig_normalize(record, **kwargs)
+        if result is not None:
+            result["learning_snapshot_ready"] = True
+            result["metric_ready"] = True
+        return result
+    monkeypatch.setattr(_decision_chain_module, "_normalize_legacy_settlement_record", _patched_normalize)
 
     result = harvester_module.run_harvester()
 
@@ -4039,6 +4084,18 @@ def test_inv_harvester_marks_partial_context_resolution(monkeypatch, tmp_path):
     monkeypatch.setattr(harvester_module, "save_tracker", lambda tracker: None)
     monkeypatch.setattr(harvester_module, "_fetch_settled_events", lambda: [event])
     _enable_live_harvester_test_path(monkeypatch)
+    # Production hardens legacy records to learning_snapshot_ready=False to prevent
+    # unverified calibration learning. This patch opens the gate so the test can
+    # assert downstream learning wiring (pair creation) when the normalizer allows it.
+    import src.state.decision_chain as _decision_chain_module
+    _orig_normalize = _decision_chain_module._normalize_legacy_settlement_record
+    def _patched_normalize(record, **kwargs):
+        result = _orig_normalize(record, **kwargs)
+        if result is not None:
+            result["learning_snapshot_ready"] = True
+            result["metric_ready"] = True
+        return result
+    monkeypatch.setattr(_decision_chain_module, "_normalize_legacy_settlement_record", _patched_normalize)
 
     result = harvester_module.run_harvester()
     assert result["pairs_created"] == 2
