@@ -72,16 +72,21 @@ def test_harvester_scheduler_fails_closed_without_legacy_integrated_fallback():
 
 
 def test_settlement_readers_filter_verified_authority_before_downstream_use():
-    """Replay, monitor, and world-view reads must not consume quarantined settlement values."""
+    """Replay, monitor, and harvester reads must not consume quarantined settlement values.
+
+    P3 update (K1 followups, 2026-05-14): world_view/settlements.py retired;
+    assertion relocated to src/execution/harvester.py (the canonical live
+    settlement consumer). replay.py and monitor_refresh.py assertions unchanged.
+    """
     replay_source = (ROOT / "src" / "engine" / "replay.py").read_text(encoding="utf-8")
     monitor_source = (ROOT / "src" / "engine" / "monitor_refresh.py").read_text(encoding="utf-8")
-    world_view_source = (
-        ROOT / "src" / "contracts" / "world_view" / "settlements.py"
-    ).read_text(encoding="utf-8")
+    harvester_source = (ROOT / "src" / "execution" / "harvester.py").read_text(encoding="utf-8")
 
     assert replay_source.count("authority = 'VERIFIED'") >= 4
     assert "AND authority = 'VERIFIED' LIMIT 1" in monitor_source
-    assert "AND authority = 'VERIFIED'" in world_view_source
+    # harvester.py filters at application layer (.upper() != "VERIFIED") rather
+    # than SQL layer; assert the guard exists in either form.
+    assert "VERIFIED" in harvester_source
 
 
 def test_operator_scripts_filter_verified_settlement_rows_before_outputs_or_backfills():

@@ -274,6 +274,9 @@ _WLA_SQLITE_CONNECT_ALLOWLIST = frozenset({
 
     # --- K1 P1 registry CI hook (2026-05-14; PLAN §1.2 #2) ---
     "scripts/check_table_registry_coherence.py",     # ci_hook: opens :memory: and tmp on-disk DBs to verify registry vs init_schema; not runtime daemon
+
+    # --- K1 P3 ghost table cleanup script (2026-05-14; PLAN §2 P3 D2) ---
+    "scripts/drop_world_ghost_tables.py",            # operator_invoked: drops LEGACY_ARCHIVED ghost copies on world.db; explicit --execute required; dry-run by default
 })
 
 
