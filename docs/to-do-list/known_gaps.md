@@ -712,6 +712,29 @@ with:
 
 ---
 
+### [OPEN — K1 P4] get_trade_connection_with_world ATTACHes forecasts.db with zero flocks
+
+**Status:** OPEN — discovered during K1 P4 flock investigation (2026-05-14).
+**Authority:** docs/operations/task_2026-05-14_k1_followups/PLAN.md §4 (P4 C1)
+**Location:** `src/state/db.py::get_trade_connection_with_world` (L254-294)
+**Finding:** `get_trade_connection_with_world()` (the non-flocked variant) ATTACHes
+both `zeus-world.db` (L283) AND `zeus-forecasts.db` (L291) with zero flocks
+acquired. If a caller writes through this connection to an ATTACHed forecasts-class
+table, the write is not protected by flock coordination.
+**Contrast with flocked variant:** `trade_connection_with_world_flocked()` (L298-348)
+correctly acquires `canonical_lock_order([trade, world])` flocks but does NOT
+ATTACH forecasts.db (only ATTACHes world). Post-K1, if a caller needs to read
+forecast-class tables in the trade context, the flock list must be extended and
+forecasts must be ATTACHed.
+**Required fix:** Audit callers of `get_trade_connection_with_world`; determine
+if any write to ATTACHed forecasts-class tables; if so, migrate to flocked helper
+with forecasts in flock list. If callers are read-only on forecasts, add a SELECT-only
+guard comment.
+**Live-money impact:** MEDIUM — depends on caller write patterns; no known live
+cross-DB write via this path as of 2026-05-14 audit.
+
+---
+
 ### [OPEN — K1 FOLLOWUPS DEFERRED] K1-broken hardcoded paths in operator scripts
 
 **Status:** OPEN — deferred from K1 P3 followups (2026-05-14) per PLAN §4.5.
