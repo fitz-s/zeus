@@ -139,17 +139,19 @@ def _make_world_mem_conn() -> sqlite3.Connection:
 # ---------------------------------------------------------------------------
 
 class TestDailyObsTickRouting:
-    """ROT-1 — _k2_daily_obs_tick must use get_forecasts_connection."""
+    """ROT-1 — _k2_daily_obs_tick must use get_forecasts_connection_with_world."""
 
     def test_daily_obs_tick_uses_forecasts_connection(self):
         """daily_tick must be invoked with the connection returned by
-        get_forecasts_connection, NOT get_world_connection.
+        get_forecasts_connection_with_world, NOT get_world_connection.
 
         Pre-P1 verification: the mock captures which connection object is
-        passed; we assert it came from the forecasts factory, not world.
+        passed; we assert it came from the forecasts-with-world factory.
 
         Patching at source (src.state.db) because ingest_main imports
-        get_forecasts_connection locally inside the function body on each call.
+        get_forecasts_connection_with_world locally inside the function body.
+        get_forecasts_connection_with_world is a context manager; the mock
+        is configured as a context manager returning the in-memory conn.
         """
         import src.ingest_main as ingest_main
         forecasts_conn = _make_forecasts_mem_conn()
@@ -159,15 +161,21 @@ class TestDailyObsTickRouting:
         lock_ctx.__enter__ = MagicMock(return_value=True)
         lock_ctx.__exit__ = MagicMock(return_value=False)
 
+        # get_forecasts_connection_with_world is a @contextmanager — mock it as a
+        # context manager that yields forecasts_conn.
+        fw_ctx = MagicMock()
+        fw_ctx.__enter__ = MagicMock(return_value=forecasts_conn)
+        fw_ctx.__exit__ = MagicMock(return_value=False)
+
         with (
-            patch("src.state.db.get_forecasts_connection", return_value=forecasts_conn) as mock_fc,
+            patch("src.state.db.get_forecasts_connection_with_world", return_value=fw_ctx) as mock_fc,
             patch("src.data.daily_obs_append.daily_tick") as mock_daily_tick,
             patch("src.data.dual_run_lock.acquire_lock", return_value=lock_ctx),
         ):
             mock_daily_tick.return_value = {"rows_written": 0}
             ingest_main._k2_daily_obs_tick()
 
-        # get_forecasts_connection was called (not world).
+        # get_forecasts_connection_with_world was called (not world).
         mock_fc.assert_called_once()
         # daily_tick received the forecasts connection.
         assert mock_daily_tick.called, "daily_tick must be called"
@@ -189,20 +197,27 @@ class TestStartupCatchUpRouting:
 
     def test_catch_up_obs_uses_forecasts_connection(self):
         """catch_up_missing (aliased as catch_up_obs) must be invoked with
-        the connection from get_forecasts_connection.
+        the connection from get_forecasts_connection_with_world.
 
         World connection must still be opened for Phase 2 staleness probes.
 
         Patching at source (src.state.db) because ingest_main imports both
-        get_world_connection and get_forecasts_connection locally inside the
-        function body on each call.
+        get_world_connection and get_forecasts_connection_with_world locally
+        inside the function body on each call.
+        get_forecasts_connection_with_world is a context manager; configured
+        accordingly.
         """
         import src.ingest_main as ingest_main
         forecasts_conn = _make_forecasts_mem_conn()
         world_conn = _make_world_mem_conn()
 
+        # get_forecasts_connection_with_world is a @contextmanager — mock as ctx mgr.
+        fw_ctx = MagicMock()
+        fw_ctx.__enter__ = MagicMock(return_value=forecasts_conn)
+        fw_ctx.__exit__ = MagicMock(return_value=False)
+
         with (
-            patch("src.state.db.get_forecasts_connection", return_value=forecasts_conn) as mock_fc,
+            patch("src.state.db.get_forecasts_connection_with_world", return_value=fw_ctx) as mock_fc,
             patch("src.state.db.get_world_connection", return_value=world_conn) as mock_wc,
             patch("src.data.daily_obs_append.catch_up_missing") as mock_catch_up_obs,
             patch("src.data.hourly_instants_append.catch_up_missing") as mock_catch_up_hourly,

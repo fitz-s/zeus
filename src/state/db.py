@@ -179,6 +179,67 @@ def get_forecasts_connection(
     return _connect(ZEUS_FORECASTS_DB_PATH, write_class=write_class)
 
 
+@contextlib.contextmanager
+def get_forecasts_connection_with_world(
+    *,
+    write_class: WriteClass | str = "bulk",
+):
+    """Context manager: forecasts.db as MAIN with world.db ATTACHed.
+
+    K1 P0 2026-05-14: ``daily_obs_append._write_atom_with_coverage`` writes
+    BOTH ``observations`` (forecasts-class) AND ``data_coverage``
+    (world-class) in a single SAVEPOINT.  A bare ``get_forecasts_connection``
+    cannot service the ``data_coverage`` write; this helper opens
+    forecasts.db as MAIN and ATTACHes world.db so both bare table names
+    resolve correctly within the SAVEPOINT:
+
+      - ``observations``   → MAIN (forecasts.db)  ✓
+      - ``data_coverage``  → world (world.db via ATTACH)  ✓
+      - ``daily_observation_revisions`` → world (world.db via ATTACH)  ✓
+
+    Acquires writer-lock flocks on BOTH DBs in canonical alphabetical order
+    (``zeus-forecasts.db`` before ``zeus-world.db``) to prevent deadlocks
+    with other cross-DB writers (v4 §3.1.3 invariant).
+
+    Callers MUST use this as a context manager and MUST NOT close the
+    connection themselves — the ``finally`` block handles it.
+
+    Authority: docs/operations/task_2026-05-14_k1_followups/PLAN.md §2 P0
+    CRITIC fix per IMPLEMENTATION_REVIEW_P0.md Pass D Option (a).
+    """
+    from src.state.db_writer_lock import (
+        canonical_lock_order,
+        db_writer_lock,
+    )
+    resolved = _resolve_write_class(write_class)
+    if resolved is None:
+        from src.state.db_writer_lock import WriteClass as _WC
+        resolved = _WC.BULK
+    # Canonical alphabetical sort: zeus-forecasts.db < zeus-world.db
+    ordered_paths = canonical_lock_order(
+        [ZEUS_FORECASTS_DB_PATH, ZEUS_WORLD_DB_PATH]
+    )
+    with db_writer_lock(ordered_paths[0], resolved):
+        with db_writer_lock(ordered_paths[1], resolved):
+            conn = _connect(ZEUS_FORECASTS_DB_PATH, write_class=resolved)
+            try:
+                attached = {
+                    row[1]
+                    for row in conn.execute("PRAGMA database_list").fetchall()
+                }
+                if "world" not in attached:
+                    conn.execute(
+                        "ATTACH DATABASE ? AS world",
+                        (str(ZEUS_WORLD_DB_PATH),),
+                    )
+                yield conn
+            finally:
+                try:
+                    conn.close()
+                except Exception:  # noqa: BLE001
+                    pass
+
+
 def get_backtest_connection(
     *, write_class: WriteClass | str | None = None,
 ) -> sqlite3.Connection:
