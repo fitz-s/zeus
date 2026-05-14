@@ -8,8 +8,8 @@ cannot collide with safety-critical profiles like "modify data ingestion".
 These cases come directly from §15 of docs/reference/Zeus_Apr25_review.md.
 """
 # Created: 2026-04-25
-# Last reused or audited: 2026-05-08
-# Authority basis: AGENTS.md topology routing; phase 5 forward substrate producer phrase maintenance.
+# Last reused or audited: 2026-05-14
+# Authority basis: AGENTS.md topology routing; forecast-live daemon wiring profile maintenance.
 # Lifecycle: created=2026-04-25; last_reviewed=2026-05-01; last_reused=2026-05-01
 # Purpose: Lock the new word-boundary + denylist + veto profile resolver against
 # regression to the legacy substring matcher.
@@ -1702,6 +1702,52 @@ def test_forecast_live_work_queue_journaling_routes_to_dedicated_profile():
     assert "tests/state/_schema_pinned_hash.txt" in digest["admission"]["admitted_files"]
     assert "architecture/test_topology.yaml" in digest["admission"]["admitted_files"]
     assert "architecture/source_rationale.yaml" in digest["admission"]["admitted_files"]
+
+
+def test_forecast_live_daemon_wiring_runbook_routes_to_dedicated_profile():
+    digest = build_digest(
+        "Phase 7 forecast-live daemon live wiring plan and rollback runbook only; "
+        "no launchctl mutation; no production DB write; no daemon launch",
+        [
+            "docs/runbooks/forecast-live-daemon.md",
+            "docs/runbooks/AGENTS.md",
+            "tests/test_digest_profile_matching.py",
+            "architecture/topology.yaml",
+            "architecture/digest_profiles.py",
+        ],
+    )
+
+    assert digest["profile"] == "forecast live daemon wiring runbook"
+    assert digest["admission"]["status"] == "admitted"
+    assert set(digest["admission"]["admitted_files"]) == {
+        "docs/runbooks/forecast-live-daemon.md",
+        "docs/runbooks/AGENTS.md",
+        "tests/test_digest_profile_matching.py",
+        "architecture/topology.yaml",
+        "architecture/digest_profiles.py",
+    }
+
+
+def test_forecast_live_daemon_wiring_runbook_blocks_runtime_mutation_scope():
+    digest = build_digest(
+        "Phase 7 forecast-live daemon live wiring plan and rollback runbook only; "
+        "no launchctl mutation; no production DB write; no daemon launch",
+        [
+            "docs/runbooks/forecast-live-daemon.md",
+            "src/ingest_main.py",
+            "state/zeus-forecasts.db",
+            "scripts/install_forecast_live_launchd.py",
+        ],
+    )
+
+    assert digest["profile"] == "forecast live daemon wiring runbook"
+    assert digest["admission"]["status"] == "blocked"
+    forbidden = set(digest["admission"]["forbidden_hits"])
+    assert {
+        "src/ingest_main.py",
+        "state/zeus-forecasts.db",
+        "scripts/install_forecast_live_launchd.py",
+    } <= forbidden
 
 
 def test_phase2d_execution_capability_status_routes_to_observability_profile():

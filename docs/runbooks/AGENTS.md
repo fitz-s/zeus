@@ -15,6 +15,7 @@ Load these when the task is about active operations procedure.
 
 | File | Purpose |
 |------|---------|
+| `forecast-live-daemon.md` | Forecast-live daemon cutover, rollback, and operator verification checklist |
 | `live-operation.md` | Day-to-day live daemon operation procedures |
 | `live-phase-1-first-boot.md` | First live daemon boot checklist |
 | `settlement_mismatch_triage.md` | Procedure for investigating Zeus-vs-Polymarket settlement mismatches |
