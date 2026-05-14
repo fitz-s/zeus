@@ -1,0 +1,685 @@
+# Zeus DB table ownership registry — canonical authority for table→DB mapping.
+#
+# Created: 2026-05-14
+# Authority basis: docs/operations/task_2026-05-14_k1_followups/PLAN.md §1.1 (REV 4)
+#                  K1 DB split commit eba80d2b9d (2026-05-11)
+#
+# Schema fields per PLAN §1.1:
+#   name               — table name
+#   db                 — physical DB: world | forecasts | trade | risk_state | backtest
+#   schema_class       — forecast_class | world_class | trade_class | risk_class |
+#                        backtest_class | legacy_archived
+#   schema_version_owner — SCHEMA_VERSION | SCHEMA_FORECASTS_VERSION | none
+#   created_by         — init_schema | init_schema_forecasts | apply_v2_schema |
+#                        migration_script_<name>
+#   pk_col             — primary key column name (or null for compound/no PK)
+#   required_columns   — optional list of {name, type, nullable} for boot column-shape check
+#   notes              — free-text context
+#
+# PRIMARY KEY: (name, db) — a table with the same name can appear on multiple DBs
+#   with different schema_class (e.g., observations: forecast_class on forecasts.db,
+#   legacy_archived on world.db). Loader enforces uniqueness of (name, db) pairs.
+#
+# SCOPE NOTES:
+#   - "world" db = state/zeus-world.db (ZEUS_WORLD_DB_PATH)
+#   - "forecasts" db = state/zeus-forecasts.db (ZEUS_FORECASTS_DB_PATH)
+#   - "trade" db = state/zeus_trades.db — future; no entries yet
+#   - legacy_archived entries are EXCLUDED from assert_db_matches_registry set-equality
+#     per PLAN §1.5 + ARCHITECT D2. Drop date: 2026-08-09 (2026-05-11 + 90d retention).
+#
+schema_version: 1
+metadata:
+  created: "2026-05-14"
+  owner_packet: "K1 DB split followup — task_2026-05-14_k1_followups"
+  plan_ref: "docs/operations/task_2026-05-14_k1_followups/PLAN.md §1.1 (REV 4)"
+  k1_split_commit: "eba80d2b9d"
+
+tables:
+
+  # ---------------------------------------------------------------------------
+  # FORECAST-CLASS tables (db: forecasts, authoritative in zeus-forecasts.db)
+  # These 7 tables were moved from world.db → forecasts.db in K1 split.
+  # Ghost copies exist on world.db as legacy_archived until P3 cleanup.
+  # ---------------------------------------------------------------------------
+
+  - name: observations
+    db: forecasts
+    schema_class: forecast_class
+    schema_version_owner: SCHEMA_FORECASTS_VERSION
+    created_by: init_schema_forecasts
+    pk_col: null
+    notes: >
+      K1-split 2026-05-11. Compound unique key (city, target_date, source).
+      Written via get_forecasts_connection_with_world SAVEPOINT (ATTACH atomicity).
+      Ghost copy on world.db declared legacy_archived below.
+
+  - name: settlements
+    db: forecasts
+    schema_class: forecast_class
+    schema_version_owner: SCHEMA_FORECASTS_VERSION
+    created_by: init_schema_forecasts
+    pk_col: null
+    notes: >
+      K1-split 2026-05-11. Compound unique key.
+      Ghost copy on world.db declared legacy_archived below.
+
+  - name: settlements_v2
+    db: forecasts
+    schema_class: forecast_class
+    schema_version_owner: SCHEMA_FORECASTS_VERSION
+    created_by: init_schema_forecasts
+    pk_col: null
+    notes: >
+      K1-split 2026-05-11. v2 settlements schema (apply_v2_schema via init_schema_forecasts).
+      Ghost copy on world.db declared legacy_archived below.
+
+  - name: source_run
+    db: forecasts
+    schema_class: forecast_class
+    schema_version_owner: SCHEMA_FORECASTS_VERSION
+    created_by: init_schema_forecasts
+    pk_col: run_id
+    notes: >
+      K1-split 2026-05-11. Source run provenance for forecast jobs.
+      Ghost copy on world.db declared legacy_archived below.
+
+  - name: market_events_v2
+    db: forecasts
+    schema_class: forecast_class
+    schema_version_owner: SCHEMA_FORECASTS_VERSION
+    created_by: init_schema_forecasts
+    pk_col: null
+    notes: >
+      K1-split 2026-05-11. v2 market events (apply_v2_schema via init_schema_forecasts).
+      Ghost copy on world.db declared legacy_archived below.
+
+  - name: ensemble_snapshots_v2
+    db: forecasts
+    schema_class: forecast_class
+    schema_version_owner: SCHEMA_FORECASTS_VERSION
+    created_by: init_schema_forecasts
+    pk_col: null
+    notes: >
+      K1-split 2026-05-11. v2 ensemble snapshots (apply_v2_schema via init_schema_forecasts).
+      Ghost copy on world.db declared legacy_archived below.
+
+  - name: calibration_pairs_v2
+    db: forecasts
+    schema_class: forecast_class
+    schema_version_owner: SCHEMA_FORECASTS_VERSION
+    created_by: init_schema_forecasts
+    pk_col: null
+    notes: >
+      K1-split 2026-05-11. v2 calibration pairs (apply_v2_schema via init_schema_forecasts).
+      Ghost copy on world.db declared legacy_archived below.
+
+  # ---------------------------------------------------------------------------
+  # LEGACY_ARCHIVED — ghost copies of forecast-class tables on world.db
+  # Same table names as forecast-class entries above, but db: world.
+  # EXCLUDED from assert_db_matches_registry set-equality per PLAN §1.5 + ARCHITECT D2.
+  # Drop date: 2026-08-09 per 90-day retention policy.
+  # ---------------------------------------------------------------------------
+
+  - name: observations
+    db: world
+    schema_class: legacy_archived
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: null
+    notes: >
+      Ghost copy of observations on world.db post-K1-split.
+      Authoritative copy is on forecasts.db. Excluded from set-equality check.
+      Drop after 2026-08-09.
+
+  - name: settlements
+    db: world
+    schema_class: legacy_archived
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: null
+    notes: >
+      Ghost copy of settlements on world.db post-K1-split.
+      Authoritative on forecasts.db. Excluded. Drop after 2026-08-09.
+
+  - name: settlements_v2
+    db: world
+    schema_class: legacy_archived
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: null
+    notes: >
+      Ghost copy of settlements_v2 on world.db post-K1-split.
+      Authoritative on forecasts.db. Excluded. Drop after 2026-08-09.
+
+  - name: source_run
+    db: world
+    schema_class: legacy_archived
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: null
+    notes: >
+      Ghost copy of source_run on world.db post-K1-split.
+      Authoritative on forecasts.db. Excluded. Drop after 2026-08-09.
+
+  - name: market_events_v2
+    db: world
+    schema_class: legacy_archived
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: null
+    notes: >
+      Ghost copy of market_events_v2 on world.db post-K1-split.
+      Authoritative on forecasts.db. Excluded. Drop after 2026-08-09.
+
+  - name: ensemble_snapshots_v2
+    db: world
+    schema_class: legacy_archived
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: null
+    notes: >
+      Ghost copy of ensemble_snapshots_v2 on world.db post-K1-split.
+      Authoritative on forecasts.db. Excluded. Drop after 2026-08-09.
+
+  - name: calibration_pairs_v2
+    db: world
+    schema_class: legacy_archived
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: null
+    notes: >
+      Ghost copy of calibration_pairs_v2 on world.db post-K1-split.
+      Authoritative on forecasts.db. Excluded. Drop after 2026-08-09.
+
+  # ---------------------------------------------------------------------------
+  # WORLD-CLASS tables (db: world, authoritative in zeus-world.db)
+  # 66 tables from init_schema that are purely world-class.
+  # ---------------------------------------------------------------------------
+
+  - name: availability_fact
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: null
+
+  - name: calibration_decision_group
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: group_id
+
+  - name: calibration_pairs
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: null
+    notes: Pre-v2 calibration pairs (legacy on world.db). v2 is calibration_pairs_v2 on forecasts.db.
+
+  - name: chronicle
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: null
+
+  - name: collateral_ledger_snapshots
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: snapshot_id
+
+  - name: collateral_reservations
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: reservation_id
+
+  - name: control_overrides_history
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: null
+
+  - name: daily_observation_revisions
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: null
+
+  - name: data_coverage
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: null
+    required_columns:
+      - {name: city, type: TEXT, nullable: false}
+      - {name: target_date, type: TEXT, nullable: false}
+      - {name: metric, type: TEXT, nullable: false}
+      - {name: source, type: TEXT, nullable: false}
+    notes: >
+      Tracks per-city per-date data coverage status. Written cross-DB via
+      get_forecasts_connection_with_world SAVEPOINT (ATTACH atomicity, INV-37 carve-out).
+
+  - name: day0_metric_fact
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: null
+
+  - name: decision_log
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: decision_id
+
+  - name: diurnal_curves
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: null
+
+  - name: diurnal_peak_prob
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: null
+
+  - name: ensemble_snapshots
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: null
+    notes: Pre-v2 ensemble snapshots (legacy on world.db). v2 is ensemble_snapshots_v2 on forecasts.db.
+
+  - name: exchange_reconcile_findings
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: null
+
+  - name: executable_market_snapshots
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: null
+
+  - name: execution_fact
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: null
+
+  - name: exit_mutex_holdings
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: null
+
+  - name: forecast_skill
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: null
+
+  - name: forecasts
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: null
+    notes: Active forecast cache (world.db table). Not to be confused with the forecasts.db physical file.
+
+  - name: historical_forecasts_v2
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: null
+
+  - name: job_run
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: run_id
+
+  - name: market_events
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: null
+    notes: Pre-v2 market events (legacy on world.db). v2 is market_events_v2 on forecasts.db.
+
+  - name: market_price_history
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: null
+
+  - name: market_topology_state
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: null
+
+  - name: model_bias
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: null
+
+  - name: observation_instants
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: null
+    notes: Pre-v2 observation instants (legacy).
+
+  - name: observation_instants_v2
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: null
+
+  - name: observation_revisions
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: null
+
+  - name: opportunity_fact
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: null
+
+  - name: outcome_fact
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: null
+
+  - name: platt_models
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: null
+    notes: Pre-v2 Platt calibration models (legacy). v2 is platt_models_v2.
+
+  - name: platt_models_v2
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: null
+
+  - name: position_current
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: null
+
+  - name: position_events
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: null
+    notes: Position lifecycle events (canonical, architecture kernel). Append-only.
+
+  - name: position_lots
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: null
+    notes: U2 position lots provenance. Append-only.
+
+  - name: probability_trace_fact
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: null
+
+  - name: provenance_envelope_events
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: null
+    notes: U2 provenance envelope events. Append-only.
+
+  - name: readiness_state
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: null
+
+  - name: refit_bucket_failures
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: null
+
+  - name: rescue_events_v2
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: null
+
+  - name: risk_actions
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: null
+
+  - name: selection_family_fact
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: null
+
+  - name: selection_hypothesis_fact
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: null
+
+  - name: settlement_command_events
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: null
+
+  - name: settlement_commands
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: null
+
+  - name: shadow_signals
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: null
+
+  - name: solar_daily
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: null
+
+  - name: source_contract_audit_events
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: null
+
+  - name: source_run_coverage
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: null
+    notes: >
+      Source run coverage tracking. World-only writer: source_run_coverage_repo.py
+      uses single world conn, no cross-DB write transaction.
+      Stop condition #1 cleared per PLAN §7 audit (2026-05-14).
+
+  - name: strategy_health
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: null
+
+  - name: temp_persistence
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: null
+
+  - name: token_price_log
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: null
+
+  - name: token_suppression
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: null
+
+  - name: token_suppression_history
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: null
+
+  - name: trade_decisions
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: null
+
+  - name: uma_resolution
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: null
+
+  - name: validated_calibration_transfers
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: null
+
+  - name: venue_command_events
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: null
+    notes: Venue command event log. INV-30/31 cross-DB journaling via trade/world boundary.
+
+  - name: venue_commands
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: null
+
+  - name: venue_order_facts
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: null
+    notes: U2 venue order facts. Append-only.
+
+  - name: venue_submission_envelopes
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: envelope_id
+    notes: U2 venue submission envelopes. Append-only.
+
+  - name: venue_trade_facts
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: null
+    notes: U2 venue trade facts. Append-only.
+
+  - name: wrap_unwrap_commands
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: null
+
+  - name: wrap_unwrap_events
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: null
+
+  - name: zeus_meta
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: key
+    notes: Zeus metadata store (key-value, schema version anchor).
