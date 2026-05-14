@@ -803,9 +803,9 @@ def collect_open_ens_cycle(
             if str(INGEST_SCRIPT_DIR) not in sys.path:
                 sys.path.insert(0, str(INGEST_SCRIPT_DIR))
             from ingest_grib_to_snapshots import SourceRunContext, ingest_track as _ingest  # type: ignore
-            from src.state.db import init_schema
+            from src.state.db import assert_schema_current
 
-            init_schema(conn)
+            assert_schema_current(conn)
             # The opendata extract writes JSON files to a different subdir than
             # TIGGE — reuse the same ingester by passing the parent directory and
             # the matching track name, and override the json_subdir lookup via the

@@ -43,11 +43,13 @@ def test_rel1_no_hot_path_init_schema():
     Hot-path callers must use assert_schema_current(conn) instead.
     """
     import subprocess
+    from pathlib import Path
+    _repo_root = str(Path(__file__).parent.parent.parent)
     result = subprocess.run(
         ["grep", "-rn", "--include=*.py", "init_schema(", "src/"],
         capture_output=True,
         text=True,
-        cwd="/Users/leofitz/.openclaw/workspace-venus/zeus",
+        cwd=_repo_root,
     )
     lines = [l for l in result.stdout.strip().splitlines() if l]
     ALLOWED = ("src/main.py", "src/ingest_main.py", "src/state/db.py")

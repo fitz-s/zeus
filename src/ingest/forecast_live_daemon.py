@@ -259,12 +259,12 @@ def main() -> None:
     logger.info("Zeus forecast-live daemon starting (pid=%d)", os.getpid())
 
     from src.data.proxy_health import bypass_dead_proxy_env_vars
-    from src.state.db import get_world_connection, init_schema
+    from src.state.db import assert_schema_current, get_world_connection
 
     bypass_dead_proxy_env_vars()
     conn = get_world_connection(write_class="bulk")
     try:
-        init_schema(conn)
+        assert_schema_current(conn)
     finally:
         conn.close()
 
