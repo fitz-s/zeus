@@ -134,6 +134,15 @@ def _connect(
     # Per-connection, so independent for trade/world/forecasts/backtest.
     cache_kb = int(os.environ.get("ZEUS_DB_CACHE_KB", "1048576"))
     conn.execute(f"PRAGMA cache_size = -{cache_kb}")
+    # 2026-05-13 antibody (cold-cache K3 follow-up): mmap_size lets SQLite use
+    # OS-managed page cache instead of bounded per-connection cache. On the
+    # post-promote 51 GB forecasts.db, 1 GB cache_size still thrashes when
+    # the working set (2945 distinct ingest tuples × 5-column autoindex
+    # descent) exceeds it. Setting mmap_size to a 32 GB ceiling lets the OS
+    # cache reused autoindex/data pages across queries WITHOUT churning the
+    # SQLite cache. ZEUS_DB_MMAP_BYTES env var overrides.
+    mmap_bytes = int(os.environ.get("ZEUS_DB_MMAP_BYTES", str(32 * 1024 * 1024 * 1024)))
+    conn.execute(f"PRAGMA mmap_size = {mmap_bytes}")
     _install_connection_functions(conn)
     resolved = _resolve_write_class(write_class)
     if resolved is not None:
@@ -714,6 +723,12 @@ def get_connection(
     # Per-connection, so independent for trade/world/forecasts/backtest.
     cache_kb = int(os.environ.get("ZEUS_DB_CACHE_KB", "1048576"))
     conn.execute(f"PRAGMA cache_size = -{cache_kb}")
+    # 2026-05-13 antibody (cold-cache K3 follow-up): mirror _connect()'s
+    # mmap_size setting on this alternate connection helper. See _connect()
+    # for rationale. Without this, callers using get_connection() would
+    # still thrash the bounded SQLite cache on the 51 GB forecasts.db.
+    mmap_bytes = int(os.environ.get("ZEUS_DB_MMAP_BYTES", str(32 * 1024 * 1024 * 1024)))
+    conn.execute(f"PRAGMA mmap_size = {mmap_bytes}")
     _install_connection_functions(conn)
     resolved = _resolve_write_class(write_class)
     if resolved is not None:

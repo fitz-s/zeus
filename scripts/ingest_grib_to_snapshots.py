@@ -565,12 +565,24 @@ def ingest_json_file(
     import os as _os
     force_replace_env = _os.environ.get("ZEUS_INGEST_FORCE_REPLACE", "") == "1"
     if not overwrite and not force_replace_env:
+        # 2026-05-13 diagnostic (ECMWF wedge investigation): log slow probes so
+        # next recurrence isolates whether the SELECT is the wedge or
+        # something downstream. Threshold deliberately high to keep the log
+        # clean on healthy runs; 200ms exceeds even cold-cache expected
+        # latency on the post-promote 51 GB forecasts.db.
+        _t_sel0 = time.monotonic()
         existing = conn.execute(
             "SELECT manifest_hash, provenance_json FROM ensemble_snapshots_v2 "
             "WHERE city=? AND target_date=? "
             "AND temperature_metric=? AND issue_time=? AND data_version=?",
             (city, target_date, metric.temperature_metric, issue_time, data_version),
         ).fetchone()
+        _t_sel_ms = (time.monotonic() - _t_sel0) * 1000
+        if _t_sel_ms > 200:
+            logger.warning(
+                "manifest_select slow %.0fms city=%s target=%s issue=%s data_version=%s",
+                _t_sel_ms, city, target_date, issue_time, data_version,
+            )
         if existing:
             db_manifest_sha = ""
             try:
