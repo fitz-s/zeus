@@ -169,13 +169,17 @@ tests/state/ + tests/data/test_daily_obs_routing.py
 4 failed (pre-existing N1), 33 passed, 4 skipped
 ```
 
-**Pre-existing N1 failures (unchanged from P0 tip `2ebd8965ef`):**
+**TEST_ENV_CONTAMINATION (reclassified per critic APPROVE_WITH_NOTE — IMPLEMENTATION_REVIEW_P1.md):**
 - `test_forecast_db_split_invariant.py::test_rel1_init_schema_forecasts_tables_and_version`
 - `test_forecast_db_split_invariant.py::test_rel1_init_schema_forecasts_critical_indexes`
 - `test_forecast_db_split_invariant.py::test_rel6_trio_atomicity_rollback`
 - `test_forecast_db_split_invariant.py::test_rel6_trio_atomicity_commit`
 
-Root cause: `_ensure_v2_forecast_indexes` at db.py:2588 fails on `:memory:` connection lacking settlements_v2 (pre-existing from P0, documented in IMPLEMENTATION_REVIEW_P0_FINAL.md N1).
+Root cause: 0-byte `state/*.db` stubs present in worktree triggered the PR #114 ATTACH branch in `init_schema_forecasts` on an empty source DB, causing `_ensure_v2_forecast_indexes` to fail. These are NOT pre-existing code failures — a fresh worktree at the same SHA (`ae0a30eb54`) passes all 4. Stubs removed via separate cleanup. Full diagnosis in `IMPLEMENTATION_REVIEW_P1.md`.
+
+**P2 follow-up items (critic MINOR, not P1 fixes):**
+- (a) Populate `_P1_BASELINE_VIOLATIONS` in `scripts/check_writer_signature_typing.py` with current scan output to establish the baseline snapshot.
+- (b) Add `size > 0` guard to the ATTACH branch in `src/state/db.py::init_schema_forecasts` to prevent re-occurrence of 0-byte stub contamination triggering the ATTACH path on an empty source.
 
 **New tests introduced in P1 (all green):**
 - `test_table_registry_coherence.py`: 13 passed
