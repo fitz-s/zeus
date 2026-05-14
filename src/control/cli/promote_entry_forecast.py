@@ -1,5 +1,5 @@
 # Created: 2026-05-12
-# Last reused/audited: 2026-05-12
+# Last reused/audited: 2026-05-14
 # Authority basis: Operator CLI for write_promotion_evidence flow — replaces
 # hand-crafted Python invocations referenced in
 # src/control/entry_forecast_promotion_evidence_io.py:129 (write_promotion_evidence).
@@ -190,9 +190,12 @@ def _validate_propose_inputs(
             f"--operator-approval-id must match {OPERATOR_APPROVAL_PATTERN.pattern!r}; "
             f"got {operator_approval_id!r}"
         )
-    g1_path = Path(g1_evidence_id)
-    if not g1_path.exists():
-        errors.append(f"--g1-evidence-id must be an existing file path; got {g1_evidence_id!r}")
+    # Accept any non-empty string: documented identifiers like "g1-2026-05-14" or
+    # "g1-report-1" are valid; the persisted schema and rollout gate only require
+    # non-empty (entry_forecast_rollout.py:49).  File-path existence check removed
+    # per Codex review (PR #113 thread PRRC_kwDOR0ZtZc7BUf8f).
+    if not g1_evidence_id.strip():
+        errors.append(f"--g1-evidence-id must be a non-empty identifier; got {g1_evidence_id!r}")
     return errors
 
 
@@ -525,7 +528,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Build promotion evidence from CLI flags + DB-derived status_snapshot.",
     )
     p_propose.add_argument("--operator-approval-id", required=True)
-    p_propose.add_argument("--g1-evidence-id", required=True, help="path to G1 evidence file")
+    p_propose.add_argument("--g1-evidence-id", required=True, help="non-empty G1 evidence identifier (e.g. g1-2026-05-14, g1-report-1, or a file path)")
     p_propose.add_argument("--canary-success-evidence-id", default=None)
     p_propose.add_argument(
         "--no-calibration-approved",

@@ -1,5 +1,5 @@
 # Created: 2026-05-12
-# Last reused/audited: 2026-05-12
+# Last reused/audited: 2026-05-14
 # Authority basis: Tests for src/control/cli/promote_entry_forecast.py operator CLI.
 """Tests for the promote_entry_forecast operator CLI.
 
@@ -198,6 +198,57 @@ def test_propose_rejects_bad_operator_approval_id(
     err = capsys.readouterr().err
     assert rc == 2
     assert "operator-approval-id" in err
+
+
+def test_propose_accepts_g1_evidence_identifier_without_file(
+    isolated_evidence_path: Path,
+    fake_cfg: EntryForecastConfig,
+    fake_status_snapshot: LiveEntryForecastStatus,
+    fake_db: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Non-file-path G1 identifiers (e.g. g1-2026-05-14) must be accepted.
+
+    The persisted schema and rollout gate only require a non-empty string.
+    Codex PR #113 thread PRRC_kwDOR0ZtZc7BUf8f.
+    """
+    rc = cli.main(
+        [
+            "propose",
+            "--operator-approval-id",
+            "OPS-2026-05-14-g1-id-test",
+            "--g1-evidence-id",
+            "g1-2026-05-14",  # documented identifier, not a file path
+            "--db",
+            str(fake_db),
+        ]
+    )
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "DRY-RUN" in out
+
+
+def test_propose_rejects_empty_g1_evidence_id(
+    isolated_evidence_path: Path,
+    fake_cfg: EntryForecastConfig,
+    fake_status_snapshot: LiveEntryForecastStatus,
+    fake_db: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    rc = cli.main(
+        [
+            "propose",
+            "--operator-approval-id",
+            "OPS-2026-05-14-empty-g1",
+            "--g1-evidence-id",
+            "   ",  # whitespace-only is rejected
+            "--db",
+            str(fake_db),
+        ]
+    )
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert "g1-evidence-id" in err
 
 
 # ---------------------------------------------------------------------------
