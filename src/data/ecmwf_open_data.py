@@ -857,12 +857,16 @@ def collect_open_ens_cycle(
                 ): s
                 for s, p in tasks
             }
-            for fut in as_completed(fut2step):
+            for fut in as_completed(fut2step, timeout=_PER_STEP_TIMEOUT_SECONDS * len(tasks)):
                 step = fut2step[fut]
                 try:
-                    results[step] = fut.result()
+                    results[step] = fut.result(timeout=_PER_STEP_TIMEOUT_SECONDS)
                 except Exception as exc:  # noqa: BLE001
                     results[step] = ("FAILED", f"UNCAUGHT_{type(exc).__name__}: {exc}")
+            # Mark any steps not reached (stalled futures) as FAILED.
+            for fut, step in fut2step.items():
+                if step not in results:
+                    results[step] = ("FAILED", "STEP_TIMEOUT")
 
         ok_steps       = sorted(s for s, (st, _) in results.items() if st == "OK")
         released_404   = sorted(s for s, (st, _) in results.items() if st == "NOT_RELEASED")
