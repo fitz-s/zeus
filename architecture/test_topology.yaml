@@ -53,6 +53,7 @@ test_trust_policy:
     tests/test_ddd_wiring.py: {created: "2026-05-03", last_used: "2026-05-04"}
     tests/test_ensemble_client.py: {created: "2026-04-01", last_used: "2026-04-29"}
     tests/test_forecasts_writer_provenance_required.py: {created: "2026-04-28", last_used: "2026-04-28"}
+    tests/test_forecast_live_owner.py: {created: "2026-05-14", last_used: "2026-05-14"}
     tests/test_forecast_fetch_plan.py: {created: "2026-05-03", last_used: "2026-05-03"}
     tests/test_replay_skill_eligibility_filter.py: {created: "2026-04-28", last_used: "2026-04-28"}
     tests/test_etl_skill_eligibility_filter.py: {created: "2026-04-28", last_used: "2026-04-28"}
@@ -397,6 +398,7 @@ categories:
     - tests/test_temperature.py
     - tests/test_tier_resolver.py
     - tests/test_source_health_probe.py
+    - tests/test_forecast_live_owner.py
     - tests/test_topology_doctor.py
     - tests/test_digest_admission_policy.py
     - tests/test_digest_profile_matching.py

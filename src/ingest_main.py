@@ -1,5 +1,5 @@
-# Lifecycle: created=2026-04-30; last_reviewed=2026-05-03; last_reused=2026-05-03
-# Authority basis: docs/operations/task_2026-04-30_two_system_independence/design.md §5 Phase 1 + PLAN_v4 Phase 5A source-run selection.
+# Lifecycle: created=2026-04-30; last_reviewed=2026-05-03; last_reused=2026-05-14
+# Authority basis: docs/operations/task_2026-04-30_two_system_independence/design.md §5 Phase 1 + docs/operations/task_2026-05-08_deep_alignment_audit/DATA_DAEMON_LIVE_EFFICIENCY_REFACTOR_PLAN.md §6.2.
 """Zeus data-ingest daemon entry point.
 
 Runs all K2 ingest jobs and supporting cycles on an independent APScheduler.
@@ -40,6 +40,15 @@ logger = logging.getLogger("zeus.ingest")
 # Module-level scheduler reference for SIGTERM handler
 # ---------------------------------------------------------------------------
 _scheduler: BlockingScheduler | None = None
+FORECAST_LIVE_OWNER_ENV = "ZEUS_FORECAST_LIVE_OWNER"
+
+
+def _forecast_live_owner() -> str:
+    return os.environ.get(FORECAST_LIVE_OWNER_ENV, "ingest_main").strip().lower() or "ingest_main"
+
+
+def _ingest_main_owns_opendata() -> bool:
+    return _forecast_live_owner() != "forecast_live"
 
 
 def _graceful_shutdown(signum, frame) -> None:
@@ -524,6 +533,52 @@ def _opendata_startup_catch_up():
         result = collect_open_ens_cycle(track=track)
         logger.info("Open Data startup catch-up %s: %s", track,
                     {k: v for k, v in result.items() if k != "stages"})
+
+
+def _register_opendata_daily_jobs(scheduler: BlockingScheduler) -> list[str]:
+    if not _ingest_main_owns_opendata():
+        logger.info(
+            "OpenData daily jobs not registered in ingest_main: %s=%s",
+            FORECAST_LIVE_OWNER_ENV,
+            _forecast_live_owner(),
+        )
+        return []
+    scheduler.add_job(
+        _opendata_mx2t6_cycle, "cron",
+        hour=7, minute=30, id="ingest_opendata_daily_mx2t6",
+        max_instances=1, coalesce=True, misfire_grace_time=3600,
+    )
+    scheduler.add_job(
+        _opendata_mn2t6_cycle, "cron",
+        hour=7, minute=35, id="ingest_opendata_daily_mn2t6",
+        max_instances=1, coalesce=True, misfire_grace_time=3600,
+    )
+    return ["ingest_opendata_daily_mx2t6", "ingest_opendata_daily_mn2t6"]
+
+
+def _register_opendata_startup_job(scheduler: BlockingScheduler) -> list[str]:
+    if not _ingest_main_owns_opendata():
+        logger.info(
+            "OpenData startup job not registered in ingest_main: %s=%s",
+            FORECAST_LIVE_OWNER_ENV,
+            _forecast_live_owner(),
+        )
+        return []
+    scheduler.add_job(
+        _opendata_startup_catch_up, "date",
+        run_date=datetime.now(),
+        id="ingest_opendata_startup_catch_up",
+        max_instances=1, coalesce=True, misfire_grace_time=None,
+        executor="fast",
+    )
+    return ["ingest_opendata_startup_catch_up"]
+
+
+def _register_opendata_jobs(scheduler: BlockingScheduler) -> list[str]:
+    return [
+        *_register_opendata_daily_jobs(scheduler),
+        *_register_opendata_startup_job(scheduler),
+    ]
 
 
 @_scheduler_job("ingest_tigge_archive_backfill")
@@ -1195,16 +1250,7 @@ def main() -> None:
     # may add additional refreshes; we still register the per-track ticks at
     # 07:30/07:35 unconditionally so the freshness invariant holds even if
     # settings is misconfigured.
-    _scheduler.add_job(
-        _opendata_mx2t6_cycle, "cron",
-        hour=7, minute=30, id="ingest_opendata_daily_mx2t6",
-        max_instances=1, coalesce=True, misfire_grace_time=3600,
-    )
-    _scheduler.add_job(
-        _opendata_mn2t6_cycle, "cron",
-        hour=7, minute=35, id="ingest_opendata_daily_mn2t6",
-        max_instances=1, coalesce=True, misfire_grace_time=3600,
-    )
+    _register_opendata_daily_jobs(_scheduler)
 
     # TIGGE archive backfill REMOVED from data daemon 2026-05-11 (K1 structural
     # fix per analyst aa28d70b8cceae626 + architect add8334a4c5803f11).
@@ -1267,13 +1313,7 @@ def main() -> None:
     # (fcntl.flock) independently, so running on fast executor is safe.
     # Fix: 2026-05-10 — root cause of OpenData ingest stall: TIGGE MARS download
     # (~3-30 min) occupied the only default worker, blocking OpenData indefinitely.
-    _scheduler.add_job(
-        _opendata_startup_catch_up, "date",
-        run_date=_dt_now.now(),
-        id="ingest_opendata_startup_catch_up",
-        max_instances=1, coalesce=True, misfire_grace_time=None,
-        executor="fast",
-    )
+    _register_opendata_startup_job(_scheduler)
 
     # Phase 2: source health probe every 10 minutes (§2.1) — APPENDED END
     # File-only writer (state/source_health.json) — runs on "fast" executor
