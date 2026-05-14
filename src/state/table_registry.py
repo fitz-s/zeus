@@ -309,9 +309,19 @@ def assert_db_matches_registry(conn: sqlite3.Connection, db_identity: DBIdentity
     # Registry-declared tables for this DB (non-legacy_archived only).
     registry_tables = tables_for(db_identity)
 
-    # Check 1: set equality.
-    missing_from_disk = registry_tables - live_tables
-    extra_on_disk = live_tables - registry_tables
+    # Legacy-archived table names on this DB are ghost copies of authoritative tables
+    # on another DB. They exist on disk but are excluded from set-equality both sides
+    # (per PLAN §1.5 + ARCHITECT D2 — drop after retention expiry).
+    legacy_archived_on_this_db: frozenset[str] = frozenset(
+        name
+        for (name, db_id), entry in _REGISTRY.items()
+        if db_id == db_identity and entry.schema_class == SchemaClass.LEGACY_ARCHIVED
+    )
+
+    # Check 1: set equality (excluding legacy_archived on both sides).
+    live_tables_non_ghost = live_tables - legacy_archived_on_this_db
+    missing_from_disk = registry_tables - live_tables_non_ghost
+    extra_on_disk = live_tables_non_ghost - registry_tables
 
     if missing_from_disk or extra_on_disk:
         msg_parts = [

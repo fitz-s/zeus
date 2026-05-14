@@ -260,13 +260,17 @@ tables:
     created_by: init_schema
     pk_col: null
     required_columns:
+      - {name: data_table, type: TEXT, nullable: false}
       - {name: city, type: TEXT, nullable: false}
+      - {name: data_source, type: TEXT, nullable: false}
       - {name: target_date, type: TEXT, nullable: false}
-      - {name: metric, type: TEXT, nullable: false}
-      - {name: source, type: TEXT, nullable: false}
+      - {name: status, type: TEXT, nullable: false}
+      - {name: fetched_at, type: TEXT, nullable: false}
     notes: >
-      Tracks per-city per-date data coverage status. Written cross-DB via
-      get_forecasts_connection_with_world SAVEPOINT (ATTACH atomicity, INV-37 carve-out).
+      Tracks per-city per-date data coverage status. Composite PK:
+      (data_table, city, data_source, target_date, sub_key).
+      Written cross-DB via get_forecasts_connection_with_world SAVEPOINT
+      (ATTACH atomicity, INV-37 carve-out).
 
   - name: day0_metric_fact
     db: world
