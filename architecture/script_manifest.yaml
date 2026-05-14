@@ -371,6 +371,21 @@ scripts:
     class: runtime_support
     module_owner: scripts
     required_tests: [tests/test_healthcheck.py, tests/test_runtime_guards.py]
+  check_forecast_live_ready.py:
+    class: diagnostic
+    module_owner: scripts
+    reason: "Read-only forecast-live authority-chain verifier for Phase 8 staged E2E evidence; outputs highest completion state and exact blockers."
+    canonical_command: "python3 scripts/check_forecast_live_ready.py --json"
+    read_targets: [state/zeus-forecasts.db, state/source_health.json, state/forecast-live-heartbeat.json, process_table]
+    write_targets: [stdout]
+    dry_run_default: true
+    apply_flag: null
+    target_db: null
+    external_inputs: []
+    dangerous_if_run: false
+    promotion_barrier: "Reports evidence only; cannot authorize launchctl mutation, daemon launch, production DB writes, live venue side effects, LIVE_CONSUMING, or DONE."
+    required_helpers: []
+    required_tests: [tests/test_check_forecast_live_ready.py]
   check_kernel_manifests.py: {class: enforcement}
   check_module_boundaries.py: {class: enforcement}
   check_work_packets.py: {class: enforcement}

@@ -208,6 +208,7 @@ _WLA_SQLITE_CONNECT_ALLOWLIST = frozenset({
     "scripts/venus_sensing_report.py",              # read_only (PR #86)
 
     # --- additional read-only / ro-URI scripts ---
+    "scripts/check_forecast_live_ready.py",         # read_only_ro_uri (2026-05-14 Phase 8 verifier; opens zeus-forecasts.db with mode=ro + query_only, stdout only)
     "scripts/audit_observation_instants_v2.py",     # read_only (SELECT-only, no INSERT/UPDATE/DELETE)
     "scripts/calibration_observation_weekly.py",    # read_only_ro_uri
     "scripts/ddd_v1_v2_replay.py",                 # read_only_ro_uri

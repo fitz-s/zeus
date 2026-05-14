@@ -9,7 +9,7 @@ These cases come directly from §15 of docs/reference/Zeus_Apr25_review.md.
 """
 # Created: 2026-04-25
 # Last reused or audited: 2026-05-14
-# Authority basis: AGENTS.md topology routing; forecast-live daemon wiring profile maintenance.
+# Authority basis: AGENTS.md topology routing; forecast-live daemon wiring and readiness profile maintenance.
 # Lifecycle: created=2026-04-25; last_reviewed=2026-05-01; last_reused=2026-05-01
 # Purpose: Lock the new word-boundary + denylist + veto profile resolver against
 # regression to the legacy substring matcher.
@@ -1748,6 +1748,38 @@ def test_forecast_live_daemon_wiring_runbook_blocks_runtime_mutation_scope():
         "state/zeus-forecasts.db",
         "scripts/install_forecast_live_launchd.py",
     } <= forbidden
+
+
+def test_forecast_live_ready_verifier_routes_to_dedicated_profile():
+    digest = build_digest(
+        "Phase 8 staged end-to-end forecast-live verification verifier script; "
+        "read-only production probe only; no canonical DB write; no daemon launch; no external fetch",
+        [
+            "scripts/check_forecast_live_ready.py",
+            "tests/test_check_forecast_live_ready.py",
+            "tests/conftest.py",
+            "scripts/AGENTS.md",
+            "architecture/script_manifest.yaml",
+            "architecture/test_topology.yaml",
+            "architecture/topology.yaml",
+            "architecture/digest_profiles.py",
+            "tests/test_digest_profile_matching.py",
+        ],
+    )
+
+    assert digest["profile"] == "forecast live ready verifier implementation"
+    assert digest["admission"]["status"] == "admitted"
+    assert set(digest["admission"]["admitted_files"]) == {
+        "scripts/check_forecast_live_ready.py",
+        "tests/test_check_forecast_live_ready.py",
+        "tests/conftest.py",
+        "scripts/AGENTS.md",
+        "architecture/script_manifest.yaml",
+        "architecture/test_topology.yaml",
+        "architecture/topology.yaml",
+        "architecture/digest_profiles.py",
+        "tests/test_digest_profile_matching.py",
+    }
 
 
 def test_phase2d_execution_capability_status_routes_to_observability_profile():
