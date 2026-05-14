@@ -111,6 +111,28 @@ def _patch_mature_calibration(monkeypatch, *, level: int = 1) -> None:
             ci_bound=0.05,
         ),
     )
+    # K1 split (2026-05-14): calibration_source_id_for_lookup maps source_id →
+    # Platt bucket key.  The fixture uses "ecmwf_ifs025" which is not in the
+    # production lookup map (_CALIBRATION_LOOKUP_SOURCE_ID_BY_FORECAST_SOURCE_ID).
+    # Patch to a fixed valid bucket so evaluator path tests aren't blocked by
+    # UNSUPPORTED_CALIBRATION_SOURCE_ID rejection.
+    monkeypatch.setattr(
+        evaluator_module,
+        "calibration_source_id_for_lookup",
+        lambda s: "tigge_mars",
+    )
+    # K1 split (2026-05-14): DDD v2 gate fires when conn is not None. Tests
+    # passing conn=object() (truthy sentinel) trigger the gate which raises
+    # DDDFailClosed(DDD_CONFIG_MISSING). Patch to a no-op returning a
+    # DDDResult with action="DISCOUNT" and discount=0.0 so the evaluator path
+    # proceeds normally (no HALT, no extra discount) for all legacy fixture tests.
+    from src.oracle.data_density_discount import DDDResult as _DDDResult
+    _ddd_passthrough = _DDDResult(action="DISCOUNT", discount=0.0, rail=2, diagnostic={})
+    monkeypatch.setattr(
+        evaluator_module,
+        "evaluate_ddd_for_decision",
+        lambda **kwargs: _ddd_passthrough,
+    )
     # Oracle fail-closed gate removed 2026-05-02 (PR-B). Previous monkeypatch
     # bypassed _oracle_evidence_rejection_reason; gate no longer exists.
 
@@ -746,8 +768,8 @@ def test_inv_status_reports_real_pnl(monkeypatch, tmp_path):
         INSERT INTO position_events (
             event_id, position_id, event_version, sequence_no, event_type, occurred_at,
             phase_before, phase_after, strategy_key, decision_id, snapshot_id, order_id,
-            command_id, caused_by, idempotency_key, venue_status, source_module, payload_json
-        ) VALUES (?, ?, 1, 1, ?, ?, 'day0_window', 'pending_exit', ?, NULL, ?, NULL, NULL, ?, ?, NULL, 'tests', ?)
+            command_id, caused_by, idempotency_key, venue_status, source_module, env, payload_json
+        ) VALUES (?, ?, 1, 1, ?, ?, 'day0_window', 'pending_exit', ?, NULL, ?, NULL, NULL, ?, ?, NULL, 'tests', 'test', ?)
         """,
         (
             f"{open_pos.trade_id}:retry",
@@ -784,6 +806,8 @@ def test_inv_status_reports_real_pnl(monkeypatch, tmp_path):
         "_get_risk_details",
         lambda: {
             "effective_bankroll": 149.2,
+            "initial_bankroll": 151.5,
+            "bankroll_truth": {"source": "polymarket_wallet", "authority": "canonical"},
             "realized_pnl": -2.3,
             "unrealized_pnl": 1.5,
             "total_pnl": -0.8,
@@ -803,6 +827,12 @@ def test_inv_status_reports_real_pnl(monkeypatch, tmp_path):
     monkeypatch.setattr(status_summary_module, "query_execution_event_summary", lambda conn, not_before=None: {"overall": {}})
     monkeypatch.setattr(status_summary_module, "query_learning_surface_summary", lambda conn, not_before=None: {"by_strategy": {}})
     monkeypatch.setattr(status_summary_module, "query_no_trade_cases", lambda conn, hours=24: [{"rejection_stage": "EDGE_INSUFFICIENT"}])
+    # K1 split: these report functions query forecasts-DB tables absent in the
+    # world-only test DB. Patch them to return clean (non-error) stubs so
+    # consistency_check.ok is not polluted by infrastructure-unavailable noise.
+    monkeypatch.setattr(status_summary_module, "build_calibration_serving_status", lambda conn: {"status": "fresh"})
+    monkeypatch.setattr(status_summary_module, "query_lifecycle_funnel_report", lambda conn, not_before=None: {"status": "fresh"})
+    monkeypatch.setattr(status_summary_module, "build_price_evidence_report", lambda conn: {"status": "fresh"})
 
     status_summary_module.write_status({"mode": "test"})
     status = json.loads(status_path.read_text())
@@ -3565,7 +3595,7 @@ def test_harvester_stage2_preflight_skips_canonical_bootstrap_shape(
     assert result["stage2_status"] == "skipped_db_shape_preflight"
     assert "decision_log" in result["stage2_missing_trade_tables"]
     assert "chronicle" in result["stage2_missing_trade_tables"]
-    assert "ensemble_snapshots" in result["stage2_missing_shared_tables"]
+    assert "ensemble_snapshots_v2" in result["stage2_missing_shared_tables"]
     assert settled_calls == [("NYC", "2026-04-01", "39-40°F")]
     assert not any("Harvester error" in record.getMessage() for record in caplog.records)
 
