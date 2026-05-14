@@ -1,11 +1,12 @@
 # Created: 2026-05-11
-# Last reused or audited: 2026-05-11
-# Authority basis: PLAN docs/operations/task_2026-05-11_forecast_db_split/PLAN.md §5.9
-"""K1 forecast DB split — REL invariant tests (§5.9).
+# Last reused or audited: 2026-05-14
+# Authority basis: PLAN docs/operations/task_2026-05-11_forecast_db_split/PLAN.md §5.9;
+# docs/operations/task_2026-05-08_deep_alignment_audit/DATA_DAEMON_LIVE_EFFICIENCY_REFACTOR_PLAN.md Phase 5.
+"""K1 forecast DB split plus live forecast-authority chain invariant tests.
 
-REL-1  init_schema_forecasts on :memory: creates all 7 tables + correct schema version + indexes.
-REL-2  Row counts forecasts.X == world.X for all 7 tables (skip until operator migration runs).
-REL-3  No src/ caller reads/writes the 7 forecast-class tables on the world connection (grep).
+REL-1  init_schema_forecasts on :memory: creates all forecast-authority tables + correct schema version + indexes.
+REL-2  Row counts forecasts.X == world.X for forecast-authority tables (skip until operator migration runs).
+REL-3  No src/ caller reads/writes forecast-authority tables on the world connection (grep).
 REL-4  forecasts.db writer-lock file path is distinct from world.db writer-lock file path.
 REL-5  Pre/post migration timing baseline (skip until operator migration runs).
 REL-6  settlements + settlements_v2 + market_events_v2 atomicity: INSERT then forced rollback
@@ -22,7 +23,7 @@ from pathlib import Path
 import pytest
 
 # ---------------------------------------------------------------------------
-# Constants mirrored from PLAN §5.9 table inventory
+# Constants mirrored from PLAN §5.9 plus 2026-05-14 live authority-chain ownership.
 # ---------------------------------------------------------------------------
 
 FORECAST_TABLES = (
@@ -33,26 +34,28 @@ FORECAST_TABLES = (
     "settlements_v2",
     "market_events_v2",
     "source_run",
+    "source_run_coverage",
+    "readiness_state",
 )
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
 
 # ---------------------------------------------------------------------------
-# REL-1: init_schema_forecasts on fresh :memory: creates all 7 tables,
-#         sets PRAGMA user_version = SCHEMA_FORECASTS_VERSION = 1,
+# REL-1: init_schema_forecasts on fresh :memory: creates all authority tables,
+#         sets PRAGMA user_version = SCHEMA_FORECASTS_VERSION,
 #         and creates at minimum the critical indexes.
 # ---------------------------------------------------------------------------
 
 def test_rel1_init_schema_forecasts_tables_and_version():
-    """init_schema_forecasts must create all 7 forecast-class tables + version."""
+    """init_schema_forecasts must create all forecast-authority tables + version."""
     from src.state.db import SCHEMA_FORECASTS_VERSION, init_schema_forecasts
 
     conn = sqlite3.connect(":memory:")
     init_schema_forecasts(conn)
     conn.commit()
 
-    # All 7 tables must exist.
+    # All forecast-authority tables must exist.
     existing = {
         row[0]
         for row in conn.execute(

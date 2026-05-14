@@ -1650,6 +1650,29 @@ def test_data_daemon_live_forecast_owner_routes_to_scheduler_profile():
     assert "tests/test_forecast_live_daemon.py" in digest["admission"]["admitted_files"]
 
 
+def test_forecast_authority_chain_ownership_routes_to_dedicated_profile():
+    digest = build_digest(
+        "Phase 5 forecast authority-chain ownership in forecasts DB: source_run_coverage "
+        "and producer readiness schema plus executable forecast reader routing; "
+        "no production DB mutation; no live venue side effects; no schema migration apply",
+        [
+            "src/state/db.py",
+            "src/data/executable_forecast_reader.py",
+            "tests/test_opendata_writes_v2_table.py",
+            "tests/test_executable_forecast_reader.py",
+            "tests/state/test_forecast_db_split_invariant.py",
+            "tests/test_digest_profile_matching.py",
+            "architecture/topology.yaml",
+            "architecture/digest_profiles.py",
+        ],
+    )
+
+    assert digest["profile"] == "forecast authority chain ownership"
+    assert digest["admission"]["status"] == "admitted"
+    assert "src/state/db.py" in digest["admission"]["admitted_files"]
+    assert "src/data/executable_forecast_reader.py" in digest["admission"]["admitted_files"]
+
+
 def test_phase2d_execution_capability_status_routes_to_observability_profile():
     digest = build_digest(
         "Phase 2D DSA-16 execution capability status summary matrix for entry "

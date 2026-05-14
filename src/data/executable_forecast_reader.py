@@ -15,11 +15,11 @@ from src.state.readiness_repo import get_entry_readiness
 UTC = timezone.utc
 SOURCE_TRANSPORT = "ensemble_snapshots_v2_db_reader"
 WORLD_SCHEMA = "world"
-# K1 split 2026-05-11: ensemble_snapshots_v2 / source_run / source_run_coverage
-# physically moved from zeus-world.db → zeus-forecasts.db.  When the caller
-# holds a trade connection with both 'world' and 'forecasts' ATTACHed (the
-# standard path since K1), _resolve_owned_table checks world first, then
-# falls through to forecasts so existing callsites need no change.
+# K1 split 2026-05-11 moved forecast-class rows out of zeus-world.db. The
+# live data-daemon authority split extends that ownership to source coverage
+# and producer readiness. When both schemas are ATTACHed, forecasts is the
+# authoritative source for the forecast execution chain; world is legacy
+# fallback only for pre-split connections that have no forecasts attach.
 FORECASTS_SCHEMA = "forecasts"
 WORLD_OWNED_TABLES = frozenset({
     "ensemble_snapshots_v2",
@@ -34,6 +34,7 @@ FORECASTS_OWNED_TABLES = frozenset({
     "source_run",
     "source_run_coverage",
 })
+PRODUCER_READINESS_TABLE = "readiness_state"
 
 
 @dataclass(frozen=True)
@@ -213,10 +214,12 @@ def _resolve_owned_table(conn: sqlite3.Connection, table: str) -> str | None:
     """Return the qualified ``schema.table`` reference for *table*, or ``None``.
 
     Resolution order (K1 split 2026-05-11):
-    1. ``world`` schema attached → check there first (pre-K1 connections or
-       world-class tables such as ``readiness_state``).
-    2. ``forecasts`` schema attached → check there (post-K1 tables:
-       ``ensemble_snapshots_v2``, ``source_run``, ``source_run_coverage``).
+    1. ``forecasts`` schema attached and table is forecast-owned → check there.
+       Do not fall back to world when forecasts is attached but missing the
+       table; that would hide a broken forecast authority chain behind stale
+       shadow rows.
+    2. ``world`` schema attached → legacy fallback for pre-K1 connections or
+       world-class tables.
     3. Neither schema attached → fall back to unqualified ``table`` (``main``).
     Returns ``None`` only when a schema is attached but the table is absent
     from every attached schema — indicates the row does not exist yet.
@@ -228,11 +231,28 @@ def _resolve_owned_table(conn: sqlite3.Connection, table: str) -> str | None:
     if not world_attached and not forecasts_attached:
         # No ATTACHes (e.g. bare main-only connection in tests).
         return table
+    if forecasts_attached and table in FORECASTS_OWNED_TABLES:
+        if not _table_exists(conn, schema=FORECASTS_SCHEMA, table=table):
+            return None
+        return f"{FORECASTS_SCHEMA}.{table}"
     if world_attached and _table_exists(conn, schema=WORLD_SCHEMA, table=table):
         return f"{WORLD_SCHEMA}.{table}"
-    if forecasts_attached and table in FORECASTS_OWNED_TABLES and _table_exists(conn, schema=FORECASTS_SCHEMA, table=table):
-        return f"{FORECASTS_SCHEMA}.{table}"
     # Schema(s) attached but table found in neither — caller should treat as missing.
+    return None
+
+
+def _producer_readiness_table(conn: sqlite3.Connection) -> str | None:
+    """Resolve producer readiness authority without falling back past forecasts."""
+    world_attached = _schema_attached(conn, WORLD_SCHEMA)
+    forecasts_attached = _schema_attached(conn, FORECASTS_SCHEMA)
+    if not world_attached and not forecasts_attached:
+        return PRODUCER_READINESS_TABLE
+    if forecasts_attached:
+        if not _table_exists(conn, schema=FORECASTS_SCHEMA, table=PRODUCER_READINESS_TABLE):
+            return None
+        return f"{FORECASTS_SCHEMA}.{PRODUCER_READINESS_TABLE}"
+    if world_attached and _table_exists(conn, schema=WORLD_SCHEMA, table=PRODUCER_READINESS_TABLE):
+        return f"{WORLD_SCHEMA}.{PRODUCER_READINESS_TABLE}"
     return None
 
 
@@ -285,7 +305,7 @@ def _latest_producer_readiness(
     source_id: str,
     track: str,
 ) -> dict[str, Any] | None:
-    table = _world_owned_table(conn, "readiness_state")
+    table = _producer_readiness_table(conn)
     if table is None:
         return None
     row = conn.execute(

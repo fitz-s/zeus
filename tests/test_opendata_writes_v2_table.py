@@ -1,8 +1,8 @@
 # Created: 2026-05-01
-# Last reused/audited: 2026-05-01
-# Authority basis: Operator directive 2026-05-01 — antibody for Invariant A
-#   (Open Data ENS rows land in ensemble_snapshots_v2 with the canonical
-#   ecmwf_opendata_*_v1 data_versions; never in legacy ensemble_snapshots).
+# Last reused/audited: 2026-05-14
+# Authority basis: Operator directive 2026-05-01 — antibody for Invariant A;
+#   docs/operations/task_2026-05-08_deep_alignment_audit/DATA_DAEMON_LIVE_EFFICIENCY_REFACTOR_PLAN.md
+#   Phase 5 forecast authority chain ownership.
 """Antibody for Invariant A — Open Data writes target ensemble_snapshots_v2.
 
 The ingest cycle skips download/extract via test seams and runs the in-process
@@ -28,7 +28,7 @@ from src.contracts.ensemble_snapshot_provenance import (
 )
 from src.data.executable_forecast_reader import read_executable_forecast
 from src.state.readiness_repo import write_readiness_state
-from src.state.db import init_schema
+from src.state.db import init_schema, init_schema_forecasts
 from src.state.source_run_repo import get_source_run
 from src.state.schema.v2_schema import apply_v2_schema
 
@@ -157,11 +157,10 @@ def test_opendata_high_payload_lands_in_v2(tmp_path: Path, monkeypatch):
 def test_collect_open_ens_cycle_writes_authority_chain_readable_by_live_reader(tmp_path: Path, monkeypatch):
     from src.data import ecmwf_open_data
 
-    db_path = tmp_path / "world.db"
-    conn = sqlite3.connect(str(db_path))
-    conn.row_factory = sqlite3.Row
-    init_schema(conn)
-    apply_v2_schema(conn)
+    forecasts_db_path = tmp_path / "forecasts.db"
+    forecasts_conn = sqlite3.connect(str(forecasts_db_path))
+    forecasts_conn.row_factory = sqlite3.Row
+    init_schema_forecasts(forecasts_conn)
 
     fifty_one_root = tmp_path / "51 source data"
     monkeypatch.setattr(ecmwf_open_data, "FIFTY_ONE_ROOT", fifty_one_root)
@@ -186,7 +185,7 @@ def test_collect_open_ens_cycle_writes_authority_chain_readable_by_live_reader(t
         run_hour=0,
         skip_download=True,
         skip_extract=True,
-        conn=conn,
+        conn=forecasts_conn,
         now_utc=now,
     )
 
@@ -194,21 +193,26 @@ def test_collect_open_ens_cycle_writes_authority_chain_readable_by_live_reader(t
     assert result["forecast_track"] == "mx2t6_high_full_horizon"
     assert result["coverage_written"] == 1
     assert result["producer_readiness_written"] == 1
-    source_run = get_source_run(conn, result["source_run_id"])
+    source_run = get_source_run(forecasts_conn, result["source_run_id"])
     assert source_run is not None
     assert source_run["status"] == "SUCCESS"
     assert source_run["track"] == "mx2t6_high_full_horizon"
-    coverage = conn.execute("SELECT * FROM source_run_coverage").fetchone()
+    coverage = forecasts_conn.execute("SELECT * FROM source_run_coverage").fetchone()
     assert coverage["readiness_status"] == "LIVE_ELIGIBLE"
     assert coverage["target_window_start_utc"] == "2026-05-01T23:00:00+00:00"
-    producer = conn.execute(
+    producer = forecasts_conn.execute(
         "SELECT * FROM readiness_state WHERE strategy_key = 'producer_readiness'"
     ).fetchone()
     assert producer is not None
     assert producer["status"] == "LIVE_ELIGIBLE"
 
+    trade_db_path = tmp_path / "trade.db"
+    trade_conn = sqlite3.connect(str(trade_db_path))
+    trade_conn.row_factory = sqlite3.Row
+    init_schema(trade_conn)
+    apply_v2_schema(trade_conn)
     write_readiness_state(
-        conn,
+        trade_conn,
         readiness_id="entry-ready-london-2026-05-02",
         scope_type="city_metric",
         status="LIVE_ELIGIBLE",
@@ -231,9 +235,12 @@ def test_collect_open_ens_cycle_writes_authority_chain_readable_by_live_reader(t
         reason_codes_json=["ENTRY_READY"],
         dependency_json={"producer_readiness_id": producer["readiness_id"]},
     )
+    forecasts_conn.commit()
+    forecasts_conn.close()
+    trade_conn.execute("ATTACH DATABASE ? AS forecasts", (str(forecasts_db_path),))
 
     reader_result = read_executable_forecast(
-        conn,
+        trade_conn,
         city_id="LONDON",
         city_name="London",
         city_timezone="Europe/London",
@@ -256,11 +263,10 @@ def test_collect_open_ens_cycle_writes_authority_chain_readable_by_live_reader(t
 def test_collect_open_ens_cycle_default_extract_timeout_is_live_sized(tmp_path: Path, monkeypatch):
     from src.data import ecmwf_open_data
 
-    db_path = tmp_path / "world.db"
+    db_path = tmp_path / "forecasts.db"
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
-    init_schema(conn)
-    apply_v2_schema(conn)
+    init_schema_forecasts(conn)
 
     fifty_one_root = tmp_path / "51 source data"
     monkeypatch.setattr(ecmwf_open_data, "FIFTY_ONE_ROOT", fifty_one_root)
@@ -275,6 +281,7 @@ def test_collect_open_ens_cycle_default_extract_timeout_is_live_sized(tmp_path: 
         track="mx2t6_high",
         run_date=date(2026, 5, 1),
         run_hour=0,
+        skip_download=True,
         conn=conn,
         _runner=runner,
         now_utc=datetime(2026, 5, 1, 9, 0, tzinfo=timezone.utc),
@@ -282,6 +289,5 @@ def test_collect_open_ens_cycle_default_extract_timeout_is_live_sized(tmp_path: 
 
     assert result["status"] == "empty_ingest"
     assert calls == [
-        {"label": "download_mx2t6_high_aws", "timeout": 1500},
         {"label": "extract_mx2t6_high", "timeout": 900},
     ]

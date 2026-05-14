@@ -1,6 +1,6 @@
 # Created: 2026-05-03
-# Last reused/audited: 2026-05-10
-# Authority basis: docs/operations/task_2026-05-02_live_entry_data_contract/PLAN_v4.md Phase 8 executable forecast reader; docs/operations/task_2026-05-10_live_readiness_world_authority/PLAN.md.
+# Last reused/audited: 2026-05-14
+# Authority basis: docs/operations/task_2026-05-02_live_entry_data_contract/PLAN_v4.md Phase 8 executable forecast reader; docs/operations/task_2026-05-08_deep_alignment_audit/DATA_DAEMON_LIVE_EFFICIENCY_REFACTOR_PLAN.md Phase 5 forecast authority chain ownership.
 """Executable forecast reader relationship tests."""
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ from src.contracts.ensemble_snapshot_provenance import ECMWF_OPENDATA_HIGH_DATA_
 from src.data.executable_forecast_reader import read_executable_forecast, read_executable_forecast_snapshot
 from src.data.forecast_target_contract import build_forecast_target_scope
 from src.data.producer_readiness import PRODUCER_READINESS_STRATEGY_KEY
-from src.state.db import init_schema
+from src.state.db import init_schema, init_schema_forecasts
 from src.state.readiness_repo import write_readiness_state
 from src.state.schema.v2_schema import apply_v2_schema
 from src.state.source_run_coverage_repo import write_source_run_coverage
@@ -39,6 +39,13 @@ def _file_conn(path: Path) -> sqlite3.Connection:
     return conn
 
 
+def _forecasts_file_conn(path: Path) -> sqlite3.Connection:
+    conn = sqlite3.connect(path)
+    conn.row_factory = sqlite3.Row
+    init_schema_forecasts(conn)
+    return conn
+
+
 def _attached_trade_world_conn(tmp_path) -> tuple[sqlite3.Connection, sqlite3.Connection, Path]:
     trade_path = tmp_path / "trade.db"
     world_path = tmp_path / "world.db"
@@ -47,10 +54,38 @@ def _attached_trade_world_conn(tmp_path) -> tuple[sqlite3.Connection, sqlite3.Co
     return trade_conn, world_conn, world_path
 
 
+def _attached_trade_world_forecasts_conn(
+    tmp_path,
+) -> tuple[sqlite3.Connection, sqlite3.Connection, sqlite3.Connection, Path, Path]:
+    trade_path = tmp_path / "trade.db"
+    world_path = tmp_path / "world.db"
+    forecasts_path = tmp_path / "forecasts.db"
+    trade_conn = _file_conn(trade_path)
+    world_conn = _file_conn(world_path)
+    forecasts_conn = _forecasts_file_conn(forecasts_path)
+    return trade_conn, world_conn, forecasts_conn, world_path, forecasts_path
+
+
 def _attach_world(trade_conn: sqlite3.Connection, world_conn: sqlite3.Connection, world_path: Path) -> sqlite3.Connection:
     world_conn.commit()
     world_conn.close()
     trade_conn.execute("ATTACH DATABASE ? AS world", (str(world_path),))
+    return trade_conn
+
+
+def _attach_world_and_forecasts(
+    trade_conn: sqlite3.Connection,
+    world_conn: sqlite3.Connection,
+    forecasts_conn: sqlite3.Connection,
+    world_path: Path,
+    forecasts_path: Path,
+) -> sqlite3.Connection:
+    world_conn.commit()
+    world_conn.close()
+    forecasts_conn.commit()
+    forecasts_conn.close()
+    trade_conn.execute("ATTACH DATABASE ? AS world", (str(world_path),))
+    trade_conn.execute("ATTACH DATABASE ? AS forecasts", (str(forecasts_path),))
     return trade_conn
 
 
@@ -147,6 +182,7 @@ def _insert_snapshot(
 def _insert_source_run(
     conn: sqlite3.Connection,
     *,
+    source_run_id: str = "source-run-1",
     status: str = "SUCCESS",
     completeness_status: str = "COMPLETE",
     captured_at: datetime | None = _utc(2026, 5, 3, 8, 20),
@@ -155,7 +191,7 @@ def _insert_source_run(
     scope = _scope()
     write_source_run(
         conn,
-        source_run_id="source-run-1",
+        source_run_id=source_run_id,
         source_id="ecmwf_open_data",
         track="mx2t6_high_full_horizon",
         release_calendar_key="ecmwf_open_data:mx2t6_high:full",
@@ -188,6 +224,8 @@ def _insert_source_run(
 def _insert_coverage(
     conn: sqlite3.Connection,
     *,
+    coverage_id: str = "coverage-1",
+    source_run_id: str = "source-run-1",
     completeness_status: str = "COMPLETE",
     readiness_status: str = "LIVE_ELIGIBLE",
     observed_steps_json: list[int] | None = None,
@@ -196,8 +234,8 @@ def _insert_coverage(
     scope = _scope()
     write_source_run_coverage(
         conn,
-        coverage_id="coverage-1",
-        source_run_id="source-run-1",
+        coverage_id=coverage_id,
+        source_run_id=source_run_id,
         source_id="ecmwf_open_data",
         source_transport="ensemble_snapshots_v2_db_reader",
         release_calendar_key="ecmwf_open_data:mx2t6_high:full",
@@ -229,6 +267,7 @@ def _insert_readiness(
     *,
     strategy_key: str,
     readiness_id: str,
+    source_run_id: str = "source-run-1",
     market_family: str | None = None,
     condition_id: str | None = None,
     computed_at: datetime = _utc(2026, 5, 3, 9),
@@ -253,7 +292,7 @@ def _insert_readiness(
         data_version=scope.data_version,
         source_id="ecmwf_open_data",
         track="mx2t6_high_full_horizon",
-        source_run_id="source-run-1",
+        source_run_id=source_run_id,
         strategy_key=strategy_key,
         market_family=market_family,
         condition_id=condition_id,
@@ -279,23 +318,27 @@ def _insert_full_reader_fixture(conn: sqlite3.Connection) -> None:
 def _insert_world_owned_fixture(
     conn: sqlite3.Connection,
     *,
+    source_run_id: str = "source-run-1",
+    coverage_id: str = "coverage-1",
+    producer_readiness_id: str = "producer-readiness-1",
     include_snapshot: bool = True,
     include_source_run: bool = True,
     include_coverage: bool = True,
     include_producer_readiness: bool = True,
 ) -> None:
     if include_snapshot:
-        _insert_snapshot(conn)
+        _insert_snapshot(conn, source_run_id=source_run_id)
     if include_source_run:
-        _insert_source_run(conn)
+        _insert_source_run(conn, source_run_id=source_run_id)
     if include_coverage:
-        _insert_coverage(conn)
+        _insert_coverage(conn, coverage_id=coverage_id, source_run_id=source_run_id)
     if include_producer_readiness:
         _insert_readiness(
             conn,
             strategy_key=PRODUCER_READINESS_STRATEGY_KEY,
-            readiness_id="producer-readiness-1",
-            dependency_json={"coverage_id": "coverage-1"},
+            readiness_id=producer_readiness_id,
+            source_run_id=source_run_id,
+            dependency_json={"coverage_id": coverage_id},
         )
 
 
@@ -493,6 +536,73 @@ def test_full_reader_prefers_attached_world_for_source_authority_and_keeps_entry
     assert evidence.coverage_id == "coverage-1"
     assert evidence.source_run_id == "source-run-1"
     assert evidence.entry_readiness_id == "entry-readiness-1"
+
+
+def test_full_reader_prefers_attached_forecasts_for_source_authority_and_keeps_entry_local(tmp_path) -> None:
+    trade_conn, world_conn, forecasts_conn, world_path, forecasts_path = _attached_trade_world_forecasts_conn(tmp_path)
+    _insert_entry_readiness(trade_conn)
+    _insert_world_owned_fixture(
+        world_conn,
+        source_run_id="world-source-run-1",
+        coverage_id="world-coverage-1",
+        producer_readiness_id="world-producer-readiness-1",
+    )
+    _insert_world_owned_fixture(
+        forecasts_conn,
+        source_run_id="forecast-source-run-1",
+        coverage_id="forecast-coverage-1",
+        producer_readiness_id="forecast-producer-readiness-1",
+    )
+    conn = _attach_world_and_forecasts(trade_conn, world_conn, forecasts_conn, world_path, forecasts_path)
+
+    result = _read_full(conn)
+
+    assert result.ok
+    assert result.bundle is not None
+    evidence = result.bundle.evidence
+    assert evidence.producer_readiness_id == "forecast-producer-readiness-1"
+    assert evidence.coverage_id == "forecast-coverage-1"
+    assert evidence.source_run_id == "forecast-source-run-1"
+    assert evidence.entry_readiness_id == "entry-readiness-1"
+
+
+def test_full_reader_does_not_fallback_to_world_shadow_when_forecasts_producer_missing(tmp_path) -> None:
+    trade_conn, world_conn, forecasts_conn, world_path, forecasts_path = _attached_trade_world_forecasts_conn(tmp_path)
+    _insert_entry_readiness(trade_conn)
+    _insert_world_owned_fixture(world_conn)
+    _insert_world_owned_fixture(forecasts_conn, include_producer_readiness=False)
+    conn = _attach_world_and_forecasts(trade_conn, world_conn, forecasts_conn, world_path, forecasts_path)
+
+    result = _read_full(conn)
+
+    assert not result.ok
+    assert result.reason_code == "PRODUCER_READINESS_MISSING"
+
+
+def test_full_reader_does_not_fallback_to_world_shadow_when_forecasts_coverage_missing(tmp_path) -> None:
+    trade_conn, world_conn, forecasts_conn, world_path, forecasts_path = _attached_trade_world_forecasts_conn(tmp_path)
+    _insert_entry_readiness(trade_conn)
+    _insert_world_owned_fixture(world_conn)
+    _insert_world_owned_fixture(forecasts_conn, include_coverage=False)
+    conn = _attach_world_and_forecasts(trade_conn, world_conn, forecasts_conn, world_path, forecasts_path)
+
+    result = _read_full(conn)
+
+    assert not result.ok
+    assert result.reason_code == "SOURCE_RUN_COVERAGE_MISSING"
+
+
+def test_full_reader_does_not_fallback_to_world_shadow_when_forecasts_snapshot_missing(tmp_path) -> None:
+    trade_conn, world_conn, forecasts_conn, world_path, forecasts_path = _attached_trade_world_forecasts_conn(tmp_path)
+    _insert_entry_readiness(trade_conn)
+    _insert_world_owned_fixture(world_conn)
+    _insert_world_owned_fixture(forecasts_conn, include_snapshot=False)
+    conn = _attach_world_and_forecasts(trade_conn, world_conn, forecasts_conn, world_path, forecasts_path)
+
+    result = _read_full(conn)
+
+    assert not result.ok
+    assert result.reason_code == "NO_EXECUTABLE_FORECAST_ROWS_FOR_TARGET"
 
 
 def test_full_reader_does_not_fallback_to_trade_shadow_when_world_producer_missing(tmp_path) -> None:
