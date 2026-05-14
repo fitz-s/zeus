@@ -386,6 +386,21 @@ scripts:
     promotion_barrier: "Reports evidence only; cannot authorize launchctl mutation, daemon launch, production DB writes, live venue side effects, LIVE_CONSUMING, or DONE."
     required_helpers: []
     required_tests: [tests/test_check_forecast_live_ready.py]
+  check_forecast_live_e2e.py:
+    class: diagnostic_report_writer
+    module_owner: scripts
+    reason: "Temp-only staged forecast-live E2E smoke; exercises daemon job journal, collector authority chain, readiness verifier, and live reader with exact timing evidence."
+    canonical_command: "python3 scripts/check_forecast_live_e2e.py --json"
+    read_targets: [config/cities.json]
+    write_targets: [stdout, temp]
+    dry_run_default: true
+    apply_flag: null
+    target_db: temp
+    external_inputs: []
+    dangerous_if_run: false
+    promotion_barrier: "Writes isolated temp artifacts only; cannot authorize production DB writes, external fetch, daemon launch, live venue side effects, LIVE_CONSUMING, or DONE."
+    required_helpers: [src.ingest.forecast_live_daemon.run_opendata_track, src.data.ecmwf_open_data.collect_open_ens_cycle, scripts.check_forecast_live_ready.evaluate_forecast_live_ready, src.data.executable_forecast_reader.read_executable_forecast]
+    required_tests: [tests/test_check_forecast_live_ready.py]
   check_kernel_manifests.py: {class: enforcement}
   check_module_boundaries.py: {class: enforcement}
   check_work_packets.py: {class: enforcement}

@@ -49,7 +49,7 @@ class CompletionState(StrEnum):
 @dataclass(frozen=True)
 class TrackConfig:
     label: str
-    source_run_track: str
+    forecast_track: str
     job_name: str
     temperature_metric: str
 
@@ -57,13 +57,13 @@ class TrackConfig:
 TRACKS: tuple[TrackConfig, ...] = (
     TrackConfig(
         label="HIGH",
-        source_run_track="mx2t6_high",
+        forecast_track="mx2t6_high_full_horizon",
         job_name="forecast_live_opendata_mx2t6_high",
         temperature_metric="high",
     ),
     TrackConfig(
         label="LOW",
-        source_run_track="mn2t6_low",
+        forecast_track="mn2t6_low_full_horizon",
         job_name="forecast_live_opendata_mn2t6_low",
         temperature_metric="low",
     ),
@@ -176,7 +176,12 @@ def _latest_source_run(conn: sqlite3.Connection, source_id: str, track: str) -> 
     )
 
 
-def _latest_coverage(conn: sqlite3.Connection, source_id: str, temperature_metric: str) -> dict[str, Any] | None:
+def _latest_coverage(
+    conn: sqlite3.Connection,
+    source_id: str,
+    track: str,
+    temperature_metric: str,
+) -> dict[str, Any] | None:
     return _row(
         conn.execute(
             """
@@ -184,16 +189,22 @@ def _latest_coverage(conn: sqlite3.Connection, source_id: str, temperature_metri
             FROM source_run_coverage
             WHERE source_id = ?
               AND source_transport = ?
+              AND track = ?
               AND temperature_metric = ?
             ORDER BY computed_at DESC, recorded_at DESC
             LIMIT 1
             """,
-            (source_id, SOURCE_TRANSPORT, temperature_metric),
+            (source_id, SOURCE_TRANSPORT, track, temperature_metric),
         ).fetchone()
     )
 
 
-def _latest_readiness(conn: sqlite3.Connection, source_id: str, temperature_metric: str) -> dict[str, Any] | None:
+def _latest_readiness(
+    conn: sqlite3.Connection,
+    source_id: str,
+    track: str,
+    temperature_metric: str,
+) -> dict[str, Any] | None:
     return _row(
         conn.execute(
             """
@@ -201,11 +212,12 @@ def _latest_readiness(conn: sqlite3.Connection, source_id: str, temperature_metr
             FROM readiness_state
             WHERE source_id = ?
               AND temperature_metric = ?
+              AND track = ?
               AND strategy_key = ?
             ORDER BY computed_at DESC, recorded_at DESC
             LIMIT 1
             """,
-            (source_id, temperature_metric, PRODUCER_READINESS_STRATEGY_KEY),
+            (source_id, temperature_metric, track, PRODUCER_READINESS_STRATEGY_KEY),
         ).fetchone()
     )
 
@@ -231,9 +243,9 @@ def _evaluate_track(conn: sqlite3.Connection, config: TrackConfig, now_utc: date
     blockers: list[str] = []
     prefix = config.label
     job_run = _latest_job_run(conn, config.job_name)
-    source_run = _latest_source_run(conn, SOURCE_ID, config.source_run_track)
-    coverage = _latest_coverage(conn, SOURCE_ID, config.temperature_metric)
-    readiness = _latest_readiness(conn, SOURCE_ID, config.temperature_metric)
+    source_run = _latest_source_run(conn, SOURCE_ID, config.forecast_track)
+    coverage = _latest_coverage(conn, SOURCE_ID, config.forecast_track, config.temperature_metric)
+    readiness = _latest_readiness(conn, SOURCE_ID, config.forecast_track, config.temperature_metric)
 
     if job_run is None:
         blockers.append(f"{prefix}_JOB_RUN_MISSING")

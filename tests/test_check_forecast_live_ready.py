@@ -12,6 +12,11 @@ from pathlib import Path
 
 from scripts.check_forecast_live_ready import CompletionState, evaluate_forecast_live_ready
 from scripts import check_forecast_live_ready
+from scripts.check_forecast_live_e2e import run_smoke
+from src.contracts.ensemble_snapshot_provenance import (
+    ECMWF_OPENDATA_HIGH_DATA_VERSION,
+    ECMWF_OPENDATA_LOW_DATA_VERSION,
+)
 from src.data.producer_readiness import PRODUCER_READINESS_STRATEGY_KEY
 from src.state.db import init_schema_forecasts
 from src.state.job_run_repo import write_job_run
@@ -25,21 +30,21 @@ NOW = datetime(2026, 5, 14, 9, 30, tzinfo=UTC)
 TRACKS = {
     "HIGH": {
         "job_name": "forecast_live_opendata_mx2t6_high",
-        "source_run_track": "mx2t6_high",
-        "readiness_track": "mx2t6_high_full_horizon",
+        "job_track": "mx2t6_high",
+        "source_run_track": "mx2t6_high_full_horizon",
         "temperature_metric": "high",
-        "physical_quantity": "mx2t6_local_calendar_day_max",
+        "physical_quantity": "mx2t3_local_calendar_day_max",
         "observation_field": "high_temp",
-        "data_version": "ecmwf_opendata_mx2t6_local_calendar_day_max_v1",
+        "data_version": ECMWF_OPENDATA_HIGH_DATA_VERSION,
     },
     "LOW": {
         "job_name": "forecast_live_opendata_mn2t6_low",
-        "source_run_track": "mn2t6_low",
-        "readiness_track": "mn2t6_low_full_horizon",
+        "job_track": "mn2t6_low",
+        "source_run_track": "mn2t6_low_full_horizon",
         "temperature_metric": "low",
-        "physical_quantity": "mn2t6_local_calendar_day_min",
+        "physical_quantity": "mn2t3_local_calendar_day_min",
         "observation_field": "low_temp",
-        "data_version": "ecmwf_opendata_mn2t6_local_calendar_day_min_v1",
+        "data_version": ECMWF_OPENDATA_LOW_DATA_VERSION,
     },
 }
 
@@ -79,7 +84,7 @@ def _write_track(
 ) -> None:
     cfg = TRACKS[label]
     source_run_id = _source_run_id(label)
-    release_key = f"ecmwf_open_data:{cfg['source_run_track']}:full"
+    release_key = f"ecmwf_open_data:{cfg['job_track']}:full"
     write_job_run(
         conn,
         job_run_id=f"job-{label.lower()}",
@@ -88,7 +93,7 @@ def _write_track(
         scheduled_for=NOW.replace(minute=0),
         status="SUCCESS" if source_status == "SUCCESS" else "PARTIAL",
         source_id="ecmwf_open_data",
-        track=cfg["source_run_track"],
+        track=cfg["job_track"],
         release_calendar_key=release_key,
         source_run_id=job_source_run_id or source_run_id,
     )
@@ -114,7 +119,7 @@ def _write_track(
         source_id="ecmwf_open_data",
         source_transport="ensemble_snapshots_v2_db_reader",
         release_calendar_key=release_key,
-        track=cfg["readiness_track"],
+        track=cfg["source_run_track"],
         city_id="LONDON",
         city="London",
         city_timezone="Europe/London",
@@ -154,7 +159,7 @@ def _write_track(
         observation_field=cfg["observation_field"],
         data_version=cfg["data_version"],
         source_id="ecmwf_open_data",
-        track=cfg["readiness_track"],
+        track=cfg["source_run_track"],
         source_run_id=source_run_id,
         strategy_key=PRODUCER_READINESS_STRATEGY_KEY,
         reason_codes_json=["PRODUCER_COVERAGE_READY"],
@@ -253,3 +258,18 @@ def test_job_run_source_run_mismatch_blocks_producer_ready(tmp_path: Path) -> No
 
 def test_no_runtime_required_is_rejected_for_post_launch_claim() -> None:
     assert check_forecast_live_ready.main(["--no-runtime-required"]) == 2
+
+
+def test_temp_only_smoke_proves_daemon_to_live_reader_chain(tmp_path: Path) -> None:
+    report = run_smoke(work_dir=tmp_path / "forecast-live-smoke", keep_artifacts=True)
+
+    assert report.status == "PASS"
+    assert report.external_fetch is False
+    assert report.production_db_write is False
+    assert report.verifier["highest_completion_state"] == CompletionState.PRODUCER_READY.value
+    assert report.verifier["producer_ready"] is True
+    assert {track.label for track in report.tracks if track.reader_ok} == {"HIGH", "LOW"}
+    assert all(track.n_members == 51 for track in report.tracks)
+    assert all(track.members_match for track in report.tracks)
+    assert all(track.members_max_abs_error == 0.0 for track in report.tracks)
+    assert report.timings_seconds["total"] > 0
