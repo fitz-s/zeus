@@ -11,9 +11,12 @@ scan, risk, execution, evaluator, or venue work.
 from __future__ import annotations
 
 import functools
+import json
 import logging
+import os
 import signal
 import sys
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -25,12 +28,15 @@ _scheduler: Any | None = None
 FORECAST_LIVE_DAILY_HIGH_JOB_ID = "forecast_live_opendata_daily_mx2t6"
 FORECAST_LIVE_DAILY_LOW_JOB_ID = "forecast_live_opendata_daily_mn2t6"
 FORECAST_LIVE_STARTUP_JOB_ID = "forecast_live_opendata_startup_catch_up"
+FORECAST_LIVE_HEARTBEAT_JOB_ID = "forecast_live_heartbeat"
+FORECAST_LIVE_HEARTBEAT_SECONDS = 30
 
 FORECAST_LIVE_JOB_IDS = frozenset(
     {
         FORECAST_LIVE_DAILY_HIGH_JOB_ID,
         FORECAST_LIVE_DAILY_LOW_JOB_ID,
         FORECAST_LIVE_STARTUP_JOB_ID,
+        FORECAST_LIVE_HEARTBEAT_JOB_ID,
     }
 )
 
@@ -54,8 +60,50 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _write_forecast_live_heartbeat(
+    *,
+    heartbeat_path: Path | None = None,
+    status: str = "alive",
+    now_utc: datetime | None = None,
+) -> None:
+    """Write the forecast-live process heartbeat atomically."""
+    from src.config import state_path
+
+    now = (now_utc or _utcnow()).astimezone(timezone.utc)
+    path = heartbeat_path or state_path("forecast-live-heartbeat.json")
+    payload = {
+        "daemon": "forecast-live",
+        "status": status,
+        "timestamp": now.isoformat(),
+        "written_at": now.isoformat(),
+        "pid": os.getpid(),
+        "jobs": sorted(FORECAST_LIVE_JOB_IDS),
+        "cadence_seconds": FORECAST_LIVE_HEARTBEAT_SECONDS,
+    }
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp_path = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w") as handle:
+                json.dump(payload, handle, sort_keys=True)
+            os.replace(tmp_path, path)
+        except Exception:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
+    except Exception as exc:
+        logger.error("forecast-live heartbeat write failed: %s", exc)
+
+
+def _heartbeat_tick() -> None:
+    _write_forecast_live_heartbeat()
+
+
 def _graceful_shutdown(signum, frame) -> None:
     logger.info("forecast-live daemon received SIGTERM; shutting down scheduler")
+    _write_forecast_live_heartbeat(status="stopping")
     if _scheduler is not None:
         try:
             _scheduler.shutdown(wait=True)
@@ -404,6 +452,18 @@ def forecast_live_job_specs(
     startup_at = startup_run_date or datetime.now(timezone.utc)
     return (
         (
+            _heartbeat_tick,
+            "interval",
+            {
+                "seconds": FORECAST_LIVE_HEARTBEAT_SECONDS,
+                "id": FORECAST_LIVE_HEARTBEAT_JOB_ID,
+                "max_instances": 1,
+                "coalesce": True,
+                "misfire_grace_time": 10,
+                "executor": "heartbeat",
+            },
+        ),
+        (
             _opendata_mx2t6_cycle,
             "cron",
             {
@@ -451,6 +511,7 @@ def build_scheduler(*, startup_run_date: datetime | None = None):
         executors={
             "default": _APSchedulerThreadPoolExecutor(max_workers=1),
             "fast": _APSchedulerThreadPoolExecutor(max_workers=1),
+            "heartbeat": _APSchedulerThreadPoolExecutor(max_workers=1),
         },
     )
     for func, trigger, kwargs in forecast_live_job_specs(startup_run_date=startup_run_date):
@@ -486,6 +547,7 @@ def main() -> None:
     signal.signal(signal.SIGTERM, _graceful_shutdown)
     _scheduler = build_scheduler()
     jobs = [job.id for job in _scheduler.get_jobs()]
+    _write_forecast_live_heartbeat(status="scheduler_ready")
     logger.info("Forecast-live scheduler ready. %d jobs: %s", len(jobs), jobs)
     try:
         _scheduler.start()

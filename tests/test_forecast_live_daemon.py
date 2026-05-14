@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import ast
+import json
 import sqlite3
 import sys
 import types
@@ -44,8 +45,12 @@ sys.modules.setdefault("apscheduler.executors", _apscheduler_executors)
 sys.modules.setdefault("apscheduler.executors.pool", _apscheduler_executors_pool)
 
 
-def test_forecast_live_scheduler_only_registers_opendata_jobs() -> None:
-    from src.ingest.forecast_live_daemon import FORECAST_LIVE_JOB_IDS, forecast_live_job_specs
+def test_forecast_live_scheduler_registers_only_opendata_jobs_and_heartbeat() -> None:
+    from src.ingest.forecast_live_daemon import (
+        FORECAST_LIVE_HEARTBEAT_JOB_ID,
+        FORECAST_LIVE_JOB_IDS,
+        forecast_live_job_specs,
+    )
 
     specs = forecast_live_job_specs(
         startup_run_date=datetime(2026, 5, 14, 8, 0, tzinfo=timezone.utc)
@@ -57,10 +62,52 @@ def test_forecast_live_scheduler_only_registers_opendata_jobs() -> None:
         "forecast_live_opendata_daily_mx2t6",
         "forecast_live_opendata_daily_mn2t6",
         "forecast_live_opendata_startup_catch_up",
+        "forecast_live_heartbeat",
     }
+    heartbeat_specs = [
+        (trigger, kwargs)
+        for _, trigger, kwargs in specs
+        if kwargs["id"] == FORECAST_LIVE_HEARTBEAT_JOB_ID
+    ]
+    assert heartbeat_specs == [
+        (
+            "interval",
+            {
+                "seconds": 30,
+                "id": FORECAST_LIVE_HEARTBEAT_JOB_ID,
+                "max_instances": 1,
+                "coalesce": True,
+                "misfire_grace_time": 10,
+                "executor": "heartbeat",
+            },
+        )
+    ]
     assert not any("tigge" in job_id for job_id in job_ids)
     assert not any("calibrat" in job_id or "refit" in job_id for job_id in job_ids)
     assert not any("market" in job_id or "venue" in job_id for job_id in job_ids)
+
+
+def test_forecast_live_heartbeat_write_shape(tmp_path) -> None:
+    from src.ingest.forecast_live_daemon import (
+        FORECAST_LIVE_HEARTBEAT_JOB_ID,
+        _write_forecast_live_heartbeat,
+    )
+
+    heartbeat_path = tmp_path / "forecast-live-heartbeat.json"
+    _write_forecast_live_heartbeat(
+        heartbeat_path=heartbeat_path,
+        status="test",
+        now_utc=datetime(2026, 5, 14, 9, 30, tzinfo=timezone.utc),
+    )
+
+    payload = json.loads(heartbeat_path.read_text())
+    assert payload["daemon"] == "forecast-live"
+    assert payload["status"] == "test"
+    assert payload["timestamp"] == "2026-05-14T09:30:00+00:00"
+    assert payload["written_at"] == "2026-05-14T09:30:00+00:00"
+    assert payload["cadence_seconds"] == 30
+    assert FORECAST_LIVE_HEARTBEAT_JOB_ID in payload["jobs"]
+    assert isinstance(payload["pid"], int)
 
 
 def test_forecast_live_track_runner_uses_shared_opendata_lock(tmp_path) -> None:

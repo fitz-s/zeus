@@ -260,6 +260,32 @@ def test_no_runtime_required_is_rejected_for_post_launch_claim() -> None:
     assert check_forecast_live_ready.main(["--no-runtime-required"]) == 2
 
 
+def test_forecast_live_heartbeat_satisfies_runtime_evidence(tmp_path: Path) -> None:
+    from src.ingest.forecast_live_daemon import _write_forecast_live_heartbeat
+
+    heartbeat_path = tmp_path / "forecast-live-heartbeat.json"
+    _write_forecast_live_heartbeat(
+        heartbeat_path=heartbeat_path,
+        status="scheduler_ready",
+        now_utc=NOW,
+    )
+
+    report = evaluate_forecast_live_ready(
+        forecasts_db_path=_forecast_db(tmp_path),
+        source_health_path=_write_source_health(tmp_path),
+        now_utc=NOW,
+        claim_mode="post-launch",
+        require_process=False,
+        require_heartbeat=True,
+        heartbeat_path=heartbeat_path,
+    )
+
+    assert report.producer_ready is True
+    assert report.runtime_ready is True
+    assert report.highest_completion_state == CompletionState.PRODUCER_READY.value
+    assert report.blockers == []
+
+
 def test_temp_only_smoke_proves_daemon_to_live_reader_chain(tmp_path: Path) -> None:
     report = run_smoke(work_dir=tmp_path / "forecast-live-smoke", keep_artifacts=True)
 

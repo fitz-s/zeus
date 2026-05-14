@@ -16,10 +16,11 @@ Using this runbook can support `OPERATOR_LAUNCH_READY` only. It cannot support
 `LIVE_RUNNING`, `PRODUCER_READY`, `LIVE_CONSUMING`, or `DONE` without the
 post-launch evidence named in the data-daemon plan.
 
-The current forecast-live daemon does not yet write a dedicated heartbeat file.
-Until a heartbeat writer or verifier lands, the heartbeat gate is not satisfied;
-process and `job_run` evidence are provisional and must not be reported as
-heartbeat proof.
+The forecast-live daemon writes `state/forecast-live-heartbeat.json` at startup
+and every 30 seconds on the dedicated scheduler `heartbeat` executor. Heartbeat
+evidence can support `LIVE_RUNNING` only when paired with process evidence. It
+does not prove `PRODUCER_READY`, `LIVE_CONSUMING`, or `DONE` without fresh
+authority-chain rows and live-reader evidence.
 
 ## Preconditions
 
@@ -88,6 +89,13 @@ code review.
    - `forecast_live_opendata_daily_mx2t6`
    - `forecast_live_opendata_daily_mn2t6`
    - `forecast_live_opendata_startup_catch_up`
+   - `forecast_live_heartbeat`
+
+7. Record heartbeat and authority-chain evidence:
+
+   ```bash
+   python3 scripts/check_forecast_live_ready.py --claim-mode post-launch --json
+   ```
 
 ## Read-Only Verification
 
@@ -145,10 +153,10 @@ Rollback must restore a single owner and must not delete canonical DB rows.
 3. Restart legacy ingest only after the operator approves the restart.
 4. Verify legacy OpenData job registration is present again.
 5. Verify no forecast-live process remains.
-6. If a future forecast-live heartbeat file exists, clear only that
-   runtime-local heartbeat after recording it. Do not remove `source_run`,
-   `source_run_coverage`, `readiness_state`, `ensemble_snapshots_v2`, or
-   `job_run` rows as part of rollback.
+6. Record `state/forecast-live-heartbeat.json`, then clear only that
+   runtime-local heartbeat if the operator wants stale-heartbeat noise removed.
+   Do not remove `source_run`, `source_run_coverage`, `readiness_state`,
+   `ensemble_snapshots_v2`, or `job_run` rows as part of rollback.
 
 ## Evidence Checklist
 
@@ -159,6 +167,7 @@ Record these items for any launch or rollback claim:
 - process list for legacy ingest, forecast-live, and live trading daemon
 - legacy OpenData job absence or presence, depending on cutover or rollback
 - forecast-live scheduler job list
+- forecast-live heartbeat age and payload
 - latest HIGH and LOW `job_run` rows
 - latest HIGH and LOW `source_run` rows
 - latest HIGH and LOW coverage/readiness rows
