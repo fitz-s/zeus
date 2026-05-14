@@ -11,6 +11,8 @@ import sqlite3
 from datetime import date, datetime, timezone
 from typing import Any, Iterator
 
+from src.state.connection_pair import WorldConnection
+
 READINESS_STATUSES = frozenset({
     "LIVE_ELIGIBLE",
     "SHADOW_ONLY",
@@ -56,7 +58,7 @@ def _scope_key(*parts: object) -> str:
 
 
 @contextlib.contextmanager
-def _savepoint(conn: sqlite3.Connection, name: str) -> Iterator[None]:
+def _savepoint(conn: WorldConnection, name: str) -> Iterator[None]:
     conn.execute(f"SAVEPOINT {name}")
     try:
         yield
@@ -88,7 +90,7 @@ def _parse_expiry(value: object) -> datetime | None:
 
 
 def write_readiness_state(
-    conn: sqlite3.Connection,
+    conn: WorldConnection,
     *,
     readiness_id: str,
     scope_type: str,
@@ -201,13 +203,13 @@ def write_readiness_state(
         )
 
 
-def get_readiness_state(conn: sqlite3.Connection, readiness_id: str) -> dict[str, Any] | None:
+def get_readiness_state(conn: WorldConnection, readiness_id: str) -> dict[str, Any] | None:
     row = conn.execute("SELECT * FROM readiness_state WHERE readiness_id = ?", (readiness_id,)).fetchone()
     return dict(row) if row else None
 
 
 def get_entry_readiness(
-    conn: sqlite3.Connection,
+    conn: WorldConnection,
     *,
     city_id: str,
     city_timezone: str,

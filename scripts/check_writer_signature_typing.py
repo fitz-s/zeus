@@ -58,7 +58,9 @@ _TYPED_CONN_TYPES = frozenset({
 # Generate fresh baseline via: python3 scripts/check_writer_signature_typing.py --baseline
 _P1_BASELINE_VIOLATIONS: frozenset[str] = frozenset({
     # 69 pre-P3 violations captured at P1 completion (2026-05-14, tip 0c10a326e4)
-    # P3 will migrate these to TypedConnection. Do not grow this set.
+    # P4 partial migration reduced 69 → 59 (10 low-risk src/state/ writers migrated).
+    # Remaining 59 require HIGH-RISK caller inspection or cross-DB boundary analysis.
+    # Do not grow this set.
     "src/calibration/effective_sample_size.py::write_decision_groups",
     "src/calibration/retrain_trigger.py::_insert_version",
     "src/calibration/store.py::save_platt_model",
@@ -99,24 +101,14 @@ _P1_BASELINE_VIOLATIONS: frozenset[str] = frozenset({
     "src/ingest/harvester_truth_writer.py::_write_settlement_truth",
     "src/ingest/polymarket_user_channel.py::_append_command_event_if_legal",
     "src/ingest/polymarket_user_channel.py::_append_position_lot",
-    "src/state/data_coverage.py::bulk_record_written",
-    "src/state/data_coverage.py::record_failed",
-    "src/state/data_coverage.py::record_legitimate_gap",
-    "src/state/data_coverage.py::record_missing",
-    "src/state/data_coverage.py::record_written",
     "src/state/db.py::_insert_forward_market_event",
     "src/state/db.py::_insert_forward_price_history",
     "src/state/db.py::_insert_full_linkage_price_history",
     "src/state/db.py::append_source_contract_audit_events",
     "src/state/db.py::record_token_suppression",
     "src/state/db.py::upsert_control_override",
-    "src/state/job_run_repo.py::write_job_run",
     "src/state/ledger.py::append_many_and_project",
-    "src/state/market_topology_repo.py::write_market_topology_state",
     "src/state/projection.py::upsert_position_current",
-    "src/state/readiness_repo.py::write_readiness_state",
-    "src/state/snapshot_repo.py::insert_snapshot",
-    "src/state/source_run_coverage_repo.py::write_source_run_coverage",
     "src/state/source_run_repo.py::write_source_run",
     "src/state/uma_resolution_listener.py::record_resolution",
     "src/state/venue_command_repo.py::_append_command_provenance_event",
