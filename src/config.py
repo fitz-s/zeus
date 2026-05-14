@@ -10,6 +10,8 @@ Missing keys raise KeyError immediately at startup, not at trade time.
 
 import json
 import logging
+import os
+import sys
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -219,6 +221,8 @@ def entry_forecast_config(config: Settings | None = None) -> EntryForecastConfig
 
     cfg = config or settings
     data = cfg["entry_forecast"]
+    settings_mode_raw = data["rollout_mode"]
+    rollout_mode = _resolve_rollout_mode(settings_mode_raw)
     return EntryForecastConfig(
         source_id=str(data["source_id"]).strip(),
         source_transport=EntryForecastSourceTransport(data["source_transport"]),
@@ -228,9 +232,54 @@ def entry_forecast_config(config: Settings | None = None) -> EntryForecastConfig
         target_horizon_days=int(data["target_horizon_days"]),
         warm_horizon_days=int(data["warm_horizon_days"]),
         source_cycle_policy=str(data["source_cycle_policy"]).strip(),
-        rollout_mode=EntryForecastRolloutMode(data["rollout_mode"]),
+        rollout_mode=rollout_mode,
         calibration_policy_id=EntryForecastCalibrationPolicyId(data["calibration_policy_id"]),
     )
+
+
+# Operator escape hatch: ZEUS_ENTRY_FORECAST_ROLLOUT_MODE overrides the
+# settings.json value for the lifetime of the process. Used by flip-mode
+# rehearsals and emergency demotion when editing settings.json + restarting
+# the daemon would be too slow. The override is logged to stderr once per
+# resolution so it never silently changes behavior. Invalid env values fail
+# closed (raise ValueError) — they do NOT silently fall back to settings.
+ROLLOUT_MODE_ENV_VAR = "ZEUS_ENTRY_FORECAST_ROLLOUT_MODE"
+_ROLLOUT_MODE_OVERRIDE_LOGGED: set[tuple[str, str]] = set()
+
+
+def _resolve_rollout_mode(settings_mode_raw: str) -> EntryForecastRolloutMode:
+    """Resolve effective rollout_mode from settings + env override.
+
+    Order:
+      1. ``ZEUS_ENTRY_FORECAST_ROLLOUT_MODE`` env var (if set and non-empty).
+      2. settings.json ``entry_forecast.rollout_mode``.
+
+    Invalid env values raise ``ValueError`` (fail-closed). Env value equal to
+    the settings value is a no-op (no log line).
+    """
+    settings_mode = EntryForecastRolloutMode(settings_mode_raw)
+    env_raw = os.environ.get(ROLLOUT_MODE_ENV_VAR, "").strip()
+    if not env_raw:
+        return settings_mode
+    try:
+        env_mode = EntryForecastRolloutMode(env_raw)
+    except ValueError as exc:
+        valid = sorted(m.value for m in EntryForecastRolloutMode)
+        raise ValueError(
+            f"{ROLLOUT_MODE_ENV_VAR}={env_raw!r} is not a valid rollout mode "
+            f"(valid: {valid}). Unset the env var or set a valid value."
+        ) from exc
+    if env_mode is settings_mode:
+        return settings_mode
+    key = (settings_mode.value, env_mode.value)
+    if key not in _ROLLOUT_MODE_OVERRIDE_LOGGED:
+        _ROLLOUT_MODE_OVERRIDE_LOGGED.add(key)
+        print(
+            f"ROLLOUT_MODE_ENV_OVERRIDE: settings={settings_mode.value} "
+            f"env={env_mode.value} (env wins)",
+            file=sys.stderr,
+        )
+    return env_mode
 
 
 def _unit_diurnal_amplitude(city_row: dict, unit: str) -> float:
