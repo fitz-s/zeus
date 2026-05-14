@@ -220,12 +220,12 @@ def _k2_daily_obs_tick():
     """
     from src.data.dual_run_lock import acquire_lock
     from src.data.daily_obs_append import daily_tick
-    from src.state.db import get_world_connection
+    from src.state.db import get_forecasts_connection  # K1 P0: observations owned by forecasts.db
     with acquire_lock("daily_obs") as acquired:
         if not acquired:
             logger.info("ingest k2_daily_obs_tick skipped_lock_held")
             return
-        conn = get_world_connection(write_class="bulk")
+        conn = get_forecasts_connection(write_class="bulk")
         try:
             result = daily_tick(conn)
         finally:
@@ -349,9 +349,13 @@ def _k2_startup_catch_up():
     from src.data.forecasts_append import catch_up_missing as catch_up_forecasts
     from src.data.forecasts_append import daily_tick as forecasts_daily_tick
     from src.data.solar_append import daily_tick as solar_daily_tick
-    from src.state.db import get_world_connection
+    from src.state.db import get_world_connection, get_forecasts_connection  # K1 P0
 
     conn = get_world_connection(write_class="bulk")
+    # K1 P0: observations is a forecasts-class table (zeus-forecasts.db).
+    # catch_up_obs needs its own connection; the rest of this function stays on
+    # conn (world.db) because data_coverage, forecasts, solar_daily live there.
+    obs_conn = get_forecasts_connection(write_class="bulk")
     try:
         # ---- Phase 2 probe: capture staleness timestamps BEFORE Phase 1 ----
         # Phase 1 (catch_up_missing) can introduce fresh rows for historical
@@ -377,7 +381,7 @@ def _k2_startup_catch_up():
 
         # ---- Phase 1: hole filler (existing semantics, unchanged) -----------
         logger.info("K2 startup catch-up: observations")
-        logger.info("  %s", catch_up_obs(conn, days_back=30))
+        logger.info("  %s", catch_up_obs(obs_conn, days_back=30))
         logger.info("K2 startup catch-up: observation_instants")
         logger.info("  %s", catch_up_hourly(conn, days_back=30))
         logger.info("K2 startup catch-up: solar_daily")
@@ -440,6 +444,7 @@ def _k2_startup_catch_up():
             )
     finally:
         conn.close()
+        obs_conn.close()  # K1 P0: separate forecasts connection for observations
 
 
 @_scheduler_job("ingest_opendata_daily_mx2t6")
