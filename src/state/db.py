@@ -2667,7 +2667,7 @@ def init_schema_forecasts(conn: sqlite3.Connection) -> None:
     conn.execute(f"PRAGMA busy_timeout = {_busy_ms}")
 
     world_path = str(ZEUS_WORLD_DB_PATH)
-    if ZEUS_WORLD_DB_PATH.exists():
+    if ZEUS_WORLD_DB_PATH.exists() and ZEUS_WORLD_DB_PATH.stat().st_size > 0:
         # --- Production path: replicate schema from world.db sqlite_master ---
         conn.execute(f"ATTACH DATABASE '{world_path}' AS world_src")
         try:
