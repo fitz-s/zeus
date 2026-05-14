@@ -1765,7 +1765,7 @@ files:
   src/state/db.py:
     zone: K2_runtime
     authority_role: db_connection_schema_runtime
-    why: SQLite connections, schema setup, canonical DB queries, and R3 U2 raw provenance projection schema initialization.
+    why: SQLite connections, schema setup, canonical DB queries, and R3 U2 raw provenance projection schema initialization. Audit-touched 2026-05-14 (task_2026-05-14_attach_path_index_fix/PLAN.md Option A) — _ensure_v2_forecast_indexes() called unconditionally at end of init_schema_forecasts so ATTACH and static-fallback branches converge on the canonical v2 index inventory; closes the bug category where world.db trailing v2_schema.py silently produces a thinned index set on forecasts.db.
     write_routes:
     - canonical_position_write
     - settlement_write

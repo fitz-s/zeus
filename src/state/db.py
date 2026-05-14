@@ -2504,6 +2504,80 @@ _FORECAST_TABLES = (
 )
 
 
+def _ensure_v2_forecast_indexes(conn: sqlite3.Connection) -> None:
+    """Idempotent CREATE INDEX IF NOT EXISTS for every v2 forecast-class index.
+
+    PLAN-evidence: docs/operations/task_2026-05-14_attach_path_index_fix/PLAN.md
+    Option A (2026-05-14). Bug category being closed: the ATTACH-from-world.db
+    path inside init_schema_forecasts copies indexes from world_src.sqlite_master,
+    but world.db may trail v2_schema.py (partial migration, init_schema_world_only
+    deploy, test fixture). Calling this helper unconditionally after
+    init_schema_forecasts's table-creation branches guarantees post-condition
+    equivalence between the ATTACH path and the static-fallback path.
+
+    Canonical truth source for the index list is
+    src/state/schema/v2_schema.py (the four _create_*_v2 helpers). DDL text
+    here must match those helpers byte-for-byte. If a new v2 forecast-class
+    index is added to v2_schema.py, mirror it here in the same PR.
+
+    Tables covered: ensemble_snapshots_v2, calibration_pairs_v2,
+    settlements_v2, market_events_v2.
+    """
+    # settlements_v2 (mirror src/state/schema/v2_schema.py:49-56)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_settlements_v2_city_date_metric
+            ON settlements_v2(city, target_date, temperature_metric)
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_settlements_v2_settled_at
+            ON settlements_v2(settled_at)
+    """)
+    # market_events_v2 (mirror src/state/schema/v2_schema.py:80-89)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_market_events_v2_city_date_metric
+            ON market_events_v2(city, target_date, temperature_metric)
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_market_events_v2_open
+            ON market_events_v2(city, target_date, temperature_metric)
+            WHERE outcome IS NULL
+    """)
+    # ensemble_snapshots_v2 (mirror src/state/schema/v2_schema.py:166-229)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_ensemble_snapshots_v2_lookup
+            ON ensemble_snapshots_v2(city, target_date, temperature_metric, available_at)
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_ens_v2_source_run
+            ON ensemble_snapshots_v2(source_id, source_transport, source_run_id)
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_ens_v2_entry_lookup
+            ON ensemble_snapshots_v2(
+                city,
+                target_date,
+                temperature_metric,
+                source_id,
+                source_transport,
+                data_version,
+                source_run_id
+            )
+    """)
+    # calibration_pairs_v2 (mirror src/state/schema/v2_schema.py:288-299)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_calibration_pairs_v2_bucket
+            ON calibration_pairs_v2(temperature_metric, cluster, season, lead_days)
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_calibration_pairs_v2_city_date_metric
+            ON calibration_pairs_v2(city, target_date, temperature_metric)
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_calibration_pairs_v2_refit_core
+            ON calibration_pairs_v2(temperature_metric, data_version, training_allowed, authority)
+    """)
+
+
 def init_schema_forecasts(conn: sqlite3.Connection) -> None:
     """Create all 7 forecast-class tables on zeus-forecasts.db. Idempotent.
 
@@ -2586,6 +2660,15 @@ def init_schema_forecasts(conn: sqlite3.Connection) -> None:
         _create_market_events_v2(conn)
         _create_ensemble_snapshots_v2(conn)
         _create_calibration_pairs_v2(conn)
+
+    # Post-condition equivalence (Option A, 2026-05-14):
+    # The ATTACH branch above copies indexes from world_src.sqlite_master; if
+    # world.db trails v2_schema.py (partial migration, init_schema_world_only
+    # deploy, or test fixture), critical v2 covering indexes silently go
+    # missing on the forecasts conn. Run the idempotent helper unconditionally
+    # so both branches converge to the canonical v2 index inventory.
+    # PLAN-evidence: docs/operations/task_2026-05-14_attach_path_index_fix/PLAN.md
+    _ensure_v2_forecast_indexes(conn)
 
     # Mark schema current — MUST be last (partial failure must not mark ready).
     conn.execute(f"PRAGMA user_version = {SCHEMA_FORECASTS_VERSION}")
