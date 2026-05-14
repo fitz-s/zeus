@@ -809,17 +809,14 @@ SCHEMA_VERSION = 2
 
 def init_schema(
     conn: Optional[sqlite3.Connection] = None,
-    *,
-    _v2_forecast_tables: bool = True,
 ) -> None:
-    """Create all Zeus tables. Idempotent.
+    """Create world-class Zeus tables. Idempotent.
 
-    Args:
-        _v2_forecast_tables: Internal kwarg used by init_schema_world_only.
-            When False, passes forecast_tables=False to apply_v2_schema so the
-            4 v2 forecast-class tables are not created on the world conn
-            post-K1 migration. Default True preserves existing behavior.
-            K1 split 2026-05-11.
+    Post-K1 split (2026-05-11): init_schema creates ONLY world-class tables.
+    Forecast-class tables (observations, settlements, source_run, *_v2) are
+    exclusively created by init_schema_forecasts on zeus-forecasts.db.
+    The _v2_forecast_tables kwarg is RETIRED in P2; apply_v2_schema is always
+    called with forecast_tables=False here (P2 DDL refactor, 2026-05-14).
 
     # Fix (task #200, 2026-05-10): PRAGMA busy_timeout must be re-applied at the
     # start of init_schema. Python's sqlite3.connect(timeout=N) installs a C-level
@@ -2367,7 +2364,7 @@ def init_schema(
 
     # Phase 2: apply v2 schema (idempotent — safe to run on every boot).
     from src.state.schema.v2_schema import apply_v2_schema as _apply_v2_schema
-    _apply_v2_schema(conn, forecast_tables=_v2_forecast_tables)
+    _apply_v2_schema(conn, forecast_tables=False)
     conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
     if own_conn:
@@ -2654,7 +2651,7 @@ def init_schema_forecasts(conn: sqlite3.Connection) -> None:
     helpers.  The fallback DDL must stay in sync manually; the ATTACH path is
     the authoritative production path.
 
-    Tables owned by this DB post-K1 migration:
+    Tables owned by this DB post-K1 migration (derived from registry P2):
       ensemble_snapshots_v2, source_run, observations, settlements,
       calibration_pairs_v2, settlements_v2, market_events_v2
 
@@ -2662,16 +2659,38 @@ def init_schema_forecasts(conn: sqlite3.Connection) -> None:
 
     K1 split 2026-05-11 — do NOT call init_schema() on the forecasts conn;
     that would create world-class tables on the wrong DB.
+
+    P2 DDL refactor (2026-05-14): table list derived from registry
+    (tables_for_class(FORECAST_CLASS)) instead of hardcoded _FORECAST_TABLES.
+    Stop-condition #8: ATTACH branch iterates registry, not raw sqlite_master.
     """
+    from src.state.table_registry import SchemaClass as _SchemaClass, tables_for_class as _tables_for_class
+    _registry_forecast_tables: frozenset[str] = _tables_for_class(_SchemaClass.FORECAST_CLASS)
+
+    # Opt-in TypedConnection identity guard (P2): if a TypedConnection is
+    # passed, verify it wraps the forecasts DB. Raw sqlite3.Connection callers
+    # are accepted without check (P3 migrates all call sites to ForecastsConnection).
+    from src.state.connection_pair import TypedConnection as _TypedConnection
+    from src.state.table_registry import DBIdentity as _DBIdentity
+    if isinstance(conn, _TypedConnection) and conn.db_identity != _DBIdentity.FORECASTS:
+        raise ValueError(
+            f"init_schema_forecasts received a TypedConnection for "
+            f"{conn.db_identity!r} — must be DBIdentity.FORECASTS. "
+            f"Pass a ForecastsConnection or a raw sqlite3.Connection."
+        )
+
     _busy_ms = int(os.environ.get("ZEUS_DB_BUSY_TIMEOUT_MS", "30000"))
     conn.execute(f"PRAGMA busy_timeout = {_busy_ms}")
 
     world_path = str(ZEUS_WORLD_DB_PATH)
     if ZEUS_WORLD_DB_PATH.exists() and ZEUS_WORLD_DB_PATH.stat().st_size > 0:
         # --- Production path: replicate schema from world.db sqlite_master ---
+        # P2 stop-condition #8: iterate registry (not raw world_src.sqlite_master)
+        # so ATTACH path and static-helpers path are always in sync with the
+        # canonical ownership declaration.
         conn.execute(f"ATTACH DATABASE '{world_path}' AS world_src")
         try:
-            for tbl in _FORECAST_TABLES:
+            for tbl in _registry_forecast_tables:
                 row = conn.execute(
                     "SELECT sql FROM world_src.sqlite_master"
                     " WHERE type='table' AND name=?",
@@ -2684,7 +2703,7 @@ def init_schema_forecasts(conn: sqlite3.Connection) -> None:
                     )
                     conn.execute(ddl)
 
-            for tbl in _FORECAST_TABLES:
+            for tbl in _registry_forecast_tables:
                 for (sql,) in conn.execute(
                     "SELECT sql FROM world_src.sqlite_master"
                     " WHERE type='index' AND tbl_name=? AND sql IS NOT NULL",
@@ -2698,6 +2717,30 @@ def init_schema_forecasts(conn: sqlite3.Connection) -> None:
                     conn.execute(idx_ddl)
         finally:
             conn.execute("DETACH DATABASE world_src")
+
+        # Post-P2 fallback: world.db may be world-class-only (no legacy forecast
+        # table copies). Any registry forecast table not yet on forecasts conn
+        # must be created via static helpers so _ensure_v2_forecast_indexes succeeds.
+        _missing_on_fc = {
+            tbl for tbl in _registry_forecast_tables
+            if not conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (tbl,)
+            ).fetchone()
+        }
+        if _missing_on_fc:
+            _create_settlements(conn)
+            _create_observations(conn)
+            _create_source_run(conn)
+            from src.state.schema.v2_schema import (
+                _create_settlements_v2,
+                _create_market_events_v2,
+                _create_ensemble_snapshots_v2,
+                _create_calibration_pairs_v2,
+            )
+            _create_settlements_v2(conn)
+            _create_market_events_v2(conn)
+            _create_ensemble_snapshots_v2(conn)
+            _create_calibration_pairs_v2(conn)
     else:
         # --- Fresh-deploy fallback: static helpers (must stay in sync manually) ---
         import logging as _logging
@@ -2739,20 +2782,18 @@ def init_schema_forecasts(conn: sqlite3.Connection) -> None:
 def init_schema_world_only(conn: Optional[sqlite3.Connection] = None) -> None:
     """Create world-class tables on zeus-world.db. Idempotent.
 
-    Delegates to init_schema(_v2_forecast_tables=False) so the 4 v2
-    forecast-class tables (settlements_v2, market_events_v2,
-    ensemble_snapshots_v2, calibration_pairs_v2) are not re-created on the
-    world conn post-K1 migration. The world executescript block still contains
-    settlements/observations/source_run CREATE IF NOT EXISTS — those are
-    idempotent no-ops post-migration after §5.4 renames them away.
+    Post-K1 split (2026-05-11): init_schema now creates ONLY world-class tables
+    (the _v2_forecast_tables kwarg is RETIRED in P2). This function is an alias
+    for init_schema() and is preserved for call-site clarity. Forecast-class
+    tables live exclusively on zeus-forecasts.db via init_schema_forecasts.
 
-    This function replaces the init_schema(world_conn) call at
-    src/ingest_main.py:1042 after §5.4 migration runs (§5.10 sequencing).
-    Do NOT wire into ingest_main before §5.4 completes.
+    The world executescript block still contains settlements/observations/
+    source_run CREATE IF NOT EXISTS — those are idempotent no-ops post-migration
+    after §5.4 renames them away.
 
-    K1 split 2026-05-11.
+    P2 DDL refactor 2026-05-14.
     """
-    init_schema(conn, _v2_forecast_tables=False)
+    init_schema(conn)
 
 
 def assert_schema_current_forecasts(conn: sqlite3.Connection) -> None:
