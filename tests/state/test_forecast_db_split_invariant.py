@@ -349,3 +349,134 @@ def test_rel7_attach_read_latency():
     elapsed = time.monotonic() - t0
     conn.close()
     assert elapsed < 5.0, f"REL-7: ATTACH COUNT(*) took {elapsed:.2f}s (> 5s threshold)"
+
+
+# ---------------------------------------------------------------------------
+# REL-A (2026-05-14): Branch equivalence between ATTACH and static-fallback
+#   paths inside init_schema_forecasts. Both paths must produce the same v2
+#   forecast-class index set on the forecasts conn. This is the relationship
+#   invariant the K1 antibody assumed implicitly; Option A makes it explicit.
+#   PLAN-evidence: docs/operations/task_2026-05-14_attach_path_index_fix/PLAN.md
+# ---------------------------------------------------------------------------
+
+_CRITICAL_V2_INDEXES = frozenset({
+    "idx_ensemble_snapshots_v2_lookup",
+    "idx_calibration_pairs_v2_city_date_metric",
+    "idx_ens_v2_source_run",
+    "idx_ens_v2_entry_lookup",
+    "idx_calibration_pairs_v2_bucket",
+    "idx_calibration_pairs_v2_refit_core",
+    "idx_settlements_v2_city_date_metric",
+    "idx_settlements_v2_settled_at",
+    "idx_market_events_v2_city_date_metric",
+    "idx_market_events_v2_open",
+})
+
+
+def _indexes_on(conn: sqlite3.Connection) -> set[str]:
+    return {
+        row[0]
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='index'"
+        ).fetchall()
+    }
+
+
+def test_relA_attach_partial_world_still_produces_critical_indexes(
+    tmp_path, monkeypatch
+):
+    """Cross-module: init_schema_forecasts run against a world.db that LACKS
+    the v2 covering indexes (e.g. partial migration / init_schema_world_only)
+    must still produce the canonical v2 index inventory on the forecasts conn.
+
+    This is the failing scenario described in PLAN §1 — ATTACH path copies
+    sqlite_master which on a thinned world.db omits 2 critical indexes.
+    Option A's _ensure_v2_forecast_indexes() closes the bug category.
+    """
+    from src.state import db as state_db
+    from src.state.db import init_schema, init_schema_forecasts
+
+    # Build a world.db with full schema, then DROP the 2 critical v2 indexes
+    # to simulate the partial-migration / init_schema_world_only scenario.
+    world_partial = tmp_path / "world_partial.db"
+    w = sqlite3.connect(world_partial)
+    init_schema(w)
+    for idx_name in (
+        "idx_ensemble_snapshots_v2_lookup",
+        "idx_calibration_pairs_v2_city_date_metric",
+    ):
+        w.execute(f"DROP INDEX IF EXISTS {idx_name}")
+    w.commit()
+    w.close()
+
+    # Point ZEUS_WORLD_DB_PATH at the partial DB so init_schema_forecasts
+    # selects the ATTACH branch (world_partial exists on disk).
+    monkeypatch.setattr(state_db, "ZEUS_WORLD_DB_PATH", world_partial)
+
+    fcast = sqlite3.connect(":memory:")
+    init_schema_forecasts(fcast)
+    fcast.commit()
+
+    have = _indexes_on(fcast)
+    required = {
+        "idx_ensemble_snapshots_v2_lookup",
+        "idx_calibration_pairs_v2_city_date_metric",
+    }
+    missing = required - have
+    fcast.close()
+    assert not missing, (
+        f"REL-A: ATTACH-from-partial-world.db dropped critical v2 indexes: "
+        f"{sorted(missing)}. _ensure_v2_forecast_indexes() must run "
+        "unconditionally so the ATTACH branch reaches index-set equivalence "
+        "with the static-fallback branch."
+    )
+
+
+def test_relA_attach_and_static_branches_produce_same_v2_index_superset(
+    tmp_path, monkeypatch
+):
+    """Stronger form of REL-A: the v2 covering indexes must be a subset of the
+    index set produced by BOTH the ATTACH branch (world.db exists) and the
+    static-fallback branch (world.db absent). Asymmetry between branches is
+    the exact relationship defect Option A closes.
+    """
+    from src.state import db as state_db
+    from src.state.db import init_schema, init_schema_forecasts
+
+    # Branch 1: ATTACH path over a partial world.db.
+    world_partial = tmp_path / "world_partial_b.db"
+    w = sqlite3.connect(world_partial)
+    init_schema(w)
+    for idx_name in (
+        "idx_ensemble_snapshots_v2_lookup",
+        "idx_calibration_pairs_v2_city_date_metric",
+    ):
+        w.execute(f"DROP INDEX IF EXISTS {idx_name}")
+    w.commit()
+    w.close()
+
+    monkeypatch.setattr(state_db, "ZEUS_WORLD_DB_PATH", world_partial)
+    c_attach = sqlite3.connect(":memory:")
+    init_schema_forecasts(c_attach)
+    c_attach.commit()
+    have_attach = _indexes_on(c_attach)
+    c_attach.close()
+
+    # Branch 2: static-fallback path (world.db does not exist on disk).
+    world_absent = tmp_path / "absent_world.db"  # never created
+    monkeypatch.setattr(state_db, "ZEUS_WORLD_DB_PATH", world_absent)
+    c_static = sqlite3.connect(":memory:")
+    init_schema_forecasts(c_static)
+    c_static.commit()
+    have_static = _indexes_on(c_static)
+    c_static.close()
+
+    missing_attach = _CRITICAL_V2_INDEXES - have_attach
+    missing_static = _CRITICAL_V2_INDEXES - have_static
+    assert not missing_attach, (
+        f"REL-A: ATTACH branch missing v2 indexes: {sorted(missing_attach)}"
+    )
+    assert not missing_static, (
+        f"REL-A: static-fallback branch missing v2 indexes: "
+        f"{sorted(missing_static)}"
+    )
