@@ -177,6 +177,7 @@ _WLA_CACHE_PATH = _WLA_REPO_ROOT / ".pytest_cache" / "writer_lock_antibody.json"
 _WLA_SQLITE_CONNECT_ALLOWLIST = frozenset({
     # --- canonical infrastructure ---
     "src/state/db.py",                              # canonical_shim
+    "src/state/collateral_ledger.py",               # singleton_persistent_conn (2026-05-13 fix): CollateralLedger(db_path=) opens a ledger-owned conn for the process-wide singleton so it survives transient caller-conn lifecycles. Single connect site, no schema mutation outside init_collateral_schema.
     # NOTE: src/state/db_writer_lock.py is intentionally NOT allowlisted. The file
     # has no sqlite3.connect() call sites today; if a future edit introduces one,
     # the antibody SHOULD fire so this module stays a coordination layer (not a

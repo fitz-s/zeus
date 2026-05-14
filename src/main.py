@@ -556,6 +556,14 @@ def _startup_wallet_check(clob=None):
 
     Accepts an optional clob for testing. In production, creates a live
     PolymarketClient.
+
+    Also installs the process-wide CollateralLedger singleton with a
+    persistent ledger-owned conn (2026-05-13 remediation). Prior to this
+    the singleton was published from `PolymarketClient.get_balance()` while
+    that wrapper still owned the conn — the wrapper's `finally: conn.close()`
+    immediately poisoned the singleton, blocking every downstream
+    `assert_buy_preflight` / `assert_sell_preflight` with
+    `collateral_ledger_unconfigured` or `sqlite3.ProgrammingError`.
     """
     if clob is None:
         from src.data.polymarket_client import PolymarketClient
@@ -566,6 +574,31 @@ def _startup_wallet_check(clob=None):
     except Exception as exc:
         logger.critical("FAIL-CLOSED: wallet query failed at daemon start: %s", exc)
         sys.exit("FATAL: Cannot start — wallet unreachable. Fix credentials or network and restart.")
+
+    # Install the process-wide collateral ledger singleton with a ledger-owned
+    # persistent conn so downstream executor / riskguard preflight callers do
+    # not race against transient conn close. Failures here are non-fatal at
+    # boot — preflight will surface `collateral_ledger_unconfigured` if the
+    # singleton is missing, which is already the existing fail-closed code
+    # path for any operator misconfiguration.
+    try:
+        from src.state.collateral_ledger import (
+            CollateralLedger,
+            configure_global_ledger,
+        )
+        from src.state.db import _zeus_trade_db_path
+
+        ledger = CollateralLedger(db_path=_zeus_trade_db_path())
+        configure_global_ledger(ledger)
+        logger.info(
+            "CollateralLedger global singleton installed (db=%s)",
+            _zeus_trade_db_path(),
+        )
+    except Exception as exc:
+        logger.warning(
+            "CollateralLedger global singleton install failed (preflight will fail-closed): %s",
+            exc,
+        )
 
 
 def _startup_data_health_check(conn):

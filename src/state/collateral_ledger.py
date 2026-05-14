@@ -1,3 +1,7 @@
+# Created: 2026-04-26
+# Last reused/audited: 2026-05-13
+# Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/Z4.yaml
+#                  + 2026-05-13 collateral_ledger singleton conn lifecycle remediation
 """R3 Z4 collateral ledger for pUSD, CTF inventory, and reservations.
 
 pUSD is BUY collateral. CTF outcome tokens are SELL inventory. This module
@@ -14,6 +18,7 @@ import sqlite3
 from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_FLOOR
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Literal, Optional
 
@@ -120,12 +125,65 @@ class CollateralSnapshot:
 
 
 class CollateralLedger:
-    def __init__(self, conn: sqlite3.Connection | None = None) -> None:
-        self._conn = conn
+    def __init__(
+        self,
+        conn: sqlite3.Connection | None = None,
+        *,
+        db_path: str | Path | None = None,
+    ) -> None:
+        """Initialize a ledger backed by a sqlite3 connection.
+
+        Lifecycle modes:
+        - ``conn=None`` (default): in-memory reservations only; tests/fakes.
+        - ``conn=<existing>``: caller owns conn lifetime. The ledger is only
+          safe to use while the caller's conn is open. Suitable for short
+          unit-of-work helpers (e.g. legacy compat wrappers, tests).
+        - ``db_path=<path>``: ledger opens AND owns a persistent connection
+          for its lifetime. Use for process-wide singletons published via
+          ``configure_global_ledger`` — survives transient caller-conn
+          lifecycles. Mutually exclusive with ``conn``.
+
+        Authority basis: 2026-05-13 collateral_ledger singleton conn lifecycle
+        remediation. Previously the singleton wrapped a transient caller conn
+        (PolymarketClient.get_balance compat wrapper), which closed the conn
+        immediately after publishing the ledger globally and caused every
+        downstream preflight to raise sqlite3.ProgrammingError.
+        """
+        if conn is not None and db_path is not None:
+            raise ValueError(
+                "CollateralLedger accepts at most one of conn= or db_path="
+            )
         self._snapshot: CollateralSnapshot | None = None
         self._memory_reservations: dict[str, dict[str, Any]] = {}
-        if self._conn is not None:
+        self._owns_conn = False
+        if db_path is not None:
+            # Persistent ledger-owned connection. check_same_thread=False so
+            # the singleton can be read from riskguard / executor threads
+            # without re-opening on every call.
+            self._conn = sqlite3.connect(
+                str(db_path), check_same_thread=False
+            )
+            self._conn.row_factory = sqlite3.Row
+            self._owns_conn = True
             init_collateral_schema(self._conn)
+        else:
+            self._conn = conn
+            if self._conn is not None:
+                init_collateral_schema(self._conn)
+
+    def close(self) -> None:
+        """Close the underlying connection iff the ledger owns it.
+
+        Safe to call multiple times. Externally-supplied connections are
+        never closed by the ledger.
+        """
+        if self._owns_conn and self._conn is not None:
+            try:
+                self._conn.close()
+            except sqlite3.Error:
+                pass
+            self._owns_conn = False
+            self._conn = None
 
     def refresh(self, adapter: Any) -> CollateralSnapshot:
         """Read pUSD/CTF collateral truth from an adapter-like object.
