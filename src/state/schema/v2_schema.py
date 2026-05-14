@@ -13,18 +13,316 @@ Contract:
   writes to it actively. model_skill cleanup is deferred to a later phase.
 - Creates 8 v2 tables per the DDL sketch + architect refinements from
   docs/operations/task_2026-04-16_dual_track_metric_spine/phase2_evidence/opener_digest.md
+
+# Created: 2026-05-10
+# Last reused or audited: 2026-05-10
+# Authority basis: task #200 (Fix SQLite live-vs-ingest contention design failure)
 """
 from __future__ import annotations
 
+import os
 import sqlite3
 
 
-def apply_v2_schema(conn: sqlite3.Connection) -> None:
+def _create_settlements_v2(conn: sqlite3.Connection) -> None:
+    """Create settlements_v2 table + indexes. Idempotent. K1 forecast-class table."""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS settlements_v2 (
+            settlement_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            city TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            temperature_metric TEXT NOT NULL
+                CHECK (temperature_metric IN ('high', 'low')),
+            market_slug TEXT,
+            winning_bin TEXT,
+            settlement_value REAL,
+            settlement_source TEXT,
+            settled_at TEXT,
+            authority TEXT NOT NULL DEFAULT 'UNVERIFIED'
+                CHECK (authority IN ('VERIFIED', 'UNVERIFIED', 'QUARANTINED')),
+            provenance_json TEXT NOT NULL DEFAULT '{}',
+            recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(city, target_date, temperature_metric)
+        )
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_settlements_v2_city_date_metric
+            ON settlements_v2(city, target_date, temperature_metric)
+    """)
+    # Architect refinement: index on settled_at for harvest scans
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_settlements_v2_settled_at
+            ON settlements_v2(settled_at)
+    """)
+
+
+def _create_market_events_v2(conn: sqlite3.Connection) -> None:
+    """Create market_events_v2 table + indexes. Idempotent. K1 forecast-class table."""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS market_events_v2 (
+            event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            market_slug TEXT NOT NULL,
+            city TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            temperature_metric TEXT NOT NULL
+                CHECK (temperature_metric IN ('high', 'low')),
+            condition_id TEXT,
+            token_id TEXT,
+            range_label TEXT,
+            range_low REAL,
+            range_high REAL,
+            outcome TEXT,
+            created_at TEXT,
+            recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(market_slug, condition_id)
+        )
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_market_events_v2_city_date_metric
+            ON market_events_v2(city, target_date, temperature_metric)
+    """)
+    # Architect refinement: partial index on open markets
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_market_events_v2_open
+            ON market_events_v2(city, target_date, temperature_metric)
+            WHERE outcome IS NULL
+    """)
+
+
+def _create_ensemble_snapshots_v2(conn: sqlite3.Connection) -> None:
+    """Create ensemble_snapshots_v2 table + indexes + ALTERs. Idempotent.
+
+    K1 forecast-class table (moves to zeus-forecasts.db). Contains CREATE,
+    4 indexes, and 27 idempotent ALTER TABLE statements for additive columns
+    added across schema versions. All ALTERs suppress 'duplicate column' errors.
+    """
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS ensemble_snapshots_v2 (
+            snapshot_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            city TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            temperature_metric TEXT NOT NULL
+                CHECK (temperature_metric IN ('high', 'low')),
+            physical_quantity TEXT NOT NULL,
+            observation_field TEXT NOT NULL
+                CHECK (observation_field IN ('high_temp', 'low_temp')),
+            issue_time TEXT,
+            valid_time TEXT,
+            available_at TEXT NOT NULL,
+            fetch_time TEXT NOT NULL,
+            lead_hours REAL NOT NULL,
+            members_json TEXT NOT NULL,
+            p_raw_json TEXT,
+            spread REAL,
+            is_bimodal INTEGER,
+            model_version TEXT NOT NULL,
+            data_version TEXT NOT NULL,
+            source_id TEXT,
+            source_transport TEXT,
+            source_run_id TEXT,
+            release_calendar_key TEXT,
+            source_cycle_time TEXT,
+            source_release_time TEXT,
+            source_available_at TEXT,
+            city_timezone TEXT,
+            settlement_source_type TEXT,
+            settlement_station_id TEXT,
+            settlement_unit TEXT
+                CHECK (settlement_unit IS NULL OR settlement_unit IN ('F', 'C')),
+            settlement_rounding_policy TEXT,
+            bin_grid_id TEXT,
+            bin_schema_version TEXT,
+            forecast_window_start_utc TEXT,
+            forecast_window_end_utc TEXT,
+            forecast_window_start_local TEXT,
+            forecast_window_end_local TEXT,
+            forecast_window_local_day_overlap_hours REAL,
+            forecast_window_attribution_status TEXT,
+            contributes_to_target_extrema INTEGER
+                CHECK (contributes_to_target_extrema IS NULL OR contributes_to_target_extrema IN (0, 1)),
+            forecast_window_block_reasons_json TEXT,
+            training_allowed INTEGER NOT NULL DEFAULT 1
+                CHECK (training_allowed IN (0, 1)),
+            causality_status TEXT NOT NULL DEFAULT 'OK'
+                CHECK (causality_status IN (
+                    'OK',
+                    'N/A_CAUSAL_DAY_ALREADY_STARTED',
+                    'N/A_REQUIRED_STEP_BEYOND_DOWNLOADED_HORIZON',
+                    'REJECTED_BOUNDARY_AMBIGUOUS',
+                    'RUNTIME_ONLY_FALLBACK',
+                    'UNKNOWN'
+                )),
+            boundary_ambiguous INTEGER NOT NULL DEFAULT 0
+                CHECK (boundary_ambiguous IN (0, 1)),
+            ambiguous_member_count INTEGER NOT NULL DEFAULT 0,
+            manifest_hash TEXT,
+            provenance_json TEXT NOT NULL DEFAULT '{}',
+            authority TEXT NOT NULL DEFAULT 'VERIFIED'
+                CHECK (authority IN ('VERIFIED', 'UNVERIFIED', 'QUARANTINED')),
+            recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(city, target_date, temperature_metric, issue_time, data_version)
+        )
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_ensemble_snapshots_v2_lookup
+            ON ensemble_snapshots_v2(city, target_date, temperature_metric, available_at)
+    """)
+    # 4A.2: members_unit / members_precision — idempotent ADD COLUMN
+    for alter_sql in [
+        "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN members_unit TEXT NOT NULL DEFAULT 'degC'",
+        "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN members_precision REAL",
+        # 4.5: R-L provenance fields for local-calendar-day extractor
+        "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN local_day_start_utc TEXT",
+        "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN step_horizon_hours REAL",
+        # Phase 7A: unit column for metric-aware backfill. Formerly-accompanying
+        # contract_version + boundary_min_value columns dropped in P7B (no live
+        # consumer; P8 will re-add if needed when shadow-activation consumers land).
+        "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN unit TEXT",
+        # PLAN_v4 executable forecast-entry linkage. NULL means legacy/shadow-only.
+        "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN source_id TEXT",
+        "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN source_transport TEXT",
+        "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN source_run_id TEXT",
+        "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN release_calendar_key TEXT",
+        "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN source_cycle_time TEXT",
+        "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN source_release_time TEXT",
+        "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN source_available_at TEXT",
+        # 2026-05-07 LOW/HIGH alignment recovery: nullable shadow columns for
+        # contract-object and explicit forecast-window evidence. These columns
+        # only make evidence persistable; they do not relax training_allowed or
+        # change live decision authority.
+        "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN city_timezone TEXT",
+        "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN settlement_source_type TEXT",
+        "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN settlement_station_id TEXT",
+        "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN settlement_unit TEXT CHECK (settlement_unit IS NULL OR settlement_unit IN ('F', 'C'))",
+        "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN settlement_rounding_policy TEXT",
+        "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN bin_grid_id TEXT",
+        "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN bin_schema_version TEXT",
+        "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN forecast_window_start_utc TEXT",
+        "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN forecast_window_end_utc TEXT",
+        "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN forecast_window_start_local TEXT",
+        "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN forecast_window_end_local TEXT",
+        "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN forecast_window_local_day_overlap_hours REAL",
+        "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN forecast_window_attribution_status TEXT",
+        "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN contributes_to_target_extrema INTEGER CHECK (contributes_to_target_extrema IS NULL OR contributes_to_target_extrema IN (0, 1))",
+        "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN forecast_window_block_reasons_json TEXT",
+    ]:
+        try:
+            conn.execute(alter_sql)
+        except Exception as exc:
+            if "duplicate column" not in str(exc).lower():
+                raise
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_ens_v2_source_run
+            ON ensemble_snapshots_v2(source_id, source_transport, source_run_id)
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_ens_v2_entry_lookup
+            ON ensemble_snapshots_v2(
+                city,
+                target_date,
+                temperature_metric,
+                source_id,
+                source_transport,
+                data_version,
+                source_run_id
+            )
+    """)
+
+
+def _create_calibration_pairs_v2(conn: sqlite3.Connection) -> None:
+    """Create calibration_pairs_v2 table + indexes + ALTERs. Idempotent.
+
+    K1 forecast-class table (moves to zeus-forecasts.db). Architect refinement:
+    UNIQUE on the full dedup key. Phase 2 ALTERs for cycle/source_id/horizon_profile.
+    """
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS calibration_pairs_v2 (
+            pair_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            city TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            temperature_metric TEXT NOT NULL
+                CHECK (temperature_metric IN ('high', 'low')),
+            observation_field TEXT NOT NULL
+                CHECK (observation_field IN ('high_temp', 'low_temp')),
+            range_label TEXT NOT NULL,
+            p_raw REAL NOT NULL,
+            outcome INTEGER NOT NULL,
+            lead_days REAL NOT NULL,
+            season TEXT NOT NULL,
+            cluster TEXT NOT NULL,
+            forecast_available_at TEXT NOT NULL,
+            settlement_value REAL,
+            decision_group_id TEXT,
+            bias_corrected INTEGER NOT NULL DEFAULT 0
+                CHECK (bias_corrected IN (0, 1)),
+            authority TEXT NOT NULL DEFAULT 'UNVERIFIED'
+                CHECK (authority IN ('VERIFIED', 'UNVERIFIED', 'QUARANTINED')),
+            bin_source TEXT NOT NULL DEFAULT 'legacy',
+            snapshot_id INTEGER REFERENCES ensemble_snapshots_v2(snapshot_id),
+            data_version TEXT NOT NULL,
+            training_allowed INTEGER NOT NULL DEFAULT 1
+                CHECK (training_allowed IN (0, 1)),
+            causality_status TEXT NOT NULL DEFAULT 'OK',
+            cycle TEXT NOT NULL DEFAULT '00',
+            source_id TEXT NOT NULL DEFAULT 'tigge_mars',
+            horizon_profile TEXT NOT NULL DEFAULT 'full',
+            recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(city, target_date, temperature_metric, range_label, lead_days,
+                   forecast_available_at, bin_source, data_version)
+        )
+    """)
+    # Phase 2 (2026-05-04): cycle/source_id/horizon_profile stratification —
+    # idempotent ALTER so legacy DBs migrated via
+    # scripts/migrate_phase2_cycle_stratification.py converge with fresh DBs
+    # built from this canonical schema. Defaults match the migration script.
+    for alter_sql in [
+        "ALTER TABLE calibration_pairs_v2 ADD COLUMN cycle TEXT NOT NULL DEFAULT '00'",
+        "ALTER TABLE calibration_pairs_v2 ADD COLUMN source_id TEXT NOT NULL DEFAULT 'tigge_mars'",
+        "ALTER TABLE calibration_pairs_v2 ADD COLUMN horizon_profile TEXT NOT NULL DEFAULT 'full'",
+    ]:
+        try:
+            conn.execute(alter_sql)
+        except Exception as exc:
+            if "duplicate column" not in str(exc).lower():
+                raise
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_calibration_pairs_v2_bucket
+            ON calibration_pairs_v2(temperature_metric, cluster, season, lead_days)
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_calibration_pairs_v2_city_date_metric
+            ON calibration_pairs_v2(city, target_date, temperature_metric)
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_calibration_pairs_v2_refit_core
+            ON calibration_pairs_v2(temperature_metric, data_version, training_allowed, authority)
+    """)
+
+
+def apply_v2_schema(conn: sqlite3.Connection, *, forecast_tables: bool = True) -> None:
     """Apply the Zeus World DB v2 schema to *conn*.
 
     Safe to call on both zeus-world.db and zeus_trades.db.
     Safe to call multiple times — all DDL uses IF NOT EXISTS / IF EXISTS.
+
+    Args:
+        forecast_tables: When True (default), create the 4 forecast-class v2
+            tables (settlements_v2, market_events_v2, ensemble_snapshots_v2,
+            calibration_pairs_v2). Set to False for init_schema_world_only so
+            world conn does not recreate tables that live on zeus-forecasts.db
+            post-K1 migration. K1 split 2026-05-11.
+
+    # Fix (task #200, 2026-05-10): Re-apply PRAGMA busy_timeout at the start of
+    # this function. Python's sqlite3.executescript() resets the C-level busy
+    # handler that sqlite3.connect(timeout=N) installs, so any subsequent
+    # conn.execute() on the same connection has no wait budget and fails
+    # immediately on lock contention. Restoring busy_timeout here makes
+    # apply_v2_schema robust regardless of what ran on *conn* before it.
+    # ZEUS_DB_BUSY_TIMEOUT_MS default matches db.py _db_busy_timeout_s() (30 s).
     """
+    _busy_timeout_ms = int(os.environ.get("ZEUS_DB_BUSY_TIMEOUT_MS", "30000"))
+    conn.execute(f"PRAGMA busy_timeout = {_busy_timeout_ms}")
+
     # Save foreign_keys state before touching anything
     (fk_before,) = conn.execute("PRAGMA foreign_keys").fetchone()
 
@@ -41,70 +339,16 @@ def apply_v2_schema(conn: sqlite3.Connection) -> None:
         conn.execute("DROP TABLE IF EXISTS model_eval_point")
         conn.execute("DROP TABLE IF EXISTS model_eval_run")
 
-        # ----------------------------------------------------------------
-        # settlements_v2
-        # ----------------------------------------------------------------
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS settlements_v2 (
-                settlement_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                city TEXT NOT NULL,
-                target_date TEXT NOT NULL,
-                temperature_metric TEXT NOT NULL
-                    CHECK (temperature_metric IN ('high', 'low')),
-                market_slug TEXT,
-                winning_bin TEXT,
-                settlement_value REAL,
-                settlement_source TEXT,
-                settled_at TEXT,
-                authority TEXT NOT NULL DEFAULT 'UNVERIFIED'
-                    CHECK (authority IN ('VERIFIED', 'UNVERIFIED', 'QUARANTINED')),
-                provenance_json TEXT NOT NULL DEFAULT '{}',
-                recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(city, target_date, temperature_metric)
-            )
-        """)
-        conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_settlements_v2_city_date_metric
-                ON settlements_v2(city, target_date, temperature_metric)
-        """)
-        # Architect refinement: index on settled_at for harvest scans
-        conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_settlements_v2_settled_at
-                ON settlements_v2(settled_at)
-        """)
+        if forecast_tables:
+            # ----------------------------------------------------------------
+            # settlements_v2  (K1 forecast-class: moves to zeus-forecasts.db)
+            # ----------------------------------------------------------------
+            _create_settlements_v2(conn)
 
-        # ----------------------------------------------------------------
-        # market_events_v2
-        # ----------------------------------------------------------------
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS market_events_v2 (
-                event_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                market_slug TEXT NOT NULL,
-                city TEXT NOT NULL,
-                target_date TEXT NOT NULL,
-                temperature_metric TEXT NOT NULL
-                    CHECK (temperature_metric IN ('high', 'low')),
-                condition_id TEXT,
-                token_id TEXT,
-                range_label TEXT,
-                range_low REAL,
-                range_high REAL,
-                outcome TEXT,
-                created_at TEXT,
-                recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(market_slug, condition_id)
-            )
-        """)
-        conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_market_events_v2_city_date_metric
-                ON market_events_v2(city, target_date, temperature_metric)
-        """)
-        # Architect refinement: partial index on open markets
-        conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_market_events_v2_open
-                ON market_events_v2(city, target_date, temperature_metric)
-                WHERE outcome IS NULL
-        """)
+            # ----------------------------------------------------------------
+            # market_events_v2  (K1 forecast-class: moves to zeus-forecasts.db)
+            # ----------------------------------------------------------------
+            _create_market_events_v2(conn)
 
         # ----------------------------------------------------------------
         # market_price_history
@@ -160,203 +404,16 @@ def apply_v2_schema(conn: sqlite3.Connection) -> None:
                 ON market_price_history(condition_id, recorded_at)
         """)
 
-        # ----------------------------------------------------------------
-        # ensemble_snapshots_v2
-        # ----------------------------------------------------------------
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS ensemble_snapshots_v2 (
-                snapshot_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                city TEXT NOT NULL,
-                target_date TEXT NOT NULL,
-                temperature_metric TEXT NOT NULL
-                    CHECK (temperature_metric IN ('high', 'low')),
-                physical_quantity TEXT NOT NULL,
-                observation_field TEXT NOT NULL
-                    CHECK (observation_field IN ('high_temp', 'low_temp')),
-                issue_time TEXT,
-                valid_time TEXT,
-                available_at TEXT NOT NULL,
-                fetch_time TEXT NOT NULL,
-                lead_hours REAL NOT NULL,
-                members_json TEXT NOT NULL,
-                p_raw_json TEXT,
-                spread REAL,
-                is_bimodal INTEGER,
-                model_version TEXT NOT NULL,
-                data_version TEXT NOT NULL,
-                source_id TEXT,
-                source_transport TEXT,
-                source_run_id TEXT,
-                release_calendar_key TEXT,
-                source_cycle_time TEXT,
-                source_release_time TEXT,
-                source_available_at TEXT,
-                city_timezone TEXT,
-                settlement_source_type TEXT,
-                settlement_station_id TEXT,
-                settlement_unit TEXT
-                    CHECK (settlement_unit IS NULL OR settlement_unit IN ('F', 'C')),
-                settlement_rounding_policy TEXT,
-                bin_grid_id TEXT,
-                bin_schema_version TEXT,
-                forecast_window_start_utc TEXT,
-                forecast_window_end_utc TEXT,
-                forecast_window_start_local TEXT,
-                forecast_window_end_local TEXT,
-                forecast_window_local_day_overlap_hours REAL,
-                forecast_window_attribution_status TEXT,
-                contributes_to_target_extrema INTEGER
-                    CHECK (contributes_to_target_extrema IS NULL OR contributes_to_target_extrema IN (0, 1)),
-                forecast_window_block_reasons_json TEXT,
-                training_allowed INTEGER NOT NULL DEFAULT 1
-                    CHECK (training_allowed IN (0, 1)),
-                causality_status TEXT NOT NULL DEFAULT 'OK'
-                    CHECK (causality_status IN (
-                        'OK',
-                        'N/A_CAUSAL_DAY_ALREADY_STARTED',
-                        'N/A_REQUIRED_STEP_BEYOND_DOWNLOADED_HORIZON',
-                        'REJECTED_BOUNDARY_AMBIGUOUS',
-                        'RUNTIME_ONLY_FALLBACK',
-                        'UNKNOWN'
-                    )),
-                boundary_ambiguous INTEGER NOT NULL DEFAULT 0
-                    CHECK (boundary_ambiguous IN (0, 1)),
-                ambiguous_member_count INTEGER NOT NULL DEFAULT 0,
-                manifest_hash TEXT,
-                provenance_json TEXT NOT NULL DEFAULT '{}',
-                authority TEXT NOT NULL DEFAULT 'VERIFIED'
-                    CHECK (authority IN ('VERIFIED', 'UNVERIFIED', 'QUARANTINED')),
-                recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(city, target_date, temperature_metric, issue_time, data_version)
-            )
-        """)
-        conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_ensemble_snapshots_v2_lookup
-                ON ensemble_snapshots_v2(city, target_date, temperature_metric, available_at)
-        """)
-        # 4A.2: members_unit / members_precision — idempotent ADD COLUMN
-        for alter_sql in [
-            "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN members_unit TEXT NOT NULL DEFAULT 'degC'",
-            "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN members_precision REAL",
-            # 4.5: R-L provenance fields for local-calendar-day extractor
-            "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN local_day_start_utc TEXT",
-            "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN step_horizon_hours REAL",
-            # Phase 7A: unit column for metric-aware backfill. Formerly-accompanying
-            # contract_version + boundary_min_value columns dropped in P7B (no live
-            # consumer; P8 will re-add if needed when shadow-activation consumers land).
-            "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN unit TEXT",
-            # PLAN_v4 executable forecast-entry linkage. NULL means legacy/shadow-only.
-            "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN source_id TEXT",
-            "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN source_transport TEXT",
-            "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN source_run_id TEXT",
-            "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN release_calendar_key TEXT",
-            "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN source_cycle_time TEXT",
-            "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN source_release_time TEXT",
-            "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN source_available_at TEXT",
-            # 2026-05-07 LOW/HIGH alignment recovery: nullable shadow columns for
-            # contract-object and explicit forecast-window evidence. These columns
-            # only make evidence persistable; they do not relax training_allowed or
-            # change live decision authority.
-            "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN city_timezone TEXT",
-            "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN settlement_source_type TEXT",
-            "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN settlement_station_id TEXT",
-            "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN settlement_unit TEXT CHECK (settlement_unit IS NULL OR settlement_unit IN ('F', 'C'))",
-            "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN settlement_rounding_policy TEXT",
-            "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN bin_grid_id TEXT",
-            "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN bin_schema_version TEXT",
-            "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN forecast_window_start_utc TEXT",
-            "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN forecast_window_end_utc TEXT",
-            "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN forecast_window_start_local TEXT",
-            "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN forecast_window_end_local TEXT",
-            "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN forecast_window_local_day_overlap_hours REAL",
-            "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN forecast_window_attribution_status TEXT",
-            "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN contributes_to_target_extrema INTEGER CHECK (contributes_to_target_extrema IS NULL OR contributes_to_target_extrema IN (0, 1))",
-            "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN forecast_window_block_reasons_json TEXT",
-        ]:
-            try:
-                conn.execute(alter_sql)
-            except Exception as exc:
-                if "duplicate column" not in str(exc).lower():
-                    raise
-        conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_ens_v2_source_run
-                ON ensemble_snapshots_v2(source_id, source_transport, source_run_id)
-        """)
-        conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_ens_v2_entry_lookup
-                ON ensemble_snapshots_v2(
-                    city,
-                    target_date,
-                    temperature_metric,
-                    source_id,
-                    source_transport,
-                    data_version,
-                    source_run_id
-                )
-        """)
+        if forecast_tables:
+            # ----------------------------------------------------------------
+            # ensemble_snapshots_v2  (K1 forecast-class: moves to zeus-forecasts.db)
+            # ----------------------------------------------------------------
+            _create_ensemble_snapshots_v2(conn)
 
-        # ----------------------------------------------------------------
-        # calibration_pairs_v2
-        # Architect refinement: add UNIQUE on the full dedup key
-        # ----------------------------------------------------------------
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS calibration_pairs_v2 (
-                pair_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                city TEXT NOT NULL,
-                target_date TEXT NOT NULL,
-                temperature_metric TEXT NOT NULL
-                    CHECK (temperature_metric IN ('high', 'low')),
-                observation_field TEXT NOT NULL
-                    CHECK (observation_field IN ('high_temp', 'low_temp')),
-                range_label TEXT NOT NULL,
-                p_raw REAL NOT NULL,
-                outcome INTEGER NOT NULL,
-                lead_days REAL NOT NULL,
-                season TEXT NOT NULL,
-                cluster TEXT NOT NULL,
-                forecast_available_at TEXT NOT NULL,
-                settlement_value REAL,
-                decision_group_id TEXT,
-                bias_corrected INTEGER NOT NULL DEFAULT 0
-                    CHECK (bias_corrected IN (0, 1)),
-                authority TEXT NOT NULL DEFAULT 'UNVERIFIED'
-                    CHECK (authority IN ('VERIFIED', 'UNVERIFIED', 'QUARANTINED')),
-                bin_source TEXT NOT NULL DEFAULT 'legacy',
-                snapshot_id INTEGER REFERENCES ensemble_snapshots_v2(snapshot_id),
-                data_version TEXT NOT NULL,
-                training_allowed INTEGER NOT NULL DEFAULT 1
-                    CHECK (training_allowed IN (0, 1)),
-                causality_status TEXT NOT NULL DEFAULT 'OK',
-                cycle TEXT NOT NULL DEFAULT '00',
-                source_id TEXT NOT NULL DEFAULT 'tigge_mars',
-                horizon_profile TEXT NOT NULL DEFAULT 'full',
-                recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(city, target_date, temperature_metric, range_label, lead_days,
-                       forecast_available_at, bin_source, data_version)
-            )
-        """)
-        # Phase 2 (2026-05-04): cycle/source_id/horizon_profile stratification —
-        # idempotent ALTER so legacy DBs migrated via
-        # scripts/migrate_phase2_cycle_stratification.py converge with fresh DBs
-        # built from this canonical schema. Defaults match the migration script.
-        for alter_sql in [
-            "ALTER TABLE calibration_pairs_v2 ADD COLUMN cycle TEXT NOT NULL DEFAULT '00'",
-            "ALTER TABLE calibration_pairs_v2 ADD COLUMN source_id TEXT NOT NULL DEFAULT 'tigge_mars'",
-            "ALTER TABLE calibration_pairs_v2 ADD COLUMN horizon_profile TEXT NOT NULL DEFAULT 'full'",
-        ]:
-            try:
-                conn.execute(alter_sql)
-            except Exception as exc:
-                if "duplicate column" not in str(exc).lower():
-                    raise
-        conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_calibration_pairs_v2_bucket
-                ON calibration_pairs_v2(temperature_metric, cluster, season, lead_days)
-        """)
-        conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_calibration_pairs_v2_city_date_metric
-                ON calibration_pairs_v2(city, target_date, temperature_metric)
-        """)
+            # ----------------------------------------------------------------
+            # calibration_pairs_v2  (K1 forecast-class: moves to zeus-forecasts.db)
+            # ----------------------------------------------------------------
+            _create_calibration_pairs_v2(conn)
 
         # ----------------------------------------------------------------
         # platt_models_v2

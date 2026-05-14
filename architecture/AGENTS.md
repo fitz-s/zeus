@@ -50,7 +50,7 @@ Changes here are architecture or governance changes, never “just docs.”
 | `history_lore.yaml` | Dense historical lore registry: failure modes, wrong moves, antibodies, residual risks, and task routing |
 | `artifact_lifecycle.yaml` | Artifact classification and minimum work-record contract |
 | `context_budget.yaml` | Context budget and maintenance cadence for keeping entry maps/digests slim |
-| `module_manifest.yaml` | Machine registry for dense module books, module routers, and module-level law/current-fact/test links; now includes R3 CutoverGuard, venue adapter, user-channel ingest, strategy benchmark, and risk allocator/governor routes |
+| `module_manifest.yaml` | Machine registry for dense module books, module routers, and module-level law/current-fact/test links; now includes R3 CutoverGuard, venue adapter, user-channel ingest, forecast-live data-daemon, strategy benchmark, and risk allocator/governor routes |
 | `context_pack_profiles.yaml` | Registry of digest profile context routes; consumed by digest emission. Standalone context-pack/semantic-bootstrap subcommands retired in PR #71 — use `--navigation --task-class`. |
 | `task_boot_profiles.yaml` | Question-first semantic boot profiles for source/settlement/hourly/Day0/calibration/docs/graph tasks |
 | `fatal_misreads.yaml` | Machine-readable fatal semantic shortcut antibodies |

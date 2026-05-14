@@ -18,6 +18,7 @@ def commit_then_export(
     *,
     db_op: Callable[[], "int | None"],
     json_exports: Sequence[Callable[[], None]] = (),
+    defer_commit: bool = False,
 ) -> "int | None":
     """DT#1 / INV-17 choke point.
 
@@ -32,17 +33,31 @@ def commit_then_export(
     Note: json_exports are zero-argument callables. Callers that need the
     artifact_id in their export should capture it via a closure over a
     mutable container (e.g. a list) updated by db_op, or pass a lambda.
+
+    defer_commit (2026-05-11 antibody): when True, skip the per-call commit
+    AND skip json_exports. The caller is responsible for: (a) wrapping the
+    batched calls in an outer BEGIN/COMMIT, (b) firing any required JSON
+    exports AFTER the batched commit. Only safe when the caller does NOT
+    rely on per-row durability and produces zero json_exports per row.
+    Required to avoid O(N) fsync wall-clock in bulk-ingest loops (per debug
+    session: 364 commits × ~50ms-1s fsync = 5-10 min observed wedge).
     """
     artifact_id: "int | None" = None
     try:
         artifact_id = db_op()
-        conn.commit()
+        if not defer_commit:
+            conn.commit()
     except Exception:
         try:
-            conn.rollback()
+            if not defer_commit:
+                conn.rollback()
         except Exception:
             pass
         raise
+
+    if defer_commit:
+        # Caller owns commit + json_exports. Return artifact_id only.
+        return artifact_id
 
     for export_fn in json_exports:
         try:

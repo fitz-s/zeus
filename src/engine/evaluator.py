@@ -1,3 +1,7 @@
+# Created: prior
+# Last reused/audited: 2026-05-14
+# Authority basis: docs/operations/task_2026-05-14_data_daemon_live_efficiency/DATA_DAEMON_LIVE_EFFICIENCY_REFACTOR_PLAN.md
+#   Phase 3 live evaluator consumes forecast producer readiness instead of direct-fetching OpenData.
 """Evaluator: takes a market candidate, returns an EdgeDecision or NoTradeCase.
 
 Contains ALL business logic for edge detection. Doesn't know about scheduling,
@@ -1919,18 +1923,15 @@ def evaluate_candidate(
     # was non-None. Fix: skip the cutover for Day0 mode and fall through
     # to the legacy fetch_ensemble path so Day0 candidates run their
     # existing signal pipeline as designed.
-    # Gate-purge fix-up 2026-05-04 (post-critic-opus PR #54): the
-    # executable_forecast cutover is gated on the writer flag too.  When
-    # the writer is OFF (default since gate retirement), bypass the
-    # cutover entirely and fall through to the legacy fetch_ensemble
-    # path that worked before the writer→reader machinery was wired in.
-    # Without this guard, killing only the writer left the reader emitting
-    # ENTRY_READINESS_MISSING / BLOCKED which still rejected the same 156
-    # candidates per cycle (critic-opus Ask 5).
+    # 2026-05-14 data-daemon refactor: non-Day0 live entry must consume the
+    # source_run/source_run_coverage/producer_readiness chain written by the
+    # forecast producer. It must not direct-fetch OpenData and must not create
+    # entry_readiness rows on the evaluator hot path. Governance/rollout
+    # readiness can still be audited separately; data executability here is
+    # proven by producer readiness and source-run coverage.
     use_executable_forecast_cutover = (
         entry_forecast_cfg is not None
         and not is_day0_mode
-        and _entry_forecast_readiness_writer_flag_on()
     )
 
     if use_executable_forecast_cutover:
@@ -1949,18 +1950,6 @@ def evaluate_candidate(
         market_family_for_read = _entry_forecast_market_family(candidate, temperature_metric)
         condition_id_for_read = _entry_forecast_condition_id(support_outcomes)
 
-        if _entry_forecast_readiness_writer_flag_on():
-            _write_entry_readiness_for_candidate(
-                conn,
-                cfg=entry_forecast_cfg,
-                city=city,
-                target_local_date=target_d,
-                temperature_metric=temperature_metric,
-                market_family=market_family_for_read,
-                condition_id=condition_id_for_read,
-                decision_time=decision_instant,
-            )
-
         reader_result = read_executable_forecast(
             conn,
             city_id=_entry_forecast_city_id(city),
@@ -1976,6 +1965,7 @@ def evaluate_candidate(
             market_family=market_family_for_read,
             condition_id=condition_id_for_read,
             decision_time=decision_instant,
+            require_entry_readiness=False,
         )
         if not reader_result.ok or reader_result.bundle is None:
             return [EdgeDecision(

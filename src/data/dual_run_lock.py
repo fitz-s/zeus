@@ -1,5 +1,6 @@
-# Lifecycle: created=2026-04-30; last_reviewed=2026-04-30; last_reused=never
-# Authority basis: docs/operations/task_2026-04-30_two_system_independence/design.md §5 Phase 1
+# Lifecycle: created=2026-04-30; last_reviewed=2026-05-14; last_reused=2026-05-14
+# Authority basis: docs/operations/task_2026-05-14_data_daemon_live_efficiency/DATA_DAEMON_LIVE_EFFICIENCY_REFACTOR_PLAN.md
+#   Phase 2 OpenData forecast-live/legacy daemon mutual exclusion.
 """Advisory per-table file lock for dual-run Phase 1.
 
 During Phase 1 both the monolith (src.main) and the ingest daemon
@@ -23,7 +24,7 @@ Contract:
 - Returns ``True`` if lock acquired, ``False`` if held by another process.
 - Releases on context exit, or on process death (OS auto-release).
 - Known tables: daily_obs, hourly_instants, solar_daily, forecasts_daily,
-  hole_scanner, etl_recalibrate.
+  hole_scanner, etl_recalibrate, ecmwf_open_data.
 """
 
 from __future__ import annotations
@@ -44,6 +45,7 @@ _KNOWN_TABLES = frozenset(
         "forecasts_daily",
         "hole_scanner",
         "etl_recalibrate",
+        "ecmwf_open_data",
         # Phase 1.5: harvester split — ingest-side truth writer + trading-side P&L resolver
         "harvester_truth",
         "harvester_pnl",

@@ -275,8 +275,9 @@ matching. Canonical values: `plan_only`, `audit`, `create_new`, `modify_existing
   `admits_path_globs` are admitted; everything else → `out_of_scope_files` + `advisory_only`.
   Canonical scopes: `plan_only` admits `docs/**`, `evidence/**`; `audit` admits
   `evidence/**`. Substantive plans MUST be packetized at
-  `docs/operations/task_<YYYY-MM-DD>_<topic>/PLAN.md` (admitted via `create_new`
-  typed_intent). Runtime tool scratch directories (`.omc/plans/**`,
+  `docs/operations/task_<YYYY-MM-DD>_<topic>/<TOPIC>_PLAN.md` or legacy
+  `PLAN.md` (admitted via `create_new` typed_intent). Runtime tool scratch
+  directories (`.omc/plans/**`,
   `.omc/research/**`, `.omx/plans/**`) are explicitly **blocked** by both
   `plan_only` and `audit` — they are `scratch_runtime_artifact`
   (`architecture/artifact_lifecycle.yaml`) and never plan/research targets.

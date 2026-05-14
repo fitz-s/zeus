@@ -1,7 +1,8 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-05-07
+# Last reused/audited: 2026-05-11
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/T1.yaml
 #                  + docs/operations/task_2026-05-01_bankroll_truth_chain/architect_memo.md §7
+#                  + PLAN docs/operations/task_2026-05-11_init_schema_boot_invariant/PLAN.md §5.6
 """Shared pytest fixtures for R3 T1 fake venue parity tests."""
 
 from __future__ import annotations
@@ -176,6 +177,7 @@ _WLA_CACHE_PATH = _WLA_REPO_ROOT / ".pytest_cache" / "writer_lock_antibody.json"
 _WLA_SQLITE_CONNECT_ALLOWLIST = frozenset({
     # --- canonical infrastructure ---
     "src/state/db.py",                              # canonical_shim
+    "src/state/collateral_ledger.py",               # singleton_persistent_conn (2026-05-13 fix): CollateralLedger(db_path=) opens a ledger-owned conn for the process-wide singleton so it survives transient caller-conn lifecycles. Single connect site, no schema mutation outside init_collateral_schema.
     # NOTE: src/state/db_writer_lock.py is intentionally NOT allowlisted. The file
     # has no sqlite3.connect() call sites today; if a future edit introduces one,
     # the antibody SHOULD fire so this module stays a coordination layer (not a
@@ -191,7 +193,6 @@ _WLA_SQLITE_CONNECT_ALLOWLIST = frozenset({
     "src/ingest_main.py",                           # RO: reads condition_id for UMA listener (Track A.6 #246)
     "src/observability/status_summary.py",          # RO: status dashboard read-only (Track A.6 #246)
     "src/riskguard/discord_alerts.py",              # WRITE risk_state.db only; not world-db BULK scope (Track A.6 #246)
-    "scripts/promote_calibration_v2_stage_to_prod.py",  # ro_uri_for_inspect_verify (mixed: ?mode=ro for inspect/verify; writable only with --commit)
     "src/control/cli/promote_entry_forecast.py",    # read_only_ro_uri (operator CLI; opens world-db with mode=ro)
 
     # --- read-only scripts: verified SELECT-only, named in PR #86 ---
@@ -215,6 +216,7 @@ _WLA_SQLITE_CONNECT_ALLOWLIST = frozenset({
     "scripts/edge_observation_weekly.py",           # read_only_ro_uri
     "scripts/generate_monthly_bounds.py",           # read_only_ro_uri
     "scripts/learning_loop_observation_weekly.py",  # read_only_ro_uri
+    "scripts/check_schema_version.py",               # in_memory_only (":memory:" only — schema drift CI gate)
     "scripts/produce_activation_evidence.py",       # in_memory_only (":memory:" only)
     "scripts/replay_correctness_gate.py",           # read_only (SELECT-only)
     "scripts/state_census.py",                      # read_only_ro_uri
@@ -255,10 +257,19 @@ _WLA_SQLITE_CONNECT_ALLOWLIST = frozenset({
     "scripts/rebuild_settlements.py",               # pending_track_a6_scripts
     "scripts/reevaluate_readiness_2026_05_07.py",   # pending_track_a6_scripts
     "scripts/refit_platt_v2.py",                    # pending_track_a6_scripts
+    "scripts/_zeus_emergency_k2_obs_backfill_2026_05_10.py",  # pending_track_a6_scripts (emergency K2 obs backfill)
 
     # --- deferred non-mechanical rewrite (separate phase, cited PR #86) ---
     "scripts/verify_truth_surfaces.py",             # deferred_nonmechanical (PR #86)
+
+    # --- K1 forecast DB split migration script (2026-05-11) ---
+    "scripts/migrate_world_to_forecasts.py",         # k1_migration: operator-mediated bulk copy to zeus-forecasts.db; not runtime daemon
+
+    # --- K1 workload-class split promotion scripts (2026-05-12; PR #112 Option (c)) ---
+    "scripts/promote_platt_models_v2.py",            # operator-mediated STAGE->PROD; RW only with --commit (zeus-world.db); BEGIN IMMEDIATE + rollback
+    "scripts/promote_calibration_pairs_v2.py",       # operator-mediated STAGE->PROD; RW only with --commit (zeus-forecasts.db); BEGIN IMMEDIATE + rollback
 })
+
 
 
 def _wla_is_bypassed() -> bool:
@@ -366,4 +377,40 @@ def pytest_configure(config) -> None:
             f"with a cited reason tag (read_only / pending_track_a6 / etc). "
             f"Violations: {findings[:5]}"
             + (f" ... and {len(findings) - 5} more" if len(findings) > 5 else "")
+        )
+
+
+# ---------------------------------------------------------------------------
+# Schema-version drift guard (PLAN §5.6, 2026-05-11)
+#
+# Session-scoped autouse fixture that runs scripts/check_schema_version.py
+# once per pytest invocation.  Fails fast if sqlite_master hash of a fresh
+# init_schema DB does not match tests/state/_schema_pinned_hash.txt.
+#
+# Remediation on failure:
+#   1. Bump SCHEMA_VERSION in src/state/db.py.
+#   2. Run:  python scripts/check_schema_version.py --write-pin
+# ---------------------------------------------------------------------------
+
+import subprocess as _sv_subprocess
+import sys as _sv_sys
+
+_SV_REPO_ROOT = _wla_Path(__file__).resolve().parent.parent
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _enforce_schema_pinned_hash():
+    """Fail the test session if schema hash drifted without bumping SCHEMA_VERSION."""
+    r = _sv_subprocess.run(
+        [_sv_sys.executable, "scripts/check_schema_version.py"],
+        capture_output=True,
+        text=True,
+        cwd=str(_SV_REPO_ROOT),
+    )
+    if r.returncode != 0:
+        pytest.exit(
+            f"SCHEMA DRIFT — bump SCHEMA_VERSION in src/state/db.py "
+            f"and re-pin with: python scripts/check_schema_version.py --write-pin\n"
+            f"{r.stdout}{r.stderr}",
+            returncode=1,
         )

@@ -1,5 +1,6 @@
-# Lifecycle: created=2026-04-30; last_reviewed=2026-05-03; last_reused=2026-05-03
-# Authority basis: docs/operations/task_2026-04-30_two_system_independence/design.md §5 Phase 1 + PLAN_v4 Phase 5A source-run selection.
+# Lifecycle: created=2026-04-30; last_reviewed=2026-05-14; last_reused=2026-05-14
+# Authority basis: docs/operations/task_2026-05-14_data_daemon_live_efficiency/DATA_DAEMON_LIVE_EFFICIENCY_REFACTOR_PLAN.md
+#   Phase 2 legacy OpenData mutual exclusion with forecast-live-daemon.
 """Zeus data-ingest daemon entry point.
 
 Runs all K2 ingest jobs and supporting cycles on an independent APScheduler.
@@ -30,16 +31,14 @@ import signal
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-
-from apscheduler.schedulers.blocking import BlockingScheduler
-from apscheduler.executors.pool import ThreadPoolExecutor as _APSchedulerThreadPoolExecutor
+from typing import Any
 
 logger = logging.getLogger("zeus.ingest")
 
 # ---------------------------------------------------------------------------
 # Module-level scheduler reference for SIGTERM handler
 # ---------------------------------------------------------------------------
-_scheduler: BlockingScheduler | None = None
+_scheduler: Any | None = None
 
 
 def _graceful_shutdown(signum, frame) -> None:
@@ -453,11 +452,7 @@ def _opendata_mx2t6_cycle():
     schedule job name retains the legacy ``mx2t6`` slug for back-compat with
     ops dashboards).
     """
-    if _is_source_paused("ecmwf_open_data"):
-        logger.info("_opendata_mx2t6_cycle: paused_by_control_plane")
-        return {"status": "paused_by_control_plane", "source": "ecmwf_open_data"}
-    from src.data.ecmwf_open_data import collect_open_ens_cycle
-    result = collect_open_ens_cycle(track="mx2t6_high")
+    result = _run_opendata_track("mx2t6_high")
     logger.info("ECMWF Open Data mx2t6: %s",
                 {k: v for k, v in result.items() if k != "stages"})
     return result
@@ -473,14 +468,31 @@ def _opendata_mn2t6_cycle():
     job name retains the legacy ``mn2t6`` slug for back-compat with ops
     dashboards).
     """
-    if _is_source_paused("ecmwf_open_data"):
-        logger.info("_opendata_mn2t6_cycle: paused_by_control_plane")
-        return {"status": "paused_by_control_plane", "source": "ecmwf_open_data"}
-    from src.data.ecmwf_open_data import collect_open_ens_cycle
-    result = collect_open_ens_cycle(track="mn2t6_low")
+    result = _run_opendata_track("mn2t6_low")
     logger.info("ECMWF Open Data mn2t6: %s",
                 {k: v for k, v in result.items() if k != "stages"})
     return result
+
+
+def _run_opendata_track(
+    track: str,
+    *,
+    _locks_dir_override: Path | None = None,
+    _collector=None,
+) -> dict:
+    """Legacy ingest-main OpenData wrapper kept mutually exclusive with forecast-live-daemon."""
+    from src.data.ecmwf_open_data import OPENDATA_DAEMON_LOCK_KEY, SOURCE_ID, collect_open_ens_cycle
+    from src.data.dual_run_lock import acquire_lock
+
+    if _is_source_paused(SOURCE_ID):
+        logger.info("_run_opendata_track(%s): paused_by_control_plane", track)
+        return {"status": "paused_by_control_plane", "source": SOURCE_ID, "track": track}
+    with acquire_lock(OPENDATA_DAEMON_LOCK_KEY, _locks_dir_override=_locks_dir_override) as acquired:
+        if not acquired:
+            logger.info("_run_opendata_track(%s): skipped_lock_held", track)
+            return {"status": "skipped_lock_held", "source": SOURCE_ID, "track": track}
+        collector = _collector or collect_open_ens_cycle
+        return collector(track=track)
 
 
 @_scheduler_job("ingest_opendata_startup_catch_up")
@@ -491,12 +503,8 @@ def _opendata_startup_catch_up():
     full-horizon source run for both tracks. Re-runs after a brief restart are
     nearly idempotent thanks to ``INSERT OR IGNORE``.
     """
-    if _is_source_paused("ecmwf_open_data"):
-        logger.info("_opendata_startup_catch_up: paused_by_control_plane")
-        return
-    from src.data.ecmwf_open_data import collect_open_ens_cycle
     for track in ("mx2t6_high", "mn2t6_low"):
-        result = collect_open_ens_cycle(track=track)
+        result = _run_opendata_track(track)
         logger.info("Open Data startup catch-up %s: %s", track,
                     {k: v for k, v in result.items() if k != "stages"})
 
@@ -1005,6 +1013,8 @@ def _ingest_status_rollup_tick():
 
 def main() -> None:
     global _scheduler
+    from apscheduler.executors.pool import ThreadPoolExecutor as _APSchedulerThreadPoolExecutor
+    from apscheduler.schedulers.blocking import BlockingScheduler
 
     logging.basicConfig(
         level=logging.INFO,

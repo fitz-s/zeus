@@ -110,7 +110,10 @@ from src.contracts.ensemble_snapshot_provenance import (
 from src.contracts.settlement_semantics import SettlementSemantics
 from src.signal.ensemble_signal import p_raw_vector_from_maxes
 from src.state.db import init_schema
-from src.state.db_writer_lock import WriteClass, db_writer_lock  # noqa: E402
+from src.state.db_writer_lock import (  # noqa: E402
+    BulkChunker,
+    bulk_lock_with_chunker,
+)
 from src.state.schema.v2_schema import apply_v2_schema
 from src.types.market import validate_bin_topology
 from src.types.metric_identity import HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN, MetricIdentity
@@ -1006,20 +1009,24 @@ def _resolve_isolated_calibration_write_db_path(
     return resolved
 
 
-def _process_snapshot_v2(
+def _pre_compute_snapshot_v2(
     conn: sqlite3.Connection,
     snapshot: sqlite3.Row,
     city: City,
     *,
     spec: CalibrationMetricSpec,
-    n_mc: Optional[int],
-    rng: np.random.Generator,
     stats: RebuildStatsV2,
-) -> None:
-    """Match one v2 snapshot to its observation and write calibration_pairs_v2 rows."""
+) -> Optional[dict]:
+    """Run all pre-MC validation gates for one snapshot in main process.
+
+    Returns a survivor payload ``{"member_maxes": list[float],
+    "settlement_value": float}`` if every gate passes, otherwise updates the
+    appropriate ``stats`` counter and returns None. Gate ORDER mirrors
+    ``_process_snapshot_v2`` exactly so RebuildStatsV2 counters match the
+    sequential path under both --workers=1 and --workers>1.
+    """
     target_date = snapshot["target_date"]
     data_version = snapshot["data_version"] or ""
-    source = ""  # ensemble_snapshots_v2 has no source column; INV-15 gates on data_version prefix
 
     # Per-spec cross-check: write-time defense against cross-metric contamination (R-AU).
     if not spec.allows_data_version(data_version):
@@ -1043,12 +1050,12 @@ def _process_snapshot_v2(
             f"  CONTRACT-EVIDENCE-REJECT {city.name}/{target_date}: "
             f"{contract_evidence_rejection}"
         )
-        return
+        return None
 
     obs = _fetch_verified_observation(conn, city.name, target_date, spec=spec)
     if obs is None:
         stats.snapshots_no_observation += 1
-        return
+        return None
 
     member_maxes = np.asarray(json.loads(snapshot["members_json"]), dtype=float)
     try:
@@ -1056,7 +1063,7 @@ def _process_snapshot_v2(
     except UnitProvenanceError as e:
         stats.snapshots_unit_rejected += 1
         print(f"  UNIT-REJECT {city.name}/{target_date}: {e}")
-        return
+        return None
 
     grid = grid_for_city(city)
     bins = grid.as_bins()
@@ -1070,24 +1077,67 @@ def _process_snapshot_v2(
     except Exception as e:
         stats.snapshots_unit_rejected += 1
         print(f"  SETTLEMENT-REJECT {city.name}/{target_date}: {e}")
-        return
+        return None
 
     try:
         validate_members_vs_observation(member_maxes, city, settlement_value)
     except UnitProvenanceError as e:
         stats.snapshots_unit_rejected += 1
         print(f"  UNIT-VS-OBS-REJECT {city.name}/{target_date}: {e}")
-        return
+        return None
 
-    p_raw_vec = p_raw_vector_from_maxes(
-        member_maxes,
-        city,
-        sem,
-        bins,
-        n_mc=n_mc,
-        rng=rng,
-    )
-    winning_bin = grid.bin_for_value(settlement_value)
+    return {
+        "member_maxes": [float(x) for x in member_maxes],
+        "settlement_value": float(settlement_value),
+    }
+
+
+def _write_snapshot_pairs_v2(
+    conn: sqlite3.Connection,
+    snapshot: sqlite3.Row,
+    city: City,
+    *,
+    spec: CalibrationMetricSpec,
+    p_raw_vec,
+    settlement_value: float,
+    bin_labels: Optional[list[str]] = None,
+    winning_bin_label: Optional[str] = None,
+    stats: RebuildStatsV2,
+) -> None:
+    """Write calibration_pairs_v2 rows for one MC-computed snapshot in main.
+
+    ``p_raw_vec`` is the MC output (list[float] or np.ndarray).
+    ``settlement_value`` is the validated obs value already produced by
+    ``_pre_compute_snapshot_v2``; the caller must pass it through (we do NOT
+    re-fetch obs here — that would double the DB round-trips per snapshot).
+
+    When invoked from the parallel path, ``bin_labels`` and
+    ``winning_bin_label`` are supplied by the worker; sequentially they are
+    None and we recompute locally from the grid + settlement_value.
+
+    Mirrors the post-MC body of the legacy ``_process_snapshot_v2``.
+    """
+    target_date = snapshot["target_date"]
+    data_version = snapshot["data_version"] or ""
+    source = ""  # ensemble_snapshots_v2 has no source column; INV-15 gates on data_version prefix
+
+    grid = grid_for_city(city)
+    bins = grid.as_bins()
+    if bin_labels is not None and [b.label for b in bins] != list(bin_labels):
+        raise RuntimeError(
+            f"_write_snapshot_pairs_v2: bin_labels mismatch for "
+            f"{city.name}/{target_date}: worker={bin_labels!r}, "
+            f"main={[b.label for b in bins]!r}"
+        )
+    if winning_bin_label is not None:
+        winning_bin = next((b for b in bins if b.label == winning_bin_label), None)
+        if winning_bin is None:
+            raise RuntimeError(
+                f"_write_snapshot_pairs_v2: unknown winning_bin_label "
+                f"{winning_bin_label!r} for {city.name}/{target_date}"
+            )
+    else:
+        winning_bin = grid.bin_for_value(settlement_value)
 
     season = season_from_date(target_date, lat=city.lat)
     lead_days = float(snapshot["lead_hours"]) / 24.0
@@ -1161,6 +1211,51 @@ def _process_snapshot_v2(
     stats.per_city[city.name] = stats.per_city.get(city.name, 0) + pairs_this_snapshot
 
 
+def _process_snapshot_v2(
+    conn: sqlite3.Connection,
+    snapshot: sqlite3.Row,
+    city: City,
+    *,
+    spec: CalibrationMetricSpec,
+    n_mc: Optional[int],
+    rng: np.random.Generator,
+    stats: RebuildStatsV2,
+) -> None:
+    """Sequential path: pre-compute gates → MC → write, byte-identical to legacy.
+
+    This is the workers=1 path. It composes the same primitives that the
+    parallel path uses (``_pre_compute_snapshot_v2`` and
+    ``_write_snapshot_pairs_v2``) so behavior cannot drift between the two.
+    """
+    survivor = _pre_compute_snapshot_v2(conn, snapshot, city, spec=spec, stats=stats)
+    if survivor is None:
+        return
+
+    member_maxes = np.asarray(survivor["member_maxes"], dtype=float)
+    grid = grid_for_city(city)
+    bins = grid.as_bins()
+    sem = SettlementSemantics.for_city(city)
+    p_raw_vec = p_raw_vector_from_maxes(
+        member_maxes,
+        city,
+        sem,
+        bins,
+        n_mc=n_mc,
+        rng=rng,
+    )
+    _write_snapshot_pairs_v2(
+        conn,
+        snapshot,
+        city,
+        spec=spec,
+        p_raw_vec=p_raw_vec,
+        settlement_value=survivor["settlement_value"],
+        bin_labels=None,
+        winning_bin_label=None,
+        stats=stats,
+    )
+
+
 def _dry_run_evaluate_snapshot_v2(
     conn: sqlite3.Connection,
     snapshot: sqlite3.Row,
@@ -1229,6 +1324,10 @@ def rebuild_v2(
     horizon_profile_filter: Optional[str] = None,
     n_mc: Optional[int] = None,
     rng: Optional[np.random.Generator] = None,
+    db_path: Optional[Path] = None,
+    workers: int = 1,
+    mc_seed_base: Optional[int] = None,
+    chunker: Optional[BulkChunker] = None,
 ) -> RebuildStatsV2:
     """Run the v2 rebuild end-to-end, sharded per (city, metric) bucket.
 
@@ -1375,51 +1474,86 @@ def rebuild_v2(
     conn.commit()
     print(f"Rebuild sentinel: {sentinel_key} -> in_progress")
 
-    start = time.monotonic()
-    for city_name, city_snaps in sorted(city_buckets.items()):
-        city = cities_by_name[city_name]
-        city_unit_rejected = 0
+    if workers and workers > 1:
+        from scripts._rebuild_calibration_pairs_v2_parallel import (  # noqa: PLC0415
+            run_parallel_rebuild,
+        )
+        print(
+            f"Parallel rebuild: workers={workers}, "
+            f"cities={len(city_buckets)}, seed_base={mc_seed_base}"
+        )
+        # Compute-in-workers + write-in-main: the main conn STAYS open and is
+        # the only writer. Workers receive serializable payloads only and never
+        # touch sqlite. ``stats`` is mutated in place so all RebuildStatsV2
+        # counters end with the same shape as the sequential path.
+        run_parallel_rebuild(
+            conn,
+            dict(city_buckets),
+            spec,
+            workers=workers,
+            start_date=start_date,
+            end_date=end_date,
+            data_version_filter=data_version_filter,
+            cycle_filter=cycle_filter,
+            source_id_filter=source_id_filter,
+            horizon_profile_filter=horizon_profile_filter,
+            n_mc=effective_n_mc,
+            seed_base=mc_seed_base,
+            stats=stats,
+        )
+    else:
+        start = time.monotonic()
+        for city_name, city_snaps in sorted(city_buckets.items()):
+            city = cities_by_name[city_name]
+            city_unit_rejected = 0
 
-        # Per-(city, metric) SAVEPOINT — bounded transaction duration.
-        conn.execute("SAVEPOINT v2_rebuild_bucket")
-        try:
-            # Delete the slice for this city+metric only.
-            _delete_canonical_v2_slice(
-                conn,
-                spec=spec,
-                city_filter=city_name,
-                start_date=start_date,
-                end_date=end_date,
-                data_version_filter=data_version_filter,
-                cycle_filter=cycle_filter,
-                source_id_filter=source_id_filter,
-                horizon_profile_filter=horizon_profile_filter,
-            )
-            for snap in city_snaps:
-                _process_snapshot_v2(
-                    conn, snap, city,
+            # Per-(city, metric) SAVEPOINT — bounded transaction duration.
+            conn.execute("SAVEPOINT v2_rebuild_bucket")
+            try:
+                # Delete the slice for this city+metric only.
+                _delete_canonical_v2_slice(
+                    conn,
                     spec=spec,
-                    n_mc=effective_n_mc,
-                    rng=rng,
-                    stats=stats,
+                    city_filter=city_name,
+                    start_date=start_date,
+                    end_date=end_date,
+                    data_version_filter=data_version_filter,
+                    cycle_filter=cycle_filter,
+                    source_id_filter=source_id_filter,
+                    horizon_profile_filter=horizon_profile_filter,
                 )
-                if stats.snapshots_processed % 500 == 0 and stats.snapshots_processed > 0:
-                    elapsed = time.monotonic() - start
-                    rate = stats.snapshots_processed / max(elapsed, 1e-6)
-                    print(
-                        f"  progress: {stats.snapshots_processed}/{len(eligible)} "
-                        f"({rate:.1f} snap/s)"
+                for snap in city_snaps:
+                    _process_snapshot_v2(
+                        conn, snap, city,
+                        spec=spec,
+                        n_mc=effective_n_mc,
+                        rng=rng,
+                        stats=stats,
                     )
+                    if stats.snapshots_processed % 500 == 0 and stats.snapshots_processed > 0:
+                        elapsed = time.monotonic() - start
+                        rate = stats.snapshots_processed / max(elapsed, 1e-6)
+                        print(
+                            f"  progress: {stats.snapshots_processed}/{len(eligible)} "
+                            f"({rate:.1f} snap/s)"
+                        )
 
-            city_unit_rejected = stats.snapshots_unit_rejected
-            conn.execute("RELEASE SAVEPOINT v2_rebuild_bucket")
-        except Exception:
-            conn.execute("ROLLBACK TO SAVEPOINT v2_rebuild_bucket")
-            conn.execute("RELEASE SAVEPOINT v2_rebuild_bucket")
-            raise
+                city_unit_rejected = stats.snapshots_unit_rejected
+                conn.execute("RELEASE SAVEPOINT v2_rebuild_bucket")
+            except Exception:
+                conn.execute("ROLLBACK TO SAVEPOINT v2_rebuild_bucket")
+                conn.execute("RELEASE SAVEPOINT v2_rebuild_bucket")
+                raise
 
-        # Commit after each (city, metric) bucket — bounded writer-lock hold.
-        conn.commit()
+            # Commit after each (city, metric) bucket — bounded writer-lock hold.
+            conn.commit()
+            # K3 (2026-05-12): cooperative LIVE-yield at per-bucket chunk boundary.
+            # When BULK rebuild is running under bulk_lock_with_chunker, this
+            # probes the LIVE flock non-blocking and releases-then-reacquires
+            # the bulk fcntl if a LIVE writer is mid-transaction. No-op when
+            # chunker is None (preserves legacy callers + parallel path).
+            if chunker is not None:
+                chunker.yield_if_live_contended()
 
     # Post-all-cities validation.
     #
@@ -1519,6 +1653,10 @@ def rebuild_all_v2(
     horizon_profile_filter: Optional[str] = None,
     n_mc: Optional[int] = None,
     rng: Optional[np.random.Generator] = None,
+    db_path: Optional[Path] = None,
+    workers: int = 1,
+    mc_seed_base: Optional[int] = None,
+    chunker: Optional[BulkChunker] = None,
 ) -> dict[str, RebuildStatsV2]:
     """Rebuild calibration_pairs_v2 for all METRIC_SPECS.
 
@@ -1549,6 +1687,10 @@ def rebuild_all_v2(
             horizon_profile_filter=horizon_profile_filter,
             n_mc=n_mc,
             rng=rng,
+            db_path=db_path,
+            workers=workers,
+            mc_seed_base=mc_seed_base,
+            chunker=chunker,
         )
         per_metric[spec.identity.temperature_metric] = stats
 
@@ -1648,6 +1790,21 @@ def main() -> int:
             "(default: calibration_batch_rebuild_n_mc() = 1,000)."
         ),
     )
+    parser.add_argument(
+        "--workers", dest="workers", type=int, default=1,
+        help=(
+            "Number of city-level worker processes (default: 1 = sequential). "
+            "Only takes effect on the live write path; --dry-run remains "
+            "single-process for read-only safety."
+        ),
+    )
+    parser.add_argument(
+        "--mc-seed-base", dest="mc_seed_base", type=int, default=None,
+        help=(
+            "Optional integer seed base for Monte Carlo RNG. Workers derive "
+            "their seed as (seed_base + worker_index) for reproducibility."
+        ),
+    )
     args = parser.parse_args()
 
     write_db_path: Path | None = None
@@ -1702,40 +1859,52 @@ def main() -> int:
         any_refused = any(s.refused for s in per_metric.values())
         return 1 if any_refused else 0
 
-    # PR #86 retrofit (CRITICAL — preserved across PR #93 rebase): wrap the
-    # entire write path in db_writer_lock(BULK).
+    # K3 retrofit (2026-05-12): bulk_lock_with_chunker replaces the bare
+    # db_writer_lock(BULK) wrap. The chunker probes the LIVE flock at every
+    # per-(city, metric) bucket commit and releases-then-reacquires the bulk
+    # fcntl when a LIVE writer is mid-transaction. Preserves PR #86's
+    # write-path lock invariant while adding cooperative LIVE-yield semantics.
     assert write_db_path is not None
-    with db_writer_lock(write_db_path, WriteClass.BULK):
-        conn = sqlite3.connect(write_db_path)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA busy_timeout = 600000")
-        conn.execute("PRAGMA journal_mode=WAL")
-        init_schema(conn)
-        apply_v2_schema(conn)
+    conn = sqlite3.connect(write_db_path)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout = 600000")
+    conn.execute("PRAGMA journal_mode=WAL")
+    init_schema(conn)
+    apply_v2_schema(conn)
 
-        try:
-            per_metric = rebuild_all_v2(
-                conn,
-                dry_run=args.dry_run,
-                force=args.force,
-                city_filter=args.city,
-                start_date=args.start_date,
-                end_date=args.end_date,
-                data_version_filter=args.data_version,
-                temperature_metric=args.temperature_metric,
-                cycle_filter=args.cycle,
-                source_id_filter=args.source_id,
-                horizon_profile_filter=args.horizon_profile,
-                n_mc=args.n_mc,
-            )
-        except Exception as e:
-            print(f"ERROR: {type(e).__name__}: {e}", file=sys.stderr)
-            return 1
-        finally:
-            conn.close()
+    try:
+        with bulk_lock_with_chunker(
+            write_db_path,
+            conn,
+            caller_module="scripts.rebuild_calibration_pairs_v2",
+        ) as chunker:
+            try:
+                per_metric = rebuild_all_v2(
+                    conn,
+                    dry_run=args.dry_run,
+                    force=args.force,
+                    city_filter=args.city,
+                    start_date=args.start_date,
+                    end_date=args.end_date,
+                    data_version_filter=args.data_version,
+                    temperature_metric=args.temperature_metric,
+                    cycle_filter=args.cycle,
+                    source_id_filter=args.source_id,
+                    horizon_profile_filter=args.horizon_profile,
+                    n_mc=args.n_mc,
+                    db_path=write_db_path,
+                    workers=args.workers,
+                    mc_seed_base=args.mc_seed_base,
+                    chunker=chunker,
+                )
+            except Exception as e:
+                print(f"ERROR: {type(e).__name__}: {e}", file=sys.stderr)
+                return 1
+    finally:
+        conn.close()
 
-        any_refused = any(s.refused for s in per_metric.values())
-        return 1 if any_refused else 0
+    any_refused = any(s.refused for s in per_metric.values())
+    return 1 if any_refused else 0
 
 
 if __name__ == "__main__":

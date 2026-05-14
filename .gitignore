@@ -59,6 +59,7 @@ Thumbs.db
 # Logs / temp / root scratch artifacts
 # ----------------------------------------------------------------------
 logs/
+tmp/
 *.tmp
 *.temp
 *.bak

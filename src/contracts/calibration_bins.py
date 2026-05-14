@@ -392,7 +392,7 @@ def validate_members_vs_observation(
 
         tol = min(cap, max(floor, k * (max(members) - min(members))))
 
-    where (per ``city.settlement_unit``) ``floor=10/18``, ``cap=28/50``,
+    where (per ``city.settlement_unit``) ``floor=25/40``, ``cap=28/50``,
     and ``k=_VS_OBS_SPREAD_MULTIPLIER`` (4). Rationale lives at the
     module-level constants ``_C_VS_OBS_MAX_OFFSET_*``; see the comment
     block there for the Helsinki/contamination calibration that picked

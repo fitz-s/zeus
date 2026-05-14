@@ -1545,6 +1545,7 @@ ARTIFACT_TARGETS = frozenset(
         "existing_work_log",
         "receipt",
         "plan_packet",
+        "packet_review_evidence",
         "runtime_scratch",
         "new_evidence",
         "new_findings",
@@ -1717,6 +1718,39 @@ def _task_is_planning_package(task: str, files: list[str]) -> bool:
     return len(semantic_files) > 4 and any(_task_text_contains_marker(task_l, word) for word in ("issues", "critical", "fix"))
 
 
+def _is_operations_packet_file(path: str) -> bool:
+    normalized = path.strip().removeprefix("./")
+    prefix = "docs/operations/task_"
+    return normalized.startswith(prefix) and "/" in normalized[len(prefix):]
+
+
+def _is_packet_plan_artifact(path: str) -> bool:
+    if not _is_operations_packet_file(path) or not path.lower().endswith(".md"):
+        return False
+    basename = Path(path).name.lower()
+    return (
+        basename in {"plan.md", "implementation_plan.md"}
+        or basename.endswith("_plan.md")
+        or basename.endswith("-plan.md")
+    )
+
+
+def _is_packet_review_evidence_artifact(path: str) -> bool:
+    if not _is_operations_packet_file(path) or not path.lower().endswith(".md"):
+        return False
+    normalized = path.strip().removeprefix("./").lower()
+    basename = Path(normalized).name
+    if basename in {"critic_approval.md", "critic_review.md", "critic_verdict.md"}:
+        return True
+    if basename.startswith("critic") and basename.endswith(".md"):
+        return True
+    return normalized.endswith((
+        "/critic/review.md",
+        "/critic/approval.md",
+        "/critic/verdict.md",
+    ))
+
+
 def _infer_artifact_target(task: str, files: list[str], profile: str, explicit: str | None, sources: dict[str, str]) -> str:
     explicit_target = _clean_typed(explicit)
     if explicit_target and explicit_target in ARTIFACT_TARGETS:
@@ -1748,9 +1782,12 @@ def _infer_artifact_target(task: str, files: list[str], profile: str, explicit: 
     if any(path.endswith("receipt.json") for path in files):
         sources["artifact_target"] = "file_fact"
         return "receipt"
-    if any(path.endswith(("/PLAN.md", "/plan.md", "/implementation_plan.md")) for path in files):
+    if any(_is_packet_plan_artifact(path) for path in files):
         sources["artifact_target"] = "file_fact"
         return "plan_packet"
+    if any(_is_packet_review_evidence_artifact(path) for path in files):
+        sources["artifact_target"] = "file_fact"
+        return "packet_review_evidence"
     if any(path.endswith("work_log.md") for path in files):
         sources["artifact_target"] = "file_fact"
         return "existing_work_log"
@@ -1828,7 +1865,7 @@ def build_operation_vector(
     elif inferred_merge_state != "not_merge":
         inferred_stage = "merge"
         sources["operation_stage"] = "merge_state"
-    elif inferred_artifact_target == "plan_packet" or _task_is_planning_package(task, normalized_files):
+    elif inferred_artifact_target in {"plan_packet", "packet_review_evidence"} or _task_is_planning_package(task, normalized_files):
         inferred_stage = "plan"
         sources["operation_stage"] = "artifact_or_task_hint"
     elif inferred_artifact_target != "none":
@@ -2149,7 +2186,7 @@ def _route_card_suggested_next_command(
             "--task \"operation planning packet: structural decisions, impact context, "
             "slice routes, and verification plan\" --intent \"operation planning packet\" "
             "--write-intent edit --operation-stage plan --artifact-target plan_packet "
-            "--files docs/operations/task_YYYY-MM-DD_slug/PLAN.md"
+            "--files docs/operations/task_YYYY-MM-DD_slug/<TOPIC>_PLAN.md"
         )
     if merge_evidence_required.get("required"):
         return (
@@ -2279,8 +2316,8 @@ def _route_card_persistence_target(profile: str, task: str, files: list[str], op
         return "context_worklog"
     if artifact_target == "existing_work_log":
         return "work_log"
-    if artifact_target == "plan_packet":
-        return "plan_packet"
+    if artifact_target in {"plan_packet", "packet_review_evidence"}:
+        return artifact_target
     if artifact_target in {"final_response", "receipt", "new_evidence", "new_findings"}:
         return artifact_target
     task_l = task.lower()

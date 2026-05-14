@@ -319,7 +319,7 @@ def test_T8_run_harvester_skips_when_flag_off(monkeypatch):
     # any Gamma fetch happens. We just verify the return signature + that no exception fires.
     with patch("src.execution.harvester._fetch_settled_events") as fetch_mock, \
          patch("src.execution.harvester.get_trade_connection") as trade_mock, \
-         patch("src.execution.harvester.get_world_connection") as shared_mock:
+         patch("src.execution.harvester.get_forecasts_connection") as shared_mock:
         result = run_harvester()
         # Feature flag OFF → gate fires before any data-plane calls
         fetch_mock.assert_not_called()
@@ -483,7 +483,7 @@ def test_T12_integration_flag_on_processes_event(monkeypatch, tmp_path):
     dummy_db_path = tmp_path / "dummy.db"
     dummy_conn = sqlite3.connect(dummy_db_path, isolation_level=None)
     monkeypatch.setattr(hv, "get_trade_connection", lambda: dummy_conn)
-    monkeypatch.setattr(hv, "get_world_connection", lambda: dummy_conn)
+    monkeypatch.setattr(hv, "get_forecasts_connection", lambda: dummy_conn)
     # Return a valid obs_row so _write_settlement_truth is reached
     monkeypatch.setattr(hv, "_lookup_settlement_obs",
         lambda conn, city, td, **kw: {"id": 1, "source": "wu_icao_history",
@@ -565,7 +565,7 @@ def test_T12b_quarantined_truth_does_not_settle_positions_or_train(monkeypatch, 
     dummy_db_path = tmp_path / "quarantined.db"
     dummy_conn = sqlite3.connect(dummy_db_path, isolation_level=None)
     monkeypatch.setattr(hv, "get_trade_connection", lambda: dummy_conn)
-    monkeypatch.setattr(hv, "get_world_connection", lambda: dummy_conn)
+    monkeypatch.setattr(hv, "get_forecasts_connection", lambda: dummy_conn)
     monkeypatch.setattr(hv, "_lookup_settlement_obs",
         lambda conn, city, td, **kw: {"id": 1, "source": "wu_icao_history",
                                       "high_temp": 18.3, "unit": "C",

@@ -310,8 +310,33 @@ def _safe_component(component: str, loader) -> dict:
             component,
             allowed=False,
             reason="summary_unavailable",
-            details={"error_type": type(exc).__name__, "error": str(exc)},
+            details={
+                "error_type": type(exc).__name__,
+                "error": str(exc),
+                # Sentinel fields so downstream component builders (e.g. _collateral_component)
+                # can distinguish "loader failed / DB locked" from "genuinely unconfigured".
+                "configured": False,
+                "authority_tier": "DEGRADED",
+                "loader_failed": True,
+            },
         )
+
+
+def _propagate_loader_failure(payload: dict, details: dict) -> dict:
+    """Copy _safe_component sentinels into a component's details dict.
+
+    When _safe_component caught a loader exception, the payload it returned
+    carries loader_failed/error_type/error sentinels. Component builders
+    that construct their own details dict would otherwise drop these,
+    making loader failures invisible to operators.
+    """
+    if isinstance(payload, dict) and payload.get("loader_failed"):
+        details["loader_failed"] = True
+        if "error_type" in payload:
+            details["error_type"] = payload["error_type"]
+        if "error" in payload:
+            details["error"] = payload["error"]
+    return details
 
 
 def _cutover_summary() -> dict:
@@ -365,60 +390,68 @@ def _cutover_component(action: str, payload: dict) -> dict:
         "redeem": "allow_redemption",
     }[action]
     allowed = bool(decision.get(allow_key, False))
+    details = {
+        "state": payload.get("state"),
+        "allow_key": allow_key,
+    }
+    _propagate_loader_failure(payload, details)
     return _capability_component(
         "cutover_guard",
         allowed=allowed,
         reason=str(decision.get("block_reason") or ("allowed" if allowed else "blocked")),
-        details={
-            "state": payload.get("state"),
-            "allow_key": allow_key,
-        },
+        details=details,
     )
 
 
 def _heartbeat_component(payload: dict, *, order_type: str = "GTC") -> dict:
     entry = payload.get("entry", {}) if isinstance(payload, dict) else {}
     allowed = bool(entry.get("allow_submit", False))
+    details = {
+        "health": payload.get("health"),
+        "order_type": order_type,
+        "required_order_types": list(entry.get("required_order_types", []) or []),
+    }
+    _propagate_loader_failure(payload, details)
     return _capability_component(
         "heartbeat_supervisor",
         allowed=allowed,
         reason="allowed" if allowed else str(payload.get("last_error") or payload.get("health") or "blocked"),
-        details={
-            "health": payload.get("health"),
-            "order_type": order_type,
-            "required_order_types": list(entry.get("required_order_types", []) or []),
-        },
+        details=details,
     )
 
 
 def _ws_gap_component(payload: dict, *, current_executor_blocks_exit: bool = False) -> dict:
     entry = payload.get("entry", {}) if isinstance(payload, dict) else {}
     allowed = bool(entry.get("allow_submit", False))
+    details = {
+        "connected": payload.get("connected"),
+        "subscription_state": payload.get("subscription_state"),
+        "m5_reconcile_required": payload.get("m5_reconcile_required"),
+        "current_executor_blocks_exit": current_executor_blocks_exit,
+    }
+    _propagate_loader_failure(payload, details)
     return _capability_component(
         "ws_gap_guard",
         allowed=allowed,
         reason="allowed" if allowed else str(payload.get("gap_reason") or payload.get("subscription_state") or "blocked"),
-        details={
-            "connected": payload.get("connected"),
-            "subscription_state": payload.get("subscription_state"),
-            "m5_reconcile_required": payload.get("m5_reconcile_required"),
-            "current_executor_blocks_exit": current_executor_blocks_exit,
-        },
+        details=details,
     )
 
 
 def _risk_allocator_entry_component(payload: dict) -> dict:
     entry = payload.get("entry", {}) if isinstance(payload, dict) else {}
     allowed = bool(entry.get("allow_submit", False))
+    details = {
+        "configured": bool(payload.get("configured", False)),
+        "kill_switch_reason": payload.get("kill_switch_reason"),
+        "reduce_only": bool(payload.get("reduce_only", False)),
+    }
+    _propagate_loader_failure(payload, details)
     return _capability_component(
         "risk_allocator_global",
         allowed=allowed,
         reason=str(entry.get("reason") or ("allowed" if allowed else "blocked")),
-        details={
-            "configured": bool(payload.get("configured", False)),
-            "kill_switch_reason": payload.get("kill_switch_reason"),
-            "reduce_only": bool(payload.get("reduce_only", False)),
-        },
+        details=details,
     )
 
 
@@ -426,15 +459,17 @@ def _risk_allocator_reduce_only_component(payload: dict) -> dict:
     configured = bool(payload.get("configured", False)) if isinstance(payload, dict) else False
     kill_reason = payload.get("kill_switch_reason") if isinstance(payload, dict) else "summary_unavailable"
     allowed = configured and not kill_reason
+    details = {
+        "configured": configured,
+        "reduce_only_submit": True,
+        "reduce_only_mode": bool(payload.get("reduce_only", False)) if isinstance(payload, dict) else False,
+    }
+    _propagate_loader_failure(payload, details)
     return _capability_component(
         "risk_allocator_global",
         allowed=allowed,
         reason=str(kill_reason or "allowed"),
-        details={
-            "configured": configured,
-            "reduce_only_submit": True,
-            "reduce_only_mode": bool(payload.get("reduce_only", False)) if isinstance(payload, dict) else False,
-        },
+        details=details,
     )
 
 
@@ -442,16 +477,25 @@ def _collateral_component(payload: dict, *, collateral: str) -> dict:
     configured = bool(payload.get("configured", False)) if isinstance(payload, dict) else False
     authority_tier = str(payload.get("authority_tier") or "UNKNOWN")
     allowed = configured and authority_tier != "DEGRADED"
+    details: dict = {
+        "collateral": collateral,
+        "configured": configured,
+        "authority_tier": authority_tier,
+        "captured_at": payload.get("captured_at"),
+    }
+    # Propagate loader-failure fields set by _safe_component so operators can
+    # distinguish "DB locked at load time" from "genuinely unconfigured".
+    if isinstance(payload, dict) and payload.get("loader_failed"):
+        details["loader_failed"] = True
+        if "error_type" in payload:
+            details["error_type"] = payload["error_type"]
+        if "error" in payload:
+            details["error"] = payload["error"]
     return _capability_component(
         "collateral_ledger_global",
         allowed=allowed,
         reason=str(payload.get("reason") or ("allowed" if allowed else "blocked")),
-        details={
-            "collateral": collateral,
-            "configured": configured,
-            "authority_tier": authority_tier,
-            "captured_at": payload.get("captured_at"),
-        },
+        details=details,
     )
 
 

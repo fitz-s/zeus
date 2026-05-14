@@ -21,8 +21,9 @@ typed_intent_enum:
   - id: plan_only
     description: >
       Plan-only operation. Reads files; writes ONLY to docs/** or evidence/**.
-      No source/test/script edits. Substantive plans MUST be packetized at
-      docs/operations/task_<YYYY-MM-DD>_<topic>/PLAN.md. `.omc/plans/`,
+      No source/test/script edits. Substantive plans MUST be packetized under
+      docs/operations/task_<YYYY-MM-DD>_<topic>/ as a descriptive plan artifact
+      such as <TOPIC>_PLAN.md or legacy PLAN.md. `.omc/plans/`,
       `.omc/research/`, and `.omx/plans/` are scratch_runtime_artifact (per
       artifact_lifecycle.yaml) and are NOT plan/research targets — admission
       rejection is the structural mechanism that prevents leak of substantive

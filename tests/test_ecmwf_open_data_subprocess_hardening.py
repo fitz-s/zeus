@@ -1,13 +1,17 @@
 # Created: 2026-05-08
-# Last reused/audited: 2026-05-08
-# Authority basis: docs/operations/task_2026-05-08_ecmwf_publication_strategy/REPORT.md §6.2
-#   F1 subprocess hardening — retry + extended timeout + full stderr capture.
+# Last reused/audited: 2026-05-14
+# Authority basis: docs/operations/task_2026-05-14_data_daemon_live_efficiency/DATA_DAEMON_LIVE_EFFICIENCY_REFACTOR_PLAN.md
+#   Phase 1 HTTP 429 Retry-After handling + fetch timing contract.
 """Unit tests for ECMWF Open Data subprocess hardening (F1).
 
 Covers:
   - test_timeout_default_1500s: regression guard on the 600→1500 change.
   - test_subprocess_retry_succeeds_on_second_attempt: rc=1 then rc=0 → ok.
   - test_subprocess_retry_exhausts: rc=1×3 → download_failed.
+  - test_429_retry_after_controls_next_retry_sleep: provider Retry-After replaces fixed sleep.
+  - test_http_date_retry_after_uses_response_time_not_cycle_time: HTTP-date Retry-After uses response time.
+  - test_retry_exhaustion_does_not_sleep_after_final_failure: final failure returns immediately.
+  - test_download_failure_reports_fetch_timing: fetch timing is part of the result contract.
   - test_skipped_not_released_distinguishes_grid_404: 404 on grid-valid step →
       SKIPPED_NOT_RELEASED; 404 on non-grid step (No index entries) → retried.
 """
@@ -152,6 +156,128 @@ def test_subprocess_retry_exhausts() -> None:
     assert call_count == 2, (
         f"Expected exactly 2 runner calls (2 retries), got {call_count}"
     )
+
+
+def test_429_retry_after_controls_next_retry_sleep(tmp_path, monkeypatch) -> None:
+    """HTTP 429 Retry-After must replace the old fixed 60s retry delay."""
+    call_count = 0
+    slept: list[int] = []
+
+    def runner(args, *, label: str, timeout: int) -> dict:
+        nonlocal call_count
+        call_count += 1
+        if label.startswith("download") and call_count == 1:
+            return _fail_result(label, stderr="HTTPError: 429 Too Many Requests\nRetry-After: 7")
+        return _ok_result(label)
+
+    monkeypatch.setattr("src.data.ecmwf_open_data.time.sleep", slept.append)
+    result = _run_download_only(
+        runner,
+        conn=_make_conn(),
+        monkeypatch=monkeypatch,
+        tmp_path=tmp_path,
+    )
+
+    assert call_count == 2
+    assert slept == [7]
+    assert result["status"] != "download_failed"
+    assert result["timing_ms"]["retry_sleep_seconds"] == 7
+
+
+def test_retry_after_invalid_value_uses_default_sleep(tmp_path, monkeypatch) -> None:
+    """Malformed Retry-After must not crash the daemon; it falls back to 60s."""
+    call_count = 0
+    slept: list[int] = []
+
+    def runner(args, *, label: str, timeout: int) -> dict:
+        nonlocal call_count
+        call_count += 1
+        if label.startswith("download") and call_count == 1:
+            return _fail_result(label, stderr="HTTPError: 429 Too Many Requests\nRetry-After: bananas")
+        return _ok_result(label)
+
+    monkeypatch.setattr("src.data.ecmwf_open_data.time.sleep", slept.append)
+    result = _run_download_only(
+        runner,
+        conn=_make_conn(),
+        monkeypatch=monkeypatch,
+        tmp_path=tmp_path,
+    )
+
+    assert call_count == 2
+    assert slept == [60]
+    assert result["timing_ms"]["retry_sleep_seconds"] == 60
+
+
+def test_http_date_retry_after_uses_response_time_not_cycle_time(tmp_path, monkeypatch) -> None:
+    """HTTP-date Retry-After must be measured from response time, not cycle selection time."""
+    call_count = 0
+    slept: list[int] = []
+
+    def runner(args, *, label: str, timeout: int) -> dict:
+        nonlocal call_count
+        call_count += 1
+        if label.startswith("download") and call_count == 1:
+            return _fail_result(
+                label,
+                stderr="HTTPError: 429 Too Many Requests\nRetry-After: Fri, 08 May 2026 09:59:00 GMT",
+            )
+        return _ok_result(label)
+
+    monkeypatch.setattr("src.data.ecmwf_open_data.time.sleep", slept.append)
+    monkeypatch.setattr(
+        "src.data.ecmwf_open_data._retry_after_response_time_utc",
+        lambda: datetime(2026, 5, 8, 10, 0, tzinfo=UTC),
+    )
+    result = _run_download_only(
+        runner,
+        conn=_make_conn(),
+        monkeypatch=monkeypatch,
+        tmp_path=tmp_path,
+    )
+
+    assert call_count == 2
+    assert slept == []
+    assert result["status"] != "download_failed"
+    assert result["timing_ms"]["retry_sleep_seconds"] == 0
+
+
+def test_retry_exhaustion_does_not_sleep_after_final_failure(monkeypatch) -> None:
+    """Only the transition between attempts may sleep; final failure must return immediately."""
+    call_count = 0
+    slept: list[int] = []
+
+    def runner(args, *, label: str, timeout: int) -> dict:
+        nonlocal call_count
+        call_count += 1
+        return _fail_result(label, stderr="HTTPError: 429 Too Many Requests\nRetry-After: 3")
+
+    monkeypatch.setattr("src.data.ecmwf_open_data.time.sleep", slept.append)
+    result = _run_download_only(runner)
+
+    assert result["status"] == "download_failed"
+    assert call_count == 2
+    assert slept == [3]
+    assert result["timing_ms"]["retry_sleep_seconds"] == 3
+
+
+def test_download_failure_reports_fetch_timing(monkeypatch) -> None:
+    """Failure results must still expose timing so live maintenance can localize latency."""
+    call_count = 0
+
+    def runner(args, *, label: str, timeout: int) -> dict:
+        nonlocal call_count
+        call_count += 1
+        return _fail_result(label, stderr="network unreachable")
+
+    monkeypatch.setattr("src.data.ecmwf_open_data.time.sleep", lambda seconds: None)
+    result = _run_download_only(runner)
+
+    assert result["status"] == "download_failed"
+    assert call_count == 2
+    assert {"download_ms", "total_ms", "retry_sleep_seconds"} <= result["timing_ms"].keys()
+    assert result["timing_ms"]["download_ms"] >= 0
+    assert result["timing_ms"]["total_ms"] >= result["timing_ms"]["download_ms"]
 
 
 # ---------------------------------------------------------------------------

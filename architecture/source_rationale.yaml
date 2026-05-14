@@ -68,6 +68,26 @@ write_routes:
     - venue_commands
     - venue_command_events
     guardrail: Command event append and collateral reservation terminal-release must remain atomic.
+  data_daemon_job_run_write:
+    owner: src/state/job_run_repo.py
+    tables:
+    - job_run
+    guardrail: Data-daemon scheduler provenance must preserve scheduled window, status, source identity, affected scope, and readiness impact.
+  data_daemon_source_run_write:
+    owner: src/state/source_run_repo.py
+    tables:
+    - source_run
+    guardrail: Forecast producer runs must preserve release-calendar provenance, cycle time, capture time, completeness, and metric/source identity.
+  data_readiness_write:
+    owner: src/state/readiness_repo.py
+    tables:
+    - readiness_state
+    guardrail: Missing, expired, or mismatched readiness must fail closed; live entry may consume readiness evidence but must not direct-fetch source data.
+  market_topology_state_write:
+    owner: src/state/market_topology_repo.py
+    tables:
+    - market_topology_state
+    guardrail: Venue topology freshness must stay separate from forecast-source readiness and cannot authorize live trading alone.
   script_repair_write:
     owner: scripts/**
     guardrail: dry-run/apply metadata required in later scripts manifest packet
@@ -878,6 +898,19 @@ files:
     zone: docs
     authority_role: registry
     why: Ingest package rules and file registry for external venue/user event streams.
+  src/ingest/forecast_live_daemon.py:
+    zone: K2_runtime
+    authority_role: forecast_live_daemon_entry
+    why: Dedicated OpenData live forecast producer daemon; schedules only ECMWF OpenData HIGH/LOW forecast ingest and heartbeat, sharing the OpenData lock with legacy ingest_main during rollout.
+    hazards:
+    - SOURCE_TRUTH_PLANE_COLLAPSE
+    downstream:
+    - src/data/ecmwf_open_data.py
+    - src/data/producer_readiness.py
+    - src/state/source_run_repo.py
+    - src/state/source_run_coverage_repo.py
+    - src/state/readiness_repo.py
+    - tests/test_forecast_live_daemon.py
   src/ingest/polymarket_user_channel.py:
     zone: K2_runtime
     authority_role: user_channel_ingest

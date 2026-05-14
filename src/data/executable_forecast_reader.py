@@ -1,3 +1,7 @@
+# Created: 2026-05-03
+# Last reused/audited: 2026-05-14
+# Authority basis: docs/operations/task_2026-05-14_data_daemon_live_efficiency/DATA_DAEMON_LIVE_EFFICIENCY_REFACTOR_PLAN.md
+#   Phase 3 evaluator consumes producer readiness without hot-path entry-readiness writes.
 """Executable forecast reader for V4 source-linked ensemble snapshots."""
 
 from __future__ import annotations
@@ -52,7 +56,7 @@ class ExecutableForecastEvidence:
     release_calendar_key: str
     coverage_id: str
     producer_readiness_id: str
-    entry_readiness_id: str
+    entry_readiness_id: str | None
     source_cycle_time: str
     source_issue_time: str | None
     source_release_time: str
@@ -358,6 +362,7 @@ def read_executable_forecast(
     market_family: str,
     condition_id: str,
     decision_time: datetime,
+    require_entry_readiness: bool = True,
 ) -> ExecutableForecastBundleResult:
     if decision_time.tzinfo is None or decision_time.utcoffset() is None:
         return ExecutableForecastBundleResult("UNKNOWN_BLOCKED", "READINESS_NOW_INVALID")
@@ -378,27 +383,29 @@ def read_executable_forecast(
     if producer_reason is not None:
         return ExecutableForecastBundleResult("BLOCKED", producer_reason)
 
-    entry = get_entry_readiness(
-        conn,
-        city_id=city_id,
-        city_timezone=city_timezone,
-        target_local_date=target_local_date,
-        temperature_metric=temperature_metric,
-        physical_quantity=str(producer.get("physical_quantity")),
-        observation_field=str(producer.get("observation_field")),
-        data_version=data_version,
-        source_id=source_id,
-        track=track,
-        strategy_key=strategy_key,
-        market_family=market_family,
-        condition_id=condition_id,
-        now_utc=now,
-    )
-    entry_reason = _is_live_readiness(entry, now_utc=now)
-    if entry_reason is not None:
-        return ExecutableForecastBundleResult("BLOCKED", entry_reason)
-    if not entry.get("readiness_id"):
-        return ExecutableForecastBundleResult("BLOCKED", "ENTRY_READINESS_MISSING")
+    entry = None
+    if require_entry_readiness:
+        entry = get_entry_readiness(
+            conn,
+            city_id=city_id,
+            city_timezone=city_timezone,
+            target_local_date=target_local_date,
+            temperature_metric=temperature_metric,
+            physical_quantity=str(producer.get("physical_quantity")),
+            observation_field=str(producer.get("observation_field")),
+            data_version=data_version,
+            source_id=source_id,
+            track=track,
+            strategy_key=strategy_key,
+            market_family=market_family,
+            condition_id=condition_id,
+            now_utc=now,
+        )
+        entry_reason = _is_live_readiness(entry, now_utc=now)
+        if entry_reason is not None:
+            return ExecutableForecastBundleResult("BLOCKED", entry_reason)
+        if not entry.get("readiness_id"):
+            return ExecutableForecastBundleResult("BLOCKED", "ENTRY_READINESS_MISSING")
 
     coverage = _coverage_for_producer(conn, producer=producer)
     if coverage is None:
@@ -477,13 +484,18 @@ def read_executable_forecast(
     source_available_at = _parse_utc(source_run.get("source_available_at"))
     captured_at = _parse_utc(source_run.get("captured_at"))
     producer_computed_at = _parse_utc(producer.get("computed_at"))
-    entry_computed_at = _parse_utc(entry.get("computed_at"))
     if source_available_at is None:
         return ExecutableForecastBundleResult("BLOCKED", "SOURCE_AVAILABLE_AT_MISSING")
     if captured_at is None:
         return ExecutableForecastBundleResult("BLOCKED", "SOURCE_RUN_CAPTURED_AT_MISSING")
-    if producer_computed_at is None or entry_computed_at is None:
+    if producer_computed_at is None:
         return ExecutableForecastBundleResult("BLOCKED", "READINESS_COMPUTED_AT_INVALID")
+    if require_entry_readiness:
+        entry_computed_at = _parse_utc(entry.get("computed_at")) if entry is not None else None
+        if entry_computed_at is None:
+            return ExecutableForecastBundleResult("BLOCKED", "READINESS_COMPUTED_AT_INVALID")
+    else:
+        entry_computed_at = producer_computed_at
     if source_available_at > captured_at:
         return ExecutableForecastBundleResult("BLOCKED", "SOURCE_AVAILABLE_AFTER_CAPTURE")
     if captured_at > producer_computed_at or producer_computed_at > entry_computed_at or entry_computed_at > now:
@@ -497,7 +509,7 @@ def read_executable_forecast(
         release_calendar_key=str(coverage["release_calendar_key"]),
         coverage_id=str(coverage["coverage_id"]),
         producer_readiness_id=str(producer["readiness_id"]),
-        entry_readiness_id=str(entry["readiness_id"]),
+        entry_readiness_id=str(entry["readiness_id"]) if entry is not None else None,
         source_cycle_time=str(source_run["source_cycle_time"]),
         source_issue_time=source_run.get("source_issue_time"),
         source_release_time=str(source_run["source_release_time"]),

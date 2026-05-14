@@ -1,6 +1,7 @@
 # Created: prior; restructured 2026-05-01
-# Last reused/audited: 2026-05-03
-# Authority basis: Operator directive 2026-05-01 + PLAN_v4 Phase 5A release-calendar source-run selection.
+# Last reused/audited: 2026-05-14
+# Authority basis: docs/operations/task_2026-05-14_data_daemon_live_efficiency/DATA_DAEMON_LIVE_EFFICIENCY_REFACTOR_PLAN.md
+#   Phase 1 HTTP 429 Retry-After handling + fetch timing contract.
 #   ECMWF Open Data has ~6-8h latency (vs. TIGGE's 48h public embargo) so it
 #   is the live-trading source for same-day forecasts. Rows must land in
 #   ensemble_snapshots_v2 with the canonical local-calendar-day data_version
@@ -44,12 +45,15 @@ from __future__ import annotations
 
 import json
 import logging
+import math
+import re
 import subprocess
 import sys
 import hashlib
 import time
 from contextlib import nullcontext
 from datetime import date, datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, Optional
 
@@ -129,6 +133,13 @@ TRACKS: dict[str, dict] = {
 SOURCE_ID = "ecmwf_open_data"
 FORECAST_SOURCE_ROLE = "diagnostic"
 MODEL_VERSION = "ecmwf_open_data"
+OPENDATA_DAEMON_LOCK_KEY = "ecmwf_open_data"
+DEFAULT_DOWNLOAD_RETRY_DELAY_SECONDS = 60
+MAX_DOWNLOAD_ATTEMPTS = 2
+_RETRY_AFTER_HEADER_RE = re.compile(r"(?im)^\s*retry-after\s*:\s*(?P<value>[^\r\n]+)")
+_RETRY_AFTER_TEXT_RE = re.compile(
+    r"(?i)\bretry[- ]after(?:\s+|[=:]\s*)(?P<value>\d+(?:\.\d+)?)\b"
+)
 
 
 def _conda_python() -> str:
@@ -188,6 +199,66 @@ def _status_for_ingest_summary(summary: dict) -> str:
     if written == 0 and skipped == 0:
         return "empty_ingest"
     return "ok"
+
+
+def _parse_retry_after_seconds(value: object, *, now_utc: datetime) -> int | None:
+    """Parse HTTP Retry-After seconds from a header value or direct test seam."""
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        if math.isfinite(value) and value >= 0:
+            return int(math.ceil(value))
+        return None
+
+    text = str(value).strip().strip('"')
+    if not text:
+        return None
+    if re.fullmatch(r"\d+(?:\.\d+)?", text):
+        return int(math.ceil(float(text)))
+
+    try:
+        retry_at = parsedate_to_datetime(text)
+    except (TypeError, ValueError, IndexError, OverflowError):
+        return None
+    if retry_at.tzinfo is None:
+        retry_at = retry_at.replace(tzinfo=timezone.utc)
+    now = now_utc.astimezone(timezone.utc)
+    return int(math.ceil(max(0.0, (retry_at.astimezone(timezone.utc) - now).total_seconds())))
+
+
+def _retry_after_response_time_utc() -> datetime:
+    """Clock seam for HTTP-date Retry-After calculations."""
+    return datetime.now(timezone.utc)
+
+
+def _retry_after_seconds_from_download(download: dict, *, now_utc: datetime) -> int | None:
+    for key in ("retry_after_seconds", "retry_after", "Retry-After"):
+        parsed = _parse_retry_after_seconds(download.get(key), now_utc=now_utc)
+        if parsed is not None:
+            return parsed
+
+    stderr = str(download.get("stderr_tail", "") or "")
+    for match in _RETRY_AFTER_HEADER_RE.finditer(stderr):
+        parsed = _parse_retry_after_seconds(match.group("value"), now_utc=now_utc)
+        if parsed is not None:
+            return parsed
+    for match in _RETRY_AFTER_TEXT_RE.finditer(stderr):
+        parsed = _parse_retry_after_seconds(match.group("value"), now_utc=now_utc)
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _download_retry_delay_seconds(
+    download: dict,
+    *,
+    fallback_seconds: int,
+    response_time_utc: datetime,
+) -> int:
+    retry_after = _retry_after_seconds_from_download(download, now_utc=response_time_utc)
+    if retry_after is not None:
+        return retry_after
+    return fallback_seconds
 
 
 def _stable_id(prefix: str, *parts: object) -> str:
@@ -547,6 +618,12 @@ def collect_open_ens_cycle(
         raise ValueError(f"Unknown track {track!r}; expected one of {sorted(TRACKS)}")
     cfg = TRACKS[track]
     runner = _runner or _run_subprocess
+    cycle_started = time.monotonic()
+    timing_ms: dict[str, int] = {"retry_sleep_seconds": 0}
+
+    def _finish_timing() -> dict[str, int]:
+        timing_ms["total_ms"] = int(max(0.0, (time.monotonic() - cycle_started) * 1000))
+        return dict(timing_ms)
 
     source_spec = gate_source(SOURCE_ID)
     gate_source_role(source_spec, FORECAST_SOURCE_ROLE)
@@ -566,6 +643,7 @@ def collect_open_ens_cycle(
                 "selection": selection_metadata,
                 "stages": [],
                 "snapshots_inserted": 0,
+                "timing_ms": _finish_timing(),
             }
         selected_cycle = selection_metadata["selected_cycle_time"]
         if not isinstance(selected_cycle, datetime):
@@ -599,6 +677,7 @@ def collect_open_ens_cycle(
     stages: list[dict] = []
 
     if not skip_download:
+        download_started = time.monotonic()
         _download_args = [
             _conda_python(),
             str(DOWNLOAD_SCRIPT),
@@ -614,31 +693,34 @@ def collect_open_ens_cycle(
             / "tmp"
             / f"ecmwf_open_data_{cycle_date.isoformat()}_{cycle_hour:02d}z_{track}.stderr.txt"
         )
-        # Bounded retry: attempt 1 immediately, attempt 2 after 60s.
-        # Worst-case wall time: 1500 + 60 + 1500 = 3060s (~51 min), leaving margin before
-        # the LOW job's misfire_grace_time expires (~55 min after HIGH fires at 07:30 UTC).
+        # Bounded retry: attempt 1 immediately, attempt 2 after provider Retry-After
+        # when present, otherwise after the 60s local fallback.
         # A 404 on a grid-valid step means data not yet published → SKIPPED_NOT_RELEASED (no retry).
         # All other rc!=0 are retryable (transient network, rate-limit, timeout).
-        _retry_delays = [0, 60]
+        # No sleep occurs after the final failed attempt.
         download = None
-        for _attempt, _delay in enumerate(_retry_delays, start=1):
-            if _delay > 0:
+        _next_retry_delay = 0
+        for _attempt in range(1, MAX_DOWNLOAD_ATTEMPTS + 1):
+            if _next_retry_delay > 0:
                 logger.info(
                     "ecmwf_open_data download_%s: retry attempt %d/%d after %ds sleep",
-                    track, _attempt, len(_retry_delays), _delay,
+                    track, _attempt, MAX_DOWNLOAD_ATTEMPTS, _next_retry_delay,
                 )
-                time.sleep(_delay)
+                timing_ms["retry_sleep_seconds"] += _next_retry_delay
+                time.sleep(_next_retry_delay)
             download = runner(
                 _download_args,
                 label=f"download_{track}",
                 timeout=download_timeout_seconds,
             )
+            download = {**download, "attempt": _attempt}
             if download["ok"]:
                 break
             # Distinguish 404 on grid-valid step (not-yet-released) from other failures.
             _stderr = download.get("stderr_tail", "") or ""
             _is_404 = "404" in _stderr or "Not Found" in _stderr
             if _is_404 and "No index entries" not in _stderr:
+                timing_ms["download_ms"] = int(max(0.0, (time.monotonic() - download_started) * 1000))
                 logger.warning(
                     "ecmwf_open_data download_%s: 404 on grid-valid step — SKIPPED_NOT_RELEASED (attempt %d)",
                     track, _attempt,
@@ -651,16 +733,23 @@ def collect_open_ens_cycle(
                     "data_version": cfg["data_version"],
                     "stages": stages,
                     "snapshots_inserted": 0,
+                    "timing_ms": _finish_timing(),
                 }
-            if _attempt < len(_retry_delays):
+            if _attempt < MAX_DOWNLOAD_ATTEMPTS:
+                _next_retry_delay = _download_retry_delay_seconds(
+                    download,
+                    fallback_seconds=DEFAULT_DOWNLOAD_RETRY_DELAY_SECONDS,
+                    response_time_utc=_retry_after_response_time_utc(),
+                )
                 logger.warning(
-                    "ecmwf_open_data download_%s: rc=%d on attempt %d/%d — will retry",
-                    track, download.get("returncode", -1), _attempt, len(_retry_delays),
+                    "ecmwf_open_data download_%s: rc=%d on attempt %d/%d — will retry after %ds",
+                    track, download.get("returncode", -1), _attempt, MAX_DOWNLOAD_ATTEMPTS, _next_retry_delay,
                 )
         # Write stderr dump on final failure (any rc!=0 after all retries).
         if not download["ok"]:
             _write_stderr_dump(_stderr_dump, download.get("stderr_tail", "") or "")
         stages.append(download)
+        timing_ms["download_ms"] = int(max(0.0, (time.monotonic() - download_started) * 1000))
         if not download["ok"]:
             return {
                 "status": "download_failed",
@@ -668,9 +757,11 @@ def collect_open_ens_cycle(
                 "data_version": cfg["data_version"],
                 "stages": stages,
                 "snapshots_inserted": 0,
+                "timing_ms": _finish_timing(),
             }
 
     if not skip_extract:
+        extract_started = time.monotonic()
         extract = runner(
             [
                 _conda_python(),
@@ -683,6 +774,7 @@ def collect_open_ens_cycle(
             timeout=extract_timeout_seconds,
         )
         stages.append(extract)
+        timing_ms["extract_ms"] = int(max(0.0, (time.monotonic() - extract_started) * 1000))
         if not extract["ok"]:
             return {
                 "status": "extract_failed",
@@ -690,6 +782,7 @@ def collect_open_ens_cycle(
                 "data_version": cfg["data_version"],
                 "stages": stages,
                 "snapshots_inserted": 0,
+                "timing_ms": _finish_timing(),
             }
 
     # Ingest stage — import in-process, share a single connection so the
@@ -701,6 +794,7 @@ def collect_open_ens_cycle(
     else:
         # Injected connection (test seam with in-memory sqlite) — skip file lock.
         _lock_ctx = nullcontext()
+    ingest_started = time.monotonic()
     with _lock_ctx:
         if own_conn:
             conn = get_connection()
@@ -761,6 +855,7 @@ def collect_open_ens_cycle(
         finally:
             if own_conn:
                 conn.close()
+    timing_ms["ingest_ms"] = int(max(0.0, (time.monotonic() - ingest_started) * 1000))
 
     stages = [
         *stages,
@@ -783,6 +878,7 @@ def collect_open_ens_cycle(
         "snapshots_skipped": int(summary.get("skipped", 0)),
         **authority_summary,
         "stages": stages,
+        "timing_ms": _finish_timing(),
     }
 
 

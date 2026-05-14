@@ -1,6 +1,6 @@
 """Tests for topology_doctor compiled topology gates."""
 # Created: 2026-04-13
-# Last reused/audited: 2026-05-09
+# Last reused/audited: 2026-05-14
 # Authority basis: docs/operations/task_2026-05-02_review_crash_remediation/PLAN.md Slices 4-5; Wave17 object-meaning backfill guard repair.
 # Lifecycle: created=2026-04-13; last_reviewed=2026-05-06; last_reused=2026-05-06
 # Purpose: Regression tests for topology_doctor lanes, CLI parity, closeout compilation, and dangerous script manifest guards.
@@ -1530,6 +1530,24 @@ def test_topology_tests_mode_classifies_actual_suite_and_law_gate():
     result = topology_doctor.run_tests()
 
     assert_topology_ok(result)
+
+
+def test_data_daemon_test_registry_entries_are_flat_yaml_scalars():
+    topology = topology_doctor.load_test_topology()
+    core_law = topology["categories"]["core_law_antibody"]
+    readiness = topology["law_gate"]["DATA_DAEMON_READINESS_CONTRACT"]["tests"]
+    expected = {
+        "tests/test_opendata_writes_v2_table.py",
+        "tests/test_opendata_future_target_contract.py",
+        "tests/test_ecmwf_open_data_subprocess_hardening.py",
+        "tests/test_forecast_live_daemon.py",
+        "tests/test_ecmwf_open_data_step_hours.py",
+        "tests/test_forecast_target_contract_horizon.py",
+    }
+
+    assert all(isinstance(path, str) and path.startswith("tests/") for path in core_law)
+    assert expected <= set(core_law)
+    assert expected <= set(readiness)
 
 
 def test_tests_mode_checks_relationship_manifest_symbols(monkeypatch):
@@ -4333,6 +4351,41 @@ def test_operation_vector_admits_first_class_planning_packet():
     assert digest["profile_selection"]["selected_by"] == "operation_vector"
     assert card["persistence_target"] == "plan_packet"
     assert card["suggested_next_command"] is None
+
+
+def test_operation_vector_admits_descriptive_planning_packet_name():
+    digest = topology_doctor.build_digest(
+        "operation planning packet: structural decisions, impact context, slice routes, and verification plan",
+        ["docs/operations/task_2026-05-14_data_daemon_live_efficiency/DATA_DAEMON_LIVE_EFFICIENCY_REFACTOR_PLAN.md"],
+        write_intent="edit",
+    )
+    card = digest["route_card"]
+
+    assert digest["profile"] == "operation planning packet"
+    assert digest["admission"]["status"] == "admitted"
+    assert card["operation_vector"]["artifact_target"] == "plan_packet"
+    assert card["persistence_target"] == "plan_packet"
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "docs/operations/task_2026-05-14_data_daemon_live_efficiency/CRITIC_APPROVAL.md",
+        "docs/operations/task_2026-05-14_data_daemon_live_efficiency/phases/phase1/critic/review.md",
+    ],
+)
+def test_operation_vector_admits_planning_packet_critic_evidence(path):
+    digest = topology_doctor.build_digest(
+        "operation planning packet critic approval for data daemon live efficiency refactor",
+        [path],
+        write_intent="edit",
+    )
+    card = digest["route_card"]
+
+    assert digest["profile"] == "operation planning packet"
+    assert digest["admission"]["status"] == "admitted"
+    assert card["operation_vector"]["artifact_target"] == "packet_review_evidence"
+    assert card["persistence_target"] == "packet_review_evidence"
 
 
 def test_operation_vector_requires_explicit_surface_for_high_fanout_evaluator_profile():

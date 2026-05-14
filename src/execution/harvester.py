@@ -13,8 +13,9 @@ import logging
 import math
 import os
 import sqlite3
+import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import httpx
@@ -35,7 +36,7 @@ from src.state.decision_chain import (
     store_settlement_records,
 )
 from src.state.db import (
-    get_world_connection,
+    get_forecasts_connection,
     get_trade_connection,
     log_market_event_outcomes_v2,
     log_settlement_event,
@@ -63,6 +64,13 @@ from src.riskguard.discord_alerts import alert_redeem
 from src.observability.counters import increment as _cnt_inc
 
 logger = logging.getLogger(__name__)
+
+# Harvester paginator antibody (PLAN §D.1/D.3, critic v4 ACCEPT 2026-05-11).
+# Hard-coded module-private constants; no kwargs path exists to relax them.
+# Trading twin uses 200-item pages (existing code); ingest twin uses 100.
+_CLOSED_EVENTS_CUTOFF_DAYS = 30          # live scope: only events closed ≤30d ago
+_CLOSED_EVENTS_MAX_WALL_SECONDS = 120    # mandatory wall-cap antibody (Fitz §3)
+_CLOSED_EVENTS_PAGE_LIMIT = 200          # trading twin page size (existing)
 
 _NON_FILL_ENTRY_ECONOMICS_AUTHORITIES = frozenset({
     ENTRY_ECONOMICS_CORRECTED_COST_BASIS,
@@ -164,10 +172,11 @@ _HARVESTER_STAGE2_TRADE_TABLES = (
     "chronicle",
 )
 _HARVESTER_STAGE2_SHARED_TABLES = (
-    "ensemble_snapshots",
-    "calibration_pairs",
-    "calibration_decision_group",
-    "platt_models",
+    # K1 (2026-05-11): shared_conn is now forecasts_conn; check v2 tables that
+    # live on forecasts.db. Legacy v1 (ensemble_snapshots, calibration_pairs)
+    # remain on world.db and are not checked here post-migration.
+    "ensemble_snapshots_v2",
+    "calibration_pairs_v2",
 )
 
 _TRAINING_FORECAST_SOURCES = frozenset({"tigge", "ecmwf_ens"})
@@ -670,7 +679,7 @@ def run_harvester() -> dict:
     # Split connections: trade DB for position/settlement events, shared DB for
     # ensemble snapshots and calibration pairs.
     trade_conn = get_trade_connection()
-    shared_conn = get_world_connection()
+    shared_conn = get_forecasts_connection()
     portfolio = load_portfolio()
 
     settled_events = _fetch_settled_events()
@@ -905,31 +914,42 @@ def run_harvester() -> dict:
 def _fetch_settled_events() -> list[dict]:
     """Poll Gamma API for recently settled weather markets.
 
-    B045: mid-pagination HTTPError handling (SD-B). Previously any
-    httpx.HTTPError broke out of the loop and returned the partial
-    page batch as if it were the complete settled-event set.
-    Downstream in run_harvester events not yet fetched look
-    identical to "no settlement yet," so settlements on page 2+
-    would be silently dropped for this cycle's portfolio close
-    accounting.
+    Bounded paginator (PLAN §D.1/D.3, critic v4 ACCEPT 2026-05-11):
+    fetches closed events in descending endDate order and stops once the
+    oldest event in a page crosses the 30-day cutoff window.  A mandatory
+    wall-cap fires unconditionally at _CLOSED_EVENTS_MAX_WALL_SECONDS.
 
-    Contract:
-      * first-page (offset == 0) HTTPError is tolerated with a
-        warning and an empty return -- indistinguishable from a
-        hand-off hour with no settled events, next cycle retries.
-      * mid-pagination HTTPError (offset > 0) raises RuntimeError
-        so the outer cron wrapper logs a real fault and we do NOT
-        commit partial settlement state to the portfolio this cycle.
+    B045 mid-pagination HTTPError contract preserved:
+      * first-page (offset == 0) HTTPError is tolerated with a warning
+        and an empty return — indistinguishable from a hand-off hour
+        with no settled events; next cycle retries.
+      * mid-pagination HTTPError (offset > 0) raises RuntimeError so the
+        outer cron wrapper logs a real fault and we do NOT commit partial
+        settlement state to the portfolio this cycle.
     """
+    cutoff_iso = (
+        datetime.now(timezone.utc) - timedelta(days=_CLOSED_EVENTS_CUTOFF_DAYS)
+    ).isoformat()
+    start_wall = time.monotonic()
+    all_batches: list[dict] = []
     events: list[dict] = []
     offset = 0
 
     while True:
+        if time.monotonic() - start_wall > _CLOSED_EVENTS_MAX_WALL_SECONDS:
+            logger.warning(
+                "execution harvester paginator: wall-cap %.0fs hit at offset=%d; truncating",
+                _CLOSED_EVENTS_MAX_WALL_SECONDS,
+                offset,
+            )
+            break
         try:
             resp = httpx.get(f"{GAMMA_BASE}/events", params={
                 "closed": "true",
-                "limit": 200,
+                "limit": _CLOSED_EVENTS_PAGE_LIMIT,
                 "offset": offset,
+                "order": "endDate",
+                "ascending": "false",
             }, timeout=15.0)
             resp.raise_for_status()
             batch = resp.json()
@@ -939,22 +959,42 @@ def _fetch_settled_events() -> list[dict]:
                 break
             raise RuntimeError(
                 f"Gamma API pagination failed at offset={offset} after "
-                f"{len(events)} events already fetched: {e}. Refusing "
+                f"{len(all_batches)} events already fetched: {e}. Refusing "
                 f"to return partial settled events as complete."
             ) from e
 
         if not batch:
             break
 
-        # Filter to temperature events only
-        for event in batch:
-            title = (event.get("title") or "").lower()
-            if any(kw in title for kw in ("temperature", "°f", "°c")):
-                events.append(event)
+        all_batches.extend(batch)
 
-        if len(batch) < 200:
+        oldest_end = min(
+            (m.get("endDate", "") for m in batch if m.get("endDate")),
+            default="",
+        )
+        if oldest_end and oldest_end < cutoff_iso:
+            break  # absorb this page; dedup downstream
+        if len(batch) < _CLOSED_EVENTS_PAGE_LIMIT:
             break
-        offset += 200
+        offset += _CLOSED_EVENTS_PAGE_LIMIT
+
+    # Dedup at event grain by (conditionId or id) — HTTP-cost optimisation only.
+    seen: set[str] = set()
+    deduped: list[dict] = []
+    for ev in all_batches:
+        key = str(ev.get("conditionId") or ev.get("id") or "")
+        if not key:
+            deduped.append(ev)
+            continue
+        if key not in seen:
+            seen.add(key)
+            deduped.append(ev)
+
+    # Filter to temperature events only (preserved from original)
+    for event in deduped:
+        title = (event.get("title") or "").lower()
+        if any(kw in title for kw in ("temperature", "°f", "°c")):
+            events.append(event)
 
     return events
 

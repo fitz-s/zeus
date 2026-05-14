@@ -41,7 +41,7 @@ import numpy as np
 
 from src.data.forecast_ingest_protocol import ForecastBundle
 from src.data.forecast_source_registry import stable_payload_hash
-from src.state.db import get_world_connection
+from src.state.db import get_forecasts_connection
 
 if TYPE_CHECKING:
     from src.config import City
@@ -102,7 +102,7 @@ def fetch_from_db(
     fetch_time = fetch_time.astimezone(timezone.utc)
     cutoff = (fetch_time - timedelta(hours=freshness_hours)).isoformat()
 
-    conn = get_world_connection()
+    conn = get_forecasts_connection()
     try:
         rows = conn.execute(
             """

@@ -958,7 +958,7 @@ entries:
   doc_class: module_reference
   default_read: false
   direct_reference_allowed: true
-  current_role: dense ingest module reference for user-channel event streams and U2 fact append bridges
+  current_role: dense ingest module reference for user-channel event streams, U2 fact append bridges, and forecast-live producer scheduling
   canonical_replaced_by: []
   next_action: keep
   lifecycle_state: durable

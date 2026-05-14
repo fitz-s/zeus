@@ -67,7 +67,7 @@ test_trust_policy:
     tests/test_forecast_calibration_domain.py: {created: "2026-05-04", last_used: "2026-05-04"}
     tests/test_low_contract_window_backfill.py: {created: "2026-05-07", last_used: "2026-05-07"}
     tests/test_oracle_posterior.py: {created: "2026-05-04", last_used: "2026-05-04"}
-    tests/test_entry_forecast_evaluator_cutover.py: {created: "2026-05-03", last_used: "2026-05-03"}
+    tests/test_entry_forecast_evaluator_cutover.py: {created: "2026-05-03", last_used: "2026-05-14"}
     tests/test_entry_forecast_promotion_evidence_io.py: {created: "2026-05-03", last_used: "2026-05-03"}
     tests/test_entry_readiness_writer.py: {created: "2026-05-03", last_used: "2026-05-03"}
     tests/test_entry_forecast_chain_relationship.py: {created: "2026-05-03", last_used: "2026-05-03"}
@@ -222,7 +222,7 @@ test_trust_policy:
     tests/test_risk_allocator.py: {created: "2026-04-27", last_used: "2026-04-27"}
     tests/test_live_readiness_gates.py: {created: "2026-04-27", last_used: "2026-04-27"}
     tests/test_entry_forecast_config.py: {created: "2026-05-03", last_used: "2026-05-03"}
-    tests/test_executable_forecast_reader.py: {created: "2026-05-03", last_used: "2026-05-03"}
+    tests/test_executable_forecast_reader.py: {created: "2026-05-03", last_used: "2026-05-14"}
     tests/test_ingest_boot_time_semantics.py: {created: "2026-05-02", last_used: "2026-05-02"}
     tests/test_ingest_grib_source_run_context.py: {created: "2026-05-03", last_used: "2026-05-03"}
     tests/test_live_entry_status.py: {created: "2026-05-03", last_used: "2026-05-03"}
@@ -259,7 +259,8 @@ test_trust_policy:
     tests/test_ecmwf_open_data_step_hours.py: {created: "2026-05-08", last_used: "2026-05-08"}
     tests/test_forecast_target_contract_horizon.py: {created: "2026-05-08", last_used: "2026-05-08"}
     # F1 subprocess hardening — retry + timeout + stderr (REPORT §6.2).
-    tests/test_ecmwf_open_data_subprocess_hardening.py: {created: "2026-05-08", last_used: "2026-05-08"}
+    tests/test_ecmwf_open_data_subprocess_hardening.py: {created: "2026-05-08", last_used: "2026-05-14"}
+    tests/test_forecast_live_daemon.py: {created: "2026-05-14", last_used: "2026-05-14"}
 
 categories:
   core_law_antibody:
@@ -334,6 +335,8 @@ categories:
     - tests/test_opendata_release_calendar_selection.py
     - tests/test_opendata_writes_v2_table.py
     - tests/test_opendata_future_target_contract.py
+    - tests/test_ecmwf_open_data_subprocess_hardening.py
+    - tests/test_forecast_live_daemon.py
     - tests/test_ecmwf_open_data_step_hours.py
     - tests/test_forecast_target_contract_horizon.py
     - tests/test_readiness_state.py
@@ -704,6 +707,10 @@ law_gate:
       - tests/test_opendata_release_calendar_selection.py
       - tests/test_opendata_writes_v2_table.py
       - tests/test_opendata_future_target_contract.py
+      - tests/test_ecmwf_open_data_subprocess_hardening.py
+      - tests/test_forecast_live_daemon.py
+      - tests/test_ecmwf_open_data_step_hours.py
+      - tests/test_forecast_target_contract_horizon.py
       - tests/test_producer_readiness_builder.py
       - tests/test_readiness_state.py
       - tests/test_release_calendar.py
@@ -723,6 +730,7 @@ law_gate:
       - src/data/live_entry_status.py
       - scripts/ingest_grib_to_snapshots.py
       - scripts/healthcheck.py
+      - src/ingest/forecast_live_daemon.py
       - src/data/ecmwf_open_data.py
       - src/data/producer_readiness.py
       - src/data/release_calendar.py

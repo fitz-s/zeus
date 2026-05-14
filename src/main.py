@@ -114,7 +114,7 @@ def _harvester_cycle():
     harvester path, which can derive and write settlement truth in the same lane.
     """
     from src.data.dual_run_lock import acquire_lock
-    from src.state.db import get_trade_connection, get_world_connection
+    from src.state.db import get_trade_connection, get_forecasts_connection
     with acquire_lock("harvester_pnl") as acquired:
         if not acquired:
             logger.info("harvester_pnl_resolver skipped_lock_held")
@@ -122,13 +122,14 @@ def _harvester_cycle():
         try:
             from src.execution.harvester_pnl_resolver import resolve_pnl_for_settled_markets
             # v4 plan §AX3: harvester PnL resolver = LIVE class.
+            # K1 (2026-05-11): settlements → zeus-forecasts.db; pass forecasts conn.
             trade_conn = get_trade_connection(write_class="live")
-            world_conn = get_world_connection(write_class="live")
+            forecasts_conn = get_forecasts_connection(write_class="live")
             try:
-                result = resolve_pnl_for_settled_markets(trade_conn, world_conn)
+                result = resolve_pnl_for_settled_markets(trade_conn, forecasts_conn)
             finally:
                 trade_conn.close()
-                world_conn.close()
+                forecasts_conn.close()
         except ImportError as exc:
             logger.error(
                 "harvester_pnl_resolver unavailable; refusing legacy run_harvester fallback: %s",
@@ -476,6 +477,22 @@ def _startup_world_schema_ready_check() -> None:
     Mirrors _startup_freshness_check retry pattern (30 × 10s = 5 min).
     Fail-closed: raises SystemExit if sentinel absent after retries or written_at > 24h old.
     This is the Phase 2→Phase 3 enforcement promotion per architect audit A-2.
+
+    K1 split 2026-05-11: this function now delegates to _startup_db_schema_ready_check,
+    which checks BOTH world and forecasts sentinels. Kept for API compat; do not remove.
+    """
+    _startup_db_schema_ready_check()
+
+
+def _startup_db_schema_ready_check() -> None:
+    """K1 split 2026-05-11: wait for BOTH world_schema_ready + forecasts_schema_ready sentinels.
+
+    Replaces _startup_world_schema_ready_check (retained above as a thin shim for
+    call sites that haven't been updated yet). Both sentinels are written by the
+    ingest daemon's boot path (§5.7); either missing means ingest has not completed
+    its schema initialization for that DB class.
+
+    Retry pattern: 30 × 10s = 5 min (mirrors _startup_freshness_check).
     """
     import json
     import time
@@ -483,11 +500,18 @@ def _startup_world_schema_ready_check() -> None:
     from src.config import STATE_DIR
     from src.control.freshness_gate import BOOT_RETRY_INTERVAL_SECONDS, BOOT_RETRY_MAX_ATTEMPTS
 
-    sentinel_path = STATE_DIR / "world_schema_ready.json"
+    sentinels = [
+        (STATE_DIR / "world_schema_ready.json", "world"),
+        (STATE_DIR / "forecasts_schema_ready.json", "forecasts"),
+    ]
     max_age = timedelta(hours=24)
 
     for attempt in range(1, BOOT_RETRY_MAX_ATTEMPTS + 1):
-        if sentinel_path.exists():
+        missing = []
+        for sentinel_path, label in sentinels:
+            if not sentinel_path.exists():
+                missing.append(label)
+                continue
             try:
                 data = json.loads(sentinel_path.read_text())
                 written_at_str = data.get("written_at", "")
@@ -495,30 +519,34 @@ def _startup_world_schema_ready_check() -> None:
                 age = datetime.now(timezone.utc) - written_at
                 if age > max_age:
                     raise SystemExit(
-                        f"FATAL: world_schema_ready.json is {age.total_seconds()/3600:.1f}h old "
+                        f"FATAL: {sentinel_path.name} is {age.total_seconds()/3600:.1f}h old "
                         f"(max 24h). Is com.zeus.data-ingest running? "
                         f"Check: launchctl list com.zeus.data-ingest"
                     )
                 logger.info(
-                    "world_schema_ready sentinel OK: schema_version=%s written_at=%s",
-                    data.get("schema_version", "unknown"),
+                    "%s_schema_ready sentinel OK: written_at=%s",
+                    label,
                     written_at_str,
                 )
-                return
             except SystemExit:
                 raise
             except Exception as exc:
-                logger.warning("world_schema_ready sentinel parse error: %s — retrying", exc)
-                sentinel_path = STATE_DIR / "world_schema_ready.json"
+                logger.warning("%s_schema_ready sentinel parse error: %s — retrying", label, exc)
+                missing.append(label)
+
+        if not missing:
+            return  # Both sentinels valid.
+
         if attempt < BOOT_RETRY_MAX_ATTEMPTS:
             logger.info(
-                "world_schema_ready sentinel absent at boot — retry %d/%d in %ds",
-                attempt, BOOT_RETRY_MAX_ATTEMPTS, BOOT_RETRY_INTERVAL_SECONDS,
+                "DB schema sentinels missing=%s at boot — retry %d/%d in %ds",
+                missing, attempt, BOOT_RETRY_MAX_ATTEMPTS, BOOT_RETRY_INTERVAL_SECONDS,
             )
             time.sleep(BOOT_RETRY_INTERVAL_SECONDS)
 
     raise SystemExit(
-        "FATAL: ingest daemon must boot first; world_schema_ready sentinel not found within 5 min. "
+        "FATAL: ingest daemon must boot first; one or more DB schema sentinels not found "
+        "within 5 min (world_schema_ready.json + forecasts_schema_ready.json). "
         "Check: launchctl list com.zeus.data-ingest"
     )
 
@@ -528,6 +556,14 @@ def _startup_wallet_check(clob=None):
 
     Accepts an optional clob for testing. In production, creates a live
     PolymarketClient.
+
+    Also installs the process-wide CollateralLedger singleton with a
+    persistent ledger-owned conn (2026-05-13 remediation). Prior to this
+    the singleton was published from `PolymarketClient.get_balance()` while
+    that wrapper still owned the conn — the wrapper's `finally: conn.close()`
+    immediately poisoned the singleton, blocking every downstream
+    `assert_buy_preflight` / `assert_sell_preflight` with
+    `collateral_ledger_unconfigured` or `sqlite3.ProgrammingError`.
     """
     if clob is None:
         from src.data.polymarket_client import PolymarketClient
@@ -538,6 +574,31 @@ def _startup_wallet_check(clob=None):
     except Exception as exc:
         logger.critical("FAIL-CLOSED: wallet query failed at daemon start: %s", exc)
         sys.exit("FATAL: Cannot start — wallet unreachable. Fix credentials or network and restart.")
+
+    # Install the process-wide collateral ledger singleton with a ledger-owned
+    # persistent conn so downstream executor / riskguard preflight callers do
+    # not race against transient conn close. Failures here are non-fatal at
+    # boot — preflight will surface `collateral_ledger_unconfigured` if the
+    # singleton is missing, which is already the existing fail-closed code
+    # path for any operator misconfiguration.
+    try:
+        from src.state.collateral_ledger import (
+            CollateralLedger,
+            configure_global_ledger,
+        )
+        from src.state.db import _zeus_trade_db_path
+
+        ledger = CollateralLedger(db_path=_zeus_trade_db_path())
+        configure_global_ledger(ledger)
+        logger.info(
+            "CollateralLedger global singleton installed (db=%s)",
+            _zeus_trade_db_path(),
+        )
+    except Exception as exc:
+        logger.warning(
+            "CollateralLedger global singleton install failed (preflight will fail-closed): %s",
+            exc,
+        )
 
 
 def _startup_data_health_check(conn):
@@ -676,11 +737,16 @@ def main():
                 _capital_str,
                 settings["sizing"]["kelly_multiplier"] * 100)
 
-    # v4 plan §AX3: live daemon boot — schema init runs once at startup.
-    # Classify as LIVE so the v4 flock topology routes the (rare) startup
-    # writes through the LIVE flock alongside subsequent runtime writes.
-    conn = get_world_connection(write_class="live")
-    init_schema(conn)
+    # Daemon is a read-only consumer of world DB. Schema authority belongs to
+    # ingest (src/ingest_main.py owns init_schema on world; sentinel gate at
+    # _startup_world_schema_ready_check() below enforces ingest-first boot).
+    # Opening without write_class avoids the v4 LIVE flock and never acquires
+    # a SQLite writer lock for read-only ops below — so a concurrent ingest
+    # or backfill cannot starve daemon startup.
+    conn = get_world_connection()
+    # Read-only smoke: confirm world DB is reachable. The sentinel gate at
+    # line ~708 is the authoritative schema-readiness check.
+    conn.execute("SELECT COUNT(*) FROM settlements LIMIT 1").fetchone()
 
     # Ensure trade DB has all tables (prevents lazy-creation gaps)
     trade_conn = get_trade_connection(write_class="live")

@@ -64,8 +64,20 @@ _LOW_LOCALDAY_MIN_OPENDATA_3H = MetricIdentity(
 _ALLOWED_DATA_VERSIONS: dict[str, MetricIdentity] = {
     HIGH_LOCALDAY_MAX.data_version: HIGH_LOCALDAY_MAX,
     LOW_LOCALDAY_MIN.data_version: LOW_LOCALDAY_MIN,
-    _ECMWF_OPENDATA_HIGH_DATA_VERSION: HIGH_LOCALDAY_MAX,
-    _ECMWF_OPENDATA_LOW_DATA_VERSION: LOW_LOCALDAY_MIN,
+    # 2026-05-12 antibody (B/C — schema drift completion): the Open Data
+    # post-cutover data_versions (mx2t3/mn2t3) carry the 3h-native
+    # physical_quantity strings; mapping them to the legacy 6h
+    # HIGH_LOCALDAY_MAX / LOW_LOCALDAY_MIN MetricIdentity caused
+    # PHYSICAL_QUANTITY_MISMATCH on every correctly-tagged Open Data
+    # row (root cause of 183 rejections since 2026-05-11 12z that
+    # starved source_run COMPLETE and BLOCKED Gate #11). The 3h-aware
+    # MetricIdentity instances were created on 2026-05-07 (see comment
+    # block above) but never wired into this dict; the row-write side
+    # of that 2026-05-07 fix already persists the payload's 3h string
+    # (ingest_grib_to_snapshots.py:615-617), so the contract now needs
+    # to accept it.
+    _ECMWF_OPENDATA_HIGH_DATA_VERSION: _HIGH_LOCALDAY_MAX_OPENDATA_3H,
+    _ECMWF_OPENDATA_LOW_DATA_VERSION: _LOW_LOCALDAY_MIN_OPENDATA_3H,
     TIGGE_LOW_CONTRACT_WINDOW_DATA_VERSION: LOW_LOCALDAY_MIN,
     ECMWF_OPENDATA_LOW_CONTRACT_WINDOW_DATA_VERSION: LOW_LOCALDAY_MIN,
     # Legacy bridge — mx2t6/mn2t6 era rows written before 2026-05-07.

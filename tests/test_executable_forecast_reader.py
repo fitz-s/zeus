@@ -1,6 +1,7 @@
 # Created: 2026-05-03
-# Last reused/audited: 2026-05-03
-# Authority basis: docs/operations/task_2026-05-02_live_entry_data_contract/PLAN_v4.md Phase 8 executable forecast reader.
+# Last reused/audited: 2026-05-14
+# Authority basis: docs/operations/task_2026-05-14_data_daemon_live_efficiency/DATA_DAEMON_LIVE_EFFICIENCY_REFACTOR_PLAN.md
+#   Phase 3 producer-readiness-only data daemon cutover path.
 """Executable forecast reader relationship tests."""
 
 from __future__ import annotations
@@ -258,7 +259,7 @@ def _insert_full_reader_fixture(conn: sqlite3.Connection) -> None:
     )
 
 
-def _read_full(conn: sqlite3.Connection):
+def _read_full(conn: sqlite3.Connection, *, require_entry_readiness: bool = True):
     scope = _scope()
     return read_executable_forecast(
         conn,
@@ -275,6 +276,7 @@ def _read_full(conn: sqlite3.Connection):
         market_family="family-1",
         condition_id="condition-123",
         decision_time=_utc(2026, 5, 3, 10),
+        require_entry_readiness=require_entry_readiness,
     )
 
 
@@ -443,6 +445,27 @@ def test_full_reader_blocks_missing_entry_readiness() -> None:
 
     assert not result.ok
     assert result.reason_code == "READINESS_MISSING"
+
+
+def test_full_reader_can_consume_producer_readiness_without_entry_readiness() -> None:
+    conn = _conn()
+    _insert_snapshot(conn)
+    _insert_source_run(conn)
+    _insert_coverage(conn)
+    _insert_readiness(
+        conn,
+        strategy_key=PRODUCER_READINESS_STRATEGY_KEY,
+        readiness_id="producer-readiness-1",
+        dependency_json={"coverage_id": "coverage-1"},
+    )
+
+    result = _read_full(conn, require_entry_readiness=False)
+
+    assert result.ok
+    assert result.bundle is not None
+    evidence = result.bundle.evidence
+    assert evidence.producer_readiness_id == "producer-readiness-1"
+    assert evidence.entry_readiness_id is None
 
 
 def test_full_reader_blocks_failed_source_run() -> None:

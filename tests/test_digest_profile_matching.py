@@ -8,7 +8,7 @@ cannot collide with safety-critical profiles like "modify data ingestion".
 These cases come directly from §15 of docs/reference/Zeus_Apr25_review.md.
 """
 # Created: 2026-04-25
-# Last reused or audited: 2026-05-08
+# Last reused or audited: 2026-05-14
 # Authority basis: AGENTS.md topology routing; phase 5 forward substrate producer phrase maintenance.
 # Lifecycle: created=2026-04-25; last_reviewed=2026-05-01; last_reused=2026-05-01
 # Purpose: Lock the new word-boundary + denylist + veto profile resolver against
@@ -939,6 +939,54 @@ def test_phase1f_ecmwf_open_data_routes_to_source_policy_profile():
     assert "src/main.py" in digest["admission"]["admitted_files"]
     assert "src/data/ecmwf_open_data.py" in digest["admission"]["admitted_files"]
     assert "src/data/forecast_source_registry.py" in digest["admission"]["admitted_files"]
+
+
+def test_data_daemon_live_efficiency_refactor_routes_to_dedicated_profile():
+    digest = build_digest(
+        "data daemon HTTP 429 live readiness end-to-end refactor forecast-live-daemon "
+        "OpenData live forecast producer split readiness wiring no prod mutation "
+        "no venue side effects",
+        [
+            "docs/operations/task_2026-05-14_data_daemon_live_efficiency/DATA_DAEMON_LIVE_EFFICIENCY_REFACTOR_PLAN.md",
+            "src/ingest_main.py",
+            "src/ingest/forecast_live_daemon.py",
+            "src/data/ecmwf_open_data.py",
+            "src/data/producer_readiness.py",
+            "src/state/readiness_repo.py",
+            "tests/test_forecast_live_daemon.py",
+            "tests/test_ecmwf_open_data_parallel_fetch.py",
+        ],
+    )
+
+    assert digest["profile"] == "data daemon live efficiency refactor implementation"
+    assert digest["admission"]["status"] == "admitted"
+    assert "src/ingest/forecast_live_daemon.py" in digest["admission"]["admitted_files"]
+    assert "src/data/ecmwf_open_data.py" in digest["admission"]["admitted_files"]
+    assert "tests/test_forecast_live_daemon.py" in digest["admission"]["admitted_files"]
+
+
+@pytest.mark.parametrize(
+    "forbidden_phrase",
+    [
+        "with prod DB mutation",
+        "mutate production DB rows",
+        "live venue submission",
+    ],
+)
+def test_data_daemon_live_efficiency_refactor_forbidden_intent_vetoes_profile(forbidden_phrase):
+    digest = build_digest(
+        "data daemon HTTP 429 live readiness end-to-end refactor forecast-live-daemon "
+        f"OpenData live forecast producer split readiness wiring {forbidden_phrase}",
+        [
+            "src/ingest/forecast_live_daemon.py",
+            "src/data/ecmwf_open_data.py",
+            "tests/test_forecast_live_daemon.py",
+        ],
+    )
+
+    assert digest["profile"] != "data daemon live efficiency refactor implementation"
+    assert "data daemon live efficiency refactor implementation" not in digest["profile_selection"]["candidates"]
+    assert digest["admission"]["status"] != "admitted"
 
 
 def test_phase1g_forecast_history_provenance_routes_to_source_policy_profile():

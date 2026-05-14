@@ -700,7 +700,7 @@ def test_R12b_obs_anchor_catches_C_in_F_leak():
 
 def test_R12b_obs_anchor_catches_F_in_C_leak():
     """Symmetric: °F values (65-75 °F) sent into a °C city with obs=20°C
-    give |70 - 20| = 50 °C offset, far beyond the 22 °C tolerance."""
+    give |70 - 20| = 50 °C offset, far beyond the 28 °C tolerance."""
     f_values_in_c_city = np.array([65.0, 70.0, 75.0, 68.0, 72.0])  # °F
     with pytest.raises(UnitProvenanceError, match=r"exceeds tolerance"):
         validate_members_vs_observation(f_values_in_c_city, PARIS_C, 20.0)
@@ -1009,7 +1009,7 @@ def _seed_ensemble_snapshot(
     *,
     members_json: str,
     authority: str = "VERIFIED",
-    data_version: str = "tigge_step024_v1_test",
+    data_version: str = "tigge_mx2t6_local_calendar_day_max_v1",
     lead_hours: float = 24.0,
 ) -> None:
     now = datetime.now(timezone.utc).isoformat()

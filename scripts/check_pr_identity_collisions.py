@@ -175,7 +175,19 @@ def main(argv: Iterable[str] | None = None) -> int:
                              "as a PR comment.")
     args = parser.parse_args(list(argv) if argv is not None else None)
 
-    this_diff = _pr_diff(args.this_pr, args.repo)
+    try:
+        this_diff = _pr_diff(args.this_pr, args.repo)
+    except subprocess.CalledProcessError as exc:
+        # GitHub returns HTTP 406 when the PR diff exceeds 300 files.
+        # Mirror the same graceful-skip already applied to other-PR diffs
+        # (line ~201): treat as no identity-bearing classes found and exit 0.
+        # The check is advisory; a diff-too-large PR cannot be inspected here
+        # but also poses no collision risk we could detect anyway.
+        print(
+            f"PR #{args.this_pr} diff unavailable (gh pr diff exited {exc.returncode}; "
+            "possibly >300 files — GitHub HTTP 406). Skipping identity check."
+        )
+        return 0
     this_classes = added_classes_in_diff(this_diff)
     if not this_classes:
         print(f"PR #{args.this_pr} adds no identity-bearing classes; nothing to check.")
