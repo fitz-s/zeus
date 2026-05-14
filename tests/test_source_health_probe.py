@@ -1,6 +1,6 @@
 # Created: 2026-04-30
-# Last reused/audited: 2026-04-30
-# Authority basis: docs/operations/task_2026-04-30_two_system_independence/design.md §2.1 + §6 antibody #5
+# Last reused/audited: 2026-05-14
+# Authority basis: docs/operations/task_2026-04-30_two_system_independence/design.md §2.1 + §6 antibody #5; docs/operations/task_2026-05-08_deep_alignment_audit/DATA_DAEMON_LIVE_EFFICIENCY_REFACTOR_PLAN.md §6.4 + §8 Phase 2.
 """Antibody #5 (Phase 2): Source health probe contract tests.
 
 Asserts:
@@ -24,6 +24,7 @@ os.environ.setdefault("ZEUS_MODE", "live")
 
 from src.data.source_health_probe import (
     EXPECTED_SOURCES,
+    _probe_ecmwf_open_data,
     probe_all_sources,
     write_source_health,
     _probe_source,
@@ -141,16 +142,12 @@ class TestProbeAllSourcesSchema:
 class TestAbsentBranchHandling:
     """Absent or unknown sources return ABSENT entries, not crashes."""
 
-    def test_manual_operator_source_returns_absent_not_crash(self):
-        """tigge_mars is MANUAL_OPERATOR — must return dict, not raise."""
+    def test_tigge_mars_probe_returns_schema_not_crash(self):
+        """tigge_mars is actively probed now, but must still return schema."""
         result = _probe_source("tigge_mars", timeout=1.0)
-        assert isinstance(result, dict), "MANUAL_OPERATOR source must return dict"
-        assert "MANUAL_OPERATOR" in (result.get("error") or ""), (
-            f"Expected MANUAL_OPERATOR in error field, got: {result}"
-        )
-        # Must have all required fields
+        assert isinstance(result, dict), "tigge_mars source must return dict"
         for field in REQUIRED_FIELDS:
-            assert field in result, f"MANUAL_OPERATOR result missing field: {field}"
+            assert field in result, f"tigge_mars result missing field: {field}"
 
     def test_unknown_source_returns_absent_entry_not_crash(self):
         """Unknown source name must return ABSENT dict, not raise."""
@@ -220,3 +217,42 @@ class TestWriteSourceHealth:
         # No .tmp file should remain
         tmp_files = list(tmp_path.glob("*.tmp"))
         assert not tmp_files, f"Leftover .tmp files: {tmp_files}"
+
+
+class TestEcmwfOpenDataHttpStatusSemantics:
+    """ECMWF OpenData source health must not greenwash throttling/client failures."""
+
+    @pytest.mark.parametrize(
+        ("status_code", "expected_prefix"),
+        [
+            (429, "THROTTLED"),
+            (403, "CLIENT_BLOCKED"),
+        ],
+    )
+    def test_4xx_status_is_degraded_not_success(
+        self,
+        monkeypatch,
+        status_code,
+        expected_prefix,
+    ):
+        """HTTP 429/403 must fail closed instead of setting last_success_at."""
+        import httpx
+
+        class _Response:
+            def __init__(self, status_code: int):
+                self.status_code = status_code
+
+        monkeypatch.setattr(
+            httpx,
+            "head",
+            lambda *args, **kwargs: _Response(status_code),
+        )
+
+        result = _probe_ecmwf_open_data(timeout=1.0)
+
+        assert result["last_success_at"] is None
+        assert result["last_failure_at"] is not None
+        assert result["consecutive_failures"] == 1
+        assert result["degraded_since"] == result["last_failure_at"]
+        assert result["error"].startswith(expected_prefix)
+        assert f"HTTP {status_code}" in result["error"]

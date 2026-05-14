@@ -898,6 +898,18 @@ files:
     why: Tracks HTTP proxy health so quota/fallback workarounds stay observable instead of silently changing source routing.
     downstream:
     - src/main.py
+  src/data/source_health_probe.py:
+    zone: K2_runtime
+    authority_role: source_reachability_probe
+    why: Probes upstream source reachability and writes derived state/source_health.json for operator visibility; source health is not source-run, coverage, readiness, or trading authority.
+    hazards:
+    - DERIVED_ONLY
+    - NO_WRITE_PATH
+    - SOURCE_TRUTH_PLANE_COLLAPSE
+    downstream:
+    - src/ingest_main.py
+    - state/source_health.json
+    - tests/test_source_health_probe.py
   src/data/rebuild_validators.py:
     zone: K2_runtime
     authority_role: rebuild_row_validator

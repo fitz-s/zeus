@@ -63,6 +63,7 @@ test_trust_policy:
     tests/test_calibration_weighting_laws.py: {created: "2026-05-08", last_used: "2026-05-08"}
     tests/test_calibration_v2_fallback_alerting.py: {created: "2026-04-26", last_used: "2026-04-26"}
     tests/test_calibration_retrain.py: {created: "2026-04-27", last_used: "2026-04-27"}
+    tests/test_source_health_probe.py: {created: "2026-04-30", last_used: "2026-05-14"}
     tests/test_executable_ev_replay.py: {created: "2026-05-04", last_used: "2026-05-04"}
     tests/test_forecast_calibration_domain.py: {created: "2026-05-04", last_used: "2026-05-04"}
     tests/test_low_contract_window_backfill.py: {created: "2026-05-07", last_used: "2026-05-07"}
@@ -395,6 +396,7 @@ categories:
     - tests/test_obs_v2_writer.py
     - tests/test_temperature.py
     - tests/test_tier_resolver.py
+    - tests/test_source_health_probe.py
     - tests/test_topology_doctor.py
     - tests/test_digest_admission_policy.py
     - tests/test_digest_profile_matching.py

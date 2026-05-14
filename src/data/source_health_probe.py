@@ -1,6 +1,6 @@
 # Created: 2026-04-30
-# Last reused/audited: 2026-04-30
-# Authority basis: docs/operations/task_2026-04-30_two_system_independence/design.md §2.1
+# Last reused/audited: 2026-05-14
+# Authority basis: docs/operations/task_2026-04-30_two_system_independence/design.md §2.1; docs/operations/task_2026-05-08_deep_alignment_audit/DATA_DAEMON_LIVE_EFFICIENCY_REFACTOR_PLAN.md §6.4 + §8 Phase 3.
 """Source health probe loop — Phase 2 ingest improvement.
 
 Runs a 1-row-fetch + latency probe against each upstream data source.
@@ -65,6 +65,18 @@ def _empty_result(error: str | None = None) -> dict[str, Any]:
         "latency_ms": None,
         "error": error,
     }
+
+
+def _http_status_error(status_code: int) -> str | None:
+    if 200 <= status_code < 400:
+        return None
+    if status_code == 429:
+        return "THROTTLED HTTP 429"
+    if 400 <= status_code < 500:
+        return f"CLIENT_BLOCKED HTTP {status_code}"
+    if status_code >= 500:
+        return f"UPSTREAM_ERROR HTTP {status_code}"
+    return f"HTTP {status_code}"
 
 
 def _probe_open_meteo_archive(timeout: float) -> dict[str, Any]:
@@ -229,8 +241,9 @@ def _probe_ogimet(timeout: float) -> dict[str, Any]:
         )
         latency_ms = int((time.monotonic() - start) * 1000)
         # Ogimet returns 200 even on no-data; check it's reachable
-        if resp.status_code >= 500:
-            raise RuntimeError(f"HTTP {resp.status_code}")
+        status_error = _http_status_error(resp.status_code)
+        if status_error is not None:
+            raise RuntimeError(status_error)
         now = _now_iso()
         return {
             "last_success_at": now,
@@ -265,8 +278,9 @@ def _probe_ecmwf_open_data(timeout: float) -> dict[str, Any]:
             follow_redirects=True,
         )
         latency_ms = int((time.monotonic() - start) * 1000)
-        if resp.status_code >= 500:
-            raise RuntimeError(f"HTTP {resp.status_code}")
+        status_error = _http_status_error(resp.status_code)
+        if status_error is not None:
+            raise RuntimeError(status_error)
         now = _now_iso()
         return {
             "last_success_at": now,
@@ -301,8 +315,9 @@ def _probe_noaa(timeout: float) -> dict[str, Any]:
             follow_redirects=True,
         )
         latency_ms = int((time.monotonic() - start) * 1000)
-        if resp.status_code >= 500:
-            raise RuntimeError(f"HTTP {resp.status_code}")
+        status_error = _http_status_error(resp.status_code)
+        if status_error is not None:
+            raise RuntimeError(status_error)
         now = _now_iso()
         return {
             "last_success_at": now,
