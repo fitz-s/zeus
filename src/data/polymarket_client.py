@@ -1,3 +1,7 @@
+# Created: prior to 2026-04-26
+# Last reused/audited: 2026-05-13
+# Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/Z2.yaml
+#                  + 2026-05-13 collateral_ledger singleton conn lifecycle remediation
 """Polymarket CLOB API client. Spec §6.4.
 
 Limit orders ONLY. Auth via macOS Keychain.
@@ -634,7 +638,15 @@ class PolymarketClient:
             DeprecationWarning,
             stacklevel=2,
         )
-        from src.state.collateral_ledger import CollateralLedger, configure_global_ledger
+        # 2026-05-13 remediation: this compat path MUST NOT publish to the
+        # global ledger slot. Prior to this fix, `configure_global_ledger(ledger)`
+        # ran here with a `ledger` holding a transient `conn` that the
+        # `finally` block closes immediately, leaving the singleton
+        # unusable (`sqlite3.ProgrammingError: Cannot operate on a closed
+        # database`). Global-singleton lifecycle is owned by daemon startup
+        # in `src/main.py::_startup_wallet_check`; the compat wrapper now
+        # only computes the snapshot for legacy callers.
+        from src.state.collateral_ledger import CollateralLedger
         from src.state.db import get_trade_connection_with_world
 
         conn = get_trade_connection_with_world()
@@ -642,7 +654,6 @@ class PolymarketClient:
             ledger = CollateralLedger(conn)
             snapshot = ledger.refresh(self._ensure_v2_adapter())
             conn.commit()
-            configure_global_ledger(ledger)
             return snapshot.pusd_balance_micro / 1_000_000
         finally:
             conn.close()

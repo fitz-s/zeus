@@ -491,12 +491,29 @@ def test_fx_classification_enum_required_at_redemption(monkeypatch):
 
 
 
-def test_polymarket_client_configures_db_backed_global_collateral_ledger(conn, monkeypatch):
+def test_polymarket_client_get_balance_persists_snapshot_without_global_side_effect(tmp_path, monkeypatch):
+    """Compat wrapper persists a fresh snapshot to the trade DB but MUST NOT
+    publish to the global ledger slot.
+
+    2026-05-13 contract change: the deprecated `PolymarketClient.get_balance()`
+    wrapper previously did `configure_global_ledger(ledger)` while still
+    owning the conn — its `finally: conn.close()` then closed the conn and
+    poisoned the singleton (sqlite3.ProgrammingError on every preflight).
+    Global-singleton lifecycle is owned exclusively by daemon startup.
+    The compat path now only computes and persists the snapshot.
+    """
     from src.data.polymarket_client import PolymarketClient
     from src.state.collateral_ledger import configure_global_ledger, get_global_ledger
     from src.state.db import init_schema
 
-    init_schema(conn)
+    db_path = tmp_path / "trade.db"
+
+    def get_conn():
+        db = sqlite3.connect(db_path)
+        db.row_factory = sqlite3.Row
+        init_schema(db)
+        return db
+
     payload = {
         "pusd_balance_micro": 7_000_000,
         "pusd_allowance_micro": 7_000_000,
@@ -504,14 +521,23 @@ def test_polymarket_client_configures_db_backed_global_collateral_ledger(conn, m
         "ctf_token_allowances_units": {YES_TOKEN: _ctf_units(0.01)},
         "authority_tier": "CHAIN",
     }
-    monkeypatch.setattr("src.state.db.get_trade_connection_with_world", lambda: conn)
+    monkeypatch.setattr("src.state.db.get_trade_connection_with_world", get_conn)
     monkeypatch.setattr(PolymarketClient, "_ensure_v2_adapter", lambda self: FakeCollateralAdapter(payload=payload))
+    # Pre-condition: no global ledger set.
+    configure_global_ledger(None)
     try:
         assert PolymarketClient().get_balance() == 7.0
-        assert get_global_ledger() is not None
-        fresh = CollateralLedger(conn).snapshot()
-        assert fresh.pusd_balance_micro == 7_000_000
-        assert fresh.ctf_token_balances[YES_TOKEN] == _ctf_units(0.01)
+        # Contract: get_balance() does NOT install the global singleton.
+        assert get_global_ledger() is None
+        # Contract: snapshot persisted to the trade DB. Verify via a fresh
+        # conn (the wrapper closes its own conn).
+        fresh_conn = get_conn()
+        try:
+            fresh = CollateralLedger(fresh_conn).snapshot()
+            assert fresh.pusd_balance_micro == 7_000_000
+            assert fresh.ctf_token_balances[YES_TOKEN] == _ctf_units(0.01)
+        finally:
+            fresh_conn.close()
     finally:
         configure_global_ledger(None)
 
