@@ -15,9 +15,22 @@ from src.state.readiness_repo import get_entry_readiness
 UTC = timezone.utc
 SOURCE_TRANSPORT = "ensemble_snapshots_v2_db_reader"
 WORLD_SCHEMA = "world"
+# K1 split 2026-05-11: ensemble_snapshots_v2 / source_run / source_run_coverage
+# physically moved from zeus-world.db → zeus-forecasts.db.  When the caller
+# holds a trade connection with both 'world' and 'forecasts' ATTACHed (the
+# standard path since K1), _resolve_owned_table checks world first, then
+# falls through to forecasts so existing callsites need no change.
+FORECASTS_SCHEMA = "forecasts"
 WORLD_OWNED_TABLES = frozenset({
     "ensemble_snapshots_v2",
     "readiness_state",
+    "source_run",
+    "source_run_coverage",
+})
+# Tables that migrated to zeus-forecasts.db in K1 but may still appear in
+# world (pre-migration connections) or main (no ATTACH at all).
+FORECASTS_OWNED_TABLES = frozenset({
+    "ensemble_snapshots_v2",
     "source_run",
     "source_run_coverage",
 })
@@ -181,7 +194,7 @@ def _readiness_reasons(value: object) -> tuple[str, ...]:
 
 
 def _table_exists(conn: sqlite3.Connection, *, schema: str, table: str) -> bool:
-    if schema not in {"main", WORLD_SCHEMA} or table not in WORLD_OWNED_TABLES:
+    if schema not in {"main", WORLD_SCHEMA, FORECASTS_SCHEMA} or table not in WORLD_OWNED_TABLES:
         raise ValueError("unsupported executable forecast authority table")
     if not _schema_attached(conn, schema):
         return False
@@ -196,14 +209,36 @@ def _schema_attached(conn: sqlite3.Connection, schema: str) -> bool:
     return schema == "main" or any(row[1] == schema for row in conn.execute("PRAGMA database_list"))
 
 
-def _world_owned_table(conn: sqlite3.Connection, table: str) -> str | None:
+def _resolve_owned_table(conn: sqlite3.Connection, table: str) -> str | None:
+    """Return the qualified ``schema.table`` reference for *table*, or ``None``.
+
+    Resolution order (K1 split 2026-05-11):
+    1. ``world`` schema attached → check there first (pre-K1 connections or
+       world-class tables such as ``readiness_state``).
+    2. ``forecasts`` schema attached → check there (post-K1 tables:
+       ``ensemble_snapshots_v2``, ``source_run``, ``source_run_coverage``).
+    3. Neither schema attached → fall back to unqualified ``table`` (``main``).
+    Returns ``None`` only when a schema is attached but the table is absent
+    from every attached schema — indicates the row does not exist yet.
+    """
     if table not in WORLD_OWNED_TABLES:
         raise ValueError("unsupported executable forecast authority table")
-    if not _schema_attached(conn, WORLD_SCHEMA):
+    world_attached = _schema_attached(conn, WORLD_SCHEMA)
+    forecasts_attached = _schema_attached(conn, FORECASTS_SCHEMA)
+    if not world_attached and not forecasts_attached:
+        # No ATTACHes (e.g. bare main-only connection in tests).
         return table
-    if _table_exists(conn, schema=WORLD_SCHEMA, table=table):
+    if world_attached and _table_exists(conn, schema=WORLD_SCHEMA, table=table):
         return f"{WORLD_SCHEMA}.{table}"
+    if forecasts_attached and table in FORECASTS_OWNED_TABLES and _table_exists(conn, schema=FORECASTS_SCHEMA, table=table):
+        return f"{FORECASTS_SCHEMA}.{table}"
+    # Schema(s) attached but table found in neither — caller should treat as missing.
     return None
+
+
+# Backward-compat alias so any module that imported _world_owned_table directly
+# still works without changes.
+_world_owned_table = _resolve_owned_table
 
 
 def _source_run_coverage_by_id(conn: sqlite3.Connection, coverage_id: str) -> dict[str, Any] | None:
