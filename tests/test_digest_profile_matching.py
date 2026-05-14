@@ -1616,6 +1616,27 @@ def test_phase2f_source_degradation_freshness_routes_to_dedicated_profile():
     assert "tests/test_live_execution.py" in digest["admission"]["admitted_files"]
 
 
+def test_data_daemon_live_forecast_owner_routes_to_scheduler_profile():
+    digest = build_digest(
+        "data daemon live forecast owner routing for OpenData scheduler owner "
+        "gate in src.ingest_main; no live venue side effects; no production DB "
+        "mutation; no schema migration; no source routing; no CLOB cutover",
+        [
+            "src/ingest_main.py",
+            "tests/test_forecast_live_owner.py",
+            "architecture/test_topology.yaml",
+            "tests/test_digest_profile_matching.py",
+            "architecture/topology.yaml",
+            "architecture/digest_profiles.py",
+        ],
+    )
+
+    assert digest["profile"] == "data daemon live forecast owner routing"
+    assert digest["admission"]["status"] == "admitted"
+    assert "src/ingest_main.py" in digest["admission"]["admitted_files"]
+    assert "tests/test_forecast_live_owner.py" in digest["admission"]["admitted_files"]
+
+
 def test_phase2d_execution_capability_status_routes_to_observability_profile():
     digest = build_digest(
         "Phase 2D DSA-16 execution capability status summary matrix for entry "
