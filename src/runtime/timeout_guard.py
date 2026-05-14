@@ -1,6 +1,15 @@
 # Created: 2026-05-13
-# Last reused or audited: 2026-05-13
-# Authority basis: ECMWF hang antibody bundle — /tmp/zeus_module_audit.md row "rglob on stale mount"
+# Last reused or audited: 2026-05-14
+# Authority basis:
+#   - 2026-05-13: ECMWF hang antibody bundle — /tmp/zeus_module_audit.md row "rglob on stale mount"
+#   - 2026-05-14: ECMWF wedge diagnostic — latent deadlock fix. The original
+#     `with ThreadPoolExecutor(...) as ex:` form calls `shutdown(wait=True)`
+#     on exit, which blocks forever on a wedged worker thread. The TimeoutError
+#     raised from `fut.result(timeout=...)` triggers the `with` __exit__ BEFORE
+#     the exception propagates — so the caller never sees TimeoutError, just
+#     a deadlock. This is the original wedge mode `run_with_timeout` was meant
+#     to PREVENT. Fix: manage the executor explicitly, shutdown(wait=False,
+#     cancel_futures=True) on timeout, ensuring the raise leaves the function.
 #   Daemon-thread-safe timeout for blocking I/O calls. APScheduler runs jobs in
 #   ThreadPoolExecutor workers (see src/ingest_main.py:1141 "fast"/"default"
 #   executor pools), so signal.alarm cannot be used (it raises ValueError in
@@ -75,22 +84,52 @@ def run_with_timeout(
         raise ValueError(f"timeout_guard seconds must be > 0, got {seconds}")
     # Each call gets its own single-worker pool — we never want to share
     # a wedged worker between unrelated callers.
-    with ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"timeout_guard_{label}") as ex:
+    #
+    # NOTE 2026-05-14: do NOT use `with ThreadPoolExecutor(...) as ex:` here.
+    # The context-manager __exit__ calls `shutdown(wait=True)`, which blocks
+    # FOREVER on a wedged worker thread. The TimeoutError we raise from the
+    # except branch triggers __exit__ before propagation, so the caller never
+    # sees the timeout — the wedge silently transfers from `fn` to the
+    # `with` statement. That defeats the entire point of this helper.
+    # We manage the executor manually and call shutdown(wait=False,
+    # cancel_futures=True) on the timeout path, ensuring the raise leaves
+    # this function. The wedged worker thread leaks (Python has no portable
+    # Thread.kill) — by design; the win is converting a silent forever-hold
+    # into a loud TimeoutError at a known boundary.
+    ex = ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"timeout_guard_{label}")
+    try:
         fut = ex.submit(fn)
         try:
-            return fut.result(timeout=seconds)
+            result = fut.result(timeout=seconds)
         except _FutTimeoutError as exc:
             logger.warning(
                 "timeout_guard: %s exceeded %.1fs — thread leaked, daemon should restart",
                 label,
                 seconds,
             )
-            # Do NOT shutdown(wait=False) — that's the default behaviour of
-            # the context-manager exit, but we want to raise immediately so
-            # the with-block exit happens after the raise propagates.
+            # Best-effort: cancel queued futures and DO NOT wait for the
+            # wedged worker. Bare shutdown(wait=True) would deadlock here.
+            ex.shutdown(wait=False, cancel_futures=True)
             raise TimeoutError(
                 f"timeout_guard: {label} exceeded {seconds:.1f}s"
             ) from exc
+        except BaseException:
+            # Any other exception from fn: do not wait on the worker either
+            # (the worker has already finished — wait=False is cheap).
+            ex.shutdown(wait=False, cancel_futures=True)
+            raise
+        # Normal success path: worker finished; safe to shutdown(wait=True).
+        ex.shutdown(wait=True)
+        return result
+    except BaseException:
+        # Defensive: ensure executor is shut down if anything above raised
+        # before the inner try (e.g. submit() failure). wait=False so we
+        # never deadlock here.
+        try:
+            ex.shutdown(wait=False, cancel_futures=True)
+        except Exception:
+            pass
+        raise
 
 
 @contextmanager
