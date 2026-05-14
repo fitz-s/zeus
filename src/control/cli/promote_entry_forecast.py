@@ -240,15 +240,49 @@ def cmd_propose(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 
 
+def _read_settings_rollout_mode(settings_path: Path) -> str | None:
+    """Return the on-disk entry_forecast.rollout_mode value, or None on any error."""
+    try:
+        data = json.loads(settings_path.read_text())
+        return data.get("entry_forecast", {}).get("rollout_mode")
+    except Exception:
+        return None
+
+
 def cmd_flip_mode(args: argparse.Namespace) -> int:
     target_mode = args.target_mode
     cfg = entry_forecast_config()
-    current_mode = cfg.rollout_mode.value
+    current_mode = cfg.rollout_mode.value  # may be env-overridden
     env_mode = os.environ.get(ROLLOUT_MODE_ENV)
+
+    settings_path = Path(args.settings_path) if args.settings_path else SETTINGS_PATH
+    ondisk_mode = _read_settings_rollout_mode(settings_path)
 
     print(f"=== flip-mode {current_mode!r} -> {target_mode!r} ===")
     print(f"  config rollout_mode  : {current_mode}")
     print(f"  {ROLLOUT_MODE_ENV}: {env_mode if env_mode is not None else '<unset>'}")
+    if ondisk_mode is not None:
+        print(f"  settings.json rollout_mode: {ondisk_mode!r}")
+
+    # Bug fix (Copilot thread 2): when env override is active, --commit rewrites
+    # settings.json from its on-disk value, not the env-overridden value. Surface
+    # the divergence and validate both transitions; refuse without --force.
+    if env_mode is not None and ondisk_mode is not None and env_mode != ondisk_mode:
+        print(
+            f"WARNING: env override ({env_mode!r}) differs from settings.json ({ondisk_mode!r}). "
+            f"--commit will rewrite settings.json {ondisk_mode!r} -> {target_mode!r}, "
+            f"NOT {env_mode!r} -> {target_mode!r}.",
+            file=sys.stderr,
+        )
+        # Also validate the on-disk transition, not just the env-overridden one.
+        ondisk_allowed = ALLOWED_TRANSITIONS.get(ondisk_mode, set())
+        if target_mode not in ondisk_allowed and not args.force:
+            print(
+                f"ERROR: settings.json transition {ondisk_mode!r} -> {target_mode!r} not allowed "
+                f"(allowed: {sorted(ondisk_allowed)}). Resolve env/settings divergence or use --force.",
+                file=sys.stderr,
+            )
+            return 2
 
     allowed = ALLOWED_TRANSITIONS.get(current_mode, set())
     if target_mode not in allowed and not args.force:
@@ -306,11 +340,17 @@ def cmd_flip_mode(args: argparse.Namespace) -> int:
     print(f"  launchctl kickstart -k gui/$(id -u)/{LAUNCHD_LABEL}")
     print()
 
-    settings_path = Path(args.settings_path) if args.settings_path else SETTINGS_PATH
     if args.commit:
         rc = _rewrite_settings_rollout_mode(settings_path, target_mode)
         if rc != 0:
             return rc
+        # Bug fix (Copilot thread 1): _rewrite_settings_rollout_mode returns 0 on
+        # both actual write AND no-op (value already equals target_mode). Use the
+        # pre-read ondisk_mode to distinguish — print "WROTE" only when a real
+        # mutation occurred.
+        if ondisk_mode == target_mode:
+            # Already at target — no-op was already announced by _rewrite_settings_rollout_mode.
+            return 0
         print(f"WROTE {settings_path} (entry_forecast.rollout_mode -> {target_mode!r})")
         print(
             f"REMINDER: env var + launchctl NOT touched. Run them manually if needed."
