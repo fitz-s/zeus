@@ -50,7 +50,7 @@ from __future__ import annotations
 import argparse
 import sqlite3
 import sys
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 # Ensure repo root is on sys.path so `from src.state...` imports work when
@@ -66,11 +66,9 @@ if str(_REPO_ROOT_FOR_IMPORT) not in sys.path:
 
 _PLAN_K1_MERGE_DATE = date(2026, 5, 11)
 _RETENTION_DAYS = 90
-_EARLIEST_DROP_DATE = date(
-    _PLAN_K1_MERGE_DATE.year,
-    _PLAN_K1_MERGE_DATE.month,
-    _PLAN_K1_MERGE_DATE.day,
-)
+# Earliest date on which DROP is authorised (merge date + 90-day D2 retain window).
+# Fixed P4-N3: original constant incorrectly used merge date directly.
+_EARLIEST_DROP_DATE = _PLAN_K1_MERGE_DATE + timedelta(days=_RETENTION_DAYS)
 
 # Ghost tables to drop from world.db — must all be LEGACY_ARCHIVED in registry.
 _GHOST_TABLES = [
@@ -153,15 +151,13 @@ def _verify_db_is_world(conn: sqlite3.Connection, db_path: Path) -> None:
 
 def _retention_check() -> None:
     """Warn (but do not block) if still within the 90-day retain window."""
-    import datetime as _dt
     today = date.today()
     elapsed = (today - _PLAN_K1_MERGE_DATE).days
-    earliest_drop = _PLAN_K1_MERGE_DATE + _dt.timedelta(days=_RETENTION_DAYS)
-    if today < earliest_drop:
-        remaining = (earliest_drop - today).days
+    if today < _EARLIEST_DROP_DATE:
+        remaining = (_EARLIEST_DROP_DATE - today).days
         print(
             f"WARNING: D2 policy requires a {_RETENTION_DAYS}-day retain window after K1 merge "
-            f"({_PLAN_K1_MERGE_DATE}). Earliest authorised drop date: {earliest_drop} "
+            f"({_PLAN_K1_MERGE_DATE}). Earliest authorised drop date: {_EARLIEST_DROP_DATE} "
             f"({remaining} days from today). Proceeding anyway — operator assumes responsibility.",
             file=sys.stderr,
         )

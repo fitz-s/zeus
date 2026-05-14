@@ -351,15 +351,24 @@ class TestA8NoCrossDbWriteTransaction:
         as long as it does NOT write to both in a single logical operation)
         - Populate this list only when a genuine false-positive is found.
         """
+        # Whole-file allowlist: files that define the helpers (not call sites).
         WHOLE_FILE_ALLOWLIST = {
-            "src/state/db.py",
-            "src/state/connection_pair.py",
-            # hole_scanner.main() opens both conns but writes ONLY to world.db
-            # (data_coverage via world_conn). forecasts_conn is read-only
-            # (_get_physical_table_keys for DataTable.OBSERVATIONS: SELECT only).
-            # This is not a cross-DB write seam; adding here as a genuine false-positive.
-            # Authority: docs/operations/task_2026-05-14_k1_followups/PLAN.md §2 P3 C4
-            "src/data/hole_scanner.py",
+            "src/state/db.py",           # defines get_world_connection/get_forecasts_connection
+            "src/state/connection_pair.py",  # ConnectionTriple factory (no write path)
+        }
+
+        # Per-function allowlist: "rel_path::function_name" for genuine false-positives
+        # where the function opens both connections for read-only purposes (not
+        # a two-connection cross-DB write seam). Add only after confirming:
+        # (a) no write to forecasts.db via forecasts_conn in that function, OR
+        # (b) no write to world.db via world_conn in that function.
+        PER_FUNCTION_ALLOWLIST = {
+            # hole_scanner.main() opens world_conn (for data_coverage WRITES) and
+            # forecasts_conn (for DataTable.OBSERVATIONS SELECT only — read-only).
+            # The forecasts_conn is never written to; all writes go to world_conn.
+            # Authority: docs/operations/task_2026-05-14_k1_followups/PLAN.md §2 P3 C4;
+            #   IMPLEMENTATION_REVIEW_P3 N1 — narrowed from whole-file to per-function in P4.
+            "src/data/hole_scanner.py::main",
         }
 
         violations: list[str] = []
@@ -396,15 +405,17 @@ class TestA8NoCrossDbWriteTransaction:
                                  "get_forecasts_connection()" in func_src
                 # Only flag if bare (non-_with_world) forecasts conn AND world conn in same fn
                 if has_world and bare_forecasts:
-                    violations.append(
-                        f"{rel}::{node.name} (line {node.lineno})"
-                    )
+                    key = f"{rel}::{node.name}"
+                    if key in PER_FUNCTION_ALLOWLIST:
+                        continue
+                    violations.append(f"{key} (line {node.lineno})")
 
         assert not violations, (
             f"A8/INV-37: these src/ functions open both get_world_connection AND "
             f"bare get_forecasts_connection in the same function body — latent "
             f"two-connection cross-DB write seam. Use get_forecasts_connection_with_world "
-            f"for cross-DB atomic writes: {violations}"
+            f"for cross-DB atomic writes, or add to PER_FUNCTION_ALLOWLIST with justification: "
+            f"{violations}"
         )
 
     def test_a8_attach_helper_is_used_for_cross_db_obs_write(self):
