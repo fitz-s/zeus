@@ -15,10 +15,13 @@ or lifecycle states.
 | File | What it does | Danger level |
 |------|-------------|--------------|
 | `polymarket_user_channel.py` | R3 M3 Polymarket authenticated user WebSocket ingestor, gap status, and U2 fact append bridge | HIGH — live venue truth ingest |
+| `forecast_live_daemon.py` | Dedicated ECMWF OpenData live forecast producer scheduler | HIGH — live forecast authority producer |
 
 ## Domain rules
 
 - WebSocket messages are venue observations, not command grammar authority.
+- Forecast-live daemon owns only OpenData forecast production; it must not import
+  engine, execution, riskguard, strategy, signal, venue, or trading entrypoints.
 - `MATCHED/MINED/CONFIRMED/FAILED` belong to U2 trade facts, not `CommandState`.
 - WS gaps must block new submits and require a future M5 reconciliation sweep before unblocking.
 - REST fallback/reconciliation is evidence recovery only; it must not bypass M5 reconciliation law or mutate lifecycle phases directly.

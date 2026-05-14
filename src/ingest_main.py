@@ -72,6 +72,7 @@ _TRUTHFUL_FAIL_STATUSES = frozenset({
     "extract_failed",
     "paused_mars_credentials",
     "bad_target_date",
+    "skipped_lock_held",
 })
 
 
@@ -135,6 +136,12 @@ def _classify_result(result) -> tuple[bool, str | None]:
     for stage in stages:
         if isinstance(stage, dict) and stage.get("ok") is False:
             return True, f"stage_failed:{stage.get('label', '?')}:{stage.get('error', '?')}"
+    tracks = result.get("tracks") or {}
+    if isinstance(tracks, dict):
+        for track_result in tracks.values():
+            failed, reason = _classify_result(track_result)
+            if failed:
+                return True, reason
     return False, None
 
 
@@ -487,11 +494,7 @@ def _opendata_mx2t6_cycle():
     schedule job name retains the legacy ``mx2t6`` slug for back-compat with
     ops dashboards).
     """
-    if _is_source_paused("ecmwf_open_data"):
-        logger.info("_opendata_mx2t6_cycle: paused_by_control_plane")
-        return {"status": "paused_by_control_plane", "source": "ecmwf_open_data"}
-    from src.data.ecmwf_open_data import collect_open_ens_cycle
-    result = collect_open_ens_cycle(track="mx2t6_high")
+    result = _run_opendata_track("mx2t6_high")
     logger.info("ECMWF Open Data mx2t6: %s",
                 {k: v for k, v in result.items() if k != "stages"})
     return result
@@ -507,11 +510,7 @@ def _opendata_mn2t6_cycle():
     job name retains the legacy ``mn2t6`` slug for back-compat with ops
     dashboards).
     """
-    if _is_source_paused("ecmwf_open_data"):
-        logger.info("_opendata_mn2t6_cycle: paused_by_control_plane")
-        return {"status": "paused_by_control_plane", "source": "ecmwf_open_data"}
-    from src.data.ecmwf_open_data import collect_open_ens_cycle
-    result = collect_open_ens_cycle(track="mn2t6_low")
+    result = _run_opendata_track("mn2t6_low")
     logger.info("ECMWF Open Data mn2t6: %s",
                 {k: v for k, v in result.items() if k != "stages"})
     return result
@@ -525,14 +524,35 @@ def _opendata_startup_catch_up():
     full-horizon source run for both tracks. Re-runs after a brief restart are
     nearly idempotent thanks to ``INSERT OR IGNORE``.
     """
-    if _is_source_paused("ecmwf_open_data"):
-        logger.info("_opendata_startup_catch_up: paused_by_control_plane")
-        return
-    from src.data.ecmwf_open_data import collect_open_ens_cycle
+    results = {}
     for track in ("mx2t6_high", "mn2t6_low"):
-        result = collect_open_ens_cycle(track=track)
+        result = _run_opendata_track(track)
+        results[track] = result
         logger.info("Open Data startup catch-up %s: %s", track,
                     {k: v for k, v in result.items() if k != "stages"})
+    failed, reason = _classify_result({"tracks": results})
+    return {"status": "partial" if failed else "ok", "reason": reason, "tracks": results}
+
+
+def _run_opendata_track(
+    track: str,
+    *,
+    _locks_dir_override: Path | None = None,
+    _collector=None,
+) -> dict:
+    from src.data.dual_run_lock import OPENDATA_DAEMON_LOCK_KEY, acquire_lock
+    from src.data.ecmwf_open_data import SOURCE_ID, collect_open_ens_cycle
+
+    if _is_source_paused(SOURCE_ID):
+        logger.info("ingest_main OpenData %s paused_by_control_plane", track)
+        return {"status": "paused_by_control_plane", "source": SOURCE_ID, "track": track}
+
+    with acquire_lock(OPENDATA_DAEMON_LOCK_KEY, _locks_dir_override=_locks_dir_override) as acquired:
+        if not acquired:
+            logger.info("ingest_main OpenData %s skipped_lock_held", track)
+            return {"status": "skipped_lock_held", "source": SOURCE_ID, "track": track}
+        collector = _collector or collect_open_ens_cycle
+        return collector(track=track)
 
 
 def _register_opendata_daily_jobs(scheduler: BlockingScheduler) -> list[str]:

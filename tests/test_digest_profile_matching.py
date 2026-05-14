@@ -1623,8 +1623,18 @@ def test_data_daemon_live_forecast_owner_routes_to_scheduler_profile():
         "mutation; no schema migration; no source routing; no CLOB cutover",
         [
             "src/ingest_main.py",
+            "src/ingest/forecast_live_daemon.py",
+            "src/ingest/AGENTS.md",
+            "src/data/dual_run_lock.py",
             "tests/test_forecast_live_owner.py",
+            "tests/test_forecast_live_daemon.py",
             "architecture/test_topology.yaml",
+            "architecture/source_rationale.yaml",
+            "architecture/module_manifest.yaml",
+            "architecture/AGENTS.md",
+            "architecture/docs_registry.yaml",
+            "docs/reference/AGENTS.md",
+            "workspace_map.md",
             "tests/test_digest_profile_matching.py",
             "architecture/topology.yaml",
             "architecture/digest_profiles.py",
@@ -1634,7 +1644,10 @@ def test_data_daemon_live_forecast_owner_routes_to_scheduler_profile():
     assert digest["profile"] == "data daemon live forecast owner routing"
     assert digest["admission"]["status"] == "admitted"
     assert "src/ingest_main.py" in digest["admission"]["admitted_files"]
+    assert "src/ingest/forecast_live_daemon.py" in digest["admission"]["admitted_files"]
+    assert "src/data/dual_run_lock.py" in digest["admission"]["admitted_files"]
     assert "tests/test_forecast_live_owner.py" in digest["admission"]["admitted_files"]
+    assert "tests/test_forecast_live_daemon.py" in digest["admission"]["admitted_files"]
 
 
 def test_phase2d_execution_capability_status_routes_to_observability_profile():

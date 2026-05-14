@@ -707,6 +707,14 @@ files:
     zone: K2_runtime
     authority_role: package_marker
     why: Marks data namespace.
+  src/data/dual_run_lock.py:
+    zone: K2_runtime
+    authority_role: ingest_scheduler_mutual_exclusion
+    why: Advisory file-lock boundary preventing co-running legacy ingest and dedicated forecast-live OpenData producer jobs during phased rollout.
+    downstream:
+    - src/ingest_main.py
+    - src/ingest/forecast_live_daemon.py
+    - tests/test_forecast_live_daemon.py
   src/data/ecmwf_open_data.py:
     zone: K2_runtime
     authority_role: forecast_fetcher
@@ -878,6 +886,18 @@ files:
     zone: docs
     authority_role: registry
     why: Ingest package rules and file registry for external venue/user event streams.
+  src/ingest/forecast_live_daemon.py:
+    zone: K2_runtime
+    authority_role: forecast_live_producer_daemon
+    why: Dedicated ECMWF OpenData live forecast scheduler. Owns only HIGH/LOW OpenData daily and startup catch-up jobs; does not import trading, evaluator, risk, strategy, signal, execution, or venue modules.
+    hazards:
+    - SOURCE_TRUTH_PLANE_COLLAPSE
+    - VENUS_CONTROL_ONLY
+    downstream:
+    - src/data/ecmwf_open_data.py
+    - src/data/dual_run_lock.py
+    - tests/test_forecast_live_daemon.py
+    - tests/test_forecast_live_owner.py
   src/ingest/polymarket_user_channel.py:
     zone: K2_runtime
     authority_role: user_channel_ingest
