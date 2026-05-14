@@ -170,8 +170,9 @@ def get_forecasts_connection(
     """Forecast/harvester-truth co-transactional class DB (zeus-forecasts.db).
 
     Owns: ensemble_snapshots_v2, source_run, source_run_coverage,
-          producer readiness_state, observations, settlements, settlements_v2,
-          market_events_v2, calibration_pairs_v2.
+          producer readiness_state, job_run for forecast-live work,
+          observations, settlements, settlements_v2, market_events_v2,
+          calibration_pairs_v2.
     Lock files: state/zeus-forecasts.db.writer-lock.{bulk,live}.
 
     K1 split 2026-05-11: physically separate flock from zeus-world.db so
@@ -744,7 +745,7 @@ def get_connection(
 # CI hook scripts/check_schema_version.py diffs the sqlite_master hash of
 # a fresh-init DB against tests/state/_schema_pinned_hash.txt and fails
 # the PR if SCHEMA_VERSION did not change in lockstep.
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 def init_schema(
@@ -1459,7 +1460,7 @@ def init_schema(
             readiness_recomputed_at TEXT,
             meta_json TEXT NOT NULL DEFAULT '{}',
             recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE(job_name, scheduled_for, source_id, track)
+            UNIQUE(job_name, scheduled_for, source_id, track, release_calendar_key)
         );
         CREATE INDEX IF NOT EXISTS idx_job_run_job_window
             ON job_run(job_name, scheduled_for);
@@ -1761,6 +1762,7 @@ def init_schema(
         CREATE INDEX IF NOT EXISTS idx_venue_command_events_type ON venue_command_events(event_type);
 
     """)
+    _ensure_job_run_release_key_identity(conn)
     init_snapshot_schema(conn)
     init_collateral_schema(conn)
     # R3 M4 exit mutex DDL lives here to keep DB initialization independent of
@@ -2334,9 +2336,9 @@ def assert_schema_current(conn: sqlite3.Connection) -> None:
 # K1 forecast DB split — 2026-05-11
 # ---------------------------------------------------------------------------
 # SCHEMA_FORECASTS_VERSION: bumped whenever forecast-authority DDL changes.
-# Owned tables include the 7 K1 forecast-class tables plus the live source
-# authority chain tables source_run_coverage and producer readiness_state.
-SCHEMA_FORECASTS_VERSION: int = 2
+# Owned tables include the 7 K1 forecast-class tables, the live source
+# authority chain tables, producer readiness_state, and forecast-live job_run.
+SCHEMA_FORECASTS_VERSION: int = 3
 
 
 def _create_settlements(conn: sqlite3.Connection) -> None:
@@ -2494,6 +2496,149 @@ def _create_source_run(conn: sqlite3.Connection) -> None:
     """)
 
 
+def _create_job_run(conn: sqlite3.Connection) -> None:
+    """Create job_run table + indexes. Idempotent forecast-live work journal."""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS job_run (
+            job_run_id TEXT PRIMARY KEY,
+            job_run_key TEXT NOT NULL UNIQUE,
+            job_name TEXT NOT NULL,
+            plane TEXT NOT NULL CHECK (plane IN (
+                'forecast','observation','solar_aux','market_topology',
+                'quote','settlement_truth','source_health','hole_backfill','telemetry_control'
+            )),
+            scheduled_for TEXT NOT NULL,
+            missed_from TEXT,
+            started_at TEXT,
+            finished_at TEXT,
+            lock_key TEXT,
+            lock_acquired_at TEXT,
+            status TEXT NOT NULL CHECK (status IN (
+                'RUNNING','SUCCESS','FAILED','PARTIAL','SKIPPED_NOT_RELEASED','SKIPPED_LOCK_HELD'
+            )),
+            reason_code TEXT,
+            rows_written INTEGER NOT NULL DEFAULT 0,
+            rows_failed INTEGER NOT NULL DEFAULT 0,
+            source_run_id TEXT,
+            source_id TEXT,
+            track TEXT,
+            release_calendar_key TEXT,
+            safe_fetch_not_before TEXT,
+            expected_scope_json TEXT NOT NULL DEFAULT '{}',
+            affected_scope_json TEXT NOT NULL DEFAULT '{}',
+            readiness_impacts_json TEXT NOT NULL DEFAULT '[]',
+            readiness_recomputed_at TEXT,
+            meta_json TEXT NOT NULL DEFAULT '{}',
+            recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(job_name, scheduled_for, source_id, track, release_calendar_key)
+        )
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_job_run_job_window
+            ON job_run(job_name, scheduled_for)
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_job_run_plane_status
+            ON job_run(plane, status, scheduled_for)
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_job_run_source_run
+            ON job_run(source_run_id)
+    """)
+
+
+def _job_run_release_key_identity_current(conn: sqlite3.Connection) -> bool:
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='job_run'"
+    ).fetchone()
+    if not row or not row[0]:
+        return False
+    normalized = " ".join(str(row[0]).replace("\n", " ").split())
+    return "UNIQUE(job_name, scheduled_for, source_id, track, release_calendar_key)" in normalized
+
+
+def _ensure_job_run_release_key_identity(conn: sqlite3.Connection) -> None:
+    """Rebuild legacy job_run UNIQUE scope to include release_calendar_key."""
+    exists = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='job_run'"
+    ).fetchone()
+    if not exists or _job_run_release_key_identity_current(conn):
+        return
+
+    conn.execute("DROP TABLE IF EXISTS job_run_release_key_rebuild")
+    conn.execute("""
+        CREATE TABLE job_run_release_key_rebuild (
+            job_run_id TEXT PRIMARY KEY,
+            job_run_key TEXT NOT NULL UNIQUE,
+            job_name TEXT NOT NULL,
+            plane TEXT NOT NULL CHECK (plane IN (
+                'forecast','observation','solar_aux','market_topology',
+                'quote','settlement_truth','source_health','hole_backfill','telemetry_control'
+            )),
+            scheduled_for TEXT NOT NULL,
+            missed_from TEXT,
+            started_at TEXT,
+            finished_at TEXT,
+            lock_key TEXT,
+            lock_acquired_at TEXT,
+            status TEXT NOT NULL CHECK (status IN (
+                'RUNNING','SUCCESS','FAILED','PARTIAL','SKIPPED_NOT_RELEASED','SKIPPED_LOCK_HELD'
+            )),
+            reason_code TEXT,
+            rows_written INTEGER NOT NULL DEFAULT 0,
+            rows_failed INTEGER NOT NULL DEFAULT 0,
+            source_run_id TEXT,
+            source_id TEXT,
+            track TEXT,
+            release_calendar_key TEXT,
+            safe_fetch_not_before TEXT,
+            expected_scope_json TEXT NOT NULL DEFAULT '{}',
+            affected_scope_json TEXT NOT NULL DEFAULT '{}',
+            readiness_impacts_json TEXT NOT NULL DEFAULT '[]',
+            readiness_recomputed_at TEXT,
+            meta_json TEXT NOT NULL DEFAULT '{}',
+            recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(job_name, scheduled_for, source_id, track, release_calendar_key)
+        )
+    """)
+    conn.execute("""
+        INSERT OR REPLACE INTO job_run_release_key_rebuild (
+            job_run_id, job_run_key, job_name, plane, scheduled_for, missed_from,
+            started_at, finished_at, lock_key, lock_acquired_at, status,
+            reason_code, rows_written, rows_failed, source_run_id,
+            source_id, track, release_calendar_key, safe_fetch_not_before,
+            expected_scope_json, affected_scope_json, readiness_impacts_json,
+            readiness_recomputed_at, meta_json, recorded_at
+        )
+        SELECT
+            job_run_id,
+            job_name || '|' || scheduled_for || '|' ||
+                COALESCE(source_id, '') || '|' || COALESCE(track, '') || '|' ||
+                COALESCE(release_calendar_key, ''),
+            job_name, plane, scheduled_for, missed_from,
+            started_at, finished_at, lock_key, lock_acquired_at, status,
+            reason_code, rows_written, rows_failed, source_run_id,
+            source_id, track, release_calendar_key, safe_fetch_not_before,
+            expected_scope_json, affected_scope_json, readiness_impacts_json,
+            readiness_recomputed_at, meta_json, recorded_at
+        FROM job_run
+    """)
+    conn.execute("DROP TABLE job_run")
+    conn.execute("ALTER TABLE job_run_release_key_rebuild RENAME TO job_run")
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_job_run_job_window
+            ON job_run(job_name, scheduled_for)
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_job_run_plane_status
+            ON job_run(plane, status, scheduled_for)
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_job_run_source_run
+            ON job_run(source_run_id)
+    """)
+
+
 def _create_source_run_coverage(conn: sqlite3.Connection) -> None:
     """Create source_run_coverage table + indexes. Idempotent forecast authority table."""
     conn.execute("""
@@ -2605,6 +2750,7 @@ def _create_readiness_state(conn: sqlite3.Connection) -> None:
 
 _FORECAST_TABLES = (
     "ensemble_snapshots_v2",
+    "job_run",
     "source_run",
     "source_run_coverage",
     "readiness_state",
@@ -2707,7 +2853,7 @@ def init_schema_forecasts(conn: sqlite3.Connection) -> None:
 
     Tables owned by this DB after the live data-daemon authority split:
       ensemble_snapshots_v2, source_run, source_run_coverage,
-      producer readiness_state, observations, settlements,
+      producer readiness_state, job_run, observations, settlements,
       calibration_pairs_v2, settlements_v2, market_events_v2
 
     Sets PRAGMA user_version = SCHEMA_FORECASTS_VERSION as the final step.
@@ -2761,6 +2907,7 @@ def init_schema_forecasts(conn: sqlite3.Connection) -> None:
         )
         _create_settlements(conn)
         _create_observations(conn)
+        _create_job_run(conn)
         _create_source_run(conn)
         _create_source_run_coverage(conn)
         _create_readiness_state(conn)
@@ -2777,8 +2924,10 @@ def init_schema_forecasts(conn: sqlite3.Connection) -> None:
         _create_calibration_pairs_v2(conn)
 
     # Forecast authority post-condition: older world.db schemas or partial K1
-    # copies can omit the live source-chain tables. These helpers are
+    # copies can omit the live source-chain/work-journal tables. These helpers are
     # idempotent and also backfill the hot-path indexes after ATTACH copying.
+    _create_job_run(conn)
+    _ensure_job_run_release_key_identity(conn)
     _create_source_run_coverage(conn)
     _create_readiness_state(conn)
 

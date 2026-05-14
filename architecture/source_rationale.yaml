@@ -71,6 +71,11 @@ write_routes:
   script_repair_write:
     owner: scripts/**
     guardrail: dry-run/apply metadata required in later scripts manifest packet
+  data_daemon_job_run_write:
+    owner: src/state/job_run_repo.py
+    tables:
+    - job_run
+    guardrail: Durable data-daemon work identity must include job_name, scheduled_for, source_id, track, and release_calendar_key.
 package_defaults:
   src/contracts:
     zone: K0_frozen_kernel

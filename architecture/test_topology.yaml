@@ -237,7 +237,7 @@ test_trust_policy:
     tests/test_producer_readiness_builder.py: {created: "2026-05-03", last_used: "2026-05-03"}
     tests/test_readiness_state.py: {created: "2026-05-02", last_used: "2026-05-02"}
     tests/test_release_calendar.py: {created: "2026-05-02", last_used: "2026-05-02"}
-    tests/test_job_run_schema.py: {created: "2026-05-02", last_used: "2026-05-02"}
+    tests/test_job_run_schema.py: {created: "2026-05-02", last_used: "2026-05-14"}
     tests/test_source_run_coverage_schema.py: {created: "2026-05-03", last_used: "2026-05-03"}
     tests/test_source_run_schema.py: {created: "2026-05-02", last_used: "2026-05-02"}
     tests/test_readiness_state_schema.py: {created: "2026-05-02", last_used: "2026-05-02"}

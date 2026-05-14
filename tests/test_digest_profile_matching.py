@@ -1673,6 +1673,37 @@ def test_forecast_authority_chain_ownership_routes_to_dedicated_profile():
     assert "src/data/executable_forecast_reader.py" in digest["admission"]["admitted_files"]
 
 
+def test_forecast_live_work_queue_journaling_routes_to_dedicated_profile():
+    digest = build_digest(
+        "Phase 6 forecast live work queue journaling: durable job_run records "
+        "for forecast-live OpenData work keyed by source cycle/release key; "
+        "no production DB mutation; no daemon launch; no live venue side effects",
+        [
+            "src/state/db.py",
+            "src/state/job_run_repo.py",
+            "src/ingest/forecast_live_daemon.py",
+            "tests/test_forecast_live_daemon.py",
+            "tests/test_job_run_schema.py",
+            "tests/state/_schema_pinned_hash.txt",
+            "tests/state/test_forecast_db_split_invariant.py",
+            "tests/test_digest_profile_matching.py",
+            "architecture/test_topology.yaml",
+            "architecture/source_rationale.yaml",
+            "architecture/topology.yaml",
+            "architecture/digest_profiles.py",
+        ],
+    )
+
+    assert digest["profile"] == "forecast live work queue journaling"
+    assert digest["admission"]["status"] == "admitted"
+    assert "src/state/job_run_repo.py" in digest["admission"]["admitted_files"]
+    assert "src/ingest/forecast_live_daemon.py" in digest["admission"]["admitted_files"]
+    assert "tests/test_job_run_schema.py" in digest["admission"]["admitted_files"]
+    assert "tests/state/_schema_pinned_hash.txt" in digest["admission"]["admitted_files"]
+    assert "architecture/test_topology.yaml" in digest["admission"]["admitted_files"]
+    assert "architecture/source_rationale.yaml" in digest["admission"]["admitted_files"]
+
+
 def test_phase2d_execution_capability_status_routes_to_observability_profile():
     digest = build_digest(
         "Phase 2D DSA-16 execution capability status summary matrix for entry "

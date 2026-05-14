@@ -29,6 +29,7 @@ import pytest
 FORECAST_TABLES = (
     "ensemble_snapshots_v2",
     "calibration_pairs_v2",
+    "job_run",
     "observations",
     "settlements",
     "settlements_v2",
