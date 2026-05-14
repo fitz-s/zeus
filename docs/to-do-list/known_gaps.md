@@ -709,3 +709,23 @@ with:
 4. backup/rollback procedure and post-migration schema assertions;
 5. no promotion of legacy rows into `observation_instants_v2`, reports, replay,
    calibration, or learning authority.
+
+---
+
+### [OPEN — K1 FOLLOWUPS DEFERRED] K1-broken hardcoded paths in operator scripts
+
+**Status:** OPEN — deferred from K1 P3 followups (2026-05-14) per PLAN §4.5.
+**Authority:** docs/operations/task_2026-05-14_k1_followups/PLAN.md §4.5
+**Affected files:**
+- `scripts/healthcheck.py` — K1-broken: uses hardcoded world.db path for tables that moved to forecasts.db
+- `scripts/verify_truth_surfaces.py` — K1-broken: world.db path for forecast-class tables
+- `scripts/venus_sensing_report.py` — K1-broken: world.db path for forecast-class tables
+**Why deferred:** Status quo is already broken today (pre-P3); bundling the
+fixes triples P3 scope without adding new live-money risk. These are operator
+diagnostic scripts, not runtime daemon paths.
+**Required fix:** Update each script to open `get_forecasts_connection()` for
+observations/forecast-class table queries, and `get_world_connection()` for
+world-class queries. Follow the same pattern as `hole_scanner.py:566-580`
+(the P3 fix committed 2026-05-14).
+**Live-money impact:** LOW — these are read-only diagnostic scripts; they
+produce wrong/empty output but do not affect trading, risk, or settlement.

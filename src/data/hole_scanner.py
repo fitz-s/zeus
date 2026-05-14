@@ -296,10 +296,16 @@ class HoleScanner:
         self,
         conn: sqlite3.Connection,
         *,
+        forecasts_conn: Optional[sqlite3.Connection] = None,
         config: Optional[ExceptionsConfig] = None,
         today: Optional[date] = None,
     ):
         self.conn = conn
+        # Post-K1 split: observations table lives on forecasts.db, not world.db.
+        # Pass forecasts_conn so physical-table queries for DataTable.OBSERVATIONS
+        # are routed to the correct DB. Falls back to conn (world.db) for all
+        # other tables and for backward-compat callers that don't pass it.
+        self.forecasts_conn = forecasts_conn if forecasts_conn is not None else conn
         self.config = config if config is not None else ExceptionsConfig.load()
         self.today = today if today is not None else date.today()
 
@@ -365,11 +371,25 @@ class HoleScanner:
         """Query the actual data table for all (city, source, target_date)
         rows physically present, regardless of whether data_coverage has
         caught up with them.
+
+        Post-K1 routing: observations live on forecasts.db (self.forecasts_conn);
+        all other tables live on world.db (self.conn).
         """
         sql = self._PHYSICAL_TABLE_DISTINCT_SQL.get(data_table.value)
         if sql is None:
             return set()
-        rows = self.conn.execute(sql).fetchall()
+        # Route observations to forecasts.db; everything else stays on world.db.
+        target_conn = (
+            self.forecasts_conn
+            if data_table == DataTable.OBSERVATIONS
+            else self.conn
+        )
+        try:
+            rows = target_conn.execute(sql).fetchall()
+        except Exception:
+            # Table absent from this conn — return empty; scanner treats as no
+            # physical data (conservative: no spurious WRITTEN seeds).
+            return set()
         return {(r[0], r[1], r[2]) for r in rows}
 
     def _seed_coverage_from_physical(
@@ -563,18 +583,27 @@ def main() -> int:
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
-    from src.state.db import get_world_connection, assert_schema_current
+    from src.state.db import (
+        get_world_connection,
+        get_forecasts_connection,
+        assert_schema_current,
+    )
 
+    # Post-K1 split: observations live on forecasts.db; all other scanner
+    # tables (data_coverage, observation_instants, solar_daily, forecasts)
+    # live on world.db. Open both connections.
     conn = get_world_connection()
+    forecasts_conn = get_forecasts_connection()
     assert_schema_current(conn)
 
     if args.report:
         _cli_report(conn)
         conn.close()
+        forecasts_conn.close()
         return 0
 
     if args.scan:
-        scanner = HoleScanner(conn)
+        scanner = HoleScanner(conn, forecasts_conn=forecasts_conn)
         if args.scan == "all":
             results = scanner.scan_all()
         else:
@@ -582,10 +611,12 @@ def main() -> int:
             results = [scanner.scan(target_table)]
         print(json.dumps([r.as_dict() for r in results], indent=2))
         conn.close()
+        forecasts_conn.close()
         return 0
 
     parser.print_help()
     conn.close()
+    forecasts_conn.close()
     return 1
 
 

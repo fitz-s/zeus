@@ -354,6 +354,12 @@ class TestA8NoCrossDbWriteTransaction:
         WHOLE_FILE_ALLOWLIST = {
             "src/state/db.py",
             "src/state/connection_pair.py",
+            # hole_scanner.main() opens both conns but writes ONLY to world.db
+            # (data_coverage via world_conn). forecasts_conn is read-only
+            # (_get_physical_table_keys for DataTable.OBSERVATIONS: SELECT only).
+            # This is not a cross-DB write seam; adding here as a genuine false-positive.
+            # Authority: docs/operations/task_2026-05-14_k1_followups/PLAN.md §2 P3 C4
+            "src/data/hole_scanner.py",
         }
 
         violations: list[str] = []
