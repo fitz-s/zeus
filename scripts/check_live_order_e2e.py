@@ -257,6 +257,15 @@ def _order_fact_supports_fill_observation(fact: dict[str, Any] | None) -> bool:
     )
 
 
+def _order_fact_supports_live_order_proof(fact: dict[str, Any] | None) -> bool:
+    if fact is None or not _live_source(fact.get("source")):
+        return False
+    state = str(fact.get("state") or "")
+    return state not in TERMINAL_ORDER_FACT_STATES and (
+        state in OPEN_ORDER_FACT_STATES or state in FILL_ORDER_FACT_STATES
+    )
+
+
 def _matching_live_trade_facts(trade_facts: list[dict[str, Any]], order_id: str) -> list[dict[str, Any]]:
     if not order_id:
         return []
@@ -532,7 +541,7 @@ def evaluate(conn: sqlite3.Connection, command_id: str | None = None) -> dict[st
     checks.append(
         Check(
             "latest_venue_order_fact_open",
-            "PASS" if _order_fact_supports_open_order(latest_order_fact) or fill_observed else "FAIL",
+            "PASS" if _order_fact_supports_live_order_proof(latest_order_fact) else "FAIL",
             (
                 f"live_count={len(matching_order_facts)} total_count={len(order_facts)} "
                 f"order_id={order_id or 'missing'} "
