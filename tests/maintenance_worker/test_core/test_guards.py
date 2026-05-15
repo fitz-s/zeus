@@ -239,12 +239,13 @@ def test_check_oncall_quiet_fails_when_present(tmp_path: Path) -> None:
 def test_guard_severity_split_6_refuse_fatal_2_skip_tick(tmp_path: Path) -> None:
     """
     SCAFFOLD §6 ND3: exactly 6 hard guards (refuse_fatal) + 2 soft (skip_tick).
-    Verified by triggering all 8 guards and checking severity labels.
+    All 8 guards triggered and severity labels checked — changing any guard's
+    severity from REFUSE_FATAL to SKIP_TICK (or vice versa) will break this test.
     """
     state_dir = tmp_path / "state"
     state_dir.mkdir()
 
-    # Trigger all 8 guard failures by creating the trigger files
+    # Trigger file-based guard failures
     (state_dir / "KILL_SWITCH").touch()
     (state_dir / "SELF_QUARANTINE").write_text("test")
     (state_dir / "INFLIGHT_MAINTENANCE_PR").write_text("https://github.com/r/p/42")
@@ -253,18 +254,35 @@ def test_guard_severity_split_6_refuse_fatal_2_skip_tick(tmp_path: Path) -> None
 
     git_dir = tmp_path / ".git"
     git_dir.mkdir()
-    (git_dir / "MERGE_HEAD").touch()  # active rebase
-    # Make repo dirty by patching git status
-    (tmp_path / "dirty.txt").write_text("dirty")
+    (git_dir / "MERGE_HEAD").touch()  # active rebase indicator
+
+    # Trigger check_dirty_repo by mocking git status to report dirty output
+    with patch(
+        "maintenance_worker.core.guards.subprocess.run",
+        return_value=MagicMock(returncode=0, stdout="M dirty.txt", stderr=""),
+    ):
+        dirty_repo_result = check_dirty_repo(tmp_path)
+
+    # Trigger check_disk_free by mocking disk_usage to return 1% free
+    with patch(
+        "maintenance_worker.core.guards.shutil.disk_usage",
+        return_value=MagicMock(free=1_000_000, total=100_000_000),
+    ):
+        low_disk_result = check_disk_free(tmp_path, threshold_pct=5.0)
 
     results = [
-        check_kill_switch(state_dir),
-        check_self_quarantined(state_dir),
-        check_inflight_pr(state_dir),
-        check_active_rebase(tmp_path),
-        check_no_pause_flag(state_dir),
-        check_oncall_quiet(state_dir),
+        check_kill_switch(state_dir),          # hard
+        check_self_quarantined(state_dir),      # hard
+        check_inflight_pr(state_dir),           # hard
+        check_active_rebase(tmp_path),          # hard
+        dirty_repo_result,                      # hard
+        low_disk_result,                        # hard
+        check_no_pause_flag(state_dir),         # soft
+        check_oncall_quiet(state_dir),          # soft
     ]
+
+    # Verify all 8 failed (so each severity label is actually exercised)
+    assert all(not r.ok for r in results), "Expected all 8 guards to fail in this test"
 
     refuse_fatal_count = sum(
         1 for r in results if r.details.get("severity") == SEVERITY_REFUSE_FATAL
@@ -272,8 +290,10 @@ def test_guard_severity_split_6_refuse_fatal_2_skip_tick(tmp_path: Path) -> None
     skip_tick_count = sum(
         1 for r in results if r.details.get("severity") == SEVERITY_SKIP_TICK
     )
-    assert refuse_fatal_count == 4  # kill_switch, self_quarantined, inflight_pr, active_rebase
-    assert skip_tick_count == 2    # pause_flag, oncall_quiet
+    # 6 hard: kill_switch, self_quarantined, inflight_pr, active_rebase, dirty_repo, disk_free
+    # 2 soft: pause_flag, oncall_quiet
+    assert refuse_fatal_count == 6
+    assert skip_tick_count == 2
 
 
 # ---------------------------------------------------------------------------

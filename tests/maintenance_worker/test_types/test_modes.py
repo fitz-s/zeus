@@ -39,9 +39,9 @@ class TestRefusalReason:
         """SAFETY_CONTRACT lines 207-213: MAINTENANCE_PAUSED is skip_tick not fatal."""
         assert RefusalReason.MAINTENANCE_PAUSED in RefusalReason
 
-    def test_ten_members_total(self) -> None:
-        """8 hard guards + 2 soft guards = 10 RefusalReason values."""
-        assert len(list(RefusalReason)) == 10
+    def test_eleven_members_total(self) -> None:
+        """8 hard guards + 2 soft guards + 1 engine-level (CONFIG_INVALID) = 11."""
+        assert len(list(RefusalReason)) == 11
 
     def test_hard_guards_count(self) -> None:
         hard = {

@@ -137,7 +137,7 @@ class MaintenanceEngine:
         result.state_machine_breadcrumbs.append(("LOAD_CONFIG", load_ok))
         if not load_ok:
             logger.error("LOAD_CONFIG failed: invalid config paths")
-            refuse_fatal(RefusalReason.KILL_SWITCH, ctx, "Config validation failed")
+            refuse_fatal(RefusalReason.CONFIG_INVALID, ctx, "Config validation failed")
             # refuse_fatal never returns (sys.exit); unreachable but satisfies type checker
             raise AssertionError("unreachable")  # pragma: no cover
 

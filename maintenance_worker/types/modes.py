@@ -42,6 +42,8 @@ class RefusalReason(str, Enum):
 
     Per SCAFFOLD §6: 6 refuse_fatal hard guards + 2 skip_tick soft guards.
     The FORBIDDEN_* pair covers validator gate failures (path and operation).
+    CONFIG_INVALID is an engine-level structural failure (not a guard) added
+    in P5.1 REVISE to distinguish "config broken" from "kill switch pulled".
     """
 
     # Hard guards — refuse_fatal
@@ -57,3 +59,6 @@ class RefusalReason(str, Enum):
     # Soft guards — skip_tick
     MAINTENANCE_PAUSED = "MAINTENANCE_PAUSED"
     ONCALL_QUIET = "ONCALL_QUIET"
+
+    # Engine-level structural failures (not guard failures)
+    CONFIG_INVALID = "CONFIG_INVALID"

@@ -310,20 +310,45 @@ def test_run_tick_post_mutation_detector_called(tmp_path: Path) -> None:
 def test_run_tick_post_mutation_detector_not_called_for_dry_run(
     tmp_path: Path,
 ) -> None:
-    """post_mutation_detector is NOT invoked when dry_run_only=True."""
+    """
+    post_mutation_detector is NOT invoked when dry_run_only=True.
+
+    Injects a stub task + dry-run ApplyResult so the for-loop actually
+    executes and the skip branch is genuinely tested (non-vacuous).
+    Compare to test_run_tick_post_mutation_detector_called which injects
+    a non-dry-run result and asserts called_once.
+    """
     config = _make_config(tmp_path)
     mock_run, mock_disk = _clean_guards_context(tmp_path)
+
+    from maintenance_worker.types.specs import TaskSpec
+    stub_task = TaskSpec(
+        task_id="dry_run_only_task",
+        description="dry run task",
+        schedule="daily",
+    )
+    from maintenance_worker.types.results import ApplyResult
+    dry_result = ApplyResult(task_id="dry_run_only_task", dry_run_only=True)
 
     with mock_run, mock_disk:
         with patch(
             "maintenance_worker.core.engine.check_scheduler_invocation",
-            return_value="MANUAL_CLI",
+            return_value="SCHEDULED",
         ):
-            with patch(
-                "maintenance_worker.core.engine.post_mutation_detector"
-            ) as mock_detector:
-                result = run_tick(config)
+            with patch.object(
+                MaintenanceEngine, "_enumerate_candidates", return_value=[stub_task]
+            ):
+                with patch.object(
+                    MaintenanceEngine, "_apply_decisions", return_value=dry_result
+                ):
+                    with patch(
+                        "maintenance_worker.core.engine.post_mutation_detector"
+                    ) as mock_detector:
+                        result = run_tick(config)
 
+    # Loop ran once (one task injected) but skipped detector because dry_run_only=True
+    assert len(result.apply_results) == 1
+    assert result.apply_results[0].dry_run_only is True
     mock_detector.assert_not_called()
 
 
