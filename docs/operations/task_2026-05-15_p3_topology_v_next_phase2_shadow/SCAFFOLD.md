@@ -15,7 +15,7 @@ Authority basis:
 
 P3 transitions v_next from "structures only" (P1's reframed scope) to "shadow blocking — advises but does not block; captures per-call divergence vs current admission". It ships the wire-up shim, divergence logger, divergence analyzer, normalized tool-output envelope, and the 14-day shadow probe sequence that gates the P4 cutover decision. Current admission remains authoritative throughout P3. The deliverables resolve the open items §6.1–§6.10 of P1 SCAFFOLD rev 1.2 and the P2 SCAFFOLD §0.A.2 cutover-trigger dependency.
 
-**Density note**: this SCAFFOLD is ~850 lines (target range 350–450 lines from GOAL). The overage is load-bearing — driven by (a) §5's 17-probe enumeration with explicit kill criteria covering all 7 UNIVERSAL §12 friction patterns, (b) §3's 5-hunk grep-verified diff with full surrounding context including the single-hunk §3.4 covering the entire return dict, (c) §0's 6 explicit input inconsistencies (each requiring a binding-precedence resolution), and (d) §9's P2.1 SEV-3 carry-forward (P1.0 had no equivalent). None of these can compress without losing critic-resilience.
+**Density note**: this SCAFFOLD is ~870 lines (target range 350–450 lines from GOAL). The overage is load-bearing — driven by (a) §5's 17-probe enumeration with explicit kill criteria covering all 7 UNIVERSAL §12 friction patterns, (b) §3's 5-hunk grep-verified diff with full surrounding context including the single-hunk §3.4 covering the entire return dict, (c) §0's 6 explicit input inconsistencies (each requiring a binding-precedence resolution), and (d) §9's P2.1 SEV-3 carry-forward (P1.0 had no equivalent). None of these can compress without losing critic-resilience.
 
 ---
 
@@ -43,7 +43,7 @@ INCONSISTENCY-2 (MAJOR): Admission-call threshold mismatch.
 INCONSISTENCY-3 (MINOR): Probe-count subsumption.
 - P1 SCAFFOLD §6.7 mentions a "7-day shadow probe sequence (Days 1–7)" as a deferred P2-packet (i.e. P3) item.
 - GOAL §5 asks for "14 distinct probes — extending P1's 7-probe shadow"; reads as additive (7 + new = 14 probes total, OR 7 P1-noted + 14 new = 21 probes).
-- Resolution (binding): P3 ships 16 distinct probes (initially framed as 14; 2 added to close remaining UNIVERSAL §12 friction patterns). P1 §6.7's "7-day shadow probe sequence" was a calendar sequence reference, not 7 distinct probes. P3's 16 probes cover: 6 friction-pattern shadow events (LEXICAL_PROFILE_MISS, UNION_SCOPE_EXPANSION, PHRASING_GAME_TAX, SLICING_PRESSURE, CLOSED_PACKET_STILL_LOAD_BEARING, ADVISORY_OUTPUT_INVISIBILITY — ALL 7 UNIVERSAL §12 patterns, with INTENT_ENUM_TOO_NARROW covered by probe5) + 3 inconsistency-detection probes (intent_enum_unknown, hard_stop divergence, severity divergence) + 2 P2-integration probes (MISSING_COMPANION shadow capture, companion_skip_token-not-counted-as-divergence) + 2 structural probes (profile_match disagreement, kernel_alerts disagreement) + 3 infrastructure probes (log rotation, concurrent-writer correctness, analyzer aggregation correctness with dual-metric P4 gate). Total 16.
+- Resolution (binding): P3 ships 17 distinct probes (initially framed as 14; 3 added to close remaining UNIVERSAL §12 friction patterns and handle intent=None edge case). P1 §6.7's "7-day shadow probe sequence" was a calendar sequence reference, not 7 distinct probes. P3's 17 probes cover: 6 friction-pattern shadow events (LEXICAL_PROFILE_MISS, UNION_SCOPE_EXPANSION, PHRASING_GAME_TAX, SLICING_PRESSURE, CLOSED_PACKET_STILL_LOAD_BEARING, ADVISORY_OUTPUT_INVISIBILITY — ALL 7 UNIVERSAL §12 patterns, with INTENT_ENUM_TOO_NARROW covered by probe5) + 3 inconsistency-detection probes (intent_enum_unknown, hard_stop divergence, severity divergence) + 2 P2-integration probes (MISSING_COMPANION shadow capture, companion_skip_token-not-counted-as-divergence) + 2 structural probes (profile_match disagreement, kernel_alerts disagreement) + 3 infrastructure probes (log rotation, concurrent-writer correctness, analyzer aggregation correctness with dual-metric P4 gate) + 1 edge-case probe (intent=None defaults to Intent.other). Total 17.
 
 INCONSISTENCY-4 (MINOR): Divergence-log storage path convention.
 - GOAL §1 names `state/topology_v_next_divergence.jsonl`.
@@ -116,8 +116,9 @@ Public API:
 - `def map_old_status_to_severity(old_status: str) -> Severity` — implements the §4.4 status-mapping table.
 
 Internal helpers:
+- `_extract_binding(payload) -> BindingLayer | None` — extracts the current BindingLayer from payload's `route_card` dict if present; used by `maybe_shadow_compare` (§2.4 line 193) to pass the resolved binding to v_next.admit.
 - `_extract_old_admission(payload) -> tuple[str, str | None]` — returns `(old_status, old_profile_resolved)` from payload's `admission` and `route_card` dicts.
-- `_build_divergence_record(*, payload, decision, task, files, intent) -> DivergenceRecord` — assembles the §4.1 record.
+- `_build_divergence_record(*, payload, decision, task, task_hash: str, files, intent) -> DivergenceRecord` — assembles the §4.1 record. The `task_hash` parameter (sha256[:16] of raw task string) is required; passing the raw task string here would risk logging it in the JSONL record — the hash prevents that.
 
 **Anti-PHRASING_GAME_TAX guard**: shim does NOT accept any `phrase`, `task_phrase`, or `wording` parameter. `task` is hashed via `sha256(task.encode())[:16].hex()` and the hash is passed to `v_next.admit(intent, files, hint=task_hash)` as the diagnostic `hint` parameter. Passing the raw task string would make `closest_rejected_profile` phrase-sensitive (soft PHRASING_GAME_TAX via the hint output field varying with wording). Passing the hash instead ensures `closest_rejected_profile` is IDENTICAL across 3 phrase-varying calls with the same intent+files. Per P1 SCAFFOLD §5.3 invariant, `hint` is OUTPUT-ONLY — it feeds only the `closest_rejected_profile` diagnostic field and is NEVER consumed by `coverage_map.resolve_candidates()` or `composition_rules.apply_composition()` (which do not accept a phrase parameter at all). The shim adds no new routing input; it relies on P1's structural hint-never-routes guarantee. The shim public API accepts no parameter that could become a phrase-routing reintroduction; `task` flows through to `task_hash` (sha256[:16] for grouping in the divergence log) only.
 
@@ -221,7 +222,7 @@ Grep-verified context: line 94 is the `--intent` argparse declaration; surroundi
 ```diff
 --- a/scripts/topology_doctor_cli.py
 +++ b/scripts/topology_doctor_cli.py
-@@ -91,6 +91,7 @@ def _build_parser(api: Any) -> argparse.ArgumentParser:
+@@ -91,5 +91,6 @@ def _build_parser(api: Any) -> argparse.ArgumentParser:
      )
      parser.add_argument("--task", default="", help="Task string for --navigation")
      parser.add_argument("--files", nargs="*", default=[], help="Files for --navigation")
@@ -256,7 +257,7 @@ Grep-verified context: line 2636 is `def run_navigation(`; signature spans lines
 ```diff
 --- a/scripts/topology_doctor.py
 +++ b/scripts/topology_doctor.py
-@@ -2649,6 +2649,7 @@ def run_navigation(
+@@ -2649,5 +2649,6 @@ def run_navigation(
      artifact_target: str | None = None,
      merge_state: str | None = None,
      companion_loop_batch_cap: int | None = None,
@@ -272,13 +273,12 @@ The shim import is placed at module top alongside existing imports, not deferred
 ```diff
 --- a/scripts/topology_doctor.py
 +++ b/scripts/topology_doctor.py
-@@ -<imports section> @@
- # ... existing imports ...
+@@ -19,1 +19,2 @@
+ from typing import Any
 +from scripts.topology_v_next.cli_integration_shim import maybe_shadow_compare
- # ... remaining imports ...
 ```
 
-Exact line number is implementation-defined (place after existing `scripts.topology_v_next` imports if any exist, else after last stdlib/third-party import block). The import is unconditional; `maybe_shadow_compare` returns payload unchanged when `v_next_shadow=False` (transparent no-op), so the import cost is always paid but the shadow path has zero execution cost when disabled.
+The import is placed after line 19 (`from typing import Any`), the last stdlib import in the block. No `scripts.topology_v_next` imports exist at module top in the current file — this is the first one. The import is unconditional; `maybe_shadow_compare` returns payload unchanged when `v_next_shadow=False` (transparent no-op), so the import cost is always paid but the shadow path has zero execution cost when disabled.
 
 ### 3.4 `scripts/topology_doctor.py` — shim call site
 
@@ -287,7 +287,7 @@ Grep-verified context: `return {` is at line 2753; the closing `}` of the dict l
 ```diff
 --- a/scripts/topology_doctor.py
 +++ b/scripts/topology_doctor.py
-@@ -2753,42 +2753,49 @@
+@@ -2753,42 +2753,48 @@
 -    return {
 +    payload = {
          "ok": nav_ok,
@@ -470,7 +470,7 @@ def classify_divergence(record: DivergenceRecord) -> str:
 
 ---
 
-## §5. Shadow-Window Acceptance Probes (14 distinct probes)
+## §5. Shadow-Window Acceptance Probes (17 distinct probes)
 
 Located at `tests/topology_v_next/regression/shadow/` — each probe is an independent pytest test file. Each probe explicitly states its kill criterion as a concrete numeric/string assertion so unfalsifiable success is structurally precluded.
 
@@ -480,7 +480,7 @@ Expected divergence pattern: both calls produce SAME `profile_resolved_new` (v_n
 Kill criterion if fails: if BOTH calls return `agreement_class == "AGREE"` AND `profile_resolved_old` is identical across both, the LEXICAL_PROFILE_MISS structural fix is unmeasurable in shadow → fail with `assert at_least_one_classification == "DISAGREE_PROFILE"`.
 
 ### probe2 — `test_shadow_union_scope_expansion_resolved.py`
-Trigger: invoke with `files=["src/calibration/weighting.py", "tests/test_calibration_weighting.py"]` and intent="modify_existing" (a Universal §8 cohort).
+Trigger: invoke with `files=["src/calibration/platt.py", "tests/test_calibration_platt.py"]` and intent="modify_existing" (a Universal §8 cohort; `src/calibration/weighting.py` does not exist — substituted `platt.py` which is verified present).
 Expected: `v_next` admits via cohort (`new_admit_severity == ADMIT`); old returns `advisory_only` or `scope_expansion_required`. `agreement_class == "DISAGREE_SEVERITY"` (v_next more permissive on legitimate cohort).
 Kill criterion: if `new_admit_severity != ADMIT` and `friction_pattern_hit != UNION_SCOPE_EXPANSION`, the cohort admission is broken → fail with `assert new_admit_severity == "ADMIT" or friction_pattern_hit == "UNION_SCOPE_EXPANSION"`.
 
@@ -502,7 +502,7 @@ Expected: v_next emits ADVISORY with `intent_enum_unknown` code; old side ignore
 Kill criterion: `assert any(blocker["code"] == "intent_enum_unknown" for blocker in envelope["advisory"])` — missing advisory means INTENT_ENUM_TOO_NARROW structural fix is broken.
 
 ### probe6 — `test_shadow_hard_stop_divergence.py`
-Trigger: invoke with `files=["src/execution/order_router.py"]` and intent="modify_existing" (LIVE_SIDE_EFFECT_PATH per ZEUS_BINDING).
+Trigger: invoke with `files=["src/execution/executor.py"]` and intent="modify_existing" (LIVE_SIDE_EFFECT_PATH per ZEUS_BINDING; `src/execution/executor.py` verified present; `src/execution/order_router.py` does not exist).
 Expected: v_next emits HARD_STOP via kernel; old side returns its normal admission. `agreement_class == "DISAGREE_HARD_STOP"`.
 Kill criterion: `assert record.agreement_class == "DISAGREE_HARD_STOP"` AND `record.kernel_alert_count >= 1` — missing kernel detection means the Hard Safety Kernel didn't wire up.
 
@@ -512,13 +512,13 @@ Expected: `record.agreement_class == "DISAGREE_SEVERITY"`; record persists to JS
 Kill criterion: read back the JSONL; `assert record.agreement_class == "DISAGREE_SEVERITY"`.
 
 ### probe8 — `test_shadow_missing_companion_capture.py` (P2 integration)
-Trigger: invoke with `files=["src/calibration/weighting.py"]` (missing companion `docs/reference/zeus_calibration_weighting_authority.md`), intent="modify_existing".
+Trigger: invoke with `files=["src/calibration/platt.py"]` (missing companion `docs/reference/zeus_calibration_platt_authority.md`; `src/calibration/platt.py` verified present; `src/calibration/weighting.py` does not exist), intent="modify_existing".
 Expected: v_next emits MISSING_COMPANION ADVISORY (per P2 §3.2); record's `missing_companion` field is non-empty; `agreement_class == "DISAGREE_COMPANION"`.
-Kill criterion: `assert "docs/reference/zeus_calibration_weighting_authority.md" in record.missing_companion` AND `record.agreement_class == "DISAGREE_COMPANION"`.
+Kill criterion: `assert "docs/reference/zeus_calibration_platt_authority.md" in record.missing_companion` AND `record.agreement_class == "DISAGREE_COMPANION"`.
 
 ### probe9 — `test_shadow_companion_skip_not_counted_as_divergence.py` (P2 integration)
-Trigger: invoke with `files=["src/data/vendor_response_x.py"]` AND env `COMPANION_SKIP_NEEDS_HUMAN_REVIEW=1`.
-Expected: v_next emits `companion_skip_token_used` ADVISORY; record's `companion_skip_used == True`; `agreement_class == "SKIP_HONORED"` (per §4.5); analyzer aggregator EXCLUDES this record from agreement-% denominator (per §6 below).
+Trigger: construct a fixture binding YAML with `companion_skip_tokens: {<profile_id>: "COMPANION_SKIP_NEEDS_HUMAN_REVIEW=1"}` for the relevant profile; set env var `COMPANION_SKIP_NEEDS_HUMAN_REVIEW=1` in test setup; invoke with `files=["src/data/vendor_response_x.py"]` using that fixture binding. (Note: the actual mechanism reads `binding.companion_skip_tokens[profile_id]` per-profile — there is no global env var `COMPANION_SKIP_NEEDS_HUMAN_REVIEW`; the per-profile token string IS the env var name that must be set.)
+Expected: v_next emits `companion_skip_token_used` ADVISORY (skip token present AND env var set); record's `companion_skip_used == True`; `agreement_class == "SKIP_HONORED"` (per §4.5); analyzer aggregator EXCLUDES this record from agreement-% denominator (per §6 below).
 Kill criterion: `assert record.agreement_class == "SKIP_HONORED"` AND analyzer-computed agreement-pct EXCLUDES this row from denominator (verify via mock 100-record fixture where 50 are SKIP_HONORED — agreement-pct should be 50/50 = 100%, not 50/100 = 50%).
 
 ### probe10 — `test_shadow_profile_match_disagreement.py`
@@ -545,7 +545,7 @@ Kill criterion: `assert line_count == 400 and all(json.loads(line) for line in l
 Trigger: synthesize a 1000-record fixture covering all 7 friction patterns, AGREE/DISAGREE mix, SKIP_HONORED rows (exactly 150 SKIP_HONORED = 15% skip rate); run `divergence_summary.aggregate(start_date, end_date, root=tmp_path)`.
 Expected: summary's per-profile agreement-pct excludes SKIP_HONORED rows from denominator; per-friction-pattern counts match the fixture's distribution exactly; skip_honored_rate = 0.15; p4_gate_ok reflects both metrics.
 Kill criteria (three assertions, all must pass):
-1. `assert summary["agreement_pct_excluding_skips"]["modify_calibration_weighting"] == expected_pct_excluding_skip` — denominator-inclusion bug.
+1. `assert summary["agreement_pct_excluding_skips"]["modify_calibration_platt"] == expected_pct_excluding_skip` — denominator-inclusion bug.
 2. `assert abs(summary["skip_honored_rate"] - 0.15) < 0.001` — skip_honored_rate correctly computed over ALL records.
 3. `assert summary["p4_gate_ok"] == (all_profiles_above_95 and 0.15 < 0.20)` — p4_gate_ok derivation correctness. Run a second fixture with skip_honored_rate=0.25 and assert `p4_gate_ok == False` even when per-profile agreement-pct is 1.0.
 
@@ -691,9 +691,9 @@ P3 ships as 3 independently testable sub-packets, each ≤1000 LOC.
 
 **Note**: P3.2 is testable in isolation against synthetic divergence logs; does NOT require the shim to be wired up. This is the deliberate decomposition that lets P3.2 ship before P3.3 if needed.
 
-### P3.3 — CLI Integration Shim + Wire-Up + 17 Probes (~800 LOC cap)
+### P3.3 — CLI Integration Shim + Wire-Up + 17 Probes
 
-**Deliverables**: `cli_integration_shim.py` (~220 LOC) + `__init__.py` re-export update (~5 LOC) + the 5-hunk wire-up diff (§3 above, 13 LOC including module-top import) + 17 shadow probes under `tests/topology_v_next/regression/shadow/` (~800 LOC). Test budget exceeds module budget per probe complexity.
+**Deliverables**: `cli_integration_shim.py` (~220 LOC) + `__init__.py` re-export update (~5 LOC) + the 5-hunk wire-up diff (§3 above, 13 LOC including module-top import) + 17 shadow probes under `tests/topology_v_next/regression/shadow/` (~800 LOC). Production code ≤800 LOC; test code (17 probes) ~800 LOC separate (per PACKET_INDEX § Packet Sizing Discipline — tests excluded from sub-packet cap per per-packet convention). Deliverable production sum: ~238 LOC (shim 220 + __init__ 5 + wire-up 13), well within the ≤800 LOC production cap.
 
 **Tests in P3.3**:
 - 17 shadow probes per §5 above
@@ -769,7 +769,7 @@ Per 4-for-4 critic-catch pattern: each prior SCAFFOLD has had a SEV-1 caught. An
 | HARD_STOP has no current equivalent — auto-DISAGREE problem | §4.4 footnote — intentional: HARD_STOP is a NEW safety signal, so DISAGREE_HARD_STOP is the desired classification |
 | P2.a / P3 window overlap | §0 INC-6 + §6.1 — P2 §0.A premise on P1's `--v-next-shadow` is stale; flagged for P2 erratum; P3 captures regardless of P2.a sequencing |
 | task→hint causes phrase-sensitive closest_rejected_profile | §1.3 + §2.4 + §8.4 (M3 fix): hash passed as hint, not raw task; probe3 asserts IDENTICAL closest_rejected_profile across phrase-varying calls |
-| Wire-up diff split-hunk unapplicable (closing `}` outside range) | §3.4 (C2 fix): single unified hunk `@@ -2753,42 +2753,49 @@` covers entire dict literal; module-top import in §3.0 hunk |
+| Wire-up diff split-hunk unapplicable (closing `}` outside range) | §3.4 (C2 fix): single unified hunk `@@ -2753,42 +2753,48 @@` covers entire dict literal; module-top import in §3.0 hunk |
 | Lazy import hides import-time errors | §3.0 + §1.3 (M2 fix): import at module top; transparent no-op is in the function body, not the import |
 | Single-syscall write-atomicity claim | §4.3: explicit POSIX guarantee citation + per-record 8 KiB cap to enforce single-syscall semantics |
 | SLICING_PRESSURE not testable without friction_state | §2.4 (minor fix): `friction_state` parameter added to shim; probe4 now testable |
@@ -832,16 +832,14 @@ All three carry-forwards are recorded so P2.1 author knows exactly what to fix.
 | Wire-up diff (`topology_doctor.py` + `topology_doctor_cli.py`) | 11 | Per §3.5 grep-verified hunks |
 | `test_divergence_logger.py` | 170 | Unit tests for P3.1 |
 | `test_divergence_summary.py` | 250 | Aggregate + CLI tests for P3.2 |
-| `tests/topology_v_next/regression/shadow/` (16 probes) | 800 | Shadow integration tests for P3.3 |
+| `tests/topology_v_next/regression/shadow/` (17 probes) | 800 | Shadow integration tests for P3.3 |
 | Stub binding YAML additions (none — P3 reuses P1's binding) | 0 | No new binding entries |
 | `.gitignore` update | 2 | Adds `evidence/topology_v_next_shadow/*.jsonl*` exclusion |
-| **Module subtotal** | **805** | Production code only |
-| **Test subtotal** | **1120** | Test code only |
-| **Module subtotal** | **815** | Production code only (updated for 16-probe shim + friction_state plumbing) |
-| **Test subtotal** | **1270** | Test code only (16 probes × ~800 LOC total; unit tests unchanged) |
+| **Module subtotal** | **815** | Production code only (updated for 17-probe shim + friction_state plumbing) |
+| **Test subtotal** | **1270** | Test code only (17 probes × ~800 LOC total; unit tests unchanged) |
 | **Total** | **2085** | Production LOC is within PACKET_INDEX P3's 1000–1500 LOC budget; test LOC is not counted against the packet ceiling (tests are excluded from packet LOC accounting per PACKET_INDEX policy) |
 
-Production LOC (~815) is within PACKET_INDEX P3's 1000–1500 budget. Test coverage is heavy (16 probes) because P3's shadow window is the gate for the highest-blast P4 cutover decision — probe density is intentional risk-reduction investment, not scope creep.
+Production LOC (~815) is within PACKET_INDEX P3's 1000–1500 budget. Test coverage is heavy (17 probes) because P3's shadow window is the gate for the highest-blast P4 cutover decision — probe density is intentional risk-reduction investment, not scope creep.
 
 ---
 
