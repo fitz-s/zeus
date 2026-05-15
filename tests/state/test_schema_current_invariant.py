@@ -1,6 +1,7 @@
 # Created: 2026-05-11
-# Last reused or audited: 2026-05-11
+# Last reused or audited: 2026-05-15
 # Authority basis: PLAN docs/operations/task_2026-05-11_init_schema_boot_invariant/PLAN.md §5.5 + §6
+#                  + docs/operations/task_2026-05-15_live_order_e2e_goal/LIVE_ORDER_E2E_GOAL_PLAN.md
 
 import hashlib
 import sqlite3
@@ -104,6 +105,35 @@ def test_rel3a_fresh_idempotent():
     init_schema(conn)
     h2 = _sqlite_master_hash(conn)
     assert h1 == h2, "sqlite_master changed between first and second init_schema call"
+
+
+def test_rel3a_position_current_metric_column_existing_rows_idempotent():
+    """init_schema must be a fixed point once temperature_metric already exists.
+
+    Live boot re-runs init_schema against DBs with active/pending positions.
+    The Phase 5A zero-data guard applies only when the column is missing.
+    """
+    conn = sqlite3.connect(":memory:")
+    init_schema(conn)
+    conn.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, trade_id, strategy_key, updated_at, temperature_metric
+        ) VALUES (
+            'pending-live-row', 'pending_entry', 'pending-live-row',
+            'opening_inertia', '2026-05-15T00:00:00+00:00', 'high'
+        )
+        """
+    )
+    conn.commit()
+
+    init_schema(conn)
+
+    row = conn.execute(
+        "SELECT phase, temperature_metric FROM position_current WHERE position_id = ?",
+        ("pending-live-row",),
+    ).fetchone()
+    assert row == ("pending_entry", "high")
 
 
 # ---------------------------------------------------------------------------
