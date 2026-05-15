@@ -484,7 +484,8 @@ class ActionValidator:
     # -------------------------------------------------------------------------
 
     def decompose_directory_op(
-        self, dir_path: Path, op: Operation
+        self, dir_path: Path, op: Operation,
+        manifest: Optional[ProposalManifest] = None,
     ) -> list[LeafCheck]:
         """
         Guarantee (d): decompose a directory operation into per-leaf checks.
@@ -494,6 +495,9 @@ class ActionValidator:
         operation if ANY leaf returns FORBIDDEN_PATH or FORBIDDEN_OPERATION.
 
         If dir_path does not exist, returns an empty list (no files to check).
+
+        For WRITE operations, any existing leaf that is not registered in
+        manifest.proposed_modifies is FORBIDDEN_PATH (SEV-2 #4 carry-forward).
         """
         if not dir_path.exists() or not dir_path.is_dir():
             return []
@@ -511,6 +515,20 @@ class ActionValidator:
                     result=ValidatorResult.FORBIDDEN_PATH,
                     rule=rule,
                 ))
+            elif op == Operation.WRITE and canonical.exists():
+                # In-place WRITE to existing file requires manifest registration.
+                if not self._is_write_in_manifest(canonical, manifest):
+                    results.append(LeafCheck(
+                        path=canonical,
+                        result=ValidatorResult.FORBIDDEN_PATH,
+                        rule=None,
+                    ))
+                else:
+                    results.append(LeafCheck(
+                        path=canonical,
+                        result=ValidatorResult.ALLOWED,
+                        rule=None,
+                    ))
             else:
                 results.append(LeafCheck(
                     path=canonical,
@@ -554,7 +572,11 @@ class ActionValidator:
         """
         if manifest is None:
             return False
-        return canonical in manifest.proposed_modifies
+        import os as _os
+        for entry in manifest.proposed_modifies:
+            if Path(_os.path.realpath(str(entry))) == canonical:
+                return True
+        return False
 
     # -------------------------------------------------------------------------
     # Dry-run floor convenience wrapper

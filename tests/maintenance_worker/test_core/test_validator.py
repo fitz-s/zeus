@@ -808,3 +808,161 @@ def test_auth_profiles_json_forbidden(tmp_path: Path) -> None:
     auth_file.parent.mkdir(parents=True)
     auth_file.touch()
     assert v.validate_action(auth_file, Operation.READ) == FORBIDDEN_PATH
+
+
+# ---------------------------------------------------------------------------
+# SEV-1 adversarial tests
+# ---------------------------------------------------------------------------
+
+
+class TestSev1ManifestCanonical:
+    """
+    SEV-1 #1: _is_write_in_manifest must canonicalize manifest entries.
+
+    The C2-wall was broken: manifest stores raw Path (e.g. /tmp/x.md) while
+    validator canonicalizes to /private/tmp/x.md on macOS. The fix applies
+    os.path.realpath() to each manifest entry before comparing.
+    """
+
+    def test_raw_path_in_manifest_matches_canonical(self, tmp_path: Path) -> None:
+        """
+        Caller registers raw Path('/tmp/...'); validator must still allow it.
+
+        This is the core regression: pre-fix, canonical vs raw comparison
+        returns False on macOS, producing FORBIDDEN_PATH on a legitimate WRITE.
+        """
+        v = _validator(tmp_path)
+        target = tmp_path / "report.md"
+        target.touch()
+        # Register the RAW path (not pre-resolved) — what real callers do.
+        raw_path = Path(str(target))
+        manifest = ProposalManifest(
+            task_id="test_task",
+            proposed_modifies=(raw_path,),
+        )
+        result = v.validate_action(target, Operation.WRITE, manifest=manifest)
+        assert result == ALLOWED, (
+            f"Expected ALLOWED for raw manifest path {raw_path!r} "
+            f"vs canonical {target.resolve()!r}, got {result}"
+        )
+
+    def test_dotdot_path_in_manifest_matches_canonical(self, tmp_path: Path) -> None:
+        """
+        Caller registers Path with .. traversal; validator normalizes both sides.
+        """
+        v = _validator(tmp_path)
+        subdir = tmp_path / "sub"
+        subdir.mkdir()
+        target = subdir / "report.md"
+        target.touch()
+        # Register via dotdot traversal
+        dotdot_path = tmp_path / "sub" / ".." / "sub" / "report.md"
+        manifest = ProposalManifest(
+            task_id="test_task",
+            proposed_modifies=(dotdot_path,),
+        )
+        result = v.validate_action(target, Operation.WRITE, manifest=manifest)
+        assert result == ALLOWED
+
+    def test_write_existing_file_without_manifest_still_forbidden(
+        self, tmp_path: Path
+    ) -> None:
+        """
+        Sanity: existing file + WRITE + manifest=None → FORBIDDEN_PATH.
+        The fix must not loosen this invariant.
+        """
+        v = _validator(tmp_path)
+        target = tmp_path / "report.md"
+        target.touch()
+        result = v.validate_action(target, Operation.WRITE, manifest=None)
+        assert result == FORBIDDEN_PATH
+
+    def test_write_existing_file_not_in_manifest_forbidden(
+        self, tmp_path: Path
+    ) -> None:
+        """
+        Manifest exists but does not include this file → still FORBIDDEN_PATH.
+        """
+        v = _validator(tmp_path)
+        target = tmp_path / "report.md"
+        other = tmp_path / "other.md"
+        target.touch()
+        other.touch()
+        manifest = ProposalManifest(
+            task_id="test_task",
+            proposed_modifies=(other,),
+        )
+        result = v.validate_action(target, Operation.WRITE, manifest=manifest)
+        assert result == FORBIDDEN_PATH
+
+
+class TestSev1DecomposeInPlace:
+    """
+    SEV-1 #2: decompose_directory_op must propagate manifest and apply the
+    in-place WRITE check on each existing leaf.
+    """
+
+    def test_dir_write_no_manifest_leaf_forbidden(self, tmp_path: Path) -> None:
+        """
+        Directory WRITE with no manifest: existing leaf must be FORBIDDEN_PATH.
+        """
+        v = _validator(tmp_path)
+        work_dir = tmp_path / "work"
+        work_dir.mkdir()
+        leaf = work_dir / "existing.md"
+        leaf.touch()
+        results = v.decompose_directory_op(work_dir, Operation.WRITE, manifest=None)
+        assert len(results) == 1
+        assert results[0].result == FORBIDDEN_PATH
+
+    def test_dir_write_with_manifest_leaf_allowed(self, tmp_path: Path) -> None:
+        """
+        Directory WRITE: existing leaf in manifest.proposed_modifies → ALLOWED.
+        """
+        v = _validator(tmp_path)
+        work_dir = tmp_path / "work"
+        work_dir.mkdir()
+        leaf = work_dir / "existing.md"
+        leaf.touch()
+        # Register raw path (not pre-resolved) to test canonical comparison.
+        manifest = ProposalManifest(
+            task_id="test_task",
+            proposed_modifies=(leaf,),
+        )
+        results = v.decompose_directory_op(work_dir, Operation.WRITE, manifest=manifest)
+        assert len(results) == 1
+        assert results[0].result == ALLOWED
+
+    def test_dir_write_mixed_leaves(self, tmp_path: Path) -> None:
+        """
+        Directory with 2 existing leaves: only the registered one is ALLOWED.
+        """
+        v = _validator(tmp_path)
+        work_dir = tmp_path / "work"
+        work_dir.mkdir()
+        leaf_a = work_dir / "a.md"
+        leaf_b = work_dir / "b.md"
+        leaf_a.touch()
+        leaf_b.touch()
+        manifest = ProposalManifest(
+            task_id="test_task",
+            proposed_modifies=(leaf_a,),
+        )
+        results = v.decompose_directory_op(work_dir, Operation.WRITE, manifest=manifest)
+        result_map = {r.path.name: r.result for r in results}
+        assert result_map["a.md"] == ALLOWED
+        assert result_map["b.md"] == FORBIDDEN_PATH
+
+    def test_dir_read_no_manifest_check(self, tmp_path: Path) -> None:
+        """
+        READ op: manifest check is not applied; existing leaves are ALLOWED
+        (unless they match a forbidden rule).
+        """
+        v = _validator(tmp_path)
+        work_dir = tmp_path / "work"
+        work_dir.mkdir()
+        leaf = work_dir / "file.md"
+        leaf.touch()
+        results = v.decompose_directory_op(work_dir, Operation.READ, manifest=None)
+        assert len(results) == 1
+        assert results[0].result == ALLOWED
