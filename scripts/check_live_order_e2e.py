@@ -41,6 +41,15 @@ REJECTED_OR_UNKNOWN_STATES = frozenset(
 ACCEPTED_EVENT_TYPES = frozenset(
     {"POST_ACKED", "SUBMIT_ACKED", "PARTIAL_FILL_OBSERVED", "FILL_CONFIRMED"}
 )
+REJECTED_OR_UNKNOWN_EVENT_TYPES = frozenset(
+    {
+        "SUBMIT_REJECTED",
+        "SUBMIT_UNKNOWN",
+        "SUBMIT_TIMEOUT_UNKNOWN",
+        "CLOSED_MARKET_UNKNOWN",
+        "REVIEW_REQUIRED",
+    }
+)
 ORDER_ID_KEYS = ("venue_order_id", "order_id", "orderID", "orderId", "id")
 LIVE_PROOF_SOURCES = frozenset({"REST", "WS_USER", "WS_MARKET", "DATA_API", "CHAIN"})
 OPEN_ORDER_FACT_STATES = frozenset({"LIVE", "RESTING"})
@@ -132,11 +141,18 @@ def _latest_command(conn: sqlite3.Connection, command_id: str | None) -> dict[st
 def _events(conn: sqlite3.Connection, command_id: str) -> list[dict[str, Any]]:
     if not _table_exists(conn, "venue_command_events"):
         return []
-    order_column = "occurred_at" if "occurred_at" in _columns(conn, "venue_command_events") else "rowid"
+    cols = _columns(conn, "venue_command_events")
+    order_terms = []
+    if "occurred_at" in cols:
+        order_terms.append("occurred_at ASC")
+    if "sequence_no" in cols:
+        order_terms.append("sequence_no ASC")
+    order_terms.append("rowid ASC")
+    order_sql = ", ".join(order_terms)
     return [
         dict(row)
         for row in conn.execute(
-            f"SELECT * FROM venue_command_events WHERE command_id = ? ORDER BY {order_column} ASC",
+            f"SELECT * FROM venue_command_events WHERE command_id = ? ORDER BY {order_sql}",
             (command_id,),
         )
     ]
@@ -379,6 +395,26 @@ def _order_identity_consistent(evidence: dict[str, list[str]]) -> bool:
     return bool(values) and len(values) == 1
 
 
+def _facts_identity_consistent(facts: list[dict[str, Any]], order_id: str) -> bool:
+    if not order_id:
+        return False
+    fact_order_ids = {
+        str(fact.get("venue_order_id") or "")
+        for fact in facts
+        if fact.get("venue_order_id")
+    }
+    return not fact_order_ids or fact_order_ids == {order_id}
+
+
+def _latest_event_not_rejected_or_unknown(events: list[dict[str, Any]]) -> bool:
+    if not events:
+        return False
+    latest = events[-1]
+    event_type = str(latest.get("event_type") or "")
+    state_after = str(latest.get("state_after") or "")
+    return event_type not in REJECTED_OR_UNKNOWN_EVENT_TYPES and state_after not in REJECTED_OR_UNKNOWN_STATES
+
+
 def _has_pre_submit_envelope(command: dict[str, Any], envelopes: list[dict[str, Any]]) -> bool:
     command_envelope_id = str(command.get("envelope_id") or "")
     for envelope in envelopes:
@@ -460,6 +496,16 @@ def evaluate(conn: sqlite3.Connection, command_id: str | None = None) -> dict[st
     )
     checks.append(
         Check(
+            "latest_event_not_rejected_or_unknown",
+            "PASS" if _latest_event_not_rejected_or_unknown(events) else "FAIL",
+            (
+                f"event_type={events[-1].get('event_type') if events else 'missing'} "
+                f"state_after={events[-1].get('state_after') if events else 'missing'}"
+            ),
+        )
+    )
+    checks.append(
+        Check(
             "pre_submit_envelope_present",
             "PASS" if _has_pre_submit_envelope(command, envelopes) else "FAIL",
             f"count={len(envelopes)}",
@@ -471,6 +517,16 @@ def evaluate(conn: sqlite3.Connection, command_id: str | None = None) -> dict[st
             "venue_order_identity_consistent",
             "PASS" if _order_identity_consistent(order_identity_evidence) else "FAIL",
             json.dumps(order_identity_evidence, sort_keys=True),
+        )
+    )
+    checks.append(
+        Check(
+            "venue_order_facts_identity_consistent",
+            "PASS" if _facts_identity_consistent(order_facts, order_id) else "FAIL",
+            (
+                f"order_id={order_id or 'missing'} fact_order_ids="
+                f"{sorted({str(fact.get('venue_order_id') or '') for fact in order_facts if fact.get('venue_order_id')})}"
+            ),
         )
     )
     checks.append(
