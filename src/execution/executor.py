@@ -143,6 +143,40 @@ def _geoblock_rejection_payload(exc: Exception, *, idempotency_key: str) -> dict
     }
 
 
+def _canonical_payload_hash(payload: object) -> str:
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _jsonable_payload(payload: object) -> object:
+    return json.loads(json.dumps(payload, sort_keys=True, default=str))
+
+
+def _venue_submit_order_fact_state(result: dict) -> str:
+    status = str(result.get("status") or result.get("state") or "").upper()
+    if status in {"MATCHED", "FILLED"}:
+        return "MATCHED"
+    if status in {"PARTIALLY_MATCHED", "PARTIAL", "PARTIALLY_FILLED"}:
+        return "PARTIALLY_MATCHED"
+    return "LIVE"
+
+
+def _venue_submit_remaining_size(result: dict, fallback_size: float | Decimal) -> str:
+    for key in ("remaining_size", "remainingSize", "size", "original_size", "originalSize"):
+        value = result.get(key)
+        if value not in (None, ""):
+            return str(value)
+    return str(fallback_size)
+
+
+def _venue_submit_matched_size(result: dict) -> str:
+    for key in ("matched_size", "matchedSize", "size_matched", "sizeMatched"):
+        value = result.get(key)
+        if value not in (None, ""):
+            return str(value)
+    return "0"
+
+
 def _json_safe_string(value, fallback: str = "") -> str:
     if value is None:
         return str(fallback or "")
@@ -1565,7 +1599,7 @@ def execute_exit_order(
     _gate_runtime_check("settlement_write")
     from src.data.polymarket_client import PolymarketClient
     from src.execution.command_bus import IdempotencyKey, IntentKind, VenueCommand, CommandState
-    from src.state.venue_command_repo import insert_command, append_event, get_command
+    from src.state.venue_command_repo import append_order_fact, insert_command, append_event, get_command
     from src.contracts.executable_market_snapshot_v2 import MarketSnapshotError
     from src.state.collateral_ledger import CollateralInsufficient
 
@@ -2303,6 +2337,29 @@ def execute_exit_order(
                     **final_envelope_payload,
                 },
             )
+            append_order_fact(
+                conn,
+                venue_order_id=order_id,
+                command_id=command_id,
+                state=_venue_submit_order_fact_state(result),
+                remaining_size=_venue_submit_remaining_size(result, shares),
+                matched_size=_venue_submit_matched_size(result),
+                source="REST",
+                observed_at=ack_time,
+                venue_timestamp=ack_time,
+                raw_payload_hash=_canonical_payload_hash(
+                    {
+                        "command_id": command_id,
+                        "venue_order_id": order_id,
+                        "submit_result": result,
+                    }
+                ),
+                raw_payload_json={
+                    "venue_order_id": order_id,
+                    "submit_result": _jsonable_payload(result),
+                    "source": "place_limit_order_ack",
+                },
+            )
             if _own_conn:
                 conn.commit()
         except Exception as inner:
@@ -2368,7 +2425,7 @@ def _live_order(
     _gate_runtime_check("on_chain_mutation")
     from src.data.polymarket_client import PolymarketClient, V2PreflightError
     from src.execution.command_bus import IdempotencyKey, IntentKind
-    from src.state.venue_command_repo import insert_command, append_event
+    from src.state.venue_command_repo import append_order_fact, insert_command, append_event
     from src.contracts.executable_market_snapshot_v2 import MarketSnapshotError
     from src.state.collateral_ledger import CollateralInsufficient
 
@@ -3143,6 +3200,29 @@ def _live_order(
                     "venue_status": str(result.get("status") or ""),
                     "order_type": order_type,
                     **final_envelope_payload,
+                },
+            )
+            append_order_fact(
+                conn,
+                venue_order_id=order_id,
+                command_id=command_id,
+                state=_venue_submit_order_fact_state(result),
+                remaining_size=_venue_submit_remaining_size(result, shares),
+                matched_size=_venue_submit_matched_size(result),
+                source="REST",
+                observed_at=ack_time,
+                venue_timestamp=ack_time,
+                raw_payload_hash=_canonical_payload_hash(
+                    {
+                        "command_id": command_id,
+                        "venue_order_id": order_id,
+                        "submit_result": result,
+                    }
+                ),
+                raw_payload_json={
+                    "venue_order_id": order_id,
+                    "submit_result": _jsonable_payload(result),
+                    "source": "place_limit_order_ack",
                 },
             )
             if _own_conn:

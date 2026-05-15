@@ -920,6 +920,19 @@ class TestLiveOrderCommandSplit:
         assert cmd["state"] == "ACKED", (
             f"Expected state=ACKED after successful ack, got {cmd['state']!r}"
         )
+        order_fact = mem_conn.execute(
+            "SELECT venue_order_id, command_id, state, remaining_size, matched_size, source "
+            "FROM venue_order_facts WHERE command_id = ?",
+            (command_ids_seen[0],),
+        ).fetchone()
+        assert dict(order_fact) == {
+            "venue_order_id": "ord-acked-001",
+            "command_id": command_ids_seen[0],
+            "state": "LIVE",
+            "remaining_size": "18.19",
+            "matched_size": "0",
+            "source": "REST",
+        }
 
     def test_idempotency_key_collision_raises_before_submit(self, mem_conn):
         """Duplicate idempotency key: place_limit_order must NOT be called.
@@ -1551,6 +1564,19 @@ class TestExitOrderCommandSplit:
         cmd = get_command(mem_conn, command_ids_seen[0])
         assert cmd is not None
         assert cmd["state"] == "ACKED"
+        order_fact = mem_conn.execute(
+            "SELECT venue_order_id, command_id, state, remaining_size, matched_size, source "
+            "FROM venue_order_facts WHERE command_id = ?",
+            (command_ids_seen[0],),
+        ).fetchone()
+        assert dict(order_fact) == {
+            "venue_order_id": "ord-exit-acked-001",
+            "command_id": command_ids_seen[0],
+            "state": "LIVE",
+            "remaining_size": "10.0",
+            "matched_size": "0",
+            "source": "REST",
+        }
 
     def test_exit_idempotency_key_collision_raises_before_submit(self, mem_conn):
         """Duplicate idempotency key (exit path): place_limit_order not called."""
