@@ -89,7 +89,7 @@ def _match_hard_stop(
     return None
 
 
-def _fnmatch_path(file_path: str, pattern: str) -> str | bool:
+def _fnmatch_path(file_path: str, pattern: str) -> bool:
     """
     Match *file_path* against *pattern* using fnmatch glob semantics.
 

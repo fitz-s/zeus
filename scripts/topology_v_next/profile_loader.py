@@ -16,6 +16,7 @@ Properties:
 """
 from __future__ import annotations
 
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -28,20 +29,6 @@ from scripts.topology_v_next.dataclasses import (
     Intent,
     Severity,
 )
-
-# ---------------------------------------------------------------------------
-# Known top-level keys in the binding YAML schema.
-# Unknown keys → warning (not crash) per §1.3.
-# ---------------------------------------------------------------------------
-_KNOWN_TOP_LEVEL_KEYS = frozenset({
-    "project_id",
-    "intent_extensions",
-    "coverage_map",
-    "cohorts",
-    "severity_overrides",
-    "high_fanout_hints",
-    "artifact_authority_status",
-})
 
 
 # ---------------------------------------------------------------------------
@@ -56,8 +43,10 @@ def load_binding_layer(path: str | Path = "architecture/topology_v_next_binding.
     not exist (SCAFFOLD §1.3 m1 minor: load order documented here, not hidden
     in admission_engine).
 
-    Unknown YAML keys are silently tolerated at parse time; call
-    validate_binding_layer() to surface them as warnings.
+    Unknown top-level YAML keys are silently tolerated (warn-don't-crash per
+    §1.3). Unknown intent_extension IDs (strings not in the Intent enum) are
+    dropped and a UserWarning is emitted for each (d2 fix). Call
+    validate_binding_layer() to surface structural warnings after loading.
     """
     resolved = Path(path)
     if not resolved.exists():
@@ -69,7 +58,18 @@ def load_binding_layer(path: str | Path = "architecture/topology_v_next_binding.
     with resolved.open("r", encoding="utf-8") as fh:
         raw: dict[str, Any] = yaml.safe_load(fh) or {}
 
-    return _parse_binding_layer(raw)
+    bl, dropped_intents = _parse_binding_layer(raw)
+
+    for id_value in dropped_intents:
+        warnings.warn(
+            f"topology_v_next binding: intent_extension id '{id_value}' is not a "
+            "known Intent enum value and was dropped. Add it to the Intent enum or "
+            "remove it from the binding YAML.",
+            UserWarning,
+            stacklevel=2,
+        )
+
+    return bl
 
 
 def validate_binding_layer(bl: BindingLayer) -> list[str]:
@@ -115,11 +115,18 @@ def validate_binding_layer(bl: BindingLayer) -> list[str]:
 # Internal parsing helpers
 # ---------------------------------------------------------------------------
 
-def _parse_binding_layer(raw: dict[str, Any]) -> BindingLayer:
-    """Convert raw YAML dict to BindingLayer. Unknown keys are ignored."""
+def _parse_binding_layer(raw: dict[str, Any]) -> tuple[BindingLayer, list[str]]:
+    """
+    Convert raw YAML dict to BindingLayer.
+
+    Unknown top-level keys are ignored (warn-don't-crash per §1.3).
+    Returns (BindingLayer, dropped_intent_ids) so the caller can warn on drops.
+    """
     project_id: str = raw.get("project_id", "")
 
-    intent_extensions = _parse_intent_extensions(raw.get("intent_extensions") or [])
+    intent_extensions, dropped_intents = _parse_intent_extensions(
+        raw.get("intent_extensions") or []
+    )
     coverage_map = _parse_coverage_map(raw.get("coverage_map") or {})
     cohorts = _parse_cohorts(raw.get("cohorts") or [])
     severity_overrides = _parse_severity_overrides(raw.get("severity_overrides") or {})
@@ -128,7 +135,7 @@ def _parse_binding_layer(raw: dict[str, Any]) -> BindingLayer:
         raw.get("artifact_authority_status") or {}
     )
 
-    return BindingLayer(
+    bl = BindingLayer(
         project_id=project_id,
         intent_extensions=intent_extensions,
         coverage_map=coverage_map,
@@ -137,26 +144,32 @@ def _parse_binding_layer(raw: dict[str, Any]) -> BindingLayer:
         high_fanout_hints=high_fanout_hints,
         artifact_authority_status=artifact_authority_status,
     )
+    return bl, dropped_intents
 
 
-def _parse_intent_extensions(raw_list: list[dict[str, Any]]) -> tuple[Intent, ...]:
+def _parse_intent_extensions(
+    raw_list: list[dict[str, Any]],
+) -> tuple[tuple[Intent, ...], list[str]]:
     """
     Parse intent_extensions from YAML list.
 
     Each entry must have an 'id' key matching a value in the Intent enum.
-    Unknown IDs are skipped (intent_resolver will surface them as ADVISORY).
+    Unknown IDs are collected in ``dropped`` and returned to the caller so
+    a UserWarning can be emitted (d2 fix: silent-drop → warn on unknown IDs).
+
+    Returns (parsed_extensions_tuple, dropped_id_strings).
     """
     result: list[Intent] = []
+    dropped: list[str] = []
     for entry in raw_list:
         id_value: str = entry.get("id", "")
         try:
             result.append(Intent(id_value))
         except ValueError:
-            # Unknown intent value: not in enum yet. Skipped here; callers
-            # that supply this as an intent string will get ADVISORY from
-            # intent_resolver.
-            pass
-    return tuple(result)
+            # Unknown intent value: not in enum yet. Collect for caller warning.
+            if id_value:
+                dropped.append(id_value)
+    return tuple(result), dropped
 
 
 def _parse_coverage_map(raw: dict[str, Any]) -> CoverageMap:

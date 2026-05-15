@@ -18,6 +18,7 @@ Codex-importable: stdlib + PyYAML only.
 """
 from __future__ import annotations
 
+import datetime
 import time
 from typing import Any
 
@@ -36,6 +37,10 @@ from scripts.topology_v_next.hard_safety_kernel import kernel_check, is_hard_sto
 from scripts.topology_v_next.coverage_map import resolve_candidates, coverage_gaps
 from scripts.topology_v_next.composition_rules import apply_composition, explain_rejected
 from scripts.topology_v_next.companion_loop_break import companion_loop_break
+from scripts.topology_v_next.severity_overrides import (
+    apply_overrides as _apply_severity_overrides_impl,
+    effective_severity as _effective_severity_impl,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -85,8 +90,8 @@ def admit(
     # Step 2: Run Hard Safety Kernel (Universal §15 G1 — runs regardless)
     kernel_alerts = _run_kernel(files, binding)
 
-    # Step 3: Hard-stop short-circuit
-    if is_hard_stopped(files, binding):
+    # Step 3: Hard-stop short-circuit (d7: use kernel_alerts list, not a second iteration)
+    if kernel_alerts:
         return _build_decision(
             ok=False,
             profile_matched=None,
@@ -235,25 +240,10 @@ def _apply_severity_overrides(
     """
     Apply binding severity_overrides to the issue list.
 
+    Delegates to severity_overrides.apply_overrides (P1.3 extraction, d10).
     Returns a new list with remapped severities. No mutation.
-    Inline implementation — severity_overrides.py ships in P1.3.
     """
-    if not overrides:
-        return issues
-    result: list[IssueRecord] = []
-    for issue in issues:
-        new_sev = overrides.get(issue.code)
-        if new_sev is not None and new_sev != issue.severity:
-            result.append(IssueRecord(
-                code=issue.code,
-                path=issue.path,
-                severity=new_sev,
-                message=issue.message,
-                metadata=issue.metadata,
-            ))
-        else:
-            result.append(issue)
-    return result
+    return _apply_severity_overrides_impl(issues, overrides)
 
 
 def _check_authority_status(
@@ -339,6 +329,7 @@ def _assemble_diagnosis(issues: list[IssueRecord]) -> DiagnosisEntry | None:
         "composition_conflict": FrictionPattern.UNION_SCOPE_EXPANSION,
         "intent_enum_unknown": FrictionPattern.INTENT_ENUM_TOO_NARROW,
         "intent_unspecified": FrictionPattern.INTENT_ENUM_TOO_NARROW,
+        "intent_extension_unregistered": FrictionPattern.INTENT_ENUM_TOO_NARROW,
         "closed_packet_authority": FrictionPattern.CLOSED_PACKET_STILL_LOAD_BEARING,
         "authority_status_stale": FrictionPattern.CLOSED_PACKET_STILL_LOAD_BEARING,
         "companion_missing": FrictionPattern.UNION_SCOPE_EXPANSION,
@@ -385,17 +376,12 @@ def _increment_friction_budget(friction_state: dict[str, Any] | None) -> int:
 # ---------------------------------------------------------------------------
 
 def _effective_severity(issues: list[IssueRecord]) -> Severity:
-    """Return the maximum severity across all issues."""
-    if not issues:
-        return Severity.ADMIT
+    """
+    Return the maximum severity across all issues.
 
-    _sev_order = {
-        Severity.ADMIT: 0,
-        Severity.ADVISORY: 1,
-        Severity.SOFT_BLOCK: 2,
-        Severity.HARD_STOP: 3,
-    }
-    return max(issues, key=lambda i: _sev_order.get(i.severity, 0)).severity
+    Delegates to severity_overrides.effective_severity (P1.3 extraction, d10).
+    """
+    return _effective_severity_impl(issues)
 
 
 def _is_ttl_exceeded(
@@ -408,8 +394,6 @@ def _is_ttl_exceeded(
 
     Accepts ISO 8601 date strings (YYYY-MM-DD) or datetime strings.
     """
-    import datetime
-
     # Try full datetime first, then date-only
     for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
         try:
@@ -440,6 +424,10 @@ def _resolution_path(code: str) -> str:
         "intent_unspecified": (
             "Supply a typed intent value. Available: create_new, modify_existing, "
             "refactor, audit, hygiene, hotfix, rebase_keepup, other, and zeus.* extensions."
+        ),
+        "intent_extension_unregistered": (
+            "Add the zeus.* intent to intent_extensions in the binding YAML "
+            "(architecture/topology_v_next_binding.yaml), or use a canonical universal intent."
         ),
         "closed_packet_authority": (
             "Verify the artifact is still needed. If so, re-confirm authority status "
