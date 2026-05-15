@@ -1,8 +1,8 @@
 # Created: 2026-04-27
 # Purpose: Lock R3 Z4 CollateralLedger pUSD/CTF reservation and fail-closed executor preflight behavior.
 # Reuse: Run when collateral snapshots, pUSD/CTF accounting, wrap/unwrap command state, or executor collateral gates change.
-# Last reused/audited: 2026-04-27
-# Lifecycle: created=2026-04-27; last_reviewed=2026-04-27; last_reused=2026-04-27
+# Last reused/audited: 2026-05-15
+# Lifecycle: created=2026-04-27; last_reviewed=2026-05-15; last_reused=2026-05-15
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/Z4.yaml
 """R3 Z4 collateral-ledger antibodies."""
 
@@ -37,6 +37,7 @@ from src.state.collateral_ledger import (
     CollateralInsufficient,
     CollateralLedger,
     CollateralSnapshot,
+    SQLITE_SIGNED_INTEGER_MAX,
     init_collateral_schema,
     require_pusd_redemption_allowed,
 )
@@ -280,6 +281,41 @@ def test_buy_preflight_blocks_when_pusd_allowance_insufficient(conn):
 
     with pytest.raises(CollateralInsufficient, match="pusd_allowance_insufficient"):
         ledger.buy_preflight(_buy_intent(size_usd=10.0))
+
+
+def test_refresh_caps_uint256_allowance_to_sqlite_domain(conn):
+    class Adapter:
+        def get_collateral_payload(self):
+            return {
+                "pusd_balance_micro": 199_396_602,
+                "pusd_allowance_micro": (2**256) - 1,
+                "usdc_e_legacy_balance_micro": 0,
+                "ctf_token_balances": {},
+                "ctf_token_allowances": {},
+                "authority_tier": "CHAIN",
+            }
+
+    ledger = CollateralLedger(conn)
+    snapshot = ledger.refresh(Adapter())
+
+    assert snapshot.pusd_allowance_micro == SQLITE_SIGNED_INTEGER_MAX
+    assert ledger.buy_preflight(_buy_intent(size_usd=10.0))
+    row = conn.execute(
+        "SELECT pusd_allowance_micro FROM collateral_ledger_snapshots ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    assert row[0] == SQLITE_SIGNED_INTEGER_MAX
+
+
+def test_set_snapshot_caps_uint256_allowance_to_sqlite_domain(conn):
+    ledger = CollateralLedger(conn)
+    ledger.set_snapshot(
+        _snapshot(pusd=199_396_602, pusd_allowance=(2**256) - 1)
+    )
+
+    row = conn.execute(
+        "SELECT pusd_allowance_micro FROM collateral_ledger_snapshots ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    assert row[0] == SQLITE_SIGNED_INTEGER_MAX
 
 
 def test_buy_preflight_blocks_when_snapshot_stale(conn):

@@ -525,6 +525,45 @@ Critic questions:
 
 Approval state must be `APPROVE`. `REVISE` is unresolved.
 
+## Phase 5B Live Blocker: uint256 Allowance vs SQLite INTEGER
+
+After the Phase 5A allowance-authority fix was deployed to the live root, the
+live daemon reached the CLOB V2 collateral read with `signature_type=2`, derived
+the API key, synchronized CLOB balance/allowance cache, and recovered pUSD
+allowance from Polygon ERC20 chain truth. The next boundary failed:
+
+`FAIL-CLOSED: wallet query failed at daemon start: Python int too large to convert to SQLite INTEGER`
+
+Root cause:
+
+- ERC20 allowance is `uint256`; the user's current funder has max allowance to
+  the Polymarket V2 spender contracts.
+- `collateral_ledger_snapshots.pusd_allowance_micro` is SQLite `INTEGER`
+  signed int64.
+- The ledger tried to persist max uint256 directly as the canonical snapshot
+  allowance, so SQLite rejected the value before live startup could complete.
+
+Structural fix:
+
+- Keep the collateral gate fail-closed and do not bypass `CollateralLedger`.
+- Normalize any non-negative pUSD/pUSD-legacy micro value entering SQLite to the
+  maximum storable signed int64 (`2^63 - 1`).
+- Treat this capped value as the ledger-domain proof that allowance is enough
+  for any pUSD spend the system can record, while raw payload provenance still
+  contributes to `raw_balance_payload_hash`.
+- Preserve the existing insufficient-allowance behavior when the real allowance
+  is below required notional.
+
+Required antibodies:
+
+- `tests/test_collateral_ledger.py::test_refresh_caps_uint256_allowance_to_sqlite_domain`
+- `tests/test_collateral_ledger.py::test_set_snapshot_caps_uint256_allowance_to_sqlite_domain`
+- Existing insufficient-allowance test must still fail closed.
+
+Live completion still requires a fresh restart on the deployed commit and a real
+command/order proof from `scripts/check_live_order_e2e.py --json`; this Phase 5B
+fix only removes the current boot-time collateral persistence blocker.
+
 ## Implementation Backlog Derived From This Plan
 
 Likely code/test changes:
