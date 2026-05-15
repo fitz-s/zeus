@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
+# Lifecycle: created=2026-05-11; last_reviewed=2026-05-15; last_reused=2026-05-15
+# Purpose: One-shot live health signal for daemon, forecast-live owner, riskguard, status summary, and entry capability.
+# Reuse: Run when live process ownership, forecast-live heartbeat semantics, or operator health alerts change.
 # Created: 2026-05-11
-# Last reused/audited: 2026-05-11
-# Authority basis: Live monitoring during first-order qualification (operator directive 2026-05-11)
+# Last reused/audited: 2026-05-15
+# Authority basis: docs/operations/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md
 """One-shot live health probe.
 
 Reports a single JSON line per invocation summarizing:
   - daemon heartbeat age + alive status
   - cycle freshness (status_summary mtime + last cycle dict)
-  - 3-process liveness (src.main, src.ingest_main, riskguard)
+  - process liveness (src.main, forecast-live owner, legacy ingest, riskguard)
+  - forecast-live heartbeat freshness
   - WS state (connected, subscription, gap reason)
   - block_registry blocking gates
   - lifecycle_funnel counts
@@ -22,6 +26,8 @@ import json, os, sys, time, subprocess
 
 ROOT = "/Users/leofitz/.openclaw/workspace-venus/zeus"
 SNAPSHOT_FILE = "/tmp/zeus_health_snapshot.json"
+FORECAST_LIVE_HEARTBEAT = "state/forecast-live-heartbeat.json"
+FORECAST_LIVE_STALE_SECONDS = 300
 
 def _age(path):
     if not os.path.exists(path): return None
@@ -34,31 +40,75 @@ def _alive(pattern):
     except Exception:
         return []
 
+def _load_json(path):
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except Exception as e:
+        return {"error": str(e)}
+
+def _process_liveness():
+    forecast_live = _alive("src.ingest.forecast_live_daemon")
+    legacy_ingest = _alive("src.ingest_main")
+    return {
+        "daemon": _alive("src.main"),
+        "forecast_live": forecast_live,
+        "legacy_ingest": legacy_ingest,
+        # Backward-compatible aggregate for older dashboard readers. Forecast-live
+        # is now the canonical forecast owner; legacy ingest is a fallback signal.
+        "ingest": forecast_live or legacy_ingest,
+        "riskguard": _alive("src.riskguard"),
+    }
+
+def _classify_alerts(report, ss_age):
+    alerts = []
+    if report["hb"].get("age_s") is None or report["hb"]["age_s"] > 90:
+        alerts.append(f"hb_stale={report['hb'].get('age_s')}s")
+    if not report["procs"]["daemon"]:
+        alerts.append("daemon_dead")
+    forecast_age = report.get("forecast_live_hb", {}).get("age_s")
+    if not report["procs"].get("forecast_live"):
+        alerts.append("forecast_live_dead")
+    elif forecast_age is None or forecast_age > FORECAST_LIVE_STALE_SECONDS:
+        alerts.append(f"forecast_live_stale={forecast_age}s")
+    if not report["procs"]["riskguard"]:
+        alerts.append("riskguard_dead")
+    if ss_age is not None and ss_age > 2700:
+        alerts.append(f"cycle_stale={ss_age}s")
+    if report.get("cycle", {}).get("ws_connected") is False:
+        alerts.append("ws_disconnected")
+    if report.get("cycle", {}).get("risk_level") not in ("GREEN", None):
+        alerts.append(f"risk={report['cycle']['risk_level']}")
+    return alerts
+
 def main():
     now = time.strftime("%H:%M:%SZ", time.gmtime())
     report = {"ts": now}
 
     # Daemon heartbeat
     hb_path = os.path.join(ROOT, "state/daemon-heartbeat.json")
-    try:
-        d = json.load(open(hb_path))
-        report["hb"] = {"alive": d.get("alive"), "age_s": _age(hb_path)}
-    except Exception as e:
-        report["hb"] = {"error": str(e)}
+    d = _load_json(hb_path)
+    report["hb"] = {"alive": d.get("alive"), "age_s": _age(hb_path)}
+
+    forecast_hb_path = os.path.join(ROOT, FORECAST_LIVE_HEARTBEAT)
+    forecast_hb = _load_json(forecast_hb_path)
+    report["forecast_live_hb"] = {
+        "alive": forecast_hb.get("alive"),
+        "status": forecast_hb.get("status"),
+        "age_s": _age(forecast_hb_path),
+    }
 
     # Process liveness
-    report["procs"] = {
-        "daemon": _alive("src.main"),
-        "ingest": _alive("src.ingest_main"),
-        "riskguard": _alive("src.riskguard"),
-    }
+    report["procs"] = _process_liveness()
 
     # Status summary
     ss_path = os.path.join(ROOT, "state/status_summary.json")
     ss_age = _age(ss_path)
     report["status_summary_age_s"] = ss_age
     try:
-        ss = json.load(open(ss_path))
+        ss = _load_json(ss_path)
+        if ss.get("error"):
+            raise RuntimeError(ss["error"])
         cycle = ss.get("cycle", {})
         runtime = ss.get("runtime", {})
         risk = ss.get("risk", {})
@@ -112,21 +162,7 @@ def main():
         json.dump(report, f)
 
     # ALERT classification
-    alerts = []
-    if report["hb"].get("age_s") is None or report["hb"]["age_s"] > 90:
-        alerts.append(f"hb_stale={report['hb'].get('age_s')}s")
-    if not report["procs"]["daemon"]:
-        alerts.append("daemon_dead")
-    if not report["procs"]["ingest"]:
-        alerts.append("ingest_dead")
-    if not report["procs"]["riskguard"]:
-        alerts.append("riskguard_dead")
-    if ss_age is not None and ss_age > 2700:
-        alerts.append(f"cycle_stale={ss_age}s")
-    if report.get("cycle", {}).get("ws_connected") is False:
-        alerts.append("ws_disconnected")
-    if report.get("cycle", {}).get("risk_level") not in ("GREEN", None):
-        alerts.append(f"risk={report['cycle']['risk_level']}")
+    alerts = _classify_alerts(report, ss_age)
 
     prefix = "ALERT " if alerts else "OK    "
     flags = ",".join(alerts) if alerts else "all_healthy"
@@ -134,7 +170,8 @@ def main():
         f"{prefix}{now} hb={report['hb'].get('age_s')}s "
         f"cycle_age={ss_age}s "
         f"daemon={len(report['procs']['daemon'])} "
-        f"ingest={len(report['procs']['ingest'])} "
+        f"forecast_live={len(report['procs']['forecast_live'])} "
+        f"legacy_ingest={len(report['procs']['legacy_ingest'])} "
         f"risk={report.get('cycle',{}).get('risk_level','?')} "
         f"ws={report.get('cycle',{}).get('ws_subscription','?')} "
         f"funnel={report.get('funnel',{}).get('evaluated','?')}/{report.get('funnel',{}).get('selected','?')}/{report.get('funnel',{}).get('filled','?')} "

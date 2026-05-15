@@ -1,0 +1,147 @@
+# Lifecycle: created=2026-05-15; last_reviewed=2026-05-15; last_reused=2026-05-15
+# Purpose: Lock forecast-live as the canonical forecast owner for live health alerts.
+# Reuse: Run when live_health_probe process/heartbeat classification or forecast-live launch ownership changes.
+# Created: 2026-05-15
+# Last reused or audited: 2026-05-15
+# Authority basis: docs/operations/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md
+
+from __future__ import annotations
+
+import importlib.util
+import json
+import os
+from pathlib import Path
+
+
+SCRIPT_PATH = Path(__file__).resolve().parents[1] / "scripts" / "live_health_probe.py"
+
+
+def _load_module():
+    spec = importlib.util.spec_from_file_location("live_health_probe_under_test", SCRIPT_PATH)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _write_json(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def _healthy_state(root: Path) -> None:
+    _write_json(root / "state" / "daemon-heartbeat.json", {"alive": True})
+    _write_json(
+        root / "state" / "forecast-live-heartbeat.json",
+        {"alive": True, "status": "alive"},
+    )
+    _write_json(
+        root / "state" / "status_summary.json",
+        {
+            "cycle": {
+                "mode": "opening_hunt",
+                "risk_level": "GREEN",
+                "ws_user_channel": {"connected": True, "subscription_state": "SUBSCRIBED"},
+                "block_registry": [],
+            },
+            "risk": {"level": "GREEN"},
+            "lifecycle_funnel": {"counts": {"evaluated": 1, "selected": 0, "filled": 0}},
+            "execution_capability": {
+                "entry": {
+                    "status": "requires_intent",
+                    "global_allow_submit": True,
+                    "live_action_authorized": False,
+                }
+            },
+        },
+    )
+
+
+def _configure(module, monkeypatch, root: Path, snapshot: Path, alive_by_pattern: dict[str, list[int]]) -> None:
+    monkeypatch.setattr(module, "ROOT", str(root))
+    monkeypatch.setattr(module, "SNAPSHOT_FILE", str(snapshot))
+
+    def fake_alive(pattern: str) -> list[int]:
+        return list(alive_by_pattern.get(pattern, []))
+
+    monkeypatch.setattr(module, "_alive", fake_alive)
+
+
+def test_forecast_live_owner_replaces_legacy_ingest_dead(tmp_path, monkeypatch, capsys):
+    module = _load_module()
+    root = tmp_path / "zeus"
+    _healthy_state(root)
+    _configure(
+        module,
+        monkeypatch,
+        root,
+        tmp_path / "snapshot.json",
+        {
+            "src.main": [101],
+            "src.ingest.forecast_live_daemon": [202],
+            "src.ingest_main": [],
+            "src.riskguard": [303],
+        },
+    )
+
+    module.main()
+
+    out = capsys.readouterr().out
+    assert out.startswith("OK")
+    assert "forecast_live=1" in out
+    assert "legacy_ingest=0" in out
+    assert "ingest_dead" not in out
+    assert "forecast_live_dead" not in out
+
+
+def test_missing_forecast_live_owner_is_actionable_without_legacy_ingest_dead(tmp_path, monkeypatch, capsys):
+    module = _load_module()
+    root = tmp_path / "zeus"
+    _healthy_state(root)
+    _configure(
+        module,
+        monkeypatch,
+        root,
+        tmp_path / "snapshot.json",
+        {
+            "src.main": [101],
+            "src.ingest.forecast_live_daemon": [],
+            "src.ingest_main": [],
+            "src.riskguard": [303],
+        },
+    )
+
+    module.main()
+
+    out = capsys.readouterr().out
+    assert out.startswith("ALERT")
+    assert "forecast_live_dead" in out
+    assert "ingest_dead" not in out
+
+
+def test_stale_forecast_live_heartbeat_is_actionable(tmp_path, monkeypatch, capsys):
+    module = _load_module()
+    root = tmp_path / "zeus"
+    _healthy_state(root)
+    forecast_hb = root / "state" / "forecast-live-heartbeat.json"
+    old = forecast_hb.stat().st_mtime - module.FORECAST_LIVE_STALE_SECONDS - 30
+    os.utime(forecast_hb, (old, old))
+    _configure(
+        module,
+        monkeypatch,
+        root,
+        tmp_path / "snapshot.json",
+        {
+            "src.main": [101],
+            "src.ingest.forecast_live_daemon": [202],
+            "src.ingest_main": [],
+            "src.riskguard": [303],
+        },
+    )
+
+    module.main()
+
+    out = capsys.readouterr().out
+    assert out.startswith("ALERT")
+    assert "forecast_live_stale=" in out
+    assert "ingest_dead" not in out
