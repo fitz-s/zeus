@@ -33,6 +33,7 @@ from src.data.executable_forecast_reader import read_executable_forecast
 TRADE_DB_NAME = "zeus_trades.db"
 WORLD_DB_NAME = "zeus-world.db"
 FORECASTS_DB_NAME = "zeus-forecasts.db"
+FORECAST_LIVE_OWNER_ENV = "ZEUS_FORECAST_LIVE_OWNER"
 
 
 @dataclass(frozen=True)
@@ -143,6 +144,33 @@ def _is_legacy_ingest_owner_command(command: str) -> bool:
     return _has_module_launch(command, "src.ingest_main")
 
 
+def _selected_process_env(pid: int) -> dict[str, str]:
+    proc = _run(["ps", "eww", "-p", str(pid), "-o", "command="])
+    if proc.returncode != 0:
+        return {}
+    try:
+        tokens = shlex.split(proc.stdout.strip())
+    except ValueError:
+        tokens = proc.stdout.strip().split()
+    selected: dict[str, str] = {}
+    for token in tokens:
+        if "=" not in token:
+            continue
+        key, value = token.split("=", 1)
+        if key == FORECAST_LIVE_OWNER_ENV:
+            selected[key] = value
+    return selected
+
+
+def _legacy_ingest_process_owns_opendata(proc: dict[str, Any]) -> bool:
+    command = str(proc.get("command"))
+    if not _is_legacy_ingest_owner_command(command):
+        return False
+    env = proc.get("env") if isinstance(proc.get("env"), dict) else {}
+    owner = str(env.get(FORECAST_LIVE_OWNER_ENV, "ingest_main")).strip().lower() or "ingest_main"
+    return owner != "forecast_live"
+
+
 def _is_live_main_command(command: str) -> bool:
     return _has_module_launch(command, "src.main")
 
@@ -176,6 +204,7 @@ def _process_rows() -> list[dict[str, Any]]:
                 "ppid": int(ppid),
                 "etime": etime,
                 "command": command,
+                "env": _selected_process_env(int(pid)),
                 "cwd": _process_cwd(int(pid)),
                 "open_dbs": _process_open_dbs(int(pid)),
             }
@@ -232,6 +261,18 @@ def _latest_source_run(conn: sqlite3.Connection) -> dict[str, Any] | None:
     )
 
 
+def _source_run_by_id(conn: sqlite3.Connection, source_run_id: str) -> dict[str, Any] | None:
+    return _fetch_one_dict(
+        conn,
+        """
+        SELECT *
+        FROM forecasts.source_run
+        WHERE source_run_id = ?
+        """,
+        (source_run_id,),
+    )
+
+
 def _target_range(conn: sqlite3.Connection, source_run_id: str) -> dict[str, Any]:
     return _fetch_one_dict(
         conn,
@@ -249,31 +290,61 @@ def _target_range(conn: sqlite3.Connection, source_run_id: str) -> dict[str, Any
 
 
 def _candidate_snapshot(conn: sqlite3.Connection, source_run_id: str, now_date: date) -> dict[str, Any] | None:
-    return _fetch_one_dict(
+    live_eligible_for_source_run = _fetch_one_dict(
         conn,
         """
-        SELECT *
-        FROM forecasts.ensemble_snapshots_v2
-        WHERE source_run_id = ?
-          AND target_date >= ?
+        SELECT es.*
+        FROM forecasts.source_run_coverage AS cov
+        JOIN forecasts.ensemble_snapshots_v2 AS es
+          ON es.source_run_id = cov.source_run_id
+         AND es.source_id = cov.source_id
+         AND es.source_transport = cov.source_transport
+         AND es.city = cov.city
+         AND es.target_date = cov.target_local_date
+         AND es.temperature_metric = cov.temperature_metric
+         AND es.data_version = cov.data_version
+        WHERE cov.source_run_id = ?
+          AND cov.readiness_status = 'LIVE_ELIGIBLE'
+          AND cov.target_local_date >= ?
         ORDER BY
-          CASE WHEN city = 'London' THEN 0 ELSE 1 END,
-          target_date,
-          city,
-          snapshot_id
+          CASE WHEN cov.city = 'London' THEN 0 ELSE 1 END,
+          cov.target_local_date,
+          cov.city,
+          es.snapshot_id
         LIMIT 1
         """,
         (source_run_id, now_date.isoformat()),
-    ) or _fetch_one_dict(
+    )
+    if live_eligible_for_source_run is not None:
+        return live_eligible_for_source_run
+
+    return _fetch_one_dict(
         conn,
         """
-        SELECT *
-        FROM forecasts.ensemble_snapshots_v2
-        WHERE source_run_id = ?
-        ORDER BY target_date DESC, city, snapshot_id
+        SELECT es.*
+        FROM forecasts.source_run_coverage AS cov
+        JOIN forecasts.source_run AS sr
+          ON sr.source_run_id = cov.source_run_id
+        JOIN forecasts.ensemble_snapshots_v2 AS es
+          ON es.source_run_id = cov.source_run_id
+         AND es.source_id = cov.source_id
+         AND es.source_transport = cov.source_transport
+         AND es.city = cov.city
+         AND es.target_date = cov.target_local_date
+         AND es.temperature_metric = cov.temperature_metric
+         AND es.data_version = cov.data_version
+        WHERE cov.readiness_status = 'LIVE_ELIGIBLE'
+          AND cov.target_local_date >= ?
+        ORDER BY
+          sr.captured_at DESC,
+          sr.source_cycle_time DESC,
+          CASE WHEN cov.city = 'London' THEN 0 ELSE 1 END,
+          cov.target_local_date,
+          cov.city,
+          es.snapshot_id
         LIMIT 1
         """,
-        (source_run_id,),
+        (now_date.isoformat(),),
     )
 
 
@@ -366,10 +437,11 @@ def _build_checks(
     checks: list[Check] = []
     owner_processes = [
         proc for proc in processes
-        if _is_legacy_ingest_owner_command(str(proc.get("command")))
+        if _legacy_ingest_process_owns_opendata(proc)
         or _is_forecast_live_owner_command(str(proc.get("command")))
     ]
     dedicated_owners = [proc for proc in owner_processes if _is_forecast_live_owner_command(str(proc.get("command")))]
+    legacy_opendata_owners = [proc for proc in owner_processes if _legacy_ingest_process_owns_opendata(proc)]
     live_daemons = [proc for proc in processes if _is_live_main_command(str(proc.get("command")))]
     checks.append(
         Check(
@@ -390,6 +462,13 @@ def _build_checks(
             "dedicated_forecast_owner",
             "PASS" if len(dedicated_owners) == 1 else "FAIL",
             "expected forecast_live_daemon owner, not legacy src.ingest_main",
+        )
+    )
+    checks.append(
+        Check(
+            "legacy_ingest_opendata_demoted",
+            "PASS" if not legacy_opendata_owners else "FAIL",
+            f"legacy_opendata_owner_count={len(legacy_opendata_owners)}",
         )
     )
     checks.append(
@@ -439,7 +518,16 @@ def run_live_check(*, live_root_override: str | None = None) -> tuple[int, dict[
         latest = _latest_source_run(conn)
         target_range = _target_range(conn, str(latest["source_run_id"])) if latest else {}
         snapshot = _candidate_snapshot(conn, str(latest["source_run_id"]), _now_utc().date()) if latest else None
-        reader = _reader_probe(conn, latest, snapshot) if latest else {"status": "BLOCKED", "reason_code": "SOURCE_RUN_MISSING", "ok": False, "elapsed_ms": 0.0}
+        reader_source_run = (
+            _source_run_by_id(conn, str(snapshot["source_run_id"]))
+            if snapshot is not None
+            else latest
+        )
+        reader = (
+            _reader_probe(conn, reader_source_run, snapshot)
+            if reader_source_run
+            else {"status": "BLOCKED", "reason_code": "SOURCE_RUN_MISSING", "ok": False, "elapsed_ms": 0.0}
+        )
         stats = _table_stats(conn, str(latest["source_run_id"]) if latest else None)
 
     evaluator_guard = _evaluator_cutover_static_guard(live_root)
@@ -464,6 +552,7 @@ def run_live_check(*, live_root_override: str | None = None) -> tuple[int, dict[
         "processes": processes,
         "database_list": database_list,
         "latest_source_run": latest,
+        "reader_source_run": reader_source_run,
         "latest_source_run_target_range": target_range,
         "table_stats": stats,
         "reader_probe": reader,

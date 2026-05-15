@@ -1,5 +1,5 @@
 # Created: 2026-05-11
-# Last reused/audited: 2026-05-11
+# Last reused/audited: 2026-05-15
 # Authority basis: PLAN docs/operations/task_2026-05-11_ecmwf_download_replacement/PLAN.md §5.4 + §6
 """Unit tests for ECMWF Open Data parallel SDK fetch (Candidate H).
 
@@ -22,6 +22,7 @@ from __future__ import annotations
 import sqlite3
 from datetime import date, datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 
@@ -98,7 +99,7 @@ def test_all_ok_returns_SUCCESS_COMPLETE(tmp_path, monkeypatch):
     import src.data.ecmwf_open_data as mod
 
     def fetch_impl(*, cycle_date, cycle_hour, param, step, output_dir, mirrors):
-        f = output_dir / f".step{step:03d}_{param}.grib2"
+        f = mod._step_cache_path(output_dir, step=step, param=param)
         _make_fake_grib(f)
         return ("OK", f)
 
@@ -153,7 +154,7 @@ def test_some_404_returns_PARTIAL_PARTIAL_and_extract_fires(tmp_path, monkeypatc
     def fetch_impl(*, cycle_date, cycle_hour, param, step, output_dir, mirrors):
         if step == 9:
             return ("NOT_RELEASED", None)
-        f = output_dir / f".step{step:03d}_{param}.grib2"
+        f = mod._step_cache_path(output_dir, step=step, param=param)
         _make_fake_grib(f)
         return ("OK", f)
 
@@ -277,13 +278,13 @@ def test_resume_via_atomic_rename(tmp_path):
 
     REL-2: SIGTERM-resume idempotence — canonical files are not re-fetched.
     """
-    from src.data.ecmwf_open_data import _fetch_one_step
+    from src.data.ecmwf_open_data import _fetch_one_step, _step_cache_path
 
     output_dir = tmp_path / "output"
     output_dir.mkdir()
     step = 3
     param = "mx2t3"
-    canonical = output_dir / f".step{step:03d}_{param}.grib2"
+    canonical = _step_cache_path(output_dir, step=step, param=param)
     canonical.write_bytes(b"\x00" * 128)  # non-empty → resume
 
     # The resume path returns before entering the mirror loop — no HTTP call made.
@@ -319,7 +320,7 @@ def test_partial_file_does_not_count_as_resume(tmp_path):
     step = 6
     param = "mx2t3"
     # Write a .partial but NOT the canonical .grib2
-    partial = output_dir / f".step{step:03d}_{param}.grib2.partial"
+    partial = output_dir / f".step{step:03d}_{param}_ens51.grib2.partial"
     partial.write_bytes(b"\x00" * 64)
 
     # The canonical file does not exist, so _fetch_one_step should attempt a fetch.
@@ -391,7 +392,7 @@ def test_concat_order_step_ascending(tmp_path):
     for determinism (REL-5: manifest_sha256 over manifest JSON, not GRIB bytes,
     so concat order doesn't affect the hash — but consistent order aids debugging).
     """
-    from src.data.ecmwf_open_data import _concat_steps
+    from src.data.ecmwf_open_data import _concat_steps, _step_cache_path
 
     output_dir = tmp_path / "out"
     output_dir.mkdir()
@@ -400,7 +401,7 @@ def test_concat_order_step_ascending(tmp_path):
     # Create step files with distinctive byte payloads so we can detect order
     step_bytes = {9: b"STEP9", 3: b"STEP3", 6: b"STEP6"}
     for step, payload in step_bytes.items():
-        f = output_dir / f".step{step:03d}_{param}.grib2"
+        f = _step_cache_path(output_dir, step=step, param=param)
         f.write_bytes(payload)
 
     out = tmp_path / "merged.grib2"
@@ -439,7 +440,7 @@ def test_thread_safety_max_workers_2(tmp_path, monkeypatch):
         steps_fetched.append(step)
         if step == 6:
             return ("FAILED", "HTTP_503_mirror_aws_attempt_2")
-        f = output_dir / f".step{step:03d}_{param}.grib2"
+        f = mod._step_cache_path(output_dir, step=step, param=param)
         _make_fake_grib(f)
         return ("OK", f)
 
@@ -471,7 +472,164 @@ def test_thread_safety_max_workers_2(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# test 9: token bucket rate limiter (D1 throttle antibody)
+# test 9: controlled indexed range downloader does not delegate to multiurl
+# ---------------------------------------------------------------------------
+
+def test_fetch_one_step_merges_oper_control_with_enfo_perturbed(tmp_path, monkeypatch):
+    """One executable step is 1 oper/fc control + 50 enfo/pf members.
+
+    Relationship under test: current ECMWF Open Data ``enfo/ef`` indexes can
+    omit the ``cf`` control field for mx2t3/mn2t3 while publishing all 50
+    perturbations. The live daemon must fetch the control field from
+    ``oper/fc`` and merge it ahead of the perturbations instead of emitting a
+    pf-only step that later fails the 51-member contract.
+    """
+    import sys
+    import types
+
+    import src.data.ecmwf_open_data as mod
+
+    class _FakeClient:
+        def __init__(self, source=None):
+            self.source = source
+
+    fake_opendata = types.ModuleType("ecmwf.opendata")
+    fake_opendata.Client = _FakeClient
+    fake_ecmwf = types.ModuleType("ecmwf")
+    fake_ecmwf.opendata = fake_opendata
+
+    calls: list[tuple[str, tuple[str, ...]]] = []
+
+    def fake_retrieve(client, **kwargs):
+        stream = str(kwargs["stream"])
+        types_arg = tuple(kwargs["type"])
+        calls.append((stream, types_arg))
+        target = Path(kwargs["target"])
+        if stream == "enfo" and types_arg == ("cf",):
+            raise ValueError("Cannot find index entries matching {'type': ['cf']}")
+        target.write_bytes(b"PF" if types_arg == ("pf",) else b"CF")
+        return SimpleNamespace(size=target.stat().st_size)
+
+    orig_ecmwf = sys.modules.get("ecmwf")
+    orig_opendata = sys.modules.get("ecmwf.opendata")
+    sys.modules["ecmwf"] = fake_ecmwf
+    sys.modules["ecmwf.opendata"] = fake_opendata
+    monkeypatch.setattr(mod, "_retrieve_step_with_controlled_ranges", fake_retrieve)
+    try:
+        status, detail = mod._fetch_one_step(
+            cycle_date=RUN_DATE,
+            cycle_hour=RUN_HOUR,
+            param="mx2t3",
+            step=3,
+            output_dir=tmp_path,
+            mirrors=("aws",),
+        )
+    finally:
+        if orig_ecmwf is None:
+            sys.modules.pop("ecmwf", None)
+        else:
+            sys.modules["ecmwf"] = orig_ecmwf
+        if orig_opendata is None:
+            sys.modules.pop("ecmwf.opendata", None)
+        else:
+            sys.modules["ecmwf.opendata"] = orig_opendata
+
+    assert status == "OK"
+    assert Path(detail).read_bytes() == b"CFPF"
+    assert calls == [("enfo", ("pf",)), ("enfo", ("cf",)), ("oper", ("fc",))]
+
+
+def test_controlled_range_downloader_writes_single_ranges_in_index_order(tmp_path, monkeypatch):
+    """Indexed OpenData parts are fetched with one Range GET per index part.
+
+    Relationship under test: ecmwf-opendata may resolve the index, but Zeus owns
+    the HTTP transfer boundary. This prevents multiurl's internal multi-range
+    requests and 120-second retry loop from becoming the live daemon's behavior.
+    """
+    import src.data.ecmwf_open_data as mod
+
+    calls: list[dict[str, Any]] = []
+
+    class _FakeResponse:
+        def __init__(self, status_code: int, payload: bytes, *, lines: list[bytes] | None = None):
+            self.status_code = status_code
+            self._payload = payload
+            self._lines = lines or []
+
+        def iter_content(self, chunk_size: int):
+            yield self._payload
+
+        def iter_lines(self):
+            yield from self._lines
+
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                raise AssertionError(f"unexpected HTTP error {self.status_code}")
+
+        def close(self):
+            pass
+
+    class _FakeSession:
+        def get(self, url, *, stream, headers=None, timeout=None, verify=None):
+            calls.append(
+                {
+                    "url": url,
+                    "stream": stream,
+                    "headers": dict(headers or {}),
+                    "timeout": timeout,
+                    "verify": verify,
+                }
+            )
+            if str(url).endswith(".index"):
+                lines = [
+                    b'{"type":"pf","step":3,"param":"mx2t3","_offset":10,"_length":3}',
+                    b'{"type":"pf","step":3,"param":"mx2t3","_offset":20,"_length":2}',
+                    b'{"type":"pf","step":6,"param":"mx2t3","_offset":99,"_length":1}',
+                ]
+                return _FakeResponse(200, b"", lines=lines)
+            payload = {
+                "bytes=10-12": b"abc",
+                "bytes=20-21": b"de",
+            }[headers["Range"]]
+            return _FakeResponse(206, payload)
+
+    class _FakeClient:
+        verify = False
+
+        def _get_urls(self, **kwargs):
+            assert kwargs["use_index"] is False
+            assert kwargs["target"].endswith(".partial")
+            return SimpleNamespace(
+                urls=["https://example.invalid/step.grib2"],
+                target=kwargs["target"],
+                for_index={"type": ["cf", "pf"], "step": [3], "param": ["mx2t3"]},
+            )
+
+    monkeypatch.setattr(mod, "_RateLimitedSession", _FakeSession)
+
+    target = tmp_path / "step.grib2.partial"
+    result = mod._retrieve_step_with_controlled_ranges(
+        _FakeClient(),
+        target=target,
+        date=20260515,
+        time=0,
+        stream="enfo",
+        type=["cf", "pf"],
+        step=[3],
+        param=["mx2t3"],
+    )
+
+    assert target.read_bytes() == b"abcde"
+    assert result.size == 5
+    assert calls[0]["url"] == "https://example.invalid/step.index"
+    assert calls[0]["headers"] == {}
+    assert [call["headers"].get("Range") for call in calls[1:]] == ["bytes=10-12", "bytes=20-21"]
+    assert all(call["stream"] is True for call in calls)
+    assert all(call["verify"] is False for call in calls)
+
+
+# ---------------------------------------------------------------------------
+# test 10: token bucket rate limiter (D1 throttle antibody)
 # ---------------------------------------------------------------------------
 
 def test_token_bucket_limits_rate():

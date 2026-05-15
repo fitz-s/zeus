@@ -159,12 +159,15 @@ SOURCE_ID = "ecmwf_open_data"
 FORECAST_SOURCE_ROLE = "diagnostic"
 MODEL_VERSION = "ecmwf_open_data"
 
-# ECMWF Open Data is replicated across multiple mirrors. AWS empirically 3× faster
-# than ecmwf direct portal (which has a 500-simultaneous-connection limit per
-# ECMWF docs). Order: aws (CDN, fastest), google (CDN, backup), ecmwf (origin, fallback).
-# 404 on any mirror means upstream hasn't released — no point rotating (mirrors sync
-# within 5s of origin, measured 2026-05-11).
-_DOWNLOAD_SOURCES: tuple[str, ...] = ("aws", "google", "ecmwf")
+# ECMWF Open Data is replicated across multiple mirrors. AWS is fastest but
+# returns S3 SlowDown when byte-range requests burst. Google rejects multi-range
+# GETs, but supports the single-range GETs emitted by Zeus' controlled downloader
+# below. The ECMWF origin does not reliably serve byte ranges, so it is opt-in.
+_DOWNLOAD_SOURCES: tuple[str, ...] = tuple(
+    source.strip()
+    for source in os.environ.get("ZEUS_ECMWF_SOURCES", "aws,google").split(",")
+    if source.strip()
+)
 
 # ---------------------------------------------------------------------------
 # Token-bucket rate limiter (D1 throttle antibody — 2026-05-12)
@@ -231,11 +234,168 @@ _fetch_bucket: _TokenBucket = _TokenBucket(_DOWNLOAD_RPS)
 # the PRIMARY throttle against AWS S3 503 Slow Down; worker count is secondary.
 # Env override: ZEUS_ECMWF_MAX_WORKERS (operator-set; survives linter audits).
 _DOWNLOAD_MAX_WORKERS: int = int(os.environ.get("ZEUS_ECMWF_MAX_WORKERS", "2"))
-_PER_STEP_TIMEOUT_SECONDS: int = 90
+_PER_STEP_TIMEOUT_SECONDS: int = int(os.environ.get("ZEUS_ECMWF_STEP_TIMEOUT_SECONDS", "180"))
 _PER_STEP_MAX_RETRIES: int = int(os.environ.get("ZEUS_ECMWF_PER_STEP_RETRIES", "2"))
 _PER_STEP_RETRY_AFTER: int = int(os.environ.get("ZEUS_ECMWF_PER_STEP_RETRY_AFTER", "5"))
 # 404 → NOT_RELEASED (no retry); all others below trigger retry then failover.
 _RETRYABLE_HTTP: frozenset[int] = frozenset({500, 502, 503, 504, 408, 429})
+
+
+def _is_ecmwf_download_url(url: str) -> bool:
+    return (
+        "ecmwf-forecasts" in url
+        or "ecmwf-open-data" in url
+        or "data.ecmwf.int/forecasts" in url
+    )
+
+
+class _RateLimitedSession(requests.Session):
+    """requests.Session that rate-limits ECMWF download HEAD/GET calls."""
+
+    def request(self, method: str, url: str, *args, **kwargs):  # type: ignore[override]
+        if method.upper() in {"GET", "HEAD"} and _is_ecmwf_download_url(str(url)):
+            _fetch_bucket.acquire()
+        return super().request(method, url, *args, **kwargs)
+
+
+def _part_offset_length(part: Any) -> tuple[int, int]:
+    """Return an ECMWF index part as ``(offset, length)``.
+
+    ecmwf-opendata currently returns plain tuples; multiurl wraps them as part
+    objects internally. Supporting both keeps this helper stable across package
+    updates without delegating download control back to multiurl.
+    """
+
+    if hasattr(part, "offset") and hasattr(part, "length"):
+        return int(part.offset), int(part.length)
+    offset, length = part
+    return int(offset), int(length)
+
+
+def _http_error_for_response(response: requests.Response, message: str) -> requests.HTTPError:
+    err = requests.HTTPError(message)
+    err.response = response
+    return err
+
+
+def _resolve_index_parts(client: Any, result: Any) -> list[tuple[str, tuple[tuple[int, int], ...]]]:
+    """Resolve ECMWF ``.index`` parts without multiurl's 120-second retry loop."""
+
+    for_index = getattr(result, "for_index", {}) or {}
+    if not for_index:
+        return []
+
+    verify = getattr(client, "verify", True)
+    resolved: list[tuple[str, tuple[tuple[int, int], ...]]] = []
+    for url in result.urls:
+        base, _ = os.path.splitext(str(url))
+        index_url = f"{base}.index"
+        response = client.session.get(
+            index_url,
+            stream=True,
+            timeout=_PER_STEP_TIMEOUT_SECONDS,
+            verify=verify,
+        )
+        try:
+            if response.status_code != 200:
+                response.raise_for_status()
+            parts: list[tuple[int, int]] = []
+            for raw_line in response.iter_lines():
+                if not raw_line:
+                    continue
+                line = json.loads(raw_line)
+                if all(line.get(name) in values for name, values in for_index.items()):
+                    parts.append((int(line["_offset"]), int(line["_length"])))
+            if parts:
+                resolved.append((str(url), tuple(sorted(parts))))
+        finally:
+            close = getattr(response, "close", None)
+            if callable(close):
+                close()
+
+    if not resolved:
+        raise ValueError(f"Cannot find index entries matching {for_index!r}")
+    return resolved
+
+
+def _retrieve_step_with_controlled_ranges(client: Any, *, target: Path, **kwargs: Any) -> Any:
+    """Retrieve one indexed OpenData step with Zeus-owned single Range GETs.
+
+    ecmwf-opendata's default ``Client.retrieve`` delegates indexed GRIB assembly
+    to multiurl. In live forecast runs multiurl was the broken boundary: it can
+    emit bursty multi-range/internal-retry traffic outside Zeus' token bucket,
+    producing AWS S3 SlowDown / HTTP 429 followed by 120-second sleeps. This
+    downloader keeps index resolution in ecmwf-opendata but owns every HTTP GET.
+    Outer retry/failover remains in ``_fetch_one_step``.
+    """
+
+    if not hasattr(client, "_get_urls"):
+        _fetch_bucket.acquire()
+        return client.retrieve(target=str(target), **kwargs)
+
+    client.session = _RateLimitedSession()
+    result = client._get_urls(target=str(target), use_index=False, **kwargs)
+    indexed_parts = _resolve_index_parts(client, result)
+    if indexed_parts:
+        result.urls = indexed_parts
+
+    target_path = Path(result.target)
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    bytes_written = 0
+    verify = getattr(client, "verify", True)
+    session = client.session
+
+    with target_path.open("wb") as out:
+        for item in result.urls:
+            if isinstance(item, tuple) and len(item) == 2 and not isinstance(item[1], (str, bytes)):
+                url, parts = item
+                for part in parts:
+                    offset, length = _part_offset_length(part)
+                    end = offset + length - 1
+                    response = session.get(
+                        url,
+                        stream=True,
+                        headers={"Range": f"bytes={offset}-{end}"},
+                        timeout=_PER_STEP_TIMEOUT_SECONDS,
+                        verify=verify,
+                    )
+                    try:
+                        if response.status_code != 206:
+                            if response.status_code >= 400:
+                                response.raise_for_status()
+                            raise _http_error_for_response(
+                                response,
+                                f"Expected HTTP 206 for range GET, got {response.status_code}",
+                            )
+                        for chunk in response.iter_content(chunk_size=1024 * 1024):
+                            if chunk:
+                                out.write(chunk)
+                                bytes_written += len(chunk)
+                    finally:
+                        close = getattr(response, "close", None)
+                        if callable(close):
+                            close()
+            else:
+                response = session.get(
+                    item,
+                    stream=True,
+                    timeout=_PER_STEP_TIMEOUT_SECONDS,
+                    verify=verify,
+                )
+                try:
+                    if response.status_code != 200:
+                        response.raise_for_status()
+                    for chunk in response.iter_content(chunk_size=1024 * 1024):
+                        if chunk:
+                            out.write(chunk)
+                            bytes_written += len(chunk)
+                finally:
+                    close = getattr(response, "close", None)
+                    if callable(close):
+                        close()
+
+    result.size = bytes_written
+    return result
 
 
 def _conda_python() -> str:
@@ -275,6 +435,18 @@ def _download_output_path(*, run_date: date, run_hour: int, param: str) -> Path:
         / run_date.strftime("%Y%m%d")
         / f"open_ens_{run_date.strftime('%Y%m%d')}_{run_hour:02d}z_steps_{steps_sig}_params_{param}.grib2"
     )
+
+
+def _step_cache_path(output_dir: Path, *, step: int, param: str) -> Path:
+    """Per-step cache for the full executable member set.
+
+    Older ``.stepNNN_<param>.grib2`` cache files can contain only 50
+    perturbed ``enfo/ef`` members when ECMWF omits ``cf`` from that file. The
+    explicit suffix prevents resume from reusing those pf-only artifacts after
+    the control/oper merge fix.
+    """
+
+    return output_dir / f".step{step:03d}_{param}_ens51.grib2"
 
 
 def _cycle_extract_dir_name(*, run_date: date, run_hour: int) -> str:
@@ -434,7 +606,14 @@ def _snapshot_rows_for_source_run(conn, *, source_run_id: str, data_version: str
 
 
 def _clear_source_run_authority(conn, *, source_run_id: str) -> dict[str, int]:
-    """Clear prior deterministic-run rows before rebuilding a source_run."""
+    """Clear small derived rows before rebuilding a source_run.
+
+    Snapshot rows are intentionally not pre-deleted. The ingester uses the
+    canonical unique key with ``INSERT OR REPLACE``, so pre-deleting the same
+    run turns a small deterministic overwrite into a slow table/index rewrite
+    on the multi-GB forecasts DB. Residual rows that were not replaced by the
+    new JSON set are removed after ingest by fetch_time.
+    """
 
     coverage_ids = [
         str(row[0])
@@ -471,21 +650,58 @@ def _clear_source_run_authority(conn, *, source_run_id: str) -> dict[str, int]:
         "DELETE FROM source_run WHERE source_run_id = ?",
         (source_run_id,),
     ).rowcount
-    snapshots_deleted = conn.execute(
+    return {
+        "snapshots_deleted": 0,
+        "coverage_deleted": int(coverage_deleted),
+        "producer_readiness_deleted": int(readiness_deleted),
+        "source_run_deleted": int(source_run_deleted),
+    }
+
+
+def _delete_stale_source_run_snapshots(
+    conn,
+    *,
+    source_run_id: str,
+    replace_started_at_iso: str,
+) -> int:
+    """Delete same-run snapshots not refreshed by this ingest attempt."""
+
+    stale_count = int(
+        conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM ensemble_snapshots_v2
+            WHERE source_id = ?
+              AND source_transport = ?
+              AND source_run_id = ?
+              AND fetch_time < ?
+            """,
+            (
+                SOURCE_ID,
+                "ensemble_snapshots_v2_db_reader",
+                source_run_id,
+                replace_started_at_iso,
+            ),
+        ).fetchone()[0]
+    )
+    if stale_count <= 0:
+        return 0
+    deleted = conn.execute(
         """
         DELETE FROM ensemble_snapshots_v2
         WHERE source_id = ?
           AND source_transport = ?
           AND source_run_id = ?
+          AND fetch_time < ?
         """,
-        (SOURCE_ID, "ensemble_snapshots_v2_db_reader", source_run_id),
+        (
+            SOURCE_ID,
+            "ensemble_snapshots_v2_db_reader",
+            source_run_id,
+            replace_started_at_iso,
+        ),
     ).rowcount
-    return {
-        "snapshots_deleted": int(snapshots_deleted),
-        "coverage_deleted": int(coverage_deleted),
-        "producer_readiness_deleted": int(readiness_deleted),
-        "source_run_deleted": int(source_run_deleted),
-    }
+    return int(deleted)
 
 
 def _observed_steps_for_snapshot(*, required_steps: tuple[int, ...], step_horizon_hours: object) -> tuple[int, ...]:
@@ -663,8 +879,8 @@ def _write_source_authority_chain(
         if snapshot_window_start != scope.target_window_start_utc:
             reason_codes.append("SNAPSHOT_LOCAL_DAY_WINDOW_MISMATCH")
         live_eligible = (
-            source_run_status == "SUCCESS"
-            and source_run_completeness == "COMPLETE"
+            source_run_status in {"SUCCESS", "PARTIAL"}
+            and source_run_completeness in {"COMPLETE", "PARTIAL"}
             and horizon_decision.status == "LIVE_ELIGIBLE"
             and coverage_decision.status == "LIVE_ELIGIBLE"
             and snapshot_window_start == scope.target_window_start_utc
@@ -765,7 +981,7 @@ def _fetch_one_step(
     Single-writer antibody: NO SQLite writes in this function — HTTP only.
     All DB writes occur on the main thread after all futures complete.
     """
-    canonical = output_dir / f".step{step:03d}_{param}.grib2"
+    canonical = _step_cache_path(output_dir, step=step, param=param)
     partial   = canonical.with_suffix(".grib2.partial")
     if canonical.exists() and canonical.stat().st_size > 0:
         return ("OK", canonical)   # resume: already fetched in a prior attempt
@@ -776,17 +992,49 @@ def _fetch_one_step(
     for mirror in mirrors:
         for attempt in range(_PER_STEP_MAX_RETRIES):
             try:
-                _fetch_bucket.acquire()  # D1: token-bucket gate (4 rps shared across all workers)
-                Client(source=mirror).retrieve(
+                client = Client(source=mirror)
+                pf_partial = partial.with_suffix(".pf.partial")
+                cf_partial = partial.with_suffix(".cf.partial")
+                _retrieve_step_with_controlled_ranges(
+                    client,
                     date=int(cycle_date.strftime("%Y%m%d")),
                     time=cycle_hour,
                     stream="enfo",
-                    type=["cf", "pf"],
+                    type=["pf"],
                     step=[step],
                     param=[param],
-                    target=str(partial),
+                    target=pf_partial,
                 )
+                try:
+                    _retrieve_step_with_controlled_ranges(
+                        client,
+                        date=int(cycle_date.strftime("%Y%m%d")),
+                        time=cycle_hour,
+                        stream="enfo",
+                        type=["cf"],
+                        step=[step],
+                        param=[param],
+                        target=cf_partial,
+                    )
+                except ValueError as exc:
+                    if "Cannot find index entries matching" not in str(exc):
+                        raise
+                    _retrieve_step_with_controlled_ranges(
+                        client,
+                        date=int(cycle_date.strftime("%Y%m%d")),
+                        time=cycle_hour,
+                        stream="oper",
+                        type=["fc"],
+                        step=[step],
+                        param=[param],
+                        target=cf_partial,
+                    )
+                with partial.open("wb") as out:
+                    out.write(cf_partial.read_bytes())
+                    out.write(pf_partial.read_bytes())
                 os.replace(str(partial), str(canonical))   # atomic rename
+                pf_partial.unlink(missing_ok=True)
+                cf_partial.unlink(missing_ok=True)
                 return ("OK", canonical)
             except requests.HTTPError as exc:
                 code = getattr(exc.response, "status_code", None)
@@ -835,7 +1083,7 @@ def _concat_steps(ok_steps: list[int], param: str, output_dir: Path, output_path
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with open(output_path, "wb") as out:
         for step in sorted(ok_steps):
-            step_file = output_dir / f".step{step:03d}_{param}.grib2"
+            step_file = _step_cache_path(output_dir, step=step, param=param)
             if step_file.exists():
                 out.write(step_file.read_bytes())
 
@@ -1279,6 +1527,7 @@ def collect_open_ens_cycle(
                         cycle_extract_dir,
                         cycle_json_files,
                     )
+                    snapshot_replace_started_at = datetime.now(timezone.utc).isoformat()
                     summary = _ingest_grib_ingest_track(
                         track=cfg["ingest_track"],
                         json_root=scoped_json_root,
@@ -1305,6 +1554,18 @@ def collect_open_ens_cycle(
                     summary.get("written"),
                     summary.get("skipped_exists"),
                     summary.get("parse_error"),
+                )
+                stale_snapshots_deleted = _delete_stale_source_run_snapshots(
+                    conn,
+                    source_run_id=source_run_id,
+                    replace_started_at_iso=snapshot_replace_started_at,
+                )
+                cleared_authority["snapshots_deleted"] += stale_snapshots_deleted
+                logger.info(
+                    "ingest_stage: stale_snapshot_cleanup track=%s source_run_id=%s deleted=%d",
+                    track,
+                    source_run_id,
+                    stale_snapshots_deleted,
                 )
             finally:
                 _ingest_grib_module._TRACK_CONFIGS[cfg["ingest_track"]]["json_subdir"] = original_subdir

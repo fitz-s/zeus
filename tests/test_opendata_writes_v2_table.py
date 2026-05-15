@@ -1,5 +1,5 @@
 # Created: 2026-05-01
-# Last reused/audited: 2026-05-14
+# Last reused/audited: 2026-05-15
 # Authority basis: Operator directive 2026-05-01 — antibody for Invariant A;
 #   docs/operations/task_2026-05-08_deep_alignment_audit/DATA_DAEMON_LIVE_EFFICIENCY_REFACTOR_PLAN.md
 #   Phase 5 forecast authority chain ownership.
@@ -319,6 +319,61 @@ def test_collect_open_ens_cycle_blocks_live_when_member_value_missing(tmp_path: 
     assert json.loads(producer["reason_codes_json"]) == ["MISSING_EXPECTED_MEMBERS"]
 
 
+def test_collect_open_ens_cycle_partial_global_run_allows_covered_target(tmp_path: Path, monkeypatch):
+    from src.data import ecmwf_open_data
+
+    forecasts_db_path = tmp_path / "forecasts.db"
+    forecasts_conn = sqlite3.connect(str(forecasts_db_path))
+    forecasts_conn.row_factory = sqlite3.Row
+    init_schema_forecasts(forecasts_conn)
+
+    fifty_one_root = tmp_path / "51 source data"
+    monkeypatch.setattr(ecmwf_open_data, "FIFTY_ONE_ROOT", fifty_one_root)
+    monkeypatch.setattr(ecmwf_open_data, "STEP_HOURS", [3, 6, 9, 12, 15, 18, 21, 24, 150])
+    extract_subdir = "open_ens_mx2t6_localday_max"
+    payload = _make_opendata_high_payload(
+        "2026-05-02",
+        "2026-05-01T00:00:00+00:00",
+        local_day_start_iso="2026-05-01T23:00:00+00:00",
+        local_day_end_iso="2026-05-02T23:00:00+00:00",
+    )
+    json_dir = fifty_one_root / "raw" / extract_subdir / "london" / "20260501"
+    json_dir.mkdir(parents=True)
+    (json_dir / f"{extract_subdir}_target_2026-05-02_lead_1.json").write_text(
+        json.dumps(payload),
+        encoding="utf-8",
+    )
+
+    def fetch_impl(*, cycle_date, cycle_hour, param, step, output_dir, mirrors):
+        del cycle_date, cycle_hour, mirrors
+        if step == 150:
+            return ("NOT_RELEASED", "not released")
+        ecmwf_open_data._step_cache_path(output_dir, step=step, param=param).write_bytes(b"x")
+        return ("OK", None)
+
+    result = ecmwf_open_data.collect_open_ens_cycle(
+        track="mx2t6_high",
+        run_date=date(2026, 5, 1),
+        run_hour=0,
+        skip_extract=True,
+        conn=forecasts_conn,
+        _fetch_impl=fetch_impl,
+        now_utc=datetime(2026, 5, 1, 9, 0, tzinfo=timezone.utc),
+    )
+
+    assert result["status"] == "ok"
+    source_run = get_source_run(forecasts_conn, result["source_run_id"])
+    assert source_run is not None
+    assert source_run["status"] == "PARTIAL"
+    assert source_run["completeness_status"] == "PARTIAL"
+    coverage = forecasts_conn.execute("SELECT * FROM source_run_coverage").fetchone()
+    assert coverage["readiness_status"] == "LIVE_ELIGIBLE"
+    producer = forecasts_conn.execute(
+        "SELECT * FROM readiness_state WHERE strategy_key = 'producer_readiness'"
+    ).fetchone()
+    assert producer["status"] == "LIVE_ELIGIBLE"
+
+
 def test_collect_open_ens_cycle_scopes_ingest_to_selected_cycle(tmp_path: Path, monkeypatch):
     from src.data import ecmwf_open_data
 
@@ -534,6 +589,97 @@ def test_collect_open_ens_cycle_clears_prior_same_source_run_rows(tmp_path: Path
         (source_run_id,),
     ).fetchall()
     assert [row["target_local_date"] for row in readiness_targets] == ["2026-05-02"]
+
+
+def test_collect_open_ens_cycle_overwrites_existing_snapshot_in_place(tmp_path: Path, monkeypatch):
+    from src.data import ecmwf_open_data
+
+    forecasts_conn = sqlite3.connect(str(tmp_path / "forecasts.db"))
+    forecasts_conn.row_factory = sqlite3.Row
+    init_schema_forecasts(forecasts_conn)
+
+    fifty_one_root = tmp_path / "51 source data"
+    monkeypatch.setattr(ecmwf_open_data, "FIFTY_ONE_ROOT", fifty_one_root)
+    extract_subdir = "open_ens_mx2t6_localday_max"
+    source_run_id = "ecmwf_open_data:mx2t6_high:2026-05-01T00Z"
+    issue_iso = "2026-05-01T00:00:00+00:00"
+    forecasts_conn.execute(
+        """
+        INSERT INTO ensemble_snapshots_v2 (
+            city, target_date, temperature_metric, physical_quantity, observation_field,
+            issue_time, valid_time, available_at, fetch_time, lead_hours, members_json,
+            model_version, data_version, source_id, source_transport, source_run_id,
+            release_calendar_key, source_cycle_time, source_release_time, source_available_at,
+            city_timezone, settlement_unit, manifest_hash, provenance_json, members_unit,
+            local_day_start_utc, step_horizon_hours, unit
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "London",
+            "2026-05-02",
+            "high",
+            "mx2t3_local_calendar_day_max",
+            "high_temp",
+            issue_iso,
+            "2026-05-02T00:00:00+00:00",
+            "2026-05-01T09:00:00+00:00",
+            "2026-05-01T09:00:00+00:00",
+            48.0,
+            json.dumps([None] * 51),
+            "ecmwf_open_data",
+            ECMWF_OPENDATA_HIGH_DATA_VERSION,
+            "ecmwf_open_data",
+            "ensemble_snapshots_v2_db_reader",
+            source_run_id,
+            "ecmwf_open_data:mx2t6_high:full",
+            issue_iso,
+            issue_iso,
+            issue_iso,
+            "Europe/London",
+            "C",
+            "stale",
+            "{}",
+            "degC",
+            "2026-05-01T23:00:00+00:00",
+            240.0,
+            "C",
+        ),
+    )
+    before_id = forecasts_conn.execute(
+        "SELECT snapshot_id FROM ensemble_snapshots_v2 WHERE source_run_id = ?",
+        (source_run_id,),
+    ).fetchone()["snapshot_id"]
+
+    payload = _make_opendata_high_payload(
+        "2026-05-02",
+        issue_iso,
+        local_day_start_iso="2026-05-01T23:00:00+00:00",
+        local_day_end_iso="2026-05-02T23:00:00+00:00",
+    )
+    json_dir = fifty_one_root / "raw" / extract_subdir / "london" / "20260501"
+    json_dir.mkdir(parents=True)
+    (json_dir / f"{extract_subdir}_target_2026-05-02_lead_1.json").write_text(
+        json.dumps(payload),
+        encoding="utf-8",
+    )
+
+    result = ecmwf_open_data.collect_open_ens_cycle(
+        track="mx2t6_high",
+        run_date=date(2026, 5, 1),
+        run_hour=0,
+        skip_download=True,
+        skip_extract=True,
+        conn=forecasts_conn,
+        now_utc=datetime(2026, 5, 1, 9, 0, tzinfo=timezone.utc),
+    )
+
+    assert result["cleared_authority"]["snapshots_deleted"] == 0
+    row = forecasts_conn.execute(
+        "SELECT snapshot_id, members_json FROM ensemble_snapshots_v2 WHERE source_run_id = ?",
+        (source_run_id,),
+    ).fetchone()
+    assert row["snapshot_id"] == before_id
+    assert json.loads(row["members_json"])[0] == pytest.approx(18.0)
 
 
 def test_collect_open_ens_cycle_default_extract_timeout_is_live_sized(tmp_path: Path, monkeypatch):
