@@ -1,0 +1,40 @@
+# Test fixture: valid minimal binding YAML
+project_id: test_project
+
+intent_extensions:
+  - id: zeus.topology_tooling
+    description: Test extension
+
+coverage_map:
+  profiles:
+    - id: test_profile
+      patterns:
+        - "scripts/*.py"
+        - "tests/test_*.py"
+  orphaned:
+    - "tmp/**"
+  hard_stop_paths:
+    - "src/execution/**"
+
+cohorts:
+  - id: test.my_cohort
+    profile: test_profile
+    intent_classes:
+      - create_new
+    files:
+      - "scripts/new_module.py"
+      - "architecture/test_topology.yaml"
+    description: Test cohort for unit tests.
+
+severity_overrides:
+  coverage_gap: ADVISORY
+  closed_packet_authority: SOFT_BLOCK
+
+high_fanout_hints: []
+
+artifact_authority_status:
+  - path: "architecture/test_topology.yaml"
+    status: CURRENT_LOAD_BEARING
+    last_confirmed: "2026-05-15"
+    confirmation_ttl_days: 14
+    reason: "Test artifact authority entry"

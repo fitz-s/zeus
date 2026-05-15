@@ -1,0 +1,16 @@
+# Test fixture: binding with missing optional fields — loader should use defaults
+project_id: minimal_project
+
+# intent_extensions omitted -> defaults to empty
+# cohorts omitted -> defaults to empty
+# severity_overrides omitted -> defaults to empty dict
+# artifact_authority_status omitted -> defaults to empty dict
+# high_fanout_hints omitted -> defaults to empty tuple
+
+coverage_map:
+  profiles:
+    - id: only_profile
+      patterns:
+        - "scripts/topology_doctor.py"
+  orphaned: []
+  hard_stop_paths: []

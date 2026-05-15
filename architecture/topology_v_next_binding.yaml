@@ -1,0 +1,83 @@
+# Created: 2026-05-15
+# Last reused or audited: 2026-05-15
+# Authority basis: docs/operations/task_2026-05-15_p1_topology_v_next_additive/SCAFFOLD.md §1.3
+#                  docs/operations/task_2026-05-15_runtime_improvement_engineering_package/01_topology_v_next/ZEUS_BINDING_LAYER.md
+#
+# STUB BINDING — P1.1 deliverable. Minimal valid content for unit tests.
+# Full Zeus binding ships in P1.3 with complete coverage_map, cohorts,
+# severity_overrides, and artifact_authority_status from ZEUS_BINDING_LAYER.md.
+#
+# NOTE: companion_required key below is intentionally present to test that
+# profile_loader.validate_binding_layer warns on unknown fields without crashing.
+# It is a P2 feature (SCAFFOLD §6 open item 2); its presence here exercises the
+# "unknown fields: warn, don't crash" contract from SCAFFOLD §1.3.
+
+project_id: zeus
+
+intent_extensions:
+  - id: zeus.settlement_followthrough
+    description: >
+      Post-settlement data harvesting; resolves market outcomes against DB records.
+  - id: zeus.calibration_update
+    description: >
+      Update calibration pair records or model parameters in the forecasts DB.
+  - id: zeus.data_authority_receipt
+    description: >
+      Record a new verified data source or refresh an existing source-truth receipt.
+  - id: zeus.topology_tooling
+    description: >
+      Modify topology_doctor.py or supporting architecture YAMLs without touching money-path.
+
+coverage_map:
+  profiles:
+    - id: agent_runtime
+      patterns:
+        - "scripts/topology_doctor.py"
+        - "scripts/topology_doctor_digest.py"
+        - "architecture/task_boot_profiles.yaml"
+        - "architecture/admission_severity.yaml"
+        - "architecture/test_topology.yaml"
+        - "docs/operations/AGENTS.md"
+
+    - id: test_suite
+      patterns:
+        - "tests/test_*.py"
+        - "tests/topology_v_next/**"
+        - "tests/fixtures/**"
+
+  orphaned:
+    - "tmp/**"
+    - "*.bak.*"
+    - ".gitignore"
+
+  hard_stop_paths:
+    - "src/execution/**"
+    - "src/venue/**"
+    - "src/riskguard/**"
+    - "architecture/source_rationale.yaml"
+    - "architecture/city_truth_contract.yaml"
+    - "architecture/fatal_misreads.yaml"
+    - "state/zeus-world.db"
+    - "state/zeus-forecasts.db"
+
+cohorts:
+  - id: zeus.new_test_with_topology_registration
+    profile: test_suite
+    intent_classes:
+      - create_new
+    files:
+      - "tests/test_{new_module}.py"
+      - "architecture/test_topology.yaml"
+    description: >
+      Every new test file requires a companion entry in test_topology.yaml.
+
+severity_overrides:
+  closed_packet_authority: SOFT_BLOCK
+  coverage_gap: ADVISORY
+
+high_fanout_hints: []
+
+artifact_authority_status: {}
+
+# P2 feature — intentionally present to test unknown-field warning behavior
+companion_required: {}
