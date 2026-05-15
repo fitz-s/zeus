@@ -1,7 +1,7 @@
 # Created: 2026-04-19
-# Last reused/audited: 2026-05-05
-# Authority basis: Phase 10B DT-Seam Cleanup, 2026-04-29 design simplification audit F4, and 2026-05-01 stale live-state artifact tracking.
-# Lifecycle: created=2026-04-19; last_reviewed=2026-05-05; last_reused=2026-05-05
+# Last reused/audited: 2026-05-15
+# Authority basis: Phase 10B DT-Seam Cleanup, 2026-04-29 design simplification audit F4, 2026-05-01 stale live-state artifact tracking, and 2026-05-15 K1 forecast DB split status-summary false-flag repair.
+# Lifecycle: created=2026-04-19; last_reviewed=2026-05-15; last_reused=2026-05-15
 # Purpose: Phase 10B "DT-Seam Cleanup" antibodies (R-CL..R-CP).
 #          Dedicated test file per critic-carol cycle-3 L2 convention.
 #          Do NOT co-locate with test_phase10a_hygiene.py.
@@ -485,6 +485,46 @@ class TestRCPV2RowCountSensor:
         counts = _get_v2_row_counts(trade_conn)
 
         assert counts == expected_counts
+
+    def test_r_cp_1e_forecast_owned_v2_tables_prefer_forecasts_schema(self, tmp_path):
+        """K1 split: forecast-owned v2 tables report forecasts DB truth."""
+        from src.observability.status_summary import _get_v2_row_counts
+
+        trade_conn = self._make_empty_v2_conn()
+        world_path = tmp_path / "world.db"
+        forecasts_path = tmp_path / "forecasts.db"
+        world_conn = sqlite3.connect(str(world_path))
+        forecasts_conn = sqlite3.connect(str(forecasts_path))
+        for table in (
+            "platt_models_v2",
+            "calibration_pairs_v2",
+            "ensemble_snapshots_v2",
+            "historical_forecasts_v2",
+            "settlements_v2",
+        ):
+            world_conn.execute(f"CREATE TABLE {table} (id INTEGER PRIMARY KEY)")
+            forecasts_conn.execute(f"CREATE TABLE {table} (id INTEGER PRIMARY KEY)")
+        for _ in range(2):
+            world_conn.execute("INSERT INTO platt_models_v2 DEFAULT VALUES")
+            world_conn.execute("INSERT INTO historical_forecasts_v2 DEFAULT VALUES")
+        for _ in range(3):
+            forecasts_conn.execute("INSERT INTO calibration_pairs_v2 DEFAULT VALUES")
+            forecasts_conn.execute("INSERT INTO ensemble_snapshots_v2 DEFAULT VALUES")
+            forecasts_conn.execute("INSERT INTO settlements_v2 DEFAULT VALUES")
+        world_conn.commit()
+        forecasts_conn.commit()
+        world_conn.close()
+        forecasts_conn.close()
+
+        trade_conn.execute("ATTACH DATABASE ? AS world", (str(world_path),))
+        trade_conn.execute("ATTACH DATABASE ? AS forecasts", (str(forecasts_path),))
+        counts = _get_v2_row_counts(trade_conn)
+
+        assert counts["platt_models_v2"] == 2
+        assert counts["historical_forecasts_v2"] == 2
+        assert counts["calibration_pairs_v2"] == 3
+        assert counts["ensemble_snapshots_v2"] == 3
+        assert counts["settlements_v2"] == 3
 
     def test_r_cp_1d_v2_row_counts_avoid_full_table_count_scans(self):
         """F4 latency guard: status writes must not run COUNT(*) over large v2 tables."""
