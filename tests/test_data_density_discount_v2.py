@@ -1,5 +1,5 @@
 # Created: 2026-05-03
-# Last reused/audited: 2026-05-03
+# Last reused/audited: 2026-05-15
 # Authority basis: docs/reference/zeus_oracle_density_discount_reference.md (v2 redesign)
 """Tests for DDD v2 — Two-Rail trigger + continuous linear curve.
 
@@ -31,6 +31,8 @@ from src.oracle.data_density_discount import (
     MAX_DISCOUNT,
     LINEAR_ALPHA,
     SMALL_SAMPLE_AMPLIFIER,
+    _DEFAULT_FLOORS_PATH,
+    _DEFAULT_NSTAR_PATH,
     evaluate_ddd,
     evaluate_ddd_from_files,
     get_city_floor,
@@ -485,6 +487,24 @@ class TestSigmaDiagnosticOnly:
 # ── evaluate_ddd_from_files integration test ─────────────────────────────────
 
 class TestFromFilesIntegration:
+    def test_default_runtime_artifacts_are_source_owned_and_loadable(self):
+        """Default live DDD artifacts must not depend on ops packet paths."""
+        assert "docs/operations" not in _DEFAULT_FLOORS_PATH.as_posix()
+        assert "docs/operations" not in _DEFAULT_NSTAR_PATH.as_posix()
+        assert _DEFAULT_FLOORS_PATH.as_posix().endswith(
+            "src/oracle/ddd_artifacts/v2_city_floors.json"
+        )
+        assert _DEFAULT_NSTAR_PATH.as_posix().endswith(
+            "src/oracle/ddd_artifacts/v2_nstar.json"
+        )
+
+        floors = load_city_floors()
+        nstar = load_nstar_config()
+
+        assert floors.get("_metadata", {}).get("design_version") == "v2-two-rail-2026-05-03"
+        assert "Paris" in floors["per_city"]
+        assert "Paris_high" in nstar["per_city_metric"]
+
     def test_from_files_loads_and_evaluates(self, tmp_path):
         """evaluate_ddd_from_files loads JSON files and returns correct result."""
         city = "TestCity"
@@ -617,5 +637,3 @@ class TestDiagnosticSink:
         assert diag["discount"] == pytest.approx(0.0)
         assert diag["shortfall"] == pytest.approx(0.0)
         assert diag["sigma"] == pytest.approx(0.0)
-
-

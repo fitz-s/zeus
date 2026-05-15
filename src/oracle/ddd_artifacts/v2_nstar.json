@@ -1,0 +1,931 @@
+{
+  "_metadata": {
+    "created": "2026-05-03",
+    "authority": "RERUN_PLAN_v2.md C4",
+    "N_unit": "unique training target_dates",
+    "N_star": "smallest N where ECE std over 100-date sliding window < 0.02",
+    "paris_note": "Paris pending workstream A resync; rerun for Paris after A completes."
+  },
+  "per_city_metric": {
+    "Amsterdam_high": {
+      "city": "Amsterdam",
+      "metric": "high",
+      "total_N_dates": 840,
+      "N_star": 123,
+      "final_brier": 0.060074,
+      "final_ece": 0.197164,
+      "status": "OK"
+    },
+    "Amsterdam_low": {
+      "city": "Amsterdam",
+      "metric": "low",
+      "total_N_dates": 357,
+      "N_star": 112,
+      "final_brier": 0.170371,
+      "final_ece": 0.337911,
+      "status": "OK"
+    },
+    "Ankara_high": {
+      "city": "Ankara",
+      "metric": "high",
+      "total_N_dates": 839,
+      "N_star": 125,
+      "final_brier": 0.032271,
+      "final_ece": 0.141908,
+      "status": "OK"
+    },
+    "Ankara_low": {
+      "city": "Ankara",
+      "metric": "low",
+      "total_N_dates": 408,
+      "N_star": 110,
+      "final_brier": 0.073227,
+      "final_ece": 0.169819,
+      "status": "OK"
+    },
+    "Atlanta_high": {
+      "city": "Atlanta",
+      "metric": "high",
+      "total_N_dates": 838,
+      "N_star": 110,
+      "final_brier": 0.03647,
+      "final_ece": 0.155463,
+      "status": "OK"
+    },
+    "Atlanta_low": {
+      "city": "Atlanta",
+      "metric": "low",
+      "total_N_dates": 481,
+      "N_star": 110,
+      "final_brier": 0.056015,
+      "final_ece": 0.152889,
+      "status": "OK"
+    },
+    "Auckland_high": {
+      "city": "Auckland",
+      "metric": "high",
+      "total_N_dates": 839,
+      "N_star": 123,
+      "final_brier": 0.032021,
+      "final_ece": 0.113499,
+      "status": "OK"
+    },
+    "Auckland_low": {
+      "city": "Auckland",
+      "metric": "low",
+      "total_N_dates": 584,
+      "N_star": 110,
+      "final_brier": 0.056443,
+      "final_ece": 0.174468,
+      "status": "OK"
+    },
+    "Austin_high": {
+      "city": "Austin",
+      "metric": "high",
+      "total_N_dates": 840,
+      "N_star": 110,
+      "final_brier": 0.045376,
+      "final_ece": 0.176252,
+      "status": "OK"
+    },
+    "Austin_low": {
+      "city": "Austin",
+      "metric": "low",
+      "total_N_dates": 669,
+      "N_star": 110,
+      "final_brier": 0.047771,
+      "final_ece": 0.131556,
+      "status": "OK"
+    },
+    "Beijing_high": {
+      "city": "Beijing",
+      "metric": "high",
+      "total_N_dates": 840,
+      "N_star": 110,
+      "final_brier": 0.033141,
+      "final_ece": 0.140113,
+      "status": "OK"
+    },
+    "Beijing_low": {
+      "city": "Beijing",
+      "metric": "low",
+      "total_N_dates": 419,
+      "N_star": 137,
+      "final_brier": 0.047326,
+      "final_ece": 0.139906,
+      "status": "OK"
+    },
+    "Buenos Aires_high": {
+      "city": "Buenos Aires",
+      "metric": "high",
+      "total_N_dates": 838,
+      "N_star": 110,
+      "final_brier": 0.031531,
+      "final_ece": 0.133522,
+      "status": "OK"
+    },
+    "Buenos Aires_low": {
+      "city": "Buenos Aires",
+      "metric": "low",
+      "total_N_dates": 309,
+      "N_star": 110,
+      "final_brier": 0.056398,
+      "final_ece": 0.142303,
+      "status": "OK"
+    },
+    "Busan_high": {
+      "city": "Busan",
+      "metric": "high",
+      "total_N_dates": 840,
+      "N_star": 198,
+      "final_brier": 0.047223,
+      "final_ece": 0.130371,
+      "status": "OK"
+    },
+    "Busan_low": {
+      "city": "Busan",
+      "metric": "low",
+      "total_N_dates": 320,
+      "N_star": 110,
+      "final_brier": 0.012598,
+      "final_ece": 0.031118,
+      "status": "OK"
+    },
+    "Cape Town_high": {
+      "city": "Cape Town",
+      "metric": "high",
+      "total_N_dates": 813,
+      "N_star": 110,
+      "final_brier": 0.051114,
+      "final_ece": 0.181966,
+      "status": "OK"
+    },
+    "Cape Town_low": {
+      "city": "Cape Town",
+      "metric": "low",
+      "total_N_dates": 450,
+      "N_star": 110,
+      "final_brier": 0.102458,
+      "final_ece": 0.221699,
+      "status": "OK"
+    },
+    "Chengdu_high": {
+      "city": "Chengdu",
+      "metric": "high",
+      "total_N_dates": 840,
+      "N_star": 134,
+      "final_brier": 0.038291,
+      "final_ece": 0.151708,
+      "status": "OK"
+    },
+    "Chengdu_low": {
+      "city": "Chengdu",
+      "metric": "low",
+      "total_N_dates": 399,
+      "N_star": 115,
+      "final_brier": 0.05871,
+      "final_ece": 0.159766,
+      "status": "OK"
+    },
+    "Chicago_high": {
+      "city": "Chicago",
+      "metric": "high",
+      "total_N_dates": 839,
+      "N_star": 144,
+      "final_brier": 0.034702,
+      "final_ece": 0.154336,
+      "status": "OK"
+    },
+    "Chicago_low": {
+      "city": "Chicago",
+      "metric": "low",
+      "total_N_dates": 548,
+      "N_star": 110,
+      "final_brier": 0.043104,
+      "final_ece": 0.150302,
+      "status": "OK"
+    },
+    "Chongqing_high": {
+      "city": "Chongqing",
+      "metric": "high",
+      "total_N_dates": 840,
+      "N_star": 113,
+      "final_brier": 0.034554,
+      "final_ece": 0.14568,
+      "status": "OK"
+    },
+    "Chongqing_low": {
+      "city": "Chongqing",
+      "metric": "low",
+      "total_N_dates": 368,
+      "N_star": 130,
+      "final_brier": 0.086184,
+      "final_ece": 0.20937,
+      "status": "OK"
+    },
+    "Dallas_high": {
+      "city": "Dallas",
+      "metric": "high",
+      "total_N_dates": 839,
+      "N_star": 110,
+      "final_brier": 0.034358,
+      "final_ece": 0.149715,
+      "status": "OK"
+    },
+    "Dallas_low": {
+      "city": "Dallas",
+      "metric": "low",
+      "total_N_dates": 677,
+      "N_star": 116,
+      "final_brier": 0.074465,
+      "final_ece": 0.225076,
+      "status": "OK"
+    },
+    "Denver_high": {
+      "city": "Denver",
+      "metric": "high",
+      "total_N_dates": 836,
+      "N_star": 110,
+      "final_brier": 0.018062,
+      "final_ece": 0.0964,
+      "status": "OK"
+    },
+    "Denver_low": {
+      "city": "Denver",
+      "metric": "low",
+      "total_N_dates": 528,
+      "N_star": 110,
+      "final_brier": 0.024555,
+      "final_ece": 0.101177,
+      "status": "OK"
+    },
+    "Guangzhou_high": {
+      "city": "Guangzhou",
+      "metric": "high",
+      "total_N_dates": 840,
+      "N_star": 110,
+      "final_brier": 0.021341,
+      "final_ece": 0.090186,
+      "status": "OK"
+    },
+    "Guangzhou_low": {
+      "city": "Guangzhou",
+      "metric": "low",
+      "total_N_dates": 316,
+      "N_star": 180,
+      "final_brier": 0.029018,
+      "final_ece": 0.059944,
+      "status": "OK"
+    },
+    "Helsinki_high": {
+      "city": "Helsinki",
+      "metric": "high",
+      "total_N_dates": 840,
+      "N_star": 110,
+      "final_brier": 0.053978,
+      "final_ece": 0.193416,
+      "status": "OK"
+    },
+    "Helsinki_low": {
+      "city": "Helsinki",
+      "metric": "low",
+      "total_N_dates": 314,
+      "N_star": 118,
+      "final_brier": 0.112935,
+      "final_ece": 0.221179,
+      "status": "OK"
+    },
+    "Hong Kong_high": {
+      "city": "Hong Kong",
+      "metric": "high",
+      "total_N_dates": 850,
+      "N_star": 110,
+      "final_brier": 0.066574,
+      "final_ece": 0.194548,
+      "status": "OK"
+    },
+    "Hong Kong_low": {
+      "city": "Hong Kong",
+      "metric": "low",
+      "total_N_dates": 304,
+      "N_star": 111,
+      "final_brier": 0.021883,
+      "final_ece": 0.039707,
+      "status": "OK"
+    },
+    "Houston_high": {
+      "city": "Houston",
+      "metric": "high",
+      "total_N_dates": 839,
+      "N_star": 115,
+      "final_brier": 0.014539,
+      "final_ece": 0.050851,
+      "status": "OK"
+    },
+    "Houston_low": {
+      "city": "Houston",
+      "metric": "low",
+      "total_N_dates": 612,
+      "N_star": 189,
+      "final_brier": 0.088256,
+      "final_ece": 0.223092,
+      "status": "OK"
+    },
+    "Istanbul_high": {
+      "city": "Istanbul",
+      "metric": "high",
+      "total_N_dates": 756,
+      "N_star": 172,
+      "final_brier": 0.052645,
+      "final_ece": 0.131755,
+      "status": "OK"
+    },
+    "Istanbul_low": {
+      "city": "Istanbul",
+      "metric": "low",
+      "total_N_dates": 307,
+      "N_star": 113,
+      "final_brier": 0.070521,
+      "final_ece": 0.134465,
+      "status": "OK"
+    },
+    "Jakarta_high": {
+      "city": "Jakarta",
+      "metric": "high",
+      "total_N_dates": 840,
+      "N_star": 110,
+      "final_brier": 0.011546,
+      "final_ece": 0.042451,
+      "status": "OK"
+    },
+    "Jakarta_low": {
+      "city": "Jakarta",
+      "metric": "low",
+      "total_N_dates": 131,
+      "N_star": 110,
+      "final_brier": 0.001907,
+      "final_ece": 0.006122,
+      "status": "OK"
+    },
+    "Jeddah_high": {
+      "city": "Jeddah",
+      "metric": "high",
+      "total_N_dates": 840,
+      "N_star": 110,
+      "final_brier": 0.001176,
+      "final_ece": 0.01141,
+      "status": "OK"
+    },
+    "Jeddah_low": {
+      "city": "Jeddah",
+      "metric": "low",
+      "total_N_dates": 439,
+      "N_star": 174,
+      "final_brier": 0.09108,
+      "final_ece": 0.182015,
+      "status": "OK"
+    },
+    "Karachi_high": {
+      "city": "Karachi",
+      "metric": "high",
+      "total_N_dates": 839,
+      "N_star": 110,
+      "final_brier": 0.082846,
+      "final_ece": 0.231205,
+      "status": "OK"
+    },
+    "Karachi_low": {
+      "city": "Karachi",
+      "metric": "low",
+      "total_N_dates": 207,
+      "N_star": 114,
+      "final_brier": 0.066163,
+      "final_ece": 0.157998,
+      "status": "OK"
+    },
+    "Kuala Lumpur_high": {
+      "city": "Kuala Lumpur",
+      "metric": "high",
+      "total_N_dates": 840,
+      "N_star": 110,
+      "final_brier": 0.014597,
+      "final_ece": 0.040133,
+      "status": "OK"
+    },
+    "Kuala Lumpur_low": {
+      "city": "Kuala Lumpur",
+      "metric": "low",
+      "total_N_dates": 95,
+      "N_star": null,
+      "final_brier": 0.065335,
+      "final_ece": 0.125797,
+      "status": "N_STAR_NOT_FOUND"
+    },
+    "Lagos_high": {
+      "city": "Lagos",
+      "metric": "high",
+      "total_N_dates": 828,
+      "N_star": 110,
+      "final_brier": 0.017159,
+      "final_ece": 0.045229,
+      "status": "OK"
+    },
+    "Lagos_low": {
+      "city": "Lagos",
+      "metric": "low",
+      "total_N_dates": 500,
+      "N_star": 150,
+      "final_brier": 0.178066,
+      "final_ece": 0.330375,
+      "status": "OK"
+    },
+    "London_high": {
+      "city": "London",
+      "metric": "high",
+      "total_N_dates": 840,
+      "N_star": 110,
+      "final_brier": 0.055556,
+      "final_ece": 0.199135,
+      "status": "OK"
+    },
+    "London_low": {
+      "city": "London",
+      "metric": "low",
+      "total_N_dates": 654,
+      "N_star": 110,
+      "final_brier": 0.047621,
+      "final_ece": 0.151197,
+      "status": "OK"
+    },
+    "Los Angeles_high": {
+      "city": "Los Angeles",
+      "metric": "high",
+      "total_N_dates": 840,
+      "N_star": 110,
+      "final_brier": 0.059487,
+      "final_ece": 0.189853,
+      "status": "OK"
+    },
+    "Los Angeles_low": {
+      "city": "Los Angeles",
+      "metric": "low",
+      "total_N_dates": 287,
+      "N_star": 144,
+      "final_brier": 0.089946,
+      "final_ece": 0.196375,
+      "status": "OK"
+    },
+    "Lucknow_high": {
+      "city": "Lucknow",
+      "metric": "high",
+      "total_N_dates": 822,
+      "N_star": 161,
+      "final_brier": 0.070067,
+      "final_ece": 0.201613,
+      "status": "OK"
+    },
+    "Lucknow_low": {
+      "city": "Lucknow",
+      "metric": "low",
+      "total_N_dates": 117,
+      "N_star": 113,
+      "final_brier": 0.10707,
+      "final_ece": 0.241115,
+      "status": "OK"
+    },
+    "Madrid_high": {
+      "city": "Madrid",
+      "metric": "high",
+      "total_N_dates": 840,
+      "N_star": 110,
+      "final_brier": 0.052359,
+      "final_ece": 0.190245,
+      "status": "OK"
+    },
+    "Madrid_low": {
+      "city": "Madrid",
+      "metric": "low",
+      "total_N_dates": 608,
+      "N_star": 127,
+      "final_brier": 0.087398,
+      "final_ece": 0.239998,
+      "status": "OK"
+    },
+    "Manila_high": {
+      "city": "Manila",
+      "metric": "high",
+      "total_N_dates": 839,
+      "N_star": 110,
+      "final_brier": 0.017946,
+      "final_ece": 0.054915,
+      "status": "OK"
+    },
+    "Manila_low": {
+      "city": "Manila",
+      "metric": "low",
+      "total_N_dates": 194,
+      "N_star": 156,
+      "final_brier": 0.17428,
+      "final_ece": 0.326858,
+      "status": "OK"
+    },
+    "Mexico City_high": {
+      "city": "Mexico City",
+      "metric": "high",
+      "total_N_dates": 840,
+      "N_star": 110,
+      "final_brier": 0.08377,
+      "final_ece": 0.245788,
+      "status": "OK"
+    },
+    "Mexico City_low": {
+      "city": "Mexico City",
+      "metric": "low",
+      "total_N_dates": 840,
+      "N_star": 110,
+      "final_brier": 0.044028,
+      "final_ece": 0.140251,
+      "status": "OK"
+    },
+    "Miami_high": {
+      "city": "Miami",
+      "metric": "high",
+      "total_N_dates": 838,
+      "N_star": 125,
+      "final_brier": 0.093932,
+      "final_ece": 0.265937,
+      "status": "OK"
+    },
+    "Miami_low": {
+      "city": "Miami",
+      "metric": "low",
+      "total_N_dates": 311,
+      "N_star": 110,
+      "final_brier": 0.011978,
+      "final_ece": 0.030056,
+      "status": "OK"
+    },
+    "Milan_high": {
+      "city": "Milan",
+      "metric": "high",
+      "total_N_dates": 839,
+      "N_star": 110,
+      "final_brier": 0.047194,
+      "final_ece": 0.171521,
+      "status": "OK"
+    },
+    "Milan_low": {
+      "city": "Milan",
+      "metric": "low",
+      "total_N_dates": 426,
+      "N_star": 110,
+      "final_brier": 0.115774,
+      "final_ece": 0.273848,
+      "status": "OK"
+    },
+    "Moscow_high": {
+      "city": "Moscow",
+      "metric": "high",
+      "total_N_dates": 837,
+      "N_star": 110,
+      "final_brier": 0.052476,
+      "final_ece": 0.186556,
+      "status": "OK"
+    },
+    "Moscow_low": {
+      "city": "Moscow",
+      "metric": "low",
+      "total_N_dates": 314,
+      "N_star": 145,
+      "final_brier": 0.133777,
+      "final_ece": 0.280505,
+      "status": "OK"
+    },
+    "Munich_high": {
+      "city": "Munich",
+      "metric": "high",
+      "total_N_dates": 840,
+      "N_star": 110,
+      "final_brier": 0.037541,
+      "final_ece": 0.154031,
+      "status": "OK"
+    },
+    "Munich_low": {
+      "city": "Munich",
+      "metric": "low",
+      "total_N_dates": 415,
+      "N_star": 110,
+      "final_brier": 0.073677,
+      "final_ece": 0.156837,
+      "status": "OK"
+    },
+    "NYC_high": {
+      "city": "NYC",
+      "metric": "high",
+      "total_N_dates": 838,
+      "N_star": 110,
+      "final_brier": 0.032398,
+      "final_ece": 0.146783,
+      "status": "OK"
+    },
+    "NYC_low": {
+      "city": "NYC",
+      "metric": "low",
+      "total_N_dates": 343,
+      "N_star": 110,
+      "final_brier": 0.00591,
+      "final_ece": 0.01946,
+      "status": "OK"
+    },
+    "Panama City_high": {
+      "city": "Panama City",
+      "metric": "high",
+      "total_N_dates": 835,
+      "N_star": 110,
+      "final_brier": 0.024402,
+      "final_ece": 0.07222,
+      "status": "OK"
+    },
+    "Panama City_low": {
+      "city": "Panama City",
+      "metric": "low",
+      "total_N_dates": 256,
+      "N_star": 135,
+      "final_brier": 0.200115,
+      "final_ece": 0.358107,
+      "status": "OK"
+    },
+    "San Francisco_high": {
+      "city": "San Francisco",
+      "metric": "high",
+      "total_N_dates": 840,
+      "N_star": 110,
+      "final_brier": 0.01852,
+      "final_ece": 0.055464,
+      "status": "OK"
+    },
+    "San Francisco_low": {
+      "city": "San Francisco",
+      "metric": "low",
+      "total_N_dates": 116,
+      "N_star": null,
+      "final_brier": 0.190236,
+      "final_ece": 0.327082,
+      "status": "N_STAR_NOT_FOUND"
+    },
+    "Sao Paulo_high": {
+      "city": "Sao Paulo",
+      "metric": "high",
+      "total_N_dates": 840,
+      "N_star": 110,
+      "final_brier": 0.036026,
+      "final_ece": 0.149841,
+      "status": "OK"
+    },
+    "Sao Paulo_low": {
+      "city": "Sao Paulo",
+      "metric": "low",
+      "total_N_dates": 256,
+      "N_star": 150,
+      "final_brier": 0.109144,
+      "final_ece": 0.238543,
+      "status": "OK"
+    },
+    "Seattle_high": {
+      "city": "Seattle",
+      "metric": "high",
+      "total_N_dates": 839,
+      "N_star": 110,
+      "final_brier": 0.064501,
+      "final_ece": 0.21587,
+      "status": "OK"
+    },
+    "Seattle_low": {
+      "city": "Seattle",
+      "metric": "low",
+      "total_N_dates": 97,
+      "N_star": null,
+      "final_brier": 0.144268,
+      "final_ece": 0.265678,
+      "status": "N_STAR_NOT_FOUND"
+    },
+    "Seoul_high": {
+      "city": "Seoul",
+      "metric": "high",
+      "total_N_dates": 839,
+      "N_star": 131,
+      "final_brier": 0.042114,
+      "final_ece": 0.146686,
+      "status": "OK"
+    },
+    "Seoul_low": {
+      "city": "Seoul",
+      "metric": "low",
+      "total_N_dates": 328,
+      "N_star": 110,
+      "final_brier": 0.114775,
+      "final_ece": 0.255668,
+      "status": "OK"
+    },
+    "Shanghai_high": {
+      "city": "Shanghai",
+      "metric": "high",
+      "total_N_dates": 840,
+      "N_star": 110,
+      "final_brier": 0.034621,
+      "final_ece": 0.095979,
+      "status": "OK"
+    },
+    "Shanghai_low": {
+      "city": "Shanghai",
+      "metric": "low",
+      "total_N_dates": 218,
+      "N_star": 131,
+      "final_brier": 0.068325,
+      "final_ece": 0.120727,
+      "status": "OK"
+    },
+    "Shenzhen_high": {
+      "city": "Shenzhen",
+      "metric": "high",
+      "total_N_dates": 839,
+      "N_star": 110,
+      "final_brier": 0.05177,
+      "final_ece": 0.167742,
+      "status": "OK"
+    },
+    "Shenzhen_low": {
+      "city": "Shenzhen",
+      "metric": "low",
+      "total_N_dates": 302,
+      "N_star": 161,
+      "final_brier": 0.113065,
+      "final_ece": 0.251203,
+      "status": "OK"
+    },
+    "Singapore_high": {
+      "city": "Singapore",
+      "metric": "high",
+      "total_N_dates": 840,
+      "N_star": 124,
+      "final_brier": 0.040284,
+      "final_ece": 0.133172,
+      "status": "OK"
+    },
+    "Singapore_low": {
+      "city": "Singapore",
+      "metric": "low",
+      "total_N_dates": 123,
+      "N_star": null,
+      "final_brier": 0.075199,
+      "final_ece": 0.171973,
+      "status": "N_STAR_NOT_FOUND"
+    },
+    "Taipei_high": {
+      "city": "Taipei",
+      "metric": "high",
+      "total_N_dates": 840,
+      "N_star": 110,
+      "final_brier": 0.01854,
+      "final_ece": 0.081807,
+      "status": "OK"
+    },
+    "Taipei_low": {
+      "city": "Taipei",
+      "metric": "low",
+      "total_N_dates": 138,
+      "N_star": 110,
+      "final_brier": 0.046528,
+      "final_ece": 0.080613,
+      "status": "OK"
+    },
+    "Tel Aviv_high": {
+      "city": "Tel Aviv",
+      "metric": "high",
+      "total_N_dates": 840,
+      "N_star": 110,
+      "final_brier": 0.06058,
+      "final_ece": 0.183302,
+      "status": "OK"
+    },
+    "Tel Aviv_low": {
+      "city": "Tel Aviv",
+      "metric": "low",
+      "total_N_dates": 287,
+      "N_star": 145,
+      "final_brier": 0.074491,
+      "final_ece": 0.139816,
+      "status": "OK"
+    },
+    "Tokyo_high": {
+      "city": "Tokyo",
+      "metric": "high",
+      "total_N_dates": 840,
+      "N_star": 110,
+      "final_brier": 0.045423,
+      "final_ece": 0.148677,
+      "status": "OK"
+    },
+    "Tokyo_low": {
+      "city": "Tokyo",
+      "metric": "low",
+      "total_N_dates": 180,
+      "N_star": 130,
+      "final_brier": 0.078061,
+      "final_ece": 0.181726,
+      "status": "OK"
+    },
+    "Toronto_high": {
+      "city": "Toronto",
+      "metric": "high",
+      "total_N_dates": 840,
+      "N_star": 136,
+      "final_brier": 0.029989,
+      "final_ece": 0.114099,
+      "status": "OK"
+    },
+    "Toronto_low": {
+      "city": "Toronto",
+      "metric": "low",
+      "total_N_dates": 283,
+      "N_star": 117,
+      "final_brier": 0.050358,
+      "final_ece": 0.111571,
+      "status": "OK"
+    },
+    "Warsaw_high": {
+      "city": "Warsaw",
+      "metric": "high",
+      "total_N_dates": 839,
+      "N_star": 110,
+      "final_brier": 0.047326,
+      "final_ece": 0.184195,
+      "status": "OK"
+    },
+    "Warsaw_low": {
+      "city": "Warsaw",
+      "metric": "low",
+      "total_N_dates": 399,
+      "N_star": 110,
+      "final_brier": 0.103076,
+      "final_ece": 0.239379,
+      "status": "OK"
+    },
+    "Wellington_high": {
+      "city": "Wellington",
+      "metric": "high",
+      "total_N_dates": 840,
+      "N_star": 110,
+      "final_brier": 0.050445,
+      "final_ece": 0.131517,
+      "status": "OK"
+    },
+    "Wellington_low": {
+      "city": "Wellington",
+      "metric": "low",
+      "total_N_dates": 545,
+      "N_star": 151,
+      "final_brier": 0.093838,
+      "final_ece": 0.204848,
+      "status": "OK"
+    },
+    "Wuhan_high": {
+      "city": "Wuhan",
+      "metric": "high",
+      "total_N_dates": 839,
+      "N_star": 112,
+      "final_brier": 0.037418,
+      "final_ece": 0.148813,
+      "status": "OK"
+    },
+    "Wuhan_low": {
+      "city": "Wuhan",
+      "metric": "low",
+      "total_N_dates": 380,
+      "N_star": 154,
+      "final_brier": 0.088243,
+      "final_ece": 0.219427,
+      "status": "OK"
+    },
+    "Paris_high": {
+      "city": "Paris",
+      "metric": "high",
+      "total_N_dates": 840,
+      "N_star": 110,
+      "final_brier": null,
+      "final_ece": null,
+      "status": "POST_WORKSTREAM_A_DEFAULT",
+      "_note": "Paris re-included 2026-05-03 after workstream A resync. N* set to median across healthy cities pending dedicated calibration recompute."
+    },
+    "Paris_low": {
+      "city": "Paris",
+      "metric": "low",
+      "total_N_dates": 840,
+      "N_star": 113,
+      "final_brier": null,
+      "final_ece": null,
+      "status": "POST_WORKSTREAM_A_DEFAULT",
+      "_note": "Paris re-included 2026-05-03 after workstream A resync. N* set to median across healthy cities pending dedicated calibration recompute."
+    }
+  }
+}
