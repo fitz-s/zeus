@@ -14,6 +14,17 @@ This SCAFFOLD specifies an additive extension to the P1 v_next admission engine 
 
 ---
 
+## §0.A Prerequisites
+
+P2 CANNOT ship until the following conditions are satisfied:
+
+1. **P1 merged to main.** P2 is a strictly additive extension to P1's admission engine. P2's `_check_companion_required` helper, `BindingLayer` field additions, and `companion_skip_logger.py` all assume P1's `admission_engine.py`, `dataclasses.py`, `profile_loader.py`, and `cli_integration_shim.py` are present and passing their own test suite.
+2. **P1's `--v-next-shadow` has reached 95% AGREE.** The AGREE rate is defined in MIGRATION_PATH §Phase 2: ≥ 95% of shadow comparisons over a rolling 7-day window must show AGREE (old-engine and v_next agree on admission outcome). This threshold must be met BEFORE the P2.a window opens, because the AGREE signal is the primary instrument for detecting regressions. If P2 ships before 95% AGREE, any companion-required MISSING_COMPANION emissions will conflate with residual P1 divergence signals, making both metrics uninterpretable.
+3. **P2.a window starts on day 1 after P1 cutover.** "P1 cutover" is defined as the commit that sets `binding.severity_overrides["v_next"] = "soft_block"` in the binding YAML (the P1 promotion commit). The P2.a 14-day shadow window starts the calendar day after that commit lands on main.
+4. **The two shadow windows MUST NOT overlap.** P1's shadow window and P2's shadow window are sequential, not concurrent. Overlapping them would conflate P1 divergence signals with P2 companion signals; the AGREE rate metrics would conflate; false-positive attribution would be impossible. Enforcement: the P2 PR cannot be opened until the P1 promotion commit exists on main.
+
+---
+
 ## §0. Input Inconsistencies Found (binding instruction precedence)
 
 INCONSISTENCY-1: GOAL/REMEDIATION schema vs P1 BindingLayer dataclass shape.
@@ -131,6 +142,21 @@ If the agent supplies env `COMPANION_SKIP_NEEDS_HUMAN_REVIEW=1` (literal string 
 
 ---
 
+## §3.0 Composition-Rule Extension
+
+`composition_rules.apply_composition()` treats every path in `binding.companion_required[profile_id]` as a Rule C1 declared companion of `profile_id`. This is an additive modification to P1's `composition_rules.py` module — strictly more permissive (adds a new admission path; removes none). Acknowledged in §11.
+
+**Why this extension is required.** Without it, the following trap exists:
+
+- `probe2` calls `admit(files=["src/calibration/weighting.py", "docs/reference/zeus_calibration_weighting_authority.md"])` — a source file plus its companion doc.
+- The `files` set spans 3 profiles (e.g., `modify_calibration_weighting`, a documentation profile, and a cross-profile overlap).
+- Universal §4 step 4 triggers `UNION_SCOPE` → Rule C1 rejects the multi-profile packet → a `composition_conflict` SOFT_BLOCK fires from step 4, before the algorithm ever reaches step 6 (`_check_companion_required`).
+- The agent sees `MISSING_COMPANION`, adds the doc, then receives a **different** SOFT_BLOCK (`composition_conflict`) — an unsolvable trap: adding the required companion breaks composition.
+
+**The §3.0 extension closes this trap** by pre-registering every `companion_required` path for `profile_id` as a Rule C1 declared companion before composition runs. The composition engine therefore does not penalize the source+companion-doc combination as a multi-profile violation — it treats the authority doc as a co-declared member of the same profile cohort. The net effect: `probe2`'s `admit()` call flows through composition cleanly and reaches `_check_companion_required` in step 6, where it exits with `ADMIT` (no missing companion). The trap is permanently closed.
+
+---
+
 ## §3. Admission Engine Extension
 
 P1 SCAFFOLD §1.9 declares `admit()` with internal helpers `_run_kernel`, `_resolve_intent`, `_resolve_candidates`, `_apply_composition`, `_apply_companion_loop` (the §9 source-pair shim), `_apply_severity_overrides`, `_assemble_diagnosis`, `_increment_friction_budget`. P2 adds ONE new internal helper:
@@ -205,10 +231,7 @@ def _check_companion_required(
         return []  # All companions present — clean admit.
 
     # Emit one MISSING_COMPANION issue per missing doc, naming both source and doc.
-    source_trigger = next(
-        (f for f in files if any(_file_matches_profile(f, profile_id, binding) for f in [f])),
-        files[0] if files else "<no-source>",
-    )
+    source_trigger = next((f for f in files if profile_id in coverage_map.resolve_candidates([f]).get(f, set())), files[0] if files else "<no-source>")
     return [
         IssueRecord(
             code="missing_companion",
@@ -302,6 +325,16 @@ Field rules:
 - `agent_id` — resolved from env at log-write time per §0 INCONSISTENCY-3 fallback chain (`OMC_AGENT_ID` → `CLAUDE_AGENT_ID` → `CODEX_AGENT_ID` → `"unknown"`).
 - `session_id` — best-effort env read; null acceptable.
 - `justification_env` — optional env `COMPANION_SKIP_JUSTIFICATION` value if set; null otherwise. Allows the agent to record a one-line reason without changing `admit()` signature.
+
+### 5.2.1 Env Var Population Wiring
+
+`agent_id` is resolved from environment at log-write time per §0 INCONSISTENCY-3 fallback chain. For this to produce meaningful audit trail entries rather than 100% `"unknown"`, the three dispatch surfaces must reliably populate the env before any `admit()` call:
+
+- **`OMC_AGENT_ID`** — set by the openclaw gateway when dispatching a task to a workspace agent. P2.1 includes a one-line addition to the gateway dispatch path to export this variable.
+- **`CLAUDE_AGENT_ID`** — set by the Claude Code session wrapper (the shell environment established when a Claude Code session starts). P2.1 includes a one-line update to the session wrapper to export this variable.
+- **`CODEX_AGENT_ID`** — set by the codex CLI invocation hook. P2.1 includes a one-line update to the codex hook to export this variable.
+
+Without this wiring, every skip-token log row will carry `agent_id: "unknown"`, rendering the audit trail useless for attribution. This wiring is a P2.1 delivery prerequisite, not a P2.a prerequisite — P2.a shadow runs are acceptable with partial attribution. The wiring MUST be in place before P2.b cutover so that the weekly digest human-review step can meaningfully attribute skip uses to specific agents.
 
 ### 5.3 Retention
 
@@ -415,7 +448,7 @@ P2 ships in three named sub-phases that mirror the P1/MIGRATION_PATH soft-block-
 
 Cutover criteria (P2.a → P2.b), mirrored from MIGRATION_PATH §Phase 2:
 1. Shadow log shows ≥ 95% AGREE rate between P2.a advisory emissions and the eventual outcome (i.e. the agent did add the companion or use the skip token in ≥ 95% of MISSING_COMPANION cases within 24h).
-2. Zero false positives where a profile incorrectly demanded a companion that was not authoritative (each false positive demands binding-YAML correction before promotion).
+2. Zero false positives where a profile incorrectly demanded a companion that was not authoritative. **Detection mechanism (option a):** any agent that believes a MISSING_COMPANION emission was a false positive sets env marker `COMPANION_FALSE_POSITIVE=1` and re-runs admit(); the skip-token logger records a `false_positive_claim` row (same JSONL, distinct `event_type` field) with `profile`, `source_files`, `agent_id`, and `ts`. These rows surface in the weekly digest under a "Claimed false positives" section; a human reviewer inspects each claim against the binding YAML before the P2.b promotion decision. Non-zero claimed-false-positive count blocks automatic promotion — human sign-off required. (Option b — require human inspection of every MISSING_COMPANION emission — was considered and rejected as operationally unsustainable at scale.)
 3. Skip-token log shows fewer than N_skip_threshold uses per week (default N_skip_threshold = 5 across all profiles; tunable in binding).
 
 Promotion mechanism: edit `binding.severity_overrides["missing_companion"] = "soft_block"` in the binding YAML and re-deploy. No code change. Rollback: revert the YAML line. One-revert-commit reversibility preserved per P1 MIGRATION_PATH discipline.
