@@ -553,6 +553,16 @@ def evaluate(conn: sqlite3.Connection, command_id: str | None = None) -> dict[st
     if fill_observed:
         checks.append(
             Check(
+                "venue_trade_facts_identity_consistent",
+                "PASS" if _facts_identity_consistent(trade_facts, order_id) else "FAIL",
+                (
+                    f"order_id={order_id or 'missing'} trade_fact_order_ids="
+                    f"{sorted({str(fact.get('venue_order_id') or '') for fact in trade_facts if fact.get('venue_order_id')})}"
+                ),
+            )
+        )
+        checks.append(
+            Check(
                 "venue_trade_fact_present",
                 "PASS" if matching_trade_facts else "FAIL",
                 f"live_count={len(matching_trade_facts)} total_count={len(trade_facts)}",

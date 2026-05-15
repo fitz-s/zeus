@@ -194,6 +194,7 @@ def _insert_order_fact(
 def _insert_trade_fact(
     conn: sqlite3.Connection,
     *,
+    fact_id: str = "trade-fact-1",
     command_id: str = "cmd-1",
     order_id: str = "order-1",
     trade_id: str = "trade-1",
@@ -207,10 +208,10 @@ def _insert_trade_fact(
           fact_id, command_id, venue_order_id, trade_id, source, filled_size,
           fill_price, observed_at, state, local_sequence
         )
-        VALUES ('trade-fact-1', ?, ?, ?, ?, '10.00', '0.42',
+        VALUES (?, ?, ?, ?, ?, '10.00', '0.42',
                 '2026-05-15T12:00:04Z', ?, ?)
         """,
-        (command_id, order_id, trade_id, source, state, local_sequence),
+        (fact_id, command_id, order_id, trade_id, source, state, local_sequence),
     )
 
 
@@ -688,6 +689,32 @@ def test_fake_venue_trade_fact_is_not_fill_completion(tmp_path):
     assert result["completion_category"] == "LIVE_ORDER_FILL_MISSING_POSITION_PROOF"
     assert any(
         check["name"] == "venue_trade_fact_present" and check["status"] == "FAIL"
+        for check in result["checks"]
+    )
+
+
+def test_conflicting_trade_facts_under_same_command_are_not_fill_completion(tmp_path):
+    module = _load_module()
+    db = tmp_path / "trades.db"
+    with sqlite3.connect(db) as conn:
+        conn.row_factory = sqlite3.Row
+        _schema(conn)
+        _insert_command(conn, state="FILLED")
+        _insert_submit_requested(conn)
+        _insert_submit_acked(conn)
+        _insert_pre_submit_envelope(conn)
+        _insert_order_fact(conn, state="MATCHED")
+        _insert_trade_fact(conn, fact_id="trade-fact-1", order_id="order-1", trade_id="trade-1")
+        _insert_trade_fact(conn, fact_id="trade-fact-2", order_id="other-order", trade_id="trade-2")
+        _insert_position_fill(conn)
+
+    with module._connect_readonly(db) as conn:
+        result = module.evaluate(conn, "cmd-1")
+
+    assert result["status"] == "FAIL"
+    assert result["completion_category"] == "LIVE_ORDER_FILL_MISSING_POSITION_PROOF"
+    assert any(
+        check["name"] == "venue_trade_facts_identity_consistent" and check["status"] == "FAIL"
         for check in result["checks"]
     )
 
