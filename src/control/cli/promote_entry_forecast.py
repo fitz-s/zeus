@@ -1,5 +1,5 @@
 # Created: 2026-05-12
-# Last reused/audited: 2026-05-12
+# Last reused/audited: 2026-05-15
 # Authority basis: Operator CLI for write_promotion_evidence flow — replaces
 # hand-crafted Python invocations referenced in
 # src/control/entry_forecast_promotion_evidence_io.py:129 (write_promotion_evidence).
@@ -24,8 +24,8 @@ Invocable both as a module and as a script::
     python -m src.control.cli.promote_entry_forecast SUBCOMMAND [args]
     python src/control/cli/promote_entry_forecast.py SUBCOMMAND [args]
 
-Constraint: opens ``state/zeus-world.db`` in read-only URI mode for status
-snapshot building. Never opens it writable. Never execs ``launchctl`` or
+Constraint: opens ``state/zeus-forecasts.db`` in read-only URI mode for status
+snapshot building by default. Never opens it writable. Never execs ``launchctl`` or
 ``arm_live_mode.sh``.
 """
 
@@ -67,6 +67,7 @@ from src.control.entry_forecast_rollout import (  # noqa: E402
     evaluate_entry_forecast_rollout_gate,
 )
 from src.data.live_entry_status import build_live_entry_forecast_status  # noqa: E402
+from src.state.db import ZEUS_FORECASTS_DB_PATH  # noqa: E402
 
 ROLLOUT_MODE_ENV = "ZEUS_ENTRY_FORECAST_ROLLOUT_MODE"
 LAUNCHD_LABEL = "com.zeus.live-trading"
@@ -103,7 +104,7 @@ def _open_db_readonly(db_path: Path) -> Iterator[sqlite3.Connection]:
 
 
 def _default_db_path() -> Path:
-    return state_path("zeus-world.db")
+    return ZEUS_FORECASTS_DB_PATH
 
 
 # ---------------------------------------------------------------------------

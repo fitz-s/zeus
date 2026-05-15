@@ -23,6 +23,7 @@ import sqlite3
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
+import time
 
 
 import pytest
@@ -468,6 +469,42 @@ def test_thread_safety_max_workers_2(tmp_path, monkeypatch):
     assert result["status"] == "download_failed", (
         f"Expected download_failed when any step fails; got {result['status']!r}"
     )
+
+
+def test_hung_step_times_out_without_waiting_for_entire_grid(tmp_path, monkeypatch):
+    """A hung fetch fails its batch promptly instead of scaling timeout by step count."""
+    import src.data.ecmwf_open_data as mod
+
+    def fetch_impl(*, cycle_date, cycle_hour, param, step, output_dir, mirrors):
+        if step == 6:
+            time.sleep(0.25)
+            return ("OK", output_dir / f".step{step:03d}_{param}.grib2")
+        f = output_dir / f".step{step:03d}_{param}.grib2"
+        _make_fake_grib(f)
+        return ("OK", f)
+
+    def runner(args, *, label: str, timeout: int) -> dict:
+        return {"label": label, "ok": True, "returncode": 0, "stdout_tail": "", "stderr_tail": ""}
+
+    monkeypatch.setattr(mod, "FIFTY_ONE_ROOT", tmp_path / "51_source_data")
+    monkeypatch.setattr(mod, "STEP_HOURS", [3, 6, 9])
+    monkeypatch.setattr(mod, "_PER_STEP_TIMEOUT_SECONDS", 0.02)
+
+    started = time.monotonic()
+    result = mod.collect_open_ens_cycle(
+        track="mx2t6_high",
+        run_date=RUN_DATE,
+        run_hour=RUN_HOUR,
+        skip_extract=True,
+        conn=_make_conn(),
+        _fetch_impl=fetch_impl,
+        _runner=runner,
+        now_utc=NOW_UTC,
+    )
+    elapsed = time.monotonic() - started
+
+    assert result["status"] == "download_failed"
+    assert elapsed < 0.15, f"hung step was not failed promptly; elapsed={elapsed:.3f}s"
 
 
 # ---------------------------------------------------------------------------

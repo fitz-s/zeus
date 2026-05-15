@@ -1,5 +1,5 @@
 # Created: prior; restructured 2026-05-01
-# Last reused or audited: 2026-05-14
+# Last reused or audited: 2026-05-15
 # Authority basis: architect D1 (ECMWF throttle), AGENTS.md money path
 #   Prior: PLAN docs/operations/task_2026-05-11_ecmwf_download_replacement/PLAN.md
 #   ECMWF Open Data has ~6-8h latency (vs. TIGGE's 48h public embargo) so it
@@ -56,7 +56,7 @@ import hashlib
 import tempfile
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, wait
 from contextlib import nullcontext
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -975,35 +975,44 @@ def collect_open_ens_cycle(
         output_dir = output_path.parent
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        # Dispatch one future per step.  _DOWNLOAD_MAX_WORKERS=5 is a module
+        # Dispatch bounded batches.  _DOWNLOAD_MAX_WORKERS is a module
         # constant; no call-site kwarg (antibody: makes per-step parallelism
         # category structurally module-owned, not caller-configured).
         # Single-writer antibody: fetch_fn does HTTP only; no SQLite writes.
+        # Do not submit the entire step grid at once: a single hung SDK fetch
+        # must fail its batch after _PER_STEP_TIMEOUT_SECONDS instead of making
+        # as_completed wait timeout * len(tasks) before live readiness can move.
         tasks = [(s, cfg["open_data_param"]) for s in STEP_HOURS]
         results: dict[int, tuple[str, Any]] = {}
-        with ThreadPoolExecutor(max_workers=_DOWNLOAD_MAX_WORKERS) as ex:
-            fut2step = {
-                ex.submit(
-                    fetch_fn,
-                    cycle_date=cycle_date,
-                    cycle_hour=cycle_hour,
-                    param=p,
-                    step=s,
-                    output_dir=output_dir,
-                    mirrors=_DOWNLOAD_SOURCES,
-                ): s
-                for s, p in tasks
-            }
-            for fut in as_completed(fut2step, timeout=_PER_STEP_TIMEOUT_SECONDS * len(tasks)):
-                step = fut2step[fut]
-                try:
-                    results[step] = fut.result(timeout=_PER_STEP_TIMEOUT_SECONDS)
-                except Exception as exc:  # noqa: BLE001
-                    results[step] = ("FAILED", f"UNCAUGHT_{type(exc).__name__}: {exc}")
-            # Mark any steps not reached (stalled futures) as FAILED.
-            for fut, step in fut2step.items():
-                if step not in results:
+        for offset in range(0, len(tasks), _DOWNLOAD_MAX_WORKERS):
+            batch = tasks[offset:offset + _DOWNLOAD_MAX_WORKERS]
+            ex = ThreadPoolExecutor(max_workers=len(batch))
+            try:
+                fut2step = {
+                    ex.submit(
+                        fetch_fn,
+                        cycle_date=cycle_date,
+                        cycle_hour=cycle_hour,
+                        param=p,
+                        step=s,
+                        output_dir=output_dir,
+                        mirrors=_DOWNLOAD_SOURCES,
+                    ): s
+                    for s, p in batch
+                }
+                done, not_done = wait(fut2step, timeout=_PER_STEP_TIMEOUT_SECONDS)
+                for fut in done:
+                    step = fut2step[fut]
+                    try:
+                        results[step] = fut.result()
+                    except Exception as exc:  # noqa: BLE001
+                        results[step] = ("FAILED", f"UNCAUGHT_{type(exc).__name__}: {exc}")
+                for fut in not_done:
+                    step = fut2step[fut]
+                    fut.cancel()
                     results[step] = ("FAILED", "STEP_TIMEOUT")
+            finally:
+                ex.shutdown(wait=False, cancel_futures=True)
 
         ok_steps       = sorted(s for s, (st, _) in results.items() if st == "OK")
         released_404   = sorted(s for s, (st, _) in results.items() if st == "NOT_RELEASED")

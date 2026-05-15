@@ -136,6 +136,37 @@ def test_propose_dry_run_does_not_write(
     assert not isolated_evidence_path.exists()
 
 
+def test_propose_defaults_to_forecasts_db(
+    isolated_evidence_path: Path,
+    fake_cfg: EntryForecastConfig,
+    fake_status_snapshot: LiveEntryForecastStatus,
+    fake_db: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(cli, "ZEUS_FORECASTS_DB_PATH", fake_db)
+    g1 = tmp_path / "g1_evidence.txt"
+    g1.write_text("ok")
+
+    rc = cli.main(
+        [
+            "propose",
+            "--operator-approval-id",
+            "OPS-2026-05-12-default-db",
+            "--g1-evidence-id",
+            str(g1),
+            "--canary-success-evidence-id",
+            "CANARY-OK",
+        ]
+    )
+
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "DRY-RUN" in out
+    assert not isolated_evidence_path.exists()
+
+
 def test_propose_commit_writes_atomically(
     isolated_evidence_path: Path,
     fake_cfg: EntryForecastConfig,
