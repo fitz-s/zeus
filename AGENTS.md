@@ -44,6 +44,15 @@ The truth path is:
 
 `chain/CLOB facts -> canonical DB/events -> projections/status -> derived reports`
 
+**K1 DB split (2026-05-11):** Zeus operates two canonical SQLite files.
+`state/zeus-world.db` holds `WORLD_CLASS` tables (markets, positions, lifecycle).
+`state/zeus-forecasts.db` holds `FORECAST_CLASS` tables (observations, settlements,
+calibration_pairs_v2, ensemble_snapshots_v2, source_run, market_events_v2).
+Table ownership is machine-checked via `architecture/db_table_ownership.yaml`
+(loader: `src/state/table_registry.py`). No write transaction may span both DBs
+via independent connections (INV-37); the sanctioned cross-DB write path is
+`get_forecasts_connection_with_world()` (ATTACH+SAVEPOINT).
+
 Zeus is dual-track. High and low temperature families share local-calendar-day
 geometry and do not share physical quantity, observation field, Day0 causality,
 or calibration family.
@@ -418,7 +427,8 @@ Registry routes: `src/**` → `architecture/source_rationale.yaml`,
 `scripts/*` → `architecture/script_manifest.yaml`,
 `tests/test_*.py` → `architecture/test_topology.yaml`,
 `docs/reference/*` → `docs/reference/AGENTS.md` and
-`architecture/reference_replacement.yaml`.
+`architecture/reference_replacement.yaml`,
+DB table ownership → `architecture/db_table_ownership.yaml` (canonical schema-ownership registry; loader: `src/state/table_registry.py`; enforced by `tests/state/test_table_registry_coherence.py`).
 
 Check:
 `python3 scripts/topology_doctor.py --map-maintenance --map-maintenance-mode advisory|precommit|closeout`

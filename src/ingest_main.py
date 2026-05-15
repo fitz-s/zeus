@@ -220,16 +220,16 @@ def _k2_daily_obs_tick():
     """
     from src.data.dual_run_lock import acquire_lock
     from src.data.daily_obs_append import daily_tick
-    from src.state.db import get_world_connection
+    # K1 P0: observations is forecasts-class BUT _write_atom_with_coverage also
+    # writes data_coverage (world-class) in the same SAVEPOINT.  Use the
+    # ATTACH helper so bare table names resolve to the right physical DB.
+    from src.state.db import get_forecasts_connection_with_world
     with acquire_lock("daily_obs") as acquired:
         if not acquired:
             logger.info("ingest k2_daily_obs_tick skipped_lock_held")
             return
-        conn = get_world_connection(write_class="bulk")
-        try:
+        with get_forecasts_connection_with_world(write_class="bulk") as conn:
             result = daily_tick(conn)
-        finally:
-            conn.close()
     logger.info("K2 daily_obs_tick: %s", result)
 
 
@@ -304,19 +304,21 @@ def _k2_hole_scanner_tick():
     """
     from src.data.dual_run_lock import acquire_lock
     from src.data.hole_scanner import HoleScanner
-    from src.state.db import get_world_connection
+    from src.state.db import get_world_connection, get_forecasts_connection
     with acquire_lock("hole_scanner") as acquired:
         if not acquired:
             logger.info("ingest k2_hole_scanner_tick skipped_lock_held")
             return
         conn = get_world_connection(write_class="bulk")
+        forecasts_conn = get_forecasts_connection()
         try:
-            scanner = HoleScanner(conn)
+            scanner = HoleScanner(conn, forecasts_conn=forecasts_conn)
             results = scanner.scan_all()
             for r in results:
                 logger.info("K2 hole_scanner %s: %s", r.data_table.value, r.as_dict())
         finally:
             conn.close()
+            forecasts_conn.close()
 
 
 # Staleness threshold for boot-time force-fetch.  A once-per-day cron
@@ -349,7 +351,11 @@ def _k2_startup_catch_up():
     from src.data.forecasts_append import catch_up_missing as catch_up_forecasts
     from src.data.forecasts_append import daily_tick as forecasts_daily_tick
     from src.data.solar_append import daily_tick as solar_daily_tick
-    from src.state.db import get_world_connection
+    # K1 P0: observations is forecasts-class BUT catch_up_obs also writes
+    # data_coverage (world-class) in the same SAVEPOINT.  Use the ATTACH helper
+    # so bare table names resolve to the right physical DB.
+    # Phase 2 staleness probes (forecasts table, data_coverage) stay on world conn.
+    from src.state.db import get_world_connection, get_forecasts_connection_with_world  # K1 P0
 
     conn = get_world_connection(write_class="bulk")
     try:
@@ -377,7 +383,8 @@ def _k2_startup_catch_up():
 
         # ---- Phase 1: hole filler (existing semantics, unchanged) -----------
         logger.info("K2 startup catch-up: observations")
-        logger.info("  %s", catch_up_obs(conn, days_back=30))
+        with get_forecasts_connection_with_world(write_class="bulk") as obs_conn:
+            logger.info("  %s", catch_up_obs(obs_conn, days_back=30))
         logger.info("K2 startup catch-up: observation_instants")
         logger.info("  %s", catch_up_hourly(conn, days_back=30))
         logger.info("K2 startup catch-up: solar_daily")

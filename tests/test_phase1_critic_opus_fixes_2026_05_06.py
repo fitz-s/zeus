@@ -29,7 +29,7 @@ from src.calibration.manager import _resolve_pin_for_bucket, get_calibrator
 from src.calibration import manager as mgr_module
 from src.calibration.store import save_platt_model_v2, load_platt_model_v2
 from src.config import City, entry_forecast_config
-from src.contracts.world_view.calibration import get_active_platt_model
+from src.calibration.store import get_active_platt_model
 from src.contracts.ensemble_snapshot_provenance import (
     ECMWF_OPENDATA_HIGH_DATA_VERSION,
     ECMWF_OPENDATA_LOW_DATA_VERSION,

@@ -385,33 +385,30 @@ def _indexes_on(conn: sqlite3.Connection) -> set[str]:
 def test_relA_attach_partial_world_still_produces_critical_indexes(
     tmp_path, monkeypatch
 ):
-    """Cross-module: init_schema_forecasts run against a world.db that LACKS
-    the v2 covering indexes (e.g. partial migration / init_schema_world_only)
-    must still produce the canonical v2 index inventory on the forecasts conn.
+    """Cross-module: init_schema_forecasts via ATTACH path (world.db exists) must
+    still produce the canonical v2 index inventory on the forecasts conn.
 
-    This is the failing scenario described in PLAN §1 — ATTACH path copies
-    sqlite_master which on a thinned world.db omits 2 critical indexes.
-    Option A's _ensure_v2_forecast_indexes() closes the bug category.
+    Post-P2 DDL refactor (2026-05-14): world.db no longer holds v2 forecast-class
+    tables (init_schema uses forecast_tables=False). The ATTACH path copies only
+    world-class tables from world.db; _ensure_v2_forecast_indexes() runs
+    unconditionally after both ATTACH and static-fallback branches to guarantee
+    v2 index coverage regardless of branch taken.
+
+    This test verifies _ensure_v2_forecast_indexes() runs correctly under the
+    ATTACH branch (world.db exists but lacks v2 forecast tables).
     """
     from src.state import db as state_db
     from src.state.db import init_schema, init_schema_forecasts
 
-    # Build a world.db with full schema, then DROP the 2 critical v2 indexes
-    # to simulate the partial-migration / init_schema_world_only scenario.
-    world_partial = tmp_path / "world_partial.db"
-    w = sqlite3.connect(world_partial)
+    # Build a world.db with world-class tables only (post-P2: no v2 forecast tables)
+    world_db = tmp_path / "world_only.db"
+    w = sqlite3.connect(world_db)
     init_schema(w)
-    for idx_name in (
-        "idx_ensemble_snapshots_v2_lookup",
-        "idx_calibration_pairs_v2_city_date_metric",
-    ):
-        w.execute(f"DROP INDEX IF EXISTS {idx_name}")
     w.commit()
     w.close()
 
-    # Point ZEUS_WORLD_DB_PATH at the partial DB so init_schema_forecasts
-    # selects the ATTACH branch (world_partial exists on disk).
-    monkeypatch.setattr(state_db, "ZEUS_WORLD_DB_PATH", world_partial)
+    # Point ZEUS_WORLD_DB_PATH at the world-only DB so ATTACH branch is taken.
+    monkeypatch.setattr(state_db, "ZEUS_WORLD_DB_PATH", world_db)
 
     fcast = sqlite3.connect(":memory:")
     init_schema_forecasts(fcast)
@@ -425,10 +422,10 @@ def test_relA_attach_partial_world_still_produces_critical_indexes(
     missing = required - have
     fcast.close()
     assert not missing, (
-        f"REL-A: ATTACH-from-partial-world.db dropped critical v2 indexes: "
-        f"{sorted(missing)}. _ensure_v2_forecast_indexes() must run "
-        "unconditionally so the ATTACH branch reaches index-set equivalence "
-        "with the static-fallback branch."
+        f"REL-A: ATTACH branch + _ensure_v2_forecast_indexes() failed to produce "
+        f"critical v2 indexes: {sorted(missing)}. _ensure_v2_forecast_indexes() "
+        "must run unconditionally post-ATTACH so v2 indexes are always present "
+        "on the forecasts conn regardless of world.db v2 table presence."
     )
 
 
@@ -439,23 +436,22 @@ def test_relA_attach_and_static_branches_produce_same_v2_index_superset(
     index set produced by BOTH the ATTACH branch (world.db exists) and the
     static-fallback branch (world.db absent). Asymmetry between branches is
     the exact relationship defect Option A closes.
+
+    Post-P2 DDL refactor (2026-05-14): world.db no longer holds v2 forecast-class
+    tables. ATTACH branch copies only world-class tables; _ensure_v2_forecast_indexes
+    runs unconditionally after both branches to guarantee v2 index equivalence.
     """
     from src.state import db as state_db
     from src.state.db import init_schema, init_schema_forecasts
 
-    # Branch 1: ATTACH path over a partial world.db.
-    world_partial = tmp_path / "world_partial_b.db"
-    w = sqlite3.connect(world_partial)
+    # Branch 1: ATTACH path over a world-class-only world.db (post-P2 normal case).
+    world_db = tmp_path / "world_only_b.db"
+    w = sqlite3.connect(world_db)
     init_schema(w)
-    for idx_name in (
-        "idx_ensemble_snapshots_v2_lookup",
-        "idx_calibration_pairs_v2_city_date_metric",
-    ):
-        w.execute(f"DROP INDEX IF EXISTS {idx_name}")
     w.commit()
     w.close()
 
-    monkeypatch.setattr(state_db, "ZEUS_WORLD_DB_PATH", world_partial)
+    monkeypatch.setattr(state_db, "ZEUS_WORLD_DB_PATH", world_db)
     c_attach = sqlite3.connect(":memory:")
     init_schema_forecasts(c_attach)
     c_attach.commit()

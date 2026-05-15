@@ -718,3 +718,31 @@ invariants:
       backfill", a structural decision per Fitz S1.
     basis: docs/operations/task_2026-05-11_ingest_starvation_refactor/PLAN.md S9
     added: 2026-05-11
+
+  - id: INV-37
+    zones: [K1_db_split, K2_runtime]
+    statement: >
+      No Zeus write transaction may span more than one physical DB via independent
+      connections. Cross-DB writes via SQLite ATTACH + SAVEPOINT atomicity are
+      the ONE sanctioned exception: the ATTACH-mediated SAVEPOINT spans both
+      physical files in a single logical transaction (e.g.,
+      get_forecasts_connection_with_world writing forecasts.observations AND
+      world.data_coverage). Two-independent-connection writes that pretend to be
+      atomic are structurally forbidden.
+    why: >
+      K1 DB split (2026-05-11) created two physical SQLite files for Zeus
+      (zeus-world.db and zeus-forecasts.db). Without this invariant, callers can
+      silently open two connections and commit partial writes, leaving the DBs
+      inconsistent on crash or exception. The ATTACH+SAVEPOINT carve-out is the
+      structural solution: a single connection with ATTACH spans both files in
+      one atomic transaction, preserving fail-safe semantics across the split.
+    enforced_by:
+      tests:
+        - tests/state/test_daily_obs_cross_db_atomicity.py::TestCrossDbSavepointAtomicity::test_savepoint_rollback_undoes_both_dbs
+        - tests/state/test_table_registry_coherence.py::TestRegistryCoherence::test_a8_no_cross_db_write_transaction_in_src
+      negative_constraints: []
+    capability_tags: [K1_db_split]
+    relationship_tests:
+      - tests/state/test_daily_obs_cross_db_atomicity.py
+    basis: docs/operations/task_2026-05-14_k1_followups/PLAN.md §0.3 + §3 A7
+    added: 2026-05-14

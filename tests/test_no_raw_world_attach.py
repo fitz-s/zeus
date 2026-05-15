@@ -85,7 +85,7 @@ class TestNoRawWorldAttach:
         """src/engine|strategy|signal|execution must not contain 'ATTACH DATABASE'."""
         violations = self._violations_for_pattern("ATTACH DATABASE")
         assert not violations, (
-            "ATTACH DATABASE found in trading-lane modules (forbidden — use world_view accessors):\n"
+            "ATTACH DATABASE found in trading-lane modules (forbidden — use ConnectionTriple typed accessors):\n"
             + "\n".join(violations)
         )
 
@@ -100,7 +100,7 @@ class TestNoRawWorldAttach:
             "get_trade_connection_with_world found outside allowlist in trading-lane modules:\n"
             + "\n".join(violations)
             + "\n\nMigrate callers to src.state.connection_pair.get_connection_pair() "
-            "and world_view accessors. Phase 3 will delete the legacy seam."
+            "and ConnectionTriple typed accessors. Phase 3 deleted the world_view/ layer."
         )
 
     def test_allowlisted_files_exist(self):
@@ -112,12 +112,19 @@ class TestNoRawWorldAttach:
                 "update ALLOWLIST in test_no_raw_world_attach.py"
             )
 
-    def test_world_view_module_exists(self):
-        """src/contracts/world_view/ must exist as the approved read path."""
+    def test_world_view_module_retired(self):
+        """src/contracts/world_view/ must NOT exist — retired in P3 (K1 followups, 2026-05-14).
+
+        world_view/ was a Phase 2 accessor layer. In P3 the layer was deleted;
+        callers migrated to ConnectionTriple typed accessors and
+        src.calibration.store.get_active_platt_model. This test prevents
+        accidental re-introduction of the directory.
+        """
         world_view = SRC / "contracts" / "world_view"
-        assert world_view.is_dir(), "src/contracts/world_view/ must exist"
-        init = world_view / "__init__.py"
-        assert init.exists(), "src/contracts/world_view/__init__.py must exist"
+        assert not world_view.exists(), (
+            "src/contracts/world_view/ found — this directory was retired in P3 "
+            "(K1 followups, 2026-05-14). Do not re-introduce it."
+        )
 
     def test_connection_pair_module_exists(self):
         """src/state/connection_pair.py must exist (Phase 2 seam replacement)."""

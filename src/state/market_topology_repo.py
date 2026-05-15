@@ -11,6 +11,8 @@ import sqlite3
 from datetime import date, datetime
 from typing import Any, Iterator
 
+from src.state.connection_pair import WorldConnection
+
 TOPOLOGY_STATUSES = frozenset({"CURRENT", "STALE", "EMPTY_FALLBACK", "MISMATCH", "UNKNOWN"})
 SOURCE_CONTRACT_STATUSES = frozenset({"MATCH", "MISMATCH", "UNKNOWN", "QUARANTINED"})
 AUTHORITY_STATUSES = frozenset({"VERIFIED", "STALE", "EMPTY_FALLBACK", "UNKNOWN"})
@@ -38,7 +40,7 @@ def _scope_key(*parts: object) -> str:
 
 
 @contextlib.contextmanager
-def _savepoint(conn: sqlite3.Connection, name: str) -> Iterator[None]:
+def _savepoint(conn: WorldConnection, name: str) -> Iterator[None]:
     conn.execute(f"SAVEPOINT {name}")
     try:
         yield
@@ -50,7 +52,7 @@ def _savepoint(conn: sqlite3.Connection, name: str) -> Iterator[None]:
 
 
 def write_market_topology_state(
-    conn: sqlite3.Connection,
+    conn: WorldConnection,
     *,
     topology_id: str,
     market_family: str,
@@ -154,13 +156,13 @@ def write_market_topology_state(
         )
 
 
-def get_market_topology_state(conn: sqlite3.Connection, topology_id: str) -> dict[str, Any] | None:
+def get_market_topology_state(conn: WorldConnection, topology_id: str) -> dict[str, Any] | None:
     row = conn.execute("SELECT * FROM market_topology_state WHERE topology_id = ?", (topology_id,)).fetchone()
     return dict(row) if row else None
 
 
 def get_current_market_topology(
-    conn: sqlite3.Connection,
+    conn: WorldConnection,
     *,
     market_family: str,
     condition_id: str,
