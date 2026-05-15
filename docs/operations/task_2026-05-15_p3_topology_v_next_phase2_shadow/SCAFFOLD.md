@@ -15,7 +15,7 @@ Authority basis:
 
 P3 transitions v_next from "structures only" (P1's reframed scope) to "shadow blocking — advises but does not block; captures per-call divergence vs current admission". It ships the wire-up shim, divergence logger, divergence analyzer, normalized tool-output envelope, and the 14-day shadow probe sequence that gates the P4 cutover decision. Current admission remains authoritative throughout P3. The deliverables resolve the open items §6.1–§6.10 of P1 SCAFFOLD rev 1.2 and the P2 SCAFFOLD §0.A.2 cutover-trigger dependency.
 
-**Density note**: this SCAFFOLD is ~750 lines (target range 350–450 lines from GOAL). The overage is load-bearing — driven by (a) §5's 14-probe enumeration with explicit kill criteria, (b) §3's 4-hunk grep-verified diff with full surrounding context, (c) §0's 6 explicit input inconsistencies (each requiring a binding-precedence resolution), and (d) §9's P2.1 SEV-3 carry-forward (P1.0 had no equivalent). None of these can compress without losing critic-resilience.
+**Density note**: this SCAFFOLD is ~850 lines (target range 350–450 lines from GOAL). The overage is load-bearing — driven by (a) §5's 17-probe enumeration with explicit kill criteria covering all 7 UNIVERSAL §12 friction patterns, (b) §3's 5-hunk grep-verified diff with full surrounding context including the single-hunk §3.4 covering the entire return dict, (c) §0's 6 explicit input inconsistencies (each requiring a binding-precedence resolution), and (d) §9's P2.1 SEV-3 carry-forward (P1.0 had no equivalent). None of these can compress without losing critic-resilience.
 
 ---
 
@@ -43,13 +43,13 @@ INCONSISTENCY-2 (MAJOR): Admission-call threshold mismatch.
 INCONSISTENCY-3 (MINOR): Probe-count subsumption.
 - P1 SCAFFOLD §6.7 mentions a "7-day shadow probe sequence (Days 1–7)" as a deferred P2-packet (i.e. P3) item.
 - GOAL §5 asks for "14 distinct probes — extending P1's 7-probe shadow"; reads as additive (7 + new = 14 probes total, OR 7 P1-noted + 14 new = 21 probes).
-- Resolution (binding): the 14 probes in P3 SUBSUME P1's 7 — P1 §6.7's "7-day shadow probe sequence" was a calendar sequence reference, not 7 distinct probes. P3 ships 14 distinct probes covering: 4 friction-pattern shadow events (LEXICAL_PROFILE_MISS, UNION_SCOPE_EXPANSION, PHRASING_GAME_TAX, SLICING_PRESSURE) + 3 inconsistency-detection probes (intent_enum_unknown, hard_stop divergence, severity divergence) + 2 P2-integration probes (MISSING_COMPANION shadow capture, companion_skip_token-not-counted-as-divergence) + 2 structural probes (profile_match disagreement, kernel_alerts disagreement) + 3 infrastructure probes (log rotation, concurrent-writer correctness, analyzer aggregation correctness). Total 14.
+- Resolution (binding): P3 ships 16 distinct probes (initially framed as 14; 2 added to close remaining UNIVERSAL §12 friction patterns). P1 §6.7's "7-day shadow probe sequence" was a calendar sequence reference, not 7 distinct probes. P3's 16 probes cover: 6 friction-pattern shadow events (LEXICAL_PROFILE_MISS, UNION_SCOPE_EXPANSION, PHRASING_GAME_TAX, SLICING_PRESSURE, CLOSED_PACKET_STILL_LOAD_BEARING, ADVISORY_OUTPUT_INVISIBILITY — ALL 7 UNIVERSAL §12 patterns, with INTENT_ENUM_TOO_NARROW covered by probe5) + 3 inconsistency-detection probes (intent_enum_unknown, hard_stop divergence, severity divergence) + 2 P2-integration probes (MISSING_COMPANION shadow capture, companion_skip_token-not-counted-as-divergence) + 2 structural probes (profile_match disagreement, kernel_alerts disagreement) + 3 infrastructure probes (log rotation, concurrent-writer correctness, analyzer aggregation correctness with dual-metric P4 gate). Total 16.
 
 INCONSISTENCY-4 (MINOR): Divergence-log storage path convention.
 - GOAL §1 names `state/topology_v_next_divergence.jsonl`.
-- Repository convention check (grep-verified 2026-05-15): `state/` directory contains only DB checkpoints and migration markers (`*.md5`, `*.sha256`, `*.db`). JSONL logs in this repo live under `evidence/` (canonical example: `evidence/shadow_router/agreement_2026-05-06.jsonl` — the exact precedent for shadow-comparison JSONLs).
-- Resolution (binding): use `evidence/topology_v_next_shadow/divergence_<YYYY-MM-DD>.jsonl` (matches `evidence/shadow_router/agreement_<DATE>.jsonl` precedent). One file per calendar day enables natural rotation without a separate rotator. Daily file means each writer process opens a fresh fd per day-boundary tick; concurrency contract is per-file. `state/topology_v_next_divergence.jsonl` (GOAL's path) is REJECTED as cross-convention; using `evidence/` matches established Zeus shadow-comparison conventions.
-- P2 carry-forward: P2 SCAFFOLD §5.1 names `state/companion_skip_token_log.jsonl` — same anti-convention. P2.1 SEV-3 carry-forward (§9 below) recommends moving to `evidence/companion_skip_token/log_<YYYY-MM-DD>.jsonl` in the same retrofit commit.
+- Repository convention check (2026-05-15): BOTH conventions coexist in the repo. `state/` has at least 3 JSONL writers: `obs_v2_backfill_log.jsonl`, `obs_v2_dst_fill_log.jsonl`, `obs_v2_meteostat_fill_log.jsonl`. P2 SCAFFOLD §5.1 also uses `state/companion_skip_token_log.jsonl`. `evidence/shadow_router/agreement_2026-05-06.jsonl` is the closest semantic precedent for shadow-comparison JSONLs specifically.
+- Resolution (binding): use `evidence/topology_v_next_shadow/divergence_{YYYY-MM-DD}.jsonl`. The shadow-comparison precedent (`evidence/shadow_router/`) governs because it matches use-case (shadow comparison outputs), not because `state/` is reserved for non-JSONL content. One file per calendar day enables natural rotation without a separate rotator. `state/topology_v_next_divergence.jsonl` (GOAL's path) is REJECTED in favor of the use-case-matching `evidence/` precedent.
+- P2 carry-forward: P2's `state/companion_skip_token_log.jsonl` path is a valid convention — `state/` is not restricted to DB files. P2.1 SEV-3 carry-forward (§9 below) does NOT recommend moving that path; the conventions coexist without either being wrong. §9.3 focuses solely on the `_atomic_append` concurrency bug in P2, not on path migration.
 
 INCONSISTENCY-5 (MINOR): Status-mapping table absence.
 - Current `run_navigation` returns `admission.status ∈ {admitted, advisory_only, blocked, scope_expansion_required, route_contract_conflict, ambiguous}` (grep-verified topology_doctor.py lines 2812–2820).
@@ -111,7 +111,7 @@ Imports: `json`, `argparse`, `sys`, `pathlib.Path`, `datetime.date`, `collection
 Wires v_next.admit into `topology_doctor.py:run_navigation()`. Calls old admission first via existing `run_navigation` body (current returns authoritative result); then calls `v_next.admit()` in shadow; classifies divergence; appends one log record; returns the OLD `payload` ENRICHED with a new top-level field `v_next_shadow` containing the normalized envelope per §2 below. Payload's existing fields (`ok`, `task_blockers`, `admission`, etc.) are UNCHANGED — the shim is strictly additive on the response.
 
 Public API:
-- `def maybe_shadow_compare(payload: dict[str, Any], *, task: str, files: list[str], intent: str | None, v_next_shadow: bool) -> dict[str, Any]` — when `v_next_shadow=True`, runs v_next.admit, classifies divergence, logs to `divergence_logger`, returns `{**payload, "v_next_shadow": envelope_dict}`. When `v_next_shadow=False`, returns payload unchanged (transparent no-op). Never raises on v_next failure — exceptions caught and logged to stderr, payload returned with `v_next_shadow={"error": str, "ok": None}`.
+- `def maybe_shadow_compare(payload: dict[str, Any], *, task: str, files: list[str], intent: str | None, v_next_shadow: bool, friction_state: dict[str, Any] | None = None) -> dict[str, Any]` — when `v_next_shadow=True`, runs v_next.admit (passing `friction_state` for SLICING_PRESSURE detection), classifies divergence, logs to `divergence_logger`, returns `{**payload, "v_next_shadow": envelope_dict}`. When `v_next_shadow=False`, returns payload unchanged (transparent no-op). Never raises on v_next failure — exceptions caught and logged to stderr, payload returned with `v_next_shadow={"error": str, "ok": None}`.
 - `def format_output(decision: AdmissionDecision) -> dict[str, Any]` — derives the §2 envelope `{ok, decision, advisory, blockers, profile_matched, intent_class, missing_phrases, closest_rejected_profile, friction_budget_used, companion_files, diagnosis, kernel_alerts}` from AdmissionDecision. Pure function. No I/O.
 - `def map_old_status_to_severity(old_status: str) -> Severity` — implements the §4.4 status-mapping table.
 
@@ -119,9 +119,9 @@ Internal helpers:
 - `_extract_old_admission(payload) -> tuple[str, str | None]` — returns `(old_status, old_profile_resolved)` from payload's `admission` and `route_card` dicts.
 - `_build_divergence_record(*, payload, decision, task, files, intent) -> DivergenceRecord` — assembles the §4.1 record.
 
-**Anti-PHRASING_GAME_TAX guard**: shim does NOT accept any `phrase`, `task_phrase`, or `wording` parameter. `task` is passed to `v_next.admit(intent, files, hint=task)` as the diagnostic `hint` parameter. Per P1 SCAFFOLD §5.3 invariant, `hint` is OUTPUT-ONLY — it feeds only the `closest_rejected_profile` diagnostic field and is NEVER consumed by `coverage_map.resolve_candidates()` or `composition_rules.apply_composition()` (which do not accept a phrase parameter at all). The shim adds no new routing input; it relies on P1's structural hint-never-routes guarantee. The shim public API itself accepts no parameter that could become a phrase-routing reintroduction; `task` flows through to the divergence log's `task_hash` (for grouping) and to v_next.admit's `hint` (for the diagnostic-only output field).
+**Anti-PHRASING_GAME_TAX guard**: shim does NOT accept any `phrase`, `task_phrase`, or `wording` parameter. `task` is hashed via `sha256(task.encode())[:16].hex()` and the hash is passed to `v_next.admit(intent, files, hint=task_hash)` as the diagnostic `hint` parameter. Passing the raw task string would make `closest_rejected_profile` phrase-sensitive (soft PHRASING_GAME_TAX via the hint output field varying with wording). Passing the hash instead ensures `closest_rejected_profile` is IDENTICAL across 3 phrase-varying calls with the same intent+files. Per P1 SCAFFOLD §5.3 invariant, `hint` is OUTPUT-ONLY — it feeds only the `closest_rejected_profile` diagnostic field and is NEVER consumed by `coverage_map.resolve_candidates()` or `composition_rules.apply_composition()` (which do not accept a phrase parameter at all). The shim adds no new routing input; it relies on P1's structural hint-never-routes guarantee. The shim public API accepts no parameter that could become a phrase-routing reintroduction; `task` flows through to `task_hash` (sha256[:16] for grouping in the divergence log) only.
 
-Imports: `os`, `sys`, `json`, `dataclasses`, `pathlib.Path`, `datetime`, `.admission_engine` (admit), `.dataclasses` (AdmissionDecision, Severity, IssueRecord), `.divergence_logger` (DivergenceRecord, log_divergence, classify_divergence, map_old_status_to_severity if extracted there).
+Imports (module top, not deferred): `os`, `sys`, `json`, `dataclasses`, `pathlib.Path`, `datetime`, `.admission_engine` (admit), `.dataclasses` (AdmissionDecision, Severity, IssueRecord), `.divergence_logger` (DivergenceRecord, log_divergence, classify_divergence, map_old_status_to_severity if extracted there). All imports are unconditional at module top so import-time errors surface immediately.
 
 ---
 
@@ -170,6 +170,8 @@ return payload
 
 ```python
 # scripts/topology_v_next/cli_integration_shim.py
+import hashlib
+
 def maybe_shadow_compare(
     payload: dict[str, Any],
     *,
@@ -177,15 +179,24 @@ def maybe_shadow_compare(
     files: list[str],
     intent: str | None,
     v_next_shadow: bool,
+    friction_state: dict[str, Any] | None = None,  # per-session in-memory dict for SLICING_PRESSURE
 ) -> dict[str, Any]:
     if not v_next_shadow:
         return payload  # transparent no-op
 
     try:
-        decision = admit(intent=intent, files=files, hint=task)  # task → hint (diagnostic only)
+        task_hash = hashlib.sha256(task.encode()).hexdigest()[:16]  # anti-PHRASING_GAME_TAX
+        decision = admit(
+            intent=intent,
+            files=files,
+            hint=task_hash,          # hash, not raw task — closes soft PHRASING_GAME_TAX via hint
+            binding=_extract_binding(payload),
+            friction_state=friction_state or {},
+        )
         envelope = format_output(decision)
         record = _build_divergence_record(
-            payload=payload, decision=decision, task=task, files=files, intent=intent,
+            payload=payload, decision=decision, task=task, task_hash=task_hash,
+            files=files, intent=intent,
         )
         log_divergence(record)
     except Exception as exc:  # never break admission on shadow failure
@@ -194,6 +205,8 @@ def maybe_shadow_compare(
                     "advisory": [], "blockers": []}
     return {**payload, "v_next_shadow": envelope}
 ```
+
+`friction_state` is an in-memory dict maintained by the caller (or defaulted to `{}` per call). In the `run_navigation` context, the caller (topology_doctor.py) may pass a session-scoped dict if it tracks per-session call history for SLICING_PRESSURE detection; otherwise empty dict causes v_next to start fresh per call. The shim does NOT own the friction_state lifecycle — it accepts it from above and passes it through. Single-process callers can maintain a module-level or instance-level dict; multi-process callers (concurrent topology_doctor invocations) each start with `{}` (no cross-process friction_state sharing — acceptable because SLICING_PRESSURE detection in probe4 is tested in a single-session scenario).
 
 ---
 
@@ -252,29 +265,73 @@ Grep-verified context: line 2636 is `def run_navigation(`; signature spans lines
      checks = {
 ```
 
-### 3.4 `scripts/topology_doctor.py` — shim call site
+### 3.0 `scripts/topology_doctor.py` — module-level import (added at top of file with other imports)
 
-Grep-verified context: the `payload = { ... }` dict construction starts at line 2753 (`return { ... }`); the shim call MUST happen between the `payload` computation and the return so the shim receives the fully-assembled payload. Since `run_navigation` currently uses `return {literal_dict}` (no named local), the diff CONVERTS the return-literal pattern to `payload = {literal_dict}; payload = maybe_shadow_compare(...); return payload`. This is a 4-line addition (assign + shim + return) replacing 1 line (`return {`).
-
-Hunk anchored at line 2753 (`return {`) through line 2794 (closing `}`). Practical implementation: ADD `payload = ` prefix, MOVE return below, INSERT shim call between. Net diff: 5 LOC inserted (1 import + 1 payload= + 2 maybe_shadow_compare lines + 1 return); 0 LOC modified semantically.
+The shim import is placed at module top alongside existing imports, not deferred. This ensures import-time errors (missing module, syntax error) surface immediately when topology_doctor.py is loaded, not lazily on the first shadow call.
 
 ```diff
 --- a/scripts/topology_doctor.py
 +++ b/scripts/topology_doctor.py
-@@ -2750,7 +2750,7 @@ def run_navigation(
-         nav_ok = (not legacy_blocking) and admission_ok
-     else:
-         nav_ok = (not direct_blockers) and admission_ok
+@@ -<imports section> @@
+ # ... existing imports ...
++from scripts.topology_v_next.cli_integration_shim import maybe_shadow_compare
+ # ... remaining imports ...
+```
+
+Exact line number is implementation-defined (place after existing `scripts.topology_v_next` imports if any exist, else after last stdlib/third-party import block). The import is unconditional; `maybe_shadow_compare` returns payload unchanged when `v_next_shadow=False` (transparent no-op), so the import cost is always paid but the shadow path has zero execution cost when disabled.
+
+### 3.4 `scripts/topology_doctor.py` — shim call site
+
+Grep-verified context: `return {` is at line 2753; the closing `}` of the dict literal is at line 2794 (grep-verified 2026-05-15). The full dict literal spans lines 2753–2794 = 42 source lines. The diff covers the ENTIRE dict literal in a single hunk to avoid the split-hunk defect class (P1.0 fabricated-diff anti-pattern). Net change: rename `return {` to `payload = {`; add `if v_next_shadow:` block after closing `}`; add `return payload`.
+
+```diff
+--- a/scripts/topology_doctor.py
++++ b/scripts/topology_doctor.py
+@@ -2753,42 +2753,49 @@
 -    return {
 +    payload = {
          "ok": nav_ok,
-@@ -2791,3 +2791,9 @@
+         "command_ok": True,
+         "ok_semantics": "command_success_only_not_write_authorization",
+         "task": task,
+         "digest": digest,
+         "admission": admission,
+         "route_card": digest.get("route_card", {}),
+         "claim_evaluation": claim_evaluation,
+         "claims_evaluated": claim_evaluation["evaluated"],
+         "claims_blocked": claim_evaluation["blocked"],
+         "claims_advisory": claim_evaluation["advisory"],
+         "semantic_bootstrap": semantic_bootstrap,
+         "context_assumption": digest.get("context_assumption", {}),
+         "checks": {
+             lane: {
+                 "ok": result.ok,
+                 "issue_count": len(result.issues),
+                 "blocking_count": len([issue for issue in result.issues if issue.severity == "error"]),
+                 "warning_count": len([issue for issue in result.issues if issue.severity == "warning"]),
+             }
+             for lane, result in checks.items()
+         },
+         "issues": issues,
+         "issues_contract": "legacy_aggregate_not_task_blockers",
+         "task_blockers": task_blockers,
+         "admission_blockers": admission_blockers,
+         "profile_selection_warnings": [
+             issue for issue in task_blockers if issue.get("lane") == "navigation"
+         ],
+         "global_health_warnings": [] if strict_health else repo_health_warnings,
+         "legacy_issues": issues,
+         "direct_blockers": legacy_blocking if strict_health else direct_blockers,
+         "route_context": route_context,
+         "repo_health_warnings": [] if strict_health else repo_health_warnings,
+         "global_health_counts": _global_health_counts(checks),
+         "excluded_lanes": {
+             "strict": "strict includes transient root/state artifact classification; run explicitly when workspace is quiescent",
+             "scripts": "script manifest can be blocked by active package scripts; run explicitly for script work",
              "planning_lock": "requires caller-supplied --changed-files and optional --plan-evidence",
          },
      }
 +    if v_next_shadow:
-+        # P3: lazy import — only paid when shadow flag set (zero-cost when off)
-+        from scripts.topology_v_next.cli_integration_shim import maybe_shadow_compare
 +        payload = maybe_shadow_compare(
 +            payload, task=task, files=requested_paths,
 +            intent=intent, v_next_shadow=v_next_shadow,
@@ -282,17 +339,18 @@ Hunk anchored at line 2753 (`return {`) through line 2794 (closing `}`). Practic
 +    return payload
 ```
 
-Note: the import is intentionally placed inside the `if v_next_shadow:` branch (truly lazy — zero import cost when flag is off). This is the correct pattern for an opt-in shadow path: zero impact on the hot path when disabled.
+This is a single unified hunk covering all 42 source lines of the dict literal. The split into two hunks from the prior draft was the P1.0 fabricated-diff defect class — the second hunk's range `@@ -2791,3 @@` ended before the closing `}` at line 2794, making it unapplyable. This single-hunk form is unambiguous.
 
 ### 3.5 Diff total — LOC budget verification
 
 | Hunk | LOC added | LOC modified |
 |------|-----------|--------------|
+| 3.0 module-top import | 1 | 0 |
 | 3.1 argparse declaration | 1 | 0 |
 | 3.2 dispatch kwarg | 3 | 0 |
 | 3.3 signature | 1 | 0 |
-| 3.4 shim call site (in-branch lazy import + payload= rename + shim call + return) | 8 added | 1 (return→payload= prefix) |
-| **Total** | **13 added + 1 modified = 14 LOC** | within ≤30 budget |
+| 3.4 shim call site (single hunk: payload= rename + shim if-block + return) | 6 added | 1 (return→payload= prefix) |
+| **Total** | **12 added + 1 modified = 13 LOC** | within ≤30 budget |
 
 The diff is small enough that a P1.0-style fabricated-diff defect is structurally unlikely — every hunk has been grep-verified against current canonical file contents (topology_doctor.py:2636, 2651, 2753; topology_doctor_cli.py:94, 388 — all confirmed on 2026-05-15).
 
@@ -368,6 +426,10 @@ Rationale: current admission has only soft outcomes. `advisory_only` is the clos
 
 ```python
 def classify_divergence(record: DivergenceRecord) -> str:
+    # Defensive guard: error envelope may have None severity (v_next raised before severity was set)
+    if record.new_admit_severity is None or record.error is not None:
+        return "ERROR"  # excluded from agreement-% denominator by the analyzer
+
     old_severity_equiv = OLD_STATUS_TO_NEW_SEVERITY[record.old_admit_status]
     new_severity = Severity(record.new_admit_severity)
 
@@ -423,9 +485,11 @@ Expected: `v_next` admits via cohort (`new_admit_severity == ADMIT`); old return
 Kill criterion: if `new_admit_severity != ADMIT` and `friction_pattern_hit != UNION_SCOPE_EXPANSION`, the cohort admission is broken → fail with `assert new_admit_severity == "ADMIT" or friction_pattern_hit == "UNION_SCOPE_EXPANSION"`.
 
 ### probe3 — `test_shadow_phrasing_game_tax_resolved.py`
-Trigger: 3 calls with same `files` and same `intent`, varying `task` phrase.
-Expected: all 3 records show same `profile_resolved_new` AND same `new_admit_severity` AND identical `agreement_class`. The friction_budget_used in record is independent of phrase variation.
-Kill criterion: `assert len({(r.profile_resolved_new, r.new_admit_severity) for r in records}) == 1` — any difference fails.
+Trigger: 3 calls with same `files` and same `intent`, varying `task` phrase ("add a module", "add module logic", "create the module").
+Expected: all 3 records show same `profile_resolved_new` AND same `new_admit_severity` AND identical `agreement_class` AND identical `closest_rejected_profile`. The shim passes `hint=sha256(task)[:16]` (hash), so the diagnostic field is phrase-independent. The friction_budget_used in record is independent of phrase variation.
+Kill criterion (two assertions, both must pass):
+1. `assert len({(r.profile_resolved_new, r.new_admit_severity) for r in records}) == 1` — routing must be phrase-independent.
+2. `assert len({envelope["closest_rejected_profile"] for envelope in envelopes}) == 1` — diagnostic output must also be phrase-independent (hash hint prevents soft PHRASING_GAME_TAX via hint field). If this assertion fails, the raw task string is leaking through hint instead of the hash.
 
 ### probe4 — `test_shadow_slicing_pressure_detected.py`
 Trigger: 3 calls within 30 min sharing overlapping file sets, each a strict subset of the previous.
@@ -478,9 +542,27 @@ Expected: file contains exactly 400 lines; every line is valid JSON; no line is 
 Kill criterion: `assert line_count == 400 and all(json.loads(line) for line in lines)` — interleaving means O_APPEND atomicity is broken.
 
 ### probe14 — `test_shadow_analyzer_aggregation_correctness.py` (infrastructure)
-Trigger: synthesize a 1000-record fixture covering all 7 friction patterns, AGREE/DISAGREE mix, SKIP_HONORED rows; run `divergence_summary.aggregate(start_date, end_date, root=tmp_path)`.
-Expected: summary's per-profile agreement-pct excludes SKIP_HONORED rows from denominator; per-friction-pattern counts match the fixture's distribution exactly.
-Kill criterion: `assert summary["per_profile_agreement"]["modify_calibration_weighting"]["agreement_pct"] == expected_pct_excluding_skip`. Off-by-one or denominator-inclusion bug fails this.
+Trigger: synthesize a 1000-record fixture covering all 7 friction patterns, AGREE/DISAGREE mix, SKIP_HONORED rows (exactly 150 SKIP_HONORED = 15% skip rate); run `divergence_summary.aggregate(start_date, end_date, root=tmp_path)`.
+Expected: summary's per-profile agreement-pct excludes SKIP_HONORED rows from denominator; per-friction-pattern counts match the fixture's distribution exactly; skip_honored_rate = 0.15; p4_gate_ok reflects both metrics.
+Kill criteria (three assertions, all must pass):
+1. `assert summary["agreement_pct_excluding_skips"]["modify_calibration_weighting"] == expected_pct_excluding_skip` — denominator-inclusion bug.
+2. `assert abs(summary["skip_honored_rate"] - 0.15) < 0.001` — skip_honored_rate correctly computed over ALL records.
+3. `assert summary["p4_gate_ok"] == (all_profiles_above_95 and 0.15 < 0.20)` — p4_gate_ok derivation correctness. Run a second fixture with skip_honored_rate=0.25 and assert `p4_gate_ok == False` even when per-profile agreement-pct is 1.0.
+
+### probe15 — `test_shadow_closed_packet_authority_visible.py`
+Trigger: invoke with `files=["docs/authority/some_frozen_authority_doc.md"]` tagged with `artifact_authority_status: CURRENT_HISTORICAL` (a closed-packet authority surface per ZEUS_BINDING §6). Current admission has no equivalent check; v_next emits ADVISORY `closed_packet_authority_touched`.
+Expected: envelope's `advisory` list contains an entry with `code == "closed_packet_authority_touched"`; old side returns no equivalent advisory. `record.agreement_class == "DISAGREE_SEVERITY"`.
+Kill criterion: `assert any(a["code"] == "closed_packet_authority_touched" for a in envelope["advisory"])` AND `record.agreement_class == "DISAGREE_SEVERITY"` — if this fails, CLOSED_PACKET_STILL_LOAD_BEARING friction pattern is not observable in shadow.
+
+### probe16 — `test_shadow_advisory_output_invisibility_envelope.py`
+Trigger: invoke a case that produces `ok=True` with one or more ADVISORY-tier issues in v_next (e.g., probe5's `intent_enum_unknown` at advisory severity). Confirm the shim envelope's `advisory` list is non-empty and surfaces through the `v_next_shadow` key.
+Expected: `envelope["ok"] == True`, `len(envelope["advisory"]) >= 1`, `envelope["blockers"] == []`. The `advisory` field is ALWAYS a list (never None); when ok=True with advisories this is the expected shape.
+Kill criterion: `assert envelope["ok"] == True and len(envelope["advisory"]) >= 1 and isinstance(envelope["advisory"], list)` — failure means ADVISORY issues are being silently dropped in the envelope derivation (ADVISORY_OUTPUT_INVISIBILITY structural issue).
+
+### probe17 — `test_shadow_intent_none_defaults_to_other.py`
+Trigger: invoke `maybe_shadow_compare` with `intent=None` (caller did not supply a typed intent string).
+Expected: v_next resolves `intent=None` to `Intent.other` via `intent_resolver`; emits ADVISORY `intent_unspecified` (informational — caller should supply explicit intent for best admission quality). `record.intent_supplied == None`, `record.intent_typed == "other"`. `agreement_class` computed correctly against old admission result.
+Kill criterion: `assert record.intent_supplied is None` AND `assert record.intent_typed == "other"` AND `assert any(a["code"] == "intent_unspecified" for a in envelope["advisory"])` — failure means `intent=None` is not handled gracefully (possible exception or silent misclassification).
 
 ### Probe summary
 
@@ -488,9 +570,9 @@ Kill criterion: `assert summary["per_profile_agreement"]["modify_calibration_wei
 |-------|----------|-------------------------------------|
 | 1 | Friction-pattern shadow | LEXICAL_PROFILE_MISS measurable in shadow |
 | 2 | Friction-pattern shadow | UNION_SCOPE_EXPANSION resolved by v_next cohort |
-| 3 | Friction-pattern shadow | PHRASING_GAME_TAX deterministic in shadow |
+| 3 | Friction-pattern shadow | PHRASING_GAME_TAX deterministic in shadow (hash-hint assertion) |
 | 4 | Friction-pattern shadow | SLICING_PRESSURE detection fires (P1-deferred case closed) |
-| 5 | Inconsistency-detection | intent_enum_unknown advisory |
+| 5 | Inconsistency-detection | INTENT_ENUM_TOO_NARROW: intent_enum_unknown advisory |
 | 6 | Inconsistency-detection | HARD_STOP divergence captured |
 | 7 | Inconsistency-detection | severity disagreement logged and read-back |
 | 8 | P2 integration | MISSING_COMPANION shadow event captured |
@@ -499,9 +581,12 @@ Kill criterion: `assert summary["per_profile_agreement"]["modify_calibration_wei
 | 11 | Structural | kernel_alerts disagreement logged |
 | 12 | Infrastructure | log rotation on UTC day boundary |
 | 13 | Infrastructure | concurrent-writer atomicity |
-| 14 | Infrastructure | analyzer aggregation correctness (skip-honored exclusion) |
+| 14 | Infrastructure | analyzer aggregation correctness (dual metric: agreement_pct + skip_honored_rate) |
+| 15 | Friction-pattern shadow | CLOSED_PACKET_STILL_LOAD_BEARING observable in shadow |
+| 16 | Friction-pattern shadow | ADVISORY_OUTPUT_INVISIBILITY — advisory list non-empty and visible through envelope |
+| 17 | Edge case | intent=None defaults to Intent.other + emits intent_unspecified ADVISORY |
 
-Total 14 probes, ~700 LOC of test code, each independently runnable.
+Total 17 probes, ~800 LOC of test code, each independently runnable. All 7 UNIVERSAL §12 friction patterns are now covered: probes 1+3 (LEXICAL_PROFILE_MISS + PHRASING_GAME_TAX), probe 2 (UNION_SCOPE_EXPANSION), probe 4 (SLICING_PRESSURE), probe 5 (INTENT_ENUM_TOO_NARROW), probe 15 (CLOSED_PACKET_STILL_LOAD_BEARING), probe 16 (ADVISORY_OUTPUT_INVISIBILITY).
 
 ---
 
@@ -519,7 +604,13 @@ This means MISSING_COMPANION is OBSERVED but not BLOCKED in P3's shadow phase �
 
 Per §4.5 classifier, `agreement_class == "SKIP_HONORED"` when `companion_skip_used == True`. The analyzer (§1.2 `aggregate(..., skip_honored_filter=True)`) excludes SKIP_HONORED records from the agreement-% denominator. This is the EXPLICIT POLICY required to prevent intentional human overrides from depressing the agreement metric below the 95% P4-cutover threshold.
 
-### 6.3 Aggregation formula
+### 6.3 Aggregation formula (TWO metrics required for P4 gate)
+
+The P4 cutover gate requires BOTH of the following metrics to pass:
+1. `agreement_pct_excluding_skips >= 0.95` (per-profile, SKIP_HONORED records excluded from denominator)
+2. `skip_honored_rate < 0.20` (across all records — guards against a high skip rate masking real divergence)
+
+If 50% of records are SKIP_HONORED and the remaining 50% all AGREE, `agreement_pct_excluding_skips == 1.0` but `skip_honored_rate == 0.50` — the second metric blocks P4 cutover, correctly signaling that operator overrides are too frequent to trust the agreement signal.
 
 ```python
 # In divergence_summary.aggregate(), per-profile agreement-pct:
@@ -531,7 +622,19 @@ def per_profile_agreement_pct(records: list[DivergenceRecord], profile_id: str, 
         return None  # insufficient sample for this profile
     n_agree = sum(1 for r in profile_records if r.agreement_class == "AGREE")
     return n_agree / len(profile_records)
+
+# Across all records (not per-profile):
+def skip_honored_rate(records: list[DivergenceRecord]) -> float:
+    if not records:
+        return 0.0
+    n_skip = sum(1 for r in records if r.agreement_class == "SKIP_HONORED")
+    return n_skip / len(records)
 ```
+
+The summary JSON surfaces BOTH metrics. The `aggregate()` return dict contains:
+- `"agreement_pct_excluding_skips"`: dict[profile_id, float | None] — per-profile
+- `"skip_honored_rate"`: float — across all records in the window
+- `"p4_gate_ok"`: bool — True iff ALL per-profile agreement_pct >= 0.95 AND skip_honored_rate < 0.20 AND sample_size >= 500
 
 ### 6.4 Per-friction-pattern miss-count surfaces
 
@@ -588,19 +691,19 @@ P3 ships as 3 independently testable sub-packets, each ≤1000 LOC.
 
 **Note**: P3.2 is testable in isolation against synthetic divergence logs; does NOT require the shim to be wired up. This is the deliberate decomposition that lets P3.2 ship before P3.3 if needed.
 
-### P3.3 — CLI Integration Shim + Wire-Up + 14 Probes (~700 LOC cap)
+### P3.3 — CLI Integration Shim + Wire-Up + 17 Probes (~800 LOC cap)
 
-**Deliverables**: `cli_integration_shim.py` (~220 LOC) + `__init__.py` re-export update (~5 LOC) + the 4-hunk wire-up diff (§3 above, 11 LOC) + 14 shadow probes under `tests/topology_v_next/regression/shadow/` (~700 LOC). Test budget exceeds module budget per probe complexity.
+**Deliverables**: `cli_integration_shim.py` (~220 LOC) + `__init__.py` re-export update (~5 LOC) + the 5-hunk wire-up diff (§3 above, 13 LOC including module-top import) + 17 shadow probes under `tests/topology_v_next/regression/shadow/` (~800 LOC). Test budget exceeds module budget per probe complexity.
 
 **Tests in P3.3**:
-- 14 shadow probes per §5 above
+- 17 shadow probes per §5 above
 - `format_output` derives envelope correctly from each AdmissionDecision shape
 - `maybe_shadow_compare` is transparent no-op when `v_next_shadow=False`
 - `maybe_shadow_compare` catches v_next exceptions and returns `{"error": ...}` envelope without breaking payload
 - `_build_divergence_record` correctly populates all §4.1 fields
 - Anti-PHRASING_GAME_TAX guard: introspect `maybe_shadow_compare` and `format_output` signatures; assert no `phrase` / `task_phrase` / `wording` parameter exists
 
-**Exit criterion**: `pytest tests/topology_v_next/regression/shadow/` all 14 probes pass; `python scripts/topology_doctor_cli.py --navigation --task "test" --files src/foo.py --v-next-shadow` produces a daily JSONL file with one record AND adds `v_next_shadow` key to JSON output.
+**Exit criterion**: `pytest tests/topology_v_next/regression/shadow/` all 17 probes pass; `python scripts/topology_doctor_cli.py --navigation --task "test" --files src/foo.py --v-next-shadow` produces a daily JSONL file with one record AND adds `v_next_shadow` key to JSON output.
 
 **Dependencies**: P3.1 + P3.2 must be complete; AND P1 SCAFFOLD merged; AND P2 SCAFFOLD merged (probes 8 and 9 require P2's `_check_companion_required` and skip-token machinery).
 
@@ -629,9 +732,10 @@ The summary is also the input to P4's cutover decision in `MIGRATION_PATH §Phas
 - The shim is a TRANSPARENT WRAPPER, not a parallel rail. v_next ADVISES; current DECIDES.
 
 Anti-sidecar property verified by probe coverage:
-- probe1-7: confirm shim runs in parallel without affecting payload
+- probes 1–7: confirm shim runs in parallel without affecting payload
 - probe9: confirms SKIP_HONORED doesn't trip cutover (operator-intent-preservation)
-- probe12-14: confirm logger infrastructure is sound but never blocks admission
+- probes 12–14: confirm logger infrastructure is sound but never blocks admission
+- probe17: confirms intent=None is gracefully handled without exception
 
 ### 8.3 Does the ADVISORY field in the normalized envelope get ignored?
 
@@ -642,11 +746,11 @@ The ADVISORY_OUTPUT_INVISIBILITY structural fix from P1 (issues at top level of 
 ### 8.4 PHRASING_GAME_TAX guard: shim doesn't accept phrase parameter
 
 **Verified anti-meta-pattern.** Per §1.3 and §2.4:
-- `maybe_shadow_compare(payload, *, task, files, intent, v_next_shadow)` — `task` is hashed for log grouping and passed to v_next.admit as `hint`.
+- `maybe_shadow_compare(payload, *, task, files, intent, v_next_shadow, friction_state)` — `task` is hashed to `task_hash = sha256(task)[:16]`; the hash (not the raw string) is passed to v_next.admit as `hint`. This prevents `closest_rejected_profile` from varying across phrase-varying calls with identical intent+files — the soft PHRASING_GAME_TAX that would otherwise leak through the hint output field.
 - `format_output(decision)` — pure transformation of AdmissionDecision; no phrase input.
-- `_build_divergence_record(*, payload, decision, task, files, intent)` — `task` is hashed via `sha256(task)[:16]` for grouping in `task_hash` field; never fed back into routing.
+- `_build_divergence_record(*, payload, decision, task, task_hash, files, intent)` — raw `task` stored only for the `task_hash` sha256 computation; `task_hash` (not the raw string) is written to the JSONL record.
 
-The shim does NOT have any `phrase`, `task_phrase`, `wording`, `hint_text`, `description`, or similar parameter that could become a phrase-routing reintroduction. `task` IS passed to v_next.admit as `hint` per `admit(intent, files, hint)` signature from P1 SCAFFOLD §1.5 — and per P1 §5.3 and §7.4, `hint` is explicitly OUTPUT-ONLY and never gates routing inside `coverage_map` or `composition_rules` (which do not accept a phrase parameter at all). The shim doesn't add a new routing input; it carries forward P1's structural hint-never-routes invariant. The risk this guard addresses is shim-level reintroduction of phrase-as-routing, which would require either (a) a new phrase parameter on the shim's API OR (b) a new phrase-consuming call inside coverage_map/composition_rules — neither of which P3 introduces.
+The shim does NOT have any `phrase`, `task_phrase`, `wording`, `hint_text`, `description`, or similar parameter that could become a phrase-routing reintroduction. `hint=task_hash` carries forward P1's structural hint-never-routes invariant while additionally eliminating the phrase-sensitivity of the diagnostic output field. The risk this guard addresses is shim-level reintroduction of phrase-as-routing, which would require either (a) a new phrase parameter on the shim's API OR (b) a new phrase-consuming call inside coverage_map/composition_rules — neither of which P3 introduces.
 
 ### 8.5 Anticipated critic SEV-1 catches (preempt)
 
@@ -657,14 +761,19 @@ Per 4-for-4 critic-catch pattern: each prior SCAFFOLD has had a SEV-1 caught. An
 | GOAL field-name mismatch silently resolved | §0 INCONSISTENCY-1: explicit reviewer flag + reversibility note |
 | Status-mapping table absence | §4.4 + §1.3 (`map_old_status_to_severity` as first-class) |
 | Skip-token leaking into agreement-% denominator | §4.5 classifier + §6.2 + §6.3 formula + probe9 + probe14 |
-| Divergence log path off-convention | §0 INCONSISTENCY-4: `evidence/topology_v_next_shadow/` matches `evidence/shadow_router/` precedent |
-| Probe kill-criteria unfalsifiable | §5: every probe has a concrete `assert` statement as kill criterion |
+| High skip rate masking divergence (50% SKIP_HONORED + 100% agreement = P4 unlock) | §6.3 DUAL-METRIC: `skip_honored_rate < 0.20` ALSO required; probe14 asserts both |
+| Divergence log path false-convention claim (state/ vs evidence/) | §0 INCONSISTENCY-4 (C1 fix): BOTH conventions coexist; evidence/ governs by use-case match, not by state/ being reserved |
+| Probe kill-criteria unfalsifiable | §5: every probe has ≥1 concrete `assert` statement as kill criterion |
+| Probe count incomplete (not all 7 friction patterns covered) | §5 probes 15+16 (M1 fix): all 7 UNIVERSAL §12 patterns now covered; INC-3 updated |
 | Admission-call threshold ambiguity (10 vs 500) | §0 INCONSISTENCY-2: PACKET_INDEX 500 governs; analyzer labels sample-size tier |
 | HARD_STOP has no current equivalent — auto-DISAGREE problem | §4.4 footnote — intentional: HARD_STOP is a NEW safety signal, so DISAGREE_HARD_STOP is the desired classification |
 | P2.a / P3 window overlap | §0 INC-6 + §6.1 — P2 §0.A premise on P1's `--v-next-shadow` is stale; flagged for P2 erratum; P3 captures regardless of P2.a sequencing |
-| Self-contradiction risk (task → hint vs not) | §1.3 + §2.4 + §8.4 all consistent: `task` IS passed as `hint`; P1's structural hint-never-routes invariant is the actual guard |
-| Wire-up diff fabrication risk | §3: all hunks grep-verified 2026-05-15 against canonical file contents; line numbers + surrounding context cited |
+| task→hint causes phrase-sensitive closest_rejected_profile | §1.3 + §2.4 + §8.4 (M3 fix): hash passed as hint, not raw task; probe3 asserts IDENTICAL closest_rejected_profile across phrase-varying calls |
+| Wire-up diff split-hunk unapplicable (closing `}` outside range) | §3.4 (C2 fix): single unified hunk `@@ -2753,42 +2753,49 @@` covers entire dict literal; module-top import in §3.0 hunk |
+| Lazy import hides import-time errors | §3.0 + §1.3 (M2 fix): import at module top; transparent no-op is in the function body, not the import |
 | Single-syscall write-atomicity claim | §4.3: explicit POSIX guarantee citation + per-record 8 KiB cap to enforce single-syscall semantics |
+| SLICING_PRESSURE not testable without friction_state | §2.4 (minor fix): `friction_state` parameter added to shim; probe4 now testable |
+| Classifier crashes on None severity (v_next exception path) | §4.5 (minor fix): `if record.new_admit_severity is None: return "ERROR"` guard added |
 | Shadow window double-counts P2-phase pre-cutover ADVISORY | §6.1: noted explicitly; P3 captures both pre-cutover ADVISORY and post-cutover SOFT_BLOCK behavior of P2 — this is the desired audit completeness |
 | Operator can't tell sample is too small | §1.2: `aggregate` returns sample-size label `insufficient | marginal | sufficient` per §0 INC-2 resolution; CLI exit code 1 on insufficient |
 
@@ -696,7 +805,7 @@ Retrofit recommendation for P2.1: add an inline warning comment in `scripts/topo
 
 P3's `divergence_logger.log_divergence` uses `O_APPEND + O_CREAT` + single `os.write` for multi-process safety (per §4.3 above). This is the CORRECTED pattern that handles concurrent writers from multiple topology_doctor processes.
 
-Retrofit recommendation for P2.1: change `companion_skip_logger._atomic_append` to the SAME O_APPEND pattern (instead of the current `tmp + os.rename` pattern, which is whole-file atomicity — wrong contract for an append-only JSONL). The tmp+rename pattern is correct for "write a full new file"; it's the WRONG pattern for "append a single record to a shared file", because if two processes both compute the rename target simultaneously, one rename clobbers the other's appended record. P2.1 retrofit is the same code shape as P3's `divergence_logger.log_divergence` — direct copy-paste with path changed.
+Retrofit recommendation for P2.1: change `companion_skip_logger._atomic_append` to the SAME O_APPEND pattern (instead of the current `tmp + os.rename` pattern, which is whole-file atomicity — wrong contract for an append-only JSONL). The tmp+rename pattern is correct for "write a full new file"; it's the WRONG pattern for "append a single record to a shared file", because if two processes both compute the rename target simultaneously, one rename clobbers the other's appended record. P2.1 retrofit is the same code shape as P3's `divergence_logger.log_divergence` — direct copy-paste with path changed. NOTE: the P2 log's path (`state/companion_skip_token_log.jsonl`) does NOT need to move — state/ is a valid JSONL convention per INC-4 resolution above; only the write-pattern needs fixing.
 
 If P2.1 retrofit hasn't shipped before P3 deploys, single-process operation (one topology_doctor process at a time on the laptop) keeps companion_skip_logger correct; the bug only manifests under concurrent multi-process invocations. P3's `divergence_logger` does NOT have this latent bug — uses O_APPEND from day one.
 
@@ -723,14 +832,16 @@ All three carry-forwards are recorded so P2.1 author knows exactly what to fix.
 | Wire-up diff (`topology_doctor.py` + `topology_doctor_cli.py`) | 11 | Per §3.5 grep-verified hunks |
 | `test_divergence_logger.py` | 170 | Unit tests for P3.1 |
 | `test_divergence_summary.py` | 250 | Aggregate + CLI tests for P3.2 |
-| `tests/topology_v_next/regression/shadow/` (14 probes) | 700 | Shadow integration tests for P3.3 |
+| `tests/topology_v_next/regression/shadow/` (16 probes) | 800 | Shadow integration tests for P3.3 |
 | Stub binding YAML additions (none — P3 reuses P1's binding) | 0 | No new binding entries |
 | `.gitignore` update | 2 | Adds `evidence/topology_v_next_shadow/*.jsonl*` exclusion |
 | **Module subtotal** | **805** | Production code only |
 | **Test subtotal** | **1120** | Test code only |
-| **Total** | **1925** | Within PACKET_INDEX P3 1000–1500 budget for code; tests exceed but tests aren't counted against the packet LOC ceiling per PACKET_INDEX § Packet Sizing Discipline footnote |
+| **Module subtotal** | **815** | Production code only (updated for 16-probe shim + friction_state plumbing) |
+| **Test subtotal** | **1270** | Test code only (16 probes × ~800 LOC total; unit tests unchanged) |
+| **Total** | **2085** | Production LOC is within PACKET_INDEX P3's 1000–1500 LOC budget; test LOC is not counted against the packet ceiling (tests are excluded from packet LOC accounting per PACKET_INDEX policy) |
 
-Production LOC (~810) is in the upper half of PACKET_INDEX P3's 1000–1500 budget once test fixtures and probe scaffolding are excluded per the PACKET_INDEX sizing footnote (tests don't count). Test coverage is heavy because P3's 14-probe shadow window is the gate for the highest-blast P4 cutover decision — probe density is intentional risk-reduction investment.
+Production LOC (~815) is within PACKET_INDEX P3's 1000–1500 budget. Test coverage is heavy (16 probes) because P3's shadow window is the gate for the highest-blast P4 cutover decision — probe density is intentional risk-reduction investment, not scope creep.
 
 ---
 
