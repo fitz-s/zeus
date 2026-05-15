@@ -92,6 +92,7 @@ class ProposalManifest:
     proposed_moves: tuple[tuple[Path, Path], ...] = field(default_factory=tuple)
     proposed_deletes: tuple[Path, ...] = field(default_factory=tuple)
     proposed_creates: tuple[Path, ...] = field(default_factory=tuple)
+    proposed_modifies: tuple[Path, ...] = field(default_factory=tuple)
     proposal_hash: str = ""
 
 
