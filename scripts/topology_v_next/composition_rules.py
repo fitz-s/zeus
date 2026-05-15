@@ -242,13 +242,15 @@ def _preregister_companion_paths(
             continue  # No source file from this profile in the change set; skip.
 
         for companion_path in companion_paths:
-            if companion_path in updated:
-                # File already in candidates — add this profile to its set
-                updated[companion_path].add(profile_id)
-            else:
-                # Companion doc not yet in candidates (i.e. not a source file)
-                # Create a new entry so composition sees it as belonging to profile_id
-                updated[companion_path] = {profile_id}
+            # Whether the companion path was already matched to another profile
+            # (e.g. docs_authority via glob) or not yet in candidates, we
+            # assign it EXCLUSIVELY to the source profile_id.
+            # Rationale: the companion doc is being submitted AS a companion
+            # for the source profile; it should not expand touched_profiles
+            # to include the profile it was accidentally glob-matched to.
+            # This is the SCAFFOLD §3.0 trap closure: replacing (not adding)
+            # is what collapses touched_profiles to 1.
+            updated[companion_path] = {profile_id}
 
     return updated
 
