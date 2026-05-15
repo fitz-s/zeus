@@ -26,11 +26,10 @@ active work surfaces and current-fact companions.
 
 ## Active packet control
 
-- Active package source: `docs/operations/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md`
-- Active execution packet: `docs/operations/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md`
-- Receipt-bound source: `docs/operations/task_2026-05-15_live_order_e2e_verification/receipt.json`
-- Required evidence: `LIVE_ORDER_E2E_VERIFICATION_PLAN.md`, `LIVE_ORDER_E2E_VERIFICATION_CRITIC_APPROVAL.md`, phase evidence bundles named by the active plan, and a later receipt/work log for implementation closeout.
-- Next action: execute the live order end-to-end verification packet. First implementation slice is forecast-live health probe repair and read-only live-order evidence checker; live restart and live submit require the packet's `LIVE_RESTART_GO` and `LIVE_SUBMIT_GO` checklists.
+- Active execution packet: `docs/operations/task_2026-05-15_live_order_e2e_goal/LIVE_ORDER_E2E_GOAL_PLAN.md`.
+- Receipt-bound source: `docs/operations/task_2026-05-15_live_order_e2e_goal/receipt.json`.
+- Required evidence: `docs/operations/task_2026-05-15_live_order_e2e_goal/LIVE_ORDER_E2E_GOAL_PLAN.md`, packet-local critic approval, phase-specific focused tests, live deployed-code provenance, and real live order record-chain proof.
+- Next action: implement the approved live-order E2E plan from a clean main-based branch. Do not claim completion until the live daemon places an expected accepted/resting order or stronger outcome and the canonical command/order/fill/position/reconciliation chain is verified.
 
 ## Active monitoring surfaces
 
@@ -48,6 +47,7 @@ active work surfaces and current-fact companions.
 |---------|--------|------------------------------|
 | `docs/operations/task_2026-04-26_ultimate_plan/2026-05-01_live_alpha/evidence/tigge_ingest_decision_2026-05-01.md` | ACTIVE runtime-gating evidence | TIGGE `entry_primary` authorization depends on this evidence path; do not archive without a replacement operator-decision path. |
 | `docs/operations/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md` | ACTIVE execution packet | Current `/goal` packet: prove and repair live forecast data -> live reader -> evaluator -> executor -> accepted/resting live limit order -> command/order/position/reconciliation evidence. |
+| `docs/operations/task_2026-05-15_live_order_e2e_goal/` | ACTIVE execution packet | Frozen 2026-05-15 for the user `/goal`: prove real live daemon order placement and canonical record-chain continuity from the new main-based branch. |
 
 ## Current fact and checklist companions
 

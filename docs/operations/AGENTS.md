@@ -223,6 +223,10 @@ make a surface default-read unless `current_state.md` routes it.
 | `task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md` | topology planning packet | Execution plan requiring deployed-code proof, real live limit-order submission, durable command/event evidence, and post-order guard before claiming live readiness |
 | `task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_CRITIC_APPROVAL.md` | packet review evidence | Critic REVISE-to-APPROVE record for the live order E2E verification plan; approval is plan-only, not empirical live completion evidence |
 | `task_2026-05-15_live_order_e2e_verification/receipt.json` | packet receipt | Current-state freeze receipt naming the live order E2E plan as the active execution packet; not implementation closeout evidence |
+| `task_2026-05-15_live_order_e2e_goal/` | plan packet container | Main-based plan packet for real live order end-to-end proof: live data, evaluator intent, executor submit, venue order identity, command/order/fill/position records, and guard closeout |
+| `task_2026-05-15_live_order_e2e_goal/LIVE_ORDER_E2E_GOAL_PLAN.md` | topology planning packet | Detailed execution plan for completing the user `/goal` on a new branch from main; explicitly excludes shadow-only proof and rejected/unknown order outcomes as completion |
+| `task_2026-05-15_live_order_e2e_goal/CRITIC_APPROVAL.md` | packet review evidence | Critic REVISE-to-APPROVE record for the live-order E2E goal plan; approval is plan/phase-gate only, not completion evidence |
+| `task_2026-05-15_live_order_e2e_goal/receipt.json` | packet receipt | Active packet freeze receipt; explicitly records that live-order E2E is not complete yet |
 Archived packet evidence (physically moved to `docs/archives/packets/`) is
 listed in `docs/archive_registry.md`; do not re-list those packets here. When
 a packet closes and is archived, remove its row from this registry and the
