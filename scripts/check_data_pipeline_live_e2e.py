@@ -344,11 +344,23 @@ def _reader_probe(conn: sqlite3.Connection, source_run: dict[str, Any], snapshot
         require_entry_readiness=False,
     )
     elapsed_ms = (time.perf_counter() - started) * 1000
+    bundle = result.bundle if result.ok and result.bundle is not None else None
+    evidence = bundle.evidence if bundle is not None else None
     return {
         "status": result.status,
         "reason_code": result.reason_code,
         "ok": result.ok,
         "elapsed_ms": round(elapsed_ms, 3),
+        "reader_evidence": (
+            {
+                "source_run_id": evidence.source_run_id,
+                "release_calendar_key": evidence.release_calendar_key,
+                "coverage_id": evidence.coverage_id,
+                "producer_readiness_id": evidence.producer_readiness_id,
+            }
+            if evidence is not None
+            else None
+        ),
         "candidate": {
             "city": city_name,
             "target_date": snapshot["target_date"],
@@ -469,13 +481,26 @@ def _build_checks(
                 f"source_cycle_date={cycle_date}, min_target_date={min_target}, max_target_date={target_range.get('max_target_date')}",
             )
         )
-        reader_source_run_id = reader_source_run.get("source_run_id") if reader_source_run else None
+        reader_evidence = reader_probe.get("reader_evidence")
+        if not isinstance(reader_evidence, dict):
+            reader_evidence = {}
+        reader_source_run_id = reader_evidence.get("source_run_id")
+        reader_release_calendar_key = reader_evidence.get("release_calendar_key")
         latest_source_run_id = latest_source_run.get("source_run_id")
+        latest_release_calendar_key = latest_source_run.get("release_calendar_key")
+        reader_matches_latest = (
+            reader_source_run_id == latest_source_run_id
+            and reader_release_calendar_key == latest_release_calendar_key
+        )
         checks.append(
             Check(
                 "reader_uses_latest_source_run",
-                "PASS" if reader_source_run_id == latest_source_run_id else "FAIL",
-                f"latest_source_run_id={latest_source_run_id} reader_source_run_id={reader_source_run_id}",
+                "PASS" if reader_matches_latest else "FAIL",
+                (
+                    f"latest_source_run_id={latest_source_run_id} reader_source_run_id={reader_source_run_id} "
+                    f"latest_release_calendar_key={latest_release_calendar_key} "
+                    f"reader_release_calendar_key={reader_release_calendar_key}"
+                ),
             )
         )
     checks.append(

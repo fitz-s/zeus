@@ -332,14 +332,14 @@ def test_collect_open_ens_cycle_partial_global_run_allows_covered_target(tmp_pat
     monkeypatch.setattr(ecmwf_open_data, "STEP_HOURS", [3, 6, 9, 12, 15, 18, 21, 24, 150])
     extract_subdir = "open_ens_mx2t6_localday_max"
     payload = _make_opendata_high_payload(
-        "2026-05-02",
+        "2026-05-01",
         "2026-05-01T00:00:00+00:00",
-        local_day_start_iso="2026-05-01T23:00:00+00:00",
-        local_day_end_iso="2026-05-02T23:00:00+00:00",
+        local_day_start_iso="2026-04-30T23:00:00+00:00",
+        local_day_end_iso="2026-05-01T23:00:00+00:00",
     )
     json_dir = fifty_one_root / "raw" / extract_subdir / "london" / "20260501"
     json_dir.mkdir(parents=True)
-    (json_dir / f"{extract_subdir}_target_2026-05-02_lead_1.json").write_text(
+    (json_dir / f"{extract_subdir}_target_2026-05-01_lead_1.json").write_text(
         json.dumps(payload),
         encoding="utf-8",
     )
@@ -378,6 +378,68 @@ def test_collect_open_ens_cycle_partial_global_run_allows_covered_target(tmp_pat
         "SELECT * FROM readiness_state WHERE strategy_key = 'producer_readiness'"
     ).fetchone()
     assert producer["status"] == "LIVE_ELIGIBLE"
+
+
+def test_collect_open_ens_cycle_blocks_noncontiguous_missing_download_step(tmp_path: Path, monkeypatch):
+    from src.data import ecmwf_open_data
+
+    forecasts_conn = sqlite3.connect(str(tmp_path / "forecasts.db"))
+    forecasts_conn.row_factory = sqlite3.Row
+    init_schema_forecasts(forecasts_conn)
+
+    fifty_one_root = tmp_path / "51 source data"
+    monkeypatch.setattr(ecmwf_open_data, "FIFTY_ONE_ROOT", fifty_one_root)
+    monkeypatch.setattr(ecmwf_open_data, "STEP_HOURS", [3, 6, 9, 12, 18, 24, 150])
+    extract_subdir = "open_ens_mx2t6_localday_max"
+    payload = _make_opendata_high_payload(
+        "2026-05-01",
+        "2026-05-01T00:00:00+00:00",
+        local_day_start_iso="2026-04-30T23:00:00+00:00",
+        local_day_end_iso="2026-05-01T23:00:00+00:00",
+    )
+    json_dir = fifty_one_root / "raw" / extract_subdir / "london" / "20260501"
+    json_dir.mkdir(parents=True)
+    (json_dir / f"{extract_subdir}_target_2026-05-01_lead_1.json").write_text(
+        json.dumps(payload),
+        encoding="utf-8",
+    )
+
+    def fetch_impl(*, cycle_date, cycle_hour, param, step, output_dir, mirrors):
+        del mirrors
+        if step in {12, 150}:
+            return ("NOT_RELEASED", "not released")
+        ecmwf_open_data._step_cache_path(
+            output_dir,
+            run_date=cycle_date,
+            run_hour=cycle_hour,
+            step=step,
+            param=param,
+        ).write_bytes(b"x")
+        return ("OK", None)
+
+    result = ecmwf_open_data.collect_open_ens_cycle(
+        track="mx2t6_high",
+        run_date=date(2026, 5, 1),
+        run_hour=0,
+        skip_extract=True,
+        conn=forecasts_conn,
+        _fetch_impl=fetch_impl,
+        now_utc=datetime(2026, 5, 1, 9, 0, tzinfo=timezone.utc),
+    )
+
+    assert result["status"] == "ok"
+    source_run = get_source_run(forecasts_conn, result["source_run_id"])
+    assert source_run is not None
+    assert source_run["status"] == "PARTIAL"
+    coverage = forecasts_conn.execute("SELECT * FROM source_run_coverage").fetchone()
+    assert 12 not in json.loads(coverage["observed_steps_json"])
+    assert coverage["readiness_status"] == "BLOCKED"
+    assert coverage["reason_code"] == "MISSING_REQUIRED_STEPS"
+    producer = forecasts_conn.execute(
+        "SELECT * FROM readiness_state WHERE strategy_key = 'producer_readiness'"
+    ).fetchone()
+    assert producer["status"] == "BLOCKED"
+    assert json.loads(producer["reason_codes_json"]) == ["MISSING_REQUIRED_STEPS"]
 
 
 def test_collect_open_ens_cycle_scopes_ingest_to_selected_cycle(tmp_path: Path, monkeypatch):

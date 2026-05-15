@@ -708,12 +708,21 @@ def _delete_stale_source_run_snapshots(
     return int(deleted)
 
 
-def _observed_steps_for_snapshot(*, required_steps: tuple[int, ...], step_horizon_hours: object) -> tuple[int, ...]:
+def _observed_steps_for_snapshot(
+    *,
+    required_steps: tuple[int, ...],
+    step_horizon_hours: object,
+    downloaded_steps: list[int] | None = None,
+) -> tuple[int, ...]:
     try:
         horizon = float(step_horizon_hours)
     except (TypeError, ValueError):
         return ()
-    return tuple(step for step in required_steps if step <= horizon)
+    horizon_steps = tuple(step for step in required_steps if step <= horizon)
+    if downloaded_steps is None:
+        return horizon_steps
+    downloaded = {int(step) for step in downloaded_steps}
+    return tuple(step for step in horizon_steps if step in downloaded)
 
 
 def _coverage_reason(reason_codes: list[str]) -> str:
@@ -839,6 +848,7 @@ def _write_source_authority_chain(
         observed_steps_for_scope = _observed_steps_for_snapshot(
             required_steps=scope.required_step_hours,
             step_horizon_hours=row.get("step_horizon_hours"),
+            downloaded_steps=download_observed_steps,
         )
         observed_members_for_scope = _usable_member_count(row.get("members_json"))
         horizon_decision = evaluate_horizon_coverage(

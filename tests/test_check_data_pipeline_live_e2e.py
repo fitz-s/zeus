@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from datetime import date
 import sqlite3
+from types import SimpleNamespace
 
 from scripts import check_data_pipeline_live_e2e as checker
 
@@ -283,4 +284,66 @@ def test_live_checker_does_not_fallback_to_older_ready_source_run() -> None:
         )
     }
     assert checks["latest_source_run_usable"].status == "FAIL"
+    assert checks["reader_uses_latest_source_run"].status == "FAIL"
+
+
+def test_live_checker_uses_actual_reader_bundle_identity(monkeypatch) -> None:
+    latest_source_run = {
+        "source_run_id": "ecmwf_open_data:mx2t6_high:2026-05-15T12Z",
+        "release_calendar_key": "ecmwf_open_data:mx2t6_high:full",
+        "status": "SUCCESS",
+        "completeness_status": "COMPLETE",
+        "source_cycle_time": "2026-05-15T12:00:00+00:00",
+        "track": "mx2t6_high_full_horizon",
+    }
+    snapshot = {
+        "city": "London",
+        "target_date": "2026-05-16",
+        "temperature_metric": "high",
+        "source_id": "ecmwf_open_data",
+        "source_transport": "ensemble_snapshots_v2_db_reader",
+        "data_version": "ecmwf_opendata_mx2t3_local_calendar_day_max_v1",
+        "snapshot_id": 99,
+    }
+    monkeypatch.setattr(
+        checker,
+        "runtime_cities_by_name",
+        lambda: {"London": SimpleNamespace(name="London", timezone="Europe/London")},
+    )
+
+    def fake_read_executable_forecast(*_args, **_kwargs):
+        return SimpleNamespace(
+            status="LIVE_ELIGIBLE",
+            reason_code="EXECUTABLE_FORECAST_READY",
+            ok=True,
+            bundle=SimpleNamespace(
+                evidence=SimpleNamespace(
+                    source_run_id="ecmwf_open_data:mx2t6_high:2026-05-15T00Z",
+                    release_calendar_key="ecmwf_open_data:mx2t6_high:full",
+                    coverage_id="older-coverage",
+                    producer_readiness_id="older-producer",
+                )
+            ),
+        )
+
+    monkeypatch.setattr(checker, "read_executable_forecast", fake_read_executable_forecast)
+
+    reader = checker._reader_probe(sqlite3.connect(":memory:"), latest_source_run, snapshot)
+    checks = {
+        check.name: check
+        for check in checker._build_checks(
+            processes=[
+                {"command": "/opt/homebrew/bin/python3 -m src.main", "cwd": "/repo"},
+                {"command": "/opt/homebrew/bin/python3 -m src.ingest.forecast_live_daemon", "cwd": "/repo"},
+            ],
+            latest_source_run=latest_source_run,
+            reader_source_run=latest_source_run,
+            target_range={"min_target_date": "2026-05-15", "max_target_date": "2026-05-16"},
+            reader_probe=reader,
+            evaluator_guard={"ok": True, "reason_code": "OK", "path": "/repo/src/engine/evaluator.py"},
+        )
+    }
+
+    assert reader["ok"] is True
+    assert reader["reader_evidence"]["source_run_id"] == "ecmwf_open_data:mx2t6_high:2026-05-15T00Z"
     assert checks["reader_uses_latest_source_run"].status == "FAIL"
