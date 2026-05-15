@@ -280,6 +280,25 @@ def _matching_live_trade_facts(trade_facts: list[dict[str, Any]], order_id: str)
     ]
 
 
+def _latest_trade_fact(trade_facts: list[dict[str, Any]], order_id: str) -> dict[str, Any] | None:
+    if not order_id:
+        return None
+    for fact in trade_facts:
+        if str(fact.get("venue_order_id") or "") == order_id:
+            return fact
+    return None
+
+
+def _trade_fact_supports_fill(fact: dict[str, Any] | None) -> bool:
+    return (
+        fact is not None
+        and str(fact.get("state") or "") in FILL_TRADE_FACT_STATES
+        and _live_source(fact.get("source"))
+        and _positive_decimal(fact.get("filled_size"))
+        and _positive_decimal(fact.get("fill_price"))
+    )
+
+
 def _position_events(conn: sqlite3.Connection, command_id: str, order_id: str) -> list[dict[str, Any]]:
     if not _table_exists(conn, "position_events"):
         return []
@@ -460,6 +479,7 @@ def evaluate(conn: sqlite3.Connection, command_id: str | None = None) -> dict[st
     latest_order_fact_state = str(latest_order_fact.get("state") or "") if latest_order_fact else ""
     latest_order_fact_source = str(latest_order_fact.get("source") or "") if latest_order_fact else ""
     matching_trade_facts = _matching_live_trade_facts(trade_facts, order_id)
+    latest_trade_fact = _latest_trade_fact(trade_facts, order_id)
     position_events = _position_events(conn, cmd_id, order_id)
     position_ids = {
         str(event.get("position_id") or "")
@@ -473,7 +493,7 @@ def evaluate(conn: sqlite3.Connection, command_id: str | None = None) -> dict[st
     )
     fill_observed = (
         state in FILLED_COMMAND_STATES
-        or bool(matching_trade_facts)
+        or _trade_fact_supports_fill(latest_trade_fact)
         or bool(event_types & {"PARTIAL_FILL_OBSERVED", "FILL_CONFIRMED"})
         or _order_fact_supports_fill_observation(latest_order_fact)
     )
@@ -573,8 +593,12 @@ def evaluate(conn: sqlite3.Connection, command_id: str | None = None) -> dict[st
         checks.append(
             Check(
                 "venue_trade_fact_present",
-                "PASS" if matching_trade_facts else "FAIL",
-                f"live_count={len(matching_trade_facts)} total_count={len(trade_facts)}",
+                "PASS" if _trade_fact_supports_fill(latest_trade_fact) else "FAIL",
+                (
+                    f"live_count={len(matching_trade_facts)} total_count={len(trade_facts)} "
+                    f"latest_source={latest_trade_fact.get('source') if latest_trade_fact else 'missing'} "
+                    f"latest_state={latest_trade_fact.get('state') if latest_trade_fact else 'missing'}"
+                ),
             )
         )
         checks.append(
