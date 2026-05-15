@@ -10,6 +10,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import subprocess
 from pathlib import Path
 
 
@@ -104,6 +105,32 @@ def test_forecast_live_owner_replaces_legacy_ingest_dead(tmp_path, monkeypatch, 
     assert "legacy_ingest=0" in out
     assert "ingest_dead" not in out
     assert "forecast_live_dead" not in out
+
+
+def test_alive_matches_python_module_not_shell_text(monkeypatch):
+    module = _load_module()
+
+    def fake_run(*args, **kwargs):
+        assert args[0] == ["ps", "-axo", "pid=,command="]
+        return subprocess.CompletedProcess(
+            args[0],
+            0,
+            stdout=(
+                "101 /usr/bin/python -m src.main\n"
+                "202 /usr/bin/python -m src.ingest.forecast_live_daemon\n"
+                "303 /bin/zsh -lc rg src.ingest_main\n"
+                "404 /usr/bin/python -m src.ingest_main\n"
+                "505 /usr/bin/python -m src.riskguard.riskguard\n"
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+
+    assert module._alive("src.main") == [101]
+    assert module._alive("src.ingest.forecast_live_daemon") == [202]
+    assert module._alive("src.ingest_main") == [404]
+    assert module._alive("src.riskguard") == [505]
 
 
 def test_missing_forecast_live_owner_is_actionable_without_legacy_ingest_dead(tmp_path, monkeypatch, capsys):

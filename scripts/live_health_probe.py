@@ -35,8 +35,20 @@ def _age(path):
 
 def _alive(pattern):
     try:
-        out = subprocess.run(["pgrep","-f",pattern], capture_output=True, text=True, timeout=5).stdout.strip()
-        return [int(p) for p in out.split('\n') if p]
+        out = subprocess.run(["ps", "-axo", "pid=,command="], capture_output=True, text=True, timeout=5).stdout
+        pids = []
+        for line in out.splitlines():
+            parts = line.strip().split(None, 1)
+            if len(parts) != 2:
+                continue
+            pid_text, command = parts
+            tokens = command.split()
+            for idx, token in enumerate(tokens[:-1]):
+                module_name = tokens[idx + 1]
+                if token == "-m" and (module_name == pattern or module_name.startswith(f"{pattern}.")):
+                    pids.append(int(pid_text))
+                    break
+        return pids
     except Exception:
         return []
 
