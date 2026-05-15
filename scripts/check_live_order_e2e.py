@@ -37,6 +37,7 @@ FORECASTS_DB_NAME = "zeus-forecasts.db"
 
 ACCEPTED_COMMAND_STATES = frozenset({"ACKED", "POST_ACKED", "PARTIAL", "FILLED"})
 FILLED_COMMAND_STATES = frozenset({"PARTIAL", "FILLED"})
+TERMINAL_NO_FILL_COMMAND_STATES = frozenset({"EXPIRED", "CANCELLED"})
 REJECTED_OR_UNKNOWN_STATES = frozenset(
     {
         "REJECTED",
@@ -77,6 +78,8 @@ FILL_TRADE_FACT_STATES = frozenset({"MATCHED", "MINED", "CONFIRMED"})
 FILLED_POSITION_PHASES = frozenset(
     {"active", "day0_window", "pending_exit", "economically_closed", "settled"}
 )
+PENDING_ENTRY_PHASES = frozenset({"pending_entry"})
+VOIDED_POSITION_PHASES = frozenset({"voided"})
 
 
 @dataclass(frozen=True)
@@ -223,6 +226,13 @@ def _positive_decimal(value: Any) -> bool:
         return False
 
 
+def _zero_decimal(value: Any) -> bool:
+    try:
+        return Decimal(str(value if value not in (None, "") else "0")) == 0
+    except (InvalidOperation, TypeError, ValueError):
+        return False
+
+
 def _live_source(value: Any) -> bool:
     return str(value or "").upper() in LIVE_PROOF_SOURCES
 
@@ -274,6 +284,15 @@ def _order_fact_supports_live_order_proof(fact: dict[str, Any] | None) -> bool:
     state = str(fact.get("state") or "")
     return state not in TERMINAL_ORDER_FACT_STATES and (
         state in OPEN_ORDER_FACT_STATES or state in FILL_ORDER_FACT_STATES
+    )
+
+
+def _order_fact_supports_terminal_no_fill(fact: dict[str, Any] | None) -> bool:
+    return (
+        fact is not None
+        and _live_source(fact.get("source"))
+        and str(fact.get("state") or "") in TERMINAL_ORDER_FACT_STATES
+        and not _positive_decimal(fact.get("matched_size"))
     )
 
 
@@ -372,6 +391,26 @@ def _matching_fill_position_events(events: list[dict[str, Any]], order_id: str) 
     ]
 
 
+def _matching_pending_entry_position_events(events: list[dict[str, Any]], order_id: str) -> list[dict[str, Any]]:
+    return [
+        event
+        for event in events
+        if str(event.get("event_type") or "") == "ENTRY_ORDER_POSTED"
+        and (not order_id or str(event.get("order_id") or "") == order_id)
+        and str(event.get("env") or "live") == "live"
+    ]
+
+
+def _matching_void_position_events(events: list[dict[str, Any]], order_id: str) -> list[dict[str, Any]]:
+    return [
+        event
+        for event in events
+        if str(event.get("event_type") or "") in {"ENTRY_ORDER_VOIDED", "ENTRY_ORDER_REJECTED"}
+        and (not order_id or str(event.get("order_id") or "") == order_id)
+        and str(event.get("env") or "live") == "live"
+    ]
+
+
 def _has_matching_position_current(
     fill_events: list[dict[str, Any]],
     current_rows: list[dict[str, Any]],
@@ -386,6 +425,54 @@ def _has_matching_position_current(
         if order_id and str(row.get("order_id") or "") != order_id:
             continue
         if str(row.get("phase") or "") not in FILLED_POSITION_PHASES:
+            continue
+        return True
+    return False
+
+
+def _has_pending_entry_zero_share_projection(
+    pending_events: list[dict[str, Any]],
+    current_rows: list[dict[str, Any]],
+    order_id: str,
+) -> bool:
+    if not pending_events and not current_rows:
+        return True
+    position_ids = {str(event.get("position_id") or "") for event in pending_events if event.get("position_id")}
+    if not position_ids:
+        return False
+    for row in current_rows:
+        if str(row.get("position_id") or "") not in position_ids:
+            continue
+        if order_id and str(row.get("order_id") or "") != order_id:
+            continue
+        if str(row.get("phase") or "") not in PENDING_ENTRY_PHASES:
+            continue
+        if not _zero_decimal(row.get("shares")):
+            continue
+        if not _zero_decimal(row.get("cost_basis_usd")):
+            continue
+        return True
+    return False
+
+
+def _has_voided_zero_share_projection(
+    void_events: list[dict[str, Any]],
+    current_rows: list[dict[str, Any]],
+    order_id: str,
+) -> bool:
+    position_ids = {str(event.get("position_id") or "") for event in void_events if event.get("position_id")}
+    if not position_ids:
+        return False
+    for row in current_rows:
+        if str(row.get("position_id") or "") not in position_ids:
+            continue
+        if order_id and str(row.get("order_id") or "") != order_id:
+            continue
+        if str(row.get("phase") or "") not in VOIDED_POSITION_PHASES:
+            continue
+        if not _zero_decimal(row.get("shares")):
+            continue
+        if not _zero_decimal(row.get("cost_basis_usd")):
             continue
         return True
     return False
@@ -499,6 +586,8 @@ def evaluate(conn: sqlite3.Connection, command_id: str | None = None) -> dict[st
     }
     position_current = _position_current(conn, order_id, position_ids)
     fill_position_events = _matching_fill_position_events(position_events, order_id)
+    pending_entry_position_events = _matching_pending_entry_position_events(position_events, order_id)
+    void_position_events = _matching_void_position_events(position_events, order_id)
     position_tables_present = _table_exists(conn, "position_events") and _table_exists(
         conn, "position_current"
     )
@@ -507,6 +596,12 @@ def evaluate(conn: sqlite3.Connection, command_id: str | None = None) -> dict[st
         or _trade_fact_supports_fill(latest_trade_fact)
         or bool(event_types & {"PARTIAL_FILL_OBSERVED", "FILL_CONFIRMED"})
         or _order_fact_supports_fill_observation(latest_order_fact)
+    )
+    terminal_no_fill_observed = (
+        state in TERMINAL_NO_FILL_COMMAND_STATES
+        and _order_fact_supports_terminal_no_fill(latest_order_fact)
+        and not any(_trade_fact_supports_fill(fact) for fact in trade_facts)
+        and not fill_position_events
     )
 
     checks.append(Check("command_present", "PASS", f"command_id={cmd_id} state={state}"))
@@ -572,7 +667,12 @@ def evaluate(conn: sqlite3.Connection, command_id: str | None = None) -> dict[st
     checks.append(
         Check(
             "latest_venue_order_fact_open",
-            "PASS" if _order_fact_supports_live_order_proof(latest_order_fact) else "FAIL",
+            "PASS"
+            if (
+                _order_fact_supports_live_order_proof(latest_order_fact)
+                or terminal_no_fill_observed
+            )
+            else "FAIL",
             (
                 f"live_count={len(matching_order_facts)} total_count={len(order_facts)} "
                 f"order_id={order_id or 'missing'} "
@@ -628,20 +728,61 @@ def evaluate(conn: sqlite3.Connection, command_id: str | None = None) -> dict[st
                 f"count={len(position_current)}",
             )
         )
+    elif terminal_no_fill_observed:
+        checks.append(
+            Check(
+                "terminal_no_fill_order_fact_present",
+                "PASS",
+                (
+                    f"latest_source={latest_order_fact_source or 'missing'} "
+                    f"latest_state={latest_order_fact_state or 'missing'}"
+                ),
+            )
+        )
+        checks.append(
+            Check(
+                "position_void_event_present",
+                "PASS" if void_position_events else "FAIL",
+                f"count={len(void_position_events)}",
+            )
+        )
+        checks.append(
+            Check(
+                "position_current_voided_projection_present",
+                "PASS"
+                if _has_voided_zero_share_projection(void_position_events, position_current, order_id)
+                else "FAIL",
+                f"count={len(position_current)}",
+            )
+        )
     else:
         checks.append(
             Check(
                 "no_position_without_fill",
-                "PASS" if position_tables_present and not position_events and not position_current else "FAIL",
+                "PASS"
+                if (
+                    position_tables_present
+                    and _has_pending_entry_zero_share_projection(
+                        pending_entry_position_events,
+                        position_current,
+                        order_id,
+                    )
+                )
+                else "FAIL",
                 f"position_events={len(position_events)} position_current={len(position_current)}",
             )
         )
 
     failed_check_names = {check.name for check in checks if check.status == "FAIL"}
-    complete = state in ACCEPTED_COMMAND_STATES and not failed_check_names
+    complete = (
+        (state in ACCEPTED_COMMAND_STATES or terminal_no_fill_observed)
+        and not failed_check_names
+    )
     category = (
         "LIVE_ORDER_FILLED"
         if complete and fill_observed
+        else "LIVE_ORDER_TERMINAL_NO_FILL"
+        if complete and terminal_no_fill_observed
         else "LIVE_ORDER_SUBMITTED"
         if complete
         else "NO_LIVE_ORDER_PROOF"
@@ -654,6 +795,8 @@ def evaluate(conn: sqlite3.Connection, command_id: str | None = None) -> dict[st
         category = "LIVE_ORDER_ACKED_MISSING_ORDER_FACT"
     if state in ACCEPTED_COMMAND_STATES and fill_observed and failed_check_names:
         category = "LIVE_ORDER_FILL_MISSING_POSITION_PROOF"
+    if terminal_no_fill_observed and failed_check_names:
+        category = "LIVE_ORDER_TERMINAL_NO_FILL_MISSING_POSITION_PROOF"
     if state in REJECTED_OR_UNKNOWN_STATES:
         category = "LIVE_ORDER_REJECTED_OR_UNKNOWN_RECORDED"
     return {

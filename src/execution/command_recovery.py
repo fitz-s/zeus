@@ -31,6 +31,7 @@ import logging
 import json
 import sqlite3
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 from typing import Optional
 
 from src.execution.command_bus import (
@@ -54,6 +55,15 @@ _INACTIVE_STATUSES = frozenset({
 # Statuses that mean the cancel was acknowledged (order is gone from the book).
 _CANCEL_TERMINAL_STATUSES = frozenset({
     "CANCELLED", "CANCELED", "EXPIRED", "REJECTED",
+})
+_TERMINAL_NO_FILL_ORDER_FACT_STATES = frozenset({
+    "CANCEL_CONFIRMED",
+    "EXPIRED",
+    "VENUE_WIPED",
+})
+_ACKED_ORDER_STATES = frozenset({
+    CommandState.ACKED.value,
+    CommandState.POST_ACKED.value,
 })
 _SAFE_REPLAY_MIN_AGE_SECONDS = 15 * 60
 
@@ -253,6 +263,275 @@ def _count_position_rows_for_command(conn: sqlite3.Connection, command: dict) ->
         ).fetchone()
         counts["position_current"] = int((_dict_row(row).get("count") if row else 0) or 0)
     return counts
+
+
+def _decimal_is_zero(value: object) -> bool:
+    try:
+        parsed = Decimal(str(value if value not in (None, "") else "0"))
+    except (InvalidOperation, TypeError, ValueError):
+        return False
+    return parsed.is_finite() and parsed == 0
+
+
+def _latest_terminal_order_fact_candidates(conn: sqlite3.Connection) -> list[dict]:
+    if not _table_exists(conn, "venue_order_facts"):
+        return []
+    states = tuple(_TERMINAL_NO_FILL_ORDER_FACT_STATES)
+    command_states = tuple(_ACKED_ORDER_STATES)
+    state_placeholders = ",".join("?" for _ in states)
+    command_state_placeholders = ",".join("?" for _ in command_states)
+    rows = conn.execute(
+        f"""
+        WITH latest_order_fact AS (
+            SELECT command_id, MAX(local_sequence) AS max_sequence
+              FROM venue_order_facts
+             GROUP BY command_id
+        )
+        SELECT
+            cmd.*,
+            fact.fact_id AS order_fact_id,
+            fact.state AS order_fact_state,
+            fact.observed_at AS order_fact_observed_at,
+            fact.venue_order_id AS order_fact_venue_order_id,
+            fact.remaining_size AS order_fact_remaining_size,
+            fact.matched_size AS order_fact_matched_size,
+            fact.source AS order_fact_source,
+            fact.raw_payload_hash AS order_fact_raw_payload_hash
+          FROM venue_commands cmd
+          JOIN latest_order_fact latest
+            ON latest.command_id = cmd.command_id
+          JOIN venue_order_facts fact
+            ON fact.command_id = latest.command_id
+           AND fact.local_sequence = latest.max_sequence
+         WHERE cmd.intent_kind = 'ENTRY'
+           AND cmd.state IN ({command_state_placeholders})
+           AND fact.state IN ({state_placeholders})
+        """,
+        (*command_states, *states),
+    ).fetchall()
+    return [_dict_row(row) for row in rows]
+
+
+def _fill_trade_fact_count(conn: sqlite3.Connection, command_id: str) -> int:
+    if not _table_exists(conn, "venue_trade_facts"):
+        return 0
+    row = conn.execute(
+        """
+        SELECT COUNT(*) AS count
+          FROM venue_trade_facts
+         WHERE command_id = ?
+           AND state IN ('MATCHED', 'MINED', 'CONFIRMED')
+           AND CAST(COALESCE(filled_size, '0') AS REAL) > 0
+        """,
+        (command_id,),
+    ).fetchone()
+    return int((_dict_row(row).get("count") if row else 0) or 0)
+
+
+def _latest_position_env(conn: sqlite3.Connection, position_id: str) -> str:
+    cols = _table_columns(conn, "position_events")
+    if "env" not in cols or "position_id" not in cols:
+        return "live"
+    row = conn.execute(
+        """
+        SELECT env
+          FROM position_events
+         WHERE position_id = ?
+         ORDER BY sequence_no DESC, rowid DESC
+         LIMIT 1
+        """,
+        (position_id,),
+    ).fetchone()
+    value = _dict_row(row).get("env") if row is not None else None
+    return str(value or "live")
+
+
+def _latest_position_sequence(conn: sqlite3.Connection, position_id: str) -> int:
+    cols = _table_columns(conn, "position_events")
+    if "position_id" not in cols or "sequence_no" not in cols:
+        return 0
+    row = conn.execute(
+        "SELECT COALESCE(MAX(sequence_no), 0) AS max_sequence FROM position_events WHERE position_id = ?",
+        (position_id,),
+    ).fetchone()
+    return int((_dict_row(row).get("max_sequence") if row else 0) or 0)
+
+
+def _position_current_for_terminal_order(
+    conn: sqlite3.Connection,
+    *,
+    command: dict,
+    order_id: str,
+) -> dict:
+    if not _table_exists(conn, "position_current"):
+        raise ValueError("position_current table missing")
+    cols = _table_columns(conn, "position_current")
+    clauses: list[str] = []
+    params: list[str] = []
+    position_id = str(command.get("position_id") or "")
+    if position_id and "position_id" in cols:
+        clauses.append("position_id = ?")
+        params.append(position_id)
+    if order_id and "order_id" in cols:
+        clauses.append("order_id = ?")
+        params.append(order_id)
+    if not clauses:
+        raise ValueError("cannot locate position_current without position_id or order_id")
+    row = conn.execute(
+        f"SELECT * FROM position_current WHERE {' OR '.join(clauses)} LIMIT 1",
+        tuple(params),
+    ).fetchone()
+    if row is None:
+        raise ValueError("terminal order fact has no matching position_current row")
+    return _dict_row(row)
+
+
+def _append_entry_order_voided_projection(
+    conn: sqlite3.Connection,
+    *,
+    command: dict,
+    order_fact: dict,
+    occurred_at: str,
+) -> None:
+    from src.state.ledger import append_many_and_project
+
+    order_id = str(order_fact.get("order_fact_venue_order_id") or command.get("venue_order_id") or "")
+    current = _position_current_for_terminal_order(conn, command=command, order_id=order_id)
+    position_id = str(current.get("position_id") or "")
+    if not position_id:
+        raise ValueError("position_current row missing position_id")
+    current_phase = str(current.get("phase") or "")
+    if current_phase == "voided":
+        return
+    if current_phase != "pending_entry":
+        raise ValueError(
+            "terminal no-fill order fact can only void pending_entry positions; "
+            f"got phase={current_phase!r}"
+        )
+    if not _decimal_is_zero(current.get("shares")) or not _decimal_is_zero(current.get("cost_basis_usd")):
+        raise ValueError("terminal no-fill order fact cannot void non-zero-share position")
+
+    next_sequence = _latest_position_sequence(conn, position_id) + 1
+    event_id = f"{position_id}:entry_order_voided:{command['command_id']}"
+    idempotency_key = event_id
+    payload = {
+        "reason": "venue_terminal_no_fill",
+        "command_id": command["command_id"],
+        "venue_order_id": order_id,
+        "order_fact_id": order_fact.get("order_fact_id"),
+        "order_fact_state": order_fact.get("order_fact_state"),
+        "remaining_size": order_fact.get("order_fact_remaining_size"),
+        "matched_size": order_fact.get("order_fact_matched_size"),
+        "source": order_fact.get("order_fact_source"),
+    }
+    event = {
+        "event_id": event_id,
+        "position_id": position_id,
+        "event_version": 1,
+        "sequence_no": next_sequence,
+        "event_type": "ENTRY_ORDER_VOIDED",
+        "occurred_at": occurred_at,
+        "phase_before": "pending_entry",
+        "phase_after": "voided",
+        "strategy_key": current.get("strategy_key"),
+        "decision_id": command.get("decision_id"),
+        "snapshot_id": current.get("decision_snapshot_id") or command.get("snapshot_id"),
+        "order_id": order_id,
+        "command_id": command["command_id"],
+        "caused_by": f"venue_order_fact:{order_fact.get('order_fact_id')}",
+        "idempotency_key": idempotency_key,
+        "venue_status": order_fact.get("order_fact_state"),
+        "source_module": "src.execution.command_recovery",
+        "env": _latest_position_env(conn, position_id),
+        "payload_json": json.dumps(payload, sort_keys=True, default=str),
+    }
+    projection = dict(current)
+    projection.update(
+        {
+            "phase": "voided",
+            "shares": 0.0,
+            "cost_basis_usd": 0.0,
+            "entry_price": 0.0,
+            "order_id": order_id,
+            "order_status": "canceled",
+            "updated_at": occurred_at,
+        }
+    )
+    append_many_and_project(conn, [event], projection)
+
+
+def reconcile_terminal_order_facts(conn: sqlite3.Connection) -> dict:
+    """Close ACKED entry commands whose latest venue order fact is terminal no-fill."""
+
+    summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+    for row in _latest_terminal_order_fact_candidates(conn):
+        summary["scanned"] += 1
+        command_id = str(row.get("command_id") or "")
+        order_id = str(row.get("order_fact_venue_order_id") or row.get("venue_order_id") or "")
+        try:
+            if not order_id:
+                logger.warning("terminal order fact candidate %s has no venue order id", command_id)
+                summary["errors"] += 1
+                continue
+            if not _decimal_is_zero(row.get("order_fact_matched_size")):
+                logger.info(
+                    "terminal order fact candidate %s has matched_size=%s; leaving for fill reconciliation",
+                    command_id, row.get("order_fact_matched_size"),
+                )
+                summary["stayed"] += 1
+                continue
+            if _fill_trade_fact_count(conn, command_id) > 0:
+                logger.info(
+                    "terminal order fact candidate %s has fill trade facts; leaving for fill reconciliation",
+                    command_id,
+                )
+                summary["stayed"] += 1
+                continue
+            occurred_at = str(row.get("order_fact_observed_at") or _now_iso())
+            safe_command_id = "".join(ch if ch.isalnum() else "_" for ch in command_id)
+            sp_name = f"sp_terminal_order_fact_{safe_command_id}"
+            conn.execute(f"SAVEPOINT {sp_name}")
+            try:
+                append_event(
+                    conn,
+                    command_id=command_id,
+                    event_type=CommandEventType.EXPIRED.value,
+                    occurred_at=occurred_at,
+                    payload={
+                        "reason": "venue_terminal_no_fill",
+                        "venue_order_id": order_id,
+                        "venue_order_fact_id": row.get("order_fact_id"),
+                        "venue_order_fact_state": row.get("order_fact_state"),
+                        "matched_size": row.get("order_fact_matched_size"),
+                        "remaining_size": row.get("order_fact_remaining_size"),
+                        "source": row.get("order_fact_source"),
+                    },
+                )
+                _append_entry_order_voided_projection(
+                    conn,
+                    command=row,
+                    order_fact=row,
+                    occurred_at=occurred_at,
+                )
+                conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+            except Exception:
+                conn.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
+                conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+                raise
+            summary["advanced"] += 1
+            logger.info(
+                "recovery: command %s ACKED terminal order fact %s -> EXPIRED and ENTRY_ORDER_VOIDED",
+                command_id,
+                row.get("order_fact_state"),
+            )
+        except Exception as exc:
+            logger.error(
+                "recovery: terminal order fact reconciliation failed for command %s: %s",
+                command_id,
+                exc,
+            )
+            summary["errors"] += 1
+    return summary
 
 
 def _review_no_side_effect_predicates(
@@ -968,6 +1247,12 @@ def reconcile_unresolved_commands(
                 summary["stayed"] += 1
             else:
                 summary["errors"] += 1
+
+        terminal_summary = reconcile_terminal_order_facts(conn)
+        summary["terminal_order_facts"] = terminal_summary
+        summary["advanced"] += terminal_summary["advanced"]
+        summary["stayed"] += terminal_summary["stayed"]
+        summary["errors"] += terminal_summary["errors"]
 
     finally:
         if own_conn:

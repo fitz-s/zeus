@@ -250,6 +250,46 @@ def _insert_position_fill(conn: sqlite3.Connection, *, order_id: str = "order-1"
     )
 
 
+def _insert_position_pending(conn: sqlite3.Connection, *, order_id: str = "order-1") -> None:
+    conn.execute(
+        """
+        INSERT INTO position_events (
+          event_id, position_id, sequence_no, event_type, command_id, order_id, env
+        )
+        VALUES ('pos-1:entry_order_posted', 'pos-1', 2, 'ENTRY_ORDER_POSTED',
+                'cmd-1', ?, 'live')
+        """,
+        (order_id,),
+    )
+    conn.execute(
+        """
+        INSERT INTO position_current (position_id, phase, order_id)
+        VALUES ('pos-1', 'pending_entry', ?)
+        """,
+        (order_id,),
+    )
+
+
+def _insert_position_voided(conn: sqlite3.Connection, *, order_id: str = "order-1") -> None:
+    conn.execute(
+        """
+        INSERT INTO position_events (
+          event_id, position_id, sequence_no, event_type, command_id, order_id, env
+        )
+        VALUES ('pos-1:entry_order_voided', 'pos-1', 3, 'ENTRY_ORDER_VOIDED',
+                'cmd-1', ?, 'live')
+        """,
+        (order_id,),
+    )
+    conn.execute(
+        """
+        INSERT INTO position_current (position_id, phase, order_id)
+        VALUES ('pos-1', 'voided', ?)
+        """,
+        (order_id,),
+    )
+
+
 def _schema_current(conn: sqlite3.Connection) -> None:
     conn.executescript(
         """
@@ -346,6 +386,55 @@ def test_accepted_order_with_full_correlation_trace_passes(tmp_path):
     assert result["status"] == "PASS"
     assert result["completion_category"] == "LIVE_ORDER_SUBMITTED"
     assert result["venue_order_id"] == "order-1"
+
+
+def test_resting_order_with_pending_zero_share_projection_passes(tmp_path):
+    module = _load_module()
+    db = tmp_path / "trades.db"
+    with sqlite3.connect(db) as conn:
+        conn.row_factory = sqlite3.Row
+        _schema(conn)
+        _insert_command(conn)
+        _insert_submit_requested(conn)
+        _insert_submit_acked(conn)
+        _insert_pre_submit_envelope(conn)
+        _insert_order_fact(conn)
+        _insert_position_pending(conn)
+
+    with _connect_module_readonly(module, db, tmp_path) as conn:
+        result = module.evaluate(conn, "cmd-1")
+
+    assert result["status"] == "PASS"
+    assert result["completion_category"] == "LIVE_ORDER_SUBMITTED"
+
+
+def test_terminal_no_fill_order_with_voided_projection_passes(tmp_path):
+    module = _load_module()
+    db = tmp_path / "trades.db"
+    with sqlite3.connect(db) as conn:
+        conn.row_factory = sqlite3.Row
+        _schema(conn)
+        _insert_command(conn, state="EXPIRED")
+        _insert_submit_requested(conn)
+        _insert_submit_acked(conn)
+        conn.execute(
+            """
+            INSERT INTO venue_command_events (
+              event_id, command_id, sequence_no, event_type, state_after, occurred_at, payload_json
+            )
+            VALUES ('evt-3', 'cmd-1', 3, 'EXPIRED', 'EXPIRED',
+                    '2026-05-15T12:00:04Z', '{"reason":"venue_terminal_no_fill"}')
+            """
+        )
+        _insert_pre_submit_envelope(conn)
+        _insert_order_fact(conn, state="CANCEL_CONFIRMED")
+        _insert_position_voided(conn)
+
+    with _connect_module_readonly(module, db, tmp_path) as conn:
+        result = module.evaluate(conn, "cmd-1")
+
+    assert result["status"] == "PASS"
+    assert result["completion_category"] == "LIVE_ORDER_TERMINAL_NO_FILL"
 
 
 def test_current_schema_envelope_id_link_passes(tmp_path):
