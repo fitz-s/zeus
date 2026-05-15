@@ -510,6 +510,8 @@ class CollateralLedger:
                 snapshot.raw_balance_payload_hash,
             ),
         )
+        if self._owns_conn:
+            self._conn.commit()
 
 
 _GLOBAL_LEDGER: CollateralLedger | None = None

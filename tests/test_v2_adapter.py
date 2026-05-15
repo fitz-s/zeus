@@ -334,6 +334,36 @@ def test_collateral_payload_rechecks_chain_when_clob_reports_zero_allowance(tmp_
     assert len(rpc_calls) == 2
 
 
+def test_collateral_payload_degrades_when_clob_zero_and_chain_unavailable(tmp_path):
+    from src.venue.polymarket_v2_adapter import PolymarketV2Adapter
+
+    fake = FakeBalanceAllowanceClient(
+        response={"balance": "100000000", "allowance": "0"}
+    )
+
+    def rpc_call(_url, _method, _params):
+        raise RuntimeError("rpc unavailable")
+
+    adapter = PolymarketV2Adapter(
+        host="https://clob.polymarket.com",
+        funder_address="0x1111111111111111111111111111111111111111",
+        signer_key="test-key",
+        chain_id=137,
+        signature_type=2,
+        polygon_rpc_url="https://rpc.test",
+        rpc_call=rpc_call,
+        q1_egress_evidence_path=tmp_path / "unused.txt",
+        client_factory=lambda **kwargs: fake,
+    )
+
+    payload = adapter.get_collateral_payload()
+
+    assert payload["pusd_balance_micro"] == "100000000"
+    assert payload["pusd_allowance_micro"] == 0
+    assert payload["pusd_allowance_source"] == "chain_erc20_unavailable_clob_zero"
+    assert payload["authority_tier"] == "DEGRADED"
+
+
 def test_polymarket_client_defaults_to_current_keychain_funder_signature_type(monkeypatch):
     from src.data import polymarket_client as pm
 

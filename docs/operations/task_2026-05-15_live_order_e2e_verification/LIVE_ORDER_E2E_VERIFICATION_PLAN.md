@@ -636,6 +636,37 @@ Required antibodies:
 Live completion still requires a fresh deployed restart and real command/order
 evidence. This phase only removes the stale collateral snapshot blocker.
 
+## Phase 5E Live Blocker: Uncommitted Global Ledger Refresh
+
+After Phase 5D deployment, startup produced committed fresh collateral rows, but
+heartbeat refreshes did not appear through independent read-only DB checks. The
+global `CollateralLedger` owns a persistent SQLite connection and
+`_persist_snapshot()` inserted rows without committing them. That can split the
+live process's in-memory collateral view from canonical DB truth and from fresh
+executor/verifier connections.
+
+Additional authority hardening:
+
+- If CLOB reports `allowance=0` and chain ERC20 allowance verification is
+  unavailable, the adapter must not label the payload as `CHAIN`. It should
+  produce `DEGRADED` with zero allowance so submit remains fail-closed and the
+  zero is not mistaken for chain truth.
+
+Structural fix:
+
+- `CollateralLedger._persist_snapshot()` commits immediately when the ledger
+  owns the connection (`db_path=` singleton path); caller-owned connections
+  still preserve caller transaction control.
+- CLOB-zero plus chain-unavailable collateral payload becomes `DEGRADED`.
+
+Required antibodies:
+
+- `tests/test_collateral_ledger_global_persistent_conn.py::test_owned_persistent_ledger_refresh_commits_for_fresh_readers`
+- `tests/test_v2_adapter.py::test_collateral_payload_degrades_when_clob_zero_and_chain_unavailable`
+
+Live completion still requires a fresh deployed restart and real command/order
+evidence.
+
 ## Implementation Backlog Derived From This Plan
 
 Likely code/test changes:
