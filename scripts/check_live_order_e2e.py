@@ -172,11 +172,17 @@ def _facts(conn: sqlite3.Connection, table: str, command_id: str) -> list[dict[s
     cols = _columns(conn, table)
     if "command_id" not in cols:
         return []
-    order_column = "observed_at" if "observed_at" in cols else "rowid"
+    order_terms = []
+    if "observed_at" in cols:
+        order_terms.append("observed_at DESC")
+    if "local_sequence" in cols:
+        order_terms.append("local_sequence DESC")
+    order_terms.append("rowid DESC")
+    order_sql = ", ".join(order_terms)
     return [
         dict(row)
         for row in conn.execute(
-            f"SELECT * FROM {table} WHERE command_id = ? ORDER BY {order_column} DESC",
+            f"SELECT * FROM {table} WHERE command_id = ? ORDER BY {order_sql}",
             (command_id,),
         )
     ]

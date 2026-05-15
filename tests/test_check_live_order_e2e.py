@@ -64,7 +64,8 @@ def _schema(conn: sqlite3.Connection) -> None:
           venue_order_id TEXT,
           source TEXT,
           observed_at TEXT,
-          state TEXT
+          state TEXT,
+          local_sequence INTEGER
         );
         CREATE TABLE venue_trade_facts (
           fact_id TEXT PRIMARY KEY,
@@ -75,7 +76,8 @@ def _schema(conn: sqlite3.Connection) -> None:
           filled_size TEXT,
           fill_price TEXT,
           observed_at TEXT,
-          state TEXT
+          state TEXT,
+          local_sequence INTEGER
         );
         CREATE TABLE position_events (
           event_id TEXT PRIMARY KEY,
@@ -157,15 +159,16 @@ def _insert_order_fact(
     source: str = "REST",
     state: str = "RESTING",
     observed_at: str = "2026-05-15T12:00:03Z",
+    local_sequence: int = 1,
 ) -> None:
     conn.execute(
         """
         INSERT INTO venue_order_facts (
-          fact_id, command_id, venue_order_id, source, observed_at, state
+          fact_id, command_id, venue_order_id, source, observed_at, state, local_sequence
         )
-        VALUES (?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         """,
-        (fact_id, command_id, order_id, source, observed_at, state),
+        (fact_id, command_id, order_id, source, observed_at, state, local_sequence),
     )
 
 
@@ -177,17 +180,18 @@ def _insert_trade_fact(
     trade_id: str = "trade-1",
     source: str = "REST",
     state: str = "MATCHED",
+    local_sequence: int = 1,
 ) -> None:
     conn.execute(
         """
         INSERT INTO venue_trade_facts (
           fact_id, command_id, venue_order_id, trade_id, source, filled_size,
-          fill_price, observed_at, state
+          fill_price, observed_at, state, local_sequence
         )
         VALUES ('trade-fact-1', ?, ?, ?, ?, '10.00', '0.42',
-                '2026-05-15T12:00:04Z', ?)
+                '2026-05-15T12:00:04Z', ?, ?)
         """,
-        (command_id, order_id, trade_id, source, state),
+        (command_id, order_id, trade_id, source, state, local_sequence),
     )
 
 
@@ -256,7 +260,8 @@ def _schema_current(conn: sqlite3.Connection) -> None:
           venue_order_id TEXT,
           source TEXT,
           observed_at TEXT,
-          state TEXT
+          state TEXT,
+          local_sequence INTEGER
         );
         CREATE TABLE venue_trade_facts (
           fact_id TEXT PRIMARY KEY,
@@ -267,7 +272,8 @@ def _schema_current(conn: sqlite3.Connection) -> None:
           filled_size TEXT,
           fill_price TEXT,
           observed_at TEXT,
-          state TEXT
+          state TEXT,
+          local_sequence INTEGER
         );
         CREATE TABLE position_events (
           event_id TEXT PRIMARY KEY,
@@ -363,10 +369,11 @@ def test_current_schema_envelope_id_link_passes(tmp_path):
         conn.execute(
             """
             INSERT INTO venue_order_facts (
-              fact_id, command_id, venue_order_id, source, observed_at, state
+              fact_id, command_id, venue_order_id, source, observed_at, state,
+              local_sequence
             )
             VALUES ('fact-current-1', 'cmd-current-1', 'order-current-1', 'WS_USER',
-                    '2026-05-15T12:00:03Z', 'RESTING')
+                    '2026-05-15T12:00:03Z', 'RESTING', 1)
             """
         )
 
@@ -452,12 +459,19 @@ def test_latest_terminal_order_fact_is_not_submitted_completion(tmp_path):
         _insert_submit_requested(conn)
         _insert_submit_acked(conn)
         _insert_pre_submit_envelope(conn)
-        _insert_order_fact(conn, fact_id="fact-1", state="RESTING", observed_at="2026-05-15T12:00:03Z")
+        _insert_order_fact(
+            conn,
+            fact_id="fact-1",
+            state="RESTING",
+            observed_at="2026-05-15T12:00:03Z",
+            local_sequence=1,
+        )
         _insert_order_fact(
             conn,
             fact_id="fact-2",
             state="CANCEL_CONFIRMED",
-            observed_at="2026-05-15T12:00:04Z",
+            observed_at="2026-05-15T12:00:03Z",
+            local_sequence=2,
         )
 
     with module._connect_readonly(db) as conn:
