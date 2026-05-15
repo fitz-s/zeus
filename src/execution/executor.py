@@ -1260,6 +1260,20 @@ def _final_intent_snapshot_metadata(
         requested_size_value=Decimal(str(submitted_shares)),
         limit_price=intent.final_limit_price,
     )
+    if intent.order_policy == "post_only_passive_limit":
+        if not intent.post_only:
+            raise ValueError("FinalExecutionIntent post_only_passive_limit requires post_only")
+        if intent.order_type not in {"GTC", "GTD"}:
+            raise ValueError("FinalExecutionIntent post_only_passive_limit requires GTC/GTD")
+        if sweep.filled_shares != Decimal("0"):
+            raise ValueError(
+                "FinalExecutionIntent post_only_passive_limit would cross executable snapshot book"
+            )
+        if intent.expected_fill_price_before_fee != intent.final_limit_price:
+            raise ValueError(
+                "FinalExecutionIntent passive expected_fill_price_before_fee must equal final_limit_price"
+            )
+        return snapshot.gamma_market_id, snapshot.event_id
     if sweep.depth_status != "PASS" or sweep.average_price is None:
         raise ValueError(
             "FinalExecutionIntent executable depth validation failed: "
@@ -1287,10 +1301,6 @@ def _legacy_entry_intent_from_final(
             "execute_final_intent only supports buy_yes/buy_no entry directions; "
             f"got {intent.direction!r}"
         )
-    if intent.post_only:
-        raise ValueError("execute_final_intent cannot honor post_only on the legacy entry executor")
-    if intent.order_policy == "post_only_passive_limit":
-        raise ValueError("execute_final_intent cannot honor post_only_passive_limit")
     if intent.decision_source_context is None:
         raise ValueError("FinalExecutionIntent missing decision_source_context")
     decision_source_errors = intent.decision_source_context.integrity_errors()
@@ -1335,6 +1345,7 @@ def _legacy_entry_intent_from_final(
         correlation_key=intent.correlation_key or execution_event_id or intent.hypothesis_id,
         decision_source_context=intent.decision_source_context,
         submit_order_type=intent.order_type,
+        post_only=intent.post_only,
     )
 
 
@@ -2249,6 +2260,9 @@ def execute_exit_order(
             conn.close()
 
 
+@capability("on_chain_mutation", lease=True)
+@capability("live_venue_submit", lease=True)
+@protects("INV-21", "INV-04")
 def _live_order(
     trade_id: str,
     intent: ExecutionIntent,
@@ -2268,6 +2282,7 @@ def _live_order(
     """
     from src.architecture.gate_runtime import check as _gate_runtime_check
     _gate_runtime_check("live_venue_submit")
+    _gate_runtime_check("on_chain_mutation")
     from src.data.polymarket_client import PolymarketClient, V2PreflightError
     from src.execution.command_bus import IdempotencyKey, IntentKind
     from src.state.venue_command_repo import insert_command, append_event
@@ -2389,6 +2404,17 @@ def _live_order(
                 submitted_price=intent.limit_price,
                 shares=shares,
                 order_role="entry",
+            )
+        submit_post_only = bool(getattr(intent, "post_only", False))
+        if submit_post_only and order_type not in {"GTC", "GTD"}:
+            return OrderResult(
+                trade_id=trade_id,
+                status="rejected",
+                reason=f"post_only_order_type_mismatch: order_type={order_type}",
+                submitted_price=intent.limit_price,
+                shares=shares,
+                order_role="entry",
+                idempotency_key=idem.value,
             )
         heartbeat_component = _assert_heartbeat_allows_submit(order_type)
         ws_gap_component = _assert_ws_gap_allows_submit(getattr(intent, "market_id", None) or getattr(intent, "token_id", None))
@@ -2518,7 +2544,7 @@ def _live_order(
                 price=intent.limit_price,
                 size=shares,
                 order_type=order_type,
-                post_only=False,
+                post_only=submit_post_only,
                 captured_at=now_str,
             )
             envelope_id = _persist_prebuilt_submit_envelope(
@@ -2554,6 +2580,7 @@ def _live_order(
                 payload={
                     "allocation": _allocation_payload_for_intent(intent),
                     "order_type": order_type,
+                    "post_only": submit_post_only,
                     "execution_capability": _build_execution_capability(
                         action="ENTRY",
                         command_id=command_id,
@@ -2568,7 +2595,11 @@ def _live_order(
                                 "risk_allocator",
                                 risk_allocator_decision,
                             ),
-                            _capability_component("order_type_selection", order_type=order_type),
+                            _capability_component(
+                                "order_type_selection",
+                                order_type=order_type,
+                                post_only=submit_post_only,
+                            ),
                             heartbeat_component,
                             ws_gap_component,
                             collateral_component,
