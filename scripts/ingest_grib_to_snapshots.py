@@ -1,5 +1,5 @@
 # Created: 2026-03-26
-# Last reused/audited: 2026-05-14
+# Last reused/audited: 2026-05-15
 # Authority basis: Phase 4B audited GRIB ingest + PLAN_v4 Phase 6 SourceRunContext linkage.
 #   2026-05-14: added intra-`ingest_track` boundary logs to localize the
 #   2026-05-13 ECMWF wedge (no rglob_end after rglob_start at 17:16:44 PDT,
@@ -45,7 +45,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -669,20 +669,64 @@ def ingest_json_file(
         **contract_evidence,
     )
 
-    # D1+D3: drift_replace promotes the verb to REPLACE when manifest_sha
-    # drift was detected against an existing row. force_replace_env is set above
-    # (before existence check) so ZEUS_INGEST_FORCE_REPLACE=1 bypasses the
-    # skipped_exists short-circuit (PR #85 fix).
-    insert_verb = (
-        "INSERT OR REPLACE"
-        if (overwrite or drift_replace or force_replace_env)
-        else "INSERT OR IGNORE"
-    )
-
     def _db_op() -> None:
+        if overwrite or drift_replace or force_replace_env:
+            updated = conn.execute(
+                """
+                UPDATE ensemble_snapshots_v2
+                SET physical_quantity = :physical_quantity,
+                    observation_field = :observation_field,
+                    valid_time = :valid_time,
+                    available_at = :available_at,
+                    fetch_time = :fetch_time,
+                    lead_hours = :lead_hours,
+                    members_json = :members_json,
+                    model_version = :model_version,
+                    source_id = :source_id,
+                    source_transport = :source_transport,
+                    source_run_id = :source_run_id,
+                    release_calendar_key = :release_calendar_key,
+                    source_cycle_time = :source_cycle_time,
+                    source_release_time = :source_release_time,
+                    source_available_at = :source_available_at,
+                    training_allowed = :training_allowed,
+                    causality_status = :causality_status,
+                    boundary_ambiguous = :boundary_ambiguous,
+                    ambiguous_member_count = :ambiguous_member_count,
+                    manifest_hash = :manifest_hash,
+                    provenance_json = :provenance_json,
+                    members_unit = :members_unit,
+                    local_day_start_utc = :local_day_start_utc,
+                    step_horizon_hours = :step_horizon_hours,
+                    city_timezone = :city_timezone,
+                    settlement_source_type = :settlement_source_type,
+                    settlement_station_id = :settlement_station_id,
+                    settlement_unit = :settlement_unit,
+                    settlement_rounding_policy = :settlement_rounding_policy,
+                    bin_grid_id = :bin_grid_id,
+                    bin_schema_version = :bin_schema_version,
+                    forecast_window_start_utc = :forecast_window_start_utc,
+                    forecast_window_end_utc = :forecast_window_end_utc,
+                    forecast_window_start_local = :forecast_window_start_local,
+                    forecast_window_end_local = :forecast_window_end_local,
+                    forecast_window_local_day_overlap_hours = :forecast_window_local_day_overlap_hours,
+                    forecast_window_attribution_status = :forecast_window_attribution_status,
+                    contributes_to_target_extrema = :contributes_to_target_extrema,
+                    forecast_window_block_reasons_json = :forecast_window_block_reasons_json
+                WHERE city = :city
+                  AND target_date = :target_date
+                  AND temperature_metric = :temperature_metric
+                  AND issue_time = :issue_time
+                  AND data_version = :data_version
+                """,
+                row,
+            ).rowcount
+            if updated:
+                return
+
         conn.execute(
             f"""
-            {insert_verb} INTO ensemble_snapshots_v2
+            INSERT OR IGNORE INTO ensemble_snapshots_v2
             (city, target_date, temperature_metric, physical_quantity, observation_field,
              issue_time, valid_time, available_at, fetch_time, lead_hours,
              members_json, model_version, data_version, source_id, source_transport,
@@ -735,13 +779,15 @@ def ingest_track(
     require_files: bool = True,
     source_run_context: SourceRunContext | None = None,
     ingest_backend: str = "unknown",
+    json_files: Sequence[Path] | None = None,
 ) -> dict:
     cfg = _TRACK_CONFIGS[track]
     metric: MetricIdentity = cfg["metric"]
     model_version: str = cfg["model_version"]
     subdir = json_root / cfg["json_subdir"]
 
-    if not subdir.exists():
+    explicit_json_files = json_files is not None
+    if not explicit_json_files and not subdir.exists():
         msg = f"JSON root not found: {subdir}. Run extract_tigge_mx2t6_localday_max.py first."
         if require_files:
             raise FileNotFoundError(msg)
@@ -757,11 +803,14 @@ def ingest_track(
     # uses a one-shot ThreadPoolExecutor to bound wall-clock cost.
     # The wedged thread leaks until daemon restart — by design; the
     # win is converting a 12h silent hold into a loud TimeoutError.
-    all_json = run_with_timeout(
-        lambda: sorted(subdir.rglob("*.json")),
-        seconds=30.0,
-        label="rglob_json_scan",
-    )
+    if explicit_json_files:
+        all_json = sorted(Path(path) for path in json_files or ())
+    else:
+        all_json = run_with_timeout(
+            lambda: sorted(subdir.rglob("*.json")),
+            seconds=30.0,
+            label="rglob_json_scan",
+        )
 
     # 2026-05-14 ECMWF wedge diagnostic — boundary logs (#A): rglob completed.
     # Pairs with `ingest_stage: rglob_start` in ecmwf_open_data.py. If
@@ -769,9 +818,10 @@ def ingest_track(
     # is in rglob itself (and run_with_timeout should now raise TimeoutError
     # loud — see 2026-05-14 fix in src/runtime/timeout_guard.py).
     logger.info(
-        "ingest_track: rglob_done track=%s files=%d",
+        "ingest_track: rglob_done track=%s files=%d explicit_json_files=%s",
         track,
         len(all_json),
+        explicit_json_files,
     )
 
     # MAJOR-2: fail-loud if no JSON files found — silent zero-row runs mask missing extraction step.

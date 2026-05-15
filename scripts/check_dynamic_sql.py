@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Created: 2026-05-01
-# Last reused/audited: 2026-05-01
+# Last reused/audited: 2026-05-15
 # Authority basis: ultrareview25_remediation 2026-05-01 P2 (security review §10
 #                  "30+ f-string SQL interpolations, no whitelist enforcement")
 # Purpose: per-file baseline of dynamic SQL (f-string interpolation in
@@ -103,7 +103,8 @@ _BASELINE_PER_FILE: dict[str, int] = {
     "src/calibration/store.py": 15,
     # src/contracts/world_schema_validator.py: RETIRED P2 (2026-05-14) — file deleted
     "src/data/daily_obs_append.py": 4,
-    "src/data/executable_forecast_reader.py": 1,
+    # src/data/executable_forecast_reader.py: REPAIRED 2026-05-15 — dynamic
+    # SQL sites removed; keep absent from baseline so the gate stays tightened.
     "src/data/daily_observation_writer.py": 6,
     "src/data/ingest_status_writer.py": 1,
     "src/data/observation_instants_v2_writer.py": 4,

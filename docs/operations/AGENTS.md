@@ -216,6 +216,8 @@ make a surface default-read unless `current_state.md` routes it.
 | `task_2026-05-14_data_daemon_live_efficiency/CRITIC_APPROVAL.md` | packet review evidence | Critic attack and approval for the data-daemon live-efficiency refactor plan; approval is plan-only and phase-gated |
 | `task_2026-05-14_data_daemon_live_efficiency/IMPLEMENTATION_CRITIC_REVIEW.md` | packet review evidence | Implementation critic REVISE-to-APPROVE record for topology forbidden-intent hardening, registry-shape repair, and focused verification gates |
 | `task_2026-05-14_data_daemon_live_efficiency/FORECAST_LIVE_OPERATOR_HANDOFF.md` | packet operator handoff | Repo-only launch/verification shape for future `com.zeus.forecast-live`; not plist installation, launchctl authorization, or production deployment evidence |
+| `task_2026-05-15_data_pipeline_live_rootfix/` | plan packet container | Root-cause plan packet for live data pipeline failure: forecasts DB authority reads, source-run attribution, coverage/readiness ownership, live daemon wiring, and end-to-end proof |
+| `task_2026-05-15_data_pipeline_live_rootfix/DATA_PIPELINE_ROOTFIX_PLAN.md` | topology planning packet | Empirical live-only rootfix plan superseding the 2026-05-14 plan-only approval until live end-to-end proof exists |
 Archived packet evidence (physically moved to `docs/archives/packets/`) is
 listed in `docs/archive_registry.md`; do not re-list those packets here. When
 a packet closes and is archived, remove its row from this registry and the

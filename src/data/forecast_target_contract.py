@@ -168,9 +168,9 @@ def evaluate_producer_coverage(
 
     if source_transport != "ensemble_snapshots_v2_db_reader":
         reason_codes.append("DIRECT_FETCH_ENTRY_PATH_BLOCKED")
-    if source_run_status != "SUCCESS":
+    if source_run_status not in {"SUCCESS", "PARTIAL"}:
         reason_codes.append(f"SOURCE_RUN_{source_run_status}")
-    if source_run_completeness != "COMPLETE":
+    if source_run_completeness not in {"COMPLETE", "PARTIAL"}:
         reason_codes.append(f"SOURCE_RUN_{source_run_completeness}")
     if snapshot_target_date is None:
         reason_codes.append("FUTURE_TARGET_DATE_NOT_COVERED")
