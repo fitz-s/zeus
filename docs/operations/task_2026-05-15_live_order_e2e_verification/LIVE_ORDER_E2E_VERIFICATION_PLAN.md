@@ -595,6 +595,47 @@ Required antibody:
 Live completion still requires a fresh deployed restart and real command/order
 evidence. This phase only removes the false zero-allowance blocker.
 
+## Phase 5D Live Blocker: Stale Collateral Snapshot Before Submit
+
+The latest completed live cycle before the Phase 5C deployment reached
+`final_execution_intent_built` and `executable_snapshot_repriced`, then failed
+at the execution boundary with:
+
+`execution_intent_rejected:collateral_snapshot_stale: age_seconds=934.5 max_age_seconds=60.0`
+
+Root cause:
+
+- `_startup_wallet_check()` refreshes collateral at daemon boot and installs a
+  persistent global `CollateralLedger`.
+- `opening_hunt` runs on a schedule. The existing snapshot can age past the
+  60-second fail-closed freshness window before a candidate reaches submit.
+- `_live_order` correctly checks collateral before command persistence, so the
+  stale snapshot blocks command creation and SDK submit.
+
+Structural fix:
+
+- Keep `_live_order`'s command-persistence ordering intact; do not move SDK
+  construction or order-side-effect risk before the existing guards.
+- Use the already-running venue heartbeat lane to maintain fresh collateral
+  truth for the process-wide ledger.
+- Refresh the global collateral ledger only when the current snapshot is
+  `DEGRADED`, future/invalid, or at least 30 seconds old, and rate-limit refresh
+  attempts themselves to at most once per 30 seconds even after a failed refresh
+  writes a `DEGRADED` snapshot. This keeps the snapshot inside the 60-second
+  submit freshness window without creating a 5-second CLOB balance/allowance
+  polling loop during network/429 incidents.
+- If refresh fails, leave submit fail-closed through the existing collateral
+  preflight semantics.
+
+Required antibodies:
+
+- `tests/test_heartbeat_supervisor.py::test_venue_heartbeat_refreshes_stale_global_collateral`
+- `tests/test_heartbeat_supervisor.py::test_venue_heartbeat_skips_recent_global_collateral`
+- `tests/test_heartbeat_supervisor.py::test_venue_heartbeat_throttles_degraded_collateral_refresh_attempts`
+
+Live completion still requires a fresh deployed restart and real command/order
+evidence. This phase only removes the stale collateral snapshot blocker.
+
 ## Implementation Backlog Derived From This Plan
 
 Likely code/test changes:

@@ -205,6 +205,54 @@ def _write_heartbeat() -> None:
 
 
 _venue_heartbeat_supervisor = None
+_venue_heartbeat_adapter = None
+_last_collateral_heartbeat_refresh_attempt_at = None
+COLLATERAL_HEARTBEAT_REFRESH_SECONDS = 30.0
+
+
+def _refresh_global_collateral_snapshot_if_due(
+    adapter,
+    *,
+    now: datetime | None = None,
+) -> bool:
+    """Keep live collateral truth fresh without polling every heartbeat tick."""
+
+    if adapter is None:
+        return False
+    try:
+        from src.state.collateral_ledger import get_global_ledger
+
+        ledger = get_global_ledger()
+        if ledger is None:
+            return False
+        global _last_collateral_heartbeat_refresh_attempt_at
+        current = now or datetime.now(timezone.utc)
+        last_attempt = _last_collateral_heartbeat_refresh_attempt_at
+        if last_attempt is not None:
+            if last_attempt.tzinfo is None:
+                last_attempt = last_attempt.replace(tzinfo=timezone.utc)
+            attempt_age_seconds = (
+                current - last_attempt.astimezone(timezone.utc)
+            ).total_seconds()
+            if 0 <= attempt_age_seconds < COLLATERAL_HEARTBEAT_REFRESH_SECONDS:
+                return False
+        snapshot = ledger.snapshot()
+        captured_at = snapshot.captured_at
+        if captured_at.tzinfo is None:
+            captured_at = captured_at.replace(tzinfo=timezone.utc)
+        age_seconds = (current - captured_at.astimezone(timezone.utc)).total_seconds()
+        if (
+            snapshot.authority_tier != "DEGRADED"
+            and age_seconds >= 0
+            and age_seconds < COLLATERAL_HEARTBEAT_REFRESH_SECONDS
+        ):
+            return False
+        _last_collateral_heartbeat_refresh_attempt_at = current
+        ledger.refresh(adapter)
+        return True
+    except Exception as exc:
+        logger.warning("CollateralLedger heartbeat refresh failed closed: %s", exc)
+        return False
 
 _user_channel_ingestor = None
 _user_channel_thread = None
@@ -401,7 +449,7 @@ def _start_user_channel_ingestor_if_enabled() -> None:
 @_scheduler_job("venue_heartbeat")
 def _write_venue_heartbeat() -> None:
     """Post the Polymarket venue heartbeat required for live resting orders."""
-    global _venue_heartbeat_supervisor
+    global _venue_heartbeat_supervisor, _venue_heartbeat_adapter
     import asyncio
 
     from src.control.heartbeat_supervisor import (
@@ -416,6 +464,7 @@ def _write_venue_heartbeat() -> None:
             from src.data.polymarket_client import PolymarketClient
 
             adapter = PolymarketClient()._ensure_v2_adapter()
+            _venue_heartbeat_adapter = adapter
             _venue_heartbeat_supervisor = HeartbeatSupervisor(
                 adapter,
                 cadence_seconds=heartbeat_cadence_seconds_from_env(),
@@ -443,6 +492,7 @@ def _write_venue_heartbeat() -> None:
             f"venue heartbeat unhealthy: health={status.health.value}; "
             f"error={status.last_error or ''}"
         )
+    _refresh_global_collateral_snapshot_if_due(_venue_heartbeat_adapter)
 
 
 def _startup_freshness_check() -> None:
