@@ -290,7 +290,7 @@ inventory).
 
 ### P10 — `topology_doctor_module_consolidation`
 
-**Goal**: consolidate the 19 `topology_doctor_*.py` sub-modules where
+**Goal**: consolidate the 18 `topology_doctor_*.py` sub-modules where
 their split cost exceeds their separation benefit. This is REFACTOR, not
 behavior change. The HIDDEN_BRANCH_LESSONS observation that "every fix
 added a sidecar" is partly enabled by the trivial cost of adding another
