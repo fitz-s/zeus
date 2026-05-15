@@ -4,7 +4,48 @@ Created: 2026-05-15
 Last reused or audited: 2026-05-15
 Authority basis: `LIVE_ORDER_E2E_GOAL_PLAN.md`; critic review by Codex subagent `019e2c97-7d37-7dc2-a4c3-f0d9363392ed`.
 
-## Verdict
+## Current Verdict
+
+APPROVE
+
+## Current Review
+
+Reviewer: Codex critic subagent `019e2cdf-18bc-7e92-be49-0ee2cce9a32b`
+
+Scope:
+
+- global VPN/geoblock route proof replacing localhost proxy authority;
+- deterministic geoblock 403 terminalization without weakening timeout/unknown safety;
+- current command `8d82ea02c5b74905`;
+- production recovery capability drift;
+- rollout-gate/evaluator authority divergence;
+- live completion definition tied to accepted/resting/fill plus canonical record-chain proof.
+
+Verdict summary:
+
+The revised plan addresses the seven critic points: it treats `localhost:7890`
+as stale noise and requires process-visible global VPN/geoblock proof;
+terminalizes only proof-backed deterministic geoblock 403 while preserving
+unknown/timeout safety; handles `8d82ea02c5b74905` through explicit predicates
+instead of invented venue absence; audits the broken recovery assumptions;
+forces rollout-gate/evaluator authority reconciliation; defines relationship
+tests and acceptance gates; and keeps completion tied to accepted/resting/fill
+plus canonical record-chain proof.
+
+## Prior Superseded Verdict
+
+SUPERSEDED
+
+The prior `APPROVE` applied to the pre-geoblock plan revision. A later real
+live daemon cycle produced command `8d82ea02c5b74905` and exposed new blockers:
+historical Polymarket geoblock 403 at submit time, sticky
+`SUBMIT_UNKNOWN_SIDE_EFFECT`, production recovery capability drift, and rollout
+gate telemetry/action divergence. Current operator truth is global VPN routing,
+not localhost proxy routing; the revised plan requires process-visible
+`blocked=false` egress proof before retry. These facts materially change the
+plan and invalidated the prior approval as a current gate.
+
+## Original Verdict
 
 APPROVE
 

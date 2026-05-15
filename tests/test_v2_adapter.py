@@ -1,9 +1,10 @@
-# Lifecycle: created=2026-04-27; last_reviewed=2026-04-29; last_reused=2026-04-29
+# Lifecycle: created=2026-04-27; last_reviewed=2026-05-15; last_reused=2026-05-15
 # Purpose: R3 Z2 Polymarket V2 adapter and submission envelope antibodies.
 # Reuse: Run when V2 SDK adapter, envelope provenance, or Q1 preflight behavior changes.
 # Created: 2026-04-27
-# Last reused/audited: 2026-04-29
+# Last reused/audited: 2026-05-15
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/Z2.yaml
+#                  + docs/operations/task_2026-05-15_live_order_e2e_goal/LIVE_ORDER_E2E_GOAL_PLAN.md
 """R3 Z2 Polymarket V2 adapter antibodies."""
 
 from __future__ import annotations
@@ -118,6 +119,24 @@ class FakePostOrderFailureClient(FakeTwoStepClient):
     def post_order(self, order, order_type=None, post_only=False, defer_exec=False):
         self.calls.append(("post_order", order, order_type, post_only, defer_exec))
         raise TimeoutError("post timed out")
+
+
+class FakeOpenOrdersClient:
+    def __init__(self):
+        self.calls = []
+
+    def get_open_orders(self):
+        self.calls.append(("get_open_orders",))
+        return [{"orderID": "ord-open", "status": "LIVE"}]
+
+
+class FakeLegacyGetOrdersClient:
+    def __init__(self):
+        self.calls = []
+
+    def get_orders(self):
+        self.calls.append(("get_orders",))
+        return {"data": [{"id": "ord-legacy", "state": "LIVE"}]}
 
 
 def _intent(direction: Direction = Direction("buy_yes"), token_id: str = "yes-token") -> ExecutionIntent:
@@ -245,6 +264,28 @@ def test_submit_limit_order_snapshot_failure_is_typed_pre_submit_rejection(tmp_p
     assert "get_neg_risk" in (result.error_message or "")
     assert result.envelope.order_id is None
     assert fake.calls == [("get_ok",)]
+
+
+def test_get_open_orders_uses_sdk_get_open_orders_surface(tmp_path):
+    adapter, fake = _adapter(tmp_path, FakeOpenOrdersClient())
+
+    orders = adapter.get_open_orders()
+
+    assert fake.calls == [("get_open_orders",)]
+    assert len(orders) == 1
+    assert orders[0].order_id == "ord-open"
+    assert orders[0].status == "LIVE"
+
+
+def test_get_open_orders_keeps_legacy_get_orders_fallback(tmp_path):
+    adapter, fake = _adapter(tmp_path, FakeLegacyGetOrdersClient())
+
+    orders = adapter.get_open_orders()
+
+    assert fake.calls == [("get_orders",)]
+    assert len(orders) == 1
+    assert orders[0].order_id == "ord-legacy"
+    assert orders[0].status == "LIVE"
 
 
 def test_submit_limit_order_rejects_before_sdk_submit_when_fee_bps_missing(tmp_path):
