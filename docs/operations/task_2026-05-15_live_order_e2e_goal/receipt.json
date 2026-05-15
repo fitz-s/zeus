@@ -1,0 +1,44 @@
+{
+  "task": "live order end-to-end goal packet freeze",
+  "packet": "docs/operations/task_2026-05-15_live_order_e2e_goal/LIVE_ORDER_E2E_GOAL_PLAN.md",
+  "route_source": "codex_plan_plus_critic",
+  "route_evidence": [
+    "docs/operations/task_2026-05-15_live_order_e2e_goal/LIVE_ORDER_E2E_GOAL_PLAN.md",
+    "docs/operations/task_2026-05-15_live_order_e2e_goal/CRITIC_APPROVAL.md",
+    "docs/operations/current_state.md"
+  ],
+  "required_law": [
+    "AGENTS.md",
+    "docs/operations/AGENTS.md",
+    "src/execution/AGENTS.md",
+    "src/state/AGENTS.md"
+  ],
+  "allowed_files": [
+    "docs/operations/AGENTS.md",
+    "docs/operations/current_state.md",
+    "docs/operations/task_2026-05-15_live_order_e2e_goal/LIVE_ORDER_E2E_GOAL_PLAN.md",
+    "docs/operations/task_2026-05-15_live_order_e2e_goal/CRITIC_APPROVAL.md",
+    "docs/operations/task_2026-05-15_live_order_e2e_goal/receipt.json"
+  ],
+  "changed_files": [
+    "docs/operations/AGENTS.md",
+    "docs/operations/current_state.md",
+    "docs/operations/task_2026-05-15_live_order_e2e_goal/LIVE_ORDER_E2E_GOAL_PLAN.md",
+    "docs/operations/task_2026-05-15_live_order_e2e_goal/CRITIC_APPROVAL.md",
+    "docs/operations/task_2026-05-15_live_order_e2e_goal/receipt.json"
+  ],
+  "forbidden_files": [
+    "src/** until Phase 1 implementation routing passes",
+    "scripts/** until Phase 1 implementation routing passes",
+    "tests/** until Phase 1 implementation routing passes",
+    "state/**",
+    "production DB files"
+  ],
+  "tests_evidence": [
+    "python3 scripts/topology_doctor.py --navigation --task \"freeze live order e2e goal packet in current_state and record critic approval\" --intent plan_only --write-intent read_only --files docs/operations/current_state.md docs/operations/AGENTS.md docs/operations/task_2026-05-15_live_order_e2e_goal/LIVE_ORDER_E2E_GOAL_PLAN.md docs/operations/task_2026-05-15_live_order_e2e_goal/CRITIC_APPROVAL.md",
+    "python3 scripts/topology_doctor.py --planning-lock --changed-files docs/operations/current_state.md docs/operations/AGENTS.md docs/operations/task_2026-05-15_live_order_e2e_goal/LIVE_ORDER_E2E_GOAL_PLAN.md docs/operations/task_2026-05-15_live_order_e2e_goal/CRITIC_APPROVAL.md --plan-evidence docs/operations/task_2026-05-15_live_order_e2e_goal/LIVE_ORDER_E2E_GOAL_PLAN.md",
+    "git diff --check"
+  ],
+  "completion_claim": "plan_approved_and_packet_frozen_only",
+  "live_order_e2e_complete": false
+}
