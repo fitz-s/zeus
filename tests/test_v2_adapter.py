@@ -2,8 +2,9 @@
 # Purpose: R3 Z2 Polymarket V2 adapter and submission envelope antibodies.
 # Reuse: Run when V2 SDK adapter, envelope provenance, or Q1 preflight behavior changes.
 # Created: 2026-04-27
-# Last reused/audited: 2026-04-29
+# Last reused/audited: 2026-05-15
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/Z2.yaml
+#                  + docs/operations/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md
 """R3 Z2 Polymarket V2 adapter antibodies."""
 
 from __future__ import annotations
@@ -120,6 +121,20 @@ class FakePostOrderFailureClient(FakeTwoStepClient):
         raise TimeoutError("post timed out")
 
 
+class FakeBalanceAllowanceClient:
+    def __init__(self, response=None):
+        self.response = response or {"balance": "100000000", "allowance": "50000000"}
+        self.calls = []
+
+    def get_balance_allowance(self, params):
+        self.calls.append(("get_balance_allowance", params))
+        return dict(self.response)
+
+    def update_balance_allowance(self, params):
+        self.calls.append(("update_balance_allowance", params))
+        return {}
+
+
 def _intent(direction: Direction = Direction("buy_yes"), token_id: str = "yes-token") -> ExecutionIntent:
     return ExecutionIntent(
         direction=direction,
@@ -149,6 +164,173 @@ def _adapter(tmp_path: Path, fake_client=None):
         q1_egress_evidence_path=evidence,
         client_factory=lambda **kwargs: fake_client,
     ), fake_client
+
+
+def test_adapter_threads_configured_signature_type_to_client_factory(tmp_path):
+    from src.venue.polymarket_v2_adapter import PolymarketV2Adapter
+
+    captured = {}
+
+    def factory(**kwargs):
+        captured.update(kwargs)
+        return FakeOneStepClient()
+
+    evidence = tmp_path / "q1_zeus_egress_2026-05-15.txt"
+    evidence.write_text("daemon host probe ok\n")
+    adapter = PolymarketV2Adapter(
+        host="https://clob.polymarket.com",
+        funder_address="0xfunder",
+        signer_key="test-key",
+        chain_id=137,
+        signature_type=3,
+        q1_egress_evidence_path=evidence,
+        client_factory=factory,
+    )
+
+    assert adapter._sdk_client() is not None
+    assert captured["signature_type"] == 3
+    assert captured["funder_address"] == "0xfunder"
+
+
+def test_adapter_rejects_unknown_signature_type(tmp_path):
+    from src.venue.polymarket_v2_adapter import PolymarketV2Adapter
+
+    with pytest.raises(ValueError, match="unsupported CLOB V2 signature_type"):
+        PolymarketV2Adapter(
+            host="https://clob.polymarket.com",
+            funder_address="0xfunder",
+            signer_key="test-key",
+            signature_type=9,
+            q1_egress_evidence_path=tmp_path / "unused.txt",
+            client_factory=lambda **kwargs: FakeOneStepClient(),
+        )
+
+
+def test_collateral_payload_syncs_and_reads_with_configured_signature_type(tmp_path):
+    from src.venue.polymarket_v2_adapter import PolymarketV2Adapter
+
+    fake = FakeBalanceAllowanceClient()
+    adapter = PolymarketV2Adapter(
+        host="https://clob.polymarket.com",
+        funder_address="0xfunder",
+        signer_key="test-key",
+        chain_id=137,
+        signature_type=3,
+        q1_egress_evidence_path=tmp_path / "unused.txt",
+        client_factory=lambda **kwargs: fake,
+    )
+
+    payload = adapter.get_collateral_payload()
+
+    assert payload["pusd_balance_micro"] == "100000000"
+    assert payload["pusd_allowance_micro"] == "50000000"
+    assert payload["signature_type"] == 3
+    assert [call[0] for call in fake.calls[:2]] == [
+        "update_balance_allowance",
+        "get_balance_allowance",
+    ]
+    for _name, params in fake.calls[:2]:
+        assert getattr(params, "asset_type") == "COLLATERAL"
+        assert getattr(params, "signature_type") == 3
+
+
+def test_collateral_payload_missing_allowance_remains_fail_closed_zero(tmp_path):
+    from src.venue.polymarket_v2_adapter import PolymarketV2Adapter
+
+    fake = FakeBalanceAllowanceClient(response={"balance": "100000000"})
+    adapter = PolymarketV2Adapter(
+        host="https://clob.polymarket.com",
+        funder_address="0xfunder",
+        signer_key="test-key",
+        chain_id=137,
+        signature_type=3,
+        q1_egress_evidence_path=tmp_path / "unused.txt",
+        client_factory=lambda **kwargs: fake,
+    )
+
+    payload = adapter.get_collateral_payload()
+
+    assert payload["pusd_balance_micro"] == "100000000"
+    assert payload["pusd_allowance_micro"] == 0
+    assert payload["authority_tier"] == "CHAIN"
+    assert payload["pusd_allowance_source"] == "missing"
+
+
+def test_collateral_payload_uses_chain_allowance_when_clob_omits_allowance(tmp_path):
+    from src.venue.polymarket_v2_adapter import (
+        POLYGON_EXCHANGE_V2_ADDRESS,
+        POLYGON_NEG_RISK_EXCHANGE_V2_ADDRESS,
+        PolymarketV2Adapter,
+    )
+
+    fake = FakeBalanceAllowanceClient(response={"balance": "100000000"})
+    rpc_calls = []
+    allowances = [25_000_000, 9_000_000]
+
+    def rpc_call(_url, method, params):
+        rpc_calls.append((method, params))
+        return hex(allowances[len(rpc_calls) - 1])
+
+    adapter = PolymarketV2Adapter(
+        host="https://clob.polymarket.com",
+        funder_address="0x1111111111111111111111111111111111111111",
+        signer_key="test-key",
+        chain_id=137,
+        signature_type=2,
+        polygon_rpc_url="https://rpc.test",
+        rpc_call=rpc_call,
+        q1_egress_evidence_path=tmp_path / "unused.txt",
+        client_factory=lambda **kwargs: fake,
+    )
+
+    payload = adapter.get_collateral_payload()
+
+    assert payload["pusd_balance_micro"] == "100000000"
+    assert payload["pusd_allowance_micro"] == 9_000_000
+    assert payload["pusd_allowance_source"] == "chain_erc20_allowance"
+    assert len(rpc_calls) == 2
+    expected_spenders = {
+        POLYGON_EXCHANGE_V2_ADDRESS.lower().removeprefix("0x").rjust(64, "0"),
+        POLYGON_NEG_RISK_EXCHANGE_V2_ADDRESS.lower().removeprefix("0x").rjust(64, "0"),
+    }
+    actual_spenders = {params[0]["data"][-64:] for _method, params in rpc_calls}
+    assert actual_spenders == expected_spenders
+    for method, params in rpc_calls:
+        assert method == "eth_call"
+        data = params[0]["data"]
+        assert data.startswith("0xdd62ed3e")
+        assert "1111111111111111111111111111111111111111" in data
+
+
+def test_polymarket_client_defaults_to_current_keychain_funder_signature_type(monkeypatch):
+    from src.data import polymarket_client as pm
+
+    monkeypatch.setattr(
+        pm,
+        "_resolve_credentials",
+        lambda: {"private_key": "0xabc", "funder_address": "0xfunder"},
+    )
+    monkeypatch.delenv("POLYMARKET_CLOB_V2_SIGNATURE_TYPE", raising=False)
+
+    adapter = pm.PolymarketClient()._ensure_v2_adapter()
+
+    assert adapter.signature_type == 2
+    assert adapter.polygon_rpc_url
+
+
+def test_polymarket_client_honors_signature_type_env(monkeypatch):
+    from src.data import polymarket_client as pm
+
+    monkeypatch.setattr(
+        pm,
+        "_resolve_credentials",
+        lambda: {"private_key": "0xabc", "funder_address": "0xfunder"},
+    )
+    monkeypatch.setenv("POLYMARKET_CLOB_V2_SIGNATURE_TYPE", "1")
+
+    adapter = pm.PolymarketClient()._ensure_v2_adapter()
+
+    assert adapter.signature_type == 1
 
 
 def test_adapter_module_imports_without_py_clob_client_v2_installed(monkeypatch):

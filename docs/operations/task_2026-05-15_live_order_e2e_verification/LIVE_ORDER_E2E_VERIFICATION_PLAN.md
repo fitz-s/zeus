@@ -286,6 +286,53 @@ Pass criteria:
 - If submit-capable, `global_allow_submit=true` and `live_action_authorized=true`.
 - If still blocked, the blocker is backed by a failing test and a targeted implementation plan.
 
+## Phase 5A - pUSD Allowance, Signature Type, and Funder Root Cause
+
+Purpose: resolve the current live blocker without weakening the collateral gate.
+
+Observed live evidence after deploying commit `083801b7d0`:
+
+- `scripts/check_data_pipeline_live_e2e.py --json --live` passes: forecast-live is the single owner, the live reader consumes `ecmwf_open_data:mn2t6_low:2026-05-15T00Z`, and reader latency is sub-millisecond.
+- `scripts/check_live_order_e2e.py --json` fails with `venue_commands row not found`.
+- The latest real live cycle reached `final_execution_intent_built` and `executable_snapshot_repriced`, then rejected one Karachi candidate with:
+  `execution_intent_rejected:pusd_allowance_insufficient: required_micro=3199600 available_allowance_micro=0 allowance_micro=0`.
+- `collateral_ledger_snapshots` show repeated fresh `authority_tier='CHAIN'` rows with `pusd_balance_micro=199396602` and `pusd_allowance_micro=0`.
+- Direct SDK read of `get_balance_allowance(COLLATERAL)` returns balance but no allowance field; the adapter maps absent allowance to zero.
+- The active V2 adapter constructs `ClobClient(... signature_type=2, funder=<keychain funder>)`, while Polymarket CLOB V2 deposit-wallet documentation requires deposit-wallet orders and balance cache sync with `signature_type=3` / `POLY_1271` and the deposit wallet as funder.
+- Follow-up read-only chain proof shows the current keychain funder is a contract address with pUSD balance `199396602` micro and max ERC20 allowance to both CLOB V2 exchange spenders. Under `signature_type=3`, the same funder view has zero CLOB pUSD balance. Therefore the immediate live blocker is not "switch to 3"; it is that CLOB balance/allowance omits `allowance`, and Zeus treated that missing field as zero despite chain allowance being sufficient.
+
+Current structural failure class:
+
+`wallet/funder/signature semantics -> CLOB balance allowance truth -> CollateralLedger snapshot -> executor pre-submit gate`
+
+This is not a forecast-data failure and not a passive-limit intent failure. It is an account-authority boundary failure. Zeus must not paper over it by treating pUSD balance as spendable without allowance.
+
+Required diagnosis before code changes:
+
+1. Confirm the canonical funder address class: EOA, legacy proxy, Gnosis safe, or CLOB V2 deposit wallet.
+2. Confirm the configured signature type that matches that funder class.
+3. Confirm whether CLOB `/balance-allowance` returns nonzero allowance after using the matching signature type.
+4. Confirm whether `update_balance_allowance(COLLATERAL)` is a read/cache-sync call only, or whether any missing approval requires a separate on-chain/deposit-wallet approval batch.
+5. Confirm that no raw secret or unredacted launchd environment dump enters committed evidence.
+
+Implementation rule:
+
+- Make signature type an explicit adapter setting sourced from a single config/env surface. The current live keychain funder defaults to `signature_type=2`; a future deposit-wallet migration must explicitly set `POLYMARKET_CLOB_V2_SIGNATURE_TYPE=3` together with the funded deposit-wallet funder.
+- If CLOB balance/allowance omits `allowance`, read ERC20 allowance from chain for the configured funder and the CLOB V2 exchange spenders. If chain read fails, preserve fail-closed zero allowance.
+- Add relationship tests that prove:
+  - `PolymarketV2Adapter` passes the configured signature type into `ClobClient`.
+  - balance/allowance reads and update calls use the same configured signature type.
+  - missing CLOB allowance falls back to chain ERC20 allowance when available.
+  - a collateral payload missing `allowance` does not silently become a live-ready spend authorization unless the documented account type says allowance is not required. Current assumption: missing allowance is zero and fail-closed.
+  - the executor still blocks before `venue_commands` when pUSD allowance is below notional.
+- If the live wallet truly has allowance zero after the correct signature type and balance-cache update, stop code changes and route through the designed operator/on-chain approval path. Do not fabricate approvals, bypass preflight, or insert commands manually.
+
+Pass criteria:
+
+- The live adapter reports the configured signature type and funder class in sanitized evidence.
+- A fresh `CollateralLedger` snapshot after restart has `authority_tier='CHAIN'`, fresh `captured_at`, enough `pusd_balance_micro`, and enough `pusd_allowance_micro` for the candidate notional, or a named external approval blocker is recorded.
+- Only after the above can Phase 6/7 retry a real live submit.
+
 ## Phase 6 - Candidate and Final Intent Proof
 
 Purpose: prove the evaluator produces an orderable decision from real data.
@@ -489,6 +536,8 @@ Likely code/test changes:
 5. If `entry=requires_intent` remains ambiguous, add typed blocker output at the source that constructs `execution_capability.entry`.
 6. If no selected candidates are produced despite ready data and open markets, add a relationship test around evaluator funnel attribution before changing selection logic.
 7. If the live cycle cannot correlate decision -> final intent -> command -> venue order, add correlation evidence at the narrowest existing boundary rather than inferring from timestamps.
+8. Fix the CLOB V2 account-authority boundary if the live funder requires `POLY_1271` / `signature_type=3` instead of the current hardcoded `signature_type=2`.
+9. Add a sanitized live allowance verifier that reports balance, allowance, signature type, funder class, and update-cache result without exposing credentials.
 
 Potential files, subject to fresh topology routing before edit:
 
@@ -499,6 +548,8 @@ Potential files, subject to fresh topology routing before edit:
 - `src/engine/**` only if entry/funnel root cause is there.
 - `src/execution/**` only if evidence proves submit persistence ordering is broken.
 - `src/state/**` only with K0/K1 planning-lock evidence if command/position truth ownership is touched.
+- `src/venue/polymarket_v2_adapter.py` and `src/data/polymarket_client.py` only for the CLOB V2 signature/funder/allowance authority slice.
+- `tests/test_v2_adapter.py` and `tests/test_collateral_ledger.py` for the signature/allowance relationship antibodies.
 
 Required topology and registry checks for additions:
 

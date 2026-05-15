@@ -1,7 +1,8 @@
 # Created: prior to 2026-04-26
-# Last reused/audited: 2026-05-13
+# Last reused/audited: 2026-05-15
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/Z2.yaml
 #                  + 2026-05-13 collateral_ledger singleton conn lifecycle remediation
+#                  + docs/operations/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md
 """Polymarket CLOB API client. Spec §6.4.
 
 Limit orders ONLY. Auth via macOS Keychain.
@@ -198,6 +199,21 @@ def _resolve_credentials() -> dict:
         raise RuntimeError(f"Cannot resolve Polymarket credentials: {e}") from e
 
 
+def _resolve_clob_v2_signature_type() -> int:
+    raw = os.environ.get("POLYMARKET_CLOB_V2_SIGNATURE_TYPE", "2")
+    try:
+        signature_type = int(raw)
+    except ValueError as exc:
+        raise RuntimeError(
+            f"Invalid POLYMARKET_CLOB_V2_SIGNATURE_TYPE={raw!r}; expected 0, 1, 2, or 3"
+        ) from exc
+    if signature_type not in {0, 1, 2, 3}:
+        raise RuntimeError(
+            f"Invalid POLYMARKET_CLOB_V2_SIGNATURE_TYPE={raw!r}; expected 0, 1, 2, or 3"
+        )
+    return signature_type
+
+
 class PolymarketClient:
     """CLOB client for order placement and orderbook queries."""
 
@@ -222,7 +238,11 @@ class PolymarketClient:
         if adapter is not None:
             return adapter
 
-        from src.venue.polymarket_v2_adapter import DEFAULT_V2_HOST, PolymarketV2Adapter
+        from src.venue.polymarket_v2_adapter import (
+            DEFAULT_POLYGON_RPC_URL,
+            DEFAULT_V2_HOST,
+            PolymarketV2Adapter,
+        )
 
         creds = _resolve_credentials()
         adapter = PolymarketV2Adapter(
@@ -230,6 +250,8 @@ class PolymarketClient:
             funder_address=creds["funder_address"],
             signer_key=creds["private_key"],
             chain_id=int(os.environ.get("POLYMARKET_CHAIN_ID", "137")),
+            signature_type=_resolve_clob_v2_signature_type(),
+            polygon_rpc_url=os.environ.get("POLYGON_RPC_URL", DEFAULT_POLYGON_RPC_URL),
             api_creds=creds.get("api_creds"),
         )
         self._v2_adapter = adapter
