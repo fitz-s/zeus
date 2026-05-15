@@ -564,6 +564,37 @@ Live completion still requires a fresh restart on the deployed commit and a real
 command/order proof from `scripts/check_live_order_e2e.py --json`; this Phase 5B
 fix only removes the current boot-time collateral persistence blocker.
 
+## Phase 5C Live Blocker: CLOB Zero-Allowance Cache vs Chain Truth
+
+After Phase 5B, live startup succeeded and installed the global
+`CollateralLedger`, but a later live collateral refresh wrote
+`pusd_allowance_micro=0` while the same wallet's Polygon ERC20 allowance to both
+V2 spender contracts remained max uint256.
+
+Root cause:
+
+- CLOB `balance-allowance` can return either a missing allowance field or an
+  allowance value of zero for the current contract funder/cache state.
+- Phase 5A only used chain fallback when the allowance field was missing.
+- A returned zero therefore re-entered the ledger as authoritative enough to
+  block live submit, despite chain truth proving spend approval.
+
+Structural fix:
+
+- Treat CLOB collateral allowance as a cache/read surface, not final chain
+  authority, when it is missing or zero.
+- Query the ERC20 allowance for both Polymarket V2 spender contracts whenever
+  CLOB allowance is missing or zero.
+- Use the conservative minimum spender allowance. If chain truth cannot prove a
+  positive allowance, preserve zero/missing and fail closed.
+
+Required antibody:
+
+- `tests/test_v2_adapter.py::test_collateral_payload_rechecks_chain_when_clob_reports_zero_allowance`
+
+Live completion still requires a fresh deployed restart and real command/order
+evidence. This phase only removes the false zero-allowance blocker.
+
 ## Implementation Backlog Derived From This Plan
 
 Likely code/test changes:

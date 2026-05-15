@@ -482,12 +482,18 @@ class PolymarketV2Adapter:
         if raw.get("balance") is None:
             raise V2AdapterError("balance allowance response missing balance")
         allowance_raw = raw.get("allowance")
+        allowance_int = _micro_int_or_none(allowance_raw)
         allowance_source = "clob_balance_allowance"
-        if allowance_raw is None:
-            allowance_raw = self._chain_collateral_allowance_micro()
-            allowance_source = (
-                "chain_erc20_allowance" if allowance_raw is not None else "missing"
-            )
+        if allowance_int is None or allowance_int == 0:
+            chain_allowance = self._chain_collateral_allowance_micro()
+            if chain_allowance is not None:
+                allowance_raw = chain_allowance
+                allowance_source = "chain_erc20_allowance"
+            elif allowance_int is None:
+                allowance_raw = None
+                allowance_source = "missing"
+            else:
+                allowance_raw = allowance_int
 
         balances: dict[str, int] = {}
         allowances: dict[str, int] = {}
@@ -1112,3 +1118,12 @@ def _ctf_balance_units(value: Any) -> int:
         return int((Decimal(str(value or "0")) * Decimal("1000000")).to_integral_value(rounding=ROUND_FLOOR))
     except Exception:
         return 0
+
+
+def _micro_int_or_none(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        return max(0, int(Decimal(str(value))))
+    except Exception:
+        return None
