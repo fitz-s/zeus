@@ -1,5 +1,5 @@
 # Created: 2026-05-03
-# Last reused/audited: 2026-05-14
+# Last reused/audited: 2026-05-15
 # Authority basis: docs/operations/task_2026-05-14_data_daemon_live_efficiency/DATA_DAEMON_LIVE_EFFICIENCY_REFACTOR_PLAN.md
 #   Phase 3 evaluator data-daemon cutover without hot-path entry-readiness writes.
 """Evaluator live-entry forecast cutover guard tests."""
@@ -73,6 +73,12 @@ def _candidate_with_outcomes() -> evaluator_module.MarketCandidate:
         ]
     )
     return candidate
+
+
+def test_period_extrema_spread_value_does_not_touch_missing_legacy_ensemble() -> None:
+    spread = evaluator_module.TemperatureDelta(2.5, "C")
+
+    assert evaluator_module._ensemble_spread_value(spread, None) == 2.5
 
 
 def test_live_mode_blocked_rollout_no_longer_short_circuits_with_rollout_blocker(monkeypatch) -> None:
