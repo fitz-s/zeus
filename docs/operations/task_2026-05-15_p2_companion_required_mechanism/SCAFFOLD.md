@@ -419,7 +419,7 @@ The skip-token mechanism cannot drift because it has no mutable surface to drift
 
 NO. `_check_companion_required` is a NEW INTERNAL HELPER inside the existing P1 `admit()` function. It is invoked between `_apply_composition` and `_apply_severity_overrides` (§3.1 ordering). No new public function, no new module-level entry point, no new CLI flag. The single new module `companion_skip_logger.py` is a logger only — it does not implement admission and is not callable as an admission entry point. Universal §15 G2/G3/G5 guardrails are unchanged: HARD_STOP path untouched, AdmissionDecision struct shape only gains additional issues (existing field), Companion-Loop-Break (§9 source-pair) is orthogonal and unchanged.
 
-The §9 distinction is critical (per §0 INCONSISTENCY-2): §9 handles SOURCE-pair cohorts (file + file); P2 handles SOURCE→AUTHORITY-DOC pair (file + narrative). They run in adjacent steps of the same algorithm, both produce IssueRecords into the same issues list, and are reviewed together by `_apply_severity_overrides`. They are NOT a parallel rail; they are two helpers on the same rail.
+The §9 distinction is critical (per §0 INCONSISTENCY-2): §9 handles SOURCE-pair cohorts (file + file); P2 handles SOURCE→AUTHORITY-DOC pair (file + narrative). They run in adjacent steps of the same algorithm, both produce IssueRecords into the same issues list, and are reviewed together by `_apply_severity_overrides`. They are NOT a parallel rail; they are two helpers on the same rail. Additionally, §3.0 introduces a composition-layer extension inside `composition_rules.apply_composition()` that pre-registers companion_required paths as Rule C1 companions — this operates one step earlier in the pipeline (step 4) to prevent the composition_conflict trap described in §3.0, and is similarly additive: it extends the rule set read by `apply_composition` without adding a new public entry point or a new admission rail.
 
 ### 8.4 Does the error format invite phrasing-game-tax friction?
 
@@ -462,17 +462,19 @@ Sub-packet sizing target: 800–1200 LOC. Allocation:
 | Surface | LOC | Notes |
 |---------|-----|-------|
 | `dataclasses.py` (additive fields) + `profile_loader.py` (parse + validate) | ~80 | Two new fields, two new validation warnings. |
+| `composition_rules.py` (Rule C1 companion pre-registration hook per §3.0) | ~30 | Additive hook inside `apply_composition()`; reads `binding.companion_required[profile_id]` before Rule C1 evaluation. |
 | `admission_engine.py` (`_check_companion_required` + insertion) | ~150 | New helper plus 2-3 line wiring in `admit()`. |
 | `companion_skip_logger.py` (NEW small module, ~150 LOC cap) | ~150 | Atomic JSONL append + env-resolved agent_id. Mirrors `divergence_logger.py` shape. |
 | Weekly digest generator (`scripts/companion_skip_digest.py` or extend `authority_drift_surface`) | ~150 | Markdown rendering of the skip log. |
 | Test fixtures (5 probes per §7) | ~250 | One file per probe, pytest idioms. |
 | Binding YAML entries (5 profile candidates per §6) | ~50 | Append-only edits to `architecture/topology_v_next_binding.yaml`. |
-| **Total** | **~830** | Within 800–1200 budget; ~370 LOC headroom for unforeseen integration glue. |
+| **Total** | **~860** | Within 800–1200 budget; ~340 LOC headroom for unforeseen integration glue. |
 
 No existing module exceeds its P1 cap as a result of P2:
 - `dataclasses.py` (P1 cap 150 LOC) gains ~10 LOC for two field declarations → headroom OK.
 - `profile_loader.py` (P1 cap 300 LOC) gains ~70 LOC for parse + validate → within cap.
 - `admission_engine.py` (P1 cap 600 LOC) gains ~150 LOC for the helper + wiring → within cap.
+- `composition_rules.py` (P1 cap unspecified; P1 SCAFFOLD §1.8 describes it as a small policy module) gains ~30 LOC for the Rule C1 pre-registration hook → within any reasonable cap.
 
 ---
 
@@ -485,8 +487,9 @@ The P2 mechanism is strictly additive against P1:
 - `AdmissionDecision` struct shape is UNCHANGED — `missing_companion` and `companion_skip_token_used` are NEW issue codes flowing into the existing `issues` field.
 - The cli_integration_shim (`scripts/topology_v_next/cli_integration_shim.py`) is UNCHANGED — shadow comparison sees the new issues automatically because `divergence_logger.classify_divergence` reads from the existing struct.
 - The 5 P2 initial profile entries are additive YAML-only edits to `architecture/topology_v_next_binding.yaml`; no removal of existing entries.
+- `composition_rules.apply_composition()` (P1 §1.8) gains an additive Rule C1 pre-registration hook that consumes `binding.companion_required[profile_id]` per §3.0. Strictly more permissive (adds admission path; removes none). Public signature unchanged: `apply_composition(intent, files, candidates, binding) -> tuple[str | None, list[IssueRecord]]`. P1.1 implementer must leave the function open for this extension OR P2.0 ships a one-commit diff against `composition_rules.py` as part of P2.1 implementation.
 
-Confirmed: P2 is a clean additive extension. No P1 regression risk. No P1 SCAFFOLD §7.4 anti-pattern triggered (no `derive_intent_from_phrase`, no phrase-substring check inside `coverage_map.py` or `composition_rules.py`, no `task_phrase` parameter on any new public function).
+Confirmed: P2 is additive at binding/dataclass/admission-engine surfaces plus one `composition_rules.py` hook (per §3.0). No P1 regression risk. No P1 SCAFFOLD §7.4 anti-pattern triggered (no `derive_intent_from_phrase`, no phrase-substring check inside `coverage_map.py` or `composition_rules.py`, no `task_phrase` parameter on any new public function).
 
 ---
 
