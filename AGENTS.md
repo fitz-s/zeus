@@ -94,11 +94,13 @@ Overall level = max of all individual levels. **Genuine computation error → RE
 
 ### Position lifecycle
 
-9 states in `LifecyclePhase` enum:
+10 states in `LifecyclePhase` enum:
 
 `pending_entry → active → day0_window → pending_exit → economically_closed → settled`
 
 Terminal states: `voided`, `quarantined`, `admin_closed`.
+
+Transient/recovery state: `unknown` (may transition to `quarantined` or `voided`; not terminal).
 
 Exit intent is not closure. Settlement is not exit. No code may invent phase
 strings outside the enum.
