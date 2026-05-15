@@ -71,3 +71,24 @@ SUCCESS. New tip: `77fe3a9d0a87b2ce98588b78636d1189b53714fb`
 None. No antibody weakening, no settlement/execution defect, no architectural revert suggested.
 
 Notable: Thread PRRT_kwDOR0ZtZc6CRaQn (VERIFIED guard) touched `test_live_safety_invariants.py` — this is a Tier 0 settlement-adjacent surface. The fix STRENGTHENED the guard (specific pattern match vs substring), not weakened it. No escalation required.
+
+---
+
+## Bundle: TIGGE bridge cherry-pick
+
+**Date:** 2026-05-14
+**Cherry-pick SHA:** `36f4313883` (orig `cd93c1bdfd` from `fix/calibration-tigge-opendata-bridge-2026-05-11`)
+**Files changed:** 2 (`src/calibration/manager.py` +268/-17 LOC, one other)
+**Push tip:** `36f4313883776cdea6f4ff5ba69f66d76c53ceaa`
+
+**Cherry-pick:** SUCCESS (no conflicts — K1 P1/P4 did not touch manager.py)
+
+**pytest results:**
+- tests/test_calibration_manager.py + tests/state/: 72 passed, 4 skipped
+- tests/test_no_raw_world_attach.py + test_table_registry_coherence.py: 18 passed, 1 deselected (pre-existing)
+
+**PR description updated:** YES — appended "## Bundled (post-open additions)" section with TIGGE bridge scope, CI gitleaks note, and reviewer focus addendum citing `_low_purity_doctrine_2026_05_07`.
+
+**New auto-review triggered:** YES (CI checks in pending state post-push: gitleaks, replay-correctness-gate, pr-loc-budget, check).
+
+**STOP-flagged:** None.
