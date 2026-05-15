@@ -45,7 +45,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -735,13 +735,15 @@ def ingest_track(
     require_files: bool = True,
     source_run_context: SourceRunContext | None = None,
     ingest_backend: str = "unknown",
+    json_files: Sequence[Path] | None = None,
 ) -> dict:
     cfg = _TRACK_CONFIGS[track]
     metric: MetricIdentity = cfg["metric"]
     model_version: str = cfg["model_version"]
     subdir = json_root / cfg["json_subdir"]
 
-    if not subdir.exists():
+    explicit_json_files = json_files is not None
+    if not explicit_json_files and not subdir.exists():
         msg = f"JSON root not found: {subdir}. Run extract_tigge_mx2t6_localday_max.py first."
         if require_files:
             raise FileNotFoundError(msg)
@@ -757,11 +759,14 @@ def ingest_track(
     # uses a one-shot ThreadPoolExecutor to bound wall-clock cost.
     # The wedged thread leaks until daemon restart — by design; the
     # win is converting a 12h silent hold into a loud TimeoutError.
-    all_json = run_with_timeout(
-        lambda: sorted(subdir.rglob("*.json")),
-        seconds=30.0,
-        label="rglob_json_scan",
-    )
+    if explicit_json_files:
+        all_json = sorted(Path(path) for path in json_files or ())
+    else:
+        all_json = run_with_timeout(
+            lambda: sorted(subdir.rglob("*.json")),
+            seconds=30.0,
+            label="rglob_json_scan",
+        )
 
     # 2026-05-14 ECMWF wedge diagnostic — boundary logs (#A): rglob completed.
     # Pairs with `ingest_stage: rglob_start` in ecmwf_open_data.py. If
@@ -769,9 +774,10 @@ def ingest_track(
     # is in rglob itself (and run_with_timeout should now raise TimeoutError
     # loud — see 2026-05-14 fix in src/runtime/timeout_guard.py).
     logger.info(
-        "ingest_track: rglob_done track=%s files=%d",
+        "ingest_track: rglob_done track=%s files=%d explicit_json_files=%s",
         track,
         len(all_json),
+        explicit_json_files,
     )
 
     # MAJOR-2: fail-loud if no JSON files found — silent zero-row runs mask missing extraction step.

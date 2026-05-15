@@ -169,8 +169,10 @@ def get_forecasts_connection(
 ) -> sqlite3.Connection:
     """Forecast/harvester-truth co-transactional class DB (zeus-forecasts.db).
 
-    Owns: ensemble_snapshots_v2, source_run, observations, settlements,
-          settlements_v2, market_events_v2, calibration_pairs_v2.
+    Owns: ensemble_snapshots_v2, source_run, source_run_coverage,
+          producer readiness_state, job_run for forecast-live work,
+          observations, settlements, settlements_v2, market_events_v2,
+          calibration_pairs_v2.
     Lock files: state/zeus-forecasts.db.writer-lock.{bulk,live}.
 
     K1 split 2026-05-11: physically separate flock from zeus-world.db so
@@ -743,7 +745,7 @@ def get_connection(
 # CI hook scripts/check_schema_version.py diffs the sqlite_master hash of
 # a fresh-init DB against tests/state/_schema_pinned_hash.txt and fails
 # the PR if SCHEMA_VERSION did not change in lockstep.
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 def init_schema(
@@ -1458,7 +1460,7 @@ def init_schema(
             readiness_recomputed_at TEXT,
             meta_json TEXT NOT NULL DEFAULT '{}',
             recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE(job_name, scheduled_for, source_id, track)
+            UNIQUE(job_name, scheduled_for, source_id, track, release_calendar_key)
         );
         CREATE INDEX IF NOT EXISTS idx_job_run_job_window
             ON job_run(job_name, scheduled_for);
@@ -1760,6 +1762,7 @@ def init_schema(
         CREATE INDEX IF NOT EXISTS idx_venue_command_events_type ON venue_command_events(event_type);
 
     """)
+    _ensure_job_run_release_key_identity(conn)
     init_snapshot_schema(conn)
     init_collateral_schema(conn)
     # R3 M4 exit mutex DDL lives here to keep DB initialization independent of
@@ -2332,10 +2335,10 @@ def assert_schema_current(conn: sqlite3.Connection) -> None:
 # ---------------------------------------------------------------------------
 # K1 forecast DB split — 2026-05-11
 # ---------------------------------------------------------------------------
-# SCHEMA_FORECASTS_VERSION: bumped whenever any of the 7 forecast-class table
-# DDL changes (settlements, observations, source_run in db.py; settlements_v2,
-# market_events_v2, ensemble_snapshots_v2, calibration_pairs_v2 in v2_schema.py).
-SCHEMA_FORECASTS_VERSION: int = 1
+# SCHEMA_FORECASTS_VERSION: bumped whenever forecast-authority DDL changes.
+# Owned tables include the 7 K1 forecast-class tables, the live source
+# authority chain tables, producer readiness_state, and forecast-live job_run.
+SCHEMA_FORECASTS_VERSION: int = 3
 
 
 def _create_settlements(conn: sqlite3.Connection) -> None:
@@ -2493,9 +2496,264 @@ def _create_source_run(conn: sqlite3.Connection) -> None:
     """)
 
 
+def _create_job_run(conn: sqlite3.Connection) -> None:
+    """Create job_run table + indexes. Idempotent forecast-live work journal."""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS job_run (
+            job_run_id TEXT PRIMARY KEY,
+            job_run_key TEXT NOT NULL UNIQUE,
+            job_name TEXT NOT NULL,
+            plane TEXT NOT NULL CHECK (plane IN (
+                'forecast','observation','solar_aux','market_topology',
+                'quote','settlement_truth','source_health','hole_backfill','telemetry_control'
+            )),
+            scheduled_for TEXT NOT NULL,
+            missed_from TEXT,
+            started_at TEXT,
+            finished_at TEXT,
+            lock_key TEXT,
+            lock_acquired_at TEXT,
+            status TEXT NOT NULL CHECK (status IN (
+                'RUNNING','SUCCESS','FAILED','PARTIAL','SKIPPED_NOT_RELEASED','SKIPPED_LOCK_HELD'
+            )),
+            reason_code TEXT,
+            rows_written INTEGER NOT NULL DEFAULT 0,
+            rows_failed INTEGER NOT NULL DEFAULT 0,
+            source_run_id TEXT,
+            source_id TEXT,
+            track TEXT,
+            release_calendar_key TEXT,
+            safe_fetch_not_before TEXT,
+            expected_scope_json TEXT NOT NULL DEFAULT '{}',
+            affected_scope_json TEXT NOT NULL DEFAULT '{}',
+            readiness_impacts_json TEXT NOT NULL DEFAULT '[]',
+            readiness_recomputed_at TEXT,
+            meta_json TEXT NOT NULL DEFAULT '{}',
+            recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(job_name, scheduled_for, source_id, track, release_calendar_key)
+        )
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_job_run_job_window
+            ON job_run(job_name, scheduled_for)
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_job_run_plane_status
+            ON job_run(plane, status, scheduled_for)
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_job_run_source_run
+            ON job_run(source_run_id)
+    """)
+
+
+def _job_run_release_key_identity_current(conn: sqlite3.Connection) -> bool:
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='job_run'"
+    ).fetchone()
+    if not row or not row[0]:
+        return False
+    normalized = " ".join(str(row[0]).replace("\n", " ").split())
+    return "UNIQUE(job_name, scheduled_for, source_id, track, release_calendar_key)" in normalized
+
+
+def _ensure_job_run_release_key_identity(conn: sqlite3.Connection) -> None:
+    """Rebuild legacy job_run UNIQUE scope to include release_calendar_key."""
+    exists = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='job_run'"
+    ).fetchone()
+    if not exists or _job_run_release_key_identity_current(conn):
+        return
+
+    conn.execute("DROP TABLE IF EXISTS job_run_release_key_rebuild")
+    conn.execute("""
+        CREATE TABLE job_run_release_key_rebuild (
+            job_run_id TEXT PRIMARY KEY,
+            job_run_key TEXT NOT NULL UNIQUE,
+            job_name TEXT NOT NULL,
+            plane TEXT NOT NULL CHECK (plane IN (
+                'forecast','observation','solar_aux','market_topology',
+                'quote','settlement_truth','source_health','hole_backfill','telemetry_control'
+            )),
+            scheduled_for TEXT NOT NULL,
+            missed_from TEXT,
+            started_at TEXT,
+            finished_at TEXT,
+            lock_key TEXT,
+            lock_acquired_at TEXT,
+            status TEXT NOT NULL CHECK (status IN (
+                'RUNNING','SUCCESS','FAILED','PARTIAL','SKIPPED_NOT_RELEASED','SKIPPED_LOCK_HELD'
+            )),
+            reason_code TEXT,
+            rows_written INTEGER NOT NULL DEFAULT 0,
+            rows_failed INTEGER NOT NULL DEFAULT 0,
+            source_run_id TEXT,
+            source_id TEXT,
+            track TEXT,
+            release_calendar_key TEXT,
+            safe_fetch_not_before TEXT,
+            expected_scope_json TEXT NOT NULL DEFAULT '{}',
+            affected_scope_json TEXT NOT NULL DEFAULT '{}',
+            readiness_impacts_json TEXT NOT NULL DEFAULT '[]',
+            readiness_recomputed_at TEXT,
+            meta_json TEXT NOT NULL DEFAULT '{}',
+            recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(job_name, scheduled_for, source_id, track, release_calendar_key)
+        )
+    """)
+    conn.execute("""
+        INSERT OR REPLACE INTO job_run_release_key_rebuild (
+            job_run_id, job_run_key, job_name, plane, scheduled_for, missed_from,
+            started_at, finished_at, lock_key, lock_acquired_at, status,
+            reason_code, rows_written, rows_failed, source_run_id,
+            source_id, track, release_calendar_key, safe_fetch_not_before,
+            expected_scope_json, affected_scope_json, readiness_impacts_json,
+            readiness_recomputed_at, meta_json, recorded_at
+        )
+        SELECT
+            job_run_id,
+            job_name || '|' || scheduled_for || '|' ||
+                COALESCE(source_id, '') || '|' || COALESCE(track, '') || '|' ||
+                COALESCE(release_calendar_key, ''),
+            job_name, plane, scheduled_for, missed_from,
+            started_at, finished_at, lock_key, lock_acquired_at, status,
+            reason_code, rows_written, rows_failed, source_run_id,
+            source_id, track, release_calendar_key, safe_fetch_not_before,
+            expected_scope_json, affected_scope_json, readiness_impacts_json,
+            readiness_recomputed_at, meta_json, recorded_at
+        FROM job_run
+    """)
+    conn.execute("DROP TABLE job_run")
+    conn.execute("ALTER TABLE job_run_release_key_rebuild RENAME TO job_run")
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_job_run_job_window
+            ON job_run(job_name, scheduled_for)
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_job_run_plane_status
+            ON job_run(plane, status, scheduled_for)
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_job_run_source_run
+            ON job_run(source_run_id)
+    """)
+
+
+def _create_source_run_coverage(conn: sqlite3.Connection) -> None:
+    """Create source_run_coverage table + indexes. Idempotent forecast authority table."""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS source_run_coverage (
+            coverage_id TEXT PRIMARY KEY,
+            source_run_id TEXT NOT NULL,
+            source_id TEXT NOT NULL,
+            source_transport TEXT NOT NULL,
+            release_calendar_key TEXT NOT NULL,
+            track TEXT NOT NULL,
+            city_id TEXT NOT NULL,
+            city TEXT NOT NULL,
+            city_timezone TEXT NOT NULL,
+            target_local_date TEXT NOT NULL,
+            temperature_metric TEXT NOT NULL CHECK (temperature_metric IN ('high','low')),
+            physical_quantity TEXT NOT NULL,
+            observation_field TEXT NOT NULL,
+            data_version TEXT NOT NULL,
+            expected_members INTEGER NOT NULL,
+            observed_members INTEGER NOT NULL,
+            expected_steps_json TEXT NOT NULL,
+            observed_steps_json TEXT NOT NULL,
+            snapshot_ids_json TEXT NOT NULL DEFAULT '[]',
+            target_window_start_utc TEXT NOT NULL,
+            target_window_end_utc TEXT NOT NULL,
+            completeness_status TEXT NOT NULL CHECK (completeness_status IN (
+                'COMPLETE','PARTIAL','MISSING','HORIZON_OUT_OF_RANGE','NOT_RELEASED'
+            )),
+            readiness_status TEXT NOT NULL CHECK (readiness_status IN (
+                'LIVE_ELIGIBLE','SHADOW_ONLY','BLOCKED','UNKNOWN_BLOCKED'
+            )),
+            reason_code TEXT,
+            computed_at TEXT NOT NULL,
+            expires_at TEXT,
+            recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(
+                source_run_id, source_id, source_transport, release_calendar_key,
+                track, city_id, city_timezone, target_local_date,
+                temperature_metric, data_version
+            )
+        )
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_source_run_coverage_scope
+            ON source_run_coverage(city_id, city_timezone, target_local_date,
+                                   temperature_metric, source_id,
+                                   source_transport, data_version)
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_source_run_coverage_status
+            ON source_run_coverage(readiness_status, completeness_status, computed_at)
+    """)
+
+
+def _create_readiness_state(conn: sqlite3.Connection) -> None:
+    """Create readiness_state table + indexes. Idempotent forecast authority table."""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS readiness_state (
+            readiness_id TEXT PRIMARY KEY,
+            scope_key TEXT NOT NULL UNIQUE,
+            scope_type TEXT NOT NULL CHECK (scope_type IN (
+                'global','source','city_metric','market','strategy','quote'
+            )),
+            city_id TEXT,
+            city TEXT,
+            city_timezone TEXT,
+            target_local_date TEXT,
+            metric TEXT,
+            temperature_metric TEXT CHECK (temperature_metric IS NULL OR temperature_metric IN ('high','low')),
+            physical_quantity TEXT,
+            observation_field TEXT,
+            data_version TEXT,
+            source_id TEXT,
+            track TEXT,
+            source_run_id TEXT,
+            market_family TEXT,
+            event_id TEXT,
+            condition_id TEXT,
+            token_ids_json TEXT NOT NULL DEFAULT '[]',
+            strategy_key TEXT,
+            status TEXT NOT NULL CHECK (status IN (
+                'LIVE_ELIGIBLE','SHADOW_ONLY','BLOCKED','DEGRADED_LOG_ONLY','UNKNOWN_BLOCKED'
+            )),
+            reason_codes_json TEXT NOT NULL DEFAULT '[]',
+            computed_at TEXT NOT NULL,
+            expires_at TEXT,
+            dependency_json TEXT NOT NULL DEFAULT '{}',
+            provenance_json TEXT NOT NULL DEFAULT '{}',
+            recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(
+                scope_type, city_id, city_timezone, target_local_date,
+                temperature_metric, physical_quantity, observation_field,
+                data_version, strategy_key, market_family, source_id, track,
+                condition_id
+            )
+        )
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_readiness_state_entry_scope
+            ON readiness_state(city_id, city_timezone, target_local_date,
+                               temperature_metric, strategy_key,
+                               market_family, condition_id)
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_readiness_state_status_expiry
+            ON readiness_state(status, expires_at)
+    """)
+
+
 _FORECAST_TABLES = (
     "ensemble_snapshots_v2",
     "source_run",
+    "job_run",
+    "source_run_coverage",
+    "readiness_state",
     "observations",
     "settlements",
     "calibration_pairs_v2",
@@ -2579,7 +2837,7 @@ def _ensure_v2_forecast_indexes(conn: sqlite3.Connection) -> None:
 
 
 def init_schema_forecasts(conn: sqlite3.Connection) -> None:
-    """Create all 7 forecast-class tables on zeus-forecasts.db. Idempotent.
+    """Create all forecast-authority tables on zeus-forecasts.db. Idempotent.
 
     Schema-replication strategy (Option A, 2026-05-11 schema-drift antibody):
     Instead of maintaining parallel CREATE TABLE DDL that diverges from world.db
@@ -2593,8 +2851,9 @@ def init_schema_forecasts(conn: sqlite3.Connection) -> None:
     helpers.  The fallback DDL must stay in sync manually; the ATTACH path is
     the authoritative production path.
 
-    Tables owned by this DB post-K1 migration:
-      ensemble_snapshots_v2, source_run, observations, settlements,
+    Tables owned by this DB after the live data-daemon authority split:
+      ensemble_snapshots_v2, source_run, source_run_coverage,
+      producer readiness_state, job_run, observations, settlements,
       calibration_pairs_v2, settlements_v2, market_events_v2
 
     Sets PRAGMA user_version = SCHEMA_FORECASTS_VERSION as the final step.
@@ -2649,6 +2908,9 @@ def init_schema_forecasts(conn: sqlite3.Connection) -> None:
         _create_settlements(conn)
         _create_observations(conn)
         _create_source_run(conn)
+        _create_job_run(conn)
+        _create_source_run_coverage(conn)
+        _create_readiness_state(conn)
 
         from src.state.schema.v2_schema import (
             _create_settlements_v2,
@@ -2660,6 +2922,14 @@ def init_schema_forecasts(conn: sqlite3.Connection) -> None:
         _create_market_events_v2(conn)
         _create_ensemble_snapshots_v2(conn)
         _create_calibration_pairs_v2(conn)
+
+    # Forecast authority post-condition: older world.db schemas or partial K1
+    # copies can omit the live source-chain tables. These helpers are
+    # idempotent and also backfill the hot-path indexes after ATTACH copying.
+    _create_job_run(conn)
+    _ensure_job_run_release_key_identity(conn)
+    _create_source_run_coverage(conn)
+    _create_readiness_state(conn)
 
     # Post-condition equivalence (Option A, 2026-05-14):
     # The ATTACH branch above copies indexes from world_src.sqlite_master; if

@@ -948,12 +948,23 @@ def test_data_daemon_live_efficiency_refactor_routes_to_dedicated_profile():
         "no venue side effects",
         [
             "docs/operations/task_2026-05-14_data_daemon_live_efficiency/DATA_DAEMON_LIVE_EFFICIENCY_REFACTOR_PLAN.md",
+            "docs/operations/task_2026-05-15_data_pipeline_live_rootfix/DATA_PIPELINE_ROOTFIX_PLAN.md",
+            "architecture/script_manifest.yaml",
             "src/ingest_main.py",
             "src/ingest/forecast_live_daemon.py",
             "src/data/ecmwf_open_data.py",
+            "scripts/check_data_pipeline_live_e2e.py",
+            "scripts/ingest_grib_to_snapshots.py",
             "src/data/producer_readiness.py",
             "src/state/readiness_repo.py",
+            "src/state/db.py",
+            "src/state/job_run_repo.py",
+            "tests/conftest.py",
+            "tests/state/_schema_pinned_hash.txt",
+            "tests/state/test_forecast_db_split_invariant.py",
             "tests/test_forecast_live_daemon.py",
+            "tests/test_check_data_pipeline_live_e2e.py",
+            "tests/test_job_run_schema.py",
             "tests/test_ecmwf_open_data_parallel_fetch.py",
         ],
     )
@@ -962,7 +973,16 @@ def test_data_daemon_live_efficiency_refactor_routes_to_dedicated_profile():
     assert digest["admission"]["status"] == "admitted"
     assert "src/ingest/forecast_live_daemon.py" in digest["admission"]["admitted_files"]
     assert "src/data/ecmwf_open_data.py" in digest["admission"]["admitted_files"]
+    assert "scripts/check_data_pipeline_live_e2e.py" in digest["admission"]["admitted_files"]
+    assert "scripts/ingest_grib_to_snapshots.py" in digest["admission"]["admitted_files"]
+    assert "src/state/db.py" in digest["admission"]["admitted_files"]
+    assert "src/state/job_run_repo.py" in digest["admission"]["admitted_files"]
+    assert "tests/conftest.py" in digest["admission"]["admitted_files"]
+    assert "tests/state/_schema_pinned_hash.txt" in digest["admission"]["admitted_files"]
+    assert "tests/state/test_forecast_db_split_invariant.py" in digest["admission"]["admitted_files"]
     assert "tests/test_forecast_live_daemon.py" in digest["admission"]["admitted_files"]
+    assert "tests/test_check_data_pipeline_live_e2e.py" in digest["admission"]["admitted_files"]
+    assert "tests/test_job_run_schema.py" in digest["admission"]["admitted_files"]
 
 
 @pytest.mark.parametrize(

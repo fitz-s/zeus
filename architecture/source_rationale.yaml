@@ -12,6 +12,7 @@ hazard_badges:
   VENUS_CONTROL_ONLY: External writes must flow through Venus/control contracts.
   TRANSITIONAL_DO_NOT_DEEPEN: Transitional compatibility surface; do not deepen dependency.
   SOURCE_TRUTH_PLANE_COLLAPSE: Source roles must not collapse settlement, Day0, hourly, and forecast truth planes.
+  DOUBLE_FORECAST_PRODUCER: More than one live OpenData forecast producer can write the same source/run authority chain.
   WMO_ROUNDING_LAW: Settlement-aligned values must use WMO half-up.
   ORACLE_TRUNCATION_BIAS: HKO/Oracle truncation differences must stay explicit and may not be silently mixed with WMO half-up.
   CALIBRATION_FAMILY_MIXING: Calibration rows must keep metric, cluster, season, source identity, and promotion evidence explicit.
@@ -727,6 +728,16 @@ files:
     zone: K2_runtime
     authority_role: package_marker
     why: Marks data namespace.
+  src/data/dual_run_lock.py:
+    zone: K2_runtime
+    authority_role: forecast_live_dual_owner_lock
+    why: Shared advisory lock key and lock helper for rollout mutual exclusion between legacy ingest_main OpenData jobs and the dedicated forecast-live daemon.
+    hazards:
+    - DOUBLE_FORECAST_PRODUCER
+    downstream:
+    - src/ingest_main.py
+    - src/ingest/forecast_live_daemon.py
+    - tests/test_forecast_live_daemon.py
   src/data/ecmwf_open_data.py:
     zone: K2_runtime
     authority_role: forecast_fetcher

@@ -69,6 +69,31 @@ def test_today_target_row_cannot_authorize_future_market() -> None:
     assert "SNAPSHOT_TARGET_DATE_MISMATCH" in decision.reason_codes
 
 
+def test_target_complete_coverage_survives_run_global_partial_status() -> None:
+    contract = _contract_module()
+
+    decision = contract.evaluate_producer_coverage(
+        city_id="london",
+        city_timezone="Europe/London",
+        target_local_date=date(2026, 5, 8),
+        temperature_metric="high",
+        source_id="ecmwf_open_data",
+        source_transport="ensemble_snapshots_v2_db_reader",
+        source_run_status="PARTIAL",
+        source_run_completeness="PARTIAL",
+        snapshot_target_date=date(2026, 5, 8),
+        snapshot_metric="high",
+        expected_steps=(150, 156, 162, 168),
+        observed_steps=(150, 156, 162, 168),
+        expected_members=51,
+        observed_members=51,
+        has_source_linkage=True,
+    )
+
+    assert decision.status == "LIVE_ELIGIBLE"
+    assert decision.reason_codes == ("FUTURE_TARGET_DATE_COVERED",)
+
+
 def test_city_local_day_window_computes_required_steps() -> None:
     contract = _contract_module()
 

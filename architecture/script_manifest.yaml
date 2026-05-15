@@ -30,6 +30,7 @@ required_effective_fields:
 canonical_db_targets:
   - state/zeus_trades.db
   - state/zeus-world.db
+  - state/zeus-forecasts.db
   - state/risk_state.db
   - state/zeus.db
   - state/zeus-legacy.db
@@ -367,6 +368,26 @@ scripts:
   check_advisory_gates.py: {class: enforcement}
   compare_diurnal_v1_v2.py: {class: diagnostic}
   hko_ingest_tick.py: {class: etl_writer, dangerous_if_run: true, apply_flag: implicit, target_db: state/zeus-world.db, unguarded_write_rationale: "Standalone HKO accumulator tick + observation_instants_v2 projection; idempotent via ON CONFLICT / UNIQUE constraints. Designed for cron invocation independent of trading daemon."}
+  check_data_pipeline_live_e2e.py:
+    # Created: 2026-05-15
+    # Last reused or audited: 2026-05-15
+    # Authority basis: docs/operations/task_2026-05-15_data_pipeline_live_rootfix/DATA_PIPELINE_ROOTFIX_PLAN.md
+    class: diagnostic
+    lifecycle: long_lived
+    status: active
+    authority_scope: diagnostic_non_promotion
+    canonical_command: "python3 scripts/check_data_pipeline_live_e2e.py --json --live"
+    read_targets: [state/zeus_trades.db, state/zeus-world.db, state/zeus-forecasts.db, process_table]
+    write_targets: [stdout]
+    dry_run_default: true
+    apply_flag: null
+    target_db: null
+    external_inputs: [live_process_table, live_runtime_dbs]
+    dangerous_if_run: false
+    promotion_barrier: "Read-only live diagnostic; cannot authorize venue actions or DB truth mutation."
+    required_helpers: [src.data.executable_forecast_reader.read_executable_forecast]
+    required_tests: []
+    reason: "Live-only data pipeline E2E gate for forecast source_run -> coverage/readiness -> executable reader -> evaluator-cutover evidence. It reads real live DB files and process ownership, emits stdout JSON, and fails closed on shadow/legacy-owner/authority-chain gaps."
   check_daemon_heartbeat.py:
     class: runtime_support
     module_owner: scripts

@@ -14,7 +14,7 @@ from src.contracts.ensemble_snapshot_provenance import ECMWF_OPENDATA_HIGH_DATA_
 from src.data.executable_forecast_reader import read_executable_forecast, read_executable_forecast_snapshot
 from src.data.forecast_target_contract import build_forecast_target_scope
 from src.data.producer_readiness import PRODUCER_READINESS_STRATEGY_KEY
-from src.state.db import init_schema
+from src.state.db import init_schema, init_schema_forecasts
 from src.state.readiness_repo import write_readiness_state
 from src.state.schema.v2_schema import apply_v2_schema
 from src.state.source_run_coverage_repo import write_source_run_coverage
@@ -427,6 +427,58 @@ def test_full_reader_returns_evidence_bundle_with_separate_readiness_ids() -> No
     ens_result = result.bundle.to_ens_result()
     assert ens_result["period_extrema_source"] == "local_calendar_day_member_extrema"
     assert ens_result["raw_payload_hash"] == "a" * 64
+
+
+def test_full_reader_prefers_attached_forecasts_authority_and_keeps_entry_local(tmp_path) -> None:
+    conn = _conn()
+    _insert_readiness(
+        conn,
+        strategy_key="entry_forecast",
+        readiness_id="entry-readiness-1",
+        market_family="family-1",
+        condition_id="condition-123",
+    )
+    forecasts_path = tmp_path / "forecasts.db"
+    forecasts_conn = sqlite3.connect(forecasts_path)
+    forecasts_conn.row_factory = sqlite3.Row
+    init_schema_forecasts(forecasts_conn)
+    _insert_snapshot(forecasts_conn)
+    _insert_source_run(forecasts_conn)
+    _insert_coverage(forecasts_conn)
+    _insert_readiness(
+        forecasts_conn,
+        strategy_key=PRODUCER_READINESS_STRATEGY_KEY,
+        readiness_id="producer-readiness-forecast",
+        dependency_json={"coverage_id": "coverage-1"},
+    )
+    forecasts_conn.commit()
+    forecasts_conn.close()
+    conn.execute("ATTACH DATABASE ? AS forecasts", (str(forecasts_path),))
+
+    result = _read_full(conn)
+
+    assert result.ok
+    assert result.bundle is not None
+    evidence = result.bundle.evidence
+    assert evidence.producer_readiness_id == "producer-readiness-forecast"
+    assert evidence.entry_readiness_id == "entry-readiness-1"
+
+
+def test_full_reader_does_not_fallback_to_main_shadow_when_forecasts_attached(tmp_path) -> None:
+    conn = _conn()
+    _insert_full_reader_fixture(conn)
+    forecasts_path = tmp_path / "forecasts.db"
+    forecasts_conn = sqlite3.connect(forecasts_path)
+    forecasts_conn.row_factory = sqlite3.Row
+    init_schema_forecasts(forecasts_conn)
+    forecasts_conn.commit()
+    forecasts_conn.close()
+    conn.execute("ATTACH DATABASE ? AS forecasts", (str(forecasts_path),))
+
+    result = _read_full(conn)
+
+    assert not result.ok
+    assert result.reason_code == "PRODUCER_READINESS_MISSING"
 
 
 def test_full_reader_blocks_missing_entry_readiness() -> None:

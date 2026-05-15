@@ -39,6 +39,15 @@ logger = logging.getLogger("zeus.ingest")
 # Module-level scheduler reference for SIGTERM handler
 # ---------------------------------------------------------------------------
 _scheduler: Any | None = None
+FORECAST_LIVE_OWNER_ENV = "ZEUS_FORECAST_LIVE_OWNER"
+
+
+def _forecast_live_owner() -> str:
+    return os.environ.get(FORECAST_LIVE_OWNER_ENV, "ingest_main").strip().lower() or "ingest_main"
+
+
+def _ingest_main_owns_opendata() -> bool:
+    return _forecast_live_owner() != "forecast_live"
 
 
 def _graceful_shutdown(signum, frame) -> None:
@@ -481,8 +490,8 @@ def _run_opendata_track(
     _collector=None,
 ) -> dict:
     """Legacy ingest-main OpenData wrapper kept mutually exclusive with forecast-live-daemon."""
-    from src.data.ecmwf_open_data import OPENDATA_DAEMON_LOCK_KEY, SOURCE_ID, collect_open_ens_cycle
-    from src.data.dual_run_lock import acquire_lock
+    from src.data.dual_run_lock import OPENDATA_DAEMON_LOCK_KEY, acquire_lock
+    from src.data.ecmwf_open_data import SOURCE_ID, collect_open_ens_cycle
 
     if _is_source_paused(SOURCE_ID):
         logger.info("_run_opendata_track(%s): paused_by_control_plane", track)
@@ -1139,16 +1148,23 @@ def main() -> None:
     # may add additional refreshes; we still register the per-track ticks at
     # 07:30/07:35 unconditionally so the freshness invariant holds even if
     # settings is misconfigured.
-    _scheduler.add_job(
-        _opendata_mx2t6_cycle, "cron",
-        hour=7, minute=30, id="ingest_opendata_daily_mx2t6",
-        max_instances=1, coalesce=True, misfire_grace_time=3600,
-    )
-    _scheduler.add_job(
-        _opendata_mn2t6_cycle, "cron",
-        hour=7, minute=35, id="ingest_opendata_daily_mn2t6",
-        max_instances=1, coalesce=True, misfire_grace_time=3600,
-    )
+    if _ingest_main_owns_opendata():
+        _scheduler.add_job(
+            _opendata_mx2t6_cycle, "cron",
+            hour=7, minute=30, id="ingest_opendata_daily_mx2t6",
+            max_instances=1, coalesce=True, misfire_grace_time=3600,
+        )
+        _scheduler.add_job(
+            _opendata_mn2t6_cycle, "cron",
+            hour=7, minute=35, id="ingest_opendata_daily_mn2t6",
+            max_instances=1, coalesce=True, misfire_grace_time=3600,
+        )
+    else:
+        logger.info(
+            "OpenData daily jobs not registered in ingest_main: %s=%s",
+            FORECAST_LIVE_OWNER_ENV,
+            _forecast_live_owner(),
+        )
 
     # TIGGE archive backfill — 14:00 UTC, target = today - 2 days (post-embargo).
     # Distinct from the live Open Data feed; serves the Platt training set and
@@ -1180,12 +1196,19 @@ def main() -> None:
 
     # Open Data boot-time catch-up — fires once at daemon start so a fresh
     # ingest doesn't wait until the next 07:30 cron tick to backfill.
-    _scheduler.add_job(
-        _opendata_startup_catch_up, "date",
-        run_date=_dt_now.now(),
-        id="ingest_opendata_startup_catch_up",
-        max_instances=1, coalesce=True, misfire_grace_time=None,
-    )
+    if _ingest_main_owns_opendata():
+        _scheduler.add_job(
+            _opendata_startup_catch_up, "date",
+            run_date=_dt_now.now(),
+            id="ingest_opendata_startup_catch_up",
+            max_instances=1, coalesce=True, misfire_grace_time=None,
+        )
+    else:
+        logger.info(
+            "OpenData startup job not registered in ingest_main: %s=%s",
+            FORECAST_LIVE_OWNER_ENV,
+            _forecast_live_owner(),
+        )
 
     # Phase 2: source health probe every 10 minutes (§2.1) — APPENDED END
     # File-only writer (state/source_health.json) — runs on "fast" executor

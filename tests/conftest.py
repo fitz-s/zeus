@@ -217,6 +217,7 @@ _WLA_SQLITE_CONNECT_ALLOWLIST = frozenset({
     "scripts/generate_monthly_bounds.py",           # read_only_ro_uri
     "scripts/learning_loop_observation_weekly.py",  # read_only_ro_uri
     "scripts/check_schema_version.py",               # in_memory_only (":memory:" only — schema drift CI gate)
+    "scripts/check_data_pipeline_live_e2e.py",      # read_only_ro_uri (live E2E verifier opens runtime DBs with mode=ro only)
     "scripts/produce_activation_evidence.py",       # in_memory_only (":memory:" only)
     "scripts/replay_correctness_gate.py",           # read_only (SELECT-only)
     "scripts/state_census.py",                      # read_only_ro_uri
@@ -334,12 +335,17 @@ def _wla_scan_all() -> dict:
             except OSError:
                 continue
             rel = py_file.relative_to(_WLA_REPO_ROOT).as_posix()
+            allowlisted = rel in _WLA_SQLITE_CONNECT_ALLOWLIST
             cached = cache.get(rel)
-            if cached and cached.get("mtime") == mtime:
+            if cached and cached.get("mtime") == mtime and cached.get("allowlisted") == allowlisted:
                 violations = cached["violations"]
             else:
                 violations = _wla_scan_file(py_file)
-            new_cache[rel] = {"mtime": mtime, "violations": violations}
+            new_cache[rel] = {
+                "mtime": mtime,
+                "allowlisted": allowlisted,
+                "violations": violations,
+            }
             for kind, linenos in violations.items():
                 for lineno in linenos:
                     aggregate.setdefault(kind, []).append(f"{rel}:{lineno}")

@@ -1,6 +1,5 @@
-# Lifecycle: created=2026-04-30; last_reviewed=2026-05-14; last_reused=2026-05-14
-# Authority basis: docs/operations/task_2026-05-14_data_daemon_live_efficiency/DATA_DAEMON_LIVE_EFFICIENCY_REFACTOR_PLAN.md
-#   Phase 2 OpenData forecast-live/legacy daemon mutual exclusion.
+# Lifecycle: created=2026-04-30; last_reviewed=2026-04-30; last_reused=2026-05-14
+# Authority basis: docs/operations/task_2026-04-30_two_system_independence/design.md §5 Phase 1 + docs/operations/task_2026-05-08_deep_alignment_audit/DATA_DAEMON_LIVE_EFFICIENCY_REFACTOR_PLAN.md §6.2.
 """Advisory per-table file lock for dual-run Phase 1.
 
 During Phase 1 both the monolith (src.main) and the ingest daemon
@@ -24,7 +23,7 @@ Contract:
 - Returns ``True`` if lock acquired, ``False`` if held by another process.
 - Releases on context exit, or on process death (OS auto-release).
 - Known tables: daily_obs, hourly_instants, solar_daily, forecasts_daily,
-  hole_scanner, etl_recalibrate, ecmwf_open_data.
+  hole_scanner, etl_recalibrate.
 """
 
 from __future__ import annotations
@@ -37,6 +36,8 @@ from typing import Generator
 
 logger = logging.getLogger(__name__)
 
+OPENDATA_DAEMON_LOCK_KEY = "opendata_live_forecast"
+
 _KNOWN_TABLES = frozenset(
     {
         "daily_obs",
@@ -45,7 +46,6 @@ _KNOWN_TABLES = frozenset(
         "forecasts_daily",
         "hole_scanner",
         "etl_recalibrate",
-        "ecmwf_open_data",
         # Phase 1.5: harvester split — ingest-side truth writer + trading-side P&L resolver
         "harvester_truth",
         "harvester_pnl",
@@ -53,6 +53,9 @@ _KNOWN_TABLES = frozenset(
         "source_health",
         "drift_detector",
         "ingest_status",
+        # Data-daemon live-efficiency refactor: mutual exclusion between
+        # legacy ingest_main and dedicated forecast-live OpenData owners.
+        OPENDATA_DAEMON_LOCK_KEY,
     }
 )
 
