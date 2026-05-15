@@ -41,6 +41,7 @@ REJECTED_OR_UNKNOWN_STATES = frozenset(
 ACCEPTED_EVENT_TYPES = frozenset(
     {"POST_ACKED", "SUBMIT_ACKED", "PARTIAL_FILL_OBSERVED", "FILL_CONFIRMED"}
 )
+ORDER_ID_KEYS = ("venue_order_id", "order_id", "orderID", "orderId", "id")
 LIVE_PROOF_SOURCES = frozenset({"REST", "WS_USER", "WS_MARKET", "DATA_API", "CHAIN"})
 OPEN_ORDER_FACT_STATES = frozenset({"LIVE", "RESTING"})
 FILL_ORDER_FACT_STATES = frozenset({"MATCHED", "PARTIALLY_MATCHED"})
@@ -313,26 +314,47 @@ def _has_matching_position_current(
     return False
 
 
-def _order_identity(
+def _order_id_values(payload: dict[str, Any]) -> list[str]:
+    values: list[str] = []
+    for key in ORDER_ID_KEYS:
+        value = payload.get(key)
+        if value:
+            values.append(str(value))
+    return values
+
+
+def _order_identity_evidence(
     command: dict[str, Any],
     events: list[dict[str, Any]],
     envelopes: list[dict[str, Any]],
-) -> str:
-    command_order_id = str(command.get("venue_order_id") or "")
-    if command_order_id:
-        return command_order_id
+) -> tuple[str, dict[str, list[str]]]:
+    evidence: dict[str, list[str]] = {
+        "command": _order_id_values(command),
+        "accepted_events": [],
+        "envelopes": [],
+    }
     for event in reversed(events):
+        if str(event.get("event_type") or "") not in ACCEPTED_EVENT_TYPES:
+            continue
         payload = _json_dict(event.get("payload_json") or event.get("payload"))
-        for key in ("venue_order_id", "order_id", "orderID", "orderId", "id"):
-            value = payload.get(key)
-            if value:
-                return str(value)
+        evidence["accepted_events"].extend(_order_id_values(payload))
     for envelope in reversed(envelopes):
-        for key in ("order_id", "orderID", "orderId", "id"):
-            value = envelope.get(key)
-            if value:
-                return str(value)
-    return ""
+        evidence["envelopes"].extend(_order_id_values(envelope))
+        evidence["envelopes"].extend(_order_id_values(_json_dict(envelope.get("raw_response_json"))))
+    for source in ("command", "accepted_events", "envelopes"):
+        if evidence[source]:
+            return evidence[source][0], evidence
+    return "", evidence
+
+
+def _order_identity_consistent(evidence: dict[str, list[str]]) -> bool:
+    values = {
+        value
+        for source_values in evidence.values()
+        for value in source_values
+        if value
+    }
+    return bool(values) and len(values) == 1
 
 
 def _has_pre_submit_envelope(command: dict[str, Any], envelopes: list[dict[str, Any]]) -> bool:
@@ -365,7 +387,7 @@ def evaluate(conn: sqlite3.Connection, command_id: str | None = None) -> dict[st
     order_facts = _facts(conn, "venue_order_facts", cmd_id)
     trade_facts = _facts(conn, "venue_trade_facts", cmd_id)
     event_types = {str(event.get("event_type") or "") for event in events}
-    order_id = _order_identity(command, events, envelopes)
+    order_id, order_identity_evidence = _order_identity_evidence(command, events, envelopes)
     matching_order_facts = _matching_live_order_facts(order_facts, order_id)
     latest_live_order_fact = _latest_live_order_fact(order_facts, order_id)
     latest_live_order_fact_state = str(latest_live_order_fact.get("state") or "") if latest_live_order_fact else ""
@@ -421,6 +443,13 @@ def evaluate(conn: sqlite3.Connection, command_id: str | None = None) -> dict[st
         )
     )
     checks.append(Check("venue_order_identity_present", "PASS" if order_id else "FAIL", order_id or "missing"))
+    checks.append(
+        Check(
+            "venue_order_identity_consistent",
+            "PASS" if _order_identity_consistent(order_identity_evidence) else "FAIL",
+            json.dumps(order_identity_evidence, sort_keys=True),
+        )
+    )
     checks.append(
         Check(
             "latest_venue_order_fact_open",
@@ -500,6 +529,7 @@ def evaluate(conn: sqlite3.Connection, command_id: str | None = None) -> dict[st
         "events": events,
         "envelopes": envelopes,
         "venue_order_id": order_id,
+        "venue_order_identity_evidence": order_identity_evidence,
         "venue_order_facts": order_facts,
         "venue_trade_facts": trade_facts,
         "position_events": position_events,

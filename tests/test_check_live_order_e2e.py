@@ -32,6 +32,7 @@ def _schema(conn: sqlite3.Connection) -> None:
         CREATE TABLE venue_commands (
           command_id TEXT PRIMARY KEY,
           state TEXT NOT NULL,
+          venue_order_id TEXT,
           decision_id TEXT,
           idempotency_key TEXT,
           snapshot_id TEXT,
@@ -97,17 +98,23 @@ def _schema(conn: sqlite3.Connection) -> None:
     )
 
 
-def _insert_command(conn: sqlite3.Connection, *, state: str = "ACKED", decision_id: str = "decision-1") -> None:
+def _insert_command(
+    conn: sqlite3.Connection,
+    *,
+    state: str = "ACKED",
+    decision_id: str = "decision-1",
+    venue_order_id: str | None = None,
+) -> None:
     conn.execute(
         """
         INSERT INTO venue_commands (
-          command_id, state, decision_id, idempotency_key, snapshot_id, side,
-          token_id, limit_price, size, created_at, updated_at
+          command_id, state, venue_order_id, decision_id, idempotency_key,
+          snapshot_id, side, token_id, limit_price, size, created_at, updated_at
         )
-        VALUES ('cmd-1', ?, ?, 'idem-1', 'snap-1', 'BUY', 'token-1', '0.42',
+        VALUES ('cmd-1', ?, ?, ?, 'idem-1', 'snap-1', 'BUY', 'token-1', '0.42',
                 '10.00', '2026-05-15T12:00:00Z', '2026-05-15T12:00:02Z')
         """,
-        (state, decision_id),
+        (state, venue_order_id, decision_id),
     )
 
 
@@ -123,7 +130,7 @@ def _insert_submit_requested(conn: sqlite3.Connection) -> None:
     )
 
 
-def _insert_submit_acked(conn: sqlite3.Connection) -> None:
+def _insert_submit_acked(conn: sqlite3.Connection, *, order_id: str = "order-1") -> None:
     conn.execute(
         """
         INSERT INTO venue_command_events (
@@ -132,7 +139,7 @@ def _insert_submit_acked(conn: sqlite3.Connection) -> None:
         VALUES ('evt-2', 'cmd-1', 'SUBMIT_ACKED', 'ACKED',
                 '2026-05-15T12:00:02Z', ?)
         """,
-        (json.dumps({"venue_order_id": "order-1"}),),
+        (json.dumps({"venue_order_id": order_id}),),
     )
 
 
@@ -447,6 +454,29 @@ def test_order_fact_order_id_mismatch_is_not_completion(tmp_path):
 
     assert result["status"] == "FAIL"
     assert result["completion_category"] == "LIVE_ORDER_ACKED_MISSING_ORDER_FACT"
+
+
+def test_command_and_accepted_event_order_id_mismatch_is_not_completion(tmp_path):
+    module = _load_module()
+    db = tmp_path / "trades.db"
+    with sqlite3.connect(db) as conn:
+        conn.row_factory = sqlite3.Row
+        _schema(conn)
+        _insert_command(conn, venue_order_id="order-command")
+        _insert_submit_requested(conn)
+        _insert_submit_acked(conn, order_id="order-event")
+        _insert_pre_submit_envelope(conn)
+        _insert_order_fact(conn, order_id="order-command")
+
+    with module._connect_readonly(db) as conn:
+        result = module.evaluate(conn, "cmd-1")
+
+    assert result["status"] == "FAIL"
+    assert result["completion_category"] == "NO_LIVE_ORDER_PROOF"
+    assert any(
+        check["name"] == "venue_order_identity_consistent" and check["status"] == "FAIL"
+        for check in result["checks"]
+    )
 
 
 def test_latest_terminal_order_fact_is_not_submitted_completion(tmp_path):
