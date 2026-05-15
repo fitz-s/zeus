@@ -1,89 +1,50 @@
 # Zeus Mission Dashboard
 
-As of: **2026-05-14 ~06:30 UTC** · Branch `fix/calibration-vs-obs-relative-tolerance-2026-05-12` @ `14ace08836` · 56 commits ahead of origin
+As of: **2026-05-15** · Branch `main` @ `8b3c3c2c59` · fully aligned
 Owners: Fitz (operator) · AI (autonomous loop) · launchd (daemons)
 
 ---
 
-## 🔴 Active blocker (VACUUM IN FLIGHT)
+## Current mainline state
 
-**ECMWF flow** — REINDEX didn't solve. Lane C deeper sample shows daemon was in MIXED workload (33 libsystem_kernel, 10 _ssl, 7 _zoneinfo, 6 _cyutility, 2 _sqlite3, 2 pandas), not single-SQL bottleneck. Root cause is compounded slowness across SSL fetch + datetime parse + pandas + SQL dedup checks per-file.
+**Main HEAD**: `8b3c3c2c59` merge: data daemon live verified
+- K1 forecast DB split: COMPLETE (PR #114 + PR #116 merged)
+- Data daemon authority chain: COMPLETE (PR #117 merged)
+- INV-37 (cross-DB write seam audit): IN FORCE
+- Operator script K1-broken paths: FIXED 2026-05-15 (this commit — healthcheck.py, verify_truth_surfaces.py, venus_sensing_report.py)
 
-**Actions in flight (07:07 UTC)**:
-- ✅ Live + ingest both unloaded (live unload approved as part of "并行做a和c")
-- ✅ WAL TRUNCATE checkpoint complete (0|0|0)
-- ⏳ VACUUM INTO `state/zeus-forecasts.vacuumed.db` running (PID **5899**, log `/tmp/zd_vacuum_status.log`)
-- ⏳ Estimated 1–3h for 48 GB DB. Will atomic swap on success.
-- ⏳ Cleanup executor `ab4363d978b1617ad` running (workspace temp files)
-- ⏳ pytest executor `a7e16b8521bea5635` running (PR-scope tests)
+## Active milestones
 
-**LIVE TRADING IS HALTED for VACUUM duration.** This was implicit in user's "并行做a" approval.
-
----
-
-## 4 parallel lanes
-
-| Lane | Theme | State | Blocker | Doable now? |
-|---|---|---|---|---|
-| **A** | ECMWF flow unblock | running | REINDEX in flight | auto, no |
-| **B** | PR prep + open | ready | A | yes (B1-B4 read-only) |
-| **C** | LIVE verification | queued | PR merged | no (downstream) |
-| **D** | Tech debt / follow-up | drain | none | yes (D1-D3 anytime) |
+| Task | Theme | Status |
+|------|-------|--------|
+| #49 | Phase 2 — LOW refits + promote stage→prod | IN PROGRESS |
+| #50 | Phase 3 — LIVE readiness gates | PENDING (downstream of #49) |
+| #51 | Phase 4 — Open PR + LIVE flip | PENDING (downstream of #50) |
 
 ---
 
-## Lane A — ECMWF flow unblock (CURRENT)
+## Phase 2 — LOW refits (Task #49)
 
-### A1. REINDEX ensemble_snapshots_v2 [RUNNING]
-- **Owner**: AI inline (bj53x7bgj background bash)
-- **Why**: 100% B-tree page-read in sample = autoindex fragmentation suspected
-- **Next**: monitor `b9ka4apn9` will fire on completion
-- **Success**: REINDEX done < 60s + ANALYZE done < 30s + integrity_check ok + ingest re-loaded
-- **Fail path**: → A2 VACUUM INTO (1-3h, needs user nod)
+- LOW_v1 + LOW_contract refits: done (2026-05-14)
+- Promote stage → prod: pending operator go-ahead
+- Pre-reqs: 30-min empirical proof complete; await operator confirmation
 
-### A2. VACUUM INTO new_file + atomic swap [FALLBACK]
-- **Owner**: ASK USER (35 GB temp space, 1-3h)
-- **Why**: If REINDEX doesn't fix → page interleaving (promote DELETE 46M + INSERT 84M scattered free pages across the shared 51 GB DB file)
-- **Pre-reqs**: disk has 50 GB free, ingest daemon down
-- **Risk**: live daemon reads forecasts.db; VACUUM blocks readers — must unload src.main too
+## Phase 3 — LIVE readiness gates (Task #50)
 
-### A3. Verify ECMWF flow restored [POST-A1 or POST-A2]
-- **Probe**: `sqlite3 -readonly state/zeus-forecasts.db "SELECT MAX(fetch_time) FROM ensemble_snapshots_v2"` advances within 30 min of daemon load
-- **Probe**: `logs/zeus-ingest.err | grep -E "loop_progress|loop_end|commit_done"` non-empty
-- **Probe**: WAL grows from 0
-- **Success → Task #28 completed → unlock Lane B**
+- F1 executable_forecast bundle quality (Task #10)
+- F2 probability chain end-to-end (Task #11)
+- F3 lifecycle_funnel transitions (Task #12)
+- F4 execution_capability gate ALLOWED (Task #13)
+- All read-only; auto-collect evidence
+
+## Phase 4 — Open PR + LIVE flip (Task #51)
+
+- ASK operator before PR open (memory: paid auto-reviewers on each push)
+- LIVE flip: operator-controlled kill-switch via `config/settings.json`
 
 ---
 
-## Lane B — PR prep + open
-
-### B1. Branch hygiene [AUTO-OK ANYTIME]
-- `git diff --name-only origin/main...HEAD` → list of files in PR
-- `git log --oneline origin/main..HEAD | wc -l` → commit count
-- topology_doctor on each changed file (read-only)
-
-### B2. Pre-merge test pass [AUTO-OK ANYTIME]
-- `python -m pytest <changed-test-files> -x -q`
-- All new tests since last green: `test_collateral_ledger_global_persistent_conn.py`, `test_promote_calibration_pairs_v2_attach_path.py`, `test_ecmwf_open_data_hang_antibodies_2026_05_13.py`, etc.
-
-### B3. PR draft sanity refresh [AUTO-OK ANYTIME]
-- Re-read `tmp/PR_DESCRIPTION_draft.md`
-- Verify ECMWF empirical claims match current state (after Lane A succeeds)
-- Update commits list with: 0d4a1cd22b, 405ad3508e, 1795cd8723, 14ace08836
-
-### B4. Git reconciliation decision [ASK USER]
-- Local is strict superset of origin (134/4674 diff)
-- Options: `git push --force-with-lease` (overwrites 39 remote SHAs) vs branch-rename + new PR
-- ASK before push
-
-### B5. PR open [ASK USER]
-- `gh pr create --base main --title "<title>" --body-file tmp/PR_DESCRIPTION_draft.md`
-- Triggers paid auto-reviewers (memory)
-- ASK before
-
----
-
-## Lane C — LIVE verification (downstream — queued)
+## Lane C — LIVE verification (downstream of Phase 2)
 
 ### C1. Phase 3 readiness gates (Task #50)
 - F1 executable_forecast bundle quality (Task #10)
@@ -151,41 +112,14 @@ Owners: Fitz (operator) · AI (autonomous loop) · launchd (daemons)
 
 ---
 
-## 📍 Live state (snapshot)
+## 📍 Live state (snapshot as of 2026-05-15)
 
 | Path / Variable | Value | Note |
 |---|---|---|
-| Forecasts DB | `state/zeus-forecasts.db` (35 GB, calibration_pairs_v2 = 91 M rows) | post-promote |
-| World DB | `state/zeus-world.db` (36 GB) | unchanged |
-| STAGE DB | `state/tigge_stage_20260511T175548Z.db` (68 GB) | source of promote |
-| Forecasts WAL size | `0 B` since 19:16 PDT | wedge symptom |
-| `ensemble_snapshots_v2.MAX(fetch_time)` | `2026-05-12T02:57` (52h+ stale) | wedge symptom |
-| `src.main` PID | 38087 | LIVE daemon — don't restart |
-| `src.ingest_main` PID | **unloaded** at A1 start | will reload after REINDEX |
-| `riskguard` PID | 90763 | don't restart |
-| Disk free (state vol) | ~120 GB | healthy |
-| Branch | `fix/calibration-vs-obs-relative-tolerance-2026-05-12` | 56 commits ahead origin |
-| `git diff HEAD origin/HEAD --stat` | 134/4674 (local = strict superset) | force-push safe |
-
----
-
-## 🔄 Background workers (running)
-
-| ID | Kind | Description | Status |
-|---|---|---|---|
-| `a7e16b8521bea5635` | Executor sonnet | Lane B2 pytest on PR-scope tests | running |
-| `ScheduleWakeup ~07:06 UTC` | wake | 20-min ECMWF advance check | armed |
-| (cron `159e2a65`) | hourly | data daemon HC | persistent — 7-day expiry |
-
-**Last completed**:
-- `bj53x7bgj` Bash REINDEX + reload — done (REINDEX 9s, ANALYZE 0s, daemon PID 77932 alive)
-- `a23445483b0b87b66` Opus ECMWF diag — committed `14ace08836` (mmap+timing logs)
-
-## 📊 Lane B1 — branch scope (read just now)
-
-- **58 commits** ahead of main since merge base `0ecb3ab6`
-- **19 new test files** in PR scope (the antibody bundle + ATTACH path + collateral persistent conn + K3 yield + parallel fetch + schema invariants)
-- **PR draft** 89 lines at `tmp/PR_DESCRIPTION_draft.md` (already empirical-corrected)
+| Main HEAD | `8b3c3c2c59` | merge: data daemon live verified |
+| Forecasts DB | `state/zeus-forecasts.db` | K1 split; forecast-class tables |
+| World DB | `state/zeus-world.db` | world-class tables |
+| Branch | `main` | fully aligned, clean working tree |
 
 ---
 

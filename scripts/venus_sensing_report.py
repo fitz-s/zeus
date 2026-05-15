@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-# Lifecycle: created=2026-04-07; last_reviewed=2026-05-06; last_reused=2026-05-06
+# Lifecycle: created=2026-04-07; last_reviewed=2026-05-15; last_reused=2026-05-15
 # Purpose: Venus daemon-independent sensing report, including source-contract drift watch, quarantine, and diagnostic authority labels.
 # Reuse: Run from Venus/cron for runtime truth sensing; inspect architecture/script_manifest.yaml before changing write targets.
+# Authority basis: docs/operations/task_2026-05-14_k1_followups/PLAN.md §4.5 (K1 broken-script remediation)
 """Venus sensing report generator.
 
 Collects ALL truth surface data Venus needs into one JSON file.
@@ -27,7 +28,7 @@ if str(ROOT) not in sys.path:
 
 from src.config import STATE_DIR, state_path
 from src.contracts.reality_contracts_loader import load_contracts
-from src.state.db import get_trade_connection_with_world
+from src.state.db import get_forecasts_connection, get_trade_connection_with_world
 from src.state.truth_files import read_truth_json
 
 # Paths
@@ -329,12 +330,14 @@ def _collect_fact_tables(conn: sqlite3.Connection) -> dict:
     }
 
 
-def _collect_truth_surfaces(conn: sqlite3.Connection) -> dict:
+def _collect_truth_surfaces(conn: sqlite3.Connection, forecasts_conn: sqlite3.Connection) -> dict:
+    # K1 split 2026-05-11: settlements is a FORECAST_CLASS table; must be
+    # queried via a forecasts.db connection, not the trade connection.
     return {
         "trade_decisions": _collect_trade_decisions(conn),
         "position_current": _collect_position_current(conn),
         "positions_json": _collect_positions_json(),
-        "settlements": _collect_settlements(conn),
+        "settlements": _collect_settlements(forecasts_conn),
         "risk_state": _collect_risk_state(),
         "reality_contracts": _collect_reality_contracts(),
         "source_contract_watch": _collect_source_contract_watch(),
@@ -496,14 +499,23 @@ def generate_sensing_report() -> dict:
     except Exception as exc:
         return {"generated_at": generated_at, "_error": f"cannot open canonical trade DB: {exc}"}
 
+    # K1 split 2026-05-11: open a dedicated forecasts.db connection so that
+    # FORECAST_CLASS tables (settlements, etc.) resolve to the correct DB.
+    try:
+        forecasts_conn = get_forecasts_connection()
+    except Exception as exc:
+        conn.close()
+        return {"generated_at": generated_at, "_error": f"cannot open forecasts DB: {exc}"}
+
     try:
         diagnostics = _collect_diagnostics()
-        surfaces = _collect_truth_surfaces(conn)
+        surfaces = _collect_truth_surfaces(conn, forecasts_conn)
         consistency = _collect_consistency(conn, surfaces)
         relationship_checks = _collect_relationship_checks()
         deltas = _collect_deltas(surfaces)
     finally:
         conn.close()
+        forecasts_conn.close()
 
     return {
         "generated_at": generated_at,

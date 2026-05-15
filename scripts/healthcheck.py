@@ -1,6 +1,6 @@
 # Created: 2026-03-26
-# Last reused/audited: 2026-05-03
-# Authority basis: live healthcheck contract + PLAN_v4 Phase 10 live-entry blocker status surface.
+# Last reused or audited: 2026-05-15
+# Authority basis: docs/operations/task_2026-05-14_k1_followups/PLAN.md §4.5 (K1 broken-script remediation)
 """Zeus health check for Venus/OpenClaw monitoring.
 
 Reads mode-qualified state written by the running daemon.
@@ -10,6 +10,7 @@ Exit code 0 = healthy, 1 = degraded, 2 = dead.
 import json
 import os
 import re
+import sqlite3
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -19,7 +20,7 @@ PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.config import get_mode, state_path
-from src.state.db import get_connection
+from src.state.db import get_connection, get_forecasts_connection, ZEUS_FORECASTS_DB_PATH
 from src.state.decision_chain import query_no_trade_cases
 
 STATUS_STALE_SECONDS = 2 * 3600
@@ -59,7 +60,10 @@ def _zeus_db_path() -> Path:
 
 
 def _world_db_path() -> Path:
-    return state_path("zeus-world.db")
+    # K1 split 2026-05-11: ensemble_snapshots_v2 / readiness_state moved to
+    # forecasts.db.  Return ZEUS_FORECASTS_DB_PATH so callers (and monkeypatched
+    # tests that stub this function) target the correct physical file.
+    return ZEUS_FORECASTS_DB_PATH
 
 
 def _riskguard_label() -> str:
@@ -291,16 +295,18 @@ def check() -> dict:
         except Exception:
             result["recent_no_trade_stage_counts"] = {}
 
-    world_db_path = _world_db_path()
-    result["world_db_path"] = str(world_db_path)
-    if world_db_path.exists():
+    # K1 split 2026-05-11: ensemble_snapshots_v2 and readiness_state moved to
+    # forecasts.db.  _world_db_path() now returns ZEUS_FORECASTS_DB_PATH so
+    # that monkeypatched tests (which stub _world_db_path) continue to exercise
+    # the absent-DB branch correctly.
+    forecasts_db_path = _world_db_path()
+    result["forecasts_db_path"] = str(forecasts_db_path)
+    if forecasts_db_path.exists():
         try:
-            import sqlite3
-
             from src.config import entry_forecast_config
             from src.data.live_entry_status import build_live_entry_forecast_status
 
-            conn = sqlite3.connect(str(world_db_path))
+            conn = get_forecasts_connection()
             conn.row_factory = sqlite3.Row
             entry_forecast_status = build_live_entry_forecast_status(
                 conn,
