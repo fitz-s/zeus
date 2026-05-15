@@ -10,7 +10,7 @@ Coverage:
   - Duplicate task_id within one catalog → DuplicateTaskIdError
   - Unknown/extra YAML keys tolerated (stored in raw)
   - Env-var expansion: ${REPO}, ${STATE_DIR}, ${EVIDENCE_DIR}, ${YEAR}, ${QUARTER}
-  - Unknown vars (${ZEUS_REPO}) left as-is
+  - Unknown vars (${PROJECT_REPO}) left as-is
   - TaskSpec round-trip: TaskCatalogEntry.spec is a valid TaskSpec
   - dry_run_floor_exempt=True propagated to TaskSpec
   - tags field propagated to TaskSpec
@@ -433,7 +433,7 @@ class TestEnvVarExpansion:
         assert entries[0].raw["config"]["archive"] == "docs/operations/archive/2026-Q2"
 
     def test_unknown_project_var_left_asis(self, tmp_path: Path) -> None:
-        """${ZEUS_REPO} and other project vars are not resolved; left as-is."""
+        """${PROJECT_REPO} and other project vars are not resolved; left as-is."""
         p = write_catalog(
             tmp_path,
             """\
@@ -442,12 +442,12 @@ class TestEnvVarExpansion:
               - id: t1
                 schedule: daily
                 config:
-                  path: ${ZEUS_REPO}/state
+                  path: ${PROJECT_REPO}/state
             """,
         )
-        # Deliberately do NOT supply ZEUS_REPO in env
+        # Deliberately do NOT supply PROJECT_REPO in env
         entries = load_task_catalog(p, env={})
-        assert entries[0].raw["config"]["path"] == "${ZEUS_REPO}/state"
+        assert entries[0].raw["config"]["path"] == "${PROJECT_REPO}/state"
 
     def test_multiple_vars_in_one_string(self, tmp_path: Path) -> None:
         p = write_catalog(

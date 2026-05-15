@@ -18,7 +18,7 @@ runs inside TaskRegistry, not here.
 
 Env-var resolution resolves ${REPO}, ${STATE_DIR}, ${EVIDENCE_DIR},
 ${YEAR}, ${QUARTER} from the supplied env dict (or os.environ).
-Project-specific vars (e.g. ${ZEUS_REPO}) are left as-is — the parser
+Project-specific vars (e.g. ${PROJECT_REPO}) are left as-is — the parser
 is project-agnostic and does NOT fail on unknown vars.
 
 Schema contract:
@@ -144,7 +144,7 @@ def _expand_env_vars(value: str, env: dict[str, str]) -> str:
     Replace ${VAR_NAME} tokens in value using env.
 
     Unknown vars (not present in env) are left as-is. This makes the
-    parser project-agnostic — ${ZEUS_REPO} and similar project vars pass
+    parser project-agnostic — ${PROJECT_REPO} and similar project vars pass
     through unchanged.
     """
 
