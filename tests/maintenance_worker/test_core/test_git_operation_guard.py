@@ -19,9 +19,12 @@ Covers:
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone, timedelta
+
 import pytest
 
 from maintenance_worker.core.git_operation_guard import check_git_operation
+from maintenance_worker.core.install_metadata import InstallMetadata
 from maintenance_worker.types.results import ValidatorResult
 
 ALLOWED = ValidatorResult.ALLOWED
@@ -264,3 +267,114 @@ def test_git_full_path_push_force_blocked() -> None:
 
 def test_git_full_path_status_allowed() -> None:
     assert check_git_operation(["/usr/bin/git", "status"]) == ALLOWED
+
+
+# ---------------------------------------------------------------------------
+# SEV-1 #4 adversarial tests — guarantee (e) remote URL allowlist
+# ---------------------------------------------------------------------------
+
+
+def _make_install_meta(allowed_urls: tuple[str, ...]) -> InstallMetadata:
+    return InstallMetadata(
+        schema_version=1,
+        first_run_at=datetime.now(tz=timezone.utc) - timedelta(days=31),
+        agent_version="0.1.0",
+        install_run_id="test-uuid",
+        allowed_remote_urls=allowed_urls,
+        repo_root_at_install="/repo",
+    )
+
+
+class TestSev1GuaranteeEUrlAllowlist:
+    """
+    Guarantee (e): git push must be blocked if remote URL is not in the
+    install-time allowlist when install_meta is provided.
+    """
+
+    def test_push_allowlisted_url_allowed(self) -> None:
+        meta = _make_install_meta(("https://github.com/org/repo.git",))
+        result = check_git_operation(
+            ["git", "push", "origin", "maintenance/task-1"],
+            install_meta=meta,
+            remote_url="https://github.com/org/repo.git",
+        )
+        assert result == ALLOWED
+
+    def test_push_unknown_url_blocked(self) -> None:
+        meta = _make_install_meta(("https://github.com/org/repo.git",))
+        result = check_git_operation(
+            ["git", "push", "origin", "maintenance/task-1"],
+            install_meta=meta,
+            remote_url="https://evil.com/attacker/repo.git",
+        )
+        assert result == FORBIDDEN
+
+    def test_push_remote_url_none_with_meta_blocked(self) -> None:
+        """Fail-closed: unresolved URL cannot be validated — block."""
+        meta = _make_install_meta(("https://github.com/org/repo.git",))
+        result = check_git_operation(
+            ["git", "push", "origin", "maintenance/task-1"],
+            install_meta=meta,
+            remote_url=None,
+        )
+        assert result == FORBIDDEN
+
+    def test_push_no_install_meta_skips_url_check(self) -> None:
+        """Backward compat: no install_meta → URL check skipped, push allowed."""
+        result = check_git_operation(
+            ["git", "push", "origin", "maintenance/task-1"],
+            install_meta=None,
+            remote_url=None,
+        )
+        assert result == ALLOWED
+
+    def test_push_no_install_meta_explicit_url_skips_check(self) -> None:
+        """No install_meta means no allowlist — URL value is irrelevant."""
+        result = check_git_operation(
+            ["git", "push", "origin", "maintenance/task-1"],
+            install_meta=None,
+            remote_url="https://evil.com/repo.git",
+        )
+        assert result == ALLOWED
+
+    def test_non_push_subcommand_not_affected_by_meta(self) -> None:
+        """URL check only applies to push; status is always allowed."""
+        meta = _make_install_meta(())  # empty allowlist
+        result = check_git_operation(
+            ["git", "status"],
+            install_meta=meta,
+            remote_url=None,
+        )
+        assert result == ALLOWED
+
+    def test_push_force_still_blocked_even_with_valid_url(self) -> None:
+        """Force push is blocked regardless of URL allowlist."""
+        meta = _make_install_meta(("https://github.com/org/repo.git",))
+        result = check_git_operation(
+            ["git", "push", "--force", "origin", "maintenance/task-1"],
+            install_meta=meta,
+            remote_url="https://github.com/org/repo.git",
+        )
+        assert result == FORBIDDEN
+
+    def test_push_to_main_still_blocked_even_with_valid_url(self) -> None:
+        """Protected-branch block takes precedence over URL check."""
+        meta = _make_install_meta(("https://github.com/org/repo.git",))
+        result = check_git_operation(
+            ["git", "push", "origin", "main"],
+            install_meta=meta,
+            remote_url="https://github.com/org/repo.git",
+        )
+        assert result == FORBIDDEN
+
+    def test_push_multiple_allowed_urls_matches_correctly(self) -> None:
+        meta = _make_install_meta((
+            "https://github.com/org/repo.git",
+            "git@github.com:org/repo.git",
+        ))
+        result = check_git_operation(
+            ["git", "push", "origin", "maintenance/task-1"],
+            install_meta=meta,
+            remote_url="git@github.com:org/repo.git",
+        )
+        assert result == ALLOWED

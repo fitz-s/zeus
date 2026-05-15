@@ -44,6 +44,7 @@ from __future__ import annotations
 import os
 from typing import Optional
 
+from maintenance_worker.core.install_metadata import InstallMetadata
 from maintenance_worker.types.results import ValidatorResult
 
 
@@ -171,7 +172,11 @@ def _push_targets_protected_branch(argv: list[str]) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def check_git_operation(argv: list[str]) -> ValidatorResult:
+def check_git_operation(
+    argv: list[str],
+    install_meta: Optional[InstallMetadata] = None,
+    remote_url: Optional[str] = None,
+) -> ValidatorResult:
     """
     Check a git command invocation against the safety contract.
 
@@ -184,6 +189,14 @@ def check_git_operation(argv: list[str]) -> ValidatorResult:
 
     Caller must still invoke validate_action for any path arguments that the
     git command touches — this guard only validates the operation semantics.
+
+    Guarantee (e): if install_meta is provided, any git push whose resolved
+    remote URL is not in install_meta.allowed_remote_urls is FORBIDDEN_OPERATION.
+    Pass remote_url as the resolved URL string (from 'git remote get-url <remote>').
+    If install_meta is provided but remote_url is None, the push is blocked
+    (fail-closed: unresolved URL cannot be validated against the allowlist).
+    If install_meta is None, the URL allowlist check is skipped (backward compat
+    for callers that do not have install metadata available).
     """
     if not argv:
         return ValidatorResult.ALLOWED
@@ -209,11 +222,15 @@ def check_git_operation(argv: list[str]) -> ValidatorResult:
     if subcommand == "branch" and _argv_has_flag(argv, _BRANCH_FORCE_DELETE_FLAGS):
         return ValidatorResult.FORBIDDEN_OPERATION
 
-    # git push — check for force flags AND protected branch targets.
+    # git push — check for force flags, protected branch targets, and URL allowlist.
     if subcommand == "push":
         if _argv_has_flag(argv, _FORCE_PUSH_FLAGS):
             return ValidatorResult.FORBIDDEN_OPERATION
         if _push_targets_protected_branch(argv):
             return ValidatorResult.FORBIDDEN_OPERATION
+        # Guarantee (e): remote URL allowlist enforcement.
+        if install_meta is not None:
+            if remote_url is None or remote_url not in install_meta.allowed_remote_urls:
+                return ValidatorResult.FORBIDDEN_OPERATION
 
     return ValidatorResult.ALLOWED
