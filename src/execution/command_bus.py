@@ -1,6 +1,7 @@
 # Created: 2026-04-26
-# Last reused/audited: 2026-04-26
+# Last reused/audited: 2026-05-15
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md §P1.S2
+#                  + docs/operations/task_2026-05-15_live_order_e2e_goal/LIVE_ORDER_E2E_GOAL_PLAN.md
 """Venue command bus — typed surface for the durable command journal.
 
 Pure type contract. No I/O, no DB, no side effects. P1.S3 wires the executor
@@ -88,6 +89,7 @@ class CommandEventType(str, Enum):
     CANCEL_REPLACE_BLOCKED = "CANCEL_REPLACE_BLOCKED"
     EXPIRED = "EXPIRED"
     REVIEW_REQUIRED = "REVIEW_REQUIRED"
+    REVIEW_CLEARED_NO_VENUE_SIDE_EFFECT = "REVIEW_CLEARED_NO_VENUE_SIDE_EFFECT"
 
 
 class IntentKind(str, Enum):
@@ -122,13 +124,10 @@ TERMINAL_STATES: frozenset[CommandState] = frozenset({
     CommandState.REJECTED,
 })
 
-# Post-critic MAJOR-3 (2026-04-26): REVIEW_REQUIRED is a *quasi-terminal*
-# state. It is in IN_FLIGHT_STATES so the recovery loop / operator dashboards
-# surface it, but the closed grammar has zero outgoing transitions from it.
-# Operator manually voids/resolves the row out-of-band (e.g. by inserting a
-# follow-up command with a fresh idempotency key); the system does not
-# auto-recover. P1.S4 will add an explicit operator-unblock event type if
-# needed; deferring that decision keeps the grammar small.
+# Post-live-order E2E (2026-05-15): REVIEW_REQUIRED is quasi-terminal for
+# ordinary recovery, but has one proof-backed clearance event. It exists only
+# for commands whose evidence proves no venue side effect occurred; payload
+# validation in venue_command_repo rejects bare/manual state edits.
 
 # Post-critic MAJOR-4 (2026-04-26): IdempotencyKey factory token.
 # Direct construction `IdempotencyKey(value="...")` is forbidden — callers

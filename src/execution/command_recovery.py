@@ -1,6 +1,7 @@
 # Created: 2026-04-26
-# Last reused/audited: 2026-04-26
+# Last reused/audited: 2026-05-15
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md §P1.S4
+#                  + docs/operations/task_2026-05-15_live_order_e2e_goal/LIVE_ORDER_E2E_GOAL_PLAN.md
 """Command recovery loop — INV-31.
 
 At cycle start, scans venue_commands for rows in IN_FLIGHT_STATES and
@@ -27,6 +28,7 @@ will add conn-threading from cycle_runner; for now self-contained.
 from __future__ import annotations
 
 import logging
+import json
 import sqlite3
 from datetime import datetime, timezone
 from typing import Optional
@@ -110,6 +112,279 @@ def _lookup_unknown_side_effect_order(cmd: VenueCommand, client) -> tuple[str, d
         )
         return "unavailable", None
     return "unavailable", None
+
+
+_PRE_SDK_COLLATERAL_REASON_MARKERS = (
+    "pusd_allowance_insufficient",
+    "pusd_insufficient",
+    "collateral_snapshot_degraded",
+    "collateral_snapshot_stale",
+    "collateral_snapshot_future",
+    "collateral_ledger_unconfigured",
+    "ctf_allowance_insufficient",
+    "ctf_tokens_insufficient",
+)
+
+_PRE_SDK_REVIEW_REQUIRED_REASONS = frozenset({
+    "pre_submit_collateral_reservation_failed",
+    # Legacy live rows before the 2026-05-15 fix could be left SUBMITTING
+    # after pre-SDK collateral failure, then moved here by recovery.
+    "recovery_no_venue_order_id",
+})
+
+
+def _dict_row(row) -> dict:
+    if row is None:
+        return {}
+    try:
+        return dict(row)
+    except Exception:
+        return {}
+
+
+def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (table,),
+    ).fetchone()
+    return row is not None
+
+
+def _json_dict(raw: object) -> dict:
+    if raw in (None, ""):
+        return {}
+    try:
+        value = json.loads(str(raw))
+    except json.JSONDecodeError:
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _review_required_command(conn: sqlite3.Connection, command_id: str) -> dict:
+    row = conn.execute(
+        "SELECT * FROM venue_commands WHERE command_id = ?",
+        (command_id,),
+    ).fetchone()
+    if row is None:
+        raise ValueError(f"unknown command_id: {command_id}")
+    command = _dict_row(row)
+    if command.get("state") != CommandState.REVIEW_REQUIRED.value:
+        raise ValueError(
+            "review clearance is only legal for REVIEW_REQUIRED commands; "
+            f"got {command.get('state')!r}"
+        )
+    return command
+
+
+def _command_events(conn: sqlite3.Connection, command_id: str) -> list[dict]:
+    return [
+        _dict_row(row)
+        for row in conn.execute(
+            """
+            SELECT *
+            FROM venue_command_events
+            WHERE command_id = ?
+            ORDER BY sequence_no
+            """,
+            (command_id,),
+        ).fetchall()
+    ]
+
+
+def _latest_review_required_payload(events: list[dict]) -> dict:
+    for event in reversed(events):
+        if event.get("event_type") != CommandEventType.REVIEW_REQUIRED.value:
+            continue
+        return _json_dict(event.get("payload_json"))
+    return {}
+
+
+def _command_envelope(conn: sqlite3.Connection, envelope_id: str | None) -> dict:
+    if not envelope_id:
+        return {}
+    row = conn.execute(
+        "SELECT * FROM venue_submission_envelopes WHERE envelope_id = ?",
+        (envelope_id,),
+    ).fetchone()
+    return _dict_row(row)
+
+
+def _count_facts(conn: sqlite3.Connection, table: str, command_id: str) -> int:
+    if not _table_exists(conn, table):
+        return 0
+    row = conn.execute(
+        f"SELECT COUNT(*) AS count FROM {table} WHERE command_id = ?",
+        (command_id,),
+    ).fetchone()
+    if row is None:
+        return 0
+    data = _dict_row(row)
+    return int(data.get("count", 0) or 0)
+
+
+def _review_no_side_effect_predicates(
+    conn: sqlite3.Connection,
+    command: dict,
+) -> tuple[dict, list[str]]:
+    command_id = str(command["command_id"])
+    events = _command_events(conn, command_id)
+    review_required_payload = _latest_review_required_payload(events)
+    review_required_reason = str(review_required_payload.get("reason") or "").strip()
+    payloads = [_json_dict(event.get("payload_json")) for event in events]
+    final_envelope_ids = [
+        payload.get("final_submission_envelope_id")
+        for payload in payloads
+        if str(payload.get("final_submission_envelope_id") or "").strip()
+    ]
+    event_types = {str(event.get("event_type") or "") for event in events}
+    unsafe_event_types = {
+        "POST_ACKED",
+        "SUBMIT_ACKED",
+        "SUBMIT_UNKNOWN",
+        "SUBMIT_TIMEOUT_UNKNOWN",
+        "CLOSED_MARKET_UNKNOWN",
+        "PARTIAL_FILL_OBSERVED",
+        "FILL_CONFIRMED",
+    }
+    envelope = _command_envelope(conn, command.get("envelope_id"))
+    order_fact_count = _count_facts(conn, "venue_order_facts", command_id)
+    trade_fact_count = _count_facts(conn, "venue_trade_facts", command_id)
+    predicates = {
+        "no_venue_order_id": not str(command.get("venue_order_id") or "").strip(),
+        "no_final_submission_envelope": not final_envelope_ids,
+        "no_raw_response": not str(envelope.get("raw_response_json") or "").strip(),
+        "no_signed_order": (
+            envelope.get("signed_order_blob") in (None, b"", "")
+            and not str(envelope.get("signed_order_hash") or "").strip()
+        ),
+        "no_order_facts": order_fact_count == 0,
+        "no_trade_facts": trade_fact_count == 0,
+        "no_submit_side_effect_events": not (event_types & unsafe_event_types),
+        "review_required_reason_pre_sdk": (
+            review_required_reason in _PRE_SDK_REVIEW_REQUIRED_REASONS
+        ),
+    }
+    failures = [name for name, ok in predicates.items() if not ok]
+    return predicates, failures
+
+
+def _decision_log_pre_sdk_proof(conn: sqlite3.Connection, decision_id: str) -> dict | None:
+    if not _table_exists(conn, "decision_log"):
+        return None
+    rows = conn.execute(
+        """
+        SELECT id, mode, started_at, completed_at, artifact_json
+        FROM decision_log
+        WHERE artifact_json LIKE ?
+        ORDER BY id DESC
+        LIMIT 20
+        """,
+        (f"%{decision_id}%",),
+    ).fetchall()
+    for row in rows:
+        record = _dict_row(row)
+        artifact = _json_dict(record.get("artifact_json"))
+        for case in artifact.get("no_trade_cases") or []:
+            if not isinstance(case, dict) or case.get("decision_id") != decision_id:
+                continue
+            reasons = case.get("rejection_reasons") or []
+            if isinstance(reasons, str):
+                reasons = [reasons]
+            reason_text = " | ".join(str(reason) for reason in reasons)
+            if case.get("rejection_stage") != "EXECUTION_FAILED":
+                return None
+            if "execution_intent_rejected:" not in reason_text:
+                return None
+            if not any(marker in reason_text for marker in _PRE_SDK_COLLATERAL_REASON_MARKERS):
+                return None
+            return {
+                "decision_log_id": record.get("id"),
+                "mode": record.get("mode"),
+                "started_at": record.get("started_at"),
+                "completed_at": record.get("completed_at"),
+                "rejection_stage": case.get("rejection_stage"),
+                "rejection_reasons": list(reasons),
+                "city": case.get("city"),
+                "target_date": case.get("target_date"),
+                "range_label": case.get("range_label"),
+            }
+    return None
+
+
+def clear_review_required_no_venue_side_effect(
+    conn: sqlite3.Connection,
+    command_id: str,
+    *,
+    source_commit: str,
+    source_function: str,
+    source_reason: str,
+    reviewed_by: str = "operator",
+    occurred_at: str | None = None,
+) -> dict:
+    """Terminalize a REVIEW_REQUIRED command only with positive no-side-effect proof.
+
+    This is not a generic state editor. It requires DB predicates proving no
+    venue identity/facts/final envelope exist and decision-log evidence that
+    the command's decision failed at a pre-SDK collateral boundary.
+    """
+
+    command = _review_required_command(conn, command_id)
+    predicates, predicate_failures = _review_no_side_effect_predicates(conn, command)
+    if predicate_failures:
+        raise ValueError(
+            "review clearance predicates failed: " + ", ".join(sorted(predicate_failures))
+        )
+    decision_id = str(command.get("decision_id") or "")
+    decision_proof = _decision_log_pre_sdk_proof(conn, decision_id)
+    if decision_proof is None:
+        raise ValueError(
+            "review clearance requires decision_log EXECUTION_FAILED "
+            "execution_intent_rejected collateral proof"
+        )
+    if not str(source_commit or "").strip():
+        raise ValueError("source_commit is required")
+    if source_function not in {"_live_order", "execute_exit_order"}:
+        raise ValueError("source_function must identify the executor boundary")
+    if not str(source_reason or "").strip():
+        raise ValueError("source_reason is required")
+    now = occurred_at or _now_iso()
+    payload = {
+        "schema_version": 1,
+        "reason": "review_cleared_no_venue_side_effect",
+        "command_id": command_id,
+        "decision_id": decision_id,
+        "proof_class": "pre_sdk_no_side_effect",
+        "side_effect_boundary_crossed": False,
+        "sdk_submit_attempted": False,
+        "required_predicates": predicates,
+        "source_proof": {
+            "source_commit": source_commit,
+            "source_function": source_function,
+            "source_reason": source_reason,
+            "decision_id": decision_id,
+            "deployed_source_boundary": (
+                "collateral reservation occurs before PolymarketClient construction "
+                "and before place_limit_order"
+            ),
+        },
+        "review_required_proof": {
+            "reason": _latest_review_required_payload(
+                _command_events(conn, command_id)
+            ).get("reason"),
+            "allowed_reasons": sorted(_PRE_SDK_REVIEW_REQUIRED_REASONS),
+        },
+        "decision_log_proof": decision_proof,
+        "reviewed_by": reviewed_by,
+        "cleared_at": now,
+    }
+    append_event(
+        conn,
+        command_id=command_id,
+        event_type=CommandEventType.REVIEW_CLEARED_NO_VENUE_SIDE_EFFECT.value,
+        occurred_at=now,
+        payload=payload,
+    )
+    return payload
 
 
 def _reconcile_row(
