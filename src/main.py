@@ -22,7 +22,7 @@ import logging
 import os
 import sys
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -38,6 +38,20 @@ logger = logging.getLogger("zeus")
 
 # Cross-mode lock: prevents two discovery modes from reading/writing portfolio concurrently
 _cycle_lock = threading.Lock()
+OPENING_HUNT_FIRST_DELAY_SECONDS = 30.0
+
+
+def _utc_run_time_after(seconds: float) -> datetime:
+    """Return a UTC first-run time for APScheduler interval jobs."""
+
+    return datetime.now(timezone.utc) + timedelta(seconds=seconds)
+
+
+def _day0_first_delay_seconds(discovery: dict) -> float:
+    """Stagger Day0 away from opening_hunt so equal-interval jobs do not race."""
+
+    interval_seconds = float(discovery["day0_interval_min"]) * 60.0
+    return OPENING_HUNT_FIRST_DELAY_SECONDS + (interval_seconds / 2.0)
 
 
 def _scheduler_job(job_name: str):
@@ -846,6 +860,7 @@ def main():
     scheduler.add_job(
         lambda: _run_mode(DiscoveryMode.OPENING_HUNT), "interval",
         minutes=discovery["opening_hunt_interval_min"], id="opening_hunt",
+        next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS),
         max_instances=1, coalesce=True,
     )
     for time_str in discovery["update_reaction_times_utc"]:
@@ -858,6 +873,7 @@ def main():
     scheduler.add_job(
         lambda: _run_mode(DiscoveryMode.DAY0_CAPTURE), "interval",
         minutes=discovery["day0_interval_min"], id="day0_capture",
+        next_run_time=_utc_run_time_after(_day0_first_delay_seconds(discovery)),
         max_instances=1, coalesce=True,
     )
     scheduler.add_job(_harvester_cycle, "interval", hours=1, id="harvester")
