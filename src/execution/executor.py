@@ -1546,6 +1546,7 @@ def execute_exit_order(
     from src.execution.command_bus import IdempotencyKey, IntentKind, VenueCommand, CommandState
     from src.state.venue_command_repo import insert_command, append_event, get_command
     from src.contracts.executable_market_snapshot_v2 import MarketSnapshotError
+    from src.state.collateral_ledger import CollateralInsufficient
 
     current_price = intent.current_price
     best_bid = intent.best_bid
@@ -1912,6 +1913,45 @@ def execute_exit_order(
                 order_role="exit",
                 intent_id=intent.intent_id,
                 idempotency_key=idem.value,
+            )
+        except CollateralInsufficient as exc:
+            rej_time = datetime.now(timezone.utc).isoformat()
+            try:
+                append_event(
+                    conn,
+                    command_id=command_id,
+                    event_type="SUBMIT_REJECTED",
+                    occurred_at=rej_time,
+                    payload={
+                        "reason": "pre_submit_collateral_reservation_failed",
+                        "detail": str(exc),
+                        "exception_type": type(exc).__name__,
+                        "side_effect_boundary_crossed": False,
+                        "sdk_submit_attempted": False,
+                    },
+                )
+                if _own_conn:
+                    conn.commit()
+            except Exception as inner:
+                logger.error(
+                    "execute_exit_order: SUBMIT_REJECTED append_event failed after "
+                    "pre-submit collateral reservation failure (command_id=%s "
+                    "trade_id=%s): inner=%s original=%s",
+                    command_id,
+                    intent.trade_id,
+                    inner,
+                    exc,
+                )
+            return OrderResult(
+                trade_id=intent.trade_id,
+                status="rejected",
+                reason=f"pre_submit_collateral_reservation_failed: {exc}",
+                submitted_price=limit_price,
+                shares=shares,
+                order_role="exit",
+                intent_id=intent.intent_id,
+                idempotency_key=idem.value,
+                command_state="REJECTED",
             )
         except sqlite3.IntegrityError as exc:
             # Race-condition safety belt: another process inserted between our
@@ -2287,6 +2327,7 @@ def _live_order(
     from src.execution.command_bus import IdempotencyKey, IntentKind
     from src.state.venue_command_repo import insert_command, append_event
     from src.contracts.executable_market_snapshot_v2 import MarketSnapshotError
+    from src.state.collateral_ledger import CollateralInsufficient
 
     cutover_component = _assert_cutover_allows_submit(IntentKind.ENTRY)
 
@@ -2626,6 +2667,44 @@ def _live_order(
                 submitted_price=intent.limit_price,
                 shares=shares,
                 order_role="entry",
+            )
+        except CollateralInsufficient as exc:
+            rej_time = datetime.now(timezone.utc).isoformat()
+            try:
+                append_event(
+                    conn,
+                    command_id=command_id,
+                    event_type="SUBMIT_REJECTED",
+                    occurred_at=rej_time,
+                    payload={
+                        "reason": "pre_submit_collateral_reservation_failed",
+                        "detail": str(exc),
+                        "exception_type": type(exc).__name__,
+                        "side_effect_boundary_crossed": False,
+                        "sdk_submit_attempted": False,
+                    },
+                )
+                if _own_conn:
+                    conn.commit()
+            except Exception as inner:
+                logger.error(
+                    "_live_order: SUBMIT_REJECTED append_event failed after "
+                    "pre-submit collateral reservation failure (command_id=%s "
+                    "trade_id=%s): inner=%s original=%s",
+                    command_id,
+                    trade_id,
+                    inner,
+                    exc,
+                )
+            return OrderResult(
+                trade_id=trade_id,
+                status="rejected",
+                reason=f"pre_submit_collateral_reservation_failed: {exc}",
+                submitted_price=intent.limit_price,
+                shares=shares,
+                order_role="entry",
+                idempotency_key=idem.value,
+                command_state="REJECTED",
             )
         except sqlite3.IntegrityError as exc:
             # Race-condition safety belt: another process inserted between our
