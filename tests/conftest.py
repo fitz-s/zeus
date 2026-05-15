@@ -266,9 +266,18 @@ _WLA_SQLITE_CONNECT_ALLOWLIST = frozenset({
     # --- K1 forecast DB split migration script (2026-05-11) ---
     "scripts/migrate_world_to_forecasts.py",         # k1_migration: operator-mediated bulk copy to zeus-forecasts.db; not runtime daemon
 
+    # --- K1 P0 triage: copy stranded world.observations to forecasts.db (2026-05-14) ---
+    "scripts/migrate_world_observations_to_forecasts.py",  # k1_p0_migration: operator-mediated; copies ~109 stale obs rows + market_events_v2; not runtime daemon
+
     # --- K1 workload-class split promotion scripts (2026-05-12; PR #112 Option (c)) ---
     "scripts/promote_platt_models_v2.py",            # operator-mediated STAGE->PROD; RW only with --commit (zeus-world.db); BEGIN IMMEDIATE + rollback
     "scripts/promote_calibration_pairs_v2.py",       # operator-mediated STAGE->PROD; RW only with --commit (zeus-forecasts.db); BEGIN IMMEDIATE + rollback
+
+    # --- K1 P1 registry CI hook (2026-05-14; PLAN §1.2 #2) ---
+    "scripts/check_table_registry_coherence.py",     # ci_hook: opens :memory: and tmp on-disk DBs to verify registry vs init_schema; not runtime daemon
+
+    # --- K1 P3 ghost table cleanup script (2026-05-14; PLAN §2 P3 D2) ---
+    "scripts/drop_world_ghost_tables.py",            # operator_invoked: drops LEGACY_ARCHIVED ghost copies on world.db; explicit --execute required; dry-run by default
 })
 
 

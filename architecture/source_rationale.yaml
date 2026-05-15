@@ -2049,6 +2049,20 @@ files:
     zone: K2_runtime
     authority_role: package_marker
     why: Marks supervisor API namespace.
+  src/state/table_registry.py:
+    zone: K2_runtime
+    authority_role: canonical_registry_loader
+    why: >
+      Loads architecture/db_table_ownership.yaml at module import time. Provides
+      owner(), tables_for(), tables_for_class(), is_forecast_class(),
+      assert_db_matches_registry() — 5-function API making independent DB-ownership
+      enumerations structurally impossible. FATAL on malformation per INV-05.
+      P1 of task_2026-05-14_k1_followups.
+    hazards:
+    - NOT_DAEMON_WIRED
+    downstream:
+    - tests/state/test_table_registry_coherence.py
+    - scripts/check_table_registry_coherence.py
   src/supervisor_api/contracts.py:
     zone: K2_runtime
     authority_role: venus_external_contract

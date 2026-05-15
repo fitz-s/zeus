@@ -112,14 +112,13 @@ _BARE_SOURCE_STR_PATTERN = re.compile(
 # (one of {'tigge_mars', 'ecmwf_open_data', ...}, enumerated values not
 # external authority).
 _BASELINE_PER_FILE: dict[str, int] = {
-    "src/contracts/execution_intent.py": 6,
+    "src/contracts/execution_intent.py": 7,  # bumped P3 (2026-05-14): one additional internal-label source field surfaced (pre-P3 drift); classified internal label
     "src/contracts/executable_market_snapshot_v2.py": 4,
     "src/contracts/semantic_types.py": 1,
     "src/contracts/expiring_assumption.py": 1,
-    "src/contracts/world_view/calibration.py": 1,
-    "src/contracts/world_view/forecasts.py": 2,
-    "src/contracts/world_view/observations.py": 1,
-    "src/contracts/world_view/settlements.py": 1,
+    # world_view/ entries REMOVED — directory retired in P3 (K1 followups, 2026-05-14).
+    # PlattModelView + get_active_platt_model moved to src/calibration/store.py.
+    # Other world_view accessors (settlements, observations, forecasts) deleted.
 }
 
 

@@ -11,6 +11,8 @@ import sqlite3
 from datetime import date, datetime
 from typing import Any, Iterator
 
+from src.state.connection_pair import WorldConnection
+
 JOB_RUN_STATUSES = frozenset({
     "RUNNING",
     "SUCCESS",
@@ -54,7 +56,7 @@ def _scope_key(*parts: object) -> str:
 
 
 @contextlib.contextmanager
-def _savepoint(conn: sqlite3.Connection, name: str) -> Iterator[None]:
+def _savepoint(conn: WorldConnection, name: str) -> Iterator[None]:
     conn.execute(f"SAVEPOINT {name}")
     try:
         yield
@@ -66,7 +68,7 @@ def _savepoint(conn: sqlite3.Connection, name: str) -> Iterator[None]:
 
 
 def write_job_run(
-    conn: sqlite3.Connection,
+    conn: WorldConnection,
     *,
     job_run_id: str,
     job_name: str,
@@ -166,12 +168,12 @@ def write_job_run(
         )
 
 
-def get_job_run(conn: sqlite3.Connection, job_run_id: str) -> dict[str, Any] | None:
+def get_job_run(conn: WorldConnection, job_run_id: str) -> dict[str, Any] | None:
     row = conn.execute("SELECT * FROM job_run WHERE job_run_id = ?", (job_run_id,)).fetchone()
     return dict(row) if row else None
 
 
-def get_latest_job_run(conn: sqlite3.Connection, job_name: str) -> dict[str, Any] | None:
+def get_latest_job_run(conn: WorldConnection, job_name: str) -> dict[str, Any] | None:
     row = conn.execute(
         "SELECT * FROM job_run WHERE job_name = ? ORDER BY scheduled_for DESC, recorded_at DESC LIMIT 1",
         (job_name,),

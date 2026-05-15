@@ -70,7 +70,7 @@ Changes here are architecture or governance changes, never “just docs.”
 | `ast_rules/forbidden_patterns.md` | Forbidden code patterns |
 | `packet_templates/*.md` | Work packet templates (bugfix, feature, refactor, schema) |
 | `worktree_merge_protocol.yaml` | Cross-session merge protocol per Stage 4 Gate B (verdict.md §6) — conflict-first merge inspection; MERGE_AUDIT_EVIDENCE critic verdict required only for escalated broad/high-risk conflict surfaces |
-| `world_schema_manifest.yaml` | World DB schema manifest: per-table column inventory and schema authority for two-system independence (created 2026-04-30) |
+| ~~`world_schema_manifest.yaml`~~ | RETIRED P2 (2026-05-14): replaced by `src/state/table_registry.py` registry. `validate_world_schema_at_boot` removed from `src/main.py`; replaced in P3 by `assert_db_matches_registry`. |
 | `preflight_overrides_2026-04-28.yaml` | Operator-approved preflight drift overrides for WU ICAO history residuals (schema_version 1; created 2026-04-28) |
 | `inv_prototype.py` | @enforced_by decorator prototype for round-2 §H1 INV annotation experiment (created 2026-04-28) |
 | `world_schema_version.yaml` | World DB schema version sentinel for two-system independence axis 4 (created 2026-05-01) |

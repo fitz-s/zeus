@@ -33,6 +33,8 @@ import sqlite3
 from datetime import date, datetime, timezone
 from typing import Iterable, Optional
 
+from src.state.connection_pair import WorldConnection
+
 
 # ---------------------------------------------------------------------------
 # Type-safe enums — prevent string typos at call sites
@@ -173,7 +175,7 @@ WHERE
 
 
 def record_written(
-    conn: sqlite3.Connection,
+    conn: WorldConnection,
     *,
     data_table: DataTable,
     city: str,
@@ -207,7 +209,7 @@ def record_written(
 
 
 def record_legitimate_gap(
-    conn: sqlite3.Connection,
+    conn: WorldConnection,
     *,
     data_table: DataTable,
     city: str,
@@ -243,7 +245,7 @@ def record_legitimate_gap(
 
 
 def record_failed(
-    conn: sqlite3.Connection,
+    conn: WorldConnection,
     *,
     data_table: DataTable,
     city: str,
@@ -279,7 +281,7 @@ def record_failed(
 
 
 def record_missing(
-    conn: sqlite3.Connection,
+    conn: WorldConnection,
     *,
     data_table: DataTable,
     city: str,
@@ -318,7 +320,7 @@ def record_missing(
 
 
 def find_pending_fills(
-    conn: sqlite3.Connection,
+    conn: WorldConnection,
     *,
     data_table: DataTable,
     city: Optional[str] = None,
@@ -360,7 +362,7 @@ def find_pending_fills(
 
 
 def count_by_status(
-    conn: sqlite3.Connection,
+    conn: WorldConnection,
     *,
     data_table: Optional[DataTable] = None,
 ) -> dict[str, int]:
@@ -382,7 +384,7 @@ def count_by_status(
 
 
 def coverage_summary(
-    conn: sqlite3.Connection,
+    conn: WorldConnection,
     *,
     data_table: DataTable,
 ) -> list[sqlite3.Row]:
@@ -410,7 +412,7 @@ def coverage_summary(
 
 
 def bulk_record_written(
-    conn: sqlite3.Connection,
+    conn: WorldConnection,
     *,
     data_table: DataTable,
     rows: Iterable[tuple[str, str, str, str]],

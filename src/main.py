@@ -756,15 +756,9 @@ def main():
     # Startup health check: warn about deferred data actions
     _startup_data_health_check(conn)
 
-    # §1 axis 4 + §6 antibody #5: World schema manifest validation (Phase 2: warn-only).
-    # Phase 3 will FATAL on mismatch. The validator reads architecture/world_schema_manifest.yaml
-    # and asserts all required columns are present via PRAGMA table_info().
-    try:
-        from src.contracts.world_schema_validator import validate_world_schema_at_boot
-        validate_world_schema_at_boot(conn)
-    except Exception as _schema_exc:
-        logger.warning("World schema validation error (non-fatal in Phase 2): %s", _schema_exc)
-
+    # world_schema_manifest.yaml + validate_world_schema_at_boot RETIRED in P2
+    # (2026-05-14 K1 followups plan §5.5 D5). assert_db_matches_registry() exists
+    # (src/state/table_registry.py) but boot wiring is deferred — not called here.
     conn.close()
 
     # §4.2 World schema ready sentinel gate — fail-closed (Phase 3 enforcement).

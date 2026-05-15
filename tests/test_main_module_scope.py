@@ -10,7 +10,7 @@ legacy get_trade_connection_with_world seam.
 Allowed (trading-only):
 - src.data.dual_run_lock (lock infrastructure — retained for future daemons)
 - src.execution.harvester_pnl_resolver (trading-side P&L resolver)
-- src.contracts.* (read API; world_view, world_schema_validator)
+- src.contracts.* (read API; typed ConnectionTriple accessors post-K1)
 - src.data.proxy_health (startup gate)
 - Everything else in src.engine, src.strategy, src.signal, src.control,
   src.config, src.observability, src.state, src.ingest.polymarket_user_channel.

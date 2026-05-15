@@ -244,7 +244,28 @@ state_surfaces:
     scope: runtime
     zone: state
     authority_role: canonical_truth
-    forbidden_misread: World-data DB, not trade lifecycle authority.
+    forbidden_misread: World-data DB, not trade lifecycle authority. schema_class=WORLD_CLASS tables only (post K1-split 2026-05-11); forecast-class tables (observations, settlements, calibration_pairs_v2, etc.) reside on zeus-forecasts.db.
+    k1_split_note: >
+      K1 DB split (2026-05-11): forecast-class tables migrated to state/zeus-forecasts.db.
+      Table-to-DB ownership is machine-checked via architecture/db_table_ownership.yaml
+      (registry path: src/state/table_registry.py). Cross-DB writes are forbidden per
+      INV-37; sanctioned exception is ATTACH+SAVEPOINT via get_forecasts_connection_with_world().
+  - path: "state/zeus-forecasts.db"
+    status: active
+    scope: runtime
+    zone: state
+    authority_role: canonical_truth
+    forbidden_misread: >
+      Forecast-class DB (K1 split 2026-05-11). Contains schema_class=FORECAST_CLASS tables:
+      observations, settlements, settlements_v2, source_run, market_events_v2,
+      ensemble_snapshots_v2, calibration_pairs_v2. Do not write to this DB via a separate
+      independent connection while also writing world.db — that violates INV-37.
+      Use get_forecasts_connection() for reads and get_forecasts_connection_with_world()
+      (ATTACH+SAVEPOINT) for atomic cross-DB writes.
+    k1_split_note: >
+      Registered K1 split (2026-05-11). Ownership registry: architecture/db_table_ownership.yaml.
+      INV-37 forbids independent-connection cross-DB writes; enforced by
+      tests/state/test_table_registry_coherence.py::test_a8_no_cross_db_write_transaction_in_src.
   - path: "state/zeus_backtest.db"
     status: active
     scope: runtime

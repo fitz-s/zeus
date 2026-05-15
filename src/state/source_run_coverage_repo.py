@@ -7,6 +7,8 @@ import sqlite3
 from datetime import date, datetime, timezone
 from typing import Any
 
+from src.state.connection_pair import WorldConnection
+
 COMPLETENESS_STATUSES = frozenset({"COMPLETE", "PARTIAL", "MISSING", "HORIZON_OUT_OF_RANGE", "NOT_RELEASED"})
 READINESS_STATUSES = frozenset({"LIVE_ELIGIBLE", "SHADOW_ONLY", "BLOCKED", "UNKNOWN_BLOCKED"})
 
@@ -42,7 +44,7 @@ def _json_text(value: Any, *, default: object) -> str:
 
 
 def write_source_run_coverage(
-    conn: sqlite3.Connection,
+    conn: WorldConnection,
     *,
     coverage_id: str,
     source_run_id: str,
@@ -152,7 +154,7 @@ def write_source_run_coverage(
         raise
 
 
-def get_source_run_coverage(conn: sqlite3.Connection, coverage_id: str) -> dict[str, Any] | None:
+def get_source_run_coverage(conn: WorldConnection, coverage_id: str) -> dict[str, Any] | None:
     row = conn.execute(
         "SELECT * FROM source_run_coverage WHERE coverage_id = ?",
         (coverage_id,),
@@ -161,7 +163,7 @@ def get_source_run_coverage(conn: sqlite3.Connection, coverage_id: str) -> dict[
 
 
 def get_latest_source_run_coverage(
-    conn: sqlite3.Connection,
+    conn: WorldConnection,
     *,
     city_id: str,
     city_timezone: str,

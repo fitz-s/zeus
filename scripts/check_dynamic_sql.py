@@ -101,7 +101,7 @@ _BASELINE_PER_FILE: dict[str, int] = {
     "src/backtest/economics.py": 1,
     "src/calibration/effective_sample_size.py": 2,
     "src/calibration/store.py": 15,
-    "src/contracts/world_schema_validator.py": 1,
+    # src/contracts/world_schema_validator.py: RETIRED P2 (2026-05-14) — file deleted
     "src/data/daily_obs_append.py": 4,
     "src/data/executable_forecast_reader.py": 1,
     "src/data/daily_observation_writer.py": 6,
@@ -127,10 +127,13 @@ _BASELINE_PER_FILE: dict[str, int] = {
     "src/state/market_topology_repo.py": 4,
     "src/state/readiness_repo.py": 4,
     "src/state/source_run_repo.py": 4,
-    "src/state/db.py": 22,
+    # db.py grew by 11 sites in P1/P2 (PRAGMA busy_timeout interpolations,
+    # registry-driven table_name expansions — all closed internal identifiers).
+    "src/state/db.py": 33,
+    "src/state/decision_chain.py": 1,  # internal table-name constant; added P1
     "src/state/ledger.py": 8,
     "src/state/projection.py": 2,
-    "src/state/schema/v2_schema.py": 1,
+    "src/state/schema/v2_schema.py": 2,  # +1 PRAGMA busy_timeout in P1
     # 2 PRAGMA table_info() interpolations (with optional attached-DB name).
     # Both `table` and `attached` are internal identifiers passed by callers
     # in src/calibration/store.py — no user input. Sites were extracted out
@@ -138,8 +141,18 @@ _BASELINE_PER_FILE: dict[str, int] = {
     # contract, internal-whitelist interpolation → bump baseline (see the
     # store.py rule above).
     "src/state/schema_introspection.py": 2,
+    # PRAGMA table_info({table_name}) where table_name comes from the registry
+    # YAML (closed internal source). Added P1 (2026-05-14).
+    "src/state/table_registry.py": 1,
+    "src/state/chain_reconciliation.py": 1,  # internal table-name; added pre-P2
     "src/state/venue_command_repo.py": 5,
     "src/state/ws_poll_reaction.py": 1,
+    # Observability modules added pre-P2 — all interpolate internal column/table
+    # names from closed module-level constants; no user-controlled input.
+    "src/observability/calibration_serving_status.py": 4,
+    "src/observability/price_evidence_report.py": 7,
+    # exchange_reconcile.py: 1 f-string SQL site; internal field name constant.
+    "src/execution/exchange_reconcile.py": 1,
     # Tail catch — fresh files with f-string SQL must be added explicitly.
 }
 
