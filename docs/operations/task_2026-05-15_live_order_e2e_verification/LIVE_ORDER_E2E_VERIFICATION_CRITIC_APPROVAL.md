@@ -43,4 +43,3 @@ No required changes remain for the plan packet.
 This approval is not an empirical completion claim. The system is not live-verified until a later evidence bundle proves a real accepted/resting live limit order or stronger through:
 
 `running live daemon -> evaluator/final intent -> executor -> venue command journal -> venue ack/order fact -> order/position/reconciliation records`
-

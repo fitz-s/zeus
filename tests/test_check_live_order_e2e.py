@@ -151,19 +151,21 @@ def _insert_pre_submit_envelope(conn: sqlite3.Connection, *, order_id: str | Non
 def _insert_order_fact(
     conn: sqlite3.Connection,
     *,
+    fact_id: str = "fact-1",
     command_id: str = "cmd-1",
     order_id: str = "order-1",
     source: str = "REST",
     state: str = "RESTING",
+    observed_at: str = "2026-05-15T12:00:03Z",
 ) -> None:
     conn.execute(
         """
         INSERT INTO venue_order_facts (
           fact_id, command_id, venue_order_id, source, observed_at, state
         )
-        VALUES ('fact-1', ?, ?, ?, '2026-05-15T12:00:03Z', ?)
+        VALUES (?, ?, ?, ?, ?, ?)
         """,
-        (command_id, order_id, source, state),
+        (fact_id, command_id, order_id, source, observed_at, state),
     )
 
 
@@ -393,7 +395,7 @@ def test_accepted_ack_without_order_fact_is_not_completion(tmp_path):
     assert result["status"] == "FAIL"
     assert result["completion_category"] == "LIVE_ORDER_ACKED_MISSING_ORDER_FACT"
     assert any(
-        check["name"] == "venue_order_fact_present" and check["status"] == "FAIL"
+        check["name"] == "latest_venue_order_fact_open" and check["status"] == "FAIL"
         for check in result["checks"]
     )
 
@@ -416,7 +418,7 @@ def test_fake_venue_order_fact_is_not_completion(tmp_path):
     assert result["status"] == "FAIL"
     assert result["completion_category"] == "LIVE_ORDER_ACKED_MISSING_ORDER_FACT"
     assert any(
-        check["name"] == "venue_order_fact_present" and check["status"] == "FAIL"
+        check["name"] == "latest_venue_order_fact_open" and check["status"] == "FAIL"
         for check in result["checks"]
     )
 
@@ -438,6 +440,37 @@ def test_order_fact_order_id_mismatch_is_not_completion(tmp_path):
 
     assert result["status"] == "FAIL"
     assert result["completion_category"] == "LIVE_ORDER_ACKED_MISSING_ORDER_FACT"
+
+
+def test_latest_terminal_order_fact_is_not_submitted_completion(tmp_path):
+    module = _load_module()
+    db = tmp_path / "trades.db"
+    with sqlite3.connect(db) as conn:
+        conn.row_factory = sqlite3.Row
+        _schema(conn)
+        _insert_command(conn)
+        _insert_submit_requested(conn)
+        _insert_submit_acked(conn)
+        _insert_pre_submit_envelope(conn)
+        _insert_order_fact(conn, fact_id="fact-1", state="RESTING", observed_at="2026-05-15T12:00:03Z")
+        _insert_order_fact(
+            conn,
+            fact_id="fact-2",
+            state="CANCEL_CONFIRMED",
+            observed_at="2026-05-15T12:00:04Z",
+        )
+
+    with module._connect_readonly(db) as conn:
+        result = module.evaluate(conn, "cmd-1")
+
+    assert result["status"] == "FAIL"
+    assert result["completion_category"] == "LIVE_ORDER_ACKED_MISSING_ORDER_FACT"
+    assert any(
+        check["name"] == "latest_venue_order_fact_open"
+        and check["status"] == "FAIL"
+        and "latest_state=CANCEL_CONFIRMED" in check["detail"]
+        for check in result["checks"]
+    )
 
 
 def test_fill_fact_without_position_projection_is_not_completion(tmp_path):
