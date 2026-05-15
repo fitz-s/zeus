@@ -142,6 +142,69 @@ coverage_map:
         - "docs/operations/task_*/**.md"
         - "docs/operations/task_*/**.yaml"
 
+    # ---------------------------------------------------------------------------
+    # P2.1 companion_required profiles (SCAFFOLD §6 initial anchors)
+    # TOPOLOGY BLOCKING anchor #1 — calibration weighting
+    # ---------------------------------------------------------------------------
+    - id: modify_calibration_weighting
+      patterns:
+        - "src/calibration/*.py"
+        - "tests/test_calibration_*.py"
+      companion_required:
+        - "docs/reference/zeus_calibration_weighting_authority.md"
+      companion_reason: >
+        any change to calibration weighting must update the authority reference;
+        otherwise the authority drift problem compounds (P8 HYP-B precedent)
+
+    # TOPOLOGY BLOCKING anchor #2 — kelly sizing
+    - id: modify_kelly_sizing
+      patterns:
+        - "src/strategy/kelly_*.py"
+        - "tests/test_kelly_*.py"
+      companion_required:
+        - "docs/reference/zeus_kelly_asymmetric_loss_handoff.md"
+      companion_reason: >
+        P8 HYP-B precedent: kelly sizing changes drifted from the asymmetric
+        loss handoff authority doc within 2 weeks of merge.
+
+    # TOPOLOGY BLOCKING anchor #3 — vendor response (hotfix-prone; skip token declared)
+    - id: modify_vendor_response
+      patterns:
+        - "src/data/vendor_response_*.py"
+        - "src/ingest/vendor_response_*.py"
+        - "tests/test_vendor_response_*.py"
+      companion_required:
+        - "docs/reference/zeus_vendor_change_response_registry.md"
+      companion_skip_acknowledge_token: "COMPANION_SKIP_NEEDS_HUMAN_REVIEW=1"
+      companion_reason: >
+        Vendor change response edits frequently arrive as hotfixes with no
+        time for doc-side coordination; skip token allows admission with
+        audit trail for next-week digest review.
+
+    # Cohort 4 verified drift #1 — data replay surface
+    - id: modify_data_replay_surface
+      patterns:
+        - "src/data/replay_*.py"
+        - "src/data/client_*.py"
+        - "tests/test_data_*.py"
+      companion_required:
+        - "docs/reference/zeus_data_and_replay_reference.md"
+      companion_reason: >
+        data client surface is high-churn and the replay reference is exactly
+        one of the authority docs that lags behind (Cohort 4 verified drift).
+
+    # Cohort 4 verified drift #2 — risk strategy surface
+    - id: modify_risk_strategy_surface
+      patterns:
+        - "src/risk/*.py"
+        - "src/strategy/risk_*.py"
+        - "tests/test_risk_*.py"
+      companion_required:
+        - "docs/reference/zeus_risk_strategy_reference.md"
+      companion_reason: >
+        risk strategy reference covers the Kelly sizing formula and edge decay
+        model; separate from modify_kelly_sizing (asymmetric loss handoff doc).
+
   orphaned:
     - "tmp/**"
     - "*.bak.*"
@@ -291,7 +354,8 @@ artifact_authority_status:
     reason: "Structured override model retracted by hook_redesign_v2"
 
 # ---------------------------------------------------------------------------
-# P2 placeholder — companion_required (SCAFFOLD §6 open item)
-# profile_loader tolerates this unknown key (warn-don't-crash per §1.3).
+# P2.1 implementation note:
+# companion_required data lives PER-PROFILE inside coverage_map.profiles entries.
+# Top-level placeholder removed; profile_loader now extracts companion_required
+# and companion_skip_tokens from per-profile YAML keys (SCAFFOLD §2.1).
 # ---------------------------------------------------------------------------
-companion_required: {}

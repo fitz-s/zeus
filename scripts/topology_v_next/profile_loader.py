@@ -1,6 +1,7 @@
 # Created: 2026-05-15
 # Last reused or audited: 2026-05-15
 # Authority basis: docs/operations/task_2026-05-15_p1_topology_v_next_additive/SCAFFOLD.md §1.3
+#                  docs/operations/task_2026-05-15_p2_companion_required_mechanism/SCAFFOLD.md §2.1, §2.2
 """
 Loads and validates the Zeus binding-layer YAML into typed BindingLayer.
 
@@ -16,6 +17,7 @@ Properties:
 """
 from __future__ import annotations
 
+import re
 import warnings
 from pathlib import Path
 from typing import Any
@@ -82,33 +84,55 @@ def validate_binding_layer(bl: BindingLayer) -> list[str]:
     - intent_extensions missing 'zeus.' namespace prefix
     - Empty coverage_map.profiles
     - artifact_authority_status rows with missing required sub-keys
+    - P2.1: companion_required paths that do not exist on disk (companion_target_missing)
+    - P2.1: companion_skip_tokens values that don't match ^[A-Z_]+(=[A-Za-z0-9_]+)?$ (companion_token_malformed)
     """
-    warnings: list[str] = []
+    warnings_list: list[str] = []
 
     # Check intent extensions have project namespace prefix
     for ext in bl.intent_extensions:
         value: str = ext.value
         if "." not in value:
-            warnings.append(
+            warnings_list.append(
                 f"intent_extension '{value}' has no namespace prefix "
                 "(expected '<project>.<name>'). Universal namespace collision risk."
             )
 
     # Warn if no profiles declared
     if not bl.coverage_map.profiles:
-        warnings.append("coverage_map.profiles is empty; all files will be coverage gaps.")
+        warnings_list.append("coverage_map.profiles is empty; all files will be coverage gaps.")
 
     # Warn on artifact_authority_status rows missing required sub-keys
     required_status_keys = {"status", "last_confirmed", "confirmation_ttl_days"}
     for artifact_path, row in bl.artifact_authority_status.items():
         missing = required_status_keys - set(row.keys())
         if missing:
-            warnings.append(
+            warnings_list.append(
                 f"artifact_authority_status['{artifact_path}'] missing keys: "
                 f"{sorted(missing)}. TTL freshness enforcement will be incomplete."
             )
 
-    return warnings
+    # P2.1: Check companion_required paths exist on disk (advisory; load proceeds)
+    for profile_id, companion_paths in bl.companion_required.items():
+        for companion_path in companion_paths:
+            if not Path(companion_path).exists():
+                warnings_list.append(
+                    f"companion_target_missing: profile '{profile_id}' requires "
+                    f"'{companion_path}' but that path does not exist on disk. "
+                    "Create the authority doc or correct the path in the binding YAML."
+                )
+
+    # P2.1: Check companion_skip_tokens match expected format
+    _token_re = re.compile(r"^[A-Z_]+(=[A-Za-z0-9_]+)?$")
+    for profile_id, token in bl.companion_skip_tokens.items():
+        if not _token_re.match(token):
+            warnings_list.append(
+                f"companion_token_malformed: profile '{profile_id}' skip token "
+                f"'{token}' does not match ^[A-Z_]+(=[A-Za-z0-9_]+)?$. "
+                "Fix the token format in the binding YAML."
+            )
+
+    return warnings_list
 
 
 # ---------------------------------------------------------------------------
@@ -121,18 +145,27 @@ def _parse_binding_layer(raw: dict[str, Any]) -> tuple[BindingLayer, list[str]]:
 
     Unknown top-level keys are ignored (warn-don't-crash per §1.3).
     Returns (BindingLayer, dropped_intent_ids) so the caller can warn on drops.
+
+    P2.1 extension: companion_required and companion_skip_tokens are extracted
+    from per-profile YAML entries inside coverage_map.profiles and populated as
+    top-level BindingLayer fields (SCAFFOLD §2.1 / §0 INCONSISTENCY-1 resolution).
     """
     project_id: str = raw.get("project_id", "")
 
     intent_extensions, dropped_intents = _parse_intent_extensions(
         raw.get("intent_extensions") or []
     )
-    coverage_map = _parse_coverage_map(raw.get("coverage_map") or {})
+    coverage_map_raw = raw.get("coverage_map") or {}
+    coverage_map = _parse_coverage_map(coverage_map_raw)
     cohorts = _parse_cohorts(raw.get("cohorts") or [])
     severity_overrides = _parse_severity_overrides(raw.get("severity_overrides") or {})
     high_fanout_hints = tuple(raw.get("high_fanout_hints") or [])
     artifact_authority_status = _parse_artifact_authority_status(
         raw.get("artifact_authority_status") or {}
+    )
+    # P2.1: parse companion_required and companion_skip_tokens from per-profile entries
+    companion_required, companion_skip_tokens = _parse_companion_fields(
+        coverage_map_raw.get("profiles") or []
     )
 
     bl = BindingLayer(
@@ -143,6 +176,8 @@ def _parse_binding_layer(raw: dict[str, Any]) -> tuple[BindingLayer, list[str]]:
         severity_overrides=severity_overrides,
         high_fanout_hints=high_fanout_hints,
         artifact_authority_status=artifact_authority_status,
+        companion_required=companion_required,
+        companion_skip_tokens=companion_skip_tokens,
     )
     return bl, dropped_intents
 
@@ -234,6 +269,36 @@ def _parse_severity_overrides(raw: dict[str, Any]) -> dict[str, Severity]:
         except ValueError:
             pass
     return result
+
+
+def _parse_companion_fields(
+    profiles_raw: list[dict[str, Any]],
+) -> tuple[dict[str, tuple[str, ...]], dict[str, str]]:
+    """
+    Extract companion_required and companion_skip_acknowledge_token from
+    per-profile YAML entries (P2.1 SCAFFOLD §2.1).
+
+    Returns:
+        companion_required: profile_id → tuple of authority-doc relative paths
+        companion_skip_tokens: profile_id → exact token string
+    """
+    companion_required: dict[str, tuple[str, ...]] = {}
+    companion_skip_tokens: dict[str, str] = {}
+
+    for entry in profiles_raw:
+        profile_id: str = entry.get("id", "")
+        if not profile_id:
+            continue
+
+        raw_required = entry.get("companion_required")
+        if raw_required:
+            companion_required[profile_id] = tuple(str(p) for p in raw_required)
+
+        skip_token: str = entry.get("companion_skip_acknowledge_token", "")
+        if skip_token:
+            companion_skip_tokens[profile_id] = skip_token
+
+    return companion_required, companion_skip_tokens
 
 
 def _parse_artifact_authority_status(

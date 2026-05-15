@@ -1,6 +1,7 @@
 # Created: 2026-05-15
 # Last reused or audited: 2026-05-15
 # Authority basis: docs/operations/task_2026-05-15_p1_topology_v_next_additive/SCAFFOLD.md §1.8
+#                  docs/operations/task_2026-05-15_p2_companion_required_mechanism/SCAFFOLD.md §3.0
 """
 Composition Rules for topology v_next admission system.
 
@@ -91,6 +92,16 @@ def apply_composition(
     Phrase/hint is NOT a parameter (SCAFFOLD §5.4).
     """
     issues: list[IssueRecord] = []
+
+    # §3.0 companion_required pre-registration (P2.1 SCAFFOLD §3.0):
+    # For each profile that has companion_required paths, if the submitted files
+    # contain a source file already assigned to that profile, pre-register every
+    # companion_required path as also belonging to that same profile.
+    # This prevents the unsolvable trap: adding the required companion doc would
+    # otherwise expand touched_profiles to ≥2, causing composition_conflict
+    # BEFORE _check_companion_required ever runs (SCAFFOLD §3.0).
+    candidates = _preregister_companion_paths(files, candidates, binding)
+
     touched_profiles = union_candidate_profiles(candidates)
 
     # C1 / C2: single-profile resolution (subsumption or additive companion)
@@ -189,6 +200,57 @@ def _all_cohort_files_present(
         if not any(fnmatch.fnmatch(f, fnmatch_pattern) for f in submitted):
             return False
     return True
+
+
+def _preregister_companion_paths(
+    files: list[str],
+    candidates: dict[str, set[str]],
+    binding: BindingLayer,
+) -> dict[str, set[str]]:
+    """
+    Pre-register companion_required paths as Rule C1 declared companions.
+
+    For each profile_id that has companion_required entries:
+    1. Check if any submitted file is already assigned to that profile_id.
+    2. If yes, add every companion_required path to that file's candidate set
+       (or create a new candidates entry for those companion paths pointing
+       to the same profile_id).
+
+    This ensures that submitting (source_file + companion_doc) does NOT expand
+    touched_profiles beyond 1, preventing the composition_conflict trap described
+    in SCAFFOLD §3.0.
+
+    Returns a new candidates dict (no mutation of the original).
+    """
+    if not binding.companion_required:
+        return candidates
+
+    # Determine which profiles are already touched by the submitted files
+    # (pre-preregistration — only source files, not companion docs)
+    profiles_in_source: set[str] = set()
+    for profile_candidates in candidates.values():
+        profiles_in_source.update(profile_candidates)
+
+    if not profiles_in_source:
+        return candidates
+
+    # Build updated candidates dict; start with a shallow copy
+    updated: dict[str, set[str]] = {f: set(profiles) for f, profiles in candidates.items()}
+
+    for profile_id, companion_paths in binding.companion_required.items():
+        if profile_id not in profiles_in_source:
+            continue  # No source file from this profile in the change set; skip.
+
+        for companion_path in companion_paths:
+            if companion_path in updated:
+                # File already in candidates — add this profile to its set
+                updated[companion_path].add(profile_id)
+            else:
+                # Companion doc not yet in candidates (i.e. not a source file)
+                # Create a new entry so composition sees it as belonging to profile_id
+                updated[companion_path] = {profile_id}
+
+    return updated
 
 
 def _find_union_profile(

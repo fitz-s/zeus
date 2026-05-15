@@ -187,6 +187,11 @@ class BindingLayer:
 
     The single typed container for all project-specific topology configuration.
     Loaded via profile_loader.load_binding_layer().
+
+    P2.1 additive fields (SCAFFOLD §2.2, §0 INCONSISTENCY-1 resolution):
+    - companion_required: profile_id → tuple of authority-doc relative paths
+    - companion_skip_tokens: profile_id → exact token string for skip-token short-circuit
+    Both default to empty dicts so existing P1 binding YAML loads without modification.
     """
 
     project_id: str
@@ -196,3 +201,6 @@ class BindingLayer:
     severity_overrides: dict[str, Severity]
     high_fanout_hints: tuple[dict[str, Any], ...]
     artifact_authority_status: dict[str, dict[str, Any]]
+    # P2.1 additive fields — default empty so P1 YAML loads unchanged
+    companion_required: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    companion_skip_tokens: dict[str, str] = field(default_factory=dict)
