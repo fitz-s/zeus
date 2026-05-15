@@ -143,10 +143,10 @@ def _events(conn: sqlite3.Connection, command_id: str) -> list[dict[str, Any]]:
         return []
     cols = _columns(conn, "venue_command_events")
     order_terms = []
-    if "occurred_at" in cols:
-        order_terms.append("occurred_at ASC")
     if "sequence_no" in cols:
         order_terms.append("sequence_no ASC")
+    if "occurred_at" in cols:
+        order_terms.append("occurred_at ASC")
     order_terms.append("rowid ASC")
     order_sql = ", ".join(order_terms)
     return [
@@ -190,10 +190,10 @@ def _facts(conn: sqlite3.Connection, table: str, command_id: str) -> list[dict[s
     if "command_id" not in cols:
         return []
     order_terms = []
-    if "observed_at" in cols:
-        order_terms.append("observed_at DESC")
     if "local_sequence" in cols:
         order_terms.append("local_sequence DESC")
+    if "observed_at" in cols:
+        order_terms.append("observed_at DESC")
     order_terms.append("rowid DESC")
     order_sql = ", ".join(order_terms)
     return [

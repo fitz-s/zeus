@@ -46,6 +46,7 @@ def _schema(conn: sqlite3.Connection) -> None:
         CREATE TABLE venue_command_events (
           event_id TEXT PRIMARY KEY,
           command_id TEXT NOT NULL,
+          sequence_no INTEGER,
           event_type TEXT NOT NULL,
           state_after TEXT,
           occurred_at TEXT,
@@ -122,9 +123,9 @@ def _insert_submit_requested(conn: sqlite3.Connection) -> None:
     conn.execute(
         """
         INSERT INTO venue_command_events (
-          event_id, command_id, event_type, state_after, occurred_at, payload_json
+          event_id, command_id, sequence_no, event_type, state_after, occurred_at, payload_json
         )
-        VALUES ('evt-1', 'cmd-1', 'SUBMIT_REQUESTED', 'SUBMITTING',
+        VALUES ('evt-1', 'cmd-1', 1, 'SUBMIT_REQUESTED', 'SUBMITTING',
                 '2026-05-15T12:00:01Z', '{}')
         """
     )
@@ -134,24 +135,30 @@ def _insert_submit_acked(conn: sqlite3.Connection, *, order_id: str = "order-1")
     conn.execute(
         """
         INSERT INTO venue_command_events (
-          event_id, command_id, event_type, state_after, occurred_at, payload_json
+          event_id, command_id, sequence_no, event_type, state_after, occurred_at, payload_json
         )
-        VALUES ('evt-2', 'cmd-1', 'SUBMIT_ACKED', 'ACKED',
+        VALUES ('evt-2', 'cmd-1', 2, 'SUBMIT_ACKED', 'ACKED',
                 '2026-05-15T12:00:02Z', ?)
         """,
         (json.dumps({"venue_order_id": order_id}),),
     )
 
 
-def _insert_later_submit_rejected(conn: sqlite3.Connection) -> None:
+def _insert_later_submit_rejected(
+    conn: sqlite3.Connection,
+    *,
+    occurred_at: str = "2026-05-15T12:00:03Z",
+    sequence_no: int = 3,
+) -> None:
     conn.execute(
         """
         INSERT INTO venue_command_events (
-          event_id, command_id, event_type, state_after, occurred_at, payload_json
+          event_id, command_id, sequence_no, event_type, state_after, occurred_at, payload_json
         )
-        VALUES ('evt-3', 'cmd-1', 'SUBMIT_REJECTED', 'SUBMIT_REJECTED',
-                '2026-05-15T12:00:03Z', '{"reason":"late_reject"}')
-        """
+        VALUES ('evt-3', 'cmd-1', ?, 'SUBMIT_REJECTED', 'SUBMIT_REJECTED',
+                ?, '{"reason":"late_reject"}')
+        """,
+        (sequence_no, occurred_at),
     )
 
 
@@ -544,6 +551,30 @@ def test_later_rejected_event_after_ack_is_not_completion(tmp_path):
     )
 
 
+def test_later_rejected_sequence_overrides_earlier_timestamp(tmp_path):
+    module = _load_module()
+    db = tmp_path / "trades.db"
+    with sqlite3.connect(db) as conn:
+        conn.row_factory = sqlite3.Row
+        _schema(conn)
+        _insert_command(conn)
+        _insert_submit_requested(conn)
+        _insert_submit_acked(conn)
+        _insert_later_submit_rejected(conn, occurred_at="2026-05-15T12:00:00Z", sequence_no=3)
+        _insert_pre_submit_envelope(conn)
+        _insert_order_fact(conn)
+
+    with module._connect_readonly(db) as conn:
+        result = module.evaluate(conn, "cmd-1")
+
+    assert result["status"] == "FAIL"
+    assert result["completion_category"] == "NO_LIVE_ORDER_PROOF"
+    assert any(
+        check["name"] == "latest_event_not_rejected_or_unknown" and check["status"] == "FAIL"
+        for check in result["checks"]
+    )
+
+
 def test_latest_terminal_order_fact_is_not_submitted_completion(tmp_path):
     module = _load_module()
     db = tmp_path / "trades.db"
@@ -566,6 +597,44 @@ def test_latest_terminal_order_fact_is_not_submitted_completion(tmp_path):
             fact_id="fact-2",
             state="CANCEL_CONFIRMED",
             observed_at="2026-05-15T12:00:03Z",
+            local_sequence=2,
+        )
+
+    with module._connect_readonly(db) as conn:
+        result = module.evaluate(conn, "cmd-1")
+
+    assert result["status"] == "FAIL"
+    assert result["completion_category"] == "LIVE_ORDER_ACKED_MISSING_ORDER_FACT"
+    assert any(
+        check["name"] == "latest_venue_order_fact_open"
+        and check["status"] == "FAIL"
+        and "latest_state=CANCEL_CONFIRMED" in check["detail"]
+        for check in result["checks"]
+    )
+
+
+def test_order_fact_local_sequence_overrides_later_observed_at(tmp_path):
+    module = _load_module()
+    db = tmp_path / "trades.db"
+    with sqlite3.connect(db) as conn:
+        conn.row_factory = sqlite3.Row
+        _schema(conn)
+        _insert_command(conn)
+        _insert_submit_requested(conn)
+        _insert_submit_acked(conn)
+        _insert_pre_submit_envelope(conn)
+        _insert_order_fact(
+            conn,
+            fact_id="fact-1",
+            state="RESTING",
+            observed_at="2026-05-15T12:00:10Z",
+            local_sequence=1,
+        )
+        _insert_order_fact(
+            conn,
+            fact_id="fact-2",
+            state="CANCEL_CONFIRMED",
+            observed_at="2026-05-15T12:00:00Z",
             local_sequence=2,
         )
 
@@ -771,10 +840,10 @@ def test_rejected_order_is_recorded_but_not_completion(tmp_path):
         conn.execute(
             """
             INSERT INTO venue_command_events (
-              event_id, command_id, event_type, state_after, occurred_at,
+              event_id, command_id, sequence_no, event_type, state_after, occurred_at,
               payload_json
             )
-            VALUES ('evt-2', 'cmd-1', 'SUBMIT_REJECTED', 'SUBMIT_REJECTED',
+            VALUES ('evt-2', 'cmd-1', 2, 'SUBMIT_REJECTED', 'SUBMIT_REJECTED',
                     '2026-05-15T12:00:02Z', '{"reason":"closed"}')
             """
         )
