@@ -130,11 +130,14 @@ def build_live_entry_forecast_status(
         )
         if not rows:
             blockers.append("NO_FUTURE_TARGET_DATE_COVERAGE")
+        row_blockers: list[str] = []
         for row in rows:
             if row["status"] != "LIVE_ELIGIBLE":
-                blockers.extend(_parse_reasons(row["reason_codes_json"]))
+                row_blockers.extend(_parse_reasons(row["reason_codes_json"]))
             elif not _is_live_readiness_current(row, now_utc=now_utc):
-                blockers.append("PRODUCER_READINESS_EXPIRED")
+                row_blockers.append("PRODUCER_READINESS_EXPIRED")
+        if rows and producer_live_eligible_count == 0:
+            blockers.extend(row_blockers or ("NO_CURRENT_PRODUCER_LIVE_ELIGIBLE",))
 
     if config.rollout_mode is EntryForecastRolloutMode.BLOCKED:
         blockers.append("ENTRY_FORECAST_ROLLOUT_BLOCKED")

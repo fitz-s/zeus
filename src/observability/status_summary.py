@@ -101,8 +101,11 @@ _V2_TABLES = (
 )
 
 _V2_ROW_COUNT_SCHEMA_PREFERENCE = {
-    table: ("world", "main")
-    for table in _V2_TABLES
+    "platt_models_v2": ("world", "main"),
+    "calibration_pairs_v2": ("forecasts", "world", "main"),
+    "ensemble_snapshots_v2": ("forecasts", "world", "main"),
+    "historical_forecasts_v2": ("world", "main"),
+    "settlements_v2": ("forecasts", "world", "main"),
 }
 
 
