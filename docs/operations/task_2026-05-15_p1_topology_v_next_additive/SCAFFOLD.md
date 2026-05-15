@@ -1,13 +1,15 @@
 # P1 Topology v_next Additive Route — SCAFFOLD (rev 1.1)
 
 Created: 2026-05-15
-Revised: 2026-05-15 — P1.0 critic FIX_REQUIRED applied (SEV-1 C1 + SEV-2 M1–M6)
+Revised: 2026-05-15 — P1.0 critic FIX_REQUIRED applied (rev 1.1: SEV-1 C1 + SEV-2 M1–M6); P1.1 re-critic patches applied (rev 1.2: MAJOR-1 §7.2→§5.2 refs, MAJOR-2 P3→P2-packet naming, MINOR-1–4)
 Status: SPEC ONLY — no implementation code; this document is the build contract for P1
 Authority basis: docs/operations/task_2026-05-15_runtime_improvement_engineering_package/01_topology_v_next/{UNIVERSAL_TOPOLOGY_DESIGN.md, ZEUS_BINDING_LAYER.md, MIGRATION_PATH.md, HIDDEN_BRANCH_LESSONS.md}
 
-**STRUCTURAL REFRAMING (rev 1.1):** P1 is STRUCTURES-ONLY. MIGRATION_PATH.md Phase 1 mandate is explicit: "structures built and populated but NOT consulted." P1.0 SCAFFOLD deviated from this by including cli_integration_shim, divergence_logger, shadow_compare, --v-next-shadow CLI flag, JSONL log schema, and a 7-day probe sequence. All of those belong in P3 (`topology_v_next_phase2_shadow`). This revision honors MIGRATION_PATH Phase 1 authority and restricts P1 to 10 modules that EXIST, can be unit-tested, and are Codex-importable — but NO production caller invokes them yet.
+**STRUCTURAL REFRAMING (rev 1.1):** P1 is STRUCTURES-ONLY. MIGRATION_PATH.md Phase 1 mandate is explicit: "structures built and populated but NOT consulted." P1.0 SCAFFOLD deviated from this by including cli_integration_shim, divergence_logger, shadow_compare, --v-next-shadow CLI flag, JSONL log schema, and a 7-day probe sequence. All of those belong in P2 packet (`topology_v_next_phase2_shadow`). This revision honors MIGRATION_PATH Phase 1 authority and restricts P1 to 10 modules that EXIST, can be unit-tested, and are Codex-importable — but NO production caller invokes them yet.
 
-Modules removed from P1 scope (deferred to P3):
+**Terminology note — sub-packet vs MIGRATION_PATH phase**: Throughout this document "P1/P2/P3" refers to sub-packet identifiers within the engineering packet sequence (P1=topology_v_next_phase1_additive, P2=companion_required_mechanism, P3=topology_v_next_phase2_shadow, as per PACKET_INDEX). These sub-packet labels do NOT map 1:1 to MIGRATION_PATH phase numbers. MIGRATION_PATH Phase 1 = structures-only (this packet). MIGRATION_PATH Phase 2 = shadow comparison (P3 packet). MIGRATION_PATH Phase 3 = cutover pilot (P4 packet). When this document says "deferred to P3", it means the `topology_v_next_phase2_shadow` engineering packet, which implements MIGRATION_PATH Phase 2.
+
+Modules removed from P1 scope (deferred to P2 packet — `topology_v_next_phase2_shadow`):
 - `cli_integration_shim.py` — wire-up shim
 - `divergence_logger.py` — JSONL append + classify + friction detection
 - `shadow_compare()` function
@@ -15,7 +17,7 @@ Modules removed from P1 scope (deferred to P3):
 - JSONL divergence log schema and retention policy
 - 7-day shadow probe sequence
 
-P3 adds shim + wire-up diff against actual `scripts/topology_doctor.py:2636 run_navigation`. P3 also adds divergence_summary module + CLI for Day-7 aggregate. JSONL logger ships in P3 with its concurrency contract.
+P2 packet (`topology_v_next_phase2_shadow`) adds shim + wire-up diff against actual `scripts/topology_doctor.py:2636 run_navigation`. P2 packet also adds divergence_summary module + CLI for Day-7 aggregate. JSONL logger ships in P2 packet with its concurrency contract.
 
 ---
 
@@ -23,7 +25,7 @@ P3 adds shim + wire-up diff against actual `scripts/topology_doctor.py:2636 run_
 
 INCONSISTENCY-1: GOAL vs MIGRATION_PATH §Phase 1 — **PRIOR RESOLUTION REVERTED**.
 - P1.0 SCAFFOLD resolved this in favor of GOAL (treating P1 as "P1+P2 telescoped"). That self-resolution unilaterally telescoped MIGRATION_PATH Phase 1+2 and set a governance precedent.
-- Rev 1.1 reverts: MIGRATION_PATH Phase 1 authority is honored. GOAL is the binding *intent* document; MIGRATION_PATH is the binding *sequencing* document. When they conflict on implementation order, MIGRATION_PATH governs sequence. GOAL's per-call shadow vision is deferred to P3 as specified.
+- Rev 1.1 reverts: MIGRATION_PATH Phase 1 authority is honored. GOAL is the binding *intent* document; MIGRATION_PATH is the binding *sequencing* document. When they conflict on implementation order, MIGRATION_PATH governs sequence. GOAL's per-call shadow vision is deferred to P2 packet (`topology_v_next_phase2_shadow`) as specified.
 - Flag for ZEUS_BINDING reviewer: docs registry should reconcile GOAL vs MIGRATION_PATH explicitly. This SCAFFOLD does not unilaterally resolve it; it defers.
 
 INCONSISTENCY-2: Universal §9 Companion-Loop-Break vs Universal §8 Cohort.
@@ -33,9 +35,9 @@ INCONSISTENCY-2: Universal §9 Companion-Loop-Break vs Universal §8 Cohort.
 INCONSISTENCY-3: ZEUS_BINDING_LAYER §3 lists `.claude/hooks/**` as `CREDENTIAL_OR_AUTH_SURFACE`. Universal §5 lists CREDENTIAL_OR_AUTH_SURFACE for "credential files, auth token stores, permission manifests." Hook dispatch promotion is permitted by Universal §10 ("Project binding layers may promote any advisory to soft_block"). **FLAG FOR ZEUS_BINDING REVIEWER AWARENESS**: Universal §10 permits severity promotion, not category re-classification. Whether hook dispatch promotion constitutes an allowed severity promotion or an impermissible category reclassification requires explicit ZEUS_BINDING reviewer sign-off; this SCAFFOLD does not dismiss it as resolved.
 
 Additional Inconsistencies Found (rev 1.1):
-- INCONSISTENCY-4: P1.0 §7.2 table claimed SLICING_PRESSURE "DETECTED only in P1 (logged in shadow as DiagnosisEntry when 3 attempts shrink scope inside 30 min)." This is false: detection requires `friction_state` plumbing from the CLI shim, which does not exist in P1. With no shim and no `friction_state` supplier, detection never fires. The table overclaimed "partial closure." Corrected in §7.2 below.
+- INCONSISTENCY-4: P1.0 §7.2 table claimed SLICING_PRESSURE "DETECTED only in P1 (logged in shadow as DiagnosisEntry when 3 attempts shrink scope inside 30 min)." This is false: detection requires `friction_state` plumbing from the CLI shim, which does not exist in P1. With no shim and no `friction_state` supplier, detection never fires. The table overclaimed "partial closure." Corrected in §5.2 below.
 - INCONSISTENCY-5: P1.0 §7.2 claimed CLOSED_PACKET_STILL_LOAD_BEARING as "STRUCTURAL closure" via `admission_engine.py`, but the internal helpers list at §1.9 omitted the helper that would perform the authority status check. The module that "closes" a pattern must contain the helper that checks it. Corrected: `_check_authority_status` added to admission_engine internal helpers (§1.5 below).
-- INCONSISTENCY-6: P1.0 §7.2 claimed ADVISORY_OUTPUT_INVISIBILITY "STRUCTURAL closure" for multi-call detection. Multi-call pattern requires the divergence_logger/analyzer pipeline, which is deferred to P3. The struct-level fix (AdmissionDecision.issues top-level field) closes the single-call aspect only. Multi-call aspect deferred. Corrected in §7.2.
+- INCONSISTENCY-6: P1.0 §7.2 claimed ADVISORY_OUTPUT_INVISIBILITY "STRUCTURAL closure" for multi-call detection. Multi-call pattern requires the divergence_logger/analyzer pipeline, which is deferred to P2 packet. The struct-level fix (AdmissionDecision.issues top-level field) closes the single-call aspect only. Multi-call aspect deferred. Corrected in §5.2.
 
 ---
 
@@ -72,7 +74,7 @@ Imports: `from dataclasses import dataclass, field`; `from enum import Enum`; `f
 Loads ZEUS_BINDING_LAYER YAML into typed `BindingLayer` dataclass. Validates schema. Reports unknown fields without crashing.
 Public:
 - `def load_binding_layer(path: Path | str) -> BindingLayer` — single source path; no auto-discovery, no merging. Codex-invocable: `load_binding_layer("architecture/topology_v_next_binding.yaml")`. Default path is `architecture/topology_v_next_binding.yaml`; raises `FileNotFoundError` with a message naming the path when absent (m1 minor: load order documented here, not hidden in admission_engine). Stub binding YAML ships as part of P1.3 deliverable (see §10).
-- `def validate_binding_layer(bl: BindingLayer) -> list[str]` — returns list of warnings (gaps in coverage, expired authority TTLs, intent_extensions missing namespace prefix). Returns empty list if clean. Does NOT raise on warnings — diagnostic only.
+- `def validate_binding_layer(bl: BindingLayer) -> list[str]` — returns list of warnings (gaps in coverage, expired authority TTLs, intent_extensions missing namespace prefix). Returns empty list if clean. Does NOT raise on warnings — diagnostic only. Note: `intent_extensions` in the YAML holds string values; `profile_loader` validates each against `Intent` enum members at load time and warns when a value lacks the required namespace prefix (e.g., `"calibration_update"` warns; `"zeus.calibration_update"` is valid).
 Imports: `yaml`, `pathlib.Path`, `.dataclasses` types.
 
 ### 1.4 `scripts/topology_v_next/intent_resolver.py` (~200 LOC cap)
@@ -89,7 +91,7 @@ Public:
 - `def admit(intent: str | Intent | None, files: list[str], hint: str = "", *, binding: BindingLayer | None = None, friction_state: dict[str, Any] | None = None) -> AdmissionDecision` — sole public entry. If `binding` is None, calls `profile_loader.load_binding_layer("architecture/topology_v_next_binding.yaml")`; raises `FileNotFoundError` with message naming the path if absent. Returns full AdmissionDecision struct per Universal §2.3 / §11.
 - Internal helpers: `_run_kernel`, `_resolve_intent`, `_resolve_candidates`, `_apply_composition`, `_apply_companion_loop`, `_apply_severity_overrides`, `_check_authority_status`, `_assemble_diagnosis`, `_increment_friction_budget`.
 
-`_check_authority_status(file_paths: list[str], artifact_authority_status: dict[str, dict[str, Any]]) -> list[IssueRecord]`: checks each touched file against `binding.artifact_authority_status`. Emits `authority_status_stale` ADVISORY when `last_confirmed` exceeds `confirmation_ttl_days`, and `closed_packet_authority` ADVISORY when `status == "CURRENT_HISTORICAL"`. This helper is unit-testable in P1; it has no production caller until P3 wires the shim. (Fix for INCONSISTENCY-5 / critic M3: this was the missing helper that §7.2 previously attributed CLOSED_PACKET_STILL_LOAD_BEARING closure to.)
+`_check_authority_status(file_paths: list[str], artifact_authority_status: dict[str, dict[str, Any]]) -> list[IssueRecord]`: checks each touched file against `binding.artifact_authority_status`. Emits `authority_status_stale` ADVISORY when `last_confirmed` exceeds `confirmation_ttl_days`, and `closed_packet_authority` ADVISORY when `status == "CURRENT_HISTORICAL"`. This helper is unit-testable in P1; it has no production caller until P2 packet wires the shim. (Fix for INCONSISTENCY-5 / critic M3: this was the missing helper that §5.2 previously attributed CLOSED_PACKET_STILL_LOAD_BEARING closure to.)
 
 Friction-budget handling: `friction_state` is an OPTIONAL dict supplied by the CLI shim (which does not exist in P1). The engine reads/increments `attempts_this_session` only if state is supplied. When omitted (Codex one-shot calls or all P1 invocations), `friction_budget_used` defaults to 1 and no SLICING_PRESSURE detection runs. State is held by the CALLER, not by a v_next service. (See §7 self-check.)
 
@@ -123,7 +125,7 @@ Imports: `.dataclasses` types, `.coverage_map`.
 ### 1.9 `scripts/topology_v_next/companion_loop_break.py` (~200 LOC cap)
 Compatibility shim per Universal §9. Delegates to composition_rules.cohort_admit().
 Public:
-- `def companion_loop_break(intent: Intent, files: list[str], binding: BindingLayer) -> tuple[bool, str | None, IssueRecord | None]` — returns (mode_a_admit_bool, mode_b_missing_companion_path_or_None, issue_record_or_None). Mode A: companion declared and present in files → auto-admit. Mode B: companion declared and absent → SOFT_BLOCK (in P1 logged in AdmissionDecision.issues only, not enforced at the gate — no gate exists until P3).
+- `def companion_loop_break(intent: Intent, files: list[str], binding: BindingLayer) -> tuple[bool, str | None, IssueRecord | None]` — returns (mode_a_admit_bool, mode_b_missing_companion_path_or_None, issue_record_or_None). Mode A: companion declared and present in files → auto-admit. Mode B: companion declared and absent → SOFT_BLOCK (in P1 logged in AdmissionDecision.issues only, not enforced at the gate — no gate exists until P2 packet).
 - Internally just enumerates 2-file cohorts in binding.cohorts and calls cohort_admit().
 Imports: `.dataclasses`, `.composition_rules`.
 
@@ -161,9 +163,9 @@ Located at `tests/topology_v_next/regression/`:
 - `test_friction_CLOSED_PACKET_STILL_LOAD_BEARING.py` — touch a file whose binding artifact_authority_status row is `CURRENT_HISTORICAL`, ASSERT ADVISORY `authority_status_stale` or `closed_packet_authority` raised via _check_authority_status
 - `test_friction_ADVISORY_OUTPUT_INVISIBILITY.py` — admit with non-empty issues, ASSERT AdmissionDecision.issues populated even when ok=True; ASSERT to_dict() output contains all issues at top level (not buried)
 
-Deferred to P3 (require shim/friction_state plumbing not present in P1):
-- `test_friction_SLICING_PRESSURE.py` — requires friction_state with N=3 attempts from CLI shim; not testable in P1. Ships in P3.
-- Integration test `tests/topology_v_next/integration/test_shadow_mode_e2e.py` — requires --v-next-shadow CLI flag. Ships in P3.
+Deferred to P2 packet (require shim/friction_state plumbing not present in P1):
+- `test_friction_SLICING_PRESSURE.py` — requires friction_state with N=3 attempts from CLI shim; not testable in P1. Ships in P2 packet.
+- Integration test `tests/topology_v_next/integration/test_shadow_mode_e2e.py` — requires --v-next-shadow CLI flag. Ships in P2 packet.
 
 ---
 
@@ -171,11 +173,11 @@ Deferred to P3 (require shim/friction_state plumbing not present in P1):
 
 P1 modules exist and are importable but NO production caller invokes them.
 
-The actual wire-up diff goes in P3 (`topology_v_next_phase2_shadow` packet). For reference:
+The actual wire-up diff goes in P2 packet (`topology_v_next_phase2_shadow`). For reference:
 - Integration point: `scripts/topology_doctor.py` `run_navigation()` at line 2636
 - `run_navigation` inlines the admission payload via `build_digest(...)` at line 2665 (NOT via a function named `_assemble_navigation_payload` — that name does not exist in the codebase)
-- P3 adds the `shadow_compare` shim call after `build_digest` returns, guarded by a `--v-next-shadow` CLI flag
-- P3 also adds `divergence_logger.py` with JSONL append + atomic write (tmp+rename) + concurrency contract
+- P2 packet adds the `shadow_compare` shim call after `build_digest` returns, guarded by a `--v-next-shadow` CLI flag
+- P2 packet also adds `divergence_logger.py` with JSONL append + atomic write (tmp+rename) + concurrency contract
 
 No wire-up diff in this document. Fabricated diff context from P1.0 is removed.
 
@@ -235,7 +237,7 @@ For each AdmissionDecision field (Universal §2.3), justify why it is NOT itself
 - `companion_files: tuple[str, ...]` — output of cohort/composition rules. Diagnostic only. No sidecar.
 - `missing_phrases: tuple[str, ...]` — generated by `composition_rules.explain_rejected()` purely for human-readable diagnosis. Phrases are OUTPUT, never input. Cannot become a sidecar.
 - `closest_rejected_profile: ProfileId | null` — diagnostic only. Hint-driven; never routes. No sidecar.
-- `friction_budget_used: int` — SUSPICIOUS field. Justification: the engine reads this from CALLER-supplied `friction_state` dict. There is NO v_next service maintaining session state. When `friction_state` is None (all P1 invocations), value is 1 unconditionally. Caller (P3 shim) holds the counter; P1 never does. Not a sidecar in P1.
+- `friction_budget_used: int` — SUSPICIOUS field. Justification: the engine reads this from CALLER-supplied `friction_state` dict. There is NO v_next service maintaining session state. When `friction_state` is None (all P1 invocations), value is 1 unconditionally. Caller (P2 packet shim) holds the counter; P1 never does. Not a sidecar in P1.
 - `diagnosis: DiagnosisEntry | null` — output of §12 Failure-as-Diagnosis. Diagnostic only. No sidecar.
 - `kernel_alerts: tuple[IssueRecord, ...]` — output of Hard Safety Kernel. Algorithmic output. No sidecar.
 
@@ -249,11 +251,11 @@ CONCLUSION: no sidecar fields. friction_budget_used is caller-state-echo in P1 w
 | UNION_SCOPE_EXPANSION | **Traceable closed (P1)** | Cohort declarations (Universal §8 / Zeus binding §6) + Composition Rules C1–C4 admit coherent multi-profile change sets. composition_rules.py is the structural fix. |
 | PHRASING_GAME_TAX | **Traceable closed (P1)** | Same intent + files always returns same AdmissionDecision regardless of phrase. Deterministic on (intent, files). No phrase input to coverage_map or composition_rules. |
 | INTENT_ENUM_TOO_NARROW | **Traceable closed (P1)** | Binding-layer `intent_extensions` registers project-specific intents. Unknown intent → `Intent.other` + ADVISORY (not crash). profile_loader.validate_binding_layer detects missing namespace prefix. |
-| ADVISORY_OUTPUT_INVISIBILITY | **Partial (P1 single-call aspect only)** | AdmissionDecision struct surfaces `issues` at top level; `to_dict()` always includes them. `ok=True` with non-empty issues is now a typed condition. Multi-call/aggregate detection requires P3 divergence_summary module. |
-| SLICING_PRESSURE | **Structures exist; detection deferred to P3** | `friction_state` parameter and `FrictionPattern.SLICING_PRESSURE` enum value exist in P1 dataclasses. Detection never fires in P1: no CLI shim supplies friction_state. Gate deferred to P3 when shim adds friction_state plumbing. NOT partial-closed in P1 — structures only. |
-| CLOSED_PACKET_STILL_LOAD_BEARING | **Partial (P1 single-call helper only)** | `_check_authority_status` helper inside admission_engine checks artifact_authority_status per call and emits IssueRecord. Helper is unit-testable. No production caller until P3 wire-up. Multi-call pattern (loading a closed packet across sessions) requires P3 aggregate. |
+| ADVISORY_OUTPUT_INVISIBILITY | **Partial (P1 single-call aspect only)** | AdmissionDecision struct surfaces `issues` at top level; `to_dict()` always includes them. `ok=True` with non-empty issues is now a typed condition. Multi-call/aggregate detection requires P2 packet divergence_summary module. |
+| SLICING_PRESSURE | **Structures exist; detection deferred to P2 packet** | `friction_state` parameter and `FrictionPattern.SLICING_PRESSURE` enum value exist in P1 dataclasses. Detection never fires in P1: no CLI shim supplies friction_state. Gate deferred to P2 packet when shim adds friction_state plumbing. NOT partial-closed in P1 — structures only. |
+| CLOSED_PACKET_STILL_LOAD_BEARING | **Partial (P1 single-call helper only)** | `_check_authority_status` helper inside admission_engine checks artifact_authority_status per call and emits IssueRecord. Helper is unit-testable. No production caller until P2 packet wire-up. Multi-call pattern (loading a closed packet across sessions) requires P2 packet aggregate. |
 
-Summary: 4 traceable closed + 1 partial (ADVISORY_OUTPUT_INVISIBILITY) + 1 partial (CLOSED_PACKET_STILL_LOAD_BEARING) + 1 structures-only deferred (SLICING_PRESSURE) to P3.
+Summary: 4 traceable closed + 1 partial (ADVISORY_OUTPUT_INVISIBILITY) + 1 partial (CLOSED_PACKET_STILL_LOAD_BEARING) + 1 structures-only deferred (SLICING_PRESSURE) to P2 packet.
 
 ### 5.3 Anti-Meta-Pattern Proof — Why This Is Not Sidecar #8
 
@@ -264,33 +266,33 @@ This SCAFFOLD's structural change:
 2. The phrase (`hint`) is a strict OUTPUT contributor (closest_rejected_profile diagnostic), never an input to `coverage_map.resolve_candidates()` or `composition_rules.apply_composition()`. Those functions do not accept a phrase parameter.
 3. `intent_resolver.resolve_intent()` validates a CALLER-SUPPLIED enum value. There is no `derive_intent_from_phrase()` function anywhere in v_next.
 4. P1 rollback is one revert commit (delete `scripts/topology_v_next/`). Current admission path is unchanged. P1 has zero production call sites.
-5. The P3 shim will be the ONE wire-up point; ≤ 25 LOC of diff. If the shim grows beyond that or sprouts additional call sites, the design has reverted to sidecar shape.
+5. The P2 packet shim will be the ONE wire-up point; ≤ 25 LOC of diff. If the shim grows beyond that or sprouts additional call sites, the design has reverted to sidecar shape.
 
-**Sidecar-risk PASS**: P1 ships structures that P3 integrates. The structures are the minimum viable replacement for the current admission unit, not a parallel rail. The "no integration" shape is exactly what MIGRATION_PATH Phase 1 specifies. This is not sidecar avoidance — the keying function `(intent, files, hint)` genuinely changes structurally per HIDDEN_BRANCH_LESSONS Cross-Iteration Meta-Pattern. The structures are the deliverable, not a preparatory step for a sidecar.
+**Sidecar-risk PASS**: P1 ships structures that P2 packet integrates. The structures are the minimum viable replacement for the current admission unit, not a parallel rail. The "no integration" shape is exactly what MIGRATION_PATH Phase 1 specifies. This is not sidecar avoidance — the keying function `(intent, files, hint)` genuinely changes structurally per HIDDEN_BRANCH_LESSONS Cross-Iteration Meta-Pattern. The structures are the deliverable, not a preparatory step for a sidecar.
 
 ### 5.4 Anti-pattern catch list (review checklist for the P1 implementation PR)
 Reviewers MUST grep the v_next implementation PR for these anti-patterns:
 - `def derive_intent_from_phrase` / `def infer_intent` / `def guess_intent` → FAIL
 - Any phrase-substring check inside `coverage_map.py` or `composition_rules.py` → FAIL
 - Any call to `topology_doctor_digest.build_digest` inside v_next → FAIL (would re-couple to old kernel)
-- Any import of `cli_integration_shim` or `divergence_logger` (not present in P1) → FAIL
+- Any import of `cli_integration_shim` or `divergence_logger` (not present in P1; ship in P2 packet) → FAIL
 - Any call site in `scripts/topology_doctor.py` (no wire-up in P1) → FAIL
 - `task_phrase` or `task` parameter on any v_next public function → FAIL
 
 ---
 
-## §6. Open Items for P3 (NOT in P1 scope)
+## §6. Open Items for P2 Packet (NOT in P1 scope)
 
-For traceability — flagged so P3 packet (`topology_v_next_phase2_shadow`) authors know where to pick up:
+For traceability — flagged so P2 packet (`topology_v_next_phase2_shadow`) authors know where to pick up:
 1. `cli_integration_shim.py` — wire-up point in `run_navigation()` at `scripts/topology_doctor.py:2636`.
-2. `divergence_logger.py` — JSONL append with atomicity contract (write-to-tmp + rename). Note: append-only semantics and tmp+rename are reconciled in P3: the JSONL is append-only as a logical property; each individual write is atomic via tmp+rename before the append is visible. These are not mutually exclusive — tmp+rename achieves atomic append.
+2. `divergence_logger.py` — JSONL append with atomicity contract (write-to-tmp + rename). Note: append-only semantics and tmp+rename are reconciled in P2 packet: the JSONL is append-only as a logical property; each individual write is atomic via tmp+rename before the append is visible. These are not mutually exclusive — tmp+rename achieves atomic append.
 3. `--v-next-shadow` CLI flag and `shadow_compare()` function.
-4. `divergence_summary` module + CLI for Day-7 AGREE-rate aggregate. This is the owner of Day-7 AGREE-rate; without it, ADVISORY_OUTPUT_INVISIBILITY multi-call remains unmonitored (INCONSISTENCY-4 remediation is in P3).
+4. `divergence_summary` module + CLI for Day-7 AGREE-rate aggregate. This is the owner of Day-7 AGREE-rate; without it, ADVISORY_OUTPUT_INVISIBILITY multi-call remains unmonitored (INCONSISTENCY-4 remediation is in P2 packet).
 5. SLICING_PRESSURE detection gate (requires friction_state from shim).
 6. Integration test `test_shadow_mode_e2e.py`.
 7. 7-day shadow probe sequence (Days 1–7).
 8. Cutover order from MIGRATION_PATH §Phase 3 (per-profile cutover with config flag).
-9. Friction-budget session counter persistence (currently caller-supplied only in P3 shim).
+9. Friction-budget session counter persistence (currently caller-supplied only in P2 packet shim).
 10. MIGRATION_PATH §Phase 1 vs GOAL reconciliation — docs registry action for ZEUS_BINDING reviewer.
 
 ---
@@ -308,16 +310,18 @@ For traceability — flagged so P3 packet (`topology_v_next_phase2_shadow`) auth
 | companion_loop_break.py | UNION_SCOPE_EXPANSION (specialized 2-file cohort case) |
 | admission_engine.py | PHRASING_GAME_TAX (deterministic orchestration), CLOSED_PACKET_STILL_LOAD_BEARING (_check_authority_status helper) |
 | severity_overrides.py | (binding override application; no single friction pattern) |
-| *(divergence_logger — P3)* | SLICING_PRESSURE (detection via shadow log), ADVISORY_OUTPUT_INVISIBILITY multi-call |
-| *(cli_integration_shim — P3)* | (wire-up only; friction_state plumbing enables SLICING_PRESSURE detection) |
+| *(divergence_logger — P2 packet)* | SLICING_PRESSURE (detection via shadow log), ADVISORY_OUTPUT_INVISIBILITY multi-call |
+| *(cli_integration_shim — P2 packet)* | (wire-up only; friction_state plumbing enables SLICING_PRESSURE detection) |
 
-Every Universal §12 friction pattern maps to at least one module or an explicit P3 deferral. No pattern is orphaned.
+Every Universal §12 friction pattern maps to at least one module or an explicit P2 packet deferral. No pattern is orphaned.
 
 ---
 
 ## §8. Sub-Packet Decomposition
 
 P1 is not a single big-bang implementation. Three independently testable sub-packets:
+
+Per-module caps are absolute hard ceilings for individual files; sub-packet caps are expected totals across all modules in that sub-packet. The difference between the sum-of-per-module-caps (1800) and the sum-of-sub-packet-caps (1600) reflects admission_engine being the dominant slack consumer — its 600 LOC cap is shared across P1.2's 700 LOC sub-packet cap alongside 4 other modules.
 
 ### P1.1 — Data Layer (~400 LOC cap)
 **Deliverables**: `dataclasses.py` + `profile_loader.py` + `intent_resolver.py` + stub binding YAML at `architecture/topology_v_next_binding.yaml`.
@@ -327,12 +331,12 @@ P1 is not a single big-bang implementation. Three independently testable sub-pac
 
 ### P1.2 — Admission Core (~700 LOC cap)
 **Deliverables**: `hard_safety_kernel.py` + `coverage_map.py` + `composition_rules.py` + `companion_loop_break.py` + `admission_engine.py` (incl. `_check_authority_status`).
-**Tests**: `test_hard_safety_kernel.py`, `test_coverage_map.py`, `test_composition_rules.py`, `test_companion_loop_break.py`, `test_admission_engine.py`, `test_friction_UNION_SCOPE_EXPANSION.py`, `test_friction_PHRASING_GAME_TAX.py`, `test_friction_CLOSED_PACKET_STILL_LOAD_BEARING.py`.
-**Exit criterion**: `pytest tests/topology_v_next/` passes (P1.1 + P1.2 test files); `admit()` callable from bare Python with stub binding YAML.
+**Tests**: `test_hard_safety_kernel.py`, `test_coverage_map.py`, `test_composition_rules.py`, `test_companion_loop_break.py`, `test_admission_engine.py`, `test_friction_UNION_SCOPE_EXPANSION.py`, `test_friction_PHRASING_GAME_TAX.py` (engine-internal variant — asserts composition_rules + admission_engine alone), `test_friction_CLOSED_PACKET_STILL_LOAD_BEARING.py`.
+**Exit criterion**: `pytest tests/topology_v_next/` passes (P1.1 + P1.2 test files); `admit()` callable via direct module import (`from scripts.topology_v_next.admission_engine import admit`); public re-export via `__init__.py` ships in P1.3.
 **Dependencies**: P1.1 must be complete.
 
 ### P1.3 — Binding + Overrides + Public API (~500 LOC cap)
-**Deliverables**: `severity_overrides.py` + `__init__.py` (public re-exports) + complete stub `architecture/topology_v_next_binding.yaml` (full Zeus binding structure, not just schema stub) + `test_severity_overrides.py` + `test_friction_ADVISORY_OUTPUT_INVISIBILITY.py` + `test_friction_PHRASING_GAME_TAX.py` (full cross-module).
+**Deliverables**: `severity_overrides.py` + `__init__.py` (public re-exports) + complete stub `architecture/topology_v_next_binding.yaml` (full Zeus binding structure, not just schema stub) + `test_severity_overrides.py` + `test_friction_ADVISORY_OUTPUT_INVISIBILITY.py` + `test_friction_PHRASING_GAME_TAX.py` (cross-module variant — promotes to full admit() round-trip assertion across all modules; P1.2 ships the engine-internal variant only).
 **Tests**: `test_severity_overrides.py`, remaining regression tests, Codex one-shot invocation shape verified.
 **Exit criterion**: `from scripts.topology_v_next import admit, AdmissionDecision` works; all `tests/topology_v_next/` and `tests/topology_v_next/regression/` tests pass (excluding deferred SLICING_PRESSURE and integration tests).
 **Dependencies**: P1.2 must be complete.
