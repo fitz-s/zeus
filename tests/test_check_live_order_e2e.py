@@ -517,6 +517,47 @@ def test_latest_terminal_order_fact_is_not_submitted_completion(tmp_path):
     )
 
 
+def test_latest_fake_terminal_order_fact_supersedes_live_open_fact(tmp_path):
+    module = _load_module()
+    db = tmp_path / "trades.db"
+    with sqlite3.connect(db) as conn:
+        conn.row_factory = sqlite3.Row
+        _schema(conn)
+        _insert_command(conn)
+        _insert_submit_requested(conn)
+        _insert_submit_acked(conn)
+        _insert_pre_submit_envelope(conn)
+        _insert_order_fact(
+            conn,
+            fact_id="fact-1",
+            source="REST",
+            state="RESTING",
+            observed_at="2026-05-15T12:00:03Z",
+            local_sequence=1,
+        )
+        _insert_order_fact(
+            conn,
+            fact_id="fact-2",
+            source="FAKE_VENUE",
+            state="CANCEL_CONFIRMED",
+            observed_at="2026-05-15T12:00:03Z",
+            local_sequence=2,
+        )
+
+    with module._connect_readonly(db) as conn:
+        result = module.evaluate(conn, "cmd-1")
+
+    assert result["status"] == "FAIL"
+    assert result["completion_category"] == "LIVE_ORDER_ACKED_MISSING_ORDER_FACT"
+    assert any(
+        check["name"] == "latest_venue_order_fact_open"
+        and check["status"] == "FAIL"
+        and "latest_source=FAKE_VENUE" in check["detail"]
+        and "latest_state=CANCEL_CONFIRMED" in check["detail"]
+        for check in result["checks"]
+    )
+
+
 def test_fill_fact_without_position_projection_is_not_completion(tmp_path):
     module = _load_module()
     db = tmp_path / "trades.db"

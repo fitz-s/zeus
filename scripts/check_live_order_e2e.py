@@ -210,13 +210,35 @@ def _matching_live_order_facts(order_facts: list[dict[str, Any]], order_id: str)
     ]
 
 
-def _latest_live_order_fact(order_facts: list[dict[str, Any]], order_id: str) -> dict[str, Any] | None:
-    matching = _matching_live_order_facts(order_facts, order_id)
+def _matching_order_facts(order_facts: list[dict[str, Any]], order_id: str) -> list[dict[str, Any]]:
+    if not order_id:
+        return []
+    return [
+        fact
+        for fact in order_facts
+        if str(fact.get("venue_order_id") or "") == order_id
+    ]
+
+
+def _latest_order_fact(order_facts: list[dict[str, Any]], order_id: str) -> dict[str, Any] | None:
+    matching = _matching_order_facts(order_facts, order_id)
     return matching[0] if matching else None
 
 
 def _order_fact_supports_open_order(fact: dict[str, Any] | None) -> bool:
-    return fact is not None and str(fact.get("state") or "") in OPEN_ORDER_FACT_STATES
+    return (
+        fact is not None
+        and _live_source(fact.get("source"))
+        and str(fact.get("state") or "") in OPEN_ORDER_FACT_STATES
+    )
+
+
+def _order_fact_supports_fill_observation(fact: dict[str, Any] | None) -> bool:
+    return (
+        fact is not None
+        and _live_source(fact.get("source"))
+        and str(fact.get("state") or "") in FILL_ORDER_FACT_STATES
+    )
 
 
 def _matching_live_trade_facts(trade_facts: list[dict[str, Any]], order_id: str) -> list[dict[str, Any]]:
@@ -389,8 +411,9 @@ def evaluate(conn: sqlite3.Connection, command_id: str | None = None) -> dict[st
     event_types = {str(event.get("event_type") or "") for event in events}
     order_id, order_identity_evidence = _order_identity_evidence(command, events, envelopes)
     matching_order_facts = _matching_live_order_facts(order_facts, order_id)
-    latest_live_order_fact = _latest_live_order_fact(order_facts, order_id)
-    latest_live_order_fact_state = str(latest_live_order_fact.get("state") or "") if latest_live_order_fact else ""
+    latest_order_fact = _latest_order_fact(order_facts, order_id)
+    latest_order_fact_state = str(latest_order_fact.get("state") or "") if latest_order_fact else ""
+    latest_order_fact_source = str(latest_order_fact.get("source") or "") if latest_order_fact else ""
     matching_trade_facts = _matching_live_trade_facts(trade_facts, order_id)
     position_events = _position_events(conn, cmd_id, order_id)
     position_ids = {
@@ -407,7 +430,7 @@ def evaluate(conn: sqlite3.Connection, command_id: str | None = None) -> dict[st
         state in FILLED_COMMAND_STATES
         or bool(matching_trade_facts)
         or bool(event_types & {"PARTIAL_FILL_OBSERVED", "FILL_CONFIRMED"})
-        or latest_live_order_fact_state in FILL_ORDER_FACT_STATES
+        or _order_fact_supports_fill_observation(latest_order_fact)
     )
 
     checks.append(Check("command_present", "PASS", f"command_id={cmd_id} state={state}"))
@@ -453,10 +476,12 @@ def evaluate(conn: sqlite3.Connection, command_id: str | None = None) -> dict[st
     checks.append(
         Check(
             "latest_venue_order_fact_open",
-            "PASS" if _order_fact_supports_open_order(latest_live_order_fact) or fill_observed else "FAIL",
+            "PASS" if _order_fact_supports_open_order(latest_order_fact) or fill_observed else "FAIL",
             (
                 f"live_count={len(matching_order_facts)} total_count={len(order_facts)} "
-                f"order_id={order_id or 'missing'} latest_state={latest_live_order_fact_state or 'missing'}"
+                f"order_id={order_id or 'missing'} "
+                f"latest_source={latest_order_fact_source or 'missing'} "
+                f"latest_state={latest_order_fact_state or 'missing'}"
             ),
         )
     )
