@@ -17,6 +17,14 @@ from __future__ import annotations
 import argparse
 import json
 import sqlite3
+import sys
+from dataclasses import asdict, dataclass
+from decimal import Decimal, InvalidOperation
+from pathlib import Path
+from typing import Any
+
+
+ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS_DIR = ROOT / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))

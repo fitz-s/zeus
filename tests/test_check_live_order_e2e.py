@@ -99,6 +99,247 @@ def _schema(conn: sqlite3.Connection) -> None:
     )
 
 
+def _connect_module_readonly(module, trade_db: Path, tmp_path: Path):
+    world_db = tmp_path / "zeus-world.db"
+    forecasts_db = tmp_path / "zeus-forecasts.db"
+    for db_path in (world_db, forecasts_db):
+        sqlite3.connect(db_path).close()
+    return module._connect_readonly(trade_db, world_db, forecasts_db)
+
+
+def _insert_command(
+    conn: sqlite3.Connection,
+    *,
+    state: str = "ACKED",
+    decision_id: str = "decision-1",
+    venue_order_id: str | None = None,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO venue_commands (
+          command_id, state, venue_order_id, decision_id, idempotency_key,
+          snapshot_id, side, token_id, limit_price, size, created_at, updated_at
+        )
+        VALUES ('cmd-1', ?, ?, ?, 'idem-1', 'snap-1', 'BUY', 'token-1', '0.42',
+                '10.00', '2026-05-15T12:00:00Z', '2026-05-15T12:00:02Z')
+        """,
+        (state, venue_order_id, decision_id),
+    )
+
+
+def _insert_submit_requested(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        INSERT INTO venue_command_events (
+          event_id, command_id, sequence_no, event_type, state_after, occurred_at, payload_json
+        )
+        VALUES ('evt-1', 'cmd-1', 1, 'SUBMIT_REQUESTED', 'SUBMITTING',
+                '2026-05-15T12:00:01Z', '{}')
+        """
+    )
+
+
+def _insert_submit_acked(conn: sqlite3.Connection, *, order_id: str = "order-1") -> None:
+    conn.execute(
+        """
+        INSERT INTO venue_command_events (
+          event_id, command_id, sequence_no, event_type, state_after, occurred_at, payload_json
+        )
+        VALUES ('evt-2', 'cmd-1', 2, 'SUBMIT_ACKED', 'ACKED',
+                '2026-05-15T12:00:02Z', ?)
+        """,
+        (json.dumps({"venue_order_id": order_id}),),
+    )
+
+
+def _insert_later_submit_rejected(
+    conn: sqlite3.Connection,
+    *,
+    occurred_at: str = "2026-05-15T12:00:03Z",
+    sequence_no: int = 3,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO venue_command_events (
+          event_id, command_id, sequence_no, event_type, state_after, occurred_at, payload_json
+        )
+        VALUES ('evt-3', 'cmd-1', ?, 'SUBMIT_REJECTED', 'SUBMIT_REJECTED',
+                ?, '{"reason":"late_reject"}')
+        """,
+        (sequence_no, occurred_at),
+    )
+
+
+def _insert_pre_submit_envelope(conn: sqlite3.Connection, *, order_id: str | None = None) -> None:
+    conn.execute(
+        """
+        INSERT INTO venue_submission_envelopes (
+          envelope_id, command_id, captured_at, order_id, raw_request_hash,
+          raw_response_json
+        )
+        VALUES ('pre-submit:cmd-1', 'cmd-1', '2026-05-15T12:00:01Z',
+                ?, 'hash-1', NULL)
+        """,
+        (order_id,),
+    )
+
+
+def _insert_order_fact(
+    conn: sqlite3.Connection,
+    *,
+    fact_id: str = "fact-1",
+    command_id: str = "cmd-1",
+    order_id: str = "order-1",
+    source: str = "REST",
+    state: str = "RESTING",
+    observed_at: str = "2026-05-15T12:00:03Z",
+    local_sequence: int = 1,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO venue_order_facts (
+          fact_id, command_id, venue_order_id, source, observed_at, state, local_sequence
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (fact_id, command_id, order_id, source, observed_at, state, local_sequence),
+    )
+
+
+def _insert_trade_fact(
+    conn: sqlite3.Connection,
+    *,
+    fact_id: str = "trade-fact-1",
+    command_id: str = "cmd-1",
+    order_id: str = "order-1",
+    trade_id: str = "trade-1",
+    source: str = "REST",
+    state: str = "MATCHED",
+    observed_at: str = "2026-05-15T12:00:04Z",
+    local_sequence: int = 1,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO venue_trade_facts (
+          fact_id, command_id, venue_order_id, trade_id, source, filled_size,
+          fill_price, observed_at, state, local_sequence
+        )
+        VALUES (?, ?, ?, ?, ?, '10.00', '0.42', ?, ?, ?)
+        """,
+        (fact_id, command_id, order_id, trade_id, source, observed_at, state, local_sequence),
+    )
+
+
+def _insert_position_fill(conn: sqlite3.Connection, *, order_id: str = "order-1") -> None:
+    conn.execute(
+        """
+        INSERT INTO position_events (
+          event_id, position_id, sequence_no, event_type, command_id, order_id, env
+        )
+        VALUES ('pos-1:entry_order_filled', 'pos-1', 3, 'ENTRY_ORDER_FILLED',
+                NULL, ?, 'live')
+        """,
+        (order_id,),
+    )
+    conn.execute(
+        """
+        INSERT INTO position_current (position_id, phase, order_id)
+        VALUES ('pos-1', 'active', ?)
+        """,
+        (order_id,),
+    )
+
+
+def _schema_current(conn: sqlite3.Connection) -> None:
+    conn.executescript(
+        """
+        CREATE TABLE venue_commands (
+          command_id TEXT PRIMARY KEY,
+          snapshot_id TEXT NOT NULL,
+          envelope_id TEXT NOT NULL,
+          position_id TEXT NOT NULL,
+          decision_id TEXT NOT NULL,
+          idempotency_key TEXT NOT NULL UNIQUE,
+          intent_kind TEXT NOT NULL,
+          market_id TEXT NOT NULL,
+          token_id TEXT NOT NULL,
+          side TEXT NOT NULL,
+          size REAL NOT NULL,
+          price REAL NOT NULL,
+          venue_order_id TEXT,
+          state TEXT NOT NULL,
+          last_event_id TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          review_required_reason TEXT
+        );
+        CREATE TABLE venue_command_events (
+          event_id TEXT PRIMARY KEY,
+          command_id TEXT NOT NULL,
+          sequence_no INTEGER NOT NULL,
+          event_type TEXT NOT NULL,
+          occurred_at TEXT NOT NULL,
+          payload_json TEXT,
+          state_after TEXT NOT NULL
+        );
+        CREATE TABLE venue_submission_envelopes (
+          envelope_id TEXT PRIMARY KEY,
+          raw_request_hash TEXT NOT NULL,
+          raw_response_json TEXT,
+          order_id TEXT,
+          captured_at TEXT NOT NULL
+        );
+        CREATE TABLE venue_order_facts (
+          fact_id TEXT PRIMARY KEY,
+          command_id TEXT NOT NULL,
+          venue_order_id TEXT,
+          source TEXT,
+          observed_at TEXT,
+          state TEXT,
+          local_sequence INTEGER
+        );
+        CREATE TABLE venue_trade_facts (
+          fact_id TEXT PRIMARY KEY,
+          command_id TEXT NOT NULL,
+          venue_order_id TEXT,
+          trade_id TEXT,
+          source TEXT,
+          filled_size TEXT,
+          fill_price TEXT,
+          observed_at TEXT,
+          state TEXT,
+          local_sequence INTEGER
+        );
+        CREATE TABLE position_events (
+          event_id TEXT PRIMARY KEY,
+          position_id TEXT NOT NULL,
+          sequence_no INTEGER,
+          event_type TEXT NOT NULL,
+          command_id TEXT,
+          order_id TEXT,
+          env TEXT
+        );
+        CREATE TABLE position_current (
+          position_id TEXT PRIMARY KEY,
+          phase TEXT NOT NULL,
+          order_id TEXT
+        );
+        """
+    )
+
+
+def test_accepted_order_with_full_correlation_trace_passes(tmp_path):
+    module = _load_module()
+    db = tmp_path / "trades.db"
+    with sqlite3.connect(db) as conn:
+        conn.row_factory = sqlite3.Row
+        _schema(conn)
+        _insert_command(conn)
+        _insert_submit_requested(conn)
+        _insert_submit_acked(conn)
+        _insert_pre_submit_envelope(conn)
+        _insert_order_fact(conn)
+
     with _connect_module_readonly(module, db, tmp_path) as conn:
         result = module.evaluate(conn, "cmd-1")
 
