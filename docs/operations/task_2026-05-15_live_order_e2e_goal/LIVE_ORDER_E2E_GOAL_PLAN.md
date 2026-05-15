@@ -7,7 +7,7 @@ Authority basis: root `AGENTS.md` money path; `docs/operations/AGENTS.md` packet
 Branch: `feat/live-order-e2e-goal-2026-05-15`
 Base: `origin/main` at `8b3c3c2c59 merge: data daemon live verified`
 Worktree: `/Users/leofitz/.openclaw/workspace-venus/zeus-live-order-e2e-goal-2026-05-15`
-Critic status: Round 1 `REVISE`; this revision tightens safe review clearance, deployed-code provenance, positive verifier coverage, and active packet freeze gates.
+Critic status: prior approval is superseded by the 2026-05-15 real-live geoblock evidence below; this revision requires a new critic pass before further live-state mutation.
 
 ## Goal
 
@@ -22,8 +22,13 @@ The task is not complete when data reaches the live reader. It is not complete w
 This plan starts from current read-only facts, not from the earlier branch narrative.
 
 - New branch/worktree was created from `origin/main` at `8b3c3c2c59`.
-- The active live root is still `/Users/leofitz/.openclaw/workspace-venus/zeus`, branch `deploy/live-order-e2e-verification-2026-05-15`, commit `aa4a7ccb21`. That commit is not the new main-based branch.
-- The previous live-order branch is `feat/live-order-e2e-verification-2026-05-15`, ahead of `origin/main` by 29 commits with 54 changed files and more than 6000 inserted lines. It must not be blindly copied into this branch.
+- The main-based branch currently contains the first four repair commits:
+  - `a85d5be234 docs(operations): freeze live order e2e goal packet`;
+  - `64963a43a7 fix(operations): add live order e2e proof checker`;
+  - `376823e3f2 fix(execution): reject pre-sdk collateral reservation failures`;
+  - `d83ff6b57e fix(execution): add proof-backed review clearance`.
+- The active live root is `/Users/leofitz/.openclaw/workspace-venus/zeus`, branch `deploy/live-order-e2e-verification-2026-05-15`, currently deployed at `babba070d20514893bd95dfb114772fa7c656639`. That branch contains live validation cherry-picks and must not become the review branch by accident.
+- The previous `REVIEW_REQUIRED` blocker `cb763c300b664a4f` was cleared with the proof-backed pre-SDK no-side-effect path. That only removed an old blocker; it did not prove live order success.
 - Live data-pipeline verifier currently passes on the live root:
   - exactly one `src.main` process;
   - exactly one `src.ingest.forecast_live_daemon` OpenData owner;
@@ -31,25 +36,35 @@ This plan starts from current read-only facts, not from the earlier branch narra
   - latest source run `ecmwf_open_data:mn2t6_low:2026-05-15T00Z`;
   - forecast target range starts at the source-cycle date, not before it;
   - live reader returns `LIVE_ELIGIBLE / EXECUTABLE_FORECAST_READY`;
-  - measured reader latency `0.526 ms`, total verifier elapsed `503.402 ms`.
-- Live order verifier currently fails:
-  - latest command `cb763c300b664a4f`;
-  - state `REVIEW_REQUIRED`;
-  - event chain `INTENT_CREATED -> SUBMIT_REQUESTED -> REVIEW_REQUIRED`;
-  - pre-submit envelope exists;
+  - measured reader latency `1.444 ms`, total verifier elapsed `526.251 ms`.
+- A real live daemon `opening_hunt` cycle reached the executor submit boundary:
+  - cycle started `2026-05-15T17:51:52.212191+00:00`;
+  - decision `44323e0a-fec`, city `Karachi`, target date `2026-05-17`;
+  - command `8d82ea02c5b74905`, market `2266214`, size `10.06`, price `0.32`, snapshot `ems2-5dcb2f35a78a987713be438273aefdd100eae5ed`;
+  - event chain `INTENT_CREATED -> SUBMIT_REQUESTED -> SUBMIT_TIMEOUT_UNKNOWN`;
+  - `SUBMIT_REQUESTED` proves all entry components allowed at command time, including collateral, heartbeat, WS gap, decision source integrity, and executable snapshot gate;
+  - `SUBMIT_TIMEOUT_UNKNOWN` payload records `PolyApiException[status_code=403]` with venue body `Trading restricted in your region`.
+- Current global-VPN egress is not blocked by Polymarket:
+  - read-only `https://polymarket.com/api/geoblock` now returns `blocked=false`, `country=CA`, `region=QC`;
+  - `https://ipinfo.io/json` reports Montreal/Quebec egress through `AS147049 PacketHub S.A.`;
+  - `scutil --nwi` shows active VPN interface `utun9`;
+  - live launchd still carries legacy `HTTP_PROXY` and `HTTPS_PROXY` values pointing to `http://localhost:7890`, but current operator truth is global VPN, not per-process localhost proxy routing.
+- Therefore the failed live attempt is historical route evidence from the moment command `8d82ea02c5b74905` was submitted, not proof that current route is blocked. The next retry must prove the live daemon process sees `blocked=false` through the global VPN route before entry submit.
+- Live order verifier correctly fails on command `8d82ea02c5b74905`:
+  - state `SUBMIT_UNKNOWN_SIDE_EFFECT`;
   - no `venue_order_id`;
   - no accepted event;
-  - no open venue order fact;
+  - no final venue order fact;
   - no position rows.
-- The live cycle after recovery recorded `command_recovery.scanned=1` and `advanced=1`, then portfolio governor counted `unknown_side_effect_count=1`, armed kill switch with reason `unknown_side_effect_threshold`, and blocked new entries.
+- `unknown_side_effect_count=1` for market `2266214`, so governor correctly blocks new entries until the unknown is terminalized or reconciled.
+- Command recovery currently cannot resolve this production unknown through its advertised M2 path:
+  - `_lookup_unknown_side_effect_order()` requires `client.find_order_by_idempotency_key()` when no `venue_order_id` exists;
+  - `PolymarketClient` does not implement that method;
+  - `PolymarketV2Adapter.get_open_orders()` checks SDK method `get_orders`, but installed `py_clob_client_v2.ClobClient` exposes `get_open_orders`, not `get_orders`;
+  - the local idempotency key is not included in `VenueSubmissionEnvelope` or the SDK `OrderArgs`, so any venue-side idempotency lookup must first be proven available before it is used as authority.
+- The live cycle block registry simultaneously reported evaluator gate 11 blocking with `PRODUCER_READINESS_EXPIRED` and `SOURCE_RUN_HORIZON_OUT_OF_RANGE` while the same cycle still created a real command. This divergence must be reconciled before final approval, because operator block telemetry and executor behavior cannot disagree on a live-submit path.
 
-Current conclusion: the data side is ready enough to feed live, but the live money path is blocked by an unresolved command/recovery semantics failure. The next root cause to eliminate is not "wait for another cycle"; it is the design gap where a pre-SDK failure can leave a command in an unresolved side-effect state that permanently blocks entry.
-
-The existing `REVIEW_REQUIRED` command must not be cleared from local absence
-alone. It can be cleared only by positive proof that SDK submit was never
-reached for that command, or by mandatory external venue/order/idempotency
-lookup proving absence. If neither proof exists, it remains unresolved and live
-entry remains blocked until an operator-safe venue reconciliation path exists.
+Current conclusion: the data side is fast enough and live-eligible, and the live daemon did reach a real venue submit attempt. The remaining blockers are now process-visible global VPN/geoblock proof, post-SDK 4xx rejection grammar, production command-recovery capability drift, and rollout-gate telemetry/action divergence. The next root cause to eliminate is not "wait for another cycle"; it is the missing distinction between a deterministic venue rejection, an actually unknown side effect, and a route-dependent trading egress precondition.
 
 ## Completion Definition
 
@@ -99,6 +114,22 @@ The current command has no venue order id, no final envelope, and no order facts
 
 Prior work found DDD runtime artifact drift, pUSD allowance authority drift, uint256-to-SQLite overflow, stale collateral snapshot, uncommitted collateral refreshes, and Q1 egress evidence drift. The new branch must treat those as structural slices with tests, not as a large undocumented patch pile.
 
+### D6 - Trading egress proof is not a first-class live-entry gate.
+
+`proxy_health` was written to keep data-only daemons alive when a local proxy is down. That is not the live trading authority surface. Operator truth is global VPN routing, and the route must be proven by a process-visible geoblock probe immediately before live entry submit. Legacy `localhost:7890` proxy environment values must not be treated as the source of truth, and dead local proxy state must not distract from whether the global VPN route is actually nonblocked.
+
+### D7 - Production recovery capability drift makes unknowns sticky.
+
+The recovery design assumes either a venue order id or an idempotency-key lookup. The production client currently has neither for command `8d82ea02c5b74905`: no venue id was returned, the local idempotency key is not sent to the venue, `PolymarketClient` lacks `find_order_by_idempotency_key`, and the adapter checks an SDK method name that the installed SDK does not expose. This makes `SUBMIT_UNKNOWN_SIDE_EFFECT` a permanent live blocker.
+
+### D8 - Venue 4xx semantics are not represented in the command grammar.
+
+The executor correctly treats timeouts/network failures after `place_limit_order` as unknown. It currently overgeneralizes that rule to deterministic venue 4xx errors. A synchronous CLOB HTTP 403 geoblock rejection with no order id, no final envelope, no order fact, and no trade fact should be classified by an explicit proof rule; it must not share the same state as a timeout where the side effect is genuinely unknown.
+
+### D9 - Rollout-gate telemetry/action divergence weakens live trust.
+
+The live cycle created command `8d82ea02c5b74905` while the same cycle's block registry reported evaluator gate 11 blocking with `PRODUCER_READINESS_EXPIRED` and `SOURCE_RUN_HORIZON_OUT_OF_RANGE`. The final live proof must show that rollout gate state, executable reader readiness, and evaluator submit authority agree. If the block registry is stale/informational, it must say so; if it is authoritative, the executor must not submit.
+
 ## ADR
 
 Decision: continue from a clean main-based branch and port or reimplement only the slices required to satisfy the live completion definition.
@@ -120,7 +151,8 @@ Consequences:
 
 - The new branch will be smaller, but it must explicitly re-port required proven fixes.
 - Live deployment cannot happen until the new branch has tests, critic approval, and a clean deploy path.
-- Resolving the current `REVIEW_REQUIRED` command requires a proof-backed state transition or recovery tool, not manual DB editing.
+- Resolving live unknown commands requires a proof-backed state transition or recovery tool, not manual DB editing.
+- The system must separate data-mode proxy bypass from trading-mode global VPN egress authority.
 
 ## Phase 0 - Packet, Critic, And Branch Hygiene
 
@@ -286,20 +318,93 @@ Acceptance:
 - Entry governor no longer blocks solely because of the cleared command.
 - The evidence explicitly says this did not prove a live order; it only removed the blocker.
 
-## Phase 5 - Live Entry Gate Revalidation
+## Phase 5 - Global VPN Egress And Venue 4xx Grammar
+
+Purpose: make process-visible blocked trading egress impossible to submit, and make deterministic venue rejections terminal without weakening real unknown-side-effect safety.
+
+Tasks:
+
+- Add a trading-egress authority check separate from `proxy_health` and independent of the stale localhost proxy environment:
+  - data daemons may still strip a dead proxy when their task is data-only;
+  - live trading must fail closed before order submit when the process-visible global VPN route is absent, geoblock probe is blocked, or egress proof is stale;
+  - the check must record measured probe latency, blocked flag, country/region, network interface/VPN evidence when available, and route status without logging secrets.
+- Add a read-only geoblock probe against `https://polymarket.com/api/geoblock` or an equivalent official endpoint before live entry submit.
+- Treat `blocked=true` as a typed live-entry blocker, not as a recoverable order failure. It should prevent submit before `place_limit_order` and should not create another `SUBMIT_UNKNOWN_SIDE_EFFECT`.
+- Add narrow exception classification for synchronous CLOB 4xx venue rejections after SDK contact:
+  - geoblock 403 with no order id and no final envelope becomes terminal `SUBMIT_REJECTED` with reason `venue_rejected_geoblock_403`;
+  - timeout, connection reset, unknown SDK exceptions, 5xx, and ambiguous bodies remain `SUBMIT_UNKNOWN_SIDE_EFFECT`;
+  - 4xx generalization beyond geoblock requires separate proof and critic approval.
+- Add a proof-backed terminalization path for the already-created command `8d82ea02c5b74905` only if all predicates prove the geoblock class:
+  - latest event is `SUBMIT_TIMEOUT_UNKNOWN`;
+  - exception type is `PolyApiException`;
+  - exception message contains `status_code=403` and the geoblock body;
+  - command has no venue order id;
+  - persisted envelopes contain no order id, no raw response, no signed order, and no signed hash;
+  - no `venue_order_facts`, no `venue_trade_facts`, no `position_events`, and no `position_current` rows exist for the command;
+  - the historical payload itself proves a synchronous venue geoblock rejection at submit time; current `blocked=false` route proof is required only before retry, not as proof for terminalizing the old rejection.
+
+Relationship tests:
+
+- Process-visible geoblock `blocked=true` refuses live submit before `place_limit_order`.
+- Process-visible global VPN route with `blocked=false` allows the rest of the existing entry gate chain to decide.
+- Geoblock `PolyApiException` after SDK contact terminalizes as `SUBMIT_REJECTED` and stops counting as unknown.
+- Timeout/network exception after SDK contact remains unknown and still blocks duplicate economic intent.
+- Current-row terminalization rejects any side-effect evidence or non-geoblock exception payload.
+
+Acceptance:
+
+- A missing or blocked global VPN route cannot silently fall through into live trading.
+- A deterministic geoblock 403 is not misclassified as a timeout unknown.
+- `unknown_side_effect_count=0` only after the current command is terminalized by the geoblock proof rule or by stronger venue reconciliation evidence.
+- The plan explicitly does not claim order success from geoblock rejection; it only removes a known-false unknown blocker and prevents repeated attempts unless process-visible egress is valid.
+
+## Phase 6 - Production Recovery Capability Audit
+
+Tasks:
+
+- Fix or delete the unreachable advertised recovery path:
+  - if venue-side idempotency lookup is real, implement `PolymarketClient.find_order_by_idempotency_key()` and prove the idempotency key is actually submitted to the venue;
+  - if venue-side idempotency lookup is not real, remove it from the recovery claim and rely only on order id, signed-order hash, venue facts, or typed no-side-effect proof.
+- Correct `PolymarketV2Adapter.get_open_orders()` to use the installed SDK method `get_open_orders` when available, while preserving existing tests for SDKs that expose `get_orders`.
+- Add adapter tests using the actual method roster from the installed SDK surface.
+- Add recovery tests proving that missing lookup capability remains unresolved rather than fabricating absence.
+
+Acceptance:
+
+- Command recovery's docstring, tests, and production adapter agree on what can actually be reconciled.
+- No live unknown is cleared from "open orders list did not contain it" unless the lookup key is proven to be a venue-submitted key.
+
+## Phase 7 - Rollout Gate/Reader Authority Reconciliation
+
+Tasks:
+
+- Reconcile why `check_data_pipeline_live_e2e.py` reports `LIVE_ELIGIBLE / EXECUTABLE_FORECAST_READY` while the live cycle block registry reports `PRODUCER_READINESS_EXPIRED` and `SOURCE_RUN_HORIZON_OUT_OF_RANGE`.
+- Identify whether block registry gate 11 is:
+  - authoritative and must block evaluator submit; or
+  - diagnostic-only/stale and must not be presented as a live blocker.
+- Add a relationship test around the exact reader evidence and rollout evidence objects so live submit authority cannot diverge from operator telemetry.
+
+Acceptance:
+
+- A live cycle cannot both report evaluator rollout gate blocking and create a command from that same gate decision.
+- If the gate is stale telemetry, the block registry states that explicitly and points to the executable reader authority.
+- If the gate is authoritative, final execution intent construction is blocked before executor submit.
+
+## Phase 8 - Live Entry Gate Revalidation
 
 Tasks:
 
 - Re-run live health, data, and entry capability probes.
 - Inspect latest decision artifact and block registry after the cleared command.
 - If `PRODUCER_READINESS_EXPIRED` or `SOURCE_RUN_HORIZON_OUT_OF_RANGE` still appears while `check_data_pipeline_live_e2e.py` passes, root-cause the divergence between rollout gate and executable reader before submit.
+- Verify trading egress is nonblocked through the intended route before restarting live submit attempts.
 
 Acceptance:
 
 - `entry.allow_submit=true`, risk GREEN, heartbeat healthy, WS gap clear, and `unknown_side_effect_count=0`; or
 - a typed blocker is identified with a failing relationship test and repaired before retry.
 
-## Phase 6 - Deploy Main-Based Branch To Live
+## Phase 9 - Deploy Main-Based Branch To Live
 
 Preconditions:
 
@@ -308,6 +413,7 @@ Preconditions:
 - Focused tests pass.
 - Topology planning-lock and map-maintenance pass for changed files.
 - Live rollback path is recorded.
+- Current runtime route is nonblocked for Polymarket trading, or live submit remains disabled with typed egress blocker evidence.
 
 Deployment proof:
 
@@ -325,6 +431,7 @@ ps -axo pid,lstart,command | rg 'src\\.main|forecast_live_daemon|riskguard'
 python3 scripts/check_daemon_heartbeat.py
 python3 scripts/check_data_pipeline_live_e2e.py --json --live
 python3 scripts/check_live_order_e2e.py --json
+python3 scripts/check_live_trading_egress.py --json
 ```
 
 Acceptance:
@@ -336,8 +443,9 @@ Acceptance:
 - Daemon heartbeat/status/log evidence includes or is joined to that same git SHA.
 - Data verifier passes within timing budget.
 - Live order checker fails only because no accepted order exists yet, not because stale unresolved state blocks entry.
+- Trading egress checker reports `blocked=false` before any real order attempt.
 
-## Phase 7 - Real Live Submit Attempt
+## Phase 10 - Real Live Submit Attempt
 
 This phase uses the normal daemon/evaluator/executor path only.
 
@@ -365,7 +473,7 @@ Failure handling:
 - Unknown result: enter unknown/review path and reconcile; do not clear without side-effect proof.
 - No candidate: do not force a trade; diagnose funnel stage and wait/repair.
 
-## Phase 8 - Post-Order Record Chain And Guard
+## Phase 11 - Post-Order Record Chain And Guard
 
 For an accepted/resting order:
 
@@ -393,6 +501,7 @@ Guard cadence:
 - Live data verifier total: <= 3.0 seconds warm.
 - Executable forecast reader p95 over 30 probes: <= 5 ms.
 - Live order checker read-only classification: <= 1.0 second warm.
+- Live trading egress/geoblock checker: <= 2.0 seconds warm and must report route, blocked flag, and probe elapsed milliseconds.
 - Command persistence to SDK submit boundary: record measured elapsed; regression budget <= 1.0 second before network submit, excluding external CLOB latency.
 - Forecast-live cycle telemetry must separate `download_seconds`, `extract_seconds`, `manifest_seconds`, `db_ingest_seconds`, `authority_seconds`, `commit_seconds`, `retry_sleep_seconds`, and `total_seconds`.
 - HTTP 429 behavior must obey provider `Retry-After` when parseable, fallback otherwise, and never sleep after final failed attempt.
@@ -413,6 +522,10 @@ The critic must reject this plan or any implementation phase if any answer is "n
 8. Does it measure timing on the deployed live process?
 9. Does it avoid shadow evidence as completion proof?
 10. Does it stop if the system correctly finds no positive-EV candidate rather than forcing a trade?
+11. Does it prevent process-visible geoblocked submit attempts before command creation, regardless of stale proxy env values?
+12. Does it keep timeouts/ambiguous SDK failures unknown while terminalizing only proof-backed deterministic geoblock 403 rejections?
+13. Does it reconcile command recovery claims with the SDK methods and keys that production actually has?
+14. Does it prove rollout gate telemetry and evaluator submit authority cannot disagree?
 
 `REVISE` is not approval.
 
@@ -425,17 +538,23 @@ Stop and re-plan if a fix requires:
 - deleting or rewriting production DB files;
 - bypassing riskguard, heartbeat, WS gap, rollout, collateral, or Q1 egress gates;
 - clearing a `REVIEW_REQUIRED` command without no-side-effect proof;
+- clearing a `SUBMIT_UNKNOWN_SIDE_EFFECT` command from an unsupported idempotency lookup or open-orders absence inference;
+- treating a legacy localhost proxy setting as trading egress authority;
+- retrying live submit while the process-visible geoblock probe remains `blocked=true`;
 - claiming completion from data reader, command row, pre-submit envelope, rejected order, or shadow run alone.
 
 ## First Execution Slice
 
 1. Commit this packet and registry update.
-2. Run plan critic and revise until `APPROVE`.
+2. Run plan critic again on this geoblock-aware revision and revise until `APPROVE`.
 3. Port or reimplement the read-only live-order checker on the main-based branch.
 4. Add the pre-SDK terminal rejection antibody.
 5. Add the proof-backed `REVIEW_REQUIRED` clearance path.
-6. Use it to clear only the current safe no-side-effect live command if the proof predicates pass.
-7. Revalidate entry gates.
-8. Deploy the committed branch to live.
-9. Run the normal live daemon until it places an expected accepted/resting live order or stronger outcome.
-10. Guard and verify the canonical record chain until the designed next lifecycle state is proven.
+6. Use it to clear only the old safe no-side-effect live command if the proof predicates pass.
+7. Add the trading-egress/geoblock checker and fail-closed entry gate.
+8. Add deterministic geoblock 403 terminal rejection grammar for future attempts and a proof-backed terminalization tool for current command `8d82ea02c5b74905`.
+9. Audit production recovery capability and fix or remove unsupported idempotency/open-orders claims.
+10. Reconcile rollout gate telemetry with executable reader submit authority.
+11. Restore a nonblocked trading route (`blocked=false`) and restart live processes on the intended commit.
+12. Revalidate entry gates and run the normal live daemon until it places an expected accepted/resting live order or stronger outcome.
+13. Guard and verify the canonical record chain until the designed next lifecycle state is proven.

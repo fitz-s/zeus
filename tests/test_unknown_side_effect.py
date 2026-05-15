@@ -300,6 +300,19 @@ def _review_clearance_payload(command_id: str = "cmd-m2") -> dict:
     }
 
 
+def _geoblock_403_payload() -> dict:
+    return {
+        "reason": "post_submit_exception_possible_side_effect",
+        "exception_type": "PolyApiException",
+        "exception_message": (
+            "PolyApiException[status_code=403, error_message={'error': "
+            "'Trading restricted in your region, please refer to available "
+            "regions - https://docs.polymarket.com/developers/CLOB/geoblock'}]"
+        ),
+        "idempotency_key": "1" * 32,
+    }
+
+
 def _command(conn):
     return conn.execute("SELECT * FROM venue_commands ORDER BY created_at DESC LIMIT 1").fetchone()
 
@@ -392,6 +405,39 @@ def test_typed_venue_rejection_creates_SUBMIT_REJECTED(conn):
     assert result.status == "rejected"
     assert cmd["state"] == "REJECTED"
     assert "SUBMIT_REJECTED" in _events(conn, cmd["command_id"])
+
+
+def test_geoblock_polyapi_exception_creates_terminal_rejection(conn):
+    from src.execution.executor import _live_order
+
+    class PolyApiException(Exception):
+        pass
+
+    intent = _make_entry_intent(conn)
+    mock_client = MagicMock()
+    mock_client.v2_preflight.return_value = None
+    mock_client.place_limit_order.side_effect = PolyApiException(
+        "PolyApiException[status_code=403, error_message={'error': "
+        "'Trading restricted in your region, please refer to available regions - "
+        "https://docs.polymarket.com/developers/CLOB/geoblock'}]"
+    )
+
+    with patch("src.data.polymarket_client.PolymarketClient", return_value=mock_client):
+        result = _live_order("trade-m2-geoblock", intent, shares=18.19, conn=conn, decision_id="dec-m2-geoblock")
+
+    cmd = _command(conn)
+    assert result.status == "rejected"
+    assert "venue_rejected_geoblock_403" in (result.reason or "")
+    assert cmd["state"] == "REJECTED"
+    events = conn.execute(
+        "SELECT event_type, payload_json FROM venue_command_events WHERE command_id = ? ORDER BY sequence_no",
+        (cmd["command_id"],),
+    ).fetchall()
+    assert [row["event_type"] for row in events][-1] == "SUBMIT_REJECTED"
+    payload = json.loads(events[-1]["payload_json"])
+    assert payload["reason"] == "venue_rejected_geoblock_403"
+    assert payload["venue_order_created"] is False
+    assert "SUBMIT_TIMEOUT_UNKNOWN" not in [row["event_type"] for row in events]
 
 
 def test_pre_post_signing_exception_safe_to_retry(conn):
@@ -993,6 +1039,170 @@ def test_review_required_clearance_cannot_run_from_arbitrary_state(conn):
             source_commit="test-commit",
             source_function="_live_order",
             source_reason="pre_submit_collateral_reservation_failed",
+            reviewed_by="pytest",
+        )
+
+
+def test_submit_unknown_geoblock_403_can_be_terminalized(conn):
+    from src.execution.command_recovery import clear_submit_unknown_geoblock_403
+    from src.risk_allocator.governor import count_unknown_side_effects
+    from src.state.venue_command_repo import find_unknown_command_by_economic_intent
+
+    _insert_unknown_side_effect(
+        conn,
+        command_id="cmd-m2-geoblock",
+        token_id="tok-m2-geoblock",
+        idem="b" * 32,
+        final_event="SUBMIT_TIMEOUT_UNKNOWN",
+        final_event_payload=_geoblock_403_payload(),
+    )
+
+    payload = clear_submit_unknown_geoblock_403(
+        conn,
+        "cmd-m2-geoblock",
+        reviewed_by="pytest",
+        occurred_at=NOW.isoformat(),
+    )
+
+    cmd = conn.execute(
+        "SELECT * FROM venue_commands WHERE command_id = ?",
+        ("cmd-m2-geoblock",),
+    ).fetchone()
+    assert cmd["state"] == "SUBMIT_REJECTED"
+    events = conn.execute(
+        "SELECT event_type, payload_json FROM venue_command_events WHERE command_id = ? ORDER BY sequence_no",
+        ("cmd-m2-geoblock",),
+    ).fetchall()
+    assert [row["event_type"] for row in events][-1] == "SUBMIT_REJECTED"
+    event_payload = json.loads(events[-1]["payload_json"])
+    assert event_payload == payload
+    assert payload["reason"] == "venue_rejected_geoblock_403"
+    assert payload["proof_class"] == "deterministic_venue_geoblock_403"
+    assert payload["side_effect_boundary_crossed"] is True
+    assert payload["venue_order_created"] is False
+    assert payload["required_predicates"]["exception_message_geoblock_403"] is True
+
+    unknown_count, unknown_markets = count_unknown_side_effects(conn)
+    assert unknown_count == 0
+    assert unknown_markets == ()
+    assert find_unknown_command_by_economic_intent(
+        conn,
+        intent_kind="ENTRY",
+        token_id="tok-m2-geoblock",
+        side="BUY",
+        price=0.55,
+        size=18.19,
+    ) is None
+
+
+@pytest.mark.parametrize(
+    ("payload_update", "match"),
+    [
+        (
+            {"exception_type": "TimeoutError", "exception_message": "post timed out"},
+            "exception_message_geoblock_403",
+        ),
+        (
+            {
+                "exception_type": "PolyApiException",
+                "exception_message": "PolyApiException[status_code=500, error_message={'error':'server'}]",
+            },
+            "exception_message_geoblock_403",
+        ),
+        (
+            {"reason": "post_submit_exception_possible_side_effect", "exception_type": "RuntimeError"},
+            "exception_type_polyapi",
+        ),
+    ],
+)
+def test_submit_unknown_geoblock_terminalization_rejects_ambiguous_exceptions(
+    conn,
+    payload_update,
+    match,
+):
+    from src.execution.command_recovery import clear_submit_unknown_geoblock_403
+
+    payload = _geoblock_403_payload()
+    payload.update(payload_update)
+    _insert_unknown_side_effect(
+        conn,
+        command_id="cmd-m2-geoblock-ambiguous",
+        final_event="SUBMIT_TIMEOUT_UNKNOWN",
+        final_event_payload=payload,
+    )
+
+    with pytest.raises(ValueError, match=match):
+        clear_submit_unknown_geoblock_403(
+            conn,
+            "cmd-m2-geoblock-ambiguous",
+            reviewed_by="pytest",
+        )
+
+
+@pytest.mark.parametrize("case", ["raw_response", "signed_order", "order_fact", "trade_fact"])
+def test_submit_unknown_geoblock_terminalization_rejects_side_effect_evidence(conn, case):
+    from src.execution.command_recovery import clear_submit_unknown_geoblock_403
+
+    command_id = f"cmd-m2-geoblock-blocked-{case}"
+    kwargs = {}
+    if case == "raw_response":
+        kwargs["raw_response_json"] = '{"orderID":"ord-real"}'
+    if case == "signed_order":
+        kwargs["signed_order_hash"] = "f" * 64
+    _insert_unknown_side_effect(
+        conn,
+        command_id=command_id,
+        token_id=f"tok-m2-geoblock-blocked-{case}",
+        idem=("c" if case != "signed_order" else "d") * 32,
+        final_event="SUBMIT_TIMEOUT_UNKNOWN",
+        final_event_payload=_geoblock_403_payload(),
+        **kwargs,
+    )
+    if case == "order_fact":
+        conn.execute(
+            """
+            INSERT INTO venue_order_facts (
+              venue_order_id, command_id, state, source, observed_at,
+              local_sequence, raw_payload_hash
+            ) VALUES ('ord-geoblock-blocked', ?, 'LIVE', 'REST', ?, 1, ?)
+            """,
+            (command_id, NOW.isoformat(), "a" * 64),
+        )
+    if case == "trade_fact":
+        conn.execute(
+            """
+            INSERT INTO venue_trade_facts (
+              trade_id, venue_order_id, command_id, state, filled_size,
+              fill_price, source, observed_at, local_sequence, raw_payload_hash
+            ) VALUES ('trade-geoblock-blocked', 'ord-geoblock-blocked', ?, 'MATCHED', '1.00',
+                      '0.55', 'REST', ?, 1, ?)
+            """,
+            (command_id, NOW.isoformat(), "b" * 64),
+        )
+    conn.commit()
+
+    with pytest.raises(ValueError, match="terminalization predicates failed"):
+        clear_submit_unknown_geoblock_403(
+            conn,
+            command_id,
+            reviewed_by="pytest",
+        )
+
+
+def test_submit_unknown_geoblock_terminalization_cannot_run_from_arbitrary_state(conn):
+    from src.execution.command_recovery import clear_submit_unknown_geoblock_403
+
+    _insert_unknown_side_effect(
+        conn,
+        command_id="cmd-m2-geoblock-review",
+        final_event="REVIEW_REQUIRED",
+        final_event_payload={"reason": "still_requires_review"},
+    )
+
+    with pytest.raises(ValueError, match="only legal for SUBMIT_UNKNOWN_SIDE_EFFECT"):
+        clear_submit_unknown_geoblock_403(
+            conn,
+            "cmd-m2-geoblock-review",
             reviewed_by="pytest",
         )
 

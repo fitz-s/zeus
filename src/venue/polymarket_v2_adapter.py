@@ -440,9 +440,14 @@ class PolymarketV2Adapter:
 
     def get_open_orders(self, filter: OpenOrdersFilter | None = None) -> list[OrderState]:
         client = self._sdk_client()
-        get_orders = getattr(client, "get_orders", None)
+        get_orders = getattr(client, "get_open_orders", None)
         if not callable(get_orders):
-            raise V2ReadUnavailable("SDK client does not expose get_orders; open-order absence is unknown")
+            get_orders = getattr(client, "get_orders", None)
+        if not callable(get_orders):
+            raise V2ReadUnavailable(
+                "SDK client exposes neither get_open_orders nor get_orders; "
+                "open-order absence is unknown"
+            )
         raw = get_orders()
         if isinstance(raw, dict):
             raw = raw.get("data", []) or []

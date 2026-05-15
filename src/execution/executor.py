@@ -122,6 +122,27 @@ def _allocation_payload_for_intent(intent: ExecutionIntent) -> dict[str, str]:
     }
 
 
+def _is_polymarket_geoblock_403(exc: Exception) -> bool:
+    message = str(exc)
+    return (
+        type(exc).__name__ == "PolyApiException"
+        and "status_code=403" in message
+        and "Trading restricted in your region" in message
+        and "geoblock" in message
+    )
+
+
+def _geoblock_rejection_payload(exc: Exception, *, idempotency_key: str) -> dict:
+    return {
+        "reason": "venue_rejected_geoblock_403",
+        "exception_type": type(exc).__name__,
+        "exception_message": str(exc),
+        "idempotency_key": idempotency_key,
+        "proof_class": "deterministic_venue_geoblock_403",
+        "venue_order_created": False,
+    }
+
+
 def _json_safe_string(value, fallback: str = "") -> str:
     if value is None:
         return str(fallback or "")
@@ -2063,31 +2084,53 @@ def execute_exit_order(
             )
         except Exception as exc:
             # M2: place_limit_order has crossed the submit side-effect boundary.
-            # Treat SDK/network exceptions as unknown side effects, never as
-            # semantic rejection; recovery proves ACK/FILL or safe replay.
+            # Treat SDK/network exceptions as unknown side effects. A narrow
+            # synchronous venue geoblock 403 is deterministic rejection: no
+            # order id is created and live retry requires fresh egress proof.
             ack_time = datetime.now(timezone.utc).isoformat()
             try:
-                append_event(
-                    conn,
-                    command_id=command_id,
-                    event_type="SUBMIT_TIMEOUT_UNKNOWN",
-                    occurred_at=ack_time,
-                    payload={
-                        "reason": "post_submit_exception_possible_side_effect",
-                        "exception_type": type(exc).__name__,
-                        "exception_message": str(exc),
-                        "idempotency_key": idem.value,
-                    },
-                )
+                if _is_polymarket_geoblock_403(exc):
+                    append_event(
+                        conn,
+                        command_id=command_id,
+                        event_type="SUBMIT_REJECTED",
+                        occurred_at=ack_time,
+                        payload=_geoblock_rejection_payload(exc, idempotency_key=idem.value),
+                    )
+                else:
+                    append_event(
+                        conn,
+                        command_id=command_id,
+                        event_type="SUBMIT_TIMEOUT_UNKNOWN",
+                        occurred_at=ack_time,
+                        payload={
+                            "reason": "post_submit_exception_possible_side_effect",
+                            "exception_type": type(exc).__name__,
+                            "exception_message": str(exc),
+                            "idempotency_key": idem.value,
+                        },
+                    )
                 if _own_conn:
                     conn.commit()
             except Exception as inner:
                 logger.error(
-                    "execute_exit_order: SUBMIT_TIMEOUT_UNKNOWN append_event failed after SDK exception "
+                    "execute_exit_order: terminal SDK-exception event append failed "
                     "(command_id=%s trade_id=%s): inner=%s original=%s",
                     command_id, intent.trade_id, inner, exc,
                 )
             logger.error("Live exit order SDK exception: %s", exc)
+            if _is_polymarket_geoblock_403(exc):
+                return OrderResult(
+                    trade_id=intent.trade_id,
+                    status="rejected",
+                    reason=f"venue_rejected_geoblock_403: {exc}",
+                    submitted_price=limit_price,
+                    shares=shares,
+                    order_role="exit",
+                    intent_id=intent.intent_id,
+                    idempotency_key=idem.value,
+                    command_state="REJECTED",
+                )
             return OrderResult(
                 trade_id=intent.trade_id,
                 status="unknown_side_effect",
@@ -2890,31 +2933,52 @@ def _live_order(
             )
         except Exception as exc:
             # M2: place_limit_order has crossed the submit side-effect boundary.
-            # Treat SDK/network exceptions as unknown side effects, never as
-            # semantic rejection; recovery proves ACK/FILL or safe replay.
+            # Treat SDK/network exceptions as unknown side effects. A narrow
+            # synchronous venue geoblock 403 is deterministic rejection: no
+            # order id is created and live retry requires fresh egress proof.
             unk_time = datetime.now(timezone.utc).isoformat()
             try:
-                append_event(
-                    conn,
-                    command_id=command_id,
-                    event_type="SUBMIT_TIMEOUT_UNKNOWN",
-                    occurred_at=unk_time,
-                    payload={
-                        "reason": "post_submit_exception_possible_side_effect",
-                        "exception_type": type(exc).__name__,
-                        "exception_message": str(exc),
-                        "idempotency_key": idem.value,
-                    },
-                )
+                if _is_polymarket_geoblock_403(exc):
+                    append_event(
+                        conn,
+                        command_id=command_id,
+                        event_type="SUBMIT_REJECTED",
+                        occurred_at=unk_time,
+                        payload=_geoblock_rejection_payload(exc, idempotency_key=idem.value),
+                    )
+                else:
+                    append_event(
+                        conn,
+                        command_id=command_id,
+                        event_type="SUBMIT_TIMEOUT_UNKNOWN",
+                        occurred_at=unk_time,
+                        payload={
+                            "reason": "post_submit_exception_possible_side_effect",
+                            "exception_type": type(exc).__name__,
+                            "exception_message": str(exc),
+                            "idempotency_key": idem.value,
+                        },
+                    )
                 if _own_conn:
                     conn.commit()
             except Exception as inner:
                 logger.error(
-                    "_live_order: SUBMIT_TIMEOUT_UNKNOWN append_event failed after SDK exception "
+                    "_live_order: terminal SDK-exception event append failed "
                     "(command_id=%s trade_id=%s): inner=%s original=%s",
                     command_id, trade_id, inner, exc,
                 )
             logger.error("Live order SDK exception: %s", exc)
+            if _is_polymarket_geoblock_403(exc):
+                return OrderResult(
+                    trade_id=trade_id,
+                    status="rejected",
+                    reason=f"venue_rejected_geoblock_403: {exc}",
+                    submitted_price=intent.limit_price,
+                    shares=shares,
+                    order_role="entry",
+                    idempotency_key=idem.value,
+                    command_state="REJECTED",
+                )
             return OrderResult(
                 trade_id=trade_id,
                 status="unknown_side_effect",

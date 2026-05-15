@@ -132,6 +132,12 @@ _PRE_SDK_REVIEW_REQUIRED_REASONS = frozenset({
     "recovery_no_venue_order_id",
 })
 
+_GEOBLOCK_403_MARKERS = (
+    "status_code=403",
+    "Trading restricted in your region",
+    "geoblock",
+)
+
 
 def _dict_row(row) -> dict:
     if row is None:
@@ -222,6 +228,33 @@ def _count_facts(conn: sqlite3.Connection, table: str, command_id: str) -> int:
     return int(data.get("count", 0) or 0)
 
 
+def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    if not _table_exists(conn, table):
+        return set()
+    return {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})")}
+
+
+def _count_position_rows_for_command(conn: sqlite3.Connection, command: dict) -> dict[str, int]:
+    command_id = str(command.get("command_id") or "")
+    position_id = str(command.get("position_id") or "")
+    counts = {"position_events": 0, "position_current": 0}
+    event_cols = _table_columns(conn, "position_events")
+    if "command_id" in event_cols:
+        row = conn.execute(
+            "SELECT COUNT(*) AS count FROM position_events WHERE command_id = ?",
+            (command_id,),
+        ).fetchone()
+        counts["position_events"] = int((_dict_row(row).get("count") if row else 0) or 0)
+    current_cols = _table_columns(conn, "position_current")
+    if position_id and "position_id" in current_cols:
+        row = conn.execute(
+            "SELECT COUNT(*) AS count FROM position_current WHERE position_id = ?",
+            (position_id,),
+        ).fetchone()
+        counts["position_current"] = int((_dict_row(row).get("count") if row else 0) or 0)
+    return counts
+
+
 def _review_no_side_effect_predicates(
     conn: sqlite3.Connection,
     command: dict,
@@ -263,6 +296,73 @@ def _review_no_side_effect_predicates(
         "review_required_reason_pre_sdk": (
             review_required_reason in _PRE_SDK_REVIEW_REQUIRED_REASONS
         ),
+    }
+    failures = [name for name, ok in predicates.items() if not ok]
+    return predicates, failures
+
+
+def _submit_unknown_command(conn: sqlite3.Connection, command_id: str) -> dict:
+    row = conn.execute(
+        "SELECT * FROM venue_commands WHERE command_id = ?",
+        (command_id,),
+    ).fetchone()
+    if row is None:
+        raise ValueError(f"unknown command_id: {command_id}")
+    command = _dict_row(row)
+    if command.get("state") != CommandState.SUBMIT_UNKNOWN_SIDE_EFFECT.value:
+        raise ValueError(
+            "geoblock clearance is only legal for SUBMIT_UNKNOWN_SIDE_EFFECT commands; "
+            f"got {command.get('state')!r}"
+        )
+    return command
+
+
+def _latest_event_payload(events: list[dict]) -> tuple[str, dict]:
+    if not events:
+        return "", {}
+    latest = events[-1]
+    return str(latest.get("event_type") or ""), _json_dict(latest.get("payload_json"))
+
+
+def _geoblock_403_predicates(
+    conn: sqlite3.Connection,
+    command: dict,
+) -> tuple[dict, list[str]]:
+    command_id = str(command["command_id"])
+    events = _command_events(conn, command_id)
+    latest_event_type, latest_payload = _latest_event_payload(events)
+    payloads = [_json_dict(event.get("payload_json")) for event in events]
+    final_envelope_ids = [
+        payload.get("final_submission_envelope_id")
+        for payload in payloads
+        if str(payload.get("final_submission_envelope_id") or "").strip()
+    ]
+    envelope = _command_envelope(conn, command.get("envelope_id"))
+    position_counts = _count_position_rows_for_command(conn, command)
+    exception_message = str(latest_payload.get("exception_message") or "")
+    predicates = {
+        "latest_event_is_submit_timeout_unknown": (
+            latest_event_type == CommandEventType.SUBMIT_TIMEOUT_UNKNOWN.value
+        ),
+        "payload_reason_post_submit_exception": (
+            latest_payload.get("reason") == "post_submit_exception_possible_side_effect"
+        ),
+        "exception_type_polyapi": latest_payload.get("exception_type") == "PolyApiException",
+        "exception_message_geoblock_403": all(
+            marker in exception_message for marker in _GEOBLOCK_403_MARKERS
+        ),
+        "no_venue_order_id": not str(command.get("venue_order_id") or "").strip(),
+        "no_final_submission_envelope": not final_envelope_ids,
+        "no_envelope_order_id": not str(envelope.get("order_id") or "").strip(),
+        "no_raw_response": not str(envelope.get("raw_response_json") or "").strip(),
+        "no_signed_order": (
+            envelope.get("signed_order_blob") in (None, b"", "")
+            and not str(envelope.get("signed_order_hash") or "").strip()
+        ),
+        "no_order_facts": _count_facts(conn, "venue_order_facts", command_id) == 0,
+        "no_trade_facts": _count_facts(conn, "venue_trade_facts", command_id) == 0,
+        "no_position_events": position_counts["position_events"] == 0,
+        "no_position_current": position_counts["position_current"] == 0,
     }
     failures = [name for name, ok in predicates.items() if not ok]
     return predicates, failures
@@ -381,6 +481,53 @@ def clear_review_required_no_venue_side_effect(
         conn,
         command_id=command_id,
         event_type=CommandEventType.REVIEW_CLEARED_NO_VENUE_SIDE_EFFECT.value,
+        occurred_at=now,
+        payload=payload,
+    )
+    return payload
+
+
+def clear_submit_unknown_geoblock_403(
+    conn: sqlite3.Connection,
+    command_id: str,
+    *,
+    reviewed_by: str = "operator",
+    occurred_at: str | None = None,
+) -> dict:
+    """Terminalize a deterministic CLOB geoblock 403 as rejected.
+
+    This is intentionally narrower than general unknown-side-effect recovery.
+    It only handles synchronous Polymarket ``PolyApiException`` geoblock 403
+    responses with no persisted venue identity, final envelope, order facts,
+    trade facts, or position records. Timeouts, 5xx, connection failures, and
+    ambiguous SDK exceptions remain unresolved.
+    """
+
+    command = _submit_unknown_command(conn, command_id)
+    predicates, predicate_failures = _geoblock_403_predicates(conn, command)
+    if predicate_failures:
+        raise ValueError(
+            "geoblock 403 terminalization predicates failed: "
+            + ", ".join(sorted(predicate_failures))
+        )
+    now = occurred_at or _now_iso()
+    payload = {
+        "schema_version": 1,
+        "reason": "venue_rejected_geoblock_403",
+        "command_id": command_id,
+        "decision_id": str(command.get("decision_id") or ""),
+        "proof_class": "deterministic_venue_geoblock_403",
+        "side_effect_boundary_crossed": True,
+        "venue_order_created": False,
+        "required_predicates": predicates,
+        "idempotency_key": str(command.get("idempotency_key") or ""),
+        "reviewed_by": reviewed_by,
+        "cleared_at": now,
+    }
+    append_event(
+        conn,
+        command_id=command_id,
+        event_type=CommandEventType.SUBMIT_REJECTED.value,
         occurred_at=now,
         payload=payload,
     )
