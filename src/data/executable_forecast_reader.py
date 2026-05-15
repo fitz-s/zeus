@@ -1,5 +1,5 @@
 # Created: 2026-05-03
-# Last reused/audited: 2026-05-14
+# Last reused/audited: 2026-05-15
 # Authority basis: docs/operations/task_2026-05-14_data_daemon_live_efficiency/DATA_DAEMON_LIVE_EFFICIENCY_REFACTOR_PLAN.md
 #   Phase 3 evaluator consumes producer readiness without hot-path entry-readiness writes.
 """Executable forecast reader for V4 source-linked ensemble snapshots."""
@@ -195,15 +195,19 @@ def _schema_attached(conn: sqlite3.Connection, schema: str) -> bool:
     return schema == "main" or any(row[1] == schema for row in conn.execute("PRAGMA database_list"))
 
 
+_TABLE_EXISTS_SQL = {
+    "main": "SELECT 1 FROM main.sqlite_master WHERE type = 'table' AND name = ? LIMIT 1",
+    WORLD_SCHEMA: "SELECT 1 FROM world.sqlite_master WHERE type = 'table' AND name = ? LIMIT 1",
+    FORECASTS_SCHEMA: "SELECT 1 FROM forecasts.sqlite_master WHERE type = 'table' AND name = ? LIMIT 1",
+}
+
+
 def _table_exists(conn: sqlite3.Connection, *, schema: str, table: str) -> bool:
     if schema not in {"main", WORLD_SCHEMA, FORECASTS_SCHEMA} or table not in FORECAST_AUTHORITY_TABLES:
         raise ValueError("unsupported executable forecast authority table")
     if not _schema_attached(conn, schema):
         return False
-    row = conn.execute(
-        f"SELECT 1 FROM {schema}.sqlite_master WHERE type = 'table' AND name = ? LIMIT 1",
-        (table,),
-    ).fetchone()
+    row = conn.execute(_TABLE_EXISTS_SQL[schema], (table,)).fetchone()
     return row is not None
 
 
@@ -230,15 +234,35 @@ def _authority_table(conn: sqlite3.Connection, table: str) -> str | None:
     return None
 
 
+def _source_run_coverage_by_id_sql(table: str) -> str:
+    if table == f"{FORECASTS_SCHEMA}.source_run_coverage":
+        return "SELECT * FROM forecasts.source_run_coverage WHERE coverage_id = ?"
+    if table == f"{WORLD_SCHEMA}.source_run_coverage":
+        return "SELECT * FROM world.source_run_coverage WHERE coverage_id = ?"
+    if table == "source_run_coverage":
+        return "SELECT * FROM source_run_coverage WHERE coverage_id = ?"
+    raise ValueError("unsupported source_run_coverage authority table")
+
+
 def _source_run_coverage_by_id(conn: sqlite3.Connection, coverage_id: str) -> dict[str, Any] | None:
     table = _authority_table(conn, "source_run_coverage")
     if table is None:
         return None
     row = conn.execute(
-        f"SELECT * FROM {table} WHERE coverage_id = ?",
+        _source_run_coverage_by_id_sql(table),
         (coverage_id,),
     ).fetchone()
     return dict(row) if row else None
+
+
+def _source_run_by_id_sql(table: str) -> str:
+    if table == f"{FORECASTS_SCHEMA}.source_run":
+        return "SELECT * FROM forecasts.source_run WHERE source_run_id = ?"
+    if table == f"{WORLD_SCHEMA}.source_run":
+        return "SELECT * FROM world.source_run WHERE source_run_id = ?"
+    if table == "source_run":
+        return "SELECT * FROM source_run WHERE source_run_id = ?"
+    raise ValueError("unsupported source_run authority table")
 
 
 def _source_run_by_id(conn: sqlite3.Connection, source_run_id: str) -> dict[str, Any] | None:
@@ -246,7 +270,7 @@ def _source_run_by_id(conn: sqlite3.Connection, source_run_id: str) -> dict[str,
     if table is None:
         return None
     row = conn.execute(
-        f"SELECT * FROM {table} WHERE source_run_id = ?",
+        _source_run_by_id_sql(table),
         (source_run_id,),
     ).fetchone()
     return dict(row) if row else None
@@ -277,9 +301,9 @@ def _latest_producer_readiness(
     table = _authority_table(conn, "readiness_state")
     if table is None:
         return None
-    row = conn.execute(
-        f"""
-        SELECT * FROM {table}
+    if table == f"{FORECASTS_SCHEMA}.readiness_state":
+        sql = """
+        SELECT * FROM forecasts.readiness_state
         WHERE scope_type = 'city_metric'
           AND strategy_key = ?
           AND city_id = ?
@@ -291,7 +315,41 @@ def _latest_producer_readiness(
           AND track = ?
         ORDER BY computed_at DESC, recorded_at DESC
         LIMIT 1
-        """,
+        """
+    elif table == f"{WORLD_SCHEMA}.readiness_state":
+        sql = """
+        SELECT * FROM world.readiness_state
+        WHERE scope_type = 'city_metric'
+          AND strategy_key = ?
+          AND city_id = ?
+          AND city_timezone = ?
+          AND target_local_date = ?
+          AND temperature_metric = ?
+          AND data_version = ?
+          AND source_id = ?
+          AND track = ?
+        ORDER BY computed_at DESC, recorded_at DESC
+        LIMIT 1
+        """
+    elif table == "readiness_state":
+        sql = """
+        SELECT * FROM readiness_state
+        WHERE scope_type = 'city_metric'
+          AND strategy_key = ?
+          AND city_id = ?
+          AND city_timezone = ?
+          AND target_local_date = ?
+          AND temperature_metric = ?
+          AND data_version = ?
+          AND source_id = ?
+          AND track = ?
+        ORDER BY computed_at DESC, recorded_at DESC
+        LIMIT 1
+        """
+    else:
+        raise ValueError("unsupported readiness_state authority table")
+    row = conn.execute(
+        sql,
         (
             PRODUCER_READINESS_STRATEGY_KEY,
             city_id,
@@ -304,6 +362,122 @@ def _latest_producer_readiness(
         ),
     ).fetchone()
     return dict(row) if row else None
+
+
+def _snapshot_query_sql(table: str, *, source_run_id_present: bool) -> str:
+    if table == f"{FORECASTS_SCHEMA}.ensemble_snapshots_v2":
+        if source_run_id_present:
+            return """
+            -- Phase B7 (REMEDIATION_PLAN_2026-05-03.md): IS NOT NULL filters
+            -- on source_run_id/release_calendar_key/source_cycle_time/
+            -- source_release_time/source_available_at removed so legacy rows
+            -- with missing linkage land here and are rejected by the post-check
+            -- with FORECAST_SOURCE_LINKAGE_MISSING (reachable reason code)
+            -- instead of being silently filtered as NO_EXECUTABLE_FORECAST_ROWS_FOR_TARGET.
+            SELECT * FROM forecasts.ensemble_snapshots_v2
+            WHERE city = ?
+              AND target_date = ?
+              AND temperature_metric = ?
+              AND data_version = ?
+              AND source_id = ?
+              AND source_transport = ?
+              AND source_run_id = ?
+            ORDER BY source_cycle_time DESC, available_at DESC, snapshot_id DESC
+            LIMIT 1
+            """
+        return """
+            -- Phase B7 (REMEDIATION_PLAN_2026-05-03.md): IS NOT NULL filters
+            -- on source_run_id/release_calendar_key/source_cycle_time/
+            -- source_release_time/source_available_at removed so legacy rows
+            -- with missing linkage land here and are rejected by the post-check
+            -- with FORECAST_SOURCE_LINKAGE_MISSING (reachable reason code)
+            -- instead of being silently filtered as NO_EXECUTABLE_FORECAST_ROWS_FOR_TARGET.
+            SELECT * FROM forecasts.ensemble_snapshots_v2
+            WHERE city = ?
+              AND target_date = ?
+              AND temperature_metric = ?
+              AND data_version = ?
+              AND source_id = ?
+              AND source_transport = ?
+            ORDER BY source_cycle_time DESC, available_at DESC, snapshot_id DESC
+            LIMIT 1
+            """
+    elif table == f"{WORLD_SCHEMA}.ensemble_snapshots_v2":
+        if source_run_id_present:
+            return """
+            -- Phase B7 (REMEDIATION_PLAN_2026-05-03.md): IS NOT NULL filters
+            -- on source_run_id/release_calendar_key/source_cycle_time/
+            -- source_release_time/source_available_at removed so legacy rows
+            -- with missing linkage land here and are rejected by the post-check
+            -- with FORECAST_SOURCE_LINKAGE_MISSING (reachable reason code)
+            -- instead of being silently filtered as NO_EXECUTABLE_FORECAST_ROWS_FOR_TARGET.
+            SELECT * FROM world.ensemble_snapshots_v2
+            WHERE city = ?
+              AND target_date = ?
+              AND temperature_metric = ?
+              AND data_version = ?
+              AND source_id = ?
+              AND source_transport = ?
+              AND source_run_id = ?
+            ORDER BY source_cycle_time DESC, available_at DESC, snapshot_id DESC
+            LIMIT 1
+            """
+        return """
+            -- Phase B7 (REMEDIATION_PLAN_2026-05-03.md): IS NOT NULL filters
+            -- on source_run_id/release_calendar_key/source_cycle_time/
+            -- source_release_time/source_available_at removed so legacy rows
+            -- with missing linkage land here and are rejected by the post-check
+            -- with FORECAST_SOURCE_LINKAGE_MISSING (reachable reason code)
+            -- instead of being silently filtered as NO_EXECUTABLE_FORECAST_ROWS_FOR_TARGET.
+            SELECT * FROM world.ensemble_snapshots_v2
+            WHERE city = ?
+              AND target_date = ?
+              AND temperature_metric = ?
+              AND data_version = ?
+              AND source_id = ?
+              AND source_transport = ?
+            ORDER BY source_cycle_time DESC, available_at DESC, snapshot_id DESC
+            LIMIT 1
+            """
+    elif table == "ensemble_snapshots_v2":
+        if source_run_id_present:
+            return """
+            -- Phase B7 (REMEDIATION_PLAN_2026-05-03.md): IS NOT NULL filters
+            -- on source_run_id/release_calendar_key/source_cycle_time/
+            -- source_release_time/source_available_at removed so legacy rows
+            -- with missing linkage land here and are rejected by the post-check
+            -- with FORECAST_SOURCE_LINKAGE_MISSING (reachable reason code)
+            -- instead of being silently filtered as NO_EXECUTABLE_FORECAST_ROWS_FOR_TARGET.
+            SELECT * FROM ensemble_snapshots_v2
+            WHERE city = ?
+              AND target_date = ?
+              AND temperature_metric = ?
+              AND data_version = ?
+              AND source_id = ?
+              AND source_transport = ?
+              AND source_run_id = ?
+            ORDER BY source_cycle_time DESC, available_at DESC, snapshot_id DESC
+            LIMIT 1
+            """
+        return """
+            -- Phase B7 (REMEDIATION_PLAN_2026-05-03.md): IS NOT NULL filters
+            -- on source_run_id/release_calendar_key/source_cycle_time/
+            -- source_release_time/source_available_at removed so legacy rows
+            -- with missing linkage land here and are rejected by the post-check
+            -- with FORECAST_SOURCE_LINKAGE_MISSING (reachable reason code)
+            -- instead of being silently filtered as NO_EXECUTABLE_FORECAST_ROWS_FOR_TARGET.
+            SELECT * FROM ensemble_snapshots_v2
+            WHERE city = ?
+              AND target_date = ?
+              AND temperature_metric = ?
+              AND data_version = ?
+              AND source_id = ?
+              AND source_transport = ?
+            ORDER BY source_cycle_time DESC, available_at DESC, snapshot_id DESC
+            LIMIT 1
+            """
+    else:
+        raise ValueError("unsupported ensemble_snapshots_v2 authority table")
 
 
 def _coverage_for_producer(
@@ -346,7 +520,6 @@ def read_executable_forecast_snapshot(
     source_run_id: str | None = None,
     now_utc: datetime | None = None,
 ) -> ExecutableForecastReadResult:
-    source_run_filter = "AND source_run_id = ?" if source_run_id is not None else ""
     table = _authority_table(conn, "ensemble_snapshots_v2")
     if table is None:
         return ExecutableForecastReadResult("BLOCKED", "NO_EXECUTABLE_FORECAST_ROWS_FOR_TARGET")
@@ -363,24 +536,7 @@ def read_executable_forecast_snapshot(
     rows = [
         dict(row)
         for row in conn.execute(
-            f"""
-            -- Phase B7 (REMEDIATION_PLAN_2026-05-03.md): IS NOT NULL filters
-            -- on source_run_id/release_calendar_key/source_cycle_time/
-            -- source_release_time/source_available_at removed so legacy rows
-            -- with missing linkage land here and are rejected by the post-check
-            -- with FORECAST_SOURCE_LINKAGE_MISSING (reachable reason code)
-            -- instead of being silently filtered as NO_EXECUTABLE_FORECAST_ROWS_FOR_TARGET.
-            SELECT * FROM {table}
-            WHERE city = ?
-              AND target_date = ?
-              AND temperature_metric = ?
-              AND data_version = ?
-              AND source_id = ?
-              AND source_transport = ?
-              {source_run_filter}
-            ORDER BY source_cycle_time DESC, available_at DESC, snapshot_id DESC
-            LIMIT 1
-            """,
+            _snapshot_query_sql(table, source_run_id_present=source_run_id is not None),
             tuple(params),
         ).fetchall()
     ]

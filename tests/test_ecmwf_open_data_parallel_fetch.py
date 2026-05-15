@@ -380,6 +380,63 @@ def test_partial_file_does_not_count_as_resume(tmp_path):
     assert client_called, "Client.retrieve was not called — .partial incorrectly treated as resume"
 
 
+def test_fetch_one_step_does_not_sleep_after_final_retry(tmp_path, monkeypatch):
+    """Retryable HTTP errors sleep only between attempts, not after exhaustion."""
+
+    import sys
+    import types
+
+    import requests as req_mod
+    import src.data.ecmwf_open_data as mod
+
+    class _FakeHTTPError(req_mod.HTTPError):
+        def __init__(self):
+            resp = type("R", (), {"status_code": 503})()
+            super().__init__(response=resp)
+
+    class _FakeClient:
+        def __init__(self, source=None):
+            self.source = source
+
+    fake_opendata = types.ModuleType("ecmwf.opendata")
+    fake_opendata.Client = _FakeClient
+    fake_ecmwf = types.ModuleType("ecmwf")
+    fake_ecmwf.opendata = fake_opendata
+    sleeps: list[float] = []
+
+    def fake_retrieve(_client, **_kwargs):
+        raise _FakeHTTPError()
+
+    orig_ecmwf = sys.modules.get("ecmwf")
+    orig_opendata = sys.modules.get("ecmwf.opendata")
+    sys.modules["ecmwf"] = fake_ecmwf
+    sys.modules["ecmwf.opendata"] = fake_opendata
+    monkeypatch.setattr(mod, "_retrieve_step_with_controlled_ranges", fake_retrieve)
+    monkeypatch.setattr(mod.time, "sleep", lambda seconds: sleeps.append(float(seconds)))
+    try:
+        status, detail = mod._fetch_one_step(
+            cycle_date=RUN_DATE,
+            cycle_hour=RUN_HOUR,
+            param="mx2t3",
+            step=3,
+            output_dir=tmp_path,
+            mirrors=("aws",),
+        )
+    finally:
+        if orig_ecmwf is None:
+            sys.modules.pop("ecmwf", None)
+        else:
+            sys.modules["ecmwf"] = orig_ecmwf
+        if orig_opendata is None:
+            sys.modules.pop("ecmwf.opendata", None)
+        else:
+            sys.modules["ecmwf.opendata"] = orig_opendata
+
+    assert status == "FAILED"
+    assert str(detail).startswith("HTTP_503_mirror_aws_attempt_")
+    assert len(sleeps) == mod._PER_STEP_MAX_RETRIES - 1
+
+
 # ---------------------------------------------------------------------------
 # test 7: concat order is ascending step (REL-1)
 # ---------------------------------------------------------------------------

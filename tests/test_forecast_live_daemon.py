@@ -1,5 +1,5 @@
 # Created: 2026-05-14
-# Last reused/audited: 2026-05-14
+# Last reused/audited: 2026-05-15
 # Authority basis: docs/operations/task_2026-05-08_deep_alignment_audit/DATA_DAEMON_LIVE_EFFICIENCY_REFACTOR_PLAN.md section 6.1, section 6.2, section 8 Phase 4, and Phase 6 durable work journaling.
 """Relationship tests for the dedicated forecast-live daemon boundary."""
 
@@ -8,8 +8,6 @@ from __future__ import annotations
 import ast
 import json
 import sqlite3
-import sys
-import types
 from datetime import date, datetime, timezone
 from pathlib import Path
 
@@ -21,28 +19,6 @@ from src.state.db import init_schema_forecasts
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FORECAST_LIVE_DAEMON = REPO_ROOT / "src" / "ingest" / "forecast_live_daemon.py"
-
-
-class _BlockingSchedulerStub:
-    pass
-
-
-class _ThreadPoolExecutorStub:
-    pass
-
-
-_apscheduler = types.ModuleType("apscheduler")
-_apscheduler_schedulers = types.ModuleType("apscheduler.schedulers")
-_apscheduler_schedulers_blocking = types.ModuleType("apscheduler.schedulers.blocking")
-_apscheduler_executors = types.ModuleType("apscheduler.executors")
-_apscheduler_executors_pool = types.ModuleType("apscheduler.executors.pool")
-_apscheduler_schedulers_blocking.BlockingScheduler = _BlockingSchedulerStub
-_apscheduler_executors_pool.ThreadPoolExecutor = _ThreadPoolExecutorStub
-sys.modules.setdefault("apscheduler", _apscheduler)
-sys.modules.setdefault("apscheduler.schedulers", _apscheduler_schedulers)
-sys.modules.setdefault("apscheduler.schedulers.blocking", _apscheduler_schedulers_blocking)
-sys.modules.setdefault("apscheduler.executors", _apscheduler_executors)
-sys.modules.setdefault("apscheduler.executors.pool", _apscheduler_executors_pool)
 
 
 def test_forecast_live_scheduler_registers_only_opendata_jobs_and_heartbeat() -> None:
@@ -464,6 +440,64 @@ def test_journaled_wrapper_commits_failed_job_before_reraising(tmp_path, monkeyp
     assert row is not None
     assert row["status"] == "FAILED"
     assert row["reason_code"] == "EXCEPTION:RuntimeError:failed mx2t6_high"
+
+
+def test_journaled_wrapper_commits_running_before_collector_starts(tmp_path, monkeypatch) -> None:
+    from src.data.release_calendar import FetchDecision
+    import src.data.ecmwf_open_data as ecmwf_open_data
+    import src.ingest.forecast_live_daemon as forecast_live_daemon
+    import src.state.db as state_db
+    from src.state.job_run_repo import get_latest_job_run
+
+    db_path = tmp_path / "forecasts.db"
+    setup_conn = sqlite3.connect(db_path)
+    setup_conn.row_factory = sqlite3.Row
+    init_schema_forecasts(setup_conn)
+    setup_conn.commit()
+    setup_conn.close()
+
+    def get_test_conn(*, write_class: str):
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    monkeypatch.setattr(state_db, "get_forecasts_connection", get_test_conn)
+    monkeypatch.setattr(
+        forecast_live_daemon,
+        "_forecast_work_identity",
+        lambda track, now_utc: {
+            "decision": FetchDecision.FETCH_ALLOWED,
+            "metadata": {"selected_cycle_time": datetime(2026, 5, 14, 0, tzinfo=timezone.utc)},
+            "job_name": "forecast_live_opendata_mx2t6_high",
+            "source_id": "ecmwf_open_data",
+            "track": track,
+            "scheduled_for": datetime(2026, 5, 14, 0, tzinfo=timezone.utc),
+            "release_calendar_key": "ecmwf_open_data:mx2t6_high:full",
+            "safe_fetch_not_before": None,
+        },
+    )
+
+    def collector(*, track: str, **_kwargs) -> dict:
+        verify_conn = sqlite3.connect(db_path)
+        verify_conn.row_factory = sqlite3.Row
+        try:
+            row = get_latest_job_run(verify_conn, "forecast_live_opendata_mx2t6_high")
+        finally:
+            verify_conn.close()
+        assert row is not None
+        assert row["status"] == "RUNNING"
+        return {
+            "status": "ok",
+            "track": track,
+            "source_run_id": "ecmwf_open_data:mx2t6_high:2026-05-14T00Z",
+            "release_calendar_key": "ecmwf_open_data:mx2t6_high:full",
+            "snapshots_inserted": 1,
+        }
+
+    monkeypatch.setattr(ecmwf_open_data, "collect_open_ens_cycle", collector)
+
+    result = forecast_live_daemon._run_journaled_opendata_track("mx2t6_high")
+    assert result["status"] == "ok"
 
 
 def test_forecast_live_track_runner_journals_not_released_without_collector(tmp_path, monkeypatch) -> None:

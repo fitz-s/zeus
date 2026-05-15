@@ -631,16 +631,16 @@ def _clear_source_run_authority(conn, *, source_run_id: str) -> dict[str, int]:
         (source_run_id,),
     ).rowcount
     if coverage_ids:
-        placeholders = ",".join("?" for _ in coverage_ids)
         readiness_ids = [f"producer_readiness:{coverage_id}" for coverage_id in coverage_ids]
-        readiness_deleted += conn.execute(
-            f"""
+        for readiness_id in readiness_ids:
+            readiness_deleted += conn.execute(
+                """
             DELETE FROM readiness_state
             WHERE strategy_key = 'producer_readiness'
-              AND readiness_id IN ({placeholders})
-            """,
-            readiness_ids,
-        ).rowcount
+              AND readiness_id = ?
+                """,
+                (readiness_id,),
+            ).rowcount
 
     coverage_deleted = conn.execute(
         "DELETE FROM source_run_coverage WHERE source_run_id = ?",
@@ -746,11 +746,10 @@ def _write_source_authority_chain(
 ) -> dict[str, int | str | None]:
     """Write source_run + coverage rows for a completed ingest cycle.
 
-    download_observed_steps: when provided (PARTIAL cycles), overrides the
-    ingest-derived observed_steps approximation (line 309 below) with the
-    ground-truth step list from the download phase. This ensures
-    forecast_target_contract.evaluate_producer_coverage:184
-    (missing_steps = expected - observed) receives the accurate per-step set.
+    download_observed_steps: when provided (PARTIAL cycles), records the
+    source_run-level ground-truth step list from the download phase. Per-target
+    coverage still derives observed_steps from each snapshot's local-day
+    horizon so the readiness row describes that exact target window.
     """
     rows = _snapshot_rows_for_source_run(
         conn,
@@ -1045,13 +1044,15 @@ def _fetch_one_step(
                     return ("NOT_RELEASED", None)
                 if code in _RETRYABLE_HTTP:
                     last_err = f"HTTP_{code}_mirror_{mirror}_attempt_{attempt}"
-                    time.sleep(_PER_STEP_RETRY_AFTER)
+                    if attempt + 1 < _PER_STEP_MAX_RETRIES:
+                        time.sleep(_PER_STEP_RETRY_AFTER)
                     continue
                 last_err = f"HTTP_{code}_mirror_{mirror}"
                 break   # non-retryable; try next mirror
             except (requests.ConnectionError, requests.Timeout) as exc:
                 last_err = f"NET_{type(exc).__name__}_mirror_{mirror}_attempt_{attempt}"
-                time.sleep(_PER_STEP_RETRY_AFTER)
+                if attempt + 1 < _PER_STEP_MAX_RETRIES:
+                    time.sleep(_PER_STEP_RETRY_AFTER)
                 continue
             except OSError as exc:
                 # disk/path errors during atomic rename or partial-file write
