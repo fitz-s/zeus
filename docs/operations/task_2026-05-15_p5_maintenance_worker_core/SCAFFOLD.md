@@ -65,23 +65,33 @@ Each sub-packet must stay ≤ 1000 LOC.
 
 | Sub-packet | Name | LOC (source) | LOC (tests) | Owner role |
 |-----------|------|-------------|-------------|-----------|
+| P5.0a | Types — shared enums, dataclasses, protocols imported by all sub-packets | ~200 | ~50 | `Operation`, `ValidatorResult`, `TickResult`, `TaskSpec`, `GuardResult`, `RefusalReason`, `InvocationMode` |
 | P5.1 | Engine — loop, guards, state machine, kill switch, refusal modes, scheduler detection | ~550 | ~250 | tick lifecycle, guard evaluation, exit codes |
-| P5.2 | Validator + safety contract enforcement | ~750 | ~350 | pre-action check, 5 contract guarantees, self-quarantine |
+| P5.2 | Validator + safety contract enforcement + operation guards | ~1000 | ~400 | pre-action check, 5 contract guarantees, post-mutation detector, git/gh/subprocess guards |
 | P5.3 | Rules parser + task registry + evidence trail + ack manager | ~700 | ~300 | YAML loading, proposal emit, rollback record, ack hashing |
 | P5.4 | Integration fixtures — 10 contrived workspace messes per category | ~200 | ~900 (fixtures + assertions) | acceptance suite; defer fixture catalog to its own SCAFFOLD |
 | P5.5 (opt.) | CLI + scheduler bindings entry point | ~300 | ~100 | argparse, scheduler env detection, launchd/cron wiring |
 
+**M5 decision: P5.0a types sub-packet (option ii).** `engine.run_tick()` (P5.1)
+calls `ActionValidator` (P5.2) and both import shared enums (`Operation`,
+`ValidatorResult`, `TickResult`, etc.). Without a shared types layer, P5.1
+cannot be built and tested without P5.2 already compiled, and P5.3 shares the
+same dependency. Extracting ~200 LOC of pure dataclasses/enums/protocols into
+P5.0a creates a linear build chain: P5.0a → P5.1 → P5.2 → P5.3 → P5.4.
+Each sub-packet can be delivered and unit-tested independently; only P5.4
+requires the full chain. Types sub-packet has no logic — no guard, no
+mutation, no IO — so it has no safety contract surface to enforce.
+
 **P5.2 sizing justification:** The validator must implement 5 contract-binding
 guarantees (SAFETY_CONTRACT.md "Validator Semantics" §a–e), a 5-state return
-enum, pattern matching against ~30 individual forbidden-path bullet patterns
-across 6 named groups, self-quarantine writer on validator-miss, and per-leaf
-directory decomposition. At typical Python verbosity (type annotations,
-docstrings, error detail), 750 LOC is the realistic floor — not padded.
-If it runs over during implementation, split into `validator_core.py` (~400
-LOC: path resolution + enum + realpath/symlink/hardlink) +
-`contract_enforcer.py` (~350 LOC: pattern matching, per-leaf decomp, remote
-URL check, self-quarantine). The sub-packet boundary holds; the internal split
-is at the implementor's discretion.
+enum, Operation.READ coverage, pattern matching against ~30 individual
+forbidden-path bullet patterns across 6 named groups, post-mutation detector
+(distinct from pre-mutation FORBIDDEN_* path), and 3 operation-guard modules
+covering the 14 SAFETY_CONTRACT.md "Forbidden Actions" bullets (filesystem ops
+→ `subprocess_guard.py`; git ops → `git_operation_guard.py`; gh/PR ops →
+`gh_operation_guard.py`). Total: ~1000 LOC at the sub-packet ceiling.
+If implementation exceeds 1000 LOC, move the 3 guard modules to a new P5.2b
+sub-packet; the core validator stays in P5.2a. The ceiling is a hard constraint.
 
 **P5.4 sizing note:** Source LOC is low (~200) because P5.4 is fixture
 scaffolding and test harness only — no new production logic. The 900-LOC test
@@ -94,17 +104,34 @@ assertions. Full fixture enumeration is deferred to P5.4's own SCAFFOLD.
 
 Root: `maintenance-worker/src/maintenance_worker/`
 
+### types/ — P5.0a (shared types; no logic, no IO)
+
+```
+types/
+  operations.py   ~60 LOC  (Operation enum: READ, WRITE, MOVE, DELETE, GIT_EXEC, GH_EXEC, SUBPROCESS_EXEC)
+  results.py      ~70 LOC  (ValidatorResult, GuardResult, TickResult, ApplyResult, AckStatus)
+  specs.py        ~50 LOC  (TaskSpec, EngineConfig, InstallMetadata, ProposalManifest, RollbackRecipe)
+  modes.py        ~20 LOC  (RefusalReason enum, InvocationMode enum, ScheduleKind enum)
+```
+
+No imports from `core/`, `rules/`, or `cli/`. All other packages import from `types/`;
+`types/` imports only stdlib (`enum`, `dataclasses`, `datetime`, `pathlib`). This is
+the P5.0a → P5.1 → P5.2 → P5.3 → P5.4 build chain anchor.
+
 ### core/ — P5.1 + P5.2
 
 ```
 core/
-  engine.py            ~220 LOC
-  guards.py            ~150 LOC
-  refusal.py           ~100 LOC
-  kill_switch.py        ~80 LOC
-  validator.py         ~400 LOC
-  contract_patterns.py ~200 LOC (if P5.2 splits; else merged into validator.py)
-  evidence_writer.py   ~150 LOC
+  engine.py              ~220 LOC
+  guards.py              ~150 LOC
+  refusal.py             ~100 LOC
+  kill_switch.py          ~90 LOC  (+ post_mutation_detector)
+  validator.py           ~400 LOC
+  contract_patterns.py   ~200 LOC  (if P5.2 splits; else merged into validator.py)
+  evidence_writer.py     ~150 LOC
+  git_operation_guard.py  ~80 LOC  (Forbidden Actions: push --force, rebase, reset --hard)
+  gh_operation_guard.py  ~100 LOC  (Forbidden Actions: merge PR, approve PR, comment, close/open issues)
+  subprocess_guard.py     ~80 LOC  (Forbidden Actions: pip/npm/cargo install, pytest mutate)
 ```
 
 **engine.py** — `MaintenanceEngine`
@@ -136,8 +163,14 @@ Exit codes: one unique code per `RefusalReason` enum value (8 distinct codes).
 **kill_switch.py** — `KillSwitch`
 - `is_set(state_dir: Path) -> bool`
 - `is_paused(state_dir: Path) -> bool`
+- `is_self_quarantined(state_dir: Path) -> bool`  ← checked every tick in CHECK_GUARDS
 - `write_self_quarantine(state_dir: Path, reason: str) -> None`
-- `is_self_quarantined(state_dir: Path) -> bool`
+  Called ONLY by `post_mutation_detector()` when disk-state divergence is confirmed
+  AFTER apply. NEVER called by `validate_action()` on a pre-mutation FORBIDDEN_* catch.
+- `post_mutation_detector(apply_result: ApplyResult, manifest: ProposalManifest, state_dir: Path) -> None`
+  Compares applied filesystem diff against the allowed-write set in the manifest.
+  Any divergence → `write_self_quarantine()` + URGENT alert + non-zero exit.
+  (SAFETY_CONTRACT.md §229-238: this is the only trigger for SELF_QUARANTINE.)
 - `check_scheduler_invocation() -> InvocationMode`  ← accidental-trigger detection
   Returns `SCHEDULED | MANUAL_CLI | IN_PROCESS`. `MANUAL_CLI` forces
   `DRY_RUN_ONLY` regardless of `live_default` (SAFETY_CONTRACT.md
@@ -151,8 +184,22 @@ Public interface (each maps to one of the 5 SAFETY_CONTRACT guarantees):
 - `decompose_directory_op(dir_path: Path, op: Operation) -> list[LeafCheck]`  ← guarantee (d)
 - `check_remote_url_allowlist(remote_url: str, install_meta: InstallMetadata) -> ValidatorResult`  ← guarantee (e)
 Return enum: `ALLOWED | FORBIDDEN_PATH | FORBIDDEN_OPERATION | MISSING_PRECHECK | ALLOWED_BUT_DRY_RUN_ONLY`
-On any `FORBIDDEN_*`: write to `errors.tsv`, invoke `kill_switch.write_self_quarantine()`,
-exit non-zero. All subsequent ticks refuse until human removes `SELF_QUARANTINE`.
+Operation enum includes `READ` — guarantee (a) in SAFETY_CONTRACT.md: reads of credential
+files, `state/*.db*`, and all other Forbidden Target paths return `FORBIDDEN_PATH`, not `ALLOWED`.
+
+**Two distinct response paths — do NOT conflate (SAFETY_CONTRACT.md §138-140 vs §229-238):**
+
+Path A — validator catches violation BEFORE mutation:
+  `validate_action()` returns `FORBIDDEN_*` →
+  `RefusalModes.refuse_fatal()` for THIS tick only (writes to `errors.tsv`,
+  exits non-zero). Does NOT write `SELF_QUARANTINE`. Next tick starts clean.
+
+Path B — post-mutation detector sees violation AFTER disk state changed:
+  `post_mutation_detector(apply_result: ApplyResult, expected_manifest: ProposalManifest)`
+  in `kill_switch.py` compares applied filesystem diff against allowed-write set.
+  If divergence detected → `kill_switch.write_self_quarantine(state_dir, reason)`.
+  All future ticks call `KillSwitch.is_self_quarantined()` in CHECK_GUARDS and
+  refuse until human removes the file. Human reconciles; agent never auto-reverts.
 
 **contract_patterns.py** — `ForbiddenPatterns`
 - Defines the exhaustive forbidden-target set derived from SAFETY_CONTRACT.md
@@ -161,6 +208,36 @@ exit non-zero. All subsequent ticks refuse until human removes `SELF_QUARANTINE`
 - `match_operation(op: Operation) -> Optional[ForbiddenRule]`
 No project-specific patterns in this file; Zeus-specific extensions live in
 P6 `bindings/` and are merged at runtime into the pattern set.
+
+**git_operation_guard.py** — `GitOperationGuard`
+Covers SAFETY_CONTRACT.md "Forbidden Actions" bullets: `git push --force`,
+`git rebase`, `git reset --hard`, history rewrites, branch deletions outside
+maintenance branches.
+- `check_git_command(cmd: list[str]) -> ValidatorResult`
+  Intercepts all `subprocess` calls whose argv[0] is `git`. Returns
+  `FORBIDDEN_OPERATION` on any disallowed subcommand + flag combination.
+  Called by engine before any git subprocess; not a separate layer of
+  authorization but a specialization of `validate_action(op=Operation.GIT_EXEC)`.
+
+**gh_operation_guard.py** — `GhOperationGuard`
+Covers SAFETY_CONTRACT.md "Forbidden Actions" bullets: merge PR, approve PR,
+comment on non-maintenance PR, close/open issues, any `gh api` mutation
+beyond the maintenance-PR allowlist.
+- `check_gh_command(cmd: list[str]) -> ValidatorResult`
+  Same interception pattern as `GitOperationGuard`. Allowlist: `gh pr create`,
+  `gh pr view`, `gh api repos/.../labels` (read), `gh pr comment` on own
+  maintenance PRs only.
+
+**subprocess_guard.py** — `SubprocessGuard`
+Covers SAFETY_CONTRACT.md "Forbidden Actions" bullets: `pip install`,
+`npm install`, `cargo add`, any package install/uninstall, `pytest` invocations
+that mutate state outside the evidence dir, `chmod`, `chown`, `ln -s` across
+safety boundary, arbitrary network requests.
+- `check_subprocess(cmd: list[str]) -> ValidatorResult`
+  Allowlist of permitted subprocess patterns; all others → `FORBIDDEN_OPERATION`.
+- Note: "no Task/SendMessage/Agent tool use" (leaf-not-orchestrator) is enforced
+  at install time via `setup.py` import-time assertions — no runtime check needed
+  since those symbols do not exist in the package dependency graph.
 
 **evidence_writer.py** — `EvidenceWriter`
 - `open_trail(date: date, evidence_dir: Path) -> TrailContext`
@@ -372,10 +449,17 @@ isolation (see `test_contract_guarantees.py`). No module downstream of the
 validator may introduce a second path-authorization step — all path decisions
 go through `validate_action()`. Risk: `rules_parser.py` reading policy files
 must not try to "validate" those reads itself (they are read-only authority
-inputs; only the main validator gates write/move operations).
+inputs, explicitly in the read-allowlist; rule files are not Forbidden Targets).
 
-Verdict: **PASS if** the validator is the single, final authority on all
-filesystem mutations and no other module contains authorization logic.
+The Operation enum includes `READ` explicitly (SAFETY_CONTRACT.md §147-149:
+"READ is not exempt"). A call to open `state/*.db` for reading must pass
+through `validate_action(path, Operation.READ)` and return `FORBIDDEN_PATH`.
+`test_contract_guarantees.py` must include a probe: open `state/*.db` for
+READ → assert `FORBIDDEN_PATH` (not `ALLOWED`).
+
+Verdict: **PASS if** `validate_action()` is invoked before EVERY filesystem
+operation — READ, WRITE, MOVE, DELETE — and `Operation.READ` is a member of
+the Operation enum with correct forbidden-path coverage verified by automated test.
 
 ### Refusal modes are FATAL, not silent skip, per category?
 
@@ -432,17 +516,19 @@ Verdict: **PASS if** `grep -r "SendMessage\|AgentTool\|Task(" maintenance-worker
 
 ## Input Inconsistencies Found
 
-1. **"14 forbidden surface categories" vs. SAFETY_CONTRACT.md structure.**
-   The task brief says "14 forbidden surface categories." SAFETY_CONTRACT.md
-   structures the Forbidden Targets section into 6 named groups (source code +
-   tests, authority surfaces, runtime/state, secrets and credentials, git
-   plumbing, external system surfaces) containing approximately 30 individual
-   bullet patterns. The Forbidden Actions section adds a further 12 prohibitions.
-   Neither count equals 14. Convention used in this SCAFFOLD: "14" appears to
-   refer to the 6 Forbidden Target groups + some subset of the Forbidden Action
-   prohibitions. `contract_patterns.py` implements the exhaustive set from
-   SAFETY_CONTRACT.md verbatim; the count of 14 is not used as a magic number
-   in code.
+1. **"14 forbidden surface categories" resolved.** The task brief's "14" maps
+   to the 14 bulleted items in SAFETY_CONTRACT.md "Forbidden Actions" section
+   (lines 75-95 of the source file), not to the Forbidden Targets groups.
+   Count verified: `rm`, `git push --force`, `git rebase`, `git reset --hard`,
+   merge PR, approve PR, comment non-maintenance PR, close/open issues, pip/npm/cargo
+   install, pytest mutate, modify `.claude/scheduled_tasks.json`, trigger agent
+   (Task/SendMessage), `chmod`/`chown`, `ln -s` across boundary — 14 items exactly.
+   Of these, 8 required new coverage not previously modeled: the 3 new guard modules
+   (`git_operation_guard.py`, `gh_operation_guard.py`, `subprocess_guard.py`) cover
+   filesystem+git+gh/PR+subprocess bullets. `chmod`/`chown`/`ln -s` go into
+   `subprocess_guard.py`. Agent-trigger prohibition is enforced at install time
+   (import-time assertion, no runtime check needed). The "14" count is now fully
+   mapped in §3; no magic number appears in code.
 
 2. **ARCHIVAL_RULES.md says "9 exemption checks" (check #0 + checks 1–8);
    TASK_CATALOG.yaml says `all_8_checks_pass`.** ARCHIVAL_RULES.md §"Exemption
@@ -462,19 +548,35 @@ Verdict: **PASS if** `grep -r "SendMessage\|AgentTool\|Task(" maintenance-worker
 p5_0_completed: true
 scaffold_path: docs/operations/task_2026-05-15_p5_maintenance_worker_core/SCAFFOLD.md
 repo_placement: standalone-repo (maintenance-worker/ as pip package)
-sub_packet_count: 4 (P5.1–P5.4) + 1 optional (P5.5)
-sub_packet_max_loc: 1000  # P5.2 at 750 LOC is the largest; all within budget
-module_count: 14  # core/: 6 files; rules/: 4 files; cli/: 3 files; tests/: 1 dir
-estimated_loc_total_core: 2900  # core 1300 + rules 700 + cli 300 + P5.4 source 200 + tests 400
-estimated_loc_total_tests: 1100  # P5.4 60-fixture suite 900 + unit tests 200; defer catalog to P5.4 SCAFFOLD
+sub_packet_count: 5 (P5.0a + P5.1 + P5.2 + P5.3 + P5.4) + 1 optional (P5.5)
+sub_packet_max_loc: 1000  # P5.2 exactly at ceiling; P5.0a at 200; all within budget
+module_count: 18  # types/: 4 files; core/: 10 files; rules/: 4 files; cli/: 3 files (excl. tests dir)
+estimated_loc_total_core: 3250  # types 200 + core 1570 + rules 700 + cli 300 + P5.4 source 200 + unit tests 280
+estimated_loc_total_tests: 1350  # P5.4 60-fixture suite 900 + unit tests (types 50 + engine 250 + validator 400 + rules 300 + cli 100) = 1300 + misc 50
 zeus_identifier_leak_count: 0  # verified by §5 self-check grep; no zeus tokens in module names
-self_check_sidecar_risk: pass  # validator is sole authority; no secondary authorization path in rules_parser
-self_check_fatal_refusal: pass  # refusal.py::refuse_fatal() is FATAL for all 8 guard conditions; task-level errors are isolated
+self_check_sidecar_risk: pass  # validator is sole authority; post_mutation_detector is separate path from pre-mutation FORBIDDEN_*; no secondary authorization in rules_parser
+self_check_fatal_refusal: pass  # refusal.py::refuse_fatal() is FATAL for all 8 guard conditions; task-level errors are isolated to errors.tsv; FORBIDDEN_* from validator → refuse_fatal() not self-quarantine
+c1_c2_applied: true  # C1: Operation.READ in enum + §6 verdict; C2: two-path split (Path A refuse_fatal, Path B post_mutation_detector→self_quarantine)
+m3_recount_applied: true  # 14 Forbidden Actions mapped; 3 new guard modules added; Input Inconsistency #1 rewritten
+m5_decision: p5_0a_types  # P5.0a types sub-packet; linear build chain P5.0a→P5.1→P5.2→P5.3→P5.4
 worktree_path: /Users/leofitz/.openclaw/workspace-venus/zeus/.claude/worktrees/agent-ae1e98111aad14ffa
 input_inconsistencies_found:
-  - "14 forbidden surface categories" in brief does not match SAFETY_CONTRACT.md count (6 groups, ~30 bullets, +12 action prohibitions); contract_patterns.py implements the full SAFETY_CONTRACT.md set verbatim
-  - ARCHIVAL_RULES.md (9 checks: #0 + 1-8) vs TASK_CATALOG.yaml (all_8_checks_pass); ARCHIVAL_RULES.md is authoritative; TASK_CATALOG needs update in P6 Zeus binding
+  - '"14 forbidden surface categories" resolved: maps to 14 bulleted Forbidden Actions in SAFETY_CONTRACT.md; 3 new guard modules cover 8 previously-unmodeled bullets'
+  - 'ARCHIVAL_RULES.md (9 checks: #0 + 1-8) vs TASK_CATALOG.yaml (all_8_checks_pass); ARCHIVAL_RULES.md is authoritative; TASK_CATALOG needs update in P6 Zeus binding'
 deviations_observed:
-  - P5.2 validator budget is 750 LOC, not the implied ~500; justified by 5 contract guarantees + self-quarantine + pattern matching
-  - P5.5 (CLI) added as optional but recommended sub-packet to isolate scheduler detection from engine logic
+  - 'P5.2 grows to 1000 LOC ceiling (was 750) due to 3 new operation-guard modules covering 14 Forbidden Actions; P5.2b split available if implementation overruns'
+  - 'P5.0a types sub-packet added (200 LOC); total sub-packet count becomes 5+1opt, not 4+1opt'
+  - 'P5.5 (CLI) retained as optional but recommended'
+deferred_minors_list:
+  - M4: scheduler_detect.py duplication cosmetic (kill_switch.py + cli/scheduler_detect.py overlap)
+  - M6: Identity & Provenance unmodeled (provenance.py spec: commit author, Run-Id trailer, Generated-By header)
+  - M7: Task auto-pause after 3 failures unimplemented (failure_counter.py spec)
+  - SEV-3a: AUTO_ACK cap (bulk-ack AUTO_ACK_NEXT_N decay logic needs bounding)
+  - SEV-3b: .diff surface per proposal (evidence_writer.py needs write_proposal_diff() signature)
+  - SEV-3c: in-process heartbeat (DESIGN.md §"Scheduling Surface" in-process mode publishes heartbeat.json)
+  - SEV-3d: skills/ vs pip-package deployment surface tension
+  - SEV-3e: BATCH_DONE arithmetic (now corrected above)
+  - SEV-3f: grep-vs-import-time guard for agent-trigger (resolved in §3 subprocess_guard.py note)
+  - SEV-3g: 8-vs-9 exemption check count (see Input Inconsistency #2; deferred to P6)
+  - SEV-3h: P5.5 mandatory vs optional (critic prefers mandatory; retained as recommended-optional pending operator decision)
 ```
