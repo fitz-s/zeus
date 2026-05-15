@@ -1,6 +1,7 @@
 # Created: 2026-05-15
 # Last reused or audited: 2026-05-15
 # Authority basis: docs/operations/task_2026-05-15_p1_topology_v_next_additive/SCAFFOLD.md §1.5, §4, §5.3, §5.4
+#                  docs/operations/task_2026-05-15_p2_companion_required_mechanism/SCAFFOLD.md §3, §3.1, §3.2
 """
 Admission Engine for topology v_next.
 
@@ -19,7 +20,9 @@ Codex-importable: stdlib + PyYAML only.
 from __future__ import annotations
 
 import datetime
+import os
 import time
+from pathlib import PurePosixPath
 from typing import Any
 
 from scripts.topology_v_next.dataclasses import (
@@ -41,6 +44,8 @@ from scripts.topology_v_next.severity_overrides import (
     apply_overrides as _apply_severity_overrides_impl,
     effective_severity as _effective_severity_impl,
 )
+# P2.1: companion_skip_logger imported lazily inside _check_companion_required
+# to allow the module to be added in a subsequent commit without breaking P1.
 
 
 # ---------------------------------------------------------------------------
@@ -161,6 +166,12 @@ def admit(
     )
     all_issues.extend(composition_issues)
 
+    # Step 8b: Check companion_required (P2.1 — authority-doc gate, SCAFFOLD §3.1)
+    # Runs AFTER profile resolution so it knows the profile_id;
+    # runs BEFORE severity overrides so binding can promote missing_companion advisory.
+    companion_req_issues = _check_companion_required(profile_matched, files, binding)
+    all_issues.extend(companion_req_issues)
+
     # Step 9: Closest rejected profile (hint-driven diagnostic only)
     closest_rejected = explain_rejected(candidates, binding, hint) if profile_matched is None else None
 
@@ -231,6 +242,116 @@ def _apply_companion_loop(
 ) -> tuple[bool, str | None, IssueRecord | None]:
     """Check companion-pair cohort declarations (Universal §9)."""
     return companion_loop_break(intent, files, binding)
+
+
+def _check_companion_required(
+    profile_id: str | None,
+    files: list[str],
+    binding: BindingLayer,
+) -> list[IssueRecord]:
+    """
+    Check that every authority-doc declared in binding.companion_required[profile_id]
+    is present in the submitted files set (P2.1 SCAFFOLD §3.2).
+
+    Returns an empty list when:
+    - profile_id is None (no profile resolved; composition already flagged it)
+    - profile_id has no companion_required entries
+    - all required companion docs are present in files
+
+    Returns advisory IssueRecords (MISSING_COMPANION format) for each missing doc.
+
+    Skip-token short-circuit: if binding.companion_skip_tokens[profile_id] is set
+    AND the environment matches the token exactly, emits a companion_skip_token_used
+    ADVISORY and logs to the skip-token JSONL via companion_skip_logger.
+
+    Codex-safe: reads only binding and os.environ. No mutation of admission state.
+    Single optional side-effect (skip log) delegated to companion_skip_logger.
+    """
+    if profile_id is None:
+        return []
+
+    required_docs: tuple[str, ...] = binding.companion_required.get(profile_id, ())
+    if not required_docs:
+        return []
+
+    # Skip-token short-circuit: literal env-var match, no fuzzy (SCAFFOLD §3.2)
+    skip_token: str = binding.companion_skip_tokens.get(profile_id, "")
+    if skip_token:
+        token_key, _, token_value = skip_token.partition("=")
+        env_value = os.environ.get(token_key)
+        if env_value is not None and env_value == (token_value or "1"):
+            # Skip authorized — log to skip-token log, emit ADVISORY for visibility
+            try:
+                from scripts.topology_v_next import companion_skip_logger
+                companion_skip_logger.write_skip_event(
+                    profile=profile_id,
+                    source_files=files,
+                    expected_companions=list(required_docs),
+                    token_value=skip_token,
+                )
+            except ImportError:
+                pass  # companion_skip_logger not yet available (Commit 3)
+            return [IssueRecord(
+                code="companion_skip_token_used",
+                path=files[0] if files else "",
+                severity=Severity.ADVISORY,
+                message=(
+                    f"COMPANION_SKIP token used for profile '{profile_id}'; "
+                    f"skipped companions: {','.join(required_docs)}; logged for review."
+                ),
+                metadata={"profile": profile_id, "skipped": list(required_docs)},
+            )]
+
+    # Default path: files must include every required companion doc.
+    files_norm: set[str] = {PurePosixPath(f).as_posix() for f in files}
+    missing: list[str] = [
+        doc for doc in required_docs
+        if PurePosixPath(doc).as_posix() not in files_norm
+    ]
+    if not missing:
+        return []
+
+    # Identify source trigger: first file already assigned to profile_id
+    source_trigger = _find_source_trigger(profile_id, files, binding)
+
+    return [
+        IssueRecord(
+            code="missing_companion",
+            path=doc,
+            severity=Severity.ADVISORY,  # P2.a default; binding promotes at P2.b
+            message=(
+                f"MISSING_COMPANION profile={profile_id} "
+                f"missing_companion={doc} "
+                f"triggered_by={source_trigger}"
+            ),
+            metadata={
+                "profile": profile_id,
+                "missing_companion": doc,
+                "triggered_by": source_trigger,
+                "all_required": list(required_docs),
+            },
+        )
+        for doc in missing
+    ]
+
+
+def _find_source_trigger(
+    profile_id: str,
+    files: list[str],
+    binding: BindingLayer,
+) -> str:
+    """
+    Return the first file in *files* that is a source file for *profile_id*.
+
+    A file is a source file for profile_id when profile_id appears in the set
+    of candidate profiles resolved for that file by the coverage map.
+    Falls back to files[0] when no match, or '<no-source>' when files is empty.
+    """
+    for f in files:
+        candidates_for_file = resolve_candidates([f], binding.coverage_map)
+        if profile_id in candidates_for_file.get(f, set()):
+            return f
+    return files[0] if files else "<no-source>"
 
 
 def _apply_severity_overrides(
@@ -333,6 +454,8 @@ def _assemble_diagnosis(issues: list[IssueRecord]) -> DiagnosisEntry | None:
         "closed_packet_authority": FrictionPattern.CLOSED_PACKET_STILL_LOAD_BEARING,
         "authority_status_stale": FrictionPattern.CLOSED_PACKET_STILL_LOAD_BEARING,
         "companion_missing": FrictionPattern.UNION_SCOPE_EXPANSION,
+        "missing_companion": FrictionPattern.CLOSED_PACKET_STILL_LOAD_BEARING,
+        "companion_skip_token_used": FrictionPattern.ADVISORY_OUTPUT_INVISIBILITY,
         "hard_stop_path": FrictionPattern.CLOSED_PACKET_STILL_LOAD_BEARING,
     }
 
@@ -440,6 +563,17 @@ def _resolution_path(code: str) -> str:
         "companion_missing": (
             "Add the missing companion file to the change set, or declare a cohort "
             "override in the binding YAML."
+        ),
+        "missing_companion": (
+            "Add the named authority-doc path to the change set. The exact POSIX path "
+            "is named in the MISSING_COMPANION message. Alternatively, if the profile "
+            "declares a companion_skip_acknowledge_token, set the named env var to "
+            "the declared value to skip with audit-trail logging."
+        ),
+        "companion_skip_token_used": (
+            "The companion skip token was honored. A row has been appended to "
+            "state/companion_skip_token_log.jsonl for human review in the next "
+            "weekly digest. Ensure the authority doc is updated within 7 days."
         ),
         "hard_stop_path": (
             "Remove the protected path from the change set. "
