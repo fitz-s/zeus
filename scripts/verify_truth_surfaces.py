@@ -8,9 +8,10 @@ NOT pytest — run directly to get PASS/FAIL for each surface invariant.
 Usage:
     python scripts/verify_truth_surfaces.py
 """
-# Lifecycle: created=2026-04-07; last_reviewed=2026-05-06; last_reused=2026-05-06
+# Lifecycle: created=2026-04-07; last_reviewed=2026-05-15; last_reused=2026-05-15
 # Purpose: Diagnose truth-surface integrity, training-readiness blockers, and fact-table authority labels.
 # Reuse: Inspect docs/operations/current_data_state.md and the active packet receipt before using as closeout evidence.
+# Authority basis: docs/operations/task_2026-05-14_k1_followups/PLAN.md §4.5 (K1 broken-script remediation)
 
 from __future__ import annotations
 
@@ -40,9 +41,14 @@ from src.contracts.ensemble_snapshot_provenance import (
     TIGGE_LOW_CONTRACT_WINDOW_DATA_VERSION,
 )
 from src.config import STATE_DIR, calibration_maturity_thresholds
+from src.state.db import ZEUS_FORECASTS_DB_PATH
 
 DEFAULT_TRADE_DB = STATE_DIR / "zeus_trades.db"
-SHARED_DB = STATE_DIR / "zeus-world.db"
+# K1 split 2026-05-11: forecast-class tables (ensemble_snapshots_v2, observations,
+# settlements, settlements_v2, market_events_v2, calibration_pairs_v2) moved to
+# zeus-forecasts.db.  SHARED_DB now resolves to forecasts.db so all read-only
+# checks in this script hit the correct physical file.
+SHARED_DB = ZEUS_FORECASTS_DB_PATH
 RISK_DB = STATE_DIR / "risk_state.db"
 POSITIONS_JSON = STATE_DIR / "positions.json"
 STATUS_JSON = STATE_DIR / "status_summary.json"
