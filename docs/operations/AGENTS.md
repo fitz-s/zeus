@@ -218,6 +218,10 @@ make a surface default-read unless `current_state.md` routes it.
 | `task_2026-05-14_data_daemon_live_efficiency/FORECAST_LIVE_OPERATOR_HANDOFF.md` | packet operator handoff | Repo-only launch/verification shape for future `com.zeus.forecast-live`; not plist installation, launchctl authorization, or production deployment evidence |
 | `task_2026-05-15_data_pipeline_live_rootfix/` | plan packet container | Root-cause plan packet for live data pipeline failure: forecasts DB authority reads, source-run attribution, coverage/readiness ownership, live daemon wiring, and end-to-end proof |
 | `task_2026-05-15_data_pipeline_live_rootfix/DATA_PIPELINE_ROOTFIX_PLAN.md` | topology planning packet | Empirical live-only rootfix plan superseding the 2026-05-14 plan-only approval until live end-to-end proof exists |
+| `task_2026-05-15_live_order_e2e_verification/` | plan packet container | Live order end-to-end verification packet for forecast-live data, live reader, evaluator, executor, venue command journal, order state, and reconciliation proof |
+| `task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md` | topology planning packet | Execution plan requiring deployed-code proof, real live limit-order submission, durable command/event evidence, and post-order guard before claiming live readiness |
+| `task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_CRITIC_APPROVAL.md` | packet review evidence | Critic REVISE-to-APPROVE record for the live order E2E verification plan; approval is plan-only, not empirical live completion evidence |
+| `task_2026-05-15_live_order_e2e_verification/receipt.json` | packet receipt | Current-state freeze receipt naming the live order E2E plan as the active execution packet; not implementation closeout evidence |
 Archived packet evidence (physically moved to `docs/archives/packets/`) is
 listed in `docs/archive_registry.md`; do not re-list those packets here. When
 a packet closes and is archived, remove its row from this registry and the
