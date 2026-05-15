@@ -30,7 +30,7 @@ _REPO_ROOT = Path(__file__).parent.parent
 
 # DB writer function name patterns — functions that write to Zeus DB tables.
 # Conservative subset: functions with "write_", "insert_", "record_", "save_",
-# "_append", "_upsert", "_create", "_update" in name that take a "conn" param.
+# "_append", "_upsert", "append_", "upsert_" in name that take a "conn" param.
 _WRITER_PATTERNS = (
     "write_",
     "insert_",

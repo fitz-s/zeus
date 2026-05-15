@@ -757,8 +757,8 @@ def main():
     _startup_data_health_check(conn)
 
     # world_schema_manifest.yaml + validate_world_schema_at_boot RETIRED in P2
-    # (2026-05-14 K1 followups plan §5.5 D5). Replaced in P3 by
-    # assert_db_matches_registry(world_conn) — FATAL per INV-05 fail-closed.
+    # (2026-05-14 K1 followups plan §5.5 D5). assert_db_matches_registry() exists
+    # (src/state/table_registry.py) but boot wiring is deferred — not called here.
     conn.close()
 
     # §4.2 World schema ready sentinel gate — fail-closed (Phase 3 enforcement).

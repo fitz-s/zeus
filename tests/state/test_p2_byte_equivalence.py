@@ -76,9 +76,9 @@ class TestP2ByteEquivalence:
 
     ALLOWED delta (explicitly listed per PLAN §2):
       - Forecast-class tables (observations, settlements, calibration_pairs_v2,
-        etc.) must NOT appear in init_schema_world_only output (they moved to
-        forecasts.db in K1).
-      - Those same tables MUST appear in init_schema_forecasts output.
+        etc.) appear on world.db as legacy_archived ghost copies (per
+        architecture/db_table_ownership.yaml) and also on forecasts.db as
+        the canonical FORECAST_CLASS copy. This is by design.
       The union of both init functions must match the fixture's union.
     """
 

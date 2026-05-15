@@ -261,7 +261,11 @@ def main() -> None:
             "  1. Run PRAGMA integrity_check on zeus-world.db.\n"
             "  2. Remove LEGACY_ARCHIVED entries from architecture/db_table_ownership.yaml\n"
             "     (or leave them as documentation; assert_db_matches_registry ignores them).\n"
-            "  3. Update scripts/drop_world_ghost_tables.py status comment to COMPLETED."
+            "  3. IMPORTANT: init_schema() still contains CREATE TABLE IF NOT EXISTS for the\n"
+            "     dropped ghost tables. Until those CREATEs are removed, ingest boot will\n"
+            "     recreate empty ghost tables. Remove or gate those DDL blocks in src/state/db.py\n"
+            "     before the next ingest restart (or accept recreation and re-run this script).\n"
+            "  4. Update scripts/drop_world_ghost_tables.py status comment to COMPLETED."
         )
     finally:
         conn.close()

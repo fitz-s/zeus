@@ -5,7 +5,8 @@
 """CI hook: bidirectional set-equality between registry and init_schema output.
 
 Runs on every PR touching src/state/**, architecture/db_table_ownership.yaml,
-or architecture/world_schema_manifest.yaml.
+or src/state/table_registry.py. (architecture/world_schema_manifest.yaml was
+retired in P2 of K1 followups 2026-05-14; authority is now db_table_ownership.yaml.)
 
 Exit 0 = PASS. Exit 1 = FAIL (prints diff). Exit 2 = SETUP ERROR.
 

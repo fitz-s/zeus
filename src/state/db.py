@@ -812,9 +812,12 @@ def init_schema(
 ) -> None:
     """Create world-class Zeus tables. Idempotent.
 
-    Post-K1 split (2026-05-11): init_schema creates ONLY world-class tables.
-    Forecast-class tables (observations, settlements, source_run, *_v2) are
-    exclusively created by init_schema_forecasts on zeus-forecasts.db.
+    Post-K1 split (2026-05-11): init_schema creates world-class tables plus
+    legacy_archived ghost copies of forecast-class tables (observations,
+    settlements, source_run, *_v2) declared schema_class=legacy_archived in
+    architecture/db_table_ownership.yaml. The ghost copies are safe to drop
+    after the D2 90-day retain window (2026-08-09) via drop_world_ghost_tables.py.
+    New forecast-class tables are created by init_schema_forecasts on zeus-forecasts.db.
     The _v2_forecast_tables kwarg is RETIRED in P2; apply_v2_schema is always
     called with forecast_tables=False here (P2 DDL refactor, 2026-05-14).
 
@@ -2782,10 +2785,11 @@ def init_schema_forecasts(conn: sqlite3.Connection) -> None:
 def init_schema_world_only(conn: Optional[sqlite3.Connection] = None) -> None:
     """Create world-class tables on zeus-world.db. Idempotent.
 
-    Post-K1 split (2026-05-11): init_schema now creates ONLY world-class tables
-    (the _v2_forecast_tables kwarg is RETIRED in P2). This function is an alias
-    for init_schema() and is preserved for call-site clarity. Forecast-class
-    tables live exclusively on zeus-forecasts.db via init_schema_forecasts.
+    Post-K1 split (2026-05-11): init_schema creates world-class tables plus
+    legacy_archived ghost copies of forecast-class tables (see init_schema()
+    docstring). This function is an alias for init_schema() preserved for
+    call-site clarity. New forecast-class tables live on zeus-forecasts.db
+    via init_schema_forecasts.
 
     The world executescript block still contains settlements/observations/
     source_run CREATE IF NOT EXISTS — those are idempotent no-ops post-migration
