@@ -388,6 +388,26 @@ scripts:
     required_helpers: [src.data.executable_forecast_reader.read_executable_forecast]
     required_tests: []
     reason: "Live-only data pipeline E2E gate for forecast source_run -> coverage/readiness -> executable reader -> evaluator-cutover evidence. It reads real live DB files and process ownership, emits stdout JSON, and fails closed on shadow/legacy-owner/authority-chain gaps."
+  check_live_order_e2e.py:
+    # Created: 2026-05-15
+    # Last reused or audited: 2026-05-15
+    # Authority basis: docs/operations/task_2026-05-15_live_order_e2e_goal/LIVE_ORDER_E2E_GOAL_PLAN.md
+    class: diagnostic
+    lifecycle: long_lived
+    status: active
+    authority_scope: diagnostic_non_promotion
+    canonical_command: "python3 scripts/check_live_order_e2e.py --json"
+    read_targets: [state/zeus_trades.db, state/zeus-world.db, state/zeus-forecasts.db]
+    write_targets: [stdout]
+    dry_run_default: true
+    apply_flag: null
+    target_db: null
+    external_inputs: [live_runtime_dbs]
+    dangerous_if_run: false
+    promotion_barrier: "Read-only live-order evidence checker; cannot submit/cancel orders, mutate DB truth, or treat rejected/unknown venue outcomes as placed-order completion."
+    required_helpers: [scripts.check_data_pipeline_live_e2e._connect_live_readonly]
+    required_tests: [tests/test_check_live_order_e2e.py]
+    reason: "Classifies existing venue_commands, venue_command_events, submission envelopes, order facts, and trade facts. It fails closed unless an accepted/resting or filled command has daemon-to-command correlation fields, venue order identity, live venue facts, and matching record-chain proof."
   check_daemon_heartbeat.py:
     class: runtime_support
     module_owner: scripts

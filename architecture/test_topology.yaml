@@ -262,6 +262,7 @@ test_trust_policy:
     tests/test_ecmwf_open_data_subprocess_hardening.py: {created: "2026-05-08", last_used: "2026-05-14"}
     tests/test_forecast_live_daemon.py: {created: "2026-05-14", last_used: "2026-05-14"}
     tests/test_check_data_pipeline_live_e2e.py: {created: "2026-05-15", last_used: "2026-05-15"}
+    tests/test_check_live_order_e2e.py: {created: "2026-05-15", last_used: "2026-05-15"}
 
 categories:
   core_law_antibody:
@@ -711,6 +712,7 @@ law_gate:
       - tests/test_ecmwf_open_data_subprocess_hardening.py
       - tests/test_forecast_live_daemon.py
       - tests/test_check_data_pipeline_live_e2e.py
+      - tests/test_check_live_order_e2e.py
       - tests/test_ecmwf_open_data_step_hours.py
       - tests/test_forecast_target_contract_horizon.py
       - tests/test_producer_readiness_builder.py
@@ -733,6 +735,7 @@ law_gate:
       - scripts/ingest_grib_to_snapshots.py
       - scripts/healthcheck.py
       - scripts/check_data_pipeline_live_e2e.py
+      - scripts/check_live_order_e2e.py
       - src/ingest/forecast_live_daemon.py
       - src/data/ecmwf_open_data.py
       - src/data/producer_readiness.py
