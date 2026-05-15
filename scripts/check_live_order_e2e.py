@@ -18,6 +18,7 @@ import argparse
 import json
 import sqlite3
 from dataclasses import asdict, dataclass
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
@@ -39,6 +40,12 @@ REJECTED_OR_UNKNOWN_STATES = frozenset(
 )
 ACCEPTED_EVENT_TYPES = frozenset(
     {"POST_ACKED", "SUBMIT_ACKED", "PARTIAL_FILL_OBSERVED", "FILL_CONFIRMED"}
+)
+LIVE_PROOF_SOURCES = frozenset({"REST", "WS_USER", "WS_MARKET", "DATA_API", "CHAIN"})
+FILL_ORDER_FACT_STATES = frozenset({"MATCHED", "PARTIALLY_MATCHED"})
+FILL_TRADE_FACT_STATES = frozenset({"MATCHED", "MINED", "CONFIRMED"})
+FILLED_POSITION_PHASES = frozenset(
+    {"active", "day0_window", "pending_exit", "economically_closed", "settled"}
 )
 
 
@@ -163,14 +170,120 @@ def _facts(conn: sqlite3.Connection, table: str, command_id: str) -> list[dict[s
     ]
 
 
-def _has_matching_order_fact(order_facts: list[dict[str, Any]], order_id: str) -> bool:
-    if not order_facts:
+def _positive_decimal(value: Any) -> bool:
+    try:
+        return Decimal(str(value)) > 0
+    except (InvalidOperation, TypeError, ValueError):
         return False
+
+
+def _live_source(value: Any) -> bool:
+    return str(value or "").upper() in LIVE_PROOF_SOURCES
+
+
+def _matching_live_order_facts(order_facts: list[dict[str, Any]], order_id: str) -> list[dict[str, Any]]:
     if not order_id:
+        return []
+    return [
+        fact
+        for fact in order_facts
+        if str(fact.get("venue_order_id") or "") == order_id and _live_source(fact.get("source"))
+    ]
+
+
+def _matching_live_trade_facts(trade_facts: list[dict[str, Any]], order_id: str) -> list[dict[str, Any]]:
+    if not order_id:
+        return []
+    return [
+        fact
+        for fact in trade_facts
+        if str(fact.get("venue_order_id") or "") == order_id
+        and str(fact.get("state") or "") in FILL_TRADE_FACT_STATES
+        and _live_source(fact.get("source"))
+        and _positive_decimal(fact.get("filled_size"))
+        and _positive_decimal(fact.get("fill_price"))
+    ]
+
+
+def _position_events(conn: sqlite3.Connection, command_id: str, order_id: str) -> list[dict[str, Any]]:
+    if not _table_exists(conn, "position_events"):
+        return []
+    cols = _columns(conn, "position_events")
+    clauses: list[str] = []
+    params: list[str] = []
+    if command_id and "command_id" in cols:
+        clauses.append("command_id = ?")
+        params.append(command_id)
+    if order_id and "order_id" in cols:
+        clauses.append("order_id = ?")
+        params.append(order_id)
+    if not clauses:
+        return []
+    order_column = "sequence_no" if "sequence_no" in cols else "rowid"
+    return [
+        dict(row)
+        for row in conn.execute(
+            f"SELECT * FROM position_events WHERE {' OR '.join(clauses)} ORDER BY {order_column} ASC",
+            tuple(params),
+        )
+    ]
+
+
+def _position_current(
+    conn: sqlite3.Connection,
+    order_id: str,
+    position_ids: set[str],
+) -> list[dict[str, Any]]:
+    if not _table_exists(conn, "position_current"):
+        return []
+    cols = _columns(conn, "position_current")
+    clauses: list[str] = []
+    params: list[str] = []
+    if order_id and "order_id" in cols:
+        clauses.append("order_id = ?")
+        params.append(order_id)
+    if position_ids and "position_id" in cols:
+        placeholders = ", ".join("?" for _ in position_ids)
+        clauses.append(f"position_id IN ({placeholders})")
+        params.extend(sorted(position_ids))
+    if not clauses:
+        return []
+    return [
+        dict(row)
+        for row in conn.execute(
+            f"SELECT * FROM position_current WHERE {' OR '.join(clauses)}",
+            tuple(params),
+        )
+    ]
+
+
+def _matching_fill_position_events(events: list[dict[str, Any]], order_id: str) -> list[dict[str, Any]]:
+    return [
+        event
+        for event in events
+        if str(event.get("event_type") or "") == "ENTRY_ORDER_FILLED"
+        and (not order_id or str(event.get("order_id") or "") == order_id)
+        and str(event.get("env") or "live") == "live"
+    ]
+
+
+def _has_matching_position_current(
+    fill_events: list[dict[str, Any]],
+    current_rows: list[dict[str, Any]],
+    order_id: str,
+) -> bool:
+    position_ids = {str(event.get("position_id") or "") for event in fill_events if event.get("position_id")}
+    if not position_ids:
         return False
-    if "venue_order_id" not in order_facts[0]:
+    for row in current_rows:
+        if str(row.get("position_id") or "") not in position_ids:
+            continue
+        if order_id and str(row.get("order_id") or "") != order_id:
+            continue
+        if str(row.get("phase") or "") not in FILLED_POSITION_PHASES:
+            continue
         return True
-    return any(str(fact.get("venue_order_id") or "") == order_id for fact in order_facts)
+    return False
 
 
 def _order_identity(
@@ -226,6 +339,25 @@ def evaluate(conn: sqlite3.Connection, command_id: str | None = None) -> dict[st
     trade_facts = _facts(conn, "venue_trade_facts", cmd_id)
     event_types = {str(event.get("event_type") or "") for event in events}
     order_id = _order_identity(command, events, envelopes)
+    matching_order_facts = _matching_live_order_facts(order_facts, order_id)
+    matching_trade_facts = _matching_live_trade_facts(trade_facts, order_id)
+    position_events = _position_events(conn, cmd_id, order_id)
+    position_ids = {
+        str(event.get("position_id") or "")
+        for event in position_events
+        if event.get("position_id")
+    }
+    position_current = _position_current(conn, order_id, position_ids)
+    fill_position_events = _matching_fill_position_events(position_events, order_id)
+    position_tables_present = _table_exists(conn, "position_events") and _table_exists(
+        conn, "position_current"
+    )
+    fill_observed = (
+        state in FILLED_COMMAND_STATES
+        or bool(matching_trade_facts)
+        or bool(event_types & {"PARTIAL_FILL_OBSERVED", "FILL_CONFIRMED"})
+        or any(str(fact.get("state") or "") in FILL_ORDER_FACT_STATES for fact in matching_order_facts)
+    )
 
     checks.append(Check("command_present", "PASS", f"command_id={cmd_id} state={state}"))
     checks.append(
@@ -263,27 +395,76 @@ def evaluate(conn: sqlite3.Connection, command_id: str | None = None) -> dict[st
     checks.append(
         Check(
             "venue_order_fact_present",
-            "PASS" if _has_matching_order_fact(order_facts, order_id) else "FAIL",
-            f"count={len(order_facts)} order_id={order_id or 'missing'}",
+            "PASS" if matching_order_facts else "FAIL",
+            (
+                f"live_count={len(matching_order_facts)} total_count={len(order_facts)} "
+                f"order_id={order_id or 'missing'}"
+            ),
+        )
+    )
+    checks.append(
+        Check(
+            "position_tables_present",
+            "PASS" if position_tables_present else "FAIL",
+            f"position_events={_table_exists(conn, 'position_events')} "
+            f"position_current={_table_exists(conn, 'position_current')}",
         )
     )
 
+    if fill_observed:
+        checks.append(
+            Check(
+                "venue_trade_fact_present",
+                "PASS" if matching_trade_facts else "FAIL",
+                f"live_count={len(matching_trade_facts)} total_count={len(trade_facts)}",
+            )
+        )
+        checks.append(
+            Check(
+                "position_fill_event_present",
+                "PASS" if fill_position_events else "FAIL",
+                f"count={len(fill_position_events)}",
+            )
+        )
+        checks.append(
+            Check(
+                "position_current_projection_present",
+                "PASS"
+                if _has_matching_position_current(fill_position_events, position_current, order_id)
+                else "FAIL",
+                f"count={len(position_current)}",
+            )
+        )
+    else:
+        checks.append(
+            Check(
+                "no_position_without_fill",
+                "PASS" if position_tables_present and not position_events and not position_current else "FAIL",
+                f"position_events={len(position_events)} position_current={len(position_current)}",
+            )
+        )
+
     failed_check_names = {check.name for check in checks if check.status == "FAIL"}
-    accepted = state in ACCEPTED_COMMAND_STATES and not failed_check_names
-    filled = state in FILLED_COMMAND_STATES or bool(trade_facts)
-    category = "LIVE_ORDER_SUBMITTED" if accepted else "NO_LIVE_ORDER_PROOF"
+    complete = state in ACCEPTED_COMMAND_STATES and not failed_check_names
+    category = (
+        "LIVE_ORDER_FILLED"
+        if complete and fill_observed
+        else "LIVE_ORDER_SUBMITTED"
+        if complete
+        else "NO_LIVE_ORDER_PROOF"
+    )
     if (
         state in ACCEPTED_COMMAND_STATES
         and order_id
         and failed_check_names == {"venue_order_fact_present"}
     ):
         category = "LIVE_ORDER_ACKED_MISSING_ORDER_FACT"
+    if state in ACCEPTED_COMMAND_STATES and fill_observed and failed_check_names:
+        category = "LIVE_ORDER_FILL_MISSING_POSITION_PROOF"
     if state in REJECTED_OR_UNKNOWN_STATES:
         category = "LIVE_ORDER_REJECTED_OR_UNKNOWN_RECORDED"
-    if accepted and filled:
-        category = "LIVE_ORDER_FILLED"
     return {
-        "status": "PASS" if accepted else "FAIL",
+        "status": "PASS" if complete else "FAIL",
         "completion_category": category,
         "checks": [asdict(check) for check in checks],
         "command": command,
@@ -292,6 +473,8 @@ def evaluate(conn: sqlite3.Connection, command_id: str | None = None) -> dict[st
         "venue_order_id": order_id,
         "venue_order_facts": order_facts,
         "venue_trade_facts": trade_facts,
+        "position_events": position_events,
+        "position_current": position_current,
     }
 
 

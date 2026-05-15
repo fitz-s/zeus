@@ -62,14 +62,34 @@ def _schema(conn: sqlite3.Connection) -> None:
           fact_id TEXT PRIMARY KEY,
           command_id TEXT NOT NULL,
           venue_order_id TEXT,
+          source TEXT,
           observed_at TEXT,
           state TEXT
         );
         CREATE TABLE venue_trade_facts (
           fact_id TEXT PRIMARY KEY,
           command_id TEXT NOT NULL,
+          venue_order_id TEXT,
+          trade_id TEXT,
+          source TEXT,
+          filled_size TEXT,
+          fill_price TEXT,
           observed_at TEXT,
           state TEXT
+        );
+        CREATE TABLE position_events (
+          event_id TEXT PRIMARY KEY,
+          position_id TEXT NOT NULL,
+          sequence_no INTEGER,
+          event_type TEXT NOT NULL,
+          command_id TEXT,
+          order_id TEXT,
+          env TEXT
+        );
+        CREATE TABLE position_current (
+          position_id TEXT PRIMARY KEY,
+          phase TEXT NOT NULL,
+          order_id TEXT
         );
         """
     )
@@ -128,15 +148,64 @@ def _insert_pre_submit_envelope(conn: sqlite3.Connection, *, order_id: str | Non
     )
 
 
-def _insert_order_fact(conn: sqlite3.Connection, *, command_id: str = "cmd-1", order_id: str = "order-1") -> None:
+def _insert_order_fact(
+    conn: sqlite3.Connection,
+    *,
+    command_id: str = "cmd-1",
+    order_id: str = "order-1",
+    source: str = "REST",
+    state: str = "RESTING",
+) -> None:
     conn.execute(
         """
         INSERT INTO venue_order_facts (
-          fact_id, command_id, venue_order_id, observed_at, state
+          fact_id, command_id, venue_order_id, source, observed_at, state
         )
-        VALUES ('fact-1', ?, ?, '2026-05-15T12:00:03Z', 'RESTING')
+        VALUES ('fact-1', ?, ?, ?, '2026-05-15T12:00:03Z', ?)
         """,
-        (command_id, order_id),
+        (command_id, order_id, source, state),
+    )
+
+
+def _insert_trade_fact(
+    conn: sqlite3.Connection,
+    *,
+    command_id: str = "cmd-1",
+    order_id: str = "order-1",
+    trade_id: str = "trade-1",
+    source: str = "REST",
+    state: str = "MATCHED",
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO venue_trade_facts (
+          fact_id, command_id, venue_order_id, trade_id, source, filled_size,
+          fill_price, observed_at, state
+        )
+        VALUES ('trade-fact-1', ?, ?, ?, ?, '10.00', '0.42',
+                '2026-05-15T12:00:04Z', ?)
+        """,
+        (command_id, order_id, trade_id, source, state),
+    )
+
+
+def _insert_position_fill(conn: sqlite3.Connection, *, order_id: str = "order-1") -> None:
+    conn.execute(
+        """
+        INSERT INTO position_events (
+          event_id, position_id, sequence_no, event_type, command_id, order_id, env
+        )
+        VALUES ('pos-1:entry_order_filled', 'pos-1', 3, 'ENTRY_ORDER_FILLED',
+                NULL, ?, 'live')
+        """,
+        (order_id,),
+    )
+    conn.execute(
+        """
+        INSERT INTO position_current (position_id, phase, order_id)
+        VALUES ('pos-1', 'active', ?)
+        """,
+        (order_id,),
     )
 
 
@@ -183,14 +252,34 @@ def _schema_current(conn: sqlite3.Connection) -> None:
           fact_id TEXT PRIMARY KEY,
           command_id TEXT NOT NULL,
           venue_order_id TEXT,
+          source TEXT,
           observed_at TEXT,
           state TEXT
         );
         CREATE TABLE venue_trade_facts (
           fact_id TEXT PRIMARY KEY,
           command_id TEXT NOT NULL,
+          venue_order_id TEXT,
+          trade_id TEXT,
+          source TEXT,
+          filled_size TEXT,
+          fill_price TEXT,
           observed_at TEXT,
           state TEXT
+        );
+        CREATE TABLE position_events (
+          event_id TEXT PRIMARY KEY,
+          position_id TEXT NOT NULL,
+          sequence_no INTEGER,
+          event_type TEXT NOT NULL,
+          command_id TEXT,
+          order_id TEXT,
+          env TEXT
+        );
+        CREATE TABLE position_current (
+          position_id TEXT PRIMARY KEY,
+          phase TEXT NOT NULL,
+          order_id TEXT
         );
         """
     )
@@ -272,9 +361,9 @@ def test_current_schema_envelope_id_link_passes(tmp_path):
         conn.execute(
             """
             INSERT INTO venue_order_facts (
-              fact_id, command_id, venue_order_id, observed_at, state
+              fact_id, command_id, venue_order_id, source, observed_at, state
             )
-            VALUES ('fact-current-1', 'cmd-current-1', 'order-current-1',
+            VALUES ('fact-current-1', 'cmd-current-1', 'order-current-1', 'WS_USER',
                     '2026-05-15T12:00:03Z', 'RESTING')
             """
         )
@@ -305,6 +394,118 @@ def test_accepted_ack_without_order_fact_is_not_completion(tmp_path):
     assert result["completion_category"] == "LIVE_ORDER_ACKED_MISSING_ORDER_FACT"
     assert any(
         check["name"] == "venue_order_fact_present" and check["status"] == "FAIL"
+        for check in result["checks"]
+    )
+
+
+def test_fake_venue_order_fact_is_not_completion(tmp_path):
+    module = _load_module()
+    db = tmp_path / "trades.db"
+    with sqlite3.connect(db) as conn:
+        conn.row_factory = sqlite3.Row
+        _schema(conn)
+        _insert_command(conn)
+        _insert_submit_requested(conn)
+        _insert_submit_acked(conn)
+        _insert_pre_submit_envelope(conn)
+        _insert_order_fact(conn, source="FAKE_VENUE")
+
+    with module._connect_readonly(db) as conn:
+        result = module.evaluate(conn, "cmd-1")
+
+    assert result["status"] == "FAIL"
+    assert result["completion_category"] == "LIVE_ORDER_ACKED_MISSING_ORDER_FACT"
+    assert any(
+        check["name"] == "venue_order_fact_present" and check["status"] == "FAIL"
+        for check in result["checks"]
+    )
+
+
+def test_order_fact_order_id_mismatch_is_not_completion(tmp_path):
+    module = _load_module()
+    db = tmp_path / "trades.db"
+    with sqlite3.connect(db) as conn:
+        conn.row_factory = sqlite3.Row
+        _schema(conn)
+        _insert_command(conn)
+        _insert_submit_requested(conn)
+        _insert_submit_acked(conn)
+        _insert_pre_submit_envelope(conn)
+        _insert_order_fact(conn, order_id="other-order")
+
+    with module._connect_readonly(db) as conn:
+        result = module.evaluate(conn, "cmd-1")
+
+    assert result["status"] == "FAIL"
+    assert result["completion_category"] == "LIVE_ORDER_ACKED_MISSING_ORDER_FACT"
+
+
+def test_fill_fact_without_position_projection_is_not_completion(tmp_path):
+    module = _load_module()
+    db = tmp_path / "trades.db"
+    with sqlite3.connect(db) as conn:
+        conn.row_factory = sqlite3.Row
+        _schema(conn)
+        _insert_command(conn, state="FILLED")
+        _insert_submit_requested(conn)
+        _insert_submit_acked(conn)
+        _insert_pre_submit_envelope(conn)
+        _insert_order_fact(conn, state="MATCHED")
+        _insert_trade_fact(conn)
+
+    with module._connect_readonly(db) as conn:
+        result = module.evaluate(conn, "cmd-1")
+
+    assert result["status"] == "FAIL"
+    assert result["completion_category"] == "LIVE_ORDER_FILL_MISSING_POSITION_PROOF"
+    assert any(
+        check["name"] == "position_fill_event_present" and check["status"] == "FAIL"
+        for check in result["checks"]
+    )
+
+
+def test_fill_completion_requires_trade_fact_and_position_projection(tmp_path):
+    module = _load_module()
+    db = tmp_path / "trades.db"
+    with sqlite3.connect(db) as conn:
+        conn.row_factory = sqlite3.Row
+        _schema(conn)
+        _insert_command(conn, state="FILLED")
+        _insert_submit_requested(conn)
+        _insert_submit_acked(conn)
+        _insert_pre_submit_envelope(conn)
+        _insert_order_fact(conn, state="MATCHED")
+        _insert_trade_fact(conn)
+        _insert_position_fill(conn)
+
+    with module._connect_readonly(db) as conn:
+        result = module.evaluate(conn, "cmd-1")
+
+    assert result["status"] == "PASS"
+    assert result["completion_category"] == "LIVE_ORDER_FILLED"
+
+
+def test_fake_venue_trade_fact_is_not_fill_completion(tmp_path):
+    module = _load_module()
+    db = tmp_path / "trades.db"
+    with sqlite3.connect(db) as conn:
+        conn.row_factory = sqlite3.Row
+        _schema(conn)
+        _insert_command(conn, state="FILLED")
+        _insert_submit_requested(conn)
+        _insert_submit_acked(conn)
+        _insert_pre_submit_envelope(conn)
+        _insert_order_fact(conn, state="MATCHED")
+        _insert_trade_fact(conn, source="FAKE_VENUE")
+        _insert_position_fill(conn)
+
+    with module._connect_readonly(db) as conn:
+        result = module.evaluate(conn, "cmd-1")
+
+    assert result["status"] == "FAIL"
+    assert result["completion_category"] == "LIVE_ORDER_FILL_MISSING_POSITION_PROOF"
+    assert any(
+        check["name"] == "venue_trade_fact_present" and check["status"] == "FAIL"
         for check in result["checks"]
     )
 
