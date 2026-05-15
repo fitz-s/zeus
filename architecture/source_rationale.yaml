@@ -1484,6 +1484,20 @@ files:
     - DERIVED_ONLY
     downstream:
     - src/engine/ddd_wiring.py
+  src/oracle/ddd_artifacts/v2_city_floors.json:
+    zone: K3_extension
+    authority_role: oracle_density_discount_runtime_config
+    why: Source-controlled runtime DDD v2 city floor artifact, promoted from the 2026-05-03 DDD packet so live code no longer depends on cleanup-prone docs/operations outputs.
+    downstream:
+    - src/oracle/data_density_discount.py
+    - src/engine/ddd_wiring.py
+  src/oracle/ddd_artifacts/v2_nstar.json:
+    zone: K3_extension
+    authority_role: oracle_density_discount_runtime_config
+    why: Source-controlled runtime DDD v2 N-star artifact, promoted from the 2026-05-03 DDD packet so live code no longer depends on cleanup-prone docs/operations outputs.
+    downstream:
+    - src/oracle/data_density_discount.py
+    - src/engine/ddd_wiring.py
   src/strategy/AGENTS.md:
     zone: docs
     authority_role: registry
