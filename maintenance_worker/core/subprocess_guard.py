@@ -101,6 +101,9 @@ _DELEGATED_COMMANDS: frozenset[str] = frozenset({"git", "gh"})
 _PYTEST_COMMANDS: frozenset[str] = frozenset({"pytest", "py.test"})
 
 # Allowed read-only tools (non-exhaustive allowlist; anything not blocked).
+# REMOVED escape hatches: env (wrapper execution), xargs (wrapper execution),
+# tee (writes to arbitrary paths), sed (has -i in-place mutation flag).
+# awk is retained (no in-place mutation flag; output always to stdout).
 _ALLOWED_COMMANDS: frozenset[str] = frozenset(
     {
         "python",
@@ -117,18 +120,14 @@ _ALLOWED_COMMANDS: frozenset[str] = frozenset(
         "echo",
         "date",
         "which",
-        "env",
         "true",
         "false",
         "test",
         "printf",
         "awk",
-        "sed",
         "tr",
         "cut",
         "uniq",
-        "tee",
-        "xargs",
         "du",
         "df",
         "stat",
@@ -144,6 +143,9 @@ _ALLOWED_COMMANDS: frozenset[str] = frozenset(
         "uptime",
     }
 )
+
+# sed in-place flags — block mutation forms; read-only (stdout) forms are allowed.
+_SED_INPLACE_FLAGS: frozenset[str] = frozenset({"-i", "--in-place"})
 
 # Blocked pytest flags — these mutate state outside the evidence dir.
 _PYTEST_BLOCKED_FLAGS: frozenset[str] = frozenset(
@@ -248,6 +250,57 @@ def _is_package_manager_blocked(cmd: str, argv: list[str]) -> bool:
     return subcommand in _PACKAGE_MANAGER_BLOCKED_SUBCOMMANDS
 
 
+def _check_env_argv(argv: list[str]) -> ValidatorResult:
+    """
+    Handle 'env' invocations by recursing on the inner command.
+
+    env can be called as:
+      env VAR=VAL ... COMMAND [ARGS...]   — skip VAR=VAL tokens, recurse on COMMAND
+      env -i VAR=VAL ... COMMAND [ARGS...]
+      env COMMAND [ARGS...]               — no VAR=VAL prefix
+
+    If no inner command is present (bare 'env' or 'env VAR=VAL'), returns ALLOWED
+    (read-only: prints environment). If an inner command is found, recurse into
+    check_subprocess to evaluate it — this prevents 'env rm /' escaping the guard.
+    """
+    inner: list[str] = []
+    i = 1
+    while i < len(argv):
+        token = argv[i]
+        # Skip env-specific flags (-i, --ignore-environment, -u/--unset VAR, etc.)
+        if token in {"-i", "--ignore-environment"}:
+            i += 1
+            continue
+        if token in {"-u", "--unset"}:
+            i += 2  # skip next token (the var name)
+            continue
+        if token.startswith("-u") or token.startswith("--unset="):
+            i += 1
+            continue
+        # VAR=VAL — env variable assignment, skip
+        if "=" in token and not token.startswith("-"):
+            i += 1
+            continue
+        # First non-flag, non-assignment token is the inner command
+        inner = argv[i:]
+        break
+        i += 1  # unreachable; satisfies linter
+
+    if not inner:
+        # bare env or env with only VAR=VAL — safe (prints environment)
+        return ValidatorResult.ALLOWED
+
+    # Recurse: evaluate inner command against the same guard
+    return check_subprocess(inner)
+
+
+def _is_sed_mutating(argv: list[str]) -> bool:
+    """
+    Return True if this sed invocation uses in-place mutation flags (-i/--in-place).
+    """
+    return _argv_has_flag(argv, _SED_INPLACE_FLAGS)
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -305,6 +358,16 @@ def check_subprocess(argv: list[str]) -> ValidatorResult:
     # python -m pytest — same rule.
     if _is_python_pytest_invocation(argv):
         if _is_pytest_mutating(argv):
+            return ValidatorResult.FORBIDDEN_OPERATION
+        return ValidatorResult.ALLOWED
+
+    # env — allowed only for read-only inner command; recurse to evaluate.
+    if cmd == "env":
+        return _check_env_argv(argv)
+
+    # sed — allowed in read-only (stdout) form; in-place mutation (-i) is blocked.
+    if cmd == "sed":
+        if _is_sed_mutating(argv):
             return ValidatorResult.FORBIDDEN_OPERATION
         return ValidatorResult.ALLOWED
 

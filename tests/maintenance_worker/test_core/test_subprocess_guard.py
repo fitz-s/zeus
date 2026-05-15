@@ -307,3 +307,97 @@ def test_make_blocked() -> None:
 
 def test_docker_blocked() -> None:
     assert check_subprocess(["docker", "run", "image"]) == FORBIDDEN
+
+
+# ---------------------------------------------------------------------------
+# SEV-1 #3 adversarial tests — escape hatch closures
+# ---------------------------------------------------------------------------
+
+
+class TestSev1EnvRecursion:
+    """
+    env wraps an inner command; the inner command must be evaluated by
+    check_subprocess. Without this, 'env rm -rf /' bypasses the rm block.
+    """
+
+    def test_env_rm_blocked(self) -> None:
+        assert check_subprocess(["env", "rm", "/tmp/x"]) == FORBIDDEN
+
+    def test_env_var_then_rm_blocked(self) -> None:
+        assert check_subprocess(["env", "FOO=bar", "rm", "/"]) == FORBIDDEN
+
+    def test_env_ignore_env_then_rm_blocked(self) -> None:
+        assert check_subprocess(["env", "-i", "rm", "/tmp/x"]) == FORBIDDEN
+
+    def test_env_unset_then_rm_blocked(self) -> None:
+        assert check_subprocess(["env", "-u", "PATH", "rm", "/etc/hosts"]) == FORBIDDEN
+
+    def test_env_chmod_blocked(self) -> None:
+        assert check_subprocess(["env", "chmod", "777", "/etc/hosts"]) == FORBIDDEN
+
+    def test_env_curl_blocked(self) -> None:
+        assert check_subprocess(["env", "curl", "https://evil.com"]) == FORBIDDEN
+
+    def test_env_pip_install_blocked(self) -> None:
+        assert check_subprocess(["env", "pip", "install", "malware"]) == FORBIDDEN
+
+    def test_env_bare_allowed(self) -> None:
+        """bare 'env' with no inner command prints environment — safe."""
+        assert check_subprocess(["env"]) == ALLOWED
+
+    def test_env_var_only_allowed(self) -> None:
+        """'env VAR=val' with no inner command — safe."""
+        assert check_subprocess(["env", "FOO=bar"]) == ALLOWED
+
+    def test_env_ls_allowed(self) -> None:
+        assert check_subprocess(["env", "ls", "/tmp"]) == ALLOWED
+
+    def test_env_python_allowed(self) -> None:
+        assert check_subprocess(["env", "python3", "script.py"]) == ALLOWED
+
+    def test_env_grep_allowed(self) -> None:
+        assert check_subprocess(["env", "LANG=C", "grep", "pattern", "file"]) == ALLOWED
+
+
+class TestSev1XargsTeeRemoved:
+    """
+    xargs and tee were removed from _ALLOWED_COMMANDS.
+    xargs wraps arbitrary commands; tee writes to arbitrary paths.
+    """
+
+    def test_xargs_blocked(self) -> None:
+        assert check_subprocess(["xargs", "rm"]) == FORBIDDEN
+
+    def test_xargs_bare_blocked(self) -> None:
+        assert check_subprocess(["xargs"]) == FORBIDDEN
+
+    def test_tee_blocked(self) -> None:
+        assert check_subprocess(["tee", "/etc/passwd"]) == FORBIDDEN
+
+    def test_tee_bare_blocked(self) -> None:
+        assert check_subprocess(["tee"]) == FORBIDDEN
+
+
+class TestSev1SedInplace:
+    """
+    sed -i / --in-place is a mutation form; read-only (stdout) sed is allowed.
+    """
+
+    def test_sed_inplace_short_blocked(self) -> None:
+        assert check_subprocess(["sed", "-i", "s/a/b/", "/etc/hosts"]) == FORBIDDEN
+
+    def test_sed_inplace_long_blocked(self) -> None:
+        assert check_subprocess(["sed", "--in-place", "s/a/b/", "file.txt"]) == FORBIDDEN
+
+    def test_sed_inplace_equals_form_blocked(self) -> None:
+        assert check_subprocess(["sed", "--in-place=.bak", "s/a/b/", "file.txt"]) == FORBIDDEN
+
+    def test_sed_read_only_allowed(self) -> None:
+        """sed without -i writes to stdout — read-only form."""
+        assert check_subprocess(["sed", "s/a/b/", "file.txt"]) == ALLOWED
+
+    def test_sed_n_flag_allowed(self) -> None:
+        assert check_subprocess(["sed", "-n", "p", "file.txt"]) == ALLOWED
+
+    def test_sed_no_args_allowed(self) -> None:
+        assert check_subprocess(["sed"]) == ALLOWED
