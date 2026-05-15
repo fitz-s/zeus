@@ -304,19 +304,21 @@ def _k2_hole_scanner_tick():
     """
     from src.data.dual_run_lock import acquire_lock
     from src.data.hole_scanner import HoleScanner
-    from src.state.db import get_world_connection
+    from src.state.db import get_world_connection, get_forecasts_connection
     with acquire_lock("hole_scanner") as acquired:
         if not acquired:
             logger.info("ingest k2_hole_scanner_tick skipped_lock_held")
             return
         conn = get_world_connection(write_class="bulk")
+        forecasts_conn = get_forecasts_connection()
         try:
-            scanner = HoleScanner(conn)
+            scanner = HoleScanner(conn, forecasts_conn=forecasts_conn)
             results = scanner.scan_all()
             for r in results:
                 logger.info("K2 hole_scanner %s: %s", r.data_table.value, r.as_dict())
         finally:
             conn.close()
+            forecasts_conn.close()
 
 
 # Staleness threshold for boot-time force-fetch.  A once-per-day cron

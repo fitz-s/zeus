@@ -85,8 +85,10 @@ def test_settlement_readers_filter_verified_authority_before_downstream_use():
     assert replay_source.count("authority = 'VERIFIED'") >= 4
     assert "AND authority = 'VERIFIED' LIMIT 1" in monitor_source
     # harvester.py filters at application layer (.upper() != "VERIFIED") rather
-    # than SQL layer; assert the guard exists in either form.
-    assert "VERIFIED" in harvester_source
+    # than SQL layer; assert the specific guard pattern exists.
+    assert '.upper() != "VERIFIED"' in harvester_source or \
+        ".upper() != 'VERIFIED'" in harvester_source, \
+        "harvester.py application-layer VERIFIED guard not found"
 
 
 def test_operator_scripts_filter_verified_settlement_rows_before_outputs_or_backfills():

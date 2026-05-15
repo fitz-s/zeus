@@ -369,6 +369,10 @@ class TestA8NoCrossDbWriteTransaction:
             # Authority: docs/operations/task_2026-05-14_k1_followups/PLAN.md §2 P3 C4;
             #   IMPLEMENTATION_REVIEW_P3 N1 — narrowed from whole-file to per-function in P4.
             "src/data/hole_scanner.py::main",
+            # _k2_hole_scanner_tick: same pattern as hole_scanner.main() — world_conn for
+            # data_coverage WRITES, forecasts_conn for DataTable.OBSERVATIONS SELECT only.
+            # Fixed in PR #116 review (bot ID 3246232548): pass forecasts_conn to HoleScanner.
+            "src/ingest_main.py::_k2_hole_scanner_tick",
         }
 
         violations: list[str] = []

@@ -84,9 +84,11 @@ _GHOST_TABLES = [
 # Sentinel tables that must exist on world.db (proves it is the world DB,
 # not forecasts.db or some other file).
 _WORLD_SENTINELS = frozenset({
-    "venue_states",
-    "market_opportunities",
-    "strategy_tracker_current",
+    # Tables that must exist on world.db (proves this is the world DB, not forecasts.db).
+    # Selected from WORLD_CLASS tables in architecture/db_table_ownership.yaml.
+    "data_coverage",
+    "job_run",
+    "zeus_meta",
 })
 
 # Default world DB path

@@ -190,8 +190,7 @@ class ConnectionPair:
     """Holds separate trade (RW) and world (RO for trading lane) connections.
 
     Legacy class. New code should use ConnectionTriple (K1-aware, includes
-    forecasts_conn). The docstring reference to world_view is retained for
-    backward-compat; world_view/ is scheduled for retirement in P3.
+    forecasts_conn). world_view/ was retired in P3 (K1 followups 2026-05-14).
 
     DO NOT use ATTACH DATABASE on either connection — that is the anti-pattern
     this class replaces. Cross-DB reads go through registry-typed accessors.

@@ -386,7 +386,7 @@ class HoleScanner:
         )
         try:
             rows = target_conn.execute(sql).fetchall()
-        except Exception:
+        except sqlite3.OperationalError:
             # Table absent from this conn — return empty; scanner treats as no
             # physical data (conservative: no spurious WRITTEN seeds).
             return set()
