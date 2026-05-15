@@ -1285,7 +1285,9 @@ PROFILES: list[dict] = [ { 'id': 'change settlement rounding',
                                           'forecasts DB source_run_coverage readiness_state'],
                       'weak_terms': [ 'source_run_coverage',
                                       'producer_readiness',
+                                      'entry_readiness',
                                       'readiness_state',
+                                      'selected-cycle ingest',
                                       'executable forecast reader',
                                       'forecasts DB',
                                       'authority chain'],
@@ -1300,25 +1302,40 @@ PROFILES: list[dict] = [ { 'id': 'change settlement rounding',
                       'single_terms_can_select': False,
                       'min_confidence': 0.5},
     'file_patterns': [ 'src/state/db.py',
+                       'src/data/ecmwf_open_data.py',
                        'src/data/executable_forecast_reader.py',
+                       'src/data/entry_readiness_writer.py',
                        'tests/test_opendata_writes_v2_table.py',
                        'tests/test_executable_forecast_reader.py',
+                       'tests/test_entry_readiness_writer.py',
+                       'tests/test_entry_forecast_chain_relationship.py',
+                       'tests/test_entry_forecast_evaluator_cutover.py',
                        'tests/state/test_forecast_db_split_invariant.py',
                        'tests/test_digest_profile_matching.py',
                        'architecture/topology.yaml',
                        'architecture/digest_profiles.py'],
     'required_law': [ 'Forecast authority chain for live entry must be physically coherent: source_run, snapshots, '
                       'source_run_coverage, and producer readiness are one forecast ownership surface.',
+                      'Entry readiness must be physically keyed to the producer readiness row it depends on: '
+                      'physical_quantity, observation_field, data_version, source_id, and track must match the '
+                      'producer row the live reader will validate.',
+                      'Selected-cycle source_run identity must be physically bound to the JSON files for that cycle '
+                      'only; stale raw directories must not satisfy a new source_run.',
                       'Producer readiness must not be satisfied from stale world DB rows when fresher forecast DB '
                       'authority exists.',
                       'Failed, partial, missing, or expired forecast authority rows must block live entry rather than '
                       'render executable.',
-                      'This route edits schema bootstrap and reader resolution only; it must not mutate production '
+                      'This route edits forecast authority-chain source behavior only; it must not mutate production '
                       'DBs, run migrations, launch daemons, or change live venue behavior.'],
     'allowed_files': [ 'src/state/db.py',
+                       'src/data/ecmwf_open_data.py',
                        'src/data/executable_forecast_reader.py',
+                       'src/data/entry_readiness_writer.py',
                        'tests/test_opendata_writes_v2_table.py',
                        'tests/test_executable_forecast_reader.py',
+                       'tests/test_entry_readiness_writer.py',
+                       'tests/test_entry_forecast_chain_relationship.py',
+                       'tests/test_entry_forecast_evaluator_cutover.py',
                        'tests/state/test_forecast_db_split_invariant.py',
                        'tests/test_digest_profile_matching.py',
                        'architecture/topology.yaml',
@@ -1341,26 +1358,29 @@ PROFILES: list[dict] = [ { 'id': 'change settlement rounding',
                          'CLOB v2 cutover'],
     'gates': [ 'pytest -q -p no:cacheprovider '
                'tests/test_digest_profile_matching.py::test_forecast_authority_chain_ownership_routes_to_dedicated_profile',
-               'pytest -q -p no:cacheprovider '
-               'tests/test_opendata_writes_v2_table.py::test_collect_open_ens_cycle_writes_authority_chain_readable_by_live_reader '
-               'tests/test_executable_forecast_reader.py '
+               'pytest -q -p no:cacheprovider tests/test_opendata_writes_v2_table.py '
+               'tests/test_executable_forecast_reader.py tests/test_entry_readiness_writer.py '
+               'tests/test_entry_forecast_chain_relationship.py '
+               'tests/test_entry_forecast_evaluator_cutover.py::test_phase_c3_writer_flag_on_writes_live_eligible_when_all_gates_align '
                'tests/state/test_forecast_db_split_invariant.py::test_rel1_init_schema_forecasts_tables_and_version '
                'tests/state/test_forecast_db_split_invariant.py::test_rel1_init_schema_forecasts_critical_indexes',
-               'python3 -m py_compile src/state/db.py src/data/executable_forecast_reader.py '
+               'python3 -m py_compile src/state/db.py src/data/ecmwf_open_data.py '
+               'src/data/executable_forecast_reader.py src/data/entry_readiness_writer.py '
                'tests/test_opendata_writes_v2_table.py tests/test_executable_forecast_reader.py '
-               'tests/state/test_forecast_db_split_invariant.py tests/test_digest_profile_matching.py '
-               'architecture/digest_profiles.py',
+               'tests/test_entry_readiness_writer.py tests/test_entry_forecast_chain_relationship.py '
+               'tests/test_entry_forecast_evaluator_cutover.py tests/state/test_forecast_db_split_invariant.py '
+               'tests/test_digest_profile_matching.py architecture/digest_profiles.py',
                'python3 scripts/digest_profiles_export.py --check',
                'python3 scripts/topology_doctor.py --planning-lock --changed-files <files> --plan-evidence '
                'docs/operations/task_2026-05-08_deep_alignment_audit/DATA_DAEMON_LIVE_EFFICIENCY_REFACTOR_PLAN.md'],
     'downstream': [ 'src/engine/evaluator.py',
                     'src/data/ecmwf_open_data.py',
+                    'src/data/entry_readiness_writer.py',
                     'state/zeus-forecasts.db',
                     'state/zeus-world.db'],
     'stop_conditions': [ 'Stop before production DB mutation, migration execution, daemon launch, or live venue side '
                          'effect.',
-                         'Stop before moving entry readiness ownership out of its current writer path; this profile is '
-                         'producer-readiness/source authority only.',
+                         'Stop before moving entry readiness ownership out of its current writer path.',
                          'Stop before changing calibration math, source release calendars, city config, risk policy, '
                          'or execution behavior.']},
   { 'id': 'forecast live work queue journaling',

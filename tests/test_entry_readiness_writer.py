@@ -16,6 +16,7 @@ import json
 import sqlite3
 from dataclasses import replace
 from datetime import date, datetime, timezone
+from pathlib import Path
 
 import pytest
 
@@ -26,7 +27,10 @@ from src.config import (
     EntryForecastSourceTransport,
     entry_forecast_config,
 )
-from src.contracts.ensemble_snapshot_provenance import ECMWF_OPENDATA_HIGH_DATA_VERSION
+from src.contracts.ensemble_snapshot_provenance import (
+    ECMWF_OPENDATA_HIGH_DATA_VERSION,
+    ECMWF_OPENDATA_LOW_DATA_VERSION,
+)
 from src.control.entry_forecast_rollout import (
     EntryForecastPromotionEvidence,
     EntryForecastRolloutDecision,
@@ -38,7 +42,8 @@ from src.data.entry_readiness_writer import (
 )
 from src.data.forecast_target_contract import ForecastTargetScope
 from src.data.live_entry_status import LiveEntryForecastStatus
-from src.state.db import init_schema
+from src.state.db import init_schema, init_schema_forecasts
+from src.state.readiness_repo import write_readiness_state
 from src.state.schema.v2_schema import apply_v2_schema
 
 UTC = timezone.utc
@@ -134,16 +139,55 @@ def _live_cfg() -> EntryForecastConfig:
     return replace(entry_forecast_config(), rollout_mode=EntryForecastRolloutMode.LIVE)
 
 
+def _seed_producer_readiness(conn: sqlite3.Connection, *, scope: ForecastTargetScope | None = None) -> str:
+    scope = scope or _scope()
+    readiness_id = (
+        f"producer-{scope.city_id}-{scope.target_local_date.isoformat()}-{scope.temperature_metric}"
+    )
+    if scope.temperature_metric == "high":
+        physical_quantity = "mx2t3_local_calendar_day_max"
+        observation_field = "high_temp"
+        track = "mx2t6_high_full_horizon"
+    else:
+        physical_quantity = "mn2t3_local_calendar_day_min"
+        observation_field = "low_temp"
+        track = "mn2t6_low_full_horizon"
+    write_readiness_state(
+        conn,
+        readiness_id=readiness_id,
+        scope_type="city_metric",
+        status="LIVE_ELIGIBLE",
+        computed_at=_utc(2026, 5, 3, 10),
+        expires_at=_utc(2026, 5, 3, 18),
+        city_id=scope.city_id,
+        city=scope.city_name,
+        city_timezone=scope.city_timezone,
+        target_local_date=scope.target_local_date,
+        temperature_metric=scope.temperature_metric,
+        physical_quantity=physical_quantity,
+        observation_field=observation_field,
+        data_version=scope.data_version,
+        source_id="ecmwf_open_data",
+        track=track,
+        source_run_id="source-run-1",
+        strategy_key="producer_readiness",
+        reason_codes_json=["PRODUCER_COVERAGE_READY"],
+        dependency_json={"coverage_id": "coverage-1"},
+    )
+    return readiness_id
+
+
 def _all_gates_aligned_args(conn: sqlite3.Connection) -> dict:
+    scope = _scope()
     return dict(
-        scope=_scope(),
+        scope=scope,
         rollout_decision=_live_rollout_decision(),
         calibration_decision=_live_calibration_decision(),
         promotion_evidence=_evidence(),
         config=_live_cfg(),
         market_family="POLY_TEMP_LONDON",
         condition_id="condition-123",
-        producer_readiness_id="producer-readiness-1",
+        producer_readiness_id=_seed_producer_readiness(conn, scope=scope),
         computed_at=_utc(2026, 5, 3, 12),
     )
 
@@ -170,6 +214,8 @@ def test_all_gates_aligned_writes_live_eligible_with_expiry() -> None:
     assert row["expires_at"] == _utc(2026, 5, 3, 15).isoformat()
     assert row["target_local_date"] == "2026-05-08"
     assert row["track"] == "mx2t6_high_full_horizon"
+    assert row["physical_quantity"] == "mx2t3_local_calendar_day_max"
+    assert row["source_run_id"] == "source-run-1"
 
     provenance = json.loads(row["provenance_json"])
     assert provenance["rollout_mode"] == "live"
@@ -257,7 +303,13 @@ def test_naive_computed_at_rejected() -> None:
 def test_low_track_uses_low_metric_identity() -> None:
     conn = _conn()
     args = _all_gates_aligned_args(conn)
-    args["scope"] = replace(_scope(), temperature_metric="low")
+    low_scope = replace(
+        _scope(),
+        temperature_metric="low",
+        data_version=ECMWF_OPENDATA_LOW_DATA_VERSION,
+    )
+    args["scope"] = low_scope
+    args["producer_readiness_id"] = _seed_producer_readiness(conn, scope=low_scope)
 
     write_entry_readiness(conn, **args)
 
@@ -266,14 +318,65 @@ def test_low_track_uses_low_metric_identity() -> None:
         (ENTRY_FORECAST_STRATEGY_KEY,),
     ).fetchone()
     assert row["track"] == "mn2t6_low_full_horizon"
-    assert row["physical_quantity"] == "mn2t6_local_calendar_day_min"
+    assert row["physical_quantity"] == "mn2t3_local_calendar_day_min"
     assert row["observation_field"] == "low_temp"
+
+
+def test_live_eligible_requires_matching_producer_readiness() -> None:
+    conn = _conn()
+    args = _all_gates_aligned_args(conn)
+    args["producer_readiness_id"] = "missing-producer"
+    conn.execute("DELETE FROM readiness_state WHERE strategy_key = 'producer_readiness'")
+
+    result = write_entry_readiness(conn, **args)
+
+    assert result.status == "BLOCKED"
+    assert "ENTRY_READINESS_PRODUCER_MISSING" in result.reason_codes
+
+
+def test_writer_resolves_producer_from_attached_forecasts_db(tmp_path: Path) -> None:
+    forecasts_db = tmp_path / "forecasts.db"
+    forecasts_conn = sqlite3.connect(str(forecasts_db))
+    forecasts_conn.row_factory = sqlite3.Row
+    init_schema_forecasts(forecasts_conn)
+    producer_id = _seed_producer_readiness(forecasts_conn)
+    forecasts_conn.commit()
+    forecasts_conn.close()
+
+    conn = _conn()
+    conn.execute("ATTACH DATABASE ? AS forecasts", (str(forecasts_db),))
+    args = _all_gates_aligned_args(conn)
+    conn.execute("DELETE FROM readiness_state WHERE strategy_key = 'producer_readiness'")
+    args["producer_readiness_id"] = producer_id
+
+    result = write_entry_readiness(conn, **args)
+
+    assert result.status == "LIVE_ELIGIBLE"
+    row = conn.execute(
+        "SELECT physical_quantity, source_run_id, dependency_json FROM readiness_state WHERE strategy_key = ?",
+        (ENTRY_FORECAST_STRATEGY_KEY,),
+    ).fetchone()
+    assert row["physical_quantity"] == "mx2t3_local_calendar_day_max"
+    assert row["source_run_id"] == "source-run-1"
+    assert json.loads(row["dependency_json"]) == {"producer_readiness_id": producer_id}
+
+
+def test_writer_does_not_fallback_to_main_producer_when_forecasts_attached(tmp_path: Path) -> None:
+    forecasts_db = tmp_path / "forecasts_without_readiness.db"
+    forecasts_db.touch()
+    conn = _conn()
+    args = _all_gates_aligned_args(conn)
+    conn.execute("ATTACH DATABASE ? AS forecasts", (str(forecasts_db),))
+
+    result = write_entry_readiness(conn, **args)
+
+    assert result.status == "BLOCKED"
+    assert "ENTRY_READINESS_PRODUCER_MISSING" in result.reason_codes
 
 
 def test_dependency_links_back_to_producer_readiness() -> None:
     conn = _conn()
     args = _all_gates_aligned_args(conn)
-    args["producer_readiness_id"] = "producer-readiness-abc-123"
 
     write_entry_readiness(conn, **args)
 
@@ -282,4 +385,4 @@ def test_dependency_links_back_to_producer_readiness() -> None:
         (ENTRY_FORECAST_STRATEGY_KEY,),
     ).fetchone()
     dep = json.loads(row["dependency_json"])
-    assert dep == {"producer_readiness_id": "producer-readiness-abc-123"}
+    assert dep == {"producer_readiness_id": args["producer_readiness_id"]}

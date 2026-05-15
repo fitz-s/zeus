@@ -60,7 +60,9 @@ from src.control.entry_forecast_rollout import (
 )
 from src.data.calibration_transfer_policy import CalibrationTransferDecision
 from src.data.forecast_target_contract import ForecastTargetScope
+from src.data.producer_readiness import PRODUCER_READINESS_STRATEGY_KEY
 from src.state.readiness_repo import write_readiness_state
+from src.types.metric_identity import MetricIdentity, source_family_from_data_version
 
 ENTRY_FORECAST_STRATEGY_KEY = "entry_forecast"
 
@@ -149,6 +151,110 @@ def _provenance_payload(
     return payload
 
 
+def _metric_identity_for_scope(scope: ForecastTargetScope) -> MetricIdentity:
+    source_family = source_family_from_data_version(scope.data_version)
+    if source_family is None:
+        raise ValueError(f"unknown forecast data_version for entry readiness: {scope.data_version!r}")
+    return MetricIdentity.for_metric_with_source_family(scope.temperature_metric, source_family)
+
+
+def _producer_matches_scope(
+    row: dict[str, Any],
+    *,
+    scope: ForecastTargetScope,
+    config: EntryForecastConfig,
+    track: str,
+) -> bool:
+    return (
+        row.get("scope_type") == "city_metric"
+        and row.get("strategy_key") == PRODUCER_READINESS_STRATEGY_KEY
+        and row.get("city_id") == scope.city_id
+        and row.get("city_timezone") == scope.city_timezone
+        and row.get("target_local_date") == scope.target_local_date.isoformat()
+        and row.get("temperature_metric") == scope.temperature_metric
+        and row.get("data_version") == scope.data_version
+        and row.get("source_id") == config.source_id
+        and row.get("track") == track
+    )
+
+
+def _producer_readiness_tables(conn) -> tuple[str, ...]:
+    attached = {row[1] for row in conn.execute("PRAGMA database_list")}
+    if "forecasts" in attached:
+        try:
+            row = conn.execute(
+                "SELECT name FROM forecasts.sqlite_master WHERE type = 'table' AND name = 'readiness_state'"
+            ).fetchone()
+        except Exception:  # noqa: BLE001
+            row = None
+        return ("forecasts.readiness_state",) if row is not None else ()
+    if "world" in attached:
+        try:
+            row = conn.execute(
+                "SELECT name FROM world.sqlite_master WHERE type = 'table' AND name = 'readiness_state'"
+            ).fetchone()
+        except Exception:  # noqa: BLE001
+            row = None
+        return ("world.readiness_state",) if row is not None else ()
+    return ("main.readiness_state",)
+
+
+def _producer_row_for_scope(
+    conn,
+    *,
+    scope: ForecastTargetScope,
+    config: EntryForecastConfig,
+    track: str,
+    producer_readiness_id: str,
+) -> dict[str, Any] | None:
+    tables = _producer_readiness_tables(conn)
+    for table in tables:
+        row = conn.execute(
+            f"""
+            SELECT * FROM {table}
+            WHERE readiness_id = ?
+              AND strategy_key = ?
+            LIMIT 1
+            """,
+            (producer_readiness_id, PRODUCER_READINESS_STRATEGY_KEY),
+        ).fetchone()
+        if row is not None:
+            candidate = dict(row)
+            if _producer_matches_scope(candidate, scope=scope, config=config, track=track):
+                return candidate
+
+    for table in tables:
+        row = conn.execute(
+            f"""
+            SELECT * FROM {table}
+            WHERE scope_type = 'city_metric'
+              AND strategy_key = ?
+              AND city_id = ?
+              AND city_timezone = ?
+              AND target_local_date = ?
+              AND temperature_metric = ?
+              AND data_version = ?
+              AND source_id = ?
+              AND track = ?
+            ORDER BY computed_at DESC, recorded_at DESC
+            LIMIT 1
+            """,
+            (
+                PRODUCER_READINESS_STRATEGY_KEY,
+                scope.city_id,
+                scope.city_timezone,
+                scope.target_local_date.isoformat(),
+                scope.temperature_metric,
+                scope.data_version,
+                config.source_id,
+                track,
+            ),
+        ).fetchone()
+        if row is not None:
+            return dict(row)
+    return None
+
+
 def write_entry_readiness(
     conn,
     *,
@@ -188,13 +294,33 @@ def write_entry_readiness(
 
     final_readiness_id = readiness_id or f"entry-readiness-{uuid.uuid4().hex[:12]}"
 
-    physical_quantity = (
-        "mx2t6_local_calendar_day_max"
-        if scope.temperature_metric == "high"
-        else "mn2t6_local_calendar_day_min"
-    )
-    observation_field = "high_temp" if scope.temperature_metric == "high" else "low_temp"
     track = config.high_track if scope.temperature_metric == "high" else config.low_track
+    identity = _metric_identity_for_scope(scope)
+    producer = _producer_row_for_scope(
+        conn,
+        scope=scope,
+        config=config,
+        track=track,
+        producer_readiness_id=producer_readiness_id,
+    )
+    final_producer_readiness_id = producer_readiness_id
+    source_run_id: str | None = None
+    physical_quantity = identity.physical_quantity
+    observation_field = identity.observation_field
+    if producer is None:
+        if status == "LIVE_ELIGIBLE":
+            status = "BLOCKED"
+            reason_codes = _merge_reasons(reason_codes, ("ENTRY_READINESS_PRODUCER_MISSING",))
+            expires_at = None
+    else:
+        final_producer_readiness_id = str(producer["readiness_id"])
+        physical_quantity = str(producer["physical_quantity"])
+        observation_field = str(producer["observation_field"])
+        source_run_id = str(producer["source_run_id"]) if producer.get("source_run_id") else None
+        if status == "LIVE_ELIGIBLE" and producer.get("status") != "LIVE_ELIGIBLE":
+            status = "BLOCKED"
+            reason_codes = _merge_reasons(reason_codes, ("ENTRY_READINESS_PRODUCER_NOT_LIVE_ELIGIBLE",))
+            expires_at = None
 
     write_readiness_state(
         conn,
@@ -212,14 +338,14 @@ def write_entry_readiness(
         data_version=scope.data_version,
         source_id=config.source_id,
         track=track,
-        source_run_id=None,
+        source_run_id=source_run_id,
         market_family=market_family,
         condition_id=condition_id,
         token_ids_json=[],
         strategy_key=ENTRY_FORECAST_STRATEGY_KEY,
         reason_codes_json=list(reason_codes),
         expires_at=expires_at,
-        dependency_json={"producer_readiness_id": producer_readiness_id},
+        dependency_json={"producer_readiness_id": final_producer_readiness_id},
         provenance_json=_provenance_payload(
             rollout_decision=rollout_decision,
             calibration_decision=calibration_decision,

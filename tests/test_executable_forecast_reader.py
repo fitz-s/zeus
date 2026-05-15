@@ -120,6 +120,7 @@ def _insert_snapshot(
     causality_status: str = "OK",
     boundary_ambiguous: int = 0,
     local_day_start_utc: str | None = None,
+    members_json: str | None = None,
 ) -> None:
     scope = _scope()
     conn.execute(
@@ -155,7 +156,7 @@ def _insert_snapshot(
             "available_at": available_at,
             "fetch_time": "2026-05-03T08:15:00+00:00",
             "lead_hours": 120.0,
-            "members_json": json.dumps([18.0 + i * 0.1 for i in range(51)]),
+            "members_json": members_json or json.dumps([18.0 + i * 0.1 for i in range(51)]),
             "model_version": "ecmwf_ens",
             "data_version": scope.data_version,
             "source_id": source_id,
@@ -724,6 +725,33 @@ def test_full_reader_blocks_missing_required_steps() -> None:
 
     assert not result.ok
     assert result.reason_code == "MISSING_REQUIRED_STEPS"
+
+
+def test_full_reader_blocks_null_member_even_when_coverage_claims_complete() -> None:
+    conn = _conn()
+    members = [18.0 + i * 0.1 for i in range(51)]
+    members[0] = None
+    _insert_snapshot(conn, members_json=json.dumps(members))
+    _insert_source_run(conn)
+    _insert_coverage(conn, observed_members=51)
+    _insert_readiness(
+        conn,
+        strategy_key=PRODUCER_READINESS_STRATEGY_KEY,
+        readiness_id="producer-readiness-1",
+        dependency_json={"coverage_id": "coverage-1"},
+    )
+    _insert_readiness(
+        conn,
+        strategy_key="entry_forecast",
+        readiness_id="entry-readiness-1",
+        market_family="family-1",
+        condition_id="condition-123",
+    )
+
+    result = _read_full(conn)
+
+    assert not result.ok
+    assert result.reason_code == "MISSING_EXPECTED_MEMBERS"
 
 
 def test_full_reader_blocks_expired_entry_readiness() -> None:

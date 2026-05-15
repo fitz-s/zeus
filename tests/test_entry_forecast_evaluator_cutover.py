@@ -269,6 +269,7 @@ def test_phase_c3_writer_flag_on_writes_blocked_row_when_evidence_missing(monkey
     from src.engine import evaluator as evaluator_module
     from src.engine.evaluator import _write_entry_readiness_for_candidate
     from src.state.db import init_schema
+    from src.state.readiness_repo import write_readiness_state
     from src.state.schema.v2_schema import apply_v2_schema
     from src.types.metric_identity import HIGH_LOCALDAY_MAX
 
@@ -285,6 +286,28 @@ def test_phase_c3_writer_flag_on_writes_blocked_row_when_evidence_missing(monkey
     apply_v2_schema(conn)
 
     cfg = replace(entry_forecast_config(), rollout_mode=EntryForecastRolloutMode.LIVE)
+    write_readiness_state(
+        conn,
+        readiness_id="producer-readiness-london-2026-05-08-high",
+        scope_type="city_metric",
+        status="LIVE_ELIGIBLE",
+        computed_at=datetime(2026, 5, 3, 10, tzinfo=UTC),
+        expires_at=datetime(2026, 5, 3, 18, tzinfo=UTC),
+        city_id="LONDON",
+        city="London",
+        city_timezone="Europe/London",
+        target_local_date=date(2026, 5, 8),
+        temperature_metric="high",
+        physical_quantity="mx2t3_local_calendar_day_max",
+        observation_field="high_temp",
+        data_version=ECMWF_OPENDATA_HIGH_DATA_VERSION,
+        source_id=cfg.source_id,
+        track="mx2t6_high_full_horizon",
+        source_run_id="source-run-1",
+        strategy_key="producer_readiness",
+        reason_codes_json=["PRODUCER_COVERAGE_READY"],
+        dependency_json={"coverage_id": "coverage-1"},
+    )
 
     _write_entry_readiness_for_candidate(
         conn,
@@ -325,6 +348,7 @@ def test_phase_c3_writer_flag_on_writes_live_eligible_when_all_gates_align(monke
     from src.data.live_entry_status import LiveEntryForecastStatus
     from src.engine.evaluator import _write_entry_readiness_for_candidate
     from src.state.db import init_schema
+    from src.state.readiness_repo import write_readiness_state
     from src.state.schema.v2_schema import apply_v2_schema
     from src.types.metric_identity import HIGH_LOCALDAY_MAX
 
@@ -355,6 +379,28 @@ def test_phase_c3_writer_flag_on_writes_live_eligible_when_all_gates_align(monke
     apply_v2_schema(conn)
 
     cfg = replace(entry_forecast_config(), rollout_mode=EntryForecastRolloutMode.LIVE)
+    write_readiness_state(
+        conn,
+        readiness_id="producer-readiness-london-2026-05-08-high",
+        scope_type="city_metric",
+        status="LIVE_ELIGIBLE",
+        computed_at=datetime(2026, 5, 3, 10, tzinfo=UTC),
+        expires_at=datetime(2026, 5, 3, 18, tzinfo=UTC),
+        city_id="LONDON",
+        city="London",
+        city_timezone="Europe/London",
+        target_local_date=date(2026, 5, 8),
+        temperature_metric="high",
+        physical_quantity="mx2t3_local_calendar_day_max",
+        observation_field="high_temp",
+        data_version=ECMWF_OPENDATA_HIGH_DATA_VERSION,
+        source_id=cfg.source_id,
+        track="mx2t6_high_full_horizon",
+        source_run_id="source-run-1",
+        strategy_key="producer_readiness",
+        reason_codes_json=["PRODUCER_COVERAGE_READY"],
+        dependency_json={"coverage_id": "coverage-1"},
+    )
 
     _write_entry_readiness_for_candidate(
         conn,
@@ -368,12 +414,14 @@ def test_phase_c3_writer_flag_on_writes_live_eligible_when_all_gates_align(monke
     )
 
     row = conn.execute(
-        "SELECT status, expires_at FROM readiness_state WHERE strategy_key = ?",
+        "SELECT status, expires_at, physical_quantity, source_run_id FROM readiness_state WHERE strategy_key = ?",
         (ENTRY_FORECAST_STRATEGY_KEY,),
     ).fetchone()
     assert row is not None
     assert row["status"] == "LIVE_ELIGIBLE"
     assert row["expires_at"] is not None
+    assert row["physical_quantity"] == "mx2t3_local_calendar_day_max"
+    assert row["source_run_id"] == "source-run-1"
 
 
 def test_phase_c6_day0_mode_falls_through_to_legacy_fetch(monkeypatch) -> None:

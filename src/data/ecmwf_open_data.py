@@ -1,5 +1,5 @@
 # Created: prior; restructured 2026-05-01
-# Last reused or audited: 2026-05-12
+# Last reused or audited: 2026-05-14
 # Authority basis: architect D1 (ECMWF throttle), AGENTS.md money path
 #   Prior: PLAN docs/operations/task_2026-05-11_ecmwf_download_replacement/PLAN.md
 #   ECMWF Open Data has ~6-8h latency (vs. TIGGE's 48h public embargo) so it
@@ -47,10 +47,13 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
+import shutil
 import subprocess
 import sys
 import hashlib
+import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -274,6 +277,49 @@ def _download_output_path(*, run_date: date, run_hour: int, param: str) -> Path:
     )
 
 
+def _cycle_extract_dir_name(*, run_date: date, run_hour: int) -> str:
+    base = run_date.strftime("%Y%m%d")
+    if run_hour == 0:
+        return base
+    return f"{base}_cycle{run_hour:02d}z"
+
+
+def _build_cycle_scoped_json_root(
+    *,
+    raw_root: Path,
+    extract_subdir: str,
+    run_date: date,
+    run_hour: int,
+    tmp_root: Path,
+) -> tuple[Path, str, int]:
+    """Build an ingest view containing only the selected source cycle's JSON."""
+
+    cycle_dir_name = _cycle_extract_dir_name(run_date=run_date, run_hour=run_hour)
+    source_subdir = raw_root / extract_subdir
+    view_subdir = tmp_root / extract_subdir
+    view_subdir.mkdir(parents=True, exist_ok=True)
+    if not source_subdir.exists():
+        return tmp_root, cycle_dir_name, 0
+
+    linked = 0
+    for city_dir in source_subdir.iterdir():
+        if not city_dir.is_dir():
+            continue
+        source_cycle_dir = city_dir / cycle_dir_name
+        if not source_cycle_dir.is_dir():
+            continue
+        view_cycle_dir = view_subdir / city_dir.name / cycle_dir_name
+        view_cycle_dir.mkdir(parents=True, exist_ok=True)
+        for source_json in sorted(source_cycle_dir.glob("*.json")):
+            target_json = view_cycle_dir / source_json.name
+            try:
+                target_json.symlink_to(source_json.resolve())
+            except OSError:
+                shutil.copy2(source_json, target_json)
+            linked += 1
+    return tmp_root, cycle_dir_name, linked
+
+
 def _select_cycle_for_track(*, track: str, now_utc: datetime) -> tuple[FetchDecision, dict[str, object]]:
     """Select a release-calendar-approved source run for the configured horizon."""
     if track not in TRACKS:
@@ -340,6 +386,24 @@ def _json_list(value: object) -> list[Any]:
     return parsed if isinstance(parsed, list) else []
 
 
+def _usable_member_count(value: object) -> int:
+    """Count finite member values, not placeholder slots."""
+
+    count = 0
+    for item in _json_list(value):
+        if isinstance(item, dict):
+            item = item.get("value_native_unit")
+        if item is None or isinstance(item, bool):
+            continue
+        try:
+            numeric = float(item)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(numeric):
+            count += 1
+    return count
+
+
 def _parse_utc(value: object) -> datetime | None:
     if not isinstance(value, str) or not value:
         return None
@@ -369,12 +433,83 @@ def _snapshot_rows_for_source_run(conn, *, source_run_id: str, data_version: str
     ]
 
 
+def _clear_source_run_authority(conn, *, source_run_id: str) -> dict[str, int]:
+    """Clear prior deterministic-run rows before rebuilding a source_run."""
+
+    coverage_ids = [
+        str(row[0])
+        for row in conn.execute(
+            "SELECT coverage_id FROM source_run_coverage WHERE source_run_id = ?",
+            (source_run_id,),
+        ).fetchall()
+    ]
+    readiness_deleted = conn.execute(
+        """
+        DELETE FROM readiness_state
+        WHERE strategy_key = 'producer_readiness'
+          AND source_run_id = ?
+        """,
+        (source_run_id,),
+    ).rowcount
+    if coverage_ids:
+        placeholders = ",".join("?" for _ in coverage_ids)
+        readiness_ids = [f"producer_readiness:{coverage_id}" for coverage_id in coverage_ids]
+        readiness_deleted += conn.execute(
+            f"""
+            DELETE FROM readiness_state
+            WHERE strategy_key = 'producer_readiness'
+              AND readiness_id IN ({placeholders})
+            """,
+            readiness_ids,
+        ).rowcount
+
+    coverage_deleted = conn.execute(
+        "DELETE FROM source_run_coverage WHERE source_run_id = ?",
+        (source_run_id,),
+    ).rowcount
+    source_run_deleted = conn.execute(
+        "DELETE FROM source_run WHERE source_run_id = ?",
+        (source_run_id,),
+    ).rowcount
+    snapshots_deleted = conn.execute(
+        """
+        DELETE FROM ensemble_snapshots_v2
+        WHERE source_id = ?
+          AND source_transport = ?
+          AND source_run_id = ?
+        """,
+        (SOURCE_ID, "ensemble_snapshots_v2_db_reader", source_run_id),
+    ).rowcount
+    return {
+        "snapshots_deleted": int(snapshots_deleted),
+        "coverage_deleted": int(coverage_deleted),
+        "producer_readiness_deleted": int(readiness_deleted),
+        "source_run_deleted": int(source_run_deleted),
+    }
+
+
 def _observed_steps_for_snapshot(*, required_steps: tuple[int, ...], step_horizon_hours: object) -> tuple[int, ...]:
     try:
         horizon = float(step_horizon_hours)
     except (TypeError, ValueError):
         return ()
     return tuple(step for step in required_steps if step <= horizon)
+
+
+def _coverage_reason(reason_codes: list[str]) -> str:
+    preferred = (
+        "MISSING_EXPECTED_MEMBERS",
+        "MISSING_REQUIRED_STEPS",
+        "SNAPSHOT_LOCAL_DAY_WINDOW_MISMATCH",
+        "SOURCE_RUN_PARTIAL",
+    )
+    for reason in preferred:
+        if reason in reason_codes:
+            return reason
+    return next(
+        (reason for reason in reason_codes if reason != "FUTURE_TARGET_DATE_COVERED"),
+        "FUTURE_TARGET_DATE_COVERAGE_PARTIAL",
+    )
 
 
 def _write_source_authority_chain(
@@ -407,8 +542,13 @@ def _write_source_authority_chain(
         data_version=data_version,
     )
     source_run_status, source_run_completeness, partial_run, reason_code = _source_run_outcome(summary, status)
-    observed_member_counts = [len(_json_list(row.get("members_json"))) for row in rows]
+    observed_member_counts = [_usable_member_count(row.get("members_json")) for row in rows]
     observed_members = min(observed_member_counts) if observed_member_counts else 0
+    if rows and observed_members < 51 and source_run_status == "SUCCESS":
+        source_run_status = "PARTIAL"
+        source_run_completeness = "PARTIAL"
+        partial_run = True
+        reason_code = "MISSING_EXPECTED_MEMBERS"
     observed_step_horizons = [
         float(row["step_horizon_hours"])
         for row in rows
@@ -481,7 +621,7 @@ def _write_source_authority_chain(
             required_steps=scope.required_step_hours,
             step_horizon_hours=row.get("step_horizon_hours"),
         )
-        observed_members_for_scope = len(_json_list(row.get("members_json")))
+        observed_members_for_scope = _usable_member_count(row.get("members_json"))
         horizon_decision = evaluate_horizon_coverage(
             required_steps=scope.required_step_hours,
             live_max_step_hours=int(float(row.get("step_horizon_hours") or 0)),
@@ -540,10 +680,7 @@ def _write_source_authority_chain(
         else:
             completeness_status = "PARTIAL"
             readiness_status = "BLOCKED"
-            coverage_reason = next(
-                (reason for reason in reason_codes if reason != "FUTURE_TARGET_DATE_COVERED"),
-                "FUTURE_TARGET_DATE_COVERAGE_PARTIAL",
-            )
+            coverage_reason = _coverage_reason(reason_codes)
 
         coverage_id = _stable_id(
             "source_run_coverage",
@@ -1066,6 +1203,12 @@ def collect_open_ens_cycle(
     else:
         # Injected connection (test seam with in-memory sqlite) — skip file lock.
         _lock_ctx = nullcontext()
+    cleared_authority = {
+        "snapshots_deleted": 0,
+        "coverage_deleted": 0,
+        "producer_readiness_deleted": 0,
+        "source_run_deleted": 0,
+    }
     with _lock_ctx:
         # ECMWF hang antibody #3 (2026-05-13) — boundary INFO logs at every
         # transition inside the BULK lock so the next 12h hang has a log
@@ -1086,6 +1229,16 @@ def collect_open_ens_cycle(
                 track,
                 int((time.monotonic() - _ingest_t0) * 1000),
             )
+            cleared_authority = _clear_source_run_authority(
+                conn,
+                source_run_id=source_run_id,
+            )
+            logger.info(
+                "ingest_stage: cleared_prior_source_run track=%s source_run_id=%s %s",
+                track,
+                source_run_id,
+                cleared_authority,
+            )
             # The opendata extract writes JSON files to a different subdir than
             # TIGGE — reuse the same ingester by passing the parent directory and
             # the matching track name, and override the json_subdir lookup via the
@@ -1096,38 +1249,50 @@ def collect_open_ens_cycle(
             # than re-running the import inside the BULK lock.
             original_subdir = _ingest_grib_module._TRACK_CONFIGS[cfg["ingest_track"]]["json_subdir"]
             _ingest_grib_module._TRACK_CONFIGS[cfg["ingest_track"]]["json_subdir"] = cfg["extract_subdir"]
+            cycle_json_files = 0
+            cycle_extract_dir = _cycle_extract_dir_name(run_date=cycle_date, run_hour=cycle_hour)
             try:
-                # Boundary marker — rglob happens inside ingest_track. We log
-                # before/after at this layer so the daemon log shows the
-                # entry/exit boundary even if rglob hangs (and the timeout
-                # guard in ingest_track raises).
+                with tempfile.TemporaryDirectory(prefix="zeus_opendata_cycle_") as scoped_tmp:
+                    scoped_json_root, cycle_extract_dir, cycle_json_files = _build_cycle_scoped_json_root(
+                        raw_root=FIFTY_ONE_ROOT / "raw",
+                        extract_subdir=cfg["extract_subdir"],
+                        run_date=cycle_date,
+                        run_hour=cycle_hour,
+                        tmp_root=Path(scoped_tmp),
+                    )
+                    # Boundary marker — rglob happens inside ingest_track. The
+                    # temporary view is the selected source cycle only, so stale
+                    # raw directories cannot satisfy a new source_run.
+                    logger.info(
+                        "ingest_stage: rglob_start track=%s subdir=%s cycle_dir=%s cycle_json_files=%d",
+                        track,
+                        cfg["extract_subdir"],
+                        cycle_extract_dir,
+                        cycle_json_files,
+                    )
+                    summary = _ingest_grib_ingest_track(
+                        track=cfg["ingest_track"],
+                        json_root=scoped_json_root,
+                        conn=conn,
+                        date_from=None,
+                        date_to=None,
+                        cities=None,
+                        overwrite=True,
+                        require_files=False,
+                        source_run_context=_ingest_grib_SourceRunContext(
+                            source_id=SOURCE_ID,
+                            source_transport="ensemble_snapshots_v2_db_reader",
+                            source_run_id=source_run_id,
+                            release_calendar_key=release_calendar_key,
+                            source_cycle_time=source_cycle_time,
+                            source_release_time=source_release_time,
+                            source_available_at=source_release_time,
+                        ),
+                    )
                 logger.info(
-                    "ingest_stage: rglob_start track=%s subdir=%s",
+                    "ingest_stage: rglob_end track=%s cycle_dir=%s written=%s skipped_exists=%s parse_error=%s",
                     track,
-                    cfg["extract_subdir"],
-                )
-                summary = _ingest_grib_ingest_track(
-                    track=cfg["ingest_track"],
-                    json_root=FIFTY_ONE_ROOT / "raw",
-                    conn=conn,
-                    date_from=None,
-                    date_to=None,
-                    cities=None,
-                    overwrite=True,
-                    require_files=False,
-                    source_run_context=_ingest_grib_SourceRunContext(
-                        source_id=SOURCE_ID,
-                        source_transport="ensemble_snapshots_v2_db_reader",
-                        source_run_id=source_run_id,
-                        release_calendar_key=release_calendar_key,
-                        source_cycle_time=source_cycle_time,
-                        source_release_time=source_release_time,
-                        source_available_at=source_release_time,
-                    ),
-                )
-                logger.info(
-                    "ingest_stage: rglob_end track=%s written=%s skipped_exists=%s parse_error=%s",
-                    track,
+                    cycle_extract_dir,
                     summary.get("written"),
                     summary.get("skipped_exists"),
                     summary.get("parse_error"),
@@ -1186,6 +1351,9 @@ def collect_open_ens_cycle(
         "source_id": SOURCE_ID,
         "forecast_source_role": FORECAST_SOURCE_ROLE,
         "degradation_level": source_spec.degradation_level,
+        "cycle_extract_dir": cycle_extract_dir,
+        "cycle_json_files": cycle_json_files,
+        "cleared_authority": cleared_authority,
         "download_path": str(output_path),
         "snapshots_inserted": int(summary.get("written", 0)),
         "snapshots_skipped": int(summary.get("skipped", 0)),

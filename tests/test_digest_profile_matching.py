@@ -1657,9 +1657,14 @@ def test_forecast_authority_chain_ownership_routes_to_dedicated_profile():
         "no production DB mutation; no live venue side effects; no schema migration apply",
         [
             "src/state/db.py",
+            "src/data/ecmwf_open_data.py",
             "src/data/executable_forecast_reader.py",
+            "src/data/entry_readiness_writer.py",
             "tests/test_opendata_writes_v2_table.py",
             "tests/test_executable_forecast_reader.py",
+            "tests/test_entry_readiness_writer.py",
+            "tests/test_entry_forecast_chain_relationship.py",
+            "tests/test_entry_forecast_evaluator_cutover.py",
             "tests/state/test_forecast_db_split_invariant.py",
             "tests/test_digest_profile_matching.py",
             "architecture/topology.yaml",
@@ -1670,7 +1675,9 @@ def test_forecast_authority_chain_ownership_routes_to_dedicated_profile():
     assert digest["profile"] == "forecast authority chain ownership"
     assert digest["admission"]["status"] == "admitted"
     assert "src/state/db.py" in digest["admission"]["admitted_files"]
+    assert "src/data/ecmwf_open_data.py" in digest["admission"]["admitted_files"]
     assert "src/data/executable_forecast_reader.py" in digest["admission"]["admitted_files"]
+    assert "src/data/entry_readiness_writer.py" in digest["admission"]["admitted_files"]
 
 
 def test_forecast_live_work_queue_journaling_routes_to_dedicated_profile():

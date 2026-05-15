@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
@@ -174,6 +175,12 @@ def _members(value: object) -> tuple[float | None, ...]:
     for item in parsed:
         members.append(None if item is None else float(item))
     return tuple(members)
+
+
+def _members_are_complete(members: tuple[float | None, ...], *, expected_members: int) -> bool:
+    if len(members) != expected_members:
+        return False
+    return all(member is not None and math.isfinite(member) for member in members)
 
 
 def _json_list(value: object) -> tuple[Any, ...]:
@@ -582,7 +589,7 @@ def read_executable_forecast(
     snapshot_window_start = _parse_utc(snapshot.local_day_start_utc)
     if coverage_window_start is None or snapshot_window_start != coverage_window_start:
         return ExecutableForecastBundleResult("BLOCKED", "SNAPSHOT_LOCAL_DAY_WINDOW_MISMATCH")
-    if len(snapshot.members) < expected_members:
+    if not _members_are_complete(snapshot.members, expected_members=expected_members):
         return ExecutableForecastBundleResult("BLOCKED", "MISSING_EXPECTED_MEMBERS")
     coverage_snapshot_ids = tuple(int(item) for item in _json_list(coverage.get("snapshot_ids_json")) if str(item).isdigit())
     if coverage_snapshot_ids and snapshot.snapshot_id not in coverage_snapshot_ids:
