@@ -35,7 +35,20 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_V2_HOST = "https://clob.polymarket.com"
 DEFAULT_Q1_EGRESS_EVIDENCE = Path(
-    "docs/operations/task_2026-04-26_polymarket_clob_v2_migration/evidence/q1_zeus_egress_2026-04-26.txt"
+    "docs/operations/live_egress/q1_zeus_egress_current.txt"
+)
+Q1_EGRESS_EVIDENCE_ENV = "POLYMARKET_CLOB_V2_Q1_EGRESS_EVIDENCE"
+Q1_EGRESS_REJECTED_PATH_FRAGMENTS = (
+    "task_2026-04-26_polymarket_clob_v2_migration",
+)
+Q1_EGRESS_REQUIRED_MARKERS = (
+    "Q1 Zeus egress evidence sentinel",
+    "authority_basis:",
+    "operator_attestation:",
+    "live_side_effects: none",
+    "raw_secrets_or_signed_payloads: none",
+    "probe_results:",
+    "https://clob.polymarket.com/ok",
 )
 DEFAULT_SIGNATURE_TYPE = 2  # Current Zeus keychain funder is a POLY_GNOSIS_SAFE contract.
 DEFAULT_POLYGON_RPC_URL = "https://polygon-bor-rpc.publicnode.com"
@@ -244,12 +257,10 @@ class PolymarketV2Adapter:
         return self._client
 
     def preflight(self) -> PreflightResult:
-        if self.q1_egress_evidence_path is not None and not Path(self.q1_egress_evidence_path).exists():
-            return PreflightResult(
-                ok=False,
-                error_code="Q1_EGRESS_EVIDENCE_ABSENT",
-                message=f"missing Q1 egress evidence: {self.q1_egress_evidence_path}",
-            )
+        if self.q1_egress_evidence_path is not None:
+            evidence_result = _validate_q1_egress_evidence(self.q1_egress_evidence_path)
+            if not evidence_result.ok:
+                return evidence_result
         try:
             client = self._sdk_client()
             get_ok = getattr(client, "get_ok", None)
@@ -262,6 +273,7 @@ class PolymarketV2Adapter:
                 error_code="V2_PREFLIGHT_FAILED",
                 message=str(exc),
             )
+
 
     def get_clob_market_info(self, condition_id: str) -> ClobMarketInfo:
         raw = self._sdk_client().get_clob_market_info(condition_id)
@@ -827,6 +839,49 @@ class PolymarketV2Adapter:
             neg_risk=bool(neg_risk_fn(token_id)),
             fee_details=fee_details,
         )
+
+
+def _validate_q1_egress_evidence(path: Path | str) -> PreflightResult:
+    evidence_path = Path(path)
+    if not evidence_path.exists():
+        return PreflightResult(
+            ok=False,
+            error_code="Q1_EGRESS_EVIDENCE_ABSENT",
+            message=f"missing Q1 egress evidence: {evidence_path}",
+        )
+    if not evidence_path.is_file():
+        return PreflightResult(
+            ok=False,
+            error_code="Q1_EGRESS_EVIDENCE_INVALID",
+            message=f"Q1 egress evidence is not a file: {evidence_path}",
+        )
+    normalized_path = evidence_path.as_posix()
+    for fragment in Q1_EGRESS_REJECTED_PATH_FRAGMENTS:
+        if fragment in normalized_path:
+            return PreflightResult(
+                ok=False,
+                error_code="Q1_EGRESS_EVIDENCE_INVALID",
+                message=f"stale Q1 egress evidence path is not current authority: {evidence_path}",
+            )
+    try:
+        text = evidence_path.read_text(encoding="utf-8")
+    except Exception as exc:
+        return PreflightResult(
+            ok=False,
+            error_code="Q1_EGRESS_EVIDENCE_INVALID",
+            message=f"cannot read Q1 egress evidence {evidence_path}: {exc}",
+        )
+    missing = [marker for marker in Q1_EGRESS_REQUIRED_MARKERS if marker not in text]
+    if missing:
+        return PreflightResult(
+            ok=False,
+            error_code="Q1_EGRESS_EVIDENCE_INVALID",
+            message=(
+                f"Q1 egress evidence {evidence_path} is missing required marker(s): "
+                + ", ".join(missing)
+            ),
+        )
+    return PreflightResult(ok=True)
 
 
 def _canonical_fee_details_for_envelope(value: Any, *, allow_unavailable: bool = False) -> dict[str, Any]:

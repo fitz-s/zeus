@@ -106,7 +106,16 @@ def _build_adapter(tmp_path: Path):
     """Build a PolymarketV2Adapter with a real evidence file and fake client."""
     from src.venue.polymarket_v2_adapter import PolymarketV2Adapter
     evidence = tmp_path / "q1_zeus_egress_2026-05-05.txt"
-    evidence.write_text("daemon host probe ok\n")
+    evidence.write_text(
+        "Q1 Zeus egress evidence sentinel\n"
+        "authority_basis: test\n"
+        "operator_attestation: test current egress accepted\n"
+        "live_side_effects: none; HTTPS GET probes only\n"
+        "raw_secrets_or_signed_payloads: none\n"
+        "probe_results:\n"
+        "[{\"effective_url\":\"https://clob.polymarket.com/ok\",\"status_code\":200}]\n",
+        encoding="utf-8",
+    )
     fake_client = MagicMock()
     fake_client.get_ok.return_value = {"ok": True}
     return PolymarketV2Adapter(

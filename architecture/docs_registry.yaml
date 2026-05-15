@@ -660,6 +660,25 @@ entries:
   contains_volatile_metrics: false
   current_tense_allowed: true
   refresh_source: packet_audit
+- path: docs/operations/live_egress/q1_zeus_egress_current.txt
+  doc_class: operations
+  default_read: false
+  direct_reference_allowed: true
+  current_role: current runtime-gating Q1 Zeus daemon egress evidence for Polymarket CLOB V2 preflight
+  canonical_replaced_by: []
+  next_action: retain_as_evidence
+  lifecycle_state: active
+  coverage_scope: exact
+  parent_coverage_allowed: false
+  truth_profile: report_evidence
+  freshness_class: packet_bound
+  supersedes:
+    - docs/operations/task_2026-04-26_polymarket_clob_v2_migration/evidence/q1_zeus_egress_2026-04-26.txt
+  superseded_by: []
+  may_live_in_reference: false
+  contains_volatile_metrics: true
+  current_tense_allowed: true
+  refresh_source: packet_audit
 - path: docs/operations/active_unfinished_backlog.md
   doc_class: operations
   default_read: false

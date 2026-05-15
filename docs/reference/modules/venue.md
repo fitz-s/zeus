@@ -30,7 +30,10 @@ any Polymarket side effect.
   delegates live placement/cancel/order queries into the adapter while
   preserving existing executor monkeypatch seams.
 - Operator-gated preflight: Q1-zeus-egress evidence controls whether V2 host
-  preflight can pass operationally.
+  preflight can pass operationally. The default evidence surface is
+  `docs/operations/live_egress/q1_zeus_egress_current.txt`; operators may point
+  live runtime at an equivalent current evidence file via
+  `POLYMARKET_CLOB_V2_Q1_EGRESS_EVIDENCE`.
 
 ## 4. Runtime role
 

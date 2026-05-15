@@ -214,6 +214,16 @@ def _resolve_clob_v2_signature_type() -> int:
     return signature_type
 
 
+def _resolve_q1_egress_evidence_path(*, default: Path, env_name: str) -> Path:
+    raw = os.environ.get(env_name)
+    if raw is None:
+        return default
+    value = raw.strip()
+    if not value:
+        return default
+    return Path(value).expanduser()
+
+
 class PolymarketClient:
     """CLOB client for order placement and orderbook queries."""
 
@@ -239,12 +249,18 @@ class PolymarketClient:
             return adapter
 
         from src.venue.polymarket_v2_adapter import (
+            DEFAULT_Q1_EGRESS_EVIDENCE,
             DEFAULT_POLYGON_RPC_URL,
             DEFAULT_V2_HOST,
             PolymarketV2Adapter,
+            Q1_EGRESS_EVIDENCE_ENV,
         )
 
         creds = _resolve_credentials()
+        q1_egress_evidence = _resolve_q1_egress_evidence_path(
+            default=DEFAULT_Q1_EGRESS_EVIDENCE,
+            env_name=Q1_EGRESS_EVIDENCE_ENV,
+        )
         adapter = PolymarketV2Adapter(
             host=os.environ.get("POLYMARKET_CLOB_V2_HOST", DEFAULT_V2_HOST),
             funder_address=creds["funder_address"],
@@ -253,6 +269,7 @@ class PolymarketClient:
             signature_type=_resolve_clob_v2_signature_type(),
             polygon_rpc_url=os.environ.get("POLYGON_RPC_URL", DEFAULT_POLYGON_RPC_URL),
             api_creds=creds.get("api_creds"),
+            q1_egress_evidence_path=q1_egress_evidence,
         )
         self._v2_adapter = adapter
         logger.info("Polymarket CLOB V2 adapter initialized (live mode)")

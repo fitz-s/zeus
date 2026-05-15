@@ -98,6 +98,7 @@ make a surface default-read unless `current_state.md` routes it.
 | `current_source_validity.md` | current fact | Current audited source-validity posture; not authority law |
 | `packet_scope_protocol.md` | active support | Protocol reference for the Packet Runtime (`zpkt`) and `scope.yaml` sidecar contract |
 | `tigge_daemon_integration.md` | packet evidence | Design doc for TIGGE retrieval inside the data-ingest daemon — operator directive 2026-05-01 |
+| `live_egress/` | active runtime-gating evidence | Current Q1 Zeus daemon egress evidence for Polymarket CLOB V2 preflight; public probe results only, no secrets or signed payloads |
 | `edge_observation/` | active monitoring | Operator-managed edge trajectory observation surface |
 | `attribution_drift/` | active monitoring | Operator-managed strategy attribution drift observation surface |
 | `ws_poll_reaction/` | active monitoring | Operator-managed WebSocket/poll reaction observation surface |

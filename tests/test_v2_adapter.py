@@ -154,7 +154,7 @@ def _adapter(tmp_path: Path, fake_client=None):
     from src.venue.polymarket_v2_adapter import PolymarketV2Adapter
 
     evidence = tmp_path / "q1_zeus_egress_2026-04-27.txt"
-    evidence.write_text("daemon host probe ok\n")
+    _write_valid_q1_evidence(evidence)
     fake_client = fake_client or FakeOneStepClient()
     return PolymarketV2Adapter(
         host="https://clob-v2.polymarket.com",
@@ -176,7 +176,7 @@ def test_adapter_threads_configured_signature_type_to_client_factory(tmp_path):
         return FakeOneStepClient()
 
     evidence = tmp_path / "q1_zeus_egress_2026-05-15.txt"
-    evidence.write_text("daemon host probe ok\n")
+    _write_valid_q1_evidence(evidence)
     adapter = PolymarketV2Adapter(
         host="https://clob.polymarket.com",
         funder_address="0xfunder",
@@ -380,6 +380,16 @@ def test_polymarket_client_defaults_to_current_keychain_funder_signature_type(mo
     assert adapter.polygon_rpc_url
 
 
+def test_default_q1_egress_evidence_uses_current_live_control_surface():
+    from src.venue.polymarket_v2_adapter import DEFAULT_Q1_EGRESS_EVIDENCE
+
+    default_path = str(DEFAULT_Q1_EGRESS_EVIDENCE)
+
+    assert "task_2026-04-26_polymarket_clob_v2_migration" not in default_path
+    assert default_path == "docs/operations/live_egress/q1_zeus_egress_current.txt"
+    assert DEFAULT_Q1_EGRESS_EVIDENCE.exists()
+
+
 def test_polymarket_client_honors_signature_type_env(monkeypatch):
     from src.data import polymarket_client as pm
 
@@ -393,6 +403,36 @@ def test_polymarket_client_honors_signature_type_env(monkeypatch):
     adapter = pm.PolymarketClient()._ensure_v2_adapter()
 
     assert adapter.signature_type == 1
+
+
+def test_polymarket_client_honors_q1_egress_evidence_env(monkeypatch, tmp_path):
+    from src.data import polymarket_client as pm
+
+    evidence = tmp_path / "q1_egress_current.txt"
+    _write_valid_q1_evidence(evidence)
+    monkeypatch.setattr(
+        pm,
+        "_resolve_credentials",
+        lambda: {"private_key": "0xabc", "funder_address": "0xfunder"},
+    )
+    monkeypatch.setenv("POLYMARKET_CLOB_V2_Q1_EGRESS_EVIDENCE", str(evidence))
+
+    adapter = pm.PolymarketClient()._ensure_v2_adapter()
+
+    assert adapter.q1_egress_evidence_path == evidence
+
+
+def _write_valid_q1_evidence(path: Path) -> None:
+    path.write_text(
+        "Q1 Zeus egress evidence sentinel\n"
+        "authority_basis: test\n"
+        "operator_attestation: test current egress accepted\n"
+        "live_side_effects: none; HTTPS GET probes only\n"
+        "raw_secrets_or_signed_payloads: none\n"
+        "probe_results:\n"
+        "[{\"effective_url\":\"https://clob.polymarket.com/ok\",\"status_code\":200}]\n",
+        encoding="utf-8",
+    )
 
 
 def test_adapter_module_imports_without_py_clob_client_v2_installed(monkeypatch):
@@ -427,6 +467,54 @@ def test_preflight_fails_closed_when_q1_egress_evidence_absent(tmp_path):
 
     assert result.ok is False
     assert result.error_code == "Q1_EGRESS_EVIDENCE_ABSENT"
+    assert fake.calls == []
+
+
+def test_preflight_rejects_arbitrary_existing_q1_egress_file_without_sdk_contact(tmp_path):
+    from src.venue.polymarket_v2_adapter import PolymarketV2Adapter
+
+    evidence = tmp_path / "any_existing_file.txt"
+    evidence.write_text("not current q1 egress evidence\n")
+    fake = FakeOneStepClient()
+    adapter = PolymarketV2Adapter(
+        host="https://clob-v2.polymarket.com",
+        funder_address="0xfunder",
+        signer_key="test-key",
+        chain_id=137,
+        q1_egress_evidence_path=evidence,
+        client_factory=lambda **kwargs: fake,
+    )
+
+    result = adapter.preflight()
+
+    assert result.ok is False
+    assert result.error_code == "Q1_EGRESS_EVIDENCE_INVALID"
+    assert fake.calls == []
+
+
+def test_preflight_rejects_archived_april_q1_egress_path_without_sdk_contact(tmp_path):
+    from src.venue.polymarket_v2_adapter import PolymarketV2Adapter
+
+    evidence = (
+        tmp_path
+        / "docs/operations/task_2026-04-26_polymarket_clob_v2_migration/evidence/q1_zeus_egress_2026-04-26.txt"
+    )
+    evidence.parent.mkdir(parents=True)
+    _write_valid_q1_evidence(evidence)
+    fake = FakeOneStepClient()
+    adapter = PolymarketV2Adapter(
+        host="https://clob-v2.polymarket.com",
+        funder_address="0xfunder",
+        signer_key="test-key",
+        chain_id=137,
+        q1_egress_evidence_path=evidence,
+        client_factory=lambda **kwargs: fake,
+    )
+
+    result = adapter.preflight()
+
+    assert result.ok is False
+    assert result.error_code == "Q1_EGRESS_EVIDENCE_INVALID"
     assert fake.calls == []
 
 

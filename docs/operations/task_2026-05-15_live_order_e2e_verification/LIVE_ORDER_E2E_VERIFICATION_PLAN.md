@@ -333,6 +333,27 @@ Pass criteria:
 - A fresh `CollateralLedger` snapshot after restart has `authority_tier='CHAIN'`, fresh `captured_at`, enough `pusd_balance_micro`, and enough `pusd_allowance_micro` for the candidate notional, or a named external approval blocker is recorded.
 - Only after the above can Phase 6/7 retry a real live submit.
 
+### Phase 5F - Q1 Egress Preflight Authority Repair
+
+Live cycle 605 proved the evaluator/executor reached a real submit attempt, but the order was rejected before venue submission:
+
+`v2_preflight_failed: Q1_EGRESS_EVIDENCE_ABSENT: missing Q1 egress evidence: docs/operations/task_2026-04-26_polymarket_clob_v2_migration/evidence/q1_zeus_egress_2026-04-26.txt`
+
+Root cause:
+
+- The Q1 egress evidence file was introduced in commit `31615be` and deleted in commit `6535f50` during workspace cleanup.
+- `PolymarketV2Adapter.DEFAULT_Q1_EGRESS_EVIDENCE` still pointed at that deleted packet path.
+- The live preflight therefore depended on a stale historical packet path instead of a current live-control evidence surface.
+
+Repair rule:
+
+- Do not restore the old April packet file.
+- Move the default Q1 evidence surface to `docs/operations/live_egress/q1_zeus_egress_current.txt`.
+- Keep fail-closed behavior when the configured evidence file is absent.
+- Add `POLYMARKET_CLOB_V2_Q1_EGRESS_EVIDENCE` as an explicit operator override for equivalent current evidence.
+- Validate Q1 evidence content before SDK contact; arbitrary existing files and archived April packet paths must fail closed.
+- Verify with relationship tests that the default no longer points at the archived packet, that the default file is tracked and present, that the live client threads the operator override into the adapter, and that invalid/stale evidence paths do not contact the SDK.
+
 ## Phase 6 - Candidate and Final Intent Proof
 
 Purpose: prove the evaluator produces an orderable decision from real data.
