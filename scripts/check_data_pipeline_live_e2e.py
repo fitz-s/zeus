@@ -290,7 +290,7 @@ def _target_range(conn: sqlite3.Connection, source_run_id: str) -> dict[str, Any
 
 
 def _candidate_snapshot(conn: sqlite3.Connection, source_run_id: str, now_date: date) -> dict[str, Any] | None:
-    live_eligible_for_source_run = _fetch_one_dict(
+    return _fetch_one_dict(
         conn,
         """
         SELECT es.*
@@ -314,37 +314,6 @@ def _candidate_snapshot(conn: sqlite3.Connection, source_run_id: str, now_date: 
         LIMIT 1
         """,
         (source_run_id, now_date.isoformat()),
-    )
-    if live_eligible_for_source_run is not None:
-        return live_eligible_for_source_run
-
-    return _fetch_one_dict(
-        conn,
-        """
-        SELECT es.*
-        FROM forecasts.source_run_coverage AS cov
-        JOIN forecasts.source_run AS sr
-          ON sr.source_run_id = cov.source_run_id
-        JOIN forecasts.ensemble_snapshots_v2 AS es
-          ON es.source_run_id = cov.source_run_id
-         AND es.source_id = cov.source_id
-         AND es.source_transport = cov.source_transport
-         AND es.city = cov.city
-         AND es.target_date = cov.target_local_date
-         AND es.temperature_metric = cov.temperature_metric
-         AND es.data_version = cov.data_version
-        WHERE cov.readiness_status = 'LIVE_ELIGIBLE'
-          AND cov.target_local_date >= ?
-        ORDER BY
-          sr.captured_at DESC,
-          sr.source_cycle_time DESC,
-          CASE WHEN cov.city = 'London' THEN 0 ELSE 1 END,
-          cov.target_local_date,
-          cov.city,
-          es.snapshot_id
-        LIMIT 1
-        """,
-        (now_date.isoformat(),),
     )
 
 
@@ -430,6 +399,7 @@ def _build_checks(
     *,
     processes: list[dict[str, Any]],
     latest_source_run: dict[str, Any] | None,
+    reader_source_run: dict[str, Any] | None,
     target_range: dict[str, Any],
     reader_probe: dict[str, Any],
     evaluator_guard: dict[str, Any],
@@ -479,6 +449,16 @@ def _build_checks(
         )
     )
     if latest_source_run is not None:
+        status = str(latest_source_run.get("status") or "")
+        completeness = str(latest_source_run.get("completeness_status") or "")
+        latest_usable = status in {"SUCCESS", "PARTIAL"} and completeness in {"COMPLETE", "PARTIAL"}
+        checks.append(
+            Check(
+                "latest_source_run_usable",
+                "PASS" if latest_usable else "FAIL",
+                f"status={status} completeness_status={completeness}",
+            )
+        )
         cycle_date = _source_cycle_date(latest_source_run)
         min_target = target_range.get("min_target_date")
         contaminated = bool(cycle_date and min_target and str(min_target) < cycle_date.isoformat())
@@ -487,6 +467,15 @@ def _build_checks(
                 "source_run_target_dates_not_before_cycle",
                 "FAIL" if contaminated else "PASS",
                 f"source_cycle_date={cycle_date}, min_target_date={min_target}, max_target_date={target_range.get('max_target_date')}",
+            )
+        )
+        reader_source_run_id = reader_source_run.get("source_run_id") if reader_source_run else None
+        latest_source_run_id = latest_source_run.get("source_run_id")
+        checks.append(
+            Check(
+                "reader_uses_latest_source_run",
+                "PASS" if reader_source_run_id == latest_source_run_id else "FAIL",
+                f"latest_source_run_id={latest_source_run_id} reader_source_run_id={reader_source_run_id}",
             )
         )
     checks.append(
@@ -534,6 +523,7 @@ def run_live_check(*, live_root_override: str | None = None) -> tuple[int, dict[
     checks = _build_checks(
         processes=processes,
         latest_source_run=latest,
+        reader_source_run=reader_source_run,
         target_range=target_range,
         reader_probe=reader,
         evaluator_guard=evaluator_guard,

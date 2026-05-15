@@ -99,7 +99,13 @@ def test_all_ok_returns_SUCCESS_COMPLETE(tmp_path, monkeypatch):
     import src.data.ecmwf_open_data as mod
 
     def fetch_impl(*, cycle_date, cycle_hour, param, step, output_dir, mirrors):
-        f = mod._step_cache_path(output_dir, step=step, param=param)
+        f = mod._step_cache_path(
+            output_dir,
+            run_date=cycle_date,
+            run_hour=cycle_hour,
+            step=step,
+            param=param,
+        )
         _make_fake_grib(f)
         return ("OK", f)
 
@@ -154,7 +160,13 @@ def test_some_404_returns_PARTIAL_PARTIAL_and_extract_fires(tmp_path, monkeypatc
     def fetch_impl(*, cycle_date, cycle_hour, param, step, output_dir, mirrors):
         if step == 9:
             return ("NOT_RELEASED", None)
-        f = mod._step_cache_path(output_dir, step=step, param=param)
+        f = mod._step_cache_path(
+            output_dir,
+            run_date=cycle_date,
+            run_hour=cycle_hour,
+            step=step,
+            param=param,
+        )
         _make_fake_grib(f)
         return ("OK", f)
 
@@ -284,7 +296,13 @@ def test_resume_via_atomic_rename(tmp_path):
     output_dir.mkdir()
     step = 3
     param = "mx2t3"
-    canonical = _step_cache_path(output_dir, step=step, param=param)
+    canonical = _step_cache_path(
+        output_dir,
+        run_date=RUN_DATE,
+        run_hour=RUN_HOUR,
+        step=step,
+        param=param,
+    )
     canonical.write_bytes(b"\x00" * 128)  # non-empty → resume
 
     # The resume path returns before entering the mirror loop — no HTTP call made.
@@ -304,6 +322,79 @@ def test_resume_via_atomic_rename(tmp_path):
     assert detail == canonical
 
 
+def test_step_cache_identity_includes_cycle_hour(tmp_path, monkeypatch):
+    """A later same-date source cycle must not reuse an earlier cycle step file."""
+
+    import sys
+    import types
+
+    import src.data.ecmwf_open_data as mod
+
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    step = 3
+    param = "mx2t3"
+    prior_cycle_file = mod._step_cache_path(
+        output_dir,
+        run_date=RUN_DATE,
+        run_hour=0,
+        step=step,
+        param=param,
+    )
+    prior_cycle_file.write_bytes(b"00Z")
+    later_cycle_file = mod._step_cache_path(
+        output_dir,
+        run_date=RUN_DATE,
+        run_hour=12,
+        step=step,
+        param=param,
+    )
+    assert later_cycle_file != prior_cycle_file
+
+    class _FakeClient:
+        def __init__(self, source=None):
+            self.source = source
+
+    fake_opendata = types.ModuleType("ecmwf.opendata")
+    fake_opendata.Client = _FakeClient
+    fake_ecmwf = types.ModuleType("ecmwf")
+    fake_ecmwf.opendata = fake_opendata
+
+    def fake_retrieve(_client, **kwargs):
+        target = Path(kwargs["target"])
+        target.write_bytes(b"PF" if kwargs["type"] == ["pf"] else b"CF")
+        return SimpleNamespace(size=target.stat().st_size)
+
+    orig_ecmwf = sys.modules.get("ecmwf")
+    orig_opendata = sys.modules.get("ecmwf.opendata")
+    sys.modules["ecmwf"] = fake_ecmwf
+    sys.modules["ecmwf.opendata"] = fake_opendata
+    monkeypatch.setattr(mod, "_retrieve_step_with_controlled_ranges", fake_retrieve)
+    try:
+        status, detail = mod._fetch_one_step(
+            cycle_date=RUN_DATE,
+            cycle_hour=12,
+            param=param,
+            step=step,
+            output_dir=output_dir,
+            mirrors=("aws",),
+        )
+    finally:
+        if orig_ecmwf is None:
+            sys.modules.pop("ecmwf", None)
+        else:
+            sys.modules["ecmwf"] = orig_ecmwf
+        if orig_opendata is None:
+            sys.modules.pop("ecmwf.opendata", None)
+        else:
+            sys.modules["ecmwf.opendata"] = orig_opendata
+
+    assert status == "OK"
+    assert detail == later_cycle_file
+    assert later_cycle_file.read_bytes() == b"CFPF"
+    assert prior_cycle_file.read_bytes() == b"00Z"
+
+
 # ---------------------------------------------------------------------------
 # test 6: .partial file does NOT count as resume (REL-2)
 # ---------------------------------------------------------------------------
@@ -320,7 +411,10 @@ def test_partial_file_does_not_count_as_resume(tmp_path):
     step = 6
     param = "mx2t3"
     # Write a .partial but NOT the canonical .grib2
-    partial = output_dir / f".step{step:03d}_{param}_ens51.grib2.partial"
+    partial = output_dir / (
+        f".{RUN_DATE.strftime('%Y%m%d')}_{RUN_HOUR:02d}z_"
+        f"step{step:03d}_{param}_ens51.grib2.partial"
+    )
     partial.write_bytes(b"\x00" * 64)
 
     # The canonical file does not exist, so _fetch_one_step should attempt a fetch.
@@ -458,11 +552,24 @@ def test_concat_order_step_ascending(tmp_path):
     # Create step files with distinctive byte payloads so we can detect order
     step_bytes = {9: b"STEP9", 3: b"STEP3", 6: b"STEP6"}
     for step, payload in step_bytes.items():
-        f = _step_cache_path(output_dir, step=step, param=param)
+        f = _step_cache_path(
+            output_dir,
+            run_date=RUN_DATE,
+            run_hour=RUN_HOUR,
+            step=step,
+            param=param,
+        )
         f.write_bytes(payload)
 
     out = tmp_path / "merged.grib2"
-    _concat_steps([9, 3, 6], param, output_dir, out)  # pass steps in non-ascending order
+    _concat_steps(
+        [9, 3, 6],
+        param,
+        output_dir,
+        out,
+        run_date=RUN_DATE,
+        run_hour=RUN_HOUR,
+    )  # pass steps in non-ascending order
 
     content = out.read_bytes()
     # Ascending order: STEP3 then STEP6 then STEP9
@@ -497,7 +604,13 @@ def test_thread_safety_max_workers_2(tmp_path, monkeypatch):
         steps_fetched.append(step)
         if step == 6:
             return ("FAILED", "HTTP_503_mirror_aws_attempt_2")
-        f = mod._step_cache_path(output_dir, step=step, param=param)
+        f = mod._step_cache_path(
+            output_dir,
+            run_date=cycle_date,
+            run_hour=cycle_hour,
+            step=step,
+            param=param,
+        )
         _make_fake_grib(f)
         return ("OK", f)
 

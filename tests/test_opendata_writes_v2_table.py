@@ -345,10 +345,16 @@ def test_collect_open_ens_cycle_partial_global_run_allows_covered_target(tmp_pat
     )
 
     def fetch_impl(*, cycle_date, cycle_hour, param, step, output_dir, mirrors):
-        del cycle_date, cycle_hour, mirrors
+        del mirrors
         if step == 150:
             return ("NOT_RELEASED", "not released")
-        ecmwf_open_data._step_cache_path(output_dir, step=step, param=param).write_bytes(b"x")
+        ecmwf_open_data._step_cache_path(
+            output_dir,
+            run_date=cycle_date,
+            run_hour=cycle_hour,
+            step=step,
+            param=param,
+        ).write_bytes(b"x")
         return ("OK", None)
 
     result = ecmwf_open_data.collect_open_ens_cycle(

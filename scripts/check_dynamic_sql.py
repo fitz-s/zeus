@@ -97,21 +97,13 @@ _DYNAMIC_SQL_PATTERN = re.compile(
 # interpolation is iterated over a hardcoded literal tuple — no user input,
 # no untrusted source. Per scanner contract (internal whitelist → bump),
 # this is an explicit registration matching the calibration/store.py rule.
-#
-# 2026-05-15 (PR #117 review): src/data/executable_forecast_reader.py removed
-# its remaining dynamic-SQL execute site by routing attached-schema reads through
-# static SQL templates selected from internal authority-table names.
-#
-# 2026-05-15 (PR #117 review follow-up): baseline catch-up to the current tree
-# scanner output. This keeps the gate executable after the forecast DB split and
-# observability additions that were already present in the branch/mainline
-# surface; future dynamic-SQL additions must again change this dict explicitly.
 _BASELINE_PER_FILE: dict[str, int] = {
     "src/backtest/economics.py": 1,
     "src/calibration/effective_sample_size.py": 2,
     "src/calibration/store.py": 15,
     "src/contracts/world_schema_validator.py": 1,
     "src/data/daily_obs_append.py": 4,
+    "src/data/executable_forecast_reader.py": 1,
     "src/data/daily_observation_writer.py": 6,
     "src/data/ingest_status_writer.py": 1,
     "src/data/observation_instants_v2_writer.py": 4,
@@ -124,26 +116,21 @@ _BASELINE_PER_FILE: dict[str, int] = {
     # (sv2_table, cp_v2_table, etc.) from ReplayContext — no user-controlled
     # input. Added at PR #87 follow-up baseline bump (2026-05-08).
     "src/engine/replay_selection_coverage.py": 6,
-    "src/execution/exchange_reconcile.py": 1,
     "src/execution/harvester.py": 5,
     "src/execution/settlement_commands.py": 4,
     "src/ingest/harvester_truth_writer.py": 1,
     "src/ingest/polymarket_user_channel.py": 1,
     "src/main.py": 1,
-    "src/observability/calibration_serving_status.py": 4,
-    "src/observability/price_evidence_report.py": 7,
     "src/observability/status_summary.py": 3,
-    "src/state/chain_reconciliation.py": 1,
     "src/state/chronicler.py": 1,
-    "src/state/decision_chain.py": 1,
     "src/state/job_run_repo.py": 4,
     "src/state/market_topology_repo.py": 4,
     "src/state/readiness_repo.py": 4,
     "src/state/source_run_repo.py": 4,
-    "src/state/db.py": 33,
+    "src/state/db.py": 22,
     "src/state/ledger.py": 8,
     "src/state/projection.py": 2,
-    "src/state/schema/v2_schema.py": 2,
+    "src/state/schema/v2_schema.py": 1,
     # 2 PRAGMA table_info() interpolations (with optional attached-DB name).
     # Both `table` and `attached` are internal identifiers passed by callers
     # in src/calibration/store.py — no user input. Sites were extracted out

@@ -437,16 +437,20 @@ def _download_output_path(*, run_date: date, run_hour: int, param: str) -> Path:
     )
 
 
-def _step_cache_path(output_dir: Path, *, step: int, param: str) -> Path:
+def _step_cache_path(output_dir: Path, *, run_date: date, run_hour: int, step: int, param: str) -> Path:
     """Per-step cache for the full executable member set.
 
     Older ``.stepNNN_<param>.grib2`` cache files can contain only 50
     perturbed ``enfo/ef`` members when ECMWF omits ``cf`` from that file. The
     explicit suffix prevents resume from reusing those pf-only artifacts after
     the control/oper merge fix.
+
+    The cycle identity is part of the cache key. Reusing 00Z step bytes for a
+    later 12Z source_run would preserve file bytes while corrupting forecast
+    provenance.
     """
 
-    return output_dir / f".step{step:03d}_{param}_ens51.grib2"
+    return output_dir / f".{run_date.strftime('%Y%m%d')}_{run_hour:02d}z_step{step:03d}_{param}_ens51.grib2"
 
 
 def _cycle_extract_dir_name(*, run_date: date, run_hour: int) -> str:
@@ -980,7 +984,13 @@ def _fetch_one_step(
     Single-writer antibody: NO SQLite writes in this function — HTTP only.
     All DB writes occur on the main thread after all futures complete.
     """
-    canonical = _step_cache_path(output_dir, step=step, param=param)
+    canonical = _step_cache_path(
+        output_dir,
+        run_date=cycle_date,
+        run_hour=cycle_hour,
+        step=step,
+        param=param,
+    )
     partial   = canonical.with_suffix(".grib2.partial")
     if canonical.exists() and canonical.stat().st_size > 0:
         return ("OK", canonical)   # resume: already fetched in a prior attempt
@@ -1075,7 +1085,15 @@ def _fetch_one_step(
     return ("FAILED", last_err or "EXHAUSTED")
 
 
-def _concat_steps(ok_steps: list[int], param: str, output_dir: Path, output_path: Path) -> None:
+def _concat_steps(
+    ok_steps: list[int],
+    param: str,
+    output_dir: Path,
+    output_path: Path,
+    *,
+    run_date: date,
+    run_hour: int,
+) -> None:
     """Concatenate per-step GRIB2 files into the canonical output_path.
 
     GRIB2 is self-delimiting; step order does not affect extractor correctness
@@ -1084,7 +1102,13 @@ def _concat_steps(ok_steps: list[int], param: str, output_dir: Path, output_path
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with open(output_path, "wb") as out:
         for step in sorted(ok_steps):
-            step_file = _step_cache_path(output_dir, step=step, param=param)
+            step_file = _step_cache_path(
+                output_dir,
+                run_date=run_date,
+                run_hour=run_hour,
+                step=step,
+                param=param,
+            )
             if step_file.exists():
                 out.write(step_file.read_bytes())
 
@@ -1414,7 +1438,14 @@ def collect_open_ens_cycle(
         download_observed_steps = ok_steps
 
         # Concat per-step files into the canonical output_path for the extractor.
-        _concat_steps(ok_steps, cfg["open_data_param"], output_dir, output_path)
+        _concat_steps(
+            ok_steps,
+            cfg["open_data_param"],
+            output_dir,
+            output_path,
+            run_date=cycle_date,
+            run_hour=cycle_hour,
+        )
 
         stages.append({
             "label": f"download_parallel_{track}",
