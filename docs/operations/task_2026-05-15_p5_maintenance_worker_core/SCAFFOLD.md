@@ -70,7 +70,7 @@ Each sub-packet must stay ≤ 1000 LOC.
 | P5.2 | Validator + safety contract enforcement + operation guards | ~1000 | ~400 | pre-action check, 5 contract guarantees, post-mutation detector, git/gh/subprocess guards |
 | P5.3 | Rules parser + task registry + evidence trail + ack manager | ~700 | ~300 | YAML loading, proposal emit, rollback record, ack hashing |
 | P5.4 | Integration fixtures — 10 contrived workspace messes per category | ~200 | ~900 (fixtures + assertions) | acceptance suite; defer fixture catalog to its own SCAFFOLD |
-| P5.5 (opt.) | CLI + scheduler bindings entry point | ~300 | ~100 | argparse, scheduler env detection, launchd/cron wiring |
+| P5.5 (REQUIRED for production runs) | CLI + apply/publish layer: commit, PR open, provenance stamping, scheduler bindings | ~400 | ~150 | argparse, scheduler env detection, provenance.py, launchd/cron wiring |
 
 **M5 decision: P5.0a types sub-packet (option ii).** `engine.run_tick()` (P5.1)
 calls `ActionValidator` (P5.2) and both import shared enums (`Operation`,
@@ -108,7 +108,7 @@ Root: `maintenance-worker/src/maintenance_worker/`
 
 ```
 types/
-  operations.py   ~60 LOC  (Operation enum: READ, WRITE, MOVE, DELETE, GIT_EXEC, GH_EXEC, SUBPROCESS_EXEC)
+  operations.py   ~65 LOC  (Operation enum: READ, WRITE, MKDIR, MOVE, DELETE, GIT_EXEC, GH_EXEC, SUBPROCESS_EXEC)
   results.py      ~70 LOC  (ValidatorResult, GuardResult, TickResult, ApplyResult, AckStatus)
   specs.py        ~50 LOC  (TaskSpec, EngineConfig, InstallMetadata, ProposalManifest, RollbackRecipe)
   modes.py        ~20 LOC  (RefusalReason enum, InvocationMode enum, ScheduleKind enum)
@@ -233,8 +233,15 @@ Covers SAFETY_CONTRACT.md "Forbidden Actions" bullets: `pip install`,
 `npm install`, `cargo add`, any package install/uninstall, `pytest` invocations
 that mutate state outside the evidence dir, `chmod`, `chown`, `ln -s` across
 safety boundary, arbitrary network requests.
+Also covers SAFETY_CONTRACT.md line 75: `rm` of any non-zero-byte file.
 - `check_subprocess(cmd: list[str]) -> ValidatorResult`
   Allowlist of permitted subprocess patterns; all others → `FORBIDDEN_OPERATION`.
+  `rm` is BLOCKED unconditionally in the subprocess allowlist. The only
+  permitted deletion path is Python-native `os.unlink()` on files whose size
+  has been pre-confirmed as zero bytes and whose path has passed
+  `validate_action(path, Operation.DELETE)`. `shutil.rmtree` is blocked;
+  directory removal uses `git worktree remove` (guarded by `GitOperationGuard`)
+  or `shutil.move` to quarantine (path validated before move).
 - Note: "no Task/SendMessage/Agent tool use" (leaf-not-orchestrator) is enforced
   at install time via `setup.py` import-time assertions — no runtime check needed
   since those symbols do not exist in the package dependency graph.
@@ -286,17 +293,29 @@ Policy files are read-only inputs; parser never writes to them.
 - `decrement_auto_ack_n(task_id: str, state_dir: Path) -> None`
 - `expire_stale_proposals(evidence_dir: Path, ttl_days: int) -> list[Path]`
 
-### cli/ — P5.5
+### cli/ — P5.5 (REQUIRED)
+
+**M6 decision (b): P5.5 is mandatory, not optional.**
+`engine._apply_decisions()` in P5.1 STAGES the applied filesystem diff into
+`ApplyResult` but does NOT commit to git or open PRs. All git-commit, PR-open,
+and provenance-stamping logic lives in P5.5. This keeps P5.1 focused on safety
+and filesystem mutation; P5.5 is the apply/publish layer. A deployment missing
+P5.5 cannot produce maintenance-branch commits — the audit-by-grep discipline
+(SAFETY_CONTRACT.md "Audit-by-Grep Discipline", lines 182-192) requires
+`git log --author='Maintenance Worker' --pretty='%h %ai %s'` to work on first
+live run. Without commit-author config, Run-Id trailers, and Generated-By
+headers in place before apply, audit-by-grep fails immediately.
 
 ```
 cli/
   entry.py             ~180 LOC
   scheduler_detect.py   ~80 LOC
+  provenance.py        ~100 LOC  (commit identity, Run-Id, Generated-By)
   notifier.py           ~40 LOC  (interface only; implementation in P6 bindings)
 ```
 
 **entry.py** — argparse root
-- `cmd_run(args)`: full tick via `MaintenanceEngine.run_tick()`
+- `cmd_run(args)`: full tick via `MaintenanceEngine.run_tick()` → `ApplyPublisher.publish()`
 - `cmd_dry_run(args)`: forces `DRY_RUN_ONLY`; ignores `live_default`
 - `cmd_status(args)`: prints guard state, last tick result, kill switch status
 - `cmd_version(args)`: semver from package metadata
@@ -306,10 +325,40 @@ cli/
   Checks: `MAINTENANCE_SCHEDULER=1` env var; known parent processes
   (launchd, cron). If neither → `MANUAL_CLI` → engine enforces DRY_RUN_ONLY.
 
+**provenance.py** — `ProvenanceStamper`
+Implements SAFETY_CONTRACT.md "Audit-by-Grep Discipline" (lines 182-192) and
+DESIGN.md "Identity And Provenance" section:
+- `make_run_id() -> str`  ← UUID4; written to evidence trail and every commit trailer
+- `set_commit_identity(repo: Path, author_name: str, author_email: str) -> None`
+  Configures `Maintenance Worker <maintenance@<org>>` for the duration of a tick
+  only (via `--local` git config scoped to the operation, not globally).
+- `wrap_file_with_header(path: Path, run_id: str) -> None`
+  Prepends `# Generated-By: maintenance_worker <run_id>` to any file the agent
+  creates (DESIGN.md "every file the agent writes carries a Generated-By header").
+- `make_commit_message(run_id: str, summary: str) -> str`
+  Returns message with `Run-Id: <run_id>` trailer so every commit is
+  reverse-lookupable via `git log --grep="Run-Id: <run_id>"`.
+
 **notifier.py** — `NotifierInterface` (abstract base)
 - `send_summary(run_id: str, summary_path: Path) -> None`
 - `send_alert(run_id: str, message: str, severity: AlertSeverity) -> None`
 Concrete implementations (Discord, Slack, file-only) live in P6 `bindings/`.
+
+### §3.5 Cross-reference: P5.1 ↔ P5.5 apply/publish boundary
+
+`MaintenanceEngine._apply_decisions()` (P5.1) returns `ApplyResult` containing
+the staged filesystem mutations (paths moved, files quarantined, zero-byte files
+deleted). It does NOT call `git commit` or `gh pr create`. After
+`_apply_decisions()` returns, `entry.cmd_run()` (P5.5) passes `ApplyResult` to
+`ApplyPublisher.publish(apply_result, run_id, provenance)`, which:
+1. Calls `ProvenanceStamper.set_commit_identity()`.
+2. Commits staged changes with `ProvenanceStamper.make_commit_message()`.
+3. Opens maintenance PR if `ApplyResult.requires_pr` is true.
+4. Calls `KillSwitch.post_mutation_detector()` to verify no forbidden paths
+   landed on disk.
+
+This boundary means P5.1 is fully testable without git operations; P5.5 unit
+tests mock `ApplyPublisher.publish()` to verify provenance fields.
 
 ### tests/ — P5.4
 
@@ -458,20 +507,35 @@ through `validate_action(path, Operation.READ)` and return `FORBIDDEN_PATH`.
 READ → assert `FORBIDDEN_PATH` (not `ALLOWED`).
 
 Verdict: **PASS if** `validate_action()` is invoked before EVERY filesystem
-operation — READ, WRITE, MOVE, DELETE — and `Operation.READ` is a member of
-the Operation enum with correct forbidden-path coverage verified by automated test.
+operation — READ, WRITE, MKDIR, MOVE, DELETE — and `Operation.READ` is a member
+of the Operation enum with correct forbidden-path coverage verified by automated
+test. `MKDIR` is a distinct enum value (not subsumed under WRITE) per
+SAFETY_CONTRACT.md line 100 which lists it as an explicit allowed-write
+operation, requiring its own path-pattern check before directory creation.
 
 ### Refusal modes are FATAL, not silent skip, per category?
 
 DESIGN.md "Refusal Modes": each refusal exits non-zero with explicit log.
 SAFETY_CONTRACT.md "Failure mode for any boundary crossing: agent FATAL ERROR,
-exit non-zero." `refusal.py::refuse_fatal()` is the single code path for all
-refusal categories; there is no `continue`-on-error path inside guard checks.
-Per-task errors (not guard failures) are isolated to `errors.tsv` and do not
-block subsequent tasks — but those are task-level errors, not guard refusals.
+exit non-zero." Guards split into two severity tiers:
 
-Verdict: **PASS if** `refuse_fatal()` is called (not a softer handler) for
-all 8 guard failure conditions, and a grep of `engine.py` finds zero
+Hard guards (7) — `refuse_fatal()` → non-zero exit, human must intervene:
+  `kill_switch` (KILL_SWITCH file), `not_dirty_repo`, `no_active_rebase`,
+  `disk_free_above_threshold`, `no_inflight_maintenance_pr`,
+  `not_self_quarantined`, and any `FORBIDDEN_*` from `validate_action()`.
+
+Soft guard (1) — `skip_tick()` → tick silently skipped, next tick retries:
+  `no_maintenance_pause_flag` (MAINTENANCE_PAUSED soft pause, per
+  SAFETY_CONTRACT.md lines 207-213: "skips ticks but does not require a
+  re-acknowledge to resume").
+
+Note: `no_oncall_quiet` is also a `skip_tick` per TASK_CATALOG.yaml
+(`severity: skip_tick`), not `refuse_fatal`. Total: 6 `refuse_fatal` +
+2 `skip_tick` among the named guards. Task-level errors are isolated to
+`errors.tsv` and do not block subsequent tasks.
+
+Verdict: **PASS if** `refuse_fatal()` is called for the 6 hard guards and
+`skip_tick()` for the 2 soft guards; a grep of `engine.py` finds zero
 `continue` statements inside the `CHECK_GUARDS` stage.
 
 ### Dry-run-first encoded as code, not docs?
@@ -548,35 +612,36 @@ Verdict: **PASS if** `grep -r "SendMessage\|AgentTool\|Task(" maintenance-worker
 p5_0_completed: true
 scaffold_path: docs/operations/task_2026-05-15_p5_maintenance_worker_core/SCAFFOLD.md
 repo_placement: standalone-repo (maintenance-worker/ as pip package)
-sub_packet_count: 5 (P5.0a + P5.1 + P5.2 + P5.3 + P5.4) + 1 optional (P5.5)
-sub_packet_max_loc: 1000  # P5.2 exactly at ceiling; P5.0a at 200; all within budget
-module_count: 18  # types/: 4 files; core/: 10 files; rules/: 4 files; cli/: 3 files (excl. tests dir)
-estimated_loc_total_core: 3250  # types 200 + core 1570 + rules 700 + cli 300 + P5.4 source 200 + unit tests 280
-estimated_loc_total_tests: 1350  # P5.4 60-fixture suite 900 + unit tests (types 50 + engine 250 + validator 400 + rules 300 + cli 100) = 1300 + misc 50
+sub_packet_count: 6  # P5.0a + P5.1 + P5.2 + P5.3 + P5.4 + P5.5 (all required)
+sub_packet_max_loc: 1000  # P5.2 exactly at ceiling; all within budget
+module_count: 21  # types/ 4 + core/ 10 + rules/ 4 + cli/ 4 (entry + scheduler_detect + provenance + notifier) = 22; notifier is interface stub counted once as single file, so 21 distinct implementation files
+estimated_loc_total_core: 3450  # types 200 + core 1570 + rules 700 + cli 400 (incl. provenance 100) + P5.4 source 200 + unit-test scaffolding 280 + P5.5 integration 100
+estimated_loc_total_tests: 1500  # P5.4 60-fixture suite 900 + unit tests (types 50 + engine 250 + validator 400 + rules 300 + cli 150) = 1350 + misc 150
 zeus_identifier_leak_count: 0  # verified by §5 self-check grep; no zeus tokens in module names
 self_check_sidecar_risk: pass  # validator is sole authority; post_mutation_detector is separate path from pre-mutation FORBIDDEN_*; no secondary authorization in rules_parser
-self_check_fatal_refusal: pass  # refusal.py::refuse_fatal() is FATAL for all 8 guard conditions; task-level errors are isolated to errors.tsv; FORBIDDEN_* from validator → refuse_fatal() not self-quarantine
-c1_c2_applied: true  # C1: Operation.READ in enum + §6 verdict; C2: two-path split (Path A refuse_fatal, Path B post_mutation_detector→self_quarantine)
-m3_recount_applied: true  # 14 Forbidden Actions mapped; 3 new guard modules added; Input Inconsistency #1 rewritten
-m5_decision: p5_0a_types  # P5.0a types sub-packet; linear build chain P5.0a→P5.1→P5.2→P5.3→P5.4
+self_check_fatal_refusal: pass  # 6 refuse_fatal hard guards + 2 skip_tick soft guards (MAINTENANCE_PAUSED, ONCALL_QUIET); §6 verdict updated; task-level errors isolated to errors.tsv
+c1_c2_applied: true
+m3_recount_applied: true
+m5_decision: p5_0a_types
+m6_decision: defer_to_p5_5_mandatory  # P5.1 _apply_decisions stages filesystem diff only; P5.5 owns commit/PR/provenance; P5.5 mandatory; §3.5 cross-reference added
+nd1_rm_mapping_resolved: yes  # subprocess_guard.py BLOCKED list includes rm unconditionally; os.unlink permitted only via Operation.DELETE on confirmed zero-byte files
+nd2_module_count_fixed: yes  # module_count: 21
+nd3_refuse_fatal_split: yes  # 6 hard guards refuse_fatal + 2 soft guards skip_tick; §6 verdict rewritten
+nd5_mkdir_resolved: enum_added  # MKDIR added as explicit enum value in operations.py (~65 LOC); SAFETY_CONTRACT.md line 100 cited
 worktree_path: /Users/leofitz/.openclaw/workspace-venus/zeus/.claude/worktrees/agent-ae1e98111aad14ffa
 input_inconsistencies_found:
   - '"14 forbidden surface categories" resolved: maps to 14 bulleted Forbidden Actions in SAFETY_CONTRACT.md; 3 new guard modules cover 8 previously-unmodeled bullets'
   - 'ARCHIVAL_RULES.md (9 checks: #0 + 1-8) vs TASK_CATALOG.yaml (all_8_checks_pass); ARCHIVAL_RULES.md is authoritative; TASK_CATALOG needs update in P6 Zeus binding'
 deviations_observed:
-  - 'P5.2 grows to 1000 LOC ceiling (was 750) due to 3 new operation-guard modules covering 14 Forbidden Actions; P5.2b split available if implementation overruns'
-  - 'P5.0a types sub-packet added (200 LOC); total sub-packet count becomes 5+1opt, not 4+1opt'
-  - 'P5.5 (CLI) retained as optional but recommended'
+  - 'P5.2 at 1000 LOC ceiling; 3 operation-guard modules added for 14 Forbidden Actions coverage; P5.2b split available if implementation overruns'
+  - 'P5.0a types sub-packet added (200 LOC); linear build chain P5.0a→P5.1→P5.2→P5.3→P5.4→P5.5'
+  - 'P5.5 promoted from optional to REQUIRED; apply/publish boundary at P5.1↔P5.5; provenance.py added to cli/'
 deferred_minors_list:
   - M4: scheduler_detect.py duplication cosmetic (kill_switch.py + cli/scheduler_detect.py overlap)
-  - M6: Identity & Provenance unmodeled (provenance.py spec: commit author, Run-Id trailer, Generated-By header)
   - M7: Task auto-pause after 3 failures unimplemented (failure_counter.py spec)
   - SEV-3a: AUTO_ACK cap (bulk-ack AUTO_ACK_NEXT_N decay logic needs bounding)
   - SEV-3b: .diff surface per proposal (evidence_writer.py needs write_proposal_diff() signature)
   - SEV-3c: in-process heartbeat (DESIGN.md §"Scheduling Surface" in-process mode publishes heartbeat.json)
   - SEV-3d: skills/ vs pip-package deployment surface tension
-  - SEV-3e: BATCH_DONE arithmetic (now corrected above)
-  - SEV-3f: grep-vs-import-time guard for agent-trigger (resolved in §3 subprocess_guard.py note)
   - SEV-3g: 8-vs-9 exemption check count (see Input Inconsistency #2; deferred to P6)
-  - SEV-3h: P5.5 mandatory vs optional (critic prefers mandatory; retained as recommended-optional pending operator decision)
 ```
