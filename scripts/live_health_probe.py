@@ -40,6 +40,20 @@ def _alive(pattern):
     except Exception:
         return []
 
+def _process_env(pid):
+    try:
+        out = subprocess.run(["ps", "eww", "-p", str(pid), "-o", "command="], capture_output=True, text=True, timeout=5).stdout.strip()
+        env = {}
+        for token in out.split():
+            if "=" not in token:
+                continue
+            key, value = token.split("=", 1)
+            if key == "ZEUS_FORECAST_LIVE_OWNER":
+                env[key] = value
+        return env
+    except Exception:
+        return {}
+
 def _load_json(path):
     try:
         with open(path) as f:
@@ -50,10 +64,15 @@ def _load_json(path):
 def _process_liveness():
     forecast_live = _alive("src.ingest.forecast_live_daemon")
     legacy_ingest = _alive("src.ingest_main")
+    legacy_ingest_opendata_owner = [
+        pid for pid in legacy_ingest
+        if _process_env(pid).get("ZEUS_FORECAST_LIVE_OWNER", "ingest_main") != "forecast_live"
+    ]
     return {
         "daemon": _alive("src.main"),
         "forecast_live": forecast_live,
         "legacy_ingest": legacy_ingest,
+        "legacy_ingest_opendata_owner": legacy_ingest_opendata_owner,
         # Backward-compatible aggregate for older dashboard readers. Forecast-live
         # is now the canonical forecast owner; legacy ingest is a fallback signal.
         "ingest": forecast_live or legacy_ingest,
@@ -71,6 +90,8 @@ def _classify_alerts(report, ss_age):
         alerts.append("forecast_live_dead")
     elif forecast_age is None or forecast_age > FORECAST_LIVE_STALE_SECONDS:
         alerts.append(f"forecast_live_stale={forecast_age}s")
+    if report["procs"].get("legacy_ingest_opendata_owner"):
+        alerts.append("legacy_ingest_opendata_owner_present")
     if not report["procs"]["riskguard"]:
         alerts.append("riskguard_dead")
     if ss_age is not None and ss_age > 2700:

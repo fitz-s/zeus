@@ -57,14 +57,26 @@ def _healthy_state(root: Path) -> None:
     )
 
 
-def _configure(module, monkeypatch, root: Path, snapshot: Path, alive_by_pattern: dict[str, list[int]]) -> None:
+def _configure(
+    module,
+    monkeypatch,
+    root: Path,
+    snapshot: Path,
+    alive_by_pattern: dict[str, list[int]],
+    env_by_pid: dict[int, dict[str, str]] | None = None,
+) -> None:
     monkeypatch.setattr(module, "ROOT", str(root))
     monkeypatch.setattr(module, "SNAPSHOT_FILE", str(snapshot))
+    env_by_pid = env_by_pid or {}
 
     def fake_alive(pattern: str) -> list[int]:
         return list(alive_by_pattern.get(pattern, []))
 
+    def fake_process_env(pid: int) -> dict[str, str]:
+        return dict(env_by_pid.get(pid, {}))
+
     monkeypatch.setattr(module, "_alive", fake_alive)
+    monkeypatch.setattr(module, "_process_env", fake_process_env)
 
 
 def test_forecast_live_owner_replaces_legacy_ingest_dead(tmp_path, monkeypatch, capsys):
@@ -145,3 +157,56 @@ def test_stale_forecast_live_heartbeat_is_actionable(tmp_path, monkeypatch, caps
     assert out.startswith("ALERT")
     assert "forecast_live_stale=" in out
     assert "ingest_dead" not in out
+
+
+def test_legacy_ingest_opendata_owner_is_actionable(tmp_path, monkeypatch, capsys):
+    module = _load_module()
+    root = tmp_path / "zeus"
+    _healthy_state(root)
+    _configure(
+        module,
+        monkeypatch,
+        root,
+        tmp_path / "snapshot.json",
+        {
+            "src.main": [101],
+            "src.ingest.forecast_live_daemon": [202],
+            "src.ingest_main": [404],
+            "src.riskguard": [303],
+        },
+    )
+
+    module.main()
+
+    out = capsys.readouterr().out
+    assert out.startswith("ALERT")
+    assert "legacy_ingest=1" in out
+    assert "legacy_ingest_opendata_owner_present" in out
+
+
+def test_legacy_ingest_without_opendata_ownership_is_observed_not_actionable(
+    tmp_path, monkeypatch, capsys
+):
+    module = _load_module()
+    root = tmp_path / "zeus"
+    _healthy_state(root)
+    _configure(
+        module,
+        monkeypatch,
+        root,
+        tmp_path / "snapshot.json",
+        {
+            "src.main": [101],
+            "src.ingest.forecast_live_daemon": [202],
+            "src.ingest_main": [404],
+            "src.riskguard": [303],
+        },
+        {404: {"ZEUS_FORECAST_LIVE_OWNER": "forecast_live"}},
+    )
+
+    module.main()
+
+    out = capsys.readouterr().out
+    assert out.startswith("OK")
+    assert "legacy_ingest=1" in out
+    assert "legacy_ingest_opendata_owner_present" not in out

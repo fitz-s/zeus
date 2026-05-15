@@ -61,6 +61,7 @@ def _schema(conn: sqlite3.Connection) -> None:
         CREATE TABLE venue_order_facts (
           fact_id TEXT PRIMARY KEY,
           command_id TEXT NOT NULL,
+          venue_order_id TEXT,
           observed_at TEXT,
           state TEXT
         );
@@ -127,6 +128,18 @@ def _insert_pre_submit_envelope(conn: sqlite3.Connection, *, order_id: str | Non
     )
 
 
+def _insert_order_fact(conn: sqlite3.Connection, *, command_id: str = "cmd-1", order_id: str = "order-1") -> None:
+    conn.execute(
+        """
+        INSERT INTO venue_order_facts (
+          fact_id, command_id, venue_order_id, observed_at, state
+        )
+        VALUES ('fact-1', ?, ?, '2026-05-15T12:00:03Z', 'RESTING')
+        """,
+        (command_id, order_id),
+    )
+
+
 def _schema_current(conn: sqlite3.Connection) -> None:
     conn.executescript(
         """
@@ -169,6 +182,7 @@ def _schema_current(conn: sqlite3.Connection) -> None:
         CREATE TABLE venue_order_facts (
           fact_id TEXT PRIMARY KEY,
           command_id TEXT NOT NULL,
+          venue_order_id TEXT,
           observed_at TEXT,
           state TEXT
         );
@@ -192,6 +206,7 @@ def test_accepted_order_with_full_correlation_trace_passes(tmp_path):
         _insert_submit_requested(conn)
         _insert_submit_acked(conn)
         _insert_pre_submit_envelope(conn)
+        _insert_order_fact(conn)
 
     with module._connect_readonly(db) as conn:
         result = module.evaluate(conn, "cmd-1")
@@ -254,6 +269,15 @@ def test_current_schema_envelope_id_link_passes(tmp_path):
                     '{"venue_order_id":"order-current-1"}', 'ACKED')
             """
         )
+        conn.execute(
+            """
+            INSERT INTO venue_order_facts (
+              fact_id, command_id, venue_order_id, observed_at, state
+            )
+            VALUES ('fact-current-1', 'cmd-current-1', 'order-current-1',
+                    '2026-05-15T12:00:03Z', 'RESTING')
+            """
+        )
 
     with module._connect_readonly(db) as conn:
         result = module.evaluate(conn, "cmd-current-1")
@@ -261,6 +285,28 @@ def test_current_schema_envelope_id_link_passes(tmp_path):
     assert result["status"] == "PASS"
     assert result["completion_category"] == "LIVE_ORDER_SUBMITTED"
     assert result["venue_order_id"] == "order-current-1"
+
+
+def test_accepted_ack_without_order_fact_is_not_completion(tmp_path):
+    module = _load_module()
+    db = tmp_path / "trades.db"
+    with sqlite3.connect(db) as conn:
+        conn.row_factory = sqlite3.Row
+        _schema(conn)
+        _insert_command(conn)
+        _insert_submit_requested(conn)
+        _insert_submit_acked(conn)
+        _insert_pre_submit_envelope(conn)
+
+    with module._connect_readonly(db) as conn:
+        result = module.evaluate(conn, "cmd-1")
+
+    assert result["status"] == "FAIL"
+    assert result["completion_category"] == "LIVE_ORDER_ACKED_MISSING_ORDER_FACT"
+    assert any(
+        check["name"] == "venue_order_fact_present" and check["status"] == "FAIL"
+        for check in result["checks"]
+    )
 
 
 def test_rejected_order_is_recorded_but_not_completion(tmp_path):
@@ -304,6 +350,7 @@ def test_accepted_state_without_decision_trace_fails(tmp_path):
         _insert_submit_requested(conn)
         _insert_submit_acked(conn)
         _insert_pre_submit_envelope(conn)
+        _insert_order_fact(conn)
 
     with module._connect_readonly(db) as conn:
         result = module.evaluate(conn, "cmd-1")

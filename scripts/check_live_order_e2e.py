@@ -163,6 +163,16 @@ def _facts(conn: sqlite3.Connection, table: str, command_id: str) -> list[dict[s
     ]
 
 
+def _has_matching_order_fact(order_facts: list[dict[str, Any]], order_id: str) -> bool:
+    if not order_facts:
+        return False
+    if not order_id:
+        return False
+    if "venue_order_id" not in order_facts[0]:
+        return True
+    return any(str(fact.get("venue_order_id") or "") == order_id for fact in order_facts)
+
+
 def _order_identity(
     command: dict[str, Any],
     events: list[dict[str, Any]],
@@ -250,10 +260,24 @@ def evaluate(conn: sqlite3.Connection, command_id: str | None = None) -> dict[st
         )
     )
     checks.append(Check("venue_order_identity_present", "PASS" if order_id else "FAIL", order_id or "missing"))
+    checks.append(
+        Check(
+            "venue_order_fact_present",
+            "PASS" if _has_matching_order_fact(order_facts, order_id) else "FAIL",
+            f"count={len(order_facts)} order_id={order_id or 'missing'}",
+        )
+    )
 
-    accepted = state in ACCEPTED_COMMAND_STATES and all(check.status == "PASS" for check in checks)
+    failed_check_names = {check.name for check in checks if check.status == "FAIL"}
+    accepted = state in ACCEPTED_COMMAND_STATES and not failed_check_names
     filled = state in FILLED_COMMAND_STATES or bool(trade_facts)
     category = "LIVE_ORDER_SUBMITTED" if accepted else "NO_LIVE_ORDER_PROOF"
+    if (
+        state in ACCEPTED_COMMAND_STATES
+        and order_id
+        and failed_check_names == {"venue_order_fact_present"}
+    ):
+        category = "LIVE_ORDER_ACKED_MISSING_ORDER_FACT"
     if state in REJECTED_OR_UNKNOWN_STATES:
         category = "LIVE_ORDER_REJECTED_OR_UNKNOWN_RECORDED"
     if accepted and filled:
