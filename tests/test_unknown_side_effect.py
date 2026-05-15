@@ -1,9 +1,10 @@
 # Created: 2026-04-27
-# Lifecycle: created=2026-04-27; last_reviewed=2026-04-30; last_reused=2026-04-30
+# Lifecycle: created=2026-04-27; last_reviewed=2026-05-15; last_reused=2026-05-15
 # Purpose: R3 M2 unknown-side-effect semantics for post-POST submit uncertainty.
 # Reuse: Run when executor submit exception handling, venue command recovery,
 #        or idempotency/economic-intent duplicate blocking changes.
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/M2.yaml
+#                  + docs/operations/task_2026-05-15_live_order_e2e_goal/LIVE_ORDER_E2E_GOAL_PLAN.md
 """M2: post-side-effect submit uncertainty must not become semantic rejection."""
 
 from __future__ import annotations
@@ -147,6 +148,9 @@ def _insert_unknown_side_effect(
     price: float = 0.55,
     size: float = 18.19,
     final_event: str = "SUBMIT_TIMEOUT_UNKNOWN",
+    final_event_payload: dict | None = None,
+    raw_response_json: str | None = None,
+    signed_order_hash: str | None = None,
 ) -> None:
     from src.state.venue_command_repo import append_event, insert_command, insert_submission_envelope
     from src.contracts.venue_submission_envelope import VenueSubmissionEnvelope
@@ -185,10 +189,10 @@ def _insert_unknown_side_effect(
                 "fee_rate_raw_unit": "fraction",
             },
             canonical_pre_sign_payload_hash="d" * 64,
-            signed_order=None,
-            signed_order_hash=None,
+            signed_order=(b"signed" if signed_order_hash else None),
+            signed_order_hash=signed_order_hash,
             raw_request_hash="e" * 64,
-            raw_response_json=None,
+            raw_response_json=raw_response_json,
             order_id=None,
             trade_ids=(),
             transaction_hashes=(),
@@ -216,8 +220,84 @@ def _insert_unknown_side_effect(
         snapshot_checked_at=created.isoformat(),
     )
     append_event(conn, command_id=command_id, event_type="SUBMIT_REQUESTED", occurred_at=created.isoformat())
-    append_event(conn, command_id=command_id, event_type=final_event, occurred_at=created.isoformat())
+    append_event(
+        conn,
+        command_id=command_id,
+        event_type=final_event,
+        occurred_at=created.isoformat(),
+        payload=final_event_payload,
+    )
     conn.commit()
+
+
+def _insert_pre_sdk_decision_log(
+    conn,
+    *,
+    decision_id: str = "decision-m2",
+    reason: str = (
+        "execution_intent_rejected:pusd_allowance_insufficient: "
+        "required_micro=100 available_allowance_micro=0 allowance_micro=0"
+    ),
+) -> None:
+    artifact = {
+        "mode": "opening_hunt",
+        "started_at": NOW.isoformat(),
+        "completed_at": NOW.isoformat(),
+        "no_trade_cases": [
+            {
+                "decision_id": decision_id,
+                "city": "Karachi",
+                "target_date": "2026-05-17",
+                "range_label": "test market",
+                "rejection_stage": "EXECUTION_FAILED",
+                "rejection_reasons": [reason],
+            }
+        ],
+    }
+    conn.execute(
+        """
+        INSERT INTO decision_log (mode, started_at, completed_at, artifact_json, timestamp, env)
+        VALUES ('opening_hunt', ?, ?, ?, ?, 'live')
+        """,
+        (NOW.isoformat(), NOW.isoformat(), json.dumps(artifact), NOW.isoformat()),
+    )
+    conn.commit()
+
+
+def _review_clearance_payload(command_id: str = "cmd-m2") -> dict:
+    return {
+        "schema_version": 1,
+        "reason": "review_cleared_no_venue_side_effect",
+        "command_id": command_id,
+        "decision_id": "decision-m2",
+        "proof_class": "pre_sdk_no_side_effect",
+        "side_effect_boundary_crossed": False,
+        "sdk_submit_attempted": False,
+        "required_predicates": {
+            "no_venue_order_id": True,
+            "no_final_submission_envelope": True,
+            "no_raw_response": True,
+            "no_signed_order": True,
+            "no_order_facts": True,
+            "no_trade_facts": True,
+            "no_submit_side_effect_events": True,
+            "review_required_reason_pre_sdk": True,
+        },
+        "source_proof": {
+            "source_commit": "test-commit",
+            "source_function": "_live_order",
+            "source_reason": "pre_submit_collateral_reservation_failed",
+            "decision_id": "decision-m2",
+        },
+        "review_required_proof": {
+            "reason": "recovery_no_venue_order_id",
+            "allowed_reasons": [
+                "pre_submit_collateral_reservation_failed",
+                "recovery_no_venue_order_id",
+            ],
+        },
+        "decision_log_proof": {"decision_log_id": 1},
+    }
 
 
 def _command(conn):
@@ -655,6 +735,266 @@ def test_review_required_side_effect_still_blocks_same_economic_intent(conn):
     assert "economic_intent_duplication" in (second.reason or "")
     assert second.command_state == "REVIEW_REQUIRED"
     second_client.place_limit_order.assert_not_called()
+
+
+def test_review_required_pre_sdk_no_side_effect_can_be_cleared(conn):
+    from src.execution.command_recovery import clear_review_required_no_venue_side_effect
+    from src.risk_allocator.governor import count_unknown_side_effects
+    from src.state.venue_command_repo import find_unknown_command_by_economic_intent
+
+    _insert_unknown_side_effect(
+        conn,
+        command_id="cmd-m2-clear",
+        token_id="tok-m2-clear",
+        idem="7" * 32,
+        final_event="REVIEW_REQUIRED",
+        final_event_payload={"reason": "recovery_no_venue_order_id"},
+    )
+    _insert_pre_sdk_decision_log(conn)
+
+    payload = clear_review_required_no_venue_side_effect(
+        conn,
+        "cmd-m2-clear",
+        source_commit="test-commit",
+        source_function="_live_order",
+        source_reason="pre_submit_collateral_reservation_failed",
+        reviewed_by="pytest",
+        occurred_at=NOW.isoformat(),
+    )
+
+    cmd = conn.execute(
+        "SELECT * FROM venue_commands WHERE command_id = ?",
+        ("cmd-m2-clear",),
+    ).fetchone()
+    assert cmd["state"] == "REJECTED"
+    events = conn.execute(
+        "SELECT event_type, payload_json FROM venue_command_events WHERE command_id = ? ORDER BY sequence_no",
+        ("cmd-m2-clear",),
+    ).fetchall()
+    assert [row["event_type"] for row in events][-1] == "REVIEW_CLEARED_NO_VENUE_SIDE_EFFECT"
+    event_payload = json.loads(events[-1]["payload_json"])
+    assert event_payload == payload
+    assert payload["reason"] == "review_cleared_no_venue_side_effect"
+    assert payload["proof_class"] == "pre_sdk_no_side_effect"
+    assert payload["side_effect_boundary_crossed"] is False
+    assert payload["sdk_submit_attempted"] is False
+    assert payload["required_predicates"]["no_venue_order_id"] is True
+
+    unknown_count, unknown_markets = count_unknown_side_effects(conn)
+    assert unknown_count == 0
+    assert unknown_markets == ()
+    assert find_unknown_command_by_economic_intent(
+        conn,
+        intent_kind="ENTRY",
+        token_id="tok-m2-clear",
+        side="BUY",
+        price=0.55,
+        size=18.19,
+    ) is None
+
+
+def test_review_required_clearance_requires_decision_log_pre_sdk_proof(conn):
+    from src.execution.command_recovery import clear_review_required_no_venue_side_effect
+
+    _insert_unknown_side_effect(
+        conn,
+        command_id="cmd-m2-clear-no-proof",
+        final_event="REVIEW_REQUIRED",
+        final_event_payload={"reason": "recovery_no_venue_order_id"},
+    )
+
+    with pytest.raises(ValueError, match="decision_log EXECUTION_FAILED"):
+        clear_review_required_no_venue_side_effect(
+            conn,
+            "cmd-m2-clear-no-proof",
+            source_commit="test-commit",
+            source_function="_live_order",
+            source_reason="pre_submit_collateral_reservation_failed",
+            reviewed_by="pytest",
+        )
+
+
+def test_review_clearance_event_rejects_bare_manual_payload(conn):
+    from src.state.venue_command_repo import append_event
+
+    _insert_unknown_side_effect(
+        conn,
+        command_id="cmd-m2-clear-bare",
+        final_event="REVIEW_REQUIRED",
+        final_event_payload={"reason": "recovery_no_venue_order_id"},
+    )
+
+    with pytest.raises(ValueError, match="reason=review_cleared_no_venue_side_effect"):
+        append_event(
+            conn,
+            command_id="cmd-m2-clear-bare",
+            event_type="REVIEW_CLEARED_NO_VENUE_SIDE_EFFECT",
+            occurred_at=NOW.isoformat(),
+            payload={"reason": "manual_override"},
+        )
+
+
+def test_review_clearance_event_rejects_valid_payload_without_decision_log_db_proof(conn):
+    from src.state.venue_command_repo import append_event
+
+    _insert_unknown_side_effect(
+        conn,
+        command_id="cmd-m2-clear-no-db-proof",
+        final_event="REVIEW_REQUIRED",
+        final_event_payload={"reason": "recovery_no_venue_order_id"},
+    )
+
+    with pytest.raises(ValueError, match="decision_log collateral proof"):
+        append_event(
+            conn,
+            command_id="cmd-m2-clear-no-db-proof",
+            event_type="REVIEW_CLEARED_NO_VENUE_SIDE_EFFECT",
+            occurred_at=NOW.isoformat(),
+            payload=_review_clearance_payload("cmd-m2-clear-no-db-proof"),
+        )
+
+
+def test_review_clearance_event_rejects_valid_payload_with_db_side_effect_evidence(conn):
+    from src.state.venue_command_repo import append_event
+
+    _insert_unknown_side_effect(
+        conn,
+        command_id="cmd-m2-clear-forged-side-effect",
+        final_event="REVIEW_REQUIRED",
+        final_event_payload={"reason": "recovery_no_venue_order_id"},
+        raw_response_json='{"orderID":"ord-real"}',
+    )
+    _insert_pre_sdk_decision_log(conn)
+
+    with pytest.raises(ValueError, match="review clearance DB predicates failed"):
+        append_event(
+            conn,
+            command_id="cmd-m2-clear-forged-side-effect",
+            event_type="REVIEW_CLEARED_NO_VENUE_SIDE_EFFECT",
+            occurred_at=NOW.isoformat(),
+            payload=_review_clearance_payload("cmd-m2-clear-forged-side-effect"),
+        )
+
+
+def test_review_required_clearance_rejects_post_submit_review_required_reason(conn):
+    from src.execution.command_recovery import clear_review_required_no_venue_side_effect
+
+    _insert_unknown_side_effect(
+        conn,
+        command_id="cmd-m2-clear-post-submit-review",
+        final_event="REVIEW_REQUIRED",
+        final_event_payload={
+            "reason": "final_submission_envelope_persistence_failed",
+            "detail": "place_limit_order returned None",
+        },
+    )
+    _insert_pre_sdk_decision_log(conn)
+
+    with pytest.raises(ValueError, match="review clearance predicates failed"):
+        clear_review_required_no_venue_side_effect(
+            conn,
+            "cmd-m2-clear-post-submit-review",
+            source_commit="test-commit",
+            source_function="_live_order",
+            source_reason="pre_submit_collateral_reservation_failed",
+            reviewed_by="pytest",
+        )
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "raw_response",
+        "signed_order",
+        "order_fact",
+        "trade_fact",
+        "submit_unknown_event",
+    ],
+)
+def test_review_required_clearance_rejects_side_effect_evidence(conn, case):
+    from src.execution.command_recovery import clear_review_required_no_venue_side_effect
+    from src.state.venue_command_repo import append_event
+
+    command_id = f"cmd-m2-clear-blocked-{case}"
+    kwargs = {}
+    if case == "raw_response":
+        kwargs["raw_response_json"] = '{"status":"LIVE"}'
+    if case == "signed_order":
+        kwargs["signed_order_hash"] = "f" * 64
+    _insert_unknown_side_effect(
+        conn,
+        command_id=command_id,
+        token_id=f"tok-m2-clear-blocked-{case}",
+        idem=("8" if case != "signed_order" else "9") * 32,
+        final_event="SUBMIT_UNKNOWN" if case == "submit_unknown_event" else "REVIEW_REQUIRED",
+        final_event_payload=(
+            None if case == "submit_unknown_event"
+            else {"reason": "recovery_no_venue_order_id"}
+        ),
+        **kwargs,
+    )
+    if case == "order_fact":
+        conn.execute(
+            """
+            INSERT INTO venue_order_facts (
+              venue_order_id, command_id, state, source, observed_at,
+              local_sequence, raw_payload_hash
+            ) VALUES ('ord-blocked', ?, 'LIVE', 'REST', ?, 1, ?)
+            """,
+            (command_id, NOW.isoformat(), "a" * 64),
+        )
+    if case == "trade_fact":
+        conn.execute(
+            """
+            INSERT INTO venue_trade_facts (
+              trade_id, venue_order_id, command_id, state, filled_size,
+              fill_price, source, observed_at, local_sequence, raw_payload_hash
+            ) VALUES ('trade-blocked', 'ord-blocked', ?, 'MATCHED', '1.00',
+                      '0.55', 'REST', ?, 1, ?)
+            """,
+            (command_id, NOW.isoformat(), "b" * 64),
+        )
+    if case == "submit_unknown_event":
+        append_event(
+            conn,
+            command_id=command_id,
+            event_type="REVIEW_REQUIRED",
+            occurred_at=NOW.isoformat(),
+            payload={"reason": "still_requires_review"},
+        )
+    conn.commit()
+    _insert_pre_sdk_decision_log(conn)
+
+    with pytest.raises(ValueError, match="review clearance predicates failed"):
+        clear_review_required_no_venue_side_effect(
+            conn,
+            command_id,
+            source_commit="test-commit",
+            source_function="_live_order",
+            source_reason="pre_submit_collateral_reservation_failed",
+            reviewed_by="pytest",
+        )
+
+
+def test_review_required_clearance_cannot_run_from_arbitrary_state(conn):
+    from src.execution.command_recovery import clear_review_required_no_venue_side_effect
+
+    _insert_unknown_side_effect(
+        conn,
+        command_id="cmd-m2-clear-wrong-state",
+        final_event="SUBMIT_TIMEOUT_UNKNOWN",
+    )
+    _insert_pre_sdk_decision_log(conn)
+
+    with pytest.raises(ValueError, match="only legal for REVIEW_REQUIRED"):
+        clear_review_required_no_venue_side_effect(
+            conn,
+            "cmd-m2-clear-wrong-state",
+            source_commit="test-commit",
+            source_function="_live_order",
+            source_reason="pre_submit_collateral_reservation_failed",
+            reviewed_by="pytest",
+        )
 
 
 def test_unknown_state_side_effect_still_blocks_same_economic_intent(conn):

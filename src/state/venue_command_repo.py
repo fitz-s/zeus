@@ -1,6 +1,7 @@
 # Created: 2026-04-26
-# Last reused/audited: 2026-05-08
+# Last reused/audited: 2026-05-15
 # Authority basis: docs/operations/task_2026-05-08_object_invariance_wave27/PLAN.md
+#                  + docs/operations/task_2026-05-15_live_order_e2e_goal/LIVE_ORDER_E2E_GOAL_PLAN.md
 """Durable command journal — append-only repo API for venue_commands / venue_command_events.
 
 Public API:
@@ -131,10 +132,31 @@ _TRANSITIONS: dict[tuple[str, str], str] = {
     ("CANCEL_PENDING", "CANCEL_REPLACE_BLOCKED"): "REVIEW_REQUIRED",
     ("CANCEL_PENDING", "EXPIRED"):            "EXPIRED",
     ("CANCEL_PENDING", "REVIEW_REQUIRED"):    "REVIEW_REQUIRED",
+
+    # Proof-backed operator/recovery clearance only. Payload validation below
+    # rejects generic manual edits; the command must already be REVIEW_REQUIRED
+    # and the caller must record positive no-side-effect proof.
+    ("REVIEW_REQUIRED", "REVIEW_CLEARED_NO_VENUE_SIDE_EFFECT"): "REJECTED",
 }
 
 _PROVENANCE_SOURCES = frozenset(
     {"REST", "WS_USER", "WS_MARKET", "DATA_API", "CHAIN", "OPERATOR", "FAKE_VENUE"}
+)
+_PRE_SDK_REVIEW_REQUIRED_REASONS = frozenset({
+    "pre_submit_collateral_reservation_failed",
+    # Legacy pre-fix commands could fail before SDK submission, remain in
+    # SUBMITTING, and then be moved to REVIEW_REQUIRED by recovery.
+    "recovery_no_venue_order_id",
+})
+_PRE_SDK_COLLATERAL_REASON_MARKERS = (
+    "pusd_allowance_insufficient",
+    "pusd_insufficient",
+    "collateral_snapshot_degraded",
+    "collateral_snapshot_stale",
+    "collateral_snapshot_future",
+    "collateral_ledger_unconfigured",
+    "ctf_allowance_insufficient",
+    "ctf_tokens_insufficient",
 )
 _ORDER_FACT_STATES = frozenset(
     {
@@ -894,6 +916,13 @@ def append_event(
                 f"Illegal command-event grammar transition: "
                 f"state={current_state!r} event={event_type!r}"
             )
+        _validate_review_clearance_payload(
+            conn=conn,
+            current_state=current_state,
+            event_type=event_type,
+            payload=payload,
+            command_id=command_id,
+        )
 
         state_after = _TRANSITIONS[key]
 
@@ -955,6 +984,264 @@ def append_event(
             release_exit_mutex_for_command_state(conn, command_id, state_after)
 
     return event_id
+
+
+def _validate_review_clearance_payload(
+    *,
+    conn: sqlite3.Connection,
+    current_state: str,
+    event_type: str,
+    payload: Optional[dict],
+    command_id: str,
+) -> None:
+    if event_type != "REVIEW_CLEARED_NO_VENUE_SIDE_EFFECT":
+        return
+    if current_state != "REVIEW_REQUIRED":
+        raise ValueError("review clearance is only legal from REVIEW_REQUIRED")
+    if not isinstance(payload, dict):
+        raise ValueError("review clearance requires structured proof payload")
+    if payload.get("reason") != "review_cleared_no_venue_side_effect":
+        raise ValueError("review clearance payload requires reason=review_cleared_no_venue_side_effect")
+    if payload.get("command_id") != command_id:
+        raise ValueError("review clearance payload command_id must match appended command")
+    if payload.get("side_effect_boundary_crossed") is not False:
+        raise ValueError("review clearance requires side_effect_boundary_crossed=false")
+    if payload.get("sdk_submit_attempted") is not False:
+        raise ValueError("review clearance requires sdk_submit_attempted=false")
+    proof_class = payload.get("proof_class")
+    if proof_class != "pre_sdk_no_side_effect":
+        raise ValueError("review clearance proof_class is not supported")
+    required_predicates = payload.get("required_predicates")
+    if not isinstance(required_predicates, dict):
+        raise ValueError("review clearance requires required_predicates")
+    required_true = (
+        "no_venue_order_id",
+        "no_final_submission_envelope",
+        "no_raw_response",
+        "no_signed_order",
+        "no_order_facts",
+        "no_trade_facts",
+        "no_submit_side_effect_events",
+        "review_required_reason_pre_sdk",
+    )
+    missing = [name for name in required_true if required_predicates.get(name) is not True]
+    if missing:
+        raise ValueError(f"review clearance predicates are not proven true: {missing}")
+    actual_predicates = _actual_review_clearance_predicates(conn, command_id)
+    actual_failures = [name for name, ok in actual_predicates.items() if not ok]
+    if actual_failures:
+        raise ValueError(f"review clearance DB predicates failed: {actual_failures}")
+    source = payload.get("source_proof")
+    if not isinstance(source, dict):
+        raise ValueError("pre-SDK review clearance requires source_proof")
+    for key in ("source_commit", "source_function", "source_reason", "decision_id"):
+        if not str(source.get(key) or "").strip():
+            raise ValueError(f"pre-SDK review clearance source_proof missing {key}")
+    if source.get("source_reason") != "pre_submit_collateral_reservation_failed":
+        raise ValueError("pre-SDK review clearance requires collateral source_reason")
+    command_decision_id = _actual_command_decision_id(conn, command_id)
+    if source.get("decision_id") != command_decision_id:
+        raise ValueError("pre-SDK review clearance decision_id does not match command")
+    if not _review_clearance_decision_log_pre_sdk_proven(conn, command_decision_id):
+        raise ValueError("pre-SDK review clearance requires decision_log collateral proof")
+    actual_reason = _actual_review_required_reason(conn, command_id)
+    review_proof = payload.get("review_required_proof")
+    if not isinstance(review_proof, dict):
+        raise ValueError("pre-SDK review clearance requires review_required_proof")
+    if review_proof.get("reason") != actual_reason:
+        raise ValueError("review clearance review_required_proof reason does not match DB")
+
+
+def _review_clearance_table_exists(conn: sqlite3.Connection, table: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (table,),
+    ).fetchone()
+    return row is not None
+
+
+def _review_clearance_fact_count(
+    conn: sqlite3.Connection,
+    table: str,
+    command_id: str,
+) -> int:
+    if not _review_clearance_table_exists(conn, table):
+        return 0
+    row = conn.execute(
+        f"SELECT COUNT(*) AS count FROM {table} WHERE command_id = ?",
+        (command_id,),
+    ).fetchone()
+    if row is None:
+        return 0
+    if isinstance(row, sqlite3.Row):
+        return int(row["count"] or 0)
+    return int(row[0] or 0)
+
+
+def _review_clearance_json_dict(raw: object) -> dict:
+    if raw in (None, ""):
+        return {}
+    try:
+        parsed = json.loads(str(raw))
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _actual_command_decision_id(
+    conn: sqlite3.Connection,
+    command_id: str,
+) -> str:
+    with _row_factory_as(conn, sqlite3.Row):
+        row = conn.execute(
+            "SELECT decision_id FROM venue_commands WHERE command_id = ?",
+            (command_id,),
+        ).fetchone()
+    if row is None:
+        return ""
+    return str(row["decision_id"] or "")
+
+
+def _review_clearance_decision_log_pre_sdk_proven(
+    conn: sqlite3.Connection,
+    decision_id: str,
+) -> bool:
+    if not decision_id or not _review_clearance_table_exists(conn, "decision_log"):
+        return False
+    with _row_factory_as(conn, sqlite3.Row):
+        rows = conn.execute(
+            """
+            SELECT artifact_json
+            FROM decision_log
+            WHERE artifact_json LIKE ?
+            ORDER BY id DESC
+            LIMIT 20
+            """,
+            (f"%{decision_id}%",),
+        ).fetchall()
+    for row in rows:
+        artifact = _review_clearance_json_dict(row["artifact_json"])
+        for case in artifact.get("no_trade_cases") or []:
+            if not isinstance(case, dict) or case.get("decision_id") != decision_id:
+                continue
+            reasons = case.get("rejection_reasons") or []
+            if isinstance(reasons, str):
+                reasons = [reasons]
+            reason_text = " | ".join(str(reason) for reason in reasons)
+            return (
+                case.get("rejection_stage") == "EXECUTION_FAILED"
+                and "execution_intent_rejected:" in reason_text
+                and any(marker in reason_text for marker in _PRE_SDK_COLLATERAL_REASON_MARKERS)
+            )
+    return False
+
+
+def _actual_review_clearance_predicates(
+    conn: sqlite3.Connection,
+    command_id: str,
+) -> dict[str, bool]:
+    with _row_factory_as(conn, sqlite3.Row):
+        command = conn.execute(
+            """
+            SELECT venue_order_id, envelope_id
+            FROM venue_commands
+            WHERE command_id = ?
+            """,
+            (command_id,),
+        ).fetchone()
+        events = conn.execute(
+            """
+            SELECT event_type, payload_json
+            FROM venue_command_events
+            WHERE command_id = ?
+            ORDER BY sequence_no
+            """,
+            (command_id,),
+        ).fetchall()
+        envelope = None
+        if command is not None and command["envelope_id"]:
+            envelope = conn.execute(
+                """
+                SELECT raw_response_json, signed_order_blob, signed_order_hash
+                FROM venue_submission_envelopes
+                WHERE envelope_id = ?
+                """,
+                (command["envelope_id"],),
+            ).fetchone()
+    final_envelope_ids: list[str] = []
+    unsafe_event_types = {
+        "POST_ACKED",
+        "SUBMIT_ACKED",
+        "SUBMIT_UNKNOWN",
+        "SUBMIT_TIMEOUT_UNKNOWN",
+        "CLOSED_MARKET_UNKNOWN",
+        "PARTIAL_FILL_OBSERVED",
+        "FILL_CONFIRMED",
+    }
+    observed_event_types = set()
+    latest_review_required_reason = ""
+    for event in events:
+        event_type = str(event["event_type"] or "")
+        observed_event_types.add(event_type)
+        payload = {}
+        raw = event["payload_json"]
+        if raw:
+            try:
+                parsed = json.loads(str(raw))
+            except json.JSONDecodeError:
+                parsed = {}
+            if isinstance(parsed, dict):
+                payload = parsed
+        final_id = str(payload.get("final_submission_envelope_id") or "").strip()
+        if final_id:
+            final_envelope_ids.append(final_id)
+        if event_type == "REVIEW_REQUIRED":
+            latest_review_required_reason = str(payload.get("reason") or "").strip()
+    return {
+        "no_venue_order_id": command is not None and not str(command["venue_order_id"] or "").strip(),
+        "no_final_submission_envelope": not final_envelope_ids,
+        "no_raw_response": envelope is None or not str(envelope["raw_response_json"] or "").strip(),
+        "no_signed_order": (
+            envelope is None
+            or (
+                envelope["signed_order_blob"] in (None, b"", "")
+                and not str(envelope["signed_order_hash"] or "").strip()
+            )
+        ),
+        "no_order_facts": _review_clearance_fact_count(conn, "venue_order_facts", command_id) == 0,
+        "no_trade_facts": _review_clearance_fact_count(conn, "venue_trade_facts", command_id) == 0,
+        "no_submit_side_effect_events": not (observed_event_types & unsafe_event_types),
+        "review_required_reason_pre_sdk": (
+            latest_review_required_reason in _PRE_SDK_REVIEW_REQUIRED_REASONS
+        ),
+    }
+
+
+def _actual_review_required_reason(
+    conn: sqlite3.Connection,
+    command_id: str,
+) -> str:
+    with _row_factory_as(conn, sqlite3.Row):
+        row = conn.execute(
+            """
+            SELECT payload_json
+            FROM venue_command_events
+            WHERE command_id = ?
+              AND event_type = 'REVIEW_REQUIRED'
+            ORDER BY sequence_no DESC
+            LIMIT 1
+            """,
+            (command_id,),
+        ).fetchone()
+    if row is None or not row["payload_json"]:
+        return ""
+    try:
+        payload = json.loads(str(row["payload_json"]))
+    except json.JSONDecodeError:
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    return str(payload.get("reason") or "").strip()
 
 
 def _venue_order_id_from_payload(payload: Optional[dict]) -> str | None:

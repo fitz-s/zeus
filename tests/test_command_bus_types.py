@@ -1,9 +1,10 @@
 # Created: 2026-04-26
-# Lifecycle: created=2026-04-26; last_reviewed=2026-04-27; last_reused=2026-04-27
+# Lifecycle: created=2026-04-26; last_reviewed=2026-05-15; last_reused=2026-05-15
 # Purpose: Lock command-bus type contracts plus U1 executable snapshot gate compatibility.
 # Reuse: Run when venue_commands schema, command bus enums, or snapshot-gated insert semantics change.
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md §P1.S2;
-#                  architecture/invariants.yaml INV-29.
+#                  architecture/invariants.yaml INV-29;
+#                  docs/operations/task_2026-05-15_live_order_e2e_goal/LIVE_ORDER_E2E_GOAL_PLAN.md.
 """P1.S2 command_bus type-contract tests.
 
 Locks the typed surface so P1.S3+ executor work has stable invariants:
@@ -344,8 +345,9 @@ class TestEnumsAreClosed:
         assert len(list(CommandState)) == 17
 
     def test_command_event_type_count(self):
+        """20 events after proof-backed REVIEW_REQUIRED clearance was added."""
         from src.execution.command_bus import CommandEventType
-        assert len(list(CommandEventType)) == 19
+        assert len(list(CommandEventType)) == 20
 
     def test_intent_kind_count(self):
         from src.execution.command_bus import IntentKind
@@ -704,25 +706,26 @@ class TestIdempotencyKeyFactoryEnforcement:
 # Post-critic MAJOR-3: REVIEW_REQUIRED is quasi-terminal in the closed grammar
 # Asserts the contract documented in command_bus.py: REVIEW_REQUIRED is in
 # IN_FLIGHT_STATES (operator visibility) but has zero outgoing transitions.
-# Operator-unblock event is intentionally NOT in this slice; P1.S4 will add
-# it if the operator dashboard demands an in-grammar resume path.
+# Live-order E2E adds one proof-backed clearance event. REVIEW_REQUIRED remains
+# quasi-terminal for ordinary recovery and operator dashboards.
 # ---------------------------------------------------------------------------
 
 
 class TestReviewRequiredIsQuasiTerminal:
-    def test_review_required_has_no_outgoing_transitions(self):
-        """No (REVIEW_REQUIRED, *) → * transition exists. Operator must
-        manually resolve via a fresh idempotency key (a NEW command), not by
-        re-driving the existing REVIEW_REQUIRED row through events."""
+    def test_review_required_has_only_proof_backed_clearance_transition(self):
+        """Only explicit no-side-effect proof may terminalize REVIEW_REQUIRED."""
         from src.state.venue_command_repo import _TRANSITIONS
         outgoing = [
             (state, event, after) for (state, event), after in _TRANSITIONS.items()
             if state == "REVIEW_REQUIRED"
         ]
-        assert outgoing == [], (
-            f"REVIEW_REQUIRED is documented as quasi-terminal but found "
-            f"outgoing transitions: {outgoing}. Update docs OR the grammar."
-        )
+        assert outgoing == [
+            (
+                "REVIEW_REQUIRED",
+                "REVIEW_CLEARED_NO_VENUE_SIDE_EFFECT",
+                "REJECTED",
+            )
+        ]
 
     def test_review_required_is_in_flight_for_visibility(self):
         """REVIEW_REQUIRED stays in IN_FLIGHT_STATES so operator dashboards
