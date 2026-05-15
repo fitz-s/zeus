@@ -4,7 +4,7 @@
 # Reuse: Run after live submit attempts or when venue command/order/fill evidence semantics change.
 # Created: 2026-05-15
 # Last reused or audited: 2026-05-15
-# Authority basis: docs/operations/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md
+# Authority basis: docs/operations/task_2026-05-15_live_order_e2e_goal/LIVE_ORDER_E2E_GOAL_PLAN.md
 """Read-only live order end-to-end evidence checker.
 
 This checker never submits, cancels, mutates DB truth, or fabricates proof. It
@@ -17,15 +17,15 @@ from __future__ import annotations
 import argparse
 import json
 import sqlite3
-from dataclasses import asdict, dataclass
-from decimal import Decimal, InvalidOperation
-from pathlib import Path
-from typing import Any
+SCRIPTS_DIR = ROOT / "scripts"
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
 
+from check_data_pipeline_live_e2e import _connect_live_readonly
 
-ROOT = Path(__file__).resolve().parents[1]
 TRADE_DB_NAME = "zeus_trades.db"
 WORLD_DB_NAME = "zeus-world.db"
+FORECASTS_DB_NAME = "zeus-forecasts.db"
 
 ACCEPTED_COMMAND_STATES = frozenset({"ACKED", "POST_ACKED", "PARTIAL", "FILLED"})
 FILLED_COMMAND_STATES = frozenset({"PARTIAL", "FILLED"})
@@ -78,13 +78,16 @@ class Check:
     detail: str
 
 
-def _connect_readonly(trade_db: Path, world_db: Path | None = None) -> sqlite3.Connection:
-    conn = sqlite3.connect(f"file:{trade_db.resolve()}?mode=ro", uri=True, timeout=5.0)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA query_only = ON")
-    if world_db is not None and world_db.exists():
-        conn.execute(f"ATTACH DATABASE 'file:{world_db.resolve()}?mode=ro' AS world")
-    return conn
+def _connect_readonly(
+    trade_db: Path,
+    world_db: Path,
+    forecasts_db: Path,
+) -> sqlite3.Connection:
+    return _connect_live_readonly(
+        trade_db=trade_db,
+        world_db=world_db,
+        forecasts_db=forecasts_db,
+    )
 
 
 def _table_exists(conn: sqlite3.Connection, table: str, schema: str = "main") -> bool:
@@ -665,6 +668,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--trade-db", type=Path, default=ROOT / "state" / TRADE_DB_NAME)
     parser.add_argument("--world-db", type=Path, default=ROOT / "state" / WORLD_DB_NAME)
+    parser.add_argument("--forecasts-db", type=Path, default=ROOT / "state" / FORECASTS_DB_NAME)
     parser.add_argument("--command-id")
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--allow-no-proof", action="store_true")
@@ -674,7 +678,7 @@ def main(argv: list[str] | None = None) -> int:
         result = _no_proof_result("trade_db_present", f"missing path={args.trade_db}")
     else:
         try:
-            with _connect_readonly(args.trade_db, args.world_db) as conn:
+            with _connect_readonly(args.trade_db, args.world_db, args.forecasts_db) as conn:
                 result = evaluate(conn, args.command_id)
         except sqlite3.Error as exc:
             result = _no_proof_result("trade_db_readable", f"{type(exc).__name__}: {exc}")

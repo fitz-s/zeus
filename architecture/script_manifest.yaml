@@ -391,13 +391,13 @@ scripts:
   check_live_order_e2e.py:
     # Created: 2026-05-15
     # Last reused or audited: 2026-05-15
-    # Authority basis: docs/operations/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md
+    # Authority basis: docs/operations/task_2026-05-15_live_order_e2e_goal/LIVE_ORDER_E2E_GOAL_PLAN.md
     class: diagnostic
     lifecycle: long_lived
     status: active
     authority_scope: diagnostic_non_promotion
     canonical_command: "python3 scripts/check_live_order_e2e.py --json"
-    read_targets: [state/zeus_trades.db, state/zeus-world.db]
+    read_targets: [state/zeus_trades.db, state/zeus-world.db, state/zeus-forecasts.db]
     write_targets: [stdout]
     dry_run_default: true
     apply_flag: null
@@ -405,9 +405,9 @@ scripts:
     external_inputs: [live_runtime_dbs]
     dangerous_if_run: false
     promotion_barrier: "Read-only live-order evidence checker; cannot submit/cancel orders, mutate DB truth, or treat rejected/unknown venue outcomes as placed-order completion."
-    required_helpers: []
+    required_helpers: [scripts.check_data_pipeline_live_e2e._connect_live_readonly]
     required_tests: [tests/test_check_live_order_e2e.py]
-    reason: "Classifies existing venue_commands, venue_command_events, submission envelopes, order facts, and trade facts. It fails closed unless an accepted/resting command has daemon-to-command correlation fields and venue order identity."
+    reason: "Classifies existing venue_commands, venue_command_events, submission envelopes, order facts, and trade facts. It fails closed unless an accepted/resting or filled command has daemon-to-command correlation fields, venue order identity, live venue facts, and matching record-chain proof."
   live_health_probe.py:
     # Created: 2026-05-11
     # Last reused or audited: 2026-05-15
