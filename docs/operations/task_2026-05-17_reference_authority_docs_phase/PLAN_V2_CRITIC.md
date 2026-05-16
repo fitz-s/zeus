@@ -145,3 +145,30 @@ Item `[x] python -m maintenance_worker.cli.entry --help` confirmed surface — t
 - Audit-of-audit per `feedback_audit_of_audit_antibody_recursive` baseline (50% scout self-error). v2 author claimed pre-commit self-verification "all 4 PASS"; this re-critic finds 1 of 4 (A1 maintenance_worker dry-run) failed empirically — 25% self-error rate, consistent with baseline.
 - v1 critic verdict: REVISE (5 amendments). v2 folded all 5 but A1's fix introduced a different defect of the same class.
 - v2 critic verdict: **REVISE_ROUND_2** — A1' regression + AXIS B absence.
+
+---
+
+## v3 carry-forward (post-commit honest disclosure, 2026-05-16)
+
+After v3 commit `e19b7ca922` landed, post-commit gitleaks-advisory hook prompted invariant test run. Planner ran `ls tests/test_invariants.py` and discovered the path **does NOT exist**. Empirical evidence:
+
+```
+$ git ls-files tests/ | grep -i invariant
+tests/state/test_forecast_db_split_invariant.py
+tests/state/test_schema_current_invariant.py
+tests/test_authority_rebuild_invariants.py
+tests/test_cross_module_invariants.py
+tests/test_instrument_invariants.py
+tests/test_invariant_citations.py
+tests/test_live_safety_invariants.py
+tests/test_settlements_physical_quantity_invariant.py
+tests/test_severity_tier_invariant.py
+```
+
+PLAN.md v3 §5 WAVE 1 step 3 cites `python -m pytest tests/test_invariants.py` — that monolithic path does not exist. 9 distinct invariant test files exist; the right WAVE 1 step is either (a) `python -m pytest tests/ -q -k invariant` (smoke), (b) SCOUT 0A derives the right per-finding subset, or (c) full `python -m pytest tests/` baseline + delta.
+
+This is a **latent v3 defect** of the same class as A1 (cite a command path without empirical run). V3-D's self-verify focused on CLI-surface commands (maintenance_worker, topology_doctor, git ls-files) but missed pytest-target paths. Caught by post-commit hook advisory, not by V3-D pre-commit verification.
+
+**Disposition:** flagged as v3 carry-forward for next critic (v3 critic dispatch is the mandatory step before WAVE 0). Next critic should: (i) verify this fix lands in v4, (ii) audit every other pytest/test-path citation in PLAN.md for the same class of error.
+
+**Lesson for v4+ self-verification:** V3-D should expand from "every CLI command empirically executes" to "every PATH cited (file, test, config) empirically `ls`-resolves AND every COMMAND empirically exits 0." 25% planner self-error rate is the persistent floor — anti-rubber-stamp probes must catch path-rot in addition to command-rot.
