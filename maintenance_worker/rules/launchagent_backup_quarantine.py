@@ -49,7 +49,7 @@ DEFAULT_TTL_DAYS = 14
 DEFAULT_QUARANTINE_DIR = "~/Library/LaunchAgents/.archive"
 DEFAULT_QUARANTINE_RETENTION_DAYS = 90
 # Catalog regex: files matching backup/shrapnel suffixes
-DEFAULT_BACKUP_REGEX = r"\.(bak|backup|replaced|locked|before_[a-z_]+)[-._]?[0-9TZ]*(?:\.bak)?$"
+DEFAULT_BACKUP_REGEX = r"\.(bak|backup|replaced|locked|before_[a-z_]+)[-._]?[0-9TZ_:-]*(?:\.bak)?$"
 # Forbidden: active (non-backup) com.zeus.* plists must never be quarantined
 DEFAULT_FORBIDDEN_PATTERN = r"com\.zeus\.[^.]+\.plist$"
 

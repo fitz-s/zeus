@@ -183,19 +183,15 @@ def _check_forbidden(rel_path: str, forbidden_paths: list[str]) -> str | None:
     """
     Return the matching forbidden pattern string if rel_path matches any,
     else None. Uses fnmatch for glob patterns; also checks basename.
+
+    Note: task_*/** paths are handled by _is_under_active_packet_dir (called
+    before this function in enumerate()); no redundant component-scan needed here.
     """
     name = Path(rel_path).name
     for pattern in forbidden_paths:
         # Match against full relative path and basename
         if fnmatch.fnmatch(rel_path, pattern) or fnmatch.fnmatch(name, pattern):
             return pattern
-        # Handle task_*/** style: prefix check on path components
-        if "task_*" in pattern:
-            # Check if any path component matches task_* prefix
-            parts = Path(rel_path).parts
-            for part in parts:
-                if fnmatch.fnmatch(part, "task_*"):
-                    return pattern
     return None
 
 
