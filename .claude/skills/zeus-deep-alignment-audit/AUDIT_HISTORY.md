@@ -13,6 +13,8 @@ Append-only log of every completed run of the `zeus-deep-alignment-audit` skill.
 | 1 | 2026-05-16 | 556d55be23 (main) / ff714a7507 (skill) | 4 | 3 | 1 | 0 | A, E, F, G, H probed (findings); B, C, D probed (no findings) | docs/operations/task_2026-05-16_deep_alignment_audit/REPORT.md |
 | 2 | 2026-05-16 | a924766c8a (main) / 40e7709b2d (skill) | — | 2 | 2 | 0 | Phase-A re-verify Run-1 + Phase-B new findings #5–#8 (E, F, G, H/D) | docs/operations/task_2026-05-16_deep_alignment_audit/REPORT.md §Run #2 |
 | 3 | 2026-05-16 | a924766c8a (main) / 199a43cbbc (skill) | 5 | 2 | 2 | 1 | B, E (split → E2 daemon-supervision), F, G, **J (NEW)** probed (findings #9–#13); C, D, H skipped | docs/operations/task_2026-05-16_deep_alignment_audit/RUN_3_findings.md + deep-dives commits f65a6abe96 + Phase-3 40e7709b2d |
+| 4 | 2026-05-16 | a924766c8a (main) / f0c4f48397 (skill) | 1 | 1 | 0 | 0 | **C+Cat-K NEW** (F14 submit_redeem zero callers — Karachi 5/17 blocker), **H** (F15 settlements/_v2 1583-row asymmetric drift) | docs/operations/task_2026-05-16_deep_alignment_audit/RUN_4_findings.md |
+| 5 | 2026-05-16 | a924766c8a (main) / (this commit) (skill) | 1 (latent F16) | 2 | 2 | 0 | **Cat-K cascade-liveness exhaustion** (F16 wrap_unwrap_commands ZERO callers latent SEV-0; F17 calibration_transfers trapdoor SEV-1) + **H+F cross-DB shadow sweep** (F18 observation_instants_v2 asymmetric SEV-1; F19 market_events_v2 3-DB asymmetric SEV-2; F20 ensemble_snapshots 116 dead rows SEV-2); state-machine inventory (11 lifecycles: 8 ALIVE, 2 DEAD, 1 HALF-DEAD); F14 re-confirmed + DB-location corrected (zeus_trades.db not forecasts.db) | docs/operations/task_2026-05-16_deep_alignment_audit/RUN_5_findings.md |
 
 ---
 
@@ -148,4 +150,32 @@ When you (the opus orchestrator running this skill) read this file in Boot step 
 - New Cat-K added (cascade liveness).
 - New probe #9 documented (production-caller-for-cascade-fn).
 - Cat-J anti-heuristic refined ($(...) substitution gate).
+
+---
+
+### Run 5 — 2026-05-16 — commit (this commit)
+
+**One-paragraph summary**: Exhaustive Cat-K cascade-liveness sweep + cross-DB shadow-table audit. Inventoried 11 production state machines and classified each as ALIVE / DEAD / HALF-DEAD by checking (a) does a scheduler/loop drive it, (b) does it have ≥1 non-test production caller, (c) is the table being written today. Two complete DEAD machines surfaced: `settlement_commands.submit_redeem` (F14 sibling, already known) and `wrap_unwrap_commands.*` (F16, 7 public functions, ZERO production callers anywhere, table empty — latent SEV-0 because `AGENTS.md` documents it as "no live chain side effects in Z4" so it is *intentionally* deferred but the skill must flag it so future runs don't re-discover). One HALF-DEAD machine: `validated_calibration_transfers` reader is wired and feature-flag-gated, writer is a one-shot CLI script with no scheduler (F17 trapdoor SEV-1 — if flag flips on without backfill, every transfer query falls into "no evidence" branch silently). Cross-DB shadow sweep produced 3 new findings: `observation_instants_v2` 929k row inverse-asymmetry on world.db (F18 SEV-1), `market_events_v2` triple-DB shadow with forecasts canonical 9914 / trades shadow 7326 / world stranded 2112 (F19 SEV-2), `ensemble_snapshots` 116 dead legacy rows on world.db (F20 SEV-2). F14 location corrected: state machine is on `zeus_trades.db` not `forecasts.db` (Run #4 wrong). No new Karachi 5/17 blockers — F14 remains sole direct blocker. State-machine inventory itself is a new artifact (§1 of RUN_5_findings.md) that should be re-run every audit as a regression check against AGENTS.md drift.
+
+**Categories that produced findings**: K (SEV-0 latent F16, SEV-1 F17 — Cat-K now 2 runs consecutive HIGH yield); H (SEV-1 F18, SEV-2 F19 — 3rd run consecutive); F (SEV-2 F20 — orphan shadow, 3rd run consecutive).
+
+**Categories that produced nothing**: A, B, C (single-callsite), D, E1, E2, G, I, J — probed at registry/inventory level via state-machine sweep but no new SEV-1/2. Cat-J specifically re-validated against new candidate findings, no false positives raised.
+
+**New patterns observed**:
+- **Writer-is-a-CLI-script pattern** (F17): when a reader is wired into production and a writer exists only as `scripts/*.py` with no scheduler/cron registration, the table risks silent emptiness. This is structurally distinct from Cat-K (which is "no callers"); the writer HAS a caller, just not an automated one. Worth its own probe.
+- **AGENTS.md-as-cascade-map**: `src/execution/AGENTS.md` explicitly labels `wrap_unwrap_commands.py` as "HIGH — no live chain side effects in Z4". Grepping AGENTS.md files for "no live", "deferred", "future", "unwired", "Z5" is a near-free way to enumerate latent state machines without re-reading the code.
+- **Cross-DB shadow tables form a graph**: F19 is the first 3-DB shadow finding. Single-DB row-counts miss it; must matrix-multiply across `state/*.db`.
+- **State-machine inventory is the right base artifact for Cat-K**: enumerating every `*_commands.py` / `*_listener.py` / `*_runner.py` / `*_resolver.py` / `*_writer.py` module gives the universe; classifying each ALIVE/DEAD/HALF-DEAD turns Cat-K into a finite-coverage probe instead of an open-ended grep.
+
+**Methodology changes triggered**:
+- Added probe #10 to LEARNINGS high-signal: **AGENTS.md grep for deferred-cascade markers** (`grep -rni 'no live\|deferred\|future\|unwired\|TODO.*wire' src/**/AGENTS.md`).
+- Added probe #11 to LEARNINGS high-signal: **cross-DB shadow-table row-count matrix** across `state/zeus_trades.db`, `state/zeus-forecasts.db`, `state/zeus-world.db` — for every duplicated table name, emit a (table, db, count) tuple and flag asymmetries.
+- Added probe #12 to LEARNINGS high-signal: **writer-is-a-script gate** (`reader_calls > 0 AND scheduler_writer_calls == 0 AND scripts/*.py contains INSERT into table` → SEV-1).
+- Promoted Cat-K from new→HIGH yield (2 consecutive runs producing SEV-0/SEV-1).
+- Cat-J refinement: explicit comment-adjacency gate also covers `scripts/*.py` one-shot tools (no flag).
+- **Methodology change for next runs**: every Run must produce or update the state-machine inventory matrix in §1 of its findings doc as a base artifact. Drift in the matrix (ALIVE→DEAD or vice versa) IS the finding.
+
+**Hand-edits to LEARNINGS.md beyond Closeout**: none.
+
+**F14 correction note (back-fill on Run #4 retrospective)**: Run #4 retrospective said the `settlement_commands` state machine writes to `forecasts.db`; Run #5 §1 inventory confirmed via `db_table_ownership.yaml` and live row-counts that it is on `zeus_trades.db`. Findings unaffected (the cascade is still broken at `submit_redeem`), but the manual fallback runbook DB query path needs the corrected location. Preserved per "Never edit past entries" rule; correction lives here + in RUN_5_findings.md §2 + §4.
 

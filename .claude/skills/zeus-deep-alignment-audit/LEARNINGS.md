@@ -236,3 +236,34 @@ Per Run #3 meta-audit (3rd run is meta-audit per SKILL.md): split seed `E. Settl
 - **Pattern**: Cat-C (single-callsite scan) and Cat-K (cascade liveness) both surfaced the same Finding #14 from different angles. This is healthy — overlapping probes converge on real bugs. Don't merge them; they apply at different granularities (call-site vs cascade-link).
 - **Cascade-docs drift**: `KARACHI_2026_05_17_MANUAL_FALLBACK.md` §1 described an auto-cascade reaching `clob.redeem` that does not exist in production. Audit caught the gap before the operator relied on it. **Antibody**: every runbook describing a cascade must cite the production caller (file:line) for each link, not just the link function name.
 
+
+## Run #5 update (2026-05-16) — Cat-K exhaustion + cross-DB shadow sweep
+
+### Yield ladder updates (Run #5)
+
+- **Cat-K confirmed HIGH** (2nd consecutive run producing SEV-0/SEV-1: Run #4 F14 + Run #5 F16/F17). Cascade-liveness is the dominant fault surface in late-2026 Zeus.
+- **Cat-H confirmed HIGH** (3rd consecutive: Run #1 settlements_v2 + Run #3 #12 + Run #4 #15 + Run #5 F18 + F19). Cross-DB shadow tables now demand a dedicated sweep every run.
+- **Cat-F confirmed HIGH** (3rd consecutive: Run #3 #12 + Run #4 #15 + Run #5 F20). Orphan shadow rows are a recurring debt.
+- **Final ladder after Run #5**: HIGH = A, C, E1, F, G, H, I, K. MEDIUM = B, E2. LOW = D. None DEAD.
+
+### High-signal probes added in Run #5
+
+10. **[K] AGENTS.md-as-cascade-map probe** — `grep -rniE 'no live|deferred|future|unwired|TODO.*wire|Z5' src/**/AGENTS.md`. Latent state machines are usually documented (`HIGH — no live chain side effects in Z4` on `wrap_unwrap_commands` was the F16 signal). Near-free way to enumerate dead modules without re-reading code.
+11. **[H+F] cross-DB shadow-table row-count matrix** — for every duplicated table name across `state/zeus_trades.db`, `state/zeus-forecasts.db`, `state/zeus-world.db`, emit `(table, db, count)` tuple. Asymmetric rows = finding. Caught F18 (`observation_instants_v2` inverse asymmetry), F19 (`market_events_v2` 3-DB shadow 9914/7326/2112), F20 (`ensemble_snapshots` 116 orphan rows). One-pass sqlite script suffices.
+12. **[K] writer-is-a-script gate** — for every table T whose reader is wired into a daemon/scheduler: `grep -rn 'INSERT.*INTO ${T}' src/ scripts/` and classify writer. If writer lives ONLY in `scripts/*.py` (no APScheduler/cron registration), SEV-1 trapdoor. Caught F17 (`validated_calibration_transfers` reader on by feature flag, writer is `scripts/evaluate_calibration_transfer_oos.py:381` only, table empty).
+
+### Mandatory base artifact (Run #5 onward)
+
+- **State-machine inventory matrix** (§1 of every RUN_N_findings.md going forward). Columns: machine, driver/scheduler, public-fns, prod-caller-grep-count, table-row-count, AGENTS.md verdict, status (ALIVE/DEAD/HALF-DEAD), since-when. Enumerate every `src/**/*_commands.py`, `*_listener.py`, `*_runner.py`, `*_resolver.py`, `*_writer.py`. Drift (ALIVE→DEAD or vice versa across runs) IS the finding.
+
+### Anti-heuristics refined (Run #5)
+
+- **Cat-J extended**: `scripts/*.py` writers are NOT secrets-in-cron risks (Cat-J), they ARE writer-is-script trapdoors (Cat-K probe #12). Don't double-count.
+- **Cat-K + AGENTS.md interaction**: if `AGENTS.md` explicitly labels a module as deferred/no-live, do NOT raise SEV-0; raise SEV-0-latent (skill brain category) so future runs don't re-discover. F16 demonstrates the shape. Tracker requirement: every SEV-0-latent must cite the AGENTS.md line proving the deferral is intentional.
+
+### Meta-audit-of-the-audit (Run #5)
+
+- **State-machine inventory turns Cat-K from open-ended grep into a finite-coverage probe.** Before Run #5, Cat-K was "grep for any function the runbook claims is invoked". After Run #5, it's "enumerate all production state machines; for each, run probes 9+10+12". This converts unbounded → bounded. Re-run the matrix every audit; drift = finding.
+- **Cross-DB shadow surface forms a graph, not a list.** F19 was the first 3-DB shadow (forecasts/trades/world all carry `market_events_v2`). Probe #11's matrix form catches this; single-DB row-count diffs do not.
+- **Runbook DB-location accuracy**: F14 was reported on `forecasts.db` in Run #4; actually on `zeus_trades.db`. Antibody: every state-machine finding must cite `db_table_ownership.yaml` line for the canonical DB, not infer from co-located code.
+
