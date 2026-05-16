@@ -469,7 +469,7 @@ scripts:
   generate_monthly_bounds.py: {class: config_writer}
   healthcheck.py:
     class: runtime_support
-    read_targets: [state/status_summary.json, state/risk_state.db, state/source_health.json, state/zeus.db, state/zeus-forecasts.db, git_repo_metadata, "~/Library/LaunchAgents/com.zeus.*.plist", launchctl]
+    read_targets: [state/status_summary.json, state/risk_state.db, state/source_health.json, state/zeus.db, state/zeus_trades.db, state/zeus-forecasts.db, git_repo_metadata, "~/Library/LaunchAgents/com.zeus.*.plist", process_table, lsof, launchctl]
     write_targets: [stdout]
     required_tests: [tests/test_healthcheck.py]
   heartbeat_dispatcher.py: {class: runtime_support, external_inputs: [openclaw_binary, host_log_path]}

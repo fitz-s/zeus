@@ -27,6 +27,7 @@ from src.state.decision_chain import query_no_trade_cases
 STATUS_STALE_SECONDS = 2 * 3600
 RISKGUARD_STALE_SECONDS = 5 * 60
 SOURCE_HEALTH_WRITER_STALE_SECONDS = 10 * 60
+LIVE_DB_UNKNOWN_HOLDER_SECONDS = 10 * 60
 STATUS_REQUIRED_KEYS = ("control", "runtime", "execution", "learning", "truth")
 STATUS_CONTROL_REQUIRED_KEYS = (
     "recommended_auto_commands",
@@ -59,6 +60,10 @@ def _risk_state_path() -> Path:
 
 def _zeus_db_path() -> Path:
     return state_path("zeus.db").parent / "zeus.db"
+
+
+def _trade_db_path() -> Path:
+    return state_path("zeus_trades.db")
 
 
 def _source_health_path() -> Path:
@@ -118,6 +123,189 @@ def _module_from_program_arguments(program_args: list) -> str:
         if token == "-m":
             return str(program_args[idx + 1])
     return ""
+
+
+def _has_module_launch(command: str, module: str) -> bool:
+    tokens = str(command or "").split()
+    for idx, token in enumerate(tokens[:-1]):
+        if token == "-m" and tokens[idx + 1] == module:
+            return True
+    return False
+
+
+def _is_known_live_db_holder(command: str) -> bool:
+    command = str(command or "")
+    known_modules = (
+        "src.main",
+        "src.riskguard.riskguard",
+        "src.ingest.forecast_live_daemon",
+        "src.ingest_main",
+    )
+    if any(_has_module_launch(command, module) for module in known_modules):
+        return True
+    return False
+
+
+def _etime_to_seconds(raw: str) -> int | None:
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    days = 0
+    if "-" in text:
+        day_text, text = text.split("-", 1)
+        try:
+            days = int(day_text)
+        except ValueError:
+            return None
+    parts = text.split(":")
+    try:
+        values = [int(part) for part in parts]
+    except ValueError:
+        return None
+    if len(values) == 2:
+        hours = 0
+        minutes, seconds = values
+    elif len(values) == 3:
+        hours, minutes, seconds = values
+    else:
+        return None
+    return (((days * 24) + hours) * 60 + minutes) * 60 + seconds
+
+
+def _process_info(pid: int) -> dict:
+    try:
+        proc = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "etime=,command="],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except Exception as exc:
+        return {"pid": pid, "error": str(exc)}
+    if proc.returncode != 0:
+        return {"pid": pid, "error": (proc.stderr or "").strip() or "ps failed"}
+    text = proc.stdout.strip()
+    if not text:
+        return {"pid": pid, "error": "ps empty"}
+    parts = text.split(None, 1)
+    etime = parts[0]
+    command = parts[1] if len(parts) > 1 else ""
+    return {
+        "pid": pid,
+        "etime": etime,
+        "etime_seconds": _etime_to_seconds(etime),
+        "command": command[:500],
+    }
+
+
+def _live_db_holder_status() -> dict:
+    db_path = _trade_db_path()
+    db_paths = [db_path, db_path.with_name(f"{db_path.name}-wal"), db_path.with_name(f"{db_path.name}-shm")]
+    existing = [str(path) for path in db_paths if path.exists()]
+    if not existing:
+        return {
+            "ok": True,
+            "path": str(db_path),
+            "holders": [],
+            "unknown_long_lived_holders": [],
+            "diagnostic": "db_files_missing",
+        }
+    try:
+        proc = subprocess.run(
+            ["lsof", "-F", "pn", *existing],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except FileNotFoundError:
+        return {
+            "ok": False,
+            "path": str(db_path),
+            "holders": [],
+            "unknown_long_lived_holders": [],
+            "unattested_holders": [],
+            "diagnostic_unavailable": True,
+            "issue": "LIVE_DB_HOLDER_ATTESTATION_UNAVAILABLE",
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "path": str(db_path),
+            "holders": [],
+            "unknown_long_lived_holders": [],
+            "unattested_holders": [],
+            "diagnostic_unavailable": True,
+            "issue": f"LIVE_DB_HOLDER_ATTESTATION_FAILED:{type(exc).__name__}",
+        }
+    stderr = (proc.stderr or "").strip()
+    if proc.returncode != 0 and stderr:
+        return {
+            "ok": False,
+            "path": str(db_path),
+            "holders": [],
+            "unknown_long_lived_holders": [],
+            "unattested_holders": [],
+            "diagnostic_unavailable": True,
+            "issue": "LIVE_DB_HOLDER_ATTESTATION_FAILED",
+            "error": stderr,
+        }
+    if proc.returncode != 0 and not (proc.stdout or "").strip():
+        return {
+            "ok": True,
+            "path": str(db_path),
+            "holders": [],
+            "unknown_long_lived_holders": [],
+            "unattested_holders": [],
+            "diagnostic": "no_holders",
+        }
+
+    holders_by_pid: dict[int, dict] = {}
+    current_pid: int | None = None
+    for line in (proc.stdout or "").splitlines():
+        if line.startswith("p"):
+            try:
+                current_pid = int(line[1:])
+            except ValueError:
+                current_pid = None
+            if current_pid is not None:
+                holders_by_pid.setdefault(current_pid, {"pid": current_pid, "open_dbs": []})
+        elif line.startswith("n") and current_pid is not None:
+            holders_by_pid.setdefault(current_pid, {"pid": current_pid, "open_dbs": []})["open_dbs"].append(line[1:])
+
+    holders: list[dict] = []
+    unknown_long_lived: list[dict] = []
+    unattested: list[dict] = []
+    for pid, holder in sorted(holders_by_pid.items()):
+        info = _process_info(pid)
+        command = str(info.get("command") or "")
+        etime_seconds = info.get("etime_seconds")
+        holder.update(info)
+        holder["known_live_owner"] = _is_known_live_db_holder(command)
+        holder["open_dbs"] = sorted(set(holder.get("open_dbs", [])))
+        holders.append(holder)
+        if not holder["known_live_owner"] and not isinstance(etime_seconds, int):
+            unattested.append(holder)
+        if (
+            not holder["known_live_owner"]
+            and isinstance(etime_seconds, int)
+            and etime_seconds >= LIVE_DB_UNKNOWN_HOLDER_SECONDS
+        ):
+            unknown_long_lived.append(holder)
+
+    issue = None
+    if unknown_long_lived:
+        issue = "LIVE_DB_UNKNOWN_LONG_LIVED_HOLDER"
+    elif unattested:
+        issue = "LIVE_DB_HOLDER_ATTESTATION_INCOMPLETE"
+    return {
+        "ok": not unknown_long_lived and not unattested,
+        "path": str(db_path),
+        "holder_age_budget_seconds": LIVE_DB_UNKNOWN_HOLDER_SECONDS,
+        "holders": holders,
+        "unknown_long_lived_holders": unknown_long_lived,
+        "unattested_holders": unattested,
+        "issue": issue,
+    }
 
 
 def _first_launchctl_field(output: str, field: str) -> str:
@@ -385,6 +573,42 @@ def _source_health_status() -> dict:
     }
 
 
+def _execution_capability_db_lock_status(status: dict | None) -> dict:
+    execution_capability = (status or {}).get("execution_capability")
+    if not isinstance(execution_capability, dict):
+        return {"ok": True, "locks": [], "issue": None}
+    locks: list[dict] = []
+    for action_name, action in execution_capability.items():
+        if not isinstance(action, dict):
+            continue
+        components = action.get("components")
+        if not isinstance(components, list):
+            continue
+        for component in components:
+            if not isinstance(component, dict):
+                continue
+            details = component.get("details") if isinstance(component.get("details"), dict) else {}
+            error = str(details.get("error") or "")
+            if "database is locked" not in error.lower():
+                continue
+            locks.append(
+                {
+                    "action": action_name,
+                    "component": component.get("component"),
+                    "allowed": component.get("allowed"),
+                    "reason": component.get("reason"),
+                    "loader_failed": bool(details.get("loader_failed")),
+                    "error_type": details.get("error_type"),
+                    "error": error,
+                }
+            )
+    return {
+        "ok": not locks,
+        "locks": locks,
+        "issue": "LIVE_DB_LOCK_EXECUTION_CAPABILITY" if locks else None,
+    }
+
+
 def _parse_launchctl_pid(output: str) -> int:
     """Parse PID from launchctl output across macOS formats."""
     text = (output or "").strip()
@@ -459,6 +683,10 @@ def check() -> dict:
     result["source_health_ok"] = bool(result["source_health"].get("ok"))
     if not result["source_health_ok"]:
         result["source_health_issue"] = result["source_health"].get("issue") or "LIVE_SOURCE_HEALTH_STALE"
+    result["live_db_holders"] = _live_db_holder_status()
+    result["live_db_holders_ok"] = bool(result["live_db_holders"].get("ok", True))
+    if not result["live_db_holders_ok"]:
+        result["live_db_holders_issue"] = result["live_db_holders"].get("issue") or "LIVE_DB_HOLDER_POLICY"
 
     # Check daemon PID
     try:
@@ -542,6 +770,10 @@ def check() -> dict:
             runtime = status.get("runtime", {}) or {}
             if isinstance(runtime, dict):
                 result["runtime_summary"] = runtime
+            result["db_lock_status"] = _execution_capability_db_lock_status(status)
+            result["db_lock_ok"] = bool(result["db_lock_status"].get("ok", True))
+            if not result["db_lock_ok"]:
+                result["db_lock_issue"] = result["db_lock_status"].get("issue") or "LIVE_DB_LOCK"
             age_seconds = _status_age_seconds(result["last_cycle"])
             if age_seconds is not None:
                 result["status_age_seconds"] = round(age_seconds, 1)
@@ -553,6 +785,8 @@ def check() -> dict:
     else:
         result["status_summary"] = "missing"
         result["action_required"] = False
+        result["db_lock_status"] = {"ok": True, "locks": [], "issue": None}
+        result["db_lock_ok"] = True
 
     risk_state_path = _risk_state_path()
     result["risk_state_path"] = str(risk_state_path)
@@ -655,6 +889,8 @@ def check() -> dict:
         and bool(result.get("code_plane_ok"))
         and bool(result.get("launchd_contract_ok"))
         and bool(result.get("source_health_ok"))
+        and bool(result.get("db_lock_ok", True))
+        and bool(result.get("live_db_holders_ok", True))
         and not bool(result.get("cycle_failed"))
         and result.get("infrastructure_level") != "RED"
     )
