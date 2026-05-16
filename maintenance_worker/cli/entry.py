@@ -177,6 +177,19 @@ def cmd_run(config: EngineConfig, invocation_mode: Optional[InvocationMode] = No
     Returns an exit code integer.
     """
     mode = invocation_mode or detect()
+
+    # F3: read install_metadata BEFORE run_tick. install_metadata.json is written
+    # by the install script, not by the first tick. If it is absent the agent was
+    # not properly installed and no apply-stage must run.
+    meta_path = config.state_dir / METADATA_FILENAME
+    if not meta_path.exists():
+        print(
+            "[maintenance_worker] ERROR: install_metadata.json missing — "
+            "run install script first",
+            file=sys.stderr,
+        )
+        return EXIT_NO_CONFIG
+
     try:
         with _TickLock(config.state_dir):
             result = run_tick(config)
@@ -189,8 +202,6 @@ def cmd_run(config: EngineConfig, invocation_mode: Optional[InvocationMode] = No
         return code if code != 0 else EXIT_GUARD_FAILURE
 
     # SEV-1 #1: wire ApplyPublisher into the post-run_tick path.
-    # Load install_metadata (written on first tick; may not exist yet — skip publish if absent).
-    meta_path = config.state_dir / METADATA_FILENAME
     if meta_path.exists() and result.apply_results:
         try:
             install_meta = read_install_metadata(config.state_dir)

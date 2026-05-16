@@ -27,8 +27,8 @@ import pytest
 
 from maintenance_worker.cli.entry import (
     EXIT_LOCK_CONTENTION,
-    EXIT_OK,
     EXIT_NO_CONFIG,
+    EXIT_OK,
     LockContention,
     _TickLock,
     cmd_dry_run,
@@ -38,6 +38,10 @@ from maintenance_worker.cli.entry import (
     main,
 )
 from maintenance_worker.cli.scheduler_detect import detect
+from maintenance_worker.core.install_metadata import (
+    InstallMetadata,
+    write_install_metadata,
+)
 from maintenance_worker.types.modes import InvocationMode
 from maintenance_worker.types.specs import EngineConfig
 
@@ -74,6 +78,19 @@ def _mock_run_tick():
     return patch(
         "maintenance_worker.cli.entry.run_tick",
         return_value=mock_result,
+    )
+
+
+def _seed_install_metadata(state_dir: Path) -> None:
+    """Write a minimal install_metadata.json so cmd_run passes the F3 pre-check."""
+    write_install_metadata(
+        state_dir,
+        InstallMetadata(
+            schema_version=1,
+            first_run_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            agent_version="0.0.1-test",
+            install_run_id="00000000-0000-4000-8000-000000000001",
+        ),
     )
 
 
@@ -185,6 +202,7 @@ def test_tick_lock_cleanup_on_exception(tmp_path: Path) -> None:
 def test_cmd_run_returns_exit_ok(tmp_path: Path) -> None:
     """cmd_run returns EXIT_OK on successful tick."""
     config = _make_config(tmp_path)
+    _seed_install_metadata(config.state_dir)
     guards_patch = patch(
         "maintenance_worker.core.guards.subprocess.run",
         return_value=MagicMock(returncode=0, stdout="", stderr=""),
@@ -205,6 +223,7 @@ def test_cmd_run_returns_exit_ok(tmp_path: Path) -> None:
 def test_cmd_run_lock_contention_returns_exit_code(tmp_path: Path) -> None:
     """cmd_run returns EXIT_LOCK_CONTENTION when lock is already held."""
     config = _make_config(tmp_path)
+    _seed_install_metadata(config.state_dir)
 
     # Hold the lock in a thread
     lock = _TickLock(config.state_dir)
@@ -219,11 +238,45 @@ def test_cmd_run_lock_contention_returns_exit_code(tmp_path: Path) -> None:
 def test_cmd_run_propagates_system_exit_nonzero(tmp_path: Path) -> None:
     """cmd_run returns non-zero when engine raises SystemExit with non-zero code."""
     config = _make_config(tmp_path)
+    _seed_install_metadata(config.state_dir)
 
     with patch("maintenance_worker.cli.entry.run_tick", side_effect=SystemExit(3)):
         result = cmd_run(config)
 
     assert result != 0
+
+
+# ---------------------------------------------------------------------------
+# F3 regression: missing install_metadata.json → exit non-zero, no apply stage
+# ---------------------------------------------------------------------------
+
+
+def test_cmd_run_missing_install_metadata_exits_nonzero(tmp_path: Path, capsys) -> None:
+    """
+    F3 regression: if install_metadata.json is absent, cmd_run must return
+    EXIT_NO_CONFIG before any apply stage runs.
+
+    install_metadata.json is written by the install script, not by first tick.
+    An absent file means the agent was not properly installed.
+    """
+    config = _make_config(tmp_path)
+    # Deliberately do NOT seed install_metadata so meta_path is absent.
+
+    run_tick_called: list[bool] = []
+
+    def fake_run_tick(cfg):  # pragma: no cover
+        run_tick_called.append(True)
+        raise AssertionError("run_tick must not be called when install_metadata is missing")
+
+    with patch("maintenance_worker.cli.entry.run_tick", side_effect=fake_run_tick):
+        result = cmd_run(config)
+
+    assert result == EXIT_NO_CONFIG, (
+        f"Expected EXIT_NO_CONFIG ({EXIT_NO_CONFIG}), got {result}"
+    )
+    assert run_tick_called == [], "run_tick must not be called when install_metadata is absent"
+    captured = capsys.readouterr()
+    assert "install_metadata.json missing" in captured.err
 
 
 # ---------------------------------------------------------------------------
