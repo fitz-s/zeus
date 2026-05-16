@@ -1,0 +1,105 @@
+# Archive Migration 2026-05-16
+# Mode: DRY-RUN
+# Date: 2026-05-16
+# Source: docs/archives/packets/
+# Target: docs/operations/archive/2026-Q2/
+
+## Entry census: 28 entries found on disk
+## Pre-deletion check: 0 prior-deleted exclusions (all 28 present)
+
+## Breakdown: 26 directories, 2 bare files
+
+[DRY-RUN] mkdir -p docs/operations/archive/2026-Q2
+
+## Moves + stubs
+
+[DRY-RUN] git mv docs/archives/packets/repo_review_2026-05-01 -> docs/operations/archive/2026-Q2/repo_review_2026-05-01
+[DRY-RUN] stub -> docs/operations/repo_review_2026-05-01.archived
+
+[DRY-RUN] git mv docs/archives/packets/task_2026-04-13_topology_compiler_program.md -> docs/operations/archive/2026-Q2/task_2026-04-13_topology_compiler_program.md
+[DRY-RUN] stub -> docs/operations/task_2026-04-13_topology_compiler_program.md.archived
+
+[DRY-RUN] git mv docs/archives/packets/task_2026-04-14_session_backlog.md -> docs/operations/archive/2026-Q2/task_2026-04-14_session_backlog.md
+[DRY-RUN] stub -> docs/operations/task_2026-04-14_session_backlog.md.archived
+
+[DRY-RUN] git mv docs/archives/packets/task_2026-04-16_dual_track_metric_spine -> docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine
+[DRY-RUN] stub -> docs/operations/task_2026-04-16_dual_track_metric_spine.archived
+
+[DRY-RUN] git mv docs/archives/packets/task_2026-04-16_function_naming_freshness -> docs/operations/archive/2026-Q2/task_2026-04-16_function_naming_freshness
+[DRY-RUN] stub -> docs/operations/task_2026-04-16_function_naming_freshness.archived
+
+[DRY-RUN] git mv docs/archives/packets/task_2026-04-19_code_review_graph_topology_bridge -> docs/operations/archive/2026-Q2/task_2026-04-19_code_review_graph_topology_bridge
+[DRY-RUN] stub -> docs/operations/task_2026-04-19_code_review_graph_topology_bridge.archived
+
+[DRY-RUN] git mv docs/archives/packets/task_2026-04-19_workspace_artifact_sync -> docs/operations/archive/2026-Q2/task_2026-04-19_workspace_artifact_sync
+[DRY-RUN] stub -> docs/operations/task_2026-04-19_workspace_artifact_sync.archived
+
+[DRY-RUN] git mv docs/archives/packets/task_2026-04-20_code_impact_graph_context_pack -> docs/operations/archive/2026-Q2/task_2026-04-20_code_impact_graph_context_pack
+[DRY-RUN] stub -> docs/operations/task_2026-04-20_code_impact_graph_context_pack.archived
+
+[DRY-RUN] git mv docs/archives/packets/task_2026-04-20_code_review_graph_online_context -> docs/operations/archive/2026-Q2/task_2026-04-20_code_review_graph_online_context
+[DRY-RUN] stub -> docs/operations/task_2026-04-20_code_review_graph_online_context.archived
+
+[DRY-RUN] git mv docs/archives/packets/task_2026-04-20_workspace_authority_reconstruction -> docs/operations/archive/2026-Q2/task_2026-04-20_workspace_authority_reconstruction
+[DRY-RUN] stub -> docs/operations/task_2026-04-20_workspace_authority_reconstruction.archived
+
+[DRY-RUN] git mv docs/archives/packets/task_2026-04-21_docs_reclassification_reference_extraction -> docs/operations/archive/2026-Q2/task_2026-04-21_docs_reclassification_reference_extraction
+[DRY-RUN] stub -> docs/operations/task_2026-04-21_docs_reclassification_reference_extraction.archived
+
+[DRY-RUN] git mv docs/archives/packets/task_2026-04-21_gate_f_data_backfill -> docs/operations/archive/2026-Q2/task_2026-04-21_gate_f_data_backfill
+[DRY-RUN] stub -> docs/operations/task_2026-04-21_gate_f_data_backfill.archived
+
+[DRY-RUN] git mv docs/archives/packets/task_2026-04-22_docs_truth_refresh -> docs/operations/archive/2026-Q2/task_2026-04-22_docs_truth_refresh
+[DRY-RUN] stub -> docs/operations/task_2026-04-22_docs_truth_refresh.archived
+
+[DRY-RUN] git mv docs/archives/packets/task_2026-04-22_orphan_artifact_cleanup -> docs/operations/archive/2026-Q2/task_2026-04-22_orphan_artifact_cleanup
+[DRY-RUN] stub -> docs/operations/task_2026-04-22_orphan_artifact_cleanup.archived
+
+[DRY-RUN] git mv docs/archives/packets/task_2026-04-23_authority_kernel_gamechanger -> docs/operations/archive/2026-Q2/task_2026-04-23_authority_kernel_gamechanger
+[DRY-RUN] stub -> docs/operations/task_2026-04-23_authority_kernel_gamechanger.archived
+
+[DRY-RUN] git mv docs/archives/packets/task_2026-04-23_authority_rehydration -> docs/operations/archive/2026-Q2/task_2026-04-23_authority_rehydration
+[DRY-RUN] stub -> docs/operations/task_2026-04-23_authority_rehydration.archived
+
+[DRY-RUN] git mv docs/archives/packets/task_2026-04-23_data_readiness_remediation -> docs/operations/archive/2026-Q2/task_2026-04-23_data_readiness_remediation
+[DRY-RUN] stub -> docs/operations/task_2026-04-23_data_readiness_remediation.archived
+
+[DRY-RUN] git mv docs/archives/packets/task_2026-04-23_graph_refresh_official_integration -> docs/operations/archive/2026-Q2/task_2026-04-23_graph_refresh_official_integration
+[DRY-RUN] stub -> docs/operations/task_2026-04-23_graph_refresh_official_integration.archived
+
+[DRY-RUN] git mv docs/archives/packets/task_2026-04-23_guidance_kernel_semantic_boot -> docs/operations/archive/2026-Q2/task_2026-04-23_guidance_kernel_semantic_boot
+[DRY-RUN] stub -> docs/operations/task_2026-04-23_guidance_kernel_semantic_boot.archived
+
+[DRY-RUN] git mv docs/archives/packets/task_2026-04-23_live_harvester_enablement_dr33 -> docs/operations/archive/2026-Q2/task_2026-04-23_live_harvester_enablement_dr33
+[DRY-RUN] stub -> docs/operations/task_2026-04-23_live_harvester_enablement_dr33.archived
+
+[DRY-RUN] git mv docs/archives/packets/task_2026-05-01_hko_backfill -> docs/operations/archive/2026-Q2/task_2026-05-01_hko_backfill
+[DRY-RUN] stub -> docs/operations/task_2026-05-01_hko_backfill.archived
+
+[DRY-RUN] git mv docs/archives/packets/task_2026-05-01_hko_release -> docs/operations/archive/2026-Q2/task_2026-05-01_hko_release
+[DRY-RUN] stub -> docs/operations/task_2026-05-01_hko_release.archived
+
+[DRY-RUN] git mv docs/archives/packets/task_2026-05-01_live_arming -> docs/operations/archive/2026-Q2/task_2026-05-01_live_arming
+[DRY-RUN] stub -> docs/operations/task_2026-05-01_live_arming.archived
+
+[DRY-RUN] git mv docs/archives/packets/task_2026-05-01_live_smoke_test -> docs/operations/archive/2026-Q2/task_2026-05-01_live_smoke_test
+[DRY-RUN] stub -> docs/operations/task_2026-05-01_live_smoke_test.archived
+
+[DRY-RUN] git mv docs/archives/packets/task_2026-05-01_paris_station_resolution -> docs/operations/archive/2026-Q2/task_2026-05-01_paris_station_resolution
+[DRY-RUN] stub -> docs/operations/task_2026-05-01_paris_station_resolution.archived
+
+[DRY-RUN] git mv docs/archives/packets/task_2026-05-01_tigge_4_29_backfill -> docs/operations/archive/2026-Q2/task_2026-05-01_tigge_4_29_backfill
+[DRY-RUN] stub -> docs/operations/task_2026-05-01_tigge_4_29_backfill.archived
+
+[DRY-RUN] git mv docs/archives/packets/task_2026-05-02_hk_paris_release -> docs/operations/archive/2026-Q2/task_2026-05-02_hk_paris_release
+[DRY-RUN] stub -> docs/operations/task_2026-05-02_hk_paris_release.archived
+
+[DRY-RUN] git mv docs/archives/packets/zeus_workspace_authority_reconstruction_package_2026-04-20_v2 -> docs/operations/archive/2026-Q2/zeus_workspace_authority_reconstruction_package_2026-04-20_v2
+[DRY-RUN] stub -> docs/operations/zeus_workspace_authority_reconstruction_package_2026-04-20_v2.archived
+
+## Summary
+Total entries processed: 28
+Moves planned: 28
+Stubs planned: 28
+Prior-deleted exclusions: 0
+Migration count (for INDEX.md): 28
