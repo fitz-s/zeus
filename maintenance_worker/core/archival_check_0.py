@@ -119,9 +119,9 @@ def _path_matches_row(candidate: Path, row_path_str: str) -> bool:
       3. exact match after normalization.
     """
     cand_str = str(candidate)
-    # Normalize separators
-    cand_norm = cand_str.replace("\\", "/")
-    row_norm = row_path_str.replace("\\", "/").rstrip("/")
+    # Expand ~ so resolved absolute paths match literal-~ registry entries (and vice versa)
+    cand_norm = os.path.expanduser(cand_str).replace("\\", "/")
+    row_norm = os.path.expanduser(row_path_str).replace("\\", "/").rstrip("/")
 
     # Exact match
     if cand_norm == row_norm or cand_norm.rstrip("/") == row_norm:

@@ -255,3 +255,38 @@ class TestCacheStability:
         _load_registry.cache_clear()
         entries_reloaded = _load_registry(str(registry))
         assert len(entries_reloaded) == 1
+
+
+# ---------------------------------------------------------------------------
+# Test: expanduser in _path_matches_row (M3)
+# ---------------------------------------------------------------------------
+
+class TestPathMatchesRowExpanduser:
+    def test_path_matches_row_expanduser(self, tmp_path: Path) -> None:
+        """Resolved absolute path matches a literal-~ registry row entry."""
+        from maintenance_worker.core.archival_check_0 import _path_matches_row
+        import os
+
+        home = os.path.expanduser("~")
+        # Simulate a registry row stored as ~/.openclaw/CLAUDE.md
+        row_tilde = "~/.openclaw/CLAUDE.md"
+        # Simulate the candidate as the resolved absolute path the archival walk produces
+        candidate_abs = Path(home) / ".openclaw" / "CLAUDE.md"
+
+        assert _path_matches_row(candidate_abs, row_tilde), (
+            f"Expected match: candidate={candidate_abs!s}, row={row_tilde!r}"
+        )
+
+    def test_path_matches_row_expanduser_reverse(self, tmp_path: Path) -> None:
+        """Literal-~ candidate matches a resolved absolute registry row (symmetric)."""
+        from maintenance_worker.core.archival_check_0 import _path_matches_row
+        import os
+
+        home = os.path.expanduser("~")
+        row_abs = f"{home}/.openclaw/CLAUDE.md"
+        # candidate given as tilde path (edge case: should still match)
+        candidate_tilde = Path("~/.openclaw/CLAUDE.md")
+
+        assert _path_matches_row(candidate_tilde, row_abs), (
+            f"Expected match: candidate={candidate_tilde!s}, row={row_abs!r}"
+        )
