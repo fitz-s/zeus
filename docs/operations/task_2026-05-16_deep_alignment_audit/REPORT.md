@@ -8,20 +8,33 @@
 
 ---
 
-## EXECUTIVE SUMMARY — findings ranked by live-impact (highest first)
+## EXECUTIVE SUMMARY — cross-run ranking absorbing Runs #1–#3 (with #9 false-positive override)
 
-This ranking re-orders the body-of-report by money/operational impact on currently-live positions. Body sections retain their original sequential numbers for git-blame continuity; **read in the order below**.
+**See also**: [FINDINGS_REFERENCE.md](FINDINGS_REFERENCE.md) — master index with fix specs, owner-hints, Karachi 5/17 risk per finding, and suggested PR groupings.
 
-| Rank | Live impact | Body # | Severity | Title | Why it matters NOW |
-|------|-------------|--------|----------|-------|-------------------|
-| **A** | **🔴 MERGE-PENDING for Karachi 2026-05-17 settlement** | **#4** (escalated) | **SEV-1 MERGE-PENDING** | Harvester truth writer mis-routed to `world.db` (ghost copy) post-K1; canonical `forecasts.db.settlements_v2` silent since 2026-05-11T19:59Z (5 days, matches K1 split landing). **Phase-3 update**: fix exists on `feat/data-daemon-authority-chain-2026-05-14` but is **not merged to origin/main**; daemon offline since 2026-05-15 01:34Z so mis-routing is dormant; 726 stranded rows in `world.db.market_events_v2` from 5/12–5/13 are the real audit artifact. Rank A retained: un-merged fix + offline daemon + stranded rows still warrant highest live impact. |
-| **B** | 🟠 Live position lineage unauditable | **#2** | SEV-1 | `selection_hypothesis_fact.decision_id` 100% NULL (506/506); evaluator.py:1535 caller bug | If Karachi position needs post-mortem (e.g. dispute, mis-settlement), per-hypothesis decision trace is unrecoverable. Read-only debt, not money-at-risk today. |
-| **C** | 🟡 Systemic latent (no current consumer mis-routes; very-soon-likely-mis-routing-on-next-feature) | **#1** | SEV-1 | Registry-vs-disk drift unenforced; 24 tables wrong-DB; 5 multi-DB duplicated; `assert_db_matches_registry()` exists but unwired at boot | Same root-cause class as rank A. K1 split partially landed; followups (e.g. commit `1d952b072e`) never reached main. Next consumer added will likely pick wrong DB. |
-| **D** | 🟢 Operator-decision risk only | **#3** | SEV-2 | Doctrine drift (`current_state.md` 1 commit stale; `current_data_state.md` 18d stale with wrong settlement counts + wrong harvester status) | Decisions made from doctrine are decisions from a fiction. No direct money flow. |
+This ranking re-orders by money/operational impact on currently-live positions across all three runs. Body sections of this REPORT retain their original sequential numbers for git-blame continuity; **read in the order below**, then consult `FINDINGS_REFERENCE.md` for the routing table.
 
-**Common root cause** (ranks A + C): the K1 multi-DB split (PR #114 `eba80d2b9d`, 2026-05-10/11) landed the schema migration and registry doctrine, but **structural followup commits did not all reach main**. Commit `1d952b072e` ("feat(k1/5b): CRITICAL-1 harvester trio → get_forecasts_connection", authored 2026-05-11 21:23 PDT — i.e. ~8h after the last settlement row was written) was developed but is `NOT in main` per `git merge-base --is-ancestor 1d952b072e origin/main`. Rank A's settlement writer-target bug is the most-visible-blast-radius instance of the registry-vs-disk drift class.
+| Rank | Live impact | Finding (run · body §) | Severity | Title | Why it matters NOW |
+|------|-------------|------------------------|----------|-------|-------------------|
+| **A** | 🔴 Operator-blind during 5/17 settlement | **#10** (Run #3 · `RUN_3_findings.md`) | SEV-1 | Heartbeat sensor RED ≥49 consecutive ticks while dispatcher reports `degraded` for 3.5+ h — two-channel disagreement, alarm fatigue | A real settlement failure tomorrow may not surface in time for manual intervention |
+| **B** | 🟠 Live position lineage unauditable (worsening) | **#2** (Run #1 · §Finding #2; Run #2 regression) | SEV-1 | `selection_hypothesis_fact.decision_id` 100% NULL (506 → 693 rows, +37% in 10 days) | Karachi position `c30f28a5-d4e` cannot today be traced through hypothesis-level statistical envelope; post-mortem unrecoverable |
+| **C** | 🟡 Systemic latent (registry no longer truthful) | **#1** (Run #1 · §Finding #1) | SEV-1 | Registry-vs-disk drift unenforced; 24 tables wrong-DB; `assert_db_matches_registry()` exists but unwired at boot | Next consumer added will likely pick wrong DB; same root pattern as #4 and #12 |
+| **D** | 🟡 Ingest-blocking lock storm | **#5** (Run #2 · §Run #2) | SEV-1 | DB-lock storm in `zeus-ingest.err` from `CollateralLedger._connect` routing | Ingest slowness → stale forecasts pre-Karachi |
+| **E** | 🟡 Operator-misreads-offline | **#6** (Run #2 · §Run #2) | SEV-1 | `.log` files 0-byte while `.err` is GBs; live daemons appear offline | Audit itself was fooled in Run #1; ops misreads remain easy |
+| **F** | 🟢 Settlement writer mis-route — RESOLVED (residue persists) | **#4** (Run #1 · §Finding #4; Phase-3 correction) | SEV-1→RESOLVED | PR #121 fixed `src/ingest_main.py:646`; 2,112 stranded rows on `world.market_events_v2` remain (no growth since 2026-05-13) | Residue only — schedule purge in PR-A |
+| **G** | 🟢 Operator-decision risk only | **#3** (Run #1 · §Finding #3) | SEV-2 | Doctrine drift (`current_state.md` 1 commit stale; `current_data_state.md` 18d stale + 3 factual errors) | Decisions made from doctrine are decisions from a fiction |
+| **H** | 🟢 Harvester filter coarse | **#7** (Run #2 · `DEEP_DIVE_7_harvester_category_filter.md`) | SEV-2 | Polymarket weather markets not filtered; bounded retry missing | Could miss Karachi settlement; mitigated by manual fallback runbook |
+| **I** | 🟢 Sentinel timestamp on live row | **#8** (Run #2 · §Run #2) | SEV-2 | Non-ISO sentinel `occurred_at` on `position_events` | Tightens data hygiene; low blast radius |
+| **J** | 🟢 Daemon-supervision convention break | **#11** (Run #3 · `RUN_3_findings.md`) | SEV-2 | `com.zeus.heartbeat-sensor.plist` has no `KeepAlive`; cron `*/30 * * * *` is the real driver | Confusing surface; if cron is removed thinking plist is redundant, heartbeat goes dark |
+| **K** | 🟢 Schema-without-data ghost tables (read-side silent zero) | **#12** (Run #3 · `RUN_3_findings.md`) | SEV-2 | 6 trade-lifecycle tables exist as empty shells on `world.db`, populated copies live on `zeus_trades.db` | Stale ad-hoc reader sees rows=0, no error; sibling pattern to #1/#4 |
+| **L** | ⚪ Cosmetic unless consumer found | **#13** (Run #3 · `RUN_3_findings.md`) | SEV-3 | `replay.py:1664` calls `dynamic_kelly_mult` with 3/5 risk modulators hardcoded neutral | Verify no auto-tuner reads replay output; else escalate |
+| **—** | ⚪ FALSE POSITIVE (operator override 2026-05-16) | **#9** (Run #3) | INFO | WU_API_KEY plaintext in crontab — **adjacent crontab comment documents intentional placement**; operator-marked FP; **no action** | Preserved as a documented FP in `RUN_3_findings.md`; LEARNINGS Cat-J updated with the comment-adjacency gate |
 
-**Immediate operator action recommended** (out of audit scope; flag only): cherry-pick `1d952b072e` (and likely `a322810a2a` feat(k1/5c) too) onto main behind a focused PR, OR set `ZEUS_HARVESTER_LIVE_ENABLED=0` to disable the silent-failure path until the fix lands. Do this before Karachi 2026-05-17 settles.
+**Common root cause** (ranks A + D + E vs ranks B + C + F + K): two failure shapes dominate.
+1. **Antibody-implemented-but-unwired** (#1 boot wiring, #4 K1 followups, #12 ghost-shell DROP migration never landed) — checks/migrations exist as code but no production path invokes them. Promoted Cat I in Run #2.
+2. **Alarm-channel ↔ alarm-source disagreement** (#6 `.log` vs `.err`, #10 sensor RED vs dispatcher `degraded`, #11 plist vs cron) — multiple layers report different things; operator-trustable signal is absent. Probe #4 (severity-channel-disagreement) was added to LEARNINGS in Run #3.
+
+**Immediate operator action recommended** (out of audit scope; flag only): see `FINDINGS_REFERENCE.md` for the 8 suggested PR groupings (PR-A through PR-H, plus the no-PR-needed #9 FP entry). Pre-Karachi-5/17 priorities: PR-B (lock-storm), PR-C (harvester filter), PR-D (alarm-channel bridge).
 
 ---
 

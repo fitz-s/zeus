@@ -156,3 +156,58 @@ The whole point of this file is that future-you arrives smarter than past-you. I
 
 Run #1 itself was fooled by Finding #6 — it sampled `.log` files and concluded the live daemon was offline. **Audit protocol must always probe `.err` alongside `.log` for any python-logging daemon**, especially under macOS `launchd` where stdout/stderr split rigidly. Added to the Boot checklist for future runs.
 
+
+## Run #3 update (2026-05-16) — yields, probes, taxonomy restructure
+
+### Active categories — restructure
+
+Per Run #3 meta-audit (3rd run is meta-audit per SKILL.md): split seed `E. Settlement edges` into two independent categories because Run #3 finding #11 (heartbeat-sensor.plist KeepAlive convention) had to overload F/G when its true home is "daemon supervision", a surface the original E description never covered.
+
+**Updated active table** (replaces the row for E above, adds E2 + J):
+
+| ID | Name | Yield | Last validated | Notes |
+|----|------|-------|----------------|-------|
+| E1 | Settlement edges (writer-route, migration symmetry, cadence) | HIGH | 2026-05-16 (run #3 — sustained) | Run-1 #4 escalation + Run-2 #7 harvester filter |
+| E2 | Daemon supervision (launchd KeepAlive convention, plist↔cron coupling) | MEDIUM | 2026-05-16 (run #3 — promoted) | Run-3 #11 first standalone hit |
+| J | Secrets in plaintext (cron, plist EnvironmentVariables, shell-rc, repo configs) | **ACTIVE — needs 1 more run** | 2026-05-16 (run #3 — promoted from proposed) | Run-3 #9 SEV-1 was a FALSE POSITIVE per operator override (adjacent crontab comment documented intentional placement); category still promoted because the **probe itself fired correctly** — see anti-heuristic below for the comment-adjacency gate |
+
+### Yield ladder updates (Run #3)
+
+| Category | Run #3 result | New ladder |
+|---|---|---|
+| A data provenance | 0 (re-test passive) | HIGH (sustained) |
+| B math drift | 1 (SEV-3 #13 replay neutralized Kelly modulators) | **LOW → MEDIUM** (first non-zero in 3 runs) |
+| C statistical pitfalls | 0 (skipped) | LOW (no change; skipped, not tested) |
+| D time-calendar | 0 (crontab grep only) | LOW |
+| E1 settlement edges | 0 | HIGH (sustained — watch for demotion next run) |
+| E2 daemon supervision | 1 (SEV-2 #11) | **MEDIUM** (promoted, first standalone) |
+| F cross-module invariants | 1 (SEV-2 #12 ghost trade-lifecycle tables) | HIGH (sustained) |
+| G silent failures | 1 (SEV-1 #10 severity-channel disagreement) | HIGH (sustained) |
+| H assumption drift | 0 | MEDIUM (no change) |
+| I antibody-unwired | 0 direct (#12 is the sibling read-side instance) | HIGH (category active) |
+| J secrets in plaintext | 1 (SEV-1 #9 — operator-overridden to FALSE POSITIVE) | **ACTIVE pending 2nd-run validation** |
+
+### High-signal probes added in Run #3
+
+1. **[J] cron + plist + shell-rc plaintext secret scan** — `crontab -l | grep -oE "[A-Z_]+_(KEY|TOKEN|SECRET|PASSWORD)=[^ ]+"` AND grep across `~/Library/LaunchAgents/*.plist` + `~/.zshrc` + `~/.bashrc` + `~/.profile`. **Comment-adjacency gate (mandatory)**: before flagging a hit, scan ±3 lines for an explanatory comment; if present, demote to INFO. Caught Finding #9 (then operator-classified as FP because of adjacent comment).
+2. **[E2] launchd KeepAlive convention check** — `for p in ~/Library/LaunchAgents/com.zeus.*.plist; do plutil -extract KeepAlive raw "$p" || echo "$p MISSING KeepAlive"; done`. Caught Finding #11.
+3. **[F] schema-without-data ghost-table scan** — for every table that exists on multiple DBs, count rows on each; flag any pair where exactly one side has 0 rows AND the other has > 0. **Distinct from Run-1 DUP probe** (which flagged when BOTH sides had rows); this catches the ASYMMETRIC ghost case. Caught Finding #12.
+4. **[G] severity-channel-disagreement check** — parse `logs/heartbeat-sensor.err` for last severity, parse `logs/zeus-heartbeat-dispatch.log` for last dispatcher severity, flag if they differ for ≥30 min. Caught Finding #10 (RED-for-hours → dispatcher reports `degraded`).
+
+### Anti-heuristics recorded (Run #3)
+
+- **`grep -rEn "0x[a-f0-9]{64}" src/` as a secrets probe** is noisy — returns `market_id` and `condition_id` hex (true content, not secrets). Better: restrict to `*.py` files AND require `=` or `:` immediately before the hex, OR scan only crontab/plist/shell-rc, never `src/`. Recorded 2026-05-16.
+- **Cat-J secrets-in-config-line probe without comment-adjacency gate** is prone to FP: Run-3 Finding #9 was classified SEV-1 then operator-overridden to FALSE POSITIVE because an adjacent crontab comment clearly documented the key's role and intentional placement. **Future Cat-J probes must check ±3 lines of context for an explanatory comment before flagging.**
+
+### Methodology antibody (audit-of-the-audit, Run #3)
+
+- **VS Code terminal output buffering bug** observed: multi-line heredoc-style `sqlite3` / `python` invocations occasionally returned stale output from a prior tool call (Karachi position query first returned `693|693` lines belonging to a different query). **Antibody**: prefix every probe output with a literal `printf '==MARK==\n'` sentinel and grep the sentinel out of the response before parsing. Already used successfully in the final Karachi/HB probe.
+
+### Meta-audit (after Run #3 — first meta-audit cycle per SKILL.md)
+
+- **Categories pruned**: none. Active set grew 8 (seed) → 9 (Run #1 +I proposed) → 10 (Run #2 I promoted) → 11 (Run #3 J proposed, E split into E1+E2). Still under the 12-prune threshold.
+- **Categories restructured**: old `E. Settlement edges` → `E1. Settlement edges` (writer route, migration symmetry, cadence) + `E2. Daemon supervision` (launchd KeepAlive convention, plist↔cron coupling). Rationale: Run-3 #11 had to overload F/G because original E never covered launchd supervision; future runs need a dedicated worker.
+- **SKILL.md seeds updated**: recommended add at v1 — new seed `J. Secrets in plaintext` (cron, plist `EnvironmentVariables`, shell-rc, repo `.env`/`config/*.json`), with mandatory comment-adjacency gate.
+- **Category yield reality after 3 runs**: HIGH = A, E1, F, G, I. MEDIUM = B (just promoted), E2 (just promoted), H. LOW = C, D. None DEAD (no 3-consecutive-zero category).
+- **Rationale**: meta-audit confirms the skill is converging on the real Zeus failure surface (lineage, schema, daemon/alarm coupling, secrets) rather than the original seed bias (pure math/stat probes). Seed list should be rewritten v1 in next release.
+

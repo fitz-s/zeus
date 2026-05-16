@@ -11,6 +11,8 @@ Append-only log of every completed run of the `zeus-deep-alignment-audit` skill.
 | # | Date | Commit | K root gaps | SEV-1 | SEV-2 | SEV-3 | Coverage | Report |
 |---|------|--------|-------------|-------|-------|-------|----------|--------|
 | 1 | 2026-05-16 | 556d55be23 (main) / ff714a7507 (skill) | 4 | 3 | 1 | 0 | A, E, F, G, H probed (findings); B, C, D probed (no findings) | docs/operations/task_2026-05-16_deep_alignment_audit/REPORT.md |
+| 2 | 2026-05-16 | a924766c8a (main) / 40e7709b2d (skill) | — | 2 | 2 | 0 | Phase-A re-verify Run-1 + Phase-B new findings #5–#8 (E, F, G, H/D) | docs/operations/task_2026-05-16_deep_alignment_audit/REPORT.md §Run #2 |
+| 3 | 2026-05-16 | a924766c8a (main) / 199a43cbbc (skill) | 5 | 2 | 2 | 1 | B, E (split → E2 daemon-supervision), F, G, **J (NEW)** probed (findings #9–#13); C, D, H skipped | docs/operations/task_2026-05-16_deep_alignment_audit/RUN_3_findings.md + deep-dives commits f65a6abe96 + Phase-3 40e7709b2d |
 
 ---
 
@@ -99,4 +101,28 @@ When you (the opus orchestrator running this skill) read this file in Boot step 
 - **Category I promoted**: Antibody-implemented-but-unwired (Run #1 + Run #2 Finding #1) is now an active LEARNINGS category.
 - **Methodology surprise**: Run #1 was itself fooled by Finding #6 (empty `.log` files) — it cited `zeus-live.log` mtime as evidence the live-trading daemon was offline, but `.err` was 89 MB and growing. Audit-of-the-audit antibody: ALWAYS check `.err` alongside `.log` for python-logging daemons.
 - **Tier-0 risk for Karachi 5/17**: Combined Findings #4-residue + #5 + #7 → cannot prove auto-settlement path works. Operator preparation required.
+
+
+## Run 3 — 2026-05-16 ~17:10 UTC — commit 199a43cbbc (audit consolidation)
+
+| Anchor | Worktree HEAD | Findings | SEV-1 | SEV-2 | SEV-3 | New cat |
+|---|---|---|---|---|---|---|
+| main `a924766c8a` | `199a43cbbc` (with deep-dives `f65a6abe96` + Phase-3 `40e7709b2d`) | 5 new (#9–#13) | 2 (#9 secret in crontab — **operator-marked FALSE POSITIVE post-run**; #10 severity-channel mismatch) | 2 (#11 plist no KeepAlive; #12 ghost trade-lifecycle tables) | 1 (#13 replay Kelly modulators neutralized) | **J. Secrets in plaintext** promoted from no-prior-coverage |
+
+### Run 3 retrospective
+
+- **Surprise #1 — operator-blind alarm channel (Finding #10)**: heartbeat-sensor.err had >49 consecutive RED ticks while `zeus-heartbeat-dispatch.log` reported `severity=degraded` every 30 min for 3.5+ hours. Neither Run #1 nor Run #2 probed the cron-dispatcher tier; the dispatcher was firing `ALERT: zeus degraded` during Run #2 itself and went unnoticed. Codified Run-3 probe #4 (severity-channel-disagreement check) to make this category permanently visible.
+- **Surprise #2 — new Cat J first-probe SEV-1, then operator override**: WU_API_KEY plaintext in crontab (Finding #9) was a clean Cat-J hit. Operator subsequently classified it FALSE POSITIVE on 2026-05-16: the adjacent crontab comment documents the key's intentional placement. **Result**: J stays promoted (probe fired correctly), and a new anti-heuristic is recorded — the comment-adjacency gate: Cat-J probes must scan ±3 lines for an explanatory comment before flagging.
+- **Surprise #3 — half-finished K1 cleanup left ghost schema (Finding #12)**: post-K1 trade-lifecycle tables exist as empty shells on world.db while data lives on zeus_trades.db. Sibling of Run-1 #1 / Run-2 #5, but on the read side. New probe #3 (schema-without-data ghost-table scan) added; distinct from Run-1 DUP probe (BOTH-sides populated) — this is the ASYMMETRIC case.
+- **Taxonomy restructure**: split seed `E` into `E1` (settlement edges) + `E2` (daemon supervision). Finding #11 (heartbeat-sensor.plist missing KeepAlive) had to overload F/G because the original E description never covered launchd supervision.
+- **Cat B first non-zero finding** in 3 runs (Finding #13 replay Kelly modulators hardcoded neutral): promotes LOW → MEDIUM. Confidence intentionally kept MEDIUM (downstream consumer chain not yet traced).
+- **Methodology antibody**: VS Code terminal output buffering bug — multi-line heredoc-style sqlite3/python invocations occasionally returned stale output from a prior tool call. Antibody: prefix probes with `printf '==MARK==\n'` and grep the sentinel out before parsing.
+
+### Meta-audit (this is run #3 — first meta-audit per SKILL.md)
+
+- Recorded in LEARNINGS.md "Meta-audit log" section. Summary: 0 categories pruned, E split into E1+E2, J promoted (pending 2nd-run validation), recommend SKILL.md seeds rewrite v1 to include J + E1/E2 split.
+
+### Hand-edits to LEARNINGS.md beyond Closeout
+
+- Run #3 LEARNINGS append was applied as part of audit consolidation commit (this commit). All edits accounted for in this Run-3 row and retrospective.
 

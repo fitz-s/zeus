@@ -14,6 +14,14 @@
 
 ### Finding #9 — SEV-1 — Cat I (Secrets) — NEW CATEGORY
 
+> **FALSE POSITIVE OVERRIDE — 2026-05-16 (operator verdict)**
+>
+> - **Verdict**: FALSE POSITIVE.
+> - **Reason**: The adjacent comment in the crontab clearly explains the key's role and documents that its placement here is intentional. Operator-confirmed: not a leak.
+> - **Action**: Downgrade severity SEV-1 → **INFO** (no remediation needed; do NOT remove or rotate the key).
+> - **Heuristic update (recorded in LEARNINGS.md Cat-J)**: secrets-in-config-line probes must scan ±3 lines of context for an explanatory comment before flagging. Comment-adjacency = intentional placement = INFO, not SEV-1.
+> - **Preserved below as a documented false positive** to keep the LEARNINGS bank intact (the probe itself fired correctly; only the severity classification was wrong because the gate was missing).
+
 **Title**: Wunderground API key (`WU_API_KEY`) is hardcoded plaintext in the user crontab — leaks to anyone reading `crontab -l`, `ps -ef`, or process-environ.
 
 **Evidence**:
@@ -170,23 +178,23 @@
 
 ---
 
-## Updated Executive Ranking (absorbing Run #1-#3 findings)
+## Updated Executive Ranking (absorbing Run #1–#3 findings, with #9 false-positive override)
 
 | Rank | Finding | SEV | Status | Risk to live Karachi 5/17 |
 |------|---------|-----|--------|--------------------------|
-| 1 | #9 WU_API_KEY plaintext in crontab | 1 | **NEW Run #3** | INDIRECT (key exhaustion → snapshot failure) |
-| 2 | #10 Heartbeat RED for hours, dispatcher reports `degraded`, alarm channel broken | 1 | **NEW Run #3** | DIRECT (silent failure during 5/17 settlement) |
-| 3 | #2 selection_hypothesis_fact decision_id 100% NULL (Run #1) — regression: 506 → 693 NULL (Run #2) | 1 | OPEN | DIRECT (lineage broken on live position) |
-| 4 | #1 assert_db_matches_registry unwired at boot (Run #1) | 1 | OPEN | INDIRECT (future drift won't be caught) |
-| 5 | #5 DB-lock storm in zeus-ingest (Run #2) | 1 | OPEN | INDIRECT (ingest slowness → stale forecasts) |
-| 6 | #6 Empty `.log` files masking live daemons (Run #2) | 1 | OPEN | INDIRECT (operator misreads as offline) |
-| 7 | #11 heartbeat-sensor.plist has no KeepAlive | 2 | **NEW Run #3** | LOW |
-| 8 | #12 Ghost trade-lifecycle tables on world.db | 2 | **NEW Run #3** | LOW (read-side silent zero) |
-| 9 | #3 Doctrine drift (Run #1) | 2 | OPEN | LOW |
-| 10 | #4 Settlements_v2 settled_at==recorded_at + 5d silent writer (Run #1) | 2 | RESOLVED via PR #121 / Run #2 residue | LOW (residue only) |
-| 11 | #7 Harvester filter coarse (Run #2) | 2 | OPEN | MED (could miss Karachi settlement) |
-| 12 | #8 Sentinel timestamp on live row (Run #2) | 2 | OPEN | LOW |
-| 13 | #13 dynamic_kelly_mult neutralized in replay | 3 | **NEW Run #3** | NONE (direct) |
+| 1 | #10 Heartbeat RED for hours, dispatcher reports `degraded`, alarm channel broken | 1 | **NEW Run #3** | DIRECT (silent failure during 5/17 settlement) |
+| 2 | #2 selection_hypothesis_fact decision_id 100% NULL (Run #1) — regression: 506 → 693 NULL (Run #2) | 1 | OPEN | DIRECT (lineage broken on live position) |
+| 3 | #1 assert_db_matches_registry unwired at boot (Run #1) | 1 | OPEN | INDIRECT (future drift won't be caught) |
+| 4 | #5 DB-lock storm in zeus-ingest (Run #2) | 1 | OPEN | INDIRECT (ingest slowness → stale forecasts) |
+| 5 | #6 Empty `.log` files masking live daemons (Run #2) | 1 | OPEN | INDIRECT (operator misreads as offline) |
+| 6 | #11 heartbeat-sensor.plist has no KeepAlive | 2 | **NEW Run #3** | LOW |
+| 7 | #12 Ghost trade-lifecycle tables on world.db | 2 | **NEW Run #3** | LOW (read-side silent zero) |
+| 8 | #3 Doctrine drift (Run #1) | 2 | OPEN | LOW |
+| 9 | #4 Settlements_v2 settled_at==recorded_at + 5d silent writer (Run #1) | 2 | RESOLVED via PR #121 / Run #2 residue | LOW (residue only) |
+| 10 | #7 Harvester filter coarse (Run #2) | 2 | OPEN | MED (could miss Karachi settlement) |
+| 11 | #8 Sentinel timestamp on live row (Run #2) | 2 | OPEN | LOW |
+| 12 | #13 dynamic_kelly_mult neutralized in replay | 3 | **NEW Run #3** | NONE (direct) |
+| — | #9 WU_API_KEY plaintext in crontab — **FALSE POSITIVE** (operator override 2026-05-16; adjacent comment documents intentional placement) | INFO | FALSE-POSITIVE | NONE |
 
 **K root structural gaps (Fitz K << N synthesis)**:
 1. **Alarm-channel ↔ alarm-source disagreement** (Findings #6, #10, #11) — multiple layers report different severities; operator-trustable signal is absent.
