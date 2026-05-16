@@ -81,3 +81,4 @@ class ApplyResult:
     created: tuple[Path, ...] = field(default_factory=tuple)
     requires_pr: bool = False
     dry_run_only: bool = False
+    diff: tuple[str, ...] = field(default_factory=tuple)

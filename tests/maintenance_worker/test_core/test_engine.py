@@ -244,13 +244,11 @@ def test_run_tick_manual_cli_forces_dry_run_only(tmp_path: Path) -> None:
     config = _make_config(tmp_path, live_default=True)
     mock_run, mock_disk = _clean_guards_context(tmp_path)
 
-    # Inject a stub task so _apply_decisions is exercised
+    # Inject a stub entry so _apply_decisions is exercised
+    from maintenance_worker.rules.parser import TaskCatalogEntry
     from maintenance_worker.types.specs import TaskSpec
-    stub_task = TaskSpec(
-        task_id="test_live_task",
-        description="live task",
-        schedule="daily",
-    )
+    stub_spec = TaskSpec(task_id="test_live_task", description="live task", schedule="daily")
+    stub_entry = TaskCatalogEntry(spec=stub_spec, raw={"id": "test_live_task", "schedule": "daily"})
 
     with mock_run, mock_disk:
         with patch(
@@ -260,7 +258,7 @@ def test_run_tick_manual_cli_forces_dry_run_only(tmp_path: Path) -> None:
             with patch.object(
                 MaintenanceEngine,
                 "_enumerate_candidates",
-                return_value=[stub_task],
+                return_value=[stub_entry],
             ):
                 result = run_tick(config)
 
@@ -279,13 +277,11 @@ def test_run_tick_post_mutation_detector_called(tmp_path: Path) -> None:
     config = _make_config(tmp_path)
     mock_run, mock_disk = _clean_guards_context(tmp_path)
 
+    from maintenance_worker.rules.parser import TaskCatalogEntry
     from maintenance_worker.types.specs import TaskSpec
-    stub_task = TaskSpec(
-        task_id="detector_task",
-        description="test",
-        schedule="daily",
-    )
     from maintenance_worker.types.results import ApplyResult
+    stub_spec = TaskSpec(task_id="detector_task", description="test", schedule="daily")
+    stub_entry = TaskCatalogEntry(spec=stub_spec, raw={"id": "detector_task", "schedule": "daily"})
     non_dry_result = ApplyResult(task_id="detector_task", dry_run_only=False)
 
     with mock_run, mock_disk:
@@ -294,7 +290,7 @@ def test_run_tick_post_mutation_detector_called(tmp_path: Path) -> None:
             return_value="SCHEDULED",
         ):
             with patch.object(
-                MaintenanceEngine, "_enumerate_candidates", return_value=[stub_task]
+                MaintenanceEngine, "_enumerate_candidates", return_value=[stub_entry]
             ):
                 with patch.object(
                     MaintenanceEngine, "_apply_decisions", return_value=non_dry_result
@@ -313,7 +309,7 @@ def test_run_tick_post_mutation_detector_not_called_for_dry_run(
     """
     post_mutation_detector is NOT invoked when dry_run_only=True.
 
-    Injects a stub task + dry-run ApplyResult so the for-loop actually
+    Injects a stub entry + dry-run ApplyResult so the for-loop actually
     executes and the skip branch is genuinely tested (non-vacuous).
     Compare to test_run_tick_post_mutation_detector_called which injects
     a non-dry-run result and asserts called_once.
@@ -321,13 +317,11 @@ def test_run_tick_post_mutation_detector_not_called_for_dry_run(
     config = _make_config(tmp_path)
     mock_run, mock_disk = _clean_guards_context(tmp_path)
 
+    from maintenance_worker.rules.parser import TaskCatalogEntry
     from maintenance_worker.types.specs import TaskSpec
-    stub_task = TaskSpec(
-        task_id="dry_run_only_task",
-        description="dry run task",
-        schedule="daily",
-    )
     from maintenance_worker.types.results import ApplyResult
+    stub_spec = TaskSpec(task_id="dry_run_only_task", description="dry run task", schedule="daily")
+    stub_entry = TaskCatalogEntry(spec=stub_spec, raw={"id": "dry_run_only_task", "schedule": "daily"})
     dry_result = ApplyResult(task_id="dry_run_only_task", dry_run_only=True)
 
     with mock_run, mock_disk:
@@ -336,7 +330,7 @@ def test_run_tick_post_mutation_detector_not_called_for_dry_run(
             return_value="SCHEDULED",
         ):
             with patch.object(
-                MaintenanceEngine, "_enumerate_candidates", return_value=[stub_task]
+                MaintenanceEngine, "_enumerate_candidates", return_value=[stub_entry]
             ):
                 with patch.object(
                     MaintenanceEngine, "_apply_decisions", return_value=dry_result
@@ -346,7 +340,7 @@ def test_run_tick_post_mutation_detector_not_called_for_dry_run(
                     ) as mock_detector:
                         result = run_tick(config)
 
-    # Loop ran once (one task injected) but skipped detector because dry_run_only=True
+    # Loop ran once (one entry injected) but skipped detector because dry_run_only=True
     assert len(result.apply_results) == 1
     assert result.apply_results[0].dry_run_only is True
     mock_detector.assert_not_called()
