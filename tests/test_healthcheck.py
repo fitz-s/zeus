@@ -5,10 +5,13 @@ from __future__ import annotations
 import pytest
 
 import json
+import plistlib
 import sqlite3
 from datetime import datetime, timedelta, timezone
 
 from scripts import healthcheck
+
+_ORIGINAL_LAUNCHD_CONTRACTS = healthcheck._launchd_contracts
 
 
 @pytest.fixture(autouse=True)
@@ -37,6 +40,15 @@ def _mock_code_plane_identity(monkeypatch):
             "expected_error": None,
             "matches_expected": True,
         },
+    )
+
+
+@pytest.fixture(autouse=True)
+def _mock_launchd_contracts(monkeypatch):
+    monkeypatch.setattr(
+        healthcheck,
+        "_launchd_contracts",
+        lambda: {"ok": True, "launchagents_dir": "/tmp/LaunchAgents", "items": []},
     )
 
 
@@ -128,6 +140,243 @@ def _write_no_trade_artifact(path):
     conn.close()
 
 
+def _write_launchd_plist(
+    launchagents_dir,
+    *,
+    label,
+    module,
+    root,
+    keep_alive=True,
+    run_at_load=True,
+    throttle_interval=30,
+    working_directory=None,
+    pythonpath=None,
+):
+    payload = {
+        "Label": label,
+        "ProgramArguments": [str(root / ".venv" / "bin" / "python"), "-m", module],
+        "WorkingDirectory": str(working_directory or root),
+        "RunAtLoad": run_at_load,
+        "KeepAlive": keep_alive,
+        "ThrottleInterval": throttle_interval,
+        "EnvironmentVariables": {
+            "PYTHONPATH": str(pythonpath or root),
+            "ZEUS_MODE": "live",
+        },
+    }
+    path = launchagents_dir / f"{label}.plist"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "wb") as handle:
+        plistlib.dump(payload, handle)
+    return path
+
+
+class _LaunchctlResult:
+    def __init__(self, returncode, stdout="", stderr=""):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+def _launchctl_print_output(
+    *,
+    label,
+    module,
+    root,
+    plist_path,
+    keep_alive=True,
+    run_at_load=True,
+    minimum_runtime=30,
+    state="running",
+    pid=1234,
+    working_directory=None,
+    pythonpath=None,
+):
+    properties = []
+    if keep_alive:
+        properties.append("keepalive")
+    if run_at_load:
+        properties.append("runatload")
+    properties.append("inferred program")
+    return f"""gui/501/{label} = {{
+\tactive count = 1
+\tpath = {plist_path}
+\ttype = LaunchAgent
+\tstate = {state}
+
+\tprogram = {root / ".venv" / "bin" / "python"}
+\targuments = {{
+\t\t{root / ".venv" / "bin" / "python"}
+\t\t-m
+\t\t{module}
+\t}}
+
+\tworking directory = {working_directory or root}
+
+\tenvironment = {{
+\t\tPYTHONPATH => {pythonpath or root}
+\t\tXPC_SERVICE_NAME => {label}
+\t}}
+
+\tminimum runtime = {minimum_runtime}
+\tpid = {pid}
+\tproperties = {" | ".join(properties)}
+}}
+"""
+
+
+def _mock_launchctl_loaded_contracts(monkeypatch, specs):
+    def _run(cmd, *args, **kwargs):
+        if cmd[:2] == ["launchctl", "print"]:
+            label = cmd[-1].rsplit("/", 1)[-1]
+            if label in specs:
+                return _LaunchctlResult(0, specs[label])
+        return _LaunchctlResult(1, "", "not found")
+
+    monkeypatch.setattr(healthcheck.subprocess, "run", _run)
+
+
+def test_launchd_contracts_require_restart_policy_and_repo_identity(monkeypatch, tmp_path):
+    root = tmp_path / "zeus"
+    launchagents = tmp_path / "LaunchAgents"
+    monkeypatch.setenv("ZEUS_MODE", "live")
+    specs = {}
+    for label, module in (
+        ("com.zeus.live-trading", "src.main"),
+        ("com.zeus.riskguard-live", "src.riskguard.riskguard"),
+        ("com.zeus.forecast-live", "src.ingest.forecast_live_daemon"),
+    ):
+        plist_path = _write_launchd_plist(launchagents, label=label, module=module, root=root)
+        specs[label] = _launchctl_print_output(
+            label=label,
+            module=module,
+            root=root,
+            plist_path=plist_path,
+        )
+    _mock_launchctl_loaded_contracts(monkeypatch, specs)
+
+    result = _ORIGINAL_LAUNCHD_CONTRACTS(launchagents, root=root)
+
+    assert result["ok"] is True
+    assert {item["label"] for item in result["items"]} == {
+        "com.zeus.live-trading",
+        "com.zeus.riskguard-live",
+        "com.zeus.forecast-live",
+    }
+
+
+def test_launchd_contracts_reject_non_restartable_live_trading(monkeypatch, tmp_path):
+    root = tmp_path / "zeus"
+    launchagents = tmp_path / "LaunchAgents"
+    monkeypatch.setenv("ZEUS_MODE", "live")
+    live_plist = _write_launchd_plist(
+        launchagents,
+        label="com.zeus.live-trading",
+        module="src.main",
+        root=root,
+        keep_alive=False,
+    )
+    _write_launchd_plist(
+        launchagents,
+        label="com.zeus.riskguard-live",
+        module="src.riskguard.riskguard",
+        root=root,
+    )
+    _write_launchd_plist(
+        launchagents,
+        label="com.zeus.forecast-live",
+        module="src.ingest.forecast_live_daemon",
+        root=root,
+    )
+    _mock_launchctl_loaded_contracts(
+        monkeypatch,
+        {
+            "com.zeus.live-trading": _launchctl_print_output(
+                label="com.zeus.live-trading",
+                module="src.main",
+                root=root,
+                plist_path=live_plist,
+                keep_alive=False,
+            ),
+            "com.zeus.riskguard-live": _launchctl_print_output(
+                label="com.zeus.riskguard-live",
+                module="src.riskguard.riskguard",
+                root=root,
+                plist_path=launchagents / "com.zeus.riskguard-live.plist",
+            ),
+            "com.zeus.forecast-live": _launchctl_print_output(
+                label="com.zeus.forecast-live",
+                module="src.ingest.forecast_live_daemon",
+                root=root,
+                plist_path=launchagents / "com.zeus.forecast-live.plist",
+            ),
+        },
+    )
+
+    result = _ORIGINAL_LAUNCHD_CONTRACTS(launchagents, root=root)
+
+    assert result["ok"] is False
+    live_item = next(item for item in result["items"] if item["label"] == "com.zeus.live-trading")
+    assert "keepalive_not_true" in live_item["issues"]
+    assert "loaded_keepalive_not_true" in live_item["issues"]
+
+
+def test_launchd_contracts_reject_stale_loaded_contract_after_disk_fix(monkeypatch, tmp_path):
+    root = tmp_path / "zeus"
+    launchagents = tmp_path / "LaunchAgents"
+    monkeypatch.setenv("ZEUS_MODE", "live")
+    live_plist = _write_launchd_plist(
+        launchagents,
+        label="com.zeus.live-trading",
+        module="src.main",
+        root=root,
+        keep_alive=True,
+    )
+    _write_launchd_plist(
+        launchagents,
+        label="com.zeus.riskguard-live",
+        module="src.riskguard.riskguard",
+        root=root,
+    )
+    _write_launchd_plist(
+        launchagents,
+        label="com.zeus.forecast-live",
+        module="src.ingest.forecast_live_daemon",
+        root=root,
+    )
+    _mock_launchctl_loaded_contracts(
+        monkeypatch,
+        {
+            "com.zeus.live-trading": _launchctl_print_output(
+                label="com.zeus.live-trading",
+                module="src.main",
+                root=root,
+                plist_path=live_plist,
+                keep_alive=False,
+            ),
+            "com.zeus.riskguard-live": _launchctl_print_output(
+                label="com.zeus.riskguard-live",
+                module="src.riskguard.riskguard",
+                root=root,
+                plist_path=launchagents / "com.zeus.riskguard-live.plist",
+            ),
+            "com.zeus.forecast-live": _launchctl_print_output(
+                label="com.zeus.forecast-live",
+                module="src.ingest.forecast_live_daemon",
+                root=root,
+                plist_path=launchagents / "com.zeus.forecast-live.plist",
+            ),
+        },
+    )
+
+    result = _ORIGINAL_LAUNCHD_CONTRACTS(launchagents, root=root)
+
+    assert result["ok"] is False
+    live_item = next(item for item in result["items"] if item["label"] == "com.zeus.live-trading")
+    assert "keepalive_not_true" not in live_item["issues"]
+    assert "loaded_keepalive_not_true" in live_item["issues"]
+
+
 def test_healthcheck_uses_mode_qualified_status_and_reports_healthy(monkeypatch, tmp_path):
     status_path = tmp_path / "status_summary-live.json"
     risk_path = tmp_path / "risk_state-live.db"
@@ -185,6 +434,7 @@ def test_healthcheck_uses_mode_qualified_status_and_reports_healthy(monkeypatch,
     assert result["riskguard_fresh"] is True
     assert result["riskguard_contract_valid"] is True
     assert result["code_plane_ok"] is True
+    assert result["launchd_contract_ok"] is True
     assert result["entries_blocked_reason"] == "risk_level=ORANGE"
     assert result["execution_summary"]["entry_rejected"] == 2
     assert result["strategy_summary"]["center_buy"]["open_positions"] == 1
@@ -244,6 +494,120 @@ def test_healthcheck_is_not_healthy_when_code_plane_drifts(monkeypatch, tmp_path
     assert result["code_plane_ok"] is False
     assert result["code_plane_issue"] == "LIVE_CODE_PLANE_DRIFT"
     assert result["healthy"] is False
+    assert healthcheck.exit_code_for(result) == 1
+
+
+def test_healthcheck_is_not_healthy_when_launchd_contract_drifts(monkeypatch, tmp_path):
+    status_path = tmp_path / "status_summary.json"
+    risk_path = tmp_path / "risk_state.db"
+    zeus_db_path = tmp_path / "zeus.db"
+    status_path.write_text(json.dumps(_status_payload()))
+    _write_risk_state(risk_path)
+    _write_no_trade_artifact(zeus_db_path)
+
+    monkeypatch.setenv("ZEUS_MODE", "live")
+    monkeypatch.setattr(healthcheck, "_status_path", lambda: status_path)
+    monkeypatch.setattr(healthcheck, "_risk_state_path", lambda: risk_path)
+    monkeypatch.setattr(healthcheck, "_zeus_db_path", lambda: zeus_db_path)
+    monkeypatch.setattr(
+        healthcheck,
+        "_launchd_contracts",
+        lambda: {
+            "ok": False,
+            "launchagents_dir": "/tmp/LaunchAgents",
+            "items": [
+                {
+                    "label": "com.zeus.live-trading",
+                    "ok": False,
+                    "issues": ["keepalive_not_true"],
+                }
+            ],
+        },
+    )
+
+    class _Result:
+        returncode = 0
+        stdout = "123\t0\tcom.zeus.live-trading\n"
+
+    monkeypatch.setattr(healthcheck.subprocess, "run", lambda *args, **kwargs: _Result())
+
+    result = healthcheck.check()
+
+    assert result["launchd_contract_ok"] is False
+    assert result["launchd_contract_issue"] == "LIVE_LAUNCHD_CONTRACT_DRIFT"
+    assert result["healthy"] is False
+    assert healthcheck.exit_code_for(result) == 1
+
+
+def test_healthcheck_rejects_stale_loaded_launchd_contract_after_disk_fix(monkeypatch, tmp_path):
+    status_path = tmp_path / "status_summary.json"
+    risk_path = tmp_path / "risk_state.db"
+    zeus_db_path = tmp_path / "zeus.db"
+    root = tmp_path / "zeus"
+    launchagents = tmp_path / "LaunchAgents"
+    status_path.write_text(json.dumps(_status_payload()))
+    _write_risk_state(risk_path)
+    _write_no_trade_artifact(zeus_db_path)
+
+    monkeypatch.setenv("ZEUS_MODE", "live")
+    monkeypatch.setattr(healthcheck, "_status_path", lambda: status_path)
+    monkeypatch.setattr(healthcheck, "_risk_state_path", lambda: risk_path)
+    monkeypatch.setattr(healthcheck, "_zeus_db_path", lambda: zeus_db_path)
+    monkeypatch.setattr(
+        healthcheck,
+        "_launchd_contracts",
+        lambda: _ORIGINAL_LAUNCHD_CONTRACTS(launchagents, root=root),
+    )
+    live_plist = _write_launchd_plist(
+        launchagents,
+        label="com.zeus.live-trading",
+        module="src.main",
+        root=root,
+        keep_alive=True,
+    )
+    _write_launchd_plist(
+        launchagents,
+        label="com.zeus.riskguard-live",
+        module="src.riskguard.riskguard",
+        root=root,
+    )
+    _write_launchd_plist(
+        launchagents,
+        label="com.zeus.forecast-live",
+        module="src.ingest.forecast_live_daemon",
+        root=root,
+    )
+    _mock_launchctl_loaded_contracts(
+        monkeypatch,
+        {
+            "com.zeus.live-trading": _launchctl_print_output(
+                label="com.zeus.live-trading",
+                module="src.main",
+                root=root,
+                plist_path=live_plist,
+                keep_alive=False,
+            ),
+            "com.zeus.riskguard-live": _launchctl_print_output(
+                label="com.zeus.riskguard-live",
+                module="src.riskguard.riskguard",
+                root=root,
+                plist_path=launchagents / "com.zeus.riskguard-live.plist",
+            ),
+            "com.zeus.forecast-live": _launchctl_print_output(
+                label="com.zeus.forecast-live",
+                module="src.ingest.forecast_live_daemon",
+                root=root,
+                plist_path=launchagents / "com.zeus.forecast-live.plist",
+            ),
+        },
+    )
+
+    result = healthcheck.check()
+
+    assert result["healthy"] is False
+    assert result["launchd_contract_issue"] == "LIVE_LAUNCHD_CONTRACT_DRIFT"
+    live_item = next(item for item in result["launchd_contracts"]["items"] if item["label"] == "com.zeus.live-trading")
+    assert "loaded_keepalive_not_true" in live_item["issues"]
     assert healthcheck.exit_code_for(result) == 1
 
 

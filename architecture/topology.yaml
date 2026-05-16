@@ -1669,6 +1669,8 @@ digest_profiles:
         - "readiness gate"
         - "readiness gates"
         - "live readiness"
+        - "live health probe"
+        - "healthcheck"
         - "staged smoke"
         - "smoke evidence"
         - "operator deploy gate"
@@ -1685,7 +1687,11 @@ digest_profiles:
       min_confidence: 0.5
     semantic_file_patterns:
       - "scripts/live_readiness_check.py"
+      - "scripts/live_health_probe.py"
+      - "scripts/healthcheck.py"
       - "tests/test_live_readiness_gates.py"
+      - "tests/test_live_health_probe_forecast_owner.py"
+      - "tests/test_healthcheck.py"
     file_patterns:
       - "docs/AGENTS.md"
       - "docs/README.md"
@@ -1708,8 +1714,12 @@ digest_profiles:
       - "architecture/topology.yaml"
       - "workspace_map.md"
       - "scripts/AGENTS.md"
+      - "scripts/healthcheck.py"
+      - "scripts/live_health_probe.py"
       - "scripts/live_readiness_check.py"
       - "tests/AGENTS.md"
+      - "tests/test_healthcheck.py"
+      - "tests/test_live_health_probe_forecast_owner.py"
       - "tests/test_live_readiness_gates.py"
       - "tests/test_digest_profile_matching.py"
     required_law:
@@ -1740,8 +1750,12 @@ digest_profiles:
       - "architecture/topology.yaml"
       - "workspace_map.md"
       - "scripts/AGENTS.md"
+      - "scripts/healthcheck.py"
+      - "scripts/live_health_probe.py"
       - "scripts/live_readiness_check.py"
       - "tests/AGENTS.md"
+      - "tests/test_healthcheck.py"
+      - "tests/test_live_health_probe_forecast_owner.py"
       - "tests/test_live_readiness_gates.py"
       - "tests/test_digest_profile_matching.py"
     forbidden_files:
@@ -1758,8 +1772,9 @@ digest_profiles:
       - "live strategy promotion"
       - "credentialed read-only-live activation"
     gates:
-      - "python3 -m py_compile scripts/live_readiness_check.py tests/test_live_readiness_gates.py"
+      - "python3 -m py_compile scripts/live_readiness_check.py scripts/live_health_probe.py scripts/healthcheck.py tests/test_live_readiness_gates.py tests/test_live_health_probe_forecast_owner.py tests/test_healthcheck.py"
       - "pytest -q -p no:cacheprovider tests/test_live_readiness_gates.py"
+      - "pytest -q -p no:cacheprovider tests/test_live_health_probe_forecast_owner.py tests/test_healthcheck.py"
       - "python3 scripts/live_readiness_check.py --help"
       - "pytest -q -p no:cacheprovider tests/test_digest_profile_matching.py::test_r3_g1_live_readiness_routes_to_g1_profile_not_heartbeat"
       - "python3 docs/operations/task_2026-04-26_ultimate_plan/r3/scripts/r3_drift_check.py --phase G1"

@@ -9,6 +9,7 @@ Exit code 0 = healthy, 1 = degraded, 2 = dead.
 
 import json
 import os
+import plistlib
 import re
 import sqlite3
 import subprocess
@@ -76,6 +77,14 @@ def _riskguard_label() -> str:
     return "com.zeus.riskguard"
 
 
+def _forecast_live_label() -> str:
+    return os.environ.get("ZEUS_FORECAST_LIVE_LABEL", "com.zeus.forecast-live")
+
+
+def _launchagents_dir() -> Path:
+    return Path(os.environ.get("ZEUS_LAUNCHAGENTS_DIR", str(Path.home() / "Library" / "LaunchAgents")))
+
+
 def _code_plane_identity() -> dict:
     try:
         from scripts.live_health_probe import _git_runtime_identity
@@ -97,6 +106,200 @@ def _code_plane_is_ready(identity: dict) -> bool:
         and identity.get("dirty") is False
         and identity.get("matches_expected") is True
     )
+
+
+def _module_from_program_arguments(program_args: list) -> str:
+    for idx, token in enumerate(program_args[:-1]):
+        if token == "-m":
+            return str(program_args[idx + 1])
+    return ""
+
+
+def _first_launchctl_field(output: str, field: str) -> str:
+    match = re.search(rf"^\s*{re.escape(field)}\s*=\s*(.+)$", output or "", re.MULTILINE)
+    if not match:
+        return ""
+    return match.group(1).strip()
+
+
+def _launchctl_block_items(output: str, block_name: str) -> list[str]:
+    match = re.search(
+        rf"^\s*{re.escape(block_name)}\s*=\s*\{{\n(?P<body>.*?)^\s*\}}",
+        output or "",
+        re.MULTILINE | re.DOTALL,
+    )
+    if not match:
+        return []
+    return [line.strip() for line in match.group("body").splitlines() if line.strip()]
+
+
+def _launchctl_environment(output: str) -> dict[str, str]:
+    env: dict[str, str] = {}
+    for line in _launchctl_block_items(output, "environment"):
+        if "=>" not in line:
+            continue
+        key, value = line.split("=>", 1)
+        env[key.strip()] = value.strip()
+    return env
+
+
+def _launchctl_loaded_contract(
+    label: str,
+    *,
+    root_path: Path,
+    plist_path: Path,
+    expected_module: str,
+) -> dict:
+    item: dict = {
+        "ok": False,
+        "issues": [],
+    }
+    try:
+        ps = subprocess.run(
+            ["launchctl", "print", f"gui/{os.getuid()}/{label}"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except Exception as exc:
+        item["issues"].append(f"loaded_contract_unreadable:{type(exc).__name__}")
+        item["error"] = str(exc)
+        return item
+    output = (ps.stdout or ps.stderr or "")
+    if ps.returncode != 0:
+        item["issues"].append("loaded_job_missing")
+        item["error"] = output.strip()
+        return item
+
+    arguments = _launchctl_block_items(output, "arguments")
+    environment = _launchctl_environment(output)
+    properties = {
+        part.strip()
+        for part in _first_launchctl_field(output, "properties").split("|")
+        if part.strip()
+    }
+    minimum_runtime_raw = _first_launchctl_field(output, "minimum runtime")
+    try:
+        minimum_runtime = int(minimum_runtime_raw)
+    except ValueError:
+        minimum_runtime = None
+    module = _module_from_program_arguments(arguments)
+    path = _first_launchctl_field(output, "path")
+    state = _first_launchctl_field(output, "state")
+    pid = _parse_launchctl_pid(output)
+    working_directory = _first_launchctl_field(output, "working directory")
+
+    item.update(
+        {
+            "path": path,
+            "state": state,
+            "pid": pid,
+            "keep_alive": "keepalive" in properties,
+            "run_at_load": "runatload" in properties,
+            "minimum_runtime": minimum_runtime,
+            "working_directory": working_directory,
+            "pythonpath_matches": environment.get("PYTHONPATH") == str(root_path),
+            "module": module,
+        }
+    )
+    if path != str(plist_path):
+        item["issues"].append("loaded_plist_path_mismatch")
+    if state != "running" or pid <= 0:
+        item["issues"].append("loaded_job_not_running")
+    if "keepalive" not in properties:
+        item["issues"].append("loaded_keepalive_not_true")
+    if "runatload" not in properties:
+        item["issues"].append("loaded_runatload_not_true")
+    if minimum_runtime is None or not (10 <= minimum_runtime <= 300):
+        item["issues"].append("loaded_minimum_runtime_missing_or_out_of_range")
+    if working_directory != str(root_path):
+        item["issues"].append("loaded_working_directory_mismatch")
+    if environment.get("PYTHONPATH") != str(root_path):
+        item["issues"].append("loaded_pythonpath_mismatch")
+    if module != expected_module:
+        item["issues"].append("loaded_program_module_mismatch")
+    item["ok"] = not item["issues"]
+    return item
+
+
+def _launchd_contracts(
+    launchagents_dir: Path | None = None,
+    *,
+    root: Path | None = None,
+) -> dict:
+    root_path = Path(root or PROJECT_ROOT)
+    launchagents = Path(launchagents_dir or _launchagents_dir())
+    specs = (
+        ("live_trading", _launchd_label(), "src.main"),
+        ("riskguard", _riskguard_label(), "src.riskguard.riskguard"),
+        ("forecast_live", _forecast_live_label(), "src.ingest.forecast_live_daemon"),
+    )
+    items: list[dict] = []
+    for name, label, expected_module in specs:
+        path = launchagents / f"{label}.plist"
+        item = {
+            "name": name,
+            "label": label,
+            "path": str(path),
+            "ok": False,
+            "issues": [],
+        }
+        if not path.exists():
+            item["issues"].append("plist_missing")
+            items.append(item)
+            continue
+        try:
+            with open(path, "rb") as handle:
+                payload = plistlib.load(handle)
+        except Exception as exc:
+            item["issues"].append(f"plist_unreadable:{type(exc).__name__}")
+            item["error"] = str(exc)
+            items.append(item)
+            continue
+        env = payload.get("EnvironmentVariables") or {}
+        program_args = payload.get("ProgramArguments") or []
+        module = _module_from_program_arguments(program_args)
+        throttle = payload.get("ThrottleInterval")
+        item.update(
+            {
+                "keep_alive": bool(payload.get("KeepAlive")),
+                "run_at_load": bool(payload.get("RunAtLoad")),
+                "throttle_interval": throttle,
+                "working_directory": payload.get("WorkingDirectory"),
+                "pythonpath_matches": env.get("PYTHONPATH") == str(root_path),
+                "module": module,
+            }
+        )
+        if payload.get("Label") != label:
+            item["issues"].append("label_mismatch")
+        if payload.get("KeepAlive") is not True:
+            item["issues"].append("keepalive_not_true")
+        if payload.get("RunAtLoad") is not True:
+            item["issues"].append("runatload_not_true")
+        if not isinstance(throttle, int) or not (10 <= throttle <= 300):
+            item["issues"].append("throttle_interval_missing_or_out_of_range")
+        if payload.get("WorkingDirectory") != str(root_path):
+            item["issues"].append("working_directory_mismatch")
+        if env.get("PYTHONPATH") != str(root_path):
+            item["issues"].append("pythonpath_mismatch")
+        if module != expected_module:
+            item["issues"].append("program_module_mismatch")
+        loaded = _launchctl_loaded_contract(
+            label,
+            root_path=root_path,
+            plist_path=path,
+            expected_module=expected_module,
+        )
+        item["loaded"] = loaded
+        for issue in loaded.get("issues", []):
+            item["issues"].append(issue)
+        item["ok"] = not item["issues"]
+        items.append(item)
+    return {
+        "ok": all(item["ok"] for item in items),
+        "launchagents_dir": str(launchagents),
+        "items": items,
+    }
 
 
 def _status_age_seconds(timestamp: str) -> float | None:
@@ -175,6 +378,10 @@ def check() -> dict:
     result["code_plane_ok"] = _code_plane_is_ready(result["code_plane"])
     if not result["code_plane_ok"]:
         result["code_plane_issue"] = "LIVE_CODE_PLANE_DRIFT"
+    result["launchd_contracts"] = _launchd_contracts()
+    result["launchd_contract_ok"] = bool(result["launchd_contracts"].get("ok"))
+    if not result["launchd_contract_ok"]:
+        result["launchd_contract_issue"] = "LIVE_LAUNCHD_CONTRACT_DRIFT"
 
     # Check daemon PID
     try:
@@ -369,6 +576,7 @@ def check() -> dict:
         and bool(result.get("riskguard_contract_valid"))
         and bool(result.get("assumptions_valid"))
         and bool(result.get("code_plane_ok"))
+        and bool(result.get("launchd_contract_ok"))
         and not bool(result.get("cycle_failed"))
         and result.get("infrastructure_level") != "RED"
     )

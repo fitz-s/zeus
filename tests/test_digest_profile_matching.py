@@ -1658,6 +1658,27 @@ def test_r3_g1_live_readiness_routes_to_g1_profile_not_heartbeat():
     )
 
 
+def test_r3_g1_live_continuous_healthcheck_routes_to_g1_profile():
+    digest = build_digest(
+        "R3 G1 live readiness gates live health probe healthcheck continuous ready "
+        "LIVE_CODE_PLANE_DRIFT LIVE_LAUNCHD_CONTRACT_DRIFT",
+        [
+            "scripts/live_health_probe.py",
+            "scripts/healthcheck.py",
+            "tests/test_live_health_probe_forecast_owner.py",
+            "tests/test_healthcheck.py",
+            "architecture/script_manifest.yaml",
+        ],
+    )
+
+    assert digest["profile"] == "r3 live readiness gates implementation"
+    assert digest["admission"]["status"] == "admitted"
+    assert "scripts/live_health_probe.py" in digest["admission"]["admitted_files"]
+    assert "scripts/healthcheck.py" in digest["admission"]["admitted_files"]
+    assert "tests/test_live_health_probe_forecast_owner.py" in digest["admission"]["admitted_files"]
+    assert "tests/test_healthcheck.py" in digest["admission"]["admitted_files"]
+
+
 def test_phase2c_execution_capability_routes_to_dedicated_profile():
     digest = build_digest(
         "Phase 2C DSA-16 composed execution capability proof for entry exit "
