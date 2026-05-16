@@ -213,7 +213,7 @@ class MaintenanceEngine:
         # _enumerate_candidates returns list[TaskCatalogEntry] from catalog.
         # For each entry, dispatch to handler.enumerate(entry, ctx) to collect
         # list[Candidate] per task. Handlers not yet implemented return [].
-        entries: list[TaskCatalogEntry] = self._enumerate_candidates(config)
+        entries: list[TaskCatalogEntry] = self._enumerate_candidates(config, schedule="daily")
         per_task_candidates: dict[str, list[Candidate]] = {}
         for entry in entries:
             task_candidates = self._dispatch_enumerate(entry, ctx)
@@ -312,17 +312,18 @@ class MaintenanceEngine:
                 return False
         return True
 
-    def _enumerate_candidates(self, config: EngineConfig) -> list[TaskCatalogEntry]:
+    def _enumerate_candidates(
+        self, config: EngineConfig, schedule: str = "daily"
+    ) -> list[TaskCatalogEntry]:
         """
         Enumerate task candidates from the task catalog.
 
         Loads TaskRegistry from config.task_catalog_path and returns all
-        entries scheduled for "daily" execution. Weekly tasks (e.g.
-        authority_drift_surface) are excluded from daily ticks.
+        entries scheduled for the given schedule value. Defaults to "daily".
+        Pass schedule="weekly" to surface weekly tasks (e.g. authority_drift_surface).
 
-        Deviation: schedule is hardcoded to "daily" for Batch A. Weekly
-        dispatch (schedule="weekly") will be added when authority_drift_surface
-        handler is implemented in a later batch.
+        run_tick passes schedule="daily"; future weekly dispatch will pass
+        schedule="weekly" when the authority_drift_surface handler is implemented.
         """
         if not config.task_catalog_path.exists():
             logger.warning(
@@ -339,8 +340,7 @@ class MaintenanceEngine:
                 exc,
             )
             return []
-        # TODO(wave-1.5-batch-b): add "weekly" dispatch based on TickContext schedule
-        return registry.get_tasks_for_schedule("daily")
+        return registry.get_tasks_for_schedule(schedule)
 
     def _dispatch_by_task_id(self, task_id: str, method: str, *args: Any) -> Any:
         """

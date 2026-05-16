@@ -396,3 +396,74 @@ def test_run_tick_self_quarantined_guard_exits_nonzero(tmp_path: Path) -> None:
             with pytest.raises(SystemExit) as exc_info:
                 run_tick(config)
     assert exc_info.value.code != 0
+
+
+# ---------------------------------------------------------------------------
+# M3: _enumerate_candidates schedule parameterization
+# ---------------------------------------------------------------------------
+
+
+def test_enumerate_candidates_weekly_schedule(tmp_path: Path) -> None:
+    """
+    _enumerate_candidates(config, schedule="weekly") surfaces only weekly tasks.
+
+    Injects a catalog with one daily task and one weekly task. Calls
+    _enumerate_candidates with schedule="weekly" directly to assert only
+    the weekly entry is returned.
+    """
+    import yaml
+    from maintenance_worker.rules.parser import TaskCatalogEntry
+    from maintenance_worker.types.specs import TaskSpec
+
+    # Write a minimal catalog with one daily + one weekly task
+    catalog_content = {
+        "schema_version": 1,
+        "tasks": [
+            {
+                "id": "daily_task",
+                "description": "a daily task",
+                "rule_source": "PURGE_CATEGORIES.md#cat-1",
+                "schedule": "daily",
+                "dry_run": True,
+                "live_default": False,
+                "config": {},
+                "safety": {},
+                "evidence_emit": "per_file_action",
+            },
+            {
+                "id": "weekly_task",
+                "description": "a weekly task",
+                "rule_source": "PURGE_CATEGORIES.md#cat-99",
+                "schedule": "weekly",
+                "dry_run": True,
+                "live_default": False,
+                "config": {},
+                "safety": {},
+                "evidence_emit": "per_file_action",
+            },
+        ]
+    }
+    catalog_path = tmp_path / "catalog.yaml"
+    catalog_path.write_text(yaml.dump(catalog_content))
+
+    config = EngineConfig(
+        repo_root=tmp_path,
+        state_dir=tmp_path / "state",
+        evidence_dir=tmp_path / "evidence",
+        task_catalog_path=catalog_path,
+        safety_contract_path=tmp_path / "safety.yaml",
+        live_default=False,
+        scheduler="launchd",
+        notification_channel="discord",
+    )
+
+    engine = MaintenanceEngine()
+    weekly_entries = engine._enumerate_candidates(config, schedule="weekly")
+    daily_entries = engine._enumerate_candidates(config, schedule="daily")
+
+    assert len(weekly_entries) == 1, f"Expected 1 weekly entry; got {len(weekly_entries)}"
+    assert weekly_entries[0].spec.task_id == "weekly_task"
+    assert weekly_entries[0].spec.schedule == "weekly"
+
+    assert len(daily_entries) == 1, f"Expected 1 daily entry; got {len(daily_entries)}"
+    assert daily_entries[0].spec.task_id == "daily_task"
