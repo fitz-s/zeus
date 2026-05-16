@@ -840,22 +840,34 @@ scripts:
     required_tests: [tests/test_settlement_semantics_f_to_c.py]
     packet: docs/operations/task_2026-05-08_post_merge_full_chain/TASK.md
     fix_refs: ["#262", "#263", "#264"]
-  # P9 addition — 2026-05-15
-  authority_inventory_v2.py:
-    class: diagnostic_report_writer
-    canonical_command: "python3 scripts/authority_inventory_v2.py --repo-root . --output <path>"
-    write_targets: [stdout, "docs/operations/task_<DATE>_authority_inventory_v2_run/INVENTORY.md"]
-    external_inputs: []
-    read_targets: [".claude/CLAUDE.md", "docs/operations/INDEX.md", "docs/operations/current_*.md", "docs/operations/known_gaps.md", "docs/operations/packet_scope_protocol.md"]
-    lifecycle: durable
+
+  maintenance_worker_install.py:
+    # Created: 2026-05-15
+    # Authority basis: docs/operations/task_2026-05-15_runtime_improvement_engineering_package/05_execution_packets/PACKET_INDEX.md §P6
+    class: runtime_support
+    lifecycle: long_lived
     status: active
-    dry_run_default: false
+    authority_scope: operator_runtime_support
+    dry_run_default: true
+    apply_flag: "--run-install"
     dangerous_if_run: false
-    required_tests: [tests/scripts/test_authority_inventory_v2.py]
-    packet: docs/operations/task_2026-05-15_p9_authority_inventory_v2/SCAFFOLD.md
-    reason: >
-      Authority inventory v2 generator (P9.1). Extends v1 AUTHORITY_DOCS_INVENTORY.md format
-      to Cohort 7 surfaces: .claude/CLAUDE.md, ~/.claude/CLAUDE.md, ~/.openclaw/CLAUDE.md,
-      architecture/modules/*.yaml (LATENT_TARGET), docs/operations/INDEX.md, current_*.md,
-      known_gaps.md, packet_scope_protocol.md. Emits drift_score + verdict columns alongside
-      v1-compatible first 5 columns. Self-registration per SCAFFOLD.md §6 self-check #1.
+    read_targets: [bindings/zeus/launchd_plist.plist, bindings/zeus/config.yaml]
+    write_targets:
+      - state/maintenance_state/maintenance_worker_config.json
+      - state/maintenance_state/install_metadata.json
+      - "~/Library/LaunchAgents/com.zeus.maintenance.plist"
+    target_db: null
+    external_inputs: [git_remote_url]
+    promotion_barrier: >
+      Idempotent install helper. --run-install is safe at any time; it preserves
+      install_metadata.json (ImmutableMetadataError on re-write). launchctl load
+      must be run manually by the operator after install.
+    required_helpers: [maintenance_worker.cli.entry, maintenance_worker.core.install_metadata]
+    required_tests: [tests/maintenance_worker/test_bindings/test_zeus_config.py, tests/maintenance_worker/test_bindings/test_launchd_plist.py]
+    canonical_command: "python3 scripts/maintenance_worker_install.py --dry-run"
+    reuse_when: >
+      Installing or refreshing the Zeus maintenance worker launchd binding.
+      Safe to re-run: does not reset first_run_at (30-day floor preserved).
+    do_not_use_when: >
+      Core maintenance_worker module changes (edit core directly); migrating
+      to a different binding target (create a new bindings/<project>/ directory).
