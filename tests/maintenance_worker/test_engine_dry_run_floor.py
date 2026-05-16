@@ -23,7 +23,8 @@ import pytest
 from maintenance_worker.core.engine import MaintenanceEngine
 from maintenance_worker.core.install_metadata import DryRunFloor, InstallMetadata
 from maintenance_worker.rules.parser import TaskCatalogEntry
-from maintenance_worker.types.specs import EngineConfig, ProposalManifest, TaskSpec, TickContext
+from maintenance_worker.types.candidates import Candidate
+from maintenance_worker.types.specs import EngineConfig, TaskSpec, TickContext
 
 
 # ---------------------------------------------------------------------------
@@ -56,8 +57,13 @@ def _make_entry(task_id: str, dry_run_floor_exempt: bool = False) -> TaskCatalog
     return TaskCatalogEntry(spec=spec, raw={"id": task_id, "schedule": "daily"})
 
 
-def _make_proposal(task_id: str) -> ProposalManifest:
-    return ProposalManifest(task_id=task_id)
+def _make_candidate(task_id: str, tmp_path: Path) -> Candidate:
+    return Candidate(
+        task_id=task_id,
+        path=tmp_path / "dummy",
+        verdict="TEST",
+        reason="floor gate test candidate",
+    )
 
 
 def _make_ctx(tmp_path: Path) -> TickContext:
@@ -93,12 +99,12 @@ def test_apply_decisions_floor_not_met_forces_dry_run(tmp_path: Path) -> None:
     engine = MaintenanceEngine()
     install_meta = _make_install_meta(days_ago=5)
     entry = _make_entry("some_cleanup_task", dry_run_floor_exempt=False)
-    proposal = _make_proposal(entry.spec.task_id)
+    candidate = _make_candidate(entry.spec.task_id, tmp_path)
     ctx = _make_ctx(tmp_path)
 
     result = engine._apply_decisions(
         entry=entry,
-        proposal=proposal,
+        candidate=candidate,
         ctx=ctx,
         force_dry_run=False,
         install_meta=install_meta,
@@ -119,12 +125,12 @@ def test_apply_decisions_floor_met_allows_apply(tmp_path: Path) -> None:
     engine = MaintenanceEngine()
     install_meta = _make_install_meta(days_ago=35)
     entry = _make_entry("some_cleanup_task", dry_run_floor_exempt=False)
-    proposal = _make_proposal(entry.spec.task_id)
+    candidate = _make_candidate(entry.spec.task_id, tmp_path)
     ctx = _make_ctx(tmp_path)
 
     result = engine._apply_decisions(
         entry=entry,
-        proposal=proposal,
+        candidate=candidate,
         ctx=ctx,
         force_dry_run=False,
         install_meta=install_meta,
@@ -143,13 +149,13 @@ def test_apply_decisions_exempt_task_bypasses_floor(tmp_path: Path) -> None:
     engine = MaintenanceEngine()
     install_meta = _make_install_meta(days_ago=1)
     entry = _make_entry("zero_byte_state_cleanup", dry_run_floor_exempt=True)
-    proposal = _make_proposal(entry.spec.task_id)
+    candidate = _make_candidate(entry.spec.task_id, tmp_path)
     ctx = _make_ctx(tmp_path)
 
     # Should not raise; floor gate is skipped for exempt tasks.
     result = engine._apply_decisions(
         entry=entry,
-        proposal=proposal,
+        candidate=candidate,
         ctx=ctx,
         force_dry_run=False,
         install_meta=install_meta,
@@ -164,12 +170,12 @@ def test_apply_decisions_no_install_meta_skips_floor(tmp_path: Path) -> None:
     """
     engine = MaintenanceEngine()
     entry = _make_entry("some_cleanup_task")
-    proposal = _make_proposal(entry.spec.task_id)
+    candidate = _make_candidate(entry.spec.task_id, tmp_path)
     ctx = _make_ctx(tmp_path)
 
     result = engine._apply_decisions(
         entry=entry,
-        proposal=proposal,
+        candidate=candidate,
         ctx=ctx,
         force_dry_run=False,
         install_meta=None,
@@ -188,12 +194,12 @@ def test_apply_decisions_force_dry_run_takes_priority(tmp_path: Path) -> None:
     engine = MaintenanceEngine()
     install_meta = _make_install_meta(days_ago=1)
     entry = _make_entry("some_cleanup_task", dry_run_floor_exempt=False)
-    proposal = _make_proposal(entry.spec.task_id)
+    candidate = _make_candidate(entry.spec.task_id, tmp_path)
     ctx = _make_ctx(tmp_path)
 
     result = engine._apply_decisions(
         entry=entry,
-        proposal=proposal,
+        candidate=candidate,
         ctx=ctx,
         force_dry_run=True,
         install_meta=install_meta,

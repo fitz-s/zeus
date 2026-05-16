@@ -186,24 +186,16 @@ def enumerate(entry: Any, ctx: TickContext) -> list[Candidate]:  # noqa: A001
     return candidates
 
 
-def apply(decision: Any, ctx: TickContext) -> ApplyResult:
+def apply(decision: Candidate, ctx: TickContext) -> ApplyResult:
     """
     Apply archival proposals. Always dry_run_only (live_default: false in catalog).
 
-    Top-of-function guard per PLAN §1.5.4: defense-in-depth.
+    Receives a single Candidate from the engine (C2 fix: typed Candidate, not
+    ProposalManifest). Top-of-function guard per PLAN §1.5.4: defense-in-depth.
     Returns ApplyResult with mock diff showing what git mv would do.
     """
-    # TOP-OF-FUNCTION GUARD (defense-in-depth beyond engine-level enforcement)
-    if ctx.config.live_default is False:
-        mock = _mock_diff(decision)
-        return ApplyResult(
-            task_id="closed_packet_archive_proposal",
-            dry_run_only=True,
-            diff=mock,
-        )
-
-    # If somehow live_default is True (unexpected), still stay dry_run_only
-    # because this task is ALWAYS proposal-only.
+    # TOP-OF-FUNCTION GUARD (defense-in-depth beyond engine-level enforcement).
+    # This task is ALWAYS proposal-only — dry_run_only unconditionally.
     mock = _mock_diff(decision)
     return ApplyResult(
         task_id="closed_packet_archive_proposal",

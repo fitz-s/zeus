@@ -173,14 +173,15 @@ def enumerate(entry: Any, ctx: TickContext) -> list[Candidate]:  # noqa: A001
     return candidates
 
 
-def apply(decision: Any, ctx: TickContext) -> ApplyResult:
+def apply(decision: Candidate, ctx: TickContext) -> ApplyResult:
     """
     Apply worktree quarantine. Always dry_run_only (live_default: false in catalog).
 
-    Top-of-function guard per PLAN §1.5.4: defense-in-depth.
+    Receives a single Candidate from the engine (C2 fix: typed Candidate, not
+    ProposalManifest). Top-of-function guard per PLAN §1.5.4: defense-in-depth.
     Returns ApplyResult with mock diff showing what git worktree remove would do.
     """
-    # TOP-OF-FUNCTION GUARD
+    # TOP-OF-FUNCTION GUARD — this task is ALWAYS proposal-only.
     mock = _mock_diff(decision)
     return ApplyResult(
         task_id="stale_worktree_quarantine",

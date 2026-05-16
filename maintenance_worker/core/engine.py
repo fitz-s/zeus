@@ -17,8 +17,10 @@ P5.1 ↔ P5.5 boundary (SCAFFOLD §3.5):
     Does NOT call git commit or gh pr create (P5.5 ApplyPublisher owns those).
   _emit_dry_run_proposal: STUB — returns empty ProposalManifest.
     Full publish (evidence_writer) deferred to P5.3/P5.5.
-  _enumerate_candidates: STUB — returns empty list.
-    Full enumeration (rules_parser, task_registry) deferred to P5.3.
+  _enumerate_candidates: wired to TaskRegistry (P5.3). Returns list[TaskCatalogEntry].
+    For each entry, _dispatch_enumerate calls handler.enumerate(entry, ctx) to
+    collect list[Candidate] per task. Handlers that are not yet implemented
+    return an empty list (safe default).
 
 run_tick is available as a module-level function (alias for
 MaintenanceEngine.run_tick) to satisfy the smoke test:
@@ -56,6 +58,7 @@ from maintenance_worker.core.kill_switch import (
 from maintenance_worker.core.refusal import refuse_fatal, skip_tick
 from maintenance_worker.rules.parser import TaskCatalogEntry
 from maintenance_worker.rules.task_registry import TaskRegistry
+from maintenance_worker.types.candidates import Candidate
 from maintenance_worker.types.modes import InvocationMode, RefusalReason
 from maintenance_worker.types.results import ApplyResult, CheckResult
 from maintenance_worker.types.specs import (
@@ -207,17 +210,31 @@ class MaintenanceEngine:
         logger.info("CHECK_GUARDS passed: all 8 guards ok")
 
         # ── Phase 3: ENUMERATE_CANDIDATES ──────────────────────────────────
-        # Wired to TaskRegistry (P5.3). Returns list[TaskCatalogEntry].
-        candidates: list[TaskCatalogEntry] = self._enumerate_candidates(config)
+        # _enumerate_candidates returns list[TaskCatalogEntry] from catalog.
+        # For each entry, dispatch to handler.enumerate(entry, ctx) to collect
+        # list[Candidate] per task. Handlers not yet implemented return [].
+        entries: list[TaskCatalogEntry] = self._enumerate_candidates(config)
+        per_task_candidates: dict[str, list[Candidate]] = {}
+        for entry in entries:
+            task_candidates = self._dispatch_enumerate(entry, ctx)
+            per_task_candidates[entry.spec.task_id] = task_candidates
+        total_candidates = sum(len(v) for v in per_task_candidates.values())
         result.state_machine_breadcrumbs.append(("ENUMERATE_CANDIDATES", True))
-        logger.info("ENUMERATE_CANDIDATES: %d tasks", len(candidates))
+        logger.info(
+            "ENUMERATE_CANDIDATES: %d tasks, %d candidates total",
+            len(entries),
+            total_candidates,
+        )
 
         # ── Phase 4: DRY_RUN_PROPOSAL ──────────────────────────────────────
-        # STUB: P5.5 evidence_writer will emit the real proposal manifests.
-        manifests: list[ProposalManifest] = []
-        for entry in candidates:
-            manifest = self._emit_dry_run_proposal(entry, [])
-            manifests.append(manifest)
+        # Build ProposalManifest from per-task Candidates.
+        # P5.5 evidence_writer will emit the full manifests to disk.
+        manifests: dict[str, ProposalManifest] = {}
+        for entry in entries:
+            task_id = entry.spec.task_id
+            task_cands = per_task_candidates.get(task_id, [])
+            manifest = self._emit_dry_run_proposal(entry, task_cands)
+            manifests[task_id] = manifest
         result.state_machine_breadcrumbs.append(("DRY_RUN_PROPOSAL", True))
         logger.info("DRY_RUN_PROPOSAL: %d manifests emitted (P5.5 stub)", len(manifests))
 
@@ -234,21 +251,34 @@ class MaintenanceEngine:
 
         force_dry_run = invocation_mode == InvocationMode.MANUAL_CLI
         apply_results: list[ApplyResult] = []
-        for entry, manifest in zip(candidates, manifests):
-            apply_result = self._apply_decisions(
-                entry, manifest, ctx, force_dry_run=force_dry_run, install_meta=install_meta
-            )
-            apply_results.append(apply_result)
+        for entry in entries:
+            task_id = entry.spec.task_id
+            task_cands = per_task_candidates.get(task_id, [])
+            manifest = manifests.get(task_id, ProposalManifest(task_id=task_id))
+            if not task_cands:
+                # No candidates from enumerate → dry_run_only, no apply call
+                apply_results.append(ApplyResult(task_id=task_id, dry_run_only=True))
+                continue
+            for candidate in task_cands:
+                apply_result = self._apply_decisions(
+                    entry, candidate, ctx,
+                    force_dry_run=force_dry_run,
+                    install_meta=install_meta,
+                )
+                apply_results.append(apply_result)
         result.apply_results = apply_results
         result.state_machine_breadcrumbs.append(("APPLY_DECISIONS", True))
-        logger.info("APPLY_DECISIONS: %d tasks processed", len(apply_results))
+        logger.info("APPLY_DECISIONS: %d results across %d tasks", len(apply_results), len(entries))
 
         # ── Phase 5b: POST_DETECT (post-mutation detector) ─────────────────
         # Runs after APPLY_DECISIONS to catch any forbidden-path disk divergence.
         # Path B: divergence → write_self_quarantine + sys.exit(50).
-        for apply_result, manifest in zip(apply_results, manifests):
-            if not apply_result.dry_run_only:
-                post_mutation_detector(apply_result, manifest, config.state_dir)
+        for entry in entries:
+            task_id = entry.spec.task_id
+            manifest = manifests.get(task_id, ProposalManifest(task_id=task_id))
+            for apply_result in apply_results:
+                if apply_result.task_id == task_id and not apply_result.dry_run_only:
+                    post_mutation_detector(apply_result, manifest, config.state_dir)
         logger.info("POST_DETECT: all apply results verified against manifests")
 
         # ── Phase 6: SUMMARY_REPORT ─────────────────────────────────────────
@@ -260,7 +290,7 @@ class MaintenanceEngine:
         logger.info(
             "END tick run_id=%s tasks=%d apply_results=%d",
             run_id,
-            len(candidates),
+            len(entries),
             len(apply_results),
         )
         return result
@@ -337,13 +367,37 @@ class MaintenanceEngine:
             )
         return handler(*args)
 
+    def _dispatch_enumerate(
+        self, entry: TaskCatalogEntry, ctx: TickContext
+    ) -> list[Candidate]:
+        """
+        Call handler.enumerate(entry, ctx) for one catalog entry.
+
+        Returns list[Candidate] from the handler. Falls back to [] if the
+        handler module is not yet implemented (safe default — never skips
+        known handlers). AttributeError propagates (handler exists but
+        lacks enumerate → implementation bug, not missing module).
+        """
+        try:
+            result: list[Candidate] = self._dispatch_by_task_id(
+                entry.spec.task_id, "enumerate", entry, ctx
+            )
+            return result
+        except TaskHandlerNotFoundError:
+            logger.debug(
+                "_dispatch_enumerate: no handler for %s; returning []",
+                entry.spec.task_id,
+            )
+            return []
+
     def _emit_dry_run_proposal(
-        self, entry: TaskCatalogEntry, candidates: list
+        self, entry: TaskCatalogEntry, candidates: list[Candidate]
     ) -> ProposalManifest:
         """
         STUB: emit dry-run proposal manifest for one task.
 
-        P5.5 evidence_writer will write the full manifest to
+        Receives the Candidates collected by _dispatch_enumerate. P5.5
+        evidence_writer will write the full manifest to
         evidence_trail/<date>/proposals/<task_id>.md. Returns an
         empty ProposalManifest until P5.5 is delivered.
         """
@@ -353,24 +407,24 @@ class MaintenanceEngine:
     def _apply_decisions(
         self,
         entry: TaskCatalogEntry,
-        proposal: ProposalManifest,
+        candidate: Candidate,
         ctx: TickContext,
         force_dry_run: bool = False,
         install_meta: Optional[InstallMetadata] = None,
     ) -> ApplyResult:
         """
-        Stage filesystem mutations for one task.
+        Stage filesystem mutations for one Candidate.
 
-        Returns ApplyResult with the staged diff. Does NOT commit to git
-        or open PRs — P5.5 ApplyPublisher.publish() owns those steps
-        (SCAFFOLD §3.5).
+        Receives a single Candidate (from handler.enumerate). Returns
+        ApplyResult with the staged diff. Does NOT commit to git or open
+        PRs — P5.5 ApplyPublisher.publish() owns those steps (SCAFFOLD §3.5).
 
         If force_dry_run=True (MANUAL_CLI invocation), dry-run floor not yet
         met (< 30 days since install_metadata.first_run_at and task is not
         floor-exempt), or task has no ack, returns dry_run_only=True.
 
         F2: enforce_dry_run_floor gate is wired here so future packets cannot
-        bypass it. After the gate, dispatches to the per-task rule module
+        bypass it. After the gate, dispatches handler.apply(candidate, ctx)
         via _dispatch_by_task_id. Falls back to dry_run_only if handler
         is not found (safe default — never executes unknown handlers live).
         """
@@ -392,7 +446,7 @@ class MaintenanceEngine:
         # the handler is not yet implemented (safe: never acts live without handler).
         try:
             result: ApplyResult = self._dispatch_by_task_id(
-                task.task_id, "apply", proposal, ctx
+                task.task_id, "apply", candidate, ctx
             )
             return result
         except TaskHandlerNotFoundError:
