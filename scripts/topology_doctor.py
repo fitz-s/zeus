@@ -17,7 +17,11 @@ from datetime import date
 from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any
-from scripts.topology_v_next.cli_integration_shim import maybe_shadow_compare
+
+try:
+    from topology_v_next.cli_integration_shim import maybe_shadow_compare
+except ModuleNotFoundError:  # pytest imports this as scripts.topology_doctor
+    from scripts.topology_v_next.cli_integration_shim import maybe_shadow_compare
 
 try:
     from _yaml_bootstrap import import_yaml
