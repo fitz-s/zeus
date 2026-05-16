@@ -14,7 +14,7 @@ This ranking re-orders the body-of-report by money/operational impact on current
 
 | Rank | Live impact | Body # | Severity | Title | Why it matters NOW |
 |------|-------------|--------|----------|-------|-------------------|
-| **A** | **🔴 BLOCKING for Karachi 2026-05-17 settlement** | **#4** (escalated) | **SEV-1** | Harvester truth writer mis-routed to `world.db` (ghost copy) post-K1; canonical `forecasts.db.settlements_v2` silent since 2026-05-11T19:59Z (5 days, matches K1 split landing) | Settlement writer commits to a table whose registry status is `legacy_archived`. Canonical settlement path is broken in production. Karachi position resolves 2026-05-17 and **cannot persist a settlement row via the supported writer**. |
+| **A** | **🔴 MERGE-PENDING for Karachi 2026-05-17 settlement** | **#4** (escalated) | **SEV-1 MERGE-PENDING** | Harvester truth writer mis-routed to `world.db` (ghost copy) post-K1; canonical `forecasts.db.settlements_v2` silent since 2026-05-11T19:59Z (5 days, matches K1 split landing). **Phase-3 update**: fix exists on `feat/data-daemon-authority-chain-2026-05-14` but is **not merged to origin/main**; daemon offline since 2026-05-15 01:34Z so mis-routing is dormant; 726 stranded rows in `world.db.market_events_v2` from 5/12–5/13 are the real audit artifact. Rank A retained: un-merged fix + offline daemon + stranded rows still warrant highest live impact. |
 | **B** | 🟠 Live position lineage unauditable | **#2** | SEV-1 | `selection_hypothesis_fact.decision_id` 100% NULL (506/506); evaluator.py:1535 caller bug | If Karachi position needs post-mortem (e.g. dispute, mis-settlement), per-hypothesis decision trace is unrecoverable. Read-only debt, not money-at-risk today. |
 | **C** | 🟡 Systemic latent (no current consumer mis-routes; very-soon-likely-mis-routing-on-next-feature) | **#1** | SEV-1 | Registry-vs-disk drift unenforced; 24 tables wrong-DB; 5 multi-DB duplicated; `assert_db_matches_registry()` exists but unwired at boot | Same root-cause class as rank A. K1 split partially landed; followups (e.g. commit `1d952b072e`) never reached main. Next consumer added will likely pick wrong DB. |
 | **D** | 🟢 Operator-decision risk only | **#3** | SEV-2 | Doctrine drift (`current_state.md` 1 commit stale; `current_data_state.md` 18d stale with wrong settlement counts + wrong harvester status) | Decisions made from doctrine are decisions from a fiction. No direct money flow. |
@@ -206,12 +206,22 @@ Live Karachi position `c30f28a5-d4e` (`state/zeus_trades.db` `position_current` 
 
 ---
 
-## Finding #4 — Harvester truth writer is structurally mis-routed post-K1 (writes to ghost `world.db`, canonical `forecasts.db` silent 5 days); blocks Karachi 2026-05-17 settlement
+## Finding #4 — Harvester truth writer is structurally mis-routed post-K1 (writes to ghost `world.db`, canonical `forecasts.db` silent 5 days); merge-pending fix exists
 
-**Severity**: SEV-1 (ESCALATED 2026-05-16 from initial SEV-2 after writer-target investigation) — active money-at-risk exposure: live position `c30f28a5-d4e` resolves 2026-05-17 and cannot settle via canonical path.
+**Severity**: SEV-1 MERGE-PENDING (ESCALATED 2026-05-16 from initial SEV-2 after writer-target investigation, then DOWNGRADED in Phase-3 from BLOCKING after discovering the fix exists off-main). Live position `c30f28a5-d4e` resolves 2026-05-17; if the daemon were running on `origin/main`, settlement would still mis-route via the canonical path — but the data daemon has been OFFLINE since 2026-05-15 01:34Z, so the mis-routing pathway is currently dormant.
 **Category**: F (cross-module invariants — registry-vs-code drift); secondary E (settlement edges), G (silent failures).
 
-### Evidence (3 independent)
+### Phase-3 Correction (added 2026-05-16, supersedes Phase-2 framing)
+
+Phase-2 evidence below describes the bug as it exists on `origin/main` HEAD `556d55be23` (and on the audit worktree, which aligns with that HEAD). That description is **factually correct for origin/main**, but **incomplete** as a live-impact assessment because:
+
+1. **The fix already exists off-main.** Commits `1d952b072e` (`feat(k1/5b): CRITICAL-1 harvester trio → get_forecasts_connection`) and `a322810a2a` (`feat(k1/5c): forecast-only readers → get_forecasts_connection`) are present on branch `feat/data-daemon-authority-chain-2026-05-14` and downstream on `deploy/live-continuous-run-2026-05-16` (merged to main via PR #121 *after* the Phase-2 evidence was captured — verify with `git merge-base --is-ancestor 1d952b072e origin/main` against the HEAD at audit-time vs. post-PR-121 HEAD). At Phase-2 audit-time the fix was NOT in main; the audit worktree still points at the pre-PR-121 HEAD.
+2. **Daemon is offline.** Data daemon stopped writing at 2026-05-15 01:34Z. While offline, neither the bug nor the fix is executing — no further stranded rows accrue, no canonical writes happen either.
+3. **The real audit artifact is 726 stranded rows.** `world.db.market_events_v2` carries 726 rows written during the 2026-05-12 → 2026-05-13 active window (post-K1-split, pre-daemon-stop) that were routed to the ghost copy and never landed on the canonical destination. These are the rows a reconciliation pass must address regardless of how the routing fix is sequenced into main.
+
+**Net live impact**: the routing fix exists and is one PR-merge away from main; the daemon must be re-armed against a HEAD that contains the fix; the stranded-rows backfill is independent of both and is the immediate operational item.
+
+### Evidence (3 independent — captured against pre-PR-121 main HEAD `556d55be23`)
 
 **E1 — Code line: writer opens `get_world_connection`, but registry says canonical is forecasts.db.**
 
