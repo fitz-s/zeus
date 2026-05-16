@@ -14,7 +14,7 @@ Worker: executor (WAVE 5 resume)
 | `state/maintenance_state/maintenance_worker_config.json` | EXISTS | Written by install script |
 | `~/Library/LaunchAgents/com.zeus.maintenance.plist` | REMOVED | Operator decision: do not load worktree-pointing plist into launchd |
 | `state/topology_v_next_shadow/.gitkeep` | COMMITTED | Force-added (state/ is gitignored); commit `bcfdbd671f` |
-| Foreign orphan `scripts/promote_calibration_v2_stage_to_prod.py` | MOVED to `/tmp/` | See §Foreign Orphan Disposition |
+| Foreign orphan `scripts/promote_calibration_v2_stage_to_prod.py` | MOVED out of worktree | See §Foreign Orphan Disposition |
 | `docs/operations/task_2026-05-16_doc_alignment_plan/WAVE_4_CRITIC.md` | COMMITTED | Was untracked; triggered dirty-repo guard; committed as `6ee7fb8ef0` to clear blocker |
 
 ### Dry-run floor note
@@ -112,11 +112,11 @@ Evidence trail path: `/Users/leofitz/.openclaw/workspace-venus/zeus-doc-alignmen
 ## Foreign Orphan Disposition
 
 File: `scripts/promote_calibration_v2_stage_to_prod.py`
-Action: Moved to `/tmp/promote_calibration_v2_stage_to_prod.py.orphan-2026-05-16`
+Action: Moved out of worktree (not retained in repo; captured to ephemeral storage during execution session).
 
 Investigation: File was on disk in worktree but NOT on `origin/main`, NOT on `HEAD`, NOT in any commit. Confirmed true orphan — leaked from another session or worktree before this worktree was created. NOT added to allowlist (it is not this branch's file). NOT deleted (preserved for operator investigation).
 
-**Operator action required**: Identify origin of `promote_calibration_v2_stage_to_prod.py` — check other worktrees and recent sessions for provenance. File preserved at `/tmp/promote_calibration_v2_stage_to_prod.py.orphan-2026-05-16` until operator reviews.
+**Operator action required**: Identify origin of `promote_calibration_v2_stage_to_prod.py` — check other worktrees and recent sessions for provenance.
 
 ---
 

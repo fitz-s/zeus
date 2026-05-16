@@ -187,7 +187,7 @@ modules:
     scoped_agents: src/execution/AGENTS.md
     module_book: docs/reference/modules/execution.md
     priority: p2_remaining
-    maturity: stable  # promoted 2026-05-16: 3 test_execution_*.py + 71 tests import src.execution (flat layout in tests/)
+    maturity: stable  # promoted 2026-05-16: 3 test_execution_*.py + 53-62 tests import src.execution (flat layout in tests/; verify: grep -rl 'src\.execution' tests/test_*.py | wc -l)
     zone: source
     authority_role: live_execution
     high_risk_files:
