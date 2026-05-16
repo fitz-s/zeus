@@ -132,19 +132,14 @@ def _get_active_rules(bindings_dir: "Optional[Path]" = None) -> "list[ForbiddenR
             _here = Path(__file__).resolve().parent  # .../maintenance_worker/core/
             bindings_dir = _here.parent.parent / "bindings"
 
-    try:
-        from maintenance_worker.core.forbidden_rules_loader import (  # noqa: PLC0415
-            load_forbidden_rules,
-            ConfigurationError,
-        )
-        return load_forbidden_rules(str(bindings_dir))
-    except Exception as exc:
-        _validator_logger.warning(
-            "validator: forbidden_rules_loader failed (%s); falling back to "
-            "hardcoded rules. Set MW_FORBIDDEN_RULES_FROM_CODE=1 to suppress.",
-            exc,
-        )
-        return _FORBIDDEN_RULES
+    # No fallback: if the loader raises (ConfigurationError or any other exception),
+    # propagate it to the caller. Silent fallback to stale hardcoded rules masks
+    # mis-mounted BINDINGS_DIR and defeats fail-closed design.
+    # Use MW_FORBIDDEN_RULES_FROM_CODE=1 explicitly for transition / emergency use.
+    from maintenance_worker.core.forbidden_rules_loader import (  # noqa: PLC0415
+        load_forbidden_rules,
+    )
+    return load_forbidden_rules(str(bindings_dir))
 
 
 # Source code and tests (Group 1)

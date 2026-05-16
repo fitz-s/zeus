@@ -218,14 +218,29 @@ class TestHardcodedFallbackEnvVar:
     def test_env_var_unset_calls_loader(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Without env var, _get_active_rules uses loader path (may fall back to hardcoded on
-        missing bindings, but does NOT return the hardcoded list directly)."""
+        """Without env var + valid bindings, _get_active_rules returns loader result."""
+        monkeypatch.delenv("MW_FORBIDDEN_RULES_FROM_CODE", raising=False)
+        bindings_root = _make_universal(tmp_path)
+        monkeypatch.setenv("BINDINGS_DIR", str(bindings_root))
+
+        _clear_cache()
+        from maintenance_worker.core.validator import _get_active_rules, _FORBIDDEN_RULES
+        result = _get_active_rules()
+        # Loader succeeded — returns the YAML-loaded rule, not the hardcoded list
+        assert isinstance(result, list)
+        assert len(result) > 0
+        assert result is not _FORBIDDEN_RULES
+
+    def test_env_var_unset_missing_bindings_raises(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Without env var + missing/invalid BINDINGS_DIR, _get_active_rules raises (fail-closed)."""
         monkeypatch.delenv("MW_FORBIDDEN_RULES_FROM_CODE", raising=False)
         monkeypatch.setenv("BINDINGS_DIR", str(tmp_path / "nonexistent"))
 
-        from maintenance_worker.core.validator import _get_active_rules, _FORBIDDEN_RULES
-        # Loader will fail (no bindings dir) → fallback to hardcoded. Result matches
-        # hardcoded content but comes via the fallback path. Confirm no exception.
-        result = _get_active_rules()
-        assert isinstance(result, list)
-        assert len(result) > 0
+        _clear_cache()
+        from maintenance_worker.core.validator import _get_active_rules
+        from maintenance_worker.core.forbidden_rules_loader import ConfigurationError
+
+        with pytest.raises((ConfigurationError, Exception)):
+            _get_active_rules()
