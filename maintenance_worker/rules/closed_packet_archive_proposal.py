@@ -367,15 +367,35 @@ def _classify_packet(
         )
     checks_passed += 1
 
-    # Check #6: Open PR check (STUBBED — gh CLI unavailable in dry-run context)
-    evidence["check_6_open_pr"] = "SKIPPED_SHELL_UNAVAILABLE"
-    evidence["check_6_note"] = "Deviation: gh pr list not executed; treated as PASS-with-warn"
-    logger.warning(
-        "closed_packet_archive_proposal: check #6 (open_pr_check) skipped for %s "
-        "— gh CLI not invoked in dry-run context",
-        packet_name,
-    )
-    checks_passed += 1  # Count as passed (conservative: if PR existed, packet was recently active)
+    # Check #6: Open PR check — fail closed per ARCHIVAL_RULES.md:70-72
+    # Three outcomes:
+    #   (a) gh unavailable / error / timeout → LOAD_BEARING (unverified, fail closed)
+    #   (b) gh ok AND PRs touch packet      → LOAD_BEARING (actively referenced)
+    #   (c) gh ok AND no PRs                → checks_passed += 1 (safe to proceed)
+    check_6_result = _open_pr_check(packet_name, repo_root)
+    evidence["check_6_open_pr"] = check_6_result["status"]
+    evidence["check_6_prs"] = check_6_result.get("prs", [])
+    if check_6_result["status"] == "UNVERIFIED_FAIL_CLOSED":
+        evidence["check_6_status"] = "UNVERIFIED_FAIL_CLOSED"
+        return Candidate(
+            task_id=spec.task_id,
+            path=packet,
+            verdict=VERDICT_LOAD_BEARING,
+            reason="Check #6 unverified — fail closed per ARCHIVAL_RULES.md:70-72",
+            evidence=evidence,
+        )
+    if check_6_result["status"] == "LOAD_BEARING_PR_FOUND":
+        evidence["check_6_status"] = "LOAD_BEARING_PR_FOUND"
+        return Candidate(
+            task_id=spec.task_id,
+            path=packet,
+            verdict=VERDICT_LOAD_BEARING,
+            reason=f"Check #6: Open PR(s) touch this packet: {check_6_result.get('prs', [])[:2]}",
+            evidence=evidence,
+        )
+    # status == "PASSED_NO_PRS"
+    evidence["check_6_status"] = "PASSED_NO_PRS"
+    checks_passed += 1
 
     # Check #7: Hook/launchd citation
     hook_ref = _hook_launchd_citation(packet_name, repo_root)
@@ -606,6 +626,85 @@ def _worktree_branch_check(packet_name: str) -> list[str]:
         return [b for b in branches if slug in b]
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
         return []
+
+
+def _open_pr_check(packet_name: str, repo_root: Path) -> dict:
+    """
+    Check #6: shell out to `gh pr list` to find open PRs touching this packet.
+
+    Returns dict with keys:
+      status: "UNVERIFIED_FAIL_CLOSED" | "LOAD_BEARING_PR_FOUND" | "PASSED_NO_PRS"
+      prs:    list of PR numbers/titles that touch the packet (may be empty)
+
+    Fail-closed semantics per ARCHIVAL_RULES.md:70-72:
+      - gh unavailable / non-zero exit / timeout → UNVERIFIED_FAIL_CLOSED
+      - gh ok AND any PR file list contains packet path → LOAD_BEARING_PR_FOUND
+      - gh ok AND no PRs touch packet → PASSED_NO_PRS
+    """
+    try:
+        result = subprocess.run(
+            [
+                "gh", "pr", "list",
+                "--state", "open",
+                "--json", "number,title,files",
+                "--limit", "100",
+            ],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
+        logger.warning(
+            "closed_packet_archive_proposal: check #6 gh unavailable for %s: %s — fail closed",
+            packet_name,
+            exc,
+        )
+        return {"status": "UNVERIFIED_FAIL_CLOSED", "prs": []}
+
+    if result.returncode != 0:
+        logger.warning(
+            "closed_packet_archive_proposal: check #6 gh pr list failed (rc=%d) for %s — fail closed",
+            result.returncode,
+            packet_name,
+        )
+        return {"status": "UNVERIFIED_FAIL_CLOSED", "prs": []}
+
+    # Parse JSON output
+    import json
+    try:
+        prs = json.loads(result.stdout)
+    except (json.JSONDecodeError, ValueError) as exc:
+        logger.warning(
+            "closed_packet_archive_proposal: check #6 gh output parse error for %s: %s — fail closed",
+            packet_name,
+            exc,
+        )
+        return {"status": "UNVERIFIED_FAIL_CLOSED", "prs": []}
+
+    if not isinstance(prs, list):
+        return {"status": "UNVERIFIED_FAIL_CLOSED", "prs": []}
+
+    # Check if any open PR touches files inside this packet
+    touching_prs: list[str] = []
+    for pr in prs:
+        files = pr.get("files", [])
+        pr_label = f"#{pr.get('number', '?')} {pr.get('title', '')}"
+        for f in files:
+            file_path = f.get("path", "") if isinstance(f, dict) else str(f)
+            if packet_name in file_path:
+                touching_prs.append(pr_label)
+                break
+
+    if touching_prs:
+        logger.info(
+            "closed_packet_archive_proposal: check #6 %s has open PRs: %s",
+            packet_name,
+            touching_prs,
+        )
+        return {"status": "LOAD_BEARING_PR_FOUND", "prs": touching_prs}
+
+    return {"status": "PASSED_NO_PRS", "prs": []}
 
 
 def _mock_diff(decision: Any) -> tuple[str, ...]:

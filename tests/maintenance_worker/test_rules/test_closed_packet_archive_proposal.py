@@ -24,6 +24,7 @@ from maintenance_worker.rules.closed_packet_archive_proposal import (
     VERDICT_LOAD_BEARING,
     enumerate,
     apply,
+    _open_pr_check,
 )
 from maintenance_worker.rules.parser import TaskCatalogEntry
 from maintenance_worker.types.candidates import Candidate
@@ -103,13 +104,16 @@ def test_stale_packet_classified_archivable(tmp_path: Path) -> None:
     ctx = _make_ctx(tmp_path)
     entry = _make_entry(ttl_days=60)
 
-    # Patch subprocess calls to return no references
+    # Patch subprocess calls to return no references; gh returns no PRs (check #6 passes)
     with patch(
         "maintenance_worker.rules.closed_packet_archive_proposal._code_reference_grep",
         return_value=[],
     ), patch(
         "maintenance_worker.rules.closed_packet_archive_proposal._worktree_branch_check",
         return_value=[],
+    ), patch(
+        "maintenance_worker.rules.closed_packet_archive_proposal._open_pr_check",
+        return_value={"status": "PASSED_NO_PRS", "prs": []},
     ):
         results = enumerate(entry, ctx)
 
@@ -249,3 +253,180 @@ def test_apply_always_dry_run_with_mock_diff(tmp_path: Path) -> None:
     assert result.task_id == "closed_packet_archive_proposal"
     assert len(result.diff) > 0, "mock diff must contain at least one line"
     assert any("dry-run" in line or "git mv" in line for line in result.diff)
+
+
+# ---------------------------------------------------------------------------
+# Test 5 (M1): Check #6 fails closed when gh unavailable
+# ---------------------------------------------------------------------------
+
+
+def test_check_6_fails_closed_when_gh_unavailable(tmp_path: Path) -> None:
+    """
+    M1: When `gh pr list` is unavailable (FileNotFoundError) or returns non-zero,
+    check #6 must classify the packet LOAD_BEARING_DESPITE_AGE — not ARCHIVE_CANDIDATE.
+
+    The fail-closed direction ensures stale-but-PR'd packets never slip through.
+    """
+    ops_dir = tmp_path / "docs" / "operations"
+    ops_dir.mkdir(parents=True)
+    _make_stale_packet(ops_dir, "task_2025-04-01_stale_but_unverifiable", age_days=90)
+
+    ctx = _make_ctx(tmp_path)
+    entry = _make_entry(ttl_days=60)
+
+    # gh unavailable → FileNotFoundError
+    with patch(
+        "maintenance_worker.rules.closed_packet_archive_proposal._code_reference_grep",
+        return_value=[],
+    ), patch(
+        "maintenance_worker.rules.closed_packet_archive_proposal._worktree_branch_check",
+        return_value=[],
+    ), patch(
+        "maintenance_worker.rules.closed_packet_archive_proposal.subprocess.run",
+        side_effect=FileNotFoundError("gh not found"),
+    ):
+        results = enumerate(entry, ctx)
+
+    # Must be LOAD_BEARING, not ARCHIVE_CANDIDATE
+    target = next(
+        (c for c in results if c.path.name == "task_2025-04-01_stale_but_unverifiable"),
+        None,
+    )
+    assert target is not None, "Packet must appear in results"
+    assert target.verdict == VERDICT_LOAD_BEARING, (
+        f"Check #6 unavailable must produce LOAD_BEARING (fail closed); got {target.verdict!r}"
+    )
+    assert target.evidence.get("check_6_status") == "UNVERIFIED_FAIL_CLOSED", (
+        f"Evidence must record UNVERIFIED_FAIL_CLOSED; got {target.evidence.get('check_6_status')!r}"
+    )
+
+
+def test_check_6_fails_closed_when_gh_returns_nonzero(tmp_path: Path) -> None:
+    """
+    M1: When `gh pr list` exits non-zero (e.g. auth failure), check #6
+    must classify the packet LOAD_BEARING_DESPITE_AGE (fail closed).
+    """
+    ops_dir = tmp_path / "docs" / "operations"
+    ops_dir.mkdir(parents=True)
+    _make_stale_packet(ops_dir, "task_2025-04-02_stale_gh_error", age_days=90)
+
+    ctx = _make_ctx(tmp_path)
+    entry = _make_entry(ttl_days=60)
+
+    from unittest.mock import MagicMock
+    mock_proc = MagicMock()
+    mock_proc.returncode = 1
+    mock_proc.stdout = ""
+    mock_proc.stderr = "error: authentication required"
+
+    with patch(
+        "maintenance_worker.rules.closed_packet_archive_proposal._code_reference_grep",
+        return_value=[],
+    ), patch(
+        "maintenance_worker.rules.closed_packet_archive_proposal._worktree_branch_check",
+        return_value=[],
+    ), patch(
+        "maintenance_worker.rules.closed_packet_archive_proposal.subprocess.run",
+        return_value=mock_proc,
+    ):
+        results = enumerate(entry, ctx)
+
+    target = next(
+        (c for c in results if c.path.name == "task_2025-04-02_stale_gh_error"),
+        None,
+    )
+    assert target is not None
+    assert target.verdict == VERDICT_LOAD_BEARING, (
+        f"gh non-zero exit must produce LOAD_BEARING; got {target.verdict!r}"
+    )
+    assert target.evidence.get("check_6_status") == "UNVERIFIED_FAIL_CLOSED"
+
+
+def test_check_6_load_bearing_when_pr_touches_packet(tmp_path: Path) -> None:
+    """
+    M1: When gh returns open PRs that touch the packet path, check #6 must
+    classify the packet LOAD_BEARING_DESPITE_AGE (actively referenced).
+    """
+    ops_dir = tmp_path / "docs" / "operations"
+    ops_dir.mkdir(parents=True)
+    packet_name = "task_2025-04-03_stale_with_pr"
+    _make_stale_packet(ops_dir, packet_name, age_days=90)
+
+    ctx = _make_ctx(tmp_path)
+    entry = _make_entry(ttl_days=60)
+
+    import json
+    from unittest.mock import MagicMock
+    pr_json = json.dumps([
+        {
+            "number": 42,
+            "title": "Update old packet",
+            "files": [{"path": f"docs/operations/{packet_name}/PLAN.md"}],
+        }
+    ])
+    mock_proc = MagicMock()
+    mock_proc.returncode = 0
+    mock_proc.stdout = pr_json
+
+    with patch(
+        "maintenance_worker.rules.closed_packet_archive_proposal._code_reference_grep",
+        return_value=[],
+    ), patch(
+        "maintenance_worker.rules.closed_packet_archive_proposal._worktree_branch_check",
+        return_value=[],
+    ), patch(
+        "maintenance_worker.rules.closed_packet_archive_proposal.subprocess.run",
+        return_value=mock_proc,
+    ):
+        results = enumerate(entry, ctx)
+
+    target = next(
+        (c for c in results if c.path.name == packet_name),
+        None,
+    )
+    assert target is not None
+    assert target.verdict == VERDICT_LOAD_BEARING, (
+        f"PR touching packet must produce LOAD_BEARING; got {target.verdict!r}"
+    )
+    assert target.evidence.get("check_6_status") == "LOAD_BEARING_PR_FOUND"
+
+
+def test_check_6_passes_when_gh_ok_no_prs(tmp_path: Path) -> None:
+    """
+    M1: When gh runs successfully and finds no PRs touching the packet,
+    check #6 passes and the packet may reach ARCHIVE_CANDIDATE.
+    """
+    ops_dir = tmp_path / "docs" / "operations"
+    ops_dir.mkdir(parents=True)
+    _make_stale_packet(ops_dir, "task_2025-04-04_stale_clean", age_days=90)
+
+    ctx = _make_ctx(tmp_path)
+    entry = _make_entry(ttl_days=60)
+
+    import json
+    from unittest.mock import MagicMock
+    mock_proc = MagicMock()
+    mock_proc.returncode = 0
+    mock_proc.stdout = json.dumps([])  # No open PRs
+
+    with patch(
+        "maintenance_worker.rules.closed_packet_archive_proposal._code_reference_grep",
+        return_value=[],
+    ), patch(
+        "maintenance_worker.rules.closed_packet_archive_proposal._worktree_branch_check",
+        return_value=[],
+    ), patch(
+        "maintenance_worker.rules.closed_packet_archive_proposal.subprocess.run",
+        return_value=mock_proc,
+    ):
+        results = enumerate(entry, ctx)
+
+    target = next(
+        (c for c in results if c.path.name == "task_2025-04-04_stale_clean"),
+        None,
+    )
+    assert target is not None
+    assert target.verdict == VERDICT_ARCHIVABLE, (
+        f"gh ok + no PRs must allow ARCHIVE_CANDIDATE; got {target.verdict!r}"
+    )
+    assert target.evidence.get("check_6_status") == "PASSED_NO_PRS"
