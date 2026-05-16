@@ -50,8 +50,8 @@ the workflow look complete.
 
 Discrete `task_*` packet folders are agent-closeable by default once their
 work log, report, or committed code proves the task is complete or superseded.
-The closing agent must move the packet body to `docs/archives/packets/`, add or
-update the `docs/archive_registry.md` closeout entry, remove active pointers,
+The closing agent must move the packet body to `docs/operations/archive/<YYYY>-Q<N>/`,
+update `docs/operations/archive/<YYYY>-Q<N>/INDEX.md`, remove active pointers,
 and promote any residual OPEN work into `docs/to-do-list/known_gaps.md` or a
 new admitted packet. Operator-only closeout is required only when the packet
 itself says `awaiting operator`, `operator-deferred`, `STAGED, NOT COMMITTED`,
@@ -69,9 +69,9 @@ the semantic task, one help, one friction, and one next topology delta or
 `.omx/context/` or invent `handoff` files in packet folders.
 
 Tracked packet evidence in this live router is limited to the current rows
-below. Closed packet evidence is archived under `docs/archives/packets/` and
-indexed in `docs/archive_registry.md`; do not use archived packet folders as
-active workflow defaults.
+below. Closed packet evidence is archived under `docs/operations/archive/<YYYY>-Q<N>/` and
+indexed in `docs/operations/archive/<YYYY>-Q<N>/INDEX.md`; do not use archived packet folders as
+active workflow defaults. Active archival rules: `ARCHIVAL_RULES.md`.
 
 ### Attached Package Inputs
 
@@ -230,10 +230,10 @@ make a surface default-read unless `current_state.md` routes it.
 | `task_2026-05-16_live_continuous_run_package/` | plan packet container | Follow-up package for proving stable continuous live operation after the first real live order milestone |
 | `task_2026-05-16_live_continuous_run_package/LIVE_CONTINUOUS_RUN_PACKAGE_PLAN.md` | topology planning packet | Plan and completion definition for `LIVE_CONTINUOUS_READY` vs `CONTROLLED_DEGRADED`, including code-plane, launchd, source-health, DB-lock, and live acceptance gates |
 | `task_2026-05-16_live_continuous_run_package/CRITIC_REVIEW.md` | packet review evidence | Critic attack and approval record for the live continuous-run package plan; not empirical live-ready evidence |
-Archived packet evidence (physically moved to `docs/archives/packets/`) is
-listed in `docs/archive_registry.md`; do not re-list those packets here. When
-a packet closes and is archived, remove its row from this registry and the
-archive_registry entry becomes its single source of historical truth.
+Archived packet evidence (physically moved to `docs/operations/archive/<YYYY>-Q<N>/`) is
+listed in `docs/operations/archive/<YYYY>-Q<N>/INDEX.md`; do not re-list those packets here.
+When a packet closes and is archived, create a stub at `docs/operations/<name>.archived`
+and add a row to the quarter INDEX. Active archival rules: see `ARCHIVAL_RULES.md`.
 
 ## Rules
 

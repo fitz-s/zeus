@@ -59,7 +59,8 @@ active work surfaces and current-fact companions.
 ## Closed packet archive
 
 Closed or superseded packet bodies from the 2026-05-02 cleanup were moved to
-`docs/archives/packets/` and indexed in `docs/archive_registry.md`.
+`docs/operations/archive/2026-Q2/` (see `docs/operations/archive/2026-Q2/INDEX.md`).
+Historical registry: `docs/archive_registry.md` (deprecated forwarding doc).
 
 ## Operations routing
 
