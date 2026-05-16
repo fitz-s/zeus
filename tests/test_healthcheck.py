@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 from scripts import healthcheck
 
 _ORIGINAL_LAUNCHD_CONTRACTS = healthcheck._launchd_contracts
+_ORIGINAL_SOURCE_HEALTH_STATUS = healthcheck._source_health_status
 
 
 @pytest.fixture(autouse=True)
@@ -49,6 +50,23 @@ def _mock_launchd_contracts(monkeypatch):
         healthcheck,
         "_launchd_contracts",
         lambda: {"ok": True, "launchagents_dir": "/tmp/LaunchAgents", "items": []},
+    )
+
+
+@pytest.fixture(autouse=True)
+def _mock_source_health_status(monkeypatch):
+    monkeypatch.setattr(
+        healthcheck,
+        "_source_health_status",
+        lambda: {
+            "ok": True,
+            "path": "/tmp/source_health.json",
+            "branch": "FRESH",
+            "issue": None,
+            "written_at_age_seconds": 1.0,
+            "writer_fresh": True,
+            "stale_sources": [],
+        },
     )
 
 
@@ -138,6 +156,43 @@ def _write_no_trade_artifact(path):
     )
     conn.commit()
     conn.close()
+
+
+def _write_source_health(path, *, written_at=None, stale_source=None):
+    now = datetime.now(timezone.utc)
+    payload = {
+        "written_at": written_at or now.isoformat(),
+        "sources": {},
+    }
+    source_budgets = {
+        "open_meteo_archive": 6 * 3600,
+        "wu_pws": 6 * 3600,
+        "hko": 36 * 3600,
+        "ogimet": 36 * 3600,
+        "ecmwf_open_data": 24 * 3600,
+        "noaa": 36 * 3600,
+        "tigge_mars": 24 * 3600,
+    }
+    for source, budget_seconds in source_budgets.items():
+        age_seconds = budget_seconds // 2
+        if source == stale_source:
+            age_seconds = budget_seconds + 60
+        last_success = (now - timedelta(seconds=age_seconds)).isoformat()
+        payload["sources"][source] = {
+            "last_success_at": last_success,
+            "last_failure_at": None,
+            "consecutive_failures": 0,
+            "degraded_since": None,
+            "latency_ms": 100,
+            "error": None,
+        }
+    path.write_text(json.dumps(payload))
+    return path
+
+
+def _write_control_plane(path, *, force_ignore_freshness):
+    path.write_text(json.dumps({"force_ignore_freshness": force_ignore_freshness}))
+    return path
 
 
 def _write_launchd_plist(
@@ -377,6 +432,57 @@ def test_launchd_contracts_reject_stale_loaded_contract_after_disk_fix(monkeypat
     assert "loaded_keepalive_not_true" in live_item["issues"]
 
 
+def test_source_health_status_requires_writer_and_sources_fresh(monkeypatch, tmp_path):
+    source_health_path = _write_source_health(tmp_path / "source_health.json")
+    monkeypatch.setattr(healthcheck, "_source_health_path", lambda: source_health_path)
+
+    result = _ORIGINAL_SOURCE_HEALTH_STATUS()
+
+    assert result["ok"] is True
+    assert result["branch"] == "FRESH"
+    assert result["writer_fresh"] is True
+    assert result["stale_sources"] == []
+
+
+def test_source_health_status_rejects_stale_writer_even_when_sources_fresh(monkeypatch, tmp_path):
+    old_written_at = (datetime.now(timezone.utc) - timedelta(minutes=11)).isoformat()
+    source_health_path = _write_source_health(tmp_path / "source_health.json", written_at=old_written_at)
+    monkeypatch.setattr(healthcheck, "_source_health_path", lambda: source_health_path)
+
+    result = _ORIGINAL_SOURCE_HEALTH_STATUS()
+
+    assert result["ok"] is False
+    assert result["branch"] == "FRESH"
+    assert result["writer_fresh"] is False
+    assert result["issue"] == "SOURCE_HEALTH_WRITER_STALE"
+
+
+def test_source_health_status_rejects_stale_required_source(monkeypatch, tmp_path):
+    source_health_path = _write_source_health(tmp_path / "source_health.json", stale_source="ecmwf_open_data")
+    monkeypatch.setattr(healthcheck, "_source_health_path", lambda: source_health_path)
+
+    result = _ORIGINAL_SOURCE_HEALTH_STATUS()
+
+    assert result["ok"] is False
+    assert result["branch"] == "STALE"
+    assert result["issue"] == "SOURCE_HEALTH_SOURCE_STALE"
+    assert result["stale_sources"] == ["ecmwf_open_data"]
+
+
+def test_source_health_status_rejects_operator_override_for_live_ready(monkeypatch, tmp_path):
+    source_health_path = _write_source_health(tmp_path / "source_health.json", stale_source="ecmwf_open_data")
+    _write_control_plane(tmp_path / "control_plane.json", force_ignore_freshness=["ecmwf_open_data"])
+    monkeypatch.setattr(healthcheck, "_source_health_path", lambda: source_health_path)
+
+    result = _ORIGINAL_SOURCE_HEALTH_STATUS()
+
+    assert result["ok"] is False
+    assert result["branch"] == "FRESH"
+    assert result["all_sources_fresh"] is False
+    assert result["operator_overrides"] == ["ecmwf_open_data"]
+    assert result["issue"] == "SOURCE_HEALTH_OPERATOR_OVERRIDE"
+
+
 def test_healthcheck_uses_mode_qualified_status_and_reports_healthy(monkeypatch, tmp_path):
     status_path = tmp_path / "status_summary-live.json"
     risk_path = tmp_path / "risk_state-live.db"
@@ -435,6 +541,7 @@ def test_healthcheck_uses_mode_qualified_status_and_reports_healthy(monkeypatch,
     assert result["riskguard_contract_valid"] is True
     assert result["code_plane_ok"] is True
     assert result["launchd_contract_ok"] is True
+    assert result["source_health_ok"] is True
     assert result["entries_blocked_reason"] == "risk_level=ORANGE"
     assert result["execution_summary"]["entry_rejected"] == 2
     assert result["strategy_summary"]["center_buy"]["open_positions"] == 1
@@ -535,6 +642,45 @@ def test_healthcheck_is_not_healthy_when_launchd_contract_drifts(monkeypatch, tm
 
     assert result["launchd_contract_ok"] is False
     assert result["launchd_contract_issue"] == "LIVE_LAUNCHD_CONTRACT_DRIFT"
+    assert result["healthy"] is False
+    assert healthcheck.exit_code_for(result) == 1
+
+
+def test_healthcheck_is_not_healthy_when_source_health_is_stale(monkeypatch, tmp_path):
+    status_path = tmp_path / "status_summary.json"
+    risk_path = tmp_path / "risk_state.db"
+    zeus_db_path = tmp_path / "zeus.db"
+    status_path.write_text(json.dumps(_status_payload()))
+    _write_risk_state(risk_path)
+    _write_no_trade_artifact(zeus_db_path)
+
+    monkeypatch.setenv("ZEUS_MODE", "live")
+    monkeypatch.setattr(healthcheck, "_status_path", lambda: status_path)
+    monkeypatch.setattr(healthcheck, "_risk_state_path", lambda: risk_path)
+    monkeypatch.setattr(healthcheck, "_zeus_db_path", lambda: zeus_db_path)
+    monkeypatch.setattr(
+        healthcheck,
+        "_source_health_status",
+        lambda: {
+            "ok": False,
+            "path": str(tmp_path / "source_health.json"),
+            "branch": "FRESH",
+            "issue": "SOURCE_HEALTH_WRITER_STALE",
+            "writer_fresh": False,
+            "stale_sources": [],
+        },
+    )
+
+    class _Result:
+        returncode = 0
+        stdout = "123\t0\tcom.zeus.live-trading\n"
+
+    monkeypatch.setattr(healthcheck.subprocess, "run", lambda *args, **kwargs: _Result())
+
+    result = healthcheck.check()
+
+    assert result["source_health_ok"] is False
+    assert result["source_health_issue"] == "SOURCE_HEALTH_WRITER_STALE"
     assert result["healthy"] is False
     assert healthcheck.exit_code_for(result) == 1
 

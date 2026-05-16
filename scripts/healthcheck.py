@@ -26,6 +26,7 @@ from src.state.decision_chain import query_no_trade_cases
 
 STATUS_STALE_SECONDS = 2 * 3600
 RISKGUARD_STALE_SECONDS = 5 * 60
+SOURCE_HEALTH_WRITER_STALE_SECONDS = 10 * 60
 STATUS_REQUIRED_KEYS = ("control", "runtime", "execution", "learning", "truth")
 STATUS_CONTROL_REQUIRED_KEYS = (
     "recommended_auto_commands",
@@ -58,6 +59,10 @@ def _risk_state_path() -> Path:
 
 def _zeus_db_path() -> Path:
     return state_path("zeus.db").parent / "zeus.db"
+
+
+def _source_health_path() -> Path:
+    return state_path("source_health.json")
 
 
 def _world_db_path() -> Path:
@@ -312,6 +317,74 @@ def _status_age_seconds(timestamp: str) -> float | None:
     return max(0.0, (datetime.now(timezone.utc) - ts).total_seconds())
 
 
+def _source_health_status() -> dict:
+    path = _source_health_path()
+    try:
+        from src.control.freshness_gate import evaluate_freshness
+
+        verdict = evaluate_freshness(state_dir=path.parent)
+    except Exception as exc:
+        return {
+            "ok": False,
+            "path": str(path),
+            "error": str(exc),
+            "issue": "SOURCE_HEALTH_UNAVAILABLE",
+        }
+
+    written_at_age = _status_age_seconds(verdict.written_at or "")
+    writer_fresh = (
+        written_at_age is not None
+        and written_at_age <= SOURCE_HEALTH_WRITER_STALE_SECONDS
+    )
+    source_statuses = [
+        {
+            "source": status.source,
+            "fresh": status.fresh,
+            "stale": status.stale,
+            "last_success_at": status.last_success_at,
+            "age_seconds": None if status.age_seconds is None else round(status.age_seconds, 1),
+            "budget_seconds": status.budget_seconds,
+            "degradation_flags": list(status.degradation_flags),
+        }
+        for status in verdict.source_statuses
+    ]
+    all_sources_fresh = bool(source_statuses) and all(status["fresh"] for status in source_statuses)
+    ok = (
+        verdict.branch == "FRESH"
+        and writer_fresh
+        and all_sources_fresh
+        and not verdict.operator_overrides
+    )
+    issue = None
+    if verdict.branch == "ABSENT":
+        issue = "SOURCE_HEALTH_ABSENT"
+    elif verdict.branch == "STALE":
+        issue = "SOURCE_HEALTH_SOURCE_STALE"
+    elif not writer_fresh:
+        issue = "SOURCE_HEALTH_WRITER_STALE"
+    elif verdict.operator_overrides:
+        issue = "SOURCE_HEALTH_OPERATOR_OVERRIDE"
+    elif not all_sources_fresh:
+        issue = "SOURCE_HEALTH_SOURCE_NOT_FRESH"
+    return {
+        "ok": ok,
+        "path": str(path),
+        "branch": verdict.branch,
+        "issue": issue,
+        "written_at": verdict.written_at,
+        "written_at_age_seconds": None if written_at_age is None else round(written_at_age, 1),
+        "writer_fresh": writer_fresh,
+        "writer_budget_seconds": SOURCE_HEALTH_WRITER_STALE_SECONDS,
+        "all_sources_fresh": all_sources_fresh,
+        "stale_sources": list(verdict.stale_sources),
+        "day0_capture_disabled": bool(verdict.day0_capture_disabled),
+        "ensemble_disabled": bool(verdict.ensemble_disabled),
+        "degraded_data": bool(verdict.degraded_data),
+        "operator_overrides": list(verdict.operator_overrides),
+        "source_statuses": source_statuses,
+    }
+
+
 def _parse_launchctl_pid(output: str) -> int:
     """Parse PID from launchctl output across macOS formats."""
     text = (output or "").strip()
@@ -382,6 +455,10 @@ def check() -> dict:
     result["launchd_contract_ok"] = bool(result["launchd_contracts"].get("ok"))
     if not result["launchd_contract_ok"]:
         result["launchd_contract_issue"] = "LIVE_LAUNCHD_CONTRACT_DRIFT"
+    result["source_health"] = _source_health_status()
+    result["source_health_ok"] = bool(result["source_health"].get("ok"))
+    if not result["source_health_ok"]:
+        result["source_health_issue"] = result["source_health"].get("issue") or "LIVE_SOURCE_HEALTH_STALE"
 
     # Check daemon PID
     try:
@@ -577,6 +654,7 @@ def check() -> dict:
         and bool(result.get("assumptions_valid"))
         and bool(result.get("code_plane_ok"))
         and bool(result.get("launchd_contract_ok"))
+        and bool(result.get("source_health_ok"))
         and not bool(result.get("cycle_failed"))
         and result.get("infrastructure_level") != "RED"
     )
