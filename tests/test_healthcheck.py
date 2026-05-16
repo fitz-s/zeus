@@ -1,6 +1,6 @@
 # Created: 2026-04-30
-# Last reused/audited: 2026-04-30
-# Authority basis: first-principles ZEUS_MODE cleanup 2026-04-30; healthcheck live-only runtime contract.
+# Last reused/audited: 2026-05-16
+# Authority basis: first-principles ZEUS_MODE cleanup 2026-04-30; healthcheck live-only runtime contract; docs/operations/task_2026-05-16_live_continuous_run_package/LIVE_CONTINUOUS_RUN_PACKAGE_PLAN.md Phase C.
 from __future__ import annotations
 import pytest
 
@@ -18,6 +18,25 @@ def _mock_run_validation(monkeypatch):
     monkeypatch.setattr(
         "scripts.validate_assumptions.run_validation",
         lambda: {"valid": True, "mismatches": []},
+    )
+
+
+@pytest.fixture(autouse=True)
+def _mock_code_plane_identity(monkeypatch):
+    monkeypatch.setattr(
+        healthcheck,
+        "_code_plane_identity",
+        lambda: {
+            "status": "ok",
+            "repo": "/tmp/zeus",
+            "head": "expected-commit",
+            "branch": "main",
+            "dirty": False,
+            "expected_ref": "origin/main",
+            "expected_commit": "expected-commit",
+            "expected_error": None,
+            "matches_expected": True,
+        },
     )
 
 
@@ -165,6 +184,7 @@ def test_healthcheck_uses_mode_qualified_status_and_reports_healthy(monkeypatch,
     assert result["status_contract_valid"] is True
     assert result["riskguard_fresh"] is True
     assert result["riskguard_contract_valid"] is True
+    assert result["code_plane_ok"] is True
     assert result["entries_blocked_reason"] == "risk_level=ORANGE"
     assert result["execution_summary"]["entry_rejected"] == 2
     assert result["strategy_summary"]["center_buy"]["open_positions"] == 1
@@ -183,6 +203,48 @@ def test_healthcheck_uses_mode_qualified_status_and_reports_healthy(monkeypatch,
     assert result["recent_no_trade_stage_counts"]["EDGE_INSUFFICIENT"] == 1
     assert result["healthy"] is True
     assert healthcheck.exit_code_for(result) == 0
+
+
+def test_healthcheck_is_not_healthy_when_code_plane_drifts(monkeypatch, tmp_path):
+    status_path = tmp_path / "status_summary.json"
+    risk_path = tmp_path / "risk_state.db"
+    zeus_db_path = tmp_path / "zeus.db"
+    status_path.write_text(json.dumps(_status_payload()))
+    _write_risk_state(risk_path)
+    _write_no_trade_artifact(zeus_db_path)
+
+    monkeypatch.setenv("ZEUS_MODE", "live")
+    monkeypatch.setattr(healthcheck, "_status_path", lambda: status_path)
+    monkeypatch.setattr(healthcheck, "_risk_state_path", lambda: risk_path)
+    monkeypatch.setattr(healthcheck, "_zeus_db_path", lambda: zeus_db_path)
+    monkeypatch.setattr(
+        healthcheck,
+        "_code_plane_identity",
+        lambda: {
+            "status": "ok",
+            "repo": "/tmp/zeus",
+            "head": "running-commit",
+            "branch": "deploy/live",
+            "dirty": True,
+            "expected_ref": "origin/main",
+            "expected_commit": "main-commit",
+            "expected_error": None,
+            "matches_expected": False,
+        },
+    )
+
+    class _Result:
+        returncode = 0
+        stdout = "123\t0\tcom.zeus.live-trading\n"
+
+    monkeypatch.setattr(healthcheck.subprocess, "run", lambda *args, **kwargs: _Result())
+
+    result = healthcheck.check()
+
+    assert result["code_plane_ok"] is False
+    assert result["code_plane_issue"] == "LIVE_CODE_PLANE_DRIFT"
+    assert result["healthy"] is False
+    assert healthcheck.exit_code_for(result) == 1
 
 
 def test_healthcheck_parses_launchctl_kv_output(monkeypatch, tmp_path):

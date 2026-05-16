@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-# Lifecycle: created=2026-05-11; last_reviewed=2026-05-15; last_reused=2026-05-15
+# Lifecycle: created=2026-05-11; last_reviewed=2026-05-16; last_reused=2026-05-16
 # Purpose: One-shot live health signal for daemon, forecast-live owner, riskguard, status summary, and entry capability.
 # Reuse: Run when live process ownership, forecast-live heartbeat semantics, or operator health alerts change.
 # Created: 2026-05-11
-# Last reused/audited: 2026-05-15
-# Authority basis: docs/operations/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md
+# Last reused/audited: 2026-05-16
+# Authority basis: docs/operations/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md; docs/operations/task_2026-05-16_live_continuous_run_package/LIVE_CONTINUOUS_RUN_PACKAGE_PLAN.md Phase C
 """One-shot live health probe.
 
 Reports a single JSON line per invocation summarizing:
@@ -28,6 +28,7 @@ ROOT = "/Users/leofitz/.openclaw/workspace-venus/zeus"
 SNAPSHOT_FILE = "/tmp/zeus_health_snapshot.json"
 FORECAST_LIVE_HEARTBEAT = "state/forecast-live-heartbeat.json"
 FORECAST_LIVE_STALE_SECONDS = 300
+DEFAULT_EXPECTED_REF = "origin/main"
 
 def _age(path):
     if not os.path.exists(path): return None
@@ -91,8 +92,62 @@ def _process_liveness():
         "riskguard": _alive("src.riskguard"),
     }
 
+def _git_text(root, args):
+    try:
+        result = subprocess.run(
+            ["git", "-C", root, *args],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except Exception as exc:
+        return None, str(exc)
+    text = result.stdout.strip()
+    if result.returncode != 0:
+        return None, (result.stderr or text or f"git exited {result.returncode}").strip()
+    return text, None
+
+def _git_runtime_identity(root=ROOT):
+    head, head_error = _git_text(root, ["rev-parse", "HEAD"])
+    if head_error:
+        return {
+            "status": "git_unavailable",
+            "repo": root,
+            "error": head_error,
+            "expected_ref": os.environ.get("ZEUS_LIVE_EXPECTED_REF", DEFAULT_EXPECTED_REF),
+            "expected_commit": os.environ.get("ZEUS_LIVE_EXPECTED_COMMIT", "").strip(),
+            "matches_expected": False,
+            "dirty": None,
+        }
+    branch, _ = _git_text(root, ["rev-parse", "--abbrev-ref", "HEAD"])
+    status_text, status_error = _git_text(root, ["status", "--porcelain"])
+    dirty = None if status_error else bool(status_text)
+    expected_ref = os.environ.get("ZEUS_LIVE_EXPECTED_REF", DEFAULT_EXPECTED_REF).strip()
+    expected_commit = os.environ.get("ZEUS_LIVE_EXPECTED_COMMIT", "").strip()
+    expected_error = None
+    if not expected_commit and expected_ref:
+        expected_commit, expected_error = _git_text(root, ["rev-parse", expected_ref])
+    return {
+        "status": "ok" if expected_commit and dirty is not None else "incomplete",
+        "repo": root,
+        "head": head,
+        "branch": branch,
+        "dirty": dirty,
+        "expected_ref": expected_ref,
+        "expected_commit": expected_commit,
+        "expected_error": expected_error,
+        "matches_expected": bool(head and expected_commit and head == expected_commit),
+    }
+
 def _classify_alerts(report, ss_age):
     alerts = []
+    code_plane = report.get("code_plane", {})
+    if (
+        code_plane.get("status") != "ok"
+        or code_plane.get("dirty") is not False
+        or code_plane.get("matches_expected") is not True
+    ):
+        alerts.append("LIVE_CODE_PLANE_DRIFT")
     if report["hb"].get("age_s") is None or report["hb"]["age_s"] > 90:
         alerts.append(f"hb_stale={report['hb'].get('age_s')}s")
     if not report["procs"]["daemon"]:
@@ -133,6 +188,7 @@ def main():
 
     # Process liveness
     report["procs"] = _process_liveness()
+    report["code_plane"] = _git_runtime_identity(ROOT)
 
     # Status summary
     ss_path = os.path.join(ROOT, "state/status_summary.json")
@@ -205,6 +261,9 @@ def main():
         f"daemon={len(report['procs']['daemon'])} "
         f"forecast_live={len(report['procs']['forecast_live'])} "
         f"legacy_ingest={len(report['procs']['legacy_ingest'])} "
+        f"commit={report.get('code_plane',{}).get('head','?')} "
+        f"expected={report.get('code_plane',{}).get('expected_commit','?')} "
+        f"dirty={report.get('code_plane',{}).get('dirty','?')} "
         f"risk={report.get('cycle',{}).get('risk_level','?')} "
         f"ws={report.get('cycle',{}).get('ws_subscription','?')} "
         f"funnel={report.get('funnel',{}).get('evaluated','?')}/{report.get('funnel',{}).get('selected','?')}/{report.get('funnel',{}).get('filled','?')} "

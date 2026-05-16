@@ -1,6 +1,6 @@
 # Created: 2026-03-26
-# Last reused or audited: 2026-05-15
-# Authority basis: docs/operations/task_2026-05-14_k1_followups/PLAN.md §4.5 (K1 broken-script remediation)
+# Last reused or audited: 2026-05-16
+# Authority basis: docs/operations/task_2026-05-14_k1_followups/PLAN.md §4.5 (K1 broken-script remediation); docs/operations/task_2026-05-16_live_continuous_run_package/LIVE_CONTINUOUS_RUN_PACKAGE_PLAN.md Phase C
 """Zeus health check for Venus/OpenClaw monitoring.
 
 Reads mode-qualified state written by the running daemon.
@@ -76,6 +76,29 @@ def _riskguard_label() -> str:
     return "com.zeus.riskguard"
 
 
+def _code_plane_identity() -> dict:
+    try:
+        from scripts.live_health_probe import _git_runtime_identity
+
+        return _git_runtime_identity(str(PROJECT_ROOT))
+    except Exception as exc:
+        return {
+            "status": "git_unavailable",
+            "repo": str(PROJECT_ROOT),
+            "error": str(exc),
+            "dirty": None,
+            "matches_expected": False,
+        }
+
+
+def _code_plane_is_ready(identity: dict) -> bool:
+    return (
+        identity.get("status") == "ok"
+        and identity.get("dirty") is False
+        and identity.get("matches_expected") is True
+    )
+
+
 def _status_age_seconds(timestamp: str) -> float | None:
     if not timestamp:
         return None
@@ -148,6 +171,10 @@ def check() -> dict:
         "launchd_label": _launchd_label(),
         "riskguard_label": _riskguard_label(),
     }
+    result["code_plane"] = _code_plane_identity()
+    result["code_plane_ok"] = _code_plane_is_ready(result["code_plane"])
+    if not result["code_plane_ok"]:
+        result["code_plane_issue"] = "LIVE_CODE_PLANE_DRIFT"
 
     # Check daemon PID
     try:
@@ -341,6 +368,7 @@ def check() -> dict:
         and bool(result.get("riskguard_fresh"))
         and bool(result.get("riskguard_contract_valid"))
         and bool(result.get("assumptions_valid"))
+        and bool(result.get("code_plane_ok"))
         and not bool(result.get("cycle_failed"))
         and result.get("infrastructure_level") != "RED"
     )
