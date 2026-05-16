@@ -1,7 +1,7 @@
 # Current Data State
 
-Status: active current-fact surface
-Last audited: 2026-04-28 (HIGH `physical_quantity` migration + LOW settlements backfill)
+Status: active current-fact surface — partially stale; K1 split row (point 1) superseded
+Last audited: 2026-04-28 (HIGH `physical_quantity` migration + LOW settlements backfill); K1 split addendum 2026-05-16
 Max staleness: 14 days for data/backfill/schema planning
 Evidence packets:
   - `docs/operations/task_2026-04-23_data_readiness_remediation/` (HIGH baseline, P-E reconstruction)
@@ -21,10 +21,22 @@ law, read `architecture/data_rebuild_topology.yaml`,
 `architecture/invariants.yaml`, and
 `docs/authority/zeus_current_architecture.md`.
 
-## Current Conclusions (post-2026-04-23 workstream)
+## Current Conclusions (post-2026-04-23 workstream; K1 split addendum 2026-05-16)
+
+**K1 DB split addendum (2026-05-11 / PR #114):** Zeus now operates two canonical
+SQLite databases. `WORLD_CLASS` tables (markets, positions, lifecycle) live in
+`state/zeus-world.db`; `FORECAST_CLASS` tables (observations, settlements,
+calibration_pairs_v2, ensemble_snapshots_v2, source_run, market_events_v2) live in
+`state/zeus-forecasts.db`. Canonical ownership is machine-checked by
+`architecture/db_table_ownership.yaml` (loader: `src/state/table_registry.py`).
+The sanctioned cross-DB write path is `get_forecasts_connection_with_world()`
+(ATTACH+SAVEPOINT, enforced by INV-37). Points 1-3 below reflect pre-K1 state
+and are superseded by this addendum for routing and schema queries.
 
 1. `state/zeus-world.db` is the authoritative data DB for observations,
    forecasts, calibration, snapshots, and settlements.
+   **SUPERSEDED by K1 split**: FORECAST_CLASS tables now live in `zeus-forecasts.db`.
+   `zeus-world.db` retains WORLD_CLASS (markets/positions/lifecycle).
 2. `state/zeus_trades.db` is trades-focused DB truth.
 3. `state/zeus.db` is legacy and not the current canonical data store.
 4. **`settlements` is canonical-authority-grade as of 2026-04-28**: 1,609 rows total. INV-14 identity spine intact on every row (`temperature_metric`, `physical_quantity`, `observation_field`, `data_version`) + full `provenance_json`. Schema carries `settlements_authority_monotonic` + `settlements_non_null_metric` + `settlements_verified_insert/update_integrity` triggers.

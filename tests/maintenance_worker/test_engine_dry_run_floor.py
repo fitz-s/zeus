@@ -22,7 +22,9 @@ import pytest
 
 from maintenance_worker.core.engine import MaintenanceEngine
 from maintenance_worker.core.install_metadata import DryRunFloor, InstallMetadata
-from maintenance_worker.types.specs import EngineConfig, ProposalManifest, TaskSpec
+from maintenance_worker.rules.parser import TaskCatalogEntry
+from maintenance_worker.types.candidates import Candidate
+from maintenance_worker.types.specs import EngineConfig, TaskSpec, TickContext
 
 
 # ---------------------------------------------------------------------------
@@ -50,8 +52,38 @@ def _make_task(task_id: str, dry_run_floor_exempt: bool = False) -> TaskSpec:
     )
 
 
-def _make_proposal(task_id: str) -> ProposalManifest:
-    return ProposalManifest(task_id=task_id)
+def _make_entry(task_id: str, dry_run_floor_exempt: bool = False) -> TaskCatalogEntry:
+    spec = _make_task(task_id, dry_run_floor_exempt)
+    return TaskCatalogEntry(spec=spec, raw={"id": task_id, "schedule": "daily"})
+
+
+def _make_candidate(task_id: str, tmp_path: Path) -> Candidate:
+    return Candidate(
+        task_id=task_id,
+        path=tmp_path / "dummy",
+        verdict="TEST",
+        reason="floor gate test candidate",
+    )
+
+
+def _make_ctx(tmp_path: Path) -> TickContext:
+    """Return a minimal TickContext for direct _apply_decisions calls."""
+    config = EngineConfig(
+        repo_root=tmp_path,
+        state_dir=tmp_path / "state",
+        evidence_dir=tmp_path / "evidence",
+        task_catalog_path=tmp_path / "catalog.yaml",
+        safety_contract_path=tmp_path / "safety.yaml",
+        live_default=False,
+        scheduler="launchd",
+        notification_channel="discord",
+    )
+    return TickContext(
+        run_id="00000000-0000-4000-8000-000000000099",
+        started_at=datetime.now(tz=timezone.utc),
+        config=config,
+        invocation_mode="SCHEDULED",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -59,19 +91,21 @@ def _make_proposal(task_id: str) -> ProposalManifest:
 # ---------------------------------------------------------------------------
 
 
-def test_apply_decisions_floor_not_met_forces_dry_run() -> None:
+def test_apply_decisions_floor_not_met_forces_dry_run(tmp_path: Path) -> None:
     """
     F2 regression: install_metadata.first_run_at = 5 days ago, non-exempt task.
     _apply_decisions must return dry_run_only=True (floor not met).
     """
     engine = MaintenanceEngine()
     install_meta = _make_install_meta(days_ago=5)
-    task = _make_task("some_cleanup_task", dry_run_floor_exempt=False)
-    proposal = _make_proposal(task.task_id)
+    entry = _make_entry("some_cleanup_task", dry_run_floor_exempt=False)
+    candidate = _make_candidate(entry.spec.task_id, tmp_path)
+    ctx = _make_ctx(tmp_path)
 
     result = engine._apply_decisions(
-        task=task,
-        proposal=proposal,
+        entry=entry,
+        candidate=candidate,
+        ctx=ctx,
         force_dry_run=False,
         install_meta=install_meta,
     )
@@ -79,76 +113,79 @@ def test_apply_decisions_floor_not_met_forces_dry_run() -> None:
     assert result.dry_run_only is True, (
         "Floor not met (5 days < 30): _apply_decisions must force dry_run_only=True"
     )
-    assert result.task_id == task.task_id
+    assert result.task_id == entry.spec.task_id
 
 
-def test_apply_decisions_floor_met_allows_apply() -> None:
+def test_apply_decisions_floor_met_allows_apply(tmp_path: Path) -> None:
     """
     When install_metadata.first_run_at >= 30 days ago and task is not exempt,
     _apply_decisions does NOT force dry_run_only=True due to the floor.
-    (Still returns dry_run_only=True in P5.1 due to missing ack state, but
-    the floor gate itself is not the cause — confirmed by exempt task parity.)
+    (Falls through to dispatch; handler absent → dry_run_only=True via fallback.)
     """
     engine = MaintenanceEngine()
     install_meta = _make_install_meta(days_ago=35)
-    task = _make_task("some_cleanup_task", dry_run_floor_exempt=False)
-    proposal = _make_proposal(task.task_id)
+    entry = _make_entry("some_cleanup_task", dry_run_floor_exempt=False)
+    candidate = _make_candidate(entry.spec.task_id, tmp_path)
+    ctx = _make_ctx(tmp_path)
 
     result = engine._apply_decisions(
-        task=task,
-        proposal=proposal,
+        entry=entry,
+        candidate=candidate,
+        ctx=ctx,
         force_dry_run=False,
         install_meta=install_meta,
     )
 
-    # P5.1 stub still returns dry_run_only=True (no ack state yet), but
-    # floor gate passed — the result is not caused by the floor check.
-    assert result.task_id == task.task_id
-    # dry_run_only may be True (P5.1 stub) but must NOT raise or block.
+    # Floor gate passed; dispatch falls back to dry_run_only=True (no handler),
+    # but must NOT raise or block.
+    assert result.task_id == entry.spec.task_id
 
 
-def test_apply_decisions_exempt_task_bypasses_floor() -> None:
+def test_apply_decisions_exempt_task_bypasses_floor(tmp_path: Path) -> None:
     """
     A task with dry_run_floor_exempt=True bypasses the floor check
     even when first_run_at is 1 day ago.
     """
     engine = MaintenanceEngine()
     install_meta = _make_install_meta(days_ago=1)
-    task = _make_task("zero_byte_state_cleanup", dry_run_floor_exempt=True)
-    proposal = _make_proposal(task.task_id)
+    entry = _make_entry("zero_byte_state_cleanup", dry_run_floor_exempt=True)
+    candidate = _make_candidate(entry.spec.task_id, tmp_path)
+    ctx = _make_ctx(tmp_path)
 
     # Should not raise; floor gate is skipped for exempt tasks.
     result = engine._apply_decisions(
-        task=task,
-        proposal=proposal,
+        entry=entry,
+        candidate=candidate,
+        ctx=ctx,
         force_dry_run=False,
         install_meta=install_meta,
     )
-    assert result.task_id == task.task_id
+    assert result.task_id == entry.spec.task_id
 
 
-def test_apply_decisions_no_install_meta_skips_floor() -> None:
+def test_apply_decisions_no_install_meta_skips_floor(tmp_path: Path) -> None:
     """
     When install_meta is None (absent — engine started before install script ran),
-    the floor gate is skipped and _apply_decisions falls through to the stub
-    dry_run_only=True path without raising.
+    the floor gate is skipped and _apply_decisions falls through without raising.
     """
     engine = MaintenanceEngine()
-    task = _make_task("some_cleanup_task")
-    proposal = _make_proposal(task.task_id)
+    entry = _make_entry("some_cleanup_task")
+    candidate = _make_candidate(entry.spec.task_id, tmp_path)
+    ctx = _make_ctx(tmp_path)
 
     result = engine._apply_decisions(
-        task=task,
-        proposal=proposal,
+        entry=entry,
+        candidate=candidate,
+        ctx=ctx,
         force_dry_run=False,
         install_meta=None,
     )
 
-    assert result.task_id == task.task_id
+    assert result.task_id == entry.spec.task_id
     assert result.dry_run_only is True
 
 
-def test_apply_decisions_force_dry_run_takes_priority() -> None:
+def test_apply_decisions_force_dry_run_takes_priority(tmp_path: Path) -> None:
     """
     force_dry_run=True (MANUAL_CLI) takes priority over the floor check:
     even with a fresh install_meta (1 day old) and non-exempt task,
@@ -156,15 +193,17 @@ def test_apply_decisions_force_dry_run_takes_priority() -> None:
     """
     engine = MaintenanceEngine()
     install_meta = _make_install_meta(days_ago=1)
-    task = _make_task("some_cleanup_task", dry_run_floor_exempt=False)
-    proposal = _make_proposal(task.task_id)
+    entry = _make_entry("some_cleanup_task", dry_run_floor_exempt=False)
+    candidate = _make_candidate(entry.spec.task_id, tmp_path)
+    ctx = _make_ctx(tmp_path)
 
     result = engine._apply_decisions(
-        task=task,
-        proposal=proposal,
+        entry=entry,
+        candidate=candidate,
+        ctx=ctx,
         force_dry_run=True,
         install_meta=install_meta,
     )
 
     assert result.dry_run_only is True
-    assert result.task_id == task.task_id
+    assert result.task_id == entry.spec.task_id

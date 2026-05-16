@@ -17,7 +17,7 @@ required_claim_fields:
   - invalidation_condition
 
 allowed_claim_statuses:
-  - replaced
+  - replaced             # claim is actively enforced by its proof_targets; code implements the v2 contract (v1 fallback may coexist but is not the primary path)
   - partial_replacement_candidate
   - intentionally_unpromoted
   - stale_superseded

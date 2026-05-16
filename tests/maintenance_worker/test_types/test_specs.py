@@ -131,6 +131,82 @@ class TestTickContext:
         with pytest.raises((AttributeError, TypeError)):
             ctx.run_id = "y"  # type: ignore[misc]
 
+    def test_dry_run_only_default_false(self) -> None:
+        """
+        MB2: TickContext.dry_run_only defaults to False.
+        Engine constructs TickContext with this default and never updates it;
+        the field is for test/external callers constructing ctx directly.
+        Verify the field exists and its default is correct.
+        """
+        cfg = _config()
+        ctx = TickContext(
+            run_id="mb2-test",
+            started_at=datetime.now(tz=timezone.utc),
+            config=cfg,
+            invocation_mode="SCHEDULED",
+        )
+        assert ctx.dry_run_only is False
+
+    def test_dry_run_only_true_honoured_by_handler(self) -> None:
+        """
+        MB2: When ctx.dry_run_only=True is set by a test/external caller,
+        zero_byte_state_cleanup.apply() must respect it and return dry_run_only=True
+        without deleting the file — confirming the TOP guard fires.
+
+        This is the external-caller path; engine-driven runs never set the field.
+        """
+        from pathlib import Path
+        from maintenance_worker.rules.zero_byte_state_cleanup import apply, VERDICT_CANDIDATE
+        from maintenance_worker.types.candidates import Candidate
+        import tempfile, os
+
+        cfg = EngineConfig(
+            repo_root=Path("/tmp"),
+            state_dir=Path("/tmp/state"),
+            evidence_dir=Path("/tmp/evidence"),
+            task_catalog_path=Path("/tmp/catalog.yaml"),
+            safety_contract_path=Path("/tmp/safety.yaml"),
+            live_default=True,
+            scheduler="launchd",
+            notification_channel="discord",
+        )
+        ctx_dry = TickContext(
+            run_id="mb2-dry",
+            started_at=datetime.now(tz=timezone.utc),
+            config=cfg,
+            invocation_mode="SCHEDULED",
+            dry_run_only=True,
+        )
+        ctx_live = TickContext(
+            run_id="mb2-live",
+            started_at=datetime.now(tz=timezone.utc),
+            config=cfg,
+            invocation_mode="SCHEDULED",
+            dry_run_only=False,
+        )
+
+        with tempfile.TemporaryDirectory() as td:
+            zero_file = Path(td) / "test_mb2.json"
+            zero_file.write_bytes(b"")
+
+            decision = Candidate(
+                task_id="zero_byte_state_cleanup",
+                path=zero_file,
+                verdict=VERDICT_CANDIDATE,
+                reason="test",
+                evidence={},
+            )
+
+            # With dry_run_only=True: TOP guard fires, file preserved
+            result_dry = apply(decision, ctx_dry)
+            assert result_dry.dry_run_only is True
+            assert zero_file.exists(), "dry_run_only=True must not delete the file"
+
+            # With dry_run_only=False: live deletion proceeds
+            result_live = apply(decision, ctx_live)
+            assert result_live.dry_run_only is False
+            assert not zero_file.exists(), "dry_run_only=False must delete the file"
+
 
 # ------------------------------------------------------------------
 # ProposalManifest

@@ -75,6 +75,10 @@ types exist:
 Shoulder bins are not symmetric bounded ranges. Do not infer bin semantics from
 label punctuation or continuous-interval intuition.
 
+Settlement discovery and canonical DB write: `src/execution/harvester.py`. Post-2026-02-21,
+Polymarket uses the internal automatic resolver (`0x69c47De9D4D3Dad79590d61b9e05918E03775f24`)
+instead of UMA OO V2; harvester reads settled events via the Gamma API. Authority: `architecture/settlement_dual_source_truth_2026_05_07.yaml`.
+
 **Key file**: `src/contracts/settlement_semantics.py`
 
 ### Risk levels
@@ -199,7 +203,7 @@ parallel session merged 9 commits into `plan-pre5` without enough conflict
 surface inspection; 6 drift items resulted, including 815k mislabeled
 production rows. The antibody is conflict-first escalation, not making every
 clean merge pay a critic tax. (Evidence archived at
-`docs/archives/packets/task_2026-04-28_contamination_remediation/`.)
+`docs/archives/packets/task_2026-04-28_contamination_remediation/` — Batch 3 local-only cold storage.)
 
 ### Commit & PR protocol
 

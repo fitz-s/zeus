@@ -132,16 +132,17 @@ rebuilt_row_contract:
       provenance_required: true
       required_fields: [authority, provenance_metadata, source, target_date, value]
       producer_contract: src/types/observation_atom.py
-    ensemble_snapshots:
+    ensemble_snapshots_v2:
       authority_required: true
       provenance_required: true
+      # K1 split (2026-05-11 / PR #114): canonical snapshot table is
+      # ensemble_snapshots_v2 in zeus-forecasts.db. Legacy ensemble_snapshots
+      # remains in zeus-world.db but is not the active rebuild target. Rebuild
+      # operators must write to ensemble_snapshots_v2.
       # Slice P2-fix6 (post-review MINOR #7 from code-reviewer, 2026-04-26):
-      # bias_corrected was added to the ensemble_snapshots schema by slice
-      # P2-B1 but not registered here. Replay/rebuild operators need to
-      # know the column is canonical so they preserve it through any
-      # rebuild operation. NOT-NULL with default 0; takes 1 (true) when
-      # _store_snapshot_p_raw is called with bias_corrected=True.
-      required_fields: [model_version, data_version, issue_time, available_at, members_json, bias_corrected]
+      # bias_corrected was added to the schema. NOT-NULL with default 0; takes 1
+      # (true) when _store_snapshot_p_raw is called with bias_corrected=True.
+      required_fields: [model_version, data_version, issue_time, available_at, members_json, bias_corrected, temperature_metric]
       producer_script: scripts/ingest_grib_to_snapshots.py
       producer_status: pending_task_53_audited_grib_to_snapshots
     settlements:

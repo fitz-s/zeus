@@ -137,6 +137,9 @@ Detailed path table at `docs/review/review_scope_map.md`. Compressed map:
 - `src/riskguard/**`, `src/control/**`, `src/supervisor_api/**`
 - `src/main.py`, `src/engine/{cycle_runner,evaluator,monitor_refresh}.py`
 - `migrations/**`, `architecture/2026_04_02_architecture_kernel.sql`
+- `maintenance_worker/core/{validator,apply_publisher}.py` — forbidden-path enforcement and real-apply publisher; fail-closed safety contracts
+- `scripts/topology_v_next/{admission_engine,hard_safety_kernel}.py` — topology v-next admission gate and hard safety kernel; changes here affect all topology-gated routing
+- `bindings/zeus/safety_overrides.yaml` — loaded by `maintenance_worker/core/validator.py`; defines the forbidden-rule set at runtime
 
 **Tier 1 — Data / probability / persistence correctness**
 - `src/calibration/**` — Platt fitting, manager, replay

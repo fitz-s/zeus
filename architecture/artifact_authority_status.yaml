@@ -1,0 +1,147 @@
+# architecture/artifact_authority_status.yaml
+# Created: 2026-05-16
+# Last reused or audited: 2026-05-16
+# Authority basis:
+#   UNIVERSAL_TOPOLOGY_DESIGN.md §13 (Closed-Artifact Authority Distinction)
+#   ZEUS_BINDING_LAYER.md §8 (Artifact Authority Status Registry)
+#
+# Schema deviation note (for WAVE 1.9 opus critic):
+#   The WAVE 1 executor brief listed status values: ACTIVE_LAW|DRAFT|ARCHIVED|CURRENT_HISTORICAL
+#   The design docs (UNIVERSAL_TOPOLOGY_DESIGN §13 + ZEUS_BINDING_LAYER §8) specify:
+#     CURRENT_LOAD_BEARING | CURRENT_HISTORICAL | STALE_REWRITE_NEEDED | DEMOTE | QUARANTINE | ARCHIVED
+#   Per brief's own instruction ("Read those sections first for exact schema"), the
+#   canonical 6-value enum from the design docs is used here. Code in archival_check_0.py
+#   uses ARCHIVED + CURRENT_HISTORICAL which aligns with design enum.
+#   Brief's ACTIVE_LAW is closest to CURRENT_LOAD_BEARING; DRAFT has no design-doc equivalent.
+#
+# cross-repo reference note:
+#   ~/.openclaw/CLAUDE.md (project root) is outside this git tree. It is registered here
+#   with literal path and a comment. Zeus-repo tooling should treat this as advisory only
+#   (file-existence check will fail in CI if path is not present). Open question for 1.9 critic.
+#
+# Fields:
+#   path: file or directory path (relative to zeus repo root, or absolute for cross-repo)
+#   status: CURRENT_LOAD_BEARING | CURRENT_HISTORICAL | STALE_REWRITE_NEEDED | DEMOTE | QUARANTINE | ARCHIVED
+#   last_confirmed: YYYY-MM-DD of last human or automated verification
+#   confirmation_ttl_days: advisory fires on next admission if stale beyond this
+#   owner: responsible party (default: fitz)
+#   archival_ok: whether archival tooling may archive this artifact (default: false)
+
+schema_version: 1
+metadata:
+  created: "2026-05-16"
+  owner_packet: "doc-alignment-2026-05-16 WAVE 1"
+  purpose: >
+    Per-artifact authority status registry. Separates lifecycle status (open/closed)
+    from authority status (still load-bearing or not). Feeds archival_check_0.py
+    Check #0 logic and admission advisory for CLOSED_PACKET_STILL_LOAD_BEARING.
+
+entries:
+  # ── 5 SCAFFOLD docs from PR #119 (runtime improvement engineering package) ──
+
+  - path: docs/operations/task_2026-05-15_runtime_improvement_engineering_package/01_topology_v_next/UNIVERSAL_TOPOLOGY_DESIGN.md
+    status: CURRENT_LOAD_BEARING
+    last_confirmed: "2026-05-16"
+    confirmation_ttl_days: 30
+    owner: fitz
+    archival_ok: false
+    reason: >
+      Design authority for topology_v_next shadow system. Governs admission_engine.py
+      logic, profile loading, and binding layer contract.
+
+  - path: docs/operations/task_2026-05-15_runtime_improvement_engineering_package/01_topology_v_next/ZEUS_BINDING_LAYER.md
+    status: CURRENT_LOAD_BEARING
+    last_confirmed: "2026-05-16"
+    confirmation_ttl_days: 30
+    owner: fitz
+    archival_ok: false
+    reason: >
+      Zeus-specific binding for topology_v_next. Defines safety_overrides.yaml schema,
+      artifact_authority_status registry (§8), and cohort definitions.
+
+  - path: docs/operations/task_2026-05-15_runtime_improvement_engineering_package/02_daily_maintenance_agent/DESIGN.md
+    status: CURRENT_LOAD_BEARING
+    last_confirmed: "2026-05-16"
+    confirmation_ttl_days: 30
+    owner: fitz
+    archival_ok: false
+    reason: >
+      Architecture authority for maintenance_worker. Module structure, engine flow,
+      and install contract derive from this document.
+
+  - path: docs/operations/task_2026-05-15_runtime_improvement_engineering_package/02_daily_maintenance_agent/SAFETY_CONTRACT.md
+    status: CURRENT_LOAD_BEARING
+    last_confirmed: "2026-05-16"
+    confirmation_ttl_days: 30
+    owner: fitz
+    archival_ok: false
+    reason: >
+      Validator semantics, forbidden target groups, and Path A/B invariants for
+      maintenance_worker. Core safety enforcement depends on this.
+
+  - path: docs/operations/task_2026-05-15_runtime_improvement_engineering_package/02_daily_maintenance_agent/TASK_CATALOG.yaml
+    status: CURRENT_LOAD_BEARING
+    last_confirmed: "2026-05-16"
+    confirmation_ttl_days: 30
+    owner: fitz
+    archival_ok: false
+    reason: >
+      Enumerates all 9 task types and their schedules. TaskRegistry.from_catalog()
+      reads this file; engine dispatch depends on it.
+
+  # ── 5 highest-blast navigation docs ──────────────────────────────────────
+
+  - path: AGENTS.md
+    status: CURRENT_LOAD_BEARING
+    last_confirmed: "2026-05-16"
+    confirmation_ttl_days: 14
+    owner: fitz
+    archival_ok: false
+    reason: >
+      Primary agent routing and authority order. All Zeus sessions start here.
+      Updated in PR #119; currently active.
+
+  - path: REVIEW.md
+    status: CURRENT_LOAD_BEARING
+    last_confirmed: "2026-05-16"
+    confirmation_ttl_days: 30
+    owner: fitz
+    archival_ok: false
+    reason: >
+      Review protocol authority for all code review sessions. Pre-dates PR #119;
+      needs audit for new review protocols but is still load-bearing.
+
+  - path: docs/operations/AGENTS.md
+    status: CURRENT_LOAD_BEARING
+    last_confirmed: "2026-05-16"
+    confirmation_ttl_days: 14
+    owner: fitz
+    archival_ok: false
+    reason: >
+      Operations-layer routing and packet lifecycle rules. Updated in PR #119.
+      Governs all docs/operations/ task packet work.
+
+  - path: .claude/CLAUDE.md
+    status: CURRENT_LOAD_BEARING
+    last_confirmed: "2026-05-16"
+    confirmation_ttl_days: 30
+    owner: fitz
+    archival_ok: false
+    reason: >
+      Zeus-specific Claude Code entry point. Lightweight (16 lines) but governs
+      topology_doctor boot order and review behavior for all sessions.
+
+  - path: ~/.openclaw/CLAUDE.md
+    # cross-repo: file lives at /Users/leofitz/.openclaw/CLAUDE.md outside zeus git tree.
+    # Zeus-repo file-existence checks will fail; treat as advisory reference only.
+    # Open question for WAVE 1.9 critic: whether cross-repo entries should be scoped
+    # to a separate cross_repo_entries block or filtered by tooling.
+    status: CURRENT_LOAD_BEARING
+    last_confirmed: "2026-05-16"
+    confirmation_ttl_days: 14
+    owner: fitz
+    archival_ok: false
+    reason: >
+      Global OMC orchestration rules that govern all Zeus agent sessions.
+      Contains methodology, delegation rules, and model routing that affect
+      every multi-agent Zeus operation.

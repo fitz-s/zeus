@@ -1861,6 +1861,98 @@ entries:
   contains_volatile_metrics: false
   current_tense_allowed: true
   refresh_source: manual_operator_audit
+# WAVE 1 additions — 5 SCAFFOLD docs from PR #119 (2026-05-16)
+# Dup-check: grep for task_2026-05-15_runtime_improvement_engineering_package returned 0 hits before adding.
+- path: docs/operations/task_2026-05-15_runtime_improvement_engineering_package/01_topology_v_next/UNIVERSAL_TOPOLOGY_DESIGN.md
+  doc_class: authority
+  default_read: true
+  direct_reference_allowed: true
+  current_role: design authority for topology_v_next shadow system; governs admission_engine.py and profile loading
+  canonical_replaced_by: []
+  next_action: keep
+  lifecycle_state: active
+  coverage_scope: exact
+  parent_coverage_allowed: false
+  truth_profile: authority
+  freshness_class: slow_changing
+  supersedes: []
+  superseded_by: []
+  may_live_in_reference: true
+  contains_volatile_metrics: false
+  current_tense_allowed: false
+  refresh_source: manual_operator_audit
+- path: docs/operations/task_2026-05-15_runtime_improvement_engineering_package/01_topology_v_next/ZEUS_BINDING_LAYER.md
+  doc_class: authority
+  default_read: true
+  direct_reference_allowed: true
+  current_role: zeus-specific binding for topology_v_next; defines safety_overrides.yaml schema and artifact_authority_status registry
+  canonical_replaced_by: []
+  next_action: keep
+  lifecycle_state: active
+  coverage_scope: exact
+  parent_coverage_allowed: false
+  truth_profile: authority
+  freshness_class: slow_changing
+  supersedes: []
+  superseded_by: []
+  may_live_in_reference: true
+  contains_volatile_metrics: false
+  current_tense_allowed: false
+  refresh_source: manual_operator_audit
+- path: docs/operations/task_2026-05-15_runtime_improvement_engineering_package/02_daily_maintenance_agent/DESIGN.md
+  doc_class: authority
+  default_read: true
+  direct_reference_allowed: true
+  current_role: architecture authority for maintenance_worker; module structure, engine flow, and install contract
+  canonical_replaced_by: []
+  next_action: keep
+  lifecycle_state: active
+  coverage_scope: exact
+  parent_coverage_allowed: false
+  truth_profile: authority
+  freshness_class: slow_changing
+  supersedes: []
+  superseded_by: []
+  may_live_in_reference: true
+  contains_volatile_metrics: false
+  current_tense_allowed: false
+  refresh_source: manual_operator_audit
+- path: docs/operations/task_2026-05-15_runtime_improvement_engineering_package/02_daily_maintenance_agent/SAFETY_CONTRACT.md
+  doc_class: authority
+  default_read: true
+  direct_reference_allowed: true
+  current_role: validator semantics and forbidden target groups for maintenance_worker; Path A/B invariants
+  canonical_replaced_by: []
+  next_action: keep
+  lifecycle_state: active
+  coverage_scope: exact
+  parent_coverage_allowed: false
+  truth_profile: authority
+  freshness_class: slow_changing
+  supersedes: []
+  superseded_by: []
+  may_live_in_reference: true
+  contains_volatile_metrics: false
+  current_tense_allowed: false
+  refresh_source: manual_operator_audit
+- path: docs/operations/task_2026-05-15_runtime_improvement_engineering_package/02_daily_maintenance_agent/TASK_CATALOG.yaml
+  doc_class: authority
+  default_read: true
+  direct_reference_allowed: true
+  current_role: enumerates all 9 task types and schedules; TaskRegistry.from_catalog() reads this at runtime
+  canonical_replaced_by: []
+  next_action: keep
+  lifecycle_state: active
+  coverage_scope: exact
+  parent_coverage_allowed: false
+  truth_profile: authority
+  freshness_class: slow_changing
+  supersedes: []
+  superseded_by: []
+  may_live_in_reference: true
+  contains_volatile_metrics: false
+  current_tense_allowed: false
+  refresh_source: manual_operator_audit
 allowed_truth_profiles:
 - router
 - authority

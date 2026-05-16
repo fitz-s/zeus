@@ -1,0 +1,11 @@
+---
+archived_to: docs/operations/archive/2026-Q2/task_2026-04-22_orphan_artifact_cleanup
+archived_at: 2026-05-16
+archived_by: maintenance_agent
+last_modified_before_archive: 2026-05-16
+exemption_checks_passed: 9/9
+reference_grep_count: 0
+restore_command: git mv docs/operations/archive/2026-Q2/task_2026-04-22_orphan_artifact_cleanup docs/operations/task_2026-04-22_orphan_artifact_cleanup
+entry_type: directory
+migration_source: docs/archives/packets/task_2026-04-22_orphan_artifact_cleanup
+---
