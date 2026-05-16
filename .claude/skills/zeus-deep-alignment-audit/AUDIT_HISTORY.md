@@ -83,3 +83,20 @@ When you (the opus orchestrator running this skill) read this file in Boot step 
 2. **Identify long-stale categories**: any category with no findings for ≥3 runs → it's a DEAD candidate this run (check Active table in LEARNINGS).
 3. **Note any back-filled post-mortems**: they reveal the audit's blind spots. Read recent ones before designing this run's worker briefs.
 4. **Track meta-audit cadence**: count entries in the Run table. If this would be run #3, #6, #9, … the Closeout MUST do a meta-audit step (see SKILL.md).
+
+
+## Run 2 — 2026-05-16 16:50 UTC
+
+| Anchor | Worktree HEAD | Findings | SEV-0 | SEV-1 | SEV-2 | INVESTIGATE-FURTHER |
+|---|---|---|---|---|---|---|
+| main `a924766c8a` | `40e7709b2d` | 4 re-verified + 4 new | 0 | 2 (#5 DB-lock storm, #6 empty `.log` files) | 2 (#7 harvester filter coarse, #8 sentinel timestamp) | 1 (Finding #7 weather-path liveness) |
+
+### Run 2 retrospective
+
+- **Phase A**: 3 of 4 Run-1 findings STILL-OPEN against current main (`#1` registry antibody, `#2` hypothesis decision_id, `#3` doctrine drift). Only `#4` (harvester writer mis-routing) RESOLVED via PR #121 — verified at `src/ingest_main.py:646` calling `get_forecasts_connection`. Residue: 2,112 stranded rows on `world.market_events_v2` (1,386 + 726) but no growth since 2026-05-13 16:45 UTC.
+- **Finding #2 regression**: 506 → 693 NULL hypothesis rows (+37%) over ~10 days; bug actively accruing data debt. Plus new sister-instance: `execution_fact` 1/6 NULL `decision_id`.
+- **Phase B yield**: Categories E/G/F dominated. **G silent-failures triple-yielded** (DB-lock storm, empty `.log` files, harvester noise) and rises HIGH.
+- **Category I promoted**: Antibody-implemented-but-unwired (Run #1 + Run #2 Finding #1) is now an active LEARNINGS category.
+- **Methodology surprise**: Run #1 was itself fooled by Finding #6 (empty `.log` files) — it cited `zeus-live.log` mtime as evidence the live-trading daemon was offline, but `.err` was 89 MB and growing. Audit-of-the-audit antibody: ALWAYS check `.err` alongside `.log` for python-logging daemons.
+- **Tier-0 risk for Karachi 5/17**: Combined Findings #4-residue + #5 + #7 → cannot prove auto-settlement path works. Operator preparation required.
+

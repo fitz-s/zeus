@@ -127,3 +127,32 @@ When you (the opus orchestrator running this skill) read this file in Boot step 
 5. **Check deployed antibodies**: before flagging a SEV-1 in some category, verify the relevant antibody isn't already DEPLOYED (false alarm on archived issue would erode trust).
 
 The whole point of this file is that future-you arrives smarter than past-you. If a run's `Closeout` doesn't update it, the skill silently devolves into a frozen template and loses its reason for existing.
+
+
+## Run #2 update (2026-05-16) — yields & probe additions
+
+### Category yield ladder after Run #2
+
+| Category | Run #1 | Run #2 | New ladder |
+|---|---|---|---|
+| A data provenance | 1 (#2) | 1 (#8 sentinel timestamp on live row) | HIGH (sustained) |
+| B math drift | 0 | 0 | LOW |
+| C statistical pitfalls | 0 | 0 | LOW |
+| D time-calendar | 0 | 0.5 (#8 cross-listed) | LOW |
+| E settlement edges | 1 (#4) | 1.5 (#4 residue, #7 filter) | HIGH (sustained) |
+| F cross-module invariants | 1 (#1) | 1 (#5 cross-process DB-lock) | HIGH (sustained) |
+| G silent failures | 0 | 3 (#5 DB-lock storm, #6 empty .log, #7 harvester WARNING flood) | **HIGH** (promoted from MEDIUM) |
+| H assumption drift | 1 (#3) | 1 (#6 .log naming false-negative) | MEDIUM (sustained) |
+| **I antibody-implemented-but-unwired** | 1 (proposed) | 1 (#1 re-confirmed) | **ACTIVE (promoted)** — 2-appearance gate met |
+
+### New high-signal probes added to the registry
+
+1. **Empty stdout but full stderr** — `ls -lt logs/*.log logs/*.err | head -10`. If `.log` is 0-byte but `.err` is large and recently mtime'd, daemon is alive but operator-facing logs are misleading. Cost ≈ 0. (Finding #6.)
+2. **DB-lock contention pulse** — `grep -c "database is locked" logs/*.err` and `tail -1000 logs/<daemon>.err | grep -c "database is locked"`. The historical vs recent pair tells you whether the storm is ongoing. Cost ≈ 0. (Finding #5.)
+3. **Harvester tick fruitfulness** — `grep "harvester_truth_writer_tick.*markets_resolved" logs/zeus-ingest.err | tail -20`. If `settlements_written=0` over a multi-day window despite expected settlements, upstream filter is broken. Cost ≈ 0. (Finding #7.)
+4. **Position-events timestamp sanity** — `python -c "import sqlite3; ... SELECT occurred_at FROM position_events WHERE occurred_at NOT GLOB '2*'"`. Catches non-ISO sentinels. Cost ≈ 0. (Finding #8.)
+
+### Methodology antibody (audit-of-the-audit)
+
+Run #1 itself was fooled by Finding #6 — it sampled `.log` files and concluded the live daemon was offline. **Audit protocol must always probe `.err` alongside `.log` for any python-logging daemon**, especially under macOS `launchd` where stdout/stderr split rigidly. Added to the Boot checklist for future runs.
+

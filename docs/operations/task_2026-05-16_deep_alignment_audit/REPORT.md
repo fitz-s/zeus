@@ -340,3 +340,110 @@ Carry forward to next audit run (also recorded in LEARNINGS.md):
 - Topology doctor (Boot step 6) and full git log review (Boot step 7) skipped.
 
 These are not signals of low yield; they are signals of un-tested territory.
+
+
+---
+
+## Run #2 — Re-verify Phase A + Deep-Sweep Phase B (2026-05-16 16:50 UTC)
+
+Anchor: main HEAD `a924766c8a` (PR #121 merged: `feat(k1): harvester writer DB-routing fix + open-markets pipeline`). Audit worktree HEAD `40e7709b2d`. Run #1 anchor was `556d55be23`; PR #121 advanced main with semantically-equivalent commits (`a2515d5547 feat(k1/5b)`, `fb44a47bb6 feat(k1/5c)`, `37b0dd5993 fix(k1)`, `4e597bd3c3 fix(live)`, `6d0290788b fix(live)`, `584cf92432 fix(data)`). Original Run-1 SHAs `1d952b072e` / `a322810a2a` are NOT ancestors of main.
+
+### Phase A — re-verification verdicts
+
+| # | Finding (Run #1) | Verdict on `a924766c8a` | Evidence | Residue / new signal |
+|---|---|---|---|---|
+| 1 | Registry-vs-disk drift, `assert_db_matches_registry` antibody unwired | **STILL-OPEN** | `src/main.py:861` still carries the inline note "antibody … not called here"; 0 production callers per `grep`. Registry cross-check yields **23 mismatch + 5 dupe** tables (Run #1 reported 24 + 5; `availability_fact` migrated mismatch→dupe; otherwise stable). | Systemic. |
+| 2 | `selection_hypothesis_fact.decision_id` 100% NULL | **STILL-OPEN-REGRESSED** | `src/engine/evaluator.py:1535` still omits `decision_id=` kwarg in `log_selection_hypothesis_fact(...)`. Row count **693/693 NULL** (Run #1: 506/506) — +37% growth in unauditable rows. **NEW orphan**: `execution_fact` has **1/6 NULL `decision_id`**. | 693 stranded hypothesis rows + 1 stranded execution row. |
+| 3 | Doctrine drift in operator-facing snapshots | **STILL-OPEN** | `current_state.md:12` reports Main HEAD `8b3c3c2c59` — actual `a924766c8a` (Run #1's fix landed on main but the operator snapshot was not refreshed). `current_data_state.md:4` last_audited `2026-04-28` (now **18 days stale**, > 14d threshold). | Both doc files unchanged since Run #1. |
+| 4 | Harvester writer routed to WORLD instead of FORECASTS | **RESOLVED-WITH-CAVEATS** | Code fix landed on main via PR #121: `src/ingest_main.py:646` now calls `get_forecasts_connection(write_class="bulk")`. Daemon `com.zeus.data-ingest` PID 34316 alive; tick log `[zeus.ingest] INFO: harvester_truth_writer_tick: {'status':'ok','markets_resolved':0,'settlements_written':0,...}` confirms routing is correct and feature flag `ZEUS_HARVESTER_LIVE_ENABLED=1` is set in `~/Library/LaunchAgents/com.zeus.data-ingest.plist`. | (a) `world.market_events_v2` has **2,112 stranded rows** (2026-05-12: 1,386 + 2026-05-13: 726). **No new stranded rows since 2026-05-13 16:45 UTC** — clean post-fix. (b) `forecasts.settlements_v2` `max(settled_at) = 2026-05-11T19:59:13Z`, **0 writes in last 24h** — tick legitimately returns `settlements_written=0` because the open-markets pass is filtering out every market (see new Finding #7). Cleanup recommended for the 2,112 stranded rows but not required for forward correctness. |
+
+### Phase B — new findings
+
+Methodology: Eight categories A–H per SKILL.md were re-swept; high-yield categories prioritised (E settlement, G silent-failures, F cross-module, H assumption-drift). Four new findings emerged that meet the 3-evidence bar for SEV-1/2.
+
+#### Finding #5 — DB-lock contention storm in live & ingest daemons (SEV-1, category G silent-failures + F cross-module)
+
+**Evidence 1**: `grep -c "database is locked" logs/zeus-ingest.err logs/zeus-live.err logs/riskguard-live.err logs/zeus-forecast-live.err` → **50,730 / 1,894 / 29 / 0**.
+
+**Evidence 2**: Last 1000 lines of `logs/zeus-live.err` contain 37 `database is locked` rows — contention is ongoing, not historical. Representative trace: `2026-05-16 11:50:09,360 [zeus] WARNING: CollateralLedger heartbeat refresh failed closed: database is locked`. Heartbeat runs every 5 s (`_write_venue_heartbeat`), so lock loss directly degrades venue freshness.
+
+**Evidence 3**: `CollateralLedger.heartbeat_refresh` is the named site; the apscheduler log shows the job "executed successfully" immediately after a `database is locked` WARNING, meaning the per-tick exception is swallowed and the heartbeat row is silently skipped. Aggregate effect: silent under-counting of venue health and possible stale balance/allowance reads.
+
+**Severity rationale**: Karachi position `c30f28a5-d4e` ($0.59) is live and chain-synced; if collateral allowance refresh silently fails during settlement Tx, the risk daemon may approve actions on stale balance state. SEV-1.
+
+#### Finding #6 — Daemon stdout `.log` files are 0 bytes; all output routed to `.err` (SEV-1, category H assumption-drift + G silent-failures)
+
+**Evidence 1**: `ls -lt logs/*.log logs/*.err`:
+- `zeus-live.log`: **0 bytes** since 2026-05-15 09:04
+- `zeus-ingest.log`: **860 bytes** since 2026-05-14 03:19  
+- `zeus-forecast-live.log`: **0 bytes** since 2026-05-15 03:44
+- `riskguard-live.log`: **0 bytes** since 2026-05-15 15:26
+- Corresponding `.err` files: **89 MB / 114 MB / 1.5 MB / 10 MB** updated 2026-05-16 11:50 (live).
+
+**Evidence 2**: Run #1 audit (`REPORT.md`) cited the May-15 `.log` mtime as evidence that the live-trading daemon was offline. **Run #1 was misled by this same observability gap**; daemons were running but had no stdout output.
+
+**Evidence 3**: `~/Library/LaunchAgents/com.zeus.*.plist` `StandardOutPath` and `StandardErrorPath` both resolve to per-daemon log files inside `logs/`, but the Python logging config sends ALL records (INFO + WARNING + ERROR) to stderr — so `.log` is by design empty. The naming creates a false-negative trap for any operator who runs `tail logs/zeus-live.log`.
+
+**Severity rationale**: Any operator (or audit run) inspecting `.log` will misdiagnose a healthy daemon as offline. SEV-1 because it directly degrades Tier-0 incident response.
+
+#### Finding #7 — Harvester open-markets selector pulls every closed Polymarket event, not just weather (SEV-2, category E settlement + B math)
+
+**Evidence 1**: `src/ingest/harvester_truth_writer.py:239 _fetch_open_settling_markets()` calls `GAMMA_BASE/events?closed=true&order=endDate&ascending=false` with **no category filter** — returns sport, election, music, weather indiscriminately.
+
+**Evidence 2**: Recent `logs/zeus-ingest.err` shows the tick processing dozens of non-weather events per pass and emitting WARNING for each:
+```
+WARNING: harvester_truth_writer: both pm_bin_lo and pm_bin_hi are None; skipping Lucknow 2026-05-14 (degenerate bin)
+WARNING: harvester_truth_writer: skipping Madrid 2026-05-14 ambiguous winners=3 slug=lal-rea-ovi-2026-05-14-more-markets
+WARNING: harvester_truth_writer: skipping Atlanta 2026-05-14 ambiguous winners=7 slug=cs2-navi-lgc-2026-05-13
+```
+The slugs (`cricipl-`, `mlb-`, `lal-`, `cs2-`, `atp-`, `wta-`, `crint-`) are cricket, baseball, La Liga, CS2, tennis — explicitly non-weather. Each enters the bin-resolver and is rejected.
+
+**Evidence 3**: Net result `markets_resolved=0, settlements_written=0` per tick over the last 24h despite real weather markets settling daily. The bin filter masks the absence of an upstream category filter, so the system looks healthy at the aggregate (`status: ok`) while no weather settlement work occurs.
+
+**Severity rationale**: Karachi 2026-05-17 will settle within the next 24-48h; if the weather match-path is also rejecting valid weather markets (not just sport events) we will silently miss the settlement and rely on manual write-in. The log noise also hides Finding #5's heartbeat warnings. SEV-2 with **INVESTIGATE-FURTHER on whether the weather path itself fires**: needs a successful settlement to confirm.
+
+#### Finding #8 — Live position carries non-ISO sentinel timestamp `"unknown_entered_at"` in `position_events.occurred_at` (SEV-2, category A data provenance + D time-calendar)
+
+**Evidence 1**: `position_events` for the Karachi live position:
+```
+('c30f28a5-d4e', 'CHAIN_SYNCED', None, 'unknown_entered_at')
+```
+The `occurred_at` column on the live row is the string `"unknown_entered_at"` — not an ISO timestamp. `decision_id` is also NULL on this row (related to Finding #2 lineage).
+
+**Evidence 2**: No schema CHECK constraint on `occurred_at` in `position_events`; sentinel string accepted at write boundary. Any downstream code that sorts/diffs on `occurred_at` will mis-order this row or crash on `datetime.fromisoformat()`.
+
+**Evidence 3**: Search `grep -rn "unknown_entered_at" src/` shows the sentinel is emitted by chain reconciliation when an on-chain order has no corresponding local intent timestamp — defensive fallback, but it should be `NULL` (typed) or an ISO timestamp inferred from blockchain block timestamp, not a free-form string.
+
+**Severity rationale**: Pollutes the audit trail for the only live position. SEV-2 because no immediate correctness break — but Fitz Constraint #4 (data provenance) applies; type system should make the wrong value unwritable.
+
+### LEARNINGS — category promotions
+
+- **Category I "Antibody-implemented-but-unwired"** now has 2 confirmed appearances (Run #1 + Run #2 Finding #1). **PROMOTED** from PROPOSED to active per the 2-appearance gate in LEARNINGS.md.
+- **Category G silent-failures** earned 3 distinct yields this run (Findings #5, #6, #7) — yield ladder rises from MEDIUM to **HIGH**.
+- **Category H assumption-drift** earned 1 new yield (Finding #6); stays MEDIUM.
+
+### Updated executive ranking (Run-2 view)
+
+Ordering by combined `(severity, blast-radius-on-Karachi-2026-05-17-settlement, ease-of-fix)`:
+
+1. **Finding #5 — DB-lock storm** (SEV-1, directly affects live settlement-day collateral state)
+2. **Finding #6 — empty `.log` files** (SEV-1, blocks operator triage including audits)
+3. **Finding #4 residue + #7 harvester filter** (RESOLVED + SEV-2 INVESTIGATE-FURTHER; combined risk of missing Karachi auto-settle)
+4. **Finding #2 — hypothesis decision_id NULL, regressed** (SEV-1 still, growing each day)
+5. **Finding #1 — registry antibody unwired** (SEV-1 still, no growth)
+6. **Finding #3 — doctrine drift** (SEV-2, low-blast operational)
+7. **Finding #8 — sentinel timestamp on live row** (SEV-2, low-blast but on the only live position)
+
+### Live position implications (Karachi 2026-05-17)
+
+- Position `c30f28a5-d4e`, condition `0xc5fad…f44ae`, phase **active**, chain_state **synced**, 1.5873 shares @ entry 0.37, cost basis $0.5873, p_posterior 0.88. Order status `partial` (ENTRY_ORDER_FILLED at 2026-05-16 06:40Z).
+- **Settlement path concern**: Findings #4-residue and #7 together mean we cannot prove the harvester will auto-write the settlement to `forecasts.settlements_v2` on 2026-05-17. The code is routed correctly but the open-markets pass has not produced a single successful weather settlement in 5 days. **Operator should prepare manual settlement fallback OR observe one weather settlement before 5/17 to confirm the path is functional.**
+- **Collateral path concern**: Finding #5 — CollateralLedger heartbeat losing writes; if it fails during Tx submission, position state may diverge from chain. Risk-daemon mitigation depends on heartbeat freshness.
+
+### Anomalies / blockers / non-claims
+
+- Cannot probe `FORECASTS.opportunity_fact` — table does not exist on FORECASTS (it lives on TRADE; consistent with Finding #1 registry-vs-disk drift).
+- Cannot probe `FORECASTS.observations.observed_at` — column does not exist. Did NOT investigate further (would expand scope beyond Run #2).
+- Cannot confirm weather-market path of harvester fires correctly without observing one successful tick — labelled `INVESTIGATE-FURTHER` per skill protocol.
+- DID NOT touch any production code, write to any DB, or modify any operator-facing docs. Read-only audit per skill contract.
+
