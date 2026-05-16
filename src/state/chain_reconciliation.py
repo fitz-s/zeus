@@ -263,8 +263,10 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                 """,
                 (order_id,),
             ).fetchone()
-        except Exception:
-            return False
+        except Exception as exc:
+            raise RuntimeError(
+                f"pending-entry command lookup failed for order_id={order_id}"
+            ) from exc
         return row is not None
 
     def _pending_entry_has_linked_fill_fact(position: Position) -> bool:

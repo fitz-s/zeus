@@ -11,6 +11,7 @@ import hashlib
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from types import SimpleNamespace
 
 import pytest
 
@@ -369,6 +370,53 @@ def event_types(c, command_id="cmd-m5"):
     ]
 
 
+def seed_position_baseline(c, *, position_id="pos-m5", order_id="ord-m5") -> None:
+    from src.engine.lifecycle_events import build_entry_canonical_write
+    from src.state.db import append_many_and_project
+
+    position_obj = SimpleNamespace(
+        trade_id=position_id,
+        state="pending_tracked",
+        exit_state="",
+        chain_state="local_only",
+        market_id="condition-m5",
+        city="Karachi",
+        cluster="Karachi",
+        target_date="2026-05-17",
+        bin_label="test-bin",
+        direction="buy_yes",
+        unit="C",
+        size_usd=0,
+        shares=0,
+        cost_basis_usd=0,
+        entry_price=0,
+        p_posterior=0.5,
+        last_monitor_prob=None,
+        last_monitor_edge=None,
+        last_monitor_market_price=None,
+        decision_snapshot_id="snap-m5",
+        entry_method="ens_member_counting",
+        strategy_key="opening_inertia",
+        edge_source="test",
+        discovery_mode="test",
+        token_id=YES_TOKEN,
+        no_token_id=f"{YES_TOKEN}-no",
+        condition_id="condition-m5",
+        order_id=order_id,
+        order_status="pending",
+        temperature_metric="high",
+        order_posted_at=NOW.isoformat(),
+        entered_at="",
+        env="live",
+    )
+    events, projection = build_entry_canonical_write(
+        position_obj,
+        decision_id="dec-m5",
+        source_module="tests/test_exchange_reconcile",
+    )
+    append_many_and_project(c, events, projection)
+
+
 def test_init_schema_creates_exchange_reconcile_findings(conn):
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(exchange_reconcile_findings)")}
     assert {
@@ -450,6 +498,66 @@ def test_trade_at_exchange_missing_locally_emits_trade_fact_if_order_linkable_el
     row = [row for row in findings(conn) if row["kind"] == "unrecorded_trade"][0]
     assert row["kind"] == "unrecorded_trade"
     assert row["subject_id"] == "trade-ghost"
+
+
+def test_maker_order_trade_links_to_local_command_and_uses_maker_fill_economics(conn):
+    from src.execution.exchange_reconcile import run_reconcile_sweep
+
+    seed_command(conn, size=5.17, price=0.37)
+    seed_position_baseline(conn)
+    adapter = FakeM5Adapter(
+        positions=[position(token_id=YES_TOKEN, size="1.5873")],
+        trades=[
+            TradeFact(
+                raw={
+                    "id": "trade-maker-linked",
+                    "taker_order_id": "ord-other-taker",
+                    "status": "CONFIRMED",
+                    "size": "1.5873",
+                    "price": "0.63",
+                    "transaction_hash": "0xabc",
+                    "maker_orders": [
+                        {
+                            "order_id": "ord-m5",
+                            "matched_amount": "1.5873",
+                            "price": "0.37",
+                            "asset_id": YES_TOKEN,
+                            "side": "BUY",
+                        }
+                    ],
+                }
+            )
+        ]
+    )
+
+    run_reconcile_sweep(adapter, conn, context="periodic", observed_at=NOW)
+
+    row = conn.execute(
+        "SELECT * FROM venue_trade_facts WHERE trade_id = 'trade-maker-linked'"
+    ).fetchone()
+    assert row is not None
+    assert row["venue_order_id"] == "ord-m5"
+    assert row["state"] == "CONFIRMED"
+    assert Decimal(row["filled_size"]) == Decimal("1.5873")
+    assert Decimal(row["fill_price"]) == Decimal("0.37")
+    assert row["tx_hash"] == "0xabc"
+    assert event_types(conn)[-1] == "PARTIAL_FILL_OBSERVED"
+    position_event = conn.execute(
+        """
+        SELECT event_type, order_id, phase_after, source_module
+          FROM position_events
+         WHERE position_id = 'pos-m5'
+         ORDER BY sequence_no DESC
+         LIMIT 1
+        """
+    ).fetchone()
+    assert dict(position_event) == {
+        "event_type": "ENTRY_ORDER_FILLED",
+        "order_id": "ord-m5",
+        "phase_after": "active",
+        "source_module": "src.execution.exchange_reconcile",
+    }
+    assert findings(conn) == []
 
 
 def test_failed_or_retrying_trade_fact_does_not_advance_command_fill_state(conn):
