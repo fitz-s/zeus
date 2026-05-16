@@ -1,7 +1,7 @@
 # Live Order E2E Goal Plan
 
 Created: 2026-05-15
-Last reused or audited: 2026-05-15
+Last reused or audited: 2026-05-16
 Authority basis: root `AGENTS.md` money path; `docs/operations/AGENTS.md` packet routing; topology admission for this packet; live read-only probes on 2026-05-15; user `/goal` directive requiring real live order placement and designed record-chain proof.
 
 Branch: `feat/live-order-e2e-goal-2026-05-15`
@@ -65,6 +65,29 @@ This plan starts from current read-only facts, not from the earlier branch narra
 - The live cycle block registry simultaneously reported evaluator gate 11 blocking with `PRODUCER_READINESS_EXPIRED` and `SOURCE_RUN_HORIZON_OUT_OF_RANGE` while the same cycle still created a real command. This divergence must be reconciled before final approval, because operator block telemetry and executor behavior cannot disagree on a live-submit path.
 
 Current conclusion: the data side is fast enough and live-eligible, and the live daemon did reach a real venue submit attempt. The remaining blockers are now process-visible global VPN/geoblock proof, post-SDK 4xx rejection grammar, production command-recovery capability drift, and rollout-gate telemetry/action divergence. The next root cause to eliminate is not "wait for another cycle"; it is the missing distinction between a deterministic venue rejection, an actually unknown side effect, and a route-dependent trading egress precondition.
+
+2026-05-16 scope expansion after real accepted-order evidence:
+
+- Real command `2f3807c5dc744a32` reached `SUBMIT_ACKED` with venue order
+  `0x9ad6940952565afb74e4b7ad7ae17e0f8471d125a7211045212a0ef551822a3c`.
+- The latest order fact is live/resting evidence, not fill evidence:
+  `source=REST`, `state=LIVE`, `remaining_size=5.17`, `matched_size=0`.
+- Public Data API trade reads for the funded account returned no matching
+  recent trade row for that order id.
+- `position_current` nevertheless moved the command's position to
+  `phase=active`, `order_status=filled`, `shares=1.5873` through
+  `CHAIN_SYNCED` / `pending_fill_rescued`, while `venue_trade_facts` remains
+  empty.
+- Therefore the active root blocker is not just a missing writer. The broken
+  relationship is: token-level chain position existence was treated as proof
+  that a specific durable order filled. That loses order identity at the
+  `chain position -> pending entry rescue` boundary.
+- Repair law for this packet: a pending entry with a durable
+  `venue_commands.venue_order_id` may not be rescued to filled by token-level
+  chain position evidence alone. It requires a matching live-source
+  `venue_trade_facts` row with positive finite `filled_size` and `fill_price`
+  for the same `venue_order_id`. Otherwise the position stays pending and the
+  guard remains open.
 
 ## Completion Definition
 

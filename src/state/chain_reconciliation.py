@@ -14,6 +14,7 @@ Live mode: MANDATORY every cycle before any trading.
 import logging
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation
 
 from src.state.chain_state import ChainState, classify_chain_state
 from src.state.lifecycle_manager import (
@@ -25,6 +26,8 @@ from src.observability.counters import increment as _cnt_inc
 
 logger = logging.getLogger(__name__)
 PENDING_EXIT_STATES = frozenset({"exit_intent", "sell_placed", "sell_pending", "retry_pending"})
+LIVE_TRADE_FACT_SOURCES = frozenset({"REST", "WS_USER", "WS_MARKET", "DATA_API", "CHAIN"})
+FILL_TRADE_FACT_STATES = frozenset({"MATCHED", "MINED", "CONFIRMED"})
 
 # Slice A4 (PR #19 finding 8, 2026-04-26): structural anchor for the
 # learning-authority contract previously held only in resolve_rescue_authority's
@@ -233,6 +236,68 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
         if phase != "pending_entry":
             raise RuntimeError(f"canonical rescue baseline phase mismatch: expected pending_entry, got {phase!r}")
         return True
+
+    def _positive_decimal(value) -> bool:
+        if value is None:
+            return False
+        try:
+            parsed = Decimal(str(value))
+        except (InvalidOperation, ValueError):
+            return False
+        return parsed.is_finite() and parsed > 0
+
+    def _pending_entry_has_durable_command(position: Position) -> bool:
+        if conn is None:
+            return False
+        order_id = str(getattr(position, "entry_order_id", "") or getattr(position, "order_id", "") or "").strip()
+        if not order_id:
+            return False
+        try:
+            row = conn.execute(
+                """
+                SELECT 1
+                  FROM venue_commands
+                 WHERE venue_order_id = ?
+                   AND intent_kind = 'ENTRY'
+                 LIMIT 1
+                """,
+                (order_id,),
+            ).fetchone()
+        except Exception:
+            return False
+        return row is not None
+
+    def _pending_entry_has_linked_fill_fact(position: Position) -> bool:
+        if conn is None:
+            return False
+        order_id = str(getattr(position, "entry_order_id", "") or getattr(position, "order_id", "") or "").strip()
+        if not order_id:
+            return False
+        try:
+            rows = conn.execute(
+                """
+                SELECT state, source, filled_size, fill_price
+                  FROM venue_trade_facts
+                 WHERE venue_order_id = ?
+                 ORDER BY observed_at DESC, local_sequence DESC
+                """,
+                (order_id,),
+            ).fetchall()
+        except Exception:
+            return False
+        for row in rows:
+            state = str(row["state"] if hasattr(row, "keys") else row[0])
+            source = str(row["source"] if hasattr(row, "keys") else row[1])
+            filled_size = row["filled_size"] if hasattr(row, "keys") else row[2]
+            fill_price = row["fill_price"] if hasattr(row, "keys") else row[3]
+            if (
+                state in FILL_TRADE_FACT_STATES
+                and source in LIVE_TRADE_FACT_SOURCES
+                and _positive_decimal(filled_size)
+                and _positive_decimal(fill_price)
+            ):
+                return True
+        return False
 
     def _canonical_size_correction_baseline_available(position_id: str, *, expected_phase: str) -> bool:
         if conn is None:
@@ -532,6 +597,13 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
             if not canonical_rescue_baseline_available:
                 stats["skipped_pending"] += 1
                 stats["skipped_pending_missing_canonical_baseline"] = stats.get("skipped_pending_missing_canonical_baseline", 0) + 1
+                continue
+            if (
+                _pending_entry_has_durable_command(pos)
+                and not _pending_entry_has_linked_fill_fact(pos)
+            ):
+                stats["skipped_pending"] += 1
+                stats["skipped_pending_missing_fill_fact"] = stats.get("skipped_pending_missing_fill_fact", 0) + 1
                 continue
             rescued = replace(pos)
             rescued.entry_order_id = rescued.entry_order_id or rescued.order_id or ""
