@@ -199,8 +199,10 @@ hooks:
     intent: >
       After successful `gh pr create` or `gh pr ready`, emit
       additionalContext instructing the agent to arm a Monitor on
-      `gh pr checks --watch --interval=30` + a 30s poll on
-      `gh pr view --json reviews,comments`.
+      `gh pr checks --watch --interval=30` + a thread-aware review
+      comment poll. Reviewer appearance is a repair trigger, not a
+      completion condition; actionable comments must be triaged, fixed
+      by code/test commit, pushed, and resolved with evidence.
     severity: ADVISORY
     sunset_date: 2026-08-06
 
@@ -467,11 +469,12 @@ Monitor and a watcher now:
 
   Monitor(persistent=true,
           command="prev=''; while true; do
+                     pr_state=$(gh pr view <num> --json state -q .state 2>/dev/null);
+                     [ \"$pr_state\" != \"OPEN\" ] && echo \"PR_NOT_OPEN:$pr_state\" && break;
                      s=$(gh pr checks <num> --json name,bucket); 
                      cur=$(jq -r '.[] | select(.bucket!=\"pending\") | \"\\(.name): \\(.bucket)\"' <<<\"$s\" | sort);
                      comm -13 <(echo \"$prev\") <(echo \"$cur\");
                      prev=$cur;
-                     jq -e 'all(.bucket!=\"pending\")' <<<\"$s\" >/dev/null && break;
                      sleep 30;
                    done")
 
@@ -483,11 +486,13 @@ Monitor and a watcher now:
                   last=$now; sleep 60;
                 done")
 
-Stop both watchers when:
-  (a) all checks resolved AND
-  (b) all review comments resolved (gh pr view --json reviews shows
-      latestReviews state=APPROVED or no actionable items),
-  OR if 60 min idle elapses (escalate).
+Reviewer appearance is not success. On new non-self review summaries or inline
+comments, fetch thread-aware reviewThreads via GraphQL, classify actionable
+versus non-actionable, repair actionable findings by code/test commit, push the
+repair batch, and resolve the threads only after evidence supports the fix.
+
+Stop both watchers only when the PR is merged/closed or the operator explicitly
+stops the monitor. Checks passing or reviewers appearing is not a stop condition.
 
 Address comments by commit, not by reply. After each commit batch,
 poll once more before declaring DONE.

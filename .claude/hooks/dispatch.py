@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Created: 2026-05-06
-# Last reused or audited: 2026-05-07
+# Last reused or audited: 2026-05-16
 # Authority basis: docs/operations/task_2026-05-07_hook_redesign_v2/PLAN.md
 #   v2 minimal: BLOCKING tier retired, bespoke authorization removed.
 #   All hooks ADVISORY-only. Boot self-test added (K1).
@@ -760,7 +760,7 @@ def _run_advisory_check_pr_open_monitor_arm(
         output = tool_response
 
     pr_num: str | None = None
-    m = re.search(r"#(\d+)", output) or re.search(r"pulls/(\d+)", output)
+    m = re.search(r"#(\d+)", output) or re.search(r"pulls?/(\d+)", output)
     if m:
         pr_num = m.group(1)
 
@@ -777,7 +777,9 @@ def _run_advisory_check_pr_open_monitor_arm(
             f"PR opened, but the PR number could not be parsed from the gh output.\n"
             f"Paid auto-reviewers (Copilot, Codex) still fire within 5-8 min.\n"
             f"Find the PR number with `gh pr list --head $(git branch --show-current) --json number`\n"
-            f"and arm a Monitor on `gh pr checks <number> --json name,bucket` manually."
+            f"and arm a Monitor/heartbeat on checks plus thread-aware reviewThreads.\n"
+            f"Reviewer appearance is NOT completion; it triggers triage, code/test repair,\n"
+            f"push, and thread resolution only after evidence supports the fix."
         )
 
     monitor_sentinel = f"MONITOR_ARM_REQUIRED:{pr_num}:{expiry_iso}"
@@ -787,11 +789,16 @@ def _run_advisory_check_pr_open_monitor_arm(
         f"Arm a Monitor that watches BOTH ci checks AND reviewer comments,\n"
         f"and that filters out the agent's own replies (otherwise the watcher\n"
         f"echoes every reply you post and produces false-positive notifications):\n\n"
+        f"  IMPORTANT: reviewer appearance is NOT completion. It means fetch the\n"
+        f"  thread-aware review state, repair actionable comments by code/test commit,\n"
+        f"  push, and resolve threads only after evidence supports the fix.\n\n"
         f"  ME=$(gh api user --jq .login)\n"
         f"  REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner)\n"
         f"  Monitor(persistent=true,\n"
         f"          command=\"prev_checks=''; prev_comments=''; prev_reviews='';\n"
         f"                   while true; do\n"
+        f"                     pr_state=$(gh pr view {pr_num} --json state -q .state 2>/dev/null);\n"
+        f"                     [ \\\"$pr_state\\\" != \\\"OPEN\\\" ] && echo \\\"PR_NOT_OPEN:$pr_state\\\" && break;\n"
         f"                     s=$(gh pr checks {pr_num} --json name,bucket 2>/dev/null);\n"
         f"                     cur_checks=$(jq -r '.[] | select(.bucket!=\\\"pending\\\") | \\\"\\(.name): \\(.bucket)\\\"' <<<\\\"$s\\\" | sort);\n"
         f"                     comm -13 <(echo \\\"$prev_checks\\\") <(echo \\\"$cur_checks\\\");\n"
@@ -805,10 +812,13 @@ def _run_advisory_check_pr_open_monitor_arm(
         f"                       --jq \\\"[.[] | select(.user.login!=\\\\\\\"$ME\\\\\\\") | .id] | sort | @csv\\\" 2>/dev/null);\n"
         f"                     [ \\\"$cur_reviews\\\" != \\\"$prev_reviews\\\" ] && echo \\\"NEW_BOT_REVIEW_SUMMARY\\\";\n"
         f"                     prev_reviews=$cur_reviews;\n"
-        f"                     jq -e 'all(.bucket!=\\\"pending\\\")' <<<\\\"$s\\\" >/dev/null && [ -n \\\"$prev_comments\\\" ] && break;\n"
         f"                     sleep 30;\n"
         f"                   done\")\n\n"
-        f"Stop when all checks resolved AND reviewer comments addressed, or 60 min idle.\n"
+        f"On NEW_BOT_INLINE_COMMENTS or NEW_BOT_REVIEW_SUMMARY: fetch thread-aware\n"
+        f"reviewThreads via GraphQL, classify actionable vs non-actionable, fix the\n"
+        f"code/tests, push one repair batch, then re-check checks + unresolved threads.\n"
+        f"Do not stop the monitor because comments appeared or because checks passed;\n"
+        f"stop only when the PR is merged/closed or the operator explicitly stops it.\n"
         f"DESIGN NOTE: the `select(.user.login != \\\"$ME\\\")` filters out the agent's\n"
         f"own reply posts. Without it, every `gh api ... -X POST .../replies` you\n"
         f"send to address a reviewer fires the watcher again — observed in session\n"
