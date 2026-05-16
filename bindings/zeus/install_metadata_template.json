@@ -1,0 +1,11 @@
+{
+  "_comment": "Template written by scripts/maintenance_worker_install.py. Do NOT edit manually. The install script replaces PLACEHOLDER fields at install time.",
+  "schema_version": 1,
+  "first_run_at": "PLACEHOLDER_ISO8601_UTC",
+  "agent_version": "0.1.0",
+  "install_run_id": "PLACEHOLDER_UUID4",
+  "allowed_remote_urls": ["PLACEHOLDER_GIT_REMOTE_URL"],
+  "repo_root_at_install": "PLACEHOLDER_REPO_ROOT",
+  "_dry_run_floor_note": "The 30-day dry-run floor is enforced by maintenance_worker.core.install_metadata.enforce_dry_run_floor(). floor_days=30 is hardcoded in FLOOR_EXEMPT_TASK_IDS. This file is immutable after first write — ImmutableMetadataError is raised on any subsequent write attempt.",
+  "_exempt_task_ids_note": "zero_byte_state_cleanup and agent_self_evidence_archival are floor-exempt (hardcoded in FLOOR_EXEMPT_TASK_IDS frozenset, not configurable here)."
+}

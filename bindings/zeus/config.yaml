@@ -1,0 +1,111 @@
+# Zeus maintenance_worker binding — config.yaml
+# Created: 2026-05-15
+# Last reused or audited: 2026-05-15
+# Authority basis:
+#   docs/operations/task_2026-05-15_runtime_improvement_engineering_package/02_daily_maintenance_agent/DESIGN.md
+#   docs/operations/task_2026-05-15_runtime_improvement_engineering_package/05_execution_packets/PACKET_INDEX.md §P6
+#
+# Translates to maintenance_worker_config.json by scripts/maintenance_worker_install.py.
+# Zero project-agnostic core modifications — overlay only.
+
+# ------------------------------------------------------------------
+# Engine identity
+# ------------------------------------------------------------------
+label: com.zeus.maintenance
+agent_version: "0.1.0"
+
+# ------------------------------------------------------------------
+# Zeus-specific paths (all resolved relative to ZEUS_REPO)
+# ------------------------------------------------------------------
+paths:
+  # State directory: kill switch, ack files, install_metadata.json, pause flags
+  state_dir: "${ZEUS_REPO}/state/maintenance_state"
+  # Evidence directory: per-tick SUMMARY.md, proposals/, applied/, rollback recipes
+  evidence_dir: "${ZEUS_REPO}/state/maintenance_evidence"
+  # Task catalog consumed by the worker
+  task_catalog: "${ZEUS_REPO}/docs/operations/task_2026-05-15_runtime_improvement_engineering_package/02_daily_maintenance_agent/TASK_CATALOG.yaml"
+  # Safety contract (core; augmented by safety_overrides.yaml)
+  safety_contract: "${ZEUS_REPO}/docs/operations/task_2026-05-15_runtime_improvement_engineering_package/02_daily_maintenance_agent/SAFETY_CONTRACT.md"
+  # Safety overrides (Zeus-specific additions to the universal forbidden list)
+  safety_overrides: "${ZEUS_REPO}/bindings/zeus/safety_overrides.yaml"
+
+# ------------------------------------------------------------------
+# Scheduler configuration
+# ------------------------------------------------------------------
+scheduler:
+  kind: launchd
+  label: com.zeus.maintenance
+  # 04:30 Chicago local time daily
+  # Encoded as StartCalendarInterval in launchd plist (see launchd_plist.plist)
+  schedule_hour: 4
+  schedule_minute: 30
+
+# ------------------------------------------------------------------
+# Dry-run floor (enforced by install_metadata.py; not honor-system)
+# ------------------------------------------------------------------
+dry_run:
+  floor_days: 30
+  # Exempt tasks bypass the 30-day floor (hardcoded in install_metadata.py;
+  # YAML entry is documentation only — cannot widen the frozenset here).
+  exempt_task_ids:
+    - zero_byte_state_cleanup       # zero bytes: no recoverable content
+    - agent_self_evidence_archival  # agent's own evidence trail
+
+# ------------------------------------------------------------------
+# Notification routing
+# ------------------------------------------------------------------
+notification:
+  channel: discord
+  # Webhook resolved via macOS Keychain at runtime; NOT stored here.
+  # Key name: ZEUS_MAINTENANCE_DISCORD_WEBHOOK
+  webhook_keychain_item: ZEUS_MAINTENANCE_DISCORD_WEBHOOK
+  # Quiet window: skip notifications (not ticks) during oncall freeze
+  oncall_quiet_flag: "${ZEUS_REPO}/state/maintenance_state/ONCALL_QUIET"
+  # Separate channel for high-blast-radius proposals
+  blast_radius_channel_keychain_item: ZEUS_MAINTENANCE_BLAST_RADIUS_WEBHOOK
+
+# ------------------------------------------------------------------
+# TTL overrides (project-specific; overrides PURGE_CATEGORIES.md defaults)
+# ------------------------------------------------------------------
+ttl_overrides:
+  # Stale worktrees: Zeus generates many worktrees per orchestration run;
+  # 21-day idle TTL from TASK_CATALOG.yaml is correct for Zeus.
+  stale_worktree_quarantine_idle_days: 21
+  # LaunchAgent backups: 14-day TTL from TASK_CATALOG.yaml is correct.
+  launchagent_backup_ttl_days: 14
+  # Untracked top-level files: 14-day TTL.
+  untracked_top_level_ttl_days: 14
+  # In-repo scratch directories: 7-day TTL.
+  in_repo_scratch_ttl_days: 7
+  # Proposal expiry: 7 days (per DRY_RUN_PROTOCOL.md).
+  proposal_ttl_days: 7
+  # Evidence retention before cold archive.
+  evidence_retention_days: 90
+
+# ------------------------------------------------------------------
+# Per-task allowlists (Zeus-specific overrides; additive to core allowlists)
+# ------------------------------------------------------------------
+task_allowlists:
+  # launchagent_backup_quarantine: only Zeus-prefixed plist backups
+  launchagent_backup_quarantine:
+    target_glob: "~/Library/LaunchAgents/com.zeus.*"
+    quarantine_dir: "~/Library/LaunchAgents/.archive"
+  # stale_worktree_quarantine: Zeus worktrees only
+  stale_worktree_quarantine:
+    worktree_roots:
+      - "${ZEUS_REPO}/.claude/worktrees"
+    worktree_name_glob:
+      - "agent-*"
+      - "worktree-*"
+  # in_repo_scratch_quarantine: Zeus scratch roots
+  in_repo_scratch_quarantine:
+    scratch_roots:
+      - "${ZEUS_REPO}/tmp"
+    quarantine_dir: "${ZEUS_REPO}/.archive/scratch"
+
+# ------------------------------------------------------------------
+# Log paths (written by launchd; not by the worker itself)
+# ------------------------------------------------------------------
+logs:
+  stdout: "${ZEUS_REPO}/state/maintenance_worker.log"
+  stderr: "${ZEUS_REPO}/state/maintenance_worker_error.log"
