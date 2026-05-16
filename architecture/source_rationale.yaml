@@ -912,7 +912,7 @@ files:
   src/ingest/forecast_live_daemon.py:
     zone: K2_runtime
     authority_role: forecast_live_daemon_entry
-    why: Dedicated OpenData live forecast producer daemon; schedules only ECMWF OpenData HIGH/LOW forecast ingest and heartbeat, sharing the OpenData lock with legacy ingest_main during rollout.
+    why: Dedicated OpenData live forecast producer daemon; schedules only ECMWF OpenData HIGH/LOW forecast ingest, heartbeat, and OpenData-only source-health refresh, sharing the OpenData lock with legacy ingest_main during rollout.
     hazards:
     - SOURCE_TRUTH_PLANE_COLLAPSE
     downstream:

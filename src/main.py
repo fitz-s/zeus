@@ -833,8 +833,15 @@ def main():
                 _capital_str,
                 settings["sizing"]["kelly_multiplier"] * 100)
 
-    # Daemon is a read-only consumer of world DB. Schema currency is proven
-    # below by direct read-only user_version checks on the canonical DB files.
+    # §4.2 DB schema-ready gate — fail-closed (Phase 3 enforcement).
+    # Must run before the first world DB open/read so missing or uninitialized
+    # DBs go through the retry/FATAL authority path rather than raw SQLite errors.
+    # Directly verifies world/forecast DB schema versions. Older JSON sentinels
+    # from data-ingest are not live boot authority after the forecast-live split.
+    _startup_world_schema_ready_check()
+
+    # Daemon is a read-only consumer of world DB. Schema currency was proven
+    # above by direct read-only user_version checks on the canonical DB files.
     # Opening without write_class avoids the v4 LIVE flock and never acquires
     # a SQLite writer lock for read-only ops below — so a concurrent ingest
     # or backfill cannot starve daemon startup.
@@ -854,11 +861,6 @@ def main():
     # (2026-05-14 K1 followups plan §5.5 D5). assert_db_matches_registry() exists
     # (src/state/table_registry.py) but boot wiring is deferred — not called here.
     conn.close()
-
-    # §4.2 DB schema-ready gate — fail-closed (Phase 3 enforcement).
-    # Directly verifies world/forecast DB schema versions. Older JSON sentinels
-    # from data-ingest are not live boot authority after the forecast-live split.
-    _startup_world_schema_ready_check()
 
     # §3.1 Data freshness gate — WARN-only at boot (Phase 2: warn; Phase 3: enforce).
     # Runs BEFORE strategy gate so operator sees freshness diagnostics even when

@@ -77,7 +77,7 @@ def test_forecast_live_scheduler_registers_only_opendata_jobs_and_heartbeat() ->
                 "max_instances": 1,
                 "coalesce": True,
                 "misfire_grace_time": 120,
-                "next_run_time": datetime(2026, 5, 14, 8, 0, tzinfo=timezone.utc),
+                "next_run_time": datetime(2026, 5, 14, 8, 10, tzinfo=timezone.utc),
                 "executor": "source_health",
             },
         )
@@ -117,9 +117,8 @@ def test_forecast_live_source_health_probe_uses_shared_lock_and_prior_state(tmp_
         json.dumps(
             {
                 "sources": {
-                    "ecmwf_open_data": {
-                        "consecutive_failures": 2,
-                    }
+                    "ecmwf_open_data": {"consecutive_failures": 2},
+                    "wu_pws": {"last_success_at": "2026-05-14T07:00:00+00:00"},
                 }
             }
         )
@@ -129,7 +128,8 @@ def test_forecast_live_source_health_probe_uses_shared_lock_and_prior_state(tmp_
     def _state_path(name: str) -> Path:
         return state_dir / name
 
-    def _probe(timeout: float, *, _prior_state: dict) -> dict:
+    def _probe(sources, timeout: float, *, _prior_state: dict) -> dict:
+        calls["sources"] = tuple(sorted(sources))
         calls["timeout"] = timeout
         calls["prior_state"] = _prior_state
         return {"ecmwf_open_data": {"ok": True}}
@@ -140,7 +140,7 @@ def test_forecast_live_source_health_probe_uses_shared_lock_and_prior_state(tmp_
 
     result = _source_health_probe_tick(
         _locks_dir_override=tmp_path / "locks",
-        _probe_all_sources=_probe,
+        _probe_sources=_probe,
         _write_source_health=_write,
         _state_path=_state_path,
     )
@@ -149,11 +149,19 @@ def test_forecast_live_source_health_probe_uses_shared_lock_and_prior_state(tmp_
         "status": "ok",
         "source": "source_health",
         "sources": 1,
+        "updated_sources": ["ecmwf_open_data"],
         "path": str(source_health_path),
     }
+    assert calls["sources"] == ("ecmwf_open_data",)
     assert calls["timeout"] == 10.0
-    assert calls["prior_state"] == {"ecmwf_open_data": {"consecutive_failures": 2}}
-    assert calls["results"] == {"ecmwf_open_data": {"ok": True}}
+    assert calls["prior_state"] == {
+        "ecmwf_open_data": {"consecutive_failures": 2},
+        "wu_pws": {"last_success_at": "2026-05-14T07:00:00+00:00"},
+    }
+    assert calls["results"] == {
+        "ecmwf_open_data": {"ok": True},
+        "wu_pws": {"last_success_at": "2026-05-14T07:00:00+00:00"},
+    }
 
 
 def test_forecast_live_source_health_probe_skips_when_lock_is_held(tmp_path) -> None:
@@ -168,7 +176,7 @@ def test_forecast_live_source_health_probe_skips_when_lock_is_held(tmp_path) -> 
         assert acquired
         result = _source_health_probe_tick(
             _locks_dir_override=tmp_path / "locks",
-            _probe_all_sources=_probe,
+            _probe_sources=_probe,
         )
 
     assert result == {"status": "skipped_lock_held", "source": "source_health"}

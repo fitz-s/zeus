@@ -3,10 +3,10 @@
 # Authority basis: docs/operations/task_2026-05-08_deep_alignment_audit/DATA_DAEMON_LIVE_EFFICIENCY_REFACTOR_PLAN.md section 6.1, section 6.2, and section 8 Phase 4; Phase 6 durable work journaling; docs/operations/task_2026-05-16_live_continuous_run_package/LIVE_CONTINUOUS_RUN_PACKAGE_PLAN.md source-health gate.
 """Dedicated OpenData live forecast producer daemon.
 
-This module owns the ECMWF OpenData live forecast scheduler and the live
-source-health heartbeat required to prove source freshness. It does not schedule
-TIGGE archive backfill, calibration refit, settlement truth, market scan, risk,
-execution, evaluator, or venue work.
+This module owns the ECMWF OpenData live forecast scheduler and the OpenData-only
+source-health heartbeat required to prove forecast freshness. It does not
+schedule TIGGE archive backfill, calibration refit, settlement truth, market
+scan, risk, execution, evaluator, or venue work.
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ import os
 import signal
 import sys
 import tempfile
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -33,6 +33,7 @@ FORECAST_LIVE_HEARTBEAT_JOB_ID = "forecast_live_heartbeat"
 FORECAST_LIVE_SOURCE_HEALTH_JOB_ID = "forecast_live_source_health_probe"
 FORECAST_LIVE_HEARTBEAT_SECONDS = 30
 FORECAST_LIVE_SOURCE_HEALTH_SECONDS = 10 * 60
+FORECAST_LIVE_SOURCE_HEALTH_SOURCE_IDS = frozenset({"ecmwf_open_data"})
 
 FORECAST_LIVE_JOB_IDS = frozenset(
     {
@@ -166,14 +167,14 @@ def _scheduler_job(job_name: str):
 def _source_health_probe_tick(
     *,
     _locks_dir_override: Path | None = None,
-    _probe_all_sources: Callable[..., dict] | None = None,
+    _probe_sources: Callable[..., dict] | None = None,
     _write_source_health: Callable[..., Path] | None = None,
     _state_path: Callable[[str], Path] | None = None,
 ) -> dict[str, object]:
-    """Refresh source_health.json from the live data daemon lane."""
+    """Refresh source_health.json for the OpenData source owned by forecast-live."""
     from src.config import state_path
     from src.data.dual_run_lock import acquire_lock
-    from src.data.source_health_probe import probe_all_sources, write_source_health
+    from src.data.source_health_probe import probe_sources, write_source_health
 
     resolve_state_path = _state_path or state_path
     with acquire_lock("source_health", _locks_dir_override=_locks_dir_override) as acquired:
@@ -190,15 +191,26 @@ def _source_health_probe_tick(
         except Exception:
             prior_state = {}
 
-        probe = _probe_all_sources or probe_all_sources
+        probe = _probe_sources or probe_sources
         writer = _write_source_health or write_source_health
-        results = probe(10.0, _prior_state=prior_state)
+        updated_sources = probe(
+            FORECAST_LIVE_SOURCE_HEALTH_SOURCE_IDS,
+            10.0,
+            _prior_state=prior_state,
+        )
+        results = dict(prior_state)
+        results.update(updated_sources)
         out_path = writer(results)
-        logger.info("forecast-live source health probe complete: %d sources", len(results))
+        logger.info(
+            "forecast-live source health probe complete: updated=%s preserved=%d",
+            sorted(updated_sources),
+            max(0, len(results) - len(updated_sources)),
+        )
         return {
             "status": "ok",
             "source": "source_health",
-            "sources": len(results),
+            "sources": len(updated_sources),
+            "updated_sources": sorted(updated_sources),
             "path": str(out_path),
         }
 
@@ -621,7 +633,7 @@ def forecast_live_job_specs(
                 "max_instances": 1,
                 "coalesce": True,
                 "misfire_grace_time": 120,
-                "next_run_time": startup_at,
+                "next_run_time": startup_at + timedelta(seconds=FORECAST_LIVE_SOURCE_HEALTH_SECONDS),
                 "executor": "source_health",
             },
         ),

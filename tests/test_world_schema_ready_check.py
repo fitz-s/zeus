@@ -177,3 +177,11 @@ class TestWorldSchemaReadyCheck:
         assert "_startup_world_schema_ready_check()" in content, (
             "src/main.py must CALL _startup_world_schema_ready_check() in main() boot sequence (A-2)"
         )
+
+    def test_schema_ready_check_runs_before_first_world_db_open(self):
+        """Boot schema authority must precede direct world DB smoke reads."""
+        content = (Path(__file__).parent.parent / "src" / "main.py").read_text()
+        main_body = content[content.index("def main():") :]
+        assert main_body.index("_startup_world_schema_ready_check()") < main_body.index(
+            "conn = get_world_connection()"
+        )
