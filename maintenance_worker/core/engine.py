@@ -37,7 +37,7 @@ import logging
 import os
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -271,6 +271,7 @@ class MaintenanceEngine:
                     entry, candidate, ctx,
                     force_dry_run=force_dry_run,
                     install_meta=install_meta,
+                    proposal=manifest,
                 )
                 apply_results.append(apply_result)
         result.apply_results = apply_results
@@ -509,6 +510,7 @@ class MaintenanceEngine:
         ctx: TickContext,
         force_dry_run: bool = False,
         install_meta: Optional[InstallMetadata] = None,
+        proposal: Optional[ProposalManifest] = None,
     ) -> ApplyResult:
         """
         Stage filesystem mutations for one Candidate.
@@ -525,6 +527,13 @@ class MaintenanceEngine:
         bypass it. After the gate, dispatches handler.apply(candidate, ctx)
         via _dispatch_by_task_id. Falls back to dry_run_only if handler
         is not found (safe default — never executes unknown handlers live).
+
+        P5.5 GATE: when proposal manifest is the empty stub AND the handler is
+        live-default + floor-exempt (i.e. capable of real mutations), force
+        dry_run_only=True on the ctx passed to the handler. This prevents the
+        live mutation → empty manifest → post_mutation_detector mismatch →
+        SELF_QUARANTINE → exit(50) brick pattern. Remove this gate when P5.5
+        _emit_dry_run_proposal() ships real manifest entries (Codex PR #124 P2).
         """
         task = entry.spec
         if force_dry_run:
@@ -540,11 +549,37 @@ class MaintenanceEngine:
             if floor_result == "ALLOWED_BUT_DRY_RUN_ONLY":
                 return ApplyResult(task_id=task.task_id, dry_run_only=True)
 
+        # P5.5 GATE: protect against live-mutation + empty-manifest → SELF_QUARANTINE brick.
+        # _emit_dry_run_proposal() is a stub returning ProposalManifest with all-empty tuples.
+        # post_mutation_detector compares ApplyResult.deleted/moved against manifest entries;
+        # mismatch writes SELF_QUARANTINE + exit(50), bricking all future ticks permanently.
+        # Condition: manifest is empty stub AND handler is live-default + floor-exempt.
+        # Remove this gate when P5.5 evidence_writer populates real manifest entries.
+        effective_ctx = ctx
+        if proposal is not None:
+            manifest_is_empty_stub = (
+                not proposal.proposed_moves
+                and not proposal.proposed_deletes
+                and not proposal.proposed_creates
+                and not proposal.proposed_modifies
+            )
+            task_is_live_exempt = (
+                bool(entry.raw.get("live_default", False))
+                and bool(task.dry_run_floor_exempt)
+            )
+            if manifest_is_empty_stub and task_is_live_exempt:
+                effective_ctx = replace(ctx, dry_run_only=True)
+                logger.warning(
+                    "p5_5_dependency: forcing dry_run_only=True for task_id=%s "
+                    "until _emit_dry_run_proposal lands (Codex PR #124 P2)",
+                    task.task_id,
+                )
+
         # Dispatch to per-task rule module. Falls back to dry_run_only if
         # the handler is not yet implemented (safe: never acts live without handler).
         try:
             result: ApplyResult = self._dispatch_by_task_id(
-                task.task_id, "apply", candidate, ctx
+                task.task_id, "apply", candidate, effective_ctx
             )
             return result
         except TaskHandlerNotFoundError:

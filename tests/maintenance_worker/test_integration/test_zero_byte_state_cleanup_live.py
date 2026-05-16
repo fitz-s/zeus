@@ -105,11 +105,21 @@ def _clean_guards_context():
 
 def test_engine_live_deletes_stale_zero_byte_file(tmp_path: Path) -> None:
     """
-    MB3: engine drives zero_byte_state_cleanup enumerate() → apply() and
-    actually deletes a stale zero-byte file (dry_run_only=False).
+    MB3 (updated for PR #124 Codex P2 gate): engine drives zero_byte_state_cleanup
+    enumerate() → apply() end-to-end, but with the P5.5 empty-manifest gate active,
+    the apply() call receives dry_run_only=True — preventing the live deletion →
+    empty manifest → SELF_QUARANTINE brick pattern.
 
-    dry_run_floor_exempt=True bypasses the floor gate; no install_metadata file
-    so install_meta=None also bypasses the gate. force_dry_run=False (CRON mode).
+    The MB3 invariant (engine dispatches the handler) is preserved: the gate
+    warning log proves the dispatch reached _apply_decisions and the gate fired.
+    The previous assertion (live delete actually happens) is now WRONG by design —
+    live deletion with an empty stub manifest bricks the tick permanently.
+
+    When P5.5 _emit_dry_run_proposal() ships real manifest entries, the gate
+    will stop firing and a separate P5.5 integration test should assert live
+    deletion works with a populated manifest.
+
+    REMOVE the P5.5 guard from this test comment when P5.5 lands.
     """
     config = _make_config(tmp_path)
     _write_catalog(config.task_catalog_path, age_days=7)
@@ -135,33 +145,26 @@ def test_engine_live_deletes_stale_zero_byte_file(tmp_path: Path) -> None:
                 "maintenance_worker.rules.zero_byte_state_cleanup._is_locked_by_lsof",
                 return_value=False,
             ):
-                # post_mutation_detector compares actual deletes against the P5.5
-                # stub ProposalManifest (always empty proposed_deletes). Mocking
-                # avoids spurious sys.exit(50); the detector logic is tested
-                # separately in test_kill_switch.py.
-                with patch(
-                    "maintenance_worker.core.engine.post_mutation_detector",
-                ):
-                    engine = MaintenanceEngine()
-                    result = engine.run_tick(config)
+                engine = MaintenanceEngine()
+                result = engine.run_tick(config)
 
-    # At least one apply result must be live (dry_run_only=False)
-    live_results = [ar for ar in result.apply_results if not ar.dry_run_only]
-    assert len(live_results) >= 1, (
-        f"Expected ≥1 live ApplyResult; got apply_results={result.apply_results!r}"
+    # P5.5 gate: all apply results must be dry_run_only=True while manifest is stub.
+    # Gate prevents: live delete → empty manifest mismatch → SELF_QUARANTINE → exit(50).
+    task_results = [ar for ar in result.apply_results if ar.task_id == "zero_byte_state_cleanup"]
+    assert len(task_results) >= 1, (
+        "Engine must have dispatched zero_byte_state_cleanup and returned ≥1 ApplyResult"
     )
+    for ar in task_results:
+        assert ar.dry_run_only is True, (
+            "P5.5 gate must force dry_run_only=True for live-exempt handler "
+            "when manifest is empty stub (Codex PR #124 P2). "
+            f"Got dry_run_only={ar.dry_run_only!r}"
+        )
 
-    # The stale file must be gone
-    assert not stale_file.exists(), (
-        "Engine must have deleted the stale zero-byte file in live mode"
-    )
-
-    # Live result must report deleted paths
-    deleted_paths = []
-    for ar in live_results:
-        deleted_paths.extend(ar.deleted)
-    assert stale_file in deleted_paths, (
-        f"stale_file not in deleted paths; deleted={deleted_paths!r}"
+    # File must be preserved — no live deletion while gate is active
+    assert stale_file.exists(), (
+        "P5.5 gate: stale zero-byte file must be preserved (no live delete) "
+        "while _emit_dry_run_proposal() returns empty stub manifest"
     )
 
 

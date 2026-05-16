@@ -806,3 +806,261 @@ def test_weekly_cadence_fires_when_overdue(tmp_path: Path) -> None:
     assert updated["last_run_ts"] > eight_days_ago, (
         "last_weekly_tick.json must be updated after weekly dispatch"
     )
+
+
+# ---------------------------------------------------------------------------
+# PR #124 Codex P2: P5.5 gate — empty manifest + live-exempt → force dry_run
+# ---------------------------------------------------------------------------
+
+
+def test_empty_manifest_forces_dry_run_for_live_exempt_handler(
+    tmp_path: Path,
+) -> None:
+    """
+    When _emit_dry_run_proposal() returns an empty stub manifest AND a handler
+    is live_default=True + dry_run_floor_exempt=True, _apply_decisions must
+    force dry_run_only=True on the ctx passed to handler.apply().
+
+    Without this gate: handler does a real delete/move → post_mutation_detector
+    compares against empty manifest → writes SELF_QUARANTINE → exit(50),
+    permanently bricking future ticks. (Codex PR #124 P2 finding.)
+    """
+    from datetime import datetime, timezone
+    from maintenance_worker.rules.parser import TaskCatalogEntry
+    from maintenance_worker.types.candidates import Candidate
+    from maintenance_worker.types.specs import TaskSpec, ProposalManifest, TickContext
+    from maintenance_worker.types.results import ApplyResult
+
+    config = _make_config(tmp_path)
+
+    # Live-exempt spec: live_default=True + dry_run_floor_exempt=True
+    live_exempt_spec = TaskSpec(
+        task_id="live_exempt_task",
+        description="live mutation handler",
+        schedule="daily",
+        dry_run_floor_exempt=True,
+    )
+    live_exempt_entry = TaskCatalogEntry(
+        spec=live_exempt_spec,
+        raw={
+            "id": "live_exempt_task",
+            "schedule": "daily",
+            "live_default": True,          # live by default
+            "dry_run_floor_exempt": True,  # bypasses floor gate
+            "config": {},
+            "safety": {},
+        },
+    )
+
+    candidate = Candidate(
+        task_id="live_exempt_task",
+        path=tmp_path / "dummy.txt",
+        verdict="TEST_CANDIDATE",
+        reason="test",
+    )
+
+    # Empty stub manifest — what _emit_dry_run_proposal() currently returns
+    empty_manifest = ProposalManifest(task_id="live_exempt_task")
+
+    dispatched_ctx: list[TickContext] = []
+
+    def capture_apply(cand: object, ctx: TickContext) -> ApplyResult:
+        dispatched_ctx.append(ctx)
+        return ApplyResult(task_id="live_exempt_task", dry_run_only=ctx.dry_run_only)
+
+    engine = MaintenanceEngine()
+    tick_ctx = TickContext(
+        run_id="test-p2",
+        started_at=datetime.now(tz=timezone.utc),
+        config=config,
+        invocation_mode="SCHEDULED",
+        dry_run_only=False,  # engine never sets this True
+    )
+
+    with patch.object(
+        engine,
+        "_dispatch_by_task_id",
+        side_effect=lambda task_id, method, *args: capture_apply(*args)
+        if method == "apply" else [],
+    ):
+        result = engine._apply_decisions(
+            live_exempt_entry,
+            candidate,
+            tick_ctx,
+            force_dry_run=False,
+            install_meta=None,
+            proposal=empty_manifest,
+        )
+
+    assert len(dispatched_ctx) == 1, "handler.apply() must be called exactly once"
+    assert dispatched_ctx[0].dry_run_only is True, (
+        "P5.5 gate must force dry_run_only=True when manifest is empty stub "
+        "and handler is live_default + dry_run_floor_exempt"
+    )
+    assert result.dry_run_only is True
+
+
+def test_non_exempt_handler_unaffected_by_empty_manifest_gate(
+    tmp_path: Path,
+) -> None:
+    """
+    Regression: a handler without live_default=True (or without
+    dry_run_floor_exempt=True) must NOT be affected by the P5.5 gate.
+    The gate must be narrowly scoped to live-exempt handlers only.
+    """
+    from datetime import datetime, timezone
+    from maintenance_worker.rules.parser import TaskCatalogEntry
+    from maintenance_worker.types.candidates import Candidate
+    from maintenance_worker.types.specs import TaskSpec, ProposalManifest, TickContext
+    from maintenance_worker.types.results import ApplyResult
+
+    config = _make_config(tmp_path)
+
+    # Normal non-exempt spec: live_default=False, dry_run_floor_exempt=False
+    normal_spec = TaskSpec(
+        task_id="normal_task",
+        description="surface-only handler",
+        schedule="daily",
+        dry_run_floor_exempt=False,
+    )
+    normal_entry = TaskCatalogEntry(
+        spec=normal_spec,
+        raw={
+            "id": "normal_task",
+            "schedule": "daily",
+            "live_default": False,
+            "dry_run_floor_exempt": False,
+            "config": {},
+            "safety": {},
+        },
+    )
+
+    candidate = Candidate(
+        task_id="normal_task",
+        path=tmp_path / "dummy.txt",
+        verdict="TEST_CANDIDATE",
+        reason="test",
+    )
+
+    empty_manifest = ProposalManifest(task_id="normal_task")
+
+    dispatched_ctx: list[TickContext] = []
+
+    def capture_apply(cand: object, ctx: TickContext) -> ApplyResult:
+        dispatched_ctx.append(ctx)
+        return ApplyResult(task_id="normal_task", dry_run_only=ctx.dry_run_only)
+
+    engine = MaintenanceEngine()
+    tick_ctx = TickContext(
+        run_id="test-p2-normal",
+        started_at=datetime.now(tz=timezone.utc),
+        config=config,
+        invocation_mode="SCHEDULED",
+        dry_run_only=False,
+    )
+
+    with patch.object(
+        engine,
+        "_dispatch_by_task_id",
+        side_effect=lambda task_id, method, *args: capture_apply(*args)
+        if method == "apply" else [],
+    ):
+        result = engine._apply_decisions(
+            normal_entry,
+            candidate,
+            tick_ctx,
+            force_dry_run=False,
+            install_meta=None,
+            proposal=empty_manifest,
+        )
+
+    assert len(dispatched_ctx) == 1
+    assert dispatched_ctx[0].dry_run_only is False, (
+        "P5.5 gate must NOT alter ctx for non-live-exempt handlers; "
+        f"got dry_run_only={dispatched_ctx[0].dry_run_only}"
+    )
+
+
+def test_populated_manifest_allows_live_dispatch_when_p55_lands(
+    tmp_path: Path,
+) -> None:
+    """
+    When the manifest has real entries (P5.5 implemented), the gate must NOT
+    fire — live-exempt handlers must be allowed to execute live as designed.
+    This test documents the intended post-P5.5 behaviour.
+    """
+    from datetime import datetime, timezone
+    from pathlib import Path as _Path
+    from maintenance_worker.rules.parser import TaskCatalogEntry
+    from maintenance_worker.types.candidates import Candidate
+    from maintenance_worker.types.specs import TaskSpec, ProposalManifest, TickContext
+    from maintenance_worker.types.results import ApplyResult
+
+    config = _make_config(tmp_path)
+
+    live_exempt_spec = TaskSpec(
+        task_id="live_exempt_p55",
+        description="live handler, manifest populated by P5.5",
+        schedule="daily",
+        dry_run_floor_exempt=True,
+    )
+    live_exempt_entry = TaskCatalogEntry(
+        spec=live_exempt_spec,
+        raw={
+            "id": "live_exempt_p55",
+            "schedule": "daily",
+            "live_default": True,
+            "dry_run_floor_exempt": True,
+            "config": {},
+            "safety": {},
+        },
+    )
+
+    candidate = Candidate(
+        task_id="live_exempt_p55",
+        path=tmp_path / "dummy.txt",
+        verdict="TEST_CANDIDATE",
+        reason="test",
+    )
+
+    # Non-empty manifest — simulates P5.5 having populated it
+    populated_manifest = ProposalManifest(
+        task_id="live_exempt_p55",
+        proposed_deletes=(tmp_path / "dummy.txt",),
+    )
+
+    dispatched_ctx: list[TickContext] = []
+
+    def capture_apply(cand: object, ctx: TickContext) -> ApplyResult:
+        dispatched_ctx.append(ctx)
+        return ApplyResult(task_id="live_exempt_p55", dry_run_only=ctx.dry_run_only)
+
+    engine = MaintenanceEngine()
+    tick_ctx = TickContext(
+        run_id="test-p2-p55",
+        started_at=datetime.now(tz=timezone.utc),
+        config=config,
+        invocation_mode="SCHEDULED",
+        dry_run_only=False,
+    )
+
+    with patch.object(
+        engine,
+        "_dispatch_by_task_id",
+        side_effect=lambda task_id, method, *args: capture_apply(*args)
+        if method == "apply" else [],
+    ):
+        result = engine._apply_decisions(
+            live_exempt_entry,
+            candidate,
+            tick_ctx,
+            force_dry_run=False,
+            install_meta=None,
+            proposal=populated_manifest,
+        )
+
+    assert len(dispatched_ctx) == 1
+    assert dispatched_ctx[0].dry_run_only is False, (
+        "When manifest is non-empty (P5.5 landed), gate must NOT force dry_run_only; "
+        f"got dry_run_only={dispatched_ctx[0].dry_run_only}"
+    )
