@@ -49,8 +49,14 @@ VERDICT_SKIP_FRESH = "SKIP_TOO_FRESH"
 DEFAULT_AGE_DAYS = 7
 DEFAULT_TARGET_DIRS = ["state/", "logs/", "evidence/", "proofs/"]
 
-# SQLite attachment pattern: db, db-wal, db-shm companion files
-_SQLITE_SUFFIXES = frozenset([".db", ".db-wal", ".db-shm", ".sqlite", ".sqlite-wal", ".sqlite-shm"])
+# SQLite companion file suffixes — any file matching these must never be deleted.
+# Includes WAL, SHM, journal modes (rollback + WAL journal), and sqlite3 extensions.
+# Deleting a journal/WAL companion while the parent .db is mid-transaction = corruption.
+_SQLITE_SUFFIXES = frozenset([
+    ".db", ".db-wal", ".db-shm", ".db-journal",
+    ".sqlite", ".sqlite-wal", ".sqlite-shm", ".sqlite-journal",
+    ".sqlite3", ".sqlite3-wal", ".sqlite3-shm", ".sqlite3-journal",
+])
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -118,7 +124,7 @@ def enumerate(entry: Any, ctx: TickContext) -> list[Candidate]:  # noqa: A001
                 continue
 
             # SQLite attachment pattern → skip
-            if _is_sqlite_attached(path):
+            if _is_sqlite_companion(path):
                 candidates.append(Candidate(
                     task_id="zero_byte_state_cleanup",
                     path=path,
@@ -211,14 +217,29 @@ def _is_locked_by_lsof(path: Path) -> bool:
         return False
 
 
-def _is_sqlite_attached(path: Path) -> bool:
+def _is_sqlite_companion(path: Path) -> bool:
     """
-    Return True if path has a SQLite-related suffix (db, db-wal, db-shm, etc.).
+    Return True if path is or may be a SQLite companion file — safe to never delete.
 
-    Heuristic: presence of sqlite suffix implies an active WAL/SHM companion
-    may exist; deleting zero-byte db stub while WAL is active corrupts the db.
+    Three checks (any match → True):
+      1. Suffix in _SQLITE_SUFFIXES (covers .db, .db-wal, .db-journal, .sqlite3*, etc.)
+      2. Name ends with -wal, -shm, or -journal (catches suffix-less WAL names)
+      3. Companion-sibling check: if a .db/.sqlite/.sqlite3 file with the same
+         stem prefix exists in the same directory, treat this file as sqlite-related.
+         This covers Zeus-specific names like zeus-world.db.writer-lock.bulk where
+         Path.suffix == ".bulk" but a zeus-world.db companion exists alongside it.
     """
-    return path.suffix in _SQLITE_SUFFIXES or path.name.endswith(("-wal", "-shm"))
+    if path.suffix in _SQLITE_SUFFIXES:
+        return True
+    if path.name.endswith(("-wal", "-shm", "-journal")):
+        return True
+    # Companion-sibling check: stem prefix = everything before the first dot after the name root
+    # e.g. "zeus-world.db.writer-lock.bulk" → stem_prefix = "zeus-world"
+    stem_prefix = path.name.split(".")[0]
+    for ext in (".db", ".sqlite", ".sqlite3"):
+        if (path.parent / f"{stem_prefix}{ext}").exists():
+            return True
+    return False
 
 
 def _mock_diff(decision: Candidate) -> tuple[str, ...]:

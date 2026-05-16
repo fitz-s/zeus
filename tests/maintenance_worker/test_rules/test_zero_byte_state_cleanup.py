@@ -117,7 +117,7 @@ def test_zero_byte_stale_file_is_candidate(tmp_path: Path) -> None:
         "maintenance_worker.rules.zero_byte_state_cleanup._is_locked_by_lsof",
         return_value=False,
     ), patch(
-        "maintenance_worker.rules.zero_byte_state_cleanup._is_sqlite_attached",
+        "maintenance_worker.rules.zero_byte_state_cleanup._is_sqlite_companion",
         return_value=False,
     ), patch("pathlib.Path.stat") as mock_stat:
         import os
@@ -181,7 +181,7 @@ def test_lsof_locked_file_skipped(tmp_path: Path) -> None:
         "maintenance_worker.rules.zero_byte_state_cleanup._is_locked_by_lsof",
         return_value=True,  # simulate lsof reports it held
     ), patch(
-        "maintenance_worker.rules.zero_byte_state_cleanup._is_sqlite_attached",
+        "maintenance_worker.rules.zero_byte_state_cleanup._is_sqlite_companion",
         return_value=False,
     ), patch("pathlib.Path.stat") as mock_stat:
         import os
@@ -301,3 +301,153 @@ def test_apply_live_mode_deletes_file(tmp_path: Path) -> None:
     assert result.task_id == "zero_byte_state_cleanup"
     assert not zero_file.exists(), "File should have been deleted in live mode"
     assert zero_file in result.deleted
+
+
+# ---------------------------------------------------------------------------
+# CB1 Tests: expanded sqlite-companion filter
+# ---------------------------------------------------------------------------
+
+
+def test_db_journal_file_skipped(tmp_path: Path) -> None:
+    """
+    A zero-byte .db-journal file must be classified SKIP_SQLITE_ATTACHED.
+    Deleting a rollback-journal while parent .db is mid-transaction = corruption.
+    """
+    ctx = _make_ctx(tmp_path)
+    entry = _make_entry(age_days=7)
+
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    journal_file = state_dir / "zeus_world.db-journal"
+    journal_file.write_bytes(b"")
+
+    with patch(
+        "maintenance_worker.rules.zero_byte_state_cleanup._is_locked_by_lsof",
+        return_value=False,
+    ), patch("pathlib.Path.stat") as mock_stat:
+        import os
+        stat_result = os.stat_result((
+            0o100644, 0, 0, 1, 0, 0, 0,
+            _old_mtime(), _old_mtime(), _old_mtime(),
+        ))
+        mock_stat.return_value = stat_result
+        results = enumerate(entry, ctx)
+
+    sqlite_skips = [c for c in results if c.verdict == VERDICT_SKIP_SQLITE]
+    assert any(c.path == journal_file for c in sqlite_skips), (
+        f".db-journal must be SKIP_SQLITE_ATTACHED; got: {[c.verdict for c in results]}"
+    )
+
+
+def test_sqlite3_shm_file_skipped(tmp_path: Path) -> None:
+    """
+    A zero-byte .sqlite3-shm file must be classified SKIP_SQLITE_ATTACHED.
+    .sqlite3 extension is common; its -shm companion is an active WAL index.
+    """
+    ctx = _make_ctx(tmp_path)
+    entry = _make_entry(age_days=7)
+
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    shm_file = state_dir / "forecasts.sqlite3-shm"
+    shm_file.write_bytes(b"")
+
+    with patch(
+        "maintenance_worker.rules.zero_byte_state_cleanup._is_locked_by_lsof",
+        return_value=False,
+    ), patch("pathlib.Path.stat") as mock_stat:
+        import os
+        stat_result = os.stat_result((
+            0o100644, 0, 0, 1, 0, 0, 0,
+            _old_mtime(), _old_mtime(), _old_mtime(),
+        ))
+        mock_stat.return_value = stat_result
+        results = enumerate(entry, ctx)
+
+    sqlite_skips = [c for c in results if c.verdict == VERDICT_SKIP_SQLITE]
+    assert any(c.path == shm_file for c in sqlite_skips), (
+        f".sqlite3-shm must be SKIP_SQLITE_ATTACHED; got: {[c.verdict for c in results]}"
+    )
+
+
+def test_writer_lock_bulk_file_skipped_via_companion_check(tmp_path: Path) -> None:
+    """
+    A zero-byte zeus-world.db.writer-lock.bulk file must be classified
+    SKIP_SQLITE_ATTACHED via the companion-sibling check.
+
+    Path.suffix == '.bulk' — not in suffix set — so the companion-sibling check
+    must detect that zeus-world.db exists in the same dir and skip this file.
+    """
+    ctx = _make_ctx(tmp_path)
+    entry = _make_entry(age_days=7)
+
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+
+    # Companion .db file must exist for the sibling check to fire
+    companion_db = state_dir / "zeus-world.db"
+    companion_db.write_bytes(b"fake-db-content")
+
+    bulk_file = state_dir / "zeus-world.db.writer-lock.bulk"
+    bulk_file.write_bytes(b"")
+
+    with patch(
+        "maintenance_worker.rules.zero_byte_state_cleanup._is_locked_by_lsof",
+        return_value=False,
+    ), patch("pathlib.Path.stat") as mock_stat:
+        import os
+
+        def stat_side_effect(self=None):
+            # companion_db is non-zero so use real stat; bulk_file is old zero-byte
+            path_obj = self if self is not None else tmp_path
+            # We need size=0 for bulk_file, real for companion_db
+            # Since Path.stat is patched globally, check the path name
+            return os.stat_result((
+                0o100644, 0, 0, 1, 0, 0, 0,
+                _old_mtime(), _old_mtime(), _old_mtime(),
+            ))
+
+        mock_stat.return_value = os.stat_result((
+            0o100644, 0, 0, 1, 0, 0, 0,
+            _old_mtime(), _old_mtime(), _old_mtime(),
+        ))
+        results = enumerate(entry, ctx)
+
+    sqlite_skips = [c for c in results if c.verdict == VERDICT_SKIP_SQLITE]
+    assert any(c.path == bulk_file for c in sqlite_skips), (
+        f"zeus-world.db.writer-lock.bulk must be SKIP_SQLITE_ATTACHED via companion check; "
+        f"got: {[(c.path.name, c.verdict) for c in results]}"
+    )
+
+
+def test_generic_tmp_file_is_candidate(tmp_path: Path) -> None:
+    """
+    Positive control: a stale zero-byte .tmp file with no sqlite companion must be
+    classified ZERO_BYTE_DELETE_CANDIDATE (not skipped by the expanded filter).
+    """
+    ctx = _make_ctx(tmp_path)
+    entry = _make_entry(age_days=7)
+
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    tmp_file = state_dir / "stale_result.tmp"
+    tmp_file.write_bytes(b"")
+
+    with patch(
+        "maintenance_worker.rules.zero_byte_state_cleanup._is_locked_by_lsof",
+        return_value=False,
+    ), patch(
+        "maintenance_worker.rules.zero_byte_state_cleanup._is_sqlite_companion",
+        return_value=False,
+    ), patch("pathlib.Path.stat") as mock_stat:
+        import os
+        mock_stat.return_value = os.stat_result((
+            0o100644, 0, 0, 1, 0, 0, 0,
+            _old_mtime(), _old_mtime(), _old_mtime(),
+        ))
+        results = enumerate(entry, ctx)
+
+    candidates = [c for c in results if c.verdict == VERDICT_CANDIDATE]
+    assert any(c.path == tmp_file for c in candidates), (
+        f".tmp file should be ZERO_BYTE_DELETE_CANDIDATE; got: {[(c.path.name, c.verdict) for c in results]}"
+    )
