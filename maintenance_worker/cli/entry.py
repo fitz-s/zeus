@@ -30,8 +30,14 @@ from pathlib import Path
 from typing import Optional
 
 from maintenance_worker.cli.scheduler_detect import detect
+from maintenance_worker.core.apply_publisher import ApplyPublisher
 from maintenance_worker.core.engine import run_tick
+from maintenance_worker.core.install_metadata import (
+    METADATA_FILENAME,
+    read_install_metadata,
+)
 from maintenance_worker.core.notifier import notify_tick_summary
+from maintenance_worker.core.provenance import make_run_id
 from maintenance_worker.types.modes import InvocationMode
 from maintenance_worker.types.specs import EngineConfig
 
@@ -97,11 +103,11 @@ class _TickLock:
             except OSError:
                 pass
             self._fd = None
-        # Best-effort cleanup of lockfile
-        try:
-            self._path.unlink(missing_ok=True)
-        except OSError:
-            pass
+        # NOTE: lockfile is NOT unlinked here.
+        # flock is the mutex; unlinking creates a TOCTOU race where a second
+        # tick could open the file just before unlink, acquire the fd, and then
+        # find the file gone — leaving an orphaned lock. The lockfile is durable;
+        # the PID written to it can be inspected by cmd_status.
 
 
 # ---------------------------------------------------------------------------
@@ -165,6 +171,9 @@ def cmd_run(config: EngineConfig, invocation_mode: Optional[InvocationMode] = No
     dry-run-only regardless of live_default (engine enforces this via the
     check_scheduler_invocation result).
 
+    After run_tick returns apply_results, instantiates ApplyPublisher and
+    calls publish() for each non-dry-run result (SEV-1 #1: wires P5.1↔P5.5).
+
     Returns an exit code integer.
     """
     mode = invocation_mode or detect()
@@ -179,8 +188,43 @@ def cmd_run(config: EngineConfig, invocation_mode: Optional[InvocationMode] = No
         code = exc.code if isinstance(exc.code, int) else EXIT_GUARD_FAILURE
         return code if code != 0 else EXIT_GUARD_FAILURE
 
+    # SEV-1 #1: wire ApplyPublisher into the post-run_tick path.
+    # Load install_metadata (written on first tick; may not exist yet — skip publish if absent).
+    meta_path = config.state_dir / METADATA_FILENAME
+    if meta_path.exists() and result.apply_results:
+        try:
+            install_meta = read_install_metadata(config.state_dir)
+        except Exception as exc:
+            print(
+                f"[maintenance_worker] WARNING: could not load install_metadata: {exc}",
+                file=sys.stderr,
+            )
+            install_meta = None
+
+        if install_meta is not None:
+            publisher = ApplyPublisher(
+                repo_root=config.repo_root,
+                install_meta=install_meta,
+            )
+            run_id = make_run_id()
+            for apply_result in result.apply_results:
+                if apply_result.dry_run_only:
+                    continue
+                pub_result = publisher.publish(apply_result, run_id=run_id)
+                if pub_result.error:
+                    print(
+                        f"[maintenance_worker] publish error task={apply_result.task_id}: "
+                        f"{pub_result.error}",
+                        file=sys.stderr,
+                    )
+                if pub_result.rolled_back:
+                    print(
+                        f"[maintenance_worker] publish rolled back task={apply_result.task_id}",
+                        file=sys.stderr,
+                    )
+
     # Notify if we have a summary path and notification is configured.
-    if hasattr(result, "summary_path") and result.summary_path is not None:
+    if result.summary_path is not None:
         notify_tick_summary(result.summary_path)
 
     return EXIT_OK

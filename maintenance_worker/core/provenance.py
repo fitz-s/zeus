@@ -20,7 +20,7 @@ Stdlib only. Zero Zeus identifiers.
 """
 from __future__ import annotations
 
-import subprocess
+import os
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -66,80 +66,47 @@ def make_run_id() -> str:
 # ---------------------------------------------------------------------------
 
 
-def _git_config_get(repo_root: Path, key: str) -> str | None:
-    """Return a git config value, or None if unset."""
-    try:
-        result = subprocess.run(
-            ["git", "-C", str(repo_root), "config", "--local", key],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        if result.returncode == 0:
-            return result.stdout.strip() or None
-        return None
-    except (subprocess.TimeoutExpired, FileNotFoundError):
-        return None
-
-
-def _git_config_set(repo_root: Path, key: str, value: str) -> None:
-    """Set a local git config value."""
-    subprocess.run(
-        ["git", "-C", str(repo_root), "config", "--local", key, value],
-        capture_output=True,
-        timeout=10,
-        check=True,
-    )
-
-
-def _git_config_unset(repo_root: Path, key: str) -> None:
-    """Unset a local git config value (silently ignore if already unset)."""
-    try:
-        subprocess.run(
-            ["git", "-C", str(repo_root), "config", "--local", "--unset", key],
-            capture_output=True,
-            timeout=10,
-            check=True,
-        )
-    except subprocess.CalledProcessError:
-        # returncode 5 = key not set; ignore
-        pass
-
-
 @contextmanager
 def set_commit_identity(repo_root: Path, run_id: str) -> Iterator[None]:
     """
-    Context manager: set local git commit identity to Maintenance Worker.
+    Context manager: inject Maintenance Worker identity via environment variables.
 
-    Captures the pre-existing user.name and user.email (if set locally),
-    sets the Maintenance Worker identity, yields, then restores the prior
-    values. If no prior local values existed, unsets them on exit.
+    Sets GIT_AUTHOR_NAME, GIT_AUTHOR_EMAIL, GIT_COMMITTER_NAME,
+    GIT_COMMITTER_EMAIL in the current process environment for the duration
+    of the context, then restores prior values on exit.
 
-    run_id is accepted (for Audit-by-Grep correlation) but not written to
-    git config (identity is static; run-id appears in commit messages).
+    This approach is SIGKILL-safe: no persistent git config mutation occurs.
+    The prior implementation mutated local git config, which left the repo
+    in a contaminated state if the process was killed mid-tick (SEV-2 #4).
+
+    run_id is accepted for Audit-by-Grep correlation; the Run-Id appears in
+    commit messages via make_commit_message(), not in the identity.
 
     Usage:
         with set_commit_identity(repo_root, run_id):
-            subprocess.run(["git", "commit", "-m", msg], ...)
+            subprocess.run(["git", "-C", str(repo_root), "commit", "-m", msg], ...)
     """
-    prior_name = _git_config_get(repo_root, "user.name")
-    prior_email = _git_config_get(repo_root, "user.email")
+    _env_keys = (
+        "GIT_AUTHOR_NAME",
+        "GIT_AUTHOR_EMAIL",
+        "GIT_COMMITTER_NAME",
+        "GIT_COMMITTER_EMAIL",
+    )
+    prior: dict[str, str | None] = {k: os.environ.get(k) for k in _env_keys}
 
-    _git_config_set(repo_root, "user.name", _COMMIT_AUTHOR_NAME)
-    _git_config_set(repo_root, "user.email", _COMMIT_AUTHOR_EMAIL)
+    os.environ["GIT_AUTHOR_NAME"] = _COMMIT_AUTHOR_NAME
+    os.environ["GIT_AUTHOR_EMAIL"] = _COMMIT_AUTHOR_EMAIL
+    os.environ["GIT_COMMITTER_NAME"] = _COMMIT_AUTHOR_NAME
+    os.environ["GIT_COMMITTER_EMAIL"] = _COMMIT_AUTHOR_EMAIL
 
     try:
         yield
     finally:
-        if prior_name is not None:
-            _git_config_set(repo_root, "user.name", prior_name)
-        else:
-            _git_config_unset(repo_root, "user.name")
-
-        if prior_email is not None:
-            _git_config_set(repo_root, "user.email", prior_email)
-        else:
-            _git_config_unset(repo_root, "user.email")
+        for key in _env_keys:
+            if prior[key] is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = prior[key]  # type: ignore[assignment]
 
 
 # ---------------------------------------------------------------------------

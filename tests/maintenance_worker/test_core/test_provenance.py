@@ -13,9 +13,7 @@ Covers:
 """
 from __future__ import annotations
 
-import subprocess
 from pathlib import Path
-from unittest.mock import MagicMock, call, patch
 
 import pytest
 
@@ -72,109 +70,87 @@ def test_make_run_id_sortable() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_set_commit_identity_sets_maintenance_worker(tmp_path: Path) -> None:
-    """Context manager sets user.name to 'Maintenance Worker'."""
+def test_set_commit_identity_sets_git_author_env(tmp_path: Path) -> None:
+    """Context manager sets GIT_AUTHOR_NAME to 'Maintenance Worker'."""
+    import os as _os
     run_id = make_run_id()
-    calls: list[str] = []
+    observed: list[str] = []
 
-    def fake_run(cmd, **kwargs):
-        calls.append(" ".join(cmd))
-        return MagicMock(returncode=0, stdout="", stderr="")
+    with set_commit_identity(tmp_path, run_id):
+        observed.append(_os.environ.get("GIT_AUTHOR_NAME", ""))
 
-    with patch("maintenance_worker.core.provenance.subprocess.run", side_effect=fake_run):
+    assert observed == ["Maintenance Worker"], f"Expected GIT_AUTHOR_NAME=Maintenance Worker, got {observed}"
+
+
+def test_set_commit_identity_sets_email_env(tmp_path: Path) -> None:
+    """Context manager sets GIT_AUTHOR_EMAIL to 'maintenance@worker.local'."""
+    import os as _os
+    run_id = make_run_id()
+    observed: list[str] = []
+
+    with set_commit_identity(tmp_path, run_id):
+        observed.append(_os.environ.get("GIT_AUTHOR_EMAIL", ""))
+
+    assert observed == ["maintenance@worker.local"], f"Got {observed}"
+
+
+def test_set_commit_identity_sets_committer_env(tmp_path: Path) -> None:
+    """Context manager sets both AUTHOR and COMMITTER env vars."""
+    import os as _os
+    run_id = make_run_id()
+
+    with set_commit_identity(tmp_path, run_id):
+        author_name = _os.environ.get("GIT_AUTHOR_NAME", "")
+        committer_name = _os.environ.get("GIT_COMMITTER_NAME", "")
+
+    assert author_name == "Maintenance Worker"
+    assert committer_name == "Maintenance Worker"
+
+
+def test_set_commit_identity_restores_prior_env(tmp_path: Path) -> None:
+    """Context manager restores prior GIT_AUTHOR_NAME on exit."""
+    import os as _os
+    run_id = make_run_id()
+    prior = "Prior Author"
+    _os.environ["GIT_AUTHOR_NAME"] = prior
+    try:
         with set_commit_identity(tmp_path, run_id):
             pass
+        assert _os.environ.get("GIT_AUTHOR_NAME") == prior, (
+            f"Expected GIT_AUTHOR_NAME restored to {prior!r}, "
+            f"got {_os.environ.get('GIT_AUTHOR_NAME')!r}"
+        )
+    finally:
+        _os.environ.pop("GIT_AUTHOR_NAME", None)
 
-    # Must have called git config --local user.name 'Maintenance Worker'
-    set_name_calls = [c for c in calls if "user.name" in c and "--local" in c and "--unset" not in c and "get" not in c]
-    assert any("Maintenance Worker" in c for c in set_name_calls), (
-        f"Expected set user.name to 'Maintenance Worker', got calls: {calls}"
-    )
 
-
-def test_set_commit_identity_sets_email(tmp_path: Path) -> None:
-    """Context manager sets user.email to 'maintenance@worker.local'."""
+def test_set_commit_identity_removes_env_when_no_prior(tmp_path: Path) -> None:
+    """Context manager removes GIT_AUTHOR_NAME if it wasn't set before."""
+    import os as _os
     run_id = make_run_id()
-    calls: list[str] = []
+    _os.environ.pop("GIT_AUTHOR_NAME", None)
 
-    def fake_run(cmd, **kwargs):
-        calls.append(" ".join(cmd))
-        return MagicMock(returncode=0, stdout="", stderr="")
+    with set_commit_identity(tmp_path, run_id):
+        pass
 
-    with patch("maintenance_worker.core.provenance.subprocess.run", side_effect=fake_run):
-        with set_commit_identity(tmp_path, run_id):
-            pass
-
-    set_email_calls = [c for c in calls if "user.email" in c and "maintenance@worker.local" in c]
-    assert set_email_calls, f"Expected set user.email, calls: {calls}"
-
-
-def test_set_commit_identity_restores_prior_name(tmp_path: Path) -> None:
-    """Context manager restores prior user.name on exit."""
-    run_id = make_run_id()
-    prior_name = "Alice Dev"
-
-    def fake_run(cmd, **kwargs):
-        # Simulate: git config --local user.name returns prior_name
-        # Get call: ['git', '-C', path, 'config', '--local', 'user.name'] = 6 args
-        if "--local" in cmd and "user.name" in cmd and len(cmd) == 6 and "--unset" not in cmd:
-            return MagicMock(returncode=0, stdout=prior_name)
-        return MagicMock(returncode=0, stdout="", stderr="")
-
-    with patch("maintenance_worker.core.provenance.subprocess.run", side_effect=fake_run) as mock:
-        with set_commit_identity(tmp_path, run_id):
-            pass
-
-    # The last user.name write should restore prior_name
-    restore_calls = [
-        c for c in mock.call_args_list
-        if "user.name" in str(c) and prior_name in str(c)
-    ]
-    assert restore_calls, f"Expected restore of prior name '{prior_name}', calls: {mock.call_args_list}"
-
-
-def test_set_commit_identity_unsets_when_no_prior(tmp_path: Path) -> None:
-    """Context manager unsets user.name if there was no prior local value."""
-    run_id = make_run_id()
-    unset_calls: list[list[str]] = []
-
-    def fake_run(cmd, **kwargs):
-        if "--unset" in cmd:
-            unset_calls.append(list(cmd))
-        # Simulate: config get returns code 1 (not set)
-        if "--local" in cmd and len(cmd) == 5:
-            return MagicMock(returncode=1, stdout="")
-        return MagicMock(returncode=0, stdout="", stderr="")
-
-    with patch("maintenance_worker.core.provenance.subprocess.run", side_effect=fake_run):
-        with set_commit_identity(tmp_path, run_id):
-            pass
-
-    assert any("user.name" in " ".join(c) for c in unset_calls), (
-        f"Expected --unset user.name call, got: {unset_calls}"
+    assert "GIT_AUTHOR_NAME" not in _os.environ, (
+        "GIT_AUTHOR_NAME must be removed when it wasn't set before context entry"
     )
 
 
 def test_set_commit_identity_restores_on_exception(tmp_path: Path) -> None:
     """Restore happens even if the body raises."""
+    import os as _os
     run_id = make_run_id()
-    prior_name = "Bob Dev"
-    restored: list[bool] = []
+    _os.environ.pop("GIT_AUTHOR_NAME", None)
 
-    def fake_run(cmd, **kwargs):
-        # Get call: ['git', '-C', path, 'config', '--local', 'user.name'] = 6 args
-        if "--local" in cmd and "user.name" in cmd and len(cmd) == 6 and "--unset" not in cmd:
-            return MagicMock(returncode=0, stdout=prior_name)
-        if "--local" in cmd and prior_name in cmd:
-            restored.append(True)
-        return MagicMock(returncode=0, stdout="", stderr="")
+    with pytest.raises(ValueError):
+        with set_commit_identity(tmp_path, run_id):
+            raise ValueError("test error")
 
-    with patch("maintenance_worker.core.provenance.subprocess.run", side_effect=fake_run):
-        with pytest.raises(ValueError):
-            with set_commit_identity(tmp_path, run_id):
-                raise ValueError("test error")
-
-    assert restored, "Prior identity must be restored even on exception"
+    assert "GIT_AUTHOR_NAME" not in _os.environ, (
+        "GIT_AUTHOR_NAME must be cleaned up even when body raises"
+    )
 
 
 # ---------------------------------------------------------------------------

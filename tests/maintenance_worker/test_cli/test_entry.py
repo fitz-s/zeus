@@ -132,7 +132,7 @@ def test_detect_returns_invocation_mode_enum() -> None:
 
 
 def test_tick_lock_acquires_and_releases(tmp_path: Path) -> None:
-    """_TickLock creates lockfile, writes PID, removes on exit."""
+    """_TickLock creates lockfile, writes PID; flock released after exit (file stays)."""
     state_dir = tmp_path / "state"
     state_dir.mkdir()
     lockfile = state_dir / "maintenance_worker.pid"
@@ -142,7 +142,11 @@ def test_tick_lock_acquires_and_releases(tmp_path: Path) -> None:
         pid_text = lockfile.read_text().strip()
         assert pid_text == str(os.getpid()), f"Lockfile must contain current PID, got {pid_text!r}"
 
-    assert not lockfile.exists(), "Lockfile must be removed after lock release"
+    # SEV-2 #3: flock is the mutex; lockfile is NOT unlinked on exit (avoids TOCTOU race).
+    # Verify the flock was released by successfully acquiring it again.
+    assert lockfile.exists(), "Lockfile must persist after release (flock is the mutex)"
+    with _TickLock(state_dir):
+        pass  # second acquisition succeeds → flock was released
 
 
 def test_tick_lock_contention_raises(tmp_path: Path) -> None:
@@ -157,7 +161,7 @@ def test_tick_lock_contention_raises(tmp_path: Path) -> None:
 
 
 def test_tick_lock_cleanup_on_exception(tmp_path: Path) -> None:
-    """Lockfile is removed even if the body raises."""
+    """Flock is released even if the body raises (lockfile stays on disk)."""
     state_dir = tmp_path / "state"
     state_dir.mkdir()
     lockfile = state_dir / "maintenance_worker.pid"
@@ -166,7 +170,11 @@ def test_tick_lock_cleanup_on_exception(tmp_path: Path) -> None:
         with _TickLock(state_dir):
             raise ValueError("body error")
 
-    assert not lockfile.exists(), "Lockfile must be cleaned up even on exception"
+    # SEV-2 #3: lockfile persists (flock is the mutex, not file existence).
+    # Verify flock was released by acquiring a second lock successfully.
+    assert lockfile.exists(), "Lockfile must persist on disk after exception (flock is mutex)"
+    with _TickLock(state_dir):
+        pass  # second acquisition succeeds → flock was released on exception
 
 
 # ---------------------------------------------------------------------------
@@ -373,3 +381,160 @@ def test_main_status_subcommand(tmp_path: Path) -> None:
     )
     result = main(["--config", str(config_path), "status"])
     assert result == EXIT_OK
+
+
+# ---------------------------------------------------------------------------
+# SEV-1 integration tests
+# ---------------------------------------------------------------------------
+
+
+def _make_apply_result_live(task_id: str = "test_task"):
+    """Build a non-dry-run ApplyResult with a move mutation."""
+    from maintenance_worker.types.results import ApplyResult
+    return ApplyResult(
+        task_id=task_id,
+        dry_run_only=False,
+        moved=[("src/old.py", "src/new.py")],
+    )
+
+
+def _make_install_meta(allowed_url: str = "https://github.com/allowed/repo.git"):
+    """Build an InstallMetadata with all required fields."""
+    from datetime import datetime, timezone
+    from maintenance_worker.core.install_metadata import InstallMetadata, SCHEMA_VERSION
+    return InstallMetadata(
+        schema_version=SCHEMA_VERSION,
+        first_run_at=datetime.now(tz=timezone.utc),
+        agent_version="0.1.0",
+        install_run_id="test-install-run-id",
+        allowed_remote_urls=(allowed_url,),
+    )
+
+
+def _write_install_metadata(state_dir: Path, allowed_url: str = "https://github.com/test/repo.git") -> None:
+    """Write a minimal install_metadata.json to state_dir (all required fields)."""
+    import json
+    from datetime import datetime, timezone
+    from maintenance_worker.core.install_metadata import SCHEMA_VERSION, METADATA_FILENAME
+    meta = {
+        "schema_version": SCHEMA_VERSION,
+        "first_run_at": datetime.now(tz=timezone.utc).isoformat(),
+        "agent_version": "0.1.0",
+        "install_run_id": "test-install-run-id",
+        "repo_root_at_install": str(state_dir.parent),
+        "allowed_remote_urls": [allowed_url],
+    }
+    (state_dir / METADATA_FILENAME).write_text(json.dumps(meta), encoding="utf-8")
+
+
+def test_sev1_1_apply_publisher_called_for_live_result(tmp_path: Path) -> None:
+    """SEV-1 #1: cmd_run calls ApplyPublisher.publish() for non-dry-run ApplyResults."""
+    from maintenance_worker.types.results import ApplyResult
+    config = _make_config(tmp_path)
+    _write_install_metadata(config.state_dir)
+
+    live_result = _make_apply_result_live()
+
+    # Mock run_tick to return a TickResult with one live ApplyResult
+    mock_tick_result = MagicMock()
+    mock_tick_result.apply_results = [live_result]
+    mock_tick_result.summary_path = None
+
+    with patch("maintenance_worker.cli.entry.run_tick", return_value=mock_tick_result), \
+         patch("maintenance_worker.cli.entry.ApplyPublisher") as MockPublisher:
+        instance = MockPublisher.return_value
+        instance.publish.return_value = MagicMock(error="", rolled_back=False)
+        result = cmd_run(config)
+
+    assert result == EXIT_OK
+    instance.publish.assert_called_once()
+    call_args = instance.publish.call_args
+    assert call_args[0][0].task_id == "test_task", (
+        "publish() must be called with the live ApplyResult"
+    )
+
+
+def test_sev1_1_publish_skipped_for_dry_run_result(tmp_path: Path) -> None:
+    """SEV-1 #1: cmd_run does NOT call ApplyPublisher.publish() for dry_run_only results."""
+    from maintenance_worker.types.results import ApplyResult
+    config = _make_config(tmp_path)
+    _write_install_metadata(config.state_dir)
+
+    dry_result = ApplyResult(task_id="dry_task", dry_run_only=True)
+    mock_tick_result = MagicMock()
+    mock_tick_result.apply_results = [dry_result]
+    mock_tick_result.summary_path = None
+
+    with patch("maintenance_worker.cli.entry.run_tick", return_value=mock_tick_result), \
+         patch("maintenance_worker.cli.entry.ApplyPublisher") as MockPublisher:
+        instance = MockPublisher.return_value
+        result = cmd_run(config)
+
+    assert result == EXIT_OK
+    instance.publish.assert_not_called()
+
+
+def test_sev1_2_allowlist_check_called_before_push(tmp_path: Path) -> None:
+    """SEV-1 #2: check_remote_url_allowlist is called in the publish path before any git push."""
+    from maintenance_worker.core.apply_publisher import ApplyPublisher
+    from maintenance_worker.types.results import ApplyResult, ValidatorResult
+
+    install_meta = _make_install_meta()
+    publisher = ApplyPublisher(repo_root=tmp_path, install_meta=install_meta)
+
+    apply_result = _make_apply_result_live("task_allowlist")
+
+    allowlist_calls: list = []
+
+    def fake_check_allowlist(remote_url, meta):
+        allowlist_calls.append(remote_url)
+        return ValidatorResult.FORBIDDEN_OPERATION  # block — we just want to confirm it's called
+
+    with patch.object(publisher._validator, "check_remote_url_allowlist", side_effect=fake_check_allowlist), \
+         patch.object(publisher, "_resolve_remote_url", return_value="https://github.com/some/repo.git"):
+        result = publisher.publish(apply_result, run_id="testrun-12345678")
+
+    assert len(allowlist_calls) == 1, (
+        f"check_remote_url_allowlist must be called exactly once; got {allowlist_calls}"
+    )
+    # FORBIDDEN_OPERATION → publish returns error (not proceed to push)
+    assert result.error, "Allowlist rejection must surface as PublishResult.error"
+    assert not result.commit_sha, "No commit must be made when allowlist blocks"
+
+
+def test_sev1_3_guarded_git_blocks_force_push(tmp_path: Path) -> None:
+    """SEV-1 #3: _guarded_git blocks git push --force (FORBIDDEN_OPERATION from guard)."""
+    from maintenance_worker.core.apply_publisher import ApplyPublisher, PublishGuardError
+    from maintenance_worker.types.results import ValidatorResult
+
+    install_meta = _make_install_meta()
+    publisher = ApplyPublisher(repo_root=tmp_path, install_meta=install_meta)
+
+    force_push_argv = ["git", "-C", str(tmp_path), "push", "--force", "origin", "main"]
+
+    with patch(
+        "maintenance_worker.core.apply_publisher.check_git_operation",
+        return_value=ValidatorResult.FORBIDDEN_OPERATION,
+    ):
+        import pytest as _pytest
+        with _pytest.raises(PublishGuardError):
+            publisher._guarded_git(force_push_argv)
+
+
+def test_sev1_3_guarded_git_blocks_reset_hard(tmp_path: Path) -> None:
+    """SEV-1 #3: _guarded_git blocks git reset --hard (guard prevents forbidden ops)."""
+    from maintenance_worker.core.apply_publisher import ApplyPublisher, PublishGuardError
+    from maintenance_worker.types.results import ValidatorResult
+
+    install_meta = _make_install_meta()
+    publisher = ApplyPublisher(repo_root=tmp_path, install_meta=install_meta)
+
+    hard_reset_argv = ["git", "-C", str(tmp_path), "reset", "--hard", "HEAD"]
+
+    with patch(
+        "maintenance_worker.core.apply_publisher.check_git_operation",
+        return_value=ValidatorResult.FORBIDDEN_OPERATION,
+    ):
+        import pytest as _pytest
+        with _pytest.raises(PublishGuardError):
+            publisher._guarded_git(hard_reset_argv)

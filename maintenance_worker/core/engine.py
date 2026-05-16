@@ -47,7 +47,7 @@ from maintenance_worker.core.kill_switch import (
     post_mutation_detector,
 )
 from maintenance_worker.core.refusal import refuse_fatal, skip_tick
-from maintenance_worker.types.modes import RefusalReason
+from maintenance_worker.types.modes import InvocationMode, RefusalReason
 from maintenance_worker.types.results import ApplyResult, CheckResult
 from maintenance_worker.types.specs import (
     AckState,
@@ -76,6 +76,8 @@ class TickResult:
     apply_results: list of ApplyResult from APPLY_DECISIONS (one per task).
     skipped: True if tick was soft-skipped (skip_tick path).
     run_id: UUID4 identifying this tick's evidence trail.
+    summary_path: path to SUMMARY.md written in SUMMARY_REPORT phase, or None
+      if not yet written (stubs return None; P5.3/P5.5 EvidenceWriter populates).
     """
 
     run_id: str
@@ -85,6 +87,7 @@ class TickResult:
     apply_results: list[ApplyResult] = field(default_factory=list)
     skipped: bool = False
     skip_reason: str = ""
+    summary_path: Optional[Path] = None
 
 
 # ---------------------------------------------------------------------------
@@ -198,7 +201,7 @@ class MaintenanceEngine:
         # ── Phase 5: APPLY_DECISIONS ────────────────────────────────────────
         # Stages filesystem mutations only. No git commit or PR (P5.5 boundary).
         # MANUAL_CLI invocation mode forces dry_run_only regardless of live_default.
-        force_dry_run = invocation_mode == "MANUAL_CLI"
+        force_dry_run = invocation_mode == InvocationMode.MANUAL_CLI
         apply_results: list[ApplyResult] = []
         for task, manifest in zip(candidates, manifests):
             apply_result = self._apply_decisions(task, manifest, force_dry_run=force_dry_run)
@@ -302,10 +305,12 @@ class MaintenanceEngine:
         """
         Write SUMMARY.md to evidence_trail/<date>/.
 
-        P5.3/P5.5 EvidenceWriter.write_summary() will implement the full
-        artifact. This stub logs the summary to the logger only.
+        Writes a minimal SUMMARY.md to evidence_dir/<date>/SUMMARY.md and
+        sets result.summary_path so cmd_run can pass it to notify_tick_summary.
+
+        P5.3/P5.5 EvidenceWriter.write_summary() will replace this stub with
+        the full artifact. The path contract (result.summary_path) is stable.
         """
-        # P5.5 will implement: EvidenceWriter.write_summary(ctx, result).
         applied_count = sum(1 for r in result.apply_results if not r.dry_run_only)
         logger.info(
             "SUMMARY run_id=%s phases=%d applied=%d skipped=%s",
@@ -314,6 +319,25 @@ class MaintenanceEngine:
             applied_count,
             result.skipped,
         )
+        # Write minimal SUMMARY.md so notify_tick_summary has a path to read.
+        try:
+            today = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
+            trail_dir = ctx.config.evidence_dir / today
+            trail_dir.mkdir(parents=True, exist_ok=True)
+            summary_path = trail_dir / "SUMMARY.md"
+            content = (
+                f"# Maintenance Worker Summary\n\n"
+                f"run_id: {ctx.run_id}\n"
+                f"phases: {len(result.state_machine_breadcrumbs)}\n"
+                f"applied: {applied_count}\n"
+                f"skipped: {result.skipped}\n"
+            )
+            tmp = summary_path.with_suffix(".md.tmp")
+            tmp.write_text(content, encoding="utf-8")
+            tmp.replace(summary_path)
+            result.summary_path = summary_path
+        except OSError as exc:
+            logger.warning("_emit_summary: could not write SUMMARY.md: %s", exc)
 
 
 # ---------------------------------------------------------------------------

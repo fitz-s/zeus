@@ -34,6 +34,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
+from maintenance_worker.core.git_operation_guard import check_git_operation
 from maintenance_worker.core.install_metadata import InstallMetadata
 from maintenance_worker.core.provenance import (
     make_commit_message,
@@ -41,6 +42,10 @@ from maintenance_worker.core.provenance import (
 )
 from maintenance_worker.core.validator import ActionValidator
 from maintenance_worker.types.results import ApplyResult, ValidatorResult
+
+
+class PublishGuardError(RuntimeError):
+    """Raised when a git/gh operation guard blocks a command before execution."""
 
 
 # ---------------------------------------------------------------------------
@@ -180,8 +185,8 @@ class ApplyPublisher:
                 self._unstage()
                 return PublishResult(task_id=task_id, error=f"git commit failed: {commit_err}")
 
-            # Step 5: push to current branch.
-            push_ok, push_err = self._push()
+            # Step 5: push to current branch (pass remote_url for guard allowlist check).
+            push_ok, push_err = self._push(remote_url=remote_url)
             if not push_ok:
                 # Rollback: undo the commit (NEVER --hard).
                 self._rollback_commit()
@@ -243,40 +248,55 @@ class ApplyPublisher:
         except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
             return None
 
-    def _stage_changes(self) -> tuple[bool, str]:
-        """Run 'git add -A'. Returns (success, error_text)."""
+    def _guarded_git(
+        self,
+        argv: list[str],
+        remote_url: Optional[str] = None,
+        timeout: int = 30,
+    ) -> tuple[bool, str, str]:
+        """
+        Run a git command after passing it through check_git_operation.
+
+        Returns (ok, stdout, stderr). If the guard blocks, raises
+        PublishGuardError (caller converts to PublishResult.error).
+
+        SEV-1 #3: every git subprocess in this class must go through
+        this helper so the operation guard is structurally enforced.
+        """
+        guard_result = check_git_operation(argv, self._install_meta, remote_url)
+        if guard_result == ValidatorResult.FORBIDDEN_OPERATION:
+            raise PublishGuardError(
+                f"git_operation_guard blocked: {' '.join(argv[:4])!r}"
+            )
         try:
             result = subprocess.run(
-                ["git", "-C", str(self._repo_root), "add", "-A"],
+                argv,
                 capture_output=True,
                 text=True,
-                timeout=30,
+                timeout=timeout,
             )
-            if result.returncode == 0:
-                return True, ""
-            return False, result.stderr.strip() or result.stdout.strip()
+            return result.returncode == 0, result.stdout, result.stderr
         except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
-            return False, str(exc)
+            return False, "", str(exc)
+
+    def _stage_changes(self) -> tuple[bool, str]:
+        """Run 'git add -A' (guarded). Returns (success, error_text)."""
+        argv = ["git", "-C", str(self._repo_root), "add", "-A"]
+        ok, _out, err = self._guarded_git(argv, timeout=30)
+        return ok, err.strip() if not ok else ""
 
     def _commit(self, message: str) -> tuple[str, str]:
         """
-        Run 'git commit -m <message>'. Returns (sha_or_empty, error_text).
+        Run 'git commit -m <message>' (guarded). Returns (sha_or_empty, error_text).
 
         Caller must have already set the commit identity via set_commit_identity.
         """
-        try:
-            result = subprocess.run(
-                ["git", "-C", str(self._repo_root), "commit", "-m", message],
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
-            if result.returncode == 0:
-                sha = self._head_sha()
-                return sha, ""
-            return "", result.stderr.strip() or result.stdout.strip()
-        except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
-            return "", str(exc)
+        argv = ["git", "-C", str(self._repo_root), "commit", "-m", message]
+        ok, _out, err = self._guarded_git(argv, timeout=30)
+        if ok:
+            sha = self._head_sha()
+            return sha, ""
+        return "", err.strip() or _out.strip()
 
     def _head_sha(self) -> str:
         """Return the SHA of HEAD, or '' on failure."""
@@ -310,62 +330,53 @@ class ApplyPublisher:
         except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
             return ""
 
-    def _push(self) -> tuple[bool, str]:
+    def _push(self, remote_url: Optional[str] = None) -> tuple[bool, str]:
         """
-        Run 'git push origin <branch>' (non-force, non-main/master).
+        Run 'git push origin <branch>' (guarded, non-force, non-main/master).
 
-        The git_operation_guard in the engine enforces no force flags and
-        no push to protected branches. This method uses a plain push only.
+        remote_url: the resolved remote URL, passed to check_git_operation for
+        the allowlist guard (guarantee e). Defense-in-depth: we also check the
+        branch name directly before invoking the guard.
         """
         branch = self._current_branch()
         if not branch:
             return False, "Could not determine current branch for push"
 
-        # SAFETY: never push to main/master via publish (SAFETY_CONTRACT).
+        # Defense-in-depth: never push to main/master (guard also blocks this).
         if branch in ("main", "master"):
             return False, f"Refusing to push to protected branch {branch!r}"
 
+        argv = ["git", "-C", str(self._repo_root), "push", "origin", branch]
         try:
-            result = subprocess.run(
-                ["git", "-C", str(self._repo_root), "push", "origin", branch],
-                capture_output=True,
-                text=True,
-                timeout=60,
-            )
-            if result.returncode == 0:
-                return True, ""
-            return False, result.stderr.strip() or result.stdout.strip()
-        except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
+            ok, _out, err = self._guarded_git(argv, remote_url=remote_url, timeout=60)
+            return ok, err.strip() if not ok else ""
+        except PublishGuardError as exc:
             return False, str(exc)
 
     def _rollback_commit(self) -> bool:
         """
-        Roll back the most recent commit via 'git reset --soft HEAD~1'.
+        Roll back the most recent commit via 'git reset --soft HEAD~1' (guarded).
 
         SAFETY_CONTRACT: NEVER use --hard (forbidden operation). --soft
         leaves the working tree and index untouched; only moves HEAD back.
         Returns True if rollback succeeded, False otherwise.
+
+        The guard will ALLOW 'git reset --soft' and BLOCK 'git reset --hard',
+        adding structural enforcement on top of the defense-in-depth hardcoded --soft.
         """
+        argv = ["git", "-C", str(self._repo_root), "reset", "--soft", "HEAD~1"]
         try:
-            result = subprocess.run(
-                ["git", "-C", str(self._repo_root), "reset", "--soft", "HEAD~1"],
-                capture_output=True,
-                text=True,
-                timeout=15,
-            )
-            return result.returncode == 0
-        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+            ok, _out, _err = self._guarded_git(argv, timeout=15)
+            return ok
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError, PublishGuardError):
             return False
 
     def _unstage(self) -> None:
-        """Unstage all changes via 'git reset HEAD' (no commit to undo)."""
+        """Unstage all changes via 'git reset HEAD' (guarded, no commit to undo)."""
+        argv = ["git", "-C", str(self._repo_root), "reset", "HEAD"]
         try:
-            subprocess.run(
-                ["git", "-C", str(self._repo_root), "reset", "HEAD"],
-                capture_output=True,
-                timeout=15,
-            )
-        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+            self._guarded_git(argv, timeout=15)
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError, PublishGuardError):
             pass
 
     def _open_pr(
