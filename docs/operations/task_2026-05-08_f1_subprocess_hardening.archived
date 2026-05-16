@@ -1,0 +1,11 @@
+---
+archived_to: docs/operations/archive/2026-Q2/task_2026-05-08_f1_subprocess_hardening
+archived_at: 2026-05-16
+archived_by: maintenance_agent
+last_modified_before_archive: 2026-05-16
+exemption_checks_passed: 3/3
+reference_grep_count: 0
+restore_command: git mv docs/operations/archive/2026-Q2/task_2026-05-08_f1_subprocess_hardening docs/operations/task_2026-05-08_f1_subprocess_hardening
+entry_type: directory
+migration_source: docs/operations/task_2026-05-08_f1_subprocess_hardening
+---

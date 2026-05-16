@@ -1,5 +1,9 @@
 # Archive Queue — May 2–8 Task Batch
 
+**STATUS: EXECUTED 2026-05-16** — 53 entries migrated via `scripts/archive_may_batch_2026-05-16.py --apply`.  
+Deferred (OPERATOR_DECISION): 8 evidence/ files + paris_station_resolution_2026-05-01.yaml.  
+See commit on branch `feat/doc-alignment-2026-05-16`.
+
 **Purpose:** Post-merge cleanup list. DO NOT `git mv` these in the current PR (would balloon diff).  
 **Execute:** After this PR merges, run as a separate cleanup PR from canonical `main`.  
 **Deferred-archive rationale:** Archiving 59 dirs via `git mv` adds ~500-1500 lines to PR diff, breaking review tooling size limits and obscuring the substantive changes in this PR.
