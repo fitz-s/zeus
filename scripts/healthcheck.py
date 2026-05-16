@@ -1,3 +1,6 @@
+# Lifecycle: created=2026-03-26; last_reviewed=2026-05-16; last_reused=2026-05-16
+# Purpose: Operator healthcheck for live daemon, launchd, source truth, entry capability, and settlement freshness.
+# Reuse: Run when live health predicates, launchd contracts, or readiness/status summary health fields change.
 # Created: 2026-03-26
 # Last reused or audited: 2026-05-16
 # Authority basis: docs/operations/task_2026-05-14_k1_followups/PLAN.md §4.5 (K1 broken-script remediation); docs/operations/task_2026-05-16_live_continuous_run_package/LIVE_CONTINUOUS_RUN_PACKAGE_PLAN.md Phase C
@@ -14,6 +17,7 @@ import re
 import sqlite3
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -28,6 +32,30 @@ STATUS_STALE_SECONDS = 2 * 3600
 RISKGUARD_STALE_SECONDS = 5 * 60
 SOURCE_HEALTH_WRITER_STALE_SECONDS = 15 * 60
 LIVE_DB_UNKNOWN_HOLDER_SECONDS = 10 * 60
+SETTLEMENT_TRUTH_STALE_SECONDS = int(os.environ.get("ZEUS_SETTLEMENT_TRUTH_STALE_SECONDS", str(48 * 3600)))
+PROCESS_CODE_STALE_TOLERANCE_SECONDS = 2
+PROCESS_CODE_SURFACES = {
+    "live_trading": (
+        "src/main.py",
+        "src/engine/cycle_runner.py",
+        "src/control/ws_gap_guard.py",
+        "src/execution/command_recovery.py",
+        "src/execution/exchange_reconcile.py",
+        "src/execution/executor.py",
+        "src/execution/harvester_pnl_resolver.py",
+    ),
+    "data_ingest": (
+        "src/ingest_main.py",
+        "src/ingest/harvester_truth_writer.py",
+        "src/data/source_health_probe.py",
+    ),
+    "riskguard": ("src/riskguard/riskguard.py",),
+    "forecast_live": (
+        "src/ingest/forecast_live_daemon.py",
+        "src/data/source_health_probe.py",
+        "src/data/ecmwf_open_data.py",
+    ),
+}
 STATUS_REQUIRED_KEYS = ("control", "runtime", "execution", "learning", "truth")
 STATUS_CONTROL_REQUIRED_KEYS = (
     "recommended_auto_commands",
@@ -89,6 +117,10 @@ def _riskguard_label() -> str:
 
 def _forecast_live_label() -> str:
     return os.environ.get("ZEUS_FORECAST_LIVE_LABEL", "com.zeus.forecast-live")
+
+
+def _data_ingest_label() -> str:
+    return os.environ.get("ZEUS_DATA_INGEST_LABEL", "com.zeus.data-ingest")
 
 
 def _launchagents_dir() -> Path:
@@ -204,6 +236,85 @@ def _process_info(pid: int) -> dict:
         "etime_seconds": _etime_to_seconds(etime),
         "command": _redacted_process_command(command),
         "_command_for_classification": command,
+    }
+
+
+def _process_start_epoch(pid: int) -> float | None:
+    try:
+        proc = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "lstart="],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except Exception:
+        return None
+    if proc.returncode != 0:
+        return None
+    text = proc.stdout.strip()
+    if not text:
+        return None
+    try:
+        return time.mktime(time.strptime(text, "%a %b %d %H:%M:%S %Y"))
+    except ValueError:
+        return None
+
+
+def _max_source_mtime(root: Path, rel_paths: tuple[str, ...]) -> float | None:
+    mtimes: list[float] = []
+    for rel_path in rel_paths:
+        try:
+            mtimes.append((root / rel_path).stat().st_mtime)
+        except OSError:
+            pass
+    return max(mtimes) if mtimes else None
+
+
+def _process_loaded_code_status(launchd_contracts: dict, *, root: Path | None = None) -> dict:
+    root_path = Path(root or PROJECT_ROOT)
+    stale: list[dict] = []
+    unattested: list[dict] = []
+    items: list[dict] = []
+    for item in launchd_contracts.get("items", []):
+        name = item.get("name")
+        rel_paths = PROCESS_CODE_SURFACES.get(str(name))
+        if not rel_paths:
+            continue
+        loaded = item.get("loaded") if isinstance(item.get("loaded"), dict) else {}
+        pid = int(loaded.get("pid") or 0)
+        source_mtime = _max_source_mtime(root_path, rel_paths)
+        attestation = {
+            "name": name,
+            "label": item.get("label"),
+            "pid": pid,
+            "source_mtime": source_mtime,
+            "paths": list(rel_paths),
+        }
+        if pid <= 0 or source_mtime is None:
+            attestation["issue"] = "process_loaded_code_unattested"
+            unattested.append(attestation)
+            items.append(attestation)
+            continue
+        started_at = _process_start_epoch(pid)
+        attestation["started_at"] = started_at
+        if started_at is None:
+            attestation["issue"] = "process_loaded_code_unattested"
+            unattested.append(attestation)
+        elif started_at + PROCESS_CODE_STALE_TOLERANCE_SECONDS < source_mtime:
+            attestation["issue"] = "process_started_before_source_mtime"
+            stale.append(attestation)
+        items.append(attestation)
+    issue = None
+    if stale:
+        issue = "PROCESS_LOADED_CODE_STALE"
+    elif unattested:
+        issue = "PROCESS_LOADED_CODE_UNATTESTED"
+    return {
+        "ok": not stale and not unattested,
+        "issue": issue,
+        "stale": stale,
+        "unattested": unattested,
+        "items": items,
     }
 
 
@@ -433,6 +544,7 @@ def _launchd_contracts(
     launchagents = Path(launchagents_dir or _launchagents_dir())
     specs = (
         ("live_trading", _launchd_label(), "src.main"),
+        ("data_ingest", _data_ingest_label(), "src.ingest_main"),
         ("riskguard", _riskguard_label(), "src.riskguard.riskguard"),
         ("forecast_live", _forecast_live_label(), "src.ingest.forecast_live_daemon"),
     )
@@ -523,6 +635,55 @@ def _status_age_seconds(timestamp: str) -> float | None:
     except ValueError:
         return None
     return max(0.0, (datetime.now(timezone.utc) - ts).total_seconds())
+
+
+def _settlement_truth_status(db_path: Path | None = None) -> dict:
+    path = Path(db_path or _world_db_path())
+    if not path.exists():
+        return {
+            "ok": False,
+            "path": str(path),
+            "issue": "SETTLEMENT_TRUTH_DB_MISSING",
+        }
+    try:
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        row = conn.execute(
+            "SELECT COUNT(*) AS count, MAX(settled_at) AS max_settled_at, "
+            "MAX(recorded_at) AS max_recorded_at FROM settlements_v2"
+        ).fetchone()
+        conn.close()
+    except Exception as exc:
+        return {
+            "ok": False,
+            "path": str(path),
+            "issue": "SETTLEMENT_TRUTH_UNAVAILABLE",
+            "error": str(exc),
+        }
+    count = int(row[0] or 0) if row else 0
+    max_settled_at = row[1] if row else None
+    age_seconds = _status_age_seconds(max_settled_at or "")
+    ok = (
+        count > 0
+        and age_seconds is not None
+        and age_seconds <= SETTLEMENT_TRUTH_STALE_SECONDS
+    )
+    issue = None
+    if count <= 0:
+        issue = "SETTLEMENT_TRUTH_EMPTY"
+    elif age_seconds is None:
+        issue = "SETTLEMENT_TRUTH_MAX_SETTLED_AT_UNPARSEABLE"
+    elif not ok:
+        issue = "SETTLEMENT_TRUTH_STALE"
+    return {
+        "ok": ok,
+        "path": str(path),
+        "count": count,
+        "max_settled_at": max_settled_at,
+        "max_recorded_at": row[2] if row else None,
+        "age_seconds": None if age_seconds is None else round(age_seconds, 1),
+        "stale_budget_seconds": SETTLEMENT_TRUTH_STALE_SECONDS,
+        "issue": issue,
+    }
 
 
 def _source_health_status() -> dict:
@@ -699,6 +860,10 @@ def check() -> dict:
     result["launchd_contract_ok"] = bool(result["launchd_contracts"].get("ok"))
     if not result["launchd_contract_ok"]:
         result["launchd_contract_issue"] = "LIVE_LAUNCHD_CONTRACT_DRIFT"
+    result["process_code"] = _process_loaded_code_status(result["launchd_contracts"])
+    result["process_code_ok"] = bool(result["process_code"].get("ok"))
+    if not result["process_code_ok"]:
+        result["process_code_issue"] = result["process_code"].get("issue") or "PROCESS_LOADED_CODE_UNATTESTED"
     result["source_health"] = _source_health_status()
     result["source_health_ok"] = bool(result["source_health"].get("ok"))
     if not result["source_health_ok"]:
@@ -723,6 +888,15 @@ def check() -> dict:
         result["riskguard_alive"] = pid > 0
     except Exception:
         result["riskguard_alive"] = False
+
+    try:
+        pid = _launchctl_pid_for(_data_ingest_label())
+        result["data_ingest_label"] = _data_ingest_label()
+        result["data_ingest_pid"] = pid
+        result["data_ingest_alive"] = pid > 0
+    except Exception:
+        result["data_ingest_label"] = _data_ingest_label()
+        result["data_ingest_alive"] = False
 
     # Check mode-qualified status summary
     status_path = _status_path()
@@ -776,6 +950,20 @@ def check() -> dict:
             execution = status.get("execution", {}) or {}
             if isinstance(execution, dict):
                 result["execution_summary"] = execution.get("overall", execution)
+            execution_capability = status.get("execution_capability", {}) or {}
+            if isinstance(execution_capability, dict):
+                entry_capability = execution_capability.get("entry", {}) or {}
+                if isinstance(entry_capability, dict):
+                    result["entry_execution_capability"] = entry_capability
+                    entry_status = entry_capability.get("status")
+                    result["entry_execution_capability_status"] = entry_status
+                    result["entry_execution_capability_ok"] = entry_status not in {
+                        "blocked",
+                        "UNKNOWN_BLOCKED",
+                        "unknown_blocked",
+                    }
+                    if not result["entry_execution_capability_ok"]:
+                        result["entry_execution_capability_issue"] = "LIVE_ENTRY_EXECUTION_BLOCKED"
             strategy = status.get("strategy", {}) or {}
             if isinstance(strategy, dict):
                 result["strategy_summary"] = strategy
@@ -807,6 +995,7 @@ def check() -> dict:
         result["action_required"] = False
         result["db_lock_status"] = {"ok": True, "locks": [], "issue": None}
         result["db_lock_ok"] = True
+        result["entry_execution_capability_ok"] = False
 
     risk_state_path = _risk_state_path()
     result["risk_state_path"] = str(risk_state_path)
@@ -887,6 +1076,11 @@ def check() -> dict:
         result["entry_forecast_status"] = {"status": "UNKNOWN_BLOCKED", "error": "world_db_missing"}
         result["entry_forecast_blockers"] = ["ENTRY_FORECAST_WORLD_DB_MISSING"]
 
+    result["settlement_truth"] = _settlement_truth_status()
+    result["settlement_truth_ok"] = bool(result["settlement_truth"].get("ok"))
+    if not result["settlement_truth_ok"]:
+        result["settlement_truth_issue"] = result["settlement_truth"].get("issue") or "SETTLEMENT_TRUTH_UNHEALTHY"
+
     try:
         from scripts.validate_assumptions import run_validation
 
@@ -903,12 +1097,16 @@ def check() -> dict:
         and bool(result.get("status_fresh"))
         and bool(result.get("status_contract_valid"))
         and bool(result.get("riskguard_alive"))
+        and bool(result.get("data_ingest_alive"))
         and bool(result.get("riskguard_fresh"))
         and bool(result.get("riskguard_contract_valid"))
         and bool(result.get("assumptions_valid"))
         and bool(result.get("code_plane_ok"))
+        and bool(result.get("process_code_ok"))
         and bool(result.get("launchd_contract_ok"))
         and bool(result.get("source_health_ok"))
+        and bool(result.get("entry_execution_capability_ok", True))
+        and bool(result.get("settlement_truth_ok"))
         and bool(result.get("db_lock_ok", True))
         and bool(result.get("live_db_holders_ok", True))
         and not bool(result.get("cycle_failed"))
