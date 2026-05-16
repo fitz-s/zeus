@@ -178,6 +178,26 @@ def apply(decision: Candidate, ctx: TickContext) -> ApplyResult:
     if decision.verdict != VERDICT_CANDIDATE:
         return ApplyResult(task_id="zero_byte_state_cleanup", dry_run_only=True)
 
+    # TOCTOU re-verify: conditions may have changed between enumerate() and apply().
+    # Re-check size, lsof lock, and sqlite-companion before committing to unlink().
+    try:
+        cur = decision.path.stat()
+    except (OSError, FileNotFoundError):
+        logger.info("zero_byte_state_cleanup: skip; file gone at apply time: %s", decision.path)
+        return ApplyResult(task_id="zero_byte_state_cleanup", dry_run_only=True)
+    if cur.st_size != 0:
+        logger.info(
+            "zero_byte_state_cleanup: skip; file no longer zero-byte at apply (size=%d): %s",
+            cur.st_size, decision.path,
+        )
+        return ApplyResult(task_id="zero_byte_state_cleanup", dry_run_only=True)
+    if _is_locked_by_lsof(decision.path) or _is_sqlite_companion(decision.path):
+        logger.info(
+            "zero_byte_state_cleanup: skip; race-detected post-enumerate guard fired: %s",
+            decision.path,
+        )
+        return ApplyResult(task_id="zero_byte_state_cleanup", dry_run_only=True)
+
     try:
         decision.path.unlink()
         logger.info("zero_byte_state_cleanup: deleted %s", decision.path)

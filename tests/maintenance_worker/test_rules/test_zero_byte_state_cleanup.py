@@ -451,3 +451,50 @@ def test_generic_tmp_file_is_candidate(tmp_path: Path) -> None:
     assert any(c.path == tmp_file for c in candidates), (
         f".tmp file should be ZERO_BYTE_DELETE_CANDIDATE; got: {[(c.path.name, c.verdict) for c in results]}"
     )
+
+
+# ---------------------------------------------------------------------------
+# MB1 Test: TOCTOU re-verify in apply()
+# ---------------------------------------------------------------------------
+
+
+def test_apply_toctou_skip_if_file_grows(tmp_path: Path) -> None:
+    """
+    MB1: apply() must skip deletion if the file has grown (size > 0) between
+    enumerate() and apply() time.
+
+    Simulate: decision has VERDICT_CANDIDATE but file is non-zero at apply-time
+    (mocked via Path.stat returning st_size > 0).
+    apply() must return dry_run_only=True and NOT call unlink().
+    """
+    ctx = _make_ctx(tmp_path, dry_run_only=False)
+
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    growing_file = state_dir / "race_file.json"
+    growing_file.write_bytes(b"")  # zero at enumerate time
+
+    decision = Candidate(
+        task_id="zero_byte_state_cleanup",
+        path=growing_file,
+        verdict=VERDICT_CANDIDATE,
+        reason="zero-byte stale file: age=20.0d > 7d",
+        evidence={"age_days": 20.0, "ttl_days": 7},
+    )
+
+    import os
+    # Simulate file having grown between enumerate and apply
+    non_zero_stat = os.stat_result((
+        0o100644, 0, 0, 1, 0, 0, 42,  # st_size=42 (non-zero)
+        0.0, 0.0, 0.0,
+    ))
+
+    with patch("maintenance_worker.rules.zero_byte_state_cleanup._is_locked_by_lsof",
+               return_value=False), \
+         patch("maintenance_worker.rules.zero_byte_state_cleanup._is_sqlite_companion",
+               return_value=False), \
+         patch.object(type(growing_file), "stat", return_value=non_zero_stat):
+        result = apply(decision, ctx)
+
+    assert result.dry_run_only is True, "apply() must skip when file grew post-enumerate"
+    assert growing_file.exists(), "File must NOT have been deleted"
