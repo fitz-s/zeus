@@ -22,7 +22,7 @@
 
 **Lesson (b):** When an operator lock row is written with `system_auto_pause` issuer (precedence=100, auto-expiry=15min), a subsequent auto-pause from an unrelated exception can silently overwrite it and expire it — leaving the lock decorative for ~5 minutes. Operator-issued locks must use `precedence ≥ 200` and `effective_until=NULL`.  
 **Source:** `docs/operations/task_2026-05-04_zeus_may3_review_remediation/LOCK_DECISION.md` §3 Amendment 1 and embedded history "between 09:34:17 and 09:39:00 UTC layer 3 was decorative"  
-**Drill-in:** `LOCK_DECISION.md` → Amendment 1 + "Lock layer 3 history" in `LIVE_TRADING_LOCKED_2026-05-04.md` (now archived to `archive/2026-Q2/`)
+**Drill-in:** `LOCK_DECISION.md` → Amendment 1 + "Lock layer 3 history" in `LIVE_TRADING_LOCKED_2026-05-04.md` (now deleted from main per PR #122; our archive intent superseded during 2026-05-16 rebase; recover from git history if needed)
 
 ---
 

@@ -12,7 +12,7 @@
 | Phase | Action | Outcome |
 |-------|--------|---------|
 | A | Delete gitignored state checksums + writer-locks + tmp/ | DONE |
-| B | LIVE_TRADING_LOCKED_2026-05-04.md disposition | ARCHIVED (stale) |
+| B | LIVE_TRADING_LOCKED_2026-05-04.md disposition | DELETED_BY_MAIN_PR#122 (our archive intent superseded during rebase) |
 | C | Canonical /zeus cleanup (deprecated raw, zeus_trades.db, log rotation) | PARTIAL — see details |
 | D | Deeper subdir audit | REPORT ONLY — no action taken |
 
@@ -59,6 +59,8 @@
 3. **Recent commits:** `src/execution/` and `src/control/` have 18 commits since 2026-05-05, including `feat(live): add live order e2e verification` — confirming active live trading development post-lock.
 
 **Action:** `git mv LIVE_TRADING_LOCKED_2026-05-04.md docs/operations/archive/2026-Q2/LIVE_TRADING_LOCKED_2026-05-04.md`
+
+Post-rebase reconciliation 2026-05-16: PR #122 landed before our merge and explicitly deleted `LIVE_TRADING_LOCKED_2026-05-04.md` from the root. The rebase conflict was resolved by accepting main's deletion. Net effect matches our archive intent (file no longer at root), but no archive copy preserved at `docs/operations/archive/2026-Q2/`. If historical content is needed, recover from git history via `git show <pre-rebase-SHA>:LIVE_TRADING_LOCKED_2026-05-04.md`.
 
 **Commit:** see commit hash below.
 
