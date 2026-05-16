@@ -116,7 +116,20 @@ def enumerate(entry: Any, ctx: TickContext) -> list[Candidate]:  # noqa: A001
             ))
             continue
 
-        # Current tick dir — forbidden by catalog safety spec
+        # Depth filter FIRST — children of date dirs move with their parent.
+        # Must precede current-tick check to avoid emitting N noise SKIP_CURRENT_TICK
+        # candidates for every file inside today's evidence dir.
+        try:
+            rel = path.relative_to(evidence_dir)
+        except ValueError:
+            continue
+        if len(rel.parts) > 1:
+            # Nested child — silently skip (no candidate emitted; moves with parent)
+            continue
+
+        # Current tick dir — forbidden by catalog safety spec.
+        # Only reached for top-level entries (rel.parts == 1) so at most ONE
+        # SKIP_CURRENT_TICK candidate per tick (the date dir itself).
         try:
             if path == current_tick_dir or path.is_relative_to(current_tick_dir):
                 candidates.append(Candidate(
@@ -139,16 +152,6 @@ def enumerate(entry: Any, ctx: TickContext) -> list[Candidate]:  # noqa: A001
                 reason="file matches sqlite-companion pattern",
                 evidence={"suffix": path.suffix},
             ))
-            continue
-
-        # Age check — only top-level date dirs or files directly in evidence_dir
-        # are the unit of archival; skip deeply nested children (they move with parent)
-        try:
-            rel = path.relative_to(evidence_dir)
-        except ValueError:
-            continue
-        if len(rel.parts) > 1:
-            # Child of a date dir — will be moved with its parent dir
             continue
 
         try:

@@ -139,7 +139,8 @@ def enumerate(entry: Any, ctx: TickContext) -> list[Candidate]:  # noqa: A001
                 ))
                 continue
 
-            # Compute drift score: doc newer than code = possible undocumented change
+            # Compute drift score: doc newer than code (authority not reflected in code yet)
+            # Directional: code-newer-than-doc scores 0 (not drift by this definition)
             drift_score = _compute_drift_score(doc_mtime, code_mtime, now_ts, stale_seconds)
 
             if drift_score < drift_threshold:
@@ -222,16 +223,21 @@ def _compute_drift_score(doc_mtime: float, code_mtime: float, now_ts: float, sta
     """
     Compute a drift score in [0.0, 1.0].
 
-    Score is higher when:
-    - Code is significantly older than doc (doc updated without code update)
-    - Either file is very stale relative to stale_seconds
+    Direction: authority drift = doc was updated MORE RECENTLY than code
+    (doc says X, code hasn't caught up). Inverse (code newer than doc) is
+    not drift — it may simply mean the doc hasn't been written yet.
 
-    Formula:
-      base = abs(doc_mtime - code_mtime) / stale_seconds  (clamped to 1.0)
-      stale_bonus = +0.1 if code is older than stale_seconds
+    Specifically:
+      mtime_gap = max(doc_mtime - code_mtime, 0)  -- zero if code is newer
+      base = mtime_gap / stale_seconds             (clamped to 1.0)
+      stale_bonus = +0.1 if code is older than stale_seconds (amplify stale code)
       result = min(base + stale_bonus, 1.0)
+
+    Example: doc updated 5d ago, code last updated 35d ago → stale_seconds=30d:
+      gap = 30d → base = 1.0 → clamp → stale_bonus = 0.1 → score = 1.0 (ESCALATE)
     """
-    mtime_gap = abs(doc_mtime - code_mtime)
+    # Directional: only score when doc is newer than code (authority not in code yet)
+    mtime_gap = max(doc_mtime - code_mtime, 0.0)
     base = min(mtime_gap / stale_seconds, 1.0) if stale_seconds > 0 else 0.0
 
     code_age = now_ts - code_mtime

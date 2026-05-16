@@ -61,8 +61,12 @@ DEFAULT_LORE_TOPIC_DIRS = [
 ]
 DEFAULT_PROPOSALS_DIR = "lore_proposals"
 
-# Heuristic: look for a ## Lessons heading (any level 2 variant)
-_LESSONS_RE = re.compile(r"^#{1,3}\s+(Lessons|Lessons Learned|Lore)\b", re.MULTILINE | re.IGNORECASE)
+# Heuristic: look for a ## Lessons heading (H2 exactly per catalog spec "## Lessons").
+# Excludes H1 (# Lessons) and H3 (### Lessons) to avoid over-capture.
+# "Lore" variant is excluded — catalog spec (TASK_CATALOG.yaml:172) says "Lessons" only;
+# a packet heading "## Lore" would match the handler's own lore-dir scan, not this trigger.
+# Note: still matches "## Lessons Learned" (common variant) per IGNORECASE.
+_LESSONS_RE = re.compile(r"^##\s+Lessons\b", re.MULTILINE | re.IGNORECASE)
 # Reviewed/promoted marker (written by human or promote script)
 _REVIEWED_RE = re.compile(r"^(REVIEWED|PROMOTED)\s*:", re.MULTILINE)
 
