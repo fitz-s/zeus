@@ -92,6 +92,7 @@ def build_parser(description: str | None = None) -> argparse.ArgumentParser:
     parser.add_argument("--task", default="", help="Task string for --navigation")
     parser.add_argument("--files", nargs="*", default=[], help="Files for --navigation")
     parser.add_argument("--intent", default=None, help="Typed digest profile id; overrides free-text profile scoring but not admission")
+    parser.add_argument("--v-next-shadow", action="store_true", default=False, help="P3 shadow mode: run v_next.admit in parallel with current admission, log divergence to evidence/topology_v_next_shadow/; current admission remains authoritative")
     parser.add_argument("--task-class", default=None, help="Typed semantic boot task class")
     parser.add_argument("--write-intent", default=None, help="Runtime write intent: read_only, edit, apply, live, production")
     parser.add_argument("--operation-stage", default=None, help="Typed operation stage: explore, edit, merge, closeout, handoff")
@@ -388,6 +389,9 @@ def run_flag_command(api: Any, args: argparse.Namespace) -> int | None:
         _batch_cap = getattr(args, "companion_loop_batch_cap", None)
         if _batch_cap is not None:
             navigation_kwargs["companion_loop_batch_cap"] = _batch_cap
+        _v_next_shadow = getattr(args, "v_next_shadow", False)
+        if _v_next_shadow:
+            navigation_kwargs["v_next_shadow"] = True
         if args.issue_schema_version != "1":
             navigation_kwargs["issue_schema_version"] = args.issue_schema_version
         navigation_files = list(args.files or [])
