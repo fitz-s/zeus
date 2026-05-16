@@ -1,9 +1,9 @@
-# Lifecycle: created=2026-05-15; last_reviewed=2026-05-15; last_reused=2026-05-15
+# Lifecycle: created=2026-05-15; last_reviewed=2026-05-16; last_reused=2026-05-16
 # Purpose: Lock forecast-live as the canonical forecast owner for live health alerts.
 # Reuse: Run when live_health_probe process/heartbeat classification or forecast-live launch ownership changes.
 # Created: 2026-05-15
-# Last reused or audited: 2026-05-15
-# Authority basis: docs/operations/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md
+# Last reused or audited: 2026-05-16
+# Authority basis: docs/operations/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md; docs/operations/task_2026-05-16_live_continuous_run_package/LIVE_CONTINUOUS_RUN_PACKAGE_PLAN.md Phase C
 
 from __future__ import annotations
 
@@ -78,6 +78,21 @@ def _configure(
 
     monkeypatch.setattr(module, "_alive", fake_alive)
     monkeypatch.setattr(module, "_process_env", fake_process_env)
+    monkeypatch.setattr(
+        module,
+        "_git_runtime_identity",
+        lambda root_arg: {
+            "status": "ok",
+            "repo": str(root_arg),
+            "head": "expected-commit",
+            "branch": "main",
+            "dirty": False,
+            "expected_ref": "origin/main",
+            "expected_commit": "expected-commit",
+            "expected_error": None,
+            "matches_expected": True,
+        },
+    )
 
 
 def test_forecast_live_owner_replaces_legacy_ingest_dead(tmp_path, monkeypatch, capsys):
@@ -237,3 +252,76 @@ def test_legacy_ingest_without_opendata_ownership_is_observed_not_actionable(
     assert out.startswith("OK")
     assert "legacy_ingest=1" in out
     assert "legacy_ingest_opendata_owner_present" not in out
+
+
+def test_code_plane_drift_is_actionable(tmp_path, monkeypatch, capsys):
+    module = _load_module()
+    root = tmp_path / "zeus"
+    _healthy_state(root)
+    _configure(
+        module,
+        monkeypatch,
+        root,
+        tmp_path / "snapshot.json",
+        {
+            "src.main": [101],
+            "src.ingest.forecast_live_daemon": [202],
+            "src.ingest_main": [],
+            "src.riskguard": [303],
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "_git_runtime_identity",
+        lambda root_arg: {
+            "status": "ok",
+            "repo": str(root_arg),
+            "head": "running-commit",
+            "branch": "deploy/live",
+            "dirty": True,
+            "expected_ref": "origin/main",
+            "expected_commit": "main-commit",
+            "expected_error": None,
+            "matches_expected": False,
+        },
+    )
+
+    module.main()
+
+    out = capsys.readouterr().out
+    assert out.startswith("ALERT")
+    assert "LIVE_CODE_PLANE_DRIFT" in out
+    assert "commit=running-commit" in out
+    assert "expected=main-commit" in out
+    assert "dirty=True" in out
+
+
+def test_git_runtime_identity_uses_expected_commit_env(tmp_path, monkeypatch):
+    module = _load_module()
+    root = tmp_path / "zeus"
+    calls = []
+
+    def fake_run(args, **kwargs):
+        calls.append(args)
+        git_args = args[3:]
+        if git_args == ["rev-parse", "HEAD"]:
+            stdout = "abc123\n"
+        elif git_args == ["rev-parse", "--abbrev-ref", "HEAD"]:
+            stdout = "main\n"
+        elif git_args == ["status", "--porcelain"]:
+            stdout = ""
+        else:
+            raise AssertionError(f"unexpected git args: {git_args!r}")
+        return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+    monkeypatch.setenv("ZEUS_LIVE_EXPECTED_COMMIT", "abc123")
+
+    identity = module._git_runtime_identity(str(root))
+
+    assert identity["status"] == "ok"
+    assert identity["head"] == "abc123"
+    assert identity["expected_commit"] == "abc123"
+    assert identity["matches_expected"] is True
+    assert identity["dirty"] is False
+    assert ["git", "-C", str(root), "rev-parse", "origin/main"] not in calls

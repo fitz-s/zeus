@@ -1,6 +1,6 @@
 # Created: 2026-03-26
-# Last reused or audited: 2026-05-15
-# Authority basis: docs/operations/task_2026-05-14_k1_followups/PLAN.md §4.5 (K1 broken-script remediation)
+# Last reused or audited: 2026-05-16
+# Authority basis: docs/operations/task_2026-05-14_k1_followups/PLAN.md §4.5 (K1 broken-script remediation); docs/operations/task_2026-05-16_live_continuous_run_package/LIVE_CONTINUOUS_RUN_PACKAGE_PLAN.md Phase C
 """Zeus health check for Venus/OpenClaw monitoring.
 
 Reads mode-qualified state written by the running daemon.
@@ -9,6 +9,7 @@ Exit code 0 = healthy, 1 = degraded, 2 = dead.
 
 import json
 import os
+import plistlib
 import re
 import sqlite3
 import subprocess
@@ -25,6 +26,8 @@ from src.state.decision_chain import query_no_trade_cases
 
 STATUS_STALE_SECONDS = 2 * 3600
 RISKGUARD_STALE_SECONDS = 5 * 60
+SOURCE_HEALTH_WRITER_STALE_SECONDS = 15 * 60
+LIVE_DB_UNKNOWN_HOLDER_SECONDS = 10 * 60
 STATUS_REQUIRED_KEYS = ("control", "runtime", "execution", "learning", "truth")
 STATUS_CONTROL_REQUIRED_KEYS = (
     "recommended_auto_commands",
@@ -59,6 +62,14 @@ def _zeus_db_path() -> Path:
     return state_path("zeus.db").parent / "zeus.db"
 
 
+def _trade_db_path() -> Path:
+    return state_path("zeus_trades.db")
+
+
+def _source_health_path() -> Path:
+    return state_path("source_health.json")
+
+
 def _world_db_path() -> Path:
     # K1 split 2026-05-11: ensemble_snapshots_v2 / readiness_state moved to
     # forecasts.db.  Return ZEUS_FORECASTS_DB_PATH so callers (and monkeypatched
@@ -76,6 +87,434 @@ def _riskguard_label() -> str:
     return "com.zeus.riskguard"
 
 
+def _forecast_live_label() -> str:
+    return os.environ.get("ZEUS_FORECAST_LIVE_LABEL", "com.zeus.forecast-live")
+
+
+def _launchagents_dir() -> Path:
+    return Path(os.environ.get("ZEUS_LAUNCHAGENTS_DIR", str(Path.home() / "Library" / "LaunchAgents")))
+
+
+def _code_plane_identity() -> dict:
+    try:
+        from scripts.live_health_probe import _git_runtime_identity
+
+        return _git_runtime_identity(str(PROJECT_ROOT))
+    except Exception as exc:
+        return {
+            "status": "git_unavailable",
+            "repo": str(PROJECT_ROOT),
+            "error": str(exc),
+            "dirty": None,
+            "matches_expected": False,
+        }
+
+
+def _code_plane_is_ready(identity: dict) -> bool:
+    return (
+        identity.get("status") == "ok"
+        and identity.get("dirty") is False
+        and identity.get("matches_expected") is True
+    )
+
+
+def _module_from_program_arguments(program_args: list) -> str:
+    for idx, token in enumerate(program_args[:-1]):
+        if token == "-m":
+            return str(program_args[idx + 1])
+    return ""
+
+
+def _has_module_launch(command: str, module: str) -> bool:
+    tokens = str(command or "").split()
+    for idx, token in enumerate(tokens[:-1]):
+        if token == "-m" and tokens[idx + 1] == module:
+            return True
+    return False
+
+
+def _is_known_live_db_holder(command: str) -> bool:
+    command = str(command or "")
+    known_modules = (
+        "src.main",
+    )
+    if any(_has_module_launch(command, module) for module in known_modules):
+        return True
+    return False
+
+
+def _redacted_process_command(command: str) -> str:
+    tokens = str(command or "").split()
+    for idx, token in enumerate(tokens[:-1]):
+        if token == "-m":
+            return f"-m {tokens[idx + 1]}"
+    for token in tokens:
+        if token.endswith(".py"):
+            return Path(token).name
+    return tokens[0] if tokens else ""
+
+
+def _etime_to_seconds(raw: str) -> int | None:
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    days = 0
+    if "-" in text:
+        day_text, text = text.split("-", 1)
+        try:
+            days = int(day_text)
+        except ValueError:
+            return None
+    parts = text.split(":")
+    try:
+        values = [int(part) for part in parts]
+    except ValueError:
+        return None
+    if len(values) == 2:
+        hours = 0
+        minutes, seconds = values
+    elif len(values) == 3:
+        hours, minutes, seconds = values
+    else:
+        return None
+    return (((days * 24) + hours) * 60 + minutes) * 60 + seconds
+
+
+def _process_info(pid: int) -> dict:
+    try:
+        proc = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "etime=,command="],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except Exception as exc:
+        return {"pid": pid, "error": str(exc)}
+    if proc.returncode != 0:
+        return {"pid": pid, "error": (proc.stderr or "").strip() or "ps failed"}
+    text = proc.stdout.strip()
+    if not text:
+        return {"pid": pid, "error": "ps empty"}
+    parts = text.split(None, 1)
+    etime = parts[0]
+    command = parts[1] if len(parts) > 1 else ""
+    return {
+        "pid": pid,
+        "etime": etime,
+        "etime_seconds": _etime_to_seconds(etime),
+        "command": _redacted_process_command(command),
+        "_command_for_classification": command,
+    }
+
+
+def _live_db_holder_status() -> dict:
+    db_path = _trade_db_path()
+    db_paths = [db_path, db_path.with_name(f"{db_path.name}-wal"), db_path.with_name(f"{db_path.name}-shm")]
+    existing = [str(path) for path in db_paths if path.exists()]
+    if not existing:
+        return {
+            "ok": True,
+            "path": str(db_path),
+            "holders": [],
+            "unknown_long_lived_holders": [],
+            "diagnostic": "db_files_missing",
+        }
+    try:
+        proc = subprocess.run(
+            ["lsof", "-F", "pn", *existing],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except FileNotFoundError:
+        return {
+            "ok": False,
+            "path": str(db_path),
+            "holders": [],
+            "unknown_long_lived_holders": [],
+            "unattested_holders": [],
+            "diagnostic_unavailable": True,
+            "issue": "LIVE_DB_HOLDER_ATTESTATION_UNAVAILABLE",
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "path": str(db_path),
+            "holders": [],
+            "unknown_long_lived_holders": [],
+            "unattested_holders": [],
+            "diagnostic_unavailable": True,
+            "issue": f"LIVE_DB_HOLDER_ATTESTATION_FAILED:{type(exc).__name__}",
+        }
+    stderr = (proc.stderr or "").strip()
+    if proc.returncode != 0 and stderr:
+        return {
+            "ok": False,
+            "path": str(db_path),
+            "holders": [],
+            "unknown_long_lived_holders": [],
+            "unattested_holders": [],
+            "diagnostic_unavailable": True,
+            "issue": "LIVE_DB_HOLDER_ATTESTATION_FAILED",
+            "error": stderr,
+        }
+    if proc.returncode != 0 and not (proc.stdout or "").strip():
+        return {
+            "ok": True,
+            "path": str(db_path),
+            "holders": [],
+            "unknown_long_lived_holders": [],
+            "unattested_holders": [],
+            "diagnostic": "no_holders",
+        }
+
+    holders_by_pid: dict[int, dict] = {}
+    current_pid: int | None = None
+    for line in (proc.stdout or "").splitlines():
+        if line.startswith("p"):
+            try:
+                current_pid = int(line[1:])
+            except ValueError:
+                current_pid = None
+            if current_pid is not None:
+                holders_by_pid.setdefault(current_pid, {"pid": current_pid, "open_dbs": []})
+        elif line.startswith("n") and current_pid is not None:
+            holders_by_pid.setdefault(current_pid, {"pid": current_pid, "open_dbs": []})["open_dbs"].append(line[1:])
+
+    holders: list[dict] = []
+    unknown_long_lived: list[dict] = []
+    unattested: list[dict] = []
+    for pid, holder in sorted(holders_by_pid.items()):
+        info = _process_info(pid)
+        command = str(info.pop("_command_for_classification", "") or info.get("command") or "")
+        etime_seconds = info.get("etime_seconds")
+        holder.update(info)
+        holder["known_live_owner"] = _is_known_live_db_holder(command)
+        holder["open_dbs"] = sorted(set(holder.get("open_dbs", [])))
+        holders.append(holder)
+        if not holder["known_live_owner"] and not isinstance(etime_seconds, int):
+            unattested.append(holder)
+        if (
+            not holder["known_live_owner"]
+            and isinstance(etime_seconds, int)
+            and etime_seconds >= LIVE_DB_UNKNOWN_HOLDER_SECONDS
+        ):
+            unknown_long_lived.append(holder)
+
+    issue = None
+    if unknown_long_lived:
+        issue = "LIVE_DB_UNKNOWN_LONG_LIVED_HOLDER"
+    elif unattested:
+        issue = "LIVE_DB_HOLDER_ATTESTATION_INCOMPLETE"
+    return {
+        "ok": not unknown_long_lived and not unattested,
+        "path": str(db_path),
+        "holder_age_budget_seconds": LIVE_DB_UNKNOWN_HOLDER_SECONDS,
+        "holders": holders,
+        "unknown_long_lived_holders": unknown_long_lived,
+        "unattested_holders": unattested,
+        "issue": issue,
+    }
+
+
+def _first_launchctl_field(output: str, field: str) -> str:
+    match = re.search(rf"^\s*{re.escape(field)}\s*=\s*(.+)$", output or "", re.MULTILINE)
+    if not match:
+        return ""
+    return match.group(1).strip()
+
+
+def _launchctl_block_items(output: str, block_name: str) -> list[str]:
+    match = re.search(
+        rf"^\s*{re.escape(block_name)}\s*=\s*\{{\n(?P<body>.*?)^\s*\}}",
+        output or "",
+        re.MULTILINE | re.DOTALL,
+    )
+    if not match:
+        return []
+    return [line.strip() for line in match.group("body").splitlines() if line.strip()]
+
+
+def _launchctl_environment(output: str) -> dict[str, str]:
+    env: dict[str, str] = {}
+    for line in _launchctl_block_items(output, "environment"):
+        if "=>" not in line:
+            continue
+        key, value = line.split("=>", 1)
+        env[key.strip()] = value.strip()
+    return env
+
+
+def _launchctl_loaded_contract(
+    label: str,
+    *,
+    root_path: Path,
+    plist_path: Path,
+    expected_module: str,
+) -> dict:
+    item: dict = {
+        "ok": False,
+        "issues": [],
+    }
+    try:
+        ps = subprocess.run(
+            ["launchctl", "print", f"gui/{os.getuid()}/{label}"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except Exception as exc:
+        item["issues"].append(f"loaded_contract_unreadable:{type(exc).__name__}")
+        item["error"] = str(exc)
+        return item
+    output = (ps.stdout or ps.stderr or "")
+    if ps.returncode != 0:
+        item["issues"].append("loaded_job_missing")
+        item["error"] = output.strip()
+        return item
+
+    arguments = _launchctl_block_items(output, "arguments")
+    environment = _launchctl_environment(output)
+    properties = {
+        part.strip()
+        for part in _first_launchctl_field(output, "properties").split("|")
+        if part.strip()
+    }
+    minimum_runtime_raw = _first_launchctl_field(output, "minimum runtime")
+    try:
+        minimum_runtime = int(minimum_runtime_raw)
+    except ValueError:
+        minimum_runtime = None
+    module = _module_from_program_arguments(arguments)
+    path = _first_launchctl_field(output, "path")
+    state = _first_launchctl_field(output, "state")
+    pid = _parse_launchctl_pid(output)
+    working_directory = _first_launchctl_field(output, "working directory")
+
+    item.update(
+        {
+            "path": path,
+            "state": state,
+            "pid": pid,
+            "keep_alive": "keepalive" in properties,
+            "run_at_load": "runatload" in properties,
+            "minimum_runtime": minimum_runtime,
+            "working_directory": working_directory,
+            "pythonpath_matches": environment.get("PYTHONPATH") == str(root_path),
+            "module": module,
+        }
+    )
+    if path != str(plist_path):
+        item["issues"].append("loaded_plist_path_mismatch")
+    if state != "running" or pid <= 0:
+        item["issues"].append("loaded_job_not_running")
+    if "keepalive" not in properties:
+        item["issues"].append("loaded_keepalive_not_true")
+    if "runatload" not in properties:
+        item["issues"].append("loaded_runatload_not_true")
+    if minimum_runtime is None or not (10 <= minimum_runtime <= 300):
+        item["issues"].append("loaded_minimum_runtime_missing_or_out_of_range")
+    if working_directory != str(root_path):
+        item["issues"].append("loaded_working_directory_mismatch")
+    if environment.get("PYTHONPATH") != str(root_path):
+        item["issues"].append("loaded_pythonpath_mismatch")
+    if module != expected_module:
+        item["issues"].append("loaded_program_module_mismatch")
+    item["ok"] = not item["issues"]
+    return item
+
+
+def _launchd_contracts(
+    launchagents_dir: Path | None = None,
+    *,
+    root: Path | None = None,
+) -> dict:
+    root_path = Path(root or PROJECT_ROOT)
+    launchagents = Path(launchagents_dir or _launchagents_dir())
+    specs = (
+        ("live_trading", _launchd_label(), "src.main"),
+        ("riskguard", _riskguard_label(), "src.riskguard.riskguard"),
+        ("forecast_live", _forecast_live_label(), "src.ingest.forecast_live_daemon"),
+    )
+    items: list[dict] = []
+    for name, label, expected_module in specs:
+        path = launchagents / f"{label}.plist"
+        item = {
+            "name": name,
+            "label": label,
+            "path": str(path),
+            "ok": False,
+            "issues": [],
+        }
+        if not path.exists():
+            item["issues"].append("plist_missing")
+            items.append(item)
+            continue
+        try:
+            with open(path, "rb") as handle:
+                payload = plistlib.load(handle)
+        except Exception as exc:
+            item["issues"].append(f"plist_unreadable:{type(exc).__name__}")
+            item["error"] = str(exc)
+            items.append(item)
+            continue
+        if not isinstance(payload, dict):
+            item["issues"].append("plist_not_dict")
+            item["ok"] = False
+            items.append(item)
+            continue
+        env = payload.get("EnvironmentVariables") or {}
+        if not isinstance(env, dict):
+            item["issues"].append("environment_variables_not_dict")
+            env = {}
+        program_args = payload.get("ProgramArguments") or []
+        if not isinstance(program_args, list):
+            item["issues"].append("program_arguments_not_list")
+            program_args = []
+        module = _module_from_program_arguments(program_args)
+        throttle = payload.get("ThrottleInterval")
+        item.update(
+            {
+                "keep_alive": bool(payload.get("KeepAlive")),
+                "run_at_load": bool(payload.get("RunAtLoad")),
+                "throttle_interval": throttle,
+                "working_directory": payload.get("WorkingDirectory"),
+                "pythonpath_matches": env.get("PYTHONPATH") == str(root_path),
+                "module": module,
+            }
+        )
+        if payload.get("Label") != label:
+            item["issues"].append("label_mismatch")
+        if payload.get("KeepAlive") is not True:
+            item["issues"].append("keepalive_not_true")
+        if payload.get("RunAtLoad") is not True:
+            item["issues"].append("runatload_not_true")
+        if not isinstance(throttle, int) or not (10 <= throttle <= 300):
+            item["issues"].append("throttle_interval_missing_or_out_of_range")
+        if payload.get("WorkingDirectory") != str(root_path):
+            item["issues"].append("working_directory_mismatch")
+        if env.get("PYTHONPATH") != str(root_path):
+            item["issues"].append("pythonpath_mismatch")
+        if module != expected_module:
+            item["issues"].append("program_module_mismatch")
+        loaded = _launchctl_loaded_contract(
+            label,
+            root_path=root_path,
+            plist_path=path,
+            expected_module=expected_module,
+        )
+        item["loaded"] = loaded
+        for issue in loaded.get("issues", []):
+            item["issues"].append(issue)
+        item["ok"] = not item["issues"]
+        items.append(item)
+    return {
+        "ok": all(item["ok"] for item in items),
+        "launchagents_dir": str(launchagents),
+        "items": items,
+    }
+
+
 def _status_age_seconds(timestamp: str) -> float | None:
     if not timestamp:
         return None
@@ -84,6 +523,110 @@ def _status_age_seconds(timestamp: str) -> float | None:
     except ValueError:
         return None
     return max(0.0, (datetime.now(timezone.utc) - ts).total_seconds())
+
+
+def _source_health_status() -> dict:
+    path = _source_health_path()
+    try:
+        from src.control.freshness_gate import evaluate_freshness
+
+        verdict = evaluate_freshness(state_dir=path.parent)
+    except Exception as exc:
+        return {
+            "ok": False,
+            "path": str(path),
+            "error": str(exc),
+            "issue": "SOURCE_HEALTH_UNAVAILABLE",
+        }
+
+    written_at_age = _status_age_seconds(verdict.written_at or "")
+    writer_fresh = (
+        written_at_age is not None
+        and written_at_age <= SOURCE_HEALTH_WRITER_STALE_SECONDS
+    )
+    source_statuses = [
+        {
+            "source": status.source,
+            "fresh": status.fresh,
+            "stale": status.stale,
+            "last_success_at": status.last_success_at,
+            "age_seconds": None if status.age_seconds is None else round(status.age_seconds, 1),
+            "budget_seconds": status.budget_seconds,
+            "degradation_flags": list(status.degradation_flags),
+        }
+        for status in verdict.source_statuses
+    ]
+    all_sources_fresh = bool(source_statuses) and all(status["fresh"] for status in source_statuses)
+    ok = (
+        verdict.branch == "FRESH"
+        and writer_fresh
+        and all_sources_fresh
+        and not verdict.operator_overrides
+    )
+    issue = None
+    if verdict.branch == "ABSENT":
+        issue = "SOURCE_HEALTH_ABSENT"
+    elif verdict.branch == "STALE":
+        issue = "SOURCE_HEALTH_SOURCE_STALE"
+    elif not writer_fresh:
+        issue = "SOURCE_HEALTH_WRITER_STALE"
+    elif verdict.operator_overrides:
+        issue = "SOURCE_HEALTH_OPERATOR_OVERRIDE"
+    elif not all_sources_fresh:
+        issue = "SOURCE_HEALTH_SOURCE_NOT_FRESH"
+    return {
+        "ok": ok,
+        "path": str(path),
+        "branch": verdict.branch,
+        "issue": issue,
+        "written_at": verdict.written_at,
+        "written_at_age_seconds": None if written_at_age is None else round(written_at_age, 1),
+        "writer_fresh": writer_fresh,
+        "writer_budget_seconds": SOURCE_HEALTH_WRITER_STALE_SECONDS,
+        "all_sources_fresh": all_sources_fresh,
+        "stale_sources": list(verdict.stale_sources),
+        "day0_capture_disabled": bool(verdict.day0_capture_disabled),
+        "ensemble_disabled": bool(verdict.ensemble_disabled),
+        "degraded_data": bool(verdict.degraded_data),
+        "operator_overrides": list(verdict.operator_overrides),
+        "source_statuses": source_statuses,
+    }
+
+
+def _execution_capability_db_lock_status(status: dict | None) -> dict:
+    execution_capability = (status or {}).get("execution_capability")
+    if not isinstance(execution_capability, dict):
+        return {"ok": True, "locks": [], "issue": None}
+    locks: list[dict] = []
+    for action_name, action in execution_capability.items():
+        if not isinstance(action, dict):
+            continue
+        components = action.get("components")
+        if not isinstance(components, list):
+            continue
+        for component in components:
+            if not isinstance(component, dict):
+                continue
+            details = component.get("details") if isinstance(component.get("details"), dict) else {}
+            error = str(details.get("error") or "")
+            if "database is locked" not in error.lower():
+                continue
+            locks.append(
+                {
+                    "action": action_name,
+                    "component": component.get("component"),
+                    "allowed": component.get("allowed"),
+                    "reason": component.get("reason"),
+                    "loader_failed": bool(details.get("loader_failed")),
+                    "error_type": details.get("error_type"),
+                    "error": error,
+                }
+            )
+    return {
+        "ok": not locks,
+        "locks": locks,
+        "issue": "LIVE_DB_LOCK_EXECUTION_CAPABILITY" if locks else None,
+    }
 
 
 def _parse_launchctl_pid(output: str) -> int:
@@ -148,6 +691,22 @@ def check() -> dict:
         "launchd_label": _launchd_label(),
         "riskguard_label": _riskguard_label(),
     }
+    result["code_plane"] = _code_plane_identity()
+    result["code_plane_ok"] = _code_plane_is_ready(result["code_plane"])
+    if not result["code_plane_ok"]:
+        result["code_plane_issue"] = "LIVE_CODE_PLANE_DRIFT"
+    result["launchd_contracts"] = _launchd_contracts()
+    result["launchd_contract_ok"] = bool(result["launchd_contracts"].get("ok"))
+    if not result["launchd_contract_ok"]:
+        result["launchd_contract_issue"] = "LIVE_LAUNCHD_CONTRACT_DRIFT"
+    result["source_health"] = _source_health_status()
+    result["source_health_ok"] = bool(result["source_health"].get("ok"))
+    if not result["source_health_ok"]:
+        result["source_health_issue"] = result["source_health"].get("issue") or "LIVE_SOURCE_HEALTH_STALE"
+    result["live_db_holders"] = _live_db_holder_status()
+    result["live_db_holders_ok"] = bool(result["live_db_holders"].get("ok", True))
+    if not result["live_db_holders_ok"]:
+        result["live_db_holders_issue"] = result["live_db_holders"].get("issue") or "LIVE_DB_HOLDER_POLICY"
 
     # Check daemon PID
     try:
@@ -231,6 +790,10 @@ def check() -> dict:
             runtime = status.get("runtime", {}) or {}
             if isinstance(runtime, dict):
                 result["runtime_summary"] = runtime
+            result["db_lock_status"] = _execution_capability_db_lock_status(status)
+            result["db_lock_ok"] = bool(result["db_lock_status"].get("ok", True))
+            if not result["db_lock_ok"]:
+                result["db_lock_issue"] = result["db_lock_status"].get("issue") or "LIVE_DB_LOCK"
             age_seconds = _status_age_seconds(result["last_cycle"])
             if age_seconds is not None:
                 result["status_age_seconds"] = round(age_seconds, 1)
@@ -242,6 +805,8 @@ def check() -> dict:
     else:
         result["status_summary"] = "missing"
         result["action_required"] = False
+        result["db_lock_status"] = {"ok": True, "locks": [], "issue": None}
+        result["db_lock_ok"] = True
 
     risk_state_path = _risk_state_path()
     result["risk_state_path"] = str(risk_state_path)
@@ -341,6 +906,11 @@ def check() -> dict:
         and bool(result.get("riskguard_fresh"))
         and bool(result.get("riskguard_contract_valid"))
         and bool(result.get("assumptions_valid"))
+        and bool(result.get("code_plane_ok"))
+        and bool(result.get("launchd_contract_ok"))
+        and bool(result.get("source_health_ok"))
+        and bool(result.get("db_lock_ok", True))
+        and bool(result.get("live_db_holders_ok", True))
         and not bool(result.get("cycle_failed"))
         and result.get("infrastructure_level") != "RED"
     )

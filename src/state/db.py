@@ -22,6 +22,7 @@ if TYPE_CHECKING:
 
 from src.architecture.decorators import capability
 from src.config import STATE_DIR, get_mode, state_path
+from src.contracts.semantic_types import ExitState
 from src.state.ledger import (
     CANONICAL_POSITION_EVENT_COLUMNS,
     apply_architecture_kernel_schema,
@@ -39,6 +40,25 @@ ZEUS_WORLD_DB_PATH = STATE_DIR / "zeus-world.db"  # Shared world data (settlemen
 ZEUS_FORECASTS_DB_PATH = STATE_DIR / "zeus-forecasts.db"  # K1 split 2026-05-11: forecast/harvester-truth class
 ZEUS_BACKTEST_DB_PATH = STATE_DIR / "zeus_backtest.db"  # Derived audit output; never runtime authority
 RISK_DB_PATH = STATE_DIR / "risk_state.db"  # Single risk DB (live-only)
+
+_EXIT_LIFECYCLE_EVENT_TYPES = frozenset(
+    {
+        "EXIT_ORDER_POSTED",
+        "EXIT_ORDER_ATTEMPTED",
+        "EXIT_ORDER_FILLED",
+        "EXIT_ORDER_REJECTED",
+        "EXIT_ORDER_VOIDED",
+        "EXIT_RETRY_SCHEDULED",
+        "EXIT_BACKOFF_EXHAUSTED",
+        "EXIT_INTENT_RECOVERED",
+        "EXIT_FILL_CONFIRMED",
+        "EXIT_FILL_CHECKED",
+        "EXIT_FILL_CHECK_FAILED",
+        "EXIT_RETRY_RELEASED",
+        "EXIT_ORDER_ID_MISSING",
+    }
+)
+_EXIT_STATE_HINT_VALUES = frozenset(state.value for state in ExitState if state.value)
 
 # T1E: configurable busy-timeout (ms → s). Default 30000ms = 30s per T0_SQLITE_POLICY.md.
 # ZEUS_DB_BUSY_TIMEOUT_MS env var is in milliseconds; sqlite3.connect(timeout=) takes seconds.
@@ -7704,11 +7724,26 @@ def _query_transitional_position_hints(
         ):
             bucket["entered_at"] = occurred_at
         if "exit_state" not in bucket:
-            status = details.get("status")
-            if status not in (None, ""):
-                bucket["exit_state"] = str(status)
+            if row["event_type"] == "EXIT_RETRY_RELEASED":
+                bucket["exit_state"] = ""
+                continue
+            exit_state = _exit_state_hint_from_event(str(row["event_type"] or ""), details)
+            if exit_state:
+                bucket["exit_state"] = exit_state
         # Non-settlement lifecycle hints are env-filtered by their caller scope.
     return hints
+
+
+def _exit_state_hint_from_event(event_type: str, details: dict) -> str | None:
+    if event_type not in _EXIT_LIFECYCLE_EVENT_TYPES:
+        return None
+    raw = details.get("exit_state")
+    if raw in (None, ""):
+        raw = details.get("status")
+    exit_state = str(raw or "").strip()
+    if exit_state in _EXIT_STATE_HINT_VALUES:
+        return exit_state
+    return None
 
 
 def _settlement_authority_smoke_summary(conn: sqlite3.Connection) -> dict:

@@ -410,19 +410,19 @@ scripts:
     reason: "Classifies existing venue_commands, venue_command_events, submission envelopes, order facts, and trade facts. It fails closed unless an accepted/resting or filled command has daemon-to-command correlation fields, venue order identity, live venue facts, and matching record-chain proof."
   live_health_probe.py:
     # Created: 2026-05-11
-    # Last reused or audited: 2026-05-15
-    # Authority basis: docs/operations/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md
+    # Last reused or audited: 2026-05-16
+    # Authority basis: docs/operations/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md; docs/operations/task_2026-05-16_live_continuous_run_package/LIVE_CONTINUOUS_RUN_PACKAGE_PLAN.md Phase C
     class: diagnostic
     lifecycle: long_lived
     status: active
     authority_scope: diagnostic_non_promotion
     canonical_command: "python3 scripts/live_health_probe.py"
-    read_targets: [state/daemon-heartbeat.json, state/forecast-live-heartbeat.json, state/status_summary.json, process_table]
+    read_targets: [state/daemon-heartbeat.json, state/forecast-live-heartbeat.json, state/status_summary.json, process_table, git_repo_metadata]
     write_targets: [/tmp/zeus_health_snapshot.json, stdout]
     dry_run_default: true
     apply_flag: null
     target_db: null
-    external_inputs: [live_process_table, live_runtime_state_json]
+    external_inputs: [live_process_table, live_runtime_state_json, git_repo_metadata]
     dangerous_if_run: false
     promotion_barrier: "Runtime diagnostic only; cannot authorize live restart, live submit, DB truth mutation, or venue action."
     required_helpers: []
@@ -467,7 +467,11 @@ scripts:
   force_lifecycle.py: {class: repair, apply_flag: implicit, target_db: state/zeus_trades.db, unguarded_write_rationale: "Direct lifecycle forcing is unsafe and currently unguarded; do not run outside a dedicated repair packet."}
   generate_calibration_pairs.py: {class: stale_deprecated, status: deprecated, lifecycle: deprecated_fail_closed, fail_closed: true, canonical_command: DO_NOT_RUN, replacement: rebuild_calibration_pairs_canonical.py, delete_policy: archive_or_delete_in_cleanup_packet, reason: legacy market_events calibration-pair generator retired}
   generate_monthly_bounds.py: {class: config_writer}
-  healthcheck.py: {class: runtime_support}
+  healthcheck.py:
+    class: runtime_support
+    read_targets: [state/status_summary.json, state/risk_state.db, state/source_health.json, state/zeus.db, state/zeus_trades.db, state/zeus-forecasts.db, git_repo_metadata, "~/Library/LaunchAgents/com.zeus.*.plist", process_table, lsof, launchctl]
+    write_targets: [stdout]
+    required_tests: [tests/test_healthcheck.py]
   heartbeat_dispatcher.py: {class: runtime_support, external_inputs: [openclaw_binary, host_log_path]}
   history_lore_audit.py:
     class: utility

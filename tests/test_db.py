@@ -1,9 +1,9 @@
 # Created: 2026-03-30
-# Last reused/audited: 2026-05-08
-# Lifecycle: created=2026-03-30; last_reviewed=2026-05-08; last_reused=2026-05-08
+# Last reused/audited: 2026-05-16
+# Lifecycle: created=2026-03-30; last_reviewed=2026-05-16; last_reused=2026-05-16
 # Purpose: Protect DB schema bootstrap contracts, daily revision-history DDL, and fact-smoke authority labels.
 # Reuse: Audit touched schema assertions and high-sensitivity skip metadata before closeout.
-# Authority basis: P2 4.4.A2 daily observation revision-history schema packet; Wave16 object-meaning fact-smoke authority repair; PR90 latest-event env authority review fix.
+# Authority basis: P2 4.4.A2 daily observation revision-history schema packet; Wave16 object-meaning fact-smoke authority repair; PR90 latest-event env authority review fix; 2026-05-16 live-continuous Phase B event-status boundary.
 """Tests for database schema initialization."""
 
 import json
@@ -210,6 +210,36 @@ def _insert_entry_execution_fact_for_fill_authority_view_test(
             shares,
             terminal_exec_status,
             terminal_exec_status,
+        ),
+    )
+
+
+def _insert_status_position_event_for_view_test(
+    conn,
+    *,
+    position_id: str,
+    event_type: str,
+    status: str,
+    occurred_at: str,
+    sequence_no: int = 1,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO position_events (
+            event_id, position_id, event_version, sequence_no, event_type, occurred_at,
+            phase_before, phase_after, strategy_key, decision_id, snapshot_id, order_id,
+            command_id, caused_by, idempotency_key, venue_status, source_module, env, payload_json
+        ) VALUES (?, ?, 1, ?, ?, ?, NULL, NULL, 'center_buy', NULL, 'snap-fill', NULL,
+                  NULL, 'test', ?, NULL, 'tests', 'test', ?)
+        """,
+        (
+            f"{position_id}:{event_type}:{sequence_no}",
+            position_id,
+            sequence_no,
+            event_type,
+            occurred_at,
+            f"{position_id}:{event_type}:{sequence_no}",
+            json.dumps({"status": status}),
         ),
     )
 
@@ -1184,6 +1214,29 @@ def test_load_portfolio_enables_audit_logging(tmp_path):
     assert state.audit_logging_enabled is True
 
 
+def test_load_portfolio_ignores_non_exit_status_payload(tmp_path):
+    from src.state.portfolio import load_portfolio
+    from src.state.db import get_connection, init_schema
+
+    db = get_connection(tmp_path / "zeus.db")
+    init_schema(db)
+    _insert_current_position_for_fill_authority_view_test(db, position_id="portfolio-non-exit-status-pos")
+    _insert_status_position_event_for_view_test(
+        db,
+        position_id="portfolio-non-exit-status-pos",
+        event_type="CHAIN_SYNCED",
+        status="entered",
+        occurred_at="2026-04-01T00:05:00+00:00",
+    )
+    db.commit()
+    db.close()
+
+    state = load_portfolio(tmp_path / "missing.json")
+
+    assert len(state.positions) == 1
+    assert getattr(state.positions[0].exit_state, "value", state.positions[0].exit_state) == ""
+
+
 def test_position_current_views_use_fill_authority_current_open_economics(tmp_path):
     from src.state.db import (
         query_portfolio_loader_view,
@@ -1250,6 +1303,121 @@ def test_position_current_views_use_fill_authority_current_open_economics(tmp_pa
     assert strategy_row["unrealized_pnl"] == pytest.approx(5.0)
 
     conn.close()
+
+
+def test_position_current_status_view_ignores_non_exit_status_payload(tmp_path):
+    from src.state.db import query_position_current_status_view
+
+    conn = get_connection(tmp_path / "status-view-non-exit-status.db")
+    init_schema(conn)
+    _insert_current_position_for_fill_authority_view_test(conn, position_id="non-exit-status-pos")
+    _insert_status_position_event_for_view_test(
+        conn,
+        position_id="non-exit-status-pos",
+        event_type="CHAIN_SYNCED",
+        status="entered",
+        occurred_at="2026-04-01T00:05:00+00:00",
+    )
+    conn.commit()
+
+    status_view = query_position_current_status_view(conn)
+    conn.close()
+
+    assert status_view["positions"][0]["exit_state"] == "none"
+    assert status_view["exit_state_counts"]["none"] == 1
+
+
+def test_portfolio_loader_view_ignores_non_exit_status_payload(tmp_path):
+    from src.state.db import query_portfolio_loader_view
+
+    conn = get_connection(tmp_path / "loader-view-non-exit-status.db")
+    init_schema(conn)
+    _insert_current_position_for_fill_authority_view_test(conn, position_id="loader-non-exit-status-pos")
+    _insert_status_position_event_for_view_test(
+        conn,
+        position_id="loader-non-exit-status-pos",
+        event_type="ENTRY_ORDER_FILLED",
+        status="filled",
+        occurred_at="2026-04-01T00:05:00+00:00",
+    )
+    conn.commit()
+
+    loader_view = query_portfolio_loader_view(conn)
+    conn.close()
+
+    assert loader_view["positions"][0]["exit_state"] == ""
+
+
+def test_status_views_use_real_exit_event_status_over_newer_non_exit_noise(tmp_path):
+    from src.state.db import query_portfolio_loader_view, query_position_current_status_view
+
+    conn = get_connection(tmp_path / "exit-status-over-non-exit-noise.db")
+    init_schema(conn)
+    _insert_current_position_for_fill_authority_view_test(conn, position_id="exit-status-pos")
+    _insert_status_position_event_for_view_test(
+        conn,
+        position_id="exit-status-pos",
+        event_type="EXIT_ORDER_REJECTED",
+        status="retry_pending",
+        occurred_at="2026-04-01T00:04:00+00:00",
+        sequence_no=1,
+    )
+    _insert_status_position_event_for_view_test(
+        conn,
+        position_id="exit-status-pos",
+        event_type="ENTRY_ORDER_FILLED",
+        status="entered",
+        occurred_at="2026-04-01T00:05:00+00:00",
+        sequence_no=2,
+    )
+    conn.commit()
+
+    status_view = query_position_current_status_view(conn)
+    loader_view = query_portfolio_loader_view(conn)
+    conn.close()
+
+    assert status_view["positions"][0]["exit_state"] == "retry_pending"
+    assert status_view["exit_state_counts"]["retry_pending"] == 1
+    assert loader_view["positions"][0]["exit_state"] == "retry_pending"
+
+
+def test_status_views_clear_exit_state_on_retry_release(tmp_path):
+    from src.state.db import query_portfolio_loader_view, query_position_current_status_view
+
+    conn = get_connection(tmp_path / "exit-retry-release-clears-state.db")
+    init_schema(conn)
+    _insert_current_position_for_fill_authority_view_test(conn, position_id="exit-release-pos")
+    _insert_status_position_event_for_view_test(
+        conn,
+        position_id="exit-release-pos",
+        event_type="EXIT_ORDER_REJECTED",
+        status="retry_pending",
+        occurred_at="2026-04-01T00:04:00+00:00",
+        sequence_no=1,
+    )
+    # EXIT_RETRY_RELEASED is live telemetry that older/relaxed DBs may carry;
+    # the read model must treat it as a clear signal, not as a non-exit noise row.
+    conn.execute("PRAGMA ignore_check_constraints = ON")
+    try:
+        _insert_status_position_event_for_view_test(
+            conn,
+            position_id="exit-release-pos",
+            event_type="EXIT_RETRY_RELEASED",
+            status="ready",
+            occurred_at="2026-04-01T00:05:00+00:00",
+            sequence_no=2,
+        )
+    finally:
+        conn.execute("PRAGMA ignore_check_constraints = OFF")
+    conn.commit()
+
+    status_view = query_position_current_status_view(conn)
+    loader_view = query_portfolio_loader_view(conn)
+    conn.close()
+
+    assert status_view["positions"][0]["exit_state"] == "none"
+    assert status_view["exit_state_counts"]["none"] == 1
+    assert loader_view["positions"][0]["exit_state"] == ""
 
 
 def test_position_current_views_do_not_cap_full_open_fill_cost_to_projection(tmp_path):
