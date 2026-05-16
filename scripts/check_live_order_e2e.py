@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# Lifecycle: created=2026-05-15; last_reviewed=2026-05-15; last_reused=2026-05-15
+# Lifecycle: created=2026-05-15; last_reviewed=2026-05-16; last_reused=2026-05-16
 # Purpose: Read-only verifier for live order command, venue ack, and record-chain evidence.
 # Reuse: Run after live submit attempts or when venue command/order/fill evidence semantics change.
 # Created: 2026-05-15
-# Last reused or audited: 2026-05-15
+# Last reused or audited: 2026-05-16
 # Authority basis: docs/operations/task_2026-05-15_live_order_e2e_goal/LIVE_ORDER_E2E_GOAL_PLAN.md
 """Read-only live order end-to-end evidence checker.
 
@@ -227,10 +227,13 @@ def _positive_decimal(value: Any) -> bool:
 
 
 def _zero_decimal(value: Any) -> bool:
+    if value in (None, ""):
+        return False
     try:
-        return Decimal(str(value if value not in (None, "") else "0")) == 0
+        parsed = Decimal(str(value))
     except (InvalidOperation, TypeError, ValueError):
         return False
+    return parsed.is_finite() and parsed == 0
 
 
 def _live_source(value: Any) -> bool:
@@ -292,7 +295,7 @@ def _order_fact_supports_terminal_no_fill(fact: dict[str, Any] | None) -> bool:
         fact is not None
         and _live_source(fact.get("source"))
         and str(fact.get("state") or "") in TERMINAL_ORDER_FACT_STATES
-        and not _positive_decimal(fact.get("matched_size"))
+        and _zero_decimal(fact.get("matched_size"))
     )
 
 
@@ -815,6 +818,21 @@ def evaluate(conn: sqlite3.Connection, command_id: str | None = None) -> dict[st
     }
 
 
+def _allow_no_proof_soft_fail(result: dict[str, Any]) -> bool:
+    if result.get("status") != "FAIL" or result.get("completion_category") != "NO_LIVE_ORDER_PROOF":
+        return False
+    failed_names = {
+        str(check.get("name") or "")
+        for check in result.get("checks", [])
+        if check.get("status") == "FAIL"
+    }
+    return bool(failed_names) and failed_names <= {
+        "trade_db_present",
+        "trade_db_readable",
+        "command_present",
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--trade-db", type=Path, default=ROOT / "state" / TRADE_DB_NAME)
@@ -839,7 +857,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{result['status']} {result['completion_category']}")
         for check in result["checks"]:
             print(f"{check['status']} {check['name']}: {check['detail']}")
-    if result["status"] == "PASS" or args.allow_no_proof:
+    if result["status"] == "PASS" or (args.allow_no_proof and _allow_no_proof_soft_fail(result)):
         return 0
     return 1
 

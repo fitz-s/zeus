@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Created: 2026-05-01
-# Last reused/audited: 2026-05-15
+# Last reused/audited: 2026-05-16
 # Authority basis: ultrareview25_remediation 2026-05-01 P2 (security review §10
 #                  "30+ f-string SQL interpolations, no whitelist enforcement")
 # Purpose: per-file baseline of dynamic SQL (f-string interpolation in
@@ -146,7 +146,10 @@ _BASELINE_PER_FILE: dict[str, int] = {
     # YAML (closed internal source). Added P1 (2026-05-14).
     "src/state/table_registry.py": 1,
     "src/state/chain_reconciliation.py": 1,  # internal table-name; added pre-P2
-    "src/state/venue_command_repo.py": 5,
+    # 6 sites audited 2026-05-16: four SAVEPOINT statements use generated
+    # UUID names; the review-clearance count query receives only the closed
+    # internal table names `venue_order_facts` and `venue_trade_facts`.
+    "src/state/venue_command_repo.py": 6,
     "src/state/ws_poll_reaction.py": 1,
     # Observability modules added pre-P2 — all interpolate internal column/table
     # names from closed module-level constants; no user-controlled input.
@@ -154,6 +157,13 @@ _BASELINE_PER_FILE: dict[str, int] = {
     "src/observability/price_evidence_report.py": 7,
     # exchange_reconcile.py: 1 f-string SQL site; internal field name constant.
     "src/execution/exchange_reconcile.py": 1,
+    # 8 sites audited 2026-05-16: `_latest_terminal_order_fact_candidates`
+    # interpolates placeholder lists derived from closed module constants;
+    # `_count_facts` and `_table_columns` receive table names from internal
+    # call sites only; `_position_current_for_terminal_order` interpolates a
+    # fixed where-clause chosen from known column predicates; SAVEPOINT names
+    # are sanitized from command IDs. No user-controlled SQL identifiers.
+    "src/execution/command_recovery.py": 8,
     # Tail catch — fresh files with f-string SQL must be added explicitly.
 }
 

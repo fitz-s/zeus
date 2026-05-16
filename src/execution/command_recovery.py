@@ -1,5 +1,5 @@
 # Created: 2026-04-26
-# Last reused/audited: 2026-05-15
+# Last reused/audited: 2026-05-16
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md §P1.S4
 #                  + docs/operations/task_2026-05-15_live_order_e2e_goal/LIVE_ORDER_E2E_GOAL_PLAN.md
 """Command recovery loop — INV-31.
@@ -60,6 +60,13 @@ _TERMINAL_NO_FILL_ORDER_FACT_STATES = frozenset({
     "CANCEL_CONFIRMED",
     "EXPIRED",
     "VENUE_WIPED",
+})
+_LIVE_TERMINAL_ORDER_FACT_SOURCES = frozenset({
+    "REST",
+    "WS_USER",
+    "WS_MARKET",
+    "DATA_API",
+    "CHAIN",
 })
 _ACKED_ORDER_STATES = frozenset({
     CommandState.ACKED.value,
@@ -266,8 +273,10 @@ def _count_position_rows_for_command(conn: sqlite3.Connection, command: dict) ->
 
 
 def _decimal_is_zero(value: object) -> bool:
+    if value in (None, ""):
+        return False
     try:
-        parsed = Decimal(str(value if value not in (None, "") else "0"))
+        parsed = Decimal(str(value))
     except (InvalidOperation, TypeError, ValueError):
         return False
     return parsed.is_finite() and parsed == 0
@@ -278,8 +287,10 @@ def _latest_terminal_order_fact_candidates(conn: sqlite3.Connection) -> list[dic
         return []
     states = tuple(_TERMINAL_NO_FILL_ORDER_FACT_STATES)
     command_states = tuple(_ACKED_ORDER_STATES)
+    sources = tuple(_LIVE_TERMINAL_ORDER_FACT_SOURCES)
     state_placeholders = ",".join("?" for _ in states)
     command_state_placeholders = ",".join("?" for _ in command_states)
+    source_placeholders = ",".join("?" for _ in sources)
     rows = conn.execute(
         f"""
         WITH latest_order_fact AS (
@@ -306,8 +317,9 @@ def _latest_terminal_order_fact_candidates(conn: sqlite3.Connection) -> list[dic
          WHERE cmd.intent_kind = 'ENTRY'
            AND cmd.state IN ({command_state_placeholders})
            AND fact.state IN ({state_placeholders})
+           AND fact.source IN ({source_placeholders})
         """,
-        (*command_states, *states),
+        (*command_states, *states, *sources),
     ).fetchall()
     return [_dict_row(row) for row in rows]
 
@@ -366,20 +378,23 @@ def _position_current_for_terminal_order(
     if not _table_exists(conn, "position_current"):
         raise ValueError("position_current table missing")
     cols = _table_columns(conn, "position_current")
-    clauses: list[str] = []
-    params: list[str] = []
     position_id = str(command.get("position_id") or "")
-    if position_id and "position_id" in cols:
-        clauses.append("position_id = ?")
-        params.append(position_id)
-    if order_id and "order_id" in cols:
-        clauses.append("order_id = ?")
-        params.append(order_id)
-    if not clauses:
+    has_position_id = position_id and "position_id" in cols
+    has_order_id = order_id and "order_id" in cols
+    if has_position_id and has_order_id:
+        where_sql = "position_id = ? AND order_id = ?"
+        params = (position_id, order_id)
+    elif has_position_id:
+        where_sql = "position_id = ?"
+        params = (position_id,)
+    elif has_order_id:
+        where_sql = "order_id = ?"
+        params = (order_id,)
+    else:
         raise ValueError("cannot locate position_current without position_id or order_id")
     row = conn.execute(
-        f"SELECT * FROM position_current WHERE {' OR '.join(clauses)} LIMIT 1",
-        tuple(params),
+        f"SELECT * FROM position_current WHERE {where_sql} LIMIT 1",
+        params,
     ).fetchone()
     if row is None:
         raise ValueError("terminal order fact has no matching position_current row")
@@ -467,10 +482,18 @@ def reconcile_terminal_order_facts(conn: sqlite3.Connection) -> dict:
     for row in _latest_terminal_order_fact_candidates(conn):
         summary["scanned"] += 1
         command_id = str(row.get("command_id") or "")
-        order_id = str(row.get("order_fact_venue_order_id") or row.get("venue_order_id") or "")
+        command_order_id = str(row.get("venue_order_id") or "")
+        order_id = str(row.get("order_fact_venue_order_id") or "")
         try:
-            if not order_id:
+            if not order_id or not command_order_id:
                 logger.warning("terminal order fact candidate %s has no venue order id", command_id)
+                summary["errors"] += 1
+                continue
+            if order_id != command_order_id:
+                logger.error(
+                    "terminal order fact candidate %s order id mismatch: command=%s fact=%s",
+                    command_id, command_order_id, order_id,
+                )
                 summary["errors"] += 1
                 continue
             if not _decimal_is_zero(row.get("order_fact_matched_size")):
