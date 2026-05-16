@@ -11,6 +11,7 @@ Uses in-memory DB; mocks PolymarketClient.get_order.
 """
 from __future__ import annotations
 
+import json
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -39,7 +40,7 @@ def conn():
 
 @pytest.fixture
 def mock_client():
-    return MagicMock(spec_set=["get_order", "v2_preflight"])
+    return MagicMock(spec_set=["get_order", "get_open_orders", "v2_preflight"])
 
 
 # ---------------------------------------------------------------------------
@@ -363,6 +364,62 @@ def _append_order_fact(
         venue_timestamp="2026-04-26T00:05:00Z",
         raw_payload_hash="f" * 64,
         raw_payload_json={"status": state, "order_id": order_id},
+    )
+
+
+def _append_confirmed_trade_fact(
+    conn,
+    *,
+    command_id="cmd-001",
+    order_id="ord-001",
+    trade_id="trade-001",
+    filled_size="1.25",
+    fill_price="0.50",
+):
+    from src.state.venue_command_repo import append_trade_fact
+
+    return append_trade_fact(
+        conn,
+        trade_id=trade_id,
+        venue_order_id=order_id,
+        command_id=command_id,
+        state="CONFIRMED",
+        filled_size=filled_size,
+        fill_price=fill_price,
+        source="REST",
+        observed_at="2026-04-26T00:06:00Z",
+        venue_timestamp="2026-04-26T00:06:00Z",
+        raw_payload_hash="a" * 64,
+        raw_payload_json={
+            "id": trade_id,
+            "status": "CONFIRMED",
+            "maker_orders": [
+                {
+                    "order_id": order_id,
+                    "matched_amount": filled_size,
+                    "price": fill_price,
+                }
+            ],
+        },
+    )
+
+
+def _advance_to_partial(conn, command_id="cmd-001", venue_order_id="ord-001"):
+    from src.state.venue_command_repo import append_event
+
+    _advance_to_acked(conn, command_id=command_id, venue_order_id=venue_order_id)
+    append_event(
+        conn,
+        command_id=command_id,
+        event_type="PARTIAL_FILL_OBSERVED",
+        occurred_at="2026-04-26T00:06:00Z",
+        payload={
+            "venue_order_id": venue_order_id,
+            "trade_id": "trade-001",
+            "filled_size": "1.25",
+            "fill_price": "0.50",
+            "source": "test",
+        },
     )
 
 
@@ -869,6 +926,149 @@ class TestRecoveryResolutionTable:
         payload = json.loads(review["payload_json"])
         assert payload["reason"] == "recovery_confirmed_requires_trade_fact"
         assert payload["semantic_guard"] == "order_status_confirmed_is_not_fill_economics_authority"
+
+    def test_partial_confirmed_fill_absent_from_open_orders_expires_remainder_without_voiding_fill(
+        self,
+        conn,
+        mock_client,
+    ):
+        _insert(conn, size=5.0)
+        _advance_to_partial(conn, venue_order_id="ord-partial")
+        _append_confirmed_trade_fact(
+            conn,
+            order_id="ord-partial",
+            trade_id="trade-partial",
+            filled_size="1.25",
+            fill_price="0.50",
+        )
+        _seed_pending_entry_projection(conn, order_id="ord-partial")
+        conn.execute(
+            """
+            UPDATE position_current
+               SET phase = 'active',
+                   shares = 1.25,
+                   cost_basis_usd = 0.625,
+                   entry_price = 0.50,
+                   order_status = 'partial'
+             WHERE position_id = 'pos-001'
+            """
+        )
+        mock_client.get_open_orders.return_value = []
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["partial_remainders"] == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+        assert _get_state(conn, "cmd-001") == "EXPIRED"
+        events = _get_events(conn, "cmd-001")
+        assert events[-1]["event_type"] == "EXPIRED"
+        order_fact = conn.execute(
+            """
+            SELECT state, remaining_size, matched_size, source, raw_payload_json
+              FROM venue_order_facts
+             WHERE command_id = 'cmd-001'
+             ORDER BY local_sequence DESC
+             LIMIT 1
+            """
+        ).fetchone()
+        order_fact = dict(order_fact)
+        payload = json.loads(order_fact.pop("raw_payload_json"))
+        assert order_fact == {
+            "state": "EXPIRED",
+            "remaining_size": "0",
+            "matched_size": "1.25",
+            "source": "REST",
+        }
+        assert payload == {
+            "command_id": "cmd-001",
+            "matched_size": "1.25",
+            "open_order_absent": True,
+            "proof_class": "confirmed_fill_plus_open_order_absence",
+            "reason": "partial_remainder_absent_from_exchange_open_orders",
+            "remaining_size": "0",
+            "source_surface": "client.get_open_orders",
+            "venue_order_id": "ord-partial",
+        }
+        current = conn.execute(
+            "SELECT phase, shares, cost_basis_usd, order_status FROM position_current WHERE position_id = 'pos-001'"
+        ).fetchone()
+        assert dict(current) == {
+            "phase": "active",
+            "shares": 1.25,
+            "cost_basis_usd": 0.625,
+            "order_status": "partial",
+        }
+
+    def test_partial_remainder_stays_partial_while_order_is_still_open(
+        self,
+        conn,
+        mock_client,
+    ):
+        _insert(conn, size=5.0)
+        _advance_to_partial(conn, venue_order_id="ord-partial")
+        _append_confirmed_trade_fact(conn, order_id="ord-partial")
+        mock_client.get_open_orders.return_value = [{"orderID": "ord-partial", "status": "LIVE"}]
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["partial_remainders"] == {"scanned": 1, "advanced": 0, "stayed": 1, "errors": 0}
+        assert _get_state(conn, "cmd-001") == "PARTIAL"
+
+    def test_partial_absent_from_open_orders_without_trade_fact_requires_review(
+        self,
+        conn,
+        mock_client,
+    ):
+        _insert(conn, size=5.0)
+        _advance_to_partial(conn, venue_order_id="ord-partial")
+        mock_client.get_open_orders.return_value = []
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["partial_remainders"] == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+        assert _get_state(conn, "cmd-001") == "REVIEW_REQUIRED"
+        events = _get_events(conn, "cmd-001")
+        assert events[-1]["event_type"] == "REVIEW_REQUIRED"
+
+    def test_partial_remainder_recovery_resolves_matching_m5_local_orphan_finding(
+        self,
+        conn,
+        mock_client,
+    ):
+        from src.execution.exchange_reconcile import list_unresolved_findings, record_finding
+
+        _insert(conn, size=5.0)
+        _advance_to_partial(conn, venue_order_id="ord-partial")
+        _append_confirmed_trade_fact(conn, order_id="ord-partial")
+        finding = record_finding(
+            conn,
+            kind="local_orphan_order",
+            subject_id="ord-partial",
+            context="ws_gap",
+            evidence={"reason": "local_open_order_absent_from_exchange_open_orders"},
+            recorded_at="2026-04-26T00:07:00Z",
+        )
+        mock_client.get_open_orders.return_value = []
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        reconcile_unresolved_commands(conn, mock_client)
+
+        assert _get_state(conn, "cmd-001") == "EXPIRED"
+        assert [row.finding_id for row in list_unresolved_findings(conn)] == []
+        resolved = conn.execute(
+            "SELECT resolution, resolved_by FROM exchange_reconcile_findings WHERE finding_id = ?",
+            (finding.finding_id,),
+        ).fetchone()
+        assert dict(resolved) == {
+            "resolution": "command_recovery_expired_partial_remainder",
+            "resolved_by": "src.execution.command_recovery",
+        }
 
     # Supplementary: summary dict has all expected keys
     def test_summary_has_all_keys(self, conn, mock_client):

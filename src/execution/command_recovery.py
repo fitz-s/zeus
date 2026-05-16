@@ -27,6 +27,7 @@ will add conn-threading from cycle_runner; for now self-contained.
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import json
 import sqlite3
@@ -43,6 +44,7 @@ from src.execution.command_bus import (
 from src.state.venue_command_repo import (
     find_unresolved_commands,
     append_event,
+    append_order_fact,
 )
 
 logger = logging.getLogger(__name__)
@@ -71,6 +73,9 @@ _LIVE_TERMINAL_ORDER_FACT_SOURCES = frozenset({
 _ACKED_ORDER_STATES = frozenset({
     CommandState.ACKED.value,
     CommandState.POST_ACKED.value,
+})
+_PARTIAL_REMAINDER_STATES = frozenset({
+    CommandState.PARTIAL.value,
 })
 _SAFE_REPLAY_MIN_AGE_SECONDS = 15 * 60
 
@@ -340,6 +345,40 @@ def _fill_trade_fact_count(conn: sqlite3.Connection, command_id: str) -> int:
     return int((_dict_row(row).get("count") if row else 0) or 0)
 
 
+def _decimal_text(value: Decimal) -> str:
+    text = format(value, "f")
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return text or "0"
+
+
+def _positive_fill_trade_fact_summary(conn: sqlite3.Connection, command_id: str) -> dict:
+    if not _table_exists(conn, "venue_trade_facts"):
+        return {"count": 0, "filled_size": "0"}
+    rows = conn.execute(
+        """
+        SELECT filled_size
+          FROM venue_trade_facts
+         WHERE command_id = ?
+           AND state IN ('MATCHED', 'MINED', 'CONFIRMED')
+        """,
+        (command_id,),
+    ).fetchall()
+    count = 0
+    filled = Decimal("0")
+    for row in rows:
+        raw = _dict_row(row).get("filled_size")
+        try:
+            size = Decimal(str(raw))
+        except (InvalidOperation, TypeError, ValueError):
+            continue
+        if not size.is_finite() or size <= 0:
+            continue
+        count += 1
+        filled += size
+    return {"count": count, "filled_size": _decimal_text(filled)}
+
+
 def _latest_position_env(conn: sqlite3.Connection, position_id: str) -> str:
     cols = _table_columns(conn, "position_events")
     if "env" not in cols or "position_id" not in cols:
@@ -550,6 +589,231 @@ def reconcile_terminal_order_facts(conn: sqlite3.Connection) -> dict:
         except Exception as exc:
             logger.error(
                 "recovery: terminal order fact reconciliation failed for command %s: %s",
+                command_id,
+                exc,
+            )
+            summary["errors"] += 1
+    return summary
+
+
+def _partial_remainder_candidates(
+    conn: sqlite3.Connection,
+    *,
+    updated_before: str | None = None,
+) -> list[dict]:
+    state_placeholders = ",".join("?" for _ in _PARTIAL_REMAINDER_STATES)
+    rows = conn.execute(
+        f"""
+        SELECT *
+          FROM venue_commands
+         WHERE intent_kind = 'ENTRY'
+           AND state IN ({state_placeholders})
+           AND COALESCE(venue_order_id, '') != ''
+           AND (? IS NULL OR updated_at < ?)
+         ORDER BY updated_at, command_id
+        """,
+        (*tuple(_PARTIAL_REMAINDER_STATES), updated_before, updated_before),
+    ).fetchall()
+    return [_dict_row(row) for row in rows]
+
+
+def _open_order_id(order: object) -> str | None:
+    raw = order if isinstance(order, dict) else getattr(order, "raw", None)
+    raw_dict = raw if isinstance(raw, dict) else {}
+    fallback = getattr(order, "order_id", None)
+    return _extract_order_id(raw_dict, fallback=fallback)
+
+
+def _client_open_order_ids(client) -> set[str]:
+    get_open_orders = getattr(client, "get_open_orders", None)
+    if not callable(get_open_orders):
+        raise RuntimeError("client lacks get_open_orders; partial remainder absence is unknown")
+    return {
+        order_id
+        for order_id in (_open_order_id(order) for order in (get_open_orders() or []))
+        if order_id
+    }
+
+
+def _resolve_m5_local_orphan_findings(
+    conn: sqlite3.Connection,
+    *,
+    venue_order_id: str,
+    resolved_at: str,
+) -> int:
+    if not _table_exists(conn, "exchange_reconcile_findings"):
+        return 0
+    rows = conn.execute(
+        """
+        SELECT finding_id
+          FROM exchange_reconcile_findings
+         WHERE kind = 'local_orphan_order'
+           AND subject_id = ?
+           AND resolved_at IS NULL
+         ORDER BY recorded_at, finding_id
+        """,
+        (venue_order_id,),
+    ).fetchall()
+    if not rows:
+        return 0
+    from src.execution.exchange_reconcile import resolve_finding
+
+    resolved = 0
+    for row in rows:
+        resolve_finding(
+            conn,
+            str(_dict_row(row)["finding_id"]),
+            resolution="command_recovery_expired_partial_remainder",
+            resolved_by="src.execution.command_recovery",
+            resolved_at=resolved_at,
+        )
+        resolved += 1
+    return resolved
+
+
+def _payload_hash(payload: dict) -> str:
+    blob = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+def _append_partial_remainder_terminal_order_fact(
+    conn: sqlite3.Connection,
+    *,
+    command: dict,
+    observed_at: str,
+    matched_size: str,
+) -> int:
+    command_id = str(command.get("command_id") or "")
+    venue_order_id = str(command.get("venue_order_id") or "")
+    payload = {
+        "reason": "partial_remainder_absent_from_exchange_open_orders",
+        "proof_class": "confirmed_fill_plus_open_order_absence",
+        "source_surface": "client.get_open_orders",
+        "venue_order_id": venue_order_id,
+        "command_id": command_id,
+        "open_order_absent": True,
+        "remaining_size": "0",
+        "matched_size": matched_size,
+    }
+    return append_order_fact(
+        conn,
+        venue_order_id=venue_order_id,
+        command_id=command_id,
+        state="EXPIRED",
+        remaining_size="0",
+        matched_size=matched_size,
+        source="REST",
+        observed_at=observed_at,
+        raw_payload_hash=_payload_hash(payload),
+        raw_payload_json=payload,
+    )
+
+
+def reconcile_partial_remainders(
+    conn: sqlite3.Connection,
+    client,
+    *,
+    updated_before: str | None = None,
+) -> dict:
+    """Terminalize filled command remainders when the venue open-order surface is empty.
+
+    ``PARTIAL`` means Zeus has observed at least some fill. If the exchange's
+    fresh open-order enumeration no longer contains the order, only the
+    unfilled remainder has disappeared. The command may become ``EXPIRED``,
+    but the filled position exposure must remain intact and must continue to
+    flow through venue_trade_facts/position projections.
+    """
+
+    summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+    candidates = _partial_remainder_candidates(conn, updated_before=updated_before)
+    if not candidates:
+        return summary
+    try:
+        open_order_ids = _client_open_order_ids(client)
+    except Exception as exc:
+        logger.warning(
+            "recovery: partial remainder open-order enumeration failed: %s",
+            exc,
+        )
+        summary["errors"] = len(candidates)
+        return summary
+
+    for command in candidates:
+        summary["scanned"] += 1
+        command_id = str(command.get("command_id") or "")
+        venue_order_id = str(command.get("venue_order_id") or "")
+        try:
+            if venue_order_id in open_order_ids:
+                summary["stayed"] += 1
+                continue
+            now = _now_iso()
+            fill_summary = _positive_fill_trade_fact_summary(conn, command_id)
+            if fill_summary["count"] <= 0:
+                append_event(
+                    conn,
+                    command_id=command_id,
+                    event_type=CommandEventType.REVIEW_REQUIRED.value,
+                    occurred_at=now,
+                    payload={
+                        "reason": "partial_remainder_absent_without_trade_fact",
+                        "venue_order_id": venue_order_id,
+                        "proof_class": "open_order_absence_without_fill_fact_authority",
+                    },
+                )
+                logger.warning(
+                    "recovery: command %s PARTIAL absent from open orders but has no "
+                    "positive fill trade fact -> REVIEW_REQUIRED",
+                    command_id,
+                )
+                summary["advanced"] += 1
+                continue
+            safe_command_id = "".join(ch if ch.isalnum() else "_" for ch in command_id)
+            sp_name = f"sp_partial_remainder_{safe_command_id}"
+            conn.execute(f"SAVEPOINT {sp_name}")
+            try:
+                order_fact_id = _append_partial_remainder_terminal_order_fact(
+                    conn,
+                    command=command,
+                    observed_at=now,
+                    matched_size=fill_summary["filled_size"],
+                )
+                resolved_findings = _resolve_m5_local_orphan_findings(
+                    conn,
+                    venue_order_id=venue_order_id,
+                    resolved_at=now,
+                )
+                append_event(
+                    conn,
+                    command_id=command_id,
+                    event_type=CommandEventType.EXPIRED.value,
+                    occurred_at=now,
+                    payload={
+                        "reason": "partial_remainder_absent_from_exchange_open_orders",
+                        "venue_order_id": venue_order_id,
+                        "venue_order_fact_id": order_fact_id,
+                        "proof_class": "confirmed_fill_plus_open_order_absence",
+                        "positive_fill_trade_fact_count": fill_summary["count"],
+                        "positive_fill_size": fill_summary["filled_size"],
+                        "resolved_m5_local_orphan_findings": resolved_findings,
+                    },
+                )
+                conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+            except Exception:
+                conn.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
+                conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+                raise
+            logger.info(
+                "recovery: command %s PARTIAL remainder -> EXPIRED "
+                "(venue_order_id=%s; fill_trade_facts=%d; resolved_findings=%d)",
+                command_id,
+                venue_order_id,
+                fill_summary["count"],
+                resolved_findings,
+            )
+            summary["advanced"] += 1
+        except Exception as exc:
+            logger.error(
+                "recovery: partial remainder reconciliation failed for command %s: %s",
                 command_id,
                 exc,
             )
@@ -1247,6 +1511,7 @@ def reconcile_unresolved_commands(
         client = PolymarketClient()
 
     summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+    started_at = _now_iso()
 
     try:
         rows = find_unresolved_commands(conn)
@@ -1276,6 +1541,16 @@ def reconcile_unresolved_commands(
         summary["advanced"] += terminal_summary["advanced"]
         summary["stayed"] += terminal_summary["stayed"]
         summary["errors"] += terminal_summary["errors"]
+
+        partial_summary = reconcile_partial_remainders(
+            conn,
+            client,
+            updated_before=started_at,
+        )
+        summary["partial_remainders"] = partial_summary
+        summary["advanced"] += partial_summary["advanced"]
+        summary["stayed"] += partial_summary["stayed"]
+        summary["errors"] += partial_summary["errors"]
 
     finally:
         if own_conn:

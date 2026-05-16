@@ -1,6 +1,6 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-05-08
-# Lifecycle: created=2026-04-27; last_reviewed=2026-05-07; last_reused=2026-05-08
+# Last reused/audited: 2026-05-16
+# Lifecycle: created=2026-04-27; last_reviewed=2026-05-07; last_reused=2026-05-16
 # Authority basis: docs/operations/task_2026-05-08_object_invariance_remaining_mainline/PLAN.md
 # Purpose: R3 M5 exchange reconciliation sweep antibodies.
 # Reuse: Run when exchange_reconcile, venue facts, findings, heartbeat/cutover reconciliation, or operator finding resolution changes.
@@ -69,6 +69,19 @@ class FakeAdapterWithoutTrades:
     def get_positions(self):
         self.calls.append(("get_positions", (), {}))
         return self.positions
+
+
+class FakeAdapterWithoutPositions:
+    def __init__(self, *, open_orders=None, trades=None):
+        self.open_orders = open_orders or []
+        self.trades = trades or []
+        self.read_freshness = {"open_orders": True, "trades": True}
+
+    def get_open_orders(self):
+        return self.open_orders
+
+    def get_trades(self):
+        return self.trades
 
 
 class FakeAdapterWithoutFreshness:
@@ -358,6 +371,21 @@ def findings(c):
 
 def command_count(c):
     return c.execute("SELECT COUNT(*) FROM venue_commands").fetchone()[0]
+
+
+def configure_subscribed_m5_latch():
+    from src.control import ws_gap_guard
+
+    return ws_gap_guard.configure_status(
+        ws_gap_guard.WSGapStatus(
+            connected=True,
+            last_message_at=NOW,
+            subscription_state="SUBSCRIBED",
+            gap_reason="message_received",
+            m5_reconcile_required=True,
+            updated_at=NOW,
+        )
+    )
 
 
 def event_types(c, command_id="cmd-m5"):
@@ -1181,6 +1209,26 @@ def test_failed_trade_does_not_suppress_local_orphan_finding(conn):
     assert conn.execute("SELECT state FROM venue_commands WHERE command_id = 'cmd-m5'").fetchone()["state"] == "ACKED"
 
 
+def test_ws_gap_partial_trade_does_not_suppress_local_orphan_when_order_absent(conn):
+    from src.execution.exchange_reconcile import run_reconcile_sweep
+
+    seed_command(conn, size=10)
+    append_resting_order_fact(conn)
+
+    result = run_reconcile_sweep(
+        FakeM5Adapter(
+            open_orders=[],
+            trades=[trade(trade_id="trade-partial", order_id="ord-m5", size="4", status="CONFIRMED")],
+        ),
+        conn,
+        context="ws_gap",
+        observed_at=NOW,
+    )
+
+    assert any(finding.kind == "local_orphan_order" for finding in result)
+    assert conn.execute("SELECT state FROM venue_commands WHERE command_id = 'cmd-m5'").fetchone()["state"] == "PARTIAL"
+
+
 def test_real_adapter_missing_read_surface_is_not_absence_proof(conn):
     from src.execution.exchange_reconcile import run_reconcile_sweep
     from src.venue.polymarket_v2_adapter import PolymarketV2Adapter, V2ReadUnavailable
@@ -1403,6 +1451,148 @@ def test_get_trades_sdk_method_used_when_available_else_position_diff_fallback(c
     assert not any(call[0] == "get_trades" for call in fallback.calls)
     assert any(finding.kind == "position_drift" for finding in result)
     assert not any(finding.kind == "unrecorded_trade" for finding in result)
+
+
+def test_missing_positions_surface_is_not_position_absence_proof(conn):
+    from src.execution.exchange_reconcile import run_reconcile_sweep
+
+    seed_command(conn, size=10)
+    append_trade_fact(conn, command_id="cmd-m5", venue_order_id="ord-m5", size="10")
+
+    result = run_reconcile_sweep(
+        FakeAdapterWithoutPositions(
+            open_orders=[],
+            trades=[trade(trade_id="trade-local", order_id="ord-m5", size="10", status="CONFIRMED")],
+        ),
+        conn,
+        context="periodic",
+        observed_at=NOW,
+    )
+
+    assert not any(finding.kind == "position_drift" for finding in result)
+
+
+def test_ws_gap_m5_sweep_clears_latch_for_fresh_open_partial_order(conn):
+    from src.control import ws_gap_guard
+    from src.execution.exchange_reconcile import run_ws_gap_reconcile_and_clear
+
+    seed_command(conn, size=5)
+    conn.execute("UPDATE venue_commands SET state = 'PARTIAL' WHERE command_id = 'cmd-m5'")
+    configure_subscribed_m5_latch()
+
+    try:
+        result = run_ws_gap_reconcile_and_clear(
+            FakeM5Adapter(open_orders=[order(order_id="ord-m5")], trades=[], positions=[]),
+            conn,
+            observed_at=NOW,
+        )
+
+        assert result["status"] == "cleared"
+        assert result["captured_surfaces"] == ["open_orders", "positions", "trades"]
+        assert ws_gap_guard.summary(now=NOW)["entry"]["allow_submit"] is True
+        assert ws_gap_guard.status().m5_reconcile_required is False
+        assert conn.execute("SELECT state FROM venue_commands WHERE command_id = 'cmd-m5'").fetchone()["state"] == "PARTIAL"
+        assert findings(conn) == []
+    finally:
+        ws_gap_guard.clear_for_test(observed_at=NOW)
+
+
+def test_ws_gap_m5_sweep_filters_unrelated_wallet_trade_history(conn):
+    from src.control import ws_gap_guard
+    from src.execution.exchange_reconcile import run_ws_gap_reconcile_and_clear
+
+    seed_command(conn, size=5)
+    conn.execute("UPDATE venue_commands SET state = 'PARTIAL' WHERE command_id = 'cmd-m5'")
+    configure_subscribed_m5_latch()
+
+    try:
+        result = run_ws_gap_reconcile_and_clear(
+            FakeM5Adapter(
+                open_orders=[order(order_id="ord-m5")],
+                trades=[trade(trade_id="historical-unrelated", order_id="old-wallet-order")],
+                positions=[],
+            ),
+            conn,
+            observed_at=NOW,
+        )
+
+        assert result["status"] == "cleared"
+        assert ws_gap_guard.status().m5_reconcile_required is False
+        assert findings(conn) == []
+    finally:
+        ws_gap_guard.clear_for_test(observed_at=NOW)
+
+
+def test_ws_gap_m5_sweep_keeps_latch_closed_when_findings_remain(conn):
+    from src.control import ws_gap_guard
+    from src.execution.exchange_reconcile import run_ws_gap_reconcile_and_clear
+
+    seed_command(conn, size=5)
+    append_resting_order_fact(conn)
+    configure_subscribed_m5_latch()
+
+    try:
+        result = run_ws_gap_reconcile_and_clear(
+            FakeM5Adapter(open_orders=[], trades=[], positions=[]),
+            conn,
+            observed_at=NOW,
+        )
+
+        assert result["status"] == "blocked"
+        assert result["reason"] == "m5_findings_unresolved"
+        assert result["findings"] == 1
+        assert ws_gap_guard.status().m5_reconcile_required is True
+        assert ws_gap_guard.summary(now=NOW)["entry"]["allow_submit"] is False
+        assert findings(conn)[0]["kind"] == "local_orphan_order"
+    finally:
+        ws_gap_guard.clear_for_test(observed_at=NOW)
+
+
+def test_ws_gap_m5_sweep_requires_fresh_trade_enumeration_before_clear(conn):
+    from src.control import ws_gap_guard
+    from src.execution.exchange_reconcile import run_ws_gap_reconcile_and_clear
+
+    seed_command(conn, size=5)
+    conn.execute("UPDATE venue_commands SET state = 'PARTIAL' WHERE command_id = 'cmd-m5'")
+    configure_subscribed_m5_latch()
+
+    try:
+        result = run_ws_gap_reconcile_and_clear(
+            FakeAdapterWithoutTrades(open_orders=[order(order_id="ord-m5")], positions=[]),
+            conn,
+            observed_at=NOW,
+        )
+
+        assert result["status"] == "blocked"
+        assert result["reason"] == "trades_read_unavailable"
+        assert result["unavailable_surfaces"] == ["trades"]
+        assert ws_gap_guard.status().m5_reconcile_required is True
+        assert ws_gap_guard.summary(now=NOW)["entry"]["allow_submit"] is False
+        assert findings(conn) == []
+    finally:
+        ws_gap_guard.clear_for_test(observed_at=NOW)
+
+
+def test_live_heartbeat_runs_ws_gap_m5_sweep_without_closing_external_test_conn(conn):
+    import src.main as main_module
+    from src.control import ws_gap_guard
+
+    seed_command(conn, size=5)
+    conn.execute("UPDATE venue_commands SET state = 'PARTIAL' WHERE command_id = 'cmd-m5'")
+    configure_subscribed_m5_latch()
+
+    try:
+        result = main_module._run_ws_gap_reconcile_if_required(
+            FakeM5Adapter(open_orders=[order(order_id="ord-m5")], trades=[], positions=[]),
+            conn_factory=lambda: conn,
+            now=NOW,
+        )
+
+        assert result["status"] == "cleared"
+        assert ws_gap_guard.status().m5_reconcile_required is False
+        conn.execute("SELECT 1").fetchone()
+    finally:
+        ws_gap_guard.clear_for_test(observed_at=NOW)
 
 
 def test_findings_actuator_loop_resolves_findings_via_operator_decision(conn):

@@ -1363,8 +1363,10 @@ def test_r3_m5_exchange_reconcile_routes_to_m5_profile_not_heartbeat():
             "src/execution/exchange_reconcile.py",
             "src/state/venue_command_repo.py",
             "src/state/db.py",
+            "src/control/ws_gap_guard.py",
             "src/control/heartbeat_supervisor.py",
             "src/control/cutover_guard.py",
+            "src/main.py",
             "src/venue/polymarket_v2_adapter.py",
             "tests/test_exchange_reconcile.py",
             "docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/M5.yaml",
@@ -1375,7 +1377,9 @@ def test_r3_m5_exchange_reconcile_routes_to_m5_profile_not_heartbeat():
     assert digest["admission"]["status"] == "admitted"
     assert "src/execution/exchange_reconcile.py" in digest["admission"]["admitted_files"]
     assert "src/state/venue_command_repo.py" in digest["admission"]["admitted_files"]
+    assert "src/control/ws_gap_guard.py" in digest["admission"]["admitted_files"]
     assert "src/control/heartbeat_supervisor.py" in digest["admission"]["admitted_files"]
+    assert "src/main.py" in digest["admission"]["admitted_files"]
     assert "tests/test_exchange_reconcile.py" in digest["admission"]["admitted_files"]
 
 

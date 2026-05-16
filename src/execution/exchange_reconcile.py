@@ -91,10 +91,128 @@ class ReconcileFinding:
     recorded_at: datetime
 
 
+@dataclass(frozen=True)
+class FreshReconcileSnapshot:
+    adapter: Any
+    captured_surfaces: tuple[str, ...]
+    unavailable_surfaces: tuple[str, ...]
+
+
 def init_exchange_reconcile_schema(conn: sqlite3.Connection) -> None:
     """Create the M5 findings table if absent."""
 
     conn.executescript(_SCHEMA)
+
+
+def fresh_reconcile_snapshot(
+    adapter: Any,
+    *,
+    observed_at: datetime | str | None = None,
+    trade_order_ids: set[str] | frozenset[str] | None = None,
+) -> FreshReconcileSnapshot:
+    """Capture venue read surfaces and attach explicit freshness evidence.
+
+    ``run_reconcile_sweep`` intentionally refuses to infer absence from a raw
+    adapter without read freshness. Live runtime adapters expose methods, not a
+    prebuilt freshness map, so the runtime first snapshots successful reads and
+    reconciles against that immutable evidence object.
+    """
+
+    observed = _coerce_dt(observed_at)
+    captured: dict[str, list[Any]] = {}
+    unavailable: list[str] = []
+
+    captured["open_orders"] = _call_required(adapter, "get_open_orders")
+    for surface, method in (("trades", "get_trades"), ("positions", "get_positions")):
+        fn = getattr(adapter, method, None)
+        if not callable(fn):
+            unavailable.append(surface)
+            continue
+        try:
+            rows = list(fn() or [])
+            if surface == "trades" and trade_order_ids is not None:
+                rows = [
+                    row for row in rows
+                    if set(_trade_order_ids(_raw(row))) & set(trade_order_ids)
+                ]
+            captured[surface] = rows
+        except Exception as exc:
+            if exc.__class__.__name__ == "V2ReadUnavailable":
+                unavailable.append(surface)
+                continue
+            raise
+
+    freshness = {
+        surface: {"ok": True, "fresh": True, "captured_at": observed.isoformat()}
+        for surface in captured
+    }
+    snapshot = SimpleNamespace(read_freshness=freshness)
+    snapshot.get_open_orders = lambda: list(captured["open_orders"])
+    if "trades" in captured:
+        snapshot.get_trades = lambda: list(captured["trades"])
+    if "positions" in captured:
+        snapshot.get_positions = lambda: list(captured["positions"])
+    return FreshReconcileSnapshot(
+        adapter=snapshot,
+        captured_surfaces=tuple(sorted(captured)),
+        unavailable_surfaces=tuple(sorted(unavailable)),
+    )
+
+
+def run_ws_gap_reconcile_and_clear(
+    adapter: Any,
+    conn: sqlite3.Connection,
+    *,
+    ws_guard: Any = None,
+    observed_at: datetime | str | None = None,
+) -> dict[str, Any]:
+    """Run a fresh M5 sweep for a WS gap and clear the latch only on proof.
+
+    A live open/PARTIAL order is not itself a reason to stay latched after M5:
+    the fresh open-order/trade snapshot is the missing proof that the gap did
+    not hide an unresolved side effect. Findings or missing trade enumeration
+    keep the latch closed.
+    """
+
+    if ws_guard is None:
+        from src.control import ws_gap_guard as ws_guard
+
+    observed = _coerce_dt(observed_at)
+    summary = ws_guard.summary(now=observed)
+    if not bool(summary.get("m5_reconcile_required", False)):
+        return {"status": "not_required", "findings": 0, "unresolved_findings": 0}
+
+    local_order_ids = set(_local_open_order_ids(conn))
+    snapshot = fresh_reconcile_snapshot(
+        adapter,
+        observed_at=observed,
+        trade_order_ids=local_order_ids,
+    )
+    findings = run_reconcile_sweep(snapshot.adapter, conn, context="ws_gap", observed_at=observed)
+    unresolved = list_unresolved_findings(conn)
+    result = {
+        "status": "blocked",
+        "findings": len(findings),
+        "unresolved_findings": len(unresolved),
+        "captured_surfaces": list(snapshot.captured_surfaces),
+        "unavailable_surfaces": list(snapshot.unavailable_surfaces),
+    }
+    if "trades" not in snapshot.captured_surfaces:
+        result["reason"] = "trades_read_unavailable"
+        return result
+    if findings or unresolved:
+        result["reason"] = "m5_findings_unresolved"
+        return result
+
+    ws_guard.clear_after_m5_reconcile(
+        observed_at=observed,
+        stale_after_seconds=int(summary.get("stale_after_seconds") or 0) or None,
+        findings_count=len(findings),
+        unresolved_findings_count=len(unresolved),
+    )
+    result["status"] = "cleared"
+    result["reason"] = "m5_reconcile_complete"
+    return result
 
 
 @capability("on_chain_mutation", lease=True)
@@ -149,6 +267,7 @@ def run_reconcile_sweep(
         _assert_adapter_read_fresh(adapter, "trades", observed)
     trades = adapter.get_trades() if trades_available else []
     trade_order_ids: set[str] = set()
+    trade_fills_by_order_id: dict[str, Decimal] = {}
     for trade in trades or []:
         raw = _raw(trade)
         venue_trade_id = _trade_id(raw)
@@ -172,8 +291,14 @@ def run_reconcile_sweep(
                 )
             )
             continue
-        if state in {"MATCHED", "MINED", "CONFIRMED"}:
-            trade_order_ids.update(candidate_order_ids)
+        if state in {"MATCHED", "MINED", "CONFIRMED"} and command is not None and order_id:
+            trade_order_ids.add(order_id)
+            try:
+                filled = _decimal(_trade_filled_size(raw, order_id))
+            except (InvalidOperation, ValueError):
+                filled = Decimal("0")
+            if filled.is_finite() and filled > Decimal("0"):
+                trade_fills_by_order_id[order_id] = trade_fills_by_order_id.get(order_id, Decimal("0")) + filled
         if command is None:
             findings.append(
                 record_finding(
@@ -220,7 +345,13 @@ def run_reconcile_sweep(
             findings.append(finding)
 
     for order_id, command in local_by_order.items():
-        if order_id in open_order_ids or order_id in trade_order_ids:
+        if order_id in open_order_ids:
+            continue
+        if context == "ws_gap" and _trade_fill_covers_local_command(
+            command, trade_fills_by_order_id.get(order_id)
+        ):
+            continue
+        if context != "ws_gap" and order_id in trade_order_ids:
             continue
         if not _local_order_is_open(conn, command):
             continue
@@ -244,15 +375,15 @@ def run_reconcile_sweep(
     positions_available = callable(getattr(adapter, "get_positions", None))
     if positions_available:
         _assert_adapter_read_fresh(adapter, "positions", observed)
-    positions = adapter.get_positions() if positions_available else []
-    findings.extend(
-        _record_position_drift_findings(
-            conn,
-            positions=positions,
-            context=context,
-            observed_at=observed,
+        positions = adapter.get_positions()
+        findings.extend(
+            _record_position_drift_findings(
+                conn,
+                positions=positions,
+                context=context,
+                observed_at=observed,
+            )
         )
-    )
     return findings
 
 
@@ -848,6 +979,15 @@ def _local_commands_by_order(conn: sqlite3.Connection) -> dict[str, dict[str, An
     return {str(row["venue_order_id"]): dict(row) for row in rows}
 
 
+def _local_open_order_ids(conn: sqlite3.Connection) -> tuple[str, ...]:
+    local_by_order = _local_commands_by_order(conn)
+    return tuple(
+        order_id
+        for order_id, command in local_by_order.items()
+        if _local_order_is_open(conn, command)
+    )
+
+
 def _local_order_is_open(conn: sqlite3.Connection, command: Mapping[str, Any]) -> bool:
     if str(command.get("state")) not in _OPEN_LOCAL_STATES:
         return False
@@ -877,6 +1017,16 @@ def _local_absence_kind(context: ReconcileContext) -> FindingKind:
     if context == "cutover":
         return "cutover_wipe"
     return "local_orphan_order"
+
+
+def _trade_fill_covers_local_command(command: Mapping[str, Any], filled: Decimal | None) -> bool:
+    if filled is None:
+        return False
+    try:
+        requested = _decimal(command.get("size"))
+    except (InvalidOperation, ValueError):
+        return False
+    return requested > Decimal("0") and filled >= requested
 
 
 def _exchange_positions_by_token(positions: list[Any]) -> dict[str, Decimal]:
