@@ -382,6 +382,75 @@ def test_collateral_payload_degrades_when_clob_zero_and_chain_unavailable(tmp_pa
     assert payload["authority_tier"] == "DEGRADED"
 
 
+def test_collateral_payload_pusd_allowance_not_overwritten_by_ctf_positions(tmp_path):
+    """Regression: CTF positions loop must not clobber the pUSD allowance variable.
+
+    When a wallet holds CTF outcome tokens, the loop body assigns a local
+    ``allowance_raw`` for each position.  Before the fix this shadowed the
+    outer ``pusd_allowance_raw``, so ``pusd_allowance_micro`` ended up as
+    the last position's token allowance (or 0 when absent) rather than the
+    actual pUSD/CLOB allowance.  The return payload must always report the
+    initial pUSD allowance regardless of CTF position count.
+    """
+    from src.venue.polymarket_v2_adapter import PolymarketV2Adapter
+
+    # Client with pUSD allowance + two CTF positions carrying different allowances.
+    class FakeClientWithPositions:
+        def get_balance_allowance(self, params):
+            return {"balance": "200000000", "allowance": "99000000"}
+
+        def update_balance_allowance(self, params):
+            return {}
+
+        def get_positions(self):
+            return [
+                {"asset": "token-A", "size": "10", "allowance": "1111"},
+                {"asset": "token-B", "size": "5"},  # no allowance field → 0
+            ]
+
+    adapter = PolymarketV2Adapter(
+        host="https://clob.polymarket.com",
+        funder_address="0xfunder",
+        signer_key="test-key",
+        chain_id=137,
+        signature_type=3,
+        q1_egress_evidence_path=tmp_path / "unused.txt",
+        client_factory=lambda **kwargs: FakeClientWithPositions(),
+    )
+
+    payload = adapter.get_collateral_payload()
+
+    # pUSD allowance must be the CLOB value, not any CTF position's allowance.
+    assert payload["pusd_allowance_micro"] == "99000000", (
+        f"pusd_allowance_micro was {payload['pusd_allowance_micro']!r}; "
+        "CTF position loop must not overwrite the pUSD allowance variable"
+    )
+    # CTF maps must still reflect the positions correctly.
+    assert "token-A" in payload["ctf_token_balances_units"]
+    assert "token-B" in payload["ctf_token_balances_units"]
+
+
+def test_collateral_payload_pusd_allowance_preserved_with_zero_ctf_positions(tmp_path):
+    """Baseline: pUSD allowance correct when no CTF positions exist."""
+    from src.venue.polymarket_v2_adapter import PolymarketV2Adapter
+
+    fake = FakeBalanceAllowanceClient(response={"balance": "100000000", "allowance": "77000000"})
+    adapter = PolymarketV2Adapter(
+        host="https://clob.polymarket.com",
+        funder_address="0xfunder",
+        signer_key="test-key",
+        chain_id=137,
+        signature_type=3,
+        q1_egress_evidence_path=tmp_path / "unused.txt",
+        client_factory=lambda **kwargs: fake,
+    )
+
+    payload = adapter.get_collateral_payload()
+
+    assert payload["pusd_allowance_micro"] == "77000000"
+    assert payload["ctf_token_balances_units"] == {}
+
+
 def test_polymarket_client_defaults_to_current_keychain_funder_signature_type(monkeypatch):
     from src.data import polymarket_client as pm
 

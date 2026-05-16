@@ -498,20 +498,20 @@ class PolymarketV2Adapter:
             raw = dict(raw)
         if raw.get("balance") is None:
             raise V2AdapterError("balance allowance response missing balance")
-        allowance_raw = raw.get("allowance")
-        allowance_int = _micro_int_or_none(allowance_raw)
+        pusd_allowance_raw = raw.get("allowance")
+        allowance_int = _micro_int_or_none(pusd_allowance_raw)
         authority_tier = "CHAIN"
         allowance_source = "clob_balance_allowance"
         if allowance_int is None or allowance_int == 0:
             chain_allowance = self._chain_collateral_allowance_micro()
             if chain_allowance is not None:
-                allowance_raw = chain_allowance
+                pusd_allowance_raw = chain_allowance
                 allowance_source = "chain_erc20_allowance"
             elif allowance_int is None:
-                allowance_raw = None
+                pusd_allowance_raw = None
                 allowance_source = "missing"
             else:
-                allowance_raw = allowance_int
+                pusd_allowance_raw = allowance_int
                 authority_tier = "DEGRADED"
                 allowance_source = "chain_erc20_unavailable_clob_zero"
 
@@ -550,7 +550,7 @@ class PolymarketV2Adapter:
 
         return {
             "pusd_balance_micro": raw.get("balance", 0),
-            "pusd_allowance_micro": allowance_raw if allowance_raw is not None else 0,
+            "pusd_allowance_micro": pusd_allowance_raw if pusd_allowance_raw is not None else 0,
             "usdc_e_legacy_balance_micro": 0,
             "ctf_token_balances_units": balances,
             "ctf_token_allowances_units": allowances,
