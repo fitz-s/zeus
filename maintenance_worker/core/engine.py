@@ -32,7 +32,10 @@ maintenance_worker.core.* (guards, refusal, kill_switch).
 from __future__ import annotations
 
 import importlib
+import json
 import logging
+import os
+import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -213,10 +216,11 @@ class MaintenanceEngine:
         # _enumerate_candidates returns list[TaskCatalogEntry] from catalog.
         # For each entry, dispatch to handler.enumerate(entry, ctx) to collect
         # list[Candidate] per task. Handlers not yet implemented return [].
-        # TODO(WAVE 7): add weekly tick dispatch here for schedule="weekly" tasks
-        # (e.g. authority_drift_surface, schedule_day=monday). Currently only
-        # daily tasks are enumerated; weekly handler is implemented but dormant.
         entries: list[TaskCatalogEntry] = self._enumerate_candidates(config, schedule="daily")
+        # Weekly cadence gate: dispatch schedule="weekly" tasks only when due (≥7d since last run).
+        # Cadence state persisted in state/maintenance_state/last_weekly_tick.json (atomic write).
+        # On first run (file absent) weekly tasks are dispatched immediately.
+        entries.extend(self._run_weekly_if_due(config))
         per_task_candidates: dict[str, list[Candidate]] = {}
         for entry in entries:
             task_candidates = self._dispatch_enumerate(entry, ctx)
@@ -315,6 +319,88 @@ class MaintenanceEngine:
                 return False
         return True
 
+    _WEEKLY_CADENCE_DAYS = 7
+    _WEEKLY_STATE_SUBDIR = "maintenance_state"
+    _WEEKLY_STATE_FILE = "last_weekly_tick.json"
+
+    def _run_weekly_if_due(self, config: EngineConfig) -> list[TaskCatalogEntry]:
+        """
+        Return weekly TaskCatalogEntries if ≥7 days have passed since the last
+        weekly dispatch, then atomically update the cadence timestamp.
+
+        Cadence state: state_dir/maintenance_state/last_weekly_tick.json
+          {"last_run_ts": <unix float>}
+
+        Absent file → first run → weekly is due.
+        Atomic write: tmp file + os.replace() per Zeus convention.
+
+        Returns [] if not yet due; returns weekly entries (may be empty if
+        catalog has no weekly tasks) if due.
+        """
+        state_file = (
+            config.state_dir / self._WEEKLY_STATE_SUBDIR / self._WEEKLY_STATE_FILE
+        )
+        now_ts = time.time()
+        due = False
+
+        if not state_file.exists():
+            due = True
+            logger.info(
+                "_run_weekly_if_due: no cadence file found — weekly dispatch due (first run)"
+            )
+        else:
+            try:
+                data = json.loads(state_file.read_text())
+                last_ts: float = float(data.get("last_run_ts", 0))
+                elapsed_days = (now_ts - last_ts) / 86400
+                if elapsed_days >= self._WEEKLY_CADENCE_DAYS:
+                    due = True
+                    logger.info(
+                        "_run_weekly_if_due: %.1f days since last weekly run — dispatching",
+                        elapsed_days,
+                    )
+                else:
+                    logger.debug(
+                        "_run_weekly_if_due: %.1f days since last weekly run — not yet due",
+                        elapsed_days,
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "_run_weekly_if_due: could not read cadence file %s: %s — skipping weekly",
+                    state_file,
+                    exc,
+                )
+                return []
+
+        if not due:
+            return []
+
+        # Verify catalog exists before committing to a weekly dispatch.
+        # If catalog is absent, _enumerate_candidates returns [] anyway; skip
+        # the atomic state write so the cadence re-fires once the catalog appears.
+        if not config.task_catalog_path.exists():
+            logger.debug(
+                "_run_weekly_if_due: catalog missing — skipping weekly dispatch"
+            )
+            return []
+
+        # Atomic timestamp update (tmp + os.replace per Zeus convention)
+        try:
+            state_file.parent.mkdir(parents=True, exist_ok=True)
+            tmp_file = state_file.with_suffix(".json.tmp")
+            tmp_file.write_text(json.dumps({"last_run_ts": now_ts}))
+            os.replace(str(tmp_file), str(state_file))
+        except Exception as exc:
+            logger.warning(
+                "_run_weekly_if_due: could not update cadence file %s: %s",
+                state_file,
+                exc,
+            )
+            # Proceed with dispatch even if state write fails — missing write
+            # means next tick re-dispatches weekly (safe: all weekly tasks are dry_run).
+
+        return self._enumerate_candidates(config, schedule="weekly")
+
     def _enumerate_candidates(
         self, config: EngineConfig, schedule: str = "daily"
     ) -> list[TaskCatalogEntry]:
@@ -392,6 +478,15 @@ class MaintenanceEngine:
                 entry.spec.task_id,
             )
             return []
+        except Exception as exc:
+            logger.error(
+                "_dispatch_enumerate: handler %s raised %s: %s; isolating from peers",
+                entry.spec.task_id,
+                type(exc).__name__,
+                exc,
+                exc_info=True,
+            )
+            return []
 
     def _emit_dry_run_proposal(
         self, entry: TaskCatalogEntry, candidates: list[Candidate]
@@ -456,6 +551,15 @@ class MaintenanceEngine:
             logger.debug(
                 "_apply_decisions: no handler for %s; returning dry_run_only",
                 task.task_id,
+            )
+            return ApplyResult(task_id=task.task_id, dry_run_only=True)
+        except Exception as exc:
+            logger.error(
+                "_apply_decisions: handler %s raised %s: %s; treating as dry_run",
+                task.task_id,
+                type(exc).__name__,
+                exc,
+                exc_info=True,
             )
             return ApplyResult(task_id=task.task_id, dry_run_only=True)
 

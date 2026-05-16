@@ -467,3 +467,342 @@ def test_enumerate_candidates_weekly_schedule(tmp_path: Path) -> None:
 
     assert len(daily_entries) == 1, f"Expected 1 daily entry; got {len(daily_entries)}"
     assert daily_entries[0].spec.task_id == "daily_task"
+
+
+# ---------------------------------------------------------------------------
+# MC2: Cascade isolation — one handler crash does not poison peers
+# ---------------------------------------------------------------------------
+
+
+def test_one_handler_crash_does_not_poison_peers(tmp_path: Path) -> None:
+    """
+    When handler_A.enumerate() raises OSError, the engine must:
+    - Catch it (not propagate to run_tick outer scope)
+    - Return [] for handler_A
+    - Still dispatch handler_B and collect its candidates
+
+    Regression test for MC2: _dispatch_enumerate previously only caught
+    TaskHandlerNotFoundError; bare OSError propagated and killed the tick.
+    """
+    import yaml
+    from maintenance_worker.rules.parser import TaskCatalogEntry
+    from maintenance_worker.types.candidates import Candidate
+    from maintenance_worker.types.specs import TaskSpec
+
+    catalog_content = {
+        "schema_version": 1,
+        "tasks": [
+            {
+                "id": "crashy_handler",
+                "description": "crashes on enumerate",
+                "rule_source": "test",
+                "schedule": "daily",
+                "dry_run": True,
+                "live_default": False,
+                "config": {},
+                "safety": {},
+                "evidence_emit": "per_file_action",
+            },
+            {
+                "id": "clean_handler",
+                "description": "returns clean candidate",
+                "rule_source": "test",
+                "schedule": "daily",
+                "dry_run": True,
+                "live_default": False,
+                "config": {},
+                "safety": {},
+                "evidence_emit": "per_file_action",
+            },
+        ],
+    }
+    catalog_path = tmp_path / "catalog.yaml"
+    catalog_path.write_text(yaml.dump(catalog_content))
+
+    config = EngineConfig(
+        repo_root=tmp_path,
+        state_dir=tmp_path / "state",
+        evidence_dir=tmp_path / "evidence",
+        task_catalog_path=catalog_path,
+        safety_contract_path=tmp_path / "safety.yaml",
+        live_default=False,
+        scheduler="launchd",
+        notification_channel="discord",
+    )
+    (tmp_path / "state").mkdir()
+    (tmp_path / "evidence").mkdir()
+    (tmp_path / ".git").mkdir()
+
+    clean_candidate = Candidate(
+        task_id="clean_handler",
+        path=tmp_path / "dummy.txt",
+        verdict="TEST_CANDIDATE",
+        reason="clean handler ran",
+    )
+
+    # Mock at _dispatch_by_task_id so _dispatch_enumerate's broad-except actually fires.
+    # Mocking _dispatch_enumerate directly would bypass the except clause under test.
+    def fake_dispatch_by_task_id(task_id: str, method: str, *args: object) -> object:
+        """Simulate crashy_handler raising OSError at handler dispatch level."""
+        if task_id == "crashy_handler" and method == "enumerate":
+            raise OSError("disk read failed: permission denied")
+        if task_id == "clean_handler" and method == "enumerate":
+            return [clean_candidate]
+        # apply() path — return dry_run_only ApplyResult
+        from maintenance_worker.types.results import ApplyResult
+        return ApplyResult(task_id=task_id, dry_run_only=True)
+
+    mock_run, mock_disk = _clean_guards_context(tmp_path)
+    with mock_run, mock_disk:
+        with patch(
+            "maintenance_worker.core.engine.check_scheduler_invocation",
+            return_value="SCHEDULED",
+        ):
+            with patch.object(
+                MaintenanceEngine,
+                "_dispatch_by_task_id",
+                side_effect=fake_dispatch_by_task_id,
+            ):
+                result = run_tick(config)
+
+    # Tick must complete normally (not raise)
+    assert isinstance(result, TickResult)
+    assert result.skipped is False
+
+    # clean_handler must have contributed its candidate to apply_results
+    all_task_ids = [r.task_id for r in result.apply_results]
+    assert "clean_handler" in all_task_ids, (
+        f"clean_handler must run despite crashy_handler's OSError; got task_ids={all_task_ids}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# MC1 (Option A): Weekly cadence gate — _run_weekly_if_due
+# ---------------------------------------------------------------------------
+
+
+def test_weekly_cadence_fires_on_first_run(tmp_path: Path) -> None:
+    """
+    When last_weekly_tick.json is absent, run_tick must dispatch weekly tasks
+    (cadence due on first run) and write last_weekly_tick.json.
+    """
+    import yaml
+    from maintenance_worker.types.candidates import Candidate
+    from maintenance_worker.rules.parser import TaskCatalogEntry
+
+    catalog_content = {
+        "schema_version": 1,
+        "tasks": [
+            {
+                "id": "authority_drift_surface",
+                "description": "weekly drift check",
+                "rule_source": "test",
+                "schedule": "weekly",
+                "dry_run": True,
+                "live_default": False,
+                "config": {},
+                "safety": {},
+                "evidence_emit": "drift_report_per_doc",
+            },
+        ],
+    }
+    catalog_path = tmp_path / "catalog.yaml"
+    catalog_path.write_text(yaml.dump(catalog_content))
+
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    (tmp_path / "evidence").mkdir()
+    (tmp_path / ".git").mkdir()
+
+    config = EngineConfig(
+        repo_root=tmp_path,
+        state_dir=state_dir,
+        evidence_dir=tmp_path / "evidence",
+        task_catalog_path=catalog_path,
+        safety_contract_path=tmp_path / "safety.yaml",
+        live_default=False,
+        scheduler="launchd",
+        notification_channel="discord",
+    )
+
+    weekly_ran: list[str] = []
+
+    def fake_dispatch_enumerate(entry: TaskCatalogEntry, ctx: object) -> list[Candidate]:
+        weekly_ran.append(entry.spec.task_id)
+        return []
+
+    mock_run, mock_disk = _clean_guards_context(tmp_path)
+    with mock_run, mock_disk:
+        with patch(
+            "maintenance_worker.core.engine.check_scheduler_invocation",
+            return_value="SCHEDULED",
+        ):
+            with patch.object(
+                MaintenanceEngine,
+                "_dispatch_enumerate",
+                side_effect=fake_dispatch_enumerate,
+            ):
+                result = run_tick(config)
+
+    assert "authority_drift_surface" in weekly_ran, (
+        "Weekly task must dispatch when last_weekly_tick.json is absent (first run)"
+    )
+    weekly_ts_file = state_dir / "maintenance_state" / "last_weekly_tick.json"
+    assert weekly_ts_file.exists(), (
+        "last_weekly_tick.json must be written after weekly dispatch"
+    )
+
+
+def test_weekly_cadence_skips_when_recent(tmp_path: Path) -> None:
+    """
+    When last_weekly_tick.json was written 6 days ago, weekly tasks must NOT fire.
+    """
+    import json
+    import time
+    import yaml
+    from maintenance_worker.rules.parser import TaskCatalogEntry
+    from maintenance_worker.types.candidates import Candidate
+
+    catalog_content = {
+        "schema_version": 1,
+        "tasks": [
+            {
+                "id": "authority_drift_surface",
+                "description": "weekly drift check",
+                "rule_source": "test",
+                "schedule": "weekly",
+                "dry_run": True,
+                "live_default": False,
+                "config": {},
+                "safety": {},
+                "evidence_emit": "drift_report_per_doc",
+            },
+        ],
+    }
+    catalog_path = tmp_path / "catalog.yaml"
+    catalog_path.write_text(yaml.dump(catalog_content))
+
+    state_dir = tmp_path / "state"
+    maintenance_state_dir = state_dir / "maintenance_state"
+    maintenance_state_dir.mkdir(parents=True)
+    (tmp_path / "evidence").mkdir()
+    (tmp_path / ".git").mkdir()
+
+    # Write last_weekly_tick.json with 6-day-ago timestamp
+    six_days_ago = time.time() - (6 * 86400)
+    weekly_ts_file = maintenance_state_dir / "last_weekly_tick.json"
+    weekly_ts_file.write_text(json.dumps({"last_run_ts": six_days_ago}))
+
+    config = EngineConfig(
+        repo_root=tmp_path,
+        state_dir=state_dir,
+        evidence_dir=tmp_path / "evidence",
+        task_catalog_path=catalog_path,
+        safety_contract_path=tmp_path / "safety.yaml",
+        live_default=False,
+        scheduler="launchd",
+        notification_channel="discord",
+    )
+
+    weekly_ran: list[str] = []
+
+    def fake_dispatch_enumerate(entry: TaskCatalogEntry, ctx: object) -> list[Candidate]:
+        weekly_ran.append(entry.spec.task_id)
+        return []
+
+    mock_run, mock_disk = _clean_guards_context(tmp_path)
+    with mock_run, mock_disk:
+        with patch(
+            "maintenance_worker.core.engine.check_scheduler_invocation",
+            return_value="SCHEDULED",
+        ):
+            with patch.object(
+                MaintenanceEngine,
+                "_dispatch_enumerate",
+                side_effect=fake_dispatch_enumerate,
+            ):
+                result = run_tick(config)
+
+    assert "authority_drift_surface" not in weekly_ran, (
+        "Weekly task must NOT dispatch when last run was 6 days ago (< 7d threshold)"
+    )
+
+
+def test_weekly_cadence_fires_when_overdue(tmp_path: Path) -> None:
+    """
+    When last_weekly_tick.json was written 8 days ago, weekly tasks must fire again.
+    """
+    import json
+    import time
+    import yaml
+    from maintenance_worker.rules.parser import TaskCatalogEntry
+    from maintenance_worker.types.candidates import Candidate
+
+    catalog_content = {
+        "schema_version": 1,
+        "tasks": [
+            {
+                "id": "authority_drift_surface",
+                "description": "weekly drift check",
+                "rule_source": "test",
+                "schedule": "weekly",
+                "dry_run": True,
+                "live_default": False,
+                "config": {},
+                "safety": {},
+                "evidence_emit": "drift_report_per_doc",
+            },
+        ],
+    }
+    catalog_path = tmp_path / "catalog.yaml"
+    catalog_path.write_text(yaml.dump(catalog_content))
+
+    state_dir = tmp_path / "state"
+    maintenance_state_dir = state_dir / "maintenance_state"
+    maintenance_state_dir.mkdir(parents=True)
+    (tmp_path / "evidence").mkdir()
+    (tmp_path / ".git").mkdir()
+
+    # Write last_weekly_tick.json with 8-day-ago timestamp
+    eight_days_ago = time.time() - (8 * 86400)
+    weekly_ts_file = maintenance_state_dir / "last_weekly_tick.json"
+    weekly_ts_file.write_text(json.dumps({"last_run_ts": eight_days_ago}))
+
+    config = EngineConfig(
+        repo_root=tmp_path,
+        state_dir=state_dir,
+        evidence_dir=tmp_path / "evidence",
+        task_catalog_path=catalog_path,
+        safety_contract_path=tmp_path / "safety.yaml",
+        live_default=False,
+        scheduler="launchd",
+        notification_channel="discord",
+    )
+
+    weekly_ran: list[str] = []
+
+    def fake_dispatch_enumerate(entry: TaskCatalogEntry, ctx: object) -> list[Candidate]:
+        weekly_ran.append(entry.spec.task_id)
+        return []
+
+    mock_run, mock_disk = _clean_guards_context(tmp_path)
+    with mock_run, mock_disk:
+        with patch(
+            "maintenance_worker.core.engine.check_scheduler_invocation",
+            return_value="SCHEDULED",
+        ):
+            with patch.object(
+                MaintenanceEngine,
+                "_dispatch_enumerate",
+                side_effect=fake_dispatch_enumerate,
+            ):
+                result = run_tick(config)
+
+    assert "authority_drift_surface" in weekly_ran, (
+        "Weekly task must fire when last run was 8 days ago (> 7d threshold)"
+    )
+    # Timestamp must have been updated
+    updated = json.loads(weekly_ts_file.read_text())
+    assert updated["last_run_ts"] > eight_days_ago, (
+        "last_weekly_tick.json must be updated after weekly dispatch"
+    )
