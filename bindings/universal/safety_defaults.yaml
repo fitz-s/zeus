@@ -221,17 +221,37 @@ forbidden_paths:
     group: external_system_surfaces
     description: /etc/**
 
+  - pattern: "/etc"
+    group: external_system_surfaces
+    description: /etc root
+    prefix: true
+
   - pattern: "/private/etc/*"
     group: external_system_surfaces
     description: /private/etc/** (macOS)
+
+  - pattern: "/private/etc"
+    group: external_system_surfaces
+    description: /private/etc root (macOS)
+    prefix: true
 
   - pattern: "/usr/local/etc/*"
     group: external_system_surfaces
     description: /usr/local/etc/**
 
+  - pattern: "/usr/local/etc"
+    group: external_system_surfaces
+    description: /usr/local/etc root
+    prefix: true
+
   - pattern: "/private/usr/local/etc/*"
     group: external_system_surfaces
     description: /private/usr/local/etc (macOS)
+
+  - pattern: "/private/usr/local/etc"
+    group: external_system_surfaces
+    description: /private/usr/local/etc (macOS)
+    prefix: true
 
   - pattern: "*/Library/LaunchDaemons/*"
     group: external_system_surfaces
