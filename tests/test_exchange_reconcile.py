@@ -100,6 +100,15 @@ class FakeAdapterWithoutFreshness:
         return self.positions
 
 
+class FailingCommitConnection(sqlite3.Connection):
+    fail_commit = False
+
+    def commit(self):
+        if self.fail_commit:
+            raise sqlite3.OperationalError("injected commit failure")
+        return super().commit()
+
+
 def order(order_id="ord-m5", status="LIVE", **raw):
     payload = {"orderID": order_id, "status": status, **raw}
     return OrderState(order_id=order_id, status=status, raw=payload)
@@ -1571,6 +1580,40 @@ def test_ws_gap_m5_sweep_requires_fresh_trade_enumeration_before_clear(conn):
         assert findings(conn) == []
     finally:
         ws_gap_guard.clear_for_test(observed_at=NOW)
+
+
+def test_ws_gap_m5_sweep_does_not_clear_latch_when_durable_commit_fails():
+    from src.control import ws_gap_guard
+    from src.execution.exchange_reconcile import run_ws_gap_reconcile_and_clear
+    from src.state.db import init_schema
+
+    conn = sqlite3.connect(":memory:", factory=FailingCommitConnection)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys=ON")
+    init_schema(conn)
+    seed_command(conn, size=5)
+    append_resting_order_fact(conn)
+    conn.commit()
+    configure_subscribed_m5_latch()
+
+    try:
+        conn.fail_commit = True
+        with pytest.raises(sqlite3.OperationalError, match="injected commit failure"):
+            run_ws_gap_reconcile_and_clear(
+                FakeM5Adapter(
+                    open_orders=[order(order_id="ord-m5")],
+                    trades=[trade(trade_id="trade-m5", order_id="ord-m5", size="1.25")],
+                    positions=[],
+                ),
+                conn,
+                observed_at=NOW,
+            )
+
+        assert ws_gap_guard.status().m5_reconcile_required is True
+        assert ws_gap_guard.summary(now=NOW)["entry"]["allow_submit"] is False
+    finally:
+        ws_gap_guard.clear_for_test(observed_at=NOW)
+        conn.close()
 
 
 def test_live_heartbeat_runs_ws_gap_m5_sweep_without_closing_external_test_conn(conn):

@@ -357,12 +357,21 @@ def _positive_fill_trade_fact_summary(conn: sqlite3.Connection, command_id: str)
         return {"count": 0, "filled_size": "0"}
     rows = conn.execute(
         """
-        SELECT filled_size
-          FROM venue_trade_facts
-         WHERE command_id = ?
-           AND state IN ('MATCHED', 'MINED', 'CONFIRMED')
+        WITH latest_trade_fact AS (
+            SELECT trade_id, MAX(local_sequence) AS max_sequence
+              FROM venue_trade_facts
+             WHERE command_id = ?
+             GROUP BY trade_id
+        )
+        SELECT fact.filled_size
+          FROM venue_trade_facts fact
+          JOIN latest_trade_fact latest
+            ON latest.trade_id = fact.trade_id
+           AND latest.max_sequence = fact.local_sequence
+         WHERE fact.command_id = ?
+           AND fact.state IN ('MATCHED', 'MINED', 'CONFIRMED')
         """,
-        (command_id,),
+        (command_id, command_id),
     ).fetchall()
     count = 0
     filled = Decimal("0")

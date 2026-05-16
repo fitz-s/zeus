@@ -12,6 +12,7 @@ Uses in-memory DB; mocks PolymarketClient.get_order.
 from __future__ import annotations
 
 import json
+import hashlib
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -376,6 +377,27 @@ def _append_confirmed_trade_fact(
     filled_size="1.25",
     fill_price="0.50",
 ):
+    return _append_trade_fact(
+        conn,
+        command_id=command_id,
+        order_id=order_id,
+        trade_id=trade_id,
+        state="CONFIRMED",
+        filled_size=filled_size,
+        fill_price=fill_price,
+    )
+
+
+def _append_trade_fact(
+    conn,
+    *,
+    command_id="cmd-001",
+    order_id="ord-001",
+    trade_id="trade-001",
+    state="CONFIRMED",
+    filled_size="1.25",
+    fill_price="0.50",
+):
     from src.state.venue_command_repo import append_trade_fact
 
     return append_trade_fact(
@@ -383,16 +405,18 @@ def _append_confirmed_trade_fact(
         trade_id=trade_id,
         venue_order_id=order_id,
         command_id=command_id,
-        state="CONFIRMED",
+        state=state,
         filled_size=filled_size,
         fill_price=fill_price,
         source="REST",
         observed_at="2026-04-26T00:06:00Z",
         venue_timestamp="2026-04-26T00:06:00Z",
-        raw_payload_hash="a" * 64,
+        raw_payload_hash=hashlib.sha256(
+            f"{command_id}:{order_id}:{trade_id}:{state}:{filled_size}:{fill_price}".encode()
+        ).hexdigest(),
         raw_payload_json={
             "id": trade_id,
-            "status": "CONFIRMED",
+            "status": state,
             "maker_orders": [
                 {
                     "order_id": order_id,
@@ -999,6 +1023,46 @@ class TestRecoveryResolutionTable:
             "cost_basis_usd": 0.625,
             "order_status": "partial",
         }
+
+    def test_partial_remainder_terminal_fact_uses_latest_trade_fact_per_trade_id(
+        self,
+        conn,
+        mock_client,
+    ):
+        _insert(conn, size=5.0)
+        _advance_to_partial(conn, venue_order_id="ord-partial")
+        for state in ("MATCHED", "MINED", "CONFIRMED"):
+            _append_trade_fact(
+                conn,
+                order_id="ord-partial",
+                trade_id="trade-partial",
+                state=state,
+                filled_size="1.25",
+                fill_price="0.50",
+            )
+        _seed_pending_entry_projection(conn, order_id="ord-partial")
+        mock_client.get_open_orders.return_value = []
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["partial_remainders"] == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+        order_fact = conn.execute(
+            """
+            SELECT matched_size, raw_payload_json
+              FROM venue_order_facts
+             WHERE command_id = 'cmd-001'
+             ORDER BY local_sequence DESC
+             LIMIT 1
+            """
+        ).fetchone()
+        payload = json.loads(order_fact["raw_payload_json"])
+        assert order_fact["matched_size"] == "1.25"
+        assert payload["matched_size"] == "1.25"
+        event_payload = json.loads(_get_events(conn, "cmd-001")[-1]["payload_json"])
+        assert event_payload["positive_fill_trade_fact_count"] == 1
+        assert event_payload["positive_fill_size"] == "1.25"
 
     def test_partial_remainder_stays_partial_while_order_is_still_open(
         self,

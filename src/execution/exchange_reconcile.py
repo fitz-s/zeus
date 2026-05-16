@@ -204,6 +204,7 @@ def run_ws_gap_reconcile_and_clear(
         result["reason"] = "m5_findings_unresolved"
         return result
 
+    conn.commit()
     ws_guard.clear_after_m5_reconcile(
         observed_at=observed,
         stale_after_seconds=int(summary.get("stale_after_seconds") or 0) or None,
