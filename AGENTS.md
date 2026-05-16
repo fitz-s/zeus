@@ -199,7 +199,7 @@ parallel session merged 9 commits into `plan-pre5` without enough conflict
 surface inspection; 6 drift items resulted, including 815k mislabeled
 production rows. The antibody is conflict-first escalation, not making every
 clean merge pay a critic tax. (Evidence archived at
-`docs/archives/packets/task_2026-04-28_contamination_remediation/`.)
+`docs/archives/packets/task_2026-04-28_contamination_remediation/` — Batch 3 local-only cold storage.)
 
 ### Commit & PR protocol
 
