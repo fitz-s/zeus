@@ -1,6 +1,6 @@
 # Created: 2026-05-14
-# Last reused/audited: 2026-05-15
-# Authority basis: docs/operations/task_2026-05-08_deep_alignment_audit/DATA_DAEMON_LIVE_EFFICIENCY_REFACTOR_PLAN.md section 6.1, section 6.2, section 8 Phase 4, and Phase 6 durable work journaling.
+# Last reused/audited: 2026-05-16
+# Authority basis: docs/operations/task_2026-05-08_deep_alignment_audit/DATA_DAEMON_LIVE_EFFICIENCY_REFACTOR_PLAN.md section 6.1, section 6.2, section 8 Phase 4, and Phase 6 durable work journaling; docs/operations/task_2026-05-16_live_continuous_run_package/LIVE_CONTINUOUS_RUN_PACKAGE_PLAN.md source-health gate.
 """Relationship tests for the dedicated forecast-live daemon boundary."""
 
 from __future__ import annotations
@@ -24,6 +24,7 @@ FORECAST_LIVE_DAEMON = REPO_ROOT / "src" / "ingest" / "forecast_live_daemon.py"
 def test_forecast_live_scheduler_registers_only_opendata_jobs_and_heartbeat() -> None:
     from src.ingest.forecast_live_daemon import (
         FORECAST_LIVE_HEARTBEAT_JOB_ID,
+        FORECAST_LIVE_SOURCE_HEALTH_JOB_ID,
         FORECAST_LIVE_JOB_IDS,
         forecast_live_job_specs,
     )
@@ -39,6 +40,7 @@ def test_forecast_live_scheduler_registers_only_opendata_jobs_and_heartbeat() ->
         "forecast_live_opendata_daily_mn2t6",
         "forecast_live_opendata_startup_catch_up",
         "forecast_live_heartbeat",
+        "forecast_live_source_health_probe",
     }
     heartbeat_specs = [
         (trigger, kwargs)
@@ -61,6 +63,25 @@ def test_forecast_live_scheduler_registers_only_opendata_jobs_and_heartbeat() ->
     assert not any("tigge" in job_id for job_id in job_ids)
     assert not any("calibrat" in job_id or "refit" in job_id for job_id in job_ids)
     assert not any("market" in job_id or "venue" in job_id for job_id in job_ids)
+    source_health_specs = [
+        (trigger, kwargs)
+        for _, trigger, kwargs in specs
+        if kwargs["id"] == FORECAST_LIVE_SOURCE_HEALTH_JOB_ID
+    ]
+    assert source_health_specs == [
+        (
+            "interval",
+            {
+                "seconds": 600,
+                "id": FORECAST_LIVE_SOURCE_HEALTH_JOB_ID,
+                "max_instances": 1,
+                "coalesce": True,
+                "misfire_grace_time": 120,
+                "next_run_time": datetime(2026, 5, 14, 8, 0, tzinfo=timezone.utc),
+                "executor": "source_health",
+            },
+        )
+    ]
 
 
 def test_forecast_live_heartbeat_write_shape(tmp_path) -> None:
@@ -84,6 +105,81 @@ def test_forecast_live_heartbeat_write_shape(tmp_path) -> None:
     assert payload["cadence_seconds"] == 30
     assert FORECAST_LIVE_HEARTBEAT_JOB_ID in payload["jobs"]
     assert isinstance(payload["pid"], int)
+
+
+def test_forecast_live_source_health_probe_uses_shared_lock_and_prior_state(tmp_path) -> None:
+    from src.ingest.forecast_live_daemon import _source_health_probe_tick
+
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    source_health_path = state_dir / "source_health.json"
+    source_health_path.write_text(
+        json.dumps(
+            {
+                "sources": {
+                    "ecmwf_open_data": {
+                        "consecutive_failures": 2,
+                    }
+                }
+            }
+        )
+    )
+    calls: dict[str, object] = {}
+
+    def _state_path(name: str) -> Path:
+        return state_dir / name
+
+    def _probe(timeout: float, *, _prior_state: dict) -> dict:
+        calls["timeout"] = timeout
+        calls["prior_state"] = _prior_state
+        return {"ecmwf_open_data": {"ok": True}}
+
+    def _write(results: dict) -> Path:
+        calls["results"] = results
+        return source_health_path
+
+    result = _source_health_probe_tick(
+        _locks_dir_override=tmp_path / "locks",
+        _probe_all_sources=_probe,
+        _write_source_health=_write,
+        _state_path=_state_path,
+    )
+
+    assert result == {
+        "status": "ok",
+        "source": "source_health",
+        "sources": 1,
+        "path": str(source_health_path),
+    }
+    assert calls["timeout"] == 10.0
+    assert calls["prior_state"] == {"ecmwf_open_data": {"consecutive_failures": 2}}
+    assert calls["results"] == {"ecmwf_open_data": {"ok": True}}
+
+
+def test_forecast_live_source_health_probe_skips_when_lock_is_held(tmp_path) -> None:
+    from src.ingest.forecast_live_daemon import _source_health_probe_tick
+
+    from src.data.dual_run_lock import acquire_lock
+
+    def _probe(**_kwargs):
+        raise AssertionError("probe must not run while source_health lock is held")
+
+    with acquire_lock("source_health", _locks_dir_override=tmp_path / "locks") as acquired:
+        assert acquired
+        result = _source_health_probe_tick(
+            _locks_dir_override=tmp_path / "locks",
+            _probe_all_sources=_probe,
+        )
+
+    assert result == {"status": "skipped_lock_held", "source": "source_health"}
+
+
+def test_forecast_live_source_health_refresh_runs_before_scheduler_start() -> None:
+    content = FORECAST_LIVE_DAEMON.read_text(encoding="utf-8")
+    source_health_index = content.index("_source_health_probe_tick()\n")
+    scheduler_index = content.index("_scheduler = build_scheduler()")
+
+    assert source_health_index < scheduler_index
 
 
 def test_forecast_live_track_runner_uses_shared_opendata_lock(tmp_path) -> None:

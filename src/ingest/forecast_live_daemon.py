@@ -1,11 +1,12 @@
 # Created: 2026-05-14
-# Last reused/audited: 2026-05-15
-# Authority basis: docs/operations/task_2026-05-08_deep_alignment_audit/DATA_DAEMON_LIVE_EFFICIENCY_REFACTOR_PLAN.md section 6.1, section 6.2, and section 8 Phase 4; Phase 6 durable work journaling.
+# Last reused/audited: 2026-05-16
+# Authority basis: docs/operations/task_2026-05-08_deep_alignment_audit/DATA_DAEMON_LIVE_EFFICIENCY_REFACTOR_PLAN.md section 6.1, section 6.2, and section 8 Phase 4; Phase 6 durable work journaling; docs/operations/task_2026-05-16_live_continuous_run_package/LIVE_CONTINUOUS_RUN_PACKAGE_PLAN.md source-health gate.
 """Dedicated OpenData live forecast producer daemon.
 
-This module owns only the ECMWF OpenData live forecast scheduler. It does not
-schedule TIGGE archive backfill, calibration refit, settlement truth, market
-scan, risk, execution, evaluator, or venue work.
+This module owns the ECMWF OpenData live forecast scheduler and the live
+source-health heartbeat required to prove source freshness. It does not schedule
+TIGGE archive backfill, calibration refit, settlement truth, market scan, risk,
+execution, evaluator, or venue work.
 """
 
 from __future__ import annotations
@@ -29,7 +30,9 @@ FORECAST_LIVE_DAILY_HIGH_JOB_ID = "forecast_live_opendata_daily_mx2t6"
 FORECAST_LIVE_DAILY_LOW_JOB_ID = "forecast_live_opendata_daily_mn2t6"
 FORECAST_LIVE_STARTUP_JOB_ID = "forecast_live_opendata_startup_catch_up"
 FORECAST_LIVE_HEARTBEAT_JOB_ID = "forecast_live_heartbeat"
+FORECAST_LIVE_SOURCE_HEALTH_JOB_ID = "forecast_live_source_health_probe"
 FORECAST_LIVE_HEARTBEAT_SECONDS = 30
+FORECAST_LIVE_SOURCE_HEALTH_SECONDS = 10 * 60
 
 FORECAST_LIVE_JOB_IDS = frozenset(
     {
@@ -37,6 +40,7 @@ FORECAST_LIVE_JOB_IDS = frozenset(
         FORECAST_LIVE_DAILY_LOW_JOB_ID,
         FORECAST_LIVE_STARTUP_JOB_ID,
         FORECAST_LIVE_HEARTBEAT_JOB_ID,
+        FORECAST_LIVE_SOURCE_HEALTH_JOB_ID,
     }
 )
 
@@ -156,6 +160,47 @@ def _scheduler_job(job_name: str):
         return _wrapper
 
     return _decorator
+
+
+@_scheduler_job(FORECAST_LIVE_SOURCE_HEALTH_JOB_ID)
+def _source_health_probe_tick(
+    *,
+    _locks_dir_override: Path | None = None,
+    _probe_all_sources: Callable[..., dict] | None = None,
+    _write_source_health: Callable[..., Path] | None = None,
+    _state_path: Callable[[str], Path] | None = None,
+) -> dict[str, object]:
+    """Refresh source_health.json from the live data daemon lane."""
+    from src.config import state_path
+    from src.data.dual_run_lock import acquire_lock
+    from src.data.source_health_probe import probe_all_sources, write_source_health
+
+    resolve_state_path = _state_path or state_path
+    with acquire_lock("source_health", _locks_dir_override=_locks_dir_override) as acquired:
+        if not acquired:
+            logger.info("forecast-live source_health_probe skipped_lock_held")
+            return {"status": "skipped_lock_held", "source": "source_health"}
+
+        prior_state: dict = {}
+        try:
+            existing = resolve_state_path("source_health.json")
+            if Path(existing).exists():
+                data = json.loads(Path(existing).read_text())
+                prior_state = data.get("sources", {})
+        except Exception:
+            prior_state = {}
+
+        probe = _probe_all_sources or probe_all_sources
+        writer = _write_source_health or write_source_health
+        results = probe(10.0, _prior_state=prior_state)
+        out_path = writer(results)
+        logger.info("forecast-live source health probe complete: %d sources", len(results))
+        return {
+            "status": "ok",
+            "source": "source_health",
+            "sources": len(results),
+            "path": str(out_path),
+        }
 
 
 def _is_source_paused(source_id: str) -> bool:
@@ -567,6 +612,19 @@ def forecast_live_job_specs(
                 "executor": "fast",
             },
         ),
+        (
+            _source_health_probe_tick,
+            "interval",
+            {
+                "seconds": FORECAST_LIVE_SOURCE_HEALTH_SECONDS,
+                "id": FORECAST_LIVE_SOURCE_HEALTH_JOB_ID,
+                "max_instances": 1,
+                "coalesce": True,
+                "misfire_grace_time": 120,
+                "next_run_time": startup_at,
+                "executor": "source_health",
+            },
+        ),
     )
 
 
@@ -580,6 +638,7 @@ def build_scheduler(*, startup_run_date: datetime | None = None):
             "default": _APSchedulerThreadPoolExecutor(max_workers=1),
             "fast": _APSchedulerThreadPoolExecutor(max_workers=1),
             "heartbeat": _APSchedulerThreadPoolExecutor(max_workers=1),
+            "source_health": _APSchedulerThreadPoolExecutor(max_workers=1),
         },
     )
     for func, trigger, kwargs in forecast_live_job_specs(startup_run_date=startup_run_date):
@@ -613,6 +672,7 @@ def main() -> None:
         conn.close()
 
     signal.signal(signal.SIGTERM, _graceful_shutdown)
+    _source_health_probe_tick()
     _scheduler = build_scheduler()
     jobs = [job.id for job in _scheduler.get_jobs()]
     _write_forecast_live_heartbeat(status="scheduler_ready")
