@@ -809,3 +809,81 @@ modules:
       - tests/test_topology_doctor.py
     graph_appendix_status: TRACKED_AVAILABLE
     archive_extraction_status: partial
+
+  maintenance_worker:
+    path: maintenance_worker/
+    scoped_agents: AGENTS.md
+    module_book: docs/operations/task_2026-05-15_runtime_improvement_engineering_package/02_daily_maintenance_agent/DESIGN.md
+    priority: p2_runtime
+    maturity: new
+    zone: tool
+    authority_role: automated_hygiene_proposer
+    high_risk_files:
+      - maintenance_worker/core/engine.py
+      - maintenance_worker/core/apply_publisher.py
+      - maintenance_worker/core/validator.py
+      - maintenance_worker/core/subprocess_guard.py
+      - maintenance_worker/core/git_operation_guard.py
+      - maintenance_worker/core/gh_operation_guard.py
+      - maintenance_worker/core/refusal.py
+      - maintenance_worker/core/kill_switch.py
+    public_entry_files:
+      - maintenance_worker/cli/entry.py
+      - maintenance_worker/core/engine.py
+    law_dependencies:
+      - docs/operations/task_2026-05-15_runtime_improvement_engineering_package/02_daily_maintenance_agent/DESIGN.md
+      - docs/operations/task_2026-05-15_runtime_improvement_engineering_package/02_daily_maintenance_agent/SAFETY_CONTRACT.md
+    current_fact_dependencies:
+      - docs/operations/current_state.md
+    required_tests:
+      - tests/maintenance_worker/
+    graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
+    archive_extraction_status: none
+
+  topology_v_next:
+    path: scripts/topology_v_next/
+    scoped_agents: AGENTS.md
+    module_book: docs/operations/task_2026-05-15_runtime_improvement_engineering_package/01_topology_v_next/UNIVERSAL_TOPOLOGY_DESIGN.md
+    priority: p1_first_wave
+    maturity: shadow
+    zone: tool
+    authority_role: admission_advisor
+    high_risk_files:
+      - scripts/topology_v_next/admission_engine.py
+      - scripts/topology_v_next/dataclasses.py
+      - scripts/topology_v_next/validator.py
+    public_entry_files:
+      - scripts/topology_v_next/admission_engine.py
+    law_dependencies:
+      - docs/operations/task_2026-05-15_runtime_improvement_engineering_package/01_topology_v_next/UNIVERSAL_TOPOLOGY_DESIGN.md
+      - docs/operations/task_2026-05-15_runtime_improvement_engineering_package/01_topology_v_next/ZEUS_BINDING_LAYER.md
+    current_fact_dependencies:
+      - docs/operations/current_state.md
+    required_tests:
+      - tests/topology_v_next/
+    graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
+    archive_extraction_status: none
+
+  zeus_bindings:
+    path: bindings/zeus/
+    scoped_agents: AGENTS.md
+    module_book: docs/operations/task_2026-05-15_runtime_improvement_engineering_package/02_daily_maintenance_agent/DESIGN.md
+    priority: p2_runtime
+    maturity: config
+    zone: config
+    authority_role: zeus_binding_config
+    high_risk_files:
+      - bindings/zeus/safety_overrides.yaml
+      - bindings/zeus/config.yaml
+    public_entry_files:
+      - bindings/zeus/config.yaml
+      - bindings/zeus/safety_overrides.yaml
+    law_dependencies:
+      - docs/operations/task_2026-05-15_runtime_improvement_engineering_package/01_topology_v_next/ZEUS_BINDING_LAYER.md
+      - docs/operations/task_2026-05-15_runtime_improvement_engineering_package/02_daily_maintenance_agent/SAFETY_CONTRACT.md
+    current_fact_dependencies:
+      - docs/operations/current_state.md
+    required_tests:
+      - tests/maintenance_worker/test_bindings/
+    graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
+    archive_extraction_status: none
