@@ -9,6 +9,7 @@ authority_class: DESIGN_RATIONALE
 last_verified: 2026-05-15
 verification_command: python3 scripts/topology_doctor.py --reference-replacement
 related: [20260515-ref-replacement-companion-gate-missing, 20260515-keep-conditional-requires-agents-md-conditional-reads]
+expected_signature: e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
 ---
 
 # Topology authority drift batches as Hyp-B when docs are current but yaml is absent

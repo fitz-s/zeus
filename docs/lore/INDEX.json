@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "generated_by": "scripts/lore_indexer.py",
+  "topics": {
+    "topology": [
+      {
+        "id": "20260515-authority-drift-hypothesis-b-batch",
+        "title": "Topology authority drift batches as Hyp-B when docs are current but yaml is absent",
+        "topic": "topology",
+        "extracted_from": "docs/operations/task_2026-05-15_p8_authority_drift_3_blocking/POSTMORTEM.md:cross-doc-root-cause",
+        "extracted_on": "2026-05-15",
+        "status": "ACTIVE",
+        "authority_class": "DESIGN_RATIONALE",
+        "last_verified": "2026-05-15",
+        "verification_command": "python3 scripts/topology_doctor.py --reference-replacement",
+        "related": [
+          "20260515-ref-replacement-companion-gate-missing",
+          "20260515-keep-conditional-requires-agents-md-conditional-reads"
+        ]
+      },
+      {
+        "id": "20260515-keep-conditional-requires-agents-md-conditional-reads",
+        "title": "keep_conditional yaml action requires matching AGENTS.md conditional reads entry",
+        "topic": "topology",
+        "extracted_from": "docs/operations/task_2026-05-15_p8_authority_drift_3_blocking/POSTMORTEM.md:kelly-handoff",
+        "extracted_on": "2026-05-15",
+        "status": "ACTIVE",
+        "authority_class": "HARD_RULE",
+        "last_verified": "2026-05-15",
+        "verification_command": "python3 scripts/topology_doctor.py --reference-replacement",
+        "related": [
+          "20260515-ref-replacement-companion-gate-missing"
+        ]
+      },
+      {
+        "id": "20260515-ref-replacement-companion-gate-missing",
+        "title": "New docs/reference/*.md files require companion reference_replacement.yaml entry",
+        "topic": "topology",
+        "extracted_from": "docs/operations/task_2026-05-15_p8_authority_drift_3_blocking/POSTMORTEM.md:root-cause",
+        "extracted_on": "2026-05-15",
+        "status": "ACTIVE",
+        "authority_class": "HARD_RULE",
+        "last_verified": "2026-05-15",
+        "verification_command": "python3 scripts/topology_doctor.py --reference-replacement",
+        "related": []
+      }
+    ]
+  }
+}

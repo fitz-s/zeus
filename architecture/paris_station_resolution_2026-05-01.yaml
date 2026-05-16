@@ -16,7 +16,7 @@ paris_station_lfpb_canonical:
        event.description and all 11 child market descriptions name
        "Paris-Le Bourget Airport Station" and resolutionSource =
        https://www.wunderground.com/history/daily/fr/bonneuil-en-france/LFPB
-      Snapshot: docs/archives/packets/task_2026-05-01_paris_station_resolution/
+      Snapshot: docs/operations/archive/2026-Q2/task_2026-05-01_paris_station_resolution/
                  evidence/gamma_paris_active_2026-05-01.json
 
     2) Gamma API event highest-temperature-in-paris-on-may-1-2026

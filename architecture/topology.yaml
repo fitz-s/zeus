@@ -3,8 +3,11 @@ metadata:
   created: "2026-04-13"
   owner_packet: "Packet 2 topology compiler MVP"
   authority_note: >
-    This graph indexes existing authority. It does not override
-    architecture/zones.yaml, architecture/invariants.yaml, or root AGENTS.md.
+    This graph serves as the active nav authority for topology_doctor.py
+    (not read-only registry). It indexes existing authority and drives
+    routing, admission, and risk-tier decisions at runtime. It does not
+    override architecture/zones.yaml, architecture/invariants.yaml, or
+    root AGENTS.md.
 
 coverage_roots:
   - path: "."

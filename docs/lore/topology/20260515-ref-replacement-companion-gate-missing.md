@@ -9,6 +9,7 @@ authority_class: HARD_RULE
 last_verified: 2026-05-15
 verification_command: python3 scripts/topology_doctor.py --reference-replacement
 related: []
+expected_signature: e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
 ---
 
 # New docs/reference/*.md files require companion reference_replacement.yaml entry

@@ -191,7 +191,7 @@ hko_canonical:
     released_at: 2026-05-02T00:00Z
     rationale: |
       HK quarantine released 2026-05-02 as part of the HK+Paris combined release packet
-      (docs/archives/packets/task_2026-05-02_hk_paris_release/work_log.md Step 2).
+      (docs/operations/archive/2026-Q2/task_2026-05-02_hk_paris_release/work_log.md Step 2).
       HKO XML backfill confirmed 29 April 2026 rows; all 821 historical rows released
       to VERIFIED. The hko_requires_fresh_source_audit gate is now advisory - HK is
       a confirmed VERIFIED city again. Gate re-arms automatically if this released:

@@ -210,3 +210,27 @@ misreads:
     tests:
       - python3 scripts/topology_doctor.py --fatal-misreads --json
     task_classes: [settlement_semantics, source_routing, calibration]
+
+  - id: artifact_authority_status_missing_gate
+    severity: high
+    false_equivalence: "artifact_status_MISSING == artifact_score_0 OR artifact_absent == artifact_irrelevant"
+    correction: >
+      When architecture/artifact_authority_status.yaml is absent or an artifact
+      entry is MISSING from the registry, agents MUST NOT assume the artifact is
+      low-risk (score 0) or that no gate applies. MISSING from the registry means
+      the artifact has not been assessed — not that it passed assessment.
+      The correct behavior is: treat MISSING as UNKNOWN authority status, apply
+      the most conservative gate (LOAD_BEARING by default), and escalate to an
+      authority audit before proceeding. An absent registry entry is a gap in
+      coverage, not a green light. Do not silently promote MISSING artifacts to
+      ARCHIVABLE or skip Check #0 because the registry file does not exist.
+    proof_files:
+      - maintenance_worker/core/archival_check_0.py
+      - architecture/module_manifest.yaml
+    invalidation_condition: >
+      Only a committed artifact_authority_status.yaml registry entry with
+      status != MISSING and archival_ok: true may authorize archival of a
+      specific path. No other signal overrides this gate.
+    tests:
+      - python3 scripts/topology_doctor.py --fatal-misreads --json
+    task_classes: [authority_audit, maintenance_worker, docs_authority]
