@@ -26,7 +26,7 @@ from src.state.decision_chain import query_no_trade_cases
 
 STATUS_STALE_SECONDS = 2 * 3600
 RISKGUARD_STALE_SECONDS = 5 * 60
-SOURCE_HEALTH_WRITER_STALE_SECONDS = 10 * 60
+SOURCE_HEALTH_WRITER_STALE_SECONDS = 15 * 60
 LIVE_DB_UNKNOWN_HOLDER_SECONDS = 10 * 60
 STATUS_REQUIRED_KEYS = ("control", "runtime", "execution", "learning", "truth")
 STATUS_CONTROL_REQUIRED_KEYS = (
@@ -137,13 +137,21 @@ def _is_known_live_db_holder(command: str) -> bool:
     command = str(command or "")
     known_modules = (
         "src.main",
-        "src.riskguard.riskguard",
-        "src.ingest.forecast_live_daemon",
-        "src.ingest_main",
     )
     if any(_has_module_launch(command, module) for module in known_modules):
         return True
     return False
+
+
+def _redacted_process_command(command: str) -> str:
+    tokens = str(command or "").split()
+    for idx, token in enumerate(tokens[:-1]):
+        if token == "-m":
+            return f"-m {tokens[idx + 1]}"
+    for token in tokens:
+        if token.endswith(".py"):
+            return Path(token).name
+    return tokens[0] if tokens else ""
 
 
 def _etime_to_seconds(raw: str) -> int | None:
@@ -194,7 +202,8 @@ def _process_info(pid: int) -> dict:
         "pid": pid,
         "etime": etime,
         "etime_seconds": _etime_to_seconds(etime),
-        "command": command[:500],
+        "command": _redacted_process_command(command),
+        "_command_for_classification": command,
     }
 
 
@@ -277,7 +286,7 @@ def _live_db_holder_status() -> dict:
     unattested: list[dict] = []
     for pid, holder in sorted(holders_by_pid.items()):
         info = _process_info(pid)
-        command = str(info.get("command") or "")
+        command = str(info.pop("_command_for_classification", "") or info.get("command") or "")
         etime_seconds = info.get("etime_seconds")
         holder.update(info)
         holder["known_live_owner"] = _is_known_live_db_holder(command)
@@ -449,8 +458,19 @@ def _launchd_contracts(
             item["error"] = str(exc)
             items.append(item)
             continue
+        if not isinstance(payload, dict):
+            item["issues"].append("plist_not_dict")
+            item["ok"] = False
+            items.append(item)
+            continue
         env = payload.get("EnvironmentVariables") or {}
+        if not isinstance(env, dict):
+            item["issues"].append("environment_variables_not_dict")
+            env = {}
         program_args = payload.get("ProgramArguments") or []
+        if not isinstance(program_args, list):
+            item["issues"].append("program_arguments_not_list")
+            program_args = []
         module = _module_from_program_arguments(program_args)
         throttle = payload.get("ThrottleInterval")
         item.update(

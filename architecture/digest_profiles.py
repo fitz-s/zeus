@@ -919,6 +919,8 @@ PROFILES: list[dict] = [ { 'id': 'change settlement rounding',
                'python3 scripts/live_readiness_check.py --help',
                'pytest -q -p no:cacheprovider '
                'tests/test_digest_profile_matching.py::test_r3_g1_live_readiness_routes_to_g1_profile_not_heartbeat',
+               'pytest -q -p no:cacheprovider '
+               'tests/test_digest_profile_matching.py::test_r3_g1_live_continuous_healthcheck_routes_to_g1_profile',
                'python3 docs/operations/task_2026-04-26_ultimate_plan/r3/scripts/r3_drift_check.py --phase G1',
                'python3 scripts/topology_doctor.py --scripts --json',
                'python3 scripts/topology_doctor.py --tests --json',

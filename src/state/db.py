@@ -7724,6 +7724,9 @@ def _query_transitional_position_hints(
         ):
             bucket["entered_at"] = occurred_at
         if "exit_state" not in bucket:
+            if row["event_type"] == "EXIT_RETRY_RELEASED":
+                bucket["exit_state"] = ""
+                continue
             exit_state = _exit_state_hint_from_event(str(row["event_type"] or ""), details)
             if exit_state:
                 bucket["exit_state"] = exit_state

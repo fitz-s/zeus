@@ -468,6 +468,57 @@ def test_launchd_contracts_reject_stale_loaded_contract_after_disk_fix(monkeypat
     assert "loaded_keepalive_not_true" in live_item["issues"]
 
 
+def test_launchd_contracts_reject_non_dict_plist_without_crashing(tmp_path):
+    root = tmp_path / "zeus"
+    launchagents = tmp_path / "LaunchAgents"
+    launchagents.mkdir()
+    path = launchagents / "com.zeus.live-trading.plist"
+    with open(path, "wb") as handle:
+        plistlib.dump("not-a-dict", handle)
+
+    result = _ORIGINAL_LAUNCHD_CONTRACTS(launchagents, root=root)
+
+    assert result["ok"] is False
+    live_item = next(item for item in result["items"] if item["label"] == "com.zeus.live-trading")
+    assert "plist_not_dict" in live_item["issues"]
+
+
+def test_launchd_contracts_reject_non_dict_environment_without_crashing(monkeypatch, tmp_path):
+    root = tmp_path / "zeus"
+    launchagents = tmp_path / "LaunchAgents"
+    payload = {
+        "Label": "com.zeus.live-trading",
+        "ProgramArguments": [str(root / ".venv" / "bin" / "python"), "-m", "src.main"],
+        "WorkingDirectory": str(root),
+        "RunAtLoad": True,
+        "KeepAlive": True,
+        "ThrottleInterval": 30,
+        "EnvironmentVariables": ["PYTHONPATH", str(root)],
+    }
+    launchagents.mkdir()
+    path = launchagents / "com.zeus.live-trading.plist"
+    with open(path, "wb") as handle:
+        plistlib.dump(payload, handle)
+    _mock_launchctl_loaded_contracts(
+        monkeypatch,
+        {
+            "com.zeus.live-trading": _launchctl_print_output(
+                label="com.zeus.live-trading",
+                module="src.main",
+                root=root,
+                plist_path=path,
+            ),
+        },
+    )
+
+    result = _ORIGINAL_LAUNCHD_CONTRACTS(launchagents, root=root)
+
+    assert result["ok"] is False
+    live_item = next(item for item in result["items"] if item["label"] == "com.zeus.live-trading")
+    assert "environment_variables_not_dict" in live_item["issues"]
+    assert "pythonpath_mismatch" in live_item["issues"]
+
+
 def test_source_health_status_requires_writer_and_sources_fresh(monkeypatch, tmp_path):
     source_health_path = _write_source_health(tmp_path / "source_health.json")
     monkeypatch.setattr(healthcheck, "_source_health_path", lambda: source_health_path)
@@ -481,7 +532,7 @@ def test_source_health_status_requires_writer_and_sources_fresh(monkeypatch, tmp
 
 
 def test_source_health_status_rejects_stale_writer_even_when_sources_fresh(monkeypatch, tmp_path):
-    old_written_at = (datetime.now(timezone.utc) - timedelta(minutes=11)).isoformat()
+    old_written_at = (datetime.now(timezone.utc) - timedelta(minutes=16)).isoformat()
     source_health_path = _write_source_health(tmp_path / "source_health.json", written_at=old_written_at)
     monkeypatch.setattr(healthcheck, "_source_health_path", lambda: source_health_path)
 
@@ -491,6 +542,18 @@ def test_source_health_status_rejects_stale_writer_even_when_sources_fresh(monke
     assert result["branch"] == "FRESH"
     assert result["writer_fresh"] is False
     assert result["issue"] == "SOURCE_HEALTH_WRITER_STALE"
+
+
+def test_source_health_status_allows_writer_cadence_jitter(monkeypatch, tmp_path):
+    old_written_at = (datetime.now(timezone.utc) - timedelta(minutes=11)).isoformat()
+    source_health_path = _write_source_health(tmp_path / "source_health.json", written_at=old_written_at)
+    monkeypatch.setattr(healthcheck, "_source_health_path", lambda: source_health_path)
+
+    result = _ORIGINAL_SOURCE_HEALTH_STATUS()
+
+    assert result["ok"] is True
+    assert result["writer_fresh"] is True
+    assert result["writer_budget_seconds"] == 15 * 60
 
 
 def test_source_health_status_rejects_stale_required_source(monkeypatch, tmp_path):
@@ -535,7 +598,7 @@ def test_live_db_holder_status_blocks_unknown_long_lived_holder(monkeypatch, tmp
         if cmd[0] == "lsof":
             return _Result(0, f"p4242\nn{db_path}\nn{db_path}-wal\n")
         if cmd[:3] == ["ps", "-p", "4242"]:
-            return _Result(0, "12:01 python gyoshu_bridge.py --live-db\n")
+            return _Result(0, "12:01 python /tmp/gyoshu_bridge.py --token secret-token --live-db\n")
         return _Result(1, "", "unexpected command")
 
     monkeypatch.setattr(healthcheck.subprocess, "run", _run)
@@ -545,6 +608,8 @@ def test_live_db_holder_status_blocks_unknown_long_lived_holder(monkeypatch, tmp
     assert result["ok"] is False
     assert result["issue"] == "LIVE_DB_UNKNOWN_LONG_LIVED_HOLDER"
     assert result["unknown_long_lived_holders"][0]["pid"] == 4242
+    assert result["unknown_long_lived_holders"][0]["command"] == "gyoshu_bridge.py"
+    assert "secret-token" not in json.dumps(result)
 
 
 def test_live_db_holder_status_blocks_long_lived_pytest_holder(monkeypatch, tmp_path):
@@ -599,6 +664,33 @@ def test_live_db_holder_status_allows_known_live_owner(monkeypatch, tmp_path):
     assert result["ok"] is True
     assert result["holders"][0]["known_live_owner"] is True
     assert result["unknown_long_lived_holders"] == []
+
+
+def test_live_db_holder_status_blocks_long_lived_forecast_holder(monkeypatch, tmp_path):
+    db_path = tmp_path / "zeus_trades.db"
+    db_path.write_text("")
+    monkeypatch.setattr(healthcheck, "_trade_db_path", lambda: db_path)
+
+    class _Result:
+        def __init__(self, returncode, stdout="", stderr=""):
+            self.returncode = returncode
+            self.stdout = stdout
+            self.stderr = stderr
+
+    def _run(cmd, *args, **kwargs):
+        if cmd[0] == "lsof":
+            return _Result(0, f"p222\nn{db_path}\n")
+        if cmd[:3] == ["ps", "-p", "222"]:
+            return _Result(0, "2-00:00:00 /tmp/zeus/.venv/bin/python -m src.ingest.forecast_live_daemon\n")
+        return _Result(1, "", "unexpected command")
+
+    monkeypatch.setattr(healthcheck.subprocess, "run", _run)
+
+    result = _ORIGINAL_LIVE_DB_HOLDER_STATUS()
+
+    assert result["ok"] is False
+    assert result["holders"][0]["known_live_owner"] is False
+    assert result["unknown_long_lived_holders"][0]["command"] == "-m src.ingest.forecast_live_daemon"
 
 
 def test_live_db_holder_status_lsof_unavailable_blocks_ready(monkeypatch, tmp_path):

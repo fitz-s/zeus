@@ -263,7 +263,7 @@ Design:
 
 Exit criteria:
 
-- For `LIVE_CONTINUOUS_READY`, `source_health.json` written_at age <= 10 minutes during acceptance and all live-required source budgets are green.
+- For `LIVE_CONTINUOUS_READY`, `source_health.json` written_at age <= 15 minutes during acceptance and all live-required source budgets are green. The source-health writer is scheduled every 10 minutes; the additional 5 minutes is scheduler/probe-runtime slack, not a stale-data allowance.
 - For `CONTROLLED_DEGRADED`, freshness gate may report documented stale/disabled lanes, but the package must explicitly deny live-ready status.
 - `Freshness gate STALE` no longer silently blocks day0/live cycle without a corresponding operator-visible reason.
 
@@ -295,7 +295,7 @@ Only after this window may the package claim live continuous-run readiness.
 
 A report that says only "degraded safely" fails this package's completion definition.
 
-## 6. Verification Matrix
+## 7. Verification Matrix
 
 | Concern | Test / Probe | Pass Condition |
 | --- | --- | --- |
@@ -309,7 +309,7 @@ A report that says only "degraded safely" fails this package's completion defini
 | Data pipeline | `check_data_pipeline_live_e2e.py --live --json` | PASS |
 | Live order proof | `check_live_order_e2e.py --json` | PASS / recorded fill proof |
 
-## 7. Rollback and Safety
+## 8. Rollback and Safety
 
 - Semantic loader fix rollback: revert source commit; no DB rewrite required.
 - Runtime commit attestation rollback: disable claim gate, not live trading safety gates.
@@ -317,14 +317,14 @@ A report that says only "degraded safely" fails this package's completion defini
 - DB bridge cleanup rollback: restart bridge with previous mode only after confirming no live DB write lock hazard.
 - Source-health scheduler rollback: keep freshness gate conservative; stale source should degrade, not silently become green.
 
-## 8. Worktree and Deployment Discipline
+## 9. Worktree and Deployment Discipline
 
 - Implementation happens on `followup/live-continuous-run-package-2026-05-16` or a dedicated child worktree based on it.
 - The current live worktree must not be used as the implementation scratchpad while live continues running.
 - Deployment to live path requires a separate operator-safe step that proves dirty state is handled and runtime commit is expected.
 - Do not remove old worktrees or bridge processes as part of this plan unless a separate cleanup route admits it.
 
-## 9. Completion Definition
+## 10. Completion Definition
 
 This package is complete only when all of the following are true:
 

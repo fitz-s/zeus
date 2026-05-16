@@ -227,6 +227,9 @@ make a surface default-read unless `current_state.md` routes it.
 | `task_2026-05-15_live_order_e2e_goal/LIVE_ORDER_E2E_GOAL_PLAN.md` | topology planning packet | Detailed execution plan for completing the user `/goal` on a new branch from main; explicitly excludes shadow-only proof and rejected/unknown order outcomes as completion |
 | `task_2026-05-15_live_order_e2e_goal/CRITIC_APPROVAL.md` | packet review evidence | Critic REVISE-to-APPROVE record for the live-order E2E goal plan; approval is plan/phase-gate only, not completion evidence |
 | `task_2026-05-15_live_order_e2e_goal/receipt.json` | packet receipt | Active packet freeze receipt; explicitly records that live-order E2E is not complete yet |
+| `task_2026-05-16_live_continuous_run_package/` | plan packet container | Follow-up package for proving stable continuous live operation after the first real live order milestone |
+| `task_2026-05-16_live_continuous_run_package/LIVE_CONTINUOUS_RUN_PACKAGE_PLAN.md` | topology planning packet | Plan and completion definition for `LIVE_CONTINUOUS_READY` vs `CONTROLLED_DEGRADED`, including code-plane, launchd, source-health, DB-lock, and live acceptance gates |
+| `task_2026-05-16_live_continuous_run_package/CRITIC_REVIEW.md` | packet review evidence | Critic attack and approval record for the live continuous-run package plan; not empirical live-ready evidence |
 Archived packet evidence (physically moved to `docs/archives/packets/`) is
 listed in `docs/archive_registry.md`; do not re-list those packets here. When
 a packet closes and is archived, remove its row from this registry and the
