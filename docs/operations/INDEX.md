@@ -46,54 +46,54 @@ directory should EITHER be moved under `archive/` OR keep a
 | `task_2026-04-26_ultimate_plan/` | (multi-commit) `2cb1c421` | **closed** — pre-PR-37 ingest plan, completed | 2026-04 |
 | `task_2026-05-02_live_entry_data_contract/` | (planning artifacts) `2cb1c421` | **review** — multiple PLAN_v[1,2,3] suggest abandoned drafts | 2026-05-02 |
 | `task_2026-05-03_ddd_implementation_plan/` | DDD v2 commits `650136bd` etc. | **closed** — DDD v2 redesign live-wired, 38 docs is excessive — needs INDEX of its own or pruning | 2026-05-04 |
-| `task_2026-05-05_topology_noise_repair/` | PR #67 | **closed** — topology boot-profile and script-route noise repair, completed | 2026-05-05 |
-| `task_2026-05-05_object_invariance_mainline/` | PR #67 | **closed** — object-meaning invariance mainline closeout ledger | 2026-05-05 |
-| `task_2026-05-05_object_invariance_wave5/` through `wave8/`, `wave11/`–`wave21/` | PR #67 | **closed** — object-meaning invariance remediation waves 5-21 | 2026-05-05 |
-| `task_2026-05-06_calibration_quality_blockers/` | PR #80 | **closed** — calibration quality launch-blocker (12 quarantined Platts + fit-time guard) | 2026-05-06 |
+| `task_2026-05-05_topology_noise_repair/` | `dfb1451af6` | **closed** — topology boot-profile and script-route noise repair, completed | 2026-05-05 |
+| `task_2026-05-05_object_invariance_mainline/` | `7357aac7ef..e0b4c00276` | **closed** — object-meaning invariance mainline closeout ledger | 2026-05-05 |
+| `task_2026-05-05_object_invariance_wave5/` through `wave8/`, `wave11/`–`wave21/` | `dfb1451af6` | **closed** — object-meaning invariance remediation waves 5-21 | 2026-05-05 |
+| `task_2026-05-06_calibration_quality_blockers/` | `ff5c09f283..be302b9111` | **closed** — calibration quality launch-blocker (12 quarantined Platts + fit-time guard) | 2026-05-06 |
 | `task_2026-05-06_hook_redesign/` | superseded | **closed** — hook redesign v1; superseded by v2 | 2026-05-06 |
 | `task_2026-05-06_topology_redesign/` | superseded | **closed** — topology redesign v1; superseded by v2 | 2026-05-06 |
-| `task_2026-05-07_hook_redesign_v2/` | PR #77 | **active** — hook ecosystem v2; `.claude/settings.json` BLOCKING tier is authoritative | 2026-05-07 |
-| `task_2026-05-07_navigation_topology_v2/` | PR #79 | **closed** — topology v2 navigation upgrade, merged | 2026-05-07 |
-| `task_2026-05-07_recalibration_after_low_high_alignment/` | PR #82 | **closed** — LOW/HIGH recalibration recovery, merged | 2026-05-07 |
-| `task_2026-05-07_object_invariance_wave24/`–`wave26/` | PR #67 | **closed** — object-meaning invariance waves 24-26 | 2026-05-07 |
+| `task_2026-05-07_hook_redesign_v2/` | `d99bbf9500` | **active** — hook ecosystem v2; `.claude/settings.json` BLOCKING tier is authoritative | 2026-05-07 |
+| `task_2026-05-07_navigation_topology_v2/` | `fe8d0d79a5` | **closed** — topology v2 navigation upgrade, merged | 2026-05-07 |
+| `task_2026-05-07_recalibration_after_low_high_alignment/` | `1d9859d90a` | **closed** — LOW/HIGH recalibration recovery, merged | 2026-05-07 |
+| `task_2026-05-07_object_invariance_wave24/`–`wave26/` | `d7db6ba2ef` | **closed** — object-meaning invariance waves 24-26 | 2026-05-07 |
 | `task_2026-05-08_deep_alignment_audit/` | pre-PR #88 | **closed** — deep alignment audit, findings drove repair | 2026-05-08 |
-| `task_2026-05-08_alignment_safe_implementation/` | PR #88 | **closed** — alignment repair implementation, merged | 2026-05-08 |
+| `task_2026-05-08_alignment_safe_implementation/` | `2f436a6b21` | **closed** — alignment repair implementation, merged | 2026-05-08 |
 | `task_2026-05-08_alignment_repair_workflow/` | workflow record | **closed** — alignment repair session record | 2026-05-08 |
 | `task_2026-05-08_100_blocked_horizon_audit/` | diagnostic | **closed** — blocked-horizon audit evidence | 2026-05-08 |
-| `task_2026-05-08_262_london_f_to_c/` | PR #89 | **closed** — London °F→°C settlement semantics fix, merged | 2026-05-08 |
+| `task_2026-05-08_262_london_f_to_c/` | `9cc3d5fefd` | **closed** — London °F→°C settlement semantics fix, merged | 2026-05-08 |
 | `task_2026-05-08_ecmwf_publication_strategy/` | evidence packet | **closed** — ECMWF publication timing strategy | 2026-05-08 |
 | `task_2026-05-08_ecmwf_step_grid_scientist_eval/` | evidence packet | **closed** — ECMWF step-grid evaluation | 2026-05-08 |
-| `task_2026-05-08_f1_subprocess_hardening/` | PR #90 | **closed** — F1 subprocess hardening, merged | 2026-05-08 |
-| `task_2026-05-08_low_recalibration_residue_pr/` | PR #91 | **closed** — LOW recalibration residue, merged | 2026-05-08 |
+| `task_2026-05-08_f1_subprocess_hardening/` | `7e727b1f49` | **closed** — F1 subprocess hardening, merged | 2026-05-08 |
+| `task_2026-05-08_low_recalibration_residue_pr/` | `2f436a6b21` | **closed** — LOW recalibration residue, merged | 2026-05-08 |
 | `task_2026-05-08_obs_outside_bin_audit/` | evidence packet | **closed** — observations-outside-bin audit | 2026-05-08 |
 | `task_2026-05-08_phase_b_download_root_cause/` | evidence packet | **closed** — Phase B download root-cause dossier | 2026-05-08 |
 | `task_2026-05-08_post_merge_full_chain/` | post-merge checks | **closed** — full-chain verification post-merge | 2026-05-08 |
-| `task_2026-05-08_topology_redesign_completion/` | PR #92 | **closed** — topology redesign completion, merged | 2026-05-08 |
+| `task_2026-05-08_topology_redesign_completion/` | `b9b93da6ee` | **closed** — topology redesign completion, merged | 2026-05-08 |
 | `task_2026-05-08_track_a6_run/` | evidence packet | **closed** — Track A.6 run evidence | 2026-05-08 |
-| `task_2026-05-08_object_invariance_wave27/`–`wave42/` | PR #67 | **closed** — object-meaning invariance waves 27-42 | 2026-05-08 |
-| `task_2026-05-08_object_invariance_remaining_mainline/` | PR #67 | **closed** — remaining mainline invariance closeout | 2026-05-08 |
+| `task_2026-05-08_object_invariance_wave27/`–`wave42/` | `214a805ef2` | **closed** — object-meaning invariance waves 27-42 | 2026-05-08 |
+| `task_2026-05-08_object_invariance_remaining_mainline/` | `e0b4c00276` | **closed** — remaining mainline invariance closeout | 2026-05-08 |
 | `task_2026-05-09_copilot_agent_sync/` | planning packet | **active** — Copilot/VS Code agent sync planning; open for implementation | 2026-05-09 |
 | `task_2026-05-09_daemon_restart_and_backfill/` | operations run | **closed** — daemon restart and ECMWF backfill, completed | 2026-05-09 |
 | `task_2026-05-09_post_s4_residuals_topology/` | evidence packet | **closed** — post-S4 topology residuals audit | 2026-05-09 |
 | `task_2026-05-09_pr_workflow_failure/` | incident record | **closed** — PR workflow failure, resolved | 2026-05-09 |
-| `task_2026-05-09_workflow_redesign_plan/` | PR #94 | **closed** — PR discipline and workflow redesign, merged | 2026-05-09 |
-| `task_2026-05-11_ecmwf_download_replacement/` | PR #105 | **closed** — ECMWF download replacement, merged | 2026-05-11 |
-| `task_2026-05-11_tigge_vm_to_zeus_db/` | PR #106 | **closed** — TIGGE VM-to-Zeus DB wiring, merged | 2026-05-11 |
-| `task_2026-05-14_attach_path_index_fix/` | PR #114 | **closed** — K1 attach-path index fix, merged | 2026-05-14 |
-| `task_2026-05-14_data_daemon_live_efficiency/` | PR #115 | **closed** — data-daemon live-efficiency refactor, merged | 2026-05-14 |
-| `task_2026-05-14_k1_followups/` | PR #116 | **closed** — K1 followup seam repairs, merged | 2026-05-14 |
-| `task_2026-05-15_data_pipeline_live_rootfix/` | PR #117 | **closed** — live data pipeline root-cause fix, merged | 2026-05-15 |
+| `task_2026-05-09_workflow_redesign_plan/` | `f6a796b966..2f436a6b21` | **closed** — PR discipline and workflow redesign, merged | 2026-05-09 |
+| `task_2026-05-11_ecmwf_download_replacement/` | `eba80d2b9d` | **closed** — ECMWF download replacement, merged | 2026-05-11 |
+| `task_2026-05-11_tigge_vm_to_zeus_db/` | `eba80d2b9d` | **closed** — TIGGE VM-to-Zeus DB wiring, merged | 2026-05-11 |
+| `task_2026-05-14_attach_path_index_fix/` | `eba80d2b9d` | **closed** — K1 attach-path index fix, merged | 2026-05-14 |
+| `task_2026-05-14_data_daemon_live_efficiency/` | `eba80d2b9d` | **closed** — data-daemon live-efficiency refactor, merged | 2026-05-14 |
+| `task_2026-05-14_k1_followups/` | `2e00271cee` | **closed** — K1 followup seam repairs, merged | 2026-05-14 |
+| `task_2026-05-15_data_pipeline_live_rootfix/` | `595be616e3` | **closed** — live data pipeline root-cause fix, merged | 2026-05-15 |
 | `task_2026-05-15_live_order_e2e_goal/` | branch: feat/live-order-e2e | **active** — live order E2E proof: data→evaluator→executor→venue record | 2026-05-15 |
 | `task_2026-05-15_live_order_e2e_verification/` | evidence packet | **active** — E2E verification plan and critic approval | 2026-05-15 |
-| `task_2026-05-15_p_drift_remediation/` | PR #119 | **closed** — probability drift remediation, merged | 2026-05-15 |
-| `task_2026-05-15_p1_topology_v_next_additive/` | PR #119 | **closed** — topology v-next additive phase 1, merged | 2026-05-15 |
-| `task_2026-05-15_p2_companion_required_mechanism/` | PR #119 | **closed** — companion-required mechanism, merged | 2026-05-15 |
-| `task_2026-05-15_p3_topology_v_next_phase2_shadow/` | PR #119 | **closed** — topology v-next phase 2 shadow mode, merged | 2026-05-15 |
-| `task_2026-05-15_p5_maintenance_worker_core/` | PR #119 | **closed** — maintenance worker core scaffold, merged | 2026-05-15 |
-| `task_2026-05-15_p8_authority_drift_3_blocking/` | PR #119 | **closed** — authority drift blocking fixes, merged | 2026-05-15 |
-| `task_2026-05-15_p9_authority_inventory_v2/` | PR #119 | **closed** — authority inventory v2, merged | 2026-05-15 |
+| `task_2026-05-15_p_drift_remediation/` | `3f73872236` | **closed** — probability drift remediation, merged | 2026-05-15 |
+| `task_2026-05-15_p1_topology_v_next_additive/` | `7235165807..1ebf1a7079` | **closed** — topology v-next additive phase 1, merged | 2026-05-15 |
+| `task_2026-05-15_p2_companion_required_mechanism/` | `1f2158a14e..16690c36f6` | **closed** — companion-required mechanism, merged | 2026-05-15 |
+| `task_2026-05-15_p3_topology_v_next_phase2_shadow/` | `95617f5300..010d930941` | **closed** — topology v-next phase 2 shadow mode, merged | 2026-05-15 |
+| `task_2026-05-15_p5_maintenance_worker_core/` | `8f2eddf3d0..ea857404d5` | **closed** — maintenance worker core scaffold, merged | 2026-05-15 |
+| `task_2026-05-15_p8_authority_drift_3_blocking/` | `89ac23f7f1` | **closed** — authority drift blocking fixes, merged | 2026-05-15 |
+| `task_2026-05-15_p9_authority_inventory_v2/` | `3262f2c080..8f54c8392c` | **closed** — authority inventory v2, merged | 2026-05-15 |
 | `task_2026-05-15_p10_module_consolidation_planning/` | planning packet | **active** — module consolidation planning; open for implementation | 2026-05-15 |
-| `task_2026-05-15_runtime_improvement_engineering_package/` | PR #119 | **active** — runtime improvement engineering package; ACTIVE_LAW | 2026-05-15 |
+| `task_2026-05-15_runtime_improvement_engineering_package/` | `d6eac5d21a..44b12a372b` | **active** — runtime improvement engineering package; ACTIVE_LAW | 2026-05-15 |
 | `task_2026-05-15_autonomous_agent_runtime_audit/` | audit packet | **active** — autonomous agent runtime audit; IN_PROGRESS | 2026-05-15 |
 | `task_2026-05-15_claude_md_drift_audit/` | audit packet | **closed** — CLAUDE.md drift audit, findings applied | 2026-05-15 |
 | `task_2026-05-16_doc_alignment_plan/` | this PR (feat/doc-alignment-2026-05-16) | **active** — post-PR-#119 authority doc + semantic drift refresh (大扫除) | 2026-05-16 |
