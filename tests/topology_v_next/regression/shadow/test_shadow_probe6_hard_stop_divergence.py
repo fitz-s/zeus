@@ -52,11 +52,14 @@ class TestProbe6HardStopDivergence:
 
         assert envelope["decision"] == "HARD_STOP"
         assert envelope["ok"] is False
-        assert len(envelope["blockers"]) >= 1, (
-            f"blockers list empty despite HARD_STOP severity: {envelope['blockers']}"
+        # SCAFFOLD §2.1: blockers = decision.issues only; kernel HARD_STOP lives in kernel_alerts.
+        # For kernel-only HARD_STOP paths, blockers may be empty — kernel_alerts carries evidence.
+        assert len(envelope["blockers"]) + len(envelope["kernel_alerts"]) >= 1, (
+            f"Both blockers and kernel_alerts are empty despite HARD_STOP severity. "
+            f"blockers={envelope['blockers']}, kernel_alerts={envelope['kernel_alerts']}"
         )
         assert envelope["advisory"] == [], (
-            f"advisory should be empty for HARD_STOP (issues are blockers): {envelope['advisory']}"
+            f"advisory should be empty for HARD_STOP: {envelope['advisory']}"
         )
 
     def test_divergence_record_agreement_class(self, monkeypatch):

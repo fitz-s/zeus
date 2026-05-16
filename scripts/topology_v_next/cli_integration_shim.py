@@ -78,7 +78,7 @@ def maybe_shadow_compare(
             files=files,
             hint=task_hash,               # hash, not raw task — see guard above
             binding=_extract_binding(payload),
-            friction_state=friction_state or {},
+            friction_state=friction_state if friction_state is not None else {},
         )
         envelope = format_output(decision)
         record = _build_divergence_record(
@@ -116,6 +116,9 @@ def format_output(decision: AdmissionDecision) -> dict[str, Any]:
         for issue in decision.issues
         if issue.severity == Severity.ADVISORY
     ]
+    # SCAFFOLD §2.1: blockers sourced only from decision.issues (not kernel_alerts).
+    # Kernel alerts are surfaced separately via the kernel_alerts field below.
+    # Callers that need full hard-stop evidence should check both blockers AND kernel_alerts.
     blockers = [
         issue.to_dict()
         for issue in decision.issues

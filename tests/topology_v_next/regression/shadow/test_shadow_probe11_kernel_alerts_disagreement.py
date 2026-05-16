@@ -87,11 +87,16 @@ class TestProbe11KernelAlertsDisagreement:
         decision = admit(intent="modify_existing", files=FILES_CRED)
         envelope = format_output(decision)
 
-        # All kernel issues should be HARD_STOP → in blockers
+        # SCAFFOLD §2.1: blockers = decision.issues only; kernel HARD_STOP lives in kernel_alerts.
+        # For kernel-only HARD_STOP, blockers may be empty — kernel_alerts carries the evidence.
         blocker_codes = [b["code"] for b in envelope["blockers"]]
-        assert len(blocker_codes) >= 1
+        kernel_codes = [a["code"] for a in envelope["kernel_alerts"]]
+        assert len(blocker_codes) + len(kernel_codes) >= 1, (
+            f"Both blockers and kernel_alerts are empty for credentials path. "
+            f"blockers={blocker_codes}, kernel_alerts={kernel_codes}"
+        )
         advisory_codes = [a["code"] for a in envelope["advisory"]]
         # hard_stop_path issues should NOT appear in advisory
         assert "hard_stop_path" not in advisory_codes, (
-            f"hard_stop_path appeared in advisory (should be in blockers): {advisory_codes}"
+            f"hard_stop_path appeared in advisory (should be in blockers/kernel_alerts): {advisory_codes}"
         )
