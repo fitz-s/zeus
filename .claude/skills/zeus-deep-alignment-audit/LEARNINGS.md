@@ -211,3 +211,28 @@ Per Run #3 meta-audit (3rd run is meta-audit per SKILL.md): split seed `E. Settl
 - **Category yield reality after 3 runs**: HIGH = A, E1, F, G, I. MEDIUM = B (just promoted), E2 (just promoted), H. LOW = C, D. None DEAD (no 3-consecutive-zero category).
 - **Rationale**: meta-audit confirms the skill is converging on the real Zeus failure surface (lineage, schema, daemon/alarm coupling, secrets) rather than the original seed bias (pure math/stat probes). Seed list should be rewritten v1 in next release.
 
+
+
+## Run #4 update (2026-05-16) — keystone Karachi 5/17 cascade verdict
+
+### Yield ladder updates (Run #4)
+
+- **Cat-H promoted MEDIUM → HIGH** (2nd consecutive hit: Run #3 #12 ghost trade-lifecycle tables + Run #4 #15 `settlements`/`settlements_v2` 1583-row asymmetric drift). Ghost-table-asymmetric is now a HIGH-yield surface.
+- **NEW Cat-K cascade liveness** added at HIGH (caught keystone Finding #14 on first probe). Definition-only is insufficient; every link in a documented cascade must have ≥1 production caller.
+- **Cat-C single-callsite scan**: re-promoted MEDIUM → HIGH on the cascade slice — F14 is a sister-instance (function defined but no production caller). Cat-C and Cat-K overlap on "wired-but-not-driven"; keep both, but Cat-K is cascade-scoped (multi-link) while Cat-C is single-callsite.
+- **Final ladder after Run #4**: HIGH = A, C, E1, F, G, H, I, K. MEDIUM = B, E2. LOW = D. None DEAD.
+
+### High-signal probes added in Run #4
+
+9. **[K] cascade-liveness probe** — for any function the runbook/docs claim "the system invokes", run `grep -rn '<fn>(' src/ scripts/ | grep -v tests/` and require ≥1 hit. Apply to every link in any documented cascade (truth-writer → pnl-resolver → `_settle_positions` → `submit_redeem` → `clob.redeem`). Caught Finding #14 (submit_redeem zero production callers).
+10. **[E2] plist-KeepAlive sweep** — `for p in ~/Library/LaunchAgents/com.zeus.*.plist; do printf '%s: ' "$p"; plutil -extract KeepAlive raw "$p" 2>/dev/null || echo 'MISSING'; done`. Whitelist one-shot eval plists. Caught Finding #11 re-verification.
+
+### Anti-heuristics refined (Run #4)
+
+- **Cat-J `$(...)`-substitution gate**: in addition to the comment-adjacency gate, exclude values whose RHS is a `$(...)` command substitution (e.g. `KEY=$(keychain_resolver \u2026)`). Only literal `KEY=hex` patterns should fire. Prevents re-raising operator-overridden Run #3 #9.
+
+### Meta-audit-of-the-audit (Run #4)
+
+- **Pattern**: Cat-C (single-callsite scan) and Cat-K (cascade liveness) both surfaced the same Finding #14 from different angles. This is healthy — overlapping probes converge on real bugs. Don't merge them; they apply at different granularities (call-site vs cascade-link).
+- **Cascade-docs drift**: `KARACHI_2026_05_17_MANUAL_FALLBACK.md` §1 described an auto-cascade reaching `clob.redeem` that does not exist in production. Audit caught the gap before the operator relied on it. **Antibody**: every runbook describing a cascade must cite the production caller (file:line) for each link, not just the link function name.
+

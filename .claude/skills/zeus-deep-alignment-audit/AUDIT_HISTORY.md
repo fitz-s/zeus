@@ -126,3 +126,26 @@ When you (the opus orchestrator running this skill) read this file in Boot step 
 
 - Run #3 LEARNINGS append was applied as part of audit consolidation commit (this commit). All edits accounted for in this Run-3 row and retrospective.
 
+
+
+## Run 4 — 2026-05-16 — keystone: Karachi 5/17 cascade-liveness verdict
+
+| Anchor | Worktree HEAD | Findings | SEV-0 | SEV-1 | SEV-2 | Cascade |
+|---|---|---|---|---|---|---|
+| main `a924766c8a` | `8114dcd009` | 2 new (#14, #15) + 1 re-verified (#11) | 1 (#14 `submit_redeem` no production driver) | 1 (#15 `settlements`/`settlements_v2` 1583-row asymmetric drift) | 0 new (#11 re-verified, no state change) | **PARTIAL** — L1-L3 GREEN (truth-writer → pnl-resolver → `_settle_positions`); L4-L5 RED (`enqueue_redeem_command` writes `REDEEM_INTENT_CREATED` row, no driver advances it to `REDEEM_SUBMITTED`/on-chain) |
+
+### Run 4 retrospective
+
+- **Surprise #1 (keystone) — cascade-liveness gap (Finding #14)**: trace from `harvester_truth_writer` to `clob.redeem` showed all 5 links wired in the code but the 4th link (`submit_redeem`) has ZERO production callers — only test imports. Karachi 5/17 auto-redeem of the $0.59 LIVE position (c30f28a5-d4e, shares=1.5873) will NOT happen without manual intervention. Operator's `KARACHI_2026_05_17_MANUAL_FALLBACK.md` §1 description is wrong about the cascade reaching `clob.redeem` automatically. P&L books normally; on-chain claim does not.
+- **Surprise #2 — asymmetric ghost (Finding #15)**: Cat-H (Run #3 probe #3 schema-without-data ghost-table scan) double-hit on `state/zeus-forecasts.db`: `settlements` has 5582 rows, `settlements_v2` has 3999 rows (1583-row gap). Production reader uses correct table; `_v2` is a silent shadow. Cat-H promoted MEDIUM → HIGH (now 2 hits).
+- **Surprise #3 — anti-heuristic confirmed**: WU_API_KEY plaintext re-tripped Cat-J probe; was correctly NOT re-raised because Run #3 #9 was operator-overridden as FP. Confirms comment-adjacency gate value. Refinement added: `$(...)` substitution gate (literal `KEY=hex` fires; `KEY=$(keychain_resolver \u2026)` does not).
+- **Methodology surprise — new Cat-K added**: "cascade liveness" as a first-class category. Definition-only is insufficient; every link in a documented cascade must have a verified production caller. Probe #9: for any function the runbook claims the system invokes, `grep -rn '<fn>(' src/ scripts/` and require ≥1 non-test hit. Pairs with Cat-I (antibody-implemented-but-unwired) — same root failure mode but at the cascade-link granularity.
+- **Re-verification**: 6 prior STILL-OPEN findings (#1, #2, #5, #7, #10, #11, #12, #13) all confirmed STILL-OPEN; no regressions vs Run #3. Finding #4 (PR #121) remains RESOLVED on the read side.
+
+### Hand-edits to LEARNINGS.md beyond Closeout
+
+- Cat-H promoted MEDIUM → HIGH (2nd hit).
+- New Cat-K added (cascade liveness).
+- New probe #9 documented (production-caller-for-cascade-fn).
+- Cat-J anti-heuristic refined ($(...) substitution gate).
+
