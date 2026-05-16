@@ -1,12 +1,12 @@
-# Lifecycle: created=2026-04-30; last_reviewed=2026-05-08; last_reused=2026-05-08
-# Authority basis: docs/operations/task_2026-04-30_two_system_independence/design.md §5 Phase 1.5
+# Lifecycle: created=2026-04-30; last_reviewed=2026-05-16; last_reused=2026-05-16
+# Authority basis: docs/operations/task_2026-04-30_two_system_independence/design.md §5 Phase 1.5; docs/operations/task_2026-05-16_deep_alignment_audit/REPORT.md Finding #4
 """Ingest-side settlement truth writer (Phase 1.5 harvester split).
 
-Owns world.settlements writes for open/settling markets.
+Owns forecasts DB settlement-truth writes for open/settling markets.
 Runs from src/ingest_main.py at hourly cadence via acquire_lock("harvester_truth").
 
 Design invariants:
-- Single connection: world_conn = get_world_connection(). NO trade_conn.
+- Single connection: forecasts_conn = get_forecasts_connection(). NO trade_conn.
 - Feature-flagged: ZEUS_HARVESTER_LIVE_ENABLED must equal "1" or function is a no-op.
 - NO imports from src.engine, src.execution, src.strategy, src.signal,
   src.control, src.main, src.ingest_main — ingest-side only.
@@ -74,7 +74,6 @@ from src.config import City, cities_by_name
 from src.contracts.settlement_semantics import SettlementSemantics
 from src.contracts.exceptions import SettlementPrecisionError
 from src.state.db import (
-    get_world_connection,
     log_market_event_outcomes_v2,
     log_settlement_v2,
 )
@@ -393,7 +392,7 @@ def _write_settlement_truth(
     """Write canonical-authority settlement truth to settlements table.
 
     This is an ingest-side copy of harvester.py:_write_settlement_truth.
-    Writes ONLY to world_conn (settlements, settlements_v2, market_events_v2).
+    Writes ONLY to forecasts_conn (settlements, settlements_v2, market_events_v2).
     Does NOT commit -- caller owns transaction boundary.
 
     pm_bin_unit: the unit of pm_bin_lo/pm_bin_hi as parsed from the market question
@@ -636,19 +635,19 @@ def _write_settlement_truth(
 # ---------------------------------------------------------------------------
 
 def write_settlement_truth_for_open_markets(
-    world_conn,
+    forecasts_conn,
     *,
     dry_run: bool = False,
 ) -> dict:
-    """Write world.settlements for all currently settling markets.
+    """Write forecasts DB settlement truth for all currently settling markets.
 
     Entry point for the ingest-side harvester tick.
     Feature flag: ZEUS_HARVESTER_LIVE_ENABLED must equal "1" or returns disabled status.
 
     Parameters
     ----------
-    world_conn:
-        A connection returned by get_world_connection().  NO trade_conn used.
+    forecasts_conn:
+        A connection returned by get_forecasts_connection().  NO trade_conn used.
     dry_run:
         If True, fetches and processes but does not commit.
 
@@ -728,7 +727,7 @@ def write_settlement_truth_for_open_markets(
                 continue
 
             obs_row = _lookup_settlement_obs(
-                world_conn, city, target_date, temperature_metric=temperature_metric,
+                forecasts_conn, city, target_date, temperature_metric=temperature_metric,
             )
             if obs_row is None:
                 logger.debug(
@@ -753,7 +752,7 @@ def write_settlement_truth_for_open_markets(
             winning_bin_unit = _detect_bin_unit(winning.get("range_label", ""))
 
             _write_settlement_truth(
-                world_conn, city, target_date, pm_bin_lo, pm_bin_hi,
+                forecasts_conn, city, target_date, pm_bin_lo, pm_bin_hi,
                 event_slug=event.get("slug", ""),
                 obs_row=obs_row,
                 resolved_market_outcomes=resolved_market_outcomes,
@@ -771,7 +770,7 @@ def write_settlement_truth_for_open_markets(
 
     if not dry_run:
         try:
-            world_conn.commit()
+            forecasts_conn.commit()
         except Exception as exc:
             logger.error("harvester_truth_writer: commit failed: %s", exc)
             errors += 1

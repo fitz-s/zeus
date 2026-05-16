@@ -24,7 +24,7 @@ or lifecycle states.
 - WS gaps must block new submits and require a future M5 reconciliation sweep before unblocking.
 - REST fallback/reconciliation is evidence recovery only; it must not bypass M5 reconciliation law or mutate lifecycle phases directly.
 - API credentials must never be logged or serialized into evidence payloads.
-- Forecast-live daemon jobs must stay limited to OpenData forecast production and heartbeat; TIGGE/backfill/refit/market scan/venue actions remain outside this daemon.
+- Forecast-live daemon jobs must stay limited to OpenData forecast production, heartbeat, and OpenData-only source-health refresh; TIGGE/backfill/refit/market scan/venue actions and non-OpenData probes remain outside this daemon.
 
 ## Common mistakes
 

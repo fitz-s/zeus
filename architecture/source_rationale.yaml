@@ -912,7 +912,7 @@ files:
   src/ingest/forecast_live_daemon.py:
     zone: K2_runtime
     authority_role: forecast_live_daemon_entry
-    why: Dedicated OpenData live forecast producer daemon; schedules only ECMWF OpenData HIGH/LOW forecast ingest and heartbeat, sharing the OpenData lock with legacy ingest_main during rollout.
+    why: Dedicated OpenData live forecast producer daemon; schedules only ECMWF OpenData HIGH/LOW forecast ingest, heartbeat, and OpenData-only source-health refresh, sharing the OpenData lock with legacy ingest_main during rollout.
     hazards:
     - SOURCE_TRUTH_PLANE_COLLAPSE
     downstream:
@@ -1283,7 +1283,7 @@ files:
   src/execution/harvester_pnl_resolver.py:
     zone: K2_runtime
     authority_role: settlement_pnl_resolver
-    why: Trading-side resolver that reads VERIFIED world settlement truth and settles matching trade-side positions without writing world truth.
+    why: Trading-side resolver that reads VERIFIED forecasts settlement truth and settles matching trade-side positions without writing forecast truth.
     write_routes:
     - canonical_position_write
     downstream:

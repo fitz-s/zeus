@@ -1,6 +1,6 @@
 # Created: 2026-04-30
-# Last reused/audited: 2026-04-30
-# Authority basis: docs/operations/task_2026-04-30_two_system_independence/design.md §2.1
+# Last reused/audited: 2026-05-16
+# Authority basis: docs/operations/task_2026-04-30_two_system_independence/design.md §2.1; PR #121 forecast-live OpenData-only source-health boundary
 """Source health probe loop — Phase 2 ingest improvement.
 
 Runs a 1-row-fetch + latency probe against each upstream data source.
@@ -449,6 +449,43 @@ def _probe_source(source: str, timeout: float) -> dict[str, Any]:
     return fn(timeout)
 
 
+def _apply_prior_failure_state(
+    source: str,
+    result: dict[str, Any],
+    *,
+    prior: dict[str, Any],
+) -> dict[str, Any]:
+    prev = prior.get(source, {})
+    if result.get("error") and result.get("last_success_at") is None and source not in _MANUAL_OPERATOR_SOURCES:
+        prev_consec = prev.get("consecutive_failures", 0) or 0
+        result["consecutive_failures"] = prev_consec + 1
+        result["degraded_since"] = prev.get("degraded_since") or result.get("last_failure_at")
+    else:
+        result["consecutive_failures"] = 0
+        result["degraded_since"] = None
+    return result
+
+
+def probe_sources(
+    sources: list[str] | tuple[str, ...] | frozenset[str],
+    timeout_per_source_seconds: float = 10.0,
+    *,
+    _prior_state: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Run health probes for an explicit source subset."""
+    prior = _prior_state or {}
+    results: dict[str, Any] = {}
+
+    for source in sources:
+        logger.debug("Probing source: %s", source)
+        result = _probe_source(source, timeout_per_source_seconds)
+        result = _apply_prior_failure_state(source, result, prior=prior)
+        results[source] = result
+        logger.debug("Source %s: latency=%s error=%s", source, result.get("latency_ms"), result.get("error"))
+
+    return results
+
+
 def probe_all_sources(
     timeout_per_source_seconds: float = 10.0,
     *,
@@ -462,29 +499,11 @@ def probe_all_sources(
     Uses _prior_state to accumulate consecutive_failures and degraded_since
     across calls (so the file on disk acts as the prior state on restart).
     """
-    prior = _prior_state or {}
-    results: dict[str, Any] = {}
-
-    for source in EXPECTED_SOURCES:
-        logger.debug("Probing source: %s", source)
-        result = _probe_source(source, timeout_per_source_seconds)
-
-        # Accumulate consecutive_failures and degraded_since from prior state
-        prev = prior.get(source, {})
-        if result.get("error") and result.get("last_success_at") is None and source not in _MANUAL_OPERATOR_SOURCES:
-            # Failure: accumulate counter
-            prev_consec = prev.get("consecutive_failures", 0) or 0
-            result["consecutive_failures"] = prev_consec + 1
-            result["degraded_since"] = prev.get("degraded_since") or result.get("last_failure_at")
-        else:
-            # Success or manual: reset counter
-            result["consecutive_failures"] = 0
-            result["degraded_since"] = None
-
-        results[source] = result
-        logger.debug("Source %s: latency=%s error=%s", source, result.get("latency_ms"), result.get("error"))
-
-    return results
+    return probe_sources(
+        tuple(EXPECTED_SOURCES),
+        timeout_per_source_seconds,
+        _prior_state=_prior_state,
+    )
 
 
 def write_source_health(

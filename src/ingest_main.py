@@ -630,20 +630,20 @@ def _etl_recalibrate_body():
 
 @_scheduler_job("ingest_harvester_truth_writer")
 def _harvester_truth_writer_tick():
-    """Phase 1.5 harvester split — ingest-side world.settlements writer.
+    """Phase 1.5 harvester split — ingest-side forecasts settlement writer.
 
     Acquires advisory lock before running. Runs hourly. Writes settlement truth
-    to world.settlements independent of the trading daemon's lifecycle.
+    to forecasts DB independent of the trading daemon's lifecycle.
     Feature-flagged: ZEUS_HARVESTER_LIVE_ENABLED must equal "1" to do real work.
     """
     from src.data.dual_run_lock import acquire_lock
     from src.ingest.harvester_truth_writer import write_settlement_truth_for_open_markets
-    from src.state.db import get_world_connection
+    from src.state.db import get_forecasts_connection
     with acquire_lock("harvester_truth") as acquired:
         if not acquired:
             logger.info("ingest harvester_truth_writer_tick skipped_lock_held")
             return
-        conn = get_world_connection(write_class="bulk")
+        conn = get_forecasts_connection(write_class="bulk")
         try:
             result = write_settlement_truth_for_open_markets(conn)
         finally:
@@ -824,7 +824,7 @@ def _uma_resolution_listener_tick():
         poll_uma_resolutions,
         set_last_scanned_block,
     )
-    from src.state.db import get_world_connection, ZEUS_WORLD_DB_PATH
+    from src.state.db import get_world_connection, ZEUS_FORECASTS_DB_PATH
     import sqlite3
 
     # Load optional uma settings (default-OFF when absent).
@@ -843,10 +843,10 @@ def _uma_resolution_listener_tick():
         )
         return
 
-    # Collect tracked condition_ids from market_events_v2 (read-only connection).
+    # Collect tracked condition_ids from market_events_v2 (read-only, forecasts DB post-K1).
     condition_ids: list[str] = []
     try:
-        ro_conn = sqlite3.connect(str(ZEUS_WORLD_DB_PATH), timeout=10)
+        ro_conn = sqlite3.connect(str(ZEUS_FORECASTS_DB_PATH), timeout=10)
         ro_conn.row_factory = sqlite3.Row
         try:
             rows = ro_conn.execute(
@@ -986,7 +986,7 @@ def _market_scan_tick():
     Running this from the ingest daemon ensures market_events_v2 stays updated
     even when the trading daemon (src/main.py) is paused.
 
-    Runs on default executor (writes to zeus-world.db via _persist_market_events_to_db).
+    Runs on default executor (writes to zeus-forecasts.db via _persist_market_events_to_db).
     """
     try:
         from src.data.market_scanner import find_weather_markets
@@ -1287,7 +1287,7 @@ def main() -> None:
     # 2026-05-07 STALE fix: Gamma market scan — every 30 minutes.
     # Keeps market_events_v2 fresh when the trading daemon (src/main.py) is paused.
     # INSERT OR IGNORE makes it idempotent.
-    # Runs on default executor (writes to zeus-world.db via _persist_market_events_to_db).
+    # Runs on default executor (writes to zeus-forecasts.db via _persist_market_events_to_db).
     _scheduler.add_job(
         _market_scan_tick, "interval",
         minutes=30, id="ingest_market_scan",

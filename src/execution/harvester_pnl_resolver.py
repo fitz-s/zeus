@@ -1,5 +1,5 @@
-# Lifecycle: created=2026-04-30; last_reviewed=2026-04-30; last_reused=never
-# Authority basis: docs/operations/task_2026-04-30_two_system_independence/design.md §5 Phase 1.5
+# Lifecycle: created=2026-04-30; last_reviewed=2026-05-16; last_reused=2026-05-16
+# Authority basis: docs/operations/task_2026-04-30_two_system_independence/design.md §5 Phase 1.5; docs/operations/task_2026-05-16_deep_alignment_audit/REPORT.md Finding #4
 """Trading-side P&L resolver (Phase 1.5 harvester split).
 
 Reads forecasts.settlements via get_forecasts_connection() (read-only).
@@ -67,7 +67,7 @@ def resolve_pnl_for_settled_markets(trade_conn, forecasts_conn) -> dict:
             "errors": 0,
         }
 
-    # Read settled rows from world.settlements (VERIFIED authority only).
+    # Read settled rows from forecasts.settlements (VERIFIED authority only).
     try:
         rows = forecasts_conn.execute(
             """
@@ -91,7 +91,7 @@ def resolve_pnl_for_settled_markets(trade_conn, forecasts_conn) -> dict:
 
     if not rows:
         logger.debug(
-            "harvester_pnl_resolver: no VERIFIED settlements in world.settlements; "
+            "harvester_pnl_resolver: no VERIFIED settlements in forecasts.settlements; "
             "truth writer may not have run yet"
         )
         return {
@@ -145,7 +145,7 @@ def resolve_pnl_for_settled_markets(trade_conn, forecasts_conn) -> dict:
                 settlement_records=settlement_records,
                 strategy_tracker=tracker,
                 settlement_authority=authority,
-                settlement_truth_source="world.settlements",
+                settlement_truth_source="forecasts.settlements",
                 settlement_market_slug=str(market_slug or ""),
                 settlement_temperature_metric=str(temperature_metric or ""),
                 settlement_source=str(settlement_source or ""),

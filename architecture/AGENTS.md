@@ -73,7 +73,7 @@ Changes here are architecture or governance changes, never “just docs.”
 | ~~`world_schema_manifest.yaml`~~ | RETIRED P2 (2026-05-14): replaced by `src/state/table_registry.py` registry. `validate_world_schema_at_boot` removed from `src/main.py`; replaced in P3 by `assert_db_matches_registry`. |
 | `preflight_overrides_2026-04-28.yaml` | Operator-approved preflight drift overrides for WU ICAO history residuals (schema_version 1; created 2026-04-28) |
 | `inv_prototype.py` | @enforced_by decorator prototype for round-2 §H1 INV annotation experiment (created 2026-04-28) |
-| `world_schema_version.yaml` | World DB schema version sentinel for two-system independence axis 4 (created 2026-05-01) |
+| `world_schema_version.yaml` | Legacy world DB schema version sentinel retained for historical two-system independence registry; live boot authority is direct `zeus-world.db` and `zeus-forecasts.db` `PRAGMA user_version` checks in `src/main.py` |
 | `runtime_posture.yaml` | Runtime posture YAML — read-only at runtime per INV-26 (created 2026-04-26) |
 | `scope_schema.json` | JSON Schema for Zeus packet scope.yaml sidecar; machine-read by zpkt and pre-commit hook |
 | `digest_profiles.py` | Auto-generated digest profiles for topology_doctor — DO NOT EDIT BY HAND; regenerated from topology.yaml |
