@@ -203,4 +203,10 @@ docs/reports/generated/
 docs/artifacts/generated/
 # Evidence data dumps in operations tasks (market snapshots, settlement/obs corpora).
 docs/operations/**/evidence/*.json
+# P3 topology v_next shadow divergence JSONL — raw per-call records, never committed.
+# Summary JSONs (divergence_summary_*.json) ARE committed; only raw JSONL excluded.
+evidence/topology_v_next_shadow/*.jsonl
+evidence/topology_v_next_shadow/*.jsonl.gz
+evidence/topology_v_next_shadow/archive/*.jsonl
+evidence/topology_v_next_shadow/archive/*.jsonl.gz
 .zpkt-cache/
