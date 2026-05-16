@@ -840,3 +840,22 @@ scripts:
     required_tests: [tests/test_settlement_semantics_f_to_c.py]
     packet: docs/operations/task_2026-05-08_post_merge_full_chain/TASK.md
     fix_refs: ["#262", "#263", "#264"]
+  # P9 addition — 2026-05-15
+  authority_inventory_v2.py:
+    class: diagnostic_report_writer
+    canonical_command: "python3 scripts/authority_inventory_v2.py --repo-root . --output <path>"
+    write_targets: [stdout, "docs/operations/task_<DATE>_authority_inventory_v2_run/INVENTORY.md"]
+    external_inputs: []
+    read_targets: [".claude/CLAUDE.md", "docs/operations/INDEX.md", "docs/operations/current_*.md", "docs/operations/known_gaps.md", "docs/operations/packet_scope_protocol.md"]
+    lifecycle: durable
+    status: active
+    dry_run_default: false
+    dangerous_if_run: false
+    required_tests: [tests/scripts/test_authority_inventory_v2.py]
+    packet: docs/operations/task_2026-05-15_p9_authority_inventory_v2/SCAFFOLD.md
+    reason: >
+      Authority inventory v2 generator (P9.1). Extends v1 AUTHORITY_DOCS_INVENTORY.md format
+      to Cohort 7 surfaces: .claude/CLAUDE.md, ~/.claude/CLAUDE.md, ~/.openclaw/CLAUDE.md,
+      architecture/modules/*.yaml (LATENT_TARGET), docs/operations/INDEX.md, current_*.md,
+      known_gaps.md, packet_scope_protocol.md. Emits drift_score + verdict columns alongside
+      v1-compatible first 5 columns. Self-registration per SCAFFOLD.md §6 self-check #1.
