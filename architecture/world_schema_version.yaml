@@ -5,7 +5,7 @@
 #
 # Bump-on-migration contract:
 #   When a migration changes the required schema (adds/removes a column listed
-#   in architecture/world_schema_manifest.yaml), increment `version` by 1 and
+#   in architecture/db_table_ownership.yaml), increment `version` by 1 and
 #   commit as part of the migration while this legacy surface remains present.
 #   Historical ingest code may still write this version into
 #   state/world_schema_ready.json at boot, but that JSON file is no longer live
