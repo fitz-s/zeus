@@ -170,7 +170,7 @@ For each finding in SCOUT_0A.md:
 
 1. Commit message header: `AMENDMENT: <doc>::<id> [REASON: <stale-reality | new-loader-requirement | misclassified>]`. Commit footer carries §8.5 Rule 3 provenance triple (REPLACES / WHY / VERIFIED-AT) — kept in commit message, NOT inline in doc, to honor §8.5 Rule 4 (no mass-add).
 2. Edit doc to match reality — surgical diff per §8.5 Rule 1. Preserve numeric ID gaps (do NOT re-number).
-3. Run `python -m pytest tests/test_invariants.py` (verified `python -m pytest` exit 0 surface; and any invariant-specific tests SCOUT surfaces).
+3. Run `python -m pytest tests/test_invariant*.py tests/test_*_invariants.py tests/state/test_*_invariant.py` (9 invariant test files as of 2026-05-16; `tests/test_invariants.py` does not exist — DERIVED_BY_SCOUT replaced with actual glob; verified `python -m pytest` exit 0 surface).
 4. If edit touches `invariants.yaml`: confirm INV-NN cited in `src/` still resolves to the changed semantics.
 
 **OPUS CRITIC** (per memory `feedback_opus_critic_on_architectural_scaffold_4_for_4_roi`). Critic = fresh subagent, **not** the editor (m-c). Brief ≤30 lines (m-b). Probes:
