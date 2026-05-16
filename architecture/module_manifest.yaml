@@ -187,7 +187,7 @@ modules:
     scoped_agents: src/execution/AGENTS.md
     module_book: docs/reference/modules/execution.md
     priority: p2_remaining
-    maturity: stable  # promoted 2026-05-16: 15+ test files, full invariant coverage
+    maturity: stable  # promoted 2026-05-16: 3 test_execution_*.py + 71 tests import src.execution (flat layout in tests/)
     zone: source
     authority_role: live_execution
     high_risk_files:
@@ -327,7 +327,7 @@ modules:
     scoped_agents: src/calibration/AGENTS.md
     module_book: docs/reference/modules/calibration.md
     priority: p2_remaining
-    maturity: stable  # promoted 2026-05-16: 19+ test files, LAW antibodies enforced
+    maturity: stable  # promoted 2026-05-16: 19 test_calibration_*.py files (flat layout in tests/), LAW antibodies enforced
     zone: source
     authority_role: calibration_runtime
     high_risk_files:
@@ -395,7 +395,7 @@ modules:
     scoped_agents: src/riskguard/AGENTS.md
     module_book: docs/reference/modules/riskguard.md
     priority: p2_remaining
-    maturity: stable  # promoted 2026-05-16: 5+ test files, INV-05/INV-19 antibodies enforced
+    maturity: stable  # promoted 2026-05-16: 4 test_riskguard_*.py files (flat layout in tests/), INV-05/INV-19 antibodies enforced
     zone: source
     authority_role: risk_control
     high_risk_files:
@@ -446,7 +446,7 @@ modules:
     scoped_agents: src/contracts/AGENTS.md
     module_book: docs/reference/modules/contracts.md
     priority: p2_remaining
-    maturity: stable  # promoted 2026-05-16: settlement_semantics + execution_price fully tested
+    maturity: stable  # promoted 2026-05-16: 10 test_settlement_*.py + test_contract_*.py files (flat layout in tests/)
     zone: source
     authority_role: runtime_contracts
     high_risk_files:
