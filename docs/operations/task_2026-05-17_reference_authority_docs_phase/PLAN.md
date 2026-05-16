@@ -1,23 +1,27 @@
-# Plan: TIER 0+1 Reference + Authority Doc Alignment (Post-PR-#124) — v2 (critic-amended)
+# Plan: TIER 0+1 Reference + Authority Doc Alignment (Post-PR-#124) — v3 (critic-amended round 2)
 
 **Phase target:** dedicated remediation of reference + authority docs **not** covered by PR #124's reality audit.
-**Status:** v2 = v1 + 5 critic-REVISE amendments + minors. Awaiting orchestrator dispatch on WAVE 0.
+**Status:** v3 = v2 + V3-A/B/C/D amendments per PLAN_V2_CRITIC.md REVISE_ROUND_2. Awaiting orchestrator dispatch on WAVE 0.
 **Author:** planner (orchestrator), 2026-05-16. Scheduled WAVE 0 dispatch: 2026-05-17.
 **Branch:** `feat/ref-authority-docs-2026-05-17` (fresh from origin/main post-PR-#124 merge).
 **Worktree:** `/Users/leofitz/.openclaw/workspace-venus/zeus-ref-authority-docs-2026-05-17`.
-**v1 fate:** orphaned on deleted `zeus-doc-alignment-2026-05-16` worktree before commit; v2 reconstructs from transcript + critic verdict + fresh FCI4.
+**v1/v2 history:** v1 orphaned with deleted `zeus-doc-alignment-2026-05-16` worktree; v2 folded 5 critic amendments but A1 fix regressed (cited a still-broken `maintenance_worker --config <yaml>` command). v3 fixes A1' AND embeds the operator's edit-discipline mandate as a binding contract.
 
-## Change log v1 → v2
+## Change log v2 → v3
 
-- **A1 (CRITICAL)**: replaced phantom `python -m maintenance_worker.cli.entry validate` with grep-verified `dry-run` invocation; WAVE 0 SCOUT 0B records exact per-binding loader-test commands.
-- **A2 (CRITICAL)**: every `topology_doctor` invocation now `PYTHONPATH=. python -m scripts.topology_doctor ...` (module form; verified to import cleanly).
-- **A3 (MAJOR)**: `config/reality_contracts/{data,economic,execution,protocol}.yaml` moved from TIER 3 deferred to TIER 0B in-scope (loader `src/contracts/reality_contracts_loader.py` exists today; verified).
-- **A4 (MAJOR)**: all TIER 0A/0B/0C `Lines` columns replaced with actual `wc -l` measurements; §11 effort budget re-derived from real totals.
-- **A5 (MAJOR)**: TIER 1 AGENTS.md count reconciled to 40 (= 46 total − 5 observation subdirs − 1 archive); every path explicitly enumerated; WAVE 3 batch sizing re-derived for 40 docs.
-- **m-a (minor)**: §7 risk register adds (a) 3-PR auto-reviewer fatigue, (b) multi-parallel-session collision, (c) worker-self-review prohibition rows.
-- **m-b (minor)**: every WAVE critic dispatch capped at "brief ≤30 lines" per `feedback_long_opus_revision_briefs_timeout`.
-- **m-c (minor)**: WAVE 1 explicitly notes "critic ≠ executor; dispatch fresh critic subagent, not the editor."
-- **m-d (minor)**: §3 TIER 1 footnote cites `workspace_map.md` extant at repo root (FCI4-verified).
+- **V3-A (CRITICAL)**: A1' regression fixed. Removed every cite of `python -m maintenance_worker.cli.entry dry-run --config bindings/zeus/config.yaml` from §4/§5/§6/§7/§12 (verified to fail: argparse rejects YAML at `--config` slot expecting JSON; `find . -name maintenance_worker_config.json` returns zero results). All `bindings/zeus/config.yaml` loader-test references now defer to SCOUT-0B-determined command. Planner does NOT pre-commit a CLI command in the plan body.
+- **V3-B (CORE, MAJOR)**: New §8.5 "Edit Discipline Contract" embeds operator mandate ("不是盲目的删除和重写也不是往docs里疯狂叠加语句而不是写精华" = NOT blind delete-rewrite, NOT mass-add without distilling essence) as 5 binding rules (Surgical / Essence-over-bloat / Atomic / Per-statement provenance / Stop-condition) applicable to ALL WAVE 1/2/3 executors.
+- **V3-C (MAJOR)**: §5 WAVE 2 + WAVE 3 dispatch sections now explicitly reference §8.5 and extend the WAVE-1 commit-header provenance rule to WAVE 2 (`LOADER-COUPLED:` prefix) and WAVE 3 (`AGENTS-NAV:` prefix). Per-wave critic probes §8.5 Rules 1-5.
+- **V3-D (MAJOR)**: §12 pre-execution checklist hardened — every cited command actually executed end-to-end (not just `--help`) with exit code recorded. New rule: planner MUST execute every command they propose; un-executed commands removed from plan.
+
+## Change log v1 → v2 (preserved for audit)
+
+- **A1 (CRITICAL)**: replaced phantom `python -m maintenance_worker.cli.entry validate` with `dry-run` invocation. **A1 REGRESSED — see V3-A above.**
+- **A2 (CRITICAL)**: every `topology_doctor` invocation now `PYTHONPATH=. python -m scripts.topology_doctor ...` (module form; verified). **PASS.**
+- **A3 (MAJOR)**: `config/reality_contracts/{data,economic,execution,protocol}.yaml` moved from TIER 3 deferred to TIER 0B in-scope. **PASS.**
+- **A4 (MAJOR)**: all TIER 0A/0B/0C `Lines` columns replaced with actual `wc -l`. **PASS.**
+- **A5 (MAJOR)**: TIER 1 AGENTS.md count reconciled to 40. **PASS.**
+- **m-a/b/c/d (minors)**: risk-register rows, critic brief ≤30 lines, critic ≠ editor, workspace_map.md triangle anchor. **ALL PASS.**
 
 ---
 
@@ -127,7 +131,7 @@ Per memory `feedback_pr_unit_of_work_not_loc`: ship coherent units, not a single
 | PR | Scope | Est. LOC | Critic tier | Gate |
 |---|---|---|---|---|
 | PR-A | TIER 0A (8 docs) + INV-27-style amendment block | 300-600 | opus | constitution-amendment review |
-| PR-B | TIER 0B (10 docs incl. 4 reality_contracts) | 500-1,000 | opus | loader-tests + `PYTHONPATH=. python -m scripts.topology_doctor --strict-health` + `python -m maintenance_worker.cli.entry dry-run` |
+| PR-B | TIER 0B (10 docs incl. 4 reality_contracts) | 500-1,000 | opus | loader-tests per SCOUT-0B Loader Command Table + `PYTHONPATH=. python -m scripts.topology_doctor --strict-health` (Zeus-binding loader-test deferred to SCOUT 0B — see V3-A) |
 | PR-C | TIER 0C (4 MDs) + TIER 1 (40 AGENTS.md) | 500-900 | opus-on-0C, sonnet-on-1 | FCI4 audit + cross-ref triangle |
 
 **Alternative considered: single mega-PR.** Rejected because (a) governance amendment + runtime-coupled changes have different review concerns; (b) per memory `feedback_accumulate_changes_before_pr_open` paid auto-reviewers parallelize across PRs better than within one 1,500-LOC PR; (c) gate-fail recovery is cleaner when scoped.
@@ -147,7 +151,7 @@ NOT hygiene (PR #124 did hygiene). Pure read-only reality scan.
 Dispatch 3 parallel haiku scouts:
 
 - **Scout 0A** — TIER 0A (8 docs): findings table (file → claim → reality → POISON/STALE/OK). For invariants.yaml: cross-check each INV-NN against runtime callers via `grep -rn "INV-NN"` in `src/`. Write `SCOUT_0A.md`.
-- **Scout 0B** — TIER 0B (10 docs): identify loader for each (`src/contracts/reality_contracts_loader.py` known; others via `grep -rn "<filename>" scripts/ src/ maintenance_worker/`); confirm schema match; RECORD the exact loader-test command per doc (e.g. `python -m maintenance_worker.cli.entry dry-run --config bindings/zeus/config.yaml`, `PYTHONPATH=. python -m scripts.topology_doctor --task-boot-profiles --strict-health`). Write `SCOUT_0B.md` including a "Loader Command Table" used by WAVE 2.
+- **Scout 0B** — TIER 0B (10 docs): identify loader for each (`src/contracts/reality_contracts_loader.py` known for reality_contracts; others via `grep -rn "<filename>" scripts/ src/ maintenance_worker/`); confirm schema match; RECORD the exact loader-test command per doc by ACTUALLY EXECUTING candidate commands until exit 0 (per V3-D + memory `feedback_one_failed_test_is_not_a_diagnosis`). For `bindings/zeus/config.yaml` specifically: V2 cited a broken `maintenance_worker.cli.entry --config <yaml>` (argparse rejects YAML; `find . -name maintenance_worker_config.json` = 0 results). SCOUT 0B MUST (a) read `maintenance_worker/cli/entry.py` source to understand the actual config schema, AND (b) locate the Zeus-binding loader via `grep -rn "bindings/zeus/config.yaml" src/ maintenance_worker/` — that loader is the loader-test target, not `cli/entry.py`. Write `SCOUT_0B.md` including a "Loader Command Table" (doc → exact command → exit code → expected output excerpt) used by WAVE 2. Example PASS row format: `architecture/task_boot_profiles.yaml` → `PYTHONPATH=. python -m scripts.topology_doctor --task-boot-profiles --strict-health` → exit 0 → "task_boot_profiles OK"; example FAIL-and-fixed row: `bindings/zeus/config.yaml` → `<SCOUT-determined command>` → exit 0.
 - **Scout 0C+1** — TIER 0C (4 docs) + TIER 1 (40 AGENTS.md): findings table. For per-subdir AGENTS.md: cross-check every file:line citation against current HEAD; cross-check every symbol via `git grep`. Write `SCOUT_0C.md`.
 
 Each scout writes to `docs/operations/task_2026-05-17_reference_authority_docs_phase/SCOUT_{0A,0B,0C}.md` using the schema from `REALITY_AUDIT_2026-05-16.md` (file | location | claim | reality | category | recommended action).
@@ -158,59 +162,70 @@ Each scout writes to `docs/operations/task_2026-05-17_reference_authority_docs_p
 
 ### WAVE 1 — TIER 0A remediation (PR-A) (~3-4 hr, opus critic)
 
+**Executor MUST honor §8.5 Edit Discipline Contract.** Critic dispatch MUST probe compliance with §8.5 Rules 1-5 in every wave-close review.
+
 Architectural anchor: every TIER 0A edit ships with a constitutional amendment block in the same commit, modeled on INV-27 carve-out precedent. Authority doc: `docs/authority/zeus_change_control_constitution.md` (646 LOC, verified extant).
 
 For each finding in SCOUT_0A.md:
 
-1. Commit message header: `AMENDMENT: <doc>::<id> [REASON: <stale-reality | new-loader-requirement | misclassified>]`.
-2. Edit doc to match reality. Preserve numeric ID gaps (do NOT re-number).
-3. Run `python -m pytest tests/test_invariants.py` (and any invariant-specific tests SCOUT surfaces).
+1. Commit message header: `AMENDMENT: <doc>::<id> [REASON: <stale-reality | new-loader-requirement | misclassified>]`. Commit footer carries §8.5 Rule 3 provenance triple (REPLACES / WHY / VERIFIED-AT) — kept in commit message, NOT inline in doc, to honor §8.5 Rule 4 (no mass-add).
+2. Edit doc to match reality — surgical diff per §8.5 Rule 1. Preserve numeric ID gaps (do NOT re-number).
+3. Run `python -m pytest tests/test_invariants.py` (verified `python -m pytest` exit 0 surface; and any invariant-specific tests SCOUT surfaces).
 4. If edit touches `invariants.yaml`: confirm INV-NN cited in `src/` still resolves to the changed semantics.
 
 **OPUS CRITIC** (per memory `feedback_opus_critic_on_architectural_scaffold_4_for_4_roi`). Critic = fresh subagent, **not** the editor (m-c). Brief ≤30 lines (m-b). Probes:
+- §8.5 Rules 1-5 compliance per edit (surgical / atomic / provenance triple / no mass-add / stop-condition met)?
 - Did each amendment block name the source-of-rule?
 - Did any edit silently re-number an existing INV-NN/table-NN?
 - Did any edit invalidate a runtime caller?
 - Did the commit message cite a verification probe?
 
-**Gate**: opus critic CLEAR_PASS or ACCEPT_WITH_FOLLOWUP; pytest invariants green; no re-numbering; PR-A ready to open.
+**Gate**: opus critic CLEAR_PASS or ACCEPT_WITH_FOLLOWUP; pytest invariants green; no re-numbering; all commits carry `AMENDMENT:` prefix + §8.5 Rule 3 provenance triple; PR-A ready to open.
 
-### WAVE 2 — TIER 0B remediation (PR-B) (~5-6 hr, opus critic) — A1+A3 updated
+### WAVE 2 — TIER 0B remediation (PR-B) (~5-6 hr, opus critic) — A1+A3+V3-A+V3-C updated
+
+**Executor MUST honor §8.5 Edit Discipline Contract.** Critic dispatch MUST probe compliance with §8.5 Rules 1-5 in every wave-close review.
 
 For each finding in SCOUT_0B.md:
 
-1. Edit doc to match current loader/schema.
-2. Run the doc-specific loader-test recorded in SCOUT_0B's "Loader Command Table":
-   - `bindings/zeus/config.yaml` → `python -m maintenance_worker.cli.entry dry-run --config bindings/zeus/config.yaml` (verified CLI surface; subcommands are `{run,dry-run,status,init}`)
-   - `architecture/task_boot_profiles.yaml` → `PYTHONPATH=. python -m scripts.topology_doctor --task-boot-profiles --strict-health` (verified module form)
-   - `architecture/test_topology.yaml` → `PYTHONPATH=. python -m scripts.topology_doctor --tests --strict-health`
-   - `architecture/script_manifest.yaml` → `PYTHONPATH=. python -m scripts.topology_doctor --scripts --strict-health`
-   - `architecture/source_rationale.yaml` → ingest-loader test (SCOUT 0B identifies exact path)
-   - `architecture/topology_v_next_binding.yaml` → `PYTHONPATH=. python -m scripts.topology_doctor --strict-health`
-   - `config/reality_contracts/{data,economic,execution,protocol}.yaml` → smoke test via `python -c "from src.contracts.reality_contracts_loader import *; ..."` (SCOUT 0B records exact loader-API call)
-3. Backward-compat: every edit must preserve loader-public schema unless amendment explicitly says otherwise.
+1. Commit message header: `LOADER-COUPLED: <doc>::<section> [REASON: <stale-loader-binding | schema-shift | dead-reference>]` (V3-C — mirrors WAVE 1 `AMENDMENT:` prefix). Commit footer carries §8.5 Rule 3 provenance triple (REPLACES / WHY / VERIFIED-AT).
+2. Edit doc to match current loader/schema — surgical diff per §8.5 Rule 1.
+3. Run the doc-specific loader-test from SCOUT_0B's "Loader Command Table" (every command in that table is empirically exit-0 per V3-D rule). NO command in this PLAN body is cited as the loader-test for `bindings/zeus/config.yaml` — SCOUT 0B determines it (V3-A). Categories of loader-test commands the table SHOULD contain, in order of safety:
+   - Topology-doctor-based (verified module form): `PYTHONPATH=. python -m scripts.topology_doctor --task-boot-profiles --strict-health`, `--tests --strict-health`, `--scripts --strict-health`, `--strict-health` (for topology_v_next_binding).
+   - Loader-API smoke tests (verified to exist): for `config/reality_contracts/*.yaml`, SCOUT 0B records the exact `python -c "..."` import + parse call against `src/contracts/reality_contracts_loader.py`.
+   - `architecture/source_rationale.yaml`: ingest-loader test (SCOUT 0B identifies exact path; if no loader found, doc treated as TIER 0C-equivalent per §8.5 Rule 5 stop-condition).
+   - `bindings/zeus/config.yaml`: **SCOUT 0B determines command per V3-A** (V2's cited command empirically fails).
+4. Backward-compat: every edit must preserve loader-public schema unless amendment explicitly says otherwise.
 
-**OPUS CRITIC** (fresh subagent, brief ≤30 lines). Probes:
-- Did each edit run its loader-test? Output captured?
+**OPUS CRITIC** (fresh subagent, brief ≤30 lines per m-b). Probes:
+- §8.5 Rules 1-5 compliance per edit (surgical / atomic / provenance triple / no mass-add / stop-condition met)?
+- Did each edit run its SCOUT-0B-determined loader-test? Exit code captured in commit?
 - Any schema changes carry a migration note?
 - `PYTHONPATH=. python -m scripts.topology_doctor --strict-health` output captured in commit?
-- Did any edit break a maintenance_worker rule-load?
+- Did any edit break a runtime caller?
+- Commit-header `LOADER-COUPLED:` prefix present? Provenance triple in footer?
 
-**Gate**: opus critic PASS; loader-tests green; `topology_doctor --strict-health` zero new failures vs baseline (baseline captured at §12); PR-B ready.
+**Gate**: opus critic PASS; loader-tests green per Loader Command Table; `topology_doctor --strict-health` zero new failures vs baseline (baseline captured at §12); all commits carry `LOADER-COUPLED:` prefix + §8.5 Rule 3 provenance triple; PR-B ready.
 
-### WAVE 3 — TIER 0C + TIER 1 remediation (PR-C) (~5-6 hr, mixed critic) — A5 batch resizing
+### WAVE 3 — TIER 0C + TIER 1 remediation (PR-C) (~5-6 hr, mixed critic) — A5+V3-C updated
+
+**Executor MUST honor §8.5 Edit Discipline Contract.** Critic dispatch MUST probe compliance with §8.5 Rules 1-5 in every wave-close review.
 
 Dispatch ≤5 parallel sonnet executors (per memory `feedback_dispatch_brief_concise`), each handling 8-10 docs from TIER 1 + 1 TIER 0C MD where possible. Per-batch brief ≤30 lines (m-b).
 
 For each finding in SCOUT_0C.md:
 
-1. Edit per FCI4 (cite `file::symbol` not `file:line` per memory `feedback_zeus_plan_citations_rot_fast`).
-2. Cross-reference triangle: `AGENTS.md` ↔ `docs/operations/AGENTS.md` ↔ `workspace_map.md` MUST stay consistent. Orchestrator runs triangle-consistency check via haiku grep across 3 paths (m-d).
-3. For per-subdir AGENTS.md: verify every claimed `file:line` via `git grep` within 10 min of edit (per memory `feedback_grep_gate_before_contract_lock`).
+1. Commit message header: `AGENTS-NAV: <doc>::<section> [REASON: <symbol-rot | path-rot | orphan-ref | drift-from-triangle>]` (V3-C — mirrors WAVE 1/2 prefix). Commit footer carries §8.5 Rule 3 provenance triple.
+2. Edit per FCI4 (cite `file::symbol` not `file:line` per memory `feedback_zeus_plan_citations_rot_fast`) — surgical diff per §8.5 Rule 1.
+3. Cross-reference triangle: `AGENTS.md` ↔ `docs/operations/AGENTS.md` ↔ `workspace_map.md` MUST stay consistent. Orchestrator runs triangle-consistency check via haiku grep across 3 paths (m-d).
+4. For per-subdir AGENTS.md: verify every claimed `file:line` via `git grep` within 10 min of edit (per memory `feedback_grep_gate_before_contract_lock`).
 
-**CRITIC**: opus on TIER 0C (4 MDs), sonnet on TIER 1 (40 AGENTS.md). Fresh critic subagent, brief ≤30 lines. Per memory `feedback_default_dispatch_reviewers_per_phase`: critic dispatched automatically at wave-close.
+**CRITIC**: opus on TIER 0C (4 MDs), sonnet on TIER 1 (40 AGENTS.md). Fresh critic subagent, brief ≤30 lines. Per memory `feedback_default_dispatch_reviewers_per_phase`: critic dispatched automatically at wave-close. Critic probes:
+- §8.5 Rules 1-5 compliance per edit.
+- Commit-header `AGENTS-NAV:` prefix present? Provenance triple in footer?
+- Cross-reference triangle still consistent post-edit?
 
-**Gate**: critic PASS per sub-tier; triangle consistent; PR-C ready.
+**Gate**: critic PASS per sub-tier; triangle consistent; all commits carry `AGENTS-NAV:` prefix + §8.5 Rule 3 provenance triple; PR-C ready.
 
 ### WAVE 4 — Final reality audit + PR open (~2 hr, opus)
 
@@ -232,9 +247,10 @@ After CLEAN_FOR_PR: open PR-A, PR-B, PR-C per chosen split. Each PR description 
 | Gate | Wave | Mechanism |
 |---|---|---|
 | Scout accuracy | WAVE 0 | Verification haiku samples 25% of POISON+STALE; ≥75% pass |
-| TIER 0A governance | WAVE 1 | Every commit has amendment block + opus critic (fresh subagent, ≤30-line brief) |
-| TIER 0B loader compat | WAVE 2 | Each edit runs its loader-test (table in SCOUT 0B); `PYTHONPATH=. python -m scripts.topology_doctor --strict-health` zero new failures |
-| TIER 0C+1 FCI4 | WAVE 3 | All citations grep-verified within 10 min; cross-ref triangle check |
+| TIER 0A governance | WAVE 1 | Every commit has `AMENDMENT:` header + §8.5 Rule 3 provenance triple + opus critic (fresh subagent, ≤30-line brief, probes §8.5 Rules 1-5) |
+| TIER 0B loader compat | WAVE 2 | Each edit runs SCOUT-0B-determined loader-test (V3-A — no broken cmd pre-committed in plan body); `PYTHONPATH=. python -m scripts.topology_doctor --strict-health` zero new failures; commits carry `LOADER-COUPLED:` header + provenance triple |
+| TIER 0C+1 FCI4 | WAVE 3 | All citations grep-verified within 10 min; cross-ref triangle check; commits carry `AGENTS-NAV:` header + provenance triple |
+| Edit discipline | WAVES 1/2/3 | §8.5 Rules 1-5 (Surgical / Essence / Atomic / Provenance / Stop-condition) probed at every wave-close critic |
 | Final | WAVE 4 | Opus reality audit on ALL phase output before PR open |
 
 ---
@@ -244,7 +260,7 @@ After CLEAN_FOR_PR: open PR-A, PR-B, PR-C per chosen split. Each PR description 
 | Risk | Severity | Mitigation |
 |---|---|---|
 | Touching `invariants.yaml` without amendment = governance violation | HIGH | WAVE 1 amendment block per commit; opus critic probes |
-| Touching `bindings/zeus/config.yaml` breaks maintenance_worker | HIGH | WAVE 2 `maintenance_worker.cli.entry dry-run` before commit |
+| Touching `bindings/zeus/config.yaml` breaks maintenance_worker | HIGH | WAVE 2 runs SCOUT-0B-determined loader-test before commit (V3-A — V2 cited `maintenance_worker.cli.entry --config <yaml>` empirically failed: argparse rejects YAML at JSON slot) |
 | Touching `task_boot_profiles.yaml` breaks fresh-agent boot | HIGH | WAVE 2 confirms schema; SCOUT 0B maps loader |
 | Touching `config/reality_contracts/*` breaks contract loader | HIGH | WAVE 2 imports loader smoke-test (per SCOUT 0B command table) |
 | AGENTS.md ↔ docs/operations/AGENTS.md ↔ workspace_map.md triangle drift | MEDIUM | WAVE 3 orchestrator triangle check |
@@ -274,6 +290,53 @@ After CLEAN_FOR_PR: open PR-A, PR-B, PR-C per chosen split. Each PR description 
 
 ---
 
+## §8.5 Edit Discipline Contract (binding on all WAVE 1/2/3 executors)
+
+**Operator mandate** (verbatim, 2026-05-16): "不是盲目的删除和重写也不是往docs里疯狂叠加语句而不是写精华"
+**Translation**: NOT blind delete-and-rewrite; NOT mass-add to docs without distilling essence.
+
+This is THE binding operating rule for every executor edit in WAVES 1/2/3. Critic dispatches MUST probe §8.5 Rules 1-5 in every wave-close review. Violation → critic returns REVISE; executor must amend or revert.
+
+### Rule 1 — SURGICAL EDIT
+
+Every edit MUST be the SMALLEST diff that fixes the surfaced drift. If a 1-line fix suffices, do not rewrite the section. If a section needs rewrite, justify in commit message body why surgical was insufficient. Operational threshold: diff line count ≤ 3× lines of cited drift; otherwise the executor MUST justify per-commit. No reformatting, no reordering, no re-wording unless the drift requires it.
+
+### Rule 2 — ESSENCE OVER BLOAT
+
+A doc edit that ADDS net lines must justify each added line as "distilled new insight not previously captured." Mass-adding explanations to docs that already explain is FAILURE, not THOROUGHNESS. Operational threshold: adding >10 net LOC to any single doc requires explicit justification in commit body (what insight, why not distilled to ≤5 LOC, why it belongs in THIS doc not in a sibling). Append-and-explain is the empirical dominant failure mode (per `feedback_zeus_plan_citations_rot_fast` lineage); critic probes for it.
+
+### Rule 3 — ATOMIC AUTHORITATIVE STATEMENTS
+
+Every CHANGED claim in invariants, topology, core_claims, fatal_misreads, db_table_ownership, runtime_modes, runtime_posture, world_schema_version, kernel_manifest, maturity_model, task_boot_profiles, test_topology, script_manifest, source_rationale, topology_v_next_binding, bindings, reality_contracts, or any TIER 0C authority MD must be ATOMIC: one fact, verifiable in isolation, no compound assertions. Compound statements (`X AND Y AND Z`) MUST be split into 3 separate atomic statements. Critic probes for unresolved compounds.
+
+### Rule 4 — PER-STATEMENT PROVENANCE TRIPLE
+
+Every CHANGED authoritative statement carries:
+- **(a) REPLACES**: verbatim quote of old text (truncated to 1 line if needed) OR explicit `<new claim>` marker.
+- **(b) WHY**: 1-sentence reason current text is wrong/incomplete — one of `stale | incorrect | ambiguous | dead-ref | new-loader-binding | drift-from-triangle`.
+- **(c) VERIFIED-AT**: `file::symbol`, code path, DB row, OR cited commit SHA where the new claim is empirically verifiable.
+
+Stored in the **commit message footer**, NOT inline in the doc (preserves §3 Rule 2 essence-over-bloat). Commit-header prefixes by wave:
+- WAVE 1 TIER 0A: `AMENDMENT: <doc>::<id>` (mandatory)
+- WAVE 2 TIER 0B: `LOADER-COUPLED: <doc>::<section>` (mandatory)
+- WAVE 3 TIER 0C+1: `AGENTS-NAV: <doc>::<section>` (mandatory)
+
+### Rule 5 — STOP CONDITION
+
+Per-doc work is DONE when, and only when:
+- (a) Every citation grep-verifiable within the 10-min FCI4 window.
+- (b) Every changed claim sourced via Rule 4 provenance triple.
+- (c) Zero orphan refs (no pointer to deleted symbol, file, or section).
+- (d) Zero net-new lines without justification under Rule 2.
+
+Executor MUST stop and report DONE when the stop condition is met. Further "polish" is forbidden — it consumes orchestrator turn budget and risks introducing Rule 2 violations. WAVE-close gate (§6) checks all four per touched doc.
+
+### Operator-language summary
+
+Surgical fixes, not rewrites. Essence, not append. Atomic claims, not compounds. Provenance per statement, not "trust me." Stop when done, not when bored. These five rules are the contract; the rest of the plan is mechanism.
+
+---
+
 ## 9. Carry-forward queue from PR #124
 
 | Item | Source | Disposition |
@@ -293,8 +356,9 @@ After CLEAN_FOR_PR: open PR-A, PR-B, PR-C per chosen split. Each PR description 
 
 | Deliverable | Path | Wave |
 |---|---|---|
-| This PLAN.md (v2) | `docs/operations/task_2026-05-17_reference_authority_docs_phase/PLAN.md` | now |
-| PLAN_CRITIC.md (v1 critic verdict archived) | same dir | now |
+| This PLAN.md (v3) | `docs/operations/task_2026-05-17_reference_authority_docs_phase/PLAN.md` | now |
+| PLAN_CRITIC.md (v1 critic verdict archived) | same dir | (previous commit) |
+| PLAN_V2_CRITIC.md (v2 critic verdict archived) | same dir | (previous commit) |
 | SCOUT_0A.md | same dir | WAVE 0 |
 | SCOUT_0B.md (incl. Loader Command Table) | same dir | WAVE 0 |
 | SCOUT_0C.md | same dir | WAVE 0 |
@@ -320,20 +384,30 @@ After CLEAN_FOR_PR: open PR-A, PR-B, PR-C per chosen split. Each PR description 
 
 ---
 
-## 12. Pre-execution checklist (orchestrator runs before WAVE 0)
+## 12. Pre-execution checklist (orchestrator runs before WAVE 0) — V3-D hardened
 
-- [x] PR #124 merged to main (HEAD `9fd3ac46c5`, confirmed)
-- [x] Fresh worktree created off origin/main: `/Users/leofitz/.openclaw/workspace-venus/zeus-ref-authority-docs-2026-05-17`
-- [x] This PLAN.md committed (this commit)
-- [ ] pytest baseline captured: `python -m pytest tests/ -q --tb=no | tee state/pytest_baseline_2026-05-17.txt`
-- [ ] topology_doctor baseline captured: `PYTHONPATH=. python -m scripts.topology_doctor --strict-health 2>&1 | tee state/topology_doctor_baseline_2026-05-17.txt`
-- [x] All 18 TIER 0 paths confirmed extant (FCI4 §3)
-- [x] `python -m maintenance_worker.cli.entry --help` confirmed surface (`{run,dry-run,status,init}`)
-- [x] `PYTHONPATH=. python -m scripts.topology_doctor --help` confirmed module form
-- [x] AGENTS.md count: 46 total → 40 in-scope (FCI4 §3 TIER 1)
-- [x] `src/contracts/reality_contracts_loader.py` extant → A3 promotion justified
-- [x] `workspace_map.md` extant at root → m-d triangle anchor verified
-- [ ] Opus plan-critic pass on v2 (delta-only review of A1-A5 + minors against v1 critic verdict in PLAN_CRITIC.md)
+**V3-D rule:** Every command listed below has been executed by the planner end-to-end (NOT just `--help`); exit code recorded. Planner MUST execute every command they propose. If a command does not yet have a verified exit-0 form, it is NOT in this checklist — instead it is deferred to SCOUT 0B per V3-A.
+
+| # | Item | Status | Verified-at |
+|---|---|---|---|
+| 1 | PR #124 merged to main (HEAD `9fd3ac46c5`) | [x] | `git log --oneline -1` returned merge commit |
+| 2 | Fresh worktree at `/Users/leofitz/.openclaw/workspace-venus/zeus-ref-authority-docs-2026-05-17` | [x] | `pwd` confirmed |
+| 3 | This PLAN.md v3 committed | [x] | this commit |
+| 4 | `python -m maintenance_worker.cli.entry dry-run --config bindings/zeus/config.yaml` → empirically FAILS (exit non-zero, `unrecognized arguments`) | [x] V3-A | planner ran 2026-05-16; confirmed broken per PLAN_V2_CRITIC.md |
+| 5 | `python -m maintenance_worker.cli.entry --config bindings/zeus/config.yaml dry-run` → empirically FAILS (exit non-zero, `config parse error: Expecting value` — YAML at JSON slot) | [x] V3-A | planner ran 2026-05-16; confirmed broken |
+| 6 | `find . -name maintenance_worker_config.json` → empirically returns ZERO results | [x] V3-A | planner ran 2026-05-16; no JSON config exists in tree |
+| 7 | `PYTHONPATH=. python -m scripts.topology_doctor --help` → empirically exit 0 | [x] | planner ran 2026-05-16; full flag list printed |
+| 8 | `python -m pytest --version` → empirically exit 0 (pytest 9.0.2) | [x] | planner ran 2026-05-16 |
+| 9 | `git ls-files '**/AGENTS.md' '*AGENTS.md' \| wc -l` → empirically returns 46 | [x] | planner ran 2026-05-16 |
+| 10 | `ls src/contracts/reality_contracts_loader.py` → exists | [x] | A3 promotion justified |
+| 11 | `ls workspace_map.md` → exists at repo root | [x] | m-d triangle anchor verified |
+| 12 | All 22 TIER 0 paths `wc -l`'d; actuals recorded in §3 | [x] A4 | planner ran 2026-05-16 |
+| 13 | pytest baseline captured: `python -m pytest tests/ -q --tb=no \| tee state/pytest_baseline_2026-05-17.txt` | [ ] | WAVE 0 dispatch prerequisite |
+| 14 | topology_doctor baseline captured: `PYTHONPATH=. python -m scripts.topology_doctor --strict-health 2>&1 \| tee state/topology_doctor_baseline_2026-05-17.txt` | [ ] | WAVE 0 dispatch prerequisite |
+| 15 | SCOUT 0B locates Zeus-binding loader for `bindings/zeus/config.yaml` AND records exit-0 loader-test command | [ ] V3-A | WAVE 0 deliverable; no command pre-committed in PLAN body |
+| 16 | Fresh opus plan-critic pass on v3 (delta-only review of V3-A/B/C/D against PLAN_V2_CRITIC.md) | [ ] | mandatory before WAVE 0 dispatch |
+
+**Self-audit (V3-D):** Items 4-6 are POSITIVE-FAILURE records — planner ran broken commands intentionally to confirm V2 critic was correct. Items 7-11 are exit-0 confirmations. Item 13/14 are baselines, NOT to be assumed but RUN. Item 15 is the V3-A defer-to-SCOUT contract.
 
 ---
 
@@ -361,8 +435,9 @@ After CLEAN_FOR_PR: open PR-A, PR-B, PR-C per chosen split. Each PR description 
 
 ## 15. Sign-off
 
-- Planner verdict: v2 = v1 + 5 critic amendments + 4 minors; FCI4 re-run on every cited LOC + CLI command.
+- Planner verdict: v3 = v2 + V3-A/B/C/D per PLAN_V2_CRITIC.md REVISE_ROUND_2. A1' regression fixed by removing all pre-committed `bindings/zeus/config.yaml` loader-test commands (deferred to SCOUT 0B). §8.5 Edit Discipline Contract embedded as binding rule for all WAVE 1/2/3 executors. WAVE 2/3 commit-header prefixes (`LOADER-COUPLED:` / `AGENTS-NAV:`) extend WAVE 1 `AMENDMENT:` provenance rule per V3-C. §12 hardened per V3-D — every cited command empirically executed before listing.
 - v1 critic verdict: REVISE (archived at `PLAN_CRITIC.md`).
-- v2 critic dispatch (per Final Checklist): fresh opus subagent, brief ≤30 lines: "delta-review v2 against v1 critic 5 amendments + 4 minors; confirm A1-A5 land cleanly; verdict CLEAR_PASS / ACCEPT_WITH_FOLLOWUP / REVISE."
+- v2 critic verdict: REVISE_ROUND_2 (archived at `PLAN_V2_CRITIC.md`).
+- v3 critic dispatch (mandatory before WAVE 0): fresh haiku per PLAN_V2_CRITIC.md recommendation, brief ≤20 lines, scoped only to V3-A through V3-D delta. Verdict CLEAR_PASS / ACCEPT_WITH_FOLLOWUP / REVISE_ROUND_3.
 
-*PLAN v2 complete. PLAN_V2_DONE pending commit + push.*
+*PLAN v3 complete. PLAN_V3_DONE pending commit + push.*
