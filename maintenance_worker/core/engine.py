@@ -245,7 +245,7 @@ class MaintenanceEngine:
         """
         required_paths = [config.repo_root, config.state_dir, config.evidence_dir]
         for p in required_paths:
-            if not isinstance(p, Path) or str(p) == "":
+            if not isinstance(p, Path) or str(p) in ("", "."):
                 return False
         return True
 
