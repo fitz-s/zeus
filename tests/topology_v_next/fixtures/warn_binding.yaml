@@ -1,0 +1,28 @@
+# Test fixture: binding that triggers validate_binding_layer warnings
+# - intent_extension missing namespace prefix -> warning
+# - artifact_authority_status entry missing required keys -> warning
+project_id: warn_project
+
+intent_extensions:
+  - id: no_namespace_intent
+    description: This intent is missing a namespace prefix — should trigger a warning
+
+coverage_map:
+  profiles:
+    - id: basic_profile
+      patterns:
+        - "scripts/*.py"
+  orphaned: []
+  hard_stop_paths: []
+
+cohorts: []
+
+severity_overrides: {}
+
+high_fanout_hints: []
+
+artifact_authority_status:
+  - path: "architecture/some_doc.yaml"
+    status: CURRENT_LOAD_BEARING
+    # intentionally missing last_confirmed and confirmation_ttl_days -> warning
+    reason: "Incomplete authority row"

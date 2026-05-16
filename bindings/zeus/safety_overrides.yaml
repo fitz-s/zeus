@@ -1,0 +1,109 @@
+# Zeus maintenance_worker binding — safety_overrides.yaml
+# Created: 2026-05-15
+# Last reused or audited: 2026-05-15
+# Authority basis:
+#   docs/operations/task_2026-05-15_runtime_improvement_engineering_package/02_daily_maintenance_agent/SAFETY_CONTRACT.md
+#   docs/operations/task_2026-05-15_runtime_improvement_engineering_package/05_execution_packets/PACKET_INDEX.md §P6
+#
+# ADDITIVE ONLY — these rules extend the universal forbidden list in
+# maintenance_worker/core/validator.py. They do NOT replace it.
+# Any path matching a rule here receives the same FORBIDDEN_PATH treatment
+# as the universal rules.
+#
+# Group naming mirrors SAFETY_CONTRACT.md §"Forbidden Targets" groups.
+
+schema_version: 1
+project: zeus
+extends: SAFETY_CONTRACT.md  # universal base; this file adds Zeus-specific entries
+
+additional_forbidden_paths:
+
+  # ── Zeus runtime state: DB files not covered by generic state/*.db pattern ──
+  # zeus-forecasts.db, zeus-world.db, zeus.db have specific extension variants
+  - pattern: "*/state/zeus*.db*"
+    group: zeus_runtime_state
+    description: >
+      Zeus canonical DB files (trades, world, forecasts, risk). Pattern covers
+      zeus_trades.db, zeus-world.db, zeus-forecasts.db, risk_state.db, zeus.db,
+      zeus-legacy.db, zeus-shared.db and their WAL/shm variants.
+
+  # ── Calibration state (DB tables and flat files) ─────────────────────────
+  - pattern: "*/state/calibration/**"
+    group: zeus_calibration
+    description: >
+      Calibration pipeline outputs: calibration_pairs_v2.*, Platt parameters,
+      city-floor snapshots. Modifying these produces silent trading edge loss.
+
+  - pattern: "*/state/calibration_pairs*"
+    group: zeus_calibration
+    description: >
+      calibration_pairs_v2 table flat-file exports. Modification desynchronizes
+      the live DB from the Platt fitting state.
+
+  # ── Forecast and world state ──────────────────────────────────────────────
+  - pattern: "*/state/forecasts/**"
+    group: zeus_runtime_state
+    description: Ensemble forecast snapshots. Already in SAFETY_CONTRACT; repeated here for clarity.
+
+  - pattern: "*/state/world/**"
+    group: zeus_runtime_state
+    description: World model state. Already in SAFETY_CONTRACT; repeated here for clarity.
+
+  # ── DDD artifacts (oracle model data) ────────────────────────────────────
+  - pattern: "*/src/oracle/ddd_artifacts/**"
+    group: zeus_oracle
+    description: >
+      DDD v2 artifacts (city floors, nstar). Authoritative ML outputs;
+      overwriting invalidates the entire oracle pipeline for live contracts.
+
+  # ── Live-trading lock file ────────────────────────────────────────────────
+  - pattern: "*LIVE_TRADING_LOCKED*"
+    group: zeus_live_trading
+    description: >
+      LIVE_TRADING_LOCKED_2026-05-04.md governs live mode activation.
+      The maintenance worker must never touch this file.
+
+  # ── REVIEW.md and SECURITY-FALSE-POSITIVES.md (project authority) ────────
+  - pattern: "*REVIEW.md"
+    group: zeus_authority
+    description: >
+      REVIEW.md is a project-authority doc. Maintenance worker must not modify it.
+      (AGENTS.md and CLAUDE.md are already forbidden by the universal contract.)
+
+  - pattern: "*SECURITY-FALSE-POSITIVES.md"
+    group: zeus_authority
+    description: Security false-positive register; authority surface.
+
+  # ── Config files that govern live trading ────────────────────────────────
+  - pattern: "*/config/settings.json"
+    group: zeus_live_config
+    description: >
+      config/settings.json contains live_mode, bankroll_doctrine, and risk
+      parameters. Modification can enable or disable live trading.
+
+  - pattern: "*/config/**"
+    group: zeus_live_config
+    description: >
+      All files under config/ are live-trading governance surfaces.
+      No maintenance action may modify them.
+
+  # ── plist install targets (maintenance-owned plist is in bindings, not LaunchAgents)
+  - pattern: "*/bindings/zeus/launchd_plist.plist"
+    group: zeus_binding_integrity
+    description: >
+      The generated plist source file. The maintenance worker must not
+      self-modify its own plist template; human + install script own this.
+
+# ------------------------------------------------------------------
+# Zeus-specific allowed-write extensions
+# (additive to SAFETY_CONTRACT §"Allowed Targets"; documents permitted paths)
+# ------------------------------------------------------------------
+allowed_write_extensions:
+  - path: "${ZEUS_REPO}/state/maintenance_state/**"
+    reason: "Maintenance worker's own state directory (kill switch, ack files, metadata)"
+  - path: "${ZEUS_REPO}/state/maintenance_evidence/**"
+    reason: "Per-tick evidence trail, proposals, applied records, rollback recipes"
+  - path: "${ZEUS_REPO}/.archive/**"
+    reason: "In-repo quarantine root for reversible quarantine moves"
+  - path: "~/Library/LaunchAgents/.archive/**"
+    reason: "LaunchAgents backup quarantine destination (Category 1)"

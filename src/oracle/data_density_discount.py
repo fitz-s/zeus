@@ -1,11 +1,12 @@
 # Created: 2026-05-03
-# Last reused/audited: 2026-05-03
+# Last reused/audited: 2026-05-15
 # Authority basis: docs/reference/zeus_oracle_density_discount_reference.md (v2 redesign)
 """Data Density Discount (DDD) v2 — Two-Rail trigger + continuous linear curve.
 
 Design spec: docs/reference/zeus_oracle_density_discount_reference.md §6 (v2)
 Phase 1 analysis: docs/operations/task_2026-05-03_ddd_implementation_plan/
                    phase1_results/MATH_REALITY_OPTIMUM_ANALYSIS.md
+Runtime artifacts: src/oracle/ddd_artifacts/
 
 Two-Rail logic:
   Rail 1 — Absolute hard kill: cov < 0.35 AND window_elapsed > 0.50
@@ -30,21 +31,14 @@ logger = logging.getLogger(__name__)
 
 # ── config paths ──────────────────────────────────────────────────────────────
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+_RUNTIME_ARTIFACTS_DIR = _REPO_ROOT / "src" / "oracle" / "ddd_artifacts"
 _DEFAULT_FLOORS_PATH = (
-    _REPO_ROOT
-    / "docs"
-    / "operations"
-    / "task_2026-05-03_ddd_implementation_plan"
-    / "phase1_results"
-    / "p2_1_FINAL_v2_per_city_floors.json"
+    _RUNTIME_ARTIFACTS_DIR
+    / "v2_city_floors.json"
 )
 _DEFAULT_NSTAR_PATH = (
-    _REPO_ROOT
-    / "docs"
-    / "operations"
-    / "task_2026-05-03_ddd_implementation_plan"
-    / "phase1_results"
-    / "p2_5_small_sample_floor.json"
+    _RUNTIME_ARTIFACTS_DIR
+    / "v2_nstar.json"
 )
 
 # ── constants ─────────────────────────────────────────────────────────────────

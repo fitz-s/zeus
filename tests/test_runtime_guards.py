@@ -1,8 +1,8 @@
 """Runtime guard and live-cycle wiring tests."""
-# Lifecycle: created=2026-04-28; last_reviewed=2026-05-09; last_reused=2026-05-09
+# Lifecycle: created=2026-04-28; last_reviewed=2026-05-15; last_reused=2026-05-15
 # Created: 2026-04-28
-# Last reused/audited: 2026-05-09
-# Authority basis: task_2026-04-28_contamination_remediation Batch G; Phase 1B ENS snapshot persistence; Phase 1D forecast source policy; PR #56 MarketPhaseEvidence sidecar propagation; Wave26 explicit position env authority.
+# Last reused/audited: 2026-05-15
+# Authority basis: docs/operations/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md; task_2026-04-28_contamination_remediation Batch G; Phase 1B ENS snapshot persistence; Phase 1D forecast source policy; PR #56 MarketPhaseEvidence sidecar propagation; Wave26 explicit position env authority.
 # Purpose: Lock runtime guard and live-cycle wiring contracts.
 # Reuse: Run for runtime guard, live-only cleanup, and cycle wiring changes.
 
@@ -2576,7 +2576,10 @@ def test_executable_snapshot_repricing_updates_edge_and_size(tmp_path):
     passive_maker_size = (0.47 - 0.25) / (1 - 0.25) * 0.25 * 100.0
     assert decision.size_usd == pytest.approx(passive_maker_size)
     assert "executable_snapshot_repriced" in decision.applied_validations
-    assert "corrected_pricing_shadow_built" in decision.applied_validations
+    assert "final_execution_intent_built" in decision.applied_validations
+    assert decision.final_execution_intent.order_policy == "post_only_passive_limit"
+    assert decision.final_execution_intent.order_type == "GTC"
+    assert decision.final_execution_intent.post_only is True
     reprice = decision.tokens["executable_snapshot_reprice"]
     assert reprice["snapshot_id"] == "snap-reprice-1"
     assert reprice["snapshot_vwmp"] == pytest.approx(0.25)
@@ -2584,10 +2587,11 @@ def test_executable_snapshot_repricing_updates_edge_and_size(tmp_path):
     assert reprice["best_ask_blocked_by_slippage"] is True
     assert reprice["corrected_candidate_limit_price"] == pytest.approx(0.23)
     assert reprice["repriced_size_usd"] == pytest.approx(decision.size_usd)
+    assert reprice["live_submit_authority"] is True
     shadow = reprice["corrected_pricing_shadow"]
-    assert shadow["shadow_only"] is True
-    assert shadow["live_submit_authority"] is False
-    assert shadow["field_semantics"] == "passive_limit_requires_maker_only_support"
+    assert shadow["shadow_only"] is False
+    assert shadow["live_submit_authority"] is True
+    assert shadow["field_semantics"] == "final_execution_intent_submit_authority"
     assert shadow["order_policy"] == "post_only_passive_limit"
     assert shadow["selected_token_id"] == "yes1"
     assert shadow["direction"] == "buy_yes"
@@ -2601,8 +2605,9 @@ def test_executable_snapshot_repricing_updates_edge_and_size(tmp_path):
     assert shadow["fee_source"] == "post_only_maker_fee_exempt:test_snapshot_taker_fee"
     assert shadow["sweep_attempted"] is False
     assert shadow["sweep_depth_status"] == "NOT_MARKETABLE_PASSIVE_LIMIT"
-    assert shadow["unsupported_reason"] == "PASSIVE_LIMIT_REQUIRES_POST_ONLY_OR_MAKER_ONLY_SUBMIT"
+    assert "unsupported_reason" not in shadow
     assert shadow["cost_basis_hash"]
+    assert shadow["final_execution_intent_id"] == decision.final_execution_intent.hypothesis_id
     assert shadow["posterior_distribution_id"] == "decision_snapshot:decision-snap"
 
 
@@ -3346,7 +3351,7 @@ def test_live_reprice_binds_intent_limit_when_dynamic_gap_would_not_jump(tmp_pat
     assert shadow["submitted_matches_corrected_candidate"] is True
 
 
-def test_live_reprice_rejects_passive_without_maker_only_support(tmp_path):
+def test_live_reprice_builds_post_only_passive_final_intent(tmp_path):
     db_path = tmp_path / "live-reprice-passive-final-intent.db"
     conn = get_connection(db_path)
     init_schema(conn)
@@ -3459,20 +3464,18 @@ def test_live_reprice_rejects_passive_without_maker_only_support(tmp_path):
     )
     conn.close()
 
-    assert summary["no_trades"] == 1
-    assert captured == {}
-    assert artifact.trade_cases == []
-    assert artifact.no_trade_cases[0].rejection_stage == "EXECUTION_FAILED"
-    assert "FINAL_EXECUTION_INTENT_UNAVAILABLE" in artifact.no_trade_cases[0].rejection_reasons[0]
-    assert (
-        "PASSIVE_LIMIT_REQUIRES_POST_ONLY_OR_MAKER_ONLY_SUBMIT"
-        in artifact.no_trade_cases[0].rejection_reasons[0]
-    )
+    assert summary["no_trades"] == 0
+    assert artifact.no_trade_cases == []
+    assert len(artifact.trade_cases) == 1
+    assert captured["intent"].order_policy == "post_only_passive_limit"
+    assert captured["intent"].order_type == "GTC"
+    assert captured["intent"].post_only is True
     reprice = decision.tokens["executable_snapshot_reprice"]
     shadow = reprice["corrected_pricing_shadow"]
-    assert shadow["submit_path"] is None
-    assert shadow["live_submit_authority"] is False
-    assert shadow["unsupported_reason"] == "PASSIVE_LIMIT_REQUIRES_POST_ONLY_OR_MAKER_ONLY_SUBMIT"
+    assert shadow["submit_path"] == "final_execution_intent"
+    assert shadow["live_submit_authority"] is True
+    assert shadow["shadow_only"] is False
+    assert "unsupported_reason" not in shadow
 
 
 def test_live_entry_captures_and_commits_snapshot_before_executor(tmp_path, monkeypatch):

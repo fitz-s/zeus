@@ -1,0 +1,224 @@
+# Daily Maintenance Agent — Task Catalog
+# Status: SPEC
+# Schema version: 1
+# Loaded by: maintenance worker core
+# Policy reference: ../04_workspace_hygiene/PURGE_CATEGORIES.md
+#                   ../04_workspace_hygiene/ARCHIVAL_RULES.md
+#                   ../04_workspace_hygiene/LORE_EXTRACTION_PROTOCOL.md
+#                   ../03_authority_drift_remediation/REMEDIATION_PLAN.md
+#
+# Each task is independent. Failure of one does not block others.
+# Every task defaults to dry_run: true. Live execution requires either:
+#   - live_default: true on this task (set by human, not agent), OR
+#   - presence of a human-acknowledge file from the previous tick
+#
+# TTL_DAYS values flow from PURGE_CATEGORIES.md defaults; override here per
+# project as needed.
+
+schema_version: 1
+project: zeus  # binding only; the catalog itself is project-agnostic
+default_evidence_dir: ${ZEUS_REPO}/state/maintenance_evidence
+default_state_dir: ${ZEUS_REPO}/state/maintenance_state
+default_notification_channel: discord  # see bindings/zeus_notifier.yaml
+
+# Global guards (checked once per tick, before any task runs)
+guards:
+  - name: not_dirty_repo
+    description: Refuse if working tree dirty on currently-checked-out branch
+    severity: refuse_to_run
+  - name: no_active_rebase
+    description: Refuse if .git/REBASE_HEAD or MERGE_HEAD or CHERRY_PICK_HEAD present
+    severity: refuse_to_run
+  - name: no_maintenance_pause_flag
+    description: Refuse if state_dir/MAINTENANCE_PAUSED exists
+    severity: refuse_to_run
+  - name: no_kill_switch
+    description: Refuse if state_dir/KILL_SWITCH exists
+    severity: refuse_to_run
+  - name: not_oncall_quiet_window
+    description: Skip tick if state_dir/ONCALL_QUIET present
+    severity: skip_tick
+  - name: disk_free_above_threshold
+    description: Refuse if df shows < 5% free on the repo volume
+    severity: refuse_to_run
+  - name: no_in_flight_maintenance_pr
+    description: Skip tick if open PR labeled 'maintenance/in-flight' exists
+    severity: skip_tick
+
+# Dry-run floor: enforced by the validator, not by honor.
+# The validator refuses any live_default: true action while
+#   now - install_metadata.first_run_at < floor_days
+# UNLESS override_ack_file is present with a human signature line.
+dry_run_floor:
+  floor_days: 30
+  install_metadata_file: ${STATE_DIR}/install_metadata.json   # immutable; written on first run
+  override_ack_file: ${STATE_DIR}/dry_run_floor_override.ack  # must be created by human; presence bypasses floor
+  # Tasks exempt from the floor (see rationale in DESIGN.md §"Dry-run floor enforcement"):
+  exempt_task_ids:
+    - zero_byte_state_cleanup       # zero bytes = no recoverable content; safe from day 1
+    - agent_self_evidence_archival  # agent's own state; safe from day 1
+
+tasks:
+
+  - id: launchagent_backup_quarantine
+    rule_source: PURGE_CATEGORIES.md#category-1-launchagent-backup-shrapnel
+    schedule: daily
+    dry_run: true
+    live_default: false
+    config:
+      backup_ttl_days: 14
+      quarantine_dir: ~/Library/LaunchAgents/.archive
+      quarantine_retention_days: 90
+      regex: '\.(bak|backup|replaced|locked|before_[a-z_]+)[-._]?[0-9TZ]*(?:\.bak)?$'
+    safety:
+      forbidden_paths: ['~/Library/LaunchAgents/com.zeus.*[!.bak]*[!.replaced]*[!.locked]*[!.before*]']
+      pre_check: corresponding_active_plist_must_exist
+    evidence_emit: per_file_action
+
+  - id: stale_worktree_quarantine
+    rule_source: PURGE_CATEGORIES.md#category-2-stale-worktrees
+    schedule: daily
+    dry_run: true
+    live_default: false
+    config:
+      worktree_idle_ttl_days: 21
+      worktree_roots: ['${ZEUS_REPO}/.claude/worktrees', '${ZEUS_REPO}/..']
+      worktree_name_glob: ['zeus-*', 'worktree-*']
+    safety:
+      forbidden:
+        - currently_checked_out_branch
+        - any_worktree_with_uncommitted_changes
+        - any_worktree_whose_branch_appears_in_open_pr
+      pre_check: capture_full_diff_before_remove
+    evidence_emit: per_worktree_action
+
+  - id: in_repo_scratch_quarantine
+    rule_source: PURGE_CATEGORIES.md#category-3-in-repo-scratch-directories
+    schedule: daily
+    dry_run: true
+    live_default: false
+    config:
+      scratch_ttl_days: 7
+      scratch_patterns: ['tmp', 'tmp/*', 'scratch', 'scratch/*', 'debug_*', '*.scratch.*', '*.tmp']
+      quarantine_dir: ${ZEUS_REPO}/.archive/scratch
+    safety:
+      forbidden_paths: ['src/**', 'tests/**', 'architecture/**', 'docs/**',
+                        'state/**', 'config/**', 'scripts/**']
+      first_contact_audit: confirm_no_source_of_truth_files
+    evidence_emit: per_path_action
+
+  - id: closed_packet_archive_proposal
+    rule_source: ARCHIVAL_RULES.md
+    schedule: daily
+    dry_run: true            # archival is high blast radius; never auto-live without human flip
+    live_default: false
+    config:
+      packet_archive_ttl_days: 60
+      archive_dir_pattern: docs/operations/archive/${YEAR}-Q${QUARTER}
+    exemption_checks:
+      - authority_status_check
+      - reference_replacement_check
+      - docs_registry_check
+      - code_reference_grep
+      - active_packet_citation
+      - open_pr_check
+      - hook_launchd_citation
+      - worktree_branch_check
+    requires: all_8_checks_pass
+    safety:
+      pr_label: maintenance
+      pr_branch_prefix: maintenance/archive-
+      pr_merge_by_agent: forbidden
+    evidence_emit: per_packet_verdict
+
+  - id: untracked_top_level_quarantine
+    rule_source: PURGE_CATEGORIES.md#category-5-stale-untracked-top-level-files
+    schedule: daily
+    dry_run: true
+    live_default: false
+    config:
+      untracked_ttl_days: 14
+      quarantine_dir: ${ZEUS_REPO}/.archive/untracked
+    safety:
+      forbidden_paths: ['docs/operations/task_*/**', '.env*', '*credential*', '*secret*', '*key*']
+      pre_check: not_under_active_packet_dir
+    evidence_emit: per_file_action
+
+  - id: zero_byte_state_cleanup
+    rule_source: PURGE_CATEGORIES.md#category-6-empty-zero-byte-result-files
+    schedule: daily
+    dry_run: true
+    live_default: true       # exception: zero bytes = no recoverable content
+    dry_run_floor_exempt: true   # rationale: deletion of a zero-byte file is content-free; no data loss possible
+    config:
+      zero_byte_age_days: 7
+      target_dirs: ['state/', 'logs/', 'evidence/', 'proofs/']
+    safety:
+      forbidden:
+        - non_zero_files
+        - paths_held_by_open_lsof_handle
+        - paths_referenced_by_active_sqlite_attach
+    evidence_emit: per_file_action
+
+  - id: lore_proposal_emission
+    rule_source: LORE_EXTRACTION_PROTOCOL.md
+    schedule: daily
+    dry_run: true            # always proposal-only; live promotion requires human approval
+    live_default: false
+    config:
+      lore_review_ttl_days: 7
+      lore_topic_dirs: ['topology', 'hooks', 'runtime', 'data', 'calibration',
+                        'execution', 'settlement', 'vendor', 'browser', 'identity', 'packet']
+    triggers_to_scan:
+      - packet_closure_with_lessons_section
+      - memory_feedback_write_referencing_packet
+      - critic_recurring_pattern
+      - missed_authority_doc_update
+      - external_vendor_quirk
+    safety:
+      no_auto_card_creation: true
+      proposals_dir: ${EVIDENCE_DIR}/lore_proposals
+    evidence_emit: per_packet_proposal
+
+  - id: authority_drift_surface
+    rule_source: ../03_authority_drift_remediation/REMEDIATION_PLAN.md
+    schedule: weekly         # not daily — drift evolves slowly
+    schedule_day: monday
+    dry_run: true            # surface-only; never edits authority docs
+    live_default: false
+    config:
+      drift_score_threshold: 0.3
+      escalate_threshold: 0.7
+    safety:
+      no_authority_doc_edits: true
+      output_only_dir: ${EVIDENCE_DIR}/drift_surface
+    evidence_emit: drift_report_per_doc
+
+  - id: agent_self_evidence_archival
+    rule_source: DESIGN.md#evidence-trail
+    schedule: daily
+    dry_run: false           # exception: this is the agent maintaining its own state
+    live_default: true
+    dry_run_floor_exempt: true   # rationale: agent archives only its own evidence trail; no project state touched
+    config:
+      evidence_retention_days: 90
+      cold_archive_dir: ${STATE_DIR}/evidence_cold
+    safety:
+      target_only: ${EVIDENCE_DIR}
+      forbidden:
+        - any_path_outside_evidence_dir
+        - current_tick_evidence_dir
+    evidence_emit: per_archived_trail
+
+# Notification routing
+notify_on:
+  - tick_complete: SUMMARY.md to default_notification_channel
+  - tick_refused: alert with refusal reason
+  - task_paused_after_3_failures: alert with task id and last 3 errors
+  - high_blast_radius_proposal: separate channel ${BLAST_RADIUS_CHANNEL}
+  - drift_score_above_threshold: weekly digest
+
+# Per-task pause flags (human writes these to pause without disabling agent)
+pause_flag_dir: ${STATE_DIR}/task_pauses
+# A file at ${pause_flag_dir}/<task_id>.pause skips that task on every tick
+# until the file is removed.

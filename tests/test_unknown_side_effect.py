@@ -581,7 +581,16 @@ def test_exit_adapter_submit_pre_snapshot_failure_safe_to_retry(conn, tmp_path):
     token_id = "tok-m2-exit-submit-pre"
     _ensure_snapshot(conn, token_id=token_id)
     q1_evidence = tmp_path / "q1_egress.txt"
-    q1_evidence.write_text("daemon egress ok\n")
+    q1_evidence.write_text(
+        "Q1 Zeus egress evidence sentinel\n"
+        "authority_basis: test\n"
+        "operator_attestation: test current egress accepted\n"
+        "live_side_effects: none; HTTPS GET probes only\n"
+        "raw_secrets_or_signed_payloads: none\n"
+        "probe_results:\n"
+        "[{\"effective_url\":\"https://clob.polymarket.com/ok\",\"status_code\":200}]\n",
+        encoding="utf-8",
+    )
     fake_sdk = FakePreflightOnlyClient()
     adapter = PolymarketV2Adapter(
         host="https://clob-v2.polymarket.com",

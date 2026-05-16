@@ -1,8 +1,9 @@
 # Created: 2026-04-27
-# Lifecycle: created=2026-04-27; last_reviewed=2026-05-06; last_reused=2026-05-06
+# Lifecycle: created=2026-04-27; last_reviewed=2026-05-15; last_reused=2026-05-15
 # Purpose: U1 snapshot antibodies plus pricing-semantics contract scaffolding.
 # Reuse: Run when executable snapshots, venue_commands gating, or V2 market preflight semantics change.
-# Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/U1.yaml
+# Authority basis: docs/operations/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md
+#                  docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/U1.yaml
 #                  docs/operations/task_2026-04-30_reality_semantics_refactor_package/evidence/source_package/zeus_pricing_semantics_cutover_package/04_multiphase_execution_plan.md
 """Executable snapshot, command freshness, and corrected pricing contract tests."""
 
@@ -1273,7 +1274,7 @@ def test_clob_sweep_non_crossing_limit_is_depth_insufficient_not_empty_book():
     assert sweep.average_price is None
 
 
-def test_passive_limit_candidate_cost_basis_requires_maker_only_before_submit_intent():
+def test_passive_limit_candidate_cost_basis_requires_maker_only_submit_intent():
     cost_basis = _buy_no_cost_basis(
         use_sweep=False,
         order_policy="post_only_passive_limit",
@@ -1282,14 +1283,26 @@ def test_passive_limit_candidate_cost_basis_requires_maker_only_before_submit_in
     )
     hypothesis = _hypothesis(cost_basis)
 
-    with pytest.raises(ValueError, match="NOT_MARKETABLE_PASSIVE_LIMIT"):
-        cost_basis.assert_live_safe()
-    with pytest.raises(ValueError, match="NOT_MARKETABLE_PASSIVE_LIMIT"):
-        cost_basis.assert_submit_safe()
-    with pytest.raises(ValueError, match="NOT_MARKETABLE_PASSIVE_LIMIT"):
+    cost_basis.assert_live_safe()
+    cost_basis.assert_submit_safe()
+
+    final_intent = FinalExecutionIntent.from_hypothesis_and_cost_basis(
+        hypothesis=hypothesis,
+        cost_basis=cost_basis,
+        order_type="GTC",
+        post_only=True,
+    )
+
+    assert final_intent.order_policy == "post_only_passive_limit"
+    assert final_intent.order_type == "GTC"
+    assert final_intent.post_only is True
+
+    with pytest.raises(ValueError, match="requires post_only=True"):
         FinalExecutionIntent.from_hypothesis_and_cost_basis(
             hypothesis=hypothesis,
             cost_basis=cost_basis,
+            order_type="GTC",
+            post_only=False,
         )
 
 

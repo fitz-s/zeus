@@ -985,6 +985,33 @@ def test_data_daemon_live_efficiency_refactor_routes_to_dedicated_profile():
     assert "tests/test_job_run_schema.py" in digest["admission"]["admitted_files"]
 
 
+def test_ddd_runtime_config_authority_repair_routes_to_dedicated_profile():
+    digest = build_digest(
+        "DDD runtime config authority repair DDD_CONFIG_MISSING live blocker "
+        "retarget DDD loader away from ops packet source-owned artifact migration",
+        [
+            "architecture/topology.yaml",
+            "architecture/digest_profiles.py",
+            "architecture/source_rationale.yaml",
+            "architecture/test_topology.yaml",
+            "src/oracle/data_density_discount.py",
+            "src/oracle/ddd_artifacts/v2_city_floors.json",
+            "src/oracle/ddd_artifacts/v2_nstar.json",
+            "src/engine/ddd_wiring.py",
+            "tests/test_data_density_discount_v2.py",
+            "tests/test_ddd_wiring.py",
+            "tests/test_digest_profile_matching.py",
+        ],
+    )
+
+    assert digest["profile"] == "ddd runtime config authority repair"
+    assert digest["admission"]["status"] == "admitted"
+    assert "src/oracle/data_density_discount.py" in digest["admission"]["admitted_files"]
+    assert "src/oracle/ddd_artifacts/v2_city_floors.json" in digest["admission"]["admitted_files"]
+    assert "src/oracle/ddd_artifacts/v2_nstar.json" in digest["admission"]["admitted_files"]
+    assert "src/engine/ddd_wiring.py" in digest["admission"]["admitted_files"]
+
+
 @pytest.mark.parametrize(
     "forbidden_phrase",
     [

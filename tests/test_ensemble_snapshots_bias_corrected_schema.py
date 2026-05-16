@@ -1,7 +1,8 @@
 # Created: 2026-04-26
-# Last reused/audited: 2026-04-26
+# Last reused/audited: 2026-05-15
 # Authority basis: docs/operations/task_2026-04-26_full_data_midstream_fix_plan/
-#                  phases/task_2026-04-26_phase2_adjacent_fixes/plan.md slice P2-B1
+#                  phases/task_2026-04-26_phase2_adjacent_fixes/plan.md slice P2-B1;
+#                  docs/operations/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md forecasts DB p_raw authority.
 """Slice P2-B1 relationship + idempotency tests.
 
 PR #19 phase 2 audit Q2: ensemble_snapshots schema declared by
@@ -26,6 +27,7 @@ This test pins both:
 """
 from __future__ import annotations
 
+import json
 import sqlite3
 import sys
 from pathlib import Path
@@ -162,3 +164,94 @@ def test_store_snapshot_p_raw_round_trip_with_fresh_schema():
     )
     assert json.loads(row["p_raw_json"]) == [0.2, 0.3, 0.5]
     assert row["bias_corrected"] == 1
+
+
+def _attach_forecasts_snapshot_table(conn: sqlite3.Connection) -> None:
+    conn.execute("ATTACH DATABASE ':memory:' AS forecasts")
+    conn.execute("""
+        CREATE TABLE forecasts.ensemble_snapshots_v2 (
+            snapshot_id INTEGER PRIMARY KEY,
+            city TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            issue_time TEXT,
+            valid_time TEXT,
+            available_at TEXT NOT NULL,
+            fetch_time TEXT NOT NULL,
+            model_version TEXT NOT NULL,
+            data_version TEXT NOT NULL,
+            temperature_metric TEXT NOT NULL,
+            provenance_json TEXT,
+            p_raw_json TEXT,
+            boundary_ambiguous INTEGER NOT NULL DEFAULT 0,
+            causality_status TEXT NOT NULL DEFAULT 'VALID'
+        )
+    """)
+
+
+def test_store_snapshot_p_raw_uses_attached_forecasts_v2_without_legacy_projection():
+    """Forecast-live snapshots live in attached forecasts DB, not world legacy rows."""
+
+    import numpy as np
+    from src.engine.evaluator import _store_snapshot_p_raw
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    init_schema(conn)
+    _attach_forecasts_snapshot_table(conn)
+    conn.execute("""
+        INSERT INTO forecasts.ensemble_snapshots_v2
+        (snapshot_id, city, target_date, available_at, fetch_time,
+         model_version, data_version, temperature_metric, provenance_json)
+        VALUES (777, 'London', '2026-05-17', '2026-05-15T09:55:00+00:00',
+                '2026-05-15T09:56:00+00:00', 'ecmwf_ens',
+                'ecmwf_opendata_mx2t3_local_calendar_day_max_v1', 'high', '{}')
+    """)
+    conn.commit()
+
+    assert _store_snapshot_p_raw(conn, "777", np.array([0.25, 0.75]))
+
+    canonical = conn.execute(
+        "SELECT p_raw_json FROM forecasts.ensemble_snapshots_v2 WHERE snapshot_id = 777"
+    ).fetchone()
+    legacy = conn.execute(
+        "SELECT p_raw_json FROM ensemble_snapshots WHERE snapshot_id = 777"
+    ).fetchone()
+    conn.close()
+
+    assert json.loads(canonical["p_raw_json"]) == [0.25, 0.75]
+    assert legacy is None
+
+
+def test_read_v2_snapshot_metadata_prefers_attached_forecasts_schema():
+    from src.engine.evaluator import _read_v2_snapshot_metadata
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    init_schema(conn)
+    _attach_forecasts_snapshot_table(conn)
+    conn.execute("""
+        INSERT INTO forecasts.ensemble_snapshots_v2
+        (snapshot_id, city, target_date, available_at, fetch_time,
+         model_version, data_version, temperature_metric, boundary_ambiguous,
+         causality_status)
+        VALUES (888, 'London', '2026-05-17', '2026-05-15T09:55:00+00:00',
+                '2026-05-15T09:56:00+00:00', 'ecmwf_ens',
+                'ecmwf_opendata_mx2t3_local_calendar_day_max_v1', 'high',
+                1, 'BOUNDARY_AMBIGUOUS')
+    """)
+    conn.commit()
+
+    meta = _read_v2_snapshot_metadata(
+        conn,
+        "London",
+        "2026-05-17",
+        "high",
+        snapshot_id="888",
+    )
+    conn.close()
+
+    assert meta == {
+        "boundary_ambiguous": True,
+        "causality_status": "BOUNDARY_AMBIGUOUS",
+        "snapshot_id": 888,
+    }

@@ -1,9 +1,9 @@
-# Lifecycle: created=2026-04-27; last_reviewed=2026-05-06; last_reused=2026-05-06
+# Lifecycle: created=2026-04-27; last_reviewed=2026-05-15; last_reused=2026-05-15
 # Purpose: Regression coverage for executor and portfolio mechanics under R3 cutover preflight opt-outs.
 # Reuse: Run when executor order submission or portfolio save/load mechanics change.
 # Created: 2026-04-27
-# Last reused/audited: 2026-04-30
-# Authority basis: R3 Z1 cutover guard audit; pre-existing executor behavior tests updated to opt out of CutoverGuard so they keep testing executor mechanics.
+# Last reused/audited: 2026-05-15
+# Authority basis: docs/operations/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md; R3 Z1 cutover guard audit.
 """Tests for executor and portfolio."""
 
 import sqlite3
@@ -1025,15 +1025,71 @@ class TestExecutor:
         with pytest.raises(ValueError, match="executable depth validation failed"):
             execute_final_intent(final_intent, conn=_TEST_CONN)
 
-    def test_execute_final_intent_rejects_legacy_unrepresentable_order_semantics(self):
+    def test_execute_final_intent_submits_post_only_passive_limit_with_bound_envelope(
+        self,
+        monkeypatch,
+    ):
         final_intent = _final_execution_intent(
+            token_id="yes-token-passive-submit-final",
+            final_limit_price=Decimal("0.33"),
+            snapshot_top_ask=Decimal("0.34"),
             order_policy="post_only_passive_limit",
             order_type="GTC",
             post_only=True,
         )
+        captured = {}
 
-        with pytest.raises(ValueError, match="post_only"):
-            execute_final_intent(final_intent, conn=_TEST_CONN)
+        class DummyClient:
+            def __init__(self):
+                self.bound_envelope = None
+
+            def bind_submission_envelope(self, envelope):
+                self.bound_envelope = envelope
+                captured["bound_post_only"] = envelope.post_only
+                captured["bound_order_type"] = envelope.order_type
+
+            def v2_preflight(self):
+                return None
+
+            def place_limit_order(self, *, token_id, price, size, side, order_type="GTC"):
+                captured.update(
+                    token_id=token_id,
+                    price=price,
+                    size=size,
+                    side=side,
+                    order_type=order_type,
+                )
+                return _final_submit_result(
+                    self.bound_envelope,
+                    order_id="final-passive-post-only-1",
+                )
+
+        monkeypatch.setattr("src.execution.executor._assert_risk_allocator_allows_submit", lambda intent: None)
+        monkeypatch.setattr("src.execution.executor._select_risk_allocator_order_type", lambda conn, snapshot_id: "GTC")
+        monkeypatch.setattr("src.control.ws_gap_guard.assert_ws_allows_submit", lambda *args, **kwargs: None)
+        monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", DummyClient)
+
+        result = execute_final_intent(
+            final_intent,
+            conn=_TEST_CONN,
+            decision_id="decision-passive-post-only",
+        )
+
+        assert result.status == "pending"
+        assert result.order_id == "final-passive-post-only-1"
+        assert captured["bound_post_only"] is True
+        assert captured["bound_order_type"] == "GTC"
+        assert captured["order_type"] == "GTC"
+        command = _TEST_CONN.execute(
+            """
+            SELECT e.order_type, e.post_only
+            FROM venue_commands c
+            JOIN venue_submission_envelopes e ON e.envelope_id = c.envelope_id
+            WHERE c.decision_id = ?
+            """,
+            ("decision-passive-post-only",),
+        ).fetchone()
+        assert dict(command) == {"order_type": "GTC", "post_only": 1}
 
     def test_execute_final_intent_rejects_sell_direction_on_entry_executor(self):
         final_intent = _final_execution_intent(direction="sell_yes")

@@ -282,3 +282,62 @@ entries:
           - python3 scripts/topology_doctor.py --data-rebuild
           - pytest -q tests/test_data_rebuild_relationships.py
         invalidation_condition: "Only a market-contract topology packet may replace open-boundary bin semantics."
+
+  - path: docs/reference/zeus_calibration_weighting_authority.md
+    default_read: false
+    replacement_status: not_replaced
+    delete_allowed: false
+    replaced_by: []
+    unique_remaining:
+      - mathematical authority for LOW-track binary→continuous training_allowed→precision_weight transition
+      - per-city calibration eligibility opt-outs (coastal/monsoon physics)
+      - ΔT-magnitude weighting forbidden in production (empirical basis PoC v4+v5 on 1.7M pairs)
+      - Extended Platt regime absorption relationship to calibration weight
+    allowed_action: keep_conditional
+    rationale: >
+      Companion-update: P8 authority-drift remediation 2026-05-15 (POSTMORTEM at
+      docs/operations/task_2026-05-15_p8_authority_drift_3_blocking/POSTMORTEM.md).
+      Doc was added ~2026-04-29 by calibration-weight authority packet without a
+      companion yaml entry. Content is current and load-bearing; no drift found.
+      Conditional load for calibration/Platt/LOW-track work. AGENTS.md conditional
+      reads block already listed this doc correctly.
+
+  - path: docs/reference/zeus_kelly_asymmetric_loss_handoff.md
+    default_read: false
+    replacement_status: not_replaced
+    delete_allowed: false
+    replaced_by: []
+    unique_remaining:
+      - authority that asymmetric loss must be per-city Kelly multipliers, NOT DDD floor overrides
+      - composition order (base_kelly × per_city_multiplier × (1 - ddd_discount))
+      - open wiring point at src/engine/evaluator.py and src/engine/replay.py (operator-owned)
+      - two-stage rollout rationale (module landed 2026-05-03; live wiring is operator schedule)
+    allowed_action: keep_conditional
+    rationale: >
+      Companion-update: P8 authority-drift remediation 2026-05-15 (POSTMORTEM at
+      docs/operations/task_2026-05-15_p8_authority_drift_3_blocking/POSTMORTEM.md).
+      Doc was added 2026-05-03 by Kelly asymmetric loss handoff packet without a
+      companion yaml entry. Content is current; kelly.py implementation verified.
+      Conditional load for Kelly sizing, per-city asymmetric loss, or DDD↔Kelly
+      composition work. AGENTS.md conditional reads updated in same P8 commit.
+
+  - path: docs/reference/zeus_vendor_change_response_registry.md
+    default_read: false
+    replacement_status: not_replaced
+    delete_allowed: false
+    replaced_by: []
+    unique_remaining:
+      - 14-layer vendor dependency surface map (Layers 1-14)
+      - T1 PM source-switch playbook
+      - T2 WU silent-mutation playbook
+      - T3 Lagos-class catastrophic-failure playbook
+      - T4 Shenzhen-class new-city onboarding playbook
+      - T5 vendor outage / data-gap playbook
+    allowed_action: keep_conditional
+    rationale: >
+      Companion-update: P8 authority-drift remediation 2026-05-15 (POSTMORTEM at
+      docs/operations/task_2026-05-15_p8_authority_drift_3_blocking/POSTMORTEM.md).
+      Doc was added ~2026-05-03 by vendor-response registry packet without a
+      companion yaml entry. Content is current; all cited files exist. Conditional
+      load for any work touching vendor dependencies or source-change response.
+      AGENTS.md conditional reads block already listed this doc correctly.

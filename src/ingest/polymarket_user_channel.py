@@ -489,7 +489,7 @@ class PolymarketUserChannelIngestor:
         self._record_subscribed_message()
         family = _event_family(message)
         if family in {"order", "placement", "update", "cancellation"}:
-            return {"order_fact_id": self._handle_order(message)}
+            return self._handle_order(message)
         if family in {"trade"} or _trade_status(message) in {"MATCHED", "MINED", "CONFIRMED", "RETRYING", "FAILED"}:
             return self._handle_trade(message)
         return None
@@ -507,7 +507,7 @@ class PolymarketUserChannelIngestor:
             return status
         return current
 
-    def _handle_order(self, message: dict[str, Any]) -> int:
+    def _handle_order(self, message: dict[str, Any]) -> dict[str, Any]:
         venue_order_id = str(message.get("id") or message.get("order_id") or message.get("orderID") or message.get("orderId") or "")
         if not venue_order_id:
             raise ValueError("user-channel order message missing order id")
@@ -515,7 +515,16 @@ class PolymarketUserChannelIngestor:
         try:
             command = _lookup_command(conn, [venue_order_id])
             if command is None:
-                raise ValueError(f"no venue command found for order_id={venue_order_id}")
+                logger.warning(
+                    "M3 user-channel deferred unmatched order event: order_id=%s",
+                    venue_order_id,
+                )
+                conn.commit()
+                return {
+                    "order_fact_id": None,
+                    "reason": "unmatched_order_event_deferred",
+                    "venue_order_id": venue_order_id,
+                }
             state = _order_state(message)
             observed = _parse_dt(message.get("timestamp") or message.get("last_update"))
             fact_id = append_order_fact(
@@ -540,7 +549,7 @@ class PolymarketUserChannelIngestor:
                     {"source": "WS_USER", "venue_order_id": venue_order_id, "order_fact_id": fact_id},
                 )
             conn.commit()
-            return fact_id
+            return {"order_fact_id": fact_id}
         finally:
             if self.own_connection:
                 conn.close()
@@ -557,7 +566,18 @@ class PolymarketUserChannelIngestor:
         try:
             command = _lookup_command(conn, candidates)
             if command is None:
-                raise ValueError(f"no venue command found for trade order ids={candidates}")
+                logger.warning(
+                    "M3 user-channel deferred unmatched trade event: trade_id=%s order_ids=%s",
+                    trade_id,
+                    candidates,
+                )
+                conn.commit()
+                return {
+                    "trade_fact_id": None,
+                    "command_event": None,
+                    "reason": "unmatched_trade_event_deferred",
+                    "order_ids": list(candidates),
+                }
             venue_order_id = str(command.get("venue_order_id") or candidates[0])
             observed = _parse_dt(message.get("timestamp") or message.get("matchtime") or message.get("last_update"))
             size_raw = message.get("size")

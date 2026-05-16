@@ -408,6 +408,26 @@ scripts:
     required_helpers: [scripts.check_data_pipeline_live_e2e._connect_live_readonly]
     required_tests: [tests/test_check_live_order_e2e.py]
     reason: "Classifies existing venue_commands, venue_command_events, submission envelopes, order facts, and trade facts. It fails closed unless an accepted/resting or filled command has daemon-to-command correlation fields, venue order identity, live venue facts, and matching record-chain proof."
+  live_health_probe.py:
+    # Created: 2026-05-11
+    # Last reused or audited: 2026-05-15
+    # Authority basis: docs/operations/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md
+    class: diagnostic
+    lifecycle: long_lived
+    status: active
+    authority_scope: diagnostic_non_promotion
+    canonical_command: "python3 scripts/live_health_probe.py"
+    read_targets: [state/daemon-heartbeat.json, state/forecast-live-heartbeat.json, state/status_summary.json, process_table]
+    write_targets: [/tmp/zeus_health_snapshot.json, stdout]
+    dry_run_default: true
+    apply_flag: null
+    target_db: null
+    external_inputs: [live_process_table, live_runtime_state_json]
+    dangerous_if_run: false
+    promotion_barrier: "Runtime diagnostic only; cannot authorize live restart, live submit, DB truth mutation, or venue action."
+    required_helpers: []
+    required_tests: [tests/test_live_health_probe_forecast_owner.py]
+    reason: "One-shot live health probe for daemon, forecast-live owner, riskguard, status summary, entry capability, and stale runtime signals. Forecast-live is the canonical OpenData owner after the data-daemon split; legacy ingest absence is not by itself an alert."
   check_daemon_heartbeat.py:
     class: runtime_support
     module_owner: scripts
@@ -820,3 +840,86 @@ scripts:
     required_tests: [tests/test_settlement_semantics_f_to_c.py]
     packet: docs/operations/task_2026-05-08_post_merge_full_chain/TASK.md
     fix_refs: ["#262", "#263", "#264"]
+
+  lore_indexer.py:
+    # Created: 2026-05-15
+    # Authority basis: docs/operations/task_2026-05-15_runtime_improvement_engineering_package/04_workspace_hygiene/LORE_EXTRACTION_PROTOCOL.md
+    class: enforcement
+    lifecycle: long_lived
+    status: active
+    authority_scope: read_only
+    target_db: "none"
+    dry_run_default: true
+    apply_flag: "none"
+    dangerous_if_run: false
+    read_targets: [docs/lore/]
+    write_targets: [docs/lore/INDEX.json]
+    external_inputs: []
+    delete_policy: permanent
+    canonical_command: "python3 scripts/lore_indexer.py [--validate-only] [--output PATH]"
+    reuse_when: >
+      Building or refreshing docs/lore/INDEX.json for agent consumption.
+      Use --validate-only to check frontmatter without writing.
+    do_not_use_when: >
+      Promoting draft cards (use lore_promoter.py) or re-verifying cards (use lore_reverify.py).
+    promotion_barrier: "none — read-only diagnostic and index builder"
+    required_helpers: []
+    required_tests: [tests/scripts/test_lore_indexer.py]
+    packet: docs/operations/task_2026-05-15_runtime_improvement_engineering_package/05_execution_packets/PACKET_INDEX.md
+
+  lore_promoter.py:
+    # Created: 2026-05-15
+    # Authority basis: docs/operations/task_2026-05-15_runtime_improvement_engineering_package/04_workspace_hygiene/LORE_EXTRACTION_PROTOCOL.md
+    class: enforcement
+    lifecycle: long_lived
+    status: active
+    authority_scope: workspace_write
+    target_db: "none"
+    dry_run_default: true
+    apply_flag: "none (use --dry-run to preview)"
+    dangerous_if_run: false
+    read_targets: [docs/lore/_drafts/]
+    write_targets: [docs/lore/<topic>/]
+    external_inputs: []
+    delete_policy: permanent
+    canonical_command: "python3 scripts/lore_promoter.py promote <draft_id> <topic> [--dry-run]"
+    reuse_when: >
+      Promoting an approved draft lore card from _drafts/ to its topic directory.
+      Use list-drafts subcommand to see available drafts.
+    do_not_use_when: >
+      Card has missing or invalid frontmatter (promoter will reject it).
+      Card topic does not match its frontmatter topic field.
+    promotion_barrier: "Rejects cards with missing required frontmatter fields. Human approval required before draft exists."
+    required_helpers: []
+    required_tests: [tests/scripts/test_lore_promoter.py]
+    packet: docs/operations/task_2026-05-15_runtime_improvement_engineering_package/05_execution_packets/PACKET_INDEX.md
+
+  lore_reverify.py:
+    # Created: 2026-05-15
+    # Authority basis: docs/operations/task_2026-05-15_runtime_improvement_engineering_package/04_workspace_hygiene/LORE_EXTRACTION_PROTOCOL.md
+    class: enforcement
+    lifecycle: long_lived
+    status: active
+    authority_scope: workspace_write
+    target_db: "none"
+    dry_run_default: true
+    apply_flag: "none (omit --dry-run to run verification commands)"
+    dangerous_if_run: false
+    read_targets: [docs/lore/]
+    write_targets: [docs/lore/<topic>/<card>.md]
+    external_inputs: []
+    delete_policy: permanent
+    canonical_command: "python3 scripts/lore_reverify.py [--dry-run] [--timeout 60] [--strict]"
+    reuse_when: >
+      Re-verifying lore cards with verification_command fields.
+      Signature mismatch sets status to NEEDS_RE_VERIFICATION for human review.
+      First run records expected_signature; subsequent runs compare.
+    do_not_use_when: >
+      Cards do not have verification_command fields (no-op for those cards).
+      Do not use to retire cards — retirement requires human action.
+    promotion_barrier: >
+      Sets NEEDS_RE_VERIFICATION status on mismatch; does NOT retire cards.
+      Human decides whether card or command is stale.
+    required_helpers: []
+    required_tests: [tests/scripts/test_lore_reverify.py]
+    packet: docs/operations/task_2026-05-15_runtime_improvement_engineering_package/05_execution_packets/PACKET_INDEX.md

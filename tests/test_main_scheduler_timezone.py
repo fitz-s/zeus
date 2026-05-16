@@ -1,6 +1,7 @@
 # Created: 2026-05-04
-# Last reused/audited: 2026-05-04
-# Authority basis: docs/operations/task_2026-05-04_strategy_redesign_day0_endgame/PLAN_v3.md §P0 — APScheduler UTC invariant.
+# Last reused/audited: 2026-05-15
+# Authority basis: docs/operations/task_2026-05-04_strategy_redesign_day0_endgame/PLAN_v3.md §P0 — APScheduler UTC invariant;
+# docs/operations/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md live scheduler collision proof.
 """P0 antibody: ``BlockingScheduler`` in ``src/main.py`` MUST be
 constructed with ``timezone=ZoneInfo("UTC")``.
 
@@ -101,3 +102,65 @@ def test_zoneinfo_imported_at_module_level() -> None:
         "``from zoneinfo import ZoneInfo`` import so the BlockingScheduler "
         "tz kwarg resolves correctly. If you must alias, update this test."
     )
+
+
+def _scheduler_add_job_calls_by_id(tree: ast.Module) -> dict[str, ast.Call]:
+    calls: dict[str, ast.Call] = {}
+    for node in ast.walk(tree):
+        if not (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "add_job"
+        ):
+            continue
+        id_kw = next((kw for kw in node.keywords if kw.arg == "id"), None)
+        if id_kw is None or not isinstance(id_kw.value, ast.Constant):
+            continue
+        if isinstance(id_kw.value.value, str):
+            calls[id_kw.value.value] = node
+    return calls
+
+
+def test_interval_discovery_jobs_are_phase_staggered() -> None:
+    """Opening hunt and Day0 must not race on the same interval instant."""
+
+    calls = _scheduler_add_job_calls_by_id(_parse_main())
+    next_run_values: dict[str, ast.expr] = {}
+    for job_id in ("opening_hunt", "day0_capture"):
+        call = calls[job_id]
+        next_run_kw = next((kw for kw in call.keywords if kw.arg == "next_run_time"), None)
+        assert next_run_kw is not None, (
+            f"{job_id} must set next_run_time explicitly. Without a first-run "
+            "phase, opening_hunt and day0_capture share the same 15-minute "
+            "interval instant after daemon restart; the process-local cycle "
+            "lock then drops one live cycle by race."
+        )
+        value = next_run_kw.value
+        assert (
+            isinstance(value, ast.Call)
+            and isinstance(value.func, ast.Name)
+            and value.func.id == "_utc_run_time_after"
+        ), f"{job_id} next_run_time must be computed through _utc_run_time_after(...)."
+        next_run_values[job_id] = value
+
+    opening_delay = next_run_values["opening_hunt"]
+    assert isinstance(opening_delay, ast.Call)
+    assert (
+        len(opening_delay.args) == 1
+        and isinstance(opening_delay.args[0], ast.Name)
+        and opening_delay.args[0].id == "OPENING_HUNT_FIRST_DELAY_SECONDS"
+    )
+
+    day0_delay = next_run_values["day0_capture"]
+    assert isinstance(day0_delay, ast.Call)
+    assert (
+        len(day0_delay.args) == 1
+        and isinstance(day0_delay.args[0], ast.Call)
+        and isinstance(day0_delay.args[0].func, ast.Name)
+        and day0_delay.args[0].func.id == "_day0_first_delay_seconds"
+    )
+
+
+def test_day0_stagger_helper_offsets_by_half_interval() -> None:
+    source = MAIN_FILE.read_text(encoding="utf-8")
+    assert "return OPENING_HUNT_FIRST_DELAY_SECONDS + (interval_seconds / 2.0)" in source

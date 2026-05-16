@@ -1,0 +1,33 @@
+Q1 Zeus egress evidence sentinel
+generated_at_utc: 2026-05-15T16:33:51+00:00
+authority_basis: /goal live-order-e2e-verification operator authorization, 2026-05-15
+operator_attestation: current workspace daemon egress accepted for Zeus live-order E2E verification
+live_side_effects: none; HTTPS GET probes only
+raw_secrets_or_signed_payloads: none
+probe_results:
+[
+  {
+    "body": "{\"version\":2}\n",
+    "effective_url": "https://clob.polymarket.com/version",
+    "path": "/version",
+    "returncode": 0,
+    "status_code": 200,
+    "total_time_seconds": 0.166135
+  },
+  {
+    "body": "\"OK\"",
+    "effective_url": "https://clob.polymarket.com/ok",
+    "path": "/ok",
+    "returncode": 0,
+    "status_code": 200,
+    "total_time_seconds": 0.168266
+  },
+  {
+    "body": "1778862852",
+    "effective_url": "https://clob.polymarket.com/time",
+    "path": "/time",
+    "returncode": 0,
+    "status_code": 200,
+    "total_time_seconds": 0.166028
+  }
+]

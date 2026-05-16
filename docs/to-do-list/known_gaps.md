@@ -735,9 +735,9 @@ cross-DB write via this path as of 2026-05-14 audit.
 
 ---
 
-### [OPEN — K1 FOLLOWUPS DEFERRED] K1-broken hardcoded paths in operator scripts
+### [CLOSED — 2026-05-15] K1-broken hardcoded paths in operator scripts
 
-**Status:** OPEN — deferred from K1 P3 followups (2026-05-14) per PLAN §4.5.
+**Status:** CLOSED — 2026-05-15.
 **Authority:** docs/operations/task_2026-05-14_k1_followups/PLAN.md §4.5
 **Affected files:**
 - `scripts/healthcheck.py` — K1-broken: uses hardcoded world.db path for tables that moved to forecasts.db
@@ -752,3 +752,9 @@ world-class queries. Follow the same pattern as `hole_scanner.py:566-580`
 (the P3 fix committed 2026-05-14).
 **Live-money impact:** LOW — these are read-only diagnostic scripts; they
 produce wrong/empty output but do not affect trading, risk, or settlement.
+**Closed:** 2026-05-15 — applied registry-routed typed connections to all 3 scripts per
+`src/state/db.py` `get_forecasts_connection()` pattern (mirrors `src/data/hole_scanner.py` K1 fix).
+`_world_db_path()` in healthcheck.py now returns `ZEUS_FORECASTS_DB_PATH`; `SHARED_DB` in
+verify_truth_surfaces.py redirected to `ZEUS_FORECASTS_DB_PATH`; venus_sensing_report.py
+opens a dedicated `get_forecasts_connection()` for settlements. All 3 scripts compile clean;
+24 healthcheck tests pass.

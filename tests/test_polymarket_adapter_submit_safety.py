@@ -31,6 +31,19 @@ def _sha256(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()
 
 
+def _write_valid_q1_evidence(path: Path) -> None:
+    path.write_text(
+        "Q1 Zeus egress evidence sentinel\n"
+        "authority_basis: test\n"
+        "operator_attestation: test current egress accepted\n"
+        "live_side_effects: none; HTTPS GET probes only\n"
+        "raw_secrets_or_signed_payloads: none\n"
+        "probe_results:\n"
+        "[{\"effective_url\":\"https://clob.polymarket.com/ok\",\"status_code\":200}]\n",
+        encoding="utf-8",
+    )
+
+
 def _make_placeholder_envelope(
     *,
     condition_id: str = "legacy:0xabc",
@@ -82,7 +95,7 @@ def _build_adapter(tmp_path: Path, fake_client):
     from src.venue.polymarket_v2_adapter import PolymarketV2Adapter
 
     evidence = tmp_path / "q1_zeus_egress_2026-04-27.txt"
-    evidence.write_text("daemon host probe ok\n")
+    _write_valid_q1_evidence(evidence)
     return PolymarketV2Adapter(
         host="https://clob.polymarket.com",
         funder_address="0xfunder",

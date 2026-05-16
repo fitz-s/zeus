@@ -1,12 +1,13 @@
 # Created: 2026-04-27
-# Lifecycle: created=2026-04-27; last_reviewed=2026-04-30; last_reused=2026-04-30
+# Lifecycle: created=2026-04-27; last_reviewed=2026-05-15; last_reused=2026-05-15
 # Purpose: R3 M3 Polymarket user-channel WS ingest and fail-closed gap guard antibodies.
 # Reuse: Run when user WebSocket ingest, U2 venue facts, or submit gap guards change.
 # Last reused/audited: 2026-05-08
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/M3.yaml;
 #                  PR 37 review: clean-reconnect proof ignores resolved history
 #                  while preserving active side-effect state;
-#                  docs/operations/task_2026-05-08_object_invariance_wave27/PLAN.md.
+#                  docs/operations/task_2026-05-08_object_invariance_wave27/PLAN.md;
+#                  docs/operations/task_2026-05-15_live_order_e2e_goal/LIVE_ORDER_E2E_GOAL_PLAN.md.
 """M3: user-channel WS messages become U2 facts; gaps block new submit."""
 
 from __future__ import annotations
@@ -241,6 +242,18 @@ def test_ws_message_parsed_to_order_fact(conn):
     assert raw["apiKey"] == raw["secret"] == raw["passphrase"] == "***"
 
 
+def test_unmatched_order_event_is_deferred_not_thread_fatal(conn):
+    result = _ingestor(conn).handle_message(_order_message(id="ord-race-before-commit"))
+
+    assert result == {
+        "order_fact_id": None,
+        "reason": "unmatched_order_event_deferred",
+        "venue_order_id": "ord-race-before-commit",
+    }
+    assert _rows(conn, "venue_order_facts") == []
+    assert _command_state(conn) == "ACKED"
+
+
 def test_ws_message_parsed_to_trade_fact(conn):
     result = _ingestor(conn).handle_message(_trade_message("MATCHED"))
 
@@ -250,6 +263,20 @@ def test_ws_message_parsed_to_trade_fact(conn):
     assert row["state"] == "MATCHED"
     assert row["source"] == "WS_USER"
     assert _command_state(conn) == "PARTIAL"
+
+
+def test_unmatched_trade_event_is_deferred_not_thread_fatal(conn):
+    result = _ingestor(conn).handle_message(_trade_message("MATCHED", taker_order_id="ord-race-fill"))
+
+    assert result == {
+        "trade_fact_id": None,
+        "command_event": None,
+        "reason": "unmatched_trade_event_deferred",
+        "order_ids": ["ord-race-fill", "trade-ws"],
+    }
+    assert _rows(conn, "venue_trade_facts") == []
+    assert _rows(conn, "position_lots") == []
+    assert _command_state(conn) == "ACKED"
 
 
 def test_matched_event_does_not_final_close_lot(conn):

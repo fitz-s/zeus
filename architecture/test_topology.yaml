@@ -50,7 +50,8 @@ test_trust_policy:
     tests/test_backtest_skill_economics.py: {created: "2026-04-28", last_used: "2026-04-28"}
     tests/test_backtest_training_eligibility.py: {created: "2026-04-28", last_used: "2026-04-28"}
     tests/test_dissemination_schedules.py: {created: "2026-04-28", last_used: "2026-04-28"}
-    tests/test_ddd_wiring.py: {created: "2026-05-03", last_used: "2026-05-04"}
+    tests/test_ddd_wiring.py: {created: "2026-05-03", last_used: "2026-05-15"}
+    tests/test_data_density_discount_v2.py: {created: "2026-05-03", last_used: "2026-05-15"}
     tests/test_ensemble_client.py: {created: "2026-04-01", last_used: "2026-04-29"}
     tests/test_forecasts_writer_provenance_required.py: {created: "2026-04-28", last_used: "2026-04-28"}
     tests/test_forecast_fetch_plan.py: {created: "2026-05-03", last_used: "2026-05-03"}
@@ -263,6 +264,7 @@ test_trust_policy:
     tests/test_forecast_live_daemon.py: {created: "2026-05-14", last_used: "2026-05-14"}
     tests/test_check_data_pipeline_live_e2e.py: {created: "2026-05-15", last_used: "2026-05-15"}
     tests/test_check_live_order_e2e.py: {created: "2026-05-15", last_used: "2026-05-15"}
+    tests/test_live_health_probe_forecast_owner.py: {created: "2026-05-15", last_used: "2026-05-15"}
 
 categories:
   core_law_antibody:
@@ -277,6 +279,7 @@ categories:
     - tests/test_backtest_training_eligibility.py
     - tests/test_dissemination_schedules.py
     - tests/test_ddd_wiring.py
+    - tests/test_data_density_discount_v2.py
     - tests/test_forecasts_writer_provenance_required.py
     - tests/test_forecast_fetch_plan.py
     - tests/test_forecast_calibration_domain.py
@@ -713,6 +716,7 @@ law_gate:
       - tests/test_forecast_live_daemon.py
       - tests/test_check_data_pipeline_live_e2e.py
       - tests/test_check_live_order_e2e.py
+      - tests/test_live_health_probe_forecast_owner.py
       - tests/test_ecmwf_open_data_step_hours.py
       - tests/test_forecast_target_contract_horizon.py
       - tests/test_producer_readiness_builder.py
@@ -736,6 +740,7 @@ law_gate:
       - scripts/healthcheck.py
       - scripts/check_data_pipeline_live_e2e.py
       - scripts/check_live_order_e2e.py
+      - scripts/live_health_probe.py
       - src/ingest/forecast_live_daemon.py
       - src/data/ecmwf_open_data.py
       - src/data/producer_readiness.py

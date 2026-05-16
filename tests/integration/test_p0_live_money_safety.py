@@ -320,7 +320,16 @@ def test_fake_and_live_produce_identical_journal_event_shapes(tmp_path):
             return {"success": True, "orderID": "live-ord-1", "status": "LIVE"}
 
     evidence = tmp_path / "q1.txt"
-    evidence.write_text("ok\n")
+    evidence.write_text(
+        "Q1 Zeus egress evidence sentinel\n"
+        "authority_basis: test\n"
+        "operator_attestation: test current egress accepted\n"
+        "live_side_effects: none; HTTPS GET probes only\n"
+        "raw_secrets_or_signed_payloads: none\n"
+        "probe_results:\n"
+        "[{\"effective_url\":\"https://clob.polymarket.com/ok\",\"status_code\":200}]\n",
+        encoding="utf-8",
+    )
     live = PolymarketV2Adapter(
         host="https://clob-v2.polymarket.com",
         funder_address="0xfake-funder",

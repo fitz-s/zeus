@@ -1,6 +1,7 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-04-27
+# Last reused/audited: 2026-05-15
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/Z2.yaml
+#                  + docs/operations/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md
 """Polymarket CLOB V2 adapter.
 
 This module is the only R3 Z2 surface that may import py_clob_client_v2. It
@@ -14,6 +15,7 @@ import hashlib
 import importlib.metadata
 import json
 import logging
+import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_FLOOR
@@ -33,8 +35,26 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_V2_HOST = "https://clob.polymarket.com"
 DEFAULT_Q1_EGRESS_EVIDENCE = Path(
-    "docs/operations/task_2026-04-26_polymarket_clob_v2_migration/evidence/q1_zeus_egress_2026-04-26.txt"
+    "docs/operations/live_egress/q1_zeus_egress_current.txt"
 )
+Q1_EGRESS_EVIDENCE_ENV = "POLYMARKET_CLOB_V2_Q1_EGRESS_EVIDENCE"
+Q1_EGRESS_REJECTED_PATH_FRAGMENTS = (
+    "task_2026-04-26_polymarket_clob_v2_migration",
+)
+Q1_EGRESS_REQUIRED_MARKERS = (
+    "Q1 Zeus egress evidence sentinel",
+    "authority_basis:",
+    "operator_attestation:",
+    "live_side_effects: none",
+    "raw_secrets_or_signed_payloads: none",
+    "probe_results:",
+    "https://clob.polymarket.com/ok",
+)
+DEFAULT_SIGNATURE_TYPE = 2  # Current Zeus keychain funder is a POLY_GNOSIS_SAFE contract.
+DEFAULT_POLYGON_RPC_URL = "https://polygon-bor-rpc.publicnode.com"
+POLYGON_PUSD_ADDRESS = "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB"
+POLYGON_EXCHANGE_V2_ADDRESS = "0xE111180000d2663C0091e4f400237545B87B996B"
+POLYGON_NEG_RISK_EXCHANGE_V2_ADDRESS = "0xe2222d279d744050d28e00520010520000310F59"
 
 
 @dataclass(frozen=True)
@@ -173,6 +193,9 @@ class PolymarketV2Adapter:
         signer_key: str,
         api_creds: Any = None,
         chain_id: int = 137,
+        signature_type: int = DEFAULT_SIGNATURE_TYPE,
+        polygon_rpc_url: str | None = None,
+        rpc_call: Optional[Callable[[str, str, list[Any]], Any]] = None,
         builder_code: Optional[str] = None,
         q1_egress_evidence_path: Path | None = DEFAULT_Q1_EGRESS_EVIDENCE,
         client_factory: Optional[Callable[..., Any]] = None,
@@ -183,6 +206,9 @@ class PolymarketV2Adapter:
         self.signer_key = signer_key
         self.api_creds = api_creds
         self.chain_id = chain_id
+        self.signature_type = _normalize_signature_type(signature_type)
+        self.polygon_rpc_url = polygon_rpc_url
+        self._rpc_call = rpc_call or _json_rpc_call
         self.builder_code = builder_code
         self.q1_egress_evidence_path = q1_egress_evidence_path
         self._client_factory = client_factory or self._default_client_factory
@@ -197,7 +223,7 @@ class PolymarketV2Adapter:
             kwargs["chain_id"],
             key=kwargs.get("signer_key"),
             creds=kwargs.get("api_creds"),
-            signature_type=2,
+            signature_type=kwargs.get("signature_type", DEFAULT_SIGNATURE_TYPE),
             funder=kwargs.get("funder_address"),
         )
         # CLOB v2 L2 endpoints (balance/order) require API creds. The canonical
@@ -224,18 +250,17 @@ class PolymarketV2Adapter:
                 chain_id=self.chain_id,
                 signer_key=self.signer_key,
                 api_creds=self.api_creds,
+                signature_type=self.signature_type,
                 funder_address=self.funder_address,
                 builder_code=self.builder_code,
             )
         return self._client
 
     def preflight(self) -> PreflightResult:
-        if self.q1_egress_evidence_path is not None and not Path(self.q1_egress_evidence_path).exists():
-            return PreflightResult(
-                ok=False,
-                error_code="Q1_EGRESS_EVIDENCE_ABSENT",
-                message=f"missing Q1 egress evidence: {self.q1_egress_evidence_path}",
-            )
+        if self.q1_egress_evidence_path is not None:
+            evidence_result = _validate_q1_egress_evidence(self.q1_egress_evidence_path)
+            if not evidence_result.ok:
+                return evidence_result
         try:
             client = self._sdk_client()
             get_ok = getattr(client, "get_ok", None)
@@ -248,6 +273,7 @@ class PolymarketV2Adapter:
                 error_code="V2_PREFLIGHT_FAILED",
                 message=str(exc),
             )
+
 
     def get_clob_market_info(self, condition_id: str) -> ClobMarketInfo:
         raw = self._sdk_client().get_clob_market_info(condition_id)
@@ -455,14 +481,39 @@ class PolymarketV2Adapter:
         try:
             from py_clob_client_v2.clob_types import AssetType, BalanceAllowanceParams
 
-            params = BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
+            params = BalanceAllowanceParams(
+                asset_type=AssetType.COLLATERAL,
+                signature_type=self.signature_type,
+            )
         except Exception:
-            params = SimpleNamespace(asset_type="COLLATERAL")
+            params = SimpleNamespace(
+                asset_type="COLLATERAL",
+                signature_type=self.signature_type,
+            )
+        update_balance_allowance = getattr(client, "update_balance_allowance", None)
+        if callable(update_balance_allowance):
+            update_balance_allowance(params)
         raw = get_balance_allowance(params)
         if not isinstance(raw, dict):
             raw = dict(raw)
         if raw.get("balance") is None:
             raise V2AdapterError("balance allowance response missing balance")
+        pusd_allowance_raw = raw.get("allowance")
+        allowance_int = _micro_int_or_none(pusd_allowance_raw)
+        authority_tier = "CHAIN"
+        allowance_source = "clob_balance_allowance"
+        if allowance_int is None or allowance_int == 0:
+            chain_allowance = self._chain_collateral_allowance_micro()
+            if chain_allowance is not None:
+                pusd_allowance_raw = chain_allowance
+                allowance_source = "chain_erc20_allowance"
+            elif allowance_int is None:
+                pusd_allowance_raw = None
+                allowance_source = "missing"
+            else:
+                pusd_allowance_raw = allowance_int
+                authority_tier = "DEGRADED"
+                allowance_source = "chain_erc20_unavailable_clob_zero"
 
         balances: dict[str, int] = {}
         allowances: dict[str, int] = {}
@@ -499,12 +550,39 @@ class PolymarketV2Adapter:
 
         return {
             "pusd_balance_micro": raw.get("balance", 0),
-            "pusd_allowance_micro": raw.get("allowance", 0),
+            "pusd_allowance_micro": pusd_allowance_raw if pusd_allowance_raw is not None else 0,
             "usdc_e_legacy_balance_micro": 0,
             "ctf_token_balances_units": balances,
             "ctf_token_allowances_units": allowances,
-            "authority_tier": "CHAIN",
+            "authority_tier": authority_tier,
+            "signature_type": self.signature_type,
+            "pusd_allowance_source": allowance_source,
         }
+
+    def _chain_collateral_allowance_micro(self) -> int | None:
+        if not self.polygon_rpc_url:
+            return None
+        try:
+            collateral, spenders = _collateral_allowance_contracts(self.chain_id)
+            allowances = [
+                _eth_call_uint(
+                    self.polygon_rpc_url,
+                    self._rpc_call,
+                    to=collateral,
+                    data="0xdd62ed3e"
+                    + _abi_address(self.funder_address)
+                    + _abi_address(spender),
+                )
+                for spender in spenders
+            ]
+            return min(allowances)
+        except Exception as exc:
+            logger.warning(
+                "pUSD allowance chain fallback failed; preserving fail-closed "
+                "missing-allowance semantics: %s",
+                exc,
+            )
+            return None
 
     def get_balance(self, conn=None) -> "CollateralSnapshot":
         """Return the funded wallet's Z4 collateral snapshot.
@@ -768,6 +846,49 @@ class PolymarketV2Adapter:
         )
 
 
+def _validate_q1_egress_evidence(path: Path | str) -> PreflightResult:
+    evidence_path = Path(path)
+    if not evidence_path.exists():
+        return PreflightResult(
+            ok=False,
+            error_code="Q1_EGRESS_EVIDENCE_ABSENT",
+            message=f"missing Q1 egress evidence: {evidence_path}",
+        )
+    if not evidence_path.is_file():
+        return PreflightResult(
+            ok=False,
+            error_code="Q1_EGRESS_EVIDENCE_INVALID",
+            message=f"Q1 egress evidence is not a file: {evidence_path}",
+        )
+    normalized_path = evidence_path.as_posix()
+    for fragment in Q1_EGRESS_REJECTED_PATH_FRAGMENTS:
+        if fragment in normalized_path:
+            return PreflightResult(
+                ok=False,
+                error_code="Q1_EGRESS_EVIDENCE_INVALID",
+                message=f"stale Q1 egress evidence path is not current authority: {evidence_path}",
+            )
+    try:
+        text = evidence_path.read_text(encoding="utf-8")
+    except Exception as exc:
+        return PreflightResult(
+            ok=False,
+            error_code="Q1_EGRESS_EVIDENCE_INVALID",
+            message=f"cannot read Q1 egress evidence {evidence_path}: {exc}",
+        )
+    missing = [marker for marker in Q1_EGRESS_REQUIRED_MARKERS if marker not in text]
+    if missing:
+        return PreflightResult(
+            ok=False,
+            error_code="Q1_EGRESS_EVIDENCE_INVALID",
+            message=(
+                f"Q1 egress evidence {evidence_path} is missing required marker(s): "
+                + ", ".join(missing)
+            ),
+        )
+    return PreflightResult(ok=True)
+
+
 def _canonical_fee_details_for_envelope(value: Any, *, allow_unavailable: bool = False) -> dict[str, Any]:
     details = dict(value or {})
     if not details:
@@ -797,6 +918,73 @@ def _sdk_version() -> str:
         return importlib.metadata.version("py-clob-client-v2")
     except importlib.metadata.PackageNotFoundError:
         return "uninstalled"
+
+
+def _normalize_signature_type(value: Any) -> int:
+    try:
+        signature_type = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"signature_type must be an integer, got {value!r}") from exc
+    if signature_type not in {0, 1, 2, 3}:
+        raise ValueError(f"unsupported CLOB V2 signature_type={signature_type}")
+    return signature_type
+
+
+def _collateral_allowance_contracts(chain_id: int) -> tuple[str, tuple[str, str]]:
+    if int(chain_id) == 137:
+        return (
+            POLYGON_PUSD_ADDRESS,
+            (POLYGON_EXCHANGE_V2_ADDRESS, POLYGON_NEG_RISK_EXCHANGE_V2_ADDRESS),
+        )
+    try:
+        from py_clob_client_v2.config import get_contract_config
+
+        config = get_contract_config(chain_id)
+        return (
+            str(config.collateral),
+            (str(config.exchange_v2), str(config.neg_risk_exchange_v2)),
+        )
+    except Exception as exc:
+        raise V2AdapterError(f"unsupported chain_id for allowance fallback: {chain_id}") from exc
+
+
+def _abi_address(address: str) -> str:
+    normalized = str(address).lower().removeprefix("0x")
+    if len(normalized) != 40:
+        raise ValueError(f"invalid EVM address {address!r}")
+    int(normalized, 16)
+    return normalized.rjust(64, "0")
+
+
+def _eth_call_uint(
+    rpc_url: str,
+    rpc_call: Callable[[str, str, list[Any]], Any],
+    *,
+    to: str,
+    data: str,
+) -> int:
+    raw = rpc_call(rpc_url, "eth_call", [{"to": to, "data": data}, "latest"])
+    return int(str(raw or "0x0"), 16)
+
+
+def _json_rpc_call(rpc_url: str, method: str, params: list[Any]) -> Any:
+    payload = json.dumps(
+        {"jsonrpc": "2.0", "id": 1, "method": method, "params": params},
+        separators=(",", ":"),
+    ).encode("utf-8")
+    request = urllib.request.Request(
+        rpc_url,
+        data=payload,
+        headers={
+            "content-type": "application/json",
+            "user-agent": "zeus-readonly/1.0",
+        },
+    )
+    with urllib.request.urlopen(request, timeout=20) as response:
+        decoded = json.loads(response.read())
+    if "error" in decoded:
+        raise V2AdapterError(f"polygon rpc error: {decoded['error']}")
+    return decoded.get("result")
 
 
 def _snapshot_attr(snapshot: Any, name: str) -> Any:
@@ -993,3 +1181,12 @@ def _ctf_balance_units(value: Any) -> int:
         return int((Decimal(str(value or "0")) * Decimal("1000000")).to_integral_value(rounding=ROUND_FLOOR))
     except Exception:
         return 0
+
+
+def _micro_int_or_none(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        return max(0, int(Decimal(str(value))))
+    except Exception:
+        return None

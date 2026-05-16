@@ -1,5 +1,5 @@
 # Created: 2026-04-26
-# Last reused/audited: 2026-05-13
+# Last reused/audited: 2026-05-15
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/Z4.yaml
 #                  + 2026-05-13 collateral_ledger singleton conn lifecycle remediation
 """R3 Z4 collateral ledger for pUSD, CTF inventory, and reservations.
@@ -33,6 +33,7 @@ AuthorityTier = Literal["CHAIN", "VENUE", "DEGRADED"]
 
 _MICRO = 1_000_000
 _CTF_SCALE = 1_000_000
+SQLITE_SIGNED_INTEGER_MAX = (2**63) - 1
 _TERMINAL_RESERVATION_STATES = frozenset(
     {"CANCELED", "CANCELLED", "FILLED", "EXPIRED", "REJECTED", "SUBMIT_REJECTED"}
 )
@@ -206,9 +207,9 @@ class CollateralLedger:
         reserved_tokens = self._reserved_tokens()
         payload_hash = _hash_payload(raw)
         snapshot = CollateralSnapshot(
-            pusd_balance_micro=_int_micro(raw.get("pusd_balance_micro", raw.get("pusd_balance", 0))),
-            pusd_allowance_micro=_int_micro(raw.get("pusd_allowance_micro", raw.get("pusd_allowance", 0))),
-            usdc_e_legacy_balance_micro=_int_micro(
+            pusd_balance_micro=_sqlite_micro(raw.get("pusd_balance_micro", raw.get("pusd_balance", 0))),
+            pusd_allowance_micro=_sqlite_micro(raw.get("pusd_allowance_micro", raw.get("pusd_allowance", 0))),
+            usdc_e_legacy_balance_micro=_sqlite_micro(
                 raw.get("usdc_e_legacy_balance_micro", raw.get("usdc_e_legacy_balance", 0))
             ),
             ctf_token_balances=_ctf_units_dict_from_payload(raw, "ctf_token_balances"),
@@ -497,9 +498,9 @@ class CollateralLedger:
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                snapshot.pusd_balance_micro,
-                snapshot.pusd_allowance_micro,
-                snapshot.usdc_e_legacy_balance_micro,
+                _sqlite_micro(snapshot.pusd_balance_micro),
+                _sqlite_micro(snapshot.pusd_allowance_micro),
+                _sqlite_micro(snapshot.usdc_e_legacy_balance_micro),
                 json.dumps(snapshot.ctf_token_balances, sort_keys=True),
                 json.dumps(snapshot.ctf_token_allowances, sort_keys=True),
                 snapshot.reserved_pusd_for_buys_micro,
@@ -509,6 +510,8 @@ class CollateralLedger:
                 snapshot.raw_balance_payload_hash,
             ),
         )
+        if self._owns_conn:
+            self._conn.commit()
 
 
 _GLOBAL_LEDGER: CollateralLedger | None = None
@@ -664,6 +667,13 @@ def _int_micro(value: Any) -> int:
         return int(value or 0)
     except (TypeError, ValueError):
         return 0
+
+
+def _sqlite_micro(value: Any) -> int:
+    # ERC20 allowance is uint256 on-chain, while SQLite INTEGER is signed int64.
+    # The ledger only needs spend-cover proof, so values above the DB domain are
+    # represented as the maximum storable non-negative allowance.
+    return min(SQLITE_SIGNED_INTEGER_MAX, max(0, _int_micro(value)))
 
 
 def _token_required_units(value: Any) -> int:

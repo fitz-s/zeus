@@ -1,5 +1,5 @@
 # Created: 2026-05-03
-# Last reused/audited: 2026-05-03
+# Last reused/audited: 2026-05-15
 # Authority basis: docs/operations/task_2026-05-03_ddd_implementation_plan/
 #                  RERUN_PLAN_v2.md §5 D-E (live wiring) + F2 (null-floor fail-CLOSED)
 """Live wiring helper for DDD v2.
@@ -281,7 +281,15 @@ def evaluate_ddd_for_decision(
             track=metric,
         ) from exc
 
-    nstar_cfg = _nstar()  # let FileNotFoundError propagate same as floors
+    try:
+        nstar_cfg = _nstar()
+    except FileNotFoundError as exc:
+        raise DDDFailClosed(
+            code="DDD_CONFIG_MISSING",
+            reason=str(exc),
+            city=city,
+            track=metric,
+        ) from exc
 
     # F2 fail-CLOSED: city must exist with a non-status entry.
     per_city = floors_cfg.get("per_city", floors_cfg)

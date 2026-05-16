@@ -98,6 +98,7 @@ make a surface default-read unless `current_state.md` routes it.
 | `current_source_validity.md` | current fact | Current audited source-validity posture; not authority law |
 | `packet_scope_protocol.md` | active support | Protocol reference for the Packet Runtime (`zpkt`) and `scope.yaml` sidecar contract |
 | `tigge_daemon_integration.md` | packet evidence | Design doc for TIGGE retrieval inside the data-ingest daemon — operator directive 2026-05-01 |
+| `live_egress/` | active runtime-gating evidence | Current Q1 Zeus daemon egress evidence for Polymarket CLOB V2 preflight; public probe results only, no secrets or signed payloads |
 | `edge_observation/` | active monitoring | Operator-managed edge trajectory observation surface |
 | `attribution_drift/` | active monitoring | Operator-managed strategy attribution drift observation surface |
 | `ws_poll_reaction/` | active monitoring | Operator-managed WebSocket/poll reaction observation surface |
@@ -218,6 +219,10 @@ make a surface default-read unless `current_state.md` routes it.
 | `task_2026-05-14_data_daemon_live_efficiency/FORECAST_LIVE_OPERATOR_HANDOFF.md` | packet operator handoff | Repo-only launch/verification shape for future `com.zeus.forecast-live`; not plist installation, launchctl authorization, or production deployment evidence |
 | `task_2026-05-15_data_pipeline_live_rootfix/` | plan packet container | Root-cause plan packet for live data pipeline failure: forecasts DB authority reads, source-run attribution, coverage/readiness ownership, live daemon wiring, and end-to-end proof |
 | `task_2026-05-15_data_pipeline_live_rootfix/DATA_PIPELINE_ROOTFIX_PLAN.md` | topology planning packet | Empirical live-only rootfix plan superseding the 2026-05-14 plan-only approval until live end-to-end proof exists |
+| `task_2026-05-15_live_order_e2e_verification/` | plan packet container | Live order end-to-end verification packet for forecast-live data, live reader, evaluator, executor, venue command journal, order state, and reconciliation proof |
+| `task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md` | topology planning packet | Execution plan requiring deployed-code proof, real live limit-order submission, durable command/event evidence, and post-order guard before claiming live readiness |
+| `task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_CRITIC_APPROVAL.md` | packet review evidence | Critic REVISE-to-APPROVE record for the live order E2E verification plan; approval is plan-only, not empirical live completion evidence |
+| `task_2026-05-15_live_order_e2e_verification/receipt.json` | packet receipt | Current-state freeze receipt naming the live order E2E plan as the active execution packet; not implementation closeout evidence |
 | `task_2026-05-15_live_order_e2e_goal/` | plan packet container | Main-based plan packet for real live order end-to-end proof: live data, evaluator intent, executor submit, venue order identity, command/order/fill/position records, and guard closeout |
 | `task_2026-05-15_live_order_e2e_goal/LIVE_ORDER_E2E_GOAL_PLAN.md` | topology planning packet | Detailed execution plan for completing the user `/goal` on a new branch from main; explicitly excludes shadow-only proof and rejected/unknown order outcomes as completion |
 | `task_2026-05-15_live_order_e2e_goal/CRITIC_APPROVAL.md` | packet review evidence | Critic REVISE-to-APPROVE record for the live-order E2E goal plan; approval is plan/phase-gate only, not completion evidence |

@@ -660,6 +660,25 @@ entries:
   contains_volatile_metrics: false
   current_tense_allowed: true
   refresh_source: packet_audit
+- path: docs/operations/live_egress/q1_zeus_egress_current.txt
+  doc_class: operations
+  default_read: false
+  direct_reference_allowed: true
+  current_role: current runtime-gating Q1 Zeus daemon egress evidence for Polymarket CLOB V2 preflight
+  canonical_replaced_by: []
+  next_action: retain_as_evidence
+  lifecycle_state: active
+  coverage_scope: exact
+  parent_coverage_allowed: false
+  truth_profile: report_evidence
+  freshness_class: packet_bound
+  supersedes:
+    - docs/operations/task_2026-04-26_polymarket_clob_v2_migration/evidence/q1_zeus_egress_2026-04-26.txt
+  superseded_by: []
+  may_live_in_reference: false
+  contains_volatile_metrics: true
+  current_tense_allowed: true
+  refresh_source: packet_audit
 - path: docs/operations/active_unfinished_backlog.md
   doc_class: operations
   default_read: false
@@ -1804,6 +1823,43 @@ entries:
   may_live_in_reference: false
   contains_volatile_metrics: false
   current_tense_allowed: false
+  refresh_source: manual_operator_audit
+# Cohort 7 additions — appended 2026-05-15 by P9 implementation packet
+- path: .claude/CLAUDE.md
+  doc_class: authority
+  default_read: true
+  direct_reference_allowed: true
+  current_role: zeus project-local agent session behavioral rules and topology_doctor protocol
+  canonical_replaced_by: []
+  next_action: keep
+  lifecycle_state: durable
+  coverage_scope: exact
+  parent_coverage_allowed: false
+  truth_profile: authority
+  freshness_class: slow_changing
+  supersedes: []
+  superseded_by: []
+  may_live_in_reference: false
+  contains_volatile_metrics: false
+  current_tense_allowed: false
+  refresh_source: code_and_manifest
+- path: docs/operations/INDEX.md
+  doc_class: operations
+  default_read: true
+  direct_reference_allowed: true
+  current_role: authoritative index of all docs/operations/ surfaces; governs archival candidacy
+  canonical_replaced_by: []
+  next_action: keep
+  lifecycle_state: durable
+  coverage_scope: descendants
+  parent_coverage_allowed: false
+  truth_profile: router
+  freshness_class: slow_changing
+  supersedes: []
+  superseded_by: []
+  may_live_in_reference: false
+  contains_volatile_metrics: false
+  current_tense_allowed: true
   refresh_source: manual_operator_audit
 allowed_truth_profiles:
 - router
