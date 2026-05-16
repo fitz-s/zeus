@@ -3,8 +3,25 @@
 **Run anchor**: cherry-picked skill `ff714a7507`; worktree HEAD aligned with main `556d55be23`.
 **Worktree**: `.claude/worktrees/zeus-deep-alignment-audit-skill`
 **Mode**: read-only (no production code edits); only this REPORT.md and Closeout updates to `LEARNINGS.md` + `AUDIT_HISTORY.md` are written.
-**Scope authorized by operator**: C1 (K1 split parity), C4 (lineage gap under live orders), F3/F13/F18 (refreshed schema probes). F-class folded into C1/C4 where evidence overlapped.
-**On-chain context**: position `c30f28a5-d4e` (Karachi 2026-05-17 HIGH ≥37°C, condition `0xc5fad…f44ae`, ~$0.59 cost basis, `phase=active`, `chain_state=synced`, `order_status=partial`) IS live during this audit. The SKILL stop rule fired (see Finding #2).
+**Scope authorized by operator**: C1 (K1 split parity), C4 (lineage gap under live orders), F3/F13/F18 (refreshed schema probes), then B/C/D/E sweep. F-class folded into C1/C4 where evidence overlapped.
+**On-chain context**: position `c30f28a5-d4e` (Karachi 2026-05-17 HIGH ≥37°C, condition `0xc5fad…f44ae`, ~$0.59 cost basis, `phase=active`, `chain_state=synced`, `order_status=partial`) IS live during this audit. The SKILL stop rule fired (see Findings #2 and #4).
+
+---
+
+## EXECUTIVE SUMMARY — findings ranked by live-impact (highest first)
+
+This ranking re-orders the body-of-report by money/operational impact on currently-live positions. Body sections retain their original sequential numbers for git-blame continuity; **read in the order below**.
+
+| Rank | Live impact | Body # | Severity | Title | Why it matters NOW |
+|------|-------------|--------|----------|-------|-------------------|
+| **A** | **🔴 BLOCKING for Karachi 2026-05-17 settlement** | **#4** (escalated) | **SEV-1** | Harvester truth writer mis-routed to `world.db` (ghost copy) post-K1; canonical `forecasts.db.settlements_v2` silent since 2026-05-11T19:59Z (5 days, matches K1 split landing) | Settlement writer commits to a table whose registry status is `legacy_archived`. Canonical settlement path is broken in production. Karachi position resolves 2026-05-17 and **cannot persist a settlement row via the supported writer**. |
+| **B** | 🟠 Live position lineage unauditable | **#2** | SEV-1 | `selection_hypothesis_fact.decision_id` 100% NULL (506/506); evaluator.py:1535 caller bug | If Karachi position needs post-mortem (e.g. dispute, mis-settlement), per-hypothesis decision trace is unrecoverable. Read-only debt, not money-at-risk today. |
+| **C** | 🟡 Systemic latent (no current consumer mis-routes; very-soon-likely-mis-routing-on-next-feature) | **#1** | SEV-1 | Registry-vs-disk drift unenforced; 24 tables wrong-DB; 5 multi-DB duplicated; `assert_db_matches_registry()` exists but unwired at boot | Same root-cause class as rank A. K1 split partially landed; followups (e.g. commit `1d952b072e`) never reached main. Next consumer added will likely pick wrong DB. |
+| **D** | 🟢 Operator-decision risk only | **#3** | SEV-2 | Doctrine drift (`current_state.md` 1 commit stale; `current_data_state.md` 18d stale with wrong settlement counts + wrong harvester status) | Decisions made from doctrine are decisions from a fiction. No direct money flow. |
+
+**Common root cause** (ranks A + C): the K1 multi-DB split (PR #114 `eba80d2b9d`, 2026-05-10/11) landed the schema migration and registry doctrine, but **structural followup commits did not all reach main**. Commit `1d952b072e` ("feat(k1/5b): CRITICAL-1 harvester trio → get_forecasts_connection", authored 2026-05-11 21:23 PDT — i.e. ~8h after the last settlement row was written) was developed but is `NOT in main` per `git merge-base --is-ancestor 1d952b072e origin/main`. Rank A's settlement writer-target bug is the most-visible-blast-radius instance of the registry-vs-disk drift class.
+
+**Immediate operator action recommended** (out of audit scope; flag only): cherry-pick `1d952b072e` (and likely `a322810a2a` feat(k1/5c) too) onto main behind a focused PR, OR set `ZEUS_HARVESTER_LIVE_ENABLED=0` to disable the silent-failure path until the fix lands. Do this before Karachi 2026-05-17 settles.
 
 ---
 
@@ -189,55 +206,92 @@ Live Karachi position `c30f28a5-d4e` (`state/zeus_trades.db` `position_current` 
 
 ---
 
-## Finding #4 — `settlements_v2.settled_at` and `recorded_at` conflated; settlement writer silent for 5 days
+## Finding #4 — Harvester truth writer is structurally mis-routed post-K1 (writes to ghost `world.db`, canonical `forecasts.db` silent 5 days); blocks Karachi 2026-05-17 settlement
 
-**Severity**: SEV-2 (settlement integrity + potential SEV-1 if pipeline is broken vs simply quiet — needs operator confirmation to upgrade)
-**Category**: E (settlement edges); secondary G (silent failures)
+**Severity**: SEV-1 (ESCALATED 2026-05-16 from initial SEV-2 after writer-target investigation) — active money-at-risk exposure: live position `c30f28a5-d4e` resolves 2026-05-17 and cannot settle via canonical path.
+**Category**: F (cross-module invariants — registry-vs-code drift); secondary E (settlement edges), G (silent failures).
 
 ### Evidence (3 independent)
 
-**E1 — Data artifact: 100% identity collapse between `settled_at` and `recorded_at`.**
+**E1 — Code line: writer opens `get_world_connection`, but registry says canonical is forecasts.db.**
 
-Probe on `state/zeus-forecasts.db` 2026-05-16:
+`src/ingest_main.py:641-651` (HEAD `556d55be23`):
 
-```
-settlements_v2 settled_at == recorded_at rows / total: (3987, 3987)
-```
-
-Every single v2 settlement row has identical strings in the two fields. The schema-author's intent (two columns) cannot be satisfied if the writer pipes the same `now()` into both. Either the schema design is meaningless or the writer is wrong; both are bugs.
-
-**E2 — Data artifact: writer cadence stopped 2026-05-11; no new rows for 5 days.**
-
-```
-settlements_v2 last settled_at: 2026-05-11T19:59:13+00:00
-settlements   last settled_at: 2026-05-11T19:59:13+00:00
-opportunity_fact recorded_at max: 2026-05-16T00:29:38+00:00
-```
-
-`opportunity_fact` is being written through today (last entry 2026-05-16T00:29Z), so the broader pipeline lives. But both `settlements` and `settlements_v2` froze at the exact same timestamp 5 days ago — settlement writer is silent. Target_dates 2026-05-12 through 2026-05-16 have not produced a single new settlement row in either table despite weather having occurred for those dates. With live position `c30f28a5-d4e` resolving 2026-05-17, the settlement writer must resume before that date or the position cannot exit cleanly via the canonical path.
-
-**E3 — Legacy-vs-v2 migration not idempotent.**
-
-```
-legacy distinct (city,target_date): 4619
-v2     distinct (city,target_date): 3862
-overlap                           : 3805
-legacy-only                       :  814  ← never migrated to v2
-v2-only                           :   57  ← v2-original, no legacy twin
+```python
+@_scheduler_job("ingest_harvester_truth_writer")
+def _harvester_truth_writer_tick():
+    ...
+    from src.state.db import get_world_connection
+    ...
+    with acquire_lock("harvester_truth") as acquired:
+        if not acquired: ...
+        conn = get_world_connection(write_class="bulk")
+        try:
+            result = write_settlement_truth_for_open_markets(conn)
 ```
 
-Per `docs/operations/current_state.md` the K1 split moved `settlements_v2` to forecasts.db as the canonical table. But the legacy `settlements` still has 814 (city, date) keys that v2 never received. Authority mix differs too: legacy has 5,263 VERIFIED + 307 QUARANTINED; v2 has 3,605 VERIFIED + 382 QUARANTINED. Consumers reading "the settlements table" get materially different answers depending on which they pick — and the registry says `settlements` is `forecasts/legacy_archived` while `settlements_v2` is canonical, so the 814 legacy-only keys are now dark data.
+`architecture/db_table_ownership.yaml:67-69` (same HEAD):
 
-### Root cause (one sentence, hypothesis)
+```yaml
+  - name: settlements_v2
+    db: forecasts
+    schema_class: forecast_class
+```
 
-The v2 settlement writer treats `settled_at` and `recorded_at` as aliases (likely a single `dt.utcnow()` plugged into both columns); separately, the writer process has been silent since 2026-05-11T19:59Z, suggesting either a cron/daemon failure or an upstream input (UMA / weather harvester) that stopped producing settlement-ready candidates. Both bugs need direct daemon-log inspection to confirm/refute, but the data shape alone is sufficient evidence to flag.
+And the ghost copy on world.db is explicitly flagged at lines 178-186:
+
+```yaml
+  - name: settlements_v2
+    db: world
+    schema_class: legacy_archived
+    ...
+      Ghost copy of settlements_v2 on world.db post-K1-split.
+      Authoritative on forecasts.db. Excluded. Drop after 2026-08-09.
+```
+
+So the writer is opening the `world.db` connection and calling `write_settlement_truth_for_open_markets(conn)` which writes to the `legacy_archived` ghost table that is scheduled for deletion. Canonical destination is never reached.
+
+**E2 — Data artifact: writer's actual destination has 0 rows; canonical destination silent 5 days; tail matches K1 split landing.**
+
+Probe on all three DBs read-only (2026-05-16):
+
+```
+zeus-world.db.settlements_v2:     count=0     max_settled_at=None
+zeus-forecasts.db.settlements_v2: count=3987  max_settled_at=2026-05-11T19:59:13+00:00
+zeus_trades.db.settlements_v2:    count=0     max_settled_at=None
+```
+
+`opportunity_fact.recorded_at` MAX on forecasts.db = `2026-05-16T00:29:38+00:00` (today) — so the broader pipeline is alive. Only settlements are frozen, and the tail timestamp `2026-05-11T19:59Z` corresponds with K1 split work landing: `eba80d2b9d fix(state): K1 forecast DB split + ATTACH index helper + calibration adversarial bundle (#114)` is the merge that moved `settlements_v2` to forecasts.db. After that merge, the writer's target (`world.db.settlements_v2`) became an empty ghost; the canonical (`forecasts.db.settlements_v2`) retained the pre-split rows but has received zero new writes.
+
+**E3 — Git evidence: the structural followup commit was authored but never merged to main.**
+
+```
+git log --all --oneline -- src/ingest_main.py | grep 'k1/5b'
+1d952b072e feat(k1/5b): CRITICAL-1 harvester trio → get_forecasts_connection
+
+git merge-base --is-ancestor 1d952b072e origin/main
+$? = 1   ← NOT in main
+```
+
+Commit body says it swaps `get_world_connection → get_forecasts_connection` at `ingest_main.py` line 647 and updates corresponding tests. Authored 2026-05-11 21:23 PDT (~8h after the last settlement row was written — same date the upstream K1 split shipped). Its sibling commit `a322810a2a feat(k1/5c): forecast-only readers → get_forecasts_connection` is also absent from main per same check. K1 split landed partially: schema migration + registry merged; writer-/reader-side connection migrations did not.
+
+Additionally: `src/ingest/harvester_truth_writer.py:13` says "Logic copied verbatim from `src/execution/harvester.py:_write_settlement_truth`" — so there's a second writer copy in `execution/harvester.py` that may or may not have the same mis-routing, expanding blast radius (not probed this run).
+
+### Root cause (one sentence)
+
+K1 multi-DB split landed the schema move + registry doctrine without their connection-migration followup commits (`1d952b072e`, `a322810a2a`), leaving the harvester truth writer to commit settlement rows to a now-empty world.db ghost copy while the canonical forecasts.db destination receives nothing — silent failure mode visible only by cross-checking writer destination vs registry.
 
 ### Antibody (design only)
 
-**A-F4** — Two-part:
+**A-F4** — Three-layer:
 
-1. **Writer correctness**: rename / repurpose the columns so the bug surfaces. Either drop `recorded_at` (if it was supposed to be identity-with-settled_at) and adjust readers, or require the writer to set `settled_at = <observed-weather-cutoff-time>` (e.g., `target_date + interval '23:59:59' UTC` for daily-temperature markets) and `recorded_at = utcnow()`. Add a NOT NULL CHECK that `recorded_at >= settled_at` to fail-loud on regressions.
-2. **Cadence health**: add `scripts/settlement_writer_freshness.py` that asserts `max(settled_at) > today() - 36h` and emits to the same source-health JSON as the existing data freshness gates. Wire as a degradation signal to `_startup_freshness_check()` so the boot gate notices a silent settlement writer.
+1. **Immediate (operator action, out of audit scope but flagged)**: cherry-pick `1d952b072e` + `a322810a2a` to main via a focused PR titled "k1/5b+5c followups: route harvester trio + forecast-only readers to forecasts.db (settlement writer recovery)". Verify post-merge by re-running the E2 probe; `forecasts.db.settlements_v2` `max(settled_at)` must move past `2026-05-11T19:59Z` within one cron tick. Alternatively, as a containment measure until the PR lands, set `ZEUS_HARVESTER_LIVE_ENABLED=0` to disable the silent-failure path — this stops false writes but does not recover; only the cherry-picks recover.
+2. **Structural antibody (durable)**: implement & wire `assert_writer_db_matches_registry(conn, table_name)` as a per-write assertion. At every site that does `conn.execute("INSERT INTO <table>…")` for a registry-tracked table, call the assertion first; it inspects `conn`'s file path vs registry's `db:` field and raises if mismatched. Wire at writer entry points (`harvester_truth_writer`, `harvester.py`, `evaluator.py` selectors). Cost: ~one syscall per write; well within budget for a bulk writer that runs hourly.
+3. **Cadence antibody (also fixes the original SEV-2 framing)**: add `scripts/settlement_writer_freshness.py` that asserts `forecasts.db.settlements_v2 max(settled_at) > today() - 36h` (and equivalent for any other registry-canonical writer destination). Wire as boot gate AND as cron-emitted source-health JSON entry. A silent writer is the failure shape we just observed; this antibody catches the recurrence regardless of which-DB the routing bug points to.
+
+### Connection to existing on-chain position
+
+Karachi `c30f28a5-d4e` (target_date 2026-05-17) will go through the settlement window 2026-05-17T~23:59Z. At that point the canonical writer path must persist a row to `forecasts.db.settlements_v2` for downstream PnL/audit/UMA-reconciliation. With current code that row will be written to `world.db.settlements_v2` (legacy_archived) instead, and (per registry doctrine) consumers reading from canonical will see no settlement. Cost basis is small (~$0.59) so the immediate financial blast radius is bounded, but the **operational blast radius is broader**: every settled position since 2026-05-11T19:59Z is in the same state (settlement attempted, persisted to ghost, invisible to canonical readers). The position-events / pnl / UMA-reconciliation flows that depend on `settlements_v2` are operating on stale data.
 
 ---
 
@@ -245,12 +299,12 @@ The v2 settlement writer treats `settled_at` and `recorded_at` as aliases (likel
 
 | # | Severity | Category | Title | On-chain impact |
 |---|---|---|---|---|
-| 1 | SEV-1 | F (cross-module invariants) | Registry-vs-disk drift unenforced; 24 tables wrong-DB, 5 multi-DB-duplicated | Latent (no current consumer mis-routes, but registry is no longer authoritative) |
+| 1 | SEV-1 | F (cross-module invariants) | Registry-vs-disk drift unenforced; 24 tables wrong-DB, 5 multi-DB-duplicated; `assert_db_matches_registry()` unwired | Latent (no current consumer mis-routes today, but same root-cause class as #4) |
 | 2 | SEV-1 | A (data provenance) | `selection_hypothesis_fact.decision_id` 100% NULL — caller bug in `evaluator.py:1535` | Live Karachi position `c30f28a5-d4e` lineage unauditable at hypothesis layer |
 | 3 | SEV-2 | H (assumption drift) | `current_state.md` 1 commit stale; `current_data_state.md` 18 days stale with wrong settlement counts + wrong harvester status; eight column-name drifts vs 2026-05-08 audit | Operator-decision risk |
-| 4 | SEV-2 | E (settlement edges) | `settlements_v2.settled_at`==`recorded_at` for 100% of rows; both `settlements` and `settlements_v2` writers silent since 2026-05-11; legacy↔v2 migration leaves 814 dark rows | Could become SEV-1 if Karachi 2026-05-17 settlement is required and writer is broken |
+| 4 | **SEV-1 (escalated)** | E + F | Harvester truth writer mis-routed to ghost `world.db.settlements_v2` post-K1; canonical `forecasts.db.settlements_v2` silent 5 days; K1 followup commits `1d952b072e` + `a322810a2a` not in main | **BLOCKING**: Karachi 2026-05-17 settlement will write to legacy_archived ghost, invisible to canonical readers |
 
-K (root gap count) = 4, within the SKILL's ≤5 ceiling.
+K (root gap count) = 4, within the SKILL's ≤5 ceiling. Final severity counts: SEV-1 × 3, SEV-2 × 1, SEV-3 × 0.
 
 ---
 

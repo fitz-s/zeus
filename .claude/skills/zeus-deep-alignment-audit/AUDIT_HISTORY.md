@@ -10,7 +10,7 @@ Append-only log of every completed run of the `zeus-deep-alignment-audit` skill.
 
 | # | Date | Commit | K root gaps | SEV-1 | SEV-2 | SEV-3 | Coverage | Report |
 |---|------|--------|-------------|-------|-------|-------|----------|--------|
-| 1 | 2026-05-16 | 556d55be23 (main) / ff714a7507 (skill) | 4 | 2 | 2 | 0 | A, E, F, G, H probed (findings); B, C, D probed (no findings) | docs/operations/task_2026-05-16_deep_alignment_audit/REPORT.md |
+| 1 | 2026-05-16 | 556d55be23 (main) / ff714a7507 (skill) | 4 | 3 | 1 | 0 | A, E, F, G, H probed (findings); B, C, D probed (no findings) | docs/operations/task_2026-05-16_deep_alignment_audit/REPORT.md |
 
 ---
 
@@ -54,9 +54,12 @@ Format per run:
 - Bumped F (Cross-module invariants) yield to HIGH (1 SEV-1 in 1 run; verifies in next 2 runs to confirm).
 - Bumped A (Data provenance holes) yield to HIGH (1 SEV-1 in 1 run; same rule).
 - Bumped H (Assumption drift) yield to MEDIUM (1 SEV-2).
-- Bumped E (Settlement edges) yield to MEDIUM (1 SEV-2 — column-conflation + silent writer).
+- Bumped E (Settlement edges) yield to HIGH (1 SEV-1 — mis-routed writer + missing K1 followup commits).
 - Added probe "settlement-writer cadence + settled_at==recorded_at identity-rate cross-check" to LEARNINGS high-signal.
 - Added probe "legacy↔v2 settlement-migration completeness (symmetric (city,target_date) key-set diff)" to LEARNINGS high-signal.
+- Added probe "writer-destination-vs-registry cross-check across all canonical writers" to LEARNINGS high-signal (this is the probe that produced the run #1 SEV-1 escalation; should run first on every future Boot).
+
+**Mid-run escalation (2026-05-16, post initial REPORT commit 490c902e77)**: Operator-requested follow-up probe of daemon logs / cron / writer code path elevated Finding #4 from SEV-2 to SEV-1 after discovery that the harvester truth writer opens `get_world_connection()` while the registry declares `settlements_v2` canonical on forecasts.db, and that the K1 followup commits intended to fix this (`1d952b072e`, `a322810a2a`) are not in main. Documented as a separate commit on top of 490c902e77 to preserve the discovery sequence. Lesson: a SEV-2 'silent writer' finding should automatically trigger writer-target-vs-registry investigation in-run, not rely on operator escalation request — codify this as a default expansion step in SKILL.md for any settlement/lineage anomaly.
 
 **Hand-edits to LEARNINGS.md beyond Closeout**: none.
 
