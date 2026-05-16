@@ -213,6 +213,9 @@ class MaintenanceEngine:
         # _enumerate_candidates returns list[TaskCatalogEntry] from catalog.
         # For each entry, dispatch to handler.enumerate(entry, ctx) to collect
         # list[Candidate] per task. Handlers not yet implemented return [].
+        # TODO(WAVE 7): add weekly tick dispatch here for schedule="weekly" tasks
+        # (e.g. authority_drift_surface, schedule_day=monday). Currently only
+        # daily tasks are enumerated; weekly handler is implemented but dormant.
         entries: list[TaskCatalogEntry] = self._enumerate_candidates(config, schedule="daily")
         per_task_candidates: dict[str, list[Candidate]] = {}
         for entry in entries:
