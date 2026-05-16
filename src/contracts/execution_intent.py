@@ -687,6 +687,7 @@ class ExecutionIntent:
     correlation_key: str = ""
     decision_source_context: DecisionSourceContext | None = None
     submit_order_type: OrderType | None = None
+    post_only: bool = False
 
     def __post_init__(self) -> None:
         # Slice P3-fix1 (post-review BLOCKER from critic M1 + code-reviewer
@@ -717,6 +718,8 @@ class ExecutionIntent:
             "FAK",
         }:
             raise ValueError(f"unsupported submit_order_type {self.submit_order_type!r}")
+        if self.post_only and self.submit_order_type in {"FOK", "FAK"}:
+            raise ValueError("post_only entry intents require GTC/GTD submit_order_type")
         decision_source_context = self.decision_source_context
         if decision_source_context is not None and not isinstance(
             decision_source_context, DecisionSourceContext
@@ -1052,7 +1055,12 @@ class ExecutableCostBasis:
             raise ValueError("tick validation failed")
         if self.min_order_status != "PASS":
             raise ValueError("min-order validation failed")
-        if self.depth_status != "PASS":
+        passive_maker_safe = (
+            self.order_policy == "post_only_passive_limit"
+            and self.depth_status == "NOT_MARKETABLE_PASSIVE_LIMIT"
+            and self.depth_proof_source == "PASSIVE_LIMIT"
+        )
+        if self.depth_status != "PASS" and not passive_maker_safe:
             raise ValueError(f"depth validation failed: {self.depth_status}")
         _assert_tick_aligned(self.final_limit_price, self.tick_size)
         _assert_min_order_satisfied(
@@ -1069,9 +1077,14 @@ class ExecutableCostBasis:
             raise ValueError("tick validation failed")
         if self.min_order_status != "PASS":
             raise ValueError("min-order validation failed")
-        if self.depth_status != "PASS":
+        passive_maker_safe = (
+            self.order_policy == "post_only_passive_limit"
+            and self.depth_status == "NOT_MARKETABLE_PASSIVE_LIMIT"
+            and self.depth_proof_source == "PASSIVE_LIMIT"
+        )
+        if self.depth_status != "PASS" and not passive_maker_safe:
             raise ValueError(f"depth validation failed: {self.depth_status}")
-        if self.depth_proof_source != "CLOB_SWEEP":
+        if self.depth_proof_source != "CLOB_SWEEP" and not passive_maker_safe:
             raise ValueError("PASS depth_status requires CLOB_SWEEP proof")
         _assert_tick_aligned(self.final_limit_price, self.tick_size)
         _assert_min_order_satisfied(

@@ -2328,19 +2328,24 @@ def init_schema(
     # portfolio_loader_view can emit per-row metric identity.
     # Zero-Data Golden Window precondition: this ALTER must only run on an empty table.
     try:
-        row_count = conn.execute("SELECT COUNT(*) FROM position_current").fetchone()[0]
-        logger.info(
-            "phase5a_alter_position_current: row_count=%d before ADD COLUMN temperature_metric",
-            row_count,
-        )
-        assert row_count == 0, (
-            f"Phase 5A ALTER expects empty position_current (Zero-Data Golden Window); "
-            f"found {row_count} rows"
-        )
-        conn.execute(
-            "ALTER TABLE position_current ADD COLUMN temperature_metric TEXT NOT NULL DEFAULT 'high' "
-            "CHECK (temperature_metric IN ('high', 'low'));"
-        )
+        position_current_cols = {
+            str(row[1])
+            for row in conn.execute("PRAGMA table_info(position_current)").fetchall()
+        }
+        if "temperature_metric" not in position_current_cols:
+            row_count = conn.execute("SELECT COUNT(*) FROM position_current").fetchone()[0]
+            logger.info(
+                "phase5a_alter_position_current: row_count=%d before ADD COLUMN temperature_metric",
+                row_count,
+            )
+            assert row_count == 0, (
+                f"Phase 5A ALTER expects empty position_current (Zero-Data Golden Window); "
+                f"found {row_count} rows"
+            )
+            conn.execute(
+                "ALTER TABLE position_current ADD COLUMN temperature_metric TEXT NOT NULL DEFAULT 'high' "
+                "CHECK (temperature_metric IN ('high', 'low'));"
+            )
     except sqlite3.OperationalError as exc:
         if "duplicate column" not in str(exc).lower():
             raise  # Column already exists — idempotent re-run

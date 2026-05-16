@@ -1,5 +1,5 @@
 # Created: prior
-# Last reused/audited: 2026-05-14
+# Last reused/audited: 2026-05-15
 # Authority basis: docs/operations/task_2026-05-14_data_daemon_live_efficiency/DATA_DAEMON_LIVE_EFFICIENCY_REFACTOR_PLAN.md
 #   Phase 3 live evaluator consumes forecast producer readiness instead of direct-fetching OpenData.
 """Evaluator: takes a market candidate, returns an EdgeDecision or NoTradeCase.
@@ -305,10 +305,10 @@ def _read_v2_snapshot_metadata(
     if not snapshot_id:
         return {}
 
-    # Resolve schema prefix (world.ensemble_snapshots_v2 when world DB
-    # attached; bare ensemble_snapshots_v2 in monolithic test DBs).
+    # Resolve schema prefix. Forecast-live owns the executable snapshot table
+    # when attached; world/main are legacy or test fallback surfaces.
     import sqlite3
-    for sp in ("world.", ""):
+    for sp in ("forecasts.", "world.", ""):
         try:
             row = conn.execute(
                 f"""
@@ -805,6 +805,17 @@ def _to_jsonable(value):
 
 def _serialize_json(value) -> str:
     return json.dumps(_to_jsonable(value), default=str, ensure_ascii=False)
+
+
+def _ensemble_spread_value(ensemble_spread, ens) -> float:
+    """Return spread without eagerly touching a legacy ensemble fallback."""
+    if ensemble_spread is not None:
+        value = getattr(ensemble_spread, "value", None)
+        if value is not None:
+            return float(value)
+    if ens is not None:
+        return float(ens.spread_float())
+    raise ValueError("ensemble spread unavailable after forecast validation")
 
 
 def _forecast_model_family(model_name: str | None) -> str:
@@ -3189,7 +3200,7 @@ def evaluate_candidate(
             p_market=p_market,
             alpha=alpha,
             agreement=agreement,
-            spread=float(getattr(ensemble_spread, "value", ens.spread_float())),
+            spread=_ensemble_spread_value(ensemble_spread, ens),
             n_edges_found=len(edges),
             n_edges_after_fdr=0,
             fdr_fallback_fired=_fdr_fallback,
@@ -3723,7 +3734,7 @@ def evaluate_candidate(
             p_market=p_market,
             alpha=alpha,
             agreement=agreement,
-            spread=float(getattr(ensemble_spread, "value", ens.spread_float())),
+            spread=_ensemble_spread_value(ensemble_spread, ens),
             n_edges_found=len(edges),
             n_edges_after_fdr=len(filtered),
             edge_context=edge_ctx,
@@ -3789,15 +3800,22 @@ def _ensemble_snapshots_table(conn) -> str:
     return "world.ensemble_snapshots" if row is not None else "ensemble_snapshots"
 
 
-def _ensemble_snapshots_v2_table(conn) -> str:
+def _attached_table_exists(conn, schema: str, table: str) -> bool:
     try:
         row = conn.execute(
-            "SELECT 1 FROM world.sqlite_master WHERE type = 'table' AND name = 'ensemble_snapshots_v2'"
+            f"SELECT 1 FROM {schema}.sqlite_master WHERE type = 'table' AND name = ?",
+            (table,),
         ).fetchone()
-        if row is not None:
-            return "world.ensemble_snapshots_v2"
     except Exception:
-        pass
+        return False
+    return row is not None
+
+
+def _ensemble_snapshots_v2_table(conn) -> str:
+    if _attached_table_exists(conn, "forecasts", "ensemble_snapshots_v2"):
+        return "forecasts.ensemble_snapshots_v2"
+    if _attached_table_exists(conn, "world", "ensemble_snapshots_v2"):
+        return "world.ensemble_snapshots_v2"
     try:
         row = conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'ensemble_snapshots_v2'"
@@ -4410,6 +4428,9 @@ def _store_snapshot_p_raw(
                 v2_row["valid_time"],
             ))
             if result.rowcount != 1:
+                if v2_table.startswith("forecasts.") and result.rowcount == 0:
+                    conn.commit()
+                    return True
                 raise ValueError(
                     "legacy ensemble_snapshots p_raw projection update affected "
                     f"{result.rowcount} rows for canonical snapshot_id {snapshot_id}"

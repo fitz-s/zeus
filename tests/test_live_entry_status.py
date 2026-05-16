@@ -1,6 +1,6 @@
 # Created: 2026-05-03
-# Last reused/audited: 2026-05-03
-# Authority basis: docs/operations/task_2026-05-02_live_entry_data_contract/PLAN_v4.md Phase 10 live-entry blocker status.
+# Last reused/audited: 2026-05-15
+# Authority basis: docs/operations/task_2026-05-15_live_order_e2e_goal/LIVE_ORDER_E2E_GOAL_PLAN.md Gate 11/live-reader relationship.
 """Live-entry forecast blocker status tests."""
 
 from __future__ import annotations
@@ -178,5 +178,27 @@ def test_live_mode_without_blockers_reports_live_eligible_status() -> None:
         now_utc=_utc(2026, 5, 3, 10),
     )
 
+    assert status.status == "LIVE_ELIGIBLE"
+    assert status.blockers == ()
+
+
+def test_mixed_future_blocked_rows_do_not_globally_block_live_eligible_coverage() -> None:
+    conn = _conn()
+    _insert_snapshot(conn, linked=True)
+    _insert_producer_readiness(conn, status="LIVE_ELIGIBLE", reasons=["PRODUCER_COVERAGE_READY"])
+    _insert_producer_readiness(
+        conn,
+        status="BLOCKED",
+        reasons=["SOURCE_RUN_HORIZON_OUT_OF_RANGE"],
+    )
+    cfg = replace(entry_forecast_config(), rollout_mode=EntryForecastRolloutMode.LIVE)
+
+    status = build_live_entry_forecast_status(
+        conn,
+        config=cfg,
+        now_utc=_utc(2026, 5, 3, 10),
+    )
+
+    assert status.producer_live_eligible_count == 1
     assert status.status == "LIVE_ELIGIBLE"
     assert status.blockers == ()

@@ -122,6 +122,61 @@ def _allocation_payload_for_intent(intent: ExecutionIntent) -> dict[str, str]:
     }
 
 
+def _is_polymarket_geoblock_403(exc: Exception) -> bool:
+    message = str(exc)
+    return (
+        type(exc).__name__ == "PolyApiException"
+        and "status_code=403" in message
+        and "Trading restricted in your region" in message
+        and "geoblock" in message
+    )
+
+
+def _geoblock_rejection_payload(exc: Exception, *, idempotency_key: str) -> dict:
+    return {
+        "reason": "venue_rejected_geoblock_403",
+        "exception_type": type(exc).__name__,
+        "exception_message": str(exc),
+        "idempotency_key": idempotency_key,
+        "proof_class": "deterministic_venue_geoblock_403",
+        "venue_order_created": False,
+    }
+
+
+def _canonical_payload_hash(payload: object) -> str:
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _jsonable_payload(payload: object) -> object:
+    return json.loads(json.dumps(payload, sort_keys=True, default=str))
+
+
+def _venue_submit_order_fact_state(result: dict) -> str:
+    status = str(result.get("status") or result.get("state") or "").upper()
+    if status in {"MATCHED", "FILLED"}:
+        return "MATCHED"
+    if status in {"PARTIALLY_MATCHED", "PARTIAL", "PARTIALLY_FILLED"}:
+        return "PARTIALLY_MATCHED"
+    return "LIVE"
+
+
+def _venue_submit_remaining_size(result: dict, fallback_size: float | Decimal) -> str:
+    for key in ("remaining_size", "remainingSize", "size", "original_size", "originalSize"):
+        value = result.get(key)
+        if value not in (None, ""):
+            return str(value)
+    return str(fallback_size)
+
+
+def _venue_submit_matched_size(result: dict) -> str:
+    for key in ("matched_size", "matchedSize", "size_matched", "sizeMatched"):
+        value = result.get(key)
+        if value not in (None, ""):
+            return str(value)
+    return "0"
+
+
 def _json_safe_string(value, fallback: str = "") -> str:
     if value is None:
         return str(fallback or "")
@@ -1260,6 +1315,20 @@ def _final_intent_snapshot_metadata(
         requested_size_value=Decimal(str(submitted_shares)),
         limit_price=intent.final_limit_price,
     )
+    if intent.order_policy == "post_only_passive_limit":
+        if not intent.post_only:
+            raise ValueError("FinalExecutionIntent post_only_passive_limit requires post_only")
+        if intent.order_type not in {"GTC", "GTD"}:
+            raise ValueError("FinalExecutionIntent post_only_passive_limit requires GTC/GTD")
+        if sweep.filled_shares != Decimal("0"):
+            raise ValueError(
+                "FinalExecutionIntent post_only_passive_limit would cross executable snapshot book"
+            )
+        if intent.expected_fill_price_before_fee != intent.final_limit_price:
+            raise ValueError(
+                "FinalExecutionIntent passive expected_fill_price_before_fee must equal final_limit_price"
+            )
+        return snapshot.gamma_market_id, snapshot.event_id
     if sweep.depth_status != "PASS" or sweep.average_price is None:
         raise ValueError(
             "FinalExecutionIntent executable depth validation failed: "
@@ -1287,10 +1356,6 @@ def _legacy_entry_intent_from_final(
             "execute_final_intent only supports buy_yes/buy_no entry directions; "
             f"got {intent.direction!r}"
         )
-    if intent.post_only:
-        raise ValueError("execute_final_intent cannot honor post_only on the legacy entry executor")
-    if intent.order_policy == "post_only_passive_limit":
-        raise ValueError("execute_final_intent cannot honor post_only_passive_limit")
     if intent.decision_source_context is None:
         raise ValueError("FinalExecutionIntent missing decision_source_context")
     decision_source_errors = intent.decision_source_context.integrity_errors()
@@ -1335,6 +1400,7 @@ def _legacy_entry_intent_from_final(
         correlation_key=intent.correlation_key or execution_event_id or intent.hypothesis_id,
         decision_source_context=intent.decision_source_context,
         submit_order_type=intent.order_type,
+        post_only=intent.post_only,
     )
 
 
@@ -1533,8 +1599,9 @@ def execute_exit_order(
     _gate_runtime_check("settlement_write")
     from src.data.polymarket_client import PolymarketClient
     from src.execution.command_bus import IdempotencyKey, IntentKind, VenueCommand, CommandState
-    from src.state.venue_command_repo import insert_command, append_event, get_command
+    from src.state.venue_command_repo import append_order_fact, insert_command, append_event, get_command
     from src.contracts.executable_market_snapshot_v2 import MarketSnapshotError
+    from src.state.collateral_ledger import CollateralInsufficient
 
     current_price = intent.current_price
     best_bid = intent.best_bid
@@ -1902,6 +1969,45 @@ def execute_exit_order(
                 intent_id=intent.intent_id,
                 idempotency_key=idem.value,
             )
+        except CollateralInsufficient as exc:
+            rej_time = datetime.now(timezone.utc).isoformat()
+            try:
+                append_event(
+                    conn,
+                    command_id=command_id,
+                    event_type="SUBMIT_REJECTED",
+                    occurred_at=rej_time,
+                    payload={
+                        "reason": "pre_submit_collateral_reservation_failed",
+                        "detail": str(exc),
+                        "exception_type": type(exc).__name__,
+                        "side_effect_boundary_crossed": False,
+                        "sdk_submit_attempted": False,
+                    },
+                )
+                if _own_conn:
+                    conn.commit()
+            except Exception as inner:
+                logger.error(
+                    "execute_exit_order: SUBMIT_REJECTED append_event failed after "
+                    "pre-submit collateral reservation failure (command_id=%s "
+                    "trade_id=%s): inner=%s original=%s",
+                    command_id,
+                    intent.trade_id,
+                    inner,
+                    exc,
+                )
+            return OrderResult(
+                trade_id=intent.trade_id,
+                status="rejected",
+                reason=f"pre_submit_collateral_reservation_failed: {exc}",
+                submitted_price=limit_price,
+                shares=shares,
+                order_role="exit",
+                intent_id=intent.intent_id,
+                idempotency_key=idem.value,
+                command_state="REJECTED",
+            )
         except sqlite3.IntegrityError as exc:
             # Race-condition safety belt: another process inserted between our
             # lookup and our INSERT. Existing command is the canonical record.
@@ -2012,31 +2118,53 @@ def execute_exit_order(
             )
         except Exception as exc:
             # M2: place_limit_order has crossed the submit side-effect boundary.
-            # Treat SDK/network exceptions as unknown side effects, never as
-            # semantic rejection; recovery proves ACK/FILL or safe replay.
+            # Treat SDK/network exceptions as unknown side effects. A narrow
+            # synchronous venue geoblock 403 is deterministic rejection: no
+            # order id is created and live retry requires fresh egress proof.
             ack_time = datetime.now(timezone.utc).isoformat()
             try:
-                append_event(
-                    conn,
-                    command_id=command_id,
-                    event_type="SUBMIT_TIMEOUT_UNKNOWN",
-                    occurred_at=ack_time,
-                    payload={
-                        "reason": "post_submit_exception_possible_side_effect",
-                        "exception_type": type(exc).__name__,
-                        "exception_message": str(exc),
-                        "idempotency_key": idem.value,
-                    },
-                )
+                if _is_polymarket_geoblock_403(exc):
+                    append_event(
+                        conn,
+                        command_id=command_id,
+                        event_type="SUBMIT_REJECTED",
+                        occurred_at=ack_time,
+                        payload=_geoblock_rejection_payload(exc, idempotency_key=idem.value),
+                    )
+                else:
+                    append_event(
+                        conn,
+                        command_id=command_id,
+                        event_type="SUBMIT_TIMEOUT_UNKNOWN",
+                        occurred_at=ack_time,
+                        payload={
+                            "reason": "post_submit_exception_possible_side_effect",
+                            "exception_type": type(exc).__name__,
+                            "exception_message": str(exc),
+                            "idempotency_key": idem.value,
+                        },
+                    )
                 if _own_conn:
                     conn.commit()
             except Exception as inner:
                 logger.error(
-                    "execute_exit_order: SUBMIT_TIMEOUT_UNKNOWN append_event failed after SDK exception "
+                    "execute_exit_order: terminal SDK-exception event append failed "
                     "(command_id=%s trade_id=%s): inner=%s original=%s",
                     command_id, intent.trade_id, inner, exc,
                 )
             logger.error("Live exit order SDK exception: %s", exc)
+            if _is_polymarket_geoblock_403(exc):
+                return OrderResult(
+                    trade_id=intent.trade_id,
+                    status="rejected",
+                    reason=f"venue_rejected_geoblock_403: {exc}",
+                    submitted_price=limit_price,
+                    shares=shares,
+                    order_role="exit",
+                    intent_id=intent.intent_id,
+                    idempotency_key=idem.value,
+                    command_state="REJECTED",
+                )
             return OrderResult(
                 trade_id=intent.trade_id,
                 status="unknown_side_effect",
@@ -2209,6 +2337,29 @@ def execute_exit_order(
                     **final_envelope_payload,
                 },
             )
+            append_order_fact(
+                conn,
+                venue_order_id=order_id,
+                command_id=command_id,
+                state=_venue_submit_order_fact_state(result),
+                remaining_size=_venue_submit_remaining_size(result, shares),
+                matched_size=_venue_submit_matched_size(result),
+                source="REST",
+                observed_at=ack_time,
+                venue_timestamp=ack_time,
+                raw_payload_hash=_canonical_payload_hash(
+                    {
+                        "command_id": command_id,
+                        "venue_order_id": order_id,
+                        "submit_result": result,
+                    }
+                ),
+                raw_payload_json={
+                    "venue_order_id": order_id,
+                    "submit_result": _jsonable_payload(result),
+                    "source": "place_limit_order_ack",
+                },
+            )
             if _own_conn:
                 conn.commit()
         except Exception as inner:
@@ -2249,6 +2400,9 @@ def execute_exit_order(
             conn.close()
 
 
+@capability("on_chain_mutation", lease=True)
+@capability("live_venue_submit", lease=True)
+@protects("INV-21", "INV-04")
 def _live_order(
     trade_id: str,
     intent: ExecutionIntent,
@@ -2268,10 +2422,12 @@ def _live_order(
     """
     from src.architecture.gate_runtime import check as _gate_runtime_check
     _gate_runtime_check("live_venue_submit")
+    _gate_runtime_check("on_chain_mutation")
     from src.data.polymarket_client import PolymarketClient, V2PreflightError
     from src.execution.command_bus import IdempotencyKey, IntentKind
-    from src.state.venue_command_repo import insert_command, append_event
+    from src.state.venue_command_repo import append_order_fact, insert_command, append_event
     from src.contracts.executable_market_snapshot_v2 import MarketSnapshotError
+    from src.state.collateral_ledger import CollateralInsufficient
 
     cutover_component = _assert_cutover_allows_submit(IntentKind.ENTRY)
 
@@ -2389,6 +2545,17 @@ def _live_order(
                 submitted_price=intent.limit_price,
                 shares=shares,
                 order_role="entry",
+            )
+        submit_post_only = bool(getattr(intent, "post_only", False))
+        if submit_post_only and order_type not in {"GTC", "GTD"}:
+            return OrderResult(
+                trade_id=trade_id,
+                status="rejected",
+                reason=f"post_only_order_type_mismatch: order_type={order_type}",
+                submitted_price=intent.limit_price,
+                shares=shares,
+                order_role="entry",
+                idempotency_key=idem.value,
             )
         heartbeat_component = _assert_heartbeat_allows_submit(order_type)
         ws_gap_component = _assert_ws_gap_allows_submit(getattr(intent, "market_id", None) or getattr(intent, "token_id", None))
@@ -2518,7 +2685,7 @@ def _live_order(
                 price=intent.limit_price,
                 size=shares,
                 order_type=order_type,
-                post_only=False,
+                post_only=submit_post_only,
                 captured_at=now_str,
             )
             envelope_id = _persist_prebuilt_submit_envelope(
@@ -2554,6 +2721,7 @@ def _live_order(
                 payload={
                     "allocation": _allocation_payload_for_intent(intent),
                     "order_type": order_type,
+                    "post_only": submit_post_only,
                     "execution_capability": _build_execution_capability(
                         action="ENTRY",
                         command_id=command_id,
@@ -2568,7 +2736,11 @@ def _live_order(
                                 "risk_allocator",
                                 risk_allocator_decision,
                             ),
-                            _capability_component("order_type_selection", order_type=order_type),
+                            _capability_component(
+                                "order_type_selection",
+                                order_type=order_type,
+                                post_only=submit_post_only,
+                            ),
                             heartbeat_component,
                             ws_gap_component,
                             collateral_component,
@@ -2595,6 +2767,44 @@ def _live_order(
                 submitted_price=intent.limit_price,
                 shares=shares,
                 order_role="entry",
+            )
+        except CollateralInsufficient as exc:
+            rej_time = datetime.now(timezone.utc).isoformat()
+            try:
+                append_event(
+                    conn,
+                    command_id=command_id,
+                    event_type="SUBMIT_REJECTED",
+                    occurred_at=rej_time,
+                    payload={
+                        "reason": "pre_submit_collateral_reservation_failed",
+                        "detail": str(exc),
+                        "exception_type": type(exc).__name__,
+                        "side_effect_boundary_crossed": False,
+                        "sdk_submit_attempted": False,
+                    },
+                )
+                if _own_conn:
+                    conn.commit()
+            except Exception as inner:
+                logger.error(
+                    "_live_order: SUBMIT_REJECTED append_event failed after "
+                    "pre-submit collateral reservation failure (command_id=%s "
+                    "trade_id=%s): inner=%s original=%s",
+                    command_id,
+                    trade_id,
+                    inner,
+                    exc,
+                )
+            return OrderResult(
+                trade_id=trade_id,
+                status="rejected",
+                reason=f"pre_submit_collateral_reservation_failed: {exc}",
+                submitted_price=intent.limit_price,
+                shares=shares,
+                order_role="entry",
+                idempotency_key=idem.value,
+                command_state="REJECTED",
             )
         except sqlite3.IntegrityError as exc:
             # Race-condition safety belt: another process inserted between our
@@ -2780,31 +2990,52 @@ def _live_order(
             )
         except Exception as exc:
             # M2: place_limit_order has crossed the submit side-effect boundary.
-            # Treat SDK/network exceptions as unknown side effects, never as
-            # semantic rejection; recovery proves ACK/FILL or safe replay.
+            # Treat SDK/network exceptions as unknown side effects. A narrow
+            # synchronous venue geoblock 403 is deterministic rejection: no
+            # order id is created and live retry requires fresh egress proof.
             unk_time = datetime.now(timezone.utc).isoformat()
             try:
-                append_event(
-                    conn,
-                    command_id=command_id,
-                    event_type="SUBMIT_TIMEOUT_UNKNOWN",
-                    occurred_at=unk_time,
-                    payload={
-                        "reason": "post_submit_exception_possible_side_effect",
-                        "exception_type": type(exc).__name__,
-                        "exception_message": str(exc),
-                        "idempotency_key": idem.value,
-                    },
-                )
+                if _is_polymarket_geoblock_403(exc):
+                    append_event(
+                        conn,
+                        command_id=command_id,
+                        event_type="SUBMIT_REJECTED",
+                        occurred_at=unk_time,
+                        payload=_geoblock_rejection_payload(exc, idempotency_key=idem.value),
+                    )
+                else:
+                    append_event(
+                        conn,
+                        command_id=command_id,
+                        event_type="SUBMIT_TIMEOUT_UNKNOWN",
+                        occurred_at=unk_time,
+                        payload={
+                            "reason": "post_submit_exception_possible_side_effect",
+                            "exception_type": type(exc).__name__,
+                            "exception_message": str(exc),
+                            "idempotency_key": idem.value,
+                        },
+                    )
                 if _own_conn:
                     conn.commit()
             except Exception as inner:
                 logger.error(
-                    "_live_order: SUBMIT_TIMEOUT_UNKNOWN append_event failed after SDK exception "
+                    "_live_order: terminal SDK-exception event append failed "
                     "(command_id=%s trade_id=%s): inner=%s original=%s",
                     command_id, trade_id, inner, exc,
                 )
             logger.error("Live order SDK exception: %s", exc)
+            if _is_polymarket_geoblock_403(exc):
+                return OrderResult(
+                    trade_id=trade_id,
+                    status="rejected",
+                    reason=f"venue_rejected_geoblock_403: {exc}",
+                    submitted_price=intent.limit_price,
+                    shares=shares,
+                    order_role="entry",
+                    idempotency_key=idem.value,
+                    command_state="REJECTED",
+                )
             return OrderResult(
                 trade_id=trade_id,
                 status="unknown_side_effect",
@@ -2969,6 +3200,29 @@ def _live_order(
                     "venue_status": str(result.get("status") or ""),
                     "order_type": order_type,
                     **final_envelope_payload,
+                },
+            )
+            append_order_fact(
+                conn,
+                venue_order_id=order_id,
+                command_id=command_id,
+                state=_venue_submit_order_fact_state(result),
+                remaining_size=_venue_submit_remaining_size(result, shares),
+                matched_size=_venue_submit_matched_size(result),
+                source="REST",
+                observed_at=ack_time,
+                venue_timestamp=ack_time,
+                raw_payload_hash=_canonical_payload_hash(
+                    {
+                        "command_id": command_id,
+                        "venue_order_id": order_id,
+                        "submit_result": result,
+                    }
+                ),
+                raw_payload_json={
+                    "venue_order_id": order_id,
+                    "submit_result": _jsonable_payload(result),
+                    "source": "place_limit_order_ack",
                 },
             )
             if _own_conn:

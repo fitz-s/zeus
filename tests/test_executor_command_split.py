@@ -1,9 +1,10 @@
-# Lifecycle: created=2026-04-26; last_reviewed=2026-04-29; last_reused=2026-04-29
+# Lifecycle: created=2026-04-26; last_reviewed=2026-05-15; last_reused=2026-05-15
 # Purpose: Lock executor command split phase ordering and ACK invariants.
 # Reuse: Run when venue command persistence, live order submission, or ACK handling changes.
 # Created: 2026-04-26
-# Last reused/audited: 2026-04-29
+# Last reused/audited: 2026-05-15
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md §P1.S3
+#                  + docs/operations/task_2026-05-15_live_order_e2e_goal/LIVE_ORDER_E2E_GOAL_PLAN.md
 """INV-30 relationship tests: executor split build/persist/submit/ack.
 
 Each test names the relationship it locks, not just the function.
@@ -919,6 +920,19 @@ class TestLiveOrderCommandSplit:
         assert cmd["state"] == "ACKED", (
             f"Expected state=ACKED after successful ack, got {cmd['state']!r}"
         )
+        order_fact = mem_conn.execute(
+            "SELECT venue_order_id, command_id, state, remaining_size, matched_size, source "
+            "FROM venue_order_facts WHERE command_id = ?",
+            (command_ids_seen[0],),
+        ).fetchone()
+        assert dict(order_fact) == {
+            "venue_order_id": "ord-acked-001",
+            "command_id": command_ids_seen[0],
+            "state": "LIVE",
+            "remaining_size": "18.19",
+            "matched_size": "0",
+            "source": "REST",
+        }
 
     def test_idempotency_key_collision_raises_before_submit(self, mem_conn):
         """Duplicate idempotency key: place_limit_order must NOT be called.
@@ -1034,6 +1048,71 @@ class TestLiveOrderCommandSplit:
         assert cmd["state"] == "REJECTED", (
             f"Expected state=REJECTED after v2_preflight failure, got {cmd['state']!r}"
         )
+
+    def test_pre_sdk_collateral_reservation_failure_writes_rejected_event(
+        self,
+        mem_conn,
+        monkeypatch,
+    ):
+        """Collateral reservation failure after SUBMIT_REQUESTED is terminal."""
+        from src.execution.executor import _live_order
+        from src.risk_allocator.governor import count_unknown_side_effects
+        from src.state.collateral_ledger import CollateralInsufficient
+        from src.state.venue_command_repo import get_command, list_events
+
+        intent = _make_entry_intent(mem_conn)
+        command_ids_seen: list[str] = []
+
+        import src.state.venue_command_repo as _repo
+        _real_insert = _repo.insert_command
+
+        def capturing_insert(*args, **kwargs):
+            command_ids_seen.append(kwargs["command_id"])
+            return _real_insert(*args, **kwargs)
+
+        def fail_reservation(*args, **kwargs):
+            raise CollateralInsufficient("pusd_allowance_insufficient")
+
+        monkeypatch.setattr(
+            "src.execution.executor._reserve_collateral_for_buy",
+            fail_reservation,
+        )
+
+        with patch(
+            "src.state.venue_command_repo.insert_command",
+            side_effect=capturing_insert,
+        ), patch("src.data.polymarket_client.PolymarketClient") as MockClient:
+            result = _live_order(
+                trade_id="trd-pre-sdk-collateral",
+                intent=intent,
+                shares=18.19,
+                conn=mem_conn,
+                decision_id="dec-pre-sdk-collateral",
+            )
+
+        assert result.status == "rejected"
+        assert result.command_state == "REJECTED"
+        assert result.reason is not None
+        assert "pre_submit_collateral_reservation_failed" in result.reason
+        MockClient.assert_not_called()
+
+        assert len(command_ids_seen) == 1
+        cmd = get_command(mem_conn, command_ids_seen[0])
+        assert cmd is not None
+        assert cmd["state"] == "REJECTED"
+        events = list_events(mem_conn, command_ids_seen[0])
+        event_types = [event["event_type"] for event in events]
+        assert "SUBMIT_REQUESTED" in event_types
+        assert "SUBMIT_REJECTED" in event_types
+        assert "REVIEW_REQUIRED" not in event_types
+        rejected = [event for event in events if event["event_type"] == "SUBMIT_REJECTED"][0]
+        payload = json.loads(rejected["payload_json"])
+        assert payload["reason"] == "pre_submit_collateral_reservation_failed"
+        assert payload["side_effect_boundary_crossed"] is False
+        assert payload["sdk_submit_attempted"] is False
+        unknown_count, unknown_markets = count_unknown_side_effects(mem_conn)
+        assert unknown_count == 0
+        assert unknown_markets == ()
 
     def test_executionprice_validation_runs_before_persist(self, mem_conn):
         """NaN limit_price: ExecutionPrice rejects before any DB write.
@@ -1187,6 +1266,76 @@ class TestExitOrderCommandSplit:
         }
         assert components_by_name["decision_source_integrity"]["allowed"] is True
         assert components_by_name["decision_source_integrity"]["reason"] == "not_applicable_reduce_only"
+
+    def test_exit_pre_sdk_collateral_reservation_failure_writes_rejected_event(
+        self,
+        mem_conn,
+        monkeypatch,
+    ):
+        """Exit collateral reservation failure is terminal before SDK contact."""
+        import src.execution.executor as executor_module
+        from src.execution.executor import execute_exit_order
+        from src.risk_allocator.governor import count_unknown_side_effects
+        from src.state.collateral_ledger import CollateralInsufficient
+        from src.state.venue_command_repo import list_events
+
+        monkeypatch.setattr(executor_module, "_assert_risk_allocator_allows_exit_submit", lambda *args, **kwargs: None)
+        monkeypatch.setattr(executor_module, "_select_risk_allocator_order_type", lambda *args, **kwargs: "FOK")
+        monkeypatch.setattr(
+            executor_module,
+            "_assert_ws_gap_allows_submit",
+            lambda *args, **kwargs: {"component": "ws_gap_guard", "allowed": True, "reason": "allowed"},
+        )
+
+        def fail_reservation(*args, **kwargs):
+            raise CollateralInsufficient("ctf_allowance_insufficient")
+
+        monkeypatch.setattr(
+            executor_module,
+            "_reserve_collateral_for_sell",
+            fail_reservation,
+        )
+
+        intent = _make_exit_intent(mem_conn, trade_id="trd-exit-pre-sdk-collateral")
+
+        with patch("src.data.polymarket_client.PolymarketClient") as MockClient:
+            result = execute_exit_order(
+                intent=intent,
+                conn=mem_conn,
+                decision_id="dec-exit-pre-sdk-collateral",
+            )
+
+        assert result.status == "rejected"
+        assert result.command_state == "REJECTED"
+        assert result.reason is not None
+        assert "pre_submit_collateral_reservation_failed" in result.reason
+        MockClient.assert_not_called()
+
+        command = mem_conn.execute(
+            "SELECT command_id, state FROM venue_commands WHERE position_id = ?",
+            ("trd-exit-pre-sdk-collateral",),
+        ).fetchone()
+        assert command["state"] == "REJECTED"
+        events = list_events(mem_conn, command["command_id"])
+        event_types = [event["event_type"] for event in events]
+        assert "SUBMIT_REQUESTED" in event_types
+        assert "SUBMIT_REJECTED" in event_types
+        assert "REVIEW_REQUIRED" not in event_types
+        rejected = [event for event in events if event["event_type"] == "SUBMIT_REJECTED"][0]
+        payload = json.loads(rejected["payload_json"])
+        assert payload["reason"] == "pre_submit_collateral_reservation_failed"
+        assert payload["side_effect_boundary_crossed"] is False
+        assert payload["sdk_submit_attempted"] is False
+        unknown_count, unknown_markets = count_unknown_side_effects(mem_conn)
+        assert unknown_count == 0
+        assert unknown_markets == ()
+        mutex = mem_conn.execute(
+            "SELECT released_at, release_reason FROM exit_mutex_holdings WHERE command_id = ?",
+            (command["command_id"],),
+        ).fetchone()
+        assert mutex is not None
+        assert mutex["released_at"] is not None
+        assert mutex["release_reason"] == "REJECTED"
 
     def test_exit_binds_pre_submit_and_persists_final_submit_envelope(self, mem_conn, monkeypatch):
         """Exit ACK uses the U1 pre-submit envelope and appends final SDK facts."""
@@ -1415,6 +1564,19 @@ class TestExitOrderCommandSplit:
         cmd = get_command(mem_conn, command_ids_seen[0])
         assert cmd is not None
         assert cmd["state"] == "ACKED"
+        order_fact = mem_conn.execute(
+            "SELECT venue_order_id, command_id, state, remaining_size, matched_size, source "
+            "FROM venue_order_facts WHERE command_id = ?",
+            (command_ids_seen[0],),
+        ).fetchone()
+        assert dict(order_fact) == {
+            "venue_order_id": "ord-exit-acked-001",
+            "command_id": command_ids_seen[0],
+            "state": "LIVE",
+            "remaining_size": "10.0",
+            "matched_size": "0",
+            "source": "REST",
+        }
 
     def test_exit_idempotency_key_collision_raises_before_submit(self, mem_conn):
         """Duplicate idempotency key (exit path): place_limit_order not called."""

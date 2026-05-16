@@ -14,15 +14,15 @@ Advisory file lock infrastructure (src.data.dual_run_lock) is retained in code
 """
 
 # Created: pre-Phase-0 (K2 scheduler wiring via 27bedbd; P9A run_mode observability via 7081634)
-# Last reused/audited: 2026-04-30
-# Authority basis: Phase 3 two-system independence — docs/operations/task_2026-04-30_two_system_independence/design.md §5 Phase 3
+# Last reused/audited: 2026-05-15
+# Authority basis: Phase 3 two-system independence — docs/operations/task_2026-04-30_two_system_independence/design.md §5 Phase 3; docs/operations/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md
 
 import functools
 import logging
 import os
 import sys
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -38,6 +38,20 @@ logger = logging.getLogger("zeus")
 
 # Cross-mode lock: prevents two discovery modes from reading/writing portfolio concurrently
 _cycle_lock = threading.Lock()
+OPENING_HUNT_FIRST_DELAY_SECONDS = 30.0
+
+
+def _utc_run_time_after(seconds: float) -> datetime:
+    """Return a UTC first-run time for APScheduler interval jobs."""
+
+    return datetime.now(timezone.utc) + timedelta(seconds=seconds)
+
+
+def _day0_first_delay_seconds(discovery: dict) -> float:
+    """Stagger Day0 away from opening_hunt so equal-interval jobs do not race."""
+
+    interval_seconds = float(discovery["day0_interval_min"]) * 60.0
+    return OPENING_HUNT_FIRST_DELAY_SECONDS + (interval_seconds / 2.0)
 
 
 def _scheduler_job(job_name: str):
@@ -191,6 +205,54 @@ def _write_heartbeat() -> None:
 
 
 _venue_heartbeat_supervisor = None
+_venue_heartbeat_adapter = None
+_last_collateral_heartbeat_refresh_attempt_at = None
+COLLATERAL_HEARTBEAT_REFRESH_SECONDS = 30.0
+
+
+def _refresh_global_collateral_snapshot_if_due(
+    adapter,
+    *,
+    now: datetime | None = None,
+) -> bool:
+    """Keep live collateral truth fresh without polling every heartbeat tick."""
+
+    if adapter is None:
+        return False
+    try:
+        from src.state.collateral_ledger import get_global_ledger
+
+        ledger = get_global_ledger()
+        if ledger is None:
+            return False
+        global _last_collateral_heartbeat_refresh_attempt_at
+        current = now or datetime.now(timezone.utc)
+        last_attempt = _last_collateral_heartbeat_refresh_attempt_at
+        if last_attempt is not None:
+            if last_attempt.tzinfo is None:
+                last_attempt = last_attempt.replace(tzinfo=timezone.utc)
+            attempt_age_seconds = (
+                current - last_attempt.astimezone(timezone.utc)
+            ).total_seconds()
+            if 0 <= attempt_age_seconds < COLLATERAL_HEARTBEAT_REFRESH_SECONDS:
+                return False
+        snapshot = ledger.snapshot()
+        captured_at = snapshot.captured_at
+        if captured_at.tzinfo is None:
+            captured_at = captured_at.replace(tzinfo=timezone.utc)
+        age_seconds = (current - captured_at.astimezone(timezone.utc)).total_seconds()
+        if (
+            snapshot.authority_tier != "DEGRADED"
+            and age_seconds >= 0
+            and age_seconds < COLLATERAL_HEARTBEAT_REFRESH_SECONDS
+        ):
+            return False
+        _last_collateral_heartbeat_refresh_attempt_at = current
+        ledger.refresh(adapter)
+        return True
+    except Exception as exc:
+        logger.warning("CollateralLedger heartbeat refresh failed closed: %s", exc)
+        return False
 
 _user_channel_ingestor = None
 _user_channel_thread = None
@@ -387,7 +449,7 @@ def _start_user_channel_ingestor_if_enabled() -> None:
 @_scheduler_job("venue_heartbeat")
 def _write_venue_heartbeat() -> None:
     """Post the Polymarket venue heartbeat required for live resting orders."""
-    global _venue_heartbeat_supervisor
+    global _venue_heartbeat_supervisor, _venue_heartbeat_adapter
     import asyncio
 
     from src.control.heartbeat_supervisor import (
@@ -402,6 +464,7 @@ def _write_venue_heartbeat() -> None:
             from src.data.polymarket_client import PolymarketClient
 
             adapter = PolymarketClient()._ensure_v2_adapter()
+            _venue_heartbeat_adapter = adapter
             _venue_heartbeat_supervisor = HeartbeatSupervisor(
                 adapter,
                 cadence_seconds=heartbeat_cadence_seconds_from_env(),
@@ -429,6 +492,7 @@ def _write_venue_heartbeat() -> None:
             f"venue heartbeat unhealthy: health={status.health.value}; "
             f"error={status.last_error or ''}"
         )
+    _refresh_global_collateral_snapshot_if_due(_venue_heartbeat_adapter)
 
 
 def _startup_freshness_check() -> None:
@@ -472,25 +536,50 @@ def _startup_freshness_check() -> None:
 
 
 def _startup_world_schema_ready_check() -> None:
-    """Design §4.2: trading boot retries then FAILs if world_schema_ready.json is missing/stale.
+    """Design §4.2: trading boot retries then FAILs if DB schema readiness is absent/stale.
 
     Mirrors _startup_freshness_check retry pattern (30 × 10s = 5 min).
-    Fail-closed: raises SystemExit if sentinel absent after retries or written_at > 24h old.
+    Fail-closed: raises SystemExit if world sentinel absent after retries,
+    written_at > 24h old, or forecast DB schema is not current.
     This is the Phase 2→Phase 3 enforcement promotion per architect audit A-2.
 
     K1 split 2026-05-11: this function now delegates to _startup_db_schema_ready_check,
-    which checks BOTH world and forecasts sentinels. Kept for API compat; do not remove.
+    which checks the world sentinel plus direct forecast DB schema currency.
+    Kept for API compat; do not remove.
     """
     _startup_db_schema_ready_check()
 
 
-def _startup_db_schema_ready_check() -> None:
-    """K1 split 2026-05-11: wait for BOTH world_schema_ready + forecasts_schema_ready sentinels.
+def _startup_forecasts_schema_ready_check() -> str:
+    """Read-only forecast DB schema currency check for forecast-live split authority."""
+    import sqlite3
 
-    Replaces _startup_world_schema_ready_check (retained above as a thin shim for
-    call sites that haven't been updated yet). Both sentinels are written by the
-    ingest daemon's boot path (§5.7); either missing means ingest has not completed
-    its schema initialization for that DB class.
+    from src.state.db import ZEUS_FORECASTS_DB_PATH, assert_schema_current_forecasts
+
+    if not ZEUS_FORECASTS_DB_PATH.exists():
+        raise FileNotFoundError(f"{ZEUS_FORECASTS_DB_PATH} does not exist")
+    conn = sqlite3.connect(
+        f"file:{ZEUS_FORECASTS_DB_PATH.resolve()}?mode=ro",
+        uri=True,
+        timeout=5.0,
+    )
+    try:
+        conn.execute("PRAGMA query_only = ON")
+        assert_schema_current_forecasts(conn)
+        row = conn.execute("PRAGMA user_version").fetchone()
+        return str(row[0] if row else "unknown")
+    finally:
+        conn.close()
+
+
+def _startup_db_schema_ready_check() -> None:
+    """K1 split: wait for world sentinel and directly verify forecast DB schema.
+
+    Replaces _startup_world_schema_ready_check (retained above as a thin shim).
+    The world sentinel is still written by the world/ingest maintenance path.
+    Forecast schema currency is verified directly against zeus-forecasts.db
+    because forecast-live now owns that DB class and old forecasts_schema_ready
+    files can be stale even when the DB schema itself is current.
 
     Retry pattern: 30 × 10s = 5 min (mirrors _startup_freshness_check).
     """
@@ -502,7 +591,6 @@ def _startup_db_schema_ready_check() -> None:
 
     sentinels = [
         (STATE_DIR / "world_schema_ready.json", "world"),
-        (STATE_DIR / "forecasts_schema_ready.json", "forecasts"),
     ]
     max_age = timedelta(hours=24)
 
@@ -533,9 +621,18 @@ def _startup_db_schema_ready_check() -> None:
             except Exception as exc:
                 logger.warning("%s_schema_ready sentinel parse error: %s — retrying", label, exc)
                 missing.append(label)
+        try:
+            forecast_schema_version = _startup_forecasts_schema_ready_check()
+            logger.info(
+                "forecasts DB schema current: user_version=%s",
+                forecast_schema_version,
+            )
+        except Exception as exc:
+            logger.warning("forecasts DB schema readiness check failed: %s — retrying", exc)
+            missing.append("forecasts")
 
         if not missing:
-            return  # Both sentinels valid.
+            return  # World sentinel and forecast DB schema are valid.
 
         if attempt < BOOT_RETRY_MAX_ATTEMPTS:
             logger.info(
@@ -545,9 +642,9 @@ def _startup_db_schema_ready_check() -> None:
             time.sleep(BOOT_RETRY_INTERVAL_SECONDS)
 
     raise SystemExit(
-        "FATAL: ingest daemon must boot first; one or more DB schema sentinels not found "
-        "within 5 min (world_schema_ready.json + forecasts_schema_ready.json). "
-        "Check: launchctl list com.zeus.data-ingest"
+        "FATAL: DB schema readiness not proven within 5 min "
+        "(world_schema_ready.json + zeus-forecasts.db user_version). "
+        "Check: launchctl list com.zeus.data-ingest and launchctl list com.zeus.forecast-live"
     )
 
 
@@ -813,6 +910,7 @@ def main():
     scheduler.add_job(
         lambda: _run_mode(DiscoveryMode.OPENING_HUNT), "interval",
         minutes=discovery["opening_hunt_interval_min"], id="opening_hunt",
+        next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS),
         max_instances=1, coalesce=True,
     )
     for time_str in discovery["update_reaction_times_utc"]:
@@ -825,6 +923,7 @@ def main():
     scheduler.add_job(
         lambda: _run_mode(DiscoveryMode.DAY0_CAPTURE), "interval",
         minutes=discovery["day0_interval_min"], id="day0_capture",
+        next_run_time=_utc_run_time_after(_day0_first_delay_seconds(discovery)),
         max_instances=1, coalesce=True,
     )
     scheduler.add_job(_harvester_cycle, "interval", hours=1, id="harvester")

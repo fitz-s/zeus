@@ -94,11 +94,13 @@ Overall level = max of all individual levels. **Genuine computation error → RE
 
 ### Position lifecycle
 
-9 states in `LifecyclePhase` enum:
+10 states in `LifecyclePhase` enum:
 
 `pending_entry → active → day0_window → pending_exit → economically_closed → settled`
 
 Terminal states: `voided`, `quarantined`, `admin_closed`.
+
+Transient/recovery state: `unknown` (may transition to `quarantined` or `voided`; not terminal).
 
 Exit intent is not closure. Settlement is not exit. No code may invent phase
 strings outside the enum.
@@ -498,3 +500,7 @@ manual Claude session):
    is itself an **Important** finding (Tier 3 surface).
 
 The review doctrine surface is owned by `docs/review/AGENTS.md`.
+
+---
+
+<!-- AUDIT NOTE 2026-05-15: AGENTS.md audited against K1 DB split + data daemon authority chain (PRs #114, #116, #117). K1 DB split section (lines 47-54) correctly describes WORLD_CLASS/FORECAST_CLASS split and get_forecasts_connection_with_world() as the sanctioned cross-DB write path. No stale world.db-opening routing instructions found. Passes. -->

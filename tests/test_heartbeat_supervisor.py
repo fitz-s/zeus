@@ -1,9 +1,10 @@
-# Lifecycle: created=2026-04-27; last_reviewed=2026-04-27; last_reused=2026-04-27
+# Lifecycle: created=2026-04-27; last_reviewed=2026-05-15; last_reused=2026-05-15
 # Purpose: Lock R3 Z3 HeartbeatSupervisor fail-closed resting-order gate behavior.
 # Reuse: Run when heartbeat supervision, executor submit gating, or R3 live-money readiness changes.
 # Created: 2026-04-27
-# Last reused/audited: 2026-04-27
+# Last reused/audited: 2026-05-15
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/Z3.yaml
+#                  + docs/operations/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md
 """R3 Z3 HeartbeatSupervisor antibodies."""
 
 from __future__ import annotations
@@ -11,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sqlite3
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -68,9 +70,13 @@ def _intent() -> ExecutionIntent:
 @pytest.fixture(autouse=True)
 def _clear_global_supervisor(tmp_path, monkeypatch):
     monkeypatch.setattr("src.config.state_path", lambda name: tmp_path / name)
+    from src.state.collateral_ledger import configure_global_ledger
+
     configure_global_supervisor(None)
+    configure_global_ledger(None)
     yield
     configure_global_supervisor(None)
+    configure_global_ledger(None)
 
 
 def test_initial_state_starting_then_healthy_after_first_success():
@@ -230,6 +236,184 @@ def test_venue_heartbeat_scheduler_reports_failed_when_post_misses(tmp_path, mon
     assert "venue heartbeat unhealthy" in entry["last_failure_reason"]
     assert main._venue_heartbeat_supervisor is not None
     assert main._venue_heartbeat_supervisor.status().health is HeartbeatHealth.DEGRADED
+
+
+def test_venue_heartbeat_refreshes_stale_global_collateral(monkeypatch, tmp_path):
+    from src import main
+    from src.observability import scheduler_health
+    from src.state.collateral_ledger import (
+        CollateralLedger,
+        CollateralSnapshot,
+        configure_global_ledger,
+    )
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    ledger = CollateralLedger(conn)
+    ledger.set_snapshot(
+        CollateralSnapshot(
+            pusd_balance_micro=1_000_000,
+            pusd_allowance_micro=1_000_000,
+            usdc_e_legacy_balance_micro=0,
+            ctf_token_balances={},
+            ctf_token_allowances={},
+            reserved_pusd_for_buys_micro=0,
+            reserved_tokens_for_sells={},
+            captured_at=datetime.now(timezone.utc) - timedelta(seconds=31),
+            authority_tier="CHAIN",
+        )
+    )
+    configure_global_ledger(ledger)
+
+    class Adapter(FakeHeartbeatAdapter):
+        def __init__(self):
+            super().__init__([HeartbeatAck(ok=True, raw={"heartbeat_id": "session-A"})])
+            self.collateral_refreshes = 0
+
+        def get_collateral_payload(self):
+            self.collateral_refreshes += 1
+            return {
+                "pusd_balance_micro": 199_396_602,
+                "pusd_allowance_micro": 9_000_000,
+                "usdc_e_legacy_balance_micro": 0,
+                "ctf_token_balances": {},
+                "ctf_token_allowances": {},
+                "authority_tier": "CHAIN",
+            }
+
+    adapter = Adapter()
+
+    class Client:
+        def _ensure_v2_adapter(self):
+            return adapter
+
+    monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", Client)
+    monkeypatch.setattr(scheduler_health, "_SCHEDULER_HEALTH_PATH", tmp_path / "scheduler_health.json")
+    main._venue_heartbeat_supervisor = None
+    main._venue_heartbeat_adapter = None
+    main._last_collateral_heartbeat_refresh_attempt_at = None
+
+    main._write_venue_heartbeat()
+
+    assert adapter.collateral_refreshes == 1
+    snapshot = ledger.snapshot()
+    assert snapshot.pusd_balance_micro == 199_396_602
+    assert snapshot.pusd_allowance_micro == 9_000_000
+
+
+def test_venue_heartbeat_skips_recent_global_collateral(monkeypatch, tmp_path):
+    from src import main
+    from src.observability import scheduler_health
+    from src.state.collateral_ledger import (
+        CollateralLedger,
+        CollateralSnapshot,
+        configure_global_ledger,
+    )
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    ledger = CollateralLedger(conn)
+    ledger.set_snapshot(
+        CollateralSnapshot(
+            pusd_balance_micro=1_000_000,
+            pusd_allowance_micro=1_000_000,
+            usdc_e_legacy_balance_micro=0,
+            ctf_token_balances={},
+            ctf_token_allowances={},
+            reserved_pusd_for_buys_micro=0,
+            reserved_tokens_for_sells={},
+            captured_at=datetime.now(timezone.utc),
+            authority_tier="CHAIN",
+        )
+    )
+    configure_global_ledger(ledger)
+
+    class Adapter(FakeHeartbeatAdapter):
+        def __init__(self):
+            super().__init__([HeartbeatAck(ok=True, raw={"heartbeat_id": "session-A"})])
+            self.collateral_refreshes = 0
+
+        def get_collateral_payload(self):
+            self.collateral_refreshes += 1
+            raise AssertionError("recent collateral snapshot should not refresh")
+
+    adapter = Adapter()
+
+    class Client:
+        def _ensure_v2_adapter(self):
+            return adapter
+
+    monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", Client)
+    monkeypatch.setattr(scheduler_health, "_SCHEDULER_HEALTH_PATH", tmp_path / "scheduler_health.json")
+    main._venue_heartbeat_supervisor = None
+    main._venue_heartbeat_adapter = None
+    main._last_collateral_heartbeat_refresh_attempt_at = None
+
+    main._write_venue_heartbeat()
+
+    assert adapter.collateral_refreshes == 0
+
+
+def test_venue_heartbeat_throttles_degraded_collateral_refresh_attempts(monkeypatch, tmp_path):
+    from src import main
+    from src.observability import scheduler_health
+    from src.state.collateral_ledger import (
+        CollateralLedger,
+        CollateralSnapshot,
+        configure_global_ledger,
+    )
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    ledger = CollateralLedger(conn)
+    ledger.set_snapshot(
+        CollateralSnapshot(
+            pusd_balance_micro=0,
+            pusd_allowance_micro=0,
+            usdc_e_legacy_balance_micro=0,
+            ctf_token_balances={},
+            ctf_token_allowances={},
+            reserved_pusd_for_buys_micro=0,
+            reserved_tokens_for_sells={},
+            captured_at=datetime.now(timezone.utc) - timedelta(minutes=5),
+            authority_tier="DEGRADED",
+        )
+    )
+    configure_global_ledger(ledger)
+
+    class Adapter(FakeHeartbeatAdapter):
+        def __init__(self):
+            super().__init__(
+                [
+                    HeartbeatAck(ok=True, raw={"heartbeat_id": "session-A"}),
+                    HeartbeatAck(ok=True, raw={"heartbeat_id": "session-B"}),
+                ]
+            )
+            self.collateral_refreshes = 0
+
+        def get_collateral_payload(self):
+            self.collateral_refreshes += 1
+            raise RuntimeError("simulated collateral refresh failure")
+
+    adapter = Adapter()
+
+    class Client:
+        def _ensure_v2_adapter(self):
+            return adapter
+
+    monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", Client)
+    monkeypatch.setattr(scheduler_health, "_SCHEDULER_HEALTH_PATH", tmp_path / "scheduler_health.json")
+    main._venue_heartbeat_supervisor = None
+    main._venue_heartbeat_adapter = None
+    main._last_collateral_heartbeat_refresh_attempt_at = None
+
+    main._write_venue_heartbeat()
+    first_snapshot = ledger.snapshot()
+    main._write_venue_heartbeat()
+
+    assert adapter.collateral_refreshes == 1
+    assert first_snapshot.authority_tier == "DEGRADED"
+    assert ledger.snapshot().authority_tier == "DEGRADED"
 
 
 @pytest.mark.skip(reason="M5 exchange reconciliation owns no-resubmit proof after heartbeat loss.")

@@ -242,6 +242,129 @@ def _advance_to_cancel_pending(conn, command_id="cmd-001", venue_order_id=None):
                  occurred_at="2026-04-26T00:03:00Z")
 
 
+def _advance_to_acked(conn, command_id="cmd-001", venue_order_id="ord-001"):
+    from src.state.venue_command_repo import append_event
+
+    _advance_to_submitting(conn, command_id=command_id)
+    append_event(
+        conn,
+        command_id=command_id,
+        event_type="SUBMIT_ACKED",
+        occurred_at="2026-04-26T00:02:00Z",
+        payload={"venue_order_id": venue_order_id, "venue_status": "accepted"},
+    )
+
+
+def _seed_pending_entry_projection(
+    conn,
+    *,
+    position_id="pos-001",
+    command_id="cmd-001",
+    order_id="ord-001",
+):
+    from src.state.ledger import append_many_and_project
+
+    event_base = {
+        "position_id": position_id,
+        "event_version": 1,
+        "strategy_key": "opening_inertia",
+        "decision_id": "dec-001",
+        "snapshot_id": "snap-pos-001",
+        "command_id": command_id,
+        "caused_by": None,
+        "source_module": "tests.test_command_recovery",
+        "env": "live",
+    }
+    events = [
+        {
+            **event_base,
+            "event_id": f"{position_id}:open",
+            "sequence_no": 1,
+            "event_type": "POSITION_OPEN_INTENT",
+            "occurred_at": "2026-04-26T00:02:00Z",
+            "phase_before": None,
+            "phase_after": "pending_entry",
+            "order_id": None,
+            "idempotency_key": f"{position_id}:open",
+            "venue_status": None,
+            "payload_json": "{}",
+        },
+        {
+            **event_base,
+            "event_id": f"{position_id}:posted",
+            "sequence_no": 2,
+            "event_type": "ENTRY_ORDER_POSTED",
+            "occurred_at": "2026-04-26T00:02:00Z",
+            "phase_before": "pending_entry",
+            "phase_after": "pending_entry",
+            "order_id": order_id,
+            "idempotency_key": f"{position_id}:posted",
+            "venue_status": "pending",
+            "payload_json": "{}",
+        },
+    ]
+    projection = {
+        "position_id": position_id,
+        "phase": "pending_entry",
+        "trade_id": position_id,
+        "market_id": "condition-test",
+        "city": "Karachi",
+        "cluster": "Karachi",
+        "target_date": "2026-05-17",
+        "bin_label": "Karachi high",
+        "direction": "buy_yes",
+        "unit": "C",
+        "size_usd": 3.2,
+        "shares": 0.0,
+        "cost_basis_usd": 0.0,
+        "entry_price": 0.0,
+        "p_posterior": 0.9,
+        "last_monitor_prob": None,
+        "last_monitor_edge": None,
+        "last_monitor_market_price": None,
+        "decision_snapshot_id": "snap-pos-001",
+        "entry_method": "ens_member_counting",
+        "strategy_key": "opening_inertia",
+        "edge_source": "opening_inertia",
+        "discovery_mode": "opening_hunt",
+        "chain_state": "local_only",
+        "token_id": "tok-001",
+        "no_token_id": "tok-001-no",
+        "condition_id": "condition-test",
+        "order_id": order_id,
+        "order_status": "pending",
+        "updated_at": "2026-04-26T00:02:00Z",
+        "temperature_metric": "high",
+    }
+    append_many_and_project(conn, events, projection)
+
+
+def _append_order_fact(
+    conn,
+    *,
+    command_id="cmd-001",
+    order_id="ord-001",
+    state="CANCEL_CONFIRMED",
+    matched_size="0",
+    remaining_size="0",
+):
+    from src.state.venue_command_repo import append_order_fact
+
+    return append_order_fact(
+        conn,
+        venue_order_id=order_id,
+        command_id=command_id,
+        state=state,
+        remaining_size=remaining_size,
+        matched_size=matched_size,
+        source="REST",
+        observed_at="2026-04-26T00:05:00Z",
+        venue_timestamp="2026-04-26T00:05:00Z",
+        raw_payload_hash="f" * 64,
+        raw_payload_json={"status": state, "order_id": order_id},
+    )
+
+
 def _advance_to_review_required(conn, command_id="cmd-001"):
     """Advance to REVIEW_REQUIRED (INTENT_CREATED u2192 REVIEW_REQUIRED)."""
     from src.state.venue_command_repo import append_event
@@ -528,6 +651,72 @@ class TestRecoveryResolutionTable:
         assert _get_state(conn, "cmd-001") == "CANCEL_PENDING"
         assert summary["stayed"] == 1
         assert summary["advanced"] == 0
+
+    def test_acked_terminal_no_fill_order_fact_expires_command_and_voids_pending_entry(
+        self,
+        conn,
+        mock_client,
+    ):
+        _insert(conn)
+        _advance_to_acked(conn, venue_order_id="ord-001")
+        _seed_pending_entry_projection(conn)
+        _append_order_fact(conn, state="CANCEL_CONFIRMED", matched_size="0", remaining_size="0")
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["scanned"] == 0
+        assert summary["terminal_order_facts"]["advanced"] == 1
+        assert summary["advanced"] == 1
+        assert _get_state(conn, "cmd-001") == "EXPIRED"
+        event_types = [e["event_type"] for e in _get_events(conn, "cmd-001")]
+        assert event_types[-1] == "EXPIRED"
+        position_event = conn.execute(
+            """
+            SELECT event_type, phase_before, phase_after, command_id, order_id
+              FROM position_events
+             WHERE position_id = 'pos-001'
+             ORDER BY sequence_no DESC
+             LIMIT 1
+            """
+        ).fetchone()
+        assert dict(position_event) == {
+            "event_type": "ENTRY_ORDER_VOIDED",
+            "phase_before": "pending_entry",
+            "phase_after": "voided",
+            "command_id": "cmd-001",
+            "order_id": "ord-001",
+        }
+        current = conn.execute(
+            "SELECT phase, shares, cost_basis_usd, order_status FROM position_current WHERE position_id = 'pos-001'"
+        ).fetchone()
+        assert current["phase"] == "voided"
+        assert Decimal(str(current["shares"])) == Decimal("0")
+        assert Decimal(str(current["cost_basis_usd"])) == Decimal("0")
+        assert current["order_status"] == "canceled"
+
+    def test_acked_terminal_order_fact_with_matched_size_waits_for_fill_reconciliation(
+        self,
+        conn,
+        mock_client,
+    ):
+        _insert(conn)
+        _advance_to_acked(conn, venue_order_id="ord-001")
+        _seed_pending_entry_projection(conn)
+        _append_order_fact(conn, state="CANCEL_CONFIRMED", matched_size="1.25", remaining_size="0")
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["terminal_order_facts"]["stayed"] == 1
+        assert summary["advanced"] == 0
+        assert _get_state(conn, "cmd-001") == "ACKED"
+        current = conn.execute(
+            "SELECT phase FROM position_current WHERE position_id = 'pos-001'"
+        ).fetchone()
+        assert current["phase"] == "pending_entry"
 
     @pytest.mark.parametrize("venue_status", ["MATCHED", "MINED", "FILLED"])
     def test_unknown_side_effect_nonconfirmed_status_stays_partial_not_fill_finality(

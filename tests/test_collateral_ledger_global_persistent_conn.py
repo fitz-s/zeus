@@ -1,5 +1,5 @@
 # Created: 2026-05-13
-# Last reused/audited: 2026-05-13
+# Last reused/audited: 2026-05-15
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/Z4.yaml
 #                  + 2026-05-13 collateral_ledger singleton conn lifecycle remediation
 """Relationship test for CollateralLedger global singleton conn lifecycle.
@@ -22,6 +22,7 @@ so the singleton remains live regardless of the caller's conn lifetime.
 from __future__ import annotations
 
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -109,3 +110,46 @@ def test_global_ledger_snapshot_survives_after_transient_caller_conn_pattern(
         assert snap is not None
     finally:
         configure_global_ledger(None)
+
+
+def test_owned_persistent_ledger_refresh_commits_for_fresh_readers(
+    tmp_path: Path,
+) -> None:
+    """RELATIONSHIP: global ledger refresh -> fresh DB reader must see it.
+
+    The live daemon keeps a process-wide ledger with a persistent owned
+    connection. Heartbeat refreshes must become canonical DB truth immediately;
+    otherwise the daemon's in-memory collateral view diverges from fresh
+    read-only verifier / executor ledger instances.
+    """
+
+    db_path = tmp_path / "trades.db"
+    ledger = CollateralLedger(db_path=db_path)
+
+    class Adapter:
+        def get_collateral_payload(self):
+            return {
+                "pusd_balance_micro": 199_396_602,
+                "pusd_allowance_micro": 9_000_000,
+                "usdc_e_legacy_balance_micro": 0,
+                "ctf_token_balances": {},
+                "ctf_token_allowances": {},
+                "authority_tier": "CHAIN",
+                "captured_at": datetime.now(timezone.utc).isoformat(),
+            }
+
+    try:
+        snapshot = ledger.refresh(Adapter())
+        assert snapshot.pusd_allowance_micro == 9_000_000
+
+        fresh_conn = sqlite3.connect(str(db_path))
+        fresh_conn.row_factory = sqlite3.Row
+        try:
+            fresh = CollateralLedger(fresh_conn).snapshot()
+            assert fresh.pusd_balance_micro == 199_396_602
+            assert fresh.pusd_allowance_micro == 9_000_000
+            assert fresh.authority_tier == "CHAIN"
+        finally:
+            fresh_conn.close()
+    finally:
+        ledger.close()

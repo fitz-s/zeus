@@ -1,6 +1,7 @@
 # Created: 2026-04-26
-# Last reused/audited: 2026-04-26
+# Last reused/audited: 2026-05-15
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md §P1.S4
+#                  + docs/operations/task_2026-05-15_live_order_e2e_goal/LIVE_ORDER_E2E_GOAL_PLAN.md
 """Command recovery loop — INV-31.
 
 At cycle start, scans venue_commands for rows in IN_FLIGHT_STATES and
@@ -27,8 +28,10 @@ will add conn-threading from cycle_runner; for now self-contained.
 from __future__ import annotations
 
 import logging
+import json
 import sqlite3
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 from typing import Optional
 
 from src.execution.command_bus import (
@@ -52,6 +55,15 @@ _INACTIVE_STATUSES = frozenset({
 # Statuses that mean the cancel was acknowledged (order is gone from the book).
 _CANCEL_TERMINAL_STATUSES = frozenset({
     "CANCELLED", "CANCELED", "EXPIRED", "REJECTED",
+})
+_TERMINAL_NO_FILL_ORDER_FACT_STATES = frozenset({
+    "CANCEL_CONFIRMED",
+    "EXPIRED",
+    "VENUE_WIPED",
+})
+_ACKED_ORDER_STATES = frozenset({
+    CommandState.ACKED.value,
+    CommandState.POST_ACKED.value,
 })
 _SAFE_REPLAY_MIN_AGE_SECONDS = 15 * 60
 
@@ -110,6 +122,695 @@ def _lookup_unknown_side_effect_order(cmd: VenueCommand, client) -> tuple[str, d
         )
         return "unavailable", None
     return "unavailable", None
+
+
+_PRE_SDK_COLLATERAL_REASON_MARKERS = (
+    "pusd_allowance_insufficient",
+    "pusd_insufficient",
+    "collateral_snapshot_degraded",
+    "collateral_snapshot_stale",
+    "collateral_snapshot_future",
+    "collateral_ledger_unconfigured",
+    "ctf_allowance_insufficient",
+    "ctf_tokens_insufficient",
+)
+
+_PRE_SDK_REVIEW_REQUIRED_REASONS = frozenset({
+    "pre_submit_collateral_reservation_failed",
+    # Legacy live rows before the 2026-05-15 fix could be left SUBMITTING
+    # after pre-SDK collateral failure, then moved here by recovery.
+    "recovery_no_venue_order_id",
+})
+
+_GEOBLOCK_403_MARKERS = (
+    "status_code=403",
+    "Trading restricted in your region",
+    "geoblock",
+)
+
+
+def _dict_row(row) -> dict:
+    if row is None:
+        return {}
+    try:
+        return dict(row)
+    except Exception:
+        return {}
+
+
+def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (table,),
+    ).fetchone()
+    return row is not None
+
+
+def _json_dict(raw: object) -> dict:
+    if raw in (None, ""):
+        return {}
+    try:
+        value = json.loads(str(raw))
+    except json.JSONDecodeError:
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _review_required_command(conn: sqlite3.Connection, command_id: str) -> dict:
+    row = conn.execute(
+        "SELECT * FROM venue_commands WHERE command_id = ?",
+        (command_id,),
+    ).fetchone()
+    if row is None:
+        raise ValueError(f"unknown command_id: {command_id}")
+    command = _dict_row(row)
+    if command.get("state") != CommandState.REVIEW_REQUIRED.value:
+        raise ValueError(
+            "review clearance is only legal for REVIEW_REQUIRED commands; "
+            f"got {command.get('state')!r}"
+        )
+    return command
+
+
+def _command_events(conn: sqlite3.Connection, command_id: str) -> list[dict]:
+    return [
+        _dict_row(row)
+        for row in conn.execute(
+            """
+            SELECT *
+            FROM venue_command_events
+            WHERE command_id = ?
+            ORDER BY sequence_no
+            """,
+            (command_id,),
+        ).fetchall()
+    ]
+
+
+def _latest_review_required_payload(events: list[dict]) -> dict:
+    for event in reversed(events):
+        if event.get("event_type") != CommandEventType.REVIEW_REQUIRED.value:
+            continue
+        return _json_dict(event.get("payload_json"))
+    return {}
+
+
+def _command_envelope(conn: sqlite3.Connection, envelope_id: str | None) -> dict:
+    if not envelope_id:
+        return {}
+    row = conn.execute(
+        "SELECT * FROM venue_submission_envelopes WHERE envelope_id = ?",
+        (envelope_id,),
+    ).fetchone()
+    return _dict_row(row)
+
+
+def _count_facts(conn: sqlite3.Connection, table: str, command_id: str) -> int:
+    if not _table_exists(conn, table):
+        return 0
+    row = conn.execute(
+        f"SELECT COUNT(*) AS count FROM {table} WHERE command_id = ?",
+        (command_id,),
+    ).fetchone()
+    if row is None:
+        return 0
+    data = _dict_row(row)
+    return int(data.get("count", 0) or 0)
+
+
+def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    if not _table_exists(conn, table):
+        return set()
+    return {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})")}
+
+
+def _count_position_rows_for_command(conn: sqlite3.Connection, command: dict) -> dict[str, int]:
+    command_id = str(command.get("command_id") or "")
+    position_id = str(command.get("position_id") or "")
+    counts = {"position_events": 0, "position_current": 0}
+    event_cols = _table_columns(conn, "position_events")
+    if "command_id" in event_cols:
+        row = conn.execute(
+            "SELECT COUNT(*) AS count FROM position_events WHERE command_id = ?",
+            (command_id,),
+        ).fetchone()
+        counts["position_events"] = int((_dict_row(row).get("count") if row else 0) or 0)
+    current_cols = _table_columns(conn, "position_current")
+    if position_id and "position_id" in current_cols:
+        row = conn.execute(
+            "SELECT COUNT(*) AS count FROM position_current WHERE position_id = ?",
+            (position_id,),
+        ).fetchone()
+        counts["position_current"] = int((_dict_row(row).get("count") if row else 0) or 0)
+    return counts
+
+
+def _decimal_is_zero(value: object) -> bool:
+    try:
+        parsed = Decimal(str(value if value not in (None, "") else "0"))
+    except (InvalidOperation, TypeError, ValueError):
+        return False
+    return parsed.is_finite() and parsed == 0
+
+
+def _latest_terminal_order_fact_candidates(conn: sqlite3.Connection) -> list[dict]:
+    if not _table_exists(conn, "venue_order_facts"):
+        return []
+    states = tuple(_TERMINAL_NO_FILL_ORDER_FACT_STATES)
+    command_states = tuple(_ACKED_ORDER_STATES)
+    state_placeholders = ",".join("?" for _ in states)
+    command_state_placeholders = ",".join("?" for _ in command_states)
+    rows = conn.execute(
+        f"""
+        WITH latest_order_fact AS (
+            SELECT command_id, MAX(local_sequence) AS max_sequence
+              FROM venue_order_facts
+             GROUP BY command_id
+        )
+        SELECT
+            cmd.*,
+            fact.fact_id AS order_fact_id,
+            fact.state AS order_fact_state,
+            fact.observed_at AS order_fact_observed_at,
+            fact.venue_order_id AS order_fact_venue_order_id,
+            fact.remaining_size AS order_fact_remaining_size,
+            fact.matched_size AS order_fact_matched_size,
+            fact.source AS order_fact_source,
+            fact.raw_payload_hash AS order_fact_raw_payload_hash
+          FROM venue_commands cmd
+          JOIN latest_order_fact latest
+            ON latest.command_id = cmd.command_id
+          JOIN venue_order_facts fact
+            ON fact.command_id = latest.command_id
+           AND fact.local_sequence = latest.max_sequence
+         WHERE cmd.intent_kind = 'ENTRY'
+           AND cmd.state IN ({command_state_placeholders})
+           AND fact.state IN ({state_placeholders})
+        """,
+        (*command_states, *states),
+    ).fetchall()
+    return [_dict_row(row) for row in rows]
+
+
+def _fill_trade_fact_count(conn: sqlite3.Connection, command_id: str) -> int:
+    if not _table_exists(conn, "venue_trade_facts"):
+        return 0
+    row = conn.execute(
+        """
+        SELECT COUNT(*) AS count
+          FROM venue_trade_facts
+         WHERE command_id = ?
+           AND state IN ('MATCHED', 'MINED', 'CONFIRMED')
+           AND CAST(COALESCE(filled_size, '0') AS REAL) > 0
+        """,
+        (command_id,),
+    ).fetchone()
+    return int((_dict_row(row).get("count") if row else 0) or 0)
+
+
+def _latest_position_env(conn: sqlite3.Connection, position_id: str) -> str:
+    cols = _table_columns(conn, "position_events")
+    if "env" not in cols or "position_id" not in cols:
+        return "live"
+    row = conn.execute(
+        """
+        SELECT env
+          FROM position_events
+         WHERE position_id = ?
+         ORDER BY sequence_no DESC, rowid DESC
+         LIMIT 1
+        """,
+        (position_id,),
+    ).fetchone()
+    value = _dict_row(row).get("env") if row is not None else None
+    return str(value or "live")
+
+
+def _latest_position_sequence(conn: sqlite3.Connection, position_id: str) -> int:
+    cols = _table_columns(conn, "position_events")
+    if "position_id" not in cols or "sequence_no" not in cols:
+        return 0
+    row = conn.execute(
+        "SELECT COALESCE(MAX(sequence_no), 0) AS max_sequence FROM position_events WHERE position_id = ?",
+        (position_id,),
+    ).fetchone()
+    return int((_dict_row(row).get("max_sequence") if row else 0) or 0)
+
+
+def _position_current_for_terminal_order(
+    conn: sqlite3.Connection,
+    *,
+    command: dict,
+    order_id: str,
+) -> dict:
+    if not _table_exists(conn, "position_current"):
+        raise ValueError("position_current table missing")
+    cols = _table_columns(conn, "position_current")
+    clauses: list[str] = []
+    params: list[str] = []
+    position_id = str(command.get("position_id") or "")
+    if position_id and "position_id" in cols:
+        clauses.append("position_id = ?")
+        params.append(position_id)
+    if order_id and "order_id" in cols:
+        clauses.append("order_id = ?")
+        params.append(order_id)
+    if not clauses:
+        raise ValueError("cannot locate position_current without position_id or order_id")
+    row = conn.execute(
+        f"SELECT * FROM position_current WHERE {' OR '.join(clauses)} LIMIT 1",
+        tuple(params),
+    ).fetchone()
+    if row is None:
+        raise ValueError("terminal order fact has no matching position_current row")
+    return _dict_row(row)
+
+
+def _append_entry_order_voided_projection(
+    conn: sqlite3.Connection,
+    *,
+    command: dict,
+    order_fact: dict,
+    occurred_at: str,
+) -> None:
+    from src.state.ledger import append_many_and_project
+
+    order_id = str(order_fact.get("order_fact_venue_order_id") or command.get("venue_order_id") or "")
+    current = _position_current_for_terminal_order(conn, command=command, order_id=order_id)
+    position_id = str(current.get("position_id") or "")
+    if not position_id:
+        raise ValueError("position_current row missing position_id")
+    current_phase = str(current.get("phase") or "")
+    if current_phase == "voided":
+        return
+    if current_phase != "pending_entry":
+        raise ValueError(
+            "terminal no-fill order fact can only void pending_entry positions; "
+            f"got phase={current_phase!r}"
+        )
+    if not _decimal_is_zero(current.get("shares")) or not _decimal_is_zero(current.get("cost_basis_usd")):
+        raise ValueError("terminal no-fill order fact cannot void non-zero-share position")
+
+    next_sequence = _latest_position_sequence(conn, position_id) + 1
+    event_id = f"{position_id}:entry_order_voided:{command['command_id']}"
+    idempotency_key = event_id
+    payload = {
+        "reason": "venue_terminal_no_fill",
+        "command_id": command["command_id"],
+        "venue_order_id": order_id,
+        "order_fact_id": order_fact.get("order_fact_id"),
+        "order_fact_state": order_fact.get("order_fact_state"),
+        "remaining_size": order_fact.get("order_fact_remaining_size"),
+        "matched_size": order_fact.get("order_fact_matched_size"),
+        "source": order_fact.get("order_fact_source"),
+    }
+    event = {
+        "event_id": event_id,
+        "position_id": position_id,
+        "event_version": 1,
+        "sequence_no": next_sequence,
+        "event_type": "ENTRY_ORDER_VOIDED",
+        "occurred_at": occurred_at,
+        "phase_before": "pending_entry",
+        "phase_after": "voided",
+        "strategy_key": current.get("strategy_key"),
+        "decision_id": command.get("decision_id"),
+        "snapshot_id": current.get("decision_snapshot_id") or command.get("snapshot_id"),
+        "order_id": order_id,
+        "command_id": command["command_id"],
+        "caused_by": f"venue_order_fact:{order_fact.get('order_fact_id')}",
+        "idempotency_key": idempotency_key,
+        "venue_status": order_fact.get("order_fact_state"),
+        "source_module": "src.execution.command_recovery",
+        "env": _latest_position_env(conn, position_id),
+        "payload_json": json.dumps(payload, sort_keys=True, default=str),
+    }
+    projection = dict(current)
+    projection.update(
+        {
+            "phase": "voided",
+            "shares": 0.0,
+            "cost_basis_usd": 0.0,
+            "entry_price": 0.0,
+            "order_id": order_id,
+            "order_status": "canceled",
+            "updated_at": occurred_at,
+        }
+    )
+    append_many_and_project(conn, [event], projection)
+
+
+def reconcile_terminal_order_facts(conn: sqlite3.Connection) -> dict:
+    """Close ACKED entry commands whose latest venue order fact is terminal no-fill."""
+
+    summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+    for row in _latest_terminal_order_fact_candidates(conn):
+        summary["scanned"] += 1
+        command_id = str(row.get("command_id") or "")
+        order_id = str(row.get("order_fact_venue_order_id") or row.get("venue_order_id") or "")
+        try:
+            if not order_id:
+                logger.warning("terminal order fact candidate %s has no venue order id", command_id)
+                summary["errors"] += 1
+                continue
+            if not _decimal_is_zero(row.get("order_fact_matched_size")):
+                logger.info(
+                    "terminal order fact candidate %s has matched_size=%s; leaving for fill reconciliation",
+                    command_id, row.get("order_fact_matched_size"),
+                )
+                summary["stayed"] += 1
+                continue
+            if _fill_trade_fact_count(conn, command_id) > 0:
+                logger.info(
+                    "terminal order fact candidate %s has fill trade facts; leaving for fill reconciliation",
+                    command_id,
+                )
+                summary["stayed"] += 1
+                continue
+            occurred_at = str(row.get("order_fact_observed_at") or _now_iso())
+            safe_command_id = "".join(ch if ch.isalnum() else "_" for ch in command_id)
+            sp_name = f"sp_terminal_order_fact_{safe_command_id}"
+            conn.execute(f"SAVEPOINT {sp_name}")
+            try:
+                append_event(
+                    conn,
+                    command_id=command_id,
+                    event_type=CommandEventType.EXPIRED.value,
+                    occurred_at=occurred_at,
+                    payload={
+                        "reason": "venue_terminal_no_fill",
+                        "venue_order_id": order_id,
+                        "venue_order_fact_id": row.get("order_fact_id"),
+                        "venue_order_fact_state": row.get("order_fact_state"),
+                        "matched_size": row.get("order_fact_matched_size"),
+                        "remaining_size": row.get("order_fact_remaining_size"),
+                        "source": row.get("order_fact_source"),
+                    },
+                )
+                _append_entry_order_voided_projection(
+                    conn,
+                    command=row,
+                    order_fact=row,
+                    occurred_at=occurred_at,
+                )
+                conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+            except Exception:
+                conn.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
+                conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+                raise
+            summary["advanced"] += 1
+            logger.info(
+                "recovery: command %s ACKED terminal order fact %s -> EXPIRED and ENTRY_ORDER_VOIDED",
+                command_id,
+                row.get("order_fact_state"),
+            )
+        except Exception as exc:
+            logger.error(
+                "recovery: terminal order fact reconciliation failed for command %s: %s",
+                command_id,
+                exc,
+            )
+            summary["errors"] += 1
+    return summary
+
+
+def _review_no_side_effect_predicates(
+    conn: sqlite3.Connection,
+    command: dict,
+) -> tuple[dict, list[str]]:
+    command_id = str(command["command_id"])
+    events = _command_events(conn, command_id)
+    review_required_payload = _latest_review_required_payload(events)
+    review_required_reason = str(review_required_payload.get("reason") or "").strip()
+    payloads = [_json_dict(event.get("payload_json")) for event in events]
+    final_envelope_ids = [
+        payload.get("final_submission_envelope_id")
+        for payload in payloads
+        if str(payload.get("final_submission_envelope_id") or "").strip()
+    ]
+    event_types = {str(event.get("event_type") or "") for event in events}
+    unsafe_event_types = {
+        "POST_ACKED",
+        "SUBMIT_ACKED",
+        "SUBMIT_UNKNOWN",
+        "SUBMIT_TIMEOUT_UNKNOWN",
+        "CLOSED_MARKET_UNKNOWN",
+        "PARTIAL_FILL_OBSERVED",
+        "FILL_CONFIRMED",
+    }
+    envelope = _command_envelope(conn, command.get("envelope_id"))
+    order_fact_count = _count_facts(conn, "venue_order_facts", command_id)
+    trade_fact_count = _count_facts(conn, "venue_trade_facts", command_id)
+    predicates = {
+        "no_venue_order_id": not str(command.get("venue_order_id") or "").strip(),
+        "no_final_submission_envelope": not final_envelope_ids,
+        "no_raw_response": not str(envelope.get("raw_response_json") or "").strip(),
+        "no_signed_order": (
+            envelope.get("signed_order_blob") in (None, b"", "")
+            and not str(envelope.get("signed_order_hash") or "").strip()
+        ),
+        "no_order_facts": order_fact_count == 0,
+        "no_trade_facts": trade_fact_count == 0,
+        "no_submit_side_effect_events": not (event_types & unsafe_event_types),
+        "review_required_reason_pre_sdk": (
+            review_required_reason in _PRE_SDK_REVIEW_REQUIRED_REASONS
+        ),
+    }
+    failures = [name for name, ok in predicates.items() if not ok]
+    return predicates, failures
+
+
+def _submit_unknown_command(conn: sqlite3.Connection, command_id: str) -> dict:
+    row = conn.execute(
+        "SELECT * FROM venue_commands WHERE command_id = ?",
+        (command_id,),
+    ).fetchone()
+    if row is None:
+        raise ValueError(f"unknown command_id: {command_id}")
+    command = _dict_row(row)
+    if command.get("state") != CommandState.SUBMIT_UNKNOWN_SIDE_EFFECT.value:
+        raise ValueError(
+            "geoblock clearance is only legal for SUBMIT_UNKNOWN_SIDE_EFFECT commands; "
+            f"got {command.get('state')!r}"
+        )
+    return command
+
+
+def _latest_event_payload(events: list[dict]) -> tuple[str, dict]:
+    if not events:
+        return "", {}
+    latest = events[-1]
+    return str(latest.get("event_type") or ""), _json_dict(latest.get("payload_json"))
+
+
+def _geoblock_403_predicates(
+    conn: sqlite3.Connection,
+    command: dict,
+) -> tuple[dict, list[str]]:
+    command_id = str(command["command_id"])
+    events = _command_events(conn, command_id)
+    latest_event_type, latest_payload = _latest_event_payload(events)
+    payloads = [_json_dict(event.get("payload_json")) for event in events]
+    final_envelope_ids = [
+        payload.get("final_submission_envelope_id")
+        for payload in payloads
+        if str(payload.get("final_submission_envelope_id") or "").strip()
+    ]
+    envelope = _command_envelope(conn, command.get("envelope_id"))
+    position_counts = _count_position_rows_for_command(conn, command)
+    exception_message = str(latest_payload.get("exception_message") or "")
+    predicates = {
+        "latest_event_is_submit_timeout_unknown": (
+            latest_event_type == CommandEventType.SUBMIT_TIMEOUT_UNKNOWN.value
+        ),
+        "payload_reason_post_submit_exception": (
+            latest_payload.get("reason") == "post_submit_exception_possible_side_effect"
+        ),
+        "exception_type_polyapi": latest_payload.get("exception_type") == "PolyApiException",
+        "exception_message_geoblock_403": all(
+            marker in exception_message for marker in _GEOBLOCK_403_MARKERS
+        ),
+        "no_venue_order_id": not str(command.get("venue_order_id") or "").strip(),
+        "no_final_submission_envelope": not final_envelope_ids,
+        "no_envelope_order_id": not str(envelope.get("order_id") or "").strip(),
+        "no_raw_response": not str(envelope.get("raw_response_json") or "").strip(),
+        "no_signed_order": (
+            envelope.get("signed_order_blob") in (None, b"", "")
+            and not str(envelope.get("signed_order_hash") or "").strip()
+        ),
+        "no_order_facts": _count_facts(conn, "venue_order_facts", command_id) == 0,
+        "no_trade_facts": _count_facts(conn, "venue_trade_facts", command_id) == 0,
+        "no_position_events": position_counts["position_events"] == 0,
+        "no_position_current": position_counts["position_current"] == 0,
+    }
+    failures = [name for name, ok in predicates.items() if not ok]
+    return predicates, failures
+
+
+def _decision_log_pre_sdk_proof(conn: sqlite3.Connection, decision_id: str) -> dict | None:
+    if not _table_exists(conn, "decision_log"):
+        return None
+    rows = conn.execute(
+        """
+        SELECT id, mode, started_at, completed_at, artifact_json
+        FROM decision_log
+        WHERE artifact_json LIKE ?
+        ORDER BY id DESC
+        LIMIT 20
+        """,
+        (f"%{decision_id}%",),
+    ).fetchall()
+    for row in rows:
+        record = _dict_row(row)
+        artifact = _json_dict(record.get("artifact_json"))
+        for case in artifact.get("no_trade_cases") or []:
+            if not isinstance(case, dict) or case.get("decision_id") != decision_id:
+                continue
+            reasons = case.get("rejection_reasons") or []
+            if isinstance(reasons, str):
+                reasons = [reasons]
+            reason_text = " | ".join(str(reason) for reason in reasons)
+            if case.get("rejection_stage") != "EXECUTION_FAILED":
+                return None
+            if "execution_intent_rejected:" not in reason_text:
+                return None
+            if not any(marker in reason_text for marker in _PRE_SDK_COLLATERAL_REASON_MARKERS):
+                return None
+            return {
+                "decision_log_id": record.get("id"),
+                "mode": record.get("mode"),
+                "started_at": record.get("started_at"),
+                "completed_at": record.get("completed_at"),
+                "rejection_stage": case.get("rejection_stage"),
+                "rejection_reasons": list(reasons),
+                "city": case.get("city"),
+                "target_date": case.get("target_date"),
+                "range_label": case.get("range_label"),
+            }
+    return None
+
+
+def clear_review_required_no_venue_side_effect(
+    conn: sqlite3.Connection,
+    command_id: str,
+    *,
+    source_commit: str,
+    source_function: str,
+    source_reason: str,
+    reviewed_by: str = "operator",
+    occurred_at: str | None = None,
+) -> dict:
+    """Terminalize a REVIEW_REQUIRED command only with positive no-side-effect proof.
+
+    This is not a generic state editor. It requires DB predicates proving no
+    venue identity/facts/final envelope exist and decision-log evidence that
+    the command's decision failed at a pre-SDK collateral boundary.
+    """
+
+    command = _review_required_command(conn, command_id)
+    predicates, predicate_failures = _review_no_side_effect_predicates(conn, command)
+    if predicate_failures:
+        raise ValueError(
+            "review clearance predicates failed: " + ", ".join(sorted(predicate_failures))
+        )
+    decision_id = str(command.get("decision_id") or "")
+    decision_proof = _decision_log_pre_sdk_proof(conn, decision_id)
+    if decision_proof is None:
+        raise ValueError(
+            "review clearance requires decision_log EXECUTION_FAILED "
+            "execution_intent_rejected collateral proof"
+        )
+    if not str(source_commit or "").strip():
+        raise ValueError("source_commit is required")
+    if source_function not in {"_live_order", "execute_exit_order"}:
+        raise ValueError("source_function must identify the executor boundary")
+    if not str(source_reason or "").strip():
+        raise ValueError("source_reason is required")
+    now = occurred_at or _now_iso()
+    payload = {
+        "schema_version": 1,
+        "reason": "review_cleared_no_venue_side_effect",
+        "command_id": command_id,
+        "decision_id": decision_id,
+        "proof_class": "pre_sdk_no_side_effect",
+        "side_effect_boundary_crossed": False,
+        "sdk_submit_attempted": False,
+        "required_predicates": predicates,
+        "source_proof": {
+            "source_commit": source_commit,
+            "source_function": source_function,
+            "source_reason": source_reason,
+            "decision_id": decision_id,
+            "deployed_source_boundary": (
+                "collateral reservation occurs before PolymarketClient construction "
+                "and before place_limit_order"
+            ),
+        },
+        "review_required_proof": {
+            "reason": _latest_review_required_payload(
+                _command_events(conn, command_id)
+            ).get("reason"),
+            "allowed_reasons": sorted(_PRE_SDK_REVIEW_REQUIRED_REASONS),
+        },
+        "decision_log_proof": decision_proof,
+        "reviewed_by": reviewed_by,
+        "cleared_at": now,
+    }
+    append_event(
+        conn,
+        command_id=command_id,
+        event_type=CommandEventType.REVIEW_CLEARED_NO_VENUE_SIDE_EFFECT.value,
+        occurred_at=now,
+        payload=payload,
+    )
+    return payload
+
+
+def clear_submit_unknown_geoblock_403(
+    conn: sqlite3.Connection,
+    command_id: str,
+    *,
+    reviewed_by: str = "operator",
+    occurred_at: str | None = None,
+) -> dict:
+    """Terminalize a deterministic CLOB geoblock 403 as rejected.
+
+    This is intentionally narrower than general unknown-side-effect recovery.
+    It only handles synchronous Polymarket ``PolyApiException`` geoblock 403
+    responses with no persisted venue identity, final envelope, order facts,
+    trade facts, or position records. Timeouts, 5xx, connection failures, and
+    ambiguous SDK exceptions remain unresolved.
+    """
+
+    command = _submit_unknown_command(conn, command_id)
+    predicates, predicate_failures = _geoblock_403_predicates(conn, command)
+    if predicate_failures:
+        raise ValueError(
+            "geoblock 403 terminalization predicates failed: "
+            + ", ".join(sorted(predicate_failures))
+        )
+    now = occurred_at or _now_iso()
+    payload = {
+        "schema_version": 1,
+        "reason": "venue_rejected_geoblock_403",
+        "command_id": command_id,
+        "decision_id": str(command.get("decision_id") or ""),
+        "proof_class": "deterministic_venue_geoblock_403",
+        "side_effect_boundary_crossed": True,
+        "venue_order_created": False,
+        "required_predicates": predicates,
+        "idempotency_key": str(command.get("idempotency_key") or ""),
+        "reviewed_by": reviewed_by,
+        "cleared_at": now,
+    }
+    append_event(
+        conn,
+        command_id=command_id,
+        event_type=CommandEventType.SUBMIT_REJECTED.value,
+        occurred_at=now,
+        payload=payload,
+    )
+    return payload
 
 
 def _reconcile_row(
@@ -546,6 +1247,12 @@ def reconcile_unresolved_commands(
                 summary["stayed"] += 1
             else:
                 summary["errors"] += 1
+
+        terminal_summary = reconcile_terminal_order_facts(conn)
+        summary["terminal_order_facts"] = terminal_summary
+        summary["advanced"] += terminal_summary["advanced"]
+        summary["stayed"] += terminal_summary["stayed"]
+        summary["errors"] += terminal_summary["errors"]
 
     finally:
         if own_conn:

@@ -19,6 +19,11 @@ from pathlib import Path
 from typing import Any
 
 try:
+    from topology_v_next.cli_integration_shim import maybe_shadow_compare
+except ModuleNotFoundError:  # pytest imports this as scripts.topology_doctor
+    from scripts.topology_v_next.cli_integration_shim import maybe_shadow_compare
+
+try:
     from _yaml_bootstrap import import_yaml
 except ModuleNotFoundError:  # pytest imports this as scripts.topology_doctor
     from scripts._yaml_bootstrap import import_yaml
@@ -2649,6 +2654,7 @@ def run_navigation(
     artifact_target: str | None = None,
     merge_state: str | None = None,
     companion_loop_batch_cap: int | None = None,
+    v_next_shadow: bool = False,
 ) -> dict[str, Any]:
     checks = {
         "context_budget": run_context_budget(),
@@ -2750,7 +2756,7 @@ def run_navigation(
         nav_ok = (not legacy_blocking) and admission_ok
     else:
         nav_ok = (not direct_blockers) and admission_ok
-    return {
+    payload = {
         "ok": nav_ok,
         "command_ok": True,
         "ok_semantics": "command_success_only_not_write_authorization",
@@ -2792,6 +2798,12 @@ def run_navigation(
             "planning_lock": "requires caller-supplied --changed-files and optional --plan-evidence",
         },
     }
+    if v_next_shadow:
+        payload = maybe_shadow_compare(
+            payload, task=task, files=requested_paths,
+            intent=intent, v_next_shadow=v_next_shadow,
+        )
+    return payload
 
 
 def _admission_typed_issue(

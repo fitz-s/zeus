@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+    "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.zeus.maintenance</string>
+
+	<key>ProgramArguments</key>
+	<array>
+		<string>/usr/bin/env</string>
+		<string>python3</string>
+		<string>ZEUS_REPO_PLACEHOLDER/scripts/maintenance_worker_install.py</string>
+		<string>--run</string>
+	</array>
+
+	<key>WorkingDirectory</key>
+	<string>ZEUS_REPO_PLACEHOLDER</string>
+
+	<!-- StartCalendarInterval: run at 04:30 local time daily.
+	     Hour=4, Minute=30 is Chicago local (America/Chicago) which is the
+	     Zeus canonical timezone per CLAUDE.md §"Time handling". -->
+	<key>StartCalendarInterval</key>
+	<dict>
+		<key>Hour</key>
+		<integer>4</integer>
+		<key>Minute</key>
+		<integer>30</integer>
+	</dict>
+
+	<!-- RunAtLoad: false — do not run immediately on launchd load.
+	     First tick is at the next 04:30 occurrence. -->
+	<key>RunAtLoad</key>
+	<false/>
+
+	<key>KeepAlive</key>
+	<false/>
+
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>MAINTENANCE_WORKER_CONFIG</key>
+		<string>ZEUS_REPO_PLACEHOLDER/state/maintenance_state/maintenance_worker_config.json</string>
+		<key>ZEUS_REPO</key>
+		<string>ZEUS_REPO_PLACEHOLDER</string>
+		<key>PYTHONPATH</key>
+		<string>ZEUS_REPO_PLACEHOLDER</string>
+	</dict>
+
+	<key>StandardOutPath</key>
+	<string>ZEUS_REPO_PLACEHOLDER/state/maintenance_worker.log</string>
+
+	<key>StandardErrorPath</key>
+	<string>ZEUS_REPO_PLACEHOLDER/state/maintenance_worker_error.log</string>
+
+	<!-- ThrottleInterval: minimum seconds between consecutive launches.
+	     86400 = 24 hours — prevents double-fire on wake from sleep. -->
+	<key>ThrottleInterval</key>
+	<integer>86400</integer>
+</dict>
+</plist>

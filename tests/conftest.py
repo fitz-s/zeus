@@ -191,6 +191,7 @@ _WLA_SQLITE_CONNECT_ALLOWLIST = frozenset({
     # world DB or writes a separate DB (risk_state.db). Rationale comments are
     # co-located in SQLITE_CONNECT_ALLOWLIST inside src/state/db_writer_lock.py.
     "src/ingest_main.py",                           # RO: reads condition_id for UMA listener (Track A.6 #246)
+    "src/main.py",                                  # read_only_ro_uri: live boot verifies zeus-forecasts.db user_version with mode=ro + query_only after forecast-live split
     "src/observability/status_summary.py",          # RO: status dashboard read-only (Track A.6 #246)
     "src/riskguard/discord_alerts.py",              # WRITE risk_state.db only; not world-db BULK scope (Track A.6 #246)
     "src/control/cli/promote_entry_forecast.py",    # read_only_ro_uri (operator CLI; opens world-db with mode=ro)
@@ -218,6 +219,7 @@ _WLA_SQLITE_CONNECT_ALLOWLIST = frozenset({
     "scripts/learning_loop_observation_weekly.py",  # read_only_ro_uri
     "scripts/check_schema_version.py",               # in_memory_only (":memory:" only — schema drift CI gate)
     "scripts/check_data_pipeline_live_e2e.py",      # read_only_ro_uri (live E2E verifier opens runtime DBs with mode=ro only)
+    "scripts/check_live_order_e2e.py",              # read_only_ro_uri (live order verifier opens runtime DBs with mode=ro + query_only)
     "scripts/produce_activation_evidence.py",       # in_memory_only (":memory:" only)
     "scripts/replay_correctness_gate.py",           # read_only (SELECT-only)
     "scripts/state_census.py",                      # read_only_ro_uri

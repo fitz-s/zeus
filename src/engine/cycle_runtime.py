@@ -507,12 +507,14 @@ def _attach_corrected_pricing_authority(
         cost_basis=cost_basis,
     )
     final_intent = None
-    if is_marketable and not final_unsupported_reason:
+    if not is_marketable and immediate_order_type not in {"GTC", "GTD"}:
+        final_unsupported_reason = "PASSIVE_LIMIT_REQUIRES_GTC_OR_GTD_POST_ONLY"
+    if not final_unsupported_reason:
         final_intent = FinalExecutionIntent.from_hypothesis_and_cost_basis(
             hypothesis=hypothesis,
             cost_basis=cost_basis,
             order_type=immediate_order_type,
-            post_only=False,
+            post_only=not is_marketable,
             cancel_after=cancel_after,
             max_slippage_bps=Decimal("200"),
             event_id=snapshot_event_id,
@@ -2967,13 +2969,19 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                             sweep_payload = reprice_payload.get("corrected_pricing_shadow")
                             if not isinstance(sweep_payload, dict):
                                 sweep_payload = reprice_payload
-                            try:
-                                submitted_shares = Decimal(str(sweep_payload["sweep_submitted_shares"]))
-                                filled_shares = Decimal(str(sweep_payload["sweep_filled_shares"]))
-                            except (KeyError, TypeError, ValueError) as exc:
-                                raise ValueError("FINAL_EXECUTION_INTENT_MISSING: sweep depth unavailable") from exc
-                            if filled_shares < submitted_shares:
-                                raise ValueError("depth_below_submitted_shares")
+                            if getattr(final_intent, "order_policy", "") == "post_only_passive_limit":
+                                if getattr(final_intent, "post_only", False) is not True:
+                                    raise ValueError("FINAL_EXECUTION_INTENT_MISSING: passive intent is not post_only")
+                                if sweep_payload.get("sweep_depth_status") != "NOT_MARKETABLE_PASSIVE_LIMIT":
+                                    raise ValueError("FINAL_EXECUTION_INTENT_MISSING: passive non-crossing proof unavailable")
+                            else:
+                                try:
+                                    submitted_shares = Decimal(str(sweep_payload["sweep_submitted_shares"]))
+                                    filled_shares = Decimal(str(sweep_payload["sweep_filled_shares"]))
+                                except (KeyError, TypeError, ValueError) as exc:
+                                    raise ValueError("FINAL_EXECUTION_INTENT_MISSING: sweep depth unavailable") from exc
+                                if filled_shares < submitted_shares:
+                                    raise ValueError("depth_below_submitted_shares")
                             if (
                                 reprice_payload.get("final_execution_intent_id")
                                 != final_intent.hypothesis_id

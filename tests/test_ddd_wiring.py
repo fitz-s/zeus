@@ -1,5 +1,5 @@
 # Created: 2026-05-03
-# Last reused/audited: 2026-05-04
+# Last reused/audited: 2026-05-15
 # Authority basis: RERUN_PLAN_v2.md §5 D-E (live wiring) + F2 (fail-CLOSED)
 # Lifecycle: created=2026-05-03; last_reviewed=2026-05-04; last_reused=2026-05-04
 # Purpose: DDD live wiring coverage, including may4math F4 city-timezone window elapsed refinement.
@@ -248,6 +248,39 @@ def test_fail_closed_no_train_data(conn, floors_and_nstar):
         )
     assert excinfo.value.code == "DDD_NO_TRAIN_DATA"
     assert "Hong Kong" in excinfo.value.reason
+
+
+def test_fail_closed_missing_nstar_config(conn, tmp_path, monkeypatch):
+    floors = {
+        "_metadata": {"schema_version": "2"},
+        "per_city": {
+            "NYC": {
+                "final_floor": 1.0,
+                "floor_source": "empirical_p05",
+            },
+        },
+    }
+    floors_path = tmp_path / "floors.json"
+    floors_path.write_text(json.dumps(floors))
+
+    from src.oracle import data_density_discount as ddd_mod
+    monkeypatch.setattr(ddd_mod, "_DEFAULT_FLOORS_PATH", floors_path)
+    monkeypatch.setattr(ddd_mod, "_DEFAULT_NSTAR_PATH", tmp_path / "missing_nstar.json")
+    reset_caches()
+
+    with pytest.raises(DDDFailClosed) as excinfo:
+        evaluate_ddd_for_decision(
+            conn=conn,
+            city="NYC",
+            target_date="2026-05-02",
+            metric="high",
+            peak_hour=15.0,
+            season="MAM",
+            mismatch_rate=0.0,
+        )
+    assert excinfo.value.code == "DDD_CONFIG_MISSING"
+    assert "N_star config not found" in excinfo.value.reason
+    reset_caches()
 
 
 def test_fail_closed_excluded_workstream_a(conn, floors_and_nstar):
