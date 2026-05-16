@@ -1,15 +1,17 @@
-# World DB schema version sentinel.
+# Legacy world DB schema version sentinel.
 # Authority basis: docs/operations/task_2026-04-30_two_system_independence/design.md §1 axis 4
 # Created: 2026-05-01
-# Last reviewed: 2026-05-01
+# Last reviewed: 2026-05-16
 #
 # Bump-on-migration contract:
 #   When a migration changes the required schema (adds/removes a column listed
 #   in architecture/world_schema_manifest.yaml), increment `version` by 1 and
-#   commit as part of the migration. The ingest daemon writes this version into
-#   state/world_schema_ready.json at boot. Trading reads world_schema_ready.json
-#   at boot and refuses to start if the version does not match its local copy of
-#   this file (Phase 3 enforcement — Phase 2 warns only).
+#   commit as part of the migration while this legacy surface remains present.
+#   Historical ingest code may still write this version into
+#   state/world_schema_ready.json at boot, but that JSON file is no longer live
+#   trading boot authority after the forecast-live split. Trading now proves
+#   schema currency directly from zeus-world.db and zeus-forecasts.db
+#   PRAGMA user_version checks in src/main.py.
 #
 # Current value: 1 (initial baseline, matches Phase 1/2/3 schema)
 
