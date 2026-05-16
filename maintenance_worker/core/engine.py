@@ -42,6 +42,12 @@ from maintenance_worker.core.guards import (
     GuardReport,
     evaluate_all,
 )
+from maintenance_worker.core.install_metadata import (
+    DryRunFloor,
+    InstallMetadata,
+    enforce_dry_run_floor,
+    read_install_metadata,
+)
 from maintenance_worker.core.kill_switch import (
     check_scheduler_invocation,
     post_mutation_detector,
@@ -201,10 +207,20 @@ class MaintenanceEngine:
         # ── Phase 5: APPLY_DECISIONS ────────────────────────────────────────
         # Stages filesystem mutations only. No git commit or PR (P5.5 boundary).
         # MANUAL_CLI invocation mode forces dry_run_only regardless of live_default.
+        # F2: read install_metadata once per tick; used by dry-run floor gate inside
+        # _apply_decisions. None if absent (engine started before install script ran).
+        install_meta: Optional[InstallMetadata] = None
+        try:
+            install_meta = read_install_metadata(config.state_dir)
+        except (FileNotFoundError, Exception):
+            pass  # absent or unreadable — floor gate skipped (safe: defaults to dry_run_only)
+
         force_dry_run = invocation_mode == InvocationMode.MANUAL_CLI
         apply_results: list[ApplyResult] = []
         for task, manifest in zip(candidates, manifests):
-            apply_result = self._apply_decisions(task, manifest, force_dry_run=force_dry_run)
+            apply_result = self._apply_decisions(
+                task, manifest, force_dry_run=force_dry_run, install_meta=install_meta
+            )
             apply_results.append(apply_result)
         result.apply_results = apply_results
         result.state_machine_breadcrumbs.append(("APPLY_DECISIONS", True))
@@ -278,6 +294,7 @@ class MaintenanceEngine:
         task: TaskSpec,
         proposal: ProposalManifest,
         force_dry_run: bool = False,
+        install_meta: Optional[InstallMetadata] = None,
     ) -> ApplyResult:
         """
         Stage filesystem mutations for one task.
@@ -286,8 +303,13 @@ class MaintenanceEngine:
         or open PRs — P5.5 ApplyPublisher.publish() owns those steps
         (SCAFFOLD §3.5).
 
-        If force_dry_run=True (MANUAL_CLI invocation) or task has no ack,
-        returns dry_run_only=True with empty move/delete/create sets.
+        If force_dry_run=True (MANUAL_CLI invocation), dry-run floor not yet
+        met (< 30 days since install_metadata.first_run_at and task is not
+        floor-exempt), or task has no ack, returns dry_run_only=True.
+
+        F2: enforce_dry_run_floor gate is wired here so future packets cannot
+        bypass it. Even though _enumerate_candidates is a stub returning [],
+        the gate runs for every TaskSpec that reaches this method.
 
         Full apply logic (actual file moves, zero-byte deletes, stub creates)
         will be wired in P5.4 integration tests after P5.3 supplies real
@@ -297,6 +319,19 @@ class MaintenanceEngine:
         # moves/deletes, call os.replace/os.unlink on validated paths, record results.
         if force_dry_run:
             return ApplyResult(task_id=task.task_id, dry_run_only=True)
+
+        # F2: dry-run floor gate. Enforced before any non-dry-run action.
+        # If install_meta is available, check whether the 30-day floor has elapsed.
+        # TaskSpec.dry_run_floor_exempt=True bypasses the floor (hardcoded exempt
+        # task IDs in FLOOR_EXEMPT_TASK_IDS take priority inside enforce_dry_run_floor).
+        if install_meta is not None and not task.dry_run_floor_exempt:
+            floor_result = enforce_dry_run_floor(
+                task_id=task.task_id,
+                install_meta=install_meta,
+                floor_cfg=DryRunFloor(),
+            )
+            if floor_result == "ALLOWED_BUT_DRY_RUN_ONLY":
+                return ApplyResult(task_id=task.task_id, dry_run_only=True)
 
         # Without ack state (P5.3 not yet available), default to dry_run_only.
         return ApplyResult(task_id=task.task_id, dry_run_only=True)
