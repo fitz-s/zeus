@@ -131,5 +131,36 @@
 
 ---
 
-*15 lessons extracted from 15 HISTORICAL_LESSON-classified dirs.*  
+*15 lessons extracted from 15 HISTORICAL_LESSON-classified dirs (May 2–8 batch).*  
 *Remaining 44 dirs: ROUTINE_ARCHIVE (PLAN.md only or KEEP_ACTIVE — see ARCHIVE_QUEUE_FOR_NEXT_PR.md).*
+
+---
+
+## Extended Batch — May 9–14 (SURFACE 1 EXTENDED)
+
+*2 additional HISTORICAL_LESSON dirs from the deeper 3-day lifecycle audit.*
+
+---
+
+## 16. task_2026-05-09_pr_workflow_failure
+
+**Lesson:** The pre-B2 merge gate was scoped only to the loudest bot signals (Codex P0/P1, CHANGES_REQUESTED); Copilot inline suggestions and Codex P2 ("should fix") leaked through, allowing PR #106 to merge with 6 unaddressed comments — exposing a cost-economics / quality-economics split: the 300-LOC gate covered cost (don't open tiny PRs) but no gate covered quality (don't merge without processing every comment). The canonical fix encodes both in four principles + strict B2 hook that blocks on ANY unresolved thread.  
+**Source:** `docs/operations/task_2026-05-09_pr_workflow_failure/ANALYSIS.md` — "historical record — superseded fix design"; §"Where the merge-gate hook failed" (design gap table); §"Where the workflow doctrine failed"  
+**Drill-in:** `ANALYSIS.md` §"What actually happened on PR #106" (644s timeline) + §"Where the merge-gate hook failed" (severity-tag gap table); canonical fix at `architecture/agent_pr_discipline_2026_05_09.md` (four-principle framework)
+
+---
+
+## 17. task_2026-05-11_tigge_vm_to_zeus_db
+
+**Lesson (a):** The OpenData ingest pipeline mislabeled `data_version` as `ecmwf_opendata_mx2t6_local_calendar_day_max_v1` when the actual downloaded parameter was `mx2t3` — 1342 production rows from 2026-05-05 onward carry this defect. The download script itself (`--param mx2t3`) was correct; the bug is in downstream JSON-build / `data_version` assignment. A STAGE_DB-only fix (`UPDATE training_allowed=0`) must be replicated to production before any production calibration rebuild can pass the preflight gate.  
+**Source:** `docs/operations/task_2026-05-11_tigge_vm_to_zeus_db/EVIDENCE_2026-05-11_session.md` §"Open issue" — "data_version field: writes `mx2t6` when source product is actually `mx2t3`. Production zeus-world.db has 1342 rows with this defect."  
+**Drill-in:** `EVIDENCE_2026-05-11_session.md` §"STAGE-only fix caveat" for promotion sequence; `POST_REBUILD_HANDOFF_2026-05-11.md` §2a-2b for ECMWF ingest diagnostic
+
+**Lesson (b):** The critical-path from rebuild-complete to live-active requires 6 gated steps including an explicit operator-gated STAGE_DB → production promotion (Step 1); `evaluate_entry_forecast_rollout_gate` will only return `LIVE_ELIGIBLE` after `entry_forecast_promotion_evidence.json` is atomically written via the CLI (`promote_entry_forecast propose --commit`), and the rollout mode must be flipped in `config/settings.json` (NOT an env var — `ZEUS_ENTRY_FORECAST_ROLLOUT_MODE` is not wired).  
+**Source:** `docs/operations/task_2026-05-11_tigge_vm_to_zeus_db/POST_REBUILD_HANDOFF_2026-05-11.md` §"Critical path: rebuild-complete → live-active" (6-step table, Steps 4-6)  
+**Drill-in:** `POST_REBUILD_HANDOFF_2026-05-11.md` §Step 5 for rollout mode flip CLI invocation; §"TIME-WINDOW RISK" section (truncated — read full file for the time-sensitivity notes)
+
+---
+
+*17 total lessons extracted across May 2–14 batch (15 from May 2–8 + 2 from May 9–14).*  
+*See ARCHIVE_QUEUE_FOR_NEXT_PR.md for full surface triage (79 items across 4 surfaces).*

@@ -178,3 +178,129 @@ These 10 dirs have either recent commits (post-2026-05-09) or live architecture 
 | `task_2026-05-08_phase_b_download_root_cause` | DOSSIER is active authority for ECMWF download failure analysis; commit `2f436a6b21` | After download pipeline is confirmed stable |
 | `task_2026-05-08_post_merge_full_chain` | Ref in `architecture/script_manifest.yaml` + `architecture/test_topology.yaml`; commit `2f436a6b21` | After referenced architecture files are updated |
 | `task_2026-05-08_track_a6_run` | Commit `2f436a6b21` | After track A6 run is closed |
+
+---
+
+## SURFACE 1 EXTENDED — task dirs from 2026-05-09..14
+
+**3-day lifecycle rule:** date ≤ 2026-05-12 → DEFAULT_ARCHIVE_CANDIDATE unless KEEP_ACTIVE override.  
+**New dirs audited:** 10 (5 from 2026-05-09, 2 from 2026-05-11, 3 from 2026-05-14).  
+**2026-05-15+ dirs:** all DEFAULT_ACTIVE (14 dirs, all confirmed with recent commits ≥ 2026-05-13). Not listed here.
+
+| dir | category | reason | extracted_lesson_ref |
+|-----|----------|--------|----------------------|
+| `task_2026-05-09_copilot_agent_sync` | KEEP_ACTIVE | Cross-ref in `architecture/topology.yaml` + `docs/operations/AGENTS.md`; no date-age override when live arch refs present | — |
+| `task_2026-05-09_daemon_restart_and_backfill` | KEEP_ACTIVE | Cross-ref in `docs/operations/AGENTS.md`; RUN+TASK docs | — |
+| `task_2026-05-09_post_s4_residuals_topology` | ROUTINE_ARCHIVE | PLAN.md + phases only; no xrefs; no recent commits; date ≤ 2026-05-12 | — |
+| `task_2026-05-09_pr_workflow_failure` | HISTORICAL_LESSON | ANALYSIS.md — PR #106 failure record: hook gap (Copilot suggestions + Codex P2 leaked through pre-B2 gate), cost-vs-quality economics doctrine origin | EXTRACTED_LESSONS §16 |
+| `task_2026-05-09_workflow_redesign_plan` | KEEP_ACTIVE | Cross-ref in `architecture/agent_pr_discipline_2026_05_09.md` + `docs/operations/AGENTS.md`; DRILL_LOG encodes failure-injection methodology | — |
+| `task_2026-05-11_ecmwf_download_replacement` | ROUTINE_ARCHIVE | PLAN.md only; commit `eba80d2b9d` pre-2026-05-13; no xrefs; date ≤ 2026-05-12 | — |
+| `task_2026-05-11_tigge_vm_to_zeus_db` | HISTORICAL_LESSON | POST_REBUILD_HANDOFF + EVIDENCE — full VM-to-STAGE_DB pipeline: coverage audit, tar transfer, STAGE_DB promotion critical path, time-window risk doc | EXTRACTED_LESSONS §17 |
+| `task_2026-05-14_attach_path_index_fix` | ROUTINE_ARCHIVE | PLAN.md only; commit `eba80d2b9d` (pre-2026-05-13); no xrefs | — |
+| `task_2026-05-14_data_daemon_live_efficiency` | KEEP_ACTIVE | Cross-ref in `architecture/topology.yaml` + `docs/operations/AGENTS.md`; CRITIC_APPROVAL + IMPLEMENTATION_CRITIC_REVIEW load-bearing for data daemon refactor authority | — |
+| `task_2026-05-14_k1_followups` | KEEP_ACTIVE | Cross-ref in `architecture/db_table_ownership.yaml` + `architecture/invariants.yaml` + `architecture/source_rationale.yaml`; commit `2e00271cee` (2026-05-14 ≥ threshold); 8 files including P0 critic reviews with SAVEPOINT crash analysis | — |
+
+**KEEP_ACTIVE additions (surface 1 extended): 5**  
+**HISTORICAL_LESSON additions (archive after extraction): 2**  
+**ROUTINE_ARCHIVE additions: 3**
+
+### Execution (post-merge, surface 1 extended ROUTINE_ARCHIVE + HISTORICAL_LESSON)
+
+```bash
+ARCHIVE_TARGET="docs/operations/archive/2026-Q2"
+for dir in \
+  task_2026-05-09_post_s4_residuals_topology \
+  task_2026-05-09_pr_workflow_failure \
+  task_2026-05-11_ecmwf_download_replacement \
+  task_2026-05-11_tigge_vm_to_zeus_db \
+  task_2026-05-14_attach_path_index_fix \
+; do
+  git mv "docs/operations/$dir" "$ARCHIVE_TARGET/"
+done
+# Commit: "fix(cleanup): archive 5 May-9..14 task dirs to 2026-Q2 (3-day lifecycle rule)"
+```
+
+---
+
+## SURFACE 2 — Dated scripts ≤ 2026-05-12
+
+**Scan result:** `find scripts/ -maxdepth 1 -name '*_2026-04-*' -o -name '*_2026-05-0[1-9]*' -o -name '*_2026-05-1[012]*'` → **0 files found.**
+
+No dated one-off scripts matching the pattern exist in `scripts/`. Surface 2 is clean — no archive action needed.
+
+---
+
+## SURFACE 3 — Dated architecture/*.yaml
+
+**Files found:**
+- `architecture/preflight_overrides_2026-04-28.yaml` (202 lines)
+- `architecture/paris_station_resolution_2026-05-01.yaml` (182 lines)
+
+| file | category | reason | notes |
+|------|----------|--------|-------|
+| `architecture/preflight_overrides_2026-04-28.yaml` | KEEP_ACTIVE | Directly imported by `scripts/backfill_hko_xml.py` (line 4: `# Authority basis: architecture/preflight_overrides_2026-04-28.yaml`). Active script dependency. | Cross-referenced from `paris_station_resolution_2026-05-01.yaml` as well. Do NOT archive while `backfill_hko_xml.py` references it. |
+| `architecture/paris_station_resolution_2026-05-01.yaml` | ARCHIVE_CANDIDATE | Listed in `architecture/AGENTS.md` table (docs index only — no code import). No `git grep` hits in `src/` or `scripts/`. Operator-decision record that Paris settlement station = LFPB. | Known pre-existing parse error per operator brief. Archive to `architecture/archive/2026-Q2/` when `AGENTS.md` entry updated to point to archive. |
+
+**Surface 3 action (post-merge):**
+```bash
+mkdir -p architecture/archive/2026-Q2
+git mv architecture/paris_station_resolution_2026-05-01.yaml architecture/archive/2026-Q2/
+# Update architecture/AGENTS.md table entry to note archived location
+# Commit: "fix(cleanup): archive paris_station_resolution yaml (docs-index-only ref, no code import)"
+```
+
+`preflight_overrides_2026-04-28.yaml`: KEEP until `backfill_hko_xml.py` is updated to remove or redirect the reference.
+
+---
+
+## SURFACE 4 — Other Dated Artifacts
+
+**evidence/ dated files (8 files, all ≤ 2026-05-07):**
+
+All 8 files have zero live references beyond themselves (no hits in `AGENTS.md`, `REVIEW.md`, `architecture/`, `src/`, or `scripts/`). They are point-in-time activation/override/regression records.
+
+| file | lines | category | notes |
+|------|-------|----------|-------|
+| `evidence/activation/2026-05-04_c1_rollout_gate.txt` | 7 | ROUTINE_ARCHIVE | Activation gate record; no live refs |
+| `evidence/activation/2026-05-04_c3_writer.sql` | 7 | ROUTINE_ARCHIVE | One-time SQL artifact; no live refs |
+| `evidence/charter_overrides/2026-05-06_phase0_shadow_gate.yaml` | 42 | ROUTINE_ARCHIVE | Phase 0 shadow gate override; no live refs |
+| `evidence/hook_schema_changes/2026-05-06.md` | 5 | ROUTINE_ARCHIVE | Hook schema change record; no live refs |
+| `evidence/main_regressions/2026-05-07.md` | 24 | ROUTINE_ARCHIVE | Regression baseline snapshot; no live refs |
+| `evidence/replay_baseline/2026-05-06.json` | 22 | ROUTINE_ARCHIVE | Replay baseline JSON; no live refs |
+| `evidence/shadow_router/calibration_2026-05-06.md` | 56 | ROUTINE_ARCHIVE | Shadow router calibration record; no live refs |
+| `evidence/shadow_router/agreement_2026-05-06.jsonl` | 31 | ROUTINE_ARCHIVE | Shadow router agreement log; no live refs |
+
+**Operator decision needed:** `evidence/` has different semantics from `docs/operations/` (activation records, regression baselines may be needed for audit trail). Recommend archiving to `evidence/archive/2026-Q2/` rather than deleting, preserving audit trail while cleaning the active surface.
+
+**Surface 4 action (post-merge, pending operator approval):**
+```bash
+mkdir -p evidence/archive/2026-Q2/activation evidence/archive/2026-Q2/charter_overrides \
+          evidence/archive/2026-Q2/hook_schema_changes evidence/archive/2026-Q2/main_regressions \
+          evidence/archive/2026-Q2/replay_baseline evidence/archive/2026-Q2/shadow_router
+git mv evidence/activation/2026-05-04_c1_rollout_gate.txt evidence/archive/2026-Q2/activation/
+git mv evidence/activation/2026-05-04_c3_writer.sql evidence/archive/2026-Q2/activation/
+git mv evidence/charter_overrides/2026-05-06_phase0_shadow_gate.yaml evidence/archive/2026-Q2/charter_overrides/
+git mv evidence/hook_schema_changes/2026-05-06.md evidence/archive/2026-Q2/hook_schema_changes/
+git mv evidence/main_regressions/2026-05-07.md evidence/archive/2026-Q2/main_regressions/
+git mv evidence/replay_baseline/2026-05-06.json evidence/archive/2026-Q2/replay_baseline/
+git mv evidence/shadow_router/calibration_2026-05-06.md evidence/archive/2026-Q2/shadow_router/
+git mv evidence/shadow_router/agreement_2026-05-06.jsonl evidence/archive/2026-Q2/shadow_router/
+# Commit: "fix(cleanup): archive 8 dated evidence/ files to 2026-Q2 (no live refs)"
+```
+
+**Root-level and bindings/: no dated artifacts found** beyond the already-handled `LIVE_TRADING_LOCKED_2026-05-04.md`.
+
+---
+
+## Updated Total Counts (all surfaces)
+
+| Surface | ROUTINE_ARCHIVE | HISTORICAL_LESSON | KEEP_ACTIVE | Total |
+|---------|----------------|-------------------|-------------|-------|
+| Surface 1 (May 2–8, prior audit) | 40 | 15 | 10 | 59 (+ 6 already-archived stubs) |
+| Surface 1 extended (May 9–14) | 3 | 2 | 5 | 10 |
+| Surface 2 (dated scripts) | 0 | 0 | 0 | 0 |
+| Surface 3 (architecture yamls) | 1 | 0 | 1 | 2 |
+| Surface 4 (evidence/ dated files) | 8 | 0 | 0 | 8 |
+| **Grand total** | **52** | **17** | **16** | **79** |
+
+**Total ARCHIVE_QUEUE entries (ROUTINE_ARCHIVE + HISTORICAL_LESSON):** 69 (was 55 after prior audit).
