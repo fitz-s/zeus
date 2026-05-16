@@ -1,6 +1,6 @@
 # Created: 2026-04-30
-# Last reused/audited: 2026-04-30
-# Authority basis: docs/operations/task_2026-04-30_two_system_independence/design.md §2.1 + §6 antibody #5
+# Last reused/audited: 2026-05-16
+# Authority basis: docs/operations/task_2026-04-30_two_system_independence/design.md §2.1 + §6 antibody #5; PR #121 forecast-live OpenData-only source-health boundary
 """Antibody #5 (Phase 2): Source health probe contract tests.
 
 Asserts:
@@ -25,6 +25,7 @@ os.environ.setdefault("ZEUS_MODE", "live")
 from src.data.source_health_probe import (
     EXPECTED_SOURCES,
     probe_all_sources,
+    probe_sources,
     write_source_health,
     _probe_source,
 )
@@ -137,20 +138,38 @@ class TestProbeAllSourcesSchema:
         reparsed = json.loads(serialized)
         assert set(reparsed.keys()) == set(results.keys())
 
+    def test_probe_sources_can_limit_to_explicit_subset(self, monkeypatch):
+        """Forecast-live uses this to refresh OpenData without probing other sources."""
+        import src.data.source_health_probe as shp
+
+        calls: list[str] = []
+
+        def fake_source(source: str, timeout: float) -> dict:
+            calls.append(source)
+            return _make_fake_probe(True)(timeout)
+
+        monkeypatch.setattr(shp, "_probe_source", fake_source)
+
+        results = probe_sources(
+            ("ecmwf_open_data",),
+            timeout_per_source_seconds=1.0,
+            _prior_state={"wu_pws": {"consecutive_failures": 7}},
+        )
+
+        assert calls == ["ecmwf_open_data"]
+        assert set(results) == {"ecmwf_open_data"}
+        assert "wu_pws" not in results
+
 
 class TestAbsentBranchHandling:
     """Absent or unknown sources return ABSENT entries, not crashes."""
 
-    def test_manual_operator_source_returns_absent_not_crash(self):
-        """tigge_mars is MANUAL_OPERATOR — must return dict, not raise."""
+    def test_tigge_mars_probe_returns_schema_not_crash(self):
+        """tigge_mars must return a health dict whether active or operator-gated."""
         result = _probe_source("tigge_mars", timeout=1.0)
-        assert isinstance(result, dict), "MANUAL_OPERATOR source must return dict"
-        assert "MANUAL_OPERATOR" in (result.get("error") or ""), (
-            f"Expected MANUAL_OPERATOR in error field, got: {result}"
-        )
-        # Must have all required fields
+        assert isinstance(result, dict), "tigge_mars probe must return dict"
         for field in REQUIRED_FIELDS:
-            assert field in result, f"MANUAL_OPERATOR result missing field: {field}"
+            assert field in result, f"tigge_mars result missing field: {field}"
 
     def test_unknown_source_returns_absent_entry_not_crash(self):
         """Unknown source name must return ABSENT dict, not raise."""

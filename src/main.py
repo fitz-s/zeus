@@ -122,7 +122,7 @@ def _run_mode(mode: DiscoveryMode):
 def _harvester_cycle():
     """Phase 1.5 harvester split: trading-side P&L resolver.
 
-    Reads world.settlements (written by ingest-side harvester_truth_writer)
+    Reads forecasts.settlements (written by ingest-side harvester_truth_writer)
     and settles positions + writes decision_log. If the resolver is unavailable,
     fail closed; the trading daemon must not fall back to the legacy integrated
     harvester path, which can derive and write settlement truth in the same lane.
@@ -536,18 +536,42 @@ def _startup_freshness_check() -> None:
 
 
 def _startup_world_schema_ready_check() -> None:
-    """Design §4.2: trading boot retries then FAILs if DB schema readiness is absent/stale.
+    """Design §4.2: trading boot retries then FAILs if DB schema readiness is not proven.
 
     Mirrors _startup_freshness_check retry pattern (30 × 10s = 5 min).
-    Fail-closed: raises SystemExit if world sentinel absent after retries,
-    written_at > 24h old, or forecast DB schema is not current.
+    Fail-closed: raises SystemExit if direct world or forecast DB schema checks
+    cannot prove current `PRAGMA user_version` after retries.
     This is the Phase 2→Phase 3 enforcement promotion per architect audit A-2.
 
     K1 split 2026-05-11: this function now delegates to _startup_db_schema_ready_check,
-    which checks the world sentinel plus direct forecast DB schema currency.
+    which checks both canonical DB files directly. The old data-ingest sentinel
+    is no longer authority for live boot because live forecast production moved
+    to forecast-live while com.zeus.data-ingest is not a required live process.
     Kept for API compat; do not remove.
     """
     _startup_db_schema_ready_check()
+
+
+def _startup_world_db_schema_ready_check() -> str:
+    """Read-only world DB schema currency check for live startup."""
+    import sqlite3
+
+    from src.state.db import ZEUS_WORLD_DB_PATH, assert_schema_current
+
+    if not ZEUS_WORLD_DB_PATH.exists():
+        raise FileNotFoundError(f"{ZEUS_WORLD_DB_PATH} does not exist")
+    conn = sqlite3.connect(
+        f"file:{ZEUS_WORLD_DB_PATH.resolve()}?mode=ro",
+        uri=True,
+        timeout=5.0,
+    )
+    try:
+        conn.execute("PRAGMA query_only = ON")
+        assert_schema_current(conn)
+        row = conn.execute("PRAGMA user_version").fetchone()
+        return str(row[0] if row else "unknown")
+    finally:
+        conn.close()
 
 
 def _startup_forecasts_schema_ready_check() -> str:
@@ -573,54 +597,29 @@ def _startup_forecasts_schema_ready_check() -> str:
 
 
 def _startup_db_schema_ready_check() -> None:
-    """K1 split: wait for world sentinel and directly verify forecast DB schema.
+    """K1 split: directly verify world and forecast DB schema currency.
 
     Replaces _startup_world_schema_ready_check (retained above as a thin shim).
-    The world sentinel is still written by the world/ingest maintenance path.
-    Forecast schema currency is verified directly against zeus-forecasts.db
-    because forecast-live now owns that DB class and old forecasts_schema_ready
-    files can be stale even when the DB schema itself is current.
+    Schema currency is verified directly against zeus-world.db and
+    zeus-forecasts.db. This avoids binding live startup to stale JSON sentinels
+    from retired or split data-daemon processes.
 
     Retry pattern: 30 × 10s = 5 min (mirrors _startup_freshness_check).
     """
-    import json
     import time
-    from datetime import timedelta
-    from src.config import STATE_DIR
     from src.control.freshness_gate import BOOT_RETRY_INTERVAL_SECONDS, BOOT_RETRY_MAX_ATTEMPTS
-
-    sentinels = [
-        (STATE_DIR / "world_schema_ready.json", "world"),
-    ]
-    max_age = timedelta(hours=24)
 
     for attempt in range(1, BOOT_RETRY_MAX_ATTEMPTS + 1):
         missing = []
-        for sentinel_path, label in sentinels:
-            if not sentinel_path.exists():
-                missing.append(label)
-                continue
-            try:
-                data = json.loads(sentinel_path.read_text())
-                written_at_str = data.get("written_at", "")
-                written_at = datetime.fromisoformat(written_at_str)
-                age = datetime.now(timezone.utc) - written_at
-                if age > max_age:
-                    raise SystemExit(
-                        f"FATAL: {sentinel_path.name} is {age.total_seconds()/3600:.1f}h old "
-                        f"(max 24h). Is com.zeus.data-ingest running? "
-                        f"Check: launchctl list com.zeus.data-ingest"
-                    )
-                logger.info(
-                    "%s_schema_ready sentinel OK: written_at=%s",
-                    label,
-                    written_at_str,
-                )
-            except SystemExit:
-                raise
-            except Exception as exc:
-                logger.warning("%s_schema_ready sentinel parse error: %s — retrying", label, exc)
-                missing.append(label)
+        try:
+            world_schema_version = _startup_world_db_schema_ready_check()
+            logger.info(
+                "world DB schema current: user_version=%s",
+                world_schema_version,
+            )
+        except Exception as exc:
+            logger.warning("world DB schema readiness check failed: %s — retrying", exc)
+            missing.append("world")
         try:
             forecast_schema_version = _startup_forecasts_schema_ready_check()
             logger.info(
@@ -632,19 +631,19 @@ def _startup_db_schema_ready_check() -> None:
             missing.append("forecasts")
 
         if not missing:
-            return  # World sentinel and forecast DB schema are valid.
+            return  # World and forecast DB schemas are current.
 
         if attempt < BOOT_RETRY_MAX_ATTEMPTS:
             logger.info(
-                "DB schema sentinels missing=%s at boot — retry %d/%d in %ds",
+                "DB schema checks missing=%s at boot — retry %d/%d in %ds",
                 missing, attempt, BOOT_RETRY_MAX_ATTEMPTS, BOOT_RETRY_INTERVAL_SECONDS,
             )
             time.sleep(BOOT_RETRY_INTERVAL_SECONDS)
 
     raise SystemExit(
         "FATAL: DB schema readiness not proven within 5 min "
-        "(world_schema_ready.json + zeus-forecasts.db user_version). "
-        "Check: launchctl list com.zeus.data-ingest and launchctl list com.zeus.forecast-live"
+        "(zeus-world.db + zeus-forecasts.db user_version). "
+        "Check direct DB schema initialization and launchctl list com.zeus.forecast-live"
     )
 
 
@@ -834,15 +833,20 @@ def main():
                 _capital_str,
                 settings["sizing"]["kelly_multiplier"] * 100)
 
-    # Daemon is a read-only consumer of world DB. Schema authority belongs to
-    # ingest (src/ingest_main.py owns init_schema on world; sentinel gate at
-    # _startup_world_schema_ready_check() below enforces ingest-first boot).
+    # §4.2 DB schema-ready gate — fail-closed (Phase 3 enforcement).
+    # Must run before the first world DB open/read so missing or uninitialized
+    # DBs go through the retry/FATAL authority path rather than raw SQLite errors.
+    # Directly verifies world/forecast DB schema versions. Older JSON sentinels
+    # from data-ingest are not live boot authority after the forecast-live split.
+    _startup_world_schema_ready_check()
+
+    # Daemon is a read-only consumer of world DB. Schema currency was proven
+    # above by direct read-only user_version checks on the canonical DB files.
     # Opening without write_class avoids the v4 LIVE flock and never acquires
     # a SQLite writer lock for read-only ops below — so a concurrent ingest
     # or backfill cannot starve daemon startup.
     conn = get_world_connection()
-    # Read-only smoke: confirm world DB is reachable. The sentinel gate at
-    # line ~708 is the authoritative schema-readiness check.
+    # Read-only smoke: confirm world DB is reachable.
     conn.execute("SELECT COUNT(*) FROM settlements LIMIT 1").fetchone()
 
     # Ensure trade DB has all tables (prevents lazy-creation gaps)
@@ -857,12 +861,6 @@ def main():
     # (2026-05-14 K1 followups plan §5.5 D5). assert_db_matches_registry() exists
     # (src/state/table_registry.py) but boot wiring is deferred — not called here.
     conn.close()
-
-    # §4.2 World schema ready sentinel gate — fail-closed (Phase 3 enforcement).
-    # Ingest daemon must have written state/world_schema_ready.json within 24h.
-    # If absent: 5-min retry then FATAL (mirrors freshness check retry pattern).
-    # Ensures trading never boots against a schema the ingest daemon hasn't validated.
-    _startup_world_schema_ready_check()
 
     # §3.1 Data freshness gate — WARN-only at boot (Phase 2: warn; Phase 3: enforce).
     # Runs BEFORE strategy gate so operator sees freshness diagnostics even when
