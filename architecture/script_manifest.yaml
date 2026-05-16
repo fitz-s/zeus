@@ -841,33 +841,85 @@ scripts:
     packet: docs/operations/task_2026-05-08_post_merge_full_chain/TASK.md
     fix_refs: ["#262", "#263", "#264"]
 
-  maintenance_worker_install.py:
+  lore_indexer.py:
     # Created: 2026-05-15
-    # Authority basis: docs/operations/task_2026-05-15_runtime_improvement_engineering_package/05_execution_packets/PACKET_INDEX.md §P6
-    class: runtime_support
+    # Authority basis: docs/operations/task_2026-05-15_runtime_improvement_engineering_package/04_workspace_hygiene/LORE_EXTRACTION_PROTOCOL.md
+    class: enforcement
     lifecycle: long_lived
     status: active
-    authority_scope: operator_runtime_support
+    authority_scope: read_only
+    target_db: "none"
     dry_run_default: true
-    apply_flag: "--run-install"
+    apply_flag: "none"
     dangerous_if_run: false
-    read_targets: [bindings/zeus/launchd_plist.plist, bindings/zeus/config.yaml]
-    write_targets:
-      - state/maintenance_state/maintenance_worker_config.json
-      - state/maintenance_state/install_metadata.json
-      - "~/Library/LaunchAgents/com.zeus.maintenance.plist"
-    target_db: null
-    external_inputs: [git_remote_url]
-    promotion_barrier: >
-      Idempotent install helper. --run-install is safe at any time; it preserves
-      install_metadata.json (ImmutableMetadataError on re-write). launchctl load
-      must be run manually by the operator after install.
-    required_helpers: [maintenance_worker.cli.entry, maintenance_worker.core.install_metadata]
-    required_tests: [tests/maintenance_worker/test_bindings/test_zeus_config.py, tests/maintenance_worker/test_bindings/test_launchd_plist.py]
-    canonical_command: "python3 scripts/maintenance_worker_install.py --dry-run"
+    read_targets: [docs/lore/]
+    write_targets: [docs/lore/INDEX.json]
+    external_inputs: []
+    delete_policy: permanent
+    canonical_command: "python3 scripts/lore_indexer.py [--validate-only] [--output PATH]"
     reuse_when: >
-      Installing or refreshing the Zeus maintenance worker launchd binding.
-      Safe to re-run: does not reset first_run_at (30-day floor preserved).
+      Building or refreshing docs/lore/INDEX.json for agent consumption.
+      Use --validate-only to check frontmatter without writing.
     do_not_use_when: >
-      Core maintenance_worker module changes (edit core directly); migrating
-      to a different binding target (create a new bindings/<project>/ directory).
+      Promoting draft cards (use lore_promoter.py) or re-verifying cards (use lore_reverify.py).
+    promotion_barrier: "none — read-only diagnostic and index builder"
+    required_helpers: []
+    required_tests: [tests/scripts/test_lore_indexer.py]
+    packet: docs/operations/task_2026-05-15_runtime_improvement_engineering_package/05_execution_packets/PACKET_INDEX.md
+
+  lore_promoter.py:
+    # Created: 2026-05-15
+    # Authority basis: docs/operations/task_2026-05-15_runtime_improvement_engineering_package/04_workspace_hygiene/LORE_EXTRACTION_PROTOCOL.md
+    class: enforcement
+    lifecycle: long_lived
+    status: active
+    authority_scope: workspace_write
+    target_db: "none"
+    dry_run_default: true
+    apply_flag: "none (use --dry-run to preview)"
+    dangerous_if_run: false
+    read_targets: [docs/lore/_drafts/]
+    write_targets: [docs/lore/<topic>/]
+    external_inputs: []
+    delete_policy: permanent
+    canonical_command: "python3 scripts/lore_promoter.py promote <draft_id> <topic> [--dry-run]"
+    reuse_when: >
+      Promoting an approved draft lore card from _drafts/ to its topic directory.
+      Use list-drafts subcommand to see available drafts.
+    do_not_use_when: >
+      Card has missing or invalid frontmatter (promoter will reject it).
+      Card topic does not match its frontmatter topic field.
+    promotion_barrier: "Rejects cards with missing required frontmatter fields. Human approval required before draft exists."
+    required_helpers: []
+    required_tests: [tests/scripts/test_lore_promoter.py]
+    packet: docs/operations/task_2026-05-15_runtime_improvement_engineering_package/05_execution_packets/PACKET_INDEX.md
+
+  lore_reverify.py:
+    # Created: 2026-05-15
+    # Authority basis: docs/operations/task_2026-05-15_runtime_improvement_engineering_package/04_workspace_hygiene/LORE_EXTRACTION_PROTOCOL.md
+    class: enforcement
+    lifecycle: long_lived
+    status: active
+    authority_scope: workspace_write
+    target_db: "none"
+    dry_run_default: true
+    apply_flag: "none (omit --dry-run to run verification commands)"
+    dangerous_if_run: false
+    read_targets: [docs/lore/]
+    write_targets: [docs/lore/<topic>/<card>.md]
+    external_inputs: []
+    delete_policy: permanent
+    canonical_command: "python3 scripts/lore_reverify.py [--dry-run] [--timeout 60] [--strict]"
+    reuse_when: >
+      Re-verifying lore cards with verification_command fields.
+      Signature mismatch sets status to NEEDS_RE_VERIFICATION for human review.
+      First run records expected_signature; subsequent runs compare.
+    do_not_use_when: >
+      Cards do not have verification_command fields (no-op for those cards).
+      Do not use to retire cards — retirement requires human action.
+    promotion_barrier: >
+      Sets NEEDS_RE_VERIFICATION status on mismatch; does NOT retire cards.
+      Human decides whether card or command is stale.
+    required_helpers: []
+    required_tests: [tests/scripts/test_lore_reverify.py]
+    packet: docs/operations/task_2026-05-15_runtime_improvement_engineering_package/05_execution_packets/PACKET_INDEX.md
