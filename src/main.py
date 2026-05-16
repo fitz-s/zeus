@@ -122,7 +122,7 @@ def _run_mode(mode: DiscoveryMode):
 def _harvester_cycle():
     """Phase 1.5 harvester split: trading-side P&L resolver.
 
-    Reads world.settlements (written by ingest-side harvester_truth_writer)
+    Reads forecasts.settlements (written by ingest-side harvester_truth_writer)
     and settles positions + writes decision_log. If the resolver is unavailable,
     fail closed; the trading daemon must not fall back to the legacy integrated
     harvester path, which can derive and write settlement truth in the same lane.

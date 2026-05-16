@@ -1283,7 +1283,7 @@ files:
   src/execution/harvester_pnl_resolver.py:
     zone: K2_runtime
     authority_role: settlement_pnl_resolver
-    why: Trading-side resolver that reads VERIFIED world settlement truth and settles matching trade-side positions without writing world truth.
+    why: Trading-side resolver that reads VERIFIED forecasts settlement truth and settles matching trade-side positions without writing forecast truth.
     write_routes:
     - canonical_position_write
     downstream:

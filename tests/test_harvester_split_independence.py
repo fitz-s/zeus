@@ -1,5 +1,5 @@
-# Lifecycle: created=2026-04-30; last_reviewed=2026-04-30; last_reused=never
-# Authority basis: docs/operations/task_2026-04-30_two_system_independence/design.md §6 antibody #12
+# Lifecycle: created=2026-04-30; last_reviewed=2026-05-16; last_reused=2026-05-16
+# Authority basis: docs/operations/task_2026-04-30_two_system_independence/design.md §6 antibody #12; docs/operations/task_2026-05-16_deep_alignment_audit/REPORT.md Finding #4
 """Antibody #12 — Harvester split independence.
 
 Four tests enforce the structural boundary between the ingest-side settlement
@@ -7,9 +7,10 @@ truth writer and the trading-side P&L resolver:
 
   Test 1: harvester_truth_writer does NOT import from trading modules.
   Test 2: harvester_pnl_resolver does NOT import from ingest_main or scripts.ingest.
-  Test 3: harvester_truth_writer only writes to world tables (settlements, settlements_v2,
-          market_events_v2), never to trade tables (decision_log, position_*, etc.).
-  Test 4: harvester_pnl_resolver does NOT write settlements; reads settlements only.
+  Test 3: harvester_truth_writer only writes settlement-truth tables
+          (settlements, settlements_v2, market_events_v2), never to trade tables
+          (decision_log, position_*, etc.).
+  Test 4: harvester_pnl_resolver does NOT write settlement-truth tables; reads only.
 """
 
 from __future__ import annotations
@@ -24,6 +25,8 @@ if str(PROJECT_ROOT) not in sys.path:
 
 _TRUTH_WRITER = PROJECT_ROOT / "src" / "ingest" / "harvester_truth_writer.py"
 _PNL_RESOLVER = PROJECT_ROOT / "src" / "execution" / "harvester_pnl_resolver.py"
+_INGEST_MAIN = PROJECT_ROOT / "src" / "ingest_main.py"
+_BACKFILL_SCRIPT = PROJECT_ROOT / "scripts" / "backfill_harvester_settlements.py"
 
 # ---------------------------------------------------------------------------
 # Forbidden import prefixes
@@ -55,8 +58,8 @@ _TRADE_WRITE_TABLES = (
     "portfolio",
 )
 
-# World-side table names that harvester_pnl_resolver must NOT write
-_WORLD_WRITE_TABLES = (
+# Settlement-truth table names that harvester_pnl_resolver must NOT write
+_SETTLEMENT_TRUTH_WRITE_TABLES = (
     "settlements",
     "settlements_v2",
     "market_events_v2",
@@ -115,6 +118,15 @@ def _has_write_targeting(source: str, tables: tuple[str, ...]) -> list[str]:
         if re.search(r"\b" + re.escape(table) + r"\b", source, re.IGNORECASE):
             hits.append(table)
     return hits
+
+
+def _function_source(path: Path, function_name: str) -> str:
+    source = path.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == function_name:
+            return ast.get_source_segment(source, node) or ""
+    raise AssertionError(f"{function_name} not found in {path.relative_to(PROJECT_ROOT)}")
 
 
 # ---------------------------------------------------------------------------
@@ -180,16 +192,15 @@ def test_harvester_pnl_resolver_does_not_import_ingest_main():
 
 
 # ---------------------------------------------------------------------------
-# Test 3: harvester_truth_writer only writes world tables, never trade tables
+# Test 3: harvester_truth_writer only writes settlement-truth tables, never trade tables
 # ---------------------------------------------------------------------------
 
-def test_harvester_truth_writer_only_writes_world_settlements():
+def test_harvester_truth_writer_only_writes_settlement_truth_tables():
     """Grep: harvester_truth_writer.py must not contain SQL writes to trade tables.
 
-    The ingest-side writer owns ONLY world.settlements (+ settlements_v2,
-    market_events_v2). It must NOT emit INSERT INTO / UPDATE / DELETE FROM
-    targeting: decision_log, position_events, position_current, trade_decisions,
-    venue_commands, risk_state, portfolio.
+    The ingest-side writer owns ONLY forecasts settlement-truth tables
+    (settlements, settlements_v2, market_events_v2). It must NOT emit
+    INSERT INTO / UPDATE / DELETE FROM targeting trade-side tables.
     """
     assert _TRUTH_WRITER.exists(), (
         f"Expected file not found: {_TRUTH_WRITER.relative_to(PROJECT_ROOT)}"
@@ -200,40 +211,56 @@ def test_harvester_truth_writer_only_writes_world_settlements():
     assert not trade_table_hits, (
         f"harvester_truth_writer.py contains SQL write verbs targeting trade tables: "
         f"{trade_table_hits}.\n"
-        f"The ingest-side writer must only write world tables (settlements, "
-        f"settlements_v2, market_events_v2)."
+        f"The ingest-side writer must only write forecasts settlement-truth tables "
+        f"(settlements, settlements_v2, market_events_v2)."
     )
+
+
+def test_ingest_harvester_truth_tick_opens_forecasts_connection():
+    """The live ingest scheduler must pass a forecasts DB conn to the truth writer."""
+    function_source = _function_source(_INGEST_MAIN, "_harvester_truth_writer_tick")
+
+    assert "get_forecasts_connection" in function_source
+    assert "get_world_connection" not in function_source
+
+
+def test_backfill_harvester_settlements_opens_forecasts_connection():
+    """Operator backfill must use the same canonical forecasts DB writer target."""
+    source = _BACKFILL_SCRIPT.read_text(encoding="utf-8")
+
+    assert "get_forecasts_connection" in source
+    assert "get_world_connection" not in source
 
 
 # ---------------------------------------------------------------------------
 # Test 4: harvester_pnl_resolver must not write settlements
 # ---------------------------------------------------------------------------
 
-def test_harvester_pnl_resolver_does_not_write_world_settlements():
-    """Grep: harvester_pnl_resolver.py must not contain SQL writes to world tables.
+def test_harvester_pnl_resolver_does_not_write_settlement_truth_tables():
+    """Grep: harvester_pnl_resolver.py must not contain settlement-truth writes.
 
-    The trading-side resolver READS world.settlements (SELECT is allowed) but must
-    NOT write it or any other world table. All writes go to trade-side tables
-    (decision_log via store_settlement_records, position tables via _settle_positions).
+    The trading-side resolver READS forecasts.settlements (SELECT is allowed) but
+    must NOT write it or any other settlement-truth table. All writes go to
+    trade-side tables.
     """
     assert _PNL_RESOLVER.exists(), (
         f"Expected file not found: {_PNL_RESOLVER.relative_to(PROJECT_ROOT)}"
     )
     source = _PNL_RESOLVER.read_text(encoding="utf-8")
 
-    world_table_hits = _has_write_targeting(source, _WORLD_WRITE_TABLES)
-    assert not world_table_hits, (
-        f"harvester_pnl_resolver.py contains SQL write verbs targeting world tables: "
-        f"{world_table_hits}.\n"
-        f"The trading-side resolver must only READ world.settlements, not write it."
+    settlement_truth_hits = _has_write_targeting(source, _SETTLEMENT_TRUTH_WRITE_TABLES)
+    assert not settlement_truth_hits, (
+        f"harvester_pnl_resolver.py contains SQL write verbs targeting settlement-truth tables: "
+        f"{settlement_truth_hits}.\n"
+        f"The trading-side resolver must only READ forecasts.settlements, not write it."
     )
 
 
-def test_harvester_pnl_resolver_passes_verified_world_truth_to_position_settlement():
-    """Static relationship: world.settlements VERIFIED authority reaches _settle_positions."""
+def test_harvester_pnl_resolver_passes_verified_forecasts_truth_to_position_settlement():
+    """Static relationship: forecasts.settlements VERIFIED authority reaches _settle_positions."""
     source = _PNL_RESOLVER.read_text(encoding="utf-8")
 
     assert "WHERE authority = 'VERIFIED'" in source
-    assert 'settlement_truth_source="world.settlements"' in source
+    assert 'settlement_truth_source="forecasts.settlements"' in source
     assert "settlement_authority=authority" in source
     assert "settlement_temperature_metric=str(temperature_metric or \"\")" in source

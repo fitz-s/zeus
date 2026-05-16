@@ -1,6 +1,6 @@
 # Created: 2026-05-11
-# Last reused or audited: 2026-05-11
-# Authority basis: PLAN.md §10, critic v4 ACCEPT 2026-05-11
+# Last reused or audited: 2026-05-16
+# Authority basis: PLAN.md §10, critic v4 ACCEPT 2026-05-11; docs/operations/task_2026-05-16_deep_alignment_audit/REPORT.md Finding #4
 """Operator-invoked backfill for harvester settlements outside the 30-day live window.
 
 Usage:
@@ -33,7 +33,7 @@ import httpx
 # Downstream write surfaces — importable (sit below the paginator antibody surface)
 from src.ingest.harvester_truth_writer import write_settlement_truth_for_open_markets
 from src.data.market_scanner import GAMMA_BASE
-from src.state.db import get_world_connection
+from src.state.db import get_forecasts_connection
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(
@@ -177,15 +177,15 @@ def main() -> int:
         logger.info("backfill: no events to process")
         return 0
 
-    world_conn = get_world_connection()
+    forecasts_conn = get_forecasts_connection()
     try:
         result = write_settlement_truth_for_open_markets(
-            world_conn,
+            forecasts_conn,
             dry_run=args.dry_run,
         )
         logger.info("backfill: write_settlement_truth result: %s", result)
     finally:
-        world_conn.close()
+        forecasts_conn.close()
 
     return 0
 

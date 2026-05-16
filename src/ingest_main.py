@@ -630,10 +630,10 @@ def _etl_recalibrate_body():
 
 @_scheduler_job("ingest_harvester_truth_writer")
 def _harvester_truth_writer_tick():
-    """Phase 1.5 harvester split — ingest-side world.settlements writer.
+    """Phase 1.5 harvester split — ingest-side forecasts settlement writer.
 
     Acquires advisory lock before running. Runs hourly. Writes settlement truth
-    to world.settlements independent of the trading daemon's lifecycle.
+    to forecasts DB independent of the trading daemon's lifecycle.
     Feature-flagged: ZEUS_HARVESTER_LIVE_ENABLED must equal "1" to do real work.
     """
     from src.data.dual_run_lock import acquire_lock
@@ -986,7 +986,7 @@ def _market_scan_tick():
     Running this from the ingest daemon ensures market_events_v2 stays updated
     even when the trading daemon (src/main.py) is paused.
 
-    Runs on default executor (writes to zeus-world.db via _persist_market_events_to_db).
+    Runs on default executor (writes to zeus-forecasts.db via _persist_market_events_to_db).
     """
     try:
         from src.data.market_scanner import find_weather_markets
@@ -1287,7 +1287,7 @@ def main() -> None:
     # 2026-05-07 STALE fix: Gamma market scan — every 30 minutes.
     # Keeps market_events_v2 fresh when the trading daemon (src/main.py) is paused.
     # INSERT OR IGNORE makes it idempotent.
-    # Runs on default executor (writes to zeus-world.db via _persist_market_events_to_db).
+    # Runs on default executor (writes to zeus-forecasts.db via _persist_market_events_to_db).
     _scheduler.add_job(
         _market_scan_tick, "interval",
         minutes=30, id="ingest_market_scan",
