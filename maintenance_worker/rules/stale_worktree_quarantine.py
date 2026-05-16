@@ -47,6 +47,7 @@ VERDICT_SKIP_CURRENT = "SKIP_CURRENT_BRANCH"
 VERDICT_SKIP_UNCOMMITTED = "SKIP_UNCOMMITTED"
 VERDICT_SKIP_OPEN_PR = "SKIP_OPEN_PR"
 VERDICT_SKIP_ACTIVE = "SKIP_ACTIVE"
+VERDICT_SKIP_PR_CHECK_UNVERIFIED = "SKIP_PR_CHECK_UNVERIFIED"
 
 DEFAULT_TTL_DAYS = 21
 
@@ -135,13 +136,35 @@ def enumerate(entry: Any, ctx: TickContext) -> list[Candidate]:  # noqa: A001
             ))
             continue
 
-        # Skip: open PR check (STUBBED — gh unavailable in dry-run)
-        # Conservative: we do NOT mark as STALE_QUARANTINE if we can't verify.
-        # We warn and proceed to idle check anyway (PR check is advisory here).
-        logger.debug(
-            "stale_worktree_quarantine: open_pr_check skipped for %s (gh unavailable)",
-            wt_branch,
-        )
+        # Skip: open PR check — fail closed per TASK_CATALOG.yaml:88-91
+        # any_worktree_whose_branch_appears_in_open_pr is a forbidden action.
+        # Three outcomes:
+        #   (a) gh unavailable / error / timeout → SKIP_PR_CHECK_UNVERIFIED (fail closed)
+        #   (b) gh ok AND branch in open PR      → SKIP_OPEN_PR (stay)
+        #   (c) gh ok AND no open PR             → fall through to idle check
+        if wt_branch:
+            pr_result = _open_pr_check_for_branch(wt_branch, repo_root)
+            evidence["check_6_pr_status"] = pr_result["status"]
+            if pr_result["status"] == "UNVERIFIED_FAIL_CLOSED":
+                candidates.append(Candidate(
+                    task_id=spec.task_id,
+                    path=p,
+                    verdict=VERDICT_SKIP_PR_CHECK_UNVERIFIED,
+                    reason="Open-PR check unverified (gh unavailable) — fail closed; skip quarantine.",
+                    evidence=evidence,
+                ))
+                continue
+            if pr_result["status"] == "OPEN_PR_FOUND":
+                evidence["check_6_prs"] = pr_result.get("prs", [])
+                candidates.append(Candidate(
+                    task_id=spec.task_id,
+                    path=p,
+                    verdict=VERDICT_SKIP_OPEN_PR,
+                    reason=f"Branch '{wt_branch}' appears in open PR(s): {pr_result.get('prs', [])[:2]}",
+                    evidence=evidence,
+                ))
+                continue
+            # status == "NO_OPEN_PR" → fall through to idle check
 
         # Idle check: mtime of worktree path OR most recent commit in ttl_days
         idle = _is_worktree_idle(p, repo_root, wt_branch, ttl_seconds)
@@ -338,6 +361,80 @@ def _is_worktree_idle(
             pass
 
     return True
+
+
+def _open_pr_check_for_branch(branch: str, repo_root: Path) -> dict:
+    """
+    Check whether `branch` appears in any open GitHub PR.
+
+    Returns dict with key "status":
+      "UNVERIFIED_FAIL_CLOSED" — gh unavailable / non-zero / timeout / parse error
+      "OPEN_PR_FOUND"          — gh ok and branch is head of an open PR
+      "NO_OPEN_PR"             — gh ok and no open PR uses this branch
+
+    Fail-closed semantics: TASK_CATALOG.yaml:88-91 lists
+    any_worktree_whose_branch_appears_in_open_pr as forbidden quarantine target.
+    When gh is unavailable we cannot verify → must not quarantine.
+    """
+    import json as _json
+
+    try:
+        result = subprocess.run(
+            [
+                "gh", "pr", "list",
+                "--state", "open",
+                "--json", "number,title,headRefName",
+                "--limit", "100",
+            ],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
+        logger.warning(
+            "stale_worktree_quarantine: gh pr list unavailable for branch %s: %s — fail closed",
+            branch,
+            exc,
+        )
+        return {"status": "UNVERIFIED_FAIL_CLOSED"}
+
+    if result.returncode != 0:
+        logger.warning(
+            "stale_worktree_quarantine: gh pr list rc=%d for branch %s — fail closed",
+            result.returncode,
+            branch,
+        )
+        return {"status": "UNVERIFIED_FAIL_CLOSED"}
+
+    try:
+        prs = _json.loads(result.stdout)
+    except (_json.JSONDecodeError, ValueError) as exc:
+        logger.warning(
+            "stale_worktree_quarantine: gh output parse error for branch %s: %s — fail closed",
+            branch,
+            exc,
+        )
+        return {"status": "UNVERIFIED_FAIL_CLOSED"}
+
+    if not isinstance(prs, list):
+        return {"status": "UNVERIFIED_FAIL_CLOSED"}
+
+    matching: list[str] = []
+    for pr in prs:
+        head = pr.get("headRefName", "")
+        if head == branch:
+            matching.append(f"#{pr.get('number', '?')} {pr.get('title', '')}")
+
+    if matching:
+        logger.info(
+            "stale_worktree_quarantine: branch %s has open PR(s): %s",
+            branch,
+            matching,
+        )
+        return {"status": "OPEN_PR_FOUND", "prs": matching}
+
+    return {"status": "NO_OPEN_PR"}
 
 
 def _mock_diff(decision: Any) -> tuple[str, ...]:
