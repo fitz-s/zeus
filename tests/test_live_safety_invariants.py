@@ -2,7 +2,7 @@
 # Lifecycle: created=2026-03-31; last_reviewed=2026-05-05; last_reused=2026-05-05
 # Purpose: Lock live-money safety invariants across fill, exit, chain, and P&L flows.
 # Reuse: Run for execution finality, live exit, chain reconciliation, and safety invariant changes.
-# Last reused/audited: 2026-05-08
+# Last reused/audited: 2026-05-16
 # Authority basis: midstream verdict v2 2026-04-23; docs/operations/task_2026-05-08_object_invariance_remaining_mainline/PLAN.md
 """Live safety invariant tests: relationship tests, not function tests.
 
@@ -160,6 +160,35 @@ def _seed_canonical_entry_baseline(conn, position) -> None:
         source_module="src.test.t1c_followup_baseline",
     )
     append_many_and_project(conn, events, projection)
+
+
+def _seed_acked_entry_command(conn, position, *, command_id: str = "cmd-rescue-proof") -> None:
+    order_id = getattr(position, "entry_order_id", None) or getattr(position, "order_id", None)
+    token_id = getattr(position, "token_id", None) or "tok-rescue-proof"
+    conn.execute(
+        """
+        INSERT INTO venue_commands (
+            command_id, snapshot_id, envelope_id, position_id, decision_id,
+            idempotency_key, intent_kind, market_id, token_id, side, size,
+            price, venue_order_id, state, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, 'ENTRY', ?, ?, 'BUY', ?, ?, ?, 'ACKED', ?, ?)
+        """,
+        (
+            command_id,
+            f"snapshot-{command_id}",
+            f"envelope-{command_id}",
+            getattr(position, "trade_id", "pos-rescue-proof"),
+            f"decision-{command_id}",
+            f"idem-{command_id}",
+            getattr(position, "market_id", None) or getattr(position, "condition_id", None) or "market-rescue-proof",
+            token_id,
+            float(getattr(position, "shares_submitted", 0.0) or getattr(position, "shares", 0.0) or 1.0),
+            float(getattr(position, "entry_price_submitted", 0.0) or getattr(position, "entry_price", 0.0) or 0.5),
+            order_id,
+            "2026-04-03T00:00:00+00:00",
+            "2026-04-03T00:00:00+00:00",
+        ),
+    )
 
 
 def _make_clob(
@@ -2079,6 +2108,109 @@ def test_chain_reconciliation_rescues_pending_tracked_fill(tmp_path):
     assert pos.cost_basis_usd == 11.0
     assert pos.condition_id == "cond-1"
     assert portfolio.positions == [pos]
+
+
+def test_chain_reconciliation_does_not_rescue_commanded_pending_entry_without_trade_fact(tmp_path):
+    """A token-level chain position cannot prove that a specific live order filled."""
+    from src.state.chain_reconciliation import ChainPosition, reconcile
+    from src.state.db import get_connection, init_schema
+
+    conn = get_connection(tmp_path / "rescue_requires_trade_fact.db")
+    init_schema(conn)
+
+    pos = _make_position(
+        trade_id="rescue-proof-1",
+        state="pending_tracked",
+        direction="buy_yes",
+        token_id="tok_yes_proof_001",
+        no_token_id="tok_no_proof_001",
+        order_id="order-proof-1",
+        entry_order_id="order-proof-1",
+        entry_fill_verified=False,
+        entered_at="",
+        order_status="pending",
+        order_posted_at="2026-04-03T00:00:00Z",
+        strategy_key="center_buy",
+        strategy="center_buy",
+        entry_method="ens_member_counting",
+        decision_snapshot_id="snap-proof-1",
+    )
+    _seed_canonical_entry_baseline(conn, pos)
+    _seed_acked_entry_command(conn, pos, command_id="cmd-rescue-proof-1")
+    portfolio = _make_portfolio(pos)
+
+    stats = reconcile(
+        portfolio,
+        [ChainPosition(token_id="tok_yes_proof_001", size=25.0, avg_price=0.44, cost=11.0, condition_id="cond-1")],
+        conn=conn,
+    )
+    phase = conn.execute(
+        "SELECT phase FROM position_current WHERE position_id = ?",
+        ("rescue-proof-1",),
+    ).fetchone()["phase"]
+    conn.close()
+
+    assert stats["rescued_pending"] == 0
+    assert stats["skipped_pending_missing_fill_fact"] == 1
+    assert phase == "pending_entry"
+    assert pos.state == "pending_tracked"
+    assert pos.entry_fill_verified is False
+    assert pos.order_status == "pending"
+
+
+def test_chain_reconciliation_rescues_commanded_pending_entry_with_trade_fact(tmp_path):
+    from src.state.chain_reconciliation import ChainPosition, reconcile
+    from src.state.db import get_connection, init_schema
+    from src.state.venue_command_repo import append_trade_fact
+
+    conn = get_connection(tmp_path / "rescue_with_trade_fact.db")
+    init_schema(conn)
+
+    pos = _make_position(
+        trade_id="rescue-proof-2",
+        state="pending_tracked",
+        direction="buy_yes",
+        token_id="tok_yes_proof_002",
+        no_token_id="tok_no_proof_002",
+        order_id="order-proof-2",
+        entry_order_id="order-proof-2",
+        entry_fill_verified=False,
+        entered_at="",
+        order_status="pending",
+        order_posted_at="2026-04-03T00:00:00Z",
+        strategy_key="center_buy",
+        strategy="center_buy",
+        entry_method="ens_member_counting",
+        decision_snapshot_id="snap-proof-2",
+    )
+    _seed_canonical_entry_baseline(conn, pos)
+    _seed_acked_entry_command(conn, pos, command_id="cmd-rescue-proof-2")
+    append_trade_fact(
+        conn,
+        trade_id="trade-proof-2",
+        venue_order_id="order-proof-2",
+        command_id="cmd-rescue-proof-2",
+        state="MATCHED",
+        filled_size="25",
+        fill_price="0.44",
+        source="WS_USER",
+        observed_at="2026-04-03T00:00:01+00:00",
+        raw_payload_hash="a" * 64,
+        raw_payload_json={"order_id": "order-proof-2", "trade_id": "trade-proof-2"},
+    )
+    portfolio = _make_portfolio(pos)
+
+    stats = reconcile(
+        portfolio,
+        [ChainPosition(token_id="tok_yes_proof_002", size=25.0, avg_price=0.44, cost=11.0, condition_id="cond-1")],
+        conn=conn,
+    )
+    conn.close()
+
+    assert stats["rescued_pending"] == 1
+    assert pos.state == "entered"
+    assert pos.entry_fill_verified is True
+    assert pos.order_status == "filled"
 
 
 def test_lifecycle_kernel_rescues_pending_runtime_state_to_entered():

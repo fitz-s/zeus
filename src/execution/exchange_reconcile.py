@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from hashlib import sha256
+from types import SimpleNamespace
 from typing import Any, Literal, Mapping, Optional
 
 from src.architecture.decorators import capability, protects
@@ -152,7 +153,8 @@ def run_reconcile_sweep(
         raw = _raw(trade)
         venue_trade_id = _trade_id(raw)
         subject_id = venue_trade_id or _stable_subject("trade", raw)
-        order_id = _trade_order_id(raw)
+        order_id, command = _local_command_for_trade(raw, local_by_order)
+        candidate_order_ids = _trade_order_ids(raw)
         state = _trade_state(raw)
         if state is None:
             findings.append(
@@ -170,9 +172,8 @@ def run_reconcile_sweep(
                 )
             )
             continue
-        if order_id and state in {"MATCHED", "MINED", "CONFIRMED"}:
-            trade_order_ids.add(order_id)
-        command = local_by_order.get(order_id or "")
+        if state in {"MATCHED", "MINED", "CONFIRMED"}:
+            trade_order_ids.update(candidate_order_ids)
         if command is None:
             findings.append(
                 record_finding(
@@ -183,6 +184,7 @@ def run_reconcile_sweep(
                     evidence={
                         "exchange_trade": raw,
                         "reason": "exchange_trade_unlinked_to_local_command",
+                        "candidate_order_ids": candidate_order_ids,
                     },
                     recorded_at=observed,
                 )
@@ -212,6 +214,7 @@ def run_reconcile_sweep(
             observed,
             state=state,
             context=context,
+            matched_order_id=order_id,
         )
         if finding is not None:
             findings.append(finding)
@@ -408,12 +411,13 @@ def _append_linkable_trade_fact_if_missing(
     *,
     state: str,
     context: ReconcileContext,
+    matched_order_id: str | None = None,
 ) -> ReconcileFinding | None:
     from src.state.venue_command_repo import append_event, append_trade_fact, get_command
 
-    order_id = _trade_order_id(raw) or str(command["venue_order_id"])
-    filled_size_raw = _first_present(raw, "filled_size", "size", "amount", default=None)
-    fill_price_raw = _first_explicit_fill_price(raw)
+    order_id = matched_order_id or _trade_order_id(raw) or str(command["venue_order_id"])
+    filled_size_raw = _trade_filled_size(raw, order_id)
+    fill_price_raw = _trade_fill_price(raw, order_id)
     missing = _missing_trade_fill_economics(
         state=state,
         filled_size=filled_size_raw,
@@ -468,6 +472,14 @@ def _append_linkable_trade_fact_if_missing(
             fill_price=fill_price,
         )
         if same_fill_economics and str(latest_fact.get("state") or "") == state:
+            _ensure_entry_fill_position_event(
+                conn,
+                command=command,
+                venue_order_id=order_id,
+                filled_size=filled_size,
+                fill_price=fill_price,
+                observed_at=observed_at,
+            )
             return None
         if state in {"MATCHED", "MINED", "CONFIRMED"} and not same_fill_economics:
             return record_finding(
@@ -526,6 +538,7 @@ def _append_linkable_trade_fact_if_missing(
         venue_timestamp=_first_present(raw, "timestamp", "created_at", "createdAt", default=None),
         raw_payload_hash=_hash_payload(raw),
         raw_payload_json=dict(raw),
+        tx_hash=_first_present(raw, "transaction_hash", "tx_hash", default=None),
     )
     if state in {"FAILED", "RETRYING"}:
         return None
@@ -554,7 +567,163 @@ def _append_linkable_trade_fact_if_missing(
         # transitions stay fail-closed by not inventing grammar or forcing a
         # local command mutation.
         return None
+    _ensure_entry_fill_position_event(
+        conn,
+        command=latest,
+        venue_order_id=order_id,
+        filled_size=filled_size,
+        fill_price=fill_price,
+        observed_at=observed_at,
+        command_event=event,
+    )
     return None
+
+
+def _ensure_entry_fill_position_event(
+    conn: sqlite3.Connection,
+    *,
+    command: Mapping[str, Any],
+    venue_order_id: str,
+    filled_size: str,
+    fill_price: str,
+    observed_at: datetime,
+    command_event: str | None = None,
+) -> None:
+    if str(command.get("intent_kind") or "").upper() != "ENTRY":
+        return
+    if str(command.get("side") or "").upper() != "BUY":
+        return
+    position_id = str(command.get("position_id") or "").strip()
+    if not position_id:
+        return
+    row = conn.execute(
+        """
+        SELECT *
+          FROM position_current
+         WHERE position_id = ? OR order_id = ?
+         ORDER BY updated_at DESC
+         LIMIT 1
+        """,
+        (position_id, venue_order_id),
+    ).fetchone()
+    if row is None:
+        return
+
+    current = dict(row)
+    phase = str(current.get("phase") or "")
+    runtime_state = "day0_window" if phase == "day0_window" else "entered"
+    command_state = str(command.get("state") or "").upper()
+    order_status = (
+        "partial"
+        if command_event == "PARTIAL_FILL_OBSERVED" or command_state == "PARTIAL"
+        else "filled"
+    )
+    shares = current.get("shares") if current.get("shares") not in (None, "") else filled_size
+    entry_price = current.get("entry_price") if current.get("entry_price") not in (None, "") else fill_price
+    cost_basis = current.get("cost_basis_usd")
+    if cost_basis in (None, ""):
+        cost_basis = str(_decimal(filled_size) * _decimal(fill_price))
+    occurred_at = observed_at.isoformat()
+    position = SimpleNamespace(
+        **{
+            **current,
+            "trade_id": position_id,
+            "state": runtime_state,
+            "exit_state": current.get("exit_state") or "",
+            "chain_state": current.get("chain_state") or "synced",
+            "env": current.get("env") or "live",
+            "order_id": venue_order_id,
+            "entry_order_id": venue_order_id,
+            "order_status": order_status,
+            "entered_at": current.get("entered_at") or occurred_at,
+            "order_posted_at": current.get("order_posted_at") or occurred_at,
+            "shares": shares,
+            "entry_price": entry_price,
+            "cost_basis_usd": cost_basis,
+            "size_usd": current.get("size_usd") or cost_basis,
+            "strategy_key": current.get("strategy_key") or current.get("strategy") or "unknown_strategy",
+            "unit": current.get("unit") or "F",
+        }
+    )
+    existing = conn.execute(
+        """
+        SELECT 1
+          FROM position_events
+         WHERE position_id = ?
+           AND event_type = 'ENTRY_ORDER_FILLED'
+           AND order_id = ?
+         LIMIT 1
+        """,
+        (position_id, venue_order_id),
+    ).fetchone()
+    if existing is not None:
+        from src.engine.lifecycle_events import build_position_current_projection
+        from src.state.projection import upsert_position_current
+
+        upsert_position_current(conn, build_position_current_projection(position))
+        return
+    seq_row = conn.execute(
+        "SELECT COALESCE(MAX(sequence_no), 0) FROM position_events WHERE position_id = ?",
+        (position_id,),
+    ).fetchone()
+    sequence_no = int((seq_row[0] if seq_row else 0) or 0) + 1
+
+    from src.engine.lifecycle_events import build_entry_fill_only_canonical_write
+    from src.state.db import append_many_and_project
+
+    events, projection = build_entry_fill_only_canonical_write(
+        position,
+        sequence_no=sequence_no,
+        source_module="src.execution.exchange_reconcile",
+    )
+    append_many_and_project(conn, events, projection)
+
+
+def _local_command_for_trade(
+    raw: Mapping[str, Any],
+    local_by_order: Mapping[str, dict[str, Any]],
+) -> tuple[str | None, dict[str, Any] | None]:
+    for order_id in _trade_order_ids(raw):
+        command = local_by_order.get(order_id)
+        if command is not None:
+            return order_id, command
+    return None, None
+
+
+def _selected_maker_order(raw: Mapping[str, Any], order_id: str | None) -> Mapping[str, Any] | None:
+    if not order_id:
+        return None
+    for maker in raw.get("maker_orders") or []:
+        if not isinstance(maker, Mapping):
+            continue
+        maker_order_id = _string_or_none(
+            _first_present(maker, "order_id", "orderID", "orderId", default=None)
+        )
+        if maker_order_id == order_id:
+            return maker
+    return None
+
+
+def _trade_filled_size(raw: Mapping[str, Any], order_id: str | None) -> Any:
+    maker = _selected_maker_order(raw, order_id)
+    if maker is not None:
+        return _first_present(
+            maker,
+            "matched_amount",
+            "matchedAmount",
+            "filled_size",
+            "size",
+            "amount",
+            default=None,
+        )
+    return _first_present(raw, "filled_size", "size", "amount", default=None)
+
+
+def _trade_fill_price(raw: Mapping[str, Any], order_id: str | None) -> Any:
+    maker = _selected_maker_order(raw, order_id)
+    if maker is not None:
+        return _first_present(maker, "avgPrice", "avg_price", "fillPrice", "fill_price", "price", default=None)
+    return _first_explicit_fill_price(raw)
 
 
 def _first_explicit_fill_price(raw: Mapping[str, Any]) -> Any:
@@ -882,9 +1051,25 @@ def _trade_id(raw: Mapping[str, Any]) -> str | None:
 
 
 def _trade_order_id(raw: Mapping[str, Any]) -> str | None:
-    return _string_or_none(
-        _first_present(raw, "orderID", "orderId", "order_id", "maker_order_id", "taker_order_id", default=None)
-    )
+    ids = _trade_order_ids(raw)
+    return ids[0] if ids else None
+
+
+def _trade_order_ids(raw: Mapping[str, Any]) -> list[str]:
+    candidates: list[str] = []
+    for key in ("orderID", "orderId", "order_id", "maker_order_id", "taker_order_id"):
+        value = _string_or_none(_first_present(raw, key, default=None))
+        if value:
+            candidates.append(value)
+    for maker in raw.get("maker_orders") or []:
+        if not isinstance(maker, Mapping):
+            continue
+        value = _string_or_none(
+            _first_present(maker, "order_id", "orderID", "orderId", default=None)
+        )
+        if value:
+            candidates.append(value)
+    return list(dict.fromkeys(candidates))
 
 
 def _trade_state(raw: Mapping[str, Any]) -> str | None:

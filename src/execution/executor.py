@@ -142,7 +142,6 @@ def _geoblock_rejection_payload(exc: Exception, *, idempotency_key: str) -> dict
         "venue_order_created": False,
     }
 
-
 def _canonical_payload_hash(payload: object) -> str:
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()

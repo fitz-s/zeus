@@ -121,6 +121,7 @@ class FakePostOrderFailureClient(FakeTwoStepClient):
         self.calls.append(("post_order", order, order_type, post_only, defer_exec))
         raise TimeoutError("post timed out")
 
+
 class FakeBalanceAllowanceClient:
     def __init__(self, response=None):
         self.response = response or {"balance": "100000000", "allowance": "50000000"}

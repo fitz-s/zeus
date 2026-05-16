@@ -1,8 +1,8 @@
-# Lifecycle: created=2026-05-15; last_reviewed=2026-05-15; last_reused=2026-05-15
+# Lifecycle: created=2026-05-15; last_reviewed=2026-05-16; last_reused=2026-05-16
 # Purpose: Lock read-only live-order E2E proof classification and overclaim prevention.
 # Reuse: Run after venue command schema, executor submit events, or live-order evidence rules change.
 # Created: 2026-05-15
-# Last reused or audited: 2026-05-15
+# Last reused or audited: 2026-05-16
 # Authority basis: docs/operations/task_2026-05-15_live_order_e2e_goal/LIVE_ORDER_E2E_GOAL_PLAN.md
 
 from __future__ import annotations
@@ -67,6 +67,8 @@ def _schema(conn: sqlite3.Connection) -> None:
           source TEXT,
           observed_at TEXT,
           state TEXT,
+          remaining_size TEXT,
+          matched_size TEXT,
           local_sequence INTEGER
         );
         CREATE TABLE venue_trade_facts (
@@ -93,7 +95,10 @@ def _schema(conn: sqlite3.Connection) -> None:
         CREATE TABLE position_current (
           position_id TEXT PRIMARY KEY,
           phase TEXT NOT NULL,
-          order_id TEXT
+          order_id TEXT,
+          order_status TEXT,
+          shares TEXT,
+          cost_basis_usd TEXT
         );
         """
     )
@@ -192,17 +197,30 @@ def _insert_order_fact(
     order_id: str = "order-1",
     source: str = "REST",
     state: str = "RESTING",
+    remaining_size: str | None = "10.00",
+    matched_size: str | None = "0",
     observed_at: str = "2026-05-15T12:00:03Z",
     local_sequence: int = 1,
 ) -> None:
     conn.execute(
         """
         INSERT INTO venue_order_facts (
-          fact_id, command_id, venue_order_id, source, observed_at, state, local_sequence
+          fact_id, command_id, venue_order_id, source, observed_at, state,
+          remaining_size, matched_size, local_sequence
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (fact_id, command_id, order_id, source, observed_at, state, local_sequence),
+        (
+            fact_id,
+            command_id,
+            order_id,
+            source,
+            observed_at,
+            state,
+            remaining_size,
+            matched_size,
+            local_sequence,
+        ),
     )
 
 
@@ -230,7 +248,12 @@ def _insert_trade_fact(
     )
 
 
-def _insert_position_fill(conn: sqlite3.Connection, *, order_id: str = "order-1") -> None:
+def _insert_position_fill(
+    conn: sqlite3.Connection,
+    *,
+    order_id: str = "order-1",
+    order_status: str = "filled",
+) -> None:
     conn.execute(
         """
         INSERT INTO position_events (
@@ -243,10 +266,10 @@ def _insert_position_fill(conn: sqlite3.Connection, *, order_id: str = "order-1"
     )
     conn.execute(
         """
-        INSERT INTO position_current (position_id, phase, order_id)
-        VALUES ('pos-1', 'active', ?)
+        INSERT INTO position_current (position_id, phase, order_id, order_status, shares, cost_basis_usd)
+        VALUES ('pos-1', 'active', ?, ?, '10.00', '4.20')
         """,
-        (order_id,),
+        (order_id, order_status),
     )
 
 
@@ -263,8 +286,8 @@ def _insert_position_pending(conn: sqlite3.Connection, *, order_id: str = "order
     )
     conn.execute(
         """
-        INSERT INTO position_current (position_id, phase, order_id)
-        VALUES ('pos-1', 'pending_entry', ?)
+        INSERT INTO position_current (position_id, phase, order_id, shares, cost_basis_usd)
+        VALUES ('pos-1', 'pending_entry', ?, '0', '0')
         """,
         (order_id,),
     )
@@ -283,8 +306,8 @@ def _insert_position_voided(conn: sqlite3.Connection, *, order_id: str = "order-
     )
     conn.execute(
         """
-        INSERT INTO position_current (position_id, phase, order_id)
-        VALUES ('pos-1', 'voided', ?)
+        INSERT INTO position_current (position_id, phase, order_id, shares, cost_basis_usd)
+        VALUES ('pos-1', 'voided', ?, '0', '0')
         """,
         (order_id,),
     )
@@ -336,6 +359,8 @@ def _schema_current(conn: sqlite3.Connection) -> None:
           source TEXT,
           observed_at TEXT,
           state TEXT,
+          remaining_size TEXT,
+          matched_size TEXT,
           local_sequence INTEGER
         );
         CREATE TABLE venue_trade_facts (
@@ -362,7 +387,9 @@ def _schema_current(conn: sqlite3.Connection) -> None:
         CREATE TABLE position_current (
           position_id TEXT PRIMARY KEY,
           phase TEXT NOT NULL,
-          order_id TEXT
+          order_id TEXT,
+          shares TEXT,
+          cost_basis_usd TEXT
         );
         """
     )
@@ -435,6 +462,105 @@ def test_terminal_no_fill_order_with_voided_projection_passes(tmp_path):
 
     assert result["status"] == "PASS"
     assert result["completion_category"] == "LIVE_ORDER_TERMINAL_NO_FILL"
+
+
+def test_terminal_no_fill_order_requires_explicit_zero_matched_size(tmp_path):
+    module = _load_module()
+    db = tmp_path / "trades.db"
+    with sqlite3.connect(db) as conn:
+        conn.row_factory = sqlite3.Row
+        _schema(conn)
+        _insert_command(conn, state="EXPIRED")
+        _insert_submit_requested(conn)
+        _insert_submit_acked(conn)
+        conn.execute(
+            """
+            INSERT INTO venue_command_events (
+              event_id, command_id, sequence_no, event_type, state_after, occurred_at, payload_json
+            )
+            VALUES ('evt-3', 'cmd-1', 3, 'EXPIRED', 'EXPIRED',
+                    '2026-05-15T12:00:04Z', '{"reason":"venue_terminal_no_fill"}')
+            """
+        )
+        _insert_pre_submit_envelope(conn)
+        _insert_order_fact(conn, state="CANCEL_CONFIRMED", matched_size=None)
+        _insert_position_voided(conn)
+
+    with _connect_module_readonly(module, db, tmp_path) as conn:
+        result = module.evaluate(conn, "cmd-1")
+
+    assert result["status"] == "FAIL"
+    assert result["completion_category"] == "NO_LIVE_ORDER_PROOF"
+    assert any(
+        check["name"] == "latest_venue_order_fact_open"
+        and check["status"] == "FAIL"
+        and "latest_state=CANCEL_CONFIRMED" in check["detail"]
+        for check in result["checks"]
+    )
+
+
+def test_pending_projection_requires_explicit_zero_shares_and_cost_basis(tmp_path):
+    module = _load_module()
+    db = tmp_path / "trades.db"
+    with sqlite3.connect(db) as conn:
+        conn.row_factory = sqlite3.Row
+        _schema(conn)
+        _insert_command(conn)
+        _insert_submit_requested(conn)
+        _insert_submit_acked(conn)
+        _insert_pre_submit_envelope(conn)
+        _insert_order_fact(conn)
+        _insert_position_pending(conn)
+        conn.execute(
+            "UPDATE position_current SET shares = NULL WHERE position_id = 'pos-1'"
+        )
+
+    with _connect_module_readonly(module, db, tmp_path) as conn:
+        result = module.evaluate(conn, "cmd-1")
+
+    assert result["status"] == "FAIL"
+    assert result["completion_category"] == "NO_LIVE_ORDER_PROOF"
+    assert any(
+        check["name"] == "no_position_without_fill" and check["status"] == "FAIL"
+        for check in result["checks"]
+    )
+
+
+def test_voided_projection_requires_explicit_zero_shares_and_cost_basis(tmp_path):
+    module = _load_module()
+    db = tmp_path / "trades.db"
+    with sqlite3.connect(db) as conn:
+        conn.row_factory = sqlite3.Row
+        _schema(conn)
+        _insert_command(conn, state="EXPIRED")
+        _insert_submit_requested(conn)
+        _insert_submit_acked(conn)
+        conn.execute(
+            """
+            INSERT INTO venue_command_events (
+              event_id, command_id, sequence_no, event_type, state_after, occurred_at, payload_json
+            )
+            VALUES ('evt-3', 'cmd-1', 3, 'EXPIRED', 'EXPIRED',
+                    '2026-05-15T12:00:04Z', '{"reason":"venue_terminal_no_fill"}')
+            """
+        )
+        _insert_pre_submit_envelope(conn)
+        _insert_order_fact(conn, state="CANCEL_CONFIRMED", matched_size="0")
+        _insert_position_voided(conn)
+        conn.execute(
+            "UPDATE position_current SET cost_basis_usd = NULL WHERE position_id = 'pos-1'"
+        )
+
+    with _connect_module_readonly(module, db, tmp_path) as conn:
+        result = module.evaluate(conn, "cmd-1")
+
+    assert result["status"] == "FAIL"
+    assert result["completion_category"] == "LIVE_ORDER_TERMINAL_NO_FILL_MISSING_POSITION_PROOF"
+    assert any(
+        check["name"] == "position_current_voided_projection_present"
+        and check["status"] == "FAIL"
+        for check in result["checks"]
+    )
 
 
 def test_current_schema_envelope_id_link_passes(tmp_path):
@@ -834,6 +960,33 @@ def test_fill_completion_requires_trade_fact_and_position_projection(tmp_path):
     assert result["completion_category"] == "LIVE_ORDER_FILLED"
 
 
+def test_partial_fill_requires_partial_position_projection_status(tmp_path):
+    module = _load_module()
+    db = tmp_path / "trades.db"
+    with sqlite3.connect(db) as conn:
+        conn.row_factory = sqlite3.Row
+        _schema(conn)
+        _insert_command(conn, state="PARTIAL")
+        _insert_submit_requested(conn)
+        _insert_submit_acked(conn)
+        _insert_pre_submit_envelope(conn)
+        _insert_order_fact(conn, state="MATCHED")
+        _insert_trade_fact(conn, state="CONFIRMED")
+        _insert_position_fill(conn, order_status="filled")
+
+    with _connect_module_readonly(module, db, tmp_path) as conn:
+        result = module.evaluate(conn, "cmd-1")
+
+    assert result["status"] == "FAIL"
+    assert result["completion_category"] == "LIVE_ORDER_FILL_MISSING_POSITION_PROOF"
+    assert any(
+        check["name"] == "position_current_order_status_consistent"
+        and check["status"] == "FAIL"
+        and "command_state=PARTIAL" in check["detail"]
+        for check in result["checks"]
+    )
+
+
 def test_latest_terminal_order_fact_blocks_fill_completion(tmp_path):
     module = _load_module()
     db = tmp_path / "trades.db"
@@ -1031,3 +1184,42 @@ def test_missing_trade_db_is_structured_no_proof(tmp_path, capsys):
     assert result["status"] == "FAIL"
     assert result["completion_category"] == "NO_LIVE_ORDER_PROOF"
     assert result["checks"][0]["name"] == "trade_db_present"
+
+
+def test_allow_no_proof_does_not_soft_pass_failed_live_order_classification(tmp_path, capsys):
+    module = _load_module()
+    db = tmp_path / "trades.db"
+    with sqlite3.connect(db) as conn:
+        conn.row_factory = sqlite3.Row
+        _schema(conn)
+        _insert_command(conn, decision_id="")
+        _insert_submit_requested(conn)
+        _insert_submit_acked(conn)
+        _insert_pre_submit_envelope(conn)
+        _insert_order_fact(conn)
+    world_db = tmp_path / "zeus-world.db"
+    forecasts_db = tmp_path / "zeus-forecasts.db"
+    for db_path in (world_db, forecasts_db):
+        sqlite3.connect(db_path).close()
+
+    exit_code = module.main(
+        [
+            "--trade-db",
+            str(db),
+            "--world-db",
+            str(world_db),
+            "--forecasts-db",
+            str(forecasts_db),
+            "--json",
+            "--allow-no-proof",
+        ]
+    )
+
+    result = json.loads(capsys.readouterr().out)
+    assert exit_code == 1
+    assert result["status"] == "FAIL"
+    assert result["completion_category"] == "NO_LIVE_ORDER_PROOF"
+    assert any(
+        check["name"] == "command_decision_id_present" and check["status"] == "FAIL"
+        for check in result["checks"]
+    )

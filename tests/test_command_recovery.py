@@ -1,8 +1,8 @@
 # Created: 2026-04-26
-# Lifecycle: created=2026-04-26; last_reviewed=2026-05-08; last_reused=2026-05-08
+# Lifecycle: created=2026-04-26; last_reviewed=2026-05-16; last_reused=2026-05-16
 # Purpose: Lock INV-31 command recovery behavior plus snapshot-gated command inserts.
 # Reuse: Run when command recovery, command journal schema, or executable snapshot gating changes.
-# Last reused/audited: 2026-05-08
+# Last reused/audited: 2026-05-16
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md u00a7P1.S4
 """INV-31 anchor tests: command recovery loop.
 
@@ -347,6 +347,7 @@ def _append_order_fact(
     state="CANCEL_CONFIRMED",
     matched_size="0",
     remaining_size="0",
+    source="REST",
 ):
     from src.state.venue_command_repo import append_order_fact
 
@@ -357,7 +358,7 @@ def _append_order_fact(
         state=state,
         remaining_size=remaining_size,
         matched_size=matched_size,
-        source="REST",
+        source=source,
         observed_at="2026-04-26T00:05:00Z",
         venue_timestamp="2026-04-26T00:05:00Z",
         raw_payload_hash="f" * 64,
@@ -717,6 +718,108 @@ class TestRecoveryResolutionTable:
             "SELECT phase FROM position_current WHERE position_id = 'pos-001'"
         ).fetchone()
         assert current["phase"] == "pending_entry"
+
+    def test_acked_terminal_order_fact_order_id_mismatch_does_not_void_command_position(
+        self,
+        conn,
+        mock_client,
+    ):
+        _insert(conn)
+        _advance_to_acked(conn, venue_order_id="ord-001")
+        _seed_pending_entry_projection(conn, order_id="ord-001")
+        _append_order_fact(
+            conn,
+            order_id="other-order",
+            state="CANCEL_CONFIRMED",
+            matched_size="0",
+            remaining_size="0",
+        )
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["terminal_order_facts"]["scanned"] == 1
+        assert summary["terminal_order_facts"]["errors"] == 1
+        assert summary["terminal_order_facts"]["advanced"] == 0
+        assert _get_state(conn, "cmd-001") == "ACKED"
+        current = conn.execute(
+            "SELECT phase, order_id FROM position_current WHERE position_id = 'pos-001'"
+        ).fetchone()
+        assert dict(current) == {"phase": "pending_entry", "order_id": "ord-001"}
+
+    def test_acked_terminal_order_fact_requires_live_proof_source(
+        self,
+        conn,
+        mock_client,
+    ):
+        _insert(conn)
+        _advance_to_acked(conn, venue_order_id="ord-001")
+        _seed_pending_entry_projection(conn)
+        _append_order_fact(
+            conn,
+            state="CANCEL_CONFIRMED",
+            matched_size="0",
+            remaining_size="0",
+            source="FAKE_VENUE",
+        )
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["terminal_order_facts"]["scanned"] == 0
+        assert summary["terminal_order_facts"]["advanced"] == 0
+        assert _get_state(conn, "cmd-001") == "ACKED"
+        current = conn.execute(
+            "SELECT phase FROM position_current WHERE position_id = 'pos-001'"
+        ).fetchone()
+        assert current["phase"] == "pending_entry"
+
+    def test_acked_terminal_order_fact_missing_matched_size_waits_for_fill_reconciliation(
+        self,
+        conn,
+        mock_client,
+    ):
+        _insert(conn)
+        _advance_to_acked(conn, venue_order_id="ord-001")
+        _seed_pending_entry_projection(conn)
+        _append_order_fact(conn, state="CANCEL_CONFIRMED", matched_size=None, remaining_size="0")
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["terminal_order_facts"]["stayed"] == 1
+        assert summary["terminal_order_facts"]["advanced"] == 0
+        assert _get_state(conn, "cmd-001") == "ACKED"
+        current = conn.execute(
+            "SELECT phase FROM position_current WHERE position_id = 'pos-001'"
+        ).fetchone()
+        assert current["phase"] == "pending_entry"
+
+    def test_acked_terminal_order_fact_missing_position_zero_proof_fails_closed(
+        self,
+        conn,
+        mock_client,
+    ):
+        _insert(conn)
+        _advance_to_acked(conn, venue_order_id="ord-001")
+        _seed_pending_entry_projection(conn)
+        conn.execute("UPDATE position_current SET shares = NULL WHERE position_id = 'pos-001'")
+        _append_order_fact(conn, state="CANCEL_CONFIRMED", matched_size="0", remaining_size="0")
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["terminal_order_facts"]["errors"] == 1
+        assert summary["terminal_order_facts"]["advanced"] == 0
+        assert _get_state(conn, "cmd-001") == "ACKED"
+        current = conn.execute(
+            "SELECT phase, shares FROM position_current WHERE position_id = 'pos-001'"
+        ).fetchone()
+        assert dict(current) == {"phase": "pending_entry", "shares": None}
 
     @pytest.mark.parametrize("venue_status", ["MATCHED", "MINED", "FILLED"])
     def test_unknown_side_effect_nonconfirmed_status_stays_partial_not_fill_finality(

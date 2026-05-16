@@ -122,10 +122,14 @@ function codexAdjustedContext(context) {
     context,
     '',
     'CODEX NOTE: the advisory above mentions Claude Monitor. Codex does not have that tool.',
-    'Use a Codex heartbeat/automation or manual polling instead. Minimum manual checks:',
+    'Use a Codex heartbeat/automation or manual polling instead. Reviewer appearance is a repair trigger, not completion.',
+    'The monitor must notify on failing/pending checks, new non-self comments/reviews, and unresolved actionable reviewThreads.',
+    'After notification: fetch thread-aware reviewThreads, fix code/tests, push one repair batch, and resolve threads only after evidence.',
+    'Keep watching while the PR remains open; do not stop merely because checks pass or reviewers appeared.',
+    'Minimum manual checks:',
     '  gh pr checks <pr-number> --json name,bucket',
-    '  gh api repos/$REPO/pulls/<pr-number>/comments',
-    '  gh api repos/$REPO/pulls/<pr-number>/reviews',
+    '  gh pr view <pr-number> --json reviewDecision,statusCheckRollup,mergeStateStatus,isDraft,latestReviews,state',
+    '  gh api graphql ... reviewThreads { isResolved isOutdated comments { nodes { body author { login } } } }',
   ].join('\n');
 }
 

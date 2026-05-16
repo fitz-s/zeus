@@ -1,5 +1,5 @@
 # Created: 2026-05-06
-# Last reused or audited: 2026-05-07
+# Last reused or audited: 2026-05-16
 # Authority basis: docs/operations/task_2026-05-07_hook_redesign_v2/PLAN.md
 #   BLOCKING tier retired; all hooks ADVISORY-only; bespoke authorization removed.
 
@@ -126,7 +126,9 @@ hooks:
     intent: >
       After successful `gh pr create` or `gh pr ready`, emit
       additionalContext instructing the agent to arm a Monitor on
-      `gh pr checks` + a poll on `gh pr view --json reviews,comments`.
+      `gh pr checks` + thread-aware review comments. Reviewer appearance
+      is a repair trigger, not a completion condition; comments must be
+      triaged, fixed, pushed, and resolved with evidence.
     blocked_when: []
     severity: ADVISORY
     sunset_date: 2026-08-06
