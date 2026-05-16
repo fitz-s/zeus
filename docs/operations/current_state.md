@@ -1,6 +1,6 @@
 # Current State
 
-Last updated: 2026-05-15
+Last updated: 2026-05-16
 
 Role: single live control pointer for the repo.
 
@@ -9,19 +9,22 @@ Role: single live control pointer for the repo.
 Zeus live posture remains operator-controlled; this file only points agents at
 active work surfaces and current-fact companions.
 
-- Main HEAD: `8b3c3c2c59` merge: data daemon live verified (2026-05-15)
+- Main HEAD: `a924766c8a` merge: PR #121 live continuous run (2026-05-16)
 - Runtime entry: `src/main.py` (code-authoritative live runtime state)
 - Posture: live-capable; operator params live in `config/settings.json`
 
-### Completed infrastructure milestones (as of 2026-05-15)
+### Completed infrastructure milestones (as of 2026-05-16)
 
 | Milestone | Status | Reference |
 |-----------|--------|-----------|
 | K1 forecast DB split | COMPLETE | PR #114 merged; canonical schema registry in `src/state/table_registry.py` |
 | K1 followup (cross-DB write seam, index gaps) | COMPLETE | PR #116 merged |
-| Data daemon authority chain | COMPLETE | PR #117 merged via `8b3c3c2c59` |
+| Data daemon authority chain | COMPLETE | PR #117 merged |
 | INV-37 antibody (cross-DB write seam audit) | IN FORCE | `src/state/db_writer_lock.py` canonical lock order |
 | Operator script K1-broken paths | FIXED 2026-05-15 | `healthcheck.py`, `verify_truth_surfaces.py`, `venus_sensing_report.py` now route forecast-class tables to `zeus-forecasts.db` |
+| PR #119 authority + topology v-next + maintenance worker | COMPLETE | 257-file / +50K LOC; topology v-next, maintenance worker scaffold, authority drift fixes |
+| PR #120 live continuous run follow-up | COMPLETE | Boot authority review gaps, source health writer, schema readiness |
+| PR #121 K1 live seam alignment | COMPLETE | `a924766c8a`; harvester/reader trio → `get_forecasts_connection`; settlement writer authority aligned |
 | Flock gap on `get_trade_connection_with_world` | DEFERRED | Out of K1 followup scope; tracked in `docs/to-do-list/known_gaps.md` |
 
 ## Active packet control
