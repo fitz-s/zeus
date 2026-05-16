@@ -96,6 +96,7 @@ def _schema(conn: sqlite3.Connection) -> None:
           position_id TEXT PRIMARY KEY,
           phase TEXT NOT NULL,
           order_id TEXT,
+          order_status TEXT,
           shares TEXT,
           cost_basis_usd TEXT
         );
@@ -247,7 +248,12 @@ def _insert_trade_fact(
     )
 
 
-def _insert_position_fill(conn: sqlite3.Connection, *, order_id: str = "order-1") -> None:
+def _insert_position_fill(
+    conn: sqlite3.Connection,
+    *,
+    order_id: str = "order-1",
+    order_status: str = "filled",
+) -> None:
     conn.execute(
         """
         INSERT INTO position_events (
@@ -260,10 +266,10 @@ def _insert_position_fill(conn: sqlite3.Connection, *, order_id: str = "order-1"
     )
     conn.execute(
         """
-        INSERT INTO position_current (position_id, phase, order_id, shares, cost_basis_usd)
-        VALUES ('pos-1', 'active', ?, '10.00', '4.20')
+        INSERT INTO position_current (position_id, phase, order_id, order_status, shares, cost_basis_usd)
+        VALUES ('pos-1', 'active', ?, ?, '10.00', '4.20')
         """,
-        (order_id,),
+        (order_id, order_status),
     )
 
 
@@ -952,6 +958,33 @@ def test_fill_completion_requires_trade_fact_and_position_projection(tmp_path):
 
     assert result["status"] == "PASS"
     assert result["completion_category"] == "LIVE_ORDER_FILLED"
+
+
+def test_partial_fill_requires_partial_position_projection_status(tmp_path):
+    module = _load_module()
+    db = tmp_path / "trades.db"
+    with sqlite3.connect(db) as conn:
+        conn.row_factory = sqlite3.Row
+        _schema(conn)
+        _insert_command(conn, state="PARTIAL")
+        _insert_submit_requested(conn)
+        _insert_submit_acked(conn)
+        _insert_pre_submit_envelope(conn)
+        _insert_order_fact(conn, state="MATCHED")
+        _insert_trade_fact(conn, state="CONFIRMED")
+        _insert_position_fill(conn, order_status="filled")
+
+    with _connect_module_readonly(module, db, tmp_path) as conn:
+        result = module.evaluate(conn, "cmd-1")
+
+    assert result["status"] == "FAIL"
+    assert result["completion_category"] == "LIVE_ORDER_FILL_MISSING_POSITION_PROOF"
+    assert any(
+        check["name"] == "position_current_order_status_consistent"
+        and check["status"] == "FAIL"
+        and "command_state=PARTIAL" in check["detail"]
+        for check in result["checks"]
+    )
 
 
 def test_latest_terminal_order_fact_blocks_fill_completion(tmp_path):

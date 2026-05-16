@@ -557,6 +557,28 @@ def test_maker_order_trade_links_to_local_command_and_uses_maker_fill_economics(
         "phase_after": "active",
         "source_module": "src.execution.exchange_reconcile",
     }
+    projection = conn.execute(
+        "SELECT phase, order_status FROM position_current WHERE position_id = 'pos-m5'"
+    ).fetchone()
+    assert dict(projection) == {"phase": "active", "order_status": "partial"}
+
+    conn.execute("UPDATE position_current SET order_status = 'filled' WHERE position_id = 'pos-m5'")
+    run_reconcile_sweep(adapter, conn, context="periodic", observed_at=NOW)
+    projection = conn.execute(
+        "SELECT phase, order_status FROM position_current WHERE position_id = 'pos-m5'"
+    ).fetchone()
+    assert dict(projection) == {"phase": "active", "order_status": "partial"}
+    assert (
+        conn.execute(
+            """
+            SELECT COUNT(*)
+              FROM position_events
+             WHERE position_id = 'pos-m5'
+               AND event_type = 'ENTRY_ORDER_FILLED'
+            """
+        ).fetchone()[0]
+        == 1
+    )
     assert findings(conn) == []
 
 

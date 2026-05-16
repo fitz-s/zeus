@@ -433,6 +433,33 @@ def _has_matching_position_current(
     return False
 
 
+def _position_current_order_status_consistent(
+    command_state: str,
+    fill_events: list[dict[str, Any]],
+    current_rows: list[dict[str, Any]],
+    order_id: str,
+) -> bool:
+    if command_state == "PARTIAL":
+        expected = {"partial", "partially_filled", "partially_matched"}
+    elif command_state == "FILLED":
+        expected = {"filled", "confirmed", "complete"}
+    else:
+        return True
+    position_ids = {str(event.get("position_id") or "") for event in fill_events if event.get("position_id")}
+    for row in current_rows:
+        if str(row.get("position_id") or "") not in position_ids:
+            continue
+        if order_id and str(row.get("order_id") or "") != order_id:
+            continue
+        if str(row.get("order_status") or "").lower() in expected:
+            return True
+    return False
+
+
+def _position_current_order_statuses(rows: list[dict[str, Any]]) -> list[str]:
+    return sorted({str(row.get("order_status") or "") for row in rows})
+
+
 def _has_pending_entry_zero_share_projection(
     pending_events: list[dict[str, Any]],
     current_rows: list[dict[str, Any]],
@@ -729,6 +756,17 @@ def evaluate(conn: sqlite3.Connection, command_id: str | None = None) -> dict[st
                 if _has_matching_position_current(fill_position_events, position_current, order_id)
                 else "FAIL",
                 f"count={len(position_current)}",
+            )
+        )
+        checks.append(
+            Check(
+                "position_current_order_status_consistent",
+                "PASS"
+                if _position_current_order_status_consistent(
+                    state, fill_position_events, position_current, order_id
+                )
+                else "FAIL",
+                f"command_state={state} position_order_statuses={_position_current_order_statuses(position_current)}",
             )
         )
     elif terminal_no_fill_observed:

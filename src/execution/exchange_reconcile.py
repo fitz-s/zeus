@@ -574,6 +574,7 @@ def _append_linkable_trade_fact_if_missing(
         filled_size=filled_size,
         fill_price=fill_price,
         observed_at=observed_at,
+        command_event=event,
     )
     return None
 
@@ -586,6 +587,7 @@ def _ensure_entry_fill_position_event(
     filled_size: str,
     fill_price: str,
     observed_at: datetime,
+    command_event: str | None = None,
 ) -> None:
     if str(command.get("intent_kind") or "").upper() != "ENTRY":
         return
@@ -593,19 +595,6 @@ def _ensure_entry_fill_position_event(
         return
     position_id = str(command.get("position_id") or "").strip()
     if not position_id:
-        return
-    existing = conn.execute(
-        """
-        SELECT 1
-          FROM position_events
-         WHERE position_id = ?
-           AND event_type = 'ENTRY_ORDER_FILLED'
-           AND order_id = ?
-         LIMIT 1
-        """,
-        (position_id, venue_order_id),
-    ).fetchone()
-    if existing is not None:
         return
     row = conn.execute(
         """
@@ -623,6 +612,12 @@ def _ensure_entry_fill_position_event(
     current = dict(row)
     phase = str(current.get("phase") or "")
     runtime_state = "day0_window" if phase == "day0_window" else "entered"
+    command_state = str(command.get("state") or "").upper()
+    order_status = (
+        "partial"
+        if command_event == "PARTIAL_FILL_OBSERVED" or command_state == "PARTIAL"
+        else "filled"
+    )
     shares = current.get("shares") if current.get("shares") not in (None, "") else filled_size
     entry_price = current.get("entry_price") if current.get("entry_price") not in (None, "") else fill_price
     cost_basis = current.get("cost_basis_usd")
@@ -639,7 +634,7 @@ def _ensure_entry_fill_position_event(
             "env": current.get("env") or "live",
             "order_id": venue_order_id,
             "entry_order_id": venue_order_id,
-            "order_status": "filled",
+            "order_status": order_status,
             "entered_at": current.get("entered_at") or occurred_at,
             "order_posted_at": current.get("order_posted_at") or occurred_at,
             "shares": shares,
@@ -650,6 +645,23 @@ def _ensure_entry_fill_position_event(
             "unit": current.get("unit") or "F",
         }
     )
+    existing = conn.execute(
+        """
+        SELECT 1
+          FROM position_events
+         WHERE position_id = ?
+           AND event_type = 'ENTRY_ORDER_FILLED'
+           AND order_id = ?
+         LIMIT 1
+        """,
+        (position_id, venue_order_id),
+    ).fetchone()
+    if existing is not None:
+        from src.engine.lifecycle_events import build_position_current_projection
+        from src.state.projection import upsert_position_current
+
+        upsert_position_current(conn, build_position_current_projection(position))
+        return
     seq_row = conn.execute(
         "SELECT COALESCE(MAX(sequence_no), 0) FROM position_events WHERE position_id = ?",
         (position_id,),
