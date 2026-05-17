@@ -561,6 +561,7 @@ def enqueue_redeem_command(
     pusd_amount_micro: Optional[int] = None,
     token_amounts: Optional[dict] = None,
     trade_id: str = "",
+    winning_index_set: Optional[str] = None,
 ) -> dict:
     """Enqueue a durable redeem-intent command in the settlement_commands ledger.
 
@@ -581,6 +582,7 @@ def enqueue_redeem_command(
             pusd_amount_micro=pusd_amount_micro,
             token_amounts=token_amounts or {},
             conn=conn,
+            winning_index_set=winning_index_set,
         )
         logger.info(
             "pUSD redemption for %s (condition=%s) recorded in R1 settlement command ledger: %s",
@@ -2180,6 +2182,20 @@ def _settle_positions(
         # enqueue_redeem_command's body (src/execution/harvester.py:~499).
         if exit_price > 0 and pos.condition_id:
             redeem_token_id = pos.token_id if pos.direction == "buy_yes" else pos.no_token_id
+            # PR-I.5.a: encode the chain-winning outcome bin as a CTF indexSet.
+            # Binary market convention: YES outcome = index 1 → indexSet 1<<1 = 2,
+            #   NO outcome = index 0 → indexSet 1<<0 = 1.
+            # exit_price > 0 guarantees this position is on the winning side:
+            #   buy_yes + won=True  → YES won → indexSet ["2"]
+            #   buy_no  + won=False → NO won  → indexSet ["1"]
+            # V1 limitation: multi-bin (ranged market) encoding not supported;
+            # stays None for non-binary markets until PR-I.5.b extends this.
+            if pos.direction == "buy_yes":
+                _winning_index_set: Optional[str] = '["2"]'
+            elif pos.direction == "buy_no":
+                _winning_index_set = '["1"]'
+            else:
+                _winning_index_set = None
             enqueue_redeem_command(
                 conn,
                 condition_id=pos.condition_id,
@@ -2188,6 +2204,7 @@ def _settle_positions(
                 pusd_amount_micro=int(round(shares * 1_000_000)),
                 token_amounts={redeem_token_id: shares} if redeem_token_id else {},
                 trade_id=pos.trade_id,
+                winning_index_set=_winning_index_set,
             )
 
         # T2-C: Add settled token to ignored set (don't resurrect in reconciliation)

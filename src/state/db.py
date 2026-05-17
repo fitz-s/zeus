@@ -826,7 +826,7 @@ def get_connection(
 # CI hook scripts/check_schema_version.py diffs the sqlite_master hash of
 # a fresh-init DB against tests/state/_schema_pinned_hash.txt and fails
 # the PR if SCHEMA_VERSION did not change in lockstep.
-SCHEMA_VERSION = 4  # 2026-05-16 PR-I C2: REDEEM_OPERATOR_REQUIRED added to settlement_commands.state CHECK (SCAFFOLD §K v5)
+SCHEMA_VERSION = 5  # 2026-05-17 PR-I.5.a: winning_index_set column added to settlement_commands (CTF indexSet for redeemPositions)
 
 
 def init_schema(
@@ -5654,6 +5654,7 @@ def log_execution_fact(
     position_id: str,
     order_role: str,
     decision_id: str | None = None,
+    command_id: str | None = None,
     strategy_key: str | None = None,
     posted_at: str | None = None,
     filled_at: str | None = None,
@@ -5680,7 +5681,8 @@ def log_execution_fact(
     current = conn.execute(
         """
         SELECT posted_at, filled_at, voided_at, submitted_price, fill_price, shares, fill_quality,
-               latency_seconds, venue_status, terminal_exec_status, decision_id, strategy_key
+               latency_seconds, venue_status, terminal_exec_status, decision_id, strategy_key,
+               command_id
         FROM execution_fact
         WHERE intent_id = ?
         """,
@@ -5694,6 +5696,7 @@ def log_execution_fact(
     stored_terminal_status = terminal_exec_status if terminal_exec_status not in (None, "") else (current["terminal_exec_status"] if current else None)
     stored_decision_id = decision_id if decision_id not in (None, "") else (current["decision_id"] if current else None)
     stored_strategy_key = strategy_key if strategy_key not in (None, "") else (current["strategy_key"] if current else None)
+    stored_command_id = command_id if command_id not in (None, "") else (current["command_id"] if current else None)
 
     if clear_fill_fields:
         stored_filled_at = None
@@ -5734,9 +5737,10 @@ def log_execution_fact(
             fill_quality,
             latency_seconds,
             venue_status,
-            terminal_exec_status
+            terminal_exec_status,
+            command_id
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(intent_id) DO UPDATE SET
             position_id=excluded.position_id,
             decision_id=excluded.decision_id,
@@ -5751,7 +5755,8 @@ def log_execution_fact(
             fill_quality=excluded.fill_quality,
             latency_seconds=excluded.latency_seconds,
             venue_status=excluded.venue_status,
-            terminal_exec_status=excluded.terminal_exec_status
+            terminal_exec_status=excluded.terminal_exec_status,
+            command_id=COALESCE(excluded.command_id, execution_fact.command_id)
         """,
         (
             intent_id,
@@ -5769,6 +5774,7 @@ def log_execution_fact(
             stored_latency_seconds,
             stored_venue_status,
             stored_terminal_status,
+            stored_command_id,
         ),
     )
     return {"status": "written", "table": "execution_fact"}
@@ -6037,6 +6043,7 @@ def log_execution_report(conn: sqlite3.Connection, pos, result, *, decision_id: 
         ),
         position_id=getattr(pos, "trade_id", ""),
         decision_id=decision_id,
+        command_id=str(getattr(result, "command_id", None) or "") or None,
         order_role=order_role,
         strategy_key=str(getattr(pos, "strategy_key", "") or getattr(pos, "strategy", "") or "") or None,
         posted_at=posted_at,

@@ -655,7 +655,7 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                     getattr(rescued, "chain_state", "?"),
                     now,
                 )
-                rescued.entered_at = "unknown_entered_at"
+                rescued.entered_at = now  # `now` already in scope; line 668 uses it as _rescue_display_ts
                 _entered_at_was_fabricated = True
             else:
                 _entered_at_was_fabricated = False
@@ -805,7 +805,7 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                 entry_price=0.0,
                 p_posterior=0.0,
                 edge=0.0,
-                entered_at="unknown_entered_at",
+                entered_at="unknown_entered_at",  # QUARANTINE_SENTINEL pattern: all fields are sentinel; intentional (distinct from line-658 bug fixed in F8). Do NOT replace with `now`.
                 token_id=tid,
                 state=enter_chain_quarantined_runtime_state(),
                 strategy="",
