@@ -826,7 +826,7 @@ def get_connection(
 # CI hook scripts/check_schema_version.py diffs the sqlite_master hash of
 # a fresh-init DB against tests/state/_schema_pinned_hash.txt and fails
 # the PR if SCHEMA_VERSION did not change in lockstep.
-SCHEMA_VERSION = 5  # 2026-05-17 PR-I.5.a: winning_index_set column added to settlement_commands (CTF indexSet for redeemPositions)
+SCHEMA_VERSION = 6  # 2026-05-17 PR #137: execution_fact.command_id + position_events.occurred_at ISO CHECK added to kernel DDL
 
 
 def init_schema(

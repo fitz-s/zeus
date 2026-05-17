@@ -225,8 +225,15 @@ def test_apply_migrations_dry_run_does_not_write_ledger(tmp_path: Path) -> None:
         mig_module._BOOTSTRAP_APPLIED = original_bootstrap
 
     assert result == ["202600_dry"]
-    # Ledger table exists (created by _ensure_ledger) but migration not recorded.
-    count = conn.execute(
-        "SELECT COUNT(*) FROM _migrations_applied WHERE name='202600_dry'"
+    # dry_run=True must not create or write the _migrations_applied ledger at all
+    # (PR #137 fix: previously _ensure_ledger was called unconditionally, committing
+    # bootstrap rows before the dry_run branch was reached).
+    ledger_exists = conn.execute(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='_migrations_applied'"
     ).fetchone()[0]
-    assert count == 0, "dry_run must not record migration in ledger."
+    assert ledger_exists == 0, "dry_run must not create _migrations_applied ledger table."
+    # Also verify the migration's up() function did NOT run (no _dry table).
+    dry_table_exists = conn.execute(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='_dry'"
+    ).fetchone()[0]
+    assert dry_table_exists == 0, "dry_run must not execute migration up() function."

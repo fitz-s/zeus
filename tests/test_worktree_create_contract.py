@@ -13,7 +13,9 @@ def test_worktree_create_contract():
     Assert that the worktree_create_advisor hook returns an advisory to stderr,
     leaving stdout empty (Harness protocol requirement for WorktreeCreate).
     """
-    repo_root = Path(__file__).resolve().parents[3]
+    # parents[1] = repo root (tests/ is one level below root).
+    # Original was parents[3] when the file lived under tests/.claude/hooks/.
+    repo_root = Path(__file__).resolve().parents[1]
     dispatch_py = repo_root / ".claude" / "hooks" / "dispatch.py"
 
     # Mock payload for WorktreeCreate
