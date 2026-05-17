@@ -41,6 +41,7 @@ CREATE TABLE IF NOT EXISTS settlement_commands (
   payout_asset TEXT NOT NULL CHECK (payout_asset IN ('pUSD','USDC','USDC_E')),
   pusd_amount_micro INTEGER,
   token_amounts_json TEXT,
+  winning_index_set TEXT,
   tx_hash TEXT,
   block_number INTEGER,
   confirmation_count INTEGER DEFAULT 0,
@@ -221,8 +222,15 @@ def request_redeem(
     conn: sqlite3.Connection | None = None,
     requested_at: datetime | str | None = None,
     fx_classification: FXClassification | None = None,
+    winning_index_set: str | None = None,
 ) -> str:
     """Create a durable redeem intent and return its command id.
+
+    winning_index_set: JSON-encoded uint256[] for CTF redeemPositions indexSets.
+    For binary markets: '["2"]' = YES outcome won, '["1"]' = NO outcome won.
+    NULL is valid for historical rows and callers that don't yet know the bin.
+    V1 limitation: multi-bin (ranged market) encoding is not supported here;
+    callers should pass None for non-binary markets until PR-I.5.b extends this.
 
     pUSD redemption/accounting is Q-FX-1 gated.  Legacy USDC.e payout is not
     silently promoted into pUSD accounting; it is recorded directly into
@@ -281,9 +289,9 @@ def request_redeem(
                 """
                 INSERT INTO settlement_commands (
                   command_id, state, condition_id, market_id, payout_asset,
-                  pusd_amount_micro, token_amounts_json, requested_at,
-                  terminal_at, error_payload
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                  pusd_amount_micro, token_amounts_json, winning_index_set,
+                  requested_at, terminal_at, error_payload
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     command_id,
@@ -293,6 +301,7 @@ def request_redeem(
                     payout_asset,
                     int(pusd_amount_micro) if pusd_amount_micro is not None else None,
                     token_amounts_json,
+                    winning_index_set,
                     requested_at_s,
                     requested_at_s if state in _TERMINAL_STATES else None,
                     _json_dumps(error_payload) if error_payload else None,
@@ -308,6 +317,7 @@ def request_redeem(
                     "payout_asset": payout_asset,
                     "pusd_amount_micro": pusd_amount_micro,
                     "token_amounts": dict(token_amounts or {}),
+                    "winning_index_set": winning_index_set,
                     "error_payload": error_payload,
                 },
                 recorded_at=requested_at_s,
@@ -384,6 +394,11 @@ def submit_redeem(
             conn.commit()
 
         try:
+            logger.debug(
+                "[REDEEM_CTX] command_id=%s winning_index_set=%s (web3 wire pending PR-I.5.c)",
+                command_id,
+                row["winning_index_set"],
+            )
             raw = adapter.redeem(row["condition_id"])
         except Exception as exc:  # preserve durable SUBMITTED before retry classification
             error_payload = {"exception_type": type(exc).__name__, "message": str(exc)}
