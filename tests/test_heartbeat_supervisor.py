@@ -1,10 +1,11 @@
-# Lifecycle: created=2026-04-27; last_reviewed=2026-05-15; last_reused=2026-05-15
+# Lifecycle: created=2026-04-27; last_reviewed=2026-05-15; last_reused=2026-05-17
 # Purpose: Lock R3 Z3 HeartbeatSupervisor fail-closed resting-order gate behavior.
 # Reuse: Run when heartbeat supervision, executor submit gating, or R3 live-money readiness changes.
 # Created: 2026-04-27
-# Last reused/audited: 2026-05-15
+# Last reused/audited: 2026-05-17
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/Z3.yaml
 #                  + docs/operations/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md
+#                  + 2026-05-17 CLOB venue-heartbeat critical-path split
 """R3 Z3 HeartbeatSupervisor antibodies."""
 
 from __future__ import annotations
@@ -238,9 +239,108 @@ def test_venue_heartbeat_scheduler_reports_failed_when_post_misses(tmp_path, mon
     assert main._venue_heartbeat_supervisor.status().health is HeartbeatHealth.DEGRADED
 
 
-def test_venue_heartbeat_refreshes_stale_global_collateral(monkeypatch, tmp_path):
+def test_venue_heartbeat_does_not_run_slow_background_inline(monkeypatch, tmp_path):
     from src import main
     from src.observability import scheduler_health
+
+    adapter = FakeHeartbeatAdapter([HeartbeatAck(ok=True, raw={"heartbeat_id": "session-A"})])
+
+    class Client:
+        def _ensure_v2_adapter(self):
+            return adapter
+
+    launched = []
+
+    def _background(active_adapter):
+        launched.append(active_adapter)
+        return "started"
+
+    def _forbidden(*_args, **_kwargs):
+        raise AssertionError("slow venue maintenance must not run inline with heartbeat")
+
+    monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", Client)
+    monkeypatch.setattr(scheduler_health, "_SCHEDULER_HEALTH_PATH", tmp_path / "scheduler_health.json")
+    monkeypatch.setattr(main, "_run_ws_gap_reconcile_if_required", _forbidden)
+    monkeypatch.setattr(main, "_refresh_global_collateral_snapshot_if_due", _forbidden)
+    monkeypatch.setattr(main, "_start_venue_background_maintenance_async", _background)
+    main._venue_heartbeat_supervisor = None
+    main._venue_heartbeat_adapter = None
+
+    main._write_venue_heartbeat()
+
+    assert adapter.heartbeat_ids == [""]
+    assert launched == [adapter]
+    data = json.loads((tmp_path / "scheduler_health.json").read_text())
+    assert data["venue_heartbeat"]["status"] == "OK"
+
+
+def test_venue_heartbeat_loop_continues_after_failed_tick(monkeypatch):
+    from src import main
+
+    class StopLoop(Exception):
+        pass
+
+    calls = []
+    sleeps = []
+
+    def _heartbeat():
+        calls.append("tick")
+        if len(calls) == 1:
+            raise RuntimeError("transient venue heartbeat failure")
+
+    def _sleep(seconds):
+        sleeps.append(seconds)
+        if len(sleeps) >= 2:
+            raise StopLoop()
+
+    monkeypatch.setattr(main, "_write_venue_heartbeat", _heartbeat)
+    monkeypatch.setattr("time.sleep", _sleep)
+
+    with pytest.raises(StopLoop):
+        main._run_venue_heartbeat_loop(0.01)
+
+    assert calls == ["tick", "tick"]
+    assert sleeps == [0.1, 0.1]
+
+
+def test_main_starts_venue_heartbeat_before_boot_http():
+    from src import main
+
+    source = Path(main.__file__).read_text()
+    main_body = source[source.index("def main():"):]
+    heartbeat_start = main_body.index("_start_venue_heartbeat_loop_if_needed()")
+
+    assert heartbeat_start < main_body.index("_bankroll_current()")
+    assert heartbeat_start < main_body.index("_startup_wallet_check()")
+
+
+def test_venue_background_maintenance_is_throttled_between_heartbeat_ticks(monkeypatch):
+    from src import main
+
+    adapter = object()
+    calls = []
+
+    def _maintenance(active_adapter):
+        calls.append(active_adapter)
+
+    class InlineThread:
+        def __init__(self, *, target, name, daemon):
+            self._target = target
+
+        def start(self):
+            self._target()
+
+    monkeypatch.setattr(main, "_run_venue_background_maintenance_once", _maintenance)
+    monkeypatch.setattr(main.threading, "Thread", InlineThread)
+    main._last_venue_background_maintenance_attempt_at = None
+
+    assert main._start_venue_background_maintenance_async(adapter) == "started"
+    assert main._start_venue_background_maintenance_async(adapter) == "throttled"
+    assert calls == [adapter]
+
+
+def test_venue_background_maintenance_refreshes_stale_global_collateral(monkeypatch):
+    from src import main
     from src.state.collateral_ledger import (
         CollateralLedger,
         CollateralSnapshot,
@@ -283,27 +383,19 @@ def test_venue_heartbeat_refreshes_stale_global_collateral(monkeypatch, tmp_path
 
     adapter = Adapter()
 
-    class Client:
-        def _ensure_v2_adapter(self):
-            return adapter
-
-    monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", Client)
-    monkeypatch.setattr(scheduler_health, "_SCHEDULER_HEALTH_PATH", tmp_path / "scheduler_health.json")
-    main._venue_heartbeat_supervisor = None
-    main._venue_heartbeat_adapter = None
     main._last_collateral_heartbeat_refresh_attempt_at = None
 
-    main._write_venue_heartbeat()
+    result = main._run_venue_background_maintenance_once(adapter)
 
+    assert result["status"] == "ok"
     assert adapter.collateral_refreshes == 1
     snapshot = ledger.snapshot()
     assert snapshot.pusd_balance_micro == 199_396_602
     assert snapshot.pusd_allowance_micro == 9_000_000
 
 
-def test_venue_heartbeat_skips_recent_global_collateral(monkeypatch, tmp_path):
+def test_venue_background_maintenance_skips_recent_global_collateral(monkeypatch):
     from src import main
-    from src.observability import scheduler_health
     from src.state.collateral_ledger import (
         CollateralLedger,
         CollateralSnapshot,
@@ -339,24 +431,16 @@ def test_venue_heartbeat_skips_recent_global_collateral(monkeypatch, tmp_path):
 
     adapter = Adapter()
 
-    class Client:
-        def _ensure_v2_adapter(self):
-            return adapter
-
-    monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", Client)
-    monkeypatch.setattr(scheduler_health, "_SCHEDULER_HEALTH_PATH", tmp_path / "scheduler_health.json")
-    main._venue_heartbeat_supervisor = None
-    main._venue_heartbeat_adapter = None
     main._last_collateral_heartbeat_refresh_attempt_at = None
 
-    main._write_venue_heartbeat()
+    result = main._run_venue_background_maintenance_once(adapter)
 
+    assert result["status"] == "ok"
     assert adapter.collateral_refreshes == 0
 
 
-def test_venue_heartbeat_throttles_degraded_collateral_refresh_attempts(monkeypatch, tmp_path):
+def test_venue_background_maintenance_throttles_degraded_collateral_refresh_attempts(monkeypatch):
     from src import main
-    from src.observability import scheduler_health
     from src.state.collateral_ledger import (
         CollateralLedger,
         CollateralSnapshot,
@@ -397,19 +481,11 @@ def test_venue_heartbeat_throttles_degraded_collateral_refresh_attempts(monkeypa
 
     adapter = Adapter()
 
-    class Client:
-        def _ensure_v2_adapter(self):
-            return adapter
-
-    monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", Client)
-    monkeypatch.setattr(scheduler_health, "_SCHEDULER_HEALTH_PATH", tmp_path / "scheduler_health.json")
-    main._venue_heartbeat_supervisor = None
-    main._venue_heartbeat_adapter = None
     main._last_collateral_heartbeat_refresh_attempt_at = None
 
-    main._write_venue_heartbeat()
+    main._run_venue_background_maintenance_once(adapter)
     first_snapshot = ledger.snapshot()
-    main._write_venue_heartbeat()
+    main._run_venue_background_maintenance_once(adapter)
 
     assert adapter.collateral_refreshes == 1
     assert first_snapshot.authority_tier == "DEGRADED"

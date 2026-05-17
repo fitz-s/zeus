@@ -14,8 +14,9 @@ Advisory file lock infrastructure (src.data.dual_run_lock) is retained in code
 """
 
 # Created: pre-Phase-0 (K2 scheduler wiring via 27bedbd; P9A run_mode observability via 7081634)
-# Last reused/audited: 2026-05-16
+# Last reused/audited: 2026-05-17
 # Authority basis: Phase 3 two-system independence — docs/operations/task_2026-04-30_two_system_independence/design.md §5 Phase 3; docs/operations/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md
+#                  + 2026-05-17 CLOB venue-heartbeat critical-path split
 
 import functools
 import logging
@@ -422,6 +423,10 @@ def _write_heartbeat() -> None:
 
 _venue_heartbeat_supervisor = None
 _venue_heartbeat_adapter = None
+_venue_heartbeat_thread = None
+_venue_background_maintenance_lock = threading.Lock()
+_last_venue_background_maintenance_attempt_at = None
+VENUE_BACKGROUND_MAINTENANCE_SECONDS = 30.0
 _last_collateral_heartbeat_refresh_attempt_at = None
 COLLATERAL_HEARTBEAT_REFRESH_SECONDS = 30.0
 
@@ -524,6 +529,52 @@ def _run_ws_gap_reconcile_if_required(
     finally:
         if owns_connection and conn is not None:
             conn.close()
+
+
+def _run_venue_background_maintenance_once(adapter=None) -> dict:
+    """Run venue read-side maintenance outside the heartbeat critical path."""
+
+    active_adapter = adapter or _venue_heartbeat_adapter
+    if active_adapter is None:
+        return {"status": "adapter_unavailable"}
+    return {
+        "status": "ok",
+        "ws_gap_reconcile": _run_ws_gap_reconcile_if_required(active_adapter),
+        "collateral_refreshed": _refresh_global_collateral_snapshot_if_due(active_adapter),
+    }
+
+
+def _start_venue_background_maintenance_async(adapter=None) -> str:
+    """Start slow venue maintenance without delaying the next heartbeat tick."""
+
+    global _last_venue_background_maintenance_attempt_at
+    active_adapter = adapter or _venue_heartbeat_adapter
+    if active_adapter is None:
+        return "adapter_unavailable"
+    now = datetime.now(timezone.utc)
+    if (
+        _last_venue_background_maintenance_attempt_at is not None
+        and (now - _last_venue_background_maintenance_attempt_at).total_seconds()
+        < VENUE_BACKGROUND_MAINTENANCE_SECONDS
+    ):
+        return "throttled"
+    if not _venue_background_maintenance_lock.acquire(blocking=False):
+        return "already_running"
+    _last_venue_background_maintenance_attempt_at = now
+
+    def _runner() -> None:
+        try:
+            _run_venue_background_maintenance_once(active_adapter)
+        finally:
+            _venue_background_maintenance_lock.release()
+
+    thread = threading.Thread(
+        target=_runner,
+        name="venue-background-maintenance",
+        daemon=True,
+    )
+    thread.start()
+    return "started"
 
 
 _user_channel_ingestor = None
@@ -720,7 +771,12 @@ def _start_user_channel_ingestor_if_enabled() -> None:
 
 @_scheduler_job("venue_heartbeat")
 def _write_venue_heartbeat() -> None:
-    """Post the Polymarket venue heartbeat required for live resting orders."""
+    """Post the Polymarket venue heartbeat required for live resting orders.
+
+    Keep this function narrow. Polymarket cancels resting GTC/GTD orders when
+    valid heartbeats stop, so slow reconciliation and collateral reads must not
+    run inline with the heartbeat tick.
+    """
     global _venue_heartbeat_supervisor, _venue_heartbeat_adapter
     import asyncio
 
@@ -764,8 +820,42 @@ def _write_venue_heartbeat() -> None:
             f"venue heartbeat unhealthy: health={status.health.value}; "
             f"error={status.last_error or ''}"
         )
-    _run_ws_gap_reconcile_if_required(_venue_heartbeat_adapter)
-    _refresh_global_collateral_snapshot_if_due(_venue_heartbeat_adapter)
+    _start_venue_background_maintenance_async(_venue_heartbeat_adapter)
+
+
+@_scheduler_job("venue_heartbeat")
+def _start_venue_heartbeat_loop_if_needed() -> None:
+    """Keep a dedicated venue-heartbeat loop alive outside APScheduler load."""
+
+    global _venue_heartbeat_thread
+    if _venue_heartbeat_thread is not None and _venue_heartbeat_thread.is_alive():
+        return
+
+    from src.control.heartbeat_supervisor import heartbeat_cadence_seconds_from_env
+
+    cadence_seconds = heartbeat_cadence_seconds_from_env()
+    _venue_heartbeat_thread = threading.Thread(
+        target=_run_venue_heartbeat_loop,
+        args=(cadence_seconds,),
+        name="venue-heartbeat",
+        daemon=True,
+    )
+    _venue_heartbeat_thread.start()
+
+
+def _run_venue_heartbeat_loop(cadence_seconds: float) -> None:
+    """Run venue heartbeats forever; a failed tick must not kill the loop."""
+
+    import time
+
+    while True:
+        started = datetime.now(timezone.utc)
+        try:
+            _write_venue_heartbeat()
+        except Exception as exc:
+            logger.error("venue heartbeat loop tick failed: %s", exc, exc_info=True)
+        elapsed = (datetime.now(timezone.utc) - started).total_seconds()
+        time.sleep(max(0.1, cadence_seconds - elapsed))
 
 
 def _startup_freshness_check() -> None:
@@ -1094,6 +1184,12 @@ def main():
     # without VPN. Must precede any HTTP call (PolymarketClient wallet check, etc).
     from src.data.proxy_health import bypass_dead_proxy_env_vars
     bypass_dead_proxy_env_vars()
+
+    # Venue heartbeat is the liveness contract for already-resting CLOB orders.
+    # Start it before any boot-time wallet/readiness HTTP so a restart cannot
+    # leave existing orders without heartbeats while slow checks complete.
+    _start_venue_heartbeat_loop_if_needed()
+
     # Capital truth: query on-chain wallet via bankroll_provider. Startup must
     # never log retired config-literal capital as if it were wallet truth.
     try:
@@ -1202,7 +1298,7 @@ def main():
                       max_instances=1, coalesce=True)
     from src.control.heartbeat_supervisor import heartbeat_cadence_seconds_from_env
     scheduler.add_job(
-        _write_venue_heartbeat,
+        _start_venue_heartbeat_loop_if_needed,
         "interval",
         seconds=heartbeat_cadence_seconds_from_env(),
         id="venue_heartbeat",
