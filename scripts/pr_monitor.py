@@ -33,11 +33,14 @@ feedback_monitor_emit_only_terminal_review_and_check_events.md):
     - Intermediate CI states (queued, in_progress, pending, mixed).
     - Re-emission of an already-seen terminal state.
     - Self-author comments and review submissions.
-    - CI re-runs caused by a push whose head commit was authored by $ME.
-      Snapshot-then-clear: the prior terminal state is captured before
-      clearing; the same terminal state arriving in the post-push CI re-run
-      is silently re-recorded (no CHECK-COMPLETE echo). Only a CHANGED
-      terminal state (e.g., pass → fail) emits on the post-push round.
+    - CI re-runs caused by ANY push (self or other) — the per-check terminal
+      tracker survives push events, so a re-run that produces the same
+      (name, bucket) silently dedups. Only a CHANGED terminal state
+      (e.g., pass → fail in the re-run) emits a new CHECK-COMPLETE. This is
+      the entire mechanism: there is no special-case self-push branch,
+      because the original "snapshot-then-clear" attempt failed across the
+      common multi-poll gap between push detection and re-run terminal
+      arrival (PR #133 live anchor 2026-05-17).
 
 Use:
     Monitor(persistent=true, command="python scripts/pr_monitor.py <PR>")
@@ -116,14 +119,6 @@ def _fetch_pr_state(pr: int) -> tuple[str | None, str | None]:
     if not isinstance(data, dict):
         return None, None
     return data.get("state"), data.get("headRefOid")
-
-
-def _fetch_last_commit_author(pr: int) -> str:
-    rc, out = _gh(
-        "pr", "view", str(pr), "--json", "commits",
-        "--jq", '.commits[-1].authors[0].login // ""',
-    )
-    return out if rc == 0 else ""
 
 
 def _fetch_checks(pr: int) -> list[dict[str, Any]]:
@@ -241,19 +236,18 @@ def run_once(
     if state is None:
         return None, None
 
-    # Self-push CI suppression: when head SHA changes AND the new commit is
-    # authored by $ME, the CI inevitably re-runs. Snapshot the prior terminal
-    # state BEFORE clearing, then suppress emission for any check whose
-    # (name, bucket) matches the snapshot. Only a CHANGED terminal state
-    # (e.g., pass → fail in the re-run) emits a new CHECK-COMPLETE.
-    # Per feedback_monitor_emit_only_terminal_review_and_check_events.md.
-    pre_self_push_snapshot: dict[str, str] = {}
-    if last_head is not None and head and head != last_head:
-        last_author = _fetch_last_commit_author(pr)
-        if last_author == me:
-            pre_self_push_snapshot = dict(seen_terminal)
-            seen_terminal.clear()
-
+    # CI dedup: the per-check terminal tracker (`seen_terminal`) survives
+    # across polls AND across push events. A check that re-runs to the same
+    # terminal state hits `seen_terminal.get(name) == bucket` and continues
+    # silently. A check that changes terminal state (pass → fail) falls into
+    # the body and emits — exactly what we want.
+    #
+    # No special-case self-push branch: the previous "snapshot-then-clear"
+    # design (PR #133 v1) failed because CI re-runs typically settle several
+    # polls AFTER the push event, and the local snapshot couldn't survive
+    # that gap. Removing the clear is simpler, correct across any number of
+    # intermediate polls, and handles foreign pushes identically. Anchor:
+    # PR #133 live emission of duplicate CHECK-COMPLETE after c81499c36e.
     for chk in _fetch_checks(pr):
         name = chk.get("name", "") or ""
         bucket = chk.get("bucket", "") or ""
@@ -261,12 +255,8 @@ def run_once(
             continue
         if seen_terminal.get(name) == bucket:
             continue
-        # Suppress emission when: (a) first poll baseline, or (b) this is a
-        # self-push round and the pre-clear snapshot already had the same
-        # (name, bucket) — i.e., the CI re-run produced identical terminal
-        # state. Both cases record silently to keep future polls deduped.
-        suppress = first_poll or pre_self_push_snapshot.get(name) == bucket
-        if not suppress:
+        # First-poll baseline: record but never emit.
+        if not first_poll:
             _emit(f"CHECK-COMPLETE: {name}: {bucket}")
         seen_terminal[name] = bucket
 

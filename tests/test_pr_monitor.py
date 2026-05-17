@@ -13,10 +13,13 @@ contracts are pinned in source:
     2. Non-self comments/reviews are emitted on later polls; self-author are not.
     3. Already-seen terminal CI states are never re-emitted.
     4. PR transitioning out of OPEN emits PR-CLOSED and terminates.
-    5. A self-authored head SHA change snapshots the prior terminal state,
-       clears the live tracker, then suppresses CHECK-COMPLETE emission for
-       any check whose (name, bucket) matches the snapshot. CHANGED terminal
-       states (pass→fail in re-run) still emit.
+    5. Any push (head SHA change, any author) does NOT reset the terminal
+       tracker. The plain dedup on `seen_terminal` survives the push event
+       and silently absorbs CI re-runs landing at the SAME terminal bucket
+       even across multiple intermediate in_progress polls. CHANGED terminal
+       states (pass→fail in re-run) still emit. Anchor: PR #133 live
+       reproduction of duplicate CHECK-COMPLETE proved a per-poll snapshot
+       cannot bridge the multi-poll window between push and re-run terminal.
     6. Transient _fetch_pr_state failures don't advance first_poll; baseline
        is preserved for the next successful poll. After 3 consecutive
        failures, main emits ERROR and exits non-zero.
@@ -25,8 +28,10 @@ contracts are pinned in source:
 Meta-verification (per feedback_antibody_recursion_metaverify_essential):
 each test is constructed so that breaking the corresponding filter in
 scripts/pr_monitor.py would make the assertion fail. Sed-break/restore
-proofs run during PR authoring for: self-author filter (broken_rc=1) and
-self-push snapshot (broken_rc=1).
+proofs run during PR authoring; the multi-poll push test
+(test_push_then_ci_rerun_across_polls_does_not_echo) was added
+specifically because the original single-poll snapshot test couldn't
+catch the across-polls regression that fired live on PR #133.
 """
 from __future__ import annotations
 
@@ -44,12 +49,9 @@ import pr_monitor  # noqa: E402
 
 def _patch_fetches(monkeypatch, *,
                    state="OPEN", head="sha0",
-                   author="",
                    checks=None, comments=None, reviews=None):
     monkeypatch.setattr(pr_monitor, "_fetch_pr_state",
                         lambda pr: (state, head))
-    monkeypatch.setattr(pr_monitor, "_fetch_last_commit_author",
-                        lambda pr: author)
     monkeypatch.setattr(pr_monitor, "_fetch_checks",
                         lambda pr: checks or [])
     monkeypatch.setattr(pr_monitor, "_fetch_inline_comments",
@@ -160,17 +162,13 @@ def test_already_seen_comments_and_reviews_not_re_emitted(monkeypatch):
     assert lines == [], f"already-seen items must not re-emit; got {lines!r}"
 
 
-def test_self_push_same_terminal_state_does_not_echo(monkeypatch):
-    """Contract 5: self-authored head SHA change with identical terminal CI
-    state in the re-run does NOT emit CHECK-COMPLETE. This is the headline
-    contract — the entire reason the snapshot-then-clear logic exists.
-    Pinned by asserting NO CHECK-COMPLETE in emitted stdout (the prior
-    revision asserted only the dict shape and silently passed even when
-    the implementation echoed)."""
+def test_push_with_same_terminal_state_does_not_echo(monkeypatch):
+    """Contract 5: a head SHA change with identical terminal CI state in the
+    re-run does NOT emit CHECK-COMPLETE. The plain dedup on `seen_terminal`
+    handles this without any snapshot/clear mechanism."""
     _patch_fetches(
         monkeypatch,
         head="sha1",
-        author="me",
         checks=[{"name": "tests", "bucket": "pass"}],
     )
     seen_terminal = {"tests": "pass"}
@@ -180,18 +178,16 @@ def test_self_push_same_terminal_state_does_not_echo(monkeypatch):
         last_head="sha0", first_poll=False,
     )
     assert not any(l.startswith("CHECK-COMPLETE") for l in lines), \
-        f"self-push round must not echo unchanged terminal state; got {lines!r}"
-    assert seen_terminal == {"tests": "pass"}, \
-        "tracker must be re-populated so subsequent polls remain deduped"
+        f"push round must not echo unchanged terminal state; got {lines!r}"
+    assert seen_terminal == {"tests": "pass"}
 
 
-def test_self_push_changed_terminal_state_does_emit(monkeypatch):
+def test_push_with_changed_terminal_state_does_emit(monkeypatch):
     """Contract 5 positive: if the CI re-run's terminal state DIFFERS from
-    the pre-push snapshot (pass → fail), that IS a new event and emits."""
+    the prior known state (pass → fail), that IS a new event and emits."""
     _patch_fetches(
         monkeypatch,
         head="sha1",
-        author="me",
         checks=[{"name": "tests", "bucket": "fail"}],  # was pass before push
     )
     seen_terminal = {"tests": "pass"}
@@ -201,18 +197,59 @@ def test_self_push_changed_terminal_state_does_emit(monkeypatch):
         last_head="sha0", first_poll=False,
     )
     assert any("CHECK-COMPLETE: tests: fail" in l for l in lines), \
-        f"changed terminal state after self-push must emit; got {lines!r}"
+        f"changed terminal state after push must emit; got {lines!r}"
     assert seen_terminal == {"tests": "fail"}
 
 
-def test_foreign_push_preserves_terminal_tracker(monkeypatch):
-    """Contract 5 negative: head SHA change by non-self does NOT reset."""
+def test_push_then_ci_rerun_across_polls_does_not_echo(monkeypatch):
+    """Contract 5 multi-poll: the anchor scenario from PR #133 v1 bug.
+    Push happens between poll 1 (CI was pass) and poll 2 (CI now pending).
+    Poll 3 sees CI terminal again at the same bucket. The intermediate
+    in_progress poll MUST NOT cause the eventual terminal re-arrival to
+    look NEW. seen_terminal entries must persist across the entire window.
+    """
+    seen_terminal: dict[str, str] = {"tests": "pass"}
+
+    # Poll 2: head changed to sha1, CI in_progress (intermediate, not terminal)
     _patch_fetches(
         monkeypatch,
         head="sha1",
-        author="other-human",
+        checks=[{"name": "tests", "bucket": "in_progress"}],
+    )
+    p2 = _capture_run_once(
+        132, "owner/repo", "me",
+        seen_terminal, set(), set(),
+        last_head="sha0", first_poll=False,
+    )
+    assert p2 == [], f"intermediate state must not emit; got {p2!r}"
+    assert seen_terminal == {"tests": "pass"}, \
+        "seen_terminal must survive across the push event"
+
+    # Poll 3: still on sha1, CI re-run finished at same terminal state
+    _patch_fetches(
+        monkeypatch,
+        head="sha1",
+        checks=[{"name": "tests", "bucket": "pass"}],
+    )
+    p3 = _capture_run_once(
+        132, "owner/repo", "me",
+        seen_terminal, set(), set(),
+        last_head="sha1", first_poll=False,
+    )
+    assert p3 == [], \
+        f"re-arrival at same terminal must NOT echo across polls; got {p3!r}"
+    assert seen_terminal == {"tests": "pass"}
+
+
+def test_push_with_brand_new_check_emits(monkeypatch):
+    """A push (any author) that introduces a brand-new check (not in
+    seen_terminal) reaching terminal state emits CHECK-COMPLETE. The
+    plain dedup naturally handles this — no special-case branch needed."""
+    _patch_fetches(
+        monkeypatch,
+        head="sha1",
         checks=[{"name": "tests", "bucket": "pass"},
-                {"name": "build", "bucket": "pass"}],
+                {"name": "build", "bucket": "pass"}],  # brand new check
     )
     seen_terminal = {"tests": "pass"}
     lines = _capture_run_once(
@@ -221,9 +258,11 @@ def test_foreign_push_preserves_terminal_tracker(monkeypatch):
         last_head="sha0", first_poll=False,
     )
     assert "build" in seen_terminal, \
-        "foreign push: new terminal states still emit and get tracked"
+        "brand-new check must be tracked after first terminal sighting"
     assert any("CHECK-COMPLETE: build" in l for l in lines), \
-        f"foreign push: new terminal CI must emit; got {lines!r}"
+        f"brand-new terminal check must emit; got {lines!r}"
+    assert not any("CHECK-COMPLETE: tests" in l for l in lines), \
+        f"pre-known check at same bucket must not echo; got {lines!r}"
 
 
 def test_pr_closed_emits_and_terminates(monkeypatch):
@@ -343,7 +382,6 @@ def test_main_exits_with_error_after_consecutive_state_failures(monkeypatch):
     monkeypatch.setattr(pr_monitor, "_fetch_checks", lambda pr: [])
     monkeypatch.setattr(pr_monitor, "_fetch_inline_comments", lambda pr, r: [])
     monkeypatch.setattr(pr_monitor, "_fetch_reviews", lambda pr, r: [])
-    monkeypatch.setattr(pr_monitor, "_fetch_last_commit_author", lambda pr: "")
     monkeypatch.setattr(pr_monitor.time, "sleep", lambda s: None)
     buf = io.StringIO()
     with redirect_stdout(buf):
@@ -359,7 +397,6 @@ def test_transient_first_poll_failure_preserves_baseline(monkeypatch):
     successful poll still treats itself as baseline — no noise flood."""
     monkeypatch.setattr(pr_monitor, "_fetch_me", lambda: "me")
     monkeypatch.setattr(pr_monitor, "_fetch_repo", lambda: "owner/repo")
-    monkeypatch.setattr(pr_monitor, "_fetch_last_commit_author", lambda pr: "")
     monkeypatch.setattr(pr_monitor.time, "sleep", lambda s: None)
     monkeypatch.setattr(pr_monitor, "_fetch_inline_comments", lambda pr, r: [])
     monkeypatch.setattr(pr_monitor, "_fetch_reviews", lambda pr, r: [])
