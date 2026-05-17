@@ -10291,6 +10291,53 @@ def _monitor_chain_deps(now: datetime):
     )
 
 
+def test_monitoring_phase_skips_terminal_positions_before_probability_refresh(monkeypatch):
+    """RELATIONSHIP: canonical lifecycle terminals must not enter monitor fresh_prob flow."""
+
+    portfolio = PortfolioState(
+        positions=[
+            _position(trade_id="voided-terminal", state="voided"),
+            _position(trade_id="settled-terminal", state="settled"),
+            _position(trade_id="admin-terminal", state="admin_closed"),
+        ]
+    )
+    artifact = CycleArtifact(mode="opening_hunt", started_at="2026-04-01T20:00:00Z")
+    summary = {"monitors": 0, "exits": 0}
+
+    monkeypatch.setattr(
+        "src.execution.exit_lifecycle.check_pending_exits",
+        lambda portfolio, clob, conn=None: {"filled": 0, "retried": 0, "filled_positions": []},
+    )
+    monkeypatch.setattr(
+        "src.execution.exit_lifecycle.handle_exit_pending_missing",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("terminal positions must not enter pending-exit reconciliation")
+        ),
+    )
+    monkeypatch.setattr(
+        "src.engine.monitor_refresh.refresh_position",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("terminal positions must not enter monitor probability refresh")
+        ),
+    )
+
+    p_dirty, t_dirty = cycle_runtime.execute_monitoring_phase(
+        conn=None,
+        clob=types.SimpleNamespace(),
+        portfolio=portfolio,
+        artifact=artifact,
+        tracker=StrategyTracker(),
+        summary=summary,
+        deps=_monitor_chain_deps(datetime(2026, 4, 1, 20, 0, tzinfo=timezone.utc)),
+    )
+
+    assert p_dirty is False
+    assert t_dirty is False
+    assert summary["monitor_skipped_terminal"] == 3
+    assert summary["monitors"] == 0
+    assert artifact.monitor_results == []
+
+
 def test_orange_risk_exits_favorable_position_through_monitor_lifecycle(monkeypatch):
     pos = _position(
         trade_id="orange-favorable",

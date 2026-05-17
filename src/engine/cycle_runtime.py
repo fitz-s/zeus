@@ -23,6 +23,7 @@ from src.engine.time_context import lead_hours_to_date_start, lead_hours_to_sett
 from src.state.lifecycle_manager import (
     enter_day0_window_runtime_state,
     initial_entry_runtime_state_for_order_status,
+    is_terminal_state,
 )
 from src.state.portfolio import (
     CORRECTED_EXECUTABLE_PRICING_SEMANTICS_VERSION,
@@ -1689,6 +1690,10 @@ def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: 
 
     for pos in list(portfolio.positions):
         if pos.state == "pending_tracked":
+            continue
+        state_value = _position_state_value(pos)
+        if is_terminal_state(state_value) and state_value != "quarantined":
+            summary["monitor_skipped_terminal"] = summary.get("monitor_skipped_terminal", 0) + 1
             continue
         if False:
             _ = pos.entry_method
