@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
-# Created: 2026-05-17
-# Last reused or audited: 2026-05-17
+# Lifecycle: created=2026-05-17; last_reviewed=2026-05-17; last_reused=never
+# Purpose: Canonical PR Monitor script — single source of filter logic for
+#   the Monitor tool armed after `gh pr create` / `gh pr ready` succeeds.
+# Reuse: Inspect `.claude/hooks/dispatch.py::_run_advisory_check_pr_open_monitor_arm`
+#   and `tests/test_pr_monitor.py` antibodies before adjusting filter contracts.
 # Authority basis: feedback_monitor_emit_only_terminal_review_and_check_events.md
 #                  feedback_pr_auto_review_one_shot_per_open.md
 #                  feedback_pr_bot_comments_are_bug_reports.md
@@ -70,8 +73,9 @@ def _gh(*args: str) -> tuple[int, str]:
 
     Stderr is dropped intentionally — Monitor stdout is the only event stream
     the agent reads, and gh's warning chatter (rate-limit hints, etc.) is not
-    actionable. fail-open: any subprocess failure returns ("", non-zero rc)
-    and the caller treats it as "no data this poll" rather than an event.
+    actionable. fail-open: on TimeoutExpired/FileNotFoundError/OSError, returns
+    (1, "") so the caller treats it as "no data this poll" rather than an
+    event. Tuple ordering is (rc, stdout) — never (stdout, rc).
     """
     try:
         r = subprocess.run(
@@ -133,27 +137,57 @@ def _fetch_checks(pr: int) -> list[dict[str, Any]]:
     return data if isinstance(data, list) else []
 
 
-def _fetch_inline_comments(pr: int, repo: str) -> list[dict[str, Any]]:
-    # --paginate so PRs with >30 comments don't silently truncate older ones.
-    rc, out = _gh("api", "--paginate", f"repos/{repo}/pulls/{pr}/comments")
-    if rc != 0 or not out:
-        return []
+def _parse_paginated_json(out: str) -> list[dict[str, Any]]:
+    """Parse `gh api --paginate --slurp` output.
+
+    With --slurp, gh wraps each page as an element of the outer array, so the
+    output is `[[page1...], [page2...], ...]` — flatten to a single list of
+    items. Tolerates the single-page case (one wrapper array containing one
+    page array). Returns [] on parse failure or unexpected shape.
+
+    Without --slurp, multi-page --paginate emits concatenated JSON arrays
+    that `json.loads` cannot parse — silently dropping ALL comments past
+    page 1. The original anchor for adding --slurp here is PR #133 review
+    by chatgpt-codex-connector[bot].
+    """
     try:
         data = json.loads(out)
     except json.JSONDecodeError:
         return []
-    return data if isinstance(data, list) else []
+    if not isinstance(data, list):
+        return []
+    # If --slurp wrapper present: data is a list of lists. Flatten.
+    # If somehow a flat list slips through (defensive), pass through.
+    flat: list[dict[str, Any]] = []
+    for entry in data:
+        if isinstance(entry, list):
+            flat.extend(item for item in entry if isinstance(item, dict))
+        elif isinstance(entry, dict):
+            flat.append(entry)
+    return flat
+
+
+def _fetch_inline_comments(pr: int, repo: str) -> list[dict[str, Any]]:
+    # --paginate + --slurp: traverses every page AND wraps the pages so the
+    # output is parseable as a single JSON array (concatenated arrays without
+    # --slurp would silently drop pages 2+ to JSONDecodeError → []).
+    rc, out = _gh(
+        "api", "--paginate", "--slurp",
+        f"repos/{repo}/pulls/{pr}/comments",
+    )
+    if rc != 0 or not out:
+        return []
+    return _parse_paginated_json(out)
 
 
 def _fetch_reviews(pr: int, repo: str) -> list[dict[str, Any]]:
-    rc, out = _gh("api", "--paginate", f"repos/{repo}/pulls/{pr}/reviews")
+    rc, out = _gh(
+        "api", "--paginate", "--slurp",
+        f"repos/{repo}/pulls/{pr}/reviews",
+    )
     if rc != 0 or not out:
         return []
-    try:
-        data = json.loads(out)
-    except json.JSONDecodeError:
-        return []
-    return data if isinstance(data, list) else []
+    return _parse_paginated_json(out)
 
 
 def _emit(line: str) -> None:
@@ -268,6 +302,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--once", action="store_true",
                         help="single poll then exit (for tests / spot-checks)")
     args = parser.parse_args(argv)
+
+    # --poll <= 0 would spin-loop and burn gh rate limits. Reject early. Tests
+    # that need a fast cadence should monkeypatch time.sleep instead.
+    if args.poll <= 0:
+        _emit(f"ERROR: --poll must be >= 1 (got {args.poll})")
+        return 4
 
     me = args.me or _fetch_me()
     repo = args.repo or _fetch_repo()

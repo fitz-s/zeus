@@ -1,5 +1,8 @@
-# Created: 2026-05-17
-# Last reused or audited: 2026-05-17
+# Lifecycle: created=2026-05-17; last_reviewed=2026-05-17; last_reused=never
+# Purpose: Antibody tests pinning the 7 filter contracts of scripts/pr_monitor.py
+#   so a future refactor that regresses a filter fails the build.
+# Reuse: Inspect scripts/pr_monitor.py docstring (emission contract + filters)
+#   before adding/changing tests.
 # Authority basis: feedback_antibody_recursion_metaverify_essential.md
 #                  feedback_monitor_emit_only_terminal_review_and_check_events.md
 """Antibody tests for scripts/pr_monitor.py — the canonical PR Monitor.
@@ -28,6 +31,7 @@ self-push snapshot (broken_rc=1).
 from __future__ import annotations
 
 import io
+import json
 import sys
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -36,11 +40,6 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
 import pr_monitor  # noqa: E402
-
-
-def _run(captures: list[str]) -> None:
-    captures.clear()
-    captures.extend([])
 
 
 def _patch_fetches(monkeypatch, *,
@@ -348,7 +347,8 @@ def test_main_exits_with_error_after_consecutive_state_failures(monkeypatch):
     monkeypatch.setattr(pr_monitor.time, "sleep", lambda s: None)
     buf = io.StringIO()
     with redirect_stdout(buf):
-        rc = pr_monitor.main(["9999", "--poll", "0"])
+        # --poll 1 (smallest valid) + monkeypatched sleep keeps the test fast.
+        rc = pr_monitor.main(["9999", "--poll", "1"])
     assert rc == 3, f"must exit 3 after consecutive failures; got {rc}"
     assert "ERROR" in buf.getvalue() and "9999" in buf.getvalue(), \
         f"must emit ERROR line; got {buf.getvalue()!r}"
@@ -413,3 +413,54 @@ def test_pr_state_handles_json_null_response(monkeypatch):
     monkeypatch.setattr(pr_monitor, "_gh", fake_gh)
     state, head = pr_monitor._fetch_pr_state(132)
     assert state is None and head is None
+
+
+def test_parse_paginated_json_flattens_slurp_wrapper():
+    """gh api --paginate --slurp returns [[page1...], [page2...], ...].
+    The parser must flatten to a single item list. Anchor: PR #133 Codex
+    P2 (silent comment loss past 30 items without --slurp+flatten)."""
+    multi_page = json.dumps([
+        [{"id": 1, "body": "p1a"}, {"id": 2, "body": "p1b"}],
+        [{"id": 3, "body": "p2a"}],
+    ])
+    flat = pr_monitor._parse_paginated_json(multi_page)
+    assert [c["id"] for c in flat] == [1, 2, 3]
+
+
+def test_parse_paginated_json_handles_single_page_wrapper():
+    """Single-page slurp output: [[items...]] — still flattens correctly."""
+    single_page = json.dumps([[{"id": 1, "body": "only"}]])
+    flat = pr_monitor._parse_paginated_json(single_page)
+    assert [c["id"] for c in flat] == [1]
+
+
+def test_parse_paginated_json_returns_empty_on_garbage():
+    """Malformed JSON must NOT crash — fail-open to []."""
+    assert pr_monitor._parse_paginated_json("not json") == []
+    assert pr_monitor._parse_paginated_json("") == []
+    assert pr_monitor._parse_paginated_json(json.dumps({"unexpected": "shape"})) == []
+
+
+def test_main_rejects_nonpositive_poll(monkeypatch):
+    """--poll 0 or negative must error early, not spin-loop and burn gh."""
+    monkeypatch.setattr(pr_monitor, "_fetch_me", lambda: "me")
+    monkeypatch.setattr(pr_monitor, "_fetch_repo", lambda: "owner/repo")
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        rc = pr_monitor.main(["132", "--poll", "0"])
+    assert rc == 4
+    assert "ERROR" in buf.getvalue() and "--poll" in buf.getvalue()
+
+
+def test_fetch_inline_comments_uses_slurp_flag(monkeypatch):
+    """Wire test: _fetch_inline_comments must pass --paginate --slurp to gh.
+    Without --slurp, multi-page PRs silently drop comments past page 1."""
+    captured_args: list[tuple] = []
+    def fake_gh(*args):
+        captured_args.append(args)
+        return 0, json.dumps([[{"id": 1, "user": {"login": "x"}}]])
+    monkeypatch.setattr(pr_monitor, "_gh", fake_gh)
+    pr_monitor._fetch_inline_comments(132, "owner/repo")
+    assert any("--paginate" in a and "--slurp" in a
+               for a in captured_args), \
+        f"both --paginate and --slurp must be in gh args; got {captured_args!r}"
