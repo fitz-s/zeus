@@ -285,7 +285,7 @@ def _aggregate_records(
 # ---------------------------------------------------------------------------
 
 def load_window(
-    evidence_dir: Path | str = "evidence/topology_v_next_shadow",
+    evidence_dir: Path | str = "docs/historical_evidence/topology_v_next_shadow",
     days_back: int = 14,
 ) -> list[DivergenceRecord]:
     """
@@ -375,7 +375,7 @@ def aggregate(
     start_date: date | str,
     end_date: date | str,
     *,
-    root: Path | str = "evidence/topology_v_next_shadow",
+    root: Path | str = "docs/historical_evidence/topology_v_next_shadow",
     out_path: Path | str | None = None,
     skip_honored_filter: bool = True,
 ) -> dict[str, Any]:
@@ -438,7 +438,7 @@ def cli_main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--root",
-        default="evidence/topology_v_next_shadow",
+        default="docs/historical_evidence/topology_v_next_shadow",
         metavar="DIR",
         help="Evidence directory root containing divergence_YYYY-MM-DD.jsonl files.",
     )

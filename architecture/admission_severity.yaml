@@ -9,7 +9,7 @@ metadata:
   created: 2026-05-07
   authority_basis: >
     ULTIMATE_DESIGN §2.3 reversibility classes; Navigation Topology v2 PLAN §2.2;
-    critic-opus evidence/topology_v2_critic_opus.md C3/D1 resolved;
+    critic-opus docs/historical_evidence/topology_v2_critic_opus.md C3/D1 resolved;
     sunset 2026-11-07
   default_severity: ADVISORY
   default_reversibility_class: WORKING
@@ -20,7 +20,7 @@ metadata:
 typed_intent_enum:
   - id: plan_only
     description: >
-      Plan-only operation. Reads files; writes ONLY to docs/** or evidence/**.
+      Plan-only operation. Reads files; writes ONLY to docs/** or docs/historical_evidence/**.
       No source/test/script edits. Substantive plans MUST be packetized under
       docs/operations/task_<YYYY-MM-DD>_<topic>/ as a descriptive plan artifact
       such as <TOPIC>_PLAN.md or legacy PLAN.md. `.omc/plans/`,
@@ -31,7 +31,7 @@ typed_intent_enum:
       Admitted directly without profile match (admission shortcut per K3).
     admits_path_globs:
       - docs/**
-      - evidence/**
+      - docs/historical_evidence/**
     blocks_path_globs:
       - src/**
       - tests/**
@@ -75,12 +75,12 @@ typed_intent_enum:
 
   - id: audit
     description: >
-      Read-only audit/investigation. Writes ONLY to evidence/**.
+      Read-only audit/investigation. Writes ONLY to docs/historical_evidence/**.
       `.omc/research/` is scratch_runtime_artifact and not an audit-write target;
-      audit findings worth preserving belong in evidence/<topic>.md.
+      audit findings worth preserving belong in docs/historical_evidence/<topic>.md.
       Source/test/script writes blocked.
     admits_path_globs:
-      - evidence/**
+      - docs/historical_evidence/**
     blocks_path_globs:
       - src/**
       - tests/**
@@ -102,7 +102,7 @@ typed_intent_enum:
       - REVIEW.md
       - docs/review/**
       - docs/reference/**
-      - evidence/**
+      - docs/historical_evidence/**
     blocks_path_globs:
       - src/**
       - tests/**
@@ -145,7 +145,7 @@ typed_intent_enum:
 #
 # Per K1 structural decision: default_severity = ADVISORY.
 # BLOCKING is reserved for entries whose reversibility_class is TRUTH_REWRITE
-# or ON_CHAIN, or explicitly operator-promoted under evidence/admission_blocking_promotions/.
+# or ON_CHAIN, or explicitly operator-promoted under docs/historical_evidence/admission_blocking_promotions/.
 #
 # Per K1 invariant: no entry may have target_severity = BLOCKING with
 # reversibility_class = WORKING. Asserted by tests/test_severity_tier_invariant.py.

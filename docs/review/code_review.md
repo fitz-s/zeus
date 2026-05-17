@@ -277,7 +277,7 @@ Default-skip paths (review only if change mutates runtime behavior):
 - `.omc/**`, `.omx/**`, `.zeus/**`, `.zeus-githooks/**`, `.zpkt-cache/**`
 - `docs/archives/**`, `docs/artifacts/**`, `docs/reports/**`,
   `docs/operations/archive/**`, closed `docs/operations/task_*/**` packets
-- `logs/**`, `raw/**`, `state/**`, `evidence/**`
+- `logs/**`, `raw/**`, `state/**`, `docs/historical_evidence/**`
 - `*.lock`, `.DS_Store`, `*.log`, `__pycache__/**`, `*.pyc`
 - Generated files, fixture data, prompt archives, large model outputs
 

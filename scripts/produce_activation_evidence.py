@@ -524,8 +524,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--out-dir",
         type=Path,
-        default=Path("evidence/activation"),
-        help="Directory to write artifact files into (default: evidence/activation/).",
+        default=Path("docs/historical_evidence/activation"),
+        help="Directory to write artifact files into (default: docs/historical_evidence/activation/).",
     )
     parser.add_argument(
         "--evidence",

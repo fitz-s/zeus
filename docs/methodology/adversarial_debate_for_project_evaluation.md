@@ -124,7 +124,7 @@ Boot prompt structure:
 
 ### R1 dispatch (after both BOOT_ACKs)
 
-Each side writes opening at `evidence/<role>/R1_opening.md`:
+Each side writes opening at `docs/historical_evidence/<role>/R1_opening.md`:
 - Engage opponent's STRONGEST anticipated attack at face value before pivoting (per anti-rubber-stamp rule)
 - ≥2 WebFetch external sources cited inline with URL + exact quote + timestamp
 - ≥1 concrete tradeoff/concession itemized
@@ -135,7 +135,7 @@ Sequential or parallel? Both work for opening statements (no inter-dependency). 
 
 ### R2 dispatch (after both R1 closed)
 
-Each side reads opponent's R1, writes rebuttal at `evidence/<role>/R2_rebuttal.md`:
+Each side reads opponent's R1, writes rebuttal at `docs/historical_evidence/<role>/R2_rebuttal.md`:
 - Engage opponent's STRONGEST R1 element at face value
 - ≥2 NEW WebFetch (no recycle from R1)
 - LOCK formal concession bank (itemized "I CONCEDE / I HOLD / UNRESOLVABLE")
@@ -145,8 +145,8 @@ Each side reads opponent's R1, writes rebuttal at `evidence/<role>/R2_rebuttal.m
 
 For round-2 (alt-system) and round-3 (capital allocation), use **two-phase format**:
 
-- Phase-1 (parallel): each side writes proposal at `evidence/<role>/round<N>_proposal.md`
-- Phase-2 (parallel): each side critiques opponent's at `evidence/<role>/round<N>_critique.md`
+- Phase-1 (parallel): each side writes proposal at `docs/historical_evidence/<role>/round<N>_proposal.md`
+- Phase-2 (parallel): each side critiques opponent's at `docs/historical_evidence/<role>/round<N>_critique.md`
 - Both phases: ≥2 NEW WebFetch each (no recycle from prior rounds)
 - Phase-2: LOCK FINAL POSITION explicitly (stands / partial-accept / move-toward-middle / surrender)
 
@@ -227,7 +227,7 @@ Spawn `critic-<topic>` (opus, longlast) parallel to executor. Critic reads:
 - Repo authority docs
 - Pre-execution baselines (test counts, planning-lock state, etc.)
 
-Critic writes own boot evidence at `evidence/critic-<topic>/_boot_critic.md` with:
+Critic writes own boot evidence at `docs/historical_evidence/critic-<topic>/_boot_critic.md` with:
 - LIVE baselines (independently re-measured; do NOT trust documented baselines)
 - Per-batch attack vectors (10 attacks per anticipated batch)
 - Pytest baseline plan
@@ -245,7 +245,7 @@ After executor SendMessages `BATCH_X_DONE`:
    - Apply 10-attack template to executor's claims
    - Verify any deprecation/stub strategies still satisfy validators
    - Spot-check pre-existing-vs-new findings
-3. Critic writes `evidence/critic-<topic>/batch_X_review_<date>.md` (≤300 lines)
+3. Critic writes `docs/historical_evidence/critic-<topic>/batch_X_review_<date>.md` (≤300 lines)
 4. Critic SendMessages `BATCH_X_REVIEW <APPROVE|REVISE|BLOCK> path=<abs>`
 
 If APPROVE → team-lead dispatches GO_BATCH_X+1
@@ -690,7 +690,7 @@ Sequence:
 2. Read <repo authority docs>
 3. Sample-read <N> manifests of YOUR choice
 4. Read <relevant retrospective / review docs>
-5. Write to evidence/<role>/_boot_<role>.md (≤300 lines, 4 sections)
+5. Write to docs/historical_evidence/<role>/_boot_<role>.md (≤300 lines, 4 sections)
 6. SendMessage me exactly "BOOT_ACK_<ROLE> path=<abs>". Then idle.
 
 DO NOT engage R1 substantively. DO NOT WebFetch in boot.
@@ -715,7 +715,7 @@ Your task:
 
 Engage opponent's STRONGEST direction at face value before pivoting.
 
-Disk: evidence/<role>/round<N>_<phase>.md (≤350 lines). SendMessage me "ROUND<N>_<EVENT>_DONE_<ROLE> path=<abs>".
+Disk: docs/historical_evidence/<role>/round<N>_<phase>.md (≤350 lines). SendMessage me "ROUND<N>_<EVENT>_DONE_<ROLE> path=<abs>".
 ```
 
 ### Template 4: Critic gate dispatch
@@ -733,7 +733,7 @@ Per your boot §<N> attack vectors for BATCH X + caveat-fix carryovers from prio
 - <attack vector 2>
 - ...
 
-Write evidence/critic-<topic>/batch_X_review_<date>.md. SendMessage me "BATCH_X_REVIEW <APPROVE|REVISE|BLOCK> path=<abs>".
+Write docs/historical_evidence/critic-<topic>/batch_X_review_<date>.md. SendMessage me "BATCH_X_REVIEW <APPROVE|REVISE|BLOCK> path=<abs>".
 ```
 
 ### Template 5: Verdict skeleton

@@ -173,7 +173,7 @@ Detailed path table at `docs/review/review_scope_map.md`. Compressed map:
   `.omc/**`, `.omx/**`, `.zeus/**`, `.zeus-githooks/**`, `.zpkt-cache/**`
 - `docs/archives/**`, `docs/artifacts/**`, `docs/reports/**`,
   `docs/operations/archive/**`, closed `docs/operations/task_*/**` packets
-- `logs/**`, `raw/**`, `state/**`, `evidence/**`
+- `logs/**`, `raw/**`, `state/**`, `docs/historical_evidence/**`
 - `*.lock`, `.DS_Store`, `*.log`, `__pycache__/**`, `*.pyc`,
   `.gitleaks.toml`, `.importlinter` (configs — review only when changed)
 - Generated files, fixture data, prompt archives, large model outputs

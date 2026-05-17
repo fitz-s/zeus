@@ -18,7 +18,7 @@ Why these and not just per-flag tests:
 
 When a flag is about to be flipped, this whole module must pass under
 the operator's actual evidence state. ``produce_activation_evidence.py``
-runs these and dumps the verdict to ``evidence/activation/``.
+runs these and dumps the verdict to ``docs/historical_evidence/activation/``.
 """
 
 from __future__ import annotations

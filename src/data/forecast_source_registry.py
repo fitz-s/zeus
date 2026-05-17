@@ -104,7 +104,7 @@ ENSEMBLE_MODEL_SOURCE_MAP: dict[str, str] = {
 
 _TIGGE_OPERATOR_ARTIFACT = (
     "docs/operations/task_2026-04-26_ultimate_plan/**/"
-    "evidence/tigge_ingest_decision_*.md"
+    "docs/historical_evidence/tigge_ingest_decision_*.md"
 )
 
 SOURCES: dict[str, ForecastSourceSpec] = {

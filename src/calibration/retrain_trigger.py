@@ -32,7 +32,7 @@ ENV_FLAG_NAME = "ZEUS_CALIBRATION_RETRAIN_ENABLED"
 OPERATOR_TOKEN_SECRET_ENV = "ZEUS_CALIBRATION_RETRAIN_OPERATOR_TOKEN_SECRET"
 ARTIFACT_PATTERN = (
     "docs/operations/task_2026-04-26_ultimate_plan/**/"
-    "evidence/calibration_retrain_decision_*.md"
+    "docs/historical_evidence/calibration_retrain_decision_*.md"
 )
 
 
