@@ -282,6 +282,35 @@ def record_gap(
     return _status
 
 
+def record_message_persistence_gap(
+    reason: str = "ws_message_persistence_db_locked",
+    *,
+    observed_at: datetime | None = None,
+    stale_after_seconds: int | None = None,
+) -> WSGapStatus:
+    """Mark a persisted-message gap without falsifying WS connectivity.
+
+    A DB write failure can hide a user-channel fact, so new submits still need
+    M5 proof before resuming. It is not itself a socket disconnect: the reader
+    received the message and may keep consuming the stream.
+    """
+
+    global _status
+    now = observed_at or _utcnow()
+    _status = WSGapStatus(
+        connected=True,
+        last_message_at=now,
+        consecutive_gaps=_status.consecutive_gaps + 1,
+        subscription_state="SUBSCRIBED",
+        gap_reason=str(reason),
+        m5_reconcile_required=True,
+        affected_markets=_status.affected_markets,
+        updated_at=now,
+        stale_after_seconds=stale_after_seconds or _status.stale_after_seconds,
+    )
+    return _status
+
+
 def clear_for_test(*, observed_at: datetime | None = None) -> WSGapStatus:
     """Reset guard state for deterministic unit tests only."""
 

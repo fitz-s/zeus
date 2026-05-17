@@ -1724,6 +1724,79 @@ def test_position_drift_tolerates_venue_precision_and_resolves_existing(conn):
     }
 
 
+def test_position_drift_ignores_position_api_visibility_floor_dust(conn):
+    from src.execution.exchange_reconcile import record_finding, run_reconcile_sweep
+
+    token = "dust-position-token"
+    seed_command(conn, command_id="cmd-dust", venue_order_id="ord-dust", token_id=token)
+    append_trade_fact(
+        conn,
+        command_id="cmd-dust",
+        venue_order_id="ord-dust",
+        token_id=token,
+        trade_id="trade-dust",
+        size="0.007891",
+        state="CONFIRMED",
+    )
+    stale = record_finding(
+        conn,
+        kind="position_drift",
+        subject_id=token,
+        context="ws_gap",
+        evidence={"reason": "stale_dust_probe"},
+        recorded_at=NOW - timedelta(minutes=1),
+    )
+
+    result = run_reconcile_sweep(
+        FakeM5Adapter(positions=[]),
+        conn,
+        context="ws_gap",
+        observed_at=NOW,
+    )
+
+    assert not any(finding.kind == "position_drift" for finding in result)
+    resolved = conn.execute(
+        "SELECT resolution, resolved_by FROM exchange_reconcile_findings WHERE finding_id = ?",
+        (stale.finding_id,),
+    ).fetchone()
+    assert dict(resolved) == {
+        "resolution": "position_drift_below_position_api_visibility_floor",
+        "resolved_by": "src.execution.exchange_reconcile",
+    }
+
+
+def test_position_drift_visibility_floor_does_not_hide_material_drift(conn):
+    from src.execution.exchange_reconcile import run_reconcile_sweep
+
+    token = "material-position-token"
+    seed_command(
+        conn,
+        command_id="cmd-material",
+        venue_order_id="ord-material",
+        token_id=token,
+    )
+    append_trade_fact(
+        conn,
+        command_id="cmd-material",
+        venue_order_id="ord-material",
+        token_id=token,
+        trade_id="trade-material",
+        size="0.0101",
+        state="CONFIRMED",
+    )
+
+    result = run_reconcile_sweep(
+        FakeM5Adapter(positions=[]),
+        conn,
+        context="ws_gap",
+        observed_at=NOW,
+    )
+
+    position_findings = [finding for finding in result if finding.kind == "position_drift"]
+    assert [finding.subject_id for finding in position_findings] == [token]
+    assert '"confirmed_journal_size":"0.0101"' in position_findings[0].evidence_json
+
+
 def test_pending_exit_matched_sell_offsets_confirmed_position_without_drift(conn):
     from src.execution.exchange_reconcile import run_reconcile_sweep
 

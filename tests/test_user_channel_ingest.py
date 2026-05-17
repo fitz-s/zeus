@@ -326,8 +326,11 @@ def test_raw_trade_message_db_lock_defers_without_tearing_down_ws_reader(conn):
     }
     status = ws_gap_guard.status()
     assert status.gap_reason == "ws_message_persistence_db_locked"
+    assert status.connected is True
+    assert status.subscription_state == "SUBSCRIBED"
     assert status.m5_reconcile_required is True
     assert gaps[-1] == status
+    assert gaps[-1].connected is True
     assert _rows(conn, "venue_trade_facts") == []
     assert _rows(conn, "position_lots") == []
     assert _command_state(conn) == "ACKED"

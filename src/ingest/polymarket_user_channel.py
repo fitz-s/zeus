@@ -490,14 +490,14 @@ class PolymarketUserChannelIngestor:
         except sqlite3.OperationalError as exc:
             if not _is_sqlite_locked(exc):
                 raise
-            status = ws_gap_guard.record_gap(
+            status = ws_gap_guard.record_message_persistence_gap(
                 "ws_message_persistence_db_locked",
-                subscription_state="DISCONNECTED",
+                stale_after_seconds=self.stale_after_seconds,
             )
             self._emit_gap(status)
             logger.warning(
                 "M3 user-channel deferred message persistence after sqlite lock: "
-                "family=%s condition_id=%s; preserving M5 latch",
+                "family=%s condition_id=%s; WS remains connected, M5 latch preserved",
                 _event_family(message) or _trade_status(message),
                 _condition_id(message),
             )

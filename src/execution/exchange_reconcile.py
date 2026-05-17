@@ -63,6 +63,7 @@ _TRADE_FACT_STATES = frozenset({"MATCHED", "MINED", "CONFIRMED", "RETRYING", "FA
 _CONFIRMED_POSITION_FACT_STATES = frozenset({"CONFIRMED"})
 _OPTIMISTIC_POSITION_FACT_STATES = frozenset({"MATCHED", "MINED"})
 _POSITION_DRIFT_ABS_TOLERANCE = Decimal("0.0001")
+_POSITION_API_VISIBILITY_FLOOR = Decimal("0.01")
 _ENTRY_FILL_PROJECTION_PHASES = frozenset({"pending_entry", "active", "day0_window"})
 _TERMINAL_ORDER_FACT_STATES = frozenset({"MATCHED", "CANCEL_CONFIRMED", "EXPIRED", "VENUE_WIPED"})
 
@@ -957,6 +958,14 @@ def _record_position_drift_findings(
                 resolved_at=observed_at,
             )
             continue
+        if _position_size_hidden_by_visibility_floor(exchange_size, confirmed_size):
+            _resolve_open_position_drift_findings(
+                conn,
+                token,
+                resolution="position_drift_below_position_api_visibility_floor",
+                resolved_at=observed_at,
+            )
+            continue
         if _pending_exit_optimistic_sell_offsets_confirmed_position(
             conn,
             token_id=token,
@@ -1147,6 +1156,14 @@ def _resolve_position_drift_tokens_from_current_truth(
                 resolved_at=observed_at,
             )
             continue
+        if _position_size_hidden_by_visibility_floor(exchange_size, confirmed_size):
+            _resolve_open_position_drift_findings(
+                conn,
+                token,
+                resolution="position_drift_below_position_api_visibility_floor",
+                resolved_at=observed_at,
+            )
+            continue
         if _pending_exit_optimistic_sell_offsets_confirmed_position(
             conn,
             token_id=token,
@@ -1172,6 +1189,12 @@ def _resolve_position_drift_tokens_from_current_truth(
 
 def _position_size_matches(left: Decimal, right: Decimal) -> bool:
     return abs(left - right) <= _POSITION_DRIFT_ABS_TOLERANCE
+
+
+def _position_size_hidden_by_visibility_floor(left: Decimal, right: Decimal) -> bool:
+    if min(abs(left), abs(right)) != Decimal("0"):
+        return False
+    return abs(left - right) <= _POSITION_API_VISIBILITY_FLOOR
 
 
 def _resolve_open_position_drift_findings(
