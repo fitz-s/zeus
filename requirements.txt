@@ -25,6 +25,7 @@ pandas==3.0.1
 # --- HTTP / networking ---
 httpx==0.28.1
 requests==2.33.0
+websockets>=16.0,<17
 
 # --- scheduling / runtime ---
 apscheduler==3.11.2

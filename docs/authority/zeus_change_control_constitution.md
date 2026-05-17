@@ -234,10 +234,10 @@ LLM 输出永远不是 authority；只有 spec、tests、machine checks、runtim
 - `ledger.py` 只负责 canonical append/project
 - `projection.py` 只负责 fold / rebuild
 - `lifecycle_manager.py` 只负责 transition legality
-- `cycle_runner.py` 只负责 orchestration
-- `evaluator.py` 只负责 signal + decision，不负责 authority write
+- `src/engine/cycle_runner.py` 只负责 orchestration
+- `src/engine/evaluator.py` 只负责 signal + decision，不负责 authority write
 - `riskguard.py` 负责 policy emission，不负责 signal math
-- `status_summary.py` 只读 projection，不得自持状态
+- `src/observability/status_summary.py` 只读 projection，不得自持状态
 
 ### 7.2 不允许的跨层写法
 
@@ -261,8 +261,8 @@ LLM 输出永远不是 authority；只有 spec、tests、machine checks、runtim
 
 必须通过：
 - `LifecyclePhase` enum
-- `fold_event(...)`
-- `apply_transition(...)`
+- `fold_event(...)` <!-- GAP_NEEDS_OPERATOR_2026-05-17: symbol absent from src/; grep -rn "def fold_event" src/ → 0 results. Verify intent — implement, drop requirement, or replace with actual ledger API. SCOUT_0C_DRIFTS.md drift #4 refs this. -->
+- `apply_transition(...)` <!-- GAP_NEEDS_OPERATOR_2026-05-17: symbol absent from src/; grep -rn "def apply_transition" src/ → 0 results. Verify intent — implement, drop, or replace with src/state/lifecycle_manager.py API. SCOUT_0C_DRIFTS.md drift #5 refs this. -->
 
 **AST/semgrep 规则：**
 - 在 `state/ledger.py`, `state/projection.py`, `state/lifecycle_manager.py` 之外，禁止对 `phase/state` 赋字符串字面量。
@@ -276,7 +276,7 @@ LLM 输出永远不是 authority；只有 spec、tests、machine checks、runtim
 **AST/semgrep 规则：**
 - 禁止 `strategy = "opening_inertia"` 作为 default/fallback
 - 禁止在 evaluator 之外新建未知 strategy string
-- 仅允许从 `StrategyKey` enum 取值
+- 仅允许从 `StrategyKey` enum 取值 <!-- GAP_NEEDS_OPERATOR_2026-05-17: enum absent from src/; grep -rn "class StrategyKey" src/ → 0 results. Constitution §8.2 mandates AST enforcement against this enum but enum was never implemented. Verify intent — implement StrategyKey enum, drop requirement, or replace with alternative enforcement. SCOUT_0C_DRIFTS.md drift #6 refs this. -->
 
 ### 8.3 温度/单位语义
 禁止：
@@ -305,8 +305,8 @@ LLM 输出永远不是 authority；只有 spec、tests、machine checks、runtim
 - 多处 direct SQL 更新 current row
 
 **AST/semgrep 规则：**
-- 只有 `append_event_and_project` / `append_many_and_project` 可同时触达 `position_events` / `position_current`
-- 禁止其它模块直接 `INSERT INTO position_events`
+- 只有 `append_many_and_project` 可同时触达 `position_events` / `position_current`
+- 禁止其它模块直接 `INSERT INTO position_events` <!-- GAP_NEEDS_OPERATOR_2026-05-17: src/state/chain_reconciliation.py:463 has direct INSERT INTO position_events outside ledger; verify whether this is an approved exception or a violation requiring remediation. SCOUT_0C_DRIFTS.md drift #8 refs this. -->
 - 禁止其它模块直接 `UPDATE position_current`
 
 ### 8.6 Shadow persistence

@@ -45,5 +45,5 @@ Critical invariant: **exit is not local close** (INV-01). A monitor decision pro
 ## Settlement Truth Writes (harvester.py)
 
 `_write_settlement_truth()` writes `winning_bin` and `settled_at` to `settlements` table
-after Gamma API confirms a market settled. Uses UPSERT (UPDATE then INSERT if no match).
+after Gamma API confirms a market settled. Uses `INSERT OR REPLACE` (SQLite DELETE+INSERT idempotency).
 `settlement_source_type` mapped from config lowercase to DB uppercase via `_SOURCE_TYPE_MAP`.

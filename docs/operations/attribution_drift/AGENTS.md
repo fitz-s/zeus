@@ -50,9 +50,9 @@ Per `src/state/attribution_drift.py` module docstring §"Known limitations":
     in the canonical row, so clauses 1-2 (Day0 / Opening) of the dispatch
     rule cannot be applied;
   - `bin.is_shoulder` is inferred heuristically from the persisted
-    `bin_label` string (per AGENTS.md L66 antibody warning, the classifier
-    conservatively returns `unknown` rather than guess for non-canonical
-    label formats).
+    `bin_label` string (per AGENTS.md::Settlement mechanics,
+    the classifier conservatively returns `unknown` rather than guess for
+    non-canonical label formats).
 - A high `n_insufficient` in a strategy's report is NOT a defect — it
   means the dispatch rule could not be re-applied for those positions, and
   surfacing the volume tells the operator how many positions are in that

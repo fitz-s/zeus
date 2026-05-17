@@ -96,6 +96,11 @@
             "type": "command",
             "command": "python3 .claude/hooks/dispatch.py pre_branch_create_in_primary",
             "description": "[hook v2 ADVISORY] Detect git branch creation in PRIMARY worktree (2026-05-17 antibody)"
+          },
+          {
+            "type": "command",
+            "command": "python3 .claude/hooks/dispatch.py monitor_arm_overdue_advisor",
+            "description": "[hook v2 ADVISORY] 2nd-tier MONITOR_ARM reminder if sentinel >120s old"
           }
         ]
       }

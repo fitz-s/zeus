@@ -1,6 +1,6 @@
 # src AGENTS
 
-Zeus source code root. 16 packages organized by zone (K0-K4), plus cross-cutting types and standalone config. `src/venue/` is the R3 live-venue adapter boundary; `src/ingest/` is the R3 user-channel event ingest boundary.
+Zeus source code root. 20 packages organized by zone (K0-K4), plus cross-cutting types and standalone config. `src/venue/` is the R3 live-venue adapter boundary; `src/ingest/` is the R3 user-channel event ingest boundary.
 
 ## Navigation
 

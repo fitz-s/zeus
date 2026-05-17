@@ -13,7 +13,7 @@ The control plane allows Venus/OpenClaw to change Zeus's runtime behavior WITHOU
 
 | File | Purpose | Watch out for |
 |------|---------|---------------|
-| `control_plane.py` | Command processing (6 supported commands), edge threshold multiplier, strategy gates | Adding new commands changes the external contract |
+| `control_plane.py` | Command processing (8 supported commands: pause_entries, resume, tighten_risk, request_status, set_strategy_gate, acknowledge_quarantine_clear, pause_source, resume_source), edge threshold multiplier, strategy gates | Adding new commands changes the external contract |
 | `cutover_guard.py` | CLOB V2 cutover runtime state machine and live-side-effect gate | Must fail closed; live enablement remains operator-gated |
 | `heartbeat_supervisor.py` | CLOB V2 venue-heartbeat health and resting-order submit gate | Must reuse `auto_pause_failclosed.tombstone`; no second tombstone source |
 | `ws_gap_guard.py` | M3 user-channel WS gap submit gate and M5 reconcile-required marker | Must fail closed and must not implement M5 recovery/unblock semantics |

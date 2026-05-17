@@ -152,7 +152,7 @@ DISCLOSURE" + boot evidence §1 KEY OPEN QUESTION #1:
 The CALIBRATION_HARDENING packet BATCH 3 boot evidence + AGENTS.md
 known-limitations stated "HEAD substrate has no append-only Platt
 history table." THAT WAS WRONG. The append-only history exists at
-`calibration_params_versions` (`src/calibration/retrain_trigger.py:242-264`
+`calibration_params_versions` (`src/calibration/retrain_trigger.py::_ensure_versions_table`
 schema). It IS append-only:
   - `version_id` AUTOINCREMENT
   - `promoted_at` + `retired_at` lifecycle columns
