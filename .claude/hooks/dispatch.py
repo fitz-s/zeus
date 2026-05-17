@@ -802,16 +802,22 @@ def _run_advisory_check_pr_open_monitor_arm(
     expiry = datetime.now(timezone.utc) + timedelta(minutes=60)
     expiry_iso = expiry.strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    # Write sentinel for monitor_arm_overdue_advisor 2nd-tier reminder.
-    # If operator doesn't arm Monitor within 120s, that hook re-fires a strong
-    # advisory on the next Bash call. Sentinel deleted on Monitor arm OR after
-    # 2nd-tier fires (one-shot).
-    try:
-        sentinel_dir = REPO_ROOT / "state" / ".monitor_arm_pending"
-        sentinel_dir.mkdir(parents=True, exist_ok=True)
-        (sentinel_dir / f"{pr_num or 'unknown'}.lock").touch()
-    except Exception:
-        pass  # fail-silent; the advisory text still emits
+    # Write sentinel for monitor_arm_overdue_advisor 2nd-tier reminder, ONLY
+    # if the gh command actually succeeded AND a real PR number was parsed.
+    # Bot fix (PR #132 round 1): previously wrote `unknown.lock` even on
+    # failed `gh pr create` — caused false "PR #unknown was opened" advisories
+    # later. Now gated on exit_code == 0 AND pr_num parseable.
+    exit_code = None
+    if isinstance(tool_response, dict):
+        exit_code = tool_response.get("exit_code", tool_response.get("returncode"))
+    pr_actually_opened = (exit_code in (None, 0)) and (pr_num is not None)
+    if pr_actually_opened:
+        try:
+            sentinel_dir = REPO_ROOT / "state" / ".monitor_arm_pending"
+            sentinel_dir.mkdir(parents=True, exist_ok=True)
+            (sentinel_dir / f"{pr_num}.lock").touch()
+        except Exception:
+            pass  # fail-silent; the advisory text still emits
 
     if pr_num is None:
         # PR number couldn't be parsed from gh output (rare: gh stdout was empty,
@@ -1271,13 +1277,21 @@ def _run_advisory_check_monitor_arm_overdue_advisor(
     Antibody (2026-05-17 follow-up): pr_open_monitor_arm's STOP advisory is
     text the agent can ignore. This hook detects when a PR was opened but
     Monitor wasn't armed within 120s, then re-fires a stronger reminder on
-    the next non-Monitor Bash call. One-shot: sentinel deleted after firing
-    OR when operator runs Monitor tool.
+    the next non-Monitor Bash call. One-shot: sentinel deleted after firing.
+
+    SENTINEL ACK PATHS (per PR #132 bot review):
+    - Fire path: this hook deletes the oldest sentinel after emitting the
+      reminder (built-in here).
+    - Manual: operator removes state/.monitor_arm_pending/<pr>.lock.
+    - NOT via Monitor tool: this hook is registered under PreToolUse Bash
+      ONLY (per settings.json), so it cannot see Monitor tool calls
+      (tool_name="Monitor" ≠ "Bash"). A Monitor-tool ack path would require
+      registering this handler under PreToolUse Monitor too — deferred.
     """
     hook_id = "monitor_arm_overdue_advisor"
     event = payload.get("hook_event_name", "PreToolUse")
     try:
-        import re, time
+        import time
         if payload.get("tool_name", "") != "Bash":
             return None
         sentinel_dir = REPO_ROOT / "state" / ".monitor_arm_pending"
@@ -1285,13 +1299,6 @@ def _run_advisory_check_monitor_arm_overdue_advisor(
             return None
         sentinels = list(sentinel_dir.glob("*.lock"))
         if not sentinels:
-            return None
-        cmd = _command_from_payload(payload)
-        # If operator is arming Monitor now, ack ALL sentinels (success path).
-        if re.search(r"\bMonitor\s*\(|Monitor\s+command=", cmd, re.IGNORECASE):
-            for s in sentinels:
-                try: s.unlink()
-                except Exception: pass
             return None
         oldest = min(sentinels, key=lambda p: p.stat().st_mtime)
         age = time.time() - oldest.stat().st_mtime

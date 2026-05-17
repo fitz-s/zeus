@@ -88,11 +88,6 @@ FIXTURES_DIR = Path(__file__).parent / "fixtures" / "dispatch_payloads"
 # test below. Hooks not in this dict are not yet covered by positive
 # enforcement (an antibody growth surface — add as you write new hooks).
 POSITIVE_ENFORCEMENT_TRIGGERS: dict[str, dict[str, Any]] = {
-    "pr_create_loc_accumulation": {
-        "hook_event_name": "PreToolUse",
-        "tool_name": "Bash",
-        "tool_input": {"command": "gh pr create --title x --body y"},
-    },
     "pr_thread_reply_waste": {
         "hook_event_name": "PreToolUse",
         "tool_name": "Bash",
@@ -106,10 +101,18 @@ POSITIVE_ENFORCEMENT_TRIGGERS: dict[str, dict[str, Any]] = {
         "hook_event_name": "WorktreeRemove",
         "tool_input": {"path": "/tmp/synthetic-trigger"},
     },
-    # pre_branch_create_in_primary: only triggers when cwd IS primary worktree.
-    # Synthetic subprocess runs in the test worktree (NOT primary), so the
-    # cwd-check returns None → no advisory. We assert non-trigger here instead;
-    # operator-level e2e is the real verification path.
+    # EXCLUDED FROM DETERMINISTIC POSITIVE ENFORCEMENT (state-dependent):
+    # - pr_create_loc_accumulation: signal depends on current branch's
+    #   accumulated LOC vs origin/main. PR #132 itself has >300 LOC, so
+    #   the hook returns None ("no block needed") instead of blocking.
+    # - pre_branch_create_in_primary: signal depends on cwd being PRIMARY
+    #   worktree; test subprocess runs in a worktree (not primary).
+    # - monitor_arm_overdue_advisor: signal depends on sentinel file
+    #   existing + age >120s.
+    # These hooks are exercised by the runtime-fire F3/F7-F10/dispatch_error
+    # signal tests with neutral payloads (assert they don't crash). The
+    # operator-level e2e (real PR open, real worktree op) verifies their
+    # trigger paths.
 }
 
 
