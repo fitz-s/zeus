@@ -603,6 +603,27 @@ scripts:
   refit_platt_v2.py: {class: repair, dangerous_if_run: true, dry_run_default: true, apply_flag: "--no-dry-run --force", target_db: explicit_isolated_staging_db, read_targets: [state/zeus-world.db, explicit_isolated_staging_db], write_targets: [explicit_isolated_staging_db], unguarded_write_rationale: "Phase 7A metric-aware v2 refit; dry-run may inspect canonical world DB read-only, but write mode fails closed unless --db names an isolated staging DB and refuses canonical state/zeus-world.db.", promotion_barrier: "Isolated Platt model output is not live calibration authority and cannot be promoted without separate operator-approved promotion evidence.", required_helpers: ["scripts/refit_platt_v2.py::_resolve_isolated_calibration_write_db_path"], required_tests: [tests/test_rebuild_live_sentinel.py]}
   promote_platt_models_v2.py: {class: repair, dangerous_if_run: true, dry_run_default: true, apply_flag: "--commit", target_db: state/zeus-world.db, read_targets: [explicit_isolated_staging_db, state/zeus-world.db], write_targets: [state/zeus-world.db], unguarded_write_rationale: "K1 workload-class split (2026-05-12; PR #112 Option c): STAGE -> PROD promotion of platt_models_v2; --commit DELETEs by data_version then INSERTs from STAGE, gated by sentinel-completeness, schema match, non-empty STAGE, gzipped pre-promotion backup, BEGIN IMMEDIATE + rollback, and PRAGMA integrity_check.", promotion_barrier: "STAGE_DB content must originate from refit_platt_v2.py against an isolated staging DB; promotion is operator-mediated only.", required_helpers: ["scripts/promote_platt_models_v2.py::_rw_connect", "scripts/promote_platt_models_v2.py::_backup_prod_tables"], required_tests: [tests/test_promote_platt_models_v2.py]}
   promote_calibration_pairs_v2.py: {class: repair, dangerous_if_run: true, dry_run_default: true, apply_flag: "--commit", target_db: state/zeus-forecasts.db, read_targets: [explicit_isolated_staging_db, state/zeus-forecasts.db], write_targets: [state/zeus-forecasts.db], unguarded_write_rationale: "K1 workload-class split (2026-05-12; PR #112 Option c): STAGE -> PROD promotion of calibration_pairs_v2; --commit DELETEs by data_version then INSERTs from STAGE, gated by sentinel-completeness, schema match, non-empty STAGE, gzipped pre-promotion backup, BEGIN IMMEDIATE + rollback, and PRAGMA integrity_check.", promotion_barrier: "STAGE_DB content must originate from rebuild_calibration_pairs_v2.py against an isolated staging DB; promotion is operator-mediated only.", required_helpers: ["scripts/promote_calibration_pairs_v2.py::_rw_connect", "scripts/promote_calibration_pairs_v2.py::_backup_prod_tables"], required_tests: [tests/test_promote_calibration_pairs_v2.py]}
+  promote_calibration_v2_stage_to_prod.py:
+    class: repair
+    status: active
+    lifecycle: long_lived
+    authority_scope: repair_write
+    reuse_when: >
+      Promote completed STAGE_DB calibration_v2 (platt_models_v2 + optional pairs) to PROD via atomic backup + BEGIN IMMEDIATE write. Sentinel-completeness gate refuses incomplete rebuilds.
+    do_not_use_when: >
+      STAGE_DB sentinel state != COMPLETE (script refuses); PROD currently held by another writer (BEGIN IMMEDIATE will fail).
+    canonical_command: "python3 scripts/promote_calibration_v2_stage_to_prod.py {inspect|promote|verify} --stage-db <PATH> [--commit] [--include-pairs] [--null-snapshot-id]"
+    delete_policy: retain_until_superseded
+    read_targets: [state/zeus-world.db, state/zeus-forecasts.db, '<STAGE_DB_PATH>']
+    write_targets: [state/zeus-world.db, state/zeus-forecasts.db]
+    dry_run_default: true
+    apply_flag: "--commit"
+    target_db: state/zeus-world.db
+    external_inputs: []
+    dangerous_if_run: true
+    promotion_barrier: "--commit required; sentinel-completeness gate refuses incomplete STAGE; atomic gzipped backup before BEGIN IMMEDIATE; rollback if commit fails."
+    required_helpers: []
+    required_tests: [tests/test_promote_calibration_v2_stage_to_prod.py]
   regenerate_registries.py:
     class: utility
     reason: "Read-only harness-debate audit utility for manifest completeness/header drift; deliberately audits instead of regenerating authority manifests."
