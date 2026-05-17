@@ -29,17 +29,21 @@ _scheduler: Any | None = None
 FORECAST_LIVE_DAILY_HIGH_JOB_ID = "forecast_live_opendata_daily_mx2t6"
 FORECAST_LIVE_DAILY_LOW_JOB_ID = "forecast_live_opendata_daily_mn2t6"
 FORECAST_LIVE_STARTUP_JOB_ID = "forecast_live_opendata_startup_catch_up"
+FORECAST_LIVE_SAFE_CYCLE_POLL_JOB_ID = "forecast_live_opendata_safe_cycle_poll"
 FORECAST_LIVE_HEARTBEAT_JOB_ID = "forecast_live_heartbeat"
 FORECAST_LIVE_SOURCE_HEALTH_JOB_ID = "forecast_live_source_health_probe"
 FORECAST_LIVE_HEARTBEAT_SECONDS = 30
+FORECAST_LIVE_SAFE_CYCLE_POLL_SECONDS = 5 * 60
 FORECAST_LIVE_SOURCE_HEALTH_SECONDS = 10 * 60
 FORECAST_LIVE_SOURCE_HEALTH_SOURCE_IDS = frozenset({"ecmwf_open_data"})
+_CURRENT_SOURCE_CYCLE_STATUSES = frozenset({"SUCCESS", "PARTIAL"})
 
 FORECAST_LIVE_JOB_IDS = frozenset(
     {
         FORECAST_LIVE_DAILY_HIGH_JOB_ID,
         FORECAST_LIVE_DAILY_LOW_JOB_ID,
         FORECAST_LIVE_STARTUP_JOB_ID,
+        FORECAST_LIVE_SAFE_CYCLE_POLL_JOB_ID,
         FORECAST_LIVE_HEARTBEAT_JOB_ID,
         FORECAST_LIVE_SOURCE_HEALTH_JOB_ID,
     }
@@ -408,6 +412,44 @@ def _collector_identity_mismatch(identity: dict[str, object], result: dict | Non
     return None
 
 
+def _latest_job_run_current_for_identity(conn, identity: dict[str, object]) -> tuple[bool, dict[str, object]]:
+    from src.state.job_run_repo import get_latest_job_run
+
+    row = get_latest_job_run(conn, str(identity["job_name"]))
+    if row is None:
+        return False, {"reason": "NO_JOB_RUN"}
+
+    scheduled_for = identity.get("scheduled_for")
+    expected_scheduled_for = scheduled_for.isoformat() if isinstance(scheduled_for, datetime) else str(scheduled_for)
+    expected_source_run_id = _expected_source_run_id(identity)
+    status = str(row["status"]).upper()
+    rows_written = int(row["rows_written"] or 0)
+    metadata = {
+        "reason": "JOB_RUN_NOT_CURRENT",
+        "job_run_id": row["job_run_id"],
+        "status": status,
+        "rows_written": rows_written,
+        "scheduled_for": row["scheduled_for"],
+        "expected_scheduled_for": expected_scheduled_for,
+        "source_run_id": row["source_run_id"],
+        "expected_source_run_id": expected_source_run_id,
+        "release_calendar_key": row["release_calendar_key"],
+        "expected_release_calendar_key": str(identity["release_calendar_key"]),
+    }
+    if row["scheduled_for"] != expected_scheduled_for:
+        return False, metadata
+    if row["release_calendar_key"] != str(identity["release_calendar_key"]):
+        return False, metadata
+    if row["source_run_id"] != expected_source_run_id:
+        return False, metadata
+    if status not in _CURRENT_SOURCE_CYCLE_STATUSES:
+        return False, metadata
+    if rows_written <= 0:
+        return False, metadata
+    metadata["reason"] = "CURRENT_SOURCE_CYCLE_ALREADY_JOURNALED"
+    return True, metadata
+
+
 def run_opendata_track(
     track: str,
     *,
@@ -535,6 +577,47 @@ def run_opendata_track(
         return result
 
 
+def _run_opendata_track_if_due(
+    track: str,
+    *,
+    _job_conn,
+    _locks_dir_override: Path | None = None,
+    _collector: Callable[..., dict] | None = None,
+    _source_paused: Callable[[str], bool] | None = None,
+    _now_utc: datetime | None = None,
+) -> dict:
+    from src.data.release_calendar import FetchDecision
+
+    now = (_now_utc or _utcnow()).astimezone(timezone.utc)
+    identity = _forecast_work_identity(track, now_utc=now)
+    if identity["decision"] is FetchDecision.FETCH_ALLOWED:
+        is_current, current_metadata = _latest_job_run_current_for_identity(_job_conn, identity)
+        if is_current:
+            logger.info(
+                "forecast-live OpenData %s current source cycle already journaled: %s",
+                track,
+                current_metadata.get("source_run_id"),
+            )
+            return {
+                "status": "current_cycle_already_journaled",
+                "source": identity["source_id"],
+                "track": track,
+                "source_run_id": current_metadata.get("source_run_id"),
+                "scheduled_for": current_metadata.get("scheduled_for"),
+                "selection": identity.get("metadata"),
+                "journal": current_metadata,
+            }
+
+    return run_opendata_track(
+        track,
+        _locks_dir_override=_locks_dir_override,
+        _collector=_collector,
+        _source_paused=_source_paused,
+        _job_conn=_job_conn,
+        _now_utc=now,
+    )
+
+
 def _run_journaled_opendata_track(track: str) -> dict:
     from src.state.db import get_forecasts_connection
 
@@ -550,21 +633,46 @@ def _run_journaled_opendata_track(track: str) -> dict:
         conn.close()
 
 
+def _run_journaled_opendata_track_if_due(track: str) -> dict:
+    from src.state.db import get_forecasts_connection
+
+    conn = get_forecasts_connection(write_class="bulk")
+    try:
+        result = _run_opendata_track_if_due(track, _job_conn=conn)
+        conn.commit()
+        return result
+    except Exception:
+        conn.commit()
+        raise
+    finally:
+        conn.close()
+
+
 @_scheduler_job(FORECAST_LIVE_DAILY_HIGH_JOB_ID)
 def _opendata_mx2t6_cycle() -> dict:
-    return _run_journaled_opendata_track("mx2t6_high")
+    return _run_journaled_opendata_track_if_due("mx2t6_high")
 
 
 @_scheduler_job(FORECAST_LIVE_DAILY_LOW_JOB_ID)
 def _opendata_mn2t6_cycle() -> dict:
-    return _run_journaled_opendata_track("mn2t6_low")
+    return _run_journaled_opendata_track_if_due("mn2t6_low")
 
 
 @_scheduler_job(FORECAST_LIVE_STARTUP_JOB_ID)
 def _opendata_startup_catch_up() -> dict:
     results = {
-        "mx2t6_high": _run_journaled_opendata_track("mx2t6_high"),
-        "mn2t6_low": _run_journaled_opendata_track("mn2t6_low"),
+        "mx2t6_high": _run_journaled_opendata_track_if_due("mx2t6_high"),
+        "mn2t6_low": _run_journaled_opendata_track_if_due("mn2t6_low"),
+    }
+    failed, reason = _classify_result({"tracks": results})
+    return {"status": "partial" if failed else "ok", "reason": reason, "tracks": results}
+
+
+@_scheduler_job(FORECAST_LIVE_SAFE_CYCLE_POLL_JOB_ID)
+def _opendata_safe_cycle_poll() -> dict:
+    results = {
+        "mx2t6_high": _run_journaled_opendata_track_if_due("mx2t6_high"),
+        "mn2t6_low": _run_journaled_opendata_track_if_due("mn2t6_low"),
     }
     failed, reason = _classify_result({"tracks": results})
     return {"status": "partial" if failed else "ok", "reason": reason, "tracks": results}
@@ -622,6 +730,17 @@ def forecast_live_job_specs(
                 "coalesce": True,
                 "misfire_grace_time": None,
                 "executor": "fast",
+            },
+        ),
+        (
+            _opendata_safe_cycle_poll,
+            "interval",
+            {
+                "seconds": FORECAST_LIVE_SAFE_CYCLE_POLL_SECONDS,
+                "id": FORECAST_LIVE_SAFE_CYCLE_POLL_JOB_ID,
+                "max_instances": 1,
+                "coalesce": True,
+                "misfire_grace_time": 120,
             },
         ),
         (
