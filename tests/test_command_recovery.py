@@ -1296,6 +1296,96 @@ class TestRecoveryResolutionTable:
         }
         assert not any(row["event_type"] == "EXIT_ORDER_FILLED" for row in lifecycle_events)
 
+    def test_exit_matched_trade_fact_repairs_existing_event_torn_projection(
+        self,
+        conn,
+        mock_client,
+    ):
+        _insert(conn, command_id="cmd-entry", position_id="pos-001")
+        _advance_to_acked(conn, command_id="cmd-entry", venue_order_id="ord-entry")
+        _seed_pending_entry_projection(conn, command_id="cmd-entry", order_id="ord-entry")
+        conn.execute(
+            """
+            UPDATE position_current
+               SET phase = 'active',
+                   shares = 23.7,
+                   cost_basis_usd = 1.659,
+                   entry_price = 0.07,
+                   order_status = 'filled',
+                   updated_at = '2026-04-26T00:04:00Z'
+             WHERE position_id = 'pos-001'
+            """
+        )
+        _insert(
+            conn,
+            command_id="cmd-exit",
+            position_id="pos-001",
+            intent_kind="EXIT",
+            side="SELL",
+            size=23.7,
+            price=0.04,
+            token_id="tok-001",
+        )
+        _advance_to_partial(conn, command_id="cmd-exit", venue_order_id="ord-exit")
+        _append_trade_fact(
+            conn,
+            command_id="cmd-exit",
+            order_id="ord-exit",
+            trade_id="trade-exit-001",
+            state="MATCHED",
+            filled_size="23.7",
+            fill_price="0.04",
+        )
+        conn.execute(
+            """
+            INSERT INTO position_events (
+                event_id, position_id, event_version, sequence_no, event_type,
+                occurred_at, phase_before, phase_after, strategy_key, decision_id,
+                snapshot_id, order_id, command_id, caused_by, idempotency_key,
+                venue_status, source_module, payload_json, env
+            )
+            VALUES (
+                'pos-001:exit_order_posted:cmd-exit', 'pos-001', 1, 3,
+                'EXIT_ORDER_POSTED', '2026-04-26T00:06:00Z', 'active',
+                'pending_exit', 'opening_inertia', 'dec-001', 'snap-pos-001',
+                'ord-exit', 'cmd-exit', 'test_torn_setup',
+                'pos-001:exit_order_posted:cmd-exit', 'MATCHED',
+                'tests.test_command_recovery', '{}', 'live'
+            )
+            """
+        )
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["exit_pending_projections"] == {
+            "scanned": 1,
+            "advanced": 1,
+            "stayed": 0,
+            "errors": 0,
+        }
+        current = conn.execute(
+            """
+            SELECT phase, order_id, order_status
+              FROM position_current
+             WHERE position_id = 'pos-001'
+            """
+        ).fetchone()
+        assert dict(current) == {
+            "phase": "pending_exit",
+            "order_id": "ord-exit",
+            "order_status": "sell_pending_confirmation",
+        }
+        event_count = conn.execute(
+            """
+            SELECT COUNT(*) AS n
+              FROM position_events
+             WHERE idempotency_key = 'pos-001:exit_order_posted:cmd-exit'
+            """
+        ).fetchone()
+        assert event_count["n"] == 1
+
     def test_partial_remainder_terminal_fact_uses_latest_trade_fact_per_trade_id(
         self,
         conn,

@@ -766,6 +766,7 @@ def _append_exit_pending_projection(
 ) -> None:
     from src.state.ledger import append_many_and_project
     from src.state.lifecycle_manager import fold_lifecycle_phase
+    from src.state.projection import upsert_position_current
 
     current_cols = _table_columns(conn, "position_current")
     current = {
@@ -786,6 +787,24 @@ def _append_exit_pending_projection(
     phase_after = fold_lifecycle_phase(phase_before, "pending_exit").value
     fill_states = str(candidate.get("fill_states") or "").strip()
     event_id = f"{position_id}:exit_order_posted:{command_id}"
+    projection = dict(current)
+    projection.update(
+        {
+            "phase": phase_after,
+            "order_id": venue_order_id,
+            "order_status": "sell_pending_confirmation",
+            "updated_at": occurred_at,
+        }
+    )
+    existing = conn.execute(
+        "SELECT 1 FROM position_events WHERE idempotency_key = ? LIMIT 1",
+        (event_id,),
+    ).fetchone()
+    if existing is not None:
+        # Append-first recovery: if the event already exists but projection is
+        # stale/torn, do not append a duplicate event; fold the projection.
+        upsert_position_current(conn, projection)
+        return
     event = {
         "event_id": event_id,
         "position_id": position_id,
@@ -822,15 +841,6 @@ def _append_exit_pending_projection(
             default=str,
         ),
     }
-    projection = dict(current)
-    projection.update(
-        {
-            "phase": phase_after,
-            "order_id": venue_order_id,
-            "order_status": "sell_pending_confirmation",
-            "updated_at": occurred_at,
-        }
-    )
     append_many_and_project(conn, [event], projection)
 
 
