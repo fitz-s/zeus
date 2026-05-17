@@ -269,3 +269,29 @@ When you (the opus orchestrator running this skill) read this file in Boot step 
 **Hand-edits beyond Closeout**: accidental real-run of `bridge_oracle_to_calibration.py` (disclosed §2.5); cleaned with `rm -fv data/oracle_error_rates.json data/oracle_error_rates.heartbeat.json && rmdir data`. Repo verified clean post-cleanup.
 
 **Token-economy**: 4 sentinel-terminal probes (self-claim grep + scheduler-universe enum + state-mtime + settlements-archive inspection). One read_file for tracker-tail format-matching. Full deliverable in well under context budget. Confirmed: forensic-archeology shape is well-suited to sentinel-terminal pattern.
+
+---
+
+## Run #11 — 2026-05-17 — F36 root cause + Q1/Q2/Q3 + F40/F41/F42
+
+**Operator trigger (verbatim)**: "drive F36 to a definitive root cause + fix, answer Q1 (archive intent), Q2 (any VERIFIED rows since 5/7?), Q3 (plist intentional?); opportunistically catch any other F32-class silent gaps. READ-ONLY production."
+
+**Deliverable**: `docs/operations/task_2026-05-16_post_pr126_audit/RUN_11_f36_rootcause_and_q1q2q3.md`
+
+**Findings**: F36/F38 RETRACTED (DEFECT-INVALID-PROVENANCE); F40 (TIER-1, Cat-J+K), F41 (TIER-1, Cat-J), F42 (TIER-1 META, Cat-K+J).
+
+**Run #10 error class**: Cat-J (data-provenance error). Run #10 queried `zeus-world.db` and `zeus_trades.db` for settlements without first tracing the post-PR-#114 K1 split (which moved live tables to `zeus-forecasts.db`). The empty-tables observation was correct for the DBs queried but the WRONG DBs were queried.
+
+**Real regressions surfaced (F40/F41)**: PR #114 migrated WRITERS to `get_forecasts_connection()` but did NOT sweep ~30 reader callers using `get_world_connection()` that reference the 7 forecast-class tables. Bridge_oracle_to_calibration.py and evaluate_calibration_transfer_oos.py are the first two confirmed cases (the latter has a live log regression — "target domains: [...]" → "target domains: []" — aligned exactly with the 2026-05-11 migration timestamp).
+
+**Methodology changes triggered**:
+- **NEW probe #23 (LEARNINGS)**: post-DB-split provenance antibody — when any finding asserts "table X is empty / writer Y is dormant", FIRST `grep -n "get_.*_connection" <writer.py>` to identify the writer's actual target DB, then probe THAT DB. Symptomatic shortcut: `git log --since=30days -- scripts/migrate_*.py` to catch recent migrations.
+- **NEW probe #24 (LEARNINGS)**: schema-first column verification — before writing `WHERE` clauses with assumed timestamp columns, `sqlite3 <db> ".schema <table>"` to enumerate actual columns. Run #10 used `verified_at` (does not exist; correct column is `authority`).
+- **Cat-J upgrades to PERMANENT HIGH** after Run #11 exposed Run #10's data-provenance class error. 6 consecutive runs have produced Cat-J SEV-1 findings (#5 F17, #6 F22, #7 F25, #9 F32, #10 F36-mistake, #11 F40/F41).
+- **NEW Cat-O case-file 2 (operator-brief-coupling-falsification reinforcement)**: this run *itself* falsifies Run #10's coupling between "harvester dormant" and "post-archive migration". Strengthens Run #9's Cat-O. Promote to HIGH.
+
+**Hand-edits beyond Closeout**: none (read-only run preserved).
+
+**Token-economy**: 3 sentinel-terminal probes (settlements-DB enumeration, calibration_pairs/bridge/plist probe, K1-callers + commit probe) + 1 read_file for finding/audit/learning format. Full deliverable in well under context budget. Pattern: forensic-correction runs respond well to "verify-then-broaden" — first probe re-checks the prior run's claim against the right DB, second probe enumerates downstream blast radius.
+
+**LEARNING #19 (writer-claim grep) updated**: pair with **reader-claim grep** as Run #10 promised; also pair with **DB-target verification** — for any module whose docstring claims a target table, confirm the connection helper actually routes there post any recent migration. This run is the proof.

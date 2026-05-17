@@ -387,3 +387,29 @@ Per Run #3 meta-audit (3rd run is meta-audit per SKILL.md): split seed `E. Settl
 - **Accidental writes during read-only runs MUST be disclosed at top-of-deliverable, not buried in appendix.** Run #10 §2.5 puts disclosure inline with the archeology results so the operator cannot miss it. Treat this as the template for all future accidental-side-effect disclosures.
 
 - **The "writer-claim grep" probe (LEARNING #19) caught only 1 true positive this run (the F32 itself).** This is a HIGH-precision low-recall probe. Pair it next time with a "reader-claim grep" (`# single reader`, `# ONLY consumer`) — files that exist but nobody reads are cheap deletes; files that nobody writes but someone reads are SEV-1.
+
+---
+
+## Run #11 additions (2026-05-17)
+
+23. **[J] post-DB-split provenance antibody (CRITICAL)** — When any finding asserts "writer X is dormant" OR "table Y is empty", do NOT trust the symptom against any single DB. Mandatory sequence:
+    - (a) `grep -n "get_.*_connection\|sqlite3.connect" <writer-module>.py` → identify the writer's actual connection helper.
+    - (b) `git log --since=60days --oneline -- scripts/migrate_*.py src/state/db.py` → catch recent topology migrations.
+    - (c) Resolve the writer's target DB POST any such migration; probe THAT DB, not the assumed pre-migration one.
+    - Run #11 caught Run #10 missing the PR #114 K1 split → mis-identifying the harvester as dormant and calibration_pairs_v2 as empty when the real live counts are 3634 VERIFIED rows and 91M rows respectively (in a DB Run #10 never opened). Cat-J upgraded to PERMANENT HIGH after this case.
+
+24. **[J/K] schema-first column verification** — Before issuing `WHERE <col> >= X` or `MAX(<col>)` on a settlement/calibration table, ALWAYS `sqlite3 <db> ".schema <table>"` first. Run #10 issued `WHERE verified_at >= '2026-05-07'`; the column is `authority` (TEXT, value `VERIFIED`), and the timestamp column is `recorded_at` (NOT `verified_at`). The error silently returned 0 rows for ALL probed DBs (an "ERROR: no such column" would have been a TELL; sqlite3's behavior was to error early, but the audit author treated "error" as "definitely 0"). Treat any sqlite probe that errors as "I do not know the answer" — not "the count is 0".
+
+25. **[K] post-migration reader sweep contract** — Any PR that migrates a writer from DB_A to DB_B must include a CALLER SWEEP for ALL readers of the migrated tables. PR #114 migrated writers (harvester_truth_writer + harvester) and the ATTACH-helper (`get_forecasts_connection_with_world`) but did NOT sweep ~30 readers. Result: F40 + F41 + N more (per F42 META). General rule for future PRs: `grep -rln "get_<old>_connection" src/ scripts/ | xargs grep -l "<migrated-table-name>"` MUST be empty before merging the migration.
+
+### Anti-heuristics refined (Run #11)
+
+- **"Run #N said X is empty" should be RE-VERIFIED before acting on it.** Even careful runs make data-provenance errors when there's a recent migration. The cost of re-verification with a fresh sqlite probe is ~30 seconds; the cost of acting on a wrong finding is a useless fix-PR + lost trust + perpetuation of the wrong belief. Run-to-run beliefs should not be authoritative; only artifacts on disk are. Mandatory: at the start of each run, re-probe ONE prior-run claim that is load-bearing for current decisions.
+
+- **A live-log regression aligned with a commit timestamp is a smoking gun.** F41 was confirmed because `logs/calibration-transfer-eval.log` shows "target domains: [('tigge_mars', '00'), ('tigge_mars', '12')]" on 2026-05-10 and "target domains: []" on 2026-05-17 — bracketing the PR #114 K1 migration on 2026-05-11. Time-aligned regressions in app logs are the single most reliable post-hoc diagnostic. Probe #26 candidate (next run): for every modified scheduler-class file in the last 14d, `tail -N` the corresponding log and look for cardinality regressions across the change boundary.
+
+### Meta-audit-of-the-audit (Run #11)
+
+- **Self-correction runs are first-class outputs.** Run #11 retracted 2 prior findings and surfaced 3 new ones. Without it, F36 would have driven a "fix" that touched nothing (harvester already works), and F40/F41 would have remained silent for ~weeks until the next time someone looked at the bridge or the OOS evaluator. The retraction itself is valuable. Treat "I went back to verify N runs ago and the claim was wrong" as a publishable finding, not as embarrassment to bury.
+
+- **Sentinel-terminal pattern STILL the right shape, even for self-correction runs.** 3 probes were sufficient. The deliberate "verify-then-broaden" sequence (probe 1 retests prior claim; probe 2 enumerates new blast radius; probe 3 verifies operator-question Q3) generalizes to any forensic-correction shape.
