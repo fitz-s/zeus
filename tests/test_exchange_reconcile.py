@@ -100,6 +100,16 @@ class FakeAdapterWithoutFreshness:
         return self.positions
 
 
+class FakeM5AdapterWithPointOrders(FakeM5Adapter):
+    def __init__(self, *, orders_by_id=None, open_orders=None, trades=None, positions=None):
+        super().__init__(open_orders=open_orders, trades=trades, positions=positions)
+        self.orders_by_id = orders_by_id or {}
+
+    def get_order(self, order_id):
+        self.calls.append(("get_order", (order_id,), {}))
+        return self.orders_by_id.get(order_id)
+
+
 class FailingCommitConnection(sqlite3.Connection):
     fail_commit = False
 
@@ -1156,6 +1166,46 @@ def test_stale_or_unsuccessful_venue_reads_are_not_absence_proof(conn):
     assert conn.execute("SELECT state FROM venue_commands WHERE command_id = 'cmd-m5'").fetchone()["state"] == "ACKED"
 
 
+def test_point_order_live_overrides_empty_global_open_order_enumeration(conn):
+    from src.execution.exchange_reconcile import run_reconcile_sweep
+
+    seed_command(conn)
+    append_resting_order_fact(conn)
+    adapter = FakeM5AdapterWithPointOrders(
+        open_orders=[],
+        trades=[],
+        orders_by_id={"ord-m5": order(order_id="ord-m5", status="LIVE")},
+    )
+
+    result = run_reconcile_sweep(adapter, conn, context="periodic", observed_at=NOW)
+
+    assert result == []
+    assert findings(conn) == []
+    assert ("get_order", ("ord-m5",), {}) in adapter.calls
+    assert conn.execute("SELECT state FROM venue_commands WHERE command_id = 'cmd-m5'").fetchone()["state"] == "ACKED"
+
+
+def test_point_order_terminal_keeps_local_orphan_finding_with_point_evidence(conn):
+    from src.execution.exchange_reconcile import run_reconcile_sweep
+
+    seed_command(conn)
+    append_resting_order_fact(conn)
+    adapter = FakeM5AdapterWithPointOrders(
+        open_orders=[],
+        trades=[],
+        orders_by_id={"ord-m5": order(order_id="ord-m5", status="CANCELED")},
+    )
+
+    result = run_reconcile_sweep(adapter, conn, context="periodic", observed_at=NOW)
+
+    assert [finding.kind for finding in result] == ["local_orphan_order"]
+    assert ("get_order", ("ord-m5",), {}) in adapter.calls
+    evidence = result[0].evidence_json
+    assert '"point_order_status":"CANCELED"' in evidence
+    assert '"point_order_surface":"get_order"' in evidence
+    assert '"reason":"local_open_order_absent_from_exchange_open_orders"' in evidence
+
+
 def test_explicit_fresh_false_is_not_absence_proof(conn):
     from src.execution.exchange_reconcile import run_reconcile_sweep
 
@@ -1553,6 +1603,33 @@ def test_ws_gap_m5_sweep_keeps_latch_closed_when_findings_remain(conn):
         assert ws_gap_guard.status().m5_reconcile_required is True
         assert ws_gap_guard.summary(now=NOW)["entry"]["allow_submit"] is False
         assert findings(conn)[0]["kind"] == "local_orphan_order"
+    finally:
+        ws_gap_guard.clear_for_test(observed_at=NOW)
+
+
+def test_ws_gap_empty_global_open_orders_but_point_order_live_clears_latch(conn):
+    from src.control import ws_gap_guard
+    from src.execution.exchange_reconcile import run_ws_gap_reconcile_and_clear
+
+    seed_command(conn, size=5)
+    append_resting_order_fact(conn)
+    configure_subscribed_m5_latch()
+    adapter = FakeM5AdapterWithPointOrders(
+        open_orders=[],
+        trades=[],
+        positions=[],
+        orders_by_id={"ord-m5": order(order_id="ord-m5", status="LIVE")},
+    )
+
+    try:
+        result = run_ws_gap_reconcile_and_clear(adapter, conn, observed_at=NOW)
+
+        assert result["status"] == "cleared"
+        assert result["captured_surfaces"] == ["open_orders", "point_orders", "positions", "trades"]
+        assert ws_gap_guard.status().m5_reconcile_required is False
+        assert ws_gap_guard.summary(now=NOW)["entry"]["allow_submit"] is True
+        assert findings(conn) == []
+        assert ("get_order", ("ord-m5",), {}) in adapter.calls
     finally:
         ws_gap_guard.clear_for_test(observed_at=NOW)
 

@@ -53,6 +53,9 @@ _OPEN_LOCAL_STATES = frozenset(
     }
 )
 _OPEN_ORDER_FACT_STATES = frozenset({"LIVE", "RESTING", "CANCEL_UNKNOWN"})
+_OPEN_POINT_ORDER_STATES = _OPEN_ORDER_FACT_STATES | frozenset(
+    {"OPEN", "PARTIAL", "PARTIALLY_MATCHED", "PARTIALLY_FILLED"}
+)
 _TRADE_FACT_STATES = frozenset({"MATCHED", "MINED", "CONFIRMED", "RETRYING", "FAILED"})
 _CONFIRMED_POSITION_FACT_STATES = frozenset({"CONFIRMED"})
 _OPTIMISTIC_POSITION_FACT_STATES = frozenset({"MATCHED", "MINED"})
@@ -119,10 +122,19 @@ def fresh_reconcile_snapshot(
     """
 
     observed = _coerce_dt(observed_at)
-    captured: dict[str, list[Any]] = {}
+    captured: dict[str, Any] = {}
     unavailable: list[str] = []
 
     captured["open_orders"] = _call_required(adapter, "get_open_orders")
+    local_order_ids = {str(order_id) for order_id in (trade_order_ids or set()) if str(order_id).strip()}
+    open_order_ids = {_order_id(item) for item in captured["open_orders"] if _order_id(item)}
+    missing_local_order_ids = sorted(local_order_ids - open_order_ids)
+    get_order = getattr(adapter, "get_order", None)
+    if callable(get_order) and missing_local_order_ids:
+        captured["point_orders"] = {
+            order_id: get_order(order_id)
+            for order_id in missing_local_order_ids
+        }
     for surface, method in (("trades", "get_trades"), ("positions", "get_positions")):
         fn = getattr(adapter, method, None)
         if not callable(fn):
@@ -148,6 +160,8 @@ def fresh_reconcile_snapshot(
     }
     snapshot = SimpleNamespace(read_freshness=freshness)
     snapshot.get_open_orders = lambda: list(captured["open_orders"])
+    if "point_orders" in captured:
+        snapshot.get_order = lambda order_id: captured["point_orders"].get(str(order_id))
     if "trades" in captured:
         snapshot.get_trades = lambda: list(captured["trades"])
     if "positions" in captured:
@@ -348,6 +362,10 @@ def run_reconcile_sweep(
     for order_id, command in local_by_order.items():
         if order_id in open_order_ids:
             continue
+        point_order = _point_order_lookup(adapter, order_id)
+        point_order_status = _order_state(point_order)
+        if point_order_status in _OPEN_POINT_ORDER_STATES:
+            continue
         if context == "ws_gap" and _trade_fill_covers_local_command(
             command, trade_fills_by_order_id.get(order_id)
         ):
@@ -366,6 +384,9 @@ def run_reconcile_sweep(
                     "local_command": _command_evidence(command),
                     "latest_order_fact": _latest_order_fact(conn, order_id),
                     "exchange_open_order_ids": sorted(open_order_ids),
+                    "point_order": _raw(point_order) if point_order is not None else None,
+                    "point_order_status": point_order_status,
+                    "point_order_surface": "get_order" if point_order is not None else None,
                     "trade_enumeration_available": trades_available,
                     "reason": "local_open_order_absent_from_exchange_open_orders",
                 },
@@ -1195,6 +1216,25 @@ def _order_id(value: Any) -> str | None:
     if direct:
         return str(direct)
     return _string_or_none(_first_present(raw, "orderID", "orderId", "order_id", "id", default=None))
+
+
+def _point_order_lookup(adapter: Any, order_id: str) -> Any | None:
+    fn = getattr(adapter, "get_order", None)
+    if not callable(fn):
+        return None
+    return fn(order_id)
+
+
+def _order_state(value: Any | None) -> str | None:
+    if value is None:
+        return None
+    raw = _raw(value)
+    direct = getattr(value, "status", None)
+    state = direct if direct is not None else _first_present(raw, "status", "state", "order_status", default=None)
+    if state is None:
+        return None
+    text = str(state).strip().upper()
+    return text or None
 
 
 def _trade_id(raw: Mapping[str, Any]) -> str | None:
