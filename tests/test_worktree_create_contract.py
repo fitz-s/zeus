@@ -1,7 +1,3 @@
-# MOVED: this file was under tests/.claude/hooks/ which is excluded by
-# pytest.ini norecursedirs=.claude, so pytest never collected it.
-# Canonical location: tests/test_worktree_create_contract.py (PR #137 fix).
-# This stub remains so the git history shows where the file came from.
 import json
 import subprocess
 import sys

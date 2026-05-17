@@ -2188,8 +2188,14 @@ def _settle_positions(
             # exit_price > 0 guarantees this position is on the winning side:
             #   buy_yes + won=True  → YES won → indexSet ["2"]
             #   buy_no  + won=False → NO won  → indexSet ["1"]
-            # V1 limitation: multi-bin (ranged market) encoding not supported;
-            # stays None for non-binary markets until PR-I.5.b extends this.
+            # V1 limitation: multi-bin (ranged market) encoding not supported.
+            # The `else` branch (direction not buy_yes/buy_no) explicitly sets
+            # winning_index_set=None, which suppresses the field for non-binary
+            # markets. This is WAD per PR-I.5.a scope; PR-I.5.b will extend
+            # to ranged markets. The buy_yes/buy_no branches are binary-only
+            # by design — they do NOT need an explicit is_binary_market guard
+            # because: (a) Zeus only enters binary CTF markets, and (b) the
+            # else=None fallback is the safe default for any unexpected direction.
             if pos.direction == "buy_yes":
                 _winning_index_set: Optional[str] = '["2"]'
             elif pos.direction == "buy_no":

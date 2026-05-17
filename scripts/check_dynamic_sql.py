@@ -111,7 +111,9 @@ _BASELINE_PER_FILE: dict[str, int] = {
     "src/data/solar_append.py": 4,
     "src/engine/cycle_runtime.py": 4,
     "src/engine/ddd_wiring.py": 1,
-    "src/engine/evaluator.py": 14,
+    # +1 site from F2 DSI fix (PR #137): `_record_selection_family_facts` call
+    # uses module-level table-name constants — no user-controlled input.
+    "src/engine/evaluator.py": 15,
     "src/engine/replay.py": 14,
     # 6 f-string SQL sites: all interpolate module-level table-name constants
     # (sv2_table, cp_v2_table, etc.) from ReplayContext — no user-controlled
@@ -121,7 +123,8 @@ _BASELINE_PER_FILE: dict[str, int] = {
     "src/execution/settlement_commands.py": 4,
     "src/ingest/harvester_truth_writer.py": 1,
     "src/ingest/polymarket_user_channel.py": 1,
-    "src/main.py": 1,
+    # +1 site from PR #137 batch: table-name constant from closed internal source.
+    "src/main.py": 2,
     "src/observability/status_summary.py": 3,
     "src/state/chronicler.py": 1,
     "src/state/job_run_repo.py": 4,
@@ -157,13 +160,10 @@ _BASELINE_PER_FILE: dict[str, int] = {
     "src/observability/price_evidence_report.py": 7,
     # exchange_reconcile.py: 1 f-string SQL site; internal field name constant.
     "src/execution/exchange_reconcile.py": 1,
-    # 8 sites audited 2026-05-16: `_latest_terminal_order_fact_candidates`
-    # interpolates placeholder lists derived from closed module constants;
-    # `_count_facts` and `_table_columns` receive table names from internal
-    # call sites only; `_position_current_for_terminal_order` interpolates a
-    # fixed where-clause chosen from known column predicates; SAVEPOINT names
-    # are sanitized from command IDs. No user-controlled SQL identifiers.
-    "src/execution/command_recovery.py": 8,
+    # 13 sites as of PR #137 (was 8, +5 new SAVEPOINT f-strings in F7 command_id
+    # recovery path): all interpolate internal constants or uuid-derived SAVEPOINT
+    # names; the new sites match the existing pattern — no user-controlled input.
+    "src/execution/command_recovery.py": 13,
     # Tail catch — fresh files with f-string SQL must be added explicitly.
 }
 
