@@ -1,3 +1,6 @@
+# Created: 2026-05-17
+# Last reused or audited: 2026-05-17
+# Authority basis: 2026-05-17 incident post-mortem — boot ≠ runtime blindspot
 """Runtime-fire test for .claude/hooks/dispatch.py — antibody for the
 "boot ≠ runtime" failure class.
 
