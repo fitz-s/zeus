@@ -1,11 +1,12 @@
-# Lifecycle: created=2026-04-27; last_reviewed=2026-05-15; last_reused=2026-05-15
+# Lifecycle: created=2026-04-27; last_reviewed=2026-05-15; last_reused=2026-05-17
 # Purpose: R3 Z2 Polymarket V2 adapter and submission envelope antibodies.
 # Reuse: Run when V2 SDK adapter, envelope provenance, or Q1 preflight behavior changes.
 # Created: 2026-04-27
-# Last reused/audited: 2026-05-15
+# Last reused/audited: 2026-05-17
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/Z2.yaml
 #                  + docs/operations/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md
 #                  + docs/operations/task_2026-05-15_live_order_e2e_goal/LIVE_ORDER_E2E_GOAL_PLAN.md
+#                  + 2026-05-17 public CLOB HTTP reuse for live opening_hunt backpressure.
 """R3 Z2 Polymarket V2 adapter antibodies."""
 
 from __future__ import annotations
@@ -152,6 +153,16 @@ class FakeLegacyGetOrdersClient:
     def get_orders(self):
         self.calls.append(("get_orders",))
         return {"data": [{"id": "ord-legacy", "state": "LIVE"}]}
+
+
+class FakeCancelOrderClient:
+    def __init__(self, response=None):
+        self.response = response or {"canceled": ["ord-cancel"], "not_canceled": []}
+        self.calls = []
+
+    def cancel_order(self, payload):
+        self.calls.append(("cancel_order", payload))
+        return self.response
 
 
 def _intent(direction: Direction = Direction("buy_yes"), token_id: str = "yes-token") -> ExecutionIntent:
@@ -808,7 +819,15 @@ def test_create_submission_envelope_captures_all_provenance_fields(tmp_path):
 
 
 def test_one_step_sdk_path_still_produces_envelope_with_provenance(tmp_path):
-    fake = FakeOneStepClient(response={"orderID": "ord-one", "status": "matched"})
+    fake = FakeOneStepClient(
+        response={
+            "orderID": "ord-one",
+            "status": "matched",
+            "makingAmount": "1.70",
+            "takingAmount": "5",
+            "transactionsHashes": ["0xhash-one"],
+        }
+    )
     adapter, _ = _adapter(tmp_path, fake)
     envelope = adapter.create_submission_envelope(_intent(), FakeSnapshot(), order_type="GTC")
 
@@ -821,7 +840,34 @@ def test_one_step_sdk_path_still_produces_envelope_with_provenance(tmp_path):
     assert result.envelope.signed_order_hash is None
     assert result.envelope.raw_request_hash == envelope.raw_request_hash
     assert '"orderID":"ord-one"' in (result.envelope.raw_response_json or "")
+    assert result.envelope.transaction_hashes == ("0xhash-one",)
     assert any(call[0] == "create_and_post_order" for call in fake.calls)
+
+
+def test_legacy_order_result_preserves_matched_submit_truth(tmp_path):
+    fake = FakeOneStepClient(
+        response={
+            "orderID": "ord-one",
+            "status": "matched",
+            "makingAmount": "1.70",
+            "takingAmount": "5",
+            "transactionsHashes": ["0xhash-one"],
+        }
+    )
+    adapter, _ = _adapter(tmp_path, fake)
+    envelope = adapter.create_submission_envelope(_intent(), FakeSnapshot(), order_type="GTC")
+
+    submit = adapter.submit(envelope)
+
+    from src.data.polymarket_client import _legacy_order_result_from_submit
+
+    payload = _legacy_order_result_from_submit(submit)
+    assert payload["success"] is True
+    assert payload["status"] == "matched"
+    assert payload["orderID"] == "ord-one"
+    assert payload["makingAmount"] == "1.70"
+    assert payload["takingAmount"] == "5"
+    assert payload["transactionsHashes"] == ["0xhash-one"]
 
 
 def test_two_step_sdk_path_produces_envelope_with_signed_order_hash(tmp_path):
@@ -1102,11 +1148,22 @@ def test_polymarket_client_fee_rate_accepts_current_base_fee_shape(monkeypatch):
         def json(self):
             return {"base_fee": 30}
 
-    monkeypatch.setattr(pm.httpx, "get", lambda *args, **kwargs: Response())
-
     client = pm.PolymarketClient()
+    calls = []
+
+    class PublicClient:
+        def get(self, url, *, params=None):
+            calls.append((url, params))
+            return Response()
+
+    client._public_http_client = PublicClient()
+
     assert client.get_fee_rate("token-1") == pytest.approx(0.003)
     assert client.get_fee_rate_details("token-1")["fee_rate_bps"] == pytest.approx(30.0)
+    assert calls == [
+        (f"{pm.CLOB_BASE}/fee-rate", {"token_id": "token-1"}),
+        (f"{pm.CLOB_BASE}/fee-rate", {"token_id": "token-1"}),
+    ]
 
 
 def test_polymarket_client_fee_rate_rejects_malformed_shape(monkeypatch):
@@ -1119,10 +1176,82 @@ def test_polymarket_client_fee_rate_rejects_malformed_shape(monkeypatch):
         def json(self):
             return {"feeSchedule": {"feesEnabled": True}}
 
-    monkeypatch.setattr(pm.httpx, "get", lambda *args, **kwargs: Response())
+    client = pm.PolymarketClient()
+
+    class PublicClient:
+        def get(self, url, *, params=None):
+            return Response()
+
+    client._public_http_client = PublicClient()
 
     with pytest.raises(RuntimeError, match="base_fee"):
-        pm.PolymarketClient().get_fee_rate("token-1")
+        client.get_fee_rate("token-1")
+
+
+def test_polymarket_client_reuses_public_http_client_for_clob_reads(monkeypatch):
+    from src.data import polymarket_client as pm
+
+    class Response:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self._payload
+
+    class PublicClient:
+        def __init__(self, *args, **kwargs):
+            self.calls = []
+            self.closed = False
+
+        def get(self, url, *, params=None):
+            self.calls.append((url, params))
+            if url.endswith("/markets/condition-1"):
+                return Response({"condition_id": "condition-1", "tokens": []})
+            if url.endswith("/book"):
+                return Response({"bids": [], "asks": []})
+            if url.endswith("/fee-rate"):
+                return Response({"base_fee": 30})
+            raise AssertionError(f"unexpected URL: {url}")
+
+        def close(self):
+            self.closed = True
+
+    clients = []
+
+    def client_factory(*args, **kwargs):
+        client = PublicClient(*args, **kwargs)
+        clients.append(client)
+        return client
+
+    monkeypatch.setattr(pm.httpx, "Client", client_factory)
+
+    client = pm.PolymarketClient()
+    client._v2_adapter = type(
+        "AdapterTripwire",
+        (),
+        {
+            "get_clob_market_info": lambda self, condition_id: (_ for _ in ()).throw(
+                AssertionError("public CLOB market facts must not use the V2 SDK adapter")
+            )
+        },
+    )()
+    assert client.get_clob_market_info("condition-1") == {"condition_id": "condition-1", "tokens": []}
+    assert client.get_orderbook_snapshot("token-1") == {"bids": [], "asks": []}
+    assert client.get_fee_rate_details("token-1")["fee_rate_bps"] == pytest.approx(30.0)
+
+    assert len(clients) == 1
+    assert clients[0].calls == [
+        (f"{pm.CLOB_BASE}/markets/condition-1", None),
+        (f"{pm.CLOB_BASE}/book", {"token_id": "token-1"}),
+        (f"{pm.CLOB_BASE}/fee-rate", {"token_id": "token-1"}),
+    ]
+
+    client.close()
+    assert clients[0].closed is True
+    assert client._public_http_client is None
 
 
 def test_polymarket_client_cancel_blocks_before_adapter_when_cutover_disallows(monkeypatch):
@@ -1142,6 +1271,47 @@ def test_polymarket_client_cancel_blocks_before_adapter_when_cutover_disallows(m
 
     with pytest.raises(CutoverPending, match="BLOCKED:CANCEL"):
         client.cancel_order("ord-cancel")
+
+
+def test_v2_cancel_order_method_uses_order_payload(tmp_path):
+    fake = FakeCancelOrderClient()
+    adapter, _ = _adapter(tmp_path, fake)
+
+    result = adapter.cancel("ord-cancel")
+
+    assert result.status == "CANCELED"
+    assert result.order_id == "ord-cancel"
+    assert fake.calls[0][0] == "cancel_order"
+    assert fake.calls[0][1].orderID == "ord-cancel"
+    assert '"canceled":["ord-cancel"]' in (result.raw_response_json or "")
+
+
+def test_polymarket_client_cancel_payload_is_exit_safety_parseable(monkeypatch):
+    from src.control.cutover_guard import CutoverDecision, CutoverState
+    from src.data.polymarket_client import PolymarketClient
+    from src.execution.exit_safety import parse_cancel_response
+    from src.venue.polymarket_v2_adapter import CancelResult
+
+    class FakeAdapter:
+        def cancel(self, order_id):
+            return CancelResult(
+                status="CANCELED",
+                order_id=order_id,
+                raw_response_json='{"canceled":["ord-cancel"],"not_canceled":[]}',
+            )
+
+    monkeypatch.setattr(
+        "src.control.cutover_guard.gate_for_intent",
+        lambda _intent_kind: CutoverDecision(False, True, False, None, CutoverState.LIVE_ENABLED),
+    )
+    client = PolymarketClient()
+    client._v2_adapter = FakeAdapter()
+
+    payload = client.cancel_order("ord-cancel")
+
+    assert payload["orderID"] == "ord-cancel"
+    assert payload["status"] == "CANCELED"
+    assert parse_cancel_response(payload).status == "CANCELED"
 
 
 def test_polymarket_client_wrapper_fails_closed_before_unbound_v2_preflight():

@@ -184,7 +184,7 @@ pre-Phase-C.
 ### Flip authorization (evidence-gated)
 
 **Authority**: `docs/operations/activation/UNLOCK_CRITERIA.md`. Each
-flip must produce an evidence bundle under `evidence/activation/`
+flip must produce an evidence bundle under `docs/historical_evidence/activation/`
 AND pass the relationship tests in
 `tests/test_activation_flag_combinations.py` BEFORE the flag is set
 in the running daemon. The flip commit body cites the evidence
@@ -194,11 +194,11 @@ Run the producer:
 
 ```bash
 python scripts/produce_activation_evidence.py --all \
-  --out-dir evidence/activation/ \
+  --out-dir docs/historical_evidence/activation/ \
   --evidence state/entry_forecast_promotion_evidence.json
 ```
 
-Inspect `evidence/activation/<date>_summary.md` for per-flag
+Inspect `docs/historical_evidence/activation/<date>_summary.md` for per-flag
 `ready_to_flip` verdicts. Stale (>7 day) bundles do not authorize.
 
 ### Recommended flip order

@@ -237,7 +237,78 @@ def _quantize_submit_shares(direction: ExecutionDirection, shares: Decimal) -> D
     return quantized
 
 
-def _submitted_shares_from_cost_basis(cost_basis: "ExecutableCostBasis") -> Decimal:
+def _is_decimal_quantized(value: Decimal, quantum: Decimal) -> bool:
+    return value == value.quantize(quantum)
+
+
+def venue_submit_amount_precision_error(
+    *,
+    direction: ExecutionDirection | str,
+    final_limit_price: Decimal,
+    submitted_shares: Decimal,
+    order_type: OrderType | str,
+) -> str | None:
+    """Return why a venue submit amount would be rejected before SDK contact."""
+
+    normalized_direction = str(direction or "")
+    normalized_order_type = str(order_type or "").strip().upper()
+    if not (
+        normalized_direction.startswith("buy_")
+        and normalized_order_type in {"FOK", "FAK"}
+    ):
+        return None
+    if not _is_decimal_quantized(submitted_shares, Decimal("0.0001")):
+        return (
+            "immediate BUY taker amount must have at most 4 decimal places: "
+            f"submitted_shares={submitted_shares}"
+        )
+    maker_amount = submitted_shares * final_limit_price
+    if not _is_decimal_quantized(maker_amount, Decimal("0.01")):
+        return (
+            "immediate BUY maker amount must be cents-aligned: "
+            f"final_limit_price={final_limit_price} submitted_shares={submitted_shares} "
+            f"maker_amount={maker_amount}"
+        )
+    return None
+
+
+def quantize_submit_shares_for_venue(
+    direction: ExecutionDirection,
+    shares: Decimal,
+    *,
+    final_limit_price: Decimal,
+    order_type: OrderType | str,
+) -> Decimal:
+    """Quantize submitted shares to both Zeus' share grid and venue amount grids."""
+
+    quantized = _quantize_submit_shares(direction, shares)
+    if not (
+        str(direction).startswith("buy_")
+        and str(order_type or "").strip().upper() in {"FOK", "FAK"}
+    ):
+        return quantized
+    for _ in range(10_000):
+        if (
+            venue_submit_amount_precision_error(
+                direction=direction,
+                final_limit_price=final_limit_price,
+                submitted_shares=quantized,
+                order_type=order_type,
+            )
+            is None
+        ):
+            return quantized
+        quantized += Decimal("0.01")
+    raise ValueError(
+        "unable to quantize immediate BUY shares to venue amount precision"
+    )
+
+
+def _submitted_shares_from_cost_basis(
+    cost_basis: "ExecutableCostBasis",
+    *,
+    order_type: OrderType | str,
+) -> Decimal:
     if cost_basis.requested_size_kind == "shares":
         raw_shares = cost_basis.requested_size_value
     else:
@@ -1367,7 +1438,10 @@ class FinalExecutionIntent:
             direction=cost_basis.direction,
             size_kind=cost_basis.requested_size_kind,
             size_value=cost_basis.requested_size_value,
-            submitted_shares=_submitted_shares_from_cost_basis(cost_basis),
+            submitted_shares=_submitted_shares_from_cost_basis(
+                cost_basis,
+                order_type=order_type,
+            ),
             final_limit_price=cost_basis.final_limit_price,
             expected_fill_price_before_fee=cost_basis.expected_fill_price_before_fee,
             fee_adjusted_execution_price=cost_basis.fee_adjusted_execution_price,

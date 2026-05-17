@@ -1,5 +1,5 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-05-15
+# Last reused/audited: 2026-05-17
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/Z2.yaml
 #                  + docs/operations/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md
 """Polymarket CLOB V2 adapter.
@@ -15,6 +15,7 @@ import hashlib
 import importlib.metadata
 import json
 import logging
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -34,6 +35,7 @@ from src.observability.counters import increment as _cnt_inc
 logger = logging.getLogger(__name__)
 
 DEFAULT_V2_HOST = "https://clob.polymarket.com"
+POLYMARKET_DATA_API_BASE = "https://data-api.polymarket.com"
 DEFAULT_Q1_EGRESS_EVIDENCE = Path(
     "docs/operations/live_egress/q1_zeus_egress_current.txt"
 )
@@ -152,6 +154,8 @@ class PolymarketV2AdapterProtocol(Protocol):
     def get_trades(self, since: Optional[str] = None) -> list[TradeFact]: ...
 
     def get_positions(self) -> list[PositionFact]: ...
+
+    def get_pusd_balance_micro(self) -> int: ...
 
     def get_collateral_payload(self) -> dict[str, Any]: ...
 
@@ -427,11 +431,15 @@ class PolymarketV2Adapter:
 
     def cancel(self, order_id: str) -> CancelResult:
         client = self._sdk_client()
-        cancel = getattr(client, "cancel", None) or getattr(client, "cancel_order", None)
+        cancel = getattr(client, "cancel", None)
         if not callable(cancel):
-            return CancelResult(status="rejected", order_id=order_id, error_code="CANCEL_UNSUPPORTED")
-        raw = cancel(order_id)
-        return CancelResult(status="accepted", order_id=order_id, raw_response_json=_canonical_json(raw or {}))
+            cancel_order = getattr(client, "cancel_order", None)
+            if not callable(cancel_order):
+                return CancelResult(status="rejected", order_id=order_id, error_code="CANCEL_UNSUPPORTED")
+            raw = cancel_order(_order_payload(order_id))
+        else:
+            raw = cancel(order_id)
+        return _cancel_result_from_response(order_id, raw)
 
     def get_order(self, order_id: str) -> OrderState:
         raw = self._sdk_client().get_order(order_id)
@@ -463,9 +471,39 @@ class PolymarketV2Adapter:
     def get_positions(self) -> list[PositionFact]:
         get_positions = getattr(self._sdk_client(), "get_positions", None)
         if not callable(get_positions):
-            raise V2ReadUnavailable("SDK client does not expose get_positions; position absence is unknown")
+            return self._get_positions_from_data_api()
         raw = get_positions() or []
         return [PositionFact(raw=dict(item)) for item in raw]
+
+    def _get_positions_from_data_api(self) -> list[PositionFact]:
+        if not self.funder_address:
+            raise V2ReadUnavailable("funder_address is required for data-api position enumeration")
+        query = urllib.parse.urlencode(
+            {"user": self.funder_address, "sizeThreshold": "0.01"}
+        )
+        request = urllib.request.Request(
+            f"{POLYMARKET_DATA_API_BASE}/positions?{query}",
+            headers={"user-agent": "zeus-readonly/1.0"},
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=15) as response:
+                decoded = json.loads(response.read())
+        except Exception as exc:
+            raise V2ReadUnavailable(f"data-api position enumeration failed: {exc}") from exc
+        if isinstance(decoded, dict):
+            decoded = decoded.get("data", []) or []
+        if not isinstance(decoded, list):
+            raise V2ReadUnavailable("data-api position enumeration returned non-list payload")
+        return [PositionFact(raw=dict(item)) for item in decoded if isinstance(item, dict)]
+
+    def get_pusd_balance_micro(self) -> int:
+        """Return pUSD wallet balance without touching local trade-state DBs."""
+
+        raw = self._collateral_balance_allowance_raw()
+        balance = _micro_int_or_none(raw.get("balance"))
+        if balance is None:
+            raise V2AdapterError("balance allowance response missing balance")
+        return balance
 
     def get_collateral_payload(self) -> dict[str, Any]:
         """Return SDK-derived collateral facts for CollateralLedger.refresh().
@@ -474,30 +512,7 @@ class PolymarketV2Adapter:
         ledger receives plain dictionaries and never depends on SDK types.
         """
 
-        client = self._sdk_client()
-        get_balance_allowance = getattr(client, "get_balance_allowance", None)
-        if not callable(get_balance_allowance):
-            raise V2AdapterError("SDK client does not expose get_balance_allowance")
-        try:
-            from py_clob_client_v2.clob_types import AssetType, BalanceAllowanceParams
-
-            params = BalanceAllowanceParams(
-                asset_type=AssetType.COLLATERAL,
-                signature_type=self.signature_type,
-            )
-        except Exception:
-            params = SimpleNamespace(
-                asset_type="COLLATERAL",
-                signature_type=self.signature_type,
-            )
-        update_balance_allowance = getattr(client, "update_balance_allowance", None)
-        if callable(update_balance_allowance):
-            update_balance_allowance(params)
-        raw = get_balance_allowance(params)
-        if not isinstance(raw, dict):
-            raw = dict(raw)
-        if raw.get("balance") is None:
-            raise V2AdapterError("balance allowance response missing balance")
+        raw = self._collateral_balance_allowance_raw()
         pusd_allowance_raw = raw.get("allowance")
         allowance_int = _micro_int_or_none(pusd_allowance_raw)
         authority_tier = "CHAIN"
@@ -537,11 +552,31 @@ class PolymarketV2Adapter:
             if not token_id:
                 continue
             token_key = str(token_id)
-            balance_units = _ctf_balance_units(item.get("size", item.get("balance", 0)))
+            conditional_raw = self._conditional_balance_allowance_raw(token_key)
+            conditional_balance_units = _micro_int_or_none(conditional_raw.get("balance"))
+            balance_units = (
+                conditional_balance_units
+                if conditional_balance_units is not None
+                else _ctf_balance_units(item.get("size", item.get("balance", 0)))
+            )
             balances[token_key] = balances.get(token_key, 0) + balance_units
-            allowance_raw = item.get("allowance", item.get("token_allowance", item.get("approved_amount")))
+            allowance_raw = conditional_raw.get(
+                "allowance",
+                item.get("allowance", item.get("token_allowance", item.get("approved_amount"))),
+            )
             if allowance_raw is not None:
-                allowance_units = _ctf_balance_units(allowance_raw)
+                allowance_micro = _micro_int_or_none(allowance_raw)
+                allowance_units = (
+                    allowance_micro
+                    if allowance_micro is not None
+                    else _ctf_balance_units(allowance_raw)
+                )
+            elif conditional_balance_units is not None:
+                # CLOB currently returns conditional-token balance without a
+                # separate allowance field. Treat the CLOB conditional balance
+                # as sell-cover proof; the submit response remains the authority
+                # for any approval-specific rejection.
+                allowance_units = conditional_balance_units
             elif item.get("approved") is True or item.get("isApprovedForAll") is True:
                 allowance_units = balance_units
             else:
@@ -558,6 +593,69 @@ class PolymarketV2Adapter:
             "signature_type": self.signature_type,
             "pusd_allowance_source": allowance_source,
         }
+
+    def _collateral_balance_allowance_raw(self) -> dict[str, Any]:
+        """Read the CLOB collateral balance/allowance surface once."""
+
+        client = self._sdk_client()
+        get_balance_allowance = getattr(client, "get_balance_allowance", None)
+        if not callable(get_balance_allowance):
+            raise V2AdapterError("SDK client does not expose get_balance_allowance")
+        try:
+            from py_clob_client_v2.clob_types import AssetType, BalanceAllowanceParams
+
+            params = BalanceAllowanceParams(
+                asset_type=AssetType.COLLATERAL,
+                signature_type=self.signature_type,
+            )
+        except Exception:
+            params = SimpleNamespace(
+                asset_type="COLLATERAL",
+                signature_type=self.signature_type,
+            )
+        update_balance_allowance = getattr(client, "update_balance_allowance", None)
+        if callable(update_balance_allowance):
+            update_balance_allowance(params)
+        raw = get_balance_allowance(params)
+        if not isinstance(raw, dict):
+            raw = dict(raw)
+        if raw.get("balance") is None:
+            raise V2AdapterError("balance allowance response missing balance")
+        return raw
+
+    def _conditional_balance_allowance_raw(self, token_id: str) -> dict[str, Any]:
+        """Read CLOB conditional-token balance/allowance for one outcome token."""
+
+        if not token_id:
+            return {}
+        client = self._sdk_client()
+        get_balance_allowance = getattr(client, "get_balance_allowance", None)
+        if not callable(get_balance_allowance):
+            return {}
+        try:
+            from py_clob_client_v2.clob_types import AssetType, BalanceAllowanceParams
+
+            params = BalanceAllowanceParams(
+                asset_type=AssetType.CONDITIONAL,
+                token_id=token_id,
+                signature_type=self.signature_type,
+            )
+        except Exception:
+            params = SimpleNamespace(
+                asset_type="CONDITIONAL",
+                token_id=token_id,
+                signature_type=self.signature_type,
+            )
+        try:
+            return dict(get_balance_allowance(params) or {})
+        except Exception as exc:
+            logger.debug(
+                "conditional balance allowance unavailable for token %s...%s: %s",
+                token_id[:8],
+                token_id[-4:],
+                exc,
+            )
+            return {}
 
     def _chain_collateral_allowance_micro(self) -> int | None:
         if not self.polygon_rpc_url:
@@ -1081,6 +1179,50 @@ def _order_args_from_envelope(envelope: VenueSubmissionEnvelope) -> SimpleNamesp
         )
 
 
+def _order_payload(order_id: str) -> Any:
+    try:
+        from py_clob_client_v2.clob_types import OrderPayload
+
+        return OrderPayload(orderID=order_id)
+    except Exception:
+        return SimpleNamespace(orderID=order_id)
+
+
+def _cancel_result_from_response(order_id: str, raw: Any) -> CancelResult:
+    if isinstance(raw, str) and raw.strip():
+        normalized_order_id = raw.strip()
+        return CancelResult(
+            status="CANCELED",
+            order_id=normalized_order_id,
+            raw_response_json=_canonical_json({"orderID": normalized_order_id, "status": "CANCELED"}),
+        )
+    raw_dict = dict(raw or {}) if isinstance(raw, dict) else {"raw": _to_jsonish(raw)}
+    error_code, error_message = _response_error(raw_dict)
+    not_canceled = raw_dict.get("not_canceled", raw_dict.get("not_cancelled"))
+    if error_code or error_message or _nonempty(not_canceled) or raw_dict.get("success") is False:
+        return CancelResult(
+            status="NOT_CANCELED",
+            order_id=order_id,
+            raw_response_json=_canonical_json(raw_dict),
+            error_code=error_code,
+            error_message=error_message or _reason_from(not_canceled, "cancel_not_canceled"),
+        )
+    canceled = raw_dict.get("canceled", raw_dict.get("cancelled"))
+    status = str(raw_dict.get("status") or raw_dict.get("state") or "").upper()
+    if _nonempty(canceled) or status in {"CANCELED", "CANCELLED", "CANCEL_CONFIRMED"} or raw_dict.get("success") is True:
+        return CancelResult(
+            status="CANCELED",
+            order_id=_extract_order_id(raw_dict) or order_id,
+            raw_response_json=_canonical_json(raw_dict),
+        )
+    return CancelResult(
+        status="UNKNOWN",
+        order_id=order_id,
+        raw_response_json=_canonical_json(raw_dict),
+        error_message="unrecognized_cancel_response",
+    )
+
+
 def _signed_order_bytes(signed_order: Any) -> bytes:
     if isinstance(signed_order, bytes):
         return signed_order
@@ -1097,6 +1239,30 @@ def _to_jsonish(value: Any) -> Any:
     return repr(value)
 
 
+def _nonempty(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, (str, bytes)):
+        return bool(value)
+    if isinstance(value, dict):
+        return bool(value)
+    try:
+        return bool(list(value))
+    except TypeError:
+        return bool(value)
+
+
+def _reason_from(value: Any, fallback: str) -> str:
+    if value is None:
+        return fallback
+    if isinstance(value, dict):
+        parts = [f"{key}: {item}" for key, item in value.items()]
+        return "; ".join(parts) if parts else fallback
+    if isinstance(value, (list, tuple, set)):
+        return ", ".join(str(item) for item in value) or fallback
+    return str(value) or fallback
+
+
 def _extract_order_id(raw: Any) -> Optional[str]:
     if not isinstance(raw, dict):
         return None
@@ -1109,6 +1275,37 @@ def _response_error(raw: Any) -> tuple[Optional[str], Optional[str]]:
     code = raw.get("errorCode") or raw.get("error_code") or raw.get("code")
     message = raw.get("errorMessage") or raw.get("error_message") or raw.get("message")
     return (str(code) if code else None, str(message) if message else None)
+
+
+def _string_sequence_from_value(value: Any) -> tuple[str, ...]:
+    if value in (None, ""):
+        return ()
+    if isinstance(value, (str, int, float)):
+        text = str(value).strip()
+        return (text,) if text else ()
+    if isinstance(value, dict):
+        for key in ("id", "trade_id", "tradeID", "tradeId", "hash", "tx_hash", "transactionHash"):
+            item = value.get(key)
+            if item not in (None, ""):
+                text = str(item).strip()
+                return (text,) if text else ()
+        return ()
+    if isinstance(value, (list, tuple)):
+        items: list[str] = []
+        for item in value:
+            items.extend(_string_sequence_from_value(item))
+        return tuple(items)
+    return ()
+
+
+def _extract_string_sequence(raw: Any, *keys: str) -> tuple[str, ...]:
+    if not isinstance(raw, dict):
+        return ()
+    for key in keys:
+        values = _string_sequence_from_value(raw.get(key))
+        if values:
+            return values
+    return ()
 
 
 def _rejected_submit_result(
@@ -1172,6 +1369,22 @@ def _submit_result_from_response(
         signed_order_hash=signed_order_hash,
         raw_response_json=raw_json,
         order_id=str(order_id),
+        trade_ids=_extract_string_sequence(
+            raw_response,
+            "tradeIDs",
+            "tradeIds",
+            "trade_ids",
+            "associate_trades",
+            "trades",
+        ),
+        transaction_hashes=_extract_string_sequence(
+            raw_response,
+            "transactionsHashes",
+            "transactionHashes",
+            "transaction_hashes",
+            "txHashes",
+            "tx_hashes",
+        ),
     )
     return SubmitResult(status="accepted", envelope=updated)
 

@@ -507,6 +507,9 @@ def run_cycle(mode: DiscoveryMode) -> dict:
         "exits": 0,
         "candidates": 0,
         "trades": 0,
+        "entry_orders_submitted": 0,
+        "entry_orders_resting": 0,
+        "entry_orders_filled_immediate": 0,
         "no_trades": 0,
     }
 
@@ -982,14 +985,23 @@ def run_cycle(mode: DiscoveryMode) -> dict:
         logger.warning("Decision chain recording failed: %s", e)
 
     conn.close()
+    close_clob = getattr(clob, "close", None)
+    if callable(close_clob):
+        try:
+            close_clob()
+        except Exception as exc:
+            logger.warning("PolymarketClient close failed during cycle teardown: %s", exc)
     summary["completed_at"] = _utcnow().isoformat()
 
     logger.info(
-        "Cycle %s: %d monitors, %d exits, %d candidates, %d trades",
+        "Cycle %s: %d monitors, %d exits, %d candidates, %d filled trades, "
+        "%d entry orders submitted (%d resting)",
         mode.value,
         summary["monitors"],
         summary["exits"],
         summary["candidates"],
         summary["trades"],
+        int(summary.get("entry_orders_submitted", 0) or 0),
+        int(summary.get("entry_orders_resting", 0) or 0),
     )
     return summary

@@ -66,7 +66,7 @@ references:
   - architecture/fatal_misreads.yaml  # polymarket_low_market_history_starts_2026_04_15
   - scripts/backfill_uma_resolution_2026.py
   - scripts/backfill_settlements_via_gamma_2026.py
-  - docs/operations/UNMATCHED_GAMMA_CITIES_2026_05_07.md
+  - docs/historical_evidence/UNMATCHED_GAMMA_CITIES_2026_05_07.md
   - "git:1e5615b9"  # Gamma backfill re-enabled
   - "git:68937b27"  # DDD v2 live wiring
   - "git:365429e7"  # Gamma unlock implementation

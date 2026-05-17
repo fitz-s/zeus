@@ -1,6 +1,7 @@
 # Created: 2026-03-30
-# Last reused/audited: 2026-05-08
+# Last reused/audited: 2026-05-17
 # Authority basis: docs/operations/task_2026-04-28_contamination_remediation/plan.md Batch D RiskGuard test-law remediation; Wave26 verification-noise helper alignment; PR90 current-env fallback review fix.
+#                  2026-05-17 live lock remediation: RiskGuard trade/world DB lock degrades to fresh DATA_DEGRADED rather than stale RED.
 # Lifecycle: created=2026-03-30; last_reviewed=2026-05-08; last_reused=2026-05-08
 # Purpose: Guard RiskGuard protective metrics, policy resolution, source authority, and portfolio loader invariants.
 # Reuse: Run after RiskGuard risk details, portfolio loader, settlement source, bankroll, or risk-action changes.
@@ -594,6 +595,105 @@ class TestRiskEvaluation:
 
 
 class TestRiskGuardSettlementSource:
+    def test_tick_preserves_previous_fresh_level_when_dependency_db_metrics_lock(self, monkeypatch, tmp_path):
+        """Relationship: metric DB lock must not erase a fresh full risk attestation."""
+        risk_db = tmp_path / "risk_state.db"
+        risk_conn = get_connection(risk_db)
+        riskguard_module.init_risk_db(risk_conn)
+        _insert_risk_state_row(
+            risk_conn,
+            checked_at=(datetime.now(timezone.utc) - timedelta(minutes=4)).isoformat(),
+            level=RiskLevel.GREEN.value,
+        )
+        risk_conn.commit()
+        risk_conn.close()
+
+        class _LockedTradeConn:
+            def __init__(self):
+                self.rollback_called = False
+                self.close_called = False
+
+            def rollback(self):
+                self.rollback_called = True
+
+            def close(self):
+                self.close_called = True
+
+        trade_conn = _LockedTradeConn()
+
+        def _fake_get_connection(path=None, **_kwargs):
+            assert path == riskguard_module.RISK_DB_PATH
+            return get_connection(risk_db)
+
+        def _raise_trade_db_locked(_conn):
+            raise sqlite3.OperationalError("database is locked")
+
+        monkeypatch.setattr(riskguard_module, "get_connection", _fake_get_connection)
+        monkeypatch.setattr(riskguard_module, "_get_runtime_trade_connection", lambda: trade_conn)
+        monkeypatch.setattr(riskguard_module, "_load_riskguard_portfolio_truth", _raise_trade_db_locked)
+
+        level = riskguard_module.tick()
+
+        row = get_connection(risk_db).execute(
+            "SELECT level, details_json, checked_at FROM risk_state ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        details = json.loads(row["details_json"])
+
+        assert level == RiskLevel.GREEN
+        assert row["level"] == RiskLevel.GREEN.value
+        assert details["status"] == "dependency_db_locked_previous_risk_level_preserved"
+        assert details["riskguard_degraded_reason"] == "dependency_db_locked"
+        assert details["full_metrics_status"] == "locked_previous_fresh_level_preserved"
+        assert details["previous_full_risk_level"] == RiskLevel.GREEN.value
+        assert details["bankroll_truth_source"] == "polymarket_wallet"
+        assert riskguard_module.get_current_level() == RiskLevel.GREEN
+        assert trade_conn.rollback_called is True
+        assert trade_conn.close_called is True
+
+    def test_tick_degrades_when_dependency_db_metrics_lock_has_no_fresh_full_level(self, monkeypatch, tmp_path):
+        """Relationship: old full risk truth cannot be extended past its TTL."""
+        risk_db = tmp_path / "risk_state.db"
+        risk_conn = get_connection(risk_db)
+        riskguard_module.init_risk_db(risk_conn)
+        _insert_risk_state_row(
+            risk_conn,
+            checked_at=(datetime.now(timezone.utc) - timedelta(minutes=6)).isoformat(),
+            level=RiskLevel.GREEN.value,
+        )
+        risk_conn.commit()
+        risk_conn.close()
+
+        class _LockedTradeConn:
+            def rollback(self):
+                pass
+
+            def close(self):
+                pass
+
+        def _fake_get_connection(path=None, **_kwargs):
+            assert path == riskguard_module.RISK_DB_PATH
+            return get_connection(risk_db)
+
+        def _raise_dependency_db_locked(_conn):
+            raise sqlite3.OperationalError("database is locked")
+
+        monkeypatch.setattr(riskguard_module, "get_connection", _fake_get_connection)
+        monkeypatch.setattr(riskguard_module, "_get_runtime_trade_connection", lambda: _LockedTradeConn())
+        monkeypatch.setattr(riskguard_module, "_load_riskguard_portfolio_truth", _raise_dependency_db_locked)
+
+        level = riskguard_module.tick()
+
+        row = get_connection(risk_db).execute(
+            "SELECT level, details_json FROM risk_state ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        details = json.loads(row["details_json"])
+
+        assert level == RiskLevel.DATA_DEGRADED
+        assert row["level"] == RiskLevel.DATA_DEGRADED.value
+        assert details["status"] == "dependency_db_locked"
+        assert details["full_metrics_status"] == "unavailable_no_fresh_full_risk_row"
+        assert riskguard_module.get_current_level() == RiskLevel.DATA_DEGRADED
+
     def test_tick_prefers_position_current_for_portfolio_truth(self, monkeypatch, tmp_path):
         # P0-A masking-test repoint (architect_memo §6, followup_design §2.1):
         # this test's axis is portfolio TRUTH-SOURCE preference (canonical_db

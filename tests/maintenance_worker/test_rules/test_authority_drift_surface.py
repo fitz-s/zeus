@@ -83,7 +83,7 @@ def _make_entry(drift_threshold: float = 0.3, escalate_threshold: float = 0.7) -
             },
             "safety": {
                 "no_authority_doc_edits": True,
-                "output_only_dir": "evidence/drift_surface",
+                "output_only_dir": "docs/historical_evidence/drift_surface",
             },
         },
     )

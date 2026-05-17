@@ -1,8 +1,8 @@
-# Lifecycle: created=2026-04-26; last_reviewed=2026-05-15; last_reused=2026-05-15
+# Lifecycle: created=2026-04-26; last_reviewed=2026-05-15; last_reused=2026-05-17
 # Purpose: Lock executor command split phase ordering and ACK invariants.
 # Reuse: Run when venue command persistence, live order submission, or ACK handling changes.
 # Created: 2026-04-26
-# Last reused/audited: 2026-05-15
+# Last reused/audited: 2026-05-17
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md §P1.S3
 #                  + docs/operations/task_2026-05-15_live_order_e2e_goal/LIVE_ORDER_E2E_GOAL_PLAN.md
 """INV-30 relationship tests: executor split build/persist/submit/ack.
@@ -271,6 +271,7 @@ def _final_submit_result(
     success: bool | None = None,
     error_code: str | None = None,
     error_message: str | None = None,
+    raw_extra: dict | None = None,
 ) -> dict:
     envelope = bound.get("envelope")
     if envelope is None:
@@ -280,10 +281,14 @@ def _final_submit_result(
         raw_payload["orderID"] = order_id
     if success is not None:
         raw_payload["success"] = success
+    if raw_extra:
+        raw_payload.update(raw_extra)
     changes = {
         "raw_response_json": json.dumps(raw_payload, sort_keys=True, separators=(",", ":")),
         "order_id": order_id,
     }
+    if raw_extra and raw_extra.get("transactionsHashes"):
+        changes["transaction_hashes"] = tuple(raw_extra["transactionsHashes"])
     if error_code is not None:
         changes["error_code"] = error_code
         changes["error_message"] = error_message or ""
@@ -296,6 +301,8 @@ def _final_submit_result(
         result["orderID"] = order_id
     if success is not None:
         result["success"] = success
+    if raw_extra:
+        result.update(raw_extra)
     if error_code is not None:
         result["errorCode"] = error_code
         result["errorMessage"] = error_message or ""
@@ -575,6 +582,99 @@ class TestLiveOrderCommandSplit:
         assert observed["durable_envelope_count"] == 1
         assert observed["durable_submit_requested_count"] == 1
         assert observed["submit_kwargs"]["token_id"] == token_id
+
+    def test_entry_caller_connection_commits_submit_boundaries_before_preflight(self, tmp_path, monkeypatch):
+        """Caller-owned entry conn must not hold write locks across CLOB preflight."""
+        import src.execution.executor as executor_module
+        from src.execution.executor import _live_order
+        from src.state.db import get_connection, init_schema
+
+        monkeypatch.setenv("ZEUS_DB_BUSY_TIMEOUT_MS", "100")
+        token_id = "tok-" + "8" * 36
+        db_path = tmp_path / "entry-caller-conn-durable.db"
+        setup_conn = get_connection(db_path)
+        init_schema(setup_conn)
+        intent = _make_entry_intent(setup_conn, token_id=token_id)
+        setup_conn.commit()
+        setup_conn.close()
+
+        submit_conn = get_connection(db_path)
+        init_schema(submit_conn)
+        monkeypatch.setattr(executor_module, "_assert_risk_allocator_allows_submit", lambda *args, **kwargs: None)
+        monkeypatch.setattr(executor_module, "_select_risk_allocator_order_type", lambda *args, **kwargs: "GTC")
+        monkeypatch.setattr(
+            executor_module,
+            "_assert_ws_gap_allows_submit",
+            lambda *args, **kwargs: {"component": "ws_gap_guard", "allowed": True, "reason": "allowed"},
+        )
+        monkeypatch.setattr(executor_module, "alert_trade", lambda *args, **kwargs: None)
+
+        observed = {}
+
+        class DurableVisibilityClient:
+            def v2_preflight(self):
+                read_conn = get_connection(db_path)
+                init_schema(read_conn)
+                try:
+                    command_rows = read_conn.execute(
+                        """
+                        SELECT command_id, snapshot_id, envelope_id, state
+                        FROM venue_commands
+                        WHERE snapshot_id = ?
+                        """,
+                        (intent.executable_snapshot_id,),
+                    ).fetchall()
+                    envelope_count = read_conn.execute(
+                        "SELECT COUNT(*) FROM venue_submission_envelopes"
+                    ).fetchone()[0]
+                    requested_count = read_conn.execute(
+                        """
+                        SELECT COUNT(*)
+                        FROM venue_command_events
+                        WHERE command_id = ? AND event_type = 'SUBMIT_REQUESTED'
+                        """,
+                        (command_rows[0]["command_id"] if command_rows else "",),
+                    ).fetchone()[0]
+                finally:
+                    read_conn.close()
+
+                observed["durable_command_count_before_preflight"] = len(command_rows)
+                observed["durable_command_state_before_preflight"] = command_rows[0]["state"] if command_rows else None
+                observed["durable_envelope_count_before_preflight"] = envelope_count
+                observed["durable_submit_requested_count_before_preflight"] = requested_count
+
+            def bind_submission_envelope(self, envelope):
+                observed["bound_envelope"] = envelope
+
+            def place_limit_order(self, **kwargs):
+                final = observed["bound_envelope"].with_updates(
+                    raw_response_json='{"orderID":"ord-entry-caller-durable"}',
+                    order_id="ord-entry-caller-durable",
+                )
+                return {
+                    "orderID": "ord-entry-caller-durable",
+                    "status": "LIVE",
+                    "_venue_submission_envelope": final.to_dict(),
+                }
+
+        try:
+            with patch("src.data.polymarket_client.PolymarketClient", return_value=DurableVisibilityClient()):
+                result = _live_order(
+                    trade_id="trd-entry-caller-commit",
+                    intent=intent,
+                    shares=18.19,
+                    conn=submit_conn,
+                    decision_id="dec-entry-caller-commit",
+                )
+            assert not submit_conn.in_transaction
+        finally:
+            submit_conn.close()
+
+        assert result.status == "pending"
+        assert observed["durable_command_count_before_preflight"] == 1
+        assert observed["durable_command_state_before_preflight"] == "SUBMITTING"
+        assert observed["durable_envelope_count_before_preflight"] == 1
+        assert observed["durable_submit_requested_count_before_preflight"] == 1
 
     def test_entry_persists_final_submit_envelope_as_append_only_row(self, mem_conn, monkeypatch):
         """Entry ACK keeps command on pre-submit envelope and appends final SDK envelope."""
@@ -934,6 +1034,104 @@ class TestLiveOrderCommandSplit:
             "source": "REST",
         }
 
+    def test_matched_submit_records_fill_truth_instead_of_resting_ack(self, mem_conn):
+        """A matched FOK submit response is a fill boundary, not a resting ACK."""
+        from src.execution.executor import _live_order
+        from src.state.venue_command_repo import get_command, list_events
+
+        intent = _make_entry_intent(mem_conn, limit_price=0.34)
+        command_ids_seen: list[str] = []
+
+        import src.state.venue_command_repo as _repo
+        _real_insert = _repo.insert_command
+
+        def capturing_insert(*args, **kwargs):
+            command_ids_seen.append(kwargs["command_id"])
+            return _real_insert(*args, **kwargs)
+
+        with patch(
+            "src.state.venue_command_repo.insert_command", side_effect=capturing_insert
+        ), patch("src.data.polymarket_client.PolymarketClient") as MockClient:
+            mock_inst = MagicMock()
+            MockClient.return_value = mock_inst
+            mock_inst.v2_preflight.return_value = None
+            bound = _capture_bound_submission_envelope(mock_inst)
+            mock_inst.place_limit_order.side_effect = (
+                lambda **kwargs: _final_submit_result(
+                    bound,
+                    order_id="ord-matched-001",
+                    status="matched",
+                    success=True,
+                    raw_extra={
+                        "makingAmount": "1.70",
+                        "takingAmount": "5",
+                        "transactionsHashes": ["0xhash-matched"],
+                    },
+                )
+            )
+            mock_inst.get_order.return_value = {
+                "id": "ord-matched-001",
+                "status": "MATCHED",
+                "size_matched": "5",
+                "price": "0.34",
+                "associate_trades": ["trade-matched-001"],
+            }
+
+            result = _live_order(
+                trade_id="trd-matched",
+                intent=intent,
+                shares=5.0,
+                conn=mem_conn,
+                decision_id="dec-matched",
+            )
+
+        assert result.status == "filled"
+        assert result.command_state == "FILLED"
+        assert result.fill_price == pytest.approx(0.34)
+        assert result.shares == pytest.approx(5.0)
+        assert len(command_ids_seen) == 1
+        command_id = command_ids_seen[0]
+        cmd = get_command(mem_conn, command_id)
+        assert cmd is not None
+        assert cmd["state"] == "FILLED"
+        event_types = [event["event_type"] for event in list_events(mem_conn, command_id)]
+        assert event_types[-2:] == ["SUBMIT_ACKED", "FILL_CONFIRMED"]
+        order_fact = mem_conn.execute(
+            """
+            SELECT venue_order_id, state, remaining_size, matched_size, source
+              FROM venue_order_facts
+             WHERE command_id = ?
+             ORDER BY local_sequence DESC
+             LIMIT 1
+            """,
+            (command_id,),
+        ).fetchone()
+        assert dict(order_fact) == {
+            "venue_order_id": "ord-matched-001",
+            "state": "MATCHED",
+            "remaining_size": "0",
+            "matched_size": "5",
+            "source": "REST",
+        }
+        trade_fact = mem_conn.execute(
+            """
+            SELECT trade_id, venue_order_id, state, filled_size, fill_price, tx_hash
+              FROM venue_trade_facts
+             WHERE command_id = ?
+             ORDER BY local_sequence DESC
+             LIMIT 1
+            """,
+            (command_id,),
+        ).fetchone()
+        assert dict(trade_fact) == {
+            "trade_id": "trade-matched-001",
+            "venue_order_id": "ord-matched-001",
+            "state": "MATCHED",
+            "filled_size": "5",
+            "fill_price": "0.34",
+            "tx_hash": "0xhash-matched",
+        }
+
     def test_idempotency_key_collision_raises_before_submit(self, mem_conn):
         """Duplicate idempotency key: place_limit_order must NOT be called.
 
@@ -1202,6 +1400,127 @@ class TestExitOrderCommandSplit:
         assert call_log.index("insert_command") < call_log.index("place_limit_order"), (
             f"INV-30: insert_command must precede place_limit_order; call order was {call_log}"
         )
+
+    def test_exit_caller_connection_commits_submit_boundaries(self, tmp_path, monkeypatch):
+        """Caller-owned exit conn must not hold write locks across SDK contact."""
+        import src.execution.executor as executor_module
+        from src.execution.executor import execute_exit_order
+        from src.state.db import get_connection, init_schema
+
+        token_id = "tok-" + "7" * 36
+        db_path = tmp_path / "exit-caller-conn-durable.db"
+        setup_conn = get_connection(db_path)
+        init_schema(setup_conn)
+        intent = _make_exit_intent(
+            setup_conn,
+            trade_id="trd-exit-caller-commit",
+            token_id=token_id,
+        )
+        setup_conn.commit()
+        setup_conn.close()
+
+        submit_conn = get_connection(db_path)
+        init_schema(submit_conn)
+        monkeypatch.setattr(executor_module, "_assert_risk_allocator_allows_exit_submit", lambda *args, **kwargs: None)
+        monkeypatch.setattr(executor_module, "_select_risk_allocator_order_type", lambda *args, **kwargs: "GTC")
+        monkeypatch.setattr(
+            executor_module,
+            "_assert_ws_gap_allows_submit",
+            lambda *args, **kwargs: {"component": "ws_gap_guard", "allowed": True, "reason": "allowed"},
+        )
+
+        observed = {}
+
+        class DurableVisibilityClient:
+            def bind_submission_envelope(self, envelope):
+                observed["bound_envelope"] = envelope
+
+            def place_limit_order(self, **kwargs):
+                read_conn = get_connection(db_path)
+                init_schema(read_conn)
+                try:
+                    command_rows = read_conn.execute(
+                        """
+                        SELECT command_id, snapshot_id, envelope_id, state
+                        FROM venue_commands
+                        WHERE snapshot_id = ?
+                        """,
+                        (intent.executable_snapshot_id,),
+                    ).fetchall()
+                    envelope_count = read_conn.execute(
+                        "SELECT COUNT(*) FROM venue_submission_envelopes"
+                    ).fetchone()[0]
+                    requested_count = read_conn.execute(
+                        """
+                        SELECT COUNT(*)
+                        FROM venue_command_events
+                        WHERE command_id = ? AND event_type = 'SUBMIT_REQUESTED'
+                        """,
+                        (command_rows[0]["command_id"] if command_rows else "",),
+                    ).fetchone()[0]
+                finally:
+                    read_conn.close()
+
+                observed["durable_command_count_before_sdk"] = len(command_rows)
+                observed["durable_command_state_before_sdk"] = command_rows[0]["state"] if command_rows else None
+                observed["durable_envelope_count_before_sdk"] = envelope_count
+                observed["durable_submit_requested_count_before_sdk"] = requested_count
+                final = observed["bound_envelope"].with_updates(
+                    raw_response_json='{"orderID":"ord-exit-durable"}',
+                    order_id="ord-exit-durable",
+                )
+                return {
+                    "orderID": "ord-exit-durable",
+                    "status": "LIVE",
+                    "_venue_submission_envelope": final.to_dict(),
+                }
+
+        try:
+            with patch("src.data.polymarket_client.PolymarketClient", return_value=DurableVisibilityClient()):
+                result = execute_exit_order(
+                    intent=intent,
+                    conn=submit_conn,
+                    decision_id="dec-exit-caller-commit",
+                )
+            assert not submit_conn.in_transaction
+
+            read_conn = get_connection(db_path)
+            init_schema(read_conn)
+            try:
+                command = read_conn.execute(
+                    """
+                    SELECT command_id, state, venue_order_id
+                    FROM venue_commands
+                    WHERE position_id = ?
+                    """,
+                    ("trd-exit-caller-commit",),
+                ).fetchone()
+                ack_count = read_conn.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM venue_command_events
+                    WHERE command_id = ? AND event_type = 'SUBMIT_ACKED'
+                    """,
+                    (command["command_id"] if command else "",),
+                ).fetchone()[0]
+                fact_count = read_conn.execute(
+                    "SELECT COUNT(*) FROM venue_order_facts WHERE command_id = ?",
+                    (command["command_id"] if command else "",),
+                ).fetchone()[0]
+            finally:
+                read_conn.close()
+        finally:
+            submit_conn.close()
+
+        assert result.status == "pending"
+        assert observed["durable_command_count_before_sdk"] == 1
+        assert observed["durable_command_state_before_sdk"] == "SUBMITTING"
+        assert observed["durable_envelope_count_before_sdk"] == 1
+        assert observed["durable_submit_requested_count_before_sdk"] == 1
+        assert command["state"] == "ACKED"
+        assert command["venue_order_id"] == "ord-exit-durable"
+        assert ack_count == 1
+        assert fact_count == 1
 
     def test_exit_submit_requested_persists_execution_capability_proof(self, mem_conn, monkeypatch):
         """Exit SUBMIT_REQUESTED carries one pre-submit capability proof."""

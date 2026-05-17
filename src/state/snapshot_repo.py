@@ -1,6 +1,7 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-04-27
-# Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/U1.yaml
+# Last reused/audited: 2026-05-17
+# Authority basis: docs/operations/task_2026-05-17_live_order_survival/LIVE_ORDER_SURVIVAL_PLAN.md S5
+#                  docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/U1.yaml
 """Append-only persistence for ExecutableMarketSnapshotV2.
 
 The executable snapshot table is the U1 bridge from discovery facts to command
@@ -22,6 +23,7 @@ from src.state.connection_pair import WorldConnection
 
 
 SNAPSHOT_TABLE = "executable_market_snapshots"
+ABSENT_ORDERBOOK_SIDE = "ABSENT"
 
 
 def init_snapshot_schema(conn: WorldConnection) -> None:
@@ -178,7 +180,7 @@ def _row_from_snapshot(snapshot: ExecutableMarketSnapshotV2) -> dict[str, Any]:
         "rfqe": _nullable_bool(snapshot.rfqe),
         "neg_risk": int(snapshot.neg_risk),
         "orderbook_top_bid": str(snapshot.orderbook_top_bid),
-        "orderbook_top_ask": str(snapshot.orderbook_top_ask),
+        "orderbook_top_ask": _decimal_or_absent_text(snapshot.orderbook_top_ask),
         "orderbook_depth_json": snapshot.orderbook_depth_jsonb,
         "raw_gamma_payload_hash": snapshot.raw_gamma_payload_hash,
         "raw_clob_market_info_hash": snapshot.raw_clob_market_info_hash,
@@ -216,7 +218,7 @@ def _snapshot_from_row(row: sqlite3.Row) -> ExecutableMarketSnapshotV2:
         rfqe=_bool_or_none(row["rfqe"]),
         neg_risk=bool(row["neg_risk"]),
         orderbook_top_bid=Decimal(row["orderbook_top_bid"]),
-        orderbook_top_ask=Decimal(row["orderbook_top_ask"]),
+        orderbook_top_ask=_decimal_or_absent(row["orderbook_top_ask"]),
         orderbook_depth_jsonb=row["orderbook_depth_json"],
         raw_gamma_payload_hash=row["raw_gamma_payload_hash"],
         raw_clob_market_info_hash=row["raw_clob_market_info_hash"],
@@ -237,6 +239,21 @@ def _bool_or_none(value: Any) -> Optional[bool]:
     if value is None:
         return None
     return bool(value)
+
+
+def _decimal_or_absent_text(value: Decimal | None) -> str:
+    if value is None:
+        return ABSENT_ORDERBOOK_SIDE
+    return str(value)
+
+
+def _decimal_or_absent(value: Any) -> Decimal | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text or text.upper() == ABSENT_ORDERBOOK_SIDE:
+        return None
+    return Decimal(text)
 
 
 def _dt(value: datetime) -> str:

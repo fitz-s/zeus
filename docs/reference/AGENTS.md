@@ -93,6 +93,7 @@ which module reference matters.
 | `modules/topology_doctor_system.md` | Dense topology-doctor reference for lanes, issue models, and closeout seams |
 | `modules/manifests_system.md` | Dense manifest-system reference for fact ownership and repair routing |
 | `modules/closeout_and_receipts_system.md` | Dense closeout/receipts reference for scoped gates and evidence |
+| `zeus_oracle_density_discount_reference.md` | Oracle penalty, Data Density Discount, source-thinness handling, and Mismatch↔DDD↔Platt-regime-absorption relationship reference |
 
 ## Rules
 

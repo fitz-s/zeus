@@ -1024,14 +1024,6 @@ def _record_partial_entry_observed(
         return non_fill_progress
     if shares is None or shares <= 0:
         return _update_pending_status(pos, "partial")
-    missing = _missing_fill_economics(fill_price=fill_price, shares=shares)
-    if missing:
-        return _quarantine_missing_fill_economics(
-            pos,
-            status="PARTIALLY_MATCHED",
-            missing=missing,
-        )
-
     ledger_ok = _maybe_append_venue_fill_observation(
         pos,
         payload,
@@ -1048,6 +1040,14 @@ def _record_partial_entry_observed(
             order_status="partial_fill_ledger_write_failed",
         )
         return "still_pending", True, False
+
+    missing = _missing_fill_economics(fill_price=fill_price, shares=shares)
+    if missing:
+        return _quarantine_missing_fill_economics(
+            pos,
+            status="PARTIALLY_MATCHED",
+            missing=missing,
+        )
 
     _apply_entry_fill_economics(
         pos,
@@ -1341,7 +1341,12 @@ def _normalize_status(payload) -> str:
         return payload.upper()
     if isinstance(payload, dict):
         status = payload.get("status") or payload.get("state") or payload.get("orderStatus")
-        return str(status).upper() if status else ""
+        normalized = str(status).upper() if status else ""
+        if normalized in {"LIVE", "RESTING", "OPEN", "ACCEPTED"} and _positive_finite(
+            _extract_filled_shares(payload, allow_order_size_fallback=False)
+        ):
+            return "PARTIALLY_MATCHED"
+        return normalized
     return ""
 
 
@@ -1487,91 +1492,9 @@ def _position_id_from_command(command: dict, conn=None) -> int | None:
 
     if conn is None:
         return None
+    from src.state.venue_command_repo import resolve_position_lot_id_for_command
 
-    # The live executor's runtime id is a UUID prefix and may be all digits.
-    # Treat command identity fields as runtime aliases first; only accept a
-    # numeric value as canonical after checking the target decision row.
-    for key in ("position_id", "decision_id"):
-        parsed = _trade_decision_id_for_runtime_id(conn, command.get(key))
-        if parsed is not None:
-            return parsed
-
-    position_id = command.get("position_id")
-    parsed_position_id = _parse_positive_int(position_id)
-    if parsed_position_id is not None and _trade_decision_id_is_compatible(
-        conn,
-        parsed_position_id,
-        runtime_trade_id=position_id,
-    ):
-        return parsed_position_id
-
-    decision_id = command.get("decision_id")
-    parsed_decision_id = _parse_positive_int(decision_id)
-    if parsed_decision_id is not None and _trade_decision_id_is_compatible(
-        conn,
-        parsed_decision_id,
-        runtime_trade_id=position_id,
-    ):
-        return parsed_decision_id
-    return None
-
-
-def _parse_positive_int(value: Any) -> int | None:
-    try:
-        parsed = int(str(value))
-    except (TypeError, ValueError):
-        return None
-    return parsed if parsed > 0 else None
-
-
-def _trade_decision_id_for_runtime_id(conn, runtime_trade_id: Any) -> int | None:
-    runtime_id = str(runtime_trade_id or "").strip()
-    if not runtime_id:
-        return None
-    try:
-        row = conn.execute(
-            """
-            SELECT trade_id
-              FROM trade_decisions
-             WHERE runtime_trade_id = ?
-             ORDER BY trade_id DESC
-             LIMIT 1
-            """,
-            (runtime_id,),
-        ).fetchone()
-    except Exception:
-        return None
-    if row is None:
-        return None
-    if hasattr(row, "keys"):
-        return _parse_positive_int(row["trade_id"])
-    return _parse_positive_int(row[0])
-
-
-def _trade_decision_id_is_compatible(
-    conn,
-    trade_decision_id: int,
-    *,
-    runtime_trade_id: Any,
-) -> bool:
-    try:
-        row = conn.execute(
-            """
-            SELECT runtime_trade_id
-              FROM trade_decisions
-             WHERE trade_id = ?
-             LIMIT 1
-            """,
-            (int(trade_decision_id),),
-        ).fetchone()
-    except Exception:
-        return False
-    if row is None:
-        return False
-    row_runtime = row["runtime_trade_id"] if hasattr(row, "keys") else row[0]
-    row_runtime_s = str(row_runtime or "").strip()
-    expected_runtime_s = str(runtime_trade_id or "").strip()
-    return not row_runtime_s or not expected_runtime_s or row_runtime_s == expected_runtime_s
+    return resolve_position_lot_id_for_command(conn, command)
 
 
 def _remaining_size(command: dict, shares: float | None) -> str | None:

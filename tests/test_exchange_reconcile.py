@@ -1,6 +1,6 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-05-16
-# Lifecycle: created=2026-04-27; last_reviewed=2026-05-07; last_reused=2026-05-16
+# Last reused/audited: 2026-05-17
+# Lifecycle: created=2026-04-27; last_reviewed=2026-05-07; last_reused=2026-05-17
 # Authority basis: docs/operations/task_2026-05-08_object_invariance_remaining_mainline/PLAN.md
 # Purpose: R3 M5 exchange reconciliation sweep antibodies.
 # Reuse: Run when exchange_reconcile, venue facts, findings, heartbeat/cutover reconciliation, or operator finding resolution changes.
@@ -98,6 +98,16 @@ class FakeAdapterWithoutFreshness:
 
     def get_positions(self):
         return self.positions
+
+
+class FakeM5AdapterWithPointOrders(FakeM5Adapter):
+    def __init__(self, *, orders_by_id=None, open_orders=None, trades=None, positions=None):
+        super().__init__(open_orders=open_orders, trades=trades, positions=positions)
+        self.orders_by_id = orders_by_id or {}
+
+    def get_order(self, order_id):
+        self.calls.append(("get_order", (order_id,), {}))
+        return self.orders_by_id.get(order_id)
 
 
 class FailingCommitConnection(sqlite3.Connection):
@@ -372,6 +382,36 @@ def append_trade_fact(
     )
 
 
+def seed_trade_decision_runtime_alias(c, *, trade_id=7, runtime_trade_id="pos-m5") -> None:
+    c.execute(
+        """
+        INSERT INTO trade_decisions (
+            trade_id, market_id, bin_label, direction, size_usd, price,
+            timestamp, p_raw, p_posterior, edge, ci_lower, ci_upper,
+            kelly_fraction, status, runtime_trade_id
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            trade_id,
+            "condition-m5",
+            "test-bin",
+            "buy_yes",
+            10.0,
+            0.50,
+            NOW.isoformat(),
+            0.6,
+            0.6,
+            0.1,
+            0.05,
+            0.15,
+            0.0,
+            "pending",
+            runtime_trade_id,
+        ),
+    )
+
+
 def findings(c):
     return c.execute(
         "SELECT * FROM exchange_reconcile_findings ORDER BY recorded_at, finding_id"
@@ -542,6 +582,7 @@ def test_maker_order_trade_links_to_local_command_and_uses_maker_fill_economics(
 
     seed_command(conn, size=5.17, price=0.37)
     seed_position_baseline(conn)
+    seed_trade_decision_runtime_alias(conn)
     adapter = FakeM5Adapter(
         positions=[position(token_id=YES_TOKEN, size="1.5873")],
         trades=[
@@ -595,9 +636,46 @@ def test_maker_order_trade_links_to_local_command_and_uses_maker_fill_economics(
         "source_module": "src.execution.exchange_reconcile",
     }
     projection = conn.execute(
-        "SELECT phase, order_status FROM position_current WHERE position_id = 'pos-m5'"
+        """
+        SELECT phase, order_status, shares, entry_price, cost_basis_usd
+          FROM position_current
+         WHERE position_id = 'pos-m5'
+        """
     ).fetchone()
-    assert dict(projection) == {"phase": "active", "order_status": "partial"}
+    assert projection["phase"] == "active"
+    assert projection["order_status"] == "partial"
+    assert Decimal(str(projection["shares"])) == Decimal("1.5873")
+    assert Decimal(str(projection["entry_price"])) == Decimal("0.37")
+    assert Decimal(str(projection["cost_basis_usd"])) == Decimal("0.587301")
+
+    execution = conn.execute(
+        """
+        SELECT filled_at, fill_price, shares, venue_status, terminal_exec_status
+          FROM execution_fact
+         WHERE intent_id = 'pos-m5:entry'
+        """
+    ).fetchone()
+    assert execution is not None
+    assert execution["filled_at"] == NOW.isoformat()
+    assert Decimal(str(execution["fill_price"])) == Decimal("0.37")
+    assert Decimal(str(execution["shares"])) == Decimal("1.5873")
+    assert execution["venue_status"] == "PARTIAL"
+    assert execution["terminal_exec_status"] == "partial"
+
+    lot = conn.execute(
+        """
+        SELECT position_id, state, shares, entry_price_avg, source_trade_fact_id
+          FROM position_lots
+         ORDER BY lot_id DESC
+         LIMIT 1
+        """
+    ).fetchone()
+    assert lot is not None
+    assert lot["position_id"] == 7
+    assert lot["state"] == "CONFIRMED_EXPOSURE"
+    assert Decimal(str(lot["shares"])) == Decimal("1.5873")
+    assert Decimal(str(lot["entry_price_avg"])) == Decimal("0.37")
+    assert lot["source_trade_fact_id"] == row["trade_fact_id"]
 
     conn.execute("UPDATE position_current SET order_status = 'filled' WHERE position_id = 'pos-m5'")
     run_reconcile_sweep(adapter, conn, context="periodic", observed_at=NOW)
@@ -617,6 +695,169 @@ def test_maker_order_trade_links_to_local_command_and_uses_maker_fill_economics(
         == 1
     )
     assert findings(conn) == []
+
+
+def test_entry_fill_projection_aggregates_multiple_trade_facts(conn):
+    from src.execution.exchange_reconcile import run_reconcile_sweep
+
+    seed_command(conn, size=10, price=0.50)
+    seed_position_baseline(conn)
+
+    run_reconcile_sweep(
+        FakeM5Adapter(
+            trades=[
+                trade(
+                    trade_id="trade-partial-a",
+                    order_id="ord-m5",
+                    size="3",
+                    price="0.20",
+                    status="CONFIRMED",
+                )
+            ]
+        ),
+        conn,
+        context="periodic",
+        observed_at=NOW,
+    )
+    run_reconcile_sweep(
+        FakeM5Adapter(
+            trades=[
+                trade(
+                    trade_id="trade-partial-b",
+                    order_id="ord-m5",
+                    size="4",
+                    price="0.40",
+                    status="CONFIRMED",
+                )
+            ]
+        ),
+        conn,
+        context="periodic",
+        observed_at=NOW + timedelta(seconds=1),
+    )
+
+    projection = conn.execute(
+        """
+        SELECT phase, order_status, shares, entry_price, cost_basis_usd
+          FROM position_current
+         WHERE position_id = 'pos-m5'
+        """
+    ).fetchone()
+    assert projection["phase"] == "active"
+    assert projection["order_status"] == "partial"
+    assert Decimal(str(projection["shares"])) == Decimal("7")
+    assert Decimal(str(projection["cost_basis_usd"])) == Decimal("2.20")
+    assert float(projection["entry_price"]) == pytest.approx(float(Decimal("2.20") / Decimal("7")))
+
+    execution = conn.execute(
+        """
+        SELECT fill_price, shares, terminal_exec_status
+          FROM execution_fact
+         WHERE intent_id = 'pos-m5:entry'
+        """
+    ).fetchone()
+    assert Decimal(str(execution["shares"])) == Decimal("7")
+    assert Decimal(str(execution["fill_price"])) == Decimal("0.3142857142857143")
+    assert execution["terminal_exec_status"] == "partial"
+
+
+def test_recorded_maker_fill_economic_drift_appends_correction_and_reprojects(conn):
+    from src.execution.exchange_reconcile import reconcile_recorded_maker_fill_economics
+    from src.state.venue_command_repo import append_trade_fact as append_venue_trade_fact
+
+    seed_command(conn, state="FILLED", size=181.16, price=0.01)
+    seed_position_baseline(conn)
+    seed_trade_decision_runtime_alias(conn)
+    raw = {
+        "id": "trade-maker-drift",
+        "status": "CONFIRMED",
+        "taker_order_id": "foreign-taker",
+        "size": "100",
+        "price": "0.99",
+        "transaction_hash": "0xmakerdrift",
+        "maker_orders": [
+            {
+                "order_id": "ord-m5",
+                "matched_amount": "100",
+                "price": "0.01",
+                "asset_id": YES_TOKEN,
+                "side": "BUY",
+            }
+        ],
+    }
+    bad_fact_id = append_venue_trade_fact(
+        conn,
+        trade_id="trade-maker-drift",
+        venue_order_id="ord-m5",
+        command_id="cmd-m5",
+        state="CONFIRMED",
+        filled_size="100",
+        fill_price="0.99",
+        source="WS_USER",
+        observed_at=NOW,
+        raw_payload_hash=hashlib.sha256(b"bad-maker-drift").hexdigest(),
+        raw_payload_json=raw,
+    )
+
+    summary = reconcile_recorded_maker_fill_economics(conn, observed_at=NOW + timedelta(seconds=5))
+
+    assert summary == {"scanned": 1, "corrected": 1, "projected": 1, "stayed": 0, "errors": 0}
+    rows = conn.execute(
+        """
+        SELECT trade_fact_id, local_sequence, filled_size, fill_price, raw_payload_json
+          FROM venue_trade_facts
+         WHERE trade_id = 'trade-maker-drift'
+         ORDER BY local_sequence
+        """
+    ).fetchall()
+    assert [(r["local_sequence"], r["filled_size"], r["fill_price"]) for r in rows] == [
+        (1, "100", "0.99"),
+        (2, "100", "0.01"),
+    ]
+    repair_payload = rows[-1]["raw_payload_json"]
+    assert "maker_leg_economics_selected_for_command_order" in repair_payload
+    assert str(bad_fact_id) in repair_payload
+
+    projection = conn.execute(
+        """
+        SELECT phase, order_status, shares, entry_price, cost_basis_usd
+          FROM position_current
+         WHERE position_id = 'pos-m5'
+        """
+    ).fetchone()
+    assert projection["phase"] == "active"
+    assert projection["order_status"] == "partial"
+    assert Decimal(str(projection["shares"])) == Decimal("100")
+    order_fact = conn.execute(
+        """
+        SELECT state, remaining_size, matched_size, source
+          FROM venue_order_facts
+         WHERE command_id = 'cmd-m5'
+         ORDER BY local_sequence DESC
+         LIMIT 1
+        """
+    ).fetchone()
+    assert dict(order_fact) == {
+        "state": "PARTIALLY_MATCHED",
+        "remaining_size": "81.16",
+        "matched_size": "100",
+        "source": "WS_USER",
+    }
+    assert Decimal(str(projection["entry_price"])) == Decimal("0.01")
+    assert Decimal(str(projection["cost_basis_usd"])) == Decimal("1.00")
+
+    lot = conn.execute(
+        """
+        SELECT state, shares, entry_price_avg, source_trade_fact_id
+          FROM position_lots
+         ORDER BY lot_id DESC
+         LIMIT 1
+        """
+    ).fetchone()
+    assert lot["state"] == "CONFIRMED_EXPOSURE"
+    assert Decimal(str(lot["shares"])) == Decimal("100")
+    assert Decimal(str(lot["entry_price_avg"])) == Decimal("0.01")
+    assert lot["source_trade_fact_id"] == rows[-1]["trade_fact_id"]
 
 
 def test_failed_or_retrying_trade_fact_does_not_advance_command_fill_state(conn):
@@ -766,6 +1007,320 @@ def test_confirmed_full_size_trade_is_required_for_fill_finality(conn):
     assert conn.execute("SELECT state FROM venue_trade_facts WHERE trade_id = 'trade-confirmed'").fetchone()["state"] == "CONFIRMED"
     assert event_types(conn)[-1] == "FILL_CONFIRMED"
     assert conn.execute("SELECT state FROM venue_commands WHERE command_id = 'cmd-m5'").fetchone()["state"] == "FILLED"
+
+
+def test_confirmed_exit_trade_economically_closes_active_position_projection(conn):
+    from src.execution.exchange_reconcile import run_reconcile_sweep
+
+    token = "exit-confirmed-token"
+    seed_position_baseline(conn, position_id="pos-exit-confirmed", order_id="ord-entry-exit-confirmed")
+    conn.execute(
+        """
+        UPDATE position_current
+           SET phase = 'active',
+               token_id = ?,
+               order_id = 'ord-entry-exit-confirmed',
+               order_status = 'filled',
+               shares = 35.6,
+               cost_basis_usd = 5.34,
+               entry_price = 0.15,
+               updated_at = ?
+         WHERE position_id = 'pos-exit-confirmed'
+        """,
+        (token, NOW.isoformat()),
+    )
+    seed_command(
+        conn,
+        command_id="cmd-exit-confirmed",
+        venue_order_id="ord-exit-confirmed",
+        position_id="pos-exit-confirmed",
+        token_id=token,
+        side="SELL",
+        size=35.6,
+        price=0.13,
+        state="ACKED",
+    )
+
+    result = run_reconcile_sweep(
+        FakeM5Adapter(
+            trades=[
+                trade(
+                    trade_id="trade-exit-confirmed",
+                    order_id="ord-exit-confirmed",
+                    size="35.6",
+                    price="0.14",
+                    status="CONFIRMED",
+                )
+            ],
+            positions=[position(token_id=token, size="0")],
+        ),
+        conn,
+        context="periodic",
+        observed_at=NOW,
+    )
+
+    assert result == []
+    assert conn.execute(
+        "SELECT state FROM venue_commands WHERE command_id = 'cmd-exit-confirmed'"
+    ).fetchone()["state"] == "FILLED"
+    projection = conn.execute(
+        """
+        SELECT phase, order_id, order_status
+          FROM position_current
+         WHERE position_id = 'pos-exit-confirmed'
+        """
+    ).fetchone()
+    assert dict(projection) == {
+        "phase": "economically_closed",
+        "order_id": "ord-entry-exit-confirmed",
+        "order_status": "sell_filled",
+    }
+    event = conn.execute(
+        """
+        SELECT event_type, phase_before, phase_after, order_id
+          FROM position_events
+         WHERE position_id = 'pos-exit-confirmed'
+           AND event_type = 'EXIT_ORDER_FILLED'
+        """
+    ).fetchone()
+    assert dict(event) == {
+        "event_type": "EXIT_ORDER_FILLED",
+        "phase_before": "pending_exit",
+        "phase_after": "economically_closed",
+        "order_id": "ord-exit-confirmed",
+    }
+    fact = conn.execute(
+        """
+        SELECT filled_at, fill_price, shares, venue_status, terminal_exec_status
+          FROM execution_fact
+         WHERE intent_id = 'pos-exit-confirmed:exit'
+        """
+    ).fetchone()
+    assert dict(fact) == {
+        "filled_at": NOW.isoformat(),
+        "fill_price": 0.14,
+        "shares": 35.6,
+        "venue_status": "FILLED",
+        "terminal_exec_status": "filled",
+    }
+
+
+def test_existing_confirmed_exit_trade_repairs_missing_economic_close_projection(conn):
+    from src.execution.exchange_reconcile import run_reconcile_sweep
+
+    token = "exit-existing-confirmed-token"
+    seed_position_baseline(conn, position_id="pos-exit-existing-confirmed", order_id="ord-entry-existing-exit")
+    conn.execute(
+        """
+        UPDATE position_current
+           SET phase = 'active',
+               token_id = ?,
+               order_id = 'ord-entry-existing-exit',
+               order_status = 'filled',
+               shares = 35.6,
+               cost_basis_usd = 5.34,
+               entry_price = 0.15,
+               updated_at = ?
+         WHERE position_id = 'pos-exit-existing-confirmed'
+        """,
+        (token, NOW.isoformat()),
+    )
+    seed_command(
+        conn,
+        command_id="cmd-existing-exit-confirmed",
+        venue_order_id="ord-existing-exit-confirmed",
+        position_id="pos-exit-existing-confirmed",
+        token_id=token,
+        side="SELL",
+        size=35.6,
+        price=0.13,
+        state="FILLED",
+    )
+    append_trade_fact(
+        conn,
+        command_id="cmd-existing-exit-confirmed",
+        venue_order_id="ord-existing-exit-confirmed",
+        token_id=token,
+        trade_id="trade-existing-exit-confirmed",
+        size="35.6",
+        state="CONFIRMED",
+    )
+
+    result = run_reconcile_sweep(
+        FakeM5Adapter(
+            trades=[
+                trade(
+                    trade_id="trade-existing-exit-confirmed",
+                    order_id="ord-existing-exit-confirmed",
+                    size="35.6",
+                    price="0.50",
+                    status="CONFIRMED",
+                )
+            ],
+            positions=[position(token_id=token, size="0")],
+        ),
+        conn,
+        context="periodic",
+        observed_at=NOW,
+    )
+
+    assert result == []
+    assert conn.execute(
+        """
+        SELECT phase
+          FROM position_current
+         WHERE position_id = 'pos-exit-existing-confirmed'
+        """
+    ).fetchone()["phase"] == "economically_closed"
+    assert conn.execute(
+        """
+        SELECT COUNT(*)
+          FROM position_events
+         WHERE position_id = 'pos-exit-existing-confirmed'
+           AND event_type = 'EXIT_ORDER_FILLED'
+           AND order_id = 'ord-existing-exit-confirmed'
+        """
+    ).fetchone()[0] == 1
+
+
+def test_recorded_confirmed_exit_trade_repair_hook_economically_closes_projection(conn):
+    from src.execution.exchange_reconcile import reconcile_recorded_maker_fill_economics
+
+    token = "exit-recorded-confirmed-token"
+    seed_position_baseline(conn, position_id="pos-exit-recorded-confirmed", order_id="ord-entry-recorded-exit")
+    conn.execute(
+        """
+        UPDATE position_current
+           SET phase = 'active',
+               token_id = ?,
+               order_id = 'ord-entry-recorded-exit',
+               order_status = 'filled',
+               shares = 35.6,
+               cost_basis_usd = 5.34,
+               entry_price = 0.15,
+               updated_at = ?
+         WHERE position_id = 'pos-exit-recorded-confirmed'
+        """,
+        (token, NOW.isoformat()),
+    )
+    seed_command(
+        conn,
+        command_id="cmd-recorded-exit-confirmed",
+        venue_order_id="ord-recorded-exit-confirmed",
+        position_id="pos-exit-recorded-confirmed",
+        token_id=token,
+        side="SELL",
+        size=35.6,
+        price=0.13,
+        state="FILLED",
+    )
+    append_trade_fact(
+        conn,
+        command_id="cmd-recorded-exit-confirmed",
+        venue_order_id="ord-recorded-exit-confirmed",
+        token_id=token,
+        trade_id="trade-recorded-exit-confirmed",
+        size="35.6",
+        state="CONFIRMED",
+    )
+
+    summary = reconcile_recorded_maker_fill_economics(conn, observed_at=NOW)
+
+    assert summary["exit_projected"] == 1
+    current = conn.execute(
+        """
+        SELECT phase, order_status
+          FROM position_current
+         WHERE position_id = 'pos-exit-recorded-confirmed'
+        """
+    ).fetchone()
+    assert dict(current) == {
+        "phase": "economically_closed",
+        "order_status": "sell_filled",
+    }
+    fact = conn.execute(
+        """
+        SELECT filled_at, fill_price, shares, venue_status, terminal_exec_status
+          FROM execution_fact
+         WHERE intent_id = 'pos-exit-recorded-confirmed:exit'
+        """
+    ).fetchone()
+    assert dict(fact) == {
+        "filled_at": NOW.isoformat(),
+        "fill_price": 0.5,
+        "shares": 35.6,
+        "venue_status": "FILLED",
+        "terminal_exec_status": "filled",
+    }
+
+
+@pytest.mark.parametrize("status", ["MATCHED", "MINED"])
+def test_nonconfirmed_exit_trade_does_not_economically_close_position(conn, status):
+    from src.execution.exchange_reconcile import run_reconcile_sweep
+
+    token = "exit-nonconfirmed-token"
+    seed_position_baseline(conn, position_id="pos-exit-nonconfirmed", order_id="ord-entry-exit-nonconfirmed")
+    conn.execute(
+        """
+        UPDATE position_current
+           SET phase = 'active',
+               token_id = ?,
+               order_id = 'ord-entry-exit-nonconfirmed',
+               order_status = 'filled',
+               shares = 10,
+               cost_basis_usd = 5,
+               entry_price = 0.5,
+               updated_at = ?
+         WHERE position_id = 'pos-exit-nonconfirmed'
+        """,
+        (token, NOW.isoformat()),
+    )
+    seed_command(
+        conn,
+        command_id=f"cmd-exit-{status.lower()}",
+        venue_order_id=f"ord-exit-{status.lower()}",
+        position_id="pos-exit-nonconfirmed",
+        token_id=token,
+        side="SELL",
+        size=10,
+        price=0.45,
+        state="ACKED",
+    )
+
+    run_reconcile_sweep(
+        FakeM5Adapter(
+            trades=[
+                trade(
+                    trade_id=f"trade-exit-{status.lower()}",
+                    order_id=f"ord-exit-{status.lower()}",
+                    size="10",
+                    price="0.46",
+                    status=status,
+                )
+            ],
+            positions=[position(token_id=token, size="10")],
+        ),
+        conn,
+        context="periodic",
+        observed_at=NOW,
+    )
+
+    assert event_types(conn, f"cmd-exit-{status.lower()}")[-1] == "PARTIAL_FILL_OBSERVED"
+    assert conn.execute(
+        """
+        SELECT phase
+          FROM position_current
+         WHERE position_id = 'pos-exit-nonconfirmed'
+        """
+    ).fetchone()["phase"] == "active"
+    assert conn.execute(
+        """
+        SELECT COUNT(*)
+          FROM position_events
+         WHERE position_id = 'pos-exit-nonconfirmed'
+           AND event_type = 'EXIT_ORDER_FILLED'
+        """
+    ).fetchone()[0] == 0
 
 
 def test_trade_lifecycle_update_appends_confirmed_after_matched_without_double_counting(conn):
@@ -1007,6 +1562,43 @@ def test_linked_confirmed_trade_generic_price_is_not_fill_authority(conn):
     assert conn.execute("SELECT state FROM venue_commands WHERE command_id = 'cmd-m5'").fetchone()["state"] == "ACKED"
 
 
+def test_linked_taker_confirmed_trade_top_level_price_records_fill_authority(conn):
+    from src.execution.exchange_reconcile import run_reconcile_sweep
+
+    seed_command(conn, size=10)
+
+    result = run_reconcile_sweep(
+        FakeM5Adapter(
+            trades=[
+                trade(
+                    trade_id="trade-confirmed-taker-price",
+                    order_id="ord-m5",
+                    size="10",
+                    price="0.51",
+                    status="CONFIRMED",
+                    include_fill_price=False,
+                    taker_order_id="ord-m5",
+                    trader_side="TAKER",
+                )
+            ]
+        ),
+        conn,
+        context="periodic",
+        observed_at=NOW,
+    )
+
+    assert result == []
+    latest = conn.execute(
+        """
+        SELECT state, filled_size, fill_price
+          FROM venue_trade_facts
+         WHERE trade_id = 'trade-confirmed-taker-price'
+        """
+    ).fetchone()
+    assert latest[:] == ("CONFIRMED", "10", "0.51")
+    assert "FILL_CONFIRMED" in event_types(conn)
+
+
 def test_linked_confirmed_trade_explicit_fill_price_records_fill_authority(conn):
     from src.execution.exchange_reconcile import run_reconcile_sweep
 
@@ -1154,6 +1746,46 @@ def test_stale_or_unsuccessful_venue_reads_are_not_absence_proof(conn):
 
     assert findings(conn) == []
     assert conn.execute("SELECT state FROM venue_commands WHERE command_id = 'cmd-m5'").fetchone()["state"] == "ACKED"
+
+
+def test_point_order_live_overrides_empty_global_open_order_enumeration(conn):
+    from src.execution.exchange_reconcile import run_reconcile_sweep
+
+    seed_command(conn)
+    append_resting_order_fact(conn)
+    adapter = FakeM5AdapterWithPointOrders(
+        open_orders=[],
+        trades=[],
+        orders_by_id={"ord-m5": order(order_id="ord-m5", status="LIVE")},
+    )
+
+    result = run_reconcile_sweep(adapter, conn, context="periodic", observed_at=NOW)
+
+    assert result == []
+    assert findings(conn) == []
+    assert ("get_order", ("ord-m5",), {}) in adapter.calls
+    assert conn.execute("SELECT state FROM venue_commands WHERE command_id = 'cmd-m5'").fetchone()["state"] == "ACKED"
+
+
+def test_point_order_terminal_keeps_local_orphan_finding_with_point_evidence(conn):
+    from src.execution.exchange_reconcile import run_reconcile_sweep
+
+    seed_command(conn)
+    append_resting_order_fact(conn)
+    adapter = FakeM5AdapterWithPointOrders(
+        open_orders=[],
+        trades=[],
+        orders_by_id={"ord-m5": order(order_id="ord-m5", status="CANCELED")},
+    )
+
+    result = run_reconcile_sweep(adapter, conn, context="periodic", observed_at=NOW)
+
+    assert [finding.kind for finding in result] == ["local_orphan_order"]
+    assert ("get_order", ("ord-m5",), {}) in adapter.calls
+    evidence = result[0].evidence_json
+    assert '"point_order_status":"CANCELED"' in evidence
+    assert '"point_order_surface":"get_order"' in evidence
+    assert '"reason":"local_open_order_absent_from_exchange_open_orders"' in evidence
 
 
 def test_explicit_fresh_false_is_not_absence_proof(conn):
@@ -1365,6 +1997,596 @@ def test_position_drift_compares_exchange_to_confirmed_not_optimistic(conn):
     assert '"reason":"exchange_position_differs_from_confirmed_trade_facts"' in evidence
 
 
+def test_position_drift_tolerates_venue_precision_and_resolves_existing(conn):
+    from src.execution.exchange_reconcile import record_finding, run_reconcile_sweep
+
+    token = "rounded-position-token"
+    seed_command(conn, command_id="cmd-rounded", venue_order_id="ord-rounded", token_id=token)
+    append_trade_fact(
+        conn,
+        command_id="cmd-rounded",
+        venue_order_id="ord-rounded",
+        token_id=token,
+        trade_id="trade-rounded",
+        size="1.304337",
+        state="CONFIRMED",
+    )
+    stale = record_finding(
+        conn,
+        kind="position_drift",
+        subject_id=token,
+        context="ws_gap",
+        evidence={"reason": "stale_precision_probe"},
+        recorded_at=NOW - timedelta(minutes=1),
+    )
+
+    result = run_reconcile_sweep(
+        FakeM5Adapter(positions=[position(token_id=token, size="1.3043")]),
+        conn,
+        context="periodic",
+        observed_at=NOW,
+    )
+
+    assert not any(finding.kind == "position_drift" for finding in result)
+    resolved = conn.execute(
+        "SELECT resolution, resolved_by FROM exchange_reconcile_findings WHERE finding_id = ?",
+        (stale.finding_id,),
+    ).fetchone()
+    assert dict(resolved) == {
+        "resolution": "position_drift_cleared",
+        "resolved_by": "src.execution.exchange_reconcile",
+    }
+
+
+def test_position_drift_ignores_position_api_visibility_floor_dust(conn):
+    from src.execution.exchange_reconcile import record_finding, run_reconcile_sweep
+
+    token = "dust-position-token"
+    seed_command(conn, command_id="cmd-dust", venue_order_id="ord-dust", token_id=token)
+    append_trade_fact(
+        conn,
+        command_id="cmd-dust",
+        venue_order_id="ord-dust",
+        token_id=token,
+        trade_id="trade-dust",
+        size="0.007891",
+        state="CONFIRMED",
+    )
+    stale = record_finding(
+        conn,
+        kind="position_drift",
+        subject_id=token,
+        context="ws_gap",
+        evidence={"reason": "stale_dust_probe"},
+        recorded_at=NOW - timedelta(minutes=1),
+    )
+
+    result = run_reconcile_sweep(
+        FakeM5Adapter(positions=[]),
+        conn,
+        context="ws_gap",
+        observed_at=NOW,
+    )
+
+    assert not any(finding.kind == "position_drift" for finding in result)
+    resolved = conn.execute(
+        "SELECT resolution, resolved_by FROM exchange_reconcile_findings WHERE finding_id = ?",
+        (stale.finding_id,),
+    ).fetchone()
+    assert dict(resolved) == {
+        "resolution": "position_drift_below_position_api_visibility_floor",
+        "resolved_by": "src.execution.exchange_reconcile",
+    }
+
+
+def test_position_drift_visibility_floor_does_not_hide_material_drift(conn):
+    from src.execution.exchange_reconcile import run_reconcile_sweep
+
+    token = "material-position-token"
+    seed_command(
+        conn,
+        command_id="cmd-material",
+        venue_order_id="ord-material",
+        token_id=token,
+    )
+    append_trade_fact(
+        conn,
+        command_id="cmd-material",
+        venue_order_id="ord-material",
+        token_id=token,
+        trade_id="trade-material",
+        size="0.0101",
+        state="CONFIRMED",
+    )
+
+    result = run_reconcile_sweep(
+        FakeM5Adapter(positions=[]),
+        conn,
+        context="ws_gap",
+        observed_at=NOW,
+    )
+
+    position_findings = [finding for finding in result if finding.kind == "position_drift"]
+    assert [finding.subject_id for finding in position_findings] == [token]
+    assert '"confirmed_journal_size":"0.0101"' in position_findings[0].evidence_json
+
+
+def test_pending_exit_matched_sell_offsets_confirmed_position_without_drift(conn):
+    from src.execution.exchange_reconcile import run_reconcile_sweep
+
+    token = "pending-exit-token"
+    seed_command(
+        conn,
+        command_id="cmd-entry-pending-exit",
+        venue_order_id="ord-entry-pending-exit",
+        token_id=token,
+        side="BUY",
+        size=23.7,
+        state="FILLED",
+    )
+    append_trade_fact(
+        conn,
+        command_id="cmd-entry-pending-exit",
+        venue_order_id="ord-entry-pending-exit",
+        token_id=token,
+        trade_id="trade-entry-pending-exit",
+        size="23.7",
+        state="CONFIRMED",
+    )
+    seed_position_baseline(conn, position_id="pos-pending-exit", order_id="ord-exit-pending")
+    conn.execute(
+        """
+        UPDATE position_current
+           SET phase = 'pending_exit',
+               token_id = ?,
+               order_id = 'ord-exit-pending',
+               order_status = 'sell_pending_confirmation',
+               shares = 23.7,
+               cost_basis_usd = 1.659,
+               entry_price = 0.07,
+               updated_at = ?
+         WHERE position_id = 'pos-pending-exit'
+        """,
+        (token, NOW.isoformat()),
+    )
+    seed_command(
+        conn,
+        command_id="cmd-exit-pending",
+        venue_order_id="ord-exit-pending",
+        position_id="pos-pending-exit",
+        token_id=token,
+        side="SELL",
+        size=23.7,
+        price=0.04,
+        state="PARTIAL",
+    )
+    append_trade_fact(
+        conn,
+        command_id="cmd-exit-pending",
+        venue_order_id="ord-exit-pending",
+        token_id=token,
+        trade_id="trade-exit-pending",
+        size="23.7",
+        state="MATCHED",
+    )
+
+    result = run_reconcile_sweep(
+        FakeM5Adapter(positions=[position(token_id=token, size="0")]),
+        conn,
+        context="ws_gap",
+        observed_at=NOW,
+    )
+
+    assert not any(finding.kind == "position_drift" for finding in result)
+
+
+def test_unresolved_position_drift_refresh_resolves_late_confirmed_entry_without_broad_scan(conn):
+    from src.execution.exchange_reconcile import (
+        record_finding,
+        refresh_unresolved_reconcile_findings,
+    )
+
+    token = "late-confirmed-entry-token"
+    unrelated_token = "unrelated-confirmed-token"
+    seed_command(
+        conn,
+        command_id="cmd-late-confirmed",
+        venue_order_id="ord-late-confirmed",
+        token_id=token,
+        size=5,
+        state="FILLED",
+    )
+    append_trade_fact(
+        conn,
+        command_id="cmd-late-confirmed",
+        venue_order_id="ord-late-confirmed",
+        token_id=token,
+        trade_id="trade-late-confirmed",
+        size="5",
+        state="MATCHED",
+    )
+    seed_command(
+        conn,
+        command_id="cmd-unrelated-confirmed",
+        venue_order_id="ord-unrelated-confirmed",
+        token_id=unrelated_token,
+        size=9,
+        state="FILLED",
+    )
+    append_trade_fact(
+        conn,
+        command_id="cmd-unrelated-confirmed",
+        venue_order_id="ord-unrelated-confirmed",
+        token_id=unrelated_token,
+        trade_id="trade-unrelated-confirmed",
+        size="9",
+        state="CONFIRMED",
+    )
+    stale = record_finding(
+        conn,
+        kind="position_drift",
+        subject_id=token,
+        context="ws_gap",
+        evidence={"reason": "late_confirmed_entry_probe"},
+        recorded_at=NOW - timedelta(minutes=1),
+    )
+    stale_trade = record_finding(
+        conn,
+        kind="unrecorded_trade",
+        subject_id="trade-late-confirmed",
+        context="ws_gap",
+        evidence={"reason": "exchange_trade_missing_fill_economics"},
+        recorded_at=NOW - timedelta(minutes=1),
+    )
+
+    result = refresh_unresolved_reconcile_findings(
+        FakeM5Adapter(
+            open_orders=[],
+            trades=[
+                trade(
+                    trade_id="trade-late-confirmed",
+                    order_id="ord-late-confirmed",
+                    size="5",
+                    status="CONFIRMED",
+                    include_fill_price=False,
+                    taker_order_id="ord-late-confirmed",
+                    trader_side="TAKER",
+                )
+            ],
+            positions=[position(token_id=token, size="5")],
+        ),
+        conn,
+        observed_at=NOW,
+    )
+
+    assert result["status"] == "resolved"
+    assert result["remaining"] == 0
+    resolved = conn.execute(
+        "SELECT resolution, resolved_by FROM exchange_reconcile_findings WHERE finding_id = ?",
+        (stale.finding_id,),
+    ).fetchone()
+    assert dict(resolved) == {
+        "resolution": "position_drift_cleared",
+        "resolved_by": "src.execution.exchange_reconcile",
+    }
+    resolved_trade = conn.execute(
+        "SELECT resolution, resolved_by FROM exchange_reconcile_findings WHERE finding_id = ?",
+        (stale_trade.finding_id,),
+    ).fetchone()
+    assert dict(resolved_trade) == {
+        "resolution": "unrecorded_trade_linked",
+        "resolved_by": "src.execution.exchange_reconcile",
+    }
+    assert conn.execute(
+        """
+        SELECT COUNT(*)
+          FROM exchange_reconcile_findings
+         WHERE subject_id = ?
+           AND kind = 'position_drift'
+        """,
+        (unrelated_token,),
+    ).fetchone()[0] == 0
+    latest = conn.execute(
+        """
+        SELECT state
+          FROM venue_trade_facts
+         WHERE trade_id = 'trade-late-confirmed'
+         ORDER BY local_sequence DESC
+         LIMIT 1
+        """
+    ).fetchone()
+    assert latest["state"] == "CONFIRMED"
+
+
+def test_unresolved_reconcile_refresh_resolves_unrecorded_trade_without_position_drift(conn):
+    from src.execution.exchange_reconcile import (
+        record_finding,
+        refresh_unresolved_reconcile_findings,
+    )
+
+    seed_command(
+        conn,
+        command_id="cmd-unrecorded-only",
+        venue_order_id="ord-unrecorded-only",
+        token_id="unrecorded-only-token",
+        size=7,
+        state="FILLED",
+    )
+    stale = record_finding(
+        conn,
+        kind="unrecorded_trade",
+        subject_id="trade-unrecorded-only",
+        context="ws_gap",
+        evidence={
+            "reason": "exchange_trade_missing_fill_economics",
+            "local_command": {"venue_order_id": "ord-unrecorded-only"},
+        },
+        recorded_at=NOW - timedelta(minutes=1),
+    )
+
+    result = refresh_unresolved_reconcile_findings(
+        FakeM5Adapter(
+            open_orders=[],
+            trades=[
+                trade(
+                    trade_id="trade-unrecorded-only",
+                    order_id="ord-unrecorded-only",
+                    size="7",
+                    price="0.42",
+                    status="CONFIRMED",
+                    include_fill_price=False,
+                    taker_order_id="ord-unrecorded-only",
+                    trader_side="TAKER",
+                )
+            ],
+            positions=[],
+        ),
+        conn,
+        observed_at=NOW,
+    )
+
+    assert result["status"] == "resolved"
+    resolved = conn.execute(
+        "SELECT resolution, resolved_by FROM exchange_reconcile_findings WHERE finding_id = ?",
+        (stale.finding_id,),
+    ).fetchone()
+    assert dict(resolved) == {
+        "resolution": "unrecorded_trade_linked",
+        "resolved_by": "src.execution.exchange_reconcile",
+    }
+    latest = conn.execute(
+        """
+        SELECT state, filled_size, fill_price
+          FROM venue_trade_facts
+         WHERE trade_id = 'trade-unrecorded-only'
+        """
+    ).fetchone()
+    assert latest[:] == ("CONFIRMED", "7", "0.42")
+
+
+def test_unresolved_position_drift_refresh_resolves_pending_exit_offset_after_latch_clear(conn):
+    from src.execution.exchange_reconcile import (
+        record_finding,
+        refresh_unresolved_reconcile_findings,
+    )
+
+    token = "refresh-pending-exit-token"
+    seed_command(
+        conn,
+        command_id="cmd-refresh-entry",
+        venue_order_id="ord-refresh-entry",
+        token_id=token,
+        side="BUY",
+        size=23.7,
+        price=0.07,
+        state="FILLED",
+    )
+    append_trade_fact(
+        conn,
+        command_id="cmd-refresh-entry",
+        venue_order_id="ord-refresh-entry",
+        token_id=token,
+        trade_id="trade-refresh-entry",
+        size="23.7",
+        state="CONFIRMED",
+    )
+    seed_position_baseline(conn, position_id="pos-refresh-exit", order_id="ord-refresh-exit")
+    conn.execute(
+        """
+        UPDATE position_current
+           SET phase = 'pending_exit',
+               token_id = ?,
+               order_id = 'ord-refresh-exit',
+               order_status = 'sell_pending_confirmation',
+               shares = 23.7,
+               cost_basis_usd = 1.659,
+               entry_price = 0.07,
+               updated_at = ?
+         WHERE position_id = 'pos-refresh-exit'
+        """,
+        (token, NOW.isoformat()),
+    )
+    seed_command(
+        conn,
+        command_id="cmd-refresh-exit",
+        venue_order_id="ord-refresh-exit",
+        position_id="pos-refresh-exit",
+        token_id=token,
+        side="SELL",
+        size=23.7,
+        price=0.04,
+        state="PARTIAL",
+    )
+    append_trade_fact(
+        conn,
+        command_id="cmd-refresh-exit",
+        venue_order_id="ord-refresh-exit",
+        token_id=token,
+        trade_id="trade-refresh-exit",
+        size="23.7",
+        state="MATCHED",
+    )
+    stale = record_finding(
+        conn,
+        kind="position_drift",
+        subject_id=token,
+        context="ws_gap",
+        evidence={"reason": "pending_exit_offset_probe"},
+        recorded_at=NOW - timedelta(minutes=1),
+    )
+
+    result = refresh_unresolved_reconcile_findings(
+        FakeM5Adapter(open_orders=[], trades=[], positions=[]),
+        conn,
+        observed_at=NOW,
+    )
+
+    assert result["status"] == "resolved"
+    resolved = conn.execute(
+        "SELECT resolution, resolved_by FROM exchange_reconcile_findings WHERE finding_id = ?",
+        (stale.finding_id,),
+    ).fetchone()
+    assert dict(resolved) == {
+        "resolution": "position_drift_pending_exit_offset",
+        "resolved_by": "src.execution.exchange_reconcile",
+    }
+
+
+def test_recorded_maker_fill_reprojection_does_not_regress_pending_exit_phase(conn):
+    from src.execution.exchange_reconcile import reconcile_recorded_maker_fill_economics, run_reconcile_sweep
+
+    seed_command(conn, state="FILLED", size=23.7, price=0.07)
+    seed_position_baseline(conn)
+    seed_trade_decision_runtime_alias(conn)
+    maker_trade = TradeFact(
+        raw={
+            "id": "trade-entry-reprojection",
+            "taker_order_id": "ord-other-taker",
+            "status": "CONFIRMED",
+            "size": "23.7",
+            "price": "0.93",
+            "transaction_hash": "0xentryreprojection",
+            "maker_orders": [
+                {
+                    "order_id": "ord-m5",
+                    "matched_amount": "23.7",
+                    "price": "0.07",
+                    "asset_id": YES_TOKEN,
+                    "side": "BUY",
+                }
+            ],
+        }
+    )
+
+    run_reconcile_sweep(
+        FakeM5Adapter(
+            positions=[position(token_id=YES_TOKEN, size="23.7")],
+            trades=[maker_trade],
+        ),
+        conn,
+        context="periodic",
+        observed_at=NOW,
+    )
+    assert (
+        conn.execute(
+            """
+            SELECT COUNT(*)
+              FROM position_events
+             WHERE position_id = 'pos-m5'
+               AND event_type = 'ENTRY_ORDER_FILLED'
+            """
+        ).fetchone()[0]
+        == 1
+    )
+
+    conn.execute(
+        """
+        UPDATE position_current
+           SET phase = 'pending_exit',
+               order_id = 'ord-exit-m5',
+               order_status = 'sell_pending_confirmation',
+               shares = 23.7,
+               cost_basis_usd = 1.659,
+               entry_price = 0.07,
+               updated_at = ?
+         WHERE position_id = 'pos-m5'
+        """,
+        ((NOW + timedelta(minutes=1)).isoformat(),),
+    )
+
+    summary = reconcile_recorded_maker_fill_economics(
+        conn,
+        observed_at=NOW + timedelta(minutes=2),
+    )
+    assert summary == {"scanned": 1, "corrected": 0, "projected": 1, "stayed": 0, "errors": 0}
+
+    current = conn.execute(
+        "SELECT phase, order_id, order_status FROM position_current WHERE position_id = 'pos-m5'"
+    ).fetchone()
+    assert dict(current) == {
+        "phase": "pending_exit",
+        "order_id": "ord-exit-m5",
+        "order_status": "sell_pending_confirmation",
+    }
+
+
+def test_late_entry_fill_does_not_resurrect_terminal_order_remainder(conn):
+    from src.execution.exchange_reconcile import run_reconcile_sweep
+    from src.state.venue_command_repo import append_order_fact
+
+    seed_command(conn, state="PARTIAL", size=7.21, price=0.28)
+    seed_position_baseline(conn)
+    append_order_fact(
+        conn,
+        venue_order_id="ord-m5",
+        command_id="cmd-m5",
+        state="EXPIRED",
+        remaining_size="0",
+        matched_size="2.11",
+        source="REST",
+        observed_at=NOW,
+        raw_payload_hash=hashlib.sha256(b"terminal-partial-remainder").hexdigest(),
+        raw_payload_json={
+            "reason": "partial_remainder_absent_from_exchange_open_orders",
+            "point_order_status": "CANCELED",
+            "matched_size": "2.11",
+        },
+    )
+
+    run_reconcile_sweep(
+        FakeM5Adapter(
+            positions=[position(token_id=YES_TOKEN, size="4.95")],
+            trades=[
+                trade(
+                    trade_id="trade-late-fill",
+                    order_id="ord-m5",
+                    size="4.95",
+                    price="0.28",
+                    status="CONFIRMED",
+                )
+            ],
+        ),
+        conn,
+        context="periodic",
+        observed_at=NOW + timedelta(minutes=1),
+    )
+
+    latest = conn.execute(
+        """
+        SELECT state, remaining_size, matched_size
+          FROM venue_order_facts
+         WHERE command_id = 'cmd-m5'
+         ORDER BY local_sequence DESC, fact_id DESC
+         LIMIT 1
+        """
+    ).fetchone()
+    assert dict(latest) == {
+        "state": "EXPIRED",
+        "remaining_size": "0",
+        "matched_size": "4.95",
+    }
+
+
 def test_position_journal_ignores_confirmed_trade_without_fill_economics(conn):
     from src.execution.exchange_reconcile import run_reconcile_sweep
 
@@ -1553,6 +2775,33 @@ def test_ws_gap_m5_sweep_keeps_latch_closed_when_findings_remain(conn):
         assert ws_gap_guard.status().m5_reconcile_required is True
         assert ws_gap_guard.summary(now=NOW)["entry"]["allow_submit"] is False
         assert findings(conn)[0]["kind"] == "local_orphan_order"
+    finally:
+        ws_gap_guard.clear_for_test(observed_at=NOW)
+
+
+def test_ws_gap_empty_global_open_orders_but_point_order_live_clears_latch(conn):
+    from src.control import ws_gap_guard
+    from src.execution.exchange_reconcile import run_ws_gap_reconcile_and_clear
+
+    seed_command(conn, size=5)
+    append_resting_order_fact(conn)
+    configure_subscribed_m5_latch()
+    adapter = FakeM5AdapterWithPointOrders(
+        open_orders=[],
+        trades=[],
+        positions=[],
+        orders_by_id={"ord-m5": order(order_id="ord-m5", status="LIVE")},
+    )
+
+    try:
+        result = run_ws_gap_reconcile_and_clear(adapter, conn, observed_at=NOW)
+
+        assert result["status"] == "cleared"
+        assert result["captured_surfaces"] == ["open_orders", "point_orders", "positions", "trades"]
+        assert ws_gap_guard.status().m5_reconcile_required is False
+        assert ws_gap_guard.summary(now=NOW)["entry"]["allow_submit"] is True
+        assert findings(conn) == []
+        assert ("get_order", ("ord-m5",), {}) in adapter.calls
     finally:
         ws_gap_guard.clear_for_test(observed_at=NOW)
 

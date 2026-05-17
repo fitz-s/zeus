@@ -551,7 +551,9 @@ def test_live_mode_actual_reader_consumes_daemon_readiness_before_signal(monkeyp
     cfg = replace(entry_forecast_config(), rollout_mode=EntryForecastRolloutMode.LIVE)
     monkeypatch.setattr(evaluator_module, "get_mode", lambda: "live")
     monkeypatch.setattr(evaluator_module, "entry_forecast_config", lambda: cfg)
-    monkeypatch.setattr(evaluator_module, "_store_snapshot_p_raw", lambda *args, **kwargs: True)
+
+    def forbidden_p_raw_writer(*args, **kwargs):
+        raise AssertionError("executable reader hot path must not write snapshot p_raw")
 
     def forbidden_fetch(*args, **kwargs):
         raise AssertionError("legacy fetch_ensemble should not be called")
@@ -560,6 +562,7 @@ def test_live_mode_actual_reader_consumes_daemon_readiness_before_signal(monkeyp
         raise AssertionError("evaluator hot path must not write entry_readiness")
 
     monkeypatch.setattr(evaluator_module, "fetch_ensemble", forbidden_fetch)
+    monkeypatch.setattr(evaluator_module, "_store_snapshot_p_raw", forbidden_p_raw_writer)
     monkeypatch.setattr(evaluator_module, "_write_entry_readiness_for_candidate", forbidden_writer)
 
     decisions = evaluator_module.evaluate_candidate(

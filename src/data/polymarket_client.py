@@ -1,8 +1,10 @@
 # Created: prior to 2026-04-26
-# Last reused/audited: 2026-05-15
+# Last reused/audited: 2026-05-17
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/Z2.yaml
 #                  + 2026-05-13 collateral_ledger singleton conn lifecycle remediation
 #                  + docs/operations/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md
+#                  + 2026-05-17 public CLOB HTTP reuse for live opening_hunt backpressure.
+#                  + 2026-05-17 riskguard/read-only bankroll lock remediation.
 """Polymarket CLOB API client. Spec §6.4.
 
 Limit orders ONLY. Auth via macOS Keychain.
@@ -32,6 +34,8 @@ logger = logging.getLogger(__name__)
 
 CLOB_BASE = "https://clob.polymarket.com"
 DATA_API_BASE = "https://data-api.polymarket.com"
+PUBLIC_CLOB_HTTP_TIMEOUT_SECONDS = 15.0
+PUBLIC_CLOB_HTTP_LIMITS = httpx.Limits(max_keepalive_connections=8, max_connections=16, keepalive_expiry=30.0)
 
 
 # ---------------------------------------------------------------------------
@@ -231,6 +235,40 @@ class PolymarketClient:
         self._clob_client = None
         self._v2_adapter = None
         self._pending_submission_envelope = None
+        self._public_http_client = None
+
+    def _public_http(self) -> httpx.Client:
+        client = getattr(self, "_public_http_client", None)
+        if client is None:
+            client = httpx.Client(
+                timeout=PUBLIC_CLOB_HTTP_TIMEOUT_SECONDS,
+                limits=PUBLIC_CLOB_HTTP_LIMITS,
+            )
+            self._public_http_client = client
+        return client
+
+    def close(self) -> None:
+        """Close reusable public CLOB transports owned by this wrapper."""
+
+        client = getattr(self, "_public_http_client", None)
+        if client is not None:
+            close = getattr(client, "close", None)
+            if callable(close):
+                close()
+        self._public_http_client = None
+
+    def __enter__(self) -> "PolymarketClient":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        self.close()
+        return False
+
+    def _public_get(self, path: str, *, params: dict[str, Any] | None = None):
+        url = f"{CLOB_BASE}{path}"
+        if not hasattr(self, "_public_http_client"):
+            return httpx.get(url, params=params, timeout=PUBLIC_CLOB_HTTP_TIMEOUT_SECONDS)
+        return self._public_http().get(url, params=params)
 
     def _ensure_client(self):
         """Deprecated compatibility alias for the V2 adapter boundary."""
@@ -335,7 +373,7 @@ class PolymarketClient:
     def get_orderbook_snapshot(self, token_id: str) -> dict:
         """Fetch raw CLOB orderbook facts for executable snapshot capture."""
 
-        resp = httpx.get(f"{CLOB_BASE}/book", params={"token_id": token_id}, timeout=15.0)
+        resp = self._public_get("/book", params={"token_id": token_id})
         resp.raise_for_status()
         data = resp.json()
         if not isinstance(data, dict):
@@ -345,31 +383,12 @@ class PolymarketClient:
     def get_clob_market_info(self, condition_id: str) -> dict:
         """Fetch raw CLOB market facts for executable snapshot capture."""
 
-        adapter = getattr(self, "_v2_adapter", None)
-        if adapter is not None:
-            getter = getattr(adapter, "get_clob_market_info", None)
-            if callable(getter):
-                info = getter(condition_id)
-                raw = getattr(info, "raw", info)
-                if isinstance(raw, dict):
-                    return dict(raw)
-
-        legacy_client = getattr(self, "_clob_client", None)
-        if legacy_client is not None:
-            getter = getattr(legacy_client, "get_market", None)
-            if callable(getter):
-                raw = getter(condition_id)
-                if isinstance(raw, dict):
-                    return dict(raw)
-                if raw is not None and hasattr(raw, "__dict__"):
-                    return dict(raw.__dict__)
-
-        resp = httpx.get(f"{CLOB_BASE}/markets/{condition_id}", timeout=15.0)
+        resp = self._public_get(f"/markets/{condition_id}")
         resp.raise_for_status()
         data = resp.json()
-        if not isinstance(data, dict):
-            raise RuntimeError(f"CLOB market response for {condition_id} is not an object")
-        return data
+        if isinstance(data, dict):
+            return data
+        raise RuntimeError(f"CLOB market response for {condition_id} is not an object")
 
     def get_best_bid_ask(self, token_id: str) -> tuple[float, float, float, float]:
         """Get best bid/ask with sizes for VWMP calculation.
@@ -398,7 +417,7 @@ class PolymarketClient:
     def get_fee_rate_details(self, token_id: str) -> dict[str, Any]:
         """Fetch token-specific fee metadata with explicit fraction/bps units."""
 
-        resp = httpx.get(f"{CLOB_BASE}/fee-rate", params={"token_id": token_id}, timeout=15.0)
+        resp = self._public_get("/fee-rate", params={"token_id": token_id})
         resp.raise_for_status()
         data = resp.json()
         schedule = data.get("feeSchedule") if isinstance(data, dict) else None
@@ -663,39 +682,35 @@ class PolymarketClient:
             })
         return positions
 
-    def get_balance(self) -> float:
-        """Get pUSD balance through the Z4 CollateralLedger.
+    def get_wallet_balance(self) -> float:
+        """Return pUSD wallet balance without writing local collateral state.
 
-        Connection discipline (2026-05-10 leak fix): get_trade_connection_with_world()
-        ATTACHes zeus-world.db; conn must be closed after use. Prior to this fix
-        conn was never closed, producing +2 zeus-world.db fds per bankroll_provider
-        tick (one per riskguard tick = 60s accumulation rate).
+        RiskGuard and entry sizing need a single scalar from venue wallet truth.
+        They must not open a trade DB write transaction just to refresh a
+        collateral snapshot; the persistent CollateralLedger owner maintains
+        snapshots for executor preflight.
+        """
+        adapter = self._ensure_v2_adapter()
+        direct = getattr(adapter, "get_pusd_balance_micro", None)
+        if callable(direct):
+            return float(direct()) / 1_000_000
+        payload = dict(adapter.get_collateral_payload())
+        return float(payload.get("pusd_balance_micro", 0) or 0) / 1_000_000
+
+    def get_balance(self) -> float:
+        """Compatibility wrapper for pUSD wallet balance.
+
+        This is intentionally read-only. Collateral snapshot persistence is
+        owned by daemon startup / heartbeat through the process-wide
+        CollateralLedger, not by scalar bankroll consumers.
         """
         warnings.warn(
             "PolymarketClient.get_balance() is a compatibility wrapper; "
-            "live balance queries route through CollateralLedger.",
+            "live collateral accounting routes through CollateralLedger.",
             DeprecationWarning,
             stacklevel=2,
         )
-        # 2026-05-13 remediation: this compat path MUST NOT publish to the
-        # global ledger slot. Prior to this fix, `configure_global_ledger(ledger)`
-        # ran here with a `ledger` holding a transient `conn` that the
-        # `finally` block closes immediately, leaving the singleton
-        # unusable (`sqlite3.ProgrammingError: Cannot operate on a closed
-        # database`). Global-singleton lifecycle is owned by daemon startup
-        # in `src/main.py::_startup_wallet_check`; the compat wrapper now
-        # only computes the snapshot for legacy callers.
-        from src.state.collateral_ledger import CollateralLedger
-        from src.state.db import get_trade_connection_with_world
-
-        conn = get_trade_connection_with_world()
-        try:
-            ledger = CollateralLedger(conn)
-            snapshot = ledger.refresh(self._ensure_v2_adapter())
-            conn.commit()
-            return snapshot.pusd_balance_micro / 1_000_000
-        finally:
-            conn.close()
+        return self.get_wallet_balance()
 
     def redeem(self, condition_id: str) -> Optional[dict]:
         """Redeem winning shares for USDC after settlement.
@@ -778,11 +793,27 @@ def _submission_envelope_to_dict(envelope: Any) -> dict:
     return {"repr": repr(envelope)}
 
 
+def _submission_raw_response(envelope: Any) -> dict:
+    raw_json = getattr(envelope, "raw_response_json", None)
+    if not raw_json:
+        return {}
+    try:
+        parsed = json.loads(str(raw_json))
+    except (TypeError, json.JSONDecodeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
 def _legacy_order_result_from_submit(submit: Any) -> dict:
     envelope = submit.envelope
+    raw_response = _submission_raw_response(envelope)
+    payload = dict(raw_response)
+    raw_success = raw_response.get("success")
+    success = submit.status == "accepted" and raw_success is not False
     payload = {
-        "success": submit.status == "accepted",
-        "status": submit.status,
+        **payload,
+        "success": success,
+        "status": raw_response.get("status") or submit.status,
         "errorCode": submit.error_code,
         "errorMessage": submit.error_message,
         "_venue_submission_envelope": envelope.to_dict(),
@@ -795,4 +826,8 @@ def _legacy_order_result_from_submit(submit: Any) -> dict:
                 "id": envelope.order_id,
             }
         )
+    if getattr(envelope, "transaction_hashes", ()):
+        payload.setdefault("transactionsHashes", list(envelope.transaction_hashes))
+    if getattr(envelope, "trade_ids", ()):
+        payload.setdefault("tradeIds", list(envelope.trade_ids))
     return payload

@@ -192,7 +192,7 @@ docs/operations/task_*/**           — closed task packets (historical evidence
 logs/**                             — log streams
 raw/**                              — raw ingest / fixture data
 state/**                            — runtime DB / state files (dynamic)
-evidence/**                         — collected evidence
+docs/historical_evidence/**                         — collected evidence
 *.lock                              — lock files
 .DS_Store                           — Finder metadata
 *.log                               — log artifacts

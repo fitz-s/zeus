@@ -12,7 +12,7 @@ Per ATTACK 7 (critic-opus §0.5), MUST verify:
 2. Auto-expiry via git log -1 --format=%ct (NOT mtime)
 3. Replay protection: (override_id, evidence_file) counts once per 30d
 4. OPERATOR_SIGNATURE_REQUIRED: TRUTH_REWRITE/ON_CHAIN class requires
-   evidence/operator_signed/<override>_<date>.signed sentinel
+   docs/historical_evidence/operator_signed/<override>_<date>.signed sentinel
 5. auto_expires_after: never only for REVIEW_SAFE_TAG + ISOLATED_WORKTREE
 
 Coverage: each override_id in overrides.yaml exercised.
@@ -164,7 +164,7 @@ class TestEvidenceFileValidation:
         override = {
             "id": "BASELINE_RATCHET",
             "requires": {
-                "evidence_file": "evidence/baseline_ratchets/<date>_<phase>.md",
+                "evidence_file": "docs/historical_evidence/baseline_ratchets/<date>_<phase>.md",
                 "auto_expires_after": "24h",
             },
         }
@@ -457,7 +457,7 @@ class TestOperatorSignatureRequired:
         requires = override.get("requires", {})
         assert "operator_signed_sentinel" in requires, (
             "HOOK_SCHEMA_CHANGE override must have operator_signed_sentinel field "
-            "(evidence/operator_signed/... path)"
+            "(docs/historical_evidence/operator_signed/... path)"
         )
         assert "operator_signature" in requires and requires["operator_signature"] is True, (
             "HOOK_SCHEMA_CHANGE override must have operator_signature: true"

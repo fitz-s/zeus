@@ -1,6 +1,6 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-05-06
-# Lifecycle: created=2026-04-27; last_reviewed=2026-05-06; last_reused=2026-05-06
+# Last reused/audited: 2026-05-17
+# Lifecycle: created=2026-04-27; last_reviewed=2026-05-06; last_reused=2026-05-17
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/M4.yaml
 # Purpose: Lock R3 M4 cancel/replace exit mutex, typed cancel outcomes, replacement gates, and CTF preflight.
 # Reuse: Run when exit_safety, executor exit submit, exit_lifecycle cancel retry, venue command transitions, or collateral sell preflight changes.
@@ -144,6 +144,7 @@ def _ensure_snapshot(
     snapshot_id: str | None = None,
     raw_orderbook_hash: str = "c" * 64,
     captured_at: datetime = _NOW,
+    min_tick_size: Decimal | str = Decimal("0.01"),
 ) -> str:
     from src.contracts.executable_market_snapshot_v2 import ExecutableMarketSnapshotV2
     from src.state.snapshot_repo import get_snapshot, insert_snapshot
@@ -175,7 +176,7 @@ def _ensure_snapshot(
             market_end_at=None,
             market_close_at=None,
             sports_start_at=None,
-            min_tick_size=Decimal("0.01"),
+            min_tick_size=Decimal(str(min_tick_size)),
             min_order_size=Decimal("0.01"),
             fee_details={
                 "source": "test",
@@ -341,6 +342,27 @@ def test_cancel_canceled_array_success_creates_CANCEL_CONFIRMED(conn):
     assert "CANCEL_ACKED" in events
 
 
+def test_cancel_order_id_string_response_creates_CANCEL_ACKED(conn):
+    from src.execution.exit_safety import parse_cancel_response, request_cancel_for_command
+    from src.state.venue_command_repo import get_command, list_events
+
+    parsed = parse_cancel_response("ord-1")
+    assert parsed.status == "CANCELED"
+    assert parsed.raw_response == {"orderID": "ord-1", "status": "CANCELED"}
+
+    _insert_exit_command(conn, venue_order_id="ord-1")
+    _ack_exit(conn)
+
+    outcome = request_cancel_for_command(conn, "cmd-exit-1", lambda order_id: order_id)
+
+    assert outcome.status == "CANCELED"
+    assert get_command(conn, "cmd-exit-1")["state"] == "CANCELLED"
+    assert [event["event_type"] for event in list_events(conn, "cmd-exit-1")][-2:] == [
+        "CANCEL_REQUESTED",
+        "CANCEL_ACKED",
+    ]
+
+
 def test_cancel_requested_persists_execution_capability_before_cancel_callable(conn):
     from src.execution.exit_safety import request_cancel_for_command
 
@@ -384,6 +406,59 @@ def test_cancel_requested_persists_execution_capability_before_cancel_callable(c
 
     assert outcome.status == "CANCELED"
     assert len(seen) == 1
+
+
+def test_cancel_caller_connection_commits_requested_before_cancel_callable(tmp_path, monkeypatch):
+    from src.execution.exit_safety import request_cancel_for_command
+    from src.state.db import get_connection, init_schema
+
+    monkeypatch.setenv("ZEUS_DB_BUSY_TIMEOUT_MS", "100")
+    db_path = tmp_path / "cancel-caller-conn-durable.db"
+    setup_conn = get_connection(db_path)
+    init_schema(setup_conn)
+    _insert_exit_command(setup_conn, venue_order_id="ord-1")
+    _ack_exit(setup_conn)
+    setup_conn.commit()
+    setup_conn.close()
+
+    submit_conn = get_connection(db_path)
+    init_schema(submit_conn)
+    observed = {}
+
+    def cancel(order_id: str):
+        read_conn = get_connection(db_path)
+        init_schema(read_conn)
+        try:
+            row = read_conn.execute(
+                """
+                SELECT vc.state, vce.payload_json
+                FROM venue_commands vc
+                JOIN venue_command_events vce ON vce.command_id = vc.command_id
+                WHERE vc.command_id = ?
+                  AND vce.event_type = 'CANCEL_REQUESTED'
+                ORDER BY vce.sequence_no DESC
+                LIMIT 1
+                """,
+                ("cmd-exit-1",),
+            ).fetchone()
+        finally:
+            read_conn.close()
+        observed["row"] = row
+        assert order_id == "ord-1"
+        return {"canceled": [order_id], "not_canceled": []}
+
+    try:
+        outcome = request_cancel_for_command(submit_conn, "cmd-exit-1", cancel)
+        assert not submit_conn.in_transaction
+    finally:
+        submit_conn.close()
+
+    assert outcome.status == "CANCELED"
+    assert observed["row"] is not None
+    assert observed["row"]["state"] == "CANCEL_PENDING"
+    payload = json.loads(observed["row"]["payload_json"])
+    assert payload["venue_order_id"] == "ord-1"
+    assert payload["execution_capability"]["action"] == "CANCEL"
 
 
 def test_cancel_guard_blocks_before_cancel_callable_and_command_transition(conn, monkeypatch):
@@ -956,6 +1031,68 @@ def test_two_exit_requests_for_same_position_collapse_into_one_durable_chain(con
         configure_global_ledger(None)
 
 
+def test_execute_exit_order_uses_snapshot_tick_for_sell_price_planning(conn, monkeypatch):
+    from src.execution.executor import create_exit_order_intent, execute_exit_order
+    from src.state.collateral_ledger import CollateralLedger, configure_global_ledger
+
+    ledger = CollateralLedger(conn)
+    ledger.set_snapshot(_snapshot(pusd=1_000_000_000, ctf={YES_TOKEN: 50}))
+    configure_global_ledger(ledger)
+    _allow_risk_allocator_for_exit_tests()
+    monkeypatch.setattr("src.control.cutover_guard.assert_submit_allowed", lambda *args, **kwargs: None)
+    monkeypatch.setattr("src.control.heartbeat_supervisor.assert_heartbeat_allows_order_type", lambda *args, **kwargs: None)
+    monkeypatch.setattr("src.control.ws_gap_guard.assert_ws_allows_submit", lambda *args, **kwargs: None)
+
+    calls: list[dict] = []
+
+    class FakeClient:
+        def bind_submission_envelope(self, envelope):
+            self.bound_envelope = envelope
+
+        def place_limit_order(self, **kwargs):
+            calls.append(kwargs)
+            return _fake_submit_result(self.bound_envelope, order_id="ord-tick")
+
+    monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", FakeClient)
+    snapshot_id = _ensure_snapshot(
+        conn,
+        snapshot_id="snap-exit-dynamic-tick",
+        min_tick_size=Decimal("0.001"),
+    )
+    try:
+        result = execute_exit_order(
+            create_exit_order_intent(
+                trade_id="pos-dynamic-tick",
+                token_id=YES_TOKEN,
+                shares=5.0,
+                current_price=0.033323782234957027,
+                best_bid=None,
+                executable_snapshot_id=snapshot_id,
+                executable_snapshot_min_tick_size=Decimal("0.001"),
+                executable_snapshot_min_order_size=Decimal("0.01"),
+                executable_snapshot_neg_risk=False,
+            ),
+            conn=conn,
+            decision_id="exit-dynamic-tick",
+        )
+        command_row = conn.execute(
+            "SELECT price, state FROM venue_commands WHERE position_id = ?",
+            ("pos-dynamic-tick",),
+        ).fetchone()
+
+        assert result.status == "pending"
+        assert result.submitted_price == pytest.approx(0.032)
+        assert calls[0]["price"] == pytest.approx(0.032)
+        assert command_row["price"] == pytest.approx(0.032)
+        assert Decimal(str(command_row["price"])) % Decimal("0.001") == 0
+        assert command_row["state"] == "ACKED"
+    finally:
+        from src.risk_allocator import clear_global_allocator
+
+        clear_global_allocator()
+        configure_global_ledger(None)
+
+
 def test_execute_exit_order_rejects_submit_connection_snapshot_hash_drift(monkeypatch):
     from src.execution.executor import create_exit_order_intent, execute_exit_order
     from src.state.db import init_schema
@@ -1329,8 +1466,18 @@ def test_live_exit_captures_snapshot_for_held_position_before_sell(conn, monkeyp
     monkeypatch.setattr("src.data.market_scanner.get_sibling_outcomes", lambda market_id: [sibling])
     monkeypatch.setattr("src.data.market_scanner.get_last_scan_authority", lambda: "VERIFIED")
 
-    def fake_capture_snapshot(conn_arg, *, market, decision, clob, captured_at, scan_authority):
+    def fake_capture_snapshot(
+        conn_arg,
+        *,
+        market,
+        decision,
+        clob,
+        captured_at,
+        scan_authority,
+        execution_side,
+    ):
         assert scan_authority == "VERIFIED"
+        assert execution_side == "SELL"
         assert market["outcomes"] == [sibling]
         assert decision.tokens["market_id"] == "condition-test"
         assert decision.edge.direction == "buy_yes"
@@ -1457,6 +1604,166 @@ def test_live_exit_quick_confirmed_without_explicit_fill_price_does_not_close(mo
     assert position.size_usd == pytest.approx(10.0)
     assert position.cost_basis_usd == pytest.approx(10.0)
     assert portfolio.positions == [position]
+
+
+def test_live_exit_below_min_order_rejection_enters_dust_hold_not_retry(conn, monkeypatch):
+    from src.execution import exit_lifecycle
+    from src.state.portfolio import ExitContext, PortfolioState, Position
+
+    position = Position(
+        trade_id="pos-dust-below-min-order",
+        market_id="condition-test",
+        condition_id="condition-test",
+        city="Karachi",
+        cluster="asia",
+        target_date="2026-05-17",
+        bin_label="37C+",
+        direction="buy_yes",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        entry_price=0.37,
+        size_usd=0.5873,
+        shares=1.5873,
+        cost_basis_usd=0.5873,
+        state="day0_window",
+        strategy_key="opening_inertia",
+    )
+    portfolio = PortfolioState(positions=[position])
+    exit_context = ExitContext(
+        exit_reason="SETTLEMENT_IMMINENT",
+        current_market_price=0.99,
+        best_bid=0.99,
+        hours_to_settlement=1.0,
+        position_state="day0_window",
+        day0_active=True,
+    )
+    error = "executable_snapshot_gate: size 1.5873 is below snapshot min_order_size 5"
+
+    monkeypatch.setattr(exit_lifecycle, "check_sell_collateral", lambda *args, **kwargs: (True, ""))
+    monkeypatch.setattr(exit_lifecycle, "_latest_or_capture_exit_snapshot_context", lambda *args, **kwargs: {})
+
+    def fake_execute_exit_order(intent, decision_id=""):
+        return exit_lifecycle.OrderResult(
+            trade_id=intent.trade_id,
+            status="rejected",
+            reason=error,
+            order_role="exit",
+        )
+
+    monkeypatch.setattr(exit_lifecycle, "execute_exit_order", fake_execute_exit_order)
+
+    outcome = exit_lifecycle.execute_exit(
+        portfolio,
+        position,
+        exit_context,
+        clob=object(),
+        conn=conn,
+    )
+
+    assert outcome == f"sell_blocked_dust: {error}"
+    assert position.state == "pending_exit"
+    assert position.exit_state == "backoff_exhausted"
+    assert position.next_exit_retry_at in ("", None)
+    assert position.last_exit_error == error
+    assert exit_lifecycle.check_pending_retries(position, conn=conn) is False
+    current = conn.execute(
+        "SELECT phase FROM position_current WHERE position_id = ?",
+        (position.trade_id,),
+    ).fetchone()
+    assert current["phase"] == "pending_exit"
+    event = conn.execute(
+        """
+        SELECT event_type, phase_after, payload_json
+          FROM position_events
+         WHERE position_id = ?
+         ORDER BY sequence_no DESC
+         LIMIT 1
+        """,
+        (position.trade_id,),
+    ).fetchone()
+    assert event["event_type"] == "EXIT_ORDER_REJECTED"
+    assert event["phase_after"] == "pending_exit"
+    assert json.loads(event["payload_json"])["status"] == "backoff_exhausted"
+    from src.state.db import query_position_current_status_view
+
+    status_view = query_position_current_status_view(conn)
+    assert status_view["exit_state_counts"]["backoff_exhausted"] == 1
+    facts = _execution_facts(conn, position.trade_id)
+    assert facts[-1]["venue_status"] == "backoff_exhausted"
+    assert facts[-1]["terminal_exec_status"] == "backoff_exhausted"
+
+
+def test_live_exit_snapshot_min_order_dust_hold_preempts_stale_collateral(conn, monkeypatch):
+    from src.execution import exit_lifecycle
+    from src.state.portfolio import ExitContext, PortfolioState, Position
+
+    position = Position(
+        trade_id="pos-dust-before-collateral",
+        market_id="condition-test",
+        condition_id="condition-test",
+        city="Karachi",
+        cluster="asia",
+        target_date="2026-05-17",
+        bin_label="37C+",
+        direction="buy_yes",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        entry_price=0.37,
+        size_usd=1.83,
+        shares=4.95,
+        cost_basis_usd=1.83,
+        state="day0_window",
+        strategy_key="opening_inertia",
+    )
+    portfolio = PortfolioState(positions=[position])
+    exit_context = ExitContext(
+        exit_reason="MODEL_DIVERGENCE_PANIC",
+        current_market_price=0.99,
+        best_bid=0.99,
+        hours_to_settlement=1.0,
+        position_state="day0_window",
+        day0_active=True,
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_latest_or_capture_exit_snapshot_context",
+        lambda *args, **kwargs: {"executable_snapshot_min_order_size": "5"},
+    )
+
+    def stale_collateral(*args, **kwargs):
+        raise AssertionError("collateral freshness must not override deterministic dust hold")
+
+    monkeypatch.setattr(exit_lifecycle, "check_sell_collateral", stale_collateral)
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "execute_exit_order",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("sell should not be attempted")),
+    )
+
+    outcome = exit_lifecycle.execute_exit(
+        portfolio,
+        position,
+        exit_context,
+        clob=object(),
+        conn=conn,
+    )
+
+    assert outcome == "sell_blocked_dust: executable_snapshot_gate: size 4.95 is below snapshot min_order_size 5"
+    assert position.state == "pending_exit"
+    assert position.exit_state == "backoff_exhausted"
+    assert position.next_exit_retry_at in ("", None)
+    assert position.last_exit_error == "executable_snapshot_gate: size 4.95 is below snapshot min_order_size 5"
+    current = conn.execute(
+        "SELECT phase FROM position_current WHERE position_id = ?",
+        (position.trade_id,),
+    ).fetchone()
+    assert current["phase"] == "pending_exit"
+    from src.state.db import query_portfolio_loader_view
+
+    loader_view = query_portfolio_loader_view(conn)
+    loaded = next(row for row in loader_view["positions"] if row["trade_id"] == position.trade_id)
+    assert loaded["state"] == "pending_exit"
+    assert loaded["exit_state"] == "backoff_exhausted"
 
 
 def test_exit_snapshot_capture_fails_closed_on_unverified_market_scan(conn, monkeypatch):

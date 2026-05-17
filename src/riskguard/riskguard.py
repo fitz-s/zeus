@@ -6,12 +6,14 @@ and emits durable risk actions into zeus.db when the canonical table exists.
 Graduated response: GREEN → YELLOW → ORANGE → RED.
 
 # Created: (pre-audit)
-# Last reused or audited: 2026-05-10
+# Last reused or audited: 2026-05-17
 # Authority basis: connection-leak audit 2026-05-10 — 51 open zeus-world.db-wal
 #   handles observed on PID 18538. Root cause: tick() and tick_with_portfolio()
 #   opened zeus_conn / risk_conn without try/finally, so any exception in the
 #   tick body left both connections dangling. Fixed by wrapping tick bodies in
 #   try/finally to guarantee conn.close() on every exit path.
+#   2026-05-17 live lock remediation: trade/world metric lock loss degrades to
+#   a fresh DATA_DEGRADED risk_state row, not stale RED force-exit.
 """
 
 import json
@@ -782,6 +784,114 @@ def init_risk_db(conn: sqlite3.Connection) -> None:
             pass  # concurrent process already added it
 
 
+def _is_sqlite_database_locked(exc: BaseException) -> bool:
+    return isinstance(exc, sqlite3.OperationalError) and "database is locked" in str(exc).lower()
+
+
+def _close_conn(conn: sqlite3.Connection | None) -> None:
+    if conn is None:
+        return
+    try:
+        conn.close()
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _rollback_and_close(conn: sqlite3.Connection | None) -> None:
+    if conn is None:
+        return
+    try:
+        conn.rollback()
+    except Exception:  # noqa: BLE001
+        pass
+    _close_conn(conn)
+
+
+def _full_risk_row_is_fresh(row: sqlite3.Row, *, now: datetime) -> bool:
+    try:
+        details = json.loads(row["details_json"]) if row["details_json"] else {}
+    except (json.JSONDecodeError, TypeError):
+        details = {}
+    if isinstance(details, dict) and details.get("riskguard_degraded_reason"):
+        return False
+    checked_at = datetime.fromisoformat(str(row["checked_at"]).replace("Z", "+00:00"))
+    return (now - checked_at).total_seconds() <= 300
+
+
+def _latest_fresh_full_risk_row(conn: sqlite3.Connection, *, now: datetime) -> sqlite3.Row | None:
+    rows = conn.execute(
+        """
+        SELECT level, checked_at, details_json, force_exit_review
+        FROM risk_state
+        ORDER BY checked_at DESC, id DESC
+        LIMIT 20
+        """
+    ).fetchall()
+    for row in rows:
+        if _full_risk_row_is_fresh(row, now=now):
+            return row
+    return None
+
+
+def _persist_dependency_db_locked_attestation(exc: sqlite3.OperationalError) -> RiskLevel:
+    """Persist a fresh degraded row when a RiskGuard dependency DB is locked.
+
+    A locked dependency surface means RiskGuard cannot run full metrics. If a
+    previous full risk attestation is still fresh, preserve that level and mark
+    only the metrics refresh degraded. If no full attestation is fresh, degrade
+    to DATA_DEGRADED.
+    """
+    now = datetime.now(timezone.utc)
+    now_ts = now.isoformat()
+    risk_conn = get_connection(RISK_DB_PATH, write_class="live")
+    try:
+        init_risk_db(risk_conn)
+        previous_full = _latest_fresh_full_risk_row(risk_conn, now=now)
+        if previous_full is None:
+            level = RiskLevel.DATA_DEGRADED
+            force_exit_review = 0
+            details = {
+                "status": "dependency_db_locked",
+                "riskguard_degraded_reason": "dependency_db_locked",
+                "bankroll_truth_source": "polymarket_wallet",
+                "dependency_db_lock_error": str(exc),
+                "full_metrics_status": "unavailable_no_fresh_full_risk_row",
+            }
+        else:
+            level = RiskLevel(previous_full["level"])
+            force_exit_review = int(previous_full["force_exit_review"] or 0)
+            details = {
+                "status": "dependency_db_locked_previous_risk_level_preserved",
+                "riskguard_degraded_reason": "dependency_db_locked",
+                "bankroll_truth_source": "polymarket_wallet",
+                "dependency_db_lock_error": str(exc),
+                "full_metrics_status": "locked_previous_fresh_level_preserved",
+                "previous_full_risk_level": previous_full["level"],
+                "previous_full_risk_checked_at": previous_full["checked_at"],
+            }
+        risk_conn.execute(
+            """
+            INSERT INTO risk_state (level, brier, accuracy, win_rate, details_json, checked_at, force_exit_review)
+            VALUES (?, NULL, NULL, NULL, ?, ?, ?)
+            """,
+            (
+                level.value,
+                json.dumps(details),
+                now_ts,
+                force_exit_review,
+            ),
+        )
+        risk_conn.commit()
+    finally:
+        _close_conn(risk_conn)
+    logger.error(
+        "RiskGuard tick metrics degraded: dependency DB locked; persisted fresh risk_state level=%s. error=%s",
+        level.value,
+        exc,
+    )
+    return level
+
+
 def tick() -> RiskLevel:
     """Run one RiskGuard evaluation tick. Spec §7: 60-second cycle.
 
@@ -794,9 +904,11 @@ def tick() -> RiskLevel:
     errors this produced 51+ accumulated zeus-world.db-wal reader handles
     (observed on PID 18538), blocking all WAL writers (data-ingest, live-trading).
     """
-    zeus_conn = _get_runtime_trade_connection()
-    risk_conn = get_connection(RISK_DB_PATH, write_class="live")
+    zeus_conn: sqlite3.Connection | None = None
+    risk_conn: sqlite3.Connection | None = None
     try:
+        zeus_conn = _get_runtime_trade_connection()
+        risk_conn = get_connection(RISK_DB_PATH, write_class="live")
         init_risk_db(risk_conn)
 
         previous_row = risk_conn.execute(
@@ -1178,9 +1290,17 @@ def tick() -> RiskLevel:
                            level.value, settlement_storage_source, b_score, d_accuracy * 100)
 
         return level
+    except sqlite3.OperationalError as exc:
+        if not _is_sqlite_database_locked(exc):
+            raise
+        _rollback_and_close(risk_conn)
+        risk_conn = None
+        _rollback_and_close(zeus_conn)
+        zeus_conn = None
+        return _persist_dependency_db_locked_attestation(exc)
     finally:
-        zeus_conn.close()
-        risk_conn.close()
+        _close_conn(zeus_conn)
+        _close_conn(risk_conn)
 
 
 def tick_with_portfolio(portfolio: PortfolioState) -> RiskLevel:

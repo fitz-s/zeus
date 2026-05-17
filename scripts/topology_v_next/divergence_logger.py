@@ -9,7 +9,7 @@ Concurrency-safe append-only JSONL writer for per-call divergence records.
 
 Public API (SCAFFOLD §1.1):
     DivergenceRecord  -- frozen dataclass, all §4.1 schema fields
-    log_divergence(record, *, root="evidence/topology_v_next_shadow") -> None
+    log_divergence(record, *, root="docs/historical_evidence/topology_v_next_shadow") -> None
     compute_event_type(*, old_status, new_severity, companion_skip_used) -> str
     classify_divergence(record: DivergenceRecord) -> str
     daily_path(*, root=..., today=None) -> Path
@@ -69,7 +69,7 @@ class DivergenceRecord:
     Frozen dataclass capturing one shadow-call divergence observation.
 
     All fields per SCAFFOLD §4.1. Serialised to a single JSONL line by
-    _serialize_record(); stored in evidence/topology_v_next_shadow/.
+    _serialize_record(); stored in docs/historical_evidence/topology_v_next_shadow/.
     """
     # Temporal
     ts: str                                  # ISO-8601 UTC ms-precision, Z suffix
@@ -268,7 +268,7 @@ def classify_divergence(record: DivergenceRecord) -> str:
 
 def daily_path(
     *,
-    root: Path | str = "evidence/topology_v_next_shadow",
+    root: Path | str = "docs/historical_evidence/topology_v_next_shadow",
     today: date | None = None,
 ) -> Path:
     """
@@ -286,7 +286,7 @@ def daily_path(
 def log_divergence(
     record: DivergenceRecord,
     *,
-    root: Path | str = "evidence/topology_v_next_shadow",
+    root: Path | str = "docs/historical_evidence/topology_v_next_shadow",
 ) -> None:
     """
     Append *record* as one JSONL line to the daily file under *root*.

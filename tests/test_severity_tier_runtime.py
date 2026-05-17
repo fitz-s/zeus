@@ -175,7 +175,7 @@ def test_f5_forbidden_write_target_emits_advisory() -> None:
     manifest = {
         "scripts": {"diagnose_bad_target.py": {}},
         "required_effective_fields": [],
-        "diagnostic_allowed_write_targets": ["stdout", "temp", "evidence/**"],
+        "diagnostic_allowed_write_targets": ["stdout", "temp", "docs/historical_evidence/**"],
         "canonical_db_targets": [],
     }
     api.load_script_manifest = MagicMock(return_value=manifest)

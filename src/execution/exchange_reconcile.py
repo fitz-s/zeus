@@ -9,6 +9,7 @@ performed here.
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import uuid
 from dataclasses import dataclass
@@ -20,6 +21,8 @@ from typing import Any, Literal, Mapping, Optional
 
 from src.architecture.decorators import capability, protects
 from src.state.venue_command_repo import trade_fact_has_positive_fill_economics
+
+logger = logging.getLogger(__name__)
 
 FindingKind = Literal[
     "exchange_ghost_order",
@@ -53,9 +56,17 @@ _OPEN_LOCAL_STATES = frozenset(
     }
 )
 _OPEN_ORDER_FACT_STATES = frozenset({"LIVE", "RESTING", "CANCEL_UNKNOWN"})
+_OPEN_POINT_ORDER_STATES = _OPEN_ORDER_FACT_STATES | frozenset(
+    {"OPEN", "PARTIAL", "PARTIALLY_MATCHED", "PARTIALLY_FILLED"}
+)
 _TRADE_FACT_STATES = frozenset({"MATCHED", "MINED", "CONFIRMED", "RETRYING", "FAILED"})
 _CONFIRMED_POSITION_FACT_STATES = frozenset({"CONFIRMED"})
 _OPTIMISTIC_POSITION_FACT_STATES = frozenset({"MATCHED", "MINED"})
+_POSITION_DRIFT_ABS_TOLERANCE = Decimal("0.0001")
+_POSITION_API_VISIBILITY_FLOOR = Decimal("0.01")
+_ENTRY_FILL_PROJECTION_PHASES = frozenset({"pending_entry", "active", "day0_window"})
+_EXIT_FILL_PROJECTION_PHASES = frozenset({"active", "day0_window", "pending_exit", "economically_closed"})
+_TERMINAL_ORDER_FACT_STATES = frozenset({"MATCHED", "CANCEL_CONFIRMED", "EXPIRED", "VENUE_WIPED"})
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS exchange_reconcile_findings (
@@ -119,10 +130,19 @@ def fresh_reconcile_snapshot(
     """
 
     observed = _coerce_dt(observed_at)
-    captured: dict[str, list[Any]] = {}
+    captured: dict[str, Any] = {}
     unavailable: list[str] = []
 
     captured["open_orders"] = _call_required(adapter, "get_open_orders")
+    local_order_ids = {str(order_id) for order_id in (trade_order_ids or set()) if str(order_id).strip()}
+    open_order_ids = {_order_id(item) for item in captured["open_orders"] if _order_id(item)}
+    missing_local_order_ids = sorted(local_order_ids - open_order_ids)
+    get_order = getattr(adapter, "get_order", None)
+    if callable(get_order) and missing_local_order_ids:
+        captured["point_orders"] = {
+            order_id: get_order(order_id)
+            for order_id in missing_local_order_ids
+        }
     for surface, method in (("trades", "get_trades"), ("positions", "get_positions")):
         fn = getattr(adapter, method, None)
         if not callable(fn):
@@ -148,6 +168,8 @@ def fresh_reconcile_snapshot(
     }
     snapshot = SimpleNamespace(read_freshness=freshness)
     snapshot.get_open_orders = lambda: list(captured["open_orders"])
+    if "point_orders" in captured:
+        snapshot.get_order = lambda order_id: captured["point_orders"].get(str(order_id))
     if "trades" in captured:
         snapshot.get_trades = lambda: list(captured["trades"])
     if "positions" in captured:
@@ -214,6 +236,146 @@ def run_ws_gap_reconcile_and_clear(
     result["status"] = "cleared"
     result["reason"] = "m5_reconcile_complete"
     return result
+
+
+def refresh_unresolved_reconcile_findings(
+    adapter: Any,
+    conn: sqlite3.Connection,
+    *,
+    observed_at: datetime | str | None = None,
+    context: ReconcileContext = "ws_gap",
+) -> dict[str, Any]:
+    """Refresh only already-open position-drift findings from fresh venue truth.
+
+    This is intentionally narrower than ``run_reconcile_sweep``.  When the WS
+    latch has already cleared, risk can still remain reduce-only because late
+    CONFIRMED trade facts arrived after the original M5 sweep.  A partial
+    subject-scoped refresh must not reinterpret absent unrelated positions as
+    global exchange absence.
+    """
+
+    _validate_context(context)
+    init_exchange_reconcile_schema(conn)
+    observed = _coerce_dt(observed_at)
+    token_ids = _unresolved_position_drift_tokens(conn)
+    trade_ids = _unresolved_unrecorded_trade_ids(conn)
+    if not token_ids and not trade_ids:
+        return {"status": "not_required", "resolved": 0, "remaining": 0}
+
+    order_ids = _local_order_ids_for_tokens(conn, token_ids) | _order_ids_for_unrecorded_trade_findings(conn)
+    snapshot = fresh_reconcile_snapshot(
+        adapter,
+        observed_at=observed,
+        trade_order_ids=order_ids,
+    )
+    if "trades" not in snapshot.captured_surfaces:
+        return {
+            "status": "blocked",
+            "reason": "trades_read_unavailable",
+            "subject_count": len(token_ids) + len(trade_ids),
+            "captured_surfaces": list(snapshot.captured_surfaces),
+            "unavailable_surfaces": list(snapshot.unavailable_surfaces),
+        }
+    if token_ids and "positions" not in snapshot.captured_surfaces:
+        return {
+            "status": "blocked",
+            "reason": "positions_read_unavailable",
+            "subject_count": len(token_ids) + len(trade_ids),
+            "captured_surfaces": list(snapshot.captured_surfaces),
+            "unavailable_surfaces": list(snapshot.unavailable_surfaces),
+        }
+
+    local_by_order = _local_commands_by_order(conn)
+    new_findings: list[ReconcileFinding] = []
+    for trade in snapshot.adapter.get_trades():
+        raw = _raw(trade)
+        venue_trade_id = _trade_id(raw)
+        subject_id = venue_trade_id or _stable_subject("trade", raw)
+        state = _trade_state(raw)
+        order_id, command = _local_command_for_trade(raw, local_by_order)
+        if state is None:
+            new_findings.append(
+                record_finding(
+                    conn,
+                    kind="unrecorded_trade",
+                    subject_id=subject_id,
+                    context=context,
+                    evidence={
+                        "exchange_trade": raw,
+                        "reason": "exchange_trade_unknown_trade_state",
+                        "raw_state": _first_present(raw, "state", "status", default=None),
+                    },
+                    recorded_at=observed,
+                )
+            )
+            continue
+        if command is None or not order_id:
+            new_findings.append(
+                record_finding(
+                    conn,
+                    kind="unrecorded_trade",
+                    subject_id=subject_id,
+                    context=context,
+                    evidence={
+                        "exchange_trade": raw,
+                        "reason": "exchange_trade_unlinked_to_local_command",
+                        "candidate_order_ids": _trade_order_ids(raw),
+                    },
+                    recorded_at=observed,
+                )
+            )
+            continue
+        if not venue_trade_id:
+            new_findings.append(
+                record_finding(
+                    conn,
+                    kind="unrecorded_trade",
+                    subject_id=subject_id,
+                    context=context,
+                    evidence={
+                        "exchange_trade": raw,
+                        "local_command": _command_evidence(command),
+                        "reason": "exchange_trade_missing_venue_trade_identity",
+                    },
+                    recorded_at=observed,
+                )
+            )
+            continue
+        finding = _append_linkable_trade_fact_if_missing(
+            conn,
+            command,
+            raw,
+            venue_trade_id,
+            observed,
+            state=state,
+            context=context,
+            matched_order_id=order_id,
+        )
+        if finding is not None:
+            new_findings.append(finding)
+
+    repair_summary = reconcile_recorded_maker_fill_economics(conn, observed_at=observed)
+    before_remaining = _unresolved_position_drift_count(conn, token_ids) + _unresolved_trade_count(conn, trade_ids)
+    if token_ids:
+        _resolve_position_drift_tokens_from_current_truth(
+            conn,
+            token_ids=token_ids,
+            positions=snapshot.adapter.get_positions(),
+            observed_at=observed,
+        )
+    remaining = _unresolved_position_drift_count(conn, token_ids) + _unresolved_trade_count(conn, trade_ids)
+    resolved = max(0, before_remaining - remaining)
+    return {
+        "status": "resolved" if remaining == 0 and not new_findings else "blocked",
+        "reason": "reconcile_finding_refresh_complete" if remaining == 0 else "reconcile_findings_remain",
+        "subject_count": len(token_ids) + len(trade_ids),
+        "resolved": resolved,
+        "remaining": remaining,
+        "new_findings": len(new_findings),
+        "captured_surfaces": list(snapshot.captured_surfaces),
+        "unavailable_surfaces": list(snapshot.unavailable_surfaces),
+        "repair_summary": repair_summary,
+    }
 
 
 @capability("on_chain_mutation", lease=True)
@@ -348,6 +510,10 @@ def run_reconcile_sweep(
     for order_id, command in local_by_order.items():
         if order_id in open_order_ids:
             continue
+        point_order = _point_order_lookup(adapter, order_id)
+        point_order_status = _order_state(point_order)
+        if point_order_status in _OPEN_POINT_ORDER_STATES:
+            continue
         if context == "ws_gap" and _trade_fill_covers_local_command(
             command, trade_fills_by_order_id.get(order_id)
         ):
@@ -366,6 +532,9 @@ def run_reconcile_sweep(
                     "local_command": _command_evidence(command),
                     "latest_order_fact": _latest_order_fact(conn, order_id),
                     "exchange_open_order_ids": sorted(open_order_ids),
+                    "point_order": _raw(point_order) if point_order is not None else None,
+                    "point_order_status": point_order_status,
+                    "point_order_surface": "get_order" if point_order is not None else None,
                     "trade_enumeration_available": trades_available,
                     "reason": "local_open_order_absent_from_exchange_open_orders",
                 },
@@ -385,7 +554,391 @@ def run_reconcile_sweep(
                 observed_at=observed,
             )
         )
+    reconcile_recorded_maker_fill_economics(conn, observed_at=observed)
     return findings
+
+
+def reconcile_recorded_maker_fill_economics(
+    conn: sqlite3.Connection,
+    *,
+    observed_at: datetime | str | None = None,
+) -> dict[str, int]:
+    """Repair recorded trade facts whose raw maker leg contradicts top-level trade economics.
+
+    The venue user stream emits a trade-level top-line from the taker side while
+    Zeus can be the maker.  The immutable raw payload already contains the
+    command-owned maker order.  This repair appends a corrected fact instead of
+    rewriting the old row, then replays the entry-fill projection from the
+    latest fact chain.
+    """
+
+    summary = {
+        "scanned": 0,
+        "corrected": 0,
+        "projected": 0,
+        "stayed": 0,
+        "errors": 0,
+    }
+    if not _table_exists(conn, "venue_trade_facts") or not _table_exists(conn, "venue_commands"):
+        return summary
+    observed = _coerce_dt(observed_at)
+    rows = conn.execute(
+        """
+        WITH latest_trade_fact AS (
+            SELECT trade_id, MAX(local_sequence) AS local_sequence
+              FROM venue_trade_facts
+             GROUP BY trade_id
+        )
+        SELECT
+            tf.*,
+            cmd.snapshot_id AS cmd_snapshot_id,
+            cmd.envelope_id AS cmd_envelope_id,
+            cmd.position_id AS cmd_position_id,
+            cmd.decision_id AS cmd_decision_id,
+            cmd.idempotency_key AS cmd_idempotency_key,
+            cmd.intent_kind AS cmd_intent_kind,
+            cmd.market_id AS cmd_market_id,
+            cmd.token_id AS cmd_token_id,
+            cmd.side AS cmd_side,
+            cmd.size AS cmd_size,
+            cmd.price AS cmd_price,
+            cmd.venue_order_id AS cmd_venue_order_id,
+            cmd.state AS cmd_state,
+            cmd.created_at AS cmd_created_at,
+            cmd.updated_at AS cmd_updated_at
+          FROM venue_trade_facts tf
+          JOIN latest_trade_fact latest
+            ON latest.trade_id = tf.trade_id
+           AND latest.local_sequence = tf.local_sequence
+          JOIN venue_commands cmd
+            ON cmd.command_id = tf.command_id
+         WHERE tf.state IN ('MATCHED', 'MINED', 'CONFIRMED')
+           AND COALESCE(tf.raw_payload_json, '') LIKE '%maker_orders%'
+         ORDER BY tf.observed_at, tf.trade_fact_id
+        """
+    ).fetchall()
+    for row in rows:
+        summary["scanned"] += 1
+        fact = dict(row)
+        try:
+            command = _command_from_prefixed_trade_fact_row(fact)
+            raw = _json_mapping(fact.get("raw_payload_json"))
+            order_id = str(command.get("venue_order_id") or fact.get("venue_order_id") or "")
+            if _selected_maker_order(raw, order_id) is None:
+                summary["stayed"] += 1
+                continue
+            corrected_size_raw = _trade_filled_size(raw, order_id)
+            corrected_price_raw = _trade_fill_price(raw, order_id)
+            missing = _missing_trade_fill_economics(
+                state=str(fact.get("state") or ""),
+                filled_size=corrected_size_raw,
+                fill_price=corrected_price_raw,
+            )
+            if missing:
+                summary["errors"] += 1
+                continue
+            corrected_size = str(corrected_size_raw)
+            corrected_price = str(corrected_price_raw)
+            if not _same_trade_fill_economics(
+                fact,
+                filled_size=corrected_size,
+                fill_price=corrected_price,
+            ):
+                _append_maker_fill_economic_correction(
+                    conn,
+                    fact=fact,
+                    command=command,
+                    raw=raw,
+                    venue_order_id=order_id,
+                    filled_size=corrected_size,
+                    fill_price=corrected_price,
+                    observed_at=observed,
+                )
+                summary["corrected"] += 1
+            _ensure_entry_fill_position_event(
+                conn,
+                command=command,
+                venue_order_id=order_id,
+                filled_size=corrected_size,
+                fill_price=corrected_price,
+                observed_at=observed,
+                order_fact_source=str(fact.get("source") or "REST"),
+            )
+            summary["projected"] += 1
+        except Exception:
+            summary["errors"] += 1
+            logger.exception(
+                "exchange_reconcile: maker fill economics repair failed for trade_fact_id=%s",
+                fact.get("trade_fact_id"),
+            )
+    exit_summary = _reconcile_recorded_exit_fill_projections(conn, observed_at=observed)
+    if exit_summary["projected"]:
+        summary["exit_projected"] = exit_summary["projected"]
+    summary["stayed"] += exit_summary["stayed"]
+    summary["errors"] += exit_summary["errors"]
+    return summary
+
+
+def _reconcile_recorded_exit_fill_projections(
+    conn: sqlite3.Connection,
+    *,
+    observed_at: datetime,
+) -> dict[str, int]:
+    """Project already-recorded confirmed exit fills into lifecycle state.
+
+    command_recovery calls reconcile_recorded_maker_fill_economics every cycle
+    as the local recorded-trade repair hook.  This keeps confirmed exit
+    self-healing local: the daemon needs only the command, trade fact, and
+    position projection already in SQLite, not a fresh full venue resweep.
+    """
+
+    summary = {"scanned": 0, "projected": 0, "stayed": 0, "errors": 0}
+    rows = conn.execute(
+        """
+        WITH latest_trade_fact AS (
+            SELECT trade_id, MAX(local_sequence) AS local_sequence
+              FROM venue_trade_facts
+             GROUP BY trade_id
+        )
+        SELECT
+            tf.*,
+            cmd.snapshot_id AS cmd_snapshot_id,
+            cmd.envelope_id AS cmd_envelope_id,
+            cmd.position_id AS cmd_position_id,
+            cmd.decision_id AS cmd_decision_id,
+            cmd.idempotency_key AS cmd_idempotency_key,
+            cmd.intent_kind AS cmd_intent_kind,
+            cmd.market_id AS cmd_market_id,
+            cmd.token_id AS cmd_token_id,
+            cmd.side AS cmd_side,
+            cmd.size AS cmd_size,
+            cmd.price AS cmd_price,
+            cmd.venue_order_id AS cmd_venue_order_id,
+            cmd.state AS cmd_state,
+            cmd.created_at AS cmd_created_at,
+            cmd.updated_at AS cmd_updated_at,
+            pc.phase AS position_phase
+          FROM venue_trade_facts tf
+          JOIN latest_trade_fact latest
+            ON latest.trade_id = tf.trade_id
+           AND latest.local_sequence = tf.local_sequence
+          JOIN venue_commands cmd
+            ON cmd.command_id = tf.command_id
+          JOIN position_current pc
+            ON pc.position_id = cmd.position_id
+         WHERE tf.state = 'CONFIRMED'
+           AND UPPER(COALESCE(cmd.intent_kind, '')) = 'EXIT'
+           AND UPPER(COALESCE(cmd.side, '')) = 'SELL'
+           AND pc.phase IN ('active', 'day0_window', 'pending_exit', 'economically_closed')
+         ORDER BY tf.observed_at, tf.trade_fact_id
+        """
+    ).fetchall()
+    for row in rows:
+        summary["scanned"] += 1
+        fact = dict(row)
+        try:
+            command = _command_from_prefixed_trade_fact_row(fact)
+            command_size = _positive_decimal_or_none(command.get("size"))
+            if command_size is None:
+                summary["stayed"] += 1
+                continue
+            fill_economics = _exit_fill_economics_for_command(
+                conn,
+                command_id=str(command.get("command_id") or ""),
+                fallback_filled_size=str(fact.get("filled_size") or "0"),
+                fallback_fill_price=str(fact.get("fill_price") or "0"),
+            )
+            if fill_economics is None:
+                summary["stayed"] += 1
+                continue
+            confirmed_shares, _ = fill_economics
+            if confirmed_shares < command_size:
+                summary["stayed"] += 1
+                continue
+            before = conn.total_changes
+            _ensure_exit_fill_position_event(
+                conn,
+                command=command,
+                venue_order_id=str(command.get("venue_order_id") or fact.get("venue_order_id") or ""),
+                filled_size=str(fact.get("filled_size") or "0"),
+                fill_price=str(fact.get("fill_price") or "0"),
+                observed_at=_coerce_dt(fact.get("observed_at") or observed_at),
+                command_event="FILL_CONFIRMED",
+            )
+            if conn.total_changes > before:
+                summary["projected"] += 1
+            else:
+                summary["stayed"] += 1
+        except Exception:
+            summary["errors"] += 1
+            logger.exception(
+                "exchange_reconcile: recorded exit fill projection repair failed for trade_fact_id=%s",
+                fact.get("trade_fact_id"),
+            )
+    return summary
+
+
+def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (table,),
+    ).fetchone()
+    return row is not None
+
+
+def _json_mapping(raw: object) -> dict[str, Any]:
+    if isinstance(raw, Mapping):
+        return dict(raw)
+    if raw in (None, ""):
+        return {}
+    try:
+        parsed = json.loads(str(raw))
+    except (TypeError, json.JSONDecodeError):
+        return {}
+    return dict(parsed) if isinstance(parsed, Mapping) else {}
+
+
+def _command_from_prefixed_trade_fact_row(row: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "command_id": row.get("command_id"),
+        "snapshot_id": row.get("cmd_snapshot_id"),
+        "envelope_id": row.get("cmd_envelope_id"),
+        "position_id": row.get("cmd_position_id"),
+        "decision_id": row.get("cmd_decision_id"),
+        "idempotency_key": row.get("cmd_idempotency_key"),
+        "intent_kind": row.get("cmd_intent_kind"),
+        "market_id": row.get("cmd_market_id"),
+        "token_id": row.get("cmd_token_id"),
+        "side": row.get("cmd_side"),
+        "size": row.get("cmd_size"),
+        "price": row.get("cmd_price"),
+        "venue_order_id": row.get("cmd_venue_order_id"),
+        "state": row.get("cmd_state"),
+        "created_at": row.get("cmd_created_at"),
+        "updated_at": row.get("cmd_updated_at"),
+    }
+
+
+def _append_maker_fill_economic_correction(
+    conn: sqlite3.Connection,
+    *,
+    fact: Mapping[str, Any],
+    command: Mapping[str, Any],
+    raw: Mapping[str, Any],
+    venue_order_id: str,
+    filled_size: str,
+    fill_price: str,
+    observed_at: datetime,
+) -> int:
+    from src.state.venue_command_repo import append_trade_fact
+
+    payload = dict(raw)
+    payload["zeus_repair"] = {
+        "schema_version": 1,
+        "reason": "maker_leg_economics_selected_for_command_order",
+        "source_trade_fact_id": fact.get("trade_fact_id"),
+        "source_filled_size": fact.get("filled_size"),
+        "source_fill_price": fact.get("fill_price"),
+        "corrected_filled_size": filled_size,
+        "corrected_fill_price": fill_price,
+        "command_id": command.get("command_id"),
+        "venue_order_id": venue_order_id,
+        "source_module": "src.execution.exchange_reconcile",
+    }
+    return append_trade_fact(
+        conn,
+        trade_id=str(fact["trade_id"]),
+        venue_order_id=venue_order_id,
+        command_id=str(command["command_id"]),
+        state=str(fact["state"]),
+        filled_size=filled_size,
+        fill_price=fill_price,
+        source=str(fact.get("source") or "WS_USER"),
+        observed_at=observed_at,
+        venue_timestamp=fact.get("venue_timestamp"),
+        raw_payload_hash=_hash_payload(payload),
+        raw_payload_json=payload,
+        fee_paid_micro=fact.get("fee_paid_micro"),
+        tx_hash=fact.get("tx_hash"),
+        block_number=fact.get("block_number"),
+        confirmation_count=fact.get("confirmation_count"),
+    )
+
+
+def _ensure_entry_fill_order_fact(
+    conn: sqlite3.Connection,
+    *,
+    command: Mapping[str, Any],
+    venue_order_id: str,
+    filled_size: str,
+    observed_at: datetime,
+    source: str,
+) -> None:
+    if not _table_exists(conn, "venue_order_facts"):
+        return
+    filled_dec = _positive_decimal_or_none(filled_size)
+    if filled_dec is None:
+        return
+    command_size = _positive_decimal_or_none(command.get("size"))
+    latest = conn.execute(
+        """
+        SELECT state, remaining_size, matched_size
+          FROM venue_order_facts
+         WHERE command_id = ?
+         ORDER BY local_sequence DESC, fact_id DESC
+         LIMIT 1
+        """,
+        (str(command.get("command_id") or ""),),
+    ).fetchone()
+    latest_terminal_state = str(latest["state"] or "") if latest is not None else ""
+    terminal_state_preserved = latest_terminal_state in _TERMINAL_ORDER_FACT_STATES
+    if terminal_state_preserved:
+        latest_matched = _positive_decimal_or_none(latest["matched_size"]) or Decimal("0")
+        matched_dec = max(filled_dec, latest_matched)
+        remaining = Decimal("0")
+        state = latest_terminal_state
+    else:
+        matched_dec = filled_dec
+        if command_size is None:
+            remaining = Decimal("0")
+        else:
+            remaining = max(Decimal("0"), command_size - matched_dec)
+        state = "MATCHED" if command_size is not None and matched_dec >= command_size else "PARTIALLY_MATCHED"
+    remaining_text = _decimal_text(remaining)
+    matched_text = _decimal_text(matched_dec)
+    if latest is not None and (
+        str(latest["state"] or "") == state
+        and _same_decimal_value(latest["remaining_size"], remaining_text)
+        and _same_decimal_value(latest["matched_size"], matched_text)
+    ):
+        return
+
+    from src.state.venue_command_repo import append_order_fact
+
+    payload = {
+        "schema_version": 1,
+        "reason": "m5_exchange_reconcile_entry_fill_order_fact",
+        "source_module": "src.execution.exchange_reconcile",
+        "command_id": str(command.get("command_id") or ""),
+        "venue_order_id": venue_order_id,
+        "state": state,
+        "remaining_size": remaining_text,
+        "matched_size": matched_text,
+        "terminal_state_preserved": terminal_state_preserved,
+    }
+    append_order_fact(
+        conn,
+        venue_order_id=venue_order_id,
+        command_id=str(command.get("command_id") or ""),
+        state=state,
+        remaining_size=remaining_text,
+        matched_size=matched_text,
+        source=source,
+        observed_at=observed_at,
+        venue_timestamp=observed_at,
+        raw_payload_hash=_hash_payload(payload),
+        raw_payload_json=payload,
+    )
 
 
 def record_finding(
@@ -508,9 +1061,43 @@ def _record_position_drift_findings(
         exchange_size = exchange.get(token, Decimal("0"))
         confirmed_size = confirmed_journal.get(token, Decimal("0"))
         optimistic_size = optimistic_journal.get(token, Decimal("0"))
-        if exchange_size == confirmed_size:
+        if _position_size_matches(exchange_size, confirmed_size):
+            _resolve_open_position_drift_findings(
+                conn,
+                token,
+                resolution="position_drift_cleared",
+                resolved_at=observed_at,
+            )
+            continue
+        if _position_size_hidden_by_visibility_floor(exchange_size, confirmed_size):
+            _resolve_open_position_drift_findings(
+                conn,
+                token,
+                resolution="position_drift_below_position_api_visibility_floor",
+                resolved_at=observed_at,
+            )
+            continue
+        if _pending_exit_optimistic_sell_offsets_confirmed_position(
+            conn,
+            token_id=token,
+            exchange_size=exchange_size,
+            confirmed_size=confirmed_size,
+            optimistic_size=optimistic_size,
+        ):
+            _resolve_open_position_drift_findings(
+                conn,
+                token,
+                resolution="position_drift_pending_exit_offset",
+                resolved_at=observed_at,
+            )
             continue
         if _has_recent_filled_suppression(conn, token, observed_at):
+            _resolve_open_position_drift_findings(
+                conn,
+                token,
+                resolution="position_drift_recent_fill_suppressed",
+                resolved_at=observed_at,
+            )
             continue
         findings.append(
             record_finding(
@@ -532,6 +1119,285 @@ def _record_position_drift_findings(
             )
         )
     return findings
+
+
+def _unresolved_position_drift_tokens(conn: sqlite3.Connection) -> tuple[str, ...]:
+    rows = conn.execute(
+        """
+        SELECT DISTINCT subject_id
+          FROM exchange_reconcile_findings
+         WHERE kind = 'position_drift'
+           AND resolved_at IS NULL
+           AND TRIM(COALESCE(subject_id, '')) != ''
+         ORDER BY subject_id
+        """
+    ).fetchall()
+    return tuple(str(row["subject_id"]) for row in rows)
+
+
+def _unresolved_unrecorded_trade_ids(conn: sqlite3.Connection) -> tuple[str, ...]:
+    rows = conn.execute(
+        """
+        SELECT DISTINCT subject_id
+          FROM exchange_reconcile_findings
+         WHERE kind = 'unrecorded_trade'
+           AND resolved_at IS NULL
+           AND TRIM(COALESCE(subject_id, '')) != ''
+         ORDER BY subject_id
+        """
+    ).fetchall()
+    return tuple(str(row["subject_id"]) for row in rows)
+
+
+def _unresolved_position_drift_count(
+    conn: sqlite3.Connection,
+    token_ids: tuple[str, ...] | frozenset[str] | set[str],
+) -> int:
+    if not token_ids:
+        return 0
+    selected = tuple(sorted(str(token) for token in token_ids))
+    placeholders = ", ".join("?" for _ in selected)
+    row = conn.execute(
+        f"""
+        SELECT COUNT(*) AS count
+          FROM exchange_reconcile_findings
+         WHERE kind = 'position_drift'
+           AND resolved_at IS NULL
+           AND subject_id IN ({placeholders})
+        """,
+        selected,
+    ).fetchone()
+    return int(row["count"] or 0)
+
+
+def _unresolved_trade_count(
+    conn: sqlite3.Connection,
+    trade_ids: tuple[str, ...] | frozenset[str] | set[str],
+) -> int:
+    if not trade_ids:
+        return 0
+    selected = tuple(sorted(str(trade_id) for trade_id in trade_ids))
+    placeholders = ", ".join("?" for _ in selected)
+    row = conn.execute(
+        f"""
+        SELECT COUNT(*) AS count
+          FROM exchange_reconcile_findings
+         WHERE kind = 'unrecorded_trade'
+           AND resolved_at IS NULL
+           AND subject_id IN ({placeholders})
+        """,
+        selected,
+    ).fetchone()
+    return int(row["count"] or 0)
+
+
+def _local_order_ids_for_tokens(
+    conn: sqlite3.Connection,
+    token_ids: tuple[str, ...] | frozenset[str] | set[str],
+) -> frozenset[str]:
+    if not token_ids:
+        return frozenset()
+    selected = tuple(sorted(str(token) for token in token_ids))
+    placeholders = ", ".join("?" for _ in selected)
+    rows = conn.execute(
+        f"""
+        SELECT DISTINCT venue_order_id
+          FROM venue_commands
+         WHERE token_id IN ({placeholders})
+           AND venue_order_id IS NOT NULL
+           AND TRIM(venue_order_id) != ''
+        """,
+        selected,
+    ).fetchall()
+    return frozenset(str(row["venue_order_id"]) for row in rows)
+
+
+def _order_ids_for_unrecorded_trade_findings(conn: sqlite3.Connection) -> frozenset[str]:
+    rows = conn.execute(
+        """
+        SELECT evidence_json
+          FROM exchange_reconcile_findings
+         WHERE kind = 'unrecorded_trade'
+           AND resolved_at IS NULL
+        """
+    ).fetchall()
+    order_ids: set[str] = set()
+    for row in rows:
+        evidence = _json_mapping(row["evidence_json"])
+        local_command = evidence.get("local_command")
+        if isinstance(local_command, Mapping):
+            venue_order_id = _string_or_none(local_command.get("venue_order_id"))
+            if venue_order_id:
+                order_ids.add(venue_order_id)
+        for candidate in evidence.get("candidate_order_ids") or []:
+            value = _string_or_none(candidate)
+            if value:
+                order_ids.add(value)
+        exchange_trade = evidence.get("exchange_trade")
+        if isinstance(exchange_trade, Mapping):
+            order_ids.update(_trade_order_ids(exchange_trade))
+    return frozenset(order_ids)
+
+
+def _resolve_position_drift_tokens_from_current_truth(
+    conn: sqlite3.Connection,
+    *,
+    token_ids: tuple[str, ...] | frozenset[str] | set[str],
+    positions: list[Any],
+    observed_at: datetime,
+) -> None:
+    exchange = _exchange_positions_by_token(positions)
+    confirmed_journal = _journal_positions_by_token(
+        conn,
+        states=_CONFIRMED_POSITION_FACT_STATES,
+    )
+    optimistic_journal = _journal_positions_by_token(
+        conn,
+        states=_OPTIMISTIC_POSITION_FACT_STATES,
+    )
+    for token in sorted(str(item) for item in token_ids):
+        exchange_size = exchange.get(token, Decimal("0"))
+        confirmed_size = confirmed_journal.get(token, Decimal("0"))
+        optimistic_size = optimistic_journal.get(token, Decimal("0"))
+        if _position_size_matches(exchange_size, confirmed_size):
+            _resolve_open_position_drift_findings(
+                conn,
+                token,
+                resolution="position_drift_cleared",
+                resolved_at=observed_at,
+            )
+            continue
+        if _position_size_hidden_by_visibility_floor(exchange_size, confirmed_size):
+            _resolve_open_position_drift_findings(
+                conn,
+                token,
+                resolution="position_drift_below_position_api_visibility_floor",
+                resolved_at=observed_at,
+            )
+            continue
+        if _pending_exit_optimistic_sell_offsets_confirmed_position(
+            conn,
+            token_id=token,
+            exchange_size=exchange_size,
+            confirmed_size=confirmed_size,
+            optimistic_size=optimistic_size,
+        ):
+            _resolve_open_position_drift_findings(
+                conn,
+                token,
+                resolution="position_drift_pending_exit_offset",
+                resolved_at=observed_at,
+            )
+            continue
+        if _has_recent_filled_suppression(conn, token, observed_at):
+            _resolve_open_position_drift_findings(
+                conn,
+                token,
+                resolution="position_drift_recent_fill_suppressed",
+                resolved_at=observed_at,
+            )
+
+
+def _position_size_matches(left: Decimal, right: Decimal) -> bool:
+    return abs(left - right) <= _POSITION_DRIFT_ABS_TOLERANCE
+
+
+def _position_size_hidden_by_visibility_floor(left: Decimal, right: Decimal) -> bool:
+    if min(abs(left), abs(right)) != Decimal("0"):
+        return False
+    return abs(left - right) <= _POSITION_API_VISIBILITY_FLOOR
+
+
+def _resolve_open_position_drift_findings(
+    conn: sqlite3.Connection,
+    token_id: str,
+    *,
+    resolution: str,
+    resolved_at: datetime,
+) -> None:
+    rows = conn.execute(
+        """
+        SELECT finding_id
+          FROM exchange_reconcile_findings
+         WHERE kind = 'position_drift'
+           AND subject_id = ?
+           AND resolved_at IS NULL
+        """,
+        (token_id,),
+    ).fetchall()
+    for row in rows:
+        resolve_finding(
+            conn,
+            str(row["finding_id"]),
+            resolution=resolution,
+            resolved_by="src.execution.exchange_reconcile",
+            resolved_at=resolved_at,
+        )
+
+
+def _resolve_open_trade_findings(
+    conn: sqlite3.Connection,
+    trade_id: str,
+    *,
+    resolution: str,
+    resolved_at: datetime,
+) -> None:
+    rows = conn.execute(
+        """
+        SELECT finding_id
+          FROM exchange_reconcile_findings
+         WHERE kind = 'unrecorded_trade'
+           AND subject_id = ?
+           AND resolved_at IS NULL
+        """,
+        (trade_id,),
+    ).fetchall()
+    for row in rows:
+        resolve_finding(
+            conn,
+            str(row["finding_id"]),
+            resolution=resolution,
+            resolved_by="src.execution.exchange_reconcile",
+            resolved_at=resolved_at,
+        )
+
+
+def _pending_exit_optimistic_sell_offsets_confirmed_position(
+    conn: sqlite3.Connection,
+    *,
+    token_id: str,
+    exchange_size: Decimal,
+    confirmed_size: Decimal,
+    optimistic_size: Decimal,
+) -> bool:
+    if optimistic_size >= Decimal("0"):
+        return False
+    if not _position_size_matches(exchange_size, confirmed_size + optimistic_size):
+        return False
+    row = conn.execute(
+        """
+        SELECT 1
+          FROM position_current pc
+          JOIN venue_commands cmd
+            ON cmd.position_id = pc.position_id
+          JOIN venue_trade_facts tf
+            ON tf.command_id = cmd.command_id
+         WHERE pc.token_id = ?
+           AND pc.phase = 'pending_exit'
+           AND cmd.intent_kind = 'EXIT'
+           AND cmd.side = 'SELL'
+           AND tf.state IN ('MATCHED', 'MINED')
+           AND CAST(COALESCE(tf.filled_size, '0') AS REAL) > 0
+           AND tf.local_sequence = (
+                SELECT MAX(newer.local_sequence)
+                  FROM venue_trade_facts newer
+                 WHERE newer.trade_id = tf.trade_id
+           )
+         LIMIT 1
+        """,
+        (token_id,),
+    ).fetchone()
+    return row is not None
 
 
 def _append_linkable_trade_fact_if_missing(
@@ -604,6 +1470,32 @@ def _append_linkable_trade_fact_if_missing(
             fill_price=fill_price,
         )
         if same_fill_economics and str(latest_fact.get("state") or "") == state:
+            _resolve_open_trade_findings(
+                conn,
+                trade_id,
+                resolution="unrecorded_trade_linked",
+                resolved_at=observed_at,
+            )
+            existing_event = _fill_event_for_command(command, filled_size, trade_state=state)
+            if existing_event is not None:
+                try:
+                    append_event(
+                        conn,
+                        command_id=str(command["command_id"]),
+                        event_type=existing_event,
+                        occurred_at=observed_at.isoformat(),
+                        payload={
+                            "venue_order_id": order_id,
+                            "trade_id": trade_id,
+                            "filled_size": filled_size,
+                            "fill_price": fill_price,
+                            "source": "M5_EXCHANGE_RECONCILE",
+                        },
+                    )
+                except ValueError:
+                    existing_event = None
+            elif str(command.get("state") or "") == "FILLED" and state == "CONFIRMED":
+                existing_event = "FILL_CONFIRMED"
             _ensure_entry_fill_position_event(
                 conn,
                 command=command,
@@ -611,6 +1503,17 @@ def _append_linkable_trade_fact_if_missing(
                 filled_size=filled_size,
                 fill_price=fill_price,
                 observed_at=observed_at,
+                command_event=existing_event,
+                order_fact_source=str(latest_fact.get("source") or "REST"),
+            )
+            _ensure_exit_fill_position_event(
+                conn,
+                command=command,
+                venue_order_id=order_id,
+                filled_size=filled_size,
+                fill_price=fill_price,
+                observed_at=observed_at,
+                command_event=existing_event,
             )
             return None
         if state in {"MATCHED", "MINED", "CONFIRMED"} and not same_fill_economics:
@@ -672,6 +1575,12 @@ def _append_linkable_trade_fact_if_missing(
         raw_payload_json=dict(raw),
         tx_hash=_first_present(raw, "transaction_hash", "tx_hash", default=None),
     )
+    _resolve_open_trade_findings(
+        conn,
+        trade_id,
+        resolution="unrecorded_trade_linked",
+        resolved_at=observed_at,
+    )
     if state in {"FAILED", "RETRYING"}:
         return None
     latest = get_command(conn, str(command["command_id"]))
@@ -707,6 +1616,16 @@ def _append_linkable_trade_fact_if_missing(
         fill_price=fill_price,
         observed_at=observed_at,
         command_event=event,
+        order_fact_source="REST",
+    )
+    _ensure_exit_fill_position_event(
+        conn,
+        command=latest,
+        venue_order_id=order_id,
+        filled_size=filled_size,
+        fill_price=fill_price,
+        observed_at=observed_at,
+        command_event=event,
     )
     return None
 
@@ -720,6 +1639,7 @@ def _ensure_entry_fill_position_event(
     fill_price: str,
     observed_at: datetime,
     command_event: str | None = None,
+    order_fact_source: str = "REST",
 ) -> None:
     if str(command.get("intent_kind") or "").upper() != "ENTRY":
         return
@@ -743,18 +1663,38 @@ def _ensure_entry_fill_position_event(
 
     current = dict(row)
     phase = str(current.get("phase") or "")
+    if phase not in _ENTRY_FILL_PROJECTION_PHASES:
+        logger.info(
+            "exchange_reconcile: skip entry fill projection for downstream phase position_id=%s phase=%s order_id=%s",
+            position_id,
+            phase,
+            venue_order_id,
+        )
+        return
     runtime_state = "day0_window" if phase == "day0_window" else "entered"
-    command_state = str(command.get("state") or "").upper()
-    order_status = (
-        "partial"
-        if command_event == "PARTIAL_FILL_OBSERVED" or command_state == "PARTIAL"
-        else "filled"
+    fill_economics = _entry_fill_economics_for_command(
+        conn,
+        command_id=str(command.get("command_id") or ""),
+        fallback_filled_size=filled_size,
+        fallback_fill_price=fill_price,
     )
-    shares = current.get("shares") if current.get("shares") not in (None, "") else filled_size
-    entry_price = current.get("entry_price") if current.get("entry_price") not in (None, "") else fill_price
-    cost_basis = current.get("cost_basis_usd")
-    if cost_basis in (None, ""):
-        cost_basis = str(_decimal(filled_size) * _decimal(fill_price))
+    if fill_economics is None:
+        return
+    shares_dec, entry_price_dec, cost_basis_dec = fill_economics
+    shares = _decimal_text(shares_dec)
+    entry_price = _decimal_text(entry_price_dec)
+    cost_basis = _decimal_text(cost_basis_dec)
+    order_status = "filled" if _entry_fill_covers_command(command, shares_dec) else "partial"
+    if command_event == "PARTIAL_FILL_OBSERVED":
+        order_status = "partial"
+    _ensure_entry_fill_order_fact(
+        conn,
+        command=command,
+        venue_order_id=venue_order_id,
+        filled_size=shares,
+        observed_at=observed_at,
+        source=order_fact_source,
+    )
     occurred_at = observed_at.isoformat()
     position = SimpleNamespace(
         **{
@@ -790,9 +1730,20 @@ def _ensure_entry_fill_position_event(
     ).fetchone()
     if existing is not None:
         from src.engine.lifecycle_events import build_position_current_projection
-        from src.state.projection import upsert_position_current
 
-        upsert_position_current(conn, build_position_current_projection(position))
+        projection = build_position_current_projection(position)
+        _apply_entry_fill_projection_and_execution_fact(
+            conn,
+            events=[],
+            projection=projection,
+            position=position,
+            command=command,
+            observed_at=observed_at,
+            order_status=order_status,
+            shares=shares_dec,
+            entry_price=entry_price_dec,
+            upsert_only=True,
+        )
         return
     seq_row = conn.execute(
         "SELECT COALESCE(MAX(sequence_no), 0) FROM position_events WHERE position_id = ?",
@@ -801,14 +1752,413 @@ def _ensure_entry_fill_position_event(
     sequence_no = int((seq_row[0] if seq_row else 0) or 0) + 1
 
     from src.engine.lifecycle_events import build_entry_fill_only_canonical_write
-    from src.state.db import append_many_and_project
 
     events, projection = build_entry_fill_only_canonical_write(
         position,
         sequence_no=sequence_no,
         source_module="src.execution.exchange_reconcile",
     )
-    append_many_and_project(conn, events, projection)
+    _apply_entry_fill_projection_and_execution_fact(
+        conn,
+        events=events,
+        projection=projection,
+        position=position,
+        command=command,
+        observed_at=observed_at,
+        order_status=order_status,
+        shares=shares_dec,
+        entry_price=entry_price_dec,
+        upsert_only=False,
+    )
+
+
+def _entry_fill_economics_for_command(
+    conn: sqlite3.Connection,
+    *,
+    command_id: str,
+    fallback_filled_size: str,
+    fallback_fill_price: str,
+) -> tuple[Decimal, Decimal, Decimal] | None:
+    """Aggregate latest authoritative trade facts for an entry command."""
+
+    rows = conn.execute(
+        """
+        SELECT tf.state, tf.filled_size, tf.fill_price
+          FROM venue_trade_facts tf
+          JOIN (
+                SELECT trade_id, MAX(local_sequence) AS local_sequence
+                  FROM venue_trade_facts
+                 WHERE command_id = ?
+                 GROUP BY trade_id
+               ) latest
+            ON latest.trade_id = tf.trade_id
+           AND latest.local_sequence = tf.local_sequence
+         WHERE tf.command_id = ?
+           AND tf.state IN ('MATCHED', 'MINED', 'CONFIRMED')
+        """,
+        (command_id, command_id),
+    ).fetchall()
+    shares = Decimal("0")
+    cost_basis = Decimal("0")
+    for row in rows:
+        filled = _positive_decimal_or_none(row["filled_size"])
+        price = _positive_decimal_or_none(row["fill_price"])
+        if filled is None or price is None:
+            continue
+        shares += filled
+        cost_basis += filled * price
+    if shares > Decimal("0") and cost_basis > Decimal("0"):
+        return shares, cost_basis / shares, cost_basis
+
+    fallback_shares = _positive_decimal_or_none(fallback_filled_size)
+    fallback_price = _positive_decimal_or_none(fallback_fill_price)
+    if fallback_shares is None or fallback_price is None:
+        return None
+    return fallback_shares, fallback_price, fallback_shares * fallback_price
+
+
+def _ensure_exit_fill_position_event(
+    conn: sqlite3.Connection,
+    *,
+    command: Mapping[str, Any],
+    venue_order_id: str,
+    filled_size: str,
+    fill_price: str,
+    observed_at: datetime,
+    command_event: str | None = None,
+) -> None:
+    if command_event != "FILL_CONFIRMED":
+        return
+    if str(command.get("intent_kind") or "").upper() != "EXIT":
+        return
+    if str(command.get("side") or "").upper() != "SELL":
+        return
+    position_id = str(command.get("position_id") or "").strip()
+    if not position_id:
+        return
+    row = conn.execute(
+        """
+        SELECT *
+          FROM position_current
+         WHERE position_id = ?
+         ORDER BY updated_at DESC
+         LIMIT 1
+        """,
+        (position_id,),
+    ).fetchone()
+    if row is None:
+        return
+
+    current = dict(row)
+    phase = str(current.get("phase") or "")
+    if phase not in _EXIT_FILL_PROJECTION_PHASES:
+        logger.info(
+            "exchange_reconcile: skip exit fill projection for incompatible phase position_id=%s phase=%s order_id=%s",
+            position_id,
+            phase,
+            venue_order_id,
+        )
+        return
+    fill_economics = _exit_fill_economics_for_command(
+        conn,
+        command_id=str(command.get("command_id") or ""),
+        fallback_filled_size=filled_size,
+        fallback_fill_price=fill_price,
+    )
+    if fill_economics is None:
+        return
+    shares_dec, exit_price_dec = fill_economics
+    occurred_at = observed_at.isoformat()
+    position = SimpleNamespace(
+        **{
+            **current,
+            "trade_id": position_id,
+            "state": "economically_closed",
+            "exit_state": "sell_filled",
+            "pre_exit_state": phase,
+            "chain_state": current.get("chain_state") or "synced",
+            "env": current.get("env") or "live",
+            "order_id": current.get("order_id") or "",
+            "order_status": "sell_filled",
+            "last_exit_order_id": venue_order_id,
+            "last_exit_at": occurred_at,
+            "exit_price": _decimal_text(exit_price_dec),
+            "exit_reason": "M5_EXCHANGE_RECONCILE",
+            "shares": current.get("shares") or _decimal_text(shares_dec),
+            "strategy_key": current.get("strategy_key") or current.get("strategy") or "unknown_strategy",
+            "unit": current.get("unit") or "F",
+        }
+    )
+    existing = conn.execute(
+        """
+        SELECT 1
+          FROM position_events
+         WHERE position_id = ?
+           AND event_type = 'EXIT_ORDER_FILLED'
+           AND order_id = ?
+         LIMIT 1
+        """,
+        (position_id, venue_order_id),
+    ).fetchone()
+    if existing is not None:
+        from src.engine.lifecycle_events import build_position_current_projection
+
+        projection = build_position_current_projection(position)
+        _apply_exit_fill_projection_and_execution_fact(
+            conn,
+            events=[],
+            projection=projection,
+            position=position,
+            command=command,
+            observed_at=observed_at,
+            shares=shares_dec,
+            exit_price=exit_price_dec,
+            upsert_only=True,
+        )
+        return
+    seq_row = conn.execute(
+        "SELECT COALESCE(MAX(sequence_no), 0) FROM position_events WHERE position_id = ?",
+        (position_id,),
+    ).fetchone()
+    sequence_no = int((seq_row[0] if seq_row else 0) or 0) + 1
+
+    from src.engine.lifecycle_events import build_economic_close_canonical_write
+
+    events, projection = build_economic_close_canonical_write(
+        position,
+        sequence_no=sequence_no,
+        phase_before="pending_exit",
+        source_module="src.execution.exchange_reconcile",
+    )
+    _apply_exit_fill_projection_and_execution_fact(
+        conn,
+        events=events,
+        projection=projection,
+        position=position,
+        command=command,
+        observed_at=observed_at,
+        shares=shares_dec,
+        exit_price=exit_price_dec,
+        upsert_only=False,
+    )
+
+
+def _exit_fill_economics_for_command(
+    conn: sqlite3.Connection,
+    *,
+    command_id: str,
+    fallback_filled_size: str,
+    fallback_fill_price: str,
+) -> tuple[Decimal, Decimal] | None:
+    rows = conn.execute(
+        """
+        SELECT tf.state, tf.filled_size, tf.fill_price
+          FROM venue_trade_facts tf
+          JOIN (
+                SELECT trade_id, MAX(local_sequence) AS local_sequence
+                  FROM venue_trade_facts
+                 WHERE command_id = ?
+                 GROUP BY trade_id
+               ) latest
+            ON latest.trade_id = tf.trade_id
+           AND latest.local_sequence = tf.local_sequence
+         WHERE tf.command_id = ?
+           AND tf.state = 'CONFIRMED'
+        """,
+        (command_id, command_id),
+    ).fetchall()
+    shares = Decimal("0")
+    proceeds = Decimal("0")
+    for row in rows:
+        filled = _positive_decimal_or_none(row["filled_size"])
+        price = _positive_decimal_or_none(row["fill_price"])
+        if filled is None or price is None:
+            continue
+        shares += filled
+        proceeds += filled * price
+    if shares > Decimal("0") and proceeds > Decimal("0"):
+        return shares, proceeds / shares
+
+    fallback_shares = _positive_decimal_or_none(fallback_filled_size)
+    fallback_price = _positive_decimal_or_none(fallback_fill_price)
+    if fallback_shares is None or fallback_price is None:
+        return None
+    return fallback_shares, fallback_price
+
+
+def _apply_entry_fill_projection_and_execution_fact(
+    conn: sqlite3.Connection,
+    *,
+    events: list[dict],
+    projection: dict,
+    position: SimpleNamespace,
+    command: Mapping[str, Any],
+    observed_at: datetime,
+    order_status: str,
+    shares: Decimal,
+    entry_price: Decimal,
+    upsert_only: bool,
+) -> None:
+    from src.state.db import append_many_and_project, log_execution_fact
+    from src.state.projection import upsert_position_current
+
+    sp_name = f"sp_entry_fill_{uuid.uuid4().hex[:12]}"
+    conn.execute(f"SAVEPOINT {sp_name}")
+    try:
+        if upsert_only:
+            upsert_position_current(conn, projection)
+        else:
+            append_many_and_project(conn, events, projection)
+        position_id = str(getattr(position, "trade_id", "") or "")
+        submitted_price = _float_or_none(command.get("price"))
+        fill_price = _float_or_none(entry_price)
+        filled_shares = _float_or_none(shares)
+        terminal_status = "filled" if order_status == "filled" else "partial"
+        venue_status = "FILLED" if terminal_status == "filled" else "PARTIAL"
+        log_execution_fact(
+            conn,
+            intent_id=f"{position_id}:entry",
+            position_id=position_id,
+            decision_id=str(command.get("decision_id") or "") or None,
+            order_role="entry",
+            strategy_key=str(getattr(position, "strategy_key", "") or "") or None,
+            posted_at=(
+                str(getattr(position, "order_posted_at", "") or "")
+                or str(command.get("created_at") or "")
+                or None
+            ),
+            filled_at=observed_at.isoformat(),
+            submitted_price=submitted_price,
+            fill_price=fill_price,
+            shares=filled_shares,
+            venue_status=venue_status,
+            terminal_exec_status=terminal_status,
+        )
+        _append_entry_position_lots_for_command(conn, command=command, observed_at=observed_at)
+        conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+    except Exception:
+        conn.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
+        conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+        raise
+
+
+def _apply_exit_fill_projection_and_execution_fact(
+    conn: sqlite3.Connection,
+    *,
+    events: list[dict],
+    projection: dict,
+    position: SimpleNamespace,
+    command: Mapping[str, Any],
+    observed_at: datetime,
+    shares: Decimal,
+    exit_price: Decimal,
+    upsert_only: bool,
+) -> None:
+    from src.state.db import append_many_and_project, log_execution_fact
+    from src.state.projection import upsert_position_current
+
+    sp_name = f"sp_exit_fill_{uuid.uuid4().hex[:12]}"
+    conn.execute(f"SAVEPOINT {sp_name}")
+    try:
+        if upsert_only:
+            upsert_position_current(conn, projection)
+        else:
+            append_many_and_project(conn, events, projection)
+        position_id = str(getattr(position, "trade_id", "") or "")
+        log_execution_fact(
+            conn,
+            intent_id=f"{position_id}:exit",
+            position_id=position_id,
+            decision_id=str(command.get("decision_id") or "") or None,
+            order_role="exit",
+            strategy_key=str(getattr(position, "strategy_key", "") or "") or None,
+            posted_at=str(command.get("created_at") or "") or None,
+            filled_at=observed_at.isoformat(),
+            submitted_price=_float_or_none(command.get("price")),
+            fill_price=_float_or_none(exit_price),
+            shares=_float_or_none(shares),
+            venue_status="FILLED",
+            terminal_exec_status="filled",
+        )
+        conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+    except Exception:
+        conn.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
+        conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+        raise
+
+
+def _append_entry_position_lots_for_command(
+    conn: sqlite3.Connection,
+    *,
+    command: Mapping[str, Any],
+    observed_at: datetime,
+) -> None:
+    if str(command.get("intent_kind") or "").upper() != "ENTRY":
+        return
+    if str(command.get("side") or "").upper() != "BUY":
+        return
+    from src.state.venue_command_repo import append_position_lot, resolve_position_lot_id_for_command
+
+    position_lot_id = resolve_position_lot_id_for_command(conn, command)
+    if position_lot_id is None:
+        return
+    rows = conn.execute(
+        """
+        SELECT tf.*
+          FROM venue_trade_facts tf
+          JOIN (
+                SELECT trade_id, MAX(local_sequence) AS local_sequence
+                  FROM venue_trade_facts
+                 WHERE command_id = ?
+                 GROUP BY trade_id
+               ) latest
+            ON latest.trade_id = tf.trade_id
+           AND latest.local_sequence = tf.local_sequence
+         WHERE tf.command_id = ?
+           AND tf.state IN ('MATCHED', 'MINED', 'CONFIRMED')
+         ORDER BY tf.observed_at, tf.trade_fact_id
+        """,
+        (str(command.get("command_id") or ""), str(command.get("command_id") or "")),
+    ).fetchall()
+    for row in rows:
+        if _positive_decimal_or_none(row["filled_size"]) is None:
+            continue
+        if _positive_decimal_or_none(row["fill_price"]) is None:
+            continue
+        existing = conn.execute(
+            """
+            SELECT 1
+              FROM position_lots
+             WHERE source_trade_fact_id = ?
+             LIMIT 1
+            """,
+            (int(row["trade_fact_id"]),),
+        ).fetchone()
+        if existing is not None:
+            continue
+        state = "CONFIRMED_EXPOSURE" if str(row["state"]) == "CONFIRMED" else "OPTIMISTIC_EXPOSURE"
+        append_position_lot(
+            conn,
+            position_id=position_lot_id,
+            state=state,
+            shares=str(row["filled_size"]),
+            entry_price_avg=str(row["fill_price"]),
+            source_command_id=str(command["command_id"]),
+            source_trade_fact_id=int(row["trade_fact_id"]),
+            captured_at=row["observed_at"] or observed_at,
+            state_changed_at=row["observed_at"] or observed_at,
+            source=str(row["source"] or "REST"),
+            observed_at=row["observed_at"] or observed_at,
+            venue_timestamp=row["venue_timestamp"],
+            raw_payload_json={
+                "source": "exchange_reconcile_entry_fill_materialization",
+                "command_id": str(command["command_id"]),
+                "trade_fact_id": int(row["trade_fact_id"]),
+                "trade_id": str(row["trade_id"]),
+                "market_id": str(command.get("market_id") or ""),
+                "token_id": str(command.get("token_id") or ""),
+            },
+        )
 
 
 def _local_command_for_trade(
@@ -836,6 +2186,13 @@ def _selected_maker_order(raw: Mapping[str, Any], order_id: str | None) -> Mappi
     return None
 
 
+def _entry_fill_covers_command(command: Mapping[str, Any], shares: Decimal) -> bool:
+    target = _positive_decimal_or_none(command.get("size"))
+    if target is None:
+        return str(command.get("state") or "").upper() == "FILLED"
+    return shares >= target
+
+
 def _trade_filled_size(raw: Mapping[str, Any], order_id: str | None) -> Any:
     maker = _selected_maker_order(raw, order_id)
     if maker is not None:
@@ -855,11 +2212,20 @@ def _trade_fill_price(raw: Mapping[str, Any], order_id: str | None) -> Any:
     maker = _selected_maker_order(raw, order_id)
     if maker is not None:
         return _first_present(maker, "avgPrice", "avg_price", "fillPrice", "fill_price", "price", default=None)
+    if _taker_order_price_applies(raw, order_id):
+        return _first_present(raw, "avgPrice", "avg_price", "fillPrice", "fill_price", "price", default=None)
     return _first_explicit_fill_price(raw)
 
 
 def _first_explicit_fill_price(raw: Mapping[str, Any]) -> Any:
     return _first_present(raw, "avgPrice", "avg_price", "fillPrice", "fill_price", default=None)
+
+
+def _taker_order_price_applies(raw: Mapping[str, Any], order_id: str | None) -> bool:
+    if not order_id:
+        return False
+    taker_order_id = _string_or_none(_first_present(raw, "taker_order_id", "takerOrderId", default=None))
+    return taker_order_id == order_id
 
 
 def _missing_trade_fill_economics(
@@ -886,6 +2252,32 @@ def _positive_decimal(value: Any) -> bool:
     except (InvalidOperation, ValueError):
         return False
     return decimal.is_finite() and decimal > Decimal("0")
+
+
+def _positive_decimal_or_none(value: Any) -> Decimal | None:
+    if value is None or value == "":
+        return None
+    try:
+        decimal = _decimal(value)
+    except (InvalidOperation, ValueError):
+        return None
+    if not decimal.is_finite() or decimal <= Decimal("0"):
+        return None
+    return decimal
+
+
+def _decimal_text(value: Decimal) -> str:
+    return str(value)
+
+
+def _float_or_none(value: Any) -> float | None:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    if numeric != numeric or numeric in (float("inf"), float("-inf")):
+        return None
+    return numeric
 
 
 def _latest_trade_fact_for_trade_id(conn: sqlite3.Connection, trade_id: str) -> dict[str, Any] | None:
@@ -1195,6 +2587,25 @@ def _order_id(value: Any) -> str | None:
     if direct:
         return str(direct)
     return _string_or_none(_first_present(raw, "orderID", "orderId", "order_id", "id", default=None))
+
+
+def _point_order_lookup(adapter: Any, order_id: str) -> Any | None:
+    fn = getattr(adapter, "get_order", None)
+    if not callable(fn):
+        return None
+    return fn(order_id)
+
+
+def _order_state(value: Any | None) -> str | None:
+    if value is None:
+        return None
+    raw = _raw(value)
+    direct = getattr(value, "status", None)
+    state = direct if direct is not None else _first_present(raw, "status", "state", "order_status", default=None)
+    if state is None:
+        return None
+    text = str(state).strip().upper()
+    return text or None
 
 
 def _trade_id(raw: Mapping[str, Any]) -> str | None:

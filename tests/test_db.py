@@ -1825,6 +1825,61 @@ def test_log_trade_entry_persists_replay_critical_fields(tmp_path):
     assert row["edge_context_json"] == '{"forward_edge":0.2}'
 
 
+def test_log_trade_entry_tolerates_forecast_class_snapshot_ids(tmp_path):
+    from src.state.db import log_trade_entry
+    from src.state.portfolio import Position
+
+    db_path = tmp_path / "test.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+
+    pos = Position(
+        trade_id="t-k1",
+        market_id="m1",
+        city="NYC",
+        cluster="US-Northeast",
+        target_date="2026-04-01",
+        bin_label="39-40°F",
+        direction="buy_yes",
+        env="live",
+        unit="F",
+        size_usd=10.0,
+        entry_price=0.40,
+        p_posterior=0.60,
+        edge=0.20,
+        entry_ci_width=0.10,
+        decision_snapshot_id="1129974",
+        calibration_version="platt_v1",
+        strategy="opening_inertia",
+        edge_source="opening_inertia",
+        discovery_mode="opening_hunt",
+        entry_method="executable_forecast",
+        selected_method="executable_forecast",
+        order_posted_at="2026-04-01T01:00:00Z",
+        order_id="0xlive-order",
+        order_status="live",
+        state="pending_tracked",
+    )
+
+    log_trade_entry(conn, pos)
+    conn.commit()
+
+    row = conn.execute(
+        """
+        SELECT forecast_snapshot_id, runtime_trade_id, order_id, status
+        FROM trade_decisions
+        ORDER BY trade_id DESC LIMIT 1
+        """
+    ).fetchone()
+    conn.close()
+
+    assert row is not None
+    assert row["forecast_snapshot_id"] is None
+    assert row["runtime_trade_id"] == "t-k1"
+    assert row["order_id"] == "0xlive-order"
+    assert row["status"] == "pending_tracked"
+
+
 @pytest.mark.skip(reason="P9: legacy position_events write path eliminated")
 def test_log_trade_entry_emits_position_event(tmp_path):
     from src.state.db import log_trade_entry, query_position_events
