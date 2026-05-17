@@ -180,8 +180,8 @@ make a surface default-read unless `current_state.md` routes it.
 | `task_2026-05-17_live_order_survival/` | plan packet container | Live order survival packet for heartbeat lease ownership, submit ownership projection, REVIEW_REQUIRED clearance, and sustained order progress proof |
 | `task_2026-05-17_live_order_survival/LIVE_ORDER_SURVIVAL_PLAN.md` | topology planning packet | Plan and completion definition for proving submitted orders survive heartbeat/recovery boundaries through fill, venue terminality, or explicit no-exposure clearance |
 | `LIVE_LAUNCH_HANDOFF.md` | Live launch handoff document for daemon deployment |
-| `UNMATCHED_GAMMA_CITIES_2026_05_07.md` | Unmatched gamma cities investigation evidence (2026-05-07) |
-| `CLOUD_EXTRACT_PATCH_2026_05_07.md` | Cloud extract patch evidence (2026-05-07) |
+| `docs/historical_evidence/UNMATCHED_GAMMA_CITIES_2026_05_07.md` | Unmatched gamma cities investigation evidence (2026-05-07) |
+| `docs/historical_evidence/CLOUD_EXTRACT_PATCH_2026_05_07.md` | Cloud extract patch evidence (2026-05-07) |
 | `PLIST_UPDATE_FOR_RELOCK.md` | Plist update evidence for re-lock operation |
 | `INDEX.md` | Directory index for docs/operations live surfaces |
 | `live_rescue_ledger_2026-05-04.md` | Live rescue ledger evidence (2026-05-04) |

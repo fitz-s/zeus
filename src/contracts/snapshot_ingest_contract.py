@@ -33,7 +33,7 @@ from src.types.metric_identity import HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN, Metri
 # 2026-05-07 Codex P2 fix: dedicate MetricIdentity instances for the 3h
 # native derived quantity ("mx2t3_local_calendar_day_max" /
 # "mn2t3_local_calendar_day_min"). The cloud extract patch (see
-# docs/operations/CLOUD_EXTRACT_PATCH_2026_05_07.md) writes these strings
+# docs/historical_evidence/CLOUD_EXTRACT_PATCH_2026_05_07.md) writes these strings
 # into payload.physical_quantity. Mapping the new data_versions to the
 # legacy 6h MetricIdentity caused PHYSICAL_QUANTITY_MISMATCH on every
 # correctly-tagged 3h row, dropping post-cutover Open Data rows on the
