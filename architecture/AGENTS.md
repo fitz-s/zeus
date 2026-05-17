@@ -70,7 +70,6 @@ Changes here are architecture or governance changes, never “just docs.”
 | `ast_rules/forbidden_patterns.md` | Forbidden code patterns |
 | `packet_templates/*.md` | Work packet templates (bugfix, feature, refactor, schema) |
 | `worktree_merge_protocol.yaml` | Cross-session merge protocol per Stage 4 Gate B (verdict.md §6) — conflict-first merge inspection; MERGE_AUDIT_EVIDENCE critic verdict required only for escalated broad/high-risk conflict surfaces |
-| ~~`world_schema_manifest.yaml`~~ | RETIRED P2 (2026-05-14): replaced by `src/state/table_registry.py` registry. `validate_world_schema_at_boot` removed from `src/main.py`; replaced in P3 by `assert_db_matches_registry`. |
 | `preflight_overrides_2026-04-28.yaml` | Operator-approved preflight drift overrides for WU ICAO history residuals (schema_version 1; created 2026-04-28) |
 | `inv_prototype.py` | @enforced_by decorator prototype for round-2 §H1 INV annotation experiment (created 2026-04-28) |
 | `world_schema_version.yaml` | Legacy world DB schema version sentinel retained for historical two-system independence registry; live boot authority is direct `zeus-world.db` and `zeus-forecasts.db` `PRAGMA user_version` checks in `src/main.py` |
@@ -80,6 +79,21 @@ Changes here are architecture or governance changes, never “just docs.”
 | `paris_station_resolution_2026-05-01.yaml` | Operator decision 2026-05-01: Paris Polymarket settlement station is LFPB (not LFPG) |
 | `data_sources_registry_2026_05_08.yaml` | BINDING authoritative registry of all 12 external data sources Zeus consumes (forecast, observation, settlement, market); created 2026-05-08; includes [VERIFIED]/[INFERRED] tags, forbidden patterns FP-01..FP-10, and cross-references to all binding architecture docs |
 | `agent_pr_discipline_2026_05_09.md` | Agent PR discipline: 300-LOC threshold, auto-reviewer cost economics, decision tree, author detection, bypass protocol; hook `.claude/hooks/dispatch.py::_run_advisory_check_pr_create_loc_accumulation` |
+| `admission_severity.yaml` | Topology v_next admission severity overrides; maps file patterns to admission severity levels (created 2026-05-07) |
+| `antibody_specs.yaml` | Machine-readable antibody specs from zeus_agent_runtime_compounding plan W1.2 (created 2026-05-16) |
+| `artifact_authority_status.yaml` | Closed-artifact authority distinction registry per UNIVERSAL_TOPOLOGY_DESIGN §13 (created 2026-05-16) |
+| `calibration_transfer_oos_design_2026-05-05.md` | Design doc for calibration transfer OOS evidence; legacy `evaluate_calibration_transfer_policy` wiring analysis (created 2026-05-05) |
+| `capabilities.yaml` | Capability registry with sunset dates; agent capability declarations per ULTIMATE_DESIGN §2.2 (created 2026-05-06) |
+| `cascade_liveness_contract.yaml` | Registry of state-machine tables and their cascade liveness obligations per SCAFFOLD_F14_F16 §G.2 (created 2026-05-16) |
+| `db_table_ownership.yaml` | Canonical table→DB mapping authority post K1 DB split (eba80d2b9d); cross-reference for all DB routing decisions (created 2026-05-14) |
+| `ecmwf_opendata_tigge_equivalence_2026_05_06.yaml` | ECMWF OpenData/TIGGE equivalence proof registry; calibration READ-path audit evidence (created 2026-05-06) |
+| `improvement_backlog.yaml` | Structured improvement backlog from PROPOSALS_2026-05-04 P3 context capsule (created 2026-05-04) |
+| `math_defects_2_3_2_4_3_1_design_2026-05-05.md` | Unified design for math defects 2.3/2.4/3.1; DDD INV-17 fix + calibration transfer scaffolding (created 2026-05-05) |
+| `reversibility.yaml` | Reversibility class registry per ULTIMATE_DESIGN §2.3; governs rollback obligations by change class (created 2026-05-06) |
+| `settlement_dual_source_truth_2026_05_07.yaml` | Operator-confirmed settlement dual-source truth registry; Gamma backfill re-enabled decision (created 2026-05-07) |
+| `strategy_profile_registry.yaml` | Strategy profile registry; oracle/kelly evidence rebuild authority (created 2026-05-04) |
+| `topology_v_next_binding.yaml` | Zeus binding layer for topology_v_next P1; maps file patterns to cohort/admission intent (created 2026-05-15) |
+| `zeus_grid_resolution_authority_2026_05_07.yaml` | Grid resolution authority Plan A; operator decision 2026-05-07 on ECMWF grid handling (created 2026-05-07) |
 
 ## Subdirectory navigation
 
