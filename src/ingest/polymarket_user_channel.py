@@ -110,7 +110,19 @@ def _parse_dt(value: Any, *, fallback: datetime | None = None) -> datetime:
         return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
     text = str(value)
     if text.isdigit():
-        return datetime.fromtimestamp(int(text), tz=timezone.utc)
+        try:
+            epoch_value = int(text)
+            if epoch_value >= 10**18:
+                epoch_seconds = epoch_value / 1_000_000_000
+            elif epoch_value >= 10**15:
+                epoch_seconds = epoch_value / 1_000_000
+            elif epoch_value >= 10**12:
+                epoch_seconds = epoch_value / 1_000
+            else:
+                epoch_seconds = epoch_value
+            return datetime.fromtimestamp(epoch_seconds, tz=timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            return fallback or _utcnow()
     try:
         parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
     except ValueError:

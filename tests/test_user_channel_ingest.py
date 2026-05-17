@@ -1,5 +1,5 @@
 # Created: 2026-04-27
-# Lifecycle: created=2026-04-27; last_reviewed=2026-05-15; last_reused=2026-05-15
+# Lifecycle: created=2026-04-27; last_reviewed=2026-05-15; last_reused=2026-05-17
 # Purpose: R3 M3 Polymarket user-channel WS ingest and fail-closed gap guard antibodies.
 # Reuse: Run when user WebSocket ingest, U2 venue facts, or submit gap guards change.
 # Last reused/audited: 2026-05-08
@@ -22,7 +22,7 @@ import pytest
 from src.contracts.executable_market_snapshot_v2 import ExecutableMarketSnapshotV2
 from src.contracts.venue_submission_envelope import VenueSubmissionEnvelope
 from src.control import ws_gap_guard
-from src.ingest.polymarket_user_channel import PolymarketUserChannelIngestor, WSAuth
+from src.ingest.polymarket_user_channel import PolymarketUserChannelIngestor, WSAuth, _parse_dt
 from src.state.db import init_schema
 from src.state.snapshot_repo import insert_snapshot
 from src.state.venue_command_repo import (
@@ -240,6 +240,17 @@ def test_ws_message_parsed_to_order_fact(conn):
     assert row["source"] == "WS_USER"
     raw = json.loads(row["raw_payload_json"])
     assert raw["apiKey"] == raw["secret"] == raw["passphrase"] == "***"
+
+
+def test_ws_order_timestamp_accepts_epoch_milliseconds(conn):
+    epoch_millis = str(int(NOW.timestamp() * 1000))
+
+    result = _ingestor(conn).handle_message(_order_message(timestamp=epoch_millis))
+
+    assert result and result["order_fact_id"]
+    row = _rows(conn, "venue_order_facts")[-1]
+    assert row["observed_at"] == NOW.isoformat()
+    assert _parse_dt(epoch_millis) == NOW
 
 
 def test_unmatched_order_event_is_deferred_not_thread_fatal(conn):
