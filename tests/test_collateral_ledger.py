@@ -366,6 +366,21 @@ def test_buy_preflight_blocks_when_snapshot_stale(conn):
         ledger.buy_preflight(_buy_intent(size_usd=1.0))
 
 
+def test_buy_preflight_reloads_newer_persisted_snapshot_before_freshness_gate(conn):
+    """RELATIONSHIP: external snapshot writer -> live preflight freshness gate."""
+
+    ledger = CollateralLedger(conn)
+    old_time = datetime.now(timezone.utc) - timedelta(seconds=120)
+    ledger.set_snapshot(_snapshot(pusd=0, captured_at=old_time))
+
+    writer = CollateralLedger(conn)
+    fresh_time = datetime.now(timezone.utc)
+    writer.set_snapshot(_snapshot(pusd=2_000_000, captured_at=fresh_time))
+
+    assert ledger.buy_preflight(_buy_intent(size_usd=1.0)) is True
+    assert ledger.snapshot().pusd_balance_micro == 2_000_000
+
+
 def test_buy_preflight_blocks_when_snapshot_timestamp_is_future(conn):
     ledger = CollateralLedger(conn)
     ledger.set_snapshot(_snapshot(captured_at=datetime.now(timezone.utc) + timedelta(seconds=61)))

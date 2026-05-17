@@ -281,23 +281,25 @@ class CollateralLedger:
         self._persist_snapshot(snapshot)
 
     def snapshot(self) -> CollateralSnapshot:
+        loaded = self._load_latest_snapshot()
+        if loaded is not None and (
+            self._snapshot is None
+            or _is_newer_snapshot(loaded, self._snapshot)
+        ):
+            self._snapshot = loaded
         if self._snapshot is None:
-            loaded = self._load_latest_snapshot()
-            if loaded is not None:
-                self._snapshot = loaded
-            else:
-                return CollateralSnapshot(
-                    pusd_balance_micro=0,
-                    pusd_allowance_micro=0,
-                    usdc_e_legacy_balance_micro=0,
-                    ctf_token_balances={},
-                    ctf_token_allowances={},
-                    reserved_pusd_for_buys_micro=self._reserved_pusd(),
-                    reserved_tokens_for_sells=self._reserved_tokens(),
-                    captured_at=datetime.now(timezone.utc),
-                    authority_tier="DEGRADED",
-                    raw_balance_payload_hash=None,
-                )
+            return CollateralSnapshot(
+                pusd_balance_micro=0,
+                pusd_allowance_micro=0,
+                usdc_e_legacy_balance_micro=0,
+                ctf_token_balances={},
+                ctf_token_allowances={},
+                reserved_pusd_for_buys_micro=self._reserved_pusd(),
+                reserved_tokens_for_sells=self._reserved_tokens(),
+                captured_at=datetime.now(timezone.utc),
+                authority_tier="DEGRADED",
+                raw_balance_payload_hash=None,
+            )
         return replace(
             self._snapshot,
             reserved_pusd_for_buys_micro=self._reserved_pusd(),
@@ -585,6 +587,17 @@ def configure_global_ledger(ledger: CollateralLedger | None) -> None:
 
 def get_global_ledger() -> CollateralLedger | None:
     return _GLOBAL_LEDGER
+
+
+def _snapshot_time(snapshot: CollateralSnapshot) -> datetime:
+    captured_at = snapshot.captured_at
+    if captured_at.tzinfo is None:
+        return captured_at.replace(tzinfo=timezone.utc)
+    return captured_at.astimezone(timezone.utc)
+
+
+def _is_newer_snapshot(candidate: CollateralSnapshot, current: CollateralSnapshot) -> bool:
+    return _snapshot_time(candidate) > _snapshot_time(current)
 
 
 def release_reservation_for_command_state(
