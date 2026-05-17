@@ -27,6 +27,16 @@ index, or archive catalog.
 | `current_source_validity.md` | Active current-fact surface for audited source-validity posture |
 | `packet_scope_protocol.md` | Protocol reference for the Packet Runtime (`zpkt`) and `scope.yaml` sidecar contract |
 
+### Standalone Reports / Evidence (top-level files, not packet-scoped)
+
+| File | Purpose |
+|------|---------|
+| `zeus_system_review_2026-05-16.md` | 2026-05-16 system review evidence (7-agent investigation; parent for compounding plan) |
+| `zeus_agent_runtime_compounding_plan_2026-05-16.md` | Wave 1 agent runtime compounding plan v2.4 (4-critic + A2 + pre-PR + bot revisions, traced in §9) |
+
+Top-level standalone reports must register in `architecture/docs_registry.yaml`
+under `doc_class: report` with explicit `freshness_class` and `next_action`.
+
 Current-fact files must stay summary-only, receipt/evidence-backed,
 expiry-bound, and fail-closed when stale. They are planning truth, not durable
 law or implementation permission.

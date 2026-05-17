@@ -1,0 +1,23 @@
+# Proposed registry.yaml entry for citation_grep_gate hook.
+# Operator: paste this block into .claude/hooks/registry.yaml under the `hooks:` list
+# when ready to activate. Do NOT add until the hook file is audited and boot self-test confirmed.
+
+  - id: citation_grep_gate
+    event: PreToolUse
+    matcher: "Edit|Write"
+    intent: >
+      Scan old_string/new_string args for file:line and file Lline citations.
+      For each citation, verify the referenced file exists and the stated line
+      number is within the file's current bounds (1 <= lineno <= total_lines).
+      On drift, emit additionalContext listing the stale citations so the agent
+      can grep-verify before proceeding. Future enhancement (not implemented):
+      content-match within a ±5 line tolerance window.
+      Antibody for: feedback_zeus_plan_citations_rot_fast.md and
+      feedback_grep_gate_before_contract_lock.md.
+      ADVISORY: emits context; never blocks; fail-open on any exception.
+    blocked_when: []
+    severity: ADVISORY
+    sunset_date: 2026-08-16
+    telemetry:
+      ritual_signal_emitted: true
+    owner_module: .claude/hooks/citation_grep_gate.py
