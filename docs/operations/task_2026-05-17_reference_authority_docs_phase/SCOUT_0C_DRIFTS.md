@@ -46,6 +46,8 @@ Scope rule: IN = dead-path-ref, dead-symbol-ref, stale-claim, wrong-value. OUT =
 
 **Note:** All 8 file paths cited in §15 Machine-Checkable Sources exist on disk (verified). All lifecycle phase strings in §8.2 match `src/state/lifecycle_manager.py` exactly. `ExecutionPrice`, `HeldSideProbability`, `NativeSidePrice`, `Temperature`, `TemperatureDelta` all verified present.
 
+**ATTRIBUTION_CORRECTED 2026-05-17**: The 4 drifts in the table above (`cycle_runner.py`, `evaluator.py`, `status_summary.py`, `append_event_and_project`) actually live in `zeus_change_control_constitution.md` (rows 1–3 = constitution:237/238/240; row 4 = constitution:308), NOT in `zeus_current_architecture.md`. Independent grep (`git log -S "src/execution/cycle_runner" -- docs/authority/zeus_current_architecture.md`) returns empty — these symbols never existed in `architecture.md`. `zeus_current_architecture.md` was **0-drift CLEAN** per TIER 0C execution. The executor correctly skipped all 4 phantom rows (no fix applied because none were needed). This erratum corrects the SCOUT artifact only; execution was correct. Source: WAVE_4_FINAL_AUDIT.md §Finding F2.
+
 ---
 
 ### docs/authority/zeus_current_delivery.md
