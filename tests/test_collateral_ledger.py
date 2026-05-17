@@ -1,8 +1,8 @@
 # Created: 2026-04-27
 # Purpose: Lock R3 Z4 CollateralLedger pUSD/CTF reservation and fail-closed executor preflight behavior.
 # Reuse: Run when collateral snapshots, pUSD/CTF accounting, wrap/unwrap command state, or executor collateral gates change.
-# Last reused/audited: 2026-05-15
-# Lifecycle: created=2026-04-27; last_reviewed=2026-05-15; last_reused=2026-05-15
+# Last reused/audited: 2026-05-17
+# Lifecycle: created=2026-04-27; last_reviewed=2026-05-17; last_reused=2026-05-17
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/Z4.yaml
 """R3 Z4 collateral-ledger antibodies."""
 
@@ -141,6 +141,46 @@ def _allow_non_collateral_execution_guards(monkeypatch):
         "src.execution.executor._assert_ws_gap_allows_submit",
         lambda *args, **kwargs: {"component": "ws_gap_guard", "allowed": True, "reason": "unit_test"},
     )
+
+
+def test_init_collateral_schema_preserves_existing_busy_timeout(tmp_path):
+    db_path = tmp_path / "trade.db"
+    db = sqlite3.connect(db_path)
+    db.row_factory = sqlite3.Row
+    db.execute("PRAGMA busy_timeout = 12345")
+
+    try:
+        init_collateral_schema(db)
+
+        assert db.execute("PRAGMA busy_timeout").fetchone()[0] == 12345
+    finally:
+        db.close()
+
+
+def test_owned_collateral_ledger_connection_uses_live_db_pragmas(tmp_path, monkeypatch):
+    monkeypatch.setenv("ZEUS_DB_BUSY_TIMEOUT_MS", "23456")
+
+    ledger = CollateralLedger(db_path=tmp_path / "trade.db")
+    try:
+        conn = ledger._conn
+        assert conn is not None
+        assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 23456
+        assert conn.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
+        assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+    finally:
+        ledger.close()
+
+
+def test_owned_collateral_ledger_bad_timeout_env_falls_back(tmp_path, monkeypatch):
+    monkeypatch.setenv("ZEUS_DB_BUSY_TIMEOUT_MS", "1e10000")
+
+    ledger = CollateralLedger(db_path=tmp_path / "trade.db")
+    try:
+        conn = ledger._conn
+        assert conn is not None
+        assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 30000
+    finally:
+        ledger.close()
 
 
 def _buy_intent(

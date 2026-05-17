@@ -1,5 +1,5 @@
 # Created: 2026-04-26
-# Last reused/audited: 2026-05-16
+# Last reused/audited: 2026-05-17
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md §P1.S4
 #                  + docs/operations/task_2026-05-15_live_order_e2e_goal/LIVE_ORDER_E2E_GOAL_PLAN.md
 """Command recovery loop — INV-31.
@@ -62,6 +62,12 @@ _TERMINAL_NO_FILL_ORDER_FACT_STATES = frozenset({
     "CANCEL_CONFIRMED",
     "EXPIRED",
     "VENUE_WIPED",
+})
+_TERMINAL_NO_FILL_VENUE_STATUSES = frozenset({
+    "CANCELLED",
+    "CANCELED",
+    "EXPIRED",
+    "REJECTED",
 })
 _LIVE_TERMINAL_ORDER_FACT_SOURCES = frozenset({
     "REST",
@@ -329,6 +335,81 @@ def _latest_terminal_order_fact_candidates(conn: sqlite3.Connection) -> list[dic
     return [_dict_row(row) for row in rows]
 
 
+def _local_orphan_no_fill_candidates(conn: sqlite3.Connection) -> list[dict]:
+    if not _table_exists(conn, "exchange_reconcile_findings"):
+        return []
+    if not _table_exists(conn, "venue_order_facts"):
+        return []
+    command_states = tuple(_ACKED_ORDER_STATES)
+    if len(command_states) != 2:
+        raise RuntimeError(
+            "update local-orphan no-fill query when _ACKED_ORDER_STATES changes"
+        )
+    rows = conn.execute(
+        """
+        WITH latest_order_fact AS (
+            SELECT command_id, MAX(local_sequence) AS max_sequence
+              FROM venue_order_facts
+             GROUP BY command_id
+        )
+        SELECT
+            finding.finding_id AS finding_id,
+            finding.evidence_json AS finding_evidence_json,
+            finding.recorded_at AS finding_recorded_at,
+            cmd.*,
+            fact.fact_id AS order_fact_id,
+            fact.state AS order_fact_state,
+            fact.observed_at AS order_fact_observed_at,
+            fact.venue_order_id AS order_fact_venue_order_id,
+            fact.remaining_size AS order_fact_remaining_size,
+            fact.matched_size AS order_fact_matched_size,
+            fact.source AS order_fact_source
+          FROM exchange_reconcile_findings finding
+          JOIN venue_commands cmd
+            ON cmd.venue_order_id = finding.subject_id
+          JOIN latest_order_fact latest
+            ON latest.command_id = cmd.command_id
+          JOIN venue_order_facts fact
+            ON fact.command_id = latest.command_id
+           AND fact.local_sequence = latest.max_sequence
+         WHERE finding.kind = 'local_orphan_order'
+           AND finding.resolved_at IS NULL
+           AND cmd.intent_kind = 'ENTRY'
+           AND cmd.state IN (?, ?)
+         ORDER BY finding.recorded_at, finding.finding_id
+        """,
+        command_states,
+    ).fetchall()
+    return [_dict_row(row) for row in rows]
+
+
+def _json_dict(raw: object) -> dict:
+    if isinstance(raw, dict):
+        return raw
+    if raw in (None, ""):
+        return {}
+    try:
+        parsed = json.loads(str(raw))
+    except (TypeError, json.JSONDecodeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _finding_proves_trade_enumeration(evidence: dict) -> bool:
+    return evidence.get("trade_enumeration_available") is True
+
+
+def _terminal_fact_state_for_venue_status(status: str, *, venue_resp_present: bool) -> str | None:
+    normalized = str(status or "").upper()
+    if normalized in {"CANCELLED", "CANCELED"}:
+        return "CANCEL_CONFIRMED"
+    if normalized in {"EXPIRED", "REJECTED"}:
+        return "EXPIRED"
+    if not venue_resp_present:
+        return "VENUE_WIPED"
+    return None
+
+
 def _fill_trade_fact_count(conn: sqlite3.Connection, command_id: str) -> int:
     if not _table_exists(conn, "venue_trade_facts"):
         return 0
@@ -563,6 +644,12 @@ def reconcile_terminal_order_facts(conn: sqlite3.Connection) -> dict:
             sp_name = f"sp_terminal_order_fact_{safe_command_id}"
             conn.execute(f"SAVEPOINT {sp_name}")
             try:
+                resolved_findings = _resolve_m5_local_orphan_findings(
+                    conn,
+                    venue_order_id=order_id,
+                    resolved_at=occurred_at,
+                    resolution="command_recovery_terminal_no_fill",
+                )
                 append_event(
                     conn,
                     command_id=command_id,
@@ -576,6 +663,7 @@ def reconcile_terminal_order_facts(conn: sqlite3.Connection) -> dict:
                         "matched_size": row.get("order_fact_matched_size"),
                         "remaining_size": row.get("order_fact_remaining_size"),
                         "source": row.get("order_fact_source"),
+                        "resolved_m5_local_orphan_findings": resolved_findings,
                     },
                 )
                 _append_entry_order_voided_projection(
@@ -649,6 +737,7 @@ def _resolve_m5_local_orphan_findings(
     *,
     venue_order_id: str,
     resolved_at: str,
+    resolution: str,
 ) -> int:
     if not _table_exists(conn, "exchange_reconcile_findings"):
         return 0
@@ -665,16 +754,22 @@ def _resolve_m5_local_orphan_findings(
     ).fetchall()
     if not rows:
         return 0
-    from src.execution.exchange_reconcile import resolve_finding
 
     resolved = 0
     for row in rows:
-        resolve_finding(
-            conn,
-            str(_dict_row(row)["finding_id"]),
-            resolution="command_recovery_expired_partial_remainder",
-            resolved_by="src.execution.command_recovery",
-            resolved_at=resolved_at,
+        conn.execute(
+            """
+            UPDATE exchange_reconcile_findings
+               SET resolved_at = ?, resolution = ?, resolved_by = ?
+             WHERE finding_id = ?
+               AND resolved_at IS NULL
+            """,
+            (
+                resolved_at,
+                resolution,
+                "src.execution.command_recovery",
+                str(_dict_row(row)["finding_id"]),
+            ),
         )
         resolved += 1
     return resolved
@@ -683,6 +778,118 @@ def _resolve_m5_local_orphan_findings(
 def _payload_hash(payload: dict) -> str:
     blob = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+def _append_local_orphan_terminal_order_fact(
+    conn: sqlite3.Connection,
+    *,
+    command: dict,
+    observed_at: str,
+    venue_status: str,
+    venue_resp: dict | None,
+) -> int:
+    command_id = str(command.get("command_id") or "")
+    venue_order_id = str(command.get("venue_order_id") or "")
+    fact_state = _terminal_fact_state_for_venue_status(
+        venue_status,
+        venue_resp_present=venue_resp is not None,
+    )
+    if fact_state is None:
+        raise ValueError(f"venue status is not terminal no-fill: {venue_status!r}")
+    payload = {
+        "reason": "m5_local_orphan_order_terminal_no_fill",
+        "proof_class": "local_orphan_open_order_absence_plus_zero_fill",
+        "finding_id": command.get("finding_id"),
+        "venue_order_id": venue_order_id,
+        "command_id": command_id,
+        "venue_status": str(venue_status or "NOT_FOUND"),
+        "venue_response": venue_resp,
+        "latest_order_fact_id": command.get("order_fact_id"),
+        "latest_order_fact_state": command.get("order_fact_state"),
+        "latest_order_fact_matched_size": command.get("order_fact_matched_size"),
+        "trade_enumeration_available": True,
+    }
+    return append_order_fact(
+        conn,
+        venue_order_id=venue_order_id,
+        command_id=command_id,
+        state=fact_state,
+        remaining_size="0",
+        matched_size="0",
+        source="REST",
+        observed_at=observed_at,
+        venue_timestamp=observed_at,
+        raw_payload_hash=_payload_hash(payload),
+        raw_payload_json=payload,
+    )
+
+
+def reconcile_local_orphan_no_fill_findings(conn: sqlite3.Connection, client) -> dict:
+    """Convert proven no-fill local-orphan findings into terminal order facts."""
+
+    summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+    for row in _local_orphan_no_fill_candidates(conn):
+        summary["scanned"] += 1
+        command_id = str(row.get("command_id") or "")
+        venue_order_id = str(row.get("venue_order_id") or "")
+        try:
+            evidence = _json_dict(row.get("finding_evidence_json"))
+            if not _finding_proves_trade_enumeration(evidence):
+                summary["stayed"] += 1
+                continue
+            if str(row.get("order_fact_source") or "") not in _LIVE_TERMINAL_ORDER_FACT_SOURCES:
+                summary["stayed"] += 1
+                continue
+            if not _decimal_is_zero(row.get("order_fact_matched_size")):
+                summary["stayed"] += 1
+                continue
+            if _fill_trade_fact_count(conn, command_id) > 0:
+                summary["stayed"] += 1
+                continue
+            get_order = getattr(client, "get_order", None)
+            if not callable(get_order):
+                logger.warning("recovery: client lacks get_order for local orphan %s", venue_order_id)
+                summary["errors"] += 1
+                continue
+            try:
+                venue_resp = get_order(venue_order_id)
+            except Exception as exc:
+                logger.warning(
+                    "recovery: local orphan venue lookup for command %s (venue_order_id=%s) raised: %s",
+                    command_id,
+                    venue_order_id,
+                    exc,
+                )
+                summary["errors"] += 1
+                continue
+            venue_payload = venue_resp if isinstance(venue_resp, dict) else None
+            venue_status = (
+                str((venue_payload or {}).get("status") or (venue_payload or {}).get("state") or "NOT_FOUND")
+                .upper()
+            )
+            if _terminal_fact_state_for_venue_status(
+                venue_status,
+                venue_resp_present=venue_payload is not None,
+            ) is None:
+                summary["stayed"] += 1
+                continue
+            _append_local_orphan_terminal_order_fact(
+                conn,
+                command=row,
+                observed_at=_now_iso(),
+                venue_status=venue_status,
+                venue_resp=venue_payload,
+            )
+            summary["advanced"] += 1
+            logger.info("recovery: local orphan no-fill %s -> terminal order fact", venue_order_id)
+        except Exception as exc:
+            logger.error(
+                "recovery: local orphan no-fill reconciliation failed for command %s: %s",
+                command_id,
+                exc,
+            )
+            summary["errors"] += 1
+    return summary
 
 
 def _append_partial_remainder_terminal_order_fact(
@@ -790,6 +997,7 @@ def reconcile_partial_remainders(
                     conn,
                     venue_order_id=venue_order_id,
                     resolved_at=now,
+                    resolution="command_recovery_expired_partial_remainder",
                 )
                 append_event(
                     conn,
@@ -1544,6 +1752,12 @@ def reconcile_unresolved_commands(
                 summary["stayed"] += 1
             else:
                 summary["errors"] += 1
+
+        local_orphan_summary = reconcile_local_orphan_no_fill_findings(conn, client)
+        summary["local_orphan_no_fill_findings"] = local_orphan_summary
+        summary["advanced"] += local_orphan_summary["advanced"]
+        summary["stayed"] += local_orphan_summary["stayed"]
+        summary["errors"] += local_orphan_summary["errors"]
 
         terminal_summary = reconcile_terminal_order_facts(conn)
         summary["terminal_order_facts"] = terminal_summary

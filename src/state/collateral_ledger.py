@@ -1,7 +1,8 @@
 # Created: 2026-04-26
-# Last reused/audited: 2026-05-15
+# Last reused/audited: 2026-05-17
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/Z4.yaml
 #                  + 2026-05-13 collateral_ledger singleton conn lifecycle remediation
+#                  + 2026-05-17 live collateral DB lock remediation
 """R3 Z4 collateral ledger for pUSD, CTF inventory, and reservations.
 
 pUSD is BUY collateral. CTF outcome tokens are SELL inventory. This module
@@ -14,6 +15,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import sqlite3
 from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_FLOOR
 from dataclasses import dataclass, replace
@@ -39,6 +41,7 @@ _TERMINAL_RESERVATION_STATES = frozenset(
 )
 COLLATERAL_SNAPSHOT_MAX_AGE_SECONDS = 60.0
 COLLATERAL_SNAPSHOT_CLOCK_SKEW_SECONDS = 5.0
+DEFAULT_COLLATERAL_BUSY_TIMEOUT_MS = 30_000
 
 COLLATERAL_LEDGER_SCHEMA = """
 CREATE TABLE IF NOT EXISTS collateral_ledger_snapshots (
@@ -73,6 +76,58 @@ CREATE TABLE IF NOT EXISTS collateral_reservations (
 
 class CollateralInsufficient(RuntimeError):
     """Raised when live submit preflight lacks spendable collateral/inventory."""
+
+
+def _collateral_busy_timeout_ms() -> int:
+    raw = os.environ.get("ZEUS_DB_BUSY_TIMEOUT_MS", str(DEFAULT_COLLATERAL_BUSY_TIMEOUT_MS))
+    try:
+        ms = int(float(raw))
+    except (OverflowError, TypeError, ValueError):
+        return DEFAULT_COLLATERAL_BUSY_TIMEOUT_MS
+    if ms < 0:
+        raise ValueError(
+            f"ZEUS_DB_BUSY_TIMEOUT_MS must be >= 0; got {raw!r} ({ms} ms). "
+            "Fix the environment variable before starting the daemon."
+        )
+    return ms
+
+
+def _pragma_busy_timeout_ms(conn: sqlite3.Connection) -> int | None:
+    try:
+        row = conn.execute("PRAGMA busy_timeout").fetchone()
+    except sqlite3.Error:
+        return None
+    if row is None:
+        return None
+    try:
+        return int(row[0])
+    except (TypeError, ValueError):
+        return None
+
+
+def _apply_busy_timeout(conn: sqlite3.Connection, busy_ms: int | None) -> None:
+    if busy_ms is None:
+        return
+    # SQLite does not support bound parameters for this PRAGMA. The value is
+    # normalized to int before interpolation, so no untrusted identifier/text can
+    # enter the statement.
+    conn.execute("PRAGMA busy_timeout = %d" % int(busy_ms))
+
+
+def _connect_owned_collateral_db(db_path: str | Path) -> sqlite3.Connection:
+    path = Path(db_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    busy_ms = _collateral_busy_timeout_ms()
+    conn = sqlite3.connect(
+        str(path),
+        timeout=busy_ms / 1000.0,
+        check_same_thread=False,
+    )
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA foreign_keys=ON")
+    _apply_busy_timeout(conn, busy_ms)
+    return conn
 
 
 @dataclass(frozen=True)
@@ -161,10 +216,7 @@ class CollateralLedger:
             # Persistent ledger-owned connection. check_same_thread=False so
             # the singleton can be read from riskguard / executor threads
             # without re-opening on every call.
-            self._conn = sqlite3.connect(
-                str(db_path), check_same_thread=False
-            )
-            self._conn.row_factory = sqlite3.Row
+            self._conn = _connect_owned_collateral_db(db_path)
             self._owns_conn = True
             init_collateral_schema(self._conn)
         else:
@@ -518,7 +570,12 @@ _GLOBAL_LEDGER: CollateralLedger | None = None
 
 
 def init_collateral_schema(conn: sqlite3.Connection) -> None:
+    busy_ms = _pragma_busy_timeout_ms(conn)
     conn.executescript(COLLATERAL_LEDGER_SCHEMA)
+    # sqlite3.executescript() can clear the connection busy handler. Preserve the
+    # caller's lock-wait contract so collateral initialization does not turn a
+    # live writer into an immediate "database is locked" failure surface.
+    _apply_busy_timeout(conn, busy_ms)
 
 
 def configure_global_ledger(ledger: CollateralLedger | None) -> None:
