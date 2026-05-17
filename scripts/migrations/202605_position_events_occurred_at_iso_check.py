@@ -101,7 +101,8 @@ CREATE TABLE position_events_v3 (
     venue_status TEXT,
     source_module TEXT NOT NULL,
     payload_json TEXT NOT NULL,
-    env TEXT NOT NULL DEFAULT 'live',
+    env TEXT NOT NULL DEFAULT 'live'
+        CHECK (env IN ('live','test','replay','backtest','shadow')),
     UNIQUE(position_id, sequence_no)
 )
 """

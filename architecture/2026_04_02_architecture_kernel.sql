@@ -27,7 +27,8 @@ CREATE TABLE IF NOT EXISTS position_events (
         'ADMIN_VOIDED',
         'MANUAL_OVERRIDE_APPLIED'
     )),
-    occurred_at TEXT NOT NULL,
+    occurred_at TEXT NOT NULL
+        CHECK (occurred_at LIKE '____-__-__T%' OR occurred_at = 'QUARANTINE'),
     phase_before TEXT CHECK (phase_before IS NULL OR phase_before IN (
         'pending_entry',
         'active',
@@ -369,7 +370,9 @@ CREATE TABLE IF NOT EXISTS execution_fact (
     fill_quality REAL,
     latency_seconds REAL,
     venue_status TEXT,
-    terminal_exec_status TEXT
+    terminal_exec_status TEXT,
+    -- F7: FK to venue_commands.command_id — column added by 202605 migration batch.
+    command_id TEXT
 );
 
 CREATE TABLE IF NOT EXISTS outcome_fact (
