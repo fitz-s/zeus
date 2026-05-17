@@ -33,3 +33,5 @@ def up(conn: sqlite3.Connection) -> None:
         "ON settlement_commands(winning_index_set) "
         "WHERE winning_index_set IS NOT NULL"
     )
+    # Bump schema version to match SCHEMA_VERSION constant (CB-1 critic finding 2026-05-17)
+    conn.execute("PRAGMA user_version = 5")

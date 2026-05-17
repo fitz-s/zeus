@@ -25,8 +25,17 @@ import sqlite3
 
 import pytest
 
+import importlib.util
+import pathlib
+
 from src.execution.harvester import enqueue_redeem_command
 from src.execution.settlement_commands import init_settlement_command_schema
+
+# Migration filename starts with a digit; use importlib to load it directly.
+_migration_path = pathlib.Path(__file__).parents[2] / "scripts" / "migrations" / "202605_add_settlement_commands_winning_index_set.py"
+_spec = importlib.util.spec_from_file_location("migration_i", _migration_path)
+migration_i = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(migration_i)
 
 
 # ---------------------------------------------------------------------------
@@ -121,6 +130,33 @@ def test_winning_index_set_none_for_multi_bin_unsupported():
     assert result["status"] == "queued"
     stored = _fetch_winning_index_set(conn, result["command_id"])
     assert stored is None, f"Expected NULL for multi-bin unsupported case, got {stored!r}"
+
+
+def test_migration_bumps_user_version():
+    """CB-1 antibody: migration up() must set PRAGMA user_version = 5.
+
+    Without this, post-merge assert_schema_current() raises because SCHEMA_VERSION=5
+    but the DB user_version stays at whatever the previous migration left it.
+    Authority: CRITIC_REPORT.md §CB-1 (2026-05-17).
+    """
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    # Baseline: user_version starts at 0 in a fresh DB
+    v_before = conn.execute("PRAGMA user_version").fetchone()[0]
+    assert v_before == 0, f"Expected fresh DB user_version=0, got {v_before}"
+    # Run the migration (schema must exist for idempotency check inside up())
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS settlement_commands "
+        "(command_id TEXT PRIMARY KEY, winning_index_set TEXT)"
+    )
+    conn.commit()
+    migration_i.up(conn)
+    conn.commit()
+    v_after = conn.execute("PRAGMA user_version").fetchone()[0]
+    assert v_after == 5, (
+        f"CB-1: migration must set PRAGMA user_version=5, got {v_after}. "
+        "assert_schema_current() would raise post-merge without this."
+    )
 
 
 def test_winning_index_set_idempotent_on_duplicate_enqueue():
