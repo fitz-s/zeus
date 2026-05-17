@@ -8051,6 +8051,7 @@ def log_exit_lifecycle_event(
             ),
             position_id=getattr(pos, "trade_id", ""),
             order_role="exit",
+            decision_id=str(getattr(pos, "decision_id", None) or "") or None,
             strategy_key=str(getattr(pos, "strategy_key", "") or getattr(pos, "strategy", "") or "") or None,
             posted_at=posted_at if event_type in {"EXIT_ORDER_POSTED", "EXIT_ORDER_ATTEMPTED"} else None,
             filled_at=filled_at,

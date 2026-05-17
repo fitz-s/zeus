@@ -1445,6 +1445,7 @@ def materialize_position(candidate, decision, result, portfolio, city, mode, *, 
         # Now: AttributeError raises if a non-MarketCandidate flows here.
         temperature_metric=candidate.temperature_metric,
         entry_model_agreement=getattr(decision, "agreement", "NOT_CHECKED"),
+        decision_id=str(getattr(decision, "decision_id", None) or "") or None,
     )
 
 

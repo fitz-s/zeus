@@ -418,6 +418,12 @@ class Position:
     exit_market_velocity_1h: float = 0.0
     exit_forward_edge: float = 0.0
 
+    # Lineage audit-trail: FK to EdgeDecision that originated entry order.
+    # Set at Position creation from EdgeDecision.decision_id; forwarded to
+    # exit-side execution_fact so the full entry→exit lineage is joinable.
+    # Default None for in-memory compatibility with pre-fix positions.
+    decision_id: Optional[str] = None
+
     # JSON Object Snapshots (Phase 2 Object Persistence DTO)
     settlement_semantics_json: Optional[str] = None
     epistemic_context_json: Optional[str] = None
