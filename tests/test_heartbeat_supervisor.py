@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sqlite3
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -689,6 +690,9 @@ def test_venue_background_maintenance_is_throttled_between_heartbeat_ticks(monke
     monkeypatch.setattr(main, "_run_venue_background_maintenance_once", _maintenance)
     monkeypatch.setattr(main.threading, "Thread", InlineThread)
     main._last_venue_background_maintenance_attempt_at = None
+    deadline = time.monotonic() + 1.0
+    while main._venue_background_maintenance_lock.locked() and time.monotonic() < deadline:
+        time.sleep(0.01)
 
     assert main._start_venue_background_maintenance_async(adapter) == "started"
     assert main._start_venue_background_maintenance_async(adapter) == "throttled"

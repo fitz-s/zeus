@@ -236,6 +236,146 @@ def run_ws_gap_reconcile_and_clear(
     return result
 
 
+def refresh_unresolved_reconcile_findings(
+    adapter: Any,
+    conn: sqlite3.Connection,
+    *,
+    observed_at: datetime | str | None = None,
+    context: ReconcileContext = "ws_gap",
+) -> dict[str, Any]:
+    """Refresh only already-open position-drift findings from fresh venue truth.
+
+    This is intentionally narrower than ``run_reconcile_sweep``.  When the WS
+    latch has already cleared, risk can still remain reduce-only because late
+    CONFIRMED trade facts arrived after the original M5 sweep.  A partial
+    subject-scoped refresh must not reinterpret absent unrelated positions as
+    global exchange absence.
+    """
+
+    _validate_context(context)
+    init_exchange_reconcile_schema(conn)
+    observed = _coerce_dt(observed_at)
+    token_ids = _unresolved_position_drift_tokens(conn)
+    trade_ids = _unresolved_unrecorded_trade_ids(conn)
+    if not token_ids and not trade_ids:
+        return {"status": "not_required", "resolved": 0, "remaining": 0}
+
+    order_ids = _local_order_ids_for_tokens(conn, token_ids) | _order_ids_for_unrecorded_trade_findings(conn)
+    snapshot = fresh_reconcile_snapshot(
+        adapter,
+        observed_at=observed,
+        trade_order_ids=order_ids,
+    )
+    if "trades" not in snapshot.captured_surfaces:
+        return {
+            "status": "blocked",
+            "reason": "trades_read_unavailable",
+            "subject_count": len(token_ids) + len(trade_ids),
+            "captured_surfaces": list(snapshot.captured_surfaces),
+            "unavailable_surfaces": list(snapshot.unavailable_surfaces),
+        }
+    if token_ids and "positions" not in snapshot.captured_surfaces:
+        return {
+            "status": "blocked",
+            "reason": "positions_read_unavailable",
+            "subject_count": len(token_ids) + len(trade_ids),
+            "captured_surfaces": list(snapshot.captured_surfaces),
+            "unavailable_surfaces": list(snapshot.unavailable_surfaces),
+        }
+
+    local_by_order = _local_commands_by_order(conn)
+    new_findings: list[ReconcileFinding] = []
+    for trade in snapshot.adapter.get_trades():
+        raw = _raw(trade)
+        venue_trade_id = _trade_id(raw)
+        subject_id = venue_trade_id or _stable_subject("trade", raw)
+        state = _trade_state(raw)
+        order_id, command = _local_command_for_trade(raw, local_by_order)
+        if state is None:
+            new_findings.append(
+                record_finding(
+                    conn,
+                    kind="unrecorded_trade",
+                    subject_id=subject_id,
+                    context=context,
+                    evidence={
+                        "exchange_trade": raw,
+                        "reason": "exchange_trade_unknown_trade_state",
+                        "raw_state": _first_present(raw, "state", "status", default=None),
+                    },
+                    recorded_at=observed,
+                )
+            )
+            continue
+        if command is None or not order_id:
+            new_findings.append(
+                record_finding(
+                    conn,
+                    kind="unrecorded_trade",
+                    subject_id=subject_id,
+                    context=context,
+                    evidence={
+                        "exchange_trade": raw,
+                        "reason": "exchange_trade_unlinked_to_local_command",
+                        "candidate_order_ids": _trade_order_ids(raw),
+                    },
+                    recorded_at=observed,
+                )
+            )
+            continue
+        if not venue_trade_id:
+            new_findings.append(
+                record_finding(
+                    conn,
+                    kind="unrecorded_trade",
+                    subject_id=subject_id,
+                    context=context,
+                    evidence={
+                        "exchange_trade": raw,
+                        "local_command": _command_evidence(command),
+                        "reason": "exchange_trade_missing_venue_trade_identity",
+                    },
+                    recorded_at=observed,
+                )
+            )
+            continue
+        finding = _append_linkable_trade_fact_if_missing(
+            conn,
+            command,
+            raw,
+            venue_trade_id,
+            observed,
+            state=state,
+            context=context,
+            matched_order_id=order_id,
+        )
+        if finding is not None:
+            new_findings.append(finding)
+
+    repair_summary = reconcile_recorded_maker_fill_economics(conn, observed_at=observed)
+    before_remaining = _unresolved_position_drift_count(conn, token_ids) + _unresolved_trade_count(conn, trade_ids)
+    if token_ids:
+        _resolve_position_drift_tokens_from_current_truth(
+            conn,
+            token_ids=token_ids,
+            positions=snapshot.adapter.get_positions(),
+            observed_at=observed,
+        )
+    remaining = _unresolved_position_drift_count(conn, token_ids) + _unresolved_trade_count(conn, trade_ids)
+    resolved = max(0, before_remaining - remaining)
+    return {
+        "status": "resolved" if remaining == 0 and not new_findings else "blocked",
+        "reason": "reconcile_finding_refresh_complete" if remaining == 0 else "reconcile_findings_remain",
+        "subject_count": len(token_ids) + len(trade_ids),
+        "resolved": resolved,
+        "remaining": remaining,
+        "new_findings": len(new_findings),
+        "captured_surfaces": list(snapshot.captured_surfaces),
+        "unavailable_surfaces": list(snapshot.unavailable_surfaces),
+        "repair_summary": repair_summary,
+    }
+
+
 @capability("on_chain_mutation", lease=True)
 @protects("INV-21", "INV-04")
 def run_reconcile_sweep(
@@ -861,6 +1001,175 @@ def _record_position_drift_findings(
     return findings
 
 
+def _unresolved_position_drift_tokens(conn: sqlite3.Connection) -> tuple[str, ...]:
+    rows = conn.execute(
+        """
+        SELECT DISTINCT subject_id
+          FROM exchange_reconcile_findings
+         WHERE kind = 'position_drift'
+           AND resolved_at IS NULL
+           AND TRIM(COALESCE(subject_id, '')) != ''
+         ORDER BY subject_id
+        """
+    ).fetchall()
+    return tuple(str(row["subject_id"]) for row in rows)
+
+
+def _unresolved_unrecorded_trade_ids(conn: sqlite3.Connection) -> tuple[str, ...]:
+    rows = conn.execute(
+        """
+        SELECT DISTINCT subject_id
+          FROM exchange_reconcile_findings
+         WHERE kind = 'unrecorded_trade'
+           AND resolved_at IS NULL
+           AND TRIM(COALESCE(subject_id, '')) != ''
+         ORDER BY subject_id
+        """
+    ).fetchall()
+    return tuple(str(row["subject_id"]) for row in rows)
+
+
+def _unresolved_position_drift_count(
+    conn: sqlite3.Connection,
+    token_ids: tuple[str, ...] | frozenset[str] | set[str],
+) -> int:
+    if not token_ids:
+        return 0
+    selected = tuple(sorted(str(token) for token in token_ids))
+    placeholders = ", ".join("?" for _ in selected)
+    row = conn.execute(
+        f"""
+        SELECT COUNT(*) AS count
+          FROM exchange_reconcile_findings
+         WHERE kind = 'position_drift'
+           AND resolved_at IS NULL
+           AND subject_id IN ({placeholders})
+        """,
+        selected,
+    ).fetchone()
+    return int(row["count"] or 0)
+
+
+def _unresolved_trade_count(
+    conn: sqlite3.Connection,
+    trade_ids: tuple[str, ...] | frozenset[str] | set[str],
+) -> int:
+    if not trade_ids:
+        return 0
+    selected = tuple(sorted(str(trade_id) for trade_id in trade_ids))
+    placeholders = ", ".join("?" for _ in selected)
+    row = conn.execute(
+        f"""
+        SELECT COUNT(*) AS count
+          FROM exchange_reconcile_findings
+         WHERE kind = 'unrecorded_trade'
+           AND resolved_at IS NULL
+           AND subject_id IN ({placeholders})
+        """,
+        selected,
+    ).fetchone()
+    return int(row["count"] or 0)
+
+
+def _local_order_ids_for_tokens(
+    conn: sqlite3.Connection,
+    token_ids: tuple[str, ...] | frozenset[str] | set[str],
+) -> frozenset[str]:
+    if not token_ids:
+        return frozenset()
+    selected = tuple(sorted(str(token) for token in token_ids))
+    placeholders = ", ".join("?" for _ in selected)
+    rows = conn.execute(
+        f"""
+        SELECT DISTINCT venue_order_id
+          FROM venue_commands
+         WHERE token_id IN ({placeholders})
+           AND venue_order_id IS NOT NULL
+           AND TRIM(venue_order_id) != ''
+        """,
+        selected,
+    ).fetchall()
+    return frozenset(str(row["venue_order_id"]) for row in rows)
+
+
+def _order_ids_for_unrecorded_trade_findings(conn: sqlite3.Connection) -> frozenset[str]:
+    rows = conn.execute(
+        """
+        SELECT evidence_json
+          FROM exchange_reconcile_findings
+         WHERE kind = 'unrecorded_trade'
+           AND resolved_at IS NULL
+        """
+    ).fetchall()
+    order_ids: set[str] = set()
+    for row in rows:
+        evidence = _json_mapping(row["evidence_json"])
+        local_command = evidence.get("local_command")
+        if isinstance(local_command, Mapping):
+            venue_order_id = _string_or_none(local_command.get("venue_order_id"))
+            if venue_order_id:
+                order_ids.add(venue_order_id)
+        for candidate in evidence.get("candidate_order_ids") or []:
+            value = _string_or_none(candidate)
+            if value:
+                order_ids.add(value)
+        exchange_trade = evidence.get("exchange_trade")
+        if isinstance(exchange_trade, Mapping):
+            order_ids.update(_trade_order_ids(exchange_trade))
+    return frozenset(order_ids)
+
+
+def _resolve_position_drift_tokens_from_current_truth(
+    conn: sqlite3.Connection,
+    *,
+    token_ids: tuple[str, ...] | frozenset[str] | set[str],
+    positions: list[Any],
+    observed_at: datetime,
+) -> None:
+    exchange = _exchange_positions_by_token(positions)
+    confirmed_journal = _journal_positions_by_token(
+        conn,
+        states=_CONFIRMED_POSITION_FACT_STATES,
+    )
+    optimistic_journal = _journal_positions_by_token(
+        conn,
+        states=_OPTIMISTIC_POSITION_FACT_STATES,
+    )
+    for token in sorted(str(item) for item in token_ids):
+        exchange_size = exchange.get(token, Decimal("0"))
+        confirmed_size = confirmed_journal.get(token, Decimal("0"))
+        optimistic_size = optimistic_journal.get(token, Decimal("0"))
+        if _position_size_matches(exchange_size, confirmed_size):
+            _resolve_open_position_drift_findings(
+                conn,
+                token,
+                resolution="position_drift_cleared",
+                resolved_at=observed_at,
+            )
+            continue
+        if _pending_exit_optimistic_sell_offsets_confirmed_position(
+            conn,
+            token_id=token,
+            exchange_size=exchange_size,
+            confirmed_size=confirmed_size,
+            optimistic_size=optimistic_size,
+        ):
+            _resolve_open_position_drift_findings(
+                conn,
+                token,
+                resolution="position_drift_pending_exit_offset",
+                resolved_at=observed_at,
+            )
+            continue
+        if _has_recent_filled_suppression(conn, token, observed_at):
+            _resolve_open_position_drift_findings(
+                conn,
+                token,
+                resolution="position_drift_recent_fill_suppressed",
+                resolved_at=observed_at,
+            )
+
+
 def _position_size_matches(left: Decimal, right: Decimal) -> bool:
     return abs(left - right) <= _POSITION_DRIFT_ABS_TOLERANCE
 
@@ -881,6 +1190,33 @@ def _resolve_open_position_drift_findings(
            AND resolved_at IS NULL
         """,
         (token_id,),
+    ).fetchall()
+    for row in rows:
+        resolve_finding(
+            conn,
+            str(row["finding_id"]),
+            resolution=resolution,
+            resolved_by="src.execution.exchange_reconcile",
+            resolved_at=resolved_at,
+        )
+
+
+def _resolve_open_trade_findings(
+    conn: sqlite3.Connection,
+    trade_id: str,
+    *,
+    resolution: str,
+    resolved_at: datetime,
+) -> None:
+    rows = conn.execute(
+        """
+        SELECT finding_id
+          FROM exchange_reconcile_findings
+         WHERE kind = 'unrecorded_trade'
+           AND subject_id = ?
+           AND resolved_at IS NULL
+        """,
+        (trade_id,),
     ).fetchall()
     for row in rows:
         resolve_finding(
@@ -1000,6 +1336,12 @@ def _append_linkable_trade_fact_if_missing(
             fill_price=fill_price,
         )
         if same_fill_economics and str(latest_fact.get("state") or "") == state:
+            _resolve_open_trade_findings(
+                conn,
+                trade_id,
+                resolution="unrecorded_trade_linked",
+                resolved_at=observed_at,
+            )
             _ensure_entry_fill_position_event(
                 conn,
                 command=command,
@@ -1068,6 +1410,12 @@ def _append_linkable_trade_fact_if_missing(
         raw_payload_hash=_hash_payload(raw),
         raw_payload_json=dict(raw),
         tx_hash=_first_present(raw, "transaction_hash", "tx_hash", default=None),
+    )
+    _resolve_open_trade_findings(
+        conn,
+        trade_id,
+        resolution="unrecorded_trade_linked",
+        resolved_at=observed_at,
     )
     if state in {"FAILED", "RETRYING"}:
         return None
@@ -1477,11 +1825,20 @@ def _trade_fill_price(raw: Mapping[str, Any], order_id: str | None) -> Any:
     maker = _selected_maker_order(raw, order_id)
     if maker is not None:
         return _first_present(maker, "avgPrice", "avg_price", "fillPrice", "fill_price", "price", default=None)
+    if _taker_order_price_applies(raw, order_id):
+        return _first_present(raw, "avgPrice", "avg_price", "fillPrice", "fill_price", "price", default=None)
     return _first_explicit_fill_price(raw)
 
 
 def _first_explicit_fill_price(raw: Mapping[str, Any]) -> Any:
     return _first_present(raw, "avgPrice", "avg_price", "fillPrice", "fill_price", default=None)
+
+
+def _taker_order_price_applies(raw: Mapping[str, Any], order_id: str | None) -> bool:
+    if not order_id:
+        return False
+    taker_order_id = _string_or_none(_first_present(raw, "taker_order_id", "takerOrderId", default=None))
+    return taker_order_id == order_id
 
 
 def _missing_trade_fill_economics(

@@ -575,6 +575,63 @@ def _run_ws_gap_reconcile_if_required(
             conn.close()
 
 
+def _refresh_reconcile_findings_if_required(
+    adapter,
+    *,
+    conn_factory=None,
+    now: datetime | None = None,
+) -> dict:
+    """Resolve stale M5 findings after late venue confirmations arrive."""
+
+    if adapter is None:
+        return {"status": "adapter_unavailable"}
+    if _cycle_lock.locked():
+        return {"status": "deferred_cycle_running"}
+    owns_connection = conn_factory is None
+    conn = None
+    current = now or datetime.now(timezone.utc)
+    try:
+        from src.execution.exchange_reconcile import refresh_unresolved_reconcile_findings
+        from src.state.db import get_trade_connection
+
+        conn = (conn_factory or (lambda: get_trade_connection(write_class="live")))()
+        unresolved = int(
+            conn.execute(
+                """
+                SELECT COUNT(*) AS count
+                  FROM exchange_reconcile_findings
+                 WHERE resolved_at IS NULL
+                """
+            ).fetchone()["count"]
+            or 0
+        )
+        if unresolved <= 0:
+            return {"status": "not_required", "unresolved_findings": 0}
+        result = refresh_unresolved_reconcile_findings(
+            adapter,
+            conn,
+            observed_at=current,
+        )
+        result["unresolved_findings_before"] = unresolved
+        conn.commit()
+        if result.get("status") == "resolved":
+            logger.info("M5 reconcile finding refresh resolved stale blockers: %s", result)
+        else:
+            logger.info("M5 reconcile finding refresh kept blockers: %s", result)
+        return result
+    except Exception as exc:
+        if conn is not None:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+        logger.warning("M5 reconcile finding refresh failed closed: %s", exc)
+        return {"status": "failed_closed", "error": str(exc)}
+    finally:
+        if owns_connection and conn is not None:
+            conn.close()
+
+
 def _run_venue_background_maintenance_once(adapter=None) -> dict:
     """Run venue read-side maintenance outside the heartbeat critical path."""
 
@@ -586,6 +643,7 @@ def _run_venue_background_maintenance_once(adapter=None) -> dict:
     return {
         "status": "ok",
         "ws_gap_reconcile": _run_ws_gap_reconcile_if_required(active_adapter),
+        "reconcile_findings_refresh": _refresh_reconcile_findings_if_required(active_adapter),
         "collateral_refreshed": _refresh_global_collateral_snapshot_if_due(active_adapter),
     }
 
