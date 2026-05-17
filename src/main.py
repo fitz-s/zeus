@@ -427,6 +427,7 @@ _venue_heartbeat_thread = None
 _venue_background_maintenance_lock = threading.Lock()
 _last_venue_background_maintenance_attempt_at = None
 VENUE_BACKGROUND_MAINTENANCE_SECONDS = 30.0
+_collateral_background_refresh_lock = threading.Lock()
 _last_collateral_heartbeat_refresh_attempt_at = None
 COLLATERAL_HEARTBEAT_REFRESH_SECONDS = 30.0
 
@@ -585,6 +586,30 @@ def _run_venue_background_maintenance_once(adapter=None) -> dict:
         "ws_gap_reconcile": _run_ws_gap_reconcile_if_required(active_adapter),
         "collateral_refreshed": _refresh_global_collateral_snapshot_if_due(active_adapter),
     }
+
+
+def _start_collateral_background_refresh_async(adapter=None) -> str:
+    """Refresh collateral on an independent lane from slower venue maintenance."""
+
+    active_adapter = adapter or _venue_heartbeat_adapter
+    if active_adapter is None:
+        return "adapter_unavailable"
+    if not _collateral_background_refresh_lock.acquire(blocking=False):
+        return "already_running"
+
+    def _runner() -> None:
+        try:
+            _refresh_global_collateral_snapshot_if_due(active_adapter)
+        finally:
+            _collateral_background_refresh_lock.release()
+
+    thread = threading.Thread(
+        target=_runner,
+        name="collateral-background-refresh",
+        daemon=True,
+    )
+    thread.start()
+    return "started"
 
 
 def _start_venue_background_maintenance_async(adapter=None) -> str:
@@ -888,7 +913,9 @@ def _start_venue_heartbeat_loop_if_needed() -> None:
     global _venue_heartbeat_thread
     if _external_venue_heartbeat_enabled():
         _configure_external_venue_heartbeat_supervisor_if_needed()
-        _start_venue_background_maintenance_async(_ensure_venue_read_side_adapter())
+        adapter = _ensure_venue_read_side_adapter()
+        _start_collateral_background_refresh_async(adapter)
+        _start_venue_background_maintenance_async(adapter)
         return
     if _venue_heartbeat_thread is not None and _venue_heartbeat_thread.is_alive():
         return

@@ -514,14 +514,20 @@ def test_main_external_venue_heartbeat_mode_consumes_status_without_posting(
             return adapter
 
     launched_background = []
+    launched_collateral = []
 
     def _background(active_adapter):
         launched_background.append(active_adapter)
         return "started"
 
+    def _collateral(active_adapter):
+        launched_collateral.append(active_adapter)
+        return "started"
+
     monkeypatch.setenv("ZEUS_VENUE_HEARTBEAT_MODE", "external")
     monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", Client)
     monkeypatch.setattr(main, "_start_venue_background_maintenance_async", _background)
+    monkeypatch.setattr(main, "_start_collateral_background_refresh_async", _collateral)
     main._venue_heartbeat_thread = None
     main._venue_heartbeat_supervisor = None
     main._venue_heartbeat_adapter = None
@@ -531,6 +537,7 @@ def test_main_external_venue_heartbeat_mode_consumes_status_without_posting(
 
     assert main._venue_heartbeat_thread is None
     assert main._venue_heartbeat_supervisor is None
+    assert launched_collateral == [adapter]
     assert launched_background == [adapter]
     assert adapter.heartbeat_ids == []
 
@@ -604,6 +611,37 @@ def test_venue_background_maintenance_is_throttled_between_heartbeat_ticks(monke
 
     assert main._start_venue_background_maintenance_async(adapter) == "started"
     assert main._start_venue_background_maintenance_async(adapter) == "throttled"
+    assert calls == [adapter]
+
+
+def test_collateral_background_refresh_is_not_blocked_by_slow_venue_maintenance(monkeypatch):
+    from src import main
+
+    adapter = object()
+    calls = []
+
+    def _refresh(active_adapter):
+        calls.append(active_adapter)
+        return True
+
+    class InlineThread:
+        def __init__(self, *, target, name, daemon):
+            self._target = target
+
+        def start(self):
+            self._target()
+
+    monkeypatch.setattr(main, "_refresh_global_collateral_snapshot_if_due", _refresh)
+    monkeypatch.setattr(main.threading, "Thread", InlineThread)
+    main._last_venue_background_maintenance_attempt_at = None
+
+    assert main._venue_background_maintenance_lock.acquire(blocking=False)
+    try:
+        assert main._start_venue_background_maintenance_async(adapter) == "already_running"
+        assert main._start_collateral_background_refresh_async(adapter) == "started"
+    finally:
+        main._venue_background_maintenance_lock.release()
+
     assert calls == [adapter]
 
 
