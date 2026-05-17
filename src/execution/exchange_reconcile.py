@@ -65,6 +65,7 @@ _OPTIMISTIC_POSITION_FACT_STATES = frozenset({"MATCHED", "MINED"})
 _POSITION_DRIFT_ABS_TOLERANCE = Decimal("0.0001")
 _POSITION_API_VISIBILITY_FLOOR = Decimal("0.01")
 _ENTRY_FILL_PROJECTION_PHASES = frozenset({"pending_entry", "active", "day0_window"})
+_EXIT_FILL_PROJECTION_PHASES = frozenset({"active", "day0_window", "pending_exit", "economically_closed"})
 _TERMINAL_ORDER_FACT_STATES = frozenset({"MATCHED", "CANCEL_CONFIRMED", "EXPIRED", "VENUE_WIPED"})
 
 _SCHEMA = """
@@ -1365,6 +1366,26 @@ def _append_linkable_trade_fact_if_missing(
                 resolution="unrecorded_trade_linked",
                 resolved_at=observed_at,
             )
+            existing_event = _fill_event_for_command(command, filled_size, trade_state=state)
+            if existing_event is not None:
+                try:
+                    append_event(
+                        conn,
+                        command_id=str(command["command_id"]),
+                        event_type=existing_event,
+                        occurred_at=observed_at.isoformat(),
+                        payload={
+                            "venue_order_id": order_id,
+                            "trade_id": trade_id,
+                            "filled_size": filled_size,
+                            "fill_price": fill_price,
+                            "source": "M5_EXCHANGE_RECONCILE",
+                        },
+                    )
+                except ValueError:
+                    existing_event = None
+            elif str(command.get("state") or "") == "FILLED" and state == "CONFIRMED":
+                existing_event = "FILL_CONFIRMED"
             _ensure_entry_fill_position_event(
                 conn,
                 command=command,
@@ -1372,7 +1393,17 @@ def _append_linkable_trade_fact_if_missing(
                 filled_size=filled_size,
                 fill_price=fill_price,
                 observed_at=observed_at,
+                command_event=existing_event,
                 order_fact_source=str(latest_fact.get("source") or "REST"),
+            )
+            _ensure_exit_fill_position_event(
+                conn,
+                command=command,
+                venue_order_id=order_id,
+                filled_size=filled_size,
+                fill_price=fill_price,
+                observed_at=observed_at,
+                command_event=existing_event,
             )
             return None
         if state in {"MATCHED", "MINED", "CONFIRMED"} and not same_fill_economics:
@@ -1476,6 +1507,15 @@ def _append_linkable_trade_fact_if_missing(
         observed_at=observed_at,
         command_event=event,
         order_fact_source="REST",
+    )
+    _ensure_exit_fill_position_event(
+        conn,
+        command=latest,
+        venue_order_id=order_id,
+        filled_size=filled_size,
+        fill_price=fill_price,
+        observed_at=observed_at,
+        command_event=event,
     )
     return None
 
@@ -1667,6 +1707,175 @@ def _entry_fill_economics_for_command(
     return fallback_shares, fallback_price, fallback_shares * fallback_price
 
 
+def _ensure_exit_fill_position_event(
+    conn: sqlite3.Connection,
+    *,
+    command: Mapping[str, Any],
+    venue_order_id: str,
+    filled_size: str,
+    fill_price: str,
+    observed_at: datetime,
+    command_event: str | None = None,
+) -> None:
+    if command_event != "FILL_CONFIRMED":
+        return
+    if str(command.get("intent_kind") or "").upper() != "EXIT":
+        return
+    if str(command.get("side") or "").upper() != "SELL":
+        return
+    position_id = str(command.get("position_id") or "").strip()
+    if not position_id:
+        return
+    row = conn.execute(
+        """
+        SELECT *
+          FROM position_current
+         WHERE position_id = ?
+         ORDER BY updated_at DESC
+         LIMIT 1
+        """,
+        (position_id,),
+    ).fetchone()
+    if row is None:
+        return
+
+    current = dict(row)
+    phase = str(current.get("phase") or "")
+    if phase not in _EXIT_FILL_PROJECTION_PHASES:
+        logger.info(
+            "exchange_reconcile: skip exit fill projection for incompatible phase position_id=%s phase=%s order_id=%s",
+            position_id,
+            phase,
+            venue_order_id,
+        )
+        return
+    fill_economics = _exit_fill_economics_for_command(
+        conn,
+        command_id=str(command.get("command_id") or ""),
+        fallback_filled_size=filled_size,
+        fallback_fill_price=fill_price,
+    )
+    if fill_economics is None:
+        return
+    shares_dec, exit_price_dec = fill_economics
+    occurred_at = observed_at.isoformat()
+    position = SimpleNamespace(
+        **{
+            **current,
+            "trade_id": position_id,
+            "state": "economically_closed",
+            "exit_state": "sell_filled",
+            "pre_exit_state": phase,
+            "chain_state": current.get("chain_state") or "synced",
+            "env": current.get("env") or "live",
+            "order_id": current.get("order_id") or "",
+            "order_status": "sell_filled",
+            "last_exit_order_id": venue_order_id,
+            "last_exit_at": occurred_at,
+            "exit_price": _decimal_text(exit_price_dec),
+            "exit_reason": "M5_EXCHANGE_RECONCILE",
+            "shares": current.get("shares") or _decimal_text(shares_dec),
+            "strategy_key": current.get("strategy_key") or current.get("strategy") or "unknown_strategy",
+            "unit": current.get("unit") or "F",
+        }
+    )
+    existing = conn.execute(
+        """
+        SELECT 1
+          FROM position_events
+         WHERE position_id = ?
+           AND event_type = 'EXIT_ORDER_FILLED'
+           AND order_id = ?
+         LIMIT 1
+        """,
+        (position_id, venue_order_id),
+    ).fetchone()
+    if existing is not None:
+        from src.engine.lifecycle_events import build_position_current_projection
+
+        projection = build_position_current_projection(position)
+        _apply_exit_fill_projection_and_execution_fact(
+            conn,
+            events=[],
+            projection=projection,
+            position=position,
+            command=command,
+            observed_at=observed_at,
+            shares=shares_dec,
+            exit_price=exit_price_dec,
+            upsert_only=True,
+        )
+        return
+    seq_row = conn.execute(
+        "SELECT COALESCE(MAX(sequence_no), 0) FROM position_events WHERE position_id = ?",
+        (position_id,),
+    ).fetchone()
+    sequence_no = int((seq_row[0] if seq_row else 0) or 0) + 1
+
+    from src.engine.lifecycle_events import build_economic_close_canonical_write
+
+    events, projection = build_economic_close_canonical_write(
+        position,
+        sequence_no=sequence_no,
+        phase_before="pending_exit",
+        source_module="src.execution.exchange_reconcile",
+    )
+    _apply_exit_fill_projection_and_execution_fact(
+        conn,
+        events=events,
+        projection=projection,
+        position=position,
+        command=command,
+        observed_at=observed_at,
+        shares=shares_dec,
+        exit_price=exit_price_dec,
+        upsert_only=False,
+    )
+
+
+def _exit_fill_economics_for_command(
+    conn: sqlite3.Connection,
+    *,
+    command_id: str,
+    fallback_filled_size: str,
+    fallback_fill_price: str,
+) -> tuple[Decimal, Decimal] | None:
+    rows = conn.execute(
+        """
+        SELECT tf.state, tf.filled_size, tf.fill_price
+          FROM venue_trade_facts tf
+          JOIN (
+                SELECT trade_id, MAX(local_sequence) AS local_sequence
+                  FROM venue_trade_facts
+                 WHERE command_id = ?
+                 GROUP BY trade_id
+               ) latest
+            ON latest.trade_id = tf.trade_id
+           AND latest.local_sequence = tf.local_sequence
+         WHERE tf.command_id = ?
+           AND tf.state = 'CONFIRMED'
+        """,
+        (command_id, command_id),
+    ).fetchall()
+    shares = Decimal("0")
+    proceeds = Decimal("0")
+    for row in rows:
+        filled = _positive_decimal_or_none(row["filled_size"])
+        price = _positive_decimal_or_none(row["fill_price"])
+        if filled is None or price is None:
+            continue
+        shares += filled
+        proceeds += filled * price
+    if shares > Decimal("0") and proceeds > Decimal("0"):
+        return shares, proceeds / shares
+
+    fallback_shares = _positive_decimal_or_none(fallback_filled_size)
+    fallback_price = _positive_decimal_or_none(fallback_fill_price)
+    if fallback_shares is None or fallback_price is None:
+        return None
+    return fallback_shares, fallback_price
+
+
 def _apply_entry_fill_projection_and_execution_fact(
     conn: sqlite3.Connection,
     *,
@@ -1716,6 +1925,51 @@ def _apply_entry_fill_projection_and_execution_fact(
             terminal_exec_status=terminal_status,
         )
         _append_entry_position_lots_for_command(conn, command=command, observed_at=observed_at)
+        conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+    except Exception:
+        conn.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
+        conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+        raise
+
+
+def _apply_exit_fill_projection_and_execution_fact(
+    conn: sqlite3.Connection,
+    *,
+    events: list[dict],
+    projection: dict,
+    position: SimpleNamespace,
+    command: Mapping[str, Any],
+    observed_at: datetime,
+    shares: Decimal,
+    exit_price: Decimal,
+    upsert_only: bool,
+) -> None:
+    from src.state.db import append_many_and_project, log_execution_fact
+    from src.state.projection import upsert_position_current
+
+    sp_name = f"sp_exit_fill_{uuid.uuid4().hex[:12]}"
+    conn.execute(f"SAVEPOINT {sp_name}")
+    try:
+        if upsert_only:
+            upsert_position_current(conn, projection)
+        else:
+            append_many_and_project(conn, events, projection)
+        position_id = str(getattr(position, "trade_id", "") or "")
+        log_execution_fact(
+            conn,
+            intent_id=f"{position_id}:exit",
+            position_id=position_id,
+            decision_id=str(command.get("decision_id") or "") or None,
+            order_role="exit",
+            strategy_key=str(getattr(position, "strategy_key", "") or "") or None,
+            posted_at=str(command.get("created_at") or "") or None,
+            filled_at=observed_at.isoformat(),
+            submitted_price=_float_or_none(command.get("price")),
+            fill_price=_float_or_none(exit_price),
+            shares=_float_or_none(shares),
+            venue_status="FILLED",
+            terminal_exec_status="filled",
+        )
         conn.execute(f"RELEASE SAVEPOINT {sp_name}")
     except Exception:
         conn.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
