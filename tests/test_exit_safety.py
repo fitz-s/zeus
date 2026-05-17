@@ -1626,6 +1626,7 @@ def test_live_exit_below_min_order_rejection_enters_dust_hold_not_retry(conn, mo
         shares=1.5873,
         cost_basis_usd=0.5873,
         state="day0_window",
+        strategy_key="opening_inertia",
     )
     portfolio = PortfolioState(positions=[position])
     exit_context = ExitContext(
@@ -1665,9 +1666,104 @@ def test_live_exit_below_min_order_rejection_enters_dust_hold_not_retry(conn, mo
     assert position.next_exit_retry_at in ("", None)
     assert position.last_exit_error == error
     assert exit_lifecycle.check_pending_retries(position, conn=conn) is False
+    current = conn.execute(
+        "SELECT phase FROM position_current WHERE position_id = ?",
+        (position.trade_id,),
+    ).fetchone()
+    assert current["phase"] == "pending_exit"
+    event = conn.execute(
+        """
+        SELECT event_type, phase_after, payload_json
+          FROM position_events
+         WHERE position_id = ?
+         ORDER BY sequence_no DESC
+         LIMIT 1
+        """,
+        (position.trade_id,),
+    ).fetchone()
+    assert event["event_type"] == "EXIT_ORDER_REJECTED"
+    assert event["phase_after"] == "pending_exit"
+    assert json.loads(event["payload_json"])["status"] == "backoff_exhausted"
+    from src.state.db import query_position_current_status_view
+
+    status_view = query_position_current_status_view(conn)
+    assert status_view["exit_state_counts"]["backoff_exhausted"] == 1
     facts = _execution_facts(conn, position.trade_id)
     assert facts[-1]["venue_status"] == "backoff_exhausted"
     assert facts[-1]["terminal_exec_status"] == "backoff_exhausted"
+
+
+def test_live_exit_snapshot_min_order_dust_hold_preempts_stale_collateral(conn, monkeypatch):
+    from src.execution import exit_lifecycle
+    from src.state.portfolio import ExitContext, PortfolioState, Position
+
+    position = Position(
+        trade_id="pos-dust-before-collateral",
+        market_id="condition-test",
+        condition_id="condition-test",
+        city="Karachi",
+        cluster="asia",
+        target_date="2026-05-17",
+        bin_label="37C+",
+        direction="buy_yes",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        entry_price=0.37,
+        size_usd=1.83,
+        shares=4.95,
+        cost_basis_usd=1.83,
+        state="day0_window",
+        strategy_key="opening_inertia",
+    )
+    portfolio = PortfolioState(positions=[position])
+    exit_context = ExitContext(
+        exit_reason="MODEL_DIVERGENCE_PANIC",
+        current_market_price=0.99,
+        best_bid=0.99,
+        hours_to_settlement=1.0,
+        position_state="day0_window",
+        day0_active=True,
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_latest_or_capture_exit_snapshot_context",
+        lambda *args, **kwargs: {"executable_snapshot_min_order_size": "5"},
+    )
+
+    def stale_collateral(*args, **kwargs):
+        raise AssertionError("collateral freshness must not override deterministic dust hold")
+
+    monkeypatch.setattr(exit_lifecycle, "check_sell_collateral", stale_collateral)
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "execute_exit_order",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("sell should not be attempted")),
+    )
+
+    outcome = exit_lifecycle.execute_exit(
+        portfolio,
+        position,
+        exit_context,
+        clob=object(),
+        conn=conn,
+    )
+
+    assert outcome == "sell_blocked_dust: executable_snapshot_gate: size 4.95 is below snapshot min_order_size 5"
+    assert position.state == "pending_exit"
+    assert position.exit_state == "backoff_exhausted"
+    assert position.next_exit_retry_at in ("", None)
+    assert position.last_exit_error == "executable_snapshot_gate: size 4.95 is below snapshot min_order_size 5"
+    current = conn.execute(
+        "SELECT phase FROM position_current WHERE position_id = ?",
+        (position.trade_id,),
+    ).fetchone()
+    assert current["phase"] == "pending_exit"
+    from src.state.db import query_portfolio_loader_view
+
+    loader_view = query_portfolio_loader_view(conn)
+    loaded = next(row for row in loader_view["positions"] if row["trade_id"] == position.trade_id)
+    assert loaded["state"] == "pending_exit"
+    assert loaded["exit_state"] == "backoff_exhausted"
 
 
 def test_exit_snapshot_capture_fails_closed_on_unverified_market_scan(conn, monkeypatch):

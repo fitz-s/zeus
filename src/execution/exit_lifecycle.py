@@ -14,6 +14,8 @@ CycleRunner does not contain exit business logic.
 """
 
 import logging
+import copy
+import json
 import math
 import sqlite3
 from dataclasses import dataclass
@@ -27,6 +29,8 @@ from src.execution.collateral import check_sell_collateral
 from src.execution.executor import OrderResult, create_exit_order_intent, execute_exit_order
 from src.state.lifecycle_manager import (
     enter_pending_exit_runtime_state,
+    fold_lifecycle_phase,
+    phase_for_runtime_position,
     release_pending_exit_runtime_state,
 )
 from src.state.portfolio import (
@@ -418,6 +422,108 @@ def _mark_exit_dust_hold(position: Position, reason: str, error: str = "") -> No
     )
 
 
+def _positive_decimal(value: object) -> Decimal | None:
+    if value in (None, ""):
+        return None
+    try:
+        numeric = Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        return None
+    if numeric <= 0:
+        return None
+    return numeric
+
+
+def _below_snapshot_min_order_error(position: Position, snapshot_context: dict[str, object]) -> str:
+    min_order = _positive_decimal(snapshot_context.get("executable_snapshot_min_order_size"))
+    shares = _positive_decimal(getattr(position, "effective_shares", None))
+    if min_order is None or shares is None or shares >= min_order:
+        return ""
+    return f"executable_snapshot_gate: size {shares} is below snapshot min_order_size {min_order}"
+
+
+def _dual_write_canonical_pending_exit_if_available(
+    conn: sqlite3.Connection | None,
+    position: Position,
+    *,
+    reason: str,
+    error: str,
+    event_type: str = "EXIT_ORDER_REJECTED",
+) -> bool:
+    if conn is None:
+        return False
+    try:
+        from src.engine.lifecycle_events import build_position_current_projection
+        from src.state.db import append_many_and_project
+
+        trade_id = str(getattr(position, "trade_id", "") or "")
+        if not trade_id:
+            return False
+        sequence_no = _next_canonical_sequence_no(conn, trade_id)
+        occurred_at = _utcnow().isoformat()
+        phase_before = phase_for_runtime_position(
+            state=getattr(position, "pre_exit_state", "") or "holding",
+        ).value
+        phase_after = fold_lifecycle_phase(phase_before, "pending_exit").value
+        projection_position = copy.copy(position)
+        if not any(
+            getattr(projection_position, field, "")
+            for field in (
+                "last_exit_at",
+                "chain_verified_at",
+                "day0_entered_at",
+                "entered_at",
+                "order_posted_at",
+            )
+        ):
+            projection_position.order_posted_at = occurred_at
+        projection = build_position_current_projection(projection_position)
+        if projection.get("phase") != "pending_exit":
+            return False
+        projection["updated_at"] = occurred_at
+        payload = {
+            "status": getattr(position, "exit_state", ""),
+            "exit_reason": getattr(position, "exit_reason", "") or reason,
+            "error": error or getattr(position, "last_exit_error", ""),
+            "retry_count": getattr(position, "exit_retry_count", 0),
+            "next_retry_at": getattr(position, "next_exit_retry_at", ""),
+            "last_exit_order_id": getattr(position, "last_exit_order_id", ""),
+        }
+        env = str(getattr(position, "env", "") or "live")
+        if env not in {"live", "test", "replay", "backtest", "shadow"}:
+            env = "live"
+        event = {
+            "event_id": f"{trade_id}:exit_rejected:{sequence_no}",
+            "position_id": trade_id,
+            "event_version": 1,
+            "sequence_no": sequence_no,
+            "event_type": event_type,
+            "occurred_at": occurred_at,
+            "phase_before": phase_before,
+            "phase_after": phase_after,
+            "strategy_key": str(getattr(position, "strategy_key", "") or getattr(position, "strategy", "") or ""),
+            "decision_id": None,
+            "snapshot_id": getattr(position, "decision_snapshot_id", "") or None,
+            "order_id": getattr(position, "last_exit_order_id", "") or None,
+            "command_id": None,
+            "caused_by": "exit_recovery",
+            "idempotency_key": f"{trade_id}:exit_rejected:{sequence_no}",
+            "venue_status": str(getattr(position, "exit_state", "") or "rejected"),
+            "source_module": "src.execution.exit_lifecycle",
+            "env": env,
+            "payload_json": json.dumps(payload, default=str, sort_keys=True),
+        }
+        append_many_and_project(conn, [event], projection)
+        return True
+    except Exception as exc:
+        logger.warning(
+            "Canonical pending-exit write failed for %s: %s",
+            getattr(position, "trade_id", ""),
+            exc,
+        )
+        return False
+
+
 def execute_exit(
     portfolio: PortfolioState,
     position: Position,
@@ -472,16 +578,74 @@ def _execute_live_exit(
             error="",
         )
 
+    token_id = exit_intent.token_id
+    if not token_id:
+        retry_reason = f"{exit_intent.reason} [NO_TOKEN_ID]"
+        _mark_exit_retry(position, reason=retry_reason, error="no_token_id")
+        _dual_write_canonical_pending_exit_if_available(
+            conn,
+            position,
+            reason=retry_reason,
+            error="no_token_id",
+        )
+        if conn is not None:
+            log_pending_exit_recovery_event(
+                conn,
+                position,
+                event_type="EXIT_ORDER_REJECTED",
+                reason=retry_reason,
+                error="no_token_id",
+            )
+            log_exit_retry_event(conn, position, reason=retry_reason, error="no_token_id")
+        return "exit_blocked: no_token_id"
+
+    snapshot_context = _latest_or_capture_exit_snapshot_context(
+        conn,
+        clob,
+        position,
+        token_id,
+    )
+    dust_error = _below_snapshot_min_order_error(position, snapshot_context)
+    if dust_error:
+        dust_reason = f"{exit_context.exit_reason} [DUST: {dust_error}]"
+        _mark_exit_dust_hold(
+            position,
+            reason=dust_reason,
+            error=dust_error,
+        )
+        _dual_write_canonical_pending_exit_if_available(
+            conn,
+            position,
+            reason=dust_reason,
+            error=dust_error,
+        )
+        if conn is not None:
+            log_pending_exit_recovery_event(
+                conn,
+                position,
+                event_type="EXIT_ORDER_REJECTED",
+                reason=dust_reason,
+                error=dust_error,
+            )
+            log_exit_retry_event(conn, position, reason=dust_reason, error=dust_error)
+        return f"sell_blocked_dust: {dust_error}"
+
     # Pre-sell collateral check (fail-closed)
     can_sell, collateral_reason = check_sell_collateral(
         position.entry_price,
         position.effective_shares,
         clob,
-        token_id=exit_intent.token_id,
+        token_id=token_id,
     )
     if not can_sell:
         retry_reason = f"{exit_context.exit_reason} [COLLATERAL: {collateral_reason}]"
         _mark_exit_retry(
+            position,
+            reason=retry_reason,
+            error=collateral_reason or "",
+        )
+        _dual_write_canonical_pending_exit_if_available(
+            conn,
             position,
             reason=retry_reason,
             error=collateral_reason or "",
@@ -555,6 +719,12 @@ def _execute_live_exit(
             if outcome.status != "CANCELED":
                 retry_reason = f"{exit_context.exit_reason} [CANCEL_{outcome.status}]"
                 _mark_exit_retry(position, reason=retry_reason, error=outcome.reason or outcome.status)
+                _dual_write_canonical_pending_exit_if_available(
+                    conn,
+                    position,
+                    reason=retry_reason,
+                    error=outcome.reason or outcome.status,
+                )
                 log_pending_exit_recovery_event(
                     conn,
                     position,
@@ -577,28 +747,6 @@ def _execute_live_exit(
                 _mark_exit_retry(position, reason=f"{exit_context.exit_reason} [CANCEL_{outcome.status}]", error=outcome.reason or outcome.status)
                 return f"exit_blocked: cancel_{outcome.status.lower()}"
 
-    # Determine the token to sell
-    token_id = exit_intent.token_id
-    if not token_id:
-        retry_reason = f"{exit_intent.reason} [NO_TOKEN_ID]"
-        _mark_exit_retry(position, reason=retry_reason, error="no_token_id")
-        if conn is not None:
-            log_pending_exit_recovery_event(
-                conn,
-                position,
-                event_type="EXIT_ORDER_REJECTED",
-                reason=retry_reason,
-                error="no_token_id",
-            )
-            log_exit_retry_event(conn, position, reason=retry_reason, error="no_token_id")
-        return "exit_blocked: no_token_id"
-
-    snapshot_context = _latest_or_capture_exit_snapshot_context(
-        conn,
-        clob,
-        position,
-        token_id,
-    )
     _mark_pending_exit(position)
     position.exit_state = "exit_intent"
 
@@ -623,6 +771,12 @@ def _execute_live_exit(
                     reason=dust_reason,
                     error=sell_error,
                 )
+                _dual_write_canonical_pending_exit_if_available(
+                    conn,
+                    position,
+                    reason=dust_reason,
+                    error=sell_error,
+                )
                 if conn is not None:
                     log_pending_exit_recovery_event(
                         conn,
@@ -635,6 +789,12 @@ def _execute_live_exit(
                 return f"sell_blocked_dust: {sell_error}"
             retry_reason = f"{exit_context.exit_reason} [SELL_ERROR: {sell_error}]"
             _mark_exit_retry(
+                position,
+                reason=retry_reason,
+                error=sell_error,
+            )
+            _dual_write_canonical_pending_exit_if_available(
+                conn,
                 position,
                 reason=retry_reason,
                 error=sell_error,
@@ -758,6 +918,12 @@ def _execute_live_exit(
         retry_reason = f"{exit_context.exit_reason} [ERROR]"
         retry_error = str(exc)[:500]
         _mark_exit_retry(
+            position,
+            reason=retry_reason,
+            error=retry_error,
+        )
+        _dual_write_canonical_pending_exit_if_available(
+            conn,
             position,
             reason=retry_reason,
             error=retry_error,
