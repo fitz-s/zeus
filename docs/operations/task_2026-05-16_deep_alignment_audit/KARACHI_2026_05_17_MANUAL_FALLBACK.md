@@ -41,6 +41,44 @@ not capital-protective.
 
 ---
 
+## 1.5 Cascade Flow (post PR-I — Path A-clean) — REWRITE 2026-05-16
+
+**Authority basis**: SCAFFOLD_F14_F16.md §K.7 v5 + PR-I commits C1-C5.
+**Supersedes the pre-PR-I description** in earlier drafts of this runbook,
+which erroneously implied `clob.redeem` was part of the auto-cascade.
+
+PR-I lands the cascade-liveness antibody and the operator-completion state.
+Under current adapter state (PolymarketV2Adapter.redeem returns
+REDEEM_DEFERRED_TO_R1 stub), the end-to-end flow for Karachi is:
+
+| Step | What | Where | Trigger |
+| --- | --- | --- | --- |
+| 1 | Polymarket settles | UMA on-chain | T-0 = 2026-05-17 12:00 UTC |
+| 2 | Harvester writes `settlements_v2` VERIFIED row | `state/zeus-forecasts.db` | hourly `harvester` job (T-0 → ~T+1h) |
+| 3 | `harvester_pnl_resolver` enqueues REDEEM_INTENT_CREATED in `settlement_commands` | `state/zeus_trades.db` | same harvester tick |
+| 4 | `redeem_submitter` poller fires | `src/main.py:_redeem_submitter_cycle` | every 5 min |
+| 5 | `submit_redeem` calls `PolymarketV2Adapter.redeem` | `src/execution/settlement_commands.py:L324` | inside savepoint |
+| 6 | Adapter returns `REDEEM_DEFERRED_TO_R1` → state transitions to **REDEEM_OPERATOR_REQUIRED** | settlement_commands row | atomic via `_transition` |
+| 7 | `logger.warning("[REDEEM_OPERATOR_REQUIRED] command_id=… condition_id=c30f28a5-d4e action=run_operator_record_redeem …")` fires AFTER commit | `logs/zeus-live.err` | post-savepoint best-effort |
+| 8 | Operator (notified by alert) claims Karachi $1.5873 via Polymarket UI; copies tx_hash | external | within 24h SLA |
+| 9 | Operator runs CLI: `python -m scripts.operator_record_redeem 0xc5faddf4810e0c14659dbdf170599dcb8304ef42afcccb84992b4d8fcb0f44ae 0x<tx_hash>` | `scripts/operator_record_redeem.py` | manual |
+| 10 | CLI atomic transition REDEEM_OPERATOR_REQUIRED → REDEEM_TX_HASHED; audit event written with actor='operator' | settlement_commands + settlement_command_events | within seconds |
+| 11 | `redeem_reconciler` poller picks up REDEEM_TX_HASHED → currently NO-OP (web3 not wired); row sits in TX_HASHED until PR-I.5 lands web3 receipt path | `src/main.py:_redeem_reconciler_cycle` | every 10 min |
+
+Steps 1-7 + 10-11 are deterministic and machine-driven; steps 8-9 are the
+**designed operator action**, not silent UI tinkering. Until PR-I.5 wires
+adapter for true end-to-end automation, this is "complete per design" under
+v3 §K.10 semantics (per operator policy 2026-05-16 — see SCAFFOLD §K.10 v5
+honest verdict on the first-live-precedent reframe).
+
+**Failure-mode mapping** (Path C escalation triggers per SCAFFOLD §I.4):
+- REDEEM_OPERATOR_REQUIRED row aged ≤24h with no CLI invocation → **EXPECTED** designed-state; not a Path C trigger. Operator action pending.
+- REDEEM_OPERATOR_REQUIRED row aged >24h with no CLI invocation → **Path C trigger**. Investigate operator availability; if abandoned, arm §3 manual fallback.
+- REDEEM_INTENT_CREATED stuck >30 min post-enqueue (poller broken) → **Path C trigger**. PR-I cascade antibody broken.
+- Adapter returns hard error code other than REDEEM_DEFERRED_TO_R1 → row lands in REDEEM_FAILED (not OPERATOR_REQUIRED); investigate before recovery via `operator_record_redeem.py --force --notes "..."`.
+
+---
+
 ## 2. Canonical Truth Source
 
 `config/cities.json` Karachi entry:
@@ -154,7 +192,40 @@ sqlite3 -readonly state/zeus_trades.db "
   ORDER BY rowid DESC LIMIT 5;"
 ```
 
-Look for a `SETTLED` event after T-0. Done — stop here.
+Look for a `SETTLED` event after T-0. **Per §1.5 cascade flow (post PR-I)**:
+the cascade halts at `REDEEM_OPERATOR_REQUIRED` state in settlement_commands
+until you complete step 9 (operator CLI). Check:
+
+```bash
+# Should show REDEEM_OPERATOR_REQUIRED with the [REDEEM_OPERATOR_REQUIRED] alert
+# from logs/zeus-live.err if the redeem_submitter poller has run
+sqlite3 -readonly state/zeus_trades.db "
+  SELECT command_id, state, error_payload
+  FROM settlement_commands
+  WHERE condition_id LIKE 'c30f28a5%';"
+
+# Inspect the WARN alert (cascade-liveness signal):
+grep '\[REDEEM_OPERATOR_REQUIRED\]' logs/zeus-live.err | tail -5
+```
+
+If `state=REDEEM_OPERATOR_REQUIRED` and the alert is present → cascade is
+healthy and waiting for operator action. Proceed to **operator UI claim**:
+1. Open Polymarket UI for Karachi event 486870.
+2. Claim YES tokens (winning side); copy the tx_hash from the chain
+   confirmation.
+3. Run the CLI:
+   ```bash
+   python -m scripts.operator_record_redeem \
+     0xc5faddf4810e0c14659dbdf170599dcb8304ef42afcccb84992b4d8fcb0f44ae \
+     0x<tx_hash>
+   ```
+4. CLI atomic transitions OPERATOR_REQUIRED → TX_HASHED; logs
+   `[OPERATOR_RECORD] command_id=… new=REDEEM_TX_HASHED tx_hash=0x…`.
+5. Reconciler will pick up TX_HASHED but currently NO-OPS (web3 not wired;
+   that's PR-I.5). Row sits in TX_HASHED indefinitely until then — this is
+   expected and NOT a Path C trigger.
+
+Done — stop here. The settlement is recorded per design.
 
 ### T+3 h — 2026-05-17 15:00 UTC
 
