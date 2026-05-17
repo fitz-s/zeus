@@ -278,3 +278,97 @@ def test_h_existing_migrated_db_bumps_user_version_too(tmp_path: Path) -> None:
         assert v == 4
     finally:
         conn.close()
+
+
+def test_i_default_targets_exclude_zeus_forecasts_db() -> None:
+    """G5c FA3 ship-blocker regression: forecasts DB uses an INDEPENDENT
+    sentinel SCHEMA_FORECASTS_VERSION (src/state/db.py:2427) that this
+    PR does NOT change. Migration MUST NOT include zeus-forecasts.db in
+    its default target list; bumping its user_version to 4 would trigger
+    assert_schema_current_forecasts(conn) to raise on next forecast-live
+    daemon boot — fatal.
+
+    Operator may still explicitly target it via --db, but the default
+    must never include it.
+    """
+    import sys
+    from io import StringIO
+
+    # Inspect the default-target list inline by reading the script source
+    # and asserting the absence of zeus-forecasts.db. AST-level enforcement
+    # is more robust than substring match against possible refactors.
+    import ast
+    script_path = (
+        Path(__file__).resolve().parent.parent
+        / "scripts"
+        / "migrations"
+        / "202605_add_redeem_operator_required_state.py"
+    )
+    src = script_path.read_text()
+    # AST-only check: walk for any string literal "zeus-forecasts.db" that
+    # lands as a runtime constant (i.e., NOT a docstring/comment — comments are
+    # not in the AST; docstrings ARE Constant nodes but only at module/class/
+    # function head as the first statement). We exclude docstring positions
+    # by checking the parent context.
+    tree = ast.parse(src)
+    # Collect all docstring nodes to exclude
+    docstring_ids = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            if (node.body and isinstance(node.body[0], ast.Expr)
+                    and isinstance(node.body[0].value, ast.Constant)
+                    and isinstance(node.body[0].value.value, str)):
+                docstring_ids.add(id(node.body[0].value))
+    # Now walk for runtime Constant nodes containing the bad literal
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            if id(node) in docstring_ids:
+                continue
+            if "zeus-forecasts.db" in node.value:
+                pytest.fail(
+                    f"AST-detected RUNTIME literal 'zeus-forecasts.db' in migration "
+                    f"script at line {node.lineno}; would bump forecasts user_version "
+                    f"and break SCHEMA_FORECASTS_VERSION boot check (G5c FA3)."
+                )
+
+
+def test_j_forecasts_shaped_db_user_version_preserved(tmp_path: Path) -> None:
+    """Defensive functional test: if operator runs default migration against
+    a checkout that includes a forecasts-shaped DB (no settlement_commands)
+    at user_version=3, migration with DEFAULT targets must leave it untouched.
+
+    We simulate by calling main() with default targets pointing at a tmp
+    repo_root that contains ONLY a forecasts-shaped DB at the
+    state/zeus-forecasts.db location. The default-target list (post-R2)
+    does NOT include this path, so migration should skip_missing on all
+    other targets and never touch zeus-forecasts.db's user_version.
+    """
+    fake_repo = tmp_path / "fake-repo"
+    state = fake_repo / "state"
+    state.mkdir(parents=True)
+    # Only forecasts DB exists in this fake repo (sibling DBs missing)
+    forecasts = state / "zeus-forecasts.db"
+    conn = sqlite3.connect(str(forecasts))
+    try:
+        conn.execute("PRAGMA user_version = 3")
+        conn.commit()
+    finally:
+        conn.close()
+
+    # Run migration with --repo-root pointing at fake-repo (default targets)
+    exit_code = migration.main([
+        "--repo-root", str(fake_repo),
+    ])
+    # All targets are missing → exit 0 with skip_missing actions
+    assert exit_code == 0, f"unexpected exit_code={exit_code}"
+
+    # Verify forecasts DB user_version is STILL 3 (untouched)
+    conn = sqlite3.connect(str(forecasts))
+    try:
+        v = conn.execute("PRAGMA user_version").fetchone()[0]
+        assert v == 3, (
+            f"forecasts.db user_version must remain at 3 (SCHEMA_FORECASTS_VERSION) "
+            f"after default migration; got {v}. R2 ship-blocker regression."
+        )
+    finally:
+        conn.close()

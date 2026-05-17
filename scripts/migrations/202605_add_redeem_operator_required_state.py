@@ -273,15 +273,21 @@ def main(argv: Iterable[str] | None = None) -> int:
     if args.db:
         targets = [Path(p).resolve() for p in args.db]
     else:
-        # PR #126 review-fix (Codex P1 #2): include world.db + forecasts.db
-        # in default targets so user_version sentinel stays in sync across
-        # all canonical DBs. Without these, _startup_world_db_schema_ready_check
-        # fatal-errors on existing deployments post-upgrade.
+        # PR #126 review-fix (Codex P1 #2): include world.db in default targets
+        # so SCHEMA_VERSION sentinel stays in sync across DBs that share it.
+        #
+        # PR #126 G5c FA3 ship-blocker fix (R2): zeus-forecasts.db is NOT in
+        # default targets. forecasts DB uses an INDEPENDENT sentinel
+        # SCHEMA_FORECASTS_VERSION (src/state/db.py:2427, currently 3) that
+        # this PR does NOT change. Bumping forecasts.db user_version to 4
+        # would trigger assert_schema_current_forecasts(conn) (db.py:3099)
+        # to raise SchemaOutOfDateError on next boot of com.zeus.forecast-live
+        # — fatal. settlement_commands lives on trade DB only; forecasts
+        # schema is untouched here.
         targets = [
             repo_root / "state" / "zeus_trades.db",
             repo_root / "state" / "zeus-live.db",
             repo_root / "state" / "zeus-world.db",
-            repo_root / "state" / "zeus-forecasts.db",
         ]
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
