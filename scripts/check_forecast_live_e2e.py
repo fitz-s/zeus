@@ -394,7 +394,7 @@ def _run_in_work_dir(work_dir: Path, *, keep_artifacts: bool) -> SmokeReport:
         ecmwf_open_data.FIFTY_ONE_ROOT = fifty_one_root
         try:
             for config in TRACKS:
-                def _collector(*, track: str, _config: TrackSmokeConfig = config) -> dict[str, Any]:
+                def _collector(*, track: str, _config: TrackSmokeConfig = config, **_daemon_kwargs) -> dict[str, Any]:
                     return ecmwf_open_data.collect_open_ens_cycle(
                         track=track,
                         run_date=SOURCE_CYCLE.date(),
