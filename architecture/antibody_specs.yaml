@@ -42,23 +42,26 @@ antibody_specs:
       missing_file_policy: skip
 
     tolerance:
-      # ±N lines around the cited line_number are considered "in range"
-      window: 5
+      # Current implementation: bounds-only check.
+      # A citation is valid iff 1 <= lineno <= total_lines.
+      # Future enhancement (not implemented): ±N line content-match window.
+      future_window: 5
       description: >
-        Minor edits shift lines by a few positions. A citation is considered
-        valid if its stated line number falls within [lineno - window, lineno + window]
-        of the file's current length. If the file has fewer total lines than
-        (lineno - window), the citation is flagged as drifted.
+        A citation is considered valid if its stated line number falls within
+        the file's current bounds (1 <= lineno <= total_lines). If lineno > total_lines
+        or lineno < 1, the citation is flagged as drifted. The original spec
+        proposed a ±5-line tolerance window; that is a future enhancement once
+        the hook can parse expected-content from surrounding citation prose.
 
     match_content:
       description: >
-        The hook currently validates only line-range existence, not content
+        The hook currently validates only line-bounds existence, not content
         equality. Content-equality matching is intentionally deferred: the hook
         does not know the "expected" content from the citation text alone.
         Future enhancement: parse citation context from surrounding prose and
-        fuzzy-match the target line.
-      current_check: line_in_range
-      future_check: content_fuzzy_match
+        fuzzy-match the target line within a ±5 line window.
+      current_check: line_in_bounds
+      future_check: content_fuzzy_match_within_window
 
     severity: ADVISORY
     fail_open: true

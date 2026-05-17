@@ -7,15 +7,17 @@
 citation_grep_gate.py -- PreToolUse advisory for Edit/Write.
 
 Scans old_string / new_string args for file:line and file Lline citations.
-For each citation, verifies the referenced file exists and the line still
-contains content matching a nearby window (±5 lines). On drift, returns
-an advisory listing the stale citations. Fail-open on any exception.
+For each citation, verifies the referenced file exists and the line number
+is within the file's current bounds (1 <= lineno <= total_lines). On drift,
+returns an advisory listing the stale citations. Fail-open on any exception.
+
+Future enhancement (not implemented): content-match within a ±5 line tolerance
+window — would require the citation source text to anchor the match.
 """
 
 from __future__ import annotations
 
 import re
-import sys
 from pathlib import Path
 from typing import Any
 
@@ -27,10 +29,6 @@ _CITATION_PATTERN = re.compile(
     r'([\w./\-]+\.(?:py|yaml|yml|json|md|ts|js|sh|txt))'
     r'(?::(\d+)|[ \t]+L(\d+))',
 )
-
-# Content match: strip whitespace, require non-empty overlap
-_TOLERANCE = 5
-
 
 def _extract_citations(text: str) -> list[tuple[str, int]]:
     """Return list of (filepath, lineno) from all citations in text."""
@@ -56,8 +54,9 @@ def _resolve_path(cited: str) -> Path | None:
 
 def _check_citation(filepath: str, lineno: int) -> str | None:
     """
-    Return None if citation is valid (or file not found = skip).
-    Return drift description string if line has moved beyond tolerance.
+    Return None if citation is valid (file exists, lineno in bounds) or file
+    not found (skip — may be a new file being created).
+    Return drift description string if lineno is outside file bounds.
     """
     resolved = _resolve_path(filepath)
     if resolved is None:
@@ -69,22 +68,8 @@ def _check_citation(filepath: str, lineno: int) -> str | None:
         return None
 
     total = len(lines)
-    # lineno is 1-based
-    idx = lineno - 1
-
-    # Check window [idx - TOLERANCE, idx + TOLERANCE]
-    lo = max(0, idx - _TOLERANCE)
-    hi = min(total, idx + _TOLERANCE + 1)
-
-    if idx < 0 or idx >= total:
-        return f"{filepath}:{lineno} — line {lineno} is beyond file end ({total} lines)"
-
-    # The line exists within the file; citation is valid
-    # (We don't have the expected content, only the citation reference.
-    #  If the file has the line, report valid. If the line index is out of
-    #  range even within tolerance, report drift.)
-    if lo > idx or hi <= idx:
-        return f"{filepath}:{lineno} — line out of tolerance window"
+    if lineno < 1 or lineno > total:
+        return f"{filepath}:{lineno} — line {lineno} is outside file bounds (file has {total} lines)"
 
     return None  # valid
 
