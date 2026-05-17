@@ -106,6 +106,7 @@ DOCS_REGISTRY_PARENT_PATTERNS = (
     "docs/artifacts/",
     "docs/to-do-list/",
     "docs/runbooks/",
+    "docs/reference/legacy/",
 )
 
 
@@ -213,6 +214,44 @@ def docs_registry_parent_allowed(path: str) -> bool:
 
 def docs_registry_covers(path: str, entries: list[dict[str, Any]]) -> bool:
     return any(docs_registry_path_matches(path, entry) for entry in entries)
+
+
+def check_expected_empty_zones(api: Any, topology: dict[str, Any]) -> list[Any]:
+    """D7: scan topology zones with expected_empty: true and error if they contain files.
+
+    A zone declared expected_empty: true must contain only .gitkeep (or nothing
+    at all — absent path is treated as empty, not as an error). Any other tracked
+    file inside the zone is flagged as an expected_empty_violation.
+
+    Rationale: archive/cold/ is declared expected_empty to document the constraint
+    that nothing lands there without explicit operator action. This parser enforces
+    that invariant structurally so agents cannot silently populate the zone.
+    """
+    issues: list[Any] = []
+    for zone in topology.get("docs_subroots") or []:
+        if not zone.get("expected_empty"):
+            continue
+        zone_path_str = str(zone.get("path") or "").strip("/")
+        if not zone_path_str:
+            continue
+        zone_dir = api.ROOT / zone_path_str
+        if not zone_dir.exists():
+            # Absent path satisfies expected_empty: no files can be in a non-existent dir.
+            continue
+        for rel in api._git_visible_files():
+            if not rel.startswith(zone_path_str + "/"):
+                continue
+            filename = Path(rel).name
+            if filename == ".gitkeep":
+                continue
+            issues.append(
+                api._issue(
+                    "expected_empty_violation",
+                    rel,
+                    f"zone '{zone_path_str}' is declared expected_empty but contains tracked file: {rel}",
+                )
+            )
+    return issues
 
 
 def check_docs_registry(api: Any, topology: dict[str, Any]) -> list[Any]:

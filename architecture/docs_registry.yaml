@@ -68,6 +68,7 @@ parent_coverage_allowed_patterns:
 - docs/artifacts/
 - docs/to-do-list/
 - docs/runbooks/
+- docs/reference/legacy/
 entries:
 - path: docs/AGENTS.md
   doc_class: router
