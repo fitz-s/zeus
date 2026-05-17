@@ -2989,6 +2989,73 @@ def test_executable_snapshot_repricing_upgrades_maker_order_type_when_crossing_a
     assert decision.final_execution_intent.post_only is False
 
 
+def test_executable_snapshot_repricing_crosses_positive_ev_ask_outside_flat_slippage_when_live_taker_allowed(tmp_path):
+    """RELATIONSHIP: executable cost, not flat bps from VWMP, governs taker eligibility."""
+
+    conn = get_connection(tmp_path / "snapshot-reprice-edge-aware-wide-ask.db")
+    init_schema(conn)
+    _insert_executable_snapshot(
+        conn,
+        snapshot_id="snap-reprice-edge-aware-wide-ask",
+        selected_outcome_token_id="yes1",
+        outcome_label="YES",
+        yes_token_id="yes1",
+        no_token_id="no1",
+        top_bid="0.20",
+        top_ask="0.30",
+        fee_details={"feeRate": "0.03", "source": "test_snapshot_taker_fee"},
+    )
+    edge = _edge()
+    decision = EdgeDecision(
+        should_trade=True,
+        edge=edge,
+        tokens={"token_id": "yes1", "no_token_id": "no1"},
+        size_usd=5.0,
+        applied_validations=[],
+        edge_context=types.SimpleNamespace(p_posterior=edge.p_posterior),
+        decision_snapshot_id="decision-snap-edge-aware-wide-ask",
+        sizing_bankroll=100.0,
+        kelly_multiplier_used=0.25,
+        execution_fee_rate=0.03,
+    )
+
+    best_ask = cycle_runtime._reprice_decision_from_executable_snapshot(
+        conn,
+        decision,
+        {"executable_snapshot_id": "snap-reprice-edge-aware-wide-ask"},
+        {
+            "order_type": "GTC",
+            "allow_taker_upgrade": True,
+            "cancel_after": datetime(2026, 4, 3, 1, tzinfo=timezone.utc),
+            "resolution_window": "2026-04-03",
+            "correlation_key": "NYC:2026-04-03",
+        },
+    )
+    conn.close()
+
+    taker_fee_price = 0.30 + 0.03 * 0.30 * (1 - 0.30)
+    expected_size = (0.47 - taker_fee_price) / (1 - taker_fee_price) * 0.25 * 100.0
+    reprice = decision.tokens["executable_snapshot_reprice"]
+    shadow = reprice["corrected_pricing_shadow"]
+    assert best_ask == pytest.approx(0.30)
+    assert reprice["best_ask_slippage_bps"] > reprice["max_slippage_bps"]
+    assert reprice["best_ask_blocked_by_slippage"] is False
+    assert reprice["best_ask_inside_edge_budget"] is True
+    assert reprice["best_ask_slippage_override_by_edge"] is True
+    assert reprice["best_ask_fee_adjusted_edge"] == pytest.approx(0.47 - taker_fee_price)
+    assert reprice["best_ask_size_at_fee_adjusted_cost"] == pytest.approx(expected_size)
+    assert decision.size_usd == pytest.approx(float(shadow["candidate_size_usd"]))
+    assert decision.size_usd >= expected_size
+    assert reprice["final_order_type"] == "FOK"
+    assert reprice["taker_order_type_upgraded"] is True
+    assert reprice["live_submit_authority"] is True
+    assert shadow["order_policy"] == "marketable_limit_depth_bound"
+    assert shadow["candidate_final_limit_price"] == "0.3"
+    assert shadow["candidate_fee_adjusted_execution_price"] == "0.3063"
+    assert decision.final_execution_intent.order_type == "FOK"
+    assert decision.final_execution_intent.post_only is False
+
+
 def test_executable_snapshot_repricing_sweeps_deeper_ask_inside_budget(tmp_path):
     from dataclasses import replace
 
@@ -3646,7 +3713,7 @@ def test_live_reprice_builds_post_only_passive_final_intent(tmp_path):
         event_id="evt-passive-mismatch",
         condition_id="m1",
         top_bid="0.20",
-        top_ask="0.30",
+        top_ask="0.48",
     )
     artifact = CycleArtifact(mode=DiscoveryMode.OPENING_HUNT.value, started_at="2026-04-03T00:00:00Z")
     summary = {"candidates": 0, "no_trades": 0}

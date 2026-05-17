@@ -715,6 +715,7 @@ def _reprice_decision_from_executable_snapshot(
         Decimal(str(round(float(snapshot_limit_price), 12))),
         tick_size_decimal,
     )
+    final_intent_context = final_intent_context or {}
     slippage_reference_price = min(float(decision.edge.p_posterior), float(snapshot_vwmp))
     max_slippage = SlippageBps(value_bps=200.0, direction="adverse")
     best_ask_slippage_bps = 0.0
@@ -764,6 +765,26 @@ def _reprice_decision_from_executable_snapshot(
     corrected_candidate_price = snapshot_limit_price
     corrected_candidate_expected_fill = snapshot_limit_price
     corrected_candidate_size = repriced_size_at_snapshot_vwmp
+    best_ask_fee_adjusted_edge = 0.0
+    best_ask_size_at_fee_adjusted_cost = 0.0
+    if best_ask_edge > 0.0:
+        best_ask_size_at_fee_adjusted_cost = _size_at_execution_price_boundary(
+            p_posterior=float(decision.edge.p_posterior),
+            entry_price=best_ask_float,
+            fee_rate=taker_fee_rate,
+            sizing_bankroll=sizing_bankroll,
+            kelly_multiplier=kelly_multiplier,
+        )
+        best_ask_fee_adjusted_edge = best_ask_edge - (
+            taker_fee_rate * best_ask_float * (1.0 - best_ask_float)
+        )
+    best_ask_inside_edge_budget = (
+        best_ask_edge > 0.0
+        and best_ask_fee_adjusted_edge > 0.0
+        and best_ask_size_at_fee_adjusted_cost > 0.0
+    )
+    edge_aware_taker_enabled = bool(final_intent_context.get("allow_taker_upgrade"))
+    edge_aware_taker_selected = False
     depth_sweep_limit_decimal = Decimal("0")
     if positive_edge_cap_decimal > Decimal("0") and slippage_cap_decimal > Decimal("0"):
         depth_sweep_limit_decimal = _floor_to_tick(
@@ -775,7 +796,18 @@ def _reprice_decision_from_executable_snapshot(
         depth_sweep_limit_float > 0.0
         and best_ask_float <= depth_sweep_limit_float
     )
-    if best_ask_edge > 0.0 and best_ask_inside_slippage_budget:
+    if (
+        not best_ask_inside_slippage_budget
+        and edge_aware_taker_enabled
+        and best_ask_inside_edge_budget
+    ):
+        depth_sweep_limit_decimal = _floor_to_tick(
+            Decimal(str(best_ask_float)),
+            tick_size_decimal,
+        )
+        depth_sweep_limit_float = float(depth_sweep_limit_decimal)
+        edge_aware_taker_selected = True
+    if best_ask_edge > 0.0 and (best_ask_inside_slippage_budget or edge_aware_taker_selected):
         size_at_depth_limit = _size_at_execution_price_boundary(
             p_posterior=float(decision.edge.p_posterior),
             entry_price=depth_sweep_limit_float,
@@ -806,7 +838,6 @@ def _reprice_decision_from_executable_snapshot(
             corrected_candidate_expected_fill = float(best_ask_sweep.average_price or best_ask_float)
             corrected_candidate_size = size_at_depth_limit
 
-    final_intent_context = final_intent_context or {}
     selected_order_type = str(final_intent_context.get("order_type") or "GTC").strip().upper()
     final_order_type = selected_order_type
     taker_order_type_upgraded = False
@@ -884,9 +915,14 @@ def _reprice_decision_from_executable_snapshot(
         "max_slippage_bps": float(max_slippage.value_bps),
         "depth_sweep_limit_price": depth_sweep_limit_float,
         "best_ask_slippage_bps": float(best_ask_slippage_bps),
+        "best_ask_fee_adjusted_edge": float(best_ask_fee_adjusted_edge),
+        "best_ask_size_at_fee_adjusted_cost": float(best_ask_size_at_fee_adjusted_cost),
+        "best_ask_inside_edge_budget": bool(best_ask_inside_edge_budget),
+        "best_ask_slippage_override_by_edge": bool(edge_aware_taker_selected),
         "best_ask_blocked_by_slippage": bool(
             best_ask_edge > 0.0
             and not best_ask_inside_slippage_budget
+            and not edge_aware_taker_selected
             and best_ask_slippage_bps > max_slippage.value_bps
         ),
         "best_ask_blocked_by_edge_boundary": bool(

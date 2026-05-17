@@ -108,6 +108,22 @@ def _select_risk_allocator_order_type(conn: sqlite3.Connection, snapshot_id: str
     return select_global_order_type(snapshot)
 
 
+def _risk_allocator_order_type_allows_intent(
+    *,
+    selected_order_type: str,
+    intent_order_type: str,
+) -> bool:
+    selected = str(selected_order_type or "").strip().upper()
+    intended = str(intent_order_type or "").strip().upper()
+    if not intended or selected == intended:
+        return True
+    resting = {"GTC", "GTD"}
+    immediate = {"FOK", "FAK"}
+    if selected in resting and intended in immediate:
+        return True
+    return False
+
+
 def _allocation_payload_for_intent(intent: ExecutionIntent) -> dict[str, str]:
     """Return JSON-safe A2 allocation metadata for SUBMIT_REQUESTED payloads."""
 
@@ -2533,7 +2549,10 @@ def _live_order(
         order_type = _select_risk_allocator_order_type(conn, intent.executable_snapshot_id)
         raw_submit_order_type = getattr(intent, "submit_order_type", None)
         submit_order_type = raw_submit_order_type if isinstance(raw_submit_order_type, str) else None
-        if submit_order_type is not None and order_type != submit_order_type:
+        if submit_order_type is not None and not _risk_allocator_order_type_allows_intent(
+            selected_order_type=order_type,
+            intent_order_type=submit_order_type,
+        ):
             return OrderResult(
                 trade_id=trade_id,
                 status="rejected",
@@ -2545,18 +2564,19 @@ def _live_order(
                 shares=shares,
                 order_role="entry",
             )
+        effective_order_type = submit_order_type or order_type
         submit_post_only = bool(getattr(intent, "post_only", False))
-        if submit_post_only and order_type not in {"GTC", "GTD"}:
+        if submit_post_only and effective_order_type not in {"GTC", "GTD"}:
             return OrderResult(
                 trade_id=trade_id,
                 status="rejected",
-                reason=f"post_only_order_type_mismatch: order_type={order_type}",
+                reason=f"post_only_order_type_mismatch: order_type={effective_order_type}",
                 submitted_price=intent.limit_price,
                 shares=shares,
                 order_role="entry",
                 idempotency_key=idem.value,
             )
-        heartbeat_component = _assert_heartbeat_allows_submit(order_type)
+        heartbeat_component = _assert_heartbeat_allows_submit(effective_order_type)
         ws_gap_component = _assert_ws_gap_allows_submit(getattr(intent, "market_id", None) or getattr(intent, "token_id", None))
         collateral_component = _assert_collateral_allows_buy(intent, spend_micro=required_pusd_micro)
 
@@ -2683,7 +2703,7 @@ def _live_order(
                 side="BUY",
                 price=intent.limit_price,
                 size=shares,
-                order_type=order_type,
+                order_type=effective_order_type,
                 post_only=submit_post_only,
                 captured_at=now_str,
             )
@@ -2719,13 +2739,13 @@ def _live_order(
                 occurred_at=now_str,
                 payload={
                     "allocation": _allocation_payload_for_intent(intent),
-                    "order_type": order_type,
+                    "order_type": effective_order_type,
                     "post_only": submit_post_only,
                     "execution_capability": _build_execution_capability(
                         action="ENTRY",
                         command_id=command_id,
                         intent_kind=IntentKind.ENTRY.value,
-                        order_type=order_type,
+                        order_type=effective_order_type,
                         token_id=intent.token_id,
                         snapshot_id=intent.executable_snapshot_id,
                         freshness_time=now_str,
@@ -2737,7 +2757,9 @@ def _live_order(
                             ),
                             _capability_component(
                                 "order_type_selection",
-                                order_type=order_type,
+                                order_type=effective_order_type,
+                                selected_order_type=order_type,
+                                intent_order_type=submit_order_type,
                                 post_only=submit_post_only,
                             ),
                             heartbeat_component,
@@ -2985,7 +3007,7 @@ def _live_order(
                 price=intent.limit_price,
                 size=shares,
                 side="BUY",  # Always BUY
-                order_type=order_type,
+                order_type=effective_order_type,
             )
         except Exception as exc:
             # M2: place_limit_order has crossed the submit side-effect boundary.

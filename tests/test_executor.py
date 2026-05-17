@@ -662,16 +662,52 @@ class TestExecutor:
             "order_type": "FOK",
         }
 
-    def test_execute_final_intent_fails_closed_when_a2_order_type_would_change(self, monkeypatch):
+    def test_execute_final_intent_allows_stricter_fok_when_a2_selected_resting_maker(self, monkeypatch):
         final_intent = _final_execution_intent(order_type="FOK")
+        captured = {}
+
+        class DummyClient:
+            def __init__(self):
+                self.bound_envelope = None
+
+            def bind_submission_envelope(self, envelope):
+                self.bound_envelope = envelope
+
+            def v2_preflight(self):
+                return None
+
+            def place_limit_order(self, *, token_id, price, size, side, order_type="GTC"):
+                captured["order_type"] = order_type
+                return _final_submit_result(self.bound_envelope, order_id="strict-fok-1")
 
         monkeypatch.setattr("src.execution.executor._assert_risk_allocator_allows_submit", lambda intent: None)
         monkeypatch.setattr("src.execution.executor._select_risk_allocator_order_type", lambda conn, snapshot_id: "GTC")
+        monkeypatch.setattr("src.control.ws_gap_guard.assert_ws_allows_submit", lambda *args, **kwargs: None)
+        monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", DummyClient)
+
+        result = execute_final_intent(final_intent, conn=_TEST_CONN, decision_id="decision-final")
+
+        assert result.status == "pending"
+        assert captured["order_type"] == "FOK"
+
+    def test_execute_final_intent_rejects_resting_intent_when_a2_requires_taker(self, monkeypatch):
+        final_intent = _final_execution_intent(
+            final_limit_price=Decimal("0.33"),
+            expected_fill_price_before_fee=Decimal("0.33"),
+            size_value=Decimal("3.30"),
+            snapshot_top_ask=Decimal("0.34"),
+            order_policy="post_only_passive_limit",
+            order_type="GTC",
+            post_only=True,
+        )
+
+        monkeypatch.setattr("src.execution.executor._assert_risk_allocator_allows_submit", lambda intent: None)
+        monkeypatch.setattr("src.execution.executor._select_risk_allocator_order_type", lambda conn, snapshot_id: "FOK")
 
         result = execute_final_intent(final_intent, conn=_TEST_CONN, decision_id="decision-final")
 
         assert result.status == "rejected"
-        assert result.reason == "final_order_type_mismatch: intent=FOK selected=GTC"
+        assert result.reason == "final_order_type_mismatch: intent=GTC selected=FOK"
 
     def test_execute_final_intent_rejects_submit_connection_snapshot_hash_drift(
         self,
