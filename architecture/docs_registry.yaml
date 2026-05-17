@@ -7,6 +7,8 @@ metadata:
     '
 required_entry_fields:
 - path
+- topic_authority
+- superseded_chain
 - doc_class
 - default_read
 - direct_reference_allowed
@@ -28,6 +30,7 @@ allowed_doc_classes:
 - router
 - authority
 - reference
+- legacy_reference
 - module_reference
 - operations
 - runbook
