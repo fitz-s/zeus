@@ -17,6 +17,8 @@ hazard_badges:
   ORACLE_TRUNCATION_BIAS: HKO/Oracle truncation differences must stay explicit and may not be silently mixed with WMO half-up.
   CALIBRATION_FAMILY_MIXING: Calibration rows must keep metric, cluster, season, source identity, and promotion evidence explicit.
   NOT_DAEMON_WIRED: Module exists in src/ but is not imported from any daemon hot-path file (src/main.py, src/ingest_main.py, src/engine/*, src/execution/*, src/state/db.py runtime callers, scripts/healthcheck.py healthy predicate). Daemon activation happens in a separate operator-controlled commit, not by anyone who happens to need the module.
+  SOURCE_INGEST_SCHEMA_DRIFT: Ingest payload contract has drifted from the declared schema; mx2t6/mn2t6 field shapes, causality evidence, or boundary markers must be re-verified before merging new ingest paths.
+  LOW_HIGH_METRIC_MIXING: High and low temperature metric families must never be mixed in a single ingest payload; each payload must carry an explicit metric identity tag.
 write_routes:
   canonical_position_write:
     owner: src/state/ledger.py
@@ -36,10 +38,10 @@ write_routes:
     # reconstruction pattern. Writer signature: harvester_live_dr33.
     # P-E alternate writer signature (one-off reconstruction): p_e_reconstruction_2026-04-23.
     # See:
-    # - docs/operations/task_2026-04-23_live_harvester_enablement_dr33/plan.md
-    # - docs/operations/task_2026-04-23_data_readiness_remediation/evidence/harvester_gamma_probe.md §6.1
-    # - docs/operations/task_2026-04-23_data_readiness_remediation/evidence/pe_reconstruction_plan.md
-    dr33_live_enablement: docs/operations/task_2026-04-23_live_harvester_enablement_dr33/plan.md
+    # - docs/operations/task_2026-04-23_live_harvester_enablement_dr33.archived/plan.md
+    # - docs/operations/archive/2026-Q2/task_2026-04-23_data_readiness_remediation/evidence/harvester_gamma_probe.md §6.1
+    # - docs/operations/archive/2026-Q2/task_2026-04-23_data_readiness_remediation/evidence/pe_reconstruction_plan.md
+    dr33_live_enablement: docs/operations/task_2026-04-23_live_harvester_enablement_dr33.archived/plan.md
     feature_flag: ZEUS_HARVESTER_LIVE_ENABLED
     live_enabled_default: false
   backtest_diagnostic_write:
@@ -177,8 +179,7 @@ package_defaults:
       Typed backtest purpose contracts (SKILL/ECONOMICS/DIAGNOSTIC) and
       decision-time truth provenance. Does NOT carry promotion authority.
       ECONOMICS purpose is tombstoned until market_events_v2 + parity gates
-      pass; SKILL/DIAGNOSTIC are runnable today. Design at
-      docs/operations/task_2026-04-27_backtest_first_principles_review/01_backtest_upgrade_design.md
+      pass; SKILL/DIAGNOSTIC are runnable today.
   src/observability:
     zone: K2_runtime
     authority_role: derived_operator_read_model
@@ -398,7 +399,6 @@ files:
     downstream:
     - src/venue/polymarket_v2_adapter.py
     - src/execution/executor.py
-    - docs/operations/task_2026-04-26_ultimate_plan/r3/frozen_interfaces/Z2.md
   src/contracts/expiring_assumption.py:
     zone: K0_frozen_kernel
     authority_role: assumption_contract
@@ -476,12 +476,6 @@ files:
     - src/signal/day0_signal.py
     - src/signal/ensemble_signal.py
     - src/strategy/market_analysis.py
-  src/contracts/world_view/settlements.py:
-    zone: K0_frozen_kernel
-    authority_role: settlement_world_view_accessor
-    why: Read-only world settlement accessor; must preserve VERIFIED authority and temperature-metric identity before exposing settlement truth to callers.
-    downstream:
-    - src/execution/harvester_pnl_resolver.py
   src/contracts/snapshot_ingest_contract.py:
     zone: K0_frozen_kernel
     authority_role: snapshot_ingest_contract
