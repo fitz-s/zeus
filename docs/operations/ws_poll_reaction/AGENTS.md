@@ -76,7 +76,7 @@ per strategy because reaction-time pressure differs:
 
 | strategy_key       | default | rationale                                                                                              |
 |--------------------|---------|--------------------------------------------------------------------------------------------------------|
-| opening_inertia    | **1.2** | Alpha decays fastest here (bot scanning per `AGENTS.md` L114-126); needs the tightest gap discipline. |
+| opening_inertia    | **1.2** | Alpha decays fastest here (bot scanning per `AGENTS.md::Strategy families` table); needs the tightest gap discipline. |
 | shoulder_sell      | 1.4     | Moderate pressure — competition narrows but reaction window is still seconds-scale.                    |
 | center_buy         | 1.5     | Standard ratio multiplier.                                                                             |
 | settlement_capture | 1.5     | Default — settlement timing is structurally outcome-determined, not WS-reaction-bound.                 |
