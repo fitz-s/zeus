@@ -1680,6 +1680,7 @@ def evaluate_candidate(
     limits: RiskLimits,
     entry_bankroll: Optional[float] = None,
     decision_time: Optional[datetime] = None,
+    microstructure_sink=None,
 ) -> list[EdgeDecision]:
     """Evaluate a market candidate through the full signal pipeline."""
 
@@ -2746,24 +2747,22 @@ def evaluate_candidate(
             p_market[idx] = vwmp(bid, ask, bid_sz, ask_sz)
 
             # Injection Point 7: Data completeness - record microstructure snapshot
-            try:
+            if callable(microstructure_sink):
                 import datetime as dt
-                from src.state.db import log_microstructure
-                log_microstructure(
-                    conn,
-                    token_id=o["token_id"],
-                    city=city.name,
-                    target_date=target_d.isoformat(),
-                    range_label=bins[idx].label,
-                    price=float(p_market[idx]),
-                    volume=float(bid_sz + ask_sz),
-                    bid=float(bid),
-                    ask=float(ask),
-                    spread=round(float(ask - bid), 4) if ask >= bid else 0.0,
-                    source_timestamp=dt.datetime.now(dt.timezone.utc).isoformat(),
+                microstructure_sink(
+                    {
+                        "token_id": o["token_id"],
+                        "city": city.name,
+                        "target_date": target_d.isoformat(),
+                        "range_label": bins[idx].label,
+                        "price": float(p_market[idx]),
+                        "volume": float(bid_sz + ask_sz),
+                        "bid": float(bid),
+                        "ask": float(ask),
+                        "spread": round(float(ask - bid), 4) if ask >= bid else 0.0,
+                        "source_timestamp": dt.datetime.now(dt.timezone.utc).isoformat(),
+                    }
                 )
-            except Exception as micro_exc:
-                logger.warning("Microstructure log DB insert failed for %s: %s", o["token_id"], micro_exc)
             if probe_native_no_quotes:
                 no_token_id = str(o.get("no_token_id") or "")
                 if not no_token_id:

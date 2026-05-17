@@ -1977,8 +1977,39 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
     if callable(oracle_penalty_reload):
         oracle_penalty_reload()
 
+    derived_writes: list[tuple[str, object]] = []
+
+    def _queue_derived_write(name: str, writer) -> None:
+        if callable(writer):
+            derived_writes.append((name, writer))
+
+    def _flush_derived_writes() -> None:
+        while derived_writes:
+            name, writer = derived_writes.pop(0)
+            try:
+                writer()
+            except Exception as exc:  # noqa: BLE001 - derived telemetry is fail-soft.
+                deps.logger.warning("Derived discovery write failed for %s: %s", name, exc)
+                summary["degraded"] = True
+
+    def _record_microstructure(row: dict) -> None:
+        payload = dict(row)
+
+        def _write() -> None:
+            from src.state.db import log_microstructure
+
+            log_microstructure(conn, **payload)
+
+        _queue_derived_write("microstructure", _write)
+
     def _record_opportunity_fact(candidate, decision, *, should_trade: bool, rejection_stage: str, rejection_reasons: list[str]):
-        try:
+        def _write(
+            candidate=candidate,
+            decision=decision,
+            should_trade=should_trade,
+            rejection_stage=rejection_stage,
+            rejection_reasons=list(rejection_reasons or []),
+        ) -> None:
             from src.state.db import log_opportunity_fact
 
             log_opportunity_fact(
@@ -1990,15 +2021,14 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                 rejection_reasons=rejection_reasons,
                 recorded_at=decision_time.isoformat(),
             )
-        except Exception as exc:
-            deps.logger.warning(
-                "Opportunity fact write failed for %s: %s",
-                getattr(decision, "decision_id", ""),
-                exc,
-            )
+
+        _queue_derived_write(
+            f"opportunity_fact:{getattr(decision, 'decision_id', '')}",
+            _write,
+        )
 
     def _record_probability_trace(candidate, decision):
-        try:
+        def _write(candidate=candidate, decision=decision) -> None:
             from src.state.db import log_probability_trace_fact
 
             result = log_probability_trace_fact(
@@ -2014,12 +2044,11 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                     getattr(decision, "decision_id", ""),
                     result.get("status"),
                 )
-        except Exception as exc:
-            deps.logger.warning(
-                "Probability trace write failed for %s: %s",
-                getattr(decision, "decision_id", ""),
-                exc,
-            )
+
+        _queue_derived_write(
+            f"probability_trace:{getattr(decision, 'decision_id', '')}",
+            _write,
+        )
 
     def _availability_scope_key(*, candidate=None, city_name: str = "", target_date: str = "") -> str:
         if candidate is not None:
@@ -2061,7 +2090,16 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
         normalized = str(status or "").strip().upper()
         if not normalized or normalized == "OK":
             return
-        try:
+        details_payload = dict(details)
+        reasons_payload = list(reasons)
+
+        def _write(
+            normalized=normalized,
+            reasons=reasons_payload,
+            scope_type=scope_type,
+            scope_key=scope_key,
+            details=details_payload,
+        ) -> None:
             from src.state.db import log_availability_fact
 
             failure_type = _availability_failure_type(normalized, reasons)
@@ -2087,8 +2125,8 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                 impact="skip",
                 details=details,
             )
-        except Exception as exc:
-            deps.logger.warning("Availability fact write failed for %s: %s", scope_key, exc)
+
+        _queue_derived_write(f"availability_fact:{scope_key}", _write)
 
     def _market_scan_authority() -> str:
         getter = getattr(deps, "get_last_scan_authority", None)
@@ -2112,7 +2150,9 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
         return ""
 
     def _record_forward_market_substrate(markets_to_record, authority: str) -> None:
-        try:
+        markets_payload = list(markets_to_record or [])
+
+        def _write(markets_to_record=markets_payload, authority=authority) -> None:
             from src.state.db import log_forward_market_substrate
 
             result = log_forward_market_substrate(
@@ -2121,34 +2161,27 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                 recorded_at=decision_time.isoformat(),
                 scan_authority=authority,
             )
-        except Exception as exc:
-            deps.logger.warning("Forward market substrate write failed: %s", exc)
-            summary["forward_market_substrate_status"] = "error"
-            summary["forward_market_substrate_error"] = str(exc)
-            summary["degraded"] = True
-            return
 
-        status = str(result.get("status", "") or "")
-        summary["forward_market_substrate_status"] = status
-        for key in (
-            "market_events_inserted",
-            "market_events_unchanged",
-            "market_events_conflicted",
-            "price_rows_inserted",
-            "price_rows_unchanged",
-            "price_rows_conflicted",
-            "markets_skipped_missing_facts",
-            "outcomes_skipped_missing_facts",
-            "prices_skipped_missing_facts",
-            "outcomes_skipped_with_outcome_fact",
-        ):
-            if key in result:
-                summary[f"forward_market_substrate_{key}"] = int(result.get(key) or 0)
-        if status in {"written_with_conflicts", "skipped_invalid_schema"}:
-            deps.logger.warning("Forward market substrate degraded: %s", result)
-            summary["degraded"] = True
+            status = str(result.get("status", "") or "")
+            summary["forward_market_substrate_status"] = status
+            for key in (
+                "market_events_inserted",
+                "market_events_unchanged",
+                "market_events_conflicted",
+                "price_rows_inserted",
+                "price_rows_unchanged",
+                "price_rows_conflicted",
+                "markets_skipped_missing_facts",
+                "outcomes_skipped_missing_facts",
+                "prices_skipped_missing_facts",
+                "outcomes_skipped_with_outcome_fact",
+            ):
+                if key in result:
+                    summary[f"forward_market_substrate_{key}"] = int(result.get(key) or 0)
+            if status in {"written_with_conflicts", "skipped_invalid_schema"}:
+                deps.logger.warning("Forward market substrate degraded: %s", result)
+                summary["degraded"] = True
 
-        try:
             from src.state.db import log_market_source_contract_topology_facts
 
             source_contract_result = log_market_source_contract_topology_facts(
@@ -2157,30 +2190,35 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                 recorded_at=decision_time.isoformat(),
                 scan_authority=authority,
             )
-        except Exception as exc:
-            deps.logger.warning("Market source-contract topology write failed: %s", exc)
-            summary["market_source_contract_topology_status"] = "error"
-            summary["market_source_contract_topology_error"] = str(exc)
-            summary["degraded"] = True
-            return
 
-        source_contract_status = str(source_contract_result.get("status", "") or "")
-        summary["market_source_contract_topology_status"] = source_contract_status
-        for key in (
-            "topology_rows_written",
-            "markets_skipped_missing_facts",
-            "markets_skipped_source_contract_status",
-            "outcomes_skipped_missing_facts",
-        ):
-            if key in source_contract_result:
-                summary[f"market_source_contract_topology_{key}"] = int(
-                    source_contract_result.get(key) or 0
+            source_contract_status = str(source_contract_result.get("status", "") or "")
+            summary["market_source_contract_topology_status"] = source_contract_status
+            for key in (
+                "topology_rows_written",
+                "markets_skipped_missing_facts",
+                "markets_skipped_source_contract_status",
+                "outcomes_skipped_missing_facts",
+            ):
+                if key in source_contract_result:
+                    summary[f"market_source_contract_topology_{key}"] = int(
+                        source_contract_result.get(key) or 0
+                    )
+            if source_contract_status == "skipped_invalid_schema":
+                deps.logger.warning(
+                    "Market source-contract topology degraded: %s", source_contract_result
                 )
-        if source_contract_status in {"skipped_missing_tables", "skipped_invalid_schema"}:
-            deps.logger.warning(
-                "Market source-contract topology degraded: %s", source_contract_result
-            )
-            summary["degraded"] = True
+                summary["degraded"] = True
+
+        def _write_guarded() -> None:
+            try:
+                _write()
+            except Exception as exc:
+                deps.logger.warning("Forward market substrate write failed: %s", exc)
+                summary["forward_market_substrate_status"] = "error"
+                summary["forward_market_substrate_error"] = str(exc)
+                summary["degraded"] = True
+
+        _queue_derived_write("forward_market_substrate", _write_guarded)
 
     def _execution_snapshot_fields(tokens: dict) -> dict:
         tokens = tokens or {}
@@ -2319,6 +2357,7 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                 )
             )
             summary["no_trades"] += 1
+        _flush_derived_writes()
         return portfolio_dirty, tracker_dirty
 
     for market in markets:
@@ -2475,11 +2514,21 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
             # evaluator so per-cycle `recorded_at` timestamps derive from
             # the cycle boundary rather than being silently re-fabricated
             # as `datetime.now()` inside the evaluator per-candidate.
-            decisions = deps.evaluate_candidate(
-                candidate, conn, portfolio, clob, limits,
-                entry_bankroll=entry_bankroll,
-                decision_time=decision_time,
-            )
+            try:
+                decisions = deps.evaluate_candidate(
+                    candidate, conn, portfolio, clob, limits,
+                    entry_bankroll=entry_bankroll,
+                    decision_time=decision_time,
+                    microstructure_sink=_record_microstructure,
+                )
+            except TypeError as exc:
+                if "microstructure_sink" not in str(exc):
+                    raise
+                decisions = deps.evaluate_candidate(
+                    candidate, conn, portfolio, clob, limits,
+                    entry_bankroll=entry_bankroll,
+                    decision_time=decision_time,
+                )
             # P2 (PLAN_v3 §6.P2 stage 2): stamp MarketPhase axis A onto
             # every returned EdgeDecision. evaluate_candidate has 30+
             # ``return [EdgeDecision(...)]`` sites; stamping at the call
@@ -2502,7 +2551,6 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                     _record_probability_trace(candidate, trace_decision)
                 try:
                     from src.engine.time_context import lead_hours_to_date_start, lead_hours_to_settlement_close
-                    from src.state.db import log_shadow_signal
                     first = decisions[0]
                     edges_payload = [
                         {
@@ -2517,16 +2565,25 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                         }
                         for d in decisions
                     ]
-                    log_shadow_signal(
-                        conn,
-                        city=city.name,
-                        target_date=candidate.target_date,
-                        timestamp=decision_time.isoformat(),
-                        decision_snapshot_id=first.decision_snapshot_id,
-                        p_raw_json=json.dumps(first.p_raw.tolist() if getattr(first, "p_raw", None) is not None else []),
-                        p_cal_json=json.dumps(first.p_cal.tolist() if getattr(first, "p_cal", None) is not None else []),
-                        edges_json=json.dumps(edges_payload),
-                        lead_hours=float(lead_hours_to_date_start(date.fromisoformat(candidate.target_date), city.timezone, decision_time)),
+                    shadow_payload = {
+                        "city": city.name,
+                        "target_date": candidate.target_date,
+                        "timestamp": decision_time.isoformat(),
+                        "decision_snapshot_id": first.decision_snapshot_id,
+                        "p_raw_json": json.dumps(first.p_raw.tolist() if getattr(first, "p_raw", None) is not None else []),
+                        "p_cal_json": json.dumps(first.p_cal.tolist() if getattr(first, "p_cal", None) is not None else []),
+                        "edges_json": json.dumps(edges_payload),
+                        "lead_hours": float(lead_hours_to_date_start(date.fromisoformat(candidate.target_date), city.timezone, decision_time)),
+                    }
+
+                    def _write_shadow_signal(payload=shadow_payload) -> None:
+                        from src.state.db import log_shadow_signal
+
+                        log_shadow_signal(conn, **payload)
+
+                    _queue_derived_write(
+                        f"shadow_signal:{city.name}:{candidate.target_date}",
+                        _write_shadow_signal,
                     )
                 except Exception as exc:
                     deps.logger.error("telemetry write failed, cycle flagged degraded: %s", exc, exc_info=True)
@@ -3340,4 +3397,5 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
         except Exception as e:
             deps.logger.error("Evaluation failed for %s %s: %s", city.name, candidate.target_date, e, exc_info=True)
 
+    _flush_derived_writes()
     return portfolio_dirty, tracker_dirty

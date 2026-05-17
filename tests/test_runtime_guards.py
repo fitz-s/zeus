@@ -1994,7 +1994,7 @@ def test_discovery_phase_blocks_unverified_market_scan_authority_before_evaluato
     assert artifact.no_trade_cases[0].rejection_reasons == ["market_scan_authority=NEVER_FETCHED"]
 
 
-def test_discovery_phase_writes_verified_forward_market_substrate_before_evaluator(tmp_path):
+def test_discovery_phase_buffers_forward_market_substrate_until_after_evaluator(tmp_path):
     db_path = tmp_path / "forward-substrate-runtime.db"
     conn = get_connection(db_path)
     init_schema(conn)
@@ -2027,20 +2027,20 @@ def test_discovery_phase_writes_verified_forward_market_substrate_before_evaluat
     }
     observed = {}
 
-    def _evaluate_after_forward_write(candidate, conn_arg, *args, **kwargs):
+    def _evaluate_before_forward_flush(candidate, conn_arg, *args, **kwargs):
         del candidate, args, kwargs
-        observed["same_conn_events"] = conn_arg.execute(
+        observed["same_conn_events_during_eval"] = conn_arg.execute(
             "SELECT COUNT(*) FROM market_events_v2"
         ).fetchone()[0]
-        observed["same_conn_prices"] = conn_arg.execute(
+        observed["same_conn_prices_during_eval"] = conn_arg.execute(
             "SELECT COUNT(*) FROM market_price_history"
         ).fetchone()[0]
         read_conn = get_connection(db_path)
         try:
-            observed["external_events_before_commit"] = read_conn.execute(
+            observed["external_events_during_eval"] = read_conn.execute(
                 "SELECT COUNT(*) FROM market_events_v2"
             ).fetchone()[0]
-            observed["external_prices_before_commit"] = read_conn.execute(
+            observed["external_prices_during_eval"] = read_conn.execute(
                 "SELECT COUNT(*) FROM market_price_history"
             ).fetchone()[0]
         finally:
@@ -2055,7 +2055,7 @@ def test_discovery_phase_writes_verified_forward_market_substrate_before_evaluat
         logger=types.SimpleNamespace(warning=lambda *args, **kwargs: None, error=lambda *args, **kwargs: None),
         NoTradeCase=NoTradeCase,
         MarketCandidate=MarketCandidate,
-        evaluate_candidate=_evaluate_after_forward_write,
+        evaluate_candidate=_evaluate_before_forward_flush,
     )
 
     cycle_runtime.execute_discovery_phase(
@@ -2073,12 +2073,32 @@ def test_discovery_phase_writes_verified_forward_market_substrate_before_evaluat
         deps=deps,
     )
 
+    observed["same_conn_events_after_flush"] = conn.execute(
+        "SELECT COUNT(*) FROM market_events_v2"
+    ).fetchone()[0]
+    observed["same_conn_prices_after_flush"] = conn.execute(
+        "SELECT COUNT(*) FROM market_price_history"
+    ).fetchone()[0]
+    read_conn = get_connection(db_path)
+    try:
+        observed["external_events_before_commit"] = read_conn.execute(
+            "SELECT COUNT(*) FROM market_events_v2"
+        ).fetchone()[0]
+        observed["external_prices_before_commit"] = read_conn.execute(
+            "SELECT COUNT(*) FROM market_price_history"
+        ).fetchone()[0]
+    finally:
+        read_conn.close()
     readiness = check_economics_readiness(conn)
     conn.close()
 
     assert observed == {
-        "same_conn_events": 1,
-        "same_conn_prices": 2,
+        "same_conn_events_during_eval": 0,
+        "same_conn_prices_during_eval": 0,
+        "external_events_during_eval": 0,
+        "external_prices_during_eval": 0,
+        "same_conn_events_after_flush": 1,
+        "same_conn_prices_after_flush": 2,
         "external_events_before_commit": 0,
         "external_prices_before_commit": 0,
     }
@@ -4734,6 +4754,116 @@ def test_forecast_provider_identity_uses_source_id_not_model_family(monkeypatch)
     assert captured["bias_reference"]["source"] == "tigge"
     assert captured["bias_reference"]["bias"] == 1.0
     assert captured_calibration_lookup["source_id"] == "tigge_mars"
+
+
+def test_evaluator_buffers_microstructure_without_opening_quote_loop_transaction(monkeypatch, tmp_path):
+    monkeypatch.setattr(evaluator_module, "get_mode", lambda: "test")
+    target_date = "2026-01-15"
+    tz = ZoneInfo(NYC.timezone)
+    start_local = datetime(2026, 1, 15, 0, 0, tzinfo=tz)
+    times = [
+        (start_local + timedelta(hours=i)).astimezone(timezone.utc).isoformat()
+        for i in range(24)
+    ]
+    candidate = MarketCandidate(
+        city=NYC,
+        target_date=target_date,
+        outcomes=_three_outcomes(),
+        hours_since_open=8.0,
+        hours_to_resolution=24.0,
+        discovery_mode=DiscoveryMode.OPENING_HUNT.value,
+    )
+    conn = get_connection(tmp_path / "quote-boundary.db")
+    init_schema(conn)
+
+    class BoundaryClob:
+        def __init__(self):
+            self.in_transaction_before_quote: list[tuple[str, bool]] = []
+
+        def get_best_bid_ask(self, token_id):
+            self.in_transaction_before_quote.append((token_id, bool(conn.in_transaction)))
+            return (0.34, 0.36, 20.0, 20.0)
+
+    class DummyEnsembleSignal:
+        def __init__(self, *args, **kwargs):
+            self.member_maxes = np.full(51, 40.0)
+            self.member_extrema = self.member_maxes
+            self.bias_corrected = False
+
+        def p_raw_vector(self, bins, n_mc=None):
+            return np.full(len(bins), 1.0 / len(bins))
+
+        def spread(self):
+            return TemperatureDelta(1.0, "F")
+
+        def spread_float(self):
+            return 1.0
+
+        def is_bimodal(self):
+            return False
+
+    class EmptyAnalysis:
+        selected_method = "ens_member_counting"
+
+        def __init__(self, **kwargs):
+            pass
+
+        def find_edges(self, n_bootstrap=500):
+            return []
+
+        def sigma_context(self):
+            return {"final_sigma": 1.0}
+
+        def mean_context(self):
+            return {"offset": 0.0}
+
+        def forecast_context(self):
+            return {"uncertainty": self.sigma_context(), "location": self.mean_context()}
+
+    def _fetch_ensemble(city, forecast_days=2, model=None, role=None, **kwargs):
+        n_members = 31 if role == "diagnostic" else 51
+        return {
+            "members_hourly": np.ones((n_members, len(times))) * 40.0,
+            "times": times,
+            **_entry_forecast_evidence(
+                model="ecmwf_ifs025" if role == "entry_primary" else "gfs025",
+                source_id="tigge" if role == "entry_primary" else "openmeteo_ensemble_gfs025",
+                role=role or "entry_primary",
+                issue_time=datetime(2026, 1, 14, 0, tzinfo=timezone.utc),
+                first_valid_time=datetime(2026, 1, 15, tzinfo=timezone.utc),
+                fetch_time=datetime(2026, 1, 14, 6, tzinfo=timezone.utc),
+                n_members=n_members,
+            ),
+        }
+
+    monkeypatch.setattr(evaluator_module, "fetch_ensemble", _fetch_ensemble)
+    monkeypatch.setattr(evaluator_module, "validate_ensemble", lambda result, expected_members=51: result is not None)
+    monkeypatch.setattr(evaluator_module, "EnsembleSignal", DummyEnsembleSignal)
+    monkeypatch.setattr(evaluator_module, "_store_ens_snapshot", lambda *args, **kwargs: "snap-quote-boundary")
+    monkeypatch.setattr(evaluator_module, "_store_snapshot_p_raw", lambda *args, **kwargs: None)
+    _patch_mature_calibration(monkeypatch)
+    monkeypatch.setattr(evaluator_module, "MarketAnalysis", EmptyAnalysis)
+    _stub_full_family_scan(monkeypatch)
+    monkeypatch.setattr(evaluator_module, "fdr_filter", lambda edges, fdr_alpha=0.10: list(edges))
+    clob = BoundaryClob()
+    microstructure_rows: list[dict] = []
+
+    decisions = evaluator_module.evaluate_candidate(
+        candidate,
+        conn=conn,
+        portfolio=PortfolioState(bankroll=211.37),
+        clob=clob,
+        limits=evaluator_module.RiskLimits(),
+        decision_time=datetime(2026, 1, 14, 6, 0, tzinfo=timezone.utc),
+        microstructure_sink=microstructure_rows.append,
+    )
+
+    assert len(decisions) == 1
+    assert len(clob.in_transaction_before_quote) >= 2
+    assert all(in_tx is False for _, in_tx in clob.in_transaction_before_quote)
+    assert len(microstructure_rows) == len(clob.in_transaction_before_quote)
+    assert conn.in_transaction is False
+    conn.close()
 
 
 def test_evaluator_live_path_ignores_shadow_calibration_authority_result(monkeypatch):
@@ -8891,6 +9021,7 @@ def test_store_ens_snapshot_links_openmeteo_valid_time_without_faking_issue_time
     db_path = tmp_path / "zeus.db"
     conn = get_connection(db_path)
     init_schema(conn)
+    apply_v2_schema(conn)
 
     fetch_time = datetime(2026, 1, 14, 6, 5, tzinfo=timezone.utc)
     # Slice A3 follow-up (PR #19 review fix, 2026-04-26): the writer requires
@@ -8975,6 +9106,7 @@ def test_store_ens_snapshot_links_openmeteo_valid_time_without_faking_issue_time
 
 
 def _seed_p_raw_snapshot(conn) -> str:
+    apply_v2_schema(conn)
     fetch_time = datetime(2026, 1, 14, 6, 5, tzinfo=timezone.utc)
     ens = type(
         "DummyEns",
@@ -9102,9 +9234,11 @@ def test_store_ens_snapshot_routes_to_attached_world_db(tmp_path):
     world_db = tmp_path / "zeus-world.db"
     trade_conn = get_connection(trade_db)
     init_schema(trade_conn)
+    apply_v2_schema(trade_conn)
     trade_conn.close()
     world_conn = get_connection(world_db)
     init_schema(world_conn)
+    apply_v2_schema(world_conn)
     world_conn.close()
 
     conn = get_connection(trade_db)
@@ -9188,6 +9322,7 @@ def test_store_ens_snapshot_refuses_legacy_id_collision_without_p_raw_corruption
     db_path = tmp_path / "zeus.db"
     conn = get_connection(db_path)
     init_schema(conn)
+    apply_v2_schema(conn)
     conn.execute(
         """
         INSERT INTO ensemble_snapshots
@@ -9259,6 +9394,7 @@ def test_store_ens_snapshot_reuses_v2_conflict_without_legacy_fallback(tmp_path)
     db_path = tmp_path / "zeus.db"
     conn = get_connection(db_path)
     init_schema(conn)
+    apply_v2_schema(conn)
     issue_time = "2026-01-14T00:00:00+00:00"
     conn.execute(
         """
@@ -11257,6 +11393,107 @@ def test_discovery_phase_records_rate_limited_decision_as_availability_fact(tmp_
     assert row["failure_type"] == "rate_limited"
     assert row["impact"] == "skip"
     assert "RATE_LIMITED" in row["details_json"]
+
+
+def test_discovery_phase_buffers_telemetry_before_candidate_external_io(tmp_path):
+    conn = get_connection(tmp_path / "discovery-boundary.db")
+    init_schema(conn)
+    conn.commit()
+
+    artifact = CycleArtifact(mode="opening_hunt", started_at="2026-04-03T00:00:00Z")
+    tracker = StrategyTracker()
+    portfolio = PortfolioState()
+    summary = {"candidates": 0, "no_trades": 0}
+    observed_eval_transactions: list[bool] = []
+
+    def _market(slug: str) -> dict:
+        return {
+            "city": NYC,
+            "target_date": "2026-04-01",
+            "outcomes": [
+                {
+                    "title": "39-40°F",
+                    "range_low": 39,
+                    "range_high": 40,
+                    "token_id": f"yes-{slug}",
+                    "no_token_id": f"no-{slug}",
+                    "market_id": f"m-{slug}",
+                    "condition_id": f"cond-{slug}",
+                    "question_id": f"q-{slug}",
+                    "price": 0.35,
+                    "no_price": 0.65,
+                }
+            ],
+            "hours_since_open": 1.0,
+            "hours_to_resolution": 4.0,
+            "temperature_metric": "high",
+            "event_id": f"evt-{slug}",
+            "slug": slug,
+            "source_contract": {"status": "MATCH", "resolution_sources": ["wu_api"]},
+        }
+
+    def _evaluate_candidate(candidate, conn_arg, *args, **kwargs):
+        observed_eval_transactions.append(bool(conn_arg.in_transaction))
+        return [
+            types.SimpleNamespace(
+                should_trade=False,
+                edge=None,
+                tokens=None,
+                decision_id=f"d-{candidate.slug}",
+                rejection_stage="SIGNAL_QUALITY",
+                rejection_reasons=["fixture no edge"],
+                selected_method="ens_member_counting",
+                applied_validations=["entry_forecast_reader"],
+                decision_snapshot_id=f"snap-{candidate.slug}",
+                edge_source="",
+                strategy_key="",
+                availability_status="RATE_LIMITED",
+                settlement_semantics_json="",
+                epistemic_context_json="",
+                edge_context_json="",
+                p_raw=np.array([]),
+                p_cal=np.array([]),
+                p_market=np.array([]),
+                alpha=0.0,
+                agreement="",
+            )
+        ]
+
+    deps = types.SimpleNamespace(
+        MODE_PARAMS={DiscoveryMode.OPENING_HUNT: {}},
+        DiscoveryMode=DiscoveryMode,
+        logger=types.SimpleNamespace(
+            debug=lambda *args, **kwargs: None,
+            warning=lambda *args, **kwargs: None,
+            error=lambda *args, **kwargs: None,
+        ),
+        NoTradeCase=NoTradeCase,
+        MarketCandidate=MarketCandidate,
+        find_weather_markets=lambda **kwargs: [_market("one"), _market("two")],
+        get_last_scan_authority=lambda: "VERIFIED",
+        evaluate_candidate=_evaluate_candidate,
+        _classify_edge_source=lambda *args, **kwargs: "",
+    )
+
+    cycle_runtime.execute_discovery_phase(
+        conn,
+        clob=None,
+        portfolio=portfolio,
+        artifact=artifact,
+        tracker=tracker,
+        limits=types.SimpleNamespace(),
+        mode=DiscoveryMode.OPENING_HUNT,
+        summary=summary,
+        entry_bankroll=100.0,
+        decision_time=datetime(2026, 4, 3, 6, 0, tzinfo=timezone.utc),
+        env="live",
+        deps=deps,
+    )
+
+    assert observed_eval_transactions == [False, False]
+    assert summary["no_trades"] == 2
+    assert conn.in_transaction is True
+    conn.close()
 
 
 def test_evaluator_ens_fetch_exception_becomes_explicit_availability_truth(monkeypatch):
