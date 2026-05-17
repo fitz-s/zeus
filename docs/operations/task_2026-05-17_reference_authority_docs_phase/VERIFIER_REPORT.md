@@ -11,6 +11,13 @@ Generated: 2026-05-17T04:52:04+00:00
 - `protocol.yaml::WEBSOCKET_REQUIRED`: TCP connection to ws-subscriptions-clob.polymarket.com:443 succeeded
   - old: `2026-04-06T00:00:00+00:00` → new: `2026-05-17T04:52:04+00:00`
 
+## Addendum 2026-05-17 (verifier strengthening)
+
+Strengthened verifier executed on 2026-05-17 with real WS handshake (websockets library) + NOAA time-suffix check:
+
+- `protocol.yaml::WEBSOCKET_REQUIRED`: WS handshake succeeded for wss://ws-subscriptions-clob.polymarket.com/ws/market — last_verified update RETAINED.
+- `data.yaml::NOAA_TIME_SCALE`: FAIL — Open-Meteo returns time strings without Z/+00:00 suffix (e.g. '2026-05-17T00:00'); timezone field is 'GMT' (OK) but suffix check fails. last_verified update REVERTED to pre-PR value '2026-04-06T00:00:00+00:00'. Operator must re-verify once Open-Meteo suffix behavior is confirmed or verification_method is updated.
+
 ## UNMAPPED_NEEDS_OPERATOR
 
 These contracts cannot be verified by automated read-only API calls.
