@@ -869,6 +869,7 @@ def _latest_or_capture_exit_snapshot_context(
             clob=clob,
             captured_at=captured_at,
             scan_authority=scan_authority,
+            execution_side="SELL",
         )
         # The executor opens its own DB handle through place_sell_order(); make
         # the snapshot durable before any submit-side effect can observe it.

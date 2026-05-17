@@ -111,6 +111,21 @@ Implementation direction:
 - Recovery must correct existing `ACKED/LIVE` rows when point CLOB truth later
   says the order is `MATCHED` or `FILLED`.
 
+### S5. Side-Aware Exit Snapshot Authority
+
+Exit executable evidence must match the side that can actually execute. A
+reduce-only SELL exits by taking bids on the held outcome token; an empty ask
+side does not make that SELL non-executable. The snapshot contract must preserve
+that provenance without fabricating an ask.
+
+Implementation direction:
+- Keep entry BUY snapshots fail-closed on missing asks.
+- Permit exit SELL snapshots only when the selected token has a fresh positive
+  bid and bid depth, with tick/min-order/fee/neg-risk/token identity preserved.
+- Store the missing opposite side as absent evidence, not a synthetic ask.
+- Route exit lifecycle through the side-aware capture path, then leave executor
+  gates responsible for min-size, tick, inventory, and depth simulation.
+
 ## Slice Routes
 
 1. Heartbeat keeper slice:
@@ -141,6 +156,13 @@ Implementation direction:
      `src/execution/command_recovery.py`, and focused tests.
    - required proof: a matched FOK submit response becomes durable matched
      order/trade facts and cannot remain locally projected as open.
+
+5. Side-aware exit snapshot slice:
+   - likely files: `src/contracts/executable_market_snapshot_v2.py`,
+     `src/state/snapshot_repo.py`, `src/data/market_scanner.py`,
+     `src/execution/exit_lifecycle.py`, and focused tests.
+   - required proof: a bid-only CLOB book can mint a SELL exit snapshot without
+     inventing an ask; no-bid SELL and no-ask BUY still fail closed.
 
 ## End-to-End Verification
 

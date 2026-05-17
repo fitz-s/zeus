@@ -1735,14 +1735,18 @@ def capture_executable_market_snapshot(
     clob: Any,
     captured_at: datetime,
     scan_authority: str,
+    execution_side: str = "BUY",
 ) -> dict[str, str | bool]:
-    """Capture and persist an entry-only executable market snapshot.
+    """Capture and persist an executable market snapshot.
 
     This is deliberately post-decision: the selected YES/NO token is known, so
     the stored orderbook hash and top-of-book facts describe the token that the
     executor will actually submit against.
     """
 
+    side = str(execution_side or "BUY").strip().upper()
+    if side not in {"BUY", "SELL"}:
+        raise ExecutableSnapshotCaptureError(f"unsupported execution_side for snapshot capture: {execution_side!r}")
     if str(scan_authority or "").strip().upper() != "VERIFIED":
         raise ExecutableSnapshotCaptureError(
             f"executable snapshot requires VERIFIED Gamma authority, got {scan_authority!r}"
@@ -1767,14 +1771,14 @@ def capture_executable_market_snapshot(
         )
 
     direction = str(getattr(getattr(decision, "edge", None), "direction", "") or "").lower()
-    if direction == "buy_no":
+    if direction in {"buy_no", "sell_no"}:
         selected_token = no_token
         outcome_label = "NO"
-    elif direction == "buy_yes":
+    elif direction in {"buy_yes", "sell_yes"}:
         selected_token = yes_token
         outcome_label = "YES"
     else:
-        raise ExecutableSnapshotCaptureError(f"unsupported entry direction for snapshot capture: {direction!r}")
+        raise ExecutableSnapshotCaptureError(f"unsupported direction for snapshot capture: {direction!r}")
 
     gamma_market_raw = outcome.get("gamma_market_raw")
     if not isinstance(gamma_market_raw, dict):
@@ -1816,11 +1820,12 @@ def capture_executable_market_snapshot(
         (raw_orderbook, raw_clob_market),
         ("neg_risk", "negRisk", "negative_risk"),
     )
-    top_bid = _top_book_decimal(raw_orderbook, "bids")
-    top_ask = _top_book_decimal(raw_orderbook, "asks")
-    if top_bid <= 0 or top_ask <= 0:
-        raise ExecutableSnapshotCaptureError("CLOB top-of-book prices must be positive")
-    if top_bid >= top_ask:
+    top_bid, _bid_size = _top_book_level_decimal(raw_orderbook, "bids")
+    if side == "BUY":
+        top_ask, _ask_size = _top_book_level_decimal(raw_orderbook, "asks")
+    else:
+        top_ask, _ask_size = _optional_top_book_level_decimal(raw_orderbook, "asks")
+    if top_ask is not None and top_bid >= top_ask:
         raise ExecutableSnapshotCaptureError("CLOB orderbook is crossed")
 
     # Validate the caller's boundary timestamp, but do not use it as the
@@ -2107,6 +2112,15 @@ def _top_book_level_decimal(orderbook: dict, side: str) -> tuple[Decimal, Decima
         raise ExecutableSnapshotCaptureError(f"unsupported CLOB orderbook side {side!r}")
     best_size = sum((size for price, size in parsed if price == best_price), Decimal("0"))
     return best_price, best_size
+
+
+def _optional_top_book_level_decimal(orderbook: dict, side: str) -> tuple[Decimal | None, Decimal]:
+    rows = orderbook.get(side)
+    if rows is None:
+        return None, Decimal("0")
+    if isinstance(rows, list) and not rows:
+        return None, Decimal("0")
+    return _top_book_level_decimal(orderbook, side)
 
 
 def _top_book_decimal(orderbook: dict, side: str) -> Decimal:

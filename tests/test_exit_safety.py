@@ -1466,8 +1466,18 @@ def test_live_exit_captures_snapshot_for_held_position_before_sell(conn, monkeyp
     monkeypatch.setattr("src.data.market_scanner.get_sibling_outcomes", lambda market_id: [sibling])
     monkeypatch.setattr("src.data.market_scanner.get_last_scan_authority", lambda: "VERIFIED")
 
-    def fake_capture_snapshot(conn_arg, *, market, decision, clob, captured_at, scan_authority):
+    def fake_capture_snapshot(
+        conn_arg,
+        *,
+        market,
+        decision,
+        clob,
+        captured_at,
+        scan_authority,
+        execution_side,
+    ):
         assert scan_authority == "VERIFIED"
+        assert execution_side == "SELL"
         assert market["outcomes"] == [sibling]
         assert decision.tokens["market_id"] == "condition-test"
         assert decision.edge.direction == "buy_yes"

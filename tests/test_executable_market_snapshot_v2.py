@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import sqlite3
+import json
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, localcontext
@@ -191,6 +192,7 @@ def _ensure_envelope(
     envelope_id: str | None = None,
     price: str = "0.50",
     size: str = "10",
+    side: str = "BUY",
 ) -> str:
     from src.contracts.venue_submission_envelope import VenueSubmissionEnvelope
     from src.state.venue_command_repo import insert_submission_envelope
@@ -216,7 +218,7 @@ def _ensure_envelope(
             no_token_id=no_token_id,
             selected_outcome_token_id=token_id,
             outcome_label="YES",
-            side="BUY",
+            side=side,
             price=Decimal(str(price)),
             size=Decimal(str(size)),
             order_type="GTC",
@@ -247,6 +249,7 @@ def _insert_command(
     *,
     snapshot_id: str = "snap-u1",
     token_id: str = "yes-token",
+    side: str = "BUY",
     price: float = 0.50,
     size: float = 10.0,
     expected_min_tick_size=Decimal("0.01"),
@@ -256,16 +259,22 @@ def _insert_command(
 ) -> None:
     insert_command(
         conn,
-        command_id=f"cmd-{snapshot_id}-{token_id}-{price}-{size}",
-        envelope_id=_ensure_envelope(conn, token_id=token_id, price=str(price), size=str(size)),
+        command_id=f"cmd-{snapshot_id}-{token_id}-{side}-{price}-{size}",
+        envelope_id=_ensure_envelope(
+            conn,
+            token_id=token_id,
+            price=str(price),
+            size=str(size),
+            side=side,
+        ),
         snapshot_id=snapshot_id,
         position_id="pos-u1",
         decision_id="dec-u1",
         idempotency_key=(snapshot_id.replace("-", "") + "0" * 32)[:32],
-        intent_kind="ENTRY",
+        intent_kind="ENTRY" if side == "BUY" else "EXIT",
         market_id="market-u1",
         token_id=token_id,
-        side="BUY",
+        side=side,
         size=size,
         price=price,
         created_at=checked_at.isoformat(),
@@ -321,6 +330,68 @@ def test_capture_executable_snapshot_persists_verified_gamma_and_clob_facts(conn
     assert fields["executable_snapshot_min_tick_size"] == "0.01"
     assert fields["executable_snapshot_min_order_size"] == "5"
     assert fields["executable_snapshot_neg_risk"] is False
+
+
+def test_capture_sell_exit_snapshot_preserves_bid_only_book_without_fabricating_ask(conn):
+    clob = FakeClobFacts(orderbook={
+        "asset_id": "yes-token",
+        "tick_size": "0.01",
+        "min_order_size": "5",
+        "neg_risk": False,
+        "bids": [{"price": "0.49", "size": "100"}],
+        "asks": [],
+    })
+
+    fields = capture_executable_market_snapshot(
+        conn,
+        market=_market_for_capture(),
+        decision=_decision_for_capture(direction="buy_yes"),
+        clob=clob,
+        captured_at=NOW,
+        scan_authority="VERIFIED",
+        execution_side="SELL",
+    )
+    loaded = get_snapshot(conn, fields["executable_snapshot_id"])
+    raw = conn.execute(
+        "SELECT orderbook_top_ask FROM executable_market_snapshots WHERE snapshot_id = ?",
+        (fields["executable_snapshot_id"],),
+    ).fetchone()
+
+    assert loaded is not None
+    assert loaded.selected_outcome_token_id == "yes-token"
+    assert loaded.orderbook_top_bid == Decimal("0.49")
+    assert loaded.orderbook_top_ask is None
+    assert raw["orderbook_top_ask"] == "ABSENT"
+    assert json.loads(loaded.orderbook_depth_jsonb)["asks"] == []
+
+
+def test_bid_only_sell_snapshot_authorizes_sell_but_not_buy_command(conn):
+    insert_snapshot(
+        conn,
+        _snapshot(
+            snapshot_id="snap-sell-bid-only",
+            min_order_size=Decimal("0.01"),
+            orderbook_top_ask=None,
+            orderbook_depth_jsonb='{"asks":[],"bids":[["0.49","100"]]}',
+        ),
+    )
+
+    _insert_command(
+        conn,
+        snapshot_id="snap-sell-bid-only",
+        side="SELL",
+        price=0.49,
+        size=10.0,
+    )
+
+    with pytest.raises(MarketSnapshotMismatchError, match="BUY command requires ask-side"):
+        _insert_command(
+            conn,
+            snapshot_id="snap-sell-bid-only",
+            side="BUY",
+            price=0.49,
+            size=10.0,
+        )
 
 
 def test_capture_executable_snapshot_timestamps_actual_clob_read_completion(conn):
@@ -599,6 +670,17 @@ def test_capture_executable_snapshot_requires_verified_gamma_authority(conn, aut
                 "asset_id": "yes-token",
                 "tick_size": "0.01",
                 "min_order_size": "5",
+                "neg_risk": False,
+                "bids": [{"price": "0.49", "size": "100"}],
+                "asks": [],
+            }),
+            "missing asks",
+        ),
+        (
+            FakeClobFacts(orderbook={
+                "asset_id": "yes-token",
+                "tick_size": "0.01",
+                "min_order_size": "5",
                 "bids": [{"price": "0.49", "size": "100"}],
                 "asks": [{"price": "0.51", "size": "100"}],
             }),
@@ -619,6 +701,26 @@ def test_capture_executable_snapshot_fails_closed_on_missing_clob_facts(conn, cl
             clob=clob,
             captured_at=NOW,
             scan_authority="VERIFIED",
+        )
+
+
+def test_capture_sell_exit_snapshot_fails_closed_without_bid_depth(conn):
+    with pytest.raises(ExecutableSnapshotCaptureError, match="missing bids"):
+        capture_executable_market_snapshot(
+            conn,
+            market=_market_for_capture(),
+            decision=_decision_for_capture(direction="buy_yes"),
+            clob=FakeClobFacts(orderbook={
+                "asset_id": "yes-token",
+                "tick_size": "0.01",
+                "min_order_size": "5",
+                "neg_risk": False,
+                "bids": [],
+                "asks": [],
+            }),
+            captured_at=NOW,
+            scan_authority="VERIFIED",
+            execution_side="SELL",
         )
 
 

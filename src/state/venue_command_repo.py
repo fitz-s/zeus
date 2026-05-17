@@ -2,6 +2,7 @@
 # Last reused/audited: 2026-05-17
 # Authority basis: docs/operations/task_2026-05-08_object_invariance_wave27/PLAN.md
 #                  + docs/operations/task_2026-05-15_live_order_e2e_goal/LIVE_ORDER_E2E_GOAL_PLAN.md
+#                  + docs/operations/task_2026-05-17_live_order_survival/LIVE_ORDER_SURVIVAL_PLAN.md S5
 """Durable command journal — append-only repo API for venue_commands / venue_command_events.
 
 Public API:
@@ -775,6 +776,7 @@ def insert_command(
         conn,
         snapshot_id=snapshot_id_value,
         token_id=token_id,
+        side=side,
         price=price,
         size=size,
         checked_at=snapshot_checked_at,
@@ -936,6 +938,7 @@ def _assert_snapshot_gate(
     *,
     snapshot_id: str | None,
     token_id: str,
+    side: str,
     price: float,
     size: float,
     checked_at: str | datetime.datetime | None,
@@ -963,6 +966,7 @@ def _assert_snapshot_gate(
     assert_snapshot_executable(
         snapshot,
         token_id=token_id,
+        side=side,
         price=price,
         size=size,
         now=_coerce_snapshot_checked_at(checked_at),
