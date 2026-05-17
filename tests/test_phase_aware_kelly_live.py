@@ -1,6 +1,6 @@
 # Created: 2026-05-04
-# Last reused/audited: 2026-05-04
-# Authority basis: docs/operations/task_2026-05-04_oracle_kelly_evidence_rebuild/PLAN.md §A6 (Phase-aware Kelly LIVE) + PLAN_v3 §6.P5 (resolver formula).
+# Last reused/audited: 2026-05-17
+# Authority basis: docs/operations/task_2026-05-04_oracle_kelly_evidence_rebuild/PLAN.md §A6 (Phase-aware Kelly LIVE) + PLAN_v3 §6.P5 (resolver formula) + 2026-05-17 live opening_hunt no-order sizing relationship.
 """Phase-aware Kelly LIVE resolver regression antibodies (PLAN.md §A6).
 
 Pre-A6 the Kelly multiplier resolution was a single dict lookup:
@@ -10,7 +10,7 @@ to combine at open-time:
 
   m_strategy_phase    = registry.get(key).kelly_for_phase(market_phase)
   m_oracle            = oracle_penalty.get_oracle_info(city, metric).penalty_multiplier
-  m_observed_fraction = max(0.3, observed_target_day_fraction(...))
+  m_observed_fraction = max(0.3, observed_target_day_fraction(...)) for settlement_capture only; 1.0 for opening_inertia
   m_phase_source      = 0.7 if phase_source == "fallback_f1" else 1.0
 
   kelly_multiplier    = m_strategy_phase × m_oracle × m_observed_fraction × m_phase_source
@@ -29,8 +29,10 @@ These tests pin:
    further along.
 4. fallback_f1 phase_source applies a 0.7× haircut.
 5. observed_target_day_fraction is clamped to [0.0, 1.0] AND the
-   resolver applies the 0.3 floor (so day-start cases retain at
-   least 30% Kelly — operator-tunable via OBSERVED_FRACTION_MIN).
+   resolver applies the 0.3 floor for settlement_capture (so day-start
+   cases retain at least 30% Kelly — operator-tunable via
+   OBSERVED_FRACTION_MIN). opening_inertia uses market-age/phase policy,
+   not target-day observation progress.
 6. DST handling: target_local_end - target_local_start is the actual
    local-day length (23h/24h/25h), not a fixed 24h window.
 7. Migration policy: this resolver is invoked at NEW open-time;
@@ -253,6 +255,49 @@ def test_resolver_observed_fraction_floor_at_day_start(tmp_path):
     )
     # 1.0 × 1.0 × max(0.3, 0.0) × 1.0 = 0.3 (the floor)
     assert mult == pytest.approx(OBSERVED_FRACTION_MIN, abs=1e-6)
+
+
+def test_opening_inertia_pre_settlement_day_ignores_target_day_observed_fraction(tmp_path):
+    """opening_inertia is an opening-tick alpha, not an observation-speed alpha.
+
+    Pre-settlement-day opening_hunt candidates must not be multiplied by target-day
+    observed fraction. The strategy profile already applies half Kelly for this
+    phase; adding the target-day floor again suppresses live opening orders before
+    the target day can begin.
+    """
+    _write_oracle_high(tmp_path, "NYC", n=200, m=0)
+    nyc = _City(name="NYC", timezone="America/New_York")
+    decision = datetime(2026, 5, 6, 12, 0, 0, tzinfo=timezone.utc)
+
+    mult = phase_aware_kelly_multiplier(
+        strategy_key="opening_inertia",
+        market_phase="pre_settlement_day",
+        city=nyc,
+        temperature_metric="high",
+        decision_time_utc=decision,
+        target_local_date=date(2026, 5, 8),
+        phase_source="verified_gamma",
+    )
+
+    assert mult == pytest.approx(0.5, abs=1e-6)
+
+
+def test_opening_inertia_missing_oracle_keeps_oracle_penalty_without_fraction(tmp_path):
+    """Missing oracle remains a 0.5 penalty, but not 0.5 × observed-day floor."""
+    nyc = _City(name="NYC", timezone="America/New_York")
+    decision = datetime(2026, 5, 6, 12, 0, 0, tzinfo=timezone.utc)
+
+    mult = phase_aware_kelly_multiplier(
+        strategy_key="opening_inertia",
+        market_phase="pre_settlement_day",
+        city=nyc,
+        temperature_metric="high",
+        decision_time_utc=decision,
+        target_local_date=date(2026, 5, 8),
+        phase_source="verified_gamma",
+    )
+
+    assert mult == pytest.approx(0.25, abs=1e-6)
 
 
 # ── short-circuits ─────────────────────────────────────────────────── #

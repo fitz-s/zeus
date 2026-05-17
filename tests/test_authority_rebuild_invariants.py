@@ -312,12 +312,13 @@ def test_I5_cohort_boundary_value_pinned_to_git_fact():
         ("settlement_capture", "settlement_day", "fallback_f1", "NYC",
          "America/New_York", datetime(2026, 5, 8, 16, 0, 0, tzinfo=timezone.utc),
          date(2026, 5, 8), 0.5 * 0.7),
-        # opening_inertia × pre_settlement_day × verified_gamma × NYC midday
-        # phase override 0.5 × oracle 1.0 (OK) × fraction 0.5 (midday) ×
-        # phase_source 1.0 = 0.25
+        # opening_inertia × pre_settlement_day × verified_gamma × NYC midday.
+        # opening_inertia is an opening-tick alpha: phase override 0.5 ×
+        # oracle 1.0 (OK) × observed fraction 1.0 (not applicable) ×
+        # phase_source 1.0 = 0.5.
         ("opening_inertia", "pre_settlement_day", "verified_gamma", "NYC",
          "America/New_York", datetime(2026, 5, 8, 16, 0, 0, tzinfo=timezone.utc),
-         date(2026, 5, 8), 0.25),
+         date(2026, 5, 8), 0.5),
         # blocked phase short-circuits to 0
         ("settlement_capture", "post_trading", "verified_gamma", "NYC",
          "America/New_York", datetime(2026, 5, 8, 16, 0, 0, tzinfo=timezone.utc),
