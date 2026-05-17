@@ -4,6 +4,27 @@
 **Owner**: PR-I (Path A-clean, Karachi 5/17 T-0 = 2026-05-17 12:00 UTC)
 **Author**: opus SCAFFOLD architect 2026-05-16; v2 §K + §I.1 amendment by main session per operator directive "选择架构上最干净和正确的解法" 2026-05-16
 
+## Changelog v2 → v3 (2026-05-16, post-G2-critic revision)
+
+G2 opus critic verdict on v2 was **G2-FAIL-REVISE** (5 SEV-1 + 4 SEV-2). Path A-clean direction confirmed sound; v2 added §K at intent level but did not propagate edits into v1 §I.2/§I.3/§I.4 and did not verify primitives. v3 addresses every probe:
+
+- **P2 STATE MACHINE COMPLETENESS (SEV-1)**: §K.4 CLI gains `--force` flag for OPERATOR_REQUIRED→OPERATOR_REQUIRED re-record (covers operator-pasted-wrong-hash recovery while reconciler is web3-unwired). REDEEM_ABANDONED state NOT added in PR-I (would require SLA-timeout poller + abandoned-cleanup policy; deferred to PR-I.5 follow-up with §K.6 row-age guard). Aging beyond 24h surfaced via §K.6 contract row and §I.4 trigger.
+- **P3 IDEMPOTENCY (SEV-1)**: §K.3 + §K.4 spec uses SQLite native atomic conditional UPDATE (`WHERE state='REDEEM_OPERATOR_REQUIRED'`, `cursor.rowcount==1` as success signal). Scheduler tick and CLI cannot race because submit_redeem only operates on `_SUBMITTABLE_STATES` (INTENT_CREATED, RETRYING) while CLI only operates on OPERATOR_REQUIRED — no state overlap.
+- **P5 SEMANTIC DRIFT (SEV-1)**: §K.10 softened — "completes per designed operator-required transition" instead of "per design". Explicitly notes v2 semantic reframe of operator policy.
+- **P8 RISK REGISTER (SEV-1)**: §K.9 adds RISK 6 (SQLite CHECK migration cost), RISK 7 (CLI-vs-daemon-restart race — mitigated by atomic UPDATE), RISK 8 (`_emit_heartbeat_alert` does not exist).
+- **P10 ATOMICITY (SEV-1)**: §K.3 contract: `_transition` returns cursor.rowcount; alert fires ONLY on rowcount>0. Logger.warning is best-effort post-commit (no DB write, no rollback cascade). False-alert + silent-stuck both impossible.
+- **P1 antibody row-age (SEV-2)**: §K.6 contract row gains `max_age_hours_with_operator_action` field; CI assertion fails if any row exceeds. Specced; row-aging poller deferred to PR-I.5 (acceptable since OPERATOR_REQUIRED rows are operator-attended).
+- **P4 F16 operator gate (SEV-2)**: §E.2 unchanged; §K.9 RISK 3 (pUSD abandonment) gains explicit "operator decision required before code freeze" gate listed in G3 PR-open checklist.
+- **P6 document conflict (SEV-2)**: §I.2 + §I.3 rewritten inline to reflect §K state machine.
+- **P7 SCAFFOLD-to-code TBD (SEV-2)**: §K.8 resolves `src/state/db.py or wherever` to `src/execution/settlement_commands.py:31-34` (CHECK literal-set) + `:71-78` (SettlementState Enum). Adds migration script row.
+- **P9 Path-C trigger (SEV-2)**: §I.4 amended — OPERATOR_REQUIRED ≤24h = expected; >24h with no CLI invocation = Path C trigger.
+
+**Verification evidence used**: G3-prep haiku scout 2026-05-16 (DB schema, line numbers, position existence). Karachi position `c30f28a5-d4e` CONFIRMED present at `state/zeus_trades.db.position_current` phase=day0_window, market=Karachi 2026-05-17, shares=1.5873, exposure=$0.59. T-0 deadline holds.
+
+**Author of v3**: main session (executor role, opus model) per `feedback_long_opus_revision_briefs_timeout.md` (do not dispatch opus revision briefs).
+
+---
+
 ## Changelog v1 → v2 (2026-05-16, operator-directed)
 
 SCAFFOLD v1 (sections A through J as written by opus architect) honestly disclosed in §I.0 that `PolymarketV2Adapter.redeem` is a hard stub returning `REDEEM_DEFERRED_TO_R1` and that PR-I plumbing alone does not enable end-to-end on-chain settlement. v1 framed three operator paths (A-as-scoped / A-extended / C) and recommended A-as-scoped (Karachi $0.59 manually claimed via Polymarket UI; PR-I.5 wires adapter post-Karachi).
@@ -596,38 +617,56 @@ zeus-live.log: Harvester: {'status': 'ok', 'positions_settled': 1, ...}
 zeus-live.log: pUSD redemption for <trade_id> (condition=c5faddf4...) recorded in R1 settlement command ledger: <command_id>
 ```
 
-**T+1h+5min to T+1h+10min** — `redeem_submitter` fires (current adapter state):
+**T+1h+5min to T+1h+10min** — `redeem_submitter` fires (current adapter state + v3 Path A-clean state machine):
 ```
 zeus-live.log: redeem_submitter: submitted=1 failed=0
-zeus-live.log:   command_id=<...> state=REDEEM_REVIEW_REQUIRED  # adapter returned REDEEM_DEFERRED_TO_R1
+zeus-live.log:   command_id=<...> state=REDEEM_OPERATOR_REQUIRED  # adapter returned REDEEM_DEFERRED_TO_R1
+zeus-live.err: WARNING [REDEEM_OPERATOR_REQUIRED] command_id=<...> condition_id=c30f28a5-d4e action=run_operator_record_redeem  # picked up by heartbeat-sensor per Finding #10 path
 ```
 
-**T+1h+15min to T+1h+20min** — `redeem_reconciler` fires:
+**T+1h+10min to T+24h (operator action window)** — operator claims via Polymarket UI + records via CLI:
 ```
-zeus-live.log: redeem_reconciler: results=0   # no row in TX_HASHED state because adapter is unwired
+zeus-live.log: operator_record_redeem: command_id=<...> condition_id=c30f28a5-d4e tx_hash=0x<...> actor=operator
+zeus-live.log: state transition REDEEM_OPERATOR_REQUIRED → REDEEM_TX_HASHED
 ```
 
-Post-PR-I.5 (adapter wired, future state) the same windows would show `REDEEM_TX_HASHED` then `REDEEM_CONFIRMED` instead.
+**Post-operator-record** — `redeem_reconciler` fires (current web3-unwired state):
+```
+zeus-live.log: redeem_reconciler: results=0   # web3 unwired; row sits in TX_HASHED until PR-I.5 (cascade complete per design v3 semantics)
+```
+
+Post-PR-I.5 (adapter + web3 wired, future state) the same windows would show `REDEEM_TX_HASHED` (auto, not operator-recorded) → `REDEEM_CONFIRMED` instead. The operator CLI path remains available as recovery for adapter failures even after PR-I.5.
 
 ### I.3 What to monitor
 
 | Surface | Healthy signal (post-PR-I, current adapter state) | Anomaly signal |
 |---|---|---|
 | `state/scheduler_jobs_health.json` | `redeem_submitter.status=OK` last 5 min, `redeem_reconciler.status=OK` last 10 min, `wrap_unwrap_liveness_guard.status=OK` last 30 min | Any FAILED → operator review |
-| `settlement_commands` row state | Transition INTENT → SUBMITTED → REVIEW_REQUIRED within ~1h+10min post-Polymarket-settle (adapter unwired, terminal at REVIEW_REQUIRED) | Stuck at `REDEEM_INTENT_CREATED` >30 min after enqueue → cascade plumbing still dead (PR-I antibody broken) |
-| Stuck-row visibility | Per §G antibody: row in non-terminal `REDEEM_SUBMITTED` >30 min surfaces via `scheduler_jobs_health.json` (no auto-recovery for crashed-adapter; operator-driven from this signal) | Any row in `REDEEM_SUBMITTED` aged >30 min |
-| `logs/zeus-live.err` | No new ERROR lines from `_redeem_submitter_cycle` or `_redeem_reconciler_cycle` | Repeated `submit_redeem` traceback → unexpected adapter error code — Path C trigger |
+| `settlement_commands` row state (v3 Path A-clean) | Transition INTENT → SUBMITTED → OPERATOR_REQUIRED within ~1h+10min post-Polymarket-settle (stub-deferred); then OPERATOR_REQUIRED → TX_HASHED after CLI invocation | Stuck at `REDEEM_INTENT_CREATED` >30 min after enqueue → cascade plumbing dead (PR-I antibody broken) |
+| OPERATOR_REQUIRED aging | Row ≤24h post-OPERATOR_REQUIRED entry: EXPECTED designed-state (operator action pending). CLI invocation transitions out within minutes once invoked. | Row >24h with no CLI invocation → **Path C trigger** (operator missed alert; manual fallback runbook §3). Track via `MAX(julianday('now') - julianday(<entry_at>))` against settlement_command_events |
+| Stuck-row visibility | Per §G antibody + §K.6 row-age guard: row in non-terminal `REDEEM_SUBMITTED` >30 min surfaces via `scheduler_jobs_health.json` (adapter call hung — Path C trigger) | Any row in `REDEEM_SUBMITTED` aged >30 min |
+| `logs/zeus-live.err` | Single `[REDEEM_OPERATOR_REQUIRED]` WARNING per row when stub-detected; no further errors until CLI invoked | Repeated `submit_redeem` traceback → unexpected adapter error code → REVIEW_REQUIRED → Path C trigger |
 | `logs/zeus-live.log` | `redeem_submitter: submitted=N failed=0` heartbeat every 5 min | `failed>0` for 3+ consecutive ticks → Path C |
-| Polymarket UI balance | (Manual claim required this cycle — see §I.0.) Karachi $1.5873 claimable balance appears post-manual-claim. | Adapter wiring would change this row in PR-I.5; not in scope for PR-I. |
+| Polymarket UI balance | Karachi $1.5873 claimable balance appears post-Polymarket-settle. Operator claims via UI → records via `operator_record_redeem.py` CLI. | After PR-I.5 (adapter wired), this row updates to auto-claimed; CLI remains as recovery for adapter failures. |
 
-### I.4 Path C escalation triggers
+### I.4 Path C escalation triggers (v3 Path A-clean semantics)
 
 Per FIX_PLAN §1.2 + §9, any G1-G5 failure or:
+
+**Pre-CLI cascade-plumbing failures** (PR-I antibody not holding):
 - Karachi `REDEEM_INTENT_CREATED` row stuck for >30 min post-enqueue with `redeem_submitter` showing FAILED
 - `_redeem_submitter_cycle` raises uncaught (would surface as `scheduler_jobs_health.json` FAILED)
-- `PolymarketV2Adapter.redeem` returns hard error code other than `REDEEM_DEFERRED_TO_R1`
+- `PolymarketV2Adapter.redeem` returns hard error code other than `REDEEM_DEFERRED_TO_R1` (would land in REVIEW_REQUIRED, not OPERATOR_REQUIRED)
 
-→ Trigger Path C: arm manual fallback per KARACHI_2026_05_17_MANUAL_FALLBACK.md §3 starting T+9h. **Note**: under current adapter state, manual claim of the $0.59 is the expected outcome regardless of Path A/C; what Path C-vs-A-as-scoped controls is whether the PR-I plumbing antibody ships before T-0.
+**Post-stub-detect, pre-CLI states** (v3 designed flow):
+- Row in `REDEEM_OPERATOR_REQUIRED` ≤24h with no CLI invocation → **EXPECTED designed-state, NOT a Path C trigger**. Operator action pending; alert is the cue.
+- Row in `REDEEM_OPERATOR_REQUIRED` >24h with no CLI invocation → **Path C trigger** (operator missed alert OR cannot complete UI claim). Arm fallback runbook §3.
+
+**Post-CLI states** (operator has recorded a tx_hash):
+- Row in `REDEEM_TX_HASHED` indefinitely with reconciler `results=0` → EXPECTED until PR-I.5 (web3 wired). Not a Path C trigger.
+- Row in `REDEEM_TX_HASHED` where post-PR-I.5 reconciler finds receipt missing → execute recovery via `operator_record_redeem.py --force` (per §K.4 spec); if recovery exhausts (3 tries), escalate to REVIEW_REQUIRED + Path C.
+
+→ Trigger Path C: arm manual fallback per KARACHI_2026_05_17_MANUAL_FALLBACK.md §3 starting T+9h. **Note (v3)**: under Path A-clean + current adapter state, "operator runs CLI" IS the designed completion; what Path C controls is whether to abandon CLI flow entirely when the cascade-plumbing antibody is broken or operator unavailability exceeds SLA.
 
 ---
 
@@ -715,51 +754,103 @@ State machine deltas:
                                                                           REDEEM_CONFIRMED
 ```
 
-### K.3 `submit_redeem` transition delta
+### K.3 `submit_redeem` transition delta (v3 — atomicity + real alert primitive)
 
-In the function that wraps `adapter.redeem()` and updates the row state (likely `src/execution/settlement_commands.py` near line 393 where the error-code check already exists):
+In the function that wraps `adapter.redeem()` and updates the row state (`src/execution/settlement_commands.py` — exact insertion site is the existing error-code check; scout-verified location L31-34 = CHECK literal-set, L71-78 = SettlementState Enum, near L380-410 = state-transition path):
 
 ```python
+import logging
+logger = logging.getLogger(__name__)
+
 result = adapter.redeem(condition_id=row["condition_id"])
 if result.get("success"):
-    _transition(conn, row["id"], "REDEEM_TX_HASHED", tx_hash=result["tx_hash"])
-    return
-err = result.get("errorCode")
-if err == "REDEEM_DEFERRED_TO_R1":
-    _transition(conn, row["id"], "REDEEM_OPERATOR_REQUIRED")
-    _emit_heartbeat_alert(
-        severity="WARN",
-        message=(
-            f"Redeem requires operator UI claim + record: "
-            f"condition={row['condition_id']} command_id={row['id']}. "
-            f"Run scripts/operator_record_redeem.py after UI claim."
-        ),
+    transitioned = _atomic_transition(
+        conn, row["command_id"],
+        from_state="REDEEM_SUBMITTED",
+        to_state="REDEEM_TX_HASHED",
+        tx_hash=result["tx_hash"],
     )
     return
-# unexpected error code
-_transition(conn, row["id"], "REDEEM_REVIEW_REQUIRED", error_code=err)
+
+err = result.get("errorCode")
+if err == "REDEEM_DEFERRED_TO_R1":
+    transitioned = _atomic_transition(
+        conn, row["command_id"],
+        from_state="REDEEM_SUBMITTED",
+        to_state="REDEEM_OPERATOR_REQUIRED",
+        error_payload=result,
+    )
+    if transitioned:  # row state guard passed; cursor.rowcount == 1
+        logger.warning(
+            "[REDEEM_OPERATOR_REQUIRED] command_id=%s condition_id=%s "
+            "action=run_operator_record_redeem details='Polymarket UI claim + "
+            "scripts/operator_record_redeem.py <condition_id> <tx_hash>'",
+            row["command_id"], row["condition_id"],
+        )
+    return
+
+# unexpected error code (NOT REDEEM_DEFERRED_TO_R1)
+_atomic_transition(
+    conn, row["command_id"],
+    from_state="REDEEM_SUBMITTED",
+    to_state="REDEEM_REVIEW_REQUIRED",
+    error_payload=result,
+)
 ```
 
-Heartbeat alert path reuses existing infrastructure (do not create new alert channel); WARN severity is appropriate (designed-state-requiring-action, not a system fault).
+**Atomicity contract (v3, P10 critic fix)**:
+- `_atomic_transition` issues a single SQLite UPDATE with `WHERE command_id=? AND state=?` — `cursor.rowcount == 1` is the success signal; `0` means another writer changed state since selection (rollback no-op).
+- The `logger.warning` call fires ONLY when `transitioned == True`. Cannot false-alert (no rowcount > 0 means no alert) and cannot silent-transition (if logger.warning's file-handle fails, row is still observable via DB query + scheduler_jobs_health.json).
+- `logger.warning` does NOT write to DB. No transaction concern. Best-effort log emit; failure mode is rare-OS-error → row state remains correct + observable.
 
-### K.4 `scripts/operator_record_redeem.py` (new, record-only CLI)
+**Alert primitive (v3, P8.3 critic fix)**:
+- `_emit_heartbeat_alert` referenced in v2 does **not exist** in the codebase (G2 critic grep + G3-prep scout confirm both: grep `_emit_heartbeat_alert` = 0 hits; closest find `_emit_signal` in `src/execution/live_executor.py:69` is the ANTI_DRIFT_CHARTER ritual-signal helper, wrong domain).
+- v3 alert path: structured `logger.warning` with `[REDEEM_OPERATOR_REQUIRED]` prefix in `logs/zeus-live.err`. The existing heartbeat-sensor (per Finding #10 architecture) scans `.err` files for severity-tagged lines and feeds the dispatcher. PR-D (alarm-channel-bridge, FIX_PLAN §4.2) is the dedicated push-notification path; PR-I emits the prefix that PR-D picks up. No new alert infrastructure created in PR-I.
+- Operator-pageable channel is PR-D scope. Until PR-D ships, operator picks up the WARNING via heartbeat-dispatcher status reports + manual `.err` log grep.
+
+### K.4 `scripts/operator_record_redeem.py` (v3 — atomic CLI with recovery flag)
 
 ```python
 """Record a Polymarket-UI-completed redeem against a REDEEM_OPERATOR_REQUIRED row.
 
 Usage:
     python -m scripts.operator_record_redeem <condition_id> <tx_hash> [--notes "..."]
+    python -m scripts.operator_record_redeem <condition_id> <tx_hash> --force [--notes "..."]
 
 Authority basis: 2026-05-16 SCAFFOLD §K — operator-completion as first-class
 state while PolymarketV2Adapter.redeem is stubbed at REDEEM_DEFERRED_TO_R1.
 
 Behavior (record-only; no web3 write, no signing, no gas):
-1. Verify exactly one settlement_commands row in REDEEM_OPERATOR_REQUIRED for condition_id.
-2. Verify tx_hash matches 0x-prefixed 64-hex regex.
-3. SAVEPOINT-transition state to REDEEM_TX_HASHED with tx_hash recorded + occurred_at + actor='operator'.
-4. Append audit-log row (existing infrastructure).
-5. Emit operator_action heartbeat event for traceability.
-6. Print 4-line summary: condition_id, old_state → new_state, tx_hash, command_id.
+
+NORMAL MODE (no --force):
+1. SELECT exactly one settlement_commands row in REDEEM_OPERATOR_REQUIRED for condition_id.
+2. Verify tx_hash matches 0x-prefixed 64-hex regex (rejects malformed before DB touch).
+3. Atomic transition: UPDATE settlement_commands SET state='REDEEM_TX_HASHED', tx_hash=?, submitted_at=?
+   WHERE command_id=? AND state='REDEEM_OPERATOR_REQUIRED'. Assert cursor.rowcount == 1.
+4. INSERT settlement_command_events row (event_type='operator_record', payload=tx_hash + actor + notes).
+5. logger.info("[OPERATOR_RECORD] command_id=... old=OPERATOR_REQUIRED new=TX_HASHED tx_hash=...").
+6. Print 4-line summary to stdout: command_id, old → new state, tx_hash, condition_id.
+
+FORCE MODE (--force, recovery use):
+- Allowed source states: REDEEM_OPERATOR_REQUIRED (re-record over prior fail), REDEEM_TX_HASHED (overwrite).
+- Same atomicity (single UPDATE), but WHERE clause widens to `state IN ('REDEEM_OPERATOR_REQUIRED','REDEEM_TX_HASHED')`.
+- INSERT audit event with extra payload field actor_override=true + prior_tx_hash field if overwriting.
+- Emits WARNING (not info) because forced overwrite is operator-acknowledged exception.
+
+REJECTIONS:
+- Wrong state (NOT in allowed set): exit 2, log REJECT, no DB write.
+- Malformed tx_hash (not 0x + 64 hex): exit 3, log REJECT, no DB write.
+- Multiple matching rows: exit 4, log REJECT, no DB write (data integrity violation; never expected because UNIQUE INDEX on (condition_id, market_id, payout_asset) WHERE state NOT IN (CONFIRMED, FAILED) — settlement_commands.py:53-55).
+- Zero matching rows: exit 5, log REJECT.
+
+IDEMPOTENCY:
+- NORMAL mode + row already TX_HASHED with matching tx_hash: detect via SELECT before UPDATE; exit 0, log "already_recorded_no_op".
+- NORMAL mode + row already TX_HASHED with DIFFERENT tx_hash: reject (exit 6); operator must use --force to overwrite.
+
+RACE CONTRACT (v3 P3 critic fix):
+- scheduler `redeem_submitter` only operates on `_SUBMITTABLE_STATES = {REDEEM_INTENT_CREATED, REDEEM_RETRYING}` (settlement_commands.py:87-90). CLI only operates on REDEEM_OPERATOR_REQUIRED (NORMAL) or {OPERATOR_REQUIRED, TX_HASHED} (FORCE). No state overlap → no race.
+- SQLite WAL serializes writes per row anyway. Conditional UPDATE is the atomic primitive; cursor.rowcount==1 is the success signal.
+- CLI-during-daemon-restart: harmless. If CLI commits TX_HASHED while daemon is down, daemon restart picks up TX_HASHED → reconciler operates normally (or no-ops if web3 unwired).
 
 Reconciler picks up REDEEM_TX_HASHED in normal flow → CONFIRMED via web3 receipt
 (once web3 is wired; until then reconciler logs the row and leaves it for the
@@ -784,16 +875,34 @@ If in REDEEM_TX_HASHED with different tx_hash → reject (operator must reconcil
 | `test_operator_record_redeem_is_idempotent_with_same_hash` | same NEW file | Seed `REDEEM_TX_HASHED` already with hash X; invoke CLI with same hash; assert no-op success |
 | `test_operator_record_redeem_rejects_conflicting_hash` | same NEW file | Seed `REDEEM_TX_HASHED` with hash X; invoke CLI with hash Y; assert raises |
 
-### K.6 cascade_liveness_contract.yaml addendum
+### K.6 cascade_liveness_contract.yaml addendum (v3 — row-age guard)
 
-Add a `terminal_states_with_operator_action` array per entry. The antibody test (`tests/test_cascade_liveness_contract.py`) extends to assert that for each contract entry:
+Add per-entry fields to the YAML schema:
 
-- Every non-terminal state has a poller that can transition out of it
-- Every state in `terminal_states_with_operator_action` is reachable from a known transition AND has a documented operator runbook step (the runbook reference is a yaml field on the entry)
+```yaml
+- table: settlement_commands
+  poller_job_id: redeem_submitter
+  reconciler_job_id: redeem_reconciler
+  submittable_states: [REDEEM_INTENT_CREATED, REDEEM_RETRYING]
+  terminal_states: [REDEEM_CONFIRMED, REDEEM_FAILED, REDEEM_REVIEW_REQUIRED]
+  terminal_states_with_operator_action:
+    - state: REDEEM_OPERATOR_REQUIRED
+      max_age_hours: 24                    # P1 critic fix: row-age guard
+      operator_runbook: docs/operations/task_2026-05-16_deep_alignment_audit/KARACHI_2026_05_17_MANUAL_FALLBACK.md#1
+      escalation_action: "Path C trigger per §I.4 if exceeded; arm manual fallback runbook §3"
+      cli_invocation: "python -m scripts.operator_record_redeem <condition_id> <tx_hash>"
+```
 
-For F14: `terminal_states_with_operator_action: [REDEEM_OPERATOR_REQUIRED]` with runbook ref pointing to KARACHI runbook §1 (rewritten per §K.7).
+The antibody test (`tests/test_cascade_liveness_contract.py`) extends to assert:
 
-This keeps the antibody contract complete: no state can sit silently with no defined progression.
+- Every non-terminal state has a poller (existing v2 check).
+- Every state in `terminal_states_with_operator_action` has: (a) a transition path INTO it from the state-machine code, (b) `max_age_hours` field set, (c) `operator_runbook` reference resolves to an existing file + section anchor, (d) `cli_invocation` is a runnable command string.
+- **Row-age guard (v3 P1 critic fix)**: a new test `test_no_operator_required_row_exceeds_max_age` queries production-shape settlement_commands rows and asserts no row in OPERATOR_REQUIRED exceeds `max_age_hours`. Test is data-dependent (skipped if DB is empty); runs in CI against staging snapshot if available, runs in operator-invocable mode against live DB.
+- **Aging poller (deferred to PR-I.5)**: scheduled job `redeem_age_guard` scans every 1h, raises ALERT for rows exceeding `max_age_hours`. PR-I ships the contract field + CI test; PR-I.5 ships the poller. Acceptable because:
+  - For Karachi: position is the first ever — operator attention guaranteed; no need for aging-poller alert on top of the immediate WARN.
+  - For future positions post-PR-I.5: the guard is automated.
+
+This keeps the antibody contract complete: no state can sit silently with no defined progression; OPERATOR_REQUIRED has documented escalation if exceeded.
 
 ### K.7 KARACHI_2026_05_17_MANUAL_FALLBACK.md §1 rewrite
 
@@ -814,38 +923,68 @@ The v1 SCAFFOLD §H already calls for correcting the misleading "auto-cascade in
 
 Until step 9 the cascade is deterministic and machine-driven; step 7+8 is the designed operator action, not silent UI tinkering. Until R1 ships, this is "complete per design".
 
-### K.8 Files-changed manifest amendment (over §H)
+### K.8 Files-changed manifest amendment (v3 — TBDs resolved + migration added)
 
 | File | Range | Change | Rationale |
 |---|---|---|---|
-| `src/execution/settlement_commands.py` | ~L380-410 (where `errorCode == REDEEM_DEFERRED_TO_R1` is already checked) | Add `REDEEM_OPERATOR_REQUIRED` state transition + heartbeat WARN emit per §K.3 | Stub-detected designed-state transition |
-| `src/state/db.py` or wherever `state` literal-set lives | Add `"REDEEM_OPERATOR_REQUIRED"` to allowed states | Schema literal | New state |
-| `scripts/operator_record_redeem.py` | NEW (~80 LOC) | Record-only CLI per §K.4 | Operator-completion entrypoint |
-| `tests/test_redeem_cascade_liveness.py` | EXTEND (already created per §H) | Add 2 tests per §K.5 | Coverage for state-transition logic |
-| `tests/test_operator_record_redeem.py` | NEW | 5 tests per §K.5 | CLI coverage |
-| `architecture/cascade_liveness_contract.yaml` | EXTEND (already created per §H) | Add `terminal_states_with_operator_action` field per §K.6 | Antibody completeness |
-| `KARACHI_2026_05_17_MANUAL_FALLBACK.md` | §1 (already to be rewritten per §H) | Rewrite per §K.7 walkthrough (supersedes §H bullet — same file, expanded scope) | Operator runbook |
+| `src/execution/settlement_commands.py` | L31-34 (CHECK literal-set) | Add `'REDEEM_OPERATOR_REQUIRED'` to CHECK constraint. Since SQLite cannot ALTER CHECK in-place, the migration script (below) drops + recreates table. Production starting state: 0 rows in both `state/zeus_trades.db` and `state/zeus-live.db` per scout 2026-05-16 — migration is zero-cost data-wise. | New state in schema |
+| `src/execution/settlement_commands.py` | L71-78 (SettlementState Enum) | Add `REDEEM_OPERATOR_REQUIRED = "REDEEM_OPERATOR_REQUIRED"` | Python-level literal-set parallel |
+| `src/execution/settlement_commands.py` | ~L380-410 (existing `REDEEM_DEFERRED_TO_R1` check site) | Add `_atomic_transition` helper + transition logic per §K.3 (v3 atomicity + logger.warning alert primitive) | Stub-detected designed-state transition |
+| `src/execution/settlement_commands.py` | adjacent to existing `_TERMINAL_STATES` (L81-85) | Update set membership: REDEEM_OPERATOR_REQUIRED is NOT terminal (CLI exits it); REDEEM_REVIEW_REQUIRED stays terminal | State-set bookkeeping |
+| `scripts/migrations/202605_add_redeem_operator_required_state.py` | NEW (v3 P7 critic fix) | SQLite CHECK-constraint migration: BEGIN; CREATE TABLE settlement_commands_new with new CHECK; INSERT INTO settlement_commands_new SELECT * FROM settlement_commands; DROP TABLE settlement_commands; ALTER TABLE settlement_commands_new RENAME TO settlement_commands; recreate indexes; COMMIT. Idempotent (no-op if CHECK already includes REDEEM_OPERATOR_REQUIRED). | Schema migration on live DB |
+| `scripts/operator_record_redeem.py` | NEW (~120 LOC including --force flag + atomic UPDATE + audit event) | Per §K.4 v3 spec | Operator-completion entrypoint |
+| `src/main.py` | scout-verified line range L984-986 (existing harvester + heartbeat jobs) | Add 3 new `scheduler.add_job` blocks + `_assert_cascade_liveness_contract(scheduler)` call. Mirror existing pattern exactly per scout Q2. | Scheduler registration |
+| `src/main.py` | after `_harvester_cycle` def (~L160-200 area; executor to find exact insertion site) | Add tick body functions: `_redeem_submitter_cycle`, `_redeem_reconciler_cycle`, `_wrap_unwrap_liveness_guard_cycle`, `_assert_cascade_liveness_contract`, `_atomic_transition` helper | Scheduler tick implementations |
+| `tests/test_redeem_cascade_liveness.py` | EXTEND (already created per §H) | Add 2 tests per §K.5 v2 + 1 atomicity test per §K.3 v3 (assert `transitioned == False` → no logger.warning fires) | Coverage for state-transition logic |
+| `tests/test_operator_record_redeem.py` | NEW | 7 tests per §K.5 v3 (NORMAL mode: 5 from v2; FORCE mode: 2 new — `test_force_overwrites_conflicting_hash`, `test_force_re_records_after_failure`) | CLI coverage |
+| `architecture/cascade_liveness_contract.yaml` | EXTEND (already created per §H) | Add `terminal_states_with_operator_action` schema per §K.6 v3 (with `max_age_hours`, `operator_runbook`, `cli_invocation` fields) | Antibody completeness |
+| `tests/test_cascade_liveness_contract.py` | EXTEND | Add `test_no_operator_required_row_exceeds_max_age` (data-dependent; skip-if-empty) | Row-age guard per §K.6 v3 |
+| `KARACHI_2026_05_17_MANUAL_FALLBACK.md` | §1 (already to be rewritten per §H) | Rewrite per §K.7 walkthrough; correct misleading "auto-cascade includes clob.redeem" wording | Operator runbook |
+| `requirements.txt` | NEW line (still applies from §H) | Add `web3==<latest-stable>` pin; reconciler path no-ops without it but installing keeps option open for PR-I.5 | Reconciler future-state |
 
-**Updated file count: 8 files modified or created** (over §H's 6 — adds `src/execution/settlement_commands.py` and `scripts/operator_record_redeem.py` and `tests/test_operator_record_redeem.py`; KARACHI runbook is same file as §H, rewrite scope expanded; cascade_liveness_contract.yaml extended in place). The `requirements.txt` web3 pin from §H is still added for reconciler path (no v2 change).
+**Updated file count: 10 files modified or created** (was 8 in v2; v3 adds `scripts/migrations/202605_add_redeem_operator_required_state.py` and `tests/test_cascade_liveness_contract.py` extension). `src/main.py` has TWO insertion sites (scheduler registration L984 + tick body functions ~L160).
 
-### K.9 Risk register addendum (extend §J.1)
+### K.9 Risk register addendum (v3 — extends §J.1; adds RISK 6/7/8 per P8 critic fix)
 
 **RISK 4 — alert fatigue / silent CLI failure.** If the heartbeat alert path is noisy or operators ignore WARN events, the row sits in REDEEM_OPERATOR_REQUIRED indefinitely.
 
-**Mitigation**: cascade_liveness_contract antibody (§K.6) asserts every entry has runbook ref; reconciler observability can be extended to surface "row aged >24h in REDEEM_OPERATOR_REQUIRED" as a higher-severity alert in a follow-up PR. For Karachi the row is the first one ever — operator attention is guaranteed.
+**Mitigation**: cascade_liveness_contract antibody (§K.6 v3) asserts every entry has runbook ref + `max_age_hours`; aging-poller deferred to PR-I.5 is the automated mitigation. For Karachi the row is the first ever — operator attention is guaranteed.
 
 **RISK 5 — CLI typo / wrong tx_hash recorded.** Operator pastes wrong tx_hash; cascade records it; reconciler later fails to find on-chain receipt.
 
-**Mitigation**: K.5 tests cover idempotency + conflicting-hash rejection. CLI validates 0x + 64-hex format before commit. Wrong-but-format-valid hash surfaces at reconciler stage as REDEEM_FAILED — operator can re-run CLI after correcting (reconciler ticket carries the bad hash, audit log preserved).
+**Mitigation**: K.5 tests cover idempotency + conflicting-hash rejection. CLI validates 0x + 64-hex format before commit. Wrong-but-format-valid hash surfaces at reconciler stage post-PR-I.5 as REDEEM_FAILED — operator can re-run CLI with `--force` after correcting (reconciler ticket carries the bad hash; audit log preserves prior recordings).
 
-### K.10 Why this is "architecturally cleanest"
+**RISK 6 (v3 P8.1 critic fix) — SQLite CHECK-constraint migration on live `settlement_commands`.** Adding REDEEM_OPERATOR_REQUIRED to the CHECK literal-set requires a table rebuild (CREATE new + INSERT copy + DROP old + RENAME), because SQLite cannot ALTER CHECK in place.
+
+**Mitigation**: scout 2026-05-16 confirms `state/zeus_trades.db.settlement_commands` and `state/zeus-live.db.settlement_commands` are both 0-row tables. Migration is data-cost-zero. Migration script `scripts/migrations/202605_add_redeem_operator_required_state.py` (per §K.8 v3) wraps the rebuild in a single transaction; idempotent (no-op if CHECK already includes REDEEM_OPERATOR_REQUIRED). Test: migration must be runnable against a `:memory:` SQLite seeded with v1 schema + a non-OPERATOR_REQUIRED row, end state preserves row + accepts new state.
+
+**RISK 7 (v3 P8.2 critic fix) — CLI invocation race with daemon restart mid-cascade.** Scenario: scheduler tick has read row in REDEEM_SUBMITTED + called adapter; daemon SIGKILL'd before commit; restart re-reads row in REDEEM_SUBMITTED; operator concurrently runs CLI.
+
+**Mitigation**: CLI's atomic conditional UPDATE `WHERE state='REDEEM_OPERATOR_REQUIRED'` fails (cursor.rowcount==0) because row is still SUBMITTED post-daemon-restart. CLI exits cleanly with "wrong state" reject. Operator can re-run CLI once scheduler has had a tick to re-process. The state guard is the race-free primitive; no advisory lock needed. Test: `test_cli_rejects_during_submitted_state_after_daemon_crash_simulation` seeds row in SUBMITTED, runs CLI, asserts reject + state unchanged.
+
+**RISK 8 (v3 P8.3 critic fix) — `_emit_heartbeat_alert` function does NOT exist.** v2 §K.3 referenced a function that grep finds zero hits for. Closest existing surface (`_emit_signal` in `src/execution/live_executor.py:69`) is the ANTI_DRIFT_CHARTER ritual-signal helper, wrong domain.
+
+**Mitigation (v3)**: §K.3 replaced with `logger.warning("[REDEEM_OPERATOR_REQUIRED] ...")` writing to existing logger infrastructure (lands in `logs/zeus-live.err`). Heartbeat-sensor (per Finding #10) already scans `.err` for severity lines. PR-D (FIX_PLAN §4.2 alarm-channel-bridge) is the dedicated push-notification wiring; PR-I emits the prefix that PR-D picks up. No new alert infrastructure invented in PR-I.
+
+### K.10 Why this is "architecturally cleanest" (v3 — softened per P5 critic fix)
 
 - **F14 category antibody unchanged**: cascade_liveness_contract.yaml + tests + boot assertion still ship. Any future *_INTENT_CREATED table without a poller still bricks boot. v1 §G unchanged.
 - **Stub-after-cascade gets first-class semantics**: not parked in REVIEW_REQUIRED catch-all; has dedicated state, alert, CLI, runbook, tests, antibody-contract coverage.
 - **No web3 dependency added**: PR-I stays Tier-1 implementation cost; no signing-code-under-time-pressure risk per `feedback_long_opus_revision_briefs_timeout.md`.
-- **R1 forward-compatible**: when adapter is wired, change `submit_redeem`'s success path to write tx_hash directly (no state-machine refactor needed). `REDEEM_OPERATOR_REQUIRED` becomes a legacy state recorded in the YAML but never re-entered.
-- **Operator action is auditable**: every UI claim has a CLI invocation record, tx_hash recorded, audit log row, heartbeat trace. v1's "manual UI claim" had no DB footprint.
-- **First-live-precedent**: the cascade contract reaches its designed terminal state programmatically. The operator-completion step is a designed transition, not an out-of-system rescue. Per operator policy 2026-05-16, this is what "完成 per design" means under current adapter state.
+- **R1 forward-compatible**: when adapter is wired, change `submit_redeem`'s success path to write tx_hash directly (no state-machine refactor needed). `REDEEM_OPERATOR_REQUIRED` becomes a legacy state recorded in the YAML but rarely re-entered (still available as recovery path for adapter failures).
+- **Operator action is auditable**: every UI claim has a CLI invocation record, tx_hash recorded, audit log row, structured log trace. v1's "manual UI claim" had no DB footprint.
+
+**On first-live-precedent semantic (v3 P5 critic-corrected reframe)**:
+
+Operator policy memory (`feedback_first_live_order_no_manual_completion.md`) verbatim: *"目前我们唯一 live smoke test 成功的订单不能'手动'执行，必须要程序性的正确按照我们设计预期完成"*. v3 explicitly acknowledges:
+
+- **Strict reading**: "程序性的正确按照我们设计预期完成" = "completes through the programmatic path designed by the system, end-to-end on-chain". Under THIS reading, Path A-clean does NOT satisfy the policy — operator still runs a CLI, which is operator action regardless of how well-designed it is.
+- **v2 reframe** (the read v2 §K.10 implicitly adopted): "designed expectation" includes the operator-completion CLI as a first-class step of the design, given R1 phase is not yet implemented. Under this reading, Path A-clean DOES satisfy the policy.
+- **v3 honest verdict**: this is a redefinition of the policy semantics under current adapter state. v3 does NOT silently adopt the redefinition. The operator should ratify which reading governs first-live-precedent.
+
+Path A-clean's actual claim is precise: **the cascade contract reaches its designed terminal state programmatically; the operator-completion step is a designed CLI transition with full auditability; the strict on-chain-call layer is deferred to PR-I.5 because adapter wiring inside the Karachi window is unsafe**. Whether this counts as "完成 per design" depends on whether the policy's "design" refers to (a) end-to-end automation or (b) the system's current designed terminal-state semantics under partial-adapter conditions.
+
+Per operator directive 2026-05-16 "选择架构上最干净和正确的解法", v3 selects Path A-clean as the architecturally correct response to current adapter state. Whether this fully honors the first-live-precedent policy is the operator's call to make explicit in G2-second-round review or in §1 of FIX_PLAN.
 
 ---
 
