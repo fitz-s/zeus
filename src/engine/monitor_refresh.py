@@ -72,7 +72,7 @@ class HeldTokenMonitorQuote:
 
     token_id: str
     best_bid: float
-    best_ask: float
+    best_ask: float | None
     bid_size: float
     ask_size: float
     diagnostic_market_price: float
@@ -577,12 +577,61 @@ def _refresh_ens_member_counting(
     return current_p_posterior, [*applied, "model_only_posterior", "alpha_posterior"]
 
 
+def _position_state_value(pos: Position) -> str:
+    return str(getattr(getattr(pos, "state", ""), "value", getattr(pos, "state", "")) or "")
+
+
 def _fetch_day0_observation(city: Position | object, target_d: date):
     reference_time = datetime.now(timezone.utc)
     try:
         return get_current_observation(city, target_date=target_d, reference_time=reference_time)
     except TypeError:
         return get_current_observation(city)
+
+
+def _day0_bid_only_monitor_quote(conn, clob: PolymarketClient, pos: Position, token_id: str) -> HeldTokenMonitorQuote | None:
+    if _position_state_value(pos) != "day0_window" or not hasattr(clob, "get_orderbook"):
+        return None
+    try:
+        from src.data.market_scanner import _top_book_level_decimal
+
+        book = clob.get_orderbook(token_id)
+        best_bid, bid_size = _top_book_level_decimal(book, "bids")
+        bid_f = float(best_bid)
+        bid_sz_f = float(bid_size)
+        if not np.isfinite(bid_f) or bid_f <= 0.0 or not np.isfinite(bid_sz_f) or bid_sz_f <= 0.0:
+            return None
+        source_timestamp = datetime.now(timezone.utc).isoformat()
+        try:
+            from src.state.db import log_microstructure
+
+            log_microstructure(
+                conn,
+                token_id=token_id,
+                city=pos.city,
+                target_date=pos.target_date,
+                range_label=pos.bin_label,
+                price=bid_f,
+                volume=bid_sz_f,
+                bid=bid_f,
+                ask=None,
+                spread=None,
+                source_timestamp=source_timestamp,
+            )
+        except Exception as exc:
+            logger.debug("Bid-only microstructure log failed for %s: %s", pos.trade_id, exc)
+        return HeldTokenMonitorQuote(
+            token_id=token_id,
+            best_bid=bid_f,
+            best_ask=None,
+            bid_size=bid_sz_f,
+            ask_size=0.0,
+            diagnostic_market_price=bid_f,
+            source_timestamp=source_timestamp,
+        )
+    except Exception as exc:
+        logger.debug("Day0 bid-only quote refresh failed for %s: %s", pos.trade_id, exc)
+        return None
 
 
 def monitor_quote_refresh(conn, clob: PolymarketClient, pos: Position) -> HeldTokenMonitorQuote | None:
@@ -634,6 +683,9 @@ def monitor_quote_refresh(conn, clob: PolymarketClient, pos: Position) -> HeldTo
             source_timestamp=source_timestamp,
         )
     except Exception as e:
+        bid_only_quote = _day0_bid_only_monitor_quote(conn, clob, pos, tid)
+        if bid_only_quote is not None:
+            return bid_only_quote
         logger.debug("VWMP refresh failed for %s: %s", pos.trade_id, e)
         return None
 

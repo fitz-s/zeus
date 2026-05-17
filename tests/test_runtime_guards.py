@@ -511,6 +511,65 @@ class _MonitorQuoteSplitClob:
         return self.bid, self.ask, self.bid_size, self.ask_size
 
 
+class _BidOnlyDay0Clob:
+    def get_best_bid_ask(self, token_id):
+        from src.contracts.exceptions import EmptyOrderbookError
+
+        assert token_id == "yes123"
+        raise EmptyOrderbookError("No executable top book for yes123: missing asks")
+
+    def get_orderbook(self, token_id):
+        assert token_id == "yes123"
+        return {"bids": [{"price": 0.998, "size": 12.5}], "asks": []}
+
+
+def test_day0_monitor_quote_refresh_uses_executable_bid_when_asks_absent(monkeypatch):
+    from src.engine import monitor_refresh
+
+    monkeypatch.setattr("src.state.db.log_microstructure", lambda *args, **kwargs: None)
+
+    pos = _position(state="day0_window")
+
+    quote = monitor_refresh.monitor_quote_refresh(None, _BidOnlyDay0Clob(), pos)
+
+    assert quote is not None
+    assert quote.best_bid == pytest.approx(0.998)
+    assert quote.best_ask is None
+    assert quote.ask_size == pytest.approx(0.0)
+    assert quote.diagnostic_market_price == pytest.approx(0.998)
+
+
+def test_day0_refresh_keeps_current_market_fresh_with_bid_only_book(monkeypatch):
+    from src.engine import monitor_refresh
+
+    monkeypatch.setattr("src.state.db.log_microstructure", lambda *args, **kwargs: None)
+    monkeypatch.setattr(monitor_refresh, "_detect_whale_toxicity_from_orderbook", lambda *args, **kwargs: False)
+
+    def _stale_refresh(pos, *, conn, city, target_d):
+        pos.applied_validations = ["day0_observation", "observation_quality_gate"]
+        return pos.p_posterior, pos, False
+
+    monkeypatch.setattr(monitor_refresh, "monitor_probability_refresh", _stale_refresh)
+
+    pos = _position(
+        state="day0_window",
+        entry_price=0.37,
+        p_posterior=0.88,
+        last_monitor_market_price=None,
+        last_monitor_prob=0.0,
+    )
+
+    edge_ctx = monitor_refresh.refresh_position(None, _BidOnlyDay0Clob(), pos)
+
+    assert pos.last_monitor_market_price == pytest.approx(0.998)
+    assert pos.last_monitor_market_price_is_fresh is True
+    assert pos.last_monitor_best_bid == pytest.approx(0.998)
+    assert pos.last_monitor_best_ask is None
+    assert pos.last_monitor_prob_is_fresh is False
+    assert edge_ctx.p_market[0] == pytest.approx(0.998)
+    assert not np.isfinite(edge_ctx.p_posterior)
+
+
 def test_monitor_quote_refresh_changes_exit_price_not_posterior_dispatch(monkeypatch, tmp_path):
     from src.engine import monitor_refresh
 
