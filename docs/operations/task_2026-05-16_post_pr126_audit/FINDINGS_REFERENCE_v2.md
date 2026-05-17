@@ -166,3 +166,17 @@ Track D (daemon supervision): **+8 new findings F85–F92** below. F87 flagged *
 | **F90** | **`cron/jobs.json` 82 KB vs `crontab -l` only 2 lines — 40-job catalog NOT scheduled** | **SEV-1** | **NEW (Run #14)** | `cron/jobs.json` | Run #14 | Run #14 |
 | **F91** | Heartbeat JSONs written every minute; consumer + alert path unverified | SEV-2 | NEW (Run #14) AMBIGUOUS | `state/heartbeats/zeus-*.json` + `src/control/heartbeat_supervisor.py` | Run #14 | Run #14 |
 | **F92** | Riskguard auth/api-key 400 → derive-api-key fallback succeeds silently (no metric) | SEV-2 | NEW (Run #14) | `src/riskguard/*` | Run #14 | Run #14 |
+
+## Run #15 Track 1 additions (F90 reframe + F90a/b/c + F93–F95)
+
+Track 1 (F90 deep dive): Run #14's F90 premise ("82KB jobs.json vs 2-line crontab; 40 jobs un-scheduled") was wrong on both numbers and conclusion. `crontab -l` is 71 lines / 24 active commands; `jobs.json` IS executed by `ai.openclaw.node` daemon. 31 disabled-flag jobs are intentionally dormant, not silently un-scheduled. F90 reframed; sub-findings extracted; 3 new findings F93–F95.
+
+| F#  | Title | Sev | Status | Owner | First seen | Last verified |
+|-----|-------|-----|--------|-------|------------|----------------|
+| **F90** | **REFRAMED**: jobs.json↔crontab↔launchd source-of-truth ambiguity (was: "40 jobs un-scheduled" — DISPROVEN) | SEV-3 | REFRAMED (Run #15) | `cron/jobs.json` + crontab + launchd | Run #14 | **Run #15 Track 1** |
+| **F90a** | **3 enabled jobs failing every tick**: `memory-observer` + `finance-subagent-scanner` + `finance-subagent-scanner-offhours` reject `payload.model 'openai-codex/gpt-5.4-mini'` | **SEV-1** | **NEW (Run #15 T1)** | `cron/jobs.json` payload.model + `openclaw.json` agents.defaults.model | Run #15 T1 | Run #15 T1 |
+| **F90b** | `memory-reflector` + `memory-dream-cycle` timing out on most ticks (`cron: job execution timed out`) | SEV-2 | NEW (Run #15 T1) | `cron/jobs.json` payload.timeoutMs + memory pipeline | Run #15 T1 | Run #15 T1 |
+| **F90c** | No `cron_reconcile` tool across 3 scheduler layers (jobs.json / crontab / launchd) | SEV-3 | NEW (Run #15 T1) | `tools/ops/cron_reconcile.py` (to be created) | Run #15 T1 | Run #15 T1 |
+| **F93** | **Karachi-direct**: no job in any layer refreshes Karachi WU/HKO data more than once/day; single `oracle_snapshot_listener.py` @ 10:00 UTC = SPOF | SEV-3 | NEW (Run #15 T1) | crontab oracle entry | Run #15 T1 | Run #15 T1 |
+| **F94** | `cron/jobs-state.json` is structurally empty (all 42 entries `{}`); real state lives in `cron/runs/<jobid>.jsonl` — likely cause of F90 misread | SEV-3 | NEW (Run #15 T1) | `cron/jobs-state.json` writer | Run #15 T1 | Run #15 T1 |
+| **F95** | **Karachi-defensive**: `zeus-antibody-scan` + `zeus-daily-audit` DISABLED in jobs.json since 2026-04-14/15 with NO crontab/launchd replacement → Karachi regression coverage gap | SEV-2 | NEW (Run #15 T1) | `cron/jobs.json` enabled flags | Run #15 T1 | Run #15 T1 |
