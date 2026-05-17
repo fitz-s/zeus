@@ -2886,6 +2886,79 @@ def test_monitoring_unknown_direction_report_has_no_fresh_probability(monkeypatc
     assert monitor_results[0].fresh_edge is None
 
 
+def test_day0_closed_non_accepting_market_skips_exit_monitor_chain_missing(monkeypatch):
+    """Closed non-accepting Day0 markets await settlement instead of failing quote freshness."""
+    from src.engine import cycle_runtime
+
+    pos = _make_position(
+        trade_id="closed-day0-001",
+        state="day0_window",
+        chain_state="synced",
+        city="Chicago",
+        target_date="2026-04-01",
+        market_id="0xclosed",
+        condition_id="0xclosed",
+    )
+    portfolio = _make_portfolio(pos)
+
+    class ClosedMarketClob:
+        def get_clob_market_info(self, condition_id):
+            assert condition_id == "0xclosed"
+            return {
+                "closed": True,
+                "accepting_orders": False,
+                "enable_order_book": False,
+            }
+
+        def get_best_bid_ask(self, token_id):
+            raise AssertionError("closed market should not refresh executable quote")
+
+    class Tracker:
+        def record_exit(self, position):
+            raise AssertionError("closed market should not execute an exit")
+
+    monitor_results = []
+    artifact = type("Artifact", (), {"add_monitor_result": lambda self, result: monitor_results.append(result)})()
+    summary = {"monitors": 0, "exits": 0}
+    deps = type(
+        "Deps",
+        (),
+        {
+            "MonitorResult": type("MonitorResult", (), {"__init__": lambda self, **kwargs: self.__dict__.update(kwargs)}),
+            "logger": logging.getLogger("test_closed_day0_market_monitor_skip"),
+            "cities_by_name": {"Chicago": type("City", (), {"timezone": "America/Chicago"})()},
+            "_utcnow": staticmethod(lambda: datetime(2026, 4, 1, 18, 30, tzinfo=timezone.utc)),
+            "has_acknowledged_quarantine_clear": staticmethod(lambda token_id: False),
+        },
+    )
+    monkeypatch.setattr(
+        "src.engine.monitor_refresh.refresh_position",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("closed Day0 market must not reach monitor refresh")
+        ),
+    )
+
+    portfolio_dirty, tracker_dirty = cycle_runtime.execute_monitoring_phase(
+        None,
+        ClosedMarketClob(),
+        portfolio,
+        artifact,
+        Tracker(),
+        summary,
+        deps=deps,
+    )
+
+    assert portfolio_dirty is False
+    assert tracker_dirty is False
+    assert summary["monitor_skipped_closed_market_pending_settlement"] == 1
+    assert "monitor_chain_missing" not in summary
+    assert "monitor_incomplete_exit_context" not in summary
+    assert summary["monitors"] == 1
+    assert monitor_results[0].exit_reason == "MARKET_CLOSED_AWAITING_SETTLEMENT"
+    assert monitor_results[0].fresh_prob is None
+    assert monitor_results[0].fresh_edge is None
+
+
 def test_quarantine_expired_marks_distinct_admin_resolution_reason(monkeypatch):
     """Expired quarantine keeps the same protective path but with explicit expired provenance."""
     from src.engine import cycle_runtime

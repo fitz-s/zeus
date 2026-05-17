@@ -1610,6 +1610,43 @@ def _position_direction_value(pos) -> str:
     return _semantic_value(getattr(pos, "direction", ""))
 
 
+def _market_info_value(info, *keys):
+    if isinstance(info, dict):
+        for key in keys:
+            if key in info:
+                return info.get(key)
+    for key in keys:
+        if hasattr(info, key):
+            return getattr(info, key)
+    return None
+
+
+def _closed_non_accepting_market_info(clob, pos) -> dict | None:
+    condition_id = str(
+        getattr(pos, "condition_id", None)
+        or getattr(pos, "market_id", None)
+        or ""
+    ).strip()
+    get_market_info = getattr(clob, "get_clob_market_info", None)
+    if not condition_id or not callable(get_market_info):
+        return None
+    try:
+        info = get_market_info(condition_id)
+    except Exception:
+        return None
+    closed = _market_info_value(info, "closed")
+    accepting_orders = _market_info_value(info, "accepting_orders", "acceptingOrders")
+    enable_orderbook = _market_info_value(info, "enable_order_book", "enable_orderbook", "enableOrderBook")
+    if closed is True and accepting_orders is False:
+        return {
+            "condition_id": condition_id,
+            "closed": closed,
+            "accepting_orders": accepting_orders,
+            "enable_orderbook": enable_orderbook,
+        }
+    return None
+
+
 def _is_open_crowding_exposure(pos) -> bool:
     state_value = _position_state_value(pos)
     chain_state = _position_chain_state_value(pos)
@@ -1946,6 +1983,34 @@ def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: 
                         previous_phase=previous_phase_str,
                         deps=deps,
                     )
+
+            closed_market_info = None
+            if _position_state_value(pos) == "day0_window":
+                closed_market_info = _closed_non_accepting_market_info(clob, pos)
+            if closed_market_info is not None:
+                artifact.add_monitor_result(
+                    deps.MonitorResult(
+                        position_id=pos.trade_id,
+                        fresh_prob=None,
+                        fresh_edge=None,
+                        should_exit=False,
+                        exit_reason="MARKET_CLOSED_AWAITING_SETTLEMENT",
+                        neg_edge_count=pos.neg_edge_count,
+                    )
+                )
+                summary["monitor_skipped_closed_market_pending_settlement"] = (
+                    summary.get("monitor_skipped_closed_market_pending_settlement", 0) + 1
+                )
+                summary.setdefault("monitor_closed_market_pending_settlement_positions", []).append(pos.trade_id)
+                summary.setdefault("monitor_closed_market_pending_settlement_reasons", []).append(
+                    {
+                        "position_id": pos.trade_id,
+                        "reason": "market_closed_non_accepting_orders",
+                        **closed_market_info,
+                    }
+                )
+                summary["monitors"] += 1
+                continue
 
             edge_ctx = refresh_position(conn, clob, pos)
             exit_context = _build_exit_context(
