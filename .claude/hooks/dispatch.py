@@ -95,18 +95,37 @@ def _emit_signal(
 # ---------------------------------------------------------------------------
 
 
+# Events whose Claude Code response schema accepts `hookSpecificOutput`. Other
+# events (WorktreeCreate, WorktreeRemove, Stop, SessionStart, ...) must use
+# `systemMessage` instead — emitting `hookSpecificOutput.hookEventName` for
+# those events fails schema validation and HARD-blocks the parent tool
+# (e.g. EnterWorktree), forcing the agent to bypass into the unsafe
+# primary-worktree workflow (see 2026-05-17 incident).
+_HOOK_SPECIFIC_OUTPUT_EVENTS = frozenset({
+    "PreToolUse", "UserPromptSubmit", "PostToolUse", "PostToolBatch",
+})
+
+
 def _emit_advisory(hook_id: str, event: str, additional_context: str) -> int:
-    """Emit hookSpecificOutput.additionalContext (no permissionDecision)."""
-    print(
-        json.dumps(
-            {
-                "hookSpecificOutput": {
-                    "hookEventName": event,
-                    "additionalContext": additional_context,
-                }
+    """Emit additionalContext using the right wrapper for the event type.
+
+    For PreToolUse/UserPromptSubmit/PostToolUse/PostToolBatch, use
+    `hookSpecificOutput.additionalContext` (the documented surface).
+
+    For everything else (WorktreeCreate, WorktreeRemove, Stop, SessionStart,
+    ...), use the universal `systemMessage` field — Claude Code rejects
+    hookSpecificOutput with a non-allowlisted hookEventName.
+    """
+    if event in _HOOK_SPECIFIC_OUTPUT_EVENTS:
+        out = {
+            "hookSpecificOutput": {
+                "hookEventName": event,
+                "additionalContext": additional_context,
             }
-        )
-    )
+        }
+    else:
+        out = {"systemMessage": additional_context}
+    print(json.dumps(out))
     return 0
 
 
@@ -785,10 +804,14 @@ def _run_advisory_check_pr_open_monitor_arm(
     monitor_sentinel = f"MONITOR_ARM_REQUIRED:{pr_num}:{expiry_iso}"
     return (
         f"{monitor_sentinel}\n\n"
-        f"PR opened. Paid auto-reviewers (Copilot, Codex) fire within 5-8 min.\n"
-        f"Arm a Monitor that watches BOTH ci checks AND reviewer comments,\n"
-        f"and that filters out the agent's own replies (otherwise the watcher\n"
-        f"echoes every reply you post and produces false-positive notifications):\n\n"
+        f"⛔ STOP. ARM THE MONITOR BELOW BEFORE ANY OTHER TOOL CALL. ⛔\n"
+        f"Auto-review fires ONCE per PR-open (within 5-8 min). If you proceed\n"
+        f"to fetch comments / commit / push / merge without arming, you will:\n"
+        f"  (a) miss the one-shot review entirely, OR\n"
+        f"  (b) discover comments late, manually re-grep them, and re-derive\n"
+        f"      the workflow each time — same trap as 2026-05-17 PR #127.\n"
+        f"Do NOT call `gh pr view`, `gh api .../comments`, `git commit`, or any\n"
+        f"other tool until the Monitor tool call below has been issued.\n\n"
         f"  IMPORTANT: reviewer appearance is NOT completion. It means fetch the\n"
         f"  thread-aware review state, repair actionable comments by code/test commit,\n"
         f"  push, and resolve threads only after evidence supports the fix.\n\n"
@@ -1214,6 +1237,80 @@ def _run_advisory_check_maintenance_worker_dry_run_floor(
         return None
 
 
+def _run_advisory_check_pre_branch_create_in_primary(
+    payload: dict[str, Any],
+) -> str | None:
+    """PreToolUse (Bash): warn when `git checkout -b` / `git switch -c` /
+    `git worktree add` runs in the PRIMARY worktree (shared workspace).
+
+    Root cause this hook prevents (2026-05-17 incident): an agent that exits
+    its dedicated worktree and creates a new branch IN PRIMARY exposes its
+    session to concurrent processes (gh CLI, post-merge cleanup, other
+    agents) that operate on the shared primary. HEAD can be silently
+    switched mid-work.
+
+    Discipline: every agent must EnterWorktree (or `git worktree add` into
+    .claude/worktrees/) before any new-branch work. PRIMARY is read-only +
+    sync surface only.
+
+    Advisory only — never blocks. Bypass: ZEUS_PRIMARY_BRANCH_OK=1.
+    """
+    hook_id = "pre_branch_create_in_primary"
+    event = payload.get("hook_event_name", "PreToolUse")
+    try:
+        import re  # local import matches sibling-handler convention (see L155,172,188,...)
+        if payload.get("tool_name", "") != "Bash":
+            return None
+        cmd = _command_from_payload(payload)
+        if not re.search(
+            r"\bgit\s+(checkout\s+-b|switch\s+-c|worktree\s+add)\b", cmd
+        ):
+            return None
+        if os.environ.get("ZEUS_PRIMARY_BRANCH_OK"):
+            return (
+                "[pre_branch_create_in_primary] ADVISORY (bypass active):\n"
+                "  ZEUS_PRIMARY_BRANCH_OK set — proceeding with branch op in PRIMARY.\n"
+                "  Bypass should be documented operator-side."
+            )
+        # Determine if cwd is the primary worktree
+        try:
+            r1 = subprocess.run(
+                ["git", "rev-parse", "--show-toplevel"],
+                capture_output=True, text=True, timeout=3,
+            )
+            r2 = subprocess.run(
+                ["git", "worktree", "list", "--porcelain"],
+                capture_output=True, text=True, timeout=3,
+            )
+        except Exception:
+            return None  # fail-open if git not available
+        if r1.returncode != 0 or r2.returncode != 0:
+            return None
+        cwd_root = r1.stdout.strip()
+        # The primary worktree is the FIRST entry in `git worktree list`.
+        primary = ""
+        for line in r2.stdout.splitlines():
+            if line.startswith("worktree "):
+                primary = line[len("worktree "):].strip()
+                break
+        if not primary or cwd_root != primary:
+            return None  # already in a worktree (or detection failed)
+        return (
+            "[pre_branch_create_in_primary] ADVISORY: branch op in PRIMARY worktree.\n"
+            f"  cwd: {cwd_root}\n"
+            f"  cmd: {cmd[:120]}\n"
+            "  RISK: PRIMARY is shared with gh CLI / post-merge cleanup / other\n"
+            "        agents. HEAD can be silently switched mid-work (2026-05-17\n"
+            "        incident: 3 cross-agent HEAD-switches in 6 min on PR #127).\n"
+            "  REMEDY: use EnterWorktree first (or `git worktree add .claude/\n"
+            "        worktrees/<task-slug>`), then cd there before branch ops.\n"
+            "  Bypass: ZEUS_PRIMARY_BRANCH_OK=1 (documents intent; not a skip)."
+        )
+    except Exception as exc:
+        _emit_signal(hook_id, event, "error", f"dispatch_error:{exc}", payload)
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Advisory check dispatcher
 # ---------------------------------------------------------------------------
@@ -1247,6 +1344,7 @@ _ADVISORY_HANDLERS: dict[str, Any] = {
     "worktree_create_advisor": _run_advisory_check_worktree_create_advisor,
     "worktree_remove_advisor": _run_advisory_check_worktree_remove_advisor,
     "maintenance_worker_dry_run_floor": _run_advisory_check_maintenance_worker_dry_run_floor,
+    "pre_branch_create_in_primary": _run_advisory_check_pre_branch_create_in_primary,
 }
 
 # External-module handlers registered conditionally (None if import failed → boot

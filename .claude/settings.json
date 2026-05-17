@@ -36,6 +36,11 @@
             "type": "command",
             "command": "python3 .claude/hooks/dispatch.py maintenance_worker_dry_run_floor",
             "description": "[hook v2 ADVISORY] Warn when maintenance worker targets governance files without dry-run verification (ADVISORY only)"
+          },
+          {
+            "type": "command",
+            "command": "python3 .claude/hooks/dispatch.py citation_grep_gate",
+            "description": "[hook v2 ADVISORY] Citation grep-gate \u2014 drift in file:line citations within Edit/Write args"
           }
         ]
       },
@@ -86,6 +91,11 @@
             "type": "command",
             "command": "python3 .claude/hooks/dispatch.py maintenance_worker_dry_run_floor",
             "description": "[hook v2 ADVISORY] Warn when maintenance worker targets governance files without dry-run verification (ADVISORY only)"
+          },
+          {
+            "type": "command",
+            "command": "python3 .claude/hooks/dispatch.py pre_branch_create_in_primary",
+            "description": "[hook v2 ADVISORY] Detect git branch creation in PRIMARY worktree (2026-05-17 antibody)"
           }
         ]
       }

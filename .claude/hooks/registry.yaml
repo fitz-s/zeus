@@ -6,7 +6,7 @@
 schema_version: 1
 metadata:
   charter_version: 2.0.0
-  catalog_size: 17
+  catalog_size: 19
   sunset_default: 90d
 
 hooks:
@@ -249,3 +249,42 @@ hooks:
     sunset_date: 2026-11-16
     telemetry:
       ritual_signal_emitted: true
+
+  - id: pre_branch_create_in_primary
+    event: PreToolUse
+    matcher: "Bash"
+    intent: >
+      Detect `git checkout -b` / `git switch -c` / `git worktree add` issued
+      from the PRIMARY worktree (cwd == primary). Emit advisory recommending
+      EnterWorktree first. Antibody for the 2026-05-17 worktree-discipline
+      incident: agent exited dedicated worktree, created branch in PRIMARY,
+      got HEAD silently switched 3× by concurrent processes (gh CLI,
+      post-merge cleanup) during PR #127 open window.
+      ADVISORY: emits context; never blocks; fail-open on any exception.
+    blocked_when: []
+    severity: ADVISORY
+    bypass_env: ZEUS_PRIMARY_BRANCH_OK
+    sunset_date: 2026-08-17
+    telemetry:
+      ritual_signal_emitted: true
+    owner_module: .claude/hooks/dispatch.py
+
+  - id: citation_grep_gate
+    event: PreToolUse
+    matcher: "Edit|Write"
+    intent: >
+      Scan old_string/new_string/content args for file:line and file Lline citations.
+      For each citation, verify the referenced file exists and the stated line
+      number is within the file's current bounds (1 <= lineno <= total_lines).
+      On drift, emit additionalContext listing the stale citations so the agent
+      can grep-verify before proceeding. Future enhancement (not implemented):
+      content-match within a ±5 line tolerance window.
+      Antibody for: feedback_zeus_plan_citations_rot_fast.md and
+      feedback_grep_gate_before_contract_lock.md.
+      ADVISORY: emits context; never blocks; fail-open on any exception.
+    blocked_when: []
+    severity: ADVISORY
+    sunset_date: 2026-08-16
+    telemetry:
+      ritual_signal_emitted: true
+    owner_module: .claude/hooks/citation_grep_gate.py
