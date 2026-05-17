@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-# Lifecycle: created=2026-05-11; last_reviewed=2026-05-16; last_reused=2026-05-16
+# Lifecycle: created=2026-05-11; last_reviewed=2026-05-16; last_reused=2026-05-17
 # Purpose: One-shot live health signal for daemon, forecast-live owner, riskguard, status summary, and entry capability.
 # Reuse: Run when live process ownership, forecast-live heartbeat semantics, or operator health alerts change.
 # Created: 2026-05-11
-# Last reused/audited: 2026-05-16
-# Authority basis: docs/operations/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md; docs/operations/task_2026-05-16_live_continuous_run_package/LIVE_CONTINUOUS_RUN_PACKAGE_PLAN.md Phase C
+# Last reused/audited: 2026-05-17
+# Authority basis: docs/operations/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md; docs/operations/task_2026-05-16_live_continuous_run_package/LIVE_CONTINUOUS_RUN_PACKAGE_PLAN.md Phase C; 2026-05-17 volatile runtime-artifact code-plane contract.
 """One-shot live health probe.
 
 Reports a single JSON line per invocation summarizing:
@@ -30,6 +30,9 @@ SNAPSHOT_FILE = "/tmp/zeus_health_snapshot.json"
 FORECAST_LIVE_HEARTBEAT = "state/forecast-live-heartbeat.json"
 FORECAST_LIVE_STALE_SECONDS = 300
 DEFAULT_EXPECTED_REF = "origin/main"
+VOLATILE_CODE_PLANE_DIRTY_PATHS = frozenset({
+    "station_migration_alerts.json",
+})
 SETTLEMENT_TRUTH_STALE_SECONDS = int(os.environ.get("ZEUS_SETTLEMENT_TRUTH_STALE_SECONDS", str(48 * 3600)))
 PROCESS_CODE_STALE_TOLERANCE_SECONDS = 2
 PROCESS_CODE_SURFACES = {
@@ -41,6 +44,7 @@ PROCESS_CODE_SURFACES = {
         "src/execution/exchange_reconcile.py",
         "src/execution/executor.py",
         "src/execution/harvester_pnl_resolver.py",
+        "src/data/polymarket_client.py",
     ),
     "forecast_live": (
         "src/ingest/forecast_live_daemon.py",
@@ -265,6 +269,32 @@ def _git_text(root, args):
         return None, (result.stderr or text or f"git exited {result.returncode}").strip()
     return text, None
 
+def _porcelain_dirty_paths(status_text):
+    paths = []
+    for raw_line in str(status_text or "").splitlines():
+        line = raw_line.rstrip()
+        if not line:
+            continue
+        if line.startswith("?? "):
+            path_text = line[3:]
+        elif len(line) >= 3 and line[2] == " ":
+            path_text = line[3:]
+        elif len(line) >= 2 and line[1] == " ":
+            path_text = line[2:]
+        else:
+            parts = line.split(maxsplit=1)
+            path_text = parts[1] if len(parts) == 2 else line
+        if " -> " in path_text:
+            path_text = path_text.rsplit(" -> ", 1)[1]
+        paths.append(path_text)
+    return paths
+
+def _code_plane_dirty_state(status_text):
+    paths = _porcelain_dirty_paths(status_text)
+    material = [p for p in paths if p not in VOLATILE_CODE_PLANE_DIRTY_PATHS]
+    ignored = [p for p in paths if p in VOLATILE_CODE_PLANE_DIRTY_PATHS]
+    return bool(material), material, ignored
+
 def _git_runtime_identity(root=ROOT):
     head, head_error = _git_text(root, ["rev-parse", "HEAD"])
     if head_error:
@@ -279,7 +309,11 @@ def _git_runtime_identity(root=ROOT):
         }
     branch, _ = _git_text(root, ["rev-parse", "--abbrev-ref", "HEAD"])
     status_text, status_error = _git_text(root, ["status", "--porcelain"])
-    dirty = None if status_error else bool(status_text)
+    dirty = None
+    dirty_paths = []
+    ignored_dirty_paths = []
+    if not status_error:
+        dirty, dirty_paths, ignored_dirty_paths = _code_plane_dirty_state(status_text)
     expected_ref = os.environ.get("ZEUS_LIVE_EXPECTED_REF", DEFAULT_EXPECTED_REF).strip()
     expected_commit = os.environ.get("ZEUS_LIVE_EXPECTED_COMMIT", "").strip()
     expected_error = None
@@ -291,6 +325,8 @@ def _git_runtime_identity(root=ROOT):
         "head": head,
         "branch": branch,
         "dirty": dirty,
+        "dirty_paths": dirty_paths,
+        "ignored_dirty_paths": ignored_dirty_paths,
         "expected_ref": expected_ref,
         "expected_commit": expected_commit,
         "expected_error": expected_error,

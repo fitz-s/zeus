@@ -1,11 +1,12 @@
-# Lifecycle: created=2026-04-27; last_reviewed=2026-05-15; last_reused=2026-05-15
+# Lifecycle: created=2026-04-27; last_reviewed=2026-05-15; last_reused=2026-05-17
 # Purpose: R3 Z2 Polymarket V2 adapter and submission envelope antibodies.
 # Reuse: Run when V2 SDK adapter, envelope provenance, or Q1 preflight behavior changes.
 # Created: 2026-04-27
-# Last reused/audited: 2026-05-15
+# Last reused/audited: 2026-05-17
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/Z2.yaml
 #                  + docs/operations/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md
 #                  + docs/operations/task_2026-05-15_live_order_e2e_goal/LIVE_ORDER_E2E_GOAL_PLAN.md
+#                  + 2026-05-17 public CLOB HTTP reuse for live opening_hunt backpressure.
 """R3 Z2 Polymarket V2 adapter antibodies."""
 
 from __future__ import annotations
@@ -1102,11 +1103,22 @@ def test_polymarket_client_fee_rate_accepts_current_base_fee_shape(monkeypatch):
         def json(self):
             return {"base_fee": 30}
 
-    monkeypatch.setattr(pm.httpx, "get", lambda *args, **kwargs: Response())
-
     client = pm.PolymarketClient()
+    calls = []
+
+    class PublicClient:
+        def get(self, url, *, params=None):
+            calls.append((url, params))
+            return Response()
+
+    client._public_http_client = PublicClient()
+
     assert client.get_fee_rate("token-1") == pytest.approx(0.003)
     assert client.get_fee_rate_details("token-1")["fee_rate_bps"] == pytest.approx(30.0)
+    assert calls == [
+        (f"{pm.CLOB_BASE}/fee-rate", {"token_id": "token-1"}),
+        (f"{pm.CLOB_BASE}/fee-rate", {"token_id": "token-1"}),
+    ]
 
 
 def test_polymarket_client_fee_rate_rejects_malformed_shape(monkeypatch):
@@ -1119,10 +1131,61 @@ def test_polymarket_client_fee_rate_rejects_malformed_shape(monkeypatch):
         def json(self):
             return {"feeSchedule": {"feesEnabled": True}}
 
-    monkeypatch.setattr(pm.httpx, "get", lambda *args, **kwargs: Response())
+    client = pm.PolymarketClient()
+
+    class PublicClient:
+        def get(self, url, *, params=None):
+            return Response()
+
+    client._public_http_client = PublicClient()
 
     with pytest.raises(RuntimeError, match="base_fee"):
-        pm.PolymarketClient().get_fee_rate("token-1")
+        client.get_fee_rate("token-1")
+
+
+def test_polymarket_client_reuses_public_http_client_for_clob_reads(monkeypatch):
+    from src.data import polymarket_client as pm
+
+    class Response:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self._payload
+
+    class PublicClient:
+        def __init__(self, *args, **kwargs):
+            self.calls = []
+
+        def get(self, url, *, params=None):
+            self.calls.append((url, params))
+            if url.endswith("/book"):
+                return Response({"bids": [], "asks": []})
+            if url.endswith("/fee-rate"):
+                return Response({"base_fee": 30})
+            raise AssertionError(f"unexpected URL: {url}")
+
+    clients = []
+
+    def client_factory(*args, **kwargs):
+        client = PublicClient(*args, **kwargs)
+        clients.append(client)
+        return client
+
+    monkeypatch.setattr(pm.httpx, "Client", client_factory)
+
+    client = pm.PolymarketClient()
+    assert client.get_orderbook_snapshot("token-1") == {"bids": [], "asks": []}
+    assert client.get_fee_rate_details("token-1")["fee_rate_bps"] == pytest.approx(30.0)
+
+    assert len(clients) == 1
+    assert clients[0].calls == [
+        (f"{pm.CLOB_BASE}/book", {"token_id": "token-1"}),
+        (f"{pm.CLOB_BASE}/fee-rate", {"token_id": "token-1"}),
+    ]
 
 
 def test_polymarket_client_cancel_blocks_before_adapter_when_cutover_disallows(monkeypatch):

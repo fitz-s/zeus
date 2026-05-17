@@ -1,9 +1,9 @@
-# Lifecycle: created=2026-05-15; last_reviewed=2026-05-16; last_reused=2026-05-16
+# Lifecycle: created=2026-05-15; last_reviewed=2026-05-16; last_reused=2026-05-17
 # Purpose: Lock forecast-live as the canonical forecast owner for live health alerts.
 # Reuse: Run when live_health_probe process/heartbeat classification or forecast-live launch ownership changes.
 # Created: 2026-05-15
-# Last reused or audited: 2026-05-16
-# Authority basis: docs/operations/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md; docs/operations/task_2026-05-16_live_continuous_run_package/LIVE_CONTINUOUS_RUN_PACKAGE_PLAN.md Phase C
+# Last reused or audited: 2026-05-17
+# Authority basis: docs/operations/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md; docs/operations/task_2026-05-16_live_continuous_run_package/LIVE_CONTINUOUS_RUN_PACKAGE_PLAN.md Phase C; 2026-05-17 volatile runtime-artifact code-plane contract.
 
 from __future__ import annotations
 
@@ -32,6 +32,7 @@ def test_live_probe_loaded_code_surface_includes_recovery_and_m5_paths():
     assert "src/control/ws_gap_guard.py" in daemon_paths
     assert "src/execution/command_recovery.py" in daemon_paths
     assert "src/execution/exchange_reconcile.py" in daemon_paths
+    assert "src/data/polymarket_client.py" in daemon_paths
 
 
 def _write_json(path: Path, payload: dict) -> None:
@@ -457,3 +458,55 @@ def test_git_runtime_identity_uses_expected_commit_env(tmp_path, monkeypatch):
     assert identity["matches_expected"] is True
     assert identity["dirty"] is False
     assert ["git", "-C", str(root), "rev-parse", "origin/main"] not in calls
+
+
+def test_git_runtime_identity_ignores_station_migration_timestamp_artifact(tmp_path, monkeypatch):
+    module = _load_module()
+    root = tmp_path / "zeus"
+
+    def fake_run(args, **kwargs):
+        git_args = args[3:]
+        if git_args == ["rev-parse", "HEAD"]:
+            stdout = "abc123\n"
+        elif git_args == ["rev-parse", "--abbrev-ref", "HEAD"]:
+            stdout = "main\n"
+        elif git_args == ["status", "--porcelain"]:
+            stdout = " M station_migration_alerts.json\n"
+        else:
+            raise AssertionError(f"unexpected git args: {git_args!r}")
+        return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+    monkeypatch.setenv("ZEUS_LIVE_EXPECTED_COMMIT", "abc123")
+
+    identity = module._git_runtime_identity(str(root))
+
+    assert identity["dirty"] is False
+    assert identity["dirty_paths"] == []
+    assert identity["ignored_dirty_paths"] == ["station_migration_alerts.json"]
+
+
+def test_git_runtime_identity_still_flags_material_dirty_path(tmp_path, monkeypatch):
+    module = _load_module()
+    root = tmp_path / "zeus"
+
+    def fake_run(args, **kwargs):
+        git_args = args[3:]
+        if git_args == ["rev-parse", "HEAD"]:
+            stdout = "abc123\n"
+        elif git_args == ["rev-parse", "--abbrev-ref", "HEAD"]:
+            stdout = "main\n"
+        elif git_args == ["status", "--porcelain"]:
+            stdout = " M station_migration_alerts.json\n M src/main.py\n"
+        else:
+            raise AssertionError(f"unexpected git args: {git_args!r}")
+        return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+    monkeypatch.setenv("ZEUS_LIVE_EXPECTED_COMMIT", "abc123")
+
+    identity = module._git_runtime_identity(str(root))
+
+    assert identity["dirty"] is True
+    assert identity["dirty_paths"] == ["src/main.py"]
+    assert identity["ignored_dirty_paths"] == ["station_migration_alerts.json"]
