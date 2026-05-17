@@ -511,6 +511,7 @@ def reconcile_recorded_maker_fill_economics(
                 filled_size=corrected_size,
                 fill_price=corrected_price,
                 observed_at=observed,
+                order_fact_source=str(fact.get("source") or "REST"),
             )
             summary["projected"] += 1
         except Exception:
@@ -606,6 +607,72 @@ def _append_maker_fill_economic_correction(
         tx_hash=fact.get("tx_hash"),
         block_number=fact.get("block_number"),
         confirmation_count=fact.get("confirmation_count"),
+    )
+
+
+def _ensure_entry_fill_order_fact(
+    conn: sqlite3.Connection,
+    *,
+    command: Mapping[str, Any],
+    venue_order_id: str,
+    filled_size: str,
+    observed_at: datetime,
+    source: str,
+) -> None:
+    if not _table_exists(conn, "venue_order_facts"):
+        return
+    filled_dec = _positive_decimal_or_none(filled_size)
+    if filled_dec is None:
+        return
+    command_size = _positive_decimal_or_none(command.get("size"))
+    if command_size is None:
+        remaining = Decimal("0")
+    else:
+        remaining = max(Decimal("0"), command_size - filled_dec)
+    state = "MATCHED" if command_size is not None and filled_dec >= command_size else "PARTIALLY_MATCHED"
+    remaining_text = _decimal_text(remaining)
+    matched_text = _decimal_text(filled_dec)
+    latest = conn.execute(
+        """
+        SELECT state, remaining_size, matched_size
+          FROM venue_order_facts
+         WHERE command_id = ?
+         ORDER BY local_sequence DESC, fact_id DESC
+         LIMIT 1
+        """,
+        (str(command.get("command_id") or ""),),
+    ).fetchone()
+    if latest is not None and (
+        str(latest["state"] or "") == state
+        and _same_decimal_value(latest["remaining_size"], remaining_text)
+        and _same_decimal_value(latest["matched_size"], matched_text)
+    ):
+        return
+
+    from src.state.venue_command_repo import append_order_fact
+
+    payload = {
+        "schema_version": 1,
+        "reason": "m5_exchange_reconcile_entry_fill_order_fact",
+        "source_module": "src.execution.exchange_reconcile",
+        "command_id": str(command.get("command_id") or ""),
+        "venue_order_id": venue_order_id,
+        "state": state,
+        "remaining_size": remaining_text,
+        "matched_size": matched_text,
+    }
+    append_order_fact(
+        conn,
+        venue_order_id=venue_order_id,
+        command_id=str(command.get("command_id") or ""),
+        state=state,
+        remaining_size=remaining_text,
+        matched_size=matched_text,
+        source=source,
+        observed_at=observed_at,
+        venue_timestamp=observed_at,
+        raw_payload_hash=_hash_payload(payload),
+        raw_payload_json=payload,
     )
 
 
@@ -832,6 +899,7 @@ def _append_linkable_trade_fact_if_missing(
                 filled_size=filled_size,
                 fill_price=fill_price,
                 observed_at=observed_at,
+                order_fact_source=str(latest_fact.get("source") or "REST"),
             )
             return None
         if state in {"MATCHED", "MINED", "CONFIRMED"} and not same_fill_economics:
@@ -928,6 +996,7 @@ def _append_linkable_trade_fact_if_missing(
         fill_price=fill_price,
         observed_at=observed_at,
         command_event=event,
+        order_fact_source="REST",
     )
     return None
 
@@ -941,6 +1010,7 @@ def _ensure_entry_fill_position_event(
     fill_price: str,
     observed_at: datetime,
     command_event: str | None = None,
+    order_fact_source: str = "REST",
 ) -> None:
     if str(command.get("intent_kind") or "").upper() != "ENTRY":
         return
@@ -980,6 +1050,14 @@ def _ensure_entry_fill_position_event(
     order_status = "filled" if _entry_fill_covers_command(command, shares_dec) else "partial"
     if command_event == "PARTIAL_FILL_OBSERVED":
         order_status = "partial"
+    _ensure_entry_fill_order_fact(
+        conn,
+        command=command,
+        venue_order_id=venue_order_id,
+        filled_size=shares,
+        observed_at=observed_at,
+        source=order_fact_source,
+    )
     occurred_at = observed_at.isoformat()
     position = SimpleNamespace(
         **{

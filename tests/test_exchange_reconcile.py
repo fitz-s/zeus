@@ -828,6 +828,21 @@ def test_recorded_maker_fill_economic_drift_appends_correction_and_reprojects(co
     assert projection["phase"] == "active"
     assert projection["order_status"] == "partial"
     assert Decimal(str(projection["shares"])) == Decimal("100")
+    order_fact = conn.execute(
+        """
+        SELECT state, remaining_size, matched_size, source
+          FROM venue_order_facts
+         WHERE command_id = 'cmd-m5'
+         ORDER BY local_sequence DESC
+         LIMIT 1
+        """
+    ).fetchone()
+    assert dict(order_fact) == {
+        "state": "PARTIALLY_MATCHED",
+        "remaining_size": "81.16",
+        "matched_size": "100",
+        "source": "WS_USER",
+    }
     assert Decimal(str(projection["entry_price"])) == Decimal("0.01")
     assert Decimal(str(projection["cost_basis_usd"])) == Decimal("1.00")
 
