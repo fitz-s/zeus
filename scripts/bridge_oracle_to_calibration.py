@@ -60,6 +60,9 @@ ROOT = Path(__file__).resolve().parent.parent
 # Re-resolved on each call so ZEUS_STORAGE_ROOT env override propagates
 # into the bridge without reimport. Kept as module-level callables for
 # readability inside the existing single-file procedural style.
+from src.state.db import (  # noqa: E402  (path-bootstrap above must run first)
+    get_forecasts_connection_with_world,
+)
 from src.state.paths import (  # noqa: E402  (path-bootstrap above must run first)
     oracle_artifact_heartbeat_path,
     oracle_error_rates_path,
@@ -68,7 +71,8 @@ from src.state.paths import (  # noqa: E402  (path-bootstrap above must run firs
     write_json_atomic,
 )
 
-DB_PATH = ROOT / "state" / "zeus-world.db"
+# DB_PATH removed: settlements is forecast_class post-K1-split; use
+# get_forecasts_connection_with_world() — K1 fix F40 2026-05-17
 
 
 def _load_settlements(conn: sqlite3.Connection) -> dict[tuple[str, str], dict]:
@@ -158,252 +162,250 @@ def bridge(dry_run: bool = False) -> dict:
 
     Returns summary stats.
     """
-    conn = sqlite3.connect(str(DB_PATH))
-    settlements = _load_settlements(conn)
+    with get_forecasts_connection_with_world() as conn:
+        settlements = _load_settlements(conn)
 
-    snapshots = _load_snapshots()
-    if not snapshots:
-        logger.info("No shadow snapshots found in %s", oracle_snapshot_dir())
-        conn.close()
-        return {"cities": 0, "comparisons": 0}
+        snapshots = _load_snapshots()
+        if not snapshots:
+            logger.info("No shadow snapshots found in %s", oracle_snapshot_dir())
+            return {"cities": 0, "comparisons": 0}
 
-    # Coverage check helper
-    def _get_day_coverage(city: str, target_date: str) -> tuple[int, int]:
-        """Return (primary_hours, max_fallback_hours)."""
-        primary_source = expected_source_for_city(city)
-        allowed_sources = allowed_sources_for_city(city)
-        fallback_sources = [s for s in allowed_sources if s != primary_source]
+        # Coverage check helper (closure over conn — must be inside with block)
+        def _get_day_coverage(city: str, target_date: str) -> tuple[int, int]:
+            """Return (primary_hours, max_fallback_hours)."""
+            primary_source = expected_source_for_city(city)
+            allowed_sources = allowed_sources_for_city(city)
+            fallback_sources = [s for s in allowed_sources if s != primary_source]
 
-        # Count distinct hours for primary source
-        p_count = conn.execute("""
-            SELECT COUNT(DISTINCT utc_timestamp)
-            FROM observation_instants_v2
-            WHERE city = ? AND target_date = ? AND source = ?
-              AND authority = 'VERIFIED'
-        """, (city, target_date, primary_source)).fetchone()[0]
+            # Count distinct hours for primary source
+            p_count = conn.execute("""
+                SELECT COUNT(DISTINCT utc_timestamp)
+                FROM observation_instants_v2
+                WHERE city = ? AND target_date = ? AND source = ?
+                  AND authority = 'VERIFIED'
+            """, (city, target_date, primary_source)).fetchone()[0]
 
-        # Count distinct hours for fallbacks (if primary is too thin)
-        f_max = 0
-        if p_count < _MIN_HOURS_PER_DAY and fallback_sources:
-            placeholders = ",".join(["?"] * len(fallback_sources))
-            f_max = conn.execute(f"""
-                SELECT MAX(h) FROM (
-                    SELECT COUNT(DISTINCT utc_timestamp) as h
-                    FROM observation_instants_v2
-                    WHERE city = ? AND target_date = ? AND source IN ({placeholders})
-                      AND authority = 'VERIFIED'
-                    GROUP BY source
+            # Count distinct hours for fallbacks (if primary is too thin)
+            f_max = 0
+            if p_count < _MIN_HOURS_PER_DAY and fallback_sources:
+                placeholders = ",".join(["?"] * len(fallback_sources))
+                f_max = conn.execute(f"""
+                    SELECT MAX(h) FROM (
+                        SELECT COUNT(DISTINCT utc_timestamp) as h
+                        FROM observation_instants_v2
+                        WHERE city = ? AND target_date = ? AND source IN ({placeholders})
+                          AND authority = 'VERIFIED'
+                        GROUP BY source
+                    )
+                """, (city, target_date, *fallback_sources)).fetchone()[0] or 0
+
+            return p_count, f_max
+
+        # Existing oracle error rates (to preserve historical data)
+        oracle_file = oracle_error_rates_path()
+        existing: dict[str, dict] = {}
+        if oracle_file.exists():
+            with open(oracle_file) as f:
+                existing = json.load(f)
+
+        city_stats: dict[str, dict] = {}
+
+        for city_name, date_snaps in sorted(snapshots.items()):
+            matches = 0
+            mismatches = 0
+            skipped_low_coverage = 0
+            mismatch_dates = []
+            dates_compared = []
+
+            for target_date, snap in sorted(date_snaps.items()):
+                key = (city_name, target_date)
+                if key not in settlements:
+                    continue
+
+                # S2 R4 P10C: Coverage filter. Ignore thin days to keep oracle stats clean.
+                p_hours, f_hours = _get_day_coverage(city_name, target_date)
+                if p_hours < _MIN_HOURS_PER_DAY and f_hours < _MIN_HOURS_PER_DAY:
+                    skipped_low_coverage += 1
+                    logger.info(
+                        "SKIP_LOW_COVERAGE %s %s: primary_h=%d, fallback_max_h=%d (threshold=%d)",
+                        city_name, target_date, p_hours, f_hours, _MIN_HOURS_PER_DAY,
+                    )
+                    continue
+
+                settle = settlements[key]
+                snap_high = _snapshot_daily_high(snap)
+                if snap_high is None:
+                    continue
+
+                # Convert WU °F snapshot to °C if settlement is °C
+                snap_val = snap_high
+                if settle["unit"] == "C" and snap.get("source") == "wu_icao_history":
+                    # WU returns °F, need to convert to integer °C
+                    # DANGER: oracle_truncate — PM's UMA voters use floor()
+                    # for decimal °C (truncation bias). 仅限 oracle 对比使用！
+                    import math
+                    snap_val = (snap_high - 32) * 5 / 9
+                    snap_val = math.floor(snap_val)  # oracle_truncate semantics
+
+                in_bin = _in_bin(
+                    snap_val,
+                    settle["bin_lo"],
+                    settle["bin_hi"],
                 )
-            """, (city, target_date, *fallback_sources)).fetchone()[0] or 0
 
-        return p_count, f_max
+                dates_compared.append(target_date)
+                if in_bin:
+                    matches += 1
+                else:
+                    mismatches += 1
+                    mismatch_dates.append(target_date)
+                    logger.info(
+                        "MISMATCH %s %s: snapshot=%s → %s, PM bin=[%s,%s]",
+                        city_name, target_date, snap_high, snap_val,
+                        settle["bin_lo"], settle["bin_hi"],
+                    )
 
-    # Existing oracle error rates (to preserve historical data)
-    oracle_file = oracle_error_rates_path()
-    existing: dict[str, dict] = {}
-    if oracle_file.exists():
-        with open(oracle_file) as f:
-            existing = json.load(f)
-
-    city_stats: dict[str, dict] = {}
-
-    for city_name, date_snaps in sorted(snapshots.items()):
-        matches = 0
-        mismatches = 0
-        skipped_low_coverage = 0
-        mismatch_dates = []
-        dates_compared = []
-
-        for target_date, snap in sorted(date_snaps.items()):
-            key = (city_name, target_date)
-            if key not in settlements:
-                continue
-
-            # S2 R4 P10C: Coverage filter. Ignore thin days to keep oracle stats clean.
-            p_hours, f_hours = _get_day_coverage(city_name, target_date)
-            if p_hours < _MIN_HOURS_PER_DAY and f_hours < _MIN_HOURS_PER_DAY:
-                skipped_low_coverage += 1
+            total = matches + mismatches
+            if total > 0:
+                error_rate = mismatches / total
+                city_stats[city_name] = {
+                    "snapshot_comparisons": total,
+                    "snapshot_match": matches,
+                    "snapshot_mismatch": mismatches,
+                    "skipped_low_coverage": skipped_low_coverage,
+                    "snapshot_error_rate": round(error_rate, 4),
+                    "snapshot_mismatch_dates": mismatch_dates,
+                    "snapshot_dates": dates_compared,
+                }
                 logger.info(
-                    "SKIP_LOW_COVERAGE %s %s: primary_h=%d, fallback_max_h=%d (threshold=%d)",
-                    city_name, target_date, p_hours, f_hours, _MIN_HOURS_PER_DAY,
+                    "%s: %d/%d match, %d skipped (error=%.1f%%)",
+                    city_name, matches, total, skipped_low_coverage, error_rate * 100,
                 )
-                continue
 
-            settle = settlements[key]
-            snap_high = _snapshot_daily_high(snap)
-            if snap_high is None:
-                continue
+        # Merge snapshot results into existing oracle error rates.
+        # S2 R4 P10B: write nested {city: {high: {...}, low: {...}}} shape.
+        # This bridge only measures HIGH track (daily_high snapshots), so only
+        # the "high" subkey is updated here. LOW starts empty and is populated
+        # when LOW oracle snapshot infrastructure is added (future phase).
+        from src.strategy.oracle_penalty import summarize_oracle_posterior
 
-            # Convert WU °F snapshot to °C if settlement is °C
-            snap_val = snap_high
-            if settle["unit"] == "C" and snap.get("source") == "wu_icao_history":
-                # WU returns °F, need to convert to integer °C
-                # DANGER: oracle_truncate — PM's UMA voters use floor()
-                # for decimal °C (truncation bias). 仅限 oracle 对比使用！
-                import math
-                snap_val = (snap_high - 32) * 5 / 9
-                snap_val = math.floor(snap_val)  # oracle_truncate semantics
+        for city_name, snap_stats in city_stats.items():
+            if city_name not in existing:
+                existing[city_name] = {}
 
-            in_bin = _in_bin(
-                snap_val,
-                settle["bin_lo"],
-                settle["bin_hi"],
+            # Migrate legacy flat structure to nested on first write
+            city_entry = existing[city_name]
+            if "oracle_error_rate" in city_entry and "high" not in city_entry:
+                # Legacy flat: promote to nested "high" subkey
+                legacy_rate = city_entry.pop("oracle_error_rate", 0.0)
+                legacy_status = city_entry.pop("status", "OK")
+                legacy_snap_data = city_entry.pop("snapshot_data", {})
+                city_entry["high"] = {
+                    "oracle_error_rate": legacy_rate,
+                    "status": legacy_status,
+                    "snapshot_data": legacy_snap_data,
+                }
+
+            # Ensure "high" subkey exists
+            if "high" not in city_entry:
+                city_entry["high"] = {}
+
+            city_entry["high"]["snapshot_data"] = snap_stats
+
+            # PLAN.md §A3: write raw counts at the top level so the reader
+            # can compute the Beta-binomial posterior. Pre-A3 the bridge
+            # wrote only `oracle_error_rate` (point estimate), losing the
+            # n/m split needed for evidence-graded classification. The
+            # downstream reader (oracle_penalty) now treats absence of n/m
+            # as MISSING (mult 0.5) — files that bridge wrote pre-A3 will
+            # carry only oracle_error_rate and degrade until the next bridge
+            # run.
+            n = int(snap_stats["snapshot_comparisons"])
+            m = int(snap_stats["snapshot_mismatch"])
+            city_entry["high"]["n"] = n
+            city_entry["high"]["mismatches"] = m
+            city_entry["high"]["last_observed_date"] = (
+                max(snap_stats["snapshot_dates"]) if snap_stats.get("snapshot_dates") else None
             )
 
-            dates_compared.append(target_date)
-            if in_bin:
-                matches += 1
+            # Keep oracle_error_rate as a derived convenience field — readers
+            # compute their own posterior, but operators still grep for the
+            # raw rate when triaging. ``error_rate = m/n`` is the maximum-
+            # likelihood estimate; the posterior_mean lives in the reader.
+            snap_rate = snap_stats["snapshot_error_rate"]
+            city_entry["high"]["oracle_error_rate"] = round(snap_rate, 4)
+            posterior = summarize_oracle_posterior(
+                n=n,
+                mismatches=m,
+                metric="high",
+                source_role="oracle_shadow_snapshot",
+                last_date=city_entry["high"]["last_observed_date"] or "",
+                city=city_name,
+            )
+            city_entry["high"].update({
+                "metric": "high",
+                "source_role": posterior.source_role,
+                "posterior_mean": round(posterior.posterior_mean, 6),
+                "posterior_upper_95": round(posterior.posterior_upper_95, 6),
+                "posterior_prob_gt_03": round(posterior.posterior_prob_gt_03, 6),
+                "posterior_prob_gt_10": round(posterior.posterior_prob_gt_10, 6),
+                "penalty_multiplier": round(posterior.penalty_multiplier, 6),
+            })
+
+            # Status field is now informational. The reader recomputes
+            # status via oracle_estimator.classify(m, n, age) on each
+            # `get_oracle_info` call — operators changing thresholds in code
+            # should NOT need a bridge re-run. We still emit a status hint
+            # for human readability of the JSON dump.
+            if n < 10:
+                city_entry["high"]["status_hint"] = "INSUFFICIENT_SAMPLE"
+            elif m == 0:
+                city_entry["high"]["status_hint"] = "OK_pending_p95"
+            elif snap_rate > 0.10:
+                city_entry["high"]["status_hint"] = "BLACKLIST"
+            elif snap_rate > 0.03:
+                city_entry["high"]["status_hint"] = "CAUTION"
             else:
-                mismatches += 1
-                mismatch_dates.append(target_date)
-                logger.info(
-                    "MISMATCH %s %s: snapshot=%s → %s, PM bin=[%s,%s]",
-                    city_name, target_date, snap_high, snap_val,
-                    settle["bin_lo"], settle["bin_hi"],
-                )
+                city_entry["high"]["status_hint"] = "INCIDENTAL"
+            # Drop the old top-level "status" field; the reader's classify()
+            # is the authority. Keep a one-cycle compat shim so anything
+            # ad-hoc reading the JSON doesn't crash on missing key.
+            city_entry["high"]["status"] = city_entry["high"]["status_hint"]
 
-        total = matches + mismatches
-        if total > 0:
-            error_rate = mismatches / total
-            city_stats[city_name] = {
-                "snapshot_comparisons": total,
-                "snapshot_match": matches,
-                "snapshot_mismatch": mismatches,
-                "skipped_low_coverage": skipped_low_coverage,
-                "snapshot_error_rate": round(error_rate, 4),
-                "snapshot_mismatch_dates": mismatch_dates,
-                "snapshot_dates": dates_compared,
-            }
-            logger.info(
-                "%s: %d/%d match, %d skipped (error=%.1f%%)",
-                city_name, matches, total, skipped_low_coverage, error_rate * 100,
+        if not dry_run:
+            # Atomic write + heartbeat (PLAN.md §A2 + D-10). The previous
+            # plain open()+json.dump could leave a partial file on crash;
+            # the reader (oracle_penalty.reload) catches that as a JSON error
+            # and silently keeps the previous cache, masking the bridge crash.
+            # Atomic + heartbeat surfaces the failure mode for §A3 readers.
+            meta = write_json_atomic(oracle_file, existing, writer_identity="bridge_oracle_to_calibration")
+            write_heartbeat(
+                "oracle_error_rates",
+                {
+                    **meta,
+                    "snapshot_cities": len(city_stats),
+                    "comparisons": sum(s["snapshot_comparisons"] for s in city_stats.values()),
+                    "mismatches": sum(s["snapshot_mismatch"] for s in city_stats.values()),
+                },
+                heartbeat_path=oracle_artifact_heartbeat_path(),
             )
+            logger.info("Updated %s with %d snapshot cities (sha256=%s)",
+                        oracle_file, len(city_stats), meta["sha256"][:12])
 
-    # Merge snapshot results into existing oracle error rates.
-    # S2 R4 P10B: write nested {city: {high: {...}, low: {...}}} shape.
-    # This bridge only measures HIGH track (daily_high snapshots), so only
-    # the "high" subkey is updated here. LOW starts empty and is populated
-    # when LOW oracle snapshot infrastructure is added (future phase).
-    from src.strategy.oracle_penalty import summarize_oracle_posterior
-
-    for city_name, snap_stats in city_stats.items():
-        if city_name not in existing:
-            existing[city_name] = {}
-
-        # Migrate legacy flat structure to nested on first write
-        city_entry = existing[city_name]
-        if "oracle_error_rate" in city_entry and "high" not in city_entry:
-            # Legacy flat: promote to nested "high" subkey
-            legacy_rate = city_entry.pop("oracle_error_rate", 0.0)
-            legacy_status = city_entry.pop("status", "OK")
-            legacy_snap_data = city_entry.pop("snapshot_data", {})
-            city_entry["high"] = {
-                "oracle_error_rate": legacy_rate,
-                "status": legacy_status,
-                "snapshot_data": legacy_snap_data,
-            }
-
-        # Ensure "high" subkey exists
-        if "high" not in city_entry:
-            city_entry["high"] = {}
-
-        city_entry["high"]["snapshot_data"] = snap_stats
-
-        # PLAN.md §A3: write raw counts at the top level so the reader
-        # can compute the Beta-binomial posterior. Pre-A3 the bridge
-        # wrote only `oracle_error_rate` (point estimate), losing the
-        # n/m split needed for evidence-graded classification. The
-        # downstream reader (oracle_penalty) now treats absence of n/m
-        # as MISSING (mult 0.5) — files that bridge wrote pre-A3 will
-        # carry only oracle_error_rate and degrade until the next bridge
-        # run.
-        n = int(snap_stats["snapshot_comparisons"])
-        m = int(snap_stats["snapshot_mismatch"])
-        city_entry["high"]["n"] = n
-        city_entry["high"]["mismatches"] = m
-        city_entry["high"]["last_observed_date"] = (
-            max(snap_stats["snapshot_dates"]) if snap_stats.get("snapshot_dates") else None
-        )
-
-        # Keep oracle_error_rate as a derived convenience field — readers
-        # compute their own posterior, but operators still grep for the
-        # raw rate when triaging. ``error_rate = m/n`` is the maximum-
-        # likelihood estimate; the posterior_mean lives in the reader.
-        snap_rate = snap_stats["snapshot_error_rate"]
-        city_entry["high"]["oracle_error_rate"] = round(snap_rate, 4)
-        posterior = summarize_oracle_posterior(
-            n=n,
-            mismatches=m,
-            metric="high",
-            source_role="oracle_shadow_snapshot",
-            last_date=city_entry["high"]["last_observed_date"] or "",
-            city=city_name,
-        )
-        city_entry["high"].update({
-            "metric": "high",
-            "source_role": posterior.source_role,
-            "posterior_mean": round(posterior.posterior_mean, 6),
-            "posterior_upper_95": round(posterior.posterior_upper_95, 6),
-            "posterior_prob_gt_03": round(posterior.posterior_prob_gt_03, 6),
-            "posterior_prob_gt_10": round(posterior.posterior_prob_gt_10, 6),
-            "penalty_multiplier": round(posterior.penalty_multiplier, 6),
-        })
-
-        # Status field is now informational. The reader recomputes
-        # status via oracle_estimator.classify(m, n, age) on each
-        # `get_oracle_info` call — operators changing thresholds in code
-        # should NOT need a bridge re-run. We still emit a status hint
-        # for human readability of the JSON dump.
-        if n < 10:
-            city_entry["high"]["status_hint"] = "INSUFFICIENT_SAMPLE"
-        elif m == 0:
-            city_entry["high"]["status_hint"] = "OK_pending_p95"
-        elif snap_rate > 0.10:
-            city_entry["high"]["status_hint"] = "BLACKLIST"
-        elif snap_rate > 0.03:
-            city_entry["high"]["status_hint"] = "CAUTION"
+            # Signal the oracle penalty module to reload
+            try:
+                from src.strategy.oracle_penalty import reload
+                reload()
+            except ImportError:
+                pass  # OK if not running inside Zeus process
         else:
-            city_entry["high"]["status_hint"] = "INCIDENTAL"
-        # Drop the old top-level "status" field; the reader's classify()
-        # is the authority. Keep a one-cycle compat shim so anything
-        # ad-hoc reading the JSON doesn't crash on missing key.
-        city_entry["high"]["status"] = city_entry["high"]["status_hint"]
+            logger.info("[DRY RUN] Would update %s with %d cities", oracle_file, len(city_stats))
 
-    if not dry_run:
-        # Atomic write + heartbeat (PLAN.md §A2 + D-10). The previous
-        # plain open()+json.dump could leave a partial file on crash;
-        # the reader (oracle_penalty.reload) catches that as a JSON error
-        # and silently keeps the previous cache, masking the bridge crash.
-        # Atomic + heartbeat surfaces the failure mode for §A3 readers.
-        meta = write_json_atomic(oracle_file, existing, writer_identity="bridge_oracle_to_calibration")
-        write_heartbeat(
-            "oracle_error_rates",
-            {
-                **meta,
-                "snapshot_cities": len(city_stats),
-                "comparisons": sum(s["snapshot_comparisons"] for s in city_stats.values()),
-                "mismatches": sum(s["snapshot_mismatch"] for s in city_stats.values()),
-            },
-            heartbeat_path=oracle_artifact_heartbeat_path(),
-        )
-        logger.info("Updated %s with %d snapshot cities (sha256=%s)",
-                    oracle_file, len(city_stats), meta["sha256"][:12])
-
-        # Signal the oracle penalty module to reload
-        try:
-            from src.strategy.oracle_penalty import reload
-            reload()
-        except ImportError:
-            pass  # OK if not running inside Zeus process
-    else:
-        logger.info("[DRY RUN] Would update %s with %d cities", oracle_file, len(city_stats))
-
-    conn.close()
-    return {
-        "cities": len(city_stats),
-        "comparisons": sum(s["snapshot_comparisons"] for s in city_stats.values()),
-        "mismatches": sum(s["snapshot_mismatch"] for s in city_stats.values()),
-    }
+        return {
+            "cities": len(city_stats),
+            "comparisons": sum(s["snapshot_comparisons"] for s in city_stats.values()),
+            "mismatches": sum(s["snapshot_mismatch"] for s in city_stats.values()),
+        }
 
 
 if __name__ == "__main__":

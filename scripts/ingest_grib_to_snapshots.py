@@ -68,7 +68,7 @@ from src.contracts.snapshot_ingest_contract import validate_snapshot_contract
 from src.contracts.tigge_snapshot_payload import ProvenanceViolation, TiggeSnapshotPayload
 from src.runtime.timeout_guard import run_with_timeout
 from src.state.canonical_write import commit_then_export
-from src.state.db import get_world_connection
+from src.state.db import ZEUS_FORECASTS_DB_PATH, get_forecasts_connection  # K1-batch2 fix 2026-05-17: ensemble_snapshots_v2 + source_run are forecast_class
 from src.state.db_writer_lock import WriteClass, db_writer_lock  # noqa: E402
 from src.state.schema.v2_schema import apply_v2_schema
 from src.types.metric_identity import HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN, MetricIdentity
@@ -983,8 +983,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
-    from src.state.db import ZEUS_WORLD_DB_PATH  # noqa: PLC0415
-    _lock_path = args.db_path if args.db_path else ZEUS_WORLD_DB_PATH
+    _lock_path = args.db_path if args.db_path else ZEUS_FORECASTS_DB_PATH
     with db_writer_lock(_lock_path, WriteClass.BULK):
         if args.db_path:
             conn = sqlite3.connect(str(args.db_path))
@@ -994,7 +993,7 @@ def main(argv: list[str] | None = None) -> int:
             from src.state.db import init_schema  # noqa: PLC0415
             init_schema(conn)
         else:
-            conn = get_world_connection(write_class="bulk")
+            conn = get_forecasts_connection(write_class="bulk")  # K1-batch2 fix 2026-05-17
         apply_v2_schema(conn)
 
         summary = ingest_track(

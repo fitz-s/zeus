@@ -1,10 +1,13 @@
 # Created: 2026-05-02
-# Last reused/audited: 2026-05-04
-# Authority basis: Operator directive; skip-thin-days-for-oracle-bridge + docs/operations/task_2026-05-04_oracle_kelly_evidence_rebuild/PLAN.md §A2 (path centralization migration; tests now redirect storage via ZEUS_STORAGE_ROOT instead of @patch on SNAPSHOT_DIR/ORACLE_FILE module constants).
+# Last reused/audited: 2026-05-17
+# Authority basis: F40 K1 fix — bridge now uses get_forecasts_connection_with_world() (settlements
+# is forecast_class post-K1-split). Test patches the context-manager helper instead of removed
+# DB_PATH constant. See docs/operations/task_2026-05-17_post_karachi_remediation/FIX_K1_READERS.md §A.
 """Tests for oracle bridge coverage filtering."""
 
 import json
 import sqlite3
+from contextlib import contextmanager
 from unittest.mock import patch
 
 import pytest
@@ -50,12 +53,17 @@ def storage_root_with_snapshot(monkeypatch, tmp_path):
     return tmp_path
 
 
-@patch("scripts.bridge_oracle_to_calibration.DB_PATH")
+@patch("scripts.bridge_oracle_to_calibration.get_forecasts_connection_with_world")
 def test_bridge_coverage_filtering(
-    mock_db_path, mock_db, storage_root_with_snapshot, tmp_path
+    mock_helper, mock_db, storage_root_with_snapshot, tmp_path
 ):
     db_path, conn = mock_db
-    mock_db_path.__str__.return_value = str(db_path)
+
+    @contextmanager
+    def fake_ctx(*args, **kwargs):
+        yield conn
+
+    mock_helper.side_effect = fake_ctx
 
     # 1. Setup settlement
     conn.execute("""
