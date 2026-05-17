@@ -259,7 +259,7 @@ def request_redeem(
          WHERE condition_id = ?
            AND market_id = ?
            AND payout_asset = ?
-           AND state NOT IN ('REDEEM_CONFIRMED','REDEEM_FAILED','REDEEM_REVIEW_REQUIRED')
+           AND state NOT IN ('REDEEM_CONFIRMED','REDEEM_FAILED')
          ORDER BY requested_at, command_id
          LIMIT 1
         """,
