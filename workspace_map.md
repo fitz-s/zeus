@@ -37,12 +37,13 @@ Use it after `AGENTS.md` to answer two questions quickly:
 | `src/ingest/` | Runtime event-stream ingest and forecast-live producer boundary | `src/ingest/AGENTS.md`, `docs/reference/modules/ingest.md` |
 | `tests/` | Regression and law gates, including test-only fakes and integration antibodies | `tests/AGENTS.md`, `architecture/test_topology.yaml` |
 | `scripts/` | Operator, ETL, audit, and enforcement tools | `scripts/AGENTS.md`, `architecture/script_manifest.yaml` |
-| `docs/authority/` | Durable architecture and delivery law only | `docs/authority/AGENTS.md` |
+| `docs/authority/` | Durable architecture + delivery law (incl. ARCHIVAL_RULES.md since 2026-05-17 PR #136 W3) | `docs/authority/AGENTS.md` |
 | `docs/reference/` | Domain, architecture, market/settlement, data/replay, failure-mode, and module references | `docs/reference/AGENTS.md` |
 | `docs/reference/modules/` | Dense module books; reference only, never constitutional law | `docs/reference/modules/AGENTS.md` (`state`, `engine`, and `data` landed first) |
-| `docs/operations/` | Live control pointer, active packets, package inputs, gap register | `docs/operations/AGENTS.md` |
+| `docs/reference/legacy/` | Demoted historical reference snapshots (`legacy_reference_*.md`); doc_class `legacy_reference` per 2026-05-17 W6 | `docs/reference/legacy/AGENTS.md` |
+| `docs/operations/` | Live control pointer, active packets (.archived stubs dropped 2026-05-17 — git is backup, docs/archives/packets/ holds canonical) | `docs/operations/AGENTS.md` |
 | `docs/runbooks/` | Operator runbooks | `docs/runbooks/AGENTS.md` |
-| `docs/reports/` | Generated diagnostic reports | `docs/reports/AGENTS.md` |
+| `docs/reports/` | Generated diagnostic reports (7 legacy_reference_*.md moved to docs/reference/legacy/ per W6) | `docs/reports/AGENTS.md` |
 | `docs/to-do-list/` | Active checklist workbooks | `docs/to-do-list/AGENTS.md` |
 | `docs/artifacts/` | Active evidence artifacts | `docs/artifacts/AGENTS.md` |
 | `architecture/` | Machine-checkable workspace law | `architecture/AGENTS.md` |
@@ -50,6 +51,7 @@ Use it after `AGENTS.md` to answer two questions quickly:
 | `.code-review-graph/` | Tracked derived online context | graph status via `python3 scripts/topology_doctor.py --code-review-graph-status --json` |
 | `state/` | Runtime DBs and local control files | classify before treating as truth |
 | `raw/` | Raw external evidence captures | `raw/AGENTS.md` |
+| `docs/archives/evidence/` | Relocated historical evidence trails (formerly `evidence/` at root, moved 2026-05-17) | per-subdir inspect |
 | `.agents/` | Repo-local workflow skills and AI handoff guidance | `.agents/skills/AGENTS.md` |
 
 ## Machine manifests
