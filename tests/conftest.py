@@ -280,6 +280,9 @@ _WLA_SQLITE_CONNECT_ALLOWLIST = frozenset({
 
     # --- K1 P3 ghost table cleanup script (2026-05-14; PLAN §2 P3 D2) ---
     "scripts/drop_world_ghost_tables.py",            # operator_invoked: drops LEGACY_ARCHIVED ghost copies on world.db; explicit --execute required; dry-run by default
+
+    # --- Audit PR-I C2 migration script (2026-05-16; SCAFFOLD §K.8 v5) ---
+    "scripts/migrations/202605_add_redeem_operator_required_state.py",  # operator_invoked: adds REDEEM_OPERATOR_REQUIRED to settlement_commands.state CHECK; daemon-stop prereq + fcntl.flock check + per-DB atomic + foreign_key_check before commit; --dry-run mode
 })
 
 

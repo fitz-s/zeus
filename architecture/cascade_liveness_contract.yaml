@@ -1,0 +1,57 @@
+# Created: 2026-05-16
+# Last reused or audited: 2026-05-16
+# Authority basis: docs/operations/task_2026-05-16_deep_alignment_audit/SCAFFOLD_F14_F16.md §G.2 + §K.6 v5
+#
+# Cascade liveness contract — the registry of state-machine tables in src/
+# that REQUIRE a scheduled APScheduler poller to drive them, plus optional
+# terminal-states-with-operator-action fields for documented operator-completion
+# paths.
+#
+# Antibody: tests/test_cascade_liveness_contract.py + src/main.py's
+# _assert_cascade_liveness_contract() jointly enforce that every entry here
+# has a registered poller at scheduler boot AND that every state listed in
+# terminal_states_with_operator_action has a transition INTO it from src/
+# (verified via ast.parse walk).
+#
+# Adding a new state machine: add the entry here; register the poller in
+# src/main.py; add the tick body function; if the state machine has an
+# operator-completion step, add terminal_states_with_operator_action with
+# operator_runbook + cli_invocation fields.
+
+state_machines:
+  - table: settlement_commands
+    db: trades
+    intent_states: [REDEEM_INTENT_CREATED, REDEEM_RETRYING]
+    terminal_states:
+      - REDEEM_CONFIRMED
+      - REDEEM_FAILED
+      - REDEEM_REVIEW_REQUIRED
+    terminal_states_with_operator_action:
+      - state: REDEEM_OPERATOR_REQUIRED
+        max_age_hours: 24
+        operator_runbook: docs/operations/task_2026-05-16_deep_alignment_audit/KARACHI_2026_05_17_MANUAL_FALLBACK.md
+        escalation_action: "Path C trigger per SCAFFOLD §I.4 if exceeded; arm manual fallback runbook §3"
+        cli_invocation: "python -m scripts.operator_record_redeem <condition_id> <tx_hash>"
+    required_pollers:
+      - id: redeem_submitter
+        watched_states: [REDEEM_INTENT_CREATED]
+        owner: src/main.py:_redeem_submitter_cycle
+        mode: submitter
+      - id: redeem_reconciler
+        watched_states: [REDEEM_TX_HASHED]
+        owner: src/main.py:_redeem_reconciler_cycle
+        mode: reconciler
+
+  - table: wrap_unwrap_commands
+    db: world
+    intent_states: [WRAP_REQUESTED, UNWRAP_REQUESTED]
+    # NOTE: no terminal_states_with_operator_action field for liveness_only entries.
+    # Table must stay empty until Z5 pUSD migration ships (per SCAFFOLD §E.2);
+    # the liveness_guard poller asserts row count == 0 instead of driving transitions.
+    # If pUSD migration is abandoned per RISK 3, this entry + the poller +
+    # src/execution/wrap_unwrap_commands.py all get deleted in one commit.
+    required_pollers:
+      - id: wrap_unwrap_liveness_guard
+        watched_states: [WRAP_REQUESTED, UNWRAP_REQUESTED]
+        owner: src/main.py:_wrap_unwrap_liveness_guard_cycle
+        mode: liveness_only

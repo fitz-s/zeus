@@ -158,6 +158,222 @@ def _harvester_cycle():
     logger.info("Harvester: %s", result)
 
 
+# ---------------------------------------------------------------------------
+# F14 + F16 cascade-liveness pollers (2026-05-16, SCAFFOLD §K v5)
+# ---------------------------------------------------------------------------
+# Per architecture/cascade_liveness_contract.yaml: each state-machine table
+# with *_INTENT_CREATED / *_REQUESTED rows MUST have a registered scheduler
+# poller. Without these, settlement_commands rows enqueued by
+# harvester_pnl_resolver would sit forever (the F14 SEV-0 defect documented
+# in docs/operations/task_2026-05-16_deep_alignment_audit/).
+#
+# _redeem_submitter_cycle: polls REDEEM_INTENT_CREATED, calls submit_redeem
+#   (which transitions stub-deferred rows to REDEEM_OPERATOR_REQUIRED per
+#   SCAFFOLD §K.3; operator then completes via scripts/operator_record_redeem.py).
+# _redeem_reconciler_cycle: polls REDEEM_TX_HASHED, calls reconcile_pending_redeems
+#   (no-op until web3 is wired — operator-recorded tx_hash sits in TX_HASHED
+#   until PR-I.5 follow-up).
+# _wrap_unwrap_liveness_guard_cycle: liveness_only mode; asserts table stays
+#   empty until Z5 pUSD migration (per SCAFFOLD §E.2). Does NOT drive any
+#   state transition (antibody test enforces this via ast walk).
+
+@_scheduler_job("redeem_submitter")
+def _redeem_submitter_cycle() -> None:
+    """Poll settlement_commands for ALL _SUBMITTABLE_STATES rows + submit_redeem.
+
+    PR #126 review-fix (Codex P1 + Copilot 3254021478): poll the full
+    _SUBMITTABLE_STATES set (INTENT_CREATED + RETRYING), not just INTENT_CREATED.
+    Without RETRYING in the query, rows that hit an adapter exception once
+    and were durably moved to RETRYING by submit_redeem would never be
+    re-attempted.
+
+    PR #126 review-fix (Codex P1 + Copilot 3254021447/49): commit AFTER each
+    submit_redeem call. submit_redeem only commits when own_conn=True; the
+    poller passes conn=conn so own_conn=False; without an explicit commit
+    the state transitions roll back when conn closes → INTENT_CREATED rows
+    are re-processed every tick AND any real adapter tx_hash is not durably
+    anchored. Per-row commit gives partial-failure tolerance.
+    """
+    from src.data.dual_run_lock import acquire_lock
+    from src.execution.settlement_commands import (
+        _SUBMITTABLE_STATES,
+        submit_redeem,
+    )
+    from src.state.db import get_trade_connection
+    from src.venue.polymarket_v2_adapter import PolymarketV2Adapter
+
+    with acquire_lock("redeem_submitter") as acquired:
+        if not acquired:
+            logger.info("redeem_submitter skipped_lock_held")
+            return
+        conn = get_trade_connection(write_class="live")
+        try:
+            # Poll ALL submittable states (INTENT_CREATED + RETRYING).
+            placeholders = ",".join("?" * len(_SUBMITTABLE_STATES))
+            state_values = tuple(s.value for s in _SUBMITTABLE_STATES)
+            rows = conn.execute(
+                f"""
+                SELECT command_id FROM settlement_commands
+                 WHERE state IN ({placeholders})
+                 ORDER BY requested_at, command_id
+                 LIMIT 32
+                """,
+                state_values,
+            ).fetchall()
+            if not rows:
+                return
+            adapter = PolymarketV2Adapter()
+            submitted = 0
+            failed = 0
+            for row in rows:  # already capped at 32 via SQL LIMIT
+                try:
+                    result = submit_redeem(
+                        row["command_id"], adapter, object(), conn=conn,
+                    )
+                    conn.commit()  # durable per-row commit; transitions stick
+                    submitted += 1
+                    logger.info(
+                        "redeem_submitter: command_id=%s state=%s",
+                        row["command_id"], result.state.value,
+                    )
+                except Exception as exc:  # noqa: BLE001 — fail-open per scheduler contract
+                    # On exception submit_redeem may have committed an intermediate
+                    # REDEEM_RETRYING via its own savepoint+commit (own_conn path
+                    # closed it); for own_conn=False we still rollback in-flight
+                    # uncommitted savepoints by closing the conn cleanly. Per-row
+                    # rollback isolates failures from successful prior rows.
+                    try:
+                        conn.rollback()
+                    except Exception:  # noqa: BLE001
+                        pass
+                    failed += 1
+                    logger.error(
+                        "redeem_submitter: command_id=%s error=%s",
+                        row["command_id"], exc,
+                    )
+            logger.info(
+                "redeem_submitter: submitted=%d failed=%d", submitted, failed,
+            )
+        finally:
+            conn.close()
+
+
+@_scheduler_job("redeem_reconciler")
+def _redeem_reconciler_cycle() -> None:
+    """Poll REDEEM_TX_HASHED rows + reconcile_pending_redeems against web3.
+
+    NO-OP until web3 is installed + adapter wired (PR-I.5). Without web3,
+    operator-recorded tx_hash rows sit in TX_HASHED indefinitely — that's
+    expected per SCAFFOLD §I.2 ('redeem_reconciler: results=0').
+    """
+    from src.data.dual_run_lock import acquire_lock
+    from src.execution.settlement_commands import (
+        SettlementState,
+        list_commands,
+    )
+    from src.state.db import get_trade_connection
+
+    with acquire_lock("redeem_reconciler") as acquired:
+        if not acquired:
+            logger.info("redeem_reconciler skipped_lock_held")
+            return
+        conn = get_trade_connection(write_class="live")
+        try:
+            rows = list_commands(conn, state=SettlementState.REDEEM_TX_HASHED)
+            if not rows:
+                logger.info("redeem_reconciler: results=0")
+                return
+            try:
+                from web3 import Web3  # noqa: F401 — import probe only
+            except ImportError:
+                logger.info(
+                    "redeem_reconciler: web3 not installed; rows=%d sitting in "
+                    "TX_HASHED (expected pre-PR-I.5)", len(rows),
+                )
+                return
+            # web3 provider wiring is PR-I.5 scope; in PR-I we declare the seam.
+            logger.warning(
+                "redeem_reconciler: web3 import succeeded but provider wiring "
+                "is PR-I.5 scope; rows=%d not reconciled this tick.", len(rows),
+            )
+        finally:
+            conn.close()
+
+
+@_scheduler_job("wrap_unwrap_liveness_guard")
+def _wrap_unwrap_liveness_guard_cycle() -> None:
+    """liveness_only poller: assert wrap_unwrap_commands stays empty until Z5.
+
+    Per SCAFFOLD §E.2: the wrap_unwrap_commands state machine exists in src/
+    (defined but no production enqueue caller). Until pUSD migration ships,
+    rows here are a bug. This poller counts and alerts; does NOT call any
+    state-transition helper (antibody test enforces this via ast walk).
+    """
+    from src.state.db import get_world_connection
+
+    conn = get_world_connection()
+    try:
+        try:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM wrap_unwrap_commands"
+            ).fetchone()
+        except Exception as exc:
+            # Table may not exist in some envs; log + return (fail-open).
+            logger.info("wrap_unwrap_liveness_guard: table missing (%s)", exc)
+            return
+        count = row[0] if row else 0
+        if count > 0:
+            logger.warning(
+                "[WRAP_UNWRAP_LIVENESS_GUARD] %d unexpected rows in "
+                "wrap_unwrap_commands; table must stay empty until Z5 per "
+                "SCAFFOLD §E.2. Investigate before continuing.", count,
+            )
+        else:
+            logger.debug("wrap_unwrap_liveness_guard: count=0 (expected)")
+    finally:
+        conn.close()
+
+
+def _assert_cascade_liveness_contract(scheduler) -> None:
+    """Boot-time mirror of tests/test_cascade_liveness_contract.py.
+
+    Fail-closed: refuses to start the daemon if any required poller from
+    architecture/cascade_liveness_contract.yaml is missing from scheduler.
+    Guards against accidental edits that delete a job registration without
+    updating the contract (or vice versa).
+    """
+    import pathlib
+    import yaml
+
+    contract_path = (
+        pathlib.Path(__file__).resolve().parent.parent
+        / "architecture"
+        / "cascade_liveness_contract.yaml"
+    )
+    if not contract_path.exists():
+        # Defensive: if contract YAML absent, skip — but log loudly so the
+        # operator notices. Antibody test will still catch this in CI.
+        logger.error(
+            "_assert_cascade_liveness_contract: %s missing; skipping boot check",
+            contract_path,
+        )
+        return
+    contract = yaml.safe_load(contract_path.read_text())
+    job_ids = {j.id for j in scheduler.get_jobs()}
+    missing: list[tuple[str, str]] = []
+    for sm in contract.get("state_machines", []) or []:
+        for poller in sm.get("required_pollers", []) or []:
+            if poller["id"] not in job_ids:
+                missing.append((sm["table"], poller["id"]))
+    if missing:
+        raise SystemExit(
+            f"FATAL: cascade_liveness_contract violation: missing pollers "
+            f"{missing!r}. Refusing to boot. Either register the job in "
+            f"src/main.py OR remove the contract entry in "
+            f"architecture/cascade_liveness_contract.yaml."
+        )
+
+
 def run_single_cycle():
     """Run one complete cycle of all modes. For testing, not production."""
     logger.info("=== SINGLE CYCLE TEST ===")
@@ -993,6 +1209,28 @@ def main():
         max_instances=1,
         coalesce=True,
     )
+
+    # 2026-05-16 PR-I C3 — F14 + F16 cascade-liveness pollers per SCAFFOLD §K v5
+    # + architecture/cascade_liveness_contract.yaml. Insertion site is here per
+    # SCAFFOLD §K.8 v5 (after L988 venue_heartbeat block; pre-existing K2 jobs
+    # below were already migrated to src/ingest_main.py).
+    scheduler.add_job(
+        _redeem_submitter_cycle, "interval", minutes=5, id="redeem_submitter",
+        max_instances=1, coalesce=True,
+    )
+    scheduler.add_job(
+        _redeem_reconciler_cycle, "interval", minutes=10, id="redeem_reconciler",
+        max_instances=1, coalesce=True,
+    )
+    scheduler.add_job(
+        _wrap_unwrap_liveness_guard_cycle, "interval", minutes=30,
+        id="wrap_unwrap_liveness_guard", max_instances=1, coalesce=True,
+    )
+
+    # Boot-time fail-closed cascade-liveness contract check. MUST run AFTER
+    # all scheduler.add_job calls so it sees the complete job set, and
+    # BEFORE scheduler.start() so a contract violation prevents booting.
+    _assert_cascade_liveness_contract(scheduler)
 
     # Phase 3: K2 ingest jobs removed from this scheduler block.
     # All K2 ticks, etl_recalibrate, ecmwf_open_data, automation_analysis,
