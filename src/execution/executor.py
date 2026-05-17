@@ -2185,8 +2185,7 @@ def execute_exit_order(
                     occurred_at=now_str,
                     payload={"reason": "exit_mutex_held"},
                 )
-                if _own_conn:
-                    conn.commit()
+                conn.commit()
                 return OrderResult(
                     trade_id=intent.trade_id,
                     status="rejected",
@@ -2233,10 +2232,7 @@ def execute_exit_order(
                 },
             )
             _reserve_collateral_for_sell(command_id, intent.token_id, shares, conn)
-            if not _own_conn:
-                pass  # caller manages commit
-            else:
-                conn.commit()
+            conn.commit()
         except MarketSnapshotError as exc:
             return OrderResult(
                 trade_id=intent.trade_id,
@@ -2427,8 +2423,7 @@ def execute_exit_order(
                             "idempotency_key": idem.value,
                         },
                     )
-                if _own_conn:
-                    conn.commit()
+                conn.commit()
             except Exception as inner:
                 logger.error(
                     "execute_exit_order: terminal SDK-exception event append failed "
@@ -2477,8 +2472,7 @@ def execute_exit_order(
                         "idempotency_key": idem.value,
                     },
                 )
-                if _own_conn:
-                    conn.commit()
+                conn.commit()
             except Exception as inner:
                 logger.error(
                     "execute_exit_order: REVIEW_REQUIRED append_event failed after missing final "
@@ -2517,8 +2511,7 @@ def execute_exit_order(
                         idempotency_key=idem.value,
                     ),
                 )
-                if _own_conn:
-                    conn.commit()
+                conn.commit()
             except Exception as inner:
                 logger.error(
                     "execute_exit_order: REVIEW_REQUIRED append_event failed after final "
@@ -2559,8 +2552,7 @@ def execute_exit_order(
                         **final_envelope_payload,
                     },
                 )
-                if _own_conn:
-                    conn.commit()
+                conn.commit()
             except Exception as inner:
                 logger.error(
                     "execute_exit_order: SUBMIT_REJECTED (success_false) append_event failed "
@@ -2587,8 +2579,7 @@ def execute_exit_order(
                     occurred_at=ack_time,
                     payload={"reason": "missing_order_id", **final_envelope_payload},
                 )
-                if _own_conn:
-                    conn.commit()
+                conn.commit()
             except Exception as inner:
                 logger.error(
                     "execute_exit_order: SUBMIT_REJECTED (missing_order_id) append_event failed "
