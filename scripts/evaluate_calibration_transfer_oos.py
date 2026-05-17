@@ -378,7 +378,7 @@ def _upsert_row(
 ) -> None:
     conn.execute(
         """
-        INSERT INTO validated_calibration_transfers (
+        INSERT INTO world.validated_calibration_transfers (
             policy_id, source_id, target_source_id,
             source_cycle, target_cycle, horizon_profile,
             season, cluster, metric,
@@ -458,7 +458,7 @@ def _has_fresh_row(
     cutoff_iso = datetime.fromtimestamp(cutoff, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     row = conn.execute(
         """
-        SELECT 1 FROM validated_calibration_transfers
+        SELECT 1 FROM world.validated_calibration_transfers
          WHERE policy_id = ?
            AND platt_model_key = ?
            AND target_source_id = ?
@@ -681,13 +681,16 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    from src.state.db import get_world_connection
+    # K1 fix F41 2026-05-17: calibration_pairs_v2 is forecast_class (91M rows in
+    # forecasts.db, 0 in world post-K1); validated_calibration_transfers is world_class.
+    # get_forecasts_connection_with_world: MAIN=forecasts.db, world.db ATTACHed.
+    # All world-class table refs below use world.* qualification.
+    from src.state.db import get_forecasts_connection_with_world
 
-    conn = get_world_connection(write_class="bulk")
-    conn.execute("PRAGMA busy_timeout = 30000")
-    logger.info("busy_timeout=30000ms set on connection")
+    with get_forecasts_connection_with_world(write_class="bulk") as conn:
+        conn.execute("PRAGMA busy_timeout = 30000")
+        logger.info("busy_timeout=30000ms set on connection")
 
-    try:
         if not args.skip_lock_check:
             ok, msg = _check_daemon_down(conn)
             logger.info("daemon-lock check: %s — %s", "PASS" if ok else "FAIL", msg)
@@ -708,8 +711,6 @@ def main() -> int:
 
         print(json.dumps(summary, indent=2))
         return 0
-    finally:
-        conn.close()
 
 
 if __name__ == "__main__":
