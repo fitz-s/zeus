@@ -9,6 +9,7 @@ Created: 2026-05-17
 
 1. §3 `architecture/topology.yaml` verdict loader cite: `L41 NAMING_CONVENTIONS_PATH + L57 DOCS_REGISTRY_PATH` → `(scripts/topology_doctor.py, line 34 TOPOLOGY_PATH, file_sha8=58ec7cab)`
 2. All §3 cites normalized to D2 `(path, line, file_sha8)`. Recomputed sha8: `58ec7cab` (topology_doctor.py), `188a8939` (naming_conventions.yaml), `2d629100` (topology_doctor_docs_checks.py), `8a662ff7` (archival_check_0.py)
+<!-- cite: scripts/archive_migration_2026-05-16.py:44 sha=c4b0c91e -->
 3. W3 (post-renumber) enumerates `update_existing` (13 grep-verified) + `insert_new` (2: `docs/authority/AGENTS.md`, `REVIEW.md`); "4 packet bodies" dropped; 13th site = `scripts/archive_migration_2026-05-16.py:44` docstring
 4. All Phase-1b refs purged; `source_family.py` + `test_source_family_collision.py` moved to Phase-1 W5 (~80 LOC); §4 FM-10 updated
 

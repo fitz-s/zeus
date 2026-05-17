@@ -159,6 +159,7 @@ Loader: `(scripts/topology_doctor.py, line 34 TOPOLOGY_PATH, file_sha8=58ec7cab)
 
 ### `docs/operations/task_2026-05-15_runtime_improvement_engineering_package/04_workspace_hygiene/ARCHIVAL_RULES.md`
 **Verdict: SUPERSEDE_WITH_REASON (location, not content).**
+<!-- cite: docs/authority/AGENTS.md:10 sha=a86ccb64 -->
 Content is canonical (referenced by `scripts/archive_migration_2026-05-16.py` and `docs/operations/AGENTS.md`). Location is wrong: a packet-internal file MUST NOT define repo-wide archival law (per `docs/authority/AGENTS.md:10-13` "durable authority law only" + the constitution K3/K4 isolation rule). Wave-3 edit (post-renumber): relocate to `docs/authority/ARCHIVAL_RULES.md`, leave a 3-line pointer stub at the old path with `.relocated` extension, update all references — see EXECUTION_PLAN W3 for full enumeration.
 
 ### `AGENTS.md` (root)
@@ -253,6 +254,7 @@ Silent-failures from `INPUT_failure_modes.md §3`:
 ## §6 Outstanding decisions deferred to Wave-1 critic (NOT to operator)
 
 1. `docs/archives/` retention policy: keep as session/cross-repo cold storage (current §2 proposal), or delete entirely (1 file)? Defer to Wave-1 critic with a one-line analysis citing `docs/operations/AGENTS.md` and the constitution. Default proposal: keep, narrow scope to sessions/cross-repo.
+<!-- cite: AGENTS.md:388 sha=090a5103 -->
 2. `docs/reports/authority_history/` (9 files): keep in `reports/` (current §2 proposal) or move to `docs/archives/authority_history/`? Defer. Default: keep — `authority_history` is genuinely "demoted historical authority" per `AGENTS.md:388-400` and matches `reports/` role.
 3. Stub-suffix normalization: 81 `.archived` files — some are `<slug>.archived`, some `<slug>.md.archived`. Whether to normalize all → `<slug>.archived` in this PR or defer to Phase-2 mass migration. Default: defer to Phase-2 (test in this PR detects mismatch but doesn't block).
 

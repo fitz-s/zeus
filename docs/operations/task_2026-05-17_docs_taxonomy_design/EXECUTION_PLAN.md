@@ -118,6 +118,7 @@ W3 (ARCHIVAL_RULES relocation) executes BEFORE W4 (manifest/topology updates) to
 | **A**: "W6 6 legacy files have inbound references that break" | **B**: pre-generate a `mv` map in `tools/legacy_reference_redirect.json`; W6 patch updates all inbound cites via `sed -i` driven by the map. |
 | **A**: "scout drift (per audit-of-audit memory): some `legacy_reference_*` file count or names are wrong in SCAFFOLD" | **B**: W6 first action = `find docs/reports -name 'legacy_reference_*'` and use actual list; do not trust SCAFFOLD names. |
 | **A**: "Phase-1 PR is over 2500 LOC" | **B**: defer W6 to a sibling Phase-1c PR (W1–W5 ship first, structural antibodies are independently coherent). |
+<!-- cite: docs/authority/AGENTS.md:10 sha=a86ccb64 -->
 | **A**: "Critic doubts whether ARCHIVAL_RULES belongs in `docs/authority/` vs `docs/operations/`" | **B**: cite `docs/authority/AGENTS.md:10-13` ("durable authority law only") and `zeus_change_control_constitution.md:102-108` (K3/K4 isolation) — these settle the question in `docs/authority/`'s favor. |
 
 ---
