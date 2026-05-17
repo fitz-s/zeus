@@ -275,6 +275,40 @@ class EdgeDecision:
     # test fixtures — the sidecar key is omitted in that case.
     decision_evidence: Optional[DecisionEvidence] = None
 
+    def __post_init__(self) -> None:
+        if self.decision_snapshot_id is None:
+            raise ValueError(
+                "EdgeDecision.decision_snapshot_id must not be None"
+            )
+
+
+# F25 Strategy R: sentinel for pre-snapshot rejection paths (all 31 early-rejection
+# sites in evaluate_candidate fire before snapshot_id is resolved at line ~2378+).
+# Non-NULL, non-empty — passes truthy checks and SQL LIKE queries.
+_PRE_SNAPSHOT_DSI_SENTINEL = "<pre_snapshot:rejected>"
+
+
+def _make_rejection_decision(
+    *,
+    rejection_stage: str,
+    rejection_reasons: list[str],
+    selected_method: str,
+    applied_validations: list[str],
+    availability_status: str = "",
+    p_raw=None,
+) -> "EdgeDecision":
+    """Canonical ctor for pre-snapshot rejections. Stamps DSI sentinel."""
+    return EdgeDecision(
+        False,
+        decision_id=_decision_id(),
+        rejection_stage=rejection_stage,
+        rejection_reasons=rejection_reasons,
+        selected_method=selected_method,
+        applied_validations=applied_validations,
+        availability_status=availability_status,
+        p_raw=p_raw,
+        decision_snapshot_id=_PRE_SNAPSHOT_DSI_SENTINEL,
+    )
 
 
 def _read_v2_snapshot_metadata(
@@ -1376,6 +1410,7 @@ def _record_selection_family_facts(
     filtered: list[BinEdge],
     hypotheses: list[FullFamilyHypothesis] | None = None,
     decision_snapshot_id: str,
+    decision_id: str | None = None,
     selected_method: str,
     recorded_at: str,
     decision_time_status: str | None = None,
@@ -1537,6 +1572,7 @@ def _record_selection_family_facts(
             hypothesis_id=row["hypothesis_id"],
             family_id=row["family_id"],
             candidate_id=row["candidate_id"],
+            decision_id=decision_id,
             city=candidate.city.name,
             target_date=candidate.target_date,
             range_label=row["range_label"],
@@ -1719,9 +1755,7 @@ def evaluate_candidate(
         raise ValueError("entry provenance context is required before probability evaluation")
 
     if is_day0_mode and candidate.observation is None:
-        return [EdgeDecision(
-            False,
-            decision_id=_decision_id(),
+        return [_make_rejection_decision(
             rejection_stage="SIGNAL_QUALITY",
             rejection_reasons=["Day0 observation unavailable"],
             availability_status="DATA_UNAVAILABLE",
@@ -1734,9 +1768,7 @@ def evaluate_candidate(
             city, candidate.observation
         )
         if source_rejection_reason is not None:
-            return [EdgeDecision(
-                False,
-                decision_id=_decision_id(),
+            return [_make_rejection_decision(
                 rejection_stage="OBSERVATION_SOURCE_UNAUTHORIZED",
                 rejection_reasons=[source_rejection_reason],
                 availability_status="DATA_UNAVAILABLE",
@@ -1756,9 +1788,7 @@ def evaluate_candidate(
                 or "after the decision boundary" in observation_quality_rejection
                 else "DATA_UNAVAILABLE"
             )
-            return [EdgeDecision(
-                False,
-                decision_id=_decision_id(),
+            return [_make_rejection_decision(
                 rejection_stage="SIGNAL_QUALITY",
                 rejection_reasons=[observation_quality_rejection],
                 availability_status=availability_status,
@@ -1772,9 +1802,7 @@ def evaluate_candidate(
         if live_entry_forecast_blocker is None and entry_forecast_cfg is not None:
             live_entry_forecast_blocker = _live_entry_forecast_rollout_blocker(entry_forecast_cfg)
         if live_entry_forecast_blocker is not None:
-            return [EdgeDecision(
-                False,
-                decision_id=_decision_id(),
+            return [_make_rejection_decision(
                 rejection_stage="SIGNAL_QUALITY",
                 rejection_reasons=[live_entry_forecast_blocker],
                 availability_status="DATA_UNAVAILABLE",
@@ -1799,23 +1827,16 @@ def evaluate_candidate(
             try:
                 declared_support_index = int(declared_support_index)
             except (TypeError, ValueError):
-                return [EdgeDecision(
-                    False,
-                    decision_id=_decision_id(),
+                return [_make_rejection_decision(
                     rejection_stage="MARKET_FILTER",
                     rejection_reasons=[f"invalid support_index for {o.get('title', '')!r}"],
                     selected_method=selected_method,
                     applied_validations=["market_filter", "support_topology"],
                 )]
             if declared_support_index != support_index:
-                return [EdgeDecision(
-                    False,
-                    decision_id=_decision_id(),
+                return [_make_rejection_decision(
                     rejection_stage="MARKET_FILTER",
-                    rejection_reasons=[
-                        f"support_index mismatch for {o.get('title', '')!r}: "
-                        f"declared {declared_support_index}, expected {support_index}"
-                    ],
+                    rejection_reasons=[ f"support_index mismatch for {o.get('title', '')!r}: " f"declared {declared_support_index}, expected {support_index}" ],
                     selected_method=selected_method,
                     applied_validations=["market_filter", "support_topology"],
                 )]
@@ -1847,9 +1868,7 @@ def evaluate_candidate(
             token_map[support_index] = token_payload
 
     if len(bins) < 3:
-        return [EdgeDecision(
-            False,
-            decision_id=_decision_id(),
+        return [_make_rejection_decision(
             rejection_stage="MARKET_FILTER",
             rejection_reasons=["< 3 parseable bins"],
             selected_method=selected_method,
@@ -1859,9 +1878,7 @@ def evaluate_candidate(
     try:
         validate_bin_topology(bins)
     except BinTopologyError as e:
-        return [EdgeDecision(
-            False,
-            decision_id=_decision_id(),
+        return [_make_rejection_decision(
             rejection_stage="MARKET_FILTER",
             rejection_reasons=[f"bin topology: {e}"],
             selected_method=selected_method,
@@ -1870,9 +1887,7 @@ def evaluate_candidate(
     executable_mask = np.asarray(executable_mask_values, dtype=bool)
     executable_count = int(np.count_nonzero(executable_mask))
     if executable_count < 1:
-        return [EdgeDecision(
-            False,
-            decision_id=_decision_id(),
+        return [_make_rejection_decision(
             rejection_stage="MARKET_FILTER",
             rejection_reasons=["support topology has no executable bins"],
             selected_method=selected_method,
@@ -1947,9 +1962,7 @@ def evaluate_candidate(
 
     if use_executable_forecast_cutover:
         if conn is None or not hasattr(conn, "execute"):
-            return [EdgeDecision(
-                False,
-                decision_id=_decision_id(),
+            return [_make_rejection_decision(
                 rejection_stage="SIGNAL_QUALITY",
                 rejection_reasons=["ENTRY_FORECAST_READER_DB_UNAVAILABLE"],
                 availability_status="DATA_UNAVAILABLE",
@@ -1979,9 +1992,7 @@ def evaluate_candidate(
             require_entry_readiness=False,
         )
         if not reader_result.ok or reader_result.bundle is None:
-            return [EdgeDecision(
-                False,
-                decision_id=_decision_id(),
+            return [_make_rejection_decision(
                 rejection_stage="SIGNAL_QUALITY",
                 rejection_reasons=[reader_result.reason_code],
                 availability_status="DATA_UNAVAILABLE",
@@ -2000,9 +2011,7 @@ def evaluate_candidate(
                 temperature_metric=temperature_metric.temperature_metric,
             )
         except SourceNotEnabled as e:
-            return [EdgeDecision(
-                False,
-                decision_id=_decision_id(),
+            return [_make_rejection_decision(
                 rejection_stage="SIGNAL_QUALITY",
                 rejection_reasons=[str(e)],
                 availability_status="DATA_STALE",
@@ -2010,9 +2019,7 @@ def evaluate_candidate(
                 applied_validations=["ens_fetch", "forecast_source_policy"],
             )]
         except Exception as e:
-            return [EdgeDecision(
-                False,
-                decision_id=_decision_id(),
+            return [_make_rejection_decision(
                 rejection_stage="SIGNAL_QUALITY",
                 rejection_reasons=[str(e)],
                 availability_status=_availability_status_for_error(e),
@@ -2020,9 +2027,7 @@ def evaluate_candidate(
                 applied_validations=["ens_fetch"],
             )]
     if ens_result is None:
-        return [EdgeDecision(
-            False,
-            decision_id=_decision_id(),
+        return [_make_rejection_decision(
             rejection_stage="SIGNAL_QUALITY",
             rejection_reasons=["ENS fetch failed or < 51 members"],
             availability_status="DATA_UNAVAILABLE",
@@ -2031,9 +2036,7 @@ def evaluate_candidate(
         )]
     n_members_meta = ens_result.get("n_members")
     if n_members_meta is not None and int(n_members_meta) < ensemble_member_count():
-        return [EdgeDecision(
-            False,
-            decision_id=_decision_id(),
+        return [_make_rejection_decision(
             rejection_stage="SIGNAL_QUALITY",
             rejection_reasons=["ENS fetch failed or < 51 members"],
             availability_status="DATA_UNAVAILABLE",
@@ -2041,14 +2044,9 @@ def evaluate_candidate(
             applied_validations=["ens_fetch"],
         )]
     if ens_result.get("degradation_level") == "DEGRADED_FORECAST_FALLBACK":
-        return [EdgeDecision(
-            False,
-            decision_id=_decision_id(),
+        return [_make_rejection_decision(
             rejection_stage="SIGNAL_QUALITY",
-            rejection_reasons=[
-                f"Forecast source {ens_result.get('source_id', 'unknown')} is "
-                "DEGRADED_FORECAST_FALLBACK; entry requires primary forecast authority"
-            ],
+            rejection_reasons=[ f"Forecast source {ens_result.get('source_id', 'unknown')} is " "DEGRADED_FORECAST_FALLBACK; entry requires primary forecast authority" ],
             availability_status="DATA_STALE",
             selected_method=selected_method,
             applied_validations=["ens_fetch", "forecast_source_policy"],
@@ -2059,14 +2057,9 @@ def evaluate_candidate(
         decision_time,
     )
     if forecast_evidence_errors:
-        return [EdgeDecision(
-            False,
-            decision_id=_decision_id(),
+        return [_make_rejection_decision(
             rejection_stage="SIGNAL_QUALITY",
-            rejection_reasons=[
-                "Forecast source evidence incomplete for executable entry: "
-                + ", ".join(forecast_evidence_errors)
-            ],
+            rejection_reasons=[ "Forecast source evidence incomplete for executable entry: " + ", ".join(forecast_evidence_errors) ],
             availability_status="DATA_UNAVAILABLE",
             selected_method=selected_method,
             applied_validations=["ens_fetch", "forecast_source_evidence"],
@@ -2080,9 +2073,7 @@ def evaluate_candidate(
         try:
             ens_times = _forecast_times_as_strings(ens_result["times"])
         except (KeyError, TypeError) as e:
-            return [EdgeDecision(
-                False,
-                decision_id=_decision_id(),
+            return [_make_rejection_decision(
                 rejection_stage="SIGNAL_QUALITY",
                 rejection_reasons=[str(e)],
                 availability_status="DATA_STALE",
@@ -2102,9 +2093,7 @@ def evaluate_candidate(
     if is_day0_mode:
         day0_temporal_context = _get_day0_temporal_context(city, target_d, candidate.observation)
         if day0_temporal_context is None:
-            return [EdgeDecision(
-                False,
-                decision_id=_decision_id(),
+            return [_make_rejection_decision(
                 rejection_stage="SIGNAL_QUALITY",
                 rejection_reasons=["Solar/DST context unavailable for Day0"],
                 availability_status="DATA_STALE",
@@ -2119,9 +2108,7 @@ def evaluate_candidate(
                 now=day0_temporal_context.current_utc_timestamp,
             )
             if len(required_hour_indices) == 0:
-                return [EdgeDecision(
-                    False,
-                    decision_id=_decision_id(),
+                return [_make_rejection_decision(
                     rejection_stage="SIGNAL_QUALITY",
                     rejection_reasons=["No Day0 forecast hours remain for target date"],
                     availability_status="DATA_STALE",
@@ -2132,9 +2119,7 @@ def evaluate_candidate(
         ens_result,
         required_hour_indices=required_hour_indices,
     ):
-        return [EdgeDecision(
-            False,
-            decision_id=_decision_id(),
+        return [_make_rejection_decision(
             rejection_stage="SIGNAL_QUALITY",
             rejection_reasons=["ENS fetch failed, < 51 members, or insufficient finite required-hour members"],
             availability_status="DATA_UNAVAILABLE",
@@ -2158,9 +2143,7 @@ def evaluate_candidate(
                 temperature_metric=temperature_metric,
             )
         except ValueError as e:
-            return [EdgeDecision(
-                False,
-                decision_id=_decision_id(),
+            return [_make_rejection_decision(
                 rejection_stage="SIGNAL_QUALITY",
                 rejection_reasons=[str(e)],
                 availability_status="DATA_STALE",
@@ -2183,9 +2166,7 @@ def evaluate_candidate(
             temperature_metric=temperature_metric,
         )
         if extrema is None:
-            return [EdgeDecision(
-                False,
-                decision_id=_decision_id(),
+            return [_make_rejection_decision(
                 rejection_stage="SIGNAL_QUALITY",
                 rejection_reasons=["No Day0 forecast hours remain for target date"],
                 availability_status="DATA_STALE",
@@ -2194,9 +2175,7 @@ def evaluate_candidate(
             )]
 
         if temperature_metric.is_low() and candidate.observation.low_so_far is None:
-            return [EdgeDecision(
-                False,
-                decision_id=_decision_id(),
+            return [_make_rejection_decision(
                 rejection_stage="OBSERVATION_UNAVAILABLE_LOW",
                 rejection_reasons=["Day0 low observation unavailable"],
                 availability_status="DATA_UNAVAILABLE",
@@ -2227,14 +2206,9 @@ def evaluate_candidate(
         # an explicit evaluator-level rejection_stage for audit and operator clarity.
         _LOW_ALLOWED_CAUSALITY = frozenset({"OK", "N/A_CAUSAL_DAY_ALREADY_STARTED"})
         if temperature_metric.is_low() and causality_status not in _LOW_ALLOWED_CAUSALITY:
-            return [EdgeDecision(
-                False,
-                decision_id=_decision_id(),
+            return [_make_rejection_decision(
                 rejection_stage="CAUSAL_SLOT_NOT_OK",
-                rejection_reasons=[
-                    f"Day0 low slot rejected: causality_status={causality_status!r} "
-                    f"not in allowed set {sorted(_LOW_ALLOWED_CAUSALITY)} (INV-16)"
-                ],
+                rejection_reasons=[ f"Day0 low slot rejected: causality_status={causality_status!r} " f"not in allowed set {sorted(_LOW_ALLOWED_CAUSALITY)} (INV-16)" ],
                 availability_status="DATA_AVAILABLE",
                 selected_method=selected_method,
                 applied_validations=["day0_observation", "ens_fetch", "causality_gate"],
@@ -2253,9 +2227,7 @@ def evaluate_candidate(
             "current_temp",
         )
         if current_temp is None:
-            return [EdgeDecision(
-                False,
-                decision_id=_decision_id(),
+            return [_make_rejection_decision(
                 rejection_stage="SIGNAL_QUALITY",
                 rejection_reasons=["Day0 current observation became unavailable before signal routing"],
                 availability_status="DATA_UNAVAILABLE",
@@ -2288,9 +2260,7 @@ def evaluate_candidate(
         raw_arr = extrema.maxes if extrema.maxes is not None else extrema.mins
         required_member_floor = ensemble_member_count() if required_hour_indices is not None else 1
         if raw_arr is None or np.count_nonzero(np.isfinite(raw_arr)) < required_member_floor:
-            return [EdgeDecision(
-                False,
-                decision_id=_decision_id(),
+            return [_make_rejection_decision(
                 rejection_stage="SIGNAL_QUALITY",
                 rejection_reasons=["Day0 forecast has insufficient finite remaining ensemble members"],
                 availability_status="DATA_UNAVAILABLE",
@@ -2309,9 +2279,7 @@ def evaluate_candidate(
         if using_period_extrema:
             expected_members_unit = "degC" if city.settlement_unit == "C" else "degF"
             if ens_result.get("members_unit") != expected_members_unit:
-                return [EdgeDecision(
-                    False,
-                    decision_id=_decision_id(),
+                return [_make_rejection_decision(
                     rejection_stage="SIGNAL_QUALITY",
                     rejection_reasons=["EXECUTABLE_FORECAST_MEMBERS_UNIT_MISMATCH"],
                     availability_status="DATA_UNAVAILABLE",
@@ -2324,9 +2292,7 @@ def evaluate_candidate(
                 or len(member_extrema) < ensemble_member_count()
                 or not np.isfinite(member_extrema).all()
             ):
-                return [EdgeDecision(
-                    False,
-                    decision_id=_decision_id(),
+                return [_make_rejection_decision(
                     rejection_stage="SIGNAL_QUALITY",
                     rejection_reasons=["EXECUTABLE_FORECAST_MEMBER_EXTREMA_INVALID"],
                     availability_status="DATA_UNAVAILABLE",
@@ -2361,9 +2327,7 @@ def evaluate_candidate(
         lead_days_for_calibration = lead_days
 
     if not _valid_probability_vector(p_raw, len(bins)):
-        return [EdgeDecision(
-            False,
-            decision_id=_decision_id(),
+        return [_make_rejection_decision(
             rejection_stage="SIGNAL_QUALITY",
             rejection_reasons=["P_raw is non-finite, negative, non-normalized, out of [0,1], or has wrong bin cardinality"],
             availability_status="DATA_UNAVAILABLE",
@@ -2380,9 +2344,7 @@ def evaluate_candidate(
         assert ens is not None
         snapshot_id = _store_ens_snapshot(conn, city, target_date, ens, ens_result)
     if not snapshot_id:
-        return [EdgeDecision(
-            False,
-            decision_id=_decision_id(),
+        return [_make_rejection_decision(
             rejection_stage="SIGNAL_QUALITY",
             rejection_reasons=["ENS snapshot persistence failed: decision_snapshot_id unavailable"],
             availability_status="DATA_UNAVAILABLE",
@@ -2428,6 +2390,7 @@ def evaluate_candidate(
             selected_method=selected_method,
             applied_validations=[*entry_validations, "ens_snapshot_p_raw_persistence"],
             p_raw=p_raw,
+            decision_snapshot_id=snapshot_id,
         )]
 
     # Calibration
@@ -3165,6 +3128,7 @@ def evaluate_candidate(
             filtered=filtered,
             hypotheses=full_family_hypotheses or None,
             decision_snapshot_id=snapshot_id,
+            decision_id="<pre_decision:family>",
             selected_method=selected_method,
             recorded_at=_recorded_at,
             decision_time_status=_decision_time_status,
