@@ -1,7 +1,7 @@
 #!/bin/bash
 # Created: 2026-05-11
-# Last reused/audited: 2026-05-11
-# Authority basis: Live monitoring during first-order qualification (operator directive 2026-05-11)
+# Last reused/audited: 2026-05-17
+# Authority basis: K1-batch2 fix — source_run + readiness_state are forecast_class (zeus-forecasts.db)
 #
 # Detects key data-chain milestones on the path to first live order:
 # Tracks BOTH variants (3h derived + 6h backfill) so we see if
@@ -23,7 +23,7 @@ while true; do
   snapshot=$(.venv/bin/python << 'PY'
 import sqlite3, json
 try:
-    conn = sqlite3.connect('state/zeus-world.db', timeout=2)
+    conn = sqlite3.connect('state/zeus-forecasts.db', timeout=2)  # K1-batch2 fix 2026-05-17: source_run + readiness_state are forecast_class
     def _count_src(dv):
         return conn.execute("""
             SELECT COUNT(*) FROM source_run

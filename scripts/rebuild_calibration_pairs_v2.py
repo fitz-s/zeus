@@ -1772,7 +1772,7 @@ def main() -> int:
     )
     parser.add_argument(
         "--db", dest="db_path", default=None,
-        help="Path to the world DB (default: production zeus-world.db).",
+        help="Path to the staging calibration DB (default dry-run: production zeus-forecasts.db read-only).",
     )
     parser.add_argument(
         "--data-version",
@@ -1831,8 +1831,8 @@ def main() -> int:
             uri_path = Path(args.db_path).resolve().as_uri().replace("file://", "file:")
             conn = sqlite3.connect(f"{uri_path}?mode=ro", uri=True)
         else:
-            from src.state.db import ZEUS_WORLD_DB_PATH  # noqa: PLC0415
-            uri_path = Path(ZEUS_WORLD_DB_PATH).resolve().as_uri().replace("file://", "file:")
+            from src.state.db import ZEUS_FORECASTS_DB_PATH  # noqa: PLC0415  # K1-batch2 fix 2026-05-17: ensemble_snapshots_v2+calibration_pairs_v2+observations are forecast_class
+            uri_path = Path(ZEUS_FORECASTS_DB_PATH).resolve().as_uri().replace("file://", "file:")
             conn = sqlite3.connect(f"{uri_path}?mode=ro", uri=True)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA busy_timeout = 600000")
