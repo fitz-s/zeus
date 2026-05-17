@@ -386,3 +386,39 @@ Before next Karachi monitor tick:
 - `RUN_14_track_C_alias_lint_patch.md`
 - `RUN_14_track_D_daemon_supervision.md`
 - `AUDIT_HISTORY.md` (new index file)
+
+
+## Run #15 Track 1 status delta (2026-05-17, branch fix/wave-2-lineage-and-k1-cleanup-2026-05-17 @ 7fb380c5)
+
+### F90 reframe — Run #14 premise disproven
+Run #14 logged F90 SEV-1 as "82KB jobs.json vs 2-line crontab, 40 jobs un-scheduled." Run #15 Track 1 disproves the premise:
+- `crontab -l` is 71 lines / **24 active commands** (Run #14 likely sampled wrong / used a stub crontab).
+- `jobs.json` (42 jobs) IS executed by `ai.openclaw.node` daemon (PID 17251). Evidence: 10/11 enabled jobs have `cron/runs/<jobid>.jsonl` mtimes < 1 day old.
+- 31 disabled jobs are intentionally dormant (explicit `enabled: false` flag), not silently un-scheduled.
+- F90 SEV-1 → SEV-3 (architectural source-of-truth ambiguity remains; not Karachi-blocking).
+
+### New SEV-1 (was hiding under F90's wrong framing)
+- **F90a SEV-1**: 3 enabled jobs failing every tick with `cron payload.model 'openai-codex/gpt-5.4-mini' rejected by agents.defaults.model`:
+  - `memory-observer` (*/15 min) — observability infra broken
+  - `finance-subagent-scanner` (*/20 8-16 Mon-Fri) — LLM market scanner broken
+  - `finance-subagent-scanner-offhours` — same root cause
+  Fix: jobs.json payload.model reconciliation against openclaw.json `agents.defaults.model`. Manual model-id selection required.
+
+### New SEV-2
+- **F90b**: `memory-reflector` + `memory-dream-cycle` timing out on most invocations. Memory pipeline degraded.
+- **F95 (Karachi-defensive)**: `zeus-antibody-scan` + `zeus-daily-audit` disabled in jobs.json since 2026-04-14/15 with NO crontab/launchd replacement. Karachi regression coverage gap. Restore via JSON enabled-flag flip + `launchctl kickstart ai.openclaw.node`.
+
+### New SEV-3
+- **F90c**: No `tools/ops/cron_reconcile.py` across 3 scheduler layers. Sketch + CI gate in `RUN_15_track1_f90_cron_diff.md` §6.
+- **F93 (Karachi-direct)**: Single 10:00 UTC `oracle_snapshot_listener.py` tick is SPOF for Karachi WU/HKO data. Add 16:00 UTC retry tick (one-liner in §5 Top-4).
+- **F94**: `cron/jobs-state.json` is structurally empty (all 42 entries `{}`); real state is in `cron/runs/<jobid>.jsonl`. Likely cause of Run #14 misread.
+
+### Recommended Run #15 Track 1 ops actions (operator-pasteable in `RUN_15_track1_f90_cron_diff.md` §5)
+1. **F90a fix** (SEV-1): reconcile payload.model in jobs.json (3 jobs). Backup, edit, kickstart openclaw-node.
+2. **F90b fix** (SEV-2): tune memory-reflector / dream-cycle timeoutMs OR chunk.
+3. **F95 fix** (SEV-2 Karachi): re-enable zeus-antibody-scan + zeus-daily-audit in jobs.json.
+4. **F93 fix** (SEV-3 Karachi): add 16:00 UTC oracle_snapshot_listener.py retry to crontab.
+5. **F90c antibody**: ship `tools/ops/cron_reconcile.py` + pre-commit hook + cron_jobs_tracker.py `--alert-on-failure` flag.
+
+### Documents in this track
+- `RUN_15_track1_f90_cron_diff.md` (NEW)
