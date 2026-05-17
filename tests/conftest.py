@@ -239,6 +239,7 @@ _WLA_SQLITE_CONNECT_ALLOWLIST = frozenset({
     "scripts/backfill_london_f_to_c_2026_05_08.py", # pending_track_a6_scripts (fix #262/#263/#264 repair; under db_writer_lock for writes)
     "scripts/backfill_low_contract_window_evidence.py",  # pending_track_a6_scripts
     "scripts/backfill_obs_v2.py",                   # pending_track_a6_scripts
+    "scripts/obs_v2_live_tick.py",                  # pending_track_a6_scripts (F44 live-tick writer; db_writer_lock guards; direct connect needed for non-dry-run path)
     "scripts/backfill_ogimet_metar.py",             # pending_track_a6_scripts
     "scripts/backfill_outcome_fact.py",             # pending_track_a6_scripts
     "scripts/backfill_tigge_snapshot_p_raw_v2.py",  # pending_track_a6_scripts

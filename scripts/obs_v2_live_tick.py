@@ -118,6 +118,24 @@ def _sha256_json(payload: dict) -> str:
     return "sha256:" + hashlib.sha256(encoded).hexdigest()
 
 
+def _source_url_for_obs(obs: HourlyObservation, *, source_tag: str) -> str:
+    """Build a source_url string for A1 provenance (mirrors backfill_obs_v2)."""
+    city = cities_by_name[obs.city]
+    if source_tag == "wu_icao_history":
+        unit_code = "m" if city.settlement_unit == "C" else "e"
+        return (
+            "https://api.weather.com/v1/location/"
+            f"{obs.station_id}:9:{city.country_code}/observations/historical.json"
+            f"?units={unit_code}&targetDate={obs.target_date}&apiKey=REDACTED"
+        )
+    if source_tag.startswith("ogimet_metar_"):
+        return (
+            "https://www.ogimet.com/cgi-bin/getmetar"
+            f"?icao={obs.station_id}&targetDate={obs.target_date}"
+        )
+    return f"source:{source_tag}:{obs.station_id}:{obs.target_date}"
+
+
 def _hourly_obs_to_v2_row(
     obs: HourlyObservation,
     *,
@@ -137,6 +155,7 @@ def _hourly_obs_to_v2_row(
         "hour_min_raw_ts": obs.hour_min_raw_ts,
         "raw_obs_count": obs.observation_count,
         "aggregation": "utc_hour_bucket_extremum",
+        "source_url": _source_url_for_obs(obs, source_tag=source_tag),
         "payload_hash": _sha256_json({
             "city": obs.city,
             "target_date": obs.target_date,
@@ -304,29 +323,35 @@ def run_live_tick(
         results.append(r)
         logger.debug("skip HKO_NATIVE city %s", name)
 
-    with db_writer_lock(db_path, WriteClass.BULK) as conn:
-        # WU_ICAO cities
-        for city_name in wu_names:
-            try:
-                r = _tick_wu_city(city_name, conn, start_date=start_date, end_date=end_date, dry_run=dry_run)
-            except Exception as exc:
-                r = TickResult(city=city_name, tier="WU_ICAO", failure_reason=f"unexpected: {exc}")
-                logger.exception("Unexpected error for WU city %s", city_name)
-            results.append(r)
-            logger.info("%s", r)
-            _append_log(log_path, r, start_date=start_date, end_date=end_date)
-            time.sleep(0.5)  # modest rate-limit courtesy
+    with db_writer_lock(db_path, WriteClass.BULK):
+        conn = sqlite3.connect(str(db_path)) if not dry_run else None
+        try:
+            # WU_ICAO cities
+            for city_name in wu_names:
+                try:
+                    r = _tick_wu_city(city_name, conn, start_date=start_date, end_date=end_date, dry_run=dry_run)
+                except Exception as exc:
+                    r = TickResult(city=city_name, tier="WU_ICAO", failure_reason=f"unexpected: {exc}")
+                    logger.exception("Unexpected error for WU city %s", city_name)
+                results.append(r)
+                logger.info("%s", r)
+                _append_log(log_path, r, start_date=start_date, end_date=end_date)
+                time.sleep(0.5)  # modest rate-limit courtesy
 
-        # OGIMET_METAR cities (21s inter-request limit enforced by client module)
-        for city_name in ogimet_names:
-            try:
-                r = _tick_ogimet_city(city_name, conn, start_date=start_date, end_date=end_date, dry_run=dry_run)
-            except Exception as exc:
-                r = TickResult(city=city_name, tier="OGIMET_METAR", failure_reason=f"unexpected: {exc}")
-                logger.exception("Unexpected error for Ogimet city %s", city_name)
-            results.append(r)
-            logger.info("%s", r)
-            _append_log(log_path, r, start_date=start_date, end_date=end_date)
+            # OGIMET_METAR cities (21s inter-request limit enforced by client module)
+            for city_name in ogimet_names:
+                try:
+                    r = _tick_ogimet_city(city_name, conn, start_date=start_date, end_date=end_date, dry_run=dry_run)
+                except Exception as exc:
+                    r = TickResult(city=city_name, tier="OGIMET_METAR", failure_reason=f"unexpected: {exc}")
+                    logger.exception("Unexpected error for Ogimet city %s", city_name)
+                results.append(r)
+                logger.info("%s", r)
+                _append_log(log_path, r, start_date=start_date, end_date=end_date)
+        finally:
+            if conn is not None:
+                conn.commit()
+                conn.close()
 
     return results
 
