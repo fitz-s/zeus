@@ -69,6 +69,52 @@ HOOK_SPECIFIC_OUTPUT_EVENTS = frozenset({
     "PreToolUse", "UserPromptSubmit", "PostToolUse", "PostToolBatch",
 })
 
+# Events where harness reserves stdout for tool-protocol payload. Hooks for
+# these events MUST emit empty stdout + advisory on stderr (see dispatch.py
+# _STDOUT_PROTOCOL_RESERVED_EVENTS). Tracked separately so the F3 schema
+# check expects empty stdout instead of JSON for these events.
+STDOUT_PROTOCOL_RESERVED_EVENTS = frozenset({
+    "WorktreeCreate", "WorktreeRemove",
+})
+
+# 2026-05-17 fixtures captured from real Claude Code hook payloads. These
+# match the actual shape the harness sends, supplementing _synthetic_payload_for
+# which is a permissive superset. Used by test_real_payload_fixtures_round_trip.
+FIXTURES_DIR = Path(__file__).parent / "fixtures" / "dispatch_payloads"
+
+# Hooks that should DEMONSTRABLY fire an advisory when given a payload that
+# matches their trigger conditions. Mapping: hook_id → callable that returns
+# a payload guaranteed to trigger the advisory. Used by F5 positive-enforcement
+# test below. Hooks not in this dict are not yet covered by positive
+# enforcement (an antibody growth surface — add as you write new hooks).
+POSITIVE_ENFORCEMENT_TRIGGERS: dict[str, dict[str, Any]] = {
+    "pr_thread_reply_waste": {
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_input": {"command": "gh pr comment 123 --body 'thanks for the fix'"},
+    },
+    "worktree_create_advisor": {
+        "hook_event_name": "WorktreeCreate",
+        "tool_input": {"path": "/tmp/synthetic-trigger", "branch": "synth"},
+    },
+    "worktree_remove_advisor": {
+        "hook_event_name": "WorktreeRemove",
+        "tool_input": {"path": "/tmp/synthetic-trigger"},
+    },
+    # EXCLUDED FROM DETERMINISTIC POSITIVE ENFORCEMENT (state-dependent):
+    # - pr_create_loc_accumulation: signal depends on current branch's
+    #   accumulated LOC vs origin/main. PR #132 itself has >300 LOC, so
+    #   the hook returns None ("no block needed") instead of blocking.
+    # - pre_branch_create_in_primary: signal depends on cwd being PRIMARY
+    #   worktree; test subprocess runs in a worktree (not primary).
+    # - monitor_arm_overdue_advisor: signal depends on sentinel file
+    #   existing + age >120s.
+    # These hooks are exercised by the runtime-fire F3/F7-F10/dispatch_error
+    # signal tests with neutral payloads (assert they don't crash). The
+    # operator-level e2e (real PR open, real worktree op) verifies their
+    # trigger paths.
+}
+
 
 def _load_registry() -> dict[str, Any]:
     return yaml.safe_load(REGISTRY_PATH.read_text())
@@ -162,35 +208,62 @@ def test_catalog_size_matches_len_hooks(registry):
 
 def test_f1_every_registry_hook_invoked_by_settings(registry, settings_invocations):
     """Every registry hook must have at least one matching dispatch invocation
-    in settings.json for the event type the registry declares."""
+    in settings.json for the event type the registry declares — AND the
+    settings matcher must include the tool(s) the registry says the hook
+    needs (otherwise the hook fires for an unrelated tool or never fires
+    for the relevant one).
+
+    2026-05-17 critic Finding #5 (PR #127 deferred): F1 originally checked
+    only event match, missing matcher mismatches where event was right but
+    matcher excluded the registry's declared tool surface.
+    """
     failures: list[str] = []
     for h in registry["hooks"]:
         hid = h["id"]
         expected_event = h.get("event", "")
+        expected_matcher = (h.get("matcher", "") or "").strip()
         invocations = settings_invocations.get(hid, [])
         if not invocations:
             failures.append(
                 f"{hid}: no settings.json dispatch invocation — hook never fires"
             )
             continue
-        # event-match: at least one invocation must be under the right event
-        # (matcher narrowing is allowed; event mismatch is fatal)
-        if not any(ev == expected_event for ev, _ in invocations):
+        event_match = [m for ev, m in invocations if ev == expected_event]
+        if not event_match:
             failures.append(
                 f"{hid}: registry event={expected_event} but settings invokes "
                 f"only under {invocations}"
             )
-    assert not failures, "F1 dormant/wrong-event hooks:\n" + "\n".join(failures)
+            continue
+        # Matcher overlap check: settings matcher must include the registry's
+        # declared tool surface. For pipe-OR matchers ("Edit|Write|Bash"),
+        # check that EVERY registry-declared tool appears in at least one
+        # settings matcher.
+        if expected_matcher:
+            registry_tools = {t.strip() for t in expected_matcher.split("|") if t.strip()}
+            settings_tools = set()
+            for m in event_match:
+                settings_tools.update(t.strip() for t in m.split("|") if t.strip())
+            missing = registry_tools - settings_tools
+            if missing:
+                failures.append(
+                    f"{hid}: registry matcher={expected_matcher!r} declares tool(s) "
+                    f"{sorted(missing)} not covered by settings matcher(s) "
+                    f"{sorted(settings_tools)}"
+                )
+    assert not failures, "F1 dormant/wrong-event/matcher-gap hooks:\n" + "\n".join(failures)
 
 
-@pytest.mark.parametrize("hook_idx", range(0, 20))  # safe upper bound
+@pytest.mark.parametrize("hook_idx", range(len(_load_registry().get("hooks", []))))
 def test_f3_emit_advisory_schema_valid_per_hook(registry, hook_idx):
-    """For each hook, synthesizing its declared event produces a Claude-Code-
-    schema-valid JSON response (uses hookSpecificOutput only for allowlisted
-    events; uses systemMessage otherwise)."""
+    """For each hook, synthesizing its declared event produces a response that
+    matches the THREE-ROUTE protocol in _emit_advisory:
+      1. allowlisted events → hookSpecificOutput JSON on stdout
+      2. WorktreeCreate/Remove → EMPTY stdout (harness reads stdout as
+         tool-protocol path; advisory goes to stderr)
+      3. everything else → systemMessage JSON on stdout
+    """
     hooks = registry["hooks"]
-    if hook_idx >= len(hooks):
-        pytest.skip(f"only {len(hooks)} hooks; idx {hook_idx} out of range")
     h = hooks[hook_idx]
     hid = h["id"]
     event = h.get("event", "PreToolUse")
@@ -199,8 +272,15 @@ def test_f3_emit_advisory_schema_valid_per_hook(registry, hook_idx):
     assert result.returncode == 0, (
         f"{hid}: dispatch exited {result.returncode}, stderr={result.stderr[:200]}"
     )
+    # Route 2: WorktreeCreate/Remove MUST have empty stdout (advisory → stderr)
+    if event in STDOUT_PROTOCOL_RESERVED_EVENTS:
+        assert not result.stdout.strip(), (
+            f"{hid}: event={event} is stdout-protocol-reserved; stdout MUST be "
+            f"empty (advisory belongs on stderr). Got stdout[:200]={result.stdout[:200]}"
+        )
+        return
     if not result.stdout.strip():
-        # Empty stdout is acceptable (handler returned None → no advisory)
+        # Routes 1/3: empty stdout acceptable when handler returned None.
         return
     try:
         out = json.loads(result.stdout)
@@ -246,7 +326,7 @@ def test_f6_handler_signature_matches_dispatcher(registry):
     assert not issues, "F6 handler signature issues:\n" + "\n".join(issues)
 
 
-@pytest.mark.parametrize("hook_idx", range(0, 20))
+@pytest.mark.parametrize("hook_idx", range(len(_load_registry().get("hooks", []))))
 def test_f7_f10_handler_runtime_fire(registry, hook_idx):
     """Combined F7 (lazy imports) + F10 (timeout). Synthesizing each event
     and running the FULL subprocess flow within timeout proves handler
@@ -363,3 +443,133 @@ def test_no_handler_emits_dispatch_error_signal(registry):
         "fail-open mask exit code AND in-process return, but _emit_signal "
         "log entry survives as proof):\n" + "\n".join(errors)
     )
+
+
+# ---------------------------------------------------------------------------
+# 2026-05-17 PR #128 follow-up: positive enforcement + E2E + real-payload fixtures
+# ---------------------------------------------------------------------------
+
+
+def test_f5_positive_enforcement_hooks_that_should_advise_do_advise():
+    """For hooks that have an entry in POSITIVE_ENFORCEMENT_TRIGGERS,
+    a payload guaranteed to trigger the advisory MUST produce a non-None
+    return value (or for stdout-reserved events, non-empty stderr).
+
+    Antibody for the 2026-05-17 critic Finding (PR #127 deferred): the
+    runtime-fire test only asserted "didn't crash" — it could not catch
+    "handler ran cleanly and silently returned None when it SHOULD have
+    advised". This is the "forgot to fire" failure mode, distinct from
+    the "crashed and got fail-opened" mode test_no_handler_emits_
+    dispatch_error_signal already catches.
+
+    Coverage: see POSITIVE_ENFORCEMENT_TRIGGERS dict. Add new entries when
+    writing new hooks. Hooks not in the dict are not yet covered.
+    """
+    failures: list[str] = []
+    # "Fired" = ANY of: non-empty stdout (advisory JSON), non-zero exit
+    # (BLOCKING hooks like pr_create_loc_accumulation), or stderr containing
+    # the hook's signature ([advisory:<id>] or BLOCKED prefix).
+    for hook_id, payload in POSITIVE_ENFORCEMENT_TRIGGERS.items():
+        event = payload.get("hook_event_name", "PreToolUse")
+        result = _invoke_dispatch(hook_id, payload)
+        fired = bool(result.stdout.strip())
+        fired = fired or (result.returncode != 0)
+        # Strip the noisy boot-integrity line before checking stderr signal
+        stderr_clean = "\n".join(
+            line for line in (result.stderr or "").splitlines()
+            if "[hook integrity]" not in line
+        )
+        fired = fired or bool(stderr_clean.strip())
+        if not fired:
+            failures.append(
+                f"{hook_id}: trigger payload produced NO signal "
+                f"(event={event}, exit={result.returncode}). "
+                f"stderr[:200]={result.stderr[:200]}"
+            )
+    assert not failures, (
+        "Hooks silently returned None on payloads that SHOULD trigger their "
+        "advisory (the 'forgot to fire' failure mode):\n" + "\n".join(failures)
+    )
+
+
+def test_e2e_real_dispatch_invocation_for_pretooluse_bash():
+    """End-to-end: invoke dispatch.py the SAME WAY Claude Code does for a
+    PreToolUse Bash event, with a payload shape matching settings.json
+    fixture, and verify advisory delivery via stdout JSON.
+
+    The runtime-fire tests (F1-F7,F10) catch boot/wiring/schema/silent-crash
+    failures. This E2E test catches "the hook runs, the payload reaches the
+    handler, AND the handler produces a parseable advisory the harness can
+    deliver to the agent." If any step in that real chain breaks, this test
+    catches it.
+
+    Choice of hook: invariant_test (PreToolUse Bash on `git commit`). It's
+    one of the OLDEST hooks (created 2026-05-06 per registry charter), so
+    a regression in dispatch.py main() or _emit_advisory would surface here.
+    """
+    # Realistic payload shape: matches what Claude Code passes for PreToolUse
+    payload = {
+        "hook_event_name": "PreToolUse",
+        "session_id": "e2e-test",
+        "tool_name": "Bash",
+        "tool_input": {
+            "command": "git commit -m 'test'",
+            "description": "commit test",
+        },
+    }
+    result = _invoke_dispatch("invariant_test", payload)
+    assert result.returncode == 0, f"exit={result.returncode} stderr={result.stderr[:200]}"
+    assert result.stdout.strip(), (
+        "E2E: PreToolUse Bash + git commit cmd produced NO stdout advisory. "
+        "invariant_test should always advise on git commit. "
+        f"stderr={result.stderr[:300]}"
+    )
+    out = json.loads(result.stdout)
+    assert "hookSpecificOutput" in out, (
+        f"E2E: expected hookSpecificOutput JSON, got {list(out.keys())}"
+    )
+    assert out["hookSpecificOutput"]["hookEventName"] == "PreToolUse"
+    assert "additionalContext" in out["hookSpecificOutput"]
+    # Advisory text should mention invariant tests or pytest
+    ctx = out["hookSpecificOutput"]["additionalContext"]
+    assert "pytest" in ctx.lower() or "invariant" in ctx.lower(), (
+        f"E2E: advisory text doesn't look like invariant_test's output: {ctx[:200]}"
+    )
+
+
+def test_real_payload_fixtures_round_trip(registry):
+    """If real-shape payload fixtures exist under tests/fixtures/dispatch_payloads/,
+    feed each one to its named hook and assert no dispatch_error.
+
+    Fixtures are JSON files named `<hook_id>.<scenario>.json`. They supplement
+    _synthetic_payload_for (which is a permissive superset) with actual
+    captured shapes. Captured per 2026-05-17 critic Finding #3 (PR #127
+    deferred) — synthetic payloads may diverge from real ones in subtle ways.
+
+    If FIXTURES_DIR doesn't exist, skip (no real captures yet).
+    """
+    if not FIXTURES_DIR.exists():
+        pytest.skip(f"no fixtures captured at {FIXTURES_DIR}")
+    fixtures = list(FIXTURES_DIR.glob("*.json"))
+    if not fixtures:
+        pytest.skip("fixtures dir exists but is empty")
+    failures: list[str] = []
+    for fx in fixtures:
+        hook_id = fx.stem.split(".")[0]
+        try:
+            payload = json.loads(fx.read_text())
+        except json.JSONDecodeError as e:
+            failures.append(f"{fx.name}: invalid JSON ({e})")
+            continue
+        result = _invoke_dispatch(hook_id, payload)
+        if result.returncode != 0:
+            failures.append(
+                f"{fx.name}: dispatch exit={result.returncode} stderr={result.stderr[:200]}"
+            )
+            continue
+        # Check stderr doesn't have a real Python Traceback
+        for marker in ("Traceback", "NameError", "TypeError", "AttributeError"):
+            if marker in result.stderr:
+                failures.append(f"{fx.name}: stderr contains {marker}")
+                break
+    assert not failures, "Real-payload fixture failures:\n" + "\n".join(failures)

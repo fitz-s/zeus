@@ -1,0 +1,9 @@
+{
+  "hook_event_name": "PreToolUse",
+  "session_id": "real-shape-capture-2026-05-17",
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "git commit -m 'feat: add new feature'",
+    "description": "create commit"
+  }
+}
