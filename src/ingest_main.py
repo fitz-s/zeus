@@ -330,6 +330,37 @@ def _k2_hole_scanner_tick():
             forecasts_conn.close()
 
 
+@_scheduler_job("ingest_k2_obs_v2_tick")
+def _k2_obs_v2_tick():
+    """Rolling 7-day live ingest for observation_instants_v2 (F44 fix).
+
+    Fetches recent hourly observations for all WU_ICAO + OGIMET_METAR cities
+    via the source-tier-correct clients and writes through the typed v2 writer.
+    HKO_NATIVE (Hong Kong) is handled by hko_ingest_tick.py --project-only.
+
+    Runs hourly at minute=15, offset from hourly_instants (:07) and other ticks.
+    Advisory lock 'obs_v2' prevents concurrent runs from ingest_main restart.
+    """
+    from src.data.dual_run_lock import acquire_lock
+    from pathlib import Path
+
+    with acquire_lock("obs_v2") as acquired:
+        if not acquired:
+            logger.info("ingest k2_obs_v2_tick skipped_lock_held")
+            return
+        import sys as _sys
+        _REPO_ROOT = Path(__file__).resolve().parent.parent
+        if str(_REPO_ROOT) not in _sys.path:
+            _sys.path.insert(0, str(_REPO_ROOT))
+        from scripts.obs_v2_live_tick import run_live_tick
+        # run_live_tick opens its own db_writer_lock connection to world.db.
+        # Do NOT create a second get_world_connection here.
+        results = run_live_tick(days_back=7, db_path=_REPO_ROOT / "state" / "zeus-world.db")
+        written = sum(r.rows_written for r in results if not r.skipped_hko)
+        failed = [r.city for r in results if r.failure_reason]
+        logger.info("K2 obs_v2_tick: written=%d failed=%s", written, failed or "none")
+
+
 # Staleness threshold for boot-time force-fetch.  A once-per-day cron
 # (forecasts at 07:30 UTC, solar at 00:30 UTC) that was missed while the
 # daemon was offline leaves the table stale.  If max captured_at / fetched_at
@@ -1130,6 +1161,16 @@ def main() -> None:
     _scheduler.add_job(
         _k2_hole_scanner_tick, "cron",
         hour=4, minute=0, id="ingest_k2_hole_scanner",
+        max_instances=1, coalesce=True, misfire_grace_time=3600,
+    )
+    # F44 fix: live rolling-window ingest for observation_instants_v2.
+    # Runs hourly at :15, offset from hourly_instants (:07) and other ticks.
+    # Ogimet cities have 21s inter-request rate limit enforced by client module;
+    # expect ~10-15 min runtime for a full 50-city pass. misfire_grace_time=3600
+    # allows one missed tick before the next fires.
+    _scheduler.add_job(
+        _k2_obs_v2_tick, "cron",
+        minute=15, id="ingest_k2_obs_v2",
         max_instances=1, coalesce=True, misfire_grace_time=3600,
     )
     _scheduler.add_job(
