@@ -575,6 +575,10 @@ docs_subroots:
     role: module_reference
     requires_agents: true
     allow_non_markdown: false
+  - path: "docs/reference/legacy"
+    role: legacy_reference
+    requires_agents: true
+    allow_non_markdown: false
   - path: "docs/operations"
     role: operations
     requires_agents: true
@@ -599,6 +603,13 @@ docs_subroots:
     requires_agents: true
     allow_non_markdown: true
     allowed_extensions: [".xlsx", ".csv", ".json"]
+  - path: "docs/operations/archive/cold"
+    role: historical_archive
+    visibility: historical_cold_storage
+    default_read: false
+    requires_agents: false
+    allow_non_markdown: true
+    expected_empty: true
   - path: "docs/archives"
     role: historical_archive
     visibility: historical_cold_storage
