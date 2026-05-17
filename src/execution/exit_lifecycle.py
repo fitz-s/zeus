@@ -400,6 +400,24 @@ def handle_exit_pending_missing(portfolio: PortfolioState, position: Position) -
     return {"action": "ignore", "position": None}
 
 
+def _is_below_min_order_sell_error(error: str) -> bool:
+    text = str(error or "").lower()
+    return "below" in text and "min_order_size" in text
+
+
+def _mark_exit_dust_hold(position: Position, reason: str, error: str = "") -> None:
+    """Hold a non-executable dust exit to settlement instead of retrying."""
+    _mark_pending_exit(position)
+    position.exit_state = "backoff_exhausted"
+    position.next_exit_retry_at = ""
+    position.last_exit_error = (error or "below_min_order_size")[:500]
+    logger.warning(
+        "EXIT DUST HOLD %s: %s. Holding to settlement; no sell retry is executable.",
+        position.trade_id,
+        reason,
+    )
+
+
 def execute_exit(
     portfolio: PortfolioState,
     position: Position,
@@ -598,6 +616,23 @@ def _execute_live_exit(
 
         if sell_result.status == "rejected":
             sell_error = sell_result.reason or "sell_rejected"
+            if _is_below_min_order_sell_error(sell_error):
+                dust_reason = f"{exit_context.exit_reason} [DUST: {sell_error}]"
+                _mark_exit_dust_hold(
+                    position,
+                    reason=dust_reason,
+                    error=sell_error,
+                )
+                if conn is not None:
+                    log_pending_exit_recovery_event(
+                        conn,
+                        position,
+                        event_type="EXIT_ORDER_REJECTED",
+                        reason=dust_reason,
+                        error=sell_error,
+                    )
+                    log_exit_retry_event(conn, position, reason=dust_reason, error=sell_error)
+                return f"sell_blocked_dust: {sell_error}"
             retry_reason = f"{exit_context.exit_reason} [SELL_ERROR: {sell_error}]"
             _mark_exit_retry(
                 position,

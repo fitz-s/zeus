@@ -1606,6 +1606,70 @@ def test_live_exit_quick_confirmed_without_explicit_fill_price_does_not_close(mo
     assert portfolio.positions == [position]
 
 
+def test_live_exit_below_min_order_rejection_enters_dust_hold_not_retry(conn, monkeypatch):
+    from src.execution import exit_lifecycle
+    from src.state.portfolio import ExitContext, PortfolioState, Position
+
+    position = Position(
+        trade_id="pos-dust-below-min-order",
+        market_id="condition-test",
+        condition_id="condition-test",
+        city="Karachi",
+        cluster="asia",
+        target_date="2026-05-17",
+        bin_label="37C+",
+        direction="buy_yes",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        entry_price=0.37,
+        size_usd=0.5873,
+        shares=1.5873,
+        cost_basis_usd=0.5873,
+        state="day0_window",
+    )
+    portfolio = PortfolioState(positions=[position])
+    exit_context = ExitContext(
+        exit_reason="SETTLEMENT_IMMINENT",
+        current_market_price=0.99,
+        best_bid=0.99,
+        hours_to_settlement=1.0,
+        position_state="day0_window",
+        day0_active=True,
+    )
+    error = "executable_snapshot_gate: size 1.5873 is below snapshot min_order_size 5"
+
+    monkeypatch.setattr(exit_lifecycle, "check_sell_collateral", lambda *args, **kwargs: (True, ""))
+    monkeypatch.setattr(exit_lifecycle, "_latest_or_capture_exit_snapshot_context", lambda *args, **kwargs: {})
+
+    def fake_execute_exit_order(intent, decision_id=""):
+        return exit_lifecycle.OrderResult(
+            trade_id=intent.trade_id,
+            status="rejected",
+            reason=error,
+            order_role="exit",
+        )
+
+    monkeypatch.setattr(exit_lifecycle, "execute_exit_order", fake_execute_exit_order)
+
+    outcome = exit_lifecycle.execute_exit(
+        portfolio,
+        position,
+        exit_context,
+        clob=object(),
+        conn=conn,
+    )
+
+    assert outcome == f"sell_blocked_dust: {error}"
+    assert position.state == "pending_exit"
+    assert position.exit_state == "backoff_exhausted"
+    assert position.next_exit_retry_at in ("", None)
+    assert position.last_exit_error == error
+    assert exit_lifecycle.check_pending_retries(position, conn=conn) is False
+    facts = _execution_facts(conn, position.trade_id)
+    assert facts[-1]["venue_status"] == "backoff_exhausted"
+    assert facts[-1]["terminal_exec_status"] == "backoff_exhausted"
+
+
 def test_exit_snapshot_capture_fails_closed_on_unverified_market_scan(conn, monkeypatch):
     from src.execution import exit_lifecycle
     from src.state.portfolio import Position
