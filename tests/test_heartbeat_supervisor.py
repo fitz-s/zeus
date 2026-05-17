@@ -30,6 +30,7 @@ from src.control.heartbeat_supervisor import (
     HeartbeatSupervisor,
     OrderType,
     configure_global_supervisor,
+    fresh_heartbeat_id_from_status,
     heartbeat_required_for,
     run_heartbeat_keeper,
     write_heartbeat_keeper_status,
@@ -151,6 +152,31 @@ def test_invalid_heartbeat_id_is_immediate_lease_loss_and_next_tick_restarts_cha
 
     assert recovered.health is HeartbeatHealth.HEALTHY
     assert adapter.heartbeat_ids == ["", "id-1", ""]
+
+
+def test_invalid_heartbeat_id_with_venue_hint_recovers_from_hinted_chain_id():
+    adapter = FakeHeartbeatAdapter([
+        RuntimeError(
+            "PolyApiException[status_code=400, "
+            "error_message={'heartbeat_id': 'server-current', "
+            "'error_msg': 'Invalid Heartbeat ID'}]"
+        ),
+        HeartbeatAck(ok=True, raw={"heartbeat_id": "server-next"}),
+    ])
+    supervisor = HeartbeatSupervisor(
+        adapter,
+        cadence_seconds=5,
+        initial_heartbeat_id="persisted-stale",
+    )
+
+    lost = _run(supervisor.run_once())
+    recovered = _run(supervisor.run_once())
+
+    assert lost.health is HeartbeatHealth.LOST
+    assert lost.heartbeat_id == "server-current"
+    assert recovered.health is HeartbeatHealth.HEALTHY
+    assert recovered.heartbeat_id == "server-next"
+    assert adapter.heartbeat_ids == ["persisted-stale", "server-current"]
 
 
 def test_overlapping_heartbeat_ticks_do_not_reuse_same_heartbeat_id():
@@ -410,7 +436,60 @@ def test_heartbeat_keeper_writes_status_without_order_side_effects(tmp_path):
     payload = json.loads(status_path.read_text())
     assert payload["owner"] == "zeus-venue-heartbeat"
     assert payload["health"] == "HEALTHY"
+    assert payload["heartbeat_id"] == "keeper-A"
     assert payload["last_error"] is None
+    assert adapter.heartbeat_ids == [""]
+
+
+def test_heartbeat_keeper_reuses_fresh_chain_id_after_restart(tmp_path):
+    status_path = tmp_path / "venue-heartbeat-keeper.json"
+    previous = HeartbeatStatus(
+        health=HeartbeatHealth.HEALTHY,
+        last_success_at=datetime.now(timezone.utc),
+        consecutive_failures=0,
+        heartbeat_id="keeper-A",
+        cadence_seconds=5,
+        last_error=None,
+    )
+    write_heartbeat_keeper_status(previous, path=status_path)
+    adapter = FakeHeartbeatAdapter([HeartbeatAck(ok=True, raw={"heartbeat_id": "keeper-B"})])
+
+    run_heartbeat_keeper(
+        adapter=adapter,
+        status_path=status_path,
+        cadence_seconds=5,
+        max_ticks=1,
+    )
+
+    payload = json.loads(status_path.read_text())
+    assert fresh_heartbeat_id_from_status(path=status_path) == "keeper-B"
+    assert payload["heartbeat_id"] == "keeper-B"
+    assert adapter.heartbeat_ids == ["keeper-A"]
+
+
+def test_heartbeat_keeper_ignores_stale_restart_seed(tmp_path):
+    status_path = tmp_path / "venue-heartbeat-keeper.json"
+    previous = HeartbeatStatus(
+        health=HeartbeatHealth.HEALTHY,
+        last_success_at=datetime.now(timezone.utc) - timedelta(seconds=60),
+        consecutive_failures=0,
+        heartbeat_id="stale-id",
+        cadence_seconds=5,
+        last_error=None,
+    )
+    write_heartbeat_keeper_status(previous, path=status_path)
+    payload = json.loads(status_path.read_text())
+    payload["written_at"] = (datetime.now(timezone.utc) - timedelta(seconds=60)).isoformat()
+    status_path.write_text(json.dumps(payload))
+    adapter = FakeHeartbeatAdapter([HeartbeatAck(ok=True, raw={"heartbeat_id": "keeper-A"})])
+
+    run_heartbeat_keeper(
+        adapter=adapter,
+        status_path=status_path,
+        cadence_seconds=5,
+        max_ticks=1,
+    )
+
     assert adapter.heartbeat_ids == [""]
 
 
@@ -444,6 +523,42 @@ def test_main_external_venue_heartbeat_mode_consumes_status_without_posting(
 
     assert main._venue_heartbeat_thread is None
     assert main._venue_heartbeat_supervisor is None
+
+
+def test_main_internal_venue_heartbeat_reuses_fresh_chain_id_on_restart(
+    tmp_path,
+    monkeypatch,
+):
+    from src import main
+
+    status_path = tmp_path / "venue-heartbeat-keeper.json"
+    previous = HeartbeatStatus(
+        health=HeartbeatHealth.HEALTHY,
+        last_success_at=datetime.now(timezone.utc),
+        consecutive_failures=0,
+        heartbeat_id="daemon-A",
+        cadence_seconds=5,
+        last_error=None,
+    )
+    write_heartbeat_keeper_status(previous, path=status_path, owner="zeus-live-daemon")
+    adapter = FakeHeartbeatAdapter([HeartbeatAck(ok=True, raw={"heartbeat_id": "daemon-B"})])
+
+    class Client:
+        def _ensure_v2_adapter(self):
+            return adapter
+
+    monkeypatch.delenv("ZEUS_VENUE_HEARTBEAT_MODE", raising=False)
+    monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", Client)
+    main._venue_heartbeat_thread = None
+    main._venue_heartbeat_supervisor = None
+    main._venue_heartbeat_adapter = None
+
+    main._write_venue_heartbeat()
+
+    payload = json.loads(status_path.read_text())
+    assert adapter.heartbeat_ids == ["daemon-A"]
+    assert payload["owner"] == "zeus-live-daemon"
+    assert payload["heartbeat_id"] == "daemon-B"
 
 
 def test_main_starts_venue_heartbeat_before_boot_http():

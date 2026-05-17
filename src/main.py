@@ -817,7 +817,9 @@ def _write_venue_heartbeat() -> None:
         HeartbeatSupervisor,
         current_status,
         configure_global_supervisor,
+        fresh_heartbeat_id_from_status,
         heartbeat_cadence_seconds_from_env,
+        write_heartbeat_keeper_status,
     )
 
     if _external_venue_heartbeat_enabled():
@@ -839,6 +841,7 @@ def _write_venue_heartbeat() -> None:
             _venue_heartbeat_supervisor = HeartbeatSupervisor(
                 adapter,
                 cadence_seconds=heartbeat_cadence_seconds_from_env(),
+                initial_heartbeat_id=fresh_heartbeat_id_from_status(),
             )
             configure_global_supervisor(_venue_heartbeat_supervisor)
     except Exception as exc:
@@ -863,6 +866,7 @@ def _write_venue_heartbeat() -> None:
             f"venue heartbeat unhealthy: health={status.health.value}; "
             f"error={status.last_error or ''}"
         )
+    write_heartbeat_keeper_status(status, owner="zeus-live-daemon")
     _start_venue_background_maintenance_async(_venue_heartbeat_adapter)
 
 

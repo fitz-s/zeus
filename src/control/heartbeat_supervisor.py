@@ -13,6 +13,7 @@ import inspect
 import json
 import logging
 import os
+import re
 import threading
 import time
 from dataclasses import dataclass
@@ -26,6 +27,7 @@ logger = logging.getLogger(__name__)
 HEARTBEAT_CANCEL_SUSPECTED_REASON = "heartbeat_cancel_suspected"
 DEFAULT_HEARTBEAT_CADENCE_SECONDS = 5
 DEFAULT_HEARTBEAT_STATUS_MAX_AGE_SECONDS = 8
+DEFAULT_HEARTBEAT_RESTART_SEED_MAX_AGE_SECONDS = 30
 HEARTBEAT_KEEPER_STATUS_FILENAME = "venue-heartbeat-keeper.json"
 _RESTING_ORDER_TYPES = {"GTC", "GTD"}
 _IMMEDIATE_ORDER_TYPES = {"FOK", "FAK"}
@@ -142,6 +144,18 @@ def _is_invalid_heartbeat_id_error(exc: Exception | str) -> bool:
     return "Invalid Heartbeat ID" in str(exc)
 
 
+def _heartbeat_id_hint_from_error(exc: Exception | str) -> str:
+    text = str(exc)
+    for pattern in (
+        r"['\"]heartbeat_id['\"]\s*:\s*['\"]([^'\"]+)['\"]",
+        r"heartbeat_id=([0-9a-fA-F-]{16,})",
+    ):
+        match = re.search(pattern, text)
+        if match:
+            return match.group(1)
+    return ""
+
+
 def write_heartbeat_keeper_status(
     status: HeartbeatStatus,
     *,
@@ -157,6 +171,7 @@ def write_heartbeat_keeper_status(
         "written_at": now.isoformat(),
         "health": status.health.value,
         "last_success_at": status.last_success_at.isoformat() if status.last_success_at else None,
+        "heartbeat_id": status.heartbeat_id,
         "consecutive_failures": status.consecutive_failures,
         "cadence_seconds": status.cadence_seconds,
         "last_error": status.last_error,
@@ -165,6 +180,35 @@ def write_heartbeat_keeper_status(
     tmp.write_text(json.dumps(payload, sort_keys=True) + "\n")
     tmp.replace(target)
     return target
+
+
+def fresh_heartbeat_id_from_status(
+    *,
+    path: Path | None = None,
+    max_age_seconds: int = DEFAULT_HEARTBEAT_RESTART_SEED_MAX_AGE_SECONDS,
+) -> str:
+    """Return the latest fresh venue heartbeat chain token for restart handoff.
+
+    The CLOB heartbeat id is a server-rotated lease token. A daemon restart must
+    continue the last fresh token instead of registering a new empty chain while
+    the old server-side lease is still active.
+    """
+
+    target = path or heartbeat_keeper_status_path()
+    try:
+        payload = json.loads(target.read_text())
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        return ""
+    written_at = _parse_utc(payload.get("written_at"))
+    if written_at is None:
+        return ""
+    age_seconds = (datetime.now(timezone.utc) - written_at).total_seconds()
+    if age_seconds < 0 or age_seconds > max_age_seconds:
+        return ""
+    if str(payload.get("health") or "").upper() != HeartbeatHealth.HEALTHY.value:
+        return ""
+    heartbeat_id = str(payload.get("heartbeat_id") or "").strip()
+    return heartbeat_id
 
 
 class ExternalHeartbeatSupervisor:
@@ -245,7 +289,7 @@ class ExternalHeartbeatSupervisor:
             health=health,
             last_success_at=last_success_at,
             consecutive_failures=int(payload.get("consecutive_failures") or 0),
-            heartbeat_id="external",
+            heartbeat_id=str(payload.get("heartbeat_id") or "external"),
             cadence_seconds=cadence_seconds,
             last_error=payload.get("last_error"),
         )
@@ -257,7 +301,13 @@ class ExternalHeartbeatSupervisor:
 
 
 class HeartbeatSupervisor:
-    def __init__(self, adapter: Any, cadence_seconds: int = DEFAULT_HEARTBEAT_CADENCE_SECONDS) -> None:
+    def __init__(
+        self,
+        adapter: Any,
+        cadence_seconds: int = DEFAULT_HEARTBEAT_CADENCE_SECONDS,
+        *,
+        initial_heartbeat_id: str = "",
+    ) -> None:
         if cadence_seconds <= 0:
             raise ValueError("cadence_seconds must be positive")
         self._adapter = adapter
@@ -272,7 +322,7 @@ class HeartbeatSupervisor:
         #     POST {heartbeat_id:"<bogus>"}       -> 400 Invalid Heartbeat ID
         # On any 4xx we restart the chain with "" rather than minting a UUID
         # (the previous bug — a fresh UUID never matches the server record).
-        self._heartbeat_id: str = ""
+        self._heartbeat_id: str = str(initial_heartbeat_id or "")
         self._health = HeartbeatHealth.STARTING
         self._last_success_at: Optional[datetime] = None
         self._consecutive_failures = 0
@@ -326,7 +376,14 @@ class HeartbeatSupervisor:
                 self._heartbeat_id = next_id
                 self.record_success()
             except Exception as exc:  # fail closed, surface through status/tombstone
-                self._heartbeat_id = ""  # reset chain so next tick re-registers
+                # Invalid-heartbeat errors include the venue's current canonical
+                # token. Preserve that handoff hint so a restart can recover on
+                # the next tick instead of waiting for the old server lease to
+                # expire and cancel resting orders.
+                if _is_invalid_heartbeat_id_error(exc):
+                    self._heartbeat_id = _heartbeat_id_hint_from_error(exc)
+                else:
+                    self._heartbeat_id = ""  # reset chain so next tick re-registers
                 self.record_failure(exc)
         finally:
             self._run_once_lock.release()
@@ -464,7 +521,12 @@ def run_heartbeat_keeper(
 
         adapter = PolymarketClient()._ensure_v2_adapter()
     cadence = heartbeat_cadence_seconds_from_env() if cadence_seconds is None else int(cadence_seconds)
-    supervisor = HeartbeatSupervisor(adapter, cadence_seconds=cadence)
+    initial_heartbeat_id = fresh_heartbeat_id_from_status(path=status_path)
+    supervisor = HeartbeatSupervisor(
+        adapter,
+        cadence_seconds=cadence,
+        initial_heartbeat_id=initial_heartbeat_id,
+    )
     ticks = 0
     while True:
         started = datetime.now(timezone.utc)
