@@ -11,6 +11,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import json
+import logging
 import sqlite3
 import uuid
 from dataclasses import dataclass
@@ -23,6 +24,8 @@ from src.control.cutover_guard import CutoverPending, redemption_decision
 from src.contracts.fx_classification import FXClassification
 from src.state.collateral_ledger import require_pusd_redemption_allowed
 
+logger = logging.getLogger(__name__)
+
 PAYOUT_ASSETS = frozenset({"pUSD", "USDC", "USDC_E"})
 
 SETTLEMENT_COMMAND_SCHEMA = """
@@ -30,7 +33,8 @@ CREATE TABLE IF NOT EXISTS settlement_commands (
   command_id TEXT PRIMARY KEY,
   state TEXT NOT NULL CHECK (state IN (
     'REDEEM_INTENT_CREATED','REDEEM_SUBMITTED','REDEEM_TX_HASHED',
-    'REDEEM_CONFIRMED','REDEEM_FAILED','REDEEM_RETRYING','REDEEM_REVIEW_REQUIRED'
+    'REDEEM_CONFIRMED','REDEEM_FAILED','REDEEM_RETRYING','REDEEM_REVIEW_REQUIRED',
+    'REDEEM_OPERATOR_REQUIRED'
   )),
   condition_id TEXT NOT NULL,
   market_id TEXT NOT NULL,
@@ -76,8 +80,18 @@ class SettlementState(str, Enum):
     REDEEM_FAILED = "REDEEM_FAILED"
     REDEEM_RETRYING = "REDEEM_RETRYING"
     REDEEM_REVIEW_REQUIRED = "REDEEM_REVIEW_REQUIRED"
+    # 2026-05-16 SCAFFOLD §K.2 v5 Path A-clean: first-class state for
+    # operator-completion when PolymarketV2Adapter.redeem returns the
+    # REDEEM_DEFERRED_TO_R1 stub. Exit transitions only via
+    # scripts/operator_record_redeem.py CLI (record-only, no web3 write).
+    REDEEM_OPERATOR_REQUIRED = "REDEEM_OPERATOR_REQUIRED"
 
 
+# NOTE (2026-05-16 SCAFFOLD §K v5): REDEEM_OPERATOR_REQUIRED is NOT terminal.
+# It is a designed-terminal-with-operator-action state (per
+# cascade_liveness_contract.yaml terminal_states_with_operator_action).
+# The operator CLI transitions it out to REDEEM_TX_HASHED; no scheduler tick
+# touches it (disjoint state guard with _SUBMITTABLE_STATES).
 _TERMINAL_STATES = {
     SettlementState.REDEEM_CONFIRMED,
     SettlementState.REDEEM_FAILED,
@@ -388,11 +402,19 @@ def submit_redeem(
 
         raw_payload = _raw_dict(raw)
         if not _success(raw_payload):
-            state_after = (
-                SettlementState.REDEEM_REVIEW_REQUIRED
-                if raw_payload.get("errorCode") == "REDEEM_DEFERRED_TO_R1"
-                else SettlementState.REDEEM_FAILED
-            )
+            # SCAFFOLD §K.3 v5 (2026-05-16): when adapter returns the
+            # REDEEM_DEFERRED_TO_R1 stub, route to REDEEM_OPERATOR_REQUIRED
+            # (first-class operator-completion state) instead of generic
+            # REVIEW_REQUIRED catch-all. Operator-completion CLI is
+            # scripts/operator_record_redeem.py. Other errorCodes still
+            # route to REDEEM_FAILED as a true terminal failure.
+            stub_deferred = raw_payload.get("errorCode") == "REDEEM_DEFERRED_TO_R1"
+            if stub_deferred:
+                state_after = SettlementState.REDEEM_OPERATOR_REQUIRED
+                terminal_flag = False  # operator CLI exits this state
+            else:
+                state_after = SettlementState.REDEEM_FAILED
+                terminal_flag = True
             with _savepoint(conn):
                 _transition(
                     conn,
@@ -400,11 +422,22 @@ def submit_redeem(
                     state_after,
                     payload=raw_payload,
                     error_payload=raw_payload,
-                    terminal=True,
+                    terminal=terminal_flag,
                     recorded_at=_coerce_time(None),
                 )
             if own_conn:
                 conn.commit()
+            # SCAFFOLD §K.3 v5 atomicity contract: alert fires AFTER the
+            # savepoint+commit completes (best-effort, not part of transaction).
+            # Heartbeat-sensor (Finding #10 path) picks up the
+            # [REDEEM_OPERATOR_REQUIRED] prefix from logs/zeus-live.err.
+            if stub_deferred:
+                logger.warning(
+                    "[REDEEM_OPERATOR_REQUIRED] command_id=%s condition_id=%s "
+                    "action=run_operator_record_redeem details='Polymarket UI claim + "
+                    "scripts/operator_record_redeem.py <condition_id> <tx_hash>'",
+                    command_id, row["condition_id"],
+                )
             return SettlementResult(command_id, state_after, raw_response=raw_payload, error_payload=raw_payload)
 
         tx_hash = _extract_tx_hash(raw_payload)
@@ -559,6 +592,73 @@ def _transition(
         ),
     )
     _append_event(conn, command_id, state.value, dict(payload), recorded_at=recorded_at)
+
+
+def _atomic_transition(
+    conn: sqlite3.Connection,
+    command_id: str,
+    *,
+    from_state: SettlementState | str,
+    to_state: SettlementState | str,
+    tx_hash: str | None = None,
+    submitted_at: str | None = None,
+    terminal_at: str | None = None,
+    error_payload: Mapping[str, Any] | None = None,
+    payload: Mapping[str, Any] | None = None,
+    recorded_at: str | None = None,
+) -> bool:
+    """SQLite-atomic conditional state transition with WHERE state guard.
+
+    Returns True if the row was transitioned (cursor.rowcount == 1), False
+    if the row was already in a different state (no UPDATE happened). The
+    caller MUST check the return value before firing side effects (alerts,
+    audit events) — see SCAFFOLD §K.3 v5 atomicity contract.
+
+    Distinct from `_transition`:
+      - `_transition` is Python-guard + SAVEPOINT semantics (caller pre-checks
+        state then transitions). Used by submit_redeem internally.
+      - `_atomic_transition` is SQL-guard via `WHERE state = ?`. Used by the
+        operator CLI (scripts/operator_record_redeem.py) which races with the
+        scheduler tick across processes — disjoint state guards (CLI on
+        OPERATOR_REQUIRED, scheduler on _SUBMITTABLE_STATES) are race-free.
+
+    Per SCAFFOLD §K.3 v5: if rowcount == 0, alert MUST NOT fire (no
+    false-alert on failed transition). The event append also depends on
+    successful UPDATE, so on rowcount == 0 nothing is appended.
+    """
+    from_value = from_state.value if isinstance(from_state, SettlementState) else from_state
+    to_value = to_state.value if isinstance(to_state, SettlementState) else to_state
+    cur = conn.execute(
+        """
+        UPDATE settlement_commands
+           SET state = ?,
+               tx_hash = COALESCE(?, tx_hash),
+               submitted_at = COALESCE(?, submitted_at),
+               terminal_at = COALESCE(?, terminal_at),
+               error_payload = ?
+         WHERE command_id = ?
+           AND state = ?
+        """,
+        (
+            to_value,
+            tx_hash,
+            submitted_at,
+            terminal_at,
+            _json_dumps(error_payload) if error_payload is not None else None,
+            command_id,
+            from_value,
+        ),
+    )
+    transitioned = cur.rowcount == 1
+    if transitioned and payload is not None:
+        _append_event(
+            conn,
+            command_id,
+            to_value,
+            dict(payload),
+            recorded_at=recorded_at or _coerce_time(None),
+        )
+    return transitioned
 
 
 def _append_event(

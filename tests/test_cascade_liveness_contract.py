@@ -96,37 +96,53 @@ def _scheduler_job_ids_at_boot() -> set[str]:
 
 
 def _state_transitions_in_module(module_path: Path) -> Iterable[str]:
-    """Yield every state literal/enum-attribute passed to _transition /
-    _atomic_transition call expressions in `module_path`.
+    """Yield every state name referenced in a function body that contains
+    a call to _transition / _atomic_transition.
 
-    Covers BOTH forms (G2 round-3 critic NEW-P11 fix):
-      _transition(conn, cid, "REDEEM_OPERATOR_REQUIRED", ...)
-      _transition(conn, cid, SettlementState.REDEEM_OPERATOR_REQUIRED, ...)
-      _atomic_transition(conn, cid, to_state="REDEEM_OPERATOR_REQUIRED")
-      _atomic_transition(conn, cid, to_state=SettlementState.REDEEM_OPERATOR_REQUIRED)
+    Covers both inline and via-variable patterns (G2 round-3 critic NEW-P11 fix):
+      _transition(conn, cid, "REDEEM_OPERATOR_REQUIRED", ...)              # literal
+      _transition(conn, cid, SettlementState.REDEEM_OPERATOR_REQUIRED, ...) # enum inline
+      state_after = SettlementState.REDEEM_OPERATOR_REQUIRED                # via variable
+      _transition(conn, cid, state_after, ...)                              # ↑
+      _atomic_transition(... to_state="REDEEM_OPERATOR_REQUIRED" ...)       # kwarg literal
+      _atomic_transition(... to_state=SettlementState.REDEEM_OPERATOR_REQUIRED ...) # kwarg enum
+
+    Strategy: find every FunctionDef containing a transition call; then walk
+    the function body for any reference (string literal or SettlementState
+    attribute access) to a state name. This avoids requiring inline-literal
+    style in the source while preserving the contract intent ("state is
+    reachable from a transition site in this function").
     """
     tree = ast.parse(module_path.read_text())
     targets = {"_transition", "_atomic_transition"}
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
+
+    def _calls_transition(func_def: ast.FunctionDef) -> bool:
+        for sub in ast.walk(func_def):
+            if not isinstance(sub, ast.Call):
+                continue
+            f = sub.func
+            n = f.id if isinstance(f, ast.Name) else (
+                f.attr if isinstance(f, ast.Attribute) else None
+            )
+            if n in targets:
+                return True
+        return False
+
+    for fdef in ast.walk(tree):
+        if not isinstance(fdef, ast.FunctionDef):
             continue
-        func = node.func
-        name = func.id if isinstance(func, ast.Name) else (
-            func.attr if isinstance(func, ast.Attribute) else None
-        )
-        if name not in targets:
+        if not _calls_transition(fdef):
             continue
-        # positional and keyword args both possible
-        candidates: list[ast.expr] = []
-        candidates.extend(node.args)
-        candidates.extend(kw.value for kw in node.keywords)
-        for c in candidates:
-            if isinstance(c, ast.Constant) and isinstance(c.value, str):
-                yield c.value
-            elif isinstance(c, ast.Attribute) and isinstance(c.value, ast.Name):
-                # SettlementState.REDEEM_OPERATOR_REQUIRED
-                if c.value.id in {"SettlementState"}:
-                    yield c.attr
+        for sub in ast.walk(fdef):
+            # SettlementState.REDEEM_OPERATOR_REQUIRED  →  Attribute(Name)
+            if isinstance(sub, ast.Attribute) and isinstance(sub.value, ast.Name):
+                if sub.value.id == "SettlementState":
+                    yield sub.attr
+            # "REDEEM_OPERATOR_REQUIRED"  →  Constant(str)
+            if isinstance(sub, ast.Constant) and isinstance(sub.value, str):
+                # filter to look-like-state strings (uppercase + underscores)
+                if sub.value.isupper() and "_" in sub.value:
+                    yield sub.value
 
 
 def test_every_state_machine_in_contract_has_a_registered_poller():

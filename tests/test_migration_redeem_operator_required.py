@@ -1,0 +1,218 @@
+# Created: 2026-05-16
+# Last reused or audited: 2026-05-16
+# Authority basis: SCAFFOLD_F14_F16.md §K.8 v5 (migration tests a-f)
+
+from __future__ import annotations
+
+import sqlite3
+from pathlib import Path
+
+import pytest
+
+# Script filename starts with digits ("202605_..."), so direct package
+# import is impossible. Load via importlib spec instead.
+import importlib.util
+
+
+def _import_migration_module():
+    repo_root = Path(__file__).resolve().parent.parent
+    script_path = (
+        repo_root
+        / "scripts"
+        / "migrations"
+        / "202605_add_redeem_operator_required_state.py"
+    )
+    spec = importlib.util.spec_from_file_location("_migr_module", script_path)
+    assert spec and spec.loader
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)  # type: ignore[union-attr]
+    return mod
+
+
+migration = _import_migration_module()
+
+
+# v1 (pre-migration) schema — minimal subset, mirrors settlement_commands.py:28-66
+V1_SCHEMA = """
+CREATE TABLE settlement_commands (
+  command_id TEXT PRIMARY KEY,
+  state TEXT NOT NULL CHECK (state IN (
+    'REDEEM_INTENT_CREATED','REDEEM_SUBMITTED','REDEEM_TX_HASHED',
+    'REDEEM_CONFIRMED','REDEEM_FAILED','REDEEM_RETRYING','REDEEM_REVIEW_REQUIRED'
+  )),
+  condition_id TEXT NOT NULL,
+  market_id TEXT NOT NULL,
+  payout_asset TEXT NOT NULL CHECK (payout_asset IN ('pUSD','USDC','USDC_E')),
+  pusd_amount_micro INTEGER,
+  token_amounts_json TEXT,
+  tx_hash TEXT,
+  block_number INTEGER,
+  confirmation_count INTEGER DEFAULT 0,
+  requested_at TEXT NOT NULL,
+  submitted_at TEXT,
+  terminal_at TEXT,
+  error_payload TEXT
+);
+CREATE INDEX idx_settlement_commands_state ON settlement_commands (state, requested_at);
+CREATE INDEX idx_settlement_commands_condition ON settlement_commands (condition_id, market_id);
+CREATE UNIQUE INDEX ux_settlement_commands_active_condition_asset
+  ON settlement_commands (condition_id, market_id, payout_asset)
+  WHERE state NOT IN ('REDEEM_CONFIRMED','REDEEM_FAILED');
+
+CREATE TABLE settlement_command_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  command_id TEXT NOT NULL REFERENCES settlement_commands(command_id),
+  event_type TEXT NOT NULL,
+  payload_hash TEXT NOT NULL,
+  payload_json TEXT,
+  recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+"""
+
+
+def _seed_v1_db(db_path: Path, with_row: bool = True) -> None:
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.executescript(V1_SCHEMA)
+        if with_row:
+            conn.execute(
+                """
+                INSERT INTO settlement_commands
+                  (command_id, state, condition_id, market_id, payout_asset,
+                   requested_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                ("cmd-001", "REDEEM_INTENT_CREATED", "c30f28a5", "m1", "USDC_E", "2026-05-16T20:00:00+00:00"),
+            )
+            conn.execute(
+                """
+                INSERT INTO settlement_command_events
+                  (command_id, event_type, payload_hash, payload_json)
+                VALUES (?, ?, ?, ?)
+                """,
+                ("cmd-001", "REDEEM_INTENT_CREATED", "h", "{}"),
+            )
+            conn.commit()
+    finally:
+        conn.close()
+
+
+def test_a_row_preserved_after_migration(tmp_path: Path) -> None:
+    db = tmp_path / "test.db"
+    _seed_v1_db(db, with_row=True)
+
+    outcome = migration._migrate_one_db(db, dry_run=False)
+    assert outcome["action"] == "migrated", outcome
+
+    conn = sqlite3.connect(str(db))
+    try:
+        row = conn.execute(
+            "SELECT command_id, state, condition_id FROM settlement_commands WHERE command_id='cmd-001'"
+        ).fetchone()
+        assert row == ("cmd-001", "REDEEM_INTENT_CREATED", "c30f28a5"), row
+    finally:
+        conn.close()
+
+
+def test_b_new_state_accepted_post_migration(tmp_path: Path) -> None:
+    db = tmp_path / "test.db"
+    _seed_v1_db(db, with_row=True)
+    migration._migrate_one_db(db, dry_run=False)
+
+    conn = sqlite3.connect(str(db))
+    try:
+        # Should accept the new state now
+        conn.execute(
+            """
+            INSERT INTO settlement_commands
+              (command_id, state, condition_id, market_id, payout_asset, requested_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            ("cmd-002", "REDEEM_OPERATOR_REQUIRED", "c2", "m2", "USDC_E", "2026-05-16T20:01:00+00:00"),
+        )
+        conn.commit()
+        row = conn.execute("SELECT state FROM settlement_commands WHERE command_id='cmd-002'").fetchone()
+        assert row[0] == "REDEEM_OPERATOR_REQUIRED"
+    finally:
+        conn.close()
+
+
+def test_c_foreign_keys_valid_post_migration(tmp_path: Path) -> None:
+    db = tmp_path / "test.db"
+    _seed_v1_db(db, with_row=True)
+    migration._migrate_one_db(db, dry_run=False)
+
+    conn = sqlite3.connect(str(db))
+    try:
+        conn.execute("PRAGMA foreign_keys = ON")
+        violations = list(conn.execute("PRAGMA foreign_key_check"))
+        assert violations == [], f"unexpected FK violations: {violations!r}"
+        # And: settlement_command_events.command_id still references the row
+        ev = conn.execute(
+            "SELECT command_id FROM settlement_command_events WHERE command_id='cmd-001'"
+        ).fetchone()
+        assert ev is not None
+    finally:
+        conn.close()
+
+
+def test_d_re_run_is_no_op(tmp_path: Path) -> None:
+    db = tmp_path / "test.db"
+    _seed_v1_db(db, with_row=True)
+    first = migration._migrate_one_db(db, dry_run=False)
+    assert first["action"] == "migrated"
+    second = migration._migrate_one_db(db, dry_run=False)
+    assert second["action"] == "no_op_already_applied", second
+
+
+def test_e_fk_violation_triggers_rollback(tmp_path: Path) -> None:
+    """Artificially seed an FK violation (orphan event row) then run migration.
+
+    SQLite v3 allows orphan FK rows when foreign_keys=OFF. After table rebuild,
+    the new table has the same PK; the orphan event still references a missing
+    row (but the migration only rebuilds settlement_commands, not events).
+    Force violation by inserting an orphan AFTER seeding the row that gets
+    preserved — then the rebuild keeps the row, FK valid. So instead: insert
+    an event with command_id that points to a NON-existent command.
+    """
+    db = tmp_path / "test.db"
+    _seed_v1_db(db, with_row=True)
+    conn = sqlite3.connect(str(db))
+    try:
+        # Insert orphan event row with foreign_keys=OFF to bypass enforcement
+        conn.execute("PRAGMA foreign_keys = OFF")
+        conn.execute(
+            "INSERT INTO settlement_command_events (command_id, event_type, payload_hash) "
+            "VALUES (?, ?, ?)",
+            ("nonexistent-cmd", "BAD", "h"),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    outcome = migration._migrate_one_db(db, dry_run=False)
+    assert outcome["action"] == "abort_fk_violations", outcome
+    # And: original row preserved (rollback should not have lost it)
+    conn = sqlite3.connect(str(db))
+    try:
+        row = conn.execute("SELECT command_id FROM settlement_commands WHERE command_id='cmd-001'").fetchone()
+        assert row is not None, "rollback must preserve pre-migration row"
+    finally:
+        conn.close()
+
+
+def test_f_dry_run_does_not_modify(tmp_path: Path) -> None:
+    db = tmp_path / "test.db"
+    _seed_v1_db(db, with_row=True)
+    before = db.read_bytes()
+    outcome = migration._migrate_one_db(db, dry_run=True)
+    assert outcome["action"] == "dry_run_would_migrate", outcome
+    after = db.read_bytes()
+    assert before == after, "dry-run must not modify DB bytes"
+
+
+def test_skip_missing_db(tmp_path: Path) -> None:
+    """Per v5 spec: migration on a non-existent DB returns skip outcome, exit 0."""
+    db = tmp_path / "not-here.db"
+    outcome = migration._migrate_one_db(db, dry_run=False)
+    assert outcome["action"] == "skip_missing"

@@ -826,7 +826,7 @@ def get_connection(
 # CI hook scripts/check_schema_version.py diffs the sqlite_master hash of
 # a fresh-init DB against tests/state/_schema_pinned_hash.txt and fails
 # the PR if SCHEMA_VERSION did not change in lockstep.
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4  # 2026-05-16 PR-I C2: REDEEM_OPERATOR_REQUIRED added to settlement_commands.state CHECK (SCAFFOLD §K v5)
 
 
 def init_schema(
