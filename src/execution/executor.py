@@ -2296,6 +2296,7 @@ def execute_exit_order(
                 intent_id=intent.intent_id,
                 idempotency_key=intent.idempotency_key,
                 venue_status=str(result.get("status") or ""),
+                command_id=command_id,  # F7: propagate so log_execution_fact records FK
             )
         if not order_id:
             try:
@@ -2324,6 +2325,7 @@ def execute_exit_order(
                 intent_id=intent.intent_id,
                 idempotency_key=intent.idempotency_key,
                 venue_status=str(result.get("status") or ""),
+                command_id=command_id,  # F7: propagate so log_execution_fact records FK
             )
 
         # SUBMIT_ACKED — order placed successfully
@@ -3163,6 +3165,7 @@ def _live_order(
                 order_role="entry",
                 venue_status=str(result.get("status") or ""),
                 idempotency_key=idem.value,
+                command_id=command_id,  # F7: propagate so log_execution_fact records FK
             )
         if not order_id:
             try:
@@ -3190,6 +3193,7 @@ def _live_order(
                 order_role="entry",
                 venue_status=str(result.get("status") or ""),
                 idempotency_key=idem.value,
+                command_id=command_id,  # F7: propagate so log_execution_fact records FK
             )
         # SUBMIT_ACKED
         try:

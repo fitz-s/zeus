@@ -38,10 +38,24 @@ def _ensure_ledger(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
-def _get_pending(conn: sqlite3.Connection) -> list[Path]:
-    """Return migration scripts not yet recorded in the ledger."""
-    _ensure_ledger(conn)
-    applied = {r[0] for r in conn.execute("SELECT name FROM _migrations_applied")}
+def _get_pending(conn: sqlite3.Connection, *, ensure: bool = True) -> list[Path]:
+    """Return migration scripts not yet recorded in the ledger.
+
+    Args:
+        ensure: if True (default), call _ensure_ledger() to create and seed the
+            ledger table before querying it.  Pass False for dry-run inspection
+            where committing bootstrap rows would violate the advertised no-write
+            contract.  When False the ledger must already exist or the SELECT
+            will raise OperationalError; callers must guard accordingly.
+    """
+    if ensure:
+        _ensure_ledger(conn)
+    applied: set[str] = set()
+    try:
+        applied = {r[0] for r in conn.execute("SELECT name FROM _migrations_applied")}
+    except Exception:
+        # Ledger absent and ensure=False — treat all scripts as pending.
+        pass
     scripts = sorted(MIGRATIONS_DIR.glob("2*.py"))
     return [s for s in scripts if s.stem not in applied]
 
@@ -79,7 +93,11 @@ def apply_migrations(
         List of migration names that were applied (or would be applied).
     """
     applied_names: list[str] = []
-    for script in _get_pending(conn):
+    # dry_run=True must not commit any rows — pass ensure=False so _ensure_ledger
+    # is skipped and no bootstrap rows land in the DB.  Non-dry-run always
+    # initialises the ledger via ensure=True (the default).
+    pending = _get_pending(conn, ensure=not dry_run)
+    for script in pending:
         if target and script.stem != target:
             continue
         # F30: enforce header presence before any work.

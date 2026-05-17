@@ -26,10 +26,14 @@ import sqlite3
 
 def up(conn: sqlite3.Connection) -> None:
     """Backfill settlements_v2 from settlements. Idempotent."""
-    # Pre-check 1: no duplicates in v1 that would cause silent data loss
+    # Pre-check 1: no duplicates in v1 eligible rows that would cause silent data loss.
+    # Scope to temperature_metric IS NOT NULL: NULL-metric rows are always skipped
+    # (v2 has a NOT NULL constraint) so duplicate (city, target_date, NULL) groups
+    # cannot collide in settlements_v2 and must not abort the migration.
     dupes = conn.execute(
         """SELECT city, target_date, temperature_metric, COUNT(*) as cnt
            FROM settlements
+           WHERE temperature_metric IS NOT NULL
            GROUP BY city, target_date, temperature_metric
            HAVING cnt > 1"""
     ).fetchall()
@@ -78,7 +82,10 @@ def up(conn: sqlite3.Connection) -> None:
          pm_bin_lo, pm_bin_hi, unit, settlement_source_type,
          physical_quantity, observation_field, data_version) = row
 
-        # Merge v1-only fields into provenance_json
+        # Merge v1-only fields into provenance_json.
+        # Also stamp explicit backfill provenance so rows inserted via this
+        # migration are auditable (reconstruction_method + writer_module) even
+        # when the legacy settlements.provenance_json was empty or malformed.
         try:
             provenance = json.loads(provenance_json_str) if provenance_json_str else {}
         except (json.JSONDecodeError, TypeError):
@@ -93,6 +100,13 @@ def up(conn: sqlite3.Connection) -> None:
             "observation_field": observation_field,
             "data_version": data_version,
         }
+
+        # Stamp backfill audit keys only when absent so live-written rows
+        # that already carry these fields are not overwritten.
+        if "reconstruction_method" not in provenance:
+            provenance["reconstruction_method"] = "v1_backfill"
+        if "writer_module" not in provenance:
+            provenance["writer_module"] = "scripts.migrations.202605_backfill_settlements_v2"
 
         # Normalize authority: v2 CHECK only allows VERIFIED/UNVERIFIED/QUARANTINED
         if authority not in ("VERIFIED", "UNVERIFIED", "QUARANTINED"):
