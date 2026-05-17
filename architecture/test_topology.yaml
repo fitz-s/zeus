@@ -267,6 +267,18 @@ test_trust_policy:
     tests/test_check_data_pipeline_live_e2e.py: {created: "2026-05-15", last_used: "2026-05-15"}
     tests/test_check_live_order_e2e.py: {created: "2026-05-15", last_used: "2026-05-15"}
     tests/test_live_health_probe_forecast_owner.py: {created: "2026-05-15", last_used: "2026-05-15"}
+    # PR #137 — post-Karachi remediation wave antibodies (2026-05-17).
+    # E: WorktreeCreate hook stdout protocol — moved from tests/.claude/hooks/
+    # (pytest.ini norecursedirs=.claude excluded it) to tests/ for collection.
+    tests/test_worktree_create_contract.py: {created: "2026-05-17", last_used: "2026-05-17"}
+    tests/test_settlements_parity.py: {created: "2026-05-17", last_used: "2026-05-17"}
+    tests/test_settlement_commands_ux_review_required.py: {created: "2026-05-17", last_used: "2026-05-17"}
+    tests/test_migration_runner_idempotent.py: {created: "2026-05-17", last_used: "2026-05-17"}
+    tests/test_market_scanner_zero_insert_alert.py: {created: "2026-05-17", last_used: "2026-05-17"}
+    tests/test_k1_reader_isolation.py: {created: "2026-05-17", last_used: "2026-05-17"}
+    tests/test_k1_reader_isolation_batch2.py: {created: "2026-05-17", last_used: "2026-05-17"}
+    tests/test_evaluator_dsi_invariant.py: {created: "2026-05-17", last_used: "2026-05-17"}
+    tests/test_chain_reconciliation_occurred_at_iso.py: {created: "2026-05-17", last_used: "2026-05-17"}
 
 categories:
   core_law_antibody:
@@ -460,6 +472,20 @@ categories:
     - tests/test_position_metric_resolver.py
     - tests/test_realized_fill_at_receipt.py
     - tests/test_evaluate_candidate_metric_integration.py
+    # PR #137 — post-Karachi remediation wave antibodies (2026-05-17).
+    # E: WorktreeCreate hook stdout protocol antibody (moved from tests/.claude/hooks/).
+    - tests/test_worktree_create_contract.py
+    # F8/F15/F18/F23/F25/F29/F40/F41 fixes: occurred_at ISO, settlements_v2 parity,
+    # migration runner idempotency, market scanner 0-insert alert, DSI sentinel,
+    # redeem review exclusion index, K1 reader isolation batch-1 and batch-2.
+    - tests/test_settlements_parity.py
+    - tests/test_settlement_commands_ux_review_required.py
+    - tests/test_migration_runner_idempotent.py
+    - tests/test_market_scanner_zero_insert_alert.py
+    - tests/test_k1_reader_isolation.py
+    - tests/test_k1_reader_isolation_batch2.py
+    - tests/test_evaluator_dsi_invariant.py
+    - tests/test_chain_reconciliation_occurred_at_iso.py
 
   useful_regression:
     - tests/test_alpha_target_coherence.py
