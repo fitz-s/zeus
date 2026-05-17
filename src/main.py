@@ -578,6 +578,8 @@ def _run_ws_gap_reconcile_if_required(
 def _run_venue_background_maintenance_once(adapter=None) -> dict:
     """Run venue read-side maintenance outside the heartbeat critical path."""
 
+    if _cycle_lock.locked():
+        return {"status": "deferred_cycle_running"}
     active_adapter = adapter or _venue_heartbeat_adapter
     if active_adapter is None:
         return {"status": "adapter_unavailable"}
@@ -591,6 +593,8 @@ def _run_venue_background_maintenance_once(adapter=None) -> dict:
 def _start_collateral_background_refresh_async(adapter=None) -> str:
     """Refresh collateral on an independent lane from slower venue maintenance."""
 
+    if _cycle_lock.locked():
+        return "deferred_cycle_running"
     active_adapter = adapter or _venue_heartbeat_adapter
     if active_adapter is None:
         return "adapter_unavailable"
@@ -616,6 +620,8 @@ def _start_venue_background_maintenance_async(adapter=None) -> str:
     """Start slow venue maintenance without delaying the next heartbeat tick."""
 
     global _last_venue_background_maintenance_attempt_at
+    if _cycle_lock.locked():
+        return "deferred_cycle_running"
     active_adapter = adapter or _venue_heartbeat_adapter
     if active_adapter is None:
         return "adapter_unavailable"
@@ -913,6 +919,8 @@ def _start_venue_heartbeat_loop_if_needed() -> None:
     global _venue_heartbeat_thread
     if _external_venue_heartbeat_enabled():
         _configure_external_venue_heartbeat_supervisor_if_needed()
+        if _cycle_lock.locked():
+            return
         adapter = _ensure_venue_read_side_adapter()
         _start_collateral_background_refresh_async(adapter)
         _start_venue_background_maintenance_async(adapter)

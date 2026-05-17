@@ -651,6 +651,72 @@ def test_collateral_background_refresh_is_not_blocked_by_slow_venue_maintenance(
     assert calls == [adapter]
 
 
+def test_external_heartbeat_defers_background_db_work_while_cycle_runs(monkeypatch):
+    from src import main
+
+    calls = []
+
+    class Adapter:
+        pass
+
+    def _ensure_adapter():
+        calls.append("ensure_adapter")
+        return Adapter()
+
+    monkeypatch.setattr(main, "_external_venue_heartbeat_enabled", lambda: True)
+    monkeypatch.setattr(
+        main,
+        "_configure_external_venue_heartbeat_supervisor_if_needed",
+        lambda: calls.append("configure_supervisor"),
+    )
+    monkeypatch.setattr(main, "_ensure_venue_read_side_adapter", _ensure_adapter)
+    monkeypatch.setattr(
+        main,
+        "_start_collateral_background_refresh_async",
+        lambda adapter: calls.append("collateral_background"),
+    )
+    monkeypatch.setattr(
+        main,
+        "_start_venue_background_maintenance_async",
+        lambda adapter: calls.append("venue_background"),
+    )
+
+    assert main._cycle_lock.acquire(blocking=False)
+    try:
+        main._start_venue_heartbeat_loop_if_needed()
+    finally:
+        main._cycle_lock.release()
+
+    assert calls == ["configure_supervisor"]
+
+
+def test_venue_background_maintenance_defers_while_cycle_runs(monkeypatch):
+    from src import main
+
+    adapter = object()
+    calls = []
+
+    monkeypatch.setattr(
+        main,
+        "_run_ws_gap_reconcile_if_required",
+        lambda active_adapter: calls.append("ws_gap"),
+    )
+    monkeypatch.setattr(
+        main,
+        "_refresh_global_collateral_snapshot_if_due",
+        lambda active_adapter: calls.append("collateral"),
+    )
+
+    assert main._cycle_lock.acquire(blocking=False)
+    try:
+        result = main._run_venue_background_maintenance_once(adapter)
+    finally:
+        main._cycle_lock.release()
+
+    assert result == {"status": "deferred_cycle_running"}
+    assert calls == []
+
+
 def test_venue_background_maintenance_refreshes_stale_global_collateral(monkeypatch):
     from src import main
     from src.state.collateral_ledger import (
