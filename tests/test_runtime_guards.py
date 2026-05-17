@@ -9654,6 +9654,29 @@ def test_store_snapshot_p_raw_persists_support_topology_in_v2_provenance(tmp_pat
     assert json.loads(legacy_row["p_raw_json"]) == [0.2, 0.3, 0.5]
 
 
+def test_store_snapshot_p_raw_defers_transient_database_lock():
+    class LockedConn:
+        def __init__(self):
+            self.rolled_back = False
+
+        def execute(self, *args, **kwargs):
+            raise sqlite3.OperationalError("database is locked")
+
+        def rollback(self):
+            self.rolled_back = True
+
+    conn = LockedConn()
+
+    result = evaluator_module._store_snapshot_p_raw(
+        conn,
+        "locked-snapshot",
+        np.array([0.2, 0.3, 0.5]),
+    )
+
+    assert result is None
+    assert conn.rolled_back
+
+
 @pytest.mark.parametrize(
     "mutate",
     [

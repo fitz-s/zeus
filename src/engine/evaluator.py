@@ -13,6 +13,7 @@ import logging
 import hashlib
 import math
 import os
+import sqlite3
 import uuid
 from collections import defaultdict
 from dataclasses import dataclass, field, fields, is_dataclass
@@ -2412,13 +2413,19 @@ def evaluate_candidate(
             p_raw=p_raw,
         )]
 
-    p_raw_persisted = _store_snapshot_p_raw(
-        conn,
-        snapshot_id,
-        p_raw,
-        bias_corrected=bool(getattr(ens, "bias_corrected", False)),
-        p_raw_topology=p_raw_topology,
-    )
+    if using_period_extrema:
+        # Executable forecast-reader rows are forecast-authority inputs. The
+        # live evaluator must not turn a forecast DB projection write into a
+        # foreground money-path dependency; it already has p_raw in memory.
+        p_raw_persisted = None
+    else:
+        p_raw_persisted = _store_snapshot_p_raw(
+            conn,
+            snapshot_id,
+            p_raw,
+            bias_corrected=bool(getattr(ens, "bias_corrected", False)),
+            p_raw_topology=p_raw_topology,
+        )
     if p_raw_persisted is False:
         return [EdgeDecision(
             False,
@@ -4447,6 +4454,20 @@ def _store_snapshot_p_raw(
             )
         conn.commit()
         return True
+    except sqlite3.OperationalError as e:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        if str(e).startswith("database is locked"):
+            logger.warning(
+                "Deferred snapshot p_raw persistence for %s: %s",
+                snapshot_id,
+                e,
+            )
+            return None
+        logger.warning("Failed to store snapshot p_raw for %s: %s", snapshot_id, e)
+        return False
     except Exception as e:
         try:
             conn.rollback()
