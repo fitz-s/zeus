@@ -3,7 +3,7 @@
 ## Summary table
 
 All paths are repo-relative (resolve from worktree root). Workers MUST edit files
-in their own worktree only — never at canonical `/Users/leofitz/.openclaw/workspace-venus/zeus/`.
+in their own worktree only — never at canonical `<canonical_worktree>`.
 
 | path | lines | last_touched | category |
 |------|-------|--------------|----------|
