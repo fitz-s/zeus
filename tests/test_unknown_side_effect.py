@@ -839,6 +839,191 @@ def test_review_required_pre_sdk_no_side_effect_can_be_cleared(conn):
     ) is None
 
 
+def test_review_required_recovery_no_venue_exposure_can_be_cleared(conn):
+    from src.execution.command_recovery import (
+        build_review_required_no_venue_exposure_proof,
+        clear_review_required_no_venue_exposure,
+    )
+    from src.risk_allocator.governor import count_unknown_side_effects
+
+    _insert_unknown_side_effect(
+        conn,
+        command_id="cmd-m2-clear-no-exposure",
+        token_id="tok-m2-clear-no-exposure",
+        idem="a" * 32,
+        final_event="REVIEW_REQUIRED",
+        final_event_payload={"reason": "recovery_no_venue_order_id"},
+    )
+
+    class FakeAdapter:
+        def get_open_orders(self):
+            return [{"id": "unrelated", "asset_id": "other-token", "status": "LIVE"}]
+
+        def get_trades(self):
+            return [{"id": "old", "asset_id": "tok-m2-clear-no-exposure", "match_time": "1"}]
+
+    proof = build_review_required_no_venue_exposure_proof(
+        conn,
+        "cmd-m2-clear-no-exposure",
+        FakeAdapter(),
+        observed_at=NOW.isoformat(),
+    )
+    payload = clear_review_required_no_venue_exposure(
+        conn,
+        "cmd-m2-clear-no-exposure",
+        venue_absence_proof=proof,
+        source_commit="test-commit",
+        source_function="operator_review",
+        reviewed_by="pytest",
+        occurred_at=NOW.isoformat(),
+    )
+
+    cmd = conn.execute(
+        "SELECT * FROM venue_commands WHERE command_id = ?",
+        ("cmd-m2-clear-no-exposure",),
+    ).fetchone()
+    assert cmd["state"] == "EXPIRED"
+    events = conn.execute(
+        "SELECT event_type, payload_json FROM venue_command_events WHERE command_id = ? ORDER BY sequence_no",
+        ("cmd-m2-clear-no-exposure",),
+    ).fetchall()
+    assert [row["event_type"] for row in events][-1] == "REVIEW_CLEARED_NO_VENUE_EXPOSURE"
+    assert json.loads(events[-1]["payload_json"]) == payload
+    assert payload["proof_class"] == "venue_absence_no_exposure"
+    assert payload["venue_absence_proof"]["matching_open_order_count"] == 0
+    assert payload["venue_absence_proof"]["matching_trade_count"] == 0
+
+    unknown_count, unknown_markets = count_unknown_side_effects(conn)
+    assert unknown_count == 0
+    assert unknown_markets == ()
+
+
+def test_review_required_recovery_no_venue_exposure_rejects_matching_trade(conn):
+    from src.execution.command_recovery import (
+        build_review_required_no_venue_exposure_proof,
+        clear_review_required_no_venue_exposure,
+    )
+
+    _insert_unknown_side_effect(
+        conn,
+        command_id="cmd-m2-clear-has-trade",
+        token_id="tok-m2-clear-has-trade",
+        idem="b" * 32,
+        final_event="REVIEW_REQUIRED",
+        final_event_payload={"reason": "recovery_no_venue_order_id"},
+    )
+
+    class FakeAdapter:
+        def get_open_orders(self):
+            return []
+
+        def get_trades(self):
+            return [
+                {
+                    "id": "trade-match",
+                    "asset_id": "tok-m2-clear-has-trade",
+                    "match_time": str(NOW.timestamp() + 1),
+                }
+            ]
+
+    proof = build_review_required_no_venue_exposure_proof(
+        conn,
+        "cmd-m2-clear-has-trade",
+        FakeAdapter(),
+        observed_at=NOW.isoformat(),
+    )
+    assert proof["matching_trade_count"] == 1
+    with pytest.raises(ValueError, match="matching trades"):
+        clear_review_required_no_venue_exposure(
+            conn,
+            "cmd-m2-clear-has-trade",
+            venue_absence_proof=proof,
+            source_commit="test-commit",
+            source_function="operator_review",
+            reviewed_by="pytest",
+        )
+
+
+def test_review_required_recovery_no_venue_exposure_rejects_matching_open_order(conn):
+    from src.execution.command_recovery import (
+        build_review_required_no_venue_exposure_proof,
+        clear_review_required_no_venue_exposure,
+    )
+
+    _insert_unknown_side_effect(
+        conn,
+        command_id="cmd-m2-clear-has-open",
+        token_id="tok-m2-clear-has-open",
+        idem="c" * 32,
+        final_event="REVIEW_REQUIRED",
+        final_event_payload={"reason": "recovery_no_venue_order_id"},
+    )
+
+    class FakeAdapter:
+        def get_open_orders(self):
+            return [{"id": "ord-match", "asset_id": "tok-m2-clear-has-open", "status": "LIVE"}]
+
+        def get_trades(self):
+            return []
+
+    proof = build_review_required_no_venue_exposure_proof(
+        conn,
+        "cmd-m2-clear-has-open",
+        FakeAdapter(),
+        observed_at=NOW.isoformat(),
+    )
+    assert proof["matching_open_order_count"] == 1
+    with pytest.raises(ValueError, match="matching open orders"):
+        clear_review_required_no_venue_exposure(
+            conn,
+            "cmd-m2-clear-has-open",
+            venue_absence_proof=proof,
+            source_commit="test-commit",
+            source_function="operator_review",
+            reviewed_by="pytest",
+        )
+
+
+def test_review_required_recovery_no_venue_exposure_rejects_stale_read(conn):
+    from src.execution.command_recovery import (
+        build_review_required_no_venue_exposure_proof,
+        clear_review_required_no_venue_exposure,
+    )
+
+    _insert_unknown_side_effect(
+        conn,
+        command_id="cmd-m2-clear-stale-proof",
+        token_id="tok-m2-clear-stale-proof",
+        idem="d" * 32,
+        final_event="REVIEW_REQUIRED",
+        final_event_payload={"reason": "recovery_no_venue_order_id"},
+    )
+
+    class FakeAdapter:
+        def get_open_orders(self):
+            return []
+
+        def get_trades(self):
+            return []
+
+    proof = build_review_required_no_venue_exposure_proof(
+        conn,
+        "cmd-m2-clear-stale-proof",
+        FakeAdapter(),
+        observed_at=NOW.isoformat(),
+    )
+    with pytest.raises(ValueError, match="stale"):
+        clear_review_required_no_venue_exposure(
+            conn,
+            "cmd-m2-clear-stale-proof",
+            venue_absence_proof=proof,
+            source_commit="test-commit",
+            source_function="operator_review",
+            reviewed_by="pytest",
+            occurred_at=(NOW + timedelta(seconds=61)).isoformat(),
+        )
+
+
 def test_review_required_clearance_requires_decision_log_pre_sdk_proof(conn):
     from src.execution.command_recovery import clear_review_required_no_venue_side_effect
 

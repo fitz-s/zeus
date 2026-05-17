@@ -1,5 +1,5 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-05-08
+# Last reused/audited: 2026-05-17
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/M3.yaml
 """Polymarket authenticated user-channel ingest (R3 M3).
 
@@ -29,6 +29,7 @@ from src.state.venue_command_repo import (
     append_order_fact,
     append_position_lot,
     append_trade_fact,
+    resolve_position_lot_id_for_command,
     rollback_optimistic_lot_for_failed_trade,
 )
 
@@ -110,7 +111,19 @@ def _parse_dt(value: Any, *, fallback: datetime | None = None) -> datetime:
         return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
     text = str(value)
     if text.isdigit():
-        return datetime.fromtimestamp(int(text), tz=timezone.utc)
+        try:
+            epoch_value = int(text)
+            if epoch_value >= 10**18:
+                epoch_seconds = epoch_value / 1_000_000_000
+            elif epoch_value >= 10**15:
+                epoch_seconds = epoch_value / 1_000_000
+            elif epoch_value >= 10**12:
+                epoch_seconds = epoch_value / 1_000
+            else:
+                epoch_seconds = epoch_value
+            return datetime.fromtimestamp(epoch_seconds, tz=timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            return fallback or _utcnow()
     try:
         parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
     except ValueError:
@@ -227,10 +240,63 @@ def _trade_order_candidates(message: dict[str, Any]) -> list[str]:
         if value:
             candidates.append(str(value))
     for maker in message.get("maker_orders") or []:
-        if isinstance(maker, dict) and maker.get("order_id"):
-            candidates.append(str(maker["order_id"]))
+        if not isinstance(maker, dict):
+            continue
+        for key in ("order_id", "orderID", "orderId", "id"):
+            value = maker.get(key)
+            if value:
+                candidates.append(str(value))
     # Preserve order while deduping.
     return list(dict.fromkeys(candidates))
+
+
+def _maker_order_for_venue_order_id(message: dict[str, Any], venue_order_id: str) -> dict[str, Any] | None:
+    expected = str(venue_order_id or "")
+    if not expected:
+        return None
+    for maker in message.get("maker_orders") or []:
+        if not isinstance(maker, dict):
+            continue
+        for key in ("order_id", "orderID", "orderId", "id"):
+            if str(maker.get(key) or "") == expected:
+                return maker
+    return None
+
+
+def _first_present(mapping: dict[str, Any], keys: tuple[str, ...]) -> Any:
+    for key in keys:
+        value = mapping.get(key)
+        if value is not None and value != "":
+            return value
+    return None
+
+
+def _order_remaining_size(message: dict[str, Any]) -> str:
+    explicit_remaining = _first_present(
+        message,
+        ("remaining_size", "remainingSize", "size_remaining", "sizeRemaining"),
+    )
+    if explicit_remaining is not None:
+        return _decimal_str(explicit_remaining, "0")
+    original = _first_present(message, ("original_size", "originalSize", "size"))
+    matched = _first_present(message, ("size_matched", "matched_size", "sizeMatched", "matchedSize"))
+    if original is not None and matched is not None:
+        try:
+            remaining = Decimal(str(original)) - Decimal(str(matched))
+        except (InvalidOperation, TypeError, ValueError):
+            return _decimal_str(original, "0")
+        return str(max(remaining, Decimal("0")))
+    return _decimal_str(original, "0")
+
+
+def _trade_fill_economics_for_command(message: dict[str, Any], venue_order_id: str) -> tuple[Any, Any]:
+    maker = _maker_order_for_venue_order_id(message, venue_order_id)
+    if maker is not None:
+        return (
+            _first_present(maker, ("matched_amount", "matchedAmount", "filled_size", "size", "amount")),
+            _first_present(maker, ("price", "fill_price", "fillPrice", "avg_price", "avgPrice")),
+        )
+    return message.get("size"), message.get("price")
 
 
 def _lookup_command(conn, venue_order_ids: Iterable[str]) -> Optional[dict[str, Any]]:
@@ -245,29 +311,40 @@ def _lookup_command(conn, venue_order_ids: Iterable[str]) -> Optional[dict[str, 
     return dict(row) if row is not None else None
 
 
-def _parse_positive_int(value: Any) -> Optional[int]:
+def _command_fill_is_complete(conn, command: dict[str, Any]) -> bool:
     try:
-        parsed = int(str(value))
-    except (TypeError, ValueError):
-        return None
-    return parsed if parsed > 0 else None
-
-
-def _position_id_from_command(command: dict[str, Any]) -> Optional[int]:
-    """Resolve the canonical position id for a venue command row.
-
-    Executor-created live commands store a short runtime trade id in
-    ``position_id`` for operator correlation and thread the durable DB
-    ``trade_decisions.trade_id`` through ``decision_id``.  U2 position lots are
-    keyed by the canonical integer position id, so the user-channel projection
-    must not silently skip lots when ``position_id`` is non-numeric.
-    """
-
-    for key in ("position_id", "decision_id"):
-        parsed = _parse_positive_int(command.get(key))
-        if parsed is not None:
-            return parsed
-    return None
+        command_size = Decimal(str(command.get("size")))
+    except (InvalidOperation, TypeError, ValueError):
+        return False
+    if not command_size.is_finite() or command_size <= Decimal("0"):
+        return False
+    rows = conn.execute(
+        """
+        WITH latest AS (
+            SELECT trade_id, MAX(local_sequence) AS max_sequence
+              FROM venue_trade_facts
+             WHERE command_id = ?
+             GROUP BY trade_id
+        )
+        SELECT tf.filled_size
+          FROM venue_trade_facts tf
+          JOIN latest
+            ON latest.trade_id = tf.trade_id
+           AND latest.max_sequence = tf.local_sequence
+         WHERE tf.command_id = ?
+           AND tf.state IN ('MATCHED', 'MINED', 'CONFIRMED')
+        """,
+        (command["command_id"], command["command_id"]),
+    ).fetchall()
+    total = Decimal("0")
+    for row in rows:
+        try:
+            filled = Decimal(str(row["filled_size"]))
+        except (InvalidOperation, TypeError, ValueError):
+            continue
+        if filled.is_finite() and filled > Decimal("0"):
+            total += filled
+    return total >= command_size
 
 
 def _is_entry_buy_command(command: dict[str, Any]) -> bool:
@@ -532,7 +609,7 @@ class PolymarketUserChannelIngestor:
                 venue_order_id=venue_order_id,
                 command_id=command["command_id"],
                 state=state,
-                remaining_size=_decimal_str(message.get("size") or message.get("remaining_size"), "0"),
+                remaining_size=_order_remaining_size(message),
                 matched_size=_decimal_str(message.get("size_matched") or message.get("matched_size"), "0"),
                 source="WS_USER",
                 observed_at=observed,
@@ -580,8 +657,7 @@ class PolymarketUserChannelIngestor:
                 }
             venue_order_id = str(command.get("venue_order_id") or candidates[0])
             observed = _parse_dt(message.get("timestamp") or message.get("matchtime") or message.get("last_update"))
-            size_raw = message.get("size")
-            price_raw = message.get("price")
+            size_raw, price_raw = _trade_fill_economics_for_command(message, venue_order_id)
             missing = _missing_trade_fill_economics(status, size=size_raw, price=price_raw)
             if missing:
                 self._append_command_event_if_legal(
@@ -726,10 +802,28 @@ class PolymarketUserChannelIngestor:
             if status in {"MATCHED", "MINED"}:
                 command_event = "PARTIAL_FILL_OBSERVED"
                 if self._optimistic_trade_fact_for_trade(conn, trade_id) is None:
-                    self._append_position_lot(conn, command, fact_id, "OPTIMISTIC_EXPOSURE", message, observed)
+                    self._append_position_lot(
+                        conn,
+                        command,
+                        fact_id,
+                        "OPTIMISTIC_EXPOSURE",
+                        message,
+                        observed,
+                        filled_size=filled_size,
+                        fill_price=fill_price,
+                    )
             elif status == "CONFIRMED":
-                command_event = "FILL_CONFIRMED"
-                self._append_position_lot(conn, command, fact_id, "CONFIRMED_EXPOSURE", message, observed)
+                command_event = "FILL_CONFIRMED" if _command_fill_is_complete(conn, command) else "PARTIAL_FILL_OBSERVED"
+                self._append_position_lot(
+                    conn,
+                    command,
+                    fact_id,
+                    "CONFIRMED_EXPOSURE",
+                    message,
+                    observed,
+                    filled_size=filled_size,
+                    fill_price=fill_price,
+                )
             elif status == "FAILED":
                 self._rollback_failed_trade(conn, trade_id, fact_id, observed)
             if command_event:
@@ -772,18 +866,21 @@ class PolymarketUserChannelIngestor:
         state: str,
         message: dict[str, Any],
         observed: datetime,
+        *,
+        filled_size: str,
+        fill_price: str,
     ) -> int | None:
         if not _is_entry_buy_command(command):
             return None
-        position_id = _position_id_from_command(command)
+        position_id = resolve_position_lot_id_for_command(conn, command)
         if position_id is None:
             return None
         return append_position_lot(
             conn,
             position_id=position_id,
             state=state,
-            shares=_decimal_str(message.get("size"), "0"),
-            entry_price_avg=_decimal_str(message.get("price"), "0"),
+            shares=filled_size,
+            entry_price_avg=fill_price,
             source_command_id=command["command_id"],
             source_trade_fact_id=trade_fact_id,
             captured_at=observed,

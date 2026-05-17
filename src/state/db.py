@@ -4888,6 +4888,19 @@ def _coerce_snapshot_fk(value) -> Optional[int]:
         return None
 
 
+def _local_legacy_snapshot_fk(conn: sqlite3.Connection, value) -> Optional[int]:
+    snapshot_id = _coerce_snapshot_fk(value)
+    if snapshot_id is None:
+        return None
+    if not _table_exists(conn, "ensemble_snapshots"):
+        return None
+    row = conn.execute(
+        "SELECT 1 FROM ensemble_snapshots WHERE snapshot_id = ? LIMIT 1",
+        (snapshot_id,),
+    ).fetchone()
+    return snapshot_id if row is not None else None
+
+
 def _normalize_opportunity_availability_status(value: str) -> str:
     status = str(value or "").strip().upper()
     if not status:
@@ -5895,6 +5908,10 @@ def log_trade_entry(conn: sqlite3.Connection, pos) -> None:
     fill_price = getattr(pos, "entry_price", None) if status == "entered" else None
     if _table_exists(conn, "trade_decisions"):
         try:
+            snapshot_fk = _local_legacy_snapshot_fk(
+                conn,
+                getattr(pos, "decision_snapshot_id", None),
+            )
             values = (
                 pos.market_id,
                 pos.bin_label,
@@ -5902,7 +5919,7 @@ def log_trade_entry(conn: sqlite3.Connection, pos) -> None:
                 pos.size_usd,
                 pos.entry_price,
                 timestamp,
-                _coerce_snapshot_fk(getattr(pos, "decision_snapshot_id", None)),
+                snapshot_fk,
                 getattr(pos, "calibration_version", "") or None,
                 pos.p_posterior,
                 pos.p_posterior,
@@ -6090,9 +6107,13 @@ def log_trade_exit(conn: sqlite3.Connection, pos) -> None:
         from datetime import datetime
         env = getattr(pos, "env", "unknown_env") or "unknown_env"
         status = "voided" if getattr(pos, "state", "") == "voided" else "exited"
+        snapshot_fk = _local_legacy_snapshot_fk(
+            conn,
+            getattr(pos, "decision_snapshot_id", None),
+        )
         values = (
             pos.market_id, pos.bin_label, pos.direction, pos.size_usd, pos.entry_price, pos.last_exit_at or datetime.now(timezone.utc).isoformat(),
-            getattr(pos, "decision_snapshot_id", None) or None,
+            snapshot_fk,
             getattr(pos, "calibration_version", "") or None,
             getattr(pos, "p_raw", None), getattr(pos, "p_posterior", None), pos.edge, 0.0, 0.0, 0.0,
             status, getattr(pos, "strategy", ""), pos.edge_source, _bin_type_for_label(pos.bin_label), env, pos.last_exit_at, pos.exit_price, getattr(pos, 'pnl', 0.0),

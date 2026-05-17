@@ -13,6 +13,7 @@ import logging
 import hashlib
 import math
 import os
+import sqlite3
 import uuid
 from collections import defaultdict
 from dataclasses import dataclass, field, fields, is_dataclass
@@ -1680,6 +1681,7 @@ def evaluate_candidate(
     limits: RiskLimits,
     entry_bankroll: Optional[float] = None,
     decision_time: Optional[datetime] = None,
+    microstructure_sink=None,
 ) -> list[EdgeDecision]:
     """Evaluate a market candidate through the full signal pipeline."""
 
@@ -2411,13 +2413,19 @@ def evaluate_candidate(
             p_raw=p_raw,
         )]
 
-    p_raw_persisted = _store_snapshot_p_raw(
-        conn,
-        snapshot_id,
-        p_raw,
-        bias_corrected=bool(getattr(ens, "bias_corrected", False)),
-        p_raw_topology=p_raw_topology,
-    )
+    if using_period_extrema:
+        # Executable forecast-reader rows are forecast-authority inputs. The
+        # live evaluator must not turn a forecast DB projection write into a
+        # foreground money-path dependency; it already has p_raw in memory.
+        p_raw_persisted = None
+    else:
+        p_raw_persisted = _store_snapshot_p_raw(
+            conn,
+            snapshot_id,
+            p_raw,
+            bias_corrected=bool(getattr(ens, "bias_corrected", False)),
+            p_raw_topology=p_raw_topology,
+        )
     if p_raw_persisted is False:
         return [EdgeDecision(
             False,
@@ -2746,24 +2754,22 @@ def evaluate_candidate(
             p_market[idx] = vwmp(bid, ask, bid_sz, ask_sz)
 
             # Injection Point 7: Data completeness - record microstructure snapshot
-            try:
+            if callable(microstructure_sink):
                 import datetime as dt
-                from src.state.db import log_microstructure
-                log_microstructure(
-                    conn,
-                    token_id=o["token_id"],
-                    city=city.name,
-                    target_date=target_d.isoformat(),
-                    range_label=bins[idx].label,
-                    price=float(p_market[idx]),
-                    volume=float(bid_sz + ask_sz),
-                    bid=float(bid),
-                    ask=float(ask),
-                    spread=round(float(ask - bid), 4) if ask >= bid else 0.0,
-                    source_timestamp=dt.datetime.now(dt.timezone.utc).isoformat(),
+                microstructure_sink(
+                    {
+                        "token_id": o["token_id"],
+                        "city": city.name,
+                        "target_date": target_d.isoformat(),
+                        "range_label": bins[idx].label,
+                        "price": float(p_market[idx]),
+                        "volume": float(bid_sz + ask_sz),
+                        "bid": float(bid),
+                        "ask": float(ask),
+                        "spread": round(float(ask - bid), 4) if ask >= bid else 0.0,
+                        "source_timestamp": dt.datetime.now(dt.timezone.utc).isoformat(),
+                    }
                 )
-            except Exception as micro_exc:
-                logger.warning("Microstructure log DB insert failed for %s: %s", o["token_id"], micro_exc)
             if probe_native_no_quotes:
                 no_token_id = str(o.get("no_token_id") or "")
                 if not no_token_id:
@@ -4448,6 +4454,20 @@ def _store_snapshot_p_raw(
             )
         conn.commit()
         return True
+    except sqlite3.OperationalError as e:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        if str(e).startswith("database is locked"):
+            logger.warning(
+                "Deferred snapshot p_raw persistence for %s: %s",
+                snapshot_id,
+                e,
+            )
+            return None
+        logger.warning("Failed to store snapshot p_raw for %s: %s", snapshot_id, e)
+        return False
     except Exception as e:
         try:
             conn.rollback()

@@ -1,8 +1,8 @@
 # Created: 2026-04-27
-# Lifecycle: created=2026-04-27; last_reviewed=2026-05-15; last_reused=2026-05-15
+# Lifecycle: created=2026-04-27; last_reviewed=2026-05-15; last_reused=2026-05-17
 # Purpose: R3 M3 Polymarket user-channel WS ingest and fail-closed gap guard antibodies.
 # Reuse: Run when user WebSocket ingest, U2 venue facts, or submit gap guards change.
-# Last reused/audited: 2026-05-08
+# Last reused/audited: 2026-05-17
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/M3.yaml;
 #                  PR 37 review: clean-reconnect proof ignores resolved history
 #                  while preserving active side-effect state;
@@ -22,7 +22,7 @@ import pytest
 from src.contracts.executable_market_snapshot_v2 import ExecutableMarketSnapshotV2
 from src.contracts.venue_submission_envelope import VenueSubmissionEnvelope
 from src.control import ws_gap_guard
-from src.ingest.polymarket_user_channel import PolymarketUserChannelIngestor, WSAuth
+from src.ingest.polymarket_user_channel import PolymarketUserChannelIngestor, WSAuth, _parse_dt
 from src.state.db import init_schema
 from src.state.snapshot_repo import insert_snapshot
 from src.state.venue_command_repo import (
@@ -137,6 +137,7 @@ def _envelope(
 def _seed_acknowledged_command(c) -> None:
     insert_snapshot(c, _snapshot())
     insert_submission_envelope(c, _envelope(), envelope_id="env-ws")
+    _seed_trade_decision_runtime_alias(c, trade_id=1, runtime_trade_id="1")
     insert_command(
         c,
         command_id="cmd-ws",
@@ -161,6 +162,36 @@ def _seed_acknowledged_command(c) -> None:
     append_event(c, command_id="cmd-ws", event_type="SUBMIT_REQUESTED", occurred_at=NOW.isoformat())
     append_event(c, command_id="cmd-ws", event_type="SUBMIT_ACKED", occurred_at=NOW.isoformat())
     c.commit()
+
+
+def _seed_trade_decision_runtime_alias(c, *, trade_id: int, runtime_trade_id: str | None = None) -> None:
+    c.execute(
+        """
+        INSERT INTO trade_decisions (
+            trade_id, market_id, bin_label, direction, size_usd, price,
+            timestamp, p_raw, p_posterior, edge, ci_lower, ci_upper,
+            kelly_fraction, status, runtime_trade_id
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            trade_id,
+            "condition-ws",
+            "test-bin",
+            "buy_yes",
+            10.0,
+            0.50,
+            NOW.isoformat(),
+            0.6,
+            0.6,
+            0.1,
+            0.05,
+            0.15,
+            0.0,
+            "pending",
+            runtime_trade_id,
+        ),
+    )
 
 
 def _seed_lot_trade_fact(c, *, state: str, trade_id: str) -> int:
@@ -242,6 +273,17 @@ def test_ws_message_parsed_to_order_fact(conn):
     assert raw["apiKey"] == raw["secret"] == raw["passphrase"] == "***"
 
 
+def test_ws_order_timestamp_accepts_epoch_milliseconds(conn):
+    epoch_millis = str(int(NOW.timestamp() * 1000))
+
+    result = _ingestor(conn).handle_message(_order_message(timestamp=epoch_millis))
+
+    assert result and result["order_fact_id"]
+    row = _rows(conn, "venue_order_facts")[-1]
+    assert row["observed_at"] == NOW.isoformat()
+    assert _parse_dt(epoch_millis) == NOW
+
+
 def test_unmatched_order_event_is_deferred_not_thread_fatal(conn):
     result = _ingestor(conn).handle_message(_order_message(id="ord-race-before-commit"))
 
@@ -252,6 +294,24 @@ def test_unmatched_order_event_is_deferred_not_thread_fatal(conn):
     }
     assert _rows(conn, "venue_order_facts") == []
     assert _command_state(conn) == "ACKED"
+
+
+def test_order_update_derives_remaining_from_original_minus_matched_when_size_absent(conn):
+    result = _ingestor(conn).handle_message(
+        _order_message(
+            type="UPDATE",
+            size=None,
+            original_size="181.16",
+            size_matched="100",
+        )
+    )
+
+    assert result and result["order_fact_id"]
+    row = _rows(conn, "venue_order_facts")[-1]
+    assert row["state"] == "PARTIALLY_MATCHED"
+    assert Decimal(row["remaining_size"]) == Decimal("81.16")
+    assert Decimal(row["matched_size"]) == Decimal("100")
+    assert _command_state(conn) == "PARTIAL"
 
 
 def test_ws_message_parsed_to_trade_fact(conn):
@@ -311,8 +371,8 @@ def test_matched_then_mined_does_not_duplicate_optimistic_exposure(conn):
 
 def test_confirmed_event_finalizes_trade_and_permits_canonical_pnl(conn):
     ingestor = _ingestor(conn)
-    ingestor.handle_message(_trade_message("MATCHED"))
-    ingestor.handle_message(_trade_message("CONFIRMED", transaction_hash="0xconfirmed", confirmation_count=3))
+    ingestor.handle_message(_trade_message("MATCHED", size="10"))
+    ingestor.handle_message(_trade_message("CONFIRMED", size="10", transaction_hash="0xconfirmed", confirmation_count=3))
 
     lot_states = [r["state"] for r in _rows(conn, "position_lots")]
     assert lot_states == ["OPTIMISTIC_EXPOSURE", "CONFIRMED_EXPOSURE"]
@@ -323,11 +383,11 @@ def test_confirmed_event_finalizes_trade_and_permits_canonical_pnl(conn):
 
 def test_duplicate_trade_messages_are_idempotent_at_latest_lifecycle_state(conn):
     ingestor = _ingestor(conn)
-    ingestor.handle_message(_trade_message("MATCHED"))
-    matched_duplicate = ingestor.handle_message(_trade_message("MATCHED"))
-    ingestor.handle_message(_trade_message("CONFIRMED", transaction_hash="0xconfirmed", confirmation_count=3))
+    ingestor.handle_message(_trade_message("MATCHED", size="10"))
+    matched_duplicate = ingestor.handle_message(_trade_message("MATCHED", size="10"))
+    ingestor.handle_message(_trade_message("CONFIRMED", size="10", transaction_hash="0xconfirmed", confirmation_count=3))
     confirmed_duplicate = ingestor.handle_message(
-        _trade_message("CONFIRMED", transaction_hash="0xconfirmed", confirmation_count=3)
+        _trade_message("CONFIRMED", size="10", transaction_hash="0xconfirmed", confirmation_count=3)
     )
 
     assert matched_duplicate["reason"] == "duplicate_trade_fact"
@@ -364,6 +424,44 @@ def test_confirmed_trade_regression_requires_review_not_failed_fact(conn):
     assert [r["state"] for r in _rows(conn, "position_lots")] == ["CONFIRMED_EXPOSURE"]
     assert load_calibration_trade_facts(conn)[0]["state"] == "CONFIRMED"
     assert _command_state(conn) == "REVIEW_REQUIRED"
+
+
+def test_confirmed_trade_below_command_size_is_not_order_fill_finality(conn):
+    conn.execute(
+        """
+        UPDATE venue_commands
+           SET size = ?, price = ?
+         WHERE command_id = 'cmd-ws'
+        """,
+        (181.16, 0.01),
+    )
+    conn.commit()
+
+    result = _ingestor(conn).handle_message(
+        _trade_message(
+            "CONFIRMED",
+            taker_order_id="foreign-taker-order",
+            size="100",
+            price="0.99",
+            maker_orders=[
+                {
+                    "order_id": "ord-ws",
+                    "matched_amount": "100",
+                    "price": "0.01",
+                    "side": "BUY",
+                }
+            ],
+            transaction_hash="0xpartialconfirmed",
+            confirmation_count=3,
+        )
+    )
+
+    assert result["command_event"] == "PARTIAL_FILL_OBSERVED"
+    assert _command_state(conn) == "PARTIAL"
+    row = _rows(conn, "venue_trade_facts")[-1]
+    assert Decimal(row["filled_size"]) == Decimal("100")
+    assert Decimal(row["fill_price"]) == Decimal("0.01")
+    assert [r["event_type"] for r in _rows(conn, "venue_command_events")].count("FILL_CONFIRMED") == 0
 
 
 def test_trade_lifecycle_forward_transition_requires_stable_fill_economics(conn):
@@ -422,7 +520,7 @@ def test_same_trade_id_different_order_requires_review_not_rebinding(conn):
         _trade_message(
             "CONFIRMED",
             taker_order_id=other_order,
-            maker_orders=[{"order_id": other_order}],
+            maker_orders=[{"order_id": other_order, "matched_amount": "5", "price": "0.50"}],
         )
     )
 
@@ -496,7 +594,7 @@ def test_exit_sell_confirmed_trade_does_not_mint_positive_exposure_lot(conn):
     conn.commit()
 
     result = _ingestor(conn).handle_message(
-        _trade_message("CONFIRMED", transaction_hash="0xexit", confirmation_count=3)
+        _trade_message("CONFIRMED", size="10", transaction_hash="0xexit", confirmation_count=3)
     )
 
     assert result["command_event"] == "FILL_CONFIRMED"
@@ -943,7 +1041,7 @@ def test_maker_order_trade_fact_uses_matched_zeus_order_id(conn):
         _trade_message(
             "MATCHED",
             taker_order_id="foreign-taker-order",
-            maker_orders=[{"order_id": "ord-ws"}],
+            maker_orders=[{"order_id": "ord-ws", "matched_amount": "5", "price": "0.50"}],
         )
     )
 
@@ -952,10 +1050,57 @@ def test_maker_order_trade_fact_uses_matched_zeus_order_id(conn):
     assert row["command_id"] == "cmd-ws"
 
 
+def test_maker_order_trade_fact_uses_matched_zeus_order_economics(conn):
+    conn.execute(
+        """
+        UPDATE venue_commands
+           SET size = ?, price = ?
+         WHERE command_id = 'cmd-ws'
+        """,
+        (12.12, 0.10),
+    )
+    conn.commit()
+
+    result = _ingestor(conn).handle_message(
+        _trade_message(
+            "CONFIRMED",
+            taker_order_id="foreign-taker-order",
+            size="32.12",
+            price="0.90",
+            maker_orders=[
+                {
+                    "order_id": "other-maker-order",
+                    "matched_amount": "20",
+                    "price": "0.10",
+                    "side": "BUY",
+                },
+                {
+                    "order_id": "ord-ws",
+                    "matched_amount": "12.12",
+                    "price": "0.10",
+                    "side": "BUY",
+                },
+            ],
+            transaction_hash="0xfullmaker",
+            confirmation_count=3,
+        )
+    )
+
+    assert result["command_event"] == "FILL_CONFIRMED"
+    row = _rows(conn, "venue_trade_facts")[-1]
+    lot = _rows(conn, "position_lots")[-1]
+    assert row["venue_order_id"] == "ord-ws"
+    assert Decimal(row["filled_size"]) == Decimal("12.12")
+    assert Decimal(row["fill_price"]) == Decimal("0.10")
+    assert Decimal(str(lot["shares"])) == Decimal("12.12")
+    assert Decimal(lot["entry_price_avg"]) == Decimal("0.10")
+    assert _command_state(conn) == "FILLED"
+
+
 def test_ws_path_emits_equivalent_command_events_when_enabled(conn):
     ingestor = _ingestor(conn)
-    ingestor.handle_message(_trade_message("MATCHED"))
-    ingestor.handle_message(_trade_message("CONFIRMED"))
+    ingestor.handle_message(_trade_message("MATCHED", size="10"))
+    ingestor.handle_message(_trade_message("CONFIRMED", size="10"))
 
     events = [
         r["event_type"]
@@ -968,6 +1113,7 @@ def test_ws_path_emits_equivalent_command_events_when_enabled(conn):
 
 
 def test_executor_runtime_position_id_falls_back_to_numeric_decision_id_for_lots(conn):
+    _seed_trade_decision_runtime_alias(conn, trade_id=42, runtime_trade_id=None)
     conn.execute(
         """
         UPDATE venue_commands

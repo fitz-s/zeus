@@ -11,6 +11,7 @@ import json
 import logging
 import math
 import os
+import time
 from dataclasses import is_dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
@@ -23,9 +24,8 @@ from src.engine.time_context import lead_hours_to_date_start, lead_hours_to_sett
 from src.state.lifecycle_manager import (
     enter_day0_window_runtime_state,
     initial_entry_runtime_state_for_order_status,
+    is_terminal_state,
 )
-MAX_SNAPSHOT_AGE_SECONDS = 5
-
 from src.state.portfolio import (
     CORRECTED_EXECUTABLE_PRICING_SEMANTICS_VERSION,
     ENTRY_ECONOMICS_AVG_FILL_PRICE,
@@ -75,6 +75,14 @@ STRATEGY_KEYS_BY_DISCOVERY_MODE = _strategy_keys_by_discovery_mode()
 NATIVE_BUY_NO_LIVE_APPROVED_CONTEXTS: frozenset[tuple[str, str, str]] = frozenset()
 NATIVE_BUY_NO_LIVE_PROMOTION_VALIDATION = "native_buy_no_live_promotion_approved"
 _FORWARD_PRICE_LINKAGE_OK_STATUSES = frozenset({"inserted", "unchanged"})
+_ORDER_OWNERSHIP_TERMINAL_POSITION_PHASES = frozenset(
+    {"settled", "voided", "admin_closed", "quarantined"}
+)
+_ORDER_OWNERSHIP_TERMINAL_ORDER_STATUSES = frozenset(
+    {"filled", "cancelled", "canceled", "expired", "rejected", "voided"}
+)
+_LIVE_DISCOVERY_EVAL_BUDGET_ENV = "ZEUS_LIVE_DISCOVERY_EVAL_BUDGET_SECONDS"
+_LIVE_DISCOVERY_EVAL_BUDGET_DEFAULT_SECONDS = 360.0
 
 
 # D4: exit triggers whose statistical burden (2 consecutive negative cycles,
@@ -110,6 +118,33 @@ def _deps_utcnow_iso(deps) -> str:
         except Exception:
             pass
     return datetime.now(timezone.utc).isoformat()
+
+
+def _live_discovery_eval_budget_seconds(mode, env: str, params: dict | None) -> float | None:
+    if str(env or "").strip().lower() != "live":
+        return None
+    raw = None
+    if isinstance(params, dict):
+        raw = params.get("evaluation_budget_seconds")
+    if raw is None:
+        raw = os.getenv(_LIVE_DISCOVERY_EVAL_BUDGET_ENV)
+    if raw is None:
+        return _LIVE_DISCOVERY_EVAL_BUDGET_DEFAULT_SECONDS
+    try:
+        budget = float(raw)
+    except (TypeError, ValueError):
+        logger.warning("Invalid %s=%r; using default", _LIVE_DISCOVERY_EVAL_BUDGET_ENV, raw)
+        return _LIVE_DISCOVERY_EVAL_BUDGET_DEFAULT_SECONDS
+    if budget <= 0:
+        return None
+    return budget
+
+
+def _monotonic_seconds(deps) -> float:
+    getter = getattr(deps, "monotonic", None)
+    if callable(getter):
+        return float(getter())
+    return time.monotonic()
 
 
 def _record_exit_evidence_gate_block(
@@ -627,11 +662,9 @@ def _reprice_decision_from_executable_snapshot(
     snapshot = get_snapshot(conn, snapshot_id)
     if snapshot is None:
         raise ValueError(f"EXECUTABLE_SNAPSHOT_UNAVAILABLE: {snapshot_id}")
-    captured_at = snapshot.captured_at
-    if captured_at.tzinfo is None:
-        captured_at = captured_at.replace(tzinfo=timezone.utc)
-    snapshot_age_seconds = (datetime.now(timezone.utc) - captured_at).total_seconds()
-    if snapshot_age_seconds > MAX_SNAPSHOT_AGE_SECONDS:
+    from src.contracts.executable_market_snapshot_v2 import is_fresh
+
+    if not is_fresh(snapshot, datetime.now(timezone.utc)):
         raise ValueError("executable_snapshot_stale")
     from src.config import settings
     from src.contracts import (
@@ -682,7 +715,6 @@ def _reprice_decision_from_executable_snapshot(
         Decimal(str(round(float(snapshot_limit_price), 12))),
         tick_size_decimal,
     )
-    snapshot_limit_price = float(snapshot_limit_decimal)
     slippage_reference_price = min(float(decision.edge.p_posterior), float(snapshot_vwmp))
     max_slippage = SlippageBps(value_bps=200.0, direction="adverse")
     best_ask_slippage_bps = 0.0
@@ -707,12 +739,6 @@ def _reprice_decision_from_executable_snapshot(
     )
     if repriced_size_at_snapshot_vwmp <= 0.0:
         raise ValueError("EXECUTABLE_REPRICE_REJECTED: repriced size is zero")
-    final_best_ask: float | None = None
-    final_price = float(snapshot_limit_price)
-    repriced_size = repriced_size_at_snapshot_vwmp
-    corrected_candidate_price = float(snapshot_limit_price)
-    corrected_candidate_expected_fill = float(snapshot_limit_price)
-    corrected_candidate_size = repriced_size_at_snapshot_vwmp
     best_ask_edge = float(decision.edge.p_posterior) - best_ask_float
     p_posterior_decimal = Decimal(str(decision.edge.p_posterior))
     slippage_reference_decimal = Decimal(str(slippage_reference_price))
@@ -720,6 +746,24 @@ def _reprice_decision_from_executable_snapshot(
         Decimal("1") + Decimal(str(max_slippage.fraction))
     )
     positive_edge_cap_decimal = p_posterior_decimal - tick_size_decimal
+    passive_maker_repositioned = False
+    passive_maker_reposition_reason = ""
+    if direction.startswith("buy_") and snapshot_limit_decimal < best_bid:
+        if positive_edge_cap_decimal < best_bid:
+            raise ValueError(
+                "EXECUTABLE_PASSIVE_MAKER_NO_COMPETITIVE_POSITIVE_EDGE: "
+                f"best_bid={float(best_bid):.6f} edge_cap={float(positive_edge_cap_decimal):.6f}"
+            )
+        snapshot_limit_decimal = best_bid
+        passive_maker_repositioned = True
+        passive_maker_reposition_reason = "raised_buy_limit_to_snapshot_best_bid"
+    snapshot_limit_price = float(snapshot_limit_decimal)
+    final_best_ask: float | None = None
+    final_price = snapshot_limit_price
+    repriced_size = repriced_size_at_snapshot_vwmp
+    corrected_candidate_price = snapshot_limit_price
+    corrected_candidate_expected_fill = snapshot_limit_price
+    corrected_candidate_size = repriced_size_at_snapshot_vwmp
     depth_sweep_limit_decimal = Decimal("0")
     if positive_edge_cap_decimal > Decimal("0") and slippage_cap_decimal > Decimal("0"):
         depth_sweep_limit_decimal = _floor_to_tick(
@@ -763,13 +807,23 @@ def _reprice_decision_from_executable_snapshot(
             corrected_candidate_size = size_at_depth_limit
 
     final_intent_context = final_intent_context or {}
+    selected_order_type = str(final_intent_context.get("order_type") or "GTC").strip().upper()
+    final_order_type = selected_order_type
+    taker_order_type_upgraded = False
+    if (
+        final_best_ask is not None
+        and final_order_type in {"GTC", "GTD"}
+        and bool(final_intent_context.get("allow_taker_upgrade"))
+    ):
+        final_order_type = "FOK"
+        taker_order_type_upgraded = True
     corrected_pricing_shadow = _attach_corrected_pricing_authority(
         decision=decision,
         snapshot=snapshot,
         candidate_limit_price=float(corrected_candidate_price),
         candidate_expected_fill_price_before_fee=float(corrected_candidate_expected_fill),
         candidate_size_usd=float(corrected_candidate_size),
-        order_type=str(final_intent_context.get("order_type") or "GTC"),
+        order_type=final_order_type,
         cancel_after=final_intent_context.get("cancel_after"),
         resolution_window=str(final_intent_context.get("resolution_window") or "default"),
         correlation_key=str(final_intent_context.get("correlation_key") or ""),
@@ -824,6 +878,8 @@ def _reprice_decision_from_executable_snapshot(
         "snapshot_best_ask": best_ask_float,
         "snapshot_best_ask_size": ask_size_float,
         "snapshot_limit_price": float(snapshot_limit_price),
+        "passive_maker_repositioned": passive_maker_repositioned,
+        "passive_maker_reposition_reason": passive_maker_reposition_reason,
         "slippage_reference_price": float(slippage_reference_price),
         "max_slippage_bps": float(max_slippage.value_bps),
         "depth_sweep_limit_price": depth_sweep_limit_float,
@@ -840,6 +896,9 @@ def _reprice_decision_from_executable_snapshot(
         ),
         "final_limit_price": final_price,
         "final_best_ask": final_best_ask,
+        "selected_order_type": selected_order_type,
+        "final_order_type": final_order_type,
+        "taker_order_type_upgraded": taker_order_type_upgraded,
         "corrected_candidate_limit_price": float(corrected_candidate_price),
         "corrected_candidate_expected_fill_price": float(corrected_candidate_expected_fill),
         "corrected_candidate_size_usd": float(corrected_candidate_size),
@@ -930,7 +989,7 @@ def cleanup_orphan_open_orders(portfolio, clob, *, deps, conn=None) -> int:
 
     Durable-command guard (#63 + R3):
       1. Order is NOT in local portfolio tracking (order_id / last_exit_order_id)
-      2. Order is NOT in execution_fact (recent command log) within 2 hours
+      2. Order is NOT in canonical position_current ownership
       3. Order has durable venue_commands truth; cancel through request_cancel_for_command
     """
     if not hasattr(clob, "get_open_orders"):
@@ -943,30 +1002,35 @@ def cleanup_orphan_open_orders(portfolio, clob, *, deps, conn=None) -> int:
         if pos.last_exit_order_id:
             tracked_order_ids.add(pos.last_exit_order_id)
 
-    # Build set of recently-commanded order IDs from trade_decisions
-    recent_order_ids: set[str] = set()
+    locally_owned_order_ids: set[str] = set()
     if conn is not None:
         try:
             from src.state.db import _table_exists
-            if _table_exists(conn, "trade_decisions"):
-                cutoff = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+            if _table_exists(conn, "position_current"):
                 rows = conn.execute(
-                    "SELECT order_id FROM trade_decisions WHERE order_posted_at >= ? AND order_id IS NOT NULL AND order_id != ''",
-                    (cutoff,),
+                    """
+                    SELECT order_id
+                      FROM position_current
+                     WHERE order_id IS NOT NULL
+                       AND order_id != ''
+                       AND lower(COALESCE(phase, '')) NOT IN (?, ?, ?, ?)
+                       AND lower(COALESCE(order_status, '')) NOT IN (?, ?, ?, ?, ?, ?)
+                    """,
+                    tuple(_ORDER_OWNERSHIP_TERMINAL_POSITION_PHASES)
+                    + tuple(_ORDER_OWNERSHIP_TERMINAL_ORDER_STATUSES),
                 ).fetchall()
-                recent_order_ids = {str(r[0]) for r in rows}
+                locally_owned_order_ids.update(str(r[0]) for r in rows)
         except Exception as exc:
-            deps.logger.warning("Could not query trade_decisions for orphan guard: %s", exc)
+            deps.logger.warning("Could not query canonical local order ownership for orphan guard: %s", exc)
 
     cancelled = 0
     for order in clob.get_open_orders():
         order_id = extract_order_id(order)
         if not order_id or order_id in tracked_order_ids:
             continue
-        # Quarantine guard: if order appears in recent trade_decisions, do NOT cancel
-        if order_id in recent_order_ids:
+        if order_id in locally_owned_order_ids:
             deps.logger.warning(
-                "Orphan order %s found in recent execution_fact — quarantining instead of cancelling",
+                "Open order %s has durable local ownership — quarantining instead of cancelling",
                 order_id,
             )
             continue
@@ -1024,6 +1088,27 @@ def cleanup_orphan_open_orders(portfolio, clob, *, deps, conn=None) -> int:
 
 def _summary_risk_level(summary: dict) -> str:
     return str(summary.get("risk_level") or "").strip().upper()
+
+
+def _initialize_entry_order_summary(summary: dict) -> None:
+    summary.setdefault("trades", 0)
+    summary.setdefault("entry_orders_submitted", 0)
+    summary.setdefault("entry_orders_resting", 0)
+    summary.setdefault("entry_orders_filled_immediate", 0)
+
+
+def _record_entry_order_summary(
+    summary: dict,
+    *,
+    runtime_order_status: str,
+    command_state: str | None,
+) -> None:
+    _initialize_entry_order_summary(summary)
+    summary["entry_orders_submitted"] += 1
+    if runtime_order_status == "filled" or command_state == "FILLED":
+        summary["entry_orders_filled_immediate"] += 1
+    else:
+        summary["entry_orders_resting"] += 1
 
 
 def _dedupe_steps(steps: list[str]) -> list[str]:
@@ -1636,6 +1721,10 @@ def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: 
     for pos in list(portfolio.positions):
         if pos.state == "pending_tracked":
             continue
+        state_value = _position_state_value(pos)
+        if is_terminal_state(state_value) and state_value != "quarantined":
+            summary["monitor_skipped_terminal"] = summary.get("monitor_skipped_terminal", 0) + 1
+            continue
         if False:
             _ = pos.entry_method
             _ = pos.selected_method
@@ -1959,6 +2048,7 @@ def _availability_status_for_exception(exc: Exception) -> str:
 def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mode, summary: dict, entry_bankroll: float, decision_time, *, env: str, deps):
     portfolio_dirty = False
     tracker_dirty = False
+    _initialize_entry_order_summary(summary)
     market_candidate_ctor = getattr(deps, "MarketCandidate", None)
     if market_candidate_ctor is None:
         from src.engine.evaluator import MarketCandidate as market_candidate_ctor
@@ -1977,8 +2067,39 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
     if callable(oracle_penalty_reload):
         oracle_penalty_reload()
 
+    derived_writes: list[tuple[str, object]] = []
+
+    def _queue_derived_write(name: str, writer) -> None:
+        if callable(writer):
+            derived_writes.append((name, writer))
+
+    def _flush_derived_writes() -> None:
+        while derived_writes:
+            name, writer = derived_writes.pop(0)
+            try:
+                writer()
+            except Exception as exc:  # noqa: BLE001 - derived telemetry is fail-soft.
+                deps.logger.warning("Derived discovery write failed for %s: %s", name, exc)
+                summary["degraded"] = True
+
+    def _record_microstructure(row: dict) -> None:
+        payload = dict(row)
+
+        def _write() -> None:
+            from src.state.db import log_microstructure
+
+            log_microstructure(conn, **payload)
+
+        _queue_derived_write("microstructure", _write)
+
     def _record_opportunity_fact(candidate, decision, *, should_trade: bool, rejection_stage: str, rejection_reasons: list[str]):
-        try:
+        def _write(
+            candidate=candidate,
+            decision=decision,
+            should_trade=should_trade,
+            rejection_stage=rejection_stage,
+            rejection_reasons=list(rejection_reasons or []),
+        ) -> None:
             from src.state.db import log_opportunity_fact
 
             log_opportunity_fact(
@@ -1990,15 +2111,14 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                 rejection_reasons=rejection_reasons,
                 recorded_at=decision_time.isoformat(),
             )
-        except Exception as exc:
-            deps.logger.warning(
-                "Opportunity fact write failed for %s: %s",
-                getattr(decision, "decision_id", ""),
-                exc,
-            )
+
+        _queue_derived_write(
+            f"opportunity_fact:{getattr(decision, 'decision_id', '')}",
+            _write,
+        )
 
     def _record_probability_trace(candidate, decision):
-        try:
+        def _write(candidate=candidate, decision=decision) -> None:
             from src.state.db import log_probability_trace_fact
 
             result = log_probability_trace_fact(
@@ -2014,12 +2134,11 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                     getattr(decision, "decision_id", ""),
                     result.get("status"),
                 )
-        except Exception as exc:
-            deps.logger.warning(
-                "Probability trace write failed for %s: %s",
-                getattr(decision, "decision_id", ""),
-                exc,
-            )
+
+        _queue_derived_write(
+            f"probability_trace:{getattr(decision, 'decision_id', '')}",
+            _write,
+        )
 
     def _availability_scope_key(*, candidate=None, city_name: str = "", target_date: str = "") -> str:
         if candidate is not None:
@@ -2061,7 +2180,16 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
         normalized = str(status or "").strip().upper()
         if not normalized or normalized == "OK":
             return
-        try:
+        details_payload = dict(details)
+        reasons_payload = list(reasons)
+
+        def _write(
+            normalized=normalized,
+            reasons=reasons_payload,
+            scope_type=scope_type,
+            scope_key=scope_key,
+            details=details_payload,
+        ) -> None:
             from src.state.db import log_availability_fact
 
             failure_type = _availability_failure_type(normalized, reasons)
@@ -2087,8 +2215,8 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                 impact="skip",
                 details=details,
             )
-        except Exception as exc:
-            deps.logger.warning("Availability fact write failed for %s: %s", scope_key, exc)
+
+        _queue_derived_write(f"availability_fact:{scope_key}", _write)
 
     def _market_scan_authority() -> str:
         getter = getattr(deps, "get_last_scan_authority", None)
@@ -2112,7 +2240,9 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
         return ""
 
     def _record_forward_market_substrate(markets_to_record, authority: str) -> None:
-        try:
+        markets_payload = list(markets_to_record or [])
+
+        def _write(markets_to_record=markets_payload, authority=authority) -> None:
             from src.state.db import log_forward_market_substrate
 
             result = log_forward_market_substrate(
@@ -2121,34 +2251,27 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                 recorded_at=decision_time.isoformat(),
                 scan_authority=authority,
             )
-        except Exception as exc:
-            deps.logger.warning("Forward market substrate write failed: %s", exc)
-            summary["forward_market_substrate_status"] = "error"
-            summary["forward_market_substrate_error"] = str(exc)
-            summary["degraded"] = True
-            return
 
-        status = str(result.get("status", "") or "")
-        summary["forward_market_substrate_status"] = status
-        for key in (
-            "market_events_inserted",
-            "market_events_unchanged",
-            "market_events_conflicted",
-            "price_rows_inserted",
-            "price_rows_unchanged",
-            "price_rows_conflicted",
-            "markets_skipped_missing_facts",
-            "outcomes_skipped_missing_facts",
-            "prices_skipped_missing_facts",
-            "outcomes_skipped_with_outcome_fact",
-        ):
-            if key in result:
-                summary[f"forward_market_substrate_{key}"] = int(result.get(key) or 0)
-        if status in {"written_with_conflicts", "skipped_invalid_schema"}:
-            deps.logger.warning("Forward market substrate degraded: %s", result)
-            summary["degraded"] = True
+            status = str(result.get("status", "") or "")
+            summary["forward_market_substrate_status"] = status
+            for key in (
+                "market_events_inserted",
+                "market_events_unchanged",
+                "market_events_conflicted",
+                "price_rows_inserted",
+                "price_rows_unchanged",
+                "price_rows_conflicted",
+                "markets_skipped_missing_facts",
+                "outcomes_skipped_missing_facts",
+                "prices_skipped_missing_facts",
+                "outcomes_skipped_with_outcome_fact",
+            ):
+                if key in result:
+                    summary[f"forward_market_substrate_{key}"] = int(result.get(key) or 0)
+            if status in {"written_with_conflicts", "skipped_invalid_schema"}:
+                deps.logger.warning("Forward market substrate degraded: %s", result)
+                summary["degraded"] = True
 
-        try:
             from src.state.db import log_market_source_contract_topology_facts
 
             source_contract_result = log_market_source_contract_topology_facts(
@@ -2157,30 +2280,35 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                 recorded_at=decision_time.isoformat(),
                 scan_authority=authority,
             )
-        except Exception as exc:
-            deps.logger.warning("Market source-contract topology write failed: %s", exc)
-            summary["market_source_contract_topology_status"] = "error"
-            summary["market_source_contract_topology_error"] = str(exc)
-            summary["degraded"] = True
-            return
 
-        source_contract_status = str(source_contract_result.get("status", "") or "")
-        summary["market_source_contract_topology_status"] = source_contract_status
-        for key in (
-            "topology_rows_written",
-            "markets_skipped_missing_facts",
-            "markets_skipped_source_contract_status",
-            "outcomes_skipped_missing_facts",
-        ):
-            if key in source_contract_result:
-                summary[f"market_source_contract_topology_{key}"] = int(
-                    source_contract_result.get(key) or 0
+            source_contract_status = str(source_contract_result.get("status", "") or "")
+            summary["market_source_contract_topology_status"] = source_contract_status
+            for key in (
+                "topology_rows_written",
+                "markets_skipped_missing_facts",
+                "markets_skipped_source_contract_status",
+                "outcomes_skipped_missing_facts",
+            ):
+                if key in source_contract_result:
+                    summary[f"market_source_contract_topology_{key}"] = int(
+                        source_contract_result.get(key) or 0
+                    )
+            if source_contract_status == "skipped_invalid_schema":
+                deps.logger.warning(
+                    "Market source-contract topology degraded: %s", source_contract_result
                 )
-        if source_contract_status in {"skipped_missing_tables", "skipped_invalid_schema"}:
-            deps.logger.warning(
-                "Market source-contract topology degraded: %s", source_contract_result
-            )
-            summary["degraded"] = True
+                summary["degraded"] = True
+
+        def _write_guarded() -> None:
+            try:
+                _write()
+            except Exception as exc:
+                deps.logger.warning("Forward market substrate write failed: %s", exc)
+                summary["forward_market_substrate_status"] = "error"
+                summary["forward_market_substrate_error"] = str(exc)
+                summary["degraded"] = True
+
+        _queue_derived_write("forward_market_substrate", _write_guarded)
 
     def _execution_snapshot_fields(tokens: dict) -> dict:
         tokens = tokens or {}
@@ -2216,6 +2344,8 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
         return missing
 
     params = deps.MODE_PARAMS[mode]
+    evaluation_budget_seconds = _live_discovery_eval_budget_seconds(mode, env, params)
+    evaluation_started_at = _monotonic_seconds(deps)
     min_hours_to_resolution = params.get("min_hours_to_resolution")
     if min_hours_to_resolution is None:
         min_hours_to_resolution = 0 if "max_hours_to_resolution" in params else 6
@@ -2319,9 +2449,30 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                 )
             )
             summary["no_trades"] += 1
+        _flush_derived_writes()
         return portfolio_dirty, tracker_dirty
 
-    for market in markets:
+    for market_index, market in enumerate(markets):
+        if evaluation_budget_seconds is not None:
+            elapsed = _monotonic_seconds(deps) - evaluation_started_at
+            if elapsed >= evaluation_budget_seconds:
+                markets_skipped = len(markets) - market_index
+                summary["cycle_backpressure_truncated"] = True
+                summary["cycle_backpressure_reason"] = "market_evaluation_budget_exceeded"
+                summary["cycle_backpressure_budget_seconds"] = evaluation_budget_seconds
+                summary["cycle_backpressure_elapsed_seconds"] = elapsed
+                summary["cycle_backpressure_markets_evaluated"] = market_index
+                summary["cycle_backpressure_markets_skipped"] = markets_skipped
+                summary["degraded"] = True
+                deps.logger.warning(
+                    "Discovery cycle backpressure: truncated %s after %.1fs budget=%.1fs evaluated=%s skipped=%s",
+                    mode.value,
+                    elapsed,
+                    evaluation_budget_seconds,
+                    market_index,
+                    markets_skipped,
+                )
+                break
         city = market.get("city")
         if city is None:
             continue
@@ -2475,11 +2626,21 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
             # evaluator so per-cycle `recorded_at` timestamps derive from
             # the cycle boundary rather than being silently re-fabricated
             # as `datetime.now()` inside the evaluator per-candidate.
-            decisions = deps.evaluate_candidate(
-                candidate, conn, portfolio, clob, limits,
-                entry_bankroll=entry_bankroll,
-                decision_time=decision_time,
-            )
+            try:
+                decisions = deps.evaluate_candidate(
+                    candidate, conn, portfolio, clob, limits,
+                    entry_bankroll=entry_bankroll,
+                    decision_time=decision_time,
+                    microstructure_sink=_record_microstructure,
+                )
+            except TypeError as exc:
+                if "microstructure_sink" not in str(exc):
+                    raise
+                decisions = deps.evaluate_candidate(
+                    candidate, conn, portfolio, clob, limits,
+                    entry_bankroll=entry_bankroll,
+                    decision_time=decision_time,
+                )
             # P2 (PLAN_v3 §6.P2 stage 2): stamp MarketPhase axis A onto
             # every returned EdgeDecision. evaluate_candidate has 30+
             # ``return [EdgeDecision(...)]`` sites; stamping at the call
@@ -2502,7 +2663,6 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                     _record_probability_trace(candidate, trace_decision)
                 try:
                     from src.engine.time_context import lead_hours_to_date_start, lead_hours_to_settlement_close
-                    from src.state.db import log_shadow_signal
                     first = decisions[0]
                     edges_payload = [
                         {
@@ -2517,16 +2677,25 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                         }
                         for d in decisions
                     ]
-                    log_shadow_signal(
-                        conn,
-                        city=city.name,
-                        target_date=candidate.target_date,
-                        timestamp=decision_time.isoformat(),
-                        decision_snapshot_id=first.decision_snapshot_id,
-                        p_raw_json=json.dumps(first.p_raw.tolist() if getattr(first, "p_raw", None) is not None else []),
-                        p_cal_json=json.dumps(first.p_cal.tolist() if getattr(first, "p_cal", None) is not None else []),
-                        edges_json=json.dumps(edges_payload),
-                        lead_hours=float(lead_hours_to_date_start(date.fromisoformat(candidate.target_date), city.timezone, decision_time)),
+                    shadow_payload = {
+                        "city": city.name,
+                        "target_date": candidate.target_date,
+                        "timestamp": decision_time.isoformat(),
+                        "decision_snapshot_id": first.decision_snapshot_id,
+                        "p_raw_json": json.dumps(first.p_raw.tolist() if getattr(first, "p_raw", None) is not None else []),
+                        "p_cal_json": json.dumps(first.p_cal.tolist() if getattr(first, "p_cal", None) is not None else []),
+                        "edges_json": json.dumps(edges_payload),
+                        "lead_hours": float(lead_hours_to_date_start(date.fromisoformat(candidate.target_date), city.timezone, decision_time)),
+                    }
+
+                    def _write_shadow_signal(payload=shadow_payload) -> None:
+                        from src.state.db import log_shadow_signal
+
+                        log_shadow_signal(conn, **payload)
+
+                    _queue_derived_write(
+                        f"shadow_signal:{city.name}:{candidate.target_date}",
+                        _write_shadow_signal,
                     )
                 except Exception as exc:
                     deps.logger.error("telemetry write failed, cycle flagged degraded: %s", exc, exc_info=True)
@@ -2878,6 +3047,7 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                                     snapshot_fields["executable_snapshot_id"],
                                     deps,
                                 ),
+                                "allow_taker_upgrade": True,
                                 "cancel_after": decision_time + timedelta(seconds=timeout_seconds),
                                 "resolution_window": candidate.target_date,
                                 "correlation_key": (
@@ -3192,6 +3362,12 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                             _cmd_state or "missing",
                         )
                         runtime_order_status = "pending"
+                    if _cmd_durable:
+                        _record_entry_order_summary(
+                            summary,
+                            runtime_order_status=runtime_order_status,
+                            command_state=_cmd_state,
+                        )
                     if runtime_order_status in ("filled", "pending") and _cmd_durable:
                         pos = materialize_position(
                             candidate,
@@ -3340,4 +3516,5 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
         except Exception as e:
             deps.logger.error("Evaluation failed for %s %s: %s", city.name, candidate.target_date, e, exc_info=True)
 
+    _flush_derived_writes()
     return portfolio_dirty, tracker_dirty

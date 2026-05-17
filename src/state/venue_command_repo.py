@@ -1,5 +1,5 @@
 # Created: 2026-04-26
-# Last reused/audited: 2026-05-15
+# Last reused/audited: 2026-05-17
 # Authority basis: docs/operations/task_2026-05-08_object_invariance_wave27/PLAN.md
 #                  + docs/operations/task_2026-05-15_live_order_e2e_goal/LIVE_ORDER_E2E_GOAL_PLAN.md
 """Durable command journal — append-only repo API for venue_commands / venue_command_events.
@@ -11,6 +11,7 @@ Public API:
   find_unresolved_commands(conn) -> Iterable[dict]
   find_command_by_idempotency_key(conn, key) -> Optional[dict]
   find_unknown_command_by_economic_intent(conn, *, ...) -> Optional[dict]
+  resolve_position_lot_id_for_command(conn, command) -> Optional[int]
   list_events(conn, command_id) -> list[dict]
 
 Only this module may INSERT/UPDATE/DELETE on venue_command_events (NC-18).
@@ -137,6 +138,7 @@ _TRANSITIONS: dict[tuple[str, str], str] = {
     # rejects generic manual edits; the command must already be REVIEW_REQUIRED
     # and the caller must record positive no-side-effect proof.
     ("REVIEW_REQUIRED", "REVIEW_CLEARED_NO_VENUE_SIDE_EFFECT"): "REJECTED",
+    ("REVIEW_REQUIRED", "REVIEW_CLEARED_NO_VENUE_EXPOSURE"):    "EXPIRED",
 }
 
 _PROVENANCE_SOURCES = frozenset(
@@ -376,6 +378,103 @@ def _assert_position_lot_trade_fact_authority(
             f"{lot_state} entry_price_avg must equal source trade fact fill_price"
         )
     return command_id, fact_id
+
+
+def resolve_position_lot_id_for_command(
+    conn: sqlite3.Connection,
+    command: Mapping[str, Any],
+) -> int | None:
+    """Resolve the integer lot identity for commands keyed by runtime ids.
+
+    Live venue commands store a runtime position id for operator correlation,
+    while the current ``position_lots`` schema still keys exposure by the
+    integer ``trade_decisions.trade_id``. Prefer the explicit
+    ``runtime_trade_id`` bridge; accept numeric compatibility fields only when
+    they point at a compatible ``trade_decisions`` row.
+    """
+
+    for key in ("position_id", "decision_id"):
+        parsed = _trade_decision_id_for_runtime_id(conn, command.get(key))
+        if parsed is not None:
+            return parsed
+
+    position_id = command.get("position_id")
+    parsed_position_id = _parse_positive_int(position_id)
+    if parsed_position_id is not None and _trade_decision_id_is_compatible(
+        conn,
+        parsed_position_id,
+        runtime_trade_id=position_id,
+    ):
+        return parsed_position_id
+
+    decision_id = command.get("decision_id")
+    parsed_decision_id = _parse_positive_int(decision_id)
+    if parsed_decision_id is not None and _trade_decision_id_is_compatible(
+        conn,
+        parsed_decision_id,
+        runtime_trade_id=position_id,
+    ):
+        return parsed_decision_id
+    return None
+
+
+def _parse_positive_int(value: Any) -> int | None:
+    try:
+        parsed = int(str(value))
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _trade_decision_id_for_runtime_id(
+    conn: sqlite3.Connection,
+    runtime_trade_id: Any,
+) -> int | None:
+    runtime_id = str(runtime_trade_id or "").strip()
+    if not runtime_id:
+        return None
+    try:
+        row = conn.execute(
+            """
+            SELECT trade_id
+              FROM trade_decisions
+             WHERE runtime_trade_id = ?
+             ORDER BY trade_id DESC
+             LIMIT 1
+            """,
+            (runtime_id,),
+        ).fetchone()
+    except Exception:
+        return None
+    if row is None:
+        return None
+    return _parse_positive_int(row["trade_id"] if hasattr(row, "keys") else row[0])
+
+
+def _trade_decision_id_is_compatible(
+    conn: sqlite3.Connection,
+    trade_decision_id: int,
+    *,
+    runtime_trade_id: Any,
+) -> bool:
+    try:
+        row = conn.execute(
+            """
+            SELECT runtime_trade_id
+              FROM trade_decisions
+             WHERE trade_id = ?
+             LIMIT 1
+            """,
+            (int(trade_decision_id),),
+        ).fetchone()
+    except Exception:
+        return False
+    if row is None:
+        return False
+    row_runtime = row["runtime_trade_id"] if hasattr(row, "keys") else row[0]
+    row_runtime_s = str(row_runtime or "").strip()
+    expected_runtime_s = str(runtime_trade_id or "").strip()
+    return not row_runtime_s or not expected_runtime_s or row_runtime_s == expected_runtime_s
 
 
 def _payload_default(value):
@@ -994,6 +1093,14 @@ def _validate_review_clearance_payload(
     payload: Optional[dict],
     command_id: str,
 ) -> None:
+    if event_type == "REVIEW_CLEARED_NO_VENUE_EXPOSURE":
+        _validate_review_no_exposure_payload(
+            conn=conn,
+            current_state=current_state,
+            payload=payload,
+            command_id=command_id,
+        )
+        return
     if event_type != "REVIEW_CLEARED_NO_VENUE_SIDE_EFFECT":
         return
     if current_state != "REVIEW_REQUIRED":
@@ -1050,6 +1157,139 @@ def _validate_review_clearance_payload(
         raise ValueError("pre-SDK review clearance requires review_required_proof")
     if review_proof.get("reason") != actual_reason:
         raise ValueError("review clearance review_required_proof reason does not match DB")
+
+
+def _validate_review_no_exposure_payload(
+    *,
+    conn: sqlite3.Connection,
+    current_state: str,
+    payload: Optional[dict],
+    command_id: str,
+) -> None:
+    if current_state != "REVIEW_REQUIRED":
+        raise ValueError("review no-exposure clearance is only legal from REVIEW_REQUIRED")
+    if not isinstance(payload, dict):
+        raise ValueError("review no-exposure clearance requires structured proof payload")
+    if payload.get("reason") != "review_cleared_no_venue_exposure":
+        raise ValueError("review no-exposure clearance payload requires reason=review_cleared_no_venue_exposure")
+    if payload.get("command_id") != command_id:
+        raise ValueError("review no-exposure clearance payload command_id must match appended command")
+    if payload.get("proof_class") != "venue_absence_no_exposure":
+        raise ValueError("review no-exposure clearance proof_class is not supported")
+    if payload.get("side_effect_boundary_crossed") != "unknown":
+        raise ValueError("review no-exposure clearance requires side_effect_boundary_crossed=unknown")
+    if payload.get("sdk_submit_attempted") != "unknown":
+        raise ValueError("review no-exposure clearance requires sdk_submit_attempted=unknown")
+    required_predicates = payload.get("required_predicates")
+    if not isinstance(required_predicates, dict):
+        raise ValueError("review no-exposure clearance requires required_predicates")
+    required_true = (
+        "no_venue_order_id",
+        "no_final_submission_envelope",
+        "no_raw_response",
+        "no_signed_order",
+        "no_order_facts",
+        "no_trade_facts",
+        "no_submit_side_effect_events",
+        "review_required_reason_recovery_no_venue_order_id",
+    )
+    missing = [name for name in required_true if required_predicates.get(name) is not True]
+    if missing:
+        raise ValueError(f"review no-exposure predicates are not proven true: {missing}")
+    actual_predicates = _actual_review_clearance_predicates(conn, command_id)
+    actual_failures = [
+        name
+        for name, ok in actual_predicates.items()
+        if name != "review_required_reason_pre_sdk" and not ok
+    ]
+    if actual_failures:
+        raise ValueError(f"review no-exposure DB predicates failed: {actual_failures}")
+    actual_reason = _actual_review_required_reason(conn, command_id)
+    if actual_reason != "recovery_no_venue_order_id":
+        raise ValueError("review no-exposure clearance only supports recovery_no_venue_order_id")
+    venue_proof = payload.get("venue_absence_proof")
+    if not isinstance(venue_proof, dict):
+        raise ValueError("review no-exposure clearance requires venue_absence_proof")
+    if venue_proof.get("owner_scope") != "authenticated_funder":
+        raise ValueError("review no-exposure clearance requires authenticated_funder owner_scope")
+    observed_at = _review_clearance_parse_utc(venue_proof.get("observed_at"))
+    cleared_at = _review_clearance_parse_utc(payload.get("cleared_at"))
+    if observed_at is None or cleared_at is None:
+        raise ValueError("review no-exposure clearance requires observed_at and cleared_at")
+    age_seconds = (cleared_at - observed_at).total_seconds()
+    if age_seconds < -5 or age_seconds > 60:
+        raise ValueError("review no-exposure clearance venue proof is stale")
+    if venue_proof.get("open_orders_checked") is not True:
+        raise ValueError("review no-exposure clearance requires open_orders_checked=true")
+    if venue_proof.get("trades_checked") is not True:
+        raise ValueError("review no-exposure clearance requires trades_checked=true")
+    if venue_proof.get("open_orders_query_complete") is not True:
+        raise ValueError("review no-exposure clearance requires open_orders_query_complete=true")
+    if venue_proof.get("trades_query_complete") is not True:
+        raise ValueError("review no-exposure clearance requires trades_query_complete=true")
+    if not str(venue_proof.get("pagination_scope") or "").strip():
+        raise ValueError("review no-exposure clearance requires pagination_scope")
+    if int(venue_proof.get("matching_open_order_count", -1)) != 0:
+        raise ValueError("review no-exposure clearance found matching open orders")
+    if int(venue_proof.get("matching_trade_count", -1)) != 0:
+        raise ValueError("review no-exposure clearance found matching trades")
+    with _row_factory_as(conn, sqlite3.Row):
+        command = conn.execute(
+            """
+            SELECT decision_id, market_id, token_id, side, price, size, created_at
+            FROM venue_commands
+            WHERE command_id = ?
+            """,
+            (command_id,),
+        ).fetchone()
+    if command is None:
+        raise ValueError("review no-exposure clearance command is missing")
+    window_start = _review_clearance_parse_utc(venue_proof.get("time_window_start"))
+    window_end = _review_clearance_parse_utc(venue_proof.get("time_window_end"))
+    command_created_at = _review_clearance_parse_utc(command["created_at"])
+    if window_start is None or window_end is None or command_created_at is None:
+        raise ValueError("review no-exposure clearance requires a parseable command-to-read window")
+    if window_start > command_created_at or window_end < observed_at:
+        raise ValueError("review no-exposure clearance time window does not cover command through venue read")
+    for key in ("decision_id", "market_id", "token_id", "side"):
+        if str(venue_proof.get(key) or "") != str(command[key] or ""):
+            raise ValueError(f"review no-exposure venue_absence_proof {key} does not match command")
+    for key in ("price", "size"):
+        try:
+            proof_value = Decimal(str(venue_proof.get(key)))
+            command_value = Decimal(str(command[key]))
+        except (InvalidOperation, TypeError):
+            raise ValueError(f"review no-exposure venue_absence_proof {key} is invalid")
+        if proof_value != command_value:
+            raise ValueError(f"review no-exposure venue_absence_proof {key} does not match command")
+    source = payload.get("source_proof")
+    if not isinstance(source, dict):
+        raise ValueError("review no-exposure clearance requires source_proof")
+    for key in ("source_commit", "source_function", "source_reason"):
+        if not str(source.get(key) or "").strip():
+            raise ValueError(f"review no-exposure source_proof missing {key}")
+    if source.get("source_reason") != "recovery_no_venue_order_id":
+        raise ValueError("review no-exposure source_reason must be recovery_no_venue_order_id")
+    review_proof = payload.get("review_required_proof")
+    if not isinstance(review_proof, dict):
+        raise ValueError("review no-exposure clearance requires review_required_proof")
+    if review_proof.get("reason") != actual_reason:
+        raise ValueError("review no-exposure review_required_proof reason does not match DB")
+
+
+def _review_clearance_parse_utc(value: object) -> datetime.datetime | None:
+    if value in (None, ""):
+        return None
+    try:
+        text = str(value)
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        parsed = datetime.datetime.fromisoformat(text)
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=datetime.timezone.utc)
+    return parsed.astimezone(datetime.timezone.utc)
 
 
 def _review_clearance_table_exists(conn: sqlite3.Connection, table: str) -> bool:

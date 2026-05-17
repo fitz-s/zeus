@@ -119,85 +119,42 @@ make a surface default-read unless `current_state.md` routes it.
 | `learning_loop_observation/` | active monitoring | Operator-managed learning-loop health observation surface |
 | `task_2026-04-26_ultimate_plan/` | active packet container | Contains live-alpha runtime-gating TIGGE authorization evidence |
 | `task_2026-04-26_ultimate_plan/2026-05-01_live_alpha/evidence/tigge_ingest_decision_2026-05-01.md` | active runtime-gating evidence | TIGGE entry-primary operator authorization evidence; do not archive without replacement |
-| `task_2026-05-02_live_entry_data_contract/CURRENT_ROLLOUT_MODE.md` | single-source-of-truth | Declared rollout_mode; canary `test_settings_json_rollout_mode_matches_plan_declaration` asserts agreement with `config/settings.json:entry_forecast.rollout_mode` |
-| `task_2026-05-02_live_entry_data_contract/PREMISE_ERRATUM_2026-05-03.md` | erratum record | DB-probe resolution of LIVE_ELIGIBLE/HORIZON_OUT_OF_RANGE per-track vs aggregate figure mismatch |
 | `task_2026-05-04_zeus_may3_review_remediation/` | lock-candidate planning packet container | Round-5 corrected-live remediation plan packet; not implementation authority until locked by `LOCK_DECISION.md` |
-| `task_2026-05-04_zeus_may3_review_remediation/PLAN.md` | topology planning entrypoint | Routeable entrypoint for the Round-5 plan; points to `MASTER_PLAN_v2.md` as detailed payload |
-| `task_2026-05-04_zeus_may3_review_remediation/MASTER_PLAN_v2.md` | lock-candidate remediation plan | Serialized T-1/T0/T1/T2/T3/T4 plan for corrected-live safety and orchestrated-delivery execution |
-| `task_2026-05-04_zeus_may3_review_remediation/ORCHESTRATOR_RUNBOOK.md` | lock-candidate orchestration runbook | Skill-derived coordinator prompt, role split, idle boot, critic-gate, verifier, and co-tenant staging protocol for the Round-5 plan |
-| `task_2026-05-04_zeus_may3_review_remediation/scope.yaml` | packet scope | Plan-finalization scope sidecar; source/script/test implementation requires narrower phase scopes |
 | `task_2026-05-05_topology_noise_repair/` | plan packet container | Scoped plan packet for topology boot-profile and script-route noise repair |
-| `task_2026-05-05_topology_noise_repair/PLAN.md` | topology planning packet | Minimal route evidence for the 2026-05-05 topology noise repair |
 | `task_2026-05-05_object_invariance_mainline/` | closeout packet container | PR67 object-meaning invariance closeout ledger and remaining-mainline alignment |
-| `task_2026-05-05_object_invariance_mainline/PLAN.md` | closeout ledger | PR67 baseline, wave-evidence ledger, review claims, verification debt, and remaining mainline plan |
 | `task_2026-05-05_object_invariance_wave5/` | plan packet container | Planning-lock evidence for object-meaning invariance Wave 5 settlement authority cutover |
-| `task_2026-05-05_object_invariance_wave5/PLAN.md` | topology planning packet | Route evidence for settlement source/result to position settlement authority repair |
 | `task_2026-05-05_object_invariance_wave6/` | plan packet container | Planning-lock evidence for object-meaning invariance Wave 6 command recovery and allocation authority repair |
-| `task_2026-05-05_object_invariance_wave6/PLAN.md` | topology planning packet | Route evidence for unknown submit side-effect recovery to fill-finality and allocation-authority repair |
 | `task_2026-05-05_object_invariance_wave7/` | plan packet container | Planning-lock evidence for object-meaning invariance Wave 7 forecast source identity to calibration bucket identity repair |
-| `task_2026-05-05_object_invariance_wave7/PLAN.md` | topology planning packet | Route evidence for forecast source role, calibration bucket, and live/shadow evidence separation repair |
 | `task_2026-05-05_object_invariance_wave8/` | plan packet container | Planning-lock evidence for object-meaning invariance Wave 8 OrderResult/fill authority economics repair |
-| `task_2026-05-05_object_invariance_wave8/PLAN.md` | topology planning packet | Route evidence for venue fill observation to entry economics and report/replay cohort gates |
 | `task_2026-05-05_object_invariance_wave11/` | plan packet container | Planning-lock evidence for object-meaning invariance Wave 11 current-open fill-authority DB read-model repair |
-| `task_2026-05-05_object_invariance_wave11/PLAN.md` | topology planning packet | Route evidence for fill-authority current-open economics through position read models and strategy health |
 | `task_2026-05-05_object_invariance_wave12/` | plan packet container | Planning-lock evidence for object-meaning invariance Wave 12 operator status bankroll semantics repair |
-| `task_2026-05-05_object_invariance_wave12/PLAN.md` | topology planning packet | Route evidence for wallet-equity bankroll preservation in derived status_summary output |
 | `task_2026-05-05_object_invariance_wave13/` | plan packet container | Planning-lock evidence for object-meaning invariance Wave 13 RiskGuard loader provenance repair |
-| `task_2026-05-05_object_invariance_wave13/PLAN.md` | topology planning packet | Route evidence for fill-authority current-open economics provenance preservation in RiskGuard portfolio loading |
 | `task_2026-05-05_object_invariance_wave14/` | plan packet container | Planning-lock evidence for object-meaning invariance Wave 14 strategy-health settlement authority repair |
-| `task_2026-05-05_object_invariance_wave14/PLAN.md` | topology planning packet | Route evidence for verified settlement authority feeding strategy_health realized PnL metrics |
 | `task_2026-05-05_object_invariance_wave15/` | plan packet container | Planning-lock evidence for object-meaning invariance Wave 15 replay diagnostic outcome_fact eligibility repair |
-| `task_2026-05-05_object_invariance_wave15/PLAN.md` | topology planning packet | Route evidence for legacy outcome_fact to trade-history diagnostic replay/report semantics |
 | `task_2026-05-05_object_invariance_wave16/` | plan packet container | Planning-lock evidence for object-meaning invariance Wave 16 diagnostic fact-table authority repair |
-| `task_2026-05-05_object_invariance_wave16/PLAN.md` | topology planning packet | Route evidence for legacy outcome_fact row counts to operator diagnostic/readiness semantics |
 | `task_2026-05-05_object_invariance_wave17/` | plan packet container | Planning-lock evidence for object-meaning invariance Wave 17 legacy outcome_fact producer guard repair |
-| `task_2026-05-05_object_invariance_wave17/PLAN.md` | topology planning packet | Route evidence for fail-closed backfill_outcome_fact producer semantics and manifest truth |
 | `task_2026-05-05_object_invariance_wave18/` | plan packet container | Planning-lock evidence for object-meaning invariance Wave 18 calibration-transfer OOS evidence time-basis repair |
-| `task_2026-05-05_object_invariance_wave18/PLAN.md` | topology planning packet | Route evidence for time-blocked OOS transfer evidence and pseudo-OOS rejection |
 | `task_2026-05-05_object_invariance_wave19/` | plan packet container | Planning-lock evidence for object-meaning invariance Wave 19 FinalExecutionIntent identity preservation repair |
-| `task_2026-05-05_object_invariance_wave19/PLAN.md` | topology planning packet | Route evidence for corrected execution intent no-recompute, hypothesis/cost-basis direction, and snapshot-hash submit identity repair |
 | `task_2026-05-05_object_invariance_wave20/` | plan packet container | Planning-lock evidence for object-meaning invariance Wave 20 exit snapshot identity preservation repair |
-| `task_2026-05-05_object_invariance_wave20/PLAN.md` | topology planning packet | Route evidence for exit snapshot hash preservation through execute_exit_order retry/recovery paths |
 | `task_2026-05-05_object_invariance_wave21/` | plan packet container | Planning-lock evidence for object-meaning invariance Wave 21 exchange-reconcile freshness authority repair |
-| `task_2026-05-05_object_invariance_wave21/PLAN.md` | topology planning packet | Route evidence for venue-read freshness authority before M5 absence findings |
 | `task_2026-05-08_object_invariance_wave27/` | plan packet container | Planning-lock evidence for object-meaning invariance Wave 27 trade-fact to position-lot exposure authority repair |
-| `task_2026-05-08_object_invariance_wave27/PLAN.md` | topology planning packet | Route evidence for state-compatible venue trade facts before active `position_lots` exposure authority |
 | `task_2026-05-08_object_invariance_wave28/` | plan packet container | Planning-lock evidence for object-meaning invariance Wave 28 monitor posterior to exit EV gate repair |
-| `task_2026-05-08_object_invariance_wave28/PLAN.md` | topology planning packet | Route evidence for monitor-current native posterior preservation through exit trigger hold-value EV gates |
 | `task_2026-05-08_object_invariance_wave29/` | plan packet container | Planning-lock evidence for object-meaning invariance Wave 29 monitor result reporting probability authority repair |
-| `task_2026-05-08_object_invariance_wave29/PLAN.md` | topology planning packet | Route evidence for preventing skipped/error monitor results from reporting stale probabilities as fresh |
 | `task_2026-05-08_object_invariance_wave30/` | plan packet container | Planning-lock evidence for object-meaning invariance Wave 30 position_current monitor probability read-model authority repair |
-| `task_2026-05-08_object_invariance_wave30/PLAN.md` | topology planning packet | Route evidence for preserving missing monitor probability and edge through canonical portfolio loader view |
 | `task_2026-05-08_object_invariance_wave31/` | plan packet container | Planning-lock evidence for object-meaning invariance Wave 31 D4 exit evidence hard gate repair |
-| `task_2026-05-08_object_invariance_wave31/PLAN.md` | topology planning packet | Route evidence for preventing weak statistical exit evidence from becoming executable sell intent |
 | `task_2026-05-08_object_invariance_wave32/` | plan packet container | Planning-lock evidence for object-meaning invariance Wave 32 venue fill cost-basis continuity repair |
-| `task_2026-05-08_object_invariance_wave32/PLAN.md` | topology planning packet | Route evidence for preserving venue-confirmed fill cost through portfolio loader and Position effective exposure |
 | `task_2026-05-08_object_invariance_wave33/` | plan packet container | Planning-lock evidence for object-meaning invariance Wave 33 passive maker fee authority repair |
-| `task_2026-05-08_object_invariance_wave33/PLAN.md` | topology planning packet | Route evidence for preventing post-only passive maker-only cost basis from carrying market taker fee |
 | `task_2026-05-08_object_invariance_wave34/` | plan packet container | Planning-lock evidence for object-meaning invariance Wave 34 replay execution-cost continuity repair |
-| `task_2026-05-08_object_invariance_wave34/PLAN.md` | topology planning packet | Route evidence for preserving fee-adjusted replay execution cost through shares and PnL |
 | `task_2026-05-08_object_invariance_wave35/` | plan packet container | Planning-lock evidence for object-meaning invariance Wave 35 calibration bulk writer isolation repair |
-| `task_2026-05-08_object_invariance_wave35/PLAN.md` | topology planning packet | Route evidence for preventing rebuild/refit bulk calibration writes from defaulting to canonical live world DB |
 | `task_2026-05-08_object_invariance_wave36/` | plan packet container | Planning-lock evidence for object-meaning invariance Wave 36 pending entry economics authority repair |
-| `task_2026-05-08_object_invariance_wave36/PLAN.md` | topology planning packet | Route evidence for preventing pending submitted/model economics from masquerading as fill-authoritative position cost basis |
 | `task_2026-05-08_object_invariance_wave37/` | plan packet container | Planning-lock evidence for object-meaning invariance Wave 37 calibration weighting LAW antibody triage |
-| `task_2026-05-08_object_invariance_wave37/PLAN.md` | topology planning packet | Route evidence separating safe calibration weighting LAW antibodies from schema/data-layer blocked LAW implementation work |
 | `task_2026-05-08_object_invariance_wave38/` | plan packet container | Planning-lock evidence for object-meaning invariance Wave 38 dead hourly-observations compatibility-surface deletion |
-| `task_2026-05-08_object_invariance_wave38/PLAN.md` | topology planning packet | Route evidence for deleting stale `hourly_observations` table/view/script constructibility without mutating canonical DB data |
 | `task_2026-05-08_object_invariance_wave39/` | plan packet container | Planning-lock evidence for object-meaning invariance Wave 39 `solar_daily` malformed-rootpage Day0 degrade antibody |
-| `task_2026-05-08_object_invariance_wave39/PLAN.md` | topology planning packet | Route evidence for proving malformed `solar_daily` rootpage degrades Day0 evaluator/monitor paths without DB mutation |
 | `task_2026-05-08_object_invariance_wave41/` | plan packet container | Planning-lock evidence for object-meaning invariance Wave 41 explicit fill-price authority repair |
-| `task_2026-05-08_object_invariance_wave41/PLAN.md` | topology planning packet | Route evidence for preventing generic exchange `price` from becoming venue-confirmed fill economics |
 | `task_2026-05-08_object_invariance_wave42/` | plan packet container | Planning-lock evidence for object-meaning invariance Wave 42 harvester corrected-economics fail-closed repair |
-| `task_2026-05-08_object_invariance_wave42/PLAN.md` | topology planning packet | Route evidence for preventing corrected-marked positions without fill authority from using legacy settlement P&L fallback |
 | `task_2026-05-08_object_invariance_remaining_mainline/` | closeout packet container | Remaining object-meaning invariance mainline closeout packet for Wave22/23 evidence, failed-trade rollback repair, downstream sweep, and read-only contamination audit |
-| `task_2026-05-08_object_invariance_remaining_mainline/PLAN.md` | closeout ledger | Evidence and verification for remaining mainline closure; not live unlock, data mutation authority, backfill, relabel, or report-publication authority |
 | `task_2026-05-06_calibration_quality_blockers/` | active packet container | 2026-05-06 launch-blocker remediation packet for calibration quality (12 inverted-slope Platts quarantined + fit-time guard) |
-| `task_2026-05-06_calibration_quality_blockers/PLAN.md` | active packet plan | LOW/HIGH calibration alignment recovery plan covering contract-window evidence persistence, recovery snapshot backfill, LOW pair rebuild gates, and calibration authority shadow gating |
-| `task_2026-05-06_calibration_quality_blockers/QUARANTINE_LEDGER.md` | active packet evidence | Ledger of the 12 QUARANTINED platt_models_v2 buckets with reversibility queries and fallback-chain analysis |
 | `task_2026-05-07_recalibration_after_low_high_alignment/` | active packet container | Post-merge LOW/HIGH recalibration packet for contract-window recovery materialization and runtime authority checks |
-| `task_2026-05-07_recalibration_after_low_high_alignment/PLAN.md` | active packet plan | Controlled LOW/HIGH recovery, pair rebuild, Platt refit, authority, and promotion-readiness plan |
-| `task_2026-05-07_recalibration_after_low_high_alignment/REPORT.md` | active packet evidence | Before/after report for TIGGE LOW contract-window recovery snapshots, pairs, Platts, runtime samples, and verification |
 | `task_2026-05-08_100_blocked_horizon_audit/` | packet evidence container | Evidence packet for ECMWF blocked-horizon audit around missing 2026-05-08 forecast horizons |
 | `task_2026-05-08_100_blocked_horizon_audit/RUN.md` | packet evidence | Run record for blocked-horizon audit and source-run horizon findings |
 | `task_2026-05-08_alignment_safe_implementation/` | plan packet container | Safe implementation plan for alignment repair work following deep alignment audit |
@@ -227,8 +184,6 @@ make a surface default-read unless `current_state.md` routes it.
 | `task_2026-05-09_copilot_agent_sync/PLAN.md` | topology planning packet | Route evidence and phased design for Copilot/VS Code agent sync, MCP/tool bridge, hook adapter, and OpenClaw delegation |
 | `task_2026-05-14_data_daemon_live_efficiency/` | plan packet container | Planning packet for data-daemon live-efficiency refactor: HTTP 429 handling, forecast producer split, readiness wiring, launch maintenance, and end-to-end verification |
 | `task_2026-05-14_data_daemon_live_efficiency/DATA_DAEMON_LIVE_EFFICIENCY_REFACTOR_PLAN.md` | topology planning packet | Cross-module plan for isolating live OpenData forecast production and proving live readiness consumption without runtime deployment authority |
-| `task_2026-05-14_data_daemon_live_efficiency/CRITIC_APPROVAL.md` | packet review evidence | Critic attack and approval for the data-daemon live-efficiency refactor plan; approval is plan-only and phase-gated |
-| `task_2026-05-14_data_daemon_live_efficiency/IMPLEMENTATION_CRITIC_REVIEW.md` | packet review evidence | Implementation critic REVISE-to-APPROVE record for topology forbidden-intent hardening, registry-shape repair, and focused verification gates |
 | `task_2026-05-14_data_daemon_live_efficiency/FORECAST_LIVE_OPERATOR_HANDOFF.md` | packet operator handoff | Repo-only launch/verification shape for future `com.zeus.forecast-live`; not plist installation, launchctl authorization, or production deployment evidence |
 | `task_2026-05-15_data_pipeline_live_rootfix/` | plan packet container | Root-cause plan packet for live data pipeline failure: forecasts DB authority reads, source-run attribution, coverage/readiness ownership, live daemon wiring, and end-to-end proof |
 | `task_2026-05-15_data_pipeline_live_rootfix/DATA_PIPELINE_ROOTFIX_PLAN.md` | topology planning packet | Empirical live-only rootfix plan superseding the 2026-05-14 plan-only approval until live end-to-end proof exists |
@@ -243,6 +198,16 @@ make a surface default-read unless `current_state.md` routes it.
 | `task_2026-05-16_live_continuous_run_package/` | plan packet container | Follow-up package for proving stable continuous live operation after the first real live order milestone |
 | `task_2026-05-16_live_continuous_run_package/LIVE_CONTINUOUS_RUN_PACKAGE_PLAN.md` | topology planning packet | Plan and completion definition for `LIVE_CONTINUOUS_READY` vs `CONTROLLED_DEGRADED`, including code-plane, launchd, source-health, DB-lock, and live acceptance gates |
 | `task_2026-05-16_live_continuous_run_package/CRITIC_REVIEW.md` | packet review evidence | Critic attack and approval record for the live continuous-run package plan; not empirical live-ready evidence |
+| `task_2026-05-17_live_order_survival/` | plan packet container | Live order survival packet for heartbeat lease ownership, submit ownership projection, REVIEW_REQUIRED clearance, and sustained order progress proof |
+| `task_2026-05-17_live_order_survival/LIVE_ORDER_SURVIVAL_PLAN.md` | topology planning packet | Plan and completion definition for proving submitted orders survive heartbeat/recovery boundaries through fill, venue terminality, or explicit no-exposure clearance |
+| `LIVE_LAUNCH_HANDOFF.md` | Live launch handoff document for daemon deployment |
+| `UNMATCHED_GAMMA_CITIES_2026_05_07.md` | Unmatched gamma cities investigation evidence (2026-05-07) |
+| `CLOUD_EXTRACT_PATCH_2026_05_07.md` | Cloud extract patch evidence (2026-05-07) |
+| `PLIST_UPDATE_FOR_RELOCK.md` | Plist update evidence for re-lock operation |
+| `LIVE_RESTART_2026_05_07.md` | Live daemon restart evidence (2026-05-07) |
+| `INDEX.md` | Directory index for docs/operations live surfaces |
+| `live_rescue_ledger_2026-05-04.md` | Live rescue ledger evidence (2026-05-04) |
+| `POLICY.md` | Operations policy document |
 Archived packet evidence (physically moved to `docs/operations/archive/<YYYY>-Q<N>/`) is
 listed in `docs/operations/archive/<YYYY>-Q<N>/INDEX.md`; do not re-list those packets here.
 When a packet closes and is archived, create a stub at `docs/operations/<name>.archived`

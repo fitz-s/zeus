@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# Lifecycle: created=2026-05-15; last_reviewed=2026-05-16; last_reused=2026-05-16
+# Lifecycle: created=2026-05-15; last_reviewed=2026-05-17; last_reused=2026-05-17
 # Purpose: Read-only verifier for live order command, venue ack, and record-chain evidence.
 # Reuse: Run after live submit attempts or when venue command/order/fill evidence semantics change.
 # Created: 2026-05-15
-# Last reused or audited: 2026-05-16
+# Last reused or audited: 2026-05-17
 # Authority basis: docs/operations/task_2026-05-15_live_order_e2e_goal/LIVE_ORDER_E2E_GOAL_PLAN.md
 """Read-only live order end-to-end evidence checker.
 
@@ -226,6 +226,14 @@ def _positive_decimal(value: Any) -> bool:
         return False
 
 
+def _decimal_or_none(value: Any) -> Decimal | None:
+    try:
+        parsed = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+    return parsed if parsed.is_finite() else None
+
+
 def _zero_decimal(value: Any) -> bool:
     if value in (None, ""):
         return False
@@ -330,6 +338,45 @@ def _latest_trade_fact(trade_facts: list[dict[str, Any]], order_id: str) -> dict
         if str(fact.get("venue_order_id") or "") == order_id:
             return fact
     return None
+
+
+def _latest_live_trade_facts_by_trade(trade_facts: list[dict[str, Any]], order_id: str) -> list[dict[str, Any]]:
+    latest: dict[str, dict[str, Any]] = {}
+    for fact in trade_facts:
+        if str(fact.get("venue_order_id") or "") != order_id:
+            continue
+        if str(fact.get("state") or "") not in FILL_TRADE_FACT_STATES:
+            continue
+        if not _live_source(fact.get("source")):
+            continue
+        if not _positive_decimal(fact.get("filled_size")):
+            continue
+        if not _positive_decimal(fact.get("fill_price")):
+            continue
+        trade_key = str(fact.get("trade_id") or fact.get("fact_id") or "")
+        if not trade_key:
+            continue
+        latest.setdefault(trade_key, fact)
+    return list(latest.values())
+
+
+def _fill_coverage_state(command: dict[str, Any], trade_facts: list[dict[str, Any]], order_id: str) -> str:
+    command_size = _decimal_or_none(command.get("size"))
+    if command_size is None or command_size <= 0:
+        return "unknown"
+    latest_trade_facts = _latest_live_trade_facts_by_trade(trade_facts, order_id)
+    if not latest_trade_facts:
+        return "none"
+    filled_total = Decimal("0")
+    for fact in latest_trade_facts:
+        size = _decimal_or_none(fact.get("filled_size"))
+        if size is not None and size > 0:
+            filled_total += size
+    if filled_total <= 0:
+        return "none"
+    if filled_total >= command_size:
+        return "complete"
+    return "partial"
 
 
 def _trade_fact_supports_fill(fact: dict[str, Any] | None) -> bool:
@@ -444,15 +491,21 @@ def _has_matching_position_current(
 
 
 def _position_current_order_status_consistent(
-    command_state: str,
+    command: dict[str, Any],
+    trade_facts: list[dict[str, Any]],
     fill_events: list[dict[str, Any]],
     current_rows: list[dict[str, Any]],
     order_id: str,
 ) -> bool:
+    command_state = str(command.get("state") or "")
+    coverage_state = _fill_coverage_state(command, trade_facts, order_id)
     if command_state == "PARTIAL":
         expected = {"partial", "partially_filled", "partially_matched"}
     elif command_state == "FILLED":
-        expected = {"filled", "confirmed", "complete"}
+        if coverage_state == "partial":
+            expected = {"partial", "partially_filled", "partially_matched"}
+        else:
+            expected = {"filled", "confirmed", "complete"}
     else:
         return True
     position_ids = {str(event.get("position_id") or "") for event in fill_events if event.get("position_id")}
@@ -468,6 +521,19 @@ def _position_current_order_status_consistent(
 
 def _position_current_order_statuses(rows: list[dict[str, Any]]) -> list[str]:
     return sorted({str(row.get("order_status") or "") for row in rows})
+
+
+def _position_current_order_status_detail(
+    command: dict[str, Any],
+    trade_facts: list[dict[str, Any]],
+    current_rows: list[dict[str, Any]],
+    order_id: str,
+) -> str:
+    return (
+        f"command_state={str(command.get('state') or '')} "
+        f"fill_coverage={_fill_coverage_state(command, trade_facts, order_id)} "
+        f"position_order_statuses={_position_current_order_statuses(current_rows)}"
+    )
 
 
 def _has_pending_entry_zero_share_projection(
@@ -643,10 +709,11 @@ def evaluate(conn: sqlite3.Connection, command_id: str | None = None) -> dict[st
         and not any(_trade_fact_supports_fill(fact) for fact in trade_facts)
         and not fill_position_events
     )
+    fill_coverage = _fill_coverage_state(command, trade_facts, order_id)
     terminal_remainder_after_fill_observed = (
-        state in TERMINAL_NO_FILL_COMMAND_STATES
-        and fill_observed
+        fill_observed
         and _order_fact_supports_terminal_remainder_after_fill(latest_order_fact)
+        and (state in TERMINAL_NO_FILL_COMMAND_STATES or fill_coverage == "partial")
     )
 
     checks.append(Check("command_present", "PASS", f"command_id={cmd_id} state={state}"))
@@ -779,10 +846,10 @@ def evaluate(conn: sqlite3.Connection, command_id: str | None = None) -> dict[st
                 "position_current_order_status_consistent",
                 "PASS"
                 if _position_current_order_status_consistent(
-                    state, fill_position_events, position_current, order_id
+                    command, trade_facts, fill_position_events, position_current, order_id
                 )
                 else "FAIL",
-                f"command_state={state} position_order_statuses={_position_current_order_statuses(position_current)}",
+                _position_current_order_status_detail(command, trade_facts, position_current, order_id),
             )
         )
     elif terminal_no_fill_observed:
@@ -840,7 +907,11 @@ def evaluate(conn: sqlite3.Connection, command_id: str | None = None) -> dict[st
         and not failed_check_names
     )
     category = (
-        "LIVE_ORDER_FILLED"
+        "LIVE_ORDER_PARTIAL_TERMINAL_REMAINDER"
+        if complete and fill_observed and fill_coverage == "partial" and terminal_remainder_after_fill_observed
+        else "LIVE_ORDER_PARTIAL_REMAINDER_OPEN_OR_UNKNOWN"
+        if complete and fill_observed and fill_coverage == "partial"
+        else "LIVE_ORDER_FILLED"
         if complete and fill_observed
         else "LIVE_ORDER_TERMINAL_NO_FILL"
         if complete and terminal_no_fill_observed

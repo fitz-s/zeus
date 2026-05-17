@@ -14,8 +14,9 @@ Advisory file lock infrastructure (src.data.dual_run_lock) is retained in code
 """
 
 # Created: pre-Phase-0 (K2 scheduler wiring via 27bedbd; P9A run_mode observability via 7081634)
-# Last reused/audited: 2026-05-16
+# Last reused/audited: 2026-05-17
 # Authority basis: Phase 3 two-system independence — docs/operations/task_2026-04-30_two_system_independence/design.md §5 Phase 3; docs/operations/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md
+#                  + 2026-05-17 CLOB venue-heartbeat critical-path split
 
 import functools
 import logging
@@ -422,8 +423,45 @@ def _write_heartbeat() -> None:
 
 _venue_heartbeat_supervisor = None
 _venue_heartbeat_adapter = None
+_venue_heartbeat_thread = None
+_venue_background_maintenance_lock = threading.Lock()
+_last_venue_background_maintenance_attempt_at = None
+VENUE_BACKGROUND_MAINTENANCE_SECONDS = 30.0
+_collateral_background_refresh_lock = threading.Lock()
 _last_collateral_heartbeat_refresh_attempt_at = None
 COLLATERAL_HEARTBEAT_REFRESH_SECONDS = 30.0
+
+
+def _venue_heartbeat_mode() -> str:
+    return os.environ.get("ZEUS_VENUE_HEARTBEAT_MODE", "internal").strip().lower()
+
+
+def _external_venue_heartbeat_enabled() -> bool:
+    return _venue_heartbeat_mode() == "external"
+
+
+def _configure_external_venue_heartbeat_supervisor_if_needed() -> None:
+    from src.control.heartbeat_supervisor import (
+        ExternalHeartbeatSupervisor,
+        configure_global_supervisor,
+        get_global_supervisor,
+    )
+
+    supervisor = get_global_supervisor()
+    if isinstance(supervisor, ExternalHeartbeatSupervisor):
+        return
+    configure_global_supervisor(ExternalHeartbeatSupervisor())
+
+
+def _ensure_venue_read_side_adapter():
+    """Install the venue adapter used by non-heartbeat read-side maintenance."""
+
+    global _venue_heartbeat_adapter
+    if _venue_heartbeat_adapter is None:
+        from src.data.polymarket_client import PolymarketClient
+
+        _venue_heartbeat_adapter = PolymarketClient()._ensure_v2_adapter()
+    return _venue_heartbeat_adapter
 
 
 def _refresh_global_collateral_snapshot_if_due(
@@ -493,6 +531,17 @@ def _run_ws_gap_reconcile_if_required(
         summary = ws_guard.summary()
     if not bool(summary.get("m5_reconcile_required", False)):
         return {"status": "not_required"}
+    if (
+        summary.get("subscription_state") == "DISCONNECTED"
+        and summary.get("gap_reason") == "not_configured"
+    ):
+        return {
+            "status": "deferred_ws_not_ready",
+            "reason": "ws_not_configured",
+            "subscription_state": summary.get("subscription_state"),
+            "gap_reason": summary.get("gap_reason"),
+            "m5_reconcile_required": True,
+        }
 
     owns_connection = conn_factory is None
     conn = None
@@ -524,6 +573,82 @@ def _run_ws_gap_reconcile_if_required(
     finally:
         if owns_connection and conn is not None:
             conn.close()
+
+
+def _run_venue_background_maintenance_once(adapter=None) -> dict:
+    """Run venue read-side maintenance outside the heartbeat critical path."""
+
+    if _cycle_lock.locked():
+        return {"status": "deferred_cycle_running"}
+    active_adapter = adapter or _venue_heartbeat_adapter
+    if active_adapter is None:
+        return {"status": "adapter_unavailable"}
+    return {
+        "status": "ok",
+        "ws_gap_reconcile": _run_ws_gap_reconcile_if_required(active_adapter),
+        "collateral_refreshed": _refresh_global_collateral_snapshot_if_due(active_adapter),
+    }
+
+
+def _start_collateral_background_refresh_async(adapter=None) -> str:
+    """Refresh collateral on an independent lane from slower venue maintenance."""
+
+    if _cycle_lock.locked():
+        return "deferred_cycle_running"
+    active_adapter = adapter or _venue_heartbeat_adapter
+    if active_adapter is None:
+        return "adapter_unavailable"
+    if not _collateral_background_refresh_lock.acquire(blocking=False):
+        return "already_running"
+
+    def _runner() -> None:
+        try:
+            _refresh_global_collateral_snapshot_if_due(active_adapter)
+        finally:
+            _collateral_background_refresh_lock.release()
+
+    thread = threading.Thread(
+        target=_runner,
+        name="collateral-background-refresh",
+        daemon=True,
+    )
+    thread.start()
+    return "started"
+
+
+def _start_venue_background_maintenance_async(adapter=None) -> str:
+    """Start slow venue maintenance without delaying the next heartbeat tick."""
+
+    global _last_venue_background_maintenance_attempt_at
+    if _cycle_lock.locked():
+        return "deferred_cycle_running"
+    active_adapter = adapter or _venue_heartbeat_adapter
+    if active_adapter is None:
+        return "adapter_unavailable"
+    now = datetime.now(timezone.utc)
+    if (
+        _last_venue_background_maintenance_attempt_at is not None
+        and (now - _last_venue_background_maintenance_attempt_at).total_seconds()
+        < VENUE_BACKGROUND_MAINTENANCE_SECONDS
+    ):
+        return "throttled"
+    if not _venue_background_maintenance_lock.acquire(blocking=False):
+        return "already_running"
+    _last_venue_background_maintenance_attempt_at = now
+
+    def _runner() -> None:
+        try:
+            _run_venue_background_maintenance_once(active_adapter)
+        finally:
+            _venue_background_maintenance_lock.release()
+
+    thread = threading.Thread(
+        target=_runner,
+        name="venue-background-maintenance",
+        daemon=True,
+    )
+    thread.start()
+    return "started"
 
 
 _user_channel_ingestor = None
@@ -720,16 +845,34 @@ def _start_user_channel_ingestor_if_enabled() -> None:
 
 @_scheduler_job("venue_heartbeat")
 def _write_venue_heartbeat() -> None:
-    """Post the Polymarket venue heartbeat required for live resting orders."""
+    """Post the Polymarket venue heartbeat required for live resting orders.
+
+    Keep this function narrow. Polymarket cancels resting GTC/GTD orders when
+    valid heartbeats stop, so slow reconciliation and collateral reads must not
+    run inline with the heartbeat tick.
+    """
     global _venue_heartbeat_supervisor, _venue_heartbeat_adapter
     import asyncio
 
     from src.control.heartbeat_supervisor import (
         HeartbeatHealth,
         HeartbeatSupervisor,
+        current_status,
         configure_global_supervisor,
+        fresh_heartbeat_id_from_status,
         heartbeat_cadence_seconds_from_env,
+        write_heartbeat_keeper_status,
     )
+
+    if _external_venue_heartbeat_enabled():
+        _configure_external_venue_heartbeat_supervisor_if_needed()
+        status = current_status()
+        if status.health is not HeartbeatHealth.HEALTHY:
+            raise RuntimeError(
+                f"external venue heartbeat unhealthy: health={status.health.value}; "
+                f"error={status.last_error or ''}"
+            )
+        return
 
     try:
         if _venue_heartbeat_supervisor is None:
@@ -740,6 +883,7 @@ def _write_venue_heartbeat() -> None:
             _venue_heartbeat_supervisor = HeartbeatSupervisor(
                 adapter,
                 cadence_seconds=heartbeat_cadence_seconds_from_env(),
+                initial_heartbeat_id=fresh_heartbeat_id_from_status(),
             )
             configure_global_supervisor(_venue_heartbeat_supervisor)
     except Exception as exc:
@@ -764,8 +908,51 @@ def _write_venue_heartbeat() -> None:
             f"venue heartbeat unhealthy: health={status.health.value}; "
             f"error={status.last_error or ''}"
         )
-    _run_ws_gap_reconcile_if_required(_venue_heartbeat_adapter)
-    _refresh_global_collateral_snapshot_if_due(_venue_heartbeat_adapter)
+    write_heartbeat_keeper_status(status, owner="zeus-live-daemon")
+    _start_venue_background_maintenance_async(_venue_heartbeat_adapter)
+
+
+@_scheduler_job("venue_heartbeat")
+def _start_venue_heartbeat_loop_if_needed() -> None:
+    """Keep a dedicated venue-heartbeat loop alive outside APScheduler load."""
+
+    global _venue_heartbeat_thread
+    if _external_venue_heartbeat_enabled():
+        _configure_external_venue_heartbeat_supervisor_if_needed()
+        if _cycle_lock.locked():
+            return
+        adapter = _ensure_venue_read_side_adapter()
+        _start_collateral_background_refresh_async(adapter)
+        _start_venue_background_maintenance_async(adapter)
+        return
+    if _venue_heartbeat_thread is not None and _venue_heartbeat_thread.is_alive():
+        return
+
+    from src.control.heartbeat_supervisor import heartbeat_cadence_seconds_from_env
+
+    cadence_seconds = heartbeat_cadence_seconds_from_env()
+    _venue_heartbeat_thread = threading.Thread(
+        target=_run_venue_heartbeat_loop,
+        args=(cadence_seconds,),
+        name="venue-heartbeat",
+        daemon=True,
+    )
+    _venue_heartbeat_thread.start()
+
+
+def _run_venue_heartbeat_loop(cadence_seconds: float) -> None:
+    """Run venue heartbeats forever; a failed tick must not kill the loop."""
+
+    import time
+
+    while True:
+        started = datetime.now(timezone.utc)
+        try:
+            _write_venue_heartbeat()
+        except Exception as exc:
+            logger.error("venue heartbeat loop tick failed: %s", exc, exc_info=True)
+        elapsed = (datetime.now(timezone.utc) - started).total_seconds()
+        time.sleep(max(0.1, cadence_seconds - elapsed))
 
 
 def _startup_freshness_check() -> None:
@@ -1094,6 +1281,12 @@ def main():
     # without VPN. Must precede any HTTP call (PolymarketClient wallet check, etc).
     from src.data.proxy_health import bypass_dead_proxy_env_vars
     bypass_dead_proxy_env_vars()
+
+    # Venue heartbeat is the liveness contract for already-resting CLOB orders.
+    # Start it before any boot-time wallet/readiness HTTP so a restart cannot
+    # leave existing orders without heartbeats while slow checks complete.
+    _start_venue_heartbeat_loop_if_needed()
+
     # Capital truth: query on-chain wallet via bankroll_provider. Startup must
     # never log retired config-literal capital as if it were wallet truth.
     try:
@@ -1202,7 +1395,7 @@ def main():
                       max_instances=1, coalesce=True)
     from src.control.heartbeat_supervisor import heartbeat_cadence_seconds_from_env
     scheduler.add_job(
-        _write_venue_heartbeat,
+        _start_venue_heartbeat_loop_if_needed,
         "interval",
         seconds=heartbeat_cadence_seconds_from_env(),
         id="venue_heartbeat",

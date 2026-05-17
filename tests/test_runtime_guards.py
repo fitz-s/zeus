@@ -1,7 +1,7 @@
 """Runtime guard and live-cycle wiring tests."""
 # Lifecycle: created=2026-04-28; last_reviewed=2026-05-15; last_reused=2026-05-15
 # Created: 2026-04-28
-# Last reused/audited: 2026-05-15
+# Last reused/audited: 2026-05-17
 # Authority basis: docs/operations/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md; task_2026-04-28_contamination_remediation Batch G; Phase 1B ENS snapshot persistence; Phase 1D forecast source policy; PR #56 MarketPhaseEvidence sidecar propagation; Wave26 explicit position env authority.
 # Purpose: Lock runtime guard and live-cycle wiring contracts.
 # Reuse: Run for runtime guard, live-only cleanup, and cycle wiring changes.
@@ -1251,6 +1251,76 @@ def test_stale_order_cleanup_blocks_without_matching_command(tmp_path):
     assert cancelled == []
 
 
+def test_stale_order_cleanup_quarantines_position_current_owned_order(monkeypatch, tmp_path):
+    conn = get_connection(tmp_path / "command-backed-order.db")
+    init_schema(conn)
+    conn.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, trade_id, market_id, city, cluster, target_date,
+            bin_label, direction, unit, size_usd, shares, cost_basis_usd,
+            entry_price, p_posterior, entry_method, strategy_key, edge_source,
+            discovery_mode, chain_state, order_id, order_status, updated_at,
+            temperature_metric
+        ) VALUES (
+            'pos-owned', 'pending_entry', 'pos-owned', 'm-owned', 'NYC', 'NYC',
+            '2026-05-19', '80°F or higher', 'buy_yes', 'F', 7.5, 0.0, 0.0,
+            0.27, 0.60, 'executable_forecast', 'opening_inertia',
+            'opening_inertia', 'opening_hunt', 'unknown', 'owned-order',
+            'live', '2026-05-17T07:45:01Z', 'high'
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO venue_commands (
+            command_id, snapshot_id, envelope_id, position_id, decision_id,
+            idempotency_key, intent_kind, market_id, token_id, side, size, price,
+            venue_order_id, state, last_event_id, created_at, updated_at,
+            review_required_reason
+        ) VALUES (
+            'cmd-owned', 'snap-owned', 'env-owned', 'pos-owned', 'dec-owned',
+            'idem-owned', 'entry', 'm-owned', 'tok-owned', 'BUY', 7.5, 0.27,
+            'owned-order', 'ACKED', NULL, '2026-05-17T07:45:00Z',
+            '2026-05-17T07:45:01Z', NULL
+        )
+        """
+    )
+    conn.commit()
+    cancelled: list[str] = []
+
+    class DummyClob:
+        def get_open_orders(self):
+            return [{"id": "owned-order"}]
+
+        def cancel_order(self, order_id):
+            cancelled.append(order_id)
+            return {"status": "CANCELLED", "id": order_id}
+
+    import src.execution.exit_safety as exit_safety
+
+    def fake_request_cancel_for_command(conn_arg, command_id, cancel_fn):
+        cancel_fn("owned-order")
+        return types.SimpleNamespace(status="CANCELED")
+
+    monkeypatch.setattr(
+        exit_safety,
+        "request_cancel_for_command",
+        fake_request_cancel_for_command,
+    )
+
+    cancelled_count = cycle_runtime.cleanup_orphan_open_orders(
+        PortfolioState(),
+        DummyClob(),
+        deps=types.SimpleNamespace(logger=logging.getLogger("test_command_backed_order")),
+        conn=conn,
+    )
+    conn.close()
+
+    assert cancelled_count == 0
+    assert cancelled == []
+
+
 def test_reconcile_pending_positions_delegates_to_fill_tracker(monkeypatch):
     portfolio = PortfolioState()
     tracker = StrategyTracker()
@@ -1994,7 +2064,7 @@ def test_discovery_phase_blocks_unverified_market_scan_authority_before_evaluato
     assert artifact.no_trade_cases[0].rejection_reasons == ["market_scan_authority=NEVER_FETCHED"]
 
 
-def test_discovery_phase_writes_verified_forward_market_substrate_before_evaluator(tmp_path):
+def test_discovery_phase_buffers_forward_market_substrate_until_after_evaluator(tmp_path):
     db_path = tmp_path / "forward-substrate-runtime.db"
     conn = get_connection(db_path)
     init_schema(conn)
@@ -2027,20 +2097,20 @@ def test_discovery_phase_writes_verified_forward_market_substrate_before_evaluat
     }
     observed = {}
 
-    def _evaluate_after_forward_write(candidate, conn_arg, *args, **kwargs):
+    def _evaluate_before_forward_flush(candidate, conn_arg, *args, **kwargs):
         del candidate, args, kwargs
-        observed["same_conn_events"] = conn_arg.execute(
+        observed["same_conn_events_during_eval"] = conn_arg.execute(
             "SELECT COUNT(*) FROM market_events_v2"
         ).fetchone()[0]
-        observed["same_conn_prices"] = conn_arg.execute(
+        observed["same_conn_prices_during_eval"] = conn_arg.execute(
             "SELECT COUNT(*) FROM market_price_history"
         ).fetchone()[0]
         read_conn = get_connection(db_path)
         try:
-            observed["external_events_before_commit"] = read_conn.execute(
+            observed["external_events_during_eval"] = read_conn.execute(
                 "SELECT COUNT(*) FROM market_events_v2"
             ).fetchone()[0]
-            observed["external_prices_before_commit"] = read_conn.execute(
+            observed["external_prices_during_eval"] = read_conn.execute(
                 "SELECT COUNT(*) FROM market_price_history"
             ).fetchone()[0]
         finally:
@@ -2055,7 +2125,7 @@ def test_discovery_phase_writes_verified_forward_market_substrate_before_evaluat
         logger=types.SimpleNamespace(warning=lambda *args, **kwargs: None, error=lambda *args, **kwargs: None),
         NoTradeCase=NoTradeCase,
         MarketCandidate=MarketCandidate,
-        evaluate_candidate=_evaluate_after_forward_write,
+        evaluate_candidate=_evaluate_before_forward_flush,
     )
 
     cycle_runtime.execute_discovery_phase(
@@ -2073,12 +2143,32 @@ def test_discovery_phase_writes_verified_forward_market_substrate_before_evaluat
         deps=deps,
     )
 
+    observed["same_conn_events_after_flush"] = conn.execute(
+        "SELECT COUNT(*) FROM market_events_v2"
+    ).fetchone()[0]
+    observed["same_conn_prices_after_flush"] = conn.execute(
+        "SELECT COUNT(*) FROM market_price_history"
+    ).fetchone()[0]
+    read_conn = get_connection(db_path)
+    try:
+        observed["external_events_before_commit"] = read_conn.execute(
+            "SELECT COUNT(*) FROM market_events_v2"
+        ).fetchone()[0]
+        observed["external_prices_before_commit"] = read_conn.execute(
+            "SELECT COUNT(*) FROM market_price_history"
+        ).fetchone()[0]
+    finally:
+        read_conn.close()
     readiness = check_economics_readiness(conn)
     conn.close()
 
     assert observed == {
-        "same_conn_events": 1,
-        "same_conn_prices": 2,
+        "same_conn_events_during_eval": 0,
+        "same_conn_prices_during_eval": 0,
+        "external_events_during_eval": 0,
+        "external_prices_during_eval": 0,
+        "same_conn_events_after_flush": 1,
+        "same_conn_prices_after_flush": 2,
         "external_events_before_commit": 0,
         "external_prices_before_commit": 0,
     }
@@ -2611,6 +2701,136 @@ def test_executable_snapshot_repricing_updates_edge_and_size(tmp_path):
     assert shadow["posterior_distribution_id"] == "decision_snapshot:decision-snap"
 
 
+def test_executable_snapshot_repricing_passive_buy_limit_cannot_rest_below_best_bid(tmp_path):
+    conn = get_connection(tmp_path / "snapshot-reprice-passive-top-bid.db")
+    init_schema(conn)
+    _insert_executable_snapshot(
+        conn,
+        snapshot_id="snap-passive-top-bid",
+        selected_outcome_token_id="yes1",
+        outcome_label="YES",
+        yes_token_id="yes1",
+        no_token_id="no1",
+        top_bid="0.29",
+        top_ask="0.31",
+        fee_details={"feeRate": "0.03", "source": "test_snapshot_taker_fee"},
+    )
+    edge = _edge()
+    decision = EdgeDecision(
+        should_trade=True,
+        edge=edge,
+        tokens={"token_id": "yes1", "no_token_id": "no1"},
+        size_usd=5.0,
+        decision_snapshot_id="decision-snap-passive-top-bid",
+        applied_validations=[],
+        sizing_bankroll=100.0,
+        kelly_multiplier_used=0.25,
+        execution_fee_rate=0.03,
+    )
+
+    best_ask = cycle_runtime._reprice_decision_from_executable_snapshot(
+        conn,
+        decision,
+        {"executable_snapshot_id": "snap-passive-top-bid"},
+    )
+    conn.close()
+
+    assert best_ask is None
+    reprice = decision.tokens["executable_snapshot_reprice"]
+    assert reprice["snapshot_best_bid"] == pytest.approx(0.29)
+    assert reprice["snapshot_best_ask"] == pytest.approx(0.31)
+    assert reprice["final_limit_price"] == pytest.approx(0.29)
+    assert reprice["corrected_candidate_limit_price"] == pytest.approx(0.29)
+    shadow = reprice["corrected_pricing_shadow"]
+    assert shadow["order_policy"] == "post_only_passive_limit"
+    assert shadow["live_submit_authority"] is True
+    assert shadow["candidate_final_limit_price"] == "0.29"
+
+
+def test_executable_snapshot_repricing_tick_aligns_raw_passive_limit_before_final_intent(tmp_path):
+    conn = get_connection(tmp_path / "snapshot-reprice-raw-tick.db")
+    init_schema(conn)
+    _insert_executable_snapshot(
+        conn,
+        snapshot_id="snap-raw-tick",
+        selected_outcome_token_id="yes1",
+        outcome_label="YES",
+        yes_token_id="yes1",
+        no_token_id="no1",
+        top_bid="0.29",
+        top_ask="0.3417241379310344",
+        fee_details={"feeRate": "0.03", "source": "test_snapshot_taker_fee"},
+    )
+    edge = _edge()
+    decision = EdgeDecision(
+        should_trade=True,
+        edge=edge,
+        tokens={"token_id": "yes1", "no_token_id": "no1"},
+        size_usd=5.0,
+        decision_snapshot_id="decision-snap-raw-tick",
+        applied_validations=[],
+        sizing_bankroll=100.0,
+        kelly_multiplier_used=0.25,
+        execution_fee_rate=0.03,
+    )
+
+    best_ask = cycle_runtime._reprice_decision_from_executable_snapshot(
+        conn,
+        decision,
+        {"executable_snapshot_id": "snap-raw-tick"},
+    )
+    conn.close()
+
+    assert best_ask is None
+    reprice = decision.tokens["executable_snapshot_reprice"]
+    assert reprice["snapshot_vwmp"] == pytest.approx(0.3158620689655172)
+    assert reprice["snapshot_limit_price"] == pytest.approx(0.29)
+    assert reprice["final_limit_price"] == pytest.approx(0.29)
+    assert reprice["corrected_candidate_limit_price"] == pytest.approx(0.29)
+    shadow = reprice["corrected_pricing_shadow"]
+    assert shadow["live_submit_authority"] is True
+    assert shadow["candidate_final_limit_price"] == "0.29"
+    assert decision.final_execution_intent.final_limit_price == Decimal("0.29")
+    assert decision.final_execution_intent.final_limit_price % decision.final_execution_intent.tick_size == 0
+
+
+def test_executable_snapshot_repricing_uses_snapshot_freshness_deadline(tmp_path):
+    conn = get_connection(tmp_path / "snapshot-deadline-fresh.db")
+    init_schema(conn)
+    _insert_executable_snapshot(
+        conn,
+        snapshot_id="snap-deadline-fresh",
+        selected_outcome_token_id="yes1",
+        outcome_label="YES",
+        yes_token_id="yes1",
+        no_token_id="no1",
+        top_bid="0.20",
+        top_ask="0.30",
+        captured_at=datetime.now(timezone.utc) - timedelta(seconds=10),
+    )
+    edge = _edge()
+    decision = EdgeDecision(
+        should_trade=True,
+        edge=edge,
+        tokens={"token_id": "yes1", "no_token_id": "no1"},
+        size_usd=5.0,
+        decision_snapshot_id="decision-snap",
+        applied_validations=[],
+        sizing_bankroll=100.0,
+        kelly_multiplier_used=0.25,
+        execution_fee_rate=0.0,
+    )
+
+    cycle_runtime._reprice_decision_from_executable_snapshot(
+        conn,
+        decision,
+        {"executable_snapshot_id": "snap-deadline-fresh"},
+    )
+    conn.close()
+
+    assert "executable_snapshot_repriced" in decision.applied_validations
+
+
 def test_executable_snapshot_repricing_rejects_stale_snapshot(tmp_path):
     conn = get_connection(tmp_path / "snapshot-stale.db")
     init_schema(conn)
@@ -2623,7 +2843,7 @@ def test_executable_snapshot_repricing_rejects_stale_snapshot(tmp_path):
         no_token_id="no1",
         top_bid="0.20",
         top_ask="0.30",
-        captured_at=datetime.now(timezone.utc) - timedelta(seconds=10),
+        captured_at=datetime.now(timezone.utc) - timedelta(seconds=40),
     )
     decision = EdgeDecision(
         should_trade=True,
@@ -2706,6 +2926,67 @@ def test_executable_snapshot_repricing_can_cross_ask_inside_slippage_budget(tmp_
         == "MARKETABLE_FINAL_INTENT_REQUIRES_IMMEDIATE_ORDER_TYPE"
     )
     assert getattr(decision, "final_execution_intent", None) is None
+
+
+def test_executable_snapshot_repricing_upgrades_maker_order_type_when_crossing_ask(tmp_path):
+    """RELATIONSHIP: repriced taker policy -> concrete submit order type.
+
+    The governor may allow a maker order before repricing, but if the executable
+    snapshot proves the best ask is inside edge/slippage/depth budget, the final
+    intent must carry an immediate order type instead of becoming shadow-only.
+    """
+    conn = get_connection(tmp_path / "snapshot-reprice-tight-ask-upgrade.db")
+    init_schema(conn)
+    _insert_executable_snapshot(
+        conn,
+        snapshot_id="snap-reprice-tight-ask-upgrade",
+        selected_outcome_token_id="yes1",
+        outcome_label="YES",
+        yes_token_id="yes1",
+        no_token_id="no1",
+        top_bid="0.40",
+        top_ask="0.41",
+        fee_details={"feeRate": "0.03", "source": "test_snapshot_taker_fee"},
+    )
+    edge = _edge()
+    decision = EdgeDecision(
+        should_trade=True,
+        edge=edge,
+        tokens={"token_id": "yes1", "no_token_id": "no1"},
+        size_usd=5.0,
+        applied_validations=[],
+        edge_context=types.SimpleNamespace(p_posterior=edge.p_posterior),
+        decision_snapshot_id="decision-snap-tight-ask-upgrade",
+        sizing_bankroll=100.0,
+        kelly_multiplier_used=0.25,
+        execution_fee_rate=0.03,
+    )
+
+    best_ask = cycle_runtime._reprice_decision_from_executable_snapshot(
+        conn,
+        decision,
+        {"executable_snapshot_id": "snap-reprice-tight-ask-upgrade"},
+        {
+            "order_type": "GTC",
+            "allow_taker_upgrade": True,
+            "cancel_after": datetime(2026, 4, 3, 1, tzinfo=timezone.utc),
+            "resolution_window": "2026-04-03",
+            "correlation_key": "NYC:2026-04-03",
+        },
+    )
+    conn.close()
+
+    reprice = decision.tokens["executable_snapshot_reprice"]
+    shadow = reprice["corrected_pricing_shadow"]
+    assert best_ask == pytest.approx(0.41)
+    assert reprice["selected_order_type"] == "GTC"
+    assert reprice["final_order_type"] == "FOK"
+    assert reprice["taker_order_type_upgraded"] is True
+    assert reprice["live_submit_authority"] is True
+    assert shadow["order_policy"] == "marketable_limit_depth_bound"
+    assert shadow["live_submit_authority"] is True
+    assert decision.final_execution_intent.order_type == "FOK"
+    assert decision.final_execution_intent.post_only is False
 
 
 def test_executable_snapshot_repricing_sweeps_deeper_ask_inside_budget(tmp_path):
@@ -3693,6 +3974,10 @@ def test_live_entry_captures_and_commits_snapshot_before_executor(tmp_path, monk
     assert command_row["token_id"] == "yes1"
     assert command_row["price"] == pytest.approx(float(captured["intent"].final_limit_price))
     assert command_row["state"] == "ACKED"
+    assert summary["trades"] == 0
+    assert summary["entry_orders_submitted"] == 1
+    assert summary["entry_orders_resting"] == 1
+    assert summary["entry_orders_filled_immediate"] == 0
     assert price_linkage is not None
     assert price_linkage["market_price_linkage"] == "full"
     assert price_linkage["source"] == "CLOB_ORDERBOOK"
@@ -4018,6 +4303,193 @@ def test_monitor_ens_refresh_records_forecast_fallback_provenance(monkeypatch):
     assert "forecast_source_role:monitor_fallback" in applied
     assert "forecast_degradation:DEGRADED_FORECAST_FALLBACK" in applied
     assert "alpha_posterior" in applied
+
+
+def test_monitor_ens_refresh_uses_executable_forecast_reader_for_ecmwf_open_data(monkeypatch):
+    """RELATIONSHIP: entry forecast authority -> held-position monitor fresh_prob.
+
+    A position opened from ecmwf_open_data must refresh monitor probability from
+    the executable forecast reader, not by re-entering the legacy Open-Meteo
+    fetch_ensemble fallback path.
+    """
+    from src.engine import monitor_refresh
+
+    conn = sqlite3.connect(":memory:")
+    position = types.SimpleNamespace(
+        temperature_metric="high",
+        bin_label="30-31°F",
+        unit="F",
+        market_id="m-monitor",
+        condition_id="c-monitor",
+        direction="buy_yes",
+        p_posterior=0.42,
+        entered_at=None,
+        target_date="2026-04-01",
+        entry_model_agreement="AGREE",
+        selected_method="ens_member_counting",
+        entry_method="ens_member_counting",
+    )
+    city = types.SimpleNamespace(
+        name="NYC",
+        lat=40.7772,
+        timezone="America/New_York",
+        cluster="NYC",
+        settlement_unit="F",
+        settlement_source_type="wu_icao",
+        wu_station="KLGA",
+    )
+    calls: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        monitor_refresh,
+        "entry_forecast_config",
+        lambda: types.SimpleNamespace(
+            source_id="ecmwf_open_data",
+            source_transport=types.SimpleNamespace(value="ensemble_snapshots_v2_db_reader"),
+            high_track="mx2t6_high_full_horizon",
+            low_track="mn2t6_low_full_horizon",
+        ),
+    )
+
+    class FakeBundle:
+        def to_ens_result(self):
+            return {
+                "period_extrema_members": [30.5] * 51,
+                "period_extrema_source": "local_calendar_day_member_extrema",
+                "members_unit": "degF",
+                "times": ["2026-04-01"],
+                "n_members": 51,
+                "source_id": "ecmwf_open_data",
+                "source_transport": "ensemble_snapshots_v2_db_reader",
+                "source_run_id": "source-run-1",
+                "forecast_source_role": "entry_primary",
+                "degradation_level": "OK",
+                "fetch_time": datetime(2026, 4, 1, 12, tzinfo=timezone.utc),
+            }
+
+    def _read_executable_forecast(*args, **kwargs):
+        calls["reader_kwargs"] = kwargs
+        return types.SimpleNamespace(ok=True, bundle=FakeBundle(), reason_code="EXECUTABLE_FORECAST_READY")
+
+    monkeypatch.setattr(monitor_refresh, "read_executable_forecast", _read_executable_forecast)
+    monkeypatch.setattr(
+        monitor_refresh,
+        "fetch_ensemble",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("legacy fetch_ensemble must not run")),
+    )
+    monkeypatch.setattr(monitor_refresh, "lead_days_to_date_start", lambda *args, **kwargs: 2.0)
+    monkeypatch.setattr(
+        monitor_refresh,
+        "_build_all_bins",
+        lambda *args, **kwargs: (
+            [
+                Bin(low=30, high=31, label="30-31°F", unit="F"),
+                Bin(low=32, high=33, label="32-33°F", unit="F"),
+            ],
+            0,
+        ),
+    )
+    monkeypatch.setattr(monitor_refresh, "get_calibrator", lambda *args, **kwargs: (None, 4))
+    monkeypatch.setattr("src.calibration.store.get_pairs_for_bucket", lambda *args, **kwargs: [])
+
+    def _season_from_date(date_arg, **kwargs):
+        calls["season_arg"] = date_arg
+        assert isinstance(date_arg, str)
+        return "MAM"
+
+    monkeypatch.setattr(monitor_refresh, "season_from_date", _season_from_date)
+    monkeypatch.setattr(
+        monitor_refresh,
+        "compute_alpha",
+        lambda **kwargs: types.SimpleNamespace(value_for_consumer=lambda consumer: 1.0),
+    )
+    monkeypatch.setattr(monitor_refresh, "_check_persistence_anomaly", lambda *args, **kwargs: 1.0)
+
+    _posterior, applied = monitor_refresh._refresh_ens_member_counting(
+        position=position,
+        current_p_market=0.50,
+        conn=conn,
+        city=city,
+        target_d=date(2026, 4, 1),
+    )
+
+    assert calls["reader_kwargs"]["require_entry_readiness"] is False
+    assert calls["reader_kwargs"]["source_id"] == "ecmwf_open_data"
+    assert calls["reader_kwargs"]["condition_id"] == "c-monitor"
+    assert "entry_forecast_reader" in applied
+    assert "period_extrema_members_adapter" in applied
+    assert "forecast_source_role:entry_primary" in applied
+    assert "alpha_posterior" in applied
+    assert calls["season_arg"] == "2026-04-01"
+    assert getattr(position, monitor_refresh._MONITOR_PROBABILITY_FRESH_ATTR) is True
+
+
+def test_monitor_ens_refresh_blocks_legacy_fallback_when_executable_reader_blocks(monkeypatch):
+    from src.engine import monitor_refresh
+
+    conn = sqlite3.connect(":memory:")
+    position = types.SimpleNamespace(
+        temperature_metric="high",
+        bin_label="30-31°F",
+        unit="F",
+        market_id="m-monitor",
+        condition_id="c-monitor",
+        direction="buy_yes",
+        p_posterior=0.42,
+        entered_at=None,
+        target_date="2026-04-01",
+        entry_model_agreement="AGREE",
+        selected_method="ens_member_counting",
+        entry_method="ens_member_counting",
+    )
+    city = types.SimpleNamespace(
+        name="NYC",
+        lat=40.7772,
+        timezone="America/New_York",
+        cluster="NYC",
+        settlement_unit="F",
+        settlement_source_type="wu_icao",
+        wu_station="KLGA",
+    )
+    monkeypatch.setattr(
+        monitor_refresh,
+        "entry_forecast_config",
+        lambda: types.SimpleNamespace(
+            source_id="ecmwf_open_data",
+            source_transport=types.SimpleNamespace(value="ensemble_snapshots_v2_db_reader"),
+            high_track="mx2t6_high_full_horizon",
+            low_track="mn2t6_low_full_horizon",
+        ),
+    )
+    monkeypatch.setattr(
+        monitor_refresh,
+        "read_executable_forecast",
+        lambda *args, **kwargs: types.SimpleNamespace(
+            ok=False,
+            bundle=None,
+            reason_code="PRODUCER_READINESS_MISSING",
+        ),
+    )
+    monkeypatch.setattr(
+        monitor_refresh,
+        "fetch_ensemble",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("legacy fetch_ensemble must not run")),
+    )
+    monkeypatch.setattr(monitor_refresh, "lead_days_to_date_start", lambda *args, **kwargs: 2.0)
+
+    posterior, applied = monitor_refresh._refresh_ens_member_counting(
+        position=position,
+        current_p_market=0.50,
+        conn=conn,
+        city=city,
+        target_d=date(2026, 4, 1),
+    )
+
+    assert posterior == pytest.approx(position.p_posterior)
+    assert "entry_forecast_reader" in applied
+    assert "executable_forecast_reader_blocked:PRODUCER_READINESS_MISSING" in applied
+    assert "legacy_monitor_fallback_blocked" in applied
+    assert getattr(position, monitor_refresh._MONITOR_PROBABILITY_FRESH_ATTR) is False
 
 
 def test_monitor_ens_refresh_preserves_tigge_evidence_but_uses_bucket_source_id(monkeypatch):
@@ -4363,7 +4835,13 @@ def test_day0_monitor_refresh_records_forecast_fallback_provenance(monkeypatch):
         ),
     )
     monkeypatch.setattr("src.calibration.store.get_pairs_for_bucket", lambda *args, **kwargs: [])
-    monkeypatch.setattr(monitor_refresh, "season_from_date", lambda *args, **kwargs: "MAM")
+
+    def _season_from_date(date_arg, **kwargs):
+        captured["season_arg"] = date_arg
+        assert isinstance(date_arg, str)
+        return "MAM"
+
+    monkeypatch.setattr(monitor_refresh, "season_from_date", _season_from_date)
     monkeypatch.setattr(
         monitor_refresh,
         "compute_alpha",
@@ -4384,6 +4862,7 @@ def test_day0_monitor_refresh_records_forecast_fallback_provenance(monkeypatch):
     assert "forecast_source_role:monitor_fallback" in applied
     assert "forecast_degradation:DEGRADED_FORECAST_FALLBACK" in applied
     assert "alpha_posterior" in applied
+    assert captured["season_arg"] == "2026-04-01"
 
 
 def test_day0_monitor_refresh_rejects_stale_observation_before_fetch(monkeypatch):
@@ -4734,6 +5213,116 @@ def test_forecast_provider_identity_uses_source_id_not_model_family(monkeypatch)
     assert captured["bias_reference"]["source"] == "tigge"
     assert captured["bias_reference"]["bias"] == 1.0
     assert captured_calibration_lookup["source_id"] == "tigge_mars"
+
+
+def test_evaluator_buffers_microstructure_without_opening_quote_loop_transaction(monkeypatch, tmp_path):
+    monkeypatch.setattr(evaluator_module, "get_mode", lambda: "test")
+    target_date = "2026-01-15"
+    tz = ZoneInfo(NYC.timezone)
+    start_local = datetime(2026, 1, 15, 0, 0, tzinfo=tz)
+    times = [
+        (start_local + timedelta(hours=i)).astimezone(timezone.utc).isoformat()
+        for i in range(24)
+    ]
+    candidate = MarketCandidate(
+        city=NYC,
+        target_date=target_date,
+        outcomes=_three_outcomes(),
+        hours_since_open=8.0,
+        hours_to_resolution=24.0,
+        discovery_mode=DiscoveryMode.OPENING_HUNT.value,
+    )
+    conn = get_connection(tmp_path / "quote-boundary.db")
+    init_schema(conn)
+
+    class BoundaryClob:
+        def __init__(self):
+            self.in_transaction_before_quote: list[tuple[str, bool]] = []
+
+        def get_best_bid_ask(self, token_id):
+            self.in_transaction_before_quote.append((token_id, bool(conn.in_transaction)))
+            return (0.34, 0.36, 20.0, 20.0)
+
+    class DummyEnsembleSignal:
+        def __init__(self, *args, **kwargs):
+            self.member_maxes = np.full(51, 40.0)
+            self.member_extrema = self.member_maxes
+            self.bias_corrected = False
+
+        def p_raw_vector(self, bins, n_mc=None):
+            return np.full(len(bins), 1.0 / len(bins))
+
+        def spread(self):
+            return TemperatureDelta(1.0, "F")
+
+        def spread_float(self):
+            return 1.0
+
+        def is_bimodal(self):
+            return False
+
+    class EmptyAnalysis:
+        selected_method = "ens_member_counting"
+
+        def __init__(self, **kwargs):
+            pass
+
+        def find_edges(self, n_bootstrap=500):
+            return []
+
+        def sigma_context(self):
+            return {"final_sigma": 1.0}
+
+        def mean_context(self):
+            return {"offset": 0.0}
+
+        def forecast_context(self):
+            return {"uncertainty": self.sigma_context(), "location": self.mean_context()}
+
+    def _fetch_ensemble(city, forecast_days=2, model=None, role=None, **kwargs):
+        n_members = 31 if role == "diagnostic" else 51
+        return {
+            "members_hourly": np.ones((n_members, len(times))) * 40.0,
+            "times": times,
+            **_entry_forecast_evidence(
+                model="ecmwf_ifs025" if role == "entry_primary" else "gfs025",
+                source_id="tigge" if role == "entry_primary" else "openmeteo_ensemble_gfs025",
+                role=role or "entry_primary",
+                issue_time=datetime(2026, 1, 14, 0, tzinfo=timezone.utc),
+                first_valid_time=datetime(2026, 1, 15, tzinfo=timezone.utc),
+                fetch_time=datetime(2026, 1, 14, 6, tzinfo=timezone.utc),
+                n_members=n_members,
+            ),
+        }
+
+    monkeypatch.setattr(evaluator_module, "fetch_ensemble", _fetch_ensemble)
+    monkeypatch.setattr(evaluator_module, "validate_ensemble", lambda result, expected_members=51: result is not None)
+    monkeypatch.setattr(evaluator_module, "EnsembleSignal", DummyEnsembleSignal)
+    monkeypatch.setattr(evaluator_module, "_store_ens_snapshot", lambda *args, **kwargs: "snap-quote-boundary")
+    monkeypatch.setattr(evaluator_module, "_store_snapshot_p_raw", lambda *args, **kwargs: None)
+    _patch_mature_calibration(monkeypatch)
+    monkeypatch.setattr(evaluator_module, "MarketAnalysis", EmptyAnalysis)
+    _stub_full_family_scan(monkeypatch)
+    monkeypatch.setattr(evaluator_module, "fdr_filter", lambda edges, fdr_alpha=0.10: list(edges))
+    clob = BoundaryClob()
+    microstructure_rows: list[dict] = []
+
+    decisions = evaluator_module.evaluate_candidate(
+        candidate,
+        conn=conn,
+        portfolio=PortfolioState(bankroll=211.37),
+        clob=clob,
+        limits=evaluator_module.RiskLimits(),
+        decision_time=datetime(2026, 1, 14, 6, 0, tzinfo=timezone.utc),
+        microstructure_sink=microstructure_rows.append,
+    )
+
+    assert len(decisions) == 1
+    assert len(clob.in_transaction_before_quote) >= 2
+    assert all(in_tx is False for _, in_tx in clob.in_transaction_before_quote)
+    assert len(microstructure_rows) == len(clob.in_transaction_before_quote)
+    assert conn.in_transaction is False
+    conn.close()
 
 
 def test_evaluator_live_path_ignores_shadow_calibration_authority_result(monkeypatch):
@@ -8891,6 +9480,7 @@ def test_store_ens_snapshot_links_openmeteo_valid_time_without_faking_issue_time
     db_path = tmp_path / "zeus.db"
     conn = get_connection(db_path)
     init_schema(conn)
+    apply_v2_schema(conn)
 
     fetch_time = datetime(2026, 1, 14, 6, 5, tzinfo=timezone.utc)
     # Slice A3 follow-up (PR #19 review fix, 2026-04-26): the writer requires
@@ -8975,6 +9565,7 @@ def test_store_ens_snapshot_links_openmeteo_valid_time_without_faking_issue_time
 
 
 def _seed_p_raw_snapshot(conn) -> str:
+    apply_v2_schema(conn)
     fetch_time = datetime(2026, 1, 14, 6, 5, tzinfo=timezone.utc)
     ens = type(
         "DummyEns",
@@ -9063,6 +9654,29 @@ def test_store_snapshot_p_raw_persists_support_topology_in_v2_provenance(tmp_pat
     assert json.loads(legacy_row["p_raw_json"]) == [0.2, 0.3, 0.5]
 
 
+def test_store_snapshot_p_raw_defers_transient_database_lock():
+    class LockedConn:
+        def __init__(self):
+            self.rolled_back = False
+
+        def execute(self, *args, **kwargs):
+            raise sqlite3.OperationalError("database is locked")
+
+        def rollback(self):
+            self.rolled_back = True
+
+    conn = LockedConn()
+
+    result = evaluator_module._store_snapshot_p_raw(
+        conn,
+        "locked-snapshot",
+        np.array([0.2, 0.3, 0.5]),
+    )
+
+    assert result is None
+    assert conn.rolled_back
+
+
 @pytest.mark.parametrize(
     "mutate",
     [
@@ -9102,9 +9716,11 @@ def test_store_ens_snapshot_routes_to_attached_world_db(tmp_path):
     world_db = tmp_path / "zeus-world.db"
     trade_conn = get_connection(trade_db)
     init_schema(trade_conn)
+    apply_v2_schema(trade_conn)
     trade_conn.close()
     world_conn = get_connection(world_db)
     init_schema(world_conn)
+    apply_v2_schema(world_conn)
     world_conn.close()
 
     conn = get_connection(trade_db)
@@ -9188,6 +9804,7 @@ def test_store_ens_snapshot_refuses_legacy_id_collision_without_p_raw_corruption
     db_path = tmp_path / "zeus.db"
     conn = get_connection(db_path)
     init_schema(conn)
+    apply_v2_schema(conn)
     conn.execute(
         """
         INSERT INTO ensemble_snapshots
@@ -9259,6 +9876,7 @@ def test_store_ens_snapshot_reuses_v2_conflict_without_legacy_fallback(tmp_path)
     db_path = tmp_path / "zeus.db"
     conn = get_connection(db_path)
     init_schema(conn)
+    apply_v2_schema(conn)
     issue_time = "2026-01-14T00:00:00+00:00"
     conn.execute(
         """
@@ -9708,6 +10326,53 @@ def _monitor_chain_deps(now: datetime):
         _utcnow=lambda: now,
         has_acknowledged_quarantine_clear=lambda token_id: False,
     )
+
+
+def test_monitoring_phase_skips_terminal_positions_before_probability_refresh(monkeypatch):
+    """RELATIONSHIP: canonical lifecycle terminals must not enter monitor fresh_prob flow."""
+
+    portfolio = PortfolioState(
+        positions=[
+            _position(trade_id="voided-terminal", state="voided"),
+            _position(trade_id="settled-terminal", state="settled"),
+            _position(trade_id="admin-terminal", state="admin_closed"),
+        ]
+    )
+    artifact = CycleArtifact(mode="opening_hunt", started_at="2026-04-01T20:00:00Z")
+    summary = {"monitors": 0, "exits": 0}
+
+    monkeypatch.setattr(
+        "src.execution.exit_lifecycle.check_pending_exits",
+        lambda portfolio, clob, conn=None: {"filled": 0, "retried": 0, "filled_positions": []},
+    )
+    monkeypatch.setattr(
+        "src.execution.exit_lifecycle.handle_exit_pending_missing",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("terminal positions must not enter pending-exit reconciliation")
+        ),
+    )
+    monkeypatch.setattr(
+        "src.engine.monitor_refresh.refresh_position",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("terminal positions must not enter monitor probability refresh")
+        ),
+    )
+
+    p_dirty, t_dirty = cycle_runtime.execute_monitoring_phase(
+        conn=None,
+        clob=types.SimpleNamespace(),
+        portfolio=portfolio,
+        artifact=artifact,
+        tracker=StrategyTracker(),
+        summary=summary,
+        deps=_monitor_chain_deps(datetime(2026, 4, 1, 20, 0, tzinfo=timezone.utc)),
+    )
+
+    assert p_dirty is False
+    assert t_dirty is False
+    assert summary["monitor_skipped_terminal"] == 3
+    assert summary["monitors"] == 0
+    assert artifact.monitor_results == []
 
 
 def test_orange_risk_exits_favorable_position_through_monitor_lifecycle(monkeypatch):
@@ -11257,6 +11922,214 @@ def test_discovery_phase_records_rate_limited_decision_as_availability_fact(tmp_
     assert row["failure_type"] == "rate_limited"
     assert row["impact"] == "skip"
     assert "RATE_LIMITED" in row["details_json"]
+
+
+def test_discovery_phase_buffers_telemetry_before_candidate_external_io(tmp_path):
+    conn = get_connection(tmp_path / "discovery-boundary.db")
+    init_schema(conn)
+    conn.commit()
+
+    artifact = CycleArtifact(mode="opening_hunt", started_at="2026-04-03T00:00:00Z")
+    tracker = StrategyTracker()
+    portfolio = PortfolioState()
+    summary = {"candidates": 0, "no_trades": 0}
+    observed_eval_transactions: list[bool] = []
+
+    def _market(slug: str) -> dict:
+        return {
+            "city": NYC,
+            "target_date": "2026-04-01",
+            "outcomes": [
+                {
+                    "title": "39-40°F",
+                    "range_low": 39,
+                    "range_high": 40,
+                    "token_id": f"yes-{slug}",
+                    "no_token_id": f"no-{slug}",
+                    "market_id": f"m-{slug}",
+                    "condition_id": f"cond-{slug}",
+                    "question_id": f"q-{slug}",
+                    "price": 0.35,
+                    "no_price": 0.65,
+                }
+            ],
+            "hours_since_open": 1.0,
+            "hours_to_resolution": 4.0,
+            "temperature_metric": "high",
+            "event_id": f"evt-{slug}",
+            "slug": slug,
+            "source_contract": {"status": "MATCH", "resolution_sources": ["wu_api"]},
+        }
+
+    def _evaluate_candidate(candidate, conn_arg, *args, **kwargs):
+        observed_eval_transactions.append(bool(conn_arg.in_transaction))
+        return [
+            types.SimpleNamespace(
+                should_trade=False,
+                edge=None,
+                tokens=None,
+                decision_id=f"d-{candidate.slug}",
+                rejection_stage="SIGNAL_QUALITY",
+                rejection_reasons=["fixture no edge"],
+                selected_method="ens_member_counting",
+                applied_validations=["entry_forecast_reader"],
+                decision_snapshot_id=f"snap-{candidate.slug}",
+                edge_source="",
+                strategy_key="",
+                availability_status="RATE_LIMITED",
+                settlement_semantics_json="",
+                epistemic_context_json="",
+                edge_context_json="",
+                p_raw=np.array([]),
+                p_cal=np.array([]),
+                p_market=np.array([]),
+                alpha=0.0,
+                agreement="",
+            )
+        ]
+
+    deps = types.SimpleNamespace(
+        MODE_PARAMS={DiscoveryMode.OPENING_HUNT: {}},
+        DiscoveryMode=DiscoveryMode,
+        logger=types.SimpleNamespace(
+            debug=lambda *args, **kwargs: None,
+            warning=lambda *args, **kwargs: None,
+            error=lambda *args, **kwargs: None,
+        ),
+        NoTradeCase=NoTradeCase,
+        MarketCandidate=MarketCandidate,
+        find_weather_markets=lambda **kwargs: [_market("one"), _market("two")],
+        get_last_scan_authority=lambda: "VERIFIED",
+        evaluate_candidate=_evaluate_candidate,
+        _classify_edge_source=lambda *args, **kwargs: "",
+    )
+
+    cycle_runtime.execute_discovery_phase(
+        conn,
+        clob=None,
+        portfolio=portfolio,
+        artifact=artifact,
+        tracker=tracker,
+        limits=types.SimpleNamespace(),
+        mode=DiscoveryMode.OPENING_HUNT,
+        summary=summary,
+        entry_bankroll=100.0,
+        decision_time=datetime(2026, 4, 3, 6, 0, tzinfo=timezone.utc),
+        env="live",
+        deps=deps,
+    )
+
+    assert observed_eval_transactions == [False, False]
+    assert summary["no_trades"] == 2
+    assert conn.in_transaction is True
+    conn.close()
+
+
+def test_live_discovery_phase_truncates_candidate_evaluation_on_backpressure(monkeypatch, tmp_path):
+    conn = get_connection(tmp_path / "discovery-backpressure.db")
+    init_schema(conn)
+    conn.commit()
+
+    artifact = CycleArtifact(mode="opening_hunt", started_at="2026-04-03T00:00:00Z")
+    summary = {"candidates": 0, "no_trades": 0}
+    evaluated: list[str] = []
+
+    def _market(slug: str) -> dict:
+        return {
+            "city": NYC,
+            "target_date": "2026-04-01",
+            "outcomes": [
+                {
+                    "title": "39-40°F",
+                    "range_low": 39,
+                    "range_high": 40,
+                    "token_id": f"yes-{slug}",
+                    "no_token_id": f"no-{slug}",
+                    "market_id": f"m-{slug}",
+                    "condition_id": f"cond-{slug}",
+                    "question_id": f"q-{slug}",
+                    "price": 0.35,
+                    "no_price": 0.65,
+                }
+            ],
+            "hours_since_open": 1.0,
+            "hours_to_resolution": 4.0,
+            "temperature_metric": "high",
+            "event_id": f"evt-{slug}",
+            "slug": slug,
+            "source_contract": {"status": "MATCH", "resolution_sources": ["wu_api"]},
+        }
+
+    def _evaluate_candidate(candidate, *args, **kwargs):
+        evaluated.append(candidate.slug)
+        return [
+            types.SimpleNamespace(
+                should_trade=False,
+                edge=None,
+                tokens=None,
+                decision_id=f"d-{candidate.slug}",
+                rejection_stage="SIGNAL_QUALITY",
+                rejection_reasons=["fixture no edge"],
+                selected_method="ens_member_counting",
+                applied_validations=["entry_forecast_reader"],
+                decision_snapshot_id=f"snap-{candidate.slug}",
+                edge_source="",
+                strategy_key="",
+                availability_status="",
+                settlement_semantics_json="",
+                epistemic_context_json="",
+                edge_context_json="",
+                p_raw=np.array([]),
+                p_cal=np.array([]),
+                p_market=np.array([]),
+                alpha=0.0,
+                agreement="",
+            )
+        ]
+
+    ticks = iter([0.0, 0.0, 2.0])
+    deps = types.SimpleNamespace(
+        MODE_PARAMS={DiscoveryMode.OPENING_HUNT: {}},
+        DiscoveryMode=DiscoveryMode,
+        logger=types.SimpleNamespace(
+            debug=lambda *args, **kwargs: None,
+            warning=lambda *args, **kwargs: None,
+            error=lambda *args, **kwargs: None,
+        ),
+        NoTradeCase=NoTradeCase,
+        MarketCandidate=MarketCandidate,
+        find_weather_markets=lambda **kwargs: [_market("one"), _market("two"), _market("three")],
+        get_last_scan_authority=lambda: "VERIFIED",
+        evaluate_candidate=_evaluate_candidate,
+        _classify_edge_source=lambda *args, **kwargs: "",
+        monotonic=lambda: next(ticks, 2.0),
+    )
+    monkeypatch.setenv("ZEUS_LIVE_DISCOVERY_EVAL_BUDGET_SECONDS", "1")
+
+    cycle_runtime.execute_discovery_phase(
+        conn,
+        clob=None,
+        portfolio=PortfolioState(),
+        artifact=artifact,
+        tracker=StrategyTracker(),
+        limits=types.SimpleNamespace(),
+        mode=DiscoveryMode.OPENING_HUNT,
+        summary=summary,
+        entry_bankroll=100.0,
+        decision_time=datetime(2026, 4, 3, 6, 0, tzinfo=timezone.utc),
+        env="live",
+        deps=deps,
+    )
+
+    assert evaluated == ["one"]
+    assert summary["candidates"] == 1
+    assert summary["no_trades"] == 1
+    assert summary["cycle_backpressure_truncated"] is True
+    assert summary["cycle_backpressure_reason"] == "market_evaluation_budget_exceeded"
+    assert summary["cycle_backpressure_markets_evaluated"] == 1
+    assert summary["cycle_backpressure_markets_skipped"] == 2
+    assert summary["degraded"] is True
+    conn.close()
 
 
 def test_evaluator_ens_fetch_exception_becomes_explicit_availability_truth(monkeypatch):

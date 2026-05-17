@@ -9,6 +9,7 @@ performed here.
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import uuid
 from dataclasses import dataclass
@@ -20,6 +21,8 @@ from typing import Any, Literal, Mapping, Optional
 
 from src.architecture.decorators import capability, protects
 from src.state.venue_command_repo import trade_fact_has_positive_fill_economics
+
+logger = logging.getLogger(__name__)
 
 FindingKind = Literal[
     "exchange_ghost_order",
@@ -53,6 +56,9 @@ _OPEN_LOCAL_STATES = frozenset(
     }
 )
 _OPEN_ORDER_FACT_STATES = frozenset({"LIVE", "RESTING", "CANCEL_UNKNOWN"})
+_OPEN_POINT_ORDER_STATES = _OPEN_ORDER_FACT_STATES | frozenset(
+    {"OPEN", "PARTIAL", "PARTIALLY_MATCHED", "PARTIALLY_FILLED"}
+)
 _TRADE_FACT_STATES = frozenset({"MATCHED", "MINED", "CONFIRMED", "RETRYING", "FAILED"})
 _CONFIRMED_POSITION_FACT_STATES = frozenset({"CONFIRMED"})
 _OPTIMISTIC_POSITION_FACT_STATES = frozenset({"MATCHED", "MINED"})
@@ -119,10 +125,19 @@ def fresh_reconcile_snapshot(
     """
 
     observed = _coerce_dt(observed_at)
-    captured: dict[str, list[Any]] = {}
+    captured: dict[str, Any] = {}
     unavailable: list[str] = []
 
     captured["open_orders"] = _call_required(adapter, "get_open_orders")
+    local_order_ids = {str(order_id) for order_id in (trade_order_ids or set()) if str(order_id).strip()}
+    open_order_ids = {_order_id(item) for item in captured["open_orders"] if _order_id(item)}
+    missing_local_order_ids = sorted(local_order_ids - open_order_ids)
+    get_order = getattr(adapter, "get_order", None)
+    if callable(get_order) and missing_local_order_ids:
+        captured["point_orders"] = {
+            order_id: get_order(order_id)
+            for order_id in missing_local_order_ids
+        }
     for surface, method in (("trades", "get_trades"), ("positions", "get_positions")):
         fn = getattr(adapter, method, None)
         if not callable(fn):
@@ -148,6 +163,8 @@ def fresh_reconcile_snapshot(
     }
     snapshot = SimpleNamespace(read_freshness=freshness)
     snapshot.get_open_orders = lambda: list(captured["open_orders"])
+    if "point_orders" in captured:
+        snapshot.get_order = lambda order_id: captured["point_orders"].get(str(order_id))
     if "trades" in captured:
         snapshot.get_trades = lambda: list(captured["trades"])
     if "positions" in captured:
@@ -348,6 +365,10 @@ def run_reconcile_sweep(
     for order_id, command in local_by_order.items():
         if order_id in open_order_ids:
             continue
+        point_order = _point_order_lookup(adapter, order_id)
+        point_order_status = _order_state(point_order)
+        if point_order_status in _OPEN_POINT_ORDER_STATES:
+            continue
         if context == "ws_gap" and _trade_fill_covers_local_command(
             command, trade_fills_by_order_id.get(order_id)
         ):
@@ -366,6 +387,9 @@ def run_reconcile_sweep(
                     "local_command": _command_evidence(command),
                     "latest_order_fact": _latest_order_fact(conn, order_id),
                     "exchange_open_order_ids": sorted(open_order_ids),
+                    "point_order": _raw(point_order) if point_order is not None else None,
+                    "point_order_status": point_order_status,
+                    "point_order_surface": "get_order" if point_order is not None else None,
                     "trade_enumeration_available": trades_available,
                     "reason": "local_open_order_absent_from_exchange_open_orders",
                 },
@@ -385,7 +409,204 @@ def run_reconcile_sweep(
                 observed_at=observed,
             )
         )
+    reconcile_recorded_maker_fill_economics(conn, observed_at=observed)
     return findings
+
+
+def reconcile_recorded_maker_fill_economics(
+    conn: sqlite3.Connection,
+    *,
+    observed_at: datetime | str | None = None,
+) -> dict[str, int]:
+    """Repair recorded trade facts whose raw maker leg contradicts top-level trade economics.
+
+    The venue user stream emits a trade-level top-line from the taker side while
+    Zeus can be the maker.  The immutable raw payload already contains the
+    command-owned maker order.  This repair appends a corrected fact instead of
+    rewriting the old row, then replays the entry-fill projection from the
+    latest fact chain.
+    """
+
+    summary = {"scanned": 0, "corrected": 0, "projected": 0, "stayed": 0, "errors": 0}
+    if not _table_exists(conn, "venue_trade_facts") or not _table_exists(conn, "venue_commands"):
+        return summary
+    observed = _coerce_dt(observed_at)
+    rows = conn.execute(
+        """
+        WITH latest_trade_fact AS (
+            SELECT trade_id, MAX(local_sequence) AS local_sequence
+              FROM venue_trade_facts
+             GROUP BY trade_id
+        )
+        SELECT
+            tf.*,
+            cmd.snapshot_id AS cmd_snapshot_id,
+            cmd.envelope_id AS cmd_envelope_id,
+            cmd.position_id AS cmd_position_id,
+            cmd.decision_id AS cmd_decision_id,
+            cmd.idempotency_key AS cmd_idempotency_key,
+            cmd.intent_kind AS cmd_intent_kind,
+            cmd.market_id AS cmd_market_id,
+            cmd.token_id AS cmd_token_id,
+            cmd.side AS cmd_side,
+            cmd.size AS cmd_size,
+            cmd.price AS cmd_price,
+            cmd.venue_order_id AS cmd_venue_order_id,
+            cmd.state AS cmd_state,
+            cmd.created_at AS cmd_created_at,
+            cmd.updated_at AS cmd_updated_at
+          FROM venue_trade_facts tf
+          JOIN latest_trade_fact latest
+            ON latest.trade_id = tf.trade_id
+           AND latest.local_sequence = tf.local_sequence
+          JOIN venue_commands cmd
+            ON cmd.command_id = tf.command_id
+         WHERE tf.state IN ('MATCHED', 'MINED', 'CONFIRMED')
+           AND COALESCE(tf.raw_payload_json, '') LIKE '%maker_orders%'
+         ORDER BY tf.observed_at, tf.trade_fact_id
+        """
+    ).fetchall()
+    for row in rows:
+        summary["scanned"] += 1
+        fact = dict(row)
+        try:
+            command = _command_from_prefixed_trade_fact_row(fact)
+            raw = _json_mapping(fact.get("raw_payload_json"))
+            order_id = str(command.get("venue_order_id") or fact.get("venue_order_id") or "")
+            if _selected_maker_order(raw, order_id) is None:
+                summary["stayed"] += 1
+                continue
+            corrected_size_raw = _trade_filled_size(raw, order_id)
+            corrected_price_raw = _trade_fill_price(raw, order_id)
+            missing = _missing_trade_fill_economics(
+                state=str(fact.get("state") or ""),
+                filled_size=corrected_size_raw,
+                fill_price=corrected_price_raw,
+            )
+            if missing:
+                summary["errors"] += 1
+                continue
+            corrected_size = str(corrected_size_raw)
+            corrected_price = str(corrected_price_raw)
+            if not _same_trade_fill_economics(
+                fact,
+                filled_size=corrected_size,
+                fill_price=corrected_price,
+            ):
+                _append_maker_fill_economic_correction(
+                    conn,
+                    fact=fact,
+                    command=command,
+                    raw=raw,
+                    venue_order_id=order_id,
+                    filled_size=corrected_size,
+                    fill_price=corrected_price,
+                    observed_at=observed,
+                )
+                summary["corrected"] += 1
+            _ensure_entry_fill_position_event(
+                conn,
+                command=command,
+                venue_order_id=order_id,
+                filled_size=corrected_size,
+                fill_price=corrected_price,
+                observed_at=observed,
+            )
+            summary["projected"] += 1
+        except Exception:
+            summary["errors"] += 1
+            logger.exception(
+                "exchange_reconcile: maker fill economics repair failed for trade_fact_id=%s",
+                fact.get("trade_fact_id"),
+            )
+    return summary
+
+
+def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (table,),
+    ).fetchone()
+    return row is not None
+
+
+def _json_mapping(raw: object) -> dict[str, Any]:
+    if isinstance(raw, Mapping):
+        return dict(raw)
+    if raw in (None, ""):
+        return {}
+    try:
+        parsed = json.loads(str(raw))
+    except (TypeError, json.JSONDecodeError):
+        return {}
+    return dict(parsed) if isinstance(parsed, Mapping) else {}
+
+
+def _command_from_prefixed_trade_fact_row(row: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "command_id": row.get("command_id"),
+        "snapshot_id": row.get("cmd_snapshot_id"),
+        "envelope_id": row.get("cmd_envelope_id"),
+        "position_id": row.get("cmd_position_id"),
+        "decision_id": row.get("cmd_decision_id"),
+        "idempotency_key": row.get("cmd_idempotency_key"),
+        "intent_kind": row.get("cmd_intent_kind"),
+        "market_id": row.get("cmd_market_id"),
+        "token_id": row.get("cmd_token_id"),
+        "side": row.get("cmd_side"),
+        "size": row.get("cmd_size"),
+        "price": row.get("cmd_price"),
+        "venue_order_id": row.get("cmd_venue_order_id"),
+        "state": row.get("cmd_state"),
+        "created_at": row.get("cmd_created_at"),
+        "updated_at": row.get("cmd_updated_at"),
+    }
+
+
+def _append_maker_fill_economic_correction(
+    conn: sqlite3.Connection,
+    *,
+    fact: Mapping[str, Any],
+    command: Mapping[str, Any],
+    raw: Mapping[str, Any],
+    venue_order_id: str,
+    filled_size: str,
+    fill_price: str,
+    observed_at: datetime,
+) -> int:
+    from src.state.venue_command_repo import append_trade_fact
+
+    payload = dict(raw)
+    payload["zeus_repair"] = {
+        "schema_version": 1,
+        "reason": "maker_leg_economics_selected_for_command_order",
+        "source_trade_fact_id": fact.get("trade_fact_id"),
+        "source_filled_size": fact.get("filled_size"),
+        "source_fill_price": fact.get("fill_price"),
+        "corrected_filled_size": filled_size,
+        "corrected_fill_price": fill_price,
+        "command_id": command.get("command_id"),
+        "venue_order_id": venue_order_id,
+        "source_module": "src.execution.exchange_reconcile",
+    }
+    return append_trade_fact(
+        conn,
+        trade_id=str(fact["trade_id"]),
+        venue_order_id=venue_order_id,
+        command_id=str(command["command_id"]),
+        state=str(fact["state"]),
+        filled_size=filled_size,
+        fill_price=fill_price,
+        source=str(fact.get("source") or "WS_USER"),
+        observed_at=observed_at,
+        venue_timestamp=fact.get("venue_timestamp"),
+        raw_payload_hash=_hash_payload(payload),
+        raw_payload_json=payload,
+        fee_paid_micro=fact.get("fee_paid_micro"),
+        tx_hash=fact.get("tx_hash"),
+        block_number=fact.get("block_number"),
+        confirmation_count=fact.get("confirmation_count"),
+    )
 
 
 def record_finding(
@@ -744,17 +965,21 @@ def _ensure_entry_fill_position_event(
     current = dict(row)
     phase = str(current.get("phase") or "")
     runtime_state = "day0_window" if phase == "day0_window" else "entered"
-    command_state = str(command.get("state") or "").upper()
-    order_status = (
-        "partial"
-        if command_event == "PARTIAL_FILL_OBSERVED" or command_state == "PARTIAL"
-        else "filled"
+    fill_economics = _entry_fill_economics_for_command(
+        conn,
+        command_id=str(command.get("command_id") or ""),
+        fallback_filled_size=filled_size,
+        fallback_fill_price=fill_price,
     )
-    shares = current.get("shares") if current.get("shares") not in (None, "") else filled_size
-    entry_price = current.get("entry_price") if current.get("entry_price") not in (None, "") else fill_price
-    cost_basis = current.get("cost_basis_usd")
-    if cost_basis in (None, ""):
-        cost_basis = str(_decimal(filled_size) * _decimal(fill_price))
+    if fill_economics is None:
+        return
+    shares_dec, entry_price_dec, cost_basis_dec = fill_economics
+    shares = _decimal_text(shares_dec)
+    entry_price = _decimal_text(entry_price_dec)
+    cost_basis = _decimal_text(cost_basis_dec)
+    order_status = "filled" if _entry_fill_covers_command(command, shares_dec) else "partial"
+    if command_event == "PARTIAL_FILL_OBSERVED":
+        order_status = "partial"
     occurred_at = observed_at.isoformat()
     position = SimpleNamespace(
         **{
@@ -790,9 +1015,20 @@ def _ensure_entry_fill_position_event(
     ).fetchone()
     if existing is not None:
         from src.engine.lifecycle_events import build_position_current_projection
-        from src.state.projection import upsert_position_current
 
-        upsert_position_current(conn, build_position_current_projection(position))
+        projection = build_position_current_projection(position)
+        _apply_entry_fill_projection_and_execution_fact(
+            conn,
+            events=[],
+            projection=projection,
+            position=position,
+            command=command,
+            observed_at=observed_at,
+            order_status=order_status,
+            shares=shares_dec,
+            entry_price=entry_price_dec,
+            upsert_only=True,
+        )
         return
     seq_row = conn.execute(
         "SELECT COALESCE(MAX(sequence_no), 0) FROM position_events WHERE position_id = ?",
@@ -801,14 +1037,199 @@ def _ensure_entry_fill_position_event(
     sequence_no = int((seq_row[0] if seq_row else 0) or 0) + 1
 
     from src.engine.lifecycle_events import build_entry_fill_only_canonical_write
-    from src.state.db import append_many_and_project
 
     events, projection = build_entry_fill_only_canonical_write(
         position,
         sequence_no=sequence_no,
         source_module="src.execution.exchange_reconcile",
     )
-    append_many_and_project(conn, events, projection)
+    _apply_entry_fill_projection_and_execution_fact(
+        conn,
+        events=events,
+        projection=projection,
+        position=position,
+        command=command,
+        observed_at=observed_at,
+        order_status=order_status,
+        shares=shares_dec,
+        entry_price=entry_price_dec,
+        upsert_only=False,
+    )
+
+
+def _entry_fill_economics_for_command(
+    conn: sqlite3.Connection,
+    *,
+    command_id: str,
+    fallback_filled_size: str,
+    fallback_fill_price: str,
+) -> tuple[Decimal, Decimal, Decimal] | None:
+    """Aggregate latest authoritative trade facts for an entry command."""
+
+    rows = conn.execute(
+        """
+        SELECT tf.state, tf.filled_size, tf.fill_price
+          FROM venue_trade_facts tf
+          JOIN (
+                SELECT trade_id, MAX(local_sequence) AS local_sequence
+                  FROM venue_trade_facts
+                 WHERE command_id = ?
+                 GROUP BY trade_id
+               ) latest
+            ON latest.trade_id = tf.trade_id
+           AND latest.local_sequence = tf.local_sequence
+         WHERE tf.command_id = ?
+           AND tf.state IN ('MATCHED', 'MINED', 'CONFIRMED')
+        """,
+        (command_id, command_id),
+    ).fetchall()
+    shares = Decimal("0")
+    cost_basis = Decimal("0")
+    for row in rows:
+        filled = _positive_decimal_or_none(row["filled_size"])
+        price = _positive_decimal_or_none(row["fill_price"])
+        if filled is None or price is None:
+            continue
+        shares += filled
+        cost_basis += filled * price
+    if shares > Decimal("0") and cost_basis > Decimal("0"):
+        return shares, cost_basis / shares, cost_basis
+
+    fallback_shares = _positive_decimal_or_none(fallback_filled_size)
+    fallback_price = _positive_decimal_or_none(fallback_fill_price)
+    if fallback_shares is None or fallback_price is None:
+        return None
+    return fallback_shares, fallback_price, fallback_shares * fallback_price
+
+
+def _apply_entry_fill_projection_and_execution_fact(
+    conn: sqlite3.Connection,
+    *,
+    events: list[dict],
+    projection: dict,
+    position: SimpleNamespace,
+    command: Mapping[str, Any],
+    observed_at: datetime,
+    order_status: str,
+    shares: Decimal,
+    entry_price: Decimal,
+    upsert_only: bool,
+) -> None:
+    from src.state.db import append_many_and_project, log_execution_fact
+    from src.state.projection import upsert_position_current
+
+    sp_name = f"sp_entry_fill_{uuid.uuid4().hex[:12]}"
+    conn.execute(f"SAVEPOINT {sp_name}")
+    try:
+        if upsert_only:
+            upsert_position_current(conn, projection)
+        else:
+            append_many_and_project(conn, events, projection)
+        position_id = str(getattr(position, "trade_id", "") or "")
+        submitted_price = _float_or_none(command.get("price"))
+        fill_price = _float_or_none(entry_price)
+        filled_shares = _float_or_none(shares)
+        terminal_status = "filled" if order_status == "filled" else "partial"
+        venue_status = "FILLED" if terminal_status == "filled" else "PARTIAL"
+        log_execution_fact(
+            conn,
+            intent_id=f"{position_id}:entry",
+            position_id=position_id,
+            decision_id=str(command.get("decision_id") or "") or None,
+            order_role="entry",
+            strategy_key=str(getattr(position, "strategy_key", "") or "") or None,
+            posted_at=(
+                str(getattr(position, "order_posted_at", "") or "")
+                or str(command.get("created_at") or "")
+                or None
+            ),
+            filled_at=observed_at.isoformat(),
+            submitted_price=submitted_price,
+            fill_price=fill_price,
+            shares=filled_shares,
+            venue_status=venue_status,
+            terminal_exec_status=terminal_status,
+        )
+        _append_entry_position_lots_for_command(conn, command=command, observed_at=observed_at)
+        conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+    except Exception:
+        conn.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
+        conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+        raise
+
+
+def _append_entry_position_lots_for_command(
+    conn: sqlite3.Connection,
+    *,
+    command: Mapping[str, Any],
+    observed_at: datetime,
+) -> None:
+    if str(command.get("intent_kind") or "").upper() != "ENTRY":
+        return
+    if str(command.get("side") or "").upper() != "BUY":
+        return
+    from src.state.venue_command_repo import append_position_lot, resolve_position_lot_id_for_command
+
+    position_lot_id = resolve_position_lot_id_for_command(conn, command)
+    if position_lot_id is None:
+        return
+    rows = conn.execute(
+        """
+        SELECT tf.*
+          FROM venue_trade_facts tf
+          JOIN (
+                SELECT trade_id, MAX(local_sequence) AS local_sequence
+                  FROM venue_trade_facts
+                 WHERE command_id = ?
+                 GROUP BY trade_id
+               ) latest
+            ON latest.trade_id = tf.trade_id
+           AND latest.local_sequence = tf.local_sequence
+         WHERE tf.command_id = ?
+           AND tf.state IN ('MATCHED', 'MINED', 'CONFIRMED')
+         ORDER BY tf.observed_at, tf.trade_fact_id
+        """,
+        (str(command.get("command_id") or ""), str(command.get("command_id") or "")),
+    ).fetchall()
+    for row in rows:
+        if _positive_decimal_or_none(row["filled_size"]) is None:
+            continue
+        if _positive_decimal_or_none(row["fill_price"]) is None:
+            continue
+        existing = conn.execute(
+            """
+            SELECT 1
+              FROM position_lots
+             WHERE source_trade_fact_id = ?
+             LIMIT 1
+            """,
+            (int(row["trade_fact_id"]),),
+        ).fetchone()
+        if existing is not None:
+            continue
+        state = "CONFIRMED_EXPOSURE" if str(row["state"]) == "CONFIRMED" else "OPTIMISTIC_EXPOSURE"
+        append_position_lot(
+            conn,
+            position_id=position_lot_id,
+            state=state,
+            shares=str(row["filled_size"]),
+            entry_price_avg=str(row["fill_price"]),
+            source_command_id=str(command["command_id"]),
+            source_trade_fact_id=int(row["trade_fact_id"]),
+            captured_at=row["observed_at"] or observed_at,
+            state_changed_at=row["observed_at"] or observed_at,
+            source=str(row["source"] or "REST"),
+            observed_at=row["observed_at"] or observed_at,
+            venue_timestamp=row["venue_timestamp"],
+            raw_payload_json={
+                "source": "exchange_reconcile_entry_fill_materialization",
+                "command_id": str(command["command_id"]),
+                "trade_fact_id": int(row["trade_fact_id"]),
+                "trade_id": str(row["trade_id"]),
+                "market_id": str(command.get("market_id") or ""),
+                "token_id": str(command.get("token_id") or ""),
+            },
+        )
 
 
 def _local_command_for_trade(
@@ -834,6 +1255,13 @@ def _selected_maker_order(raw: Mapping[str, Any], order_id: str | None) -> Mappi
         if maker_order_id == order_id:
             return maker
     return None
+
+
+def _entry_fill_covers_command(command: Mapping[str, Any], shares: Decimal) -> bool:
+    target = _positive_decimal_or_none(command.get("size"))
+    if target is None:
+        return str(command.get("state") or "").upper() == "FILLED"
+    return shares >= target
 
 
 def _trade_filled_size(raw: Mapping[str, Any], order_id: str | None) -> Any:
@@ -886,6 +1314,32 @@ def _positive_decimal(value: Any) -> bool:
     except (InvalidOperation, ValueError):
         return False
     return decimal.is_finite() and decimal > Decimal("0")
+
+
+def _positive_decimal_or_none(value: Any) -> Decimal | None:
+    if value is None or value == "":
+        return None
+    try:
+        decimal = _decimal(value)
+    except (InvalidOperation, ValueError):
+        return None
+    if not decimal.is_finite() or decimal <= Decimal("0"):
+        return None
+    return decimal
+
+
+def _decimal_text(value: Decimal) -> str:
+    return str(value)
+
+
+def _float_or_none(value: Any) -> float | None:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    if numeric != numeric or numeric in (float("inf"), float("-inf")):
+        return None
+    return numeric
 
 
 def _latest_trade_fact_for_trade_id(conn: sqlite3.Connection, trade_id: str) -> dict[str, Any] | None:
@@ -1195,6 +1649,25 @@ def _order_id(value: Any) -> str | None:
     if direct:
         return str(direct)
     return _string_or_none(_first_present(raw, "orderID", "orderId", "order_id", "id", default=None))
+
+
+def _point_order_lookup(adapter: Any, order_id: str) -> Any | None:
+    fn = getattr(adapter, "get_order", None)
+    if not callable(fn):
+        return None
+    return fn(order_id)
+
+
+def _order_state(value: Any | None) -> str | None:
+    if value is None:
+        return None
+    raw = _raw(value)
+    direct = getattr(value, "status", None)
+    state = direct if direct is not None else _first_present(raw, "status", "state", "order_status", default=None)
+    if state is None:
+        return None
+    text = str(state).strip().upper()
+    return text or None
 
 
 def _trade_id(raw: Mapping[str, Any]) -> str | None:

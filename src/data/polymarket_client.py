@@ -1,8 +1,9 @@
 # Created: prior to 2026-04-26
-# Last reused/audited: 2026-05-15
+# Last reused/audited: 2026-05-17
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/Z2.yaml
 #                  + 2026-05-13 collateral_ledger singleton conn lifecycle remediation
 #                  + docs/operations/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md
+#                  + 2026-05-17 public CLOB HTTP reuse for live opening_hunt backpressure.
 """Polymarket CLOB API client. Spec §6.4.
 
 Limit orders ONLY. Auth via macOS Keychain.
@@ -32,6 +33,8 @@ logger = logging.getLogger(__name__)
 
 CLOB_BASE = "https://clob.polymarket.com"
 DATA_API_BASE = "https://data-api.polymarket.com"
+PUBLIC_CLOB_HTTP_TIMEOUT_SECONDS = 15.0
+PUBLIC_CLOB_HTTP_LIMITS = httpx.Limits(max_keepalive_connections=8, max_connections=16, keepalive_expiry=30.0)
 
 
 # ---------------------------------------------------------------------------
@@ -231,6 +234,23 @@ class PolymarketClient:
         self._clob_client = None
         self._v2_adapter = None
         self._pending_submission_envelope = None
+        self._public_http_client = None
+
+    def _public_http(self) -> httpx.Client:
+        client = getattr(self, "_public_http_client", None)
+        if client is None:
+            client = httpx.Client(
+                timeout=PUBLIC_CLOB_HTTP_TIMEOUT_SECONDS,
+                limits=PUBLIC_CLOB_HTTP_LIMITS,
+            )
+            self._public_http_client = client
+        return client
+
+    def _public_get(self, path: str, *, params: dict[str, Any] | None = None):
+        url = f"{CLOB_BASE}{path}"
+        if not hasattr(self, "_public_http_client"):
+            return httpx.get(url, params=params, timeout=PUBLIC_CLOB_HTTP_TIMEOUT_SECONDS)
+        return self._public_http().get(url, params=params)
 
     def _ensure_client(self):
         """Deprecated compatibility alias for the V2 adapter boundary."""
@@ -335,7 +355,7 @@ class PolymarketClient:
     def get_orderbook_snapshot(self, token_id: str) -> dict:
         """Fetch raw CLOB orderbook facts for executable snapshot capture."""
 
-        resp = httpx.get(f"{CLOB_BASE}/book", params={"token_id": token_id}, timeout=15.0)
+        resp = self._public_get("/book", params={"token_id": token_id})
         resp.raise_for_status()
         data = resp.json()
         if not isinstance(data, dict):
@@ -345,31 +365,12 @@ class PolymarketClient:
     def get_clob_market_info(self, condition_id: str) -> dict:
         """Fetch raw CLOB market facts for executable snapshot capture."""
 
-        adapter = getattr(self, "_v2_adapter", None)
-        if adapter is not None:
-            getter = getattr(adapter, "get_clob_market_info", None)
-            if callable(getter):
-                info = getter(condition_id)
-                raw = getattr(info, "raw", info)
-                if isinstance(raw, dict):
-                    return dict(raw)
-
-        legacy_client = getattr(self, "_clob_client", None)
-        if legacy_client is not None:
-            getter = getattr(legacy_client, "get_market", None)
-            if callable(getter):
-                raw = getter(condition_id)
-                if isinstance(raw, dict):
-                    return dict(raw)
-                if raw is not None and hasattr(raw, "__dict__"):
-                    return dict(raw.__dict__)
-
-        resp = httpx.get(f"{CLOB_BASE}/markets/{condition_id}", timeout=15.0)
+        resp = self._public_get(f"/markets/{condition_id}")
         resp.raise_for_status()
         data = resp.json()
-        if not isinstance(data, dict):
-            raise RuntimeError(f"CLOB market response for {condition_id} is not an object")
-        return data
+        if isinstance(data, dict):
+            return data
+        raise RuntimeError(f"CLOB market response for {condition_id} is not an object")
 
     def get_best_bid_ask(self, token_id: str) -> tuple[float, float, float, float]:
         """Get best bid/ask with sizes for VWMP calculation.
@@ -398,7 +399,7 @@ class PolymarketClient:
     def get_fee_rate_details(self, token_id: str) -> dict[str, Any]:
         """Fetch token-specific fee metadata with explicit fraction/bps units."""
 
-        resp = httpx.get(f"{CLOB_BASE}/fee-rate", params={"token_id": token_id}, timeout=15.0)
+        resp = self._public_get("/fee-rate", params={"token_id": token_id})
         resp.raise_for_status()
         data = resp.json()
         schedule = data.get("feeSchedule") if isinstance(data, dict) else None

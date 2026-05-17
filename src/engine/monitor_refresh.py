@@ -5,6 +5,7 @@ Uses full p_raw_vector with MC instrument noise (not simplified _estimate_bin_p_
 """
 
 import logging
+import sqlite3
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 
@@ -16,8 +17,10 @@ from src.config import (
     cities_by_name,
     day0_n_mc,
     edge_n_bootstrap,
+    ensemble_member_count,
     ensemble_n_mc,
     ensemble_primary_model,
+    entry_forecast_config,
 )
 from src.contracts import (
     EntryMethod,
@@ -26,6 +29,8 @@ from src.contracts import (
 )
 from src.contracts.settlement_semantics import round_wmo_half_up_value
 from src.data.ensemble_client import fetch_ensemble, validate_ensemble
+from src.data.executable_forecast_reader import read_executable_forecast
+from src.data.forecast_fetch_plan import data_version_for_track, track_for_metric
 from src.data.forecast_source_registry import calibration_source_id_for_lookup
 from src.data.market_scanner import _parse_temp_range, get_last_scan_authority, get_sibling_outcomes
 from src.data.observation_client import get_current_observation
@@ -39,7 +44,7 @@ from src.engine.evaluator import (
 from src.engine.time_context import lead_days_to_date_start
 from src.signal.day0_router import Day0Router, Day0SignalInputs
 from src.signal.day0_window import remaining_member_extrema_for_day0
-from src.signal.ensemble_signal import EnsembleSignal
+from src.signal.ensemble_signal import EnsembleSignal, p_raw_vector_from_maxes
 from src.state.chain_reconciliation import resolve_position_metric
 from src.state.portfolio import Position
 from src.strategy.market_fusion import (
@@ -160,6 +165,78 @@ def _monitor_forecast_source_validations(ens_result: dict) -> list[str]:
     return validations
 
 
+def _monitor_city_id(city) -> str:
+    return str(city.name).upper().replace(" ", "_")
+
+
+def _monitor_condition_id(position: Position) -> str:
+    return str(
+        getattr(position, "condition_id", "")
+        or getattr(position, "market_id", "")
+        or getattr(position, "trade_id", "")
+        or ""
+    )
+
+
+def _monitor_market_family(position: Position, city, target_d, temperature_metric: MetricIdentity) -> str:
+    market_ref = getattr(position, "market_id", "") or getattr(position, "condition_id", "")
+    if market_ref:
+        return str(market_ref)
+    return f"{city.name}|{target_d.isoformat()}|{temperature_metric.temperature_metric}"
+
+
+def _read_monitor_executable_forecast(
+    *,
+    conn,
+    position: Position,
+    city,
+    target_d: date,
+    temperature_metric: MetricIdentity,
+) -> tuple[dict | None, str | None]:
+    """Read monitor probability from the same executable forecast authority as entry.
+
+    Live ecmwf_open_data entry uses producer/source-run readiness plus
+    ensemble_snapshots_v2.  A held-position monitor must not fall back to the
+    legacy Open-Meteo ``fetch_ensemble`` adapter for that source, because that
+    path cannot prove the executable forecast reader contract.  Non-real sqlite
+    connections return ``(None, None)`` so legacy unit tests and diagnostic
+    callsites keep their existing fallback behavior.
+    """
+
+    if not isinstance(conn, sqlite3.Connection):
+        return None, None
+    try:
+        cfg = entry_forecast_config()
+    except Exception as exc:
+        return None, f"entry_forecast_config_error:{exc.__class__.__name__}"
+    if cfg.source_id != "ecmwf_open_data":
+        return None, None
+    try:
+        track = track_for_metric(cfg, temperature_metric.temperature_metric)
+        reader_result = read_executable_forecast(
+            conn,
+            city_id=_monitor_city_id(city),
+            city_name=city.name,
+            city_timezone=city.timezone,
+            target_local_date=target_d,
+            temperature_metric=temperature_metric.temperature_metric,
+            source_id=cfg.source_id,
+            source_transport=cfg.source_transport.value,
+            data_version=data_version_for_track(track),
+            track=track,
+            strategy_key="entry_forecast",
+            market_family=_monitor_market_family(position, city, target_d, temperature_metric),
+            condition_id=_monitor_condition_id(position),
+            decision_time=datetime.now(timezone.utc),
+            require_entry_readiness=False,
+        )
+    except Exception as exc:
+        return None, f"executable_forecast_reader_error:{exc.__class__.__name__}"
+    if reader_result.ok and reader_result.bundle is not None:
+        return reader_result.bundle.to_ens_result(), None
+    return None, f"executable_forecast_reader_blocked:{reader_result.reason_code}"
+
+
 def _build_all_bins(position: Position, city) -> tuple[list, int]:
     """Build full bin vector for a position's market.
 
@@ -247,29 +324,49 @@ def _refresh_ens_member_counting(
         _set_monitor_probability_fresh(position, False)
         return position.p_posterior, ["fresh_ens_fetch"]
 
-    ens_result = fetch_ensemble(
-        city,
-        forecast_days=int(requested_lead_days) + 2,
-        model=ensemble_primary_model(),
-        role="monitor_fallback",
-        temperature_metric=temperature_metric.temperature_metric,
+    ens_result, executable_forecast_block = _read_monitor_executable_forecast(
+        conn=conn,
+        position=position,
+        city=city,
+        target_d=target_d,
+        temperature_metric=temperature_metric,
     )
-    if ens_result is None or not validate_ensemble(ens_result):
+    if ens_result is None and executable_forecast_block is not None:
+        _set_monitor_probability_fresh(position, False)
+        return position.p_posterior, [
+            "fresh_ens_fetch",
+            "entry_forecast_reader",
+            executable_forecast_block,
+            "legacy_monitor_fallback_blocked",
+        ]
+    if ens_result is None:
+        ens_result = fetch_ensemble(
+            city,
+            forecast_days=int(requested_lead_days) + 2,
+            model=ensemble_primary_model(),
+            role="monitor_fallback",
+            temperature_metric=temperature_metric.temperature_metric,
+        )
+    period_extrema_members = ens_result.get("period_extrema_members") if isinstance(ens_result, dict) else None
+    using_period_extrema = period_extrema_members is not None
+    if ens_result is None or (not using_period_extrema and not validate_ensemble(ens_result)):
         _set_monitor_probability_fresh(position, False)
         return position.p_posterior, ["fresh_ens_fetch"]
     forecast_source_validations = _monitor_forecast_source_validations(ens_result)
     lead_days = max(0.0, lead_days_to_date_start(target_d, city.timezone, ens_result.get("fetch_time")))
 
     semantics = SettlementSemantics.for_city(city)
-    ens = EnsembleSignal(
-        ens_result["members_hourly"],
-        ens_result["times"],
-        city,
-        target_d,
-        settlement_semantics=semantics,
-        decision_time=ens_result.get("fetch_time"),
-        temperature_metric=temperature_metric,
-    )
+    ens = None
+    if not using_period_extrema:
+        ens = EnsembleSignal(
+            ens_result["members_hourly"],
+            ens_result["times"],
+            city,
+            target_d,
+            settlement_semantics=semantics,
+            decision_time=ens_result.get("fetch_time"),
+            temperature_metric=temperature_metric,
+        )
 
     low, high = _parse_temp_range(position.bin_label)
     if low is None and high is None:
@@ -289,7 +386,55 @@ def _refresh_ens_member_counting(
             str(exc),
         ]
 
-    p_raw_vector = ens.p_raw_vector(all_bins, n_mc=ensemble_n_mc())
+    if using_period_extrema:
+        expected_members_unit = "degC" if city.settlement_unit == "C" else "degF"
+        if ens_result.get("members_unit") != expected_members_unit:
+            _set_monitor_probability_fresh(position, False)
+            return position.p_posterior, [
+                "fresh_ens_fetch",
+                *forecast_source_validations,
+                "entry_forecast_reader",
+                "members_unit_mismatch",
+            ]
+        member_extrema = np.asarray(period_extrema_members, dtype=float)
+        if (
+            member_extrema.ndim != 1
+            or len(member_extrema) < ensemble_member_count()
+            or not np.isfinite(member_extrema).all()
+        ):
+            _set_monitor_probability_fresh(position, False)
+            return position.p_posterior, [
+                "fresh_ens_fetch",
+                *forecast_source_validations,
+                "entry_forecast_reader",
+                "period_extrema_members_invalid",
+            ]
+        p_raw_vector = p_raw_vector_from_maxes(
+            member_extrema,
+            city,
+            semantics,
+            all_bins,
+            n_mc=ensemble_n_mc(),
+        )
+        ensemble_spread = TemperatureDelta(float(np.std(member_extrema)), city.settlement_unit)
+        analysis_member_extrema = member_extrema
+        base_applied = [
+            "fresh_ens_fetch",
+            *forecast_source_validations,
+            "entry_forecast_reader",
+            "period_extrema_members_adapter",
+            "mc_instrument_noise",
+        ]
+    else:
+        assert ens is not None
+        p_raw_vector = ens.p_raw_vector(all_bins, n_mc=ensemble_n_mc())
+        ensemble_spread = ens.spread()
+        analysis_member_extrema = getattr(ens, "member_extrema", getattr(ens, "member_maxes"))
+        base_applied = [
+            "fresh_ens_fetch",
+            *forecast_source_validations,
+            "mc_instrument_noise",
+        ]
 
     # DT#5 / L3 Phase 9C: thread temperature_metric so LOW position reads
     # its own Platt model (pre-P9C this was metric-blind and LOW silently
@@ -321,9 +466,7 @@ def _refresh_ens_member_counting(
         p_cal_yes = float(p_cal_vector[held_idx])
         p_cal_full = p_cal_vector
         applied = [
-            "fresh_ens_fetch",
-            *forecast_source_validations,
-            "mc_instrument_noise",
+            *base_applied,
             "platt_recalibration",
             "vector_normalization",
         ]
@@ -335,15 +478,13 @@ def _refresh_ens_member_counting(
         )
         p_cal_full = np.array([p_cal_yes], dtype=float)
         applied = [
-            "fresh_ens_fetch",
-            *forecast_source_validations,
-            "mc_instrument_noise",
+            *base_applied,
             "platt_recalibration",
         ]
     else:
         p_cal_yes = float(p_raw_vector[held_idx])
         p_cal_full = p_raw_vector if len(all_bins) > 1 else np.array([p_cal_yes], dtype=float)
-        applied = ["fresh_ens_fetch", *forecast_source_validations, "mc_instrument_noise"]
+        applied = [*base_applied]
 
     # Compute actual hours since position was entered (not hardcoded 48h)
     hours_since_open = 48.0
@@ -365,7 +506,7 @@ def _refresh_ens_member_counting(
     _authority_verified = False
     if conn is not None and hasattr(conn, 'execute'):
         from src.calibration.store import get_pairs_for_bucket as _get_pairs
-        _cal_season = season_from_date(target_d, lat=city.lat)
+        _cal_season = season_from_date(target_d.isoformat(), lat=city.lat)
         _gate_metric = "high" if _position_metric_str == "high" else None  # hoisted (P2-fix5)
         try:
             _unverified_pairs = _get_pairs(
@@ -387,7 +528,7 @@ def _refresh_ens_member_counting(
 
     alpha = compute_alpha(
         calibration_level=cal_level,
-        ensemble_spread=ens.spread(),
+        ensemble_spread=ensemble_spread,
         model_agreement=getattr(position, "entry_model_agreement", "NOT_CHECKED"),
         lead_days=float(lead_days),
         hours_since_open=hours_since_open,
@@ -401,7 +542,7 @@ def _refresh_ens_member_counting(
     # on a position with missing temperature_metric attr (now uses the
     # resolver default).
     anomaly_discount = _check_persistence_anomaly(
-        conn, city.name, target_d, float(np.mean(ens.member_maxes)),
+        conn, city.name, target_d, float(np.mean(analysis_member_extrema)),
         temperature_metric=_position_metric_str,
     )
     if anomaly_discount < 1.0:
@@ -426,7 +567,7 @@ def _refresh_ens_member_counting(
         "alpha": alpha,
         "bins": all_bins,
         "held_idx": held_idx,
-        "member_extrema": ens.member_maxes,
+        "member_extrema": analysis_member_extrema,
         "calibrator": cal,
         "lead_days": float(lead_days),
         "unit": city.settlement_unit,
@@ -733,7 +874,7 @@ def _refresh_day0_observation(
     _authority_verified = False
     if conn is not None and hasattr(conn, 'execute'):
         from src.calibration.store import get_pairs_for_bucket as _get_pairs
-        _cal_season = season_from_date(target_d, lat=city.lat)
+        _cal_season = season_from_date(target_d.isoformat(), lat=city.lat)
         _gate_metric = "high" if _position_metric_str == "high" else None  # hoisted (P2-fix5)
         try:
             _unverified_pairs = _get_pairs(

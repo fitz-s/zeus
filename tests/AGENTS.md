@@ -63,7 +63,6 @@ authoritative machine registry is `architecture/test_topology.yaml`.
 | `test_no_raw_world_attach.py` | Antibody #13: no raw ATTACH DATABASE or get_trade_connection_with_world in trading-lane source modules (created 2026-04-30) |
 | `test_no_synthetic_provenance_marker.py` | Relapse antibody: blocks re-introduction of synthetic provenance markers per critic findings #6A/E (created 2026-04-28) |
 | `test_observations_k1_migration.py` | Antibody for Invariant C: observations schema migrated to K1 dual-atom shape (created 2026-05-01) |
-| `test_opendata_mx2t6_not_2t.py` | Antibody for Invariant A: download_ecmwf_open_ens.py default param must be mx2t6+mn2t6, not 2t (created 2026-05-01) |
 | `test_opendata_writes_v2_table.py` | Antibody for Invariant A: Open Data ENS rows land in ensemble_snapshots_v2 with canonical data_versions (created 2026-05-01) |
 | `test_riskguard_cold_start.py` | Antibody: riskguard cold-start deadlock fix — empty outcome fact must not block startup (created 2026-05-01) |
 | `test_readiness_state.py` | PR45a relationship contract: readiness invalidation, backfill shadow-only, topology blocking, quote exclusion, and settlement-capture shadow boundary (created 2026-05-02) |

@@ -1823,7 +1823,13 @@ def capture_executable_market_snapshot(
     if top_bid >= top_ask:
         raise ExecutableSnapshotCaptureError("CLOB orderbook is crossed")
 
-    captured = _utc_datetime(captured_at, field_name="captured_at")
+    # Validate the caller's boundary timestamp, but do not use it as the
+    # executable snapshot's authority time.  The fresh orderbook authority is
+    # only known after all CLOB reads above have returned; stamping at call
+    # entry can make a slow-but-current snapshot self-expire before immediate
+    # repricing.
+    _utc_datetime(captured_at, field_name="captured_at")
+    captured = datetime.now(timezone.utc)
     snapshot = ExecutableMarketSnapshotV2(
         snapshot_id=_snapshot_id(
             condition_id=condition_id,

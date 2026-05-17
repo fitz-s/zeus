@@ -1,5 +1,5 @@
 # Created: 2026-04-27
-# Lifecycle: created=2026-04-27; last_reviewed=2026-05-15; last_reused=2026-05-15
+# Lifecycle: created=2026-04-27; last_reviewed=2026-05-15; last_reused=2026-05-17
 # Purpose: U1 snapshot antibodies plus pricing-semantics contract scaffolding.
 # Reuse: Run when executable snapshots, venue_commands gating, or V2 market preflight semantics change.
 # Authority basis: docs/operations/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md
@@ -321,6 +321,28 @@ def test_capture_executable_snapshot_persists_verified_gamma_and_clob_facts(conn
     assert fields["executable_snapshot_min_tick_size"] == "0.01"
     assert fields["executable_snapshot_min_order_size"] == "5"
     assert fields["executable_snapshot_neg_risk"] is False
+
+
+def test_capture_executable_snapshot_timestamps_actual_clob_read_completion(conn):
+    stale_call_start = datetime(2000, 1, 1, tzinfo=timezone.utc)
+    before_capture = datetime.now(timezone.utc)
+
+    fields = capture_executable_market_snapshot(
+        conn,
+        market=_market_for_capture(),
+        decision=_decision_for_capture(),
+        clob=FakeClobFacts(),
+        captured_at=stale_call_start,
+        scan_authority="VERIFIED",
+    )
+    after_capture = datetime.now(timezone.utc)
+    loaded = get_snapshot(conn, fields["executable_snapshot_id"])
+
+    assert loaded is not None
+    assert loaded.captured_at >= before_capture
+    assert loaded.captured_at <= after_capture
+    assert loaded.freshness_deadline == loaded.captured_at + timedelta(seconds=30)
+    assert is_fresh(loaded, loaded.captured_at + timedelta(seconds=1))
 
 
 def test_fee_details_canonicalize_base_fee_bps_to_fraction():
