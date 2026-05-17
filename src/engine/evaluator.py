@@ -1,5 +1,5 @@
 # Created: prior
-# Last reused/audited: 2026-05-15
+# Last reused/audited: 2026-05-17
 # Authority basis: docs/operations/task_2026-05-14_data_daemon_live_efficiency/DATA_DAEMON_LIVE_EFFICIENCY_REFACTOR_PLAN.md
 #   Phase 3 live evaluator consumes forecast producer readiness instead of direct-fetching OpenData.
 """Evaluator: takes a market candidate, returns an EdgeDecision or NoTradeCase.
@@ -1352,6 +1352,11 @@ def _validate_ensemble_for_required_hours(
         return validate_ensemble(result, expected_members=expected_members)
 
 
+def _forecast_days_covering_local_target_day(lead_days_to_local_start: float) -> int:
+    """Request enough upstream horizon to include the full local target day."""
+    return max(2, int(math.ceil(max(0.0, float(lead_days_to_local_start)))) + 2)
+
+
 def _selection_hypothesis_id(
     *,
     family_id: str,
@@ -1924,7 +1929,7 @@ def evaluate_candidate(
 
     target_d = date.fromisoformat(target_date)
     lead_days = max(0.0, lead_days_to_date_start(target_d, city.timezone))
-    ens_forecast_days = max(2, int(max(0.0, lead_days)) + 2)
+    ens_forecast_days = _forecast_days_covering_local_target_day(lead_days)
 
     primary_model = ensemble_primary_model()
 

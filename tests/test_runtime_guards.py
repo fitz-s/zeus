@@ -9353,6 +9353,108 @@ def test_gfs_crosscheck_uses_local_target_day_hours_instead_of_first_24h(monkeyp
     np.testing.assert_allclose(calls["gfs_p"], np.array([0.0, 0.0, 1.0]))
 
 
+def test_gfs_crosscheck_forecast_days_cover_fractional_local_target_lead(monkeypatch):
+    monkeypatch.setattr(evaluator_module, "get_mode", lambda: "test")
+    monkeypatch.setattr(evaluator_module, "lead_days_to_date_start", lambda target_d, timezone_name, now=None: 1.25)
+    calls: dict[str, int] = {}
+    target_date = "2026-01-15"
+
+    candidate = MarketCandidate(
+        city=NYC,
+        target_date=target_date,
+        outcomes=[
+            {"title": "32°F or below", "range_low": None, "range_high": 32, "token_id": "yes1", "no_token_id": "no1", "market_id": "m1", "price": 0.35},
+            {"title": "33-34°F", "range_low": 33, "range_high": 34, "token_id": "yes2", "no_token_id": "no2", "market_id": "m2", "price": 0.33},
+            {"title": "35°F or higher", "range_low": 35, "range_high": None, "token_id": "yes3", "no_token_id": "no3", "market_id": "m3", "price": 0.32},
+        ],
+        hours_since_open=8.0,
+        hours_to_resolution=40.0,
+        discovery_mode=DiscoveryMode.OPENING_HUNT.value,
+    )
+
+    tz = ZoneInfo(NYC.timezone)
+    local_start = datetime(2026, 1, 15, 0, 0, tzinfo=tz)
+    full_target_day_times = [
+        (local_start + timedelta(hours=i)).astimezone(timezone.utc).isoformat()
+        for i in range(24)
+    ]
+
+    class DummyEnsembleSignal:
+        def __init__(self, members_hourly, times, city, target_d, settlement_semantics=None, decision_time=None, **kwargs):
+            self.member_maxes = np.full(51, 55.0)
+            self.member_extrema = self.member_maxes
+            self.bias_corrected = False
+
+        def p_raw_vector(self, bins, n_mc=None):
+            return np.array([0.0, 0.0, 1.0])
+
+        def spread(self):
+            from src.types.temperature import TemperatureDelta
+
+            return TemperatureDelta(1.0, "F")
+
+        def spread_float(self):
+            return 1.0
+
+        def is_bimodal(self):
+            return False
+
+    class DummyAnalysis:
+        def __init__(self, **kwargs):
+            pass
+
+        def find_edges(self, n_bootstrap=500):
+            return []
+
+        def sigma_context(self):
+            return {"base_sigma": 0.5, "lead_multiplier": 1.1, "spread_multiplier": 1.05, "final_sigma": 0.5775}
+
+        def mean_context(self):
+            return {"offset": 0.0, "lead_days": 1.5}
+
+    def _fetch_ensemble(city, forecast_days=2, model=None, role=None, **kwargs):
+        calls[model or "ecmwf_ifs025"] = forecast_days
+        times = full_target_day_times if forecast_days >= 4 else full_target_day_times[:19]
+        n_members = 31 if model == "gfs025" else 51
+        return {
+            "members_hourly": np.ones((n_members, len(times))) * 55.0,
+            "times": times,
+            **_entry_forecast_evidence(
+                model=model or "ecmwf_ifs025",
+                source_id="openmeteo_ensemble_gfs025" if model == "gfs025" else "tigge",
+                role=role or ("diagnostic" if model == "gfs025" else "entry_primary"),
+                issue_time=datetime(2026, 1, 14, 0, 0, tzinfo=timezone.utc),
+                first_valid_time=datetime(2026, 1, 14, 5, 0, tzinfo=timezone.utc),
+                fetch_time=datetime(2026, 1, 14, 6, 0, tzinfo=timezone.utc),
+                n_members=n_members,
+            ),
+        }
+
+    monkeypatch.setattr(evaluator_module, "fetch_ensemble", _fetch_ensemble)
+    monkeypatch.setattr(evaluator_module, "validate_ensemble", lambda result, expected_members=51: result is not None)
+    monkeypatch.setattr(evaluator_module, "EnsembleSignal", DummyEnsembleSignal)
+    monkeypatch.setattr(evaluator_module, "model_agreement", lambda p_raw, gfs_p: "AGREE")
+    monkeypatch.setattr(evaluator_module, "_store_ens_snapshot", lambda *args, **kwargs: "snap-gfs")
+    monkeypatch.setattr(evaluator_module, "_store_snapshot_p_raw", lambda *args, **kwargs: None)
+    _patch_mature_calibration(monkeypatch)
+    monkeypatch.setattr(evaluator_module, "MarketAnalysis", DummyAnalysis)
+    _stub_full_family_scan(monkeypatch)
+    monkeypatch.setattr(evaluator_module, "fdr_filter", lambda edges, fdr_alpha=0.10: list(edges))
+
+    decisions = evaluator_module.evaluate_candidate(
+        candidate,
+        conn=None,
+        portfolio=PortfolioState(bankroll=211.37),
+        clob=type("DummyClob", (), {"get_best_bid_ask": lambda self, token_id: (0.34, 0.36, 20.0, 20.0)})(),
+        limits=evaluator_module.RiskLimits(),
+        decision_time=datetime(2026, 1, 14, 22, 30, tzinfo=timezone.utc),
+    )
+
+    assert calls["gfs025"] == 4
+    assert len(decisions) == 1
+    assert decisions[0].agreement == "AGREE"
+
+
 def test_gfs_crosscheck_failure_rejects_instead_of_defaulting_to_agree(monkeypatch):
     monkeypatch.setattr(evaluator_module, "get_mode", lambda: "test")
     candidate = MarketCandidate(
