@@ -180,7 +180,7 @@ def bridge(dry_run: bool = False) -> dict:
             # Count distinct hours for primary source
             p_count = conn.execute("""
                 SELECT COUNT(DISTINCT utc_timestamp)
-                FROM observation_instants_v2
+                FROM world.observation_instants_v2
                 WHERE city = ? AND target_date = ? AND source = ?
                   AND authority = 'VERIFIED'
             """, (city, target_date, primary_source)).fetchone()[0]
@@ -192,7 +192,7 @@ def bridge(dry_run: bool = False) -> dict:
                 f_max = conn.execute(f"""
                     SELECT MAX(h) FROM (
                         SELECT COUNT(DISTINCT utc_timestamp) as h
-                        FROM observation_instants_v2
+                        FROM world.observation_instants_v2
                         WHERE city = ? AND target_date = ? AND source IN ({placeholders})
                           AND authority = 'VERIFIED'
                         GROUP BY source
