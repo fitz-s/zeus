@@ -1033,6 +1033,27 @@ def _summary_risk_level(summary: dict) -> str:
     return str(summary.get("risk_level") or "").strip().upper()
 
 
+def _initialize_entry_order_summary(summary: dict) -> None:
+    summary.setdefault("trades", 0)
+    summary.setdefault("entry_orders_submitted", 0)
+    summary.setdefault("entry_orders_resting", 0)
+    summary.setdefault("entry_orders_filled_immediate", 0)
+
+
+def _record_entry_order_summary(
+    summary: dict,
+    *,
+    runtime_order_status: str,
+    command_state: str | None,
+) -> None:
+    _initialize_entry_order_summary(summary)
+    summary["entry_orders_submitted"] += 1
+    if runtime_order_status == "filled" or command_state == "FILLED":
+        summary["entry_orders_filled_immediate"] += 1
+    else:
+        summary["entry_orders_resting"] += 1
+
+
 def _dedupe_steps(steps: list[str]) -> list[str]:
     seen: set[str] = set()
     ordered: list[str] = []
@@ -1966,6 +1987,7 @@ def _availability_status_for_exception(exc: Exception) -> str:
 def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mode, summary: dict, entry_bankroll: float, decision_time, *, env: str, deps):
     portfolio_dirty = False
     tracker_dirty = False
+    _initialize_entry_order_summary(summary)
     market_candidate_ctor = getattr(deps, "MarketCandidate", None)
     if market_candidate_ctor is None:
         from src.engine.evaluator import MarketCandidate as market_candidate_ctor
@@ -3256,6 +3278,12 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                             _cmd_state or "missing",
                         )
                         runtime_order_status = "pending"
+                    if _cmd_durable:
+                        _record_entry_order_summary(
+                            summary,
+                            runtime_order_status=runtime_order_status,
+                            command_state=_cmd_state,
+                        )
                     if runtime_order_status in ("filled", "pending") and _cmd_durable:
                         pos = materialize_position(
                             candidate,

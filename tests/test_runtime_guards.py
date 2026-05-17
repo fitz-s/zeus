@@ -3820,6 +3820,10 @@ def test_live_entry_captures_and_commits_snapshot_before_executor(tmp_path, monk
     assert command_row["token_id"] == "yes1"
     assert command_row["price"] == pytest.approx(float(captured["intent"].final_limit_price))
     assert command_row["state"] == "ACKED"
+    assert summary["trades"] == 0
+    assert summary["entry_orders_submitted"] == 1
+    assert summary["entry_orders_resting"] == 1
+    assert summary["entry_orders_filled_immediate"] == 0
     assert price_linkage is not None
     assert price_linkage["market_price_linkage"] == "full"
     assert price_linkage["source"] == "CLOB_ORDERBOOK"
