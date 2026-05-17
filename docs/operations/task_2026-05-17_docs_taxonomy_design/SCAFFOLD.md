@@ -159,7 +159,7 @@ Loader: `(scripts/topology_doctor.py, line 34 TOPOLOGY_PATH, file_sha8=58ec7cab)
 
 ### `docs/operations/task_2026-05-15_runtime_improvement_engineering_package/04_workspace_hygiene/ARCHIVAL_RULES.md`
 **Verdict: SUPERSEDE_WITH_REASON (location, not content).**
-<!-- cite: docs/authority/AGENTS.md:10 sha=a86ccb64 -->
+<!-- cite: docs/authority/AGENTS.md:10 sha=7b94f6b8 -->
 Content is canonical (referenced by `scripts/archive_migration_2026-05-16.py` and `docs/operations/AGENTS.md`). Location is wrong: a packet-internal file MUST NOT define repo-wide archival law (per `docs/authority/AGENTS.md:10-13` "durable authority law only" + the constitution K3/K4 isolation rule). Wave-3 edit (post-renumber): relocate to `docs/authority/ARCHIVAL_RULES.md`, leave a 3-line pointer stub at the old path with `.relocated` extension, update all references — see EXECUTION_PLAN W3 for full enumeration.
 
 ### `AGENTS.md` (root)

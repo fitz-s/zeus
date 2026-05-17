@@ -26,6 +26,11 @@ Cross-family combinations are structurally blocked: any function typed to accept
 IFSGridId will raise TypeError if passed an ENSGridId at runtime. No runtime
 validator needed — the wrong object simply cannot be constructed as the right type.
 
+Note: FM-10 prevention is enforced at assert_*() call boundaries. Untyped functions
+that consume source-family objects via attribute access (e.g., obj.identifier) can
+still bypass; Phase-2 will add a CI lint for missing assert_* calls on source-family
+parameters.
+
 Usage:
     ifs_id = IFSGridId("IFS:EGLL:2026-06-01")
     ens_id = ENSGridId("ENS:EGLL:2026-06-01")
