@@ -73,6 +73,12 @@ STRATEGY_KEYS_BY_DISCOVERY_MODE = _strategy_keys_by_discovery_mode()
 NATIVE_BUY_NO_LIVE_APPROVED_CONTEXTS: frozenset[tuple[str, str, str]] = frozenset()
 NATIVE_BUY_NO_LIVE_PROMOTION_VALIDATION = "native_buy_no_live_promotion_approved"
 _FORWARD_PRICE_LINKAGE_OK_STATUSES = frozenset({"inserted", "unchanged"})
+_ORDER_OWNERSHIP_TERMINAL_POSITION_PHASES = frozenset(
+    {"settled", "voided", "admin_closed", "quarantined"}
+)
+_ORDER_OWNERSHIP_TERMINAL_ORDER_STATUSES = frozenset(
+    {"filled", "cancelled", "canceled", "expired", "rejected", "voided"}
+)
 
 
 # D4: exit triggers whose statistical burden (2 consecutive negative cycles,
@@ -926,7 +932,7 @@ def cleanup_orphan_open_orders(portfolio, clob, *, deps, conn=None) -> int:
 
     Durable-command guard (#63 + R3):
       1. Order is NOT in local portfolio tracking (order_id / last_exit_order_id)
-      2. Order is NOT in execution_fact (recent command log) within 2 hours
+      2. Order is NOT in canonical position_current ownership
       3. Order has durable venue_commands truth; cancel through request_cancel_for_command
     """
     if not hasattr(clob, "get_open_orders"):
@@ -939,30 +945,35 @@ def cleanup_orphan_open_orders(portfolio, clob, *, deps, conn=None) -> int:
         if pos.last_exit_order_id:
             tracked_order_ids.add(pos.last_exit_order_id)
 
-    # Build set of recently-commanded order IDs from trade_decisions
-    recent_order_ids: set[str] = set()
+    locally_owned_order_ids: set[str] = set()
     if conn is not None:
         try:
             from src.state.db import _table_exists
-            if _table_exists(conn, "trade_decisions"):
-                cutoff = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+            if _table_exists(conn, "position_current"):
                 rows = conn.execute(
-                    "SELECT order_id FROM trade_decisions WHERE order_posted_at >= ? AND order_id IS NOT NULL AND order_id != ''",
-                    (cutoff,),
+                    """
+                    SELECT order_id
+                      FROM position_current
+                     WHERE order_id IS NOT NULL
+                       AND order_id != ''
+                       AND lower(COALESCE(phase, '')) NOT IN (?, ?, ?, ?)
+                       AND lower(COALESCE(order_status, '')) NOT IN (?, ?, ?, ?, ?, ?)
+                    """,
+                    tuple(_ORDER_OWNERSHIP_TERMINAL_POSITION_PHASES)
+                    + tuple(_ORDER_OWNERSHIP_TERMINAL_ORDER_STATUSES),
                 ).fetchall()
-                recent_order_ids = {str(r[0]) for r in rows}
+                locally_owned_order_ids.update(str(r[0]) for r in rows)
         except Exception as exc:
-            deps.logger.warning("Could not query trade_decisions for orphan guard: %s", exc)
+            deps.logger.warning("Could not query canonical local order ownership for orphan guard: %s", exc)
 
     cancelled = 0
     for order in clob.get_open_orders():
         order_id = extract_order_id(order)
         if not order_id or order_id in tracked_order_ids:
             continue
-        # Quarantine guard: if order appears in recent trade_decisions, do NOT cancel
-        if order_id in recent_order_ids:
+        if order_id in locally_owned_order_ids:
             deps.logger.warning(
-                "Orphan order %s found in recent execution_fact — quarantining instead of cancelling",
+                "Open order %s has durable local ownership — quarantining instead of cancelling",
                 order_id,
             )
             continue

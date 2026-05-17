@@ -23,12 +23,16 @@ from src.contracts import Direction, ExecutionIntent
 from src.contracts.slippage_bps import SlippageBps
 from src.control.heartbeat_supervisor import (
     HEARTBEAT_CANCEL_SUSPECTED_REASON,
+    ExternalHeartbeatSupervisor,
     HeartbeatHealth,
     HeartbeatNotHealthy,
+    HeartbeatStatus,
     HeartbeatSupervisor,
     OrderType,
     configure_global_supervisor,
     heartbeat_required_for,
+    run_heartbeat_keeper,
+    write_heartbeat_keeper_status,
 )
 from src.state.db import init_schema
 from src.venue.polymarket_v2_adapter import HeartbeatAck
@@ -301,6 +305,86 @@ def test_venue_heartbeat_loop_continues_after_failed_tick(monkeypatch):
 
     assert calls == ["tick", "tick"]
     assert sleeps == [0.1, 0.1]
+
+
+def test_external_heartbeat_supervisor_requires_fresh_healthy_status(tmp_path):
+    status_path = tmp_path / "venue-heartbeat-keeper.json"
+    status = HeartbeatStatus(
+        health=HeartbeatHealth.HEALTHY,
+        last_success_at=datetime.now(timezone.utc),
+        consecutive_failures=0,
+        heartbeat_id="keeper-id",
+        cadence_seconds=5,
+        last_error=None,
+    )
+    write_heartbeat_keeper_status(status, path=status_path)
+
+    supervisor = ExternalHeartbeatSupervisor(
+        status_path=status_path,
+        max_age_seconds=8,
+        cadence_seconds=5,
+    )
+
+    assert supervisor.gate_for_order_type(OrderType.GTC) is True
+    assert supervisor.status().health is HeartbeatHealth.HEALTHY
+
+    stale_payload = json.loads(status_path.read_text())
+    stale_payload["written_at"] = (datetime.now(timezone.utc) - timedelta(seconds=9)).isoformat()
+    status_path.write_text(json.dumps(stale_payload))
+
+    assert supervisor.gate_for_order_type(OrderType.GTC) is False
+    assert supervisor.status().health is HeartbeatHealth.LOST
+    assert "stale" in (supervisor.status().last_error or "")
+
+
+def test_heartbeat_keeper_writes_status_without_order_side_effects(tmp_path):
+    status_path = tmp_path / "venue-heartbeat-keeper.json"
+    adapter = FakeHeartbeatAdapter([HeartbeatAck(ok=True, raw={"heartbeat_id": "keeper-A"})])
+
+    run_heartbeat_keeper(
+        adapter=adapter,
+        status_path=status_path,
+        cadence_seconds=5,
+        max_ticks=1,
+    )
+
+    payload = json.loads(status_path.read_text())
+    assert payload["owner"] == "zeus-venue-heartbeat"
+    assert payload["health"] == "HEALTHY"
+    assert payload["last_error"] is None
+    assert adapter.heartbeat_ids == [""]
+
+
+def test_main_external_venue_heartbeat_mode_consumes_status_without_posting(
+    tmp_path,
+    monkeypatch,
+):
+    from src import main
+
+    status = HeartbeatStatus(
+        health=HeartbeatHealth.HEALTHY,
+        last_success_at=datetime.now(timezone.utc),
+        consecutive_failures=0,
+        heartbeat_id="keeper-id",
+        cadence_seconds=5,
+    )
+    write_heartbeat_keeper_status(status)
+
+    class Client:
+        def _ensure_v2_adapter(self):
+            raise AssertionError("trading daemon must not own heartbeat in external mode")
+
+    monkeypatch.setenv("ZEUS_VENUE_HEARTBEAT_MODE", "external")
+    monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", Client)
+    main._venue_heartbeat_thread = None
+    main._venue_heartbeat_supervisor = None
+    main._venue_heartbeat_adapter = None
+
+    main._start_venue_heartbeat_loop_if_needed()
+    main._write_venue_heartbeat()
+
+    assert main._venue_heartbeat_thread is None
+    assert main._venue_heartbeat_supervisor is None
 
 
 def test_main_starts_venue_heartbeat_before_boot_http():

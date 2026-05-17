@@ -1251,6 +1251,76 @@ def test_stale_order_cleanup_blocks_without_matching_command(tmp_path):
     assert cancelled == []
 
 
+def test_stale_order_cleanup_quarantines_position_current_owned_order(monkeypatch, tmp_path):
+    conn = get_connection(tmp_path / "command-backed-order.db")
+    init_schema(conn)
+    conn.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, trade_id, market_id, city, cluster, target_date,
+            bin_label, direction, unit, size_usd, shares, cost_basis_usd,
+            entry_price, p_posterior, entry_method, strategy_key, edge_source,
+            discovery_mode, chain_state, order_id, order_status, updated_at,
+            temperature_metric
+        ) VALUES (
+            'pos-owned', 'pending_entry', 'pos-owned', 'm-owned', 'NYC', 'NYC',
+            '2026-05-19', '80°F or higher', 'buy_yes', 'F', 7.5, 0.0, 0.0,
+            0.27, 0.60, 'executable_forecast', 'opening_inertia',
+            'opening_inertia', 'opening_hunt', 'unknown', 'owned-order',
+            'live', '2026-05-17T07:45:01Z', 'high'
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO venue_commands (
+            command_id, snapshot_id, envelope_id, position_id, decision_id,
+            idempotency_key, intent_kind, market_id, token_id, side, size, price,
+            venue_order_id, state, last_event_id, created_at, updated_at,
+            review_required_reason
+        ) VALUES (
+            'cmd-owned', 'snap-owned', 'env-owned', 'pos-owned', 'dec-owned',
+            'idem-owned', 'entry', 'm-owned', 'tok-owned', 'BUY', 7.5, 0.27,
+            'owned-order', 'ACKED', NULL, '2026-05-17T07:45:00Z',
+            '2026-05-17T07:45:01Z', NULL
+        )
+        """
+    )
+    conn.commit()
+    cancelled: list[str] = []
+
+    class DummyClob:
+        def get_open_orders(self):
+            return [{"id": "owned-order"}]
+
+        def cancel_order(self, order_id):
+            cancelled.append(order_id)
+            return {"status": "CANCELLED", "id": order_id}
+
+    import src.execution.exit_safety as exit_safety
+
+    def fake_request_cancel_for_command(conn_arg, command_id, cancel_fn):
+        cancel_fn("owned-order")
+        return types.SimpleNamespace(status="CANCELED")
+
+    monkeypatch.setattr(
+        exit_safety,
+        "request_cancel_for_command",
+        fake_request_cancel_for_command,
+    )
+
+    cancelled_count = cycle_runtime.cleanup_orphan_open_orders(
+        PortfolioState(),
+        DummyClob(),
+        deps=types.SimpleNamespace(logger=logging.getLogger("test_command_backed_order")),
+        conn=conn,
+    )
+    conn.close()
+
+    assert cancelled_count == 0
+    assert cancelled == []
+
+
 def test_reconcile_pending_positions_delegates_to_fill_tracker(monkeypatch):
     portfolio = PortfolioState()
     tracker = StrategyTracker()

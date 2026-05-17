@@ -1194,6 +1194,140 @@ def _decision_log_pre_sdk_proof(conn: sqlite3.Connection, decision_id: str) -> d
     return None
 
 
+def _raw_payload(item) -> dict:
+    raw = getattr(item, "raw", item)
+    return raw if isinstance(raw, dict) else {}
+
+
+def _epoch_seconds(value) -> float | None:
+    if value in (None, ""):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        pass
+    try:
+        text = str(value)
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        return datetime.fromisoformat(text).timestamp()
+    except ValueError:
+        return None
+
+
+def _raw_mentions_token(raw: dict, token_id: str) -> bool:
+    token_fields = (
+        "asset_id",
+        "token_id",
+        "selected_outcome_token_id",
+        "outcome_token_id",
+    )
+    if any(str(raw.get(field) or "") == token_id for field in token_fields):
+        return True
+    for maker in raw.get("maker_orders") or []:
+        if isinstance(maker, dict) and any(str(maker.get(field) or "") == token_id for field in token_fields):
+            return True
+    return False
+
+
+def _decimal_matches(left, right) -> bool:
+    try:
+        return Decimal(str(left)) == Decimal(str(right))
+    except (InvalidOperation, TypeError):
+        return False
+
+
+def _raw_matches_command_exposure(raw: dict, command: dict) -> bool:
+    token_id = str(command.get("token_id") or "")
+    if _raw_mentions_token(raw, token_id):
+        return True
+    market_id = str(command.get("market_id") or "")
+    raw_market = str(raw.get("market") or raw.get("market_id") or raw.get("condition_id") or "")
+    if market_id and raw_market != market_id:
+        return False
+    side = str(command.get("side") or "").upper()
+    raw_side = str(raw.get("side") or "").upper()
+    if side and raw_side and raw_side != side:
+        return False
+    if not _decimal_matches(raw.get("price"), command.get("price")):
+        return False
+    raw_size = raw.get("size") or raw.get("original_size") or raw.get("matched_amount")
+    return _decimal_matches(raw_size, command.get("size"))
+
+
+def _summarize_venue_match(raw: dict) -> dict:
+    return {
+        "id": raw.get("id") or raw.get("order_id") or raw.get("taker_order_id"),
+        "status": raw.get("status") or raw.get("state"),
+        "asset_id": raw.get("asset_id") or raw.get("token_id"),
+        "price": raw.get("price"),
+        "size": raw.get("size") or raw.get("original_size") or raw.get("matched_amount"),
+        "match_time": raw.get("match_time"),
+        "last_update": raw.get("last_update"),
+    }
+
+
+def build_review_required_no_venue_exposure_proof(
+    conn: sqlite3.Connection,
+    command_id: str,
+    adapter,
+    *,
+    observed_at: str | None = None,
+) -> dict:
+    """Read venue surfaces and prove a REVIEW_REQUIRED command has no exposure."""
+
+    command = _review_required_command(conn, command_id)
+    events = _command_events(conn, command_id)
+    review_reason = _latest_review_required_payload(events).get("reason")
+    if review_reason != "recovery_no_venue_order_id":
+        raise ValueError("no-exposure proof only supports recovery_no_venue_order_id")
+    token_id = str(command.get("token_id") or "")
+    created_epoch = _epoch_seconds(command.get("created_at")) or 0.0
+    now = observed_at or _now_iso()
+    open_orders = list(adapter.get_open_orders())
+    trades = list(adapter.get_trades())
+    matching_open = [
+        _summarize_venue_match(raw)
+        for raw in (_raw_payload(order) for order in open_orders)
+        if _raw_matches_command_exposure(raw, command)
+    ]
+    matching_trades = []
+    for trade in trades:
+        raw = _raw_payload(trade)
+        if not _raw_matches_command_exposure(raw, command):
+            continue
+        trade_epoch = _epoch_seconds(raw.get("match_time") or raw.get("last_update"))
+        if trade_epoch is not None and trade_epoch < created_epoch:
+            continue
+        matching_trades.append(_summarize_venue_match(raw))
+    return {
+        "schema_version": 1,
+        "source": "authenticated_clob_user_read",
+        "owner_scope": "authenticated_funder",
+        "observed_at": now,
+        "command_id": command_id,
+        "decision_id": str(command.get("decision_id") or ""),
+        "market_id": str(command.get("market_id") or ""),
+        "token_id": token_id,
+        "side": str(command.get("side") or ""),
+        "price": str(Decimal(str(command.get("price")))),
+        "size": str(Decimal(str(command.get("size")))),
+        "open_orders_checked": True,
+        "trades_checked": True,
+        "open_orders_query_complete": True,
+        "trades_query_complete": True,
+        "pagination_scope": "sdk_get_trades_returned_all_visible_user_trades",
+        "time_window_start": command.get("created_at"),
+        "time_window_end": now,
+        "open_order_count": len(open_orders),
+        "trade_count": len(trades),
+        "matching_open_order_count": len(matching_open),
+        "matching_trade_count": len(matching_trades),
+        "matching_open_orders": matching_open[:10],
+        "matching_trades": matching_trades[:10],
+    }
+
+
 def clear_review_required_no_venue_side_effect(
     conn: sqlite3.Connection,
     command_id: str,
@@ -1264,6 +1398,85 @@ def clear_review_required_no_venue_side_effect(
         conn,
         command_id=command_id,
         event_type=CommandEventType.REVIEW_CLEARED_NO_VENUE_SIDE_EFFECT.value,
+        occurred_at=now,
+        payload=payload,
+    )
+    return payload
+
+
+def _review_no_exposure_predicates(
+    conn: sqlite3.Connection,
+    command: dict,
+) -> tuple[dict, list[str]]:
+    predicates, _failures = _review_no_side_effect_predicates(conn, command)
+    predicates.pop("review_required_reason_pre_sdk", None)
+    latest_reason = _latest_review_required_payload(
+        _command_events(conn, str(command["command_id"]))
+    ).get("reason")
+    predicates["review_required_reason_recovery_no_venue_order_id"] = (
+        latest_reason == "recovery_no_venue_order_id"
+    )
+    failures = [name for name, ok in predicates.items() if not ok]
+    return predicates, failures
+
+
+def clear_review_required_no_venue_exposure(
+    conn: sqlite3.Connection,
+    command_id: str,
+    *,
+    venue_absence_proof: dict,
+    source_commit: str,
+    source_function: str,
+    reviewed_by: str = "operator",
+    occurred_at: str | None = None,
+) -> dict:
+    """Terminalize recovery_no_venue_order_id only after fresh venue absence proof."""
+
+    command = _review_required_command(conn, command_id)
+    predicates, predicate_failures = _review_no_exposure_predicates(conn, command)
+    if predicate_failures:
+        raise ValueError(
+            "review no-exposure predicates failed: " + ", ".join(sorted(predicate_failures))
+        )
+    latest_reason = _latest_review_required_payload(_command_events(conn, command_id)).get("reason")
+    if latest_reason != "recovery_no_venue_order_id":
+        raise ValueError("review no-exposure clearance only supports recovery_no_venue_order_id")
+    if int(venue_absence_proof.get("matching_open_order_count", -1)) != 0:
+        raise ValueError("review no-exposure clearance found matching open orders")
+    if int(venue_absence_proof.get("matching_trade_count", -1)) != 0:
+        raise ValueError("review no-exposure clearance found matching trades")
+    if not str(source_commit or "").strip():
+        raise ValueError("source_commit is required")
+    if source_function not in {"command_recovery._reconcile_row", "operator_review"}:
+        raise ValueError("source_function must identify the recovery/operator boundary")
+    now = occurred_at or _now_iso()
+    decision_id = str(command.get("decision_id") or "")
+    payload = {
+        "schema_version": 1,
+        "reason": "review_cleared_no_venue_exposure",
+        "command_id": command_id,
+        "decision_id": decision_id,
+        "proof_class": "venue_absence_no_exposure",
+        "side_effect_boundary_crossed": "unknown",
+        "sdk_submit_attempted": "unknown",
+        "required_predicates": predicates,
+        "venue_absence_proof": venue_absence_proof,
+        "source_proof": {
+            "source_commit": source_commit,
+            "source_function": source_function,
+            "source_reason": "recovery_no_venue_order_id",
+        },
+        "review_required_proof": {
+            "reason": latest_reason,
+            "allowed_reasons": ["recovery_no_venue_order_id"],
+        },
+        "reviewed_by": reviewed_by,
+        "cleared_at": now,
+    }
+    append_event(
+        conn,
+        command_id=command_id,
+        event_type=CommandEventType.REVIEW_CLEARED_NO_VENUE_EXPOSURE.value,
         occurred_at=now,
         payload=payload,
     )

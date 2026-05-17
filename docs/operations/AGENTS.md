@@ -240,6 +240,8 @@ make a surface default-read unless `current_state.md` routes it.
 | `task_2026-05-16_live_continuous_run_package/` | plan packet container | Follow-up package for proving stable continuous live operation after the first real live order milestone |
 | `task_2026-05-16_live_continuous_run_package/LIVE_CONTINUOUS_RUN_PACKAGE_PLAN.md` | topology planning packet | Plan and completion definition for `LIVE_CONTINUOUS_READY` vs `CONTROLLED_DEGRADED`, including code-plane, launchd, source-health, DB-lock, and live acceptance gates |
 | `task_2026-05-16_live_continuous_run_package/CRITIC_REVIEW.md` | packet review evidence | Critic attack and approval record for the live continuous-run package plan; not empirical live-ready evidence |
+| `task_2026-05-17_live_order_survival/` | plan packet container | Live order survival packet for heartbeat lease ownership, submit ownership projection, REVIEW_REQUIRED clearance, and sustained order progress proof |
+| `task_2026-05-17_live_order_survival/LIVE_ORDER_SURVIVAL_PLAN.md` | topology planning packet | Plan and completion definition for proving submitted orders survive heartbeat/recovery boundaries through fill, venue terminality, or explicit no-exposure clearance |
 Archived packet evidence (physically moved to `docs/operations/archive/<YYYY>-Q<N>/`) is
 listed in `docs/operations/archive/<YYYY>-Q<N>/INDEX.md`; do not re-list those packets here.
 When a packet closes and is archived, create a stub at `docs/operations/<name>.archived`

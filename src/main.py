@@ -431,6 +431,27 @@ _last_collateral_heartbeat_refresh_attempt_at = None
 COLLATERAL_HEARTBEAT_REFRESH_SECONDS = 30.0
 
 
+def _venue_heartbeat_mode() -> str:
+    return os.environ.get("ZEUS_VENUE_HEARTBEAT_MODE", "internal").strip().lower()
+
+
+def _external_venue_heartbeat_enabled() -> bool:
+    return _venue_heartbeat_mode() == "external"
+
+
+def _configure_external_venue_heartbeat_supervisor_if_needed() -> None:
+    from src.control.heartbeat_supervisor import (
+        ExternalHeartbeatSupervisor,
+        configure_global_supervisor,
+        get_global_supervisor,
+    )
+
+    supervisor = get_global_supervisor()
+    if isinstance(supervisor, ExternalHeartbeatSupervisor):
+        return
+    configure_global_supervisor(ExternalHeartbeatSupervisor())
+
+
 def _refresh_global_collateral_snapshot_if_due(
     adapter,
     *,
@@ -783,9 +804,20 @@ def _write_venue_heartbeat() -> None:
     from src.control.heartbeat_supervisor import (
         HeartbeatHealth,
         HeartbeatSupervisor,
+        current_status,
         configure_global_supervisor,
         heartbeat_cadence_seconds_from_env,
     )
+
+    if _external_venue_heartbeat_enabled():
+        _configure_external_venue_heartbeat_supervisor_if_needed()
+        status = current_status()
+        if status.health is not HeartbeatHealth.HEALTHY:
+            raise RuntimeError(
+                f"external venue heartbeat unhealthy: health={status.health.value}; "
+                f"error={status.last_error or ''}"
+            )
+        return
 
     try:
         if _venue_heartbeat_supervisor is None:
@@ -828,6 +860,9 @@ def _start_venue_heartbeat_loop_if_needed() -> None:
     """Keep a dedicated venue-heartbeat loop alive outside APScheduler load."""
 
     global _venue_heartbeat_thread
+    if _external_venue_heartbeat_enabled():
+        _configure_external_venue_heartbeat_supervisor_if_needed()
+        return
     if _venue_heartbeat_thread is not None and _venue_heartbeat_thread.is_alive():
         return
 

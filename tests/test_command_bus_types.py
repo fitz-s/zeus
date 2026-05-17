@@ -345,9 +345,9 @@ class TestEnumsAreClosed:
         assert len(list(CommandState)) == 17
 
     def test_command_event_type_count(self):
-        """20 events after proof-backed REVIEW_REQUIRED clearance was added."""
+        """21 events after proof-backed REVIEW_REQUIRED clearance was added."""
         from src.execution.command_bus import CommandEventType
-        assert len(list(CommandEventType)) == 20
+        assert len(list(CommandEventType)) == 21
 
     def test_intent_kind_count(self):
         from src.execution.command_bus import IntentKind
@@ -705,15 +705,15 @@ class TestIdempotencyKeyFactoryEnforcement:
 # ---------------------------------------------------------------------------
 # Post-critic MAJOR-3: REVIEW_REQUIRED is quasi-terminal in the closed grammar
 # Asserts the contract documented in command_bus.py: REVIEW_REQUIRED is in
-# IN_FLIGHT_STATES (operator visibility) but has zero outgoing transitions.
-# Live-order E2E adds one proof-backed clearance event. REVIEW_REQUIRED remains
-# quasi-terminal for ordinary recovery and operator dashboards.
+# IN_FLIGHT_STATES (operator visibility) and only proof-backed clearance events
+# may terminalize it. REVIEW_REQUIRED remains quasi-terminal for ordinary
+# recovery and operator dashboards.
 # ---------------------------------------------------------------------------
 
 
 class TestReviewRequiredIsQuasiTerminal:
     def test_review_required_has_only_proof_backed_clearance_transition(self):
-        """Only explicit no-side-effect proof may terminalize REVIEW_REQUIRED."""
+        """Only explicit proof-backed clearance may terminalize REVIEW_REQUIRED."""
         from src.state.venue_command_repo import _TRANSITIONS
         outgoing = [
             (state, event, after) for (state, event), after in _TRANSITIONS.items()
@@ -724,7 +724,12 @@ class TestReviewRequiredIsQuasiTerminal:
                 "REVIEW_REQUIRED",
                 "REVIEW_CLEARED_NO_VENUE_SIDE_EFFECT",
                 "REJECTED",
-            )
+            ),
+            (
+                "REVIEW_REQUIRED",
+                "REVIEW_CLEARED_NO_VENUE_EXPOSURE",
+                "EXPIRED",
+            ),
         ]
 
     def test_review_required_is_in_flight_for_visibility(self):

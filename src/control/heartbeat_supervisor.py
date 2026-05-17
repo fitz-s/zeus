@@ -7,19 +7,25 @@ it does not introduce a second control truth surface.
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import inspect
+import json
 import logging
 import os
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
+from pathlib import Path
 from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
 HEARTBEAT_CANCEL_SUSPECTED_REASON = "heartbeat_cancel_suspected"
 DEFAULT_HEARTBEAT_CADENCE_SECONDS = 5
+DEFAULT_HEARTBEAT_STATUS_MAX_AGE_SECONDS = 8
+HEARTBEAT_KEEPER_STATUS_FILENAME = "venue-heartbeat-keeper.json"
 _RESTING_ORDER_TYPES = {"GTC", "GTD"}
 _IMMEDIATE_ORDER_TYPES = {"FOK", "FAK"}
 
@@ -95,6 +101,154 @@ def heartbeat_cadence_seconds_from_env() -> int:
     if value <= 0:
         raise ValueError("ZEUS_HEARTBEAT_CADENCE_SECONDS must be positive")
     return value
+
+
+def heartbeat_status_max_age_seconds_from_env() -> int:
+    raw = os.environ.get("ZEUS_HEARTBEAT_STATUS_MAX_AGE_SECONDS")
+    if raw is None or raw == "":
+        return DEFAULT_HEARTBEAT_STATUS_MAX_AGE_SECONDS
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError("ZEUS_HEARTBEAT_STATUS_MAX_AGE_SECONDS must be an integer") from exc
+    if value <= 0:
+        raise ValueError("ZEUS_HEARTBEAT_STATUS_MAX_AGE_SECONDS must be positive")
+    return value
+
+
+def heartbeat_keeper_status_path() -> Path:
+    from src.config import state_path
+
+    return state_path(HEARTBEAT_KEEPER_STATUS_FILENAME)
+
+
+def _parse_utc(value: Any) -> datetime | None:
+    if not value:
+        return None
+    try:
+        text = str(value)
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        parsed = datetime.fromisoformat(text)
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def write_heartbeat_keeper_status(
+    status: HeartbeatStatus,
+    *,
+    path: Path | None = None,
+    owner: str = "zeus-venue-heartbeat",
+) -> Path:
+    target = path or heartbeat_keeper_status_path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    now = datetime.now(timezone.utc)
+    payload = {
+        "schema_version": 1,
+        "owner": owner,
+        "written_at": now.isoformat(),
+        "health": status.health.value,
+        "last_success_at": status.last_success_at.isoformat() if status.last_success_at else None,
+        "consecutive_failures": status.consecutive_failures,
+        "cadence_seconds": status.cadence_seconds,
+        "last_error": status.last_error,
+    }
+    tmp = target.with_suffix(target.suffix + ".tmp")
+    tmp.write_text(json.dumps(payload, sort_keys=True) + "\n")
+    tmp.replace(target)
+    return target
+
+
+class ExternalHeartbeatSupervisor:
+    """Read-only gate over a daemon-independent heartbeat keeper status file."""
+
+    def __init__(
+        self,
+        *,
+        status_path: Path | None = None,
+        max_age_seconds: int | None = None,
+        cadence_seconds: int | None = None,
+    ) -> None:
+        self._status_path = status_path or heartbeat_keeper_status_path()
+        self._max_age_seconds = (
+            heartbeat_status_max_age_seconds_from_env()
+            if max_age_seconds is None
+            else int(max_age_seconds)
+        )
+        self._cadence_seconds = (
+            heartbeat_cadence_seconds_from_env()
+            if cadence_seconds is None
+            else int(cadence_seconds)
+        )
+
+    def status(self) -> HeartbeatStatus:
+        try:
+            payload = json.loads(self._status_path.read_text())
+        except FileNotFoundError:
+            return HeartbeatStatus(
+                health=HeartbeatHealth.LOST,
+                last_success_at=None,
+                consecutive_failures=0,
+                heartbeat_id="external",
+                cadence_seconds=self._cadence_seconds,
+                last_error=f"external heartbeat status missing: {self._status_path}",
+            )
+        except (OSError, json.JSONDecodeError) as exc:
+            return HeartbeatStatus(
+                health=HeartbeatHealth.LOST,
+                last_success_at=None,
+                consecutive_failures=0,
+                heartbeat_id="external",
+                cadence_seconds=self._cadence_seconds,
+                last_error=f"external heartbeat status unreadable: {exc}",
+            )
+
+        written_at = _parse_utc(payload.get("written_at"))
+        last_success_at = _parse_utc(payload.get("last_success_at"))
+        if written_at is None:
+            return HeartbeatStatus(
+                health=HeartbeatHealth.LOST,
+                last_success_at=last_success_at,
+                consecutive_failures=int(payload.get("consecutive_failures") or 0),
+                heartbeat_id="external",
+                cadence_seconds=int(payload.get("cadence_seconds") or self._cadence_seconds),
+                last_error="external heartbeat status missing written_at",
+            )
+        age_seconds = (datetime.now(timezone.utc) - written_at).total_seconds()
+        cadence_seconds = int(payload.get("cadence_seconds") or self._cadence_seconds)
+        if age_seconds > self._max_age_seconds:
+            return HeartbeatStatus(
+                health=HeartbeatHealth.LOST,
+                last_success_at=last_success_at,
+                consecutive_failures=int(payload.get("consecutive_failures") or 0),
+                heartbeat_id="external",
+                cadence_seconds=cadence_seconds,
+                last_error=(
+                    f"external heartbeat status stale: age={age_seconds:.3f}s "
+                    f"max_age={self._max_age_seconds}s"
+                ),
+            )
+        raw_health = str(payload.get("health") or "").upper()
+        try:
+            health = HeartbeatHealth(raw_health)
+        except ValueError:
+            health = HeartbeatHealth.LOST
+        return HeartbeatStatus(
+            health=health,
+            last_success_at=last_success_at,
+            consecutive_failures=int(payload.get("consecutive_failures") or 0),
+            heartbeat_id="external",
+            cadence_seconds=cadence_seconds,
+            last_error=payload.get("last_error"),
+        )
+
+    def gate_for_order_type(self, order_type: str | OrderType | None) -> bool:
+        if not heartbeat_required_for(order_type):
+            return True
+        return self.status().health is HeartbeatHealth.HEALTHY
 
 
 class HeartbeatSupervisor:
@@ -209,15 +363,15 @@ class HeartbeatSupervisor:
         pass
 
 
-_GLOBAL_SUPERVISOR: Optional[HeartbeatSupervisor] = None
+_GLOBAL_SUPERVISOR: Optional[Any] = None
 
 
-def configure_global_supervisor(supervisor: Optional[HeartbeatSupervisor]) -> None:
+def configure_global_supervisor(supervisor: Optional[Any]) -> None:
     global _GLOBAL_SUPERVISOR
     _GLOBAL_SUPERVISOR = supervisor
 
 
-def get_global_supervisor() -> Optional[HeartbeatSupervisor]:
+def get_global_supervisor() -> Optional[Any]:
     return _GLOBAL_SUPERVISOR
 
 
@@ -271,4 +425,52 @@ async def run_global_heartbeat_once() -> HeartbeatStatus:
     supervisor = get_global_supervisor()
     if supervisor is None:
         raise HeartbeatNotHealthy("heartbeat supervisor not configured")
+    if not hasattr(supervisor, "run_once"):
+        raise HeartbeatNotHealthy("heartbeat supervisor is external read-only")
     return await supervisor.run_once()
+
+
+def run_heartbeat_keeper(
+    *,
+    adapter: Any | None = None,
+    status_path: Path | None = None,
+    cadence_seconds: int | None = None,
+    max_ticks: int | None = None,
+    sleep_fn: Any = time.sleep,
+) -> None:
+    """Run the minimal CLOB heartbeat lease owner.
+
+    This loop owns only the venue heartbeat and its local status file. It does
+    not read orders, reconcile, cancel, refresh collateral, or write DB truth.
+    """
+
+    if adapter is None:
+        from src.data.polymarket_client import PolymarketClient
+
+        adapter = PolymarketClient()._ensure_v2_adapter()
+    cadence = heartbeat_cadence_seconds_from_env() if cadence_seconds is None else int(cadence_seconds)
+    supervisor = HeartbeatSupervisor(adapter, cadence_seconds=cadence)
+    ticks = 0
+    while True:
+        started = datetime.now(timezone.utc)
+        status = asyncio.run(supervisor.run_once())
+        write_heartbeat_keeper_status(status, path=status_path)
+        ticks += 1
+        if max_ticks is not None and ticks >= max_ticks:
+            return
+        elapsed = (datetime.now(timezone.utc) - started).total_seconds()
+        sleep_fn(max(0.1, cadence - elapsed))
+
+
+def _main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Run the Zeus CLOB venue heartbeat keeper.")
+    parser.add_argument("--once", action="store_true", help="post one heartbeat and exit")
+    parser.add_argument("--status-path", help="override status JSON path")
+    args = parser.parse_args(argv)
+    status_path = Path(args.status_path).expanduser() if args.status_path else None
+    run_heartbeat_keeper(status_path=status_path, max_ticks=1 if args.once else None)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(_main())
