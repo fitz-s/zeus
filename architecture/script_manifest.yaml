@@ -934,3 +934,32 @@ scripts:
     required_helpers: []
     required_tests: [tests/scripts/test_lore_reverify.py]
     packet: docs/operations/task_2026-05-15_runtime_improvement_engineering_package/05_execution_packets/PACKET_INDEX.md
+
+  verify_reality_contracts_2026-05-17.py:
+    class: enforcement
+    status: active
+    lifecycle: long_lived
+    authority_scope: read_only_verification
+    reuse_when: >
+      Re-run periodically (recommended monthly) to refresh last_verified on
+      config/reality_contracts/*.yaml after live API check.
+    do_not_use_when: >
+      Polymarket CLOB / Open-Meteo are known-down (will mark FAIL on transient outage).
+    canonical_command: "python3 scripts/verify_reality_contracts_2026-05-17.py [--dry-run | --apply]"
+    delete_policy: retain_until_superseded
+    read_targets: [config/reality_contracts/*.yaml]
+    write_targets:
+      - config/reality_contracts/*.yaml
+      - docs/operations/task_2026-05-17_reference_authority_docs_phase/VERIFIER_REPORT.md
+    dry_run_default: true
+    apply_flag: "--apply"
+    target_db: none
+    external_inputs:
+      - https://clob.polymarket.com
+      - https://api.open-meteo.com
+      - wss://ws-subscriptions-clob.polymarket.com
+    dangerous_if_run: false
+    promotion_barrier: >
+      --apply only updates last_verified on PASS; no other state mutation.
+    required_helpers: []
+    required_tests: []
