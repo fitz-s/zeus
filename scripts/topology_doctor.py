@@ -1009,6 +1009,10 @@ def _check_docs_registry(topology: dict[str, Any]) -> list[TopologyIssue]:
     return _docs_checks().check_docs_registry(sys.modules[__name__], topology)
 
 
+def _check_expected_empty_zones(topology: dict[str, Any]) -> list[TopologyIssue]:
+    return _docs_checks().check_expected_empty_zones(sys.modules[__name__], topology)
+
+
 def _current_state_operation_paths(text: str, surface_prefix: str) -> set[str]:
     return _docs_checks().current_state_operation_paths(sys.modules[__name__], text, surface_prefix)
 

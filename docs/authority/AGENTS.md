@@ -42,6 +42,7 @@ rollback doctrine, or historical governance evidence.
 | `zeus_current_architecture.md` | Current architecture law — truth ownership, lifecycle semantics, risk behavior, zone boundaries |
 | `zeus_current_delivery.md` | Current delivery law — authority order, planning lock, packet doctrine, completion protocol |
 | `zeus_change_control_constitution.md` | Deep packet governance rules (Chinese language) |
+| `ARCHIVAL_RULES.md` | Active archival rules for workspace packets and operations hygiene |
 
 Historical architecture/design files live in `docs/reports/authority_history/`
 or the archive interface. They are evidence, not active law.

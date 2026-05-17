@@ -81,7 +81,10 @@ the semantic task, one help, one friction, and one next topology delta or
 Tracked packet evidence in this live router is limited to the current rows
 below. Closed packet evidence is archived under `docs/operations/archive/<YYYY>-Q<N>/` and
 indexed in `docs/operations/archive/<YYYY>-Q<N>/INDEX.md`; do not use archived packet folders as
-active workflow defaults. Active archival rules: `docs/operations/task_2026-05-15_runtime_improvement_engineering_package/04_workspace_hygiene/ARCHIVAL_RULES.md`.
+active workflow defaults. Active archival rules: `docs/authority/ARCHIVAL_RULES.md`.
+Note: ARCHIVAL_RULES.md now lives at `docs/authority/ARCHIVAL_RULES.md` (relocated from
+`docs/operations/task_2026-05-15_runtime_improvement_engineering_package/04_workspace_hygiene/`
+by W3 2026-05-17). A `.relocated` stub exists at the old path for reference.
 
 ### Attached Package Inputs
 
@@ -245,7 +248,7 @@ make a surface default-read unless `current_state.md` routes it.
 Archived packet evidence (physically moved to `docs/operations/archive/<YYYY>-Q<N>/`) is
 listed in `docs/operations/archive/<YYYY>-Q<N>/INDEX.md`; do not re-list those packets here.
 When a packet closes and is archived, create a stub at `docs/operations/<name>.archived`
-and add a row to the quarter INDEX. Active archival rules: see `docs/operations/task_2026-05-15_runtime_improvement_engineering_package/04_workspace_hygiene/ARCHIVAL_RULES.md`.
+and add a row to the quarter INDEX. Active archival rules: see `docs/authority/ARCHIVAL_RULES.md`.
 
 ## Rules
 

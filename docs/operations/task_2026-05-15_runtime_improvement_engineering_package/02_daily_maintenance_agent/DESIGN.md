@@ -210,7 +210,7 @@ command.
 The agent reads policy from:
 
 - `04_workspace_hygiene/PURGE_CATEGORIES.md` for purge candidates.
-- `04_workspace_hygiene/ARCHIVAL_RULES.md` for packet archival.
+- `ARCHIVAL_RULES.md` for packet archival.
 - `04_workspace_hygiene/LORE_EXTRACTION_PROTOCOL.md` for lore proposals
   (proposal-only; the agent never auto-writes lore cards).
 - `03_authority_drift_remediation/REMEDIATION_PLAN.md` for drift surfacing

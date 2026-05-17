@@ -2,7 +2,7 @@
 
 **DEPRECATED 2026-05-16.** Archive content moved to `docs/operations/archive/<YYYY>-Q<N>/`.
 See `docs/operations/archive/2026-Q2/INDEX.md` for the 2026-Q2 migration index.
-Active archival rules: `ARCHIVAL_RULES.md` (at `docs/operations/task_2026-05-15_runtime_improvement_engineering_package/04_workspace_hygiene/ARCHIVAL_RULES.md`).
+Active archival rules: `ARCHIVAL_RULES.md` (at `docs/authority/ARCHIVAL_RULES.md`).
 
 This file is retained to preserve back-references. Do not update it; it is historical only.
 

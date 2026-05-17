@@ -234,3 +234,34 @@ misreads:
     tests:
       - python3 scripts/topology_doctor.py --fatal-misreads --json
     task_classes: [authority_audit, maintenance_worker, docs_authority]
+
+  - id: source_family_false_equivalence
+    severity: critical
+    false_equivalence: "IFS_grid_id == ENS_grid_id OR settlement_source == day0_source OR settlement_source == hourly_source OR day0_source == hourly_source"
+    correction: >
+      FM-10: IFS (ECMWF deterministic) and ENS (ECMWF ensemble) grid identifiers
+      are NOT interchangeable. Settlement-window, day0 (same-day), and hourly
+      source identifiers are NOT interchangeable. Each family is a distinct type
+      in src/contracts/source_family.py. The assert_* guard functions raise
+      TypeError at the family boundary. Any code path that treats these as
+      equivalent will silently produce wrong weather source routing — the
+      canonical failure mode is using an ENS ensemble source identifier in a
+      function that expects an IFS deterministic source, producing no runtime
+      error but systematically wrong model output.
+
+      Canonical prevention: use IFSGridId, ENSGridId, SettlementSourceId,
+      Day0SourceId, HourlySourceId from src/contracts/source_family.py. Pass
+      values through assert_ifs_grid(), assert_ens_grid(), etc. at any boundary
+      where the family matters. Tests in tests/test_source_family_collision.py
+      prove the collision cases raise TypeError.
+    proof_files:
+      - src/contracts/source_family.py
+      - tests/test_source_family_collision.py
+    invalidation_condition: >
+      Only a redesign of src/contracts/source_family.py that replaces the typed
+      dataclass system with an equivalent or stronger runtime enforcement
+      mechanism may alter this entry. Removing the typed boundary without
+      replacement is not acceptable.
+    tests:
+      - python3 -m pytest tests/test_source_family_collision.py -p no:cov -q
+    task_classes: [source_routing, calibration, settlement_semantics, docs_taxonomy]
