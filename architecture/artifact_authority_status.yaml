@@ -28,6 +28,15 @@
 #   archival_ok: whether archival tooling may archive this artifact (default: false)
 
 schema_version: 1
+# Structured enum declaration — read by _artifact_status_values() in test_lifecycle_field_orthogonality.py.
+# Mirrors docs_registry.yaml's allowed_lifecycle_states pattern (robust to comment reformatting).
+allowed_statuses:
+- CURRENT_LOAD_BEARING
+- CURRENT_HISTORICAL
+- STALE_REWRITE_NEEDED
+- DEMOTE
+- QUARANTINE
+- ARCHIVED
 metadata:
   created: "2026-05-16"
   owner_packet: "doc-alignment-2026-05-16 WAVE 1"

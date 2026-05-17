@@ -13,13 +13,7 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
 
-import pytest
-
-# Import directly from scripts/ — tests run from repo root with scripts/ on sys.path via pytest.ini.
-try:
-    from scripts.topology_doctor_docs_checks import check_expected_empty_zones
-except ModuleNotFoundError:
-    from topology_doctor_docs_checks import check_expected_empty_zones
+from scripts.topology_doctor_docs_checks import check_expected_empty_zones
 
 
 def _make_api(root: Path, tracked_files: list[str]) -> Any:

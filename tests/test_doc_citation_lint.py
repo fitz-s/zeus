@@ -395,3 +395,58 @@ def test_build_retro_cite_marker_range_uses_start_line():
     with patch("doc_citation_lint.compute_sha8", return_value="12345678"):
         result = build_retro_cite_marker("docs/authority/AGENTS.md", "10-13", REPO_ROOT)
     assert result == "<!-- cite: docs/authority/AGENTS.md:10 sha=12345678 -->"
+
+
+# ---------------------------------------------------------------------------
+# Placement enforcement (D2 contract, C2 fix)
+# ---------------------------------------------------------------------------
+
+
+def test_placement_marker_not_on_own_line_is_flagged(tmp_path):
+    """A marker embedded in prose (not on its own line) is flagged as placement error.
+
+    D2 rule 1: marker must occupy its OWN line — no other non-whitespace content.
+    """
+    md = make_md_file(tmp_path, "inline_marker.md", """\
+        # Inline marker test
+
+        See the docs <!-- cite: scripts/doc_citation_lint.py:1 sha=abcd1234 --> for details.
+        This marker is not on its own line.
+    """)
+
+    with (
+        patch("doc_citation_lint.compute_sha8", return_value="abcd1234"),
+        patch("doc_citation_lint.count_lines", return_value=200),
+    ):
+        errors = lint_files([str(md)], REPO_ROOT)
+
+    placement_errors = [e for e in errors if e.kind == "placement"]
+    assert len(placement_errors) >= 1, (
+        f"Expected at least 1 placement error for inline marker, got errors: {errors}"
+    )
+    assert "own line" in placement_errors[0].detail
+
+
+def test_placement_marker_at_eof_no_claim_line_is_flagged(tmp_path):
+    """A marker followed only by blank lines (no claim line) is flagged as placement error.
+
+    D2 rule 2: next non-blank line after marker must exist (the cited claim).
+    """
+    md = make_md_file(tmp_path, "eof_marker.md", """\
+        # EOF marker test
+
+        <!-- cite: scripts/doc_citation_lint.py:1 sha=abcd1234 -->
+
+    """)
+
+    with (
+        patch("doc_citation_lint.compute_sha8", return_value="abcd1234"),
+        patch("doc_citation_lint.count_lines", return_value=200),
+    ):
+        errors = lint_files([str(md)], REPO_ROOT)
+
+    placement_errors = [e for e in errors if e.kind == "placement"]
+    assert len(placement_errors) >= 1, (
+        f"Expected at least 1 placement error for marker at EOF, got errors: {errors}"
+    )
+    assert "claim" in placement_errors[0].detail or "blank" in placement_errors[0].detail

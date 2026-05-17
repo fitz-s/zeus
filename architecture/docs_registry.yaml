@@ -7,8 +7,6 @@ metadata:
     '
 required_entry_fields:
 - path
-- topic_authority
-- superseded_chain
 - doc_class
 - default_read
 - direct_reference_allowed
@@ -26,6 +24,12 @@ required_entry_fields:
 - contains_volatile_metrics
 - current_tense_allowed
 - refresh_source
+# Optional fields: Phase-2 backfill to legacy_reference and authority entries deferred.
+# These are documented here so topology_doctor and schema consumers know they exist
+# but do NOT reject entries that omit them.
+optional_entry_fields:
+- topic_authority
+- superseded_chain
 allowed_doc_classes:
 - router
 - authority

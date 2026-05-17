@@ -74,7 +74,7 @@ class CitationError(NamedTuple):
     path: str
     line: int
     sha: str
-    kind: str  # "missing_file" | "stale_sha" | "line_out_of_range" | "malformed"
+    kind: str  # "missing_file" | "stale_sha" | "line_out_of_range" | "malformed" | "placement"
     detail: str
 
 
@@ -125,6 +125,65 @@ def count_lines(repo_root: Path, file_path: str) -> int | None:
     except subprocess.CalledProcessError:
         return None
     return blob.count(b"\n") + (1 if blob and not blob.endswith(b"\n") else 0)
+
+
+def check_marker_placement(file: Path, lines: list[str], marker_line_idx: int) -> CitationError | None:
+    """Check D2 placement contract for a marker at lines[marker_line_idx] (0-indexed).
+
+    Contract:
+      1. Marker must occupy its OWN line — no other non-whitespace content on the same line.
+      2. The next non-blank line after the marker must exist (i.e., the marker is not at EOF
+         with nothing following it), ensuring the marker binds to a claim line.
+
+    Returns CitationError with kind="placement" if either rule is violated, else None.
+    Note: the Citation object is not yet available when this is called; the caller
+    synthesises a minimal CitationError using the raw regex match fields.
+    """
+    raw_line = lines[marker_line_idx]
+    m = MARKER_RE.search(raw_line)
+    if m is None:
+        return None  # caller should not call this if no match
+
+    marker_line_1indexed = marker_line_idx + 1  # for display
+
+    # Rule 1: marker must be the sole non-whitespace content on its line.
+    # Strip the marker text itself and check what remains.
+    without_marker = raw_line[:m.start()] + raw_line[m.end():]
+    if without_marker.strip():
+        return CitationError(
+            file=file,
+            marker_line=marker_line_1indexed,
+            path=m.group("path"),
+            line=int(m.group("line")),
+            sha=m.group("sha"),
+            kind="placement",
+            detail=(
+                f"marker must occupy its own line (no other non-whitespace content); "
+                f"found extra content: {without_marker.strip()!r}"
+            ),
+        )
+
+    # Rule 2: there must be at least one non-blank line following the marker.
+    has_claim_line = False
+    for j in range(marker_line_idx + 1, len(lines)):
+        if lines[j].strip():
+            has_claim_line = True
+            break
+    if not has_claim_line:
+        return CitationError(
+            file=file,
+            marker_line=marker_line_1indexed,
+            path=m.group("path"),
+            line=int(m.group("line")),
+            sha=m.group("sha"),
+            kind="placement",
+            detail=(
+                "marker must be followed by at least one non-blank line (the cited claim); "
+                "marker is at end of file or followed only by blank lines"
+            ),
+        )
+
+    return None
 
 
 def enumerate_markers(file: Path) -> Iterator[Citation]:
@@ -253,14 +312,35 @@ def build_retro_cite_marker(path: str, line_spec: str, repo_root: Path) -> str |
 
 
 def lint_files(paths: list[str], repo_root: Path) -> list[CitationError]:
-    """Lint all .md files in paths. Return list of errors."""
+    """Lint all files in paths. Return list of errors.
+
+    Checks both sha/file validity (rules 2-4) and placement (rule 1: marker on own line,
+    next non-blank line is the cited claim).
+    """
     files = collect_files(paths, repo_root)
     errors: list[CitationError] = []
     for f in files:
-        for cite in enumerate_markers(f):
-            err = validate_citation(cite, repo_root)
-            if err:
-                errors.append(err)
+        file_lines = f.read_text(encoding="utf-8", errors="replace").splitlines()
+        for i, line in enumerate(file_lines):
+            if not MARKER_RE.search(line):
+                continue
+            # Placement check (D2 rule 1)
+            placement_err = check_marker_placement(f, file_lines, i)
+            if placement_err:
+                errors.append(placement_err)
+            # sha/file/line validation (D2 rules 2-4)
+            m = MARKER_RE.search(line)
+            if m:
+                cite = Citation(
+                    file=f,
+                    marker_line=i + 1,
+                    path=m.group("path"),
+                    line=int(m.group("line")),
+                    sha=m.group("sha"),
+                )
+                err = validate_citation(cite, repo_root)
+                if err:
+                    errors.append(err)
     return errors
 
 
@@ -279,6 +359,12 @@ def main(argv: list[str] | None = None) -> int:
         "--repo-root",
         default=None,
         help="Repo root directory (default: parent of scripts/)",
+    )
+    parser.add_argument(
+        "--strict",
+        action="store_true",
+        default=False,
+        help="Strict mode (currently identical to default; reserved for future tighter rules)",
     )
     args = parser.parse_args(argv)
 

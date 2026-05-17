@@ -27,7 +27,6 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-import pytest
 import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -47,24 +46,14 @@ def _load_yaml(path: Path) -> dict:
 
 
 def _artifact_status_values() -> set[str]:
-    """Read the status enum from artifact_authority_status.yaml header comment.
+    """Read the status enum from the structured allowed_statuses: key in artifact_authority_status.yaml.
 
-    The header comment at line 24 reads:
-      #   status: CURRENT_LOAD_BEARING | CURRENT_HISTORICAL | ...
-    We parse that line as the canonical enum declaration.
+    Reads the top-level allowed_statuses list, which mirrors docs_registry.yaml's
+    allowed_lifecycle_states pattern. Robust to comment reformatting.
     """
-    text = ARTIFACT_STATUS_YAML.read_text(encoding="utf-8")
-    for line in text.splitlines():
-        if "status:" in line and "|" in line and line.strip().startswith("#"):
-            # Extract the value part after "status:"
-            after_status = line.split("status:", 1)[1]
-            values = {v.strip() for v in after_status.split("|") if v.strip()}
-            if values:
-                return values
-    # Fallback: collect all unique status field values from data entries
     data = _load_yaml(ARTIFACT_STATUS_YAML)
-    artifacts = data.get("artifacts") or []
-    return {str(a["status"]) for a in artifacts if "status" in a}
+    statuses = data.get("allowed_statuses") or []
+    return {str(s) for s in statuses}
 
 
 def _lifecycle_state_values() -> set[str]:
@@ -188,26 +177,48 @@ class TestArchivedArtifactLifecycleImplication:
 
 class TestLoadBearingNotArchived:
     def test_load_bearing_verdict_implies_not_archived(self) -> None:
-        """(c) Artifacts with ARCHIVAL_RULES verdict LOAD_BEARING must not have status==ARCHIVED.
+        """(c) Cross-system invariant: archival_ok=false in artifact_authority_status implies
+        status != ARCHIVED, AND docs_registry must not classify such a path as historical.
 
-        maintenance_worker assigns LOAD_BEARING_DESPITE_AGE to packets that cannot
-        be archived. If such a packet's artifact_authority_status is ARCHIVED, the
-        two systems have diverged — a corrupted archival state.
+        ARCHIVAL_RULES.md defines the verdict enum (read via _archival_verdict_values) and
+        specifies that LOAD_BEARING_DESPITE_AGE verdicts cannot be archived. The proxy for
+        "this artifact has a LOAD_BEARING verdict" in static repo state is archival_ok=false
+        in artifact_authority_status.yaml — this is the authoritative machine-readable signal
+        (ARCHIVAL_RULES check #0 is explicit about this). Per-packet runtime verdicts from
+        maintenance_worker are not stored as static files; archival_ok is the committed signal.
+
+        Two cross-system checks:
+          1. artifact_authority_status: archival_ok=false AND status=ARCHIVED is contradictory
+             within the same system (the dead branch removed per Copilot Cop1 review).
+          2. Cross-registry: artifact with archival_ok=false must not appear in docs_registry
+             with lifecycle_state in {archived, historical} — those states imply the doc has
+             been retired, contradicting the load-bearing designation.
+
+        ARCHIVAL_RULES verdict enum is verified non-empty to confirm the spec file is intact.
         """
+        # Verify ARCHIVAL_RULES verdict enum is readable and non-empty (spec-integrity guard).
+        archival_verdicts = _archival_verdict_values()
+        assert archival_verdicts, (
+            "ARCHIVAL_RULES.md verdict enum must not be empty — spec file may be corrupted"
+        )
+        assert "LOAD_BEARING_DESPITE_AGE" in archival_verdicts, (
+            "ARCHIVAL_RULES.md must declare LOAD_BEARING_DESPITE_AGE verdict"
+        )
+
         artifact_data = _load_yaml(ARTIFACT_STATUS_YAML)
+        registry_data = _load_yaml(DOCS_REGISTRY_YAML)
 
-        # Build lookup: path -> status from artifact_authority_status
-        status_by_path: dict[str, str] = {}
-        for artifact in artifact_data.get("artifacts") or []:
-            path = str(artifact.get("path") or "")
-            status = str(artifact.get("status") or "")
+        # Build lookup: path -> lifecycle_state from docs_registry
+        lifecycle_by_path: dict[str, str] = {}
+        for entry in registry_data.get("entries") or []:
+            path = str(entry.get("path") or "")
+            state = str(entry.get("lifecycle_state") or "")
             if path:
-                status_by_path[path] = status
+                lifecycle_by_path[path] = state
 
-        # Extract LOAD_BEARING packets from artifact_authority_status archival_ok field.
-        # An artifact that must not be archived has archival_ok: false and status in
-        # LOAD_BEARING family (CURRENT_LOAD_BEARING, CURRENT_HISTORICAL).
-        LOAD_BEARING_STATUSES = {"CURRENT_LOAD_BEARING", "CURRENT_HISTORICAL"}
+        # States that imply retirement — incompatible with load-bearing designation.
+        RETIRED_LIFECYCLE_STATES = {"archived", "historical"}
+
         violations: list[str] = []
 
         for artifact in artifact_data.get("artifacts") or []:
@@ -215,28 +226,26 @@ class TestLoadBearingNotArchived:
             status = str(artifact.get("status") or "")
             archival_ok = artifact.get("archival_ok", False)
 
-            # A LOAD_BEARING artifact must not be marked ARCHIVED.
-            # archival_ok: false + status in LOAD_BEARING_STATUSES = load-bearing.
-            if status in LOAD_BEARING_STATUSES and not archival_ok:
-                # This is load-bearing: ensure it is not also marked ARCHIVED
-                # (a contradictory state that archival_check_0.py should prevent).
-                if status == "ARCHIVED":
-                    violations.append(
-                        f"{path}: status=ARCHIVED but archival_ok=false (contradictory)"
-                    )
-
-        # Also check: nothing with status==ARCHIVED has archival_ok: false
-        for artifact in artifact_data.get("artifacts") or []:
-            path = str(artifact.get("path") or "")
-            status = str(artifact.get("status") or "")
-            archival_ok = artifact.get("archival_ok", False)
+            # Check 1 (intra-system): ARCHIVED status requires archival_ok: true.
             if status == "ARCHIVED" and archival_ok is False:
                 violations.append(
                     f"{path}: status=ARCHIVED but archival_ok=false — "
-                    "ARCHIVED status requires archival_ok: true (LOAD_BEARING implies not ARCHIVED)"
+                    "ARCHIVED status requires archival_ok: true (load-bearing cannot be archived)"
                 )
+                continue
+
+            # Check 2 (cross-system): archival_ok=false means load-bearing;
+            # docs_registry must not classify this path as a retired state.
+            if archival_ok is False and path in lifecycle_by_path:
+                lifecycle = lifecycle_by_path[path]
+                if lifecycle in RETIRED_LIFECYCLE_STATES:
+                    violations.append(
+                        f"{path}: archival_ok=false (load-bearing per ARCHIVAL_RULES #0) "
+                        f"but docs_registry.lifecycle_state={lifecycle!r} "
+                        f"(must not be in {RETIRED_LIFECYCLE_STATES})"
+                    )
 
         assert not violations, (
-            "LIFECYCLE ORTHOGONALITY VIOLATION (c): LOAD_BEARING artifacts marked ARCHIVED:\n"
-            + "\n".join(violations)
+            "LIFECYCLE ORTHOGONALITY VIOLATION (c): load-bearing artifacts with contradictory "
+            "archival/retirement state:\n" + "\n".join(violations)
         )
