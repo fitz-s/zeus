@@ -48,6 +48,24 @@ _TERMINAL_LEGACY_POSITION_STATES = {
     "closed",
     "exited",
 }
+_OPEN_ENTRY_COMMAND_STATES = {"ACKED", "SUBMITTED"}
+_TERMINAL_ENTRY_ORDER_STATUSES = {
+    "filled",
+    "cancelled",
+    "canceled",
+    "expired",
+    "rejected",
+    "voided",
+}
+_TERMINAL_ENTRY_PHASES = {"settled", "voided", "admin_closed", "quarantined"}
+_TERMINAL_VENUE_ORDER_STATES = {
+    "MATCHED",
+    "FILLED",
+    "CANCELED",
+    "CANCELLED",
+    "EXPIRED",
+    "REJECTED",
+}
 
 
 def _enum_text(value, default: str) -> str:
@@ -61,6 +79,15 @@ def _round_money_or_none(value) -> float | None:
         return None
     try:
         return round(float(value), 2)
+    except (TypeError, ValueError):
+        return None
+
+
+def _float_or_none(value) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
     except (TypeError, ValueError):
         return None
 
@@ -138,6 +165,130 @@ def _table_exists(conn, schema: str, table: str) -> bool:
         return row is not None
     except Exception:
         return False
+
+
+def _query_current_open_entry_orders(conn) -> dict:
+    """Derived operator view of currently open entry orders in DB truth."""
+
+    empty = {
+        "status": "skipped_no_connection",
+        "authority": "derived_operator_visibility",
+        "source": "venue_commands+position_current+venue_order_facts",
+        "count": 0,
+        "pending_entry_count": 0,
+        "by_strategy": {},
+        "orders": [],
+    }
+    if conn is None:
+        return empty
+    if not _table_exists(conn, "main", "venue_commands"):
+        return {**empty, "status": "missing_venue_commands"}
+
+    has_position_current = _table_exists(conn, "main", "position_current")
+    has_order_facts = _table_exists(conn, "main", "venue_order_facts")
+    pc_select = (
+        "pc.position_id, pc.phase, pc.order_status, pc.city, pc.target_date, pc.strategy_key"
+        if has_position_current
+        else (
+            "vc.position_id, NULL AS phase, NULL AS order_status, NULL AS city, "
+            "NULL AS target_date, NULL AS strategy_key"
+        )
+    )
+    pc_join = "LEFT JOIN position_current pc ON pc.position_id = vc.position_id" if has_position_current else ""
+    if has_order_facts:
+        fact_cte = """
+            WITH latest_order_facts AS (
+                SELECT venue_order_id, command_id, state, remaining_size, matched_size, observed_at,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY venue_order_id
+                           ORDER BY COALESCE(observed_at, '') DESC,
+                                    COALESCE(ingested_at, '') DESC,
+                                    COALESCE(local_sequence, 0) DESC
+                       ) AS rn
+                  FROM venue_order_facts
+            )
+        """
+        fact_select = (
+            "lof.state AS venue_state, lof.remaining_size, lof.matched_size, "
+            "lof.observed_at AS venue_observed_at"
+        )
+        fact_join = (
+            "LEFT JOIN latest_order_facts lof "
+            "ON lof.venue_order_id = vc.venue_order_id AND lof.rn = 1"
+        )
+    else:
+        fact_cte = ""
+        fact_select = (
+            "NULL AS venue_state, NULL AS remaining_size, NULL AS matched_size, "
+            "NULL AS venue_observed_at"
+        )
+        fact_join = ""
+
+    rows = conn.execute(
+        f"""
+        {fact_cte}
+        SELECT vc.command_id, vc.venue_order_id, vc.state AS command_state,
+               vc.side, vc.size AS submitted_size, vc.price AS submitted_price,
+               vc.updated_at, {pc_select}, {fact_select}
+          FROM venue_commands vc
+          {pc_join}
+          {fact_join}
+         WHERE upper(COALESCE(vc.intent_kind, '')) = 'ENTRY'
+           AND vc.venue_order_id IS NOT NULL
+           AND trim(vc.venue_order_id) != ''
+           AND upper(COALESCE(vc.state, '')) IN ({",".join("?" for _ in _OPEN_ENTRY_COMMAND_STATES)})
+         ORDER BY vc.updated_at DESC, vc.created_at DESC, vc.command_id
+        """,
+        tuple(sorted(_OPEN_ENTRY_COMMAND_STATES)),
+    ).fetchall()
+
+    orders: list[dict] = []
+    by_strategy: dict[str, int] = {}
+    pending_entry_count = 0
+    for row in rows:
+        phase = str(row["phase"] or "")
+        order_status = str(row["order_status"] or "")
+        venue_state = str(row["venue_state"] or "")
+        if phase.lower() in _TERMINAL_ENTRY_PHASES:
+            continue
+        if order_status.lower() in _TERMINAL_ENTRY_ORDER_STATUSES:
+            continue
+        if venue_state.upper() in _TERMINAL_VENUE_ORDER_STATES:
+            continue
+        strategy_key = str(row["strategy_key"] or "unclassified")
+        by_strategy[strategy_key] = by_strategy.get(strategy_key, 0) + 1
+        if phase == "pending_entry":
+            pending_entry_count += 1
+        orders.append(
+            {
+                "command_id": str(row["command_id"] or ""),
+                "venue_order_id": str(row["venue_order_id"] or ""),
+                "position_id": str(row["position_id"] or ""),
+                "city": str(row["city"] or ""),
+                "target_date": str(row["target_date"] or ""),
+                "strategy_key": strategy_key,
+                "phase": phase,
+                "order_status": order_status,
+                "command_state": str(row["command_state"] or ""),
+                "venue_state": venue_state or "UNKNOWN",
+                "side": str(row["side"] or ""),
+                "submitted_price": _float_or_none(row["submitted_price"]),
+                "submitted_size": _float_or_none(row["submitted_size"]),
+                "remaining_size": _float_or_none(row["remaining_size"]),
+                "matched_size": _float_or_none(row["matched_size"]),
+                "updated_at": str(row["updated_at"] or ""),
+                "venue_observed_at": str(row["venue_observed_at"] or ""),
+            }
+        )
+
+    return {
+        **empty,
+        "status": "ok",
+        "count": len(orders),
+        "pending_entry_count": pending_entry_count,
+        "by_strategy": by_strategy,
+        "orders": orders,
+    }
 
 
 def _bounded_table_row_count(conn, schema: str, table: str) -> int:
@@ -680,10 +831,12 @@ def write_status(cycle_summary: dict = None) -> None:
     if "review_strategy_gates" in recommended_controls and recommended_but_not_gated:
         recommended_controls_not_applied.append("review_strategy_gates")
     conn = None
+    current_open_entry_orders = _query_current_open_entry_orders(None)
     try:
         conn = get_trade_connection_with_world()
         position_view = query_position_current_status_view(conn)
         strategy_health = query_strategy_health_snapshot(conn, now=generated_at)
+        current_open_entry_orders = _query_current_open_entry_orders(conn)
     except Exception:
         position_view = {
             "status": "query_error",
@@ -701,6 +854,10 @@ def write_status(cycle_summary: dict = None) -> None:
             "status": "query_error",
             "by_strategy": {},
             "stale_strategy_keys": [],
+        }
+        current_open_entry_orders = {
+            **current_open_entry_orders,
+            "status": "query_error",
         }
 
     # S5 R11 P10B: v2 row-count sensor
@@ -918,10 +1075,14 @@ def write_status(cycle_summary: dict = None) -> None:
         current_regime_started_at = str(
             ((risk_details.get("strategy_tracker_accounting") or {}).get("current_regime_started_at")) or ""
         )
-        status["execution"] = query_execution_event_summary(
+        execution_summary = query_execution_event_summary(
             conn,
             not_before=current_regime_started_at or None,
         )
+        if not isinstance(execution_summary, dict):
+            execution_summary = {}
+        execution_summary["current_open_entry_orders"] = current_open_entry_orders
+        status["execution"] = execution_summary
         status["learning"] = query_learning_surface_summary(
             conn,
             not_before=current_regime_started_at or None,
@@ -941,7 +1102,10 @@ def write_status(cycle_summary: dict = None) -> None:
             "recent_stage_counts": stage_counts,
         }
     except Exception:
-        status["execution"] = {"error": "execution_summary_unavailable"}
+        status["execution"] = {
+            "error": "execution_summary_unavailable",
+            "current_open_entry_orders": current_open_entry_orders,
+        }
         status["learning"] = {"error": "learning_summary_unavailable"}
         status["calibration_serving"] = {
             "status": "query_error",

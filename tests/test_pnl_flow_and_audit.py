@@ -1,5 +1,5 @@
 # Created: 2026-04-28
-# Last reused/audited: 2026-05-07
+# Last reused/audited: 2026-05-17
 # Authority basis: docs/operations/task_2026-04-28_contamination_remediation/plan.md; task_2026-04-29 Phase 1A/1B evaluator gates; docs/operations/task_2026-05-07_object_invariance_wave24/PLAN.md.
 # Lifecycle: created=2026-04-28; last_reviewed=2026-05-07; last_reused=2026-05-07
 # Purpose: Cross-module P&L flow, CI-threshold, status-summary bankroll, and hardcoded-audit tests.
@@ -330,6 +330,7 @@ def _insert_position_current_row(
     position_id: str,
     strategy_key: str,
     phase: str = "active",
+    target_date: str = "2026-04-01",
     size_usd: float = 0.0,
     shares: float = 0.0,
     cost_basis_usd: float = 0.0,
@@ -340,6 +341,8 @@ def _insert_position_current_row(
     bin_label: str = "39-40°F",
     chain_state: str = "unknown",
     decision_snapshot_id: str = "",
+    order_id: str = "",
+    order_status: str = "",
 ) -> None:
     conn.execute(
         """
@@ -349,13 +352,14 @@ def _insert_position_current_row(
             last_monitor_prob, last_monitor_edge, last_monitor_market_price,
             decision_snapshot_id, entry_method, strategy_key, edge_source, discovery_mode,
             chain_state, order_id, order_status, updated_at, temperature_metric
-        ) VALUES (?, ?, ?, 'm-test', ?, 'NYC', '2026-04-01', ?, ?, 'F', ?, ?, ?, ?, NULL, NULL, NULL, ?, ?, '', ?, '', '', ?, '', '', ?, 'high')
+        ) VALUES (?, ?, ?, 'm-test', ?, 'NYC', ?, ?, ?, 'F', ?, ?, ?, ?, NULL, NULL, NULL, ?, ?, '', ?, '', '', ?, ?, ?, ?, 'high')
         """,
         (
             position_id,
             phase,
             position_id,
             city,
+            target_date,
             bin_label,
             direction,
             size_usd,
@@ -366,6 +370,8 @@ def _insert_position_current_row(
             decision_snapshot_id,
             strategy_key,
             chain_state,
+            order_id,
+            order_status,
             datetime.now(timezone.utc).isoformat(),
         ),
     )
@@ -1131,6 +1137,113 @@ def test_inv_status_strategy_merges_learning_surface(monkeypatch, tmp_path):
     assert status["strategy"]["opening_inertia"]["learning_settlement_pnl"] == 8.0
     assert status["strategy"]["opening_inertia"]["gated"] is True
     assert status["strategy"]["opening_inertia"]["no_trade_stage_counts"]["MARKET_FILTER"] == 2
+
+
+def test_status_summary_separates_current_open_entry_orders_from_cycle_submission_counts(monkeypatch, tmp_path):
+    """RELATIONSHIP: current venue-command order truth is not per-cycle submit telemetry."""
+
+    status_path = tmp_path / "status_summary.json"
+    db_path = tmp_path / "zeus.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+    now = datetime.now(timezone.utc).isoformat()
+    _insert_position_current_row(
+        conn,
+        position_id="pos-open-1",
+        strategy_key="opening_inertia",
+        phase="pending_entry",
+        target_date="2026-05-19",
+        city="Shenzhen",
+        bin_label="29C",
+        size_usd=2.02,
+        order_id="ord-live-1",
+        order_status="pending",
+    )
+    conn.execute(
+        """
+        INSERT INTO venue_commands (
+            command_id, snapshot_id, envelope_id, position_id, decision_id,
+            idempotency_key, intent_kind, market_id, token_id, side, size, price,
+            venue_order_id, state, last_event_id, created_at, updated_at,
+            review_required_reason
+        ) VALUES (?, ?, ?, ?, ?, ?, 'ENTRY', 'm-test', 'tok-yes', 'BUY', 7.21, 0.28,
+                  ?, 'ACKED', NULL, ?, ?, NULL)
+        """,
+        (
+            "cmd-open-1",
+            "snap-open-1",
+            "env-open-1",
+            "pos-open-1",
+            "decision-open-1",
+            "idem-open-1",
+            "ord-live-1",
+            now,
+            now,
+        ),
+    )
+    conn.execute(
+        """
+        INSERT INTO venue_order_facts (
+            venue_order_id, command_id, state, remaining_size, matched_size,
+            source, observed_at, venue_timestamp, ingested_at, local_sequence,
+            raw_payload_hash, raw_payload_json
+        ) VALUES (?, ?, 'LIVE', '7.21', '0', 'DATA_API', ?, ?, ?, 1, ?, '{}')
+        """,
+        ("ord-live-1", "cmd-open-1", now, now, now, "h" * 64),
+    )
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr(status_summary_module, "STATUS_PATH", status_path)
+    monkeypatch.setattr(status_summary_module, "_get_risk_level", lambda: "GREEN")
+    monkeypatch.setattr(status_summary_module, "_get_risk_details", lambda: {})
+    monkeypatch.setattr(status_summary_module, "get_trade_connection_with_world", lambda: get_connection(db_path))
+    monkeypatch.setattr(status_summary_module, "query_execution_event_summary", lambda conn, not_before=None: {"overall": {}})
+    monkeypatch.setattr(status_summary_module, "query_learning_surface_summary", lambda conn, not_before=None: {"by_strategy": {}})
+    monkeypatch.setattr(status_summary_module, "query_no_trade_cases", lambda conn, hours=24: [])
+    monkeypatch.setattr(status_summary_module, "build_calibration_serving_status", lambda conn: {"status": "fresh"})
+    monkeypatch.setattr(status_summary_module, "query_lifecycle_funnel_report", lambda conn, not_before=None: {"status": "fresh"})
+    monkeypatch.setattr(status_summary_module, "build_price_evidence_report", lambda conn: {"status": "fresh"})
+    monkeypatch.setattr(status_summary_module, "is_entries_paused", lambda: False)
+    monkeypatch.setattr(status_summary_module, "get_edge_threshold_multiplier", lambda: 1.0)
+    monkeypatch.setattr(status_summary_module, "strategy_gates", lambda: {})
+
+    status_summary_module.write_status(
+        {
+            "mode": "opening_hunt",
+            "entry_orders_submitted": 0,
+            "entry_orders_resting": 0,
+        }
+    )
+    status = json.loads(status_path.read_text())
+
+    assert status["cycle"]["entry_orders_resting"] == 0
+    open_orders = status["execution"]["current_open_entry_orders"]
+    assert open_orders["status"] == "ok"
+    assert open_orders["count"] == 1
+    assert open_orders["pending_entry_count"] == 1
+    assert open_orders["by_strategy"] == {"opening_inertia": 1}
+    assert open_orders["orders"] == [
+        {
+            "command_id": "cmd-open-1",
+            "venue_order_id": "ord-live-1",
+            "position_id": "pos-open-1",
+            "city": "Shenzhen",
+            "target_date": "2026-05-19",
+            "strategy_key": "opening_inertia",
+            "phase": "pending_entry",
+            "order_status": "pending",
+            "command_state": "ACKED",
+            "venue_state": "LIVE",
+            "side": "BUY",
+            "submitted_price": 0.28,
+            "submitted_size": 7.21,
+            "remaining_size": 7.21,
+            "matched_size": 0.0,
+            "updated_at": now,
+            "venue_observed_at": now,
+        }
+    ]
 
 
 def test_inv_status_normalizes_enum_backed_runtime_keys(monkeypatch, tmp_path):
