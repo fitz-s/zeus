@@ -95,18 +95,37 @@ def _emit_signal(
 # ---------------------------------------------------------------------------
 
 
+# Events whose Claude Code response schema accepts `hookSpecificOutput`. Other
+# events (WorktreeCreate, WorktreeRemove, Stop, SessionStart, ...) must use
+# `systemMessage` instead — emitting `hookSpecificOutput.hookEventName` for
+# those events fails schema validation and HARD-blocks the parent tool
+# (e.g. EnterWorktree), forcing the agent to bypass into the unsafe
+# primary-worktree workflow (see 2026-05-17 incident).
+_HOOK_SPECIFIC_OUTPUT_EVENTS = frozenset({
+    "PreToolUse", "UserPromptSubmit", "PostToolUse", "PostToolBatch",
+})
+
+
 def _emit_advisory(hook_id: str, event: str, additional_context: str) -> int:
-    """Emit hookSpecificOutput.additionalContext (no permissionDecision)."""
-    print(
-        json.dumps(
-            {
-                "hookSpecificOutput": {
-                    "hookEventName": event,
-                    "additionalContext": additional_context,
-                }
+    """Emit additionalContext using the right wrapper for the event type.
+
+    For PreToolUse/UserPromptSubmit/PostToolUse/PostToolBatch, use
+    `hookSpecificOutput.additionalContext` (the documented surface).
+
+    For everything else (WorktreeCreate, WorktreeRemove, Stop, SessionStart,
+    ...), use the universal `systemMessage` field — Claude Code rejects
+    hookSpecificOutput with a non-allowlisted hookEventName.
+    """
+    if event in _HOOK_SPECIFIC_OUTPUT_EVENTS:
+        out = {
+            "hookSpecificOutput": {
+                "hookEventName": event,
+                "additionalContext": additional_context,
             }
-        )
-    )
+        }
+    else:
+        out = {"systemMessage": additional_context}
+    print(json.dumps(out))
     return 0
 
 
