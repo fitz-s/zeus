@@ -220,6 +220,7 @@ _WLA_SQLITE_CONNECT_ALLOWLIST = frozenset({
     "scripts/learning_loop_observation_weekly.py",  # read_only_ro_uri
     "scripts/check_schema_version.py",               # in_memory_only (":memory:" only — schema drift CI gate)
     "scripts/check_data_pipeline_live_e2e.py",      # read_only_ro_uri (live E2E verifier opens runtime DBs with mode=ro only)
+    "scripts/check_forecast_live_ready.py",         # read_only_ro_uri (forecast-live authority-chain verifier; mode=ro + query_only only)
     "scripts/check_live_order_e2e.py",              # read_only_ro_uri (live order verifier opens runtime DBs with mode=ro + query_only)
     "scripts/produce_activation_evidence.py",       # in_memory_only (":memory:" only)
     "scripts/replay_correctness_gate.py",           # read_only (SELECT-only)
