@@ -1,5 +1,5 @@
 # Created: 2026-04-26
-# Last reused/audited: 2026-05-15
+# Last reused/audited: 2026-05-17
 # Authority basis: docs/operations/task_2026-05-08_object_invariance_wave27/PLAN.md
 #                  + docs/operations/task_2026-05-15_live_order_e2e_goal/LIVE_ORDER_E2E_GOAL_PLAN.md
 """Durable command journal — append-only repo API for venue_commands / venue_command_events.
@@ -11,6 +11,7 @@ Public API:
   find_unresolved_commands(conn) -> Iterable[dict]
   find_command_by_idempotency_key(conn, key) -> Optional[dict]
   find_unknown_command_by_economic_intent(conn, *, ...) -> Optional[dict]
+  resolve_position_lot_id_for_command(conn, command) -> Optional[int]
   list_events(conn, command_id) -> list[dict]
 
 Only this module may INSERT/UPDATE/DELETE on venue_command_events (NC-18).
@@ -377,6 +378,103 @@ def _assert_position_lot_trade_fact_authority(
             f"{lot_state} entry_price_avg must equal source trade fact fill_price"
         )
     return command_id, fact_id
+
+
+def resolve_position_lot_id_for_command(
+    conn: sqlite3.Connection,
+    command: Mapping[str, Any],
+) -> int | None:
+    """Resolve the integer lot identity for commands keyed by runtime ids.
+
+    Live venue commands store a runtime position id for operator correlation,
+    while the current ``position_lots`` schema still keys exposure by the
+    integer ``trade_decisions.trade_id``. Prefer the explicit
+    ``runtime_trade_id`` bridge; accept numeric compatibility fields only when
+    they point at a compatible ``trade_decisions`` row.
+    """
+
+    for key in ("position_id", "decision_id"):
+        parsed = _trade_decision_id_for_runtime_id(conn, command.get(key))
+        if parsed is not None:
+            return parsed
+
+    position_id = command.get("position_id")
+    parsed_position_id = _parse_positive_int(position_id)
+    if parsed_position_id is not None and _trade_decision_id_is_compatible(
+        conn,
+        parsed_position_id,
+        runtime_trade_id=position_id,
+    ):
+        return parsed_position_id
+
+    decision_id = command.get("decision_id")
+    parsed_decision_id = _parse_positive_int(decision_id)
+    if parsed_decision_id is not None and _trade_decision_id_is_compatible(
+        conn,
+        parsed_decision_id,
+        runtime_trade_id=position_id,
+    ):
+        return parsed_decision_id
+    return None
+
+
+def _parse_positive_int(value: Any) -> int | None:
+    try:
+        parsed = int(str(value))
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _trade_decision_id_for_runtime_id(
+    conn: sqlite3.Connection,
+    runtime_trade_id: Any,
+) -> int | None:
+    runtime_id = str(runtime_trade_id or "").strip()
+    if not runtime_id:
+        return None
+    try:
+        row = conn.execute(
+            """
+            SELECT trade_id
+              FROM trade_decisions
+             WHERE runtime_trade_id = ?
+             ORDER BY trade_id DESC
+             LIMIT 1
+            """,
+            (runtime_id,),
+        ).fetchone()
+    except Exception:
+        return None
+    if row is None:
+        return None
+    return _parse_positive_int(row["trade_id"] if hasattr(row, "keys") else row[0])
+
+
+def _trade_decision_id_is_compatible(
+    conn: sqlite3.Connection,
+    trade_decision_id: int,
+    *,
+    runtime_trade_id: Any,
+) -> bool:
+    try:
+        row = conn.execute(
+            """
+            SELECT runtime_trade_id
+              FROM trade_decisions
+             WHERE trade_id = ?
+             LIMIT 1
+            """,
+            (int(trade_decision_id),),
+        ).fetchone()
+    except Exception:
+        return False
+    if row is None:
+        return False
+    row_runtime = row["runtime_trade_id"] if hasattr(row, "keys") else row[0]
+    row_runtime_s = str(row_runtime or "").strip()
+    expected_runtime_s = str(runtime_trade_id or "").strip()
+    return not row_runtime_s or not expected_runtime_s or row_runtime_s == expected_runtime_s
 
 
 def _payload_default(value):

@@ -771,11 +771,18 @@ def _ensure_entry_fill_position_event(
         if command_event == "PARTIAL_FILL_OBSERVED" or command_state == "PARTIAL"
         else "filled"
     )
-    shares = current.get("shares") if current.get("shares") not in (None, "") else filled_size
-    entry_price = current.get("entry_price") if current.get("entry_price") not in (None, "") else fill_price
-    cost_basis = current.get("cost_basis_usd")
-    if cost_basis in (None, ""):
-        cost_basis = str(_decimal(filled_size) * _decimal(fill_price))
+    fill_economics = _entry_fill_economics_for_command(
+        conn,
+        command_id=str(command.get("command_id") or ""),
+        fallback_filled_size=filled_size,
+        fallback_fill_price=fill_price,
+    )
+    if fill_economics is None:
+        return
+    shares_dec, entry_price_dec, cost_basis_dec = fill_economics
+    shares = _decimal_text(shares_dec)
+    entry_price = _decimal_text(entry_price_dec)
+    cost_basis = _decimal_text(cost_basis_dec)
     occurred_at = observed_at.isoformat()
     position = SimpleNamespace(
         **{
@@ -811,9 +818,20 @@ def _ensure_entry_fill_position_event(
     ).fetchone()
     if existing is not None:
         from src.engine.lifecycle_events import build_position_current_projection
-        from src.state.projection import upsert_position_current
 
-        upsert_position_current(conn, build_position_current_projection(position))
+        projection = build_position_current_projection(position)
+        _apply_entry_fill_projection_and_execution_fact(
+            conn,
+            events=[],
+            projection=projection,
+            position=position,
+            command=command,
+            observed_at=observed_at,
+            order_status=order_status,
+            shares=shares_dec,
+            entry_price=entry_price_dec,
+            upsert_only=True,
+        )
         return
     seq_row = conn.execute(
         "SELECT COALESCE(MAX(sequence_no), 0) FROM position_events WHERE position_id = ?",
@@ -822,14 +840,199 @@ def _ensure_entry_fill_position_event(
     sequence_no = int((seq_row[0] if seq_row else 0) or 0) + 1
 
     from src.engine.lifecycle_events import build_entry_fill_only_canonical_write
-    from src.state.db import append_many_and_project
 
     events, projection = build_entry_fill_only_canonical_write(
         position,
         sequence_no=sequence_no,
         source_module="src.execution.exchange_reconcile",
     )
-    append_many_and_project(conn, events, projection)
+    _apply_entry_fill_projection_and_execution_fact(
+        conn,
+        events=events,
+        projection=projection,
+        position=position,
+        command=command,
+        observed_at=observed_at,
+        order_status=order_status,
+        shares=shares_dec,
+        entry_price=entry_price_dec,
+        upsert_only=False,
+    )
+
+
+def _entry_fill_economics_for_command(
+    conn: sqlite3.Connection,
+    *,
+    command_id: str,
+    fallback_filled_size: str,
+    fallback_fill_price: str,
+) -> tuple[Decimal, Decimal, Decimal] | None:
+    """Aggregate latest authoritative trade facts for an entry command."""
+
+    rows = conn.execute(
+        """
+        SELECT tf.state, tf.filled_size, tf.fill_price
+          FROM venue_trade_facts tf
+          JOIN (
+                SELECT trade_id, MAX(local_sequence) AS local_sequence
+                  FROM venue_trade_facts
+                 WHERE command_id = ?
+                 GROUP BY trade_id
+               ) latest
+            ON latest.trade_id = tf.trade_id
+           AND latest.local_sequence = tf.local_sequence
+         WHERE tf.command_id = ?
+           AND tf.state IN ('MATCHED', 'MINED', 'CONFIRMED')
+        """,
+        (command_id, command_id),
+    ).fetchall()
+    shares = Decimal("0")
+    cost_basis = Decimal("0")
+    for row in rows:
+        filled = _positive_decimal_or_none(row["filled_size"])
+        price = _positive_decimal_or_none(row["fill_price"])
+        if filled is None or price is None:
+            continue
+        shares += filled
+        cost_basis += filled * price
+    if shares > Decimal("0") and cost_basis > Decimal("0"):
+        return shares, cost_basis / shares, cost_basis
+
+    fallback_shares = _positive_decimal_or_none(fallback_filled_size)
+    fallback_price = _positive_decimal_or_none(fallback_fill_price)
+    if fallback_shares is None or fallback_price is None:
+        return None
+    return fallback_shares, fallback_price, fallback_shares * fallback_price
+
+
+def _apply_entry_fill_projection_and_execution_fact(
+    conn: sqlite3.Connection,
+    *,
+    events: list[dict],
+    projection: dict,
+    position: SimpleNamespace,
+    command: Mapping[str, Any],
+    observed_at: datetime,
+    order_status: str,
+    shares: Decimal,
+    entry_price: Decimal,
+    upsert_only: bool,
+) -> None:
+    from src.state.db import append_many_and_project, log_execution_fact
+    from src.state.projection import upsert_position_current
+
+    sp_name = f"sp_entry_fill_{uuid.uuid4().hex[:12]}"
+    conn.execute(f"SAVEPOINT {sp_name}")
+    try:
+        if upsert_only:
+            upsert_position_current(conn, projection)
+        else:
+            append_many_and_project(conn, events, projection)
+        position_id = str(getattr(position, "trade_id", "") or "")
+        submitted_price = _float_or_none(command.get("price"))
+        fill_price = _float_or_none(entry_price)
+        filled_shares = _float_or_none(shares)
+        terminal_status = "filled" if order_status == "filled" else "partial"
+        venue_status = "FILLED" if terminal_status == "filled" else "PARTIAL"
+        log_execution_fact(
+            conn,
+            intent_id=f"{position_id}:entry",
+            position_id=position_id,
+            decision_id=str(command.get("decision_id") or "") or None,
+            order_role="entry",
+            strategy_key=str(getattr(position, "strategy_key", "") or "") or None,
+            posted_at=(
+                str(getattr(position, "order_posted_at", "") or "")
+                or str(command.get("created_at") or "")
+                or None
+            ),
+            filled_at=observed_at.isoformat(),
+            submitted_price=submitted_price,
+            fill_price=fill_price,
+            shares=filled_shares,
+            venue_status=venue_status,
+            terminal_exec_status=terminal_status,
+        )
+        _append_entry_position_lots_for_command(conn, command=command, observed_at=observed_at)
+        conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+    except Exception:
+        conn.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
+        conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+        raise
+
+
+def _append_entry_position_lots_for_command(
+    conn: sqlite3.Connection,
+    *,
+    command: Mapping[str, Any],
+    observed_at: datetime,
+) -> None:
+    if str(command.get("intent_kind") or "").upper() != "ENTRY":
+        return
+    if str(command.get("side") or "").upper() != "BUY":
+        return
+    from src.state.venue_command_repo import append_position_lot, resolve_position_lot_id_for_command
+
+    position_lot_id = resolve_position_lot_id_for_command(conn, command)
+    if position_lot_id is None:
+        return
+    rows = conn.execute(
+        """
+        SELECT tf.*
+          FROM venue_trade_facts tf
+          JOIN (
+                SELECT trade_id, MAX(local_sequence) AS local_sequence
+                  FROM venue_trade_facts
+                 WHERE command_id = ?
+                 GROUP BY trade_id
+               ) latest
+            ON latest.trade_id = tf.trade_id
+           AND latest.local_sequence = tf.local_sequence
+         WHERE tf.command_id = ?
+           AND tf.state IN ('MATCHED', 'MINED', 'CONFIRMED')
+         ORDER BY tf.observed_at, tf.trade_fact_id
+        """,
+        (str(command.get("command_id") or ""), str(command.get("command_id") or "")),
+    ).fetchall()
+    for row in rows:
+        if _positive_decimal_or_none(row["filled_size"]) is None:
+            continue
+        if _positive_decimal_or_none(row["fill_price"]) is None:
+            continue
+        existing = conn.execute(
+            """
+            SELECT 1
+              FROM position_lots
+             WHERE source_trade_fact_id = ?
+             LIMIT 1
+            """,
+            (int(row["trade_fact_id"]),),
+        ).fetchone()
+        if existing is not None:
+            continue
+        state = "CONFIRMED_EXPOSURE" if str(row["state"]) == "CONFIRMED" else "OPTIMISTIC_EXPOSURE"
+        append_position_lot(
+            conn,
+            position_id=position_lot_id,
+            state=state,
+            shares=str(row["filled_size"]),
+            entry_price_avg=str(row["fill_price"]),
+            source_command_id=str(command["command_id"]),
+            source_trade_fact_id=int(row["trade_fact_id"]),
+            captured_at=row["observed_at"] or observed_at,
+            state_changed_at=row["observed_at"] or observed_at,
+            source=str(row["source"] or "REST"),
+            observed_at=row["observed_at"] or observed_at,
+            venue_timestamp=row["venue_timestamp"],
+            raw_payload_json={
+                "source": "exchange_reconcile_entry_fill_materialization",
+                "command_id": str(command["command_id"]),
+                "trade_fact_id": int(row["trade_fact_id"]),
+                "trade_id": str(row["trade_id"]),
+                "market_id": str(command.get("market_id") or ""),
+                "token_id": str(command.get("token_id") or ""),
+            },
+        )
 
 
 def _local_command_for_trade(
@@ -907,6 +1110,32 @@ def _positive_decimal(value: Any) -> bool:
     except (InvalidOperation, ValueError):
         return False
     return decimal.is_finite() and decimal > Decimal("0")
+
+
+def _positive_decimal_or_none(value: Any) -> Decimal | None:
+    if value is None or value == "":
+        return None
+    try:
+        decimal = _decimal(value)
+    except (InvalidOperation, ValueError):
+        return None
+    if not decimal.is_finite() or decimal <= Decimal("0"):
+        return None
+    return decimal
+
+
+def _decimal_text(value: Decimal) -> str:
+    return str(value)
+
+
+def _float_or_none(value: Any) -> float | None:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    if numeric != numeric or numeric in (float("inf"), float("-inf")):
+        return None
+    return numeric
 
 
 def _latest_trade_fact_for_trade_id(conn: sqlite3.Connection, trade_id: str) -> dict[str, Any] | None:

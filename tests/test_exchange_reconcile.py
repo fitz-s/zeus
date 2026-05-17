@@ -1,6 +1,6 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-05-16
-# Lifecycle: created=2026-04-27; last_reviewed=2026-05-07; last_reused=2026-05-16
+# Last reused/audited: 2026-05-17
+# Lifecycle: created=2026-04-27; last_reviewed=2026-05-07; last_reused=2026-05-17
 # Authority basis: docs/operations/task_2026-05-08_object_invariance_remaining_mainline/PLAN.md
 # Purpose: R3 M5 exchange reconciliation sweep antibodies.
 # Reuse: Run when exchange_reconcile, venue facts, findings, heartbeat/cutover reconciliation, or operator finding resolution changes.
@@ -382,6 +382,36 @@ def append_trade_fact(
     )
 
 
+def seed_trade_decision_runtime_alias(c, *, trade_id=7, runtime_trade_id="pos-m5") -> None:
+    c.execute(
+        """
+        INSERT INTO trade_decisions (
+            trade_id, market_id, bin_label, direction, size_usd, price,
+            timestamp, p_raw, p_posterior, edge, ci_lower, ci_upper,
+            kelly_fraction, status, runtime_trade_id
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            trade_id,
+            "condition-m5",
+            "test-bin",
+            "buy_yes",
+            10.0,
+            0.50,
+            NOW.isoformat(),
+            0.6,
+            0.6,
+            0.1,
+            0.05,
+            0.15,
+            0.0,
+            "pending",
+            runtime_trade_id,
+        ),
+    )
+
+
 def findings(c):
     return c.execute(
         "SELECT * FROM exchange_reconcile_findings ORDER BY recorded_at, finding_id"
@@ -552,6 +582,7 @@ def test_maker_order_trade_links_to_local_command_and_uses_maker_fill_economics(
 
     seed_command(conn, size=5.17, price=0.37)
     seed_position_baseline(conn)
+    seed_trade_decision_runtime_alias(conn)
     adapter = FakeM5Adapter(
         positions=[position(token_id=YES_TOKEN, size="1.5873")],
         trades=[
@@ -605,9 +636,46 @@ def test_maker_order_trade_links_to_local_command_and_uses_maker_fill_economics(
         "source_module": "src.execution.exchange_reconcile",
     }
     projection = conn.execute(
-        "SELECT phase, order_status FROM position_current WHERE position_id = 'pos-m5'"
+        """
+        SELECT phase, order_status, shares, entry_price, cost_basis_usd
+          FROM position_current
+         WHERE position_id = 'pos-m5'
+        """
     ).fetchone()
-    assert dict(projection) == {"phase": "active", "order_status": "partial"}
+    assert projection["phase"] == "active"
+    assert projection["order_status"] == "partial"
+    assert Decimal(str(projection["shares"])) == Decimal("1.5873")
+    assert Decimal(str(projection["entry_price"])) == Decimal("0.37")
+    assert Decimal(str(projection["cost_basis_usd"])) == Decimal("0.587301")
+
+    execution = conn.execute(
+        """
+        SELECT filled_at, fill_price, shares, venue_status, terminal_exec_status
+          FROM execution_fact
+         WHERE intent_id = 'pos-m5:entry'
+        """
+    ).fetchone()
+    assert execution is not None
+    assert execution["filled_at"] == NOW.isoformat()
+    assert Decimal(str(execution["fill_price"])) == Decimal("0.37")
+    assert Decimal(str(execution["shares"])) == Decimal("1.5873")
+    assert execution["venue_status"] == "PARTIAL"
+    assert execution["terminal_exec_status"] == "partial"
+
+    lot = conn.execute(
+        """
+        SELECT position_id, state, shares, entry_price_avg, source_trade_fact_id
+          FROM position_lots
+         ORDER BY lot_id DESC
+         LIMIT 1
+        """
+    ).fetchone()
+    assert lot is not None
+    assert lot["position_id"] == 7
+    assert lot["state"] == "CONFIRMED_EXPOSURE"
+    assert Decimal(str(lot["shares"])) == Decimal("1.5873")
+    assert Decimal(str(lot["entry_price_avg"])) == Decimal("0.37")
+    assert lot["source_trade_fact_id"] == row["trade_fact_id"]
 
     conn.execute("UPDATE position_current SET order_status = 'filled' WHERE position_id = 'pos-m5'")
     run_reconcile_sweep(adapter, conn, context="periodic", observed_at=NOW)
@@ -627,6 +695,70 @@ def test_maker_order_trade_links_to_local_command_and_uses_maker_fill_economics(
         == 1
     )
     assert findings(conn) == []
+
+
+def test_entry_fill_projection_aggregates_multiple_trade_facts(conn):
+    from src.execution.exchange_reconcile import run_reconcile_sweep
+
+    seed_command(conn, size=10, price=0.50)
+    seed_position_baseline(conn)
+
+    run_reconcile_sweep(
+        FakeM5Adapter(
+            trades=[
+                trade(
+                    trade_id="trade-partial-a",
+                    order_id="ord-m5",
+                    size="3",
+                    price="0.20",
+                    status="CONFIRMED",
+                )
+            ]
+        ),
+        conn,
+        context="periodic",
+        observed_at=NOW,
+    )
+    run_reconcile_sweep(
+        FakeM5Adapter(
+            trades=[
+                trade(
+                    trade_id="trade-partial-b",
+                    order_id="ord-m5",
+                    size="4",
+                    price="0.40",
+                    status="CONFIRMED",
+                )
+            ]
+        ),
+        conn,
+        context="periodic",
+        observed_at=NOW + timedelta(seconds=1),
+    )
+
+    projection = conn.execute(
+        """
+        SELECT phase, order_status, shares, entry_price, cost_basis_usd
+          FROM position_current
+         WHERE position_id = 'pos-m5'
+        """
+    ).fetchone()
+    assert projection["phase"] == "active"
+    assert projection["order_status"] == "partial"
+    assert Decimal(str(projection["shares"])) == Decimal("7")
+    assert Decimal(str(projection["cost_basis_usd"])) == Decimal("2.20")
+    assert float(projection["entry_price"]) == pytest.approx(float(Decimal("2.20") / Decimal("7")))
+
+    execution = conn.execute(
+        """
+        SELECT fill_price, shares, terminal_exec_status
+          FROM execution_fact
+         WHERE intent_id = 'pos-m5:entry'
+        """
+    ).fetchone()
+    assert Decimal(str(execution["shares"])) == Decimal("7")
+    assert Decimal(str(execution["fill_price"])) == Decimal("0.3142857142857143")
+    assert execution["terminal_exec_status"] == "partial"
 
 
 def test_failed_or_retrying_trade_fact_does_not_advance_command_fill_state(conn):
