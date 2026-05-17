@@ -520,7 +520,7 @@ def _latest_matched_order_fact_candidates(conn: sqlite3.Connection) -> list[dict
           JOIN venue_order_facts fact
             ON fact.command_id = latest.command_id
            AND fact.local_sequence = latest.max_sequence
-         WHERE cmd.intent_kind = 'ENTRY'
+         WHERE cmd.intent_kind IN ('ENTRY', 'EXIT')
            AND cmd.state IN ({command_state_placeholders})
            AND fact.state IN ({fact_state_placeholders})
            AND fact.source IN ({source_placeholders})
@@ -613,11 +613,23 @@ def _matched_remaining_size(command: dict, matched_size: str) -> str:
 
 
 def _matched_event_type(command: dict, matched_size: str) -> str:
+    if str(command.get("intent_kind") or "").upper() == "EXIT":
+        return CommandEventType.PARTIAL_FILL_OBSERVED.value
     command_size = _decimal_or_none(command.get("size"))
     matched = _decimal_or_none(matched_size)
     if command_size is not None and matched is not None and matched < command_size:
         return CommandEventType.PARTIAL_FILL_OBSERVED.value
     return CommandEventType.FILL_CONFIRMED.value
+
+
+def _matched_order_fact_state(*, event_type: str, venue_status: str, remaining_size: str) -> str:
+    if event_type == CommandEventType.FILL_CONFIRMED.value:
+        return "MATCHED"
+    if str(venue_status or "").upper() in {"MATCHED", "FILLED", "MINED"}:
+        return "MATCHED"
+    if _decimal_is_zero(remaining_size):
+        return "MATCHED"
+    return "PARTIALLY_MATCHED"
 
 
 def _coerce_iso_datetime(value: str) -> datetime:
@@ -1163,7 +1175,7 @@ def reconcile_terminal_order_facts(conn: sqlite3.Connection) -> dict:
 
 
 def reconcile_matched_order_facts(conn: sqlite3.Connection, client) -> dict:
-    """Advance ACKED entry commands when point-order truth says the order matched."""
+    """Recover ACKED command fill facts when point-order truth says the order matched."""
 
     summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
     get_order = getattr(client, "get_order", None)
@@ -1217,6 +1229,11 @@ def reconcile_matched_order_facts(conn: sqlite3.Connection, client) -> dict:
             tx_hash = next(iter(_point_order_transaction_hashes(point_order)), None)
             event_type = _matched_event_type(row, matched_size)
             remaining_size = _matched_remaining_size(row, matched_size)
+            order_fact_state = _matched_order_fact_state(
+                event_type=event_type,
+                venue_status=venue_status,
+                remaining_size=remaining_size,
+            )
             observed_at = _now_iso()
             payload = {
                 "reason": "acked_order_point_order_matched",
@@ -1241,7 +1258,7 @@ def reconcile_matched_order_facts(conn: sqlite3.Connection, client) -> dict:
                     conn,
                     venue_order_id=order_id,
                     command_id=command_id,
-                    state="MATCHED" if event_type == CommandEventType.FILL_CONFIRMED.value else "PARTIALLY_MATCHED",
+                    state=order_fact_state,
                     remaining_size=remaining_size,
                     matched_size=matched_size,
                     source="REST",
@@ -1272,14 +1289,15 @@ def reconcile_matched_order_facts(conn: sqlite3.Connection, client) -> dict:
                     occurred_at=observed_at,
                     payload=payload,
                 )
-                _append_matched_order_fill_projection(
-                    conn,
-                    command=row,
-                    venue_order_id=order_id,
-                    matched_size=matched_size,
-                    fill_price=fill_price,
-                    observed_at=observed_at,
-                )
+                if str(row.get("intent_kind") or "").upper() == "ENTRY":
+                    _append_matched_order_fill_projection(
+                        conn,
+                        command=row,
+                        venue_order_id=order_id,
+                        matched_size=matched_size,
+                        fill_price=fill_price,
+                        observed_at=observed_at,
+                    )
                 conn.execute(f"RELEASE SAVEPOINT {sp_name}")
             except Exception:
                 conn.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
