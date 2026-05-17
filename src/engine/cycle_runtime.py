@@ -11,6 +11,7 @@ import json
 import logging
 import math
 import os
+import time
 from dataclasses import is_dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
@@ -80,6 +81,8 @@ _ORDER_OWNERSHIP_TERMINAL_POSITION_PHASES = frozenset(
 _ORDER_OWNERSHIP_TERMINAL_ORDER_STATUSES = frozenset(
     {"filled", "cancelled", "canceled", "expired", "rejected", "voided"}
 )
+_LIVE_DISCOVERY_EVAL_BUDGET_ENV = "ZEUS_LIVE_DISCOVERY_EVAL_BUDGET_SECONDS"
+_LIVE_DISCOVERY_EVAL_BUDGET_DEFAULT_SECONDS = 360.0
 
 
 # D4: exit triggers whose statistical burden (2 consecutive negative cycles,
@@ -115,6 +118,33 @@ def _deps_utcnow_iso(deps) -> str:
         except Exception:
             pass
     return datetime.now(timezone.utc).isoformat()
+
+
+def _live_discovery_eval_budget_seconds(mode, env: str, params: dict | None) -> float | None:
+    if str(env or "").strip().lower() != "live":
+        return None
+    raw = None
+    if isinstance(params, dict):
+        raw = params.get("evaluation_budget_seconds")
+    if raw is None:
+        raw = os.getenv(_LIVE_DISCOVERY_EVAL_BUDGET_ENV)
+    if raw is None:
+        return _LIVE_DISCOVERY_EVAL_BUDGET_DEFAULT_SECONDS
+    try:
+        budget = float(raw)
+    except (TypeError, ValueError):
+        logger.warning("Invalid %s=%r; using default", _LIVE_DISCOVERY_EVAL_BUDGET_ENV, raw)
+        return _LIVE_DISCOVERY_EVAL_BUDGET_DEFAULT_SECONDS
+    if budget <= 0:
+        return None
+    return budget
+
+
+def _monotonic_seconds(deps) -> float:
+    getter = getattr(deps, "monotonic", None)
+    if callable(getter):
+        return float(getter())
+    return time.monotonic()
 
 
 def _record_exit_evidence_gate_block(
@@ -2314,6 +2344,8 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
         return missing
 
     params = deps.MODE_PARAMS[mode]
+    evaluation_budget_seconds = _live_discovery_eval_budget_seconds(mode, env, params)
+    evaluation_started_at = _monotonic_seconds(deps)
     min_hours_to_resolution = params.get("min_hours_to_resolution")
     if min_hours_to_resolution is None:
         min_hours_to_resolution = 0 if "max_hours_to_resolution" in params else 6
@@ -2420,7 +2452,27 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
         _flush_derived_writes()
         return portfolio_dirty, tracker_dirty
 
-    for market in markets:
+    for market_index, market in enumerate(markets):
+        if evaluation_budget_seconds is not None:
+            elapsed = _monotonic_seconds(deps) - evaluation_started_at
+            if elapsed >= evaluation_budget_seconds:
+                markets_skipped = len(markets) - market_index
+                summary["cycle_backpressure_truncated"] = True
+                summary["cycle_backpressure_reason"] = "market_evaluation_budget_exceeded"
+                summary["cycle_backpressure_budget_seconds"] = evaluation_budget_seconds
+                summary["cycle_backpressure_elapsed_seconds"] = elapsed
+                summary["cycle_backpressure_markets_evaluated"] = market_index
+                summary["cycle_backpressure_markets_skipped"] = markets_skipped
+                summary["degraded"] = True
+                deps.logger.warning(
+                    "Discovery cycle backpressure: truncated %s after %.1fs budget=%.1fs evaluated=%s skipped=%s",
+                    mode.value,
+                    elapsed,
+                    evaluation_budget_seconds,
+                    market_index,
+                    markets_skipped,
+                )
+                break
         city = market.get("city")
         if city is None:
             continue

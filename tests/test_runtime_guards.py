@@ -12002,6 +12002,113 @@ def test_discovery_phase_buffers_telemetry_before_candidate_external_io(tmp_path
     conn.close()
 
 
+def test_live_discovery_phase_truncates_candidate_evaluation_on_backpressure(monkeypatch, tmp_path):
+    conn = get_connection(tmp_path / "discovery-backpressure.db")
+    init_schema(conn)
+    conn.commit()
+
+    artifact = CycleArtifact(mode="opening_hunt", started_at="2026-04-03T00:00:00Z")
+    summary = {"candidates": 0, "no_trades": 0}
+    evaluated: list[str] = []
+
+    def _market(slug: str) -> dict:
+        return {
+            "city": NYC,
+            "target_date": "2026-04-01",
+            "outcomes": [
+                {
+                    "title": "39-40°F",
+                    "range_low": 39,
+                    "range_high": 40,
+                    "token_id": f"yes-{slug}",
+                    "no_token_id": f"no-{slug}",
+                    "market_id": f"m-{slug}",
+                    "condition_id": f"cond-{slug}",
+                    "question_id": f"q-{slug}",
+                    "price": 0.35,
+                    "no_price": 0.65,
+                }
+            ],
+            "hours_since_open": 1.0,
+            "hours_to_resolution": 4.0,
+            "temperature_metric": "high",
+            "event_id": f"evt-{slug}",
+            "slug": slug,
+            "source_contract": {"status": "MATCH", "resolution_sources": ["wu_api"]},
+        }
+
+    def _evaluate_candidate(candidate, *args, **kwargs):
+        evaluated.append(candidate.slug)
+        return [
+            types.SimpleNamespace(
+                should_trade=False,
+                edge=None,
+                tokens=None,
+                decision_id=f"d-{candidate.slug}",
+                rejection_stage="SIGNAL_QUALITY",
+                rejection_reasons=["fixture no edge"],
+                selected_method="ens_member_counting",
+                applied_validations=["entry_forecast_reader"],
+                decision_snapshot_id=f"snap-{candidate.slug}",
+                edge_source="",
+                strategy_key="",
+                availability_status="",
+                settlement_semantics_json="",
+                epistemic_context_json="",
+                edge_context_json="",
+                p_raw=np.array([]),
+                p_cal=np.array([]),
+                p_market=np.array([]),
+                alpha=0.0,
+                agreement="",
+            )
+        ]
+
+    ticks = iter([0.0, 0.0, 2.0])
+    deps = types.SimpleNamespace(
+        MODE_PARAMS={DiscoveryMode.OPENING_HUNT: {}},
+        DiscoveryMode=DiscoveryMode,
+        logger=types.SimpleNamespace(
+            debug=lambda *args, **kwargs: None,
+            warning=lambda *args, **kwargs: None,
+            error=lambda *args, **kwargs: None,
+        ),
+        NoTradeCase=NoTradeCase,
+        MarketCandidate=MarketCandidate,
+        find_weather_markets=lambda **kwargs: [_market("one"), _market("two"), _market("three")],
+        get_last_scan_authority=lambda: "VERIFIED",
+        evaluate_candidate=_evaluate_candidate,
+        _classify_edge_source=lambda *args, **kwargs: "",
+        monotonic=lambda: next(ticks, 2.0),
+    )
+    monkeypatch.setenv("ZEUS_LIVE_DISCOVERY_EVAL_BUDGET_SECONDS", "1")
+
+    cycle_runtime.execute_discovery_phase(
+        conn,
+        clob=None,
+        portfolio=PortfolioState(),
+        artifact=artifact,
+        tracker=StrategyTracker(),
+        limits=types.SimpleNamespace(),
+        mode=DiscoveryMode.OPENING_HUNT,
+        summary=summary,
+        entry_bankroll=100.0,
+        decision_time=datetime(2026, 4, 3, 6, 0, tzinfo=timezone.utc),
+        env="live",
+        deps=deps,
+    )
+
+    assert evaluated == ["one"]
+    assert summary["candidates"] == 1
+    assert summary["no_trades"] == 1
+    assert summary["cycle_backpressure_truncated"] is True
+    assert summary["cycle_backpressure_reason"] == "market_evaluation_budget_exceeded"
+    assert summary["cycle_backpressure_markets_evaluated"] == 1
+    assert summary["cycle_backpressure_markets_skipped"] == 2
+    assert summary["degraded"] is True
+    conn.close()
+
+
 def test_evaluator_ens_fetch_exception_becomes_explicit_availability_truth(monkeypatch):
     monkeypatch.setattr(evaluator_module, "get_mode", lambda: "test")
     candidate = MarketCandidate(

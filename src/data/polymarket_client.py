@@ -365,31 +365,12 @@ class PolymarketClient:
     def get_clob_market_info(self, condition_id: str) -> dict:
         """Fetch raw CLOB market facts for executable snapshot capture."""
 
-        adapter = getattr(self, "_v2_adapter", None)
-        if adapter is not None:
-            getter = getattr(adapter, "get_clob_market_info", None)
-            if callable(getter):
-                info = getter(condition_id)
-                raw = getattr(info, "raw", info)
-                if isinstance(raw, dict):
-                    return dict(raw)
-
-        legacy_client = getattr(self, "_clob_client", None)
-        if legacy_client is not None:
-            getter = getattr(legacy_client, "get_market", None)
-            if callable(getter):
-                raw = getter(condition_id)
-                if isinstance(raw, dict):
-                    return dict(raw)
-                if raw is not None and hasattr(raw, "__dict__"):
-                    return dict(raw.__dict__)
-
         resp = self._public_get(f"/markets/{condition_id}")
         resp.raise_for_status()
         data = resp.json()
-        if not isinstance(data, dict):
-            raise RuntimeError(f"CLOB market response for {condition_id} is not an object")
-        return data
+        if isinstance(data, dict):
+            return data
+        raise RuntimeError(f"CLOB market response for {condition_id} is not an object")
 
     def get_best_bid_ask(self, token_id: str) -> tuple[float, float, float, float]:
         """Get best bid/ask with sizes for VWMP calculation.

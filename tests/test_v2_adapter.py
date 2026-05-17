@@ -1162,6 +1162,8 @@ def test_polymarket_client_reuses_public_http_client_for_clob_reads(monkeypatch)
 
         def get(self, url, *, params=None):
             self.calls.append((url, params))
+            if url.endswith("/markets/condition-1"):
+                return Response({"condition_id": "condition-1", "tokens": []})
             if url.endswith("/book"):
                 return Response({"bids": [], "asks": []})
             if url.endswith("/fee-rate"):
@@ -1178,11 +1180,22 @@ def test_polymarket_client_reuses_public_http_client_for_clob_reads(monkeypatch)
     monkeypatch.setattr(pm.httpx, "Client", client_factory)
 
     client = pm.PolymarketClient()
+    client._v2_adapter = type(
+        "AdapterTripwire",
+        (),
+        {
+            "get_clob_market_info": lambda self, condition_id: (_ for _ in ()).throw(
+                AssertionError("public CLOB market facts must not use the V2 SDK adapter")
+            )
+        },
+    )()
+    assert client.get_clob_market_info("condition-1") == {"condition_id": "condition-1", "tokens": []}
     assert client.get_orderbook_snapshot("token-1") == {"bids": [], "asks": []}
     assert client.get_fee_rate_details("token-1")["fee_rate_bps"] == pytest.approx(30.0)
 
     assert len(clients) == 1
     assert clients[0].calls == [
+        (f"{pm.CLOB_BASE}/markets/condition-1", None),
         (f"{pm.CLOB_BASE}/book", {"token_id": "token-1"}),
         (f"{pm.CLOB_BASE}/fee-rate", {"token_id": "token-1"}),
     ]
