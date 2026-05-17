@@ -18,7 +18,7 @@ The parent draft Part 7 names MEMORY.md as write-only. Investigation found a **f
 | Surface | Writes happen | Existing consumer | Evidence |
 |---------|---------------|-------------------|----------|
 | `state/refit_armed.json` (drift detector) | Daily | None | Parent draft Part 1 |
-| `MEMORY.md` 45 feedback entries | Per session | Agent self-skim (per parent Part 7) | Parent draft Part 7 |
+| `MEMORY.md` 46 feedback entries | Per session | Agent self-skim (per parent Part 7) | Parent draft Part 7 |
 | `~/.claude/telemetry/*.jsonl` | 18,848 events across 372 JSONL files (`1p_failed_events.*.jsonl`) | None | `ls ~/.claude/telemetry \| wc -l` = 372; `wc -l ~/.claude/telemetry/* \| tail -1` = 18,848 |
 | Hook `telemetry.ritual_signal_emitted: true` | Per hook invocation | Test contract only (`tests/test_zeus_risk_halt_e2e.py:130`) — no runtime/operator-facing consumer | `.claude/hooks/registry.yaml` (multiple) |
 
@@ -330,7 +330,7 @@ Wave 1 succeeds if **all 5** of the following hold at 2026-06-15 (v2 raises the 
 | MAJOR: launchd vs cron dual-stack glossed over | A2 | §4 W1.3, W1.6 | Scheduler switched to `~/.openclaw/cron/jobs.json` `kind: cron` entries, matching zeus-daily-audit/zeus-antibody-scan precedent (single runbook, single rollback path) |
 | MINOR: handoff schema lacks dedup/conflict spec | A2 (Critic C carry-over) | §4 W1.5 | Filename includes `<session_id>` to prevent concurrent overwrite; reader uses mtime |
 | MINOR: §8 #4 "graduated" undefined | A2 | §8 #4 | Added definition: `promotion_criteria` met + concrete artifact citing MEMORY slug |
-| MINOR: MEMORY entry count 45 not 46 | A2 | §1, §4 W1.7 | Corrected to 45 |
+| ~~MINOR: MEMORY entry count 45 not 46~~ **REVERTED v2.4** | A2 (WRONG) | §1 | A2 reported `ls feedback_*.md \| wc -l = 45` but actual is 46 (verified 2026-05-16 post-bot-review). v2.4 reverts to 46. Anchor of `feedback_audit_of_audit_antibody_recursive` strikes recursively — the audit subagent was itself wrong. |
 
 A2 verdict: ACCEPT-WITH-RESERVATIONS. Day 0-2 Instrument work proceeds independent of the MAJOR; only Day 3 W1.3 ship-gate is gated on the scheduler switch above.
 

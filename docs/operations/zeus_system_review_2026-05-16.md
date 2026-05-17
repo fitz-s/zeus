@@ -195,7 +195,7 @@ Verified: Majority of "fix" commits are critic-loop REVISE responses, K1 DB migr
 
 ### healthcheck.py vs live_health_probe.py — Intentional Separation
 
-Verified: `live_health_probe.py` is imported by `healthcheck.py` (line 129). Different callers, different outputs, different inspection depths. Real and narrow issue: path sets in `PROCESS_CODE_SURFACES` are identical but key names differ (`live_trading` vs `daemon`). Fix: one pytest assertion that path sets match across both scripts.
+Verified: `live_health_probe.py` is imported by `healthcheck.py` (line 100). Different callers, different outputs, different inspection depths. Real and narrow issue: path sets in `PROCESS_CODE_SURFACES` are identical but key names differ (`live_trading` vs `daemon`). Fix: one pytest assertion that path sets match across both scripts.
 
 ---
 
