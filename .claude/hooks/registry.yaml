@@ -6,7 +6,7 @@
 schema_version: 1
 metadata:
   charter_version: 2.0.0
-  catalog_size: 17
+  catalog_size: 18
   sunset_default: 90d
 
 hooks:
@@ -254,7 +254,7 @@ hooks:
     event: PreToolUse
     matcher: "Edit|Write"
     intent: >
-      Scan old_string/new_string args for file:line and file Lline citations.
+      Scan old_string/new_string/content args for file:line and file Lline citations.
       For each citation, verify the referenced file exists and the stated line
       number is within the file's current bounds (1 <= lineno <= total_lines).
       On drift, emit additionalContext listing the stale citations so the agent
