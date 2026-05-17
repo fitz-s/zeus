@@ -572,7 +572,13 @@ def reconcile_recorded_maker_fill_economics(
     latest fact chain.
     """
 
-    summary = {"scanned": 0, "corrected": 0, "projected": 0, "stayed": 0, "errors": 0}
+    summary = {
+        "scanned": 0,
+        "corrected": 0,
+        "projected": 0,
+        "stayed": 0,
+        "errors": 0,
+    }
     if not _table_exists(conn, "venue_trade_facts") or not _table_exists(conn, "venue_commands"):
         return summary
     observed = _coerce_dt(observed_at)
@@ -663,6 +669,110 @@ def reconcile_recorded_maker_fill_economics(
             summary["errors"] += 1
             logger.exception(
                 "exchange_reconcile: maker fill economics repair failed for trade_fact_id=%s",
+                fact.get("trade_fact_id"),
+            )
+    exit_summary = _reconcile_recorded_exit_fill_projections(conn, observed_at=observed)
+    if exit_summary["projected"]:
+        summary["exit_projected"] = exit_summary["projected"]
+    summary["stayed"] += exit_summary["stayed"]
+    summary["errors"] += exit_summary["errors"]
+    return summary
+
+
+def _reconcile_recorded_exit_fill_projections(
+    conn: sqlite3.Connection,
+    *,
+    observed_at: datetime,
+) -> dict[str, int]:
+    """Project already-recorded confirmed exit fills into lifecycle state.
+
+    command_recovery calls reconcile_recorded_maker_fill_economics every cycle
+    as the local recorded-trade repair hook.  This keeps confirmed exit
+    self-healing local: the daemon needs only the command, trade fact, and
+    position projection already in SQLite, not a fresh full venue resweep.
+    """
+
+    summary = {"scanned": 0, "projected": 0, "stayed": 0, "errors": 0}
+    rows = conn.execute(
+        """
+        WITH latest_trade_fact AS (
+            SELECT trade_id, MAX(local_sequence) AS local_sequence
+              FROM venue_trade_facts
+             GROUP BY trade_id
+        )
+        SELECT
+            tf.*,
+            cmd.snapshot_id AS cmd_snapshot_id,
+            cmd.envelope_id AS cmd_envelope_id,
+            cmd.position_id AS cmd_position_id,
+            cmd.decision_id AS cmd_decision_id,
+            cmd.idempotency_key AS cmd_idempotency_key,
+            cmd.intent_kind AS cmd_intent_kind,
+            cmd.market_id AS cmd_market_id,
+            cmd.token_id AS cmd_token_id,
+            cmd.side AS cmd_side,
+            cmd.size AS cmd_size,
+            cmd.price AS cmd_price,
+            cmd.venue_order_id AS cmd_venue_order_id,
+            cmd.state AS cmd_state,
+            cmd.created_at AS cmd_created_at,
+            cmd.updated_at AS cmd_updated_at,
+            pc.phase AS position_phase
+          FROM venue_trade_facts tf
+          JOIN latest_trade_fact latest
+            ON latest.trade_id = tf.trade_id
+           AND latest.local_sequence = tf.local_sequence
+          JOIN venue_commands cmd
+            ON cmd.command_id = tf.command_id
+          JOIN position_current pc
+            ON pc.position_id = cmd.position_id
+         WHERE tf.state = 'CONFIRMED'
+           AND UPPER(COALESCE(cmd.intent_kind, '')) = 'EXIT'
+           AND UPPER(COALESCE(cmd.side, '')) = 'SELL'
+           AND pc.phase IN ('active', 'day0_window', 'pending_exit', 'economically_closed')
+         ORDER BY tf.observed_at, tf.trade_fact_id
+        """
+    ).fetchall()
+    for row in rows:
+        summary["scanned"] += 1
+        fact = dict(row)
+        try:
+            command = _command_from_prefixed_trade_fact_row(fact)
+            command_size = _positive_decimal_or_none(command.get("size"))
+            if command_size is None:
+                summary["stayed"] += 1
+                continue
+            fill_economics = _exit_fill_economics_for_command(
+                conn,
+                command_id=str(command.get("command_id") or ""),
+                fallback_filled_size=str(fact.get("filled_size") or "0"),
+                fallback_fill_price=str(fact.get("fill_price") or "0"),
+            )
+            if fill_economics is None:
+                summary["stayed"] += 1
+                continue
+            confirmed_shares, _ = fill_economics
+            if confirmed_shares < command_size:
+                summary["stayed"] += 1
+                continue
+            before = conn.total_changes
+            _ensure_exit_fill_position_event(
+                conn,
+                command=command,
+                venue_order_id=str(command.get("venue_order_id") or fact.get("venue_order_id") or ""),
+                filled_size=str(fact.get("filled_size") or "0"),
+                fill_price=str(fact.get("fill_price") or "0"),
+                observed_at=_coerce_dt(fact.get("observed_at") or observed_at),
+                command_event="FILL_CONFIRMED",
+            )
+            if conn.total_changes > before:
+                summary["projected"] += 1
+            else:
+                summary["stayed"] += 1
+        except Exception:
+            summary["errors"] += 1
+            logger.exception(
+                "exchange_reconcile: recorded exit fill projection repair failed for trade_fact_id=%s",
                 fact.get("trade_fact_id"),
             )
     return summary

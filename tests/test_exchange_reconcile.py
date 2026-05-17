@@ -1183,6 +1183,77 @@ def test_existing_confirmed_exit_trade_repairs_missing_economic_close_projection
     ).fetchone()[0] == 1
 
 
+def test_recorded_confirmed_exit_trade_repair_hook_economically_closes_projection(conn):
+    from src.execution.exchange_reconcile import reconcile_recorded_maker_fill_economics
+
+    token = "exit-recorded-confirmed-token"
+    seed_position_baseline(conn, position_id="pos-exit-recorded-confirmed", order_id="ord-entry-recorded-exit")
+    conn.execute(
+        """
+        UPDATE position_current
+           SET phase = 'active',
+               token_id = ?,
+               order_id = 'ord-entry-recorded-exit',
+               order_status = 'filled',
+               shares = 35.6,
+               cost_basis_usd = 5.34,
+               entry_price = 0.15,
+               updated_at = ?
+         WHERE position_id = 'pos-exit-recorded-confirmed'
+        """,
+        (token, NOW.isoformat()),
+    )
+    seed_command(
+        conn,
+        command_id="cmd-recorded-exit-confirmed",
+        venue_order_id="ord-recorded-exit-confirmed",
+        position_id="pos-exit-recorded-confirmed",
+        token_id=token,
+        side="SELL",
+        size=35.6,
+        price=0.13,
+        state="FILLED",
+    )
+    append_trade_fact(
+        conn,
+        command_id="cmd-recorded-exit-confirmed",
+        venue_order_id="ord-recorded-exit-confirmed",
+        token_id=token,
+        trade_id="trade-recorded-exit-confirmed",
+        size="35.6",
+        state="CONFIRMED",
+    )
+
+    summary = reconcile_recorded_maker_fill_economics(conn, observed_at=NOW)
+
+    assert summary["exit_projected"] == 1
+    current = conn.execute(
+        """
+        SELECT phase, order_status
+          FROM position_current
+         WHERE position_id = 'pos-exit-recorded-confirmed'
+        """
+    ).fetchone()
+    assert dict(current) == {
+        "phase": "economically_closed",
+        "order_status": "sell_filled",
+    }
+    fact = conn.execute(
+        """
+        SELECT filled_at, fill_price, shares, venue_status, terminal_exec_status
+          FROM execution_fact
+         WHERE intent_id = 'pos-exit-recorded-confirmed:exit'
+        """
+    ).fetchone()
+    assert dict(fact) == {
+        "filled_at": NOW.isoformat(),
+        "fill_price": 0.5,
+        "shares": 35.6,
+        "venue_status": "FILLED",
+        "terminal_exec_status": "filled",
+    }
+
+
 @pytest.mark.parametrize("status", ["MATCHED", "MINED"])
 def test_nonconfirmed_exit_trade_does_not_economically_close_position(conn, status):
     from src.execution.exchange_reconcile import run_reconcile_sweep
