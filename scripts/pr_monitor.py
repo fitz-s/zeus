@@ -221,7 +221,6 @@ def run_once(
     seen_terminal: dict[str, str],
     seen_comments: set[Any],
     seen_reviews: set[Any],
-    last_head: str | None,
     first_poll: bool,
 ) -> tuple[str | None, str | None]:
     """One poll round. Returns (pr_state, head_sha). Mutates seen_* sets.
@@ -308,7 +307,6 @@ def main(argv: list[str] | None = None) -> int:
     seen_terminal: dict[str, str] = {}
     seen_comments: set[Any] = set()
     seen_reviews: set[Any] = set()
-    last_head: str | None = None
     first_poll = True
     consecutive_state_failures = 0
 
@@ -316,8 +314,7 @@ def main(argv: list[str] | None = None) -> int:
         state, head = run_once(
             args.pr, repo, me,
             seen_terminal, seen_comments, seen_reviews,
-            last_head, first_poll,
-        )
+            first_poll,        )
         if state and state != "OPEN":
             return 0
         if state is None:
@@ -337,8 +334,6 @@ def main(argv: list[str] | None = None) -> int:
         else:
             consecutive_state_failures = 0
             first_poll = False
-        if head:
-            last_head = head
         if args.once:
             return 0
         time.sleep(args.poll)

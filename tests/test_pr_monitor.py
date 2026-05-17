@@ -78,7 +78,7 @@ def test_first_poll_records_terminal_ci_but_does_not_emit(monkeypatch):
     lines = _capture_run_once(
         132, "owner/repo", "me",
         seen_terminal, set(), set(),
-        last_head=None, first_poll=True,
+        first_poll=True,
     )
     assert not any(l.startswith("CHECK-COMPLETE") for l in lines), \
         f"first-poll baseline must not emit CHECK-COMPLETE; got {lines!r}"
@@ -98,7 +98,7 @@ def test_second_poll_emits_only_new_terminal_transitions(monkeypatch):
     lines = _capture_run_once(
         132, "owner/repo", "me",
         seen_terminal, set(), set(),
-        last_head="sha0", first_poll=False,
+        first_poll=False,
     )
     assert lines == ["CHECK-COMPLETE: build: pass"], \
         f"only NEW terminal transitions must emit; got {lines!r}"
@@ -113,7 +113,7 @@ def test_intermediate_ci_states_are_suppressed(monkeypatch):
     )
     lines = _capture_run_once(
         132, "owner/repo", "me", {}, set(), set(),
-        last_head="sha0", first_poll=False,
+        first_poll=False,
     )
     assert lines == [], f"intermediate states must be silent; got {lines!r}"
 
@@ -136,7 +136,7 @@ def test_self_comments_and_reviews_are_filtered(monkeypatch):
     )
     lines = _capture_run_once(
         132, "owner/repo", "me", {}, set(), set(),
-        last_head="sha0", first_poll=False,
+        first_poll=False,
     )
     inline = [l for l in lines if l.startswith("REVIEW-INLINE")]
     summary = [l for l in lines if l.startswith("REVIEW-SUMMARY")]
@@ -157,7 +157,7 @@ def test_already_seen_comments_and_reviews_not_re_emitted(monkeypatch):
     )
     lines = _capture_run_once(
         132, "owner/repo", "me", {}, {7}, {99},
-        last_head="sha0", first_poll=False,
+        first_poll=False,
     )
     assert lines == [], f"already-seen items must not re-emit; got {lines!r}"
 
@@ -175,7 +175,7 @@ def test_push_with_same_terminal_state_does_not_echo(monkeypatch):
     lines = _capture_run_once(
         132, "owner/repo", "me",
         seen_terminal, set(), set(),
-        last_head="sha0", first_poll=False,
+        first_poll=False,
     )
     assert not any(l.startswith("CHECK-COMPLETE") for l in lines), \
         f"push round must not echo unchanged terminal state; got {lines!r}"
@@ -194,7 +194,7 @@ def test_push_with_changed_terminal_state_does_emit(monkeypatch):
     lines = _capture_run_once(
         132, "owner/repo", "me",
         seen_terminal, set(), set(),
-        last_head="sha0", first_poll=False,
+        first_poll=False,
     )
     assert any("CHECK-COMPLETE: tests: fail" in l for l in lines), \
         f"changed terminal state after push must emit; got {lines!r}"
@@ -219,7 +219,7 @@ def test_push_then_ci_rerun_across_polls_does_not_echo(monkeypatch):
     p2 = _capture_run_once(
         132, "owner/repo", "me",
         seen_terminal, set(), set(),
-        last_head="sha0", first_poll=False,
+        first_poll=False,
     )
     assert p2 == [], f"intermediate state must not emit; got {p2!r}"
     assert seen_terminal == {"tests": "pass"}, \
@@ -234,7 +234,7 @@ def test_push_then_ci_rerun_across_polls_does_not_echo(monkeypatch):
     p3 = _capture_run_once(
         132, "owner/repo", "me",
         seen_terminal, set(), set(),
-        last_head="sha1", first_poll=False,
+        first_poll=False,
     )
     assert p3 == [], \
         f"re-arrival at same terminal must NOT echo across polls; got {p3!r}"
@@ -255,7 +255,7 @@ def test_push_with_brand_new_check_emits(monkeypatch):
     lines = _capture_run_once(
         132, "owner/repo", "me",
         seen_terminal, set(), set(),
-        last_head="sha0", first_poll=False,
+        first_poll=False,
     )
     assert "build" in seen_terminal, \
         "brand-new check must be tracked after first terminal sighting"
@@ -273,7 +273,7 @@ def test_pr_closed_emits_and_terminates(monkeypatch):
         state, head = pr_monitor.run_once(
             132, "owner/repo", "me",
             {}, set(), set(),
-            last_head="sha0", first_poll=False,
+            first_poll=False,
         )
     assert state == "MERGED"
     out = buf.getvalue()
@@ -287,7 +287,7 @@ def test_pr_state_unavailable_returns_skip_sentinel(monkeypatch):
     state, head = pr_monitor.run_once(
         132, "owner/repo", "me",
         {}, set(), set(),
-        last_head=None, first_poll=False,
+        first_poll=False,
     )
     assert state is None and head is None
 
@@ -329,7 +329,7 @@ def test_first_poll_baselines_pre_existing_non_self_comments(monkeypatch):
     lines = _capture_run_once(
         132, "owner/repo", "me",
         {}, seen_comments, seen_reviews,
-        last_head=None, first_poll=True,
+        first_poll=True,
     )
     assert lines == [], \
         f"first-poll baseline must not emit comments/reviews; got {lines!r}"
@@ -350,7 +350,7 @@ def test_second_poll_emits_new_comment_after_baseline(monkeypatch):
     r1 = _capture_run_once(
         132, "owner/repo", "me",
         {}, seen_comments, set(),
-        last_head=None, first_poll=True,
+        first_poll=True,
     )
     assert r1 == []
     # Round 2: a NEW comment shows up alongside the baselined one.
@@ -366,7 +366,7 @@ def test_second_poll_emits_new_comment_after_baseline(monkeypatch):
     r2 = _capture_run_once(
         132, "owner/repo", "me",
         {}, seen_comments, set(),
-        last_head="sha0", first_poll=False,
+        first_poll=False,
     )
     assert len(r2) == 1 and "codex" in r2[0] and "b.py:7" in r2[0], \
         f"second-poll new comment must emit exactly once; got {r2!r}"
@@ -423,7 +423,7 @@ def test_transient_first_poll_failure_preserves_baseline(monkeypatch):
     s1, _ = pr_monitor.run_once(
         132, "owner/repo", "me",
         seen_terminal, set(), set(),
-        last_head=None, first_poll=first_poll,
+        first_poll=first_poll,
     )
     assert s1 is None
     # first_poll stays True because state was None (mimics main's gating).
@@ -433,7 +433,7 @@ def test_transient_first_poll_failure_preserves_baseline(monkeypatch):
         s2, _ = pr_monitor.run_once(
             132, "owner/repo", "me",
             seen_terminal, set(), set(),
-            last_head=None, first_poll=first_poll,
+            first_poll=first_poll,
         )
     assert s2 == "OPEN"
     assert buf.getvalue() == "", \
