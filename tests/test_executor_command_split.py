@@ -271,6 +271,7 @@ def _final_submit_result(
     success: bool | None = None,
     error_code: str | None = None,
     error_message: str | None = None,
+    raw_extra: dict | None = None,
 ) -> dict:
     envelope = bound.get("envelope")
     if envelope is None:
@@ -280,10 +281,14 @@ def _final_submit_result(
         raw_payload["orderID"] = order_id
     if success is not None:
         raw_payload["success"] = success
+    if raw_extra:
+        raw_payload.update(raw_extra)
     changes = {
         "raw_response_json": json.dumps(raw_payload, sort_keys=True, separators=(",", ":")),
         "order_id": order_id,
     }
+    if raw_extra and raw_extra.get("transactionsHashes"):
+        changes["transaction_hashes"] = tuple(raw_extra["transactionsHashes"])
     if error_code is not None:
         changes["error_code"] = error_code
         changes["error_message"] = error_message or ""
@@ -296,6 +301,8 @@ def _final_submit_result(
         result["orderID"] = order_id
     if success is not None:
         result["success"] = success
+    if raw_extra:
+        result.update(raw_extra)
     if error_code is not None:
         result["errorCode"] = error_code
         result["errorMessage"] = error_message or ""
@@ -932,6 +939,104 @@ class TestLiveOrderCommandSplit:
             "remaining_size": "18.19",
             "matched_size": "0",
             "source": "REST",
+        }
+
+    def test_matched_submit_records_fill_truth_instead_of_resting_ack(self, mem_conn):
+        """A matched FOK submit response is a fill boundary, not a resting ACK."""
+        from src.execution.executor import _live_order
+        from src.state.venue_command_repo import get_command, list_events
+
+        intent = _make_entry_intent(mem_conn, limit_price=0.34)
+        command_ids_seen: list[str] = []
+
+        import src.state.venue_command_repo as _repo
+        _real_insert = _repo.insert_command
+
+        def capturing_insert(*args, **kwargs):
+            command_ids_seen.append(kwargs["command_id"])
+            return _real_insert(*args, **kwargs)
+
+        with patch(
+            "src.state.venue_command_repo.insert_command", side_effect=capturing_insert
+        ), patch("src.data.polymarket_client.PolymarketClient") as MockClient:
+            mock_inst = MagicMock()
+            MockClient.return_value = mock_inst
+            mock_inst.v2_preflight.return_value = None
+            bound = _capture_bound_submission_envelope(mock_inst)
+            mock_inst.place_limit_order.side_effect = (
+                lambda **kwargs: _final_submit_result(
+                    bound,
+                    order_id="ord-matched-001",
+                    status="matched",
+                    success=True,
+                    raw_extra={
+                        "makingAmount": "1.70",
+                        "takingAmount": "5",
+                        "transactionsHashes": ["0xhash-matched"],
+                    },
+                )
+            )
+            mock_inst.get_order.return_value = {
+                "id": "ord-matched-001",
+                "status": "MATCHED",
+                "size_matched": "5",
+                "price": "0.34",
+                "associate_trades": ["trade-matched-001"],
+            }
+
+            result = _live_order(
+                trade_id="trd-matched",
+                intent=intent,
+                shares=5.0,
+                conn=mem_conn,
+                decision_id="dec-matched",
+            )
+
+        assert result.status == "filled"
+        assert result.command_state == "FILLED"
+        assert result.fill_price == pytest.approx(0.34)
+        assert result.shares == pytest.approx(5.0)
+        assert len(command_ids_seen) == 1
+        command_id = command_ids_seen[0]
+        cmd = get_command(mem_conn, command_id)
+        assert cmd is not None
+        assert cmd["state"] == "FILLED"
+        event_types = [event["event_type"] for event in list_events(mem_conn, command_id)]
+        assert event_types[-2:] == ["SUBMIT_ACKED", "FILL_CONFIRMED"]
+        order_fact = mem_conn.execute(
+            """
+            SELECT venue_order_id, state, remaining_size, matched_size, source
+              FROM venue_order_facts
+             WHERE command_id = ?
+             ORDER BY local_sequence DESC
+             LIMIT 1
+            """,
+            (command_id,),
+        ).fetchone()
+        assert dict(order_fact) == {
+            "venue_order_id": "ord-matched-001",
+            "state": "MATCHED",
+            "remaining_size": "0",
+            "matched_size": "5",
+            "source": "REST",
+        }
+        trade_fact = mem_conn.execute(
+            """
+            SELECT trade_id, venue_order_id, state, filled_size, fill_price, tx_hash
+              FROM venue_trade_facts
+             WHERE command_id = ?
+             ORDER BY local_sequence DESC
+             LIMIT 1
+            """,
+            (command_id,),
+        ).fetchone()
+        assert dict(trade_fact) == {
+            "trade_id": "trade-matched-001",
+            "venue_order_id": "ord-matched-001",
+            "state": "MATCHED",
+            "filled_size": "5",
+            "fill_price": "0.34",
+            "tx_hash": "0xhash-matched",
         }
 
     def test_idempotency_key_collision_raises_before_submit(self, mem_conn):

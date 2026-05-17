@@ -91,6 +91,26 @@ Implementation direction:
 - Leave actual live DB mutation behind a backup/dry-run operator step unless the
   code can safely self-clear from DB evidence alone.
 
+### S4. Submit Fill Truth Preservation
+
+A venue submit response that already proves a fill must not be projected as an
+open resting order. The raw CLOB response for live FOK can return
+`status=matched`, `takingAmount`, `makingAmount`, transaction hashes, and
+associated trades at the same boundary that returns the order id. Losing those
+fields across `PolymarketV2Adapter -> PolymarketClient -> executor` makes the
+local journal say `ACKED/LIVE` while venue truth says `MATCHED`, which blocks
+learning, position economics, and fill reconciliation.
+
+Implementation direction:
+- Preserve the raw venue status and fill amounts in the adapter result and the
+  legacy `PolymarketClient` compatibility dict.
+- The executor's submit ACK path must write `MATCHED`/`PARTIALLY_MATCHED`
+  order facts when the submit response proves a fill, not a synthetic `LIVE`.
+- If the submit response or subsequent `get_order` supplies associated trade
+  ids, append trade facts with positive fill economics.
+- Recovery must correct existing `ACKED/LIVE` rows when point CLOB truth later
+  says the order is `MATCHED` or `FILLED`.
+
 ## Slice Routes
 
 1. Heartbeat keeper slice:
@@ -114,6 +134,13 @@ Implementation direction:
      `tests/test_venue_command_repo.py`.
    - required proof: current `c4707abb7e65464c` class is either safely cleared
      by typed DB proof or remains fail-closed with explicit operator action.
+
+4. Submit fill truth slice:
+   - likely files: `src/venue/polymarket_v2_adapter.py`,
+     `src/data/polymarket_client.py`, `src/execution/executor.py`,
+     `src/execution/command_recovery.py`, and focused tests.
+   - required proof: a matched FOK submit response becomes durable matched
+     order/trade facts and cannot remain locally projected as open.
 
 ## End-to-End Verification
 

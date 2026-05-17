@@ -1111,6 +1111,37 @@ def _response_error(raw: Any) -> tuple[Optional[str], Optional[str]]:
     return (str(code) if code else None, str(message) if message else None)
 
 
+def _string_sequence_from_value(value: Any) -> tuple[str, ...]:
+    if value in (None, ""):
+        return ()
+    if isinstance(value, (str, int, float)):
+        text = str(value).strip()
+        return (text,) if text else ()
+    if isinstance(value, dict):
+        for key in ("id", "trade_id", "tradeID", "tradeId", "hash", "tx_hash", "transactionHash"):
+            item = value.get(key)
+            if item not in (None, ""):
+                text = str(item).strip()
+                return (text,) if text else ()
+        return ()
+    if isinstance(value, (list, tuple)):
+        items: list[str] = []
+        for item in value:
+            items.extend(_string_sequence_from_value(item))
+        return tuple(items)
+    return ()
+
+
+def _extract_string_sequence(raw: Any, *keys: str) -> tuple[str, ...]:
+    if not isinstance(raw, dict):
+        return ()
+    for key in keys:
+        values = _string_sequence_from_value(raw.get(key))
+        if values:
+            return values
+    return ()
+
+
 def _rejected_submit_result(
     envelope: VenueSubmissionEnvelope,
     *,
@@ -1172,6 +1203,22 @@ def _submit_result_from_response(
         signed_order_hash=signed_order_hash,
         raw_response_json=raw_json,
         order_id=str(order_id),
+        trade_ids=_extract_string_sequence(
+            raw_response,
+            "tradeIDs",
+            "tradeIds",
+            "trade_ids",
+            "associate_trades",
+            "trades",
+        ),
+        transaction_hashes=_extract_string_sequence(
+            raw_response,
+            "transactionsHashes",
+            "transactionHashes",
+            "transaction_hashes",
+            "txHashes",
+            "tx_hashes",
+        ),
     )
     return SubmitResult(status="accepted", envelope=updated)
 

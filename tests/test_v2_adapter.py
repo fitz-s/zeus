@@ -809,7 +809,15 @@ def test_create_submission_envelope_captures_all_provenance_fields(tmp_path):
 
 
 def test_one_step_sdk_path_still_produces_envelope_with_provenance(tmp_path):
-    fake = FakeOneStepClient(response={"orderID": "ord-one", "status": "matched"})
+    fake = FakeOneStepClient(
+        response={
+            "orderID": "ord-one",
+            "status": "matched",
+            "makingAmount": "1.70",
+            "takingAmount": "5",
+            "transactionsHashes": ["0xhash-one"],
+        }
+    )
     adapter, _ = _adapter(tmp_path, fake)
     envelope = adapter.create_submission_envelope(_intent(), FakeSnapshot(), order_type="GTC")
 
@@ -822,7 +830,34 @@ def test_one_step_sdk_path_still_produces_envelope_with_provenance(tmp_path):
     assert result.envelope.signed_order_hash is None
     assert result.envelope.raw_request_hash == envelope.raw_request_hash
     assert '"orderID":"ord-one"' in (result.envelope.raw_response_json or "")
+    assert result.envelope.transaction_hashes == ("0xhash-one",)
     assert any(call[0] == "create_and_post_order" for call in fake.calls)
+
+
+def test_legacy_order_result_preserves_matched_submit_truth(tmp_path):
+    fake = FakeOneStepClient(
+        response={
+            "orderID": "ord-one",
+            "status": "matched",
+            "makingAmount": "1.70",
+            "takingAmount": "5",
+            "transactionsHashes": ["0xhash-one"],
+        }
+    )
+    adapter, _ = _adapter(tmp_path, fake)
+    envelope = adapter.create_submission_envelope(_intent(), FakeSnapshot(), order_type="GTC")
+
+    submit = adapter.submit(envelope)
+
+    from src.data.polymarket_client import _legacy_order_result_from_submit
+
+    payload = _legacy_order_result_from_submit(submit)
+    assert payload["success"] is True
+    assert payload["status"] == "matched"
+    assert payload["orderID"] == "ord-one"
+    assert payload["makingAmount"] == "1.70"
+    assert payload["takingAmount"] == "5"
+    assert payload["transactionsHashes"] == ["0xhash-one"]
 
 
 def test_two_step_sdk_path_produces_envelope_with_signed_order_hash(tmp_path):

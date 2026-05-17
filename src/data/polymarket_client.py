@@ -779,11 +779,27 @@ def _submission_envelope_to_dict(envelope: Any) -> dict:
     return {"repr": repr(envelope)}
 
 
+def _submission_raw_response(envelope: Any) -> dict:
+    raw_json = getattr(envelope, "raw_response_json", None)
+    if not raw_json:
+        return {}
+    try:
+        parsed = json.loads(str(raw_json))
+    except (TypeError, json.JSONDecodeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
 def _legacy_order_result_from_submit(submit: Any) -> dict:
     envelope = submit.envelope
+    raw_response = _submission_raw_response(envelope)
+    payload = dict(raw_response)
+    raw_success = raw_response.get("success")
+    success = submit.status == "accepted" and raw_success is not False
     payload = {
-        "success": submit.status == "accepted",
-        "status": submit.status,
+        **payload,
+        "success": success,
+        "status": raw_response.get("status") or submit.status,
         "errorCode": submit.error_code,
         "errorMessage": submit.error_message,
         "_venue_submission_envelope": envelope.to_dict(),
@@ -796,4 +812,8 @@ def _legacy_order_result_from_submit(submit: Any) -> dict:
                 "id": envelope.order_id,
             }
         )
+    if getattr(envelope, "transaction_hashes", ()):
+        payload.setdefault("transactionsHashes", list(envelope.transaction_hashes))
+    if getattr(envelope, "trade_ids", ()):
+        payload.setdefault("tradeIds", list(envelope.trade_ids))
     return payload

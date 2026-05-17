@@ -45,6 +45,7 @@ from src.state.venue_command_repo import (
     find_unresolved_commands,
     append_event,
     append_order_fact,
+    append_trade_fact,
 )
 
 logger = logging.getLogger(__name__)
@@ -316,6 +317,11 @@ def _decimal_or_none(value: object) -> Decimal | None:
     return parsed if parsed.is_finite() else None
 
 
+def _positive_decimal_or_none(value: object) -> Decimal | None:
+    parsed = _decimal_or_none(value)
+    return parsed if parsed is not None and parsed > 0 else None
+
+
 def _latest_terminal_order_fact_candidates(conn: sqlite3.Connection) -> list[dict]:
     if not _table_exists(conn, "venue_order_facts"):
         return []
@@ -447,6 +453,175 @@ def _fill_trade_fact_count(conn: sqlite3.Connection, command_id: str) -> int:
         (command_id,),
     ).fetchone()
     return int((_dict_row(row).get("count") if row else 0) or 0)
+
+
+def _latest_matched_order_fact_candidates(conn: sqlite3.Connection) -> list[dict]:
+    if not _table_exists(conn, "venue_order_facts"):
+        return []
+    command_states = tuple(_ACKED_ORDER_STATES)
+    sources = tuple(_LIVE_TERMINAL_ORDER_FACT_SOURCES)
+    fact_states = ("LIVE", "RESTING", "MATCHED", "PARTIALLY_MATCHED")
+    command_state_placeholders = ",".join("?" for _ in command_states)
+    source_placeholders = ",".join("?" for _ in sources)
+    fact_state_placeholders = ",".join("?" for _ in fact_states)
+    rows = conn.execute(
+        f"""
+        WITH latest_order_fact AS (
+            SELECT command_id, MAX(local_sequence) AS max_sequence
+              FROM venue_order_facts
+             GROUP BY command_id
+        )
+        SELECT
+            cmd.*,
+            fact.fact_id AS order_fact_id,
+            fact.state AS order_fact_state,
+            fact.observed_at AS order_fact_observed_at,
+            fact.venue_order_id AS order_fact_venue_order_id,
+            fact.remaining_size AS order_fact_remaining_size,
+            fact.matched_size AS order_fact_matched_size,
+            fact.source AS order_fact_source
+          FROM venue_commands cmd
+          JOIN latest_order_fact latest
+            ON latest.command_id = cmd.command_id
+          JOIN venue_order_facts fact
+            ON fact.command_id = latest.command_id
+           AND fact.local_sequence = latest.max_sequence
+         WHERE cmd.intent_kind = 'ENTRY'
+           AND cmd.state IN ({command_state_placeholders})
+           AND fact.state IN ({fact_state_placeholders})
+           AND fact.source IN ({source_placeholders})
+           AND cmd.venue_order_id IS NOT NULL
+        """,
+        (*command_states, *fact_states, *sources),
+    ).fetchall()
+    return [_dict_row(row) for row in rows]
+
+
+def _first_present(raw: dict | None, *keys: str):
+    if not isinstance(raw, dict):
+        return None
+    for key in keys:
+        value = raw.get(key)
+        if value not in (None, ""):
+            return value
+    return None
+
+
+def _string_sequence_from_value(value: object) -> tuple[str, ...]:
+    if value in (None, ""):
+        return ()
+    if isinstance(value, (str, int, float)):
+        text = str(value).strip()
+        return (text,) if text else ()
+    if isinstance(value, dict):
+        for key in ("id", "trade_id", "tradeID", "tradeId", "hash", "tx_hash", "transactionHash"):
+            item = value.get(key)
+            if item not in (None, ""):
+                text = str(item).strip()
+                return (text,) if text else ()
+        return ()
+    if isinstance(value, (list, tuple)):
+        items: list[str] = []
+        for item in value:
+            items.extend(_string_sequence_from_value(item))
+        return tuple(items)
+    return ()
+
+
+def _point_order_trade_ids(point_order: dict | None) -> tuple[str, ...]:
+    for key in ("tradeIDs", "tradeIds", "trade_ids", "associate_trades", "trades"):
+        values = _string_sequence_from_value(_first_present(point_order, key))
+        if values:
+            return values
+    return ()
+
+
+def _point_order_transaction_hashes(point_order: dict | None) -> tuple[str, ...]:
+    for key in ("transactionsHashes", "transactionHashes", "transaction_hashes", "txHashes", "tx_hashes"):
+        values = _string_sequence_from_value(_first_present(point_order, key))
+        if values:
+            return values
+    return ()
+
+
+def _point_order_matched_size(point_order: dict | None, *, fallback: object = None) -> str:
+    value = _first_present(
+        point_order,
+        "matched_size",
+        "matchedSize",
+        "size_matched",
+        "sizeMatched",
+        "takingAmount",
+        "taking_amount",
+    )
+    if value not in (None, ""):
+        return str(value)
+    return str(fallback or "0")
+
+
+def _point_order_fill_price(point_order: dict | None, *, fallback: object = None) -> str:
+    making = _decimal_or_none(_first_present(point_order, "makingAmount", "making_amount"))
+    taking = _decimal_or_none(_first_present(point_order, "takingAmount", "taking_amount"))
+    if making is not None and taking is not None and making > 0 and taking > 0:
+        return _decimal_text(making / taking)
+    value = _first_present(point_order, "avgPrice", "avg_price", "fillPrice", "fill_price", "price")
+    if _positive_decimal_or_none(value) is not None:
+        return str(value)
+    return str(fallback or "")
+
+
+def _matched_remaining_size(command: dict, matched_size: str) -> str:
+    command_size = _decimal_or_none(command.get("size"))
+    matched = _decimal_or_none(matched_size)
+    if command_size is None or matched is None or matched >= command_size:
+        return "0"
+    return _decimal_text(command_size - matched)
+
+
+def _matched_event_type(command: dict, matched_size: str) -> str:
+    command_size = _decimal_or_none(command.get("size"))
+    matched = _decimal_or_none(matched_size)
+    if command_size is not None and matched is not None and matched < command_size:
+        return CommandEventType.PARTIAL_FILL_OBSERVED.value
+    return CommandEventType.FILL_CONFIRMED.value
+
+
+def _coerce_iso_datetime(value: str) -> datetime:
+    text = str(value or _now_iso())
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        return datetime.fromisoformat(text)
+    except ValueError:
+        return datetime.now(timezone.utc)
+
+
+def _append_matched_order_fill_projection(
+    conn: sqlite3.Connection,
+    *,
+    command: dict,
+    venue_order_id: str,
+    matched_size: str,
+    fill_price: str,
+    observed_at: str,
+) -> None:
+    try:
+        from src.execution.exchange_reconcile import _ensure_entry_fill_position_event
+
+        _ensure_entry_fill_position_event(
+            conn,
+            command=command,
+            venue_order_id=venue_order_id,
+            filled_size=matched_size,
+            fill_price=fill_price,
+            observed_at=_coerce_iso_datetime(observed_at),
+        )
+    except Exception:
+        logger.exception(
+            "recovery: entry fill projection failed for command %s order %s",
+            command.get("command_id"),
+            venue_order_id,
+        )
 
 
 def _decimal_text(value: Decimal) -> str:
@@ -747,6 +922,140 @@ def reconcile_terminal_order_facts(conn: sqlite3.Connection) -> dict:
         except Exception as exc:
             logger.error(
                 "recovery: terminal order fact reconciliation failed for command %s: %s",
+                command_id,
+                exc,
+            )
+            summary["errors"] += 1
+    return summary
+
+
+def reconcile_matched_order_facts(conn: sqlite3.Connection, client) -> dict:
+    """Advance ACKED entry commands when point-order truth says the order matched."""
+
+    summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+    get_order = getattr(client, "get_order", None)
+    if not callable(get_order):
+        return summary
+    for row in _latest_matched_order_fact_candidates(conn):
+        summary["scanned"] += 1
+        command_id = str(row.get("command_id") or "")
+        command_order_id = str(row.get("venue_order_id") or "")
+        order_id = str(row.get("order_fact_venue_order_id") or command_order_id)
+        try:
+            if not order_id or not command_order_id or order_id != command_order_id:
+                summary["errors"] += 1
+                continue
+            if _fill_trade_fact_count(conn, command_id) > 0:
+                summary["stayed"] += 1
+                continue
+            try:
+                point_order = get_order(order_id)
+            except Exception as exc:
+                logger.warning(
+                    "recovery: matched order point lookup failed for command %s order %s: %s",
+                    command_id,
+                    order_id,
+                    exc,
+                )
+                summary["errors"] += 1
+                continue
+            if not isinstance(point_order, dict):
+                summary["stayed"] += 1
+                continue
+            venue_status = str(_first_present(point_order, "status", "state") or "").upper()
+            if venue_status not in {"MATCHED", "FILLED", "MINED", "PARTIAL", "PARTIALLY_MATCHED", "PARTIALLY_FILLED"}:
+                summary["stayed"] += 1
+                continue
+            matched_size = _point_order_matched_size(
+                point_order,
+                fallback=row.get("order_fact_matched_size") or row.get("size") or "0",
+            )
+            if not _positive_decimal_or_none(matched_size):
+                summary["stayed"] += 1
+                continue
+            fill_price = _point_order_fill_price(point_order, fallback=row.get("price"))
+            if not _positive_decimal_or_none(fill_price):
+                summary["errors"] += 1
+                continue
+            trade_id = next(iter(_point_order_trade_ids(point_order)), None)
+            if not trade_id:
+                summary["errors"] += 1
+                continue
+            tx_hash = next(iter(_point_order_transaction_hashes(point_order)), None)
+            event_type = _matched_event_type(row, matched_size)
+            remaining_size = _matched_remaining_size(row, matched_size)
+            observed_at = _now_iso()
+            payload = {
+                "reason": "acked_order_point_order_matched",
+                "proof_class": "point_order_matched_fill",
+                "venue_order_id": order_id,
+                "command_id": command_id,
+                "venue_status": venue_status,
+                "matched_size": matched_size,
+                "remaining_size": remaining_size,
+                "fill_price": fill_price,
+                "trade_id": trade_id,
+                "tx_hash": tx_hash,
+                "point_order": point_order,
+                "latest_order_fact_id": row.get("order_fact_id"),
+                "latest_order_fact_state": row.get("order_fact_state"),
+            }
+            safe_command_id = "".join(ch if ch.isalnum() else "_" for ch in command_id)
+            sp_name = f"sp_matched_order_fact_{safe_command_id}"
+            conn.execute(f"SAVEPOINT {sp_name}")
+            try:
+                append_order_fact(
+                    conn,
+                    venue_order_id=order_id,
+                    command_id=command_id,
+                    state="MATCHED" if event_type == CommandEventType.FILL_CONFIRMED.value else "PARTIALLY_MATCHED",
+                    remaining_size=remaining_size,
+                    matched_size=matched_size,
+                    source="REST",
+                    observed_at=observed_at,
+                    venue_timestamp=observed_at,
+                    raw_payload_hash=_payload_hash(payload),
+                    raw_payload_json=payload,
+                )
+                append_trade_fact(
+                    conn,
+                    trade_id=trade_id,
+                    venue_order_id=order_id,
+                    command_id=command_id,
+                    state="MATCHED",
+                    filled_size=matched_size,
+                    fill_price=fill_price,
+                    source="REST",
+                    observed_at=observed_at,
+                    venue_timestamp=observed_at,
+                    tx_hash=tx_hash,
+                    raw_payload_hash=_payload_hash({**payload, "fact_type": "trade"}),
+                    raw_payload_json=payload,
+                )
+                append_event(
+                    conn,
+                    command_id=command_id,
+                    event_type=event_type,
+                    occurred_at=observed_at,
+                    payload=payload,
+                )
+                _append_matched_order_fill_projection(
+                    conn,
+                    command=row,
+                    venue_order_id=order_id,
+                    matched_size=matched_size,
+                    fill_price=fill_price,
+                    observed_at=observed_at,
+                )
+                conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+            except Exception:
+                conn.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
+                conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+                raise
+            summary["advanced"] += 1
+        except Exception as exc:
+            logger.error(
+                "recovery: matched order fact reconciliation failed for command %s: %s",
                 command_id,
                 exc,
             )
@@ -2199,6 +2508,12 @@ def reconcile_unresolved_commands(
         summary["advanced"] += terminal_summary["advanced"]
         summary["stayed"] += terminal_summary["stayed"]
         summary["errors"] += terminal_summary["errors"]
+
+        matched_summary = reconcile_matched_order_facts(conn, client)
+        summary["matched_order_facts"] = matched_summary
+        summary["advanced"] += matched_summary["advanced"]
+        summary["stayed"] += matched_summary["stayed"]
+        summary["errors"] += matched_summary["errors"]
 
         partial_summary = reconcile_partial_remainders(
             conn,

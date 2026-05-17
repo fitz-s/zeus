@@ -219,8 +219,122 @@ def _jsonable_payload(payload: object) -> object:
     return json.loads(json.dumps(payload, sort_keys=True, default=str))
 
 
+def _submit_result_envelope(result: dict) -> dict:
+    if not isinstance(result, dict):
+        return {}
+    envelope = result.get("_venue_submission_envelope")
+    return envelope if isinstance(envelope, dict) else {}
+
+
+def _submit_result_raw_response(result: dict) -> dict:
+    envelope = _submit_result_envelope(result)
+    raw_json = envelope.get("raw_response_json")
+    if not raw_json:
+        return {}
+    try:
+        parsed = json.loads(str(raw_json))
+    except (TypeError, json.JSONDecodeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _first_submit_value(result: dict, *keys: str, raw_first: bool = False):
+    if not isinstance(result, dict):
+        return None
+    raw = _submit_result_raw_response(result)
+    sources = (raw, result) if raw_first else (result, raw)
+    for source in sources:
+        for key in keys:
+            value = source.get(key)
+            if value not in (None, ""):
+                return value
+    envelope = _submit_result_envelope(result)
+    for key in keys:
+        value = envelope.get(key)
+        if value not in (None, ""):
+            return value
+    return None
+
+
+def _venue_submit_status(result: dict) -> str:
+    return str(
+        _first_submit_value(result, "status", "state", raw_first=True) or ""
+    ).upper()
+
+
+def _decimal_or_none(value: object) -> Decimal | None:
+    try:
+        parsed = Decimal(str(value))
+    except Exception:
+        return None
+    return parsed if parsed.is_finite() else None
+
+
+def _positive_decimal_or_none(value: object) -> Decimal | None:
+    parsed = _decimal_or_none(value)
+    return parsed if parsed is not None and parsed > 0 else None
+
+
+def _decimal_text(value: Decimal) -> str:
+    text = format(value.normalize(), "f")
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return text or "0"
+
+
+def _string_sequence_from_value(value: object) -> tuple[str, ...]:
+    if value in (None, ""):
+        return ()
+    if isinstance(value, (str, int, float)):
+        text = str(value).strip()
+        return (text,) if text else ()
+    if isinstance(value, dict):
+        for key in ("id", "trade_id", "tradeID", "tradeId", "hash", "tx_hash", "transactionHash"):
+            item = value.get(key)
+            if item not in (None, ""):
+                text = str(item).strip()
+                return (text,) if text else ()
+        return ()
+    if isinstance(value, (list, tuple)):
+        items: list[str] = []
+        for item in value:
+            items.extend(_string_sequence_from_value(item))
+        return tuple(items)
+    return ()
+
+
+def _submit_result_string_sequence(result: dict, *keys: str) -> tuple[str, ...]:
+    for key in keys:
+        values = _string_sequence_from_value(_first_submit_value(result, key))
+        if values:
+            return values
+    return ()
+
+
+def _venue_submit_trade_ids(result: dict) -> tuple[str, ...]:
+    return _submit_result_string_sequence(
+        result,
+        "tradeIDs",
+        "tradeIds",
+        "trade_ids",
+        "associate_trades",
+        "trades",
+    )
+
+
+def _venue_submit_transaction_hashes(result: dict) -> tuple[str, ...]:
+    return _submit_result_string_sequence(
+        result,
+        "transactionsHashes",
+        "transactionHashes",
+        "transaction_hashes",
+        "txHashes",
+        "tx_hashes",
+    )
+
+
 def _venue_submit_order_fact_state(result: dict) -> str:
-    status = str(result.get("status") or result.get("state") or "").upper()
+    status = _venue_submit_status(result)
     if status in {"MATCHED", "FILLED"}:
         return "MATCHED"
     if status in {"PARTIALLY_MATCHED", "PARTIAL", "PARTIALLY_FILLED"}:
@@ -228,20 +342,82 @@ def _venue_submit_order_fact_state(result: dict) -> str:
     return "LIVE"
 
 
-def _venue_submit_remaining_size(result: dict, fallback_size: float | Decimal) -> str:
-    for key in ("remaining_size", "remainingSize", "size", "original_size", "originalSize"):
-        value = result.get(key)
+def _venue_submit_matched_size(
+    result: dict,
+    *,
+    fallback_size: float | Decimal | None = None,
+) -> str:
+    for key in (
+        "matched_size",
+        "matchedSize",
+        "size_matched",
+        "sizeMatched",
+        "takingAmount",
+        "taking_amount",
+    ):
+        value = _first_submit_value(result, key)
+        if value not in (None, ""):
+            return str(value)
+    status = _venue_submit_status(result)
+    if status in {"MATCHED", "FILLED"} and fallback_size is not None:
+        return str(fallback_size)
+    return "0"
+
+
+def _venue_submit_remaining_size(
+    result: dict,
+    fallback_size: float | Decimal,
+    *,
+    matched_size: str | None = None,
+) -> str:
+    for key in ("remaining_size", "remainingSize"):
+        value = _first_submit_value(result, key)
+        if value not in (None, ""):
+            return str(value)
+    status = _venue_submit_status(result)
+    matched = _decimal_or_none(matched_size if matched_size is not None else _venue_submit_matched_size(result))
+    fallback = _decimal_or_none(fallback_size)
+    if status in {"MATCHED", "FILLED"} and matched is not None:
+        if fallback is not None and fallback > matched:
+            return _decimal_text(fallback - matched)
+        return "0"
+    for key in ("size", "original_size", "originalSize"):
+        value = _first_submit_value(result, key)
         if value not in (None, ""):
             return str(value)
     return str(fallback_size)
 
 
-def _venue_submit_matched_size(result: dict) -> str:
-    for key in ("matched_size", "matchedSize", "size_matched", "sizeMatched"):
-        value = result.get(key)
-        if value not in (None, ""):
+def _venue_submit_fill_price(
+    result: dict,
+    *,
+    fallback_price: float | Decimal,
+) -> str:
+    making = _positive_decimal_or_none(_first_submit_value(result, "makingAmount", "making_amount"))
+    taking = _positive_decimal_or_none(_first_submit_value(result, "takingAmount", "taking_amount"))
+    if making is not None and taking is not None:
+        return _decimal_text(making / taking)
+    for key in ("avgPrice", "avg_price", "fillPrice", "fill_price", "price"):
+        value = _first_submit_value(result, key)
+        if _positive_decimal_or_none(value) is not None:
             return str(value)
-    return "0"
+    return str(fallback_price)
+
+
+def _venue_fill_covers_submit(matched_size: str, submitted_size: float | Decimal) -> bool:
+    matched = _decimal_or_none(matched_size)
+    submitted = _decimal_or_none(submitted_size)
+    return matched is not None and submitted is not None and matched >= submitted
+
+
+def _merge_point_order_fill_truth(result: dict, point_order: dict | None) -> dict:
+    if not point_order:
+        return result
+    merged = dict(result)
+    for key, value in point_order.items():
+        if value not in (None, ""):
+            merged.setdefault(key, value)
+    return merged
 
 
 def _json_safe_string(value, fallback: str = "") -> str:
@@ -2496,7 +2672,7 @@ def _live_order(
     _gate_runtime_check("on_chain_mutation")
     from src.data.polymarket_client import PolymarketClient, V2PreflightError
     from src.execution.command_bus import IdempotencyKey, IntentKind
-    from src.state.venue_command_repo import append_order_fact, insert_command, append_event
+    from src.state.venue_command_repo import append_order_fact, append_trade_fact, insert_command, append_event
     from src.contracts.executable_market_snapshot_v2 import MarketSnapshotError
     from src.state.collateral_ledger import CollateralInsufficient
 
@@ -3284,6 +3460,65 @@ def _live_order(
                 venue_status=str(result.get("status") or ""),
                 idempotency_key=idem.value,
             )
+        order_fact_state = _venue_submit_order_fact_state(result)
+        matched_size = _venue_submit_matched_size(result, fallback_size=shares)
+        remaining_size = _venue_submit_remaining_size(
+            result,
+            shares,
+            matched_size=matched_size,
+        )
+        fill_event_type: str | None = None
+        fill_price = _venue_submit_fill_price(result, fallback_price=intent.limit_price)
+        fill_trade_id: str | None = None
+        fill_tx_hash = next(iter(_venue_submit_transaction_hashes(result)), None)
+
+        fill_evidence = result
+        if order_fact_state in {"MATCHED", "PARTIALLY_MATCHED"} and _positive_decimal_or_none(matched_size):
+            trade_ids = _venue_submit_trade_ids(result)
+            if not trade_ids:
+                get_order = getattr(client, "get_order", None)
+                if callable(get_order):
+                    try:
+                        point_order = get_order(order_id)
+                    except Exception as exc:
+                        logger.warning(
+                            "_live_order: matched submit point-order lookup failed "
+                            "(command_id=%s order_id=%s): %s",
+                            command_id,
+                            order_id,
+                            exc,
+                        )
+                        point_order = None
+                    if isinstance(point_order, dict):
+                        fill_evidence = _merge_point_order_fill_truth(result, point_order)
+                        trade_ids = _venue_submit_trade_ids(fill_evidence)
+                        point_matched = _venue_submit_matched_size(
+                            fill_evidence,
+                            fallback_size=matched_size,
+                        )
+                        if _positive_decimal_or_none(point_matched):
+                            matched_size = point_matched
+                            remaining_size = _venue_submit_remaining_size(
+                                fill_evidence,
+                                shares,
+                                matched_size=matched_size,
+                            )
+                        fill_price = _venue_submit_fill_price(
+                            fill_evidence,
+                            fallback_price=intent.limit_price,
+                        )
+                        fill_tx_hash = next(
+                            iter(_venue_submit_transaction_hashes(fill_evidence)),
+                            fill_tx_hash,
+                        )
+            fill_trade_id = next(iter(trade_ids), None)
+            if fill_trade_id:
+                fill_event_type = (
+                    "FILL_CONFIRMED"
+                    if _venue_fill_covers_submit(matched_size, shares)
+                    else "PARTIAL_FILL_OBSERVED"
+                )
+
         # SUBMIT_ACKED
         try:
             append_event(
@@ -3302,9 +3537,9 @@ def _live_order(
                 conn,
                 venue_order_id=order_id,
                 command_id=command_id,
-                state=_venue_submit_order_fact_state(result),
-                remaining_size=_venue_submit_remaining_size(result, shares),
-                matched_size=_venue_submit_matched_size(result),
+                state=order_fact_state,
+                remaining_size=remaining_size,
+                matched_size=matched_size,
                 source="REST",
                 observed_at=ack_time,
                 venue_timestamp=ack_time,
@@ -3321,6 +3556,50 @@ def _live_order(
                     "source": "place_limit_order_ack",
                 },
             )
+            if fill_event_type and fill_trade_id:
+                append_trade_fact(
+                    conn,
+                    trade_id=fill_trade_id,
+                    venue_order_id=order_id,
+                    command_id=command_id,
+                    state="MATCHED",
+                    filled_size=matched_size,
+                    fill_price=fill_price,
+                    source="REST",
+                    observed_at=ack_time,
+                    venue_timestamp=ack_time,
+                    tx_hash=fill_tx_hash,
+                    raw_payload_hash=_canonical_payload_hash(
+                        {
+                            "command_id": command_id,
+                            "venue_order_id": order_id,
+                            "trade_id": fill_trade_id,
+                            "fill_evidence": fill_evidence,
+                        }
+                    ),
+                    raw_payload_json={
+                        "venue_order_id": order_id,
+                        "trade_id": fill_trade_id,
+                        "submit_result": _jsonable_payload(result),
+                        "fill_evidence": _jsonable_payload(fill_evidence),
+                        "source": "place_limit_order_matched_submit",
+                    },
+                )
+                append_event(
+                    conn,
+                    command_id=command_id,
+                    event_type=fill_event_type,
+                    occurred_at=ack_time,
+                    payload={
+                        "reason": "place_limit_order_matched_submit",
+                        "venue_order_id": order_id,
+                        "trade_id": fill_trade_id,
+                        "filled_size": matched_size,
+                        "fill_price": fill_price,
+                        "tx_hash": fill_tx_hash,
+                        **final_envelope_payload,
+                    },
+                )
             if _own_conn:
                 conn.commit()
         except Exception as inner:
@@ -3331,8 +3610,14 @@ def _live_order(
 
         result_obj = OrderResult(
             trade_id=trade_id,
-            status="pending",
-            reason=f"Order posted, timeout={timeout}s",
+            status="filled" if fill_event_type == "FILL_CONFIRMED" else "pending",
+            fill_price=float(fill_price) if fill_event_type == "FILL_CONFIRMED" else None,
+            filled_at=ack_time if fill_event_type == "FILL_CONFIRMED" else None,
+            reason=(
+                "Order filled on submit"
+                if fill_event_type == "FILL_CONFIRMED"
+                else f"Order posted, timeout={timeout}s"
+            ),
             order_id=order_id,
             timeout_seconds=timeout,
             submitted_price=intent.limit_price,
@@ -3341,7 +3626,11 @@ def _live_order(
             external_order_id=order_id,
             venue_status=str(result.get("status") or "placed"),
             idempotency_key=idem.value,
-            command_state="ACKED",  # P1.S5 INV-32: materialize_position gates on this
+            command_state=(
+                "FILLED"
+                if fill_event_type == "FILL_CONFIRMED"
+                else ("PARTIAL" if fill_event_type == "PARTIAL_FILL_OBSERVED" else "ACKED")
+            ),
         )
         try:
             alert_trade(
