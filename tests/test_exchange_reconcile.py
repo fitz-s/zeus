@@ -1756,6 +1756,141 @@ def test_pending_exit_matched_sell_offsets_confirmed_position_without_drift(conn
     assert not any(finding.kind == "position_drift" for finding in result)
 
 
+def test_recorded_maker_fill_reprojection_does_not_regress_pending_exit_phase(conn):
+    from src.execution.exchange_reconcile import reconcile_recorded_maker_fill_economics, run_reconcile_sweep
+
+    seed_command(conn, state="FILLED", size=23.7, price=0.07)
+    seed_position_baseline(conn)
+    seed_trade_decision_runtime_alias(conn)
+    maker_trade = TradeFact(
+        raw={
+            "id": "trade-entry-reprojection",
+            "taker_order_id": "ord-other-taker",
+            "status": "CONFIRMED",
+            "size": "23.7",
+            "price": "0.93",
+            "transaction_hash": "0xentryreprojection",
+            "maker_orders": [
+                {
+                    "order_id": "ord-m5",
+                    "matched_amount": "23.7",
+                    "price": "0.07",
+                    "asset_id": YES_TOKEN,
+                    "side": "BUY",
+                }
+            ],
+        }
+    )
+
+    run_reconcile_sweep(
+        FakeM5Adapter(
+            positions=[position(token_id=YES_TOKEN, size="23.7")],
+            trades=[maker_trade],
+        ),
+        conn,
+        context="periodic",
+        observed_at=NOW,
+    )
+    assert (
+        conn.execute(
+            """
+            SELECT COUNT(*)
+              FROM position_events
+             WHERE position_id = 'pos-m5'
+               AND event_type = 'ENTRY_ORDER_FILLED'
+            """
+        ).fetchone()[0]
+        == 1
+    )
+
+    conn.execute(
+        """
+        UPDATE position_current
+           SET phase = 'pending_exit',
+               order_id = 'ord-exit-m5',
+               order_status = 'sell_pending_confirmation',
+               shares = 23.7,
+               cost_basis_usd = 1.659,
+               entry_price = 0.07,
+               updated_at = ?
+         WHERE position_id = 'pos-m5'
+        """,
+        ((NOW + timedelta(minutes=1)).isoformat(),),
+    )
+
+    summary = reconcile_recorded_maker_fill_economics(
+        conn,
+        observed_at=NOW + timedelta(minutes=2),
+    )
+    assert summary == {"scanned": 1, "corrected": 0, "projected": 1, "stayed": 0, "errors": 0}
+
+    current = conn.execute(
+        "SELECT phase, order_id, order_status FROM position_current WHERE position_id = 'pos-m5'"
+    ).fetchone()
+    assert dict(current) == {
+        "phase": "pending_exit",
+        "order_id": "ord-exit-m5",
+        "order_status": "sell_pending_confirmation",
+    }
+
+
+def test_late_entry_fill_does_not_resurrect_terminal_order_remainder(conn):
+    from src.execution.exchange_reconcile import run_reconcile_sweep
+    from src.state.venue_command_repo import append_order_fact
+
+    seed_command(conn, state="PARTIAL", size=7.21, price=0.28)
+    seed_position_baseline(conn)
+    append_order_fact(
+        conn,
+        venue_order_id="ord-m5",
+        command_id="cmd-m5",
+        state="EXPIRED",
+        remaining_size="0",
+        matched_size="2.11",
+        source="REST",
+        observed_at=NOW,
+        raw_payload_hash=hashlib.sha256(b"terminal-partial-remainder").hexdigest(),
+        raw_payload_json={
+            "reason": "partial_remainder_absent_from_exchange_open_orders",
+            "point_order_status": "CANCELED",
+            "matched_size": "2.11",
+        },
+    )
+
+    run_reconcile_sweep(
+        FakeM5Adapter(
+            positions=[position(token_id=YES_TOKEN, size="4.95")],
+            trades=[
+                trade(
+                    trade_id="trade-late-fill",
+                    order_id="ord-m5",
+                    size="4.95",
+                    price="0.28",
+                    status="CONFIRMED",
+                )
+            ],
+        ),
+        conn,
+        context="periodic",
+        observed_at=NOW + timedelta(minutes=1),
+    )
+
+    latest = conn.execute(
+        """
+        SELECT state, remaining_size, matched_size
+          FROM venue_order_facts
+         WHERE command_id = 'cmd-m5'
+         ORDER BY local_sequence DESC, fact_id DESC
+         LIMIT 1
+        """
+    ).fetchone()
+    assert dict(latest) == {
+        "state": "EXPIRED",
+        "remaining_size": "0",
+        "matched_size": "4.95",
+    }
+
+
 def test_position_journal_ignores_confirmed_trade_without_fill_economics(conn):
     from src.execution.exchange_reconcile import run_reconcile_sweep
 

@@ -63,6 +63,8 @@ _TRADE_FACT_STATES = frozenset({"MATCHED", "MINED", "CONFIRMED", "RETRYING", "FA
 _CONFIRMED_POSITION_FACT_STATES = frozenset({"CONFIRMED"})
 _OPTIMISTIC_POSITION_FACT_STATES = frozenset({"MATCHED", "MINED"})
 _POSITION_DRIFT_ABS_TOLERANCE = Decimal("0.0001")
+_ENTRY_FILL_PROJECTION_PHASES = frozenset({"pending_entry", "active", "day0_window"})
+_TERMINAL_ORDER_FACT_STATES = frozenset({"MATCHED", "CANCEL_CONFIRMED", "EXPIRED", "VENUE_WIPED"})
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS exchange_reconcile_findings (
@@ -626,13 +628,6 @@ def _ensure_entry_fill_order_fact(
     if filled_dec is None:
         return
     command_size = _positive_decimal_or_none(command.get("size"))
-    if command_size is None:
-        remaining = Decimal("0")
-    else:
-        remaining = max(Decimal("0"), command_size - filled_dec)
-    state = "MATCHED" if command_size is not None and filled_dec >= command_size else "PARTIALLY_MATCHED"
-    remaining_text = _decimal_text(remaining)
-    matched_text = _decimal_text(filled_dec)
     latest = conn.execute(
         """
         SELECT state, remaining_size, matched_size
@@ -643,6 +638,22 @@ def _ensure_entry_fill_order_fact(
         """,
         (str(command.get("command_id") or ""),),
     ).fetchone()
+    latest_terminal_state = str(latest["state"] or "") if latest is not None else ""
+    terminal_state_preserved = latest_terminal_state in _TERMINAL_ORDER_FACT_STATES
+    if terminal_state_preserved:
+        latest_matched = _positive_decimal_or_none(latest["matched_size"]) or Decimal("0")
+        matched_dec = max(filled_dec, latest_matched)
+        remaining = Decimal("0")
+        state = latest_terminal_state
+    else:
+        matched_dec = filled_dec
+        if command_size is None:
+            remaining = Decimal("0")
+        else:
+            remaining = max(Decimal("0"), command_size - matched_dec)
+        state = "MATCHED" if command_size is not None and matched_dec >= command_size else "PARTIALLY_MATCHED"
+    remaining_text = _decimal_text(remaining)
+    matched_text = _decimal_text(matched_dec)
     if latest is not None and (
         str(latest["state"] or "") == state
         and _same_decimal_value(latest["remaining_size"], remaining_text)
@@ -661,6 +672,7 @@ def _ensure_entry_fill_order_fact(
         "state": state,
         "remaining_size": remaining_text,
         "matched_size": matched_text,
+        "terminal_state_preserved": terminal_state_preserved,
     }
     append_order_fact(
         conn,
@@ -1130,6 +1142,14 @@ def _ensure_entry_fill_position_event(
 
     current = dict(row)
     phase = str(current.get("phase") or "")
+    if phase not in _ENTRY_FILL_PROJECTION_PHASES:
+        logger.info(
+            "exchange_reconcile: skip entry fill projection for downstream phase position_id=%s phase=%s order_id=%s",
+            position_id,
+            phase,
+            venue_order_id,
+        )
+        return
     runtime_state = "day0_window" if phase == "day0_window" else "entered"
     fill_economics = _entry_fill_economics_for_command(
         conn,

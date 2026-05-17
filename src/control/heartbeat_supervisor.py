@@ -390,8 +390,9 @@ class HeartbeatSupervisor:
 
         Implements the Polymarket chain-token heartbeat protocol — see the
         comment in __init__. Each successful post returns the next canonical
-        `heartbeat_id` which we capture for the following tick; any failure
-        resets to `""` so the next tick starts a fresh chain.
+        `heartbeat_id` which we capture for the following tick. Transient
+        failures keep that id so existing resting orders stay tied to the same
+        lease chain; explicit Invalid Heartbeat ID restarts from `""`.
         """
 
         if not self._run_once_lock.acquire(blocking=False):
@@ -416,7 +417,7 @@ class HeartbeatSupervisor:
                         exc = RuntimeError(
                             f"Invalid Heartbeat ID; empty-chain recovery failed: {retry_exc}"
                         )
-                self._heartbeat_id = ""  # reset chain so next tick re-registers
+                    self._heartbeat_id = ""  # invalid chain cannot protect resting orders
                 self.record_failure(exc)
         finally:
             self._run_once_lock.release()
