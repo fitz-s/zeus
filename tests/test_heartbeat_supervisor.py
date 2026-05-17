@@ -154,7 +154,14 @@ def test_invalid_heartbeat_id_is_immediate_lease_loss_and_next_tick_restarts_cha
     assert adapter.heartbeat_ids == ["", "id-1", ""]
 
 
-def test_invalid_heartbeat_id_with_venue_hint_recovers_from_hinted_chain_id():
+def test_invalid_heartbeat_id_with_venue_hint_recovers_in_same_tick():
+    """RELATIONSHIP: venue invalid-id hint -> heartbeat lease owner.
+
+    A read timeout can leave the client holding the previous heartbeat id even
+    though the venue processed and rotated the token. Polymarket returns the
+    current token on the next 400; using it only on the next tick extends the
+    lease gap long enough to cancel resting GTC/GTD orders.
+    """
     adapter = FakeHeartbeatAdapter([
         RuntimeError(
             "PolyApiException[status_code=400, "
@@ -169,13 +176,12 @@ def test_invalid_heartbeat_id_with_venue_hint_recovers_from_hinted_chain_id():
         initial_heartbeat_id="persisted-stale",
     )
 
-    lost = _run(supervisor.run_once())
     recovered = _run(supervisor.run_once())
 
-    assert lost.health is HeartbeatHealth.LOST
-    assert lost.heartbeat_id == "server-current"
     assert recovered.health is HeartbeatHealth.HEALTHY
+    assert recovered.consecutive_failures == 0
     assert recovered.heartbeat_id == "server-next"
+    assert supervisor.gate_for_order_type("GTC") is True
     assert adapter.heartbeat_ids == ["persisted-stale", "server-current"]
 
 

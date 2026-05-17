@@ -360,26 +360,21 @@ class HeartbeatSupervisor:
             return self.status()
         try:
             try:
-                if self._adapter is None:
-                    raise RuntimeError("heartbeat adapter unavailable")
-                ack = self._adapter.post_heartbeat(self._heartbeat_id)
-                if inspect.isawaitable(ack):
-                    ack = await ack
-                if getattr(ack, "ok", True) is False:
-                    raise RuntimeError("heartbeat ack returned ok=False")
-                next_id = ""
-                raw = getattr(ack, "raw", None)
-                if isinstance(raw, dict):
-                    next_id = str(raw.get("heartbeat_id") or "")
-                if not next_id:
-                    raise RuntimeError("heartbeat ack missing heartbeat_id")
-                self._heartbeat_id = next_id
+                self._heartbeat_id = await self._post_heartbeat_once(self._heartbeat_id)
                 self.record_success()
             except Exception as exc:  # fail closed, surface through status/tombstone
                 # Invalid-heartbeat errors include the venue's current canonical
-                # token. Preserve that handoff hint so a restart can recover on
-                # the next tick instead of waiting for the old server lease to
-                # expire and cancel resting orders.
+                # token. Retry that hint in the same tick; waiting for the next
+                # tick can turn one timeout into a 10-15s lease gap and cancel
+                # every resting GTC/GTD order.
+                hinted_id = _heartbeat_id_hint_from_error(exc) if _is_invalid_heartbeat_id_error(exc) else ""
+                if hinted_id:
+                    try:
+                        self._heartbeat_id = await self._post_heartbeat_once(hinted_id)
+                        self.record_success()
+                        return self.status()
+                    except Exception as retry_exc:
+                        exc = retry_exc
                 if _is_invalid_heartbeat_id_error(exc):
                     self._heartbeat_id = _heartbeat_id_hint_from_error(exc)
                 else:
@@ -388,6 +383,22 @@ class HeartbeatSupervisor:
         finally:
             self._run_once_lock.release()
         return self.status()
+
+    async def _post_heartbeat_once(self, heartbeat_id: str) -> str:
+        if self._adapter is None:
+            raise RuntimeError("heartbeat adapter unavailable")
+        ack = self._adapter.post_heartbeat(heartbeat_id)
+        if inspect.isawaitable(ack):
+            ack = await ack
+        if getattr(ack, "ok", True) is False:
+            raise RuntimeError("heartbeat ack returned ok=False")
+        raw = getattr(ack, "raw", None)
+        next_id = ""
+        if isinstance(raw, dict):
+            next_id = str(raw.get("heartbeat_id") or "")
+        if not next_id:
+            raise RuntimeError("heartbeat ack missing heartbeat_id")
+        return next_id
 
     def record_success(self) -> None:
         self._health = HeartbeatHealth.HEALTHY

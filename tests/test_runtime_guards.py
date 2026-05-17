@@ -4244,6 +4244,186 @@ def test_monitor_ens_refresh_records_forecast_fallback_provenance(monkeypatch):
     assert "alpha_posterior" in applied
 
 
+def test_monitor_ens_refresh_uses_executable_forecast_reader_for_ecmwf_open_data(monkeypatch):
+    """RELATIONSHIP: entry forecast authority -> held-position monitor fresh_prob.
+
+    A position opened from ecmwf_open_data must refresh monitor probability from
+    the executable forecast reader, not by re-entering the legacy Open-Meteo
+    fetch_ensemble fallback path.
+    """
+    from src.engine import monitor_refresh
+
+    conn = sqlite3.connect(":memory:")
+    position = types.SimpleNamespace(
+        temperature_metric="high",
+        bin_label="30-31°F",
+        unit="F",
+        market_id="m-monitor",
+        condition_id="c-monitor",
+        direction="buy_yes",
+        p_posterior=0.42,
+        entered_at=None,
+        target_date="2026-04-01",
+        entry_model_agreement="AGREE",
+        selected_method="ens_member_counting",
+        entry_method="ens_member_counting",
+    )
+    city = types.SimpleNamespace(
+        name="NYC",
+        lat=40.7772,
+        timezone="America/New_York",
+        cluster="NYC",
+        settlement_unit="F",
+        settlement_source_type="wu_icao",
+        wu_station="KLGA",
+    )
+    calls: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        monitor_refresh,
+        "entry_forecast_config",
+        lambda: types.SimpleNamespace(
+            source_id="ecmwf_open_data",
+            source_transport=types.SimpleNamespace(value="ensemble_snapshots_v2_db_reader"),
+            high_track="mx2t6_high_full_horizon",
+            low_track="mn2t6_low_full_horizon",
+        ),
+    )
+
+    class FakeBundle:
+        def to_ens_result(self):
+            return {
+                "period_extrema_members": [30.5] * 51,
+                "period_extrema_source": "local_calendar_day_member_extrema",
+                "members_unit": "degF",
+                "times": ["2026-04-01"],
+                "n_members": 51,
+                "source_id": "ecmwf_open_data",
+                "source_transport": "ensemble_snapshots_v2_db_reader",
+                "source_run_id": "source-run-1",
+                "forecast_source_role": "entry_primary",
+                "degradation_level": "OK",
+                "fetch_time": datetime(2026, 4, 1, 12, tzinfo=timezone.utc),
+            }
+
+    def _read_executable_forecast(*args, **kwargs):
+        calls["reader_kwargs"] = kwargs
+        return types.SimpleNamespace(ok=True, bundle=FakeBundle(), reason_code="EXECUTABLE_FORECAST_READY")
+
+    monkeypatch.setattr(monitor_refresh, "read_executable_forecast", _read_executable_forecast)
+    monkeypatch.setattr(
+        monitor_refresh,
+        "fetch_ensemble",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("legacy fetch_ensemble must not run")),
+    )
+    monkeypatch.setattr(monitor_refresh, "lead_days_to_date_start", lambda *args, **kwargs: 2.0)
+    monkeypatch.setattr(
+        monitor_refresh,
+        "_build_all_bins",
+        lambda *args, **kwargs: (
+            [
+                Bin(low=30, high=31, label="30-31°F", unit="F"),
+                Bin(low=32, high=33, label="32-33°F", unit="F"),
+            ],
+            0,
+        ),
+    )
+    monkeypatch.setattr(monitor_refresh, "get_calibrator", lambda *args, **kwargs: (None, 4))
+    monkeypatch.setattr("src.calibration.store.get_pairs_for_bucket", lambda *args, **kwargs: [])
+    monkeypatch.setattr(monitor_refresh, "season_from_date", lambda *args, **kwargs: "MAM")
+    monkeypatch.setattr(
+        monitor_refresh,
+        "compute_alpha",
+        lambda **kwargs: types.SimpleNamespace(value_for_consumer=lambda consumer: 1.0),
+    )
+    monkeypatch.setattr(monitor_refresh, "_check_persistence_anomaly", lambda *args, **kwargs: 1.0)
+
+    _posterior, applied = monitor_refresh._refresh_ens_member_counting(
+        position=position,
+        current_p_market=0.50,
+        conn=conn,
+        city=city,
+        target_d=date(2026, 4, 1),
+    )
+
+    assert calls["reader_kwargs"]["require_entry_readiness"] is False
+    assert calls["reader_kwargs"]["source_id"] == "ecmwf_open_data"
+    assert calls["reader_kwargs"]["condition_id"] == "c-monitor"
+    assert "entry_forecast_reader" in applied
+    assert "period_extrema_members_adapter" in applied
+    assert "forecast_source_role:entry_primary" in applied
+    assert "alpha_posterior" in applied
+    assert getattr(position, monitor_refresh._MONITOR_PROBABILITY_FRESH_ATTR) is True
+
+
+def test_monitor_ens_refresh_blocks_legacy_fallback_when_executable_reader_blocks(monkeypatch):
+    from src.engine import monitor_refresh
+
+    conn = sqlite3.connect(":memory:")
+    position = types.SimpleNamespace(
+        temperature_metric="high",
+        bin_label="30-31°F",
+        unit="F",
+        market_id="m-monitor",
+        condition_id="c-monitor",
+        direction="buy_yes",
+        p_posterior=0.42,
+        entered_at=None,
+        target_date="2026-04-01",
+        entry_model_agreement="AGREE",
+        selected_method="ens_member_counting",
+        entry_method="ens_member_counting",
+    )
+    city = types.SimpleNamespace(
+        name="NYC",
+        lat=40.7772,
+        timezone="America/New_York",
+        cluster="NYC",
+        settlement_unit="F",
+        settlement_source_type="wu_icao",
+        wu_station="KLGA",
+    )
+    monkeypatch.setattr(
+        monitor_refresh,
+        "entry_forecast_config",
+        lambda: types.SimpleNamespace(
+            source_id="ecmwf_open_data",
+            source_transport=types.SimpleNamespace(value="ensemble_snapshots_v2_db_reader"),
+            high_track="mx2t6_high_full_horizon",
+            low_track="mn2t6_low_full_horizon",
+        ),
+    )
+    monkeypatch.setattr(
+        monitor_refresh,
+        "read_executable_forecast",
+        lambda *args, **kwargs: types.SimpleNamespace(
+            ok=False,
+            bundle=None,
+            reason_code="PRODUCER_READINESS_MISSING",
+        ),
+    )
+    monkeypatch.setattr(
+        monitor_refresh,
+        "fetch_ensemble",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("legacy fetch_ensemble must not run")),
+    )
+    monkeypatch.setattr(monitor_refresh, "lead_days_to_date_start", lambda *args, **kwargs: 2.0)
+
+    posterior, applied = monitor_refresh._refresh_ens_member_counting(
+        position=position,
+        current_p_market=0.50,
+        conn=conn,
+        city=city,
+        target_d=date(2026, 4, 1),
+    )
+
+    assert posterior == pytest.approx(position.p_posterior)
+    assert "entry_forecast_reader" in applied
+    assert "executable_forecast_reader_blocked:PRODUCER_READINESS_MISSING" in applied
+    assert "legacy_monitor_fallback_blocked" in applied
+    assert getattr(position, monitor_refresh._MONITOR_PROBABILITY_FRESH_ATTR) is False
+
+
 def test_monitor_ens_refresh_preserves_tigge_evidence_but_uses_bucket_source_id(monkeypatch):
     from src.engine import monitor_refresh
 
