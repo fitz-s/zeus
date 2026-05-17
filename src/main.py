@@ -519,6 +519,17 @@ def _run_ws_gap_reconcile_if_required(
         summary = ws_guard.summary()
     if not bool(summary.get("m5_reconcile_required", False)):
         return {"status": "not_required"}
+    if (
+        summary.get("subscription_state") == "DISCONNECTED"
+        and summary.get("gap_reason") == "not_configured"
+    ):
+        return {
+            "status": "deferred_ws_not_ready",
+            "reason": "ws_not_configured",
+            "subscription_state": summary.get("subscription_state"),
+            "gap_reason": summary.get("gap_reason"),
+            "m5_reconcile_required": True,
+        }
 
     owns_connection = conn_factory is None
     conn = None

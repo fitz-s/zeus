@@ -635,6 +635,38 @@ def test_venue_background_maintenance_throttles_degraded_collateral_refresh_atte
     assert ledger.snapshot().authority_tier == "DEGRADED"
 
 
+def test_venue_background_m5_reconcile_defers_until_user_ws_configured():
+    from src import main
+
+    class BootingWSGuard:
+        def summary(self, *, now=None):
+            return {
+                "connected": False,
+                "subscription_state": "DISCONNECTED",
+                "gap_reason": "not_configured",
+                "m5_reconcile_required": True,
+                "entry": {"allow_submit": False},
+            }
+
+    def fail_if_opened():
+        raise AssertionError("boot-time not_configured WS must not open the live DB")
+
+    result = main._run_ws_gap_reconcile_if_required(
+        object(),
+        conn_factory=fail_if_opened,
+        ws_guard=BootingWSGuard(),
+        now=datetime(2026, 5, 17, 10, 0, tzinfo=timezone.utc),
+    )
+
+    assert result == {
+        "status": "deferred_ws_not_ready",
+        "reason": "ws_not_configured",
+        "subscription_state": "DISCONNECTED",
+        "gap_reason": "not_configured",
+        "m5_reconcile_required": True,
+    }
+
+
 @pytest.mark.skip(reason="M5 exchange reconciliation owns no-resubmit proof after heartbeat loss.")
 def test_recovery_does_not_duplicate_orders():
     pass
