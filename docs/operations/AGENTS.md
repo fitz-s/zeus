@@ -82,6 +82,9 @@ Tracked packet evidence in this live router is limited to the current rows
 below. Closed packet evidence is archived under `docs/operations/archive/<YYYY>-Q<N>/` and
 indexed in `docs/operations/archive/<YYYY>-Q<N>/INDEX.md`; do not use archived packet folders as
 active workflow defaults. Active archival rules: `docs/authority/ARCHIVAL_RULES.md`.
+Note: ARCHIVAL_RULES.md now lives at `docs/authority/ARCHIVAL_RULES.md` (relocated from
+`docs/operations/task_2026-05-15_runtime_improvement_engineering_package/04_workspace_hygiene/`
+by W3 2026-05-17). A `.relocated` stub exists at the old path for reference.
 
 ### Attached Package Inputs
 

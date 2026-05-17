@@ -274,7 +274,7 @@ cards:
     severity: critical
     sources:
       - AGENTS.md
-      - docs/reports/legacy_reference_statistical_methodology.md
+      - docs/reference/legacy/legacy_reference_statistical_methodology.md
       - docs/reference/zeus_math_spec.md
       - docs/operations/known_gaps.md
     failure_mode: >
@@ -990,7 +990,7 @@ cards:
     severity: high
     sources:
       - docs/operations/known_gaps.md
-      - docs/reports/legacy_reference_statistical_methodology.md
+      - docs/reference/legacy/legacy_reference_statistical_methodology.md
       - src/data/wu_scheduler.py
       - src/data/ingestion_guard.py
     failure_mode: >

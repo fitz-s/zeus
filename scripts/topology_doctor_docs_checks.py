@@ -313,9 +313,9 @@ def check_docs_registry(api: Any, topology: dict[str, Any]) -> list[Any]:
         for bool_field in ("may_live_in_reference", "contains_volatile_metrics", "current_tense_allowed"):
             if not isinstance(entry.get(bool_field), bool):
                 issues.append(api._issue("docs_registry_invalid_enum", path, f"{bool_field} must be boolean"))
-        if path.startswith("docs/reference/") and path != "docs/reference/AGENTS.md":
+        if path.startswith("docs/reference/") and path not in ("docs/reference/AGENTS.md", "docs/reference/legacy/AGENTS.md") and not path.startswith("docs/reference/legacy/"):
             if entry.get("truth_profile") != "durable_reference" or entry.get("may_live_in_reference") is not True:
-                issues.append(api._issue("docs_reference_not_canonical", path, "docs/reference may contain only durable canonical reference docs"))
+                issues.append(api._issue("docs_reference_not_canonical", path, "docs/reference may contain only durable canonical reference docs (exception: docs/reference/legacy/ for demoted evidence snapshots)"))
         if entry.get("coverage_scope") == "descendants":
             if not entry.get("parent_coverage_allowed"):
                 issues.append(api._issue("docs_registry_parent_not_allowed", path, "descendant coverage requires parent_coverage_allowed=true"))
@@ -339,8 +339,12 @@ def check_docs_registry(api: Any, topology: dict[str, Any]) -> list[Any]:
     for rel in sorted(visible_docs):
         if rel.startswith("docs/archives/"):
             continue
-        if rel.startswith("docs/reference/") and Path(rel).name.startswith("legacy_reference_"):
-            issues.append(api._issue("docs_reference_legacy_snapshot", rel, "legacy reference snapshots must live outside docs/reference"))
+        if (
+            rel.startswith("docs/reference/")
+            and not rel.startswith("docs/reference/legacy/")
+            and Path(rel).name.startswith("legacy_reference_")
+        ):
+            issues.append(api._issue("docs_reference_legacy_snapshot", rel, "legacy reference snapshots must live outside docs/reference (canonical home: docs/reference/legacy/)"))
         if not docs_registry_covers(rel, entries):
             issues.append(api._issue("docs_registry_unclassified_doc", rel, "tracked docs file is not classified by architecture/docs_registry.yaml"))
 
