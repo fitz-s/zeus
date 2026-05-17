@@ -36,6 +36,7 @@ Use for agent or contributor workflow mapping, not runtime truth.
 | File | Purpose |
 |------|---------|
 | `task_2026-04-19_ai_workflow_bridge.md` | Zeus-specific mapping for AI handoff starter-kit usage |
+| `T2G_database_locked_degrade_runbook.md` | Triage runbook for T2G (database locked) degrade condition |
 
 ### Sensitive / Local Snapshots
 

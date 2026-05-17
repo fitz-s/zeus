@@ -267,6 +267,111 @@ test_trust_policy:
     tests/test_check_data_pipeline_live_e2e.py: {created: "2026-05-15", last_used: "2026-05-15"}
     tests/test_check_live_order_e2e.py: {created: "2026-05-15", last_used: "2026-05-15"}
     tests/test_live_health_probe_forecast_owner.py: {created: "2026-05-15", last_used: "2026-05-15"}
+    tests/test_activation_flag_combinations.py: {created: "2026-05-04", last_used: "2026-05-04"}
+    tests/test_admission_severity_schema.py: {created: "2026-05-07", last_used: "2026-05-07"}
+    tests/test_attach_narrow_except.py: {created: "2026-05-05", last_used: "2026-05-05"}
+    tests/test_auto_pause_hardening.py: {created: "2026-05-01", last_used: "2026-05-04"}
+    tests/test_backfill_harvester_settlements_isolation.py: {created: "2026-05-11", last_used: "2026-05-11"}
+    tests/test_backtest_runs_schema_lane_allowlist.py: {created: "2026-05-07", last_used: "2026-05-07"}
+    tests/test_bridge_oracle_to_calibration.py: {created: "2026-05-02", last_used: "2026-05-04"}
+    tests/test_calibration_pin_eligibility.py: {created: "2026-05-07", last_used: "2026-05-07"}
+    tests/test_calibration_read_path_asymmetry_fixes_2026_05_06.py: {created: "2026-05-06", last_used: "2026-05-06"}
+    tests/test_calibration_serving_status.py: {created: "2026-05-09", last_used: "2026-05-09"}
+    tests/test_calibration_transfer_policy_legacy_bridge.py: {created: "2026-05-07", last_used: "2026-05-07"}
+    tests/test_calibration_transfer_policy_with_evidence.py: {created: "2026-05-05", last_used: "2026-05-08"}
+    tests/test_calibration_world_attach_reads.py: {created: "2026-05-02", last_used: "2026-05-02"}
+    tests/test_capability_decorator_coverage.py: {created: "2026-05-06", last_used: "2026-05-07"}
+    tests/test_cascade_liveness_contract.py: {created: "2026-05-01", last_used: "2026-05-16"}
+    tests/test_charter_mandatory_evidence.py: {created: "2026-05-06", last_used: "2026-05-06"}
+    tests/test_charter_sunset_required.py: {created: "2026-05-06", last_used: "2026-05-06"}
+    tests/test_check_pr_identity_collisions.py: {created: "2026-05-04", last_used: "2026-05-04"}
+    tests/test_city_kelly_multiplier.py: {created: "2026-05-03", last_used: "2026-05-03"}
+    tests/test_collateral_ledger_global_persistent_conn.py: {created: "2026-05-13", last_used: "2026-05-15"}
+    tests/test_companion_loop_break.py: {created: "2026-05-07", last_used: "2026-05-07"}
+    tests/test_contract_source_fields_baseline.py: {created: "2026-05-01", last_used: "2026-05-01"}
+    tests/test_cycle_runner_db_lock_degrade.py: {created: "2026-05-05", last_used: "2026-05-05"}
+    tests/test_daemon_ingest_acquires_bulk_lock.py: {created: "2026-05-08", last_used: "2026-05-08"}
+    tests/test_db_writer_lock_k3_live_yield.py: {created: "2026-05-12", last_used: "2026-05-12"}
+    tests/test_db_writer_lock.py: {created: "2026-05-07", last_used: "2026-05-07"}
+    tests/test_dispatch_session_start.py: {created: "2026-05-07", last_used: "2026-05-07"}
+    tests/test_doc_citation_lint.py: {created: "2026-05-17", last_used: "2026-05-17"}
+    tests/test_ecmwf_open_data_collect_cycle.py: {created: "2026-05-11", last_used: "2026-05-11"}
+    tests/test_ecmwf_open_data_hang_antibodies_2026_05_13.py: {created: "2026-05-13", last_used: "2026-05-13"}
+    tests/test_ecmwf_open_data_parallel_fetch.py: {created: "2026-05-11", last_used: "2026-05-15"}
+    tests/test_ecmwf_open_data_source_failover.py: {created: "2026-05-11", last_used: "2026-05-11"}
+    tests/test_ensemble_snapshots_v2_ingest_backend.py: {created: "2026-05-07", last_used: "2026-05-07"}
+    tests/test_entries_block_registry.py: {created: "2026-05-04", last_used: "2026-05-04"}
+    tests/test_entry_forecast_shadow_evidence_migration.py: {created: "2026-05-05", last_used: "2026-05-05"}
+    tests/test_entry_forecast_shadow_promotion_passthrough.py: {created: "2026-05-05", last_used: "2026-05-05"}
+    tests/test_evaluate_calibration_transfer_oos.py: {created: "2026-05-05", last_used: "2026-05-08"}
+    tests/test_evaluator_phase_beta_wiring.py: {created: "2026-05-05", last_used: "2026-05-05"}
+    tests/test_execution_harvester_paginator.py: {created: "2026-05-11", last_used: "2026-05-11"}
+    tests/test_extractor_east_asia_c12_boundary.py: {created: "2026-05-07", last_used: "2026-05-07"}
+    tests/test_extractor_period_step_contract.py: {created: "2026-05-05", last_used: "2026-05-05"}
+    tests/test_gate_commit_time.py: {created: "2026-05-06", last_used: "2026-05-06"}
+    tests/test_gate_edit_time.py: {created: "2026-05-06", last_used: "2026-05-06"}
+    tests/test_gate_runtime.py: {created: "2026-05-06", last_used: "2026-05-06"}
+    tests/test_gate2_live_auth_token.py: {created: "2026-05-06", last_used: "2026-05-06"}
+    tests/test_gate5_direct_caller_bypass.py: {created: "2026-05-06", last_used: "2026-05-06"}
+    tests/test_harvester_truth_writer_paginator.py: {created: "2026-05-11", last_used: "2026-05-11"}
+    tests/test_help_not_gate.py: {created: "2026-05-06", last_used: "2026-05-06"}
+    tests/test_hook_dispatch_smoke.py: {created: "2026-05-06", last_used: "2026-05-06"}
+    tests/test_hook_registry_schema.py: {created: "2026-05-06", last_used: "2026-05-06"}
+    tests/test_hook_signal_health.py: {created: "2026-05-06", last_used: "2026-05-06"}
+    tests/test_hourly_local_time_contract_ast.py: {created: "2026-05-02", last_used: "2026-05-02"}
+    tests/test_ingest_main_boot_resilience.py: {created: "2026-05-02", last_used: "2026-05-02"}
+    tests/test_lifecycle_field_orthogonality.py: {created: "2026-05-17", last_used: "2026-05-17"}
+    tests/test_load_platt_v2_frozen_as_of.py: {created: "2026-05-03", last_used: "2026-05-03"}
+    tests/test_manifest_drift_replace.py: {created: "2026-05-07", last_used: "2026-05-07"}
+    tests/test_market_analysis_transfer_uncertainty.py: {created: "2026-05-04", last_used: "2026-05-04"}
+    tests/test_migration_redeem_operator_required.py: {created: "2026-05-01", last_used: "2026-05-16"}
+    tests/test_no_unregistered_block_predicate.py: {created: "2026-05-04", last_used: "2026-05-04"}
+    tests/test_opendata_mx2t3_not_2t.py: {created: "2026-05-01", last_used: "2026-05-07"}
+    tests/test_operator_record_redeem.py: {created: "2026-05-01", last_used: "2026-05-16"}
+    tests/test_oracle_low_failclosed.py: {created: "2026-05-05", last_used: "2026-05-05"}
+    tests/test_override_health.py: {created: "2026-05-06", last_used: "2026-05-06"}
+    tests/test_phase1_critic_opus_fixes_2026_05_06.py: {created: "2026-05-06", last_used: "2026-05-06"}
+    tests/test_phase2_6_evaluator_wiring.py: {created: "2026-05-04", last_used: "2026-05-04"}
+    tests/test_phase2_6_metric_identity_source_family.py: {created: "2026-05-04", last_used: "2026-05-04"}
+    tests/test_phase2_review_round1_fixes_part2.py: {created: "2026-05-04", last_used: "2026-05-04"}
+    tests/test_phase2_review_round1_fixes.py: {created: "2026-05-04", last_used: "2026-05-04"}
+    tests/test_phase3_routing_ecmwf_open_data.py: {created: "2026-05-04", last_used: "2026-05-04"}
+    tests/test_post_merge_cleanup_hook.py: {created: "2026-05-05", last_used: "2026-05-05"}
+    tests/test_pr_monitor.py: {created: "2026-05-01", last_used: "2026-05-17"}
+    tests/test_pre_checkout_overlap.py: {created: "2026-05-06", last_used: "2026-05-06"}
+    tests/test_pre_commit_hook.py: {created: "2026-05-02", last_used: "2026-05-02"}
+    tests/test_pre_merge_comment_check.py: {created: "2026-05-08", last_used: "2026-05-08"}
+    tests/test_produce_activation_evidence.py: {created: "2026-05-04", last_used: "2026-05-04"}
+    tests/test_promote_calibration_pairs_v2_attach_path.py: {created: "2026-05-13", last_used: "2026-05-13"}
+    tests/test_promote_calibration_pairs_v2.py: {created: "2026-05-12", last_used: "2026-05-12"}
+    tests/test_promote_entry_forecast_cli.py: {created: "2026-05-12", last_used: "2026-05-12"}
+    tests/test_promote_platt_models_v2.py: {created: "2026-05-12", last_used: "2026-05-12"}
+    tests/test_redeem_cascade_liveness.py: {created: "2026-05-01", last_used: "2026-05-16"}
+    tests/test_rejection_stage_contract.py: {created: "2026-05-02", last_used: "2026-05-02"}
+    tests/test_replay_correctness_gate.py: {created: "2026-05-06", last_used: "2026-05-06"}
+    tests/test_riskguard_onchain_bankroll.py: {created: "2026-05-01", last_used: "2026-05-01"}
+    tests/test_ritual_signal_aggregate.py: {created: "2026-05-06", last_used: "2026-05-06"}
+    tests/test_ritual_signal_emission.py: {created: "2026-05-06", last_used: "2026-05-06"}
+    tests/test_route_card_token_budget.py: {created: "2026-05-06", last_used: "2026-05-06"}
+    tests/test_schema_introspection.py: {created: "2026-05-04", last_used: "2026-05-04"}
+    tests/test_selection_coverage_mode.py: {created: "2026-05-07", last_used: "2026-05-07"}
+    tests/test_settle_positions_uses_enqueue_redeem.py: {created: "2026-05-05", last_used: "2026-05-05"}
+    tests/test_settlement_commands_gating.py: {created: "2026-05-06", last_used: "2026-05-06"}
+    tests/test_severity_tier_invariant.py: {created: "2026-05-07", last_used: "2026-05-07"}
+    tests/test_severity_tier_runtime.py: {created: "2026-05-07", last_used: "2026-05-07"}
+    tests/test_source_family_collision.py: {created: "2026-05-17", last_used: "2026-05-17"}
+    tests/test_source_grep_helper.py: {created: "2026-05-04", last_used: "2026-05-04"}
+    tests/test_status_summary_silent_failure_antibody.py: {created: "2026-05-11", last_used: "2026-05-11"}
+    tests/test_structured_overrides.py: {created: "2026-05-06", last_used: "2026-05-06"}
+    tests/test_tigge_db_fetcher_integration.py: {created: "2026-05-01", last_used: "2026-05-02"}
+    tests/test_topology_doctor_docs_checks.py: {created: "2026-05-17", last_used: "2026-05-17"}
+    tests/test_typed_intent_enum.py: {created: "2026-05-07", last_used: "2026-05-07"}
+    tests/test_uma_resolution_listener.py: {created: "2026-05-07", last_used: "2026-05-07"}
+    tests/test_untyped_for_compat_expiry.py: {created: "2026-05-06", last_used: "2026-05-06"}
+    tests/test_user_channel_ws_auto_derive.py: {created: "2026-05-01", last_used: "2026-05-01"}
+    tests/test_verify_truth_surfaces_phase2_gate.py: {created: "2026-05-04", last_used: "2026-05-04"}
+    tests/test_worktree_doctor.py: {created: "2026-05-07", last_used: "2026-05-07"}
+    tests/test_zeus_risk_halt_e2e.py: {created: "2026-05-06", last_used: "2026-05-06"}
 
 categories:
   core_law_antibody:
@@ -540,6 +645,144 @@ categories:
     - tests/test_realized_fill.py
     - tests/test_tick_size.py
     - tests/test_vig_treatment_provenance.py
+  - tests/test_activation_flag_combinations.py
+  - tests/test_admission_severity_schema.py
+  - tests/test_attach_narrow_except.py
+  - tests/test_attribution_cohort_boundary.py
+  - tests/test_authority_rebuild_invariants.py
+  - tests/test_auto_pause_hardening.py
+  - tests/test_backfill_harvester_settlements_isolation.py
+  - tests/test_backtest_runs_schema_lane_allowlist.py
+  - tests/test_bridge_oracle_to_calibration.py
+  - tests/test_calibration_pin_eligibility.py
+  - tests/test_calibration_read_path_asymmetry_fixes_2026_05_06.py
+  - tests/test_calibration_serving_status.py
+  - tests/test_calibration_transfer_policy_legacy_bridge.py
+  - tests/test_calibration_transfer_policy_with_evidence.py
+  - tests/test_calibration_world_attach_reads.py
+  - tests/test_capability_decorator_coverage.py
+  - tests/test_cascade_liveness_contract.py
+  - tests/test_chain_reconciliation_corrected_guard.py
+  - tests/test_charter_mandatory_evidence.py
+  - tests/test_charter_sunset_required.py
+  - tests/test_check_data_pipeline_live_e2e.py
+  - tests/test_check_live_order_e2e.py
+  - tests/test_check_pr_identity_collisions.py
+  - tests/test_city_kelly_multiplier.py
+  - tests/test_collateral_ledger_global_persistent_conn.py
+  - tests/test_companion_loop_break.py
+  - tests/test_contract_source_fields_baseline.py
+  - tests/test_counter_caplog_ledger.py
+  - tests/test_cycle_runner_db_lock_degrade.py
+  - tests/test_daemon_ingest_acquires_bulk_lock.py
+  - tests/test_db_writer_lock.py
+  - tests/test_db_writer_lock_k3_live_yield.py
+  - tests/test_dispatch_session_start.py
+  - tests/test_doc_citation_lint.py
+  - tests/test_ecmwf_open_data_collect_cycle.py
+  - tests/test_ecmwf_open_data_hang_antibodies_2026_05_13.py
+  - tests/test_ecmwf_open_data_parallel_fetch.py
+  - tests/test_ecmwf_open_data_source_failover.py
+  - tests/test_ensemble_snapshots_v2_ingest_backend.py
+  - tests/test_entries_block_registry.py
+  - tests/test_entry_forecast_evaluator_cutover.py
+  - tests/test_entry_forecast_rollout.py
+  - tests/test_entry_forecast_shadow_evidence_migration.py
+  - tests/test_entry_forecast_shadow_promotion_passthrough.py
+  - tests/test_evaluate_calibration_transfer_oos.py
+  - tests/test_evaluator_phase_beta_wiring.py
+  - tests/test_executable_forecast_reader.py
+  - tests/test_execution_harvester_paginator.py
+  - tests/test_extractor_east_asia_c12_boundary.py
+  - tests/test_extractor_period_step_contract.py
+  - tests/test_final_sdk_envelope_persistence.py
+  - tests/test_gate2_live_auth_token.py
+  - tests/test_gate5_direct_caller_bypass.py
+  - tests/test_gate_commit_time.py
+  - tests/test_gate_edit_time.py
+  - tests/test_gate_runtime.py
+  - tests/test_harvester_learning_authority.py
+  - tests/test_harvester_settlement_redeem.py
+  - tests/test_harvester_truth_writer_paginator.py
+  - tests/test_help_not_gate.py
+  - tests/test_hook_dispatch_smoke.py
+  - tests/test_hook_registry_schema.py
+  - tests/test_hook_signal_health.py
+  - tests/test_hourly_local_time_contract_ast.py
+  - tests/test_ingest_main_boot_resilience.py
+  - tests/test_lifecycle_field_orthogonality.py
+  - tests/test_live_entry_status.py
+  - tests/test_live_health_probe_forecast_owner.py
+  - tests/test_load_platt_v2_frozen_as_of.py
+  - tests/test_main_scheduler_timezone.py
+  - tests/test_manifest_drift_replace.py
+  - tests/test_market_analysis_transfer_uncertainty.py
+  - tests/test_market_phase.py
+  - tests/test_market_phase_d_a_unification.py
+  - tests/test_market_phase_dispatch.py
+  - tests/test_market_phase_evidence.py
+  - tests/test_market_phase_persistence.py
+  - tests/test_migration_redeem_operator_required.py
+  - tests/test_no_unregistered_block_predicate.py
+  - tests/test_observability_counters.py
+  - tests/test_opendata_mx2t3_not_2t.py
+  - tests/test_operator_record_redeem.py
+  - tests/test_oracle_evidence_status.py
+  - tests/test_oracle_low_failclosed.py
+  - tests/test_override_health.py
+  - tests/test_phase1_critic_opus_fixes_2026_05_06.py
+  - tests/test_phase2_6_evaluator_wiring.py
+  - tests/test_phase2_6_metric_identity_source_family.py
+  - tests/test_phase2_review_round1_fixes.py
+  - tests/test_phase2_review_round1_fixes_part2.py
+  - tests/test_phase3_routing_ecmwf_open_data.py
+  - tests/test_phase_aware_kelly_live.py
+  - tests/test_position_projection_d6_counters.py
+  - tests/test_post_merge_cleanup_hook.py
+  - tests/test_pr_monitor.py
+  - tests/test_pre_checkout_overlap.py
+  - tests/test_pre_commit_hook.py
+  - tests/test_pre_merge_comment_check.py
+  - tests/test_produce_activation_evidence.py
+  - tests/test_producer_readiness_builder.py
+  - tests/test_promote_calibration_pairs_v2.py
+  - tests/test_promote_calibration_pairs_v2_attach_path.py
+  - tests/test_promote_calibration_v2_stage_to_prod.py
+  - tests/test_promote_entry_forecast_cli.py
+  - tests/test_promote_platt_models_v2.py
+  - tests/test_rebuild_live_sentinel.py
+  - tests/test_redeem_cascade_liveness.py
+  - tests/test_rejection_stage_contract.py
+  - tests/test_replay_correctness_gate.py
+  - tests/test_riskguard_onchain_bankroll.py
+  - tests/test_ritual_signal_aggregate.py
+  - tests/test_ritual_signal_emission.py
+  - tests/test_route_card_token_budget.py
+  - tests/test_schema_introspection.py
+  - tests/test_selection_coverage_mode.py
+  - tests/test_settle_positions_uses_enqueue_redeem.py
+  - tests/test_settlement_commands_gating.py
+  - tests/test_settlement_commands_schema.py
+  - tests/test_settlement_semantics_f_to_c.py
+  - tests/test_severity_tier_invariant.py
+  - tests/test_severity_tier_runtime.py
+  - tests/test_source_family_collision.py
+  - tests/test_source_grep_helper.py
+  - tests/test_sqlite_busy_timeout.py
+  - tests/test_state_census.py
+  - tests/test_state_paths.py
+  - tests/test_status_summary_silent_failure_antibody.py
+  - tests/test_strategy_profile_registry.py
+  - tests/test_structured_overrides.py
+  - tests/test_tigge_db_fetcher_integration.py
+  - tests/test_topology_doctor_docs_checks.py
+  - tests/test_typed_intent_enum.py
+  - tests/test_uma_resolution_listener.py
+  - tests/test_untyped_for_compat_expiry.py
+  - tests/test_user_channel_ws_auto_derive.py
+  - tests/test_verify_truth_surfaces_phase2_gate.py
+  - tests/test_worktree_doctor.py
+  - tests/test_zeus_risk_halt_e2e.py
 
   transitional_advisory:
     - tests/test_calibration_quality.py
