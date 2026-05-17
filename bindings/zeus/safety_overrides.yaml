@@ -18,6 +18,13 @@ extends: SAFETY_CONTRACT.md  # universal base; this file adds Zeus-specific entr
 
 additional_forbidden_paths:
 
+  # ── Fitz personal automation framework ───────────────────────────────────
+  # .openclaw/ is OMC-specific, not a universal concept. Kept zeus-specific
+  # because it is Fitz's personal automation framework, not project-agnostic.
+  - pattern: "*/.openclaw/*"
+    group: authority_surfaces
+    description: .openclaw/** (except own cron job entry)
+
   # ── Zeus runtime state: DB files not covered by generic state/*.db pattern ──
   # zeus-forecasts.db, zeus-world.db, zeus.db have specific extension variants
   - pattern: "*/state/zeus*.db*"

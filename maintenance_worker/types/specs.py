@@ -68,12 +68,20 @@ class TickContext:
     Passed through the engine state machine from START to SUMMARY_REPORT.
     run_id is a UUID4 string (set by provenance.make_run_id() in P5.5).
     started_at is UTC.
+    dry_run_only: defense-in-depth flag for handler TOP guards. NOTE: the
+      engine does NOT wire this field — it constructs TickContext once with
+      the default False and never updates it; engine-driven dry-run safety
+      relies on early-return guards in _apply_decisions (force_dry_run +
+      dry_run_floor) that short-circuit before dispatch. This field is for
+      test/external callers that construct TickContext directly with
+      dry_run_only=True. Engine wiring is deferred to a future packet.
     """
 
     run_id: str
     started_at: datetime
     config: EngineConfig
     invocation_mode: str  # InvocationMode.value; avoids cross-import
+    dry_run_only: bool = False
 
 
 @dataclass(frozen=True)

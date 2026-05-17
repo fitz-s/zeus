@@ -9,7 +9,9 @@
           {"type": "command", "command": "node .codex/hooks/zeus-router.mjs cotenant_staging_guard"},
           {"type": "command", "command": "node .codex/hooks/zeus-router.mjs pre_checkout_uncommitted_overlap"},
           {"type": "command", "command": "node .codex/hooks/zeus-router.mjs pr_create_loc_accumulation"},
-          {"type": "command", "command": "node .codex/hooks/zeus-router.mjs pre_merge_contamination"}
+          {"type": "command", "command": "node .codex/hooks/zeus-router.mjs pre_merge_contamination"},
+          {"type": "command", "command": "node .codex/hooks/zeus-router.mjs pre_merge_comment_check"},
+          {"type": "command", "command": "node .codex/hooks/zeus-router.mjs pr_thread_reply_waste"}
         ]
       },
       {
@@ -26,6 +28,38 @@
         "hooks": [
           {"type": "command", "command": "node .codex/hooks/zeus-router.mjs post_merge_cleanup"},
           {"type": "command", "command": "node .codex/hooks/zeus-router.mjs pr_open_monitor_arm"}
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {"type": "command", "command": "node .codex/hooks/zeus-router.mjs phase_close_commit_required"}
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {"type": "command", "command": "node .codex/hooks/zeus-router.mjs session_start_visibility"}
+        ]
+      }
+    ],
+    "WorktreeCreate": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {"type": "command", "command": "node .codex/hooks/zeus-router.mjs worktree_create_advisor"}
+        ]
+      }
+    ],
+    "WorktreeRemove": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {"type": "command", "command": "node .codex/hooks/zeus-router.mjs worktree_remove_advisor"}
         ]
       }
     ]

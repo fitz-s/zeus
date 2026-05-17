@@ -960,6 +960,50 @@ def test_fill_completion_requires_trade_fact_and_position_projection(tmp_path):
     assert result["completion_category"] == "LIVE_ORDER_FILLED"
 
 
+def test_confirmed_fill_with_expired_remainder_is_live_order_filled(tmp_path):
+    module = _load_module()
+    db = tmp_path / "trades.db"
+    with sqlite3.connect(db) as conn:
+        conn.row_factory = sqlite3.Row
+        _schema(conn)
+        _insert_command(conn, state="EXPIRED")
+        _insert_submit_requested(conn)
+        _insert_submit_acked(conn)
+        conn.execute(
+            """
+            INSERT INTO venue_command_events (
+              event_id, command_id, sequence_no, event_type, state_after,
+              occurred_at, payload_json
+            )
+            VALUES ('evt-4', 'cmd-1', 4, 'EXPIRED', 'EXPIRED',
+                    '2026-05-15T12:00:05Z',
+                    '{"reason":"partial_remainder_absent_from_exchange_open_orders"}')
+            """
+        )
+        _insert_pre_submit_envelope(conn)
+        _insert_order_fact(
+            conn,
+            state="EXPIRED",
+            remaining_size="0",
+            matched_size="10.00",
+            observed_at="2026-05-15T12:00:05Z",
+        )
+        _insert_trade_fact(conn, state="CONFIRMED")
+        _insert_position_fill(conn, order_status="partial")
+
+    with _connect_module_readonly(module, db, tmp_path) as conn:
+        result = module.evaluate(conn, "cmd-1")
+
+    assert result["status"] == "PASS"
+    assert result["completion_category"] == "LIVE_ORDER_FILLED"
+    assert any(
+        check["name"] == "latest_venue_order_fact_open"
+        and check["status"] == "PASS"
+        and "latest_state=EXPIRED" in check["detail"]
+        for check in result["checks"]
+    )
+
+
 def test_partial_fill_requires_partial_position_projection_status(tmp_path):
     module = _load_module()
     db = tmp_path / "trades.db"

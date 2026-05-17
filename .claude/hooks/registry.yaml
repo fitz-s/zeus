@@ -6,7 +6,7 @@
 schema_version: 1
 metadata:
   charter_version: 2.0.0
-  catalog_size: 16
+  catalog_size: 17
   sunset_default: 90d
 
 hooks:
@@ -233,3 +233,19 @@ hooks:
     telemetry:
       ritual_signal_emitted: true
     owner_module: scripts/worktree_doctor.py
+
+  - id: maintenance_worker_dry_run_floor
+    event: PreToolUse
+    matcher: "Bash|Edit|Write|MultiEdit|NotebookEdit"
+    intent: >
+      Advisory floor check when a maintenance worker targets governance files
+      (.claude/settings.json, registry.yaml, dispatch.py, .codex/hooks.json).
+      Emits checklist: confirm not dry-run, BLOCKING hooks untouched, boot
+      self-test passes, JSON valid. Bypass: ZEUS_MW_DRY_RUN_VERIFIED=1.
+      ADVISORY only - never blocks.
+    blocked_when: []
+    severity: ADVISORY
+    bypass_env: ZEUS_MW_DRY_RUN_VERIFIED
+    sunset_date: 2026-11-16
+    telemetry:
+      ritual_signal_emitted: true

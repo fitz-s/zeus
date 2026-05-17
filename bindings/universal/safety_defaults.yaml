@@ -1,0 +1,258 @@
+# bindings/universal/safety_defaults.yaml
+# Created: 2026-05-16
+# Last reused or audited: 2026-05-16
+# Authority basis:
+#   docs/operations/task_2026-05-15_runtime_improvement_engineering_package/02_daily_maintenance_agent/SAFETY_CONTRACT.md
+#   §"Forbidden Targets" Groups 1–6
+#
+# These rules are project-agnostic. They apply to ALL maintenance_worker
+# deployments regardless of binding (zeus, neptune, etc.).
+# Project-specific overrides live in bindings/<project>/safety_overrides.yaml.
+#
+# Note: /.openclaw/ is OMC-specific (not universal). It appears in
+# safety_overrides.yaml for zeus, not here.
+#
+# Migration note (WAVE 1 / 2026-05-16):
+#   These rules were previously hardcoded in maintenance_worker/core/validator.py
+#   _FORBIDDEN_RULES list (lines 117-190). The MW_FORBIDDEN_RULES_FROM_CODE=1
+#   env var restores the hardcoded list for transition safety (removable in WAVE 7).
+
+schema_version: 1
+description: >
+  Universal forbidden-path rules for maintenance_worker. Applied before any
+  project-specific safety_overrides.yaml. Missing this file is a HARD FAILURE
+  (fail-closed per SAFETY_CONTRACT).
+
+forbidden_paths:
+
+  # ── Group 1: Source code and tests ────────────────────────────────────────
+  - pattern: "*/src/*"
+    group: source_code_and_tests
+    description: source tree src/**
+
+  - pattern: "*/src"
+    group: source_code_and_tests
+    description: source tree src/ root
+
+  - pattern: "*/tests/*"
+    group: source_code_and_tests
+    description: test tree tests/**
+
+  - pattern: "*/tests"
+    group: source_code_and_tests
+    description: test tree tests/ root
+
+  - pattern: "*/scripts/*"
+    group: source_code_and_tests
+    description: scripts tree scripts/**
+
+  - pattern: "*/scripts"
+    group: source_code_and_tests
+    description: scripts tree scripts/ root
+
+  - pattern: "*/bin/*"
+    group: source_code_and_tests
+    description: bin tree bin/**
+
+  - pattern: "*/bin"
+    group: source_code_and_tests
+    description: bin tree bin/ root
+
+  # ── Group 2: Authority surfaces ───────────────────────────────────────────
+  - pattern: "*/architecture/*"
+    group: authority_surfaces
+    description: architecture/**
+
+  - pattern: "*/architecture"
+    group: authority_surfaces
+    description: architecture/ root
+
+  - pattern: "*/docs/reference/*"
+    group: authority_surfaces
+    description: docs/reference/**
+
+  - pattern: "*/docs/reference"
+    group: authority_surfaces
+    description: docs/reference/ root
+
+  - pattern: "AGENTS.md"
+    group: authority_surfaces
+    description: AGENTS.md at any depth
+    exact_name: true
+
+  - pattern: "CLAUDE.md"
+    group: authority_surfaces
+    description: CLAUDE.md at any depth
+    exact_name: true
+
+  - pattern: "*/.claude/CLAUDE.md"
+    group: authority_surfaces
+    description: .claude/CLAUDE.md
+
+  - pattern: "*/.claude/settings.json"
+    group: authority_surfaces
+    description: .claude/settings.json
+
+  - pattern: "*/.claude/agents/*"
+    group: authority_surfaces
+    description: .claude/agents/**
+
+  - pattern: "*/.claude/skills/*"
+    group: authority_surfaces
+    description: .claude/skills/**
+
+  - pattern: "*/.claude/hooks/*"
+    group: authority_surfaces
+    description: .claude/hooks/**
+
+  - pattern: "*/.codex/hooks.json"
+    group: authority_surfaces
+    description: .codex/hooks.json
+
+  - pattern: "*/.codex/hooks/*"
+    group: authority_surfaces
+    description: .codex/hooks/**
+
+  # ── Group 3: Runtime / state ──────────────────────────────────────────────
+  - pattern: "*/state/*.db"
+    group: runtime_and_state
+    description: state/*.db
+
+  - pattern: "*/state/*.db-wal"
+    group: runtime_and_state
+    description: state/*.db-wal
+
+  - pattern: "*/state/*.db-shm"
+    group: runtime_and_state
+    description: state/*.db-shm
+
+  - pattern: "*/state/*.sqlite*"
+    group: runtime_and_state
+    description: state/*.sqlite*
+
+  - pattern: "*/state/calibration/*"
+    group: runtime_and_state
+    description: state/calibration/**
+
+  - pattern: "*/state/forecasts/*"
+    group: runtime_and_state
+    description: state/forecasts/**
+
+  - pattern: "*/state/world/*"
+    group: runtime_and_state
+    description: state/world/**
+
+  # ── Group 4: Secrets and credentials ─────────────────────────────────────
+  - pattern: "*.env"
+    group: secrets_and_credentials
+    description: "*.env files"
+
+  - pattern: "*.env.*"
+    group: secrets_and_credentials
+    description: ".env.* files"
+
+  - pattern: ".env*"
+    group: secrets_and_credentials
+    description: .env* dotfiles
+
+  - pattern: "*credential*"
+    group: secrets_and_credentials
+    description: "*credential* files"
+
+  - pattern: "*secret*"
+    group: secrets_and_credentials
+    description: "*secret* files"
+
+  - pattern: "*token*"
+    group: secrets_and_credentials
+    description: "*token* files"
+
+  - pattern: "*key*"
+    group: secrets_and_credentials
+    description: "*key* files"
+
+  - pattern: "*authn*"
+    group: secrets_and_credentials
+    description: "*authn* files"
+
+  - pattern: "*oauth*"
+    group: secrets_and_credentials
+    description: "*oauth* files"
+
+  - pattern: "*.pem"
+    group: secrets_and_credentials
+    description: "*.pem certificate files"
+
+  - pattern: "*.p12"
+    group: secrets_and_credentials
+    description: "*.p12 certificate files"
+
+  - pattern: "*.pfx"
+    group: secrets_and_credentials
+    description: "*.pfx certificate files"
+
+  - pattern: "*auth-profiles.json"
+    group: secrets_and_credentials
+    description: auth-profiles.json files
+
+  # ── Group 5: Git plumbing ─────────────────────────────────────────────────
+  - pattern: "*/.git/*"
+    group: git_plumbing
+    description: .git/**
+
+  - pattern: "*/.git"
+    group: git_plumbing
+    description: .git directory
+
+  - pattern: "*/.gitmodules"
+    group: git_plumbing
+    description: .gitmodules
+
+  - pattern: "*/.gitattributes"
+    group: git_plumbing
+    description: .gitattributes
+
+  - pattern: "*/.gitignore"
+    group: git_plumbing
+    description: .gitignore
+
+  # ── Group 6: External system surfaces ────────────────────────────────────
+  - pattern: "/etc/*"
+    group: external_system_surfaces
+    description: /etc/**
+
+  - pattern: "/etc"
+    group: external_system_surfaces
+    description: /etc root
+    prefix: true
+
+  - pattern: "/private/etc/*"
+    group: external_system_surfaces
+    description: /private/etc/** (macOS)
+
+  - pattern: "/private/etc"
+    group: external_system_surfaces
+    description: /private/etc root (macOS)
+    prefix: true
+
+  - pattern: "/usr/local/etc/*"
+    group: external_system_surfaces
+    description: /usr/local/etc/**
+
+  - pattern: "/usr/local/etc"
+    group: external_system_surfaces
+    description: /usr/local/etc root
+    prefix: true
+
+  - pattern: "/private/usr/local/etc/*"
+    group: external_system_surfaces
+    description: /private/usr/local/etc (macOS)
+
+  - pattern: "/private/usr/local/etc"
+    group: external_system_surfaces
+    description: /private/usr/local/etc (macOS)
+    prefix: true
+
+  - pattern: "*/Library/LaunchDaemons/*"
+    group: external_system_surfaces
+    description: ~/Library/LaunchDaemons/**

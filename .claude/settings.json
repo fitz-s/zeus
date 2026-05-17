@@ -31,6 +31,11 @@
             "type": "command",
             "command": "python3 .claude/hooks/dispatch.py pre_write_capability_gate",
             "description": "[hook v2 ADVISORY] Warn on writes to capability-path kernels without ARCH_PLAN_EVIDENCE (no deny path; PR #74 retired BLOCKING tier; sunset 2026-08-04)"
+          },
+          {
+            "type": "command",
+            "command": "python3 .claude/hooks/dispatch.py maintenance_worker_dry_run_floor",
+            "description": "[hook v2 ADVISORY] Warn when maintenance worker targets governance files without dry-run verification (ADVISORY only)"
           }
         ]
       },
@@ -65,12 +70,22 @@
           {
             "type": "command",
             "command": "python3 .claude/hooks/dispatch.py pr_create_loc_accumulation",
-            "description": "[A1 BLOCKING] Block gh pr create/ready when commits < 2 AND LOC < 80 since merge-base (both conditions required). Bypass: ZEUS_PR_ALLOW_TINY=1"
+            "description": "[A1 BLOCKING] Block gh pr create/ready when commits < 2 AND LOC < 300 since merge-base (both conditions required). Bypass: ZEUS_PR_ALLOW_TINY=1"
           },
           {
             "type": "command",
             "command": "python3 .claude/hooks/dispatch.py pre_merge_comment_check",
             "description": "[B2 BLOCKING] Block gh pr merge when PR age <600s, unresolved Codex P0/P1, or CHANGES_REQUESTED. Bypass: ZEUS_PR_MERGE_FORCE=1"
+          },
+          {
+            "type": "command",
+            "command": "python3 .claude/hooks/dispatch.py pr_thread_reply_waste",
+            "description": "[hook v2 ADVISORY] Warn on gh pr comment / thread reply commands; fix-commit IS the response, not a reply paragraph (P2 backstop)"
+          },
+          {
+            "type": "command",
+            "command": "python3 .claude/hooks/dispatch.py maintenance_worker_dry_run_floor",
+            "description": "[hook v2 ADVISORY] Warn when maintenance worker targets governance files without dry-run verification (ADVISORY only)"
           }
         ]
       }
@@ -83,6 +98,42 @@
             "type": "command",
             "command": "python3 .claude/hooks/dispatch.py phase_close_commit_required",
             "description": "[Phase 2 new] Advisory: when phase-class subagent returns with tracked uncommitted changes, emit commit reminder"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 .claude/hooks/dispatch.py session_start_visibility",
+            "description": "[hook v2 ADVISORY] On session start, emit cross-worktree visibility summary via worktree_doctor (ADVISORY only)"
+          }
+        ]
+      }
+    ],
+    "WorktreeCreate": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 .claude/hooks/dispatch.py worktree_create_advisor",
+            "description": "[hook v2 ADVISORY] After WorktreeCreate, emit naming policy + scope + sentinel write advisory (ADVISORY only)"
+          }
+        ]
+      }
+    ],
+    "WorktreeRemove": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 .claude/hooks/dispatch.py worktree_remove_advisor",
+            "description": "[hook v2 ADVISORY] Before WorktreeRemove, emit pre-remove dirty/uncommitted check + branch closure suggestion (ADVISORY only)"
           }
         ]
       }

@@ -17,8 +17,10 @@ P5.1 ↔ P5.5 boundary (SCAFFOLD §3.5):
     Does NOT call git commit or gh pr create (P5.5 ApplyPublisher owns those).
   _emit_dry_run_proposal: STUB — returns empty ProposalManifest.
     Full publish (evidence_writer) deferred to P5.3/P5.5.
-  _enumerate_candidates: STUB — returns empty list.
-    Full enumeration (rules_parser, task_registry) deferred to P5.3.
+  _enumerate_candidates: wired to TaskRegistry (P5.3). Returns list[TaskCatalogEntry].
+    For each entry, _dispatch_enumerate calls handler.enumerate(entry, ctx) to
+    collect list[Candidate] per task. Handlers that are not yet implemented
+    return an empty list (safe default).
 
 run_tick is available as a module-level function (alias for
 MaintenanceEngine.run_tick) to satisfy the smoke test:
@@ -29,12 +31,16 @@ maintenance_worker.core.* (guards, refusal, kill_switch).
 """
 from __future__ import annotations
 
+import importlib
+import json
 import logging
+import os
+import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from maintenance_worker.core.guards import (
     SEVERITY_REFUSE_FATAL,
@@ -53,6 +59,9 @@ from maintenance_worker.core.kill_switch import (
     post_mutation_detector,
 )
 from maintenance_worker.core.refusal import refuse_fatal, skip_tick
+from maintenance_worker.rules.parser import TaskCatalogEntry
+from maintenance_worker.rules.task_registry import TaskRegistry
+from maintenance_worker.types.candidates import Candidate
 from maintenance_worker.types.modes import InvocationMode, RefusalReason
 from maintenance_worker.types.results import ApplyResult, CheckResult
 from maintenance_worker.types.specs import (
@@ -64,6 +73,20 @@ from maintenance_worker.types.specs import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Exceptions
+# ---------------------------------------------------------------------------
+
+
+class TaskHandlerNotFoundError(ModuleNotFoundError):
+    """
+    Raised by _dispatch_by_task_id when no handler module exists for task_id.
+
+    Callers treat this as a safe fallback — engine returns dry_run_only=True
+    rather than failing the tick. Handlers are optional until implemented.
+    """
 
 
 # ---------------------------------------------------------------------------
@@ -190,17 +213,35 @@ class MaintenanceEngine:
         logger.info("CHECK_GUARDS passed: all 8 guards ok")
 
         # ── Phase 3: ENUMERATE_CANDIDATES ──────────────────────────────────
-        # STUB: P5.3 task_registry + rules_parser will populate this.
-        candidates: list[TaskSpec] = self._enumerate_candidates(config)
+        # _enumerate_candidates returns list[TaskCatalogEntry] from catalog.
+        # For each entry, dispatch to handler.enumerate(entry, ctx) to collect
+        # list[Candidate] per task. Handlers not yet implemented return [].
+        entries: list[TaskCatalogEntry] = self._enumerate_candidates(config, schedule="daily")
+        # Weekly cadence gate: dispatch schedule="weekly" tasks only when due (≥7d since last run).
+        # Cadence state persisted in state/maintenance_state/last_weekly_tick.json (atomic write).
+        # On first run (file absent) weekly tasks are dispatched immediately.
+        entries.extend(self._run_weekly_if_due(config))
+        per_task_candidates: dict[str, list[Candidate]] = {}
+        for entry in entries:
+            task_candidates = self._dispatch_enumerate(entry, ctx)
+            per_task_candidates[entry.spec.task_id] = task_candidates
+        total_candidates = sum(len(v) for v in per_task_candidates.values())
         result.state_machine_breadcrumbs.append(("ENUMERATE_CANDIDATES", True))
-        logger.info("ENUMERATE_CANDIDATES: %d tasks (P5.3 stub)", len(candidates))
+        logger.info(
+            "ENUMERATE_CANDIDATES: %d tasks, %d candidates total",
+            len(entries),
+            total_candidates,
+        )
 
         # ── Phase 4: DRY_RUN_PROPOSAL ──────────────────────────────────────
-        # STUB: P5.5 evidence_writer will emit the real proposal manifests.
-        manifests: list[ProposalManifest] = []
-        for task in candidates:
-            manifest = self._emit_dry_run_proposal(task, [])
-            manifests.append(manifest)
+        # Build ProposalManifest from per-task Candidates.
+        # P5.5 evidence_writer will emit the full manifests to disk.
+        manifests: dict[str, ProposalManifest] = {}
+        for entry in entries:
+            task_id = entry.spec.task_id
+            task_cands = per_task_candidates.get(task_id, [])
+            manifest = self._emit_dry_run_proposal(entry, task_cands)
+            manifests[task_id] = manifest
         result.state_machine_breadcrumbs.append(("DRY_RUN_PROPOSAL", True))
         logger.info("DRY_RUN_PROPOSAL: %d manifests emitted (P5.5 stub)", len(manifests))
 
@@ -217,21 +258,35 @@ class MaintenanceEngine:
 
         force_dry_run = invocation_mode == InvocationMode.MANUAL_CLI
         apply_results: list[ApplyResult] = []
-        for task, manifest in zip(candidates, manifests):
-            apply_result = self._apply_decisions(
-                task, manifest, force_dry_run=force_dry_run, install_meta=install_meta
-            )
-            apply_results.append(apply_result)
+        for entry in entries:
+            task_id = entry.spec.task_id
+            task_cands = per_task_candidates.get(task_id, [])
+            manifest = manifests.get(task_id, ProposalManifest(task_id=task_id))
+            if not task_cands:
+                # No candidates from enumerate → dry_run_only, no apply call
+                apply_results.append(ApplyResult(task_id=task_id, dry_run_only=True))
+                continue
+            for candidate in task_cands:
+                apply_result = self._apply_decisions(
+                    entry, candidate, ctx,
+                    force_dry_run=force_dry_run,
+                    install_meta=install_meta,
+                    proposal=manifest,
+                )
+                apply_results.append(apply_result)
         result.apply_results = apply_results
         result.state_machine_breadcrumbs.append(("APPLY_DECISIONS", True))
-        logger.info("APPLY_DECISIONS: %d tasks processed", len(apply_results))
+        logger.info("APPLY_DECISIONS: %d results across %d tasks", len(apply_results), len(entries))
 
         # ── Phase 5b: POST_DETECT (post-mutation detector) ─────────────────
         # Runs after APPLY_DECISIONS to catch any forbidden-path disk divergence.
         # Path B: divergence → write_self_quarantine + sys.exit(50).
-        for apply_result, manifest in zip(apply_results, manifests):
-            if not apply_result.dry_run_only:
-                post_mutation_detector(apply_result, manifest, config.state_dir)
+        for entry in entries:
+            task_id = entry.spec.task_id
+            manifest = manifests.get(task_id, ProposalManifest(task_id=task_id))
+            for apply_result in apply_results:
+                if apply_result.task_id == task_id and not apply_result.dry_run_only:
+                    post_mutation_detector(apply_result, manifest, config.state_dir)
         logger.info("POST_DETECT: all apply results verified against manifests")
 
         # ── Phase 6: SUMMARY_REPORT ─────────────────────────────────────────
@@ -243,7 +298,7 @@ class MaintenanceEngine:
         logger.info(
             "END tick run_id=%s tasks=%d apply_results=%d",
             run_id,
-            len(candidates),
+            len(entries),
             len(apply_results),
         )
         return result
@@ -265,65 +320,226 @@ class MaintenanceEngine:
                 return False
         return True
 
-    def _enumerate_candidates(self, config: EngineConfig) -> list[TaskSpec]:
-        """
-        STUB: enumerate task candidates from the task catalog.
+    _WEEKLY_CADENCE_DAYS = 7
+    _WEEKLY_STATE_SUBDIR = "maintenance_state"
+    _WEEKLY_STATE_FILE = "last_weekly_tick.json"
 
-        P5.3 task_registry.TaskRegistry.get_tasks_for_schedule() will
-        implement this. Returns empty list until P5.3 is delivered.
+    def _run_weekly_if_due(self, config: EngineConfig) -> list[TaskCatalogEntry]:
         """
-        # P5.3 will implement: load task_catalog_path, call TaskRegistry.load(),
-        # filter by schedule, return active TaskSpec list.
-        return []
+        Return weekly TaskCatalogEntries if ≥7 days have passed since the last
+        weekly dispatch, then atomically update the cadence timestamp.
+
+        Cadence state: state_dir/maintenance_state/last_weekly_tick.json
+          {"last_run_ts": <unix float>}
+
+        Absent file → first run → weekly is due.
+        Atomic write: tmp file + os.replace() per Zeus convention.
+
+        Returns [] if not yet due; returns weekly entries (may be empty if
+        catalog has no weekly tasks) if due.
+        """
+        state_file = (
+            config.state_dir / self._WEEKLY_STATE_SUBDIR / self._WEEKLY_STATE_FILE
+        )
+        now_ts = time.time()
+        due = False
+
+        if not state_file.exists():
+            due = True
+            logger.info(
+                "_run_weekly_if_due: no cadence file found — weekly dispatch due (first run)"
+            )
+        else:
+            try:
+                data = json.loads(state_file.read_text())
+                last_ts: float = float(data.get("last_run_ts", 0))
+                elapsed_days = (now_ts - last_ts) / 86400
+                if elapsed_days >= self._WEEKLY_CADENCE_DAYS:
+                    due = True
+                    logger.info(
+                        "_run_weekly_if_due: %.1f days since last weekly run — dispatching",
+                        elapsed_days,
+                    )
+                else:
+                    logger.debug(
+                        "_run_weekly_if_due: %.1f days since last weekly run — not yet due",
+                        elapsed_days,
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "_run_weekly_if_due: could not read cadence file %s: %s — skipping weekly",
+                    state_file,
+                    exc,
+                )
+                return []
+
+        if not due:
+            return []
+
+        # Verify catalog exists before committing to a weekly dispatch.
+        # If catalog is absent, _enumerate_candidates returns [] anyway; skip
+        # the atomic state write so the cadence re-fires once the catalog appears.
+        if not config.task_catalog_path.exists():
+            logger.debug(
+                "_run_weekly_if_due: catalog missing — skipping weekly dispatch"
+            )
+            return []
+
+        # Atomic timestamp update (tmp + os.replace per Zeus convention)
+        try:
+            state_file.parent.mkdir(parents=True, exist_ok=True)
+            tmp_file = state_file.with_suffix(".json.tmp")
+            tmp_file.write_text(json.dumps({"last_run_ts": now_ts}))
+            os.replace(str(tmp_file), str(state_file))
+        except Exception as exc:
+            logger.warning(
+                "_run_weekly_if_due: could not update cadence file %s: %s",
+                state_file,
+                exc,
+            )
+            # Proceed with dispatch even if state write fails — missing write
+            # means next tick re-dispatches weekly (safe: all weekly tasks are dry_run).
+
+        return self._enumerate_candidates(config, schedule="weekly")
+
+    def _enumerate_candidates(
+        self, config: EngineConfig, schedule: str = "daily"
+    ) -> list[TaskCatalogEntry]:
+        """
+        Enumerate task candidates from the task catalog.
+
+        Loads TaskRegistry from config.task_catalog_path and returns all
+        entries scheduled for the given schedule value. Defaults to "daily".
+        Pass schedule="weekly" to surface weekly tasks (e.g. authority_drift_surface).
+
+        run_tick passes schedule="daily"; future weekly dispatch will pass
+        schedule="weekly" when the authority_drift_surface handler is implemented.
+        """
+        if not config.task_catalog_path.exists():
+            logger.warning(
+                "_enumerate_candidates: task_catalog_path missing: %s",
+                config.task_catalog_path,
+            )
+            return []
+        try:
+            registry = TaskRegistry.from_catalog(config.task_catalog_path)
+        except Exception as exc:
+            logger.error(
+                "_enumerate_candidates: failed to load catalog %s: %s",
+                config.task_catalog_path,
+                exc,
+            )
+            return []
+        return registry.get_tasks_for_schedule(schedule)
+
+    def _dispatch_by_task_id(self, task_id: str, method: str, *args: Any) -> Any:
+        """
+        Dispatch to a per-task rule module by task_id.
+
+        Imports maintenance_worker.rules.<task_id> on first call (lazy).
+        Raises TaskHandlerNotFoundError if the module does not exist.
+        Raises AttributeError if the module lacks the requested method.
+
+        method must be one of: "enumerate", "apply".
+        """
+        module_name = f"maintenance_worker.rules.{task_id}"
+        try:
+            mod = importlib.import_module(module_name)
+        except ModuleNotFoundError:
+            raise TaskHandlerNotFoundError(
+                f"No handler module for task_id '{task_id}': "
+                f"expected {module_name}.py to exist."
+            ) from None
+        handler = getattr(mod, method, None)
+        if handler is None:
+            raise AttributeError(
+                f"Handler module {module_name} has no '{method}' function."
+            )
+        return handler(*args)
+
+    def _dispatch_enumerate(
+        self, entry: TaskCatalogEntry, ctx: TickContext
+    ) -> list[Candidate]:
+        """
+        Call handler.enumerate(entry, ctx) for one catalog entry.
+
+        Returns list[Candidate] from the handler. Falls back to [] if the
+        handler module is not yet implemented (safe default — never skips
+        known handlers). AttributeError propagates (handler exists but
+        lacks enumerate → implementation bug, not missing module).
+        """
+        try:
+            result: list[Candidate] = self._dispatch_by_task_id(
+                entry.spec.task_id, "enumerate", entry, ctx
+            )
+            return result
+        except TaskHandlerNotFoundError:
+            logger.debug(
+                "_dispatch_enumerate: no handler for %s; returning []",
+                entry.spec.task_id,
+            )
+            return []
+        except Exception as exc:
+            logger.error(
+                "_dispatch_enumerate: handler %s raised %s: %s; isolating from peers",
+                entry.spec.task_id,
+                type(exc).__name__,
+                exc,
+                exc_info=True,
+            )
+            return []
 
     def _emit_dry_run_proposal(
-        self, task: TaskSpec, candidates: list
+        self, entry: TaskCatalogEntry, candidates: list[Candidate]
     ) -> ProposalManifest:
         """
         STUB: emit dry-run proposal manifest for one task.
 
-        P5.5 evidence_writer will write the full manifest to
+        Receives the Candidates collected by _dispatch_enumerate. P5.5
+        evidence_writer will write the full manifest to
         evidence_trail/<date>/proposals/<task_id>.md. Returns an
         empty ProposalManifest until P5.5 is delivered.
         """
         # P5.5 will implement: call EvidenceWriter.write_proposal(), hash manifest.
-        return ProposalManifest(task_id=task.task_id)
+        return ProposalManifest(task_id=entry.spec.task_id)
 
     def _apply_decisions(
         self,
-        task: TaskSpec,
-        proposal: ProposalManifest,
+        entry: TaskCatalogEntry,
+        candidate: Candidate,
+        ctx: TickContext,
         force_dry_run: bool = False,
         install_meta: Optional[InstallMetadata] = None,
+        proposal: Optional[ProposalManifest] = None,
     ) -> ApplyResult:
         """
-        Stage filesystem mutations for one task.
+        Stage filesystem mutations for one Candidate.
 
-        Returns ApplyResult with the staged diff. Does NOT commit to git
-        or open PRs — P5.5 ApplyPublisher.publish() owns those steps
-        (SCAFFOLD §3.5).
+        Receives a single Candidate (from handler.enumerate). Returns
+        ApplyResult with the staged diff. Does NOT commit to git or open
+        PRs — P5.5 ApplyPublisher.publish() owns those steps (SCAFFOLD §3.5).
 
         If force_dry_run=True (MANUAL_CLI invocation), dry-run floor not yet
         met (< 30 days since install_metadata.first_run_at and task is not
         floor-exempt), or task has no ack, returns dry_run_only=True.
 
         F2: enforce_dry_run_floor gate is wired here so future packets cannot
-        bypass it. Even though _enumerate_candidates is a stub returning [],
-        the gate runs for every TaskSpec that reaches this method.
+        bypass it. After the gate, dispatches handler.apply(candidate, ctx)
+        via _dispatch_by_task_id. Falls back to dry_run_only if handler
+        is not found (safe default — never executes unknown handlers live).
 
-        Full apply logic (actual file moves, zero-byte deletes, stub creates)
-        will be wired in P5.4 integration tests after P5.3 supplies real
-        TaskSpec candidates with their AckState.
+        P5.5 GATE: when proposal manifest is the empty stub AND the handler is
+        live-default + floor-exempt (i.e. capable of real mutations), force
+        dry_run_only=True on the ctx passed to the handler. This prevents the
+        live mutation → empty manifest → post_mutation_detector mismatch →
+        SELF_QUARANTINE → exit(50) brick pattern. Remove this gate when P5.5
+        _emit_dry_run_proposal() ships real manifest entries (Codex PR #124 P2).
         """
-        # P5.3/P5.4 will implement: AckManager.check_ack(), iterate proposed
-        # moves/deletes, call os.replace/os.unlink on validated paths, record results.
+        task = entry.spec
         if force_dry_run:
             return ApplyResult(task_id=task.task_id, dry_run_only=True)
 
         # F2: dry-run floor gate. Enforced before any non-dry-run action.
-        # If install_meta is available, check whether the 30-day floor has elapsed.
-        # TaskSpec.dry_run_floor_exempt=True bypasses the floor (hardcoded exempt
-        # task IDs in FLOOR_EXEMPT_TASK_IDS take priority inside enforce_dry_run_floor).
         if install_meta is not None and not task.dry_run_floor_exempt:
             floor_result = enforce_dry_run_floor(
                 task_id=task.task_id,
@@ -333,8 +549,54 @@ class MaintenanceEngine:
             if floor_result == "ALLOWED_BUT_DRY_RUN_ONLY":
                 return ApplyResult(task_id=task.task_id, dry_run_only=True)
 
-        # Without ack state (P5.3 not yet available), default to dry_run_only.
-        return ApplyResult(task_id=task.task_id, dry_run_only=True)
+        # P5.5 GATE: protect against live-mutation + empty-manifest → SELF_QUARANTINE brick.
+        # _emit_dry_run_proposal() is a stub returning ProposalManifest with all-empty tuples.
+        # post_mutation_detector compares ApplyResult.deleted/moved against manifest entries;
+        # mismatch writes SELF_QUARANTINE + exit(50), bricking all future ticks permanently.
+        # Condition: manifest is empty stub AND handler is live-default + floor-exempt.
+        # Remove this gate when P5.5 evidence_writer populates real manifest entries.
+        effective_ctx = ctx
+        if proposal is not None:
+            manifest_is_empty_stub = (
+                not proposal.proposed_moves
+                and not proposal.proposed_deletes
+                and not proposal.proposed_creates
+                and not proposal.proposed_modifies
+            )
+            task_is_live_exempt = (
+                bool(entry.raw.get("live_default", False))
+                and bool(task.dry_run_floor_exempt)
+            )
+            if manifest_is_empty_stub and task_is_live_exempt:
+                effective_ctx = replace(ctx, dry_run_only=True)
+                logger.warning(
+                    "p5_5_dependency: forcing dry_run_only=True for task_id=%s "
+                    "until _emit_dry_run_proposal lands (Codex PR #124 P2)",
+                    task.task_id,
+                )
+
+        # Dispatch to per-task rule module. Falls back to dry_run_only if
+        # the handler is not yet implemented (safe: never acts live without handler).
+        try:
+            result: ApplyResult = self._dispatch_by_task_id(
+                task.task_id, "apply", candidate, effective_ctx
+            )
+            return result
+        except TaskHandlerNotFoundError:
+            logger.debug(
+                "_apply_decisions: no handler for %s; returning dry_run_only",
+                task.task_id,
+            )
+            return ApplyResult(task_id=task.task_id, dry_run_only=True)
+        except Exception as exc:
+            logger.error(
+                "_apply_decisions: handler %s raised %s: %s; treating as dry_run",
+                task.task_id,
+                type(exc).__name__,
+                exc,
+                exc_info=True,
+            )
+            return ApplyResult(task_id=task.task_id, dry_run_only=True)
 
     def _emit_summary(self, ctx: TickContext, result: TickResult) -> None:
         """

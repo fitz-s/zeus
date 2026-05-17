@@ -7,6 +7,7 @@ maintenance_worker.types — public surface for P5.0a shared types.
 All sub-packets import from here; this is the build-chain anchor.
 P5.0a -> P5.1 -> P5.2 -> P5.3 -> P5.4 -> P5.5.
 """
+from maintenance_worker.types.candidates import Candidate
 from maintenance_worker.types.modes import InvocationMode, RefusalReason
 from maintenance_worker.types.operations import Operation
 from maintenance_worker.types.results import ApplyResult, CheckResult, ValidatorResult
@@ -21,6 +22,7 @@ from maintenance_worker.types.specs import (
 __all__ = [
     "AckState",
     "ApplyResult",
+    "Candidate",
     "CheckResult",
     "EngineConfig",
     "InvocationMode",

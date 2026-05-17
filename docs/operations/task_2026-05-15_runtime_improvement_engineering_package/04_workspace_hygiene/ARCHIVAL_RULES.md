@@ -76,7 +76,7 @@ For each candidate packet `P = docs/operations/task_<date>_<slug>`:
 8. **Worktree branch check**: list `git worktree list`; if any worktree's
    branch name contains `<slug>` → `LOAD_BEARING_DESPITE_AGE`.
 
-A packet must pass all eight checks to become `ARCHIVE_CANDIDATE`. Any single
+A packet must pass all nine checks to become `ARCHIVE_CANDIDATE`. Any single
 failure flips it to `LOAD_BEARING_DESPITE_AGE`.
 
 ## Archive Move Procedure

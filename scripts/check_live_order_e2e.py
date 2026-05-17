@@ -299,6 +299,16 @@ def _order_fact_supports_terminal_no_fill(fact: dict[str, Any] | None) -> bool:
     )
 
 
+def _order_fact_supports_terminal_remainder_after_fill(fact: dict[str, Any] | None) -> bool:
+    return (
+        fact is not None
+        and _live_source(fact.get("source"))
+        and str(fact.get("state") or "") in TERMINAL_ORDER_FACT_STATES
+        and _zero_decimal(fact.get("remaining_size"))
+        and _positive_decimal(fact.get("matched_size"))
+    )
+
+
 def _matching_live_trade_facts(trade_facts: list[dict[str, Any]], order_id: str) -> list[dict[str, Any]]:
     if not order_id:
         return []
@@ -633,6 +643,11 @@ def evaluate(conn: sqlite3.Connection, command_id: str | None = None) -> dict[st
         and not any(_trade_fact_supports_fill(fact) for fact in trade_facts)
         and not fill_position_events
     )
+    terminal_remainder_after_fill_observed = (
+        state in TERMINAL_NO_FILL_COMMAND_STATES
+        and fill_observed
+        and _order_fact_supports_terminal_remainder_after_fill(latest_order_fact)
+    )
 
     checks.append(Check("command_present", "PASS", f"command_id={cmd_id} state={state}"))
     checks.append(
@@ -701,6 +716,7 @@ def evaluate(conn: sqlite3.Connection, command_id: str | None = None) -> dict[st
             if (
                 _order_fact_supports_live_order_proof(latest_order_fact)
                 or terminal_no_fill_observed
+                or terminal_remainder_after_fill_observed
             )
             else "FAIL",
             (
@@ -816,7 +832,11 @@ def evaluate(conn: sqlite3.Connection, command_id: str | None = None) -> dict[st
 
     failed_check_names = {check.name for check in checks if check.status == "FAIL"}
     complete = (
-        (state in ACCEPTED_COMMAND_STATES or terminal_no_fill_observed)
+        (
+            state in ACCEPTED_COMMAND_STATES
+            or terminal_no_fill_observed
+            or terminal_remainder_after_fill_observed
+        )
         and not failed_check_names
     )
     category = (
@@ -834,7 +854,11 @@ def evaluate(conn: sqlite3.Connection, command_id: str | None = None) -> dict[st
         and failed_check_names == {"latest_venue_order_fact_open"}
     ):
         category = "LIVE_ORDER_ACKED_MISSING_ORDER_FACT"
-    if state in ACCEPTED_COMMAND_STATES and fill_observed and failed_check_names:
+    if (
+        (state in ACCEPTED_COMMAND_STATES or terminal_remainder_after_fill_observed)
+        and fill_observed
+        and failed_check_names
+    ):
         category = "LIVE_ORDER_FILL_MISSING_POSITION_PROOF"
     if terminal_no_fill_observed and failed_check_names:
         category = "LIVE_ORDER_TERMINAL_NO_FILL_MISSING_POSITION_PROOF"

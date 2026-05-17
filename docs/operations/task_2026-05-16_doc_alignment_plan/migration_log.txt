@@ -1,0 +1,105 @@
+# Archive Migration 2026-05-16
+# Mode: APPLY
+# Date: 2026-05-16
+# Source: docs/archives/packets/
+# Target: docs/operations/archive/2026-Q2/
+
+## Entry census: 28 entries found on disk
+## Pre-deletion check: 0 prior-deleted exclusions (all 28 present)
+
+## Breakdown: 26 directories, 2 bare files
+
+[MKDIR] docs/operations/archive/2026-Q2
+
+## Moves + stubs
+
+[MOVED] docs/archives/packets/repo_review_2026-05-01 -> docs/operations/archive/2026-Q2/repo_review_2026-05-01
+[STUB] created docs/operations/repo_review_2026-05-01.archived
+
+[MOVED] docs/archives/packets/task_2026-04-13_topology_compiler_program.md -> docs/operations/archive/2026-Q2/task_2026-04-13_topology_compiler_program.md
+[STUB] created docs/operations/task_2026-04-13_topology_compiler_program.md.archived
+
+[MOVED] docs/archives/packets/task_2026-04-14_session_backlog.md -> docs/operations/archive/2026-Q2/task_2026-04-14_session_backlog.md
+[STUB] created docs/operations/task_2026-04-14_session_backlog.md.archived
+
+[MOVED] docs/archives/packets/task_2026-04-16_dual_track_metric_spine -> docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine
+[STUB] created docs/operations/task_2026-04-16_dual_track_metric_spine.archived
+
+[MOVED] docs/archives/packets/task_2026-04-16_function_naming_freshness -> docs/operations/archive/2026-Q2/task_2026-04-16_function_naming_freshness
+[STUB] created docs/operations/task_2026-04-16_function_naming_freshness.archived
+
+[MOVED] docs/archives/packets/task_2026-04-19_code_review_graph_topology_bridge -> docs/operations/archive/2026-Q2/task_2026-04-19_code_review_graph_topology_bridge
+[STUB] created docs/operations/task_2026-04-19_code_review_graph_topology_bridge.archived
+
+[MOVED] docs/archives/packets/task_2026-04-19_workspace_artifact_sync -> docs/operations/archive/2026-Q2/task_2026-04-19_workspace_artifact_sync
+[STUB] created docs/operations/task_2026-04-19_workspace_artifact_sync.archived
+
+[MOVED] docs/archives/packets/task_2026-04-20_code_impact_graph_context_pack -> docs/operations/archive/2026-Q2/task_2026-04-20_code_impact_graph_context_pack
+[STUB] created docs/operations/task_2026-04-20_code_impact_graph_context_pack.archived
+
+[MOVED] docs/archives/packets/task_2026-04-20_code_review_graph_online_context -> docs/operations/archive/2026-Q2/task_2026-04-20_code_review_graph_online_context
+[STUB] created docs/operations/task_2026-04-20_code_review_graph_online_context.archived
+
+[MOVED] docs/archives/packets/task_2026-04-20_workspace_authority_reconstruction -> docs/operations/archive/2026-Q2/task_2026-04-20_workspace_authority_reconstruction
+[STUB] created docs/operations/task_2026-04-20_workspace_authority_reconstruction.archived
+
+[MOVED] docs/archives/packets/task_2026-04-21_docs_reclassification_reference_extraction -> docs/operations/archive/2026-Q2/task_2026-04-21_docs_reclassification_reference_extraction
+[STUB] created docs/operations/task_2026-04-21_docs_reclassification_reference_extraction.archived
+
+[MOVED] docs/archives/packets/task_2026-04-21_gate_f_data_backfill -> docs/operations/archive/2026-Q2/task_2026-04-21_gate_f_data_backfill
+[STUB] created docs/operations/task_2026-04-21_gate_f_data_backfill.archived
+
+[MOVED] docs/archives/packets/task_2026-04-22_docs_truth_refresh -> docs/operations/archive/2026-Q2/task_2026-04-22_docs_truth_refresh
+[STUB] created docs/operations/task_2026-04-22_docs_truth_refresh.archived
+
+[MOVED] docs/archives/packets/task_2026-04-22_orphan_artifact_cleanup -> docs/operations/archive/2026-Q2/task_2026-04-22_orphan_artifact_cleanup
+[STUB] created docs/operations/task_2026-04-22_orphan_artifact_cleanup.archived
+
+[MOVED] docs/archives/packets/task_2026-04-23_authority_kernel_gamechanger -> docs/operations/archive/2026-Q2/task_2026-04-23_authority_kernel_gamechanger
+[STUB] created docs/operations/task_2026-04-23_authority_kernel_gamechanger.archived
+
+[MOVED] docs/archives/packets/task_2026-04-23_authority_rehydration -> docs/operations/archive/2026-Q2/task_2026-04-23_authority_rehydration
+[STUB] created docs/operations/task_2026-04-23_authority_rehydration.archived
+
+[MOVED] docs/archives/packets/task_2026-04-23_data_readiness_remediation -> docs/operations/archive/2026-Q2/task_2026-04-23_data_readiness_remediation
+[STUB] created docs/operations/task_2026-04-23_data_readiness_remediation.archived
+
+[MOVED] docs/archives/packets/task_2026-04-23_graph_refresh_official_integration -> docs/operations/archive/2026-Q2/task_2026-04-23_graph_refresh_official_integration
+[STUB] created docs/operations/task_2026-04-23_graph_refresh_official_integration.archived
+
+[MOVED] docs/archives/packets/task_2026-04-23_guidance_kernel_semantic_boot -> docs/operations/archive/2026-Q2/task_2026-04-23_guidance_kernel_semantic_boot
+[STUB] created docs/operations/task_2026-04-23_guidance_kernel_semantic_boot.archived
+
+[MOVED] docs/archives/packets/task_2026-04-23_live_harvester_enablement_dr33 -> docs/operations/archive/2026-Q2/task_2026-04-23_live_harvester_enablement_dr33
+[STUB] created docs/operations/task_2026-04-23_live_harvester_enablement_dr33.archived
+
+[MOVED] docs/archives/packets/task_2026-05-01_hko_backfill -> docs/operations/archive/2026-Q2/task_2026-05-01_hko_backfill
+[STUB] created docs/operations/task_2026-05-01_hko_backfill.archived
+
+[MOVED] docs/archives/packets/task_2026-05-01_hko_release -> docs/operations/archive/2026-Q2/task_2026-05-01_hko_release
+[STUB] created docs/operations/task_2026-05-01_hko_release.archived
+
+[MOVED] docs/archives/packets/task_2026-05-01_live_arming -> docs/operations/archive/2026-Q2/task_2026-05-01_live_arming
+[STUB] created docs/operations/task_2026-05-01_live_arming.archived
+
+[MOVED] docs/archives/packets/task_2026-05-01_live_smoke_test -> docs/operations/archive/2026-Q2/task_2026-05-01_live_smoke_test
+[STUB] created docs/operations/task_2026-05-01_live_smoke_test.archived
+
+[MOVED] docs/archives/packets/task_2026-05-01_paris_station_resolution -> docs/operations/archive/2026-Q2/task_2026-05-01_paris_station_resolution
+[STUB] created docs/operations/task_2026-05-01_paris_station_resolution.archived
+
+[MOVED] docs/archives/packets/task_2026-05-01_tigge_4_29_backfill -> docs/operations/archive/2026-Q2/task_2026-05-01_tigge_4_29_backfill
+[STUB] created docs/operations/task_2026-05-01_tigge_4_29_backfill.archived
+
+[MOVED] docs/archives/packets/task_2026-05-02_hk_paris_release -> docs/operations/archive/2026-Q2/task_2026-05-02_hk_paris_release
+[STUB] created docs/operations/task_2026-05-02_hk_paris_release.archived
+
+[MOVED] docs/archives/packets/zeus_workspace_authority_reconstruction_package_2026-04-20_v2 -> docs/operations/archive/2026-Q2/zeus_workspace_authority_reconstruction_package_2026-04-20_v2
+[STUB] created docs/operations/zeus_workspace_authority_reconstruction_package_2026-04-20_v2.archived
+
+## Summary
+Total entries processed: 28
+Moves executed: 28
+Stubs written: 28
+Prior-deleted exclusions: 0
+Migration count (for INDEX.md): 28

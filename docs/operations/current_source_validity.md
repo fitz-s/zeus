@@ -126,7 +126,7 @@ fully applied. All six required release evidence items are complete:
   2026-05-03. All 8 platt buckets (4 seasons × high/low) refit with LFPB
   pairs.
 
-- **verification_passed**: `docs/archives/packets/task_2026-05-02_hk_paris_release/verify_ready.py`
+- **verification_passed**: `docs/operations/archive/2026-Q2/task_2026-05-02_hk_paris_release/verify_ready.py`
   passed with Paris markets appearing in the ready list. Zero station
   MISMATCH events for Paris in source-contract probe.
 

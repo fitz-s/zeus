@@ -25,6 +25,15 @@ def _load_module():
     return module
 
 
+def test_live_probe_loaded_code_surface_includes_recovery_and_m5_paths():
+    module = _load_module()
+    daemon_paths = set(module.PROCESS_CODE_SURFACES["daemon"])
+
+    assert "src/control/ws_gap_guard.py" in daemon_paths
+    assert "src/execution/command_recovery.py" in daemon_paths
+    assert "src/execution/exchange_reconcile.py" in daemon_paths
+
+
 def _write_json(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload), encoding="utf-8")
@@ -93,9 +102,27 @@ def _configure(
             "matches_expected": True,
         },
     )
+    monkeypatch.setattr(
+        module,
+        "_process_loaded_code_status",
+        lambda procs, root_arg: {"ok": True, "issue": None, "stale": [], "unattested": [], "items": []},
+    )
+    monkeypatch.setattr(
+        module,
+        "_settlement_truth_status",
+        lambda root_arg: {
+            "ok": True,
+            "issue": None,
+            "count": 1,
+            "max_settled_at": "2026-05-16T00:00:00+00:00",
+            "age_s": 1,
+        },
+    )
 
 
-def test_forecast_live_owner_replaces_legacy_ingest_dead(tmp_path, monkeypatch, capsys):
+def test_data_ingest_support_daemon_required_even_when_forecast_live_owner_alive(
+    tmp_path, monkeypatch, capsys
+):
     module = _load_module()
     root = tmp_path / "zeus"
     _healthy_state(root)
@@ -115,10 +142,11 @@ def test_forecast_live_owner_replaces_legacy_ingest_dead(tmp_path, monkeypatch, 
     module.main()
 
     out = capsys.readouterr().out
-    assert out.startswith("OK")
+    assert out.startswith("ALERT")
     assert "forecast_live=1" in out
+    assert "data_ingest=0" in out
     assert "legacy_ingest=0" in out
-    assert "ingest_dead" not in out
+    assert "data_ingest_dead" in out
     assert "forecast_live_dead" not in out
 
 
@@ -170,7 +198,6 @@ def test_missing_forecast_live_owner_is_actionable_without_legacy_ingest_dead(tm
     out = capsys.readouterr().out
     assert out.startswith("ALERT")
     assert "forecast_live_dead" in out
-    assert "ingest_dead" not in out
 
 
 def test_stale_forecast_live_heartbeat_is_actionable(tmp_path, monkeypatch, capsys):
@@ -198,7 +225,6 @@ def test_stale_forecast_live_heartbeat_is_actionable(tmp_path, monkeypatch, caps
     out = capsys.readouterr().out
     assert out.startswith("ALERT")
     assert "forecast_live_stale=" in out
-    assert "ingest_dead" not in out
 
 
 def test_legacy_ingest_opendata_owner_is_actionable(tmp_path, monkeypatch, capsys):
@@ -252,6 +278,112 @@ def test_legacy_ingest_without_opendata_ownership_is_observed_not_actionable(
     assert out.startswith("OK")
     assert "legacy_ingest=1" in out
     assert "legacy_ingest_opendata_owner_present" not in out
+
+
+def test_entry_blocked_is_actionable_even_when_daemons_are_alive(tmp_path, monkeypatch, capsys):
+    module = _load_module()
+    root = tmp_path / "zeus"
+    _healthy_state(root)
+    status_path = root / "state" / "status_summary.json"
+    payload = json.loads(status_path.read_text())
+    payload["cycle"]["block_registry"] = [
+        {"name": "ws_gap_guard_allow_submit", "state": "blocking", "blocking_reason": "ws_gap"}
+    ]
+    payload["execution_capability"]["entry"]["status"] = "blocked"
+    status_path.write_text(json.dumps(payload), encoding="utf-8")
+    _configure(
+        module,
+        monkeypatch,
+        root,
+        tmp_path / "snapshot.json",
+        {
+            "src.main": [101],
+            "src.ingest.forecast_live_daemon": [202],
+            "src.ingest_main": [404],
+            "src.riskguard": [303],
+        },
+        {404: {"ZEUS_FORECAST_LIVE_OWNER": "forecast_live"}},
+    )
+
+    module.main()
+
+    out = capsys.readouterr().out
+    assert out.startswith("ALERT")
+    assert "entry=blocked" in out
+    assert "blocking_gates=1" in out
+    assert "entry_blocked" in out
+
+
+def test_process_loaded_code_stale_is_actionable(tmp_path, monkeypatch, capsys):
+    module = _load_module()
+    root = tmp_path / "zeus"
+    _healthy_state(root)
+    _configure(
+        module,
+        monkeypatch,
+        root,
+        tmp_path / "snapshot.json",
+        {
+            "src.main": [101],
+            "src.ingest.forecast_live_daemon": [202],
+            "src.ingest_main": [404],
+            "src.riskguard": [303],
+        },
+        {404: {"ZEUS_FORECAST_LIVE_OWNER": "forecast_live"}},
+    )
+    monkeypatch.setattr(
+        module,
+        "_process_loaded_code_status",
+        lambda procs, root_arg: {
+            "ok": False,
+            "issue": "PROCESS_LOADED_CODE_STALE",
+            "stale": [{"process": "forecast_live", "pid": 202}],
+            "unattested": [],
+            "items": [],
+        },
+    )
+
+    module.main()
+
+    out = capsys.readouterr().out
+    assert out.startswith("ALERT")
+    assert "PROCESS_LOADED_CODE_STALE" in out
+
+
+def test_settlement_truth_stale_is_actionable(tmp_path, monkeypatch, capsys):
+    module = _load_module()
+    root = tmp_path / "zeus"
+    _healthy_state(root)
+    _configure(
+        module,
+        monkeypatch,
+        root,
+        tmp_path / "snapshot.json",
+        {
+            "src.main": [101],
+            "src.ingest.forecast_live_daemon": [202],
+            "src.ingest_main": [404],
+            "src.riskguard": [303],
+        },
+        {404: {"ZEUS_FORECAST_LIVE_OWNER": "forecast_live"}},
+    )
+    monkeypatch.setattr(
+        module,
+        "_settlement_truth_status",
+        lambda root_arg: {
+            "ok": False,
+            "issue": "SETTLEMENT_TRUTH_STALE",
+            "count": 10,
+            "max_settled_at": "2026-05-11T19:59:13+00:00",
+            "age_s": 500000,
+        },
+    )
+
+    module.main()
+
+    out = capsys.readouterr().out
+    assert out.startswith("ALERT")
+    assert "SETTLEMENT_TRUTH_STALE" in out
 
 
 def test_code_plane_drift_is_actionable(tmp_path, monkeypatch, capsys):

@@ -14,7 +14,7 @@ Advisory file lock infrastructure (src.data.dual_run_lock) is retained in code
 """
 
 # Created: pre-Phase-0 (K2 scheduler wiring via 27bedbd; P9A run_mode observability via 7081634)
-# Last reused/audited: 2026-05-15
+# Last reused/audited: 2026-05-16
 # Authority basis: Phase 3 two-system independence — docs/operations/task_2026-04-30_two_system_independence/design.md §5 Phase 3; docs/operations/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md
 
 import functools
@@ -254,6 +254,62 @@ def _refresh_global_collateral_snapshot_if_due(
         logger.warning("CollateralLedger heartbeat refresh failed closed: %s", exc)
         return False
 
+
+def _run_ws_gap_reconcile_if_required(
+    adapter,
+    *,
+    conn_factory=None,
+    ws_guard=None,
+    now: datetime | None = None,
+) -> dict:
+    """Consume the M5 latch with a fresh read-only venue reconciliation sweep."""
+
+    if adapter is None:
+        return {"status": "adapter_unavailable"}
+    if _cycle_lock.locked():
+        return {"status": "deferred_cycle_running"}
+    if ws_guard is None:
+        from src.control import ws_gap_guard as ws_guard
+    current = now or datetime.now(timezone.utc)
+    try:
+        summary = ws_guard.summary(now=current)
+    except TypeError:
+        summary = ws_guard.summary()
+    if not bool(summary.get("m5_reconcile_required", False)):
+        return {"status": "not_required"}
+
+    owns_connection = conn_factory is None
+    conn = None
+    try:
+        from src.execution.exchange_reconcile import run_ws_gap_reconcile_and_clear
+        from src.state.db import get_trade_connection
+
+        conn = (conn_factory or (lambda: get_trade_connection(write_class="live")))()
+        result = run_ws_gap_reconcile_and_clear(
+            adapter,
+            conn,
+            ws_guard=ws_guard,
+            observed_at=current,
+        )
+        conn.commit()
+        if result.get("status") == "cleared":
+            logger.info("M5 WS-gap reconcile cleared submit latch: %s", result)
+        else:
+            logger.info("M5 WS-gap reconcile kept submit latch closed: %s", result)
+        return result
+    except Exception as exc:
+        if conn is not None:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+        logger.warning("M5 WS-gap reconcile failed closed: %s", exc)
+        return {"status": "failed_closed", "error": str(exc)}
+    finally:
+        if owns_connection and conn is not None:
+            conn.close()
+
+
 _user_channel_ingestor = None
 _user_channel_thread = None
 
@@ -492,6 +548,7 @@ def _write_venue_heartbeat() -> None:
             f"venue heartbeat unhealthy: health={status.health.value}; "
             f"error={status.last_error or ''}"
         )
+    _run_ws_gap_reconcile_if_required(_venue_heartbeat_adapter)
     _refresh_global_collateral_snapshot_if_due(_venue_heartbeat_adapter)
 
 

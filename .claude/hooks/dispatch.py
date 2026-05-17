@@ -1151,6 +1151,69 @@ def _run_advisory_check_worktree_remove_advisor(
         return None
 
 
+def _run_advisory_check_maintenance_worker_dry_run_floor(
+    payload: dict[str, Any],
+) -> str | None:
+    """
+    PreToolUse (Bash/Edit/Write): warn when a maintenance worker is about to
+    apply a real action to governance files without a dry-run floor.
+
+    Fires when:
+      - tool_name is Edit, Write, MultiEdit, or Bash
+      - the command / file path targets .claude/settings.json, registry.yaml,
+        dispatch.py, or .codex/hooks.json
+      - ZEUS_MW_DRY_RUN_VERIFIED env var is NOT set
+
+    Advisory only -- never blocks.
+    """
+    hook_id = "maintenance_worker_dry_run_floor"
+    event = payload.get("hook_event_name", "PreToolUse")
+    try:
+        tool_name = payload.get("tool_name", "")
+        tool_input = payload.get("tool_input", {}) or {}
+
+        _GOVERNANCE_PATHS = (
+            ".claude/settings.json",
+            ".claude/hooks/registry.yaml",
+            ".claude/hooks/dispatch.py",
+            ".codex/hooks.json",
+        )
+
+        # Build a single string to search: file_path for edits, command for Bash
+        search_target = ""
+        if tool_name in ("Edit", "Write", "MultiEdit", "NotebookEdit"):
+            search_target = tool_input.get("file_path", "") or tool_input.get("path", "")
+        elif tool_name == "Bash":
+            search_target = tool_input.get("command", "")
+
+        if not search_target:
+            return None
+
+        matched = [p for p in _GOVERNANCE_PATHS if p in search_target]
+        if not matched:
+            return None
+
+        # Skip if operator has confirmed dry-run verified
+        if os.environ.get("ZEUS_MW_DRY_RUN_VERIFIED"):
+            return None
+
+        lines = [
+            "[maintenance_worker_dry_run_floor] ADVISORY: governance file modification detected.",
+            f"  target(s): {', '.join(matched)}",
+            "  Checklist before applying real changes:",
+            "  1. Confirm this is not a dry-run simulation — set ZEUS_MW_DRY_RUN_VERIFIED=1 when ready.",
+            "  2. Verify BLOCKING hooks (pr_create_loc_accumulation, pre_merge_comment_check) are NOT demoted.",
+            "  3. Confirm registry.yaml lines 64-102 are unchanged (grep severity: BLOCKING).",
+            "  4. Run boot self-test: python3 .claude/hooks/dispatch.py boot_self_test_only",
+            "  5. Run JSON parse: python3 -c \"import json; json.load(open('.claude/settings.json'))\"",
+            "  Bypass: set ZEUS_MW_DRY_RUN_VERIFIED=1 (documents intent; not a skip).",
+        ]
+        return "\n".join(lines)
+    except Exception as exc:
+        _emit_signal(hook_id, event, "error", f"dispatch_error:{exc}", payload)
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Advisory check dispatcher
 # ---------------------------------------------------------------------------
@@ -1173,6 +1236,7 @@ _ADVISORY_HANDLERS: dict[str, Any] = {
     "session_start_visibility": _run_advisory_check_session_start_visibility,
     "worktree_create_advisor": _run_advisory_check_worktree_create_advisor,
     "worktree_remove_advisor": _run_advisory_check_worktree_remove_advisor,
+    "maintenance_worker_dry_run_floor": _run_advisory_check_maintenance_worker_dry_run_floor,
 }
 
 
