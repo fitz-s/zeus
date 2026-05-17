@@ -1860,6 +1860,24 @@ entries:
   contains_volatile_metrics: false
   current_tense_allowed: false
   refresh_source: manual_operator_audit
+- path: docs/runbooks/forecast-live-daemon.md
+  doc_class: runbook
+  default_read: false
+  direct_reference_allowed: true
+  current_role: operator runbook for forecast-live daemon startup, cutover verification, and triage
+  canonical_replaced_by: []
+  next_action: keep
+  lifecycle_state: durable
+  coverage_scope: exact
+  parent_coverage_allowed: false
+  truth_profile: runbook
+  freshness_class: slow_changing
+  supersedes: []
+  superseded_by: []
+  may_live_in_reference: false
+  contains_volatile_metrics: false
+  current_tense_allowed: false
+  refresh_source: manual_operator_audit
 # Cohort 7 additions — appended 2026-05-15 by P9 implementation packet
 - path: .claude/CLAUDE.md
   doc_class: authority

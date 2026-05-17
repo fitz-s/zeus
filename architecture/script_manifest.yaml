@@ -368,6 +368,40 @@ scripts:
   build_correlation_matrix.py: {class: config_writer, write_targets: [config/city_correlation_matrix.json], target_db: config/city_correlation_matrix.json, unguarded_write_rationale: "Existing generator writes active config without an apply flag; must be packet-reviewed before use."}
   capture_replay_artifact.py: {class: shadow_artifact_writer}
   check_advisory_gates.py: {class: enforcement}
+  check_forecast_live_e2e.py:
+    class: diagnostic
+    lifecycle: long_lived
+    status: active
+    authority_scope: diagnostic_non_promotion
+    canonical_command: "python3 scripts/check_forecast_live_e2e.py [--json]"
+    read_targets: [temp_dbs_only]
+    write_targets: [stdout]
+    dry_run_default: true
+    apply_flag: null
+    target_db: null
+    external_inputs: []
+    dangerous_if_run: false
+    promotion_barrier: "Exercises forecast-live producer chain against isolated temp DBs only; cannot start daemons, fetch ECMWF, write repo state DBs, place orders, or authorize live trading."
+    required_helpers: [scripts.check_forecast_live_ready.evaluate_forecast_live_ready, src.ingest.forecast_live_daemon]
+    required_tests: []
+    reason: "Timed staged E2E smoke for forecast-live producer chain. Reports per-stage timings so live cutover work can distinguish code readiness from runtime readiness. Salvaged from closed PR #134."
+  check_forecast_live_ready.py:
+    class: diagnostic
+    lifecycle: long_lived
+    status: active
+    authority_scope: diagnostic_non_promotion
+    canonical_command: "python3 scripts/check_forecast_live_ready.py [--json]"
+    read_targets: [state/zeus-forecasts.db, state/forecast-live-heartbeat.json, state/source_health.json]
+    write_targets: [stdout]
+    dry_run_default: true
+    apply_flag: null
+    target_db: null
+    external_inputs: []
+    dangerous_if_run: false
+    promotion_barrier: "Read-only probe; cannot initialize schemas, fetch external sources, start daemons, touch launchctl, write canonical DB/state truth, or authorize live trading."
+    required_helpers: [src.data.producer_readiness, src.state.db]
+    required_tests: []
+    reason: "Reports highest evidence-backed completion state plus exact blockers for forecast-live authority chain. Prevents operators/agents from confusing code presence with live data readiness. Salvaged from closed PR #134."
   compare_diurnal_v1_v2.py: {class: diagnostic}
   hko_ingest_tick.py: {class: etl_writer, dangerous_if_run: true, apply_flag: implicit, target_db: state/zeus-world.db, unguarded_write_rationale: "Standalone HKO accumulator tick + observation_instants_v2 projection; idempotent via ON CONFLICT / UNIQUE constraints. Designed for cron invocation independent of trading daemon."}
   check_data_pipeline_live_e2e.py:
