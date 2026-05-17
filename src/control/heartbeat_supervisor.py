@@ -13,6 +13,7 @@ import inspect
 import json
 import logging
 import os
+import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -135,6 +136,10 @@ def _parse_utc(value: Any) -> datetime | None:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc)
+
+
+def _is_invalid_heartbeat_id_error(exc: Exception | str) -> bool:
+    return "Invalid Heartbeat ID" in str(exc)
 
 
 def write_heartbeat_keeper_status(
@@ -274,6 +279,7 @@ class HeartbeatSupervisor:
         self._last_error: Optional[str] = None
         self._running = False
         self._tombstone_written = False
+        self._run_once_lock = threading.Lock()
 
     async def start(self) -> None:
         """Run heartbeat posts until stop() is called.
@@ -299,25 +305,31 @@ class HeartbeatSupervisor:
         resets to `""` so the next tick starts a fresh chain.
         """
 
+        if not self._run_once_lock.acquire(blocking=False):
+            logger.warning("Venue heartbeat tick skipped: previous tick still in flight")
+            return self.status()
         try:
-            if self._adapter is None:
-                raise RuntimeError("heartbeat adapter unavailable")
-            ack = self._adapter.post_heartbeat(self._heartbeat_id)
-            if inspect.isawaitable(ack):
-                ack = await ack
-            if getattr(ack, "ok", True) is False:
-                raise RuntimeError("heartbeat ack returned ok=False")
-            next_id = ""
-            raw = getattr(ack, "raw", None)
-            if isinstance(raw, dict):
-                next_id = str(raw.get("heartbeat_id") or "")
-            if not next_id:
-                raise RuntimeError("heartbeat ack missing heartbeat_id")
-            self._heartbeat_id = next_id
-            self.record_success()
-        except Exception as exc:  # fail closed, surface through status/tombstone
-            self._heartbeat_id = ""  # reset chain so next tick re-registers
-            self.record_failure(exc)
+            try:
+                if self._adapter is None:
+                    raise RuntimeError("heartbeat adapter unavailable")
+                ack = self._adapter.post_heartbeat(self._heartbeat_id)
+                if inspect.isawaitable(ack):
+                    ack = await ack
+                if getattr(ack, "ok", True) is False:
+                    raise RuntimeError("heartbeat ack returned ok=False")
+                next_id = ""
+                raw = getattr(ack, "raw", None)
+                if isinstance(raw, dict):
+                    next_id = str(raw.get("heartbeat_id") or "")
+                if not next_id:
+                    raise RuntimeError("heartbeat ack missing heartbeat_id")
+                self._heartbeat_id = next_id
+                self.record_success()
+            except Exception as exc:  # fail closed, surface through status/tombstone
+                self._heartbeat_id = ""  # reset chain so next tick re-registers
+                self.record_failure(exc)
+        finally:
+            self._run_once_lock.release()
         return self.status()
 
     def record_success(self) -> None:
@@ -329,7 +341,10 @@ class HeartbeatSupervisor:
     def record_failure(self, exc: Exception | str) -> None:
         self._consecutive_failures += 1
         self._last_error = str(exc)
-        if self._consecutive_failures == 1:
+        if _is_invalid_heartbeat_id_error(exc):
+            self._health = HeartbeatHealth.LOST
+            self._write_failclosed_tombstone()
+        elif self._consecutive_failures == 1:
             self._health = HeartbeatHealth.DEGRADED
         else:
             self._health = HeartbeatHealth.LOST

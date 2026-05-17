@@ -1047,6 +1047,7 @@ class TestRecoveryResolutionTable:
             """
         )
         mock_client.get_open_orders.return_value = []
+        mock_client.get_order.return_value = {"orderID": "ord-partial", "status": "CANCELED"}
 
         from src.execution.command_recovery import reconcile_unresolved_commands
 
@@ -1077,10 +1078,12 @@ class TestRecoveryResolutionTable:
             "command_id": "cmd-001",
             "matched_size": "1.25",
             "open_order_absent": True,
-            "proof_class": "confirmed_fill_plus_open_order_absence",
+            "point_order": {"orderID": "ord-partial", "status": "CANCELED"},
+            "point_order_status": "CANCELED",
+            "proof_class": "confirmed_fill_plus_point_order_terminal_remainder",
             "reason": "partial_remainder_absent_from_exchange_open_orders",
             "remaining_size": "0",
-            "source_surface": "client.get_open_orders",
+            "source_surface": "client.get_open_orders+client.get_order",
             "venue_order_id": "ord-partial",
         }
         current = conn.execute(
@@ -1108,9 +1111,10 @@ class TestRecoveryResolutionTable:
                 state=state,
                 filled_size="1.25",
                 fill_price="0.50",
-            )
+        )
         _seed_pending_entry_projection(conn, order_id="ord-partial")
         mock_client.get_open_orders.return_value = []
+        mock_client.get_order.return_value = {"orderID": "ord-partial", "status": "EXPIRED"}
 
         from src.execution.command_recovery import reconcile_unresolved_commands
 
@@ -1132,6 +1136,76 @@ class TestRecoveryResolutionTable:
         event_payload = json.loads(_get_events(conn, "cmd-001")[-1]["payload_json"])
         assert event_payload["positive_fill_trade_fact_count"] == 1
         assert event_payload["positive_fill_size"] == "1.25"
+
+    def test_legacy_filled_command_with_partial_economic_coverage_records_terminal_remainder_fact(
+        self,
+        conn,
+        mock_client,
+    ):
+        _insert(conn, size=181.16)
+        _advance_to_partial(conn, venue_order_id="ord-partial")
+        from src.state.venue_command_repo import append_event
+
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="FILL_CONFIRMED",
+            occurred_at="2026-04-26T00:07:00Z",
+            payload={"source": "legacy_ws_user", "trade_id": "trade-partial"},
+        )
+        _append_confirmed_trade_fact(
+            conn,
+            order_id="ord-partial",
+            trade_id="trade-partial",
+            filled_size="100",
+            fill_price="0.01",
+        )
+        _append_order_fact(
+            conn,
+            order_id="ord-partial",
+            state="PARTIALLY_MATCHED",
+            matched_size="100",
+            remaining_size="81.16",
+        )
+        mock_client.get_open_orders.return_value = []
+        mock_client.get_order.return_value = {"orderID": "ord-partial", "status": "CANCELED"}
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["partial_remainders"] == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+        assert _get_state(conn, "cmd-001") == "FILLED"
+        events = _get_events(conn, "cmd-001")
+        assert events[-1]["event_type"] == "FILL_CONFIRMED"
+        order_fact = conn.execute(
+            """
+            SELECT state, remaining_size, matched_size, source, raw_payload_json
+              FROM venue_order_facts
+             WHERE command_id = 'cmd-001'
+             ORDER BY local_sequence DESC
+             LIMIT 1
+            """
+        ).fetchone()
+        payload = json.loads(order_fact["raw_payload_json"])
+        assert dict(order_fact) | {"raw_payload_json": payload} == {
+            "state": "EXPIRED",
+            "remaining_size": "0",
+            "matched_size": "100",
+            "source": "REST",
+            "raw_payload_json": {
+                "command_id": "cmd-001",
+                "matched_size": "100",
+                "open_order_absent": True,
+                "point_order": {"orderID": "ord-partial", "status": "CANCELED"},
+                "point_order_status": "CANCELED",
+                "proof_class": "confirmed_fill_plus_point_order_terminal_remainder",
+                "reason": "partial_remainder_absent_from_exchange_open_orders",
+                "remaining_size": "0",
+                "source_surface": "client.get_open_orders+client.get_order",
+                "venue_order_id": "ord-partial",
+            },
+        }
 
     def test_partial_remainder_stays_partial_while_order_is_still_open(
         self,
@@ -1158,6 +1232,7 @@ class TestRecoveryResolutionTable:
         _insert(conn, size=5.0)
         _advance_to_partial(conn, venue_order_id="ord-partial")
         mock_client.get_open_orders.return_value = []
+        mock_client.get_order.return_value = {"orderID": "ord-partial", "status": "CANCELED"}
 
         from src.execution.command_recovery import reconcile_unresolved_commands
 
@@ -1187,6 +1262,7 @@ class TestRecoveryResolutionTable:
             recorded_at="2026-04-26T00:07:00Z",
         )
         mock_client.get_open_orders.return_value = []
+        mock_client.get_order.return_value = {"orderID": "ord-partial", "status": "CANCELED"}
 
         from src.execution.command_recovery import reconcile_unresolved_commands
 
@@ -1202,6 +1278,42 @@ class TestRecoveryResolutionTable:
             "resolution": "command_recovery_expired_partial_remainder",
             "resolved_by": "src.execution.command_recovery",
         }
+
+    def test_partial_remainder_global_absence_requires_point_terminal_proof(
+        self,
+        conn,
+        mock_client,
+    ):
+        _insert(conn, size=5.0)
+        _advance_to_partial(conn, venue_order_id="ord-partial")
+        _append_confirmed_trade_fact(conn, order_id="ord-partial")
+        mock_client.get_open_orders.return_value = []
+        mock_client.get_order.return_value = {"orderID": "ord-partial", "status": "LIVE"}
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["partial_remainders"] == {"scanned": 1, "advanced": 0, "stayed": 1, "errors": 0}
+        assert _get_state(conn, "cmd-001") == "PARTIAL"
+        assert "EXPIRED" not in [e["event_type"] for e in _get_events(conn, "cmd-001")]
+
+    def test_partial_remainder_without_point_reader_fails_closed(
+        self,
+        conn,
+    ):
+        _insert(conn, size=5.0)
+        _advance_to_partial(conn, venue_order_id="ord-partial")
+        _append_confirmed_trade_fact(conn, order_id="ord-partial")
+        client = MagicMock(spec_set=["get_open_orders"])
+        client.get_open_orders.return_value = []
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, client)
+
+        assert summary["partial_remainders"] == {"scanned": 1, "advanced": 0, "stayed": 0, "errors": 1}
+        assert _get_state(conn, "cmd-001") == "PARTIAL"
 
     # Supplementary: summary dict has all expected keys
     def test_summary_has_all_keys(self, conn, mock_client):

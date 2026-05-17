@@ -761,6 +761,90 @@ def test_entry_fill_projection_aggregates_multiple_trade_facts(conn):
     assert execution["terminal_exec_status"] == "partial"
 
 
+def test_recorded_maker_fill_economic_drift_appends_correction_and_reprojects(conn):
+    from src.execution.exchange_reconcile import reconcile_recorded_maker_fill_economics
+    from src.state.venue_command_repo import append_trade_fact as append_venue_trade_fact
+
+    seed_command(conn, state="FILLED", size=181.16, price=0.01)
+    seed_position_baseline(conn)
+    seed_trade_decision_runtime_alias(conn)
+    raw = {
+        "id": "trade-maker-drift",
+        "status": "CONFIRMED",
+        "taker_order_id": "foreign-taker",
+        "size": "100",
+        "price": "0.99",
+        "transaction_hash": "0xmakerdrift",
+        "maker_orders": [
+            {
+                "order_id": "ord-m5",
+                "matched_amount": "100",
+                "price": "0.01",
+                "asset_id": YES_TOKEN,
+                "side": "BUY",
+            }
+        ],
+    }
+    bad_fact_id = append_venue_trade_fact(
+        conn,
+        trade_id="trade-maker-drift",
+        venue_order_id="ord-m5",
+        command_id="cmd-m5",
+        state="CONFIRMED",
+        filled_size="100",
+        fill_price="0.99",
+        source="WS_USER",
+        observed_at=NOW,
+        raw_payload_hash=hashlib.sha256(b"bad-maker-drift").hexdigest(),
+        raw_payload_json=raw,
+    )
+
+    summary = reconcile_recorded_maker_fill_economics(conn, observed_at=NOW + timedelta(seconds=5))
+
+    assert summary == {"scanned": 1, "corrected": 1, "projected": 1, "stayed": 0, "errors": 0}
+    rows = conn.execute(
+        """
+        SELECT trade_fact_id, local_sequence, filled_size, fill_price, raw_payload_json
+          FROM venue_trade_facts
+         WHERE trade_id = 'trade-maker-drift'
+         ORDER BY local_sequence
+        """
+    ).fetchall()
+    assert [(r["local_sequence"], r["filled_size"], r["fill_price"]) for r in rows] == [
+        (1, "100", "0.99"),
+        (2, "100", "0.01"),
+    ]
+    repair_payload = rows[-1]["raw_payload_json"]
+    assert "maker_leg_economics_selected_for_command_order" in repair_payload
+    assert str(bad_fact_id) in repair_payload
+
+    projection = conn.execute(
+        """
+        SELECT phase, order_status, shares, entry_price, cost_basis_usd
+          FROM position_current
+         WHERE position_id = 'pos-m5'
+        """
+    ).fetchone()
+    assert projection["phase"] == "active"
+    assert projection["order_status"] == "partial"
+    assert Decimal(str(projection["shares"])) == Decimal("100")
+    assert Decimal(str(projection["entry_price"])) == Decimal("0.01")
+    assert Decimal(str(projection["cost_basis_usd"])) == Decimal("1.00")
+
+    lot = conn.execute(
+        """
+        SELECT state, shares, entry_price_avg, source_trade_fact_id
+          FROM position_lots
+         ORDER BY lot_id DESC
+         LIMIT 1
+        """
+    ).fetchone()
+    assert lot["state"] == "CONFIRMED_EXPOSURE"
+    assert Decimal(str(lot["shares"])) == Decimal("100")
+    assert Decimal(str(lot["entry_price_avg"])) == Decimal("0.01")
+    assert lot["source_trade_fact_id"] == rows[-1]["trade_fact_id"]
+
+
 def test_failed_or_retrying_trade_fact_does_not_advance_command_fill_state(conn):
     from src.execution.exchange_reconcile import run_reconcile_sweep
 

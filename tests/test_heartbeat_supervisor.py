@@ -131,6 +131,65 @@ def test_chain_token_protocol_rotation_and_failure_resets_to_empty():
     )
 
 
+def test_invalid_heartbeat_id_is_immediate_lease_loss_and_next_tick_restarts_chain():
+    adapter = FakeHeartbeatAdapter([
+        HeartbeatAck(ok=True, raw={"heartbeat_id": "id-1"}),
+        RuntimeError("PolyApiException: Invalid Heartbeat ID"),
+        HeartbeatAck(ok=True, raw={"heartbeat_id": "id-2"}),
+    ])
+    supervisor = HeartbeatSupervisor(adapter, cadence_seconds=5)
+
+    assert _run(supervisor.run_once()).health is HeartbeatHealth.HEALTHY
+    lost = _run(supervisor.run_once())
+
+    assert lost.health is HeartbeatHealth.LOST
+    assert lost.consecutive_failures == 1
+    assert lost.heartbeat_id == ""
+    assert supervisor.gate_for_order_type("GTC") is False
+
+    recovered = _run(supervisor.run_once())
+
+    assert recovered.health is HeartbeatHealth.HEALTHY
+    assert adapter.heartbeat_ids == ["", "id-1", ""]
+
+
+def test_overlapping_heartbeat_ticks_do_not_reuse_same_heartbeat_id():
+    class BlockingAdapter:
+        def __init__(self):
+            self.heartbeat_ids: list[str] = []
+            self.entered: asyncio.Event | None = None
+            self.release: asyncio.Event | None = None
+
+        async def post_heartbeat(self, heartbeat_id: str):
+            assert self.entered is not None
+            assert self.release is not None
+            self.heartbeat_ids.append(heartbeat_id)
+            self.entered.set()
+            await self.release.wait()
+            return HeartbeatAck(ok=True, raw={"heartbeat_id": "id-1"})
+
+    async def scenario():
+        adapter = BlockingAdapter()
+        adapter.entered = asyncio.Event()
+        adapter.release = asyncio.Event()
+        supervisor = HeartbeatSupervisor(adapter, cadence_seconds=5)
+
+        first = asyncio.create_task(supervisor.run_once())
+        await adapter.entered.wait()
+        skipped = await supervisor.run_once()
+
+        assert skipped.health is HeartbeatHealth.STARTING
+        assert adapter.heartbeat_ids == [""]
+
+        adapter.release.set()
+        completed = await first
+
+        assert completed.health is HeartbeatHealth.HEALTHY
+        assert adapter.heartbeat_ids == [""]
+
+    _run(scenario())
+
+
 def test_one_miss_degraded_two_misses_lost():
     adapter = FakeHeartbeatAdapter([
         HeartbeatAck(ok=True, raw={"heartbeat_id": "chain-1"}),

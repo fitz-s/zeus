@@ -1,8 +1,8 @@
-# Lifecycle: created=2026-05-15; last_reviewed=2026-05-16; last_reused=2026-05-16
+# Lifecycle: created=2026-05-15; last_reviewed=2026-05-17; last_reused=2026-05-17
 # Purpose: Lock read-only live-order E2E proof classification and overclaim prevention.
 # Reuse: Run after venue command schema, executor submit events, or live-order evidence rules change.
 # Created: 2026-05-15
-# Last reused or audited: 2026-05-16
+# Last reused or audited: 2026-05-17
 # Authority basis: docs/operations/task_2026-05-15_live_order_e2e_goal/LIVE_ORDER_E2E_GOAL_PLAN.md
 
 from __future__ import annotations
@@ -118,6 +118,7 @@ def _insert_command(
     state: str = "ACKED",
     decision_id: str = "decision-1",
     venue_order_id: str | None = None,
+    size: str = "10.00",
 ) -> None:
     conn.execute(
         """
@@ -126,9 +127,9 @@ def _insert_command(
           snapshot_id, side, token_id, limit_price, size, created_at, updated_at
         )
         VALUES ('cmd-1', ?, ?, ?, 'idem-1', 'snap-1', 'BUY', 'token-1', '0.42',
-                '10.00', '2026-05-15T12:00:00Z', '2026-05-15T12:00:02Z')
+                ?, '2026-05-15T12:00:00Z', '2026-05-15T12:00:02Z')
         """,
-        (state, venue_order_id, decision_id),
+        (state, venue_order_id, decision_id, size),
     )
 
 
@@ -235,6 +236,8 @@ def _insert_trade_fact(
     state: str = "MATCHED",
     observed_at: str = "2026-05-15T12:00:04Z",
     local_sequence: int = 1,
+    filled_size: str = "10.00",
+    fill_price: str = "0.42",
 ) -> None:
     conn.execute(
         """
@@ -242,9 +245,20 @@ def _insert_trade_fact(
           fact_id, command_id, venue_order_id, trade_id, source, filled_size,
           fill_price, observed_at, state, local_sequence
         )
-        VALUES (?, ?, ?, ?, ?, '10.00', '0.42', ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (fact_id, command_id, order_id, trade_id, source, observed_at, state, local_sequence),
+        (
+            fact_id,
+            command_id,
+            order_id,
+            trade_id,
+            source,
+            filled_size,
+            fill_price,
+            observed_at,
+            state,
+            local_sequence,
+        ),
     )
 
 
@@ -1027,6 +1041,88 @@ def test_partial_fill_requires_partial_position_projection_status(tmp_path):
         check["name"] == "position_current_order_status_consistent"
         and check["status"] == "FAIL"
         and "command_state=PARTIAL" in check["detail"]
+        for check in result["checks"]
+    )
+
+
+def test_legacy_filled_command_with_latest_partial_fill_requires_partial_projection(tmp_path):
+    module = _load_module()
+    db = tmp_path / "trades.db"
+    with sqlite3.connect(db) as conn:
+        conn.row_factory = sqlite3.Row
+        _schema(conn)
+        _insert_command(conn, state="FILLED", size="181.16")
+        _insert_submit_requested(conn)
+        _insert_submit_acked(conn)
+        _insert_pre_submit_envelope(conn)
+        _insert_order_fact(conn, state="MATCHED")
+        _insert_trade_fact(
+            conn,
+            fact_id="trade-fact-old",
+            trade_id="trade-1",
+            filled_size="100",
+            fill_price="0.99",
+            local_sequence=1,
+        )
+        _insert_trade_fact(
+            conn,
+            fact_id="trade-fact-corrected",
+            trade_id="trade-1",
+            filled_size="100",
+            fill_price="0.01",
+            local_sequence=2,
+        )
+        _insert_position_fill(conn, order_status="partial")
+
+    with _connect_module_readonly(module, db, tmp_path) as conn:
+        result = module.evaluate(conn, "cmd-1")
+
+    assert result["status"] == "PASS"
+    assert result["completion_category"] == "LIVE_ORDER_PARTIAL_REMAINDER_OPEN_OR_UNKNOWN"
+    assert any(
+        check["name"] == "position_current_order_status_consistent"
+        and check["status"] == "PASS"
+        and "command_state=FILLED" in check["detail"]
+        and "fill_coverage=partial" in check["detail"]
+        for check in result["checks"]
+    )
+
+
+def test_legacy_filled_command_with_terminal_partial_remainder_order_fact_passes(tmp_path):
+    module = _load_module()
+    db = tmp_path / "trades.db"
+    with sqlite3.connect(db) as conn:
+        conn.row_factory = sqlite3.Row
+        _schema(conn)
+        _insert_command(conn, state="FILLED", size="181.16")
+        _insert_submit_requested(conn)
+        _insert_submit_acked(conn)
+        _insert_pre_submit_envelope(conn)
+        _insert_order_fact(
+            conn,
+            state="EXPIRED",
+            matched_size="100",
+            remaining_size="0",
+        )
+        _insert_trade_fact(
+            conn,
+            fact_id="trade-fact-corrected",
+            trade_id="trade-1",
+            filled_size="100",
+            fill_price="0.01",
+            local_sequence=1,
+        )
+        _insert_position_fill(conn, order_status="partial")
+
+    with _connect_module_readonly(module, db, tmp_path) as conn:
+        result = module.evaluate(conn, "cmd-1")
+
+    assert result["status"] == "PASS"
+    assert result["completion_category"] == "LIVE_ORDER_PARTIAL_TERMINAL_REMAINDER"
+    assert any(
+        check["name"] == "latest_venue_order_fact_open"
+        and check["status"] == "PASS"
+        and "latest_state=EXPIRED" in check["detail"]
         for check in result["checks"]
     )
 

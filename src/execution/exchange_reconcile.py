@@ -9,6 +9,7 @@ performed here.
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import uuid
 from dataclasses import dataclass
@@ -20,6 +21,8 @@ from typing import Any, Literal, Mapping, Optional
 
 from src.architecture.decorators import capability, protects
 from src.state.venue_command_repo import trade_fact_has_positive_fill_economics
+
+logger = logging.getLogger(__name__)
 
 FindingKind = Literal[
     "exchange_ghost_order",
@@ -406,7 +409,204 @@ def run_reconcile_sweep(
                 observed_at=observed,
             )
         )
+    reconcile_recorded_maker_fill_economics(conn, observed_at=observed)
     return findings
+
+
+def reconcile_recorded_maker_fill_economics(
+    conn: sqlite3.Connection,
+    *,
+    observed_at: datetime | str | None = None,
+) -> dict[str, int]:
+    """Repair recorded trade facts whose raw maker leg contradicts top-level trade economics.
+
+    The venue user stream emits a trade-level top-line from the taker side while
+    Zeus can be the maker.  The immutable raw payload already contains the
+    command-owned maker order.  This repair appends a corrected fact instead of
+    rewriting the old row, then replays the entry-fill projection from the
+    latest fact chain.
+    """
+
+    summary = {"scanned": 0, "corrected": 0, "projected": 0, "stayed": 0, "errors": 0}
+    if not _table_exists(conn, "venue_trade_facts") or not _table_exists(conn, "venue_commands"):
+        return summary
+    observed = _coerce_dt(observed_at)
+    rows = conn.execute(
+        """
+        WITH latest_trade_fact AS (
+            SELECT trade_id, MAX(local_sequence) AS local_sequence
+              FROM venue_trade_facts
+             GROUP BY trade_id
+        )
+        SELECT
+            tf.*,
+            cmd.snapshot_id AS cmd_snapshot_id,
+            cmd.envelope_id AS cmd_envelope_id,
+            cmd.position_id AS cmd_position_id,
+            cmd.decision_id AS cmd_decision_id,
+            cmd.idempotency_key AS cmd_idempotency_key,
+            cmd.intent_kind AS cmd_intent_kind,
+            cmd.market_id AS cmd_market_id,
+            cmd.token_id AS cmd_token_id,
+            cmd.side AS cmd_side,
+            cmd.size AS cmd_size,
+            cmd.price AS cmd_price,
+            cmd.venue_order_id AS cmd_venue_order_id,
+            cmd.state AS cmd_state,
+            cmd.created_at AS cmd_created_at,
+            cmd.updated_at AS cmd_updated_at
+          FROM venue_trade_facts tf
+          JOIN latest_trade_fact latest
+            ON latest.trade_id = tf.trade_id
+           AND latest.local_sequence = tf.local_sequence
+          JOIN venue_commands cmd
+            ON cmd.command_id = tf.command_id
+         WHERE tf.state IN ('MATCHED', 'MINED', 'CONFIRMED')
+           AND COALESCE(tf.raw_payload_json, '') LIKE '%maker_orders%'
+         ORDER BY tf.observed_at, tf.trade_fact_id
+        """
+    ).fetchall()
+    for row in rows:
+        summary["scanned"] += 1
+        fact = dict(row)
+        try:
+            command = _command_from_prefixed_trade_fact_row(fact)
+            raw = _json_mapping(fact.get("raw_payload_json"))
+            order_id = str(command.get("venue_order_id") or fact.get("venue_order_id") or "")
+            if _selected_maker_order(raw, order_id) is None:
+                summary["stayed"] += 1
+                continue
+            corrected_size_raw = _trade_filled_size(raw, order_id)
+            corrected_price_raw = _trade_fill_price(raw, order_id)
+            missing = _missing_trade_fill_economics(
+                state=str(fact.get("state") or ""),
+                filled_size=corrected_size_raw,
+                fill_price=corrected_price_raw,
+            )
+            if missing:
+                summary["errors"] += 1
+                continue
+            corrected_size = str(corrected_size_raw)
+            corrected_price = str(corrected_price_raw)
+            if not _same_trade_fill_economics(
+                fact,
+                filled_size=corrected_size,
+                fill_price=corrected_price,
+            ):
+                _append_maker_fill_economic_correction(
+                    conn,
+                    fact=fact,
+                    command=command,
+                    raw=raw,
+                    venue_order_id=order_id,
+                    filled_size=corrected_size,
+                    fill_price=corrected_price,
+                    observed_at=observed,
+                )
+                summary["corrected"] += 1
+            _ensure_entry_fill_position_event(
+                conn,
+                command=command,
+                venue_order_id=order_id,
+                filled_size=corrected_size,
+                fill_price=corrected_price,
+                observed_at=observed,
+            )
+            summary["projected"] += 1
+        except Exception:
+            summary["errors"] += 1
+            logger.exception(
+                "exchange_reconcile: maker fill economics repair failed for trade_fact_id=%s",
+                fact.get("trade_fact_id"),
+            )
+    return summary
+
+
+def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (table,),
+    ).fetchone()
+    return row is not None
+
+
+def _json_mapping(raw: object) -> dict[str, Any]:
+    if isinstance(raw, Mapping):
+        return dict(raw)
+    if raw in (None, ""):
+        return {}
+    try:
+        parsed = json.loads(str(raw))
+    except (TypeError, json.JSONDecodeError):
+        return {}
+    return dict(parsed) if isinstance(parsed, Mapping) else {}
+
+
+def _command_from_prefixed_trade_fact_row(row: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "command_id": row.get("command_id"),
+        "snapshot_id": row.get("cmd_snapshot_id"),
+        "envelope_id": row.get("cmd_envelope_id"),
+        "position_id": row.get("cmd_position_id"),
+        "decision_id": row.get("cmd_decision_id"),
+        "idempotency_key": row.get("cmd_idempotency_key"),
+        "intent_kind": row.get("cmd_intent_kind"),
+        "market_id": row.get("cmd_market_id"),
+        "token_id": row.get("cmd_token_id"),
+        "side": row.get("cmd_side"),
+        "size": row.get("cmd_size"),
+        "price": row.get("cmd_price"),
+        "venue_order_id": row.get("cmd_venue_order_id"),
+        "state": row.get("cmd_state"),
+        "created_at": row.get("cmd_created_at"),
+        "updated_at": row.get("cmd_updated_at"),
+    }
+
+
+def _append_maker_fill_economic_correction(
+    conn: sqlite3.Connection,
+    *,
+    fact: Mapping[str, Any],
+    command: Mapping[str, Any],
+    raw: Mapping[str, Any],
+    venue_order_id: str,
+    filled_size: str,
+    fill_price: str,
+    observed_at: datetime,
+) -> int:
+    from src.state.venue_command_repo import append_trade_fact
+
+    payload = dict(raw)
+    payload["zeus_repair"] = {
+        "schema_version": 1,
+        "reason": "maker_leg_economics_selected_for_command_order",
+        "source_trade_fact_id": fact.get("trade_fact_id"),
+        "source_filled_size": fact.get("filled_size"),
+        "source_fill_price": fact.get("fill_price"),
+        "corrected_filled_size": filled_size,
+        "corrected_fill_price": fill_price,
+        "command_id": command.get("command_id"),
+        "venue_order_id": venue_order_id,
+        "source_module": "src.execution.exchange_reconcile",
+    }
+    return append_trade_fact(
+        conn,
+        trade_id=str(fact["trade_id"]),
+        venue_order_id=venue_order_id,
+        command_id=str(command["command_id"]),
+        state=str(fact["state"]),
+        filled_size=filled_size,
+        fill_price=fill_price,
+        source=str(fact.get("source") or "WS_USER"),
+        observed_at=observed_at,
+        venue_timestamp=fact.get("venue_timestamp"),
+        raw_payload_hash=_hash_payload(payload),
+        raw_payload_json=payload,
+        fee_paid_micro=fact.get("fee_paid_micro"),
+        tx_hash=fact.get("tx_hash"),
+        block_number=fact.get("block_number"),
+        confirmation_count=fact.get("confirmation_count"),
+    )
 
 
 def record_finding(
@@ -765,12 +965,6 @@ def _ensure_entry_fill_position_event(
     current = dict(row)
     phase = str(current.get("phase") or "")
     runtime_state = "day0_window" if phase == "day0_window" else "entered"
-    command_state = str(command.get("state") or "").upper()
-    order_status = (
-        "partial"
-        if command_event == "PARTIAL_FILL_OBSERVED" or command_state == "PARTIAL"
-        else "filled"
-    )
     fill_economics = _entry_fill_economics_for_command(
         conn,
         command_id=str(command.get("command_id") or ""),
@@ -783,6 +977,9 @@ def _ensure_entry_fill_position_event(
     shares = _decimal_text(shares_dec)
     entry_price = _decimal_text(entry_price_dec)
     cost_basis = _decimal_text(cost_basis_dec)
+    order_status = "filled" if _entry_fill_covers_command(command, shares_dec) else "partial"
+    if command_event == "PARTIAL_FILL_OBSERVED":
+        order_status = "partial"
     occurred_at = observed_at.isoformat()
     position = SimpleNamespace(
         **{
@@ -1058,6 +1255,13 @@ def _selected_maker_order(raw: Mapping[str, Any], order_id: str | None) -> Mappi
         if maker_order_id == order_id:
             return maker
     return None
+
+
+def _entry_fill_covers_command(command: Mapping[str, Any], shares: Decimal) -> bool:
+    target = _positive_decimal_or_none(command.get("size"))
+    if target is None:
+        return str(command.get("state") or "").upper() == "FILLED"
+    return shares >= target
 
 
 def _trade_filled_size(raw: Mapping[str, Any], order_id: str | None) -> Any:
