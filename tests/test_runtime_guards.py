@@ -2631,6 +2631,43 @@ def test_executable_snapshot_repricing_updates_edge_and_size(tmp_path):
     assert shadow["posterior_distribution_id"] == "decision_snapshot:decision-snap"
 
 
+def test_executable_snapshot_repricing_uses_snapshot_freshness_deadline(tmp_path):
+    conn = get_connection(tmp_path / "snapshot-deadline-fresh.db")
+    init_schema(conn)
+    _insert_executable_snapshot(
+        conn,
+        snapshot_id="snap-deadline-fresh",
+        selected_outcome_token_id="yes1",
+        outcome_label="YES",
+        yes_token_id="yes1",
+        no_token_id="no1",
+        top_bid="0.20",
+        top_ask="0.30",
+        captured_at=datetime.now(timezone.utc) - timedelta(seconds=10),
+    )
+    edge = _edge()
+    decision = EdgeDecision(
+        should_trade=True,
+        edge=edge,
+        tokens={"token_id": "yes1", "no_token_id": "no1"},
+        size_usd=5.0,
+        decision_snapshot_id="decision-snap",
+        applied_validations=[],
+        sizing_bankroll=100.0,
+        kelly_multiplier_used=0.25,
+        execution_fee_rate=0.0,
+    )
+
+    cycle_runtime._reprice_decision_from_executable_snapshot(
+        conn,
+        decision,
+        {"executable_snapshot_id": "snap-deadline-fresh"},
+    )
+    conn.close()
+
+    assert "executable_snapshot_repriced" in decision.applied_validations
+
+
 def test_executable_snapshot_repricing_rejects_stale_snapshot(tmp_path):
     conn = get_connection(tmp_path / "snapshot-stale.db")
     init_schema(conn)
@@ -2643,7 +2680,7 @@ def test_executable_snapshot_repricing_rejects_stale_snapshot(tmp_path):
         no_token_id="no1",
         top_bid="0.20",
         top_ask="0.30",
-        captured_at=datetime.now(timezone.utc) - timedelta(seconds=10),
+        captured_at=datetime.now(timezone.utc) - timedelta(seconds=40),
     )
     decision = EdgeDecision(
         should_trade=True,

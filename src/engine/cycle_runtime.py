@@ -24,8 +24,6 @@ from src.state.lifecycle_manager import (
     enter_day0_window_runtime_state,
     initial_entry_runtime_state_for_order_status,
 )
-MAX_SNAPSHOT_AGE_SECONDS = 5
-
 from src.state.portfolio import (
     CORRECTED_EXECUTABLE_PRICING_SEMANTICS_VERSION,
     ENTRY_ECONOMICS_AVG_FILL_PRICE,
@@ -627,11 +625,9 @@ def _reprice_decision_from_executable_snapshot(
     snapshot = get_snapshot(conn, snapshot_id)
     if snapshot is None:
         raise ValueError(f"EXECUTABLE_SNAPSHOT_UNAVAILABLE: {snapshot_id}")
-    captured_at = snapshot.captured_at
-    if captured_at.tzinfo is None:
-        captured_at = captured_at.replace(tzinfo=timezone.utc)
-    snapshot_age_seconds = (datetime.now(timezone.utc) - captured_at).total_seconds()
-    if snapshot_age_seconds > MAX_SNAPSHOT_AGE_SECONDS:
+    from src.contracts.executable_market_snapshot_v2 import is_fresh
+
+    if not is_fresh(snapshot, datetime.now(timezone.utc)):
         raise ValueError("executable_snapshot_stale")
     from src.config import settings
     from src.contracts import (
