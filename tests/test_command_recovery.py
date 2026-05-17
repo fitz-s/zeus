@@ -1177,6 +1177,7 @@ class TestRecoveryResolutionTable:
             SELECT state, remaining_size, matched_size, source, raw_payload_json
               FROM venue_order_facts
              WHERE command_id = 'cmd-001'
+               AND state = 'EXPIRED'
              ORDER BY local_sequence DESC
              LIMIT 1
             """
@@ -1210,6 +1211,90 @@ class TestRecoveryResolutionTable:
             "cost_basis_usd": 0.625,
             "order_status": "partial",
         }
+
+    def test_exit_matched_trade_fact_projects_pending_exit_without_economic_close(
+        self,
+        conn,
+        mock_client,
+    ):
+        _insert(conn, command_id="cmd-entry", position_id="pos-001")
+        _advance_to_acked(conn, command_id="cmd-entry", venue_order_id="ord-entry")
+        _seed_pending_entry_projection(conn, command_id="cmd-entry", order_id="ord-entry")
+        conn.execute(
+            """
+            UPDATE position_current
+               SET phase = 'active',
+                   shares = 23.7,
+                   cost_basis_usd = 1.659,
+                   entry_price = 0.07,
+                   order_status = 'filled',
+                   updated_at = '2026-04-26T00:04:00Z'
+             WHERE position_id = 'pos-001'
+            """
+        )
+        _insert(
+            conn,
+            command_id="cmd-exit",
+            position_id="pos-001",
+            intent_kind="EXIT",
+            side="SELL",
+            size=23.7,
+            price=0.04,
+            token_id="tok-001",
+        )
+        _advance_to_partial(conn, command_id="cmd-exit", venue_order_id="ord-exit")
+        _append_trade_fact(
+            conn,
+            command_id="cmd-exit",
+            order_id="ord-exit",
+            trade_id="trade-exit-001",
+            state="MATCHED",
+            filled_size="23.7",
+            fill_price="0.04",
+        )
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["exit_pending_projections"] == {
+            "scanned": 1,
+            "advanced": 1,
+            "stayed": 0,
+            "errors": 0,
+        }
+        assert _get_state(conn, "cmd-exit") == "PARTIAL"
+        current = conn.execute(
+            """
+            SELECT phase, shares, cost_basis_usd, order_id, order_status
+              FROM position_current
+             WHERE position_id = 'pos-001'
+            """
+        ).fetchone()
+        assert dict(current) == {
+            "phase": "pending_exit",
+            "shares": 23.7,
+            "cost_basis_usd": 1.659,
+            "order_id": "ord-exit",
+            "order_status": "sell_pending_confirmation",
+        }
+        lifecycle_events = conn.execute(
+            """
+            SELECT event_type, phase_before, phase_after, order_id, command_id, venue_status
+              FROM position_events
+             WHERE position_id = 'pos-001'
+             ORDER BY sequence_no
+            """
+        ).fetchall()
+        assert dict(lifecycle_events[-1]) == {
+            "event_type": "EXIT_ORDER_POSTED",
+            "phase_before": "active",
+            "phase_after": "pending_exit",
+            "order_id": "ord-exit",
+            "command_id": "cmd-exit",
+            "venue_status": "MATCHED",
+        }
+        assert not any(row["event_type"] == "EXIT_ORDER_FILLED" for row in lifecycle_events)
 
     def test_partial_remainder_terminal_fact_uses_latest_trade_fact_per_trade_id(
         self,

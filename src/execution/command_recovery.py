@@ -85,6 +85,16 @@ _PARTIAL_REMAINDER_STATES = frozenset({
     CommandState.PARTIAL.value,
     CommandState.FILLED.value,
 })
+_EXIT_PENDING_PROJECTION_COMMAND_STATES = frozenset({
+    CommandState.ACKED.value,
+    CommandState.POST_ACKED.value,
+    CommandState.PARTIAL.value,
+    CommandState.FILLED.value,
+})
+_EXIT_PENDING_PROJECTION_TRADE_STATES = frozenset({
+    "MATCHED",
+    "MINED",
+})
 _SAFE_REPLAY_MIN_AGE_SECONDS = 15 * 60
 
 
@@ -677,6 +687,195 @@ def _command_fill_coverage_state(command: dict, fill_summary: dict) -> str:
     if filled_size >= command_size:
         return "complete"
     return "partial"
+
+
+def _exit_pending_projection_candidates(conn: sqlite3.Connection) -> list[dict]:
+    if not (
+        _table_exists(conn, "venue_commands")
+        and _table_exists(conn, "venue_trade_facts")
+        and _table_exists(conn, "position_current")
+    ):
+        return []
+    current_cols = _table_columns(conn, "position_current")
+    if not current_cols:
+        return []
+    pc_select = ",\n               ".join(f"pc.{col} AS pc_{col}" for col in current_cols)
+    placeholders = ", ".join("?" for _ in _EXIT_PENDING_PROJECTION_COMMAND_STATES)
+    trade_placeholders = ", ".join("?" for _ in _EXIT_PENDING_PROJECTION_TRADE_STATES)
+    rows = conn.execute(
+        f"""
+        WITH latest_trade_fact AS (
+            SELECT command_id, trade_id, MAX(local_sequence) AS max_sequence
+              FROM venue_trade_facts
+             GROUP BY command_id, trade_id
+        ),
+        exit_fill AS (
+            SELECT fact.command_id,
+                   COUNT(*) AS fill_fact_count,
+                   SUM(CAST(COALESCE(fact.filled_size, '0') AS REAL)) AS filled_size,
+                   GROUP_CONCAT(DISTINCT fact.state) AS fill_states,
+                   MAX(fact.observed_at) AS observed_at
+              FROM venue_trade_facts fact
+              JOIN latest_trade_fact latest
+                ON latest.command_id = fact.command_id
+               AND latest.trade_id = fact.trade_id
+               AND latest.max_sequence = fact.local_sequence
+             WHERE fact.state IN ({trade_placeholders})
+               AND CAST(COALESCE(fact.filled_size, '0') AS REAL) > 0
+             GROUP BY fact.command_id
+        )
+        SELECT cmd.command_id AS cmd_command_id,
+               cmd.position_id AS cmd_position_id,
+               cmd.decision_id AS cmd_decision_id,
+               cmd.snapshot_id AS cmd_snapshot_id,
+               cmd.venue_order_id AS cmd_venue_order_id,
+               cmd.state AS cmd_state,
+               cmd.size AS cmd_size,
+               cmd.price AS cmd_price,
+               cmd.updated_at AS cmd_updated_at,
+               exit_fill.fill_fact_count AS fill_fact_count,
+               exit_fill.filled_size AS fill_filled_size,
+               exit_fill.fill_states AS fill_states,
+               exit_fill.observed_at AS fill_observed_at,
+               {pc_select}
+          FROM venue_commands cmd
+          JOIN exit_fill
+            ON exit_fill.command_id = cmd.command_id
+          JOIN position_current pc
+            ON pc.position_id = cmd.position_id
+         WHERE cmd.intent_kind = 'EXIT'
+           AND cmd.venue_order_id IS NOT NULL
+           AND cmd.venue_order_id != ''
+           AND cmd.state IN ({placeholders})
+           AND pc.phase IN ('active', 'day0_window')
+         ORDER BY exit_fill.observed_at, cmd.command_id
+        """,
+        (
+            *sorted(_EXIT_PENDING_PROJECTION_TRADE_STATES),
+            *sorted(_EXIT_PENDING_PROJECTION_COMMAND_STATES),
+        ),
+    ).fetchall()
+    return [_dict_row(row) for row in rows]
+
+
+def _append_exit_pending_projection(
+    conn: sqlite3.Connection,
+    *,
+    candidate: dict,
+    occurred_at: str,
+) -> None:
+    from src.state.ledger import append_many_and_project
+    from src.state.lifecycle_manager import fold_lifecycle_phase
+
+    current_cols = _table_columns(conn, "position_current")
+    current = {
+        col: candidate.get(f"pc_{col}")
+        for col in current_cols
+    }
+    position_id = str(current.get("position_id") or "")
+    command_id = str(candidate.get("cmd_command_id") or "")
+    venue_order_id = str(candidate.get("cmd_venue_order_id") or "")
+    phase_before = str(current.get("phase") or "")
+    if not position_id or not command_id or not venue_order_id:
+        raise ValueError("exit pending projection requires position, command, and venue order ids")
+    if phase_before not in {"active", "day0_window"}:
+        raise ValueError(
+            "exit pending projection only repairs active/day0 positions; "
+            f"got phase={phase_before!r}"
+        )
+    phase_after = fold_lifecycle_phase(phase_before, "pending_exit").value
+    fill_states = str(candidate.get("fill_states") or "").strip()
+    event_id = f"{position_id}:exit_order_posted:{command_id}"
+    event = {
+        "event_id": event_id,
+        "position_id": position_id,
+        "event_version": 1,
+        "sequence_no": _latest_position_sequence(conn, position_id) + 1,
+        "event_type": "EXIT_ORDER_POSTED",
+        "occurred_at": occurred_at,
+        "phase_before": phase_before,
+        "phase_after": phase_after,
+        "strategy_key": current.get("strategy_key"),
+        "decision_id": candidate.get("cmd_decision_id"),
+        "snapshot_id": current.get("decision_snapshot_id") or candidate.get("cmd_snapshot_id"),
+        "order_id": venue_order_id,
+        "command_id": command_id,
+        "caused_by": f"venue_command:{command_id}",
+        "idempotency_key": event_id,
+        "venue_status": fill_states or candidate.get("cmd_state"),
+        "source_module": "src.execution.command_recovery",
+        "env": _latest_position_env(conn, position_id),
+        "payload_json": json.dumps(
+            {
+                "reason": "exit_trade_fact_pending_exit_projection",
+                "proof_class": "exit_command_positive_trade_fact",
+                "command_id": command_id,
+                "venue_order_id": venue_order_id,
+                "command_state": candidate.get("cmd_state"),
+                "fill_fact_count": candidate.get("fill_fact_count"),
+                "filled_size": candidate.get("fill_filled_size"),
+                "fill_states": fill_states,
+                "economic_close_written": False,
+                "semantic_guard": "matched_or_mined_exit_is_pending_not_economic_close",
+            },
+            sort_keys=True,
+            default=str,
+        ),
+    }
+    projection = dict(current)
+    projection.update(
+        {
+            "phase": phase_after,
+            "order_id": venue_order_id,
+            "order_status": "sell_pending_confirmation",
+            "updated_at": occurred_at,
+        }
+    )
+    append_many_and_project(conn, [event], projection)
+
+
+def reconcile_exit_pending_projections(conn: sqlite3.Connection) -> dict:
+    """Repair restart-visible exit side effects into canonical pending_exit.
+
+    MATCHED/MINED exit trade facts prove a sell-side venue side effect, but not
+    economic-close finality.  The canonical position projection must therefore
+    leave P&L untouched while preventing reload from treating the row as a
+    normal active position eligible for another full sell attempt.
+    """
+
+    summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+    for candidate in _exit_pending_projection_candidates(conn):
+        summary["scanned"] += 1
+        command_id = str(candidate.get("cmd_command_id") or "")
+        safe_command_id = "".join(ch if ch.isalnum() else "_" for ch in command_id)
+        sp_name = f"sp_exit_pending_{safe_command_id}"
+        try:
+            occurred_at = str(candidate.get("fill_observed_at") or candidate.get("cmd_updated_at") or _now_iso())
+            conn.execute(f"SAVEPOINT {sp_name}")
+            try:
+                _append_exit_pending_projection(
+                    conn,
+                    candidate=candidate,
+                    occurred_at=occurred_at,
+                )
+                conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+            except Exception:
+                conn.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
+                conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+                raise
+            logger.info(
+                "recovery: exit command %s positive trade fact -> pending_exit projection",
+                command_id,
+            )
+            summary["advanced"] += 1
+        except Exception as exc:
+            logger.error(
+                "recovery: exit pending projection failed for command %s: %s",
+                command_id,
+                exc,
+            )
+            summary["errors"] += 1
+    return summary
 
 
 def _latest_terminal_remainder_order_fact_exists(
@@ -2514,6 +2713,12 @@ def reconcile_unresolved_commands(
         summary["advanced"] += matched_summary["advanced"]
         summary["stayed"] += matched_summary["stayed"]
         summary["errors"] += matched_summary["errors"]
+
+        exit_pending_summary = reconcile_exit_pending_projections(conn)
+        summary["exit_pending_projections"] = exit_pending_summary
+        summary["advanced"] += exit_pending_summary["advanced"]
+        summary["stayed"] += exit_pending_summary["stayed"]
+        summary["errors"] += exit_pending_summary["errors"]
 
         partial_summary = reconcile_partial_remainders(
             conn,
