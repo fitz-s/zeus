@@ -3052,8 +3052,7 @@ def _live_order(
                 conn,
                 spend_micro=required_pusd_micro,
             )
-            if _own_conn:
-                conn.commit()
+            conn.commit()
         except MarketSnapshotError as exc:
             return OrderResult(
                 trade_id=trade_id,

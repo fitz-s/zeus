@@ -387,6 +387,59 @@ def test_cancel_requested_persists_execution_capability_before_cancel_callable(c
     assert len(seen) == 1
 
 
+def test_cancel_caller_connection_commits_requested_before_cancel_callable(tmp_path, monkeypatch):
+    from src.execution.exit_safety import request_cancel_for_command
+    from src.state.db import get_connection, init_schema
+
+    monkeypatch.setenv("ZEUS_DB_BUSY_TIMEOUT_MS", "100")
+    db_path = tmp_path / "cancel-caller-conn-durable.db"
+    setup_conn = get_connection(db_path)
+    init_schema(setup_conn)
+    _insert_exit_command(setup_conn, venue_order_id="ord-1")
+    _ack_exit(setup_conn)
+    setup_conn.commit()
+    setup_conn.close()
+
+    submit_conn = get_connection(db_path)
+    init_schema(submit_conn)
+    observed = {}
+
+    def cancel(order_id: str):
+        read_conn = get_connection(db_path)
+        init_schema(read_conn)
+        try:
+            row = read_conn.execute(
+                """
+                SELECT vc.state, vce.payload_json
+                FROM venue_commands vc
+                JOIN venue_command_events vce ON vce.command_id = vc.command_id
+                WHERE vc.command_id = ?
+                  AND vce.event_type = 'CANCEL_REQUESTED'
+                ORDER BY vce.sequence_no DESC
+                LIMIT 1
+                """,
+                ("cmd-exit-1",),
+            ).fetchone()
+        finally:
+            read_conn.close()
+        observed["row"] = row
+        assert order_id == "ord-1"
+        return {"canceled": [order_id], "not_canceled": []}
+
+    try:
+        outcome = request_cancel_for_command(submit_conn, "cmd-exit-1", cancel)
+        assert not submit_conn.in_transaction
+    finally:
+        submit_conn.close()
+
+    assert outcome.status == "CANCELED"
+    assert observed["row"] is not None
+    assert observed["row"]["state"] == "CANCEL_PENDING"
+    payload = json.loads(observed["row"]["payload_json"])
+    assert payload["venue_order_id"] == "ord-1"
+    assert payload["execution_capability"]["action"] == "CANCEL"
+
+
 def test_cancel_guard_blocks_before_cancel_callable_and_command_transition(conn, monkeypatch):
     from src.control.cutover_guard import CutoverDecision, CutoverPending, CutoverState
     from src.execution.exit_safety import request_cancel_for_command

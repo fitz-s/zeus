@@ -583,6 +583,99 @@ class TestLiveOrderCommandSplit:
         assert observed["durable_submit_requested_count"] == 1
         assert observed["submit_kwargs"]["token_id"] == token_id
 
+    def test_entry_caller_connection_commits_submit_boundaries_before_preflight(self, tmp_path, monkeypatch):
+        """Caller-owned entry conn must not hold write locks across CLOB preflight."""
+        import src.execution.executor as executor_module
+        from src.execution.executor import _live_order
+        from src.state.db import get_connection, init_schema
+
+        monkeypatch.setenv("ZEUS_DB_BUSY_TIMEOUT_MS", "100")
+        token_id = "tok-" + "8" * 36
+        db_path = tmp_path / "entry-caller-conn-durable.db"
+        setup_conn = get_connection(db_path)
+        init_schema(setup_conn)
+        intent = _make_entry_intent(setup_conn, token_id=token_id)
+        setup_conn.commit()
+        setup_conn.close()
+
+        submit_conn = get_connection(db_path)
+        init_schema(submit_conn)
+        monkeypatch.setattr(executor_module, "_assert_risk_allocator_allows_submit", lambda *args, **kwargs: None)
+        monkeypatch.setattr(executor_module, "_select_risk_allocator_order_type", lambda *args, **kwargs: "GTC")
+        monkeypatch.setattr(
+            executor_module,
+            "_assert_ws_gap_allows_submit",
+            lambda *args, **kwargs: {"component": "ws_gap_guard", "allowed": True, "reason": "allowed"},
+        )
+        monkeypatch.setattr(executor_module, "alert_trade", lambda *args, **kwargs: None)
+
+        observed = {}
+
+        class DurableVisibilityClient:
+            def v2_preflight(self):
+                read_conn = get_connection(db_path)
+                init_schema(read_conn)
+                try:
+                    command_rows = read_conn.execute(
+                        """
+                        SELECT command_id, snapshot_id, envelope_id, state
+                        FROM venue_commands
+                        WHERE snapshot_id = ?
+                        """,
+                        (intent.executable_snapshot_id,),
+                    ).fetchall()
+                    envelope_count = read_conn.execute(
+                        "SELECT COUNT(*) FROM venue_submission_envelopes"
+                    ).fetchone()[0]
+                    requested_count = read_conn.execute(
+                        """
+                        SELECT COUNT(*)
+                        FROM venue_command_events
+                        WHERE command_id = ? AND event_type = 'SUBMIT_REQUESTED'
+                        """,
+                        (command_rows[0]["command_id"] if command_rows else "",),
+                    ).fetchone()[0]
+                finally:
+                    read_conn.close()
+
+                observed["durable_command_count_before_preflight"] = len(command_rows)
+                observed["durable_command_state_before_preflight"] = command_rows[0]["state"] if command_rows else None
+                observed["durable_envelope_count_before_preflight"] = envelope_count
+                observed["durable_submit_requested_count_before_preflight"] = requested_count
+
+            def bind_submission_envelope(self, envelope):
+                observed["bound_envelope"] = envelope
+
+            def place_limit_order(self, **kwargs):
+                final = observed["bound_envelope"].with_updates(
+                    raw_response_json='{"orderID":"ord-entry-caller-durable"}',
+                    order_id="ord-entry-caller-durable",
+                )
+                return {
+                    "orderID": "ord-entry-caller-durable",
+                    "status": "LIVE",
+                    "_venue_submission_envelope": final.to_dict(),
+                }
+
+        try:
+            with patch("src.data.polymarket_client.PolymarketClient", return_value=DurableVisibilityClient()):
+                result = _live_order(
+                    trade_id="trd-entry-caller-commit",
+                    intent=intent,
+                    shares=18.19,
+                    conn=submit_conn,
+                    decision_id="dec-entry-caller-commit",
+                )
+            assert not submit_conn.in_transaction
+        finally:
+            submit_conn.close()
+
+        assert result.status == "pending"
+        assert observed["durable_command_count_before_preflight"] == 1
+        assert observed["durable_command_state_before_preflight"] == "SUBMITTING"
+        assert observed["durable_envelope_count_before_preflight"] == 1
+        assert observed["durable_submit_requested_count_before_preflight"] == 1
+
     def test_entry_persists_final_submit_envelope_as_append_only_row(self, mem_conn, monkeypatch):
         """Entry ACK keeps command on pre-submit envelope and appends final SDK envelope."""
         import json

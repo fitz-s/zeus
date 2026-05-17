@@ -556,6 +556,7 @@ def request_cancel_for_command(
                 "execution_capability": execution_capability,
             },
         )
+        conn.commit()
     elif not _has_cancel_execution_capability(
         conn,
         command_id=command_id,
