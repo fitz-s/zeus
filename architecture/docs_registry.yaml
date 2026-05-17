@@ -698,6 +698,42 @@ entries:
   contains_volatile_metrics: false
   current_tense_allowed: true
   refresh_source: n/a
+- path: docs/operations/zeus_system_review_2026-05-16.md
+  doc_class: report
+  default_read: false
+  direct_reference_allowed: true
+  current_role: 2026-05-16 system review evidence (parent draft for agent runtime compounding plan)
+  canonical_replaced_by: []
+  next_action: retain_as_evidence
+  lifecycle_state: active
+  coverage_scope: exact
+  parent_coverage_allowed: false
+  truth_profile: report_evidence
+  freshness_class: packet_bound
+  supersedes: []
+  superseded_by: []
+  may_live_in_reference: false
+  contains_volatile_metrics: true
+  current_tense_allowed: false
+  refresh_source: n/a
+- path: docs/operations/zeus_agent_runtime_compounding_plan_2026-05-16.md
+  doc_class: report
+  default_read: false
+  direct_reference_allowed: true
+  current_role: Wave 1 agent runtime compounding plan v2.4 (4-critic + A2 + pre-PR + bot revisions traced in §9)
+  canonical_replaced_by: []
+  next_action: retain_as_evidence
+  lifecycle_state: active
+  coverage_scope: exact
+  parent_coverage_allowed: false
+  truth_profile: report_evidence
+  freshness_class: packet_bound
+  supersedes: []
+  superseded_by: []
+  may_live_in_reference: false
+  contains_volatile_metrics: true
+  current_tense_allowed: false
+  refresh_source: n/a
 - path: docs/operations/task_*/
   doc_class: operations
   default_read: false

@@ -514,6 +514,7 @@ scripts:
     dangerous_if_run: false
     promotion_barrier: "This script can report readiness only; it cannot authorize live deployment without the live-money-deploy-go operator gate."
   live_smoke_test.py: {class: runtime_support}
+  memory_repair_apply.py: {class: diagnostic, canonical_command: "python3 scripts/memory_repair_apply.py [--audit-file PATH] [--memory-dir PATH]", read_targets: [~/.claude/projects/-Users-leofitz--openclaw-workspace-venus-zeus/memory_audit_*.md, ~/.claude/projects/-Users-leofitz--openclaw-workspace-venus-zeus/memory/feedback_*.md, repo], write_targets: [stdout], dangerous_if_run: false, authority_scope: read_only_repair_proposer, reuse_when: "Proposing patches for STALE/DEAD MEMORY citations flagged by memory_audit.py. Prints unified-diff to stdout only; never modifies feedback_*.md files.", do_not_use_when: "Audit baseline is empty (script exits 0 gracefully) or operator hasn't reviewed proposals from a prior run.", required_tests: []}
   migrate_add_authority_column.py: {class: repair, apply_flag: "--no-dry-run", target_db: "--db", external_inputs: [ZEUS_DESTRUCTIVE_CONFIRMED]}
   migrate_cluster_to_city.py: {class: repair, apply_flag: implicit, target_db: state/zeus-world.db, unguarded_write_rationale: "Existing migration mutates calibration tables without an apply flag; manifest marks it dangerous pending hardening."}
   migrate_b070_control_overrides_to_history.py:
