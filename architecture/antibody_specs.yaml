@@ -1,0 +1,71 @@
+# Created: 2026-05-16
+# Last reused or audited: 2026-05-16
+# Authority basis: docs/operations/zeus_agent_runtime_compounding_plan_2026-05-16.md §4 W1.2
+
+schema_version: 1
+
+antibody_specs:
+  citation_grep_gate:
+    description: >
+      Detects stale file:line citations in Edit/Write tool args before edits land.
+      An antibody against the "plan citations rot fast" failure mode
+      (see feedback_zeus_plan_citations_rot_fast.md and feedback_grep_gate_before_contract_lock.md).
+
+    citation_patterns:
+      # Colon form: path/to/file.py:42
+      colon_form:
+        regex: '([\w./\-]+\.(?:py|yaml|yml|json|md|ts|js|sh|txt))(?::(\d+))'
+        example: "src/main.py:88"
+        capture_groups:
+          - name: filepath
+            group: 1
+          - name: lineno
+            group: 2
+
+      # L-prefix form: path/to/file.py L42  (also file.py L42 with whitespace)
+      l_prefix_form:
+        regex: '([\w./\-]+\.(?:py|yaml|yml|json|md|ts|js|sh|txt))[ \t]+L(\d+)'
+        example: "src/main.py L88"
+        capture_groups:
+          - name: filepath
+            group: 1
+          - name: lineno
+            group: 2
+
+    resolution:
+      # Resolution order for cited filepath
+      strategy:
+        - repo_relative   # REPO_ROOT / cited_path
+        - absolute        # Path(cited_path) if absolute
+
+      # If file is not found at any resolved path, skip (new files may not exist yet)
+      missing_file_policy: skip
+
+    tolerance:
+      # ±N lines around the cited line_number are considered "in range"
+      window: 5
+      description: >
+        Minor edits shift lines by a few positions. A citation is considered
+        valid if its stated line number falls within [lineno - window, lineno + window]
+        of the file's current length. If the file has fewer total lines than
+        (lineno - window), the citation is flagged as drifted.
+
+    match_content:
+      description: >
+        The hook currently validates only line-range existence, not content
+        equality. Content-equality matching is intentionally deferred: the hook
+        does not know the "expected" content from the citation text alone.
+        Future enhancement: parse citation context from surrounding prose and
+        fuzzy-match the target line.
+      current_check: line_in_range
+      future_check: content_fuzzy_match
+
+    severity: ADVISORY
+    fail_open: true
+    scanned_fields:
+      - old_string
+      - new_string
+      - content
+    applicable_tools:
+      - Edit
+      - Write
