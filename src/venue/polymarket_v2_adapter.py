@@ -431,11 +431,15 @@ class PolymarketV2Adapter:
 
     def cancel(self, order_id: str) -> CancelResult:
         client = self._sdk_client()
-        cancel = getattr(client, "cancel", None) or getattr(client, "cancel_order", None)
+        cancel = getattr(client, "cancel", None)
         if not callable(cancel):
-            return CancelResult(status="rejected", order_id=order_id, error_code="CANCEL_UNSUPPORTED")
-        raw = cancel(order_id)
-        return CancelResult(status="accepted", order_id=order_id, raw_response_json=_canonical_json(raw or {}))
+            cancel_order = getattr(client, "cancel_order", None)
+            if not callable(cancel_order):
+                return CancelResult(status="rejected", order_id=order_id, error_code="CANCEL_UNSUPPORTED")
+            raw = cancel_order(_order_payload(order_id))
+        else:
+            raw = cancel(order_id)
+        return _cancel_result_from_response(order_id, raw)
 
     def get_order(self, order_id: str) -> OrderState:
         raw = self._sdk_client().get_order(order_id)
@@ -1175,6 +1179,50 @@ def _order_args_from_envelope(envelope: VenueSubmissionEnvelope) -> SimpleNamesp
         )
 
 
+def _order_payload(order_id: str) -> Any:
+    try:
+        from py_clob_client_v2.clob_types import OrderPayload
+
+        return OrderPayload(orderID=order_id)
+    except Exception:
+        return SimpleNamespace(orderID=order_id)
+
+
+def _cancel_result_from_response(order_id: str, raw: Any) -> CancelResult:
+    if isinstance(raw, str) and raw.strip():
+        normalized_order_id = raw.strip()
+        return CancelResult(
+            status="CANCELED",
+            order_id=normalized_order_id,
+            raw_response_json=_canonical_json({"orderID": normalized_order_id, "status": "CANCELED"}),
+        )
+    raw_dict = dict(raw or {}) if isinstance(raw, dict) else {"raw": _to_jsonish(raw)}
+    error_code, error_message = _response_error(raw_dict)
+    not_canceled = raw_dict.get("not_canceled", raw_dict.get("not_cancelled"))
+    if error_code or error_message or _nonempty(not_canceled) or raw_dict.get("success") is False:
+        return CancelResult(
+            status="NOT_CANCELED",
+            order_id=order_id,
+            raw_response_json=_canonical_json(raw_dict),
+            error_code=error_code,
+            error_message=error_message or _reason_from(not_canceled, "cancel_not_canceled"),
+        )
+    canceled = raw_dict.get("canceled", raw_dict.get("cancelled"))
+    status = str(raw_dict.get("status") or raw_dict.get("state") or "").upper()
+    if _nonempty(canceled) or status in {"CANCELED", "CANCELLED", "CANCEL_CONFIRMED"} or raw_dict.get("success") is True:
+        return CancelResult(
+            status="CANCELED",
+            order_id=_extract_order_id(raw_dict) or order_id,
+            raw_response_json=_canonical_json(raw_dict),
+        )
+    return CancelResult(
+        status="UNKNOWN",
+        order_id=order_id,
+        raw_response_json=_canonical_json(raw_dict),
+        error_message="unrecognized_cancel_response",
+    )
+
+
 def _signed_order_bytes(signed_order: Any) -> bytes:
     if isinstance(signed_order, bytes):
         return signed_order
@@ -1189,6 +1237,30 @@ def _to_jsonish(value: Any) -> Any:
     if hasattr(value, "__dict__"):
         return vars(value)
     return repr(value)
+
+
+def _nonempty(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, (str, bytes)):
+        return bool(value)
+    if isinstance(value, dict):
+        return bool(value)
+    try:
+        return bool(list(value))
+    except TypeError:
+        return bool(value)
+
+
+def _reason_from(value: Any, fallback: str) -> str:
+    if value is None:
+        return fallback
+    if isinstance(value, dict):
+        parts = [f"{key}: {item}" for key, item in value.items()]
+        return "; ".join(parts) if parts else fallback
+    if isinstance(value, (list, tuple, set)):
+        return ", ".join(str(item) for item in value) or fallback
+    return str(value) or fallback
 
 
 def _extract_order_id(raw: Any) -> Optional[str]:

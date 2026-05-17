@@ -59,6 +59,7 @@ _INACTIVE_STATUSES = frozenset({
 _CANCEL_TERMINAL_STATUSES = frozenset({
     "CANCELLED", "CANCELED", "EXPIRED", "REJECTED",
 })
+_LIVE_ORDER_STATUSES = frozenset({"LIVE", "OPEN", "RESTING"})
 _TERMINAL_NO_FILL_ORDER_FACT_STATES = frozenset({
     "CANCEL_CONFIRMED",
     "EXPIRED",
@@ -131,6 +132,29 @@ def _extract_order_id(venue_resp: dict | None, fallback: str | None = None) -> s
         or venue_resp.get("id")
         or fallback
     )
+
+
+def _order_status(raw: dict) -> str:
+    return str(raw.get("status") or raw.get("state") or "").upper()
+
+
+def _order_matched_size(raw: dict) -> str:
+    value = (
+        raw.get("matched_size")
+        or raw.get("matched")
+        or raw.get("matched_amount")
+        or raw.get("filled_size")
+        or "0"
+    )
+    return str(value)
+
+
+def _is_positive_decimal(value: object) -> bool:
+    try:
+        parsed = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        return False
+    return parsed.is_finite() and parsed > 0
 
 
 def _lookup_unknown_side_effect_order(cmd: VenueCommand, client) -> tuple[str, dict | None]:
@@ -1751,6 +1775,110 @@ def _latest_event_payload(events: list[dict]) -> tuple[str, dict]:
     return str(latest.get("event_type") or ""), _json_dict(latest.get("payload_json"))
 
 
+def _latest_cancel_unknown_payload(events: list[dict]) -> dict | None:
+    latest_event_type, latest_payload = _latest_event_payload(events)
+    if latest_event_type != CommandEventType.CANCEL_REPLACE_BLOCKED.value:
+        return None
+    if str(latest_payload.get("semantic_cancel_status") or "").upper() != "CANCEL_UNKNOWN":
+        return None
+    if latest_payload.get("requires_m5_reconcile") is not True:
+        return None
+    return latest_payload
+
+
+def _review_required_cancel_unknown_live_order_recovery(
+    conn: sqlite3.Connection,
+    cmd: VenueCommand,
+    client,
+) -> str:
+    events = _command_events(conn, cmd.command_id)
+    if _latest_cancel_unknown_payload(events) is None:
+        return "stayed"
+    venue_order_id = str(cmd.venue_order_id or "").strip()
+    if not venue_order_id:
+        return "stayed"
+    try:
+        raw_order = client.get_order(venue_order_id)
+    except Exception as exc:
+        logger.warning(
+            "recovery: review-required cancel-unknown point lookup for command %s "
+            "(venue_order_id=%s) raised: %s",
+            cmd.command_id,
+            venue_order_id,
+            exc,
+        )
+        return "error"
+    order = _raw_payload(raw_order)
+    if not order:
+        return "stayed"
+    order_id = _extract_order_id(order)
+    status = _order_status(order)
+    matched_size = _order_matched_size(order)
+    if (
+        order_id != venue_order_id
+        or status not in _LIVE_ORDER_STATUSES
+        or _is_positive_decimal(matched_size)
+    ):
+        logger.info(
+            "recovery: command %s REVIEW_REQUIRED cancel-unknown stayed "
+            "(point_order_id=%s status=%s matched_size=%s)",
+            cmd.command_id,
+            order_id,
+            status or "UNKNOWN",
+            matched_size,
+        )
+        return "stayed"
+    now = _now_iso()
+    payload = {
+        "schema_version": 1,
+        "reason": "review_cleared_venue_order_live",
+        "command_id": cmd.command_id,
+        "venue_order_id": venue_order_id,
+        "proof_class": "cancel_unknown_venue_order_live",
+        "side_effect_boundary_crossed": "unknown",
+        "sdk_cancel_attempted": "unknown",
+        "required_predicates": {
+            "latest_event_is_cancel_replace_blocked": True,
+            "semantic_cancel_status_cancel_unknown": True,
+            "requires_m5_reconcile": True,
+            "venue_order_id_present": True,
+            "venue_order_id_matches_point_read": True,
+            "point_order_status_live": True,
+            "point_order_matched_size_not_positive": True,
+            "no_trade_facts": _count_facts(conn, "venue_trade_facts", cmd.command_id) == 0,
+        },
+        "venue_order_live_proof": {
+            "source": "authenticated_clob_point_order_read",
+            "observed_at": now,
+            "venue_order_id": venue_order_id,
+            "point_order_status": status,
+            "matched_size": matched_size,
+            "point_order": order,
+        },
+        "source_proof": {
+            "source_function": "command_recovery._reconcile_row",
+            "source_reason": "cancel_unknown_venue_order_live",
+        },
+        "reviewed_by": "command_recovery",
+        "cleared_at": now,
+    }
+    append_event(
+        conn,
+        command_id=cmd.command_id,
+        event_type=CommandEventType.REVIEW_CLEARED_VENUE_ORDER_LIVE.value,
+        occurred_at=now,
+        payload=payload,
+    )
+    logger.info(
+        "recovery: command %s REVIEW_REQUIRED cancel-unknown -> ACKED "
+        "(venue_order_id=%s status=%s)",
+        cmd.command_id,
+        venue_order_id,
+        status,
+    )
+    return "advanced"
+
+
 def _geoblock_403_predicates(
     conn: sqlite3.Connection,
     command: dict,
@@ -2263,9 +2391,8 @@ def _reconcile_row(
     try:
         state = cmd.state
 
-        # REVIEW_REQUIRED is operator-handoff: skip cleanly.
         if state == CommandState.REVIEW_REQUIRED:
-            return "stayed"
+            return _review_required_cancel_unknown_live_order_recovery(conn, cmd, client)
 
         now = _now_iso()
 

@@ -160,6 +160,7 @@ def test_new_event_types_pass_grammar_check():
         "CLOSED_MARKET_UNKNOWN",
         "CANCEL_FAILED",
         "CANCEL_REPLACE_BLOCKED",
+        "REVIEW_CLEARED_VENUE_ORDER_LIVE",
     } <= values
 
 

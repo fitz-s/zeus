@@ -155,6 +155,16 @@ class FakeLegacyGetOrdersClient:
         return {"data": [{"id": "ord-legacy", "state": "LIVE"}]}
 
 
+class FakeCancelOrderClient:
+    def __init__(self, response=None):
+        self.response = response or {"canceled": ["ord-cancel"], "not_canceled": []}
+        self.calls = []
+
+    def cancel_order(self, payload):
+        self.calls.append(("cancel_order", payload))
+        return self.response
+
+
 def _intent(direction: Direction = Direction("buy_yes"), token_id: str = "yes-token") -> ExecutionIntent:
     return ExecutionIntent(
         direction=direction,
@@ -1253,6 +1263,47 @@ def test_polymarket_client_cancel_blocks_before_adapter_when_cutover_disallows(m
 
     with pytest.raises(CutoverPending, match="BLOCKED:CANCEL"):
         client.cancel_order("ord-cancel")
+
+
+def test_v2_cancel_order_method_uses_order_payload(tmp_path):
+    fake = FakeCancelOrderClient()
+    adapter, _ = _adapter(tmp_path, fake)
+
+    result = adapter.cancel("ord-cancel")
+
+    assert result.status == "CANCELED"
+    assert result.order_id == "ord-cancel"
+    assert fake.calls[0][0] == "cancel_order"
+    assert fake.calls[0][1].orderID == "ord-cancel"
+    assert '"canceled":["ord-cancel"]' in (result.raw_response_json or "")
+
+
+def test_polymarket_client_cancel_payload_is_exit_safety_parseable(monkeypatch):
+    from src.control.cutover_guard import CutoverDecision, CutoverState
+    from src.data.polymarket_client import PolymarketClient
+    from src.execution.exit_safety import parse_cancel_response
+    from src.venue.polymarket_v2_adapter import CancelResult
+
+    class FakeAdapter:
+        def cancel(self, order_id):
+            return CancelResult(
+                status="CANCELED",
+                order_id=order_id,
+                raw_response_json='{"canceled":["ord-cancel"],"not_canceled":[]}',
+            )
+
+    monkeypatch.setattr(
+        "src.control.cutover_guard.gate_for_intent",
+        lambda _intent_kind: CutoverDecision(False, True, False, None, CutoverState.LIVE_ENABLED),
+    )
+    client = PolymarketClient()
+    client._v2_adapter = FakeAdapter()
+
+    payload = client.cancel_order("ord-cancel")
+
+    assert payload["orderID"] == "ord-cancel"
+    assert payload["status"] == "CANCELED"
+    assert parse_cancel_response(payload).status == "CANCELED"
 
 
 def test_polymarket_client_wrapper_fails_closed_before_unbound_v2_preflight():

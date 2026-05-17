@@ -315,6 +315,69 @@ class TestAppendEventStateTransitionIsGrammarChecked:
                      occurred_at="2026-04-26T00:01:00Z")
         assert get_command(conn, "cmd-001")["state"] == "REVIEW_REQUIRED"
 
+    def test_review_required_cancel_unknown_live_proof_restores_acked(self, conn):
+        from src.state.venue_command_repo import append_event, get_command
+        _insert(conn)
+        append_event(conn, command_id="cmd-001", event_type="SUBMIT_REQUESTED",
+                     occurred_at="2026-04-26T00:01:00Z")
+        append_event(conn, command_id="cmd-001", event_type="SUBMIT_ACKED",
+                     occurred_at="2026-04-26T00:02:00Z",
+                     payload={"venue_order_id": "ord-live"})
+        append_event(conn, command_id="cmd-001", event_type="CANCEL_REQUESTED",
+                     occurred_at="2026-04-26T00:03:00Z",
+                     payload={"venue_order_id": "ord-live"})
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="CANCEL_REPLACE_BLOCKED",
+            occurred_at="2026-04-26T00:04:00Z",
+            payload={
+                "reason": "post_cancel_exception_possible_side_effect: local adapter error",
+                "requires_m5_reconcile": True,
+                "semantic_cancel_status": "CANCEL_UNKNOWN",
+            },
+        )
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="REVIEW_CLEARED_VENUE_ORDER_LIVE",
+            occurred_at="2026-04-26T00:05:00Z",
+            payload={
+                "schema_version": 1,
+                "reason": "review_cleared_venue_order_live",
+                "command_id": "cmd-001",
+                "venue_order_id": "ord-live",
+                "proof_class": "cancel_unknown_venue_order_live",
+                "side_effect_boundary_crossed": "unknown",
+                "sdk_cancel_attempted": "unknown",
+                "required_predicates": {
+                    "latest_event_is_cancel_replace_blocked": True,
+                    "semantic_cancel_status_cancel_unknown": True,
+                    "requires_m5_reconcile": True,
+                    "venue_order_id_present": True,
+                    "venue_order_id_matches_point_read": True,
+                    "point_order_status_live": True,
+                    "point_order_matched_size_not_positive": True,
+                    "no_trade_facts": True,
+                },
+                "venue_order_live_proof": {
+                    "source": "authenticated_clob_point_order_read",
+                    "observed_at": "2026-04-26T00:05:00Z",
+                    "venue_order_id": "ord-live",
+                    "point_order_status": "LIVE",
+                    "matched_size": "0",
+                    "point_order": {"orderID": "ord-live", "status": "LIVE", "matched_size": "0"},
+                },
+                "source_proof": {
+                    "source_function": "command_recovery._reconcile_row",
+                    "source_reason": "cancel_unknown_venue_order_live",
+                },
+                "reviewed_by": "command_recovery",
+                "cleared_at": "2026-04-26T00:05:00Z",
+            },
+        )
+        assert get_command(conn, "cmd-001")["state"] == "ACKED"
+
     # --- illegal transitions ---
 
     @pytest.mark.parametrize("from_state,event_type,setup_events", [

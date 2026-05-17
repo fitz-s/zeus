@@ -378,11 +378,13 @@ def _reason_from(value: Any, fallback: str) -> str:
     return str(value) or fallback
 
 
-def parse_cancel_response(raw: Mapping[str, Any] | dict[str, Any] | None) -> CancelOutcome:
+def parse_cancel_response(raw: Any) -> CancelOutcome:
     """Normalize venue cancel payloads into the M4 typed outcome surface."""
 
     if raw is None:
         return CancelOutcome("UNKNOWN", "empty_cancel_response", {})
+    if isinstance(raw, str) and raw.strip():
+        return CancelOutcome("CANCELED", None, {"orderID": raw.strip(), "status": "CANCELED"})
     response = dict(raw)
     canceled = response.get("canceled", response.get("cancelled"))
     not_canceled = response.get("not_canceled", response.get("not_cancelled"))

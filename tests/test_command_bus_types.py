@@ -345,9 +345,9 @@ class TestEnumsAreClosed:
         assert len(list(CommandState)) == 17
 
     def test_command_event_type_count(self):
-        """21 events after proof-backed REVIEW_REQUIRED clearance was added."""
+        """22 events after proof-backed REVIEW_REQUIRED clearance was added."""
         from src.execution.command_bus import CommandEventType
-        assert len(list(CommandEventType)) == 21
+        assert len(list(CommandEventType)) == 22
 
     def test_intent_kind_count(self):
         from src.execution.command_bus import IntentKind
@@ -729,6 +729,11 @@ class TestReviewRequiredIsQuasiTerminal:
                 "REVIEW_REQUIRED",
                 "REVIEW_CLEARED_NO_VENUE_EXPOSURE",
                 "EXPIRED",
+            ),
+            (
+                "REVIEW_REQUIRED",
+                "REVIEW_CLEARED_VENUE_ORDER_LIVE",
+                "ACKED",
             ),
         ]
 

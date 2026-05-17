@@ -342,6 +342,27 @@ def test_cancel_canceled_array_success_creates_CANCEL_CONFIRMED(conn):
     assert "CANCEL_ACKED" in events
 
 
+def test_cancel_order_id_string_response_creates_CANCEL_ACKED(conn):
+    from src.execution.exit_safety import parse_cancel_response, request_cancel_for_command
+    from src.state.venue_command_repo import get_command, list_events
+
+    parsed = parse_cancel_response("ord-1")
+    assert parsed.status == "CANCELED"
+    assert parsed.raw_response == {"orderID": "ord-1", "status": "CANCELED"}
+
+    _insert_exit_command(conn, venue_order_id="ord-1")
+    _ack_exit(conn)
+
+    outcome = request_cancel_for_command(conn, "cmd-exit-1", lambda order_id: order_id)
+
+    assert outcome.status == "CANCELED"
+    assert get_command(conn, "cmd-exit-1")["state"] == "CANCELLED"
+    assert [event["event_type"] for event in list_events(conn, "cmd-exit-1")][-2:] == [
+        "CANCEL_REQUESTED",
+        "CANCEL_ACKED",
+    ]
+
+
 def test_cancel_requested_persists_execution_capability_before_cancel_callable(conn):
     from src.execution.exit_safety import request_cancel_for_command
 

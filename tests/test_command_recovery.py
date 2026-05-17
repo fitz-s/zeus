@@ -244,6 +244,27 @@ def _advance_to_cancel_pending(conn, command_id="cmd-001", venue_order_id=None):
                  occurred_at="2026-04-26T00:03:00Z")
 
 
+def _advance_to_cancel_unknown_review_required(conn, command_id="cmd-001", venue_order_id="ord-001"):
+    from src.state.venue_command_repo import append_event
+
+    _advance_to_cancel_pending(conn, command_id=command_id, venue_order_id=venue_order_id)
+    append_event(
+        conn,
+        command_id=command_id,
+        event_type="CANCEL_REPLACE_BLOCKED",
+        occurred_at="2026-04-26T00:04:00Z",
+        payload={
+            "reason": "post_cancel_exception_possible_side_effect: local adapter error",
+            "cancel_outcome": {
+                "exception_type": "AttributeError",
+                "exception_message": "'str' object has no attribute 'orderID'",
+            },
+            "requires_m5_reconcile": True,
+            "semantic_cancel_status": "CANCEL_UNKNOWN",
+        },
+    )
+
+
 def _advance_to_acked(conn, command_id="cmd-001", venue_order_id="ord-001"):
     from src.state.venue_command_repo import append_event
 
@@ -694,6 +715,45 @@ class TestRecoveryResolutionTable:
         assert summary["advanced"] == 0
         # get_order should NOT be called
         mock_client.get_order.assert_not_called()
+
+    def test_cancel_unknown_review_required_live_order_restores_acked(self, conn, mock_client):
+        _insert(conn, intent_kind="EXIT", side="SELL", size=11.62, price=0.02)
+        _advance_to_cancel_unknown_review_required(conn, venue_order_id="ord-live")
+        mock_client.get_order.return_value = {
+            "orderID": "ord-live",
+            "status": "LIVE",
+            "matched_size": "0",
+        }
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert _get_state(conn, "cmd-001") == "ACKED"
+        assert summary["advanced"] == 1
+        events = _get_events(conn, "cmd-001")
+        assert events[-1]["event_type"] == "REVIEW_CLEARED_VENUE_ORDER_LIVE"
+        payload = json.loads(events[-1]["payload_json"])
+        assert payload["reason"] == "review_cleared_venue_order_live"
+        assert payload["required_predicates"]["latest_event_is_cancel_replace_blocked"] is True
+        assert payload["required_predicates"]["point_order_status_live"] is True
+
+    def test_cancel_unknown_review_required_without_live_proof_stays_blocked(self, conn, mock_client):
+        _insert(conn, intent_kind="EXIT", side="SELL", size=11.62, price=0.02)
+        _advance_to_cancel_unknown_review_required(conn, venue_order_id="ord-terminal")
+        mock_client.get_order.return_value = {
+            "orderID": "ord-terminal",
+            "status": "CANCELLED",
+            "matched_size": "0",
+        }
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert _get_state(conn, "cmd-001") == "REVIEW_REQUIRED"
+        assert summary["stayed"] == 1
+        assert summary["advanced"] == 0
+        events = _get_events(conn, "cmd-001")
+        assert events[-1]["event_type"] == "CANCEL_REPLACE_BLOCKED"
 
     # Case 7: venue lookup raises u2192 state stays (error counted)
     def test_venue_lookup_exception_leaves_state(self, conn, mock_client):

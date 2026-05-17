@@ -139,6 +139,7 @@ _TRANSITIONS: dict[tuple[str, str], str] = {
     # and the caller must record positive no-side-effect proof.
     ("REVIEW_REQUIRED", "REVIEW_CLEARED_NO_VENUE_SIDE_EFFECT"): "REJECTED",
     ("REVIEW_REQUIRED", "REVIEW_CLEARED_NO_VENUE_EXPOSURE"):    "EXPIRED",
+    ("REVIEW_REQUIRED", "REVIEW_CLEARED_VENUE_ORDER_LIVE"):     "ACKED",
 }
 
 _PROVENANCE_SOURCES = frozenset(
@@ -1101,6 +1102,14 @@ def _validate_review_clearance_payload(
             command_id=command_id,
         )
         return
+    if event_type == "REVIEW_CLEARED_VENUE_ORDER_LIVE":
+        _validate_review_venue_order_live_payload(
+            conn=conn,
+            current_state=current_state,
+            payload=payload,
+            command_id=command_id,
+        )
+        return
     if event_type != "REVIEW_CLEARED_NO_VENUE_SIDE_EFFECT":
         return
     if current_state != "REVIEW_REQUIRED":
@@ -1157,6 +1166,64 @@ def _validate_review_clearance_payload(
         raise ValueError("pre-SDK review clearance requires review_required_proof")
     if review_proof.get("reason") != actual_reason:
         raise ValueError("review clearance review_required_proof reason does not match DB")
+
+
+def _validate_review_venue_order_live_payload(
+    *,
+    conn: sqlite3.Connection,
+    current_state: str,
+    payload: Optional[dict],
+    command_id: str,
+) -> None:
+    if current_state != "REVIEW_REQUIRED":
+        raise ValueError("review live-order clearance is only legal from REVIEW_REQUIRED")
+    if not isinstance(payload, dict):
+        raise ValueError("review live-order clearance requires structured proof payload")
+    if payload.get("reason") != "review_cleared_venue_order_live":
+        raise ValueError("review live-order clearance payload requires reason=review_cleared_venue_order_live")
+    if payload.get("command_id") != command_id:
+        raise ValueError("review live-order clearance payload command_id must match appended command")
+    if payload.get("proof_class") != "cancel_unknown_venue_order_live":
+        raise ValueError("review live-order clearance proof_class is not supported")
+    if payload.get("side_effect_boundary_crossed") != "unknown":
+        raise ValueError("review live-order clearance requires side_effect_boundary_crossed=unknown")
+    if payload.get("sdk_cancel_attempted") != "unknown":
+        raise ValueError("review live-order clearance requires sdk_cancel_attempted=unknown")
+    required_predicates = payload.get("required_predicates")
+    if not isinstance(required_predicates, dict):
+        raise ValueError("review live-order clearance requires required_predicates")
+    required_true = (
+        "latest_event_is_cancel_replace_blocked",
+        "semantic_cancel_status_cancel_unknown",
+        "requires_m5_reconcile",
+        "venue_order_id_present",
+        "venue_order_id_matches_point_read",
+        "point_order_status_live",
+        "point_order_matched_size_not_positive",
+        "no_trade_facts",
+    )
+    missing = [name for name in required_true if required_predicates.get(name) is not True]
+    if missing:
+        raise ValueError(f"review live-order clearance predicates are not proven true: {missing}")
+    actual_predicates = _actual_review_venue_order_live_predicates(conn, command_id, payload)
+    actual_failures = [name for name, ok in actual_predicates.items() if not ok]
+    if actual_failures:
+        raise ValueError(f"review live-order clearance DB predicates failed: {actual_failures}")
+    proof = payload.get("venue_order_live_proof")
+    if not isinstance(proof, dict):
+        raise ValueError("review live-order clearance requires venue_order_live_proof")
+    for key in ("source", "observed_at", "venue_order_id", "point_order_status"):
+        if not str(proof.get(key) or "").strip():
+            raise ValueError(f"review live-order clearance proof missing {key}")
+    if proof.get("source") != "authenticated_clob_point_order_read":
+        raise ValueError("review live-order clearance requires authenticated point order proof")
+    source = payload.get("source_proof")
+    if not isinstance(source, dict):
+        raise ValueError("review live-order clearance requires source_proof")
+    if source.get("source_function") not in {"command_recovery._reconcile_row", "operator_review"}:
+        raise ValueError("review live-order clearance source_function is not supported")
+    if source.get("source_reason") != "cancel_unknown_venue_order_live":
+        raise ValueError("review live-order clearance source_reason is not supported")
 
 
 def _validate_review_no_exposure_payload(
@@ -1482,6 +1549,97 @@ def _actual_review_required_reason(
     if not isinstance(payload, dict):
         return ""
     return str(payload.get("reason") or "").strip()
+
+
+def _optional_decimal_positive(value: object) -> bool:
+    if value in (None, ""):
+        return False
+    try:
+        parsed = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        return False
+    return parsed.is_finite() and parsed > 0
+
+
+def _actual_review_venue_order_live_predicates(
+    conn: sqlite3.Connection,
+    command_id: str,
+    payload: dict,
+) -> dict[str, bool]:
+    with _row_factory_as(conn, sqlite3.Row):
+        command = conn.execute(
+            """
+            SELECT venue_order_id
+            FROM venue_commands
+            WHERE command_id = ?
+            """,
+            (command_id,),
+        ).fetchone()
+        latest = conn.execute(
+            """
+            SELECT event_type, payload_json
+            FROM venue_command_events
+            WHERE command_id = ?
+            ORDER BY sequence_no DESC
+            LIMIT 1
+            """,
+            (command_id,),
+        ).fetchone()
+    latest_payload: dict[str, Any] = {}
+    if latest is not None and latest["payload_json"]:
+        try:
+            parsed = json.loads(str(latest["payload_json"]))
+        except json.JSONDecodeError:
+            parsed = {}
+        if isinstance(parsed, dict):
+            latest_payload = parsed
+    proof = payload.get("venue_order_live_proof")
+    proof = proof if isinstance(proof, dict) else {}
+    point_order = proof.get("point_order")
+    point_order = point_order if isinstance(point_order, dict) else {}
+    command_venue_order_id = str(command["venue_order_id"] or "").strip() if command is not None else ""
+    proof_venue_order_id = str(
+        proof.get("venue_order_id")
+        or point_order.get("orderID")
+        or point_order.get("orderId")
+        or point_order.get("order_id")
+        or point_order.get("id")
+        or ""
+    ).strip()
+    point_status = str(
+        proof.get("point_order_status")
+        or point_order.get("status")
+        or point_order.get("state")
+        or ""
+    ).upper()
+    matched_size = (
+        proof.get("matched_size")
+        if proof.get("matched_size") not in (None, "")
+        else (
+            point_order.get("matched_size")
+            or point_order.get("matched")
+            or point_order.get("matched_amount")
+            or point_order.get("filled_size")
+        )
+    )
+    return {
+        "latest_event_is_cancel_replace_blocked": (
+            latest is not None
+            and latest["event_type"] == "CANCEL_REPLACE_BLOCKED"
+        ),
+        "semantic_cancel_status_cancel_unknown": (
+            str(latest_payload.get("semantic_cancel_status") or "").upper() == "CANCEL_UNKNOWN"
+        ),
+        "requires_m5_reconcile": latest_payload.get("requires_m5_reconcile") is True,
+        "venue_order_id_present": bool(command_venue_order_id),
+        "venue_order_id_matches_point_read": (
+            bool(command_venue_order_id)
+            and command_venue_order_id == proof_venue_order_id
+        ),
+        "point_order_status_live": point_status in {"LIVE", "OPEN", "RESTING"},
+        "point_order_matched_size_not_positive": not _optional_decimal_positive(matched_size),
+        "no_trade_facts": _review_clearance_fact_count(conn, "venue_trade_facts", command_id) == 0,
+    }
 
 
 def _venue_order_id_from_payload(payload: Optional[dict]) -> str | None:
