@@ -26,8 +26,11 @@ from src.contracts import (
     DecisionSourceContext,
     EdgeContext,
     EntryMethod,
+    ExecutionIntent,
     FinalExecutionIntent,
+    Direction,
 )
+from src.contracts.slippage_bps import SlippageBps
 import numpy as np
 from src.config import settings
 from src.state.portfolio import (
@@ -662,6 +665,65 @@ class TestExecutor:
             "order_type": "FOK",
         }
 
+    def test_live_order_rejects_immediate_buy_invalid_amount_precision_before_sdk(
+        self,
+        monkeypatch,
+    ):
+        from src.execution.executor import _live_order
+
+        captured = {}
+
+        class DummyClient:
+            def __init__(self):
+                captured["client_created"] = True
+
+            def bind_submission_envelope(self, envelope):
+                captured["bound"] = envelope
+
+            def v2_preflight(self):
+                captured["preflight"] = True
+
+            def place_limit_order(self, **kwargs):
+                captured["submit"] = kwargs
+                return {"orderID": "should-not-submit", "status": "OPEN"}
+
+        intent = ExecutionIntent(
+            direction=Direction.YES,
+            target_size_usd=1.047,
+            limit_price=0.15,
+            toxicity_budget=0.05,
+            max_slippage=SlippageBps(value_bps=200, direction="adverse"),
+            is_sandbox=False,
+            market_id="gamma-invalid-maker-amount",
+            token_id="yes-token-invalid-maker-amount",
+            timeout_seconds=3600,
+            submit_order_type="FOK",
+        )
+
+        monkeypatch.setattr("src.execution.executor._assert_risk_allocator_allows_submit", lambda intent: None)
+        monkeypatch.setattr("src.execution.executor._select_risk_allocator_order_type", lambda conn, snapshot_id: "GTC")
+        monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", DummyClient)
+
+        result = _live_order(
+            "trade-invalid-maker-amount",
+            intent,
+            shares=6.98,
+            conn=_TEST_CONN,
+            decision_id="decision-invalid-maker-amount",
+        )
+
+        assert result.status == "rejected"
+        assert result.reason.startswith("invalid_submit_amount_precision:")
+        assert "maker amount must be cents-aligned" in result.reason
+        assert captured == {}
+        assert (
+            _TEST_CONN.execute(
+                "SELECT COUNT(*) FROM venue_commands WHERE decision_id = ?",
+                ("decision-invalid-maker-amount",),
+            ).fetchone()[0]
+            == 0
+        )
+
     def test_execute_final_intent_allows_stricter_fok_when_a2_selected_resting_maker(self, monkeypatch):
         final_intent = _final_execution_intent(order_type="FOK")
         captured = {}
@@ -858,6 +920,70 @@ class TestExecutor:
         assert second.reason == "corrected_execution_identity:existing_command_snapshot_id_mismatch"
         assert len(submitted) == 1
         assert _TEST_CONN.execute("SELECT COUNT(*) FROM venue_commands").fetchone()[0] == 1
+
+    def test_execute_final_intent_invalid_amount_400_is_submit_rejected(
+        self,
+        monkeypatch,
+    ):
+        PolyApiException = type("PolyApiException", (Exception,), {})
+        final_intent = _final_execution_intent(
+            token_id="yes-token-invalid-amount-400-final",
+            final_limit_price=Decimal("0.33"),
+            size_value=Decimal("3.30"),
+        )
+
+        class InvalidAmountClient:
+            def __init__(self):
+                self.bound_envelope = None
+
+            def bind_submission_envelope(self, envelope):
+                self.bound_envelope = envelope
+
+            def v2_preflight(self):
+                return None
+
+            def place_limit_order(self, *, token_id, price, size, side, order_type="GTC"):
+                raise PolyApiException(
+                    "PolyApiException[status_code=400, "
+                    "error_message={'error': 'invalid amounts, the market buy "
+                    "orders maker amount supports a max accuracy of 2 decimals, "
+                    "taker amount a max of 4 decimals'}]"
+                )
+
+        monkeypatch.setattr("src.execution.executor._assert_risk_allocator_allows_submit", lambda intent: None)
+        monkeypatch.setattr("src.execution.executor._select_risk_allocator_order_type", lambda conn, snapshot_id: "FOK")
+        monkeypatch.setattr("src.control.ws_gap_guard.assert_ws_allows_submit", lambda *args, **kwargs: None)
+        monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", InvalidAmountClient)
+
+        result = execute_final_intent(
+            final_intent,
+            conn=_TEST_CONN,
+            decision_id="decision-invalid-amount-400",
+        )
+
+        assert result.status == "rejected"
+        assert result.command_state == "REJECTED"
+        assert result.reason.startswith("venue_rejected_invalid_amount_400:")
+        command = _TEST_CONN.execute(
+            "SELECT state FROM venue_commands WHERE decision_id = ?",
+            ("decision-invalid-amount-400",),
+        ).fetchone()
+        assert command["state"] == "REJECTED"
+        event = _TEST_CONN.execute(
+            """
+            SELECT payload_json
+            FROM venue_command_events
+            WHERE event_type = 'SUBMIT_REJECTED'
+              AND command_id = (
+                SELECT command_id FROM venue_commands WHERE decision_id = ?
+              )
+            """,
+            ("decision-invalid-amount-400",),
+        ).fetchone()
+        payload = json.loads(event["payload_json"])
+        assert payload["reason"] == "venue_rejected_invalid_amount_400"
+        assert payload["proof_class"] == "deterministic_venue_invalid_amount_400"
+        assert payload["venue_order_created"] is False
 
     def test_execute_final_intent_rejects_idempotency_race_with_old_corrected_identity(
         self,

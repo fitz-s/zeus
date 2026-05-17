@@ -370,9 +370,21 @@ def _select_final_submit_order_type(conn, snapshot_id: str, deps) -> str:
     return str(_select_risk_allocator_order_type(conn, snapshot_id))
 
 
-def _quantize_submit_shares(direction: str, shares: Decimal) -> Decimal:
+def _quantize_submit_shares(
+    direction: str,
+    shares: Decimal,
+    *,
+    final_limit_price: Decimal | None = None,
+    order_type: str | None = None,
+) -> Decimal:
     if shares <= Decimal("0"):
         raise ValueError("submitted_shares must be positive")
+    if final_limit_price is not None and order_type is not None:
+        from src.contracts.execution_intent import quantize_submit_shares_for_venue
+
+        return quantize_submit_shares_for_venue(
+            direction, shares, final_limit_price=final_limit_price, order_type=order_type
+        )
     quantum = Decimal("0.01")
     rounding = ROUND_CEILING if direction.startswith("buy_") else ROUND_FLOOR
     quantized = (shares / quantum).to_integral_value(rounding=rounding) * quantum
@@ -466,7 +478,12 @@ def _attach_corrected_pricing_authority(
     immediate_order_type = str(order_type or "").strip().upper()
     final_unsupported_reason = ""
     if is_marketable and immediate_order_type in {"FOK", "FAK"}:
-        submitted_shares = _quantize_submit_shares(direction, sweep.filled_shares)
+        submitted_shares = _quantize_submit_shares(
+            direction,
+            sweep.filled_shares,
+            final_limit_price=candidate_limit,
+            order_type=immediate_order_type,
+        )
         sweep = simulate_clob_sweep(
             snapshot=snapshot,
             direction=direction,

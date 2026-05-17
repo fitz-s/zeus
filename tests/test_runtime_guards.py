@@ -3056,6 +3056,62 @@ def test_executable_snapshot_repricing_crosses_positive_ev_ask_outside_flat_slip
     assert decision.final_execution_intent.post_only is False
 
 
+def test_corrected_pricing_quantizes_immediate_buy_to_venue_amount_precision(tmp_path):
+    """RELATIONSHIP: final-intent BUY FOK sizing must satisfy CLOB amount precision."""
+
+    from src.state.snapshot_repo import get_snapshot
+
+    conn = get_connection(tmp_path / "snapshot-reprice-venue-amount-precision.db")
+    init_schema(conn)
+    _insert_executable_snapshot(
+        conn,
+        snapshot_id="snap-reprice-venue-amount-precision",
+        selected_outcome_token_id="yes1",
+        outcome_label="YES",
+        yes_token_id="yes1",
+        no_token_id="no1",
+        top_bid="0.14",
+        top_ask="0.15",
+        ask_size="100",
+    )
+    snapshot = get_snapshot(conn, "snap-reprice-venue-amount-precision")
+    assert snapshot is not None
+    edge = _edge()
+    decision = EdgeDecision(
+        should_trade=True,
+        edge=edge,
+        tokens={"token_id": "yes1", "no_token_id": "no1"},
+        size_usd=1.047,
+        applied_validations=[],
+        edge_context=types.SimpleNamespace(p_posterior=edge.p_posterior),
+        decision_snapshot_id="decision-snap-venue-amount-precision",
+        sizing_bankroll=100.0,
+        kelly_multiplier_used=0.25,
+        execution_fee_rate=0.0,
+    )
+
+    shadow = cycle_runtime._attach_corrected_pricing_authority(
+        decision=decision,
+        snapshot=snapshot,
+        candidate_limit_price=0.15,
+        candidate_expected_fill_price_before_fee=0.15,
+        candidate_size_usd=1.047,
+        order_type="FOK",
+        cancel_after=datetime(2026, 4, 3, 1, tzinfo=timezone.utc),
+        resolution_window="2026-04-03",
+        correlation_key="NYC:2026-04-03",
+    )
+    conn.close()
+
+    final_intent = decision.final_execution_intent
+    assert final_intent is not None
+    assert final_intent.order_type == "FOK"
+    assert final_intent.submitted_shares == Decimal("7.00")
+    assert final_intent.submitted_shares * final_intent.final_limit_price == Decimal("1.0500")
+    assert shadow["sweep_submitted_shares"] == "7"
+    assert shadow["candidate_submitted_shares"] == "7"
+
+
 def test_executable_snapshot_repricing_sweeps_deeper_ask_inside_budget(tmp_path):
     from dataclasses import replace
 

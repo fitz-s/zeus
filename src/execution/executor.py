@@ -124,6 +124,23 @@ def _risk_allocator_order_type_allows_intent(
     return False
 
 
+def _venue_submit_amount_precision_rejection_reason(
+    intent: ExecutionIntent,
+    *,
+    shares: float,
+    order_type: str,
+) -> str | None:
+    from src.contracts.execution_intent import venue_submit_amount_precision_error
+
+    direction = getattr(getattr(intent, "direction", ""), "value", getattr(intent, "direction", ""))
+    return venue_submit_amount_precision_error(
+        direction=str(direction),
+        final_limit_price=Decimal(str(intent.limit_price)),
+        submitted_shares=Decimal(str(shares)),
+        order_type=order_type,
+    )
+
+
 def _allocation_payload_for_intent(intent: ExecutionIntent) -> dict[str, str]:
     """Return JSON-safe A2 allocation metadata for SUBMIT_REQUESTED payloads."""
 
@@ -148,6 +165,17 @@ def _is_polymarket_geoblock_403(exc: Exception) -> bool:
     )
 
 
+def _is_polymarket_invalid_amount_400(exc: Exception) -> bool:
+    message = str(exc)
+    return (
+        type(exc).__name__ == "PolyApiException"
+        and "status_code=400" in message
+        and "invalid amounts" in message
+        and "maker amount" in message
+        and "taker amount" in message
+    )
+
+
 def _geoblock_rejection_payload(exc: Exception, *, idempotency_key: str) -> dict:
     return {
         "reason": "venue_rejected_geoblock_403",
@@ -157,6 +185,30 @@ def _geoblock_rejection_payload(exc: Exception, *, idempotency_key: str) -> dict
         "proof_class": "deterministic_venue_geoblock_403",
         "venue_order_created": False,
     }
+
+
+def _invalid_amount_rejection_payload(exc: Exception, *, idempotency_key: str) -> dict:
+    return {
+        "reason": "venue_rejected_invalid_amount_400",
+        "exception_type": type(exc).__name__,
+        "exception_message": str(exc),
+        "idempotency_key": idempotency_key,
+        "proof_class": "deterministic_venue_invalid_amount_400",
+        "venue_order_created": False,
+    }
+
+
+def _deterministic_submit_rejection_payload(
+    exc: Exception,
+    *,
+    idempotency_key: str,
+) -> dict | None:
+    if _is_polymarket_geoblock_403(exc):
+        return _geoblock_rejection_payload(exc, idempotency_key=idempotency_key)
+    if _is_polymarket_invalid_amount_400(exc):
+        return _invalid_amount_rejection_payload(exc, idempotency_key=idempotency_key)
+    return None
+
 
 def _canonical_payload_hash(payload: object) -> str:
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
@@ -2133,18 +2185,22 @@ def execute_exit_order(
             )
         except Exception as exc:
             # M2: place_limit_order has crossed the submit side-effect boundary.
-            # Treat SDK/network exceptions as unknown side effects. A narrow
-            # synchronous venue geoblock 403 is deterministic rejection: no
-            # order id is created and live retry requires fresh egress proof.
+            # Treat SDK/network exceptions as unknown side effects. Narrow
+            # synchronous CLOB validation failures are deterministic rejections:
+            # no order id is created and retry requires changed inputs/egress.
             ack_time = datetime.now(timezone.utc).isoformat()
+            deterministic_rejection_payload = _deterministic_submit_rejection_payload(
+                exc,
+                idempotency_key=idem.value,
+            )
             try:
-                if _is_polymarket_geoblock_403(exc):
+                if deterministic_rejection_payload is not None:
                     append_event(
                         conn,
                         command_id=command_id,
                         event_type="SUBMIT_REJECTED",
                         occurred_at=ack_time,
-                        payload=_geoblock_rejection_payload(exc, idempotency_key=idem.value),
+                        payload=deterministic_rejection_payload,
                     )
                 else:
                     append_event(
@@ -2168,11 +2224,11 @@ def execute_exit_order(
                     command_id, intent.trade_id, inner, exc,
                 )
             logger.error("Live exit order SDK exception: %s", exc)
-            if _is_polymarket_geoblock_403(exc):
+            if deterministic_rejection_payload is not None:
                 return OrderResult(
                     trade_id=intent.trade_id,
                     status="rejected",
-                    reason=f"venue_rejected_geoblock_403: {exc}",
+                    reason=f"{deterministic_rejection_payload['reason']}: {exc}",
                     submitted_price=limit_price,
                     shares=shares,
                     order_role="exit",
@@ -2571,6 +2627,21 @@ def _live_order(
                 trade_id=trade_id,
                 status="rejected",
                 reason=f"post_only_order_type_mismatch: order_type={effective_order_type}",
+                submitted_price=intent.limit_price,
+                shares=shares,
+                order_role="entry",
+                idempotency_key=idem.value,
+            )
+        amount_precision_error = _venue_submit_amount_precision_rejection_reason(
+            intent,
+            shares=shares,
+            order_type=effective_order_type,
+        )
+        if amount_precision_error is not None:
+            return OrderResult(
+                trade_id=trade_id,
+                status="rejected",
+                reason=f"invalid_submit_amount_precision: {amount_precision_error}",
                 submitted_price=intent.limit_price,
                 shares=shares,
                 order_role="entry",
@@ -3011,18 +3082,22 @@ def _live_order(
             )
         except Exception as exc:
             # M2: place_limit_order has crossed the submit side-effect boundary.
-            # Treat SDK/network exceptions as unknown side effects. A narrow
-            # synchronous venue geoblock 403 is deterministic rejection: no
-            # order id is created and live retry requires fresh egress proof.
+            # Treat SDK/network exceptions as unknown side effects. Narrow
+            # synchronous CLOB validation failures are deterministic rejections:
+            # no order id is created and retry requires changed inputs/egress.
             unk_time = datetime.now(timezone.utc).isoformat()
+            deterministic_rejection_payload = _deterministic_submit_rejection_payload(
+                exc,
+                idempotency_key=idem.value,
+            )
             try:
-                if _is_polymarket_geoblock_403(exc):
+                if deterministic_rejection_payload is not None:
                     append_event(
                         conn,
                         command_id=command_id,
                         event_type="SUBMIT_REJECTED",
                         occurred_at=unk_time,
-                        payload=_geoblock_rejection_payload(exc, idempotency_key=idem.value),
+                        payload=deterministic_rejection_payload,
                     )
                 else:
                     append_event(
@@ -3046,11 +3121,11 @@ def _live_order(
                     command_id, trade_id, inner, exc,
                 )
             logger.error("Live order SDK exception: %s", exc)
-            if _is_polymarket_geoblock_403(exc):
+            if deterministic_rejection_payload is not None:
                 return OrderResult(
                     trade_id=trade_id,
                     status="rejected",
-                    reason=f"venue_rejected_geoblock_403: {exc}",
+                    reason=f"{deterministic_rejection_payload['reason']}: {exc}",
                     submitted_price=intent.limit_price,
                     shares=shares,
                     order_role="entry",

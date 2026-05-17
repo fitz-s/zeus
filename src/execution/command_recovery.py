@@ -166,6 +166,12 @@ _GEOBLOCK_403_MARKERS = (
     "Trading restricted in your region",
     "geoblock",
 )
+_INVALID_AMOUNT_400_MARKERS = (
+    "status_code=400",
+    "invalid amounts",
+    "maker amount",
+    "taker amount",
+)
 
 
 def _dict_row(row) -> dict:
@@ -1271,6 +1277,83 @@ def _geoblock_403_predicates(
     return predicates, failures
 
 
+def _invalid_amount_400_predicates(
+    conn: sqlite3.Connection,
+    command: dict,
+) -> tuple[dict, list[str]]:
+    command_id = str(command["command_id"])
+    events = _command_events(conn, command_id)
+    latest_event_type, latest_payload = _latest_event_payload(events)
+    payloads = [_json_dict(event.get("payload_json")) for event in events]
+    final_envelope_ids = [
+        payload.get("final_submission_envelope_id")
+        for payload in payloads
+        if str(payload.get("final_submission_envelope_id") or "").strip()
+    ]
+    envelope = _command_envelope(conn, command.get("envelope_id"))
+    position_counts = _count_position_rows_for_command(conn, command)
+    exception_message = str(latest_payload.get("exception_message") or "")
+    predicates = {
+        "latest_event_is_submit_timeout_unknown": (
+            latest_event_type == CommandEventType.SUBMIT_TIMEOUT_UNKNOWN.value
+        ),
+        "payload_reason_post_submit_exception": (
+            latest_payload.get("reason") == "post_submit_exception_possible_side_effect"
+        ),
+        "exception_type_polyapi": latest_payload.get("exception_type") == "PolyApiException",
+        "exception_message_invalid_amount_400": all(
+            marker in exception_message for marker in _INVALID_AMOUNT_400_MARKERS
+        ),
+        "no_venue_order_id": not str(command.get("venue_order_id") or "").strip(),
+        "no_final_submission_envelope": not final_envelope_ids,
+        "no_envelope_order_id": not str(envelope.get("order_id") or "").strip(),
+        "no_raw_response": not str(envelope.get("raw_response_json") or "").strip(),
+        "no_signed_order": (
+            envelope.get("signed_order_blob") in (None, b"", "")
+            and not str(envelope.get("signed_order_hash") or "").strip()
+        ),
+        "no_order_facts": _count_facts(conn, "venue_order_facts", command_id) == 0,
+        "no_trade_facts": _count_facts(conn, "venue_trade_facts", command_id) == 0,
+        "no_position_events": position_counts["position_events"] == 0,
+        "no_position_current": position_counts["position_current"] == 0,
+    }
+    failures = [name for name, ok in predicates.items() if not ok]
+    return predicates, failures
+
+
+def _terminalize_submit_unknown_invalid_amount_400_if_proven(
+    conn: sqlite3.Connection,
+    command: dict,
+    *,
+    occurred_at: str,
+) -> dict | None:
+    if not command:
+        return None
+    predicates, predicate_failures = _invalid_amount_400_predicates(conn, command)
+    if predicate_failures:
+        return None
+    command_id = str(command["command_id"])
+    payload = {
+        "schema_version": 1,
+        "reason": "venue_rejected_invalid_amount_400",
+        "command_id": command_id,
+        "decision_id": str(command.get("decision_id") or ""),
+        "proof_class": "deterministic_venue_invalid_amount_400",
+        "side_effect_boundary_crossed": True,
+        "venue_order_created": False,
+        "required_predicates": predicates,
+        "idempotency_key": str(command.get("idempotency_key") or ""),
+    }
+    append_event(
+        conn,
+        command_id=command_id,
+        event_type=CommandEventType.SUBMIT_REJECTED.value,
+        occurred_at=occurred_at,
+        payload=payload,
+    )
+    return payload
+
+
 def _decision_log_pre_sdk_proof(conn: sqlite3.Connection, decision_id: str) -> dict | None:
     if not _table_exists(conn, "decision_log"):
         return None
@@ -1693,6 +1776,25 @@ def _reconcile_row(
         # M2: SUBMIT_UNKNOWN_SIDE_EFFECT                                      #
         # ------------------------------------------------------------------ #
         if state == CommandState.SUBMIT_UNKNOWN_SIDE_EFFECT:
+            command = _dict_row(
+                conn.execute(
+                    "SELECT * FROM venue_commands WHERE command_id = ?",
+                    (cmd.command_id,),
+                ).fetchone()
+            )
+            invalid_amount_payload = _terminalize_submit_unknown_invalid_amount_400_if_proven(
+                conn,
+                command,
+                occurred_at=now,
+            )
+            if invalid_amount_payload is not None:
+                logger.info(
+                    "recovery: command %s SUBMIT_UNKNOWN_SIDE_EFFECT -> "
+                    "SUBMIT_REJECTED (deterministic invalid amount 400)",
+                    cmd.command_id,
+                )
+                return "advanced"
+
             lookup_status, venue_resp = _lookup_unknown_side_effect_order(cmd, client)
             if lookup_status == "unavailable":
                 logger.warning(
