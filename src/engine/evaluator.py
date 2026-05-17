@@ -3128,7 +3128,12 @@ def evaluate_candidate(
             filtered=filtered,
             hypotheses=full_family_hypotheses or None,
             decision_snapshot_id=snapshot_id,
-            decision_id="<pre_decision:family>",
+            # F2: use snapshot_id as the joinable lineage key so child hypothesis
+            # rows can join back to the family snapshot. "<pre_decision:family>"
+            # was a placeholder sentinel that made the hypothesis-level lineage
+            # unauditable. snapshot_id is the in-scope decision_snapshot_id and
+            # the correct join target per the audit contract.
+            decision_id=snapshot_id if snapshot_id else "<pre_decision:family>",
             selected_method=selected_method,
             recorded_at=_recorded_at,
             decision_time_status=_decision_time_status,

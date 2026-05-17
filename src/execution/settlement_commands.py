@@ -57,7 +57,7 @@ CREATE INDEX IF NOT EXISTS idx_settlement_commands_condition
   ON settlement_commands (condition_id, market_id);
 CREATE UNIQUE INDEX IF NOT EXISTS ux_settlement_commands_active_condition_asset
   ON settlement_commands (condition_id, market_id, payout_asset)
-  WHERE state NOT IN ('REDEEM_CONFIRMED','REDEEM_FAILED');
+  WHERE state NOT IN ('REDEEM_CONFIRMED','REDEEM_FAILED','REDEEM_REVIEW_REQUIRED');
 
 CREATE TABLE IF NOT EXISTS settlement_command_events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -259,7 +259,7 @@ def request_redeem(
          WHERE condition_id = ?
            AND market_id = ?
            AND payout_asset = ?
-           AND state NOT IN ('REDEEM_CONFIRMED','REDEEM_FAILED')
+           AND state NOT IN ('REDEEM_CONFIRMED','REDEEM_FAILED','REDEEM_REVIEW_REQUIRED')
          ORDER BY requested_at, command_id
          LIMIT 1
         """,
