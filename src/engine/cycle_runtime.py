@@ -708,12 +708,6 @@ def _reprice_decision_from_executable_snapshot(
     )
     if repriced_size_at_snapshot_vwmp <= 0.0:
         raise ValueError("EXECUTABLE_REPRICE_REJECTED: repriced size is zero")
-    final_best_ask: float | None = None
-    final_price = float(snapshot_limit_price)
-    repriced_size = repriced_size_at_snapshot_vwmp
-    corrected_candidate_price = float(snapshot_limit_price)
-    corrected_candidate_expected_fill = float(snapshot_limit_price)
-    corrected_candidate_size = repriced_size_at_snapshot_vwmp
     best_ask_edge = float(decision.edge.p_posterior) - best_ask_float
     p_posterior_decimal = Decimal(str(decision.edge.p_posterior))
     slippage_reference_decimal = Decimal(str(slippage_reference_price))
@@ -733,10 +727,12 @@ def _reprice_decision_from_executable_snapshot(
         passive_maker_repositioned = True
         passive_maker_reposition_reason = "raised_buy_limit_to_snapshot_best_bid"
     snapshot_limit_price = float(snapshot_limit_decimal)
-    if passive_maker_repositioned:
-        final_price = snapshot_limit_price
-        corrected_candidate_price = snapshot_limit_price
-        corrected_candidate_expected_fill = snapshot_limit_price
+    final_best_ask: float | None = None
+    final_price = snapshot_limit_price
+    repriced_size = repriced_size_at_snapshot_vwmp
+    corrected_candidate_price = snapshot_limit_price
+    corrected_candidate_expected_fill = snapshot_limit_price
+    corrected_candidate_size = repriced_size_at_snapshot_vwmp
     depth_sweep_limit_decimal = Decimal("0")
     if positive_edge_cap_decimal > Decimal("0") and slippage_cap_decimal > Decimal("0"):
         depth_sweep_limit_decimal = _floor_to_tick(

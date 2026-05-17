@@ -2747,6 +2747,53 @@ def test_executable_snapshot_repricing_passive_buy_limit_cannot_rest_below_best_
     assert shadow["candidate_final_limit_price"] == "0.29"
 
 
+def test_executable_snapshot_repricing_tick_aligns_raw_passive_limit_before_final_intent(tmp_path):
+    conn = get_connection(tmp_path / "snapshot-reprice-raw-tick.db")
+    init_schema(conn)
+    _insert_executable_snapshot(
+        conn,
+        snapshot_id="snap-raw-tick",
+        selected_outcome_token_id="yes1",
+        outcome_label="YES",
+        yes_token_id="yes1",
+        no_token_id="no1",
+        top_bid="0.29",
+        top_ask="0.3417241379310344",
+        fee_details={"feeRate": "0.03", "source": "test_snapshot_taker_fee"},
+    )
+    edge = _edge()
+    decision = EdgeDecision(
+        should_trade=True,
+        edge=edge,
+        tokens={"token_id": "yes1", "no_token_id": "no1"},
+        size_usd=5.0,
+        decision_snapshot_id="decision-snap-raw-tick",
+        applied_validations=[],
+        sizing_bankroll=100.0,
+        kelly_multiplier_used=0.25,
+        execution_fee_rate=0.03,
+    )
+
+    best_ask = cycle_runtime._reprice_decision_from_executable_snapshot(
+        conn,
+        decision,
+        {"executable_snapshot_id": "snap-raw-tick"},
+    )
+    conn.close()
+
+    assert best_ask is None
+    reprice = decision.tokens["executable_snapshot_reprice"]
+    assert reprice["snapshot_vwmp"] == pytest.approx(0.3158620689655172)
+    assert reprice["snapshot_limit_price"] == pytest.approx(0.29)
+    assert reprice["final_limit_price"] == pytest.approx(0.29)
+    assert reprice["corrected_candidate_limit_price"] == pytest.approx(0.29)
+    shadow = reprice["corrected_pricing_shadow"]
+    assert shadow["live_submit_authority"] is True
+    assert shadow["candidate_final_limit_price"] == "0.29"
+    assert decision.final_execution_intent.final_limit_price == Decimal("0.29")
+    assert decision.final_execution_intent.final_limit_price % decision.final_execution_intent.tick_size == 0
+
+
 def test_executable_snapshot_repricing_uses_snapshot_freshness_deadline(tmp_path):
     conn = get_connection(tmp_path / "snapshot-deadline-fresh.db")
     init_schema(conn)
