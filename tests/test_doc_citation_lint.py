@@ -335,18 +335,26 @@ def test_enumerate_markers_yields_citations(tmp_path):
 
 
 def test_collect_files_expands_directory(tmp_path):
-    """collect_files recursively finds .md files in a directory."""
+    """collect_files recursively finds .md, .py, .yaml, .yml, .json files in a directory."""
     sub = tmp_path / "sub"
     sub.mkdir()
     (tmp_path / "a.md").write_text("a")
     (sub / "b.md").write_text("b")
-    (tmp_path / "c.py").write_text("c")  # should be excluded
+    (tmp_path / "c.py").write_text("c")  # should be included now
+    (sub / "d.yaml").write_text("d")
+    (sub / "e.yml").write_text("e")
+    (sub / "f.json").write_text("f")
+    (tmp_path / "g.txt").write_text("g")  # should be excluded
 
     files = collect_files([str(tmp_path)], REPO_ROOT)
     names = {f.name for f in files}
     assert "a.md" in names
     assert "b.md" in names
-    assert "c.py" not in names
+    assert "c.py" in names
+    assert "d.yaml" in names
+    assert "e.yml" in names
+    assert "f.json" in names
+    assert "g.txt" not in names
 
 
 def test_main_exit_zero_no_errors(tmp_path):

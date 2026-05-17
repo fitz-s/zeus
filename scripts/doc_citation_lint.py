@@ -5,9 +5,9 @@
 #                  + EXECUTION_PLAN.md §2 W2 + D2 contract (locked sha8 format)
 """doc_citation_lint.py — Citation-rot detector for Zeus docs.
 
-Scans markdown files for `<!-- cite: path:LINE sha=XXXXXXXX -->` markers,
-validates each marker against the live repo, and fails with a non-zero
-exit code if any citation is stale.
+Scans markdown files and other specified files (per D6 extension: .md, .py, .yaml, .yml, .json)
+for `<!-- cite: path:LINE sha=XXXXXXXX -->` markers, validates each marker against
+the live repo, and fails with a non-zero exit code if any citation is stale.
 
 Citation marker format (D2 contract, locked):
     <!-- cite: path/to/file.py:42 sha=abc12345 -->
@@ -186,19 +186,24 @@ def validate_citation(cite: Citation, repo_root: Path) -> CitationError | None:
 
 
 def collect_files(paths: list[str], repo_root: Path) -> list[Path]:
-    """Expand paths (files or directories) into a sorted list of .md files."""
+    """Expand paths (files or directories) into a sorted list of scanned files.
+
+    Per D6, scans .md, .py, .yaml, .yml, and .json files.
+    """
+    allowed_exts = {".md", ".py", ".yaml", ".yml", ".json"}
     result: list[Path] = []
     for p in paths:
         target = Path(p) if Path(p).is_absolute() else repo_root / p
-        if target.is_file() and target.suffix == ".md":
+        if target.is_file() and target.suffix in allowed_exts:
             result.append(target)
         elif target.is_dir():
-            result.extend(sorted(target.rglob("*.md")))
+            for ext in allowed_exts:
+                result.extend(target.rglob(f"*{ext}"))
         else:
-            # Silently skip non-.md files (e.g. AGENTS.md passed as bare name)
+            # Silently skip non-allowed files (e.g. AGENTS.md passed as bare name, but valid)
             # but still try absolute resolution
             abs_target = repo_root / p
-            if abs_target.is_file():
+            if abs_target.is_file() and abs_target.suffix in allowed_exts:
                 result.append(abs_target)
     return sorted(set(result))
 
