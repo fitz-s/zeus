@@ -62,6 +62,7 @@ _OPEN_POINT_ORDER_STATES = _OPEN_ORDER_FACT_STATES | frozenset(
 _TRADE_FACT_STATES = frozenset({"MATCHED", "MINED", "CONFIRMED", "RETRYING", "FAILED"})
 _CONFIRMED_POSITION_FACT_STATES = frozenset({"CONFIRMED"})
 _OPTIMISTIC_POSITION_FACT_STATES = frozenset({"MATCHED", "MINED"})
+_POSITION_DRIFT_ABS_TOLERANCE = Decimal("0.0001")
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS exchange_reconcile_findings (
@@ -796,9 +797,35 @@ def _record_position_drift_findings(
         exchange_size = exchange.get(token, Decimal("0"))
         confirmed_size = confirmed_journal.get(token, Decimal("0"))
         optimistic_size = optimistic_journal.get(token, Decimal("0"))
-        if exchange_size == confirmed_size:
+        if _position_size_matches(exchange_size, confirmed_size):
+            _resolve_open_position_drift_findings(
+                conn,
+                token,
+                resolution="position_drift_cleared",
+                resolved_at=observed_at,
+            )
+            continue
+        if _pending_exit_optimistic_sell_offsets_confirmed_position(
+            conn,
+            token_id=token,
+            exchange_size=exchange_size,
+            confirmed_size=confirmed_size,
+            optimistic_size=optimistic_size,
+        ):
+            _resolve_open_position_drift_findings(
+                conn,
+                token,
+                resolution="position_drift_pending_exit_offset",
+                resolved_at=observed_at,
+            )
             continue
         if _has_recent_filled_suppression(conn, token, observed_at):
+            _resolve_open_position_drift_findings(
+                conn,
+                token,
+                resolution="position_drift_recent_fill_suppressed",
+                resolved_at=observed_at,
+            )
             continue
         findings.append(
             record_finding(
@@ -820,6 +847,75 @@ def _record_position_drift_findings(
             )
         )
     return findings
+
+
+def _position_size_matches(left: Decimal, right: Decimal) -> bool:
+    return abs(left - right) <= _POSITION_DRIFT_ABS_TOLERANCE
+
+
+def _resolve_open_position_drift_findings(
+    conn: sqlite3.Connection,
+    token_id: str,
+    *,
+    resolution: str,
+    resolved_at: datetime,
+) -> None:
+    rows = conn.execute(
+        """
+        SELECT finding_id
+          FROM exchange_reconcile_findings
+         WHERE kind = 'position_drift'
+           AND subject_id = ?
+           AND resolved_at IS NULL
+        """,
+        (token_id,),
+    ).fetchall()
+    for row in rows:
+        resolve_finding(
+            conn,
+            str(row["finding_id"]),
+            resolution=resolution,
+            resolved_by="src.execution.exchange_reconcile",
+            resolved_at=resolved_at,
+        )
+
+
+def _pending_exit_optimistic_sell_offsets_confirmed_position(
+    conn: sqlite3.Connection,
+    *,
+    token_id: str,
+    exchange_size: Decimal,
+    confirmed_size: Decimal,
+    optimistic_size: Decimal,
+) -> bool:
+    if optimistic_size >= Decimal("0"):
+        return False
+    if not _position_size_matches(exchange_size, confirmed_size + optimistic_size):
+        return False
+    row = conn.execute(
+        """
+        SELECT 1
+          FROM position_current pc
+          JOIN venue_commands cmd
+            ON cmd.position_id = pc.position_id
+          JOIN venue_trade_facts tf
+            ON tf.command_id = cmd.command_id
+         WHERE pc.token_id = ?
+           AND pc.phase = 'pending_exit'
+           AND cmd.intent_kind = 'EXIT'
+           AND cmd.side = 'SELL'
+           AND tf.state IN ('MATCHED', 'MINED')
+           AND CAST(COALESCE(tf.filled_size, '0') AS REAL) > 0
+           AND tf.local_sequence = (
+                SELECT MAX(newer.local_sequence)
+                  FROM venue_trade_facts newer
+                 WHERE newer.trade_id = tf.trade_id
+           )
+         LIMIT 1
+        """,
+        (token_id,),
+    ).fetchone()
+    return row is not None
 
 
 def _append_linkable_trade_fact_if_missing(

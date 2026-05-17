@@ -1646,6 +1646,116 @@ def test_position_drift_compares_exchange_to_confirmed_not_optimistic(conn):
     assert '"reason":"exchange_position_differs_from_confirmed_trade_facts"' in evidence
 
 
+def test_position_drift_tolerates_venue_precision_and_resolves_existing(conn):
+    from src.execution.exchange_reconcile import record_finding, run_reconcile_sweep
+
+    token = "rounded-position-token"
+    seed_command(conn, command_id="cmd-rounded", venue_order_id="ord-rounded", token_id=token)
+    append_trade_fact(
+        conn,
+        command_id="cmd-rounded",
+        venue_order_id="ord-rounded",
+        token_id=token,
+        trade_id="trade-rounded",
+        size="1.304337",
+        state="CONFIRMED",
+    )
+    stale = record_finding(
+        conn,
+        kind="position_drift",
+        subject_id=token,
+        context="ws_gap",
+        evidence={"reason": "stale_precision_probe"},
+        recorded_at=NOW - timedelta(minutes=1),
+    )
+
+    result = run_reconcile_sweep(
+        FakeM5Adapter(positions=[position(token_id=token, size="1.3043")]),
+        conn,
+        context="periodic",
+        observed_at=NOW,
+    )
+
+    assert not any(finding.kind == "position_drift" for finding in result)
+    resolved = conn.execute(
+        "SELECT resolution, resolved_by FROM exchange_reconcile_findings WHERE finding_id = ?",
+        (stale.finding_id,),
+    ).fetchone()
+    assert dict(resolved) == {
+        "resolution": "position_drift_cleared",
+        "resolved_by": "src.execution.exchange_reconcile",
+    }
+
+
+def test_pending_exit_matched_sell_offsets_confirmed_position_without_drift(conn):
+    from src.execution.exchange_reconcile import run_reconcile_sweep
+
+    token = "pending-exit-token"
+    seed_command(
+        conn,
+        command_id="cmd-entry-pending-exit",
+        venue_order_id="ord-entry-pending-exit",
+        token_id=token,
+        side="BUY",
+        size=23.7,
+        state="FILLED",
+    )
+    append_trade_fact(
+        conn,
+        command_id="cmd-entry-pending-exit",
+        venue_order_id="ord-entry-pending-exit",
+        token_id=token,
+        trade_id="trade-entry-pending-exit",
+        size="23.7",
+        state="CONFIRMED",
+    )
+    seed_position_baseline(conn, position_id="pos-pending-exit", order_id="ord-exit-pending")
+    conn.execute(
+        """
+        UPDATE position_current
+           SET phase = 'pending_exit',
+               token_id = ?,
+               order_id = 'ord-exit-pending',
+               order_status = 'sell_pending_confirmation',
+               shares = 23.7,
+               cost_basis_usd = 1.659,
+               entry_price = 0.07,
+               updated_at = ?
+         WHERE position_id = 'pos-pending-exit'
+        """,
+        (token, NOW.isoformat()),
+    )
+    seed_command(
+        conn,
+        command_id="cmd-exit-pending",
+        venue_order_id="ord-exit-pending",
+        position_id="pos-pending-exit",
+        token_id=token,
+        side="SELL",
+        size=23.7,
+        price=0.04,
+        state="PARTIAL",
+    )
+    append_trade_fact(
+        conn,
+        command_id="cmd-exit-pending",
+        venue_order_id="ord-exit-pending",
+        token_id=token,
+        trade_id="trade-exit-pending",
+        size="23.7",
+        state="MATCHED",
+    )
+
+    result = run_reconcile_sweep(
+        FakeM5Adapter(positions=[position(token_id=token, size="0")]),
+        conn,
+        context="ws_gap",
+        observed_at=NOW,
+    )
+
+    assert not any(finding.kind == "position_drift" for finding in result)
+
+
 def test_position_journal_ignores_confirmed_trade_without_fill_economics(conn):
     from src.execution.exchange_reconcile import run_reconcile_sweep
 
