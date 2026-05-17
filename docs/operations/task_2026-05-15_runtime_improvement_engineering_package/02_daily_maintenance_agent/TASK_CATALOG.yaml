@@ -3,7 +3,7 @@
 # Schema version: 1
 # Loaded by: maintenance worker core
 # Policy reference: ../04_workspace_hygiene/PURGE_CATEGORIES.md
-#                   ../04_workspace_hygiene/ARCHIVAL_RULES.md
+#                   ../ARCHIVAL_RULES.md
 #                   ../04_workspace_hygiene/LORE_EXTRACTION_PROTOCOL.md
 #                   ../03_authority_drift_remediation/REMEDIATION_PLAN.md
 #
