@@ -684,7 +684,6 @@ def _reprice_decision_from_executable_snapshot(
         Decimal(str(round(float(snapshot_limit_price), 12))),
         tick_size_decimal,
     )
-    snapshot_limit_price = float(snapshot_limit_decimal)
     slippage_reference_price = min(float(decision.edge.p_posterior), float(snapshot_vwmp))
     max_slippage = SlippageBps(value_bps=200.0, direction="adverse")
     best_ask_slippage_bps = 0.0
@@ -722,6 +721,22 @@ def _reprice_decision_from_executable_snapshot(
         Decimal("1") + Decimal(str(max_slippage.fraction))
     )
     positive_edge_cap_decimal = p_posterior_decimal - tick_size_decimal
+    passive_maker_repositioned = False
+    passive_maker_reposition_reason = ""
+    if direction.startswith("buy_") and snapshot_limit_decimal < best_bid:
+        if positive_edge_cap_decimal < best_bid:
+            raise ValueError(
+                "EXECUTABLE_PASSIVE_MAKER_NO_COMPETITIVE_POSITIVE_EDGE: "
+                f"best_bid={float(best_bid):.6f} edge_cap={float(positive_edge_cap_decimal):.6f}"
+            )
+        snapshot_limit_decimal = best_bid
+        passive_maker_repositioned = True
+        passive_maker_reposition_reason = "raised_buy_limit_to_snapshot_best_bid"
+    snapshot_limit_price = float(snapshot_limit_decimal)
+    if passive_maker_repositioned:
+        final_price = snapshot_limit_price
+        corrected_candidate_price = snapshot_limit_price
+        corrected_candidate_expected_fill = snapshot_limit_price
     depth_sweep_limit_decimal = Decimal("0")
     if positive_edge_cap_decimal > Decimal("0") and slippage_cap_decimal > Decimal("0"):
         depth_sweep_limit_decimal = _floor_to_tick(
@@ -826,6 +841,8 @@ def _reprice_decision_from_executable_snapshot(
         "snapshot_best_ask": best_ask_float,
         "snapshot_best_ask_size": ask_size_float,
         "snapshot_limit_price": float(snapshot_limit_price),
+        "passive_maker_repositioned": passive_maker_repositioned,
+        "passive_maker_reposition_reason": passive_maker_reposition_reason,
         "slippage_reference_price": float(slippage_reference_price),
         "max_slippage_bps": float(max_slippage.value_bps),
         "depth_sweep_limit_price": depth_sweep_limit_float,

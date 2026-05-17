@@ -1,7 +1,7 @@
 """Runtime guard and live-cycle wiring tests."""
 # Lifecycle: created=2026-04-28; last_reviewed=2026-05-15; last_reused=2026-05-15
 # Created: 2026-04-28
-# Last reused/audited: 2026-05-15
+# Last reused/audited: 2026-05-17
 # Authority basis: docs/operations/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md; task_2026-04-28_contamination_remediation Batch G; Phase 1B ENS snapshot persistence; Phase 1D forecast source policy; PR #56 MarketPhaseEvidence sidecar propagation; Wave26 explicit position env authority.
 # Purpose: Lock runtime guard and live-cycle wiring contracts.
 # Reuse: Run for runtime guard, live-only cleanup, and cycle wiring changes.
@@ -2699,6 +2699,52 @@ def test_executable_snapshot_repricing_updates_edge_and_size(tmp_path):
     assert shadow["cost_basis_hash"]
     assert shadow["final_execution_intent_id"] == decision.final_execution_intent.hypothesis_id
     assert shadow["posterior_distribution_id"] == "decision_snapshot:decision-snap"
+
+
+def test_executable_snapshot_repricing_passive_buy_limit_cannot_rest_below_best_bid(tmp_path):
+    conn = get_connection(tmp_path / "snapshot-reprice-passive-top-bid.db")
+    init_schema(conn)
+    _insert_executable_snapshot(
+        conn,
+        snapshot_id="snap-passive-top-bid",
+        selected_outcome_token_id="yes1",
+        outcome_label="YES",
+        yes_token_id="yes1",
+        no_token_id="no1",
+        top_bid="0.29",
+        top_ask="0.31",
+        fee_details={"feeRate": "0.03", "source": "test_snapshot_taker_fee"},
+    )
+    edge = _edge()
+    decision = EdgeDecision(
+        should_trade=True,
+        edge=edge,
+        tokens={"token_id": "yes1", "no_token_id": "no1"},
+        size_usd=5.0,
+        decision_snapshot_id="decision-snap-passive-top-bid",
+        applied_validations=[],
+        sizing_bankroll=100.0,
+        kelly_multiplier_used=0.25,
+        execution_fee_rate=0.03,
+    )
+
+    best_ask = cycle_runtime._reprice_decision_from_executable_snapshot(
+        conn,
+        decision,
+        {"executable_snapshot_id": "snap-passive-top-bid"},
+    )
+    conn.close()
+
+    assert best_ask is None
+    reprice = decision.tokens["executable_snapshot_reprice"]
+    assert reprice["snapshot_best_bid"] == pytest.approx(0.29)
+    assert reprice["snapshot_best_ask"] == pytest.approx(0.31)
+    assert reprice["final_limit_price"] == pytest.approx(0.29)
+    assert reprice["corrected_candidate_limit_price"] == pytest.approx(0.29)
+    shadow = reprice["corrected_pricing_shadow"]
+    assert shadow["order_policy"] == "post_only_passive_limit"
+    assert shadow["live_submit_authority"] is True
+    assert shadow["candidate_final_limit_price"] == "0.29"
 
 
 def test_executable_snapshot_repricing_uses_snapshot_freshness_deadline(tmp_path):

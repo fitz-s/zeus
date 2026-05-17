@@ -452,6 +452,17 @@ def _configure_external_venue_heartbeat_supervisor_if_needed() -> None:
     configure_global_supervisor(ExternalHeartbeatSupervisor())
 
 
+def _ensure_venue_read_side_adapter():
+    """Install the venue adapter used by non-heartbeat read-side maintenance."""
+
+    global _venue_heartbeat_adapter
+    if _venue_heartbeat_adapter is None:
+        from src.data.polymarket_client import PolymarketClient
+
+        _venue_heartbeat_adapter = PolymarketClient()._ensure_v2_adapter()
+    return _venue_heartbeat_adapter
+
+
 def _refresh_global_collateral_snapshot_if_due(
     adapter,
     *,
@@ -877,6 +888,7 @@ def _start_venue_heartbeat_loop_if_needed() -> None:
     global _venue_heartbeat_thread
     if _external_venue_heartbeat_enabled():
         _configure_external_venue_heartbeat_supervisor_if_needed()
+        _start_venue_background_maintenance_async(_ensure_venue_read_side_adapter())
         return
     if _venue_heartbeat_thread is not None and _venue_heartbeat_thread.is_alive():
         return

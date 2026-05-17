@@ -507,13 +507,21 @@ def test_main_external_venue_heartbeat_mode_consumes_status_without_posting(
         cadence_seconds=5,
     )
     write_heartbeat_keeper_status(status)
+    adapter = FakeHeartbeatAdapter([HeartbeatAck(ok=True, raw={"heartbeat_id": "should-not-post"})])
 
     class Client:
         def _ensure_v2_adapter(self):
-            raise AssertionError("trading daemon must not own heartbeat in external mode")
+            return adapter
+
+    launched_background = []
+
+    def _background(active_adapter):
+        launched_background.append(active_adapter)
+        return "started"
 
     monkeypatch.setenv("ZEUS_VENUE_HEARTBEAT_MODE", "external")
     monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", Client)
+    monkeypatch.setattr(main, "_start_venue_background_maintenance_async", _background)
     main._venue_heartbeat_thread = None
     main._venue_heartbeat_supervisor = None
     main._venue_heartbeat_adapter = None
@@ -523,6 +531,8 @@ def test_main_external_venue_heartbeat_mode_consumes_status_without_posting(
 
     assert main._venue_heartbeat_thread is None
     assert main._venue_heartbeat_supervisor is None
+    assert launched_background == [adapter]
+    assert adapter.heartbeat_ids == []
 
 
 def test_main_internal_venue_heartbeat_reuses_fresh_chain_id_on_restart(
