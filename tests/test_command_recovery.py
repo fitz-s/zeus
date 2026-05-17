@@ -2,7 +2,7 @@
 # Lifecycle: created=2026-04-26; last_reviewed=2026-05-16; last_reused=2026-05-16
 # Purpose: Lock INV-31 command recovery behavior plus snapshot-gated command inserts.
 # Reuse: Run when command recovery, command journal schema, or executable snapshot gating changes.
-# Last reused/audited: 2026-05-16
+# Last reused/audited: 2026-05-17
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md u00a7P1.S4
 """INV-31 anchor tests: command recovery loop.
 
@@ -769,6 +769,75 @@ class TestRecoveryResolutionTable:
             "phase_after": "voided",
             "command_id": "cmd-001",
             "order_id": "ord-001",
+        }
+        current = conn.execute(
+            "SELECT phase, shares, cost_basis_usd, order_status FROM position_current WHERE position_id = 'pos-001'"
+        ).fetchone()
+        assert current["phase"] == "voided"
+        assert Decimal(str(current["shares"])) == Decimal("0")
+        assert Decimal(str(current["cost_basis_usd"])) == Decimal("0")
+        assert current["order_status"] == "canceled"
+
+    def test_m5_local_orphan_acked_no_fill_terminalizes_and_resolves_finding(
+        self,
+        conn,
+        mock_client,
+    ):
+        from src.execution.exchange_reconcile import list_unresolved_findings, record_finding
+
+        _insert(conn, size=10.0)
+        _advance_to_acked(conn, venue_order_id="ord-001")
+        _seed_pending_entry_projection(conn)
+        _append_order_fact(conn, state="LIVE", matched_size="0", remaining_size="10")
+        finding = record_finding(
+            conn,
+            kind="local_orphan_order",
+            subject_id="ord-001",
+            context="ws_gap",
+            evidence={
+                "reason": "local_open_order_absent_from_exchange_open_orders",
+                "exchange_open_order_ids": [],
+                "trade_enumeration_available": True,
+            },
+            recorded_at="2026-04-26T00:06:00Z",
+        )
+        mock_client.get_order.return_value = {"orderID": "ord-001", "status": "CANCELED"}
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["local_orphan_no_fill_findings"] == {
+            "scanned": 1,
+            "advanced": 1,
+            "stayed": 0,
+            "errors": 0,
+        }
+        assert summary["terminal_order_facts"]["advanced"] == 1
+        assert _get_state(conn, "cmd-001") == "EXPIRED"
+        latest_fact = conn.execute(
+            """
+            SELECT state, remaining_size, matched_size, source
+              FROM venue_order_facts
+             WHERE command_id = 'cmd-001'
+             ORDER BY local_sequence DESC
+             LIMIT 1
+            """
+        ).fetchone()
+        assert dict(latest_fact) == {
+            "state": "CANCEL_CONFIRMED",
+            "remaining_size": "0",
+            "matched_size": "0",
+            "source": "REST",
+        }
+        assert [row.finding_id for row in list_unresolved_findings(conn)] == []
+        resolved = conn.execute(
+            "SELECT resolution, resolved_by FROM exchange_reconcile_findings WHERE finding_id = ?",
+            (finding.finding_id,),
+        ).fetchone()
+        assert dict(resolved) == {
+            "resolution": "command_recovery_terminal_no_fill",
+            "resolved_by": "src.execution.command_recovery",
         }
         current = conn.execute(
             "SELECT phase, shares, cost_basis_usd, order_status FROM position_current WHERE position_id = 'pos-001'"
