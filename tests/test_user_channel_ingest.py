@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sqlite3
 from datetime import datetime, timedelta, timezone
@@ -261,6 +262,14 @@ def _command_state(c) -> str:
     return c.execute("SELECT state FROM venue_commands WHERE command_id = 'cmd-ws'").fetchone()["state"]
 
 
+class _LockedConnection:
+    def execute(self, *args, **kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    def close(self):
+        pass
+
+
 def test_ws_message_parsed_to_order_fact(conn):
     result = _ingestor(conn).handle_message(_order_message())
 
@@ -294,6 +303,51 @@ def test_unmatched_order_event_is_deferred_not_thread_fatal(conn):
     }
     assert _rows(conn, "venue_order_facts") == []
     assert _command_state(conn) == "ACKED"
+
+
+def test_raw_trade_message_db_lock_defers_without_tearing_down_ws_reader(conn):
+    gaps = []
+    ingestor = PolymarketUserChannelIngestor(
+        adapter=object(),
+        condition_ids=["condition-ws"],
+        auth=WSAuth("key", "secret", "pass"),
+        conn_factory=lambda: _LockedConnection(),
+        own_connection=False,
+        on_gap=gaps.append,
+    )
+
+    result = asyncio.run(ingestor.handle_raw_message(json.dumps(_trade_message("CONFIRMED"))))
+
+    assert result == {
+        "reason": "ws_message_persistence_deferred_db_locked",
+        "family": "trade",
+        "condition_id": "condition-ws",
+        "m5_reconcile_required": True,
+    }
+    status = ws_gap_guard.status()
+    assert status.gap_reason == "ws_message_persistence_db_locked"
+    assert status.m5_reconcile_required is True
+    assert gaps[-1] == status
+    assert _rows(conn, "venue_trade_facts") == []
+    assert _rows(conn, "position_lots") == []
+    assert _command_state(conn) == "ACKED"
+
+
+def test_raw_message_non_lock_operational_error_remains_thread_fatal(conn):
+    class CorruptConnection:
+        def execute(self, *args, **kwargs):
+            raise sqlite3.OperationalError("no such table: venue_commands")
+
+    ingestor = PolymarketUserChannelIngestor(
+        adapter=object(),
+        condition_ids=["condition-ws"],
+        auth=WSAuth("key", "secret", "pass"),
+        conn_factory=lambda: CorruptConnection(),
+        own_connection=False,
+    )
+
+    with pytest.raises(sqlite3.OperationalError, match="no such table"):
+        asyncio.run(ingestor.handle_raw_message(json.dumps(_trade_message("CONFIRMED"))))
 
 
 def test_order_update_derives_remaining_from_original_minus_matched_when_size_absent(conn):

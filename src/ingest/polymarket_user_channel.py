@@ -16,6 +16,7 @@ import hashlib
 import json
 import logging
 import os
+import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
@@ -358,6 +359,10 @@ def _is_entry_buy_command(command: dict[str, Any]) -> bool:
     return str(command.get("intent_kind") or "").upper() == "ENTRY" and str(command.get("side") or "").upper() == "BUY"
 
 
+def _is_sqlite_locked(exc: BaseException) -> bool:
+    return isinstance(exc, sqlite3.OperationalError) and "database is locked" in str(exc).lower()
+
+
 class PolymarketUserChannelIngestor:
     def __init__(
         self,
@@ -480,7 +485,28 @@ class PolymarketUserChannelIngestor:
             message = json.loads(raw)
         else:
             message = dict(raw)
-        return self.handle_message(message)
+        try:
+            return self.handle_message(message)
+        except sqlite3.OperationalError as exc:
+            if not _is_sqlite_locked(exc):
+                raise
+            status = ws_gap_guard.record_gap(
+                "ws_message_persistence_db_locked",
+                subscription_state="DISCONNECTED",
+            )
+            self._emit_gap(status)
+            logger.warning(
+                "M3 user-channel deferred message persistence after sqlite lock: "
+                "family=%s condition_id=%s; preserving M5 latch",
+                _event_family(message) or _trade_status(message),
+                _condition_id(message),
+            )
+            return {
+                "reason": "ws_message_persistence_deferred_db_locked",
+                "family": _event_family(message),
+                "condition_id": _condition_id(message),
+                "m5_reconcile_required": status.m5_reconcile_required,
+            }
 
     def _record_subscribed_message(self, *, observed_at: datetime | None = None) -> WSStatus:
         status = ws_gap_guard.record_message(
