@@ -192,3 +192,14 @@ Track 3 (heartbeat consumer trace + SIGTERM forensic): F91 resolved AMBIGUOUS �
 | **F99** | Heartbeat write/read asymmetry: `check_daemon_heartbeat.py` + `check_forecast_live_ready.py` exist but are unscheduled; `healthcheck.py` does not grep any heartbeat JSON | SEV-2 | NEW (Run #15 T3) | `scripts/healthcheck.py` + `scripts/heartbeat_dispatcher.py` | Run #15 T3 | Run #15 T3 |
 | **F100** | `daemon-heartbeat-ingest.json` + `oracle_error_rates.heartbeat.json` have ZERO readers anywhere in src/ or scripts/ — pure disk churn | SEV-2 | NEW (Run #15 T3) | `src/ingest_main.py:170` + `src/state/paths.py:183` writers (orphan) | Run #15 T3 | Run #15 T3 |
 | **F101** | Schema drift across 5 heartbeat payloads (3/3/7/13/N fields, different key names) blocks generic staleness checker | SEV-3 | NEW (Run #15 T3) | needs `src/state/heartbeat_envelope.py` | Run #15 T3 | Run #15 T3 |
+
+## Run #15 Track 2 additions (F102–F104) + F48 status update
+
+| F#  | Title | Sev | Status | Owner | First seen | Last verified |
+|-----|-------|-----|--------|-------|------------|----------------|
+| F48 | monitor_refresh.py:1041 settlements DEAD-READ — 2nd pass | **SEV-1** | **HOT-FIX-SPEC** (Run #15 T2) — Run #14 1-liner insufficient (see F103); requires `forecasts.`-schema-qualifier + counter | `src/engine/monitor_refresh.py:1040-1086` | Run #11/13 | Run #15 T2 |
+| **F102** | `temp_persistence` table empty in trades.db (0), world.db (0); missing in forecasts.db — secondary DEAD-READ at `monitor_refresh.py:1064` blocks discount even after F48 §5 fix | **SEV-2** | **NEW (Run #15 T2)** HOT | `src/engine/monitor_refresh.py:1064` + repopulation pipeline | Run #15 T2 | Run #15 T2 |
+| **F103** | Run #14 Track B F48 fix (bare-name `settlements_v2` rename) is no-op — SQLite ATTACH name-resolution requires schema-qualifier in mixed-DB conns | **SEV-1** | **NEW (Run #15 T2)** META | `tools/lint/zeus_db_alias.py` (extend) | Run #15 T2 | Run #15 T2 |
+| **F104** | `PERSISTENCE_CHECK_DISABLED` warning never observed in logs despite permanent DEAD-READ — observability gap | SEV-3 | NEW (Run #15 T2) | `src/engine/monitor_refresh.py:1067` + log config | Run #15 T2 | Run #15 T2 |
+
+> See `RUN_15_track2_f48_hot_fix.md` for §5 hot-fix spec (Edits A–C), §6 antibody test, §7 Karachi 5/17 blast-radius re-assessment, and §8 full F102–F104 detail.
