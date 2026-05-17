@@ -506,7 +506,7 @@ def _refresh_ens_member_counting(
     _authority_verified = False
     if conn is not None and hasattr(conn, 'execute'):
         from src.calibration.store import get_pairs_for_bucket as _get_pairs
-        _cal_season = season_from_date(target_d, lat=city.lat)
+        _cal_season = season_from_date(target_d.isoformat(), lat=city.lat)
         _gate_metric = "high" if _position_metric_str == "high" else None  # hoisted (P2-fix5)
         try:
             _unverified_pairs = _get_pairs(
@@ -874,7 +874,7 @@ def _refresh_day0_observation(
     _authority_verified = False
     if conn is not None and hasattr(conn, 'execute'):
         from src.calibration.store import get_pairs_for_bucket as _get_pairs
-        _cal_season = season_from_date(target_d, lat=city.lat)
+        _cal_season = season_from_date(target_d.isoformat(), lat=city.lat)
         _gate_metric = "high" if _position_metric_str == "high" else None  # hoisted (P2-fix5)
         try:
             _unverified_pairs = _get_pairs(

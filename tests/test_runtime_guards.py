@@ -4391,7 +4391,13 @@ def test_monitor_ens_refresh_uses_executable_forecast_reader_for_ecmwf_open_data
     )
     monkeypatch.setattr(monitor_refresh, "get_calibrator", lambda *args, **kwargs: (None, 4))
     monkeypatch.setattr("src.calibration.store.get_pairs_for_bucket", lambda *args, **kwargs: [])
-    monkeypatch.setattr(monitor_refresh, "season_from_date", lambda *args, **kwargs: "MAM")
+
+    def _season_from_date(date_arg, **kwargs):
+        calls["season_arg"] = date_arg
+        assert isinstance(date_arg, str)
+        return "MAM"
+
+    monkeypatch.setattr(monitor_refresh, "season_from_date", _season_from_date)
     monkeypatch.setattr(
         monitor_refresh,
         "compute_alpha",
@@ -4414,6 +4420,7 @@ def test_monitor_ens_refresh_uses_executable_forecast_reader_for_ecmwf_open_data
     assert "period_extrema_members_adapter" in applied
     assert "forecast_source_role:entry_primary" in applied
     assert "alpha_posterior" in applied
+    assert calls["season_arg"] == "2026-04-01"
     assert getattr(position, monitor_refresh._MONITOR_PROBABILITY_FRESH_ATTR) is True
 
 
@@ -4828,7 +4835,13 @@ def test_day0_monitor_refresh_records_forecast_fallback_provenance(monkeypatch):
         ),
     )
     monkeypatch.setattr("src.calibration.store.get_pairs_for_bucket", lambda *args, **kwargs: [])
-    monkeypatch.setattr(monitor_refresh, "season_from_date", lambda *args, **kwargs: "MAM")
+
+    def _season_from_date(date_arg, **kwargs):
+        captured["season_arg"] = date_arg
+        assert isinstance(date_arg, str)
+        return "MAM"
+
+    monkeypatch.setattr(monitor_refresh, "season_from_date", _season_from_date)
     monkeypatch.setattr(
         monitor_refresh,
         "compute_alpha",
@@ -4849,6 +4862,7 @@ def test_day0_monitor_refresh_records_forecast_fallback_provenance(monkeypatch):
     assert "forecast_source_role:monitor_fallback" in applied
     assert "forecast_degradation:DEGRADED_FORECAST_FALLBACK" in applied
     assert "alpha_posterior" in applied
+    assert captured["season_arg"] == "2026-04-01"
 
 
 def test_day0_monitor_refresh_rejects_stale_observation_before_fetch(monkeypatch):
