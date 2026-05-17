@@ -1,6 +1,11 @@
-# Created: 2026-05-16
-# Last reused or audited: 2026-05-16
-# Authority basis: SCAFFOLD_F14_F16.md §K.8 v5 (migration tests a-f)
+# Lifecycle: created=2026-05-16; last_reviewed=2026-05-16; last_reused=never
+# Purpose: Coverage for scripts/migrations/202605_add_redeem_operator_required_state.py
+#   — row preservation, CHECK acceptance of new state, FK validity post-rebuild,
+#   re-run idempotency, FK violation triggers ROLLBACK, dry-run no-modify,
+#   user_version-only path for DBs without settlement_commands (PR #126
+#   review-fix from Codex P1 #2).
+# Reuse: Run on every PR touching the migration script or SCHEMA_VERSION
+#   bump logic. Authority basis: SCAFFOLD_F14_F16.md §K.8 v5 (tests a-f + g/h).
 
 from __future__ import annotations
 
@@ -216,3 +221,60 @@ def test_skip_missing_db(tmp_path: Path) -> None:
     db = tmp_path / "not-here.db"
     outcome = migration._migrate_one_db(db, dry_run=False)
     assert outcome["action"] == "skip_missing"
+
+
+def test_g_user_version_only_for_world_or_forecasts_db(tmp_path: Path) -> None:
+    """PR #126 review-fix (Codex P1 #2): a DB without settlement_commands
+    (i.e. world.db or forecasts.db) gets user_version bumped, not rebuild.
+    """
+    db = tmp_path / "world.db"
+    # Seed an empty DB with user_version=3 (NO settlement_commands table)
+    conn = sqlite3.connect(str(db))
+    try:
+        conn.execute("PRAGMA user_version = 3")
+        conn.commit()
+    finally:
+        conn.close()
+
+    outcome = migration._migrate_one_db(db, dry_run=False)
+    assert outcome["action"] == "user_version_only", outcome
+
+    conn = sqlite3.connect(str(db))
+    try:
+        v = conn.execute("PRAGMA user_version").fetchone()[0]
+        assert v == 4, f"user_version should be 4 post-bump, got {v}"
+    finally:
+        conn.close()
+
+    # Re-run is no-op
+    outcome2 = migration._migrate_one_db(db, dry_run=False)
+    assert outcome2["action"] == "user_version_only"
+    assert "no_op_user_version_already_4" in outcome2["details"]
+
+
+def test_h_existing_migrated_db_bumps_user_version_too(tmp_path: Path) -> None:
+    """Edge case: settlement_commands rebuilt but user_version somehow stale.
+
+    Migration on an already-CHECK-current DB still bumps user_version if behind.
+    """
+    db = tmp_path / "trade.db"
+    _seed_v1_db(db, with_row=False)
+    migration._migrate_one_db(db, dry_run=False)  # first run: full migrate
+    # Force user_version back to 3 (simulating a partial-state scenario)
+    conn = sqlite3.connect(str(db))
+    try:
+        conn.execute("PRAGMA user_version = 3")
+        conn.commit()
+    finally:
+        conn.close()
+
+    outcome = migration._migrate_one_db(db, dry_run=False)
+    assert outcome["action"] == "no_op_already_applied", outcome
+    assert "user_version_bumped_3_to_4" in outcome["details"], outcome["details"]
+
+    conn = sqlite3.connect(str(db))
+    try:
+        v = conn.execute("PRAGMA user_version").fetchone()[0]
+        assert v == 4
+    finally:
+        conn.close()

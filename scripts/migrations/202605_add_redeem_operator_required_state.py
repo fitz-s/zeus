@@ -1,7 +1,14 @@
 #!/usr/bin/env python3
-# Created: 2026-05-16
-# Last reused or audited: 2026-05-16
-# Authority basis: SCAFFOLD_F14_F16.md §K.8 v5 (post G2 round-4 PASS)
+# Lifecycle: created=2026-05-16; last_reviewed=2026-05-16; last_reused=never
+# Purpose: Add REDEEM_OPERATOR_REQUIRED to settlement_commands.state CHECK
+#   (SQLite cannot ALTER CHECK in place; rebuild via CREATE new + INSERT copy +
+#   DROP old + RENAME). Also bumps PRAGMA user_version to 4 on ALL canonical
+#   DBs (zeus_trades + zeus-live + zeus-world + zeus-forecasts) to satisfy
+#   src.main._startup_world_db_schema_ready_check() — PR #126 review-fix from
+#   Codex P1 #2 (without world+forecasts bump, daemon retries 5 min then fatal).
+# Reuse: Run as operator BEFORE deploying SCHEMA_VERSION=4 code. Daemon-stop
+#   prerequisite (fcntl.flock check on zeus-live.db). --dry-run flag for
+#   operator verification. Authority basis: SCAFFOLD_F14_F16.md §K.8 v5.
 #
 # Migration: add REDEEM_OPERATOR_REQUIRED to settlement_commands.state
 # CHECK constraint via SQLite table-rebuild pattern.
@@ -70,6 +77,9 @@ INDEXES = [
 ]
 
 
+NEW_SCHEMA_VERSION = 4
+
+
 def _is_already_applied(conn: sqlite3.Connection) -> bool:
     """Idempotency check: did this migration already run on this DB?"""
     row = conn.execute(
@@ -78,6 +88,33 @@ def _is_already_applied(conn: sqlite3.Connection) -> bool:
         (f"%{NEW_STATE}%",),
     ).fetchone()
     return row is not None
+
+
+def _has_settlement_commands_table(conn: sqlite3.Connection) -> bool:
+    row = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='settlement_commands'"
+    ).fetchone()
+    return row is not None
+
+
+def _bump_user_version(conn: sqlite3.Connection, target: int) -> str:
+    """For DBs that don't carry settlement_commands (world.db, forecasts.db)
+    we still need user_version to match the shared SCHEMA_VERSION sentinel,
+    because src.main._startup_world_db_schema_ready_check() compares
+    PRAGMA user_version on every canonical DB against SCHEMA_VERSION.
+
+    PR #126 review-fix (Codex P1 #2): bumping SCHEMA_VERSION on a
+    trade-ledger-only CHECK change would otherwise brick boot on world.db
+    + forecasts.db (still at v3) until operator manually bumped them.
+    """
+    cur = conn.execute("PRAGMA user_version").fetchone()
+    current = cur[0] if cur else 0
+    if current == target:
+        return f"no_op_user_version_already_{target}"
+    if current > target:
+        return f"no_op_user_version_higher_{current}"
+    conn.execute(f"PRAGMA user_version = {target}")
+    return f"user_version_bumped_{current}_to_{target}"
 
 
 def _check_db_lock_free(db_path: Path) -> None:
@@ -114,9 +151,37 @@ def _migrate_one_db(db_path: Path, *, dry_run: bool = False) -> dict:
 
     conn = sqlite3.connect(str(db_path))
     try:
+        # PR #126 review-fix (Codex P1 #2): DBs without settlement_commands
+        # (world.db, forecasts.db) still need PRAGMA user_version bumped
+        # because src.main._startup_world_db_schema_ready_check() compares
+        # user_version against the shared SCHEMA_VERSION sentinel.
+        if not _has_settlement_commands_table(conn):
+            if dry_run:
+                outcome["action"] = "dry_run_would_bump_user_version"
+                outcome["details"] = (
+                    f"No settlement_commands table; would bump user_version "
+                    f"to {NEW_SCHEMA_VERSION} only."
+                )
+                return outcome
+            result = _bump_user_version(conn, NEW_SCHEMA_VERSION)
+            conn.commit()
+            outcome["action"] = "user_version_only"
+            outcome["details"] = result
+            return outcome
+
         if _is_already_applied(conn):
+            # CHECK already current; still verify user_version is in sync.
+            if dry_run:
+                outcome["action"] = "dry_run_no_op_or_user_version_bump"
+                outcome["details"] = "CHECK already current; user_version may need bump only."
+                return outcome
+            result = _bump_user_version(conn, NEW_SCHEMA_VERSION)
+            conn.commit()
             outcome["action"] = "no_op_already_applied"
-            outcome["details"] = f"CHECK constraint already includes {NEW_STATE}"
+            outcome["details"] = (
+                f"CHECK constraint already includes {NEW_STATE}; "
+                f"user_version: {result}"
+            )
             return outcome
 
         if dry_run:
@@ -124,7 +189,8 @@ def _migrate_one_db(db_path: Path, *, dry_run: bool = False) -> dict:
             outcome["details"] = (
                 f"Would rebuild settlement_commands with new CHECK, "
                 f"preserve all rows, recreate {len(INDEXES)} indexes, "
-                f"run foreign_key_check pre-commit."
+                f"run foreign_key_check pre-commit, bump user_version to "
+                f"{NEW_SCHEMA_VERSION}."
             )
             return outcome
 
@@ -133,7 +199,11 @@ def _migrate_one_db(db_path: Path, *, dry_run: bool = False) -> dict:
 
         conn.execute("BEGIN IMMEDIATE TRANSACTION")
         try:
-            conn.executescript(NEW_CHECK)
+            # PR #126 review-fix (Copilot 3254021453): conn.executescript()
+            # in Python sqlite3 issues an implicit COMMIT before each script,
+            # breaking our outer BEGIN IMMEDIATE. Use conn.execute() for the
+            # single CREATE TABLE statement instead — no transaction collision.
+            conn.execute(NEW_CHECK.rstrip(";").rstrip())
             conn.execute(
                 "INSERT INTO settlement_commands_new SELECT * FROM settlement_commands"
             )
@@ -156,9 +226,17 @@ def _migrate_one_db(db_path: Path, *, dry_run: bool = False) -> dict:
             conn.execute("ROLLBACK")
             raise
 
+        # Bump user_version after CHECK rebuild + commit (outside transaction
+        # per SQLite PRAGMA semantics).
+        _bump_user_version(conn, NEW_SCHEMA_VERSION)
+        conn.commit()
+
         conn.execute("PRAGMA foreign_keys = ON")
         outcome["action"] = "migrated"
-        outcome["details"] = "Table rebuilt; CHECK includes new state; FKs verified."
+        outcome["details"] = (
+            f"Table rebuilt; CHECK includes new state; FKs verified; "
+            f"user_version bumped to {NEW_SCHEMA_VERSION}."
+        )
         return outcome
     finally:
         conn.close()
@@ -195,9 +273,15 @@ def main(argv: Iterable[str] | None = None) -> int:
     if args.db:
         targets = [Path(p).resolve() for p in args.db]
     else:
+        # PR #126 review-fix (Codex P1 #2): include world.db + forecasts.db
+        # in default targets so user_version sentinel stays in sync across
+        # all canonical DBs. Without these, _startup_world_db_schema_ready_check
+        # fatal-errors on existing deployments post-upgrade.
         targets = [
             repo_root / "state" / "zeus_trades.db",
             repo_root / "state" / "zeus-live.db",
+            repo_root / "state" / "zeus-world.db",
+            repo_root / "state" / "zeus-forecasts.db",
         ]
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")

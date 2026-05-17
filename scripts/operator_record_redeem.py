@@ -1,7 +1,14 @@
 #!/usr/bin/env python3
-# Created: 2026-05-16
-# Last reused or audited: 2026-05-16
-# Authority basis: SCAFFOLD_F14_F16.md §K.4 v5 (post G2 round-4 PASS)
+# Lifecycle: created=2026-05-16; last_reviewed=2026-05-16; last_reused=never
+# Purpose: Operator CLI to advance a REDEEM_OPERATOR_REQUIRED row to
+#   REDEEM_TX_HASHED after a manual Polymarket UI claim. Record-only — no
+#   web3 write, no signing, no gas. Closes the F14 cascade-liveness gap when
+#   PolymarketV2Adapter.redeem returns the REDEEM_DEFERRED_TO_R1 stub.
+# Reuse: Invoke ONLY after manual Polymarket UI claim has produced an on-chain
+#   tx_hash. NORMAL mode requires source state REDEEM_OPERATOR_REQUIRED;
+#   --force mode allows any non-CONFIRMED state except REDEEM_SUBMITTED (in-
+#   flight adapter window — double-redeem hazard) with mandatory --notes
+#   ≥10 chars. Authority basis: SCAFFOLD_F14_F16.md §K.4 v5.
 #
 # Operator CLI to record a Polymarket-UI-completed redeem against a
 # REDEEM_OPERATOR_REQUIRED row. Record-only: no web3 write, no signing,

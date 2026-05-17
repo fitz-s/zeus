@@ -179,11 +179,24 @@ def _harvester_cycle():
 
 @_scheduler_job("redeem_submitter")
 def _redeem_submitter_cycle() -> None:
-    """Poll settlement_commands for REDEEM_INTENT_CREATED rows + submit_redeem."""
+    """Poll settlement_commands for ALL _SUBMITTABLE_STATES rows + submit_redeem.
+
+    PR #126 review-fix (Codex P1 + Copilot 3254021478): poll the full
+    _SUBMITTABLE_STATES set (INTENT_CREATED + RETRYING), not just INTENT_CREATED.
+    Without RETRYING in the query, rows that hit an adapter exception once
+    and were durably moved to RETRYING by submit_redeem would never be
+    re-attempted.
+
+    PR #126 review-fix (Codex P1 + Copilot 3254021447/49): commit AFTER each
+    submit_redeem call. submit_redeem only commits when own_conn=True; the
+    poller passes conn=conn so own_conn=False; without an explicit commit
+    the state transitions roll back when conn closes → INTENT_CREATED rows
+    are re-processed every tick AND any real adapter tx_hash is not durably
+    anchored. Per-row commit gives partial-failure tolerance.
+    """
     from src.data.dual_run_lock import acquire_lock
     from src.execution.settlement_commands import (
-        SettlementState,
-        list_commands,
+        _SUBMITTABLE_STATES,
         submit_redeem,
     )
     from src.state.db import get_trade_connection
@@ -195,23 +208,44 @@ def _redeem_submitter_cycle() -> None:
             return
         conn = get_trade_connection(write_class="live")
         try:
-            rows = list_commands(conn, state=SettlementState.REDEEM_INTENT_CREATED)
+            # Poll ALL submittable states (INTENT_CREATED + RETRYING).
+            placeholders = ",".join("?" * len(_SUBMITTABLE_STATES))
+            state_values = tuple(s.value for s in _SUBMITTABLE_STATES)
+            rows = conn.execute(
+                f"""
+                SELECT command_id FROM settlement_commands
+                 WHERE state IN ({placeholders})
+                 ORDER BY requested_at, command_id
+                 LIMIT 32
+                """,
+                state_values,
+            ).fetchall()
             if not rows:
                 return
             adapter = PolymarketV2Adapter()
             submitted = 0
             failed = 0
-            for row in rows[:32]:  # LIMIT 32 per SCAFFOLD §C.1
+            for row in rows:  # already capped at 32 via SQL LIMIT
                 try:
                     result = submit_redeem(
                         row["command_id"], adapter, object(), conn=conn,
                     )
+                    conn.commit()  # durable per-row commit; transitions stick
                     submitted += 1
                     logger.info(
                         "redeem_submitter: command_id=%s state=%s",
                         row["command_id"], result.state.value,
                     )
                 except Exception as exc:  # noqa: BLE001 — fail-open per scheduler contract
+                    # On exception submit_redeem may have committed an intermediate
+                    # REDEEM_RETRYING via its own savepoint+commit (own_conn path
+                    # closed it); for own_conn=False we still rollback in-flight
+                    # uncommitted savepoints by closing the conn cleanly. Per-row
+                    # rollback isolates failures from successful prior rows.
+                    try:
+                        conn.rollback()
+                    except Exception:  # noqa: BLE001
+                        pass
                     failed += 1
                     logger.error(
                         "redeem_submitter: command_id=%s error=%s",

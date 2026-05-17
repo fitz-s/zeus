@@ -1,6 +1,11 @@
-# Created: 2026-05-16
-# Last reused or audited: 2026-05-16
-# Authority basis: SCAFFOLD_F14_F16.md §K.5 + §K.4 v5
+# Lifecycle: created=2026-05-16; last_reviewed=2026-05-16; last_reused=never
+# Purpose: Coverage for scripts/operator_record_redeem.py — NORMAL mode happy
+#   path, malformed-hash / wrong-state / zero-rows rejections, idempotency
+#   (same hash no-op, different hash reject), --force mode (overwrite +
+#   re-record after FAILED + SUBMITTED exclusion + notes ≥10 chars).
+# Reuse: Run on every PR touching scripts/operator_record_redeem.py or
+#   src/execution/settlement_commands.py._atomic_transition.
+#   Authority basis: SCAFFOLD_F14_F16.md §K.4 + §K.5 v5.
 
 from __future__ import annotations
 

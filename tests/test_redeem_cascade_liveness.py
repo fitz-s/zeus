@@ -1,6 +1,12 @@
-# Created: 2026-05-16
-# Last reused or audited: 2026-05-16
-# Authority basis: SCAFFOLD_F14_F16.md §K.5 + §K.3 v5
+# Lifecycle: created=2026-05-16; last_reviewed=2026-05-16; last_reused=never
+# Purpose: Regression coverage for F14 cascade-liveness fix — verifies
+#   submit_redeem stub-detect branch transitions to REDEEM_OPERATOR_REQUIRED
+#   (not REDEEM_REVIEW_REQUIRED catch-all), atomicity contract that
+#   logger.warning fires only on successful transition, and the
+#   _atomic_transition WHERE-state-guard primitive used by the operator CLI.
+# Reuse: Run on every PR touching src/execution/settlement_commands.py state
+#   machine or the submit_redeem function body. Authority basis:
+#   docs/operations/task_2026-05-16_deep_alignment_audit/SCAFFOLD_F14_F16.md §K.5 + §K.3 v5.
 #
 # F14 redeem cascade liveness — verifies submit_redeem's stub-detect branch
 # routes to REDEEM_OPERATOR_REQUIRED (NOT REDEEM_REVIEW_REQUIRED) when the

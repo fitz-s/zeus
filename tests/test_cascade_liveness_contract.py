@@ -1,6 +1,11 @@
-# Created: 2026-05-16
-# Last reused or audited: 2026-05-16
-# Authority basis: docs/operations/task_2026-05-16_deep_alignment_audit/SCAFFOLD_F14_F16.md §G.3 + §K.6 v5
+# Lifecycle: created=2026-05-16; last_reviewed=2026-05-16; last_reused=never
+# Purpose: Antibody test for architecture/cascade_liveness_contract.yaml; enforces
+#   that every state-machine table with *_INTENT_CREATED rows has a registered
+#   APScheduler poller in src/main.py, and that every terminal_states_with_operator_action
+#   entry has a transition INTO it from src/ (ast walk over _transition / _atomic_transition).
+# Reuse: Run on every PR touching src/main.py scheduler block, src/execution/settlement_commands.py
+#   state machine, or architecture/cascade_liveness_contract.yaml. Authority basis:
+#   docs/operations/task_2026-05-16_deep_alignment_audit/SCAFFOLD_F14_F16.md §G.3 + §K.6 v5.
 #
 # Cascade-liveness antibody: enforces architecture/cascade_liveness_contract.yaml.
 # Every state-machine entry MUST have:
