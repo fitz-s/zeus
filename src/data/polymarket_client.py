@@ -4,6 +4,7 @@
 #                  + 2026-05-13 collateral_ledger singleton conn lifecycle remediation
 #                  + docs/operations/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md
 #                  + 2026-05-17 public CLOB HTTP reuse for live opening_hunt backpressure.
+#                  + 2026-05-17 riskguard/read-only bankroll lock remediation.
 """Polymarket CLOB API client. Spec §6.4.
 
 Limit orders ONLY. Auth via macOS Keychain.
@@ -664,39 +665,35 @@ class PolymarketClient:
             })
         return positions
 
-    def get_balance(self) -> float:
-        """Get pUSD balance through the Z4 CollateralLedger.
+    def get_wallet_balance(self) -> float:
+        """Return pUSD wallet balance without writing local collateral state.
 
-        Connection discipline (2026-05-10 leak fix): get_trade_connection_with_world()
-        ATTACHes zeus-world.db; conn must be closed after use. Prior to this fix
-        conn was never closed, producing +2 zeus-world.db fds per bankroll_provider
-        tick (one per riskguard tick = 60s accumulation rate).
+        RiskGuard and entry sizing need a single scalar from venue wallet truth.
+        They must not open a trade DB write transaction just to refresh a
+        collateral snapshot; the persistent CollateralLedger owner maintains
+        snapshots for executor preflight.
+        """
+        adapter = self._ensure_v2_adapter()
+        direct = getattr(adapter, "get_pusd_balance_micro", None)
+        if callable(direct):
+            return float(direct()) / 1_000_000
+        payload = dict(adapter.get_collateral_payload())
+        return float(payload.get("pusd_balance_micro", 0) or 0) / 1_000_000
+
+    def get_balance(self) -> float:
+        """Compatibility wrapper for pUSD wallet balance.
+
+        This is intentionally read-only. Collateral snapshot persistence is
+        owned by daemon startup / heartbeat through the process-wide
+        CollateralLedger, not by scalar bankroll consumers.
         """
         warnings.warn(
             "PolymarketClient.get_balance() is a compatibility wrapper; "
-            "live balance queries route through CollateralLedger.",
+            "live collateral accounting routes through CollateralLedger.",
             DeprecationWarning,
             stacklevel=2,
         )
-        # 2026-05-13 remediation: this compat path MUST NOT publish to the
-        # global ledger slot. Prior to this fix, `configure_global_ledger(ledger)`
-        # ran here with a `ledger` holding a transient `conn` that the
-        # `finally` block closes immediately, leaving the singleton
-        # unusable (`sqlite3.ProgrammingError: Cannot operate on a closed
-        # database`). Global-singleton lifecycle is owned by daemon startup
-        # in `src/main.py::_startup_wallet_check`; the compat wrapper now
-        # only computes the snapshot for legacy callers.
-        from src.state.collateral_ledger import CollateralLedger
-        from src.state.db import get_trade_connection_with_world
-
-        conn = get_trade_connection_with_world()
-        try:
-            ledger = CollateralLedger(conn)
-            snapshot = ledger.refresh(self._ensure_v2_adapter())
-            conn.commit()
-            return snapshot.pusd_balance_micro / 1_000_000
-        finally:
-            conn.close()
+        return self.get_wallet_balance()
 
     def redeem(self, condition_id: str) -> Optional[dict]:
         """Redeem winning shares for USDC after settlement.

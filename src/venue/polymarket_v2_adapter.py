@@ -1,5 +1,5 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-05-15
+# Last reused/audited: 2026-05-17
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/Z2.yaml
 #                  + docs/operations/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md
 """Polymarket CLOB V2 adapter.
@@ -152,6 +152,8 @@ class PolymarketV2AdapterProtocol(Protocol):
     def get_trades(self, since: Optional[str] = None) -> list[TradeFact]: ...
 
     def get_positions(self) -> list[PositionFact]: ...
+
+    def get_pusd_balance_micro(self) -> int: ...
 
     def get_collateral_payload(self) -> dict[str, Any]: ...
 
@@ -467,6 +469,15 @@ class PolymarketV2Adapter:
         raw = get_positions() or []
         return [PositionFact(raw=dict(item)) for item in raw]
 
+    def get_pusd_balance_micro(self) -> int:
+        """Return pUSD wallet balance without touching local trade-state DBs."""
+
+        raw = self._collateral_balance_allowance_raw()
+        balance = _micro_int_or_none(raw.get("balance"))
+        if balance is None:
+            raise V2AdapterError("balance allowance response missing balance")
+        return balance
+
     def get_collateral_payload(self) -> dict[str, Any]:
         """Return SDK-derived collateral facts for CollateralLedger.refresh().
 
@@ -474,30 +485,7 @@ class PolymarketV2Adapter:
         ledger receives plain dictionaries and never depends on SDK types.
         """
 
-        client = self._sdk_client()
-        get_balance_allowance = getattr(client, "get_balance_allowance", None)
-        if not callable(get_balance_allowance):
-            raise V2AdapterError("SDK client does not expose get_balance_allowance")
-        try:
-            from py_clob_client_v2.clob_types import AssetType, BalanceAllowanceParams
-
-            params = BalanceAllowanceParams(
-                asset_type=AssetType.COLLATERAL,
-                signature_type=self.signature_type,
-            )
-        except Exception:
-            params = SimpleNamespace(
-                asset_type="COLLATERAL",
-                signature_type=self.signature_type,
-            )
-        update_balance_allowance = getattr(client, "update_balance_allowance", None)
-        if callable(update_balance_allowance):
-            update_balance_allowance(params)
-        raw = get_balance_allowance(params)
-        if not isinstance(raw, dict):
-            raw = dict(raw)
-        if raw.get("balance") is None:
-            raise V2AdapterError("balance allowance response missing balance")
+        raw = self._collateral_balance_allowance_raw()
         pusd_allowance_raw = raw.get("allowance")
         allowance_int = _micro_int_or_none(pusd_allowance_raw)
         authority_tier = "CHAIN"
@@ -558,6 +546,35 @@ class PolymarketV2Adapter:
             "signature_type": self.signature_type,
             "pusd_allowance_source": allowance_source,
         }
+
+    def _collateral_balance_allowance_raw(self) -> dict[str, Any]:
+        """Read the CLOB collateral balance/allowance surface once."""
+
+        client = self._sdk_client()
+        get_balance_allowance = getattr(client, "get_balance_allowance", None)
+        if not callable(get_balance_allowance):
+            raise V2AdapterError("SDK client does not expose get_balance_allowance")
+        try:
+            from py_clob_client_v2.clob_types import AssetType, BalanceAllowanceParams
+
+            params = BalanceAllowanceParams(
+                asset_type=AssetType.COLLATERAL,
+                signature_type=self.signature_type,
+            )
+        except Exception:
+            params = SimpleNamespace(
+                asset_type="COLLATERAL",
+                signature_type=self.signature_type,
+            )
+        update_balance_allowance = getattr(client, "update_balance_allowance", None)
+        if callable(update_balance_allowance):
+            update_balance_allowance(params)
+        raw = get_balance_allowance(params)
+        if not isinstance(raw, dict):
+            raw = dict(raw)
+        if raw.get("balance") is None:
+            raise V2AdapterError("balance allowance response missing balance")
+        return raw
 
     def _chain_collateral_allowance_micro(self) -> int | None:
         if not self.polygon_rpc_url:

@@ -603,28 +603,13 @@ def test_fx_classification_enum_required_at_redemption(monkeypatch):
 
 
 
-def test_polymarket_client_get_balance_persists_snapshot_without_global_side_effect(tmp_path, monkeypatch):
-    """Compat wrapper persists a fresh snapshot to the trade DB but MUST NOT
-    publish to the global ledger slot.
-
-    2026-05-13 contract change: the deprecated `PolymarketClient.get_balance()`
-    wrapper previously did `configure_global_ledger(ledger)` while still
-    owning the conn — its `finally: conn.close()` then closed the conn and
-    poisoned the singleton (sqlite3.ProgrammingError on every preflight).
-    Global-singleton lifecycle is owned exclusively by daemon startup.
-    The compat path now only computes and persists the snapshot.
-    """
+def test_polymarket_client_get_balance_reads_wallet_without_trade_db_write(monkeypatch):
+    """Scalar bankroll readers must not contend for the trade DB write lock."""
     from src.data.polymarket_client import PolymarketClient
     from src.state.collateral_ledger import configure_global_ledger, get_global_ledger
-    from src.state.db import init_schema
 
-    db_path = tmp_path / "trade.db"
-
-    def get_conn():
-        db = sqlite3.connect(db_path)
-        db.row_factory = sqlite3.Row
-        init_schema(db)
-        return db
+    def locked_trade_conn():
+        raise sqlite3.OperationalError("database is locked")
 
     payload = {
         "pusd_balance_micro": 7_000_000,
@@ -633,23 +618,12 @@ def test_polymarket_client_get_balance_persists_snapshot_without_global_side_eff
         "ctf_token_allowances_units": {YES_TOKEN: _ctf_units(0.01)},
         "authority_tier": "CHAIN",
     }
-    monkeypatch.setattr("src.state.db.get_trade_connection_with_world", get_conn)
+    monkeypatch.setattr("src.state.db.get_trade_connection_with_world", locked_trade_conn)
     monkeypatch.setattr(PolymarketClient, "_ensure_v2_adapter", lambda self: FakeCollateralAdapter(payload=payload))
-    # Pre-condition: no global ledger set.
     configure_global_ledger(None)
     try:
         assert PolymarketClient().get_balance() == 7.0
-        # Contract: get_balance() does NOT install the global singleton.
         assert get_global_ledger() is None
-        # Contract: snapshot persisted to the trade DB. Verify via a fresh
-        # conn (the wrapper closes its own conn).
-        fresh_conn = get_conn()
-        try:
-            fresh = CollateralLedger(fresh_conn).snapshot()
-            assert fresh.pusd_balance_micro == 7_000_000
-            assert fresh.ctf_token_balances[YES_TOKEN] == _ctf_units(0.01)
-        finally:
-            fresh_conn.close()
     finally:
         configure_global_ledger(None)
 
@@ -1001,37 +975,18 @@ def test_executor_sell_rejection_release_requires_successful_terminal_append(con
 
 
 
-def test_polymarket_client_get_balance_commits_snapshot_to_trade_db(tmp_path, monkeypatch):
+def test_polymarket_client_get_wallet_balance_prefers_direct_adapter_balance(monkeypatch):
     from src.data.polymarket_client import PolymarketClient
-    from src.state.collateral_ledger import configure_global_ledger
-    from src.state.db import init_schema
 
-    db_path = tmp_path / "trade.db"
+    class DirectBalanceAdapter:
+        def get_pusd_balance_micro(self):
+            return 8_000_000
 
-    def get_conn():
-        db = sqlite3.connect(db_path)
-        db.row_factory = sqlite3.Row
-        init_schema(db)
-        return db
+        def get_collateral_payload(self):
+            raise AssertionError("direct balance path should not load collateral payload")
 
-    payload = {
-        "pusd_balance_micro": 8_000_000,
-        "pusd_allowance_micro": 8_000_000,
-        "ctf_token_balances_units": {YES_TOKEN: _ctf_units(0.01)},
-        "ctf_token_allowances_units": {YES_TOKEN: _ctf_units(0.01)},
-        "authority_tier": "CHAIN",
-    }
-    monkeypatch.setattr("src.state.db.get_trade_connection_with_world", get_conn)
-    monkeypatch.setattr(PolymarketClient, "_ensure_v2_adapter", lambda self: FakeCollateralAdapter(payload=payload))
-    try:
-        assert PolymarketClient().get_balance() == 8.0
-        fresh_conn = get_conn()
-        try:
-            assert CollateralLedger(fresh_conn).snapshot().pusd_balance_micro == 8_000_000
-        finally:
-            fresh_conn.close()
-    finally:
-        configure_global_ledger(None)
+    monkeypatch.setattr(PolymarketClient, "_ensure_v2_adapter", lambda self: DirectBalanceAdapter())
+    assert PolymarketClient().get_wallet_balance() == 8.0
 
 
 def test_polymarket_client_redeem_fails_closed_before_adapter_when_q_fx_open(monkeypatch):
