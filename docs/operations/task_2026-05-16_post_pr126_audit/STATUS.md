@@ -32,3 +32,36 @@ Method: targeted probes per RUN_7_findings.md §1 (no full re-audit of older Fs)
 
 ## New findings (Run #7)
 See `RUN_7_findings.md` and `FINDINGS_REFERENCE_v2.md` for F25–F27.
+
+## Run #8 deltas (2026-05-17)
+
+See `RUN_8_resolution_sweep.md` and `RUN_8_findings.md`. Every open finding from both v1 and v2 indices now carries either a definitive verdict, a 1-shot probe to settle, or an explicit accept-with-justification.
+
+| v2.F# | Run #7 status        | Run #8 verdict                        | Action class      |
+|-------|----------------------|---------------------------------------|-------------------|
+| F2    | WORSE                | NEEDS-CODE (PR-A, 1-line kwarg)       | post-Karachi      |
+| F5    | OPEN-acknowledged    | RESOLVED (architectural by design)    | docs-only         |
+| F17   | FIXED-held           | RESOLVED (trapdoor gate CLOSED)       | none              |
+| F21   | OPEN                 | NEEDS-CODE (PR-I)                     | post-Karachi      |
+| F22   | OPEN-acknowledged    | NEEDS-CODE (PR-J, scripts/ triage)    | post-Karachi      |
+| F23   | OPEN                 | NEEDS-CODE (PR-L, runner build)       | post-Karachi      |
+| F25   | NEW                  | ROOT CAUSE PROVEN (31 ctors miss DSI) | post-Karachi PR-A.1 |
+| F26   | NEW                  | NEEDS-CODE (PR-M, conftest import)    | post-Karachi      |
+| F27   | NEW                  | DESIGN ARTIFACT (intentional)         | docs in Karachi matrix |
+
+| v1.F# (legacy-numbered) | Run #8 verdict                                                |
+|-------------------------|---------------------------------------------------------------|
+| v1.F1 boot-wiring       | NEEDS-CODE post-Karachi (DOCUMENTED-DEFERRAL per main.py:1134) |
+| v1.F8 sentinel string   | ACTIVE INCIDENT (Karachi position c30f28a5-d4e); runbook noted |
+| v1.F11 plist KeepAlive  | NEEDS-OPERATOR pre-Karachi (5 min, idempotent)                |
+| v1.F15 settlements gap  | CONFIRMED 1583-row gap; PR-E post-Karachi                     |
+| v1.F19 market_events    | CONFIRMED 3-DB shadow; PR-J post-Karachi (with F31 reader trace) |
+| v1.F20 ensemble_snap    | 116 dead rows in zeus-world; PR-H post-Karachi                |
+
+**Karachi 5/17 verdict**: GO. See `KARACHI_5_17_SHIP_DECISION_MATRIX.md`.
+
+### New findings introduced in Run #8
+F28 (META: dual-index numbering inconsistency — partially mitigated this run via cross-walk table in RUN_8_resolution_sweep.md)
+F29 (REDEEM_REVIEW_REQUIRED not excluded from UNIQUE INDEX — sibling of v2.F27; clarification pending)
+F30 (migration runner does not enforce last_reviewed header drift — Cat-N hygiene)
+F31 (market_events_v2 reader-side audit gap — deferred from v1.F19)

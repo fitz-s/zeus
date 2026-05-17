@@ -307,3 +307,32 @@ Per Run #3 meta-audit (3rd run is meta-audit per SKILL.md): split seed `E. Settl
 - **PR-merge skepticism is a yielding stance.** Operator brief explicitly said "be skeptical of PR-126." F27 surfaced from that stance. Going forward, when ANY PR lands between runs, treat it as adversarial-review surface, not passive baseline.
 - **Three-finding minimum for new-package bootstrap.** Run #7 produced exactly 3 new findings while bootstrapping a new task package. The 3:1 ratio (3 findings : 1 package) is healthy. If a baseline-shift run produces 0 new findings, question whether the package bootstrap was warranted.
 - **Run #7 took ~50% more context than Run #6 due to baseline-shift sweep overhead.** The PR-merge probe (#13) is information-dense; budget for it explicitly.
+
+
+---
+
+## Run #8 deltas (2026-05-17) — resolution-sweep run, new Cat-N introduced
+
+### Yield ladder updates (Run #8)
+
+- **Cat-K promoted to PERMANENT HIGH** (4 consecutive runs producing SEV-1/SEV-0; Run #8 confirmed F27 verdict-flip and surfaced F29 sibling).
+- **NEW Cat-N (audit-package-coherence anti-pattern)** introduced at MEDIUM. F28 first instance (v1↔v2 numbering divergence affecting the audit's own deliverables). F30 second instance (migration runner does not enforce `Last reused/audited:` header drift — same family: audit artifact hygiene without enforcement).
+- **Cat-L stays MEDIUM** (no new two-truth finding this run).
+- **Final ladder after Run #8**: HIGH = A, C, E1, F, G, H, I, K. MEDIUM = B, E2, L, M, N. LOW = D. J = active.
+
+### High-signal probes added (Run #8)
+
+16. **[K] in-code-comment-as-design-intent reader** — when a finding is being graded as SEV-1+ on a code site authored in a recent PR, MUST read the FULL comment block (5 lines above + 5 lines below) AND the PR description before final grading. F27 was reversed from SEV-1 to "intentional design artifact" only after reading the in-code NOTE the PR-126 author left explaining REDEEM_OPERATOR_REQUIRED. Pattern: `sed -n "$((LINE-10)),$((LINE+10))p" <file>` on every SEV-1+ code site before commit.
+17. **[A] constructor-omission AST scan** — when a NULL-fact-column finding has equal-count overlap across multiple downstream tables (Run #7 probe #14), confirm the suspected upstream writer by AST-listing EVERY constructor call of the dataclass and counting which kwargs are present/absent. Caught F25 root cause (31/71 EdgeDecision ctors omit `decision_snapshot_id=`). Implementation: `python -c "import ast; …"` over the suspect module, group by kwarg presence.
+18. **[N] auditor-package self-consistency check** — at run closeout, list ALL F-numbers cited in the run's deliverables + diff against the canonical reference file. If divergence > 1 finding, add a numbering-reconciliation block before declaring closeout complete. Caught F28 mid-run when v2.F1 ≠ v1.F1 collision surfaced.
+
+### Anti-heuristics refined (Run #8)
+
+- **Reverse-grading rule**: any finding graded SEV-1+ in a prior run that survives to the current run MUST be re-probed with probe #16 (in-code comment reader) before being re-promoted. Saves bogus carry-overs. F27 was the test case.
+- **Resolution-sweep token-economy pattern**: when the run goal is "drive ALL open findings to verdict" rather than "discover new findings", front-load all probes into ≤5 large terminal commands using `printf '==MARK==\n'` sentinels between sections. Read each result file once. Synthesize all deliverables in a single doc-creation pass. Saves ~60% context vs per-finding probe roundtripping. Validated this run.
+
+### Meta-audit-of-the-audit (Run #8)
+
+- **The auditor's own artifacts can manifest the defects being audited.** F28 (dual-index numbering) caught the auditor (me) replicating the same dual-numbering inconsistency in the resolution sweep itself, half-way through drafting cards. Fix: introduce probe #18 as a closeout gate.
+- **Resolution-sweep runs are higher-leverage than discovery runs for converting attention into decisions.** Run #8 produced 0 new SEV-0/SEV-1 findings but generated 22 actionable cards + 1 ship matrix. Discovery-mode runs MUST be interleaved with resolution-sweep runs; running discovery 4× in a row inflates the open-findings backlog without ever giving operator a decisive close.
+- **Per-finding "next probe" annotation should be mandatory.** Every open finding card now carries either a definitive verdict or an explicit "1-shot probe to settle". Operator can ask "show me the 3 cheapest probes" and get a deterministic answer. Promote this to skill template.

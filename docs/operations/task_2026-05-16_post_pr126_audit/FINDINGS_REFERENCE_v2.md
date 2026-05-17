@@ -5,6 +5,10 @@ Predecessor (frozen, SUPERSEDED for master-index reading): `../task_2026-05-16_d
 
 Severity scale: SEV-0 (ship blocker / money loss / silent corruption), SEV-1 (high — likely data integrity, masking risk), SEV-2 (medium — process/discipline), SEV-3 (low — hygiene).
 
+## Numbering reconciliation (added Run #8)
+
+v1 (FROZEN brief, `../task_2026-05-16_deep_alignment_audit/`) and v2 (this doc) DO NOT share F-numbering — same number can refer to entirely different defects. This document remains canonical for the post-PR-126 package; cross-walk to v1 numbers is in `RUN_8_resolution_sweep.md`. Going forward, all new findings receive a globally-unique F-number with no renumbering. See F28 in `RUN_8_findings.md` for the meta-defect.
+
 | F#  | Title                                                                  | Sev   | Status                  | Owner module                 | First seen | Last verified |
 |-----|------------------------------------------------------------------------|-------|-------------------------|------------------------------|------------|---------------|
 | F1  | ZEUS_FORECASTS_DB legacy path                                          | SEV-1 | FIXED                   | src/state/db.py              | Run #1     | Run #7        |
@@ -34,6 +38,10 @@ Severity scale: SEV-0 (ship blocker / money loss / silent corruption), SEV-1 (hi
 | **F25** | **Triple-NULL systemic snapshot-write failure (3 fact tables)**     | **SEV-0** | **NEW**             | src/selection/, src/opportunity/, src/signal/ | Run #7 | Run #7 |
 | **F26** | **Two-truth SQLITE_CONNECT_ALLOWLIST divergence**                   | **SEV-2** | **NEW**             | src/state/db_writer_lock.py + tests/conftest.py | Run #7 | Run #7 |
 | **F27** | **REDEEM_OPERATOR_REQUIRED unique-index lockout (PR-126 review gap)** | **SEV-1** | **NEW**             | src/state/db.py + src/execution/settlement_commands.py | Run #7 | Run #7 |
+| **F28** | **META: dual-index numbering inconsistency v1↔v2**                  | **SEV-2** | **NEW (Run #8)**    | docs/operations/task_2026-05-16_*                       | Run #8 | Run #8 |
+| **F29** | **REDEEM_REVIEW_REQUIRED not excluded from UNIQUE INDEX (sibling of F27)** | **SEV-2** | **NEW (Run #8)** | src/execution/settlement_commands.py                    | Run #8 | Run #8 |
+| **F30** | **Migration runner does not enforce last_reviewed header drift**    | **SEV-3** | **NEW (Run #8)**    | scripts/migrations/                                     | Run #8 | Run #8 |
+| **F31** | **market_events_v2 reader-side audit gap (deferred from v1.F19)**   | **SEV-2** | **NEW (Run #8)**    | src/, scripts/                                          | Run #8 | Run #8 |
 
 ## Carry-forward note
 Old `FINDINGS_REFERENCE.md` in the predecessor package now bears a "SUPERSEDED" header pointing here. Run-narrative files (RUN_1…RUN_6_findings.md) remain canonical for their own narrative content.
