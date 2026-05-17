@@ -132,7 +132,7 @@ def test_chain_token_protocol_rotation_and_failure_resets_to_empty():
     )
 
 
-def test_invalid_heartbeat_id_is_immediate_lease_loss_and_next_tick_restarts_chain():
+def test_invalid_heartbeat_id_restarts_chain_in_same_tick():
     adapter = FakeHeartbeatAdapter([
         HeartbeatAck(ok=True, raw={"heartbeat_id": "id-1"}),
         RuntimeError("PolyApiException: Invalid Heartbeat ID"),
@@ -141,26 +141,23 @@ def test_invalid_heartbeat_id_is_immediate_lease_loss_and_next_tick_restarts_cha
     supervisor = HeartbeatSupervisor(adapter, cadence_seconds=5)
 
     assert _run(supervisor.run_once()).health is HeartbeatHealth.HEALTHY
-    lost = _run(supervisor.run_once())
-
-    assert lost.health is HeartbeatHealth.LOST
-    assert lost.consecutive_failures == 1
-    assert lost.heartbeat_id == ""
-    assert supervisor.gate_for_order_type("GTC") is False
-
     recovered = _run(supervisor.run_once())
 
     assert recovered.health is HeartbeatHealth.HEALTHY
+    assert recovered.consecutive_failures == 0
+    assert recovered.heartbeat_id == "id-2"
+    assert supervisor.gate_for_order_type("GTC") is True
     assert adapter.heartbeat_ids == ["", "id-1", ""]
 
 
-def test_invalid_heartbeat_id_with_venue_hint_recovers_in_same_tick():
-    """RELATIONSHIP: venue invalid-id hint -> heartbeat lease owner.
+def test_invalid_heartbeat_id_error_body_is_not_treated_as_canonical_hint():
+    """RELATIONSHIP: venue invalid-id body -> heartbeat lease owner.
 
     A read timeout can leave the client holding the previous heartbeat id even
-    though the venue processed and rotated the token. Polymarket returns the
-    current token on the next 400; using it only on the next tick extends the
-    lease gap long enough to cancel resting GTC/GTD orders.
+    though the venue processed and rotated the token. Polymarket's 400 body
+    echoes the rejected id, so retrying that value extends the lease gap long
+    enough to cancel resting GTC/GTD orders. Recovery must restart the chain
+    with the empty bootstrap id in the same tick.
     """
     adapter = FakeHeartbeatAdapter([
         RuntimeError(
@@ -182,7 +179,32 @@ def test_invalid_heartbeat_id_with_venue_hint_recovers_in_same_tick():
     assert recovered.consecutive_failures == 0
     assert recovered.heartbeat_id == "server-next"
     assert supervisor.gate_for_order_type("GTC") is True
-    assert adapter.heartbeat_ids == ["persisted-stale", "server-current"]
+    assert adapter.heartbeat_ids == ["persisted-stale", ""]
+
+
+def test_invalid_heartbeat_id_empty_chain_recovery_failure_loses_lease():
+    adapter = FakeHeartbeatAdapter([
+        RuntimeError(
+            "PolyApiException[status_code=400, "
+            "error_message={'heartbeat_id': 'stale-id', "
+            "'error_msg': 'Invalid Heartbeat ID'}]"
+        ),
+        RuntimeError("empty-chain retry timed out"),
+    ])
+    supervisor = HeartbeatSupervisor(
+        adapter,
+        cadence_seconds=5,
+        initial_heartbeat_id="stale-id",
+    )
+
+    lost = _run(supervisor.run_once())
+
+    assert lost.health is HeartbeatHealth.LOST
+    assert lost.consecutive_failures == 1
+    assert lost.heartbeat_id == ""
+    assert "empty-chain recovery failed" in (lost.last_error or "")
+    assert supervisor.gate_for_order_type("GTC") is False
+    assert adapter.heartbeat_ids == ["stale-id", ""]
 
 
 def test_overlapping_heartbeat_ticks_do_not_reuse_same_heartbeat_id():

@@ -13,7 +13,6 @@ import inspect
 import json
 import logging
 import os
-import re
 import threading
 import time
 from dataclasses import dataclass
@@ -142,18 +141,6 @@ def _parse_utc(value: Any) -> datetime | None:
 
 def _is_invalid_heartbeat_id_error(exc: Exception | str) -> bool:
     return "Invalid Heartbeat ID" in str(exc)
-
-
-def _heartbeat_id_hint_from_error(exc: Exception | str) -> str:
-    text = str(exc)
-    for pattern in (
-        r"['\"]heartbeat_id['\"]\s*:\s*['\"]([^'\"]+)['\"]",
-        r"heartbeat_id=([0-9a-fA-F-]{16,})",
-    ):
-        match = re.search(pattern, text)
-        if match:
-            return match.group(1)
-    return ""
 
 
 def write_heartbeat_keeper_status(
@@ -363,22 +350,20 @@ class HeartbeatSupervisor:
                 self._heartbeat_id = await self._post_heartbeat_once(self._heartbeat_id)
                 self.record_success()
             except Exception as exc:  # fail closed, surface through status/tombstone
-                # Invalid-heartbeat errors include the venue's current canonical
-                # token. Retry that hint in the same tick; waiting for the next
-                # tick can turn one timeout into a 10-15s lease gap and cancel
-                # every resting GTC/GTD order.
-                hinted_id = _heartbeat_id_hint_from_error(exc) if _is_invalid_heartbeat_id_error(exc) else ""
-                if hinted_id:
+                # Polymarket echoes the rejected heartbeat_id in the 400 body.
+                # Treating that value as a fresh hint can pin the lease owner to
+                # a known-bad token until a later timeout resets the chain, which
+                # is long enough for the venue to cancel resting GTC/GTD orders.
+                if _is_invalid_heartbeat_id_error(exc):
                     try:
-                        self._heartbeat_id = await self._post_heartbeat_once(hinted_id)
+                        self._heartbeat_id = await self._post_heartbeat_once("")
                         self.record_success()
                         return self.status()
                     except Exception as retry_exc:
-                        exc = retry_exc
-                if _is_invalid_heartbeat_id_error(exc):
-                    self._heartbeat_id = _heartbeat_id_hint_from_error(exc)
-                else:
-                    self._heartbeat_id = ""  # reset chain so next tick re-registers
+                        exc = RuntimeError(
+                            f"Invalid Heartbeat ID; empty-chain recovery failed: {retry_exc}"
+                        )
+                self._heartbeat_id = ""  # reset chain so next tick re-registers
                 self.record_failure(exc)
         finally:
             self._run_once_lock.release()
