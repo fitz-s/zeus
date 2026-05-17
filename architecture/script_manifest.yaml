@@ -526,16 +526,19 @@ scripts:
     do_not_use_when: "Before task #53 implementation and dry-run evidence exist."
     canonical_command: DO_NOT_RUN
     delete_policy: retain_until_implemented
+    # K1-batch2 fix 2026-05-17: writes ensemble_snapshots_v2 / source_run to forecasts DB.
     read_targets: [external_tigge_grib_extracts]
-    write_targets: []
+    write_targets: [state/zeus-forecasts.db]
     dry_run_default: true
     apply_flag: null
-    target_db: null
+    target_db: state/zeus-forecasts.db
     external_inputs: [TIGGE_GRIB_CACHE]
     dangerous_if_run: false
     promotion_barrier: "Requires task #53 implementation, dry-run evidence, and reviewer approval."
-    required_helpers: [src.state.db.get_world_connection]
-    required_tests: [tests/test_data_rebuild_relationships.py]
+    # K1-batch2 fix 2026-05-17: now uses ZEUS_FORECASTS_DB_PATH / get_forecasts_connection
+    # (ensemble_snapshots_v2 + source_run are forecast_class post-K1 split).
+    required_helpers: [src.state.db.get_forecasts_connection]
+    required_tests: [tests/test_data_rebuild_relationships.py, tests/test_k1_reader_isolation_batch2.py]
   investigate_ecmwf_bias.py: {class: diagnostic_report_writer, write_targets: [state/ecmwf_bias_investigation.json, stdout]}
   live_readiness_check.py:
     class: enforcement
@@ -596,8 +599,11 @@ scripts:
     apply_flag: "--no-dry-run"
     target_db: "--db"
     required_tests: [tests/test_calibration_bins_canonical.py, tests/test_replay_time_provenance.py]
-  rebuild_calibration_pairs_v2.py: {class: repair, dangerous_if_run: true, dry_run_default: true, apply_flag: "--no-dry-run --force", target_db: explicit_isolated_staging_db, read_targets: [state/zeus-world.db, explicit_isolated_staging_db], write_targets: [explicit_isolated_staging_db], unguarded_write_rationale: "Phase 7A metric-aware v2 rebuild; dry-run may inspect canonical world DB read-only, but write mode fails closed unless --db names an isolated staging DB and refuses canonical state/zeus-world.db.", promotion_barrier: "Isolated calibration_pairs_v2 output is not live calibration authority and cannot be promoted without separate operator-approved promotion evidence.", required_helpers: [".zeus/rebuild_lock.do_not_run_during_live (sentinel check at module load)", "scripts/rebuild_calibration_pairs_v2.py::_resolve_isolated_calibration_write_db_path"], required_tests: [tests/test_rebuild_live_sentinel.py, tests/test_sqlite_busy_timeout.py]}
-  evaluate_calibration_transfer_oos.py: {class: repair, canonical_command: "python3 scripts/evaluate_calibration_transfer_oos.py --dry-run", dangerous_if_run: true, dry_run_default: true, apply_flag: "--no-dry-run", target_db: state/zeus-world.db, write_targets: [state/zeus-world.db], unguarded_write_rationale: "Writes validated_calibration_transfers evidence rows only with --no-dry-run; guarded by daemon-lock precondition but still mutates world DB.", promotion_barrier: "OOS evidence rows cannot authorize live calibration transfer without policy gate flag and operator review.", required_tests: [tests/test_evaluate_calibration_transfer_oos.py]}
+  # K1-batch2 fix 2026-05-17: dry-run reads ZEUS_FORECASTS_DB_PATH (forecast_class);
+  # write mode still requires explicit isolated staging DB.
+  rebuild_calibration_pairs_v2.py: {class: repair, dangerous_if_run: true, dry_run_default: true, apply_flag: "--no-dry-run --force", target_db: explicit_isolated_staging_db, read_targets: [state/zeus-forecasts.db, explicit_isolated_staging_db], write_targets: [explicit_isolated_staging_db], unguarded_write_rationale: "Phase 7A metric-aware v2 rebuild; dry-run reads from forecast-class DB (ZEUS_FORECASTS_DB_PATH) read-only, but write mode fails closed unless --db names an isolated staging DB and refuses canonical state/zeus-forecasts.db.", promotion_barrier: "Isolated calibration_pairs_v2 output is not live calibration authority and cannot be promoted without separate operator-approved promotion evidence.", required_helpers: [".zeus/rebuild_lock.do_not_run_during_live (sentinel check at module load)", "scripts/rebuild_calibration_pairs_v2.py::_resolve_isolated_calibration_write_db_path"], required_tests: [tests/test_rebuild_live_sentinel.py, tests/test_sqlite_busy_timeout.py]}
+  # K1 fix F41 2026-05-17: reads forecast_class data via get_forecasts_connection_with_world().
+  evaluate_calibration_transfer_oos.py: {class: repair, canonical_command: "python3 scripts/evaluate_calibration_transfer_oos.py --dry-run", dangerous_if_run: true, dry_run_default: true, apply_flag: "--no-dry-run", target_db: state/zeus-forecasts.db, read_targets: [state/zeus-forecasts.db], write_targets: [state/zeus-forecasts.db], unguarded_write_rationale: "Writes validated_calibration_transfers evidence rows only with --no-dry-run; reads forecast_class data via get_forecasts_connection_with_world(); guarded by daemon-lock precondition.", promotion_barrier: "OOS evidence rows cannot authorize live calibration transfer without policy gate flag and operator review.", required_tests: [tests/test_evaluate_calibration_transfer_oos.py, tests/test_k1_reader_isolation.py]}
   rebuild_settlements.py:
     class: repair
     module_owner: scripts
@@ -728,7 +734,12 @@ scripts:
     reason: "Cron-safe source-contract transition controller that reuses the source watch, computes deterministic conversion/date scopes, keeps affected cities quarantined, writes durable receipts under a cron lock, emits mini-model execution contracts/reports with locator/write-scope safety, and can execute Phase B same-provider WU station conversions only behind explicit apply/force plus evidence gates."
     promotion_barrier: "Default is plan/dry-run. Apply mode is limited to auto-confirmed same-provider WU station changes with exact station metadata, scoped DB commands, backup/DB path evidence, verification, and complete release evidence refs; no live venue placement."
   oracle_snapshot_listener.py: {class: runtime_support, canonical_command: "python3 scripts/oracle_snapshot_listener.py", reason: "Cron 10:00 UTC — captures WU/HKO API responses at PM settlement window for oracle error rate calibration. Writes to raw/oracle_shadow_snapshots/{city}/{date}.json."}
-  bridge_oracle_to_calibration.py: {class: config_writer, canonical_command: "python3 scripts/bridge_oracle_to_calibration.py", write_targets: [data/oracle_error_rates.json], target_db: data/oracle_error_rates.json, external_inputs: [raw/oracle_shadow_snapshots, state/zeus-world.db], apply_flag: implicit, unguarded_write_rationale: "Existing bridge writes the oracle error-rate data artifact directly; output is evidence/config input and must be reviewed before promotion.", reason: "Compares oracle shadow snapshots vs PM settlements, updates data/oracle_error_rates.json."}
+  # K1-batch2 fix 2026-05-17: now reads source_run + readiness_state from zeus-forecasts.db
+  # (forecast_class post-K1 split). Registered here per map-maintenance contract.
+  data_chain_monitor.sh: {class: diagnostic, canonical_command: "bash scripts/data_chain_monitor.sh", dangerous_if_run: false, dry_run_default: false, read_targets: [state/zeus-forecasts.db], write_targets: [stdout], target_db: state/zeus-forecasts.db, required_tests: [tests/test_k1_reader_isolation_batch2.py], reason: "Operator pipeline health check. Reads source_run + readiness_state from zeus-forecasts.db (forecast_class). Emits human-readable status to stdout; no writes."}
+  # K1 fix F40 2026-05-17: reads settlements via get_forecasts_connection_with_world()
+  # (settlements are forecast_class post-K1 split). external_inputs updated accordingly.
+  bridge_oracle_to_calibration.py: {class: config_writer, canonical_command: "python3 scripts/bridge_oracle_to_calibration.py", write_targets: [data/oracle_error_rates.json], target_db: data/oracle_error_rates.json, external_inputs: [raw/oracle_shadow_snapshots, state/zeus-forecasts.db], apply_flag: implicit, unguarded_write_rationale: "Existing bridge writes the oracle error-rate data artifact directly; output is evidence/config input and must be reviewed before promotion.", reason: "Compares oracle shadow snapshots vs PM settlements via get_forecasts_connection_with_world(), updates data/oracle_error_rates.json.", required_tests: [tests/test_k1_reader_isolation.py]}
   code_review_graph_mcp_readonly.py: {class: utility, canonical_command: DO_NOT_RUN, reason: Zeus-safe MCP facade exposing Code Review Graph review/search tools without source-writing apply_refactor}
   edge_observation_weekly.py: {class: diagnostic_report_writer, canonical_command: "python3 scripts/edge_observation_weekly.py [--end-date YYYY-MM-DD] [--window-days 7] [--n-windows 4] [--db-path PATH] [--report-out PATH] [--stdout]", write_targets: [stdout, "docs/operations/edge_observation/weekly_<date>.json"], external_inputs: [state/zeus-shared.db], reason: "EDGE_OBSERVATION packet BATCH 3 weekly drift-assertion runner. Wires src/state/edge_observation.py compute_realized_edge_per_strategy + detect_alpha_decay → JSON report under docs/operations/edge_observation/. Read-only DB access; derived-context output (NOT authority). Exit 1 if any strategy_key has alpha_decay_detected (cron-friendly). Per round3_verdict.md §1 #2 + ULTIMATE_PLAN.md L297-301."}
   attribution_drift_weekly.py: {class: diagnostic_report_writer, canonical_command: "python3 scripts/attribution_drift_weekly.py [--end-date YYYY-MM-DD] [--window-days 7] [--drift-rate-threshold 0.05] [--db-path PATH] [--report-out PATH] [--stdout]", write_targets: [stdout, "docs/operations/attribution_drift/weekly_<date>.json"], external_inputs: [state/zeus-shared.db], reason: "ATTRIBUTION_DRIFT packet BATCH 3 weekly drift-rate runner. Wires src/state/attribution_drift.py detect_drifts_in_window + compute_drift_rate_per_strategy → JSON report with per-strategy drift_rate + per-position drift_detected evidence. Read-only DB access; derived-context output (NOT authority). Exit 1 if any strategy drift_rate exceeds --drift-rate-threshold (default 0.05; cron-friendly). Per round3_verdict.md §1 #2 + ULTIMATE_PLAN.md L305-308."}

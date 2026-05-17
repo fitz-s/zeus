@@ -320,5 +320,57 @@ def main(argv: Iterable[str] | None = None) -> int:
     return overall_exit
 
 
+def up(conn: sqlite3.Connection) -> None:
+    """Runner-framework entry point (def up(conn) contract).
+
+    Delegates to the idempotent per-connection logic already encoded in this
+    migration.  The runner passes an open connection; we apply the CHECK-
+    constraint rebuild and user_version bump if not yet done.
+
+    Note: the runner seeds this migration name into _migrations_applied at
+    ledger-create time (_BOOTSTRAP_APPLIED) so up() is never called on a DB
+    that already had the migration applied via the standalone main() path.
+    This wrapper is a conformance shim for future runner invocations and for
+    new-DB provisioning paths.
+    """
+    if _is_already_applied(conn):
+        _bump_user_version(conn, NEW_SCHEMA_VERSION)
+        conn.commit()
+        return
+
+    if not _has_settlement_commands_table(conn):
+        _bump_user_version(conn, NEW_SCHEMA_VERSION)
+        conn.commit()
+        return
+
+    # Full table-rebuild path (mirrors _migrate_one_db without the Path/lock
+    # logic — the runner owns connection lifecycle and lock acquisition).
+    conn.execute("PRAGMA foreign_keys = OFF")
+    conn.execute("BEGIN IMMEDIATE TRANSACTION")
+    try:
+        conn.execute(NEW_CHECK.rstrip(";").rstrip())
+        conn.execute(
+            "INSERT INTO settlement_commands_new SELECT * FROM settlement_commands"
+        )
+        conn.execute("DROP TABLE settlement_commands")
+        conn.execute("ALTER TABLE settlement_commands_new RENAME TO settlement_commands")
+        for idx_sql in INDEXES:
+            conn.execute(idx_sql)
+        violations = list(conn.execute("PRAGMA foreign_key_check"))
+        if violations:
+            conn.execute("ROLLBACK")
+            raise RuntimeError(
+                f"foreign_key_check returned {len(violations)} violations: "
+                f"{violations[:5]!r}"
+            )
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+    _bump_user_version(conn, NEW_SCHEMA_VERSION)
+    conn.commit()
+    conn.execute("PRAGMA foreign_keys = ON")
+
+
 if __name__ == "__main__":
     sys.exit(main())

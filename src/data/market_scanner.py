@@ -644,8 +644,19 @@ def _persist_market_events_to_db(results: list[dict], db_path: str | Path | None
                             created_at,
                         ),
                     )
-                    inserted += cursor.rowcount
+                    if cursor.rowcount == 1:
+                        inserted += 1
+                    else:
+                        logger.debug(
+                            "market_events_v2 INSERT ignored for condition_id=%s",
+                            condition_id,
+                        )
             conn.commit()
+            if inserted == 0 and results:
+                logger.warning(
+                    "market_scanner: 0 rows inserted out of %d events — possible constraint storm",
+                    len(results),
+                )
         finally:
             conn.close()
     except Exception as exc:

@@ -941,6 +941,9 @@ class OrderResult:
     # Set to the CommandState enum string after the ack phase resolves.
     # None means the result was rejected before any command was persisted.
     command_state: Optional[str] = None
+    # F7: FK to venue_commands.command_id — set when a command row was persisted
+    # (post-persist path). None for pre-persist rejections.
+    command_id: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -2293,6 +2296,7 @@ def execute_exit_order(
                 intent_id=intent.intent_id,
                 idempotency_key=intent.idempotency_key,
                 venue_status=str(result.get("status") or ""),
+                command_id=command_id,  # F7: propagate so log_execution_fact records FK
             )
         if not order_id:
             try:
@@ -2321,6 +2325,7 @@ def execute_exit_order(
                 intent_id=intent.intent_id,
                 idempotency_key=intent.idempotency_key,
                 venue_status=str(result.get("status") or ""),
+                command_id=command_id,  # F7: propagate so log_execution_fact records FK
             )
 
         # SUBMIT_ACKED — order placed successfully
@@ -2377,6 +2382,7 @@ def execute_exit_order(
             order_role="exit",
             intent_id=intent.intent_id,
             external_order_id=order_id,
+            command_id=command_id,  # F7: FK to venue_commands row
             venue_status=str(result.get("status") or "placed"),
             idempotency_key=idem.value,
             command_state="ACKED",  # P1.S5 INV-32: materialize_position gates on this
@@ -3159,6 +3165,7 @@ def _live_order(
                 order_role="entry",
                 venue_status=str(result.get("status") or ""),
                 idempotency_key=idem.value,
+                command_id=command_id,  # F7: propagate so log_execution_fact records FK
             )
         if not order_id:
             try:
@@ -3186,6 +3193,7 @@ def _live_order(
                 order_role="entry",
                 venue_status=str(result.get("status") or ""),
                 idempotency_key=idem.value,
+                command_id=command_id,  # F7: propagate so log_execution_fact records FK
             )
         # SUBMIT_ACKED
         try:
@@ -3245,6 +3253,7 @@ def _live_order(
             venue_status=str(result.get("status") or "placed"),
             idempotency_key=idem.value,
             command_state="ACKED",  # P1.S5 INV-32: materialize_position gates on this
+            command_id=command_id,  # F7: FK to venue_commands row
         )
         try:
             alert_trade(

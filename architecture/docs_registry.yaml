@@ -63,6 +63,7 @@ allowed_coverage_scopes:
 - exact
 - descendants
 parent_coverage_allowed_patterns:
+- docs/reference/legacy/
 - docs/operations/task_*/
 - docs/operations/*_package_*/
 - docs/operations/*_observation/
