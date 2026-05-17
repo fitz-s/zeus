@@ -3,6 +3,9 @@
 # Created: 2026-05-17
 # Last reused or audited: 2026-05-17
 # Authority basis: docs/operations/task_2026-05-17_reference_authority_docs_phase/PLAN.md Part B
+# Lifecycle: created=2026-05-17; last_reviewed=2026-05-17; last_reused=never
+# Purpose: live verify reality_contracts YAML against Polymarket CLOB + Open-Meteo; renew last_verified on PASS
+# Reuse: re-run with --dry-run before --apply; check VERIFIER_REPORT.md for prior UNMAPPED contracts
 
 Reads config/reality_contracts/*.yaml, calls live APIs (read-only),
 updates last_verified on PASS, flags failures in VERIFIER_REPORT.md.
@@ -83,20 +86,58 @@ def fetch_json(url: str, label: str) -> tuple[bool, Any, str]:
 
 
 def fetch_ws_reachable(url: str) -> tuple[bool, str]:
-    """Verify WebSocket endpoint is DNS-resolvable and TCP-connectable (no full WS handshake)."""
-    import socket
-    # wss://ws-subscriptions-clob.polymarket.com/ws/market -> host port 443
-    m = re.match(r"wss?://([^/]+)", url)
-    if not m:
-        return False, f"Cannot parse host from {url}"
-    host = m.group(1)
-    port = 443
+    """Verify WebSocket endpoint via real WS handshake + subscribe frame."""
+    import asyncio
+
+    async def _try_ws() -> tuple[bool, str]:
+        try:
+            import websockets  # type: ignore[import-untyped]
+            subscribe_payload = json.dumps({"type": "market", "assets_ids": []})
+            async with websockets.connect(url, open_timeout=5, close_timeout=2) as ws:
+                await ws.send(subscribe_payload)
+                try:
+                    await asyncio.wait_for(ws.recv(), timeout=5)
+                except asyncio.TimeoutError:
+                    # No response frame within 5 s — handshake itself succeeded
+                    pass
+            return True, f"WS handshake succeeded for {url}"
+        except ImportError:
+            # Fallback: raw HTTP/1.1 Upgrade handshake via urllib + socket
+            import socket, ssl, base64, os
+            m = re.match(r"wss?://([^/:]+)(?::(\d+))?(/.*)?", url)
+            if not m:
+                return False, f"Cannot parse host from {url}"
+            host = m.group(1)
+            port = int(m.group(2) or 443)
+            path = m.group(3) or "/"
+            nonce = base64.b64encode(os.urandom(16)).decode()
+            request = (
+                f"GET {path} HTTP/1.1\r\n"
+                f"Host: {host}\r\n"
+                f"Upgrade: websocket\r\n"
+                f"Connection: Upgrade\r\n"
+                f"Sec-WebSocket-Key: {nonce}\r\n"
+                f"Sec-WebSocket-Version: 13\r\n\r\n"
+            )
+            try:
+                raw_sock = socket.create_connection((host, port), timeout=10)
+                ctx = ssl.create_default_context()
+                tls_sock = ctx.wrap_socket(raw_sock, server_hostname=host)
+                tls_sock.sendall(request.encode())
+                resp = tls_sock.recv(4096).decode("utf-8", errors="replace")
+                tls_sock.close()
+                if "101" in resp.split("\r\n", 1)[0]:
+                    return True, f"HTTP 101 Switching Protocols for {url}"
+                return False, f"No 101 response — got: {resp.splitlines()[0]}"
+            except Exception as e:
+                return False, f"Upgrade handshake failed for {url}: {e}"
+        except Exception as e:
+            return False, f"WS handshake failed for {url}: {e}"
+
     try:
-        sock = socket.create_connection((host, port), timeout=REQUEST_TIMEOUT)
-        sock.close()
-        return True, f"TCP connection to {host}:{port} succeeded"
+        return asyncio.run(_try_ws())
     except Exception as e:
-        return False, f"TCP connection to {host}:{port} failed: {e}"
+        return False, f"WS check error: {e}"
 
 
 # ---------------------------------------------------------------------------
@@ -104,14 +145,26 @@ def fetch_ws_reachable(url: str) -> tuple[bool, str]:
 # ---------------------------------------------------------------------------
 
 def verify_noaa_time_scale(contract: dict[str, Any]) -> tuple[bool, str]:
-    """Verify Open-Meteo still returns UTC timestamps."""
+    """Verify Open-Meteo still returns UTC timestamps with proper suffix."""
     ok, data, msg = fetch_json(OPENMETEO_URL, "NOAA_TIME_SCALE")
     if not ok:
         return False, f"Open-Meteo unreachable: {msg}"
-    tz = (data or {}).get("timezone", "MISSING")
-    if tz in ("UTC", "GMT"):
-        return True, f"Open-Meteo timezone={tz!r} — UTC confirmed"
-    return False, f"Open-Meteo timezone={tz!r} — expected UTC or GMT"
+    data = data or {}
+    tz = data.get("timezone", "MISSING")
+    tz_ok = tz in ("UTC", "GMT")
+    if not tz_ok:
+        return False, f"Open-Meteo timezone={tz!r} — expected UTC or GMT"
+    # Check time string suffixes (first 10 samples)
+    hourly = data.get("hourly", {})
+    time_list = hourly.get("time", [])[:10]
+    bad_times = [t for t in time_list if not (t.endswith("Z") or t.endswith("+00:00"))]
+    if bad_times:
+        return False, (
+            f"timezone OK (={tz!r}) but suffix MISSING on {len(bad_times)} sample(s): "
+            f"{bad_times[:3]!r}"
+        )
+    suffix_status = "suffix OK" if time_list else "no time samples to check"
+    return True, f"Open-Meteo timezone={tz!r} — timezone OK + {suffix_status}"
 
 
 def verify_websocket_required(contract: dict[str, Any]) -> tuple[bool, str]:
@@ -122,9 +175,9 @@ def verify_websocket_required(contract: dict[str, Any]) -> tuple[bool, str]:
     return ok, msg
 
 
-def verify_unmapped(contract: dict[str, Any], reason: str) -> tuple[bool, str]:
+def verify_unmapped(contract: dict[str, Any], reason: str) -> tuple[bool | None, str]:
     """Mark contract as requiring operator verification."""
-    return None, f"UNMAPPED_NEEDS_OPERATOR: {reason}"  # type: ignore[return-value]
+    return None, f"UNMAPPED_NEEDS_OPERATOR: {reason}"
 
 
 # ---------------------------------------------------------------------------
