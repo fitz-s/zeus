@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 # Lifecycle: created=2026-05-14; last_reviewed=2026-05-17; last_reused=never
+# Created: 2026-05-14
+# Last reused or audited: 2026-05-17
+# Authority basis: architecture/script_manifest.yaml; forecast-live launchd runtime process contract.
 # Purpose: Read-only forecast-live authority-chain verifier; reports highest evidence-backed completion state + blockers.
 # Reuse: When operators or agents need to verify forecast-live readiness without starting any daemon or mutating state.
 """Read-only forecast-live authority-chain verifier.
@@ -15,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shlex
 import sqlite3
 import subprocess
 import sys
@@ -49,6 +53,7 @@ class CompletionState(StrEnum):
 @dataclass(frozen=True)
 class TrackConfig:
     label: str
+    source_track: str
     forecast_track: str
     job_name: str
     temperature_metric: str
@@ -57,12 +62,14 @@ class TrackConfig:
 TRACKS: tuple[TrackConfig, ...] = (
     TrackConfig(
         label="HIGH",
+        source_track="mx2t6_high",
         forecast_track="mx2t6_high_full_horizon",
         job_name="forecast_live_opendata_mx2t6_high",
         temperature_metric="high",
     ),
     TrackConfig(
         label="LOW",
+        source_track="mn2t6_low",
         forecast_track="mn2t6_low_full_horizon",
         job_name="forecast_live_opendata_mn2t6_low",
         temperature_metric="low",
@@ -87,6 +94,8 @@ class TrackReport:
     source_run: dict[str, Any] | None
     coverage: dict[str, Any] | None
     readiness: dict[str, Any] | None
+    expected_source_cycle: dict[str, Any]
+    readiness_summary: dict[str, Any]
 
 
 @dataclass(frozen=True)
@@ -161,6 +170,27 @@ def _latest_job_run(conn: sqlite3.Connection, job_name: str) -> dict[str, Any] |
     )
 
 
+def _job_run_for_source_run(
+    conn: sqlite3.Connection,
+    *,
+    job_name: str,
+    source_run_id: str,
+) -> dict[str, Any] | None:
+    return _row(
+        conn.execute(
+            """
+            SELECT *
+            FROM job_run
+            WHERE job_name = ?
+              AND source_run_id = ?
+            ORDER BY scheduled_for DESC, recorded_at DESC
+            LIMIT 1
+            """,
+            (job_name, source_run_id),
+        ).fetchone()
+    )
+
+
 def _latest_source_run(conn: sqlite3.Connection, source_id: str, track: str) -> dict[str, Any] | None:
     return _row(
         conn.execute(
@@ -172,6 +202,20 @@ def _latest_source_run(conn: sqlite3.Connection, source_id: str, track: str) -> 
             LIMIT 1
             """,
             (source_id, track),
+        ).fetchone()
+    )
+
+
+def _source_run_by_id(conn: sqlite3.Connection, source_run_id: str) -> dict[str, Any] | None:
+    return _row(
+        conn.execute(
+            """
+            SELECT *
+            FROM source_run
+            WHERE source_run_id = ?
+            LIMIT 1
+            """,
+            (source_run_id,),
         ).fetchone()
     )
 
@@ -199,6 +243,37 @@ def _latest_coverage(
     )
 
 
+def _latest_coverage_for_source_run(
+    conn: sqlite3.Connection,
+    *,
+    source_id: str,
+    source_run_id: str,
+    track: str,
+    temperature_metric: str,
+    now_utc: datetime,
+) -> dict[str, Any] | None:
+    return _row(
+        conn.execute(
+            """
+            SELECT *
+            FROM source_run_coverage
+            WHERE source_id = ?
+              AND source_transport = ?
+              AND source_run_id = ?
+              AND track = ?
+              AND temperature_metric = ?
+              AND completeness_status = 'COMPLETE'
+              AND readiness_status = 'LIVE_ELIGIBLE'
+              AND expires_at IS NOT NULL
+              AND expires_at > ?
+            ORDER BY computed_at DESC, recorded_at DESC
+            LIMIT 1
+            """,
+            (source_id, SOURCE_TRANSPORT, source_run_id, track, temperature_metric, now_utc.isoformat()),
+        ).fetchone()
+    )
+
+
 def _latest_readiness(
     conn: sqlite3.Connection,
     source_id: str,
@@ -222,6 +297,117 @@ def _latest_readiness(
     )
 
 
+def _latest_readiness_for_source_run(
+    conn: sqlite3.Connection,
+    *,
+    source_id: str,
+    source_run_id: str,
+    track: str,
+    temperature_metric: str,
+    now_utc: datetime,
+) -> dict[str, Any] | None:
+    return _row(
+        conn.execute(
+            """
+            SELECT *
+            FROM readiness_state
+            WHERE source_id = ?
+              AND source_run_id = ?
+              AND temperature_metric = ?
+              AND track = ?
+              AND strategy_key = ?
+              AND status = 'LIVE_ELIGIBLE'
+              AND expires_at IS NOT NULL
+              AND expires_at > ?
+            ORDER BY computed_at DESC, recorded_at DESC
+            LIMIT 1
+            """,
+            (
+                source_id,
+                source_run_id,
+                temperature_metric,
+                track,
+                PRODUCER_READINESS_STRATEGY_KEY,
+                now_utc.isoformat(),
+            ),
+        ).fetchone()
+    )
+
+
+def _readiness_summary_for_source_run(
+    conn: sqlite3.Connection,
+    *,
+    source_id: str,
+    source_run_id: str,
+    track: str,
+    temperature_metric: str,
+    now_utc: datetime,
+) -> dict[str, Any]:
+    row = conn.execute(
+        """
+        SELECT
+          COUNT(*) AS total_count,
+          SUM(CASE WHEN status = 'LIVE_ELIGIBLE' THEN 1 ELSE 0 END) AS live_eligible_count,
+          SUM(CASE WHEN status = 'LIVE_ELIGIBLE'
+                    AND expires_at IS NOT NULL
+                    AND expires_at > ?
+                   THEN 1 ELSE 0 END) AS live_eligible_current_count,
+          SUM(CASE WHEN status != 'LIVE_ELIGIBLE' THEN 1 ELSE 0 END) AS blocked_count
+        FROM readiness_state
+        WHERE source_id = ?
+          AND source_run_id = ?
+          AND temperature_metric = ?
+          AND track = ?
+          AND strategy_key = ?
+        """,
+        (
+            now_utc.isoformat(),
+            source_id,
+            source_run_id,
+            temperature_metric,
+            track,
+            PRODUCER_READINESS_STRATEGY_KEY,
+        ),
+    ).fetchone()
+    return {
+        "total_count": int(row["total_count"] or 0),
+        "live_eligible_count": int(row["live_eligible_count"] or 0),
+        "live_eligible_current_count": int(row["live_eligible_current_count"] or 0),
+        "blocked_count": int(row["blocked_count"] or 0),
+    }
+
+
+def _expected_source_cycle(config: TrackConfig, now_utc: datetime) -> dict[str, Any]:
+    from src.data.ecmwf_open_data import STEP_HOURS
+    from src.data.release_calendar import select_source_run_for_target_horizon
+
+    decision, metadata = select_source_run_for_target_horizon(
+        now_utc=now_utc,
+        source_id=SOURCE_ID,
+        track=config.source_track,
+        required_max_step_hours=max(STEP_HOURS),
+    )
+    selected_cycle = metadata.get("selected_cycle_time")
+    expected_source_run_id = None
+    if isinstance(selected_cycle, datetime):
+        selected_cycle_utc = selected_cycle.astimezone(timezone.utc)
+        expected_source_run_id = (
+            f"{SOURCE_ID}:{config.source_track}:"
+            f"{selected_cycle_utc.date().isoformat()}T{selected_cycle_utc.hour:02d}Z"
+        )
+        selected_cycle = selected_cycle_utc.isoformat()
+    next_safe_fetch_at = metadata.get("next_safe_fetch_at")
+    if isinstance(next_safe_fetch_at, datetime):
+        next_safe_fetch_at = next_safe_fetch_at.astimezone(timezone.utc).isoformat()
+    return {
+        "decision": getattr(decision, "value", str(decision)),
+        "selected_cycle_time": selected_cycle,
+        "next_safe_fetch_at": next_safe_fetch_at,
+        "expected_source_run_id": expected_source_run_id,
+        "metadata": metadata,
+    }
+
+
 def _json_obj(value: object) -> dict[str, Any]:
     if isinstance(value, dict):
         return value
@@ -242,52 +428,88 @@ def _not_expired(value: str | None, now_utc: datetime) -> bool:
 def _evaluate_track(conn: sqlite3.Connection, config: TrackConfig, now_utc: datetime) -> TrackReport:
     blockers: list[str] = []
     prefix = config.label
-    job_run = _latest_job_run(conn, config.job_name)
-    source_run = _latest_source_run(conn, SOURCE_ID, config.forecast_track)
-    coverage = _latest_coverage(conn, SOURCE_ID, config.forecast_track, config.temperature_metric)
-    readiness = _latest_readiness(conn, SOURCE_ID, config.forecast_track, config.temperature_metric)
+    expected_cycle = _expected_source_cycle(config, now_utc)
+    expected_source_run_id = expected_cycle.get("expected_source_run_id")
+    job_run = None
+    source_run = None
+    coverage = None
+    readiness = None
+    readiness_summary: dict[str, Any] = {}
+
+    if not isinstance(expected_source_run_id, str) or not expected_source_run_id:
+        blockers.append(f"{prefix}_LATEST_SAFE_SOURCE_RUN_UNRESOLVED:{expected_cycle.get('decision')}")
+        job_run = _latest_job_run(conn, config.job_name)
+        source_run = _latest_source_run(conn, SOURCE_ID, config.forecast_track)
+        coverage = _latest_coverage(conn, SOURCE_ID, config.forecast_track, config.temperature_metric)
+        readiness = _latest_readiness(conn, SOURCE_ID, config.forecast_track, config.temperature_metric)
+    else:
+        job_run = _job_run_for_source_run(
+            conn,
+            job_name=config.job_name,
+            source_run_id=expected_source_run_id,
+        )
+        if job_run is None:
+            blockers.append(f"{prefix}_LATEST_SAFE_SOURCE_RUN_MISSING:{expected_source_run_id}")
+            job_run = _latest_job_run(conn, config.job_name)
+        source_run = _source_run_by_id(conn, expected_source_run_id)
+        coverage = _latest_coverage_for_source_run(
+            conn,
+            source_id=SOURCE_ID,
+            source_run_id=expected_source_run_id,
+            track=config.forecast_track,
+            temperature_metric=config.temperature_metric,
+            now_utc=now_utc,
+        )
+        readiness = _latest_readiness_for_source_run(
+            conn,
+            source_id=SOURCE_ID,
+            source_run_id=expected_source_run_id,
+            track=config.forecast_track,
+            temperature_metric=config.temperature_metric,
+            now_utc=now_utc,
+        )
+        readiness_summary = _readiness_summary_for_source_run(
+            conn,
+            source_id=SOURCE_ID,
+            source_run_id=expected_source_run_id,
+            track=config.forecast_track,
+            temperature_metric=config.temperature_metric,
+            now_utc=now_utc,
+        )
 
     if job_run is None:
         blockers.append(f"{prefix}_JOB_RUN_MISSING")
-    elif job_run.get("status") != "SUCCESS":
-        blockers.append(f"{prefix}_JOB_RUN_NOT_SUCCESS:{job_run.get('status')}")
+    elif expected_source_run_id and job_run.get("source_run_id") == expected_source_run_id:
+        if job_run.get("status") not in {"SUCCESS", "PARTIAL"}:
+            blockers.append(f"{prefix}_JOB_RUN_NOT_CURRENT:{job_run.get('status')}")
+        if int(job_run.get("rows_written") or 0) <= 0:
+            blockers.append(f"{prefix}_JOB_RUN_NO_ROWS_WRITTEN")
 
     if source_run is None:
         blockers.append(f"{prefix}_SOURCE_RUN_MISSING")
     else:
-        if source_run.get("status") != "SUCCESS":
-            blockers.append(f"{prefix}_SOURCE_RUN_NOT_SUCCESS:{source_run.get('status')}")
-        if source_run.get("completeness_status") != "COMPLETE":
-            blockers.append(f"{prefix}_SOURCE_RUN_NOT_COMPLETE:{source_run.get('completeness_status')}")
-
-    expected_source_run_id = source_run.get("source_run_id") if source_run else None
-    if job_run and source_run and job_run.get("source_run_id") != expected_source_run_id:
-        blockers.append(f"{prefix}_JOB_RUN_SOURCE_RUN_MISMATCH")
+        if source_run.get("status") not in {"SUCCESS", "PARTIAL"}:
+            blockers.append(f"{prefix}_SOURCE_RUN_NOT_CURRENT:{source_run.get('status')}")
+        if source_run.get("completeness_status") not in {"COMPLETE", "PARTIAL"}:
+            blockers.append(f"{prefix}_SOURCE_RUN_NOT_USABLE:{source_run.get('completeness_status')}")
 
     if coverage is None:
-        blockers.append(f"{prefix}_COVERAGE_MISSING")
+        blockers.append(f"{prefix}_LIVE_ELIGIBLE_COVERAGE_MISSING_FOR_SOURCE_RUN")
     else:
         if expected_source_run_id and coverage.get("source_run_id") != expected_source_run_id:
             blockers.append(f"{prefix}_COVERAGE_SOURCE_RUN_MISMATCH")
-        if coverage.get("completeness_status") != "COMPLETE":
-            blockers.append(f"{prefix}_COVERAGE_NOT_COMPLETE:{coverage.get('completeness_status')}")
-        if coverage.get("readiness_status") != "LIVE_ELIGIBLE":
-            blockers.append(f"{prefix}_COVERAGE_NOT_LIVE_ELIGIBLE:{coverage.get('readiness_status')}")
-        if not _not_expired(coverage.get("expires_at"), now_utc):
-            blockers.append(f"{prefix}_COVERAGE_EXPIRED_OR_INVALID")
 
     if readiness is None:
-        blockers.append(f"{prefix}_READINESS_MISSING")
+        blockers.append(f"{prefix}_LIVE_ELIGIBLE_READINESS_MISSING_FOR_SOURCE_RUN")
     else:
         if expected_source_run_id and readiness.get("source_run_id") != expected_source_run_id:
             blockers.append(f"{prefix}_READINESS_SOURCE_RUN_MISMATCH")
         dependency = _json_obj(readiness.get("dependency_json"))
         if dependency.get("source_run_id") != expected_source_run_id:
             blockers.append(f"{prefix}_READINESS_DEPENDENCY_MISMATCH")
-        if readiness.get("status") != "LIVE_ELIGIBLE":
-            blockers.append(f"{prefix}_READINESS_NOT_LIVE_ELIGIBLE:{readiness.get('status')}")
-        if not _not_expired(readiness.get("expires_at"), now_utc):
-            blockers.append(f"{prefix}_READINESS_EXPIRED_OR_INVALID")
+
+    if expected_source_run_id and readiness_summary.get("live_eligible_current_count", 0) <= 0:
+        blockers.append(f"{prefix}_NO_CURRENT_LIVE_ELIGIBLE_PRODUCER_READINESS:{expected_source_run_id}")
 
     return TrackReport(
         label=config.label,
@@ -297,6 +519,8 @@ def _evaluate_track(conn: sqlite3.Connection, config: TrackConfig, now_utc: date
         source_run=source_run,
         coverage=coverage,
         readiness=readiness,
+        expected_source_cycle=expected_cycle,
+        readiness_summary=readiness_summary,
     )
 
 
@@ -356,7 +580,63 @@ def _source_health_check(
     )
 
 
+def _module_pattern_from_process_pattern(process_pattern: str) -> str | None:
+    try:
+        tokens = shlex.split(process_pattern)
+    except ValueError:
+        tokens = process_pattern.split()
+    for idx, token in enumerate(tokens[:-1]):
+        if token == "-m":
+            return tokens[idx + 1]
+    if process_pattern.startswith("src."):
+        return process_pattern
+    return None
+
+
+def _python_module_process_matches(module_pattern: str) -> list[str]:
+    completed = subprocess.run(
+        ["ps", "-axo", "pid=,command="],
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=5,
+    )
+    if completed.returncode != 0:
+        return []
+    matches: list[str] = []
+    for line in completed.stdout.splitlines():
+        parts = line.strip().split(None, 1)
+        if len(parts) != 2:
+            continue
+        _pid_text, command = parts
+        tokens = command.split()
+        for idx, token in enumerate(tokens[:-1]):
+            module_name = tokens[idx + 1]
+            if token == "-m" and (module_name == module_pattern or module_name.startswith(f"{module_pattern}.")):
+                matches.append(line.strip())
+                break
+    return matches
+
+
 def _process_check(process_pattern: str) -> tuple[bool, list[str], CheckResult]:
+    module_pattern = _module_pattern_from_process_pattern(process_pattern)
+    if module_pattern is not None:
+        matches = _python_module_process_matches(module_pattern)
+        if matches:
+            return True, [], CheckResult(
+                "forecast_live_process",
+                "PASS",
+                "forecast-live process matched",
+                {"pattern": process_pattern, "module_pattern": module_pattern, "matches": matches},
+            )
+        return False, ["FORECAST_LIVE_PROCESS_MISSING"], CheckResult(
+            "forecast_live_process",
+            "BLOCKED",
+            "forecast-live process missing",
+            {"pattern": process_pattern, "module_pattern": module_pattern},
+        )
+
     completed = subprocess.run(
         ["pgrep", "-af", process_pattern],
         check=False,

@@ -24,6 +24,7 @@ FORECAST_LIVE_DAEMON = REPO_ROOT / "src" / "ingest" / "forecast_live_daemon.py"
 def test_forecast_live_scheduler_registers_only_opendata_jobs_and_heartbeat() -> None:
     from src.ingest.forecast_live_daemon import (
         FORECAST_LIVE_HEARTBEAT_JOB_ID,
+        FORECAST_LIVE_SAFE_CYCLE_POLL_JOB_ID,
         FORECAST_LIVE_SOURCE_HEALTH_JOB_ID,
         FORECAST_LIVE_JOB_IDS,
         forecast_live_job_specs,
@@ -39,6 +40,7 @@ def test_forecast_live_scheduler_registers_only_opendata_jobs_and_heartbeat() ->
         "forecast_live_opendata_daily_mx2t6",
         "forecast_live_opendata_daily_mn2t6",
         "forecast_live_opendata_startup_catch_up",
+        "forecast_live_opendata_safe_cycle_poll",
         "forecast_live_heartbeat",
         "forecast_live_source_health_probe",
     }
@@ -79,6 +81,23 @@ def test_forecast_live_scheduler_registers_only_opendata_jobs_and_heartbeat() ->
                 "misfire_grace_time": 120,
                 "next_run_time": datetime(2026, 5, 14, 8, 10, tzinfo=timezone.utc),
                 "executor": "source_health",
+            },
+        )
+    ]
+    safe_cycle_specs = [
+        (trigger, kwargs)
+        for _, trigger, kwargs in specs
+        if kwargs["id"] == FORECAST_LIVE_SAFE_CYCLE_POLL_JOB_ID
+    ]
+    assert safe_cycle_specs == [
+        (
+            "interval",
+            {
+                "seconds": 300,
+                "id": FORECAST_LIVE_SAFE_CYCLE_POLL_JOB_ID,
+                "max_instances": 1,
+                "coalesce": True,
+                "misfire_grace_time": 120,
             },
         )
     ]
@@ -365,6 +384,148 @@ def test_forecast_live_track_runner_upserts_same_source_cycle_job_run(tmp_path) 
     ).fetchall()
     assert len(rows) == 1
     assert rows[0]["status"] == "SUCCESS"
+
+
+def test_safe_cycle_poll_fetches_latest_safe_cycle_when_not_journaled(tmp_path, monkeypatch) -> None:
+    from src.data.release_calendar import FetchDecision
+    import src.ingest.forecast_live_daemon as forecast_live_daemon
+    from src.state.job_run_repo import get_latest_job_run
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    init_schema_forecasts(conn)
+
+    selected_cycle = datetime(2026, 5, 17, 12, tzinfo=timezone.utc)
+    safe_fetch = datetime(2026, 5, 17, 20, 5, tzinfo=timezone.utc)
+
+    monkeypatch.setattr(
+        forecast_live_daemon,
+        "_forecast_work_identity",
+        lambda track, now_utc: {
+            "decision": FetchDecision.FETCH_ALLOWED,
+            "metadata": {
+                "selected_cycle_time": selected_cycle,
+                "next_safe_fetch_at": safe_fetch,
+            },
+            "job_name": "forecast_live_opendata_mx2t6_high",
+            "source_id": "ecmwf_open_data",
+            "track": track,
+            "scheduled_for": selected_cycle,
+            "release_calendar_key": "ecmwf_open_data:mx2t6_high:full",
+            "safe_fetch_not_before": safe_fetch,
+        },
+    )
+    observed: dict[str, object] = {}
+
+    def collector(*, track: str, run_date: date, run_hour: int, now_utc: datetime) -> dict:
+        observed.update(
+            {
+                "track": track,
+                "run_date": run_date,
+                "run_hour": run_hour,
+                "now_utc": now_utc,
+            }
+        )
+        return {
+            "status": "ok",
+            "track": track,
+            "source_run_id": "ecmwf_open_data:mx2t6_high:2026-05-17T12Z",
+            "release_calendar_key": "ecmwf_open_data:mx2t6_high:full",
+            "forecast_track": "mx2t6_high_full_horizon",
+            "snapshots_inserted": 4,
+            "coverage_written": 1,
+            "producer_readiness_written": 1,
+        }
+
+    result = forecast_live_daemon._run_opendata_track_if_due(
+        "mx2t6_high",
+        _locks_dir_override=tmp_path,
+        _collector=collector,
+        _source_paused=lambda source_id: False,
+        _job_conn=conn,
+        _now_utc=datetime(2026, 5, 17, 20, 10, tzinfo=timezone.utc),
+    )
+
+    assert result["status"] == "ok"
+    assert observed == {
+        "track": "mx2t6_high",
+        "run_date": date(2026, 5, 17),
+        "run_hour": 12,
+        "now_utc": datetime(2026, 5, 17, 20, 10, tzinfo=timezone.utc),
+    }
+    row = get_latest_job_run(conn, "forecast_live_opendata_mx2t6_high")
+    assert row is not None
+    assert row["source_run_id"] == "ecmwf_open_data:mx2t6_high:2026-05-17T12Z"
+    assert row["scheduled_for"] == "2026-05-17T12:00:00+00:00"
+
+
+def test_safe_cycle_poll_does_not_refetch_current_partial_cycle(tmp_path, monkeypatch) -> None:
+    from src.data.release_calendar import FetchDecision
+    import src.ingest.forecast_live_daemon as forecast_live_daemon
+    from src.state.job_run_repo import write_job_run
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    init_schema_forecasts(conn)
+
+    selected_cycle = datetime(2026, 5, 17, 12, tzinfo=timezone.utc)
+    safe_fetch = datetime(2026, 5, 17, 20, 5, tzinfo=timezone.utc)
+
+    monkeypatch.setattr(
+        forecast_live_daemon,
+        "_forecast_work_identity",
+        lambda track, now_utc: {
+            "decision": FetchDecision.FETCH_ALLOWED,
+            "metadata": {
+                "selected_cycle_time": selected_cycle,
+                "next_safe_fetch_at": safe_fetch,
+            },
+            "job_name": "forecast_live_opendata_mx2t6_high",
+            "source_id": "ecmwf_open_data",
+            "track": track,
+            "scheduled_for": selected_cycle,
+            "release_calendar_key": "ecmwf_open_data:mx2t6_high:full",
+            "safe_fetch_not_before": safe_fetch,
+        },
+    )
+    write_job_run(
+        conn,
+        job_run_id="forecast-live-20260517-12z-partial",
+        job_name="forecast_live_opendata_mx2t6_high",
+        plane="forecast",
+        scheduled_for=selected_cycle,
+        started_at=datetime(2026, 5, 17, 20, 10, tzinfo=timezone.utc),
+        finished_at=datetime(2026, 5, 17, 20, 14, tzinfo=timezone.utc),
+        status="PARTIAL",
+        reason_code="NOT_RELEASED_STEPS=[150]",
+        rows_written=364,
+        rows_failed=0,
+        source_run_id="ecmwf_open_data:mx2t6_high:2026-05-17T12Z",
+        source_id="ecmwf_open_data",
+        track="mx2t6_high",
+        release_calendar_key="ecmwf_open_data:mx2t6_high:full",
+        safe_fetch_not_before=safe_fetch,
+    )
+
+    def collector(*, track: str, **_kwargs) -> dict:
+        raise AssertionError(f"collector must not refetch current source cycle for {track}")
+
+    result = forecast_live_daemon._run_opendata_track_if_due(
+        "mx2t6_high",
+        _locks_dir_override=tmp_path,
+        _collector=collector,
+        _source_paused=lambda source_id: False,
+        _job_conn=conn,
+        _now_utc=datetime(2026, 5, 17, 20, 20, tzinfo=timezone.utc),
+    )
+
+    assert result["status"] == "current_cycle_already_journaled"
+    assert result["source_run_id"] == "ecmwf_open_data:mx2t6_high:2026-05-17T12Z"
+    rows = conn.execute(
+        "SELECT * FROM job_run WHERE job_name = ?",
+        ("forecast_live_opendata_mx2t6_high",),
+    ).fetchall()
+    assert len(rows) == 1
 
 
 def test_forecast_live_track_runner_fails_on_collector_source_run_identity_mismatch(tmp_path) -> None:

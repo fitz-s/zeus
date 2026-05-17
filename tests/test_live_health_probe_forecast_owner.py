@@ -10,17 +10,31 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import sqlite3
 import subprocess
+import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 
 SCRIPT_PATH = Path(__file__).resolve().parents[1] / "scripts" / "live_health_probe.py"
+FORECAST_READY_SCRIPT_PATH = Path(__file__).resolve().parents[1] / "scripts" / "check_forecast_live_ready.py"
 
 
 def _load_module():
     spec = importlib.util.spec_from_file_location("live_health_probe_under_test", SCRIPT_PATH)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _load_forecast_ready_module():
+    module_name = "check_forecast_live_ready_under_test"
+    spec = importlib.util.spec_from_file_location(module_name, FORECAST_READY_SCRIPT_PATH)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
     spec.loader.exec_module(module)
     return module
 
@@ -175,6 +189,219 @@ def test_alive_matches_python_module_not_shell_text(monkeypatch):
     assert module._alive("src.ingest.forecast_live_daemon") == [202]
     assert module._alive("src.ingest_main") == [404]
     assert module._alive("src.riskguard") == [505]
+
+
+def test_forecast_ready_process_check_matches_launchd_python_app_module_not_shell_text(monkeypatch):
+    module = _load_forecast_ready_module()
+
+    def fake_run(*args, **kwargs):
+        assert args[0] == ["ps", "-axo", "pid=,command="]
+        return subprocess.CompletedProcess(
+            args[0],
+            0,
+            stdout=(
+                "202 /opt/homebrew/Cellar/python@3.14/3.14.3_1/Frameworks/Python.framework/Versions/3.14/Resources/Python.app/Contents/MacOS/Python -m src.ingest.forecast_live_daemon\n"
+                "303 /bin/zsh -lc rg src.ingest.forecast_live_daemon\n"
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+
+    ok, blockers, result = module._process_check("python -m src.ingest.forecast_live_daemon")
+
+    assert ok is True
+    assert blockers == []
+    assert result.status == "PASS"
+    assert result.metadata["module_pattern"] == "src.ingest.forecast_live_daemon"
+    assert len(result.metadata["matches"]) == 1
+    assert result.metadata["matches"][0].startswith("202 ")
+
+
+def test_forecast_ready_process_check_rejects_shell_text_without_python_module(monkeypatch):
+    module = _load_forecast_ready_module()
+
+    def fake_run(*args, **kwargs):
+        assert args[0] == ["ps", "-axo", "pid=,command="]
+        return subprocess.CompletedProcess(
+            args[0],
+            0,
+            stdout="303 /bin/zsh -lc rg src.ingest.forecast_live_daemon\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+
+    ok, blockers, result = module._process_check("python -m src.ingest.forecast_live_daemon")
+
+    assert ok is False
+    assert blockers == ["FORECAST_LIVE_PROCESS_MISSING"]
+    assert result.status == "BLOCKED"
+    assert result.metadata["module_pattern"] == "src.ingest.forecast_live_daemon"
+
+
+def _forecast_ready_schema(conn: sqlite3.Connection) -> None:
+    conn.executescript(
+        """
+        CREATE TABLE job_run (
+            job_run_id TEXT,
+            job_name TEXT,
+            status TEXT,
+            scheduled_for TEXT,
+            source_run_id TEXT,
+            release_calendar_key TEXT,
+            rows_written INTEGER,
+            recorded_at TEXT
+        );
+        CREATE TABLE source_run (
+            source_run_id TEXT,
+            source_id TEXT,
+            track TEXT,
+            status TEXT,
+            completeness_status TEXT,
+            source_cycle_time TEXT,
+            recorded_at TEXT
+        );
+        CREATE TABLE source_run_coverage (
+            source_id TEXT,
+            source_transport TEXT,
+            source_run_id TEXT,
+            track TEXT,
+            temperature_metric TEXT,
+            completeness_status TEXT,
+            readiness_status TEXT,
+            expires_at TEXT,
+            computed_at TEXT,
+            recorded_at TEXT
+        );
+        CREATE TABLE readiness_state (
+            source_id TEXT,
+            source_run_id TEXT,
+            track TEXT,
+            temperature_metric TEXT,
+            strategy_key TEXT,
+            status TEXT,
+            expires_at TEXT,
+            dependency_json TEXT,
+            computed_at TEXT,
+            recorded_at TEXT
+        );
+        """
+    )
+
+
+def test_forecast_ready_uses_latest_safe_cycle_not_arbitrary_latest_blocked_row():
+    module = _load_forecast_ready_module()
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    _forecast_ready_schema(conn)
+    now = datetime(2026, 5, 17, 20, 10, tzinfo=timezone.utc)
+    source_run_id = "ecmwf_open_data:mx2t6_high:2026-05-17T12Z"
+
+    conn.execute(
+        "INSERT INTO job_run VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            "job-current",
+            "forecast_live_opendata_mx2t6_high",
+            "PARTIAL",
+            "2026-05-17T12:00:00+00:00",
+            source_run_id,
+            "ecmwf_open_data:mx2t6_high:full",
+            364,
+            "2026-05-17T20:10:00+00:00",
+        ),
+    )
+    conn.execute(
+        "INSERT INTO source_run VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (
+            source_run_id,
+            "ecmwf_open_data",
+            "mx2t6_high_full_horizon",
+            "PARTIAL",
+            "PARTIAL",
+            "2026-05-17T12:00:00+00:00",
+            "2026-05-17T20:10:00+00:00",
+        ),
+    )
+    conn.execute(
+        "INSERT INTO source_run_coverage VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            "ecmwf_open_data",
+            "ensemble_snapshots_v2_db_reader",
+            source_run_id,
+            "mx2t6_high_full_horizon",
+            "high",
+            "COMPLETE",
+            "LIVE_ELIGIBLE",
+            "2026-05-18T20:10:00+00:00",
+            "2026-05-17T20:10:00+00:00",
+            "2026-05-17T20:10:00+00:00",
+        ),
+    )
+    conn.execute(
+        "INSERT INTO readiness_state VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            "ecmwf_open_data",
+            source_run_id,
+            "mx2t6_high_full_horizon",
+            "high",
+            "producer_readiness",
+            "LIVE_ELIGIBLE",
+            "2026-05-18T20:10:00+00:00",
+            json.dumps({"source_run_id": source_run_id}),
+            "2026-05-17T20:10:00+00:00",
+            "2026-05-17T20:10:00+00:00",
+        ),
+    )
+    conn.execute(
+        "INSERT INTO readiness_state VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            "ecmwf_open_data",
+            "ecmwf_open_data:mx2t6_high:2026-05-16T12Z",
+            "mx2t6_high_full_horizon",
+            "high",
+            "producer_readiness",
+            "BLOCKED",
+            None,
+            "{}",
+            "2026-05-17T20:11:00+00:00",
+            "2026-05-17T20:11:00+00:00",
+        ),
+    )
+
+    report = module._evaluate_track(conn, module.TRACKS[0], now)
+
+    assert report.ready is True
+    assert report.blockers == []
+    assert report.job_run["source_run_id"] == source_run_id
+    assert report.readiness_summary["live_eligible_current_count"] == 1
+
+
+def test_forecast_ready_blocks_when_latest_safe_cycle_was_not_journaled():
+    module = _load_forecast_ready_module()
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    _forecast_ready_schema(conn)
+    now = datetime(2026, 5, 17, 20, 10, tzinfo=timezone.utc)
+
+    conn.execute(
+        "INSERT INTO job_run VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            "job-stale",
+            "forecast_live_opendata_mx2t6_high",
+            "PARTIAL",
+            "2026-05-16T12:00:00+00:00",
+            "ecmwf_open_data:mx2t6_high:2026-05-16T12Z",
+            "ecmwf_open_data:mx2t6_high:full",
+            364,
+            "2026-05-17T07:30:00+00:00",
+        ),
+    )
+
+    report = module._evaluate_track(conn, module.TRACKS[0], now)
+
+    assert report.ready is False
+    assert "HIGH_LATEST_SAFE_SOURCE_RUN_MISSING:ecmwf_open_data:mx2t6_high:2026-05-17T12Z" in report.blockers
 
 
 def test_missing_forecast_live_owner_is_actionable_without_legacy_ingest_dead(tmp_path, monkeypatch, capsys):
