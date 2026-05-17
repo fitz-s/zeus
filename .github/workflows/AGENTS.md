@@ -23,3 +23,7 @@ Workflow files control gate severity and maintenance cost.
 | File | Purpose |
 |------|---------|
 | `architecture_advisory_gates.yml` | Architecture/topology CI lanes: blocking stable gates plus advisory staged checks |
+| `pr_identity_collision_check.yml` | Advisory check posting PR comment when identity-bearing class added under src/types/ or src/contracts/ |
+| `pr-policy.yml` | Universal cross-agent PR LOC/commit accumulation advisory comment (CI equivalent of pre-push hook) |
+| `replay-correctness.yml` | Required merge gate (Gate 4); replay-correctness DB-fixture validation |
+| `secrets-scan.yml` | Required cross-agent secrets-scan gate covering Codex, Copilot, human, and raw pushes |

@@ -1,0 +1,863 @@
+navigation ok: False
+profile: generic
+route_card:
+- schema_version: 1
+- admission_status: advisory_only
+- risk_tier: T0
+- dominant_driver: profile_needs_typed_intent:fallback
+- merge_conflict_scan: not_applicable
+- next_action: read-only orientation; no edit admission granted or required
+- merge_evidence_required: False
+  reason: not_a_merge_task
+- operation_vector: stage=explore surface=none side_effect=read_only artifact=none merge=not_merge
+- route_candidates:
+  - 1: generic selected [evidence]
+- gate_budget: read_only_or_orientation
+  required: route_card
+- expansion_hints:
+  - use this route card as orientation only
+  - run a separate edit/apply navigation route before changing files
+direct_blockers:
+- [error:docs:unregistered_tracked_file] docs/reference/zeus_oracle_density_discount_reference.md: not listed in docs/reference/AGENTS.md file registry
+- [error:docs:stale_registry_entry] docs/operations/AGENTS.md:task_2026-05-02_live_entry_data_contract/CURRENT_ROLLOUT_MODE.md: registry target missing: docs/operations/task_2026-05-02_live_entry_data_contract/CURRENT_ROLLOUT_MODE.md
+- [error:docs:stale_registry_entry] docs/operations/AGENTS.md:task_2026-05-02_live_entry_data_contract/PREMISE_ERRATUM_2026-05-03.md: registry target missing: docs/operations/task_2026-05-02_live_entry_data_contract/PREMISE_ERRATUM_2026-05-03.md
+- [error:docs:stale_registry_entry] docs/operations/AGENTS.md:task_2026-05-04_zeus_may3_review_remediation/MASTER_PLAN_v2.md: registry target missing: docs/operations/task_2026-05-04_zeus_may3_review_remediation/MASTER_PLAN_v2.md
+- [error:docs:stale_registry_entry] docs/operations/AGENTS.md:task_2026-05-04_zeus_may3_review_remediation/ORCHESTRATOR_RUNBOOK.md: registry target missing: docs/operations/task_2026-05-04_zeus_may3_review_remediation/ORCHESTRATOR_RUNBOOK.md
+- [error:docs:stale_registry_entry] docs/operations/AGENTS.md:task_2026-05-04_zeus_may3_review_remediation/PLAN.md: registry target missing: docs/operations/task_2026-05-04_zeus_may3_review_remediation/PLAN.md
+- [error:docs:stale_registry_entry] docs/operations/AGENTS.md:task_2026-05-04_zeus_may3_review_remediation/scope.yaml: registry target missing: docs/operations/task_2026-05-04_zeus_may3_review_remediation/scope.yaml
+- [error:docs:stale_registry_entry] docs/operations/AGENTS.md:task_2026-05-05_object_invariance_mainline/PLAN.md: registry target missing: docs/operations/task_2026-05-05_object_invariance_mainline/PLAN.md
+- [error:docs:stale_registry_entry] docs/operations/AGENTS.md:task_2026-05-05_object_invariance_wave11/PLAN.md: registry target missing: docs/operations/task_2026-05-05_object_invariance_wave11/PLAN.md
+- [error:docs:stale_registry_entry] docs/operations/AGENTS.md:task_2026-05-05_object_invariance_wave12/PLAN.md: registry target missing: docs/operations/task_2026-05-05_object_invariance_wave12/PLAN.md
+- [error:docs:stale_registry_entry] docs/operations/AGENTS.md:task_2026-05-05_object_invariance_wave13/PLAN.md: registry target missing: docs/operations/task_2026-05-05_object_invariance_wave13/PLAN.md
+- [error:docs:stale_registry_entry] docs/operations/AGENTS.md:task_2026-05-05_object_invariance_wave14/PLAN.md: registry target missing: docs/operations/task_2026-05-05_object_invariance_wave14/PLAN.md
+- [error:docs:stale_registry_entry] docs/operations/AGENTS.md:task_2026-05-05_object_invariance_wave15/PLAN.md: registry target missing: docs/operations/task_2026-05-05_object_invariance_wave15/PLAN.md
+- [error:docs:stale_registry_entry] docs/operations/AGENTS.md:task_2026-05-05_object_invariance_wave16/PLAN.md: registry target missing: docs/operations/task_2026-05-05_object_invariance_wave16/PLAN.md
+- [error:docs:stale_registry_entry] docs/operations/AGENTS.md:task_2026-05-05_object_invariance_wave17/PLAN.md: registry target missing: docs/operations/task_2026-05-05_object_invariance_wave17/PLAN.md
+- [error:docs:stale_registry_entry] docs/operations/AGENTS.md:task_2026-05-05_object_invariance_wave18/PLAN.md: registry target missing: docs/operations/task_2026-05-05_object_invariance_wave18/PLAN.md
+- [error:docs:stale_registry_entry] docs/operations/AGENTS.md:task_2026-05-05_object_invariance_wave19/PLAN.md: registry target missing: docs/operations/task_2026-05-05_object_invariance_wave19/PLAN.md
+- [error:docs:stale_registry_entry] docs/operations/AGENTS.md:task_2026-05-05_object_invariance_wave20/PLAN.md: registry target missing: docs/operations/task_2026-05-05_object_invariance_wave20/PLAN.md
+- [error:docs:stale_registry_entry] docs/operations/AGENTS.md:task_2026-05-05_object_invariance_wave21/PLAN.md: registry target missing: docs/operations/task_2026-05-05_object_invariance_wave21/PLAN.md
+- [error:docs:stale_registry_entry] docs/operations/AGENTS.md:task_2026-05-05_object_invariance_wave5/PLAN.md: registry target missing: docs/operations/task_2026-05-05_object_invariance_wave5/PLAN.md
+- [error:docs:stale_registry_entry] docs/operations/AGENTS.md:task_2026-05-05_object_invariance_wave6/PLAN.md: registry target missing: docs/operations/task_2026-05-05_object_invariance_wave6/PLAN.md
+- [error:docs:stale_registry_entry] docs/operations/AGENTS.md:task_2026-05-05_object_invariance_wave7/PLAN.md: registry target missing: docs/operations/task_2026-05-05_object_invariance_wave7/PLAN.md
+- [error:docs:stale_registry_entry] docs/operations/AGENTS.md:task_2026-05-05_object_invariance_wave8/PLAN.md: registry target missing: docs/operations/task_2026-05-05_object_invariance_wave8/PLAN.md
+- [error:docs:stale_registry_entry] docs/operations/AGENTS.md:task_2026-05-05_topology_noise_repair/PLAN.md: registry target missing: docs/operations/task_2026-05-05_topology_noise_repair/PLAN.md
+- [error:docs:stale_registry_entry] docs/operations/AGENTS.md:task_2026-05-06_calibration_quality_blockers/PLAN.md: registry target missing: docs/operations/task_2026-05-06_calibration_quality_blockers/PLAN.md
+- [error:docs:stale_registry_entry] docs/operations/AGENTS.md:task_2026-05-06_calibration_quality_blockers/QUARANTINE_LEDGER.md: registry target missing: docs/operations/task_2026-05-06_calibration_quality_blockers/QUARANTINE_LEDGER.md
+- [error:docs:stale_registry_entry] docs/operations/AGENTS.md:task_2026-05-07_recalibration_after_low_high_alignment/PLAN.md: registry target missing: docs/operations/task_2026-05-07_recalibration_after_low_high_alignment/PLAN.md
+- [error:docs:stale_registry_entry] docs/operations/AGENTS.md:task_2026-05-07_recalibration_after_low_high_alignment/REPORT.md: registry target missing: docs/operations/task_2026-05-07_recalibration_after_low_high_alignment/REPORT.md
+- [error:docs:stale_registry_entry] docs/operations/AGENTS.md:task_2026-05-08_object_invariance_remaining_mainline/PLAN.md: registry target missing: docs/operations/task_2026-05-08_object_invariance_remaining_mainline/PLAN.md
+- [error:docs:stale_registry_entry] docs/operations/AGENTS.md:task_2026-05-08_object_invariance_wave27/PLAN.md: registry target missing: docs/operations/task_2026-05-08_object_invariance_wave27/PLAN.md
+- [error:docs:stale_registry_entry] docs/operations/AGENTS.md:task_2026-05-08_object_invariance_wave28/PLAN.md: registry target missing: docs/operations/task_2026-05-08_object_invariance_wave28/PLAN.md
+- [error:docs:stale_registry_entry] docs/operations/AGENTS.md:task_2026-05-08_object_invariance_wave29/PLAN.md: registry target missing: docs/operations/task_2026-05-08_object_invariance_wave29/PLAN.md
+- [error:docs:stale_registry_entry] docs/operations/AGENTS.md:task_2026-05-08_object_invariance_wave30/PLAN.md: registry target missing: docs/operations/task_2026-05-08_object_invariance_wave30/PLAN.md
+- [error:docs:stale_registry_entry] docs/operations/AGENTS.md:task_2026-05-08_object_invariance_wave31/PLAN.md: registry target missing: docs/operations/task_2026-05-08_object_invariance_wave31/PLAN.md
+- [error:docs:stale_registry_entry] docs/operations/AGENTS.md:task_2026-05-08_object_invariance_wave32/PLAN.md: registry target missing: docs/operations/task_2026-05-08_object_invariance_wave32/PLAN.md
+- [error:docs:stale_registry_entry] docs/operations/AGENTS.md:task_2026-05-08_object_invariance_wave33/PLAN.md: registry target missing: docs/operations/task_2026-05-08_object_invariance_wave33/PLAN.md
+- [error:docs:stale_registry_entry] docs/operations/AGENTS.md:task_2026-05-08_object_invariance_wave34/PLAN.md: registry target missing: docs/operations/task_2026-05-08_object_invariance_wave34/PLAN.md
+- [error:docs:stale_registry_entry] docs/operations/AGENTS.md:task_2026-05-08_object_invariance_wave35/PLAN.md: registry target missing: docs/operations/task_2026-05-08_object_invariance_wave35/PLAN.md
+- [error:docs:stale_registry_entry] docs/operations/AGENTS.md:task_2026-05-08_object_invariance_wave36/PLAN.md: registry target missing: docs/operations/task_2026-05-08_object_invariance_wave36/PLAN.md
+- [error:docs:stale_registry_entry] docs/operations/AGENTS.md:task_2026-05-08_object_invariance_wave37/PLAN.md: registry target missing: docs/operations/task_2026-05-08_object_invariance_wave37/PLAN.md
+- [error:docs:stale_registry_entry] docs/operations/AGENTS.md:task_2026-05-08_object_invariance_wave38/PLAN.md: registry target missing: docs/operations/task_2026-05-08_object_invariance_wave38/PLAN.md
+- [error:docs:stale_registry_entry] docs/operations/AGENTS.md:task_2026-05-08_object_invariance_wave39/PLAN.md: registry target missing: docs/operations/task_2026-05-08_object_invariance_wave39/PLAN.md
+- [error:docs:stale_registry_entry] docs/operations/AGENTS.md:task_2026-05-08_object_invariance_wave41/PLAN.md: registry target missing: docs/operations/task_2026-05-08_object_invariance_wave41/PLAN.md
+- [error:docs:stale_registry_entry] docs/operations/AGENTS.md:task_2026-05-08_object_invariance_wave42/PLAN.md: registry target missing: docs/operations/task_2026-05-08_object_invariance_wave42/PLAN.md
+- [error:docs:unregistered_tracked_file] docs/operations/task_2026-05-02_live_entry_data_contract.archived: not listed in docs/operations/AGENTS.md file registry
+- [error:docs:unregistered_tracked_file] docs/operations/task_2026-05-08_object_invariance_wave42.archived: not listed in docs/operations/AGENTS.md file registry
+- [error:docs:unregistered_tracked_file] docs/operations/task_2026-05-09_post_s4_residuals_topology.archived: not listed in docs/operations/AGENTS.md file registry
+- [error:docs:unregistered_tracked_file] docs/operations/task_2026-05-07_hook_redesign_v2.archived: not listed in docs/operations/AGENTS.md file registry
+- [error:docs:unregistered_tracked_file] docs/operations/zeus_workspace_authority_reconstruction_package_2026-04-20_v2.archived: not listed in docs/operations/AGENTS.md file registry
+- [error:docs:unregistered_tracked_file] docs/operations/POLICY.md: not listed in docs/operations/AGENTS.md file registry
+- [error:docs:unregistered_tracked_file] docs/operations/task_2026-05-02_hk_paris_release.archived: not listed in docs/operations/AGENTS.md file registry
+- [error:docs:unregistered_tracked_file] docs/operations/task_2026-04-20_code_impact_graph_context_pack.archived: not listed in docs/operations/AGENTS.md file registry
+- [error:docs:unregistered_tracked_file] docs/operations/task_2026-05-07_object_invariance_wave25.archived: not listed in docs/operations/AGENTS.md file registry
+- [error:docs:unregistered_tracked_file] docs/operations/task_2026-05-08_object_invariance_wave34.archived: not listed in docs/operations/AGENTS.md file registry
+- [error:docs:unregistered_tracked_file] docs/operations/task_2026-05-08_object_invariance_wave37.archived: not listed in docs/operations/AGENTS.md file registry
+- [error:docs:unregistered_tracked_file] docs/operations/task_2026-04-19_code_review_graph_topology_bridge.archived: not listed in docs/operations/AGENTS.md file registry
+- [error:docs:unregistered_tracked_file] docs/operations/UNMATCHED_GAMMA_CITIES_2026_05_07.md: not listed in docs/operations/AGENTS.md file registry
+- [error:docs:unregistered_tracked_file] docs/operations/task_2026-04-21_docs_reclassification_reference_extraction.archived: not listed in docs/operations/AGENTS.md file registry
+- [error:docs:unregistered_tracked_file] docs/operations/task_2026-05-05_object_invariance_wave12.archived: not listed in docs/operations/AGENTS.md file registry
+- [error:docs:unregistered_tracked_file] docs/operations/task_2026-04-23_live_harvester_enablement_dr33.archived: not listed in docs/operations/AGENTS.md file registry
+- [error:docs:unregistered_tracked_file] docs/operations/task_2026-05-05_object_invariance_wave17.archived: not listed in docs/operations/AGENTS.md file registry
+- [error:docs:unregistered_tracked_file] docs/operations/task_2026-05-09_pr_workflow_failure.archived: not listed in docs/operations/AGENTS.md file registry
+- [error:docs:unregistered_tracked_file] docs/operations/task_2026-05-08_object_invariance_wave29.archived: not listed in docs/operations/AGENTS.md file registry
+- [error:docs:unregistered_tracked_file] docs/operations/task_2026-05-05_object_invariance_wave7.archived: not listed in docs/operations/AGENTS.md file registry
+- [error:docs:unregistered_tracked_file] docs/operations/task_2026-04-23_data_readiness_remediation.archived: not listed in docs/operations/AGENTS.md file registry
+- [error:docs:unregistered_tracked_file] docs/operations/task_2026-04-22_orphan_artifact_cleanup.archived: not listed in docs/operations/AGENTS.md file registry
+- [error:docs:unregistered_tracked_file] docs/operations/task_2026-05-06_calibration_quality_blockers.archived: not listed in docs/operations/AGENTS.md file registry
+- [error:docs:unregistered_tracked_file] docs/operations/task_2026-05-08_object_invariance_wave36.archived: not listed in docs/operations/AGENTS.md file registry
+- [error:docs:unregistered_tracked_file] docs/operations/task_2026-05-08_object_invariance_wave39.archived: not listed in docs/operations/AGENTS.md file registry
+- [error:docs:unregistered_tracked_file] docs/operations/task_2026-05-03_ddd_implementation_plan.md.archived: not listed in docs/operations/AGENTS.md file registry
+- [error:docs:unregistered_tracked_file] docs/operations/task_2026-04-19_workspace_artifact_sync.archived: not listed in docs/operations/AGENTS.md file registry
+- [error:docs:unregistered_tracked_file] docs/operations/task_2026-04-23_guidance_kernel_semantic_boot.archived: not listed in docs/operations/AGENTS.md file registry
+- [error:docs:unregistered_tracked_file] docs/operations/task_2026-05-05_object_invariance_wave18.archived: not listed in docs/operations/AGENTS.md file registry
+- [error:docs:unregistered_tracked_file] docs/operations/task_2026-05-05_object_invariance_wave19.archived: not listed in docs/operations/AGENTS.md file registry
+- [error:docs:unregistered_tracked_file] docs/operations/task_2026-05-11_ecmwf_download_replacement.archived: not listed in docs/operations/AGENTS.md file registry
+- [error:docs:unregistered_tracked_file] docs/operations/task_2026-04-20_workspace_authority_reconstruction.archived: not listed in docs/operations/AGENTS.md file registry
+- [error:docs:unregistered_tracked_file] docs/operations/task_2026-05-05_object_invariance_wave8.archived: not listed in docs/operations/AGENTS.md file registry
+- [error:docs:unregistered_tracked_file] docs/operations/task_2026-05-05_object_invariance_wave6.archived: not listed in docs/operations/AGENTS.md file registry
+- [error:docs:unregistered_tracked_file] docs/operations/task_2026-05-05_object_invariance_wave14.archived: not listed in docs/operations/AGENTS.md file registry
+- [error:docs:unregistered_tracked_file] docs/operations/task_2026-04-23_authority_kernel_gamechanger.archived: not listed in docs/operations/AGENTS.md file registry
+- [error:docs:unregistered_tracked_file] docs/operations/task_2026-05-08_obs_outside_bin_audit.archived: not listed in docs/operations/AGENTS.md file registry
+- [error:docs:unregistered_tracked_file] docs/operations/task_2026-05-05_object_invariance_wave5.archived: not listed in docs/operations/AGENTS.md file registry
+- [error:docs:unregistered_tracked_file] docs/operations/task_2026-05-08_object_invariance_wave33.archived: not listed in docs/operations/AGENTS.md file registry
+- [error:docs:unregistered_tracked_file] docs/operations/task_2026-05-08_object_invariance_wave35.archived: not listed in docs/operations/AGENTS.md file registry
+- [error:docs:unregistered_tracked_file] docs/operations/task_2026-05-05_object_invariance_wave20.archived: not listed in docs/operations/AGENTS.md file registry
+- [error:docs:unregistered_tracked_file] docs/operations/task_2026-05-08_object_invariance_wave28.archived: not listed in docs/operations/AGENTS.md file registry
+- [error:docs:unregistered_tracked_file] docs/operations/task_2026-05-06_topology_redesign.archived: not listed in docs/operations/AGENTS.md file registry
+- [error:docs:unregistered_tracked_file] docs/operations/task_2026-05-05_object_invariance_wave13.archived: not listed in docs/operations/AGENTS.md file registry
+- [error:docs:unregistered_tracked_file] docs/operations/task_2026-05-08_object_invariance_wave32.archived: not listed in docs/operations/AGENTS.md file registry
+- [error:docs:unregistered_tracked_file] docs/operations/task_2026-05-07_navigation_topology_v2.archived: not listed in docs/operations/AGENTS.md file registry
+- [error:docs:unregistered_tracked_file] docs/operations/task_2026-05-01_hko_backfill.archived: not listed in docs/operations/AGENTS.md file registry
+- [error:docs:unregistered_tracked_file] docs/operations/task_2026-04-14_session_backlog.md.archived: not listed in docs/operations/AGENTS.md file registry
+- [error:docs:unregistered_tracked_file] docs/operations/task_2026-05-01_tigge_4_29_backfill.archived: not listed in docs/operations/AGENTS.md file registry
+- [error:docs:unregistered_tracked_file] docs/operations/task_2026-05-01_paris_station_resolution.archived: not listed in docs/operations/AGENTS.md file registry
+- [error:docs:unregistered_tracked_file] docs/operations/task_2026-05-05_object_invariance_wave15.archived: not listed in docs/operations/AGENTS.md file registry
+- [error:docs:unregistered_tracked_file] docs/operations/CLOUD_EXTRACT_PATCH_2026_05_07.md: not listed in docs/operations/AGENTS.md file registry
+- [error:docs:unregistered_tracked_file] docs/operations/task_2026-05-08_object_invariance_wave30.archived: not listed in docs/operations/AGENTS.md file registry
+- [error:docs:unregistered_tracked_file] docs/operations/LIVE_LAUNCH_HANDOFF.md: not listed in docs/operations/AGENTS.md file registry
+- [error:docs:unregistered_tracked_file] docs/operations/task_2026-05-01_live_arming.archived: not listed in docs/operations/AGENTS.md file registry
+- [error:docs:unregistered_tracked_file] docs/operations/task_2026-04-20_code_review_graph_online_context.archived: not listed in docs/operations/AGENTS.md file registry
+- [error:docs:unregistered_tracked_file] docs/operations/task_2026-05-01_live_smoke_test.archived: not listed in docs/operations/AGENTS.md file registry
+- [error:docs:unregistered_tracked_file] docs/operations/task_2026-05-05_topology_noise_repair.archived: not listed in docs/operations/AGENTS.md file registry
+- [error:docs:unregistered_tracked_file] docs/operations/live_rescue_ledger_2026-05-04.md: not listed in docs/operations/AGENTS.md file registry
+- [error:docs:unregistered_tracked_file] docs/operations/task_2026-05-01_hko_release.archived: not listed in docs/operations/AGENTS.md file registry
+- [error:docs:unregistered_tracked_file] docs/operations/repo_review_2026-05-01.archived: not listed in docs/operations/AGENTS.md file registry
+- [error:docs:unregistered_tracked_file] docs/operations/task_2026-05-08_f1_subprocess_hardening.archived: not listed in docs/operations/AGENTS.md file registry
+- [error:docs:unregistered_tracked_file] docs/operations/task_2026-04-23_graph_refresh_official_integration.archived: not listed in docs/operations/AGENTS.md file registry
+- [error:docs:unregistered_tracked_file] docs/operations/task_2026-04-16_dual_track_metric_spine.archived: not listed in docs/operations/AGENTS.md file registry
+- [error:docs:unregistered_tracked_file] docs/operations/task_2026-05-05_object_invariance_wave11.archived: not listed in docs/operations/AGENTS.md file registry
+- [error:docs:unregistered_tracked_file] docs/operations/task_2026-05-05_object_invariance_wave16.archived: not listed in docs/operations/AGENTS.md file registry
+- [error:docs:unregistered_tracked_file] docs/operations/INDEX.md: not listed in docs/operations/AGENTS.md file registry
+- [error:docs:unregistered_tracked_file] docs/operations/task_2026-04-13_topology_compiler_program.md.archived: not listed in docs/operations/AGENTS.md file registry
+- [error:docs:unregistered_tracked_file] docs/operations/task_2026-05-08_object_invariance_wave41.archived: not listed in docs/operations/AGENTS.md file registry
+- [error:docs:unregistered_tracked_file] docs/operations/task_2026-05-08_object_invariance_wave27.archived: not listed in docs/operations/AGENTS.md file registry
+- [error:docs:unregistered_tracked_file] docs/operations/task_2026-05-11_tigge_vm_to_zeus_db.archived: not listed in docs/operations/AGENTS.md file registry
+- [error:docs:unregistered_tracked_file] docs/operations/task_2026-04-23_authority_rehydration.archived: not listed in docs/operations/AGENTS.md file registry
+- [error:docs:unregistered_tracked_file] docs/operations/task_2026-05-05_object_invariance_mainline.archived: not listed in docs/operations/AGENTS.md file registry
+- [error:docs:unregistered_tracked_file] docs/operations/task_2026-05-04_zeus_may3_review_remediation.archived: not listed in docs/operations/AGENTS.md file registry
+- [error:docs:unregistered_tracked_file] docs/operations/task_2026-05-08_object_invariance_wave38.archived: not listed in docs/operations/AGENTS.md file registry
+- [error:docs:unregistered_tracked_file] docs/operations/task_2026-05-07_object_invariance_wave24.archived: not listed in docs/operations/AGENTS.md file registry
+- [error:docs:unregistered_tracked_file] docs/operations/task_2026-04-21_gate_f_data_backfill.archived: not listed in docs/operations/AGENTS.md file registry
+- [error:docs:unregistered_tracked_file] docs/operations/task_2026-05-14_attach_path_index_fix.archived: not listed in docs/operations/AGENTS.md file registry
+- [error:docs:unregistered_tracked_file] docs/operations/task_2026-05-07_object_invariance_wave26.archived: not listed in docs/operations/AGENTS.md file registry
+- [error:docs:unregistered_tracked_file] docs/operations/task_2026-05-08_topology_redesign_completion.archived: not listed in docs/operations/AGENTS.md file registry
+- [error:docs:unregistered_tracked_file] docs/operations/task_2026-05-08_object_invariance_wave31.archived: not listed in docs/operations/AGENTS.md file registry
+- [error:docs:unregistered_tracked_file] docs/operations/task_2026-05-08_object_invariance_remaining_mainline.archived: not listed in docs/operations/AGENTS.md file registry
+- [error:docs:unregistered_tracked_file] docs/operations/PLIST_UPDATE_FOR_RELOCK.md: not listed in docs/operations/AGENTS.md file registry
+- [error:docs:unregistered_tracked_file] docs/operations/task_2026-05-08_262_london_f_to_c.archived: not listed in docs/operations/AGENTS.md file registry
+- [error:docs:unregistered_tracked_file] docs/operations/task_2026-04-16_function_naming_freshness.archived: not listed in docs/operations/AGENTS.md file registry
+- [error:docs:unregistered_tracked_file] docs/operations/task_2026-04-22_docs_truth_refresh.archived: not listed in docs/operations/AGENTS.md file registry
+- [error:docs:unregistered_tracked_file] docs/operations/LIVE_RESTART_2026_05_07.md: not listed in docs/operations/AGENTS.md file registry
+- [error:docs:unregistered_tracked_file] docs/operations/task_2026-05-05_object_invariance_wave21.archived: not listed in docs/operations/AGENTS.md file registry
+- [error:docs:unregistered_tracked_file] docs/operations/task_2026-05-07_recalibration_after_low_high_alignment.archived: not listed in docs/operations/AGENTS.md file registry
+- [error:docs:unregistered_tracked_file] docs/runbooks/T2G_database_locked_degrade_runbook.md: not listed in docs/runbooks/AGENTS.md file registry
+- [error:docs:unregistered_tracked_file] docs/artifacts/Zeus_May3_review_ultimate.md: not listed in docs/artifacts/AGENTS.md file registry
+- [error:docs:unregistered_tracked_file] docs/artifacts/Zeus_May2_review_data_deamon.md: not listed in docs/artifacts/AGENTS.md file registry
+- [error:docs:unregistered_tracked_file] docs/artifacts/Zeus_Apr26_review_polymarket.md: not listed in docs/artifacts/AGENTS.md file registry
+- [error:docs:unregistered_tracked_file] docs/artifacts/Zeus_Apr25_review_topology.md: not listed in docs/artifacts/AGENTS.md file registry
+- [error:docs:docs_registry_replacement_missing] docs/artifacts/Zeus_May2_review_ strategy_update.md: replacement target missing: docs/operations/task_2026-05-02_strategy_update_execution_plan/PLAN.md
+- [error:docs:docs_registry_parent_not_allowed] docs/operations/INDEX.md: descendant coverage requires parent_coverage_allowed=true
+- [error:docs:docs_registry_unclassified_doc] docs/lore/INDEX.json: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/lore/topology/20260515-authority-drift-hypothesis-b-batch.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/lore/topology/20260515-keep-conditional-requires-agents-md-conditional-reads.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/lore/topology/20260515-ref-replacement-companion-gate-missing.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/methodology/adversarial_debate_for_project_evaluation.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/CLOUD_EXTRACT_PATCH_2026_05_07.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/LIVE_LAUNCH_HANDOFF.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/LIVE_RESTART_2026_05_07.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/PLIST_UPDATE_FOR_RELOCK.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/POLICY.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/UNMATCHED_GAMMA_CITIES_2026_05_07.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/activation/UNLOCK_CRITERIA.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/INDEX.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/repo_review_2026-05-01/AGENTS_MD_DATA_DEGRADED_clarification.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/repo_review_2026-05-01/B4_EXECUTION_PLAN.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/repo_review_2026-05-01/CI_GATE_TRIAGE_PROPOSAL.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/repo_review_2026-05-01/F12_AUDIT.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/repo_review_2026-05-01/FILE_INDEX.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/repo_review_2026-05-01/INVARIANT_CITATION_DRIFT_REPAIR.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/repo_review_2026-05-01/OPERATOR_RUNBOOK.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/repo_review_2026-05-01/P1_2_DEFAULT_HIGH_REPAIR.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/repo_review_2026-05-01/P1_3_TRUTH_AUTHORITY_AUDIT.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/repo_review_2026-05-01/SYNTHESIS.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/repo_review_2026-05-01/adversarial.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/repo_review_2026-05-01/architecture.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/repo_review_2026-05-01/live_running.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/repo_review_2026-05-01/security.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/repo_review_2026-05-01/test_topology.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-13_topology_compiler_program.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-14_session_backlog.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/AGENTS.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/e2e_audit/architect_end_state_audit.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/e2e_audit/runtime_trace.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/e2e_audit/synthesis_and_remediation_plan.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/phase0_evidence/mental_model_baseline.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/phase0_evidence/phase0b_critic_verdicts.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/phase0_evidence/planning_lock.txt: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/phase10_evidence/SCAFFOLD_B001_config_contract.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/phase10_evidence/SCAFFOLD_B047_scheduler_observability.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/phase10_evidence/critic_dave_phase10a_precommit_predictions.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/phase10_evidence/critic_dave_phase10a_wide_review.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/phase10_evidence/critic_dave_phase10b_wide_review.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/phase10_evidence/critic_eve_phase10c_wide_review.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/phase10_evidence/critic_eve_phase10e_wide_review.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/phase10_evidence/zeus_dt_coordination_handoff.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/phase10a_contract.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/phase10b_contract.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/phase10c_contract.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/phase10d_contract.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/phase10e_contract.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/phase10e_deep_plan.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/phase1_evidence/phase1_critic_verdicts.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/phase1_evidence/phase1_plan.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/phase2_evidence/critic_verdicts.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/phase2_evidence/opener_digest.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/phase2_evidence/phase2_plan.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/phase3_evidence/critic_verdicts.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/phase3_evidence/low_data_gap_audit.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/phase3_evidence/phase3_brief.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/phase3_evidence/scout_inventory.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/phase4_evidence/critic_alice_2_onboarding.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/phase4_evidence/exec_bob_final_dump.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/phase4_evidence/exec_carol_final_dump.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/phase4_evidence/legacy_code_audit_phase4_5.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/phase4_evidence/legacy_code_audit_phase4_5_common.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/phase4_evidence/low_temp_coverage_precheck.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/phase4_evidence/phase3_to_phase4_exec_bob_learnings.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/phase4_evidence/phase3_to_phase4_exec_carol_learnings.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/phase4_evidence/phase3_to_phase4_scout_learnings.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/phase4_evidence/phase3_to_phase4_testeng_learnings.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/phase4_evidence/phase4_5_design_note.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/phase4_evidence/phase4_5_wide_review.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/phase4_evidence/phase4_architect_preread.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/phase4_evidence/phase4_plan.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/phase4_evidence/phase4a_critic_verdicts.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/phase4_evidence/phase4b_critic_verdicts.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/phase4_evidence/phase4cd_critic_verdicts.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/phase4_evidence/phase5_prep_ingest_audit.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/phase4_evidence/r_letter_namespace_ruling.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/phase4_evidence/scout_dave_final_dump.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/phase4_evidence/scout_inventory.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/phase4_evidence/scripts_inventory_phase4_5.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/phase4_evidence/testeng_emma_final_dump.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/phase5_evidence/critic_alice_5A_verdict.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/phase5_evidence/critic_alice_5A_verdict_round2.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/phase5_evidence/critic_alice_5B_verdict.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/phase5_evidence/critic_alice_phase5_onboarding.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/phase5_evidence/critic_alice_phase5b_onboarding.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/phase5_evidence/critic_alice_phase5b_wide_review.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/phase5_evidence/critic_beth_fixpack_wide_review.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/phase5_evidence/critic_beth_onboarding.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/phase5_evidence/critic_beth_phase5c_wide_review.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/phase5_evidence/critic_beth_phase5c_wide_review_final.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/phase5_evidence/critic_beth_phase5fix_wide_review.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/phase5_evidence/critic_beth_phase6_wide_review.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/phase5_evidence/phase5_to_phase6_critic_beth_learnings.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/phase5_evidence/phase5_to_phase6_exec_ida_learnings.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/phase5_evidence/phase5_to_phase6_exec_juan_learnings.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/phase5_evidence/phase5_to_phase6_scout_gary_learnings.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/phase5_evidence/phase5_to_phase6_testeng_hank_learnings.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/phase5_evidence/phase5a_wide_review.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/phase5_evidence/phase5b_to_phase5c_critic_alice_learnings.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/phase5_evidence/phase5b_to_phase5c_exec_dan_learnings.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/phase5_evidence/phase5b_to_phase5c_exec_emma_learnings.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/phase5_evidence/phase5b_to_phase5c_scout_finn_learnings.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/phase5_evidence/phase5b_to_phase5c_testeng_grace_learnings.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/phase5_evidence/scout_dt_v2_package_triage.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/phase5_evidence/scout_gary_fixpack_landing_zone.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/phase5_evidence/scout_inventory_phase5.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/phase6_contract.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/phase6_evidence/critic_beth_phase6_wide_review.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/phase6_microplan.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/phase7_evidence/critic_beth_phase7a_learnings.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/phase7_evidence/critic_beth_phase7a_wide_review.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/phase7_evidence/critic_beth_phase7b_learnings.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/phase7_evidence/critic_beth_phase7b_wide_review.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/phase7_microplan.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/phase7a_contract.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/phase7b_contract.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/phase8_contract.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/phase8_evidence/critic_carol_phase8_learnings.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/phase8_evidence/critic_carol_phase8_wide_review.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/phase9_evidence/critic_carol_phase9a_learnings.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/phase9_evidence/critic_carol_phase9a_wide_review.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/phase9_evidence/critic_carol_phase9b_learnings.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/phase9_evidence/critic_carol_phase9b_reverify.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/phase9_evidence/critic_carol_phase9b_wide_review.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/phase9_evidence/critic_dave_onboarding_brief.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/phase9_evidence/critic_dave_phase9c_learnings.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/phase9_evidence/critic_dave_phase9c_reverify.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/phase9_evidence/critic_dave_phase9c_wide_review.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/phase9a_contract.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/phase9b_contract.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/phase9c_contract.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/plan.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/team_lead_handoff.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/team_lead_operating_contract.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/work_log.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_function_naming_freshness/plan.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_function_naming_freshness/receipt.json: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-16_function_naming_freshness/work_log.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-19_code_review_graph_topology_bridge/plan.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-19_code_review_graph_topology_bridge/receipt.json: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-19_code_review_graph_topology_bridge/work_log.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-19_workspace_artifact_sync/plan.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-19_workspace_artifact_sync/receipt.json: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-19_workspace_artifact_sync/work_log.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-20_code_impact_graph_context_pack/plan.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-20_code_impact_graph_context_pack/receipt.json: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-20_code_impact_graph_context_pack/work_log.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-20_code_review_graph_online_context/plan.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-20_code_review_graph_online_context/receipt.json: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-20_code_review_graph_online_context/work_log.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-20_workspace_authority_reconstruction/plan.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-20_workspace_authority_reconstruction/receipt.json: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-20_workspace_authority_reconstruction/work_log.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-21_docs_reclassification_reference_extraction/plan.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-21_docs_reclassification_reference_extraction/receipt.json: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-21_docs_reclassification_reference_extraction/work_log.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-21_gate_f_data_backfill/confirmed_upstream_gaps.yaml: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-21_gate_f_data_backfill/step1_schema_audit.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-21_gate_f_data_backfill/step1b_source_validity.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-21_gate_f_data_backfill/step2_phase0_pilot_plan.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-21_gate_f_data_backfill/step3_phase1_fleet_closeout.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-21_gate_f_data_backfill/step4_phase2_cutover.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-21_gate_f_data_backfill/step5_phase2_cutover_evidence.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-21_gate_f_data_backfill/step6_tail_backfill_evidence.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-21_gate_f_data_backfill/step7_phase3_closeout.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-21_gate_f_data_backfill/step8_data_collection_decoupling.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-22_docs_truth_refresh/plan.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-22_docs_truth_refresh/receipt.json: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-22_docs_truth_refresh/work_log.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-22_orphan_artifact_cleanup/plan.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-22_orphan_artifact_cleanup/receipt.json: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-22_orphan_artifact_cleanup/work_log.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-23_authority_kernel_gamechanger/plan.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-23_authority_kernel_gamechanger/receipt.json: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-23_authority_kernel_gamechanger/work_log.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-23_authority_rehydration/plan.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-23_authority_rehydration/receipt.json: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-23_authority_rehydration/work_log.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-23_data_readiness_remediation/evidence/bulk_writer_rca_final.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-23_data_readiness_remediation/evidence/harvester_gamma_probe.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-23_data_readiness_remediation/evidence/pb_execution_log.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-23_data_readiness_remediation/evidence/pb_schema_plan.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-23_data_readiness_remediation/evidence/pe_execution_log.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-23_data_readiness_remediation/evidence/pe_reconstruction_plan.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-23_data_readiness_remediation/evidence/pf_execution_log.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-23_data_readiness_remediation/evidence/pf_quarantine_plan.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-23_data_readiness_remediation/evidence/pg_corrections_plan.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-23_data_readiness_remediation/evidence/pg_execution_log.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-23_data_readiness_remediation/evidence/planning_lock_receipt_v4.json: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-23_data_readiness_remediation/evidence/planning_lock_receipt_v5.json: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-23_data_readiness_remediation/evidence/planning_lock_receipt_v6.json: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-23_data_readiness_remediation/evidence/scripts/pb_apply_schema_migration.sql: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-23_data_readiness_remediation/evidence/scripts/pb_run_migration.py: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-23_data_readiness_remediation/evidence/scripts/pc_agreement_audit.py: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-23_data_readiness_remediation/evidence/scripts/pe_dryrun.py: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-23_data_readiness_remediation/evidence/scripts/pe_reconstruct.py: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-23_data_readiness_remediation/evidence/scripts/pf_mark_quarantine.py: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-23_data_readiness_remediation/evidence/scripts/pg_delete_wrongmetric_and_synthetic.py: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-23_data_readiness_remediation/evidence/settlement_observation_agreement_audit.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-23_data_readiness_remediation/first_principles.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-23_data_readiness_remediation/plan.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-23_data_readiness_remediation/plan_v2.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-23_data_readiness_remediation/plan_v3.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-23_data_readiness_remediation/plan_v4.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-23_data_readiness_remediation/plan_v5.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-23_data_readiness_remediation/plan_v6.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-23_data_readiness_remediation/work_log.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-23_graph_refresh_official_integration/plan.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-23_graph_refresh_official_integration/receipt.json: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-23_graph_refresh_official_integration/work_log.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-23_guidance_kernel_semantic_boot/plan.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-23_guidance_kernel_semantic_boot/receipt.json: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-23_guidance_kernel_semantic_boot/work_log.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-23_live_harvester_enablement_dr33/evidence/dr33_execution_log.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-04-23_live_harvester_enablement_dr33/plan.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-01_hko_backfill/work_log.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-01_hko_release/hko_backfill_log.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-01_live_arming/runbook.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-01_live_smoke_test/findings.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-01_live_smoke_test/part2_report.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-01_live_smoke_test/preflight.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-01_live_smoke_test/report.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-01_paris_station_resolution/work_log.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-01_tigge_4_29_backfill/work_log.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-02_hk_paris_release/verify_ready.py: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-02_hk_paris_release/work_log.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-02_live_entry_data_contract/CURRENT_ROLLOUT_MODE.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-02_live_entry_data_contract/PHASE0_EVIDENCE_LOCK.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-02_live_entry_data_contract/PLAN.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-02_live_entry_data_contract/PLAN_v2.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-02_live_entry_data_contract/PLAN_v3.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-02_live_entry_data_contract/PLAN_v4.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-02_live_entry_data_contract/PREMISE_ERRATUM_2026-05-03.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-03_ddd_implementation_plan.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-04_zeus_may3_review_remediation/INDEX.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-04_zeus_may3_review_remediation/LOCK_DECISION.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-04_zeus_may3_review_remediation/MASTER_PLAN_v2.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-04_zeus_may3_review_remediation/ORCHESTRATOR_RUNBOOK.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-04_zeus_may3_review_remediation/PLAN.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-04_zeus_may3_review_remediation/T-1_COMPAT_SUBMIT_SCAN.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-04_zeus_may3_review_remediation/T-1_DAEMON_STATE.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-04_zeus_may3_review_remediation/T-1_GIT_STATUS.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-04_zeus_may3_review_remediation/T-1_KNOWN_GAPS_COVERAGE.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-04_zeus_may3_review_remediation/T-1_SCHEMA_SCAN.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-04_zeus_may3_review_remediation/T-1_TOPOLOGY_ROUTE.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-04_zeus_may3_review_remediation/T0_ALERT_POLICY.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-04_zeus_may3_review_remediation/T0_D6_FIELD_LOCK.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-04_zeus_may3_review_remediation/T0_DAEMON_UNLOADED.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-04_zeus_may3_review_remediation/T0_HARVESTER_POLICY.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-04_zeus_may3_review_remediation/T0_PROTOCOL_ACK.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-04_zeus_may3_review_remediation/T0_SQLITE_POLICY.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-04_zeus_may3_review_remediation/T0_VENUE_QUIESCENT.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-04_zeus_may3_review_remediation/critic_round5_response.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-04_zeus_may3_review_remediation/phases/T1A/boot/executor.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-04_zeus_may3_review_remediation/phases/T1A/critic/review.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-04_zeus_may3_review_remediation/phases/T1A/execution/execution_result.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-04_zeus_may3_review_remediation/phases/T1A/phase.json: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-04_zeus_may3_review_remediation/phases/T1A/scope.yaml: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-04_zeus_may3_review_remediation/phases/T1A/verifier/verification.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-04_zeus_may3_review_remediation/phases/T1BD/critic/review.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-04_zeus_may3_review_remediation/phases/T1BD/phase.json: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-04_zeus_may3_review_remediation/phases/T1BD/scope.yaml: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-04_zeus_may3_review_remediation/phases/T1BD/verifier/verification.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-04_zeus_may3_review_remediation/phases/T1C/critic/review.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-04_zeus_may3_review_remediation/phases/T1C/phase.json: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-04_zeus_may3_review_remediation/phases/T1C/scope.yaml: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-04_zeus_may3_review_remediation/phases/T1C/verifier/verification.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-04_zeus_may3_review_remediation/phases/T1E/critic/review.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-04_zeus_may3_review_remediation/phases/T1E/phase.json: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-04_zeus_may3_review_remediation/phases/T1E/scope.yaml: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-04_zeus_may3_review_remediation/phases/T1E/verifier/verification.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-04_zeus_may3_review_remediation/phases/T1F/critic/review.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-04_zeus_may3_review_remediation/phases/T1F/phase.json: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-04_zeus_may3_review_remediation/phases/T1F/scope.yaml: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-04_zeus_may3_review_remediation/phases/T1F/security/review.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-04_zeus_may3_review_remediation/phases/T1F/verifier/verification.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-04_zeus_may3_review_remediation/phases/T1G/audit/sdk_envelope_path_audit.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-04_zeus_may3_review_remediation/phases/T1G/critic/review.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-04_zeus_may3_review_remediation/phases/T1G/phase.json: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-04_zeus_may3_review_remediation/phases/T1G/scope.yaml: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-04_zeus_may3_review_remediation/phases/T1G/security/review.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-04_zeus_may3_review_remediation/phases/T1G/verifier/verification.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-04_zeus_may3_review_remediation/phases/T1H/critic/review.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-04_zeus_may3_review_remediation/phases/T1H/phase.json: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-04_zeus_may3_review_remediation/phases/T1H/scope.yaml: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-04_zeus_may3_review_remediation/phases/T1H/verifier/verification.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-04_zeus_may3_review_remediation/phases/T2F/phase.json: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-04_zeus_may3_review_remediation/phases/T2F/scope.yaml: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-04_zeus_may3_review_remediation/phases/T2F/verifier/verification.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-04_zeus_may3_review_remediation/phases/T2G/phase.json: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-04_zeus_may3_review_remediation/phases/T2G/scope.yaml: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-04_zeus_may3_review_remediation/phases/T2G/security/review.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-04_zeus_may3_review_remediation/phases/T2G/verifier/verification.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-04_zeus_may3_review_remediation/phases/T2H/phase.json: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-04_zeus_may3_review_remediation/phases/T2H/scope.yaml: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-04_zeus_may3_review_remediation/phases/T2H/verifier/verification.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-04_zeus_may3_review_remediation/phases/T2I/phase.json: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-04_zeus_may3_review_remediation/phases/T2I/scope.yaml: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-04_zeus_may3_review_remediation/planner_output.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-04_zeus_may3_review_remediation/scope.yaml: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-05_object_invariance_mainline/PLAN.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-05_object_invariance_wave11/PLAN.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-05_object_invariance_wave12/PLAN.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-05_object_invariance_wave13/PLAN.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-05_object_invariance_wave14/PLAN.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-05_object_invariance_wave15/PLAN.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-05_object_invariance_wave16/PLAN.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-05_object_invariance_wave17/PLAN.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-05_object_invariance_wave18/PLAN.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-05_object_invariance_wave19/PLAN.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-05_object_invariance_wave20/PLAN.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-05_object_invariance_wave21/PLAN.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-05_object_invariance_wave5/PLAN.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-05_object_invariance_wave6/PLAN.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-05_object_invariance_wave7/PLAN.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-05_object_invariance_wave8/PLAN.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-05_topology_noise_repair/PLAN.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-06_calibration_quality_blockers/PLAN.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-06_calibration_quality_blockers/QUARANTINE_LEDGER.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-06_topology_redesign/BEST_DESIGN.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-06_topology_redesign/PLAN.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-06_topology_redesign/PLAN_AMENDMENT.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-06_topology_redesign/ULTRAPLAN_PROMPT.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-06_topology_redesign/ULTRA_PLAN_FINAL_PREP.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-06_topology_redesign/adr/ADR-1_primitive_choice.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-06_topology_redesign/adr/ADR-2_profile_catalog_deletion.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-06_topology_redesign/adr/ADR-3_paper_live_type_discipline.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-06_topology_redesign/adr/ADR-4_anti_drift_binding.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-06_topology_redesign/adr/ADR-5_acceptance_gate_replay_event_scope.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-06_topology_redesign/adr/ADR-6_scope_timeline.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-06_topology_redesign/gates/gate1_edit_time.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-06_topology_redesign/gates/gate3_commit_time.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-06_topology_redesign/ultraplan/# ANTI_DRIFT_CHARTER.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-06_topology_redesign/ultraplan/# CUTOVER_RUNBOOK.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-06_topology_redesign/ultraplan/# IMPLEMENTATION_PLAN.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-06_topology_redesign/ultraplan/# RISK_REGISTER.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-06_topology_redesign/ultraplan/# ULTIMATE_DESIGN.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-06_topology_redesign/ultraplan/spec.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-07_hook_redesign_v2/PLAN.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-07_navigation_topology_v2/PLAN.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-07_object_invariance_wave24/PLAN.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-07_object_invariance_wave25/PLAN.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-07_object_invariance_wave26/PLAN.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-07_recalibration_after_low_high_alignment/PLAN.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-07_recalibration_after_low_high_alignment/REPORT.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-08_262_london_f_to_c/RUN.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-08_f1_subprocess_hardening/RUN.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-08_object_invariance_remaining_mainline/PLAN.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-08_object_invariance_wave27/PLAN.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-08_object_invariance_wave28/PLAN.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-08_object_invariance_wave29/PLAN.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-08_object_invariance_wave30/PLAN.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-08_object_invariance_wave31/PLAN.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-08_object_invariance_wave32/PLAN.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-08_object_invariance_wave33/PLAN.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-08_object_invariance_wave34/PLAN.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-08_object_invariance_wave35/PLAN.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-08_object_invariance_wave36/PLAN.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-08_object_invariance_wave37/PLAN.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-08_object_invariance_wave38/PLAN.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-08_object_invariance_wave39/PLAN.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-08_object_invariance_wave41/PLAN.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-08_object_invariance_wave42/PLAN.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-08_obs_outside_bin_audit/RUN.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-08_topology_redesign_completion/PLAN.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-09_post_s4_residuals_topology/PLAN.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-09_post_s4_residuals_topology/phases/task_2026-05-09_topology_tooling_preflight/PLAN.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-09_pr_workflow_failure/ANALYSIS.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-11_ecmwf_download_replacement/PLAN.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-11_tigge_vm_to_zeus_db/EVIDENCE_2026-05-11_session.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-11_tigge_vm_to_zeus_db/PLAN.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-11_tigge_vm_to_zeus_db/POST_REBUILD_HANDOFF_2026-05-11.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/task_2026-05-14_attach_path_index_fix/PLAN.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/zeus_workspace_authority_reconstruction_package_2026-04-20_v2/00_executive_ruling.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/zeus_workspace_authority_reconstruction_package_2026-04-20_v2/01_mental_model.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/zeus_workspace_authority_reconstruction_package_2026-04-20_v2/02_authority_order_rewrite.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/zeus_workspace_authority_reconstruction_package_2026-04-20_v2/03_file_by_file_authority_audit.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/zeus_workspace_authority_reconstruction_package_2026-04-20_v2/04_code_review_graph_policy.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/zeus_workspace_authority_reconstruction_package_2026-04-20_v2/05_archives_policy.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/zeus_workspace_authority_reconstruction_package_2026-04-20_v2/06_topology_debt_triage.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/zeus_workspace_authority_reconstruction_package_2026-04-20_v2/07_execution_packets.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/zeus_workspace_authority_reconstruction_package_2026-04-20_v2/08_patch_blueprints/p0_patch_blueprint.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/zeus_workspace_authority_reconstruction_package_2026-04-20_v2/08_patch_blueprints/p1_patch_blueprint.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/zeus_workspace_authority_reconstruction_package_2026-04-20_v2/08_patch_blueprints/p2_patch_blueprint.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/zeus_workspace_authority_reconstruction_package_2026-04-20_v2/08_patch_blueprints/p3_patch_blueprint.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/zeus_workspace_authority_reconstruction_package_2026-04-20_v2/09_validation_matrix.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/zeus_workspace_authority_reconstruction_package_2026-04-20_v2/10_codex_prompts/codex_p0_execute.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/zeus_workspace_authority_reconstruction_package_2026-04-20_v2/10_codex_prompts/codex_p1_execute.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/zeus_workspace_authority_reconstruction_package_2026-04-20_v2/10_codex_prompts/codex_p2_execute.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/zeus_workspace_authority_reconstruction_package_2026-04-20_v2/10_codex_prompts/codex_p3_execute.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/zeus_workspace_authority_reconstruction_package_2026-04-20_v2/10_codex_prompts/codex_packet_summary.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/zeus_workspace_authority_reconstruction_package_2026-04-20_v2/10_codex_prompts/codex_review_after_p0.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/zeus_workspace_authority_reconstruction_package_2026-04-20_v2/11_pro_followup_prompt.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/zeus_workspace_authority_reconstruction_package_2026-04-20_v2/12_decision_register.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/zeus_workspace_authority_reconstruction_package_2026-04-20_v2/13_open_questions.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/zeus_workspace_authority_reconstruction_package_2026-04-20_v2/14_not_now.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/zeus_workspace_authority_reconstruction_package_2026-04-20_v2/15_machine_readable_summary.json: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/zeus_workspace_authority_reconstruction_package_2026-04-20_v2/16_apply_order.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/zeus_workspace_authority_reconstruction_package_2026-04-20_v2/MANIFEST.txt: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/archive/2026-Q2/zeus_workspace_authority_reconstruction_package_2026-04-20_v2/README.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/live_rescue_ledger_2026-05-04.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/repo_review_2026-05-01.archived: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/task_2026-04-13_topology_compiler_program.md.archived: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/task_2026-04-14_session_backlog.md.archived: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/task_2026-04-16_dual_track_metric_spine.archived: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/task_2026-04-16_function_naming_freshness.archived: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/task_2026-04-19_code_review_graph_topology_bridge.archived: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/task_2026-04-19_workspace_artifact_sync.archived: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/task_2026-04-20_code_impact_graph_context_pack.archived: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/task_2026-04-20_code_review_graph_online_context.archived: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/task_2026-04-20_workspace_authority_reconstruction.archived: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/task_2026-04-21_docs_reclassification_reference_extraction.archived: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/task_2026-04-21_gate_f_data_backfill.archived: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/task_2026-04-22_docs_truth_refresh.archived: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/task_2026-04-22_orphan_artifact_cleanup.archived: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/task_2026-04-23_authority_kernel_gamechanger.archived: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/task_2026-04-23_authority_rehydration.archived: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/task_2026-04-23_data_readiness_remediation.archived: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/task_2026-04-23_graph_refresh_official_integration.archived: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/task_2026-04-23_guidance_kernel_semantic_boot.archived: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/task_2026-04-23_live_harvester_enablement_dr33.archived: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/task_2026-05-01_hko_backfill.archived: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/task_2026-05-01_hko_release.archived: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/task_2026-05-01_live_arming.archived: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/task_2026-05-01_live_smoke_test.archived: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/task_2026-05-01_paris_station_resolution.archived: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/task_2026-05-01_tigge_4_29_backfill.archived: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/task_2026-05-02_hk_paris_release.archived: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/task_2026-05-02_live_entry_data_contract.archived: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/task_2026-05-03_ddd_implementation_plan.md.archived: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/task_2026-05-04_zeus_may3_review_remediation.archived: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/task_2026-05-05_object_invariance_mainline.archived: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/task_2026-05-05_object_invariance_wave11.archived: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/task_2026-05-05_object_invariance_wave12.archived: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/task_2026-05-05_object_invariance_wave13.archived: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/task_2026-05-05_object_invariance_wave14.archived: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/task_2026-05-05_object_invariance_wave15.archived: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/task_2026-05-05_object_invariance_wave16.archived: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/task_2026-05-05_object_invariance_wave17.archived: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/task_2026-05-05_object_invariance_wave18.archived: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/task_2026-05-05_object_invariance_wave19.archived: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/task_2026-05-05_object_invariance_wave20.archived: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/task_2026-05-05_object_invariance_wave21.archived: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/task_2026-05-05_object_invariance_wave5.archived: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/task_2026-05-05_object_invariance_wave6.archived: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/task_2026-05-05_object_invariance_wave7.archived: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/task_2026-05-05_object_invariance_wave8.archived: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/task_2026-05-05_topology_noise_repair.archived: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/task_2026-05-06_calibration_quality_blockers.archived: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/task_2026-05-06_topology_redesign.archived: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/task_2026-05-07_hook_redesign_v2.archived: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/task_2026-05-07_navigation_topology_v2.archived: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/task_2026-05-07_object_invariance_wave24.archived: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/task_2026-05-07_object_invariance_wave25.archived: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/task_2026-05-07_object_invariance_wave26.archived: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/task_2026-05-07_recalibration_after_low_high_alignment.archived: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/task_2026-05-08_262_london_f_to_c.archived: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/task_2026-05-08_f1_subprocess_hardening.archived: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/task_2026-05-08_object_invariance_remaining_mainline.archived: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/task_2026-05-08_object_invariance_wave27.archived: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/task_2026-05-08_object_invariance_wave28.archived: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/task_2026-05-08_object_invariance_wave29.archived: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/task_2026-05-08_object_invariance_wave30.archived: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/task_2026-05-08_object_invariance_wave31.archived: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/task_2026-05-08_object_invariance_wave32.archived: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/task_2026-05-08_object_invariance_wave33.archived: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/task_2026-05-08_object_invariance_wave34.archived: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/task_2026-05-08_object_invariance_wave35.archived: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/task_2026-05-08_object_invariance_wave36.archived: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/task_2026-05-08_object_invariance_wave37.archived: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/task_2026-05-08_object_invariance_wave38.archived: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/task_2026-05-08_object_invariance_wave39.archived: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/task_2026-05-08_object_invariance_wave41.archived: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/task_2026-05-08_object_invariance_wave42.archived: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/task_2026-05-08_obs_outside_bin_audit.archived: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/task_2026-05-08_topology_redesign_completion.archived: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/task_2026-05-09_post_s4_residuals_topology.archived: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/task_2026-05-09_pr_workflow_failure.archived: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/task_2026-05-11_ecmwf_download_replacement.archived: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/task_2026-05-11_tigge_vm_to_zeus_db.archived: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/task_2026-05-14_attach_path_index_fix.archived: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/operations/zeus_workspace_authority_reconstruction_package_2026-04-20_v2.archived: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/reference/zeus_calibration_weighting_authority.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/reference/zeus_kelly_asymmetric_loss_handoff.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/reference/zeus_vendor_change_response_registry.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/review/AGENTS.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/review/code_review.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:docs_registry_unclassified_doc] docs/review/review_scope_map.md: tracked docs file is not classified by architecture/docs_registry.yaml
+- [error:docs:hidden_active_doc] docs/artifacts/Zeus_May2_review_ strategy_update.md: active docs path contains spaces
+- [error:docs:docs_unregistered_subtree] docs/lore: docs subtree has visible files but is not declared in topology docs_subroots
+- [error:docs:docs_non_markdown_artifact] docs/lore/INDEX.json: non-markdown docs artifact must live in a declared artifact/evidence subroot
+- [error:docs:docs_unregistered_subtree] docs/lore: docs subtree has visible files but is not declared in topology docs_subroots
+- [error:docs:docs_unregistered_subtree] docs/lore: docs subtree has visible files but is not declared in topology docs_subroots
+- [error:docs:docs_unregistered_subtree] docs/lore: docs subtree has visible files but is not declared in topology docs_subroots
+- [error:docs:docs_unregistered_subtree] docs/methodology: docs subtree has visible files but is not declared in topology docs_subroots
+- [error:docs:docs_generic_name] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/plan.md: generic docs names are only allowed inside active task folders or archived packets
+- [error:docs:docs_generic_name] docs/operations/archive/2026-Q2/task_2026-04-16_function_naming_freshness/plan.md: generic docs names are only allowed inside active task folders or archived packets
+- [error:docs:docs_generic_name] docs/operations/archive/2026-Q2/task_2026-04-19_code_review_graph_topology_bridge/plan.md: generic docs names are only allowed inside active task folders or archived packets
+- [error:docs:docs_generic_name] docs/operations/archive/2026-Q2/task_2026-04-19_workspace_artifact_sync/plan.md: generic docs names are only allowed inside active task folders or archived packets
+- [error:docs:docs_generic_name] docs/operations/archive/2026-Q2/task_2026-04-20_code_impact_graph_context_pack/plan.md: generic docs names are only allowed inside active task folders or archived packets
+- [error:docs:docs_generic_name] docs/operations/archive/2026-Q2/task_2026-04-20_code_review_graph_online_context/plan.md: generic docs names are only allowed inside active task folders or archived packets
+- [error:docs:docs_generic_name] docs/operations/archive/2026-Q2/task_2026-04-20_workspace_authority_reconstruction/plan.md: generic docs names are only allowed inside active task folders or archived packets
+- [error:docs:docs_generic_name] docs/operations/archive/2026-Q2/task_2026-04-21_docs_reclassification_reference_extraction/plan.md: generic docs names are only allowed inside active task folders or archived packets
+- [error:docs:docs_generic_name] docs/operations/archive/2026-Q2/task_2026-04-22_docs_truth_refresh/plan.md: generic docs names are only allowed inside active task folders or archived packets
+- [error:docs:docs_generic_name] docs/operations/archive/2026-Q2/task_2026-04-22_orphan_artifact_cleanup/plan.md: generic docs names are only allowed inside active task folders or archived packets
+- [error:docs:docs_generic_name] docs/operations/archive/2026-Q2/task_2026-04-23_authority_kernel_gamechanger/plan.md: generic docs names are only allowed inside active task folders or archived packets
+- [error:docs:docs_generic_name] docs/operations/archive/2026-Q2/task_2026-04-23_authority_rehydration/plan.md: generic docs names are only allowed inside active task folders or archived packets
+- [error:docs:docs_generic_name] docs/operations/archive/2026-Q2/task_2026-04-23_data_readiness_remediation/plan.md: generic docs names are only allowed inside active task folders or archived packets
+- [error:docs:docs_generic_name] docs/operations/archive/2026-Q2/task_2026-04-23_graph_refresh_official_integration/plan.md: generic docs names are only allowed inside active task folders or archived packets
+- [error:docs:docs_generic_name] docs/operations/archive/2026-Q2/task_2026-04-23_guidance_kernel_semantic_boot/plan.md: generic docs names are only allowed inside active task folders or archived packets
+- [error:docs:docs_generic_name] docs/operations/archive/2026-Q2/task_2026-04-23_live_harvester_enablement_dr33/plan.md: generic docs names are only allowed inside active task folders or archived packets
+- [error:docs:hidden_active_doc] docs/operations/archive/2026-Q2/task_2026-05-06_topology_redesign/ultraplan/# ANTI_DRIFT_CHARTER.md: active docs path contains spaces
+- [error:docs:hidden_active_doc] docs/operations/archive/2026-Q2/task_2026-05-06_topology_redesign/ultraplan/# CUTOVER_RUNBOOK.md: active docs path contains spaces
+- [error:docs:hidden_active_doc] docs/operations/archive/2026-Q2/task_2026-05-06_topology_redesign/ultraplan/# IMPLEMENTATION_PLAN.md: active docs path contains spaces
+- [error:docs:hidden_active_doc] docs/operations/archive/2026-Q2/task_2026-05-06_topology_redesign/ultraplan/# RISK_REGISTER.md: active docs path contains spaces
+- [error:docs:hidden_active_doc] docs/operations/archive/2026-Q2/task_2026-05-06_topology_redesign/ultraplan/# ULTIMATE_DESIGN.md: active docs path contains spaces
+- [error:docs:docs_non_markdown_artifact] docs/operations/repo_review_2026-05-01.archived: non-markdown docs artifact must live in a declared artifact/evidence subroot
+- [error:docs:docs_non_markdown_artifact] docs/operations/task_2026-04-13_topology_compiler_program.md.archived: non-markdown docs artifact must live in a declared artifact/evidence subroot
+- [error:docs:docs_non_markdown_artifact] docs/operations/task_2026-04-14_session_backlog.md.archived: non-markdown docs artifact must live in a declared artifact/evidence subroot
+- [error:docs:docs_non_markdown_artifact] docs/operations/task_2026-04-16_dual_track_metric_spine.archived: non-markdown docs artifact must live in a declared artifact/evidence subroot
+- [error:docs:docs_non_markdown_artifact] docs/operations/task_2026-04-16_function_naming_freshness.archived: non-markdown docs artifact must live in a declared artifact/evidence subroot
+- [error:docs:docs_non_markdown_artifact] docs/operations/task_2026-04-19_code_review_graph_topology_bridge.archived: non-markdown docs artifact must live in a declared artifact/evidence subroot
+- [error:docs:docs_non_markdown_artifact] docs/operations/task_2026-04-19_workspace_artifact_sync.archived: non-markdown docs artifact must live in a declared artifact/evidence subroot
+- [error:docs:docs_non_markdown_artifact] docs/operations/task_2026-04-20_code_impact_graph_context_pack.archived: non-markdown docs artifact must live in a declared artifact/evidence subroot
+- [error:docs:docs_non_markdown_artifact] docs/operations/task_2026-04-20_code_review_graph_online_context.archived: non-markdown docs artifact must live in a declared artifact/evidence subroot
+- [error:docs:docs_non_markdown_artifact] docs/operations/task_2026-04-20_workspace_authority_reconstruction.archived: non-markdown docs artifact must live in a declared artifact/evidence subroot
+- [error:docs:docs_non_markdown_artifact] docs/operations/task_2026-04-21_docs_reclassification_reference_extraction.archived: non-markdown docs artifact must live in a declared artifact/evidence subroot
+- [error:docs:docs_non_markdown_artifact] docs/operations/task_2026-04-21_gate_f_data_backfill.archived: non-markdown docs artifact must live in a declared artifact/evidence subroot
+- [error:docs:docs_non_markdown_artifact] docs/operations/task_2026-04-22_docs_truth_refresh.archived: non-markdown docs artifact must live in a declared artifact/evidence subroot
+- [error:docs:docs_non_markdown_artifact] docs/operations/task_2026-04-22_orphan_artifact_cleanup.archived: non-markdown docs artifact must live in a declared artifact/evidence subroot
+- [error:docs:docs_non_markdown_artifact] docs/operations/task_2026-04-23_authority_kernel_gamechanger.archived: non-markdown docs artifact must live in a declared artifact/evidence subroot
+- [error:docs:docs_non_markdown_artifact] docs/operations/task_2026-04-23_authority_rehydration.archived: non-markdown docs artifact must live in a declared artifact/evidence subroot
+- [error:docs:docs_non_markdown_artifact] docs/operations/task_2026-04-23_data_readiness_remediation.archived: non-markdown docs artifact must live in a declared artifact/evidence subroot
+- [error:docs:docs_non_markdown_artifact] docs/operations/task_2026-04-23_graph_refresh_official_integration.archived: non-markdown docs artifact must live in a declared artifact/evidence subroot
+- [error:docs:docs_non_markdown_artifact] docs/operations/task_2026-04-23_guidance_kernel_semantic_boot.archived: non-markdown docs artifact must live in a declared artifact/evidence subroot
+- [error:docs:docs_non_markdown_artifact] docs/operations/task_2026-04-23_live_harvester_enablement_dr33.archived: non-markdown docs artifact must live in a declared artifact/evidence subroot
+- [error:docs:docs_non_markdown_artifact] docs/operations/task_2026-05-01_hko_backfill.archived: non-markdown docs artifact must live in a declared artifact/evidence subroot
+- [error:docs:docs_non_markdown_artifact] docs/operations/task_2026-05-01_hko_release.archived: non-markdown docs artifact must live in a declared artifact/evidence subroot
+- [error:docs:docs_non_markdown_artifact] docs/operations/task_2026-05-01_live_arming.archived: non-markdown docs artifact must live in a declared artifact/evidence subroot
+- [error:docs:docs_non_markdown_artifact] docs/operations/task_2026-05-01_live_smoke_test.archived: non-markdown docs artifact must live in a declared artifact/evidence subroot
+- [error:docs:docs_non_markdown_artifact] docs/operations/task_2026-05-01_paris_station_resolution.archived: non-markdown docs artifact must live in a declared artifact/evidence subroot
+- [error:docs:docs_non_markdown_artifact] docs/operations/task_2026-05-01_tigge_4_29_backfill.archived: non-markdown docs artifact must live in a declared artifact/evidence subroot
+- [error:docs:docs_non_markdown_artifact] docs/operations/task_2026-05-02_hk_paris_release.archived: non-markdown docs artifact must live in a declared artifact/evidence subroot
+- [error:docs:docs_non_markdown_artifact] docs/operations/task_2026-05-02_live_entry_data_contract.archived: non-markdown docs artifact must live in a declared artifact/evidence subroot
+- [error:docs:docs_non_markdown_artifact] docs/operations/task_2026-05-03_ddd_implementation_plan.md.archived: non-markdown docs artifact must live in a declared artifact/evidence subroot
+- [error:docs:docs_non_markdown_artifact] docs/operations/task_2026-05-04_zeus_may3_review_remediation.archived: non-markdown docs artifact must live in a declared artifact/evidence subroot
+- [error:docs:docs_non_markdown_artifact] docs/operations/task_2026-05-05_object_invariance_mainline.archived: non-markdown docs artifact must live in a declared artifact/evidence subroot
+- [error:docs:docs_non_markdown_artifact] docs/operations/task_2026-05-05_object_invariance_wave11.archived: non-markdown docs artifact must live in a declared artifact/evidence subroot
+- [error:docs:docs_non_markdown_artifact] docs/operations/task_2026-05-05_object_invariance_wave12.archived: non-markdown docs artifact must live in a declared artifact/evidence subroot
+- [error:docs:docs_non_markdown_artifact] docs/operations/task_2026-05-05_object_invariance_wave13.archived: non-markdown docs artifact must live in a declared artifact/evidence subroot
+- [error:docs:docs_non_markdown_artifact] docs/operations/task_2026-05-05_object_invariance_wave14.archived: non-markdown docs artifact must live in a declared artifact/evidence subroot
+- [error:docs:docs_non_markdown_artifact] docs/operations/task_2026-05-05_object_invariance_wave15.archived: non-markdown docs artifact must live in a declared artifact/evidence subroot
+- [error:docs:docs_non_markdown_artifact] docs/operations/task_2026-05-05_object_invariance_wave16.archived: non-markdown docs artifact must live in a declared artifact/evidence subroot
+- [error:docs:docs_non_markdown_artifact] docs/operations/task_2026-05-05_object_invariance_wave17.archived: non-markdown docs artifact must live in a declared artifact/evidence subroot
+- [error:docs:docs_non_markdown_artifact] docs/operations/task_2026-05-05_object_invariance_wave18.archived: non-markdown docs artifact must live in a declared artifact/evidence subroot
+- [error:docs:docs_non_markdown_artifact] docs/operations/task_2026-05-05_object_invariance_wave19.archived: non-markdown docs artifact must live in a declared artifact/evidence subroot
+- [error:docs:docs_non_markdown_artifact] docs/operations/task_2026-05-05_object_invariance_wave20.archived: non-markdown docs artifact must live in a declared artifact/evidence subroot
+- [error:docs:docs_non_markdown_artifact] docs/operations/task_2026-05-05_object_invariance_wave21.archived: non-markdown docs artifact must live in a declared artifact/evidence subroot
+- [error:docs:docs_non_markdown_artifact] docs/operations/task_2026-05-05_object_invariance_wave5.archived: non-markdown docs artifact must live in a declared artifact/evidence subroot
+- [error:docs:docs_non_markdown_artifact] docs/operations/task_2026-05-05_object_invariance_wave6.archived: non-markdown docs artifact must live in a declared artifact/evidence subroot
+- [error:docs:docs_non_markdown_artifact] docs/operations/task_2026-05-05_object_invariance_wave7.archived: non-markdown docs artifact must live in a declared artifact/evidence subroot
+- [error:docs:docs_non_markdown_artifact] docs/operations/task_2026-05-05_object_invariance_wave8.archived: non-markdown docs artifact must live in a declared artifact/evidence subroot
+- [error:docs:docs_non_markdown_artifact] docs/operations/task_2026-05-05_topology_noise_repair.archived: non-markdown docs artifact must live in a declared artifact/evidence subroot
+- [error:docs:docs_non_markdown_artifact] docs/operations/task_2026-05-06_calibration_quality_blockers.archived: non-markdown docs artifact must live in a declared artifact/evidence subroot
+- [error:docs:docs_non_markdown_artifact] docs/operations/task_2026-05-06_topology_redesign.archived: non-markdown docs artifact must live in a declared artifact/evidence subroot
+- [error:docs:docs_non_markdown_artifact] docs/operations/task_2026-05-07_hook_redesign_v2.archived: non-markdown docs artifact must live in a declared artifact/evidence subroot
+- [error:docs:docs_non_markdown_artifact] docs/operations/task_2026-05-07_navigation_topology_v2.archived: non-markdown docs artifact must live in a declared artifact/evidence subroot
+- [error:docs:docs_non_markdown_artifact] docs/operations/task_2026-05-07_object_invariance_wave24.archived: non-markdown docs artifact must live in a declared artifact/evidence subroot
+- [error:docs:docs_non_markdown_artifact] docs/operations/task_2026-05-07_object_invariance_wave25.archived: non-markdown docs artifact must live in a declared artifact/evidence subroot
+- [error:docs:docs_non_markdown_artifact] docs/operations/task_2026-05-07_object_invariance_wave26.archived: non-markdown docs artifact must live in a declared artifact/evidence subroot
+- [error:docs:docs_non_markdown_artifact] docs/operations/task_2026-05-07_recalibration_after_low_high_alignment.archived: non-markdown docs artifact must live in a declared artifact/evidence subroot
+- [error:docs:docs_non_markdown_artifact] docs/operations/task_2026-05-08_262_london_f_to_c.archived: non-markdown docs artifact must live in a declared artifact/evidence subroot
+- [error:docs:docs_non_markdown_artifact] docs/operations/task_2026-05-08_f1_subprocess_hardening.archived: non-markdown docs artifact must live in a declared artifact/evidence subroot
+- [error:docs:docs_non_markdown_artifact] docs/operations/task_2026-05-08_object_invariance_remaining_mainline.archived: non-markdown docs artifact must live in a declared artifact/evidence subroot
+- [error:docs:docs_non_markdown_artifact] docs/operations/task_2026-05-08_object_invariance_wave27.archived: non-markdown docs artifact must live in a declared artifact/evidence subroot
+- [error:docs:docs_non_markdown_artifact] docs/operations/task_2026-05-08_object_invariance_wave28.archived: non-markdown docs artifact must live in a declared artifact/evidence subroot
+- [error:docs:docs_non_markdown_artifact] docs/operations/task_2026-05-08_object_invariance_wave29.archived: non-markdown docs artifact must live in a declared artifact/evidence subroot
+- [error:docs:docs_non_markdown_artifact] docs/operations/task_2026-05-08_object_invariance_wave30.archived: non-markdown docs artifact must live in a declared artifact/evidence subroot
+- [error:docs:docs_non_markdown_artifact] docs/operations/task_2026-05-08_object_invariance_wave31.archived: non-markdown docs artifact must live in a declared artifact/evidence subroot
+- [error:docs:docs_non_markdown_artifact] docs/operations/task_2026-05-08_object_invariance_wave32.archived: non-markdown docs artifact must live in a declared artifact/evidence subroot
+- [error:docs:docs_non_markdown_artifact] docs/operations/task_2026-05-08_object_invariance_wave33.archived: non-markdown docs artifact must live in a declared artifact/evidence subroot
+- [error:docs:docs_non_markdown_artifact] docs/operations/task_2026-05-08_object_invariance_wave34.archived: non-markdown docs artifact must live in a declared artifact/evidence subroot
+- [error:docs:docs_non_markdown_artifact] docs/operations/task_2026-05-08_object_invariance_wave35.archived: non-markdown docs artifact must live in a declared artifact/evidence subroot
+- [error:docs:docs_non_markdown_artifact] docs/operations/task_2026-05-08_object_invariance_wave36.archived: non-markdown docs artifact must live in a declared artifact/evidence subroot
+- [error:docs:docs_non_markdown_artifact] docs/operations/task_2026-05-08_object_invariance_wave37.archived: non-markdown docs artifact must live in a declared artifact/evidence subroot
+- [error:docs:docs_non_markdown_artifact] docs/operations/task_2026-05-08_object_invariance_wave38.archived: non-markdown docs artifact must live in a declared artifact/evidence subroot
+- [error:docs:docs_non_markdown_artifact] docs/operations/task_2026-05-08_object_invariance_wave39.archived: non-markdown docs artifact must live in a declared artifact/evidence subroot
+- [error:docs:docs_non_markdown_artifact] docs/operations/task_2026-05-08_object_invariance_wave41.archived: non-markdown docs artifact must live in a declared artifact/evidence subroot
+- [error:docs:docs_non_markdown_artifact] docs/operations/task_2026-05-08_object_invariance_wave42.archived: non-markdown docs artifact must live in a declared artifact/evidence subroot
+- [error:docs:docs_non_markdown_artifact] docs/operations/task_2026-05-08_obs_outside_bin_audit.archived: non-markdown docs artifact must live in a declared artifact/evidence subroot
+- [error:docs:docs_non_markdown_artifact] docs/operations/task_2026-05-08_topology_redesign_completion.archived: non-markdown docs artifact must live in a declared artifact/evidence subroot
+- [error:docs:docs_non_markdown_artifact] docs/operations/task_2026-05-09_post_s4_residuals_topology.archived: non-markdown docs artifact must live in a declared artifact/evidence subroot
+- [error:docs:docs_non_markdown_artifact] docs/operations/task_2026-05-09_pr_workflow_failure.archived: non-markdown docs artifact must live in a declared artifact/evidence subroot
+- [error:docs:docs_non_markdown_artifact] docs/operations/task_2026-05-11_ecmwf_download_replacement.archived: non-markdown docs artifact must live in a declared artifact/evidence subroot
+- [error:docs:docs_non_markdown_artifact] docs/operations/task_2026-05-11_tigge_vm_to_zeus_db.archived: non-markdown docs artifact must live in a declared artifact/evidence subroot
+- [error:docs:docs_non_markdown_artifact] docs/operations/task_2026-05-14_attach_path_index_fix.archived: non-markdown docs artifact must live in a declared artifact/evidence subroot
+- [error:docs:docs_non_markdown_artifact] docs/operations/zeus_workspace_authority_reconstruction_package_2026-04-20_v2.archived: non-markdown docs artifact must live in a declared artifact/evidence subroot
+- [error:docs:docs_unregistered_subtree] docs/review: docs subtree has visible files but is not declared in topology docs_subroots
+- [error:docs:docs_unregistered_subtree] docs/review: docs subtree has visible files but is not declared in topology docs_subroots
+- [error:docs:docs_unregistered_subtree] docs/review: docs subtree has visible files but is not declared in topology docs_subroots
+- [error:docs:progress_handoff_path_violation] docs/artifacts/tigge_data_training_handoff_2026-04-23.md: progress/handoff/work-log files must live inside a task folder, current_state, or archives
+- [error:docs:progress_handoff_path_violation] docs/operations/LIVE_LAUNCH_HANDOFF.md: progress/handoff/work-log files must live inside a task folder, current_state, or archives
+- [error:docs:progress_handoff_path_violation] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/phase10_evidence/zeus_dt_coordination_handoff.md: progress/handoff/work-log files must live inside a task folder, current_state, or archives
+- [error:docs:progress_handoff_path_violation] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/team_lead_handoff.md: progress/handoff/work-log files must live inside a task folder, current_state, or archives
+- [error:docs:progress_handoff_path_violation] docs/operations/archive/2026-Q2/task_2026-04-16_dual_track_metric_spine/work_log.md: progress/handoff/work-log files must live inside a task folder, current_state, or archives
+- [error:docs:progress_handoff_path_violation] docs/operations/archive/2026-Q2/task_2026-04-16_function_naming_freshness/work_log.md: progress/handoff/work-log files must live inside a task folder, current_state, or archives
+- [error:docs:progress_handoff_path_violation] docs/operations/archive/2026-Q2/task_2026-04-19_code_review_graph_topology_bridge/work_log.md: progress/handoff/work-log files must live inside a task folder, current_state, or archives
+- [error:docs:progress_handoff_path_violation] docs/operations/archive/2026-Q2/task_2026-04-19_workspace_artifact_sync/work_log.md: progress/handoff/work-log files must live inside a task folder, current_state, or archives
+- [error:docs:progress_handoff_path_violation] docs/operations/archive/2026-Q2/task_2026-04-20_code_impact_graph_context_pack/work_log.md: progress/handoff/work-log files must live inside a task folder, current_state, or archives
+- [error:docs:progress_handoff_path_violation] docs/operations/archive/2026-Q2/task_2026-04-20_code_review_graph_online_context/work_log.md: progress/handoff/work-log files must live inside a task folder, current_state, or archives
+- [error:docs:progress_handoff_path_violation] docs/operations/archive/2026-Q2/task_2026-04-20_workspace_authority_reconstruction/work_log.md: progress/handoff/work-log files must live inside a task folder, current_state, or archives
+- [error:docs:progress_handoff_path_violation] docs/operations/archive/2026-Q2/task_2026-04-21_docs_reclassification_reference_extraction/work_log.md: progress/handoff/work-log files must live inside a task folder, current_state, or archives
+- [error:docs:progress_handoff_path_violation] docs/operations/archive/2026-Q2/task_2026-04-21_gate_f_data_backfill/step3_phase1_fleet_closeout.md: progress/handoff/work-log files must live inside a task folder, current_state, or archives
+- [error:docs:progress_handoff_path_violation] docs/operations/archive/2026-Q2/task_2026-04-21_gate_f_data_backfill/step7_phase3_closeout.md: progress/handoff/work-log files must live inside a task folder, current_state, or archives
+- [error:docs:progress_handoff_path_violation] docs/operations/archive/2026-Q2/task_2026-04-22_docs_truth_refresh/work_log.md: progress/handoff/work-log files must live inside a task folder, current_state, or archives
+- [error:docs:progress_handoff_path_violation] docs/operations/archive/2026-Q2/task_2026-04-22_orphan_artifact_cleanup/work_log.md: progress/handoff/work-log files must live inside a task folder, current_state, or archives
+- [error:docs:progress_handoff_path_violation] docs/operations/archive/2026-Q2/task_2026-04-23_authority_kernel_gamechanger/work_log.md: progress/handoff/work-log files must live inside a task folder, current_state, or archives
+- [error:docs:progress_handoff_path_violation] docs/operations/archive/2026-Q2/task_2026-04-23_authority_rehydration/work_log.md: progress/handoff/work-log files must live inside a task folder, current_state, or archives
+- [error:docs:progress_handoff_path_violation] docs/operations/archive/2026-Q2/task_2026-04-23_data_readiness_remediation/work_log.md: progress/handoff/work-log files must live inside a task folder, current_state, or archives
+- [error:docs:progress_handoff_path_violation] docs/operations/archive/2026-Q2/task_2026-04-23_graph_refresh_official_integration/work_log.md: progress/handoff/work-log files must live inside a task folder, current_state, or archives
+- [error:docs:progress_handoff_path_violation] docs/operations/archive/2026-Q2/task_2026-04-23_guidance_kernel_semantic_boot/work_log.md: progress/handoff/work-log files must live inside a task folder, current_state, or archives
+- [error:docs:progress_handoff_path_violation] docs/operations/archive/2026-Q2/task_2026-05-01_hko_backfill/work_log.md: progress/handoff/work-log files must live inside a task folder, current_state, or archives
+- [error:docs:progress_handoff_path_violation] docs/operations/archive/2026-Q2/task_2026-05-01_paris_station_resolution/work_log.md: progress/handoff/work-log files must live inside a task folder, current_state, or archives
+- [error:docs:progress_handoff_path_violation] docs/operations/archive/2026-Q2/task_2026-05-01_tigge_4_29_backfill/work_log.md: progress/handoff/work-log files must live inside a task folder, current_state, or archives
+- [error:docs:progress_handoff_path_violation] docs/operations/archive/2026-Q2/task_2026-05-02_hk_paris_release/work_log.md: progress/handoff/work-log files must live inside a task folder, current_state, or archives
+- [error:docs:progress_handoff_path_violation] docs/operations/archive/2026-Q2/task_2026-05-11_tigge_vm_to_zeus_db/POST_REBUILD_HANDOFF_2026-05-11.md: progress/handoff/work-log files must live inside a task folder, current_state, or archives
+- [error:docs:progress_handoff_path_violation] docs/reference/zeus_kelly_asymmetric_loss_handoff.md: progress/handoff/work-log files must live inside a task folder, current_state, or archives
+- [error:docs:operations_current_state_missing_label] docs/operations/current_state.md: current_state missing required operations label: Active package source
+- [error:docs:operations_current_state_unregistered_surface] docs/operations/current_state.md: operations surface is in current_state but not docs/operations/AGENTS.md registry: docs/operations/archive/2026-Q2/
+- [error:docs:operations_current_state_unregistered_surface] docs/operations/current_state.md: operations surface is in current_state but not docs/operations/AGENTS.md registry: docs/operations/archive/2026-Q2/INDEX.md
+- [error:docs:shadow_runtime_authority_reference] docs/operations/task_2026-05-16_doc_alignment_plan/WAVE_0_CLOSURE.md:28: runtime/shadow path is referenced in an active-authority context
+- [error:docs:shadow_runtime_authority_reference] docs/operations/task_2026-05-16_doc_alignment_plan/WORKTREE_AUDIT.md:15: runtime/shadow path is referenced in an active-authority context
+- [error:source:source_rationale_missing] src/architecture/__init__.py: tracked src file has no rationale entry
+- [error:source:source_rationale_missing] src/architecture/decorators.py: tracked src file has no rationale entry
+- [error:source:source_rationale_missing] src/architecture/gate_commit_time.py: tracked src file has no rationale entry
+- [error:source:source_rationale_missing] src/architecture/gate_edit_time.py: tracked src file has no rationale entry
+- [error:source:source_rationale_missing] src/architecture/gate_runtime.py: tracked src file has no rationale entry
+- [error:source:source_rationale_missing] src/architecture/route_function.py: tracked src file has no rationale entry
+- [error:source:source_rationale_missing] src/calibration/retrain_trigger_v2.py: tracked src file has no rationale entry
+- [error:source:source_rationale_missing] src/contracts/dst_semantics.py: tracked src file has no rationale entry
+- [error:source:source_rationale_missing] src/contracts/season.py: tracked src file has no rationale entry
+- [error:source:source_rationale_missing] src/contracts/slippage_bps.py: tracked src file has no rationale entry
+- [error:source:source_rationale_missing] src/contracts/tick_size.py: tracked src file has no rationale entry
+- [error:source:source_rationale_missing] src/control/block_adapters/__init__.py: tracked src file has no rationale entry
+- [error:source:source_rationale_missing] src/control/block_adapters/_base.py: tracked src file has no rationale entry
+- [error:source:source_rationale_missing] src/control/block_adapters/auto_pause_streak.py: tracked src file has no rationale entry
+- [error:source:source_rationale_missing] src/control/block_adapters/bankroll_truth_source.py: tracked src file has no rationale entry
+- [error:source:source_rationale_missing] src/control/block_adapters/db_control_overrides.py: tracked src file has no rationale entry
+- [error:source:source_rationale_missing] src/control/block_adapters/entries_blocked_reason.py: tracked src file has no rationale entry
+- [error:source:source_rationale_missing] src/control/block_adapters/entries_paused_flag.py: tracked src file has no rationale entry
+- [error:source:source_rationale_missing] src/control/block_adapters/evaluator_rollout_gate.py: tracked src file has no rationale entry
+- [error:source:source_rationale_missing] src/control/block_adapters/fail_closed_tombstone.py: tracked src file has no rationale entry
+- [error:source:source_rationale_missing] src/control/block_adapters/heartbeat_health.py: tracked src file has no rationale entry
+- [error:source:source_rationale_missing] src/control/block_adapters/promotion_evidence_file.py: tracked src file has no rationale entry
+- [error:source:source_rationale_missing] src/control/block_adapters/risk_level.py: tracked src file has no rationale entry
+- [error:source:source_rationale_missing] src/control/block_adapters/rollout_gate_env_var.py: tracked src file has no rationale entry
+- [error:source:source_rationale_missing] src/control/block_adapters/trailing_loss_reference.py: tracked src file has no rationale entry
+- [error:source:source_rationale_missing] src/control/block_adapters/ws_gap_guard.py: tracked src file has no rationale entry
+- [error:source:source_rationale_missing] src/control/cli/__init__.py: tracked src file has no rationale entry
+- [error:source:source_rationale_missing] src/control/cli/promote_entry_forecast.py: tracked src file has no rationale entry
+- [error:source:source_rationale_missing] src/control/entries_block_registry.py: tracked src file has no rationale entry
+- [error:source:source_rationale_missing] src/data/ingest_status_writer.py: tracked src file has no rationale entry
+- [error:source:source_rationale_missing] src/data/source_health_probe.py: tracked src file has no rationale entry
+- [error:source:source_rationale_missing] src/data/station_migration_probe.py: tracked src file has no rationale entry
+- [error:source:source_rationale_missing] src/data/tigge_db_fetcher.py: tracked src file has no rationale entry
+- [error:source:source_rationale_missing] src/data/tigge_pipeline.py: tracked src file has no rationale entry
+- [error:source:source_rationale_missing] src/engine/replay_selection_coverage.py: tracked src file has no rationale entry
+- [error:source:source_rationale_missing] src/execution/live_executor.py: tracked src file has no rationale entry
+- [error:source:source_rationale_missing] src/execution/shadow_executor.py: tracked src file has no rationale entry
+- [error:source:source_rationale_missing] src/execution/venue_adapter.py: tracked src file has no rationale entry
+- [error:source:source_rationale_missing] src/ingest/harvester_truth_writer.py: tracked src file has no rationale entry
+- [error:source:source_rationale_missing] src/observability/calibration_serving_status.py: tracked src file has no rationale entry
+- [error:source:source_rationale_missing] src/observability/counters.py: tracked src file has no rationale entry
+- [error:source:source_rationale_missing] src/observability/price_evidence_report.py: tracked src file has no rationale entry
+- [error:source:source_rationale_missing] src/runtime/__init__.py: tracked src file has no rationale entry
+- [error:source:source_rationale_missing] src/runtime/posture.py: tracked src file has no rationale entry
+- [error:source:source_rationale_missing] src/runtime/timeout_guard.py: tracked src file has no rationale entry
+- [error:source:source_rationale_missing] src/state/connection_pair.py: tracked src file has no rationale entry
+- [error:source:source_rationale_missing] src/state/db_writer_lock.py: tracked src file has no rationale entry
+- [error:source:source_rationale_missing] src/state/schema_introspection.py: tracked src file has no rationale entry
+- [error:source:source_rationale_missing] src/strategy/market_phase.py: tracked src file has no rationale entry
+- [error:source:source_rationale_missing] src/types/truth_authority.py: tracked src file has no rationale entry
+- [error:source:source_rationale_stale] src/contracts/world_view/settlements.py: rationale entry has no tracked src file
+- [error:source:source_state_role_unsplit] src/state/connection_pair.py: src/state file must be split K0/K2, got None
+- [error:source:source_state_role_unsplit] src/state/db_writer_lock.py: src/state file must be split K0/K2, got None
+- [error:source:source_state_role_unsplit] src/state/readiness_repo.py: src/state file must be split K0/K2, got 'K1_governance'
+- [error:source:source_state_role_unsplit] src/state/schema_introspection.py: src/state file must be split K0/K2, got None
+- [error:source:source_unknown_hazard] src/contracts/tigge_snapshot_payload.py: unknown hazard badge SOURCE_INGEST_SCHEMA_DRIFT
+- [error:source:source_unknown_hazard] src/contracts/tigge_snapshot_payload.py: unknown hazard badge LOW_HIGH_METRIC_MIXING
+- [error:history_lore:history_lore_stale_antibody_reference] architecture/history_lore.yaml:POST_CLOSE_CONTROL_SURFACE_MISMATCH: antibodies.docs references missing path: docs/operations/runtime_artifact_inventory.md
+- [error:history_lore:history_lore_missing_antibody] architecture/history_lore.yaml:FEATURE_FLAG_DEFAULT_OFF_FOR_BEHAVIOR_RISK: critical/high active lore needs code, test, gate, or doc antibody
+- [error:history_lore:history_lore_stale_antibody_reference] architecture/history_lore.yaml:DATA_COLLECTION_AND_TRADING_DAEMON_ARE_INDEPENDENT: antibodies.docs references missing path: docs/operations/task_2026-04-21_gate_f_data_backfill/step8_data_collection_decoupling.md
+- [error:history_lore:history_lore_missing_antibody] architecture/history_lore.yaml:PERSISTENT_CRITIC_ROTATION_PREVENTS_RUBBER_STAMPING: critical/high active lore needs code, test, gate, or doc antibody
+- [error:history_lore:history_lore_missing_antibody] architecture/history_lore.yaml:FORENSIC_DATA_AUDIT_TEMPLATE: critical/high active lore needs code, test, gate, or doc antibody
+- [error:history_lore:history_lore_invalid_status] architecture/history_lore.yaml:CWA_STATION_IS_LEGACY_QUARANTINE_PATH_NOT_DEAD_CODE: invalid status 'active_knowledge'
+excluded_lanes:
+- strict: strict includes transient root/state artifact classification; run explicitly when workspace is quiescent
+- scripts: script manifest can be blocked by active package scripts; run explicitly for script work
+- planning_lock: requires caller-supplied --changed-files and optional --plan-evidence
+EXIT=1

@@ -184,7 +184,7 @@ over many weeks).
 **The "Append-only Platt history table for genuine multi-fit trajectory
 reconstruction (deferred; potential future PATH-D packet)" item above is
 WRONG.** The append-only history exists at `calibration_params_versions`
-(`src/calibration/retrain_trigger.py:242-264` schema) — autoincrement
+(`src/calibration/retrain_trigger.py::_ensure_versions_table` schema) — autoincrement
 `version_id`, `promoted_at` + `retired_at` lifecycle columns, INSERT on
 every retrain attempt (PASS → promoted; FAIL → COMPLETE_DRIFT_DETECTED,
 kept for audit), UPDATE only sets `retired_at` (never DELETE).

@@ -86,7 +86,7 @@ test_trust_policy:
     # P5-1 + P5-3 (PR #19 closeout completion, 2026-04-26):
     tests/test_realized_fill_at_receipt.py: {created: "2026-04-26", last_used: "2026-04-26"}
     tests/test_evaluate_candidate_metric_integration.py: {created: "2026-04-26", last_used: "2026-04-26"}
-    tests/test_architecture_contracts.py: {created: "2026-04-02", last_used: "2026-05-08"}
+    tests/test_architecture_contracts.py: {created: "2026-04-02", last_used: "2026-05-09"}
     tests/test_backfill_completeness_guardrails.py: {created: "2026-04-25", last_used: "2026-04-25"}
     tests/test_backfill_scripts_match_live_config.py: {created: "2026-04-21", last_used: "2026-04-25"}
     tests/test_backtest_settlement_value_outcome.py: {created: "2026-04-25", last_used: "2026-04-25"}
@@ -154,11 +154,11 @@ test_trust_policy:
     tests/test_pre_live_integration.py: {created: "2026-04-29", last_used: "2026-04-29"}
     tests/test_provenance_enforcement.py: {created: "2026-04-07", last_used: "2026-04-23"}
     tests/test_proxy_health.py: {created: "2026-04-21", last_used: "2026-04-21"}
-    tests/test_semantic_linter.py: {created: "2026-04-13", last_used: "2026-05-08"}
-    tests/test_structural_linter.py: {created: "2026-03-31", last_used: "2026-05-08"}
+    tests/test_semantic_linter.py: {created: "2026-04-13", last_used: "2026-05-09"}
+    tests/test_structural_linter.py: {created: "2026-03-31", last_used: "2026-05-09"}
     tests/test_world_writer_boundary.py: {created: "2026-04-30", last_used: "2026-05-08"}
     tests/test_tier_resolver.py: {created: "2026-04-21", last_used: "2026-04-21"}
-    tests/test_topology_doctor.py: {created: "2026-04-13", last_used: "2026-04-28"}
+    tests/test_topology_doctor.py: {created: "2026-04-13", last_used: "2026-05-14"}
     tests/test_truth_surface_health.py: {created: "2026-04-07", last_used: "2026-04-25"}
     tests/test_digest_admission_policy.py: {created: "2026-04-25", last_used: "2026-04-25"}
     tests/test_digest_profile_matching.py: {created: "2026-04-25", last_used: "2026-04-29"}
