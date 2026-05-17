@@ -18,6 +18,13 @@ from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any
 
+# Self-bootstrap: ensure project root is on sys.path so that
+# `scripts.topology_v_next.*` imports resolve when invoked directly
+# (e.g. `python scripts/topology_doctor.py`) without needing PYTHONPATH=.
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
 try:
     from topology_v_next.cli_integration_shim import maybe_shadow_compare
 except ModuleNotFoundError:  # pytest imports this as scripts.topology_doctor
