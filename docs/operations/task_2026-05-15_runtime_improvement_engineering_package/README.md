@@ -14,7 +14,7 @@ Four-track engineering package addressing compounding runtime entropy:
 | `01_topology_v_next/` | Project-agnostic topology redesign + Zeus binding + migration | UNIVERSAL_TOPOLOGY_DESIGN, then HIDDEN_BRANCH_LESSONS, ZEUS_BINDING_LAYER, MIGRATION_PATH |
 | `02_daily_maintenance_agent/` | Scheduled hygiene worker design | DESIGN, then SAFETY_CONTRACT, TASK_CATALOG.yaml, DRY_RUN_PROTOCOL |
 | `03_authority_drift_remediation/` | 62-doc drift assessment + repair playbook | DRIFT_ASSESSMENT, REMEDIATION_PLAN |
-| `04_workspace_hygiene/` | Purge/archive/lore extraction rules | PURGE_CATEGORIES, ARCHIVAL_RULES, LORE_EXTRACTION_PROTOCOL |
+| `04_workspace_hygiene/` | Purge/archive/lore extraction rules | PURGE_CATEGORIES, ARCHIVAL_RULES (relocated to docs/authority/ARCHIVAL_RULES.md), LORE_EXTRACTION_PROTOCOL |
 | `05_execution_packets/` | Ordered follow-up implementation packets | PACKET_INDEX |
 | `99_verification/` | Probes + regression suite | VERIFICATION_PLAN, REGRESSION_PROBE_SUITE |
 

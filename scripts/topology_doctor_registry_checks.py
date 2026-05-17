@@ -439,6 +439,7 @@ def run_docs(api: Any) -> Any:
     ]
     issues.extend(api._check_reference_authority(topology))
     issues.extend(api._check_docs_registry(topology))
+    issues.extend(api._check_expected_empty_zones(topology))
     issues.extend(check_archive_interface(api, topology))
     issues.extend(api._check_hidden_docs(topology))
     issues.extend(api._check_progress_handoff_paths())

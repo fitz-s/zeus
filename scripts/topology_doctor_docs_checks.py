@@ -106,6 +106,7 @@ DOCS_REGISTRY_PARENT_PATTERNS = (
     "docs/artifacts/",
     "docs/to-do-list/",
     "docs/runbooks/",
+    "docs/reference/legacy/",
 )
 
 
@@ -215,6 +216,44 @@ def docs_registry_covers(path: str, entries: list[dict[str, Any]]) -> bool:
     return any(docs_registry_path_matches(path, entry) for entry in entries)
 
 
+def check_expected_empty_zones(api: Any, topology: dict[str, Any]) -> list[Any]:
+    """D7: scan topology zones with expected_empty: true and error if they contain files.
+
+    A zone declared expected_empty: true must contain only .gitkeep (or nothing
+    at all — absent path is treated as empty, not as an error). Any other tracked
+    file inside the zone is flagged as an expected_empty_violation.
+
+    Rationale: archive/cold/ is declared expected_empty to document the constraint
+    that nothing lands there without explicit operator action. This parser enforces
+    that invariant structurally so agents cannot silently populate the zone.
+    """
+    issues: list[Any] = []
+    for zone in topology.get("docs_subroots") or []:
+        if not zone.get("expected_empty"):
+            continue
+        zone_path_str = str(zone.get("path") or "").strip("/")
+        if not zone_path_str:
+            continue
+        zone_dir = api.ROOT / zone_path_str
+        if not zone_dir.exists():
+            # Absent path satisfies expected_empty: no files can be in a non-existent dir.
+            continue
+        for rel in api._git_visible_files():
+            if not rel.startswith(zone_path_str + "/"):
+                continue
+            filename = Path(rel).name
+            if filename == ".gitkeep":
+                continue
+            issues.append(
+                api._issue(
+                    "expected_empty_violation",
+                    rel,
+                    f"zone '{zone_path_str}' is declared expected_empty but contains tracked file: {rel}",
+                )
+            )
+    return issues
+
+
 def check_docs_registry(api: Any, topology: dict[str, Any]) -> list[Any]:
     issues: list[Any] = []
     registry_path = getattr(api, "DOCS_REGISTRY_PATH", api.ROOT / "architecture" / "docs_registry.yaml")
@@ -274,9 +313,9 @@ def check_docs_registry(api: Any, topology: dict[str, Any]) -> list[Any]:
         for bool_field in ("may_live_in_reference", "contains_volatile_metrics", "current_tense_allowed"):
             if not isinstance(entry.get(bool_field), bool):
                 issues.append(api._issue("docs_registry_invalid_enum", path, f"{bool_field} must be boolean"))
-        if path.startswith("docs/reference/") and path != "docs/reference/AGENTS.md":
+        if path.startswith("docs/reference/") and path not in ("docs/reference/AGENTS.md", "docs/reference/legacy/AGENTS.md") and not path.startswith("docs/reference/legacy/"):
             if entry.get("truth_profile") != "durable_reference" or entry.get("may_live_in_reference") is not True:
-                issues.append(api._issue("docs_reference_not_canonical", path, "docs/reference may contain only durable canonical reference docs"))
+                issues.append(api._issue("docs_reference_not_canonical", path, "docs/reference may contain only durable canonical reference docs (exception: docs/reference/legacy/ for demoted evidence snapshots)"))
         if entry.get("coverage_scope") == "descendants":
             if not entry.get("parent_coverage_allowed"):
                 issues.append(api._issue("docs_registry_parent_not_allowed", path, "descendant coverage requires parent_coverage_allowed=true"))
@@ -300,8 +339,12 @@ def check_docs_registry(api: Any, topology: dict[str, Any]) -> list[Any]:
     for rel in sorted(visible_docs):
         if rel.startswith("docs/archives/"):
             continue
-        if rel.startswith("docs/reference/") and Path(rel).name.startswith("legacy_reference_"):
-            issues.append(api._issue("docs_reference_legacy_snapshot", rel, "legacy reference snapshots must live outside docs/reference"))
+        if (
+            rel.startswith("docs/reference/")
+            and not rel.startswith("docs/reference/legacy/")
+            and Path(rel).name.startswith("legacy_reference_")
+        ):
+            issues.append(api._issue("docs_reference_legacy_snapshot", rel, "legacy reference snapshots must live outside docs/reference (canonical home: docs/reference/legacy/)"))
         if not docs_registry_covers(rel, entries):
             issues.append(api._issue("docs_registry_unclassified_doc", rel, "tracked docs file is not classified by architecture/docs_registry.yaml"))
 

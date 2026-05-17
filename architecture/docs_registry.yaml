@@ -24,10 +24,17 @@ required_entry_fields:
 - contains_volatile_metrics
 - current_tense_allowed
 - refresh_source
+# Optional fields: Phase-2 backfill to legacy_reference and authority entries deferred.
+# These are documented here so topology_doctor and schema consumers know they exist
+# but do NOT reject entries that omit them.
+optional_entry_fields:
+- topic_authority
+- superseded_chain
 allowed_doc_classes:
 - router
 - authority
 - reference
+- legacy_reference
 - module_reference
 - operations
 - runbook
@@ -65,6 +72,7 @@ parent_coverage_allowed_patterns:
 - docs/artifacts/
 - docs/to-do-list/
 - docs/runbooks/
+- docs/reference/legacy/
 entries:
 - path: docs/AGENTS.md
   doc_class: router
@@ -1612,8 +1620,8 @@ entries:
   contains_volatile_metrics: false
   current_tense_allowed: false
   refresh_source: n/a
-- path: docs/reports/legacy_reference_repo_overview.md
-  doc_class: report
+- path: docs/reference/legacy/legacy_reference_repo_overview.md
+  doc_class: legacy_reference
   default_read: false
   direct_reference_allowed: false
   current_role: demoted legacy reference snapshot; evidence only
@@ -1631,8 +1639,8 @@ entries:
   contains_volatile_metrics: false
   current_tense_allowed: false
   refresh_source: n/a
-- path: docs/reports/legacy_reference_data_inventory.md
-  doc_class: report
+- path: docs/reference/legacy/legacy_reference_data_inventory.md
+  doc_class: legacy_reference
   default_read: false
   direct_reference_allowed: false
   current_role: demoted legacy reference snapshot; evidence only
@@ -1651,8 +1659,8 @@ entries:
   contains_volatile_metrics: false
   current_tense_allowed: false
   refresh_source: n/a
-- path: docs/reports/legacy_reference_data_strategy.md
-  doc_class: report
+- path: docs/reference/legacy/legacy_reference_data_strategy.md
+  doc_class: legacy_reference
   default_read: false
   direct_reference_allowed: false
   current_role: demoted legacy reference snapshot; evidence only
@@ -1670,8 +1678,8 @@ entries:
   contains_volatile_metrics: false
   current_tense_allowed: false
   refresh_source: n/a
-- path: docs/reports/legacy_reference_settlement_source_provenance.md
-  doc_class: report
+- path: docs/reference/legacy/legacy_reference_settlement_source_provenance.md
+  doc_class: legacy_reference
   default_read: false
   direct_reference_allowed: false
   current_role: demoted legacy source-provenance snapshot; evidence only
@@ -1690,8 +1698,8 @@ entries:
   contains_volatile_metrics: false
   current_tense_allowed: false
   refresh_source: n/a
-- path: docs/reports/legacy_reference_statistical_methodology.md
-  doc_class: report
+- path: docs/reference/legacy/legacy_reference_statistical_methodology.md
+  doc_class: legacy_reference
   default_read: false
   direct_reference_allowed: false
   current_role: demoted legacy statistical-methodology snapshot; evidence only
@@ -1709,8 +1717,8 @@ entries:
   contains_volatile_metrics: false
   current_tense_allowed: false
   refresh_source: n/a
-- path: docs/reports/legacy_reference_quantitative_research.md
-  doc_class: report
+- path: docs/reference/legacy/legacy_reference_quantitative_research.md
+  doc_class: legacy_reference
   default_read: false
   direct_reference_allowed: false
   current_role: demoted legacy quantitative-research snapshot; evidence only
@@ -1730,8 +1738,8 @@ entries:
   contains_volatile_metrics: false
   current_tense_allowed: false
   refresh_source: n/a
-- path: docs/reports/legacy_reference_market_microstructure.md
-  doc_class: report
+- path: docs/reference/legacy/legacy_reference_market_microstructure.md
+  doc_class: legacy_reference
   default_read: false
   direct_reference_allowed: false
   current_role: demoted legacy market-microstructure snapshot; evidence only
@@ -1749,6 +1757,26 @@ entries:
   contains_volatile_metrics: false
   current_tense_allowed: false
   refresh_source: n/a
+- path: docs/reference/legacy/AGENTS.md
+  doc_class: router
+  default_read: false
+  direct_reference_allowed: true
+  current_role: legacy reference zone router; links back to canonical sources
+  canonical_replaced_by: []
+  next_action: keep
+  lifecycle_state: historical
+  coverage_scope: exact
+  parent_coverage_allowed: false
+  truth_profile: router
+  freshness_class: historical
+  supersedes: []
+  superseded_by: []
+  may_live_in_reference: true
+  contains_volatile_metrics: false
+  current_tense_allowed: false
+  refresh_source: n/a
+  topic_authority: null
+  superseded_chain: []
 - path: docs/artifacts/
   doc_class: artifact
   default_read: false

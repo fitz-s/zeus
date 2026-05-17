@@ -165,7 +165,7 @@ Detailed path table at `docs/review/review_scope_map.md`. Compressed map:
 - `.github/{copilot-instructions.md,instructions/**,pull_request_template.md,workflows/**}`
 - `architecture/**` (invariants, manifests, source_rationale, history_lore,
   task_boot_profiles, fatal_misreads, runtime_modes)
-- `docs/authority/**`, `docs/operations/current_*.md`, `docs/reference/**`,
+- `docs/authority/**`, `docs/authority/ARCHIVAL_RULES.md`, `docs/operations/current_*.md`, `docs/reference/**`,
   `docs/review/**`, `REVIEW.md`, `workspace_map.md`, `docs/archive_registry.md`
 
 **Deprioritized — review only if change demonstrably alters runtime behavior**

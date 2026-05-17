@@ -202,12 +202,12 @@ for m_i in m:
 
 - ASOS sensor measurement noise
 - 0.5°F or 0.3°C per AGENTS.md §1 and
-  `docs/reports/legacy_reference_statistical_methodology.md`
+  `docs/reference/legacy/legacy_reference_statistical_methodology.md`
 - Per-unit value at `src/signal/ensemble_signal.py::sigma_instrument`
 
 ### 4.4 Parameter n_samples
 
-- 10,000 per `docs/reports/legacy_reference_statistical_methodology.md`
+- 10,000 per `docs/reference/legacy/legacy_reference_statistical_methodology.md`
 - Trades off variance (large n) vs compute cost
 
 ### 4.5 Non-negotiable property
@@ -611,7 +611,7 @@ Current code disagrees with this spec at the following points. The data-rebuild 
 - Calls `SettlementSemantics.round_values`, which now uses WMO half-up for WU settlement semantics.
 - Keep this dependency; do not hand-roll rounding in signal code.
 
-### 14.3 `docs/reports/legacy_reference_statistical_methodology.md` had `np.round` (now patched)
+### 14.3 `docs/reference/legacy/legacy_reference_statistical_methodology.md` had `np.round` (now patched)
 - Lines 122/130/139 had `round(...)` and `np.round(...)`.
 - Patched in this commit to `floor(... + 0.5)` with explicit WMO note.
 

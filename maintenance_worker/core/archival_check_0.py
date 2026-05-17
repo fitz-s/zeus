@@ -1,7 +1,7 @@
 # Created: 2026-05-16
 # Last reused or audited: 2026-05-16
 # Authority basis:
-#   docs/operations/task_2026-05-15_runtime_improvement_engineering_package/04_workspace_hygiene/ARCHIVAL_RULES.md
+#   docs/authority/ARCHIVAL_RULES.md
 #   §"Exemption Checks (ALL must pass to archive)" check #0
 #   architecture/artifact_authority_status.yaml (runtime registry)
 """

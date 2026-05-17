@@ -9,7 +9,7 @@ Input authority order:
   3. `02_daily_maintenance_agent/TASK_CATALOG.yaml`
   4. `02_daily_maintenance_agent/DRY_RUN_PROTOCOL.md`
   5. `04_workspace_hygiene/PURGE_CATEGORIES.md`
-  6. `04_workspace_hygiene/ARCHIVAL_RULES.md`
+  6. `ARCHIVAL_RULES.md`
 
 ---
 

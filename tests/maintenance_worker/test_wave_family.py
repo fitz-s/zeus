@@ -2,7 +2,7 @@
 # Last reused or audited: 2026-05-16
 # Authority basis:
 #   maintenance_worker/rules/wave_family.py
-#   docs/operations/task_2026-05-15_runtime_improvement_engineering_package/04_workspace_hygiene/ARCHIVAL_RULES.md
+#   docs/authority/ARCHIVAL_RULES.md
 #   §"Special Case: Wave Packets"
 """
 Tests for maintenance_worker.rules.wave_family.

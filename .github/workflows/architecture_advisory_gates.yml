@@ -185,6 +185,8 @@ jobs:
           python scripts/topology_doctor.py --source
           python scripts/topology_doctor.py --tests
           python scripts/topology_doctor.py --scripts
+      - name: Run doc citation lint (D2 contract)
+        run: python scripts/doc_citation_lint.py --strict
 
   semantic-linter:
     name: semantic-linter (blocking)

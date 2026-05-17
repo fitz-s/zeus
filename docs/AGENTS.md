@@ -13,6 +13,16 @@ Before navigating the docs mesh, understand the trading system:
 This directory is a router, not a co-equal authority plane to source code or
 machine manifests. Use it to find the right live docs surface quickly.
 
+## Taxonomy axis
+
+Docs taxonomy: stability axis. Each subroot maps to a lifecycle tier:
+- `authority/` — durable law (never expires)
+- `reference/` — canonical reference (stable); `reference/legacy/` for demoted historical snapshots
+- `operations/` — active workbench + live control (volatile)
+- `reports/` — periodic diagnostic evidence (dated)
+
+See `docs/authority/ARCHIVAL_RULES.md` for lifecycle transition rules.
+
 ## Design principle
 
 Keep the tracked docs surface thin and truthful:
@@ -43,6 +53,7 @@ body or bundle.
 | `to-do-list/known_gaps_archive.md` | Closed known-gap antibody archive |
 | `authority/` | Current architecture and delivery law -> `authority/AGENTS.md` |
 | `reference/` | Canonical domain, math, architecture, market/settlement, data/replay, failure-mode, and module references -> `reference/AGENTS.md` |
+| `reference/legacy/` | Demoted legacy reference snapshots (7 files relocated from `reports/` 2026-05-17); historical only -> `reference/legacy/AGENTS.md` |
 | `reference/modules/ingest.md` | Dense ingest module book for R3 user-channel event-stream routing; reference, not authority |
 | `operations/` | Live control pointer, current facts, active packets, and package inputs -> `operations/AGENTS.md` |
 | `operations/task_2026-04-26_polymarket_clob_v2_migration/polymarket_live_money_contract.md` | Packet-local R3 Z0 CLOB V2 live-money invariant summary; evidence, not authority |

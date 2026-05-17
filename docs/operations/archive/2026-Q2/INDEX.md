@@ -3,7 +3,7 @@
 Migrated 2026-05-16 from `docs/archives/packets/` via `scripts/archive_migration_2026-05-16.py`.
 Migration count: 28 entries (26 directories + 2 bare files). 0 prior-deleted exclusions.
 
-Active archival rules: `ARCHIVAL_RULES.md` (at repo root under `docs/operations/task_2026-05-15_runtime_improvement_engineering_package/04_workspace_hygiene/ARCHIVAL_RULES.md`).
+Active archival rules: `ARCHIVAL_RULES.md` (at repo root under `docs/authority/ARCHIVAL_RULES.md`).
 Stubs at: `docs/operations/<name>.archived` for each entry below.
 
 | Name | Type | Original Location |

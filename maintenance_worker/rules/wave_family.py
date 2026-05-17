@@ -1,7 +1,7 @@
 # Created: 2026-05-16
 # Last reused or audited: 2026-05-16
 # Authority basis:
-#   docs/operations/task_2026-05-15_runtime_improvement_engineering_package/04_workspace_hygiene/ARCHIVAL_RULES.md
+#   docs/authority/ARCHIVAL_RULES.md
 #   §"Special Case: Wave Packets"
 """
 wave_family — Wave-packet atomic group logic.
