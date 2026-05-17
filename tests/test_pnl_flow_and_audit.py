@@ -1147,6 +1147,7 @@ def test_status_summary_separates_current_open_entry_orders_from_cycle_submissio
     conn = get_connection(db_path)
     init_schema(conn)
     now = datetime.now(timezone.utc).isoformat()
+    later = (datetime.now(timezone.utc) + timedelta(seconds=1)).isoformat()
     _insert_position_current_row(
         conn,
         position_id="pos-open-1",
@@ -1191,6 +1192,50 @@ def test_status_summary_separates_current_open_entry_orders_from_cycle_submissio
         """,
         ("ord-live-1", "cmd-open-1", now, now, now, "h" * 64),
     )
+    _insert_position_current_row(
+        conn,
+        position_id="pos-open-2",
+        strategy_key="opening_inertia",
+        phase="pending_entry",
+        target_date="2026-05-19",
+        city="Shenzhen",
+        bin_label="29C",
+        size_usd=2.02,
+        order_id="ord-live-2",
+        order_status="partial",
+    )
+    conn.execute(
+        """
+        INSERT INTO venue_commands (
+            command_id, snapshot_id, envelope_id, position_id, decision_id,
+            idempotency_key, intent_kind, market_id, token_id, side, size, price,
+            venue_order_id, state, last_event_id, created_at, updated_at,
+            review_required_reason
+        ) VALUES (?, ?, ?, ?, ?, ?, 'ENTRY', 'm-test', 'tok-yes', 'BUY', 7.21, 0.28,
+                  ?, 'PARTIAL', NULL, ?, ?, NULL)
+        """,
+        (
+            "cmd-open-2",
+            "snap-open-2",
+            "env-open-2",
+            "pos-open-2",
+            "decision-open-2",
+            "idem-open-2",
+            "ord-live-2",
+            later,
+            later,
+        ),
+    )
+    conn.execute(
+        """
+        INSERT INTO venue_order_facts (
+            venue_order_id, command_id, state, remaining_size, matched_size,
+            source, observed_at, venue_timestamp, ingested_at, local_sequence,
+            raw_payload_hash, raw_payload_json
+        ) VALUES (?, ?, 'PARTIALLY_MATCHED', '5.1', '2.11', 'DATA_API', ?, ?, ?, 1, ?, '{}')
+        """,
+        ("ord-live-2", "cmd-open-2", later, later, later, "i" * 64),
+    )
     conn.commit()
     conn.close()
 
@@ -1220,10 +1265,29 @@ def test_status_summary_separates_current_open_entry_orders_from_cycle_submissio
     assert status["cycle"]["entry_orders_resting"] == 0
     open_orders = status["execution"]["current_open_entry_orders"]
     assert open_orders["status"] == "ok"
-    assert open_orders["count"] == 1
-    assert open_orders["pending_entry_count"] == 1
-    assert open_orders["by_strategy"] == {"opening_inertia": 1}
+    assert open_orders["count"] == 2
+    assert open_orders["pending_entry_count"] == 2
+    assert open_orders["by_strategy"] == {"opening_inertia": 2}
     assert open_orders["orders"] == [
+        {
+            "command_id": "cmd-open-2",
+            "venue_order_id": "ord-live-2",
+            "position_id": "pos-open-2",
+            "city": "Shenzhen",
+            "target_date": "2026-05-19",
+            "strategy_key": "opening_inertia",
+            "phase": "pending_entry",
+            "order_status": "partial",
+            "command_state": "PARTIAL",
+            "venue_state": "PARTIALLY_MATCHED",
+            "side": "BUY",
+            "submitted_price": 0.28,
+            "submitted_size": 7.21,
+            "remaining_size": 5.1,
+            "matched_size": 2.11,
+            "updated_at": later,
+            "venue_observed_at": later,
+        },
         {
             "command_id": "cmd-open-1",
             "venue_order_id": "ord-live-1",

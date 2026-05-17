@@ -2,7 +2,7 @@
 # Lifecycle: created=2026-03-31; last_reviewed=2026-05-05; last_reused=2026-05-05
 # Purpose: Lock live-money safety invariants across fill, exit, chain, and P&L flows.
 # Reuse: Run for execution finality, live exit, chain reconciliation, and safety invariant changes.
-# Last reused/audited: 2026-05-16
+# Last reused/audited: 2026-05-17
 # Authority basis: midstream verdict v2 2026-04-23; docs/operations/task_2026-05-08_object_invariance_remaining_mainline/PLAN.md
 """Live safety invariant tests: relationship tests, not function tests.
 
@@ -2056,6 +2056,100 @@ def test_partial_with_filled_size_but_missing_fill_price_quarantines_entry():
     assert pos.filled_cost_basis_usd == 0.0
     assert pos.fill_authority == FILL_AUTHORITY_NONE
     clob.cancel_order.assert_not_called()
+
+
+def test_live_order_with_positive_size_matched_records_partial_fact_before_quarantine(tmp_path):
+    """A CLOB LIVE order can still carry filled shares while the remainder rests."""
+    from src.execution.fill_tracker import check_pending_entries
+    from src.state.db import get_connection, init_schema
+
+    db_path = tmp_path / "live-partial.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+    pos = _make_position(
+        trade_id="runtime-live-partial",
+        state="pending_tracked",
+        order_id="ord-live-partial",
+        entry_order_id="ord-live-partial",
+        entry_fill_verified=False,
+        entered_at="",
+        entry_price=0.28,
+        entry_price_submitted=0.28,
+        shares=0.0,
+        shares_submitted=7.21,
+        size_usd=0.0,
+        cost_basis_usd=0.0,
+    )
+    _seed_acked_entry_command(conn, pos, command_id="cmd-live-partial")
+    conn.commit()
+    conn.close()
+
+    class Deps:
+        @staticmethod
+        def get_connection():
+            return get_connection(db_path)
+
+    portfolio = _make_portfolio(pos)
+    clob = _make_clob()
+    clob.get_order_status.return_value = {
+        "status": "LIVE",
+        "size_matched": "2.11",
+        "original_size": "7.21",
+        "price": "0.28",
+    }
+
+    stats = check_pending_entries(
+        portfolio,
+        clob,
+        deps=Deps,
+        now=datetime(2026, 5, 17, 18, 0, tzinfo=timezone.utc),
+    )
+
+    assert stats["entered"] == 0
+    assert stats["voided"] == 0
+    assert stats["still_pending"] == 1
+    assert pos.state == "quarantined"
+    assert pos.order_status == "partially_matched_missing_fill_economics"
+
+    verify = get_connection(db_path)
+    try:
+        command = verify.execute(
+            "SELECT state FROM venue_commands WHERE command_id = 'cmd-live-partial'"
+        ).fetchone()
+        order_fact = verify.execute(
+            """
+            SELECT state, remaining_size, matched_size
+              FROM venue_order_facts
+             WHERE command_id = 'cmd-live-partial'
+             ORDER BY local_sequence DESC
+             LIMIT 1
+            """
+        ).fetchone()
+        trade_fact_count = verify.execute(
+            "SELECT COUNT(*) FROM venue_trade_facts WHERE command_id = 'cmd-live-partial'"
+        ).fetchone()[0]
+        event_types = [
+            row["event_type"]
+            for row in verify.execute(
+                """
+                SELECT event_type
+                  FROM venue_command_events
+                 WHERE command_id = 'cmd-live-partial'
+                 ORDER BY sequence_no
+                """
+            ).fetchall()
+        ]
+    finally:
+        verify.close()
+
+    assert command["state"] == "PARTIAL"
+    assert dict(order_fact) == {
+        "state": "PARTIALLY_MATCHED",
+        "remaining_size": "5.1",
+        "matched_size": "2.11",
+    }
+    assert trade_fact_count == 0
+    assert event_types[-1] == "PARTIAL_FILL_OBSERVED"
 
 
 def test_chain_reconciliation_rescues_pending_tracked_fill(tmp_path):

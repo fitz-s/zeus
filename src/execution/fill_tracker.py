@@ -1024,14 +1024,6 @@ def _record_partial_entry_observed(
         return non_fill_progress
     if shares is None or shares <= 0:
         return _update_pending_status(pos, "partial")
-    missing = _missing_fill_economics(fill_price=fill_price, shares=shares)
-    if missing:
-        return _quarantine_missing_fill_economics(
-            pos,
-            status="PARTIALLY_MATCHED",
-            missing=missing,
-        )
-
     ledger_ok = _maybe_append_venue_fill_observation(
         pos,
         payload,
@@ -1048,6 +1040,14 @@ def _record_partial_entry_observed(
             order_status="partial_fill_ledger_write_failed",
         )
         return "still_pending", True, False
+
+    missing = _missing_fill_economics(fill_price=fill_price, shares=shares)
+    if missing:
+        return _quarantine_missing_fill_economics(
+            pos,
+            status="PARTIALLY_MATCHED",
+            missing=missing,
+        )
 
     _apply_entry_fill_economics(
         pos,
@@ -1341,7 +1341,12 @@ def _normalize_status(payload) -> str:
         return payload.upper()
     if isinstance(payload, dict):
         status = payload.get("status") or payload.get("state") or payload.get("orderStatus")
-        return str(status).upper() if status else ""
+        normalized = str(status).upper() if status else ""
+        if normalized in {"LIVE", "RESTING", "OPEN", "ACCEPTED"} and _positive_finite(
+            _extract_filled_shares(payload, allow_order_size_fallback=False)
+        ):
+            return "PARTIALLY_MATCHED"
+        return normalized
     return ""
 
 
