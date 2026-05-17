@@ -6,7 +6,7 @@
 schema_version: 1
 metadata:
   charter_version: 2.0.0
-  catalog_size: 19
+  catalog_size: 20
   sunset_default: 90d
 
 hooks:
@@ -249,6 +249,25 @@ hooks:
     sunset_date: 2026-11-16
     telemetry:
       ritual_signal_emitted: true
+
+  - id: monitor_arm_overdue_advisor
+    event: PreToolUse
+    matcher: "Bash"
+    intent: >
+      2nd-tier MONITOR_ARM reminder. pr_open_monitor_arm writes a sentinel
+      to state/.monitor_arm_pending/<pr>.lock; if the agent runs another
+      Bash command 120s+ later without invoking Monitor, this hook fires
+      a strong reminder ONCE then deletes the sentinel. Operator can also
+      delete sentinels manually to silence. Antibody for the 2026-05-17
+      "echo advisory ignored" failure mode where the agent proceeded past
+      MONITOR_ARM_REQUIRED text without arming.
+      ADVISORY: emits context; never blocks; fail-open on any exception.
+    blocked_when: []
+    severity: ADVISORY
+    sunset_date: 2026-08-17
+    telemetry:
+      ritual_signal_emitted: true
+    owner_module: .claude/hooks/dispatch.py
 
   - id: pre_branch_create_in_primary
     event: PreToolUse

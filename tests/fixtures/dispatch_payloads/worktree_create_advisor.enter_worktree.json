@@ -1,0 +1,10 @@
+{
+  "hook_event_name": "WorktreeCreate",
+  "session_id": "real-shape-capture-2026-05-17",
+  "tool_input": {
+    "path": "/Users/leofitz/.openclaw/workspace-venus/zeus/.claude/worktrees/test-fixture",
+    "branch": "feat/test-fixture",
+    "task_slug": "test-fixture",
+    "intent": "real-shape fixture capture for runtime-fire test"
+  }
+}

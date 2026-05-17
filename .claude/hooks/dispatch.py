@@ -95,26 +95,39 @@ def _emit_signal(
 # ---------------------------------------------------------------------------
 
 
-# Events whose Claude Code response schema accepts `hookSpecificOutput`. Other
-# events (WorktreeCreate, WorktreeRemove, Stop, SessionStart, ...) must use
-# `systemMessage` instead — emitting `hookSpecificOutput.hookEventName` for
-# those events fails schema validation and HARD-blocks the parent tool
-# (e.g. EnterWorktree), forcing the agent to bypass into the unsafe
-# primary-worktree workflow (see 2026-05-17 incident).
+# Events whose Claude Code response schema accepts `hookSpecificOutput`.
 _HOOK_SPECIFIC_OUTPUT_EVENTS = frozenset({
     "PreToolUse", "UserPromptSubmit", "PostToolUse", "PostToolBatch",
+})
+
+# Events where the harness reserves stdout for a TOOL-PROTOCOL value (NOT a
+# schema JSON object). For WorktreeCreate the harness expects either empty
+# stdout (use default path) or a worktree-path string; anything else is
+# interpreted as the chdir target → ENAMETOOLONG when an advisory JSON gets
+# emitted. Discovered 2026-05-17 round 2 incident: the round-1 fix that
+# routed WorktreeCreate to `systemMessage` JSON broke EnterWorktree harder
+# than the original schema bug (harness tried to chdir into the JSON string).
+# For these events: route advisory to STDERR (visible to operator + tee'd
+# into hook signal log) and leave stdout EMPTY.
+_STDOUT_PROTOCOL_RESERVED_EVENTS = frozenset({
+    "WorktreeCreate", "WorktreeRemove",
 })
 
 
 def _emit_advisory(hook_id: str, event: str, additional_context: str) -> int:
     """Emit additionalContext using the right wrapper for the event type.
 
-    For PreToolUse/UserPromptSubmit/PostToolUse/PostToolBatch, use
-    `hookSpecificOutput.additionalContext` (the documented surface).
-
-    For everything else (WorktreeCreate, WorktreeRemove, Stop, SessionStart,
-    ...), use the universal `systemMessage` field — Claude Code rejects
-    hookSpecificOutput with a non-allowlisted hookEventName.
+    Three routes:
+      1. PreToolUse / UserPromptSubmit / PostToolUse / PostToolBatch →
+         stdout = {"hookSpecificOutput": {"hookEventName": <event>, ...}}
+         (Claude Code's documented surface for these events.)
+      2. WorktreeCreate / WorktreeRemove →
+         stderr = "[advisory:<id>] <text>"; stdout EMPTY.
+         (Harness reserves stdout for tool-protocol payload; emitting JSON
+         there breaks EnterWorktree.)
+      3. Everything else (Stop, SessionStart, SubagentStop, ...) →
+         stdout = {"systemMessage": <text>}
+         (Universal accepted shape for non-tool events.)
     """
     if event in _HOOK_SPECIFIC_OUTPUT_EVENTS:
         out = {
@@ -123,9 +136,11 @@ def _emit_advisory(hook_id: str, event: str, additional_context: str) -> int:
                 "additionalContext": additional_context,
             }
         }
+        print(json.dumps(out))
+    elif event in _STDOUT_PROTOCOL_RESERVED_EVENTS:
+        sys.stderr.write(f"[advisory:{hook_id}] {additional_context}\n")
     else:
-        out = {"systemMessage": additional_context}
-    print(json.dumps(out))
+        print(json.dumps({"systemMessage": additional_context}))
     return 0
 
 
@@ -787,6 +802,17 @@ def _run_advisory_check_pr_open_monitor_arm(
     expiry = datetime.now(timezone.utc) + timedelta(minutes=60)
     expiry_iso = expiry.strftime("%Y-%m-%dT%H:%M:%SZ")
 
+    # Write sentinel for monitor_arm_overdue_advisor 2nd-tier reminder.
+    # If operator doesn't arm Monitor within 120s, that hook re-fires a strong
+    # advisory on the next Bash call. Sentinel deleted on Monitor arm OR after
+    # 2nd-tier fires (one-shot).
+    try:
+        sentinel_dir = REPO_ROOT / "state" / ".monitor_arm_pending"
+        sentinel_dir.mkdir(parents=True, exist_ok=True)
+        (sentinel_dir / f"{pr_num or 'unknown'}.lock").touch()
+    except Exception:
+        pass  # fail-silent; the advisory text still emits
+
     if pr_num is None:
         # PR number couldn't be parsed from gh output (rare: gh stdout was empty,
         # truncated, or a non-success exit). Emit a generic advisory rather than
@@ -1237,6 +1263,60 @@ def _run_advisory_check_maintenance_worker_dry_run_floor(
         return None
 
 
+def _run_advisory_check_monitor_arm_overdue_advisor(
+    payload: dict[str, Any],
+) -> str | None:
+    """PreToolUse (Bash): 2nd-tier MONITOR_ARM reminder.
+
+    Antibody (2026-05-17 follow-up): pr_open_monitor_arm's STOP advisory is
+    text the agent can ignore. This hook detects when a PR was opened but
+    Monitor wasn't armed within 120s, then re-fires a stronger reminder on
+    the next non-Monitor Bash call. One-shot: sentinel deleted after firing
+    OR when operator runs Monitor tool.
+    """
+    hook_id = "monitor_arm_overdue_advisor"
+    event = payload.get("hook_event_name", "PreToolUse")
+    try:
+        import re, time
+        if payload.get("tool_name", "") != "Bash":
+            return None
+        sentinel_dir = REPO_ROOT / "state" / ".monitor_arm_pending"
+        if not sentinel_dir.exists():
+            return None
+        sentinels = list(sentinel_dir.glob("*.lock"))
+        if not sentinels:
+            return None
+        cmd = _command_from_payload(payload)
+        # If operator is arming Monitor now, ack ALL sentinels (success path).
+        if re.search(r"\bMonitor\s*\(|Monitor\s+command=", cmd, re.IGNORECASE):
+            for s in sentinels:
+                try: s.unlink()
+                except Exception: pass
+            return None
+        oldest = min(sentinels, key=lambda p: p.stat().st_mtime)
+        age = time.time() - oldest.stat().st_mtime
+        if age < 120:
+            return None  # not yet overdue
+        pr_num = oldest.stem  # "<pr_num>" or "unknown"
+        # Fire ONCE then delete sentinel to avoid spam
+        try: oldest.unlink()
+        except Exception: pass
+        return (
+            f"[monitor_arm_overdue_advisor] ⛔ 2nd-tier: Monitor STILL not armed "
+            f"{int(age)}s after PR #{pr_num} was opened.\n"
+            f"  pr_open_monitor_arm fired a STOP advisory; you proceeded without\n"
+            f"  arming a Monitor. Bot auto-review fires ONCE per PR-open (5-8 min)\n"
+            f"  — you may have already missed it.\n"
+            f"  ARM NOW: Monitor(persistent=true, command=\"...\"). See pr_open_monitor_arm\n"
+            f"  output for the exact command template. Or document why intentional\n"
+            f"  (e.g. manual review) by silencing future fires with the sentinel.\n"
+            f"  This 2nd-tier reminder is one-shot per PR open."
+        )
+    except Exception as exc:
+        _emit_signal(hook_id, event, "error", f"dispatch_error:{exc}", payload)
+        return None
+
+
 def _run_advisory_check_pre_branch_create_in_primary(
     payload: dict[str, Any],
 ) -> str | None:
@@ -1345,6 +1425,7 @@ _ADVISORY_HANDLERS: dict[str, Any] = {
     "worktree_remove_advisor": _run_advisory_check_worktree_remove_advisor,
     "maintenance_worker_dry_run_floor": _run_advisory_check_maintenance_worker_dry_run_floor,
     "pre_branch_create_in_primary": _run_advisory_check_pre_branch_create_in_primary,
+    "monitor_arm_overdue_advisor": _run_advisory_check_monitor_arm_overdue_advisor,
 }
 
 # External-module handlers registered conditionally (None if import failed → boot
