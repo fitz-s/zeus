@@ -1218,6 +1218,16 @@ def _run_advisory_check_maintenance_worker_dry_run_floor(
 # Advisory check dispatcher
 # ---------------------------------------------------------------------------
 
+# External-module handler imports (kept after in-file defs to avoid forward-ref noise).
+# Pattern: hook lives as a self-contained module in .claude/hooks/<id>.py exposing
+# `_run_advisory_check_<id>(input_data)`; dispatch.py imports and registers it.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+try:
+    from citation_grep_gate import _run_advisory_check_citation_grep_gate  # type: ignore[import-not-found]
+except Exception:  # noqa: BLE001 - fail-open per dispatcher charter
+    _run_advisory_check_citation_grep_gate = None  # type: ignore[assignment]
+
+
 # Map hook_id -> advisory check function
 _ADVISORY_HANDLERS: dict[str, Any] = {
     "invariant_test": _run_advisory_check_invariant_test,
@@ -1238,6 +1248,11 @@ _ADVISORY_HANDLERS: dict[str, Any] = {
     "worktree_remove_advisor": _run_advisory_check_worktree_remove_advisor,
     "maintenance_worker_dry_run_floor": _run_advisory_check_maintenance_worker_dry_run_floor,
 }
+
+# External-module handlers registered conditionally (None if import failed → boot
+# self-test logs "no handler" and hook falls open; safe per ADVISORY-only charter).
+if _run_advisory_check_citation_grep_gate is not None:
+    _ADVISORY_HANDLERS["citation_grep_gate"] = _run_advisory_check_citation_grep_gate
 
 
 def _run_advisory_check(
