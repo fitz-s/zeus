@@ -628,6 +628,65 @@ def test_polymarket_client_get_balance_reads_wallet_without_trade_db_write(monke
         configure_global_ledger(None)
 
 
+def test_v2_collateral_payload_uses_data_api_positions_and_conditional_micro_balance(monkeypatch, tmp_path):
+    """RELATIONSHIP: data-api position set -> CLOB conditional balance -> CTF sell preflight units."""
+    from src.venue.polymarket_v2_adapter import PolymarketV2Adapter
+
+    class FakeResponse:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return json.dumps(self.payload).encode("utf-8")
+
+    class FakeClient:
+        def update_balance_allowance(self, params):
+            return {}
+
+        def get_balance_allowance(self, params):
+            token_id = getattr(params, "token_id", None)
+            if token_id == "token-A":
+                return {"balance": "10000000"}  # CLOB conditional balances are already micro-units.
+            return {"balance": "200000000", "allowance": "99000000"}
+
+    def fake_urlopen(request, timeout):
+        assert "data-api.polymarket.com/positions" in request.full_url
+        return FakeResponse(
+            [
+                {
+                    "asset": "token-A",
+                    "size": 10,
+                    "outcome": "Yes",
+                }
+            ]
+        )
+
+    monkeypatch.setattr(
+        "src.venue.polymarket_v2_adapter.urllib.request.urlopen",
+        fake_urlopen,
+    )
+    adapter = PolymarketV2Adapter(
+        host="https://clob.polymarket.com",
+        funder_address="0xfunder",
+        signer_key="test-key",
+        chain_id=137,
+        signature_type=2,
+        q1_egress_evidence_path=tmp_path / "unused.txt",
+        client_factory=lambda **kwargs: FakeClient(),
+    )
+
+    payload = adapter.get_collateral_payload()
+
+    assert payload["ctf_token_balances_units"] == {"token-A": 10_000_000}
+    assert payload["ctf_token_allowances_units"] == {"token-A": 10_000_000}
+
+
 def test_executor_buy_preflight_blocks_before_command_persistence(conn, monkeypatch):
     from src.execution.executor import _live_order
     from src.state.collateral_ledger import configure_global_ledger

@@ -15,6 +15,7 @@ import hashlib
 import importlib.metadata
 import json
 import logging
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -34,6 +35,7 @@ from src.observability.counters import increment as _cnt_inc
 logger = logging.getLogger(__name__)
 
 DEFAULT_V2_HOST = "https://clob.polymarket.com"
+POLYMARKET_DATA_API_BASE = "https://data-api.polymarket.com"
 DEFAULT_Q1_EGRESS_EVIDENCE = Path(
     "docs/operations/live_egress/q1_zeus_egress_current.txt"
 )
@@ -465,9 +467,30 @@ class PolymarketV2Adapter:
     def get_positions(self) -> list[PositionFact]:
         get_positions = getattr(self._sdk_client(), "get_positions", None)
         if not callable(get_positions):
-            raise V2ReadUnavailable("SDK client does not expose get_positions; position absence is unknown")
+            return self._get_positions_from_data_api()
         raw = get_positions() or []
         return [PositionFact(raw=dict(item)) for item in raw]
+
+    def _get_positions_from_data_api(self) -> list[PositionFact]:
+        if not self.funder_address:
+            raise V2ReadUnavailable("funder_address is required for data-api position enumeration")
+        query = urllib.parse.urlencode(
+            {"user": self.funder_address, "sizeThreshold": "0.01"}
+        )
+        request = urllib.request.Request(
+            f"{POLYMARKET_DATA_API_BASE}/positions?{query}",
+            headers={"user-agent": "zeus-readonly/1.0"},
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=15) as response:
+                decoded = json.loads(response.read())
+        except Exception as exc:
+            raise V2ReadUnavailable(f"data-api position enumeration failed: {exc}") from exc
+        if isinstance(decoded, dict):
+            decoded = decoded.get("data", []) or []
+        if not isinstance(decoded, list):
+            raise V2ReadUnavailable("data-api position enumeration returned non-list payload")
+        return [PositionFact(raw=dict(item)) for item in decoded if isinstance(item, dict)]
 
     def get_pusd_balance_micro(self) -> int:
         """Return pUSD wallet balance without touching local trade-state DBs."""
@@ -525,11 +548,31 @@ class PolymarketV2Adapter:
             if not token_id:
                 continue
             token_key = str(token_id)
-            balance_units = _ctf_balance_units(item.get("size", item.get("balance", 0)))
+            conditional_raw = self._conditional_balance_allowance_raw(token_key)
+            conditional_balance_units = _micro_int_or_none(conditional_raw.get("balance"))
+            balance_units = (
+                conditional_balance_units
+                if conditional_balance_units is not None
+                else _ctf_balance_units(item.get("size", item.get("balance", 0)))
+            )
             balances[token_key] = balances.get(token_key, 0) + balance_units
-            allowance_raw = item.get("allowance", item.get("token_allowance", item.get("approved_amount")))
+            allowance_raw = conditional_raw.get(
+                "allowance",
+                item.get("allowance", item.get("token_allowance", item.get("approved_amount"))),
+            )
             if allowance_raw is not None:
-                allowance_units = _ctf_balance_units(allowance_raw)
+                allowance_micro = _micro_int_or_none(allowance_raw)
+                allowance_units = (
+                    allowance_micro
+                    if allowance_micro is not None
+                    else _ctf_balance_units(allowance_raw)
+                )
+            elif conditional_balance_units is not None:
+                # CLOB currently returns conditional-token balance without a
+                # separate allowance field. Treat the CLOB conditional balance
+                # as sell-cover proof; the submit response remains the authority
+                # for any approval-specific rejection.
+                allowance_units = conditional_balance_units
             elif item.get("approved") is True or item.get("isApprovedForAll") is True:
                 allowance_units = balance_units
             else:
@@ -575,6 +618,40 @@ class PolymarketV2Adapter:
         if raw.get("balance") is None:
             raise V2AdapterError("balance allowance response missing balance")
         return raw
+
+    def _conditional_balance_allowance_raw(self, token_id: str) -> dict[str, Any]:
+        """Read CLOB conditional-token balance/allowance for one outcome token."""
+
+        if not token_id:
+            return {}
+        client = self._sdk_client()
+        get_balance_allowance = getattr(client, "get_balance_allowance", None)
+        if not callable(get_balance_allowance):
+            return {}
+        try:
+            from py_clob_client_v2.clob_types import AssetType, BalanceAllowanceParams
+
+            params = BalanceAllowanceParams(
+                asset_type=AssetType.CONDITIONAL,
+                token_id=token_id,
+                signature_type=self.signature_type,
+            )
+        except Exception:
+            params = SimpleNamespace(
+                asset_type="CONDITIONAL",
+                token_id=token_id,
+                signature_type=self.signature_type,
+            )
+        try:
+            return dict(get_balance_allowance(params) or {})
+        except Exception as exc:
+            logger.debug(
+                "conditional balance allowance unavailable for token %s...%s: %s",
+                token_id[:8],
+                token_id[-4:],
+                exc,
+            )
+            return {}
 
     def _chain_collateral_allowance_micro(self) -> int | None:
         if not self.polygon_rpc_url:
