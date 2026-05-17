@@ -776,13 +776,23 @@ def _reprice_decision_from_executable_snapshot(
             corrected_candidate_size = size_at_depth_limit
 
     final_intent_context = final_intent_context or {}
+    selected_order_type = str(final_intent_context.get("order_type") or "GTC").strip().upper()
+    final_order_type = selected_order_type
+    taker_order_type_upgraded = False
+    if (
+        final_best_ask is not None
+        and final_order_type in {"GTC", "GTD"}
+        and bool(final_intent_context.get("allow_taker_upgrade"))
+    ):
+        final_order_type = "FOK"
+        taker_order_type_upgraded = True
     corrected_pricing_shadow = _attach_corrected_pricing_authority(
         decision=decision,
         snapshot=snapshot,
         candidate_limit_price=float(corrected_candidate_price),
         candidate_expected_fill_price_before_fee=float(corrected_candidate_expected_fill),
         candidate_size_usd=float(corrected_candidate_size),
-        order_type=str(final_intent_context.get("order_type") or "GTC"),
+        order_type=final_order_type,
         cancel_after=final_intent_context.get("cancel_after"),
         resolution_window=str(final_intent_context.get("resolution_window") or "default"),
         correlation_key=str(final_intent_context.get("correlation_key") or ""),
@@ -855,6 +865,9 @@ def _reprice_decision_from_executable_snapshot(
         ),
         "final_limit_price": final_price,
         "final_best_ask": final_best_ask,
+        "selected_order_type": selected_order_type,
+        "final_order_type": final_order_type,
+        "taker_order_type_upgraded": taker_order_type_upgraded,
         "corrected_candidate_limit_price": float(corrected_candidate_price),
         "corrected_candidate_expected_fill_price": float(corrected_candidate_expected_fill),
         "corrected_candidate_size_usd": float(corrected_candidate_size),
@@ -2977,6 +2990,7 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                                     snapshot_fields["executable_snapshot_id"],
                                     deps,
                                 ),
+                                "allow_taker_upgrade": True,
                                 "cancel_after": decision_time + timedelta(seconds=timeout_seconds),
                                 "resolution_window": candidate.target_date,
                                 "correlation_key": (

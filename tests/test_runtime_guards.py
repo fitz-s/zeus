@@ -2928,6 +2928,67 @@ def test_executable_snapshot_repricing_can_cross_ask_inside_slippage_budget(tmp_
     assert getattr(decision, "final_execution_intent", None) is None
 
 
+def test_executable_snapshot_repricing_upgrades_maker_order_type_when_crossing_ask(tmp_path):
+    """RELATIONSHIP: repriced taker policy -> concrete submit order type.
+
+    The governor may allow a maker order before repricing, but if the executable
+    snapshot proves the best ask is inside edge/slippage/depth budget, the final
+    intent must carry an immediate order type instead of becoming shadow-only.
+    """
+    conn = get_connection(tmp_path / "snapshot-reprice-tight-ask-upgrade.db")
+    init_schema(conn)
+    _insert_executable_snapshot(
+        conn,
+        snapshot_id="snap-reprice-tight-ask-upgrade",
+        selected_outcome_token_id="yes1",
+        outcome_label="YES",
+        yes_token_id="yes1",
+        no_token_id="no1",
+        top_bid="0.40",
+        top_ask="0.41",
+        fee_details={"feeRate": "0.03", "source": "test_snapshot_taker_fee"},
+    )
+    edge = _edge()
+    decision = EdgeDecision(
+        should_trade=True,
+        edge=edge,
+        tokens={"token_id": "yes1", "no_token_id": "no1"},
+        size_usd=5.0,
+        applied_validations=[],
+        edge_context=types.SimpleNamespace(p_posterior=edge.p_posterior),
+        decision_snapshot_id="decision-snap-tight-ask-upgrade",
+        sizing_bankroll=100.0,
+        kelly_multiplier_used=0.25,
+        execution_fee_rate=0.03,
+    )
+
+    best_ask = cycle_runtime._reprice_decision_from_executable_snapshot(
+        conn,
+        decision,
+        {"executable_snapshot_id": "snap-reprice-tight-ask-upgrade"},
+        {
+            "order_type": "GTC",
+            "allow_taker_upgrade": True,
+            "cancel_after": datetime(2026, 4, 3, 1, tzinfo=timezone.utc),
+            "resolution_window": "2026-04-03",
+            "correlation_key": "NYC:2026-04-03",
+        },
+    )
+    conn.close()
+
+    reprice = decision.tokens["executable_snapshot_reprice"]
+    shadow = reprice["corrected_pricing_shadow"]
+    assert best_ask == pytest.approx(0.41)
+    assert reprice["selected_order_type"] == "GTC"
+    assert reprice["final_order_type"] == "FOK"
+    assert reprice["taker_order_type_upgraded"] is True
+    assert reprice["live_submit_authority"] is True
+    assert shadow["order_policy"] == "marketable_limit_depth_bound"
+    assert shadow["live_submit_authority"] is True
+    assert decision.final_execution_intent.order_type == "FOK"
+    assert decision.final_execution_intent.post_only is False
+
+
 def test_executable_snapshot_repricing_sweeps_deeper_ask_inside_budget(tmp_path):
     from dataclasses import replace
 
