@@ -219,7 +219,7 @@ def _iter_active_platt_models(conn, limit: int | None = None) -> Iterator[dict]:
         SELECT model_key, temperature_metric AS metric, cluster, season,
                data_version, param_A, param_B, param_C, input_space,
                brier_insample, n_samples, cycle, source_id, horizon_profile
-          FROM platt_models_v2
+          FROM world.platt_models_v2
          WHERE is_active = 1
            AND authority = 'VERIFIED'
            AND input_space = 'raw_probability'
