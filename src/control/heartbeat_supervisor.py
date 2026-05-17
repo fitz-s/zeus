@@ -16,7 +16,7 @@ import os
 import threading
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any, Optional
@@ -27,6 +27,7 @@ HEARTBEAT_CANCEL_SUSPECTED_REASON = "heartbeat_cancel_suspected"
 DEFAULT_HEARTBEAT_CADENCE_SECONDS = 5
 DEFAULT_HEARTBEAT_STATUS_MAX_AGE_SECONDS = 8
 DEFAULT_HEARTBEAT_RESTART_SEED_MAX_AGE_SECONDS = 30
+DEFAULT_HEARTBEAT_LEASE_RECOVERY_SUCCESS_TICKS = 3
 HEARTBEAT_KEEPER_STATUS_FILENAME = "venue-heartbeat-keeper.json"
 _RESTING_ORDER_TYPES = {"GTC", "GTD"}
 _IMMEDIATE_ORDER_TYPES = {"FOK", "FAK"}
@@ -59,6 +60,22 @@ class HeartbeatStatus:
     heartbeat_id: str
     cadence_seconds: int
     last_error: Optional[str] = None
+    last_failure_at: Optional[datetime] = None
+    last_invalid_id_at: Optional[datetime] = None
+    consecutive_successes: int = 0
+    lease_continuous_since: Optional[datetime] = None
+    lease_gap_suspected_until: Optional[datetime] = None
+
+    def resting_order_safe(self, *, now: Optional[datetime] = None) -> bool:
+        if self.health is not HeartbeatHealth.HEALTHY:
+            return False
+        if self.lease_gap_suspected_until is None:
+            return True
+        checked_at = now or datetime.now(timezone.utc)
+        if checked_at.tzinfo is None:
+            checked_at = checked_at.replace(tzinfo=timezone.utc)
+        checked_at = checked_at.astimezone(timezone.utc)
+        return checked_at >= self.lease_gap_suspected_until.astimezone(timezone.utc)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -68,6 +85,20 @@ class HeartbeatStatus:
             "heartbeat_id": self.heartbeat_id,
             "cadence_seconds": self.cadence_seconds,
             "last_error": self.last_error,
+            "last_failure_at": self.last_failure_at.isoformat() if self.last_failure_at else None,
+            "last_invalid_id_at": self.last_invalid_id_at.isoformat() if self.last_invalid_id_at else None,
+            "consecutive_successes": self.consecutive_successes,
+            "lease_continuous_since": (
+                self.lease_continuous_since.isoformat()
+                if self.lease_continuous_since
+                else None
+            ),
+            "lease_gap_suspected_until": (
+                self.lease_gap_suspected_until.isoformat()
+                if self.lease_gap_suspected_until
+                else None
+            ),
+            "resting_order_safe": self.resting_order_safe(),
         }
 
 
@@ -153,15 +184,10 @@ def write_heartbeat_keeper_status(
     target.parent.mkdir(parents=True, exist_ok=True)
     now = datetime.now(timezone.utc)
     payload = {
-        "schema_version": 1,
+        "schema_version": 2,
         "owner": owner,
         "written_at": now.isoformat(),
-        "health": status.health.value,
-        "last_success_at": status.last_success_at.isoformat() if status.last_success_at else None,
-        "heartbeat_id": status.heartbeat_id,
-        "consecutive_failures": status.consecutive_failures,
-        "cadence_seconds": status.cadence_seconds,
-        "last_error": status.last_error,
+        **status.to_dict(),
     }
     tmp = target.with_suffix(target.suffix + ".tmp")
     tmp.write_text(json.dumps(payload, sort_keys=True) + "\n")
@@ -244,6 +270,12 @@ class ExternalHeartbeatSupervisor:
 
         written_at = _parse_utc(payload.get("written_at"))
         last_success_at = _parse_utc(payload.get("last_success_at"))
+        last_failure_at = _parse_utc(payload.get("last_failure_at"))
+        last_invalid_id_at = _parse_utc(payload.get("last_invalid_id_at"))
+        lease_continuous_since = _parse_utc(payload.get("lease_continuous_since"))
+        lease_gap_suspected_until = _parse_utc(payload.get("lease_gap_suspected_until"))
+        consecutive_successes = int(payload.get("consecutive_successes") or 0)
+
         if written_at is None:
             return HeartbeatStatus(
                 health=HeartbeatHealth.LOST,
@@ -252,6 +284,11 @@ class ExternalHeartbeatSupervisor:
                 heartbeat_id="external",
                 cadence_seconds=int(payload.get("cadence_seconds") or self._cadence_seconds),
                 last_error="external heartbeat status missing written_at",
+                last_failure_at=last_failure_at,
+                last_invalid_id_at=last_invalid_id_at,
+                consecutive_successes=consecutive_successes,
+                lease_continuous_since=lease_continuous_since,
+                lease_gap_suspected_until=lease_gap_suspected_until,
             )
         age_seconds = (datetime.now(timezone.utc) - written_at).total_seconds()
         cadence_seconds = int(payload.get("cadence_seconds") or self._cadence_seconds)
@@ -266,6 +303,11 @@ class ExternalHeartbeatSupervisor:
                     f"external heartbeat status stale: age={age_seconds:.3f}s "
                     f"max_age={self._max_age_seconds}s"
                 ),
+                last_failure_at=last_failure_at,
+                last_invalid_id_at=last_invalid_id_at,
+                consecutive_successes=consecutive_successes,
+                lease_continuous_since=lease_continuous_since,
+                lease_gap_suspected_until=lease_gap_suspected_until,
             )
         raw_health = str(payload.get("health") or "").upper()
         try:
@@ -279,12 +321,17 @@ class ExternalHeartbeatSupervisor:
             heartbeat_id=str(payload.get("heartbeat_id") or "external"),
             cadence_seconds=cadence_seconds,
             last_error=payload.get("last_error"),
+            last_failure_at=last_failure_at,
+            last_invalid_id_at=last_invalid_id_at,
+            consecutive_successes=consecutive_successes,
+            lease_continuous_since=lease_continuous_since,
+            lease_gap_suspected_until=lease_gap_suspected_until,
         )
 
     def gate_for_order_type(self, order_type: str | OrderType | None) -> bool:
         if not heartbeat_required_for(order_type):
             return True
-        return self.status().health is HeartbeatHealth.HEALTHY
+        return self.status().resting_order_safe()
 
 
 class HeartbeatSupervisor:
@@ -313,7 +360,12 @@ class HeartbeatSupervisor:
         self._health = HeartbeatHealth.STARTING
         self._last_success_at: Optional[datetime] = None
         self._consecutive_failures = 0
+        self._consecutive_successes = 0
         self._last_error: Optional[str] = None
+        self._last_failure_at: Optional[datetime] = None
+        self._last_invalid_id_at: Optional[datetime] = None
+        self._lease_continuous_since: Optional[datetime] = None
+        self._lease_gap_suspected_until: Optional[datetime] = None
         self._running = False
         self._tombstone_written = False
         self._run_once_lock = threading.Lock()
@@ -355,6 +407,7 @@ class HeartbeatSupervisor:
                 # a known-bad token until a later timeout resets the chain, which
                 # is long enough for the venue to cancel resting GTC/GTD orders.
                 if _is_invalid_heartbeat_id_error(exc):
+                    self.record_failure(exc)
                     try:
                         self._heartbeat_id = await self._post_heartbeat_once("")
                         self.record_success()
@@ -386,15 +439,27 @@ class HeartbeatSupervisor:
         return next_id
 
     def record_success(self) -> None:
+        now = datetime.now(timezone.utc)
+        if self._consecutive_successes == 0:
+            self._lease_continuous_since = now
         self._health = HeartbeatHealth.HEALTHY
-        self._last_success_at = datetime.now(timezone.utc)
+        self._last_success_at = now
         self._consecutive_failures = 0
+        self._consecutive_successes += 1
         self._last_error = None
 
     def record_failure(self, exc: Exception | str) -> None:
+        now = datetime.now(timezone.utc)
         self._consecutive_failures += 1
+        self._consecutive_successes = 0
         self._last_error = str(exc)
+        self._last_failure_at = now
+        self._lease_continuous_since = None
+        self._lease_gap_suspected_until = now + timedelta(
+            seconds=self._cadence_seconds * DEFAULT_HEARTBEAT_LEASE_RECOVERY_SUCCESS_TICKS
+        )
         if _is_invalid_heartbeat_id_error(exc):
+            self._last_invalid_id_at = now
             self._health = HeartbeatHealth.LOST
             self._write_failclosed_tombstone()
         elif self._consecutive_failures == 1:
@@ -417,6 +482,11 @@ class HeartbeatSupervisor:
             heartbeat_id=self._heartbeat_id,
             cadence_seconds=self._cadence_seconds,
             last_error=self._last_error,
+            last_failure_at=self._last_failure_at,
+            last_invalid_id_at=self._last_invalid_id_at,
+            consecutive_successes=self._consecutive_successes,
+            lease_continuous_since=self._lease_continuous_since,
+            lease_gap_suspected_until=self._lease_gap_suspected_until,
         )
 
     def gate_for_order_type(self, order_type: str | OrderType | None) -> bool:
@@ -424,7 +494,7 @@ class HeartbeatSupervisor:
             return True
         if self._tombstone_written or _failclosed_tombstone_exists():
             return False
-        return self._health == HeartbeatHealth.HEALTHY
+        return self.status().resting_order_safe()
 
     def _write_failclosed_tombstone(self) -> None:
         # Tombstone retired 2026-05-04 — runtime safety covered by gate 6/9/10.
@@ -486,6 +556,12 @@ def summary() -> dict[str, Any]:
         "allow_submit": entry_allowed,
         "required_order_types": sorted(_RESTING_ORDER_TYPES),
     }
+    if not entry_allowed:
+        payload["entry"]["reason"] = status.last_error or (
+            "heartbeat_lease_gap_suspected"
+            if status.health is HeartbeatHealth.HEALTHY
+            else f"heartbeat={status.health.value}"
+        )
     return payload
 
 

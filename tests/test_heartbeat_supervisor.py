@@ -145,8 +145,13 @@ def test_invalid_heartbeat_id_restarts_chain_in_same_tick():
 
     assert recovered.health is HeartbeatHealth.HEALTHY
     assert recovered.consecutive_failures == 0
+    assert recovered.consecutive_successes == 1
     assert recovered.heartbeat_id == "id-2"
-    assert supervisor.gate_for_order_type("GTC") is True
+    assert recovered.last_invalid_id_at is not None
+    assert recovered.lease_gap_suspected_until is not None
+    assert recovered.resting_order_safe() is False
+    assert supervisor.gate_for_order_type("GTC") is False
+    assert supervisor.gate_for_order_type("FOK") is True
     assert adapter.heartbeat_ids == ["", "id-1", ""]
 
 
@@ -177,8 +182,11 @@ def test_invalid_heartbeat_id_error_body_is_not_treated_as_canonical_hint():
 
     assert recovered.health is HeartbeatHealth.HEALTHY
     assert recovered.consecutive_failures == 0
+    assert recovered.consecutive_successes == 1
     assert recovered.heartbeat_id == "server-next"
-    assert supervisor.gate_for_order_type("GTC") is True
+    assert recovered.last_invalid_id_at is not None
+    assert recovered.lease_gap_suspected_until is not None
+    assert supervisor.gate_for_order_type("GTC") is False
     assert adapter.heartbeat_ids == ["persisted-stale", ""]
 
 
@@ -200,9 +208,11 @@ def test_invalid_heartbeat_id_empty_chain_recovery_failure_loses_lease():
     lost = _run(supervisor.run_once())
 
     assert lost.health is HeartbeatHealth.LOST
-    assert lost.consecutive_failures == 1
+    assert lost.consecutive_failures == 2
     assert lost.heartbeat_id == ""
     assert "empty-chain recovery failed" in (lost.last_error or "")
+    assert lost.last_invalid_id_at is not None
+    assert lost.lease_gap_suspected_until is not None
     assert supervisor.gate_for_order_type("GTC") is False
     assert adapter.heartbeat_ids == ["stale-id", ""]
 
@@ -450,6 +460,44 @@ def test_external_heartbeat_supervisor_requires_fresh_healthy_status(tmp_path):
     assert "stale" in (supervisor.status().last_error or "")
 
 
+def test_external_heartbeat_supervisor_blocks_healthy_status_during_lease_gap(tmp_path):
+    status_path = tmp_path / "venue-heartbeat-keeper.json"
+    now = datetime.now(timezone.utc)
+    status = HeartbeatStatus(
+        health=HeartbeatHealth.HEALTHY,
+        last_success_at=now,
+        consecutive_failures=0,
+        heartbeat_id="keeper-id",
+        cadence_seconds=5,
+        last_error=None,
+        last_failure_at=now,
+        last_invalid_id_at=now,
+        consecutive_successes=1,
+        lease_continuous_since=now,
+        lease_gap_suspected_until=now + timedelta(seconds=15),
+    )
+    write_heartbeat_keeper_status(status, path=status_path)
+
+    supervisor = ExternalHeartbeatSupervisor(
+        status_path=status_path,
+        max_age_seconds=8,
+        cadence_seconds=5,
+    )
+
+    loaded = supervisor.status()
+    assert loaded.health is HeartbeatHealth.HEALTHY
+    assert loaded.last_invalid_id_at is not None
+    assert loaded.resting_order_safe() is False
+    assert supervisor.gate_for_order_type(OrderType.GTC) is False
+    assert supervisor.gate_for_order_type(OrderType.FOK) is True
+
+    payload = json.loads(status_path.read_text())
+    payload["lease_gap_suspected_until"] = (now - timedelta(seconds=1)).isoformat()
+    status_path.write_text(json.dumps(payload))
+
+    assert supervisor.gate_for_order_type(OrderType.GTC) is True
+
+
 def test_heartbeat_keeper_writes_status_without_order_side_effects(tmp_path):
     status_path = tmp_path / "venue-heartbeat-keeper.json"
     adapter = FakeHeartbeatAdapter([HeartbeatAck(ok=True, raw={"heartbeat_id": "keeper-A"})])
@@ -463,9 +511,12 @@ def test_heartbeat_keeper_writes_status_without_order_side_effects(tmp_path):
 
     payload = json.loads(status_path.read_text())
     assert payload["owner"] == "zeus-venue-heartbeat"
+    assert payload["schema_version"] == 2
     assert payload["health"] == "HEALTHY"
     assert payload["heartbeat_id"] == "keeper-A"
     assert payload["last_error"] is None
+    assert payload["resting_order_safe"] is True
+    assert payload["consecutive_successes"] == 1
     assert adapter.heartbeat_ids == [""]
 
 
