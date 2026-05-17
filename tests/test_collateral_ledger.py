@@ -37,6 +37,7 @@ from src.state.collateral_ledger import (
     CollateralInsufficient,
     CollateralLedger,
     CollateralSnapshot,
+    COLLATERAL_SNAPSHOT_MAX_AGE_SECONDS,
     SQLITE_SIGNED_INTEGER_MAX,
     init_collateral_schema,
     require_pusd_redemption_allowed,
@@ -360,10 +361,29 @@ def test_set_snapshot_caps_uint256_allowance_to_sqlite_domain(conn):
 
 def test_buy_preflight_blocks_when_snapshot_stale(conn):
     ledger = CollateralLedger(conn)
-    ledger.set_snapshot(_snapshot(captured_at=datetime.now(timezone.utc) - timedelta(seconds=61)))
+    ledger.set_snapshot(
+        _snapshot(
+            captured_at=datetime.now(timezone.utc)
+            - timedelta(seconds=COLLATERAL_SNAPSHOT_MAX_AGE_SECONDS + 1)
+        )
+    )
 
     with pytest.raises(CollateralInsufficient, match="collateral_snapshot_stale"):
         ledger.buy_preflight(_buy_intent(size_usd=1.0))
+
+
+def test_buy_preflight_allows_background_attestation_jitter_within_sla(conn):
+    """RELATIONSHIP: background collateral attestation -> submit preflight."""
+
+    ledger = CollateralLedger(conn)
+    ledger.set_snapshot(
+        _snapshot(
+            captured_at=datetime.now(timezone.utc)
+            - timedelta(seconds=COLLATERAL_SNAPSHOT_MAX_AGE_SECONDS - 30)
+        )
+    )
+
+    assert ledger.buy_preflight(_buy_intent(size_usd=1.0)) is True
 
 
 def test_buy_preflight_reloads_newer_persisted_snapshot_before_freshness_gate(conn):
@@ -456,7 +476,8 @@ def test_sell_preflight_blocks_when_snapshot_stale(conn):
         _snapshot(
             ctf={YES_TOKEN: 10},
             ctf_allowances={YES_TOKEN: 10},
-            captured_at=datetime.now(timezone.utc) - timedelta(seconds=61),
+            captured_at=datetime.now(timezone.utc)
+            - timedelta(seconds=COLLATERAL_SNAPSHOT_MAX_AGE_SECONDS + 1),
         )
     )
 
