@@ -32,6 +32,7 @@ FORECAST_LIVE_STALE_SECONDS = 300
 DEFAULT_EXPECTED_REF = "origin/main"
 VOLATILE_CODE_PLANE_DIRTY_PATHS = frozenset({
     "station_migration_alerts.json",
+    "state/station_migration_alerts.json",
 })
 SETTLEMENT_TRUTH_STALE_SECONDS = int(os.environ.get("ZEUS_SETTLEMENT_TRUTH_STALE_SECONDS", str(48 * 3600)))
 PROCESS_CODE_STALE_TOLERANCE_SECONDS = 2

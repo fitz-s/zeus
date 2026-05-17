@@ -985,6 +985,12 @@ def run_cycle(mode: DiscoveryMode) -> dict:
         logger.warning("Decision chain recording failed: %s", e)
 
     conn.close()
+    close_clob = getattr(clob, "close", None)
+    if callable(close_clob):
+        try:
+            close_clob()
+        except Exception as exc:
+            logger.warning("PolymarketClient close failed during cycle teardown: %s", exc)
     summary["completed_at"] = _utcnow().isoformat()
 
     logger.info(

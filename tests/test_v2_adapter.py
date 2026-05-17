@@ -1204,6 +1204,7 @@ def test_polymarket_client_reuses_public_http_client_for_clob_reads(monkeypatch)
     class PublicClient:
         def __init__(self, *args, **kwargs):
             self.calls = []
+            self.closed = False
 
         def get(self, url, *, params=None):
             self.calls.append((url, params))
@@ -1214,6 +1215,9 @@ def test_polymarket_client_reuses_public_http_client_for_clob_reads(monkeypatch)
             if url.endswith("/fee-rate"):
                 return Response({"base_fee": 30})
             raise AssertionError(f"unexpected URL: {url}")
+
+        def close(self):
+            self.closed = True
 
     clients = []
 
@@ -1244,6 +1248,10 @@ def test_polymarket_client_reuses_public_http_client_for_clob_reads(monkeypatch)
         (f"{pm.CLOB_BASE}/book", {"token_id": "token-1"}),
         (f"{pm.CLOB_BASE}/fee-rate", {"token_id": "token-1"}),
     ]
+
+    client.close()
+    assert clients[0].closed is True
+    assert client._public_http_client is None
 
 
 def test_polymarket_client_cancel_blocks_before_adapter_when_cutover_disallows(monkeypatch):

@@ -10556,6 +10556,34 @@ def test_run_cycle_clears_market_scanner_cache_each_cycle(monkeypatch, tmp_path)
     assert cleared["n"] == 1
 
 
+def test_run_cycle_closes_polymarket_client_after_cycle(monkeypatch, tmp_path):
+    db_path = tmp_path / "zeus.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+    conn.close()
+
+    closed = []
+
+    class DummyClob:
+        def close(self):
+            closed.append("closed")
+
+    monkeypatch.setattr(cycle_runner, "get_current_level", lambda: RiskLevel.GREEN)
+    monkeypatch.setattr(cycle_runner, "get_connection", lambda: get_connection(db_path))
+    monkeypatch.setattr(cycle_runner, "load_portfolio", lambda: PortfolioState())
+    monkeypatch.setattr(cycle_runner, "save_portfolio", lambda state, *args, **kwargs: None)
+    monkeypatch.setattr(cycle_runner, "PolymarketClient", DummyClob)
+    monkeypatch.setattr(cycle_runner, "get_tracker", lambda: StrategyTracker())
+    monkeypatch.setattr(cycle_runner, "save_tracker", lambda tracker: None)
+    monkeypatch.setattr(cycle_runner, "find_weather_markets", lambda **kwargs: [])
+    monkeypatch.setattr("src.control.control_plane.process_commands", lambda: [])
+    monkeypatch.setattr("src.observability.status_summary.write_status", lambda cycle_summary=None: None)
+
+    cycle_runner.run_cycle(DiscoveryMode.OPENING_HUNT)
+
+    assert closed == ["closed"]
+
+
 def test_monitoring_phase_uses_tracker_record_exit_for_deferred_sell_fills(monkeypatch):
     class Tracker:
         def __init__(self):

@@ -486,6 +486,32 @@ def test_git_runtime_identity_ignores_station_migration_timestamp_artifact(tmp_p
     assert identity["ignored_dirty_paths"] == ["station_migration_alerts.json"]
 
 
+def test_git_runtime_identity_ignores_state_station_migration_timestamp_artifact(tmp_path, monkeypatch):
+    module = _load_module()
+    root = tmp_path / "zeus"
+
+    def fake_run(args, **kwargs):
+        git_args = args[3:]
+        if git_args == ["rev-parse", "HEAD"]:
+            stdout = "abc123\n"
+        elif git_args == ["rev-parse", "--abbrev-ref", "HEAD"]:
+            stdout = "main\n"
+        elif git_args == ["status", "--porcelain"]:
+            stdout = " M state/station_migration_alerts.json\n"
+        else:
+            raise AssertionError(f"unexpected git args: {git_args!r}")
+        return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+    monkeypatch.setenv("ZEUS_LIVE_EXPECTED_COMMIT", "abc123")
+
+    identity = module._git_runtime_identity(str(root))
+
+    assert identity["dirty"] is False
+    assert identity["dirty_paths"] == []
+    assert identity["ignored_dirty_paths"] == ["state/station_migration_alerts.json"]
+
+
 def test_git_runtime_identity_still_flags_material_dirty_path(tmp_path, monkeypatch):
     module = _load_module()
     root = tmp_path / "zeus"

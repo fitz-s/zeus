@@ -247,6 +247,23 @@ class PolymarketClient:
             self._public_http_client = client
         return client
 
+    def close(self) -> None:
+        """Close reusable public CLOB transports owned by this wrapper."""
+
+        client = getattr(self, "_public_http_client", None)
+        if client is not None:
+            close = getattr(client, "close", None)
+            if callable(close):
+                close()
+        self._public_http_client = None
+
+    def __enter__(self) -> "PolymarketClient":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        self.close()
+        return False
+
     def _public_get(self, path: str, *, params: dict[str, Any] | None = None):
         url = f"{CLOB_BASE}{path}"
         if not hasattr(self, "_public_http_client"):
