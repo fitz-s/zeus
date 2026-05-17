@@ -4,6 +4,24 @@
 **Owner**: PR-I (Path A-clean, Karachi 5/17 T-0 = 2026-05-17 12:00 UTC)
 **Author**: opus SCAFFOLD architect 2026-05-16; v2 §K + §I.1 amendment by main session per operator directive "选择架构上最干净和正确的解法" 2026-05-16
 
+## Changelog v3 → v4 (2026-05-16, post-G2-round-2-critic revision)
+
+G2 round-2 opus critic on v3: 7 of 10 prior probes PASS; 3 residual/new defects + 1 minor:
+
+- **P2 SEV-1 residual**: §K.4 v3 `--force` only widened to {OPERATOR_REQUIRED, TX_HASHED}; REDEEM_FAILED + REVIEW_REQUIRED still had no exit. v4 fix: `--force` allowed source states = **ALL except REDEEM_CONFIRMED** (clean principle: operator with explicit override can rescue any non-final-success state; CONFIRMED is the only true terminal). Mandatory `--notes` + audit `actor_override=true`.
+- **NEW-P11 SEV-2 schema split**: §G.2 v1 uses `required_pollers[{id, watched_states, owner, mode}]` shape; §K.6 v3 used incompatible flat shape with field names like `poller_job_id`, `submittable_states`. Same YAML file, two schemas. v4 fix: §K.6 reworked to **extend §G.2** — adds `terminal_states` (documentation) + `terminal_states_with_operator_action` as sibling fields under `state_machines[]`; preserves required_pollers shape unchanged. Existing `intent_states` plays the role of `submittable_states`; no rename.
+- **P4 SEV-2 residual**: §K.9 RISK 3 and v3 changelog claimed a "G3 PR-open checklist" with pUSD migration gate. Grep confirms no such checklist exists in FIX_PLAN.md. v4 fix: rewrite RISK 3 + changelog claim as "operator-required pre-merge sign-off tracked in RISK 3" — stop claiming a checklist that doesn't exist.
+- **NEW-P12 SEV-2 migration under-specified**: §K.8 v3 migration row missed FK handling (`settlement_command_events.command_id REFERENCES settlement_commands(command_id)`), dual-DB target list, concrete idempotency check. v4 fix: add `PRAGMA foreign_keys=OFF/ON` wrap, both `state/zeus_trades.db` + `state/zeus-live.db`, idempotency via `SELECT sql FROM sqlite_master WHERE name='settlement_commands' AND sql LIKE '%REDEEM_OPERATOR_REQUIRED%'`.
+- **P7 minor — RECTIFIED v4 follow-up**: §K.8 v3 cited `src/main.py:L984-986` (from G3-prep scout). Critic round-2 claimed actual span was L927-938 and v4 initially adopted that. Executor re-verified via direct grep 2026-05-16: actual scheduler.add_job span is **L965-988** with harvester at L984 + heartbeat at L985-986 — scout was correct, critic round-2 was wrong (hallucinated line numbers). §K.8 v4 final cites L965-988 + insertion-point after L988 with the grep command for executor re-verification.
+
+Critic v3 also surfaced two advisory notes (NOT blocking):
+- F16 `wrap_unwrap_liveness_guard` has no `terminal_states_with_operator_action` entry — correct (liveness-only mode is documented in §G.2 mode discriminator + §K.6 v4 only adds the field where applicable; antibody test must tolerate field-absence on liveness_only entries).
+- §K.4 `submitted_at` semantic drift (CLI invocation time vs adapter submission time): v4 §K.4 spec changes column write to `submitted_at = CLI_INVOCATION_TS` with explicit comment in audit-event payload noting operator-recorded.
+
+**Author of v4**: main session (executor role, opus model) per `feedback_long_opus_revision_briefs_timeout.md`. v3 sections that PASSED critic round 2 are unchanged (§I.2, §I.3, §I.4, §K.3 atomicity, §K.5 tests, §K.7 runbook walkthrough, §K.9 RISK 6/7/8 mitigations, §K.10 first-live-precedent honest verdict).
+
+---
+
 ## Changelog v2 → v3 (2026-05-16, post-G2-critic revision)
 
 G2 opus critic verdict on v2 was **G2-FAIL-REVISE** (5 SEV-1 + 4 SEV-2). Path A-clean direction confirmed sound; v2 added §K at intent level but did not propagate edits into v1 §I.2/§I.3/§I.4 and did not verify primitives. v3 addresses every probe:
@@ -706,7 +724,7 @@ A future PR that adds a state machine to the YAML but forgets to register the jo
 **RISK 3 — F16 decision (keep + no-op poller) is wrong if pUSD migration is abandoned.**
 The SCAFFOLD assumes Z5 pUSD migration is roadmapped. If operator policy has moved away from pUSD entirely (e.g. "USDC.e is permanent settlement asset"), keeping the wrap/unwrap module is dead weight that bloats the antibody contract.
 
-**Mitigation**: §E.2 reasoning #4 explicitly cites this as the right delete trigger. The SCAFFOLD does not have access to current pUSD migration policy as of 2026-05-16; if operator confirms abandonment, the F16 portion of PR-I downgrades to: delete `src/execution/wrap_unwrap_commands.py`, drop both tables, remove the YAML entry, remove the `wrap_unwrap_liveness_guard` job. This is mechanical and reversible; the antibody pattern survives unchanged. **Operator decision required before code freeze.** Default in PR-I: keep + no-op poller.
+**Mitigation (v4 P4 critic fix — no fictitious checklist)**: §E.2 reasoning #4 explicitly cites this as the right delete trigger. The SCAFFOLD does not have access to current pUSD migration policy as of 2026-05-16. **Operator-required pre-merge sign-off tracked here in RISK 3** — there is NO separate "G3 PR-open checklist" in FIX_PLAN.md (v3 changelog incorrectly cited one). G5a PR-open task brief (TaskList #8) carries the operator-confirm requirement: PR-I cannot merge until operator answers "pUSD migration: keep / abandon". If "abandon", a follow-up commit on the same branch downgrades F16 portion: delete `src/execution/wrap_unwrap_commands.py`, drop both tables, remove the YAML entry, remove the `wrap_unwrap_liveness_guard` job. Mechanical and reversible; antibody pattern survives unchanged. Default in PR-I as opened: keep + no-op poller.
 
 ### J.2 Lower-tier risks (acknowledged, not Karachi-blocking)
 
@@ -831,11 +849,14 @@ NORMAL MODE (no --force):
 5. logger.info("[OPERATOR_RECORD] command_id=... old=OPERATOR_REQUIRED new=TX_HASHED tx_hash=...").
 6. Print 4-line summary to stdout: command_id, old → new state, tx_hash, condition_id.
 
-FORCE MODE (--force, recovery use):
-- Allowed source states: REDEEM_OPERATOR_REQUIRED (re-record over prior fail), REDEEM_TX_HASHED (overwrite).
-- Same atomicity (single UPDATE), but WHERE clause widens to `state IN ('REDEEM_OPERATOR_REQUIRED','REDEEM_TX_HASHED')`.
-- INSERT audit event with extra payload field actor_override=true + prior_tx_hash field if overwriting.
-- Emits WARNING (not info) because forced overwrite is operator-acknowledged exception.
+FORCE MODE (--force, recovery use; v4 P2 critic fix — clean "non-final non-success" principle):
+- Allowed source states: **ALL states except REDEEM_CONFIRMED**. CONFIRMED is the only true terminal (on-chain success); every other state represents a recoverable process failure.
+- Concretely allowed: REDEEM_INTENT_CREATED, REDEEM_SUBMITTED, REDEEM_TX_HASHED, REDEEM_RETRYING, REDEEM_REVIEW_REQUIRED, REDEEM_OPERATOR_REQUIRED, REDEEM_FAILED (and any future non-CONFIRMED state).
+- Same atomicity (single UPDATE), WHERE clause: `WHERE command_id=? AND state != 'REDEEM_CONFIRMED'`. Assert cursor.rowcount == 1 (row exists and was not CONFIRMED); otherwise reject + audit.
+- **Mandatory `--notes` field** with --force (CLI rejects --force without --notes; ≥10 chars enforced); operator must justify override.
+- INSERT audit event with payload: `actor_override=true`, `prior_state=<original>`, `prior_tx_hash=<original_if_any>`, `notes=<operator_string>`, `actor=operator`.
+- Emits structured `logger.warning("[REDEEM_FORCE_OVERRIDE] ...")` (not info) because forced overwrite is operator-acknowledged exception. Heartbeat-sensor picks this up per Finding #10 path.
+- REDEEM_FAILED + REDEEM_REVIEW_REQUIRED rescue path: --force is the ONLY recovery in PR-I scope. PR-I.5 (web3 reconciler) will add automated retry-from-FAILED based on on-chain receipt verification, but --force remains available as operator-overrideable backstop.
 
 REJECTIONS:
 - Wrong state (NOT in allowed set): exit 2, log REJECT, no DB write.
@@ -875,29 +896,55 @@ If in REDEEM_TX_HASHED with different tx_hash → reject (operator must reconcil
 | `test_operator_record_redeem_is_idempotent_with_same_hash` | same NEW file | Seed `REDEEM_TX_HASHED` already with hash X; invoke CLI with same hash; assert no-op success |
 | `test_operator_record_redeem_rejects_conflicting_hash` | same NEW file | Seed `REDEEM_TX_HASHED` with hash X; invoke CLI with hash Y; assert raises |
 
-### K.6 cascade_liveness_contract.yaml addendum (v3 — row-age guard)
+### K.6 cascade_liveness_contract.yaml addendum (v4 — extends §G.2 schema, no schema split)
 
-Add per-entry fields to the YAML schema:
+**v4 fix (NEW-P11 critic)**: v3 introduced a flat schema with field names `poller_job_id`/`submittable_states`/etc that conflicted with §G.2's `required_pollers[{id, watched_states, owner, mode}]` shape. v4 **extends §G.2 schema** rather than introducing a parallel one. The YAML adds two new sibling fields under `state_machines[]`: `terminal_states` (documentation) and `terminal_states_with_operator_action` (the new operator-completion semantic). `intent_states` from §G.2 already serves the role v3 called `submittable_states`; no rename.
+
+Full settlement_commands entry in `architecture/cascade_liveness_contract.yaml` after v4 changes (merge of §G.2 v1 + §K.6 v4 fields):
 
 ```yaml
-- table: settlement_commands
-  poller_job_id: redeem_submitter
-  reconciler_job_id: redeem_reconciler
-  submittable_states: [REDEEM_INTENT_CREATED, REDEEM_RETRYING]
-  terminal_states: [REDEEM_CONFIRMED, REDEEM_FAILED, REDEEM_REVIEW_REQUIRED]
-  terminal_states_with_operator_action:
-    - state: REDEEM_OPERATOR_REQUIRED
-      max_age_hours: 24                    # P1 critic fix: row-age guard
-      operator_runbook: docs/operations/task_2026-05-16_deep_alignment_audit/KARACHI_2026_05_17_MANUAL_FALLBACK.md#1
-      escalation_action: "Path C trigger per §I.4 if exceeded; arm manual fallback runbook §3"
-      cli_invocation: "python -m scripts.operator_record_redeem <condition_id> <tx_hash>"
+state_machines:
+  - table: settlement_commands
+    db: trades
+    intent_states: [REDEEM_INTENT_CREATED, REDEEM_RETRYING]                # §G.2 v1 (unchanged)
+    terminal_states:                                                        # NEW v4 (documentation; antibody-test consumes)
+      - REDEEM_CONFIRMED
+      - REDEEM_FAILED
+      - REDEEM_REVIEW_REQUIRED
+    terminal_states_with_operator_action:                                   # NEW v3+v4 (operator-completion semantic)
+      - state: REDEEM_OPERATOR_REQUIRED
+        max_age_hours: 24
+        operator_runbook: docs/operations/task_2026-05-16_deep_alignment_audit/KARACHI_2026_05_17_MANUAL_FALLBACK.md#1
+        escalation_action: "Path C trigger per §I.4 if exceeded; arm manual fallback runbook §3"
+        cli_invocation: "python -m scripts.operator_record_redeem <condition_id> <tx_hash>"
+    required_pollers:                                                       # §G.2 v1 shape (unchanged)
+      - id: redeem_submitter
+        watched_states: [REDEEM_INTENT_CREATED]
+        owner: src/main.py:_redeem_submitter_cycle
+        mode: submitter
+      - id: redeem_reconciler
+        watched_states: [REDEEM_TX_HASHED]
+        owner: src/main.py:_redeem_reconciler_cycle
+        mode: reconciler
+  - table: wrap_unwrap_commands
+    db: world
+    intent_states: [WRAP_REQUESTED, UNWRAP_REQUESTED]
+    # NOTE: no terminal_states_with_operator_action field for liveness_only entries
+    # (table must stay empty per §E.2). Antibody test tolerates absence on mode=liveness_only.
+    required_pollers:
+      - id: wrap_unwrap_liveness_guard
+        watched_states: [WRAP_REQUESTED, UNWRAP_REQUESTED]
+        owner: src/main.py:_wrap_unwrap_liveness_guard_cycle
+        mode: liveness_only
 ```
 
 The antibody test (`tests/test_cascade_liveness_contract.py`) extends to assert:
 
-- Every non-terminal state has a poller (existing v2 check).
-- Every state in `terminal_states_with_operator_action` has: (a) a transition path INTO it from the state-machine code, (b) `max_age_hours` field set, (c) `operator_runbook` reference resolves to an existing file + section anchor, (d) `cli_invocation` is a runnable command string.
-- **Row-age guard (v3 P1 critic fix)**: a new test `test_no_operator_required_row_exceeds_max_age` queries production-shape settlement_commands rows and asserts no row in OPERATOR_REQUIRED exceeds `max_age_hours`. Test is data-dependent (skipped if DB is empty); runs in CI against staging snapshot if available, runs in operator-invocable mode against live DB.
+- Every non-terminal state has a poller (§G.2 v1 check — unchanged).
+- Mode discriminator enforcement (§G.2 v1 — unchanged).
+- **NEW v4**: for each entry with `terminal_states_with_operator_action`, each listed state must have: (a) a transition INTO it from src/ (verified via `inspect.getsource` grep for the state literal in the relevant `_transition` call site), (b) `max_age_hours` field set and positive integer, (c) `operator_runbook` field resolves to an existing file + anchor (file existence checked; anchor not verified — too brittle), (d) `cli_invocation` field is a non-empty string.
+- **NEW v4 row-age guard test**: `test_no_operator_required_row_exceeds_max_age` queries production-shape settlement_commands rows and asserts no row in OPERATOR_REQUIRED exceeds `max_age_hours`. Test is data-dependent (skipped if DB is empty or table has no OPERATOR_REQUIRED rows); runs in CI against staging snapshot if available, runs in operator-invocable mode against live DB.
+- **NEW v4 tolerance**: entries with `mode: liveness_only` are NOT required to have `terminal_states_with_operator_action` field (advisory critic-finding addressed — F16 entry stays valid without the new field).
 - **Aging poller (deferred to PR-I.5)**: scheduled job `redeem_age_guard` scans every 1h, raises ALERT for rows exceeding `max_age_hours`. PR-I ships the contract field + CI test; PR-I.5 ships the poller. Acceptable because:
   - For Karachi: position is the first ever — operator attention guaranteed; no need for aging-poller alert on top of the immediate WARN.
   - For future positions post-PR-I.5: the guard is automated.
@@ -931,9 +978,9 @@ Until step 9 the cascade is deterministic and machine-driven; step 7+8 is the de
 | `src/execution/settlement_commands.py` | L71-78 (SettlementState Enum) | Add `REDEEM_OPERATOR_REQUIRED = "REDEEM_OPERATOR_REQUIRED"` | Python-level literal-set parallel |
 | `src/execution/settlement_commands.py` | ~L380-410 (existing `REDEEM_DEFERRED_TO_R1` check site) | Add `_atomic_transition` helper + transition logic per §K.3 (v3 atomicity + logger.warning alert primitive) | Stub-detected designed-state transition |
 | `src/execution/settlement_commands.py` | adjacent to existing `_TERMINAL_STATES` (L81-85) | Update set membership: REDEEM_OPERATOR_REQUIRED is NOT terminal (CLI exits it); REDEEM_REVIEW_REQUIRED stays terminal | State-set bookkeeping |
-| `scripts/migrations/202605_add_redeem_operator_required_state.py` | NEW (v3 P7 critic fix) | SQLite CHECK-constraint migration: BEGIN; CREATE TABLE settlement_commands_new with new CHECK; INSERT INTO settlement_commands_new SELECT * FROM settlement_commands; DROP TABLE settlement_commands; ALTER TABLE settlement_commands_new RENAME TO settlement_commands; recreate indexes; COMMIT. Idempotent (no-op if CHECK already includes REDEEM_OPERATOR_REQUIRED). | Schema migration on live DB |
+| `scripts/migrations/202605_add_redeem_operator_required_state.py` | NEW (v3 P7 + v4 NEW-P12 critic fix) | SQLite CHECK-constraint migration. Steps per DB: (1) **Idempotency check first**: `SELECT sql FROM sqlite_master WHERE name='settlement_commands' AND sql LIKE '%REDEEM_OPERATOR_REQUIRED%'` — if non-empty, log "migration already applied, no-op" and return. (2) `PRAGMA foreign_keys=OFF` (required because `settlement_command_events.command_id REFERENCES settlement_commands(command_id)` — see `settlement_commands.py:59`; rebuild would otherwise break FK). (3) `BEGIN IMMEDIATE TRANSACTION`. (4) `CREATE TABLE settlement_commands_new` with full v4 CHECK (includes REDEEM_OPERATOR_REQUIRED). (5) `INSERT INTO settlement_commands_new SELECT * FROM settlement_commands`. (6) `DROP TABLE settlement_commands`. (7) `ALTER TABLE settlement_commands_new RENAME TO settlement_commands`. (8) Recreate the 3 indexes (idx_state, idx_condition, ux_active_condition_asset per `settlement_commands.py:49-55`). (9) `COMMIT`. (10) `PRAGMA foreign_keys=ON`. (11) `PRAGMA foreign_key_check` to verify integrity post-rebuild. **Target DBs (dual)**: runs against both `state/zeus_trades.db` and `state/zeus-live.db`; CLI arg `--db <path>` for per-DB invocation; default mode runs both sequentially. **Test**: `tests/test_migration_redeem_operator_required.py` seeds in-memory SQLite with v1 schema + sample row + sample FK event, runs migration, asserts (a) row preserved, (b) new state accepted, (c) FK still valid, (d) re-running migration is no-op. | Schema migration on live DB |
 | `scripts/operator_record_redeem.py` | NEW (~120 LOC including --force flag + atomic UPDATE + audit event) | Per §K.4 v3 spec | Operator-completion entrypoint |
-| `src/main.py` | scout-verified line range L984-986 (existing harvester + heartbeat jobs) | Add 3 new `scheduler.add_job` blocks + `_assert_cascade_liveness_contract(scheduler)` call. Mirror existing pattern exactly per scout Q2. | Scheduler registration |
+| `src/main.py` | **v4 P7-reverified by executor grep 2026-05-16**: actual scheduler.add_job span is **L965-988** (5 existing jobs); harvester at L984, heartbeat at L985-986 (matches G3-prep scout exactly). Critic round-2's "L927-938" claim was incorrect (likely hallucinated line numbers — executor grep with `grep -n 'scheduler.add_job\|_harvester_cycle\|_write_heartbeat' src/main.py` is the authority). Insert 3 new `scheduler.add_job` blocks + `_assert_cascade_liveness_contract(scheduler)` call **after L988** (after the last existing scheduler.add_job block). | Scheduler registration |
 | `src/main.py` | after `_harvester_cycle` def (~L160-200 area; executor to find exact insertion site) | Add tick body functions: `_redeem_submitter_cycle`, `_redeem_reconciler_cycle`, `_wrap_unwrap_liveness_guard_cycle`, `_assert_cascade_liveness_contract`, `_atomic_transition` helper | Scheduler tick implementations |
 | `tests/test_redeem_cascade_liveness.py` | EXTEND (already created per §H) | Add 2 tests per §K.5 v2 + 1 atomicity test per §K.3 v3 (assert `transitioned == False` → no logger.warning fires) | Coverage for state-transition logic |
 | `tests/test_operator_record_redeem.py` | NEW | 7 tests per §K.5 v3 (NORMAL mode: 5 from v2; FORCE mode: 2 new — `test_force_overwrites_conflicting_hash`, `test_force_re_records_after_failure`) | CLI coverage |
