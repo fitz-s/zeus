@@ -267,3 +267,43 @@ Per Run #3 meta-audit (3rd run is meta-audit per SKILL.md): split seed `E. Settl
 - **Cross-DB shadow surface forms a graph, not a list.** F19 was the first 3-DB shadow (forecasts/trades/world all carry `market_events_v2`). Probe #11's matrix form catches this; single-DB row-count diffs do not.
 - **Runbook DB-location accuracy**: F14 was reported on `forecasts.db` in Run #4; actually on `zeus_trades.db`. Antibody: every state-machine finding must cite `db_table_ownership.yaml` line for the canonical DB, not infer from co-located code.
 
+
+
+## Run #6 update (2026-05-16, applied retroactively in Run #7 closeout)
+
+### Yield ladder updates (Run #6)
+
+- **Cat-J ACTIVE** confirmed: dual-write detection (`market_events_v2` raw `sqlite3.connect` in `market_scanner.py:610`) surfaced as F22. Cat-J probe yielded SEV-2 directly.
+- **Cat-A (decision_id NULL)** worsened: 693→1518 rows on `selection_hypothesis_fact.decision_id` = 100% NULL. Promote NULL-on-FK to its own probe-class.
+- **Cat-K** still HIGH (Run #6 did not surface new Cat-K, but the TODO PR-126 was the planned fix for F14/F16; landed before Run #7).
+
+### High-signal probes added (Run #6)
+
+- (Run #6 had no new probe additions beyond Run #5 set; deferred to Run #7.)
+
+## Run #7 update (2026-05-17)
+
+### Yield ladder updates (Run #7)
+
+- **Cat-K confirmed permanent HIGH** (3rd consecutive: Run #4 F14, Run #5 F16/F17, Run #7 F27). Most reliable yield surface in the audit's history.
+- **Cat-H confirmed HIGH** (4th consecutive: F25 is a generalization of Cat-H to multi-table FK correlation, not just cross-DB row asymmetry).
+- **NEW Cat-L (two-truth registry/allowlist anti-pattern)** added at MEDIUM. F26 first instance. Promote to HIGH if Run #8 produces another.
+- **NEW Cat-M (schema/state-machine co-evolution gap)** added at MEDIUM. F27 first instance. Promote to HIGH if any future PR adds a state-value without index update.
+- **Final ladder after Run #7**: HIGH = A, C, E1, F, G, H, I, K. MEDIUM = B, E2, L, M. LOW = D. J = active.
+
+### High-signal probes added (Run #7)
+
+13. **[K+M] PR-merge baseline-shift sweep** — when a referenced TODO PR lands, list `git diff PR^1..PR --name-only` and for every modified `src/state/db.py` or schema file, identify which state machines / enums / indexes are conditioned on. Re-audit each one against the post-merge schema. PR-126 added `REDEEM_OPERATOR_REQUIRED` and CHANGED the enum CHECK constraint; should have automatically triggered re-audit of every UNIQUE INDEX with a `WHERE state NOT IN (...)` predicate. Manual grep: `grep -rn "WHERE state NOT IN" src/state/`.
+14. **[A+H] multi-table FK NULL correlation matrix** — enumerate `*_fact` tables on `state/zeus_trades.db`, scan every column ending in `_id` (not PK), compute (table, col, null_count, total, pct). For columns sharing a name across tables (e.g. `snapshot_id`), compute pairwise NULL-count overlap. Equal NULL counts → one upstream culprit, SEV bumped one tier. Caught F25 (3-table correlation: 19175 NULL on opportunity_fact.snapshot_id and probability_trace_fact.decision_snapshot_id is the same upstream writer).
+15. **[L] two-truth registry/allowlist detector** — for every `frozenset` / `tuple` / `dict` of paths or table names in `src/`, grep `tests/conftest.py` and `architecture/*.yaml` for parallel copies. Diff the contents. Caught F26 (SQLITE_CONNECT_ALLOWLIST divergence).
+
+### Anti-heuristics refined (Run #7)
+
+- **Cat-J refinement**: when a "raw `sqlite3.connect`" finding is raised, FIRST check `tests/conftest.py:_WLA_SQLITE_CONNECT_ALLOWLIST` to see if the call site is allowlisted with a tag. If tagged `pending_track_a6` / `pending_track_a6_scripts` / `read_only_ro_uri` / `singleton_persistent_conn`, demote to OPEN-acknowledged rather than re-raising as new. F5 and F22 both downgraded in Run #7 status table to OPEN-acknowledged.
+- **Token-economy antibody** (Run #6 §7 forecast): on first pass, read STATUS.md (or master index) only — DO NOT read individual RUN_N_findings.md files. Lazy-load Run files when a specific finding's narrative is required. Pre-probe context consumption should stay below 15%.
+
+### Meta-audit-of-the-audit (Run #7)
+
+- **PR-merge skepticism is a yielding stance.** Operator brief explicitly said "be skeptical of PR-126." F27 surfaced from that stance. Going forward, when ANY PR lands between runs, treat it as adversarial-review surface, not passive baseline.
+- **Three-finding minimum for new-package bootstrap.** Run #7 produced exactly 3 new findings while bootstrapping a new task package. The 3:1 ratio (3 findings : 1 package) is healthy. If a baseline-shift run produces 0 new findings, question whether the package bootstrap was warranted.
+- **Run #7 took ~50% more context than Run #6 due to baseline-shift sweep overhead.** The PR-merge probe (#13) is information-dense; budget for it explicitly.

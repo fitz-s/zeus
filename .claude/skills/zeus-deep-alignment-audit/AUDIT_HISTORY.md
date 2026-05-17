@@ -179,3 +179,31 @@ When you (the opus orchestrator running this skill) read this file in Boot step 
 
 **F14 correction note (back-fill on Run #4 retrospective)**: Run #4 retrospective said the `settlement_commands` state machine writes to `forecasts.db`; Run #5 §1 inventory confirmed via `db_table_ownership.yaml` and live row-counts that it is on `zeus_trades.db`. Findings unaffected (the cascade is still broken at `submit_redeem`), but the manual fallback runbook DB query path needs the corrected location. Preserved per "Never edit past entries" rule; correction lives here + in RUN_5_findings.md §2 + §4.
 
+
+
+---
+
+### Run 7 — 2026-05-17 — commit (this commit)
+
+**One-paragraph summary**: Post-PR-126 baseline audit. PR #126 (cascade-liveness fix, F14/F16 FIXED) + PR #130 (ref-authority docs) + PR #132/#133 (`src/state/db_writer_lock.py` 749 LOC, Phase 0/0.5/1 + Track A.6 daemon retrofit) shifted the baseline from `acaae2c242` → `9259df3e9c`. Bootstrapped a new package `docs/operations/task_2026-05-16_post_pr126_audit/` (README/STATUS/FINDINGS_REFERENCE_v2/RUN_7_findings) because Run #6's TODO PR landed and the master index needed a clean fork; old package retains run-narrative files but its master index gets a SUPERSEDED header. Per operator instruction "be skeptical of PR #126", uncovered F27 (SEV-1) — the new `REDEEM_OPERATOR_REQUIRED` state lacks a UNIQUE INDEX update on `settlement_commands`, so an operator-required row permanently blocks new INSERTs for the same `(condition_id, market_id, payout_asset)`. F25 (SEV-0) — broader F24: triple-NULL systemic snapshot-write failure across `selection_hypothesis_fact.decision_id` (100%/1518), `opportunity_fact.snapshot_id` (68.20%/19175), `probability_trace_fact.decision_snapshot_id` (67.74%/19175). The 19175 row-count match across two tables strongly implies one upstream call site silently dropping `snapshot_id`. F26 (SEV-2) — two-truth allowlist: `src/state/db_writer_lock.py:575:SQLITE_CONNECT_ALLOWLIST` (8 entries, declarative) diverges from `tests/conftest.py:177:_WLA_SQLITE_CONNECT_ALLOWLIST` (~40 entries, enforced by pytest gate). Production module misleads readers into thinking allowlist is shorter than CI actually accepts. Karachi 2026-05-17 position (`c30f28a5…`) confirmed in `day0_window` with 1.5873 shares; settlement_commands table empty; F4 fix held (no `settle_status` column). R2 sentinel held (`forecasts.db` user_version=3, `SCHEMA_FORECASTS_VERSION=3`).
+
+**Categories that produced findings**: K (SEV-1 F27 — PR-126 schema-vs-state-machine co-evolution gap, 3rd consecutive run with Cat-K SEV); H (F25 — multi-table correlated NULL, qualifies as cross-DB-shadow-class via correlated fact-table integrity); L (new — two-truth registry/allowlist anti-pattern; F26).
+
+**Categories that produced nothing**: A, B, C (no new single-callsite), D, E1, E2 (plist sweep N/A), F (no shadow-orphan delta), G, I, J (re-validated against F25/F26/F27 candidates, no FP).
+
+**New patterns observed**:
+- **Schema-vs-state-machine co-evolution gap** (F27): adding a new state-machine enum value (`REDEEM_OPERATOR_REQUIRED`) without auditing every index/constraint/trigger that conditions on the enum value is a structural review gap. PR-126 author + reviewers + CI tests all missed it. The cascade-liveness contract test was added but tests the transition semantics, not the lockout edge case.
+- **Two-truth registry pattern** (F26): when a policy is declared in `src/` AND duplicated in `tests/conftest.py` (or `architecture/*.yaml`), the two copies drift. F26 is the first concrete instance for allowlists; the registry pattern is older (Run #5 db_table_ownership.yaml vs runtime declarations).
+- **Correlated multi-table NULL** (F25): NULL rates on FK columns across multiple fact tables sharing one upstream writer is a stronger signal than single-table NULL. The 19175-match across opportunity_fact and probability_trace_fact is forensic-grade evidence of one buggy call path. Single-table NULL probes miss this — must compute pairwise correlations.
+
+**Methodology changes triggered**:
+- Added probe #13 to LEARNINGS high-signal: **PR-merge baseline-shift sweep** — when a referenced TODO PR lands, re-probe every finding the PR touched at INDEX/CONSTRAINT/TRIGGER level (not just function level). PR-126 touched `state` enum; should have automatically triggered re-audit of every constraint/index conditioning on that enum.
+- Added probe #14 to LEARNINGS high-signal: **multi-table FK NULL correlation matrix** — for any fact-table sharing FK column names (`*_id`), compute pairwise row-count overlap of NULL counts. Equal NULL counts across tables = one upstream culprit; sum the SEV up one tier.
+- Added probe #15 to LEARNINGS high-signal: **two-truth registry detector** — for every allowlist/registry/policy in `src/`, grep `tests/conftest.py` + `architecture/*.yaml` for a same-named parallel copy. If two copies exist and content differs, SEV-2 auto-flag.
+- **Promoted Cat-K → permanent HIGH** (3 consecutive runs producing SEV-1/SEV-0: Run #4 F14, Run #5 F16/F17, Run #7 F27). Cat-K is now the highest-yield category in the audit's history.
+- **NEW Cat-L (two-truth registry/allowlist)** added at MEDIUM, promote to HIGH if 2nd run produces a finding.
+- **NEW Cat-M (schema/state-machine co-evolution gap)** added at MEDIUM (F27 first instance). Promote on 2nd hit.
+
+**Hand-edits to LEARNINGS.md beyond Closeout**: applied Run #6 deferred deltas from RUN_6_findings.md §6 (not previously applied) PLUS Run #7 deltas above in one combined edit.
+
+**Token-economy validation (Run #6 §7 prediction confirmed)**: First-pass context exhaustion came within ~30% of compaction before any probe started. Going forward: STATUS.md-only on first pass; load Run files only when narrative needed; lazy-load LEARNINGS only at closeout. Cat-J §7 antibody updated.

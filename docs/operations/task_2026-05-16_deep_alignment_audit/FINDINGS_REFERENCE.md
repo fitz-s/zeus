@@ -1,3 +1,8 @@
+> **SUPERSEDED (2026-05-17, Run #7).** This master index is frozen at the pre-PR-126 state.
+> The post-PR-126 master index lives at
+> [`../task_2026-05-16_post_pr126_audit/FINDINGS_REFERENCE_v2.md`](../task_2026-05-16_post_pr126_audit/FINDINGS_REFERENCE_v2.md).
+> RUN_N_findings.md files in *this* directory remain canonical for their own run narratives.
+
 # Zeus Deep Alignment Audit — FINDINGS_REFERENCE
 
 **Purpose**: single-page master index for every audit finding (Run #1 #1–#4, Run #2 #5–#8, Run #3 #9–#13). A fixer should be able to land patches without re-reading the 6 source documents.
