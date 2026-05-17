@@ -1,6 +1,6 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-05-06
-# Lifecycle: created=2026-04-27; last_reviewed=2026-05-06; last_reused=2026-05-06
+# Last reused/audited: 2026-05-17
+# Lifecycle: created=2026-04-27; last_reviewed=2026-05-06; last_reused=2026-05-17
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/M4.yaml
 # Purpose: Lock R3 M4 cancel/replace exit mutex, typed cancel outcomes, replacement gates, and CTF preflight.
 # Reuse: Run when exit_safety, executor exit submit, exit_lifecycle cancel retry, venue command transitions, or collateral sell preflight changes.
@@ -144,6 +144,7 @@ def _ensure_snapshot(
     snapshot_id: str | None = None,
     raw_orderbook_hash: str = "c" * 64,
     captured_at: datetime = _NOW,
+    min_tick_size: Decimal | str = Decimal("0.01"),
 ) -> str:
     from src.contracts.executable_market_snapshot_v2 import ExecutableMarketSnapshotV2
     from src.state.snapshot_repo import get_snapshot, insert_snapshot
@@ -175,7 +176,7 @@ def _ensure_snapshot(
             market_end_at=None,
             market_close_at=None,
             sports_start_at=None,
-            min_tick_size=Decimal("0.01"),
+            min_tick_size=Decimal(str(min_tick_size)),
             min_order_size=Decimal("0.01"),
             fee_details={
                 "source": "test",
@@ -949,6 +950,68 @@ def test_two_exit_requests_for_same_position_collapse_into_one_durable_chain(con
         assert "active_prior_exit_sell" in (second.reason or "")
         assert len(calls) == 1
         assert conn.execute("SELECT COUNT(*) FROM venue_commands WHERE position_id = ?", ("pos-1",)).fetchone()[0] == 1
+    finally:
+        from src.risk_allocator import clear_global_allocator
+
+        clear_global_allocator()
+        configure_global_ledger(None)
+
+
+def test_execute_exit_order_uses_snapshot_tick_for_sell_price_planning(conn, monkeypatch):
+    from src.execution.executor import create_exit_order_intent, execute_exit_order
+    from src.state.collateral_ledger import CollateralLedger, configure_global_ledger
+
+    ledger = CollateralLedger(conn)
+    ledger.set_snapshot(_snapshot(pusd=1_000_000_000, ctf={YES_TOKEN: 50}))
+    configure_global_ledger(ledger)
+    _allow_risk_allocator_for_exit_tests()
+    monkeypatch.setattr("src.control.cutover_guard.assert_submit_allowed", lambda *args, **kwargs: None)
+    monkeypatch.setattr("src.control.heartbeat_supervisor.assert_heartbeat_allows_order_type", lambda *args, **kwargs: None)
+    monkeypatch.setattr("src.control.ws_gap_guard.assert_ws_allows_submit", lambda *args, **kwargs: None)
+
+    calls: list[dict] = []
+
+    class FakeClient:
+        def bind_submission_envelope(self, envelope):
+            self.bound_envelope = envelope
+
+        def place_limit_order(self, **kwargs):
+            calls.append(kwargs)
+            return _fake_submit_result(self.bound_envelope, order_id="ord-tick")
+
+    monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", FakeClient)
+    snapshot_id = _ensure_snapshot(
+        conn,
+        snapshot_id="snap-exit-dynamic-tick",
+        min_tick_size=Decimal("0.001"),
+    )
+    try:
+        result = execute_exit_order(
+            create_exit_order_intent(
+                trade_id="pos-dynamic-tick",
+                token_id=YES_TOKEN,
+                shares=5.0,
+                current_price=0.033323782234957027,
+                best_bid=None,
+                executable_snapshot_id=snapshot_id,
+                executable_snapshot_min_tick_size=Decimal("0.001"),
+                executable_snapshot_min_order_size=Decimal("0.01"),
+                executable_snapshot_neg_risk=False,
+            ),
+            conn=conn,
+            decision_id="exit-dynamic-tick",
+        )
+        command_row = conn.execute(
+            "SELECT price, state FROM venue_commands WHERE position_id = ?",
+            ("pos-dynamic-tick",),
+        ).fetchone()
+
+        assert result.status == "pending"
+        assert result.submitted_price == pytest.approx(0.032)
+        assert calls[0]["price"] == pytest.approx(0.032)
+        assert command_row["price"] == pytest.approx(0.032)
+        assert Decimal(str(command_row["price"])) % Decimal("0.001") == 0
+        assert command_row["state"] == "ACKED"
     finally:
         from src.risk_allocator import clear_global_allocator
 

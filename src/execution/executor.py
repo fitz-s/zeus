@@ -20,7 +20,7 @@ import sqlite3
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
+from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_FLOOR
 from typing import Any, Optional
 
 from src.config import get_mode, settings
@@ -1481,6 +1481,37 @@ def _align_buy_limit_price_to_tick(limit_price: float, min_tick_size: Decimal | 
     return float(aligned)
 
 
+def _submit_tick_size_or_raise(min_tick_size: Decimal | str | float) -> Decimal:
+    try:
+        tick = Decimal(str(min_tick_size))
+    except (InvalidOperation, ValueError) as exc:
+        raise ValueError(
+            f"executable_snapshot_min_tick_size must be decimal: {min_tick_size!r}"
+        ) from exc
+    if not tick.is_finite() or tick <= Decimal("0") or tick >= Decimal("1"):
+        raise ValueError("executable_snapshot_min_tick_size must be finite and inside (0, 1)")
+    return tick
+
+
+def _align_sell_limit_price_to_tick(limit_price: float, min_tick_size: Decimal | str | float) -> float:
+    """Round a SELL limit down to the executable snapshot tick."""
+
+    tick = _submit_tick_size_or_raise(min_tick_size)
+    price = Decimal(str(limit_price))
+    min_price = tick
+    max_price = Decimal("1") - tick
+    if price < min_price:
+        price = min_price
+    elif price > max_price:
+        price = max_price
+    aligned = (price / tick).to_integral_value(rounding=ROUND_FLOOR) * tick
+    if aligned < min_price:
+        aligned = min_price
+    elif aligned > max_price:
+        aligned = max_price
+    return float(aligned)
+
+
 def _entry_buy_submit_shares(target_size_usd: float, limit_price: float) -> float:
     shares = target_size_usd / limit_price if limit_price > 0 else 0
     return math.ceil(shares * 100 - 1e-9) / 100.0  # BUY: round UP
@@ -1855,7 +1886,12 @@ def execute_exit_order(
     # differentiation).
     from src.contracts.tick_size import TickSize
     tick = TickSize.for_market(token_id=intent.token_id)
-    base_price = current_price - tick.value
+    effective_min_tick_size = _submit_tick_size_or_raise(
+        intent.executable_snapshot_min_tick_size
+        if intent.executable_snapshot_min_tick_size is not None
+        else Decimal(str(tick.value))
+    )
+    base_price = current_price - float(effective_min_tick_size)
     limit_price = base_price
 
     if best_bid is not None and best_bid < base_price:
@@ -1891,7 +1927,7 @@ def execute_exit_order(
             intent_id=intent.intent_id,
             idempotency_key=intent.idempotency_key,
         )
-    limit_price = tick.clamp_to_valid_range(limit_price)
+    limit_price = _align_sell_limit_price_to_tick(limit_price, effective_min_tick_size)
 
     shares = math.floor(intent.shares * 100 + 1e-9) / 100.0
     if shares <= 0:
