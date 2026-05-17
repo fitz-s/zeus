@@ -363,3 +363,27 @@ Per Run #3 meta-audit (3rd run is meta-audit per SKILL.md): split seed `E. Settl
 - **Forensic runs benefit from the same multi-section sentinel-terminal pattern Run #8 validated for sweeps.** 5 large terminal commands (oracle path probe, live status probe, log scan, bridge-callability check, expiry-sweep grep) produced enough material for the complete deliverable. Per-question round-tripping would have spent >2× the context for no information gain. Promote sentinel-terminal pattern to default shape for ALL non-trivial runs.
 - **Operator's intuition is gold even when it's only partially right.** The operator said "oracle may NOT be fully applied to runtime" — technically false on the *application* side (the multiplier IS applied), and technically true on the *data* side (the data isn't arriving). The right framing for the response is to *honor the intuition by sharpening it*, not to either rubber-stamp it or dismiss it. F32 is the operator's intuition restated rigorously.
 - **One run, two findings of different severity, different categories, different fix-paths — the deliverable must NOT collapse them.** F32 (SEV-1, oracle bridge schedule) and F34 (SEV-3, passive entry) are tempting to fuse because they were uncovered in the same investigation. Resisting the temptation is the lesson. Each gets its own card, its own owner-hint, its own verification probe.
+
+---
+
+## Run #10 additions (2026-05-17)
+
+21. **[K] argparse-absent-CLI antibody** — Writer scripts that lack argparse silently treat unknown flags as normal-mode invocation. NEVER speculatively run an unknown writer script with `--help` to inspect its CLI. Instead: `sed -n '1,50p' <script>` to read the docstring and `grep -n "sys.argv\|argparse\|click\|--" <script>` to confirm argv handling exists. If `argparse` is absent, treat the script as side-effect-on-invoke and only run inside an isolated `ZEUS_STORAGE_ROOT=/tmp/...` sandbox. Triggered by accidental write during Run #10 §2.5 (cleanly reverted, fully disclosed).
+
+22. **[J/K] stale-feed sweep** — In any post-PR audit, for every `state/*.json`, compute mtime-age in hours. Files > 168 h (1 week) are presumptive F32-class candidates pending classification. For each: identify writer (`grep -rn "<filename>" src/ scripts/`), find writer's schedule, classify as TIER-1 (writer unscheduled) / TIER-2 (writer scheduled, runs but no-op) / TIER-3 (stale-by-design — e.g., set-and-forget guards). Run #10's `cutover_guard.json` (372 h) is TIER-3 expected; `assumptions.json` (218 h) and `source_contract_quarantine.json` (329 h) are uncategorized — surface to next run.
+
+### Anti-heuristics refined (Run #10)
+
+- **Operator's "I confirm it used to exist" is gold** — pursue it to the archive tables, not just to git history. F36 was discovered ONLY because the operator's claim sent me looking past `settlements`/`settlements_v2` (both empty) to `settlements_v2_archived_2026_05_11` (3987 rows). git-history alone returned empty and would have closed the case as "operator-misremembers" — which would have been wrong. **General rule**: when operator-memory says "X existed", probe (a) git, (b) filesystem, (c) backups, (d) archive sqlite tables, (e) sibling worktrees — in that order — before concluding the memory is faulty.
+
+- **Two-layer F32 detection** — a true F32 may have TWO causes stacked: (1) writer unscheduled AND (2) writer's input has gone silent. Fixing only (1) yields an empty artifact and the operator concludes "the fix didn't work". Always trace the writer's input-source one hop back and confirm it has live rows before declaring the schedule-fix sufficient.
+
+- **Loaded-but-warned launchd plists** — when a plist's header comment says "PROPOSED — DO NOT LOAD" but `launchctl list` shows it loaded with successful exits, the doc is the stale party, not the runtime. Don't propose unloading without operator confirmation. Cat-N: document-lies-vs-reality.
+
+### Meta-audit-of-the-audit (Run #10)
+
+- **Archeology runs need MORE evidence chains than diagnostic runs.** Run #10 needed 5 evidence chains (git-history, filesystem, backups, sibling-worktrees, archive-tables) where a typical Run #N diagnostic needs only 1-2. Allocate token budget accordingly.
+
+- **Accidental writes during read-only runs MUST be disclosed at top-of-deliverable, not buried in appendix.** Run #10 §2.5 puts disclosure inline with the archeology results so the operator cannot miss it. Treat this as the template for all future accidental-side-effect disclosures.
+
+- **The "writer-claim grep" probe (LEARNING #19) caught only 1 true positive this run (the F32 itself).** This is a HIGH-precision low-recall probe. Pair it next time with a "reader-claim grep" (`# single reader`, `# ONLY consumer`) — files that exist but nobody reads are cheap deletes; files that nobody writes but someone reads are SEV-1.

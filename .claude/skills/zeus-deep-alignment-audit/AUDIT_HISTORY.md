@@ -247,3 +247,25 @@ When you (the opus orchestrator running this skill) read this file in Boot step 
 **Hand-edits beyond Closeout**: none.
 
 **Token-economy validation**: targeted investigation with 5 sentinel-delimited terminal commands produced enough material for the full deliverable in well under context budget. Resolution-sweep pattern from Run #8 worked for a *forensic* run too; promoting to default shape for any non-discovery run.
+
+---
+
+## Run #10 — 2026-05-17 — Silent-gap archeology + F32-class sibling sweep
+
+**Operator trigger (verbatim, translated)**: "Continue Run #10 — investigate other 'designed but never wired' silent gaps (F32-class). Also find where these missing data live — I CONFIRM they used to exist and were being generated correctly."
+
+**Deliverable**: `docs/operations/task_2026-05-16_post_pr126_audit/RUN_10_silent_gap_archeology.md`
+
+**Findings**: F35 (TIER-1, Cat-K), F36 (TIER-2 pre-flag, Cat-J), F37 (TIER-2, Cat-K), F38 (TIER-1, Cat-J INVESTIGATE-FURTHER), F39 (TIER-3, Cat-N).
+
+**Operator-memory vindication**: confirmed correct. Settlement data DID exist and WAS generated correctly through 2026-05-07 (3987 VERIFIED rows preserved in `settlements_v2_archived_2026_05_11`). The 2-layer F32 (unscheduled bridge + empty live source) means even an out-of-band bridge run today produces `{}`.
+
+**Methodology changes triggered**:
+- **NEW probe #21 (LEARNINGS)**: argparse-absent-CLI antibody — never speculate-invoke a writer script with `--help`. Use `sed -n '1,50p'` to read docstring/argv parsing first. Triggered by accidental write in §2.5 of this run.
+- **NEW probe #22 (LEARNINGS)**: stale-feed sweep — for every `state/*.json` with mtime > 168 h (1 week), check whether stale-by-design or F32-class. Triggered by the mtime audit table.
+- **Cat-K extends streak**: 6 consecutive runs producing SEV-1/SEV-0 (Run #4 F14, #5 F16/F17, #7 F27, #8 F29, #9 F32, #10 F35/F38). Cat-K is now structurally permanent.
+- **NEW Cat-N case-file**: F39 — loaded launchd plist contradicts its own header comment. Cat-N is "doc lies vs reality". First Run-10 case; promote to MEDIUM if a 2nd case appears.
+
+**Hand-edits beyond Closeout**: accidental real-run of `bridge_oracle_to_calibration.py` (disclosed §2.5); cleaned with `rm -fv data/oracle_error_rates.json data/oracle_error_rates.heartbeat.json && rmdir data`. Repo verified clean post-cleanup.
+
+**Token-economy**: 4 sentinel-terminal probes (self-claim grep + scheduler-universe enum + state-mtime + settlements-archive inspection). One read_file for tracker-tail format-matching. Full deliverable in well under context budget. Confirmed: forensic-archeology shape is well-suited to sentinel-terminal pattern.
