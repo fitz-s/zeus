@@ -783,7 +783,7 @@ def _exit_pending_projection_candidates(conn: sqlite3.Connection) -> list[dict]:
            AND cmd.venue_order_id IS NOT NULL
            AND cmd.venue_order_id != ''
            AND cmd.state IN ({placeholders})
-           AND pc.phase IN ('active', 'day0_window')
+           AND pc.phase IN ('active', 'day0_window', 'pending_exit')
          ORDER BY exit_fill.observed_at, cmd.command_id
         """,
         (
@@ -815,9 +815,9 @@ def _append_exit_pending_projection(
     phase_before = str(current.get("phase") or "")
     if not position_id or not command_id or not venue_order_id:
         raise ValueError("exit pending projection requires position, command, and venue order ids")
-    if phase_before not in {"active", "day0_window"}:
+    if phase_before not in {"active", "day0_window", "pending_exit"}:
         raise ValueError(
-            "exit pending projection only repairs active/day0 positions; "
+            "exit pending projection only repairs active/day0/pending_exit positions; "
             f"got phase={phase_before!r}"
         )
     phase_after = fold_lifecycle_phase(phase_before, "pending_exit").value

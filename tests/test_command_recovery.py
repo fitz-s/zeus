@@ -1489,6 +1489,108 @@ class TestRecoveryResolutionTable:
         }
         assert not any(row["event_type"] == "EXIT_ORDER_FILLED" for row in lifecycle_events)
 
+    def test_exit_matched_trade_fact_repairs_retry_pending_projection(
+        self,
+        conn,
+        mock_client,
+    ):
+        _insert(conn, command_id="cmd-entry", position_id="pos-001")
+        _advance_to_acked(conn, command_id="cmd-entry", venue_order_id="ord-entry")
+        _seed_pending_entry_projection(conn, command_id="cmd-entry", order_id="ord-entry")
+        conn.execute(
+            """
+            UPDATE position_current
+               SET phase = 'pending_exit',
+                   shares = 6.0,
+                   cost_basis_usd = 1.86,
+                   entry_price = 0.31,
+                   order_id = 'ord-entry',
+                   order_status = 'filled',
+                   updated_at = '2026-04-26T00:04:00Z'
+             WHERE position_id = 'pos-001'
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO position_events (
+                event_id, position_id, event_version, sequence_no, event_type,
+                occurred_at, phase_before, phase_after, strategy_key, decision_id,
+                snapshot_id, order_id, command_id, caused_by, idempotency_key,
+                venue_status, source_module, payload_json, env
+            )
+            VALUES (
+                'pos-001:exit_rejected:retry', 'pos-001', 1, 3,
+                'EXIT_ORDER_REJECTED', '2026-04-26T00:05:00Z', 'active',
+                'pending_exit', 'opening_inertia', 'dec-001', 'snap-pos-001',
+                NULL, NULL, 'test_retry_pending_setup',
+                'pos-001:exit_rejected:retry', 'retry_pending',
+                'tests.test_command_recovery', '{}', 'live'
+            )
+            """
+        )
+        _insert(
+            conn,
+            command_id="cmd-exit",
+            position_id="pos-001",
+            intent_kind="EXIT",
+            side="SELL",
+            size=6.0,
+            price=0.29,
+            token_id="tok-001",
+        )
+        _advance_to_partial(conn, command_id="cmd-exit", venue_order_id="ord-exit")
+        _append_trade_fact(
+            conn,
+            command_id="cmd-exit",
+            order_id="ord-exit",
+            trade_id="trade-exit-001",
+            state="MATCHED",
+            filled_size="6",
+            fill_price="0.29",
+        )
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["exit_pending_projections"] == {
+            "scanned": 1,
+            "advanced": 1,
+            "stayed": 0,
+            "errors": 0,
+        }
+        current = conn.execute(
+            """
+            SELECT phase, shares, cost_basis_usd, order_id, order_status
+              FROM position_current
+             WHERE position_id = 'pos-001'
+            """
+        ).fetchone()
+        assert dict(current) == {
+            "phase": "pending_exit",
+            "shares": 6.0,
+            "cost_basis_usd": 1.86,
+            "order_id": "ord-exit",
+            "order_status": "sell_pending_confirmation",
+        }
+        lifecycle_events = conn.execute(
+            """
+            SELECT event_type, phase_before, phase_after, order_id, command_id, venue_status
+              FROM position_events
+             WHERE position_id = 'pos-001'
+             ORDER BY sequence_no
+            """
+        ).fetchall()
+        assert dict(lifecycle_events[-1]) == {
+            "event_type": "EXIT_ORDER_POSTED",
+            "phase_before": "pending_exit",
+            "phase_after": "pending_exit",
+            "order_id": "ord-exit",
+            "command_id": "cmd-exit",
+            "venue_status": "MATCHED",
+        }
+        assert not any(row["event_type"] == "EXIT_ORDER_FILLED" for row in lifecycle_events)
+
     def test_exit_matched_trade_fact_repairs_existing_event_torn_projection(
         self,
         conn,
