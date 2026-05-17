@@ -45,3 +45,6 @@ v1 (FROZEN brief, `../task_2026-05-16_deep_alignment_audit/`) and v2 (this doc) 
 
 ## Carry-forward note
 Old `FINDINGS_REFERENCE.md` in the predecessor package now bears a "SUPERSEDED" header pointing here. Run-narrative files (RUN_1…RUN_6_findings.md) remain canonical for their own narrative content.
+| **F32** | **Oracle bridge writer not scheduled → runtime permanently MISSING for every city** | **SEV-1** | **NEW (Run #9)** | scripts/bridge_oracle_to_calibration.py + cron | Run #9 | Run #9 |
+| **F33** | **Daemon does not escalate on persistent oracle-MISSING-everywhere state**           | **SEV-2** | **NEW (Run #9)** | src/strategy/oracle_penalty.py + RiskGuard notify | Run #9 | Run #9 |
+| **F34** | **Passive-only entry pricing in thin books → ~89% non-fill rate**                    | **SEV-3** | **NEW (Run #9)** | src/strategy/market_analysis.py + executor.py    | Run #9 | Run #9 |

@@ -336,3 +336,30 @@ Per Run #3 meta-audit (3rd run is meta-audit per SKILL.md): split seed `E. Settl
 - **The auditor's own artifacts can manifest the defects being audited.** F28 (dual-index numbering) caught the auditor (me) replicating the same dual-numbering inconsistency in the resolution sweep itself, half-way through drafting cards. Fix: introduce probe #18 as a closeout gate.
 - **Resolution-sweep runs are higher-leverage than discovery runs for converting attention into decisions.** Run #8 produced 0 new SEV-0/SEV-1 findings but generated 22 actionable cards + 1 ship matrix. Discovery-mode runs MUST be interleaved with resolution-sweep runs; running discovery 4× in a row inflates the open-findings backlog without ever giving operator a decisive close.
 - **Per-finding "next probe" annotation should be mandatory.** Every open finding card now carries either a definitive verdict or an explicit "1-shot probe to settle". Operator can ask "show me the 3 cheapest probes" and get a deterministic answer. Promote this to skill template.
+
+---
+
+## Run #9 deltas (2026-05-17) — operator-triggered forensic run, new Cat-O introduced
+
+### Yield ladder updates (Run #9)
+
+- **Cat-K reconfirmed PERMANENT HIGH** (5 consecutive runs with SEV-1/SEV-0; Run #9 = F32 shipped-without-schedule). The yield is structurally inexhaustible because shipped-but-incomplete is a category of operator-stable engineering process drift, not a one-off defect.
+- **NEW Cat-O (operator-brief-coupling-falsification)** introduced at MEDIUM. First instance: Run #9 operator brief coupled two observations (oracle + Shenzhen) into one sentence; investigation falsified the coupling. Promote to HIGH on 2nd false-coupling rescue.
+- **Final ladder after Run #9**: HIGH = A, C, E1, F, G, H, I, K. MEDIUM = B, E2, L, M, N, O. LOW = D. J = active.
+
+### High-signal probes added (Run #9)
+
+19. **[K] shipped-without-schedule detector** — for every module whose docstring contains the phrases "ONLY writer" / "single writer" / "the canonical X". For each: grep `/Users/leofitz/.openclaw/cron/jobs.json`, `crontab -l`, and `launchctl list` for the script basename. If none match AND the module's output artifact does not exist on disk, raise SEV-1 immediately. This is a 30-second probe that would have caught F32 on day-one of A3 shipping if it had existed.
+20. **[J] WARNING-tier debouncer audit** — for every `logger.warning(...)` reachable on a reload/cycle path (search recurrence: grep `reload_oracle\|reload_calibration\|reload_policy` callsites), check the surrounding 20 lines for an ERROR escalation after a temporal threshold (`time.time() - _last_seen > 86400`). If no escalation exists AND the call site is in a path that runs more than once per hour, raise SEV-2. Catches F33-class observability theater.
+
+### Anti-heuristics refined (Run #9)
+
+- **Operator-brief decoupling**: when an operator observation contains "AND" / "I see X. Y is also Z." / two clauses joined by causal-sounding glue, *forbid* coupling them in the investigation until each is independently grounded. Falsify the coupling EXPLICITLY before allowing a unified narrative. F32 and F34 in this run are independent; an investigation that fused them would have produced a false unified "oracle is missing therefore sizing is small therefore order doesn't fill" story, when in reality the order's non-fill is independent of size and purely a pricing-policy artifact.
+- **"NEVER ran in prod" vs "stopped running" distinction**: when an artifact-file is missing, distinguish (a) the writer ran successfully N days ago and stopped, vs (b) the writer was never wired into a recurring schedule. Probe: `git log <writer>` for recent edits + `grep -rn <writer-basename> cron/jobs.json crontab launchctl`. Case (b) is *higher* severity than (a) because (a) implies a daemon failure (recoverable) while (b) implies a process-shipping defect (recurs on every similar PR).
+- **Daemon-WARNING tolerance ceiling**: a daemon emitting the same WARNING > 100 times in 24 h has crossed the line from "operational signal" to "broken thing the team has agreed to ignore". The right response is NOT to tune the threshold or filter the log — it is to either *resolve the underlying condition* or *promote the signal to ERROR with notification* so the broken-agreement is forced into the open.
+
+### Meta-audit-of-the-audit (Run #9)
+
+- **Forensic runs benefit from the same multi-section sentinel-terminal pattern Run #8 validated for sweeps.** 5 large terminal commands (oracle path probe, live status probe, log scan, bridge-callability check, expiry-sweep grep) produced enough material for the complete deliverable. Per-question round-tripping would have spent >2× the context for no information gain. Promote sentinel-terminal pattern to default shape for ALL non-trivial runs.
+- **Operator's intuition is gold even when it's only partially right.** The operator said "oracle may NOT be fully applied to runtime" — technically false on the *application* side (the multiplier IS applied), and technically true on the *data* side (the data isn't arriving). The right framing for the response is to *honor the intuition by sharpening it*, not to either rubber-stamp it or dismiss it. F32 is the operator's intuition restated rigorously.
+- **One run, two findings of different severity, different categories, different fix-paths — the deliverable must NOT collapse them.** F32 (SEV-1, oracle bridge schedule) and F34 (SEV-3, passive entry) are tempting to fuse because they were uncovered in the same investigation. Resisting the temptation is the lesson. Each gets its own card, its own owner-hint, its own verification probe.
