@@ -172,6 +172,27 @@ def observed_target_day_fraction(
 #   parsed cleanly = phase_source==verified_gamma).
 OBSERVED_FRACTION_MIN: float = 0.3
 FALLBACK_F1_HAIRCUT: float = 0.7
+OBSERVED_FRACTION_STRATEGY_KEYS: frozenset[str] = frozenset({"settlement_capture"})
+
+
+def _observed_fraction_multiplier(
+    *,
+    strategy_key: str,
+    decision_time_utc,
+    target_local_date,
+    city_timezone: str,
+) -> float:
+    """Return target-day observation progress multiplier for strategies that use it."""
+    if strategy_key not in OBSERVED_FRACTION_STRATEGY_KEYS:
+        return 1.0
+    return max(
+        OBSERVED_FRACTION_MIN,
+        observed_target_day_fraction(
+            decision_time_utc=decision_time_utc,
+            target_local_date=target_local_date,
+            city_timezone=city_timezone,
+        ),
+    )
 
 
 def phase_aware_kelly_multiplier(
@@ -192,6 +213,8 @@ def phase_aware_kelly_multiplier(
         m_strategy_phase    = registry.get(key).kelly_for_phase(market_phase)
         m_oracle            = oracle_penalty.get_oracle_info(city, metric).penalty_multiplier
         m_observed_fraction = max(0.3, observed_target_day_fraction(...))
+                              for settlement_capture; 1.0 for opening-tick
+                              and model-edge strategies
         m_phase_source      = 0.7 if phase_source == "fallback_f1" else 1.0
         kelly_multiplier    = product of the four
 
@@ -209,6 +232,14 @@ def phase_aware_kelly_multiplier(
       this resolver.
     - Oracle MISSING / METRIC_UNSUPPORTED: penalty_multiplier=0.5 / 0.0
       respectively (PLAN.md §A3 multiplier table).
+
+    Strategy relationship:
+    - ``settlement_capture`` edge depends on observed target-day fact
+      accumulation, so target-day fraction is a sizing input.
+    - ``opening_inertia`` edge depends on opening-tick market age. Its phase
+      policy already supplies the pre-settlement haircut; applying target-day
+      observed fraction would suppress live opening_hunt orders before the
+      target day can begin.
     """
     from src.strategy.oracle_penalty import get_oracle_info
     from src.strategy.strategy_profile import try_get
@@ -227,13 +258,11 @@ def phase_aware_kelly_multiplier(
     if m_oracle <= 0.0:
         return 0.0
 
-    m_observed_fraction = max(
-        OBSERVED_FRACTION_MIN,
-        observed_target_day_fraction(
-            decision_time_utc=decision_time_utc,
-            target_local_date=target_local_date,
-            city_timezone=getattr(city, "timezone", ""),
-        ),
+    m_observed_fraction = _observed_fraction_multiplier(
+        strategy_key=strategy_key,
+        decision_time_utc=decision_time_utc,
+        target_local_date=target_local_date,
+        city_timezone=getattr(city, "timezone", ""),
     )
 
     m_phase_source = FALLBACK_F1_HAIRCUT if phase_source == "fallback_f1" else 1.0

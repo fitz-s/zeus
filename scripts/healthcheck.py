@@ -2,8 +2,8 @@
 # Purpose: Operator healthcheck for live daemon, launchd, source truth, entry capability, and settlement freshness.
 # Reuse: Run when live health predicates, launchd contracts, or readiness/status summary health fields change.
 # Created: 2026-03-26
-# Last reused or audited: 2026-05-16
-# Authority basis: docs/operations/task_2026-05-14_k1_followups/PLAN.md §4.5 (K1 broken-script remediation); docs/operations/task_2026-05-16_live_continuous_run_package/LIVE_CONTINUOUS_RUN_PACKAGE_PLAN.md Phase C
+# Last reused or audited: 2026-05-17
+# Authority basis: docs/operations/task_2026-05-14_k1_followups/PLAN.md §4.5 (K1 broken-script remediation); docs/operations/task_2026-05-16_live_continuous_run_package/LIVE_CONTINUOUS_RUN_PACKAGE_PLAN.md Phase C; 2026-05-17 riskguard live DB-holder health contract.
 """Zeus health check for Venus/OpenClaw monitoring.
 
 Reads mode-qualified state written by the running daemon.
@@ -169,6 +169,7 @@ def _is_known_live_db_holder(command: str) -> bool:
     command = str(command or "")
     known_modules = (
         "src.main",
+        "src.riskguard.riskguard",
     )
     if any(_has_module_launch(command, module) for module in known_modules):
         return True
