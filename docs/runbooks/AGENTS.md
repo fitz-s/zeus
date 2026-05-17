@@ -17,6 +17,7 @@ Load these when the task is about active operations procedure.
 |------|---------|
 | `live-operation.md` | Day-to-day live daemon operation procedures |
 | `live-phase-1-first-boot.md` | First live daemon boot checklist |
+| `forecast-live-daemon.md` | Operator runbook for forecast-live daemon startup, cutover verification, and triage |
 | `settlement_mismatch_triage.md` | Procedure for investigating Zeus-vs-Polymarket settlement mismatches |
 | `tigge_cloud_download.md` | Durable TIGGE cloud download supervision and Zeus v2 handoff guidance |
 
