@@ -45,10 +45,11 @@ Derived surfaces may never become truth by being convenient.
   
   Separating steps 1 and 2 into different transactions creates torn state.
 
-- **Lifecycle phases come only from `LifecyclePhase` enum.** The 9 legal
-  phases are: `pending_entry → active → day0_window → pending_exit →
+- **Lifecycle phases come only from `LifecyclePhase` enum.** The 10 enum
+  values are: `pending_entry → active → day0_window → pending_exit →
   economically_closed → settled`. Terminal: `voided`, `quarantined`,
-  `admin_closed`. No code may invent phase strings.
+  `admin_closed`. Runtime sentinel: `unknown` (fallback for unmapped states;
+  participates in LEGAL_LIFECYCLE_FOLDS). No code may invent phase strings.
 
 - **Exit intent ≠ economic close ≠ settlement.** These are three separate
   lifecycle events with different semantic meaning:
