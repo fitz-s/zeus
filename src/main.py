@@ -14,7 +14,7 @@ Advisory file lock infrastructure (src.data.dual_run_lock) is retained in code
 """
 
 # Created: pre-Phase-0 (K2 scheduler wiring via 27bedbd; P9A run_mode observability via 7081634)
-# Last reused/audited: 2026-05-17
+# Last reused/audited: 2026-05-18
 # Authority basis: Phase 3 two-system independence — docs/operations/task_2026-04-30_two_system_independence/design.md §5 Phase 3; docs/operations/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md
 #                  + 2026-05-17 CLOB venue-heartbeat critical-path split
 
@@ -805,17 +805,111 @@ def _truthy_env(name: str) -> bool:
     return os.environ.get(name, "0").strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _auto_derive_user_channel_condition_ids() -> list[str]:
-    """Derive the user-channel WS subscription set from the live market scanner.
+def _parse_market_event_recorded_at(value: object) -> datetime | None:
+    if value is None:
+        return None
+    raw = str(value).strip()
+    if not raw:
+        return None
+    if raw.endswith("Z"):
+        raw = f"{raw[:-1]}+00:00"
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
-    Wraps ``src.data.market_scanner.find_weather_markets`` + the
-    ``extract_executable_condition_ids`` helper. Lives in main.py rather than
-    market_scanner.py to keep the scanner free of side-effecting boot-time
-    logging concerns; the helper itself is pure.
 
-    On scanner failure we log + return [] rather than raising — boot must
-    continue (the daemon will stay reduce_only without WS, which is the
-    fail-closed posture the WS guard records as ``not_configured``).
+def _dedupe_user_channel_condition_ids(values) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        condition_id = str(value or "").strip()
+        if not condition_id or condition_id in seen:
+            continue
+        seen.add(condition_id)
+        result.append(condition_id)
+    return result
+
+
+def _market_events_v2_fallback_max_age_hours() -> float:
+    raw = os.environ.get("ZEUS_USER_CHANNEL_WS_MARKET_EVENTS_FALLBACK_MAX_AGE_HOURS", "36")
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        logger.warning(
+            "invalid ZEUS_USER_CHANNEL_WS_MARKET_EVENTS_FALLBACK_MAX_AGE_HOURS=%r; "
+            "using default 36h",
+            raw,
+        )
+        return 36.0
+    if value <= 0:
+        logger.warning(
+            "non-positive ZEUS_USER_CHANNEL_WS_MARKET_EVENTS_FALLBACK_MAX_AGE_HOURS=%r; "
+            "using default 36h",
+            raw,
+        )
+        return 36.0
+    return value
+
+
+def _market_events_v2_user_channel_condition_ids(
+    *,
+    now: datetime | None = None,
+) -> list[str]:
+    """Read fresh condition_ids from canonical market_events_v2."""
+
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    current = current.astimezone(timezone.utc)
+    max_age_hours = _market_events_v2_fallback_max_age_hours()
+    cutoff = current - timedelta(hours=max_age_hours)
+    try:
+        from src.state.db import get_forecasts_connection
+
+        conn = get_forecasts_connection()
+        try:
+            rows = conn.execute(
+                """
+                SELECT condition_id, target_date, recorded_at
+                  FROM market_events_v2
+                 WHERE condition_id IS NOT NULL
+                   AND TRIM(condition_id) != ''
+                   AND target_date >= ?
+                 ORDER BY recorded_at DESC, condition_id
+                 LIMIT 2048
+                """,
+                (current.date().isoformat(),),
+            ).fetchall()
+        finally:
+            conn.close()
+    except Exception as exc:
+        logger.warning("user-channel WS market_events_v2 fallback failed: %s", exc)
+        return []
+
+    fresh_ids: list[str] = []
+    for row in rows:
+        recorded_at = _parse_market_event_recorded_at(row["recorded_at"])
+        if recorded_at is None or recorded_at < cutoff:
+            continue
+        fresh_ids.append(row["condition_id"])
+    return _dedupe_user_channel_condition_ids(fresh_ids)
+
+
+def _auto_derive_user_channel_condition_ids(
+    *,
+    now: datetime | None = None,
+) -> list[str]:
+    """Derive the user-channel WS subscription set.
+
+    Gamma scanning is primary. When it yields no condition_ids or fails, boot
+    falls back to fresh condition_ids already persisted in ``market_events_v2``.
+
+    Total failure still returns [] rather than raising; the daemon then stays in
+    the fail-closed WS posture recorded by the gap guard.
     """
     try:
         from src.data.market_scanner import (
@@ -829,14 +923,23 @@ def _auto_derive_user_channel_condition_ids() -> list[str]:
         # — which Zeus actively trades via DiscoveryMode.DAY0_CAPTURE — would
         # be missed while the WS guard reports healthy. (PR #34 codex P1.)
         events = find_weather_markets(min_hours_to_resolution=0.0)
-        return extract_executable_condition_ids(events)
+        condition_ids = extract_executable_condition_ids(events)
+        if condition_ids:
+            return condition_ids
+        fallback_ids = _market_events_v2_user_channel_condition_ids(now=now)
+        if fallback_ids:
+            logger.warning(
+                "user-channel WS scanner yielded 0 condition_ids; using %d "
+                "fresh market_events_v2 condition_ids as fallback",
+                len(fallback_ids),
+            )
+        return fallback_ids
     except Exception as exc:
         logger.warning(
-            "user-channel WS auto-derive failed: %s; "
-            "daemon stays in reduce_only=True mode",
+            "user-channel WS scanner failed: %s; trying market_events_v2 fallback",
             exc,
         )
-        return []
+        return _market_events_v2_user_channel_condition_ids(now=now)
 
 
 def _start_user_channel_ingestor_if_enabled() -> None:

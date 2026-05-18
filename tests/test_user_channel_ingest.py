@@ -2,7 +2,7 @@
 # Lifecycle: created=2026-04-27; last_reviewed=2026-05-15; last_reused=2026-05-17
 # Purpose: R3 M3 Polymarket user-channel WS ingest and fail-closed gap guard antibodies.
 # Reuse: Run when user WebSocket ingest, U2 venue facts, or submit gap guards change.
-# Last reused/audited: 2026-05-17
+# Last reused/audited: 2026-05-18
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/M3.yaml;
 #                  PR 37 review: clean-reconnect proof ignores resolved history
 #                  while preserving active side-effect state;
@@ -163,6 +163,105 @@ def _seed_acknowledged_command(c) -> None:
     append_event(c, command_id="cmd-ws", event_type="SUBMIT_REQUESTED", occurred_at=NOW.isoformat())
     append_event(c, command_id="cmd-ws", event_type="SUBMIT_ACKED", occurred_at=NOW.isoformat())
     c.commit()
+
+
+def test_user_channel_auto_derive_uses_market_events_fallback_when_scanner_empty(
+    monkeypatch,
+    tmp_path,
+):
+    """Relationship: M3 WS boot reads canonical market_events_v2 when live scan is empty."""
+
+    from src import main as zeus_main
+
+    db_path = tmp_path / "forecasts.db"
+    setup = sqlite3.connect(db_path)
+    setup.execute(
+        """
+        CREATE TABLE market_events_v2 (
+            condition_id TEXT,
+            target_date TEXT,
+            recorded_at TEXT
+        )
+        """
+    )
+    setup.executemany(
+        """
+        INSERT INTO market_events_v2 (condition_id, target_date, recorded_at)
+        VALUES (?, ?, ?)
+        """,
+        [
+            ("0xaaa", "2026-05-20", "2026-05-18 05:24:44"),
+            ("0xbbb", "2026-05-20", "2026-05-18 05:24:44"),
+            ("0xaaa", "2026-05-20", "2026-05-18 05:24:44"),
+            ("", "2026-05-20", "2026-05-18 05:24:44"),
+            ("0xold", "2026-05-20", "2026-05-10 05:24:44"),
+            ("0xpast", "2026-05-17", "2026-05-18 05:24:44"),
+        ],
+    )
+    setup.commit()
+    setup.close()
+
+    def _forecasts_conn():
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    monkeypatch.setattr("src.data.market_scanner.find_weather_markets", lambda **kw: [])
+    monkeypatch.setattr("src.state.db.get_forecasts_connection", _forecasts_conn)
+
+    condition_ids = zeus_main._auto_derive_user_channel_condition_ids(
+        now=datetime(2026, 5, 18, 16, 30, tzinfo=timezone.utc)
+    )
+
+    assert condition_ids == ["0xaaa", "0xbbb"]
+
+
+def test_user_channel_auto_derive_bad_fallback_age_env_still_fails_soft(
+    monkeypatch,
+    tmp_path,
+):
+    """Relationship: bad fallback config cannot crash the M3 WS boot path."""
+
+    from src import main as zeus_main
+
+    db_path = tmp_path / "forecasts.db"
+    setup = sqlite3.connect(db_path)
+    setup.execute(
+        """
+        CREATE TABLE market_events_v2 (
+            condition_id TEXT,
+            target_date TEXT,
+            recorded_at TEXT
+        )
+        """
+    )
+    setup.execute(
+        """
+        INSERT INTO market_events_v2 (condition_id, target_date, recorded_at)
+        VALUES (?, ?, ?)
+        """,
+        ("0xaaa", "2026-05-20", "2026-05-18 05:24:44"),
+    )
+    setup.commit()
+    setup.close()
+
+    def _forecasts_conn():
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    def _scanner_fails(**kw):
+        raise RuntimeError("scanner unavailable")
+
+    monkeypatch.setenv("ZEUS_USER_CHANNEL_WS_MARKET_EVENTS_FALLBACK_MAX_AGE_HOURS", "oops")
+    monkeypatch.setattr("src.data.market_scanner.find_weather_markets", _scanner_fails)
+    monkeypatch.setattr("src.state.db.get_forecasts_connection", _forecasts_conn)
+
+    condition_ids = zeus_main._auto_derive_user_channel_condition_ids(
+        now=datetime(2026, 5, 18, 16, 30, tzinfo=timezone.utc)
+    )
+
+    assert condition_ids == ["0xaaa"]
 
 
 def _seed_trade_decision_runtime_alias(c, *, trade_id: int, runtime_trade_id: str | None = None) -> None:
