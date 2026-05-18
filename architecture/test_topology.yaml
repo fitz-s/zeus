@@ -1672,3 +1672,45 @@ test_metadata:
       config/settings.json::settlement.disagreement_tolerance_celsius (default 1.0).
     created: 2026-05-08
     last_reused_or_audited: 2026-05-08
+
+  tests/test_db_isolation_antibody.py:
+    modules: [state, conftest]
+    category: core_law_antibody
+    profile: ti1_db_isolation
+    blocks_commit: true
+    asserted_invariants:
+      - TI-1-SQLITE-CONNECT-BLOCKED-FOR-LIVE-PATHS
+      - TI-1-REDIRECT-FIXTURE-ISOLATES-PER-TEST
+    source_under_test:
+      - tests/conftest.py
+      - src/state/db.py
+    law_dependencies:
+      - docs/historical_evidence/topology_v_next_shadow/
+    notes: >
+      Antibody tests for TI-1 DB isolation fixture. Covers: direct sqlite3.connect
+      blocked for world/forecasts/trades live paths; tmp_path connects allowed;
+      :memory: allowed; read-only file: URI allowed; pause_entries does not touch
+      live world DB; bypass env var disables antibody.
+    created: 2026-05-18
+    last_reused_or_audited: 2026-05-18
+
+  tests/test_pause_entries_precedence.py:
+    modules: [control, state]
+    category: core_law_antibody
+    profile: precedence1_operator_freeze
+    blocks_commit: true
+    asserted_invariants:
+      - PRECEDENCE-1-AUTO-PAUSE-CANNOT-SHADOW-OPERATOR-INDEFINITE-FREEZE
+      - PRECEDENCE-SKIP-EMITS-LOG-WARNING
+    source_under_test:
+      - src/control/control_plane.py
+      - src/state/db.py
+    law_dependencies:
+      - docs/historical_evidence/topology_v_next_shadow/
+    notes: >
+      Antibody tests for PRECEDENCE-1: system_auto_pause cannot overwrite an
+      operator indefinite freeze. Tests cover: skip fires when operator freeze
+      active; no skip when operator freeze absent; log warning emitted on skip;
+      in-memory state restored to operator values after skip (not auto_exception).
+    created: 2026-05-18
+    last_reused_or_audited: 2026-05-18
