@@ -507,6 +507,23 @@ def execute_exit(
     Live mode: place sell order, check fill, retry on failure.
     NEVER close a live position without confirmed fill.
     """
+    # PR-S1 Bug #3: block SELL for tokens with unresolved aggregate violations.
+    _eff_token_id = (
+        position.token_id if getattr(position, "direction", "") == "buy_yes"
+        else getattr(position, "no_token_id", "") or position.token_id
+    )
+    if _eff_token_id:
+        from src.engine.cycle_runtime import tokens_blocked_until_resolution, _tokens_blocked_lock
+        with _tokens_blocked_lock:
+            _is_blocked = _eff_token_id in tokens_blocked_until_resolution
+        if _is_blocked:
+            logger.warning(
+                "TOKEN_AGGREGATE_BLOCKED_PENDING_RESOLUTION: trade_id=%s token=%s",
+                position.trade_id,
+                _eff_token_id,
+            )
+            return "exit_blocked: TOKEN_AGGREGATE_BLOCKED_PENDING_RESOLUTION"
+
     if exit_context.current_market_price is None:
         retry_reason = f"{exit_context.exit_reason or 'EXIT'} [INCOMPLETE_CONTEXT]"
         _mark_exit_retry(position, reason=retry_reason, error="missing_current_market_price", conn=conn)
