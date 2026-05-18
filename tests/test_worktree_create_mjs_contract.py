@@ -27,10 +27,12 @@ Contract this test enforces:
     `hookSpecificOutput`. Any of those indicates a regression to the
     JSON-envelope shape that broke EnterWorktree 2026-05-17.
 
-The file under test is out-of-repo
-(`~/.claude/hooks/worktree-create.mjs`). When it is absent, the test
-SKIPS rather than fails: the antibody only fires when the file is
-present and edited in a way that resurrects the bug.
+The PRIMARY target is the live user-global hook at
+`~/.claude/hooks/worktree-create.mjs`. When it is absent (CI, reviewer
+environments), the antibody falls back to the committed snapshot at
+`docs/operations/2026-05-18_worktree_create_hook_cwd_leakage/worktree-create.mjs.fixed`.
+The antibody NEVER skips silently — a false-pass in CI is worse than
+a noisy failure.
 """
 
 import os
@@ -38,12 +40,34 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
 
 
 _HOOK_PATH = Path(os.path.expanduser("~/.claude/hooks/worktree-create.mjs"))
+_SNAPSHOT_PATH = (
+    Path(__file__).resolve().parents[1]
+    / "docs/operations/2026-05-18_worktree_create_hook_cwd_leakage/worktree-create.mjs.fixed"
+)
+
+
+def _hook_under_test() -> Path:
+    """Return the hook file to test.
+
+    Prefer the live user-global hook; fall back to the in-repo committed
+    snapshot so CI and reviewer environments always exercise the contract
+    rather than silently skipping.
+    """
+    if _HOOK_PATH.exists():
+        return _HOOK_PATH
+    assert _SNAPSHOT_PATH.exists(), (
+        f"Neither the live hook ({_HOOK_PATH}) nor the in-repo snapshot "
+        f"({_SNAPSHOT_PATH}) exists. Cannot validate the WorktreeCreate "
+        f"contract — antibody cannot silently pass."
+    )
+    return _SNAPSHOT_PATH
 
 
 def _node_available() -> bool:
@@ -51,8 +75,19 @@ def _node_available() -> bool:
 
 
 def _run_hook(payload_json: str, repo_cwd: str) -> subprocess.CompletedProcess:
+    hook = _hook_under_test()
+    # node requires a .mjs extension for ES-module scripts. When the
+    # snapshot path ends in .fixed, copy it to a temp .mjs file first.
+    if hook.suffix != ".mjs":
+        tmp = tempfile.NamedTemporaryFile(suffix=".mjs", delete=False,
+                                         mode="w", encoding="utf-8")
+        tmp.write(hook.read_text())
+        tmp.close()
+        run_path = Path(tmp.name)
+    else:
+        run_path = hook
     return subprocess.run(
-        ["node", str(_HOOK_PATH)],
+        ["node", str(run_path)],
         input=payload_json,
         capture_output=True,
         text=True,
@@ -87,10 +122,6 @@ def _assert_stdout_is_pathish(stdout: str) -> None:
     )
 
 
-@pytest.mark.skipif(
-    not _HOOK_PATH.exists(),
-    reason=f"user-global hook not installed at {_HOOK_PATH}",
-)
 @pytest.mark.skipif(
     not _node_available(),
     reason="node binary not on PATH",
@@ -142,17 +173,16 @@ def test_worktree_create_mjs_stdout_is_plain_path(tmp_path):
             )
 
 
-@pytest.mark.skipif(
-    not _HOOK_PATH.exists(),
-    reason=f"user-global hook not installed at {_HOOK_PATH}",
-)
 def test_worktree_create_mjs_source_has_no_json_envelope_on_stdout():
     """
     Static check: the source file must not write a JSON envelope to
     stdout. This catches regressions even on systems where node is
     unavailable to run the dynamic probe.
+
+    Targets the live hook when present; falls back to the committed
+    in-repo snapshot so CI always runs (no silent skip).
     """
-    src = _HOOK_PATH.read_text()
+    src = _hook_under_test().read_text()
     # Whitelist: comments and string-literal mentions of the legacy
     # shape (in docstrings explaining the bug) are fine. The DANGEROUS
     # pattern is the actual JS expression `process.stdout.write(JSON.`
