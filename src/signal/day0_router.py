@@ -1,5 +1,24 @@
-# Lifecycle: created=2026-04-18; last_reviewed=2026-04-18; last_reused=never
+# Created: 2026-04-18
+# Last reused or audited: 2026-05-18
 # Authority basis: phase6_contract.md R-BA..R-BD, day0_signal_router.py reference skeleton
+
+# DESIGN DECISION (F3 PR 3, 2026-05-18): Signal/Evaluator layer temperature values
+# stay as plain `float` — NOT `Celsius` or `Fahrenheit` NewTypes.
+#
+# Reason: these parameters (observed_high_so_far, current_temp, member_maxes_remaining,
+# etc.) are UNIT-POLYMORPHIC at runtime. Dallas markets flow °F; London markets flow °C
+# through the SAME code paths. The unit is carried as a separate `unit: str = "F"` field.
+# Annotating as `Celsius` would produce a false type error at Fahrenheit call sites.
+#
+# Temperature protection is enforced UPSTREAM at ingest adapters (PR #170 contracts
+# layer, PR #171 ingest layer — METAR is always °C, WU labelled at request boundary).
+# This module does NOT provide typed temperature protection; it relies on the ingest
+# boundary. No Celsius/Fahrenheit NewType annotation exists or is intended here.
+#
+# LIMITATION (Path A pattern from PR #170, operator-confirmed 2026-05-18):
+# NewType-only does NOT block `Celsius + Fahrenheit` arithmetic even at sites where it
+# is applied. Full category-impossibility requires frozen-dataclass wrappers — deferred
+# to feasibility study (#119). See src/types/temperature.py for the NewType definitions.
 """Day0Router — routes Day0SignalInputs to Day0HighSignal or Day0LowNowcastSignal.
 
 Causality gate: LOW + causality_status not in {OK, N/A_CAUSAL_DAY_ALREADY_STARTED} → raises.
