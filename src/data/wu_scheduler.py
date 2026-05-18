@@ -138,7 +138,7 @@ def run_wu_daily_dispatch(now_utc: Optional[datetime] = None) -> None:
 
     from src.config import cities_by_name
     from src.data.daily_obs_append import append_wu_city
-    from src.state.db import get_world_connection
+    from src.state.db import get_forecasts_connection_with_world
 
     if now_utc is None:
         now_utc = datetime.now(timezone.utc)
@@ -147,7 +147,6 @@ def run_wu_daily_dispatch(now_utc: Optional[datetime] = None) -> None:
     scheduler_instance = WuDailyScheduler()
     rebuild_run_id = f"wu_daily_dispatch_{now_utc.strftime('%Y-%m-%dT%H:%M:%SZ')}"
 
-    conn = get_world_connection()
     wu_totals = {"inserted": 0, "guard_rejected": 0, "fetch_errors": 0, "missing_from_api": 0}
     collected = 0
     for city_cfg in cities_by_name.values():
@@ -158,15 +157,16 @@ def run_wu_daily_dispatch(now_utc: Optional[datetime] = None) -> None:
         local_today = now_utc.astimezone(ZoneInfo(city_cfg.timezone)).date()
         local_yesterday = local_today - timedelta(days=1)
         try:
-            stats = append_wu_city(
-                city_cfg.name, [local_yesterday], conn, rebuild_run_id=rebuild_run_id,
-            )
+            with get_forecasts_connection_with_world(write_class="live") as conn:
+                stats = append_wu_city(
+                    city_cfg.name, [local_yesterday], conn, rebuild_run_id=rebuild_run_id,
+                )
             for k in wu_totals:
                 wu_totals[k] += stats.get(k, 0)
             collected += 1
             logger.info("wu_daily_dispatch: collected %s (%s)", city_cfg.name, local_yesterday)
         except Exception as exc:  # noqa: BLE001
-            logger.error("wu_daily_dispatch: error for %s: %s", city_cfg.name, exc)
+            logger.exception("wu_daily_dispatch: error for %s: %s", city_cfg.name, exc)
 
     if not collected:
         logger.debug("wu_daily_dispatch: no cities eligible this tick")
