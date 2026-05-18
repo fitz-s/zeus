@@ -119,7 +119,8 @@ def _seed_verified_settlement_authority(conn: sqlite3.Connection) -> None:
             source_module TEXT,
             payload_json TEXT,
             occurred_at TEXT,
-            sequence_no INTEGER
+            sequence_no INTEGER,
+            env TEXT NOT NULL DEFAULT 'live'
         )
         """
     )
@@ -153,10 +154,10 @@ def _seed_verified_settlement_authority(conn: sqlite3.Connection) -> None:
         """
         INSERT INTO position_events (
             event_type, position_id, order_id, snapshot_id, strategy_key,
-            source_module, payload_json, occurred_at, sequence_no
+            source_module, payload_json, occurred_at, sequence_no, env
         ) VALUES (
             'SETTLED', 'pos-verified', 'order-verified', 'snap-verified',
-            'center_buy', 'harvester', ?, '2026-04-01T12:00:00+00:00', 1
+            'center_buy', 'harvester', ?, '2026-04-01T12:00:00+00:00', 1, 'live'
         )
         """,
         (json.dumps(payload),),
@@ -2093,6 +2094,7 @@ class TestPortfolioTruthSource:
 class TestGhostPositions:
     """Entered trade_decisions with expired target_dates are ghost positions."""
 
+    @pytest.mark.live_drift  # Cluster M.4 (2026-05-18): uses real zeus_trades.db; excluded from default CI
     def test_no_ghost_positions(self):
         """No trade_decisions with status=entered should have target_date in the past.
 

@@ -1,14 +1,16 @@
 # Created: 2026-05-01
-# Last reused/audited: 2026-05-02
+# Last reused/audited: 2026-05-18
 # Authority basis: live-blockers session 2026-05-01 — TIGGE DB-backed entry evidence relationship;
 #                  PR 37 review: registered-ingest cache TTL must not use source capture time.
+# Cluster M.3 (2026-05-18): DB_FETCH_TIME and RECORDED_AT updated to be time-relative so
+# ensemble_client.fetch_ensemble (which uses datetime.now()) can pass the 24h freshness window.
 """Relationship antibody: TIGGE DB rows → trading-side ensemble evidence."""
 
 from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -17,9 +19,14 @@ import pytest
 
 ISSUE_TIME = "2026-04-29T00:00:00+00:00"
 AVAILABLE_AT = "2026-04-29T00:00:00+00:00"
-DB_FETCH_TIME = "2026-05-01T14:04:22+00:00"
-RECORDED_AT = "2026-05-01 14:04:22"
-DECISION_TIME = datetime(2026, 5, 1, 23, 44, 21, tzinfo=timezone.utc)
+# Cluster M.3 (2026-05-18): Use current time minus 1h so freshness check (now - 24h < recorded_at)
+# passes when ensemble_client.fetch_ensemble calls datetime.now(). The two passing tests that
+# call _fetch_db_payload(fake_city, DECISION_TIME) directly use DECISION_TIME as fetch_time, so
+# they also pass the freshness check as long as DECISION_TIME >= DB_FETCH_DATETIME.
+DB_FETCH_DATETIME = datetime.now(timezone.utc) - timedelta(hours=1)
+DB_FETCH_TIME = DB_FETCH_DATETIME.strftime("%Y-%m-%dT%H:%M:%S+00:00")
+RECORDED_AT = DB_FETCH_DATETIME.strftime("%Y-%m-%d %H:%M:%S")
+DECISION_TIME = DB_FETCH_DATETIME + timedelta(minutes=30)
 
 
 @pytest.fixture

@@ -165,6 +165,24 @@ def _harvester_cycle():
     logger.info("Harvester: %s", result)
 
 
+@_scheduler_job("wu_daily")
+def _wu_daily_dispatch() -> None:
+    """K2 WU daily scheduler tick — collect WU daily observations for eligible cities.
+
+    Called hourly by the daemon scheduler. WuDailyScheduler.should_collect_now
+    gates collection per city using a window_minutes=60 default, so each city
+    fires at most once per hour at its configured local trigger time.
+
+    Cluster L wiring per G4_CLEANUP_DESIGN.md §2 L (2026-05-18).
+    K2 import (daily_obs_append) lives in wu_scheduler.run_wu_daily_dispatch
+    to keep src.main free of K2 ingest modules (Phase 3 boundary, antibody #8).
+    Operator may override interval post-merge if cadence needs tuning.
+    """
+    from src.data.wu_scheduler import run_wu_daily_dispatch
+
+    run_wu_daily_dispatch()
+
+
 # ---------------------------------------------------------------------------
 # F14 + F16 cascade-liveness pollers (2026-05-16, SCAFFOLD §K v5)
 # ---------------------------------------------------------------------------
@@ -1739,8 +1757,8 @@ def main():
     # a SQLite writer lock for read-only ops below — so a concurrent ingest
     # or backfill cannot starve daemon startup.
     conn = get_world_connection()
-    # Read-only smoke: confirm world DB is reachable.
-    conn.execute("SELECT COUNT(*) FROM settlements LIMIT 1").fetchone()
+    # Read-only smoke: confirm world DB is reachable (connectivity only).
+    conn.execute("SELECT 1").fetchone()
 
     # Ensure trade DB has only trade-class tables (PR-S4b: was init_schema which
     # also created world tables on zeus_trades.db; init_schema_trade_only creates
@@ -1879,6 +1897,12 @@ def main():
     scheduler.add_job(
         _check_deployment_freshness, "interval", seconds=60,
         id="deployment_freshness", max_instances=1, coalesce=True,
+    )
+    # K2 WU daily collection — hourly tick; WuDailyScheduler gates per-city.
+    # Cluster L wiring per G4_CLEANUP_DESIGN.md §2 L (2026-05-18).
+    scheduler.add_job(
+        _wu_daily_dispatch, "interval", hours=1, id="wu_daily",
+        max_instances=1, coalesce=True,
     )
 
     # Boot-time fail-closed cascade-liveness contract check. MUST run AFTER

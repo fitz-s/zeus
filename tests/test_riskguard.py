@@ -2379,7 +2379,7 @@ def test_refresh_strategy_health_uses_parsed_settlement_time_basis():
         conn,
         position_id="verified-cutoff-settlement",
         strategy_key="center_buy",
-        settled_at="2026-04-03 12:00:00",
+        settled_at="2026-04-03T12:00:00+00:00",  # Cluster M.1: ISO 8601 T-separator required by occurred_at CHECK constraint
         pnl=3.5,
         outcome=1,
         sequence_no=1,

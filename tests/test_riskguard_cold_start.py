@@ -157,10 +157,20 @@ def test_inconsistent_history_still_data_degraded(fresh_risk_conn):
     import json
     now = datetime.now(timezone.utc)
     ts = (now - timedelta(hours=36)).isoformat()
-    # details_json present but missing required keys → row rejected as malformed
+    # SF7 fix (2026-05-04): SQL pre-filter requires bankroll_truth_source='polymarket_wallet'.
+    # Rows without this field are silently excluded (insufficient_history → GREEN).
+    # To exercise inconsistent_history (DATA_DEGRADED), the row must pass SQL filter
+    # but fail _risk_state_reference_from_row — use mismatched initial/effective
+    # (> $0.01 TRAILING_LOSS_ROW_TOLERANCE_USD → rejected as malformed).
+    # Cluster M.1 (2026-05-18): updated from {"corrupted": True} which no longer
+    # reaches the for-loop after SF7 SQL pre-filter.
     fresh_risk_conn.execute(
         "INSERT INTO risk_state (checked_at, level, details_json) VALUES (?, ?, ?)",
-        (ts, "GREEN", json.dumps({"corrupted": True})),
+        (ts, "GREEN", json.dumps({
+            "bankroll_truth_source": "polymarket_wallet",
+            "initial_bankroll": 200.0,
+            "effective_bankroll": 100.0,  # mismatch > $0.01 tolerance → rejected as malformed
+        })),
     )
     fresh_risk_conn.commit()
 

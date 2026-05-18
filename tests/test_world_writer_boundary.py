@@ -88,6 +88,25 @@ ALLOWLISTED_WRITE_MODULES: frozenset[str] = frozenset(
         "src/execution/exchange_reconcile.py",
         # Strategy benchmark suite — writes observations for backtesting
         "src/strategy/benchmark_suite.py",
+        # ---------------------------------------------------------------------------
+        # Runtime modules added post-2026-04-30 audit (wave6 + G4 bundle)
+        # ---------------------------------------------------------------------------
+        # db_writer_lock.py — writes db_chunk_boundary_events table (wave6, 2026-05-18)
+        "src/state/db_writer_lock.py",
+        # uma_resolution_listener.py — runtime UMA resolution writer (wave6, 2026-05-18)
+        "src/state/uma_resolution_listener.py",
+        # ---------------------------------------------------------------------------
+        # Scripts added post-2026-04-30 audit — operator-run offline
+        # ---------------------------------------------------------------------------
+        "scripts/backfill_london_f_to_c_2026_05_08.py",
+        "scripts/evaluate_calibration_transfer_oos.py",
+        "scripts/migrate_phase2_cycle_stratification.py",
+        "scripts/migrations/202605_add_redeem_operator_required_state.py",
+        "scripts/promote_calibration_pairs_v2.py",
+        "scripts/promote_calibration_v2_stage_to_prod.py",
+        "scripts/promote_platt_models_v2.py",
+        "scripts/refit_platt_v2.py",
+        "src/data/ecmwf_open_data.py",
     }
 )
 

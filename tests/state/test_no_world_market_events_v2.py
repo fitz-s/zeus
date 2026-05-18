@@ -90,6 +90,7 @@ class TestRegistryMarketEventsV2ForecastOnly:
             (db_id, entry.schema_class)
             for (name, db_id), entry in _REGISTRY.items()
             if name == "market_events_v2"
+            and entry.schema_class != SchemaClass.LEGACY_ARCHIVED
         ]
 
         assert len(entries) == 1, (

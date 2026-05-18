@@ -1,3 +1,6 @@
+# Created: 2026-05-18
+# Last reused or audited: 2026-05-18
+# Authority basis: G4_CLEANUP_DESIGN.md §2 L (Cluster L), src/data/AGENTS.md
 """K2 physical-clock WU scheduler tests."""
 from __future__ import annotations
 
@@ -96,6 +99,37 @@ def test_dispatch_returns_cities_in_their_window():
     expected = set(cities_by_name.keys())
     missing = expected - fired_cities
     assert not missing, f"Cities never fired over 24h: {sorted(missing)}"
+
+
+def test_run_wu_daily_dispatch_imports_resolve(monkeypatch):
+    """Antibody: run_wu_daily_dispatch must not raise ImportError on lazy imports.
+
+    Codex PR #166 thread PRRT_kwDOR0ZtZc6C1RTm: the original implementation
+    imported append_daily_obs_for_city which does not exist in
+    src.data.daily_obs_append — causing every hourly tick to fail silently.
+    This test stubs the DB + append_wu_city so the full import path executes
+    without real I/O, verifying the imports resolve correctly.
+    """
+    from unittest.mock import MagicMock
+
+    import src.data.wu_scheduler as wu_sched
+
+    # Stub get_world_connection so no real DB is needed
+    monkeypatch.setattr(
+        "src.state.db.get_world_connection",
+        lambda: MagicMock(),
+        raising=False,
+    )
+    # Stub append_wu_city so no real HTTP calls are made
+    monkeypatch.setattr(
+        "src.data.daily_obs_append.append_wu_city",
+        lambda *a, **k: {"inserted": 0, "guard_rejected": 0, "fetch_errors": 0, "missing_from_api": 0},
+        raising=False,
+    )
+    # Stub dispatch to return empty — exits before per-city loop; import still executes
+    monkeypatch.setattr(wu_sched, "dispatch_wu_daily_collection", lambda *a, **k: [])
+    # Must not raise ImportError or AttributeError
+    wu_sched.run_wu_daily_dispatch()
 
 
 def test_main_wu_daily_job_uses_scheduler_not_fixed_cron():

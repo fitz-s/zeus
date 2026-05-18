@@ -75,7 +75,7 @@ def _bootstrap_canonical_zeus_db(zeus_db) -> None:
 def _patch_tick_environment(monkeypatch, *, zeus_db, risk_db) -> None:
     """Wire riskguard.tick to use the per-test temp DBs."""
 
-    def _fake_get_connection(path=None):
+    def _fake_get_connection(path=None, *, write_class=None):
         if path == riskguard_module.RISK_DB_PATH:
             return get_connection(risk_db)
         return get_connection(zeus_db)
