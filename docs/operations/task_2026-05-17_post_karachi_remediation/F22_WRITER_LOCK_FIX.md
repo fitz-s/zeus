@@ -56,8 +56,8 @@
 | `scripts/migrate_world_to_forecasts.py` | DEFER | One-shot K1 DB-split migration; docstring says stop daemon first. Marker added. |
 | `scripts/migrate_backtest_runs_lane_constraint_2026_05_07.py` | DEFER | Backtest DB only (not a live-trading DB). Marker added. |
 | `scripts/bridge_oracle_to_calibration.py` | ALREADY OK | No raw `sqlite3.connect` — uses `get_forecasts_connection_with_world()` which internally acquires `db_writer_lock` at `src/state/db.py:244-245`. |
-| `scripts/cleanup_ghost_positions.py` | ALREADY OK | Has `db_writer_lock` (import line 28 + context manager line 114). |
-| `scripts/force_cycle_with_healthy_gates.py` | ALREADY OK | Has `db_writer_lock` (import line 48 + context manager line 55). |
+| `scripts/cleanup_ghost_positions.py` | ALREADY OK | Has `db_writer_lock` (import line 28 + context manager line 114). **Out-of-scope hazard**: OPS_FORENSICS flags a read-classify race outside the lock window (find_ghosts runs while lock is held but the classification logic runs per-row with separate cursor reuse). Lock-scope correctness issue; not addressable by the antibody contract. |
+| `scripts/force_cycle_with_healthy_gates.py` | ALREADY OK | Has `db_writer_lock` (import line 48 + context manager line 55). **Out-of-scope hazard**: OPS_FORENSICS flags that this script suppresses a legitimate bid-safety check (hazard is operational, not a missing writer-lock). Not addressable by the antibody contract. |
 
 ### Deferred scripts requiring WAVE-3 attention
 
@@ -74,8 +74,13 @@ The brief requested "refactor to F23 runner convention; drop bootstrap allowlist
 for `202605_add_redeem_operator_required_state.py`.
 
 **Finding**: `def up(conn)` already exists at line 323 of that file — the F23 runner
-convention was already applied. The `_BOOTSTRAP_APPLIED` entry in `scripts/migrations/__init__.py`
-**must remain**: it records that this migration was applied to production before the ledger
-existed, preventing re-application on existing DBs. Dropping it would cause `apply_migrations()`
-to re-run the DDL rebuild on every existing DB — a Karachi-path regression. NIT1 is complete
-as of the file's current state; no further change required.
+convention was already applied.
+
+The `_BOOTSTRAP_APPLIED` entry in `scripts/migrations/__init__.py` drop is **DEFERRED to
+WAVE-3 pending idempotency review of the `up(conn)` no-op path**. The `up(conn)` wrapper
+already calls `_is_already_applied(conn)` which checks `sqlite_master.sql LIKE
+'%REDEEM_OPERATOR_REQUIRED%'`, making re-application a no-op on existing DBs even without
+the `_BOOTSTRAP_APPLIED` guard. The conservative choice is to leave the entry in place and
+defer the drop until WAVE-3 confirms the no-op path is exercised under all migration runner
+call sites. NIT1 structural work (exposing `def up(conn)`) is complete; ledger entry cleanup
+is the only outstanding item.
