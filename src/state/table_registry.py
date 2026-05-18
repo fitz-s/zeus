@@ -407,22 +407,23 @@ def assert_writer_jobs_registered(ingest_main_source: str | None = None) -> None
             f"assert_writer_jobs_registered: could not read registry YAML: {exc}"
         ) from exc
 
+    table_list = raw_yaml.get("tables", [])
+    if not isinstance(table_list, list):
+        raise RegistryAssertionError("assert_writer_jobs_registered: 'tables' must be a list")
+
     declared: dict[str, str] = {}  # table_name → daemon_writer job id
-    for section in raw_yaml.get("tables", {}).values():
-        if not isinstance(section, list):
+    for entry in table_list:
+        if not isinstance(entry, dict):
             continue
-        for entry in section:
-            if not isinstance(entry, dict):
-                continue
-            dw = entry.get("daemon_writer")
-            if dw and str(dw).strip().lower() != "none":
-                declared[str(entry["name"])] = str(dw).strip()
+        dw = entry.get("daemon_writer")
+        if dw and str(dw).strip().lower() != "none":
+            declared[str(entry["name"])] = str(dw).strip()
 
     if not declared:
         # Nothing to check — registry has no daemon_writer entries yet
         return
 
-    # --- 2. Collect @_scheduler_job("...") strings via AST ---
+    # --- 2. Collect @_scheduler_job("...") and _scheduler.add_job(..., id="...") strings via AST ---
     if ingest_main_source is None:
         ingest_main_path = _REGISTRY_PATH.parent.parent / "src" / "ingest_main.py"
         try:
@@ -439,31 +440,90 @@ def assert_writer_jobs_registered(ingest_main_source: str | None = None) -> None
             f"assert_writer_jobs_registered: could not parse ingest_main.py: {exc}"
         ) from exc
 
-    registered_jobs: set[str] = set()
+    registered_decorators: set[str] = set()
+    wired_jobs: set[str] = set()
+
     for node in ast.walk(tree):
-        if not isinstance(node, ast.FunctionDef):
-            continue
-        for decorator in node.decorator_list:
-            # Match: @_scheduler_job("job_name")
-            if not isinstance(decorator, ast.Call):
-                continue
-            func = decorator.func
-            if not (isinstance(func, ast.Name) and func.id == "_scheduler_job"):
-                continue
-            if decorator.args and isinstance(decorator.args[0], ast.Constant):
-                registered_jobs.add(str(decorator.args[0].value))
+        # Scan decorators
+        if isinstance(node, ast.FunctionDef):
+            for decorator in node.decorator_list:
+                # Match: @_scheduler_job("job_name")
+                if not isinstance(decorator, ast.Call):
+                    continue
+                func = decorator.func
+                if not (isinstance(func, ast.Name) and func.id == "_scheduler_job"):
+                    continue
+                if decorator.args and isinstance(decorator.args[0], ast.Constant):
+                    registered_decorators.add(str(decorator.args[0].value))
+
+        # Scan _scheduler.add_job(..., id="...")
+        if isinstance(node, ast.Call):
+            func = node.func
+            if (
+                isinstance(func, ast.Attribute)
+                and isinstance(func.value, ast.Name)
+                and func.value.id == "_scheduler"
+                and func.attr == "add_job"
+            ):
+                for keyword in node.keywords:
+                    if keyword.arg == "id" and isinstance(keyword.value, ast.Constant):
+                        wired_jobs.add(str(keyword.value.value))
 
     # --- 3. Cross-check ---
-    missing: list[str] = []
-    for table_name, job_id in sorted(declared.items()):
-        if job_id not in registered_jobs:
-            missing.append(
-                f"  table '{table_name}' declares daemon_writer='{job_id}' "
-                f"but no @_scheduler_job('{job_id}') found in ingest_main.py"
+    missing_wiring: list[str] = []
+    missing_decorator: list[str] = []
+
+    # Map job IDs to decorators/add_job IDs
+    # Note: daemon_writer: ingest_k2_obs_v2_tick corresponds to decorator
+    # ingest_k2_obs_v2_tick AND _scheduler.add_job(..., id="ingest_k2_obs_v2")
+    def get_job_id_matches(job_id: str) -> tuple[str, str]:
+        # Normalizes job IDs to decorator vs add_job ID
+        # Decorator: ingest_k2_obs_v2_tick
+        # add_job ID: ingest_k2_obs_v2
+        if job_id == "ingest_k2_obs_v2_tick":
+            return "ingest_k2_obs_v2_tick", "ingest_k2_obs_v2"
+        return job_id, job_id
+
+    # Registry vs Code
+    for table_name, raw_job_id in sorted(declared.items()):
+        dec_id, add_id = get_job_id_matches(raw_job_id)
+        if dec_id not in registered_decorators:
+            missing_decorator.append(
+                f"  table '{table_name}' declares daemon_writer='{raw_job_id}' "
+                f"but no @_scheduler_job('{dec_id}') found in ingest_main.py"
+            )
+        if add_id not in wired_jobs:
+            missing_wiring.append(
+                f"  table '{table_name}' declares daemon_writer='{raw_job_id}' "
+                f"but no _scheduler.add_job(..., id='{add_id}') found in ingest_main.py"
             )
 
-    if missing:
+    # Internal code consistency (excluding known daemon-infrastructure jobs with no table registry mappings)
+    # Exclude: 'ingest_heartbeat' (pure telemetry file writer, has no table)
+    telemetry_jobs = {"ingest_heartbeat"}
+
+    # Decorator presence vs add_job presence
+    for dec_id in sorted(registered_decorators):
+        _, add_id = get_job_id_matches(dec_id)
+        if add_id not in wired_jobs:
+            missing_wiring.append(
+                f"  @_scheduler_job('{dec_id}') is present but no matching "
+                f"_scheduler.add_job(..., id='{add_id}') found"
+            )
+
+    for add_id in sorted(wired_jobs):
+        if add_id in telemetry_jobs:
+            continue
+        # Reverse map to dec_id
+        dec_id = "ingest_k2_obs_v2_tick" if add_id == "ingest_k2_obs_v2" else add_id
+        if dec_id not in registered_decorators:
+            missing_decorator.append(
+                f"  _scheduler.add_job(..., id='{add_id}') is present but no matching "
+                f"@_scheduler_job('{dec_id}') found"
+            )
+
+    errors = missing_decorator + missing_wiring
+    if errors:
         raise RegistryAssertionError(
-            "assert_writer_jobs_registered: FATAL — registry declares daemon writers "
-            "that are not wired as scheduler jobs:\n" + "\n".join(missing)
+            "assert_writer_jobs_registered: FATAL — writer job wiring mismatch:\n" + "\n".join(errors)
         )
