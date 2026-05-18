@@ -70,11 +70,17 @@ def _make_position(
 
 
 def _make_conn():
-    """In-memory SQLite with architecture schema for reconcile to write events."""
-    from src.state.db import apply_architecture_kernel_schema
+    """In-memory SQLite with full schema for reconcile to write events.
+
+    Uses init_schema (not apply_architecture_kernel_schema) so venue_commands
+    and other non-kernel tables are present. Required by U13: the new
+    _pending_entry_has_durable_command helper queries venue_commands.
+    Closes U13 (G4 pre-restart pytest gate blocker per RESTART_READINESS_PLAN.md).
+    """
+    from src.state.db import init_schema
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
-    apply_architecture_kernel_schema(conn)
+    init_schema(conn)
     return conn
 
 
