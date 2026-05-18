@@ -475,3 +475,75 @@ F106 + F108 are both "silent-no-op aggregation" defects. They join the pattern s
 
 ### Documents in this track
 - `RUN_16_track_G_financial_reconciliation.md` (NEW)
+
+
+## Run #16 Track F status delta (2026-05-17, branch fix/wave-2-lineage-and-k1-cleanup-2026-05-17)
+
+### Headline
+- **F111 (SEV-1 HOT) NEW.** Two London 5/19 positions (`0a0e3b72-46e`, `7557a029-4ad`, both `opening_inertia`) STUCK in `pending_exit` with 12+ `EXIT_ORDER_REJECTED` retries each between 22:13–23:59 UTC (cadence ≈ 7–8 min, no backoff acceleration, no `EXIT_BACKOFF_EXHAUSTED` or `CHAIN_QUARANTINED` terminator). `updated_at` refresh on every retry masks them from the classical >12 h `pending_exit` orphan query. Same code path will govern Karachi `c30f28a5-d4e`'s own exit tonight — same-class risk.
+- **F108 (SEV-2) NEW.** `EXIT_ORDER_REJECTED` rows persistently mis-log `phase_before='active'` on every retry because `src/execution/exit_lifecycle.py:460` derives `phase_before` from the in-memory `pre_exit_state` default `"holding"` rather than the persisted `position_current.phase`. Same defect mirrored at `src/execution/command_recovery.py:820`. 26 known false-transition rows in 7 d. Event-replay reconstruction in `src/state/projection.py:73` would synthesize a fictitious oscillation `active↔pending_exit` 13× per stuck position.
+- **F109 (SEV-2) NEW.** All 5 currently `economically_closed` positions reached that phase WITHOUT any `EXIT_INTENT` / `EXIT_ORDER_POSTED` / `EXIT_ORDER_REJECTED` row recording the `active→pending_exit` step — the `EXIT_ORDER_FILLED` row jumps `phase_before='pending_exit'` from nothing. Happy-path exit performs a silent state write that bypasses event-sourcing. Lineage from `decision_log` → exit fill is broken at the intent layer (relates to F7 class).
+- **F110 (SEV-3) NEW.** `position_events.occurred_at` carries the literal string `"unknown_entered_at"` on CHAIN_SYNCED events (Karachi c30f28a5 sq=3; Manila bf0a16f5 sq=3). TEXT column accepts it; `julianday()` breaks silently.
+- **F112 (SEV-3) NEW.** `position_events.event_type` enum (19 values) has no dedicated `PHASE_RECONCILED` event — phase transitions piggyback on lifecycle action events, leaving F109-class silent transitions with no canonical home in the append-only log.
+- **F113 (SEV-3) NEW.** No codified mapping between `position_current.phase` (9 values) and `position_lots.state` (7 values). Lot↔position consistency audit cannot be written without reverse-engineering the map from runtime behavior.
+
+### Updated status (Run #16 F)
+
+| F# | Prior | Now | Reason |
+|---|---|---|---|
+| F108 | — | **NEW SEV-2** | `pre_exit_state` default `"holding"` → false `active` literal in 26 reject rows. |
+| F109 | — | **NEW SEV-2** | Happy-path exit emits `EXIT_ORDER_FILLED(pending_exit→economically_closed)` with no prior `active→pending_exit` event row. 5/5 economically_closed affected. |
+| F110 | — | NEW SEV-3 | `occurred_at='unknown_entered_at'` literal in CHAIN_SYNCED. |
+| F111 | — | **NEW SEV-1 HOT** | London 5/19 twins; 12+ rejects each; no terminator wired; live-money 5/19 exit unhedged. |
+| F112 | — | NEW SEV-3 | Schema enum lacks `PHASE_RECONCILED`. |
+| F113 | — | NEW SEV-3 | `phase ↔ lot.state` mapping uncodified. |
+
+### Karachi 5/17 + 5/19 ops gate (updated)
+1. **Highest priority NEW**: live-trading operator must monitor Karachi `c30f28a5-d4e`'s upcoming exit event stream tonight; if `EXIT_ORDER_REJECTED` count reaches 3 within 30 min, force-quarantine manually (F111 same-class).
+2. **Higher priority NEW**: operator should query `payload_json` of the 24 EXIT_ORDER_REJECTED rows on the two London twins to extract the reject reason (out of scope for this READ-ONLY audit); the structural-vs-transient distinction determines whether retries can ever succeed.
+3. F48 / F85 / F86 / F90a actions from prior runs unchanged.
+
+### Carry-forward open SEV-1 (post Run #16 F)
+F3, F32, F35, F63, F71, **F90a**, F48 (HOT-FIX-SPEC), F103, **F111** (NEW HOT).
+
+### Audit-discipline meta-finding
+Run #16 F surfaces a SEV-1 HOT that PASSES the LEARNINGS §3 probe-then-claim rule on first opening: claim "London twins stuck" is backed by 26 enumerated event rows with monotone cadence (not a status indicator) AND a documented absence of `EXIT_BACKOFF_EXHAUSTED` in the 7d stream. F108–F110, F112, F113 are observability/schema findings backed directly by the same evidence rows. Pattern: "trace every legal transition in a state machine" probe is a high-yield audit angle — 6 findings (1 HOT) in a single track on a system thought to be well-understood.
+
+### Documents in this run
+- `RUN_16_track_F_position_lifecycle_correctness.md` (NEW)
+
+
+---
+
+## Run #16 T B — F102 verdict + F106 / F107 new
+
+### F102 — `temp_persistence` empty everywhere → VERDICT: MIGRATED, both ends broken
+- **Severity**: SEV-2 (HOT — silently degrades Karachi 5/17 persistence-anomaly discount to 1.0 for 100% of HIGH calls)
+- **Status**: **MIGRATED-BOTH-ENDS-BROKEN** (Run #16 T B). NOT NEVER-WIRED. NOT RETIRED.
+- **Owner**: `scripts/etl_temp_persistence.py:31` (writer) + `src/engine/monitor_refresh.py:1065` (reader)
+- **Evidence**:
+  - Writer IS scheduled: `src/main.py:413` (live daemon, APScheduler 06:00 daily) and `src/ingest_main.py:580` (ingest daemon, lock-wrapped). Latest "OK" run 2026-05-17 06:00:29 (`logs/zeus-ingest.err`).
+  - Writer exits 0 daily but writes ≈0 rows — discarded by `n < 3` filter (line 132) because source has only 145 rows across 5 days × 51 cities × 4 seasons × 9 delta buckets.
+  - Writer reads `observations` from `zeus-world.db` (145 rows). K1 split (PR #114, 2026-05-14) re-homed canonical `observations` to `zeus-forecasts.db` (43,971 rows / 868 distinct dates / 2023-12-27 → 2026-05-16). Writer was not migrated.
+  - Reader `monitor_refresh.py:1065` uses bare-name `FROM temp_persistence`; under cycle conn (`trades.db` MAIN + `world` + `forecasts` ATTACH), bare resolves to MAIN (`zeus_trades.db`, 0 rows).
+- **1-line F48 L1065 fix**: `"SELECT frequency, n_samples FROM world.temp_persistence "` — schema-qualifier matches K1 binding discipline from Run #15 T2. **Necessary** (locks reader to writer's target DB) but **NOT sufficient** at runtime — world copy still 0 rows until F106 is fixed. Pair with Run #15 T2's `PERSISTENCE_FALLBACK_TRIGGERED` counter for observability.
+- **Audit trail**: Run #15 T2 surfaced; Run #16 T B verdict pinned.
+
+### F106 — `etl_temp_persistence.py` reads stale `world.observations`
+- **Severity**: SEV-2 (HOT — root cause of F102 left-half)
+- **Status**: NEW (Run #16 T B)
+- **Owner**: `scripts/etl_temp_persistence.py:31` (binding) and `:65-77` (source query)
+- **Evidence**: Writer's `from src.state.db import get_world_connection as get_connection` points at `zeus-world.db` (145 obs rows / 5 days). Canonical observations are in `zeus-forecasts.db` (43,971 / 868 days) post-K1 split. Sibling defect-class suspect: `etl_diurnal_curves.py`, `etl_hourly_observations.py` (same `get_world_connection` pattern, both run by the same `_etl_recalibrate_body` loop).
+- **Fix shape**: open a forecasts conn for the source SELECT (or ATTACH `forecasts` to the world conn) while keeping the target write on `world.temp_persistence`. Cross-DB conn helpers already exist (e.g., `get_trade_connection_with_world`).
+- **Audit trail**: Run #16 T B discovery.
+
+### F107 — `_etl_recalibrate_body` swallows ETL row counts
+- **Severity**: SEV-3
+- **Status**: NEW (Run #16 T B)
+- **Owner**: `src/ingest_main.py:600-612` and `src/main.py:127-138`
+- **Evidence**: ETL scripts return `{"stored": N}` plus stdout `print(f"Stored {stored} persistence entries")`. The recalibrate wrapper inspects `r.stderr` only; stdout is captured but discarded. Result dict reports `OK` for every exit-0, including "exit 0 with 0 rows written". This is exactly how F102/F106 stayed invisible for ≥15 days.
+- **Fix shape**: parse `r.stdout` for `Stored \d+` (or any structured row-count line), include in result dict (`'etl_temp_persistence.py': 'OK (stored=552)'`), and trip an alarm on `stored=0` two days running.
+- **Audit trail**: Run #16 T B discovery.
+
+### Documents in this run
+- `RUN_16_track_B_f102_temp_persistence_ownership.md` (NEW)

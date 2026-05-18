@@ -228,6 +228,22 @@ Track A: F87 false-alarm formal close + F85 root cause + fix spec. READ-ONLY pro
 
 > See `RUN_16_track_A_f85_log_routing_f87_close.md` §1 (F87 evidence + close), §2 (F85 root cause), §3 (text-block fix spec), §5 (verification probe). New cross-run antibody catalog: `LEARNINGS.md`.
 
+## Run #16 Track F additions (F108–F113) — position lifecycle correctness
+
+Track F traced every legal `position_current.phase` transition (9-value DAG) across schema, code, and the last 7 days of `position_events`. Confirmed: 76 positions opened, 63 voided at entry, 16 reached `active`, 5 reached `economically_closed`, 1 reached `day0_window` (Karachi). Karachi `c30f28a5-d4e` on canonical path (F110 hygiene only). **F111 SEV-1 HOT**: 2 London 5/19 positions (`0a0e3b72-46e`, `7557a029-4ad`) STUCK in `pending_exit` with 12+ EXIT_ORDER_REJECTED retries each (cadence ≈ 7-8 min, no backoff terminator, no quarantine). F108: every reject row mis-logs `phase_before='active'` even when current phase is `pending_exit` (replay corruption, 26 false rows). F109: all 5 `economically_closed` positions have NO `EXIT_INTENT`/`EXIT_ORDER_POSTED` event recording the `active→pending_exit` step — silent state write. F112: schema has no `PHASE_RECONCILED` event_type so silent transitions cannot be recorded canonically. F113: no codified mapping between `position_current.phase` (9 values) and `position_lots.state` (7 values). READ-ONLY; no production code or schema mutated.
+
+| F#  | Title | Sev | Status | Owner | First seen | Last verified |
+|-----|-------|-----|--------|-------|------------|----------------|
+| **F108** | `EXIT_ORDER_REJECTED` falsely logs `phase_before='active'` on every retry (reads `pre_exit_state` default `'holding'` not persisted phase) | SEV-2 | NEW (Run #16 F) | `src/execution/exit_lifecycle.py:460` + `src/execution/command_recovery.py:820` | Run #16 F | Run #16 F |
+| **F109** | Silent `active → pending_exit` transition (no event row) on happy-path exits — 5/5 economically_closed positions affected | SEV-2 | NEW (Run #16 F) | `src/execution/exit_lifecycle.py` (EXIT_INTENT/POSTED emit) | Run #16 F | Run #16 F |
+| **F110** | `position_events.occurred_at='unknown_entered_at'` literal string on CHAIN_SYNCED events (Karachi c30f28a5 sq=3, Manila bf0a16f5 sq=3) | SEV-3 | NEW (Run #16 F) | `src/state/chain_reconciliation.py` (CHAIN_SYNCED emit) | Run #16 F | Run #16 F |
+| **F111** | **London 5/19 `0a0e3b72-46e` + `7557a029-4ad` STUCK in `pending_exit`; 12+ EXIT_ORDER_REJECTED retries each over ~1.5 h, no backoff terminator wired** | **SEV-1 HOT** | NEW (Run #16 F) | `src/execution/exit_lifecycle.py:595-935` + missing `EXIT_BACKOFF_EXHAUSTED` controller | Run #16 F | Run #16 F |
+| **F112** | `position_events.event_type` enum has no `PHASE_RECONCILED` record; transitions piggyback on lifecycle action events → silent state writes have no canonical home | SEV-3 | NEW (Run #16 F) | `position_events.event_type` CHECK + `src/state/db.py:49` | Run #16 F | Run #16 F |
+| **F113** | No codified mapping between `position_current.phase` (9 values) and `position_lots.state` (7 values); lot↔position consistency audit requires reverse-engineering | SEV-3 | NEW (Run #16 F) | `src/state/position_lots.py` + schema docs | Run #16 F | Run #16 F |
+
+> See `RUN_16_track_F_position_lifecycle_correctness.md` §4.3 (Karachi trace), §4.4 (5/19 sibling matrix), §5 (full F108–F113 detail with fix specs), §7 (Karachi 5/17 exit-lock blast radius from F111).
+
+
 
 ## Run #16 Track G additions (F106–F111 — financial reconciliation)
 
@@ -252,3 +268,18 @@ Track G (book-keeping ↔ on-chain reality reconciliation): READ-ONLY across `st
 - **Settlements vs payouts**: N/A — `settlements_v2` empty (F110).
 
 > See `RUN_16_track_G_financial_reconciliation.md` for §1 schema-mismatch canonical join, §2 cost-basis evidence table, §3 Karachi 5/17 fingerprint, §4 vtf revision proof, §5 by-token reconciliation, §6 chain treasury reconciliation, §7 settlements + closed-phase semantics, §8 findings catalog, §11 recommended follow-ups (NOT applied).
+
+
+## Run #16 Track B additions (F102 ownership verdict + F106/F107) + F48 L1065 1-line fix
+
+Track B: F102 ownership investigation. Verdict = **MIGRATED, both ends broken**. Writer (`scripts/etl_temp_persistence.py`) IS scheduled (daily 06:00 via APScheduler in both `src/main.py:413` and `src/ingest_main.py:580`) AND exits 0 daily, but reads stale `world.observations` (145 rows / 5 days) instead of K1-canonical `forecasts.observations` (43,971 rows / 868 days) — silently writes ≈0 rows. Reader (`monitor_refresh.py:1065`) bare-name binds to MAIN trades.db (0 rows). Both ends must be fixed for persistence-anomaly discount to ever fire.
+
+Numbering note: F106/F107 assigned here may collide with parallel Track F/G commits landing in the same session — reconcile post-hoc by renumbering whichever lands later. Track B claims these numbers first by file order.
+
+| F#  | Title | Sev | Status | Owner | First seen | Last verified |
+|-----|-------|-----|--------|-------|------------|----------------|
+| F102 | `temp_persistence` empty everywhere — ownership verdict | SEV-2 | **MIGRATED-BOTH-ENDS-BROKEN (Run #16 T B)** — writer scheduled & "OK" daily but source-drifted (see F106); reader bare-name bound to MAIN trades.db. 1-line F48 L1065 fix: `FROM world.temp_persistence` (necessary, NOT sufficient — needs F106 too). | `scripts/etl_temp_persistence.py:31` + `src/engine/monitor_refresh.py:1065` | Run #15 T2 | Run #16 T B |
+| **F106 (Track B claim)** | `etl_temp_persistence.py` reads stale `world.observations` (145 rows / 5 days / 51 cities) instead of K1-canonical `forecasts.observations` (43,971 rows / 868 days). Filters out every bucket on `n < 3`, writes ≈0 rows, exits 0. K1 split (PR #114, 2026-05-14) re-homed `observations`; writer was not migrated. Likely sibling defects in `etl_diurnal_curves.py` and `etl_hourly_observations.py` (same `get_world_connection` pattern). | **SEV-2** | **NEW (Run #16 T B)** HOT | `scripts/etl_temp_persistence.py:31, 65-77` | Run #16 T B | Run #16 T B |
+| **F107 (Track B claim)** | `_etl_recalibrate_body` discards ETL stdout — `print("Stored N persistence entries")` never reaches logs; only `r.stderr` is parsed into the `OK/FAIL` result dict. "OK" = exit 0 only; row count is invisible. Operators cannot distinguish "ETL succeeded" from "ETL exited 0 with 0 rows written". | SEV-3 | NEW (Run #16 T B) | `src/ingest_main.py:600-612` + `src/main.py:127-138` | Run #16 T B | Run #16 T B |
+
+> See `RUN_16_track_B_f102_temp_persistence_ownership.md` §3-5 (writer/source archeology), §6 (reader bind), §7 (verdict), §8 (F48 L1065 1-liner), §9 (F106/F107 detail), §10 (Karachi blast radius).
