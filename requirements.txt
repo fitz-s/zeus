@@ -36,6 +36,10 @@ pytz==2026.1.post1
 
 # --- testing ---
 pytest==9.0.2
+mypy==1.20.2  # F3 antibody tests run mypy as subprocess to verify NewType boundary
+              # enforcement (tests/contracts/test_settlement_semantics_unit_types.py,
+              # tests/data/test_ingest_unit_types.py, tests/engine/test_evaluator_unit_types.py).
+              # Required from F3 PR 3 onwards; without this CI skips/fails those tests.
 
 # --- security-critical (cryptography was previously transitive-only via
 #     py-clob-client-v2; pinning explicit so a new transitive resolution

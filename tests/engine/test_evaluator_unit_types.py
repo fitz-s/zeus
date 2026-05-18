@@ -86,7 +86,13 @@ def test_day0_high_signal_settlement_samples_basic() -> None:
 
 
 def test_day0_high_signal_p_bin_bounds_correct() -> None:
-    """Day0HighSignal.p_bin() returns probability in [0, 1] and sums correctly."""
+    """Day0HighSignal.p_bin() returns probability in [0, 1] and exhaustive pair sums to 1.
+
+    Uses two complementary bins that together cover all possible outcomes:
+    (-inf, 70] and (71, +inf). Because the hard-floor is 70 and all member
+    maxes are >= 70, settlement samples are exactly {70, 71, 72, 73} —
+    p_at_or_below_70 + p_above_70 must equal 1.0 with no mass elsewhere.
+    """
     signal = Day0HighSignal(
         observed_high_so_far=70.0,
         member_maxes_remaining=np.array([69.0, 71.0, 72.0, 73.0], dtype=np.float64),
@@ -94,10 +100,16 @@ def test_day0_high_signal_p_bin_bounds_correct() -> None:
         hours_remaining=2.0,
         unit="F",
     )
-    p_below = signal.p_bin(float("-inf"), 70.0)
-    p_at_and_above = signal.p_bin(71.0, float("inf"))
-    assert 0.0 <= p_below <= 1.0
-    assert 0.0 <= p_at_and_above <= 1.0
+    # Exhaustive pair: settlement samples are max(70, [69, 71, 72, 73]) = [70, 71, 72, 73]
+    p_at_or_below_70 = signal.p_bin(float("-inf"), 70.0)  # only 70 → 0.25
+    p_above_70 = signal.p_bin(70.001, float("inf"))        # 71, 72, 73 → 0.75
+    assert 0.0 <= p_at_or_below_70 <= 1.0
+    assert 0.0 <= p_above_70 <= 1.0
+    assert abs(p_at_or_below_70 + p_above_70 - 1.0) < 1e-9, (
+        f"Exhaustive bin pair must sum to 1.0, got "
+        f"p_at_or_below_70={p_at_or_below_70:.6f} + p_above_70={p_above_70:.6f} "
+        f"= {p_at_or_below_70 + p_above_70:.9f}"
+    )
 
 
 # ---------------------------------------------------------------------------
