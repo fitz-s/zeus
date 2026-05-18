@@ -15,13 +15,17 @@ Background (WAVE_2_PLAN §#37): BulkChunker LIVE-yield events were counter-only.
 No queryable record existed. F11 adds event_writer callback to BulkChunker so
 LIVE_CONTENDED yields and WATCHDOG fires emit rows into db_chunk_boundary_events.
 
-Three probes:
+Six probes:
 1. LIVE_CONTENDED path: mock _is_live_contended=True, verify event_writer called
-   with split_reason='LIVE_CONTENDED' and duration_ms >= 0.
+   with split_reason='LIVE_CONTENDED', duration_ms >= 0, and rows_processed == 123.
 2. WATCHDOG path: configure short watchdog_s, sleep past it, verify event_writer
-   called with split_reason='WATCHDOG'.
+   called with split_reason='WATCHDOG' and rows_processed == 456.
 3. emit_event integration: call emit_event() directly against a tmp DB, verify
    row visible to independent reader connection (confirms ensure_table + insert).
+4. Migration idempotency: up() runs twice without error.
+5. E2E: bulk_lock_with_chunker wires event_writer so a real db row appears after
+   a LIVE_CONTENDED yield (rows_processed == 789).
+6. emit_event WAL mode: journal_mode=WAL persists in the DB header after close.
 """
 
 from __future__ import annotations

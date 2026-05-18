@@ -226,7 +226,7 @@ class BulkChunker:
         # F11 (wave6 2026-05-18): optional event_writer callback; called on
         # LIVE_CONTENDED yield and WATCHDOG fire so both appear in the
         # db_chunk_boundary_events table.  Signature:
-        #   event_writer(caller_module=..., split_reason=..., duration_ms=...)
+        #   event_writer(caller_module=..., split_reason=..., duration_ms=..., rows_processed=...)
         # Failure-silent at call-site.
         self._event_writer = event_writer
         self._rows_since_last_emit = 0

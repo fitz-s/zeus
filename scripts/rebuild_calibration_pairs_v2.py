@@ -1504,9 +1504,11 @@ def rebuild_v2(
         )
     else:
         start = time.monotonic()
+        _bucket_pairs_start = 0  # cumulative pairs_written at start of each bucket
         for city_name, city_snaps in sorted(city_buckets.items()):
             city = cities_by_name[city_name]
             city_unit_rejected = 0
+            _bucket_pairs_start = stats.pairs_written
 
             # Per-(city, metric) SAVEPOINT — bounded transaction duration.
             conn.execute("SAVEPOINT v2_rebuild_bucket")
@@ -1554,7 +1556,7 @@ def rebuild_v2(
             # the bulk fcntl if a LIVE writer is mid-transaction. No-op when
             # chunker is None (preserves legacy callers + parallel path).
             if chunker is not None:
-                chunker.increment_rows(stats.pairs_written - chunker._rows_since_last_emit)
+                chunker.increment_rows(stats.pairs_written - _bucket_pairs_start)
                 chunker.yield_if_live_contended()
 
     # Post-all-cities validation.
