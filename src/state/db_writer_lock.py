@@ -612,6 +612,11 @@ def subprocess_run_with_write_class(
 # --------------------------------------------------------------------------
 
 # Files where direct ``sqlite3.connect()`` is permitted.
+#
+# F26 follow-up migration (2026-05-18): 42 CURRENT_REUSABLE entries moved here
+# from tests/conftest.py._WLA_SQLITE_CONNECT_ALLOWLIST.  conftest now imports
+# this set and unions it with its residual STALE_REWRITE / QUARANTINED entries,
+# so the Track A.3 FAIL-CI gate still fires on any unlisted site.
 SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
     {
         "src/state/db.py",  # canonical shim
@@ -620,6 +625,7 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         # These are NOT in the world-db BULK lock universe; each is either
         # read-only or writes a separate DB (risk_state.db).
         "src/ingest_main.py",           # RO: reads condition_id for UMA listener, no write
+        "src/main.py",                  # read_only_ro_uri: live boot verifies zeus-forecasts.db user_version with mode=ro + query_only
         "src/observability/status_summary.py",  # RO: status dashboard read-only
         "src/riskguard/discord_alerts.py",  # WRITE risk_state.db only; not in world-db BULK lock universe
         "src/control/cli/promote_entry_forecast.py",  # RO: operator CLI opens world-db with mode=ro
@@ -629,6 +635,48 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         # RW only with --commit, gated by BEGIN IMMEDIATE + rollback semantics.
         "scripts/promote_platt_models_v2.py",       # RO inspect/verify; RW only with --commit (zeus-world.db)
         "scripts/promote_calibration_pairs_v2.py",  # RO inspect/verify; RW only with --commit (zeus-forecasts.db)
+        # --- read-only scripts: verified SELECT-only, named in PR #86 ---
+        "scripts/attribution_drift_weekly.py",          # read_only (PR #86)
+        "scripts/audit_divergence_exit_counterfactual.py",  # read_only (PR #86)
+        "scripts/audit_realtime_pnl.py",                # read_only (PR #86)
+        "scripts/bridge_oracle_to_calibration.py",      # read_only (PR #86)
+        "scripts/build_correlation_matrix.py",          # read_only (PR #86)
+        "scripts/compare_diurnal_v1_v2.py",             # read_only (PR #86)
+        "scripts/deep_heartbeat.py",                    # read_only (PR #86)
+        "scripts/healthcheck.py",                       # read_only (PR #86)
+        "scripts/replay_parity.py",                     # read_only (PR #86)
+        "scripts/venus_sensing_report.py",              # read_only (PR #86)
+        # --- additional read-only / ro-URI scripts ---
+        "scripts/audit_observation_instants_v2.py",     # read_only (SELECT-only, no INSERT/UPDATE/DELETE)
+        "scripts/calibration_observation_weekly.py",    # read_only_ro_uri
+        "scripts/ddd_v1_v2_replay.py",                  # read_only_ro_uri
+        "scripts/diagnose_low_high_alignment.py",       # read_only (SELECT-only)
+        "scripts/diagnose_truth_surfaces.py",           # read_only (SELECT-only, no INSERT/UPDATE/DELETE)
+        "scripts/edge_observation_weekly.py",           # read_only_ro_uri
+        "scripts/generate_monthly_bounds.py",           # read_only_ro_uri
+        "scripts/learning_loop_observation_weekly.py",  # read_only_ro_uri
+        "scripts/check_schema_version.py",              # in_memory_only (":memory:" only — schema drift CI gate)
+        "scripts/check_data_pipeline_live_e2e.py",      # read_only_ro_uri (live E2E verifier; mode=ro only)
+        "scripts/check_forecast_live_ready.py",         # read_only_ro_uri (forecast-live authority-chain verifier; mode=ro + query_only)
+        "scripts/check_live_order_e2e.py",              # read_only_ro_uri (live order verifier; mode=ro + query_only)
+        "scripts/produce_activation_evidence.py",       # in_memory_only (":memory:" only)
+        "scripts/replay_correctness_gate.py",           # read_only (SELECT-only)
+        "scripts/state_census.py",                      # read_only_ro_uri
+        "scripts/topology_doctor_code_review_graph.py", # read_only_ro_uri
+        "scripts/ws_poll_reaction_weekly.py",           # read_only_ro_uri
+        # --- repro_antibodies.py: mixed; all sites verified safe ---
+        "scripts/repro_antibodies.py",                  # already_guarded + read_only + in_memory_only
+        # --- K1 migration scripts: operator-mediated, not runtime daemon ---
+        "scripts/migrate_world_to_forecasts.py",            # k1_migration: operator-mediated bulk copy to zeus-forecasts.db
+        "scripts/migrate_world_observations_to_forecasts.py",  # k1_p0_migration: operator-mediated; copies stale obs rows
+        # --- K1 P1 registry CI hook ---
+        "scripts/check_table_registry_coherence.py",    # ci_hook: opens :memory: + tmp on-disk DBs; not runtime daemon
+        # --- K1 P3 ghost table cleanup ---
+        "scripts/drop_world_ghost_tables.py",            # operator_invoked: drops LEGACY_ARCHIVED ghost copies; --dry-run by default
+        # --- Audit PR-I migration scripts ---
+        "scripts/migrations/202605_add_redeem_operator_required_state.py",  # operator_invoked: --dry-run mode; daemon never imports
+        "scripts/migrations/__main__.py",                # operator_invoked: migration runner CLI; daemon never imports
+        "scripts/migrations/202605_position_current_bridge_required_trigger.py",  # operator_invoked: idempotent; --dry-run mode
     }
 )
 

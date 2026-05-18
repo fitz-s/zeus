@@ -158,82 +158,71 @@ import ast as _wla_ast
 import json as _wla_json
 from pathlib import Path as _wla_Path
 
+from src.state.db_writer_lock import SQLITE_CONNECT_ALLOWLIST as _WLA_PRODUCTION_ALLOWLIST
+
 _WLA_REPO_ROOT = _wla_Path(__file__).resolve().parent.parent
 _WLA_SCAN_ROOTS = (_WLA_REPO_ROOT / "src", _WLA_REPO_ROOT / "scripts")
 _WLA_CACHE_PATH = _WLA_REPO_ROOT / ".pytest_cache" / "writer_lock_antibody.json"
 
 # Allowlisted files where direct ``sqlite3.connect`` is permitted.
 #
+# F26 follow-up (2026-05-18): 42 CURRENT_REUSABLE entries have been migrated
+# to src/state/db_writer_lock.SQLITE_CONNECT_ALLOWLIST (the production owner).
+# Conftest now owns ONLY:
+#   - canonical infra not owned by db_writer_lock — _WLA_CANONICAL_INFRA_ALLOWLIST
+#     (src/state/db.py is intentionally also in the production allowlist; the
+#     dual listing is by design)
+#   - STALE_REWRITE (pending Track A.6 batch retrofit) — _WLA_RESIDUAL_ALLOWLIST
+#   - QUARANTINED (non-mechanical rewrite deferred) — _WLA_RESIDUAL_ALLOWLIST
+#
+# The effective gate-allowlist = canonical_infra | residual | production.
+#
+# `_WLA_RESIDUAL_ALLOWLIST` (STALE_REWRITE + QUARANTINED) is the single
+# source of truth for paths that MUST NOT appear in the production
+# allowlist. tests/test_allowlist_migration_f26.py imports it directly so
+# there is no duplicate hand-maintained copy that could drift (the
+# two-truth bug this antibody is meant to catch).
+#
 # Reason tags used in comments:
 #   canonical_shim      — the canonical DB helper; direct connect is the point
-#   read_only           — file contains only SELECT queries; verified PR #86
-#   read_only_ro_uri    — file uses sqlite3.connect("file:...?mode=ro", uri=True)
-#   in_memory_only      — file connects only to ":memory:" (no on-disk writes)
-#   already_guarded     — call is inside a db_writer_lock() context (repro_antibodies)
 #   pending_track_a6    — daemon-level src/ site; full retrofit deferred to Track A.6 (#246)
 #   pending_track_a6_scripts — write script not yet retrofit; deferred to Track A.6 batch
 #   deferred_nonmechanical   — verify_truth_surfaces: non-mechanical rewrite, separate phase
 #
-_WLA_SQLITE_CONNECT_ALLOWLIST = frozenset({
-    # --- canonical infrastructure ---
+# Canonical infrastructure. These ARE allowed to also appear in the
+# production db_writer_lock allowlist (src/state/db.py is the canonical
+# shim and is intentionally in both). Tracked as a separate subset so
+# the no-leak check below only fires on STALE_REWRITE / QUARANTINED
+# entries that genuinely must not promote to production.
+#
+# NOTE: src/state/db_writer_lock.py is intentionally NOT allowlisted. The file
+# has no sqlite3.connect() call sites today; if a future edit introduces one,
+# the antibody SHOULD fire so this module stays a coordination layer (not a
+# connect path). Allowlisting a no-connect file would weaken the gate.
+_WLA_CANONICAL_INFRA_ALLOWLIST = frozenset({
     "src/state/db.py",                              # canonical_shim
     "src/state/collateral_ledger.py",               # singleton_persistent_conn (2026-05-13 fix): CollateralLedger(db_path=) opens a ledger-owned conn for the process-wide singleton so it survives transient caller-conn lifecycles. Single connect site, no schema mutation outside init_collateral_schema.
-    # NOTE: src/state/db_writer_lock.py is intentionally NOT allowlisted. The file
-    # has no sqlite3.connect() call sites today; if a future edit introduces one,
-    # the antibody SHOULD fire so this module stays a coordination layer (not a
-    # connect path). Allowlisting a no-connect file would weaken the gate.
+})
 
+# Residual must-not-leak set: STALE_REWRITE + QUARANTINED entries only.
+# Any path here that also appears in db_writer_lock.SQLITE_CONNECT_ALLOWLIST
+# is a scope-creep regression (Track A.6 retrofit or non-mechanical rewrite
+# was skipped). The F26 antibody in tests/test_allowlist_migration_f26.py
+# imports this set directly so a CURRENT_REUSABLE re-addition fails the
+# test without a parallel update there.
+_WLA_RESIDUAL_ALLOWLIST = frozenset({
     # --- src/ daemon sites: pending Track A.6 (#246) ---
     "src/data/market_scanner.py",                   # pending_track_a6
-    # src/ingest_main.py, src/observability/status_summary.py,
-    # src/riskguard/discord_alerts.py — reclassified in Track A.6 (#246) from
-    # pending_track_a6 to permanent exemptions: each is either read-only on the
-    # world DB or writes a separate DB (risk_state.db). Rationale comments are
-    # co-located in SQLITE_CONNECT_ALLOWLIST inside src/state/db_writer_lock.py.
-    "src/ingest_main.py",                           # RO: reads condition_id for UMA listener (Track A.6 #246)
-    "src/main.py",                                  # read_only_ro_uri: live boot verifies zeus-forecasts.db user_version with mode=ro + query_only after forecast-live split
-    "src/observability/status_summary.py",          # RO: status dashboard read-only (Track A.6 #246)
-    "src/riskguard/discord_alerts.py",              # WRITE risk_state.db only; not world-db BULK scope (Track A.6 #246)
+    # src/ingest_main.py, src/main.py, src/observability/status_summary.py,
+    # src/riskguard/discord_alerts.py, src/control/cli/promote_entry_forecast.py
+    # — migrated to SQLITE_CONNECT_ALLOWLIST in src/state/db_writer_lock.py (F26).
+    # scripts/promote_calibration_v2_stage_to_prod.py + read-only scripts (PR #86
+    # + additional) + scripts/repro_antibodies.py — also migrated to F26 production
+    # allowlist (production owner = src/state/db_writer_lock.py).
+    #
+    # Post-WAVE-6 (F11 chunk-boundary events, PR #156) addition kept here as a
+    # daemon site pending eventual migration to production allowlist:
     "src/state/chunk_boundary_events.py",           # F11 observability emit; opens world.db on-demand (failure-silent); separate conn from BulkChunker's conn to avoid lock-order conflict
-    "src/control/cli/promote_entry_forecast.py",    # read_only_ro_uri (operator CLI; opens world-db with mode=ro)
-    "scripts/promote_calibration_v2_stage_to_prod.py",  # ro_uri_for_inspect_verify (mixed: ?mode=ro for inspect/verify; writable only with --commit)
-
-    # --- read-only scripts: verified SELECT-only, named in PR #86 ---
-    "scripts/attribution_drift_weekly.py",          # read_only (PR #86)
-    "scripts/audit_divergence_exit_counterfactual.py",  # read_only (PR #86)
-    "scripts/audit_realtime_pnl.py",               # read_only (PR #86)
-    "scripts/bridge_oracle_to_calibration.py",      # read_only (PR #86)
-    "scripts/build_correlation_matrix.py",          # read_only (PR #86)
-    "scripts/compare_diurnal_v1_v2.py",            # read_only (PR #86)
-    "scripts/deep_heartbeat.py",                    # read_only (PR #86)
-    "scripts/healthcheck.py",                       # read_only (PR #86)
-    "scripts/replay_parity.py",                     # read_only (PR #86)
-    "scripts/venus_sensing_report.py",              # read_only (PR #86)
-
-    # --- additional read-only / ro-URI scripts ---
-    "scripts/audit_observation_instants_v2.py",     # read_only (SELECT-only, no INSERT/UPDATE/DELETE)
-    "scripts/calibration_observation_weekly.py",    # read_only_ro_uri
-    "scripts/ddd_v1_v2_replay.py",                 # read_only_ro_uri
-    "scripts/diagnose_low_high_alignment.py",       # read_only (SELECT-only)
-    "scripts/diagnose_truth_surfaces.py",           # read_only (SELECT-only, no INSERT/UPDATE/DELETE)
-    "scripts/edge_observation_weekly.py",           # read_only_ro_uri
-    "scripts/generate_monthly_bounds.py",           # read_only_ro_uri
-    "scripts/learning_loop_observation_weekly.py",  # read_only_ro_uri
-    "scripts/check_schema_version.py",               # in_memory_only (":memory:" only — schema drift CI gate)
-    "scripts/check_data_pipeline_live_e2e.py",      # read_only_ro_uri (live E2E verifier opens runtime DBs with mode=ro only)
-    "scripts/check_forecast_live_ready.py",         # read_only_ro_uri (forecast-live authority-chain verifier; mode=ro + query_only only)
-    "scripts/check_live_order_e2e.py",              # read_only_ro_uri (live order verifier opens runtime DBs with mode=ro + query_only)
-    "scripts/produce_activation_evidence.py",       # in_memory_only (":memory:" only)
-    "scripts/replay_correctness_gate.py",           # read_only (SELECT-only)
-    "scripts/state_census.py",                      # read_only_ro_uri
-    "scripts/topology_doctor_code_review_graph.py", # read_only_ro_uri
-    "scripts/ws_poll_reaction_weekly.py",           # read_only_ro_uri
-
-    # --- repro_antibodies.py: mixed; all sites verified safe ---
-    # Lines 77,108: inside db_writer_lock() context (already_guarded)
-    # Lines 369,448: SELECT-only reads (read_only)
-    # Line 543: ":memory:" only (in_memory_only)
-    "scripts/repro_antibodies.py",                  # already_guarded + read_only + in_memory_only
 
     # --- write scripts: pending Track A.6 batch retrofit ---
     "scripts/backfill_forecast_issue_time.py",      # pending_track_a6_scripts
@@ -268,32 +257,13 @@ _WLA_SQLITE_CONNECT_ALLOWLIST = frozenset({
 
     # --- deferred non-mechanical rewrite (separate phase, cited PR #86) ---
     "scripts/verify_truth_surfaces.py",             # deferred_nonmechanical (PR #86)
-
-    # --- K1 forecast DB split migration script (2026-05-11) ---
-    "scripts/migrate_world_to_forecasts.py",         # k1_migration: operator-mediated bulk copy to zeus-forecasts.db; not runtime daemon
-
-    # --- K1 P0 triage: copy stranded world.observations to forecasts.db (2026-05-14) ---
-    "scripts/migrate_world_observations_to_forecasts.py",  # k1_p0_migration: operator-mediated; copies ~109 stale obs rows + market_events_v2; not runtime daemon
-
-    # --- K1 workload-class split promotion scripts (2026-05-12; PR #112 Option (c)) ---
-    "scripts/promote_platt_models_v2.py",            # operator-mediated STAGE->PROD; RW only with --commit (zeus-world.db); BEGIN IMMEDIATE + rollback
-    "scripts/promote_calibration_pairs_v2.py",       # operator-mediated STAGE->PROD; RW only with --commit (zeus-forecasts.db); BEGIN IMMEDIATE + rollback
-
-    # --- K1 P1 registry CI hook (2026-05-14; PLAN §1.2 #2) ---
-    "scripts/check_table_registry_coherence.py",     # ci_hook: opens :memory: and tmp on-disk DBs to verify registry vs init_schema; not runtime daemon
-
-    # --- K1 P3 ghost table cleanup script (2026-05-14; PLAN §2 P3 D2) ---
-    "scripts/drop_world_ghost_tables.py",            # operator_invoked: drops LEGACY_ARCHIVED ghost copies on world.db; explicit --execute required; dry-run by default
-
-    # --- Audit PR-I C2 migration script (2026-05-16; SCAFFOLD §K.8 v5) ---
-    "scripts/migrations/202605_add_redeem_operator_required_state.py",  # operator_invoked: adds REDEEM_OPERATOR_REQUIRED to settlement_commands.state CHECK; daemon-stop prereq + fcntl.flock check + per-DB atomic + foreign_key_check before commit; --dry-run mode
-
-    # --- Migration runner CLI (2026-05-17; F23 framework) ---
-    "scripts/migrations/__main__.py",  # operator_invoked: migration runner CLI; sqlite3.connect() only when --db-path supplied (test/tmp DB path); daemon never imports this module
-
-    # --- Bridge trigger migration (2026-05-17; Karachi bridge fix packet) ---
-    "scripts/migrations/202605_position_current_bridge_required_trigger.py",  # operator_invoked: CREATE TRIGGER trg_position_current_requires_bridge BEFORE INSERT ON position_current; idempotent; --dry-run mode; daemon never imports this module
 })
+
+# Effective allowlist: canonical infra + residual (STALE_REWRITE + QUARANTINED)
+# unioned with the production owner set imported above.
+_WLA_SQLITE_CONNECT_ALLOWLIST = (
+    _WLA_CANONICAL_INFRA_ALLOWLIST | _WLA_RESIDUAL_ALLOWLIST | _WLA_PRODUCTION_ALLOWLIST
+)
 
 
 
@@ -382,8 +352,9 @@ def pytest_configure(config) -> None:
 
     Track A.3 posture (PR #92): FAIL-CI on any direct sqlite3.connect()
     outside the allowlist.  Advisory→fail-CI upgrade per Track A plan.
-    Add to _WLA_SQLITE_CONNECT_ALLOWLIST with a cited reason tag to
-    suppress a specific site during staged rollout.
+    Add to _WLA_RESIDUAL_ALLOWLIST (STALE_REWRITE / QUARANTINED) or
+    db_writer_lock.SQLITE_CONNECT_ALLOWLIST (CURRENT_REUSABLE) with a
+    cited reason tag to suppress a specific site during staged rollout.
     """
     if _wla_is_bypassed():
         config.issue_config_time_warning(
@@ -403,8 +374,10 @@ def pytest_configure(config) -> None:
             f"writer-lock antibody (Track A.3 FAIL-CI): "
             f"{len(findings)} direct sqlite3.connect() site(s) outside "
             f"allowlist ({allowlist_size} entries). "
-            f"Add to _WLA_SQLITE_CONNECT_ALLOWLIST in tests/conftest.py "
-            f"with a cited reason tag (read_only / pending_track_a6 / etc). "
+            f"For CURRENT_REUSABLE sites add to SQLITE_CONNECT_ALLOWLIST in "
+            f"src/state/db_writer_lock.py. For STALE_REWRITE/QUARANTINED sites "
+            f"add to _WLA_RESIDUAL_ALLOWLIST in tests/conftest.py with a "
+            f"cited reason tag (pending_track_a6 / deferred_nonmechanical / etc). "
             f"Violations: {findings[:5]}"
             + (f" ... and {len(findings) - 5} more" if len(findings) > 5 else "")
         )
