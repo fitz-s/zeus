@@ -75,7 +75,7 @@ def resolve_pnl_for_settled_markets(trade_conn, forecasts_conn) -> dict:
                    authority, settlement_source, settlement_value
             FROM settlements
             WHERE authority = 'VERIFIED'
-              AND COALESCE(temperature_metric, 'high') IN ('high', 'low')
+              AND temperature_metric IN ('high', 'low')
             ORDER BY settled_at DESC
             LIMIT 200
             """
