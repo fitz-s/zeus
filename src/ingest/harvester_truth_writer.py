@@ -36,6 +36,8 @@ _DEFAULT_DISAGREEMENT_TOLERANCE_C = 1.0
 _CLOSED_EVENTS_CUTOFF_DAYS = 30          # live scope: only events closed ≤30d ago
 _CLOSED_EVENTS_MAX_WALL_SECONDS = 120    # mandatory wall-cap antibody (Fitz §3)
 _CLOSED_EVENTS_PAGE_LIMIT = 100          # ingest twin page size
+# Polymarket daily-temperature tag ID — mirrors TAG_SLUGS in market_scanner.py.
+_WEATHER_DAILY_TEMP_TAG_ID = "103040"  # stable since 2025-12-31; verified 2026-05-17
 
 
 def _disagreement_tolerance() -> float:
@@ -272,6 +274,7 @@ def _fetch_open_settling_markets() -> list[dict]:
             resp = httpx.get(
                 f"{GAMMA_BASE}/events",
                 params={
+                    "tag_id": _WEATHER_DAILY_TEMP_TAG_ID,
                     "closed": "true",
                     "limit": _CLOSED_EVENTS_PAGE_LIMIT,
                     "offset": offset,
