@@ -1,9 +1,12 @@
 # Created: 2026-05-18
 # Last reused or audited: 2026-05-18
+# Lifecycle: created=2026-05-18; last_reviewed=2026-05-18; last_reused=never
 # Authority basis: docs/operations/task_2026-05-16_deep_alignment_audit/FIX_PLAN.md §5 PR-A (F4)
 #   POST_K1_DELTA.md F4 row: 2,112 stranded rows on world.market_events_v2
 #   Writer retargeted to forecasts.db via PR #121; world copy is dead data.
 #   Canonical reader uses forecasts.market_events_v2 (confirmed grep pre-flight).
+# DB target: zeus-world.db (world.market_events_v2 ghost table, legacy_archived)
+# Runner interface: def up(conn: sqlite3.Connection) -> None
 
 
 def up(conn):
