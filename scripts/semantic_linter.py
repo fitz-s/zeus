@@ -57,6 +57,11 @@ TIME_SEMANTICS_ALLOWED_FILES = {
     # remains diurnal/day0/solar.
     "observation_instants_v2_writer.py",
     "wu_hourly_client.py",
+    # forecast_calibration_domain.py uses local_hour inside key() as a
+    # structural composite calibration key (join key plumbing), not for
+    # signal-time inference. Allowlisted per G4_CLEANUP_DESIGN.md §2 F3/F4
+    # (Q2 resolution: allowlist-add is the principled fix).
+    "forecast_calibration_domain.py",
 }
 P_RAW_CALIBRATION_FILES = {"blocked_oos.py"}
 

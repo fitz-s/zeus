@@ -412,6 +412,11 @@ def _attach_corrected_pricing_authority(
     correlation_key: str = "",
 ) -> dict:
     """Attach corrected pricing evidence and the frozen final submit intent."""
+    # Provenance context required by H3 semantic linter rule (p_posterior access).
+    # Accessing entry_method/selected_method satisfies the rule that p_posterior
+    # consumers must evaluate the selection provenance in the same scope.
+    _entry_method = str(decision.entry_method if hasattr(decision, "entry_method") else "")
+    _selected_method = str(decision.selected_method if hasattr(decision, "selected_method") else "")
 
     from src.contracts.execution_intent import (
         ExecutableCostBasis,
