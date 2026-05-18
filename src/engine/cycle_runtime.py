@@ -1060,11 +1060,88 @@ def chain_positions_from_api(payload, *, ChainPosition):
     return chain_positions
 
 
+# PR-S1 Bug #3: per-token block-list for aggregate reconciliation violations.
+# Lifetime: daemon process. Populated by _assert_token_aggregate_invariant().
+# Cleared automatically (N1) when the invariant no longer fires for the token.
+tokens_blocked_until_resolution: set[str] = set()
+
+_logger_runtime = logging.getLogger(__name__)
+
+
+def _assert_token_aggregate_invariant(
+    portfolio,
+    chain_positions: list,
+    *,
+    deps,
+) -> None:
+    """Post-reconcile invariant: chain aggregate must cover local aggregate per token.
+
+    For each token with active local positions, sum local shares and compare to
+    the chain balance. If local_sum > chain_balance + DUST, the invariant fires:
+    - LOGs a warning
+    - Emits metric inv_token_aggregate_violated_total{token_id=...}
+    - Adds the token to tokens_blocked_until_resolution (N1: stays until it passes)
+
+    For tokens currently in the block-list, if the invariant does NOT fire,
+    removes them (N1 auto-clear).
+
+    Does NOT raise — called post-reconcile inside run_chain_sync.
+    """
+    from src.state.portfolio import INACTIVE_RUNTIME_STATES
+    from src.observability.counters import increment as _ci
+
+    _DUST = 0.01
+    chain_by_token = {cp.token_id: cp.size for cp in chain_positions}
+
+    # Build local aggregate by token across active positions.
+    local_by_token: dict[str, float] = {}
+    for pos in portfolio.positions:
+        tid = pos.token_id if pos.direction == "buy_yes" else pos.no_token_id
+        if not tid:
+            continue
+        state_val = getattr(pos.state, "value", pos.state)
+        if state_val in INACTIVE_RUNTIME_STATES or state_val == "pending_tracked":
+            continue
+        size = float(getattr(pos, "effective_shares", None) or getattr(pos, "shares", 0) or 0)
+        if size > 0:
+            local_by_token[tid] = local_by_token.get(tid, 0.0) + size
+
+    # Check all tokens: both active and currently blocked (for auto-clear).
+    all_tokens = set(local_by_token.keys()) | tokens_blocked_until_resolution
+    for tid in all_tokens:
+        local_sum = local_by_token.get(tid, 0.0)
+        chain_bal = chain_by_token.get(tid, 0.0)
+        fires = local_sum > chain_bal + _DUST
+
+        if fires:
+            _logger_runtime.warning(
+                "INV_TOKEN_AGGREGATE_VIOLATED: token=%s local_sum=%.4f chain_bal=%.4f",
+                tid, local_sum, chain_bal,
+            )
+            _ci("inv_token_aggregate_violated_total", labels={"token_id": tid})
+            tokens_blocked_until_resolution.add(tid)
+        elif tid in tokens_blocked_until_resolution:
+            # N1 auto-clear: invariant no longer fires for this token.
+            tokens_blocked_until_resolution.discard(tid)
+            _logger_runtime.info(
+                "TOKEN_BLOCK_AUTO_CLEARED: token=%s local_sum=%.4f chain_bal=%.4f",
+                tid, local_sum, chain_bal,
+            )
+
+    # N1 heartbeat gauge.
+    _logger_runtime.info(
+        "telemetry_gauge tokens_blocked_until_resolution_size=%d",
+        len(tokens_blocked_until_resolution),
+    )
+
+
 def run_chain_sync(portfolio, clob, conn=None, *, deps):
     api_positions = chain_positions_from_api(clob.get_positions_from_api(), ChainPosition=deps.ChainPosition)
     if api_positions is None:
         raise RuntimeError("chain sync returned None — API call succeeded but returned no data")
-    return deps.reconcile_with_chain(portfolio, api_positions, conn=conn), True
+    reconcile_stats = deps.reconcile_with_chain(portfolio, api_positions, conn=conn)
+    _assert_token_aggregate_invariant(portfolio, api_positions, deps=deps)
+    return reconcile_stats, True
 
 
 def cleanup_orphan_open_orders(portfolio, clob, *, deps, conn=None) -> int:

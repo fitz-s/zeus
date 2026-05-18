@@ -1565,6 +1565,69 @@ def _run_f109_consolidator() -> None:
     )
 
 
+def _check_s1_without_s2_sla() -> None:
+    """N2 boot gate (PR-S1, Bug #3): refuse boot if S1 deployed >4h without S2.
+
+    Reads state/control_plane.json for s1_deployed_at / s2_deployed_at markers
+    written by the deployment script (not Zeus code). If S1 is deployed but S2
+    has not been deployed within the SLA window, the daemon exits with code 1.
+
+    Absence of the file or of s1_deployed_at = pre-deployment environment → pass.
+    Override: ZEUS_ACCEPT_S1_ALONE=1 environment variable (emergency only).
+    """
+    import json
+    import os
+    from datetime import datetime, timedelta, timezone
+    from src.config import state_path
+
+    S1_S2_SLA_HOURS = 4
+
+    if os.environ.get("ZEUS_ACCEPT_S1_ALONE") == "1":
+        logger.warning("ZEUS_ACCEPT_S1_ALONE=1 set — skipping S1-without-S2 SLA gate")
+        return
+
+    control_path = state_path("control_plane.json")
+    try:
+        with open(control_path) as f:
+            payload = json.load(f)
+    except FileNotFoundError:
+        return  # No deployment marker file — pre-deployment env, pass.
+    except (json.JSONDecodeError, OSError) as exc:
+        # Malformed or unreadable file → fail-closed.
+        logger.error("N2 gate: cannot read control_plane.json: %s", exc)
+        raise SystemExit(1) from exc
+
+    if not isinstance(payload, dict):
+        return
+
+    s1_ts_raw = payload.get("s1_deployed_at")
+    if not s1_ts_raw:
+        return  # S1 not yet deployed → pass.
+
+    s2_ts_raw = payload.get("s2_deployed_at")
+    if s2_ts_raw:
+        return  # Both deployed → pass.
+
+    # S1 deployed, S2 missing — check age.
+    try:
+        s1_dt = datetime.fromisoformat(str(s1_ts_raw).replace("Z", "+00:00"))
+        if s1_dt.tzinfo is None:
+            s1_dt = s1_dt.replace(tzinfo=timezone.utc)
+    except (ValueError, TypeError) as exc:
+        logger.error("N2 gate: s1_deployed_at unparseable (%r): %s", s1_ts_raw, exc)
+        raise SystemExit(1) from exc
+
+    age = datetime.now(timezone.utc) - s1_dt
+    if age >= timedelta(hours=S1_S2_SLA_HOURS):
+        msg = (
+            f"S1_WITHOUT_S2_BEYOND_SLA — s1_deployed_at={s1_ts_raw} "
+            f"age={age} >= {S1_S2_SLA_HOURS}h — "
+            "set ZEUS_ACCEPT_S1_ALONE=1 to override"
+        )
+        logger.error("BOOT_REFUSED: %s", msg)
+        raise SystemExit(1)
+
+
 def _assert_live_safe_strategies_or_exit(*, refresh_state: bool = True) -> None:
     """G6 boot guard: refuse live launch when a non-allowlisted strategy is enabled.
 
@@ -1707,6 +1770,12 @@ def main():
         finally:
             _trade_conn_reg.close()
     conn.close()
+
+    # N2 — S2 deployment gate (PR-S1, Bug #3).
+    # If S1 is deployed but S2 has not been deployed within 4h, refuse boot.
+    # Prevents the daemon running with partial fix coverage beyond the SLA window.
+    # Operator override: ZEUS_ACCEPT_S1_ALONE=1 (emergency use only).
+    _check_s1_without_s2_sla()
 
     # §3.1 Data freshness gate — WARN-only at boot (Phase 2: warn; Phase 3: enforce).
     # Runs BEFORE strategy gate so operator sees freshness diagnostics even when
