@@ -111,12 +111,16 @@ def fetch_directional_coverage(
 ) -> float:
     """Return cov ∈ [0, 1] = (distinct hours observed) / (target hours).
 
-    Reads ``observation_instants_current`` (VIEW over observation_instants_v2
-    gated by zeus_meta.observation_data_version). H1-fix semantics: zero rows →
-    cov=0.0. Source defaults to the canonical settlement source. The
-    ``data_version`` filter is kept as defence-in-depth; it is redundant with
-    the VIEW's JOIN but does not change the result when the active version
-    matches what the caller supplies.
+    Reads ``observation_instants_v2``. H1-fix semantics: zero rows → cov=0.0.
+    Source defaults to the canonical settlement source. The ``data_version``
+    filter ensures we only count rows under the active training contract.
+
+    NOTE: observation_instants_current (VIEW over v2 gated by zeus_meta) is
+    the architecture's intended cutover point, but the view is currently
+    INACTIVE (zeus_meta.observation_data_version defaults to 'v0', which
+    matches no rows). Cutover to the view requires an operator-mediated
+    UPDATE zeus_meta SET value=<active-version> WHERE key='observation_data_version'
+    plus a downstream consumer audit. This is tracked as a separate ops migration.
     """
     n = len(target_hours)
     if n <= 0:
@@ -125,7 +129,7 @@ def fetch_directional_coverage(
     row = conn.execute(
         f"""
         SELECT COUNT(DISTINCT CAST(local_hour AS INTEGER)) AS hrs
-        FROM observation_instants_current
+        FROM observation_instants_v2
         WHERE city = ?
           AND source = ?
           AND data_version = ?
