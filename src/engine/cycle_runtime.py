@@ -801,6 +801,29 @@ def _reprice_decision_from_executable_snapshot(
         and best_ask_size_at_fee_adjusted_cost > 0.0
     )
     edge_aware_taker_enabled = bool(final_intent_context.get("allow_taker_upgrade"))
+    # F34 cost-of-fill optimizer (OPT-IN, default OFF).
+    # ZEUS_TAKER_CROSSING_ENABLED=1 lets the math decide whether to cross the spread;
+    # default "0" preserves the existing passive-maker-only behavior exactly.
+    # Karachi safety: flag defaults OFF → zero impact on day0_window positions.
+    # Operator must validate via backtest before flipping.
+    if os.environ.get("ZEUS_TAKER_CROSSING_ENABLED", "0") == "1":
+        from src.engine.evaluator import _crossing_decision as _f34_crossing_decision
+        _f34_expected_pnl = best_ask_fee_adjusted_edge * best_ask_size_at_fee_adjusted_cost
+        _f34_non_fill_prob = float(final_intent_context.get("f34_non_fill_probability", 0.5))
+        _f34_min_econ_size = float(final_intent_context.get("f34_min_economical_size", 5.0))
+        _f34_taker_fee_bps = taker_fee_rate * 10_000.0
+        should_cross, f34_evidence = _f34_crossing_decision(
+            best_ask_price=best_ask_float,
+            best_ask_size=ask_size_float,
+            best_bid_price=best_bid_float,
+            p_posterior=float(decision.edge.p_posterior),
+            expected_pnl_if_filled=_f34_expected_pnl,
+            non_fill_probability=_f34_non_fill_prob,
+            taker_fee_bps=_f34_taker_fee_bps,
+            min_economical_size=_f34_min_econ_size,
+        )
+        logger.info("F34_CROSSING_DECISION %s", f34_evidence)
+        edge_aware_taker_enabled = bool(should_cross)
     edge_aware_taker_selected = False
     depth_sweep_limit_decimal = Decimal("0")
     if positive_edge_cap_decimal > Decimal("0") and slippage_cap_decimal > Decimal("0"):
