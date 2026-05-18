@@ -1,24 +1,70 @@
+# Created: 2026-04-27 (BATCH C of 2026-04-27 harness debate executor work)
+# Last reused/audited: 2026-05-18
+# Authority basis: docs/operations/task_2026-04-27_harness_debate/round2_verdict.md
+#   §1.1 #4 + §4.1 #4 (both proponent + opponent endorsed type-encoded HK HKO
+#   antibody; opponent §3.1 has the template). Per Fitz Constraint #1 "make the
+#   category impossible, not just the instance".
+#
+# 2026-05-18 (F3 PR 1/3): Migrated settle_market / SettlementRoundingPolicy
+#   signatures to use CelsiusDecimal NewType. SettlementSemantics unit-polymorphic
+#   methods (assert_settlement_value, round_single, round_values) stay as float —
+#   they are dispatched at runtime by for_city() which carries measurement_unit;
+#   static NewType cannot model the runtime-dispatched unit. The typed-unit gate
+#   for those paths lands in PR 2/3 at the ingest boundary. See module docstring.
+
+"""Settlement rounding contracts for Polymarket temperature markets.
+
+Unit-type invariant (Fitz Constraint #1 — "make the category impossible"):
+  - ``settle_market`` and ``SettlementRoundingPolicy.round_to_settlement``
+    accept ``CelsiusDecimal`` (a NewType over ``Decimal``).  Passing a raw
+    ``Decimal`` without wrapping via ``degC_d()`` fails mypy-strict at the
+    call site.
+  - ``Celsius + Fahrenheit`` addition is un-typecheckable: both are NewTypes
+    over ``float``, so mypy sees the operands as incompatible (you need an
+    explicit ``f_to_c`` / ``c_to_f`` conversion).
+  - ``SettlementSemantics`` unit-polymorphic methods (``round_values``,
+    ``round_single``, ``assert_settlement_value``) remain ``float``-typed
+    because their unit is determined at runtime by the ``measurement_unit``
+    field set by ``for_city()``.  The ingest-boundary typed gate is PR 2/3
+    scope.
+
+Scope limitation (Path A, accepted by operator 2026-05-18):
+  NewType-only does NOT block ``Celsius + Fahrenheit`` arithmetic.  mypy
+  treats NewTypes over ``float`` as ``float`` for operator dispatch, so
+  ``c + f`` where ``c: Celsius`` and ``f: Fahrenheit`` returns ``float``
+  without a type error.  Function SIGNATURE gates are the achievement here;
+  full in-body arithmetic prevention requires frozen-dataclass wrappers and
+  is deferred due to runtime cost in hot statistical loops.  See
+  ``src/types/temperature.py`` LIMITATION comment for the full rationale.
+"""
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from decimal import Decimal, ROUND_DOWN, ROUND_HALF_UP
-from typing import ClassVar, Literal
+from decimal import Decimal, ROUND_DOWN
+from typing import Any, Callable, ClassVar, Literal, Optional
 
 import logging
 import numpy as np
 
+from src.architecture.decorators import capability
 from src.contracts.exceptions import SettlementPrecisionError
+from src.types.temperature import CelsiusDecimal
 
 logger = logging.getLogger(__name__)
 
 RoundingRule = Literal["wmo_half_up", "floor", "ceil", "oracle_truncate"]
 
 
-def round_wmo_half_up_values(values, precision: float = 1.0) -> np.ndarray:
+def round_wmo_half_up_values(
+    values: Any, precision: float = 1.0
+) -> "np.ndarray[Any, np.dtype[Any]]":
     """Round values using WMO asymmetric half-up semantics.
 
     WU/NWS integer temperature displays follow WMO half-up on the number line:
     floor(x + 0.5). This differs from Python/NumPy banker's rounding and from
     half-away-from-zero for negative values.
+
+    ``values`` is unit-polymorphic (°F for USA markets, °C for international);
+    this is a pure numeric primitive — it does not interpret temperature units.
     """
     arr = np.asarray(values, dtype=float)
     inv = 1.0 / precision if precision > 0 else 1.0
@@ -31,7 +77,11 @@ def round_wmo_half_up_value(value: float, precision: float = 1.0) -> float:
     return float(round_wmo_half_up_values([value], precision)[0])
 
 
-def apply_settlement_rounding(values, round_fn, precision: float = 1.0) -> np.ndarray:
+def apply_settlement_rounding(
+    values: Any,
+    round_fn: Optional[Callable[[Any], "np.ndarray[Any, np.dtype[Any]]"]],
+    precision: float = 1.0,
+) -> "np.ndarray[Any, np.dtype[Any]]":
     """B081: shared settlement-rounding dispatch.
 
     Uses injected round_fn if provided (e.g., oracle_truncate for HKO),
@@ -52,8 +102,8 @@ def apply_settlement_rounding(values, round_fn, precision: float = 1.0) -> np.nd
 @dataclass(frozen=True)
 class SettlementSemantics:
     """Every market's unique resolution rules. Drifts in rounding/precision are fatal errors.
-    
-    Replaces the global assumption of "WU integer rounding" 
+
+    Replaces the global assumption of "WU integer rounding"
     with a typed, per-market object.
     """
     resolution_source: str  # e.g., "WU_LaGuardia", "CWA_Taipei"
@@ -62,8 +112,15 @@ class SettlementSemantics:
     rounding_rule: RoundingRule
     finalization_time: str  # "12:00:00Z"
 
-    def round_values(self, values):
-        """Apply settlement rounding according to this market contract."""
+    def round_values(
+        self, values: Any
+    ) -> "np.ndarray[Any, np.dtype[Any]]":
+        """Apply settlement rounding according to this market contract.
+
+        ``values`` is unit-polymorphic: the unit is determined by
+        ``self.measurement_unit`` (set by ``for_city()``).  Typed-unit
+        enforcement for this path is PR 2/3 scope.
+        """
         arr = np.asarray(values, dtype=float)
         inv = 1.0 / self.precision if self.precision > 0 else 1.0
         scaled = arr * inv
@@ -94,6 +151,7 @@ class SettlementSemantics:
         """
         return float(self.round_values([value])[0])
 
+    @capability("settlement_write")
     def assert_settlement_value(self, value: float, *, context: str = "") -> float:
         """Validate and round a settlement value. Returns the rounded value.
 
@@ -118,7 +176,7 @@ class SettlementSemantics:
                 value, rounded, delta, self.resolution_source, context,
             )
         return rounded
-    
+
     @classmethod
     def default_wu_fahrenheit(cls, city_code: str) -> "SettlementSemantics":
         """Polymarket USA city contracts: WU integer °F with WMO half-up rounding."""
@@ -146,7 +204,7 @@ class SettlementSemantics:
         )
 
     @classmethod
-    def for_city(cls, city) -> "SettlementSemantics":
+    def for_city(cls, city: Any) -> "SettlementSemantics":
         """Construct appropriate SettlementSemantics from a City object.
 
         This is the single entry point. Do NOT call default_wu_fahrenheit
@@ -184,17 +242,14 @@ class SettlementSemantics:
         )
 
 
-# Created: 2026-04-27 (BATCH C of 2026-04-27 harness debate executor work)
-# Last reused/audited: 2026-04-27
-# Authority basis: docs/operations/task_2026-04-27_harness_debate/round2_verdict.md
-#   §1.1 #4 + §4.1 #4 (both proponent + opponent endorsed type-encoded HK HKO
-#   antibody; opponent §3.1 has the template). Per Fitz Constraint #1 "make the
-#   category impossible, not just the instance".
+# ---------------------------------------------------------------------------
+# Type-encoded settlement-rounding policy (appended 2026-04-27 BATCH C)
 #
 # This block APPENDS a parallel type-encoded settlement-rounding policy. It does
 # NOT replace the existing SettlementSemantics.round_values() string-dispatch
 # path; that migration is Tier 3 P8 territory. New code paths SHOULD use this
 # policy ABC; existing callers continue working unchanged.
+# ---------------------------------------------------------------------------
 
 class SettlementRoundingPolicy(ABC):
     """Type-encoded settlement-rounding policy. Replaces YAML antibody for
@@ -204,12 +259,16 @@ class SettlementRoundingPolicy(ABC):
     Subclasses MUST set the ClassVar `name` to a stable string identifier and
     implement `round_to_settlement` + `source_authority`. Mixing policies
     across incompatible markets raises TypeError in `settle_market`.
+
+    ``round_to_settlement`` accepts ``CelsiusDecimal`` (NewType over Decimal)
+    so that passing a plain ``Decimal`` fails mypy-strict without an explicit
+    ``degC_d()`` wrapping call.
     """
     name: ClassVar[str]
 
     @abstractmethod
-    def round_to_settlement(self, raw_temp_c: Decimal) -> int:
-        """Round a raw temperature to the integer settlement value."""
+    def round_to_settlement(self, raw_temp_c: CelsiusDecimal) -> int:
+        """Round a raw Celsius temperature to the integer settlement value."""
 
     @abstractmethod
     def source_authority(self) -> str:
@@ -233,7 +292,7 @@ class WMO_HalfUp(SettlementRoundingPolicy):
     """
     name: ClassVar[str] = "wmo_half_up"
 
-    def round_to_settlement(self, raw_temp_c: Decimal) -> int:
+    def round_to_settlement(self, raw_temp_c: CelsiusDecimal) -> int:
         # Asymmetric half-up "on the number line" (toward +∞), matching legacy
         # round_wmo_half_up_values + WMO No. 306 METAR convention. -3.5 → -3
         # (NOT -4). See settlement_semantics.py:16-27 docstring + docs/reference/
@@ -253,16 +312,23 @@ class HKO_Truncation(SettlementRoundingPolicy):
     """
     name: ClassVar[str] = "hko_truncation"
 
-    def round_to_settlement(self, raw_temp_c: Decimal) -> int:
-        return int(raw_temp_c.quantize(Decimal('1'), rounding=ROUND_DOWN))
+    def round_to_settlement(self, raw_temp_c: CelsiusDecimal) -> int:
+        return int(Decimal(raw_temp_c).quantize(Decimal('1'), rounding=ROUND_DOWN))
 
     def source_authority(self) -> str:
         return "HKO"
 
 
-def settle_market(city_name: str, raw_temp_c: Decimal,
-                  policy: SettlementRoundingPolicy) -> int:
+@capability("settlement_rebuild")
+def settle_market(
+    city_name: str,
+    raw_temp_c: CelsiusDecimal,
+    policy: SettlementRoundingPolicy,
+) -> int:
     """Apply the rounding policy to raw °C, with type-encoded city/policy match.
+
+    ``raw_temp_c`` must be ``CelsiusDecimal`` (wrap via ``degC_d()`` from
+    ``src.types.temperature``).  Passing a plain ``Decimal`` fails mypy-strict.
 
     HK markets REQUIRE HKO_Truncation; non-HK markets REQUIRE non-HKO policy.
     Mismatch raises TypeError BEFORE any rounding happens — i.e., the wrong
