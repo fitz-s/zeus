@@ -194,6 +194,7 @@ _WLA_SQLITE_CONNECT_ALLOWLIST = frozenset({
     "src/main.py",                                  # read_only_ro_uri: live boot verifies zeus-forecasts.db user_version with mode=ro + query_only after forecast-live split
     "src/observability/status_summary.py",          # RO: status dashboard read-only (Track A.6 #246)
     "src/riskguard/discord_alerts.py",              # WRITE risk_state.db only; not world-db BULK scope (Track A.6 #246)
+    "src/state/chunk_boundary_events.py",           # F11 observability emit; opens world.db on-demand (failure-silent); separate conn from BulkChunker's conn to avoid lock-order conflict
     "src/control/cli/promote_entry_forecast.py",    # read_only_ro_uri (operator CLI; opens world-db with mode=ro)
     "scripts/promote_calibration_v2_stage_to_prod.py",  # ro_uri_for_inspect_verify (mixed: ?mode=ro for inspect/verify; writable only with --commit)
 
