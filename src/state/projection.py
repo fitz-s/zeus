@@ -96,8 +96,86 @@ def validate_event_projection_batch(events: list[dict], projection: dict) -> Non
         raise ValueError("event/projection phase mismatch")
 
 
+# F109 (2026-05-17) — phases for which at most ONE position_current row may
+# exist per token_id at a time. Mirrors db.OPEN_EXPOSURE_PHASES but is duplicated
+# locally so projection.py does not pull in src.state.db (cycle risk).
+_F109_OPEN_PHASES = ("pending_entry", "active", "day0_window", "pending_exit", "unknown")
+
+
+class DuplicatePositionOpenError(RuntimeError):
+    """Raised when upsert_position_current detects an existing live row on the
+    same token_id during a fresh INSERT.
+
+    Carries the existing position_id so callers can log/correlate. The error
+    is intentionally a hard failure: by the time projection.py runs the
+    caller has already written trade_decisions + execution_report in the
+    same SAVEPOINT. Returning the existing position_id quietly would leave
+    those rows dangling. Raise cleanly; let SAVEPOINT rollback undo
+    everything.
+    """
+
+    def __init__(self, *, attempted_position_id: str, existing_position_id: str, token_id: str):
+        super().__init__(
+            f"F109: token={token_id} already has open-phase row "
+            f"position_id={existing_position_id}; refusing to open a parallel row "
+            f"position_id={attempted_position_id}"
+        )
+        self.attempted_position_id = attempted_position_id
+        self.existing_position_id = existing_position_id
+        self.token_id = token_id
+
+
+def _find_existing_open_row(
+    conn: sqlite3.Connection, *, token_id: str, exclude_position_id: str
+) -> str | None:
+    """Return position_id of any existing open-phase row for the same token.
+
+    Returns None if no other open-phase row exists. Excludes the candidate
+    itself so that pure UPSERT-on-same-position_id paths are unaffected.
+    """
+    phase_list_sql = ", ".join(f"'{p}'" for p in _F109_OPEN_PHASES)
+    row = conn.execute(
+        f"""
+        SELECT position_id FROM position_current
+         WHERE token_id = ?
+           AND position_id != ?
+           AND phase IN ({phase_list_sql})
+         LIMIT 1
+        """,
+        (token_id, exclude_position_id),
+    ).fetchone()
+    return str(row[0]) if row is not None else None
+
+
 @capability("canonical_position_write", lease=True)
 def upsert_position_current(conn: sqlite3.Connection, projection: dict) -> None:
+    # F109 writer-side idempotency check (2026-05-17).
+    # Runs before INSERT so the race window with the partial UNIQUE INDEX is
+    # tight. If a same-token open-phase row exists with a *different*
+    # position_id, this is a duplicate-open attempt — raise. The partial
+    # UNIQUE INDEX added by migration 202605_position_current_idempotent_open_per_token
+    # is the hard floor that catches any race that slips past this check;
+    # sqlite3.IntegrityError from the INDEX will propagate through the
+    # caller's SAVEPOINT and roll back the entire entry.
+    candidate_phase = str(projection.get("phase") or "")
+    candidate_token = projection.get("token_id")
+    candidate_position_id = str(projection.get("position_id") or "")
+    if (
+        candidate_phase in _F109_OPEN_PHASES
+        and candidate_token
+        and candidate_position_id
+    ):
+        existing = _find_existing_open_row(
+            conn,
+            token_id=str(candidate_token),
+            exclude_position_id=candidate_position_id,
+        )
+        if existing is not None:
+            raise DuplicatePositionOpenError(
+                attempted_position_id=candidate_position_id,
+                existing_position_id=existing,
+                token_id=str(candidate_token),
+            )
     conn.execute(
         f"""
         INSERT INTO position_current ({", ".join(CANONICAL_POSITION_CURRENT_COLUMNS)})
