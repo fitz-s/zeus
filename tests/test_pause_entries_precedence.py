@@ -103,6 +103,17 @@ def test_auto_pause_skips_when_operator_indefinite_active():
     # In-memory state also paused (in-memory set happens before DB check)
     assert cp._control_state["entries_paused"] is True
 
+    # PRECEDENCE-1 in-memory restore: after skip, _control_state source/reason
+    # must reflect the operator freeze, NOT the attempted auto-pause values.
+    # If refresh_control_state() is removed from the skip path, entries_pause_source
+    # will be "auto_exception" and this assertion fails.
+    assert cp._control_state.get("entries_pause_source") == "manual_command", (
+        f"PRECEDENCE-1 FAIL: in-memory entries_pause_source was "
+        f"{cp._control_state.get('entries_pause_source')!r}; expected 'manual_command'. "
+        "refresh_control_state() must be called in the precedence-skip path to restore "
+        "operator source/reason after the pre-skip mutation at L284-286."
+    )
+
     conn.close()
 
 
