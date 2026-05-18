@@ -1,5 +1,8 @@
 # Created: 2026-05-02
-# Last reused/audited: 2026-05-17
+# Last reused/audited: 2026-05-18
+# Lifecycle: created=2026-05-02; last_reviewed=2026-05-18; last_reused=2026-05-18
+# Purpose: Verify oracle-to-calibration coverage filtering with K1 forecast/world DB split.
+# Reuse: Run before changing bridge_oracle_to_calibration DB routing or coverage thresholds.
 # Authority basis: F40 K1 fix — bridge now uses get_forecasts_connection_with_world() (settlements
 # is forecast_class post-K1-split). Test patches the context-manager helper instead of removed
 # DB_PATH constant. See docs/operations/task_2026-05-17_post_karachi_remediation/FIX_K1_READERS.md §A.
@@ -17,8 +20,10 @@ from scripts.bridge_oracle_to_calibration import bridge
 
 @pytest.fixture
 def mock_db(tmp_path):
-    db_path = tmp_path / "test-world.db"
+    db_path = tmp_path / "test-forecasts.db"
+    world_path = tmp_path / "test-world.db"
     conn = sqlite3.connect(str(db_path))
+    conn.execute(f"ATTACH DATABASE {str(world_path)!r} AS world")
     conn.execute("""
         CREATE TABLE settlements (
             city TEXT, target_date TEXT, settlement_value REAL,
@@ -27,7 +32,7 @@ def mock_db(tmp_path):
         )
     """)
     conn.execute("""
-        CREATE TABLE observation_instants_v2 (
+        CREATE TABLE world.observation_instants_v2 (
             city TEXT, target_date TEXT, source TEXT, utc_timestamp TEXT, authority TEXT
         )
     """)
@@ -72,9 +77,9 @@ def test_bridge_coverage_filtering(
     """)
 
     # Case 1: Day with primary_hours < 22 and no verified fallback -> SKIPPED
-    conn.execute("DELETE FROM observation_instants_v2")
+    conn.execute("DELETE FROM world.observation_instants_v2")
     for i in range(21):
-        conn.execute("INSERT INTO observation_instants_v2 (city, target_date, source, utc_timestamp, authority) VALUES (?, ?, ?, ?, ?)",
+        conn.execute("INSERT INTO world.observation_instants_v2 (city, target_date, source, utc_timestamp, authority) VALUES (?, ?, ?, ?, ?)",
                      ('Chicago', '2026-05-01', 'wu_icao_history', f'2026-05-01T{i:02d}:00:00Z', 'VERIFIED'))
     conn.commit()
 
@@ -84,7 +89,7 @@ def test_bridge_coverage_filtering(
 
     # Case 2: Day with primary_hours < 22 but verified fallback >= 22 hours -> COUNTED
     for i in range(22):
-        conn.execute("INSERT INTO observation_instants_v2 (city, target_date, source, utc_timestamp, authority) VALUES (?, ?, ?, ?, ?)",
+        conn.execute("INSERT INTO world.observation_instants_v2 (city, target_date, source, utc_timestamp, authority) VALUES (?, ?, ?, ?, ?)",
                      ('Chicago', '2026-05-01', 'ogimet_metar_kord', f'2026-05-01T{i:02d}:00:00Z', 'VERIFIED'))
     conn.commit()
 
@@ -93,10 +98,10 @@ def test_bridge_coverage_filtering(
     assert stats["cities"] == 1
 
     # Case 3: Day with primary_hours >= 22 but UNVERIFIED authority -> SKIPPED
-    conn.execute("DELETE FROM observation_instants_v2 WHERE source = 'ogimet_metar_kord'")
-    conn.execute("DELETE FROM observation_instants_v2")
+    conn.execute("DELETE FROM world.observation_instants_v2 WHERE source = 'ogimet_metar_kord'")
+    conn.execute("DELETE FROM world.observation_instants_v2")
     for i in range(22):
-        conn.execute("INSERT INTO observation_instants_v2 (city, target_date, source, utc_timestamp, authority) VALUES (?, ?, ?, ?, ?)",
+        conn.execute("INSERT INTO world.observation_instants_v2 (city, target_date, source, utc_timestamp, authority) VALUES (?, ?, ?, ?, ?)",
                      ('Chicago', '2026-05-01', 'wu_icao_history', f'2026-05-01T{i:02d}:00:00Z', 'UNVERIFIED'))
     conn.commit()
 
@@ -105,9 +110,9 @@ def test_bridge_coverage_filtering(
     assert stats["cities"] == 0
 
     # Case 4: Day with VERIFIED primary_hours >= 22 -> COUNTED (regression)
-    conn.execute("DELETE FROM observation_instants_v2")
+    conn.execute("DELETE FROM world.observation_instants_v2")
     for i in range(22):
-        conn.execute("INSERT INTO observation_instants_v2 (city, target_date, source, utc_timestamp, authority) VALUES (?, ?, ?, ?, ?)",
+        conn.execute("INSERT INTO world.observation_instants_v2 (city, target_date, source, utc_timestamp, authority) VALUES (?, ?, ?, ?, ?)",
                      ('Chicago', '2026-05-01', 'wu_icao_history', f'2026-05-01T{i:02d}:00:00Z', 'VERIFIED'))
     conn.commit()
 

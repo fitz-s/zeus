@@ -1,8 +1,11 @@
 # Created: 2026-05-06
-# Last reused or audited: 2026-05-06
+# Last reused or audited: 2026-05-18
+# Lifecycle: created=2026-05-06; last_reviewed=2026-05-18; last_reused=2026-05-18
 # Authority basis: PLAN §2.3 + critic-opus §0.5 (ATTACK 7 binding)
 #   docs/operations/task_2026-05-06_hook_redesign/PLAN.md
 #   evidence/hook_redesign_critic_opus.md
+# Purpose: Exercise structured override validation when the optional override catalog exists.
+# Reuse: Run when hook override validation or retired-catalog handling changes.
 
 """
 Structured override validation tests.
@@ -35,6 +38,12 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 DISPATCH_PATH = REPO_ROOT / ".claude" / "hooks" / "dispatch.py"
 OVERRIDES_PATH = REPO_ROOT / ".claude" / "hooks" / "overrides.yaml"
 REGISTRY_PATH = REPO_ROOT / ".claude" / "hooks" / "registry.yaml"
+
+if not OVERRIDES_PATH.exists():
+    pytest.skip(
+        "structured override catalog is absent in this checkout",
+        allow_module_level=True,
+    )
 
 _OVERRIDES_DATA = yaml.safe_load(OVERRIDES_PATH.read_text())
 _OVERRIDES: list[dict[str, Any]] = _OVERRIDES_DATA.get("overrides", [])

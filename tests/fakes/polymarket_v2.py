@@ -1,5 +1,5 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-04-27
+# Last reused/audited: 2026-05-18
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/T1.yaml
 """Fake Polymarket V2 venue used by T1 fake/live adapter parity tests.
 
@@ -282,6 +282,9 @@ class FakePolymarketVenue:
     def get_positions(self) -> list[PositionFact]:
         self._maybe_record_restart("get_positions")
         return [PositionFact(raw=dict(item)) for item in self._positions.values()]
+
+    def get_pusd_balance_micro(self) -> int:
+        return int(self.ledger.pusd_balance_micro)
 
     def get_collateral_payload(self) -> dict[str, Any]:
         return {

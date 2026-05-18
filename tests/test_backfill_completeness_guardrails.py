@@ -1,9 +1,9 @@
 # Created: 2026-04-25
-# Lifecycle: created=2026-04-25; last_reviewed=2026-04-25; last_reused=2026-04-25
+# Lifecycle: created=2026-04-25; last_reviewed=2026-05-18; last_reused=2026-05-18
 # Purpose: Verify P2 4.4.B-lite backfill completeness manifest and threshold behavior.
 # Reuse: Keep tests isolated from network and production DB state.
-# Last reused/audited: 2026-04-25
-# Authority basis: P2 4.4.B-lite backfill completeness manifests and fail-threshold guardrails
+# Last reused/audited: 2026-05-18
+# Authority basis: P2 4.4.B-lite backfill completeness manifests and fail-threshold guardrails; K1 typed connection API accepts write_class.
 """P2 4.4.B-lite backfill completeness guardrail regressions."""
 from __future__ import annotations
 
@@ -38,7 +38,7 @@ def _load_script(path: Path, module_name: str):
     return module
 
 
-def _memdb() -> sqlite3.Connection:
+def _memdb(**_kwargs) -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     return conn

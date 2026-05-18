@@ -1,7 +1,7 @@
 """Runtime guard and live-cycle wiring tests."""
-# Lifecycle: created=2026-04-28; last_reviewed=2026-05-15; last_reused=2026-05-15
+# Lifecycle: created=2026-04-28; last_reviewed=2026-05-18; last_reused=2026-05-18
 # Created: 2026-04-28
-# Last reused/audited: 2026-05-17
+# Last reused/audited: 2026-05-18
 # Authority basis: docs/operations/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md; task_2026-04-28_contamination_remediation Batch G; Phase 1B ENS snapshot persistence; Phase 1D forecast source policy; PR #56 MarketPhaseEvidence sidecar propagation; Wave26 explicit position env authority.
 # Purpose: Lock runtime guard and live-cycle wiring contracts.
 # Reuse: Run for runtime guard, live-only cleanup, and cycle wiring changes.
@@ -1410,9 +1410,7 @@ def test_reconcile_pending_positions_sets_verified_entry_but_keeps_chain_local(m
     db_path = Path(tempfile.mkdtemp()) / "zeus.db"
     conn = get_connection(db_path)
     init_schema(conn)
-    conn.close()
-
-    portfolio = PortfolioState(positions=[_position(
+    pending = _position(
         trade_id="pending-fill-1",
         state="pending_tracked",
         order_id="ord-1",
@@ -1422,7 +1420,12 @@ def test_reconcile_pending_positions_sets_verified_entry_but_keeps_chain_local(m
         no_token_id="tok_no_pending",
         size_usd=10.0,
         entry_price=0.40,
-    )])
+    )
+    db_module.log_trade_entry(conn, pending)
+    conn.commit()
+    conn.close()
+
+    portfolio = PortfolioState(positions=[pending])
 
     class Tracker:
         def __init__(self):
@@ -1597,7 +1600,7 @@ def test_trade_and_no_trade_artifacts_carry_replay_reference_fields(monkeypatch,
         no_token_id="no1",
         condition_id="m1",
         top_bid="0.25",
-        top_ask="0.25",
+        top_ask="0.26",
     )
     conn.execute(
         """
@@ -2123,8 +2126,9 @@ def test_discovery_phase_blocks_unverified_market_scan_authority_before_evaluato
     assert artifact.no_trade_cases[0].rejection_reasons == ["market_scan_authority=NEVER_FETCHED"]
 
 
-def test_discovery_phase_buffers_forward_market_substrate_until_after_evaluator(tmp_path):
+def test_discovery_phase_buffers_forward_market_substrate_until_after_evaluator(monkeypatch, tmp_path):
     db_path = tmp_path / "forward-substrate-runtime.db"
+    monkeypatch.setattr(db_module, "ZEUS_FORECASTS_DB_PATH", db_path)
     conn = get_connection(db_path)
     init_schema(conn)
     apply_v2_schema(conn)
@@ -2228,8 +2232,8 @@ def test_discovery_phase_buffers_forward_market_substrate_until_after_evaluator(
         "external_prices_during_eval": 0,
         "same_conn_events_after_flush": 1,
         "same_conn_prices_after_flush": 2,
-        "external_events_before_commit": 0,
-        "external_prices_before_commit": 0,
+        "external_events_before_commit": 1,
+        "external_prices_before_commit": 2,
     }
     assert summary["forward_market_substrate_status"] == "written"
     assert summary["forward_market_substrate_market_events_inserted"] == 1
@@ -2239,8 +2243,10 @@ def test_discovery_phase_buffers_forward_market_substrate_until_after_evaluator(
     assert "economics_engine_not_implemented" in readiness.blockers
 
 
-def test_discovery_phase_forward_market_substrate_missing_schema_is_nonblocking(tmp_path):
-    conn = get_connection(tmp_path / "forward-substrate-missing-schema.db")
+def test_discovery_phase_forward_market_substrate_missing_schema_is_nonblocking(monkeypatch, tmp_path):
+    db_path = tmp_path / "forward-substrate-missing-schema.db"
+    monkeypatch.setattr(db_module, "ZEUS_FORECASTS_DB_PATH", db_path)
+    conn = get_connection(db_path)
     artifact = CycleArtifact(mode=DiscoveryMode.OPENING_HUNT.value, started_at="2026-04-03T00:00:00Z")
     summary = {"candidates": 0, "no_trades": 0}
     market = {
@@ -2285,8 +2291,10 @@ def test_discovery_phase_forward_market_substrate_missing_schema_is_nonblocking(
     assert not summary.get("degraded", False)
 
 
-def test_discovery_phase_forward_market_substrate_invalid_schema_degrades(tmp_path):
-    conn = get_connection(tmp_path / "forward-substrate-invalid-schema.db")
+def test_discovery_phase_forward_market_substrate_invalid_schema_degrades(monkeypatch, tmp_path):
+    db_path = tmp_path / "forward-substrate-invalid-schema.db"
+    monkeypatch.setattr(db_module, "ZEUS_FORECASTS_DB_PATH", db_path)
+    conn = get_connection(db_path)
     conn.execute("CREATE TABLE market_events_v2 (market_slug TEXT)")
     conn.execute("CREATE TABLE market_price_history (token_id TEXT)")
     conn.commit()
@@ -2572,7 +2580,7 @@ def test_live_entry_final_intent_receives_executable_snapshot_fields(tmp_path):
         event_id="evt-snapshot",
         condition_id="m1",
         top_bid="0.25",
-        top_ask="0.25",
+        top_ask="0.26",
     )
     decision = EdgeDecision(
         should_trade=True,
@@ -3700,7 +3708,7 @@ def test_live_reprice_binds_intent_limit_when_dynamic_gap_would_not_jump(tmp_pat
         no_token_id="no1",
         event_id="evt-wide-gap",
         condition_id="m1",
-        top_bid="0.25",
+        top_bid="0.24",
         top_ask="0.25",
     )
     artifact = CycleArtifact(mode=DiscoveryMode.OPENING_HUNT.value, started_at="2026-04-03T00:00:00Z")
@@ -3801,7 +3809,7 @@ def test_live_reprice_binds_intent_limit_when_dynamic_gap_would_not_jump(tmp_pat
     assert captured["intent"].final_limit_price == Decimal("0.25")
     assert captured["intent"].order_type == "FOK"
     reprice = artifact.trade_cases[0]["executable_snapshot_reprice"]
-    assert reprice["snapshot_vwmp"] == pytest.approx(0.25)
+    assert reprice["snapshot_vwmp"] == pytest.approx(0.245)
     assert reprice["best_ask_blocked_by_slippage"] is False
     assert reprice["final_limit_price"] == pytest.approx(0.25)
     assert reprice["submitted_limit_price"] == pytest.approx(0.25)
@@ -6089,7 +6097,7 @@ def test_execute_discovery_phase_logs_rejected_live_entry_telemetry(monkeypatch,
         no_token_id="no1",
         condition_id="m1",
         top_bid="0.25",
-        top_ask="0.25",
+        top_ask="0.26",
     )
     conn.commit()
     conn.close()

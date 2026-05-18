@@ -1,3 +1,9 @@
+# Created: 2026-04-26
+# Last reused/audited: 2026-05-18
+# Lifecycle: created=2026-04-26; last_reviewed=2026-05-18; last_reused=2026-05-18
+# Authority basis: CLOB error-handling matrix for executor and exit-lifecycle paths.
+# Purpose: Verify venue API rate-limit/server errors leave exits retryable, not silently closed.
+# Reuse: Run when executor/exit_lifecycle venue exception handling or SDK exception surfaces change.
 """CLOB error-handling matrix for executor and exit-lifecycle paths.
 
 Verifies that 429, 5xx, and timeout errors from PolymarketClient are handled
@@ -67,7 +73,14 @@ class _FakeHttpResponse:
 
 
 def _make_poly_exc(status_code: int, body: dict = None):
-    from py_clob_client.exceptions import PolyApiException
+    try:
+        from py_clob_client.exceptions import PolyApiException
+    except ModuleNotFoundError:
+        class PolyApiException(Exception):
+            def __init__(self, resp):
+                self.resp = resp
+                super().__init__(f"PolyApiException status_code={resp.status_code} body={resp.text}")
+
     return PolyApiException(resp=_FakeHttpResponse(status_code, body or {}))
 
 

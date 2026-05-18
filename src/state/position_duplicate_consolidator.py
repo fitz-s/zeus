@@ -45,7 +45,6 @@ from typing import Iterable
 logger = logging.getLogger(__name__)
 
 _OPEN_PHASES = ("pending_entry", "active", "day0_window", "pending_exit", "unknown")
-_PHASE_LIST_SQL = ", ".join(f"'{p}'" for p in _OPEN_PHASES)
 _VOIDED_REASON = "duplicate_consolidated_2026_05_17_f109"
 _MICRO_PER_SHARE = 1_000_000  # ctf_token_balances_json is in micro-units
 
@@ -90,25 +89,26 @@ def _enumerate_duplicates(
     by first-event occurred_at ASCENDING (oldest first).
     """
     token_rows = conn.execute(
-        f"""
+        """
         SELECT token_id
           FROM position_current
-         WHERE phase IN ({_PHASE_LIST_SQL}) AND token_id IS NOT NULL
+         WHERE phase IN (?, ?, ?, ?, ?) AND token_id IS NOT NULL
          GROUP BY token_id
         HAVING COUNT(*) > 1
-        """
+        """,
+        _OPEN_PHASES,
     ).fetchall()
     out: list[tuple[str, list[tuple[str, float, str]]]] = []
     for (token_id,) in token_rows:
         rows = conn.execute(
-            f"""
+            """
             SELECT pc.position_id, pc.shares,
                    (SELECT MIN(occurred_at) FROM position_events pe
                      WHERE pe.position_id = pc.position_id) AS first_at
               FROM position_current pc
-             WHERE pc.token_id = ? AND pc.phase IN ({_PHASE_LIST_SQL})
+             WHERE pc.token_id = ? AND pc.phase IN (?, ?, ?, ?, ?)
             """,
-            (str(token_id),),
+            (str(token_id), *_OPEN_PHASES),
         ).fetchall()
         triples = [
             (str(r[0]), float(r[1] or 0.0), str(r[2] or "9999"))

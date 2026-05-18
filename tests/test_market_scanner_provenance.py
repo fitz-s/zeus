@@ -1,7 +1,7 @@
 # Created: 2026-04-17
-# Last reused or audited: 2026-05-08
+# Last reused or audited: 2026-05-18
 # Authority basis: AGENTS.md money path; S1 market source-proof persistence via market_topology_state.
-# Lifecycle: created=2026-04-17; last_reviewed=2026-05-06; last_reused=2026-05-08
+# Lifecycle: created=2026-04-17; last_reviewed=2026-05-18; last_reused=2026-05-18
 # Purpose: Lock market_scanner provenance, source-contract drift behavior, and Venus diagnostic authority labels.
 # Reuse: Inspect src/data/market_scanner.py and scripts/watch_source_contract.py before relying on these assertions.
 # Authority basis: audit bug B017 (STILL_OPEN P1 SD-H), Fitz methodology constraint #4 "Data Provenance > Code Correctness"; Wave16 object-meaning diagnostic authority repair.
@@ -350,6 +350,74 @@ def _insert_full_linkage_snapshot(
             captured_at=captured_at,
             freshness_deadline=captured_at + timedelta(seconds=30),
         ),
+    )
+
+
+def _insert_crossed_full_linkage_snapshot(
+    conn: sqlite3.Connection,
+    *,
+    snapshot_id: str = "snap-crossed",
+) -> None:
+    captured_at = datetime(2026, 4, 30, 16, 0, tzinfo=timezone.utc)
+    conn.execute(
+        """
+        INSERT INTO executable_market_snapshots (
+          snapshot_id, gamma_market_id, event_id, event_slug, condition_id,
+          question_id, yes_token_id, no_token_id, selected_outcome_token_id,
+          outcome_label, enable_orderbook, active, closed, accepting_orders,
+          market_start_at, market_end_at, market_close_at, sports_start_at,
+          min_tick_size, min_order_size, fee_details_json, token_map_json,
+          rfqe, neg_risk, orderbook_top_bid, orderbook_top_ask,
+          orderbook_depth_json, raw_gamma_payload_hash,
+          raw_clob_market_info_hash, raw_orderbook_hash, authority_tier,
+          captured_at, freshness_deadline
+        ) VALUES (
+          :snapshot_id, :gamma_market_id, :event_id, :event_slug, :condition_id,
+          :question_id, :yes_token_id, :no_token_id, :selected_outcome_token_id,
+          :outcome_label, :enable_orderbook, :active, :closed, :accepting_orders,
+          :market_start_at, :market_end_at, :market_close_at, :sports_start_at,
+          :min_tick_size, :min_order_size, :fee_details_json, :token_map_json,
+          :rfqe, :neg_risk, :orderbook_top_bid, :orderbook_top_ask,
+          :orderbook_depth_json, :raw_gamma_payload_hash,
+          :raw_clob_market_info_hash, :raw_orderbook_hash, :authority_tier,
+          :captured_at, :freshness_deadline
+        )
+        """,
+        {
+            "snapshot_id": snapshot_id,
+            "gamma_market_id": "gamma-full-linkage",
+            "event_id": "event-full-linkage",
+            "event_slug": "highest-temperature-in-chicago-on-april-30-2026",
+            "condition_id": "cond-full-linkage",
+            "question_id": "question-full-linkage",
+            "yes_token_id": "yes-full-linkage",
+            "no_token_id": "no-full-linkage",
+            "selected_outcome_token_id": "yes-full-linkage",
+            "outcome_label": "YES",
+            "enable_orderbook": 1,
+            "active": 1,
+            "closed": 0,
+            "accepting_orders": 1,
+            "market_start_at": None,
+            "market_end_at": None,
+            "market_close_at": None,
+            "sports_start_at": None,
+            "min_tick_size": "0.01",
+            "min_order_size": "5",
+            "fee_details_json": '{"source":"test"}',
+            "token_map_json": '{"YES":"yes-full-linkage","NO":"no-full-linkage"}',
+            "rfqe": None,
+            "neg_risk": 0,
+            "orderbook_top_bid": "0.55",
+            "orderbook_top_ask": "0.44",
+            "orderbook_depth_json": '{"asks":[{"price":"0.44","size":"100"}],"bids":[{"price":"0.55","size":"100"}]}',
+            "raw_gamma_payload_hash": "a" * 64,
+            "raw_clob_market_info_hash": "b" * 64,
+            "raw_orderbook_hash": "c" * 64,
+            "authority_tier": "CLOB",
+            "captured_at": captured_at.isoformat(),
+            "freshness_deadline": (captured_at + timedelta(seconds=30)).isoformat(),
+        },
     )
 
 
@@ -2301,7 +2369,10 @@ class TestSourceContractGate:
 
         monkeypatch.setattr(venus_sensing_report, "get_trade_connection_with_world", _trade_conn)
         monkeypatch.setattr(venus_sensing_report, "_collect_diagnostics", lambda: {})
-        monkeypatch.setattr(venus_sensing_report, "_collect_truth_surfaces", lambda _conn: {})
+        forecasts_conn = sqlite3.connect(":memory:")
+        forecasts_conn.row_factory = sqlite3.Row
+        monkeypatch.setattr(venus_sensing_report, "get_forecasts_connection", lambda: forecasts_conn)
+        monkeypatch.setattr(venus_sensing_report, "_collect_truth_surfaces", lambda _conn, _forecasts_conn: {})
         monkeypatch.setattr(venus_sensing_report, "_collect_consistency", lambda _conn, _surfaces: {})
         monkeypatch.setattr(venus_sensing_report, "_collect_relationship_checks", lambda: {})
         monkeypatch.setattr(venus_sensing_report, "_collect_deltas", lambda _surfaces: {})
@@ -2961,11 +3032,9 @@ class TestForwardMarketSubstrateProducer:
         )
         assert missing["status"] == "refused_missing_snapshot"
 
-        _insert_full_linkage_snapshot(
+        _insert_crossed_full_linkage_snapshot(
             conn,
             snapshot_id="snap-crossed",
-            best_bid=Decimal("0.55"),
-            best_ask=Decimal("0.44"),
         )
         crossed = log_executable_snapshot_market_price_linkage(
             conn,

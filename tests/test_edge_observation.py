@@ -1,7 +1,11 @@
 # Created: 2026-04-28
-# Last reused/audited: 2026-04-28
+# Last reused/audited: 2026-05-18
+# Lifecycle: created=2026-04-28; last_reviewed=2026-05-18; last_reused=2026-05-18
+# Purpose: Verify realized-edge and attribution-drift readers over canonical settlement events.
+# Reuse: Run before changing settlement event normalization, edge observation, or attribution drift.
 # Authority basis: round3_verdict.md §1 #2 (FIRST edge packet) + ULTIMATE_PLAN.md
-# L297-301 (alpha-decay tracker per strategy_key, weekly drift assertion). Per
+# L297-301 (alpha-decay tracker per strategy_key, weekly drift assertion); K1
+# position_events env trigger. Per
 # Fitz "test relationships, not just functions" — these tests verify the
 # K1-compliant cross-module read path: canonical position_events → dedup +
 # normalize via query_authoritative_settlement_rows → per-strategy aggregation
@@ -91,8 +95,8 @@ def _insert_settled(
         """
         INSERT INTO position_events (
             event_id, position_id, event_version, sequence_no, event_type,
-            occurred_at, strategy_key, source_module, payload_json
-        ) VALUES (?, ?, 1, ?, 'SETTLED', ?, ?, 'tests', ?)
+            occurred_at, strategy_key, source_module, env, payload_json
+        ) VALUES (?, ?, 1, ?, 'SETTLED', ?, ?, 'tests', 'live', ?)
         """,
         (
             f"{position_id}:settled:{seq_no}", position_id, seq_no,
