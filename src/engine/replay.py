@@ -68,6 +68,12 @@ def _table_exists(conn, schema: str, table: str) -> bool:
 
 
 def _first_existing_table(conn, table: str) -> str:
+    # K1 (2026-05-11): forecast-class tables (ensemble_snapshots_v2, ...) live in
+    # zeus-forecasts.db, ATTACHed as 'forecasts' by get_trade_connection_with_world().
+    # Check forecasts first; fall back to world (legacy / monolithic-test layout),
+    # then main (pure in-memory test schema with no ATTACH).
+    if _table_exists(conn, "forecasts", table):
+        return f"forecasts.{table}"
     if _table_exists(conn, "world", table):
         return f"world.{table}"
     if _table_exists(conn, "", table):
@@ -320,12 +326,16 @@ class ReplayContext:
         if not self._snapshot_v2_table:
             raise RuntimeError(
                 "Replay topology error: ensemble_snapshots_v2 not found in "
-                "world attach or local main schema (legacy ensemble_snapshots removed by v1.F20)."
+                "forecasts, world, or main schema (legacy ensemble_snapshots removed by v1.F20)."
             )
-        if self._snapshot_v2_table.startswith("world."):
+        # _sp is the schema prefix for world-class tables (settlements, historical_forecasts_v2,
+        # forecasts table, shadow signal). It must reflect whether zeus-world.db is ATTACHed as
+        # 'world' — NOT where ensemble_snapshots_v2 lives. After K1 split, snapshots live in
+        # forecasts.db while world-class tables remain in world.db.
+        if _table_exists(self.conn, "world", "settlements"):
             self._sp = "world."
         else:
-            self._sp = ""  # monolithic DB (tests)
+            self._sp = ""  # monolithic DB (tests) — no world ATTACH
 
     def _columns_for(self, table: str) -> set[str]:
         if table not in self._snapshot_table_column_cache:
