@@ -36,8 +36,9 @@ _DEFAULT_DISAGREEMENT_TOLERANCE_C = 1.0
 _CLOSED_EVENTS_CUTOFF_DAYS = 30          # live scope: only events closed ≤30d ago
 _CLOSED_EVENTS_MAX_WALL_SECONDS = 120    # mandatory wall-cap antibody (Fitz §3)
 _CLOSED_EVENTS_PAGE_LIMIT = 100          # ingest twin page size
-# Polymarket daily-temperature tag ID — mirrors TAG_SLUGS in market_scanner.py.
-_WEATHER_DAILY_TEMP_TAG_ID = "103040"  # stable since 2025-12-31; verified 2026-05-17
+# corresponds to TAG_SLUGS entry "daily-temperature" — Gamma assigns numeric IDs to tags;
+# this constant pins the daily-temperature tag's current ID (stable since 2025-12-31; verified 2026-05-17)
+_WEATHER_DAILY_TEMP_TAG_ID = "103040"
 
 
 def _disagreement_tolerance() -> float:

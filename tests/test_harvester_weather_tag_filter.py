@@ -1,6 +1,6 @@
-# Created: 2026-05-17
-# Last reused or audited: 2026-05-17
-# Authority basis: PR_S7_LOCATE.md (2026-05-17 cascade incident — Karachi auto-redeem failure)
+# Lifecycle: created=2026-05-17; last_reviewed=2026-05-17; last_reused=2026-05-17
+# Purpose: Antibody for PR-S7 Gamma tag_id filter — asserts harvester only writes weather settlements
+# Reuse: Run via pytest tests/test_harvester_weather_tag_filter.py
 """
 Antibody: _fetch_open_settling_markets() must pass tag_id=103040 to Gamma.
 Without the daily-temperature tag filter, non-weather events (MLB, WTA, politics)
