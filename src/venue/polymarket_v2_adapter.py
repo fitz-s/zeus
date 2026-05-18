@@ -767,13 +767,13 @@ class PolymarketV2Adapter:
             in {"1", "true", "yes", "on"}
         )
         if not autonomous_enabled:
+            # Return verbatim legacy stub so settlement_commands.py:426 routes
+            # to REDEEM_OPERATOR_REQUIRED exactly as before this PR (errorCode
+            # AND errorMessage unchanged — byte-for-byte audited fallback).
             return {
                 "success": False,
                 "errorCode": "REDEEM_DEFERRED_TO_R1",
-                "errorMessage": (
-                    "R1 settlement command ledger must own pUSD redemption side effects "
-                    "(autonomous redeem gated by ZEUS_AUTONOMOUS_REDEEM_ENABLED, default OFF)"
-                ),
+                "errorMessage": "R1 settlement command ledger must own pUSD redemption side effects",
                 "condition_id": condition_id,
             }
 
@@ -884,7 +884,8 @@ class PolymarketV2Adapter:
                 self.polygon_rpc_url, "eth_estimateGas", [estimate_params]
             )
             gas_estimate = int(str(gas_estimate_hex), 16)
-            # 1.2x buffer for variation; bigint round up.
+            # 1.2x buffer for variation; integer floor (conservative — always
+            # <= true 1.2x, never over-estimates gas).
             gas_limit = (gas_estimate * 12) // 10
         except V2AdapterError as exc:
             # eth_estimateGas reverts when the call would fail on-chain
@@ -942,9 +943,24 @@ class PolymarketV2Adapter:
                 "condition_id": condition_id,
             }
 
+        # Validate tx_hash before returning success: a null/malformed JSON-RPC
+        # result (result=null) would stringify to "None" and get persisted as
+        # REDEEM_TX_HASHED with an unreconcilable bogus hash.
+        tx_hash_str = str(tx_hash) if tx_hash is not None else None
+        import re as _re
+        if not tx_hash_str or not _re.fullmatch(r"0x[0-9a-fA-F]{64}", tx_hash_str):
+            return {
+                "success": False,
+                "errorCode": "REDEEM_INVALID_TX_HASH",
+                "errorMessage": (
+                    f"eth_sendRawTransaction returned non-hash result: {tx_hash!r}"
+                ),
+                "condition_id": condition_id,
+            }
+
         return {
             "success": True,
-            "tx_hash": str(tx_hash),
+            "tx_hash": tx_hash_str,
             "condition_id": condition_id,
             "index_sets": list(index_sets),
             "nonce": nonce,

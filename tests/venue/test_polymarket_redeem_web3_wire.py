@@ -263,6 +263,39 @@ def test_calldata_rejects_malformed_inputs():
         _build_redeem_calldata(_TEST_CONDITION_ID, [0])  # uint256 must be > 0
 
 
+def test_polygon_ctf_address_is_valid_checksum():
+    """Antibody: POLYGON_CTF_ADDRESS is a valid EIP-55 checksummed Ethereum
+    address.  A typo in the constant would produce a mis-checksummed or
+    malformed address and silently broadcast to the wrong contract.
+
+    PR description claimed this antibody exists; added here per bot comment
+    #3256766577.
+    """
+    from eth_utils import to_checksum_address
+
+    # to_checksum_address raises ValueError on invalid addresses and returns
+    # the canonical checksummed form on valid ones.  Assert the constant
+    # round-trips identically so case errors are also caught.
+    assert to_checksum_address(POLYGON_CTF_ADDRESS) == POLYGON_CTF_ADDRESS, (
+        f"POLYGON_CTF_ADDRESS {POLYGON_CTF_ADDRESS!r} is not EIP-55 checksum-valid"
+    )
+
+
+def test_kill_switch_off_errorMessage_unchanged():
+    """Byte-for-byte audit: kill-switch OFF errorMessage must be identical to
+    the pre-PR legacy stub so the audited fallback path is preserved exactly.
+    """
+    from unittest.mock import MagicMock
+
+    adapter = _make_adapter(MagicMock())
+    result = adapter.redeem(_TEST_CONDITION_ID, index_sets=[2])
+
+    assert result["errorCode"] == "REDEEM_DEFERRED_TO_R1"
+    assert result["errorMessage"] == (
+        "R1 settlement command ledger must own pUSD redemption side effects"
+    ), f"errorMessage changed from legacy value: {result['errorMessage']!r}"
+
+
 def test_kill_switch_recognizes_truthy_variants(monkeypatch):
     """Accept the standard truthy strings; reject everything else."""
     rpc_call = MagicMock(side_effect=AssertionError("RPC must not be touched in dry-run"))
