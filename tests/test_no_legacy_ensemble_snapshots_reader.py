@@ -30,9 +30,25 @@ _V2_SUFFIX = "_v2"
 _FSTRING_PATTERN = r"_ensemble_snapshots_table("
 
 
+def _run_grep(args: list[str], cwd: Path) -> list[str]:
+    """Run grep and return stdout lines. Validates returncode in (0, 1).
+
+    grep exit codes: 0 = matches found, 1 = no matches, 2+ = error
+    (bad path, permission denied, etc.). Silently treating exit 2 as
+    "no matches" would make the antibody a false-green on broken paths.
+    """
+    result = subprocess.run(args, capture_output=True, text=True, cwd=cwd)
+    assert result.returncode in (0, 1), (
+        f"grep exited with code {result.returncode} (bad path or permission error).\n"
+        f"stderr: {result.stderr.strip()!r}\n"
+        f"command: {args}"
+    )
+    return result.stdout.splitlines()
+
+
 def _find_legacy_readers() -> list[str]:
     """Return list of 'file:line:content' strings matching the legacy table."""
-    result = subprocess.run(
+    lines = _run_grep(
         [
             "grep", "-rn", "--include=*.py",
             # Exclude the antibody file itself (self-referential) and retired/skipped
@@ -45,12 +61,10 @@ def _find_legacy_readers() -> list[str]:
             "src/",
             "tests/",
         ],
-        capture_output=True,
-        text=True,
         cwd=_REPO_ROOT,
     )
     hits = []
-    for line in result.stdout.splitlines():
+    for line in lines:
         # Exclude lines that reference ensemble_snapshots_v2
         if _V2_SUFFIX not in line.split(":", 2)[-1]:
             hits.append(line)
@@ -63,7 +77,7 @@ def _find_fstring_legacy_aliases() -> list[str]:
     _ensemble_snapshots_table() was the legacy resolver; any call site surviving
     v1.F20 in src/ means the dual-write infrastructure was not fully removed.
     """
-    result = subprocess.run(
+    return _run_grep(
         [
             "grep", "-rn", "--include=*.py",
             # Only scan src/ — tests/ may reference the symbol in skip-annotated
@@ -73,11 +87,8 @@ def _find_fstring_legacy_aliases() -> list[str]:
             _FSTRING_PATTERN,
             "src/",
         ],
-        capture_output=True,
-        text=True,
         cwd=_REPO_ROOT,
     )
-    return result.stdout.splitlines()
 
 
 def test_no_src_or_tests_reads_legacy_ensemble_snapshots():

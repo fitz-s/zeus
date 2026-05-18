@@ -139,6 +139,17 @@ CREATE TABLE data_coverage (
             retry_after TEXT,
             PRIMARY KEY (data_table, city, data_source, target_date, sub_key)
         );
+-- table: db_chunk_boundary_events
+CREATE TABLE db_chunk_boundary_events (
+    event_id       TEXT PRIMARY KEY,
+    occurred_at    TEXT NOT NULL,
+    caller_module  TEXT NOT NULL,
+    db_path        TEXT NOT NULL,
+    rows_processed INTEGER NOT NULL DEFAULT 0,
+    duration_ms    INTEGER NOT NULL DEFAULT 0,
+    split_reason   TEXT NOT NULL
+        CHECK (split_reason IN ('LIVE_CONTENDED', 'WATCHDOG', 'MANUAL'))
+);
 -- table: day0_metric_fact
 CREATE TABLE day0_metric_fact (
                 fact_id TEXT PRIMARY KEY,
@@ -196,33 +207,7 @@ CREATE TABLE diurnal_peak_prob (
             n_obs INTEGER NOT NULL,
             UNIQUE(city, month, hour)
         );
--- table: ensemble_snapshots
-CREATE TABLE ensemble_snapshots (
-            snapshot_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            city TEXT NOT NULL,
-            target_date TEXT NOT NULL,
-            issue_time TEXT,
-            valid_time TEXT,
-            available_at TEXT NOT NULL,
-            fetch_time TEXT NOT NULL,
-            lead_hours REAL NOT NULL,
-            members_json TEXT NOT NULL,
-            p_raw_json TEXT,
-            spread REAL,
-            is_bimodal INTEGER,
-            model_version TEXT NOT NULL,
-            data_version TEXT NOT NULL,
-            authority TEXT NOT NULL DEFAULT 'VERIFIED',
-            temperature_metric TEXT NOT NULL DEFAULT 'high',
-            -- Slice P2-B1 (PR #19 phase 2, 2026-04-26): bias_corrected
-            -- declared explicitly. Pre-fix, the column was added only via
-            -- the ALTER TABLE migration block below, so fresh init_schema
-            -- DBs (CI, dev, in-memory test fixtures) lacked it while
-            -- _store_snapshot_p_raw silently expected it. Cross-environment
-            -- fragility surfaced as runtime_guards test failures.
-            bias_corrected INTEGER NOT NULL DEFAULT 0 CHECK (bias_corrected IN (0, 1)),
-            UNIQUE(city, target_date, issue_time, data_version)
-        );
+-- v1.F20 (2026-05-18): ensemble_snapshots table dropped; legacy world-class removed from init_schema.
 -- table: exchange_reconcile_findings
 CREATE TABLE exchange_reconcile_findings (
           finding_id TEXT PRIMARY KEY,
@@ -404,9 +389,7 @@ CREATE INDEX idx_day0_metric_fact_city_ts
         ;
 -- index: idx_decision_log_ts
 CREATE INDEX idx_decision_log_ts ON decision_log(timestamp);
--- index: idx_ensemble_city_date
-CREATE INDEX idx_ensemble_city_date
-            ON ensemble_snapshots(city, target_date, available_at);
+-- v1.F20 (2026-05-18): idx_ensemble_city_date dropped with ensemble_snapshots table.
 -- index: idx_envelope_events_subject
 CREATE INDEX idx_envelope_events_subject ON provenance_envelope_events (subject_type, subject_id, observed_at);
 -- index: idx_findings_unresolved
@@ -1576,7 +1559,7 @@ CREATE TABLE trade_decisions (
             size_usd REAL NOT NULL,
             price REAL NOT NULL,
             timestamp TEXT NOT NULL,
-            forecast_snapshot_id INTEGER REFERENCES ensemble_snapshots(snapshot_id),
+            forecast_snapshot_id INTEGER,  -- v1.F20: soft ref to ensemble_snapshots_v2.snapshot_id (cross-DB, no FK constraint)
             calibration_model_version TEXT,
             p_raw REAL NOT NULL,
             p_calibrated REAL,
