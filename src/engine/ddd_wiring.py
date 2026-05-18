@@ -114,6 +114,13 @@ def fetch_directional_coverage(
     Reads ``observation_instants_v2``. H1-fix semantics: zero rows → cov=0.0.
     Source defaults to the canonical settlement source. The ``data_version``
     filter ensures we only count rows under the active training contract.
+
+    NOTE: observation_instants_current (VIEW over v2 gated by zeus_meta) is
+    the architecture's intended cutover point, but the view is currently
+    INACTIVE (zeus_meta.observation_data_version defaults to 'v0', which
+    matches no rows). Cutover to the view requires an operator-mediated
+    UPDATE zeus_meta SET value=<active-version> WHERE key='observation_data_version'
+    plus a downstream consumer audit. This is tracked as a separate ops migration.
     """
     n = len(target_hours)
     if n <= 0:

@@ -563,13 +563,44 @@ tables:
     created_by: init_schema
     pk_col: null
 
+  # ---------------------------------------------------------------------------
+  # Dual-write contract: observation_instants (v1) + observation_instants_v2
+  # ---------------------------------------------------------------------------
+  # DESIGN: v1 (OpenMeteo filler) and v2 (native-source canonical) run as a
+  # dual-write pair. v1 is NOT legacy — it has 5 RUNTIME consumers and
+  # provides 100% city coverage via OpenMeteo for markets where
+  # WU/Ogimet/HKO have not yet been activated. v2 is gated by A1/A2/A6
+  # ingest quality checks and covers only tier-1 settlement cities.
+  #
+  # VIEW observation_instants_current is the ARCHITECTURE'S INTENDED cutover
+  # indirection. It JOINs zeus_meta on observation_data_version=m.value.
+  # CURRENT STATUS: INACTIVE — init_schema seeds zeus_meta with value='v0',
+  # which matches no rows in v2. The view returns ZERO ROWS by default.
+  # Runtime code currently reads observation_instants_v2 directly.
+  #
+  # ACTIVATION PREREQUISITE (operator-mediated ops migration, separate PR):
+  #   1. Full downstream consumer audit (all readers of v2 confirmed VIEW-safe)
+  #   2. UPDATE zeus_meta SET value='v1.wu-native' WHERE key='observation_data_version'
+  # After activation, consumers SHOULD migrate to the VIEW.
+  #
+  # Consumer-safety antibody (pre-activation guard):
+  #   tests/state/test_observation_view_consumer_safety.py — fails if any
+  #   runtime code in src/engine/ or src/execution/ reads the inactive view.
+  # Dual-writer freshness antibody:
+  #   tests/state/test_dual_writer_observation_instants_invariant.py
+  # Retirement of v1 deferred to Phase 3 (pending full v2 city coverage).
+  # ---------------------------------------------------------------------------
+
   - name: observation_instants
     db: world
     schema_class: world_class
     schema_version_owner: SCHEMA_VERSION
     created_by: init_schema
     pk_col: null
-    notes: Pre-v2 observation instants (legacy).
+    notes: >
+      OpenMeteo filler — ungated, 100% city coverage. NOT legacy.
+      Retirement blocked by 5 runtime consumers + no v2 OpenMeteo fallback.
+      Dual-write partner: observation_instants_v2.
 
   - name: observation_instants_v2
     db: world
@@ -577,6 +608,18 @@ tables:
     schema_version_owner: SCHEMA_VERSION
     created_by: init_schema
     pk_col: null
+    notes: >
+      Native-source canonical (WU/Ogimet/HKO/etc.), A1/A2/A6 gated.
+      Dual-write partner: observation_instants. Runtime code reads this
+      table directly (view observation_instants_current is inactive — see
+      rationale block above). When the operator activation migration runs,
+      readers should migrate to the VIEW.
+      Freshness antibody: tests/state/test_dual_writer_observation_instants_invariant.py.
+
+  # NOTE: observation_instants_current is a VIEW (not a table) — defined in
+  # src/state/schema/v2_schema.py. VIEWs are intentionally excluded from the
+  # A1 set-equality check (sqlite_master WHERE type='table'). Its contract is
+  # documented above in the rationale block.
 
   - name: observation_revisions
     db: world
