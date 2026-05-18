@@ -1,0 +1,100 @@
+name: full-pytest-sweep
+
+# ADVISORY GATE — Phase 1 (continue-on-error: true).
+# Promotion path: advisory -> required after (a) backfill PRs drive baseline
+# failures to zero, (b) 5-7 advisory days of zero new-failure-ID runs.
+#
+# Purpose: cross-PR interaction anti-regression gate. Per-PR curated CI is a
+# statement about each PR's own correctness — never about post-merge combined
+# state. This gate closes that blind spot by running the full test suite on
+# every PR-open/sync and every push to main.
+#
+# Failure taxonomy (8 universal categories this gate catches):
+#   1. Schema/registry drift (new migration, NOT NULL, enum extended)
+#   2. Signature drift across module boundary (stale mocks after kwarg add)
+#   3. Symbol rename (function renamed in X; tests in Y reference old name)
+#   4. Allowlist/boundary contract drift (new write site without allowlist entry)
+#   5. Enum/literal completeness drift (new literal used but not in enum def)
+#   6. Static-count assertions (hardcoded "exactly N entries", new entry added)
+#   7. Path-filtered linter leak (violations on lines no PR diff touched)
+#   8. Settlement/state-machine drift (API renamed; old caller remains)
+#
+# GOVERNANCE: future agents MAY NOT exclude tests from this sweep without
+# explicit operator approval. Add pytest markers + xfail/skip with rationale
+# comment in the test instead. Silent exclusion is a governance violation.
+#
+# Authority: docs operations CI_IMPROVEMENT_DESIGN.md (2026-05-18).
+# Anchor case: G4 audit (225 failures, 13 clusters, all passed per-PR CI).
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: full-pytest-sweep-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  full-pytest-sweep:
+    name: full-pytest-sweep (ADVISORY — Phase 1)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    continue-on-error: true   # PHASE 1 — remove at Phase 2 promotion
+    if: github.event.pull_request.draft == false || github.event_name != 'pull_request'
+    env:
+      GATE_OWNER: "Fitz (Zeus CI infrastructure)"
+      GATE_RATIONALE: >
+        Cross-PR-interaction anti-regression gate. Catches the failure mode where
+        per-PR curated CI is green but the merged state fails the full test suite.
+        G4 anchor: 225 failures, 13 clusters, zero blocked by prior required gates.
+      GATE_PHASE: "1-advisory"
+      GATE_PROMOTION_CONDITION: >
+        Promote to REQUIRED after: (a) G4 cleanup PR ships and baseline failures
+        reach zero, (b) 5-7 days of advisory runs with zero new-failure-ID events.
+        Promotion: remove continue-on-error, add check name to branch protection.
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Describe gate contract
+        run: |
+          echo "owner=${GATE_OWNER}"
+          echo "phase=${GATE_PHASE}"
+          echo "rationale=${GATE_RATIONALE}"
+          echo "promotion=${GATE_PROMOTION_CONDITION}"
+
+      - name: Run full pytest sweep
+        # Inherits pytest.ini addopts: -m "not live_topology and not live_drift"
+        # (measured sweep baseline: 753s / 12.5 min cold with this filter active).
+        # --timeout=600 kills hung individual tests.
+        # -x exits on first failure (signal-fast on broken main).
+        run: |
+          pytest tests/ -x --timeout=600 -q
+
+      - name: Summarize sweep
+        if: always()
+        run: |
+          {
+            echo "## full-pytest-sweep (${GATE_PHASE})"
+            echo "- owner: ${GATE_OWNER}"
+            echo "- phase: ${GATE_PHASE}"
+            echo "- rationale: ${GATE_RATIONALE}"
+            echo "- promotion condition: ${GATE_PROMOTION_CONDITION}"
+          } >> "$GITHUB_STEP_SUMMARY"
