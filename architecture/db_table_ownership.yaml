@@ -241,16 +241,6 @@ tables:
       data-daemon authority-chain follow-up. Authoritative on forecasts.db.
       Excluded. Drop after 2026-08-09.
 
-  - name: market_events_v2
-    db: world
-    schema_class: legacy_archived
-    schema_version_owner: SCHEMA_VERSION
-    created_by: init_schema
-    pk_col: null
-    notes: >
-      Ghost copy of market_events_v2 on world.db post-K1-split.
-      Authoritative on forecasts.db. Excluded. Drop after 2026-08-09.
-
   - name: ensemble_snapshots_v2
     db: world
     schema_class: legacy_archived
