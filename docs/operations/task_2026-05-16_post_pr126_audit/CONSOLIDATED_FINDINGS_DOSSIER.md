@@ -547,3 +547,45 @@ Run #16 F surfaces a SEV-1 HOT that PASSES the LEARNINGS §3 probe-then-claim ru
 
 ### Documents in this run
 - `RUN_16_track_B_f102_temp_persistence_ownership.md` (NEW)
+
+
+## Run #16 Track C — F86 SIGTERM root cause + alerting antibody
+
+### F86 — 3 live-money daemons exit SIGTERM with no in-process handler → VERDICT: ISSUER-CLASS-PINNED (HUMAN-AGENT kickstart)
+- **Severity**: SEV-2 OBS (daemons are healthy at steady state; concern is observability of restarts, not production failure).
+- **Status**: **ISSUER-CLASS-PINNED (Run #16 T C)**. Was: CONFIRMED-NO-WIRE / issuer-unknown (Run #15 T3).
+- **Owner**: `~/Library/LaunchAgents/com.zeus.{live-trading,riskguard-live,venue-heartbeat}.plist` (no `ResourceLimits`, no `StartInterval`/`WatchPaths`, no SIGTERM-emitting trigger).
+- **Evidence**:
+  - 273 zeus-related lines extracted from `log show --process launchd --info --last 12h`; SIGTERM-exit lines saved to `/tmp/run16_zeus_launchd.txt`.
+  - Every kill line bears `sent by launchd[1]` → externally injected, not in-process. Source scan confirms no in-tree SIGTERM/launchctl sender (only handlers + printed recipes).
+  - Smoking gun: 08:25:16.711 (live-trading PID 56604, ran 38 m) + 08:25:16.717 (venue-heartbeat PID 56501, ran 24 m) — **6 ms apart**. Pattern matches two `launchctl kickstart -k` calls back-to-back from one shell or wrapper.
+  - 17 follow-up live-trading-only SIGTERMs through 17:49:32, spacing 3 min – 23 min (no fixed period) → interactive, not schedule-driven.
+  - 7 alternate categories ruled out: SCHEDULED-RELOAD (no `StartInterval`/`WatchPaths`), MEMORY-CAP (no `ResourceLimits`/`HardResourceLimits`), SUPERVISOR (source scan empty), OOM/jetsam (`jetsam memory limit (active) = unlimited`), SELF-EXIT (daemon `.err` shows normal HTTP/APScheduler activity right up to each kill instant; no traceback, no `MemoryError`, no graceful-shutdown log), SLEEP/WAKE (`pmset -g log` filtered to `2026-05-17` returns 0 sleep/wake), CRON (no entries in `crontab -l` or `cron/jobs.json` reference these labels).
+  - Today's issuing shell is not in `~/.zsh_history` (zero matches) — expected, because Claude/Copilot/VSCode agent terminals do not persist to it. Historical April venus session trajectories record exactly this command shape, confirming pattern.
+- **Verdict**: HUMAN-AGENT `launchctl kickstart -k` issued from a non-persisted agent shell. HIGH confidence on category; MEDIUM on exact session. Concentration on live-trading (17:1) indicates targeted code-iteration work on the live-trading path.
+- **Antibody (spec only, NOT implemented)**:
+  - **A — `launchctl_audit_wrapper.sh`**: PATH-prepended `launchctl` shim at `~/.local/bin/launchctl` writes one JSON line per invocation to `logs/launchctl-audit.log` with `argv`, `caller_pid`, `ppid_chain` (up to 8 levels), `tty`, `VSCODE_PID` — **before** exec'ing `/bin/launchctl`. Cost ≈5 ms / call, zero daemon impact.
+  - **B — launchd-event tail daemon**: new `tools/launchd_sigterm_watcher.py` started via `com.zeus.launchd-sigterm-watcher.plist` (RunAtLoad+KeepAlive) consumes `log stream --process launchd --info --predicate '… SIGTERM AND com.zeus.'`, parses each event, and posts to the existing `notifier.notify()` path with `{label, prior_runtime_ms, sender}` + tail of `logs/launchctl-audit.log` for caller attribution. Rate-limit: 1 / label / 5 min.
+- **Audit trail**: Run #15 T3 surfaced signal; Run #16 T C pinned issuer class + spec'd antibody.
+
+### F114 — launchd-kickstart caller-attribution gap
+- **Severity**: SEV-3 OBS
+- **Status**: NEW (Run #16 T C) — fixed by antibody A above.
+- **Owner**: new artifact `~/.local/bin/launchctl` shim → `logs/launchctl-audit.log`.
+- **Evidence**: today's F86 issuer cannot be retroactively traced; `~/.zsh_history` is empty for `kickstart.*com\.zeus`; broader grep across `~/.copilot/**/debug-logs/*.jsonl` and `~/.claude/projects/**/*.jsonl` timed out at 60 s without targeted mtime bounds. Without a deterministic capture surface, post-hoc attribution is best-effort.
+
+### F115 — live-trading restart concentration 17:1
+- **Severity**: SEV-3 OBS
+- **Status**: NEW (Run #16 T C)
+- **Owner**: observability — paired with antibody B's notification path.
+- **Evidence**: 12-h `launchd` log shows 18 SIGTERM events for `com.zeus.live-trading` vs. 1 each for `riskguard-live` and `venue-heartbeat` (the 08:25:16 co-fire). Spacing irregular (3–23 min). Indicates targeted operator/agent work on the live-trading code path.
+
+### F116 — 3 SIGTERM-exiting labels lack graceful-shutdown handlers
+- **Severity**: SEV-3 SEM
+- **Status**: NEW (Run #16 T C) — spec only.
+- **Owner**: `src/main.py` (live-trading), `src/riskguard/riskguard.py` (riskguard-live), `src/control/heartbeat_supervisor.py` (venue-heartbeat).
+- **Evidence**: Run #15 T3's source scan found only `src/main.py` (forecast-related) and `src/ingest/forecast_live_daemon.py` register `signal.SIGTERM` — and forecast-live (which has the handler) cleanly exits `1` while the other 3 (which do not) leave `-15` with no log trace. Once antibody B lands, register `signal.signal(SIGTERM, …)` in each so the daemon logs `received SIGTERM, draining …` before exit and existing in-flight HTTP/DB work is flushed.
+- **Audit trail**: Run #15 T3 observation; Run #16 T C upgraded to structural finding.
+
+### Documents in this run
+- `RUN_16_track_C_f86_sigterm_rootcause.md` (NEW)
