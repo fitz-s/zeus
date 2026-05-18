@@ -98,27 +98,6 @@ class TestF89StartCalendarIntervalPidBehavior:
             "heartbeat-sensor plist must not use KeepAlive=true — it is a one-shot trigger"
         )
 
-    def test_f89_semantic_documented_no_keepalive_confusion(self):
-        """Probe 2: document the PID='-' semantic difference between trigger and daemon plists.
-
-        For StartCalendarInterval / StartInterval plists: PID='-' = idle (correct).
-        For KeepAlive=true plists: PID='-' = crashed/not running (actionable).
-        This test asserts the semantic constant so it survives code search.
-        """
-        # Semantic constants — these are not code assertions but documentation greps
-        # that future audits can find via "grep StartCalendarInterval" in tests/
-        CALENDAR_PLIST_IDLE_PID = "-"          # launchctl shows '-' when job not firing
-        KEEPALIVE_DAEMON_DOWN_PID = "-"        # SAME symbol, DIFFERENT meaning
-        CALENDAR_PLIST_PID_MEANS_IDLE = True   # not a crash
-        KEEPALIVE_PID_MEANS_CRASHED = True     # IS a crash
-
-        assert CALENDAR_PLIST_PID_MEANS_IDLE is True, (
-            "StartCalendarInterval plist PID='-' means idle between firings (F89 semantic)"
-        )
-        assert KEEPALIVE_PID_MEANS_CRASHED is True, (
-            "KeepAlive daemon PID='-' means crashed/not running (different semantic)"
-        )
-
 
 class TestF101HeartbeatSchemaRegistry:
     """F101 antibody: declare each writer's payload keys so a generic checker can be written.
