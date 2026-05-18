@@ -203,6 +203,15 @@ def _resolve_credentials() -> dict:
         raise RuntimeError(f"Cannot resolve Polymarket credentials: {e}") from e
 
 
+# Public alias for the redeem submitter cycle in src/main.py (PR-I.5.b —
+# Karachi unblock prep, 2026-05-18). Entry adapter and redeem adapter MUST
+# share the same keychain path — drift between them is exactly the
+# "structural-decision-incompletely-executed" hazard called out in Fitz's
+# design-failure rule. Patch _resolve_credentials (not this alias) in tests
+# that already monkey-patch the legacy private name.
+resolve_polymarket_credentials = _resolve_credentials
+
+
 def _resolve_clob_v2_signature_type() -> int:
     raw = os.environ.get("POLYMARKET_CLOB_V2_SIGNATURE_TYPE", "2")
     try:

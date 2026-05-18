@@ -196,12 +196,39 @@ def _redeem_submitter_cycle() -> None:
     anchored. Per-row commit gives partial-failure tolerance.
     """
     from src.data.dual_run_lock import acquire_lock
+    from src.data.polymarket_client import (
+        resolve_polymarket_credentials,
+        _resolve_clob_v2_signature_type,
+        _resolve_q1_egress_evidence_path,
+    )
     from src.execution.settlement_commands import (
         _SUBMITTABLE_STATES,
         submit_redeem,
     )
     from src.state.db import get_trade_connection
-    from src.venue.polymarket_v2_adapter import PolymarketV2Adapter
+    from src.venue.polymarket_v2_adapter import (
+        DEFAULT_Q1_EGRESS_EVIDENCE,
+        DEFAULT_POLYGON_RPC_URL,
+        DEFAULT_V2_HOST,
+        PolymarketV2Adapter,
+        Q1_EGRESS_EVIDENCE_ENV,
+    )
+
+    # PR-I.5.b — Karachi unblock prep (2026-05-18):
+    # Paper/dry-run skips cleanly; live mode requires keychain credentials
+    # before any adapter is constructed. The redeem adapter MUST share the
+    # same credential source as the entry adapter (polymarket_client._ensure_v2_adapter)
+    # to avoid the "structural decision incompletely executed" pattern:
+    # different credential paths for entry vs redeem = silent drift hazard.
+    #
+    # Codex P2 fix (PR #145): credential lookup is deferred until AFTER the
+    # empty-row check so that an idle daemon with no REDEEM_INTENT_CREATED /
+    # REDEEM_RETRYING rows does NOT mark _scheduler_job FAILED every 5 min
+    # merely because Keychain is unavailable at that moment.
+    # Fail-closed still applies: if work exists and creds are missing, raise.
+    if get_mode() != "live":
+        logger.info("redeem_submitter skipped_non_live mode=%s", get_mode())
+        return
 
     with acquire_lock("redeem_submitter") as acquired:
         if not acquired:
@@ -223,7 +250,31 @@ def _redeem_submitter_cycle() -> None:
             ).fetchall()
             if not rows:
                 return
-            adapter = PolymarketV2Adapter()
+            # Credentials resolved only when actual work exists — fail-closed:
+            # if Keychain is unavailable here, raise so the scheduler records
+            # FAILED and the operator sees a clear provisioning gap.
+            try:
+                creds = resolve_polymarket_credentials()
+            except RuntimeError as exc:
+                raise RuntimeError(
+                    f"redeem_submitter: credentials unavailable (fail-closed): {exc}"
+                ) from exc
+            q1_egress_evidence = _resolve_q1_egress_evidence_path(
+                default=DEFAULT_Q1_EGRESS_EVIDENCE,
+                env_name=Q1_EGRESS_EVIDENCE_ENV,
+            )
+            adapter = PolymarketV2Adapter(
+                host=os.environ.get("POLYMARKET_CLOB_V2_HOST", DEFAULT_V2_HOST),
+                funder_address=creds["funder_address"],
+                signer_key=creds["private_key"],
+                chain_id=int(os.environ.get("POLYMARKET_CHAIN_ID", "137")),
+                signature_type=_resolve_clob_v2_signature_type(),
+                polygon_rpc_url=os.environ.get(
+                    "POLYGON_RPC_URL", DEFAULT_POLYGON_RPC_URL
+                ),
+                api_creds=creds.get("api_creds"),
+                q1_egress_evidence_path=q1_egress_evidence,
+            )
             submitted = 0
             failed = 0
             for row in rows:  # already capped at 32 via SQL LIMIT
