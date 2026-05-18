@@ -681,6 +681,18 @@ def run_cycle(mode: DiscoveryMode) -> dict:
         logger.error("command_recovery raised; continuing cycle: %s", exc, exc_info=True)
         summary["command_recovery"] = {"error": str(exc)}
 
+    # PR-S2 Bug #2: promote MATCHED/MINED trade facts to CONFIRMED via CLOB REST poll.
+    # Runs AFTER reconcile_unresolved_commands, BEFORE bankroll gate, so newly
+    # CONFIRMED facts are visible to exit_lifecycle's FILL_STATUSES gate this cycle.
+    if conn is not None:
+        try:
+            from src.execution.exit_lifecycle import promote_pending_trades
+            promote_summary = promote_pending_trades(conn, clob)
+            summary["promote_pending_trades"] = promote_summary
+        except Exception as exc:
+            logger.error("promote_pending_trades raised; continuing cycle: %s", exc, exc_info=True)
+            summary["promote_pending_trades"] = {"error": str(exc)}
+
     entry_bankroll, cap_summary = _entry_bankroll_for_cycle(portfolio, clob)
     summary.update({k: v for k, v in cap_summary.items() if v is not None})
 

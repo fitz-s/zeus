@@ -194,6 +194,203 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+# ---------------------------------------------------------------------------
+# Lifecycle promoter — Bug #2 fix (PR-S2)
+# Polls CLOB REST API for MATCHED/MINED rows and writes CONFIRMED facts.
+# Authority: STRUCTURAL_PLAN.md v3 §2 PR-S2 + A_patches_plan.md §1
+# ---------------------------------------------------------------------------
+
+NON_TERMINAL_TRADE_STATUSES = frozenset({"MATCHED", "MINED"})
+_PROMOTE_MIN_AGE_SECONDS = 60
+_PROMOTE_MAX_AGE_SECONDS = 3600
+
+
+def _hash_raw_payload(payload: object) -> str:
+    import hashlib
+    import json
+    raw = json.dumps(payload or {}, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def promote_pending_trades(
+    conn: sqlite3.Connection,
+    clob_client,
+    max_age_seconds: int = _PROMOTE_MIN_AGE_SECONDS,
+    max_cycle_budget_ms: int = 5000,
+) -> dict:
+    """Advance MATCHED/MINED venue_trade_facts rows to CONFIRMED by polling CLOB REST.
+
+    Candidate SELECT is bounded to LIMIT 10. Loop honors max_cycle_budget_ms; on
+    timeout emits metric promote_pending_trades_budget_exhausted_total and breaks.
+
+    Per-row promotion is wrapped in BEGIN IMMEDIATE so the candidate re-check and
+    append_trade_fact are atomic against concurrent WS_USER ingests
+    (CRITIC_FLAG-2, STRUCTURAL_PLAN.md v3 §2 PR-S2).
+
+    Error handling per A_patches_plan.md §1 table:
+      404             → silent skip, no phantom write
+      429             → abort entire batch
+      other 4xx       → log + skip row
+      5xx             → log + skip row (retry next cycle)
+      unexpected exc  → log + skip row
+    """
+    import time
+
+    from src.observability.counters import increment as _cnt_inc
+    from src.state.venue_command_repo import append_trade_fact
+
+    deadline_ms = time.monotonic() * 1000 + max_cycle_budget_ms
+    cutoff_old = _utcnow() - timedelta(seconds=max_age_seconds)
+    cutoff_abandon = _utcnow() - timedelta(seconds=_PROMOTE_MAX_AGE_SECONDS)
+
+    candidates = conn.execute(
+        """
+        SELECT vtf.trade_fact_id,
+               vtf.trade_id,
+               vtf.venue_order_id,
+               vtf.command_id,
+               vtf.state,
+               vtf.local_sequence,
+               vtf.observed_at,
+               vtf.filled_size,
+               vtf.fill_price
+        FROM venue_trade_facts vtf
+        WHERE vtf.state IN ('MATCHED', 'MINED')
+          AND vtf.observed_at < ?
+          AND vtf.observed_at > ?
+          AND NOT EXISTS (
+              SELECT 1 FROM venue_trade_facts c2
+              WHERE c2.command_id = vtf.command_id
+                AND c2.state = 'CONFIRMED'
+          )
+        ORDER BY vtf.observed_at ASC
+        LIMIT 10
+        """,
+        (cutoff_old.isoformat(), cutoff_abandon.isoformat()),
+    ).fetchall()
+
+    stats: dict = {"polled": 0, "promoted": 0, "errors": 0, "skipped": 0}
+
+    for row in candidates:
+        if time.monotonic() * 1000 >= deadline_ms:
+            _cnt_inc("promote_pending_trades_budget_exhausted_total")
+            logger.warning(
+                "telemetry_counter event=promote_pending_trades_budget_exhausted_total"
+            )
+            break
+
+        (
+            _trade_fact_id,
+            trade_id,
+            venue_order_id,
+            command_id,
+            _state,
+            _seq,
+            _observed_at,
+            filled_size,
+            fill_price,
+        ) = row
+
+        try:
+            raw = clob_client.get_order(venue_order_id)
+            stats["polled"] += 1
+        except Exception as exc:
+            status_code = getattr(exc, "status_code", None) or getattr(exc, "status", None)
+            if status_code == 429:
+                logger.warning(
+                    "promote_pending_trades: 429 rate-limited; aborting batch"
+                )
+                stats["errors"] += 1
+                break
+            if status_code is not None and 400 <= int(status_code) < 500:
+                logger.warning(
+                    "promote_pending_trades: 4xx on order_id=%s: %s",
+                    venue_order_id, exc,
+                )
+                stats["skipped"] += 1
+            else:
+                logger.error(
+                    "promote_pending_trades: 5xx/unexpected on order_id=%s: %s",
+                    venue_order_id, exc, exc_info=True,
+                )
+                stats["errors"] += 1
+            continue
+
+        if raw is None:
+            # 404 — order unknown to CLOB; skip without writing phantom row.
+            logger.warning(
+                "promote_pending_trades: order_id=%s returned None (404) — skipping",
+                venue_order_id,
+            )
+            stats["skipped"] += 1
+            continue
+
+        new_status = (raw.get("status") or "").upper()
+
+        if new_status not in ("CONFIRMED", "MINED"):
+            stats["skipped"] += 1
+            continue
+
+        tx_hash = raw.get("transaction_hash") or raw.get("transactionHash") or raw.get("tx_hash")
+        last_update = raw.get("last_update") or _utcnow().isoformat()
+        rest_size = raw.get("size") or raw.get("filled_size") or filled_size or "0"
+        rest_price = raw.get("price") or raw.get("fill_price") or fill_price or "0"
+
+        # CRITIC_FLAG-2: BEGIN IMMEDIATE for the entire re-check + write window.
+        # _savepoint_atomic uses SAVEPOINT/RELEASE (not `with conn:`) so
+        # nesting inside BEGIN IMMEDIATE is safe.
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            # Re-check under lock: another writer may have promoted concurrently.
+            already = conn.execute(
+                "SELECT 1 FROM venue_trade_facts WHERE command_id=? AND state='CONFIRMED'",
+                (command_id,),
+            ).fetchone()
+            if already:
+                conn.execute("COMMIT")
+                stats["skipped"] += 1
+                continue
+
+            append_trade_fact(
+                conn,
+                trade_id=trade_id,
+                venue_order_id=venue_order_id,
+                command_id=command_id,
+                state=new_status,
+                filled_size=str(rest_size),
+                fill_price=str(rest_price),
+                tx_hash=tx_hash,
+                source="REST",
+                observed_at=last_update,
+                raw_payload_hash=_hash_raw_payload(raw),
+                raw_payload_json=raw,
+            )
+            conn.execute("COMMIT")
+        except sqlite3.IntegrityError:
+            # UNIQUE (trade_id, local_sequence) fired — concurrent writer won.
+            try:
+                conn.execute("ROLLBACK")
+            except Exception:
+                pass
+            stats["skipped"] += 1
+            continue
+        except Exception:
+            try:
+                conn.execute("ROLLBACK")
+            except Exception:
+                pass
+            raise
+
+        if new_status == "CONFIRMED":
+            stats["promoted"] += 1
+            logger.info(
+                "promote_pending_trades: promoted trade_id=%s order_id=%s → CONFIRMED tx=%s",
+                trade_id, venue_order_id, tx_hash,
+            )
+
+    return stats
+
+
 def _active_runtime_state(position: Position) -> str:
     return "day0_window" if getattr(position, "day0_entered_at", "") else "holding"
 
