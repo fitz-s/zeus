@@ -18,6 +18,7 @@ Graduated response: GREEN → YELLOW → ORANGE → RED.
 
 import json
 import logging
+import os
 import sqlite3
 import sys
 from dataclasses import replace
