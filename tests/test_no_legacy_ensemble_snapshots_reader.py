@@ -24,6 +24,11 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 _GREP_PATTERN = r"FROM ensemble_snapshots"
 _V2_SUFFIX = "_v2"
 
+# Pattern: f-string table aliasing that would bypass the literal-SQL antibody.
+# _ensemble_snapshots_table() returned a legacy table name; its presence in src/
+# means dual-write infrastructure survived the v1.F20 removal.
+_FSTRING_PATTERN = r"_ensemble_snapshots_table("
+
 
 def _find_legacy_readers() -> list[str]:
     """Return list of 'file:line:content' strings matching the legacy table."""
@@ -52,6 +57,29 @@ def _find_legacy_readers() -> list[str]:
     return hits
 
 
+def _find_fstring_legacy_aliases() -> list[str]:
+    """Find f-string table aliasing that would bypass the literal-SQL probe.
+
+    _ensemble_snapshots_table() was the legacy resolver; any call site surviving
+    v1.F20 in src/ means the dual-write infrastructure was not fully removed.
+    """
+    result = subprocess.run(
+        [
+            "grep", "-rn", "--include=*.py",
+            # Only scan src/ — tests/ may reference the symbol in skip-annotated
+            # retirement stubs (e.g. test_legacy_snapshot_projection_upsert.py).
+            # The definition site in evaluator.py itself is the only src/ hit
+            # that would survive a partial removal, so no exclude needed here.
+            _FSTRING_PATTERN,
+            "src/",
+        ],
+        capture_output=True,
+        text=True,
+        cwd=_REPO_ROOT,
+    )
+    return result.stdout.splitlines()
+
+
 def test_no_src_or_tests_reads_legacy_ensemble_snapshots():
     """No file in src/ or tests/ may contain 'FROM ensemble_snapshots' (legacy).
 
@@ -62,5 +90,21 @@ def test_no_src_or_tests_reads_legacy_ensemble_snapshots():
     assert hits == [], (
         "Legacy ensemble_snapshots reader(s) found after v1.F20 migration.\n"
         "Each line below must be migrated to ensemble_snapshots_v2:\n"
+        + "\n".join(f"  {h}" for h in hits)
+    )
+
+
+def test_no_src_uses_fstring_legacy_table_alias():
+    """No file in src/ may call _ensemble_snapshots_table() (v1.F20 removed).
+
+    This catches f-string dual-write patterns that bypass the literal-SQL probe:
+      legacy_table = _ensemble_snapshots_table(conn)
+      conn.execute(f\"INSERT INTO {legacy_table} ...\")
+    These patterns are NOT caught by FROM ensemble_snapshots grep.
+    """
+    hits = _find_fstring_legacy_aliases()
+    assert hits == [], (
+        "Legacy _ensemble_snapshots_table() call(s) found in src/ after v1.F20.\n"
+        "The function and all call sites must be removed:\n"
         + "\n".join(f"  {h}" for h in hits)
     )
