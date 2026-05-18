@@ -451,3 +451,27 @@ Run #14 F87 was the 4th SEV-1 in this audit reframed/closed-false-alarm on secon
 ### Documents in this run
 - `RUN_16_track_A_f85_log_routing_f87_close.md` (NEW)
 - `LEARNINGS.md` (NEW — cross-run antibody catalog)
+
+
+## Run #16 Track G additions (2026-05-17, branch fix/wave-2-lineage-and-k1-cleanup-2026-05-17)
+
+### Headline
+- **Treasury layer reconciles cleanly.** Chain pUSDC $189.05 ↔ `risk_state.initial_bankroll` $189.05 ↔ `collateral_ledger_snapshots.pusd_balance_micro` (latest snapshot 30 s before audit). Open `CTF_SELL` reservation matches on-chain reserved tokens. No drift at the wallet / collateral layer.
+- **Position-layer book-keeping diverges from on-chain.** 4 distinct SEV-1 patterns found (F106–F109), one of which (F109 — double-book of London 5/19) is a $1.86 / 6-share over-book today that becomes a $6 phantom-PnL event if the position settles WIN.
+- **Karachi 5/17 (c30f28a5-d4e):** cost basis reconciles exactly to on-chain shares × entry price; but the `position_lots` audit trail for this position is empty (F107). Real money, real shares, missing audit row.
+- **F106 silent-empty-join is the same antibody category as Run #16 A LEARNINGS §3** (probe-then-claim): the obvious `USING(position_id)` between `position_lots` and `position_current` returns zero rows because of an INT-vs-TEXT keyspace mismatch — and a naive reconciliation script would report "all clean" while diverging silently.
+
+### New SEV-1 carry-forward (post Run #16 T G)
+F3, F32, F35, F63, F71, **F90a**, F48 (HOT-FIX-SPEC), F103, **F106 (META)**, **F107**, **F108**, **F109**.
+
+### Karachi 5/17 + 5/19 ops gate (updated)
+1. **F109 ops gate** (immediate, before London 5/19 settles): manually void one of `{0a0e3b72-46e, 7557a029-4ad}` OR confirm downstream PnL deduplicates by `(token_id, market_id)`.
+2. F107 (Karachi 5/17): no immediate action — position is real, audit trail can be backfilled. Risk: post-settle PnL queries that depend on `position_lots` will skip Karachi.
+3. F108: do not ship any new monitor that aggregates `venue_trade_facts.filled_size` until the `v_venue_trade_facts_latest` view exists.
+4. F106 antibody: add `views/v_position_lots_canonical.sql` joining via `venue_commands.command_id` so the wrong shape becomes a known-bad pattern.
+
+### Reframing-watch
+F106 + F108 are both "silent-no-op aggregation" defects. They join the pattern set with F90 (jobs.json line-count misread), F87 (`launchctl` column-2 misread), F48 (bare-name SELECT silently binds to wrong DB), F102 (`temp_persistence` empty). All five share the antibody: **the probe must observe a positive sample of the value being claimed, not just the success of the syntactic operation**. LEARNINGS.md §3 codifies this — F106/F108 entries should be added there in a follow-up doc PR.
+
+### Documents in this track
+- `RUN_16_track_G_financial_reconciliation.md` (NEW)

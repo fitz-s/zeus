@@ -227,3 +227,28 @@ Track A: F87 false-alarm formal close + F85 root cause + fix spec. READ-ONLY pro
 | **F85** | Daemon stdout/stderr inversion: all 7 `.err` huge + fresh, all 7 `.log` 0 B / stale | SEV-2 | **ROOT-CAUSE-PINNED + FIX-SPECIFIED (Run #16 A)** — plist layer ruled out (7/7 distinct `.log`/`.err` paths); root cause = `logging.basicConfig()` default `StreamHandler(sys.stderr)` at 4 daemon entry points (`src/main.py:1332`, `src/ingest_main.py:1035`, `src/ingest/forecast_live_daemon.py:664`, `src/riskguard/riskguard.py:1446`). Dual-handler patch spec'd; verification probe defined. No code mutated. | 4 daemon `main()` entry points | Run #14 | Run #16 A |
 
 > See `RUN_16_track_A_f85_log_routing_f87_close.md` §1 (F87 evidence + close), §2 (F85 root cause), §3 (text-block fix spec), §5 (verification probe). New cross-run antibody catalog: `LEARNINGS.md`.
+
+
+## Run #16 Track G additions (F106–F111 — financial reconciliation)
+
+Track G (book-keeping ↔ on-chain reality reconciliation): READ-ONLY across `state/zeus_trades.db`, `state/risk_state.db`, on-chain snapshot via `collateral_ledger_snapshots`. See `RUN_16_track_G_financial_reconciliation.md` for full evidence, queries, and Karachi 5/17 specific fingerprint.
+
+| F#  | Title | Sev | Status | Owner | First seen | Last verified |
+|-----|-------|-----|--------|-------|------------|----------------|
+| **F106** | Schema mismatch — `position_lots.position_id` (INTEGER) ≠ `position_current.position_id` (TEXT UUID). `USING(position_id)` silently returns empty. Canonical join requires `position_lots.source_command_id → venue_commands.command_id → venue_commands.position_id` | **SEV-1 META** | **NEW (Run #16 T G)** | `state/zeus_trades.db` schema (`position_lots`, `position_current`, `venue_commands`) | Run #16 T G | Run #16 T G |
+| **F107** | 3 / 13 non-voided positions hold positive `cost_basis_usd` + `shares` but zero `position_lots CONFIRMED_EXPOSURE` rows. Affected: `3a6f0728-c50` (London 5/19, $1.70), `8f02dc01-b6b` (Singapore 5/19, $1.0458), **`c30f28a5-d4e` (Karachi 5/17, $0.587)**. Dual-writer divergence: `position_current` populated, lot materializer skipped. Max drift +$1.70, total un-lot-backed cost $3.33 (1.8% of $189 pUSDC) | **SEV-1** | **NEW (Run #16 T G)** | lot materialization path (likely `exchange_reconcile_entry_fill_materialization` did not fire for these 3) | Run #16 T G | Run #16 T G |
+| **F108** | `venue_trade_facts` stores per-trade lifecycle revisions (MATCHED → MINED → CONFIRMED) sharing `trade_id`. Bare `SUM(filled_size)` over-counts 1×–4× (proof: `bf0a16f5-f95` has 4 rows × 100 filled = 400, actual 100). Any monitor / report / alarm using this aggregate over-states filled exposure. Correct form: `SUM(MIN(filled_size) per (position_id, trade_id))` or latest-by-`local_sequence` view | **SEV-1** | **NEW (Run #16 T G)** | `venue_trade_facts` aggregation sites (audit needed); recommended view `v_venue_trade_facts_latest` | Run #16 T G | Run #16 T G |
+| **F109** | **Position duplicate / double-book**: `0a0e3b72-46e` and `7557a029-4ad` reference the same `token_id=113959…30054946` (London 18°C 5/19 buy_yes), each claiming 6 shares × $0.31 = $1.86. On-chain has 6 shares total; DB over-books +6 shares / +$1.86. If WIN settles, realized PnL will phantom +$6. Likely idempotency-key collision miss at position-open | **SEV-1** | **NEW (Run #16 T G)** | position-open path (idempotency); two rows in `position_current` for same `(token_id, city, target_date, bin_label, direction)` | Run #16 T G | Run #16 T G |
+| **F110** | `settlements_v2` is EMPTY (0 rows) despite 5 `economically_closed` positions. Cannot disambiguate "markets not yet UMA-finalized" from "settlement writer broken" this run. Direct consequence: F48 fix (Run #15 T2 Edits A–C) cannot be observationally validated end-to-end on current DB — reads will return 0 settlements regardless of whether the bare-name SELECT was wrong | **SEV-2 OBS** | **NEW (Run #16 T G)** | `settlements_v2` writer path (out of scope this run); UMA resolution listener | Run #16 T G | Run #16 T G |
+| **F111** | `economically_closed` positions retain `position_current.shares > 0` post-exit (Munich 23.7 / London 5.0 / Miami 35.6 / Wuhan 13.16 / Singapore 11.62 = 89.08 phantom shares) while on-chain holds 0. By-design (preserves PnL recompute via `exit_price × shares`), but probes filtering only `phase != 'voided'` will over-state live exposure by +95 shares | **SEV-3 SEM** | **NEW (Run #16 T G)** | `position_current.shares` semantics at phase transition; recommended rename or `live_shares` computed view | Run #16 T G | Run #16 T G |
+
+### Track G aggregate verdicts (RUN_16 §9)
+
+- **Cost-basis drift**: 3 / 13 positions, max +$1.70, total +$3.33.
+- **Share drift (lots vs current)**: same 3 positions; 10 reconcile exactly.
+- **Collateral consistency**: ✓ chain pUSDC ($189.05) ↔ `risk_state.initial_bankroll` ($189.05); ✓ open `CTF_SELL` reservation matches `reserved_tokens_for_sells_json`.
+- **Karachi 5/17 c30f28a5-d4e**: ✓ cost = on-chain shares × entry price (0.37 × 1.5873 = $0.587301); ✗ `position_lots` audit trail MISSING (F107).
+- **On-chain shares vs DB (open phases only)**: 6 / 7 tokens match exactly; 1 token over-booked by +6 shares (F109).
+- **Settlements vs payouts**: N/A — `settlements_v2` empty (F110).
+
+> See `RUN_16_track_G_financial_reconciliation.md` for §1 schema-mismatch canonical join, §2 cost-basis evidence table, §3 Karachi 5/17 fingerprint, §4 vtf revision proof, §5 by-token reconciliation, §6 chain treasury reconciliation, §7 settlements + closed-phase semantics, §8 findings catalog, §11 recommended follow-ups (NOT applied).
