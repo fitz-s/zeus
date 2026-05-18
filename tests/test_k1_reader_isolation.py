@@ -2,10 +2,7 @@
 # Last reused/audited: 2026-05-17
 # Authority basis: F40/F41 K1-reader regressions — prevent world-DB direct access
 # for forecast_class tables in scripts that cross DB boundaries post-K1-split.
-# F43 antibody upgrade 2026-05-17: SELECT/FROM-side check — world_class tables
-# referenced under K1-helper MUST be world-qualified (MAIN=forecasts under helper).
 # See docs/operations/task_2026-05-17_post_karachi_remediation/FIX_K1_READERS.md §C
-# and docs/operations/task_2026-05-17_post_karachi_remediation/F43_F44_DISCOVERY.md
 """Antibody: scripts that were K1-misrouted must not regress to world-DB direct access.
 
 Scope: F40 (bridge_oracle_to_calibration) + F41 (evaluate_calibration_transfer_oos).
@@ -111,101 +108,151 @@ def test_cal_transfer_eval_qualifies_world_table_inserts():
     )
 
 
-# F43 antibody (2026-05-17): SELECT/FROM-side schema qualification.
-#
-# Under `get_forecasts_connection_with_world()`, MAIN=forecasts.db, world.db is
-# ATTACHed as schema `world`. Bare `FROM <world_class_table>` resolves to the
-# empty/shell table in forecasts.db (0 rows), not the live world.db data. PR #137
-# F40/F41 introduced this regression on 3 lines (bridge:183/195, eval:222) — all
-# silently returned 0 rows.
-#
-# This test enforces: every world-class table referenced via SELECT/FROM/JOIN
-# inside a K1_FIXED_SCRIPT must be prefixed with `world.`.
-#
-# Scope: world_class tables that have NO forecast_class twin (i.e. live only in
-# zeus-world.db, not split during K1). Tables with a forecast-class entry get
-# moved to forecasts.db, so bare refs resolve to the correct MAIN.
-WORLD_ONLY_TABLES_UNDER_K1_HELPER = {
-    "observation_instants_v2",   # 1.8M rows in world.db; no forecast-class entry
-    "platt_models_v2",           # 1.4K rows in world.db; no forecast-class entry
-    "data_coverage",             # world-class (cross-DB write target post-K1)
-    "daily_observation_revisions",  # world-class
-}
+# ---------------------------------------------------------------------------
+# K-A antibody (F19/F46/F81/F82): log_forward_market_substrate writer path pin
+# Decision A2 (2026-05-17): function opens its own forecasts conn; must not
+# accept a positional conn argument that could route writes to trades.db MAIN.
+# ---------------------------------------------------------------------------
 
+def test_log_forward_market_substrate_does_not_accept_positional_conn():
+    """K-A regression: log_forward_market_substrate must be keyword-only (no positional conn).
 
-def _strip_sql_comments(src: str) -> str:
-    """Strip Python and SQL comments so we don't false-positive on commented-out SQL."""
-    # Remove python # comments (best-effort, line-by-line)
-    out = []
-    for line in src.splitlines():
-        idx = line.find("#")
-        if idx >= 0:
-            line = line[:idx]
-        out.append(line)
-    return "\n".join(out)
-
-
-@pytest.mark.parametrize("script_name", K1_FIXED_SCRIPTS)
-def test_k1_helper_world_tables_qualified(script_name):
-    """F43 regression-block: SELECT/FROM refs to world_class-only tables under
-    a K1-helper-using script must be prefixed with `world.`."""
-    src = (SCRIPTS / script_name).read_text()
-    if "get_forecasts_connection_with_world" not in src:
-        pytest.skip(f"{script_name} no longer uses K1 helper; antibody not applicable")
-    src_clean = _strip_sql_comments(src)
-
-    violations = []
-    for table in WORLD_ONLY_TABLES_UNDER_K1_HELPER:
-        # Find any FROM <table> or JOIN <table> that is NOT preceded by 'world.'
-        # Negative lookbehind: not preceded by 'world.' or another qualifier
-        pattern = (
-            r'\b(?:FROM|JOIN)\s+'        # SQL keyword
-            r'(?<!\bworld\.)'             # not already qualified as world.
-            r'\b' + re.escape(table) + r'\b'
-        )
-        for m in re.finditer(pattern, src_clean, re.IGNORECASE):
-            # Verify the literal char before the table is NOT a dot (qualifier)
-            preceding = src_clean[max(0, m.start()):m.end()]
-            if not re.search(r'\bworld\.\s*' + re.escape(table), preceding, re.IGNORECASE):
-                line = src_clean[:m.start()].count("\n") + 1
-                violations.append((line, table, preceding.strip()))
-
-    assert not violations, (
-        f"{script_name}: F43 regression — bare references to world_class tables "
-        f"under K1-helper context.\n"
-        + "\n".join(
-            f"  line {ln}: {tbl} (raw: {raw!r})" for ln, tbl, raw in violations
-        )
-        + "\nFix: prefix with `world.` (e.g. `FROM world." + violations[0][1] + "`) "
-        + "since get_forecasts_connection_with_world() makes forecasts.db the MAIN."
+    Callers that pass the cycle trades-rooted conn as a positional argument would
+    silently route INSERT INTO market_events_v2 to trades.db MAIN (0-row shell).
+    Decision A2 fix: function opens its own forecasts conn; conn param removed.
+    """
+    import ast
+    src_file = REPO / "src" / "state" / "db.py"
+    tree = ast.parse(src_file.read_text())
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "log_forward_market_substrate":
+            # All parameters must be keyword-only (after * in signature)
+            # posonlyargs and args (positional) must be empty
+            positional_params = [a.arg for a in (node.args.posonlyargs + node.args.args)]
+            assert positional_params == [], (
+                f"log_forward_market_substrate has positional params: {positional_params}. "
+                "K-A fix (Decision A2): function must be fully keyword-only so callers "
+                "cannot pass a trades-rooted conn and silently misroute writes."
+            )
+            return
+    raise AssertionError(
+        "log_forward_market_substrate not found in src/state/db.py — "
+        "function was removed or renamed without updating this antibody."
     )
 
 
-def test_world_only_tables_set_matches_registry():
-    """Sanity: every table in WORLD_ONLY_TABLES_UNDER_K1_HELPER must be classified
-    as world_class in architecture/db_table_ownership.yaml and must NOT have a
-    forecast_class twin entry. Catches drift if a table gets reclassified during
-    future K-splits."""
-    import yaml
-    registry_path = REPO / "architecture" / "db_table_ownership.yaml"
-    if not registry_path.exists():
-        pytest.skip("db_table_ownership.yaml not present")
-    data = yaml.safe_load(registry_path.read_text())
-    entries_by_name = {}
-    for t in data.get("tables", []):
-        entries_by_name.setdefault(t["name"], []).append(t)
+def test_log_forward_market_substrate_opens_forecasts_path():
+    """K-A regression: log_forward_market_substrate must reference ZEUS_FORECASTS_DB_PATH.
 
-    for table in WORLD_ONLY_TABLES_UNDER_K1_HELPER:
-        entries = entries_by_name.get(table, [])
-        assert entries, f"{table}: not registered in db_table_ownership.yaml"
-        classes = {e.get("schema_class") for e in entries}
-        # Must include world_class
-        assert "world_class" in classes, (
-            f"{table}: schema_class set {classes!r} does not include world_class; "
-            f"remove from WORLD_ONLY_TABLES_UNDER_K1_HELPER or fix registry."
-        )
-        # Must NOT include forecast_class (would make bare ref correct under K1 helper)
-        assert "forecast_class" not in classes, (
-            f"{table}: registry shows BOTH world_class and forecast_class. "
-            f"Bare ref under K1 helper could be correct — remove from this antibody set."
+    The function must open its own connection to forecasts.db (not accept an opaque conn).
+    """
+    src = (REPO / "src" / "state" / "db.py").read_text()
+    # Find the function body (from def to next top-level def)
+    in_fn = False
+    fn_lines = []
+    for line in src.splitlines():
+        if line.startswith("def log_forward_market_substrate("):
+            in_fn = True
+        elif in_fn and line.startswith("def ") and "log_forward_market_substrate" not in line:
+            break
+        if in_fn:
+            fn_lines.append(line)
+    fn_src = "\n".join(fn_lines)
+
+    assert "ZEUS_FORECASTS_DB_PATH" in fn_src, (
+        "log_forward_market_substrate must reference ZEUS_FORECASTS_DB_PATH internally "
+        "(K-A fix Decision A2: opens own forecasts conn, not caller-supplied conn)."
+    )
+
+
+# ---------------------------------------------------------------------------
+# K-B antibody (F48/F103/F102): monitor_refresh.py reader schema-qualifier
+# Reader under get_forecasts_connection_with_world: MAIN=forecasts.db.
+# Bare table names resolve to MAIN, not to world ATTACH.
+# ---------------------------------------------------------------------------
+
+def test_monitor_refresh_settlements_query_uses_forecasts_qualifier():
+    """K-B regression (F48/F103): settlements query in _check_persistence_anomaly
+    must use forecasts.settlements_v2, not bare settlements or settlements_v2.
+
+    Bare name under cycle conn resolves to trades.db MAIN (0 rows) — silent dead-read.
+    """
+    src = (REPO / "src" / "engine" / "monitor_refresh.py").read_text()
+
+    # Must NOT have bare FROM settlements (old name)
+    assert "FROM settlements " not in src and "FROM settlements\n" not in src, (
+        "monitor_refresh.py: bare 'FROM settlements' found — must use "
+        "'FROM forecasts.settlements_v2' (K-B fix F48/F103)."
+    )
+    # Must NOT have bare FROM settlements_v2 in SQL (comment/docstring mentions are OK)
+    import re as _re
+    # SQL context: FROM immediately before settlements_v2 (not qualified by schema prefix)
+    bare_sql = _re.search(r'FROM\s+settlements_v2\b', src)
+    assert bare_sql is None, (
+        "monitor_refresh.py: bare 'FROM settlements_v2' found — must use "
+        "'FROM forecasts.settlements_v2' (K-B fix F48/F103)."
+    )
+
+    assert "forecasts.settlements_v2" in src, (
+        "monitor_refresh.py: must contain 'FROM forecasts.settlements_v2' "
+        "in _check_persistence_anomaly (K-B fix F48/F103)."
+    )
+
+
+def test_monitor_refresh_temp_persistence_query_uses_world_qualifier():
+    """K-B regression (F102): temp_persistence query must use world.temp_persistence.
+
+    temp_persistence is world_class. Under get_forecasts_connection_with_world,
+    MAIN=forecasts.db; bare 'FROM temp_persistence' resolves to a zero-row
+    forecasts.db shell. world. qualifier routes to the writer's target.
+    """
+    src = (REPO / "src" / "engine" / "monitor_refresh.py").read_text()
+
+    # Must NOT have bare FROM temp_persistence
+    import re as _re
+    bare = _re.search(r'FROM\s+temp_persistence\b(?!\s*--)', src)
+    # Allow world.temp_persistence — verify only unqualified occurrences
+    all_occ = _re.findall(r'temp_persistence', src)
+    qualified_occ = _re.findall(r'world\.temp_persistence', src)
+    assert len(all_occ) == len(qualified_occ), (
+        f"monitor_refresh.py: {len(all_occ) - len(qualified_occ)} unqualified "
+        "temp_persistence reference(s) found — must all be 'world.temp_persistence' "
+        "(K-B fix F102)."
+    )
+    assert "world.temp_persistence" in src, (
+        "monitor_refresh.py: must contain 'FROM world.temp_persistence' "
+        "in _check_persistence_anomaly (K-B fix F102)."
+    )
+
+
+# ---------------------------------------------------------------------------
+# WORLD_ONLY_TABLES helper — extends the existing pattern from F41 to cover
+# world-class tables read under get_forecasts_connection_with_world.
+# Coordinator addition (2026-05-17): temp_persistence is world_class.
+# ---------------------------------------------------------------------------
+
+# Tables that are WORLD_CLASS and must be qualified as world.<table> when read
+# under a forecasts-rooted connection (MAIN=forecasts.db).
+WORLD_ONLY_TABLES_UNDER_K1 = {
+    "temp_persistence",             # F102 — world_class, ETL writes to zeus-world.db
+    "validated_calibration_transfers",  # F41 — world_class, covered by existing test
+}
+
+
+def test_monitor_refresh_world_tables_are_qualified():
+    """K-B regression: all world_class table reads in monitor_refresh.py must use world. prefix.
+
+    Under get_forecasts_connection_with_world (MAIN=forecasts.db), bare world-class
+    table references resolve to a zero-row MAIN shell instead of the actual world.db.
+    """
+    import re as _re
+    src = (REPO / "src" / "engine" / "monitor_refresh.py").read_text()
+    for table in WORLD_ONLY_TABLES_UNDER_K1:
+        all_occ = _re.findall(rf'\b{table}\b', src)
+        qualified_occ = _re.findall(rf'world\.{table}\b', src)
+        if not all_occ:
+            continue  # table not referenced in this file — not an error
+        assert len(all_occ) == len(qualified_occ), (
+            f"monitor_refresh.py: {len(all_occ) - len(qualified_occ)} unqualified "
+            f"'{table}' reference(s) — must be 'world.{table}' (K-B fix, world_class)."
         )

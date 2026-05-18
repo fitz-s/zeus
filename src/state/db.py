@@ -3837,20 +3837,22 @@ def log_executable_snapshot_market_price_linkage(
 
 
 def log_forward_market_substrate(
-    conn: sqlite3.Connection | None,
     *,
     markets: Iterable[dict],
     recorded_at: str,
     scan_authority: str,
+    _db_path: "str | Path | None" = None,
 ) -> dict:
     """Persist Gamma scanner market identity and price observations.
 
-    This is forward-only scanner substrate. It is not CLOB VWMP/orderbook truth,
-    settlement truth, or live wiring; callers must supply an explicit DB
-    connection and a fresh VERIFIED scan authority.
+    K1-A fix (2026-05-17): opens its own forecasts connection rather than
+    accepting an opaque conn from callers. Callers that passed the cycle
+    trades-rooted conn were silently writing market_events_v2 rows to
+    zeus_trades.db (MAIN) instead of zeus-forecasts.db. Decision A2.
+
+    _db_path: override for testing; defaults to ZEUS_FORECASTS_DB_PATH.
     """
-    if conn is None:
-        return {"status": "skipped_no_connection", "tables": _FORWARD_MARKET_REQUIRED_TABLES}
+    resolved_path = Path(_db_path) if _db_path is not None else ZEUS_FORECASTS_DB_PATH
 
     if str(scan_authority or "").strip().upper() != "VERIFIED":
         return {
@@ -3863,124 +3865,131 @@ def log_forward_market_substrate(
     if recorded_at_value is None:
         return {"status": "refused_missing_recorded_at", "tables": _FORWARD_MARKET_REQUIRED_TABLES}
 
-    missing_tables = [
-        table for table in _FORWARD_MARKET_REQUIRED_TABLES if not _table_exists(conn, table)
-    ]
-    if missing_tables:
-        return {
-            "status": "skipped_missing_tables",
-            "tables": _FORWARD_MARKET_REQUIRED_TABLES,
-            "missing_tables": tuple(missing_tables),
-        }
-
-    required_columns = {
-        "market_events_v2": set(_FORWARD_MARKET_EVENT_COLUMNS),
-        "market_price_history": set(_FORWARD_PRICE_HISTORY_COLUMNS),
-    }
-    missing_columns = {
-        table: tuple(sorted(required_columns[table] - _table_columns(conn, table)))
-        for table in required_columns
-    }
-    missing_columns = {table: columns for table, columns in missing_columns.items() if columns}
-    if missing_columns:
-        return {
-            "status": "skipped_invalid_schema",
-            "tables": _FORWARD_MARKET_REQUIRED_TABLES,
-            "missing_columns": missing_columns,
-        }
-
-    counts = {
-        "market_events_inserted": 0,
-        "market_events_unchanged": 0,
-        "market_events_conflicted": 0,
-        "price_rows_inserted": 0,
-        "price_rows_unchanged": 0,
-        "price_rows_conflicted": 0,
-        "markets_skipped_missing_facts": 0,
-        "outcomes_skipped_missing_facts": 0,
-        "prices_skipped_missing_facts": 0,
-        "outcomes_skipped_with_outcome_fact": 0,
-    }
-
-    for market in markets:
-        if not isinstance(market, dict):
-            counts["markets_skipped_missing_facts"] += 1
-            continue
-        market_slug = _forward_clean_str(market.get("slug"))
-        city = _forward_city_name(market.get("city"))
-        target_date = _forward_clean_str(market.get("target_date"))
-        temperature_metric = _forward_metric(market.get("temperature_metric"))
-        if not (market_slug and city and target_date and temperature_metric):
-            counts["markets_skipped_missing_facts"] += 1
-            continue
-
-        hours_since_open = _forward_float(market.get("hours_since_open"))
-        hours_to_resolution = _forward_float(market.get("hours_to_resolution"))
-
-        for outcome in market.get("outcomes") or ():
-            if not isinstance(outcome, dict):
-                counts["outcomes_skipped_missing_facts"] += 1
-                continue
-            if _forward_clean_str(outcome.get("outcome")) is not None:
-                counts["outcomes_skipped_with_outcome_fact"] += 1
-                continue
-
-            condition_id = _forward_clean_str(outcome.get("condition_id"))
-            yes_token = _forward_clean_str(outcome.get("token_id"))
-            range_label = _forward_clean_str(outcome.get("title"))
-            range_low = _forward_float(outcome.get("range_low"))
-            range_high = _forward_float(outcome.get("range_high"))
-            if not (
-                condition_id
-                and yes_token
-                and range_label
-                and (range_low is not None or range_high is not None)
-            ):
-                counts["outcomes_skipped_missing_facts"] += 1
-                continue
-
-            event_values = {
-                "market_slug": market_slug,
-                "city": city,
-                "target_date": target_date,
-                "temperature_metric": temperature_metric,
-                "condition_id": condition_id,
-                "token_id": yes_token,
-                "range_label": range_label,
-                "range_low": range_low,
-                "range_high": range_high,
-                "outcome": None,
-                "created_at": _forward_clean_str(
-                    market.get("created_at") or outcome.get("market_start_at")
-                ),
-                "recorded_at": recorded_at_value,
+    conn = sqlite3.connect(str(resolved_path), timeout=30)
+    conn.row_factory = sqlite3.Row
+    try:
+        missing_tables = [
+            table for table in _FORWARD_MARKET_REQUIRED_TABLES if not _table_exists(conn, table)
+        ]
+        if missing_tables:
+            return {
+                "status": "skipped_missing_tables",
+                "tables": _FORWARD_MARKET_REQUIRED_TABLES,
+                "missing_tables": tuple(missing_tables),
             }
-            event_result = _insert_forward_market_event(conn, event_values)
-            if event_result == "resolved_existing":
-                counts["outcomes_skipped_with_outcome_fact"] += 1
-                continue
-            if event_result == "conflict":
-                counts["market_events_conflicted"] += 1
-                continue
-            counts[f"market_events_{event_result}"] += 1
 
-            for token_key, price_key in (("token_id", "price"), ("no_token_id", "no_price")):
-                token_id = _forward_clean_str(outcome.get(token_key))
-                price = _forward_price(outcome.get(price_key))
-                if token_id is None or price is None:
-                    counts["prices_skipped_missing_facts"] += 1
+        required_columns = {
+            "market_events_v2": set(_FORWARD_MARKET_EVENT_COLUMNS),
+            "market_price_history": set(_FORWARD_PRICE_HISTORY_COLUMNS),
+        }
+        missing_columns = {
+            table: tuple(sorted(required_columns[table] - _table_columns(conn, table)))
+            for table in required_columns
+        }
+        missing_columns = {table: columns for table, columns in missing_columns.items() if columns}
+        if missing_columns:
+            return {
+                "status": "skipped_invalid_schema",
+                "tables": _FORWARD_MARKET_REQUIRED_TABLES,
+                "missing_columns": missing_columns,
+            }
+
+        counts = {
+            "market_events_inserted": 0,
+            "market_events_unchanged": 0,
+            "market_events_conflicted": 0,
+            "price_rows_inserted": 0,
+            "price_rows_unchanged": 0,
+            "price_rows_conflicted": 0,
+            "markets_skipped_missing_facts": 0,
+            "outcomes_skipped_missing_facts": 0,
+            "prices_skipped_missing_facts": 0,
+            "outcomes_skipped_with_outcome_fact": 0,
+        }
+
+        for market in markets:
+            if not isinstance(market, dict):
+                counts["markets_skipped_missing_facts"] += 1
+                continue
+            market_slug = _forward_clean_str(market.get("slug"))
+            city = _forward_city_name(market.get("city"))
+            target_date = _forward_clean_str(market.get("target_date"))
+            temperature_metric = _forward_metric(market.get("temperature_metric"))
+            if not (market_slug and city and target_date and temperature_metric):
+                counts["markets_skipped_missing_facts"] += 1
+                continue
+
+            hours_since_open = _forward_float(market.get("hours_since_open"))
+            hours_to_resolution = _forward_float(market.get("hours_to_resolution"))
+
+            for outcome in market.get("outcomes") or ():
+                if not isinstance(outcome, dict):
+                    counts["outcomes_skipped_missing_facts"] += 1
                     continue
-                price_values = {
+                if _forward_clean_str(outcome.get("outcome")) is not None:
+                    counts["outcomes_skipped_with_outcome_fact"] += 1
+                    continue
+
+                condition_id = _forward_clean_str(outcome.get("condition_id"))
+                yes_token = _forward_clean_str(outcome.get("token_id"))
+                range_label = _forward_clean_str(outcome.get("title"))
+                range_low = _forward_float(outcome.get("range_low"))
+                range_high = _forward_float(outcome.get("range_high"))
+                if not (
+                    condition_id
+                    and yes_token
+                    and range_label
+                    and (range_low is not None or range_high is not None)
+                ):
+                    counts["outcomes_skipped_missing_facts"] += 1
+                    continue
+
+                event_values = {
                     "market_slug": market_slug,
-                    "token_id": token_id,
-                    "price": price,
+                    "city": city,
+                    "target_date": target_date,
+                    "temperature_metric": temperature_metric,
+                    "condition_id": condition_id,
+                    "token_id": yes_token,
+                    "range_label": range_label,
+                    "range_low": range_low,
+                    "range_high": range_high,
+                    "outcome": None,
+                    "created_at": _forward_clean_str(
+                        market.get("created_at") or outcome.get("market_start_at")
+                    ),
                     "recorded_at": recorded_at_value,
-                    "hours_since_open": hours_since_open,
-                    "hours_to_resolution": hours_to_resolution,
                 }
-                price_result = _insert_forward_price_history(conn, price_values)
-                price_key_name = "price_rows_conflicted" if price_result == "conflict" else f"price_rows_{price_result}"
-                counts[price_key_name] += 1
+                event_result = _insert_forward_market_event(conn, event_values)
+                if event_result == "resolved_existing":
+                    counts["outcomes_skipped_with_outcome_fact"] += 1
+                    continue
+                if event_result == "conflict":
+                    counts["market_events_conflicted"] += 1
+                    continue
+                counts[f"market_events_{event_result}"] += 1
+
+                for token_key, price_key in (("token_id", "price"), ("no_token_id", "no_price")):
+                    token_id = _forward_clean_str(outcome.get(token_key))
+                    price = _forward_price(outcome.get(price_key))
+                    if token_id is None or price is None:
+                        counts["prices_skipped_missing_facts"] += 1
+                        continue
+                    price_values = {
+                        "market_slug": market_slug,
+                        "token_id": token_id,
+                        "price": price,
+                        "recorded_at": recorded_at_value,
+                        "hours_since_open": hours_since_open,
+                        "hours_to_resolution": hours_to_resolution,
+                    }
+                    price_result = _insert_forward_price_history(conn, price_values)
+                    price_key_name = "price_rows_conflicted" if price_result == "conflict" else f"price_rows_{price_result}"
+                    counts[price_key_name] += 1
+
+        conn.commit()
+    finally:
+        conn.close()
 
     status = "written"
     if counts["market_events_conflicted"] or counts["price_rows_conflicted"]:

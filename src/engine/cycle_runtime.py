@@ -2365,7 +2365,6 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
             from src.state.db import log_forward_market_substrate
 
             result = log_forward_market_substrate(
-                conn,
                 markets=markets_to_record,
                 recorded_at=decision_time.isoformat(),
                 scan_authority=authority,

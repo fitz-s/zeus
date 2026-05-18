@@ -21,9 +21,11 @@ from __future__ import annotations
 
 import json
 import inspect
+import os
 import re
 import sqlite3
 import sys
+import tempfile
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
@@ -228,11 +230,7 @@ def _complete_release_evidence(prefix: str = "docs/operations/source_transition"
     return release_evidence
 
 
-def _make_forward_substrate_conn() -> sqlite3.Connection:
-    conn = sqlite3.connect(":memory:")
-    conn.row_factory = sqlite3.Row
-    conn.executescript(
-        """
+_FORWARD_SUBSTRATE_DDL = """
         CREATE TABLE market_events_v2 (
             event_id INTEGER PRIMARY KEY AUTOINCREMENT,
             market_slug TEXT NOT NULL,
@@ -266,9 +264,31 @@ def _make_forward_substrate_conn() -> sqlite3.Connection:
             condition_id TEXT,
             UNIQUE(token_id, recorded_at)
         );
-        """
-    )
+"""
+
+
+def _make_forward_substrate_conn() -> sqlite3.Connection:
+    """Legacy helper for tests that only need an in-memory conn (not the substrate writer)."""
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(_FORWARD_SUBSTRATE_DDL)
     return conn
+
+
+def _make_forward_substrate_db() -> "tuple[str, sqlite3.Connection]":
+    """K1-A fix: returns (db_path, conn) for a temp file-backed substrate DB.
+
+    log_forward_market_substrate now opens its own conn to _db_path. Tests pass
+    _db_path=db_path so the function writes to the same temp file that the test
+    conn can inspect. Temp file is cleaned up after the test process exits.
+    """
+    fd, db_path = tempfile.mkstemp(suffix=".db", prefix="fms_test_")
+    os.close(fd)
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    conn.executescript(_FORWARD_SUBSTRATE_DDL)
+    conn.commit()
+    return db_path, conn
 
 
 def _make_full_linkage_conn() -> sqlite3.Connection:
@@ -2799,21 +2819,19 @@ class TestForwardMarketSubstrateProducer:
         assert "market_source_contract_topology_status" in source
 
     def test_forward_substrate_writes_verified_scanner_rows_without_unblocking_economics(
-        self, monkeypatch
+        self,
     ):
-        """Verified Gamma scanner facts populate only market/price substrate."""
-        monkeypatch.setattr(
-            state_db,
-            "get_connection",
-            lambda *_a, **_kw: pytest.fail("writer must not open a default DB"),
-        )
-        conn = _make_forward_substrate_conn()
+        """Verified Gamma scanner facts populate only market/price substrate.
+
+        K1-A fix: writer opens its own forecasts conn; _db_path routes to temp file.
+        """
+        db_path, conn = _make_forward_substrate_db()
 
         result = log_forward_market_substrate(
-            conn,
             markets=[_forward_market()],
             recorded_at="2026-04-29T16:00:00Z",
             scan_authority="VERIFIED",
+            _db_path=db_path,
         )
 
         assert result["status"] == "written"
@@ -2960,32 +2978,36 @@ class TestForwardMarketSubstrateProducer:
 
     def test_forward_substrate_skips_when_required_tables_are_absent(self):
         """Capability-absent behavior is fail-loud and does not create tables."""
-        conn = sqlite3.connect(":memory:")
-        conn.row_factory = sqlite3.Row
+        fd, db_path = tempfile.mkstemp(suffix=".db", prefix="fms_empty_test_")
+        os.close(fd)
 
         result = log_forward_market_substrate(
-            conn,
             markets=[_forward_market()],
             recorded_at="2026-04-29T16:00:00Z",
             scan_authority="VERIFIED",
+            _db_path=db_path,
         )
 
         assert result["status"] == "skipped_missing_tables"
         assert set(result["missing_tables"]) == {"market_events_v2", "market_price_history"}
-        assert conn.execute(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type='table'"
-        ).fetchone()[0] == 0
+        check_conn = sqlite3.connect(db_path)
+        try:
+            assert check_conn.execute(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table'"
+            ).fetchone()[0] == 0
+        finally:
+            check_conn.close()
 
     @pytest.mark.parametrize("authority", ["STALE", "EMPTY_FALLBACK", "", None])
     def test_forward_substrate_refuses_degraded_scan_authority(self, authority):
         """Only a fresh VERIFIED scan can create forward market substrate."""
-        conn = _make_forward_substrate_conn()
+        db_path, conn = _make_forward_substrate_db()
 
         result = log_forward_market_substrate(
-            conn,
             markets=[_forward_market()],
             recorded_at="2026-04-29T16:00:00Z",
             scan_authority=authority,
+            _db_path=db_path,
         )
 
         assert result["status"] == "refused_degraded_authority"
@@ -2994,7 +3016,7 @@ class TestForwardMarketSubstrateProducer:
 
     def test_forward_substrate_refuses_missing_identity_or_range_facts(self):
         """Missing condition/token/range facts are not inferred from neighbors."""
-        conn = _make_forward_substrate_conn()
+        db_path, conn = _make_forward_substrate_db()
         market = _forward_market()
         market["outcomes"] = [
             {
@@ -3019,10 +3041,10 @@ class TestForwardMarketSubstrateProducer:
         ]
 
         result = log_forward_market_substrate(
-            conn,
             markets=[market],
             recorded_at="2026-04-29T16:00:00Z",
             scan_authority="VERIFIED",
+            _db_path=db_path,
         )
 
         assert result["status"] == "skipped_no_valid_rows"
@@ -3032,18 +3054,18 @@ class TestForwardMarketSubstrateProducer:
 
     def test_forward_substrate_is_idempotent_and_does_not_overwrite_conflicts(self):
         """Repeated facts are unchanged; conflicting token-time facts are reported."""
-        conn = _make_forward_substrate_conn()
+        db_path, conn = _make_forward_substrate_db()
         first = log_forward_market_substrate(
-            conn,
             markets=[_forward_market()],
             recorded_at="2026-04-29T16:00:00Z",
             scan_authority="VERIFIED",
+            _db_path=db_path,
         )
         second = log_forward_market_substrate(
-            conn,
             markets=[_forward_market()],
             recorded_at="2026-04-29T16:00:00Z",
             scan_authority="VERIFIED",
+            _db_path=db_path,
         )
 
         assert first["status"] == "written"
@@ -3056,10 +3078,10 @@ class TestForwardMarketSubstrateProducer:
         conflicting = _forward_market()
         conflicting["outcomes"][0]["price"] = 0.99
         conflict = log_forward_market_substrate(
-            conn,
             markets=[conflicting],
             recorded_at="2026-04-29T16:00:00Z",
             scan_authority="VERIFIED",
+            _db_path=db_path,
         )
 
         assert conflict["status"] == "written_with_conflicts"
@@ -3076,7 +3098,7 @@ class TestForwardMarketSubstrateProducer:
 
     def test_forward_substrate_does_not_append_prices_for_resolved_events(self):
         """A resolved market_events_v2 row is not unresolved scanner substrate."""
-        conn = _make_forward_substrate_conn()
+        db_path, conn = _make_forward_substrate_db()
         conn.execute(
             """
             INSERT INTO market_events_v2 (
@@ -3101,14 +3123,15 @@ class TestForwardMarketSubstrateProducer:
                 "2026-04-29T15:00:00Z",
             ),
         )
+        conn.commit()  # must commit so the function's own conn sees this pre-existing row
         market = _forward_market()
         market["outcomes"] = [market["outcomes"][0]]
 
         result = log_forward_market_substrate(
-            conn,
             markets=[market],
             recorded_at="2026-04-29T16:00:00Z",
             scan_authority="VERIFIED",
+            _db_path=db_path,
         )
 
         assert result["status"] == "skipped_no_valid_rows"
@@ -3118,14 +3141,14 @@ class TestForwardMarketSubstrateProducer:
 
     def test_forward_substrate_does_not_append_prices_for_event_identity_conflicts(self):
         """Rejected event identity conflicts cannot create orphan price facts."""
-        conn = _make_forward_substrate_conn()
+        db_path, conn = _make_forward_substrate_db()
         market = _forward_market()
         market["outcomes"] = [market["outcomes"][0]]
         first = log_forward_market_substrate(
-            conn,
             markets=[market],
             recorded_at="2026-04-29T16:00:00Z",
             scan_authority="VERIFIED",
+            _db_path=db_path,
         )
         assert first["status"] == "written"
         assert first["market_events_inserted"] == 1
@@ -3136,10 +3159,10 @@ class TestForwardMarketSubstrateProducer:
         conflicting["outcomes"][0]["token_id"] = "yes-conflicting-token"
         conflicting["outcomes"][0]["no_token_id"] = "no-conflicting-token"
         conflict = log_forward_market_substrate(
-            conn,
             markets=[conflicting],
             recorded_at="2026-04-29T16:00:00Z",
             scan_authority="VERIFIED",
+            _db_path=db_path,
         )
 
         assert conflict["status"] == "written_with_conflicts"

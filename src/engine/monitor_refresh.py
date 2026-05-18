@@ -1051,7 +1051,7 @@ def _check_persistence_anomaly(
             # (city, target_date) would silently match and produce a cross-
             # metric delta anyway.
             row = conn.execute(
-                "SELECT settlement_value FROM settlements "
+                "SELECT settlement_value FROM forecasts.settlements_v2 "
                 "WHERE city = ? AND target_date = ? "
                 "AND temperature_metric = 'high' "
                 "AND authority = 'VERIFIED' LIMIT 1",
@@ -1066,7 +1066,8 @@ def _check_persistence_anomaly(
 
         if not deltas:
             logger.warning(
-                "PERSISTENCE_CHECK_DISABLED: all 3 recent settlement days NULL for %s/%s — returning 1.0 (no discount)",
+                "PERSISTENCE_FALLBACK_TRIGGERED: all 3 recent settlement days NULL "
+                "in forecasts.settlements_v2 for %s/%s — returning 1.0 (no discount)",
                 city_name, target_date,
             )
             return 1.0
@@ -1075,7 +1076,7 @@ def _check_persistence_anomaly(
         bucket = _delta_bucket(delta)
 
         freq_row = conn.execute(
-            "SELECT frequency, n_samples FROM temp_persistence "
+            "SELECT frequency, n_samples FROM world.temp_persistence "
             "WHERE city = ? AND season = ? AND delta_bucket = ?",
             (city_name, season, bucket),
         ).fetchone()

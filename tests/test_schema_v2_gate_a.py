@@ -19,7 +19,9 @@ First commit that should turn these green: executor Phase 2 implementation commi
 """
 from __future__ import annotations
 
+import os
 import sqlite3
+import tempfile
 import unittest
 
 import pytest
@@ -386,10 +388,16 @@ class TestApplyV2SchemaSmoke(unittest.TestCase):
         self.assertEqual(1, conn.execute("PRAGMA foreign_keys").fetchone()[0])
 
     def test_forward_market_substrate_writer_works_after_apply_v2_schema(self):
-        """Schema owner DDL unlocks the explicit-connection writer in memory only."""
-        conn = _apply_and_get_conn()
+        """Schema owner DDL unlocks the substrate writer via _db_path (K1-A fix)."""
+        from src.state.schema.v2_schema import apply_v2_schema  # noqa: PLC0415
+        fd, db_path = tempfile.mkstemp(suffix=".db", prefix="gate_a_test_")
+        os.close(fd)
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        apply_v2_schema(conn)
+        conn.commit()
+
         result = log_forward_market_substrate(
-            conn,
             markets=[
                 {
                     "slug": "highest-temperature-in-chicago-on-april-30-2026",
@@ -415,6 +423,7 @@ class TestApplyV2SchemaSmoke(unittest.TestCase):
             ],
             recorded_at="2026-04-29T16:00:00Z",
             scan_authority="VERIFIED",
+            _db_path=db_path,
         )
 
         self.assertEqual("written", result["status"])
