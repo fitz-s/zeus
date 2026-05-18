@@ -62,9 +62,12 @@ def _make_v2_snapshots_db(causality_status: str = "OK") -> sqlite3.Connection:
 
 
 def _make_legacy_snapshots_db() -> sqlite3.Connection:
-    """In-memory DB with ensemble_snapshots (legacy) table, including temperature_metric."""
+    """In-memory DB for R-DA.* tests. v1.F20: _store_ens_snapshot now requires
+    ensemble_snapshots_v2; legacy table kept for schema tests that still reference it.
+    """
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
+    # Legacy table — kept for R-DA.1 schema test; _store_ens_snapshot no longer writes here.
     conn.execute("""
         CREATE TABLE ensemble_snapshots (
             snapshot_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -83,6 +86,37 @@ def _make_legacy_snapshots_db() -> sqlite3.Connection:
             authority TEXT NOT NULL DEFAULT 'VERIFIED',
             temperature_metric TEXT NOT NULL DEFAULT 'high',
             UNIQUE(city, target_date, issue_time, data_version)
+        )
+    """)
+    # v2 table required by _store_ens_snapshot (v1.F20 canonical write target).
+    conn.execute("""
+        CREATE TABLE ensemble_snapshots_v2 (
+            snapshot_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            city TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            temperature_metric TEXT NOT NULL,
+            physical_quantity TEXT NOT NULL DEFAULT 'temperature',
+            observation_field TEXT NOT NULL DEFAULT 'max',
+            issue_time TEXT,
+            valid_time TEXT,
+            available_at TEXT NOT NULL,
+            fetch_time TEXT NOT NULL,
+            lead_hours REAL NOT NULL DEFAULT 0.0,
+            members_json TEXT NOT NULL DEFAULT '[]',
+            spread REAL,
+            is_bimodal INTEGER NOT NULL DEFAULT 0,
+            model_version TEXT NOT NULL DEFAULT 'ifs',
+            data_version TEXT NOT NULL DEFAULT 'live_v1',
+            training_allowed INTEGER NOT NULL DEFAULT 0,
+            causality_status TEXT NOT NULL DEFAULT 'OK',
+            boundary_ambiguous INTEGER NOT NULL DEFAULT 0,
+            provenance_json TEXT,
+            authority TEXT NOT NULL DEFAULT 'VERIFIED',
+            members_unit TEXT,
+            unit TEXT,
+            p_raw_json TEXT,
+            bias_corrected INTEGER NOT NULL DEFAULT 0,
+            UNIQUE(city, target_date, temperature_metric, issue_time, data_version)
         )
     """)
     conn.commit()
@@ -326,8 +360,9 @@ class TestRDALegacyMetricColumn:
         from src.engine.evaluator import _store_ens_snapshot
         _store_ens_snapshot(conn, city, "2026-01-01", ens, ens_result)
 
+        # v1.F20: _store_ens_snapshot writes to ensemble_snapshots_v2 (legacy removed)
         row = conn.execute(
-            "SELECT temperature_metric FROM ensemble_snapshots WHERE city='NYC' LIMIT 1"
+            "SELECT temperature_metric FROM ensemble_snapshots_v2 WHERE city='NYC' LIMIT 1"
         ).fetchone()
         assert row is not None, "R-DA.2: snapshot row must exist after _store_ens_snapshot"
         assert row["temperature_metric"] == "low", (
@@ -362,8 +397,9 @@ class TestRDALegacyMetricColumn:
         from src.engine.evaluator import _store_ens_snapshot
         _store_ens_snapshot(conn, city, "2026-01-01", ens, ens_result)
 
+        # v1.F20: _store_ens_snapshot writes to ensemble_snapshots_v2 (legacy removed)
         row = conn.execute(
-            "SELECT temperature_metric FROM ensemble_snapshots WHERE city='NYC' LIMIT 1"
+            "SELECT temperature_metric FROM ensemble_snapshots_v2 WHERE city='NYC' LIMIT 1"
         ).fetchone()
         assert row is not None, "R-DA.3: snapshot row must exist after _store_ens_snapshot"
         assert row["temperature_metric"] == "high", (

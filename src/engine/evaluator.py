@@ -3845,16 +3845,6 @@ def _snapshot_valid_time_value(target_date: str, ens_result: dict) -> Optional[s
     return None
 
 
-def _ensemble_snapshots_table(conn) -> str:
-    try:
-        row = conn.execute(
-            "SELECT 1 FROM world.sqlite_master WHERE type = 'table' AND name = 'ensemble_snapshots'"
-        ).fetchone()
-    except Exception:
-        return "ensemble_snapshots"
-    return "world.ensemble_snapshots" if row is not None else "ensemble_snapshots"
-
-
 def _attached_table_exists(conn, schema: str, table: str) -> bool:
     try:
         row = conn.execute(
@@ -3917,164 +3907,10 @@ def _snapshot_identity_matches(
     )
 
 
-def _snapshot_identity_matches_conflict_key(
-    row,
-    *,
-    city,
-    target_date: str,
-    temperature_metric: str,
-    data_version: str,
-    issue_time: str | None,
-) -> bool:
-    """Identity check using ONLY ensemble_snapshots_v2's ON CONFLICT key.
-
-    Mirrors ON CONFLICT(city, target_date, temperature_metric, issue_time,
-    data_version) on the v2 table. Mutable fields (model_version, available_at,
-    fetch_time, valid_time, ...) are intentionally excluded so legacy
-    projection can mirror v2's UPDATE-on-conflict instead of fail-closing
-    when the same snapshot is refreshed in-cycle.
-    """
-    return (
-        row is not None
-        and row["city"] == city.name
-        and row["target_date"] == target_date
-        and row["temperature_metric"] == temperature_metric
-        and row["data_version"] == data_version
-        and row["issue_time"] == issue_time
-    )
-
-
-def _legacy_snapshot_projection_row(conn, legacy_table: str, snapshot_id: str):
-    return conn.execute(f"""
-        SELECT city, target_date, issue_time, valid_time, available_at,
-               fetch_time, model_version, data_version, temperature_metric
-        FROM {legacy_table}
-        WHERE snapshot_id = ?
-    """, (snapshot_id,)).fetchone()
-
-
-def _ensure_legacy_snapshot_projection(
-    conn,
-    *,
-    legacy_table: str,
-    snapshot_id: str,
-    city,
-    target_date: str,
-    issue_time: str | None,
-    valid_time: str | None,
-    available_at: str,
-    fetch_time: str,
-    lead_hours: float,
-    members_json: str,
-    spread: float,
-    is_bimodal: int,
-    model_version: str,
-    data_version: str,
-    authority: str,
-    temperature_metric: str,
-) -> None:
-    existing = _legacy_snapshot_projection_row(conn, legacy_table, snapshot_id)
-    if existing is not None:
-        # Codex P1 follow-up to PR #37: ensemble_snapshots_v2 INSERT uses
-        #   ON CONFLICT(city, target_date, temperature_metric, issue_time,
-        #               data_version)
-        #   DO UPDATE SET model_version, available_at, fetch_time, valid_time,
-        #                 lead_hours, members_json, spread, is_bimodal, ...
-        # so the same snapshot_id is reused whenever a snapshot is refreshed
-        # in-cycle. The legacy projection must mirror that upsert. Otherwise
-        # any mid-cycle ensemble refresh raises a spurious identity mismatch
-        # and aborts ENS storage for the rest of the cycle — which is the
-        # same halt-class failure mode PR #40 removed for the oracle gate.
-        #
-        # Conflict-key fields stay immutable: a different city / target_date /
-        # temperature_metric / issue_time / data_version under the same
-        # snapshot_id is genuine row reuse and remains a fail-closed error.
-        if not _snapshot_identity_matches_conflict_key(
-            existing,
-            city=city,
-            target_date=target_date,
-            temperature_metric=temperature_metric,
-            data_version=data_version,
-            issue_time=issue_time,
-        ):
-            raise ValueError(
-                "legacy ensemble snapshot projection refused: snapshot_id "
-                f"{snapshot_id} already belongs to {existing['city']}/"
-                f"{existing['target_date']}/{existing['temperature_metric']}"
-            )
-        conn.execute(f"""
-            UPDATE {legacy_table}
-            SET model_version = ?,
-                available_at = ?,
-                fetch_time = ?,
-                valid_time = ?,
-                lead_hours = ?,
-                members_json = ?,
-                spread = ?,
-                is_bimodal = ?,
-                authority = ?
-            WHERE snapshot_id = ?
-        """, (
-            model_version,
-            available_at,
-            fetch_time,
-            valid_time,
-            lead_hours,
-            members_json,
-            spread,
-            is_bimodal,
-            authority,
-            snapshot_id,
-        ))
-        return
-
-    conn.execute(f"""
-        INSERT INTO {legacy_table}
-        (snapshot_id, city, target_date, issue_time, valid_time, available_at,
-         fetch_time, lead_hours, members_json, spread, is_bimodal,
-         model_version, data_version, authority, temperature_metric)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (
-        snapshot_id,
-        city.name,
-        target_date,
-        issue_time,
-        valid_time,
-        available_at,
-        fetch_time,
-        lead_hours,
-        members_json,
-        spread,
-        is_bimodal,
-        model_version,
-        data_version,
-        authority,
-        temperature_metric,
-    ))
-    inserted = _legacy_snapshot_projection_row(conn, legacy_table, snapshot_id)
-    if not _snapshot_identity_matches(
-        inserted,
-        city=city,
-        target_date=target_date,
-        temperature_metric=temperature_metric,
-        data_version=data_version,
-        model_version=model_version,
-        issue_time=issue_time,
-        valid_time=valid_time,
-        available_at=available_at,
-        fetch_time=fetch_time,
-    ):
-        raise ValueError(
-            "legacy ensemble snapshot projection verification failed for "
-            f"snapshot_id {snapshot_id}"
-        )
-
-
 def _store_ens_snapshot(conn, city, target_date, ens, ens_result) -> str:
     """Store every ENS fetch and return the snapshot_id."""
 
     try:
-        legacy_table = _ensemble_snapshots_table(conn)
         v2_table = _ensemble_snapshots_v2_table(conn)
         issue_time_value = _snapshot_issue_time_value(ens_result)
         valid_time_value = _snapshot_valid_time_value(target_date, ens_result)
@@ -4140,7 +3976,6 @@ def _store_ens_snapshot(conn, city, target_date, ens, ens_result) -> str:
             "authority_tier": ens_result.get("authority_tier"),
             "degradation_level": degradation_level,
             "forecast_source_role": source_role,
-            "legacy_projection_table": legacy_table,
         }, sort_keys=True)
         lead_hours = max(
             0.0,
@@ -4236,78 +4071,15 @@ def _store_ens_snapshot(conn, city, target_date, ens, ens_result) -> str:
             snapshot_id = str(row["snapshot_id"]) if row is not None else ""
             if not snapshot_id:
                 raise ValueError(
-                    "canonical ensemble_snapshots_v2 insert/lookup failed; "
-                    "refusing to fall back to legacy ensemble_snapshots authority"
+                    "canonical ensemble_snapshots_v2 insert/lookup failed"
                 )
-            _ensure_legacy_snapshot_projection(
-                conn,
-                legacy_table=legacy_table,
-                snapshot_id=snapshot_id,
-                city=city,
-                target_date=target_date,
-                issue_time=issue_time_value,
-                valid_time=valid_time_value,
-                available_at=available_at_value,
-                fetch_time=fetch_time_value,
-                lead_hours=lead_hours,
-                members_json=members_json,
-                spread=spread,
-                is_bimodal=is_bimodal,
-                model_version=model_version,
-                data_version=data_version,
-                authority=authority,
-                temperature_metric=snap_metric,
-            )
         else:
-            conn.execute(f"""
-                INSERT OR IGNORE INTO {legacy_table}
-                (city, target_date, issue_time, valid_time, available_at, fetch_time,
-                 lead_hours, members_json, spread, is_bimodal, model_version,
-                 data_version, authority, temperature_metric)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                city.name,
-                target_date,
-                issue_time_value,
-                valid_time_value,
-                available_at_value,
-                fetch_time_value,
-                lead_hours,
-                members_json,
-                spread,
-                is_bimodal,
-                model_version,
-                data_version,
-                authority,
-                snap_metric,
-            ))
-            row = conn.execute(f"""
-                SELECT snapshot_id FROM {legacy_table}
-                WHERE city = ?
-                  AND target_date = ?
-                  AND data_version = ?
-                  AND temperature_metric = ?
-                  AND model_version = ?
-                  AND available_at = ?
-                  AND fetch_time = ?
-                  AND ((issue_time IS NULL AND ? IS NULL) OR issue_time = ?)
-                  AND ((valid_time IS NULL AND ? IS NULL) OR valid_time = ?)
-                ORDER BY snapshot_id DESC
-                LIMIT 1
-            """, (
-                city.name,
-                target_date,
-                data_version,
-                snap_metric,
-                model_version,
-                available_at_value,
-                fetch_time_value,
-                issue_time_value,
-                issue_time_value,
-                valid_time_value,
-                valid_time_value,
-            )).fetchone()
-            snapshot_id = str(row["snapshot_id"]) if row is not None else ""
+            # v1.F20: ensemble_snapshots_v2 is the only accepted writer target.
+            # No legacy ensemble_snapshots fallback; fail closed if v2 is absent.
+            raise ValueError(
+                "_store_ens_snapshot requires ensemble_snapshots_v2 to be "
+                "available (v1.F20: legacy ensemble_snapshots removed)"
+            )
         conn.commit()
         return snapshot_id
     except Exception as e:
@@ -4403,102 +4175,51 @@ def _store_snapshot_p_raw(
                     raise ValueError(
                         "p_raw_topology fusion status does not match executable_mask"
                     )
-        snapshots_table = _ensemble_snapshots_table(conn)
         v2_table = _ensemble_snapshots_v2_table(conn)
-        if v2_table:
-            v2_row = conn.execute(f"""
-                SELECT city, target_date, issue_time, valid_time, available_at,
-                       fetch_time, model_version, data_version, temperature_metric,
-                       provenance_json
-                FROM {v2_table}
-                WHERE snapshot_id = ?
-            """, (snapshot_id,)).fetchone()
-            if v2_row is None:
-                if topology_payload and bool(topology_payload.get("requires_atomic_topology")):
-                    raise ValueError(
-                        "canonical p_raw_topology persistence requires ensemble_snapshots_v2 "
-                        f"for partial-executable support snapshot_id {snapshot_id}"
-                    )
-                result = conn.execute(
-                    f"UPDATE {snapshots_table} SET p_raw_json = ?, bias_corrected = ? WHERE snapshot_id = ?",
-                    (p_raw_json, int(bias_corrected), snapshot_id),
-                )
-                if result.rowcount != 1:
-                    raise ValueError(
-                        "legacy-only ensemble_snapshots p_raw update affected "
-                        f"{result.rowcount} rows for snapshot_id {snapshot_id}"
-                    )
-                conn.commit()
-                return True
-            if topology_payload is not None:
-                try:
-                    provenance = json.loads(v2_row["provenance_json"] or "{}")
-                except (TypeError, json.JSONDecodeError):
-                    provenance = {}
-                if not isinstance(provenance, dict):
-                    provenance = {}
-                provenance["p_raw_topology"] = topology_payload
-                provenance_json = json.dumps(provenance, sort_keys=True)
-                result = conn.execute(
-                    f"UPDATE {v2_table} SET p_raw_json = ?, provenance_json = ? WHERE snapshot_id = ?",
-                    (p_raw_json, provenance_json, snapshot_id),
-                )
-            else:
-                result = conn.execute(
-                    f"UPDATE {v2_table} SET p_raw_json = ? WHERE snapshot_id = ?",
-                    (p_raw_json, snapshot_id),
-                )
-            if result.rowcount != 1:
+        if not v2_table:
+            # v1.F20: legacy ensemble_snapshots removed; fail closed if v2 absent.
+            raise ValueError(
+                "_store_snapshot_p_raw requires ensemble_snapshots_v2 to be "
+                "available (v1.F20: legacy ensemble_snapshots removed)"
+            )
+        v2_row = conn.execute(f"""
+            SELECT city, target_date, issue_time, valid_time, available_at,
+                   fetch_time, model_version, data_version, temperature_metric,
+                   provenance_json
+            FROM {v2_table}
+            WHERE snapshot_id = ?
+        """, (snapshot_id,)).fetchone()
+        if v2_row is None:
+            if topology_payload and bool(topology_payload.get("requires_atomic_topology")):
                 raise ValueError(
-                    "canonical ensemble_snapshots_v2 p_raw update affected "
-                    f"{result.rowcount} rows for snapshot_id {snapshot_id}"
+                    "canonical p_raw_topology persistence requires ensemble_snapshots_v2 "
+                    f"for partial-executable support snapshot_id {snapshot_id}"
                 )
-            result = conn.execute(f"""
-                UPDATE {snapshots_table}
-                SET p_raw_json = ?, bias_corrected = ?
-                WHERE snapshot_id = ?
-                  AND city = ?
-                  AND target_date = ?
-                  AND data_version = ?
-                  AND temperature_metric = ?
-                  AND model_version = ?
-                  AND available_at = ?
-                  AND fetch_time = ?
-                  AND ((issue_time IS NULL AND ? IS NULL) OR issue_time = ?)
-                  AND ((valid_time IS NULL AND ? IS NULL) OR valid_time = ?)
-            """, (
-                p_raw_json,
-                int(bias_corrected),
-                snapshot_id,
-                v2_row["city"],
-                v2_row["target_date"],
-                v2_row["data_version"],
-                v2_row["temperature_metric"],
-                v2_row["model_version"],
-                v2_row["available_at"],
-                v2_row["fetch_time"],
-                v2_row["issue_time"],
-                v2_row["issue_time"],
-                v2_row["valid_time"],
-                v2_row["valid_time"],
-            ))
-            if result.rowcount != 1:
-                if v2_table.startswith("forecasts.") and result.rowcount == 0:
-                    conn.commit()
-                    return True
-                raise ValueError(
-                    "legacy ensemble_snapshots p_raw projection update affected "
-                    f"{result.rowcount} rows for canonical snapshot_id {snapshot_id}"
-                )
-            conn.commit()
-            return True
-        result = conn.execute(
-            f"UPDATE {snapshots_table} SET p_raw_json = ?, bias_corrected = ? WHERE snapshot_id = ?",
-            (p_raw_json, int(bias_corrected), snapshot_id),
-        )
+            raise ValueError(
+                f"ensemble_snapshots_v2 row not found for snapshot_id {snapshot_id}; "
+                "cannot persist p_raw (v1.F20: no legacy fallback)"
+            )
+        if topology_payload is not None:
+            try:
+                provenance = json.loads(v2_row["provenance_json"] or "{}")
+            except (TypeError, json.JSONDecodeError):
+                provenance = {}
+            if not isinstance(provenance, dict):
+                provenance = {}
+            provenance["p_raw_topology"] = topology_payload
+            provenance_json = json.dumps(provenance, sort_keys=True)
+            result = conn.execute(
+                f"UPDATE {v2_table} SET p_raw_json = ?, provenance_json = ? WHERE snapshot_id = ?",
+                (p_raw_json, provenance_json, snapshot_id),
+            )
+        else:
+            result = conn.execute(
+                f"UPDATE {v2_table} SET p_raw_json = ? WHERE snapshot_id = ?",
+                (p_raw_json, snapshot_id),
+            )
         if result.rowcount != 1:
             raise ValueError(
-                "legacy ensemble_snapshots p_raw update affected "
+                "canonical ensemble_snapshots_v2 p_raw update affected "
                 f"{result.rowcount} rows for snapshot_id {snapshot_id}"
             )
         conn.commit()

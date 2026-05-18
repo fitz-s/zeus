@@ -485,13 +485,9 @@ tables:
     created_by: init_schema
     pk_col: null
 
-  - name: ensemble_snapshots
-    db: world
-    schema_class: world_class
-    schema_version_owner: SCHEMA_VERSION
-    created_by: init_schema
-    pk_col: null
-    notes: Pre-v2 ensemble snapshots (legacy on world.db). v2 is ensemble_snapshots_v2 on forecasts.db.
+  # v1.F20 (2026-05-18): ensemble_snapshots removed — table dropped via
+  # scripts/migrations/202605_drop_ensemble_snapshots_legacy.py. Canonical
+  # table is ensemble_snapshots_v2 on forecasts.db (see forecast_class section).
 
   - name: exchange_reconcile_findings
     db: world

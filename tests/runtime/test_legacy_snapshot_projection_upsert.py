@@ -1,15 +1,13 @@
 # Created: 2026-05-02
-# Last reused/audited: 2026-05-02
-# Authority basis: Codex P1 follow-up to PR #37 — evaluator.py:3156 area.
-#                  ensemble_snapshots_v2 INSERT uses ON CONFLICT(city,
-#                  target_date, temperature_metric, issue_time, data_version)
-#                  DO UPDATE SET available_at, fetch_time, model_version,
-#                  valid_time, ... so the same snapshot_id keeps getting
-#                  served whenever a snapshot is refreshed in-cycle. The
-#                  legacy ensemble_snapshots projection must mirror that
-#                  upsert; otherwise refreshing a snapshot raises a spurious
-#                  identity mismatch and aborts ENS storage.
+# Last reused/audited: 2026-05-18
+# Authority basis: Codex P1 follow-up to PR #37 — v1.F20 supersedes: legacy
+#   dual-write and _ensure_legacy_snapshot_projection removed. This file is
+#   retired; tests below are skipped. The live behavior is now v2-only.
 """Regression antibody: legacy snapshot projection mirrors v2 upsert.
+
+RETIRED by v1.F20 (2026-05-18): _ensure_legacy_snapshot_projection and
+_snapshot_identity_matches_conflict_key removed from evaluator.py.
+All tests in this file are skipped.
 
 Pre-fix behaviour: second call to ``_store_ens_snapshot`` with the same
 conflict-key tuple but a different ``model_version`` / ``available_at`` /
@@ -30,8 +28,17 @@ import json
 from datetime import datetime, timezone
 
 import numpy as np
+import pytest
 
 import src.engine.evaluator as evaluator_module
+
+pytestmark = pytest.mark.skip(
+    reason=(
+        "v1.F20 (2026-05-18): _ensure_legacy_snapshot_projection and "
+        "_snapshot_identity_matches_conflict_key removed from evaluator.py. "
+        "Legacy dual-write is retired. Tests in this file are no longer valid."
+    )
+)
 from src.config import City
 from src.state.db import get_connection, init_schema
 from src.types.metric_identity import HIGH_LOCALDAY_MAX

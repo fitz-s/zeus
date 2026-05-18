@@ -826,7 +826,7 @@ def get_connection(
 # CI hook scripts/check_schema_version.py diffs the sqlite_master hash of
 # a fresh-init DB against tests/state/_schema_pinned_hash.txt and fails
 # the PR if SCHEMA_VERSION did not change in lockstep.
-SCHEMA_VERSION = 7  # 2026-05-18 v1.F1: db_chunk_boundary_events registered in init_schema (world_class DDL gap fixed)
+SCHEMA_VERSION = 8  # 2026-05-18 v1.F20: ensemble_snapshots DDL, index, FK, and ALTER TABLE migrations removed (table dropped)
 
 
 def init_schema(
@@ -994,34 +994,11 @@ def init_schema(
             timestamp TEXT NOT NULL
         );
 
-        -- Zeus core: ENS snapshots with 4-timestamp constraint
-        -- Spec §9.2: issue_time, valid_time, available_at, fetch_time
-        CREATE TABLE IF NOT EXISTS ensemble_snapshots (
-            snapshot_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            city TEXT NOT NULL,
-            target_date TEXT NOT NULL,
-            issue_time TEXT,
-            valid_time TEXT,
-            available_at TEXT NOT NULL,
-            fetch_time TEXT NOT NULL,
-            lead_hours REAL NOT NULL,
-            members_json TEXT NOT NULL,
-            p_raw_json TEXT,
-            spread REAL,
-            is_bimodal INTEGER,
-            model_version TEXT NOT NULL,
-            data_version TEXT NOT NULL,
-            authority TEXT NOT NULL DEFAULT 'VERIFIED',
-            temperature_metric TEXT NOT NULL DEFAULT 'high',
-            -- Slice P2-B1 (PR #19 phase 2, 2026-04-26): bias_corrected
-            -- declared explicitly. Pre-fix, the column was added only via
-            -- the ALTER TABLE migration block below, so fresh init_schema
-            -- DBs (CI, dev, in-memory test fixtures) lacked it while
-            -- _store_snapshot_p_raw silently expected it. Cross-environment
-            -- fragility surfaced as runtime_guards test failures.
-            bias_corrected INTEGER NOT NULL DEFAULT 0 CHECK (bias_corrected IN (0, 1)),
-            UNIQUE(city, target_date, issue_time, data_version)
-        );
+        -- v1.F20 (2026-05-18): ensemble_snapshots (legacy world-class) removed.
+        -- Canonical table is ensemble_snapshots_v2 in zeus-forecasts.db (K1 split).
+        -- DROP migration: scripts/migrations/202605_drop_ensemble_snapshots_legacy.py
+        -- DDL removed here to prevent recreating the table on every boot after
+        -- the operator runs the DROP migration.
 
         -- Calibration: raw → calibrated probability pairs
         CREATE TABLE IF NOT EXISTS calibration_pairs (
@@ -1088,7 +1065,7 @@ def init_schema(
             size_usd REAL NOT NULL,
             price REAL NOT NULL,
             timestamp TEXT NOT NULL,
-            forecast_snapshot_id INTEGER REFERENCES ensemble_snapshots(snapshot_id),
+            forecast_snapshot_id INTEGER,  -- v1.F20: soft ref to ensemble_snapshots_v2.snapshot_id (cross-DB, no FK constraint)
             calibration_model_version TEXT,
             p_raw REAL NOT NULL,
             p_calibrated REAL,
@@ -1472,8 +1449,7 @@ def init_schema(
             ON token_price_log(token_id, timestamp);
         CREATE INDEX IF NOT EXISTS idx_market_events_slug
             ON market_events(market_slug);
-        CREATE INDEX IF NOT EXISTS idx_ensemble_city_date
-            ON ensemble_snapshots(city, target_date, available_at);
+        -- v1.F20: idx_ensemble_city_date removed (ensemble_snapshots table dropped).
         CREATE INDEX IF NOT EXISTS idx_calibration_bucket
             ON calibration_pairs(cluster, season);
 
@@ -2095,11 +2071,8 @@ def init_schema(
         # DELETE path in rebuild_calibration_pairs_canonical.py can target
         # WHERE bin_source='canonical_v1' without LIKE blast radius.
         "ALTER TABLE calibration_pairs ADD COLUMN bin_source TEXT NOT NULL DEFAULT 'legacy';",
-        # Slice P2-B1 (PR #19 phase 2, 2026-04-26): idempotent migration
-        # for legacy DBs predating the CREATE TABLE addition above. Wrapped
-        # in try/except OperationalError; safe to no-op when column already
-        # exists. Default 0 matches `int(False)` from _store_snapshot_p_raw.
-        "ALTER TABLE ensemble_snapshots ADD COLUMN bias_corrected INTEGER NOT NULL DEFAULT 0;",
+        # v1.F20 (2026-05-18): ALTER TABLE ensemble_snapshots ADD COLUMN bias_corrected removed.
+        # ensemble_snapshots table dropped; migration no longer applicable.
     ]:
         try:
             conn.execute(ddl)
@@ -2380,18 +2353,8 @@ def init_schema(
         if "duplicate column" not in str(exc).lower():
             raise  # Column already exists — idempotent re-run
 
-    # P10D S3 (eve C2 inversion): add temperature_metric to legacy ensemble_snapshots.
-    # ensemble_snapshots_v2 has zero runtime writers; skipping legacy writes for LOW
-    # would destroy snapshot persistence (harvester joins on snapshot_id from legacy
-    # table). Add temperature_metric column here so LOW rows are distinguishable.
-    # Additive column — safe on existing DBs (idempotent; OperationalError = already present).
-    try:
-        conn.execute(
-            "ALTER TABLE ensemble_snapshots ADD COLUMN temperature_metric TEXT NOT NULL DEFAULT 'high';"
-        )
-    except sqlite3.OperationalError as exc:
-        if "duplicate column" not in str(exc).lower():
-            raise  # Column already exists — idempotent re-run
+    # v1.F20 (2026-05-18): ALTER TABLE ensemble_snapshots ADD COLUMN temperature_metric removed.
+    # ensemble_snapshots table dropped; migration no longer applicable.
 
     # v1.F1 (2026-05-18): db_chunk_boundary_events DDL registration.
     # The table is declared world_class in architecture/db_table_ownership.yaml
@@ -4916,16 +4879,33 @@ def _coerce_snapshot_fk(value) -> Optional[int]:
 
 
 def _local_legacy_snapshot_fk(conn: sqlite3.Connection, value) -> Optional[int]:
+    """Resolve a snapshot id reference for trade_decisions.forecast_snapshot_id.
+
+    v1.F20 (2026-05-18): the legacy ensemble_snapshots table was dropped. The
+    canonical table is ensemble_snapshots_v2 in zeus-forecasts.db, which is
+    ATTACHed as 'forecasts' by get_trade_connection_with_world().
+
+    Validates existence in forecasts.ensemble_snapshots_v2 when available;
+    falls back to trusting the coerced id when the ATTACH is absent (e.g.
+    non-trade connections in tests). Returns None only when value is absent
+    or the snapshot row genuinely does not exist.
+    """
     snapshot_id = _coerce_snapshot_fk(value)
     if snapshot_id is None:
         return None
-    if not _table_exists(conn, "ensemble_snapshots"):
-        return None
-    row = conn.execute(
-        "SELECT 1 FROM ensemble_snapshots WHERE snapshot_id = ? LIMIT 1",
-        (snapshot_id,),
-    ).fetchone()
-    return snapshot_id if row is not None else None
+    # Primary path: validate against forecasts.ensemble_snapshots_v2 (K1 canonical).
+    # Use try/except rather than _table_exists() because that helper only queries
+    # sqlite_master in the *main* schema, not in ATTACHed schemas (forecasts.*).
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM forecasts.ensemble_snapshots_v2 WHERE snapshot_id = ? LIMIT 1",
+            (snapshot_id,),
+        ).fetchone()
+        return snapshot_id if row is not None else None
+    except sqlite3.OperationalError:
+        # forecasts schema not attached (test monolithic DB or non-trade connection).
+        # Trust the coerced id — the caller is responsible for ensuring it is valid.
+        return snapshot_id
 
 
 def _normalize_opportunity_availability_status(value: str) -> str:
