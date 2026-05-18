@@ -1,3 +1,7 @@
+# Created: 2026-04-21
+# Last reused/audited: 2026-05-18
+# Authority basis: Day0 real-time observation; F3 PR 2/3 typed temperature
+#                  boundary per Path A (src/types/temperature.py).
 """Real-time observation client for Day0 signal.
 
 Executable Day0 observations are settlement-source-bound. Diagnostic fallbacks
@@ -22,6 +26,7 @@ import httpx
 from src.config import City
 from src.contracts.exceptions import MissingCalibrationError, ObservationUnavailableError
 from src.data.openmeteo_quota import quota_tracker
+from src.types.temperature import Fahrenheit
 
 
 @dataclass(frozen=True, slots=True)
@@ -381,9 +386,12 @@ def _fetch_iem_asos(
             return None
 
         ob = data["last_ob"]
-        temp_f = ob["tmpf"]
-        if temp_f is None:
+        # F3 PR 2/3: IEM ASOS endpoint returns °F for WU ICAO stations.
+        # Tag at API parse boundary as Fahrenheit.
+        raw_tmpf = ob["tmpf"]
+        if raw_tmpf is None:
             return None
+        temp_f = Fahrenheit(float(raw_tmpf))
 
         local_valid = ob.get("local_valid")
         observed_local = _parse_local_timestamp(local_valid, tz)

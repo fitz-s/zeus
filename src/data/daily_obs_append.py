@@ -1,3 +1,7 @@
+# Created: 2026-04-21
+# Last reused/audited: 2026-05-18
+# Authority basis: K2 live ingestion; F3 PR 2/3 typed temperature boundary
+#                  per Path A (src/types/temperature.py).
 """K2 live daily-observation appender (WU ICAO + HKO + Ogimet METAR/SYNOP).
 
 Replaces the broken `src/data/wu_daily_collector.py` for live ingestion of
@@ -86,6 +90,7 @@ from src.state.data_coverage import (
     record_written,
 )
 from src.types.observation_atom import ObservationAtom
+from src.types.temperature import Celsius
 
 logger = logging.getLogger(__name__)
 
@@ -394,7 +399,8 @@ def _accumulate_hko_reading(conn) -> bool:
         return False
 
     try:
-        temp_c = float(hko_reading)
+        # F3 PR 2/3: HKO API is always native °C. Tag at parse boundary.
+        temp_c = Celsius(float(hko_reading))
     except (TypeError, ValueError):
         logger.warning("HKO rhrread: non-numeric temperature value: %r", hko_reading)
         return False
