@@ -35,6 +35,7 @@ import argparse
 import logging
 import sqlite3
 import sys
+from contextlib import nullcontext
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -168,55 +169,52 @@ def run_migration(db_path: Path = DEFAULT_DB, dry_run: bool = False) -> dict:
     if not db_path.exists():
         return {"status": "noop_db_not_found", "db": str(db_path)}
 
-    lock_ctx = db_writer_lock(db_path, WriteClass.BULK) if not dry_run else None
-    if lock_ctx is not None:
-        lock_ctx.__enter__()
-    conn = sqlite3.connect(db_path)
-    # Gate WAL mode behind not-dry-run: PRAGMA journal_mode=WAL persists on disk
-    # and creates -wal/-shm sidecar files even in read-only inspection runs
-    # (PR #89 Copilot fix).
-    if not dry_run:
-        conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA foreign_keys=OFF")  # required for rename+recreate
-
-    try:
-        if not _check_needs_migration(conn):
-            return {"status": "noop_already_migrated", "db": str(db_path)}
-
-        logger.info("Migration needed — starting transaction.")
-
+    lock_ctx = db_writer_lock(db_path, WriteClass.BULK) if not dry_run else nullcontext()
+    with lock_ctx:
+        conn = sqlite3.connect(db_path)
+        # Gate WAL mode behind not-dry-run: PRAGMA journal_mode=WAL persists on disk
+        # and creates -wal/-shm sidecar files even in read-only inspection runs
+        # (PR #89 Copilot fix).
         if not dry_run:
-            conn.execute("BEGIN IMMEDIATE")
+            conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA foreign_keys=OFF")  # required for rename+recreate
 
-        # 1. backtest_runs (no FK dependencies from it; outcome_comparison refs it)
-        runs_count = _migrate_table(conn, "backtest_runs", CREATE_BACKTEST_RUNS_NEW, dry_run)
+        try:
+            if not _check_needs_migration(conn):
+                return {"status": "noop_already_migrated", "db": str(db_path)}
 
-        # 2. backtest_outcome_comparison (has FK → backtest_runs; FK is OFF so safe)
-        oc_count = _migrate_table(
-            conn, "backtest_outcome_comparison", CREATE_BACKTEST_OUTCOME_COMPARISON_NEW, dry_run
-        )
+            logger.info("Migration needed — starting transaction.")
 
-        # 3. Recreate indexes (dropped with the old table)
-        if not dry_run:
-            for idx_sql in CREATE_INDEXES:
-                conn.execute(idx_sql)
-            conn.execute("COMMIT")
-            conn.execute("PRAGMA foreign_keys=ON")
+            if not dry_run:
+                conn.execute("BEGIN IMMEDIATE")
 
-        return {
-            "status": "dry_run" if dry_run else "migrated",
-            "db": str(db_path),
-            "backtest_runs_rows": runs_count,
-            "backtest_outcome_comparison_rows": oc_count,
-        }
-    except Exception:
-        if not dry_run:
-            conn.execute("ROLLBACK")
-        raise
-    finally:
-        conn.close()
-        if lock_ctx is not None:
-            lock_ctx.__exit__(None, None, None)
+            # 1. backtest_runs (no FK dependencies from it; outcome_comparison refs it)
+            runs_count = _migrate_table(conn, "backtest_runs", CREATE_BACKTEST_RUNS_NEW, dry_run)
+
+            # 2. backtest_outcome_comparison (has FK → backtest_runs; FK is OFF so safe)
+            oc_count = _migrate_table(
+                conn, "backtest_outcome_comparison", CREATE_BACKTEST_OUTCOME_COMPARISON_NEW, dry_run
+            )
+
+            # 3. Recreate indexes (dropped with the old table)
+            if not dry_run:
+                for idx_sql in CREATE_INDEXES:
+                    conn.execute(idx_sql)
+                conn.execute("COMMIT")
+                conn.execute("PRAGMA foreign_keys=ON")
+
+            return {
+                "status": "dry_run" if dry_run else "migrated",
+                "db": str(db_path),
+                "backtest_runs_rows": runs_count,
+                "backtest_outcome_comparison_rows": oc_count,
+            }
+        except Exception:
+            if not dry_run:
+                conn.execute("ROLLBACK")
+            raise
+        finally:
+            conn.close()
 
 
 def main() -> None:
