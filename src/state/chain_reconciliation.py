@@ -19,6 +19,7 @@ from decimal import Decimal, InvalidOperation
 from src.state.chain_state import ChainState, classify_chain_state
 from src.state.lifecycle_manager import (
     enter_chain_quarantined_runtime_state,
+    phase_for_runtime_position,
     rescue_pending_runtime_state,
 )
 from src.state.portfolio import INACTIVE_RUNTIME_STATES, QUARANTINE_SENTINEL, Position, PortfolioState, void_position
@@ -556,6 +557,74 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                 f"reconciliation lifecycle sync failed for {position.trade_id}: {exc}"
             ) from exc
 
+    def _sync_voided_position(
+        position,
+        *,
+        phase_before: str | None,
+        reason: str,
+        token_id: str,
+    ) -> None:
+        if conn is None:
+            return
+        try:
+            import json
+
+            from src.engine.lifecycle_events import build_position_current_projection
+            from src.state.db import append_many_and_project
+
+            trade_id = str(getattr(position, "trade_id", "") or "")
+            if not trade_id:
+                return
+            occurred_at = getattr(position, "last_exit_at", "") or datetime.now(timezone.utc).isoformat()
+            sequence_no = _next_canonical_sequence_no(trade_id)
+            projection = build_position_current_projection(position)
+            projection["updated_at"] = occurred_at
+            if projection.get("phase") != "voided":
+                raise RuntimeError(
+                    f"void projection for {trade_id} resolved to {projection.get('phase')!r}"
+                )
+            env = str(getattr(position, "env", "") or "live")
+            if env not in {"live", "test", "replay", "backtest", "shadow"}:
+                env = "live"
+            event = {
+                "event_id": f"{trade_id}:chain_void:{sequence_no}",
+                "position_id": trade_id,
+                "event_version": 1,
+                "sequence_no": sequence_no,
+                "event_type": "ADMIN_VOIDED",
+                "occurred_at": occurred_at,
+                "phase_before": phase_before,
+                "phase_after": "voided",
+                "strategy_key": str(
+                    getattr(position, "strategy_key", "")
+                    or getattr(position, "strategy", "")
+                    or ""
+                ),
+                "decision_id": None,
+                "snapshot_id": getattr(position, "decision_snapshot_id", "") or None,
+                "order_id": getattr(position, "order_id", "") or None,
+                "command_id": None,
+                "caused_by": "chain_reconciliation",
+                "idempotency_key": f"{trade_id}:chain_void:{sequence_no}",
+                "venue_status": "voided",
+                "source_module": "src.state.chain_reconciliation",
+                "env": env,
+                "payload_json": json.dumps(
+                    {
+                        "reason": reason,
+                        "token_id": token_id,
+                        "chain_state": getattr(position, "chain_state", ""),
+                    },
+                    default=str,
+                    sort_keys=True,
+                ),
+            }
+            append_many_and_project(conn, [event], projection)
+        except Exception as exc:
+            raise RuntimeError(
+                f"canonical phantom void sync failed for {getattr(position, 'trade_id', '?')}: {exc}"
+            ) from exc
+
     chain_by_token = {cp.token_id: cp for cp in chain_positions}
     local_tokens = set()
     stats = {
@@ -692,7 +761,21 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                 pos.trade_id,
                 tid,
             )
-            void_position(portfolio, pos.trade_id, "PHANTOM_NOT_ON_CHAIN")
+            phase_before = phase_for_runtime_position(
+                state=getattr(pos, "state", ""),
+                exit_state=getattr(pos, "exit_state", ""),
+                chain_state=getattr(pos, "chain_state", ""),
+            ).value
+            if phase_before == "unknown":
+                phase_before = None
+            voided = void_position(portfolio, pos.trade_id, "PHANTOM_NOT_ON_CHAIN")
+            if voided is not None:
+                _sync_voided_position(
+                    voided,
+                    phase_before=phase_before,
+                    reason="PHANTOM_NOT_ON_CHAIN",
+                    token_id=tid,
+                )
             stats["voided"] += 1
             stats["aggregate_phantom_voided"] = stats.get("aggregate_phantom_voided", 0) + 1
             continue
@@ -829,7 +912,21 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                 continue
             # Rule 2: Local but NOT on chain → VOID immediately
             logger.warning("PHANTOM: %s not on chain → voiding", pos.trade_id)
-            void_position(portfolio, pos.trade_id, "PHANTOM_NOT_ON_CHAIN")
+            phase_before = phase_for_runtime_position(
+                state=getattr(pos, "state", ""),
+                exit_state=getattr(pos, "exit_state", ""),
+                chain_state=getattr(pos, "chain_state", ""),
+            ).value
+            if phase_before == "unknown":
+                phase_before = None
+            voided = void_position(portfolio, pos.trade_id, "PHANTOM_NOT_ON_CHAIN")
+            if voided is not None:
+                _sync_voided_position(
+                    voided,
+                    phase_before=phase_before,
+                    reason="PHANTOM_NOT_ON_CHAIN",
+                    token_id=tid,
+                )
             stats["voided"] += 1
         else:
             local_shares = pos.effective_shares

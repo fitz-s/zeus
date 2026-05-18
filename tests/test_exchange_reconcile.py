@@ -2186,6 +2186,339 @@ def test_position_drift_visibility_floor_does_not_hide_material_drift(conn):
     assert '"confirmed_journal_size":"0.0101"' in position_findings[0].evidence_json
 
 
+def test_terminal_canonical_position_does_not_remain_current_journal_exposure(conn):
+    from src.execution.exchange_reconcile import (
+        record_finding,
+        refresh_unresolved_reconcile_findings,
+        run_reconcile_sweep,
+    )
+
+    token = "terminal-position-token"
+    seed_command(
+        conn,
+        command_id="cmd-terminal",
+        venue_order_id="ord-terminal",
+        position_id="pos-terminal",
+        token_id=token,
+        state="FILLED",
+    )
+    append_trade_fact(
+        conn,
+        command_id="cmd-terminal",
+        venue_order_id="ord-terminal",
+        token_id=token,
+        trade_id="trade-terminal",
+        size="10",
+        state="CONFIRMED",
+    )
+    seed_position_baseline(conn, position_id="pos-terminal", order_id="ord-terminal")
+    conn.execute(
+        """
+        UPDATE position_current
+           SET phase = 'voided',
+               token_id = ?,
+               shares = 10,
+               order_id = 'ord-terminal',
+               updated_at = ?
+         WHERE position_id = 'pos-terminal'
+        """,
+        (token, NOW.isoformat()),
+    )
+    observed = NOW + timedelta(minutes=10)
+    stale = record_finding(
+        conn,
+        kind="position_drift",
+        subject_id=token,
+        context="ws_gap",
+        evidence={"reason": "terminal_position_probe"},
+        recorded_at=observed - timedelta(minutes=1),
+    )
+
+    result = run_reconcile_sweep(
+        FakeM5Adapter(positions=[]),
+        conn,
+        context="ws_gap",
+        observed_at=observed,
+    )
+    refreshed = refresh_unresolved_reconcile_findings(
+        FakeM5Adapter(open_orders=[], trades=[], positions=[]),
+        conn,
+        observed_at=observed + timedelta(seconds=1),
+    )
+
+    assert not any(finding.kind == "position_drift" for finding in result)
+    assert refreshed["status"] == "resolved"
+    resolved = conn.execute(
+        "SELECT resolution, resolved_by FROM exchange_reconcile_findings WHERE finding_id = ?",
+        (stale.finding_id,),
+    ).fetchone()
+    assert dict(resolved) == {
+        "resolution": "position_drift_cleared",
+        "resolved_by": "src.execution.exchange_reconcile",
+    }
+
+
+def test_terminal_local_row_does_not_hide_positive_exchange_exposure(conn):
+    from src.execution.exchange_reconcile import run_reconcile_sweep
+
+    token = "terminal-row-exchange-positive-token"
+    seed_command(
+        conn,
+        command_id="cmd-terminal-positive",
+        venue_order_id="ord-terminal-positive",
+        position_id="pos-terminal-positive",
+        token_id=token,
+        state="FILLED",
+    )
+    append_trade_fact(
+        conn,
+        command_id="cmd-terminal-positive",
+        venue_order_id="ord-terminal-positive",
+        token_id=token,
+        trade_id="trade-terminal-positive",
+        size="10",
+        state="CONFIRMED",
+    )
+    seed_position_baseline(conn, position_id="pos-terminal-positive", order_id="ord-terminal-positive")
+    conn.execute(
+        """
+        UPDATE position_current
+           SET phase = 'voided',
+               token_id = ?,
+               shares = 10,
+               order_id = 'ord-terminal-positive',
+               updated_at = ?
+         WHERE position_id = 'pos-terminal-positive'
+        """,
+        (token, NOW.isoformat()),
+    )
+
+    result = run_reconcile_sweep(
+        FakeM5Adapter(positions=[position(token_id=token, size="10")]),
+        conn,
+        context="ws_gap",
+        observed_at=NOW + timedelta(minutes=10),
+    )
+
+    position_findings = [finding for finding in result if finding.kind == "position_drift"]
+    assert [finding.subject_id for finding in position_findings] == [token]
+    assert '"exchange_size":"10"' in position_findings[0].evidence_json
+    assert '"confirmed_journal_size":"0"' in position_findings[0].evidence_json
+
+
+def test_backoff_exhausted_chain_absent_pending_exit_admin_closes_canonical(conn):
+    from src.execution.exit_lifecycle import handle_exit_pending_missing
+    from src.state.portfolio import PortfolioState, Position
+
+    token = "backoff-chain-absent-token"
+    position_id = "pos-backoff-chain-absent"
+    seed_position_baseline(conn, position_id=position_id, order_id="ord-backoff-exit")
+    conn.execute(
+        """
+        UPDATE position_current
+           SET phase = 'pending_exit',
+               token_id = ?,
+               order_id = 'ord-backoff-exit',
+               order_status = 'backoff_exhausted',
+               shares = 4.95,
+               updated_at = ?
+         WHERE position_id = ?
+        """,
+        (token, NOW.isoformat(), position_id),
+    )
+    pos = Position(
+        trade_id=position_id,
+        market_id="condition-m5",
+        city="Karachi",
+        cluster="Karachi",
+        target_date="2026-05-17",
+        bin_label="test-bin",
+        direction="buy_yes",
+        unit="C",
+        env="live",
+        state="pending_exit",
+        exit_state="backoff_exhausted",
+        chain_state="exit_pending_missing",
+        token_id=token,
+        no_token_id=f"{token}-no",
+        condition_id="condition-m5",
+        order_id="ord-backoff-exit",
+        order_status="backoff_exhausted",
+        last_exit_order_id="ord-backoff-exit",
+        last_exit_error="exit_pending_missing",
+        shares=4.95,
+        cost_basis_usd=1.0,
+        entry_price=0.2,
+        strategy_key="opening_inertia",
+        strategy="opening_inertia",
+        edge_source="opening_inertia",
+        discovery_mode="opening_hunt",
+        decision_snapshot_id="snap-m5",
+        entered_at=NOW.isoformat(),
+    )
+    portfolio = PortfolioState(positions=[pos])
+
+    result = handle_exit_pending_missing(portfolio, pos, conn=conn)
+
+    current = conn.execute(
+        "SELECT phase, order_status FROM position_current WHERE position_id = ?",
+        (position_id,),
+    ).fetchone()
+    latest_event = conn.execute(
+        """
+        SELECT event_type, phase_after, source_module
+          FROM position_events
+         WHERE position_id = ?
+         ORDER BY sequence_no DESC
+         LIMIT 1
+        """,
+        (position_id,),
+    ).fetchone()
+    assert result["action"] == "closed"
+    assert result["position"].state == "admin_closed"
+    assert portfolio.positions == []
+    assert dict(current) == {"phase": "admin_closed", "order_status": "backoff_exhausted"}
+    assert dict(latest_event) == {
+        "event_type": "MANUAL_OVERRIDE_APPLIED",
+        "phase_after": "admin_closed",
+        "source_module": "src.execution.exit_lifecycle",
+    }
+
+
+def test_recoverable_exit_pending_missing_does_not_persist_admin_close(conn):
+    from src.execution.exit_lifecycle import handle_exit_pending_missing
+    from src.state.portfolio import PortfolioState, Position
+
+    token = "recoverable-chain-absent-token"
+    position_id = "pos-recoverable-chain-absent"
+    seed_position_baseline(conn, position_id=position_id, order_id="ord-recoverable-exit")
+    conn.execute(
+        """
+        UPDATE position_current
+           SET phase = 'pending_exit',
+               token_id = ?,
+               order_id = 'ord-recoverable-exit',
+               order_status = 'retry_pending',
+               shares = 4.95,
+               updated_at = ?
+         WHERE position_id = ?
+        """,
+        (token, NOW.isoformat(), position_id),
+    )
+    pos = Position(
+        trade_id=position_id,
+        market_id="condition-m5",
+        city="Karachi",
+        cluster="Karachi",
+        target_date="2026-05-17",
+        bin_label="test-bin",
+        direction="buy_yes",
+        unit="C",
+        env="live",
+        state="pending_exit",
+        exit_state="retry_pending",
+        chain_state="exit_pending_missing",
+        token_id=token,
+        no_token_id=f"{token}-no",
+        condition_id="condition-m5",
+        order_id="ord-recoverable-exit",
+        order_status="retry_pending",
+        last_exit_order_id="ord-recoverable-exit",
+        last_exit_error="exit_pending_missing",
+        shares=4.95,
+        cost_basis_usd=1.0,
+        entry_price=0.2,
+        strategy_key="opening_inertia",
+        strategy="opening_inertia",
+        edge_source="opening_inertia",
+        discovery_mode="opening_hunt",
+        decision_snapshot_id="snap-m5",
+        entered_at=NOW.isoformat(),
+    )
+
+    result = handle_exit_pending_missing(PortfolioState(positions=[pos]), pos, conn=conn)
+
+    current = conn.execute(
+        "SELECT phase FROM position_current WHERE position_id = ?",
+        (position_id,),
+    ).fetchone()
+    admin_events = conn.execute(
+        """
+        SELECT COUNT(*)
+          FROM position_events
+         WHERE position_id = ?
+           AND event_type = 'MANUAL_OVERRIDE_APPLIED'
+        """,
+        (position_id,),
+    ).fetchone()[0]
+    assert result["action"] == "closed"
+    assert current["phase"] == "pending_exit"
+    assert admin_events == 0
+
+
+def test_pending_exit_chain_missing_filled_order_is_not_current_journal_exposure(conn):
+    from src.execution.exchange_reconcile import record_finding, refresh_unresolved_reconcile_findings
+
+    token = "pending-exit-filled-missing-token"
+    seed_command(
+        conn,
+        command_id="cmd-pending-exit-filled",
+        venue_order_id="ord-pending-exit-filled",
+        position_id="pos-pending-exit-filled",
+        token_id=token,
+        side="BUY",
+        state="FILLED",
+    )
+    append_trade_fact(
+        conn,
+        command_id="cmd-pending-exit-filled",
+        venue_order_id="ord-pending-exit-filled",
+        token_id=token,
+        trade_id="trade-pending-exit-filled",
+        size="6",
+        state="CONFIRMED",
+    )
+    seed_position_baseline(conn, position_id="pos-pending-exit-filled", order_id="ord-pending-exit-filled")
+    conn.execute(
+        """
+        UPDATE position_current
+           SET phase = 'pending_exit',
+               chain_state = 'exit_pending_missing',
+               token_id = ?,
+               order_id = 'ord-pending-exit-filled',
+               order_status = 'filled',
+               shares = 6,
+               updated_at = ?
+         WHERE position_id = 'pos-pending-exit-filled'
+        """,
+        (token, NOW.isoformat()),
+    )
+    stale = record_finding(
+        conn,
+        kind="position_drift",
+        subject_id=token,
+        context="ws_gap",
+        evidence={"reason": "pending_exit_filled_chain_missing_probe"},
+        recorded_at=NOW - timedelta(minutes=1),
+    )
+
+    result = refresh_unresolved_reconcile_findings(
+        FakeM5Adapter(open_orders=[], trades=[], positions=[]),
+        conn,
+        observed_at=NOW,
+    )
+
+    resolved = conn.execute(
+        "SELECT resolution, resolved_by FROM exchange_reconcile_findings WHERE finding_id = ?",
+        (stale.finding_id,),
+    ).fetchone()
+    assert result["status"] == "resolved"
+    assert dict(resolved) == {
+        "resolution": "position_drift_cleared",
+        "resolved_by": "src.execution.exchange_reconcile",
+    }
+
+
 def test_pending_exit_matched_sell_offsets_confirmed_position_without_drift(conn):
     from src.execution.exchange_reconcile import run_reconcile_sweep
 

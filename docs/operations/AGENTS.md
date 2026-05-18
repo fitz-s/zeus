@@ -182,6 +182,8 @@ make a surface default-read unless `current_state.md` routes it.
 | `task_2026-05-18_wave3_dispatches/` | packet evidence container | Wave 3 Batch C per-finding accounting and critic verdict evidence for F85/F86/F89/F101 observability and heartbeat fixes |
 | `task_2026-05-18_wave3_dispatches/WAVE3_BATCH_C_PER_FINDING_ACCOUNTING.md` | packet accounting evidence | Per-finding accounting for Wave 3 Batch C observability and heartbeat findings |
 | `task_2026-05-18_wave3_dispatches/WAVE3_BATCH_C_CRITIC_VERDICT.md` | packet review evidence | Critic verdict for Wave 3 Batch C observability and heartbeat findings |
+| `task_2026-05-18_live_reduce_only_reconcile_loop/` | plan packet container | Planning packet for removing live reduce-only reconcile blockers through canonical lifecycle truth, not manual finding clearance |
+| `task_2026-05-18_live_reduce_only_reconcile_loop/LIVE_REDUCE_ONLY_RECONCILE_PLAN.md` | topology planning packet | Plan and evidence for canonical phantom void persistence, pending-exit chain-missing terminalization, and M5 current-exposure fold |
 | `LIVE_LAUNCH_HANDOFF.md` | Live launch handoff document for daemon deployment |
 | `docs/historical_evidence/UNMATCHED_GAMMA_CITIES_2026_05_07.md` | Unmatched gamma cities investigation evidence (2026-05-07) |
 | `docs/historical_evidence/CLOUD_EXTRACT_PATCH_2026_05_07.md` | Cloud extract patch evidence (2026-05-07) |

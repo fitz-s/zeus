@@ -20,6 +20,7 @@ from types import SimpleNamespace
 from typing import Any, Literal, Mapping, Optional
 
 from src.architecture.decorators import capability, protects
+from src.state.portfolio import INACTIVE_RUNTIME_STATES
 from src.state.venue_command_repo import trade_fact_has_positive_fill_economics
 
 logger = logging.getLogger(__name__)
@@ -67,6 +68,7 @@ _POSITION_API_VISIBILITY_FLOOR = Decimal("0.01")
 _ENTRY_FILL_PROJECTION_PHASES = frozenset({"pending_entry", "active", "day0_window"})
 _EXIT_FILL_PROJECTION_PHASES = frozenset({"active", "day0_window", "pending_exit", "economically_closed"})
 _TERMINAL_ORDER_FACT_STATES = frozenset({"MATCHED", "CANCEL_CONFIRMED", "EXPIRED", "VENUE_WIPED"})
+_PENDING_EXIT_NON_CURRENT_ORDER_STATUSES = frozenset({"filled", "sell_filled"})
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS exchange_reconcile_findings (
@@ -2473,20 +2475,38 @@ def _journal_positions_by_token(
     if not states:
         return {}
     selected_states = tuple(sorted(states))
-    placeholders = ", ".join("?" for _ in selected_states)
+    state_placeholders = ", ".join("?" for _ in selected_states)
+    inactive_phases = tuple(sorted(INACTIVE_RUNTIME_STATES))
+    inactive_placeholders = ", ".join("?" for _ in inactive_phases)
+    non_current_exit_statuses = tuple(sorted(_PENDING_EXIT_NON_CURRENT_ORDER_STATUSES))
+    non_current_exit_status_placeholders = ", ".join("?" for _ in non_current_exit_statuses)
     rows = conn.execute(
         f"""
         SELECT c.token_id, c.side, tf.filled_size, tf.fill_price
           FROM venue_trade_facts tf
           JOIN venue_commands c ON c.command_id = tf.command_id
+          LEFT JOIN position_current pc ON pc.position_id = c.position_id
          WHERE tf.local_sequence = (
                SELECT MAX(newer.local_sequence)
                  FROM venue_trade_facts newer
                 WHERE newer.trade_id = tf.trade_id
          )
-           AND tf.state IN ({placeholders})
+           AND tf.state IN ({state_placeholders})
+           AND (
+                c.position_id IS NULL
+                OR c.position_id = ''
+                OR pc.position_id IS NULL
+                OR (
+                    COALESCE(pc.phase, '') NOT IN ({inactive_placeholders})
+                    AND NOT (
+                        pc.phase = 'pending_exit'
+                        AND pc.chain_state = 'exit_pending_missing'
+                        AND LOWER(COALESCE(pc.order_status, '')) IN ({non_current_exit_status_placeholders})
+                    )
+                )
+           )
         """,
-        selected_states,
+        (*selected_states, *inactive_phases, *non_current_exit_statuses),
     ).fetchall()
     out: dict[str, Decimal] = {}
     for row in rows:
