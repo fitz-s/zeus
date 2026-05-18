@@ -157,6 +157,7 @@ raw/**/*.h5
 
 # Collected data corpus — local-only, not for public surface.
 /data/oracle_error_rates.json
+/data/oracle_error_rates.heartbeat.json
 /data/pm_settlement_truth.json
 /data/pm_settlements_full.json
 
