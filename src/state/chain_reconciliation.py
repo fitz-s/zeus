@@ -633,6 +633,12 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
     # Positions that the chain cannot cover are marked phantom and voided in
     # pass-2 (the per-position loop below) using PHANTOM_NOT_ON_CHAIN.
     phantom_set: set[str] = set()
+    # aggregate_backed_set: trade_ids confirmed backed by allocate_chain_truth.
+    # These must bypass per-position size-mismatch correction: their individual
+    # shares are correct; chain.size is the AGGREGATE across all lots for the
+    # token, not the per-lot size. Comparing chain.size vs pos.effective_shares
+    # for an aggregate-backed lot would trigger false quarantine (bot PR #141).
+    aggregate_backed_set: set[str] = set()
     if chain_state != ChainState.CHAIN_UNKNOWN:
         _token_to_positions: dict[str, list] = {}
         for _p in portfolio.positions:
@@ -664,6 +670,11 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
             _allocated, _phantoms = allocate_chain_truth(_positions, _chain_bal)
             for _ph in _phantoms:
                 phantom_set.add(_ph.trade_id)
+            # Only mark aggregate-backed when there are multiple lots for this
+            # token; single-lot positions are correctly compared against chain.size.
+            if len(_positions) > 1:
+                for _al in _allocated:
+                    aggregate_backed_set.add(_al.trade_id)
     # ────────────────────────────────────────────────────────────────────────
 
     for pos in list(portfolio.positions):
@@ -843,7 +854,18 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                     logger.warning("telemetry_counter event=cost_basis_chain_mutation_blocked_total field=cost_basis_usd")
                     _cnt_inc("cost_basis_chain_mutation_blocked_total", labels={"field": "size_usd"})
                     logger.warning("telemetry_counter event=cost_basis_chain_mutation_blocked_total field=size_usd")
-            if abs(chain.size - local_shares) > 0.01:
+            if pos.trade_id in aggregate_backed_set:
+                # Aggregate-backed: chain.size is the token aggregate across multiple
+                # lots; comparing it against this lot's shares would produce a false
+                # SIZE MISMATCH and quarantine. Allocation confirmed chain coverage;
+                # preserve local share count (bot finding PR #141).
+                logger.debug(
+                    "AGGREGATE_BACKED: %s skipping size-mismatch check (chain agg=%.4f, lot=%.4f)",
+                    pos.trade_id,
+                    chain.size,
+                    local_shares,
+                )
+            elif abs(chain.size - local_shares) > 0.01:
                 logger.warning("SIZE MISMATCH: %s local %.4f vs chain %.4f", pos.trade_id, local_shares, chain.size)
                 if not _size_mismatch_eligible:
                     corrected.shares = chain.size
