@@ -27,6 +27,15 @@ Unit-type invariant (Fitz Constraint #1 — "make the category impossible"):
     because their unit is determined at runtime by the ``measurement_unit``
     field set by ``for_city()``.  The ingest-boundary typed gate is PR 2/3
     scope.
+
+Scope limitation (Path A, accepted by operator 2026-05-18):
+  NewType-only does NOT block ``Celsius + Fahrenheit`` arithmetic.  mypy
+  treats NewTypes over ``float`` as ``float`` for operator dispatch, so
+  ``c + f`` where ``c: Celsius`` and ``f: Fahrenheit`` returns ``float``
+  without a type error.  Function SIGNATURE gates are the achievement here;
+  full in-body arithmetic prevention requires frozen-dataclass wrappers and
+  is deferred due to runtime cost in hot statistical loops.  See
+  ``src/types/temperature.py`` LIMITATION comment for the full rationale.
 """
 from abc import ABC, abstractmethod
 from dataclasses import dataclass

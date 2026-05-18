@@ -27,15 +27,27 @@ from scipy.stats import norm
 # ---------------------------------------------------------------------------
 # Celsius / Fahrenheit NewTypes (zero runtime cost — type-checker-only)
 #
-# Purpose: make Celsius + Fahrenheit un-typecheckable without an explicit
-# conversion.  Satisfies Fitz Constraint #1: "make the category impossible,
-# not just the instance."
+# Purpose: gate function SIGNATURES so callers cannot pass a raw float or a
+# wrongly-typed temperature where a specific unit is expected.  Satisfies
+# Fitz Constraint #1: "make the category impossible, not just the instance"
+# for the function-boundary case.
 #
 # Design: NewType over float (for float-valued paths) and over Decimal
 # (for settlement-precision paths where arithmetic must stay exact).
 # The Temperature class below remains for objects that carry unit as a runtime
 # field; NewTypes are for function-boundary annotation where the unit is
 # statically known.
+#
+# LIMITATION (F3 PR 1 — accepted by operator 2026-05-18):
+# NewType-only does NOT block `Celsius + Fahrenheit` arithmetic.  mypy
+# treats both NewTypes as `float` for operator dispatch (via float.__add__)
+# and the result is plain `float`, not a type error.  This means:
+#   BLOCKED:  def f(t: CelsiusDecimal) -> ...; f(plain_decimal)  -> mypy error
+#   NOT BLOCKED: c: Celsius; f: Fahrenheit; x = c + f  -> mypy accepts (float)
+# Full in-body arithmetic category-impossibility requires frozen-dataclass
+# wrappers with custom __add__ / __radd__ that raise at construction time.
+# That approach is deferred because of runtime cost in hot statistical loops.
+# The ingest-boundary typed gate (PR 2/3) is the next enforcement layer.
 # ---------------------------------------------------------------------------
 
 Celsius = NewType("Celsius", float)
