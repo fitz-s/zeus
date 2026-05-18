@@ -1,3 +1,6 @@
+# Created: 2026-05-18
+# Last reused or audited: 2026-05-18
+# Authority basis: G4_CLEANUP_DESIGN.md §2 L (Cluster L), src/data/AGENTS.md
 """K2 Physical-Clock WU Daily Scheduler.
 
 Replaces the fixed UTC 12:00 trigger with a per-city local-time schedule.
@@ -118,25 +121,54 @@ def dispatch_wu_daily_collection(
 def run_wu_daily_dispatch(now_utc: Optional[datetime] = None) -> None:
     """K2 ingest wrapper: collect WU daily observations for all eligible cities.
 
-    Combines dispatch_wu_daily_collection gating with append_daily_obs_for_city
-    execution. Called by main.py's _wu_daily_dispatch scheduler wrapper.
+    Gates per-city via WuDailyScheduler.should_collect_now, then calls
+    append_wu_city for each eligible city. Called by main.py's
+    _wu_daily_dispatch scheduler wrapper (hourly interval).
 
-    Lives in wu_scheduler.py (src.data) so that the K2 import
-    (src.data.daily_obs_append) stays out of src.main (Phase 3 boundary).
+    Lives in wu_scheduler.py (src.data) so that the K2 imports
+    (src.data.daily_obs_append, src.state.db) stay out of src.main
+    (Phase 3 boundary, antibody #8).
+
+    Note: src/ingest_main.py also wires daily_tick (which includes WU
+    collection). If both daemons run simultaneously, WU cities may be
+    collected twice per tick. Out-of-scope for this fix; tracked as
+    cluster-L duplicate-tick design issue.
     """
     import logging
 
-    from src.data.daily_obs_append import append_daily_obs_for_city
+    from src.config import cities_by_name
+    from src.data.daily_obs_append import append_wu_city
+    from src.state.db import get_world_connection
+
+    if now_utc is None:
+        now_utc = datetime.now(timezone.utc)
 
     logger = logging.getLogger(__name__)
     scheduler_instance = WuDailyScheduler()
-    targets = dispatch_wu_daily_collection(scheduler_instance, now_utc)
-    if not targets:
-        logger.debug("wu_daily_dispatch: no cities eligible this tick")
-        return
-    for city_name in targets:
+    rebuild_run_id = f"wu_daily_dispatch_{now_utc.strftime('%Y-%m-%dT%H:%M:%SZ')}"
+
+    conn = get_world_connection()
+    wu_totals = {"inserted": 0, "guard_rejected": 0, "fetch_errors": 0, "missing_from_api": 0}
+    collected = 0
+    for city_cfg in cities_by_name.values():
+        if city_cfg.settlement_source_type != "wu_icao":
+            continue
+        if not scheduler_instance.should_collect_now(city_cfg, now_utc):
+            continue
+        local_today = now_utc.astimezone(ZoneInfo(city_cfg.timezone)).date()
+        local_yesterday = local_today - timedelta(days=1)
         try:
-            append_daily_obs_for_city(city_name)
-            logger.info("wu_daily_dispatch: collected %s", city_name)
+            stats = append_wu_city(
+                city_cfg.name, [local_yesterday], conn, rebuild_run_id=rebuild_run_id,
+            )
+            for k in wu_totals:
+                wu_totals[k] += stats.get(k, 0)
+            collected += 1
+            logger.info("wu_daily_dispatch: collected %s (%s)", city_cfg.name, local_yesterday)
         except Exception as exc:  # noqa: BLE001
-            logger.error("wu_daily_dispatch: error for %s: %s", city_name, exc)
+            logger.error("wu_daily_dispatch: error for %s: %s", city_cfg.name, exc)
+
+    if not collected:
+        logger.debug("wu_daily_dispatch: no cities eligible this tick")
+    else:
+        logger.info("wu_daily_dispatch: %d cities, totals=%s", collected, wu_totals)
