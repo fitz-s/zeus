@@ -1,5 +1,5 @@
 # Created: 2026-05-17
-# Last reused or audited: 2026-05-17
+# Last reused/audited: 2026-05-17
 # Authority basis: STRUCTURAL_PLAN.md v3 §2 PR-S3 + B_patch_plan.md
 #
 # Relationship test: when Module A (position_current DB state) shows a non-terminal
@@ -30,7 +30,9 @@ OTHER_TOKEN = "0xother_token_yes"
 
 @pytest.fixture
 def mem_db():
-    """In-memory sqlite with minimal position_current + venue_trade_facts + venue_commands schema."""
+    """In-memory sqlite: position_current + venue_trade_facts + venue_commands.
+    Schema matches live NOT NULL constraints (direction, local_sequence, intent_kind).
+    """
     conn = sqlite3.connect(":memory:")
     conn.execute("""
         CREATE TABLE position_current (
@@ -40,6 +42,7 @@ def mem_db():
             market_id TEXT,
             city TEXT,
             bin_label TEXT,
+            direction TEXT NOT NULL DEFAULT 'buy_yes',
             token_id TEXT,
             no_token_id TEXT,
             updated_at TEXT NOT NULL
@@ -52,7 +55,8 @@ def mem_db():
             venue_order_id TEXT NOT NULL,
             command_id TEXT NOT NULL,
             state TEXT NOT NULL,
-            observed_at TEXT NOT NULL
+            observed_at TEXT NOT NULL,
+            local_sequence INTEGER NOT NULL DEFAULT 1
         )
     """)
     conn.execute("""
@@ -60,6 +64,7 @@ def mem_db():
             command_id TEXT PRIMARY KEY,
             position_id TEXT NOT NULL,
             token_id TEXT NOT NULL,
+            intent_kind TEXT NOT NULL DEFAULT 'EXIT',
             state TEXT NOT NULL
         )
     """)
@@ -67,12 +72,16 @@ def mem_db():
     return conn
 
 
-def _insert_position(conn, position_id, phase, token_id):
+def _insert_position(conn, position_id, phase, token_id, direction="buy_yes", no_token_id=None):
     conn.execute(
-        "INSERT INTO position_current VALUES (?,?,?,?,?,?,?,?,?)",
+        """INSERT INTO position_current
+           (position_id, phase, trade_id, market_id, city, bin_label,
+            direction, token_id, no_token_id, updated_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?)""",
         (
             position_id, phase, "trade-" + position_id, "mkt-1",
-            "London", "18°C", token_id, TOKEN_X_NO, "2026-05-17T22:13:38",
+            "London", "18°C", direction, token_id,
+            no_token_id or TOKEN_X_NO, "2026-05-17T22:13:38",
         ),
     )
     conn.commit()
@@ -133,6 +142,42 @@ def test_voided_position_allows_reentry(mem_db):
     assert has_same_token_open_db(mem_db, TOKEN_X) is False
 
 
+# ── buy_no token coverage (PR #143 bot review fix) ───────────────────────────────
+
+def test_buy_no_dedup_blocks_same_no_token(mem_db):
+    """
+    CATASTROPHIC fix: position_current.token_id stores the YES token.
+    For buy_no positions, the relevant token is no_token_id.
+    Gate must match on no_token_id to block duplicate NO entries.
+
+    GIVEN: buy_no position with no_token_id=TOKEN_X in pending_exit
+    WHEN:  has_same_token_open_db(conn, TOKEN_X)
+    THEN:  returns True → gate correctly blocks buy_no duplicate
+    """
+    # buy_no position: token_id=TOKEN_X_NO (YES side), no_token_id=TOKEN_X (NO side)
+    _insert_position(
+        mem_db, "buyno-pos-01", "pending_exit",
+        token_id=TOKEN_X_NO, direction="buy_no", no_token_id=TOKEN_X,
+    )
+    assert has_same_token_open_db(mem_db, TOKEN_X) is True, (
+        "buy_no position's no_token_id must be matched by the dedup gate"
+    )
+
+
+def test_buy_yes_does_not_block_existing_buy_no_on_different_token(mem_db):
+    """
+    Specificity: a buy_no position on TOKEN_X (as no_token_id) must NOT block
+    a buy_yes candidate for a different token (OTHER_TOKEN).
+    """
+    _insert_position(
+        mem_db, "buyno-pos-02", "pending_exit",
+        token_id=TOKEN_X_NO, direction="buy_no", no_token_id=TOKEN_X,
+    )
+    assert has_same_token_open_db(mem_db, OTHER_TOKEN) is False, (
+        "buy_no position on TOKEN_X must not block a candidate for OTHER_TOKEN"
+    )
+
+
 # ── phantom_not_on_chain (Bug #3 state) ─────────────────────────────────────────
 
 @pytest.mark.xfail(
@@ -171,12 +216,14 @@ def test_inflight_matched_exit_blocks_reentry(mem_db):
     _insert_position(mem_db, "pos-in-flight", "pending_exit", TOKEN_X)
     # venue_commands bridges command_id → token_id (UUID namespace, not short-ID)
     mem_db.execute(
-        "INSERT INTO venue_commands VALUES ('cmd-001', 'pos-in-flight', ?, 'open')",
+        "INSERT INTO venue_commands (command_id, position_id, token_id, intent_kind, state)"
+        " VALUES ('cmd-001', 'pos-in-flight', ?, 'EXIT', 'open')",
         (TOKEN_X,),
     )
     mem_db.execute(
-        "INSERT INTO venue_trade_facts VALUES "
-        "(1, 'trade-pos-in-flight', 'order-001', 'cmd-001', 'MATCHED', '2026-05-17T22:13:38')"
+        "INSERT INTO venue_trade_facts"
+        " (trade_fact_id, trade_id, venue_order_id, command_id, state, observed_at, local_sequence)"
+        " VALUES (1, 'trade-pos-in-flight', 'order-001', 'cmd-001', 'MATCHED', '2026-05-17T22:13:38', 1)"
     )
     mem_db.commit()
     assert has_inflight_exit_for_token(mem_db, TOKEN_X) is True
@@ -186,15 +233,77 @@ def test_confirmed_exit_does_not_block_via_inflight_check(mem_db):
     """CONFIRMED exits are terminal — must not trigger the in-flight gate."""
     _insert_position(mem_db, "pos-confirmed", "economically_closed", TOKEN_X)
     mem_db.execute(
-        "INSERT INTO venue_commands VALUES ('cmd-001', 'pos-confirmed', ?, 'closed')",
+        "INSERT INTO venue_commands (command_id, position_id, token_id, intent_kind, state)"
+        " VALUES ('cmd-001', 'pos-confirmed', ?, 'EXIT', 'closed')",
         (TOKEN_X,),
     )
     mem_db.execute(
-        "INSERT INTO venue_trade_facts VALUES "
-        "(1, 'trade-pos-confirmed', 'order-001', 'cmd-001', 'CONFIRMED', '2026-05-17T22:10:00')"
+        "INSERT INTO venue_trade_facts"
+        " (trade_fact_id, trade_id, venue_order_id, command_id, state, observed_at, local_sequence)"
+        " VALUES (1, 'trade-pos-confirmed', 'order-001', 'cmd-001', 'CONFIRMED', '2026-05-17T22:10:00', 1)"
     )
     mem_db.commit()
     assert has_inflight_exit_for_token(mem_db, TOKEN_X) is False
+
+
+def test_buy_entry_matched_does_not_trigger_inflight_gate(mem_db):
+    """
+    Fix #2: BUY confirmations (MATCHED/MINED) must NOT trigger the inflight gate.
+    Only EXIT-intent commands should block re-entry.
+
+    GIVEN: active position with a BUY command showing MATCHED in venue_trade_facts
+           (entry confirmation in-flight — not an exit)
+    WHEN:  has_inflight_exit_for_token(conn, TOKEN_X)
+    THEN:  returns False — ENTRY intents must not block new entries
+    """
+    _insert_position(mem_db, "pos-buying", "active", TOKEN_X)
+    mem_db.execute(
+        "INSERT INTO venue_commands (command_id, position_id, token_id, intent_kind, state)"
+        " VALUES ('cmd-buy-01', 'pos-buying', ?, 'ENTRY', 'open')",
+        (TOKEN_X,),
+    )
+    mem_db.execute(
+        "INSERT INTO venue_trade_facts"
+        " (trade_fact_id, trade_id, venue_order_id, command_id, state, observed_at, local_sequence)"
+        " VALUES (1, 'trade-buying', 'order-buy-01', 'cmd-buy-01', 'MATCHED', '2026-05-18T10:00:00', 1)"
+    )
+    mem_db.commit()
+    assert has_inflight_exit_for_token(mem_db, TOKEN_X) is False, (
+        "BUY-intent MATCHED fact must not trigger inflight exit gate"
+    )
+
+
+def test_historical_matched_row_superseded_by_confirmed_does_not_block(mem_db):
+    """
+    Fix #3: venue_trade_facts is append-only. An older MATCHED row for the same
+    command_id coexists with a newer CONFIRMED row. The NOT EXISTS subquery must
+    suppress the stale MATCHED row so the gate does not fire forever.
+
+    GIVEN: EXIT command with TWO rows — older MATCHED + newer CONFIRMED
+    WHEN:  has_inflight_exit_for_token(conn, TOKEN_X)
+    THEN:  returns False — CONFIRMED supersedes the historical MATCHED row
+    """
+    _insert_position(mem_db, "pos-settled", "economically_closed", TOKEN_X)
+    mem_db.execute(
+        "INSERT INTO venue_commands (command_id, position_id, token_id, intent_kind, state)"
+        " VALUES ('cmd-exit-02', 'pos-settled', ?, 'EXIT', 'closed')",
+        (TOKEN_X,),
+    )
+    # Insert MATCHED row first (seq 1), then CONFIRMED row (seq 2)
+    mem_db.execute(
+        "INSERT INTO venue_trade_facts"
+        " (trade_fact_id, trade_id, venue_order_id, command_id, state, observed_at, local_sequence)"
+        " VALUES (1, 'trade-settled', 'order-exit-02', 'cmd-exit-02', 'MATCHED', '2026-05-18T09:00:00', 1)"
+    )
+    mem_db.execute(
+        "INSERT INTO venue_trade_facts"
+        " (trade_fact_id, trade_id, venue_order_id, command_id, state, observed_at, local_sequence)"
+        " VALUES (2, 'trade-settled', 'order-exit-02', 'cmd-exit-02', 'CONFIRMED', '2026-05-18T09:00:30', 2)"
+    )
+    mem_db.commit()
+    assert has_inflight_exit_for_token(mem_db, TOKEN_X) is False, (
+        "Historical MATCHED row superseded by CONFIRMED must not re-trigger inflight gate"
+    )
 
 
 # ── OR-branch end-to-end: must fail when `or _inflight_exit` is removed ──────────
@@ -224,12 +333,14 @@ def test_evaluator_rejects_when_only_inflight_exit_present(mem_db):
 
     # Exit order still MATCHED in venue_trade_facts via venue_commands bridge
     mem_db.execute(
-        "INSERT INTO venue_commands VALUES ('cmd-settle', 'pos-promoted', ?, 'closing')",
+        "INSERT INTO venue_commands (command_id, position_id, token_id, intent_kind, state)"
+        " VALUES ('cmd-settle', 'pos-promoted', ?, 'EXIT', 'closing')",
         (TOKEN_X,),
     )
     mem_db.execute(
-        "INSERT INTO venue_trade_facts VALUES "
-        "(1, 'trade-promoted', 'order-settle', 'cmd-settle', 'MATCHED', '2026-05-17T22:24:00')"
+        "INSERT INTO venue_trade_facts"
+        " (trade_fact_id, trade_id, venue_order_id, command_id, state, observed_at, local_sequence)"
+        " VALUES (1, 'trade-promoted', 'order-settle', 'cmd-settle', 'MATCHED', '2026-05-17T22:24:00', 1)"
     )
     mem_db.commit()
 

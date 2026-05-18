@@ -2130,9 +2130,12 @@ def has_same_token_open(state: PortfolioState, token_id: str) -> bool:
     """Layer 7 (v2) snapshot fallback: block re-entry on a token already held in any
     non-terminal state. Keys by token_id (outcome-specific, direction-specific) not
     city+bin_label text. Used when conn is None (paper mode, test fixtures).
+
+    Checks BOTH token_id (YES side) and no_token_id (NO side) so buy_no positions
+    are not invisible to the dedup gate.
     """
     return any(
-        p.token_id == token_id
+        (p.token_id == token_id or p.no_token_id == token_id)
         and _is_runtime_open_position(p)
         for p in state.positions
     )
@@ -2149,20 +2152,27 @@ def has_same_token_open_db(conn, token_id: str) -> bool:
       phantom_not_on_chain, and any future non-terminal state.
     Terminal (excluded): voided, economically_closed, settled, quarantined,
       admin_closed.
+
+    Checks BOTH token_id (YES side) and no_token_id (NO side) columns so buy_no
+    positions are not invisible to the dedup gate.
+
+    Uses a parameterized NOT IN — placeholders built from the fixed-length
+    _TERMINAL_PHASES tuple (internal constant, not user input). This f-string
+    SQL site is registered in scripts/check_dynamic_sql.py baseline.
     """
     placeholders = ",".join("?" * len(_TERMINAL_PHASES))
     row = conn.execute(
         f"""SELECT 1 FROM position_current
-            WHERE token_id = ?
+            WHERE (token_id = ? OR no_token_id = ?)
             AND phase NOT IN ({placeholders})
             LIMIT 1""",
-        (token_id, *_TERMINAL_PHASES),
+        (token_id, token_id, *_TERMINAL_PHASES),
     ).fetchone()
     return row is not None
 
 
 def has_inflight_exit_for_token(conn, token_id: str) -> bool:
-    """Belt-and-suspenders: block re-entry if any exit order for this token is
+    """Belt-and-suspenders: block re-entry if any EXIT order for this token is
     in-flight (MATCHED or MINED in venue_trade_facts but not yet CONFIRMED/promoted).
 
     PR-S3 critic R1 (2026-05-17): original JOIN via position_current.trade_id was DEAD —
@@ -2172,6 +2182,13 @@ def has_inflight_exit_for_token(conn, token_id: str) -> bool:
     Fixed join path: venue_trade_facts → venue_commands (both use full command_id UUID),
     venue_commands.token_id is the correct bridge key.
 
+    PR #143 bot review fixes (2026-05-18):
+    - Restricted to intent_kind = 'EXIT' so BUY confirmations (MATCHED/MINED)
+      do not falsely trigger the gate.
+    - Added NOT EXISTS subquery to exclude historical MATCHED rows that are
+      superseded by a CONFIRMED row for the same command_id (venue_trade_facts is
+      append-only; older state rows are never deleted).
+
     Alternative future path (if needed): execution_fact.position_id → venue_commands.position_id
     (execution_fact table exists with position_id column, confirmed 2026-05-17).
     """
@@ -2180,7 +2197,13 @@ def has_inflight_exit_for_token(conn, token_id: str) -> bool:
            FROM venue_trade_facts vtf
            JOIN venue_commands vc ON vc.command_id = vtf.command_id
            WHERE vc.token_id = ?
+             AND vc.intent_kind = 'EXIT'
              AND vtf.state IN ('MATCHED', 'MINED')
+             AND NOT EXISTS (
+                 SELECT 1 FROM venue_trade_facts vtf2
+                 WHERE vtf2.command_id = vtf.command_id
+                   AND vtf2.state = 'CONFIRMED'
+             )
            LIMIT 1""",
         (token_id,),
     ).fetchone()
