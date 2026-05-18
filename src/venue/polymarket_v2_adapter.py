@@ -802,6 +802,45 @@ class PolymarketV2Adapter:
                 "condition_id": condition_id,
             }
 
+        # Fail-closed safety: the raw tx sender is the EOA derived from
+        # signer_key, not the proxy/Safe at funder_address.  If they differ
+        # (Zeus default: funder is a POLY_GNOSIS_SAFE, signature_type=2) then
+        # autonomous redeem cannot succeed — broadcasting would spend EOA gas
+        # without accessing the Safe's CTF positions.  Also guard the chain_id
+        # so Polygon-specific calldata is never broadcast on another network.
+        try:
+            from eth_account import Account as _Account
+
+            signer_eoa = _Account.from_key(self.signer_key).address
+        except Exception as exc:
+            return {
+                "success": False,
+                "errorCode": "REDEEM_SIGNER_DERIVE_FAILED",
+                "errorMessage": f"cannot derive EOA from signer_key: {exc}",
+                "condition_id": condition_id,
+            }
+        if signer_eoa.lower() != self.funder_address.lower():
+            return {
+                "success": False,
+                "errorCode": "REDEEM_SIGNER_FUNDER_MISMATCH",
+                "errorMessage": (
+                    f"signer EOA {signer_eoa} != funder_address {self.funder_address}; "
+                    "autonomous redeem requires an EOA funder — Safe/proxy execution "
+                    "path is not yet implemented"
+                ),
+                "condition_id": condition_id,
+            }
+        if int(self.chain_id) != 137:
+            return {
+                "success": False,
+                "errorCode": "REDEEM_WRONG_CHAIN",
+                "errorMessage": (
+                    f"autonomous redeem only supported on Polygon mainnet (chain_id=137); "
+                    f"configured chain_id={self.chain_id}"
+                ),
+                "condition_id": condition_id,
+            }
+
         try:
             calldata = _build_redeem_calldata(condition_id, index_sets)
         except Exception as exc:  # ABI-encode failure is a structural defect

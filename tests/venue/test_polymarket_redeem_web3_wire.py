@@ -44,19 +44,25 @@ from src.venue.polymarket_v2_adapter import (
 
 
 _TEST_PRIVATE_KEY = "0x" + "11" * 32  # deterministic test key
-_TEST_FUNDER = "0x" + "22" * 20
+# _TEST_FUNDER must be the EOA derived from _TEST_PRIVATE_KEY so the
+# fail-closed signer/funder-match preflight in redeem() passes.
+from eth_account import Account as _Account  # noqa: E402
+_TEST_FUNDER = _Account.from_key(_TEST_PRIVATE_KEY).address  # 0x19E7E376...
+_TEST_MISMATCHED_FUNDER = "0x" + "22" * 20  # deliberately != _TEST_FUNDER
 _TEST_RPC_URL = "https://polygon-test.invalid"
 _TEST_CONDITION_ID = "0x" + "ab" * 32
 
 
-def _make_adapter(rpc_call):
+def _make_adapter(rpc_call, funder_address=None):
     """Build a real PolymarketV2Adapter with rpc_call injected.
 
     No SDK client is constructed (factory replaced with a sentinel); only the
-    web3 sign+broadcast path is exercised.
+    web3 sign+broadcast path is exercised.  funder_address defaults to
+    _TEST_FUNDER (EOA matching _TEST_PRIVATE_KEY) so the signer/funder-match
+    preflight passes in all tests except the explicit mismatch test.
     """
     return PolymarketV2Adapter(
-        funder_address=_TEST_FUNDER,
+        funder_address=funder_address if funder_address is not None else _TEST_FUNDER,
         signer_key=_TEST_PRIVATE_KEY,
         chain_id=137,
         polygon_rpc_url=_TEST_RPC_URL,
@@ -288,6 +294,49 @@ def test_kill_switch_recognizes_truthy_variants(monkeypatch):
             f"value {truthy!r} must enable autonomous mode (got {result})"
         )
         assert captured, f"value {truthy!r} should have reached RPC"
+
+
+def test_signer_funder_mismatch_fails_closed(monkeypatch):
+    """Fail-closed guard: if signer EOA != funder_address, redeem() must return
+    REDEEM_SIGNER_FUNDER_MISMATCH without touching the RPC.
+
+    This is the structural antibody for the Safe/proxy deployment scenario where
+    Zeus's funder is a POLY_GNOSIS_SAFE but the signer_key is an EOA.
+    """
+    monkeypatch.setenv(AUTONOMOUS_REDEEM_ENABLED_ENV, "1")
+    rpc_call = MagicMock(side_effect=AssertionError("RPC must not be called on mismatch"))
+    adapter = _make_adapter(rpc_call, funder_address=_TEST_MISMATCHED_FUNDER)
+
+    result = adapter.redeem(_TEST_CONDITION_ID, index_sets=[2])
+
+    assert result["success"] is False
+    assert result["errorCode"] == "REDEEM_SIGNER_FUNDER_MISMATCH", (
+        f"expected REDEEM_SIGNER_FUNDER_MISMATCH, got {result}"
+    )
+    rpc_call.assert_not_called()
+
+
+def test_wrong_chain_id_fails_closed(monkeypatch):
+    """Fail-closed guard: autonomous redeem must refuse to broadcast on any
+    chain other than Polygon mainnet (137).
+    """
+    monkeypatch.setenv(AUTONOMOUS_REDEEM_ENABLED_ENV, "1")
+    rpc_call = MagicMock(side_effect=AssertionError("RPC must not be called on wrong chain"))
+    adapter = PolymarketV2Adapter(
+        funder_address=_TEST_FUNDER,
+        signer_key=_TEST_PRIVATE_KEY,
+        chain_id=1,  # Ethereum mainnet — wrong
+        polygon_rpc_url=_TEST_RPC_URL,
+        rpc_call=rpc_call,
+        q1_egress_evidence_path=None,
+        client_factory=lambda **kwargs: MagicMock(name="ClobClient"),
+    )
+
+    result = adapter.redeem(_TEST_CONDITION_ID, index_sets=[2])
+
+    assert result["success"] is False
+    assert result["errorCode"] == "REDEEM_WRONG_CHAIN"
+    rpc_call.assert_not_called()
 
 
 def test_settlement_commands_parses_winning_index_set_and_passes_kw(monkeypatch, tmp_path):
