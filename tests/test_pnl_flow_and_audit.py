@@ -39,11 +39,17 @@ from src.execution.executor import OrderResult
 from src.riskguard.risk_level import RiskLevel
 from src.state.db import (
     apply_architecture_kernel_schema,
+    _create_readiness_state,
     get_connection,
     init_schema,
     log_settlement_event,
     query_portfolio_loader_view,
     query_position_current_status_view,
+)
+from src.state.schema.v2_schema import (
+    _create_calibration_pairs_v2,
+    _create_ensemble_snapshots_v2,
+    _create_settlements_v2,
 )
 from src.state.decision_chain import SettlementRecord, store_settlement_records
 from src.state.portfolio import (
@@ -135,6 +141,29 @@ def _patch_mature_calibration(monkeypatch, *, level: int = 1) -> None:
     )
     # Oracle fail-closed gate removed 2026-05-02 (PR-B). Previous monkeypatch
     # bypassed _oracle_evidence_rejection_reason; gate no longer exists.
+    # G4 cluster A (2026-05-18): entry_forecast_cfg cutover (2026-05-14) fires
+    # when get_mode()=="live" and config is present; tests pass conn=None so
+    # the DB-availability guard returns ENTRY_FORECAST_READER_DB_UNAVAILABLE.
+    # Fixture tests exercise the legacy fetch_ensemble path — bypass the cutover
+    # by stubbing the config loader to (None, None) (no config, no blocker).
+    monkeypatch.setattr(
+        evaluator_module,
+        "_live_entry_forecast_config_or_blocker",
+        lambda: (None, None),
+    )
+    # G4 cluster A (2026-05-18): _layer7_dedup_fires calls has_same_token_open_db
+    # and has_inflight_exit_for_token which do conn.execute(). Tests passing
+    # conn=object() (sentinel) crash here. Stub both to False (no dupe open).
+    monkeypatch.setattr(
+        evaluator_module,
+        "has_same_token_open_db",
+        lambda conn, token_id: False,
+    )
+    monkeypatch.setattr(
+        evaluator_module,
+        "has_inflight_exit_for_token",
+        lambda conn, token_id: False,
+    )
 
 
 def _insert_source_correct_harvester_obs(
@@ -287,6 +316,7 @@ def _policy_conn() -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     apply_architecture_kernel_schema(conn)
+    _create_readiness_state(conn)  # Cluster D: readiness_state needed post K1 split
     return conn
 
 
@@ -3394,7 +3424,7 @@ def test_inv_riskguard_prefers_canonical_position_events_settlement_source(monke
                "pnl": 15.0,
                "exit_reason": "SETTLEMENT",
                "settlement_authority": "VERIFIED",
-               "settlement_truth_source": "forecasts.settlements",
+               "settlement_truth_source": "harvester_live_verified_settlement",
                "settlement_market_slug": "nyc-high-2026-04-01",
                "settlement_temperature_metric": "high",
                "settlement_source": "WU",
@@ -3590,6 +3620,8 @@ def test_inv_harvester_triggers_refit(monkeypatch, tmp_path):
     db_path = tmp_path / "zeus.db"
     conn = get_connection(db_path)
     init_schema(conn)
+    _create_ensemble_snapshots_v2(conn)  # Cluster A: v2 table needed post K1 split
+    _create_calibration_pairs_v2(conn)  # Cluster A: FK dep needed post K1 split
 
     season = season_from_date("2026-04-01")
     for i in range(15):
@@ -3814,6 +3846,8 @@ def test_inv_harvester_falls_back_to_open_portfolio_snapshot_when_no_durable_set
     db_path = tmp_path / "zeus.db"
     conn = get_connection(db_path)
     init_schema(conn)
+    _create_ensemble_snapshots_v2(conn)  # Cluster A: v2 table needed post K1 split
+    _create_calibration_pairs_v2(conn)  # Cluster A: FK dep needed post K1 split
 
     snapshot_id = _insert_snapshot(conn, "NYC", "2026-04-01", [0.65, 0.35])
     _insert_source_correct_harvester_obs(conn)
@@ -3893,6 +3927,8 @@ def test_inv_harvester_uses_legacy_decision_log_snapshot_before_open_portfolio(m
     db_path = tmp_path / "zeus.db"
     conn = get_connection(db_path)
     init_schema(conn)
+    _create_ensemble_snapshots_v2(conn)  # Cluster A: v2 table needed post K1 split
+    _create_calibration_pairs_v2(conn)  # Cluster A: FK dep needed post K1 split
 
     legacy_snapshot_id = _insert_snapshot(conn, "NYC", "2026-04-01", [0.65, 0.35])
     portfolio_snapshot_id = _insert_snapshot(
@@ -4016,6 +4052,8 @@ def test_inv_harvester_prefers_durable_snapshot_over_open_portfolio(monkeypatch,
     db_path = tmp_path / "zeus.db"
     conn = get_connection(db_path)
     init_schema(conn)
+    _create_ensemble_snapshots_v2(conn)  # Cluster A: v2 table needed post K1 split
+    _create_calibration_pairs_v2(conn)  # Cluster A: FK dep needed post K1 split
 
     durable_snapshot_id = _insert_snapshot(conn, "NYC", "2026-04-01", [0.65, 0.35])
     portfolio_snapshot_id = _insert_snapshot(
@@ -4068,7 +4106,7 @@ def test_inv_harvester_prefers_durable_snapshot_over_open_portfolio(monkeypatch,
                "pnl": 15.0,
                "exit_reason": "SETTLEMENT",
                "settlement_authority": "VERIFIED",
-               "settlement_truth_source": "forecasts.settlements",
+               "settlement_truth_source": "harvester_live_verified_settlement",
                "settlement_market_slug": "nyc-high-2026-04-01",
                "settlement_temperature_metric": "high",
                "settlement_source": "WU",
@@ -4162,6 +4200,8 @@ def test_inv_harvester_marks_partial_context_resolution(monkeypatch, tmp_path):
     db_path = tmp_path / "zeus.db"
     conn = get_connection(db_path)
     init_schema(conn)
+    _create_ensemble_snapshots_v2(conn)  # Cluster A: v2 table needed post K1 split
+    _create_calibration_pairs_v2(conn)  # Cluster A: FK dep needed post K1 split
 
     good_snapshot_id = _insert_snapshot(conn, "NYC", "2026-04-01", [0.65, 0.35])
     good_pos = _position(

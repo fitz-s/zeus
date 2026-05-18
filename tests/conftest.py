@@ -131,6 +131,58 @@ def r3_default_risk_allocator_for_unit_tests():
 
 
 # ---------------------------------------------------------------------------
+# Dual-DB fixture helper — Clusters A + D (G4 cleanup, 2026-05-18)
+# ---------------------------------------------------------------------------
+# make_world_forecasts_pair(tmp_path) creates isolated world + forecasts DBs
+# for tests that INSERT into ensemble_snapshots_v2, settlements_v2, or
+# readiness_state — tables that live in init_schema_forecasts, not init_schema.
+#
+# Named make_world_forecasts_pair (not make_dual_db) to avoid confusion with
+# the pytest fixture `dual_db` in tests/state/test_daily_obs_cross_db_atomicity.py.
+# This is a plain helper function (not a pytest fixture), so tests call it
+# directly: world_conn, forecasts_conn = make_world_forecasts_pair(tmp_path)
+# ---------------------------------------------------------------------------
+
+def make_world_forecasts_pair(tmp_path):
+    """Create isolated world + forecasts SQLite connections for dual-DB tests.
+
+    Returns (world_conn, forecasts_conn) with both schemas initialised.
+    Temporarily monkeypatches ZEUS_WORLD_DB_PATH / ZEUS_FORECASTS_DB_PATH
+    so init_schema_forecasts can ATTACH world_path when copying schema.
+    Both connections are left open; callers are responsible for closing them.
+
+    Usage::
+        world_conn, forecasts_conn = make_world_forecasts_pair(tmp_path)
+        world_conn.execute("INSERT INTO ...")
+        forecasts_conn.execute("INSERT INTO settlements_v2 ...")
+    """
+    import sqlite3 as _sqlite3
+    import src.state.db as _db_mod
+
+    world_path = tmp_path / "zeus-world.db"
+    forecasts_path = tmp_path / "zeus-forecasts.db"
+
+    orig_w = _db_mod.ZEUS_WORLD_DB_PATH
+    orig_f = _db_mod.ZEUS_FORECASTS_DB_PATH
+    try:
+        _db_mod.ZEUS_WORLD_DB_PATH = world_path
+        _db_mod.ZEUS_FORECASTS_DB_PATH = forecasts_path
+
+        world_conn = _sqlite3.connect(str(world_path))
+        _db_mod.init_schema(world_conn)
+        world_conn.commit()
+
+        forecasts_conn = _sqlite3.connect(str(forecasts_path))
+        _db_mod.init_schema_forecasts(forecasts_conn)
+        forecasts_conn.commit()
+    finally:
+        _db_mod.ZEUS_WORLD_DB_PATH = orig_w
+        _db_mod.ZEUS_FORECASTS_DB_PATH = orig_f
+
+    return world_conn, forecasts_conn
+
+
+# ---------------------------------------------------------------------------
 # SQLite Writer-Lock Antibody — Track A.3 (v4 plan §10).
 #
 # Collection-time enforcement that scans src/ + scripts/ for:
