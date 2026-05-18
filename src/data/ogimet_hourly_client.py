@@ -197,7 +197,7 @@ def fetch_ogimet_hourly(
     if unit not in ("F", "C"):
         raise ValueError(f"unit must be 'F' or 'C', got {unit!r}")
 
-    all_rows: list[tuple[datetime, float]] = []
+    all_rows: list[tuple[datetime, Celsius]] = []
     raw_count = 0
     current, end_utc = _local_date_range_to_utc_window(
         start_date,
@@ -275,7 +275,7 @@ def _local_date_range_to_utc_window(
 
 @dataclass(frozen=True)
 class _ChunkResult:
-    observations: list[tuple[datetime, float]] = field(default_factory=list)
+    observations: list[tuple[datetime, Celsius]] = field(default_factory=list)
     raw_metar_count: int = 0
     failure_reason: Optional[str] = None
     retryable: bool = False
@@ -343,7 +343,7 @@ def _fetch_one_chunk(
             error=f"HTTP {resp.status_code}",
         )
 
-    parsed: list[tuple[datetime, float]] = []
+    parsed: list[tuple[datetime, Celsius]] = []
     raw = 0
     for line in resp.text.splitlines():
         line = line.strip()
@@ -362,7 +362,7 @@ def _fetch_one_chunk(
 
 
 def _aggregate(
-    rows: list[tuple[datetime, float]],
+    rows: list[tuple[datetime, Celsius]],
     *,
     station: str,
     unit_out: str,
