@@ -608,6 +608,7 @@ tables:
     schema_version_owner: SCHEMA_VERSION
     created_by: init_schema
     pk_col: null
+    daemon_writer: ingest_k2_obs_v2_tick
     notes: >
       Native-source canonical (WU/Ogimet/HKO/etc.), A1/A2/A6 gated.
       Dual-write partner: observation_instants. Runtime code reads this

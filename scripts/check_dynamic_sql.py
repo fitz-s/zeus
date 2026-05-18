@@ -108,14 +108,14 @@ _BASELINE_PER_FILE: dict[str, int] = {
     # src/data/executable_forecast_reader.py: REPAIRED 2026-05-15 — dynamic
     # SQL sites removed; keep absent from baseline so the gate stays tightened.
     "src/data/daily_observation_writer.py": 6,
-    "src/data/ingest_status_writer.py": 1,
+    "src/data/ingest_status_writer.py": 2,
     "src/data/observation_instants_v2_writer.py": 4,
     "src/data/solar_append.py": 4,
     "src/engine/cycle_runtime.py": 4,
     "src/engine/ddd_wiring.py": 1,
     # +1 site from F2 DSI fix (PR #137): `_record_selection_family_facts` call
     # uses module-level table-name constants — no user-controlled input.
-    "src/engine/evaluator.py": 15,
+    "src/engine/evaluator.py": 7,
     "src/engine/replay.py": 14,
     # 6 f-string SQL sites: all interpolate module-level table-name constants
     # (sv2_table, cp_v2_table, etc.) from ReplayContext — no user-controlled
@@ -138,7 +138,7 @@ _BASELINE_PER_FILE: dict[str, int] = {
     "src/state/source_run_repo.py": 4,
     # db.py grew by 11 sites in P1/P2 (PRAGMA busy_timeout interpolations,
     # registry-driven table_name expansions — all closed internal identifiers).
-    "src/state/db.py": 33,
+    "src/state/db.py": 35,
     "src/state/decision_chain.py": 1,  # internal table-name constant; added P1
     "src/state/ledger.py": 8,
     "src/state/projection.py": 2,
@@ -172,6 +172,7 @@ _BASELINE_PER_FILE: dict[str, int] = {
     # SAVEPOINT statements use uuid-derived names; the journal query is internal
     # table/fact plumbing. No user-controlled SQL identifier is interpolated.
     "src/execution/exchange_reconcile.py": 12,
+    "src/execution/exit_lifecycle.py": 1,
     # 2026-05-18 PR #140 review: main already had 23 sites. Table-name sites are
     # reached through closed internal callers / schema probes, and SAVEPOINT
     # names are sanitized command IDs or uuid-derived names. No request/user

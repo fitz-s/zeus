@@ -1,10 +1,10 @@
 # Created: 2026-04-30
-# Last reused/audited: 2026-04-30
+# Last reused/audited: 2026-05-18
 # Authority basis: docs/operations/task_2026-04-30_two_system_independence/design.md §2.5
 """Ingest status rollup writer — Phase 2 ingest improvement.
 
-Queries data_coverage + observation_instants + forecasts + solar_daily
-and computes a summary JSON written to state/ingest_status.json.
+Queries data_coverage + observation_instants + forecasts + solar_daily +
+ensemble_snapshots and computes a summary JSON written to state/ingest_status.json.
 
 Writer cadence (per design SC-4):
   - Every K2 tick completion calls write_ingest_status.
@@ -41,6 +41,17 @@ def _rows_in_period(conn, table: str, ts_col: str, hours: int) -> int:
     except Exception as exc:
         logger.debug("rows_in_period %s.%s failed: %s", table, ts_col, exc)
         return -1
+
+
+def _max_col_value(conn, table: str, col: str) -> str | None:
+    """Return MAX(col) for the given table, or None on missing table/error."""
+    try:
+        cur = conn.execute(f"SELECT MAX({col}) FROM {table}")
+        row = cur.fetchone()
+        return row[0] if row else None
+    except Exception as exc:
+        logger.debug("max_col_value %s.%s failed: %s", table, col, exc)
+        return None
 
 
 def _holes_by_city_count(conn, data_table: str) -> dict[str, int]:
@@ -126,10 +137,6 @@ def write_ingest_status(
       - forecasts            (ts_col: imported_at)
       - solar_daily          (ts_col: fetched_at)
       - data_coverage        (holes count per table)
-
-    Note: ensemble_snapshots_v2 lives in zeus-forecasts.db (K1 split);
-    it is not queried here because world_conn does not attach forecasts.db.
-    ensemble_snapshots (legacy) was removed after reader migration v1.F20.
     """
     if state_dir is None:
         from src.config import state_path
@@ -147,6 +154,15 @@ def write_ingest_status(
         "holes_by_city_count": _holes_by_city_count(world_conn, "observation_instants"),
     }
 
+    # observation_instants_v2
+    obs_v2_max_imported_at = _max_col_value(world_conn, "observation_instants_v2", "imported_at")
+    table_stats["observation_instants_v2"] = {
+        "rows_last_hour": _rows_in_period(world_conn, "observation_instants_v2", "imported_at", 1),
+        "rows_last_day": _rows_in_period(world_conn, "observation_instants_v2", "imported_at", 24),
+        "max_imported_at": obs_v2_max_imported_at,
+        "holes_by_city_count": _holes_by_city_count(world_conn, "observation_instants_v2"),
+    }
+
     # forecasts
     # imported_at may be null for old rows; use captured_at as fallback
     table_stats["forecasts"] = {
@@ -162,6 +178,13 @@ def write_ingest_status(
         "holes_by_city_count": _holes_by_city_count(world_conn, "solar_daily"),
     }
 
+    # ensemble_snapshots
+    table_stats["ensemble_snapshots"] = {
+        "rows_last_hour": _rows_in_period(world_conn, "ensemble_snapshots", "fetch_time", 1),
+        "rows_last_day": _rows_in_period(world_conn, "ensemble_snapshots", "fetch_time", 24),
+        "holes_by_city_count": {},  # ensemble_snapshots not in data_coverage
+    }
+
     # observations (daily observations — uses fetched_at from data_coverage proxy)
     table_stats["observations"] = {
         "rows_last_hour": -1,  # no reliable ts column in observations table
@@ -174,6 +197,7 @@ def write_ingest_status(
 
     payload = {
         "written_at": _now_iso(),
+        "observation_instants_v2_max_imported_at": obs_v2_max_imported_at,
         "tables": table_stats,
         "last_quarantine_reason": last_quarantine,
         "source_health_written_at": source_health.get("written_at") if source_health else None,

@@ -1253,6 +1253,7 @@ def main() -> None:
         from src.state.table_registry import (
             DBIdentity,
             assert_db_matches_registry,
+            assert_writer_jobs_registered,
         )
         _world_conn_reg = get_world_connection()
         try:
@@ -1260,6 +1261,12 @@ def main() -> None:
             logger.info("assert_db_matches_registry: world DB table-set matches registry")
         finally:
             _world_conn_reg.close()
+
+        # v1.F44 (2026-05-18): A5 — daemon_writer registry cross-check.
+        # Every YAML entry with daemon_writer != "none" must have a live
+        # @_scheduler_job(...) in this file.  Prevents silent writer death.
+        assert_writer_jobs_registered()
+        logger.info("assert_writer_jobs_registered: all declared daemon writers are wired")
 
     # Write sentinel BEFORE scheduler.start() (design §4.2).
     _write_world_schema_ready_sentinel()
