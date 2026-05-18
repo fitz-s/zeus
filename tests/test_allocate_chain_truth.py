@@ -31,9 +31,11 @@ from src.state.portfolio import ExitContext, Position, PortfolioState
 def reset_block_list():
     """Ensure tokens_blocked_until_resolution is clean between tests."""
     from src.engine import cycle_runtime
-    cycle_runtime.tokens_blocked_until_resolution.clear()
+    with cycle_runtime._tokens_blocked_lock:
+        cycle_runtime.tokens_blocked_until_resolution.clear()
     yield
-    cycle_runtime.tokens_blocked_until_resolution.clear()
+    with cycle_runtime._tokens_blocked_lock:
+        cycle_runtime.tokens_blocked_until_resolution.clear()
 
 
 def _make_position(
@@ -314,3 +316,84 @@ def test_boot_passes_when_no_control_plane_file():
         cp_path = os.path.join(tmpdir, "nonexistent_control_plane.json")
         with patch("src.config.state_path", return_value=cp_path):
             _check_s1_without_s2_sla()  # Should not raise
+
+
+# ── MAJOR-1: thread-safety of block-list ────────────────────────────────────
+
+
+def test_block_list_concurrent_mutation_does_not_raise():
+    """Concurrent mutation + iteration of block-list must not raise RuntimeError."""
+    import threading
+    from src.engine import cycle_runtime
+
+    errors = []
+
+    def mutator():
+        for i in range(200):
+            with cycle_runtime._tokens_blocked_lock:
+                cycle_runtime.tokens_blocked_until_resolution.add(f"tok-{i}")
+            with cycle_runtime._tokens_blocked_lock:
+                cycle_runtime.tokens_blocked_until_resolution.discard(f"tok-{i}")
+
+    def reader():
+        for _ in range(200):
+            try:
+                with cycle_runtime._tokens_blocked_lock:
+                    _ = set(cycle_runtime.tokens_blocked_until_resolution)
+            except RuntimeError as e:
+                errors.append(e)
+
+    t1 = threading.Thread(target=mutator)
+    t2 = threading.Thread(target=reader)
+    t1.start(); t2.start()
+    t1.join(); t2.join()
+    assert errors == [], f"RuntimeError during concurrent access: {errors}"
+
+
+# ── MINOR-2: pending_exit symmetry ──────────────────────────────────────────
+
+
+def test_invariant_does_not_fire_during_pending_exit_propagation_lag():
+    """Invariant must not fire (and not block) for a pending_exit position
+    when chain hasn't propagated the exit yet (local > chain momentarily)."""
+    from src.engine.cycle_runtime import _assert_token_aggregate_invariant, tokens_blocked_until_resolution
+
+    token_id = "tok-exiting"
+
+    # Position is mid-exit: state=holding, exit_state=sell_placed, 6 shares local.
+    # Chain still shows 6 (hasn't propagated the exit yet).
+    # Without MINOR-2 fix, local_sum=6 > chain=0 would fire and block the token.
+    pos = _make_position("t1", token_id=token_id, shares=6.0, state="holding")
+    pos.exit_state = "sell_placed"  # exit in flight
+
+    portfolio = _make_portfolio(pos)
+    chain_positions = []  # chain not yet updated — exit not propagated
+
+    deps = MagicMock()
+    _assert_token_aggregate_invariant(portfolio, chain_positions, deps=deps)
+
+    # Invariant must NOT have fired: token not added to block-list.
+    assert token_id not in tokens_blocked_until_resolution
+
+
+# ── Optional: N2 symmetric rollout case ─────────────────────────────────────
+
+
+def test_n2_passes_when_s2_deployed_before_s1():
+    """If s2_deployed_at is present but s1_deployed_at is absent, pass."""
+    from src.main import _check_s1_without_s2_sla
+
+    s2_ts = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cp_path = os.path.join(tmpdir, "control_plane.json")
+        _write_control_plane(cp_path, {"s2_deployed_at": s2_ts})
+
+        with patch("src.config.state_path", return_value=cp_path):
+            env_patch = patch.dict(os.environ, {}, clear=False)
+            env_patch.start()
+            os.environ.pop("ZEUS_ACCEPT_S1_ALONE", None)
+            try:
+                _check_s1_without_s2_sla()  # Should not raise (no s1_deployed_at)
+            finally:
+                env_patch.stop()

@@ -513,8 +513,10 @@ def execute_exit(
         else getattr(position, "no_token_id", "") or position.token_id
     )
     if _eff_token_id:
-        from src.engine.cycle_runtime import tokens_blocked_until_resolution
-        if _eff_token_id in tokens_blocked_until_resolution:
+        from src.engine.cycle_runtime import tokens_blocked_until_resolution, _tokens_blocked_lock
+        with _tokens_blocked_lock:
+            _is_blocked = _eff_token_id in tokens_blocked_until_resolution
+        if _is_blocked:
             logger.warning(
                 "TOKEN_AGGREGATE_BLOCKED_PENDING_RESOLUTION: trade_id=%s token=%s",
                 position.trade_id,

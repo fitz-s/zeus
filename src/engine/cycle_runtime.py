@@ -1063,7 +1063,13 @@ def chain_positions_from_api(payload, *, ChainPosition):
 # PR-S1 Bug #3: per-token block-list for aggregate reconciliation violations.
 # Lifetime: daemon process. Populated by _assert_token_aggregate_invariant().
 # Cleared automatically (N1) when the invariant no longer fires for the token.
+# _tokens_blocked_lock guards all mutations and snapshot reads of the set.
+# Two DiscoveryMode cycles can run concurrently; without the lock a set union
+# during iteration by one thread while another calls add/discard raises
+# RuntimeError: Set changed size during iteration (CPython 3.x, confirmed).
+import threading as _threading
 tokens_blocked_until_resolution: set[str] = set()
+_tokens_blocked_lock: _threading.Lock = _threading.Lock()
 
 _logger_runtime = logging.getLogger(__name__)
 
@@ -1094,6 +1100,11 @@ def _assert_token_aggregate_invariant(
     chain_by_token = {cp.token_id: cp.size for cp in chain_positions}
 
     # Build local aggregate by token across active positions.
+    # Mirrors the pass-1 exclusion in chain_reconciliation.py:643-647:
+    # exclude pending_exit (exit in flight — exit_lifecycle owns chain propagation)
+    # so a mid-exit chain lag does not spuriously fire the invariant and over-block
+    # other entries for that token.
+    from src.state.chain_reconciliation import PENDING_EXIT_STATES
     local_by_token: dict[str, float] = {}
     for pos in portfolio.positions:
         tid = pos.token_id if pos.direction == "buy_yes" else pos.no_token_id
@@ -1102,12 +1113,20 @@ def _assert_token_aggregate_invariant(
         state_val = getattr(pos.state, "value", pos.state)
         if state_val in INACTIVE_RUNTIME_STATES or state_val == "pending_tracked":
             continue
+        if (
+            state_val == "pending_exit"
+            or getattr(pos, "exit_state", "") in PENDING_EXIT_STATES
+        ):
+            continue
         size = float(getattr(pos, "effective_shares", None) or getattr(pos, "shares", 0) or 0)
         if size > 0:
             local_by_token[tid] = local_by_token.get(tid, 0.0) + size
 
     # Check all tokens: both active and currently blocked (for auto-clear).
-    all_tokens = set(local_by_token.keys()) | tokens_blocked_until_resolution
+    # Snapshot blocked set under lock to prevent RuntimeError on concurrent mutation.
+    with _tokens_blocked_lock:
+        blocked_snapshot = set(tokens_blocked_until_resolution)
+    all_tokens = set(local_by_token.keys()) | blocked_snapshot
     for tid in all_tokens:
         local_sum = local_by_token.get(tid, 0.0)
         chain_bal = chain_by_token.get(tid, 0.0)
@@ -1119,19 +1138,23 @@ def _assert_token_aggregate_invariant(
                 tid, local_sum, chain_bal,
             )
             _ci("inv_token_aggregate_violated_total", labels={"token_id": tid})
-            tokens_blocked_until_resolution.add(tid)
-        elif tid in tokens_blocked_until_resolution:
+            with _tokens_blocked_lock:
+                tokens_blocked_until_resolution.add(tid)
+        elif tid in blocked_snapshot:
             # N1 auto-clear: invariant no longer fires for this token.
-            tokens_blocked_until_resolution.discard(tid)
+            with _tokens_blocked_lock:
+                tokens_blocked_until_resolution.discard(tid)
             _logger_runtime.info(
                 "TOKEN_BLOCK_AUTO_CLEARED: token=%s local_sum=%.4f chain_bal=%.4f",
                 tid, local_sum, chain_bal,
             )
 
     # N1 heartbeat gauge.
+    with _tokens_blocked_lock:
+        _blocked_size = len(tokens_blocked_until_resolution)
     _logger_runtime.info(
         "telemetry_gauge tokens_blocked_until_resolution_size=%d",
-        len(tokens_blocked_until_resolution),
+        _blocked_size,
     )
 
 
