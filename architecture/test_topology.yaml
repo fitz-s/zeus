@@ -51,6 +51,7 @@ test_trust_policy:
     tests/test_backtest_training_eligibility.py: {created: "2026-04-28", last_used: "2026-04-28"}
     tests/test_dissemination_schedules.py: {created: "2026-04-28", last_used: "2026-04-28"}
     tests/test_ddd_wiring.py: {created: "2026-05-03", last_used: "2026-05-15"}
+    tests/test_dedup_gate_token.py: {created: "2026-05-17", last_used: "2026-05-18"}
     tests/test_data_density_discount_v2.py: {created: "2026-05-03", last_used: "2026-05-15"}
     tests/test_ensemble_client.py: {created: "2026-04-01", last_used: "2026-04-29"}
     tests/test_forecasts_writer_provenance_required.py: {created: "2026-04-28", last_used: "2026-04-28"}
@@ -93,6 +94,7 @@ test_trust_policy:
     tests/test_bug100_k1_k2_structural.py: {created: "2026-04-21", last_used: "2026-04-21"}
     tests/test_calibration_bins_canonical.py: {created: "2026-04-14", last_used: "2026-04-23"}
     tests/test_promote_calibration_v2_stage_to_prod.py: {created: "2026-05-12", last_used: "2026-05-12"}
+    tests/test_promote_pending_trades.py: {created: "2026-05-17", last_used: "2026-05-18"}
     tests/test_canonical_position_current_schema_alignment.py: {created: "2026-04-23", last_used: "2026-04-23"}
     tests/test_center_buy_repair.py: {created: "2026-04-29", last_used: "2026-04-29"}
     tests/test_cross_module_invariants.py: {created: "2026-03-30", last_used: "2026-04-23"}
@@ -389,6 +391,8 @@ test_trust_policy:
     # PR #154 — WAVE-5 F22 writer-lock defer marker expiry antibody (2026-05-18).
     tests/test_operator_script_lock_contract.py: {created: "2026-05-17", last_used: "2026-05-18"}
     tests/test_writer_lock_defer_markers_expiry.py: {created: "2026-05-18", last_used: "2026-05-18"}
+    # PR-S1 Bug #3: chain aggregate reconciliation + block-list + N2 boot gate antibodies.
+    tests/test_allocate_chain_truth.py: {created: "2026-05-17", last_used: "2026-05-18"}
 
 categories:
   core_law_antibody:

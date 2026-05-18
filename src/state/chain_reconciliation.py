@@ -182,6 +182,61 @@ class ChainPositionView:
         return None
 
 
+_ALLOCATE_DUST = 0.01  # minimum size difference treated as dust, not a gap
+
+
+def allocate_chain_truth(
+    positions: list,
+    chain_balance: float,
+    dust: float = _ALLOCATE_DUST,
+    policy: str = "LIFO",
+) -> tuple[list, list]:
+    """Allocate chain backing to local positions using LIFO by entered_at.
+
+    Returns (allocated, phantom) where:
+    - allocated: positions backed by the chain balance (chain is truth for them)
+    - phantom: positions the chain balance cannot cover (aggregate phantoms)
+
+    Policy: LIFO — most-recently-entered positions have priority for backing.
+    Rationale: exits are typically of newer positions; LIFO matches observed
+    Polymarket exit fill ordering.
+
+    Whole-position semantics only: a position is either fully backed or phantom.
+    Fractional backing is not supported (deferred, DQ-1/DQ-2).
+    """
+    if policy != "LIFO":
+        raise ValueError(f"allocate_chain_truth: unsupported policy {policy!r}")
+
+    # Sort descending by entered_at (LIFO: newest first).
+    # Positions with empty entered_at sort last (oldest).
+    def _sort_key(p):
+        ea = getattr(p, "entered_at", "") or ""
+        return ea  # ISO strings sort lexicographically = chronologically
+
+    sorted_positions = sorted(positions, key=_sort_key, reverse=True)
+
+    allocated: list = []
+    phantom: list = []
+    remaining = chain_balance
+
+    for pos in sorted_positions:
+        size = float(getattr(pos, "effective_shares", None) or getattr(pos, "shares", 0) or 0)
+        if size <= 0:
+            # Zero-size position: treat as backed (no chain needed)
+            allocated.append(pos)
+            continue
+        if remaining >= size - dust:
+            allocated.append(pos)
+            # Consume exactly what remains (not full size) when within dust
+            # tolerance — prevents remaining going negative and incorrectly
+            # backing later positions in the LIFO walk.
+            remaining = max(0.0, remaining - size)
+        else:
+            phantom.append(pos)
+
+    return allocated, phantom
+
+
 def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], conn=None) -> dict:
     """Three rules. No reasoning about WHY. Chain is truth.
 
@@ -572,12 +627,76 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
             and (p.token_id if p.direction == "buy_yes" else p.no_token_id)
         )
 
+    # ── Pass-1: aggregate reconciliation per token (Bug #3, PR-S1) ──────────
+    # Group active positions by token_id, allocate chain backing LIFO.
+    # Skipped when chain state is UNKNOWN (suspect API response).
+    # Positions that the chain cannot cover are marked phantom and voided in
+    # pass-2 (the per-position loop below) using PHANTOM_NOT_ON_CHAIN.
+    phantom_set: set[str] = set()
+    # aggregate_backed_set: trade_ids confirmed backed by allocate_chain_truth.
+    # These must bypass per-position size-mismatch correction: their individual
+    # shares are correct; chain.size is the AGGREGATE across all lots for the
+    # token, not the per-lot size. Comparing chain.size vs pos.effective_shares
+    # for an aggregate-backed lot would trigger false quarantine (bot PR #141).
+    aggregate_backed_set: set[str] = set()
+    if chain_state != ChainState.CHAIN_UNKNOWN:
+        _token_to_positions: dict[str, list] = {}
+        for _p in portfolio.positions:
+            _tid = _p.token_id if _p.direction == "buy_yes" else _p.no_token_id
+            if not _tid:
+                continue
+            _state_val = getattr(_p.state, "value", _p.state)
+            if _state_val in INACTIVE_RUNTIME_STATES or _state_val == "pending_tracked":
+                continue
+            # Exclude positions with an active exit in flight — exit_lifecycle owns them.
+            if (
+                _state_val == "pending_exit"
+                or getattr(_p, "exit_state", "") in PENDING_EXIT_STATES
+            ):
+                continue
+            # Exclude positions awaiting chain propagation (entry verified but chain
+            # record not yet visible). The existing reconcile awaiting_chain_entry
+            # branch handles them; premature phantom-marking would void prematurely.
+            if (
+                getattr(_p, "entry_fill_verified", False)
+                and getattr(_p, "chain_state", "") in {"local_only", "unknown"}
+            ):
+                continue
+            _token_to_positions.setdefault(_tid, []).append(_p)
+
+        for _tid, _positions in _token_to_positions.items():
+            _chain_cp = chain_by_token.get(_tid)
+            _chain_bal = _chain_cp.size if _chain_cp is not None else 0.0
+            _allocated, _phantoms = allocate_chain_truth(_positions, _chain_bal)
+            for _ph in _phantoms:
+                phantom_set.add(_ph.trade_id)
+            # Only mark aggregate-backed when there are multiple lots for this
+            # token; single-lot positions are correctly compared against chain.size.
+            if len(_positions) > 1:
+                for _al in _allocated:
+                    aggregate_backed_set.add(_al.trade_id)
+    # ────────────────────────────────────────────────────────────────────────
+
     for pos in list(portfolio.positions):
         tid = pos.token_id if pos.direction == "buy_yes" else pos.no_token_id
         if not tid:
             if pos.state == "pending_tracked":
                 stats["skipped_pending"] += 1
             continue
+
+        # Pass-2: skip aggregate-phantom positions — chain cannot back them.
+        # Void using the existing PHANTOM_NOT_ON_CHAIN state (no new enum).
+        if pos.trade_id in phantom_set:
+            logger.warning(
+                "AGGREGATE_PHANTOM: trade_id=%s token=%s voided by chain aggregate reconciliation",
+                pos.trade_id,
+                tid,
+            )
+            void_position(portfolio, pos.trade_id, "PHANTOM_NOT_ON_CHAIN")
+            stats["voided"] += 1
+            stats["aggregate_phantom_voided"] = stats.get("aggregate_phantom_voided", 0) + 1
+            continue
+
         state_name = getattr(pos.state, "value", pos.state)
         if state_name in {"quarantined"}:
             local_tokens.add(tid)
@@ -735,7 +854,18 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                     logger.warning("telemetry_counter event=cost_basis_chain_mutation_blocked_total field=cost_basis_usd")
                     _cnt_inc("cost_basis_chain_mutation_blocked_total", labels={"field": "size_usd"})
                     logger.warning("telemetry_counter event=cost_basis_chain_mutation_blocked_total field=size_usd")
-            if abs(chain.size - local_shares) > 0.01:
+            if pos.trade_id in aggregate_backed_set:
+                # Aggregate-backed: chain.size is the token aggregate across multiple
+                # lots; comparing it against this lot's shares would produce a false
+                # SIZE MISMATCH and quarantine. Allocation confirmed chain coverage;
+                # preserve local share count (bot finding PR #141).
+                logger.debug(
+                    "AGGREGATE_BACKED: %s skipping size-mismatch check (chain agg=%.4f, lot=%.4f)",
+                    pos.trade_id,
+                    chain.size,
+                    local_shares,
+                )
+            elif abs(chain.size - local_shares) > 0.01:
                 logger.warning("SIZE MISMATCH: %s local %.4f vs chain %.4f", pos.trade_id, local_shares, chain.size)
                 if not _size_mismatch_eligible:
                     corrected.shares = chain.size

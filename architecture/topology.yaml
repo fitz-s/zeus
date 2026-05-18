@@ -583,7 +583,7 @@ docs_subroots:
     role: operations
     requires_agents: true
     allow_non_markdown: true
-    allowed_extensions: [".md", ".json", ".txt", ".yaml", ".yml", ".py", ".sql", ".mmd"]
+    allowed_extensions: [".md", ".json", ".txt", ".yaml", ".yml", ".py", ".sql", ".mmd", ".fixed", ".mjs"]
   - path: "docs/runbooks"
     role: runbook
     requires_agents: true

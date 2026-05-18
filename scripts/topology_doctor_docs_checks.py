@@ -102,6 +102,8 @@ DOCS_REGISTRY_PARENT_PATTERNS = (
     "docs/operations/*_observation/",
     "docs/operations/ws_poll_reaction/",
     "docs/operations/attribution_drift/",
+    # date-prefixed incident/operation packets (e.g. 2026-05-18_*)
+    "docs/operations/[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]_*/",
     "docs/reports/",
     "docs/artifacts/",
     "docs/to-do-list/",
