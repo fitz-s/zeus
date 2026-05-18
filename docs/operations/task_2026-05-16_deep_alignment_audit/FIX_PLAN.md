@@ -192,8 +192,15 @@ Below: per-PR antibody and scope. Finding-level evidence (file:line) is in [FIND
 
 **RETRACTED**: premise broken — v1 is not legacy, has 5 runtime consumers and
 provides OpenMeteo coverage for non-tier-1 cities. Dropping v1 would break the
-daemon. Reframed as PR-M' (view-cutover + dual-writer invariant antibody, this
-PR). See jobs/9ea6f95c/briefs/pr_m_reframed_view_cutover.md for full analysis.
+daemon.
+
+Reframed as PR-M' (dual-writer invariant antibody + contract doc, this PR).
+The view cutover (observation_instants_current) is deferred to a separate
+operator-mediated ops migration: the view is currently INACTIVE (zeus_meta
+defaults to 'v0', which returns zero rows). Cutover requires a downstream
+consumer audit + operator UPDATE zeus_meta before any reader can switch.
+Pre-activation guard: tests/state/test_observation_view_consumer_safety.py.
+See jobs/9ea6f95c/briefs/pr_m_reframed_view_cutover.md for full analysis.
 
 ### PR-K — F16 wrap_unwrap decision
 - **Decision in SCAFFOLD**: delete module + tables (Z4-deferred only) OR wire enqueue caller + APScheduler poll + reconcile (Z5-planned).
