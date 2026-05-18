@@ -27,6 +27,10 @@
 # Idempotency: checks sqlite_master before creating trigger; safe to re-run.
 #
 # Runner-framework entry point: def up(conn) per F23 migration runner contract.
+# Standalone-mode raw sqlite3.connect at line 114 is operator-mode (`python -m`
+# direct invocation); operator stops daemon before running.  Runner-invoked
+# def up(conn) path is lock-free by design (runner owns db_writer_lock).
+# WRITER_LOCK_DEFER_REVIEW=2026-05-17
 #
 # Operator runbook:
 #   python scripts/migrations/202605_position_current_bridge_required_trigger.py
