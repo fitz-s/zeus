@@ -97,6 +97,24 @@ jobs:
             -q \
             2>&1 | tee pytest-output.log
 
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-tests-${{ github.run_id }}
+          path: junit.xml
+          if-no-files-found: ignore
+
+      - name: Print failure summary to step summary
+        if: failure()
+        run: |
+          {
+            echo "## full-pytest-sweep FAILURE (${GATE_PHASE})"
+            echo '```'
+            tail -50 pytest-output.log
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Summarize sweep
         if: always()
         run: |
