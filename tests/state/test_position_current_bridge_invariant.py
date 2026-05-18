@@ -1,5 +1,8 @@
+# Lifecycle: created=2026-05-17; last_reviewed=2026-05-18; last_reused=2026-05-18
+# Purpose: Assert position_current to trade_decisions bridge invariants across migration and repair paths.
+# Reuse: Inspect KARACHI_TRADE_DECISIONS_GAP_TRACE.md and the bridge trigger migration before relying on it.
 # Created: 2026-05-17
-# Last reused or audited: 2026-05-17
+# Last reused or audited: 2026-05-18
 # Authority basis: KARACHI_TRADE_DECISIONS_GAP_TRACE.md §6-8 + fix packet design
 """Relationship test: position_current must have a matching trade_decisions bridge.
 
@@ -229,6 +232,40 @@ class TestTriggerMigration:
         ).fetchall()
         assert len(rows) == 1
 
+    def test_migration_replaces_stale_trigger_definition(self):
+        mod = _load_migration()
+        conn = _make_db()
+        position_id = str(uuid.uuid4())
+        _insert_position_current(conn, position_id)
+        conn.execute(
+            f"""
+            CREATE TRIGGER {mod.TRIGGER_NAME}
+            BEFORE INSERT ON position_current
+            BEGIN
+              SELECT RAISE(ABORT, 'position_current INSERT requires matching trade_decisions.runtime_trade_id')
+              WHERE NOT EXISTS (
+                SELECT 1 FROM trade_decisions WHERE runtime_trade_id = NEW.position_id
+              );
+            END
+            """
+        )
+        conn.commit()
+
+        mod.up(conn)
+
+        conn.execute(
+            """
+            INSERT INTO position_current (position_id, phase, strategy_key, updated_at, temperature_metric)
+            VALUES (?, 'active', 'opening_inertia', '2026-01-02', 'high')
+            ON CONFLICT(position_id) DO UPDATE SET phase=excluded.phase, updated_at=excluded.updated_at
+            """,
+            (position_id,),
+        )
+        row = conn.execute(
+            "SELECT phase FROM position_current WHERE position_id=?", (position_id,)
+        ).fetchone()
+        assert row[0] == "active"
+
     def test_trigger_blocks_insert_without_bridge(self):
         mod = _load_migration()
         conn = _make_db()
@@ -252,15 +289,19 @@ class TestTriggerMigration:
         ).fetchone()
         assert row is not None
 
-    def test_trigger_does_not_block_upsert_phase_update(self):
-        """ON CONFLICT DO UPDATE for existing rows should not re-trigger BEFORE INSERT."""
+    def test_trigger_does_not_block_existing_orphan_upsert_repair_path(self):
+        """Legacy orphan rows must remain updatable so repair paths can run."""
         mod = _load_migration()
         conn = _make_db()
-        mod.up(conn)
         position_id = str(uuid.uuid4())
-        _insert_trade_decisions(conn, position_id)
+
+        # The migration is deployed after historical orphan rows already exist.
+        # Those rows lack trade_decisions.runtime_trade_id by definition; the
+        # trigger must still permit same-position projection repairs that use
+        # INSERT ... ON CONFLICT DO UPDATE.
         _insert_position_current(conn, position_id)
-        # Phase update via upsert (ON CONFLICT DO UPDATE) should work
+        mod.up(conn)
+
         conn.execute(
             """
             INSERT INTO position_current (position_id, phase, strategy_key, updated_at, temperature_metric)

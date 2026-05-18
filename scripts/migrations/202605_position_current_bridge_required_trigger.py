@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
+# Lifecycle: created=2026-05-17; last_reviewed=2026-05-18; last_reused=2026-05-18
+# Purpose: Install the position_current bridge trigger without blocking legacy orphan repair upserts.
+# Reuse: Inspect KARACHI_TRADE_DECISIONS_GAP_TRACE.md and tests/state/test_position_current_bridge_invariant.py first.
 # Created: 2026-05-17
-# Last reused or audited: 2026-05-17
+# Last reused or audited: 2026-05-18
 # Authority basis: KARACHI_TRADE_DECISIONS_GAP_TRACE.md §6-8
 #
 # Migration: add BEFORE INSERT TRIGGER on position_current requiring a
@@ -14,10 +17,14 @@
 # lifecycle update.
 #
 # Trigger semantics:
-#   - BEFORE INSERT only — does NOT affect ON CONFLICT DO UPDATE paths
-#     (existing rows updated via upsert are unaffected).
+#   - Fresh position_current INSERT rows require a matching trade_decisions
+#     bridge row.
+#   - Existing position_current rows are exempt so INSERT ... ON CONFLICT DO
+#     UPDATE repair paths can keep updating historical orphan rows until the
+#     synthesizer repairs their bridge. SQLite fires BEFORE INSERT triggers
+#     before conflict resolution, so this exemption must be explicit.
 #   - The 17 pre-existing orphan rows in position_current are NOT affected
-#     by this trigger; it fires only on new inserts.
+#     by this trigger; same-position upserts remain available for repair.
 #   - Karachi safety: the synthesizer (src/state/trade_decisions_synthesizer.py)
 #     ships in the same packet.  When update_trade_lifecycle encounters a
 #     missing bridge on an existing orphan row, the synthesizer fires first
@@ -55,18 +62,36 @@ BEFORE INSERT ON position_current
 BEGIN
   SELECT RAISE(ABORT, 'position_current INSERT requires matching trade_decisions.runtime_trade_id')
   WHERE NOT EXISTS (
+    SELECT 1 FROM position_current WHERE position_id = NEW.position_id
+  )
+  AND NOT EXISTS (
     SELECT 1 FROM trade_decisions WHERE runtime_trade_id = NEW.position_id
   );
 END
 """
 
 
-def _is_already_applied(conn: sqlite3.Connection) -> bool:
+def _normalize_sql(sql: str | None) -> str:
+    return " ".join((sql or "").split()).strip()
+
+
+def _existing_trigger_sql(conn: sqlite3.Connection) -> str | None:
     row = conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='trigger' AND name=?",
+        "SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?",
         (TRIGGER_NAME,),
     ).fetchone()
-    return row is not None
+    return str(row[0]) if row is not None else None
+
+
+def _is_already_applied(conn: sqlite3.Connection) -> bool:
+    return _normalize_sql(_existing_trigger_sql(conn)) == _normalize_sql(TRIGGER_SQL)
+
+
+def _replace_stale_trigger(conn: sqlite3.Connection) -> bool:
+    if _existing_trigger_sql(conn) is None or _is_already_applied(conn):
+        return False
+    conn.execute(f"DROP TRIGGER {TRIGGER_NAME}")
+    return True
 
 
 def _has_trade_decisions_table(conn: sqlite3.Connection) -> bool:
@@ -102,9 +127,10 @@ def up(conn: sqlite3.Connection) -> None:
             "position_current table not found; skipping trigger creation."
         )
         return
+    replaced = _replace_stale_trigger(conn)
     conn.execute(TRIGGER_SQL)
     conn.commit()
-    logger.info("Created trigger %s.", TRIGGER_NAME)
+    logger.info("%s trigger %s.", "Replaced stale" if replaced else "Created", TRIGGER_NAME)
 
 
 def _migrate_one_db(db_path: Path, *, dry_run: bool = False) -> dict:
@@ -127,17 +153,23 @@ def _migrate_one_db(db_path: Path, *, dry_run: bool = False) -> dict:
             outcome["details"] = f"Trigger {TRIGGER_NAME} already exists."
             return outcome
 
+        replacing = _existing_trigger_sql(conn) is not None
         if dry_run:
-            outcome["action"] = "dry_run_would_create_trigger"
+            outcome["action"] = (
+                "dry_run_would_replace_trigger"
+                if replacing else "dry_run_would_create_trigger"
+            )
             outcome["details"] = (
-                f"Would CREATE TRIGGER {TRIGGER_NAME} BEFORE INSERT ON position_current."
+                f"Would {'replace' if replacing else 'create'} "
+                f"TRIGGER {TRIGGER_NAME} BEFORE INSERT ON position_current."
             )
             return outcome
 
+        _replace_stale_trigger(conn)
         conn.execute(TRIGGER_SQL)
         conn.commit()
-        outcome["action"] = "created_trigger"
-        outcome["details"] = f"Trigger {TRIGGER_NAME} created."
+        outcome["action"] = "replaced_trigger" if replacing else "created_trigger"
+        outcome["details"] = f"Trigger {TRIGGER_NAME} {'replaced' if replacing else 'created'}."
         return outcome
     finally:
         conn.close()
