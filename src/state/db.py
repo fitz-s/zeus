@@ -5368,7 +5368,7 @@ def log_rescue_event(
 
 
 def log_shadow_signal(
-    conn: sqlite3.Connection,
+    conn: sqlite3.Connection,  # Deprecated: ignored; function opens its own world connection (INV-37 fix, PR-S4b §3)
     *,
     city: str,
     target_date: str,
@@ -5379,8 +5379,17 @@ def log_shadow_signal(
     edges_json: str,
     lead_hours: float,
 ) -> None:
+    """Write one shadow signal row to zeus-world.db.
+
+    INV-37 fix (PR-S4b §3, 2026-05-18): opens its own world connection rather
+    than accepting an opaque conn from callers. Pre-fix, callers passed the
+    cycle trades-rooted conn (zeus_trades.db MAIN with world ATTACHed), causing
+    shadow_signals rows to land in zeus_trades.db instead of zeus-world.db.
+    The ``conn`` parameter is kept for backward compat but is no longer used.
+    """
     try:
-        conn.execute(
+        _wconn = get_world_connection()
+        _wconn.execute(
             """
             INSERT INTO shadow_signals
             (city, target_date, timestamp, decision_snapshot_id, p_raw_json, p_cal_json, edges_json, lead_hours)
@@ -5388,6 +5397,7 @@ def log_shadow_signal(
             """,
             (city, target_date, timestamp, decision_snapshot_id, p_raw_json, p_cal_json, edges_json, lead_hours),
         )
+        _wconn.commit()
     except Exception as e:
         import logging
         logging.getLogger(__name__).warning("Failed to log shadow signal: %s", e)
@@ -5553,21 +5563,25 @@ def _trace_int(value) -> int | None:
 
 
 def log_probability_trace_fact(
-    conn: sqlite3.Connection | None,
+    conn: sqlite3.Connection | None,  # Deprecated: ignored; function opens its own world connection (INV-37 fix, PR-S4b §3)
     *,
     candidate,
     decision,
     recorded_at: str,
     mode: str,
 ) -> dict:
-    """Write one durable probability trace row for one decision.
+    """Write one durable probability trace row for one decision to zeus-world.db.
 
     This helper intentionally stores direct decision-time vectors only. It must
     not scalar-backfill vector lineage from BinEdge scalar fields.
+
+    INV-37 fix (PR-S4b §3, 2026-05-18): opens its own world connection rather
+    than accepting an opaque conn from callers. Pre-fix, callers passed the
+    cycle trades-rooted conn (zeus_trades.db MAIN with world ATTACHed), causing
+    probability_trace_fact rows to land in zeus_trades.db instead of zeus-world.db.
+    The ``conn`` parameter is kept for backward compat but is no longer used.
     """
-    if conn is None:
-        logger.info("Probability trace write skipped: no connection")
-        return {"status": "skipped_no_connection", "table": "probability_trace_fact"}
+    conn = get_world_connection()
     if not _table_exists(conn, "probability_trace_fact"):
         logger.info("Probability trace table unavailable; skipping durable write")
         return {"status": "skipped_missing_table", "table": "probability_trace_fact"}
@@ -5726,6 +5740,7 @@ def log_probability_trace_fact(
             recorded_at,
         ),
     )
+    conn.commit()
     return {
         "status": "written",
         "table": "probability_trace_fact",
@@ -6089,7 +6104,7 @@ def log_opportunity_fact(
 
 
 def log_availability_fact(
-    conn: sqlite3.Connection | None,
+    conn: sqlite3.Connection | None,  # Deprecated: ignored; function opens its own world connection (INV-37 fix, PR-S4b §3)
     *,
     availability_id: str,
     scope_type: str,
@@ -6100,9 +6115,14 @@ def log_availability_fact(
     details: dict | None = None,
     ended_at: str | None = None,
 ) -> dict:
-    if conn is None:
-        logger.info("Availability fact write skipped: no connection")
-        return {"status": "skipped_no_connection", "table": "availability_fact"}
+    """Write one availability fact row to zeus-world.db.
+
+    INV-37 fix (PR-S4b §3, 2026-05-18): opens its own world connection rather
+    than accepting an opaque conn from callers. Pre-fix, cycle_runtime passed
+    the trades-rooted conn, routing availability_fact rows to zeus_trades.db.
+    The ``conn`` parameter is kept for backward compat but is no longer used.
+    """
+    conn = get_world_connection()
     if not _table_exists(conn, "availability_fact"):
         logger.info("Availability fact table unavailable; skipping durable write")
         return {"status": "skipped_missing_table", "table": "availability_fact"}
@@ -6143,6 +6163,7 @@ def log_availability_fact(
             payload,
         ),
     )
+    conn.commit()
     return {"status": "written", "table": "availability_fact"}
 
 
