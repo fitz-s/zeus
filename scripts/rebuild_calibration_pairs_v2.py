@@ -1873,8 +1873,10 @@ def main() -> int:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA busy_timeout = 600000")
     conn.execute("PRAGMA journal_mode=WAL")
-    init_schema(conn)
-    apply_v2_schema(conn)
+    # NOTE: init_schema + apply_v2_schema moved inside bulk_lock_with_chunker
+    # (F26 cleanup Codex finding): these DDL calls contain DROP TABLE IF EXISTS
+    # and CREATE TABLE IF NOT EXISTS writes that must be inside the writer-lock
+    # to prevent contention with live writers.
 
     try:
         # F11 (wave6 2026-05-18): emit chunk-boundary events into zeus-world.db
@@ -1892,6 +1894,10 @@ def main() -> int:
             caller_module="scripts.rebuild_calibration_pairs_v2",
             event_writer=_event_writer,
         ) as chunker:
+            # DDL inside the lock: apply_v2_schema contains DROP TABLE IF EXISTS
+            # and CREATE TABLE IF NOT EXISTS — must run while bulk flock is held.
+            init_schema(conn)
+            apply_v2_schema(conn)
             try:
                 per_metric = rebuild_all_v2(
                     conn,

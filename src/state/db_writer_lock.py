@@ -638,6 +638,16 @@ def subprocess_run_with_write_class(
 # from tests/conftest.py._WLA_SQLITE_CONNECT_ALLOWLIST.  conftest now imports
 # this set and unions it with its residual STALE_REWRITE / QUARANTINED entries,
 # so the Track A.3 FAIL-CI gate still fires on any unlisted site.
+#
+# F26 cleanup (2026-05-18): 29 STALE_REWRITE + 1 QUARANTINED entries resolved
+# from conftest._WLA_RESIDUAL_ALLOWLIST.  28 entries already used db_writer_lock
+# correctly (already_guarded / operator_invoked); 1 script retrofitted with a
+# db_writer_lock wrap (migrate_backtest_runs_lane_constraint_2026_05_07.py);
+# verify_truth_surfaces.py promoted as read_only (0 DML writes; RISK_DB/DEFAULT_TRADE_DB/
+# SHARED_DB connects switched to mode=ro URIs in F26 cleanup; all SQL is SELECT-only);
+# _zeus_emergency_k2_obs_backfill_2026_05_10.py dropped (file deleted post-run).
+# Remaining residual: src/data/market_scanner.py (daemon INSERT, pending Track A.6)
+# + src/state/chunk_boundary_events.py (daemon thread write, separate conn by design).
 SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
     {
         "src/state/db.py",  # canonical shim
@@ -698,6 +708,43 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         "scripts/migrations/202605_add_redeem_operator_required_state.py",  # operator_invoked: --dry-run mode; daemon never imports
         "scripts/migrations/__main__.py",                # operator_invoked: migration runner CLI; daemon never imports
         "scripts/migrations/202605_position_current_bridge_required_trigger.py",  # operator_invoked: idempotent; --dry-run mode
+        # -------------------------------------------------------------------
+        # F26 cleanup (2026-05-18): STALE_REWRITE + QUARANTINED entries resolved
+        # -------------------------------------------------------------------
+        # --- already_guarded backfill/ingest scripts: all writes under db_writer_lock(BULK) ---
+        "scripts/backfill_forecast_issue_time.py",          # already_guarded: reads mode=ro; writes under db_writer_lock(BULK)
+        "scripts/backfill_london_f_to_c_2026_05_08.py",     # already_guarded: writes under db_writer_lock(BULK)
+        "scripts/backfill_low_contract_window_evidence.py", # already_guarded: writes under db_writer_lock(BULK) when not dry_run
+        "scripts/backfill_obs_v2.py",                       # already_guarded: writes under db_writer_lock(BULK)
+        "scripts/backfill_ogimet_metar.py",                 # already_guarded: writes under db_writer_lock(BULK)
+        "scripts/backfill_outcome_fact.py",                 # already_guarded: writes under db_writer_lock(BULK)
+        "scripts/backfill_tigge_snapshot_p_raw_v2.py",      # already_guarded: writes under db_writer_lock(BULK)
+        "scripts/backfill_wu_daily_all.py",                 # already_guarded: writes under db_writer_lock(BULK)
+        "scripts/cleanup_ghost_positions.py",               # already_guarded: writes under db_writer_lock(BULK)
+        "scripts/etl_forecasts_v2_from_legacy.py",          # already_guarded: writes under db_writer_lock(BULK)
+        "scripts/fill_obs_v2_dst_gaps.py",                  # already_guarded: writes under db_writer_lock(BULK) when not dry_run
+        "scripts/fill_obs_v2_meteostat.py",                 # already_guarded: writes under db_writer_lock(BULK) when not dry_run
+        "scripts/force_cycle_with_healthy_gates.py",        # already_guarded: writes under db_writer_lock(BULK)
+        "scripts/hko_ingest_tick.py",                       # already_guarded: writes under db_writer_lock(BULK)
+        "scripts/ingest_grib_to_snapshots.py",              # already_guarded: writes under db_writer_lock(BULK)
+        "scripts/nuke_rebuild_projections.py",              # already_guarded: writes under db_writer_lock(BULK)
+        "scripts/obs_v2_live_tick.py",                      # already_guarded: writes under db_writer_lock(BULK) when not dry_run
+        "scripts/rebuild_calibration_pairs_canonical.py",   # already_guarded: writes under db_writer_lock(BULK)
+        "scripts/rebuild_calibration_pairs_v2.py",          # already_guarded: writes under bulk_lock_with_chunker (K3 retrofit)
+        "scripts/rebuild_settlements.py",                   # already_guarded: writes under db_writer_lock(BULK)
+        "scripts/refit_platt_v2.py",                        # already_guarded: reads mode=ro; writes under db_writer_lock(BULK)
+        # --- already_guarded operator migration scripts ---
+        "scripts/migrate_add_authority_column.py",          # operator_invoked + already_guarded: writes under db_writer_lock(BULK)
+        "scripts/migrate_b070_control_overrides_to_history.py",  # operator_invoked + already_guarded: writes under db_writer_lock(BULK)
+        "scripts/migrate_ensemble_snapshots_v2_add_ingest_backend.py",  # operator_invoked + already_guarded: writes under db_writer_lock(BULK)
+        "scripts/migrate_forecasts_availability_provenance.py",   # operator_invoked + already_guarded: reads mode=ro; writes under db_writer_lock(BULK)
+        "scripts/migrate_observations_k1.py",               # operator_invoked + already_guarded: writes under db_writer_lock(BULK)
+        # --- retrofitted migration script (F26 cleanup: lock wrap added 2026-05-18) ---
+        "scripts/migrate_backtest_runs_lane_constraint_2026_05_07.py",  # operator_invoked: db_writer_lock(BULK) wrap added F26 cleanup
+        # --- one-shot idempotent operator script ---
+        "scripts/reevaluate_readiness_2026_05_07.py",       # operator_invoked: one-shot idempotent readiness repair (ran 2026-05-07, expected 0 updates)
+        # --- QUARANTINED resolved: verify_truth_surfaces is read_only (0 writes) ---
+        "scripts/verify_truth_surfaces.py",                 # read_only: all connects are mode=ro or SELECT-only; 0 INSERT/UPDATE/DELETE
     }
 )
 

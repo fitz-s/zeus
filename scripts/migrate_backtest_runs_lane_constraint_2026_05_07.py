@@ -1,10 +1,14 @@
-# Created: 2026-05-07
-# Last reused or audited: 2026-05-07
+# Lifecycle: created=2026-05-07; last_reviewed=2026-05-18; last_reused=never
+# Purpose: One-shot migration — add 'selection_coverage' to lane CHECK constraints
+#          in backtest_runs and backtest_outcome_comparison tables.
+# Reuse: Idempotent (detects already-migrated via sqlite_master inspection).
+#        Inspect DB schema + PR #87 context before re-running.
 # Authority basis: PR #87 fix — selection_coverage lane omitted from
 #   backtest_runs + backtest_outcome_comparison CHECK constraints in
 #   src/state/db.py:2267,2283.
-# WRITER_LOCK_DEFER_REVIEW=2026-05-17 — backtest DB only (not a live-trading
-#   DB); db_writer_lock retrofit deferred to WAVE-3. See F22_WRITER_LOCK_FIX.md.
+# F26 follow-up (2026-05-18): db_writer_lock(BULK) wrap added (nullcontext for
+#   dry-run); backtest DB is not a live-trading DB but the lock makes the
+#   allowlist promotion clean.
 """Migrate backtest DB: add 'selection_coverage' to lane CHECK constraints.
 
 SQLite does not support ALTER TABLE … MODIFY CONSTRAINT, so this migration
@@ -35,10 +39,13 @@ import argparse
 import logging
 import sqlite3
 import sys
+from contextlib import nullcontext
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
+
+from src.state.db_writer_lock import WriteClass, db_writer_lock  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -166,50 +173,52 @@ def run_migration(db_path: Path = DEFAULT_DB, dry_run: bool = False) -> dict:
     if not db_path.exists():
         return {"status": "noop_db_not_found", "db": str(db_path)}
 
-    conn = sqlite3.connect(db_path)
-    # Gate WAL mode behind not-dry-run: PRAGMA journal_mode=WAL persists on disk
-    # and creates -wal/-shm sidecar files even in read-only inspection runs
-    # (PR #89 Copilot fix).
-    if not dry_run:
-        conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA foreign_keys=OFF")  # required for rename+recreate
-
-    try:
-        if not _check_needs_migration(conn):
-            return {"status": "noop_already_migrated", "db": str(db_path)}
-
-        logger.info("Migration needed — starting transaction.")
-
+    lock_ctx = db_writer_lock(db_path, WriteClass.BULK) if not dry_run else nullcontext()
+    with lock_ctx:
+        conn = sqlite3.connect(db_path)
+        # Gate WAL mode behind not-dry-run: PRAGMA journal_mode=WAL persists on disk
+        # and creates -wal/-shm sidecar files even in read-only inspection runs
+        # (PR #89 Copilot fix).
         if not dry_run:
-            conn.execute("BEGIN IMMEDIATE")
+            conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA foreign_keys=OFF")  # required for rename+recreate
 
-        # 1. backtest_runs (no FK dependencies from it; outcome_comparison refs it)
-        runs_count = _migrate_table(conn, "backtest_runs", CREATE_BACKTEST_RUNS_NEW, dry_run)
+        try:
+            if not _check_needs_migration(conn):
+                return {"status": "noop_already_migrated", "db": str(db_path)}
 
-        # 2. backtest_outcome_comparison (has FK → backtest_runs; FK is OFF so safe)
-        oc_count = _migrate_table(
-            conn, "backtest_outcome_comparison", CREATE_BACKTEST_OUTCOME_COMPARISON_NEW, dry_run
-        )
+            logger.info("Migration needed — starting transaction.")
 
-        # 3. Recreate indexes (dropped with the old table)
-        if not dry_run:
-            for idx_sql in CREATE_INDEXES:
-                conn.execute(idx_sql)
-            conn.execute("COMMIT")
-            conn.execute("PRAGMA foreign_keys=ON")
+            if not dry_run:
+                conn.execute("BEGIN IMMEDIATE")
 
-        return {
-            "status": "dry_run" if dry_run else "migrated",
-            "db": str(db_path),
-            "backtest_runs_rows": runs_count,
-            "backtest_outcome_comparison_rows": oc_count,
-        }
-    except Exception:
-        if not dry_run:
-            conn.execute("ROLLBACK")
-        raise
-    finally:
-        conn.close()
+            # 1. backtest_runs (no FK dependencies from it; outcome_comparison refs it)
+            runs_count = _migrate_table(conn, "backtest_runs", CREATE_BACKTEST_RUNS_NEW, dry_run)
+
+            # 2. backtest_outcome_comparison (has FK → backtest_runs; FK is OFF so safe)
+            oc_count = _migrate_table(
+                conn, "backtest_outcome_comparison", CREATE_BACKTEST_OUTCOME_COMPARISON_NEW, dry_run
+            )
+
+            # 3. Recreate indexes (dropped with the old table)
+            if not dry_run:
+                for idx_sql in CREATE_INDEXES:
+                    conn.execute(idx_sql)
+                conn.execute("COMMIT")
+                conn.execute("PRAGMA foreign_keys=ON")
+
+            return {
+                "status": "dry_run" if dry_run else "migrated",
+                "db": str(db_path),
+                "backtest_runs_rows": runs_count,
+                "backtest_outcome_comparison_rows": oc_count,
+            }
+        except Exception:
+            if not dry_run:
+                conn.execute("ROLLBACK")
+            raise
+        finally:
+            conn.close()
 
 
 def main() -> None:

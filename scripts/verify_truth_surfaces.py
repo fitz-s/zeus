@@ -3232,7 +3232,7 @@ def check_6_risk_state_truth_source() -> tuple[str, str]:
         return FAIL, f"{RISK_DB} not found"
 
     try:
-        rconn = sqlite3.connect(str(RISK_DB))
+        rconn = sqlite3.connect(f"file:{RISK_DB}?mode=ro", uri=True)
         rcur = rconn.cursor()
         row = _row(
             rcur,
@@ -3307,9 +3307,9 @@ def run_checks() -> int:
         print(f"FATAL: {SHARED_DB} not found")
         return 1
 
-    conn = sqlite3.connect(str(DEFAULT_TRADE_DB))
+    conn = sqlite3.connect(f"file:{DEFAULT_TRADE_DB}?mode=ro", uri=True)
     cur = conn.cursor()
-    shared_conn = sqlite3.connect(str(SHARED_DB))
+    shared_conn = sqlite3.connect(f"file:{SHARED_DB}?mode=ro", uri=True)
     shared_cur = shared_conn.cursor()
 
     checks = [

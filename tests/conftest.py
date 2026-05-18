@@ -168,32 +168,32 @@ _WLA_CACHE_PATH = _WLA_REPO_ROOT / ".pytest_cache" / "writer_lock_antibody.json"
 #
 # F26 follow-up (2026-05-18): 42 CURRENT_REUSABLE entries have been migrated
 # to src/state/db_writer_lock.SQLITE_CONNECT_ALLOWLIST (the production owner).
+# F26 cleanup (2026-05-18): 29 STALE_REWRITE entries + 1 QUARANTINED entry
+# resolved — all promoted to SQLITE_CONNECT_ALLOWLIST or dropped.
+#
 # Conftest now owns ONLY:
 #   - canonical infra not owned by db_writer_lock — _WLA_CANONICAL_INFRA_ALLOWLIST
 #     (src/state/db.py is intentionally also in the production allowlist; the
 #     dual listing is by design)
-#   - STALE_REWRITE (pending Track A.6 batch retrofit) — _WLA_RESIDUAL_ALLOWLIST
-#   - QUARANTINED (non-mechanical rewrite deferred) — _WLA_RESIDUAL_ALLOWLIST
+#   - genuinely-unresolved daemon sites — _WLA_RESIDUAL_ALLOWLIST
+#     (2 entries: market_scanner + chunk_boundary_events, pending Track A.6)
 #
 # The effective gate-allowlist = canonical_infra | residual | production.
 #
-# `_WLA_RESIDUAL_ALLOWLIST` (STALE_REWRITE + QUARANTINED) is the single
-# source of truth for paths that MUST NOT appear in the production
-# allowlist. tests/test_allowlist_migration_f26.py imports it directly so
-# there is no duplicate hand-maintained copy that could drift (the
-# two-truth bug this antibody is meant to catch).
+# `_WLA_RESIDUAL_ALLOWLIST` is the single source of truth for paths that
+# MUST NOT appear in the production allowlist. tests/test_allowlist_migration_f26.py
+# imports it directly so there is no duplicate hand-maintained copy that could
+# drift (the two-truth bug this antibody is meant to catch).
 #
 # Reason tags used in comments:
 #   canonical_shim      — the canonical DB helper; direct connect is the point
 #   pending_track_a6    — daemon-level src/ site; full retrofit deferred to Track A.6 (#246)
-#   pending_track_a6_scripts — write script not yet retrofit; deferred to Track A.6 batch
-#   deferred_nonmechanical   — verify_truth_surfaces: non-mechanical rewrite, separate phase
 #
 # Canonical infrastructure. These ARE allowed to also appear in the
 # production db_writer_lock allowlist (src/state/db.py is the canonical
 # shim and is intentionally in both). Tracked as a separate subset so
-# the no-leak check below only fires on STALE_REWRITE / QUARANTINED
-# entries that genuinely must not promote to production.
+# the no-leak check below only fires on genuinely-unresolved entries
+# that must not promote to production.
 #
 # NOTE: src/state/db_writer_lock.py is intentionally NOT allowlisted. The file
 # has no sqlite3.connect() call sites today; if a future edit introduces one,
@@ -204,63 +204,26 @@ _WLA_CANONICAL_INFRA_ALLOWLIST = frozenset({
     "src/state/collateral_ledger.py",               # singleton_persistent_conn (2026-05-13 fix): CollateralLedger(db_path=) opens a ledger-owned conn for the process-wide singleton so it survives transient caller-conn lifecycles. Single connect site, no schema mutation outside init_collateral_schema.
 })
 
-# Residual must-not-leak set: STALE_REWRITE + QUARANTINED entries only.
+# Residual must-not-leak set: daemon src/ sites pending Track A.6 retrofit.
 # Any path here that also appears in db_writer_lock.SQLITE_CONNECT_ALLOWLIST
-# is a scope-creep regression (Track A.6 retrofit or non-mechanical rewrite
-# was skipped). The F26 antibody in tests/test_allowlist_migration_f26.py
-# imports this set directly so a CURRENT_REUSABLE re-addition fails the
-# test without a parallel update there.
+# is a scope-creep regression (Track A.6 retrofit was skipped without a
+# principled decision). The F26 antibody in tests/test_allowlist_migration_f26.py
+# imports this set directly so a re-addition fails the test without a parallel
+# update there.
+#
+# F26 cleanup (2026-05-18): 30 entries removed (29 STALE_REWRITE + 1 QUARANTINED).
+# All resolved: already_guarded scripts promoted to production allowlist;
+# verify_truth_surfaces promoted as read_only; _zeus_emergency_k2 dropped (file
+# deleted post-run); migrate_backtest_runs retrofitted with db_writer_lock wrap.
+# 2 daemon src/ sites remain — unresolved pending Track A.6.
 _WLA_RESIDUAL_ALLOWLIST = frozenset({
     # --- src/ daemon sites: pending Track A.6 (#246) ---
-    "src/data/market_scanner.py",                   # pending_track_a6
-    # src/ingest_main.py, src/main.py, src/observability/status_summary.py,
-    # src/riskguard/discord_alerts.py, src/control/cli/promote_entry_forecast.py
-    # — migrated to SQLITE_CONNECT_ALLOWLIST in src/state/db_writer_lock.py (F26).
-    # scripts/promote_calibration_v2_stage_to_prod.py + read-only scripts (PR #86
-    # + additional) + scripts/repro_antibodies.py — also migrated to F26 production
-    # allowlist (production owner = src/state/db_writer_lock.py).
-    #
-    # Post-WAVE-6 (F11 chunk-boundary events, PR #156) addition kept here as a
-    # daemon site pending eventual migration to production allowlist:
-    "src/state/chunk_boundary_events.py",           # F11 observability emit; opens world.db on-demand (failure-silent); separate conn from BulkChunker's conn to avoid lock-order conflict
-
-    # --- write scripts: pending Track A.6 batch retrofit ---
-    "scripts/backfill_forecast_issue_time.py",      # pending_track_a6_scripts
-    "scripts/backfill_london_f_to_c_2026_05_08.py", # pending_track_a6_scripts (fix #262/#263/#264 repair; under db_writer_lock for writes)
-    "scripts/backfill_low_contract_window_evidence.py",  # pending_track_a6_scripts
-    "scripts/backfill_obs_v2.py",                   # pending_track_a6_scripts
-    "scripts/obs_v2_live_tick.py",                  # pending_track_a6_scripts (F44 live-tick writer; db_writer_lock guards; direct connect needed for non-dry-run path)
-    "scripts/backfill_ogimet_metar.py",             # pending_track_a6_scripts
-    "scripts/backfill_outcome_fact.py",             # pending_track_a6_scripts
-    "scripts/backfill_tigge_snapshot_p_raw_v2.py",  # pending_track_a6_scripts
-    "scripts/backfill_wu_daily_all.py",             # pending_track_a6_scripts
-    "scripts/cleanup_ghost_positions.py",           # pending_track_a6_scripts
-    "scripts/etl_forecasts_v2_from_legacy.py",      # pending_track_a6_scripts
-    "scripts/fill_obs_v2_dst_gaps.py",              # pending_track_a6_scripts
-    "scripts/fill_obs_v2_meteostat.py",             # pending_track_a6_scripts
-    "scripts/force_cycle_with_healthy_gates.py",    # pending_track_a6_scripts
-    "scripts/hko_ingest_tick.py",                   # pending_track_a6_scripts
-    "scripts/ingest_grib_to_snapshots.py",          # pending_track_a6_scripts
-    "scripts/migrate_add_authority_column.py",      # pending_track_a6_scripts
-    "scripts/migrate_b070_control_overrides_to_history.py",  # pending_track_a6_scripts
-    "scripts/migrate_backtest_runs_lane_constraint_2026_05_07.py",  # pending_track_a6_scripts
-    "scripts/migrate_ensemble_snapshots_v2_add_ingest_backend.py",  # pending_track_a6_scripts
-    "scripts/migrate_forecasts_availability_provenance.py",  # pending_track_a6_scripts
-    "scripts/migrate_observations_k1.py",           # pending_track_a6_scripts
-    "scripts/nuke_rebuild_projections.py",          # pending_track_a6_scripts
-    "scripts/rebuild_calibration_pairs_canonical.py",  # pending_track_a6_scripts
-    "scripts/rebuild_calibration_pairs_v2.py",      # pending_track_a6_scripts
-    "scripts/rebuild_settlements.py",               # pending_track_a6_scripts
-    "scripts/reevaluate_readiness_2026_05_07.py",   # pending_track_a6_scripts
-    "scripts/refit_platt_v2.py",                    # pending_track_a6_scripts
-    "scripts/_zeus_emergency_k2_obs_backfill_2026_05_10.py",  # pending_track_a6_scripts (emergency K2 obs backfill)
-
-    # --- deferred non-mechanical rewrite (separate phase, cited PR #86) ---
-    "scripts/verify_truth_surfaces.py",             # deferred_nonmechanical (PR #86)
+    "src/data/market_scanner.py",       # pending_track_a6: daemon INSERT writes to market_events_v2; no db_writer_lock yet
+    "src/state/chunk_boundary_events.py",  # pending_track_a6: F11 daemon-thread observability write; intentionally separate conn from BulkChunker's conn to avoid lock-order conflict; failure-silent
 })
 
-# Effective allowlist: canonical infra + residual (STALE_REWRITE + QUARANTINED)
-# unioned with the production owner set imported above.
+# Effective allowlist: canonical infra + residual (Track A.6 daemon sites only;
+# STALE_REWRITE + QUARANTINED fully resolved in F26 cleanup) + production owner set.
 _WLA_SQLITE_CONNECT_ALLOWLIST = (
     _WLA_CANONICAL_INFRA_ALLOWLIST | _WLA_RESIDUAL_ALLOWLIST | _WLA_PRODUCTION_ALLOWLIST
 )
@@ -352,9 +315,13 @@ def pytest_configure(config) -> None:
 
     Track A.3 posture (PR #92): FAIL-CI on any direct sqlite3.connect()
     outside the allowlist.  Advisory→fail-CI upgrade per Track A plan.
-    Add to _WLA_RESIDUAL_ALLOWLIST (STALE_REWRITE / QUARANTINED) or
-    db_writer_lock.SQLITE_CONNECT_ALLOWLIST (CURRENT_REUSABLE) with a
-    cited reason tag to suppress a specific site during staged rollout.
+
+    F26 cleanup (2026-05-18): STALE_REWRITE and QUARANTINED classes are fully
+    resolved.  _WLA_RESIDUAL_ALLOWLIST now holds only daemon src/ sites pending
+    Track A.6 (#246).  New sites should go to SQLITE_CONNECT_ALLOWLIST in
+    src/state/db_writer_lock.py (CURRENT_REUSABLE) or, if a daemon src/ site
+    requiring Track A.6 work, to _WLA_RESIDUAL_ALLOWLIST with reason tag
+    pending_track_a6.
     """
     if _wla_is_bypassed():
         config.issue_config_time_warning(
@@ -375,9 +342,9 @@ def pytest_configure(config) -> None:
             f"{len(findings)} direct sqlite3.connect() site(s) outside "
             f"allowlist ({allowlist_size} entries). "
             f"For CURRENT_REUSABLE sites add to SQLITE_CONNECT_ALLOWLIST in "
-            f"src/state/db_writer_lock.py. For STALE_REWRITE/QUARANTINED sites "
-            f"add to _WLA_RESIDUAL_ALLOWLIST in tests/conftest.py with a "
-            f"cited reason tag (pending_track_a6 / deferred_nonmechanical / etc). "
+            f"src/state/db_writer_lock.py. For daemon src/ sites pending Track A.6 "
+            f"(#246) add to _WLA_RESIDUAL_ALLOWLIST in tests/conftest.py with "
+            f"reason tag pending_track_a6. "
             f"Violations: {findings[:5]}"
             + (f" ... and {len(findings) - 5} more" if len(findings) > 5 else "")
         )
