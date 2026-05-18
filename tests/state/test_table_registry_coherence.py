@@ -1,5 +1,5 @@
 # Created: 2026-05-14
-# Last reused or audited: 2026-05-17
+# Last reused or audited: 2026-05-18
 # Authority basis: docs/operations/task_2026-05-14_k1_followups/PLAN.md §1.1, §1.2, §3 (REV 4)
 #   Antibodies A1, A2 (subset as A4), A8 per PLAN §3
 #   INV-37 enforcement per architecture/invariants.yaml::INV-37
@@ -8,6 +8,8 @@
 #   test_a4_trade_tables_init_schema_creates_12 +
 #   test_a4_ghost_shells_declared_legacy_archived_on_world
 #   per STRUCTURAL_PLAN v3 §2 PR-S4 + E_patch_plan.md §Antibody/CI
+#   v1.F1 (2026-05-18) addition: TestA4BootWiringCallSite — AST boot-wiring antibody
+#   for assert_db_matches_registry in main.py + ingest_main.py (PR-S4b)
 """Registry coherence tests — A1/A2/A4/A8 antibody suite.
 
 ANTIBODY PROOF per Fitz Core Methodology #4 (make category impossible):
@@ -706,4 +708,170 @@ class TestA4ManifestReadyForBootWiring:
             f"declaration for db: world in db_table_ownership.yaml: "
             f"{sorted(missing_ghost)}. "
             f"Add Option (b) ghost entries per E_patch_plan.md §4."
+        )
+
+
+# ---------------------------------------------------------------------------
+# A4 Boot-wiring call-site antibody (v1.F1)
+# ---------------------------------------------------------------------------
+
+class TestA4BootWiringCallSite:
+    """A4 boot-wiring antibody: assert_db_matches_registry is called at daemon boot.
+
+    AST-based: parses src/main.py and src/ingest_main.py and walks the main()
+    function body to confirm assert_db_matches_registry calls are present for
+    the expected DBIdentity members.
+
+    Antibody proof (sed-break / restore):
+    - Replace assert_db_matches_registry(conn, DBIdentity.WORLD) with pass in
+      src/main.py main() → this test fails (no Call node for DBIdentity.WORLD).
+    - Restore → test passes.
+
+    The complement of TestA4AssertDbMatchesRegistry, which tests the function
+    itself. This class tests the wiring that invokes the function at boot.
+    """
+
+    @staticmethod
+    def _collect_assert_db_calls_in_main(src_rel_path: str) -> list[str]:
+        """Return list of DBIdentity argument strings passed to assert_db_matches_registry
+        inside the main() function of the given file (relative to _REPO_ROOT).
+
+        Walks the AST of the main() body looking for Call nodes whose function
+        name is 'assert_db_matches_registry'.  Returns the string representation
+        of the second positional argument (the DBIdentity), e.g. 'DBIdentity.WORLD'.
+        """
+        src_path = _REPO_ROOT / src_rel_path
+        source = src_path.read_text(encoding="utf-8")
+        tree = ast.parse(source, filename=src_rel_path)
+
+        # Find the top-level main() function definition.
+        main_node = None
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name == "main":
+                main_node = node
+                break
+
+        if main_node is None:
+            return []
+
+        # Collect assert_db_matches_registry call arguments within main().
+        found: list[str] = []
+        for node in ast.walk(main_node):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            # Handle bare call: assert_db_matches_registry(...)
+            if isinstance(func, ast.Name) and func.id == "assert_db_matches_registry":
+                if len(node.args) >= 2:
+                    found.append(ast.unparse(node.args[1]))
+            # Handle attribute call: table_registry.assert_db_matches_registry(...)
+            elif isinstance(func, ast.Attribute) and func.attr == "assert_db_matches_registry":
+                if len(node.args) >= 2:
+                    found.append(ast.unparse(node.args[1]))
+
+        return found
+
+    def test_a4_main_py_wires_world_and_trade(self):
+        """src/main.py main() calls assert_db_matches_registry for WORLD and TRADE.
+
+        Regression injection:
+        - Remove the assert_db_matches_registry(conn, DBIdentity.WORLD) call
+          → DBIdentity.WORLD missing from found list → this test fails.
+        - Remove the assert_db_matches_registry(_trade_conn_reg, DBIdentity.TRADE) call
+          → DBIdentity.TRADE missing → this test fails.
+
+        v1.F1 authority: src/main.py:1764-1776.
+        """
+        found = self._collect_assert_db_calls_in_main("src/main.py")
+        found_str = sorted(found)
+
+        assert "DBIdentity.WORLD" in found, (
+            f"A4 BOOT-WIRING FAIL (main.py WORLD): assert_db_matches_registry is NOT "
+            f"called with DBIdentity.WORLD inside main() in src/main.py. "
+            f"v1.F1 boot wiring was removed or never applied. "
+            f"Calls found: {found_str}. "
+            f"Restore the wiring per architecture/db_table_ownership.yaml §1.1."
+        )
+        assert "DBIdentity.TRADE" in found, (
+            f"A4 BOOT-WIRING FAIL (main.py TRADE): assert_db_matches_registry is NOT "
+            f"called with DBIdentity.TRADE inside main() in src/main.py. "
+            f"v1.F1 boot wiring was removed or never applied. "
+            f"Calls found: {found_str}. "
+            f"Restore the wiring per architecture/db_table_ownership.yaml §1.1."
+        )
+
+    def test_a4_ingest_main_py_wires_world(self):
+        """src/ingest_main.py main() calls assert_db_matches_registry for WORLD.
+
+        Regression injection:
+        - Remove the assert_db_matches_registry(_world_conn_reg, DBIdentity.WORLD)
+          call from ingest_main.py main() → this test fails.
+
+        v1.F1 authority: src/ingest_main.py (PR-S4b boot wiring).
+        """
+        found = self._collect_assert_db_calls_in_main("src/ingest_main.py")
+        found_str = sorted(found)
+
+        assert "DBIdentity.WORLD" in found, (
+            f"A4 BOOT-WIRING FAIL (ingest_main.py WORLD): assert_db_matches_registry "
+            f"is NOT called with DBIdentity.WORLD inside main() in src/ingest_main.py. "
+            f"v1.F1 boot wiring was removed or never applied. "
+            f"Calls found: {found_str}. "
+            f"Restore the wiring per architecture/db_table_ownership.yaml §1.1."
+        )
+
+    def test_a4_env_bypass_guard_present_in_main_py(self):
+        """src/main.py main() contains the ZEUS_BOOT_REGISTRY_ASSERT_ENABLED guard.
+
+        Confirms the escape hatch for intentional schema migrations is structurally
+        in place (not removed), and that the guard string is present in the function
+        body.  The guard must default to '1' (enabled) — checked by asserting '0'
+        is the disabled value in the source text.
+
+        Regression injection:
+        - Remove the os.environ.get('ZEUS_BOOT_REGISTRY_ASSERT_ENABLED', '1') guard
+          → the guard string vanishes → this test fails.
+        """
+        src_path = _REPO_ROOT / "src/main.py"
+        source = src_path.read_text(encoding="utf-8")
+        tree = ast.parse(source, filename="src/main.py")
+
+        main_node = None
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name == "main":
+                main_node = node
+                break
+
+        assert main_node is not None, "src/main.py has no main() function"
+        main_src = ast.unparse(main_node)
+
+        assert "ZEUS_BOOT_REGISTRY_ASSERT_ENABLED" in main_src, (
+            "A4 BOOT-WIRING FAIL (env guard): ZEUS_BOOT_REGISTRY_ASSERT_ENABLED "
+            "is not referenced inside main() in src/main.py. "
+            "The escape hatch guard was removed. Restore per v1.F1."
+        )
+
+    def test_a4_env_bypass_guard_present_in_ingest_main_py(self):
+        """src/ingest_main.py main() contains the ZEUS_BOOT_REGISTRY_ASSERT_ENABLED guard.
+
+        Regression injection:
+        - Remove the guard → string vanishes → this test fails.
+        """
+        src_path = _REPO_ROOT / "src/ingest_main.py"
+        source = src_path.read_text(encoding="utf-8")
+        tree = ast.parse(source, filename="src/ingest_main.py")
+
+        main_node = None
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name == "main":
+                main_node = node
+                break
+
+        assert main_node is not None, "src/ingest_main.py has no main() function"
+        main_src = ast.unparse(main_node)
+
+        assert "ZEUS_BOOT_REGISTRY_ASSERT_ENABLED" in main_src, (
+            "A4 BOOT-WIRING FAIL (env guard): ZEUS_BOOT_REGISTRY_ASSERT_ENABLED "
+            "is not referenced inside main() in src/ingest_main.py. "
+            "The escape hatch guard was removed. Restore per v1.F1."
         )
