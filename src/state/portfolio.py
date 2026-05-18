@@ -2186,8 +2186,10 @@ def has_inflight_exit_for_token(conn, token_id: str) -> bool:
     - Restricted to intent_kind = 'EXIT' so BUY confirmations (MATCHED/MINED)
       do not falsely trigger the gate.
     - Added NOT EXISTS subquery to exclude historical MATCHED rows that are
-      superseded by a CONFIRMED row for the same command_id (venue_trade_facts is
-      append-only; older state rows are never deleted).
+      superseded by a CONFIRMED row for the same trade_id + command_id (venue_trade_facts
+      is append-only; older state rows are never deleted). trade_id correlation is
+      required: a CONFIRMED row for trade T1 must not suppress the MATCHED/MINED
+      gate for a sibling trade T2 under the same command_id (bot finding PR #143).
 
     Alternative future path (if needed): execution_fact.position_id → venue_commands.position_id
     (execution_fact table exists with position_id column, confirmed 2026-05-17).
@@ -2202,6 +2204,7 @@ def has_inflight_exit_for_token(conn, token_id: str) -> bool:
              AND NOT EXISTS (
                  SELECT 1 FROM venue_trade_facts vtf2
                  WHERE vtf2.command_id = vtf.command_id
+                   AND vtf2.trade_id = vtf.trade_id
                    AND vtf2.state = 'CONFIRMED'
              )
            LIMIT 1""",
