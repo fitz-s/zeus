@@ -165,6 +165,7 @@ def _harvester_cycle():
     logger.info("Harvester: %s", result)
 
 
+@_scheduler_job("wu_daily")
 def _wu_daily_dispatch() -> None:
     """K2 WU daily scheduler tick — collect WU daily observations for eligible cities.
 
@@ -173,22 +174,13 @@ def _wu_daily_dispatch() -> None:
     fires at most once per hour at its configured local trigger time.
 
     Cluster L wiring per G4_CLEANUP_DESIGN.md §2 L (2026-05-18).
+    K2 import (daily_obs_append) lives in wu_scheduler.run_wu_daily_dispatch
+    to keep src.main free of K2 ingest modules (Phase 3 boundary, antibody #8).
     Operator may override interval post-merge if cadence needs tuning.
     """
-    from src.data.wu_scheduler import WuDailyScheduler, dispatch_wu_daily_collection
-    from src.data.daily_obs_append import append_daily_obs_for_city
+    from src.data.wu_scheduler import run_wu_daily_dispatch
 
-    scheduler_instance = WuDailyScheduler()
-    targets = dispatch_wu_daily_collection(scheduler_instance)
-    if not targets:
-        logger.debug("wu_daily_dispatch: no cities eligible this tick")
-        return
-    for city_name in targets:
-        try:
-            append_daily_obs_for_city(city_name)
-            logger.info("wu_daily_dispatch: collected %s", city_name)
-        except Exception as exc:  # noqa: BLE001
-            logger.error("wu_daily_dispatch: error for %s: %s", city_name, exc)
+    run_wu_daily_dispatch()
 
 
 # ---------------------------------------------------------------------------

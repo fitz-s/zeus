@@ -113,3 +113,30 @@ def dispatch_wu_daily_collection(
         if scheduler.should_collect_now(city, now_utc):
             targets.append(name)
     return targets
+
+
+def run_wu_daily_dispatch(now_utc: Optional[datetime] = None) -> None:
+    """K2 ingest wrapper: collect WU daily observations for all eligible cities.
+
+    Combines dispatch_wu_daily_collection gating with append_daily_obs_for_city
+    execution. Called by main.py's _wu_daily_dispatch scheduler wrapper.
+
+    Lives in wu_scheduler.py (src.data) so that the K2 import
+    (src.data.daily_obs_append) stays out of src.main (Phase 3 boundary).
+    """
+    import logging
+
+    from src.data.daily_obs_append import append_daily_obs_for_city
+
+    logger = logging.getLogger(__name__)
+    scheduler_instance = WuDailyScheduler()
+    targets = dispatch_wu_daily_collection(scheduler_instance, now_utc)
+    if not targets:
+        logger.debug("wu_daily_dispatch: no cities eligible this tick")
+        return
+    for city_name in targets:
+        try:
+            append_daily_obs_for_city(city_name)
+            logger.info("wu_daily_dispatch: collected %s", city_name)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("wu_daily_dispatch: error for %s: %s", city_name, exc)
