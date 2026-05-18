@@ -252,21 +252,43 @@ def consolidate(conn: sqlite3.Connection) -> dict:
                 )
                 continue
             # OVERBOOK: void oldest rows until db_sum collapses to chain_shares.
+            # MAJ-1 fix (2026-05-17 PR critic): only safe when a prefix of oldest
+            # rows has cumulative shares == excess (within tol). Otherwise voiding
+            # any prefix either under-shoots (leaves excess) or over-shoots (loses
+            # chain authority). Counter-example: shares=[3,5], chain=4, excess=4 →
+            # void 3 leaves excess=1; void 3+5 over-shoots to -4 (loses 4 chain
+            # shares from DB authority). Conservative fail-closed: classify
+            # DIVERGENT, void nothing, log loudly for operator triage. Matches
+            # feedback_no_manual_precedent_for_any_structural_defect (the
+            # consolidator cannot guess which row owns chain truth on asymmetric
+            # overbook; that's an operator-mediated reconciliation decision).
             excess = db_sum - chain_shares
-            voided_here: list[str] = []
-            for position_id, shares, _first_at in triples:
-                if excess <= 1e-9:
+            cum = 0.0
+            clean_prefix_len = -1
+            for i, (_pid_p, shares_p, _first_p) in enumerate(triples):
+                cum += shares_p
+                if abs(cum - excess) <= 1e-9:
+                    clean_prefix_len = i + 1
                     break
+                if cum > excess + 1e-9:
+                    break  # this row over-shoots; no longer prefix can recover
+            if clean_prefix_len < 0:
+                report["divergent_tokens"].append(token_id)
+                logger.error(
+                    "[CONSOLIDATOR_DIVERGENT_ASYMMETRIC] token=%s db_sum=%.6f "
+                    "chain=%.6f excess=%.6f rows=%s "
+                    "(no clean void prefix; operator triage required)",
+                    token_id, db_sum, chain_shares, excess,
+                    [(p, s) for p, s, _ in triples],
+                )
+                continue
+            voided_here: list[str] = []
+            for position_id, shares, _first_at in triples[:clean_prefix_len]:
                 _void_row(conn, position_id=position_id, reason=_VOIDED_REASON)
                 voided_here.append(position_id)
-                excess -= shares
                 logger.warning(
-                    "[CONSOLIDATOR_OVERBOOK_VOID] token=%s voided=%s "
-                    "shares=%.6f remaining_excess=%.6f",
-                    token_id,
-                    position_id,
-                    shares,
-                    excess,
+                    "[CONSOLIDATOR_OVERBOOK_VOID] token=%s voided=%s shares=%.6f",
+                    token_id, position_id, shares,
                 )
             report["overbook_tokens"].append(token_id)
             report["voided_positions"].extend(voided_here)
@@ -317,14 +339,33 @@ def consolidate_token(conn: sqlite3.Connection, token_id: str) -> dict:
         if not chain_by_token or db_sum <= chain_shares + 1e-9:
             report["divergent_tokens"].append(str(token_id))
         else:
+            # MAJ-1 fix (2026-05-17 PR critic): asymmetric-share overbook is
+            # fail-closed DIVERGENT — see consolidate() for the counter-example
+            # and rationale. Same guard mirrored here for the single-token API.
             excess = db_sum - chain_shares
-            for position_id, shares, _first_at in triples:
-                if excess <= 1e-9:
+            cum = 0.0
+            clean_prefix_len = -1
+            for i, (_pid_p, shares_p, _first_p) in enumerate(triples):
+                cum += shares_p
+                if abs(cum - excess) <= 1e-9:
+                    clean_prefix_len = i + 1
                     break
-                _void_row(conn, position_id=position_id, reason=_VOIDED_REASON)
-                report["voided_positions"].append(position_id)
-                excess -= shares
-            report["overbook_tokens"].append(str(token_id))
+                if cum > excess + 1e-9:
+                    break
+            if clean_prefix_len < 0:
+                report["divergent_tokens"].append(str(token_id))
+                logger.error(
+                    "[CONSOLIDATOR_DIVERGENT_ASYMMETRIC] token=%s db_sum=%.6f "
+                    "chain=%.6f excess=%.6f rows=%s "
+                    "(no clean void prefix; consolidate_token; operator triage)",
+                    token_id, db_sum, chain_shares, excess,
+                    [(p, s) for p, s, _ in triples],
+                )
+            else:
+                for position_id, _shares, _first_at in triples[:clean_prefix_len]:
+                    _void_row(conn, position_id=position_id, reason=_VOIDED_REASON)
+                    report["voided_positions"].append(position_id)
+                report["overbook_tokens"].append(str(token_id))
         conn.execute(f"RELEASE SAVEPOINT {sp}")
     except Exception:
         conn.execute(f"ROLLBACK TO SAVEPOINT {sp}")

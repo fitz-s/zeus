@@ -316,3 +316,111 @@ def test_consolidator_karachi_single_row_noop(tmp_path):
         f"got scanned_tokens={report['scanned_tokens']}"
     )
     assert report["voided_positions"] == []
+
+
+# ---------------------------------------------------------------------------
+# Test 5 (PR-critic MAJ-1): asymmetric-share OVERBOOK → DIVERGENT, not over-void
+# ---------------------------------------------------------------------------
+
+def test_consolidator_overbook_unequal_shares_does_not_corrupt_db_authority(tmp_path):
+    """Asymmetric duplicates must classify DIVERGENT, NOT over-void.
+
+    Counter-example from PR-level critic 2026-05-17:
+      shares=[3, 5], chain=4, db_sum=8, excess=4.
+    Old loop voided BOTH rows (3 then 5), leaving DB=0 while chain=4 —
+    DB lost authority over 4 chain shares.
+
+    Correct behavior (MAJ-1 fix): no clean prefix of oldest rows sums to
+    excess → fail-closed DIVERGENT, void NOTHING, log loudly. Operator
+    triages per feedback_no_manual_precedent_for_any_structural_defect.
+    """
+    from src.state.position_duplicate_consolidator import consolidate
+
+    token = "tok_asym_" + uuid.uuid4().hex[:8]
+    # Chain says 4 shares; DB has 3 + 5 = 8 (asymmetric overbook).
+    conn = _make_trade_db(tmp_path, chain_balances={token: 4.0})
+
+    pos_old = str(uuid.uuid4())
+    pos_new = str(uuid.uuid4())
+    _insert_position(conn, position_id=pos_old, token_id=token, phase="pending_exit",
+                     shares=3.0, occurred_at="2026-05-17T10:00:00+00:00")
+    _insert_position(conn, position_id=pos_new, token_id=token, phase="pending_exit",
+                     shares=5.0, occurred_at="2026-05-17T11:00:00+00:00")
+
+    db_sum_before = conn.execute(
+        "SELECT COALESCE(SUM(shares), 0) FROM position_current "
+        "WHERE token_id=? AND phase='pending_exit'",
+        (token,),
+    ).fetchone()[0]
+    assert db_sum_before == 8.0, "test setup precondition: db_sum == 8"
+
+    report = consolidate(conn)
+
+    assert report["scanned_tokens"] == 1, "one duplicate token should be scanned"
+    assert report["voided_positions"] == [], (
+        f"asymmetric overbook MUST NOT void any row; got voided={report['voided_positions']}"
+    )
+    assert report["overbook_tokens"] == [], (
+        f"asymmetric overbook MUST NOT classify OVERBOOK; got {report['overbook_tokens']}"
+    )
+    assert token in report["divergent_tokens"], (
+        f"asymmetric overbook MUST classify DIVERGENT for operator triage; "
+        f"got divergent={report['divergent_tokens']}"
+    )
+
+    # DB authority preserved: both rows intact, sum unchanged.
+    db_sum_after = conn.execute(
+        "SELECT COALESCE(SUM(shares), 0) FROM position_current "
+        "WHERE token_id=? AND phase='pending_exit'",
+        (token,),
+    ).fetchone()[0]
+    assert db_sum_after == 8.0, (
+        f"DB authority must be preserved on DIVERGENT classification; "
+        f"sum dropped from 8.0 to {db_sum_after}"
+    )
+    # Neither row voided.
+    for pid in (pos_old, pos_new):
+        row = conn.execute(
+            "SELECT phase, shares FROM position_current WHERE position_id=?", (pid,)
+        ).fetchone()
+        assert row["phase"] == "pending_exit", (
+            f"row {pid} phase changed from 'pending_exit' to '{row['phase']}'"
+        )
+        assert row["shares"] > 0.0, f"row {pid} shares voided to 0"
+    conn.close()
+
+
+def test_consolidator_overbook_unequal_shares_consolidate_token_variant(tmp_path):
+    """Same fail-closed contract for the per-token API (consolidate_token).
+
+    Mirrors test_consolidator_overbook_unequal_shares_does_not_corrupt_db_authority
+    via consolidate_token() instead of consolidate(), since both functions had
+    the same over-void defect and both got the MAJ-1 guard.
+    """
+    from src.state.position_duplicate_consolidator import consolidate_token
+
+    token = "tok_asym_t_" + uuid.uuid4().hex[:8]
+    conn = _make_trade_db(tmp_path, chain_balances={token: 4.0})
+
+    _insert_position(conn, position_id=str(uuid.uuid4()), token_id=token,
+                     phase="pending_exit", shares=3.0,
+                     occurred_at="2026-05-17T10:00:00+00:00")
+    _insert_position(conn, position_id=str(uuid.uuid4()), token_id=token,
+                     phase="pending_exit", shares=5.0,
+                     occurred_at="2026-05-17T11:00:00+00:00")
+
+    report = consolidate_token(conn, token)
+
+    assert report["voided_positions"] == [], (
+        f"consolidate_token asymmetric overbook MUST NOT void; got {report['voided_positions']}"
+    )
+    assert report["overbook_tokens"] == []
+    assert token in report["divergent_tokens"]
+
+    db_sum_after = conn.execute(
+        "SELECT COALESCE(SUM(shares), 0) FROM position_current "
+        "WHERE token_id=? AND phase='pending_exit'",
+        (token,),
+    ).fetchone()[0]
+    assert db_sum_after == 8.0
+    conn.close()
