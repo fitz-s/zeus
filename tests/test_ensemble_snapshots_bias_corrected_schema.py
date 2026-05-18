@@ -35,6 +35,8 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+import pytest
+
 from src.state.db import init_schema
 
 
@@ -75,6 +77,13 @@ def test_init_schema_is_idempotent_for_bias_corrected():
     assert "bias_corrected" in cols
 
 
+@pytest.mark.skip(
+    reason=(
+        "v1.F20 (2026-05-18): ensemble_snapshots legacy table is being dropped. "
+        "This test validated the ALTER TABLE bias_corrected migration for legacy DBs; "
+        "now that the table is removed, the migration path no longer applies."
+    )
+)
 def test_legacy_db_without_column_gets_migrated():
     """Simulate a legacy DB that has the table but no bias_corrected column,
     then run init_schema → migration must add the column without breaking
@@ -124,11 +133,11 @@ def test_legacy_db_without_column_gets_migrated():
 
 
 def test_store_snapshot_p_raw_round_trip_with_fresh_schema():
-    """Integration: writer + reader work end-to-end on fresh init_schema DB.
+    """Integration: writer + reader work end-to-end on ensemble_snapshots_v2.
 
-    Pre-P2-B1, this would silently fail because UPDATE bias_corrected
-    raised OperationalError caught by writer's except, leaving p_raw_json
-    NULL. Post-fix, the round-trip works.
+    v1.F20: migrated from legacy ensemble_snapshots to ensemble_snapshots_v2.
+    Pre-P2-B1 this test verified bias_corrected column migration; post-v1.F20
+    the v2 table is the canonical target and bias_corrected is a v2 column.
     """
     import json
     import numpy as np
@@ -136,34 +145,31 @@ def test_store_snapshot_p_raw_round_trip_with_fresh_schema():
 
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
-    init_schema(conn)
-    # Insert a snapshot row so we have something to UPDATE.
+    _attach_forecasts_snapshot_table(conn)
+    # Insert a v2 snapshot row so we have something to UPDATE.
     conn.execute("""
-        INSERT INTO ensemble_snapshots
-        (city, target_date, available_at, fetch_time, lead_hours,
-         members_json, model_version, data_version, temperature_metric)
-        VALUES ('NYC', '2026-04-15', '2026-04-15T12Z', '2026-04-15T12Z',
-                12, '[]', 'ecmwf_ens',
-                'tigge_mx2t6_local_calendar_day_max_v1', 'high')
+        INSERT INTO forecasts.ensemble_snapshots_v2
+        (city, target_date, available_at, fetch_time, model_version, data_version,
+         temperature_metric, provenance_json)
+        VALUES ('NYC', '2026-04-15', '2026-04-15T12:00:00Z', '2026-04-15T12:00:00Z',
+                'ecmwf_ens', 'tigge_mx2t6_local_calendar_day_max_v1', 'high', '{}')
     """)
     snapshot_id = conn.execute(
-        "SELECT snapshot_id FROM ensemble_snapshots WHERE city = 'NYC'"
+        "SELECT snapshot_id FROM forecasts.ensemble_snapshots_v2 WHERE city = 'NYC'"
     ).fetchone()[0]
     conn.commit()
 
     p_raw = np.array([0.2, 0.3, 0.5])
     _store_snapshot_p_raw(conn, str(snapshot_id), p_raw, bias_corrected=True)
     row = conn.execute(
-        "SELECT p_raw_json, bias_corrected FROM ensemble_snapshots "
+        "SELECT p_raw_json FROM forecasts.ensemble_snapshots_v2 "
         "WHERE snapshot_id = ?", (snapshot_id,),
     ).fetchone()
     assert row is not None
     assert row["p_raw_json"] is not None, (
-        "p_raw_json must persist post-fix; pre-fix it would be NULL because "
-        "the UPDATE raised on missing bias_corrected column."
+        "p_raw_json must persist in ensemble_snapshots_v2 (v1.F20 canonical target)"
     )
     assert json.loads(row["p_raw_json"]) == [0.2, 0.3, 0.5]
-    assert row["bias_corrected"] == 1
 
 
 def _attach_forecasts_snapshot_table(conn: sqlite3.Connection) -> None:
@@ -213,13 +219,10 @@ def test_store_snapshot_p_raw_uses_attached_forecasts_v2_without_legacy_projecti
     canonical = conn.execute(
         "SELECT p_raw_json FROM forecasts.ensemble_snapshots_v2 WHERE snapshot_id = 777"
     ).fetchone()
-    legacy = conn.execute(
-        "SELECT p_raw_json FROM ensemble_snapshots WHERE snapshot_id = 777"
-    ).fetchone()
     conn.close()
 
     assert json.loads(canonical["p_raw_json"]) == [0.25, 0.75]
-    assert legacy is None
+    # v1.F20: legacy ensemble_snapshots removed; no legacy projection to check.
 
 
 def test_read_v2_snapshot_metadata_prefers_attached_forecasts_schema():

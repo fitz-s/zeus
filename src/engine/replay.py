@@ -45,7 +45,6 @@ LEGACY_SHADOW_SIGNAL_TABLE = "shadow_signals"
 LEGACY_SHADOW_SIGNAL_DIAGNOSTIC_SOURCE = "legacy_shadow_signal_diagnostic"
 DIAGNOSTIC_REPLAY_REFERENCE_SOURCES = frozenset({
     LEGACY_SHADOW_SIGNAL_DIAGNOSTIC_SOURCE,
-    "ensemble_snapshots.available_at",
     "ensemble_snapshots_v2.available_at",
     "forecasts_table_synthetic",
 })
@@ -70,6 +69,12 @@ def _table_exists(conn, schema: str, table: str) -> bool:
 
 
 def _first_existing_table(conn, table: str) -> str:
+    # K1 (2026-05-11): forecast-class tables (ensemble_snapshots_v2, ...) live in
+    # zeus-forecasts.db, ATTACHed as 'forecasts' by get_trade_connection_with_world().
+    # Check forecasts first; fall back to world (legacy / monolithic-test layout),
+    # then main (pure in-memory test schema with no ATTACH).
+    if _table_exists(conn, "forecasts", table):
+        return f"forecasts.{table}"
     if _table_exists(conn, "world", table):
         return f"world.{table}"
     if _table_exists(conn, "", table):
@@ -338,11 +343,10 @@ class ReplayContext:
         self._snapshot_v2_table = _first_existing_forecast_authority_table(
             self.conn, "ensemble_snapshots_v2"
         )
-        self._snapshot_legacy_table = _first_existing_table(self.conn, "ensemble_snapshots")
-        if not self._snapshot_v2_table and not self._snapshot_legacy_table:
+        if not self._snapshot_v2_table:
             raise RuntimeError(
-                "Replay topology error: neither ensemble_snapshots_v2 nor "
-                "ensemble_snapshots exists in world attach or local main schema."
+                "Replay topology error: ensemble_snapshots_v2 not found in "
+                "forecasts, world, or main schema (legacy ensemble_snapshots removed by v1.F20)."
             )
         self._settlements_table = _first_existing_forecast_authority_table(
             self.conn, "settlements"
@@ -353,12 +357,23 @@ class ReplayContext:
         self._calibration_pairs_v2_table = _first_existing_forecast_authority_table(
             self.conn, "calibration_pairs_v2"
         )
-        if self._snapshot_legacy_table.startswith("world."):
-            self._sp = "world."  # preserve existing replay co-location behavior
-        elif self._snapshot_legacy_table:
-            self._sp = ""  # monolithic DB (tests) or main legacy snapshot projection
+        # _sp is the schema prefix for world-class legacy replay tables. It must
+        # reflect whether zeus-world.db is ATTACHed as 'world', not where
+        # forecast-class authority tables live.
+        if any(
+            _table_exists(self.conn, "world", table)
+            for table in (
+                "settlements",
+                "historical_forecasts_v2",
+                "forecasts",
+                "calibration_pairs",
+                "market_events",
+                LEGACY_SHADOW_SIGNAL_TABLE,
+            )
+        ):
+            self._sp = "world."
         else:
-            self._sp = ""  # monolithic DB (tests)
+            self._sp = ""  # monolithic DB (tests) — no world ATTACH
 
     def _columns_for(self, table: str) -> set[str]:
         if table not in self._snapshot_table_column_cache:
@@ -382,7 +397,6 @@ class ReplayContext:
         )
         for table, source in (
             (self._snapshot_v2_table, "ensemble_snapshots_v2"),
-            (self._snapshot_legacy_table, "ensemble_snapshots"),
         ):
             if not table:
                 continue
@@ -447,7 +461,6 @@ class ReplayContext:
         """Lightweight diagnostic reference lookup; full snapshot payload may not exist."""
         for table, source in (
             (self._snapshot_v2_table, "ensemble_snapshots_v2"),
-            (self._snapshot_legacy_table, "ensemble_snapshots"),
         ):
             if not table:
                 continue

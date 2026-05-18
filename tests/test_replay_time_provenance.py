@@ -10,10 +10,81 @@ from src.state.db import get_connection, init_schema, init_schema_forecasts
 from src.types.metric_identity import HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN
 
 
+def _enable_legacy_snapshot_fixture(conn):
+    """Accept old fixture inserts while mirroring them into ensemble_snapshots_v2."""
+    init_schema_forecasts(conn)
+    conn.executescript(
+        """
+        CREATE TEMP TABLE IF NOT EXISTS ensemble_snapshots (
+            snapshot_id INTEGER PRIMARY KEY,
+            city TEXT,
+            target_date TEXT,
+            issue_time TEXT,
+            valid_time TEXT,
+            available_at TEXT,
+            fetch_time TEXT,
+            lead_hours REAL,
+            members_json TEXT,
+            p_raw_json TEXT,
+            spread REAL,
+            is_bimodal INTEGER,
+            model_version TEXT,
+            data_version TEXT,
+            temperature_metric TEXT
+        );
+        CREATE TEMP TRIGGER IF NOT EXISTS mirror_legacy_snapshot_fixture_to_v2
+        AFTER INSERT ON ensemble_snapshots
+        BEGIN
+            INSERT OR IGNORE INTO ensemble_snapshots_v2 (
+                snapshot_id, city, target_date, temperature_metric,
+                physical_quantity, observation_field, issue_time, valid_time,
+                available_at, fetch_time, lead_hours, members_json, p_raw_json,
+                spread, is_bimodal, model_version, data_version,
+                training_allowed, causality_status, boundary_ambiguous,
+                provenance_json, authority, members_unit, unit
+            )
+            VALUES (
+                NEW.snapshot_id,
+                NEW.city,
+                NEW.target_date,
+                COALESCE(NEW.temperature_metric, 'high'),
+                CASE COALESCE(NEW.temperature_metric, 'high')
+                    WHEN 'low' THEN 'mn2t6_local_calendar_day_min'
+                    ELSE 'mx2t6_local_calendar_day_max'
+                END,
+                CASE COALESCE(NEW.temperature_metric, 'high')
+                    WHEN 'low' THEN 'low_temp'
+                    ELSE 'high_temp'
+                END,
+                NEW.issue_time,
+                NEW.valid_time,
+                NEW.available_at,
+                NEW.fetch_time,
+                NEW.lead_hours,
+                NEW.members_json,
+                NEW.p_raw_json,
+                NEW.spread,
+                NEW.is_bimodal,
+                NEW.model_version,
+                COALESCE(NEW.data_version, 'legacy_test_fixture'),
+                1,
+                'OK',
+                0,
+                '{}',
+                'VERIFIED',
+                'degF',
+                'F'
+            );
+        END;
+        """
+    )
+
+
 def test_replay_context_uses_only_snapshot_available_at_or_before_decision_time(tmp_path):
     db_path = tmp_path / "zeus.db"
     conn = get_connection(db_path)
     init_schema(conn)
+    _enable_legacy_snapshot_fixture(conn)
 
     conn.execute(
         """
@@ -45,6 +116,7 @@ def test_replay_context_uses_actual_trade_snapshot_reference(tmp_path):
     conn = get_connection(db_path)
     init_schema(conn)
     init_schema_forecasts(conn)
+    _enable_legacy_snapshot_fixture(conn)
     conn.execute(
         """
         INSERT INTO ensemble_snapshots
@@ -88,6 +160,7 @@ def test_replay_context_prefers_v2_snapshot_for_decision_reference(tmp_path):
     conn = get_connection(db_path)
     init_schema(conn)
     init_schema_forecasts(conn)
+    _enable_legacy_snapshot_fixture(conn)
     conn.execute(
         """
         INSERT INTO ensemble_snapshots_v2
@@ -181,6 +254,7 @@ def test_replay_context_prefers_forecasts_v2_snapshot_over_world_ghost(tmp_path)
     conn = get_connection(trade_db)
     conn.execute("ATTACH DATABASE ? AS world", (str(world_db),))
     conn.execute("ATTACH DATABASE ? AS forecasts", (str(forecasts_db),))
+    _enable_legacy_snapshot_fixture(conn)
     conn.execute(
         """
         INSERT INTO world.ensemble_snapshots_v2
@@ -392,6 +466,7 @@ def test_replay_context_falls_back_to_decision_log_no_trade_snapshot_reference(t
     conn = get_connection(db_path)
     init_schema(conn)
     init_schema_forecasts(conn)
+    _enable_legacy_snapshot_fixture(conn)
     conn.execute(
         """
         INSERT INTO ensemble_snapshots
@@ -431,6 +506,7 @@ def test_replay_context_snapshot_only_fallback_is_opt_in(tmp_path):
     db_path = tmp_path / "zeus.db"
     conn = get_connection(db_path)
     init_schema(conn)
+    _enable_legacy_snapshot_fixture(conn)
     conn.execute(
         """
         INSERT INTO ensemble_snapshots
@@ -450,7 +526,7 @@ def test_replay_context_snapshot_only_fallback_is_opt_in(tmp_path):
 
     assert strict_ref is None
     assert fallback_ref is not None
-    assert fallback_ref["source"] == "ensemble_snapshots.available_at"
+    assert fallback_ref["source"] == "ensemble_snapshots_v2.available_at"
     assert fallback_ref["snapshot_id"] == 31
 
 
@@ -459,15 +535,6 @@ def test_replay_context_snapshot_only_fallback_prefers_v2(tmp_path):
     conn = get_connection(db_path)
     init_schema(conn)
     init_schema_forecasts(conn)
-    conn.execute(
-        """
-        INSERT INTO ensemble_snapshots
-        (snapshot_id, city, target_date, issue_time, valid_time, available_at, fetch_time,
-         lead_hours, members_json, p_raw_json, spread, is_bimodal, model_version, data_version, temperature_metric)
-        VALUES (131, 'Paris', '2026-04-03', '2026-04-02T00:00:00Z', '2026-04-03T00:00:00Z',
-                '2026-04-02T08:00:00Z', '2026-04-02T08:05:00Z', 24.0, '[12.0]', '[1.0]', 2.0, 0, 'legacy', 'v1', 'high')
-        """
-    )
     conn.execute(
         """
         INSERT INTO ensemble_snapshots_v2
@@ -522,6 +589,7 @@ def test_replay_context_v2_snapshot_lookup_is_metric_scoped(tmp_path):
     conn = get_connection(db_path)
     init_schema(conn)
     init_schema_forecasts(conn)
+    _enable_legacy_snapshot_fixture(conn)
     for snapshot_id, metric, identity, members, p_raw, available_at in (
         (
             501,
@@ -615,6 +683,7 @@ def test_replay_context_snapshot_only_fallback_requires_p_raw(tmp_path):
     conn = get_connection(db_path)
     init_schema(conn)
     init_schema_forecasts(conn)
+    _enable_legacy_snapshot_fixture(conn)
     conn.execute(
         """
         INSERT INTO ensemble_snapshots_v2
@@ -667,7 +736,7 @@ def test_replay_context_snapshot_only_fallback_requires_p_raw(tmp_path):
     conn.close()
 
     assert fallback_ref is not None
-    assert fallback_ref["source"] == "ensemble_snapshots.available_at"
+    assert fallback_ref["source"] == "ensemble_snapshots_v2.available_at"
     assert fallback_ref["snapshot_id"] == 602
 
 
@@ -675,6 +744,7 @@ def test_replay_context_can_fallback_to_shadow_signal_reference(tmp_path):
     db_path = tmp_path / "zeus.db"
     conn = get_connection(db_path)
     init_schema(conn)
+    _enable_legacy_snapshot_fixture(conn)
     conn.execute(
         """
         INSERT INTO ensemble_snapshots

@@ -1,6 +1,13 @@
+# Created: 2026-05-18
+# Last reused or audited: 2026-05-18
+# Authority basis: v1.F20 — ensemble_snapshots legacy table dropped; backfill
+#   script (scripts/backfill_tigge_snapshot_p_raw.py) operated on that table.
+#   tests that touch ensemble_snapshots directly are skipped pending script retirement.
 from __future__ import annotations
 
 import json
+
+import pytest
 
 from scripts.backfill_tigge_snapshot_p_raw import (
     materialize_snapshot_row,
@@ -24,6 +31,14 @@ def test_p_raw_from_member_values_uses_typed_bins_and_units():
     assert p_raw == [0.5, 0.5]
 
 
+@pytest.mark.skip(
+    reason=(
+        "v1.F20 (2026-05-18): scripts/backfill_tigge_snapshot_p_raw.py operates on "
+        "legacy ensemble_snapshots which is being dropped. This test is retired pending "
+        "script update or deletion. The p_raw_from_member_values and typed_bins_for_city_date "
+        "helpers are tested independently above."
+    )
+)
 def test_materialize_snapshot_row_writes_replay_compatible_vector(tmp_path):
     db_path = tmp_path / "world.db"
     conn = get_connection(db_path)

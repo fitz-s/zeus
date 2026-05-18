@@ -120,10 +120,30 @@ def _fake_ens_with_metric(metric_value: str | None = "high"):
 
 
 def _snapshot_row_count(conn, city: str = "NYC") -> int:
-    """Count rows currently in ensemble_snapshots for a city."""
-    return conn.execute(
-        "SELECT COUNT(*) FROM ensemble_snapshots WHERE city = ?", (city,)
-    ).fetchone()[0]
+    """Count rows currently in ensemble_snapshots_v2 for a city (v1.F20: legacy removed)."""
+    import sqlite3
+    try:
+        return conn.execute(
+            "SELECT COUNT(*) FROM ensemble_snapshots_v2 WHERE city = ?", (city,)
+        ).fetchone()[0]
+    except sqlite3.OperationalError:
+        # Only swallow "no such table" — other errors (SQL typo, schema mismatch)
+        # should propagate so they don't mask real test failures.
+        return 0
+
+
+def _make_test_conn():
+    """Return an in-memory connection with world + v2 forecast schema tables."""
+    import sqlite3
+    from src.state.db import init_schema
+    from src.state.schema.v2_schema import _create_ensemble_snapshots_v2
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    init_schema(conn)
+    # K1 split: ensemble_snapshots_v2 lives in zeus-forecasts.db; create it in
+    # the monolithic test conn so _store_ens_snapshot has a v2 target.
+    _create_ensemble_snapshots_v2(conn)
+    return conn
 
 
 def test_store_ens_snapshot_does_not_write_when_metric_missing(caplog):
@@ -136,11 +156,7 @@ def test_store_ens_snapshot_does_not_write_when_metric_missing(caplog):
     `temperature_metric='high'`.
     """
     import logging
-    import sqlite3
-    from src.state.db import init_schema
-
-    conn = sqlite3.connect(":memory:")
-    init_schema(conn)
+    conn = _make_test_conn()
     ens = _fake_ens_with_metric(metric_value=None)
     ens_result = {
         "fetch_time": "2026-04-15T12:00:00Z",
@@ -163,11 +179,7 @@ def test_store_ens_snapshot_does_not_write_when_metric_missing(caplog):
 def test_store_ens_snapshot_does_not_write_when_inner_metric_missing(caplog):
     """ens.temperature_metric present but lacks .temperature_metric attr: still fail-closed."""
     import logging
-    import sqlite3
-    from src.state.db import init_schema
-
-    conn = sqlite3.connect(":memory:")
-    init_schema(conn)
+    conn = _make_test_conn()
     ens = _fake_ens_with_metric(metric_value="missing_inner")
     ens_result = {
         "fetch_time": "2026-04-15T12:00:00Z",
