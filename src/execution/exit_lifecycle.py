@@ -1225,13 +1225,12 @@ def check_pending_exits(
         if pos.exit_state not in ("sell_placed", "sell_pending", "exit_intent"):
             continue
         _mark_pending_exit(pos)
-        _dual_write_canonical_pending_exit_if_available(
-            conn,
-            pos,
-            reason=f"PENDING_EXIT_SCAN:{pos.exit_state}",
-            error=getattr(pos, "last_exit_error", "") or "",
-            event_type="EXIT_ORDER_POSTED",
-        )
+        # NOTE: no canonical event here — upstream transition sites (execute_exit,
+        # handle_exit_pending_missing, _mark_exit_dust_hold) already emit the
+        # transition event at the actual state change.  Emitting again on every
+        # passive scan would append a duplicate EXIT_ORDER_POSTED row each cycle
+        # and corrupt query_execution_event_summary() counts. (WAVE-3 Batch B
+        # bot review fix, 2026-05-18)
 
         # exit_intent with no order ID = stranded from exception during place_sell_order
         if pos.exit_state == "exit_intent":
