@@ -215,3 +215,15 @@ Track D (F90a deep-dive + cron model-allowlist sweep): F90a precise root cause i
 | **F105** | **Allowlist drift META**: `agents.defaults.models` is informational only — per-agent `model.primary = "openai/gpt-5.4-mini"` (4 agents) is unregistered yet works; `minimax-portal/MiniMax-M2.7` works in 24 jobs but is not allowlisted; `openai/gpt-5.5` is allowlisted but registered nowhere | SEV-3 | **NEW (Run #16 T D)** META | `openclaw.json` agents.defaults.models + per-agent primaries + models.providers registry | Run #16 T D | Run #16 T D |
 
 > See `RUN_16_track_D_f90a_model_allowlist_fix.md` §3 (root cause), §4 (per-job substitute), §5 (JSON patch + verification), §6 (kickstart), §7 (D1–D5 latent drifts), §8 (Karachi blast radius).
+
+
+## Run #16 Track A — F87 close + F85 root cause (2026-05-17)
+
+Track A: F87 false-alarm formal close + F85 root cause + fix spec. READ-ONLY production; no code or plist mutated. See `RUN_16_track_A_f85_log_routing_f87_close.md` and `LEARNINGS.md` (new antibody file).
+
+| F#  | Title | Sev | Status | Owner | First seen | Last verified |
+|-----|-------|-----|--------|-------|------------|----------------|
+| **F87** | `com.zeus.forecast-live` flagged "DOWN" in Run #14 | ~~SEV-1 HOT~~ | **CLOSED-FALSE-ALARM (Run #16 A)** — PID 10397 healthy; `.err` mtime within 1 min; Run #14 misread `launchctl list` column 2 (LAST exit) as current state. Cross-check rule logged in LEARNINGS §1. | `~/Library/LaunchAgents/com.zeus.forecast-live.plist` | Run #14 | Run #16 A |
+| **F85** | Daemon stdout/stderr inversion: all 7 `.err` huge + fresh, all 7 `.log` 0 B / stale | SEV-2 | **ROOT-CAUSE-PINNED + FIX-SPECIFIED (Run #16 A)** — plist layer ruled out (7/7 distinct `.log`/`.err` paths); root cause = `logging.basicConfig()` default `StreamHandler(sys.stderr)` at 4 daemon entry points (`src/main.py:1332`, `src/ingest_main.py:1035`, `src/ingest/forecast_live_daemon.py:664`, `src/riskguard/riskguard.py:1446`). Dual-handler patch spec'd; verification probe defined. No code mutated. | 4 daemon `main()` entry points | Run #14 | Run #16 A |
+
+> See `RUN_16_track_A_f85_log_routing_f87_close.md` §1 (F87 evidence + close), §2 (F85 root cause), §3 (text-block fix spec), §5 (verification probe). New cross-run antibody catalog: `LEARNINGS.md`.
