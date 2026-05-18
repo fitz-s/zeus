@@ -44,14 +44,39 @@ CREATE TABLE IF NOT EXISTS db_chunk_boundary_events (
 
 _IDEMPOTENCY_MARKER = "db_chunk_boundary_events"
 
+# Expected column set for schema-shape guard.
+_EXPECTED_COLUMNS = frozenset({
+    "event_id", "occurred_at", "caller_module", "db_path",
+    "rows_processed", "duration_ms", "split_reason",
+})
+
 
 def _is_already_applied(conn: sqlite3.Connection) -> bool:
-    """True if db_chunk_boundary_events already exists."""
+    """True if db_chunk_boundary_events exists AND has the expected schema shape.
+
+    A bare-existence check would silently accept a pre-existing table with the
+    wrong columns (e.g. from a stale migration). PRAGMA table_info validates
+    column names so schema drift is detected early.
+
+    Raises RuntimeError if the table exists but is missing expected columns.
+    """
     row = conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
         (_IDEMPOTENCY_MARKER,),
     ).fetchone()
-    return row is not None
+    if row is None:
+        return False
+    # Table exists — verify column set matches expected schema.
+    cols = conn.execute(f"PRAGMA table_info({_IDEMPOTENCY_MARKER})").fetchall()
+    actual_columns = {c[1] for c in cols}  # index 1 = column name
+    missing = _EXPECTED_COLUMNS - actual_columns
+    if missing:
+        raise RuntimeError(
+            f"202605_db_chunk_boundary_events: table exists but is missing "
+            f"expected columns: {sorted(missing)}. Schema drift detected — "
+            "manual remediation required."
+        )
+    return True
 
 
 def up(conn: sqlite3.Connection) -> None:
