@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
-# Lifecycle: created=2026-05-16; last_reviewed=2026-05-16; last_reused=never
+# Lifecycle: created=2026-05-16; last_reviewed=2026-05-17; last_reused=never
 # Purpose: Add REDEEM_OPERATOR_REQUIRED to settlement_commands.state CHECK
+# WRITER_LOCK_DEFER_REVIEW=2026-05-17 — standalone _migrate_one_db() path uses
+#   fcntl.LOCK_SH daemon-stop check (not db_writer_lock). Runner-invoked up(conn)
+#   path is lock-free by design (runner owns lock). Retrofit deferred to WAVE-3.
+#   See F22_WRITER_LOCK_FIX.md.
 #   (SQLite cannot ALTER CHECK in place; rebuild via CREATE new + INSERT copy +
 #   DROP old + RENAME). Also bumps PRAGMA user_version to 4 on ALL canonical
 #   DBs (zeus_trades + zeus-live + zeus-world + zeus-forecasts) to satisfy

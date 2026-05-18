@@ -3,6 +3,8 @@
 # Authority basis: PR #87 fix — selection_coverage lane omitted from
 #   backtest_runs + backtest_outcome_comparison CHECK constraints in
 #   src/state/db.py:2267,2283.
+# WRITER_LOCK_DEFER_REVIEW=2026-05-17 — backtest DB only (not a live-trading
+#   DB); db_writer_lock retrofit deferred to WAVE-3. See F22_WRITER_LOCK_FIX.md.
 """Migrate backtest DB: add 'selection_coverage' to lane CHECK constraints.
 
 SQLite does not support ALTER TABLE … MODIFY CONSTRAINT, so this migration
