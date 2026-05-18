@@ -1,5 +1,6 @@
-# Created: 2026-05-17
-# Last reused or audited: 2026-05-18
+# Lifecycle: created=2026-05-17; last_reviewed=2026-05-18; last_reused=2026-05-18
+# Purpose: Tests for promote_pending_trades exit-fill promotion relationships.
+# Reuse: Run when exit lifecycle promotion, REST fill finality, or lock handling changes.
 # Authority basis: STRUCTURAL_PLAN.md v3 §2 PR-S2
 """Antibody tests for promote_pending_trades (Bug #2, PR-S2).
 
@@ -474,6 +475,14 @@ def test_sqlite_writer_lock_returns_skip_not_thread_error():
             venue_order_id="ord-lock",
             observed_at=_old(),
         )
+        _seed_command(setup, "cmd-lock-2", "ord-lock-2")
+        _seed_matched_fact(
+            setup,
+            trade_id="trade-lock-2",
+            command_id="cmd-lock-2",
+            venue_order_id="ord-lock-2",
+            observed_at=_old(),
+        )
         setup.close()
 
         locker = sqlite3.connect(db_path)
@@ -487,15 +496,18 @@ def test_sqlite_writer_lock_returns_skip_not_thread_error():
         contender.execute("PRAGMA foreign_keys=ON")
         contender.execute("PRAGMA journal_mode=WAL")
 
+        clob = _clob_returning("CONFIRMED", tx_hash="0xlocked")
         stats = promote_pending_trades(
             contender,
-            _clob_returning("CONFIRMED", tx_hash="0xlocked"),
+            clob,
             max_age_seconds=60,
         )
 
         assert stats["promoted"] == 0
         assert stats["skipped"] == 1
+        assert clob.get_order.call_count == 1
         assert _count_facts(contender, "trade-lock", "CONFIRMED") == 0
+        assert _count_facts(contender, "trade-lock-2", "CONFIRMED") == 0
     finally:
         if locker is not None:
             try:

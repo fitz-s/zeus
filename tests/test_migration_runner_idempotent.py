@@ -3,6 +3,7 @@
 #   - Double-apply is a no-op (idempotency)
 #   - Bootstrap entries are seeded on first table-create
 #   - F30: missing last_reviewed= header causes ValueError before apply
+# Reuse: Run when migration ledger, TARGET_DB routing, or metadata gates change.
 # Authority: docs/operations/task_2026-05-17_post_karachi_remediation/FIX_SEV1_BUNDLE.md §F23
 """Tests for the migration runner idempotency and header-drift enforcement."""
 import importlib
@@ -237,6 +238,59 @@ def test_apply_migrations_dry_run_does_not_write_ledger(tmp_path: Path) -> None:
         "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='_dry'"
     ).fetchone()[0]
     assert dry_table_exists == 0, "dry_run must not execute migration up() function."
+
+
+def test_target_db_metadata_is_preflighted_before_any_pending_migration_runs(
+    tmp_path: Path,
+) -> None:
+    """A bad later pending migration must block before earlier pending up() runs."""
+    mig_dir = tmp_path / "migs"
+    mig_dir.mkdir()
+    (mig_dir / "__init__.py").write_text("")
+    (mig_dir / "202600_world_ok.py").write_text(
+        textwrap.dedent(
+            """\
+            # Lifecycle: created=2026-05-18; last_reviewed=2026-05-18; last_reused=never
+            TARGET_DB = "world"
+            def up(conn):
+                conn.execute("CREATE TABLE _should_not_exist (id INTEGER)")
+            """
+        )
+    )
+    (mig_dir / "202601_missing_target.py").write_text(
+        textwrap.dedent(
+            """\
+            # Lifecycle: created=2026-05-18; last_reviewed=2026-05-18; last_reused=never
+            def up(conn):
+                conn.execute("CREATE TABLE _missing_target_should_not_exist (id INTEGER)")
+            """
+        )
+    )
+
+    conn = _make_conn()
+
+    import scripts.migrations as mig_module
+
+    original_dir = mig_module.MIGRATIONS_DIR
+    original_bootstrap = mig_module._BOOTSTRAP_APPLIED
+    mig_module.MIGRATIONS_DIR = mig_dir
+    mig_module._BOOTSTRAP_APPLIED = set()
+
+    try:
+        with pytest.raises(RuntimeError, match="missing TARGET_DB metadata"):
+            apply_migrations(conn, db_identity="world")
+    finally:
+        mig_module.MIGRATIONS_DIR = original_dir
+        mig_module._BOOTSTRAP_APPLIED = original_bootstrap
+
+    table_exists = conn.execute(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='_should_not_exist'"
+    ).fetchone()[0]
+    ledger_has_first = conn.execute(
+        "SELECT COUNT(*) FROM _migrations_applied WHERE name='202600_world_ok'"
+    ).fetchone()[0]
+    assert table_exists == 0
+    assert ledger_has_first == 0
 
 
 def test_targeted_world_migration_routes_to_world_connection(tmp_path: Path, monkeypatch) -> None:

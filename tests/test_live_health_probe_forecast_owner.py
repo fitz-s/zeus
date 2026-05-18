@@ -506,6 +506,27 @@ def test_forecast_live_heartbeat_age_falls_back_to_mtime_when_payload_lacks_time
     assert source is None
 
 
+def test_forecast_live_future_payload_timestamp_falls_back_to_mtime():
+    module = _load_module()
+
+    age, source = module._heartbeat_payload_age(
+        {"written_at": "2026-05-18T12:01:00+00:00"},
+        now_epoch=datetime(2026, 5, 18, 12, 0, tzinfo=timezone.utc).timestamp(),
+    )
+
+    assert age is None
+    assert source is None
+
+
+def test_parse_iso_epoch_interprets_legacy_naive_timestamp_as_utc():
+    module = _load_module()
+
+    naive = module._parse_iso_epoch("2026-05-18T12:00:00")
+    aware = datetime(2026, 5, 18, 12, 0, tzinfo=timezone.utc).timestamp()
+
+    assert naive == aware
+
+
 def test_legacy_ingest_opendata_owner_is_actionable(tmp_path, monkeypatch, capsys):
     module = _load_module()
     root = tmp_path / "zeus"

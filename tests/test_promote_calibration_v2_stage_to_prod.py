@@ -1,5 +1,6 @@
-# Created: 2026-05-12
-# Last reused/audited: 2026-05-18
+# Lifecycle: created=2026-05-12; last_reviewed=2026-05-18; last_reused=2026-05-18
+# Purpose: Tests for scripts/promote_calibration_v2_stage_to_prod.py promotion safety.
+# Reuse: Run when platt promotion, verification, or pair-deprecation behavior changes.
 # Authority basis: Tests for scripts/promote_calibration_v2_stage_to_prod.py
 """Unit tests for the STAGE→prod calibration promotion script.
 
@@ -343,6 +344,14 @@ def test_promote_refuses_legacy_pair_flags(tmp_path, capsys):
     assert "promote_calibration_pairs_v2.py" in out
 
 
+def test_legacy_pair_flag_help_names_removed_contract(capsys):
+    with pytest.raises(SystemExit):
+        P.build_parser().parse_args(["promote", "--help"])
+    help_text = capsys.readouterr().out
+
+    assert "REMOVED: this flag now refuses promotion" in help_text
+
+
 def test_promote_refuses_empty_stage_before_deleting_prod(tmp_path, capsys):
     stage = tmp_path / "stage.db"
     prod = tmp_path / "prod.db"
@@ -550,6 +559,7 @@ def test_verify_pass(tmp_path, capsys):
     out = capsys.readouterr().out
     assert rc == 0
     assert "platt_models_v2 readable" in out
+    assert "active bucket identity unique" in out
 
 
 def test_verify_is_platt_only_and_does_not_require_world_pairs(tmp_path, capsys):
@@ -566,3 +576,32 @@ def test_verify_is_platt_only_and_does_not_require_world_pairs(tmp_path, capsys)
     assert rc == 0
     assert "platt_models_v2 readable" in out
     assert "calibration_pairs_v2" not in out
+
+
+def test_verify_refuses_empty_platt_table(tmp_path, capsys):
+    prod = tmp_path / "prod.db"
+    _build_db(prod)
+
+    args = P.build_parser().parse_args(["verify", "--prod-db", str(prod)])
+    rc = args.func(args)
+    out = capsys.readouterr().out
+
+    assert rc == 1
+    assert "has no rows" in out
+
+
+def test_verify_refuses_duplicate_active_bucket_identity(tmp_path, capsys):
+    prod = tmp_path / "prod.db"
+    _build_db(prod)
+    p = sqlite3.connect(str(prod))
+    _insert_platt(p, "k1", DV_HIGH)
+    _insert_platt(p, "k2", DV_HIGH)
+    p.commit()
+    p.close()
+
+    args = P.build_parser().parse_args(["verify", "--prod-db", str(prod)])
+    rc = args.func(args)
+    out = capsys.readouterr().out
+
+    assert rc == 1
+    assert "duplicate active platt buckets" in out

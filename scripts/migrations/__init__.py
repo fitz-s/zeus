@@ -2,6 +2,7 @@
 # Purpose: scripts.migrations package — apply_migrations() runner framework.
 #   Each migration module at scripts/migrations/YYYYMM_*.py exposes def up(conn).
 #   Ledger table _migrations_applied tracks applied migrations in the target DB.
+# Reuse: Run through scripts/migrations/__main__.py or direct tests with db_identity.
 # Authority: docs/operations/task_2026-05-17_post_karachi_remediation/FIX_SEV1_BUNDLE.md §F23
 import importlib.util
 import re
@@ -158,6 +159,7 @@ def apply_migrations(
     # is skipped and no bootstrap rows land in the DB.  Non-dry-run always
     # initialises the ledger via ensure=True (the default).
     pending = _get_pending(conn, ensure=not dry_run, db_identity=resolved_db_identity)
+    plan: list[tuple[Path, types.ModuleType]] = []
     for script in pending:
         if target and script.stem != target:
             continue
@@ -183,6 +185,8 @@ def apply_migrations(
                     f"{resolved_db_identity!r}."
                 )
             continue
+        plan.append((script, mod))
+    for script, mod in plan:
         if dry_run:
             print(f"[dry-run] would apply: {script.stem}")
             applied_names.append(script.stem)

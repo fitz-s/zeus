@@ -1,5 +1,6 @@
-# Created: 2026-05-18
-# Last reused or audited: 2026-05-18
+# Lifecycle: created=2026-05-18; last_reviewed=2026-05-18; last_reused=2026-05-18
+# Purpose: Tests for citation_grep_gate edit-tool content-field scanning.
+# Reuse: Run when edit hook input parsing or citation drift detection changes.
 # Authority basis: .claude/hooks/citation_grep_gate.py runtime matcher contract
 """Regression tests for citation_grep_gate edit-tool coverage."""
 
@@ -73,6 +74,25 @@ def test_non_edit_tools_are_not_scanned(tmp_path):
         {
             "tool_name": "Bash",
             "tool_input": {"command": f"echo {cited}:99"},
+        }
+    )
+
+    assert advisory is None
+
+
+def test_edit_tool_path_fields_are_not_scanned_for_citations(tmp_path):
+    module = _load_hook_module()
+    cited = tmp_path / "path_ref.py"
+    cited.write_text("one line\n", encoding="utf-8")
+
+    advisory = module._run_advisory_check_citation_grep_gate(
+        {
+            "tool_name": "Edit",
+            "tool_input": {
+                "file_path": f"{cited}:99",
+                "old_string": "plain old text",
+                "new_string": "plain new text",
+            },
         }
     )
 

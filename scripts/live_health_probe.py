@@ -110,6 +110,9 @@ def _parse_iso_epoch(value):
     try:
         dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
         if dt.tzinfo is None:
+            # Zeus heartbeat producers write timezone-aware UTC strings. Legacy
+            # naive strings are interpreted as UTC instead of host-local time so
+            # health status does not vary with operator machine timezone.
             dt = dt.replace(tzinfo=timezone.utc)
         return dt.timestamp()
     except ValueError:
@@ -121,6 +124,8 @@ def _heartbeat_payload_age(payload, *, now_epoch=None):
         epoch = _parse_iso_epoch((payload or {}).get(key))
         if epoch is None:
             continue
+        if epoch > now:
+            return None, None
         return max(0, int(now - epoch)), key
     return None, None
 

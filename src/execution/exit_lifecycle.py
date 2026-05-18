@@ -238,7 +238,20 @@ def _hash_raw_payload(payload: object) -> str:
 
 
 def _is_sqlite_lock_error(exc: sqlite3.OperationalError) -> bool:
-    return "locked" in str(exc).lower() or "busy" in str(exc).lower()
+    lock_codes = {
+        getattr(sqlite3, "SQLITE_BUSY", 5),
+        getattr(sqlite3, "SQLITE_LOCKED", 6),
+    }
+    code = getattr(exc, "sqlite_errorcode", None)
+    if code is not None:
+        return code in lock_codes
+
+    message = str(exc).lower()
+    return (
+        "database is locked" in message
+        or "database table is locked" in message
+        or "database is busy" in message
+    )
 
 
 def promote_pending_trades(
@@ -323,7 +336,10 @@ def promote_pending_trades(
 
     stats: dict = {"polled": 0, "promoted": 0, "errors": 0, "skipped": 0}
 
+    persistent_lock_seen = False
     for row in candidates:
+        if persistent_lock_seen:
+            break
         if _time_module.monotonic() * 1000 >= deadline_ms:
             _cnt_inc("promote_pending_trades_budget_exhausted_total")
             logger.warning(
@@ -398,6 +414,16 @@ def promote_pending_trades(
 
         promoted = False
         for attempt in range(_PROMOTE_LOCK_RETRY_ATTEMPTS):
+            if _time_module.monotonic() * 1000 >= deadline_ms:
+                _cnt_inc("promote_pending_trades_sqlite_lock_skipped_total")
+                logger.warning(
+                    "promote_pending_trades: cycle budget exhausted while "
+                    "waiting for sqlite writer lock; skipping remaining "
+                    "candidates until next cycle"
+                )
+                stats["skipped"] += 1
+                persistent_lock_seen = True
+                break
             try:
                 # CRITIC_FLAG-2: SAVEPOINT wraps re-check + append_trade_fact
                 # atomically. A concurrent promoter may hold the SQLite writer
@@ -436,11 +462,13 @@ def promote_pending_trades(
                     _cnt_inc("promote_pending_trades_sqlite_lock_skipped_total")
                     logger.warning(
                         "promote_pending_trades: sqlite writer lock persisted for "
-                        "command_id=%s order_id=%s; skipping until next cycle",
+                        "command_id=%s order_id=%s; skipping remaining "
+                        "candidates until next cycle",
                         command_id,
                         venue_order_id,
                     )
                     stats["skipped"] += 1
+                    persistent_lock_seen = True
                     break
                 _time_module.sleep(_PROMOTE_LOCK_RETRY_SLEEP_SECONDS * (attempt + 1))
 
@@ -450,6 +478,8 @@ def promote_pending_trades(
                 "promote_pending_trades: promoted trade_id=%s order_id=%s → CONFIRMED tx=%s",
                 trade_id, venue_order_id, tx_hash,
             )
+        elif persistent_lock_seen:
+            break
 
     return stats
 

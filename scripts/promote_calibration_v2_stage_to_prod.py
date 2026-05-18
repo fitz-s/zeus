@@ -1,5 +1,6 @@
-# Created: 2026-05-12
-# Last reused/audited: 2026-05-18
+# Lifecycle: created=2026-05-12; last_reviewed=2026-05-18; last_reused=2026-05-18
+# Purpose: Promote completed STAGE_DB platt_models_v2 rows into production world DB.
+# Reuse: Run inspect/promote/verify only with explicit stage/prod DB paths.
 # Authority basis: STAGE_DB → production zeus-world.db promotion of
 # platt_models_v2 artifacts. calibration_pairs_v2 is forecast-class authority
 # and must be promoted with scripts/promote_calibration_pairs_v2.py.
@@ -655,20 +656,66 @@ def cmd_verify(args: argparse.Namespace) -> int:
         }
         print(f"✓ platt_models_v2 readable: {platt_n:,} rows across {len(platt_dvs)} data_versions")
 
-        # Per-bucket check: cluster/season/data_version groups should be non-empty.
-        cur = prod.execute(
-            """
-            SELECT data_version, cluster, season, COUNT(*) AS platt_n
-            FROM platt_models_v2
-            GROUP BY data_version, cluster, season
-            HAVING platt_n <= 0
-            """
-        )
-        impossible_buckets = cur.fetchall()
-        if impossible_buckets:
-            print(f"✗ FAIL: impossible empty platt buckets: {len(impossible_buckets)}")
+        if platt_n <= 0:
+            print("✗ FAIL: platt_models_v2 has no rows")
             return 1
-        print("✓ platt_models_v2 bucket grouping is internally consistent")
+
+        invalid_rows = prod.execute(
+            """
+            SELECT model_key
+            FROM platt_models_v2
+            WHERE COALESCE(TRIM(model_key), '') = ''
+               OR COALESCE(TRIM(data_version), '') = ''
+               OR COALESCE(TRIM(temperature_metric), '') = ''
+               OR COALESCE(TRIM(cluster), '') = ''
+               OR COALESCE(TRIM(season), '') = ''
+               OR COALESCE(TRIM(cycle), '') = ''
+               OR COALESCE(TRIM(source_id), '') = ''
+               OR COALESCE(TRIM(horizon_profile), '') = ''
+               OR COALESCE(TRIM(bootstrap_params_json), '') = ''
+               OR COALESCE(TRIM(fitted_at), '') = ''
+               OR COALESCE(TRIM(authority), '') = ''
+               OR n_samples <= 0
+               OR is_active NOT IN (0, 1)
+            LIMIT 20
+            """
+        ).fetchall()
+        if invalid_rows:
+            keys = ", ".join(str(row["model_key"]) for row in invalid_rows)
+            print(f"✗ FAIL: invalid platt_models_v2 rows: {keys}")
+            return 1
+
+        duplicate_active_buckets = prod.execute(
+            """
+            SELECT data_version, temperature_metric, cluster, season,
+                   cycle, source_id, horizon_profile, COUNT(*) AS model_count
+            FROM platt_models_v2
+            WHERE is_active = 1
+            GROUP BY data_version, temperature_metric, cluster, season,
+                     cycle, source_id, horizon_profile
+            HAVING model_count != 1
+            """
+        ).fetchall()
+        if duplicate_active_buckets:
+            print(
+                "✗ FAIL: duplicate active platt buckets: "
+                f"{len(duplicate_active_buckets)}"
+            )
+            return 1
+
+        active_bucket_count = prod.execute(
+            """
+            SELECT COUNT(*) FROM (
+                SELECT data_version, temperature_metric, cluster, season,
+                       cycle, source_id, horizon_profile
+                FROM platt_models_v2
+                WHERE is_active = 1
+                GROUP BY data_version, temperature_metric, cluster, season,
+                         cycle, source_id, horizon_profile
+            )
+            """
+        ).fetchone()[0]
+        print(f"✓ platt_models_v2 active bucket identity unique: {active_bucket_count:,} buckets")
     finally:
         prod.close()
     return 0
@@ -697,9 +744,9 @@ def build_parser() -> argparse.ArgumentParser:
     pp.add_argument("--prod-db", required=True)
     pp.add_argument("--metrics", default=None)
     pp.add_argument("--include-pairs", action="store_true",
-                    help="Deprecated fail-closed flag. Use promote_calibration_pairs_v2.py.")
+                    help="REMOVED: this flag now refuses promotion. Use promote_calibration_pairs_v2.py.")
     pp.add_argument("--null-snapshot-id", action="store_true",
-                    help="Deprecated fail-closed flag. Use promote_calibration_pairs_v2.py.")
+                    help="REMOVED: this flag now refuses promotion. Use promote_calibration_pairs_v2.py.")
     pp.add_argument("--allow-incomplete", action="store_true",
                     help="Bypass sentinel-completeness gate (DANGEROUS).")
     pp.add_argument("--allow-empty-stage", action="store_true",

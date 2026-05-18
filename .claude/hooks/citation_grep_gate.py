@@ -23,6 +23,24 @@ from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SUPPORTED_TOOLS = frozenset({"Edit", "Write", "MultiEdit", "NotebookEdit"})
+CONTENT_FIELD_KEYS = frozenset({
+    "content",
+    "new_string",
+    "newText",
+    "old_string",
+    "oldText",
+    "source",
+    "text",
+})
+CONTENT_CONTAINER_KEYS = frozenset({"cell", "cells", "changes", "edits"})
+PATH_FIELD_KEYS = frozenset({
+    "file",
+    "file_path",
+    "filepath",
+    "filename",
+    "notebook_path",
+    "path",
+})
 
 # Matches:  path/to/file.py:42  or  path/to/file.py L42
 # Groups: (filepath, line_number)
@@ -75,18 +93,24 @@ def _check_citation(filepath: str, lineno: int) -> str | None:
     return None  # valid
 
 
-def _collect_text_fields(value: Any) -> list[str]:
+def _collect_text_fields(value: Any, *, key: str | None = None) -> list[str]:
     if isinstance(value, str):
-        return [value]
+        return [value] if key in CONTENT_FIELD_KEYS else []
     if isinstance(value, dict):
         texts: list[str] = []
-        for nested in value.values():
-            texts.extend(_collect_text_fields(nested))
+        for nested_key, nested in value.items():
+            key_text = str(nested_key)
+            if key_text in PATH_FIELD_KEYS:
+                continue
+            if key_text in CONTENT_FIELD_KEYS or key_text in CONTENT_CONTAINER_KEYS:
+                texts.extend(_collect_text_fields(nested, key=key_text))
+            elif isinstance(nested, (dict, list, tuple)):
+                texts.extend(_collect_text_fields(nested, key=key_text))
         return texts
     if isinstance(value, (list, tuple)):
         texts = []
         for nested in value:
-            texts.extend(_collect_text_fields(nested))
+            texts.extend(_collect_text_fields(nested, key=key))
         return texts
     return []
 
