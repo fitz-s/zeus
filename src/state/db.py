@@ -4916,16 +4916,10 @@ def _coerce_snapshot_fk(value) -> Optional[int]:
 
 
 def _local_legacy_snapshot_fk(conn: sqlite3.Connection, value) -> Optional[int]:
-    snapshot_id = _coerce_snapshot_fk(value)
-    if snapshot_id is None:
-        return None
-    if not _table_exists(conn, "ensemble_snapshots"):
-        return None
-    row = conn.execute(
-        "SELECT 1 FROM ensemble_snapshots WHERE snapshot_id = ? LIMIT 1",
-        (snapshot_id,),
-    ).fetchone()
-    return snapshot_id if row is not None else None
+    # v1.F20: ensemble_snapshots removed. The FK on trade_decisions.forecast_snapshot_id
+    # is soft (nullable). ensemble_snapshots_v2 lives in forecasts.db which is not
+    # attached to the trades.db connection used here. Always return None post-migration.
+    return None
 
 
 def _normalize_opportunity_availability_status(value: str) -> str:

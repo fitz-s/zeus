@@ -3,8 +3,8 @@
 # Authority basis: docs/operations/task_2026-04-30_two_system_independence/design.md §2.5
 """Ingest status rollup writer — Phase 2 ingest improvement.
 
-Queries data_coverage + observation_instants + forecasts + solar_daily +
-ensemble_snapshots and computes a summary JSON written to state/ingest_status.json.
+Queries data_coverage + observation_instants + forecasts + solar_daily
+and computes a summary JSON written to state/ingest_status.json.
 
 Writer cadence (per design SC-4):
   - Every K2 tick completion calls write_ingest_status.
@@ -125,8 +125,11 @@ def write_ingest_status(
       - observation_instants (ts_col: utc_timestamp)
       - forecasts            (ts_col: imported_at)
       - solar_daily          (ts_col: fetched_at)
-      - ensemble_snapshots   (ts_col: fetch_time)
       - data_coverage        (holes count per table)
+
+    Note: ensemble_snapshots_v2 lives in zeus-forecasts.db (K1 split);
+    it is not queried here because world_conn does not attach forecasts.db.
+    ensemble_snapshots (legacy) was removed after reader migration v1.F20.
     """
     if state_dir is None:
         from src.config import state_path
@@ -157,13 +160,6 @@ def write_ingest_status(
         "rows_last_hour": _rows_in_period(world_conn, "solar_daily", "fetched_at", 1),
         "rows_last_day": _rows_in_period(world_conn, "solar_daily", "fetched_at", 24),
         "holes_by_city_count": _holes_by_city_count(world_conn, "solar_daily"),
-    }
-
-    # ensemble_snapshots
-    table_stats["ensemble_snapshots"] = {
-        "rows_last_hour": _rows_in_period(world_conn, "ensemble_snapshots", "fetch_time", 1),
-        "rows_last_day": _rows_in_period(world_conn, "ensemble_snapshots", "fetch_time", 24),
-        "holes_by_city_count": {},  # ensemble_snapshots not in data_coverage
     }
 
     # observations (daily observations — uses fetched_at from data_coverage proxy)

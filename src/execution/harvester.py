@@ -173,7 +173,7 @@ _HARVESTER_STAGE2_TRADE_TABLES = (
 )
 _HARVESTER_STAGE2_SHARED_TABLES = (
     # K1 (2026-05-11): shared_conn is now forecasts_conn; check v2 tables that
-    # live on forecasts.db. Legacy v1 (ensemble_snapshots, calibration_pairs)
+    # live on forecasts.db. Legacy v1 (ensemble_snapshots removed by v1.F20; calibration_pairs)
     # remain on world.db and are not checked here post-migration.
     "ensemble_snapshots_v2",
     "calibration_pairs_v2",
@@ -828,7 +828,7 @@ def run_harvester() -> dict:
             all_labels = _extract_all_bin_labels(event)
             learning_contexts = []
             if stage2_ready:
-                # shared_conn: _snapshot_contexts_for_market reads ensemble_snapshots (shared)
+                # shared_conn: _snapshot_contexts_for_market reads ensemble_snapshots_v2 (shared)
                 # and position_events via query_settlement_events — pass trade_conn for event
                 # spine queries, shared_conn for snapshot lookups.
                 snapshot_contexts, dropped_rows = _snapshot_contexts_for_market(
@@ -1482,7 +1482,6 @@ def _snapshot_row_by_id(
 ):
     for table, source in (
         (_first_snapshot_table(conn, "ensemble_snapshots_v2"), "ensemble_snapshots_v2"),
-        (_first_snapshot_table(conn, "ensemble_snapshots"), "ensemble_snapshots"),
     ):
         if not table:
             continue
@@ -1528,7 +1527,6 @@ def _latest_snapshot_row(
 ):
     for table, source in (
         (_first_snapshot_table(conn, "ensemble_snapshots_v2"), "ensemble_snapshots_v2"),
-        (_first_snapshot_table(conn, "ensemble_snapshots"), "ensemble_snapshots"),
     ):
         if not table:
             continue
@@ -1684,7 +1682,7 @@ def _snapshot_contexts_for_market(
     """Resolve decision-time snapshots, preferring durable settlement truth over open portfolio.
 
     trade_conn: for event-spine queries (position_events, decision_log).
-    shared_conn: for snapshot lookups (ensemble_snapshots).
+    shared_conn: for snapshot lookups (ensemble_snapshots_v2).
     """
     stage_events = query_settlement_events(
         trade_conn,

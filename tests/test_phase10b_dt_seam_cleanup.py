@@ -39,11 +39,11 @@ class TestRCLReplayLegacyWhereMetricAware:
     """
 
     def _make_test_db(self) -> sqlite3.Connection:
-        """Create minimal in-memory DB with legacy forecasts + ensemble_snapshots tables."""
+        """Create minimal in-memory DB with forecasts + ensemble_snapshots_v2 tables."""
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row
-        # ReplayContext.__init__ checks for ensemble_snapshots
-        conn.execute("CREATE TABLE ensemble_snapshots (id INTEGER PRIMARY KEY)")
+        # ReplayContext.__init__ checks for ensemble_snapshots_v2 (legacy removed by v1.F20)
+        conn.execute("CREATE TABLE ensemble_snapshots_v2 (snapshot_id INTEGER PRIMARY KEY, city TEXT, target_date TEXT, temperature_metric TEXT, available_at TEXT, fetch_time TEXT, p_raw_json TEXT, members_json TEXT, model_version TEXT, data_version TEXT, issue_time TEXT, valid_time TEXT, lead_hours REAL, spread REAL, is_bimodal INTEGER)")
         conn.execute("""
             CREATE TABLE forecasts (
                 city TEXT,

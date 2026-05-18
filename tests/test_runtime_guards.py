@@ -9818,15 +9818,6 @@ def test_store_ens_snapshot_links_openmeteo_valid_time_without_faking_issue_time
         """,
         (snapshot_id, NYC.name, "2026-01-15"),
     ).fetchone()
-    legacy_row = conn.execute(
-        """
-        SELECT issue_time, valid_time, available_at, fetch_time, p_raw_json,
-               data_version, authority, temperature_metric
-        FROM ensemble_snapshots
-        WHERE snapshot_id = ? AND city = ? AND target_date = ?
-        """,
-        (snapshot_id, NYC.name, "2026-01-15"),
-    ).fetchone()
     conn.close()
 
     assert snapshot_id
@@ -9845,15 +9836,7 @@ def test_store_ens_snapshot_links_openmeteo_valid_time_without_faking_issue_time
     assert v2_row["authority"] == "VERIFIED"
     assert v2_row["members_unit"] == "degF"
     assert v2_row["unit"] == "F"
-    assert legacy_row is not None
-    assert legacy_row["issue_time"] is None
-    assert legacy_row["valid_time"] == v2_row["valid_time"]
-    assert legacy_row["available_at"] == v2_row["available_at"]
-    assert legacy_row["fetch_time"] == v2_row["fetch_time"]
-    assert json.loads(legacy_row["p_raw_json"]) == [0.2, 0.3, 0.5]
-    assert legacy_row["data_version"] == HIGH_LOCALDAY_MAX.data_version
-    assert legacy_row["authority"] == "VERIFIED"
-    assert legacy_row["temperature_metric"] == HIGH_LOCALDAY_MAX.temperature_metric
+    # v1.F20: legacy ensemble_snapshots removed; no legacy projection assertions.
 
 
 def _seed_p_raw_snapshot(conn) -> str:
@@ -9930,10 +9913,6 @@ def test_store_snapshot_p_raw_persists_support_topology_in_v2_provenance(tmp_pat
         """,
         (snapshot_id,),
     ).fetchone()
-    legacy_row = conn.execute(
-        "SELECT p_raw_json FROM ensemble_snapshots WHERE snapshot_id = ?",
-        (snapshot_id,),
-    ).fetchone()
     conn.close()
 
     assert json.loads(row["p_raw_json"]) == [0.2, 0.3, 0.5]
@@ -9943,7 +9922,7 @@ def test_store_snapshot_p_raw_persists_support_topology_in_v2_provenance(tmp_pat
     assert provenance["p_raw_topology"]["skipped_support_indexes"] == [0]
     assert provenance["p_raw_topology"]["executable_hypothesis_count"] == 2
     assert len(provenance["p_raw_topology"]["market_fusion_status_by_support_index"]) == 3
-    assert json.loads(legacy_row["p_raw_json"]) == [0.2, 0.3, 0.5]
+    # v1.F20: legacy ensemble_snapshots removed; no legacy p_raw assertion.
 
 
 def test_store_snapshot_p_raw_defers_transient_database_lock():
@@ -10062,14 +10041,6 @@ def test_store_ens_snapshot_routes_to_attached_world_db(tmp_path):
         """,
         (snapshot_id,),
     ).fetchone()
-    world_legacy_row = conn.execute(
-        """
-        SELECT p_raw_json, data_version, authority, temperature_metric
-        FROM world.ensemble_snapshots
-        WHERE snapshot_id = ? AND city = 'NYC'
-        """,
-        (snapshot_id,),
-    ).fetchone()
     conn.close()
 
     assert snapshot_id
@@ -10085,18 +10056,23 @@ def test_store_ens_snapshot_routes_to_attached_world_db(tmp_path):
     assert world_v2_row["observation_field"] == HIGH_LOCALDAY_MAX.observation_field
     assert world_v2_row["members_unit"] == "degF"
     assert world_v2_row["unit"] == "F"
-    assert world_legacy_row is not None
-    assert json.loads(world_legacy_row["p_raw_json"]) == [0.2, 0.3, 0.5]
-    assert world_legacy_row["data_version"] == HIGH_LOCALDAY_MAX.data_version
-    assert world_legacy_row["authority"] == "VERIFIED"
-    assert world_legacy_row["temperature_metric"] == HIGH_LOCALDAY_MAX.temperature_metric
+    # v1.F20: legacy ensemble_snapshots removed; no world.ensemble_snapshots assertions.
 
 
-def test_store_ens_snapshot_refuses_legacy_id_collision_without_p_raw_corruption(tmp_path):
+def test_store_ens_snapshot_writes_v2_independent_of_legacy_table_contents(tmp_path):
+    """v1.F20: _store_ens_snapshot writes v2 exclusively; legacy table contents
+    are irrelevant and do not affect the write outcome.
+
+    Pre-v1.F20 this test verified that a legacy id=1 collision caused the writer
+    to return "" (fail-closed). Post-v1.F20 the writer ignores the legacy table;
+    the same scenario must now SUCCEED and produce a valid v2 snapshot_id.
+    """
     db_path = tmp_path / "zeus.db"
     conn = get_connection(db_path)
     init_schema(conn)
     apply_v2_schema(conn)
+    # Legacy table still exists (DROP migration is operator-invoked); pre-populate
+    # an unrelated row to confirm the writer doesn't touch or break it.
     conn.execute(
         """
         INSERT INTO ensemble_snapshots
@@ -10149,19 +10125,14 @@ def test_store_ens_snapshot_refuses_legacy_id_collision_without_p_raw_corruption
         ens,
         ens_result,
     )
-    old_row = conn.execute(
-        "SELECT city, target_date, p_raw_json FROM ensemble_snapshots WHERE snapshot_id = 1"
-    ).fetchone()
     v2_count = conn.execute(
         "SELECT COUNT(*) FROM ensemble_snapshots_v2 WHERE city = 'NYC'"
     ).fetchone()[0]
     conn.close()
 
-    assert snapshot_id == ""
-    assert old_row["city"] == "OLD"
-    assert old_row["target_date"] == "2026-01-01"
-    assert old_row["p_raw_json"] is None
-    assert v2_count == 0
+    # v2-only write must succeed and produce a valid snapshot_id.
+    assert snapshot_id, "v2 write must return a non-empty snapshot_id"
+    assert v2_count == 1, "exactly one v2 row must be written for NYC"
 
 
 def test_store_ens_snapshot_reuses_v2_conflict_without_legacy_fallback(tmp_path):
@@ -10231,10 +10202,6 @@ def test_store_ens_snapshot_reuses_v2_conflict_without_legacy_fallback(tmp_path)
         ens,
         ens_result,
     )
-    legacy_count = conn.execute(
-        "SELECT COUNT(*) FROM ensemble_snapshots WHERE city = ?",
-        (NYC.name,),
-    ).fetchone()[0]
     v2_rows = conn.execute(
         """
         SELECT snapshot_id, valid_time, available_at, fetch_time, model_version
@@ -10246,7 +10213,7 @@ def test_store_ens_snapshot_reuses_v2_conflict_without_legacy_fallback(tmp_path)
     conn.close()
 
     assert snapshot_id
-    assert legacy_count == 1
+    # v1.F20: legacy ensemble_snapshots no longer written; v2 is canonical.
     assert len(v2_rows) == 1
     assert str(v2_rows[0]["snapshot_id"]) == snapshot_id
     assert v2_rows[0]["valid_time"] is None
@@ -10299,10 +10266,11 @@ def test_ecmwf_open_data_collector_marks_rows_unverified_non_executable(monkeypa
     monkeypatch.setattr("src.data.ecmwf_open_data.cities", [test_city])
 
     result = collect_open_ens_cycle(run_date=date(2026, 3, 30), run_hour=0, conn=conn)
+    # v1.F20: legacy ensemble_snapshots removed; query v2 instead.
     rows = conn.execute(
         """
         SELECT city, target_date, data_version, model_version, p_raw_json, authority
-        FROM ensemble_snapshots
+        FROM ensemble_snapshots_v2
         ORDER BY target_date
         """
     ).fetchall()

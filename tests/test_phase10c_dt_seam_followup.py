@@ -274,18 +274,7 @@ class TestRCSHarvesterLowRouting:
                 pair_count INTEGER DEFAULT 0, recorded_at TEXT
             )
         """)
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS ensemble_snapshots (
-                snapshot_id INTEGER PRIMARY KEY,
-                city TEXT, target_date TEXT,
-                issue_time TEXT, available_at TEXT,
-                fetch_time TEXT, lead_hours REAL,
-                members_json TEXT, p_raw_json TEXT,
-                spread REAL, is_bimodal INTEGER,
-                model_version TEXT, data_version TEXT,
-                authority TEXT
-            )
-        """)
+        # ensemble_snapshots legacy table removed by v1.F20; no longer needed here
 
         count = self._call_harvest_settlement(conn, city, "low")
         assert count > 0, "R-CS.1: harvest_settlement should create at least 1 pair"
@@ -323,18 +312,7 @@ class TestRCSHarvesterLowRouting:
                 pair_count INTEGER DEFAULT 0, recorded_at TEXT
             )
         """)
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS ensemble_snapshots (
-                snapshot_id INTEGER PRIMARY KEY,
-                city TEXT, target_date TEXT,
-                issue_time TEXT, available_at TEXT,
-                fetch_time TEXT, lead_hours REAL,
-                members_json TEXT, p_raw_json TEXT,
-                spread REAL, is_bimodal INTEGER,
-                model_version TEXT, data_version TEXT,
-                authority TEXT
-            )
-        """)
+        # ensemble_snapshots legacy table removed by v1.F20; no longer needed here
 
         count = self._call_harvest_settlement(conn, city, "high")
         assert count > 0, "R-CS.2: harvest_settlement should create at least 1 pair"

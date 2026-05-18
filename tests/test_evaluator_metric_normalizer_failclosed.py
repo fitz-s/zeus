@@ -120,10 +120,13 @@ def _fake_ens_with_metric(metric_value: str | None = "high"):
 
 
 def _snapshot_row_count(conn, city: str = "NYC") -> int:
-    """Count rows currently in ensemble_snapshots for a city."""
-    return conn.execute(
-        "SELECT COUNT(*) FROM ensemble_snapshots WHERE city = ?", (city,)
-    ).fetchone()[0]
+    """Count rows currently in ensemble_snapshots_v2 for a city (v1.F20: legacy removed)."""
+    try:
+        return conn.execute(
+            "SELECT COUNT(*) FROM ensemble_snapshots_v2 WHERE city = ?", (city,)
+        ).fetchone()[0]
+    except Exception:
+        return 0
 
 
 def test_store_ens_snapshot_does_not_write_when_metric_missing(caplog):

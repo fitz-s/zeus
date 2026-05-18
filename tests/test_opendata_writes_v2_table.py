@@ -155,9 +155,7 @@ def test_opendata_high_payload_lands_in_v2(tmp_path: Path, monkeypatch):
     assert row["temperature_metric"] == "high"
     assert row["city"] == "London"
     assert row["target_date"] == target
-    # Legacy v1 table receives nothing.
-    legacy = conn.execute("SELECT COUNT(*) FROM ensemble_snapshots").fetchone()
-    assert legacy[0] == 0
+    # v1.F20: legacy ensemble_snapshots removed; v2 is the sole write target.
 
 
 def test_collect_open_ens_cycle_writes_authority_chain_readable_by_live_reader(tmp_path: Path, monkeypatch):

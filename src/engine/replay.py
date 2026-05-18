@@ -44,7 +44,6 @@ LEGACY_SHADOW_SIGNAL_TABLE = "shadow_signals"
 LEGACY_SHADOW_SIGNAL_DIAGNOSTIC_SOURCE = "legacy_shadow_signal_diagnostic"
 DIAGNOSTIC_REPLAY_REFERENCE_SOURCES = frozenset({
     LEGACY_SHADOW_SIGNAL_DIAGNOSTIC_SOURCE,
-    "ensemble_snapshots.available_at",
     "ensemble_snapshots_v2.available_at",
     "forecasts_table_synthetic",
 })
@@ -318,17 +317,12 @@ class ReplayContext:
         self._decision_ref_cache: dict[tuple[str, str, str], Optional[dict]] = {}
         self._snapshot_table_column_cache: dict[str, set[str]] = {}
         self._snapshot_v2_table = _first_existing_table(self.conn, "ensemble_snapshots_v2")
-        self._snapshot_legacy_table = _first_existing_table(self.conn, "ensemble_snapshots")
-        if not self._snapshot_v2_table and not self._snapshot_legacy_table:
+        if not self._snapshot_v2_table:
             raise RuntimeError(
-                "Replay topology error: neither ensemble_snapshots_v2 nor "
-                "ensemble_snapshots exists in world attach or local main schema."
+                "Replay topology error: ensemble_snapshots_v2 not found in "
+                "world attach or local main schema (legacy ensemble_snapshots removed by v1.F20)."
             )
-        if self._snapshot_legacy_table.startswith("world."):
-            self._sp = "world."  # preserve existing replay co-location behavior
-        elif self._snapshot_legacy_table:
-            self._sp = ""  # monolithic DB (tests) or main legacy snapshot projection
-        elif self._snapshot_v2_table.startswith("world."):
+        if self._snapshot_v2_table.startswith("world."):
             self._sp = "world."
         else:
             self._sp = ""  # monolithic DB (tests)
@@ -355,7 +349,6 @@ class ReplayContext:
         )
         for table, source in (
             (self._snapshot_v2_table, "ensemble_snapshots_v2"),
-            (self._snapshot_legacy_table, "ensemble_snapshots"),
         ):
             if not table:
                 continue
@@ -420,7 +413,6 @@ class ReplayContext:
         """Lightweight diagnostic reference lookup; full snapshot payload may not exist."""
         for table, source in (
             (self._snapshot_v2_table, "ensemble_snapshots_v2"),
-            (self._snapshot_legacy_table, "ensemble_snapshots"),
         ):
             if not table:
                 continue
