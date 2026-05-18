@@ -755,20 +755,29 @@ class TestA4BootWiringCallSite:
             return []
 
         # Collect assert_db_matches_registry call arguments within main().
+        # Use manual BFS/DFS instead of ast.walk() to skip nested FunctionDef /
+        # ClassDef nodes — ast.walk() would descend into nested defs and produce
+        # false-passes if a dead inner function contains the call.
         found: list[str] = []
-        for node in ast.walk(main_node):
-            if not isinstance(node, ast.Call):
-                continue
-            func = node.func
-            # Handle bare call: assert_db_matches_registry(...)
-            if isinstance(func, ast.Name) and func.id == "assert_db_matches_registry":
-                if len(node.args) >= 2:
-                    found.append(ast.unparse(node.args[1]))
-            # Handle attribute call: table_registry.assert_db_matches_registry(...)
-            elif isinstance(func, ast.Attribute) and func.attr == "assert_db_matches_registry":
-                if len(node.args) >= 2:
-                    found.append(ast.unparse(node.args[1]))
 
+        def _collect(nodes: list) -> None:
+            for node in nodes:
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    # Do NOT recurse into nested definitions — they are not
+                    # executed as part of main()'s control flow.
+                    continue
+                if isinstance(node, ast.Call):
+                    func = node.func
+                    if isinstance(func, ast.Name) and func.id == "assert_db_matches_registry":
+                        if len(node.args) >= 2:
+                            found.append(ast.unparse(node.args[1]))
+                    elif isinstance(func, ast.Attribute) and func.attr == "assert_db_matches_registry":
+                        if len(node.args) >= 2:
+                            found.append(ast.unparse(node.args[1]))
+                # Recurse into child nodes (but not into nested defs — handled above).
+                _collect(ast.iter_child_nodes(node))
+
+        _collect(main_node.body)
         return found
 
     def test_a4_main_py_wires_world_and_trade(self):
@@ -821,16 +830,17 @@ class TestA4BootWiringCallSite:
         )
 
     def test_a4_env_bypass_guard_present_in_main_py(self):
-        """src/main.py main() contains the ZEUS_BOOT_REGISTRY_ASSERT_ENABLED guard.
+        """src/main.py main() contains ZEUS_BOOT_REGISTRY_ASSERT_ENABLED guard with correct defaults.
 
-        Confirms the escape hatch for intentional schema migrations is structurally
-        in place (not removed), and that the guard string is present in the function
-        body.  The guard must default to '1' (enabled) — checked by asserting '0'
-        is the disabled value in the source text.
+        Confirms the escape hatch is structurally in place AND defaults to enabled:
+        - The guard uses os.environ.get("ZEUS_BOOT_REGISTRY_ASSERT_ENABLED", "1")
+          (default "1" = enabled).
+        - The disabled condition is != "0" (set to "0" only during migrations).
 
         Regression injection:
-        - Remove the os.environ.get('ZEUS_BOOT_REGISTRY_ASSERT_ENABLED', '1') guard
-          → the guard string vanishes → this test fails.
+        - Remove the guard → both assertions fail.
+        - Change the default from "1" to "0" → guard becomes disabled by default →
+          second assertion fails.
         """
         src_path = _REPO_ROOT / "src/main.py"
         source = src_path.read_text(encoding="utf-8")
@@ -850,12 +860,25 @@ class TestA4BootWiringCallSite:
             "is not referenced inside main() in src/main.py. "
             "The escape hatch guard was removed. Restore per v1.F1."
         )
+        # Guard must default to enabled ("1") and disable only on "0".
+        # This catches accidental inversion (default "0" = disabled by default).
+        assert (
+            'ZEUS_BOOT_REGISTRY_ASSERT_ENABLED", "1")' in main_src
+            or "ZEUS_BOOT_REGISTRY_ASSERT_ENABLED', '1')" in main_src
+        ), (
+            "A4 BOOT-WIRING FAIL (env guard default): ZEUS_BOOT_REGISTRY_ASSERT_ENABLED "
+            "guard in src/main.py does not default to '1' (enabled). "
+            "Guard must be: os.environ.get('ZEUS_BOOT_REGISTRY_ASSERT_ENABLED', '1') != '0'. "
+            "Restore per v1.F1."
+        )
 
     def test_a4_env_bypass_guard_present_in_ingest_main_py(self):
-        """src/ingest_main.py main() contains the ZEUS_BOOT_REGISTRY_ASSERT_ENABLED guard.
+        """src/ingest_main.py main() contains ZEUS_BOOT_REGISTRY_ASSERT_ENABLED guard with correct defaults.
 
         Regression injection:
-        - Remove the guard → string vanishes → this test fails.
+        - Remove the guard → both assertions fail.
+        - Change the default from "1" to "0" → guard becomes disabled by default →
+          second assertion fails.
         """
         src_path = _REPO_ROOT / "src/ingest_main.py"
         source = src_path.read_text(encoding="utf-8")
@@ -874,4 +897,14 @@ class TestA4BootWiringCallSite:
             "A4 BOOT-WIRING FAIL (env guard): ZEUS_BOOT_REGISTRY_ASSERT_ENABLED "
             "is not referenced inside main() in src/ingest_main.py. "
             "The escape hatch guard was removed. Restore per v1.F1."
+        )
+        # Guard must default to enabled ("1") and disable only on "0".
+        assert (
+            'ZEUS_BOOT_REGISTRY_ASSERT_ENABLED", "1")' in main_src
+            or "ZEUS_BOOT_REGISTRY_ASSERT_ENABLED', '1')" in main_src
+        ), (
+            "A4 BOOT-WIRING FAIL (env guard default): ZEUS_BOOT_REGISTRY_ASSERT_ENABLED "
+            "guard in src/ingest_main.py does not default to '1' (enabled). "
+            "Guard must be: os.environ.get('ZEUS_BOOT_REGISTRY_ASSERT_ENABLED', '1') != '0'. "
+            "Restore per v1.F1."
         )
