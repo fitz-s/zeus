@@ -1017,6 +1017,41 @@ def _run_venue_heartbeat_loop(cadence_seconds: float) -> None:
         time.sleep(max(0.1, cadence_seconds - elapsed))
 
 
+def _capture_boot_state() -> dict:
+    """PR-S6: capture git HEAD SHA + timestamp at daemon start.
+
+    Returns {"sha": sha, "ts": datetime} on success.
+    Returns {"sha": None, "ts": None} if ZEUS_ACCEPT_STALE_DEPLOY=1 and git fails.
+    Raises SystemExit if git fails and ZEUS_ACCEPT_STALE_DEPLOY != "1" (fail-loud).
+
+    Extracted as a named function so tests can call it directly (not an inlined copy).
+    """
+    import subprocess
+
+    from src.config import PROJECT_ROOT
+
+    try:
+        sha = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(PROJECT_ROOT),
+            timeout=5,
+            stderr=subprocess.DEVNULL,
+        ).strip().decode()
+        return {"sha": sha, "ts": datetime.now(timezone.utc)}
+    except Exception as exc:
+        if os.environ.get("ZEUS_ACCEPT_STALE_DEPLOY") == "1":
+            logger.warning(
+                "deployment_freshness: boot SHA capture failed (%s); "
+                "ZEUS_ACCEPT_STALE_DEPLOY=1 — skipping gate", exc,
+            )
+            return {"sha": None, "ts": None}
+        raise SystemExit(
+            f"deployment_freshness: boot SHA capture failed ({exc}) and "
+            "ZEUS_ACCEPT_STALE_DEPLOY != 1. Cannot initialize freshness gate. "
+            "Set ZEUS_ACCEPT_STALE_DEPLOY=1 to skip."
+        )
+
+
 def _check_deployment_freshness(
     *,
     boot_sha: str | None = None,
@@ -1503,30 +1538,11 @@ def main():
 
     # PR-S6: capture deployment snapshot for freshness gate.
     # Must run early (before any blocking I/O) so uptime accounting is accurate.
-    import subprocess as _subprocess
-    from src.config import PROJECT_ROOT as _PROJECT_ROOT
-    try:
-        _boot_sha = _subprocess.check_output(
-            ["git", "rev-parse", "HEAD"],
-            cwd=str(_PROJECT_ROOT),
-            timeout=5,
-            stderr=_subprocess.DEVNULL,
-        ).strip().decode()
-        _BOOT_STATE["sha"] = _boot_sha
-        _BOOT_STATE["ts"] = datetime.now(timezone.utc)
-        logger.info("deployment_freshness: boot_sha=%s", _boot_sha[:8])
-    except Exception as _exc:
-        if os.environ.get("ZEUS_ACCEPT_STALE_DEPLOY") == "1":
-            logger.warning(
-                "deployment_freshness: boot SHA capture failed (%s); "
-                "ZEUS_ACCEPT_STALE_DEPLOY=1 — skipping gate", _exc,
-            )
-        else:
-            raise SystemExit(
-                f"deployment_freshness: boot SHA capture failed ({_exc}) and "
-                "ZEUS_ACCEPT_STALE_DEPLOY != 1. Cannot initialize freshness gate. "
-                "Set ZEUS_ACCEPT_STALE_DEPLOY=1 to skip."
-            )
+    # Fail-loud if git unavailable and ZEUS_ACCEPT_STALE_DEPLOY != "1".
+    _boot = _capture_boot_state()
+    _BOOT_STATE.update(_boot)
+    if _boot.get("sha"):
+        logger.info("deployment_freshness: boot_sha=%s", _boot["sha"][:8])
 
     # Proxy health gate: strip dead HTTP_PROXY so data-only mode works
     # without VPN. Must precede any HTTP call (PolymarketClient wallet check, etc).

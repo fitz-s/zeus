@@ -23,7 +23,7 @@ from unittest.mock import patch, MagicMock, call
 import pytest
 
 import src.main as main_module
-from src.main import _check_deployment_freshness, _BOOT_STATE
+from src.main import _check_deployment_freshness, _capture_boot_state, _BOOT_STATE
 
 
 BOOT_SHA = "abc1234567890"
@@ -373,63 +373,28 @@ class TestGitFailures:
 
 class TestBootCapture:
     def test_boot_fails_loud_when_git_unavailable_without_override(self):
-        """If git SHA capture fails at boot and ZEUS_ACCEPT_STALE_DEPLOY != 1,
-        main() raises SystemExit (fail-closed). Prevents silently-disabled gate."""
-        import subprocess as _sp
+        """_capture_boot_state() raises SystemExit when git fails and no override.
 
-        def _fake_check_output(cmd, **kw):
-            raise FileNotFoundError("git not found")
-
+        Real antibody: calls src.main._capture_boot_state() directly so that
+        sed-breaking its raise SystemExit makes this test FAIL.
+        Patches subprocess.check_output on the real module object so the local
+        import inside _capture_boot_state picks it up.
+        """
         with patch.dict(os.environ, {"ZEUS_ACCEPT_STALE_DEPLOY": ""}, clear=False):
-            with patch("subprocess.check_output", side_effect=_fake_check_output):
-                # Call the boot-capture block logic directly via a minimal main() stub.
-                # We verify the SystemExit message rather than calling full main()
-                # (which would trigger DB/network gates).
-                from src.config import PROJECT_ROOT as _PR
+            with patch("subprocess.check_output", side_effect=FileNotFoundError("git not found")):
                 with pytest.raises(SystemExit) as exc_info:
-                    import subprocess as _subprocess
-                    try:
-                        _boot_sha = _subprocess.check_output(
-                            ["git", "rev-parse", "HEAD"],
-                            cwd=str(_PR),
-                            timeout=5,
-                            stderr=_subprocess.DEVNULL,
-                        ).strip().decode()
-                    except Exception as _exc:
-                        if os.environ.get("ZEUS_ACCEPT_STALE_DEPLOY") == "1":
-                            pass
-                        else:
-                            raise SystemExit(
-                                f"deployment_freshness: boot SHA capture failed ({_exc}) and "
-                                "ZEUS_ACCEPT_STALE_DEPLOY != 1. Cannot initialize freshness gate. "
-                                "Set ZEUS_ACCEPT_STALE_DEPLOY=1 to skip."
-                            )
-                assert "Cannot initialize freshness gate" in str(exc_info.value)
+                    _capture_boot_state()
+        assert "Cannot initialize freshness gate" in str(exc_info.value)
 
     def test_boot_silent_with_override(self):
-        """If git SHA capture fails at boot but ZEUS_ACCEPT_STALE_DEPLOY=1, no exit."""
-        import subprocess as _sp
+        """_capture_boot_state() returns null state when git fails with override.
 
-        def _fake_check_output(cmd, **kw):
-            raise FileNotFoundError("git not found")
-
+        Real antibody: calls src.main._capture_boot_state() directly.
+        """
         with patch.dict(os.environ, {"ZEUS_ACCEPT_STALE_DEPLOY": "1"}, clear=False):
-            with patch("subprocess.check_output", side_effect=_fake_check_output):
-                from src.config import PROJECT_ROOT as _PR
-                import subprocess as _subprocess
-                # Should not raise:
-                try:
-                    _boot_sha = _subprocess.check_output(
-                        ["git", "rev-parse", "HEAD"],
-                        cwd=str(_PR),
-                        timeout=5,
-                        stderr=_subprocess.DEVNULL,
-                    ).strip().decode()
-                except Exception as _exc:
-                    if os.environ.get("ZEUS_ACCEPT_STALE_DEPLOY") == "1":
-                        pass  # silent with override
-                    else:
-                        raise SystemExit("fail")
+            with patch("subprocess.check_output", side_effect=FileNotFoundError("git not found")):
+                result = _capture_boot_state()
+        assert result == {"sha": None, "ts": None}
 
 
 # ---------------------------------------------------------------------------
