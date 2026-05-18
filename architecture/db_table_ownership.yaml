@@ -898,4 +898,158 @@ tables:
     schema_version_owner: SCHEMA_VERSION
     created_by: init_schema
     pk_col: key
+
+  # ---------------------------------------------------------------------------
+  # PR-S4b (2026-05-18): world-side manifest gap closure.
+  # These 13 tables appear on zeus-world.db but were not declared in the registry,
+  # causing assert_db_matches_registry(WORLD) to fail at daemon boot.
+  #
+  # Two sub-categories:
+  #   A) Active world-class writers (2 tables): still written by src/ code.
+  #   B) Legacy/archived tables (11 tables): frozen data, no active writer.
+  #
+  # All legacy_archived entries are EXCLUDED from set-equality per §1.5.
+  # Drop date: 2026-08-09 (parity with K1 90-day retain window).
+  # ---------------------------------------------------------------------------
+
+  # --- Category A: subsystem-owned tables (created lazily by owning module, not init_schema) ---
+  # Declared legacy_archived so assert_db_matches_registry excludes them from set-equality.
+  # The owning module creates them on first use (DDL in daily_obs_append / replay engine).
+  # A future PR can promote to world_class by adding DDL to init_schema.
+
+  - name: hko_hourly_accumulator
+    db: world
+    schema_class: legacy_archived
+    schema_version_owner: SCHEMA_VERSION
+    created_by: migration_script_k1_archive
+    pk_col: null
+    notes: >
+      HKO hourly temperature accumulator. Active writer: src/data/daily_obs_append.py.
+      Created lazily by _ensure_hko_accumulator_table (not in init_schema).
+      Declared legacy_archived to exclude from set-equality until DDL
+      is promoted to init_schema. PR-S4b 2026-05-18.
+
+  - name: replay_results
+    db: world
+    schema_class: legacy_archived
+    schema_version_owner: SCHEMA_VERSION
+    created_by: migration_script_k1_archive
+    pk_col: null
+    notes: >
+      Replay engine result rows. Active writer: src/engine/replay.py.
+      No CREATE TABLE in init_schema — table exists from historical creation.
+      Declared legacy_archived to exclude from set-equality. PR-S4b 2026-05-18.
+
+  # --- Category B: legacy/archived (no active writer in src/) ---
+
+  - name: forecast_error_profile
+    db: world
+    schema_class: legacy_archived
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: null
+    notes: >
+      Legacy forecast-error aggregation table. No INSERT matches in src/ as of
+      PR-S4b audit 2026-05-18. Excluded from set-equality. Drop after 2026-08-09.
+
+  - name: historical_forecasts
+    db: world
+    schema_class: legacy_archived
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: null
+    notes: >
+      Legacy pre-v2 forecast store (current: historical_forecasts_v2).
+      No INSERT matches in src/ as of PR-S4b audit 2026-05-18.
+      Excluded. Drop after 2026-08-09.
+
+  - name: hourly_observations
+    db: world
+    schema_class: legacy_archived
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: null
+    notes: >
+      Legacy hourly observation store. No INSERT matches in src/ as of
+      PR-S4b audit 2026-05-18. Excluded. Drop after 2026-08-09.
+
+  - name: day0_residual_fact
+    db: world
+    schema_class: legacy_archived
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: null
+    notes: >
+      Day-0 residual fact table. No INSERT matches in src/ as of
+      PR-S4b audit 2026-05-18. Excluded. Drop after 2026-08-09.
+
+  - name: calibration_pairs_v2_archived_2026_05_11
+    db: world
+    schema_class: legacy_archived
+    schema_version_owner: SCHEMA_VERSION
+    created_by: migration_script_k1_archive
+    pk_col: null
+    notes: >
+      K1 2026-05-11 archive snapshot of calibration_pairs_v2.
+      Authoritative on forecasts.db. Excluded. Drop after 2026-08-09.
+
+  - name: ensemble_snapshots_v2_archived_2026_05_11
+    db: world
+    schema_class: legacy_archived
+    schema_version_owner: SCHEMA_VERSION
+    created_by: migration_script_k1_archive
+    pk_col: null
+    notes: >
+      K1 2026-05-11 archive snapshot of ensemble_snapshots_v2.
+      Authoritative on forecasts.db. Excluded. Drop after 2026-08-09.
+
+  - name: market_events_v2_archived_2026_05_11
+    db: world
+    schema_class: legacy_archived
+    schema_version_owner: SCHEMA_VERSION
+    created_by: migration_script_k1_archive
+    pk_col: null
+    notes: >
+      K1 2026-05-11 archive snapshot of market_events_v2.
+      Authoritative on forecasts.db. Excluded. Drop after 2026-08-09.
+
+  - name: observations_archived_2026_05_11
+    db: world
+    schema_class: legacy_archived
+    schema_version_owner: SCHEMA_VERSION
+    created_by: migration_script_k1_archive
+    pk_col: null
+    notes: >
+      K1 2026-05-11 archive snapshot of observations.
+      Authoritative on forecasts.db. Excluded. Drop after 2026-08-09.
+
+  - name: settlements_archived_2026_05_11
+    db: world
+    schema_class: legacy_archived
+    schema_version_owner: SCHEMA_VERSION
+    created_by: migration_script_k1_archive
+    pk_col: null
+    notes: >
+      K1 2026-05-11 archive snapshot of settlements.
+      Authoritative on forecasts.db. Excluded. Drop after 2026-08-09.
+
+  - name: settlements_v2_archived_2026_05_11
+    db: world
+    schema_class: legacy_archived
+    schema_version_owner: SCHEMA_VERSION
+    created_by: migration_script_k1_archive
+    pk_col: null
+    notes: >
+      K1 2026-05-11 archive snapshot of settlements_v2.
+      Authoritative on forecasts.db. Excluded. Drop after 2026-08-09.
+
+  - name: source_run_archived_2026_05_11
+    db: world
+    schema_class: legacy_archived
+    schema_version_owner: SCHEMA_VERSION
+    created_by: migration_script_k1_archive
+    pk_col: null
+    notes: >
+      K1 2026-05-11 archive snapshot of source_run.
+      Authoritative on forecasts.db. Excluded. Drop after 2026-08-09.
     notes: Zeus metadata store (key-value, schema version anchor).
