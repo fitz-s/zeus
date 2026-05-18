@@ -38,12 +38,15 @@ def _make_db(init_world: bool = True) -> sqlite3.Connection:
 
 
 def _add_authority_columns(conn: sqlite3.Connection) -> None:
-    """Add authority columns to tables that init_schema lacks them (worktree shim)."""
+    """Add authority columns to tables that init_schema lacks them (worktree shim).
+
+    v1.F20 / G4 schema-v9: ensemble_snapshots dropped from world-class init_schema;
+    removed from this list — it no longer exists in the world DB.
+    """
     for table, default in [
         ("calibration_pairs", "UNVERIFIED"),
         ("settlements", "UNVERIFIED"),
         ("platt_models", "UNVERIFIED"),
-        ("ensemble_snapshots", "VERIFIED"),
     ]:
         info = conn.execute(f"PRAGMA table_info({table})").fetchall()
         cols = {row[1] for row in info}
