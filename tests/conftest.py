@@ -289,6 +289,9 @@ _WLA_SQLITE_CONNECT_ALLOWLIST = frozenset({
 
     # --- Migration runner CLI (2026-05-17; F23 framework) ---
     "scripts/migrations/__main__.py",  # operator_invoked: migration runner CLI; sqlite3.connect() only when --db-path supplied (test/tmp DB path); daemon never imports this module
+
+    # --- Bridge trigger migration (2026-05-17; Karachi bridge fix packet) ---
+    "scripts/migrations/202605_position_current_bridge_required_trigger.py",  # operator_invoked: CREATE TRIGGER trg_position_current_requires_bridge BEFORE INSERT ON position_current; idempotent; --dry-run mode; daemon never imports this module
 })
 
 
