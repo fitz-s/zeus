@@ -1480,9 +1480,25 @@ def main():
     # Startup health check: warn about deferred data actions
     _startup_data_health_check(conn)
 
-    # world_schema_manifest.yaml + validate_world_schema_at_boot RETIRED in P2
-    # (2026-05-14 K1 followups plan §5.5 D5). assert_db_matches_registry() exists
-    # (src/state/table_registry.py) but boot wiring is deferred — not called here.
+    # v1.F1 (2026-05-18): assert_db_matches_registry boot wiring.
+    # Fail-closed per INV-05: RegistryAssertionError propagates and aborts daemon start.
+    # No advisory mode — a live DB whose table-set diverges from
+    # architecture/db_table_ownership.yaml must not enter the trading loop.
+    # Guard: ZEUS_BOOT_REGISTRY_ASSERT_ENABLED defaults "1" (enabled).
+    # Set to "0" ONLY during intentional schema migrations; document the migration window.
+    if os.environ.get("ZEUS_BOOT_REGISTRY_ASSERT_ENABLED", "1") != "0":
+        from src.state.table_registry import (
+            DBIdentity,
+            assert_db_matches_registry,
+        )
+        assert_db_matches_registry(conn, DBIdentity.WORLD)
+        logger.info("assert_db_matches_registry: world DB table-set matches registry")
+        _trade_conn_reg = get_trade_connection()
+        try:
+            assert_db_matches_registry(_trade_conn_reg, DBIdentity.TRADE)
+            logger.info("assert_db_matches_registry: trade DB table-set matches registry")
+        finally:
+            _trade_conn_reg.close()
     conn.close()
 
     # §3.1 Data freshness gate — WARN-only at boot (Phase 2: warn; Phase 3: enforce).

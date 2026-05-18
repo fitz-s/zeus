@@ -118,6 +118,9 @@ state/wu-*.log
 state/zeus-world.db.pre-p*-*
 !state/zeus-world.db.pre-p*-*.md5
 !state/zeus-world.db.pre-p*-*.sha256
+# MIN-3 (2026-05-18): production writer targets state/station_migration_alerts.json
+# per src/data/station_migration_probe.py:220; repo-root was a stale legacy artifact.
+/station_migration_alerts.json
 
 # ----------------------------------------------------------------------
 # Raw / bulky / vendor / shadow data
