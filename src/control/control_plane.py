@@ -305,6 +305,11 @@ def pause_entries(
                 " — operator indefinite freeze active.\nCaller stack (most recent last):\n%s",
                 reason_code, issued_by, now_iso, _caller_frames,
             )
+            # PRECEDENCE-1 fix: in-memory state was already overwritten to
+            # auto_exception values above (L284-286) before we checked the
+            # DB.  Restore from DB so status consumers reflect the operator
+            # freeze source/reason, not the attempted auto-pause.
+            refresh_control_state()
             return
         if _has_active_auto_pause_override(conn, reason_code=reason_code, now_iso=now_iso):
             logger.debug(
