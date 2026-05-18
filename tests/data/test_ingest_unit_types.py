@@ -89,8 +89,15 @@ def _run_mypy_strict_on_snippet(code: str) -> tuple[int, str]:
     modules, so pre-strict sibling modules do not cascade errors into the
     snippet check.
 
+    cwd is set to the repo root (two dirs above tests/data/) so mypy.ini is
+    discovered and src/ is on the module search path regardless of where pytest
+    is invoked from.
+
     Returns (exit_code, combined_stdout_stderr).
     """
+    # Repo root: tests/data/../../  (this file lives at tests/data/test_*.py)
+    repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
     with tempfile.NamedTemporaryFile(
         mode="w", suffix=".py", delete=False, prefix="mypy_snippet_"
     ) as f:
@@ -104,11 +111,12 @@ def _run_mypy_strict_on_snippet(code: str) -> tuple[int, str]:
                 "--strict",
                 "--ignore-missing-imports",
                 "--follow-imports=silent",
-                "--python-version", "3.11",
+                "--python-version", f"{sys.version_info.major}.{sys.version_info.minor}",
                 tmp_path,
             ],
             capture_output=True,
             text=True,
+            cwd=repo_root,
         )
         return result.returncode, result.stdout + result.stderr
     finally:
@@ -161,13 +169,13 @@ def test_mypy_accepts_degc_wrapped_celsius() -> None:
         store(degC(20.0))
     """)
     exit_code, output = _run_mypy_strict_on_snippet(snippet)
-    boundary_errors = [
-        line for line in output.splitlines()
-        if "store" in line and "error" in line.lower()
-    ]
-    assert not boundary_errors, (
-        "mypy flagged a type error on correctly-typed Celsius boundary call:\n"
-        + "\n".join(boundary_errors)
+    assert exit_code == 0, (
+        f"mypy exited {exit_code} on correctly-typed Celsius call (import error or unexpected failure):\n{output}"
+    )
+    error_lines = [line for line in output.splitlines() if "error:" in line.lower()]
+    assert not error_lines, (
+        "mypy reported errors on correctly-typed Celsius boundary call:\n"
+        + "\n".join(error_lines)
     )
 
 
@@ -191,7 +199,7 @@ def test_wu_adapter_temp_unit_matches_fahrenheit_request() -> None:
 
     # Minimal synthetic raw_observations list
     raw_observations = [
-        {"temp": "72.5", "valid_time_gmt": "1746000000"},  # 2025-04-30T10:00Z approx
+        {"temp": "72.5", "valid_time_gmt": "1746000000"},  # 2025-04-30T08:00:00Z
     ]
     city_name = "Chicago"
     start = date(2025, 4, 30)
