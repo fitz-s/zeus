@@ -89,6 +89,9 @@ from src.state.portfolio import (
     city_exposure_for_bankroll,
     cluster_exposure_for_bankroll,
     has_same_city_range_open,
+    has_same_token_open,
+    has_same_token_open_db,
+    has_inflight_exit_for_token,
     is_reentry_blocked,
     is_token_on_cooldown,
     portfolio_heat_for_bankroll,
@@ -3364,13 +3367,26 @@ def evaluate_candidate(
                 strategy_key=strategy_key,
             ))
             continue
-        if has_same_city_range_open(portfolio, city.name, edge.bin.label):
+        # Layer 7 (v2): token-keyed dedup gate with decision-time DB read.
+        # Probe-6 (2026-05-17): execution_facts absent → 2-table join path in
+        # has_inflight_exit_for_token (venue_trade_facts → position_current).
+        _token_held = (
+            has_same_token_open_db(conn, check_token)
+            if conn is not None
+            else has_same_token_open(portfolio, check_token)
+        )
+        _inflight_exit = (
+            has_inflight_exit_for_token(conn, check_token)
+            if conn is not None
+            else False
+        )
+        if _token_held or _inflight_exit:
             decisions.append(EdgeDecision(
                 False,
                 edge=edge,
                 decision_id=_decision_id(),
                 rejection_stage="ANTI_CHURN",
-                rejection_reasons=["CROSS_DATE_BLOCK"],
+                rejection_reasons=["ALREADY_HELD_SAME_TOKEN"],
                 selected_method=selected_method,
                 applied_validations=[*decision_validations, "anti_churn"],
                 decision_snapshot_id=snapshot_id,

@@ -2126,6 +2126,61 @@ def has_same_city_range_open(state: PortfolioState, city: str, bin_label: str) -
     )
 
 
+def has_same_token_open(state: PortfolioState, token_id: str) -> bool:
+    """Layer 7 (v2) snapshot fallback: block re-entry on a token already held in any
+    non-terminal state. Keys by token_id (outcome-specific, direction-specific) not
+    city+bin_label text. Used when conn is None (paper mode, test fixtures).
+    """
+    return any(
+        p.token_id == token_id
+        and _is_runtime_open_position(p)
+        for p in state.positions
+    )
+
+
+_TERMINAL_PHASES = (
+    "voided", "economically_closed", "settled", "quarantined", "admin_closed"
+)
+
+
+def has_same_token_open_db(conn, token_id: str) -> bool:
+    """Decision-time dedup gate: queries position_current directly at call time.
+    Non-terminal phases: active, day0_window, pending_exit, pending_entry,
+      phantom_not_on_chain, and any future non-terminal state.
+    Terminal (excluded): voided, economically_closed, settled, quarantined,
+      admin_closed.
+    """
+    placeholders = ",".join("?" * len(_TERMINAL_PHASES))
+    row = conn.execute(
+        f"""SELECT 1 FROM position_current
+            WHERE token_id = ?
+            AND phase NOT IN ({placeholders})
+            LIMIT 1""",
+        (token_id, *_TERMINAL_PHASES),
+    ).fetchone()
+    return row is not None
+
+
+def has_inflight_exit_for_token(conn, token_id: str) -> bool:
+    """Belt-and-suspenders: block re-entry if any exit order for this token is
+    in-flight (MATCHED or MINED in venue_trade_facts but not yet CONFIRMED/promoted).
+
+    Probe-6 result (2026-05-17): execution_facts table absent in zeus_trades.db.
+    Join path: venue_trade_facts.trade_id → position_current.trade_id (2-table).
+    If execution_facts is added later, migrate to 3-table join per B_patch_plan.md §2.
+    """
+    row = conn.execute(
+        """SELECT 1
+           FROM venue_trade_facts vtf
+           JOIN position_current pc ON pc.trade_id = vtf.trade_id
+           WHERE pc.token_id = ?
+             AND vtf.state IN ('MATCHED', 'MINED')
+           LIMIT 1""",
+        (token_id,),
+    ).fetchone()
+    return row is not None
+
+
 _V2_INTRODUCTION_DATE = datetime(2025, 1, 1, tzinfo=timezone.utc)
 
 _BUY_NO_SCALING = ExpiringAssumption[float](

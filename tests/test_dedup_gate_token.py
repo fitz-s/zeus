@@ -1,0 +1,202 @@
+# Created: 2026-05-17
+# Last reused or audited: 2026-05-17
+# Authority basis: STRUCTURAL_PLAN.md v3 §2 PR-S3 + B_patch_plan.md
+#
+# Relationship test: when Module A (position_current DB state) shows a non-terminal
+# position for token X, Module B (evaluator anti-churn gate) must reject a new
+# candidate with the same token_id. The invariant that holds across the boundary:
+#   position_current.phase NOT IN terminal_phases → new entry blocked.
+#
+# DQ-2 branch: PR-S1 SKIPS pending_exit from LIFO walk → test_phantom_not_on_chain
+# uses a non-pending_exit phantom fixture (state="phantom_not_on_chain").
+# phantom_not_on_chain is not in _TERMINAL_PHASES → DB query returns True regardless
+# of whether the rest of the system treats it as a formal lifecycle state.
+
+import sqlite3
+import pytest
+from src.state.portfolio import (
+    has_same_token_open,
+    has_same_token_open_db,
+    has_inflight_exit_for_token,
+    PortfolioState,
+    Position,
+)
+
+TOKEN_X = "0xabc123_token_yes"
+TOKEN_X_NO = "0xabc123_token_no"
+OTHER_TOKEN = "0xother_token_yes"
+
+
+@pytest.fixture
+def mem_db():
+    """In-memory sqlite with minimal position_current + venue_trade_facts schema."""
+    conn = sqlite3.connect(":memory:")
+    conn.execute("""
+        CREATE TABLE position_current (
+            position_id TEXT PRIMARY KEY,
+            phase TEXT NOT NULL,
+            trade_id TEXT,
+            market_id TEXT,
+            city TEXT,
+            bin_label TEXT,
+            token_id TEXT,
+            no_token_id TEXT,
+            updated_at TEXT NOT NULL
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE venue_trade_facts (
+            trade_fact_id INTEGER PRIMARY KEY,
+            trade_id TEXT NOT NULL,
+            venue_order_id TEXT NOT NULL,
+            command_id TEXT NOT NULL,
+            state TEXT NOT NULL,
+            observed_at TEXT NOT NULL
+        )
+    """)
+    conn.commit()
+    return conn
+
+
+def _insert_position(conn, position_id, phase, token_id):
+    conn.execute(
+        "INSERT INTO position_current VALUES (?,?,?,?,?,?,?,?,?)",
+        (
+            position_id, phase, "trade-" + position_id, "mkt-1",
+            "London", "18°C", token_id, TOKEN_X_NO, "2026-05-17T22:13:38",
+        ),
+    )
+    conn.commit()
+
+
+def _make_position(**kwargs):
+    """Minimal Position fixture with required fields."""
+    defaults = dict(
+        trade_id="t1", market_id="m1", city="London",
+        cluster="EU-West", target_date="2026-05-17",
+        bin_label="18°C", direction="buy_yes",
+        size_usd=10.0, entry_price=0.40, p_posterior=0.60,
+        edge=0.20, entered_at="2026-05-17T20:04:00Z",
+    )
+    defaults.update(kwargs)
+    return Position(**defaults)
+
+
+# ── Primary: pending_exit blocks re-entry (the London 22:13 → 22:24 race) ──────
+
+def test_pending_exit_blocks_same_token(mem_db):
+    """
+    GIVEN: position 0a0e3b72-46e with token_id=TOKEN_X in phase pending_exit
+           (EXIT_ORDER_REJECTED, retry in progress — London 22:13 scenario)
+    WHEN:  has_same_token_open_db(conn, TOKEN_X)
+    THEN:  returns True → evaluator rejects new candidate ALREADY_HELD_SAME_TOKEN
+    """
+    _insert_position(mem_db, "0a0e3b72-46e", "pending_exit", TOKEN_X)
+    assert has_same_token_open_db(mem_db, TOKEN_X) is True
+
+
+def test_pending_exit_does_not_block_different_token(mem_db):
+    """Gate is token-specific: pending_exit on TOKEN_X must not block OTHER_TOKEN."""
+    _insert_position(mem_db, "0a0e3b72-46e", "pending_exit", TOKEN_X)
+    assert has_same_token_open_db(mem_db, OTHER_TOKEN) is False
+
+
+def test_economically_closed_allows_reentry(mem_db):
+    """
+    GIVEN: prior position exited cleanly → phase economically_closed
+           (London 20:04 scenario — 3a6f0728-c50)
+    WHEN:  has_same_token_open_db(conn, TOKEN_X)
+    THEN:  returns False → evaluator allows re-entry
+    """
+    _insert_position(mem_db, "3a6f0728-c50", "economically_closed", TOKEN_X)
+    assert has_same_token_open_db(mem_db, TOKEN_X) is False
+
+
+def test_active_position_blocks_reentry(mem_db):
+    """Active position (standard case) must block."""
+    _insert_position(mem_db, "active-pos-01", "active", TOKEN_X)
+    assert has_same_token_open_db(mem_db, TOKEN_X) is True
+
+
+def test_voided_position_allows_reentry(mem_db):
+    """Voided positions are terminal — must not block."""
+    _insert_position(mem_db, "cee5fc85-3dd", "voided", TOKEN_X)
+    assert has_same_token_open_db(mem_db, TOKEN_X) is False
+
+
+# ── phantom_not_on_chain (Bug #3 state) ─────────────────────────────────────────
+
+def test_phantom_not_on_chain_blocks_reentry(mem_db):
+    """
+    GIVEN: position in phantom_not_on_chain (non-pending_exit — DQ-2 branch per N5)
+           PR-S1 SKIPS pending_exit from LIFO walk → fixture uses state="phantom_not_on_chain"
+           phantom_not_on_chain is NOT in _TERMINAL_PHASES → query returns True
+    WHEN:  has_same_token_open_db(conn, TOKEN_X)
+    THEN:  returns True → gate blocks re-entry (opening duplicate on unresolved phantom
+           compounds chain-reconciliation confusion)
+    """
+    _insert_position(mem_db, "phantom-pos-01", "phantom_not_on_chain", TOKEN_X)
+    assert has_same_token_open_db(mem_db, TOKEN_X) is True
+
+
+# ── In-flight exit gate (belt-and-suspenders) ────────────────────────────────────
+
+def test_inflight_matched_exit_blocks_reentry(mem_db):
+    """
+    GIVEN: position in pending_exit AND venue_trade_facts shows MATCHED exit order
+           (exit submitted to chain, not yet CONFIRMED — 5-30s settlement window)
+    WHEN:  has_inflight_exit_for_token(conn, TOKEN_X)
+    THEN:  returns True → evaluator blocks re-entry during settlement window
+    """
+    _insert_position(mem_db, "pos-in-flight", "pending_exit", TOKEN_X)
+    mem_db.execute(
+        "INSERT INTO venue_trade_facts VALUES "
+        "(1, 'trade-pos-in-flight', 'order-001', 'cmd-001', 'MATCHED', '2026-05-17T22:13:38')"
+    )
+    mem_db.commit()
+    assert has_inflight_exit_for_token(mem_db, TOKEN_X) is True
+
+
+def test_confirmed_exit_does_not_block_via_inflight_check(mem_db):
+    """CONFIRMED exits are terminal — must not trigger the in-flight gate."""
+    _insert_position(mem_db, "pos-confirmed", "economically_closed", TOKEN_X)
+    mem_db.execute(
+        "INSERT INTO venue_trade_facts VALUES "
+        "(1, 'trade-pos-confirmed', 'order-001', 'cmd-001', 'CONFIRMED', '2026-05-17T22:10:00')"
+    )
+    mem_db.commit()
+    assert has_inflight_exit_for_token(mem_db, TOKEN_X) is False
+
+
+# ── Snapshot fallback (anti-rot for the dual-path) ───────────────────────────────
+
+def test_snapshot_fallback_when_conn_none():
+    """
+    GIVEN: conn is None (paper mode / test fixture without DB)
+    WHEN:  has_same_token_open(portfolio_snapshot, TOKEN_X) called directly
+    THEN:  returns True for a portfolio containing TOKEN_X in pending_exit,
+           False for a portfolio with TOKEN_X in economically_closed.
+    """
+    pos_open = _make_position(
+        trade_id="snap-open", token_id=TOKEN_X, state="pending_exit",
+    )
+    # PortfolioState.state field vs Position.state: Position uses lifecycle state
+    # stored as string on the dataclass. Build PortfolioState with one open position.
+    portfolio_open = PortfolioState(
+        bankroll=100.0,
+        daily_baseline_total=100.0,
+        weekly_baseline_total=100.0,
+        positions=[pos_open],
+    )
+    assert has_same_token_open(portfolio_open, TOKEN_X) is True
+
+    pos_closed = _make_position(
+        trade_id="snap-closed", token_id=TOKEN_X, state="economically_closed",
+    )
+    portfolio_closed = PortfolioState(
+        bankroll=100.0,
+        daily_baseline_total=100.0,
+        weekly_baseline_total=100.0,
+        positions=[pos_closed],
+    )
+    assert has_same_token_open(portfolio_closed, TOKEN_X) is False
