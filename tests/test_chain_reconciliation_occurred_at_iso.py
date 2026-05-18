@@ -169,3 +169,31 @@ def test_pending_fill_rescue_stamps_iso_not_sentinel():
     assert entered_at and _ISO_RE.match(str(entered_at)), (
         f"entered_at must be an ISO timestamp; got {entered_at!r}"
     )
+
+
+def test_f107_non_empty_skips_unknown_entered_at_sentinel():
+    """F107: _non_empty must skip 'unknown_entered_at' sentinel so that
+    build_reconciliation_rescue_canonical_write uses chain_verified_at or
+    updated_at as occurred_at rather than propagating the literal sentinel
+    string into position_events.occurred_at.
+
+    Regression: CHAIN_SYNCED events for rescued positions showed
+    occurred_at='unknown_entered_at', breaking julianday() time-window queries.
+    """
+    from src.engine.lifecycle_events import _non_empty
+
+    # Sentinel alone → ValueError (no valid fallback)
+    import pytest as _pytest
+    with _pytest.raises(ValueError):
+        _non_empty("unknown_entered_at")
+
+    # Sentinel as first arg → falls through to chain_verified_at
+    result = _non_empty("unknown_entered_at", "2026-05-16T06:40:21+00:00")
+    assert result == "2026-05-16T06:40:21+00:00", (
+        f"_non_empty must skip 'unknown_entered_at' sentinel; got {result!r}"
+    )
+    assert result != "unknown_entered_at", "sentinel must never propagate as occurred_at"
+
+    # Sentinel as first arg, None second → falls through to third
+    result2 = _non_empty("unknown_entered_at", None, "2026-05-17T10:11:52+00:00")
+    assert result2 == "2026-05-17T10:11:52+00:00"
