@@ -164,7 +164,8 @@ def _send_embed(level: str, title: str, body: str, color: int | None = None) -> 
 def _with_cooldown(alert_key: str, cooldown_seconds: int, send_fn) -> bool:
     """Wrapper: check cooldown, send, record."""
     try:
-        db = sqlite3.connect(str(_get_risk_db_path()), timeout=5)
+        db = sqlite3.connect(str(_get_risk_db_path()), timeout=30)
+        db.execute("PRAGMA journal_mode=WAL")
         _ensure_cooldown_table(db)
         if _is_in_cooldown(db, alert_key, cooldown_seconds):
             db.close()

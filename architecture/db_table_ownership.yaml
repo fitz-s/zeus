@@ -867,6 +867,17 @@ tables:
       Re-owned trade per 2026-05-17 audit. Writer:
       src/state/venue_command_repo.py:1869.
 
+  - name: db_chunk_boundary_events
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: migration
+    pk_col: event_id
+    notes: >
+      F11 (wave6 2026-05-18): BulkChunker LIVE-yield and watchdog-fire
+      observability events. Written by
+      src/state/chunk_boundary_events.emit_event().
+
   - name: wrap_unwrap_commands
     db: world
     schema_class: world_class

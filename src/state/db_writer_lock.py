@@ -43,7 +43,7 @@ import threading
 import time
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator, Mapping
+from typing import Any, Callable, Iterator, Mapping
 
 from src.observability.counters import increment as _cnt_inc
 
@@ -197,6 +197,7 @@ class BulkChunker:
         db_path: Path | None = None,
         bulk_lock_fd: int | None = None,
         live_yield_sleep_s: float = DEFAULT_LIVE_YIELD_SLEEP_S,
+        event_writer: Callable[..., None] | None = None,
     ) -> None:
         self.conn = conn
         self.caller_module = caller_module
@@ -222,6 +223,12 @@ class BulkChunker:
         self._db_path = db_path
         self._bulk_lock_fd = bulk_lock_fd
         self._live_yield_sleep_s = live_yield_sleep_s
+        # F11 (wave6 2026-05-18): optional event_writer callback; called on
+        # LIVE_CONTENDED yield and WATCHDOG fire so both appear in the
+        # db_chunk_boundary_events table.  Signature:
+        #   event_writer(caller_module=..., split_reason=..., duration_ms=...)
+        # Failure-silent at call-site.
+        self._event_writer = event_writer
 
     # -- context-manager lifecycle (v4 MF5 §3.1.5) --
 
@@ -320,6 +327,7 @@ class BulkChunker:
 
     def _yield_to_live(self) -> None:
         """Release SQLite + bulk fcntl, sleep, re-acquire."""
+        yield_start = time.monotonic()
         # 1. Operative SQLite release.
         self.commit_chunk()
         # 2. Bulk fcntl yield (optional; only when caller provided fd).
@@ -357,6 +365,21 @@ class BulkChunker:
         # the sleep we just performed.
         with self._lock:
             self._last_yield_at = time.monotonic()
+        # F11: emit observability event AFTER relock (bulk lock is held again).
+        if self._event_writer is not None:
+            try:
+                duration_ms = int((time.monotonic() - yield_start) * 1000)
+                self._event_writer(
+                    caller_module=self.caller_module,
+                    split_reason="LIVE_CONTENDED",
+                    duration_ms=duration_ms,
+                )
+            except Exception as ew_exc:
+                logger.debug(
+                    "BulkChunker(%s) event_writer failed on LIVE_CONTENDED: %s",
+                    self.caller_module,
+                    ew_exc,
+                )
 
     def commit_chunk(self) -> None:
         """Commit the current chunk and let a fresh TX open lazily.
@@ -427,6 +450,21 @@ class BulkChunker:
                 # at next yield/commit).
                 self._abort_requested.set()
                 _cnt_inc("db_chunker_watchdog_fired_total")
+                # F11: emit observability event before interrupt_main so the
+                # record lands even if the main thread exits rapidly.
+                if self._event_writer is not None:
+                    try:
+                        self._event_writer(
+                            caller_module=self.caller_module,
+                            split_reason="WATCHDOG",
+                            duration_ms=int(elapsed * 1000),
+                        )
+                    except Exception as ew_exc:
+                        logger.debug(
+                            "BulkChunker(%s) event_writer failed on WATCHDOG: %s",
+                            self.caller_module,
+                            ew_exc,
+                        )
                 # Channel 2: interrupt_main (backstop; covers main-thread
                 # blocked in a C-level call). interrupt_main raises in the
                 # main thread regardless of GIL state.
@@ -454,6 +492,7 @@ def bulk_lock_with_chunker(
     watchdog_s: int = BulkChunker.DEFAULT_WATCHDOG_S,
     watchdog_poll_s: float = 1.0,
     live_yield_sleep_s: float = BulkChunker.DEFAULT_LIVE_YIELD_SLEEP_S,
+    event_writer: Callable[..., None] | None = None,
 ) -> Iterator[BulkChunker]:
     """Open the BULK fcntl + wrap a ``BulkChunker`` with LIVE-yield wiring.
 
@@ -498,6 +537,7 @@ def bulk_lock_with_chunker(
                 db_path=db_path,
                 bulk_lock_fd=fd,
                 live_yield_sleep_s=live_yield_sleep_s,
+                event_writer=event_writer,
             )
             with chunker:
                 yield chunker
