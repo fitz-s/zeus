@@ -563,13 +563,32 @@ tables:
     created_by: init_schema
     pk_col: null
 
+  # ---------------------------------------------------------------------------
+  # Dual-write contract: observation_instants (v1) + observation_instants_v2
+  # ---------------------------------------------------------------------------
+  # DESIGN: v1 (OpenMeteo filler) and v2 (native-source canonical) run as a
+  # dual-write pair. v1 is NOT legacy — it has 5 RUNTIME consumers and
+  # provides 100% city coverage via OpenMeteo for markets where
+  # WU/Ogimet/HKO have not yet been activated. v2 is gated by A1/A2/A6
+  # ingest quality checks and covers only tier-1 settlement cities. The
+  # VIEW observation_instants_current is the atomic cutover indirection:
+  # runtime readers MUST use the VIEW, not v2 directly. Switching
+  # zeus_meta.observation_data_version flips the active corpus without
+  # touching any reader. Retirement of v1 is deferred to Phase 3 (pending
+  # full v2 coverage of all cities). Dual-writer freshness antibody:
+  # tests/state/test_dual_writer_observation_instants_invariant.py.
+  # ---------------------------------------------------------------------------
+
   - name: observation_instants
     db: world
     schema_class: world_class
     schema_version_owner: SCHEMA_VERSION
     created_by: init_schema
     pk_col: null
-    notes: Pre-v2 observation instants (legacy).
+    notes: >
+      OpenMeteo filler — ungated, 100% city coverage. NOT legacy.
+      Retirement blocked by 5 runtime consumers + no v2 OpenMeteo fallback.
+      Dual-write partner: observation_instants_v2.
 
   - name: observation_instants_v2
     db: world
@@ -577,6 +596,18 @@ tables:
     schema_version_owner: SCHEMA_VERSION
     created_by: init_schema
     pk_col: null
+    notes: >
+      Native-source canonical (WU/Ogimet/HKO/etc.), A1/A2/A6 gated.
+      Dual-write partner: observation_instants.
+      Runtime readers MUST access via the VIEW observation_instants_current
+      (defined in v2_schema.py), not this table directly.
+      VIEW filters to active data_version via zeus_meta.observation_data_version.
+      Freshness antibody: tests/state/test_dual_writer_observation_instants_invariant.py.
+
+  # NOTE: observation_instants_current is a VIEW (not a table) — defined in
+  # src/state/schema/v2_schema.py. VIEWs are intentionally excluded from the
+  # A1 set-equality check (sqlite_master WHERE type='table'). Its contract is
+  # documented above in observation_instants_v2.notes and in the rationale block.
 
   - name: observation_revisions
     db: world

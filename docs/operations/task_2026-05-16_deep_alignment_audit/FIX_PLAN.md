@@ -189,9 +189,11 @@ Below: per-PR antibody and scope. Finding-level evidence (file:line) is in [FIND
 - **Critic**: opus SCAFFOLD (Tier-0 migration on production truth DB).
 
 ### PR-M — F18 observation_instants sweep
-- **Antibody**: Grep + classify every reader of `observation_instants` (legacy=906,081) vs `observation_instants_v2` (1,835,645); drop legacy after all readers migrated; registry parity check (same antibody pattern as PR-F).
-- **Files**: audit script + migration + readers.
-- **Critic**: opus SCAFFOLD (Tier-0, larger row delta).
+
+**RETRACTED**: premise broken — v1 is not legacy, has 5 runtime consumers and
+provides OpenMeteo coverage for non-tier-1 cities. Dropping v1 would break the
+daemon. Reframed as PR-M' (view-cutover + dual-writer invariant antibody, this
+PR). See jobs/9ea6f95c/briefs/pr_m_reframed_view_cutover.md for full analysis.
 
 ### PR-K — F16 wrap_unwrap decision
 - **Decision in SCAFFOLD**: delete module + tables (Z4-deferred only) OR wire enqueue caller + APScheduler poll + reconcile (Z5-planned).

@@ -18,7 +18,7 @@
 
 ## Findings NOT spot-verified (assumed unchanged from FINDINGS_REFERENCE.md)
 
-F2, F3, F6, F8, F9 (false-positive), F10, F11, F12, F13, F14, F16, F17, F18, F19, F20.
+F2, F3, F6, F8, F9 (false-positive), F10, F11, F12, F13, F14, F16, F17, F19, F20.
 
 Rationale: none of the 6 K1 commits touch the affected surfaces. If FIX_PLAN drafting surfaces doubt about any, re-verify before publishing the plan.
 
@@ -28,7 +28,8 @@ Rationale: none of the 6 K1 commits touch the affected surfaces. If FIX_PLAN dra
 - **PR-B** F5 downgrade SEV-1 → SEV-2; still ships, no longer Karachi-blocking.
 - **PR-C** F7 scope reduced to explicit tag filter + regression test (retry path already present).
 - **PR-E** F1 fix-spec changes: reframe as "land K1 P3 promised wiring", anchor on K1 followups P3 plan.
-- **All other PRs (D, F, G, H, I, J, K, L, M)**: no scope change.
+- **PR-M** REFRAMED: F18 original premise broken — v1 is not legacy (5 runtime consumers, OpenMeteo fallback coverage). Dual-write is intentional. PR-M' locks the dual-write contract via: (a) view cutover in ddd_wiring.py, (b) dual-writer freshness antibody (tests/state/test_dual_writer_observation_instants_invariant.py), (c) updated db_table_ownership.yaml with full dual-write contract documentation.
+- **All other PRs (D, F, G, H, I, J, K, L)**: no scope change.
 
 ## Karachi 5/17 implication
 
