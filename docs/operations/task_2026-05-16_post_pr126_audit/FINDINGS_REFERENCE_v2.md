@@ -203,3 +203,15 @@ Track 3 (heartbeat consumer trace + SIGTERM forensic): F91 resolved AMBIGUOUS �
 | **F104** | `PERSISTENCE_CHECK_DISABLED` warning never observed in logs despite permanent DEAD-READ — observability gap | SEV-3 | NEW (Run #15 T2) | `src/engine/monitor_refresh.py:1067` + log config | Run #15 T2 | Run #15 T2 |
 
 > See `RUN_15_track2_f48_hot_fix.md` for §5 hot-fix spec (Edits A–C), §6 antibody test, §7 Karachi 5/17 blast-radius re-assessment, and §8 full F102–F104 detail.
+
+
+## Run #16 Track D additions (F90a expansion + F105)
+
+Track D (F90a deep-dive + cron model-allowlist sweep): F90a precise root cause is two-layer — provider `openai-codex` does not register model id `gpt-5.4-mini` (only `gpt-5.4`), AND the `agents.defaults.models` allowlist contains only `openai/gpt-5.4` + `openai/gpt-5.5` (neither `openai-codex/...` nor `openai/gpt-5.4-mini` is allowlisted). Recommended substitute: `openai-codex/gpt-5.4` (registered + closest semantic match). 9 disabled jobs share the same bad string and are swept by the same JSON patch.
+
+| F#  | Title | Sev | Status | Owner | First seen | Last verified |
+|-----|-------|-----|--------|-------|------------|----------------|
+| F90a | 3 enabled jobs reject `payload.model = "openai-codex/gpt-5.4-mini"` | **SEV-1** | **HOT-FIX-SPEC (Run #16 T D)** — recommended substitute `openai-codex/gpt-5.4`; jq one-liner + kickstart in RUN_16_track_D §5–6 | `cron/jobs.json` payload.model (3 enabled + 9 disabled siblings) | Run #15 T1 | Run #16 T D |
+| **F105** | **Allowlist drift META**: `agents.defaults.models` is informational only — per-agent `model.primary = "openai/gpt-5.4-mini"` (4 agents) is unregistered yet works; `minimax-portal/MiniMax-M2.7` works in 24 jobs but is not allowlisted; `openai/gpt-5.5` is allowlisted but registered nowhere | SEV-3 | **NEW (Run #16 T D)** META | `openclaw.json` agents.defaults.models + per-agent primaries + models.providers registry | Run #16 T D | Run #16 T D |
+
+> See `RUN_16_track_D_f90a_model_allowlist_fix.md` §3 (root cause), §4 (per-job substitute), §5 (JSON patch + verification), §6 (kickstart), §7 (D1–D5 latent drifts), §8 (Karachi blast radius).
