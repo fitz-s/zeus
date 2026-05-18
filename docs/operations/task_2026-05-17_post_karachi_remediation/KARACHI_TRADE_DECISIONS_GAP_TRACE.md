@@ -102,3 +102,56 @@ H1 is the K structural decision. H2/H3/H4/H5 are alternative framings that pre-K
 
 **K structural decision (Fitz Constraint #1)**: `trade_decisions` was authored as best-effort entry-side telemetry (`try/except Exception → warning`), but downstream consumers treat it as the authoritative bridge linking the UUID `position_current` row to the INTEGER `position_lots` ledger. This authority-direction mismatch was permissible when `position_lots` did not yet enforce a FK, but became fatal once `position_lots.position_id` was bound to `trade_decisions.trade_id`. The silent-except in `src/state/db.py:5972-5974` and the equally silent `update_trade_lifecycle` early-return in `src/state/db.py:6188-6189` allow `position_current` to ship without a bridge AND mask the defect on every subsequent lifecycle update.
 
+## 6. Structural Fix Shape (NOT a backfill)
+
+Three coordinated edits, all in `src/state/db.py` + `src/engine/cycle_runtime.py`:
+
+1. **Remove the silent-except from `log_trade_entry`** (`src/state/db.py:5972-5974`). Let exceptions propagate to the outer `sp_candidate_*` SAVEPOINT so an INSERT failure rolls BOTH the trade_decisions write AND the position_current/position_events write back together. Atomic-or-nothing: either the bridge is intact or the position is never visible.
+2. **Reorder the SAVEPOINT body** at `src/engine/cycle_runtime.py:3506-3522` so `log_trade_entry` runs LAST inside the SAVEPOINT, after `_dual_write_canonical_entry_if_available`. (Optional but defense-in-depth: any future writer added before `log_trade_entry` still atomically rolls back when the bridge insert fails.) Add a single post-write assertion that confirms `trade_decisions.runtime_trade_id` exists for the new `position_id` before `RELEASE SAVEPOINT`.
+3. **Promote `update_trade_lifecycle` silent-no-op to a hard failure**: replace `if row is None: return` (`src/state/db.py:6188-6189`) with a raise that fires the moment any fill / exit / lifecycle update encounters a position lacking a bridge. This converts the *masking* surface into a *detection* surface and prevents the gap from accumulating silently.
+
+**No new tables. No new columns.** Pure invariant tightening on the existing money-path writer. Money-path tier files only — no docs/test edits buried under the same packet.
+
+## 7. Antibody Class
+
+**Schema-level antibody** (deployable in the same packet):
+
+```sql
+-- INV-NEW: every position_current row must have a trade_decisions row
+-- before the row commits. Enforced via a row-level CHECK is not possible
+-- across tables in SQLite, so use a BEFORE INSERT/UPDATE TRIGGER:
+CREATE TRIGGER position_current_requires_trade_decision
+BEFORE INSERT ON position_current
+WHEN NEW.phase NOT IN ('voided', 'admin_closed')
+BEGIN
+  SELECT RAISE(ABORT, 'position_current insert requires matching trade_decisions.runtime_trade_id')
+  WHERE NOT EXISTS (
+    SELECT 1 FROM trade_decisions WHERE runtime_trade_id = NEW.position_id
+  );
+END;
+```
+
+Pair it with **a relationship test** (`tests/test_position_current_trade_decisions_bridge.py`) that asserts: for any seed `position_current` row with `phase != 'voided'`, removing the matching `trade_decisions` row raises the TRIGGER error on the next upsert. This is the cross-module invariant test mandated by Fitz's "test relationships, not just functions" rule.
+
+**Antibody category promoted to the immune system**: "Best-effort telemetry inside an authoritative-write SAVEPOINT" — every existing `except Exception: logging.warning(...)` inside a `sp_*` SAVEPOINT block is a recurrence candidate. Schedule a one-shot audit (`grep -B5 -A2 "except Exception" src/state/db.py src/execution/*.py src/engine/cycle_runtime.py | grep -B3 -A2 "logging.warning"`) and re-classify each silent-except as either (a) genuinely best-effort + outside any SAVEPOINT, or (b) mandatory + propagate.
+
+## 8. Replay Strategy (no manual operator CLI)
+
+Karachi (`c30f28a5-d4e`) currently has phase=`day0_window`, shares=1.5873, WIN confirmed on-chain. After the structural fix lands and the daemon restarts:
+
+1. **Restart-safety contract**: the new TRIGGER is `BEFORE INSERT` — pre-existing rows are unaffected at boot. No migration is required for the 17 pre-existing gap rows. (The TRIGGER fires only on NEW inserts; the row-level audit can later flag historical gaps without blocking startup.)
+2. **Replay mechanism**: Karachi's bridge row gets re-created the next time `update_trade_lifecycle` runs against `c30f28a5-d4e` IF and ONLY IF we add a `_repair_missing_trade_decision_bridge` helper next to step 3 of the structural fix above. Concretely: when the new hard-fail in `update_trade_lifecycle` fires for a pre-existing gap row, invoke a one-shot synthesizer that builds the `trade_decisions` row from `(position_current ⋈ venue_commands ⋈ position_events ⋈ execution_fact)` for that `position_id`. The synthesizer runs through the same `log_trade_entry` writer (now non-silent), so the bridge row is restored atomically inside the lifecycle SAVEPOINT — no operator CLI, no backfill script.
+3. **If no replay path exists** (synthesizer not part of the fix packet): that is itself a structural defect to document. The minimum viable structural fix is steps 1+2 only (close the new-position gap); the historical 17 rows can be repaired by a SUBSEQUENT packet that adds the synthesizer as a side effect of the new hard-fail. Karachi specifically remains observable in `position_current` and `position_events` for redeem cascade purposes either way — the redeem path keys off `position_id` UUID and on-chain order_id, not `trade_decisions.trade_id`. So the structural fix is deployable mid-cascade without disturbing the active Karachi settlement.
+
+## 9. Uncertainty Notes
+
+- The exact proximate exception class that fired in `log_trade_entry` for the 17 rows is not recoverable from rotated logs. The structural antibody is correct regardless of which exception class fires.
+- Singapore (`8f02dc01-b6b`) was flagged by F20 as "pre-rollout" — its gap may predate the current writer entirely; that is a separate (historical) defect class not material to the live structural decision.
+- Karachi safety: the proposed BEFORE INSERT TRIGGER does not touch existing rows. The proposed `update_trade_lifecycle` hard-fail change DOES affect Karachi: it would fire on the next lifecycle update for Karachi. The replay synthesizer in §8.2 is therefore mandatory in the same packet, not a follow-up — without it, the hard-fail bricks Karachi's redeem cascade. **Recommended packet order: TRIGGER + synthesizer + hard-fail, all together. Do not ship hard-fail in isolation.**
+
+## 10. Critical Unknown / Discriminating Probe (post-fix)
+
+**Critical unknown**: which proximate exception fires inside `log_trade_entry` for the opening_inertia cluster. Knowing this would help size the synthesizer's input recovery.
+
+**Discriminating probe** (deployable BEFORE the structural fix, zero risk): replace the `logging.warning(...)` at `src/state/db.py:5973` with a `logger.error("LOG_TRADE_ENTRY_FAILED position_id=%s err=%r", getattr(pos, 'trade_id', '?'), e); raise` for ONE deployment cycle. Watch zeus-live.log for the new ERROR on the next opening_hunt tick that produces a fresh entry. The first observed exception class points directly at the proximate trigger and validates that the structural fix correctly captures it.
+
