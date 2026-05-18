@@ -471,15 +471,34 @@ _TI1_LIVE_PATHS: frozenset[str] = frozenset({
 
 
 def _ti1_is_blocked(database: str) -> bool:
-    """Return True iff `database` resolves to a live Zeus DB path."""
+    """Return True iff `database` resolves to a live Zeus DB path.
+
+    Handles plain paths, file: URIs, and query-string variants.
+    Only ``file:...?mode=ro`` URIs are allowed against live paths
+    (read-only by SQLite semantics — no writes possible).
+    All other file: URIs that resolve to a live path are blocked.
+    """
+    from urllib.parse import parse_qs, urlparse
+
     if not isinstance(database, str):
         return False
     # :memory: and named-memory variants — never writes to disk
     if database == ":memory:" or database.startswith("file::memory:"):
         return False
-    # file:...?mode=ro URIs are read-only by SQLite semantics — no writes
-    if database.startswith("file:") and "mode=ro" in database:
-        return False
+    if database.startswith("file:"):
+        parsed = urlparse(database)
+        # Allow read-only URIs — SQLite enforces no writes
+        qs = parse_qs(parsed.query)
+        mode = qs.get("mode", [""])[0]
+        if mode == "ro":
+            return False
+        # All other file: URIs: extract path and check against live paths
+        try:
+            db_path = parsed.path
+            resolved = str(_ti1_Path(db_path).resolve())
+        except (OSError, ValueError):
+            return False
+        return resolved in _TI1_LIVE_PATHS
     try:
         resolved = str(_ti1_Path(database).resolve())
     except (OSError, ValueError):
@@ -523,16 +542,28 @@ def _ti1_install_db_isolation_antibody():
 
 @pytest.fixture(autouse=True)
 def _ti1_redirect_live_db(tmp_path, monkeypatch):
-    """Redirect _connect() calls for live Zeus DBs to per-test tmp mirrors."""
+    """Redirect _connect() calls and ATTACH targets for live Zeus DBs to per-test tmp mirrors.
+
+    Belt-and-suspenders: patches BOTH the _connect() helper AND the module-level
+    path constants (ZEUS_WORLD_DB_PATH, ZEUS_FORECASTS_DB_PATH, and the return
+    value of _zeus_trade_db_path). This ensures that cross-DB helpers such as
+    get_forecasts_connection_with_world() and trade_connection_with_world_flocked()
+    also land on mirrors when they issue ``ATTACH DATABASE ? AS world/forecasts``
+    using those constants.
+    """
     if os.environ.get("ZEUS_DISABLE_DB_ISOLATION_ANTIBODY") == "1":
         yield
         return
     from src.state import db as _state_db
 
+    tmp_world = tmp_path / "zeus-world.db"
+    tmp_forecasts = tmp_path / "zeus-forecasts.db"
+    tmp_trades = tmp_path / "zeus_trades.db"
+
     mirrors = {
-        str(_TI1_WORLD.resolve()): tmp_path / "zeus-world.db",
-        str(_TI1_FORECASTS.resolve()): tmp_path / "zeus-forecasts.db",
-        str(_ti1_trade_path().resolve()): tmp_path / "zeus_trades.db",
+        str(_TI1_WORLD.resolve()): tmp_world,
+        str(_TI1_FORECASTS.resolve()): tmp_forecasts,
+        str(_ti1_trade_path().resolve()): tmp_trades,
     }
     orig_connect = _state_db._connect
 
@@ -542,4 +573,10 @@ def _ti1_redirect_live_db(tmp_path, monkeypatch):
         return orig_connect(target, *args, **kwargs)
 
     monkeypatch.setattr(_state_db, "_connect", _redirecting_connect)
+    # Also redirect the module-level path constants so ATTACH DATABASE calls
+    # inside cross-DB helpers (get_forecasts_connection_with_world,
+    # trade_connection_with_world_flocked) resolve to the per-test mirrors.
+    monkeypatch.setattr(_state_db, "ZEUS_WORLD_DB_PATH", tmp_world)
+    monkeypatch.setattr(_state_db, "ZEUS_FORECASTS_DB_PATH", tmp_forecasts)
+    monkeypatch.setattr(_state_db, "_zeus_trade_db_path", lambda: tmp_trades)
     yield
