@@ -1375,7 +1375,7 @@ def main():
     _start = time.monotonic()  # F86: process start time for SIGTERM elapsed log
     mode = get_mode()
     once = "--once" in sys.argv
-    # F85: route INFO/DEBUG to stdout (.log) and WARNING+ to stderr (.err).
+    # F85: route INFO (below-WARNING) to stdout (.log) and WARNING+ to stderr (.err).
     # Plists correctly bifurcate StandardOutPath/.err; basicConfig default
     # StreamHandler(sys.stderr) was routing all output to .err only.
     _fmt = logging.Formatter("%(asctime)s [%(name)s] %(levelname)s: %(message)s")
