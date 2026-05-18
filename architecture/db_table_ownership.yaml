@@ -1053,3 +1053,558 @@ tables:
       K1 2026-05-11 archive snapshot of source_run.
       Authoritative on forecasts.db. Excluded. Drop after 2026-08-09.
     notes: Zeus metadata store (key-value, schema version anchor).
+
+  # ---------------------------------------------------------------------------
+  # PR-S4b §4 (2026-05-18): 66 legacy_archived ghost entries on db: trade
+  #
+  # Root cause: pre-PR-S4b, src/main.py:1747 called init_schema(trade_conn)
+  # which is the world-schema constructor. This created 66 world/misc tables
+  # on zeus_trades.db that were never intended to be there.
+  #
+  # Three of these tables (shadow_signals 27k rows, probability_trace_fact 33k
+  # rows, availability_fact 24k rows) accumulated rows because cycle_runtime
+  # passed the trade-rooted conn to INV-37-violating writers. Those writers are
+  # fixed in PR-S4b §3 to use get_world_connection() internally.
+  #
+  # All 66 are declared legacy_archived so assert_db_matches_registry(TRADE)
+  # passes on the live zeus_trades.db without requiring a data migration.
+  # Data migration of the 84k misplaced rows is deferred (separate PR).
+  # Drop date: 2026-08-09 (aligns with K1 archive retention).
+  # ---------------------------------------------------------------------------
+
+  - name: availability_fact
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: init_schema_pre_pr_s4b
+    pk_col: null
+    notes: >
+      Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Contains
+      24k misplaced rows (INV-37 violation). Writes redirected to zeus-world.db
+      in PR-S4b §3. Data migration deferred. Drop after 2026-08-09.
+
+  - name: calibration_decision_group
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: init_schema_pre_pr_s4b
+    pk_col: null
+    notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
+
+  - name: calibration_pairs
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: init_schema_pre_pr_s4b
+    pk_col: null
+    notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
+
+  - name: calibration_pairs_v2
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: init_schema_pre_pr_s4b
+    pk_col: null
+    notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
+
+  - name: chronicle
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: init_schema_pre_pr_s4b
+    pk_col: null
+    notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
+
+  - name: collateral_ledger_snapshots
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: init_schema_pre_pr_s4b
+    pk_col: null
+    notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
+
+  - name: collateral_reservations
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: init_schema_pre_pr_s4b
+    pk_col: null
+    notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
+
+  - name: control_overrides
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: init_schema_pre_pr_s4b
+    pk_col: null
+    notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
+
+  - name: control_overrides_history
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: init_schema_pre_pr_s4b
+    pk_col: null
+    notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
+
+  - name: daily_observation_revisions
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: init_schema_pre_pr_s4b
+    pk_col: null
+    notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
+
+  - name: data_coverage
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: init_schema_pre_pr_s4b
+    pk_col: null
+    notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
+
+  - name: day0_metric_fact
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: init_schema_pre_pr_s4b
+    pk_col: null
+    notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
+
+  - name: decision_log
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: init_schema_pre_pr_s4b
+    pk_col: null
+    notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
+
+  - name: diurnal_curves
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: init_schema_pre_pr_s4b
+    pk_col: null
+    notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
+
+  - name: diurnal_peak_prob
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: init_schema_pre_pr_s4b
+    pk_col: null
+    notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
+
+  - name: ensemble_snapshots
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: init_schema_pre_pr_s4b
+    pk_col: null
+    notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
+
+  - name: ensemble_snapshots_v2
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: init_schema_pre_pr_s4b
+    pk_col: null
+    notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
+
+  - name: exchange_reconcile_findings
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: init_schema_pre_pr_s4b
+    pk_col: null
+    notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
+
+  - name: executable_market_snapshots
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: init_schema_pre_pr_s4b
+    pk_col: null
+    notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
+
+  - name: exit_mutex_holdings
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: init_schema_pre_pr_s4b
+    pk_col: null
+    notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
+
+  - name: forecast_skill
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: init_schema_pre_pr_s4b
+    pk_col: null
+    notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
+
+  - name: forecasts
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: init_schema_pre_pr_s4b
+    pk_col: null
+    notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
+
+  - name: historical_forecasts_v2
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: init_schema_pre_pr_s4b
+    pk_col: null
+    notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
+
+  - name: hourly_observations
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: init_schema_pre_pr_s4b
+    pk_col: null
+    notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
+
+  - name: job_run
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: init_schema_pre_pr_s4b
+    pk_col: null
+    notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
+
+  - name: market_events
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: init_schema_pre_pr_s4b
+    pk_col: null
+    notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
+
+  - name: market_events_v2
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: init_schema_pre_pr_s4b
+    pk_col: null
+    notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
+
+  - name: market_price_history
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: init_schema_pre_pr_s4b
+    pk_col: null
+    notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
+
+  - name: market_topology_state
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: init_schema_pre_pr_s4b
+    pk_col: null
+    notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
+
+  - name: model_bias
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: init_schema_pre_pr_s4b
+    pk_col: null
+    notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
+
+  - name: observation_instants
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: init_schema_pre_pr_s4b
+    pk_col: null
+    notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
+
+  - name: observation_instants_current
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: init_schema_pre_pr_s4b
+    pk_col: null
+    notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
+
+  - name: observation_instants_v2
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: init_schema_pre_pr_s4b
+    pk_col: null
+    notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
+
+  - name: observation_revisions
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: init_schema_pre_pr_s4b
+    pk_col: null
+    notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
+
+  - name: observations
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: init_schema_pre_pr_s4b
+    pk_col: null
+    notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
+
+  - name: opportunity_fact
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: init_schema_pre_pr_s4b
+    pk_col: null
+    notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
+
+  - name: outcome_fact
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: init_schema_pre_pr_s4b
+    pk_col: null
+    notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
+
+  - name: platt_models
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: init_schema_pre_pr_s4b
+    pk_col: null
+    notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
+
+  - name: platt_models_v2
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: init_schema_pre_pr_s4b
+    pk_col: null
+    notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
+
+  - name: probability_trace_fact
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: init_schema_pre_pr_s4b
+    pk_col: null
+    notes: >
+      Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Contains
+      33k misplaced rows (INV-37 violation). Writes redirected to zeus-world.db
+      in PR-S4b §3. Data migration deferred. Drop after 2026-08-09.
+
+  - name: provenance_envelope_events
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: init_schema_pre_pr_s4b
+    pk_col: null
+    notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
+
+  - name: readiness_state
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: init_schema_pre_pr_s4b
+    pk_col: null
+    notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
+
+  - name: refit_bucket_failures
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: init_schema_pre_pr_s4b
+    pk_col: null
+    notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
+
+  - name: rescue_events_v2
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: init_schema_pre_pr_s4b
+    pk_col: null
+    notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
+
+  - name: risk_actions
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: init_schema_pre_pr_s4b
+    pk_col: null
+    notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
+
+  - name: selection_family_fact
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: init_schema_pre_pr_s4b
+    pk_col: null
+    notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
+
+  - name: selection_hypothesis_fact
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: init_schema_pre_pr_s4b
+    pk_col: null
+    notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
+
+  - name: settlements
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: init_schema_pre_pr_s4b
+    pk_col: null
+    notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
+
+  - name: settlements_v2
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: init_schema_pre_pr_s4b
+    pk_col: null
+    notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
+
+  - name: shadow_signals
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: init_schema_pre_pr_s4b
+    pk_col: null
+    notes: >
+      Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Contains
+      27k misplaced rows (INV-37 violation). Writes redirected to zeus-world.db
+      in PR-S4b §3. Data migration deferred. Drop after 2026-08-09.
+
+  - name: solar_daily
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: init_schema_pre_pr_s4b
+    pk_col: null
+    notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
+
+  - name: source_contract_audit_events
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: init_schema_pre_pr_s4b
+    pk_col: null
+    notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
+
+  - name: source_run
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: init_schema_pre_pr_s4b
+    pk_col: null
+    notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
+
+  - name: source_run_coverage
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: init_schema_pre_pr_s4b
+    pk_col: null
+    notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
+
+  - name: strategy_health
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: init_schema_pre_pr_s4b
+    pk_col: null
+    notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
+
+  - name: temp_persistence
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: init_schema_pre_pr_s4b
+    pk_col: null
+    notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
+
+  - name: token_price_log
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: init_schema_pre_pr_s4b
+    pk_col: null
+    notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
+
+  - name: token_suppression
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: init_schema_pre_pr_s4b
+    pk_col: null
+    notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
+
+  - name: token_suppression_current
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: init_schema_pre_pr_s4b
+    pk_col: null
+    notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
+
+  - name: token_suppression_history
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: init_schema_pre_pr_s4b
+    pk_col: null
+    notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
+
+  - name: uma_resolution
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: init_schema_pre_pr_s4b
+    pk_col: null
+    notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
+
+  - name: v_evidence_hourly_observations
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: init_schema_pre_pr_s4b
+    pk_col: null
+    notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
+
+  - name: validated_calibration_transfers
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: init_schema_pre_pr_s4b
+    pk_col: null
+    notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
+
+  - name: wrap_unwrap_commands
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: init_schema_pre_pr_s4b
+    pk_col: null
+    notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
+
+  - name: wrap_unwrap_events
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: init_schema_pre_pr_s4b
+    pk_col: null
+    notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
+
+  - name: zeus_meta
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: init_schema_pre_pr_s4b
+    pk_col: null
+    notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
