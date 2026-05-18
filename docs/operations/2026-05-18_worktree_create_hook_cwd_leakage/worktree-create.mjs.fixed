@@ -1,0 +1,199 @@
+#!/usr/bin/env node
+// Created: 2026-05-17
+// Last reused or audited: 2026-05-18
+// Authority basis: Claude Code binary strings (2.1.143) — empirical contract:
+//   "WorktreeCreate hook failed: hook succeeded but returned no worktree
+//   path (command: echo the path to stdout; http/callback: return
+//   hookSpecificOutput.worktreePath)" and "Command hooks print the path
+//   on stdout instead". Confirmed by zeus dispatch.py round-2 fix
+//   comment (.claude/hooks/dispatch.py lines 103-114): harness chdirs
+//   into stdout literally; emitting a JSON envelope on stdout makes
+//   the harness treat the JSON blob as the cwd path.
+//
+// WorktreeCreate hook handler — for COMMAND-type hooks, the harness
+// reads the absolute worktree path directly from stdout. Emitting a
+// hookSpecificOutput JSON envelope is the HTTP/callback shape and is
+// the WRONG wire for command hooks: the harness sets the spawned
+// agent's cwd to the literal JSON string, causing every subsequent
+// Bash/Read to fail with ENAMETOOLONG / ENOENT.
+//
+// Failure mode addressed (root cause):
+//   Two parallel sub-agents (a90cfda19f7ff32d3, a66c192ac98db4c54)
+//   confirmed 2026-05-17 that isolation:"worktree" produced a cwd
+//   equal to the literal JSON envelope this handler used to emit.
+//
+// Contract:
+//   - SUCCESS:  exit 0 + stdout = "<absolute_path>\n" (plain string)
+//   - NO-OP:    exit 0 + stdout = ""                  (harness uses default)
+//   - FAILURE:  exit non-zero + stderr diagnostic     (harness surfaces error)
+//
+// Advisory messaging (for human operators) goes to STDERR, never stdout.
+
+import { execFileSync } from "node:child_process";
+import { existsSync, mkdirSync } from "node:fs";
+import { resolve, join, dirname } from "node:path";
+import { homedir } from "node:os";
+
+function readStdin() {
+  return new Promise((resolveFn) => {
+    let data = "";
+    if (process.stdin.isTTY) return resolveFn("");
+    process.stdin.setEncoding("utf8");
+    process.stdin.on("data", (chunk) => (data += chunk));
+    process.stdin.on("end", () => resolveFn(data));
+    // safety timeout: unref'd so it won't keep the event loop alive
+    // after stdin ends normally (avoids ~2s latency on every hook run)
+    const t = setTimeout(() => resolveFn(data), 2000);
+    t.unref();
+  });
+}
+
+function git(args, opts = {}) {
+  return execFileSync("git", args, {
+    encoding: "utf8",
+    timeout: 15000,
+    stdio: ["ignore", "pipe", "pipe"],
+    ...opts,
+  }).trim();
+}
+
+function trySafe(fn, fallback = null) {
+  try {
+    return fn();
+  } catch {
+    return fallback;
+  }
+}
+
+function slugify(name) {
+  return String(name || "agent")
+    .toLowerCase()
+    .replace(/[^a-z0-9._\-/]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "")
+    .slice(0, 64) || "agent";
+}
+
+function pickRepoRoot(payload) {
+  // Order: explicit cwd from payload, CLAUDE_PROJECT_DIR env, process cwd
+  const candidates = [
+    payload?.cwd,
+    process.env.CLAUDE_PROJECT_DIR,
+    process.cwd(),
+  ].filter(Boolean);
+  for (const cand of candidates) {
+    const root = trySafe(() =>
+      git(["rev-parse", "--show-toplevel"], { cwd: cand })
+    );
+    if (root && existsSync(root)) return root;
+  }
+  return null;
+}
+
+function pickBaseRef(repoRoot) {
+  // Prefer origin/HEAD symref (the canonical default branch)
+  const ref = trySafe(() =>
+    git(["symbolic-ref", "refs/remotes/origin/HEAD"], { cwd: repoRoot })
+  );
+  if (ref) return ref.replace(/^refs\/remotes\//, ""); // "origin/main"
+  // Fallback chain
+  for (const cand of ["origin/main", "origin/master", "main", "master", "HEAD"]) {
+    const exists = trySafe(() =>
+      git(["rev-parse", "--verify", "--quiet", cand], { cwd: repoRoot })
+    );
+    if (exists) return cand;
+  }
+  return "HEAD";
+}
+
+function uniqueSuffix() {
+  // 4-char base36 timestamp suffix to avoid path collisions
+  return Date.now().toString(36).slice(-4);
+}
+
+async function main() {
+  const raw = await readStdin();
+  let payload = {};
+  try {
+    payload = raw ? JSON.parse(raw) : {};
+  } catch {
+    payload = {};
+  }
+
+  // Input fields documented by Claude Code: `name` is the requested worktree name.
+  // Also accept `path` / `worktree_path` for forward-compat.
+  const requestedName =
+    payload?.name ||
+    payload?.tool_input?.name ||
+    payload?.tool_input?.path ||
+    payload?.tool_input?.worktree_path ||
+    "agent";
+
+  const repoRoot = pickRepoRoot(payload);
+
+  // Outside a git repo: emit empty stdout so Claude Code falls back to its
+  // built-in handler (VCS-agnostic isolation). Per EnterWorktree docs.
+  // NOTE: Must NOT emit JSON — the harness reads stdout as a literal path
+  // for command-type WorktreeCreate hooks.
+  if (!repoRoot) {
+    return 0;
+  }
+
+  // If a path was already supplied AND it exists as a worktree, just echo it.
+  const suppliedPath =
+    payload?.tool_input?.path || payload?.tool_input?.worktree_path || "";
+  if (suppliedPath && existsSync(suppliedPath)) {
+    const abs = resolve(suppliedPath);
+    process.stdout.write(abs + "\n");
+    return 0;
+  }
+
+  const slug = slugify(requestedName);
+  const baseRef = pickBaseRef(repoRoot);
+  const worktreesRoot = join(repoRoot, ".claude", "worktrees");
+  mkdirSync(worktreesRoot, { recursive: true });
+
+  // Resolve a non-colliding path under .claude/worktrees/
+  let wtPath = join(worktreesRoot, slug);
+  if (existsSync(wtPath)) {
+    wtPath = join(worktreesRoot, `${slug}-${uniqueSuffix()}`);
+  }
+
+  // Derive a unique branch name. Use "claude/<slug>-<suffix>" namespace to
+  // avoid colliding with feature branches.
+  const branchSlug = slug.replace(/\//g, "-");
+  let branch = `claude/${branchSlug}`;
+  const branchExists = trySafe(() =>
+    git(["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`], {
+      cwd: repoRoot,
+    })
+  );
+  if (branchExists) {
+    branch = `claude/${branchSlug}-${uniqueSuffix()}`;
+  }
+
+  try {
+    git(["worktree", "add", "-b", branch, wtPath, baseRef], { cwd: repoRoot });
+  } catch (err) {
+    // Last-ditch: emit error to stderr and exit non-zero so Claude Code
+    // surfaces a meaningful message instead of "no worktree path returned".
+    const msg = err?.stderr?.toString?.() || err?.message || String(err);
+    process.stderr.write(
+      `[worktree-create] git worktree add failed: ${msg}\n` +
+        `  repoRoot=${repoRoot}\n  base=${baseRef}\n  path=${wtPath}\n  branch=${branch}\n`
+    );
+    process.exit(2);
+  }
+
+  const abs = resolve(wtPath);
+  // Command-hook wire format: plain absolute path + newline on stdout.
+  // Any JSON envelope here would be interpreted by the harness as the
+  // literal cwd path for the spawned agent.
+  process.stdout.write(abs + "\n");
+  return 0;
+}
+
+main().catch((err) => {
+  process.stderr.write(`[worktree-create] fatal: ${err?.message || err}\n`);
+  process.exit(2);
+});
