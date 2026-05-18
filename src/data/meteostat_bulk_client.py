@@ -1,7 +1,8 @@
 # Created: 2026-04-22
-# Last reused/audited: 2026-04-22
+# Last reused/audited: 2026-05-18
 # Authority basis: subagent research 2026-04-22 — bulk CSV for sparse-WU
 #                  ICAO stations; no auth, no per-IP rate limit, parallel-safe.
+#                  F3 PR 2/3: typed temperature boundary per Path A (src/types/temperature.py).
 """Meteostat bulk-CSV client for filling sparse-WU ICAO stations.
 
 Meteostat publishes static gzipped CSV archives at
@@ -40,6 +41,7 @@ from zoneinfo import ZoneInfo
 import httpx
 
 from src.data.wu_hourly_client import HourlyObservation
+from src.types.temperature import Celsius, c_to_f
 
 logger = logging.getLogger(__name__)
 
@@ -270,7 +272,9 @@ def fetch_meteostat_bulk(
                 continue
         try:
             hour = int(hour_s)
-            temp_c = float(temp_s)
+            # F3 PR 2/3: Meteostat CSV temp_C column is always native °C.
+            # Tag at parse boundary; convert to output unit explicitly.
+            temp_c = Celsius(float(temp_s))
             utc_dt = datetime.fromisoformat(f"{date_s}T{hour:02d}:00:00+00:00")
         except (ValueError, TypeError):
             continue
@@ -286,9 +290,9 @@ def fetch_meteostat_bulk(
         is_ambiguous = bool(getattr(local_dt, "fold", 0))
 
         if unit == "F":
-            temp_out = temp_c * 9.0 / 5.0 + 32.0
+            temp_out: float = float(c_to_f(temp_c))
         else:
-            temp_out = temp_c
+            temp_out = float(temp_c)
 
         observations.append(
             HourlyObservation(

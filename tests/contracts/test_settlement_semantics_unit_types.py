@@ -77,15 +77,22 @@ def test_settle_market_hk_accepts_celsius_decimal() -> None:
 # ---------------------------------------------------------------------------
 
 def _run_mypy_strict_on_snippet(code: str) -> tuple[int, str]:
-    """Write code to a temp file and run mypy --strict --follow-imports=skip on it.
+    """Write code to a temp file and run mypy --strict --follow-imports=silent on it.
 
     --follow-imports=silent means mypy reads imported module types (so
     CelsiusDecimal annotations are visible) but suppresses errors *from*
     those modules, so pre-strict sibling modules do not cascade errors
     into the snippet check.
 
+    cwd is set to the repo root (two dirs above tests/contracts/) so mypy.ini
+    is discovered and src/ is on the module search path regardless of where
+    pytest is invoked from.
+
     Returns (exit_code, combined_stdout_stderr).
     """
+    # Repo root: tests/contracts/../../  (this file lives at tests/contracts/test_*.py)
+    repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
     with tempfile.NamedTemporaryFile(
         mode="w", suffix=".py", delete=False, prefix="mypy_snippet_"
     ) as f:
@@ -99,11 +106,12 @@ def _run_mypy_strict_on_snippet(code: str) -> tuple[int, str]:
                 "--strict",
                 "--ignore-missing-imports",
                 "--follow-imports=silent",
-                "--python-version", "3.11",
+                "--python-version", f"{sys.version_info.major}.{sys.version_info.minor}",
                 tmp_path,
             ],
             capture_output=True,
             text=True,
+            cwd=repo_root,
         )
         return result.returncode, result.stdout + result.stderr
     finally:

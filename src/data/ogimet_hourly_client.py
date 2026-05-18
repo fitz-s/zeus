@@ -1,7 +1,8 @@
 # Created: 2026-04-21
-# Last reused/audited: 2026-04-21
+# Last reused/audited: 2026-05-18
 # Authority basis: plan v3 Phase 0 file #5 (.omc/plans/observation-instants-
 #                  migration-iter3.md L86-93); step2_phase0_pilot_plan.md.
+#                  F3 PR 2/3: typed temperature boundary per Path A (src/types/temperature.py).
 """Ogimet METAR hourly-observation client for observation_instants_v2 backfill.
 
 Wraps ``https://www.ogimet.com/cgi-bin/getmetar`` which mirrors NOAA METAR
@@ -42,6 +43,7 @@ from zoneinfo import ZoneInfo
 import httpx
 
 from src.data.wu_hourly_client import HourlyObservation
+from src.types.temperature import Celsius, c_to_f
 
 
 # Force IPv4-only HTTP transport. Ogimet's IPv6 route intermittently
@@ -101,8 +103,12 @@ class OgimetHourlyFetchResult:
 # ----------------------------------------------------------------------
 
 
-def _parse_metar_temp_c(metar_body: str) -> Optional[float]:
-    """Extract temperature in °C from a raw METAR body, or None if absent."""
+def _parse_metar_temp_c(metar_body: str) -> Optional[Celsius]:
+    """Extract temperature in °C from a raw METAR body, or None if absent.
+
+    # F3 PR 2/3: typed unit per Path A — see src/types/temperature.py
+    METAR format is always native °C; result tagged as Celsius at the parse boundary.
+    """
     match = _METAR_TEMP_RE.search(" " + metar_body + " ")
     if not match:
         return None
@@ -112,10 +118,10 @@ def _parse_metar_temp_c(metar_body: str) -> Optional[float]:
         value = int(raw[1:] if negative else raw)
     except ValueError:
         return None
-    return float(-value if negative else value)
+    return Celsius(float(-value if negative else value))
 
 
-def _parse_metar_csv_line(line: str) -> Optional[tuple[datetime, float]]:
+def _parse_metar_csv_line(line: str) -> Optional[tuple[datetime, Celsius]]:
     """Parse one Ogimet CSV line into ``(utc_dt, temp_c)`` or ``None``.
 
     Format: ``ICAO,YYYY,MM,DD,HH,MI,<METAR body>`` where the METAR body
@@ -191,7 +197,7 @@ def fetch_ogimet_hourly(
     if unit not in ("F", "C"):
         raise ValueError(f"unit must be 'F' or 'C', got {unit!r}")
 
-    all_rows: list[tuple[datetime, float]] = []
+    all_rows: list[tuple[datetime, Celsius]] = []
     raw_count = 0
     current, end_utc = _local_date_range_to_utc_window(
         start_date,
@@ -269,7 +275,7 @@ def _local_date_range_to_utc_window(
 
 @dataclass(frozen=True)
 class _ChunkResult:
-    observations: list[tuple[datetime, float]] = field(default_factory=list)
+    observations: list[tuple[datetime, Celsius]] = field(default_factory=list)
     raw_metar_count: int = 0
     failure_reason: Optional[str] = None
     retryable: bool = False
@@ -337,7 +343,7 @@ def _fetch_one_chunk(
             error=f"HTTP {resp.status_code}",
         )
 
-    parsed: list[tuple[datetime, float]] = []
+    parsed: list[tuple[datetime, Celsius]] = []
     raw = 0
     for line in resp.text.splitlines():
         line = line.strip()
@@ -356,7 +362,7 @@ def _fetch_one_chunk(
 
 
 def _aggregate(
-    rows: list[tuple[datetime, float]],
+    rows: list[tuple[datetime, Celsius]],
     *,
     station: str,
     unit_out: str,
@@ -379,15 +385,18 @@ def _aggregate(
     tz = ZoneInfo(timezone_name)
 
     # Bucket: hour_floor -> list of (temp_c, raw_utc_dt)
-    buckets: dict[datetime, list[tuple[float, datetime]]] = {}
+    # F3 PR 2/3: temp_c values are Celsius at the METAR parse boundary.
+    buckets: dict[datetime, list[tuple[Celsius, datetime]]] = {}
     for utc_dt, temp_c in rows:
         hour_floor = utc_dt.replace(minute=0, second=0, microsecond=0)
         buckets.setdefault(hour_floor, []).append((temp_c, utc_dt))
 
-    def _convert(temp_c: float) -> float:
+    def _convert(temp_c: Celsius) -> float:
+        # Adapter boundary: explicit conversion from Celsius to output unit.
+        # F3 PR 2/3: c_to_f typed gate — input must be Celsius, not plain float.
         if unit_out == "F":
-            return temp_c * 9.0 / 5.0 + 32.0
-        return temp_c
+            return float(c_to_f(temp_c))
+        return float(temp_c)
 
     for hour_floor in sorted(buckets):
         obs_list = buckets[hour_floor]
