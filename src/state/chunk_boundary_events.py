@@ -26,6 +26,7 @@ Table: ``db_chunk_boundary_events`` (schema_class: world_class, db: world)
 from __future__ import annotations
 
 import logging
+import os
 import sqlite3
 import uuid
 from datetime import datetime, timezone
@@ -72,8 +73,15 @@ def emit_event(
     try:
         event_id = str(uuid.uuid4())
         occurred_at = datetime.now(timezone.utc).isoformat()
-        conn = sqlite3.connect(str(db_path), timeout=5)
+        # F11 fix (wave6 2026-05-18): match db.py:_connect timeout (30s default
+        # via ZEUS_DB_BUSY_TIMEOUT_MS) so the watchdog row is not silently lost
+        # when the main thread is stuck in a write (the most critical use-case).
+        _timeout_ms = float(os.environ.get("ZEUS_DB_BUSY_TIMEOUT_MS", "30000"))
+        conn = sqlite3.connect(str(db_path), timeout=_timeout_ms / 1000.0)
         try:
+            # WAL mode: matches db.py:_connect; required so the daemon-thread
+            # open does not block the main-thread writer in journal-mode=DELETE.
+            conn.execute("PRAGMA journal_mode=WAL")
             ensure_table(conn)
             conn.execute(
                 "INSERT INTO db_chunk_boundary_events "
