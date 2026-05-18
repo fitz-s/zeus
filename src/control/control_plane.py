@@ -221,6 +221,43 @@ def _has_active_auto_pause_override(
     return str(effective_until) > now_iso
 
 
+def _has_active_control_plane_override(conn, *, now_iso: str) -> bool:
+    """Return True iff an indefinite operator/control_plane row is active.
+
+    Used by pause_entries(issued_by='system_auto_pause') to refuse overwriting
+    an operator-issued indefinite freeze (PRECEDENCE-1). The check is keyed on
+    issued_by IN ('control_plane','operator') AND effective_until IS NULL.
+    Any query failure returns False so we err toward writing (fail-open for
+    precedence, fail-closed for pause).
+    """
+    if conn is None:
+        return False
+    try:
+        row = conn.execute(
+            """
+            SELECT issued_by, value, effective_until
+            FROM control_overrides
+            WHERE override_id = ?
+            """,
+            (AUTO_PAUSE_OVERRIDE_ID,),
+        ).fetchone()
+    except Exception:
+        return False
+    if row is None:
+        return False
+    try:
+        issued_by = row["issued_by"]
+        value = row["value"]
+        effective_until = row["effective_until"]
+    except (KeyError, IndexError, TypeError):
+        return False
+    if str(issued_by or "") not in {"control_plane", "operator"}:
+        return False
+    if str(value or "").strip().lower() not in {"true", "1", "yes"}:
+        return False
+    return effective_until is None
+
+
 def pause_entries(
     reason_code: str,
     *,
@@ -257,6 +294,18 @@ def pause_entries(
     # Persist so a daemon restart does not silently lose the pause.
     try:
         conn = get_world_connection()
+        # PRECEDENCE-1 (2026-05-18): refuse to shadow an indefinite operator freeze.
+        # Only system_auto_pause callers honor this; operator/control_plane callers
+        # come through _apply_command, not here, so operator authority is absolute.
+        if issued_by == "system_auto_pause" and _has_active_control_plane_override(conn, now_iso=now_iso):
+            conn.close()
+            _caller_frames = "".join(_traceback.format_stack()[-6:-1])
+            logger.warning(
+                "PRECEDENCE_SKIP_AUTO_PAUSE_OVER_OPERATOR_FREEZE reason=%s issued_by=%s attempted_at=%s"
+                " — operator indefinite freeze active.\nCaller stack (most recent last):\n%s",
+                reason_code, issued_by, now_iso, _caller_frames,
+            )
+            return
         if _has_active_auto_pause_override(conn, reason_code=reason_code, now_iso=now_iso):
             logger.debug(
                 "pause_entries idempotent skip — override already active for reason=%s",
@@ -297,6 +346,40 @@ def pause_entries(
         except Exception:
             pass
 
+
+def resume_entries(reason: str, *, issued_by: str = "control_plane") -> None:
+    """Operator-callable resume. Clears the entries_paused override regardless
+    of who issued it. Mirrors the _apply_command("resume", ...) path.
+
+    Required by RESTART_READINESS_PLAN.md §5 G8.
+    """
+    if issued_by not in {"control_plane", "operator"}:
+        raise ValueError(
+            f"resume_entries requires issued_by in {{control_plane, operator}}, got {issued_by!r}"
+        )
+    now_iso = datetime.now(timezone.utc).isoformat()
+    try:
+        conn = get_world_connection()
+        expire_control_override(
+            conn,
+            override_id=AUTO_PAUSE_OVERRIDE_ID,
+            expired_at=now_iso,
+        )
+        _clear_auto_pause_tombstone()
+        expire_control_override(
+            conn,
+            override_id="control_plane:global:edge_threshold_multiplier",
+            expired_at=now_iso,
+        )
+        conn.commit()
+        conn.close()
+        logger.warning("ENTRIES_RESUMED reason=%s issued_by=%s", reason, issued_by)
+    except Exception as exc:
+        logger.error("Failed to persist resume to DB: %s", exc, exc_info=True)
+        _control_state["control_db_fault"] = True
+        raise
+    # Refresh in-memory state from DB so downstream callers see the cleared pause
+    refresh_control_state()
 
 
 def get_edge_threshold_multiplier() -> float:
