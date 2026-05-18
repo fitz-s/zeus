@@ -826,7 +826,7 @@ def get_connection(
 # CI hook scripts/check_schema_version.py diffs the sqlite_master hash of
 # a fresh-init DB against tests/state/_schema_pinned_hash.txt and fails
 # the PR if SCHEMA_VERSION did not change in lockstep.
-SCHEMA_VERSION = 6  # 2026-05-17 PR #137: execution_fact.command_id + position_events.occurred_at ISO CHECK added to kernel DDL
+SCHEMA_VERSION = 7  # 2026-05-18 v1.F1: db_chunk_boundary_events registered in init_schema (world_class DDL gap fixed)
 
 
 def init_schema(
@@ -2392,6 +2392,15 @@ def init_schema(
     except sqlite3.OperationalError as exc:
         if "duplicate column" not in str(exc).lower():
             raise  # Column already exists — idempotent re-run
+
+    # v1.F1 (2026-05-18): db_chunk_boundary_events DDL registration.
+    # The table is declared world_class in architecture/db_table_ownership.yaml
+    # but its DDL lived only in src/state/chunk_boundary_events.ensure_table().
+    # Adding here ensures init_schema creates it so assert_db_matches_registry
+    # (INV-05 boot gate) passes on a fresh DB.  Delegate to the schema owner
+    # to avoid DDL duplication — same pattern as SETTLEMENT_COMMAND_SCHEMA above.
+    from src.state.chunk_boundary_events import ensure_table as _ensure_chunk_boundary_table
+    _ensure_chunk_boundary_table(conn)
 
     # Phase 2: apply v2 schema (idempotent — safe to run on every boot).
     from src.state.schema.v2_schema import apply_v2_schema as _apply_v2_schema

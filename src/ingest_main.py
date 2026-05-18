@@ -1243,6 +1243,24 @@ def main() -> None:
     conn.close()
     logger.info("init_schema complete")
 
+    # v1.F1 (2026-05-18): assert_db_matches_registry boot wiring — ingest daemon.
+    # Fail-closed per INV-05: RegistryAssertionError propagates and aborts daemon start.
+    # No advisory mode — a live DB whose table-set diverges from
+    # architecture/db_table_ownership.yaml must not enter the ingest loop.
+    # Guard: ZEUS_BOOT_REGISTRY_ASSERT_ENABLED defaults "1" (enabled).
+    # Set to "0" ONLY during intentional schema migrations; document the migration window.
+    if os.environ.get("ZEUS_BOOT_REGISTRY_ASSERT_ENABLED", "1") != "0":
+        from src.state.table_registry import (
+            DBIdentity,
+            assert_db_matches_registry,
+        )
+        _world_conn_reg = get_world_connection()
+        try:
+            assert_db_matches_registry(_world_conn_reg, DBIdentity.WORLD)
+            logger.info("assert_db_matches_registry: world DB table-set matches registry")
+        finally:
+            _world_conn_reg.close()
+
     # Write sentinel BEFORE scheduler.start() (design §4.2).
     _write_world_schema_ready_sentinel()
 
