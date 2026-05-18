@@ -79,6 +79,13 @@ class HeldTokenMonitorQuote:
     source_timestamp: str
 
 
+def _compute_divergence_score(p_posterior: float, p_market: float, *, available: bool) -> float:
+    """Adverse-only divergence: positive edge is entry signal, not exit signal."""
+    if not available:
+        return float("nan")
+    return max(0.0, p_market - p_posterior)
+
+
 def _model_only_native_posterior(p_native: float) -> float:
     """Return held-side payoff belief without using executable quote as prior."""
     p = float(p_native)
@@ -1388,10 +1395,8 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
         pos.last_monitor_prob_is_fresh
         and np.isfinite(current_p_posterior)
     )
-    divergence_score = (
-        abs(current_p_posterior - current_p_market)
-        if probability_authority_available
-        else float("nan")
+    divergence_score = _compute_divergence_score(
+        current_p_posterior, current_p_market, available=probability_authority_available
     )
     market_velocity_1h = 0.0
 
