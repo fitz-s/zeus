@@ -1,5 +1,5 @@
 # Created: 2026-05-07
-# Last reused or audited: 2026-05-07
+# Last reused or audited: 2026-05-18
 # Authority basis: backtest_v2_port_2026_05_07.md §D2+D3, T1-T5+T7
 """Tests for the selection_coverage replay mode.
 
@@ -186,6 +186,157 @@ class TestT1Dispatch:
         assert isinstance(summary, ReplaySummary)
         assert summary.mode == SELECTION_COVERAGE_LANE
         assert summary.limitations.get("selection_coverage") is not None
+
+    def test_selection_coverage_reads_forecasts_authority_not_world_ghost(
+        self, tmp_path, monkeypatch
+    ):
+        """K1: selection_coverage must route v2 forecast-class tables via ReplayContext."""
+        from src.engine.replay_selection_coverage import run_selection_coverage
+
+        trade_db = tmp_path / "trade.db"
+        world_db = tmp_path / "world.db"
+        forecasts_db = tmp_path / "forecasts.db"
+
+        forecasts = sqlite3.connect(str(forecasts_db))
+        forecasts.executescript(
+            """
+            CREATE TABLE ensemble_snapshots_v2 (
+                snapshot_id INTEGER PRIMARY KEY,
+                city TEXT,
+                target_date TEXT,
+                available_at TEXT,
+                fetch_time TEXT,
+                issue_time TEXT,
+                valid_time TEXT,
+                lead_hours REAL,
+                spread REAL,
+                is_bimodal INTEGER,
+                model_version TEXT,
+                members_json TEXT,
+                p_raw_json TEXT,
+                data_version TEXT,
+                temperature_metric TEXT
+            );
+            CREATE TABLE calibration_pairs_v2 (
+                pair_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                city TEXT,
+                target_date TEXT,
+                range_label TEXT,
+                p_raw REAL,
+                outcome INTEGER,
+                lead_days REAL,
+                season TEXT,
+                cluster TEXT,
+                forecast_available_at TEXT,
+                decision_group_id TEXT,
+                bias_corrected INTEGER,
+                temperature_metric TEXT
+            );
+            CREATE TABLE settlements_v2 (
+                settlement_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                city TEXT,
+                target_date TEXT,
+                settlement_value REAL,
+                winning_bin TEXT,
+                temperature_metric TEXT,
+                authority TEXT
+            );
+            """
+        )
+        forecasts.execute(
+            """
+            INSERT INTO ensemble_snapshots_v2
+            (snapshot_id, city, target_date, available_at, fetch_time, issue_time,
+             valid_time, lead_hours, spread, is_bimodal, model_version, members_json,
+             p_raw_json, data_version, temperature_metric)
+            VALUES (3101, 'Amsterdam', '2025-06-01', '2025-05-31T12:00:00Z',
+                    '2025-05-31T12:00:00Z', '2025-05-31T00:00:00',
+                    '2025-06-01T12:00:00', 72.0, 3.0, 0, 'ecmwf',
+                    ?, ?, 'v2', 'high')
+            """,
+            (json.dumps([20.0] * 50), json.dumps([0.10, 0.70, 0.20])),
+        )
+        for label in _REAL_LABELS[:3]:
+            forecasts.execute(
+                """
+                INSERT INTO calibration_pairs_v2
+                (city, target_date, range_label, p_raw, outcome, lead_days, season,
+                 cluster, forecast_available_at, decision_group_id, bias_corrected,
+                 temperature_metric)
+                VALUES ('Amsterdam', '2025-06-01', ?, 0.33, 0, 3.0, 'JJA',
+                        'Amsterdam', '2025-05-31T12:00:00Z', 'default', 0, 'high')
+                """,
+                (label,),
+            )
+        forecasts.execute(
+            """
+            INSERT INTO settlements_v2
+            (city, target_date, settlement_value, winning_bin, temperature_metric, authority)
+            VALUES ('Amsterdam', '2025-06-01', 22.0, ?, 'high', 'VERIFIED')
+            """,
+            (_REAL_LABELS[1],),
+        )
+        forecasts.commit()
+        forecasts.close()
+
+        world = sqlite3.connect(str(world_db))
+        world.executescript(
+            """
+            CREATE TABLE calibration_pairs_v2 (range_label TEXT);
+            CREATE TABLE settlements_v2 (winning_bin TEXT);
+            CREATE TABLE ensemble_snapshots_v2 (snapshot_id INTEGER);
+            """
+        )
+        world.execute("INSERT INTO calibration_pairs_v2 VALUES ('99°C')")
+        world.commit()
+        world.close()
+
+        conn = sqlite3.connect(str(trade_db))
+        conn.row_factory = sqlite3.Row
+        conn.execute("ATTACH DATABASE ? AS world", (str(world_db),))
+        conn.execute("ATTACH DATABASE ? AS forecasts", (str(forecasts_db),))
+        conn.execute(
+            """
+            CREATE TABLE market_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                city TEXT,
+                target_date TEXT,
+                range_label TEXT,
+                event_type TEXT
+            )
+            """
+        )
+        for label in _REAL_LABELS[:3]:
+            _insert_market_event(conn, "Amsterdam", "2025-06-01", label)
+        conn.commit()
+
+        import sys
+
+        class FakeMarketAnalysis:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+
+        fake_market_analysis = type(sys)("src.strategy.market_analysis")
+        fake_market_analysis.MarketAnalysis = FakeMarketAnalysis
+        monkeypatch.setitem(sys.modules, "src.strategy.market_analysis", fake_market_analysis)
+
+        with patch("src.engine.replay_selection_coverage.get_trade_connection_with_world", return_value=conn), \
+             patch("src.engine.replay_selection_coverage.get_backtest_connection") as mock_bc, \
+             patch("src.engine.replay_selection_coverage.init_backtest_schema"), \
+             patch("src.engine.replay_selection_coverage.scan_full_hypothesis_family", return_value=[]):
+            mock_bc.return_value = MagicMock()
+
+            summary = run_selection_coverage(
+                "2025-06-01", "2025-06-01",
+                temperature_metric="high",
+                fdr_alpha=0.10,
+                kelly_multiplier=0.5,
+                p_market_source="uniform",
+                override_platt=True,
+            )
+
+        assert summary.n_settlements == 1
+        assert summary.n_replayed == 1
 
 
 # ---------------------------------------------------------------------------

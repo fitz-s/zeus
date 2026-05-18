@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # Created: 2026-05-16
-# Last reused or audited: 2026-05-16
-# Authority basis: docs/operations/zeus_agent_runtime_compounding_plan_2026-05-16.md §4 W1.2
+# Last reused or audited: 2026-05-18
+# Authority basis: docs/operations/zeus_agent_runtime_compounding_plan_2026-05-16.md §4 W1.2 + hook matcher contract for Edit/Write/MultiEdit/NotebookEdit
 
 """
-citation_grep_gate.py -- PreToolUse advisory for Edit/Write.
+citation_grep_gate.py -- PreToolUse advisory for Edit/Write/MultiEdit/NotebookEdit.
 
 Scans old_string / new_string args for file:line and file Lline citations.
 For each citation, verifies the referenced file exists and the line number
@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+SUPPORTED_TOOLS = frozenset({"Edit", "Write", "MultiEdit", "NotebookEdit"})
 
 # Matches:  path/to/file.py:42  or  path/to/file.py L42
 # Groups: (filepath, line_number)
@@ -74,9 +75,25 @@ def _check_citation(filepath: str, lineno: int) -> str | None:
     return None  # valid
 
 
+def _collect_text_fields(value: Any) -> list[str]:
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        texts: list[str] = []
+        for nested in value.values():
+            texts.extend(_collect_text_fields(nested))
+        return texts
+    if isinstance(value, (list, tuple)):
+        texts = []
+        for nested in value:
+            texts.extend(_collect_text_fields(nested))
+        return texts
+    return []
+
+
 def _run_advisory_check_citation_grep_gate(input_data: dict[str, Any]) -> str | None:
     """
-    PreToolUse advisory for Edit/Write tools.
+    PreToolUse advisory for edit tools.
     Parses old_string/new_string for :line and Lline citations.
     Returns advisory string on drift, None if all citations valid.
     Fail-open on any exception.
@@ -85,15 +102,13 @@ def _run_advisory_check_citation_grep_gate(input_data: dict[str, Any]) -> str | 
         tool_input = input_data.get("tool_input", {})
         tool_name = input_data.get("tool_name", "")
 
-        if tool_name not in ("Edit", "Write"):
+        if tool_name not in SUPPORTED_TOOLS:
             return None
 
-        # Collect text to scan
-        texts: list[str] = []
-        for key in ("old_string", "new_string", "content"):
-            val = tool_input.get(key)
-            if isinstance(val, str):
-                texts.append(val)
+        # Collect text to scan. MultiEdit and NotebookEdit can nest edited
+        # strings inside edits/cells, so recurse through tool_input instead of
+        # enumerating only Edit/Write top-level keys.
+        texts = _collect_text_fields(tool_input)
 
         if not texts:
             return None

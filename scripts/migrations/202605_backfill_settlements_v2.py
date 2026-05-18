@@ -23,6 +23,8 @@ from __future__ import annotations
 import json
 import sqlite3
 
+TARGET_DB = "forecasts"
+
 
 def up(conn: sqlite3.Connection) -> None:
     """Backfill settlements_v2 from settlements. Idempotent."""

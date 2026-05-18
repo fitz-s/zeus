@@ -1,5 +1,5 @@
 # Created: 2026-05-17
-# Last reused or audited: 2026-05-17
+# Last reused or audited: 2026-05-18
 # Authority basis: 2026-05-17 incident post-mortem — boot ≠ runtime blindspot
 """Runtime-fire test for .claude/hooks/dispatch.py — antibody for the
 "boot ≠ runtime" failure class.
@@ -100,6 +100,14 @@ POSITIVE_ENFORCEMENT_TRIGGERS: dict[str, dict[str, Any]] = {
     "worktree_remove_advisor": {
         "hook_event_name": "WorktreeRemove",
         "tool_input": {"path": "/tmp/synthetic-trigger"},
+    },
+    "citation_grep_gate": {
+        "hook_event_name": "PreToolUse",
+        "tool_name": "MultiEdit",
+        "tool_input": {
+            "file_path": "synthetic.py",
+            "edits": [{"old_string": "stale citation REVIEW.md:999999", "new_string": ""}],
+        },
     },
     # EXCLUDED FROM DETERMINISTIC POSITIVE ENFORCEMENT (state-dependent):
     # - pr_create_loc_accumulation: signal depends on current branch's

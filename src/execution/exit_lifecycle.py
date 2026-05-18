@@ -20,6 +20,7 @@ import json
 import math
 import sqlite3
 import time as _time_module
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
@@ -46,6 +47,27 @@ from src.state.portfolio import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _venue_order_payload(value: object | None) -> dict | None:
+    """Normalize CLOB order read models to the dict shape this module stores."""
+
+    if value is None:
+        return None
+    if isinstance(value, Mapping):
+        payload = dict(value)
+    else:
+        raw = getattr(value, "raw", None)
+        payload = dict(raw) if isinstance(raw, Mapping) else dict(getattr(value, "__dict__", {}) or {})
+    status = getattr(value, "status", None)
+    if status not in (None, "") and not (payload.get("status") or payload.get("state")):
+        payload["status"] = str(status)
+    order_id = getattr(value, "order_id", None)
+    if order_id not in (None, "") and not (
+        payload.get("orderID") or payload.get("orderId") or payload.get("order_id") or payload.get("id")
+    ):
+        payload["orderID"] = str(order_id)
+    return payload
 
 
 def _emit_typed_realized_fill(
@@ -206,11 +228,17 @@ def _utcnow() -> datetime:
 NON_TERMINAL_TRADE_STATUSES = frozenset({"MATCHED", "MINED"})
 _PROMOTE_MIN_AGE_SECONDS = 60
 _PROMOTE_MAX_AGE_SECONDS = 3600
+_PROMOTE_LOCK_RETRY_ATTEMPTS = 5
+_PROMOTE_LOCK_RETRY_SLEEP_SECONDS = 0.05
 
 
 def _hash_raw_payload(payload: object) -> str:
     raw = json.dumps(payload or {}, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _is_sqlite_lock_error(exc: sqlite3.OperationalError) -> bool:
+    return "locked" in str(exc).lower() or "busy" in str(exc).lower()
 
 
 def promote_pending_trades(
@@ -316,7 +344,7 @@ def promote_pending_trades(
         ) = row
 
         try:
-            raw = clob_client.get_order(venue_order_id)
+            raw = _venue_order_payload(clob_client.get_order(venue_order_id))
             stats["polled"] += 1
         except Exception as exc:
             if isinstance(exc, httpx.HTTPStatusError):
@@ -356,7 +384,7 @@ def promote_pending_trades(
             stats["skipped"] += 1
             continue
 
-        new_status = (raw.get("status") or "").upper()
+        new_status = (raw.get("status") or raw.get("state") or "").upper()
 
         # Major fix #3: only write CONFIRMED rows. MINED is not a fill authority.
         if new_status != "CONFIRMED":
@@ -368,39 +396,60 @@ def promote_pending_trades(
         rest_size = raw.get("size") or raw.get("filled_size") or filled_size or "0"
         rest_price = raw.get("price") or raw.get("fill_price") or fill_price or "0"
 
-        # CRITIC_FLAG-2: SAVEPOINT wraps re-check + append_trade_fact atomically.
-        # SAVEPOINT nests inside any outer implicit transaction — safe when called
-        # from cycle_runner where prior DML (chain_sync, allocator) left conn
-        # in_transaction=True. BEGIN IMMEDIATE would raise OperationalError here.
-        with _savepoint_atomic(conn):
-            already = conn.execute(
-                "SELECT 1 FROM venue_trade_facts WHERE command_id=? AND state='CONFIRMED'",
-                (command_id,),
-            ).fetchone()
-            if already:
-                stats["skipped"] += 1
-                continue
+        promoted = False
+        for attempt in range(_PROMOTE_LOCK_RETRY_ATTEMPTS):
+            try:
+                # CRITIC_FLAG-2: SAVEPOINT wraps re-check + append_trade_fact
+                # atomically. A concurrent promoter may hold the SQLite writer
+                # lock for this command; retry and re-check so one winner writes
+                # CONFIRMED and the loser observes it instead of surfacing
+                # OperationalError to the cycle.
+                with _savepoint_atomic(conn):
+                    already = conn.execute(
+                        "SELECT 1 FROM venue_trade_facts WHERE command_id=? AND state='CONFIRMED'",
+                        (command_id,),
+                    ).fetchone()
+                    if already:
+                        stats["skipped"] += 1
+                        break
 
-            append_trade_fact(
-                conn,
-                trade_id=trade_id,
-                venue_order_id=venue_order_id,
-                command_id=command_id,
-                state="CONFIRMED",
-                filled_size=str(rest_size),
-                fill_price=str(rest_price),
-                tx_hash=tx_hash,
-                source="REST",
-                observed_at=last_update,
-                raw_payload_hash=_hash_raw_payload(raw),
-                raw_payload_json=raw,
+                    append_trade_fact(
+                        conn,
+                        trade_id=trade_id,
+                        venue_order_id=venue_order_id,
+                        command_id=command_id,
+                        state="CONFIRMED",
+                        filled_size=str(rest_size),
+                        fill_price=str(rest_price),
+                        tx_hash=tx_hash,
+                        source="REST",
+                        observed_at=last_update,
+                        raw_payload_hash=_hash_raw_payload(raw),
+                        raw_payload_json=raw,
+                    )
+                promoted = True
+                break
+            except sqlite3.OperationalError as exc:
+                if not _is_sqlite_lock_error(exc):
+                    raise
+                if attempt + 1 >= _PROMOTE_LOCK_RETRY_ATTEMPTS:
+                    _cnt_inc("promote_pending_trades_sqlite_lock_skipped_total")
+                    logger.warning(
+                        "promote_pending_trades: sqlite writer lock persisted for "
+                        "command_id=%s order_id=%s; skipping until next cycle",
+                        command_id,
+                        venue_order_id,
+                    )
+                    stats["skipped"] += 1
+                    break
+                _time_module.sleep(_PROMOTE_LOCK_RETRY_SLEEP_SECONDS * (attempt + 1))
+
+        if promoted:
+            stats["promoted"] += 1
+            logger.info(
+                "promote_pending_trades: promoted trade_id=%s order_id=%s → CONFIRMED tx=%s",
+                trade_id, venue_order_id, tx_hash,
             )
-
-        stats["promoted"] += 1
-        logger.info(
-            "promote_pending_trades: promoted trade_id=%s order_id=%s → CONFIRMED tx=%s",
-            trade_id, venue_order_id, tx_hash,
-        )
 
     return stats
 

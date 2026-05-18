@@ -2,6 +2,8 @@
 # last_reviewed=2026-05-17
 # Authority basis: F7 audit / FIX_SEV1_BUNDLE.md §F7
 
+TARGET_DB = "trade"
+
 
 def up(conn):
     """Add command_id column to execution_fact, linking rows to venue_commands.

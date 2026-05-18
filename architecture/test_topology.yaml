@@ -93,7 +93,7 @@ test_trust_policy:
     tests/test_backtest_settlement_value_outcome.py: {created: "2026-04-25", last_used: "2026-04-25"}
     tests/test_bug100_k1_k2_structural.py: {created: "2026-04-21", last_used: "2026-04-21"}
     tests/test_calibration_bins_canonical.py: {created: "2026-04-14", last_used: "2026-04-23"}
-    tests/test_promote_calibration_v2_stage_to_prod.py: {created: "2026-05-12", last_used: "2026-05-12"}
+    tests/test_promote_calibration_v2_stage_to_prod.py: {created: "2026-05-12", last_used: "2026-05-18"}
     tests/test_promote_pending_trades.py: {created: "2026-05-17", last_used: "2026-05-18"}
     tests/test_canonical_position_current_schema_alignment.py: {created: "2026-04-23", last_used: "2026-04-23"}
     tests/test_center_buy_repair.py: {created: "2026-04-29", last_used: "2026-04-29"}
@@ -176,8 +176,8 @@ test_trust_policy:
     tests/test_parse_canonical_bin_label.py: {created: "2026-04-23", last_used: "2026-04-23"}
     tests/test_realized_fill.py: {created: "2026-04-23", last_used: "2026-04-23"}
     tests/test_rebuild_pipeline.py: {created: "2026-04-12", last_used: "2026-04-28"}
-    tests/test_replay_time_provenance.py: {created: "2026-04-25", last_used: "2026-04-29"}
-    tests/test_run_replay_cli.py: {created: "2026-04-25", last_used: "2026-04-29"}
+    tests/test_replay_time_provenance.py: {created: "2026-04-25", last_used: "2026-05-18"}
+    tests/test_run_replay_cli.py: {created: "2026-04-25", last_used: "2026-05-18"}
     tests/test_riskguard.py: {created: "2026-03-30", last_used: "2026-04-28"}
     tests/test_runtime_guards.py: {created: "2026-04-28", last_used: "2026-05-02"}
     tests/test_runtime_n_mc_floor.py: {created: "2026-04-29", last_used: "2026-05-08"}
@@ -213,7 +213,7 @@ test_trust_policy:
     tests/test_command_grammar_amendment.py: {created: "2026-04-27", last_used: "2026-04-27"}
     tests/test_riskguard_red_durable_cmd.py: {created: "2026-04-27", last_used: "2026-04-27"}
     tests/test_command_bus_types.py: {created: "2026-04-26", last_used: "2026-04-27"}
-    tests/test_command_recovery.py: {created: "2026-04-26", last_used: "2026-04-29"}
+    tests/test_command_recovery.py: {created: "2026-04-26", last_used: "2026-05-18"}
     tests/test_venue_command_repo.py: {created: "2026-04-26", last_used: "2026-04-27"}
     tests/test_unknown_side_effect.py: {created: "2026-04-27", last_used: "2026-04-30"}
     tests/test_user_channel_ingest.py: {created: "2026-04-27", last_used: "2026-04-27"}
@@ -246,7 +246,8 @@ test_trust_policy:
     # PR #106 followup — pr_create_loc_accumulation hook antibody tests.
     tests/test_pr_create_loc_accumulation_hook.py: {created: "2026-05-09", last_used: "2026-05-09"}
     # PR #128 — dispatch runtime-fire antibody (boot ≠ runtime blindspot, 2026-05-17 incident).
-    tests/test_dispatch_runtime_fire.py: {created: "2026-05-17", last_used: "2026-05-17"}
+    tests/test_dispatch_runtime_fire.py: {created: "2026-05-17", last_used: "2026-05-18"}
+    tests/test_citation_grep_gate.py: {created: "2026-05-18", last_used: "2026-05-18"}
     tests/test_no_synthetic_provenance_marker.py: {created: "2026-04-28", last_used: "2026-04-28"}
     tests/test_settlements_physical_quantity_invariant.py: {created: "2026-04-28", last_used: "2026-04-28"}
     tests/test_settlement_commands_schema.py: {created: "2026-05-04", last_used: "2026-05-04"}
@@ -268,7 +269,7 @@ test_trust_policy:
     tests/test_forecast_live_daemon.py: {created: "2026-05-14", last_used: "2026-05-14"}
     tests/test_check_data_pipeline_live_e2e.py: {created: "2026-05-15", last_used: "2026-05-15"}
     tests/test_check_live_order_e2e.py: {created: "2026-05-15", last_used: "2026-05-15"}
-    tests/test_live_health_probe_forecast_owner.py: {created: "2026-05-15", last_used: "2026-05-15"}
+    tests/test_live_health_probe_forecast_owner.py: {created: "2026-05-15", last_used: "2026-05-18"}
     tests/test_activation_flag_combinations.py: {created: "2026-05-04", last_used: "2026-05-04"}
     tests/test_admission_severity_schema.py: {created: "2026-05-07", last_used: "2026-05-07"}
     tests/test_attach_narrow_except.py: {created: "2026-05-05", last_used: "2026-05-05"}
@@ -356,7 +357,7 @@ test_trust_policy:
     tests/test_ritual_signal_emission.py: {created: "2026-05-06", last_used: "2026-05-06"}
     tests/test_route_card_token_budget.py: {created: "2026-05-06", last_used: "2026-05-06"}
     tests/test_schema_introspection.py: {created: "2026-05-04", last_used: "2026-05-04"}
-    tests/test_selection_coverage_mode.py: {created: "2026-05-07", last_used: "2026-05-07"}
+    tests/test_selection_coverage_mode.py: {created: "2026-05-07", last_used: "2026-05-18"}
     tests/test_settle_positions_uses_enqueue_redeem.py: {created: "2026-05-05", last_used: "2026-05-05"}
     tests/test_settlement_commands_gating.py: {created: "2026-05-06", last_used: "2026-05-06"}
     tests/test_severity_tier_invariant.py: {created: "2026-05-07", last_used: "2026-05-07"}
@@ -380,7 +381,7 @@ test_trust_policy:
     tests/test_worktree_create_contract.py: {created: "2026-05-17", last_used: "2026-05-17"}
     tests/test_settlements_parity.py: {created: "2026-05-17", last_used: "2026-05-17"}
     tests/test_settlement_commands_ux_review_required.py: {created: "2026-05-17", last_used: "2026-05-17"}
-    tests/test_migration_runner_idempotent.py: {created: "2026-05-17", last_used: "2026-05-17"}
+    tests/test_migration_runner_idempotent.py: {created: "2026-05-17", last_used: "2026-05-18"}
     tests/test_market_scanner_zero_insert_alert.py: {created: "2026-05-17", last_used: "2026-05-17"}
     tests/test_k1_reader_isolation.py: {created: "2026-05-17", last_used: "2026-05-17"}
     tests/test_k1_reader_isolation_batch2.py: {created: "2026-05-17", last_used: "2026-05-17"}
@@ -854,6 +855,7 @@ categories:
     - tests/test_pscb_hook.py
     - tests/test_pr_create_loc_accumulation_hook.py
     - tests/test_dispatch_runtime_fire.py
+    - tests/test_citation_grep_gate.py
 
   # Midstream guardian panel — the 15 test files whose invariant-protection
   # role depends on current test-currency (dated provenance header + recent

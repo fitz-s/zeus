@@ -1,8 +1,8 @@
 # Created: 2026-04-26
-# Lifecycle: created=2026-04-26; last_reviewed=2026-05-16; last_reused=2026-05-16
+# Lifecycle: created=2026-04-26; last_reviewed=2026-05-18; last_reused=2026-05-18
 # Purpose: Lock INV-31 command recovery behavior plus snapshot-gated command inserts.
 # Reuse: Run when command recovery, command journal schema, or executable snapshot gating changes.
-# Last reused/audited: 2026-05-17
+# Last reused/audited: 2026-05-18
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md u00a7P1.S4
 """INV-31 anchor tests: command recovery loop.
 
@@ -627,6 +627,44 @@ class TestRecoveryResolutionTable:
         event_types = [e["event_type"] for e in events]
         assert "SUBMIT_ACKED" in event_types
 
+    def test_submitting_with_order_state_resolves_to_acked(self, conn, mock_client):
+        _insert(conn)
+        _advance_to_submitting(conn, venue_order_id="vord-state")
+        mock_client.get_order.return_value = SimpleNamespace(
+            order_id="vord-state",
+            status="LIVE",
+            raw={"orderID": "vord-state", "status": "LIVE"},
+        )
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert _get_state(conn, "cmd-001") == "ACKED"
+        assert summary["advanced"] == 1
+        events = _get_events(conn, "cmd-001")
+        ack = [e for e in events if e["event_type"] == "SUBMIT_ACKED"][-1]
+        payload = json.loads(ack["payload_json"])
+        assert payload["venue_response"] == {"orderID": "vord-state", "status": "LIVE"}
+
+    def test_submitting_with_state_only_rejected_resolves_to_submit_rejected(
+        self, conn, mock_client
+    ):
+        _insert(conn)
+        _advance_to_submitting(conn, venue_order_id="vord-rejected")
+        mock_client.get_order.return_value = {"orderID": "vord-rejected", "state": "REJECTED"}
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert _get_state(conn, "cmd-001") == "REJECTED"
+        assert summary["advanced"] == 1
+        events = _get_events(conn, "cmd-001")
+        rejected = [e for e in events if e["event_type"] == "SUBMIT_REJECTED"][-1]
+        payload = json.loads(rejected["payload_json"])
+        assert payload["venue_status"] == "REJECTED"
+
     # Case 2: SUBMITTING + no venue_order_id -> REVIEW_REQUIRED
     # Grammar note: SUBMITTING->EXPIRED is not a legal transition (_TRANSITIONS
     # has no such edge). Recovery uses REVIEW_REQUIRED (legal from SUBMITTING)
@@ -669,6 +707,23 @@ class TestRecoveryResolutionTable:
         events = _get_events(conn, "cmd-001")
         event_types = [e["event_type"] for e in events]
         assert "SUBMIT_ACKED" in event_types
+
+    def test_unknown_with_state_only_rejected_resolves_to_submit_rejected(
+        self, conn, mock_client
+    ):
+        _insert(conn)
+        _advance_to_unknown(conn, venue_order_id="vord-unknown-rejected")
+        mock_client.get_order.return_value = {
+            "orderID": "vord-unknown-rejected",
+            "state": "REJECTED",
+        }
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert _get_state(conn, "cmd-001") == "REJECTED"
+        assert summary["advanced"] == 1
 
     # Case 4: UNKNOWN + venue_order_id + venue returns None u2192 REVIEW_REQUIRED
     def test_unknown_without_venue_order_resolves_to_review_required(self, conn, mock_client):
@@ -776,6 +831,23 @@ class TestRecoveryResolutionTable:
         mock_client.get_order.return_value = {"orderID": "vord-006", "status": "CANCELLED"}
 
         from src.execution.command_recovery import reconcile_unresolved_commands
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert _get_state(conn, "cmd-001") == "CANCELLED"
+        assert summary["advanced"] == 1
+
+    def test_cancel_pending_with_state_only_cancelled_resolves_to_cancelled(
+        self, conn, mock_client
+    ):
+        _insert(conn)
+        _advance_to_cancel_pending(conn, venue_order_id="vord-state-cancel")
+        mock_client.get_order.return_value = {
+            "orderID": "vord-state-cancel",
+            "state": "CANCELED",
+        }
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
         summary = reconcile_unresolved_commands(conn, mock_client)
 
         assert _get_state(conn, "cmd-001") == "CANCELLED"
@@ -1882,6 +1954,28 @@ class TestRecoveryResolutionTable:
         assert summary["partial_remainders"] == {"scanned": 1, "advanced": 0, "stayed": 1, "errors": 0}
         assert _get_state(conn, "cmd-001") == "PARTIAL"
         assert "EXPIRED" not in [e["event_type"] for e in _get_events(conn, "cmd-001")]
+
+    def test_partial_remainder_terminalizes_from_order_state(
+        self,
+        conn,
+        mock_client,
+    ):
+        _insert(conn, size=5.0)
+        _advance_to_partial(conn, venue_order_id="ord-partial")
+        _append_confirmed_trade_fact(conn, order_id="ord-partial")
+        mock_client.get_open_orders.return_value = []
+        mock_client.get_order.return_value = SimpleNamespace(
+            order_id="ord-partial",
+            status="CANCELED",
+            raw={"orderID": "ord-partial", "status": "CANCELED"},
+        )
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["partial_remainders"] == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+        assert _get_state(conn, "cmd-001") == "EXPIRED"
 
     def test_partial_remainder_without_point_reader_fails_closed(
         self,

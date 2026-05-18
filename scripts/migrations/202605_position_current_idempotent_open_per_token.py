@@ -22,6 +22,8 @@ from __future__ import annotations
 
 import sqlite3
 
+TARGET_DB = "trade"
+
 _INDEX_NAME = "ux_position_current_open_per_token"
 _OPEN_PHASES = ("pending_entry", "active", "day0_window", "pending_exit", "unknown")
 _PHASE_LIST_SQL = ", ".join(f"'{p}'" for p in _OPEN_PHASES)

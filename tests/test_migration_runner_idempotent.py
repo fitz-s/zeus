@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-05-17; last_reviewed=2026-05-17; last_reused=never
+# Lifecycle: created=2026-05-17; last_reviewed=2026-05-18; last_reused=2026-05-18
 # Purpose: Tests for scripts.migrations runner framework (F23 + F30).
 #   - Double-apply is a no-op (idempotency)
 #   - Bootstrap entries are seeded on first table-create
@@ -237,3 +237,83 @@ def test_apply_migrations_dry_run_does_not_write_ledger(tmp_path: Path) -> None:
         "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='_dry'"
     ).fetchone()[0]
     assert dry_table_exists == 0, "dry_run must not execute migration up() function."
+
+
+def test_targeted_world_migration_routes_to_world_connection(tmp_path: Path, monkeypatch) -> None:
+    """Runner must open the migration-declared DB, not the legacy trade default."""
+    import scripts.migrations.__main__ as cli
+
+    world_path = tmp_path / "zeus-world.db"
+    trade_path = tmp_path / "zeus_trades.db"
+    calls: list[str] = []
+
+    def world_connection() -> sqlite3.Connection:
+        calls.append("world")
+        conn = sqlite3.connect(str(world_path))
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    def trade_connection() -> sqlite3.Connection:
+        calls.append("trade")
+        conn = sqlite3.connect(str(trade_path))
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    monkeypatch.setattr("src.state.db.get_world_connection", world_connection)
+    monkeypatch.setattr("src.state.db.get_trade_connection", trade_connection)
+
+    rc = cli._main(["apply", "--target", "202605_db_chunk_boundary_events"])
+
+    assert rc == 0
+    assert calls == ["world"]
+    world = sqlite3.connect(str(world_path))
+    trade = sqlite3.connect(str(trade_path))
+    try:
+        assert world.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='db_chunk_boundary_events'"
+        ).fetchone() is not None
+        assert trade.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='db_chunk_boundary_events'"
+        ).fetchone() is None
+    finally:
+        world.close()
+        trade.close()
+
+
+def test_targeted_migration_requires_matching_db_identity() -> None:
+    """TARGET_DB metadata makes wrong-connection migration writes fail closed."""
+    conn = _make_conn()
+
+    with pytest.raises(RuntimeError, match="targets 'world', not 'trade'"):
+        apply_migrations(
+            conn,
+            target="202605_db_chunk_boundary_events",
+            db_identity="trade",
+        )
+
+
+def test_targeted_migration_requires_identity_for_direct_runner_call() -> None:
+    """Direct apply_migrations callers must attest the opened DB identity."""
+    conn = _make_conn()
+
+    with pytest.raises(RuntimeError, match="must pass db_identity"):
+        apply_migrations(conn, target="202605_db_chunk_boundary_events")
+
+
+def test_world_migration_ledger_does_not_seed_trade_bootstrap() -> None:
+    """WORLD/FORECASTS ledgers must not inherit trade-only pre-ledger markers."""
+    conn = _make_conn()
+
+    applied = apply_migrations(
+        conn,
+        target="202605_db_chunk_boundary_events",
+        db_identity="world",
+    )
+    ledger_names = {
+        row[0]
+        for row in conn.execute("SELECT name FROM _migrations_applied")
+    }
+
+    assert applied == ["202605_db_chunk_boundary_events"]
+    assert "202605_db_chunk_boundary_events" in ledger_names
+    assert _BOOTSTRAP_APPLIED.isdisjoint(ledger_names)

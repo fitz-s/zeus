@@ -22,6 +22,8 @@ from __future__ import annotations
 
 import sqlite3
 
+TARGET_DB = "trade"
+
 _INDEX_NAME = "ux_settlement_commands_active_condition_asset"
 
 # New WHERE clause — adds REDEEM_REVIEW_REQUIRED to the exclusion set

@@ -1,10 +1,11 @@
 # Created: 2026-05-12
-# Last reused/audited: 2026-05-17
+# Last reused/audited: 2026-05-18
 # Authority basis: STAGE_DB → production zeus-world.db promotion of
-# calibration_pairs_v2 + platt_models_v2 artifacts produced by
-# scripts/rebuild_calibration_pairs_v2.py. All mutations are gated by
-# --commit; default behavior is dry-run with full backup + rollback semantics.
-"""Promote calibration_v2 artifacts from a STAGE_DB to production zeus-world.db.
+# platt_models_v2 artifacts. calibration_pairs_v2 is forecast-class authority
+# and must be promoted with scripts/promote_calibration_pairs_v2.py.
+# All mutations are gated by --commit; default behavior is dry-run with full
+# backup + rollback semantics.
+"""Promote platt_models_v2 artifacts from a STAGE_DB to production zeus-world.db.
 
 Subcommands
 -----------
@@ -14,13 +15,11 @@ Subcommands
   key conflicts. Exits 1 if STAGE has any in_progress sentinel or missing
   COMPLETE markers for the requested metrics.
 * ``promote``  — dry-run by default. With ``--commit``: backs up PROD
-  ``calibration_pairs_v2`` + ``platt_models_v2`` to a gzipped SQL dump under
-  ``state/backups/``, opens PROD with ``BEGIN IMMEDIATE``, replaces rows
-  filtered by ``data_version`` derived from the metric set, runs
+  ``platt_models_v2`` to a gzipped SQL dump under ``state/backups/``, opens
+  PROD with ``BEGIN IMMEDIATE``, replaces rows filtered by ``data_version``, runs
   ``PRAGMA integrity_check``, and rolls back on any failure.
-* ``verify``   — read-only post-promote consistency check. Confirms every
-  ``platt_models_v2`` (city, data_version) bucket has matching
-  ``calibration_pairs_v2`` rows.
+* ``verify``   — read-only post-promote consistency check for
+  ``platt_models_v2`` only.
 
 Constraints
 -----------
@@ -35,11 +34,9 @@ Constraints
 * Generic over ``--stage-db PATH`` and ``--prod-db PATH``. No hardcoded
   STAGE_DB filename. No hardcoded PROD path either; defaults to
   ``state/zeus-world.db`` when omitted.
-* Snapshot FK: ``calibration_pairs_v2.snapshot_id`` references
-  ``ensemble_snapshots_v2(snapshot_id)`` but PRAGMA foreign_keys is OFF in
-  zeus-world.db (verified). STAGE snapshot_ids may not exist in PROD; we
-  preserve them as-is (FK not enforced) but expose ``--null-snapshot-id``
-  to NULL them out for safety.
+* ``calibration_pairs_v2`` is K1 forecast-class authority in
+  ``state/zeus-forecasts.db``. This legacy combined script refuses pair
+  promotion; use ``scripts/promote_calibration_pairs_v2.py`` instead.
 """
 
 from __future__ import annotations
@@ -305,54 +302,30 @@ def cmd_inspect(args: argparse.Namespace) -> int:
 
     # Stage row counts
     print("=== STAGE row counts ===")
-    sc_pairs = _row_count(
-        stage,
-        "calibration_pairs_v2",
-        f"data_version IN ({','.join('?' * len(requested_dvs))})",
-        tuple(requested_dvs),
-    )
     sc_platt = _row_count(
         stage,
         "platt_models_v2",
         f"data_version IN ({','.join('?' * len(requested_dvs))})",
         tuple(requested_dvs),
     )
-    print(f"  calibration_pairs_v2: {sc_pairs:>12,}")
     print(f"  platt_models_v2:      {sc_platt:>12,}")
     print()
 
     # Prod baseline
     if prod is not None:
         print("=== PROD row counts (baseline; would be replaced for these data_versions) ===")
-        pc_pairs = _row_count(
-            prod,
-            "calibration_pairs_v2",
-            f"data_version IN ({','.join('?' * len(requested_dvs))})",
-            tuple(requested_dvs),
-        )
         pc_platt = _row_count(
             prod,
             "platt_models_v2",
             f"data_version IN ({','.join('?' * len(requested_dvs))})",
             tuple(requested_dvs),
         )
-        print(f"  calibration_pairs_v2: {pc_pairs:>12,}")
         print(f"  platt_models_v2:      {pc_platt:>12,}")
         print()
         # Total prod rows (for context)
-        total_pairs = _row_count(prod, "calibration_pairs_v2")
         total_platt = _row_count(prod, "platt_models_v2")
-        print(f"  (total calibration_pairs_v2 in PROD across all data_versions: {total_pairs:,})")
         print(f"  (total platt_models_v2 in PROD across all data_versions:      {total_platt:,})")
         print()
-
-    # Coverage matrix
-    print("=== STAGE coverage: cities × data_versions (calibration_pairs_v2) ===")
-    cov = _coverage_matrix(stage, "calibration_pairs_v2", requested_dvs)
-    for dv in requested_dvs:
-        cities = cov.get(dv, {})
-        print(f"  {dv}: {len(cities)} cities, {sum(cities.values()):,} pairs")
-    print()
 
     print("=== STAGE coverage: platt_models_v2 (cluster/season buckets) ===")
     pcov = _platt_coverage(stage, requested_dvs)
@@ -387,8 +360,8 @@ def _backup_prod_tables(
     metrics: list[str],
     backup_dir: Path,
 ) -> Path:
-    """Atomic, gzipped SQL dump of calibration_pairs_v2 + platt_models_v2 rows
-    matching any of the metric data_versions. Returns final backup file path.
+    """Atomic, gzipped SQL dump of platt_models_v2 rows matching the metric
+    data_versions. Returns final backup file path.
 
     Independently verifiable: ``gunzip -t`` then sqlite3 import + count.
     """
@@ -410,24 +383,24 @@ def _backup_prod_tables(
             gz.write(f"-- Metrics: {','.join(metrics)}\n")
             gz.write(f"-- Data versions: {','.join(requested_dvs)}\n\n")
             gz.write("BEGIN TRANSACTION;\n")
-            for table in ("platt_models_v2", "calibration_pairs_v2"):
-                cols = _column_names(conn, table)
-                placeholders = ",".join(cols)
-                where = (
-                    f"WHERE data_version IN ({','.join('?' * len(requested_dvs))})"
+            table = "platt_models_v2"
+            cols = _column_names(conn, table)
+            placeholders = ",".join(cols)
+            where = (
+                f"WHERE data_version IN ({','.join('?' * len(requested_dvs))})"
+            )
+            cur = conn.execute(
+                f"SELECT {placeholders} FROM {table} {where}",
+                tuple(requested_dvs),
+            )
+            row_count = 0
+            for row in cur:
+                vals = [_sql_literal(v) for v in row]
+                gz.write(
+                    f"INSERT INTO {table} ({placeholders}) VALUES ({','.join(vals)});\n"
                 )
-                cur = conn.execute(
-                    f"SELECT {placeholders} FROM {table} {where}",
-                    tuple(requested_dvs),
-                )
-                row_count = 0
-                for row in cur:
-                    vals = [_sql_literal(v) for v in row]
-                    gz.write(
-                        f"INSERT INTO {table} ({placeholders}) VALUES ({','.join(vals)});\n"
-                    )
-                    row_count += 1
-                gz.write(f"-- {table}: {row_count} rows backed up\n")
+                row_count += 1
+            gz.write(f"-- {table}: {row_count} rows backed up\n")
             gz.write("COMMIT;\n")
     finally:
         conn.close()
@@ -478,6 +451,14 @@ def _resolve_metrics(spec: str | None) -> list[str]:
 
 
 def cmd_promote(args: argparse.Namespace) -> int:
+    if args.include_pairs or args.null_snapshot_id:
+        print(
+            "✗ REFUSED: calibration_pairs_v2 is forecast-class authority in "
+            "state/zeus-forecasts.db. Use scripts/promote_calibration_pairs_v2.py "
+            "for pair promotion."
+        )
+        return 2
+
     stage_path = Path(args.stage_db).resolve()
     prod_path = Path(args.prod_db).resolve()
     metrics = _resolve_metrics(args.metrics)
@@ -503,38 +484,58 @@ def cmd_promote(args: argparse.Namespace) -> int:
 
     # Compute proposed changes
     proposed: dict[str, dict[str, int]] = {}
-    for table in ("platt_models_v2", "calibration_pairs_v2"):
-        if not args.include_pairs and table == "calibration_pairs_v2":
-            proposed[table] = {"stage_rows": 0, "prod_rows_to_delete": 0, "skipped": 1}
-            continue
-        sc = _row_count(
-            stage,
+    table = "platt_models_v2"
+    sc = _row_count(
+        stage,
+        table,
+        f"data_version IN ({','.join('?' * len(requested_dvs))})",
+        tuple(requested_dvs),
+    )
+    prod = _ro_connect(prod_path)
+    try:
+        pc = _row_count(
+            prod,
             table,
             f"data_version IN ({','.join('?' * len(requested_dvs))})",
             tuple(requested_dvs),
         )
-        prod = _ro_connect(prod_path)
-        try:
-            pc = _row_count(
-                prod,
-                table,
-                f"data_version IN ({','.join('?' * len(requested_dvs))})",
-                tuple(requested_dvs),
-            )
-        finally:
-            prod.close()
-        proposed[table] = {"stage_rows": sc, "prod_rows_to_delete": pc, "skipped": 0}
+    finally:
+        prod.close()
+    proposed[table] = {"stage_rows": sc, "prod_rows_to_delete": pc, "skipped": 0}
 
     print("=== Proposed changes ===")
     for table, info in proposed.items():
-        if info.get("skipped"):
-            print(f"  {table}: SKIPPED (use --include-pairs to promote)")
-            continue
         print(
             f"  {table}: DELETE {info['prod_rows_to_delete']:,} from PROD, "
             f"INSERT {info['stage_rows']:,} from STAGE"
         )
     print()
+
+    if sc == 0 and not args.allow_empty_stage:
+        print(
+            f"✗ REFUSED: STAGE has 0 rows for {table} matching the requested "
+            "data_versions. --commit would DELETE matching PROD rows and "
+            f"INSERT nothing, wiping {table} for these data_versions."
+        )
+        print("  Use --allow-empty-stage to override (DANGEROUS).")
+        stage.close()
+        return 1
+
+    prod_ro = _ro_connect(prod_path)
+    try:
+        stage_cols = _column_names(stage, table)
+        prod_cols = _column_names(prod_ro, table)
+    finally:
+        prod_ro.close()
+    if stage_cols != prod_cols:
+        print("✗ REFUSED: STAGE/PROD schema mismatch:")
+        print(f"  {table}: STAGE={stage_cols} vs PROD={prod_cols}")
+        print(
+            "  Promote requires identical column sets and order. Resolve schema "
+            "drift before retrying."
+        )
+        stage.close()
+        return 1
 
     if not args.commit:
         print("ℹ DRY-RUN: no changes made. Re-run with --commit to apply.")
@@ -554,9 +555,7 @@ def cmd_promote(args: argparse.Namespace) -> int:
     try:
         prod_rw.execute("BEGIN IMMEDIATE")
         try:
-            for table in ("platt_models_v2", "calibration_pairs_v2"):
-                if not args.include_pairs and table == "calibration_pairs_v2":
-                    continue
+            for table in ("platt_models_v2",):
                 cols = _column_names(stage, table)
                 placeholders = ",".join("?" for _ in cols)
                 col_list = ",".join(cols)
@@ -577,10 +576,6 @@ def cmd_promote(args: argparse.Namespace) -> int:
                 batch: list[tuple] = []
                 for row in cur:
                     rec = tuple(row)
-                    if args.null_snapshot_id and table == "calibration_pairs_v2":
-                        # NULL out snapshot_id column
-                        idx = cols.index("snapshot_id")
-                        rec = rec[:idx] + (None,) + rec[idx + 1 :]
                     batch.append(rec)
                     if len(batch) >= 5000:
                         prod_rw.executemany(
@@ -627,14 +622,14 @@ def cmd_promote(args: argparse.Namespace) -> int:
     print("=== Final PROD row counts ===")
     prod = _ro_connect(prod_path)
     try:
-        for table in ("platt_models_v2", "calibration_pairs_v2"):
-            n = _row_count(
-                prod,
-                table,
-                f"data_version IN ({','.join('?' * len(requested_dvs))})",
-                tuple(requested_dvs),
-            )
-            print(f"  {table}: {n:,}")
+        table = "platt_models_v2"
+        n = _row_count(
+            prod,
+            table,
+            f"data_version IN ({','.join('?' * len(requested_dvs))})",
+            tuple(requested_dvs),
+        )
+        print(f"  {table}: {n:,}")
     finally:
         prod.close()
     return 0
@@ -651,50 +646,29 @@ def cmd_verify(args: argparse.Namespace) -> int:
     print()
     prod = _ro_connect(prod_path)
     try:
-        # Every (city, data_version) bucket in platt_models_v2 should have
-        # at least one calibration_pairs_v2 row for the same data_version.
+        platt_n = _row_count(prod, "platt_models_v2")
         platt_dvs = {
             row["data_version"]
             for row in prod.execute(
                 "SELECT DISTINCT data_version FROM platt_models_v2"
             )
         }
-        pair_dvs = {
-            row["data_version"]
-            for row in prod.execute(
-                "SELECT DISTINCT data_version FROM calibration_pairs_v2"
-            )
-        }
-        orphan_dvs = platt_dvs - pair_dvs
-        if orphan_dvs:
-            print(f"✗ FAIL: platt_models_v2 data_versions with no calibration_pairs_v2:")
-            for dv in sorted(orphan_dvs):
-                print(f"    {dv}")
-            return 1
-        print(f"✓ All {len(platt_dvs)} platt data_versions have backing pairs")
+        print(f"✓ platt_models_v2 readable: {platt_n:,} rows across {len(platt_dvs)} data_versions")
 
-        # Per-bucket check: cluster/season combos in platt should appear in pairs
+        # Per-bucket check: cluster/season/data_version groups should be non-empty.
         cur = prod.execute(
             """
-            SELECT data_version, cluster, season, COUNT(*) AS platt_n,
-                   (SELECT COUNT(*) FROM calibration_pairs_v2 cp
-                    WHERE cp.data_version = p.data_version
-                      AND cp.cluster = p.cluster
-                      AND cp.season = p.season) AS pair_n
-            FROM platt_models_v2 p
+            SELECT data_version, cluster, season, COUNT(*) AS platt_n
+            FROM platt_models_v2
             GROUP BY data_version, cluster, season
-            HAVING pair_n = 0
+            HAVING platt_n <= 0
             """
         )
-        empty_buckets = cur.fetchall()
-        if empty_buckets:
-            print(f"✗ FAIL: {len(empty_buckets)} platt buckets with zero pairs:")
-            for r in empty_buckets[:10]:
-                print(f"    {r['data_version']} cluster={r['cluster']} season={r['season']}")
-            if len(empty_buckets) > 10:
-                print(f"    ... and {len(empty_buckets) - 10} more")
+        impossible_buckets = cur.fetchall()
+        if impossible_buckets:
+            print(f"✗ FAIL: impossible empty platt buckets: {len(impossible_buckets)}")
             return 1
-        print(f"✓ All platt buckets have ≥1 calibration_pairs row")
+        print("✓ platt_models_v2 bucket grouping is internally consistent")
     finally:
         prod.close()
     return 0
@@ -708,7 +682,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="promote_calibration_v2_stage_to_prod",
-        description="Promote calibration_v2 artifacts STAGE_DB → production zeus-world.db.",
+        description="Promote platt_models_v2 artifacts STAGE_DB → production zeus-world.db.",
     )
     sub = p.add_subparsers(dest="cmd", required=True)
 
@@ -723,13 +697,13 @@ def build_parser() -> argparse.ArgumentParser:
     pp.add_argument("--prod-db", required=True)
     pp.add_argument("--metrics", default=None)
     pp.add_argument("--include-pairs", action="store_true",
-                    help="Also promote calibration_pairs_v2 (large; default skipped — "
-                         "platt_models_v2 is the only runtime artifact).")
+                    help="Deprecated fail-closed flag. Use promote_calibration_pairs_v2.py.")
     pp.add_argument("--null-snapshot-id", action="store_true",
-                    help="NULL out snapshot_id on inserted calibration_pairs_v2 rows "
-                         "(safer if STAGE snapshot_ids may not exist in PROD).")
+                    help="Deprecated fail-closed flag. Use promote_calibration_pairs_v2.py.")
     pp.add_argument("--allow-incomplete", action="store_true",
                     help="Bypass sentinel-completeness gate (DANGEROUS).")
+    pp.add_argument("--allow-empty-stage", action="store_true",
+                    help="Allow deleting PROD rows when STAGE has 0 matching rows (DANGEROUS).")
     pp.add_argument("--backup-dir", default="state/backups")
     pp.add_argument("--commit", action="store_true",
                     help="Apply changes. Without this flag, dry-run only.")

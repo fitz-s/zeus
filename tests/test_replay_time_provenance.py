@@ -1,10 +1,12 @@
 """Replay point-in-time provenance antibodies."""
-# Lifecycle: created=2026-04-25; last_reviewed=2026-04-30; last_reused=2026-04-30
+# Lifecycle: created=2026-04-25; last_reviewed=2026-05-18; last_reused=2026-05-18
 # Purpose: Lock replay snapshot/decision reference selection to point-in-time evidence.
 # Reuse: Run with replay fidelity gates when changing ReplayContext reference lookup.
 # Authority basis: P3 usage-path residual guards packet; replay point-in-time provenance gate.
-from src.engine.replay import ReplayContext
-from src.state.db import get_connection, init_schema
+import pytest
+
+from src.engine.replay import ReplayContext, ReplayPreflightError
+from src.state.db import get_connection, init_schema, init_schema_forecasts
 from src.types.metric_identity import HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN
 
 
@@ -42,6 +44,7 @@ def test_replay_context_uses_actual_trade_snapshot_reference(tmp_path):
     db_path = tmp_path / "zeus.db"
     conn = get_connection(db_path)
     init_schema(conn)
+    init_schema_forecasts(conn)
     conn.execute(
         """
         INSERT INTO ensemble_snapshots
@@ -84,6 +87,7 @@ def test_replay_context_prefers_v2_snapshot_for_decision_reference(tmp_path):
     db_path = tmp_path / "zeus.db"
     conn = get_connection(db_path)
     init_schema(conn)
+    init_schema_forecasts(conn)
     conn.execute(
         """
         INSERT INTO ensemble_snapshots_v2
@@ -159,18 +163,24 @@ def test_replay_context_prefers_v2_snapshot_for_decision_reference(tmp_path):
     assert snap["p_raw_stored"] == [0.8]
 
 
-def test_replay_context_reads_main_trade_decisions_with_attached_world_v2_snapshot(tmp_path):
+def test_replay_context_prefers_forecasts_v2_snapshot_over_world_ghost(tmp_path):
     trade_db = tmp_path / "zeus_trades.db"
     world_db = tmp_path / "zeus-world.db"
+    forecasts_db = tmp_path / "zeus-forecasts.db"
     trade_conn = get_connection(trade_db)
     init_schema(trade_conn)
     trade_conn.close()
     world_conn = get_connection(world_db)
     init_schema(world_conn)
+    init_schema_forecasts(world_conn)
     world_conn.close()
+    forecasts_conn = get_connection(forecasts_db)
+    init_schema_forecasts(forecasts_conn)
+    forecasts_conn.close()
 
     conn = get_connection(trade_db)
     conn.execute("ATTACH DATABASE ? AS world", (str(world_db),))
+    conn.execute("ATTACH DATABASE ? AS forecasts", (str(forecasts_db),))
     conn.execute(
         """
         INSERT INTO world.ensemble_snapshots_v2
@@ -198,6 +208,43 @@ def test_replay_context_reads_main_trade_decisions_with_attached_world_v2_snapsh
             1.0,
             0,
             "world_v2",
+            HIGH_LOCALDAY_MAX.data_version,
+            1,
+            "OK",
+            0,
+            "{}",
+            "VERIFIED",
+            "degF",
+            "F",
+        ),
+    )
+    conn.execute(
+        """
+        INSERT INTO forecasts.ensemble_snapshots_v2
+        (snapshot_id, city, target_date, temperature_metric, physical_quantity,
+         observation_field, issue_time, valid_time, available_at, fetch_time,
+         lead_hours, members_json, p_raw_json, spread, is_bimodal,
+         model_version, data_version, training_allowed, causality_status,
+         boundary_ambiguous, provenance_json, authority, members_unit, unit)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            211,
+            "NYC",
+            "2026-04-01",
+            HIGH_LOCALDAY_MAX.temperature_metric,
+            HIGH_LOCALDAY_MAX.physical_quantity,
+            HIGH_LOCALDAY_MAX.observation_field,
+            "2026-03-31T00:00:00Z",
+            "2026-04-01T00:00:00Z",
+            "2026-03-31T10:00:00Z",
+            "2026-03-31T10:05:00Z",
+            24.0,
+            "[62.0]",
+            "[0.9]",
+            1.0,
+            0,
+            "forecasts_v2",
             HIGH_LOCALDAY_MAX.data_version,
             1,
             "OK",
@@ -243,14 +290,108 @@ def test_replay_context_reads_main_trade_decisions_with_attached_world_v2_snapsh
     assert ref["snapshot_id"] == 211
     assert snap is not None
     assert snap["snapshot_source"] == "ensemble_snapshots_v2"
-    assert snap["model"] == "world_v2"
-    assert snap["p_raw_stored"] == [0.7]
+    assert snap["model"] == "forecasts_v2"
+    assert snap["p_raw_stored"] == [0.9]
+
+
+def test_replay_context_prefers_forecasts_settlement_over_world_ghost(tmp_path):
+    trade_db = tmp_path / "zeus_trades.db"
+    world_db = tmp_path / "zeus-world.db"
+    forecasts_db = tmp_path / "zeus-forecasts.db"
+    trade_conn = get_connection(trade_db)
+    init_schema(trade_conn)
+    trade_conn.close()
+    world_conn = get_connection(world_db)
+    init_schema(world_conn)
+    init_schema_forecasts(world_conn)
+    world_conn.close()
+    forecasts_conn = get_connection(forecasts_db)
+    init_schema_forecasts(forecasts_conn)
+    forecasts_conn.close()
+
+    conn = get_connection(trade_db)
+    conn.execute("ATTACH DATABASE ? AS world", (str(world_db),))
+    conn.execute("ATTACH DATABASE ? AS forecasts", (str(forecasts_db),))
+    conn.execute(
+        """
+        INSERT INTO forecasts.ensemble_snapshots_v2
+        (snapshot_id, city, target_date, temperature_metric, physical_quantity,
+         observation_field, issue_time, valid_time, available_at, fetch_time,
+         lead_hours, members_json, p_raw_json, spread, is_bimodal,
+         model_version, data_version, training_allowed, causality_status,
+         boundary_ambiguous, provenance_json, authority, members_unit, unit)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            312,
+            "NYC",
+            "2026-04-01",
+            HIGH_LOCALDAY_MAX.temperature_metric,
+            HIGH_LOCALDAY_MAX.physical_quantity,
+            HIGH_LOCALDAY_MAX.observation_field,
+            "2026-03-31T00:00:00Z",
+            "2026-04-01T00:00:00Z",
+            "2026-03-31T10:00:00Z",
+            "2026-03-31T10:05:00Z",
+            24.0,
+            "[62.0]",
+            "[0.9]",
+            1.0,
+            0,
+            "forecasts_v2",
+            HIGH_LOCALDAY_MAX.data_version,
+            1,
+            "OK",
+            0,
+            "{}",
+            "VERIFIED",
+            "degF",
+            "F",
+        ),
+    )
+    conn.execute(
+        """
+        INSERT INTO world.settlements
+        (city, target_date, winning_bin, settlement_value, temperature_metric, authority)
+        VALUES ('NYC', '2026-04-01', 'ghost', 1.0, 'high', 'VERIFIED')
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO forecasts.settlements
+        (city, target_date, winning_bin, settlement_value, temperature_metric, authority)
+        VALUES ('NYC', '2026-04-01', 'authoritative', 2.0, 'high', 'VERIFIED')
+        """
+    )
+
+    ctx = ReplayContext(conn)
+    settlement = ctx.get_settlement("NYC", "2026-04-01")
+    conn.close()
+
+    assert settlement == {"settlement_value": 2.0, "winning_bin": "authoritative"}
+
+
+def test_replay_context_rejects_world_only_forecast_class_v2_snapshot(tmp_path):
+    trade_db = tmp_path / "empty-trade.db"
+    world_db = tmp_path / "zeus-world.db"
+    world_conn = get_connection(world_db)
+    init_schema(world_conn)
+    init_schema_forecasts(world_conn)
+    world_conn.close()
+
+    conn = get_connection(trade_db)
+    conn.execute("ATTACH DATABASE ? AS world", (str(world_db),))
+
+    with pytest.raises(ReplayPreflightError, match="world ghost fallback is forbidden"):
+        ReplayContext(conn)
+    conn.close()
 
 
 def test_replay_context_falls_back_to_decision_log_no_trade_snapshot_reference(tmp_path):
     db_path = tmp_path / "zeus.db"
     conn = get_connection(db_path)
     init_schema(conn)
+    init_schema_forecasts(conn)
     conn.execute(
         """
         INSERT INTO ensemble_snapshots
@@ -317,6 +458,7 @@ def test_replay_context_snapshot_only_fallback_prefers_v2(tmp_path):
     db_path = tmp_path / "zeus.db"
     conn = get_connection(db_path)
     init_schema(conn)
+    init_schema_forecasts(conn)
     conn.execute(
         """
         INSERT INTO ensemble_snapshots
@@ -379,6 +521,7 @@ def test_replay_context_v2_snapshot_lookup_is_metric_scoped(tmp_path):
     db_path = tmp_path / "zeus.db"
     conn = get_connection(db_path)
     init_schema(conn)
+    init_schema_forecasts(conn)
     for snapshot_id, metric, identity, members, p_raw, available_at in (
         (
             501,
@@ -471,6 +614,7 @@ def test_replay_context_snapshot_only_fallback_requires_p_raw(tmp_path):
     db_path = tmp_path / "zeus.db"
     conn = get_connection(db_path)
     init_schema(conn)
+    init_schema_forecasts(conn)
     conn.execute(
         """
         INSERT INTO ensemble_snapshots_v2

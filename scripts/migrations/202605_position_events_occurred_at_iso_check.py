@@ -29,6 +29,8 @@ from __future__ import annotations
 import json
 import sqlite3
 
+TARGET_DB = "trade"
+
 # sentinel string that becomes impossible post-migration
 _SENTINEL = "unknown_entered_at"
 

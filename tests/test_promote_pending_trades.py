@@ -1,5 +1,5 @@
 # Created: 2026-05-17
-# Last reused or audited: 2026-05-17
+# Last reused or audited: 2026-05-18
 # Authority basis: STRUCTURAL_PLAN.md v3 §2 PR-S2
 """Antibody tests for promote_pending_trades (Bug #2, PR-S2).
 
@@ -12,6 +12,7 @@ from __future__ import annotations
 import sqlite3
 import threading
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import httpx
@@ -153,6 +154,44 @@ def test_matched_row_aged_over_60s_promoted_to_confirmed():
     ).fetchone()
     assert row["tx_hash"] == "0xdeadbeef"
     assert row["source"] == "REST"
+
+
+def test_matched_row_promotes_from_order_state_payload():
+    conn = _conn()
+    _seed_command(conn, "cmd-state", "ord-state")
+    _seed_matched_fact(
+        conn,
+        trade_id="trade-state",
+        command_id="cmd-state",
+        venue_order_id="ord-state",
+        observed_at=_old(),
+    )
+    clob = MagicMock()
+    clob.get_order.return_value = SimpleNamespace(
+        order_id="ord-state",
+        status="CONFIRMED",
+        raw={
+            "orderID": "ord-state",
+            "status": "CONFIRMED",
+            "transaction_hash": "0xorderstate",
+            "last_update": _now().isoformat(),
+            "size": "6",
+            "price": "0.50",
+        },
+    )
+
+    stats = promote_pending_trades(conn, clob, max_age_seconds=60)
+
+    assert stats["promoted"] == 1
+    row = conn.execute(
+        "SELECT tx_hash, filled_size, fill_price FROM venue_trade_facts "
+        "WHERE trade_id='trade-state' AND state='CONFIRMED'"
+    ).fetchone()
+    assert dict(row) == {
+        "tx_hash": "0xorderstate",
+        "filled_size": "6",
+        "fill_price": "0.50",
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -406,6 +445,65 @@ def test_concurrent_ws_ingest_does_not_collide():
         )
 
     finally:
+        try:
+            os.unlink(db_path)
+        except Exception:
+            pass
+
+
+def test_sqlite_writer_lock_returns_skip_not_thread_error():
+    """Relationship: external writer contention degrades to retry/skip, not exception."""
+    import os
+    import tempfile
+
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        db_path = f.name
+    locker = None
+    contender = None
+    try:
+        setup = sqlite3.connect(db_path)
+        setup.row_factory = sqlite3.Row
+        setup.execute("PRAGMA foreign_keys=ON")
+        setup.execute("PRAGMA journal_mode=WAL")
+        init_schema(setup)
+        _seed_command(setup, "cmd-lock", "ord-lock")
+        _seed_matched_fact(
+            setup,
+            trade_id="trade-lock",
+            command_id="cmd-lock",
+            venue_order_id="ord-lock",
+            observed_at=_old(),
+        )
+        setup.close()
+
+        locker = sqlite3.connect(db_path)
+        locker.execute("PRAGMA journal_mode=WAL")
+        locker.execute("BEGIN IMMEDIATE")
+        locker.execute("CREATE TABLE IF NOT EXISTS _lock_holder (id INTEGER)")
+        locker.execute("INSERT INTO _lock_holder VALUES (1)")
+
+        contender = sqlite3.connect(db_path, timeout=0.01)
+        contender.row_factory = sqlite3.Row
+        contender.execute("PRAGMA foreign_keys=ON")
+        contender.execute("PRAGMA journal_mode=WAL")
+
+        stats = promote_pending_trades(
+            contender,
+            _clob_returning("CONFIRMED", tx_hash="0xlocked"),
+            max_age_seconds=60,
+        )
+
+        assert stats["promoted"] == 0
+        assert stats["skipped"] == 1
+        assert _count_facts(contender, "trade-lock", "CONFIRMED") == 0
+    finally:
+        if locker is not None:
+            try:
+                locker.rollback()
+            finally:
+                locker.close()
+        if contender is not None:
+            contender.close()
         try:
             os.unlink(db_path)
         except Exception:

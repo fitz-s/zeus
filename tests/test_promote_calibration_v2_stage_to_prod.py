@@ -1,5 +1,5 @@
 # Created: 2026-05-12
-# Last reused/audited: 2026-05-12
+# Last reused/audited: 2026-05-18
 # Authority basis: Tests for scripts/promote_calibration_v2_stage_to_prod.py
 """Unit tests for the STAGE→prod calibration promotion script.
 
@@ -287,6 +287,7 @@ def test_promote_commit_replaces_metric_rows(tmp_path, capsys):
 
     p = sqlite3.connect(str(prod))
     _insert_platt(p, "old_high", DV_HIGH)
+    _insert_pair(p, "PairAuthorityStaysForecasts", DV_HIGH, pair_id=101)
     # Rows for OTHER data_version must be untouched
     _insert_platt(p, "untouched_low", DV_LOW, metric="low")
     p.commit()
@@ -310,9 +311,114 @@ def test_promote_commit_replaces_metric_rows(tmp_path, capsys):
     low_keys = {r[0] for r in p.execute(
         "SELECT model_key FROM platt_models_v2 WHERE data_version=?", (DV_LOW,)
     )}
+    pair_cities = {r[0] for r in p.execute(
+        "SELECT city FROM calibration_pairs_v2 WHERE data_version=?", (DV_HIGH,)
+    )}
     p.close()
     assert high_keys == {"new_k1", "new_k2"}, f"got {high_keys}"
     assert low_keys == {"untouched_low"}, "Low metric must be untouched"
+    assert pair_cities == {"PairAuthorityStaysForecasts"}, (
+        "Legacy combined promotion must not mutate calibration_pairs_v2; "
+        "pairs are forecast-class authority promoted by promote_calibration_pairs_v2.py."
+    )
+
+
+def test_promote_refuses_legacy_pair_flags(tmp_path, capsys):
+    stage = tmp_path / "stage.db"
+    prod = tmp_path / "prod.db"
+    _build_db(stage)
+    _build_db(prod)
+
+    args = P.build_parser().parse_args(
+        [
+            "promote", "--stage-db", str(stage), "--prod-db", str(prod),
+            "--metrics", "high", "--commit", "--include-pairs",
+            "--backup-dir", str(tmp_path / "backups"),
+        ]
+    )
+    rc = args.func(args)
+    out = capsys.readouterr().out
+
+    assert rc == 2
+    assert "promote_calibration_pairs_v2.py" in out
+
+
+def test_promote_refuses_empty_stage_before_deleting_prod(tmp_path, capsys):
+    stage = tmp_path / "stage.db"
+    prod = tmp_path / "prod.db"
+    _build_db(stage)
+    _build_db(prod)
+
+    s = sqlite3.connect(str(stage))
+    _insert_complete_sentinel(s, "high", DV_HIGH)
+    s.commit()
+    s.close()
+
+    p = sqlite3.connect(str(prod))
+    _insert_platt(p, "old_high", DV_HIGH)
+    p.commit()
+    p.close()
+
+    args = P.build_parser().parse_args(
+        [
+            "promote", "--stage-db", str(stage), "--prod-db", str(prod),
+            "--metrics", "high", "--commit",
+            "--backup-dir", str(tmp_path / "backups"),
+        ]
+    )
+    rc = args.func(args)
+    out = capsys.readouterr().out
+
+    p = sqlite3.connect(str(prod))
+    high_keys = {r[0] for r in p.execute(
+        "SELECT model_key FROM platt_models_v2 WHERE data_version=?", (DV_HIGH,)
+    )}
+    p.close()
+
+    assert rc == 1
+    assert "STAGE has 0 rows" in out
+    assert high_keys == {"old_high"}
+    assert not (tmp_path / "backups").exists(), "Refusal must happen before backup/write path"
+
+
+def test_promote_refuses_stage_prod_schema_mismatch_before_commit(tmp_path, capsys):
+    stage = tmp_path / "stage.db"
+    prod = tmp_path / "prod.db"
+    _build_db(stage)
+    _build_db(prod)
+
+    s = sqlite3.connect(str(stage))
+    _insert_complete_sentinel(s, "high", DV_HIGH)
+    _insert_platt(s, "new_high", DV_HIGH)
+    s.execute("ALTER TABLE platt_models_v2 ADD COLUMN schema_drift TEXT")
+    s.commit()
+    s.close()
+
+    p = sqlite3.connect(str(prod))
+    _insert_platt(p, "old_high", DV_HIGH)
+    p.commit()
+    p.close()
+
+    args = P.build_parser().parse_args(
+        [
+            "promote", "--stage-db", str(stage), "--prod-db", str(prod),
+            "--metrics", "high", "--commit",
+            "--backup-dir", str(tmp_path / "backups"),
+        ]
+    )
+    rc = args.func(args)
+    out = capsys.readouterr().out
+
+    p = sqlite3.connect(str(prod))
+    high_keys = {r[0] for r in p.execute(
+        "SELECT model_key FROM platt_models_v2 WHERE data_version=?", (DV_HIGH,)
+    )}
+    p.close()
+
+    assert rc == 1
+    assert "schema mismatch" in out
+    assert high_keys == {"old_high"}
+    assert not (tmp_path / "backups").exists(), "Schema refusal must happen before backup/write path"
 
 
 def test_promote_creates_verifiable_backup(tmp_path, capsys):
@@ -443,10 +549,10 @@ def test_verify_pass(tmp_path, capsys):
     rc = args.func(args)
     out = capsys.readouterr().out
     assert rc == 0
-    assert "All" in out
+    assert "platt_models_v2 readable" in out
 
 
-def test_verify_fail_orphan_platt(tmp_path, capsys):
+def test_verify_is_platt_only_and_does_not_require_world_pairs(tmp_path, capsys):
     prod = tmp_path / "prod.db"
     _build_db(prod)
     p = sqlite3.connect(str(prod))
@@ -457,5 +563,6 @@ def test_verify_fail_orphan_platt(tmp_path, capsys):
     args = P.build_parser().parse_args(["verify", "--prod-db", str(prod)])
     rc = args.func(args)
     out = capsys.readouterr().out
-    assert rc == 1
-    assert "FAIL" in out
+    assert rc == 0
+    assert "platt_models_v2 readable" in out
+    assert "calibration_pairs_v2" not in out

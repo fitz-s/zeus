@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import sqlite3
 
+TARGET_DB = "trade"
+
 
 def up(conn: sqlite3.Connection) -> None:
     """Add winning_index_set column and sparse index to settlement_commands.

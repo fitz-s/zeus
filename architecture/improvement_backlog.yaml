@@ -706,3 +706,20 @@ entries:
       parsing, or tests around those paths, while preserving hard blocks for
       live/prod data mutation, migrations, settlement harvest, redemption, and
       venue/account side effects.
+
+  - id: P39-2026-05-18
+    title: "Review-comment remediation needs structural-slice admission"
+    raised_at: "2026-05-18"
+    raised_by: "pr-batch-review-findings-fix"
+    status: proposed
+    detail_doc: "docs/operations/current_state.md"
+    notes: >
+      A multi-PR review-comment remediation had to touch related runtime,
+      replay, migration, hook, script-manifest, and relationship-test files in
+      one structural pass. Generic topology navigation classified the complete
+      set as advisory-only/out-of-scope and suggested a plan packet even though
+      the actual operation was a bounded code-review remediation with focused
+      tests and no live/prod mutation. Future topology maintenance should add a
+      review-comment-remediation route that admits explicitly linked fix slices
+      plus their tests and registry updates while still requiring planning-lock
+      evidence for architecture/governance files and blocking live side effects.

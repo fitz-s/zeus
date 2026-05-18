@@ -32,6 +32,7 @@ from src.state.db import (
     get_trade_connection_with_world,
     init_backtest_schema,
 )
+from src.state.table_registry import is_forecast_class
 from src.types import Bin
 from src.types.temperature import TemperatureDelta
 
@@ -73,6 +74,23 @@ def _first_existing_table(conn, table: str) -> str:
         return f"world.{table}"
     if _table_exists(conn, "", table):
         return table
+    return ""
+
+
+def _first_existing_forecast_authority_table(conn, table: str) -> str:
+    """Resolve forecast-class tables through forecasts/main, never world ghosts."""
+    if not is_forecast_class(table):
+        raise ValueError(f"{table} is not registered as forecast_class")
+    if _table_exists(conn, "forecasts", table):
+        return f"forecasts.{table}"
+    if _table_exists(conn, "", table):
+        return table
+    if _table_exists(conn, "world", table):
+        raise ReplayPreflightError(
+            f"Replay topology error: {table} is forecast-class authority but "
+            f"only world.{table} is visible. Attach state/zeus-forecasts.db "
+            "or use a monolithic test DB; world ghost fallback is forbidden."
+        )
     return ""
 
 
@@ -317,19 +335,28 @@ class ReplayContext:
         self._snapshot_cache: dict[tuple[str, str, str, str, str], dict] = {}
         self._decision_ref_cache: dict[tuple[str, str, str], Optional[dict]] = {}
         self._snapshot_table_column_cache: dict[str, set[str]] = {}
-        self._snapshot_v2_table = _first_existing_table(self.conn, "ensemble_snapshots_v2")
+        self._snapshot_v2_table = _first_existing_forecast_authority_table(
+            self.conn, "ensemble_snapshots_v2"
+        )
         self._snapshot_legacy_table = _first_existing_table(self.conn, "ensemble_snapshots")
         if not self._snapshot_v2_table and not self._snapshot_legacy_table:
             raise RuntimeError(
                 "Replay topology error: neither ensemble_snapshots_v2 nor "
                 "ensemble_snapshots exists in world attach or local main schema."
             )
+        self._settlements_table = _first_existing_forecast_authority_table(
+            self.conn, "settlements"
+        )
+        self._settlements_v2_table = _first_existing_forecast_authority_table(
+            self.conn, "settlements_v2"
+        )
+        self._calibration_pairs_v2_table = _first_existing_forecast_authority_table(
+            self.conn, "calibration_pairs_v2"
+        )
         if self._snapshot_legacy_table.startswith("world."):
             self._sp = "world."  # preserve existing replay co-location behavior
         elif self._snapshot_legacy_table:
             self._sp = ""  # monolithic DB (tests) or main legacy snapshot projection
-        elif self._snapshot_v2_table.startswith("world."):
-            self._sp = "world."
         else:
             self._sp = ""  # monolithic DB (tests)
 
@@ -918,8 +945,10 @@ class ReplayContext:
         temperature_metric: Literal["high", "low"] = "high",
     ) -> Optional[dict]:
         """Get settlement outcome for scoring."""
+        if not self._settlements_table:
+            return None
         row = self.conn.execute(
-            f"SELECT settlement_value, winning_bin FROM {self._sp}settlements "
+            f"SELECT settlement_value, winning_bin FROM {self._settlements_table} "
             "WHERE city = ? AND target_date = ? AND temperature_metric = ? "
             "AND authority = 'VERIFIED'",
             (city_name, target_date, temperature_metric),
@@ -2035,10 +2064,16 @@ def run_wu_settlement_sweep(
         conn,
         allow_snapshot_only_reference=allow_snapshot_only_reference,
     )
+    if not ctx._settlements_v2_table or not ctx._calibration_pairs_v2_table:
+        conn.close()
+        raise ReplayPreflightError(
+            "wu_settlement_sweep requires forecasts settlements_v2 and "
+            "calibration_pairs_v2 authority tables."
+        )
     rows = conn.execute(
         f"""
         SELECT city, target_date, settlement_value, winning_bin, temperature_metric
-        FROM {ctx._sp}settlements_v2
+        FROM {ctx._settlements_v2_table}
         WHERE target_date >= ? AND target_date <= ?
           AND authority = 'VERIFIED'
           AND settlement_value IS NOT NULL
@@ -2095,12 +2130,13 @@ def run_wu_settlement_sweep(
             SELECT range_label, p_raw, outcome AS stored_outcome, lead_days,
                    season, cluster, forecast_available_at, decision_group_id,
                    bias_corrected
-            FROM {ctx._sp}calibration_pairs_v2
+            FROM {ctx._calibration_pairs_v2_table}
             WHERE city = ?
               AND target_date = ?
+              AND temperature_metric = ?
             ORDER BY datetime(forecast_available_at), lead_days, range_label
             """,
-            (city.name, row["target_date"]),
+            (city.name, row["target_date"], row["temperature_metric"]),
         ).fetchall()
         if not forecast_rows:
             bins = _typed_bins_for_city_date(ctx, city, row["target_date"])
@@ -2629,11 +2665,14 @@ def run_replay(
         overrides=overrides,
         allow_snapshot_only_reference=allow_snapshot_only_reference,
     )
+    if not ctx._settlements_table:
+        conn.close()
+        raise ReplayPreflightError("run_replay requires forecasts settlements authority table.")
 
     # Get all settlements in date range
     settlements = conn.execute(f"""
         SELECT city, target_date, settlement_value, winning_bin
-        FROM {ctx._sp}settlements
+        FROM {ctx._settlements_table}
         WHERE target_date >= ? AND target_date <= ?
           AND temperature_metric = ?
           AND authority = 'VERIFIED'

@@ -1,8 +1,8 @@
-# Lifecycle: created=2026-05-15; last_reviewed=2026-05-16; last_reused=2026-05-17
+# Lifecycle: created=2026-05-15; last_reviewed=2026-05-18; last_reused=2026-05-18
 # Purpose: Lock forecast-live as the canonical forecast owner for live health alerts.
 # Reuse: Run when live_health_probe process/heartbeat classification or forecast-live launch ownership changes.
 # Created: 2026-05-15
-# Last reused or audited: 2026-05-17
+# Last reused or audited: 2026-05-18
 # Authority basis: docs/operations/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md; docs/operations/task_2026-05-16_live_continuous_run_package/LIVE_CONTINUOUS_RUN_PACKAGE_PLAN.md Phase C; 2026-05-17 volatile runtime-artifact code-plane contract.
 
 from __future__ import annotations
@@ -453,6 +453,57 @@ def test_stale_forecast_live_heartbeat_is_actionable(tmp_path, monkeypatch, caps
     out = capsys.readouterr().out
     assert out.startswith("ALERT")
     assert "forecast_live_stale=" in out
+
+
+def test_forecast_live_heartbeat_age_prefers_payload_written_at(
+    tmp_path, monkeypatch, capsys
+):
+    module = _load_module()
+    root = tmp_path / "zeus"
+    _healthy_state(root)
+    forecast_hb = root / "state" / "forecast-live-heartbeat.json"
+    _write_json(
+        forecast_hb,
+        {
+            "alive": True,
+            "status": "alive",
+            "written_at": "2000-01-01T00:00:00+00:00",
+        },
+    )
+    _configure(
+        module,
+        monkeypatch,
+        root,
+        tmp_path / "snapshot.json",
+        {
+            "src.main": [101],
+            "src.ingest.forecast_live_daemon": [202],
+            "src.ingest_main": [404],
+            "src.riskguard": [303],
+        },
+    )
+
+    module.main()
+
+    out = capsys.readouterr().out
+    assert out.startswith("ALERT")
+    assert "forecast_live_stale=" in out
+
+
+def test_forecast_live_heartbeat_age_falls_back_to_mtime_when_payload_lacks_timestamp(
+    tmp_path, monkeypatch
+):
+    module = _load_module()
+    root = tmp_path / "zeus"
+    _healthy_state(root)
+    forecast_hb = root / "state" / "forecast-live-heartbeat.json"
+    _write_json(forecast_hb, {"alive": True, "status": "alive"})
+
+    payload = module._load_json(str(forecast_hb))
+    age, source = module._heartbeat_payload_age(payload)
+
+    assert age is None
+    assert source is None
 
 
 def test_legacy_ingest_opendata_owner_is_actionable(tmp_path, monkeypatch, capsys):
