@@ -492,6 +492,7 @@ def bulk_lock_with_chunker(
     watchdog_s: int = BulkChunker.DEFAULT_WATCHDOG_S,
     watchdog_poll_s: float = 1.0,
     live_yield_sleep_s: float = BulkChunker.DEFAULT_LIVE_YIELD_SLEEP_S,
+    event_writer: Callable[..., None] | None = None,
 ) -> Iterator[BulkChunker]:
     """Open the BULK fcntl + wrap a ``BulkChunker`` with LIVE-yield wiring.
 
@@ -536,6 +537,7 @@ def bulk_lock_with_chunker(
                 db_path=db_path,
                 bulk_lock_fd=fd,
                 live_yield_sleep_s=live_yield_sleep_s,
+                event_writer=event_writer,
             )
             with chunker:
                 yield chunker

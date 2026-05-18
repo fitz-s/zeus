@@ -109,11 +109,12 @@ from src.contracts.ensemble_snapshot_provenance import (
 )
 from src.contracts.settlement_semantics import SettlementSemantics
 from src.signal.ensemble_signal import p_raw_vector_from_maxes
-from src.state.db import init_schema
+from src.state.db import init_schema, ZEUS_WORLD_DB_PATH
 from src.state.db_writer_lock import (  # noqa: E402
     BulkChunker,
     bulk_lock_with_chunker,
 )
+from src.state.chunk_boundary_events import emit_event
 from src.state.schema.v2_schema import apply_v2_schema
 from src.types.market import validate_bin_topology
 from src.types.metric_identity import HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN, MetricIdentity
@@ -1873,10 +1874,20 @@ def main() -> int:
     apply_v2_schema(conn)
 
     try:
+        # F11 (wave6 2026-05-18): emit chunk-boundary events into zeus-world.db
+        # (Option A: single-table in world DB; db_path column preserves origin).
+        # CROSS_DB_CANONICAL_ORDER constraint: zeus-forecasts.db < zeus-world.db,
+        # so opening world AFTER holding forecasts lock is in canonical order.
+        # If a future BULK caller holds a lock on a DB later in canonical order
+        # than zeus-world.db, change closure to Option B (per-BULK DB).
+        _event_writer = lambda **kw: emit_event(  # noqa: E731
+            db_path=ZEUS_WORLD_DB_PATH, **kw
+        )
         with bulk_lock_with_chunker(
             write_db_path,
             conn,
             caller_module="scripts.rebuild_calibration_pairs_v2",
+            event_writer=_event_writer,
         ) as chunker:
             try:
                 per_metric = rebuild_all_v2(
