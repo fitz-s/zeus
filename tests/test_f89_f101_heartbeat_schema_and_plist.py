@@ -47,12 +47,19 @@ HEARTBEAT_SCHEMA_REGISTRY: dict[str, dict] = {
     "venue-heartbeat-keeper.json": {
         "writer": "src/control/heartbeat_supervisor.py",
         "declared_fields": [
+            "cadence_seconds",
             "consecutive_failures", "consecutive_successes", "health", "heartbeat_id",
-            "last_error", "last_success_at", "last_failure_at", "lease_continuous_since",
+            "last_error", "last_invalid_id_at",
+            "last_success_at", "last_failure_at", "lease_continuous_since",
             "lease_gap_suspected_until", "owner", "resting_order_safe", "schema_version",
             "written_at",
         ],
-        "note": "13-field rich health detail; schema_version field present.",
+        "note": (
+            "15-field rich health detail; schema_version field present. "
+            "cadence_seconds + last_invalid_id_at observed in live payloads "
+            "(WAVE-4 F101-runtime audit 2026-05-18) — added to registry to "
+            "match writer behavior."
+        ),
     },
     "oracle_error_rates.heartbeat.json": {
         "writer": "scripts/bridge_oracle_to_calibration.py",
@@ -148,3 +155,97 @@ class TestF101HeartbeatSchemaRegistry:
             "Expected ≥2 distinct time-field names across writers to document drift (F101). "
             f"Got: {time_field_names}"
         )
+
+
+class TestF101RuntimePayloadConformance:
+    """F101-runtime (WAVE-4 carry-forward #4): load each live heartbeat JSON
+    payload that exists on disk and assert its keys ⊆ declared_fields.
+
+    Closes the gap surfaced in WAVE3_BATCH_C_PER_FINDING_ACCOUNTING.md
+    line 15: the registry-internal F101 antibody does NOT load actual
+    runtime payloads, so drift between code and registry is undetected.
+    This probe loads every present heartbeat JSON and checks
+    runtime-keys ⊆ declared-fields. Missing files are skipped so this
+    runs cleanly in CI / test fixtures without live state.
+
+    The check is one-directional: registry can declare fields a writer
+    may not always emit (e.g. optional `last_error` when never failed),
+    but a writer MUST NOT emit a field the registry does not declare —
+    otherwise an `envelope.keys ⊆ declared_fields` consumer would
+    silently misread that field.
+    """
+
+    @staticmethod
+    def _candidate_state_roots() -> list:
+        """Return candidate state/ roots. Worktree runs against the live
+        Zeus state/ directory; CI without state/ skips silently."""
+        candidates = [
+            PROJECT_ROOT / "state",
+            # When this test runs inside a worktree, the live state/ lives
+            # at the canonical repo state/ path:
+            PROJECT_ROOT.parent.parent.parent / "state",
+            Path.home() / ".openclaw" / "workspace-venus" / "zeus" / "state",
+        ]
+        return [c for c in candidates if c.exists() and c.is_dir()]
+
+    def test_runtime_payload_keys_subset_of_declared(self):
+        """Probe 4: every key in a live heartbeat JSON must appear in the
+        writer's declared_fields list. Catches the "writer emits a key
+        the registry does not declare" regression."""
+        import json
+        import pytest
+
+        roots = self._candidate_state_roots()
+        if not roots:
+            pytest.skip(
+                "No state/ directory found on disk; runtime-payload conformance "
+                "probe requires live heartbeat JSON files."
+            )
+
+        # For each artifact that has a registry entry, look it up in each
+        # state root and check the runtime keys.
+        probes_run = 0
+        for root in roots:
+            for artifact, entry in HEARTBEAT_SCHEMA_REGISTRY.items():
+                # oracle_error_rates.heartbeat.json lives under data/oracle/
+                # rather than state/; skip if not under this root.
+                candidate = root / artifact
+                if not candidate.exists():
+                    continue
+                try:
+                    payload = json.loads(candidate.read_text())
+                except (json.JSONDecodeError, OSError) as exc:
+                    pytest.fail(
+                        f"{artifact}: failed to load runtime payload at "
+                        f"{candidate}: {exc}"
+                    )
+
+                if not isinstance(payload, dict):
+                    pytest.fail(
+                        f"{artifact}: runtime payload is not a JSON object "
+                        f"(got {type(payload).__name__}). F101 envelope contract "
+                        f"requires object-shaped payloads."
+                    )
+
+                declared = set(entry["declared_fields"])
+                runtime_keys = set(payload.keys())
+                undeclared = runtime_keys - declared
+                assert not undeclared, (
+                    f"{artifact} ({candidate}): runtime payload emits "
+                    f"undeclared field(s) {sorted(undeclared)} not in registry "
+                    f"declared_fields={sorted(declared)}. F101 drift: update "
+                    f"HEARTBEAT_SCHEMA_REGISTRY['{artifact}']['declared_fields'] "
+                    f"to include them, OR remove them from the writer."
+                )
+                probes_run += 1
+                break  # only need first matching root per artifact
+
+        # Sanity: if we found state roots but probed zero artifacts, the
+        # registry doesn't intersect any live files — signal the test as
+        # not exercised so it isn't a vacuous green.
+        if probes_run == 0:
+            import pytest
+            pytest.skip(
+                "No HEARTBEAT_SCHEMA_REGISTRY artifact found on disk under "
+                f"{[str(r) for r in roots]}; runtime probe not exercised."
+            )
