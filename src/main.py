@@ -1598,7 +1598,12 @@ def _check_s1_without_s2_sla() -> None:
         raise SystemExit(1) from exc
 
     if not isinstance(payload, dict):
-        return
+        # Deployment-script bug produced a non-dict JSON value — fail-closed.
+        logger.error(
+            "N2 gate: control_plane.json corrupt — non-dict payload (type=%s)",
+            type(payload).__name__,
+        )
+        raise SystemExit(1)
 
     s1_ts_raw = payload.get("s1_deployed_at")
     if not s1_ts_raw:
@@ -1625,7 +1630,7 @@ def _check_s1_without_s2_sla() -> None:
             "set ZEUS_ACCEPT_S1_ALONE=1 to override"
         )
         logger.error("BOOT_REFUSED: %s", msg)
-        raise SystemExit(1)
+        raise SystemExit(msg)
 
 
 def _assert_live_safe_strategies_or_exit(*, refresh_state: bool = True) -> None:

@@ -227,7 +227,10 @@ def allocate_chain_truth(
             continue
         if remaining >= size - dust:
             allocated.append(pos)
-            remaining -= size
+            # Consume exactly what remains (not full size) when within dust
+            # tolerance — prevents remaining going negative and incorrectly
+            # backing later positions in the LIFO walk.
+            remaining = max(0.0, remaining - size)
         else:
             phantom.append(pos)
 

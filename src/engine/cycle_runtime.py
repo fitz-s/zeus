@@ -1163,7 +1163,20 @@ def run_chain_sync(portfolio, clob, conn=None, *, deps):
     if api_positions is None:
         raise RuntimeError("chain sync returned None — API call succeeded but returned no data")
     reconcile_stats = deps.reconcile_with_chain(portfolio, api_positions, conn=conn)
-    _assert_token_aggregate_invariant(portfolio, api_positions, deps=deps)
+    # Gate the invariant on authoritative chain state only.
+    # reconcile() sets "skipped_void_incomplete_api" in stats when it detects
+    # CHAIN_UNKNOWN (empty-but-suspect API response). Running the aggregate
+    # invariant against a suspect/empty chain would spuriously fire on every
+    # active token and block all exits — identical to the CHAIN_UNKNOWN void-skip
+    # guard added to pass-1. Mirror that guard here.
+    if "skipped_void_incomplete_api" not in reconcile_stats:
+        _assert_token_aggregate_invariant(portfolio, api_positions, deps=deps)
+    else:
+        _logger_runtime.warning(
+            "INV_TOKEN_AGGREGATE_SKIPPED: chain_state=CHAIN_UNKNOWN, "
+            "skipped_void_incomplete_api=%s",
+            reconcile_stats.get("skipped_void_incomplete_api"),
+        )
     return reconcile_stats, True
 
 

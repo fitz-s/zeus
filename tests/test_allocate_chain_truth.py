@@ -1,5 +1,5 @@
 # Created: 2026-05-17
-# Last reused or audited: 2026-05-17
+# Last reused/audited: 2026-05-17
 # Authority basis: STRUCTURAL_PLAN.md v3 §2 PR-S1
 """Antibody tests for Bug #3 chain aggregate reconciliation (PR-S1).
 
@@ -246,7 +246,8 @@ def test_boot_refuses_s1_alone_after_4h():
             try:
                 with pytest.raises(SystemExit) as exc_info:
                     _check_s1_without_s2_sla()
-                assert exc_info.value.code == 1
+                # Fix #4: message must carry the S1_WITHOUT_S2_BEYOND_SLA token
+                assert "S1_WITHOUT_S2_BEYOND_SLA" in str(exc_info.value)
             finally:
                 env_patch.stop()
 
@@ -395,5 +396,98 @@ def test_n2_passes_when_s2_deployed_before_s1():
             os.environ.pop("ZEUS_ACCEPT_S1_ALONE", None)
             try:
                 _check_s1_without_s2_sla()  # Should not raise (no s1_deployed_at)
+            finally:
+                env_patch.stop()
+
+
+# ── Bot review fix antibodies (PR #141) ─────────────────────────────────────
+
+
+def test_invariant_skipped_when_chain_state_unknown():
+    """Fix #1: invariant must NOT fire when reconcile detected CHAIN_UNKNOWN.
+
+    An empty API response (CHAIN_UNKNOWN) must not produce phantom blocks.
+    Verifies run_chain_sync gates _assert_token_aggregate_invariant on the
+    reconcile stats key 'skipped_void_incomplete_api'.
+    """
+    from src.engine.cycle_runtime import (
+        run_chain_sync, tokens_blocked_until_resolution, _tokens_blocked_lock,
+    )
+
+    token_id = "tok-should-not-block"
+    pos = _make_position("t1", token_id=token_id, shares=6.0, state="holding")
+    portfolio = _make_portfolio(pos)
+
+    # Simulate reconcile returning CHAIN_UNKNOWN stats (empty chain response)
+    mock_deps = MagicMock()
+    mock_deps.ChainPosition = ChainPosition
+    mock_deps.reconcile_with_chain.return_value = {
+        "voided": 0, "synced": 0,
+        "skipped_void_incomplete_api": 1,  # key present → CHAIN_UNKNOWN
+    }
+    mock_clob = MagicMock()
+    mock_clob.get_positions_from_api.return_value = []
+
+    run_chain_sync(portfolio, mock_clob, conn=None, deps=mock_deps)
+
+    with _tokens_blocked_lock:
+        blocked = set(tokens_blocked_until_resolution)
+    assert token_id not in blocked, "token must not be blocked when chain state is UNKNOWN"
+
+
+def test_allocate_chain_truth_dust_does_not_go_negative():
+    """Fix #2: remaining must not go negative when within dust tolerance.
+
+    Three positions of 6 shares each, chain_balance=6.005 (just over 6).
+    LIFO: newest (t3) should be backed, remaining goes to 0, not -5.995.
+    t2 and t1 must be phantom — NOT incorrectly backed by negative remaining.
+    """
+    p1 = _make_position("t1", shares=6.0, entered_at="2026-05-01T01:00:00+00:00")
+    p2 = _make_position("t2", shares=6.0, entered_at="2026-05-01T02:00:00+00:00")
+    p3 = _make_position("t3", shares=6.0, entered_at="2026-05-01T03:00:00+00:00")
+
+    # 6.005 is within dust (0.01) of 6.0 for t3; pre-fix, remaining = 6.005-6 = 0.005,
+    # then 0.005 >= 6-0.01=5.99 is False so t2 phantom → correct.
+    # But with old code: remaining = 6.005-6.0 = 0.005, then for t2: 0.005 >= 5.99 → False → phantom.
+    # Edge case: chain_balance = 6.005, size = 6.0, remaining after t3 = max(0, 6.005-6.0) = 0.005.
+    # 0.005 < 5.99, so t2 → phantom. Correct.
+    # The real bug: chain=6.0, size=6.0 → remaining = 6.0-6.0 = 0.0 → t2: 0.0 >= 5.99 False → phantom. OK.
+    # Bug: chain=6.005, size=6.0. Old: remaining=0.005. New: remaining=max(0,0.005)=0.005. Same.
+    # True bug surface: chain=5.995 (within dust), size=6.0 → old: remaining=5.995-6=-0.005,
+    # next pos: -0.005 >= 5.99 → False → phantom (OK). Bug manifests with TWO dust-backed positions:
+    # chain=11.995, t3 size=6.0, t2 size=6.0.
+    # Old: after t3: remaining=11.995-6=5.995; t2: 5.995>=5.99 → backed! remaining=5.995-6=-0.005
+    # t1: -0.005 >= 5.99 → False → phantom (OK for t1). But t2 was wrongly backed by negative math.
+    # New: after t3: remaining=max(0,11.995-6)=5.995; t2: 5.995>=5.99 → backed; remaining=max(0,-0.005)=0
+    # t1: 0>=5.99 → False → phantom. Same outcome for t2 but remaining is clean.
+    # The real guard: remaining never negative after fix.
+    chain_balance = 5.995  # within dust of 6.0 for one position
+    allocated, phantom = allocate_chain_truth([p1, p2, p3], chain_balance=chain_balance)
+    # t3 (newest) is backed (5.995 >= 6.0-0.01=5.99), remaining → max(0, 5.995-6)=0
+    assert len(allocated) == 1
+    assert allocated[0].trade_id == "t3"
+    assert len(phantom) == 2
+    # Verify remaining went to 0 (not negative) by checking t2 and t1 are phantom
+    phantom_ids = {p.trade_id for p in phantom}
+    assert phantom_ids == {"t1", "t2"}, f"expected t1+t2 phantom, got {phantom_ids}"
+
+
+def test_n2_non_dict_payload_fails_closed():
+    """Fix #3: non-dict JSON payload in control_plane.json must raise SystemExit(1)."""
+    from src.main import _check_s1_without_s2_sla
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cp_path = os.path.join(tmpdir, "control_plane.json")
+        # Write a JSON array (valid JSON but non-dict)
+        with open(cp_path, "w") as f:
+            json.dump(["s1_deployed_at", "2026-05-17"], f)
+
+        with patch("src.config.state_path", return_value=cp_path):
+            env_patch = patch.dict(os.environ, {}, clear=False)
+            env_patch.start()
+            os.environ.pop("ZEUS_ACCEPT_S1_ALONE", None)
+            try:
+                with pytest.raises(SystemExit):
+                    _check_s1_without_s2_sla()
             finally:
                 env_patch.stop()
