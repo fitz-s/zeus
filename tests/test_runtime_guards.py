@@ -9691,7 +9691,7 @@ def test_monitoring_defers_exit_pending_missing_resolution_to_exit_lifecycle(mon
 
     monkeypatch.setattr(
         "src.execution.exit_lifecycle.handle_exit_pending_missing",
-        lambda portfolio, position: {"action": "closed", "position": closed},
+        lambda portfolio, position, conn=None: {"action": "closed", "position": closed},
     )
     monkeypatch.setattr(
         cycle_runner,
@@ -11435,21 +11435,30 @@ def test_monitoring_phase_persists_live_exit_telemetry_chain_with_canonical_entr
     # Post-P9: query_position_events reads from position_events (canonical spine).
     # Current baseline positions already carry entry events. The same monitor
     # cycle may append DAY0_WINDOW_ENTERED before EXIT_ORDER_FILLED.
+    # WAVE-3 Batch B (2026-05-18): transition_phase pairs every _mark_pending_exit
+    # with a position_events row; the previously-unpaired _execute_live_exit site
+    # at exit_intent setup now emits EXIT_INTENT before EXIT_ORDER_FILLED.
     assert [event["event_type"] for event in events] == [
         "POSITION_OPEN_INTENT",
         "ENTRY_ORDER_POSTED",
         "ENTRY_ORDER_FILLED",
         "DAY0_WINDOW_ENTERED",
+        "EXIT_INTENT",
         "EXIT_ORDER_FILLED",
     ]
 
-    open_intent, entry_posted, entry_filled, day0_event, fill_event = events
+    open_intent, entry_posted, entry_filled, day0_event, exit_intent_event, fill_event = events
     # Entry events come from the seeded canonical entry baseline.
     assert open_intent["runtime_trade_id"] == "live-exit-1"
     assert entry_posted["runtime_trade_id"] == "live-exit-1"
     assert entry_filled["runtime_trade_id"] == "live-exit-1"
     assert day0_event["event_type"] == "DAY0_WINDOW_ENTERED"
     assert day0_event["runtime_trade_id"] == "live-exit-1"
+
+    # EXIT_INTENT canonical event (emitted at exit_intent setup)
+    assert exit_intent_event["event_type"] == "EXIT_INTENT"
+    assert exit_intent_event["runtime_trade_id"] == "live-exit-1"
+    assert exit_intent_event["source"] == "src.execution.exit_lifecycle"
 
     # EXIT_ORDER_FILLED canonical event
     assert fill_event["event_type"] == "EXIT_ORDER_FILLED"

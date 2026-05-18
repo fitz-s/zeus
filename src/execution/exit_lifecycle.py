@@ -388,12 +388,23 @@ def is_exit_cooldown_active(position: Position) -> bool:
     return _utcnow() < deadline
 
 
-def handle_exit_pending_missing(portfolio: PortfolioState, position: Position) -> dict:
+def handle_exit_pending_missing(
+    portfolio: PortfolioState,
+    position: Position,
+    conn: sqlite3.Connection | None = None,
+) -> dict:
     """Own the `exit_pending_missing` escalation path for pending exits."""
 
     if position.chain_state != "exit_pending_missing":
         return {"action": "ignore", "position": None}
     _mark_pending_exit(position)
+    _dual_write_canonical_pending_exit_if_available(
+        conn,
+        position,
+        reason="EXIT_CHAIN_MISSING",
+        error=getattr(position, "last_exit_error", "") or "exit_pending_missing",
+        event_type="EXIT_ORDER_REJECTED",
+    )
     if position.exit_state == "backoff_exhausted":
         return {"action": "skip", "position": None}
     if position.exit_state in EXIT_LIFECYCLE_RECOVERY_STATES:
@@ -409,12 +420,24 @@ def _is_below_min_order_sell_error(error: str) -> bool:
     return "below" in text and "min_order_size" in text
 
 
-def _mark_exit_dust_hold(position: Position, reason: str, error: str = "") -> None:
+def _mark_exit_dust_hold(
+    position: Position,
+    reason: str,
+    error: str = "",
+    conn: sqlite3.Connection | None = None,
+) -> None:
     """Hold a non-executable dust exit to settlement instead of retrying."""
     _mark_pending_exit(position)
     position.exit_state = "backoff_exhausted"
     position.next_exit_retry_at = ""
     position.last_exit_error = (error or "below_min_order_size")[:500]
+    _dual_write_canonical_pending_exit_if_available(
+        conn,
+        position,
+        reason=reason,
+        error=error or "below_min_order_size",
+        event_type="EXIT_ORDER_REJECTED",
+    )
     logger.warning(
         "EXIT DUST HOLD %s: %s. Holding to settlement; no sell retry is executable.",
         position.trade_id,
@@ -450,78 +473,25 @@ def _dual_write_canonical_pending_exit_if_available(
     error: str,
     event_type: str = "EXIT_ORDER_REJECTED",
 ) -> bool:
-    if conn is None:
-        return False
-    try:
-        from src.engine.lifecycle_events import build_position_current_projection
-        from src.state.db import append_many_and_project
+    """Backwards-compat shim — routes to the canonical transition_phase writer.
 
-        trade_id = str(getattr(position, "trade_id", "") or "")
-        if not trade_id:
-            return False
-        sequence_no = _next_canonical_sequence_no(conn, trade_id)
-        occurred_at = _utcnow().isoformat()
-        phase_before = phase_for_runtime_position(
-            state=getattr(position, "pre_exit_state", "") or "holding",
-        ).value
-        phase_after = fold_lifecycle_phase(phase_before, "pending_exit").value
-        projection_position = copy.copy(position)
-        if not any(
-            getattr(projection_position, field, "")
-            for field in (
-                "last_exit_at",
-                "chain_verified_at",
-                "day0_entered_at",
-                "entered_at",
-                "order_posted_at",
-            )
-        ):
-            projection_position.order_posted_at = occurred_at
-        projection = build_position_current_projection(projection_position)
-        if projection.get("phase") != "pending_exit":
-            return False
-        projection["updated_at"] = occurred_at
-        payload = {
-            "status": getattr(position, "exit_state", ""),
-            "exit_reason": getattr(position, "exit_reason", "") or reason,
-            "error": error or getattr(position, "last_exit_error", ""),
-            "retry_count": getattr(position, "exit_retry_count", 0),
-            "next_retry_at": getattr(position, "next_exit_retry_at", ""),
-            "last_exit_order_id": getattr(position, "last_exit_order_id", ""),
-        }
-        env = str(getattr(position, "env", "") or "live")
-        if env not in {"live", "test", "replay", "backtest", "shadow"}:
-            env = "live"
-        event = {
-            "event_id": f"{trade_id}:exit_rejected:{sequence_no}",
-            "position_id": trade_id,
-            "event_version": 1,
-            "sequence_no": sequence_no,
-            "event_type": event_type,
-            "occurred_at": occurred_at,
-            "phase_before": phase_before,
-            "phase_after": phase_after,
-            "strategy_key": str(getattr(position, "strategy_key", "") or getattr(position, "strategy", "") or ""),
-            "decision_id": None,
-            "snapshot_id": getattr(position, "decision_snapshot_id", "") or None,
-            "order_id": getattr(position, "last_exit_order_id", "") or None,
-            "command_id": None,
-            "caused_by": "exit_recovery",
-            "idempotency_key": f"{trade_id}:exit_rejected:{sequence_no}",
-            "venue_status": str(getattr(position, "exit_state", "") or "rejected"),
-            "source_module": "src.execution.exit_lifecycle",
-            "env": env,
-            "payload_json": json.dumps(payload, default=str, sort_keys=True),
-        }
-        append_many_and_project(conn, [event], projection)
-        return True
-    except Exception as exc:
-        logger.warning(
-            "Canonical pending-exit write failed for %s: %s",
-            getattr(position, "trade_id", ""),
-            exc,
-        )
-        return False
+    WAVE-3 Batch B (F108 reframe, 2026-05-18): the prior in-file
+    implementation was promoted into src.state.db.transition_phase so the
+    same single-writer property holds for both the 9 already-paired sites
+    that called this shim AND the 4 freshly-paired helper sites that now
+    call transition_phase directly. Behaviour identical: returns False on
+    conn=None or any append-projection failure, True on success.
+    """
+    from src.state.db import transition_phase
+
+    return transition_phase(
+        conn,
+        position,
+        event_type=event_type,
+        reason=reason,
+        error=error,
+        source_module="src.execution.exit_lifecycle",
+    )
 
 
 def execute_exit(
@@ -539,7 +509,7 @@ def execute_exit(
     """
     if exit_context.current_market_price is None:
         retry_reason = f"{exit_context.exit_reason or 'EXIT'} [INCOMPLETE_CONTEXT]"
-        _mark_exit_retry(position, reason=retry_reason, error="missing_current_market_price")
+        _mark_exit_retry(position, reason=retry_reason, error="missing_current_market_price", conn=conn)
         return "exit_blocked: incomplete_context"
 
     exit_intent = exit_intent or build_exit_intent(position, exit_context)
@@ -581,13 +551,7 @@ def _execute_live_exit(
     token_id = exit_intent.token_id
     if not token_id:
         retry_reason = f"{exit_intent.reason} [NO_TOKEN_ID]"
-        _mark_exit_retry(position, reason=retry_reason, error="no_token_id")
-        _dual_write_canonical_pending_exit_if_available(
-            conn,
-            position,
-            reason=retry_reason,
-            error="no_token_id",
-        )
+        _mark_exit_retry(position, reason=retry_reason, error="no_token_id", conn=conn)
         if conn is not None:
             log_pending_exit_recovery_event(
                 conn,
@@ -612,12 +576,7 @@ def _execute_live_exit(
             position,
             reason=dust_reason,
             error=dust_error,
-        )
-        _dual_write_canonical_pending_exit_if_available(
-            conn,
-            position,
-            reason=dust_reason,
-            error=dust_error,
+            conn=conn,
         )
         if conn is not None:
             log_pending_exit_recovery_event(
@@ -643,12 +602,7 @@ def _execute_live_exit(
             position,
             reason=retry_reason,
             error=collateral_reason or "",
-        )
-        _dual_write_canonical_pending_exit_if_available(
-            conn,
-            position,
-            reason=retry_reason,
-            error=collateral_reason or "",
+            conn=conn,
         )
         if conn is not None:
             log_pending_exit_recovery_event(
@@ -672,7 +626,7 @@ def _execute_live_exit(
         cancel_fn = getattr(clob, "cancel_order", None)
         if not callable(cancel_fn):
             retry_reason = f"{exit_context.exit_reason} [CANCEL_UNAVAILABLE]"
-            _mark_exit_retry(position, reason=retry_reason, error="cancel_order_unavailable")
+            _mark_exit_retry(position, reason=retry_reason, error="cancel_order_unavailable", conn=conn)
             if conn is not None:
                 log_pending_exit_recovery_event(
                     conn,
@@ -701,7 +655,7 @@ def _execute_live_exit(
             ).fetchone()
             if row is None:
                 retry_reason = f"{exit_context.exit_reason} [CANCEL_UNKNOWN: no_command_row]"
-                _mark_exit_retry(position, reason=retry_reason, error="cancel_command_row_missing")
+                _mark_exit_retry(position, reason=retry_reason, error="cancel_command_row_missing", conn=conn)
                 log_pending_exit_recovery_event(
                     conn,
                     position,
@@ -718,13 +672,7 @@ def _execute_live_exit(
             )
             if outcome.status != "CANCELED":
                 retry_reason = f"{exit_context.exit_reason} [CANCEL_{outcome.status}]"
-                _mark_exit_retry(position, reason=retry_reason, error=outcome.reason or outcome.status)
-                _dual_write_canonical_pending_exit_if_available(
-                    conn,
-                    position,
-                    reason=retry_reason,
-                    error=outcome.reason or outcome.status,
-                )
+                _mark_exit_retry(position, reason=retry_reason, error=outcome.reason or outcome.status, conn=conn)
                 log_pending_exit_recovery_event(
                     conn,
                     position,
@@ -741,14 +689,21 @@ def _execute_live_exit(
                 outcome = parse_cancel_response(cancel_fn(position.last_exit_order_id))
             except Exception as exc:
                 logger.warning("Stale sell cancel unknown for %s: %s", position.trade_id, exc)
-                _mark_exit_retry(position, reason=f"{exit_context.exit_reason} [CANCEL_UNKNOWN]", error=str(exc)[:500])
+                _mark_exit_retry(position, reason=f"{exit_context.exit_reason} [CANCEL_UNKNOWN]", error=str(exc)[:500], conn=conn)
                 return "exit_blocked: cancel_unknown"
             if outcome.status != "CANCELED":
-                _mark_exit_retry(position, reason=f"{exit_context.exit_reason} [CANCEL_{outcome.status}]", error=outcome.reason or outcome.status)
+                _mark_exit_retry(position, reason=f"{exit_context.exit_reason} [CANCEL_{outcome.status}]", error=outcome.reason or outcome.status, conn=conn)
                 return f"exit_blocked: cancel_{outcome.status.lower()}"
 
     _mark_pending_exit(position)
     position.exit_state = "exit_intent"
+    _dual_write_canonical_pending_exit_if_available(
+        conn,
+        position,
+        reason=exit_intent.reason or "EXIT_INTENT",
+        error="",
+        event_type="EXIT_INTENT",
+    )
 
     try:
         raw_sell_result = place_sell_order(
@@ -770,12 +725,7 @@ def _execute_live_exit(
                     position,
                     reason=dust_reason,
                     error=sell_error,
-                )
-                _dual_write_canonical_pending_exit_if_available(
-                    conn,
-                    position,
-                    reason=dust_reason,
-                    error=sell_error,
+                    conn=conn,
                 )
                 if conn is not None:
                     log_pending_exit_recovery_event(
@@ -792,12 +742,7 @@ def _execute_live_exit(
                 position,
                 reason=retry_reason,
                 error=sell_error,
-            )
-            _dual_write_canonical_pending_exit_if_available(
-                conn,
-                position,
-                reason=retry_reason,
-                error=sell_error,
+                conn=conn,
             )
             if conn is not None:
                 log_pending_exit_recovery_event(
@@ -846,6 +791,7 @@ def _execute_live_exit(
                         position,
                         status=status,
                         order_id=order_id,
+                        conn=conn,
                     )
                     return f"sell_pending: order={order_id}, status={status}, missing_fill_price"
                 phase_before = _canonical_phase_before_for_economic_close(position)
@@ -921,12 +867,7 @@ def _execute_live_exit(
             position,
             reason=retry_reason,
             error=retry_error,
-        )
-        _dual_write_canonical_pending_exit_if_available(
-            conn,
-            position,
-            reason=retry_reason,
-            error=retry_error,
+            conn=conn,
         )
         if conn is not None:
             log_pending_exit_recovery_event(
@@ -1284,6 +1225,12 @@ def check_pending_exits(
         if pos.exit_state not in ("sell_placed", "sell_pending", "exit_intent"):
             continue
         _mark_pending_exit(pos)
+        # NOTE: no canonical event here — upstream transition sites (execute_exit,
+        # handle_exit_pending_missing, _mark_exit_dust_hold) already emit the
+        # transition event at the actual state change.  Emitting again on every
+        # passive scan would append a duplicate EXIT_ORDER_POSTED row each cycle
+        # and corrupt query_execution_event_summary() counts. (WAVE-3 Batch B
+        # bot review fix, 2026-05-18)
 
         # exit_intent with no order ID = stranded from exception during place_sell_order
         if pos.exit_state == "exit_intent":
@@ -1292,7 +1239,7 @@ def check_pending_exits(
                 _release_pending_exit(pos)
                 stats["unchanged"] += 1
                 continue
-            _mark_exit_retry(pos, reason="STRANDED_EXIT_INTENT", error="exception_during_sell")
+            _mark_exit_retry(pos, reason="STRANDED_EXIT_INTENT", error="exception_during_sell", conn=conn)
             if conn is not None:
                 log_pending_exit_recovery_event(
                     conn,
@@ -1306,7 +1253,7 @@ def check_pending_exits(
             continue
 
         if not pos.last_exit_order_id:
-            _mark_exit_retry(pos, reason="SELL_NO_ORDER_ID", error="no_order_id")
+            _mark_exit_retry(pos, reason="SELL_NO_ORDER_ID", error="no_order_id", conn=conn)
             if conn is not None:
                 log_pending_exit_recovery_event(
                     conn,
@@ -1334,6 +1281,7 @@ def check_pending_exits(
                     pos,
                     status=status,
                     order_id=pos.last_exit_order_id,
+                    conn=conn,
                 )
                 stats["unchanged"] += 1
                 continue
@@ -1384,6 +1332,7 @@ def check_pending_exits(
                         pos,
                         status=status,
                         order_id=pos.last_exit_order_id,
+                        conn=conn,
                     )
                 else:
                     partial_applied = _apply_partial_exit_fill(
@@ -1419,7 +1368,7 @@ def check_pending_exits(
                             filled_shares=filled_shares,
                         )
             if status in VOID_STATUSES:
-                _mark_exit_retry(pos, reason=f"SELL_{status}", error=status)
+                _mark_exit_retry(pos, reason=f"SELL_{status}", error=status, conn=conn)
                 if conn is not None:
                     log_pending_exit_recovery_event(
                         conn,
@@ -1446,7 +1395,7 @@ def check_pending_exits(
                 # permanent stall.
                 pos.exit_retry_count += 1
                 if pos.exit_retry_count >= 3:
-                    _mark_exit_retry(pos, reason="SELL_STATUS_UNKNOWN", error="3_consecutive_unknown")
+                    _mark_exit_retry(pos, reason="SELL_STATUS_UNKNOWN", error="3_consecutive_unknown", conn=conn)
                     if conn is not None:
                         log_exit_retry_event(conn, pos, reason="SELL_STATUS_UNKNOWN", error="3_consecutive_unknown")
                     stats["retried"] += 1
@@ -1589,10 +1538,18 @@ def _mark_exit_fill_economics_missing(
     *,
     status: str,
     order_id: str,
+    conn: sqlite3.Connection | None = None,
 ) -> None:
     _mark_pending_exit(position)
     position.exit_state = "sell_pending"
     position.last_exit_error = "missing_exit_fill_price"
+    _dual_write_canonical_pending_exit_if_available(
+        conn,
+        position,
+        reason=f"FILL_ECONOMICS_MISSING:{status}",
+        error="missing_exit_fill_price",
+        event_type="EXIT_ORDER_REJECTED",
+    )
     logger.error(
         "Exit fill price missing for %s order=%s status=%s; holding pending exit",
         position.trade_id,
@@ -1606,6 +1563,7 @@ def _mark_exit_retry(
     reason: str,
     error: str = "",
     cooldown_seconds: int = DEFAULT_COOLDOWN_SECONDS,
+    conn: sqlite3.Connection | None = None,
 ) -> None:
     """Transition position to retry_pending with exponential backoff."""
     _mark_pending_exit(position)
@@ -1614,6 +1572,13 @@ def _mark_exit_retry(
 
     if position.exit_retry_count >= MAX_EXIT_RETRIES:
         position.exit_state = "backoff_exhausted"
+        _dual_write_canonical_pending_exit_if_available(
+            conn,
+            position,
+            reason=reason,
+            error=error,
+            event_type="EXIT_ORDER_REJECTED",
+        )
         logger.warning(
             "EXIT BACKOFF EXHAUSTED %s: %s (after %d retries). Holding to settlement.",
             position.trade_id, reason, position.exit_retry_count,
@@ -1626,6 +1591,13 @@ def _mark_exit_retry(
     position.next_exit_retry_at = (
         _utcnow() + timedelta(seconds=actual_cooldown)
     ).isoformat()
+    _dual_write_canonical_pending_exit_if_available(
+        conn,
+        position,
+        reason=reason,
+        error=error,
+        event_type="EXIT_ORDER_REJECTED",
+    )
 
     logger.warning(
         "EXIT RETRY %s: %s (attempt %d, next retry %s)",

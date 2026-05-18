@@ -8040,6 +8040,41 @@ def query_execution_event_summary(
         "by_strategy": by_strategy,
     }
 
+
+# ---------------------------------------------------------------------------
+# transition_phase — single writer for pending_exit phase mutations
+# ---------------------------------------------------------------------------
+#
+# Implementation moved to src/state/canonical_write.py (WAVE-3 Batch B bot
+# review fix, 2026-05-18) to keep db.py (K0) free of K2 engine imports.
+# This re-export preserves all existing import sites: callers that do
+#   from src.state.db import transition_phase
+# continue to work without modification.
+def transition_phase(
+    conn: "sqlite3.Connection | None",
+    position: object,
+    *,
+    event_type: str,
+    reason: str,
+    error: str,
+    source_module: str = "src.execution.exit_lifecycle",
+) -> bool:
+    """Re-export shim — delegates to src.state.canonical_write.transition_phase.
+
+    See that module for full docstring and implementation.
+    """
+    from src.state.canonical_write import transition_phase as _tp
+
+    return _tp(
+        conn,
+        position,
+        event_type=event_type,
+        reason=reason,
+        error=error,
+        source_module=source_module,
+    )
+
+
 def log_exit_lifecycle_event(
     conn: sqlite3.Connection,
     pos,
