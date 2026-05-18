@@ -2138,9 +2138,9 @@ def has_same_token_open(state: PortfolioState, token_id: str) -> bool:
     )
 
 
-_TERMINAL_PHASES = (
-    "voided", "economically_closed", "settled", "quarantined", "admin_closed"
-)
+# Derived from canonical INACTIVE_RUNTIME_STATES — single source of truth (Fitz #1).
+# tuple(sorted(...)) for stable SQL placeholder order.
+_TERMINAL_PHASES = tuple(sorted(INACTIVE_RUNTIME_STATES))
 
 
 def has_same_token_open_db(conn, token_id: str) -> bool:
@@ -2165,15 +2165,21 @@ def has_inflight_exit_for_token(conn, token_id: str) -> bool:
     """Belt-and-suspenders: block re-entry if any exit order for this token is
     in-flight (MATCHED or MINED in venue_trade_facts but not yet CONFIRMED/promoted).
 
-    Probe-6 result (2026-05-17): execution_facts table absent in zeus_trades.db.
-    Join path: venue_trade_facts.trade_id → position_current.trade_id (2-table).
-    If execution_facts is added later, migrate to 3-table join per B_patch_plan.md §2.
+    PR-S3 critic R1 (2026-05-17): original JOIN via position_current.trade_id was DEAD —
+    venue_trade_facts.trade_id stores full UUIDs; position_current.trade_id stores 11-char
+    short IDs (different namespaces, 0/76 rows matched in live DB).
+
+    Fixed join path: venue_trade_facts → venue_commands (both use full command_id UUID),
+    venue_commands.token_id is the correct bridge key.
+
+    Alternative future path (if needed): execution_fact.position_id → venue_commands.position_id
+    (execution_fact table exists with position_id column, confirmed 2026-05-17).
     """
     row = conn.execute(
         """SELECT 1
            FROM venue_trade_facts vtf
-           JOIN position_current pc ON pc.trade_id = vtf.trade_id
-           WHERE pc.token_id = ?
+           JOIN venue_commands vc ON vc.command_id = vtf.command_id
+           WHERE vc.token_id = ?
              AND vtf.state IN ('MATCHED', 'MINED')
            LIMIT 1""",
         (token_id,),

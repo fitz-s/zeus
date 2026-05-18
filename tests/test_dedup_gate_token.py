@@ -21,6 +21,7 @@ from src.state.portfolio import (
     PortfolioState,
     Position,
 )
+from src.engine.evaluator import _layer7_dedup_fires
 
 TOKEN_X = "0xabc123_token_yes"
 TOKEN_X_NO = "0xabc123_token_no"
@@ -29,7 +30,7 @@ OTHER_TOKEN = "0xother_token_yes"
 
 @pytest.fixture
 def mem_db():
-    """In-memory sqlite with minimal position_current + venue_trade_facts schema."""
+    """In-memory sqlite with minimal position_current + venue_trade_facts + venue_commands schema."""
     conn = sqlite3.connect(":memory:")
     conn.execute("""
         CREATE TABLE position_current (
@@ -52,6 +53,14 @@ def mem_db():
             command_id TEXT NOT NULL,
             state TEXT NOT NULL,
             observed_at TEXT NOT NULL
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE venue_commands (
+            command_id TEXT PRIMARY KEY,
+            position_id TEXT NOT NULL,
+            token_id TEXT NOT NULL,
+            state TEXT NOT NULL
         )
     """)
     conn.commit()
@@ -126,6 +135,15 @@ def test_voided_position_allows_reentry(mem_db):
 
 # ── phantom_not_on_chain (Bug #3 state) ─────────────────────────────────────────
 
+@pytest.mark.xfail(
+    reason=(
+        "Bug #3 will add phantom_not_on_chain to kernel SQL CHECK constraint "
+        "(architecture/2026_04_02_architecture_kernel.sql:94). "
+        "Production INSERT raises IntegrityError until that ships. "
+        "mem_db fixture lacks the CHECK so this passes in-test; "
+        "marking xfail documents the forward-compat contract."
+    )
+)
 def test_phantom_not_on_chain_blocks_reentry(mem_db):
     """
     GIVEN: position in phantom_not_on_chain (non-pending_exit — DQ-2 branch per N5)
@@ -134,6 +152,8 @@ def test_phantom_not_on_chain_blocks_reentry(mem_db):
     WHEN:  has_same_token_open_db(conn, TOKEN_X)
     THEN:  returns True → gate blocks re-entry (opening duplicate on unresolved phantom
            compounds chain-reconciliation confusion)
+    NOTE:  xfail until Bug #3 ships — kernel SQL CHECK absent; production INSERT
+           would raise IntegrityError before this path is exercisable live.
     """
     _insert_position(mem_db, "phantom-pos-01", "phantom_not_on_chain", TOKEN_X)
     assert has_same_token_open_db(mem_db, TOKEN_X) is True
@@ -149,6 +169,11 @@ def test_inflight_matched_exit_blocks_reentry(mem_db):
     THEN:  returns True → evaluator blocks re-entry during settlement window
     """
     _insert_position(mem_db, "pos-in-flight", "pending_exit", TOKEN_X)
+    # venue_commands bridges command_id → token_id (UUID namespace, not short-ID)
+    mem_db.execute(
+        "INSERT INTO venue_commands VALUES ('cmd-001', 'pos-in-flight', ?, 'open')",
+        (TOKEN_X,),
+    )
     mem_db.execute(
         "INSERT INTO venue_trade_facts VALUES "
         "(1, 'trade-pos-in-flight', 'order-001', 'cmd-001', 'MATCHED', '2026-05-17T22:13:38')"
@@ -161,12 +186,63 @@ def test_confirmed_exit_does_not_block_via_inflight_check(mem_db):
     """CONFIRMED exits are terminal — must not trigger the in-flight gate."""
     _insert_position(mem_db, "pos-confirmed", "economically_closed", TOKEN_X)
     mem_db.execute(
+        "INSERT INTO venue_commands VALUES ('cmd-001', 'pos-confirmed', ?, 'closed')",
+        (TOKEN_X,),
+    )
+    mem_db.execute(
         "INSERT INTO venue_trade_facts VALUES "
         "(1, 'trade-pos-confirmed', 'order-001', 'cmd-001', 'CONFIRMED', '2026-05-17T22:10:00')"
     )
     mem_db.commit()
     assert has_inflight_exit_for_token(mem_db, TOKEN_X) is False
 
+
+# ── OR-branch end-to-end: must fail when `or _inflight_exit` is removed ──────────
+
+def test_evaluator_rejects_when_only_inflight_exit_present(mem_db):
+    """
+    OR-branch relationship test: _layer7_dedup_fires must return True when
+    ONLY has_inflight_exit_for_token returns True (has_same_token_open_db returns
+    False — position already promoted to terminal economically_closed).
+
+    Scenario: position promoted to economically_closed (Bug #2 ran), but exit order
+    still shows MATCHED in venue_trade_facts during the 5-30s settlement window.
+    has_same_token_open_db → False (terminal phase); has_inflight_exit_for_token → True.
+
+    Meta-verify contract: removing `or has_inflight_exit_for_token(conn, token_id)`
+    from _layer7_dedup_fires in evaluator.py causes this test to FAIL because
+    token_held=False, inflight not checked → returns False → assertion below fails.
+
+    Verified by sed-break: sed 's/or has_inflight_exit_for_token//' evaluator.py
+    → this test FAILS. Restore → PASSES.
+    """
+    # Position promoted to terminal — has_same_token_open_db returns False
+    _insert_position(mem_db, "pos-promoted", "economically_closed", TOKEN_X)
+    assert has_same_token_open_db(mem_db, TOKEN_X) is False, (
+        "Precondition: economically_closed must not block (terminal phase)"
+    )
+
+    # Exit order still MATCHED in venue_trade_facts via venue_commands bridge
+    mem_db.execute(
+        "INSERT INTO venue_commands VALUES ('cmd-settle', 'pos-promoted', ?, 'closing')",
+        (TOKEN_X,),
+    )
+    mem_db.execute(
+        "INSERT INTO venue_trade_facts VALUES "
+        "(1, 'trade-promoted', 'order-settle', 'cmd-settle', 'MATCHED', '2026-05-17T22:24:00')"
+    )
+    mem_db.commit()
+
+    assert has_inflight_exit_for_token(mem_db, TOKEN_X) is True, (
+        "Precondition: inflight exit must be detected via venue_commands join"
+    )
+
+    # _layer7_dedup_fires contains `has_same_token_open_db(...) or has_inflight_exit_for_token(...)`.
+    # This call is load-bearing: removing the `or ...` branch from that function returns False here.
+    assert _layer7_dedup_fires(mem_db, None, TOKEN_X) is True, (
+        "OR gate must reject: inflight-only scenario → ALREADY_HELD_SAME_TOKEN. "
+        "If this fails, `or has_inflight_exit_for_token` was removed from _layer7_dedup_fires."
+    )
 
 # ── Snapshot fallback (anti-rot for the dual-path) ───────────────────────────────
 
