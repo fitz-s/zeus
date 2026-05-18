@@ -19,6 +19,7 @@ Graduated response: GREEN → YELLOW → ORANGE → RED.
 import json
 import logging
 import sqlite3
+import sys
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -1442,8 +1443,34 @@ def get_force_exit_review() -> bool:
 
 if __name__ == "__main__":
     """Run RiskGuard as standalone process."""
+    import signal
     import time
-    logging.basicConfig(level=logging.INFO)
+    _start = time.monotonic()  # F86: process start time for SIGTERM elapsed log
+    # F85: route INFO/DEBUG to stdout (.log) and WARNING+ to stderr (.err).
+    _fmt = logging.Formatter("%(asctime)s [%(name)s] %(levelname)s: %(message)s")
+    _stdout_h = logging.StreamHandler(sys.stdout)
+    _stdout_h.setLevel(logging.INFO)
+    _stdout_h.setFormatter(_fmt)
+    _stdout_h.addFilter(lambda r: r.levelno < logging.WARNING)
+    _stderr_h = logging.StreamHandler(sys.stderr)
+    _stderr_h.setLevel(logging.WARNING)
+    _stderr_h.setFormatter(_fmt)
+    _root = logging.getLogger()
+    _root.handlers.clear()
+    _root.setLevel(logging.INFO)
+    _root.addHandler(_stdout_h)
+    _root.addHandler(_stderr_h)
+    # F86: forensic SIGTERM trail.
+    signal.signal(
+        signal.SIGTERM,
+        lambda s, f: (
+            logger.error(
+                "SIGTERM_RECEIVED pid=%s ppid=%s elapsed=%ss",
+                os.getpid(), os.getppid(), int(time.monotonic() - _start),
+            ),
+            sys.exit(0),
+        ),
+    )
     logger.info("RiskGuard starting (60s tick)")
 
     from src.data.proxy_health import bypass_dead_proxy_env_vars

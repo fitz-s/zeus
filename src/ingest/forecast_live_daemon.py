@@ -780,10 +780,21 @@ def build_scheduler(*, startup_run_date: datetime | None = None):
 def main() -> None:
     global _scheduler
 
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
-    )
+    # F85: route INFO/DEBUG to stdout (.log) and WARNING+ to stderr (.err).
+    # handlers.clear() MUST precede any logger call (including bypass_dead_proxy_env_vars).
+    _fmt = logging.Formatter("%(asctime)s [%(name)s] %(levelname)s: %(message)s")
+    _stdout_h = logging.StreamHandler(sys.stdout)
+    _stdout_h.setLevel(logging.INFO)
+    _stdout_h.setFormatter(_fmt)
+    _stdout_h.addFilter(lambda r: r.levelno < logging.WARNING)
+    _stderr_h = logging.StreamHandler(sys.stderr)
+    _stderr_h.setLevel(logging.WARNING)
+    _stderr_h.setFormatter(_fmt)
+    _root = logging.getLogger()
+    _root.handlers.clear()
+    _root.setLevel(logging.INFO)
+    _root.addHandler(_stdout_h)
+    _root.addHandler(_stderr_h)
     logger.info("Zeus forecast-live daemon starting")
 
     from src.data.proxy_health import bypass_dead_proxy_env_vars
