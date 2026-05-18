@@ -177,6 +177,10 @@ _BASELINE_PER_FILE: dict[str, int] = {
     # names are sanitized command IDs or uuid-derived names. No request/user
     # string is admitted as a SQL identifier.
     "src/execution/command_recovery.py": 23,
+    # 1 f-string SQL site in has_same_token_open_db: NOT IN placeholders built from
+    # _TERMINAL_PHASES (fixed-length tuple of internal constants — no user input).
+    # Added PR-S3 (2026-05-17), registered here per bot review PR #143 (2026-05-18).
+    "src/state/portfolio.py": 1,
     # Tail catch — fresh files with f-string SQL must be added explicitly.
 }
 

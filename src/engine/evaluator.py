@@ -88,7 +88,9 @@ from src.state.portfolio import (
     PortfolioState,
     city_exposure_for_bankroll,
     cluster_exposure_for_bankroll,
-    has_same_city_range_open,
+    has_same_token_open,
+    has_same_token_open_db,
+    has_inflight_exit_for_token,
     is_reentry_blocked,
     is_token_on_cooldown,
     portfolio_heat_for_bankroll,
@@ -1759,6 +1761,31 @@ def _get_day0_temporal_context(city: City, target_date: date, observation: "Opti
         return None
 
 
+def _layer7_dedup_fires(conn, portfolio: "PortfolioState", token_id: str) -> bool:
+    """Layer 7 (v2) dedup gate: returns True if a new entry for token_id should be rejected.
+
+    Belt-and-suspenders: rejects if EITHER the DB shows a non-terminal position
+    for this token (has_same_token_open_db) OR an exit order is still in-flight
+    on-chain (has_inflight_exit_for_token via venue_commands bridge).
+
+    When conn is None (paper mode / test fixtures without DB):
+    - Falls back to snapshot-based check (has_same_token_open).
+    - PAPER/LIVE PARITY GAP: snapshot path has no in-flight detection.
+      Live (conn != None) path is strictly stronger. Acceptable for paper-mode
+      entries because no real exits are submitted; flagged for future Position
+      in-flight marker exposure.
+
+    Extracted from evaluate_candidate inner loop so the OR-branch is directly
+    testable without wiring the full evaluate_candidate call.
+    """
+    if conn is not None:
+        return (
+            has_same_token_open_db(conn, token_id)
+            or has_inflight_exit_for_token(conn, token_id)
+        )
+    return has_same_token_open(portfolio, token_id)
+
+
 def evaluate_candidate(
     candidate: MarketCandidate,
     conn,
@@ -3364,13 +3391,16 @@ def evaluate_candidate(
                 strategy_key=strategy_key,
             ))
             continue
-        if has_same_city_range_open(portfolio, city.name, edge.bin.label):
+        # Layer 7 (v2): token-keyed dedup gate with decision-time DB read.
+        # Probe-6 (2026-05-17): execution_facts absent → venue_commands join path
+        # in has_inflight_exit_for_token (venue_trade_facts → venue_commands).
+        if _layer7_dedup_fires(conn, portfolio, check_token):
             decisions.append(EdgeDecision(
                 False,
                 edge=edge,
                 decision_id=_decision_id(),
                 rejection_stage="ANTI_CHURN",
-                rejection_reasons=["CROSS_DATE_BLOCK"],
+                rejection_reasons=["ALREADY_HELD_SAME_TOKEN"],
                 selected_method=selected_method,
                 applied_validations=[*decision_validations, "anti_churn"],
                 decision_snapshot_id=snapshot_id,
