@@ -56,10 +56,11 @@ def test_live_contended_calls_event_writer(tmp_path: Path) -> None:
     calls: list[dict] = []
 
     def mock_event_writer(*, caller_module: str, split_reason: str,
-                          duration_ms: int = 0, **kw) -> None:
+                          duration_ms: int = 0, rows_processed: int = 0, **kw) -> None:
         calls.append({"caller_module": caller_module,
                       "split_reason": split_reason,
-                      "duration_ms": duration_ms})
+                      "duration_ms": duration_ms,
+                      "rows_processed": rows_processed})
 
     chunker = BulkChunker(
         writer_conn,
@@ -70,6 +71,7 @@ def test_live_contended_calls_event_writer(tmp_path: Path) -> None:
 
     with patch.object(chunker, "_is_live_contended", return_value=True):
         with chunker:
+            chunker.increment_rows(123)
             chunker.yield_if_live_contended()
 
     writer_conn.close()
@@ -79,6 +81,9 @@ def test_live_contended_calls_event_writer(tmp_path: Path) -> None:
     )
     assert calls[0]["split_reason"] == "LIVE_CONTENDED", (
         f"F11: split_reason must be LIVE_CONTENDED; got {calls[0]['split_reason']!r}"
+    )
+    assert calls[0]["rows_processed"] == 123, (
+        f"F11: rows_processed must be 123; got {calls[0].get('rows_processed')}"
     )
     assert calls[0]["caller_module"] == "test.f11.probe1"
     assert calls[0]["duration_ms"] >= 0, (
@@ -106,10 +111,11 @@ def test_watchdog_calls_event_writer(tmp_path: Path) -> None:
     fired = threading.Event()
 
     def mock_event_writer(*, caller_module: str, split_reason: str,
-                          duration_ms: int = 0, **kw) -> None:
+                          duration_ms: int = 0, rows_processed: int = 0, **kw) -> None:
         calls.append({"caller_module": caller_module,
                       "split_reason": split_reason,
-                      "duration_ms": duration_ms})
+                      "duration_ms": duration_ms,
+                      "rows_processed": rows_processed})
         fired.set()
 
     chunker = BulkChunker(
@@ -122,6 +128,7 @@ def test_watchdog_calls_event_writer(tmp_path: Path) -> None:
 
     try:
         with chunker:
+            chunker.increment_rows(456)
             # Wait for event_writer to be called (fired event), or timeout.
             # The watchdog will also fire interrupt_main() shortly after.
             fired.wait(timeout=2.0)
@@ -139,6 +146,9 @@ def test_watchdog_calls_event_writer(tmp_path: Path) -> None:
     )
     watchdog_calls = [c for c in calls if c["split_reason"] == "WATCHDOG"]
     assert watchdog_calls[0]["caller_module"] == "test.f11.probe2"
+    assert watchdog_calls[0]["rows_processed"] == 456, (
+        f"F11: watchdog rows_processed must be 456; got {watchdog_calls[0].get('rows_processed')}"
+    )
     assert watchdog_calls[0]["duration_ms"] >= 0
 
 
@@ -258,6 +268,7 @@ def test_bulk_lock_with_chunker_emits_real_row(tmp_path: Path) -> None:
     ) as chunker:
         # Trigger LIVE_CONTENDED yield via mock on the returned chunker instance.
         with patch.object(chunker, "_is_live_contended", return_value=True):
+            chunker.increment_rows(789)
             chunker.yield_if_live_contended()
 
     write_conn.close()
@@ -266,7 +277,7 @@ def test_bulk_lock_with_chunker_emits_real_row(tmp_path: Path) -> None:
     reader = sqlite3.connect(str(obs_db_path))
     try:
         rows = reader.execute(
-            "SELECT split_reason, caller_module FROM db_chunk_boundary_events"
+            "SELECT split_reason, caller_module, rows_processed FROM db_chunk_boundary_events"
         ).fetchall()
     finally:
         reader.close()
@@ -280,6 +291,9 @@ def test_bulk_lock_with_chunker_emits_real_row(tmp_path: Path) -> None:
     )
     assert rows[0][1] == "test.f11.probe5.e2e", (
         f"F11 E2E: expected caller_module test.f11.probe5.e2e; got {rows[0][1]!r}"
+    )
+    assert rows[0][2] == 789, (
+        f"F11 E2E: expected rows_processed 789; got {rows[0][2]}"
     )
 
 

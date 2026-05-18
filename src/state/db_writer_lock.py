@@ -229,6 +229,17 @@ class BulkChunker:
         #   event_writer(caller_module=..., split_reason=..., duration_ms=...)
         # Failure-silent at call-site.
         self._event_writer = event_writer
+        self._rows_since_last_emit = 0
+
+    def increment_rows(self, n: int = 1) -> None:
+        """Increment the internal row counter for the current chunk.
+
+        Call this from the main thread during processing. The counter is
+        passed to event_writer and reset on every emit (LIVE_CONTENDED or
+        WATCHDOG).
+        """
+        with self._lock:
+            self._rows_since_last_emit += n
 
     # -- context-manager lifecycle (v4 MF5 §3.1.5) --
 
@@ -369,10 +380,15 @@ class BulkChunker:
         if self._event_writer is not None:
             try:
                 duration_ms = int((time.monotonic() - yield_start) * 1000)
+                with self._lock:
+                    rows = self._rows_since_last_emit
+                    self._rows_since_last_emit = 0
+
                 self._event_writer(
                     caller_module=self.caller_module,
                     split_reason="LIVE_CONTENDED",
                     duration_ms=duration_ms,
+                    rows_processed=rows,
                 )
             except Exception as ew_exc:
                 logger.debug(
@@ -454,10 +470,15 @@ class BulkChunker:
                 # record lands even if the main thread exits rapidly.
                 if self._event_writer is not None:
                     try:
+                        with self._lock:
+                            rows = self._rows_since_last_emit
+                            self._rows_since_last_emit = 0
+
                         self._event_writer(
                             caller_module=self.caller_module,
                             split_reason="WATCHDOG",
                             duration_ms=int(elapsed * 1000),
+                            rows_processed=rows,
                         )
                     except Exception as ew_exc:
                         logger.debug(

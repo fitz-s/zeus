@@ -1554,6 +1554,7 @@ def rebuild_v2(
             # the bulk fcntl if a LIVE writer is mid-transaction. No-op when
             # chunker is None (preserves legacy callers + parallel path).
             if chunker is not None:
+                chunker.increment_rows(stats.pairs_written - chunker._rows_since_last_emit)
                 chunker.yield_if_live_contended()
 
     # Post-all-cities validation.
