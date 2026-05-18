@@ -1087,6 +1087,11 @@ def _check_persistence_anomaly(
             # Scale discount: 10% at n=30, grows linearly to 30% at n>=100
             discount_magnitude = min(0.30, 0.10 + 0.20 * (n - 30) / 70.0)
             return 1.0 - discount_magnitude
+        else:
+            logger.debug(
+                "PERSISTENCE_NO_DATA: temp_persistence has no row for %s/%s/bucket=%s — returning 1.0 (no discount)",
+                city_name, target_date, bucket,
+            )
 
     except Exception as e:
         logger.debug("Persistence anomaly check failed for %s: %s", city_name, e)
