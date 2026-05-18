@@ -1182,10 +1182,20 @@ def main() -> None:
     from apscheduler.executors.pool import ThreadPoolExecutor as _APSchedulerThreadPoolExecutor
     from apscheduler.schedulers.blocking import BlockingScheduler
 
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
-    )
+    # F85: route INFO/DEBUG to stdout (.log) and WARNING+ to stderr (.err).
+    _fmt = logging.Formatter("%(asctime)s [%(name)s] %(levelname)s: %(message)s")
+    _stdout_h = logging.StreamHandler(sys.stdout)
+    _stdout_h.setLevel(logging.INFO)
+    _stdout_h.setFormatter(_fmt)
+    _stdout_h.addFilter(lambda r: r.levelno < logging.WARNING)
+    _stderr_h = logging.StreamHandler(sys.stderr)
+    _stderr_h.setLevel(logging.WARNING)
+    _stderr_h.setFormatter(_fmt)
+    _root = logging.getLogger()
+    _root.handlers.clear()
+    _root.setLevel(logging.INFO)
+    _root.addHandler(_stdout_h)
+    _root.addHandler(_stderr_h)
     logger.info("Zeus data-ingest daemon starting (pid=%d)", os.getpid())
 
     # §4.5(a): control_plane.json dual consumer — boot-time read of ingest directives.

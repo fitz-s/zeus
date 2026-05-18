@@ -21,8 +21,10 @@ Advisory file lock infrastructure (src.data.dual_run_lock) is retained in code
 import functools
 import logging
 import os
+import signal
 import sys
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -1421,11 +1423,35 @@ def _assert_live_safe_strategies_or_exit(*, refresh_state: bool = True) -> None:
 
 
 def main():
+    _start = time.monotonic()  # F86: process start time for SIGTERM elapsed log
     mode = get_mode()
     once = "--once" in sys.argv
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+    # F85: route INFO (below-WARNING) to stdout (.log) and WARNING+ to stderr (.err).
+    # Plists correctly bifurcate StandardOutPath/.err; basicConfig default
+    # StreamHandler(sys.stderr) was routing all output to .err only.
+    _fmt = logging.Formatter("%(asctime)s [%(name)s] %(levelname)s: %(message)s")
+    _stdout_h = logging.StreamHandler(sys.stdout)
+    _stdout_h.setLevel(logging.INFO)
+    _stdout_h.setFormatter(_fmt)
+    _stdout_h.addFilter(lambda r: r.levelno < logging.WARNING)
+    _stderr_h = logging.StreamHandler(sys.stderr)
+    _stderr_h.setLevel(logging.WARNING)
+    _stderr_h.setFormatter(_fmt)
+    _root = logging.getLogger()
+    _root.handlers.clear()
+    _root.setLevel(logging.INFO)
+    _root.addHandler(_stdout_h)
+    _root.addHandler(_stderr_h)
+    # F86: forensic SIGTERM trail — logs elapsed seconds to .err before exit.
+    signal.signal(
+        signal.SIGTERM,
+        lambda s, f: (
+            logger.error(
+                "SIGTERM_RECEIVED pid=%s ppid=%s elapsed=%ss",
+                os.getpid(), os.getppid(), int(time.monotonic() - _start),
+            ),
+            sys.exit(0),
+        ),
     )
 
     logger.info("Zeus starting in %s mode%s", mode, " (single cycle)" if once else "")

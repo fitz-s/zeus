@@ -502,6 +502,9 @@ def _launchctl_loaded_contract(
     state = _first_launchctl_field(output, "state")
     pid = _parse_launchctl_pid(output)
     working_directory = _first_launchctl_field(output, "working directory")
+    # F86: surface prior exit code so the 30-min dispatcher path catches silent SIGTERMs.
+    # launchctl print emits "last exit code = -15" for SIGTERM exits.
+    last_exit_code = _first_launchctl_field(output, "last exit code")
 
     item.update(
         {
@@ -514,12 +517,17 @@ def _launchctl_loaded_contract(
             "working_directory": working_directory,
             "pythonpath_matches": environment.get("PYTHONPATH") == str(root_path),
             "module": module,
+            "last_exit_code": last_exit_code,
         }
     )
     if path != str(plist_path):
         item["issues"].append("loaded_plist_path_mismatch")
     if state != "running" or pid <= 0:
         item["issues"].append("loaded_job_not_running")
+    # F86: flag prior non-clean exit (SIGTERM = -15; crash = positive int).
+    # "0" and "" (never exited) are clean; anything else warrants operator attention.
+    if last_exit_code and last_exit_code not in ("0", "(never exited)"):
+        item["issues"].append(f"loaded_prior_exit_code_{last_exit_code.replace('-', 'neg')}")
     if "keepalive" not in properties:
         item["issues"].append("loaded_keepalive_not_true")
     if "runatload" not in properties:

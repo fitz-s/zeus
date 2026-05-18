@@ -13,6 +13,8 @@ import inspect
 import json
 import logging
 import os
+import signal
+import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -613,6 +615,19 @@ def run_heartbeat_keeper(
 
 
 def _main(argv: list[str] | None = None) -> int:
+    _start = time.monotonic()  # F86: process start time for SIGTERM elapsed log
+    # F86: forensic SIGTERM trail — logs elapsed seconds to stderr before exit.
+    _log = logging.getLogger(__name__)
+    signal.signal(
+        signal.SIGTERM,
+        lambda s, f: (
+            _log.error(
+                "SIGTERM_RECEIVED pid=%s ppid=%s elapsed=%ss",
+                os.getpid(), os.getppid(), int(time.monotonic() - _start),
+            ),
+            sys.exit(0),
+        ),
+    )
     parser = argparse.ArgumentParser(description="Run the Zeus CLOB venue heartbeat keeper.")
     parser.add_argument("--once", action="store_true", help="post one heartbeat and exit")
     parser.add_argument("--status-path", help="override status JSON path")
