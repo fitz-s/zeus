@@ -1,9 +1,17 @@
 # Created: 2026-05-05
-# Last reused/audited: 2026-05-08
-# Lifecycle: created=2026-05-05; last_reviewed=2026-05-08; last_reused=2026-05-08
+# Last reused/audited: 2026-05-17
+# Lifecycle: created=2026-05-05; last_reviewed=2026-05-17; last_reused=2026-05-08
 # Authority basis: architecture/calibration_transfer_oos_design_2026-05-05.md Phase X.2
 # Purpose: Evaluate out-of-sample calibration-transfer evidence without promoting it to live authority.
 # Reuse: Run in --dry-run by default; use --no-dry-run only under daemon-lock/operator-gated evidence production.
+#
+# SCHEDULING NOTE (F17 — 2026-05-17): This script is intentionally NOT registered in cron/jobs.json.
+# The validated_calibration_transfers table is a Phase B upgrade path only.  At launch Zeus uses the
+# legacy static-mapping path (ZEUS_CALIBRATION_TRANSFER_OOS_EVAL_ENABLED flag OFF).  The cron entry
+# should NOT be added until Phase B is activated (~2-4 weeks post-launch, once ECMWF calibration_pairs_v2
+# rows have accumulated).  Authority: docs/operations/LIVE_LAUNCH_HANDOFF.md §A.4 and §B.3;
+# docs/operations/PLIST_UPDATE_FOR_RELOCK.md §1.5.  Flipping the flag prematurely silently falls to
+# SHADOW_ONLY because no validated_calibration_transfers rows exist for the ECMWF target_source_id.
 """OOS evaluator: writes ``validated_calibration_transfers`` rows.
 
 Phase X.2 of the calibration-transfer evidence pipeline.  Iterates all
