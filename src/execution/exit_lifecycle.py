@@ -696,6 +696,16 @@ def handle_exit_pending_missing(
         event_type="EXIT_ORDER_REJECTED",
     )
     if position.exit_state == "backoff_exhausted":
+        closed = mark_admin_closed(portfolio, position.trade_id, "EXIT_CHAIN_MISSING_REVIEW_REQUIRED")
+        if closed is not None:
+            _dual_write_canonical_admin_close_if_available(
+                conn,
+                closed,
+                phase_before="pending_exit",
+                reason="EXIT_CHAIN_MISSING_REVIEW_REQUIRED",
+                error=getattr(position, "last_exit_error", "") or "exit_pending_missing",
+            )
+            return {"action": "closed", "position": closed}
         return {"action": "skip", "position": None}
     if position.exit_state in EXIT_LIFECYCLE_RECOVERY_STATES:
         closed = mark_admin_closed(portfolio, position.trade_id, "EXIT_CHAIN_MISSING_REVIEW_REQUIRED")
@@ -782,6 +792,78 @@ def _dual_write_canonical_pending_exit_if_available(
         error=error,
         source_module="src.execution.exit_lifecycle",
     )
+
+
+def _dual_write_canonical_admin_close_if_available(
+    conn: sqlite3.Connection | None,
+    position: Position,
+    *,
+    phase_before: str,
+    reason: str,
+    error: str,
+) -> bool:
+    if conn is None:
+        return False
+    try:
+        import json as _json
+
+        from src.engine.lifecycle_events import build_position_current_projection
+        from src.state.db import append_many_and_project
+        from src.state.lifecycle_manager import fold_lifecycle_phase
+
+        trade_id = str(getattr(position, "trade_id", "") or "")
+        if not trade_id:
+            return False
+        sequence_no = _next_canonical_sequence_no(conn, trade_id)
+        occurred_at = getattr(position, "last_exit_at", "") or datetime.now(timezone.utc).isoformat()
+        projection = build_position_current_projection(position)
+        if projection.get("phase") != "admin_closed":
+            return False
+        projection["updated_at"] = occurred_at
+        env = str(getattr(position, "env", "") or "live")
+        if env not in {"live", "test", "replay", "backtest", "shadow"}:
+            env = "live"
+        event = {
+            "event_id": f"{trade_id}:admin_closed:{sequence_no}",
+            "position_id": trade_id,
+            "event_version": 1,
+            "sequence_no": sequence_no,
+            "event_type": "MANUAL_OVERRIDE_APPLIED",
+            "occurred_at": occurred_at,
+            "phase_before": phase_before,
+            "phase_after": fold_lifecycle_phase(phase_before, "admin_closed").value,
+            "strategy_key": str(
+                getattr(position, "strategy_key", "")
+                or getattr(position, "strategy", "")
+                or ""
+            ),
+            "decision_id": None,
+            "snapshot_id": getattr(position, "decision_snapshot_id", "") or None,
+            "order_id": getattr(position, "last_exit_order_id", "") or getattr(position, "order_id", "") or None,
+            "command_id": None,
+            "caused_by": "exit_pending_chain_absent",
+            "idempotency_key": f"{trade_id}:admin_closed:{sequence_no}",
+            "venue_status": "admin_closed",
+            "source_module": "src.execution.exit_lifecycle",
+            "env": env,
+            "payload_json": _json.dumps(
+                {
+                    "reason": reason,
+                    "error": error,
+                    "exit_state": getattr(position, "exit_state", ""),
+                    "chain_state": getattr(position, "chain_state", ""),
+                    "last_exit_order_id": getattr(position, "last_exit_order_id", ""),
+                },
+                default=str,
+                sort_keys=True,
+            ),
+        }
+        append_many_and_project(conn, [event], projection)
+        return True
+    except Exception as exc:
+        raise RuntimeError(
+            f"canonical admin-close dual-write failed for {getattr(position, 'trade_id', '?')}: {exc}"
+        ) from exc
 
 
 def execute_exit(

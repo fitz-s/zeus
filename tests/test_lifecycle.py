@@ -7,7 +7,7 @@
 # Reuse: Referenced by regression suite; last touched 2026-05-08 for Wave28
 #        (HIGH→v2 route). Apply v2 schema in test fixtures when asserting
 #        post-harvest pair rows.
-# Last reused/audited: 2026-05-08
+# Last reused/audited: 2026-05-18
 # Authority basis: docs/operations/task_2026-05-08_object_invariance_wave28/PLAN.md
 """Tests for exit triggers and harvester."""
 
@@ -25,7 +25,7 @@ from src.execution.exit_triggers import (
     ExitSignal,
 )
 from src.execution.harvester import harvest_settlement
-from src.state.portfolio import Position
+from src.state.portfolio import Position, PortfolioState
 from src.state.db import get_connection, init_schema
 from src.config import City
 from src.contracts import EdgeContext, EntryMethod
@@ -91,6 +91,195 @@ def _make_position(**kwargs) -> Position:
     )
     defaults.update(kwargs)
     return Position(**defaults)
+
+
+def test_chain_reconciliation_phantom_void_persists_canonical_projection(tmp_path):
+    """Relationship: Chain > Portfolio voids must persist to canonical DB truth."""
+
+    from src.state.chain_reconciliation import ChainPosition, reconcile
+    from src.state.db import query_position_events
+
+    conn = get_connection(tmp_path / "chain_phantom_void.db")
+    init_schema(conn)
+
+    pos = _make_position(
+        trade_id="phantom-db-1",
+        state="holding",
+        chain_state="synced",
+        token_id="tok-phantom",
+        no_token_id="tok-phantom-no",
+        shares=6.0,
+        cost_basis_usd=1.86,
+        size_usd=1.86,
+        entry_price=0.31,
+        entered_at="2026-05-18T12:00:00+00:00",
+        strategy_key="opening_inertia",
+        strategy="opening_inertia",
+        env="live",
+        unit="C",
+    )
+    conn.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, trade_id, market_id, city, cluster,
+            target_date, bin_label, direction, unit, size_usd, shares,
+            cost_basis_usd, entry_price, p_posterior, decision_snapshot_id,
+            entry_method, strategy_key, edge_source, discovery_mode,
+            chain_state, token_id, no_token_id, condition_id, order_id,
+            order_status, updated_at, temperature_metric
+        ) VALUES (
+            ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+        )
+        """,
+        (
+            pos.trade_id,
+            pos.trade_id,
+            pos.market_id,
+            pos.city,
+            pos.cluster,
+            pos.target_date,
+            pos.bin_label,
+            pos.direction,
+            pos.unit,
+            pos.size_usd,
+            pos.shares,
+            pos.cost_basis_usd,
+            pos.entry_price,
+            pos.p_posterior,
+            "snap-phantom",
+            "ens_member_counting",
+            pos.strategy_key,
+            "opening_inertia",
+            "opening_hunt",
+            pos.chain_state,
+            pos.token_id,
+            pos.no_token_id,
+            "cond-phantom",
+            "order-phantom",
+            "filled",
+            pos.entered_at,
+            "high",
+        ),
+    )
+    conn.commit()
+
+    portfolio = PortfolioState(positions=[pos])
+    stats = reconcile(
+        portfolio,
+        [ChainPosition(token_id="tok-other", size=1.0, avg_price=0.5, condition_id="cond-other")],
+        conn=conn,
+    )
+    conn.commit()
+
+    row = conn.execute(
+        "SELECT phase, chain_state FROM position_current WHERE position_id = ?",
+        (pos.trade_id,),
+    ).fetchone()
+    events = query_position_events(conn, pos.trade_id)
+    conn.close()
+
+    assert stats["voided"] == 1
+    assert row["phase"] == "voided"
+    assert [event["event_type"] for event in events] == ["ADMIN_VOIDED"]
+    assert events[0]["source"] == "src.state.chain_reconciliation"
+    assert events[0]["details"]["reason"] == "PHANTOM_NOT_ON_CHAIN"
+
+
+def test_chain_reconciliation_phantom_void_allows_legacy_unknown_phase_before(tmp_path):
+    """Relationship: legacy runtime states can still be canonically voided."""
+
+    from src.state.chain_reconciliation import ChainPosition, reconcile
+
+    conn = get_connection(tmp_path / "chain_phantom_void_unknown_phase.db")
+    init_schema(conn)
+
+    pos = _make_position(
+        trade_id="phantom-unknown-phase",
+        state="holding",
+        chain_state="synced",
+        token_id="tok-legacy-phantom",
+        no_token_id="tok-legacy-phantom-no",
+        shares=2.0,
+        cost_basis_usd=0.6,
+        size_usd=0.6,
+        entry_price=0.3,
+        entered_at="2026-05-18T12:00:00+00:00",
+        strategy_key="opening_inertia",
+        strategy="opening_inertia",
+        env="live",
+        unit="C",
+    )
+    pos.state = "quarantine_size_mismatch"
+    conn.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, trade_id, market_id, city, cluster,
+            target_date, bin_label, direction, unit, size_usd, shares,
+            cost_basis_usd, entry_price, p_posterior, decision_snapshot_id,
+            entry_method, strategy_key, edge_source, discovery_mode,
+            chain_state, token_id, no_token_id, condition_id, order_id,
+            order_status, updated_at, temperature_metric
+        ) VALUES (
+            ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+        )
+        """,
+        (
+            pos.trade_id,
+            pos.trade_id,
+            pos.market_id,
+            pos.city,
+            pos.cluster,
+            pos.target_date,
+            pos.bin_label,
+            pos.direction,
+            pos.unit,
+            pos.size_usd,
+            pos.shares,
+            pos.cost_basis_usd,
+            pos.entry_price,
+            pos.p_posterior,
+            "snap-legacy-phantom",
+            "ens_member_counting",
+            pos.strategy_key,
+            "opening_inertia",
+            "opening_hunt",
+            pos.chain_state,
+            pos.token_id,
+            pos.no_token_id,
+            "cond-legacy-phantom",
+            "order-legacy-phantom",
+            "filled",
+            pos.entered_at,
+            "high",
+        ),
+    )
+    conn.commit()
+
+    portfolio = PortfolioState(positions=[pos])
+    stats = reconcile(
+        portfolio,
+        [ChainPosition(token_id="tok-other", size=1.0, avg_price=0.5, condition_id="cond-other")],
+        conn=conn,
+    )
+    row = conn.execute(
+        "SELECT phase FROM position_current WHERE position_id = ?",
+        (pos.trade_id,),
+    ).fetchone()
+    event = conn.execute(
+        "SELECT event_type, phase_before, phase_after FROM position_events WHERE position_id = ?",
+        (pos.trade_id,),
+    ).fetchone()
+    conn.close()
+
+    assert stats["voided"] == 1
+    assert row["phase"] == "voided"
+    assert dict(event) == {
+        "event_type": "ADMIN_VOIDED",
+        "phase_before": None,
+        "phase_after": "voided",
+    }
 
 
 class TestExitTriggers:

@@ -9713,7 +9713,7 @@ def test_monitoring_defers_exit_pending_missing_resolution_to_exit_lifecycle(mon
     assert summary["exit_chain_missing_closed"] == 1
 
 
-def test_monitoring_skips_backoff_exhausted_chain_missing_until_settlement():
+def test_monitoring_admin_closes_backoff_exhausted_when_chain_missing():
     pos = Position(
         trade_id="backoff-missing-chain",
         market_id="m1",
@@ -9732,22 +9732,27 @@ def test_monitoring_skips_backoff_exhausted_chain_missing_until_settlement():
     summary = {"monitors": 0, "exits": 0}
 
     class Tracker:
+        def __init__(self):
+            self.exits = []
+
         def record_exit(self, position):
-            raise AssertionError("backoff_exhausted chain-missing positions should wait for settlement, not admin-close")
+            self.exits.append(position)
 
     p_dirty, t_dirty = cycle_runner._execute_monitoring_phase(
         None,
         type("LiveClob", (), {})(),
         portfolio,
         artifact,
-        Tracker(),
+        tracker := Tracker(),
         summary,
     )
 
-    assert p_dirty is False
-    assert t_dirty is False
-    assert portfolio.positions == [pos]
-    assert summary["monitor_skipped_exit_pending_missing"] == 1
+    assert p_dirty is True
+    assert t_dirty is True
+    assert portfolio.positions == []
+    assert tracker.exits[0].state == "admin_closed"
+    assert tracker.exits[0].admin_exit_reason == "EXIT_CHAIN_MISSING_REVIEW_REQUIRED"
+    assert summary["exit_chain_missing_closed"] == 1
 
 
 def test_openmeteo_parse_keeps_first_valid_time_and_does_not_fake_issue_time():
