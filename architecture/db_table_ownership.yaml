@@ -900,7 +900,7 @@ tables:
     db: world
     schema_class: world_class
     schema_version_owner: SCHEMA_VERSION
-    created_by: migration
+    created_by: init_schema
     pk_col: event_id
     notes: >
       F11 (wave6 2026-05-18): BulkChunker LIVE-yield and watchdog-fire
