@@ -3521,6 +3521,21 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                                 deps=deps,
                                 decision_evidence=getattr(d, "decision_evidence", None),
                             )
+                            # Bridge assertion: trade_decisions row must exist for
+                            # pos.trade_id before RELEASE.  If log_trade_entry
+                            # succeeded but the row is somehow absent (schema
+                            # mismatch, wrong conn), roll back atomically.
+                            _trade_id = getattr(pos, "trade_id", None)
+                            if _trade_id:
+                                _bridge_row = conn.execute(
+                                    "SELECT 1 FROM trade_decisions WHERE runtime_trade_id = ?",
+                                    (_trade_id,),
+                                ).fetchone()
+                                if _bridge_row is None:
+                                    raise RuntimeError(
+                                        f"Bridge assertion failed: trade_decisions has no row "
+                                        f"for runtime_trade_id={_trade_id!r} after log_trade_entry"
+                                    )
                             conn.execute(f"RELEASE SAVEPOINT {sp_name}")
                         except Exception:
                             conn.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")

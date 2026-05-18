@@ -2407,6 +2407,15 @@ class SchemaOutOfDateError(RuntimeError):
     """PRAGMA user_version != SCHEMA_VERSION."""
 
 
+class BridgeAbsentError(RuntimeError):
+    """position_current row has no matching trade_decisions.runtime_trade_id bridge.
+
+    Raised by update_trade_lifecycle when the synthesizer cannot reconstruct
+    the missing bridge row from available join tables.  Signals a real cascade
+    defect that requires operator investigation.
+    """
+
+
 def assert_schema_current(conn: sqlite3.Connection) -> None:
     """O(1) currency check (page-1 metadata).
     Boot: trade DB src/main.py:692, world DB src/ingest_main.py:1035."""
@@ -5970,8 +5979,14 @@ def log_trade_entry(conn: sqlite3.Connection, pos) -> None:
                 VALUES ({placeholders})
             """, values)
         except Exception as e:
-            import logging
-            logging.getLogger(__name__).warning('Failed to log trade entry: %s', e)
+            import logging as _logging
+            _logging.getLogger(__name__).error(
+                "[LOG_TRADE_ENTRY_FAILED] position_id=%s err=%r — bridge write is mandatory; "
+                "propagating to outer SAVEPOINT for rollback",
+                getattr(pos, "trade_id", "?"),
+                e,
+            )
+            raise
 
 
 
@@ -6186,7 +6201,37 @@ def update_trade_lifecycle(conn: sqlite3.Connection, pos) -> None:
         (runtime_trade_id,),
     ).fetchone()
     if row is None:
-        return
+        # Bridge absent: attempt programmatic reconstruction via synthesizer.
+        # This fires for pre-existing orphan rows (e.g. opening_inertia gap,
+        # Karachi c30f28a5-d4e) on their first lifecycle event after the fix
+        # ships.  If synthesis succeeds, lifecycle update proceeds normally.
+        # If synthesis also fails, BridgeAbsentError surfaces the real defect.
+        try:
+            from src.state.trade_decisions_synthesizer import (
+                BridgeSynthesisError,
+                synthesize_missing_bridge,
+            )
+            synthesize_missing_bridge(conn, runtime_trade_id)
+        except Exception as _synth_err:
+            raise BridgeAbsentError(
+                f"position {runtime_trade_id!r} has no trade_decisions row; "
+                f"synthesizer also failed: {_synth_err!r}; cannot update lifecycle"
+            ) from _synth_err
+        # Re-query after successful synthesis
+        row = conn.execute(
+            """
+            SELECT trade_id FROM trade_decisions
+            WHERE runtime_trade_id = ?
+            ORDER BY trade_id DESC
+            LIMIT 1
+            """,
+            (runtime_trade_id,),
+        ).fetchone()
+        if row is None:
+            raise BridgeAbsentError(
+                f"position {runtime_trade_id!r} has no trade_decisions row even after "
+                f"synthesis completed without error; cannot update lifecycle"
+            )
 
     status = getattr(pos, "state", "") or "entered"
     timestamp = (
