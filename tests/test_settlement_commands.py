@@ -449,6 +449,34 @@ def test_v1_legacy_unresolved_classified_separately_from_v2_pusd_payout(conn, mo
     assert json.loads(row["error_payload"])["reason"] == "legacy_usdc_e_payout_requires_operator_review"
 
 
+def test_enqueue_backfills_existing_redeem_winning_index_set_before_settlement_close(conn):
+    from src.execution.harvester import enqueue_redeem_command
+
+    first = enqueue_redeem_command(
+        conn,
+        condition_id="condition-backfill-index-set",
+        payout_asset="pUSD",
+        market_id="market-backfill-index-set",
+        token_amounts={"yes-token": "1.5"},
+        winning_index_set=None,
+    )
+    assert first["status"] == "queued"
+    assert command(conn, first["command_id"])["winning_index_set"] is None
+
+    second = enqueue_redeem_command(
+        conn,
+        condition_id="condition-backfill-index-set",
+        payout_asset="pUSD",
+        market_id="market-backfill-index-set",
+        token_amounts={"yes-token": "1.5"},
+        winning_index_set='["2"]',
+    )
+
+    assert second == {"status": "already_exists", "command_id": first["command_id"], "reason": None}
+    assert command(conn, first["command_id"])["winning_index_set"] == '["2"]'
+    assert "REDEEM_INDEX_SET_BACKFILLED" in states(conn, first["command_id"])
+
+
 def test_redeem_submit_blocked_until_q_fx_1_classified(conn, monkeypatch):
     from src.execution.settlement_commands import request_redeem, submit_redeem
 

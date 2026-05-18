@@ -260,7 +260,7 @@ def request_redeem(
 
     existing = conn.execute(
         """
-        SELECT command_id FROM settlement_commands
+        SELECT command_id, state, winning_index_set FROM settlement_commands
          WHERE condition_id = ?
            AND market_id = ?
            AND payout_asset = ?
@@ -271,6 +271,33 @@ def request_redeem(
         (condition_id, market_id, payout_asset),
     ).fetchone()
     if existing is not None:
+        if winning_index_set is not None and existing["winning_index_set"] is None:
+            requested_at_s = _coerce_time(requested_at)
+            with _savepoint(conn):
+                conn.execute(
+                    """
+                    UPDATE settlement_commands
+                       SET winning_index_set = ?
+                     WHERE command_id = ?
+                       AND winning_index_set IS NULL
+                    """,
+                    (winning_index_set, existing["command_id"]),
+                )
+                _append_event(
+                    conn,
+                    str(existing["command_id"]),
+                    "REDEEM_INDEX_SET_BACKFILLED",
+                    {
+                        "condition_id": condition_id,
+                        "market_id": market_id,
+                        "payout_asset": payout_asset,
+                        "winning_index_set": winning_index_set,
+                        "previous_state": existing["state"],
+                    },
+                    recorded_at=requested_at_s,
+                )
+            if own_conn:
+                conn.commit()
         if own_conn:
             conn.close()
         return str(existing["command_id"])
