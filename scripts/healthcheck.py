@@ -526,7 +526,7 @@ def _launchctl_loaded_contract(
         item["issues"].append("loaded_job_not_running")
     # F86: flag prior non-clean exit (SIGTERM = -15; crash = positive int).
     # "0" and "" (never exited) are clean; anything else warrants operator attention.
-    if last_exit_code and last_exit_code not in ("0",):
+    if last_exit_code and last_exit_code not in ("0", "(never exited)"):
         item["issues"].append(f"loaded_prior_exit_code_{last_exit_code.replace('-', 'neg')}")
     if "keepalive" not in properties:
         item["issues"].append("loaded_keepalive_not_true")
