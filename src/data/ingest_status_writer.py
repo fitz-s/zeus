@@ -192,15 +192,6 @@ def write_ingest_status(
         "holes_by_city_count": _holes_by_city_count(world_conn, "observations"),
     }
 
-    # observation_instants_v2 — v2 migration freshness lane (F44 antibody)
-    # ts_col: imported_at (ISO string, from v2_schema.py CREATE TABLE)
-    table_stats["observation_instants_v2"] = {
-        "rows_last_hour": _rows_in_period(world_conn, "observation_instants_v2", "imported_at", 1),
-        "rows_last_day": _rows_in_period(world_conn, "observation_instants_v2", "imported_at", 24),
-        "holes_by_city_count": _holes_by_city_count(world_conn, "observation_instants_v2"),
-    }
-    obs_v2_max_imported_at = _max_col_value(world_conn, "observation_instants_v2", "imported_at")
-
     last_quarantine = _last_quarantine_reason(world_conn)
     source_health = _read_source_health(state_dir)
 
@@ -208,7 +199,6 @@ def write_ingest_status(
         "written_at": _now_iso(),
         "observation_instants_v2_max_imported_at": obs_v2_max_imported_at,
         "tables": table_stats,
-        "observation_instants_v2_max_imported_at": obs_v2_max_imported_at,
         "last_quarantine_reason": last_quarantine,
         "source_health_written_at": source_health.get("written_at") if source_health else None,
         "source_health_summary": {
