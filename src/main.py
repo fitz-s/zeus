@@ -1052,6 +1052,7 @@ def _capture_boot_state() -> dict:
         )
 
 
+@_scheduler_job("deployment_freshness")
 def _check_deployment_freshness(
     *,
     boot_sha: str | None = None,
@@ -1119,6 +1120,17 @@ def _check_deployment_freshness(
     uptime_hours: float = (_now - _boot_ts).total_seconds() / 3600.0
 
     if uptime_hours >= 24.0:
+        import signal as _signal
+        logger.critical(
+            "DEPLOYMENT_STALE — loaded SHA %s but filesystem has %s for >%.1fh. "
+            "Signaling SIGTERM to escape APScheduler exception boundary.",
+            _boot_sha[:8], current_sha[:8], uptime_hours,
+        )
+        # os.kill(SIGTERM) propagates to the process's signal handler OUTSIDE
+        # APScheduler's BaseException catch in run_job(), ensuring the daemon
+        # actually stops. The trailing raise keeps direct callers (test suite)
+        # correctly fail-closed.
+        os.kill(os.getpid(), _signal.SIGTERM)
         raise SystemExit(
             f"DEPLOYMENT_STALE — daemon loaded SHA {_boot_sha[:8]} but filesystem "
             f"has {current_sha[:8]} for >{uptime_hours:.1f}h. "
@@ -1152,9 +1164,12 @@ def _check_deployment_freshness(
         # (the exact 2026-05-17 incident class). Idempotent if already paused.
         try:
             from src.control.control_plane import pause_entries
+            # issued_by="system_auto_pause" activates the idempotency guard in
+            # control_plane._has_active_auto_pause_override — prevents duplicate
+            # control_overrides rows and alert spam on every 60s tick.
             pause_entries(
                 "deployment_freshness_4h_divergence",
-                issued_by="auto_pause_freshness",
+                issued_by="system_auto_pause",
                 effective_until=None,
             )
         except Exception as _exc:

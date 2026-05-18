@@ -384,6 +384,8 @@ test_trust_policy:
     tests/test_k1_reader_isolation_batch2.py: {created: "2026-05-17", last_used: "2026-05-17"}
     tests/test_evaluator_dsi_invariant.py: {created: "2026-05-17", last_used: "2026-05-17"}
     tests/test_chain_reconciliation_occurred_at_iso.py: {created: "2026-05-17", last_used: "2026-05-17"}
+    # PR #149 — deployment freshness gate (PR-S6) antibodies (2026-05-18).
+    tests/test_deployment_freshness.py: {created: "2026-05-17", last_used: "2026-05-18"}
 
 categories:
   core_law_antibody:
