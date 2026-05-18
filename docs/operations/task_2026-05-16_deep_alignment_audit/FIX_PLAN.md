@@ -200,7 +200,7 @@ operator-mediated ops migration: the view is currently INACTIVE (zeus_meta
 defaults to 'v0', which returns zero rows). Cutover requires a downstream
 consumer audit + operator UPDATE zeus_meta before any reader can switch.
 Pre-activation guard: tests/state/test_observation_view_consumer_safety.py.
-See jobs/9ea6f95c/briefs/pr_m_reframed_view_cutover.md for full analysis.
+See docs/operations/task_2026-05-16_deep_alignment_audit/PR_M_REFRAME_BRIEF.md for full analysis.
 
 ### PR-K — F16 wrap_unwrap decision
 - **Decision in SCAFFOLD**: delete module + tables (Z4-deferred only) OR wire enqueue caller + APScheduler poll + reconcile (Z5-planned).
