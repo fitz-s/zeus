@@ -218,6 +218,7 @@ def promote_pending_trades(
     clob_client,
     max_age_seconds: int = _PROMOTE_MIN_AGE_SECONDS,
     max_cycle_budget_ms: int = 3000,
+    recovery_mode: bool = False,
 ) -> dict:
     """Advance MATCHED venue_trade_facts rows to CONFIRMED by polling CLOB REST.
 
@@ -235,6 +236,14 @@ def promote_pending_trades(
     Writes CONFIRMED rows only. MINED is skipped (no intermediate writes) —
     aligns with FILL_STATUSES gate and F3 provenance bundle (state='CONFIRMED').
 
+    Only EXIT-intent commands are eligible candidates. ENTRY commands are
+    excluded via intent_kind filter to avoid premature promotion of live entry
+    orders (bot review finding #4, PR #142).
+
+    recovery_mode=True bypasses the abandon-window cutoff (_PROMOTE_MAX_AGE_SECONDS),
+    allowing recovery of aged-out MATCHED rows. Use only in explicit recovery
+    workflows, never in the normal cycle path.
+
     Error handling per A_patches_plan.md §1 table:
       404             → silent skip, no phantom write
       429             → abort entire batch
@@ -242,14 +251,22 @@ def promote_pending_trades(
       5xx             → log + skip row (retry next cycle)
       unexpected exc  → log + skip row
     """
+    import httpx
     from src.state.venue_command_repo import _savepoint_atomic, append_trade_fact
 
     deadline_ms = _time_module.monotonic() * 1000 + max_cycle_budget_ms
     cutoff_old = _utcnow() - timedelta(seconds=max_age_seconds)
     cutoff_abandon = _utcnow() - timedelta(seconds=_PROMOTE_MAX_AGE_SECONDS)
 
+    if recovery_mode:
+        abandon_clause = ""
+        abandon_params: tuple = ()
+    else:
+        abandon_clause = "AND vtf.observed_at > ?"
+        abandon_params = (cutoff_abandon.isoformat(),)
+
     candidates = conn.execute(
-        """
+        f"""
         SELECT vtf.trade_fact_id,
                vtf.trade_id,
                vtf.venue_order_id,
@@ -260,9 +277,11 @@ def promote_pending_trades(
                vtf.filled_size,
                vtf.fill_price
         FROM venue_trade_facts vtf
+        JOIN venue_commands cmd ON cmd.command_id = vtf.command_id
         WHERE vtf.state IN ('MATCHED', 'MINED')
+          AND UPPER(COALESCE(cmd.intent_kind, '')) = 'EXIT'
           AND vtf.observed_at < ?
-          AND vtf.observed_at > ?
+          {abandon_clause}
           AND NOT EXISTS (
               SELECT 1 FROM venue_trade_facts c2
               WHERE c2.command_id = vtf.command_id
@@ -271,7 +290,7 @@ def promote_pending_trades(
         ORDER BY vtf.observed_at ASC
         LIMIT 10
         """,
-        (cutoff_old.isoformat(), cutoff_abandon.isoformat()),
+        (cutoff_old.isoformat(),) + abandon_params,
     ).fetchall()
 
     stats: dict = {"polled": 0, "promoted": 0, "errors": 0, "skipped": 0}
@@ -300,22 +319,29 @@ def promote_pending_trades(
             raw = clob_client.get_order(venue_order_id)
             stats["polled"] += 1
         except Exception as exc:
-            status_code = getattr(exc, "status_code", None) or getattr(exc, "status", None)
-            if status_code == 429:
-                logger.warning(
-                    "promote_pending_trades: 429 rate-limited; aborting batch"
-                )
-                stats["errors"] += 1
-                break
-            if status_code is not None and 400 <= int(status_code) < 500:
-                logger.warning(
-                    "promote_pending_trades: 4xx on order_id=%s: %s",
-                    venue_order_id, exc,
-                )
-                stats["skipped"] += 1
+            if isinstance(exc, httpx.HTTPStatusError):
+                status_code = exc.response.status_code
+                if status_code == 429:
+                    logger.warning(
+                        "promote_pending_trades: 429 rate-limited; aborting batch"
+                    )
+                    stats["errors"] += 1
+                    break
+                if 400 <= status_code < 500:
+                    logger.warning(
+                        "promote_pending_trades: 4xx on order_id=%s: %s",
+                        venue_order_id, exc,
+                    )
+                    stats["skipped"] += 1
+                else:
+                    logger.error(
+                        "promote_pending_trades: 5xx on order_id=%s: %s",
+                        venue_order_id, exc, exc_info=True,
+                    )
+                    stats["errors"] += 1
             else:
                 logger.error(
-                    "promote_pending_trades: 5xx/unexpected on order_id=%s: %s",
+                    "promote_pending_trades: unexpected exc on order_id=%s: %s",
                     venue_order_id, exc, exc_info=True,
                 )
                 stats["errors"] += 1

@@ -14,6 +14,8 @@ import threading
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock
 
+import httpx
+
 from src.execution.exit_lifecycle import (
     promote_pending_trades,
     FILL_STATUSES,
@@ -65,7 +67,7 @@ def _seed_command(conn: sqlite3.Connection, command_id: str, venue_order_id: str
            idempotency_key, intent_kind, market_id, token_id, side, size, price,
            venue_order_id, state, created_at, updated_at)
         VALUES (?, 'snap-test', 'env-test', 'pos-test', 'dec-test',
-                ?, 'ENTRY', 'market-test', 'tok-test', 'SELL', 6.0, 0.50,
+                ?, 'EXIT', 'market-test', 'tok-test', 'SELL', 6.0, 0.50,
                 ?, 'SUBMITTED', ?, ?)
         """,
         (
@@ -257,8 +259,12 @@ def test_429_aborts_batch_remaining_unpolled():
             observed_at=old_ts,
         )
 
-    rate_exc = Exception("rate limited")
-    rate_exc.status_code = 429
+    # Use real httpx.HTTPStatusError shape — status code is on exc.response.status_code
+    rate_exc = httpx.HTTPStatusError(
+        "429 Too Many Requests",
+        request=httpx.Request("GET", "https://clob.example.com/order/ord-5a"),
+        response=httpx.Response(429),
+    )
     clob = MagicMock()
     clob.get_order.side_effect = rate_exc
 
@@ -336,7 +342,7 @@ def test_concurrent_ws_ingest_does_not_collide():
                idempotency_key, intent_kind, market_id, token_id, side, size, price,
                venue_order_id, state, created_at, updated_at)
             VALUES ('cmd-7', 'snap-test', 'env-test', 'pos-test', 'dec-test',
-                    'idem-7', 'ENTRY', 'market-test', 'tok-test', 'SELL', 6.0, 0.50,
+                    'idem-7', 'EXIT', 'market-test', 'tok-test', 'SELL', 6.0, 0.50,
                     'ord-7', 'SUBMITTED', ?, ?)
             """,
             (old_ts.isoformat(), old_ts.isoformat()),
@@ -451,3 +457,98 @@ def test_promoter_runs_inside_outer_transaction_without_raising():
         "If this fails with OperationalError, the SAVEPOINT fix was not applied."
     )
     assert _count_facts(conn, "trade-8", "CONFIRMED") == 1
+
+
+# ---------------------------------------------------------------------------
+# Test 9: recovery_mode=True bypasses abandon-window cutoff
+# ---------------------------------------------------------------------------
+
+def test_aged_out_trades_recoverable_via_recovery_mode():
+    """recovery_mode=True must allow promotion of rows older than _PROMOTE_MAX_AGE_SECONDS.
+
+    Antibody for bot review finding #3: without recovery_mode, aged-out rows are
+    permanently excluded by the abandon-window cutoff. With recovery_mode=True,
+    they must be eligible.
+    """
+    conn = _conn()
+    _seed_command(conn, "cmd-9", "ord-9")
+    # Seed a fact that is far older than the 3600s abandon window
+    ancient_ts = _now() - timedelta(seconds=7200)  # 2 hours old
+    _seed_matched_fact(
+        conn,
+        trade_id="trade-9",
+        command_id="cmd-9",
+        venue_order_id="ord-9",
+        observed_at=ancient_ts,
+    )
+
+    clob = _clob_returning("CONFIRMED", tx_hash="0xrecovered")
+
+    # Without recovery_mode: should be excluded (observed_at > cutoff_abandon fails)
+    stats_normal = promote_pending_trades(conn, clob, max_age_seconds=60, recovery_mode=False)
+    assert stats_normal["promoted"] == 0, (
+        "Ancient row must NOT be promoted in normal mode (abandon-window enforced)"
+    )
+
+    # With recovery_mode=True: abandon-window bypassed, should be promoted
+    stats_recovery = promote_pending_trades(conn, clob, max_age_seconds=60, recovery_mode=True)
+    assert stats_recovery["promoted"] == 1, (
+        "Ancient row MUST be promoted in recovery_mode=True (abandon-window bypassed)"
+    )
+    assert _count_facts(conn, "trade-9", "CONFIRMED") == 1
+
+
+# ---------------------------------------------------------------------------
+# Test 10: ENTRY-intent commands are excluded from promotion (EXIT-only scope)
+# ---------------------------------------------------------------------------
+
+def _seed_entry_command(conn: sqlite3.Connection, command_id: str, venue_order_id: str) -> None:
+    """Seed a venue_commands row with intent_kind='ENTRY' to test exclusion."""
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO venue_commands
+          (command_id, snapshot_id, envelope_id, position_id, decision_id,
+           idempotency_key, intent_kind, market_id, token_id, side, size, price,
+           venue_order_id, state, created_at, updated_at)
+        VALUES (?, 'snap-test', 'env-test', 'pos-test', 'dec-test',
+                ?, 'ENTRY', 'market-test', 'tok-test', 'BUY', 6.0, 0.50,
+                ?, 'SUBMITTED', ?, ?)
+        """,
+        (
+            command_id,
+            command_id + "-idem",
+            venue_order_id,
+            _old().isoformat(),
+            _old().isoformat(),
+        ),
+    )
+    conn.commit()
+
+
+def test_promoter_skips_entry_trade_facts():
+    """Antibody for bot review finding #4: promoter must only touch EXIT-intent commands.
+
+    An ENTRY-intent command with a MATCHED fact (aged >60s) must NOT be promoted.
+    This prevents early promotion of live entry orders that haven't settled yet.
+    """
+    conn = _conn()
+    _seed_entry_command(conn, "cmd-10", "ord-10")
+    _seed_matched_fact(
+        conn,
+        trade_id="trade-10",
+        command_id="cmd-10",
+        venue_order_id="ord-10",
+        observed_at=_old(),
+    )
+
+    clob = _clob_returning("CONFIRMED", tx_hash="0xentry-tx")
+    stats = promote_pending_trades(conn, clob, max_age_seconds=60)
+
+    assert stats["polled"] == 0, (
+        "ENTRY-intent commands must NOT be polled by promote_pending_trades"
+    )
+    assert stats["promoted"] == 0
+    clob.get_order.assert_not_called()
+    assert _count_facts(conn, "trade-10", "CONFIRMED") == 0, (
+        "No CONFIRMED row must be written for an ENTRY-intent command"
+    )
