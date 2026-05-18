@@ -220,18 +220,15 @@ def _redeem_submitter_cycle() -> None:
     # same credential source as the entry adapter (polymarket_client._ensure_v2_adapter)
     # to avoid the "structural decision incompletely executed" pattern:
     # different credential paths for entry vs redeem = silent drift hazard.
+    #
+    # Codex P2 fix (PR #145): credential lookup is deferred until AFTER the
+    # empty-row check so that an idle daemon with no REDEEM_INTENT_CREATED /
+    # REDEEM_RETRYING rows does NOT mark _scheduler_job FAILED every 5 min
+    # merely because Keychain is unavailable at that moment.
+    # Fail-closed still applies: if work exists and creds are missing, raise.
     if get_mode() != "live":
         logger.info("redeem_submitter skipped_non_live mode=%s", get_mode())
         return
-    try:
-        creds = resolve_polymarket_credentials()
-    except RuntimeError as exc:
-        # Fail-closed: REDEEM cycle refuses to run when credentials are missing.
-        # Re-raise so @_scheduler_job logs FAILED into scheduler_jobs_health.json;
-        # operator sees a clear keychain provisioning gap rather than silent skip.
-        raise RuntimeError(
-            f"redeem_submitter: credentials unavailable (fail-closed): {exc}"
-        ) from exc
 
     with acquire_lock("redeem_submitter") as acquired:
         if not acquired:
@@ -253,6 +250,15 @@ def _redeem_submitter_cycle() -> None:
             ).fetchall()
             if not rows:
                 return
+            # Credentials resolved only when actual work exists — fail-closed:
+            # if Keychain is unavailable here, raise so the scheduler records
+            # FAILED and the operator sees a clear provisioning gap.
+            try:
+                creds = resolve_polymarket_credentials()
+            except RuntimeError as exc:
+                raise RuntimeError(
+                    f"redeem_submitter: credentials unavailable (fail-closed): {exc}"
+                ) from exc
             q1_egress_evidence = _resolve_q1_egress_evidence_path(
                 default=DEFAULT_Q1_EGRESS_EVIDENCE,
                 env_name=Q1_EGRESS_EVIDENCE_ENV,

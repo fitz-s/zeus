@@ -97,34 +97,59 @@ def test_redeem_submitter_adapter_has_credentials_in_live_mode(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Antibody 2 — fail-closed: live mode + missing creds raises before any
-#              DB/adapter side effect.
+# Antibody 2 — fail-closed: live mode + missing creds + work exists → raise
+#              before adapter construction and before submit_redeem.
+#
+# Codex P2 fix (PR #145): creds resolution moved to after empty-row check.
+# The prior assertion "DB must NOT be opened" was over-specified; a read-only
+# SELECT is not a write side effect. The real invariant is: no adapter
+# constructed and no submit_redeem called when creds missing AND work exists.
 # ---------------------------------------------------------------------------
 def test_redeem_submitter_fails_closed_when_creds_missing(monkeypatch):
-    """In live mode, if Keychain lookup fails, the cycle MUST raise before
-    constructing the adapter or opening a trade connection.
+    """In live mode with submittable rows, if Keychain lookup fails the cycle
+    MUST raise before constructing the adapter or calling submit_redeem.
+    DB may be read (empty-row check) — that is not a side effect.
     """
     from src import main as main_mod
 
-    db_opened = {"count": 0}
+    adapter_constructed = {"count": 0}
+    submit_called = {"count": 0}
 
-    def _spy_get_trade_connection(*args, **kwargs):  # pragma: no cover
-        db_opened["count"] += 1
-        raise AssertionError(
-            "trade DB must NOT be opened when credentials are missing"
-        )
+    class _SpyAdapter:  # pragma: no cover
+        def __init__(self, **kwargs):
+            adapter_constructed["count"] += 1
+
+    def _spy_submit(*args, **kwargs):  # pragma: no cover
+        submit_called["count"] += 1
+
+    fake_conn = MagicMock()
+    fake_conn.execute.return_value.fetchall.return_value = [{"command_id": "c1"}]
 
     monkeypatch.setattr(main_mod, "get_mode", lambda: "live")
     with patch(
         "src.data.polymarket_client.resolve_polymarket_credentials",
         side_effect=RuntimeError("Cannot resolve Polymarket credentials: keychain"),
     ), patch(
-        "src.state.db.get_trade_connection", side_effect=_spy_get_trade_connection
-    ):
+        "src.state.db.get_trade_connection", return_value=fake_conn
+    ), patch(
+        "src.venue.polymarket_v2_adapter.PolymarketV2Adapter", _SpyAdapter
+    ), patch(
+        "src.execution.settlement_commands.submit_redeem", side_effect=_spy_submit
+    ), patch(
+        "src.data.dual_run_lock.acquire_lock",
+    ) as mock_lock:
+        mock_lock.return_value.__enter__.return_value = True
+        mock_lock.return_value.__exit__.return_value = False
+
         with pytest.raises(RuntimeError, match="credentials unavailable"):
             main_mod._redeem_submitter_cycle.__wrapped__()
 
-    assert db_opened["count"] == 0
+    assert adapter_constructed["count"] == 0, (
+        "PolymarketV2Adapter must NOT be constructed when creds missing"
+    )
+    assert submit_called["count"] == 0, (
+        "submit_redeem must NOT be called when creds missing"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -162,3 +187,39 @@ def test_redeem_submitter_skips_in_non_live_mode(monkeypatch):
     assert result is None
     assert creds_calls["count"] == 0
     assert db_calls["count"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Antibody 4 — live mode + missing creds + NO rows → clean return, no raise.
+#
+# Antibody for the Codex P2 fix (PR #145): credential resolution deferred
+# until after the empty-row check. An idle daemon with no submittable rows
+# must NOT mark the scheduler job FAILED even when Keychain is unavailable.
+# ---------------------------------------------------------------------------
+def test_redeem_submitter_idle_no_rows_no_raise_even_when_creds_missing(monkeypatch):
+    """In live mode with no submittable rows, missing credentials must NOT
+    cause a RuntimeError. The cycle returns cleanly after the empty-row check.
+    """
+    from src import main as main_mod
+
+    fake_conn = MagicMock()
+    fake_conn.execute.return_value.fetchall.return_value = []  # no work
+
+    monkeypatch.setattr(main_mod, "get_mode", lambda: "live")
+    with patch(
+        "src.data.polymarket_client.resolve_polymarket_credentials",
+        side_effect=RuntimeError("Cannot resolve Polymarket credentials: keychain"),
+    ), patch(
+        "src.state.db.get_trade_connection", return_value=fake_conn
+    ), patch(
+        "src.data.dual_run_lock.acquire_lock",
+    ) as mock_lock:
+        mock_lock.return_value.__enter__.return_value = True
+        mock_lock.return_value.__exit__.return_value = False
+
+        # Must return cleanly — no raise.
+        result = main_mod._redeem_submitter_cycle.__wrapped__()
+
+    assert result is None, (
+        "Idle cycle with no rows must return None, not raise on missing creds"
+    )
