@@ -388,6 +388,9 @@ test_trust_policy:
     tests/test_chain_reconciliation_occurred_at_iso.py: {created: "2026-05-17", last_used: "2026-05-17"}
     # PR #149 — deployment freshness gate (PR-S6) antibodies (2026-05-18).
     tests/test_deployment_freshness.py: {created: "2026-05-17", last_used: "2026-05-18"}
+    # PR #154 — WAVE-5 F22 writer-lock defer marker expiry antibody (2026-05-18).
+    tests/test_operator_script_lock_contract.py: {created: "2026-05-17", last_used: "2026-05-18"}
+    tests/test_writer_lock_defer_markers_expiry.py: {created: "2026-05-18", last_used: "2026-05-18"}
     # PR-S1 Bug #3: chain aggregate reconciliation + block-list + N2 boot gate antibodies.
     tests/test_allocate_chain_truth.py: {created: "2026-05-17", last_used: "2026-05-18"}
 
@@ -597,6 +600,9 @@ categories:
     - tests/test_k1_reader_isolation_batch2.py
     - tests/test_evaluator_dsi_invariant.py
     - tests/test_chain_reconciliation_occurred_at_iso.py
+    # PR #154 — WAVE-5 F22 writer-lock defer marker expiry antibody (2026-05-18).
+    - tests/test_operator_script_lock_contract.py
+    - tests/test_writer_lock_defer_markers_expiry.py
 
   useful_regression:
     - tests/test_alpha_target_coherence.py

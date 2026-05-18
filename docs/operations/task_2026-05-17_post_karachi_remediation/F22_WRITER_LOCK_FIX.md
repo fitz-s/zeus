@@ -68,6 +68,48 @@ antibody passes today. WAVE-3 must either:
 
 ---
 
+## WAVE-5 carry-forward: marker expiry (2026-05-18)
+
+The sibling antibody `tests/test_operator_script_lock_contract.py` was *accepting* any
+`WRITER_LOCK_DEFER_REVIEW=YYYY-MM-DD` marker as a contract escape — a defer marker dated
+2026-05-17 was functionally identical to a defer marker dated 1970-01-01. Without expiry,
+defer markers accumulate forever and the contract escape becomes a permanent waiver.
+
+**Policy** (in force from 2026-05-18):
+- Every `WRITER_LOCK_DEFER_REVIEW=YYYY-MM-DD` marker is valid for **30 days from its date**.
+- After 30 days the marker is **overdue** and the CI antibody
+  `tests/test_writer_lock_defer_markers_expiry.py` fails for the bearing script.
+- Resolution options (in the failure message):
+  - (a) Apply the writer-lock contract (`with db_writer_lock(...)`); delete the marker.
+  - (b) Retire the script entirely if no longer in use.
+  - (c) Bump the marker date to today **and** add a renewed defer rationale here.
+
+This makes "DEFER" a stage with a deadline, not a parking lot. Re-deferring is a deliberate
+operator action that must leave a paper trail in this document, not a silent date bump.
+
+### Current marker inventory (2026-05-18)
+
+| Script | Marker date | Days remaining | Outstanding work |
+|---|---|---|---|
+| `scripts/migrate_world_observations_to_forecasts.py` | 2026-05-17 | 29 | Retrofit `db_writer_lock` OR delete (one-shot K1 backfill, likely retired). |
+| `scripts/migrate_backtest_runs_lane_constraint_2026_05_07.py` | 2026-05-17 | 29 | Backtest DB only (not live-trading). Retrofit lower priority; confirm retire status. |
+| `scripts/migrate_world_to_forecasts.py` | 2026-05-17 | 29 | One-shot K1 split migration. Confirm retired; delete preferable to retrofit. |
+| `scripts/migrations/202605_add_redeem_operator_required_state.py` | 2026-05-17 | 29 | Standalone `_migrate_one_db()` path needs fcntl→`db_writer_lock` migration. F23-runner path already correct. |
+| `scripts/migrations/202605_position_current_bridge_required_trigger.py` | 2026-05-17 | 29 | Confirm runner-only invocation; if standalone CLI path exists, retrofit. |
+
+By 2026-06-16 (30 days from marker date) each row above must resolve to one of (a/b/c)
+or the antibody will block CI.
+
+### Meta-verify
+
+The expiry antibody was confirmed via sed-break/restore on 2026-05-18:
+- Set `scripts/migrate_world_to_forecasts.py` marker to `2026-01-01`.
+- `pytest tests/test_writer_lock_defer_markers_expiry.py::test_defer_marker_within_window`
+  failed with: `WRITER_LOCK_DEFER_REVIEW=2026-01-01 is 137 days old (window=30 days, today=2026-05-18)`.
+- Restored marker; 9/9 tests pass.
+
+---
+
 ## NIT1 Carry-Forward Assessment
 
 The brief requested "refactor to F23 runner convention; drop bootstrap allowlist entry"
