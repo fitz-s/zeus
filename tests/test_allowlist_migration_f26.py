@@ -2,14 +2,20 @@
 # Last reused or audited: 2026-05-18
 # Authority basis: /Users/leofitz/.claude/jobs/9ea6f95c/findings/f26_allowlist_audit.md
 #                  F26 follow-up brief: migrate 38 (actual 42) CURRENT_REUSABLE entries
-"""F26 allowlist migration antibody.
+#                  F26 cleanup brief (2026-05-18): resolve 29 STALE_REWRITE + 1 QUARANTINED
+"""F26 allowlist migration + cleanup antibody.
 
-Asserts that every CURRENT_REUSABLE entry that was migrated from
-tests/conftest._WLA_RESIDUAL_ALLOWLIST is now:
-  1. Present in src.state.db_writer_lock.SQLITE_CONNECT_ALLOWLIST
-  2. Absent from the conftest-only residual set
-     (tests/conftest._WLA_RESIDUAL_ALLOWLIST, imported directly so any
-     re-addition in conftest is observed without a parallel update here).
+Two phases covered:
+
+Phase 1 (PR #157): 42 CURRENT_REUSABLE entries migrated from conftest residual
+  to src.state.db_writer_lock.SQLITE_CONNECT_ALLOWLIST.
+
+Phase 2 (this PR): 29 STALE_REWRITE + 1 QUARANTINED entries resolved:
+  - 28 already_guarded/operator_invoked scripts promoted to production allowlist
+  - 1 script retrofitted with db_writer_lock wrap then promoted
+  - 1 QUARANTINED (verify_truth_surfaces) promoted as read_only (0 writes)
+  - 1 dropped (_zeus_emergency_k2_obs_backfill_2026_05_10.py — file deleted)
+  - 2 daemon src/ sites remain in residual pending Track A.6 (#246)
 
 Sed-break protocols:
   A. Remove one entry from SQLITE_CONNECT_ALLOWLIST in db_writer_lock.py
@@ -22,6 +28,8 @@ Sed-break protocols:
   C. Add a residual entry to SQLITE_CONNECT_ALLOWLIST in db_writer_lock.py
      → test_residual_does_not_intersect_production_allowlist fails; restore
      → pass.
+  D. Re-add a dropped entry to SQLITE_CONNECT_ALLOWLIST in db_writer_lock.py
+     → test_dropped_entry_absent_from_production_allowlist fails; restore → pass.
 """
 
 from __future__ import annotations
@@ -129,18 +137,134 @@ def test_migrated_entry_absent_from_conftest_residual(entry: str) -> None:
 
 
 def test_residual_does_not_intersect_production_allowlist() -> None:
-    """Conftest residual (STALE_REWRITE + QUARANTINED + canonical infra) must
-    not intersect with the production allowlist.
+    """Conftest residual (pending Track A.6 daemon sites) must not intersect
+    with the production allowlist.
 
-    STALE_REWRITE entries need Track A.6 per-entry rewrite decisions; the
-    QUARANTINED entry needs a non-mechanical rewrite; canonical infra
-    intentionally lives outside db_writer_lock. None should be silently
-    promoted into the production allowlist.
+    Residual entries are daemon src/ sites pending Track A.6 retrofit.
+    They must not be silently promoted into the production allowlist without
+    a principled per-entry decision (F26 cleanup process).
     """
     leaked = _WLA_RESIDUAL_ALLOWLIST & SQLITE_CONNECT_ALLOWLIST
     assert not leaked, (
         f"SCOPE CREEP: conftest residual entries found in the production "
-        f"allowlist: {sorted(leaked)}. STALE_REWRITE entries need Track A.6 "
-        f"retrofit; QUARANTINED needs non-mechanical rewrite; canonical infra "
-        f"is by design outside db_writer_lock."
+        f"allowlist: {sorted(leaked)}. Residual entries are pending Track A.6 "
+        f"retrofit and require a principled decision before promotion to the "
+        f"production allowlist."
+    )
+
+
+# ---------------------------------------------------------------------------
+# F26 cleanup (2026-05-18): STALE_REWRITE + QUARANTINED entries resolved.
+# 29 entries promoted to production allowlist, 1 dropped (file deleted).
+# ---------------------------------------------------------------------------
+
+# Entries promoted from conftest residual to production allowlist in F26 cleanup.
+F26_CLEANUP_PROMOTED: frozenset[str] = frozenset(
+    {
+        # already_guarded backfill/ingest scripts
+        "scripts/backfill_forecast_issue_time.py",
+        "scripts/backfill_london_f_to_c_2026_05_08.py",
+        "scripts/backfill_low_contract_window_evidence.py",
+        "scripts/backfill_obs_v2.py",
+        "scripts/backfill_ogimet_metar.py",
+        "scripts/backfill_outcome_fact.py",
+        "scripts/backfill_tigge_snapshot_p_raw_v2.py",
+        "scripts/backfill_wu_daily_all.py",
+        "scripts/cleanup_ghost_positions.py",
+        "scripts/etl_forecasts_v2_from_legacy.py",
+        "scripts/fill_obs_v2_dst_gaps.py",
+        "scripts/fill_obs_v2_meteostat.py",
+        "scripts/force_cycle_with_healthy_gates.py",
+        "scripts/hko_ingest_tick.py",
+        "scripts/ingest_grib_to_snapshots.py",
+        "scripts/nuke_rebuild_projections.py",
+        "scripts/obs_v2_live_tick.py",
+        "scripts/rebuild_calibration_pairs_canonical.py",
+        "scripts/rebuild_calibration_pairs_v2.py",
+        "scripts/rebuild_settlements.py",
+        "scripts/refit_platt_v2.py",
+        # operator_invoked migration scripts (already_guarded)
+        "scripts/migrate_add_authority_column.py",
+        "scripts/migrate_b070_control_overrides_to_history.py",
+        "scripts/migrate_ensemble_snapshots_v2_add_ingest_backend.py",
+        "scripts/migrate_forecasts_availability_provenance.py",
+        "scripts/migrate_observations_k1.py",
+        # retrofitted: db_writer_lock wrap added in F26 cleanup
+        "scripts/migrate_backtest_runs_lane_constraint_2026_05_07.py",
+        # one-shot idempotent operator script
+        "scripts/reevaluate_readiness_2026_05_07.py",
+        # QUARANTINED resolved: read_only (0 writes, all SELECTs + mode=ro)
+        "scripts/verify_truth_surfaces.py",
+    }
+)
+
+# Entries dropped entirely in F26 cleanup (file deleted post-run, no longer in repo).
+F26_CLEANUP_DROPPED: frozenset[str] = frozenset(
+    {
+        "scripts/_zeus_emergency_k2_obs_backfill_2026_05_10.py",
+    }
+)
+
+
+@pytest.mark.parametrize("entry", sorted(F26_CLEANUP_PROMOTED))
+def test_cleanup_promoted_entry_present_in_production_allowlist(entry: str) -> None:
+    """Each F26-cleanup-promoted entry must exist in the production allowlist.
+
+    Sed-break: delete the entry from db_writer_lock.SQLITE_CONNECT_ALLOWLIST
+    → this parametrized case fails naming the missing entry.
+    Restore → passes.
+    """
+    assert entry in SQLITE_CONNECT_ALLOWLIST, (
+        f"CLEANUP REGRESSION: '{entry}' was resolved from conftest residual "
+        f"in F26 cleanup but is absent from "
+        f"src.state.db_writer_lock.SQLITE_CONNECT_ALLOWLIST. "
+        f"Add it back to db_writer_lock.py with its reason tag."
+    )
+
+
+@pytest.mark.parametrize("entry", sorted(F26_CLEANUP_PROMOTED))
+def test_cleanup_promoted_entry_absent_from_conftest_residual(entry: str) -> None:
+    """Each F26-cleanup-promoted entry must NOT remain in the conftest residual.
+
+    Guards against re-addition of a resolved entry to the conftest residual set.
+    The residual set is read DIRECTLY from conftest._WLA_RESIDUAL_ALLOWLIST so
+    any re-addition is observed without a parallel update here.
+    """
+    assert entry not in _WLA_RESIDUAL_ALLOWLIST, (
+        f"CLEANUP REGRESSION: '{entry}' appears in the conftest-only residual "
+        f"set (_WLA_RESIDUAL_ALLOWLIST in tests/conftest.py). "
+        f"This entry was resolved in F26 cleanup; it must only live in "
+        f"db_writer_lock.py."
+    )
+
+
+@pytest.mark.parametrize("entry", sorted(F26_CLEANUP_DROPPED))
+def test_dropped_entry_absent_from_production_allowlist(entry: str) -> None:
+    """Each dropped entry must NOT appear in the production allowlist.
+
+    Dropped entries correspond to files that were deleted from the repo.
+    Adding them back to the production allowlist would be a scope-creep
+    regression (allowlisting a non-existent file).
+
+    Sed-break: add the entry to db_writer_lock.SQLITE_CONNECT_ALLOWLIST
+    → this parametrized case fails; restore → passes.
+    """
+    assert entry not in SQLITE_CONNECT_ALLOWLIST, (
+        f"SCOPE CREEP: '{entry}' is a dropped entry (file deleted) but "
+        f"appears in src.state.db_writer_lock.SQLITE_CONNECT_ALLOWLIST. "
+        f"Remove it from the production allowlist."
+    )
+
+
+@pytest.mark.parametrize("entry", sorted(F26_CLEANUP_DROPPED))
+def test_dropped_entry_absent_from_conftest_residual(entry: str) -> None:
+    """Each dropped entry must NOT appear in the conftest residual.
+
+    Dropped entries correspond to deleted files; keeping them in the residual
+    is dead weight that weakens the 'every residual entry has a live file'
+    invariant.
+    """
+    assert entry not in _WLA_RESIDUAL_ALLOWLIST, (
+        f"DEAD ENTRY: '{entry}' is a dropped entry (file deleted) but "
+        f"remains in the conftest residual set. Remove it."
     )

@@ -1,10 +1,10 @@
 # Created: 2026-05-07
-# Last reused or audited: 2026-05-07
+# Last reused or audited: 2026-05-18
 # Authority basis: PR #87 fix — selection_coverage lane omitted from
 #   backtest_runs + backtest_outcome_comparison CHECK constraints in
 #   src/state/db.py:2267,2283.
-# WRITER_LOCK_DEFER_REVIEW=2026-05-17 — backtest DB only (not a live-trading
-#   DB); db_writer_lock retrofit deferred to WAVE-3. See F22_WRITER_LOCK_FIX.md.
+# F26 follow-up (2026-05-18): db_writer_lock(BULK) wrap added; backtest DB is
+#   not a live-trading DB but the lock makes the allowlist promotion clean.
 """Migrate backtest DB: add 'selection_coverage' to lane CHECK constraints.
 
 SQLite does not support ALTER TABLE … MODIFY CONSTRAINT, so this migration
@@ -39,6 +39,8 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
+
+from src.state.db_writer_lock import WriteClass, db_writer_lock  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -166,6 +168,9 @@ def run_migration(db_path: Path = DEFAULT_DB, dry_run: bool = False) -> dict:
     if not db_path.exists():
         return {"status": "noop_db_not_found", "db": str(db_path)}
 
+    lock_ctx = db_writer_lock(db_path, WriteClass.BULK) if not dry_run else None
+    if lock_ctx is not None:
+        lock_ctx.__enter__()
     conn = sqlite3.connect(db_path)
     # Gate WAL mode behind not-dry-run: PRAGMA journal_mode=WAL persists on disk
     # and creates -wal/-shm sidecar files even in read-only inspection runs
@@ -210,6 +215,8 @@ def run_migration(db_path: Path = DEFAULT_DB, dry_run: bool = False) -> dict:
         raise
     finally:
         conn.close()
+        if lock_ctx is not None:
+            lock_ctx.__exit__(None, None, None)
 
 
 def main() -> None:
