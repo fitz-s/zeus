@@ -1254,6 +1254,41 @@ def test_audit_logging_writes_exit_audit_to_trade_connection_after_k1_split(tmp_
     }
 
 
+def test_audit_logging_closes_trade_connection_when_exit_audit_fails(monkeypatch):
+    from unittest.mock import MagicMock
+
+    from src.state.portfolio import PortfolioState, Position, close_position
+
+    fake_conn = MagicMock()
+    monkeypatch.setattr("src.state.db.get_trade_connection_with_world", lambda **kwargs: fake_conn)
+    monkeypatch.setattr("src.state.db.log_trade_exit", MagicMock(side_effect=RuntimeError("audit boom")))
+
+    state = PortfolioState(audit_logging_enabled=True)
+    state.positions.append(Position(
+        trade_id="trade-audit-fails",
+        market_id="market-audit-fails",
+        city="NYC",
+        cluster="US-Northeast",
+        target_date="2026-04-01",
+        bin_label="39-40°F",
+        direction="buy_yes",
+        unit="F",
+        size_usd=10.0,
+        shares=25.0,
+        cost_basis_usd=10.0,
+        entry_price=0.40,
+        p_posterior=0.60,
+        edge=0.20,
+        state="holding",
+    ))
+
+    closed = close_position(state, "trade-audit-fails", 1.0, "SETTLEMENT")
+
+    assert closed is not None
+    fake_conn.rollback.assert_called_once()
+    fake_conn.close.assert_called_once()
+
+
 def test_trade_exit_snapshot_fk_drops_dead_legacy_fk_edge(tmp_path):
     """Exit audit must not preserve a forecasts-v2 id into a legacy local FK."""
     import sqlite3
