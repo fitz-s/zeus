@@ -140,8 +140,21 @@ class TestF85StderrHandlerPresent:
 
 
 def _extract_main_body(content: str) -> str:
-    """Extract text after 'def main():' to catch basicConfig calls inside main."""
+    """Extract only the body of main() to catch basicConfig calls inside it.
+
+    Stops at the next top-level definition (def/class at column 0) after
+    main(), so downstream functions that happen to contain 'logging.basicConfig'
+    do not produce false positives.
+    """
+    import re
     idx = content.find("def main(")
     if idx == -1:
         return content
-    return content[idx:]
+    # Slice from main() onward, then stop at the next top-level def/class.
+    after = content[idx:]
+    # Skip the first line (the 'def main(...)' line itself), then look for
+    # a new top-level def or class.
+    next_top = re.search(r'\n(?:def |class )\S', after[1:])
+    if next_top is None:
+        return after
+    return after[: next_top.start() + 1]
