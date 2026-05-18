@@ -1,5 +1,6 @@
-# Created: 2026-04-26
-# Last reused/audited: 2026-05-18
+# Lifecycle: created=2026-04-26; last_reviewed=2026-05-18; last_reused=2026-05-18
+# Purpose: Command recovery loop for unresolved venue command side effects.
+# Reuse: Run when command recovery, venue order payload normalization, or unknown side-effect resolution changes.
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md §P1.S4
 #                  + docs/operations/task_2026-05-15_live_order_e2e_goal/LIVE_ORDER_E2E_GOAL_PLAN.md
 """Command recovery loop — INV-31.
@@ -142,6 +143,8 @@ def _venue_order_payload(value: object | None) -> dict | None:
     order_id = getattr(value, "order_id", None)
     if order_id not in (None, "") and not _extract_order_id(payload):
         payload["orderID"] = str(order_id)
+    if not (_extract_order_id(payload) or payload.get("status") or payload.get("state")):
+        return None
     return payload
 
 

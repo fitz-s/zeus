@@ -647,6 +647,28 @@ class TestRecoveryResolutionTable:
         payload = json.loads(ack["payload_json"])
         assert payload["venue_response"] == {"orderID": "vord-state", "status": "LIVE"}
 
+    def test_submitting_rejects_empty_normalized_venue_order_payload(
+        self, conn, mock_client
+    ):
+        _insert(conn)
+        _advance_to_submitting(conn, venue_order_id="vord-empty")
+        mock_client.get_order.return_value = object()
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert _get_state(conn, "cmd-001") == "REVIEW_REQUIRED"
+        assert summary["advanced"] == 1
+        events = _get_events(conn, "cmd-001")
+        assert "SUBMIT_ACKED" not in [e["event_type"] for e in events]
+        review = [e for e in events if e["event_type"] == "REVIEW_REQUIRED"][-1]
+        payload = json.loads(review["payload_json"])
+        assert payload == {
+            "reason": "recovery_order_not_found_at_venue",
+            "venue_order_id": "vord-empty",
+        }
+
     def test_submitting_with_state_only_rejected_resolves_to_submit_rejected(
         self, conn, mock_client
     ):
@@ -1331,6 +1353,23 @@ class TestRecoveryResolutionTable:
         event_types = [e["event_type"] for e in _get_events(conn, "cmd-001")]
         assert "PARTIAL_FILL_OBSERVED" in event_types
         assert "FILL_CONFIRMED" not in event_types
+
+    def test_unknown_side_effect_rejects_empty_normalized_venue_order_payload(
+        self, conn
+    ):
+        _insert(conn)
+        _advance_to_unknown_side_effect(conn)
+        client = MagicMock()
+        client.find_order_by_idempotency_key.return_value = object()
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, client)
+
+        assert _get_state(conn, "cmd-001") == "SUBMIT_UNKNOWN_SIDE_EFFECT"
+        assert summary["errors"] >= 1
+        events = _get_events(conn, "cmd-001")
+        assert "SUBMIT_ACKED" not in [e["event_type"] for e in events]
 
     def test_unknown_side_effect_confirmed_requires_trade_fact_review(
         self,
