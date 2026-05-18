@@ -13,11 +13,13 @@ This module owns all exit state transitions. CycleRunner calls it;
 CycleRunner does not contain exit business logic.
 """
 
+import hashlib
 import logging
 import copy
 import json
 import math
 import sqlite3
+import time as _time_module
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
@@ -26,6 +28,7 @@ from types import SimpleNamespace
 from typing import Optional
 
 from src.execution.collateral import check_sell_collateral
+from src.observability.counters import increment as _cnt_inc
 from src.execution.executor import OrderResult, create_exit_order_intent, execute_exit_order
 from src.state.lifecycle_manager import (
     enter_pending_exit_runtime_state,
@@ -192,6 +195,214 @@ def _parse_iso(value: Optional[str]) -> Optional[datetime]:
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+# ---------------------------------------------------------------------------
+# Lifecycle promoter — Bug #2 fix (PR-S2)
+# Polls CLOB REST API for MATCHED/MINED rows and writes CONFIRMED facts.
+# Authority: STRUCTURAL_PLAN.md v3 §2 PR-S2 + A_patches_plan.md §1
+# ---------------------------------------------------------------------------
+
+NON_TERMINAL_TRADE_STATUSES = frozenset({"MATCHED", "MINED"})
+_PROMOTE_MIN_AGE_SECONDS = 60
+_PROMOTE_MAX_AGE_SECONDS = 3600
+
+
+def _hash_raw_payload(payload: object) -> str:
+    raw = json.dumps(payload or {}, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def promote_pending_trades(
+    conn: sqlite3.Connection,
+    clob_client,
+    max_age_seconds: int = _PROMOTE_MIN_AGE_SECONDS,
+    max_cycle_budget_ms: int = 3000,
+    recovery_mode: bool = False,
+) -> dict:
+    """Advance MATCHED venue_trade_facts rows to CONFIRMED by polling CLOB REST.
+
+    Candidate SELECT is bounded to LIMIT 10. Loop honors max_cycle_budget_ms
+    (default 3000ms — below httpx's 5s default so the deadline check fires
+    before a single slow call exhausts the entire budget).
+
+    Per-row re-check + append_trade_fact are wrapped in _savepoint_atomic so
+    they are atomic against concurrent WS_USER ingests. SAVEPOINT nests cleanly
+    inside any outer implicit transaction (CRITIC_FLAG-2, PR-S2 critic R1 fix).
+    BEGIN IMMEDIATE was the prior approach; it raises OperationalError when
+    cycle_runner's conn already has an open implicit transaction from prior
+    DML (chain_sync, allocator, etc.), silently disabling the promoter.
+
+    Writes CONFIRMED rows only. MINED is skipped (no intermediate writes) —
+    aligns with FILL_STATUSES gate and F3 provenance bundle (state='CONFIRMED').
+
+    Only EXIT-intent commands are eligible candidates. ENTRY commands are
+    excluded via intent_kind filter to avoid premature promotion of live entry
+    orders (bot review finding #4, PR #142).
+
+    recovery_mode=True bypasses the abandon-window cutoff (_PROMOTE_MAX_AGE_SECONDS),
+    allowing recovery of aged-out MATCHED rows. Use only in explicit recovery
+    workflows, never in the normal cycle path.
+
+    Error handling per A_patches_plan.md §1 table:
+      404             → silent skip, no phantom write
+      429             → abort entire batch
+      other 4xx       → log + skip row
+      5xx             → log + skip row (retry next cycle)
+      unexpected exc  → log + skip row
+    """
+    import httpx
+    from src.state.venue_command_repo import _savepoint_atomic, append_trade_fact
+
+    deadline_ms = _time_module.monotonic() * 1000 + max_cycle_budget_ms
+    cutoff_old = _utcnow() - timedelta(seconds=max_age_seconds)
+    cutoff_abandon = _utcnow() - timedelta(seconds=_PROMOTE_MAX_AGE_SECONDS)
+
+    if recovery_mode:
+        abandon_clause = ""
+        abandon_params: tuple = ()
+    else:
+        abandon_clause = "AND vtf.observed_at > ?"
+        abandon_params = (cutoff_abandon.isoformat(),)
+
+    candidates = conn.execute(
+        f"""
+        SELECT vtf.trade_fact_id,
+               vtf.trade_id,
+               vtf.venue_order_id,
+               vtf.command_id,
+               vtf.state,
+               vtf.local_sequence,
+               vtf.observed_at,
+               vtf.filled_size,
+               vtf.fill_price
+        FROM venue_trade_facts vtf
+        JOIN venue_commands cmd ON cmd.command_id = vtf.command_id
+        WHERE vtf.state IN ('MATCHED', 'MINED')
+          AND UPPER(COALESCE(cmd.intent_kind, '')) = 'EXIT'
+          AND vtf.observed_at < ?
+          {abandon_clause}
+          AND NOT EXISTS (
+              SELECT 1 FROM venue_trade_facts c2
+              WHERE c2.command_id = vtf.command_id
+                AND c2.state = 'CONFIRMED'
+          )
+        ORDER BY vtf.observed_at ASC
+        LIMIT 10
+        """,
+        (cutoff_old.isoformat(),) + abandon_params,
+    ).fetchall()
+
+    stats: dict = {"polled": 0, "promoted": 0, "errors": 0, "skipped": 0}
+
+    for row in candidates:
+        if _time_module.monotonic() * 1000 >= deadline_ms:
+            _cnt_inc("promote_pending_trades_budget_exhausted_total")
+            logger.warning(
+                "telemetry_counter event=promote_pending_trades_budget_exhausted_total"
+            )
+            break
+
+        (
+            _trade_fact_id,
+            trade_id,
+            venue_order_id,
+            command_id,
+            _state,
+            _seq,
+            _observed_at,
+            filled_size,
+            fill_price,
+        ) = row
+
+        try:
+            raw = clob_client.get_order(venue_order_id)
+            stats["polled"] += 1
+        except Exception as exc:
+            if isinstance(exc, httpx.HTTPStatusError):
+                status_code = exc.response.status_code
+                if status_code == 429:
+                    logger.warning(
+                        "promote_pending_trades: 429 rate-limited; aborting batch"
+                    )
+                    stats["errors"] += 1
+                    break
+                if 400 <= status_code < 500:
+                    logger.warning(
+                        "promote_pending_trades: 4xx on order_id=%s: %s",
+                        venue_order_id, exc,
+                    )
+                    stats["skipped"] += 1
+                else:
+                    logger.error(
+                        "promote_pending_trades: 5xx on order_id=%s: %s",
+                        venue_order_id, exc, exc_info=True,
+                    )
+                    stats["errors"] += 1
+            else:
+                logger.error(
+                    "promote_pending_trades: unexpected exc on order_id=%s: %s",
+                    venue_order_id, exc, exc_info=True,
+                )
+                stats["errors"] += 1
+            continue
+
+        if raw is None:
+            # 404 — order unknown to CLOB; skip without writing phantom row.
+            logger.warning(
+                "promote_pending_trades: order_id=%s returned None (404) — skipping",
+                venue_order_id,
+            )
+            stats["skipped"] += 1
+            continue
+
+        new_status = (raw.get("status") or "").upper()
+
+        # Major fix #3: only write CONFIRMED rows. MINED is not a fill authority.
+        if new_status != "CONFIRMED":
+            stats["skipped"] += 1
+            continue
+
+        tx_hash = raw.get("transaction_hash") or raw.get("transactionHash") or raw.get("tx_hash")
+        last_update = raw.get("last_update") or _utcnow().isoformat()
+        rest_size = raw.get("size") or raw.get("filled_size") or filled_size or "0"
+        rest_price = raw.get("price") or raw.get("fill_price") or fill_price or "0"
+
+        # CRITIC_FLAG-2: SAVEPOINT wraps re-check + append_trade_fact atomically.
+        # SAVEPOINT nests inside any outer implicit transaction — safe when called
+        # from cycle_runner where prior DML (chain_sync, allocator) left conn
+        # in_transaction=True. BEGIN IMMEDIATE would raise OperationalError here.
+        with _savepoint_atomic(conn):
+            already = conn.execute(
+                "SELECT 1 FROM venue_trade_facts WHERE command_id=? AND state='CONFIRMED'",
+                (command_id,),
+            ).fetchone()
+            if already:
+                stats["skipped"] += 1
+                continue
+
+            append_trade_fact(
+                conn,
+                trade_id=trade_id,
+                venue_order_id=venue_order_id,
+                command_id=command_id,
+                state="CONFIRMED",
+                filled_size=str(rest_size),
+                fill_price=str(rest_price),
+                tx_hash=tx_hash,
+                source="REST",
+                observed_at=last_update,
+                raw_payload_hash=_hash_raw_payload(raw),
+                raw_payload_json=raw,
+            )
+
+        stats["promoted"] += 1
+        logger.info(
+            "promote_pending_trades: promoted trade_id=%s order_id=%s → CONFIRMED tx=%s",
+            trade_id, venue_order_id, tx_hash,
+        )
+
+    return stats
 
 
 def _active_runtime_state(position: Position) -> str:
