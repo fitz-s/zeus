@@ -1030,9 +1030,15 @@ def _check_deployment_freshness(
     Divergence means a merge/deploy happened after the daemon started.
 
     Grace windows (by uptime):
-      < 4h   : WARNING log + metric. Normal deploy window; no action.
-      4–24h  : ERROR log + control_plane.json flag. Trading continues.
-      >= 24h : SystemExit — fail-closed unless ZEUS_ACCEPT_STALE_DEPLOY=1.
+      < 4h   : WARNING log. Normal deploy window; no action (daemon may not have
+               restarted yet after a deploy).
+      4–24h  : ERROR log + state/deployment_freshness.json flag + pause_entries
+               (reason='deployment_freshness_4h_divergence'). Trading paused to
+               prevent operating on stale pricing logic.
+      >= 24h : SystemExit fail-closed unless ZEUS_ACCEPT_STALE_DEPLOY=1.
+
+    Advisory state written to state/deployment_freshness.json (NOT control_plane.json
+    which is overwritten every cycle by _write_control_payload).
 
     All git failures and non-git-repo environments are silent (no crash).
     """
@@ -1086,29 +1092,41 @@ def _check_deployment_freshness(
     elif uptime_hours >= 4.0:
         logger.error(
             "deployment_freshness_diverged_total: boot_sha=%s current_sha=%s "
-            "uptime_hours=%.1f — merged code not reloaded; trading continues",
+            "uptime_hours=%.1f — merged code not reloaded; pausing entries",
             _boot_sha[:8], current_sha[:8], uptime_hours,
         )
-        # Write advisory flag to control_plane.json.
-        cp_path = state_path("control_plane.json")
+        # Write advisory flag to dedicated state/deployment_freshness.json.
+        # NOT control_plane.json — that file is overwritten on every cycle by
+        # _write_control_payload (control_plane.py:119) which writes only
+        # {commands, acks}. A dedicated file survives all control_plane writes.
+        df_path = state_path("deployment_freshness.json")
         try:
-            try:
-                with open(cp_path) as _f:
-                    _cp: dict = json.load(_f)
-            except (FileNotFoundError, OSError, json.JSONDecodeError):
-                _cp = {}
-            _cp["deployment_freshness_warning"] = {
+            _df: dict = {
                 "boot_sha": _boot_sha,
                 "current_sha": current_sha,
                 "uptime_hours": round(uptime_hours, 2),
                 "detected_at": _now.isoformat(),
             }
-            _tmp = str(cp_path) + ".tmp"
+            _tmp = str(df_path) + ".tmp"
             with open(_tmp, "w") as _f:
-                json.dump(_cp, _f, indent=2)
-            os.replace(_tmp, str(cp_path))
+                json.dump(_df, _f, indent=2)
+            os.replace(_tmp, str(df_path))
         except Exception as _exc:
-            logger.warning("deployment_freshness: failed to write control_plane flag: %s", _exc)
+            logger.warning("deployment_freshness: failed to write flag file: %s", _exc)
+        # Pause new entries — prevents trading 5h+ on stale pricing code
+        # (the exact 2026-05-17 incident class). Idempotent if already paused.
+        try:
+            from src.control.control_plane import pause_entries
+            pause_entries(
+                "deployment_freshness_4h_divergence",
+                issued_by="auto_pause_freshness",
+                effective_until=None,
+            )
+        except Exception as _exc:
+            logger.error(
+                "deployment_freshness: pause_entries failed (%s); "
+                "entries NOT paused despite 4h staleness", _exc,
+            )
     else:
         logger.warning(
             "deployment_freshness_diverged_total: boot_sha=%s current_sha=%s "
@@ -1498,7 +1516,17 @@ def main():
         _BOOT_STATE["ts"] = datetime.now(timezone.utc)
         logger.info("deployment_freshness: boot_sha=%s", _boot_sha[:8])
     except Exception as _exc:
-        logger.warning("deployment_freshness: boot SHA capture failed (%s); freshness check disabled", _exc)
+        if os.environ.get("ZEUS_ACCEPT_STALE_DEPLOY") == "1":
+            logger.warning(
+                "deployment_freshness: boot SHA capture failed (%s); "
+                "ZEUS_ACCEPT_STALE_DEPLOY=1 — skipping gate", _exc,
+            )
+        else:
+            raise SystemExit(
+                f"deployment_freshness: boot SHA capture failed ({_exc}) and "
+                "ZEUS_ACCEPT_STALE_DEPLOY != 1. Cannot initialize freshness gate. "
+                "Set ZEUS_ACCEPT_STALE_DEPLOY=1 to skip."
+            )
 
     # Proxy health gate: strip dead HTTP_PROXY so data-only mode works
     # without VPN. Must precede any HTTP call (PolymarketClient wallet check, etc).
