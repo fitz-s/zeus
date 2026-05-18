@@ -18,7 +18,7 @@ import json
 import os
 import sqlite3
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).parent.parent
@@ -31,6 +31,11 @@ from src.config import STATE_DIR, get_mode, runtime_state_path
 PHASE_STALE_HOURS = 72  # position stuck at 'active' for > N hours → flag
 TRADE_ACTIVITY_STALE_HOURS = 12  # no fills for > N hours with open positions → flag
 STATUS_SUMMARY_MAX_AGE_SECONDS = 3600  # 1 hour
+# Oracle MISSING: if oracle_error_rates.json is absent or ALL entries have n==0
+# for longer than this threshold, escalate to critical. 7 days matches the STALE
+# boundary in oracle_estimator.py so persistent-MISSING is distinguishable from
+# a single missed bridge run.
+ORACLE_MISSING_CRITICAL_HOURS = 7 * 24  # 7 days → critical (trading on 0-evidence)
 
 
 def _mode() -> str:
@@ -359,6 +364,137 @@ def check_trade_liveness() -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Check 6: Oracle MISSING Persistent Escalation (F33)
+# ---------------------------------------------------------------------------
+
+def check_oracle_missing() -> dict:
+    """Escalate when oracle_error_rates.json is absent or all-MISSING for >7 days.
+
+    OracleStatus.MISSING silently applies a 0.5 Kelly multiplier. Without this
+    check, a city with MISSING oracle data can trade at half-Kelly indefinitely
+    with no operator alert. This check fires critical when the artifact is absent
+    or entirely zero-evidence beyond the STALE threshold.
+
+    Exit semantics (matches deep_heartbeat protocol):
+      ok=True       → artifact present and has ≥1 non-zero entry within threshold
+      severity=warning → artifact missing or all-zero but within 7-day window
+      severity=critical → artifact missing or all-zero AND older than 7 days
+    """
+    result = {"check": "oracle_missing_escalation", "ok": True, "details": {}}
+
+    try:
+        from src.state.paths import oracle_error_rates_path, oracle_artifact_heartbeat_path
+    except Exception as exc:
+        result["details"]["import_error"] = str(exc)
+        result["details"]["note"] = "oracle paths import failed — skipping check"
+        return result
+
+    rates_path = oracle_error_rates_path()
+    heartbeat_path = oracle_artifact_heartbeat_path()
+    now = _utc_now()
+
+    # --- Determine artifact age ---
+    # Prefer the heartbeat sidecar (written atomically alongside oracle_error_rates.json)
+    # because it records write_at even when the main file is stale on disk.
+    artifact_age_hours: float | None = None
+    age_source = "none"
+
+    if heartbeat_path.exists():
+        try:
+            hb = json.loads(heartbeat_path.read_text())
+            written_at_raw = hb.get("written_at") or hb.get("timestamp")
+            if written_at_raw:
+                written_at = datetime.fromisoformat(
+                    str(written_at_raw).replace("Z", "+00:00")
+                )
+                if written_at.tzinfo is None:
+                    written_at = written_at.replace(tzinfo=timezone.utc)
+                artifact_age_hours = (now - written_at).total_seconds() / 3600
+                age_source = "heartbeat_sidecar"
+        except Exception:
+            pass
+
+    if artifact_age_hours is None and rates_path.exists():
+        mtime = rates_path.stat().st_mtime
+        artifact_age_hours = (now.timestamp() - mtime) / 3600
+        age_source = "file_mtime"
+
+    result["details"]["rates_path"] = str(rates_path)
+    result["details"]["heartbeat_path"] = str(heartbeat_path)
+    result["details"]["artifact_age_hours"] = (
+        round(artifact_age_hours, 2) if artifact_age_hours is not None else None
+    )
+    result["details"]["age_source"] = age_source
+    result["details"]["rates_file_exists"] = rates_path.exists()
+    result["details"]["heartbeat_file_exists"] = heartbeat_path.exists()
+
+    # --- Check if rates file is present and has evidence ---
+    has_evidence = False
+    if rates_path.exists():
+        try:
+            rates = json.loads(rates_path.read_text())
+            # rates is a dict of city → metric → {"n": int, ...} or flat list
+            # Support both dict-of-dicts and list formats.
+            if isinstance(rates, dict):
+                for city_data in rates.values():
+                    if isinstance(city_data, dict):
+                        for entry in city_data.values():
+                            if isinstance(entry, dict) and int(entry.get("n", 0)) > 0:
+                                has_evidence = True
+                                break
+                            elif isinstance(entry, (int, float)) and entry > 0:
+                                has_evidence = True
+                                break
+                    if has_evidence:
+                        break
+            elif isinstance(rates, list):
+                for entry in rates:
+                    if isinstance(entry, dict) and int(entry.get("n", 0)) > 0:
+                        has_evidence = True
+                        break
+            result["details"]["has_evidence_entries"] = has_evidence
+        except (json.JSONDecodeError, OSError) as exc:
+            result["details"]["parse_error"] = str(exc)
+            has_evidence = False
+
+    # --- Classify ---
+    if has_evidence and artifact_age_hours is not None and artifact_age_hours < ORACLE_MISSING_CRITICAL_HOURS:
+        # Healthy: evidence present and fresh enough
+        return result
+
+    # Determine severity by age
+    if artifact_age_hours is None:
+        # File never written — always critical
+        severity = "critical"
+    elif artifact_age_hours >= ORACLE_MISSING_CRITICAL_HOURS:
+        severity = "critical"
+    else:
+        severity = "warning"
+
+    result["ok"] = False
+    result["severity"] = severity
+
+    if not rates_path.exists():
+        result["message"] = (
+            "oracle_error_rates.json absent — all cities trading on MISSING prior (mult=0.5) "
+            "with no operator alert (F33)"
+        )
+    elif not has_evidence:
+        age_str = f"{artifact_age_hours:.1f}h" if artifact_age_hours is not None else "unknown age"
+        result["message"] = (
+            f"oracle_error_rates.json has zero evidence entries ({age_str} old) — "
+            "all cities at MISSING prior (mult=0.5) with no operator alert (F33)"
+        )
+    else:
+        result["message"] = (
+            f"oracle artifact age {artifact_age_hours:.1f}h exceeds "
+            f"{ORACLE_MISSING_CRITICAL_HOURS}h threshold — stale oracle data (F33)"
+        )
+
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
 
@@ -391,6 +527,7 @@ def run_diagnostics() -> dict:
             check_env_contamination(conn),
             check_portfolio_loader(conn),
             check_trade_liveness(),
+            check_oracle_missing(),
         ]
     finally:
         conn.close()
