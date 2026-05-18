@@ -721,12 +721,23 @@ class PolymarketClient:
         )
         return self.get_wallet_balance()
 
-    def redeem(self, condition_id: str) -> Optional[dict]:
+    def redeem(
+        self,
+        condition_id: str,
+        *,
+        index_sets: list[int] | None = None,
+    ) -> Optional[dict]:
         """Redeem winning shares for USDC after settlement.
 
         Not urgent (USDC stays claimable indefinitely) but without it,
         winning capital sits on-chain instead of being available for new trades.
+
+        PR-I.5.c (2026-05-18): compatibility wrapper accepts index_sets kw-only
+        for protocol parity with PolymarketV2Adapter.redeem. This wrapper still
+        returns the legacy stub — autonomous redeem routes exclusively through
+        PolymarketV2Adapter constructed by _redeem_submitter_cycle.
         """
+        _ = index_sets  # kept for protocol parity; ignored in compat wrapper
         warnings.warn(
             "PolymarketClient.redeem() is a compatibility wrapper; "
             "redeem attempts route through PolymarketV2Adapter when supported.",

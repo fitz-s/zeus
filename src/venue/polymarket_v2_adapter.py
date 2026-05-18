@@ -15,6 +15,7 @@ import hashlib
 import importlib.metadata
 import json
 import logging
+import os
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
@@ -57,6 +58,20 @@ DEFAULT_POLYGON_RPC_URL = "https://polygon-bor-rpc.publicnode.com"
 POLYGON_PUSD_ADDRESS = "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB"
 POLYGON_EXCHANGE_V2_ADDRESS = "0xE111180000d2663C0091e4f400237545B87B996B"
 POLYGON_NEG_RISK_EXCHANGE_V2_ADDRESS = "0xe2222d279d744050d28e00520010520000310F59"
+# PR-I.5.c: Gnosis Conditional Tokens Framework canonical deployment on Polygon
+# mainnet. Source: Polymarket public contract docs; on-chain bytecode
+# verification deferred to operator dry-run before first live submission.
+POLYGON_CTF_ADDRESS = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
+# PR-I.5.c: redeemPositions(address,bytes32,bytes32,uint256[]) keccak256[:4].
+# Verified locally with eth_utils.keccak; pinned to prevent silent ABI drift.
+CTF_REDEEM_POSITIONS_SELECTOR = "0x01b7037c"
+# PR-I.5.c kill switch. Default OFF — adapter returns the existing
+# REDEEM_DEFERRED_TO_R1 stub so settlement_commands routes to
+# REDEEM_OPERATOR_REQUIRED (per SCAFFOLD §K.3 v5). Operator flips this ON
+# AFTER dry-run mock verification. See settlement_commands.py:426 — the
+# OPERATOR_REQUIRED branch keys on errorCode == "REDEEM_DEFERRED_TO_R1"
+# exactly; do NOT change that string.
+AUTONOMOUS_REDEEM_ENABLED_ENV = "ZEUS_AUTONOMOUS_REDEEM_ENABLED"
 
 
 @dataclass(frozen=True)
@@ -161,7 +176,12 @@ class PolymarketV2AdapterProtocol(Protocol):
 
     def get_balance(self, conn=None) -> Any: ...
 
-    def redeem(self, condition_id: str) -> dict[str, Any]: ...
+    def redeem(
+        self,
+        condition_id: str,
+        *,
+        index_sets: list[int] | None = None,
+    ) -> dict[str, Any]: ...
 
     def post_heartbeat(self, heartbeat_id: str) -> HeartbeatAck: ...
 
@@ -711,18 +731,186 @@ class PolymarketV2Adapter:
             if own_conn:
                 conn.close()
 
-    def redeem(self, condition_id: str) -> dict[str, Any]:
-        """Redeem winning shares when the SDK exposes a redeem method.
+    def redeem(
+        self,
+        condition_id: str,
+        *,
+        index_sets: list[int] | None = None,
+    ) -> dict[str, Any]:
+        """Redeem winning shares via the Polygon CTF redeemPositions call.
 
-        Z2 does not verify a V2 redeem surface. Missing support therefore
-        produces a typed response rather than falling back to the legacy SDK.
+        PR-I.5.c (2026-05-18) Path A wire: eth_abi.encode + eth_utils.keccak
+        for calldata, eth_account.Account.sign_transaction for signing, and the
+        existing self._rpc_call (urllib JSON-RPC) for nonce/gas/broadcast.
+        No `web3` library dependency.
+
+        Kill switch: ZEUS_AUTONOMOUS_REDEEM_ENABLED env-var defaults OFF. When
+        OFF, returns the legacy REDEEM_DEFERRED_TO_R1 stub bytes-for-bytes so
+        settlement_commands.py:426 still routes to REDEEM_OPERATOR_REQUIRED
+        (operator CLI completes via scripts/operator_record_redeem.py).
+        Flipping ON enables autonomous web3 submission; do NOT do so without
+        a dry-run smoke test first (Karachi position c30f28a5-d4e is the first
+        live target).
+
+        index_sets: CTF redeemPositions indexSets — binary outcome wins as
+        [1]=NO or [2]=YES. Multi-bin (ranged) markets pass the union of winning
+        bins. None means caller did not derive the bin — adapter cannot guess
+        and returns the stub so operator CLI handles it.
         """
 
+        # Karachi safety / Path A precedence: default OFF returns the stub
+        # verbatim. settlement_commands.py:426-454 already handles this
+        # errorCode by routing to REDEEM_OPERATOR_REQUIRED (NOT terminal;
+        # operator CLI exits the state).
+        autonomous_enabled = (
+            os.environ.get(AUTONOMOUS_REDEEM_ENABLED_ENV, "").strip().lower()
+            in {"1", "true", "yes", "on"}
+        )
+        if not autonomous_enabled:
+            return {
+                "success": False,
+                "errorCode": "REDEEM_DEFERRED_TO_R1",
+                "errorMessage": (
+                    "R1 settlement command ledger must own pUSD redemption side effects "
+                    "(autonomous redeem gated by ZEUS_AUTONOMOUS_REDEEM_ENABLED, default OFF)"
+                ),
+                "condition_id": condition_id,
+            }
+
+        if not index_sets:
+            return {
+                "success": False,
+                "errorCode": "REDEEM_INDEX_SETS_MISSING",
+                "errorMessage": (
+                    "redeem() requires index_sets (e.g. [2] for YES win, [1] for NO win); "
+                    "harvester must populate winning_index_set in settlement_commands"
+                ),
+                "condition_id": condition_id,
+            }
+        if not self.polygon_rpc_url:
+            return {
+                "success": False,
+                "errorCode": "REDEEM_RPC_URL_MISSING",
+                "errorMessage": "polygon_rpc_url required for autonomous redeem path",
+                "condition_id": condition_id,
+            }
+        if not self.signer_key or not self.funder_address:
+            return {
+                "success": False,
+                "errorCode": "REDEEM_CREDENTIALS_MISSING",
+                "errorMessage": "signer_key and funder_address required for autonomous redeem",
+                "condition_id": condition_id,
+            }
+
+        try:
+            calldata = _build_redeem_calldata(condition_id, index_sets)
+        except Exception as exc:  # ABI-encode failure is a structural defect
+            return {
+                "success": False,
+                "errorCode": "REDEEM_CALLDATA_BUILD_FAILED",
+                "errorMessage": f"calldata build failed: {exc}",
+                "condition_id": condition_id,
+            }
+
+        # Nonce: 'pending' so a prior unconfirmed tx from this wallet does not
+        # collide. Gas price: eth_gasPrice RPC. Gas limit: eth_estimateGas with
+        # 1.2x buffer; if estimate reverts (e.g. already-redeemed), route to
+        # REVIEW_REQUIRED rather than RETRYING-loop forever.
+        try:
+            nonce_hex = self._rpc_call(
+                self.polygon_rpc_url,
+                "eth_getTransactionCount",
+                [self.funder_address, "pending"],
+            )
+            nonce = int(str(nonce_hex), 16)
+            gas_price_hex = self._rpc_call(
+                self.polygon_rpc_url, "eth_gasPrice", []
+            )
+            gas_price = int(str(gas_price_hex), 16)
+        except Exception as exc:
+            return {
+                "success": False,
+                "errorCode": "REDEEM_RPC_PRECHECK_FAILED",
+                "errorMessage": f"nonce/gasPrice fetch failed: {exc}",
+                "condition_id": condition_id,
+            }
+
+        estimate_params = {
+            "from": self.funder_address,
+            "to": POLYGON_CTF_ADDRESS,
+            "data": calldata,
+        }
+        try:
+            gas_estimate_hex = self._rpc_call(
+                self.polygon_rpc_url, "eth_estimateGas", [estimate_params]
+            )
+            gas_estimate = int(str(gas_estimate_hex), 16)
+            # 1.2x buffer for variation; bigint round up.
+            gas_limit = (gas_estimate * 12) // 10
+        except V2AdapterError as exc:
+            # eth_estimateGas reverts when the call would fail on-chain
+            # (already-redeemed, wrong index_sets, no balance). Surface as a
+            # typed errorCode that settlement_commands routes to REVIEW_REQUIRED,
+            # NOT RETRYING — re-broadcasting won't change the on-chain truth.
+            return {
+                "success": False,
+                "errorCode": "REDEEM_GAS_ESTIMATE_REVERTED",
+                "errorMessage": f"eth_estimateGas reverted: {exc}",
+                "condition_id": condition_id,
+            }
+        except Exception as exc:
+            return {
+                "success": False,
+                "errorCode": "REDEEM_RPC_PRECHECK_FAILED",
+                "errorMessage": f"eth_estimateGas failed: {exc}",
+                "condition_id": condition_id,
+            }
+
+        tx = {
+            "to": POLYGON_CTF_ADDRESS,
+            "data": calldata,
+            "value": 0,
+            "chainId": int(self.chain_id),
+            "nonce": nonce,
+            "gas": gas_limit,
+            "gasPrice": gas_price,
+        }
+
+        try:
+            from eth_account import Account
+
+            signed = Account.sign_transaction(tx, self.signer_key)
+            raw_hex = "0x" + signed.raw_transaction.hex().removeprefix("0x")
+        except Exception as exc:
+            return {
+                "success": False,
+                "errorCode": "REDEEM_SIGN_FAILED",
+                "errorMessage": f"sign_transaction failed: {exc}",
+                "condition_id": condition_id,
+            }
+
+        try:
+            tx_hash = self._rpc_call(
+                self.polygon_rpc_url,
+                "eth_sendRawTransaction",
+                [raw_hex],
+            )
+        except Exception as exc:
+            return {
+                "success": False,
+                "errorCode": "REDEEM_BROADCAST_FAILED",
+                "errorMessage": f"eth_sendRawTransaction failed: {exc}",
+                "condition_id": condition_id,
+            }
+
         return {
-            "success": False,
-            "errorCode": "REDEEM_DEFERRED_TO_R1",
-            "errorMessage": "R1 settlement command ledger must own pUSD redemption side effects",
+            "success": True,
+            "tx_hash": str(tx_hash),
             "condition_id": condition_id,
+            "index_sets": list(index_sets),
+            "nonce": nonce,
+            "gas_price": gas_price,
+            "gas_limit": gas_limit,
         }
 
     def post_heartbeat(self, heartbeat_id: str) -> HeartbeatAck:
@@ -1088,6 +1276,63 @@ def _json_rpc_call(rpc_url: str, method: str, params: list[Any]) -> Any:
     if "error" in decoded:
         raise V2AdapterError(f"polygon rpc error: {decoded['error']}")
     return decoded.get("result")
+
+
+def _normalize_condition_id_bytes32(condition_id: str) -> bytes:
+    """Coerce a hex condition_id to canonical bytes32. PR-I.5.c.
+
+    Settlement_commands stores condition_id as the hex string Polymarket
+    returns (with or without 0x prefix). The CTF ABI expects raw bytes32.
+    """
+    raw = condition_id.removeprefix("0x").removeprefix("0X")
+    if len(raw) != 64:
+        raise ValueError(
+            f"condition_id must be a 32-byte hex (got {len(raw)} chars): {condition_id!r}"
+        )
+    try:
+        return bytes.fromhex(raw)
+    except ValueError as exc:
+        raise ValueError(
+            f"condition_id is not valid hex: {condition_id!r}"
+        ) from exc
+
+
+def _build_redeem_calldata(condition_id: str, index_sets: list[int]) -> str:
+    """ABI-encode CTF redeemPositions calldata. PR-I.5.c.
+
+    ``redeemPositions(address collateralToken, bytes32 parentCollectionId,
+                      bytes32 conditionId, uint256[] indexSets)``
+
+    parentCollectionId is the zero word for top-level positions (no nested
+    conditions). collateralToken is the pUSD Polygon address.
+
+    Returns hex-encoded calldata starting with the selector (0x01b7037c).
+    """
+    from eth_abi import encode as _abi_encode
+
+    if not isinstance(index_sets, (list, tuple)) or not index_sets:
+        raise ValueError(f"index_sets must be a non-empty list, got {index_sets!r}")
+    coerced: list[int] = []
+    for entry in index_sets:
+        coerced.append(int(entry))
+        if int(entry) <= 0:
+            raise ValueError(f"index_sets entries must be positive uint256, got {entry!r}")
+
+    collateral = bytes.fromhex(POLYGON_PUSD_ADDRESS.removeprefix("0x"))
+    if len(collateral) != 20:
+        raise ValueError("POLYGON_PUSD_ADDRESS is not a valid 20-byte address")
+    parent_collection_id = b"\x00" * 32
+    condition_bytes = _normalize_condition_id_bytes32(condition_id)
+    encoded_args = _abi_encode(
+        ["address", "bytes32", "bytes32", "uint256[]"],
+        [
+            "0x" + collateral.hex(),
+            parent_collection_id,
+            condition_bytes,
+            coerced,
+        ],
+    )
+    return CTF_REDEEM_POSITIONS_SELECTOR + encoded_args.hex()
 
 
 def _snapshot_attr(snapshot: Any, name: str) -> Any:

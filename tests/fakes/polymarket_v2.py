@@ -303,7 +303,15 @@ class FakePolymarketVenue:
 
         return CollateralLedger(conn).refresh(self)
 
-    def redeem(self, condition_id: str) -> dict[str, Any]:
+    def redeem(
+        self,
+        condition_id: str,
+        *,
+        index_sets: list[int] | None = None,
+    ) -> dict[str, Any]:
+        # PR-I.5.c: kw-only index_sets accepted; fake preserves R1 boundary so
+        # the stub-deferred → REDEEM_OPERATOR_REQUIRED path stays exercisable
+        # in tests that wire this fake.
         return {
             "success": False,
             "errorCode": "REDEEM_DEFERRED_TO_R1",

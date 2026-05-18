@@ -394,12 +394,33 @@ def submit_redeem(
             conn.commit()
 
         try:
+            # PR-I.5.c (2026-05-18): parse JSON-encoded winning_index_set
+            # ('["2"]' for YES win, '["1"]' for NO win) into list[int] for the
+            # adapter. None means harvester did not derive the winning bin —
+            # adapter will return REDEEM_INDEX_SETS_MISSING (when autonomous
+            # ON) or the stub (when OFF). Either path is safe; both surface a
+            # well-typed errorCode rather than silently calling with wrong arg.
+            raw_winning_index_set = row["winning_index_set"]
+            parsed_index_sets: list[int] | None
+            if raw_winning_index_set is None:
+                parsed_index_sets = None
+            else:
+                try:
+                    decoded = json.loads(raw_winning_index_set)
+                    parsed_index_sets = [int(x) for x in decoded]
+                except Exception as parse_exc:
+                    logger.warning(
+                        "[REDEEM_INDEX_SET_PARSE_FAILED] command_id=%s raw=%r exc=%s",
+                        command_id, raw_winning_index_set, parse_exc,
+                    )
+                    parsed_index_sets = None
             logger.debug(
-                "[REDEEM_CTX] command_id=%s winning_index_set=%s (web3 wire pending PR-I.5.c)",
+                "[REDEEM_CTX] command_id=%s winning_index_set=%s parsed=%s",
                 command_id,
-                row["winning_index_set"],
+                raw_winning_index_set,
+                parsed_index_sets,
             )
-            raw = adapter.redeem(row["condition_id"])
+            raw = adapter.redeem(row["condition_id"], index_sets=parsed_index_sets)
         except Exception as exc:  # preserve durable SUBMITTED before retry classification
             error_payload = {"exception_type": type(exc).__name__, "message": str(exc)}
             with _savepoint(conn):
