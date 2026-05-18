@@ -165,6 +165,32 @@ def _harvester_cycle():
     logger.info("Harvester: %s", result)
 
 
+def _wu_daily_dispatch() -> None:
+    """K2 WU daily scheduler tick — collect WU daily observations for eligible cities.
+
+    Called hourly by the daemon scheduler. WuDailyScheduler.should_collect_now
+    gates collection per city using a window_minutes=60 default, so each city
+    fires at most once per hour at its configured local trigger time.
+
+    Cluster L wiring per G4_CLEANUP_DESIGN.md §2 L (2026-05-18).
+    Operator may override interval post-merge if cadence needs tuning.
+    """
+    from src.data.wu_scheduler import WuDailyScheduler, dispatch_wu_daily_collection
+    from src.data.daily_obs_append import append_daily_obs_for_city
+
+    scheduler_instance = WuDailyScheduler()
+    targets = dispatch_wu_daily_collection(scheduler_instance)
+    if not targets:
+        logger.debug("wu_daily_dispatch: no cities eligible this tick")
+        return
+    for city_name in targets:
+        try:
+            append_daily_obs_for_city(city_name)
+            logger.info("wu_daily_dispatch: collected %s", city_name)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("wu_daily_dispatch: error for %s: %s", city_name, exc)
+
+
 # ---------------------------------------------------------------------------
 # F14 + F16 cascade-liveness pollers (2026-05-16, SCAFFOLD §K v5)
 # ---------------------------------------------------------------------------
@@ -1879,6 +1905,12 @@ def main():
     scheduler.add_job(
         _check_deployment_freshness, "interval", seconds=60,
         id="deployment_freshness", max_instances=1, coalesce=True,
+    )
+    # K2 WU daily collection — hourly tick; WuDailyScheduler gates per-city.
+    # Cluster L wiring per G4_CLEANUP_DESIGN.md §2 L (2026-05-18).
+    scheduler.add_job(
+        _wu_daily_dispatch, "interval", hours=1, id="wu_daily",
+        max_instances=1, coalesce=True,
     )
 
     # Boot-time fail-closed cascade-liveness contract check. MUST run AFTER
