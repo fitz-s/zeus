@@ -1,6 +1,9 @@
 # Created: 2026-05-18
 # Last reused or audited: 2026-05-18
 # Authority basis: docs/operations/task_2026-05-16_post_pr126_audit/RUN_16_track_A_f85_log_routing_f87_close.md §3
+# Lifecycle: created=2026-05-18; last_reviewed=2026-05-18; last_reused=never
+# Purpose: Antibody test — verify F85 dual-handler logging is installed on all daemon entry-points.
+# Reuse: Run directly; no setup required. Add new daemon files to DAEMON_FILES dict at top of module.
 """F85 antibody: each daemon entry-point must use dual-handler logging.
 
 Root cause: logging.basicConfig() default StreamHandler(sys.stderr) routes ALL
