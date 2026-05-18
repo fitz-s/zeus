@@ -1,8 +1,13 @@
 # Created: 2026-05-14
-# Last reused or audited: 2026-05-14
+# Last reused or audited: 2026-05-17
 # Authority basis: docs/operations/task_2026-05-14_k1_followups/PLAN.md §1.1, §1.2, §3 (REV 4)
 #   Antibodies A1, A2 (subset as A4), A8 per PLAN §3
 #   INV-37 enforcement per architecture/invariants.yaml::INV-37
+#   PR-S4 (Bug #5) additions: test_a4_manifest_ready_for_boot_wiring +
+#   test_a4_manifest_schema_version_is_2 + test_a4_trade_tables_declared_in_registry +
+#   test_a4_trade_tables_init_schema_creates_12 +
+#   test_a4_ghost_shells_declared_legacy_archived_on_world
+#   per STRUCTURAL_PLAN v3 §2 PR-S4 + E_patch_plan.md §Antibody/CI
 """Registry coherence tests — A1/A2/A4/A8 antibody suite.
 
 ANTIBODY PROOF per Fitz Core Methodology #4 (make category impossible):
@@ -508,3 +513,197 @@ class TestRegistryLoaderFatalSemantics:
         monkeypatch.setattr(reg_mod, "_REGISTRY_PATH", bad_yaml)
         with pytest.raises(ValueError, match="missing required fields"):
             reg_mod._load_registry()
+
+
+# ---------------------------------------------------------------------------
+# Meta-antibody: manifest readiness for PR-S4b boot wiring
+# (PR-S4 Bug #5 per STRUCTURAL_PLAN v3 §2 + E_patch_plan.md §Antibody/CI)
+# Boot wiring deferred to PR-S4b per critic SEV-1 (PR_S4_critic.md):
+# live WORLD+FORECASTS DBs have 13+12 tables not yet in registry.
+# ---------------------------------------------------------------------------
+
+class TestA4ManifestReadyForBootWiring:
+    """Manifest-readiness antibodies: structural preconditions for PR-S4b boot wiring.
+
+    PR-S4 ships the YAML cutover (schema_version 2 + 12 trade re-owns + 12 ghost
+    shells). Boot wiring (assert_db_matches_registry in main.py/ingest_main.py)
+    is deferred to PR-S4b, which must also add init_schema_trade_only and extend
+    the manifest to cover all live-DB tables (critic SEV-1: live WORLD has 13
+    unregistered migration-leftover tables; FORECASTS has 12).
+
+    These tests assert the manifest changes that PR-S4b depends on are present
+    and have not been reverted.
+    """
+
+    def test_a4_manifest_ready_for_boot_wiring(self):
+        """Manifest contains schema_version 2 + 12 trade entries + 12 ghost shells.
+
+        Regression injection: revert any of the three YAML structural changes
+        → this test fails, blocking PR-S4b from merging without the prerequisite.
+        """
+        import yaml
+        from src.state.table_registry import DBIdentity, SchemaClass, _REGISTRY, tables_for
+
+        yaml_path = _REPO_ROOT / "architecture" / "db_table_ownership.yaml"
+        with open(yaml_path) as f:
+            data = yaml.safe_load(f)
+
+        # (1) schema_version == 2
+        assert data["schema_version"] == 2, (
+            f"MANIFEST READINESS FAIL: schema_version expected 2, got "
+            f"{data['schema_version']}. PR-S4 cutover was reverted."
+        )
+
+        # (2) 12 trade-class tables declared db: trade
+        expected_trade = frozenset({
+            "execution_fact", "position_current", "position_events",
+            "position_lots", "settlement_command_events", "settlement_commands",
+            "trade_decisions", "venue_command_events", "venue_commands",
+            "venue_order_facts", "venue_submission_envelopes", "venue_trade_facts",
+        })
+        actual_trade = tables_for(DBIdentity.TRADE)
+        missing_trade = expected_trade - actual_trade
+        assert not missing_trade, (
+            f"MANIFEST READINESS FAIL: these tables should be db: trade but are "
+            f"missing from registry: {sorted(missing_trade)}."
+        )
+
+        # (3) 12 ghost shells declared legacy_archived on world.db
+        missing_ghost = [
+            name for name in expected_trade
+            if (_REGISTRY.get((name, DBIdentity.WORLD)) is None
+                or _REGISTRY[(name, DBIdentity.WORLD)].schema_class != SchemaClass.LEGACY_ARCHIVED)
+        ]
+        assert not missing_ghost, (
+            f"MANIFEST READINESS FAIL: these trade tables lack legacy_archived "
+            f"ghost shell on world.db: {sorted(missing_ghost)}."
+        )
+
+    def test_a4_manifest_schema_version_is_2(self):
+        """architecture/db_table_ownership.yaml schema_version == 2 (PR-S4 cutover)."""
+        import yaml
+
+        yaml_path = _REPO_ROOT / "architecture" / "db_table_ownership.yaml"
+        with open(yaml_path) as f:
+            data = yaml.safe_load(f)
+        assert data["schema_version"] == 2, (
+            f"A4 META-ANTIBODY FAIL: db_table_ownership.yaml schema_version "
+            f"expected 2 (PR-S4 K1 cutover), got {data['schema_version']}. "
+            f"Manifest was downgraded or not updated."
+        )
+
+    def test_a4_trade_tables_declared_in_registry(self):
+        """12 trade-class tables are declared db: trade in the manifest.
+
+        Verifies the K1 cutover YAML changes (PR-S4) are present.
+        If all 12 are back to db: world, this catches the revert.
+        """
+        from src.state.table_registry import DBIdentity, tables_for
+
+        trade_tables = tables_for(DBIdentity.TRADE)
+        expected = frozenset({
+            "execution_fact", "position_current", "position_events",
+            "position_lots", "settlement_command_events", "settlement_commands",
+            "trade_decisions", "venue_command_events", "venue_commands",
+            "venue_order_facts", "venue_submission_envelopes", "venue_trade_facts",
+        })
+        missing = expected - trade_tables
+        assert not missing, (
+            f"A4 TRADE FAIL: these tables should be declared db: trade in "
+            f"architecture/db_table_ownership.yaml but are missing from "
+            f"tables_for(DBIdentity.TRADE): {sorted(missing)}. "
+            f"PR-S4 K1 manifest cutover may have been reverted."
+        )
+
+    def test_a4_trade_tables_init_schema_creates_12(self):
+        """init_schema creates exactly the 12 known trade-class tables (DDL coverage).
+
+        Uses independently sourced data:
+        - EXPECTED: hardcoded frozenset of the 12 PR-S4 trade-class table names
+        - ACTUAL: sqlite_master from fresh :memory: init_schema call
+        Both missing (init_schema skipped a table) AND spurious (an unknown table
+        claims trade-class membership) are failures.
+
+        Regression injection:
+        - Remove a CREATE TABLE from init_schema → missing_from_disk non-empty → FAIL.
+        - Add a new table to the expected set without a CREATE TABLE → same.
+        - Prior subset-only check allowed silent partial coverage (bot finding PR #144).
+        """
+        from src.state.db import init_schema
+
+        EXPECTED_TRADE_12 = frozenset({
+            "execution_fact",
+            "position_current",
+            "position_events",
+            "position_lots",
+            "settlement_command_events",
+            "settlement_commands",
+            "trade_decisions",
+            "venue_command_events",
+            "venue_commands",
+            "venue_order_facts",
+            "venue_submission_envelopes",
+            "venue_trade_facts",
+        })
+
+        conn = sqlite3.connect(":memory:")
+        init_schema(conn)
+        disk_tables = frozenset(
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' "
+                "AND name NOT LIKE 'sqlite_%'"
+            ).fetchall()
+        )
+        conn.close()
+
+        missing_from_disk = EXPECTED_TRADE_12 - disk_tables
+        assert not missing_from_disk, (
+            f"A4 TRADE DDL FAIL (missing): these 12 trade-class tables are expected "
+            f"but NOT created by init_schema: {sorted(missing_from_disk)}. "
+            f"Add CREATE TABLE to init_schema or verify migration applied."
+        )
+
+        # Also assert the expected set matches registry exactly (catches drift
+        # where a 13th table is added to trade-class without updating this test).
+        from src.state.table_registry import DBIdentity, tables_for
+        registry_trade = tables_for(DBIdentity.TRADE)
+        if registry_trade != EXPECTED_TRADE_12:
+            extra_in_registry = registry_trade - EXPECTED_TRADE_12
+            extra_in_expected = EXPECTED_TRADE_12 - registry_trade
+            assert False, (
+                f"A4 TRADE DDL FAIL (expected set drift): EXPECTED_TRADE_12 in this "
+                f"test does not match tables_for(DBIdentity.TRADE). "
+                f"Update EXPECTED_TRADE_12 to match the manifest. "
+                f"In registry but not in test: {sorted(extra_in_registry)}. "
+                f"In test but not in registry: {sorted(extra_in_expected)}."
+            )
+
+    def test_a4_ghost_shells_declared_legacy_archived_on_world(self):
+        """12 trade-class tables are declared legacy_archived on world.db (ghost shells).
+
+        Verifies Option (b) from E_patch_plan.md §4: ghost shells declared
+        legacy_archived so assert_db_matches_registry(WORLD) passes at boot.
+        """
+        from src.state.table_registry import DBIdentity, SchemaClass, _REGISTRY
+
+        trade_table_names = frozenset({
+            "execution_fact", "position_current", "position_events",
+            "position_lots", "settlement_command_events", "settlement_commands",
+            "trade_decisions", "venue_command_events", "venue_commands",
+            "venue_order_facts", "venue_submission_envelopes", "venue_trade_facts",
+        })
+
+        # Every trade table must have a legacy_archived entry for db: world
+        missing_ghost = []
+        for name in trade_table_names:
+            entry = _REGISTRY.get((name, DBIdentity.WORLD))
+            if entry is None or entry.schema_class != SchemaClass.LEGACY_ARCHIVED:
+                missing_ghost.append(name)
+
+        assert not missing_ghost, (
+            f"A4 GHOST FAIL: these trade-class tables lack a legacy_archived "
+            f"declaration for db: world in db_table_ownership.yaml: "
+            f"{sorted(missing_ghost)}. "
+            f"Add Option (b) ghost entries per E_patch_plan.md §4."
+        )
