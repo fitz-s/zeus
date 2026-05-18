@@ -125,9 +125,9 @@ calibration_pairs_v2 accumulate (~2-4 weeks post-launch).
 
 ## TOP-3 OPERATOR ACTIONS before next Karachi-class settlement
 
-1. **Unload calibration-transfer-eval plist NOW**: `launchctl bootout gui/$(id -u)/com.zeus.calibration-transfer-eval` (5 seconds, idempotent, undoable)
-2. **Backfill the 3 `unknown_entered_at` sentinel rows** to ISO timestamps (operator-attended; use `position_current.chain_verified_at` or `quarantined_at` as source)
-3. **Do NOT run `migrations/202605_add_redeem_operator_required_state.py` while live daemon active** — script lacks writer-lock + writer-stop enforcement; add hard fcntl LOCK_EX check on zeus-live.db before allowing re-run
+1. **Unload calibration-transfer-eval plist** — SUPERSEDED 2026-05-17 by F39 structural fix: `scripts/evaluate_calibration_transfer_oos.py` now self-policing (early-exit on `ZEUS_CALIBRATION_TRANSFER_OOS_EVAL_ENABLED != "1"`). Plist may remain loaded; no operator action needed.
+2. **3 `unknown_entered_at` sentinel rows — SUPERSEDED 2026-05-17 by structural fix**: `src/engine/lifecycle_events.py::_non_empty` skips the sentinel; F8 CHECK constraint blocks new occurrences. Historical 3 rows are tolerated by readers; do NOT operator-SQL them. If cleanup desired, write a programmatic backfill helper analogous to `src/state/trade_decisions_synthesizer.py` (per `feedback_no_manual_precedent_for_any_structural_defect`). Deferred to WAVE-3.
+3. **Do NOT run `migrations/202605_add_redeem_operator_required_state.py` while live daemon active** — script lacks writer-lock + writer-stop enforcement; add hard fcntl LOCK_EX check on zeus-live.db before allowing re-run (tracked under F22 WAVE-3 carry-forward).
 
 ## NOT-fixes (audit corrections)
 

@@ -213,7 +213,22 @@ def consolidate(conn: sqlite3.Connection) -> dict:
     try:
         for token_id, triples in duplicates:
             db_sum = sum(t[1] for t in triples)
-            chain_shares = float(chain_by_token.get(token_id, 0.0))
+            # MAJ-2 fix (2026-05-17 phase critic): token-absence in the chain
+            # snapshot must NOT default to chain=0.0 — that conflates "token
+            # has 0 shares on chain" with "token not measured in this snapshot"
+            # and could classify DIVERGENT cases as OVERBOOK. Per the spec
+            # (TRACE.md §4): chain-snapshot stale → SKIP.
+            if token_id not in chain_by_token:
+                report["divergent_tokens"].append(token_id)
+                logger.error(
+                    "[CONSOLIDATOR_DIVERGENT] token=%s reason=token_not_in_snapshot "
+                    "db_sum=%.6f rows=%d",
+                    token_id,
+                    db_sum,
+                    len(triples),
+                )
+                continue
+            chain_shares = float(chain_by_token[token_id])
             if not chain_snapshot_used:
                 # Conservative: without chain truth we cannot safely void.
                 report["divergent_tokens"].append(token_id)
@@ -287,7 +302,18 @@ def consolidate_token(conn: sqlite3.Connection, token_id: str) -> dict:
     try:
         triples = duplicates[0][1]
         db_sum = sum(t[1] for t in triples)
-        chain_shares = float(chain_by_token.get(str(token_id), 0.0))
+        # MAJ-2 fix (2026-05-17 phase critic): token-absence != chain=0.
+        # Detect and classify DIVERGENT, do NOT default to overbook.
+        if str(token_id) not in chain_by_token:
+            report["divergent_tokens"].append(str(token_id))
+            logger.error(
+                "[CONSOLIDATOR_DIVERGENT] token=%s reason=token_not_in_snapshot "
+                "db_sum=%.6f rows=%d (consolidate_token)",
+                token_id, db_sum, len(triples),
+            )
+            conn.execute(f"RELEASE SAVEPOINT {sp}")
+            return report
+        chain_shares = float(chain_by_token[str(token_id)])
         if not chain_by_token or db_sum <= chain_shares + 1e-9:
             report["divergent_tokens"].append(str(token_id))
         else:
