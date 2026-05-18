@@ -182,10 +182,15 @@ def test_six_known_call_sites_all_paired():
 def test_transition_phase_uses_append_many_and_project():
     """transition_phase must route through append_many_and_project so the
     position_events row and the position_current phase update commit inside
-    one SAVEPOINT (DR-33-B)."""
-    from src.state import db as db_module
+    one SAVEPOINT (DR-33-B).
 
-    src = inspect.getsource(db_module.transition_phase)
+    The implementation lives in src.state.canonical_write (moved from db.py
+    in WAVE-3 Batch B to fix K0→K2 import inversion). The db.py symbol is a
+    thin re-export shim; inspect the canonical_write implementation directly.
+    """
+    from src.state import canonical_write as cw_module
+
+    src = inspect.getsource(cw_module.transition_phase)
     assert "append_many_and_project" in src, (
         "transition_phase must call append_many_and_project to enforce the "
         "atomic (event_row + phase_projection) write inside a SAVEPOINT"
@@ -194,16 +199,36 @@ def test_transition_phase_uses_append_many_and_project():
 
 def test_dual_write_shim_routes_to_transition_phase():
     """_dual_write_canonical_pending_exit_if_available must be a thin shim
-    that delegates to transition_phase — eliminating parallel writers."""
+    that delegates to transition_phase — eliminating parallel writers.
+
+    Uses AST inspection to verify an actual Call node targeting transition_phase
+    exists, not just substring presence in the source text (which could
+    false-pass on docstring/comment mentions).
+    """
+    import ast as _ast
+    import textwrap as _textwrap
     from src.execution import exit_lifecycle
 
     src = inspect.getsource(
         exit_lifecycle._dual_write_canonical_pending_exit_if_available
     )
-    assert "transition_phase" in src, (
-        "_dual_write_canonical_pending_exit_if_available must delegate to "
-        "transition_phase; if a parallel writer is reintroduced the K "
-        "decision regresses"
+    # Dedent so the AST parser handles indented method source correctly.
+    tree = _ast.parse(_textwrap.dedent(src))
+    call_names = [
+        node.func.id
+        for node in _ast.walk(tree)
+        if isinstance(node, _ast.Call)
+        and isinstance(node.func, _ast.Name)
+    ] + [
+        node.func.attr
+        for node in _ast.walk(tree)
+        if isinstance(node, _ast.Call)
+        and isinstance(node.func, _ast.Attribute)
+    ]
+    assert "transition_phase" in call_names, (
+        "_dual_write_canonical_pending_exit_if_available must contain an "
+        "actual Call node targeting transition_phase; if a parallel writer "
+        "is reintroduced the K decision regresses"
     )
 
 
@@ -226,7 +251,11 @@ _MIN_PAIRING_CALLS_PER_HELPER = {
     "_mark_exit_fill_economics_missing": 1, # single path
     "handle_exit_pending_missing": 1,       # single path
     "_execute_live_exit": 1,                # site 750 inline pairing
-    "check_pending_exits": 1,               # site 1286 inline pairing
+    # check_pending_exits intentionally omitted: it is a passive scan whose
+    # upstream transition callers (execute_exit, handle_exit_pending_missing,
+    # _mark_exit_dust_hold) each emit the canonical event at the actual state
+    # change.  Emitting inside the scan loop would duplicate the event each
+    # cycle for open positions.  Removed SEV-1 in WAVE-3 Batch B bot review.
 }
 
 

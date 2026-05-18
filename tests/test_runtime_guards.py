@@ -11455,6 +11455,11 @@ def test_monitoring_phase_persists_live_exit_telemetry_chain_with_canonical_entr
     assert day0_event["event_type"] == "DAY0_WINDOW_ENTERED"
     assert day0_event["runtime_trade_id"] == "live-exit-1"
 
+    # EXIT_INTENT canonical event (emitted at exit_intent setup)
+    assert exit_intent_event["event_type"] == "EXIT_INTENT"
+    assert exit_intent_event["runtime_trade_id"] == "live-exit-1"
+    assert exit_intent_event["source"] == "src.execution.exit_lifecycle"
+
     # EXIT_ORDER_FILLED canonical event
     assert fill_event["event_type"] == "EXIT_ORDER_FILLED"
     assert fill_event["source"] == "src.execution.exit_lifecycle"
