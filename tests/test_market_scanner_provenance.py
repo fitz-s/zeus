@@ -21,13 +21,12 @@ from __future__ import annotations
 
 import json
 import inspect
-import os
 import re
 import sqlite3
 import sys
-import tempfile
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from pathlib import Path
 
 import httpx
 import pytest
@@ -275,19 +274,19 @@ def _make_forward_substrate_conn() -> sqlite3.Connection:
     return conn
 
 
-def _make_forward_substrate_db() -> "tuple[str, sqlite3.Connection]":
+def _make_forward_substrate_db(tmp_path: Path, request: pytest.FixtureRequest) -> "tuple[str, sqlite3.Connection]":
     """K1-A fix: returns (db_path, conn) for a temp file-backed substrate DB.
 
     log_forward_market_substrate now opens its own conn to _db_path. Tests pass
     _db_path=db_path so the function writes to the same temp file that the test
-    conn can inspect. Temp file is cleaned up after the test process exits.
+    conn can inspect. pytest's tmp_path owns cleanup after the connection closes.
     """
-    fd, db_path = tempfile.mkstemp(suffix=".db", prefix="fms_test_")
-    os.close(fd)
+    db_path = str(tmp_path / "fms_test.db")
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     conn.executescript(_FORWARD_SUBSTRATE_DDL)
     conn.commit()
+    request.addfinalizer(conn.close)
     return db_path, conn
 
 
@@ -2819,13 +2818,13 @@ class TestForwardMarketSubstrateProducer:
         assert "market_source_contract_topology_status" in source
 
     def test_forward_substrate_writes_verified_scanner_rows_without_unblocking_economics(
-        self,
+        self, tmp_path, request
     ):
         """Verified Gamma scanner facts populate only market/price substrate.
 
         K1-A fix: writer opens its own forecasts conn; _db_path routes to temp file.
         """
-        db_path, conn = _make_forward_substrate_db()
+        db_path, conn = _make_forward_substrate_db(tmp_path, request)
 
         result = log_forward_market_substrate(
             markets=[_forward_market()],
@@ -2976,10 +2975,9 @@ class TestForwardMarketSubstrateProducer:
         assert crossed["status"] == "refused_crossed_orderbook"
         assert conn.execute("SELECT COUNT(*) FROM market_price_history").fetchone()[0] == 0
 
-    def test_forward_substrate_skips_when_required_tables_are_absent(self):
+    def test_forward_substrate_skips_when_required_tables_are_absent(self, tmp_path):
         """Capability-absent behavior is fail-loud and does not create tables."""
-        fd, db_path = tempfile.mkstemp(suffix=".db", prefix="fms_empty_test_")
-        os.close(fd)
+        db_path = str(tmp_path / "fms_empty_test.db")
 
         result = log_forward_market_substrate(
             markets=[_forward_market()],
@@ -2999,9 +2997,9 @@ class TestForwardMarketSubstrateProducer:
             check_conn.close()
 
     @pytest.mark.parametrize("authority", ["STALE", "EMPTY_FALLBACK", "", None])
-    def test_forward_substrate_refuses_degraded_scan_authority(self, authority):
+    def test_forward_substrate_refuses_degraded_scan_authority(self, authority, tmp_path, request):
         """Only a fresh VERIFIED scan can create forward market substrate."""
-        db_path, conn = _make_forward_substrate_db()
+        db_path, conn = _make_forward_substrate_db(tmp_path, request)
 
         result = log_forward_market_substrate(
             markets=[_forward_market()],
@@ -3014,9 +3012,9 @@ class TestForwardMarketSubstrateProducer:
         assert conn.execute("SELECT COUNT(*) FROM market_events_v2").fetchone()[0] == 0
         assert conn.execute("SELECT COUNT(*) FROM market_price_history").fetchone()[0] == 0
 
-    def test_forward_substrate_refuses_missing_identity_or_range_facts(self):
+    def test_forward_substrate_refuses_missing_identity_or_range_facts(self, tmp_path, request):
         """Missing condition/token/range facts are not inferred from neighbors."""
-        db_path, conn = _make_forward_substrate_db()
+        db_path, conn = _make_forward_substrate_db(tmp_path, request)
         market = _forward_market()
         market["outcomes"] = [
             {
@@ -3052,9 +3050,9 @@ class TestForwardMarketSubstrateProducer:
         assert conn.execute("SELECT COUNT(*) FROM market_events_v2").fetchone()[0] == 0
         assert conn.execute("SELECT COUNT(*) FROM market_price_history").fetchone()[0] == 0
 
-    def test_forward_substrate_is_idempotent_and_does_not_overwrite_conflicts(self):
+    def test_forward_substrate_is_idempotent_and_does_not_overwrite_conflicts(self, tmp_path, request):
         """Repeated facts are unchanged; conflicting token-time facts are reported."""
-        db_path, conn = _make_forward_substrate_db()
+        db_path, conn = _make_forward_substrate_db(tmp_path, request)
         first = log_forward_market_substrate(
             markets=[_forward_market()],
             recorded_at="2026-04-29T16:00:00Z",
@@ -3096,9 +3094,9 @@ class TestForwardMarketSubstrateProducer:
         ).fetchone()[0]
         assert stored_price == 0.31
 
-    def test_forward_substrate_does_not_append_prices_for_resolved_events(self):
+    def test_forward_substrate_does_not_append_prices_for_resolved_events(self, tmp_path, request):
         """A resolved market_events_v2 row is not unresolved scanner substrate."""
-        db_path, conn = _make_forward_substrate_db()
+        db_path, conn = _make_forward_substrate_db(tmp_path, request)
         conn.execute(
             """
             INSERT INTO market_events_v2 (
@@ -3139,9 +3137,9 @@ class TestForwardMarketSubstrateProducer:
         assert conn.execute("SELECT COUNT(*) FROM market_events_v2").fetchone()[0] == 1
         assert conn.execute("SELECT COUNT(*) FROM market_price_history").fetchone()[0] == 0
 
-    def test_forward_substrate_does_not_append_prices_for_event_identity_conflicts(self):
+    def test_forward_substrate_does_not_append_prices_for_event_identity_conflicts(self, tmp_path, request):
         """Rejected event identity conflicts cannot create orphan price facts."""
-        db_path, conn = _make_forward_substrate_db()
+        db_path, conn = _make_forward_substrate_db(tmp_path, request)
         market = _forward_market()
         market["outcomes"] = [market["outcomes"][0]]
         first = log_forward_market_substrate(

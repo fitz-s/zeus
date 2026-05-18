@@ -133,16 +133,15 @@ def _find_existing_open_row(
     Returns None if no other open-phase row exists. Excludes the candidate
     itself so that pure UPSERT-on-same-position_id paths are unaffected.
     """
-    phase_list_sql = ", ".join(f"'{p}'" for p in _F109_OPEN_PHASES)
     row = conn.execute(
-        f"""
+        """
         SELECT position_id FROM position_current
          WHERE token_id = ?
            AND position_id != ?
-           AND phase IN ({phase_list_sql})
+           AND phase IN (?, ?, ?, ?, ?)
          LIMIT 1
         """,
-        (token_id, exclude_position_id),
+        (token_id, exclude_position_id, *_F109_OPEN_PHASES),
     ).fetchone()
     return str(row[0]) if row is not None else None
 

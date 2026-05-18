@@ -1,6 +1,9 @@
 # Created: 2026-05-17
 # Last reused or audited: 2026-05-17
+# Lifecycle: created=2026-05-17; last_reviewed=2026-05-17; last_reused=2026-05-17
 # Authority basis: RUN-12 settlement_commands coverage structural antibody
+# Purpose: Lock settlement command enqueue coverage and live-drift detection for closed positions.
+# Reuse: Run before modifying settlement command enqueue/deduplication behavior or live coverage fixtures.
 """RUN-12: settlement_commands coverage invariant.
 
 Two test classes:
@@ -15,6 +18,7 @@ from __future__ import annotations
 
 import sqlite3
 from datetime import datetime, timezone, timedelta
+from pathlib import Path
 
 import pytest
 
@@ -105,8 +109,8 @@ class TestSettlementCommandEnqueueCoverage:
             "REDEEM_OPERATOR_REQUIRED",
         ), f"Unexpected initial state: {row['state']!r}"
 
-    def test_enqueue_idempotent_returns_already_exists(self):
-        """Second enqueue for same condition returns 'already_exists'."""
+    def test_enqueue_idempotent_returns_same_command_id(self):
+        """Second enqueue for same condition returns the same command_id."""
         conn = _make_trades_conn()
         condition_id = "test-condition-dedup456"
 
@@ -124,10 +128,8 @@ class TestSettlementCommandEnqueueCoverage:
         r2 = enqueue_redeem_command(conn, **kwargs)
 
         assert r1["status"] == "queued"
-        # Second call should not raise; it's either already_exists or queued (idempotent)
-        assert r2["status"] in ("queued", "already_exists", "error"), (
-            f"Unexpected second-enqueue status: {r2!r}"
-        )
+        assert r2["status"] in ("queued", "already_exists")
+        assert r2["command_id"] == r1["command_id"]
 
 
 # ---------------------------------------------------------------------------
@@ -147,14 +149,9 @@ class TestSettlementCommandCoverageLiveDrift:
     @pytest.fixture
     def live_conn(self):
         """Open the real zeus_trades.db read-only; skip if unavailable."""
-        import pathlib
         import os
-        db_path = pathlib.Path(
-            os.environ.get(
-                "ZEUS_TRADE_DB_PATH",
-                "/Users/leofitz/.openclaw/workspace-venus/zeus/state/zeus_trades.db",
-            )
-        )
+        repo_default = Path(__file__).resolve().parents[1] / "state" / "zeus_trades.db"
+        db_path = Path(os.environ.get("ZEUS_TRADE_DB_PATH", str(repo_default)))
         if not db_path.exists():
             pytest.skip(f"live zeus_trades.db not found at {db_path}")
         conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
