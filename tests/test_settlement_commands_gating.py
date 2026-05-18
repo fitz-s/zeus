@@ -44,7 +44,8 @@ class TestSubmitRedeemGating:
         adapter_called = []
 
         class _SentinelAdapter:
-            def redeem(self, condition_id: str) -> None:
+            def redeem(self, condition_id: str, *, index_sets=None) -> None:
+                # PR-I.5.c kw-only signature; gate must fire BEFORE this is reached.
                 adapter_called.append(condition_id)
 
         import src.execution.settlement_commands as sc

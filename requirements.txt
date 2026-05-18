@@ -46,6 +46,14 @@ pydantic==2.12.5
 # --- venue SDK ---
 py-clob-client-v2==1.0.0
 
+# --- Ethereum / web3 stack (PR-I.5.c: autonomous redeem calldata+sign+broadcast)
+# These were previously transitive via py-clob-client-v2; pinning explicit so
+# a py-clob-client-v2 dep-graph change cannot silently alter signing/ABI
+# behavior. Versions verified against active .venv on 2026-05-18.
+eth-account==0.13.7
+eth-abi==6.0.0b1
+eth-utils==6.0.0
+
 # --- dashboard / visualization ---
 # These are NOT imported anywhere in src/ or scripts/ (verified 2026-05-01).
 # Left in with bounded ranges for compat with external tooling that may
