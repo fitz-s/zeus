@@ -661,3 +661,57 @@ class TestRCXCsvDocFlip:
             assert row.get("fix_commit", "").strip(), (
                 f"R-CX.1: {bug_id} has empty fix_commit — must cite evidence"
             )
+
+
+class TestF104PersistenceNoDataLog:
+    """F104: PERSISTENCE_NO_DATA must be logged when temp_persistence has no row.
+
+    The never-fired silent branch (freq_row is None) was invisible; verify it
+    now emits a DEBUG log rather than returning 1.0 silently.
+    """
+
+    def test_persistence_no_data_logs_when_freq_row_missing(self, caplog):
+        """When temp_persistence returns no row for (city, season, bucket),
+        a PERSISTENCE_NO_DATA debug line must appear."""
+        import logging
+        import sqlite3
+        from datetime import date
+        from unittest.mock import patch
+
+        from src.engine.monitor_refresh import _check_persistence_anomaly
+
+        # Build the same schema-qualified DB shape used by monitor_refresh:
+        # forecasts.settlements_v2 plus world.temp_persistence.
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.execute("ATTACH DATABASE ':memory:' AS forecasts")
+        conn.execute("ATTACH DATABASE ':memory:' AS world")
+        conn.execute("""
+            CREATE TABLE forecasts.settlements_v2 (
+                city TEXT, target_date TEXT, temperature_metric TEXT,
+                authority TEXT, settlement_value REAL
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE world.temp_persistence (
+                city TEXT, season TEXT, delta_bucket TEXT,
+                frequency REAL, n_samples INTEGER
+            )
+        """)
+        # Insert one settlement so deltas is non-empty (prevents PERSISTENCE_CHECK_DISABLED path).
+        conn.execute(
+            "INSERT INTO forecasts.settlements_v2 VALUES (?,?,?,?,?)",
+            ("London", "2026-05-16", "high", "VERIFIED", 68.0),
+        )
+        conn.commit()
+
+        target = date(2026, 5, 17)
+        with patch("src.calibration.manager.season_from_date", return_value="spring"), \
+             patch("src.calibration.manager.lat_for_city", return_value=51.5):
+            with caplog.at_level(logging.DEBUG, logger="src.engine.monitor_refresh"):
+                result = _check_persistence_anomaly(conn, "London", target, 70.0)
+
+        assert result == 1.0
+        assert any(
+            "PERSISTENCE_NO_DATA" in r.message for r in caplog.records
+        ), "PERSISTENCE_NO_DATA log must fire when temp_persistence has no matching row"

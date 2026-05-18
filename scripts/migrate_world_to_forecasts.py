@@ -1,6 +1,9 @@
 # Created: 2026-05-11
 # Last reused or audited: 2026-05-11
 # Authority basis: PLAN docs/operations/task_2026-05-11_forecast_db_split/PLAN.md §5.4 + §5.4.1
+# WRITER_LOCK_DEFER_REVIEW=2026-05-17 — one-shot K1 DB-split migration; operator
+#   runs with daemon stopped (§OPERATOR INSTRUCTIONS). db_writer_lock retrofit
+#   deferred to WAVE-3. See F22_WRITER_LOCK_FIX.md.
 """K1 forecast DB migration: copy 7 forecast-class tables from zeus-world.db
 to zeus-forecasts.db with checkpoint-resume (§5.4.1).
 

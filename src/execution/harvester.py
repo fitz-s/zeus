@@ -573,12 +573,31 @@ def enqueue_redeem_command(
     Returns dict with keys: status ("queued" | "already_exists" | "error"),
     command_id (str | None), reason (str | None).
     """
-    from src.execution.settlement_commands import request_redeem, SettlementState  # noqa: F401 — verify import only
+    from src.execution.settlement_commands import (  # noqa: F401 — verify import only
+        init_settlement_command_schema,
+        request_redeem,
+        SettlementState,
+    )
     try:
+        resolved_market_id = market_id or condition_id
+        init_settlement_command_schema(conn)
+        existing = conn.execute(
+            """
+            SELECT command_id FROM settlement_commands
+             WHERE condition_id = ?
+               AND market_id = ?
+               AND payout_asset = ?
+               AND state NOT IN ('REDEEM_CONFIRMED','REDEEM_FAILED')
+             ORDER BY requested_at, command_id
+             LIMIT 1
+            """,
+            (condition_id, resolved_market_id, payout_asset),
+        ).fetchone()
+        existing_command_id = str(existing[0]) if existing is not None else None
         command_id = request_redeem(
             condition_id,
             payout_asset,
-            market_id=market_id or condition_id,
+            market_id=resolved_market_id,
             pusd_amount_micro=pusd_amount_micro,
             token_amounts=token_amounts or {},
             conn=conn,
@@ -590,7 +609,8 @@ def enqueue_redeem_command(
             condition_id,
             command_id,
         )
-        return {"status": "queued", "command_id": command_id, "reason": None}
+        status = "already_exists" if existing_command_id == command_id else "queued"
+        return {"status": status, "command_id": command_id, "reason": None}
     except Exception as exc:
         logger.warning("Redeem deferred for %s: %s (pUSD still claimable later)", trade_id, exc)
         return {"status": "error", "command_id": None, "reason": str(exc)}

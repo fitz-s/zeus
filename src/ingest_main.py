@@ -330,6 +330,37 @@ def _k2_hole_scanner_tick():
             forecasts_conn.close()
 
 
+@_scheduler_job("ingest_k2_obs_v2_tick")
+def _k2_obs_v2_tick():
+    """Rolling 7-day live ingest for observation_instants_v2 (F44 fix).
+
+    Fetches recent hourly observations for all WU_ICAO + OGIMET_METAR cities
+    via the source-tier-correct clients and writes through the typed v2 writer.
+    HKO_NATIVE (Hong Kong) is handled by hko_ingest_tick.py --project-only.
+
+    Runs hourly at minute=15, offset from hourly_instants (:07) and other ticks.
+    Advisory lock 'obs_v2' prevents concurrent runs from ingest_main restart.
+    """
+    from src.data.dual_run_lock import acquire_lock
+    from pathlib import Path
+
+    with acquire_lock("obs_v2") as acquired:
+        if not acquired:
+            logger.info("ingest k2_obs_v2_tick skipped_lock_held")
+            return
+        import sys as _sys
+        _REPO_ROOT = Path(__file__).resolve().parent.parent
+        if str(_REPO_ROOT) not in _sys.path:
+            _sys.path.insert(0, str(_REPO_ROOT))
+        from scripts.obs_v2_live_tick import run_live_tick
+        # run_live_tick opens its own db_writer_lock connection to world.db.
+        # Do NOT create a second get_world_connection here.
+        results = run_live_tick(days_back=7, db_path=_REPO_ROOT / "state" / "zeus-world.db")
+        written = sum(r.rows_written for r in results if not r.skipped_hko)
+        failed = [r.city for r in results if r.failure_reason]
+        logger.info("K2 obs_v2_tick: written=%d failed=%s", written, failed or "none")
+
+
 # Staleness threshold for boot-time force-fetch.  A once-per-day cron
 # (forecasts at 07:30 UTC, solar at 00:30 UTC) that was missed while the
 # daemon was offline leaves the table stale.  If max captured_at / fetched_at
@@ -1024,6 +1055,125 @@ def _ingest_status_rollup_tick():
 
 
 # ---------------------------------------------------------------------------
+# F35: Oracle bridge tick — daily 10:05 UTC
+# ---------------------------------------------------------------------------
+
+@_scheduler_job("ingest_oracle_bridge")
+def _bridge_oracle_tick():
+    """F35: Run bridge_oracle_to_calibration.py daily at 10:05 UTC.
+
+    Eliminates the cross-repo cron entry that would otherwise be required in
+    ~/.openclaw/cron/jobs.json.  The bridge script writes data/oracle_error_rates.json
+    (file-only, no DB write) so plain subprocess.run is sufficient — no write-class
+    lock needed.  Script is idempotent; repeated runs are safe.
+
+    Runs on default executor (low frequency; subprocess, not DB writer).
+    """
+    venv_python = _etl_subprocess_python()
+    script = Path(__file__).parent.parent / "scripts" / "bridge_oracle_to_calibration.py"
+    if not script.exists():
+        logger.warning("ingest_oracle_bridge: script not found at %s", script)
+        return
+    import subprocess
+    r = subprocess.run(
+        [venv_python, str(script)],
+        capture_output=True, text=True, timeout=300,
+    )
+    stdout_tail = r.stdout[-500:] if r.stdout else ""
+    if r.returncode != 0:
+        logger.warning(
+            "[BRIDGE_ORACLE_TICK] FAILED (exit=%d): %s",
+            r.returncode, r.stderr[-500:] if r.stderr else "",
+        )
+    else:
+        logger.info("[BRIDGE_ORACLE_TICK] OK (exit=0) stdout=%r", stdout_tail)
+
+
+# ---------------------------------------------------------------------------
+# F9: Calibration auto-promote tick — weekly Sun 04:30 UTC
+# ---------------------------------------------------------------------------
+
+_CALIBRATION_AUTO_PROMOTE_ENV = "ZEUS_CALIBRATION_AUTO_PROMOTE_ENABLED"
+_CALIBRATION_STAGE_DB_ENV = "ZEUS_CALIBRATION_STAGE_DB_PATH"
+
+
+@_scheduler_job("ingest_calibration_auto_promote")
+def _calibration_auto_promote_tick():
+    """F9: Auto-promote calibration_pairs_v2 when the readiness gate passes.
+
+    Gate: invokes ``promote_calibration_pairs_v2.py inspect`` as a subprocess.
+    If the inspect exit code is 0 (all sentinels complete), invokes
+    ``promote_calibration_pairs_v2.py promote --commit``.
+
+    Guarded by two env flags:
+
+    * ``ZEUS_CALIBRATION_AUTO_PROMOTE_ENABLED=true`` — must be set by the
+      operator after the first successful manual promotion validates the gate.
+      Default OFF to prevent accidental production writes before the gate is
+      verified.
+    * ``ZEUS_CALIBRATION_STAGE_DB_PATH`` — absolute path to the STAGE_DB that
+      was produced by ``rebuild_calibration_pairs_v2.py``.  Must be set when
+      ENABLED=true; tick aborts with a warning if unset.
+
+    Runs on default executor (subprocess writes to zeus-forecasts.db via
+    the promote script; serialised with other DB writers via write-class lock).
+    """
+    import subprocess
+
+    enabled = os.environ.get(_CALIBRATION_AUTO_PROMOTE_ENV, "false").lower() == "true"
+    if not enabled:
+        logger.info(
+            "[AUTO_PROMOTE] skipped: %s not set to 'true'",
+            _CALIBRATION_AUTO_PROMOTE_ENV,
+        )
+        return
+
+    stage_db = os.environ.get(_CALIBRATION_STAGE_DB_ENV, "").strip()
+    if not stage_db:
+        logger.warning(
+            "[AUTO_PROMOTE] aborted: %s not set; cannot auto-promote without stage DB path",
+            _CALIBRATION_STAGE_DB_ENV,
+        )
+        return
+
+    venv_python = _etl_subprocess_python()
+    script = Path(__file__).parent.parent / "scripts" / "promote_calibration_pairs_v2.py"
+    if not script.exists():
+        logger.warning("[AUTO_PROMOTE] script not found at %s", script)
+        return
+
+    # Phase 1: inspect — readiness gate (read-only, no lock needed)
+    inspect_r = subprocess.run(
+        [venv_python, str(script), "inspect", "--stage-db", stage_db],
+        capture_output=True, text=True, timeout=120,
+    )
+    if inspect_r.returncode != 0:
+        logger.info(
+            "[AUTO_PROMOTE] gate NOT READY (inspect exit=%d); skipping promote.\n%s",
+            inspect_r.returncode,
+            inspect_r.stdout[-500:] if inspect_r.stdout else "",
+        )
+        return
+
+    logger.info("[AUTO_PROMOTE] gate READY (inspect exit=0); invoking promote --commit")
+
+    # Phase 2: promote --commit (DB writer; serialise via write-class lock)
+    from src.state.db_writer_lock import WriteClass, subprocess_run_with_write_class
+    promote_r = subprocess_run_with_write_class(
+        [venv_python, str(script), "promote", "--stage-db", stage_db, "--commit"],
+        WriteClass.BULK,
+        capture_output=True, text=True, timeout=600,
+    )
+    if promote_r.returncode != 0:
+        logger.warning(
+            "[AUTO_PROMOTE] FAILED (exit=%d): %s",
+            promote_r.returncode, promote_r.stderr[-500:] if promote_r.stderr else "",
+        )
+    else:
+        logger.info("[AUTO_PROMOTE] SUCCESS (exit=0)")
+
+
+# ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
 
@@ -1130,6 +1280,16 @@ def main() -> None:
     _scheduler.add_job(
         _k2_hole_scanner_tick, "cron",
         hour=4, minute=0, id="ingest_k2_hole_scanner",
+        max_instances=1, coalesce=True, misfire_grace_time=3600,
+    )
+    # F44 fix: live rolling-window ingest for observation_instants_v2.
+    # Runs hourly at :15, offset from hourly_instants (:07) and other ticks.
+    # Ogimet cities have 21s inter-request rate limit enforced by client module;
+    # expect ~10-15 min runtime for a full 50-city pass. misfire_grace_time=3600
+    # allows one missed tick before the next fires.
+    _scheduler.add_job(
+        _k2_obs_v2_tick, "cron",
+        minute=15, id="ingest_k2_obs_v2",
         max_instances=1, coalesce=True, misfire_grace_time=3600,
     )
     _scheduler.add_job(
@@ -1292,6 +1452,24 @@ def main() -> None:
         _market_scan_tick, "interval",
         minutes=30, id="ingest_market_scan",
         max_instances=1, coalesce=True,
+    )
+
+    # F35: Oracle bridge — daily at 10:05 UTC.
+    # Writes data/oracle_error_rates.json (file-only); plain subprocess, no write-class lock.
+    # Eliminates the cross-repo cron entry that would otherwise be required.
+    _scheduler.add_job(
+        _bridge_oracle_tick, "cron",
+        hour=10, minute=5, id="ingest_oracle_bridge",
+        max_instances=1, coalesce=True, misfire_grace_time=600,
+    )
+
+    # F9: Calibration auto-promote — weekly Sunday 04:30 UTC.
+    # Guarded by ZEUS_CALIBRATION_AUTO_PROMOTE_ENABLED (default OFF).
+    # Operator must also set ZEUS_CALIBRATION_STAGE_DB_PATH before enabling.
+    _scheduler.add_job(
+        _calibration_auto_promote_tick, "cron",
+        day_of_week="sun", hour=4, minute=30, id="ingest_calibration_auto_promote",
+        max_instances=1, coalesce=True, misfire_grace_time=3600,
     )
 
     jobs = [j.id for j in _scheduler.get_jobs()]

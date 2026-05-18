@@ -31,7 +31,10 @@ def _normalized_state(value: object) -> str:
 
 def _non_empty(*values: object) -> str:
     for value in values:
-        if value not in (None, ""):
+        # "unknown_entered_at" is the QUARANTINE_SENTINEL used by chain_reconciliation.py
+        # for positions that have no real entry timestamp. Treat it as absent so that
+        # subsequent fallback values (chain_verified_at, updated_at) are used instead.
+        if value not in (None, "", "unknown_entered_at"):
             return str(value)
     raise ValueError("missing required timestamp for canonical lifecycle builder")
 

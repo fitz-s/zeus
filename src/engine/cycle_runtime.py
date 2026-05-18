@@ -800,7 +800,36 @@ def _reprice_decision_from_executable_snapshot(
         and best_ask_fee_adjusted_edge > 0.0
         and best_ask_size_at_fee_adjusted_cost > 0.0
     )
-    edge_aware_taker_enabled = bool(final_intent_context.get("allow_taker_upgrade"))
+    allow_taker_upgrade = bool(final_intent_context.get("allow_taker_upgrade"))
+    edge_aware_taker_enabled = allow_taker_upgrade
+    f34_crossing_evidence = None
+    # F34 cost-of-fill optimizer (OPT-IN, default OFF).
+    # ZEUS_TAKER_CROSSING_ENABLED=1 lets the math decide whether to cross the spread;
+    # default "0" preserves the existing passive-maker-only behavior exactly.
+    # Karachi safety: flag defaults OFF → zero impact on day0_window positions.
+    # Operator must validate via backtest before flipping.
+    if os.environ.get("ZEUS_TAKER_CROSSING_ENABLED", "0") == "1" and allow_taker_upgrade:
+        from src.engine.evaluator import _crossing_decision as _f34_crossing_decision
+        _f34_order_size = best_ask_size_at_fee_adjusted_cost
+        _f34_expected_pnl = best_ask_fee_adjusted_edge * _f34_order_size
+        _f34_non_fill_prob = float(final_intent_context.get("f34_non_fill_probability", 0.5))
+        _f34_min_econ_size = float(final_intent_context.get("f34_min_economical_size", 5.0))
+        _f34_taker_fee_bps = taker_fee_rate * 10_000.0
+        should_cross, f34_evidence = _f34_crossing_decision(
+            best_ask_price=best_ask_float,
+            best_ask_size=_f34_order_size,
+            best_bid_price=best_bid_float,
+            p_posterior=float(decision.edge.p_posterior),
+            expected_pnl_if_filled=_f34_expected_pnl,
+            non_fill_probability=_f34_non_fill_prob,
+            taker_fee_bps=_f34_taker_fee_bps,
+            min_economical_size=_f34_min_econ_size,
+        )
+        f34_evidence["orderbook_best_ask_size"] = ask_size_float
+        f34_evidence["intended_order_size_usd"] = _f34_order_size
+        f34_crossing_evidence = dict(f34_evidence)
+        logger.info("F34_CROSSING_DECISION %s", f34_evidence)
+        edge_aware_taker_enabled = allow_taker_upgrade and bool(should_cross)
     edge_aware_taker_selected = False
     depth_sweep_limit_decimal = Decimal("0")
     if positive_edge_cap_decimal > Decimal("0") and slippage_cap_decimal > Decimal("0"):
@@ -935,6 +964,7 @@ def _reprice_decision_from_executable_snapshot(
         "best_ask_fee_adjusted_edge": float(best_ask_fee_adjusted_edge),
         "best_ask_size_at_fee_adjusted_cost": float(best_ask_size_at_fee_adjusted_cost),
         "best_ask_inside_edge_budget": bool(best_ask_inside_edge_budget),
+        "f34_crossing_evidence": f34_crossing_evidence,
         "best_ask_slippage_override_by_edge": bool(edge_aware_taker_selected),
         "best_ask_blocked_by_slippage": bool(
             best_ask_edge > 0.0
@@ -1445,6 +1475,7 @@ def materialize_position(candidate, decision, result, portfolio, city, mode, *, 
         # Now: AttributeError raises if a non-MarketCandidate flows here.
         temperature_metric=candidate.temperature_metric,
         entry_model_agreement=getattr(decision, "agreement", "NOT_CHECKED"),
+        decision_id=str(getattr(decision, "decision_id", None) or "") or None,
     )
 
 
@@ -2364,7 +2395,6 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
             from src.state.db import log_forward_market_substrate
 
             result = log_forward_market_substrate(
-                conn,
                 markets=markets_to_record,
                 recorded_at=decision_time.isoformat(),
                 scan_authority=authority,
@@ -3520,6 +3550,21 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                                 deps=deps,
                                 decision_evidence=getattr(d, "decision_evidence", None),
                             )
+                            # Bridge assertion: trade_decisions row must exist for
+                            # pos.trade_id before RELEASE.  If log_trade_entry
+                            # succeeded but the row is somehow absent (schema
+                            # mismatch, wrong conn), roll back atomically.
+                            _trade_id = getattr(pos, "trade_id", None)
+                            if _trade_id:
+                                _bridge_row = conn.execute(
+                                    "SELECT 1 FROM trade_decisions WHERE runtime_trade_id = ?",
+                                    (_trade_id,),
+                                ).fetchone()
+                                if _bridge_row is None:
+                                    raise RuntimeError(
+                                        f"Bridge assertion failed: trade_decisions has no row "
+                                        f"for runtime_trade_id={_trade_id!r} after log_trade_entry"
+                                    )
                             conn.execute(f"RELEASE SAVEPOINT {sp_name}")
                         except Exception:
                             conn.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")

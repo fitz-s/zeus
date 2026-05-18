@@ -1,6 +1,9 @@
 # Created: 2026-05-14
 # Last reused or audited: 2026-05-14
 # Authority basis: docs/operations/task_2026-05-14_k1_followups/PLAN.md §2 P0
+# WRITER_LOCK_DEFER_REVIEW=2026-05-17 — one-shot backfill script; operator
+#   runs with daemon stopped (docstring §2). db_writer_lock retrofit deferred
+#   to WAVE-3 (F22 ops doc §deferred). See F22_WRITER_LOCK_FIX.md.
 """K1 P0 triage: copy post-K1-split observation rows from zeus-world.db into
 zeus-forecasts.db, and mirror market_events_v2 rows that are world-only.
 

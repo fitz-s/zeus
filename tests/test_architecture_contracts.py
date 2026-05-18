@@ -1,6 +1,6 @@
 # Created: 2026-04-02
-# Last reused/audited: 2026-05-08
-# Lifecycle: created=2026-04-02; last_reviewed=2026-05-08; last_reused=2026-05-08
+# Last reused/audited: 2026-05-18
+# Lifecycle: created=2026-04-02; last_reviewed=2026-05-18; last_reused=2026-05-18
 # Purpose: Protect architecture/schema contracts and high-sensitivity DB bootstrap invariants.
 # Reuse: Audit touched assertions against architecture manifests and scoped AGENTS before extending.
 # Authority basis: midstream verdict v2 2026-04-23 (docs/to-do-list/zeus_midstream_fix_plan_2026-04-23.md T1.a midstream guardian panel); Wave26 canonical position event env authority
@@ -1475,6 +1475,18 @@ def _runtime_position(
     )
 
 
+def _install_minimal_venue_commands_lookup_table(conn: sqlite3.Connection) -> None:
+    """Install the columns chain reconciliation probes in canonical-kernel fixtures."""
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS venue_commands (
+            venue_order_id TEXT,
+            intent_kind TEXT
+        )
+        """
+    )
+
+
 def test_lifecycle_builders_map_runtime_states_to_canonical_phases():
     from src.engine.lifecycle_events import canonical_phase_for_position
 
@@ -2050,6 +2062,7 @@ def test_reconciliation_rescue_builder_emits_chain_synced_event_and_projection_t
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     apply_architecture_kernel_schema(conn)
+    _install_minimal_venue_commands_lookup_table(conn)
 
     pending_pos = _runtime_position(state="pending_tracked", chain_state="local_only")
     pending_pos.entry_order_id = "ord-1"
@@ -2619,6 +2632,7 @@ def test_reconciliation_pending_fill_path_writes_canonical_rows_when_prior_histo
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     apply_architecture_kernel_schema(conn)
+    _install_minimal_venue_commands_lookup_table(conn)
 
     pending_pos = _runtime_position(state="pending_tracked", chain_state="local_only")
     pending_pos.entry_order_id = "ord-1"
@@ -2704,6 +2718,7 @@ def test_reconciliation_pending_fill_dual_write_failure_after_legacy_steps_is_ex
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     apply_architecture_kernel_schema(conn)
+    _install_minimal_venue_commands_lookup_table(conn)
 
     pending_pos = _runtime_position(state="pending_tracked", chain_state="local_only")
     pending_pos.entry_order_id = "ord-1"
@@ -4179,11 +4194,15 @@ def test_execute_discovery_phase_entry_path_preserves_legacy_writes_on_legacy_db
 
 
 def test_execute_discovery_phase_entry_path_writes_canonical_rows_on_canonical_db():
-    from src.state.db import apply_architecture_kernel_schema
+    from src.state.db import apply_architecture_kernel_schema, init_schema
 
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     apply_architecture_kernel_schema(conn)
+    # The runtime entry path now requires the legacy trade_decisions bridge
+    # before projection writes, so the canonical fixture must include the
+    # full current DB bootstrap rather than only the event/projection kernel.
+    init_schema(conn)
 
     result = _discovery_phase_harness(conn=conn)
 

@@ -1,6 +1,9 @@
 # Created: 2026-05-05
-# Last reused or audited: 2026-05-05
+# Last reused or audited: 2026-05-18
+# Lifecycle: created=2026-05-05; last_reviewed=2026-05-18; last_reused=2026-05-18
 # Authority basis: docs/operations/task_2026-05-04_zeus_may3_review_remediation/phases/T1C/phase.json
+# Purpose: Guard independence between settlement persistence and redeem command enqueueing.
+# Reuse: Run when harvester settlement side effects or settlement_commands idempotency changes.
 """Relationship tests: harvester settlement and redeem are independent side effects.
 
 T1C-SETTLEMENT-NOT-REDEEM: calling record_settlement_result() does NOT invoke any
@@ -184,7 +187,7 @@ def test_T2b_enqueue_redeem_idempotent_returns_same_command_id():
     r2 = enqueue_redeem_command(conn, condition_id="cond-dup", payout_asset="USDC_E")
 
     assert r1["status"] == "queued"
-    assert r2["status"] == "queued"
+    assert r2["status"] == "already_exists"
     assert r1["command_id"] == r2["command_id"]
 
 

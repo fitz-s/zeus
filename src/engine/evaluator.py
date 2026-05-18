@@ -737,6 +737,51 @@ def _center_buy_ultra_low_price_block_reason(strategy_key: str, edge: BinEdge) -
     return None
 
 
+def _crossing_decision(
+    *,
+    best_ask_price: float,
+    best_ask_size: float,
+    best_bid_price: float,
+    p_posterior: float,
+    expected_pnl_if_filled: float,
+    non_fill_probability: float,
+    taker_fee_bps: float,
+    min_economical_size: float,
+) -> tuple[bool, dict]:
+    """Returns (cross_spread, evidence_dict).
+
+    cross_spread=True when expected opportunity cost of not crossing exceeds the
+    taker fee paid.  Callers are responsible for guarding this behind
+    ZEUS_TAKER_CROSSING_ENABLED=1; the function itself has no env dependency.
+
+    Key formula:
+        taker_fee_per_share  = best_ask_price * (taker_fee_bps / 10_000)
+        spread_cost_per_share = best_ask_price - best_bid_price
+        cost_of_crossing     = (taker_fee_per_share + spread_cost_per_share) * best_ask_size
+        opportunity_cost     = expected_pnl_if_filled * non_fill_probability
+
+    If best_ask_size < min_economical_size the book is too thin to absorb a
+    taker order → always PASSIVE_THIN_BOOK regardless of opportunity cost.
+
+    F34 opt-in cost-of-fill optimizer.  Default OFF at the integration site.
+    """
+    taker_fee_per_share = best_ask_price * (taker_fee_bps / 10_000.0)
+    spread_cost_per_share = best_ask_price - best_bid_price
+    cost_of_crossing = (taker_fee_per_share + spread_cost_per_share) * best_ask_size
+    opportunity_cost = expected_pnl_if_filled * non_fill_probability
+    evidence: dict = {
+        "cost_of_crossing": cost_of_crossing,
+        "opportunity_cost": opportunity_cost,
+        "decision": "CROSS" if cost_of_crossing < opportunity_cost else "PASSIVE",
+        "best_ask_size": best_ask_size,
+        "min_economical_size": min_economical_size,
+    }
+    if best_ask_size < min_economical_size:
+        evidence["decision"] = "PASSIVE_THIN_BOOK"
+        return False, evidence
+    return cost_of_crossing < opportunity_cost, evidence
+
+
 def _size_at_execution_price_boundary(
     *,
     p_posterior: float,

@@ -1,5 +1,6 @@
 # Created: 2026-04-24
-# Last reused/audited: 2026-04-30
+# Last reused/audited: 2026-05-18
+# Lifecycle: created=2026-04-24; last_reviewed=2026-05-18; last_reused=2026-05-18
 # Authority basis: POST_AUDIT_HANDOFF_2026-04-24 §3.1 C6; task_2026-04-29 Phase 1B F08 learning guard; task_2026-04-29 Phase 5C.4 settlements_v2 producer; task_2026-04-29 Phase 5C.5 market_events_v2 outcome producer
 # Purpose: INV-14 identity spine antibody for harvester settlement writes —
 #          pins temperature_metric / physical_quantity / observation_field to
@@ -137,6 +138,7 @@ def harvester_conn():
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     init_schema(conn)
+    apply_v2_schema(conn)
     return conn
 
 

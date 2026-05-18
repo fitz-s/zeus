@@ -1,8 +1,8 @@
-# Lifecycle: created=2026-04-27; last_reviewed=2026-04-27; last_reused=2026-04-27
+# Lifecycle: created=2026-04-27; last_reviewed=2026-05-18; last_reused=2026-05-18
 # Purpose: R3 T1 FakePolymarketVenue protocol and failure-injection antibodies.
 # Reuse: Run when fake/live venue adapter protocol, failure modes, or fake/live adapter parity changes.
 # Created: 2026-04-27
-# Last reused/audited: 2026-04-27
+# Last reused/audited: 2026-05-18
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/T1.yaml
 """R3 T1 fake venue unit antibodies."""
 
@@ -126,3 +126,39 @@ def test_fake_redeem_preserves_r1_command_ledger_boundary():
 
     assert result["success"] is False
     assert result["errorCode"] == "REDEEM_DEFERRED_TO_R1"
+
+
+def test_venue_auth_fallback_logs_greppable_warning(caplog):
+    """F92: VENUE_AUTH_FALLBACK_TRIGGERED must appear in logs when
+    create_or_derive_api_key is used (no static api_creds provided).
+    Regression: silent fallback means invisible degradation."""
+    import logging
+    from unittest.mock import MagicMock, patch
+    from src.venue.polymarket_v2_adapter import PolymarketV2Adapter
+
+    fake_creds = object()
+    mock_client = MagicMock()
+    mock_client.create_or_derive_api_key.return_value = fake_creds
+
+    with patch.object(
+        PolymarketV2Adapter,
+        "_default_client_factory",
+        side_effect=PolymarketV2Adapter._default_client_factory,
+    ):
+        pass  # patch not needed — exercise via factory kwargs directly
+
+    # Invoke _default_client_factory directly without api_creds so the fallback fires
+    adapter = PolymarketV2Adapter.__new__(PolymarketV2Adapter)
+
+    with caplog.at_level(logging.WARNING, logger="src.venue.polymarket_v2_adapter"):
+        with patch("py_clob_client_v2.client.ClobClient", return_value=mock_client):
+            adapter._default_client_factory(
+                host="https://clob.polymarket.com",
+                chain_id=137,
+                signer_key="0x" + "a" * 64,
+            )
+
+    assert any(
+        "VENUE_AUTH_FALLBACK_TRIGGERED" in record.message
+        for record in caplog.records
+    ), "VENUE_AUTH_FALLBACK_TRIGGERED log line must fire when no static api_creds provided"

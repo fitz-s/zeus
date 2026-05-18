@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 # Created: 2026-05-01
-# Last reused/audited: 2026-05-16
+# Last reused/audited: 2026-05-18
+# Lifecycle: created=2026-05-01; last_reviewed=2026-05-18; last_reused=2026-05-18
 # Authority basis: ultrareview25_remediation 2026-05-01 P2 (security review §10
 #                  "30+ f-string SQL interpolations, no whitelist enforcement")
 # Purpose: per-file baseline of dynamic SQL (f-string interpolation in
 #          cursor.execute*) calls. New call site beyond baseline fails the gate.
+# Reuse: Run after SQL writer changes; audit and baseline only closed identifier/savepoint interpolation.
 """Dynamic-SQL surface scanner.
 
 Why this exists
@@ -125,7 +127,10 @@ _BASELINE_PER_FILE: dict[str, int] = {
     "src/ingest/polymarket_user_channel.py": 1,
     # +1 site from PR #137 batch: table-name constant from closed internal source.
     "src/main.py": 2,
-    "src/observability/status_summary.py": 3,
+    # 2026-05-18 PR #140 review: main already had 4 sites. All interpolate
+    # schema/table identifiers through _quote_sql_identifier() or closed
+    # module-local CTE/JOIN fragments for derived status telemetry.
+    "src/observability/status_summary.py": 4,
     "src/state/chronicler.py": 1,
     "src/state/job_run_repo.py": 4,
     "src/state/market_topology_repo.py": 4,
@@ -137,6 +142,10 @@ _BASELINE_PER_FILE: dict[str, int] = {
     "src/state/decision_chain.py": 1,  # internal table-name constant; added P1
     "src/state/ledger.py": 8,
     "src/state/projection.py": 2,
+    # 2026-05-18 PR #140 review: F109 consolidator has 9 SAVEPOINT sites.
+    # Names are generated from secrets.token_hex() within the module; phase
+    # filters were refactored to bound placeholders before registration.
+    "src/state/position_duplicate_consolidator.py": 9,
     "src/state/schema/v2_schema.py": 2,  # +1 PRAGMA busy_timeout in P1
     # 2 PRAGMA table_info() interpolations (with optional attached-DB name).
     # Both `table` and `attached` are internal identifiers passed by callers
@@ -158,12 +167,16 @@ _BASELINE_PER_FILE: dict[str, int] = {
     # names from closed module-level constants; no user-controlled input.
     "src/observability/calibration_serving_status.py": 4,
     "src/observability/price_evidence_report.py": 7,
-    # exchange_reconcile.py: 1 f-string SQL site; internal field name constant.
-    "src/execution/exchange_reconcile.py": 1,
-    # 13 sites as of PR #137 (was 8, +5 new SAVEPOINT f-strings in F7 command_id
-    # recovery path): all interpolate internal constants or uuid-derived SAVEPOINT
-    # names; the new sites match the existing pattern — no user-controlled input.
-    "src/execution/command_recovery.py": 13,
+    # 2026-05-18 PR #140 review: main already had 12 sites. Three IN-list
+    # queries build placeholder strings from local set cardinality only; eight
+    # SAVEPOINT statements use uuid-derived names; the journal query is internal
+    # table/fact plumbing. No user-controlled SQL identifier is interpolated.
+    "src/execution/exchange_reconcile.py": 12,
+    # 2026-05-18 PR #140 review: main already had 23 sites. Table-name sites are
+    # reached through closed internal callers / schema probes, and SAVEPOINT
+    # names are sanitized command IDs or uuid-derived names. No request/user
+    # string is admitted as a SQL identifier.
+    "src/execution/command_recovery.py": 23,
     # Tail catch — fresh files with f-string SQL must be added explicitly.
 }
 

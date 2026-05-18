@@ -1,11 +1,14 @@
 # Created: 2026-04-24
-# Last reused/audited: 2026-05-07
+# Last reused/audited: 2026-05-18
+# Lifecycle: created=2026-04-24; last_reviewed=2026-05-18; last_reused=2026-05-18
 # Authority basis: DR-33-B (data-readiness-tail) atomicity refactor of
 # `src/state/ledger.py::append_many_and_project`. Reused for Wave26 canonical
 # event env authority while preserving the DR-33-B savepoint contract. Replaces pre-DR-33-B
 # `with conn:` with explicit SAVEPOINT so callers that already hold an
 # outer SAVEPOINT can invoke this function without silent release per
 # memory rule L30.
+# Purpose: Protect nested SAVEPOINT atomicity for canonical event/projection writes.
+# Reuse: Run when append_many_and_project or projection idempotency gates change.
 
 """Antibody for DR-33-B nested-SAVEPOINT safety.
 
@@ -94,8 +97,8 @@ def _canonical_projection(position_id: str) -> dict:
         "edge_source": "test_source",
         "discovery_mode": "day0_capture",
         "chain_state": "pending_tracked",
-        "token_id": "tok1",
-        "no_token_id": "notok1",
+        "token_id": f"tok-{position_id}",
+        "no_token_id": f"notok-{position_id}",
         "condition_id": "cond1",
         "order_id": None,
         "order_status": None,

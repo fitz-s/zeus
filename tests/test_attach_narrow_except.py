@@ -1,6 +1,9 @@
 # Created: 2026-05-05
-# Last reused or audited: 2026-05-05
-# Authority basis: docs/operations/task_2026-05-04_zeus_may3_review_remediation/phases/T2I/phase.json
+# Last reused or audited: 2026-05-18
+# Lifecycle: created=2026-05-05; last_reviewed=2026-05-18; last_reused=2026-05-18
+# Purpose: Guard narrow ATTACH exception handling in trade/world connection helpers.
+# Reuse: Run when connection helper signatures or ATTACH behavior changes.
+# Authority basis: docs/operations/task_2026-05-04_zeus_may3_review_remediation/phases/T2I/phase.json; K1 typed connection API accepts write_class.
 """Tests for T2I Deliverable A: ATTACH narrow-except in cycle_runner + db.py.
 
 Invariants asserted:
@@ -85,7 +88,7 @@ def test_cycle_runner_attach_oe_swallowed_returns_unattached_conn(monkeypatch):
     exc = sqlite3.OperationalError("unable to open database file")
     mock_conn = _make_fake_conn(attach_side_effect=exc)
 
-    monkeypatch.setattr(cr_module, "connect_or_degrade", lambda path: mock_conn)
+    monkeypatch.setattr(cr_module, "connect_or_degrade", lambda path, **_kwargs: mock_conn)
 
     conn = cr_module.get_connection()
 
@@ -95,7 +98,8 @@ def test_cycle_runner_attach_oe_swallowed_returns_unattached_conn(monkeypatch):
         c for c in mock_conn.execute.call_args_list
         if c.args[0].strip().upper().startswith("ATTACH")
     ]
-    assert len(attach_calls) == 1, "ATTACH must have been attempted once"
+    assert len(attach_calls) == 1, "cycle_runner stops after first ATTACH OperationalError"
+    assert " AS world" in attach_calls[0].args[0]
 
     # Verify 'world' is NOT in the database_list (ATTACH raised and was swallowed)
     # Use a real in-memory connection to confirm the shape of the assertion:
@@ -113,7 +117,7 @@ def test_db_py_attach_oe_swallowed_returns_unattached_conn_caller_can_detect_via
     exc = sqlite3.OperationalError("unable to open database file")
     mock_conn = _make_fake_conn(attach_side_effect=exc)
 
-    monkeypatch.setattr(db_module, "get_trade_connection", lambda: mock_conn)
+    monkeypatch.setattr(db_module, "get_trade_connection", lambda **_kwargs: mock_conn)
 
     conn = db_module.get_trade_connection_with_world()
 
@@ -122,7 +126,9 @@ def test_db_py_attach_oe_swallowed_returns_unattached_conn_caller_can_detect_via
         c for c in mock_conn.execute.call_args_list
         if c.args[0].strip().upper().startswith("ATTACH")
     ]
-    assert len(attach_calls) == 1, "ATTACH must have been attempted once"
+    assert len(attach_calls) == 2, "world and forecasts ATTACH must each be attempted once"
+    assert any(" AS world" in c.args[0] for c in attach_calls)
+    assert any(" AS forecasts" in c.args[0] for c in attach_calls)
 
     pragma_result = mock_conn.execute("PRAGMA database_list")
     names = {row[1] for row in pragma_result.fetchall()}
@@ -145,7 +151,7 @@ def test_cycle_runner_attach_non_oe_propagates(exc_class, monkeypatch):
     exc = exc_class("simulated error in ATTACH")
     mock_conn = _make_fake_conn(attach_side_effect=exc)
 
-    monkeypatch.setattr(cr_module, "connect_or_degrade", lambda path: mock_conn)
+    monkeypatch.setattr(cr_module, "connect_or_degrade", lambda path, **_kwargs: mock_conn)
 
     with pytest.raises(exc_class):
         cr_module.get_connection()
@@ -157,7 +163,7 @@ def test_db_py_attach_non_oe_propagates(exc_class, monkeypatch):
     exc = exc_class("simulated error in ATTACH")
     mock_conn = _make_fake_conn(attach_side_effect=exc)
 
-    monkeypatch.setattr(db_module, "get_trade_connection", lambda: mock_conn)
+    monkeypatch.setattr(db_module, "get_trade_connection", lambda **_kwargs: mock_conn)
 
     with pytest.raises(exc_class):
         db_module.get_trade_connection_with_world()

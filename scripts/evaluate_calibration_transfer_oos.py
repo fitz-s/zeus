@@ -1,9 +1,17 @@
 # Created: 2026-05-05
-# Last reused/audited: 2026-05-08
-# Lifecycle: created=2026-05-05; last_reviewed=2026-05-08; last_reused=2026-05-08
+# Last reused/audited: 2026-05-17
+# Lifecycle: created=2026-05-05; last_reviewed=2026-05-17; last_reused=2026-05-08
 # Authority basis: architecture/calibration_transfer_oos_design_2026-05-05.md Phase X.2
 # Purpose: Evaluate out-of-sample calibration-transfer evidence without promoting it to live authority.
 # Reuse: Run in --dry-run by default; use --no-dry-run only under daemon-lock/operator-gated evidence production.
+#
+# SCHEDULING NOTE (F17 — 2026-05-17): This script is intentionally NOT registered in cron/jobs.json.
+# The validated_calibration_transfers table is a Phase B upgrade path only.  At launch Zeus uses the
+# legacy static-mapping path (ZEUS_CALIBRATION_TRANSFER_OOS_EVAL_ENABLED flag OFF).  The cron entry
+# should NOT be added until Phase B is activated (~2-4 weeks post-launch, once ECMWF calibration_pairs_v2
+# rows have accumulated).  Authority: docs/operations/LIVE_LAUNCH_HANDOFF.md §A.4 and §B.3;
+# docs/operations/PLIST_UPDATE_FOR_RELOCK.md §1.5.  Flipping the flag prematurely silently falls to
+# SHADOW_ONLY because no validated_calibration_transfers rows exist for the ECMWF target_source_id.
 """OOS evaluator: writes ``validated_calibration_transfers`` rows.
 
 Phase X.2 of the calibration-transfer evidence pipeline.  Iterates all
@@ -219,7 +227,7 @@ def _iter_active_platt_models(conn, limit: int | None = None) -> Iterator[dict]:
         SELECT model_key, temperature_metric AS metric, cluster, season,
                data_version, param_A, param_B, param_C, input_space,
                brier_insample, n_samples, cycle, source_id, horizon_profile
-          FROM platt_models_v2
+          FROM world.platt_models_v2
          WHERE is_active = 1
            AND authority = 'VERIFIED'
            AND input_space = 'raw_probability'
@@ -650,6 +658,14 @@ def run_oos_evaluation(
 # ---------------------------------------------------------------------------
 
 def main() -> int:
+    import os
+    if os.environ.get("ZEUS_CALIBRATION_TRANSFER_OOS_EVAL_ENABLED", "0") != "1":
+        logger.info(
+            "F39_SELF_POLICING: ZEUS_CALIBRATION_TRANSFER_OOS_EVAL_ENABLED!=1; "
+            "Phase B trigger not met; exit 0 (no work, plist auto-no-ops)"
+        )
+        return 0
+
     parser = argparse.ArgumentParser(
         description="OOS evaluator: writes validated_calibration_transfers rows."
     )

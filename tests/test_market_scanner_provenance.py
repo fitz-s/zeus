@@ -1,7 +1,7 @@
 # Created: 2026-04-17
-# Last reused or audited: 2026-05-08
+# Last reused or audited: 2026-05-18
 # Authority basis: AGENTS.md money path; S1 market source-proof persistence via market_topology_state.
-# Lifecycle: created=2026-04-17; last_reviewed=2026-05-06; last_reused=2026-05-08
+# Lifecycle: created=2026-04-17; last_reviewed=2026-05-18; last_reused=2026-05-18
 # Purpose: Lock market_scanner provenance, source-contract drift behavior, and Venus diagnostic authority labels.
 # Reuse: Inspect src/data/market_scanner.py and scripts/watch_source_contract.py before relying on these assertions.
 # Authority basis: audit bug B017 (STILL_OPEN P1 SD-H), Fitz methodology constraint #4 "Data Provenance > Code Correctness"; Wave16 object-meaning diagnostic authority repair.
@@ -26,6 +26,7 @@ import sqlite3
 import sys
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from pathlib import Path
 
 import httpx
 import pytest
@@ -228,11 +229,7 @@ def _complete_release_evidence(prefix: str = "docs/operations/source_transition"
     return release_evidence
 
 
-def _make_forward_substrate_conn() -> sqlite3.Connection:
-    conn = sqlite3.connect(":memory:")
-    conn.row_factory = sqlite3.Row
-    conn.executescript(
-        """
+_FORWARD_SUBSTRATE_DDL = """
         CREATE TABLE market_events_v2 (
             event_id INTEGER PRIMARY KEY AUTOINCREMENT,
             market_slug TEXT NOT NULL,
@@ -266,9 +263,31 @@ def _make_forward_substrate_conn() -> sqlite3.Connection:
             condition_id TEXT,
             UNIQUE(token_id, recorded_at)
         );
-        """
-    )
+"""
+
+
+def _make_forward_substrate_conn() -> sqlite3.Connection:
+    """Legacy helper for tests that only need an in-memory conn (not the substrate writer)."""
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(_FORWARD_SUBSTRATE_DDL)
     return conn
+
+
+def _make_forward_substrate_db(tmp_path: Path, request: pytest.FixtureRequest) -> "tuple[str, sqlite3.Connection]":
+    """K1-A fix: returns (db_path, conn) for a temp file-backed substrate DB.
+
+    log_forward_market_substrate now opens its own conn to _db_path. Tests pass
+    _db_path=db_path so the function writes to the same temp file that the test
+    conn can inspect. pytest's tmp_path owns cleanup after the connection closes.
+    """
+    db_path = str(tmp_path / "fms_test.db")
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    conn.executescript(_FORWARD_SUBSTRATE_DDL)
+    conn.commit()
+    request.addfinalizer(conn.close)
+    return db_path, conn
 
 
 def _make_full_linkage_conn() -> sqlite3.Connection:
@@ -331,6 +350,74 @@ def _insert_full_linkage_snapshot(
             captured_at=captured_at,
             freshness_deadline=captured_at + timedelta(seconds=30),
         ),
+    )
+
+
+def _insert_crossed_full_linkage_snapshot(
+    conn: sqlite3.Connection,
+    *,
+    snapshot_id: str = "snap-crossed",
+) -> None:
+    captured_at = datetime(2026, 4, 30, 16, 0, tzinfo=timezone.utc)
+    conn.execute(
+        """
+        INSERT INTO executable_market_snapshots (
+          snapshot_id, gamma_market_id, event_id, event_slug, condition_id,
+          question_id, yes_token_id, no_token_id, selected_outcome_token_id,
+          outcome_label, enable_orderbook, active, closed, accepting_orders,
+          market_start_at, market_end_at, market_close_at, sports_start_at,
+          min_tick_size, min_order_size, fee_details_json, token_map_json,
+          rfqe, neg_risk, orderbook_top_bid, orderbook_top_ask,
+          orderbook_depth_json, raw_gamma_payload_hash,
+          raw_clob_market_info_hash, raw_orderbook_hash, authority_tier,
+          captured_at, freshness_deadline
+        ) VALUES (
+          :snapshot_id, :gamma_market_id, :event_id, :event_slug, :condition_id,
+          :question_id, :yes_token_id, :no_token_id, :selected_outcome_token_id,
+          :outcome_label, :enable_orderbook, :active, :closed, :accepting_orders,
+          :market_start_at, :market_end_at, :market_close_at, :sports_start_at,
+          :min_tick_size, :min_order_size, :fee_details_json, :token_map_json,
+          :rfqe, :neg_risk, :orderbook_top_bid, :orderbook_top_ask,
+          :orderbook_depth_json, :raw_gamma_payload_hash,
+          :raw_clob_market_info_hash, :raw_orderbook_hash, :authority_tier,
+          :captured_at, :freshness_deadline
+        )
+        """,
+        {
+            "snapshot_id": snapshot_id,
+            "gamma_market_id": "gamma-full-linkage",
+            "event_id": "event-full-linkage",
+            "event_slug": "highest-temperature-in-chicago-on-april-30-2026",
+            "condition_id": "cond-full-linkage",
+            "question_id": "question-full-linkage",
+            "yes_token_id": "yes-full-linkage",
+            "no_token_id": "no-full-linkage",
+            "selected_outcome_token_id": "yes-full-linkage",
+            "outcome_label": "YES",
+            "enable_orderbook": 1,
+            "active": 1,
+            "closed": 0,
+            "accepting_orders": 1,
+            "market_start_at": None,
+            "market_end_at": None,
+            "market_close_at": None,
+            "sports_start_at": None,
+            "min_tick_size": "0.01",
+            "min_order_size": "5",
+            "fee_details_json": '{"source":"test"}',
+            "token_map_json": '{"YES":"yes-full-linkage","NO":"no-full-linkage"}',
+            "rfqe": None,
+            "neg_risk": 0,
+            "orderbook_top_bid": "0.55",
+            "orderbook_top_ask": "0.44",
+            "orderbook_depth_json": '{"asks":[{"price":"0.44","size":"100"}],"bids":[{"price":"0.55","size":"100"}]}',
+            "raw_gamma_payload_hash": "a" * 64,
+            "raw_clob_market_info_hash": "b" * 64,
+            "raw_orderbook_hash": "c" * 64,
+            "authority_tier": "CLOB",
+            "captured_at": captured_at.isoformat(),
+            "freshness_deadline": (captured_at + timedelta(seconds=30)).isoformat(),
+        },
     )
 
 
@@ -2282,7 +2369,10 @@ class TestSourceContractGate:
 
         monkeypatch.setattr(venus_sensing_report, "get_trade_connection_with_world", _trade_conn)
         monkeypatch.setattr(venus_sensing_report, "_collect_diagnostics", lambda: {})
-        monkeypatch.setattr(venus_sensing_report, "_collect_truth_surfaces", lambda _conn: {})
+        forecasts_conn = sqlite3.connect(":memory:")
+        forecasts_conn.row_factory = sqlite3.Row
+        monkeypatch.setattr(venus_sensing_report, "get_forecasts_connection", lambda: forecasts_conn)
+        monkeypatch.setattr(venus_sensing_report, "_collect_truth_surfaces", lambda _conn, _forecasts_conn: {})
         monkeypatch.setattr(venus_sensing_report, "_collect_consistency", lambda _conn, _surfaces: {})
         monkeypatch.setattr(venus_sensing_report, "_collect_relationship_checks", lambda: {})
         monkeypatch.setattr(venus_sensing_report, "_collect_deltas", lambda _surfaces: {})
@@ -2799,21 +2889,19 @@ class TestForwardMarketSubstrateProducer:
         assert "market_source_contract_topology_status" in source
 
     def test_forward_substrate_writes_verified_scanner_rows_without_unblocking_economics(
-        self, monkeypatch
+        self, tmp_path, request
     ):
-        """Verified Gamma scanner facts populate only market/price substrate."""
-        monkeypatch.setattr(
-            state_db,
-            "get_connection",
-            lambda *_a, **_kw: pytest.fail("writer must not open a default DB"),
-        )
-        conn = _make_forward_substrate_conn()
+        """Verified Gamma scanner facts populate only market/price substrate.
+
+        K1-A fix: writer opens its own forecasts conn; _db_path routes to temp file.
+        """
+        db_path, conn = _make_forward_substrate_db(tmp_path, request)
 
         result = log_forward_market_substrate(
-            conn,
             markets=[_forward_market()],
             recorded_at="2026-04-29T16:00:00Z",
             scan_authority="VERIFIED",
+            _db_path=db_path,
         )
 
         assert result["status"] == "written"
@@ -2944,11 +3032,9 @@ class TestForwardMarketSubstrateProducer:
         )
         assert missing["status"] == "refused_missing_snapshot"
 
-        _insert_full_linkage_snapshot(
+        _insert_crossed_full_linkage_snapshot(
             conn,
             snapshot_id="snap-crossed",
-            best_bid=Decimal("0.55"),
-            best_ask=Decimal("0.44"),
         )
         crossed = log_executable_snapshot_market_price_linkage(
             conn,
@@ -2958,43 +3044,46 @@ class TestForwardMarketSubstrateProducer:
         assert crossed["status"] == "refused_crossed_orderbook"
         assert conn.execute("SELECT COUNT(*) FROM market_price_history").fetchone()[0] == 0
 
-    def test_forward_substrate_skips_when_required_tables_are_absent(self):
+    def test_forward_substrate_skips_when_required_tables_are_absent(self, tmp_path):
         """Capability-absent behavior is fail-loud and does not create tables."""
-        conn = sqlite3.connect(":memory:")
-        conn.row_factory = sqlite3.Row
+        db_path = str(tmp_path / "fms_empty_test.db")
 
         result = log_forward_market_substrate(
-            conn,
             markets=[_forward_market()],
             recorded_at="2026-04-29T16:00:00Z",
             scan_authority="VERIFIED",
+            _db_path=db_path,
         )
 
         assert result["status"] == "skipped_missing_tables"
         assert set(result["missing_tables"]) == {"market_events_v2", "market_price_history"}
-        assert conn.execute(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type='table'"
-        ).fetchone()[0] == 0
+        check_conn = sqlite3.connect(db_path)
+        try:
+            assert check_conn.execute(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table'"
+            ).fetchone()[0] == 0
+        finally:
+            check_conn.close()
 
     @pytest.mark.parametrize("authority", ["STALE", "EMPTY_FALLBACK", "", None])
-    def test_forward_substrate_refuses_degraded_scan_authority(self, authority):
+    def test_forward_substrate_refuses_degraded_scan_authority(self, authority, tmp_path, request):
         """Only a fresh VERIFIED scan can create forward market substrate."""
-        conn = _make_forward_substrate_conn()
+        db_path, conn = _make_forward_substrate_db(tmp_path, request)
 
         result = log_forward_market_substrate(
-            conn,
             markets=[_forward_market()],
             recorded_at="2026-04-29T16:00:00Z",
             scan_authority=authority,
+            _db_path=db_path,
         )
 
         assert result["status"] == "refused_degraded_authority"
         assert conn.execute("SELECT COUNT(*) FROM market_events_v2").fetchone()[0] == 0
         assert conn.execute("SELECT COUNT(*) FROM market_price_history").fetchone()[0] == 0
 
-    def test_forward_substrate_refuses_missing_identity_or_range_facts(self):
+    def test_forward_substrate_refuses_missing_identity_or_range_facts(self, tmp_path, request):
         """Missing condition/token/range facts are not inferred from neighbors."""
-        conn = _make_forward_substrate_conn()
+        db_path, conn = _make_forward_substrate_db(tmp_path, request)
         market = _forward_market()
         market["outcomes"] = [
             {
@@ -3019,10 +3108,10 @@ class TestForwardMarketSubstrateProducer:
         ]
 
         result = log_forward_market_substrate(
-            conn,
             markets=[market],
             recorded_at="2026-04-29T16:00:00Z",
             scan_authority="VERIFIED",
+            _db_path=db_path,
         )
 
         assert result["status"] == "skipped_no_valid_rows"
@@ -3030,20 +3119,20 @@ class TestForwardMarketSubstrateProducer:
         assert conn.execute("SELECT COUNT(*) FROM market_events_v2").fetchone()[0] == 0
         assert conn.execute("SELECT COUNT(*) FROM market_price_history").fetchone()[0] == 0
 
-    def test_forward_substrate_is_idempotent_and_does_not_overwrite_conflicts(self):
+    def test_forward_substrate_is_idempotent_and_does_not_overwrite_conflicts(self, tmp_path, request):
         """Repeated facts are unchanged; conflicting token-time facts are reported."""
-        conn = _make_forward_substrate_conn()
+        db_path, conn = _make_forward_substrate_db(tmp_path, request)
         first = log_forward_market_substrate(
-            conn,
             markets=[_forward_market()],
             recorded_at="2026-04-29T16:00:00Z",
             scan_authority="VERIFIED",
+            _db_path=db_path,
         )
         second = log_forward_market_substrate(
-            conn,
             markets=[_forward_market()],
             recorded_at="2026-04-29T16:00:00Z",
             scan_authority="VERIFIED",
+            _db_path=db_path,
         )
 
         assert first["status"] == "written"
@@ -3056,10 +3145,10 @@ class TestForwardMarketSubstrateProducer:
         conflicting = _forward_market()
         conflicting["outcomes"][0]["price"] = 0.99
         conflict = log_forward_market_substrate(
-            conn,
             markets=[conflicting],
             recorded_at="2026-04-29T16:00:00Z",
             scan_authority="VERIFIED",
+            _db_path=db_path,
         )
 
         assert conflict["status"] == "written_with_conflicts"
@@ -3074,9 +3163,9 @@ class TestForwardMarketSubstrateProducer:
         ).fetchone()[0]
         assert stored_price == 0.31
 
-    def test_forward_substrate_does_not_append_prices_for_resolved_events(self):
+    def test_forward_substrate_does_not_append_prices_for_resolved_events(self, tmp_path, request):
         """A resolved market_events_v2 row is not unresolved scanner substrate."""
-        conn = _make_forward_substrate_conn()
+        db_path, conn = _make_forward_substrate_db(tmp_path, request)
         conn.execute(
             """
             INSERT INTO market_events_v2 (
@@ -3101,14 +3190,15 @@ class TestForwardMarketSubstrateProducer:
                 "2026-04-29T15:00:00Z",
             ),
         )
+        conn.commit()  # must commit so the function's own conn sees this pre-existing row
         market = _forward_market()
         market["outcomes"] = [market["outcomes"][0]]
 
         result = log_forward_market_substrate(
-            conn,
             markets=[market],
             recorded_at="2026-04-29T16:00:00Z",
             scan_authority="VERIFIED",
+            _db_path=db_path,
         )
 
         assert result["status"] == "skipped_no_valid_rows"
@@ -3116,16 +3206,16 @@ class TestForwardMarketSubstrateProducer:
         assert conn.execute("SELECT COUNT(*) FROM market_events_v2").fetchone()[0] == 1
         assert conn.execute("SELECT COUNT(*) FROM market_price_history").fetchone()[0] == 0
 
-    def test_forward_substrate_does_not_append_prices_for_event_identity_conflicts(self):
+    def test_forward_substrate_does_not_append_prices_for_event_identity_conflicts(self, tmp_path, request):
         """Rejected event identity conflicts cannot create orphan price facts."""
-        conn = _make_forward_substrate_conn()
+        db_path, conn = _make_forward_substrate_db(tmp_path, request)
         market = _forward_market()
         market["outcomes"] = [market["outcomes"][0]]
         first = log_forward_market_substrate(
-            conn,
             markets=[market],
             recorded_at="2026-04-29T16:00:00Z",
             scan_authority="VERIFIED",
+            _db_path=db_path,
         )
         assert first["status"] == "written"
         assert first["market_events_inserted"] == 1
@@ -3136,10 +3226,10 @@ class TestForwardMarketSubstrateProducer:
         conflicting["outcomes"][0]["token_id"] = "yes-conflicting-token"
         conflicting["outcomes"][0]["no_token_id"] = "no-conflicting-token"
         conflict = log_forward_market_substrate(
-            conn,
             markets=[conflicting],
             recorded_at="2026-04-29T16:00:00Z",
             scan_authority="VERIFIED",
+            _db_path=db_path,
         )
 
         assert conflict["status"] == "written_with_conflicts"

@@ -239,6 +239,11 @@ class PolymarketV2Adapter:
         if not kwargs.get("api_creds"):
             try:
                 client.set_api_creds(client.create_or_derive_api_key())
+                import logging
+                logging.getLogger(__name__).warning(
+                    "VENUE_AUTH_FALLBACK_TRIGGERED: create_or_derive_api_key used "
+                    "(primary /auth/api-key creds absent); L2 calls proceeding via derived creds",
+                )
             except Exception as exc:  # pragma: no cover - upstream SDK behaviour
                 import logging
                 logging.getLogger(__name__).warning(

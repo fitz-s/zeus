@@ -1,6 +1,6 @@
 # Created: 2026-05-05
-# Last reused/audited: 2026-05-08
-# Lifecycle: created=2026-05-05; last_reviewed=2026-05-08; last_reused=2026-05-08
+# Last reused/audited: 2026-05-18
+# Lifecycle: created=2026-05-05; last_reviewed=2026-05-18; last_reused=2026-05-18
 # Authority basis: architecture/calibration_transfer_oos_design_2026-05-05.md Phase X.2
 # Purpose: Lock OOS calibration-transfer evidence eligibility and non-promotion behavior.
 # Reuse: Run when calibration_pairs_v2 eligibility, validated_calibration_transfers, or OOS transfer policy evidence changes.
@@ -35,7 +35,20 @@ from scripts.evaluate_calibration_transfer_oos import (
 def _make_conn() -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:")
     apply_v2_schema(conn)
+    conn.execute("ATTACH DATABASE ':memory:' AS world")
+    _clone_main_table_to_world(conn, "platt_models_v2")
+    _clone_main_table_to_world(conn, "validated_calibration_transfers")
     return conn
+
+
+def _clone_main_table_to_world(conn: sqlite3.Connection, table: str) -> None:
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (table,),
+    ).fetchone()
+    assert row is not None and row[0], f"missing main table DDL for {table}"
+    create_sql = str(row[0]).replace(f"CREATE TABLE {table}", f"CREATE TABLE world.{table}", 1)
+    conn.execute(create_sql)
 
 
 _NOW = datetime(2026, 5, 5, 12, 0, 0, tzinfo=timezone.utc)
@@ -115,7 +128,7 @@ def _insert_platt_model(
 ) -> None:
     conn.execute(
         """
-        INSERT INTO platt_models_v2 (
+        INSERT INTO world.platt_models_v2 (
             model_key, temperature_metric, cluster, season, data_version,
             input_space, param_A, param_B, param_C,
             bootstrap_params_json, n_samples, brier_insample,
@@ -136,7 +149,7 @@ def _insert_platt_model(
     )
     if input_space != "raw_probability":
         conn.execute(
-            "UPDATE platt_models_v2 SET input_space = ? WHERE model_key = ?",
+            "UPDATE world.platt_models_v2 SET input_space = ? WHERE model_key = ?",
             (input_space, model_key),
         )
     conn.commit()
@@ -220,13 +233,13 @@ def _insert_pairs(
 
 def _count_rows(conn: sqlite3.Connection) -> int:
     return conn.execute(
-        "SELECT COUNT(*) FROM validated_calibration_transfers"
+        "SELECT COUNT(*) FROM world.validated_calibration_transfers"
     ).fetchone()[0]
 
 
 def _fetch_row(conn: sqlite3.Connection, model_key: str) -> dict | None:
     cur = conn.execute(
-        "SELECT * FROM validated_calibration_transfers WHERE platt_model_key = ?",
+        "SELECT * FROM world.validated_calibration_transfers WHERE platt_model_key = ?",
         (model_key,),
     )
     row = cur.fetchone()

@@ -1,9 +1,9 @@
 # Created: 2026-04-21
-# Last reused/audited: 2026-04-27
-# Lifecycle: created=2026-04-21; last_reviewed=2026-04-27; last_reused=2026-04-27
+# Last reused/audited: 2026-05-18
+# Lifecycle: created=2026-04-21; last_reviewed=2026-05-18; last_reused=2026-05-18
 # Purpose: Protect Open-Meteo previous-runs backfill aggregation and forecasts writes.
 # Reuse: Run before changing previous-runs source mapping, forecasts schema, or onboarding forecast backfill.
-# Authority basis: R3 F1 forecast provenance wiring + historical backfill packet.
+# Authority basis: R3 F1 forecast provenance wiring + historical backfill packet; K1 typed connection API accepts write_class.
 from __future__ import annotations
 
 from pathlib import Path
@@ -92,7 +92,7 @@ def test_rows_from_previous_runs_payload_preserves_model_source():
 def test_run_backfill_writes_forecasts_idempotently(tmp_path, monkeypatch):
     db_path = tmp_path / "previous-runs.db"
 
-    def _conn():
+    def _conn(**_kwargs):
         conn = get_connection(db_path)
         init_schema(conn)
         return conn

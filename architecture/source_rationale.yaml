@@ -1943,6 +1943,27 @@ files:
     - src/state/chronicler.py
     - src/state/db.py
     - src/state/ledger.py
+  src/state/position_duplicate_consolidator.py:
+    zone: K0_frozen_kernel
+    authority_role: canonical_position_repair
+    why: F109 chain-truth-aware repair path for duplicate open-phase position_current rows; voids only structurally provable overbook rows and leaves ambiguous chain divergence untouched.
+    write_routes:
+    - canonical_position_write
+    downstream:
+    - src/main.py
+    - scripts/migrations/202605_position_current_idempotent_open_per_token.py
+    - tests/state/test_f109_consolidator_boot_wire.py
+    - tests/state/test_position_open_idempotency.py
+  src/state/trade_decisions_synthesizer.py:
+    zone: K0_frozen_kernel
+    authority_role: canonical_trade_decision_bridge_repair
+    why: Reconstructs missing trade_decisions.runtime_trade_id bridge rows for historical position_current orphans before lifecycle updates proceed.
+    write_routes:
+    - canonical_position_write
+    downstream:
+    - src/state/db.py
+    - scripts/migrations/202605_position_current_bridge_required_trigger.py
+    - tests/state/test_position_current_bridge_invariant.py
   src/state/schema/__init__.py:
     zone: K0_frozen_kernel
     authority_role: state_schema_namespace
