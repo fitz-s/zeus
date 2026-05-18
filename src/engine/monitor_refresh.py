@@ -80,8 +80,14 @@ class HeldTokenMonitorQuote:
 
 
 def _compute_divergence_score(p_posterior: float, p_market: float, *, available: bool) -> float:
-    """Adverse-only divergence: positive edge is entry signal, not exit signal."""
+    """Adverse-only divergence: positive edge is entry signal, not exit signal.
+
+    Non-finite inputs propagate as NaN so stale or missing quotes surface loudly
+    rather than recording a spurious 0.0 (max() would silently swallow NaN).
+    """
     if not available:
+        return float("nan")
+    if not (np.isfinite(p_posterior) and np.isfinite(p_market)):
         return float("nan")
     return max(0.0, p_market - p_posterior)
 

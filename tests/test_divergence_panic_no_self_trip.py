@@ -1,8 +1,11 @@
-# Created: 2026-05-17
-# Last reused or audited: 2026-05-17
-# Authority basis: audit cycle 2026-05-17 (Lane C). Antibody for
-#   divergence_score formula signed-vs-abs() collision. Fix:
-#   divergence_score = max(0, p_market - p_posterior) (adverse-only).
+# Lifecycle: created=2026-05-17; last_reviewed=2026-05-17; last_reused=2026-05-17
+# Purpose: Antibody for divergence_score formula sign collapse. Locks
+#   _compute_divergence_score to adverse-only semantics so abs() cannot be
+#   reintroduced at the call site (monitor_refresh.py) without break/restore
+#   surfacing failures.
+# Reuse: Run via `pytest tests/test_divergence_panic_no_self_trip.py`. Break/
+#   restore probe: swap helper body to abs() — TestProductionFormulaIsAdverseOnly
+#   must fail. Authority: architecture/naming_conventions.yaml freshness_metadata.
 """Relationship test: entry edge must not self-trip MODEL_DIVERGENCE_PANIC.
 
 Cross-module invariant:
@@ -57,6 +60,19 @@ class TestProductionFormulaIsAdverseOnly:
 
     def test_unavailable_returns_nan(self):
         assert math.isnan(_compute_divergence_score(0.62, 0.28, available=False))
+
+    @pytest.mark.parametrize("p_post,p_mkt", [
+        (float("nan"), 0.28),
+        (0.62, float("nan")),
+        (float("nan"), float("nan")),
+        (float("inf"), 0.28),
+        (0.62, float("-inf")),
+    ])
+    def test_non_finite_inputs_return_nan(self, p_post, p_mkt):
+        """Stale/invalid quotes must propagate as NaN, not silently as 0.0.
+        max() would swallow NaN to 0.0; the explicit guard preserves the
+        loud-failure semantic of the old abs() formula."""
+        assert math.isnan(_compute_divergence_score(p_post, p_mkt, available=True))
 
     @pytest.mark.parametrize("p_post,p_mkt", [
         (0.62, 0.10), (0.62, 0.30), (0.62, 0.50), (0.62, 0.61),
