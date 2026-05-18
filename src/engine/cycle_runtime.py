@@ -1849,7 +1849,7 @@ def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: 
         if False:
             _ = pos.entry_method
             _ = pos.selected_method
-        pending_exit_resolution = handle_exit_pending_missing(portfolio, pos)
+        pending_exit_resolution = handle_exit_pending_missing(portfolio, pos, conn=conn)
         if pending_exit_resolution["action"] == "closed":
             closed = pending_exit_resolution["position"]
             if closed is not None:
