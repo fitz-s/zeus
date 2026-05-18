@@ -1,12 +1,12 @@
-# Lifecycle: created=2026-05-17; last_reviewed=2026-05-17; last_reused=never
+# Lifecycle: created=2026-05-17; last_reviewed=2026-05-18; last_reused=2026-05-18
 # Purpose: Add winning_index_set column to settlement_commands.
 #   winning_index_set is a JSON-encoded uint256[] (as string array) that
 #   encodes the CTF outcome bin to redeem via redeemPositions(indexSets).
 #   For binary markets: '["2"]' = YES outcome won, '["1"]' = NO outcome won.
 #   Uses simple ALTER TABLE ... ADD COLUMN (additive, NULL for existing rows).
 # Reuse: Run BEFORE deploying PR-I.5.a code. Existing rows remain NULL until
-#   manual SQL UPDATE (out of scope for this PR). Safe to run with daemon up
-#   because ALTER TABLE ADD COLUMN is non-blocking in SQLite.
+#   manual SQL UPDATE (out of scope for this PR). Stop live writers before
+#   applying to a production DB so the migration runner can take its write lock.
 # Authority basis: PR-I.5.a / autonomous redeem prep (PR_I5_WEB3_WIRE.md)
 # Limitation: V1 assumes binary markets only. Multi-bin indexSet encoding
 #   is documented in PR_I5_WEB3_WIRE.md §3 but not implemented here.
@@ -35,5 +35,9 @@ def up(conn: sqlite3.Connection) -> None:
         "ON settlement_commands(winning_index_set) "
         "WHERE winning_index_set IS NOT NULL"
     )
-    # Bump schema version to match SCHEMA_VERSION constant (CB-1 critic finding 2026-05-17)
-    conn.execute("PRAGMA user_version = 5")
+    # Keep schema version monotonic. This migration originally set user_version=5
+    # unconditionally; live trade DBs can already be newer after later additive
+    # migrations, so never downgrade them while backfilling this missed column.
+    current_version = int(conn.execute("PRAGMA user_version").fetchone()[0] or 0)
+    if current_version < 5:
+        conn.execute("PRAGMA user_version = 5")

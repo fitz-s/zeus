@@ -5,7 +5,7 @@
 #   INV-37 enforcement per architecture/invariants.yaml::INV-37
 #   PR-S4 (Bug #5) additions: test_a4_manifest_ready_for_boot_wiring +
 #   test_a4_manifest_schema_version_is_2 + test_a4_trade_tables_declared_in_registry +
-#   test_a4_trade_tables_init_schema_creates_12 +
+#   test_a4_trade_tables_init_schema_creates_runtime_tables_and_migration_ledger +
 #   test_a4_ghost_shells_declared_legacy_archived_on_world
 #   per STRUCTURAL_PLAN v3 §2 PR-S4 + E_patch_plan.md §Antibody/CI
 #   v1.F1 (2026-05-18) addition: TestA4BootWiringCallSite — AST boot-wiring antibody
@@ -41,6 +41,25 @@ from pathlib import Path
 import pytest
 
 _REPO_ROOT = Path(__file__).parent.parent.parent
+
+EXPECTED_RUNTIME_TRADE_TABLES = frozenset({
+    "execution_fact",
+    "position_current",
+    "position_events",
+    "position_lots",
+    "settlement_command_events",
+    "settlement_commands",
+    "trade_decisions",
+    "venue_command_events",
+    "venue_commands",
+    "venue_order_facts",
+    "venue_submission_envelopes",
+    "venue_trade_facts",
+})
+
+EXPECTED_TRADE_DB_TABLES = EXPECTED_RUNTIME_TRADE_TABLES | frozenset({
+    "_migrations_applied",
+})
 
 # ---------------------------------------------------------------------------
 # A1 — Bidirectional set-equality: registry vs sqlite_master
@@ -527,8 +546,8 @@ class TestRegistryLoaderFatalSemantics:
 class TestA4ManifestReadyForBootWiring:
     """Manifest-readiness antibodies: structural preconditions for PR-S4b boot wiring.
 
-    PR-S4 ships the YAML cutover (schema_version 2 + 12 trade re-owns + 12 ghost
-    shells). Boot wiring (assert_db_matches_registry in main.py/ingest_main.py)
+    PR-S4 ships the YAML cutover (schema_version 2 + trade DB ownership + 12
+    runtime ghost shells). Boot wiring (assert_db_matches_registry in main.py/ingest_main.py)
     is deferred to PR-S4b, which must also add init_schema_trade_only and extend
     the manifest to cover all live-DB tables (critic SEV-1: live WORLD has 13
     unregistered migration-leftover tables; FORECASTS has 12).
@@ -538,7 +557,7 @@ class TestA4ManifestReadyForBootWiring:
     """
 
     def test_a4_manifest_ready_for_boot_wiring(self):
-        """Manifest contains schema_version 2 + 12 trade entries + 12 ghost shells.
+        """Manifest contains schema_version 2 + trade DB entries + 12 ghost shells.
 
         Regression injection: revert any of the three YAML structural changes
         → this test fails, blocking PR-S4b from merging without the prerequisite.
@@ -556,15 +575,8 @@ class TestA4ManifestReadyForBootWiring:
             f"{data['schema_version']}. PR-S4 cutover was reverted."
         )
 
-        # (2) 12 trade-class tables declared db: trade
-        expected_trade = frozenset({
-            "execution_fact", "position_current", "position_events",
-            "position_lots", "settlement_command_events", "settlement_commands",
-            "trade_decisions", "venue_command_events", "venue_commands",
-            "venue_order_facts", "venue_submission_envelopes", "venue_trade_facts",
-        })
         actual_trade = tables_for(DBIdentity.TRADE)
-        missing_trade = expected_trade - actual_trade
+        missing_trade = EXPECTED_TRADE_DB_TABLES - actual_trade
         assert not missing_trade, (
             f"MANIFEST READINESS FAIL: these tables should be db: trade but are "
             f"missing from registry: {sorted(missing_trade)}."
@@ -572,7 +584,7 @@ class TestA4ManifestReadyForBootWiring:
 
         # (3) 12 ghost shells declared legacy_archived on world.db
         missing_ghost = [
-            name for name in expected_trade
+            name for name in EXPECTED_RUNTIME_TRADE_TABLES
             if (_REGISTRY.get((name, DBIdentity.WORLD)) is None
                 or _REGISTRY[(name, DBIdentity.WORLD)].schema_class != SchemaClass.LEGACY_ARCHIVED)
         ]
@@ -595,21 +607,15 @@ class TestA4ManifestReadyForBootWiring:
         )
 
     def test_a4_trade_tables_declared_in_registry(self):
-        """12 trade-class tables are declared db: trade in the manifest.
+        """Trade DB tables are declared db: trade in the manifest.
 
         Verifies the K1 cutover YAML changes (PR-S4) are present.
-        If all 12 are back to db: world, this catches the revert.
+        If runtime trade tables are back to db: world, this catches the revert.
         """
         from src.state.table_registry import DBIdentity, tables_for
 
         trade_tables = tables_for(DBIdentity.TRADE)
-        expected = frozenset({
-            "execution_fact", "position_current", "position_events",
-            "position_lots", "settlement_command_events", "settlement_commands",
-            "trade_decisions", "venue_command_events", "venue_commands",
-            "venue_order_facts", "venue_submission_envelopes", "venue_trade_facts",
-        })
-        missing = expected - trade_tables
+        missing = EXPECTED_TRADE_DB_TABLES - trade_tables
         assert not missing, (
             f"A4 TRADE FAIL: these tables should be declared db: trade in "
             f"architecture/db_table_ownership.yaml but are missing from "
@@ -617,11 +623,12 @@ class TestA4ManifestReadyForBootWiring:
             f"PR-S4 K1 manifest cutover may have been reverted."
         )
 
-    def test_a4_trade_tables_init_schema_creates_12(self):
-        """init_schema creates exactly the 12 known trade-class tables (DDL coverage).
+    def test_a4_trade_tables_init_schema_creates_runtime_tables_and_migration_ledger(self):
+        """init_schema creates runtime trade tables plus migration ledger.
 
         Uses independently sourced data:
-        - EXPECTED: hardcoded frozenset of the 12 PR-S4 trade-class table names
+        - EXPECTED: hardcoded frozenset of the PR-S4 runtime trade table names
+          plus the migration framework ledger
         - ACTUAL: sqlite_master from fresh :memory: init_schema call
         Both missing (init_schema skipped a table) AND spurious (an unknown table
         claims trade-class membership) are failures.
@@ -631,25 +638,10 @@ class TestA4ManifestReadyForBootWiring:
         - Add a new table to the expected set without a CREATE TABLE → same.
         - Prior subset-only check allowed silent partial coverage (bot finding PR #144).
         """
-        from src.state.db import init_schema
-
-        EXPECTED_TRADE_12 = frozenset({
-            "execution_fact",
-            "position_current",
-            "position_events",
-            "position_lots",
-            "settlement_command_events",
-            "settlement_commands",
-            "trade_decisions",
-            "venue_command_events",
-            "venue_commands",
-            "venue_order_facts",
-            "venue_submission_envelopes",
-            "venue_trade_facts",
-        })
+        from src.state.db import init_schema_trade_only
 
         conn = sqlite3.connect(":memory:")
-        init_schema(conn)
+        init_schema_trade_only(conn)
         disk_tables = frozenset(
             row[0]
             for row in conn.execute(
@@ -659,9 +651,9 @@ class TestA4ManifestReadyForBootWiring:
         )
         conn.close()
 
-        missing_from_disk = EXPECTED_TRADE_12 - disk_tables
+        missing_from_disk = EXPECTED_TRADE_DB_TABLES - disk_tables
         assert not missing_from_disk, (
-            f"A4 TRADE DDL FAIL (missing): these 12 trade-class tables are expected "
+            f"A4 TRADE DDL FAIL (missing): these trade DB tables are expected "
             f"but NOT created by init_schema: {sorted(missing_from_disk)}. "
             f"Add CREATE TABLE to init_schema or verify migration applied."
         )
@@ -670,13 +662,13 @@ class TestA4ManifestReadyForBootWiring:
         # where a 13th table is added to trade-class without updating this test).
         from src.state.table_registry import DBIdentity, tables_for
         registry_trade = tables_for(DBIdentity.TRADE)
-        if registry_trade != EXPECTED_TRADE_12:
-            extra_in_registry = registry_trade - EXPECTED_TRADE_12
-            extra_in_expected = EXPECTED_TRADE_12 - registry_trade
+        if registry_trade != EXPECTED_TRADE_DB_TABLES:
+            extra_in_registry = registry_trade - EXPECTED_TRADE_DB_TABLES
+            extra_in_expected = EXPECTED_TRADE_DB_TABLES - registry_trade
             assert False, (
-                f"A4 TRADE DDL FAIL (expected set drift): EXPECTED_TRADE_12 in this "
+                f"A4 TRADE DDL FAIL (expected set drift): EXPECTED_TRADE_DB_TABLES in this "
                 f"test does not match tables_for(DBIdentity.TRADE). "
-                f"Update EXPECTED_TRADE_12 to match the manifest. "
+                f"Update EXPECTED_TRADE_DB_TABLES to match the manifest. "
                 f"In registry but not in test: {sorted(extra_in_registry)}. "
                 f"In test but not in registry: {sorted(extra_in_expected)}."
             )

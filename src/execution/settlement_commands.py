@@ -232,16 +232,21 @@ def request_redeem(
     V1 limitation: multi-bin (ranged market) encoding is not supported here;
     callers should pass None for non-binary markets until PR-I.5.b extends this.
 
-    pUSD redemption/accounting is Q-FX-1 gated.  Legacy USDC.e payout is not
-    silently promoted into pUSD accounting; it is recorded directly into
-    ``REDEEM_REVIEW_REQUIRED`` for operator classification.
+    This records intent only. pUSD redemption submission/accounting remains
+    Q-FX-1 gated in submit_redeem(); a missing FX classification must not erase
+    the durable command that tells the operator what work is pending. Legacy
+    USDC.e payout is not silently promoted into pUSD accounting; it is recorded
+    directly into ``REDEEM_REVIEW_REQUIRED`` for operator classification.
     """
 
     condition_id = _require_nonempty("condition_id", condition_id)
     market_id = _require_nonempty("market_id", market_id or condition_id)
     payout_asset = _normalize_payout_asset(payout_asset)
-    if payout_asset == "pUSD":
-        require_pusd_redemption_allowed(fx_classification)
+    if fx_classification is not None and not isinstance(fx_classification, FXClassification):
+        raise TypeError(
+            "pUSD redemption FX classification must be FXClassification, "
+            f"got {type(fx_classification).__name__}"
+        )
     if pusd_amount_micro is not None and int(pusd_amount_micro) < 0:
         raise ValueError("pusd_amount_micro must be non-negative")
 

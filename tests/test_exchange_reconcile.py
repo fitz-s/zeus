@@ -1,5 +1,5 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-05-17
+# Last reused/audited: 2026-05-18
 # Lifecycle: created=2026-04-27; last_reviewed=2026-05-07; last_reused=2026-05-17
 # Authority basis: docs/operations/task_2026-05-08_object_invariance_remaining_mainline/PLAN.md
 # Purpose: R3 M5 exchange reconciliation sweep antibodies.
@@ -1391,6 +1391,81 @@ def test_trade_lifecycle_update_appends_confirmed_after_matched_without_double_c
         "SELECT COUNT(*) FROM venue_trade_facts WHERE trade_id = 'trade-lifecycle'"
     ).fetchone()[0] == 2
     assert not any(finding.kind == "position_drift" for finding in third)
+
+
+def test_confirmed_taker_exit_corrects_matched_point_order_price_without_drift(conn):
+    from src.execution.exchange_reconcile import run_reconcile_sweep
+    from src.state.venue_command_repo import append_trade_fact
+
+    seed_command(
+        conn,
+        command_id="cmd-exit-price",
+        venue_order_id="ord-exit-price",
+        position_id="pos-exit-price",
+        side="SELL",
+        state="PARTIAL",
+        size=6,
+        price=0.29,
+    )
+    append_trade_fact(
+        conn,
+        trade_id="trade-exit-price",
+        venue_order_id="ord-exit-price",
+        command_id="cmd-exit-price",
+        state="MATCHED",
+        filled_size="6",
+        fill_price="0.29",
+        source="REST",
+        observed_at=NOW,
+        raw_payload_hash=hashlib.sha256(b"trade-exit-price:matched:0.29").hexdigest(),
+        raw_payload_json={
+            "id": "trade-exit-price",
+            "orderID": "ord-exit-price",
+            "size": "6",
+            "status": "MATCHED",
+            "price": "0.29",
+        },
+    )
+
+    result = run_reconcile_sweep(
+        FakeAdapterWithoutPositions(
+            trades=[
+                trade(
+                    trade_id="trade-exit-price",
+                    order_id="ord-exit-price",
+                    size="6",
+                    price="0.30",
+                    fill_price="0.30",
+                    status="CONFIRMED",
+                    taker_order_id="ord-exit-price",
+                    trader_side="TAKER",
+                    transaction_hash="0xconfirmed",
+                )
+            ]
+        ),
+        conn,
+        context="periodic",
+        observed_at=NOW + timedelta(seconds=1),
+    )
+
+    trade_rows = conn.execute(
+        """
+        SELECT state, filled_size, fill_price, local_sequence, tx_hash
+          FROM venue_trade_facts
+         WHERE trade_id = 'trade-exit-price'
+         ORDER BY local_sequence
+        """
+    ).fetchall()
+    assert [finding.kind for finding in result] == []
+    assert [row["state"] for row in trade_rows] == ["MATCHED", "CONFIRMED"]
+    assert trade_rows[-1]["filled_size"] == "6"
+    assert trade_rows[-1]["fill_price"] == "0.30"
+    assert trade_rows[-1]["tx_hash"] == "0xconfirmed"
+    assert event_types(conn, "cmd-exit-price")[-1] == "FILL_CONFIRMED"
+    assert (
+        conn.execute("SELECT state FROM venue_commands WHERE command_id = 'cmd-exit-price'").fetchone()["state"]
+        == "FILLED"
+    )
 
 
 def test_unknown_trade_status_becomes_finding_not_matched_partial(conn):

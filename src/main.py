@@ -330,6 +330,10 @@ def _redeem_submitter_cycle() -> None:
             logger.info(
                 "redeem_submitter: submitted=%d failed=%d", submitted, failed,
             )
+            if failed:
+                raise RuntimeError(
+                    f"redeem_submitter: submitted={submitted} failed={failed}"
+                )
         finally:
             conn.close()
 
@@ -1760,9 +1764,10 @@ def main():
     # Read-only smoke: confirm world DB is reachable (connectivity only).
     conn.execute("SELECT 1").fetchone()
 
-    # Ensure trade DB has only trade-class tables (PR-S4b: was init_schema which
+    # Ensure trade DB has only trade-owned tables (PR-S4b: was init_schema which
     # also created world tables on zeus_trades.db; init_schema_trade_only creates
-    # only the 12 trade-class tables so assert_db_matches_registry(TRADE) passes).
+    # trade runtime tables plus the migration ledger so
+    # assert_db_matches_registry(TRADE) passes).
     trade_conn = get_trade_connection(write_class="live")
     init_schema_trade_only(trade_conn)
     trade_conn.close()

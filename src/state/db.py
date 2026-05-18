@@ -434,6 +434,7 @@ CANONICAL_POSITION_SETTLED_DETAIL_FIELDS = (
     "settlement_value",
 )
 SETTLEMENT_METRIC_READY_TRUTH_SOURCES = frozenset({
+    "forecasts.settlements",
     "world.settlements",
     "harvester_live_verified_settlement",
 })
@@ -3096,6 +3097,7 @@ def init_schema_world_only(conn: Optional[sqlite3.Connection] = None) -> None:
 # Kept adjacent to init_schema_trade_only to prevent silent divergence.
 # ---------------------------------------------------------------------------
 _TRADE_CLASS_TABLES: frozenset[str] = frozenset({
+    "_migrations_applied",
     "execution_fact",
     "position_current",
     "position_events",
@@ -3275,6 +3277,7 @@ CREATE TABLE IF NOT EXISTS trade_decisions (
     strategy TEXT,
     edge_source TEXT,
     bin_type TEXT,
+    env TEXT NOT NULL DEFAULT 'live',
     discovery_mode TEXT,
     market_hours_open REAL,
     fill_quality REAL,
@@ -3535,14 +3538,15 @@ CREATE INDEX IF NOT EXISTS idx_venue_command_events_type ON venue_command_events
 def init_schema_trade_only(conn: sqlite3.Connection) -> None:
     """Create trade-class tables on state/zeus_trades.db. Idempotent.
 
-    K1 split (2026-05-11): trade-class tables (12 per registry) own
-    state/zeus_trades.db. World-class tables are created by init_schema_world_only
-    on zeus-world.db; forecast-class tables by init_schema_forecasts.
+    K1 split (2026-05-11): trade-class runtime tables plus the per-DB migration
+    ledger own state/zeus_trades.db. World-class tables are created by
+    init_schema_world_only on zeus-world.db; forecast-class tables by
+    init_schema_forecasts.
 
     Post-K1 cold-boot contract:
         1. World conn: init_schema_world_only(world_conn) — 52 world-class tables
            + legacy_archived ghost shells.
-        2. Trade conn: init_schema_trade_only(trade_conn) — 12 trade-class tables ONLY.
+        2. Trade conn: init_schema_trade_only(trade_conn) — trade DB tables ONLY.
            No world tables on trade.db.
         3. Forecasts conn (ingest daemon): init_schema_forecasts(forecasts_conn).
 
@@ -3567,8 +3571,18 @@ def init_schema_trade_only(conn: sqlite3.Connection) -> None:
     # Install custom SQLite scalar functions required by position_lots triggers.
     _install_connection_functions(conn)
 
-    # Create the 12 trade-class tables (IF NOT EXISTS — idempotent).
+    # Create the per-DB migration ledger from the migration framework's single
+    # authority. The boot registry assertion treats it as a real trade DB table,
+    # so fresh trade DBs must have it before assert_db_matches_registry(TRADE).
+    from scripts.migrations import _ensure_ledger
+    _ensure_ledger(conn, db_identity="trade")
+
+    # Create the trade runtime tables (IF NOT EXISTS — idempotent).
     conn.executescript(_TRADE_CLASS_DDL)
+    try:
+        conn.execute("ALTER TABLE trade_decisions ADD COLUMN env TEXT NOT NULL DEFAULT 'live';")
+    except sqlite3.OperationalError:
+        pass
 
     # settlement_commands + settlement_command_events
     # (DDL lives in src/execution/settlement_commands.py to keep the schema
@@ -3580,9 +3594,10 @@ def init_schema_trade_only(conn: sqlite3.Connection) -> None:
     # Re-apply busy_timeout: each executescript() resets the C-level handler.
     conn.execute(f"PRAGMA busy_timeout = {_busy_ms}")
 
-    # Verify all 12 trade-class tables were actually created — guards against
-    # silent DDL drift between _TRADE_CLASS_TABLES and _TRADE_CLASS_DDL /
-    # SETTLEMENT_COMMAND_SCHEMA.  Uses subset (not equality) because Path B
+    # Verify all registry-owned trade DB tables were actually created — guards
+    # against silent DDL drift between _TRADE_CLASS_TABLES, the migration ledger,
+    # _TRADE_CLASS_DDL, and SETTLEMENT_COMMAND_SCHEMA. Uses subset (not equality)
+    # because Path B
     # leaves legacy_archived ghost tables on zeus_trades.db.
     _actual_tables = {
         row[0]
@@ -5433,6 +5448,25 @@ def _local_legacy_snapshot_fk(conn: sqlite3.Connection, value) -> Optional[int]:
     snapshot_id = _coerce_snapshot_fk(value)
     if snapshot_id is None:
         return None
+    try:
+        fk_rows = conn.execute("PRAGMA foreign_key_list(trade_decisions)").fetchall()
+        has_legacy_snapshot_fk = any(
+            (row["table"] if hasattr(row, "keys") else row[2]) == "ensemble_snapshots"
+            for row in fk_rows
+        )
+    except sqlite3.OperationalError:
+        has_legacy_snapshot_fk = False
+    if has_legacy_snapshot_fk:
+        if not _table_exists(conn, "ensemble_snapshots"):
+            return None
+        try:
+            row = conn.execute(
+                "SELECT 1 FROM ensemble_snapshots WHERE snapshot_id = ? LIMIT 1",
+                (snapshot_id,),
+            ).fetchone()
+            return snapshot_id if row is not None else None
+        except sqlite3.OperationalError:
+            return None
     # Primary path: validate against forecasts.ensemble_snapshots_v2 (K1 canonical).
     # Use try/except rather than _table_exists() because that helper only queries
     # sqlite_master in the *main* schema, not in ATTACHed schemas (forecasts.*).
@@ -5443,9 +5477,21 @@ def _local_legacy_snapshot_fk(conn: sqlite3.Connection, value) -> Optional[int]:
         ).fetchone()
         return snapshot_id if row is not None else None
     except sqlite3.OperationalError:
-        # forecasts schema not attached (test monolithic DB or non-trade connection).
-        # Trust the coerced id — the caller is responsible for ensuring it is valid.
-        return snapshot_id
+        # forecasts schema not attached. Older physical trade_decisions tables
+        # may still carry a local FK to legacy ensemble_snapshots even though K1
+        # moved the canonical table to zeus-forecasts.db. Only return the id if
+        # the local legacy table exists and contains it; otherwise NULL avoids a
+        # dead foreign-key edge from dropping exit-audit evidence.
+        if not _table_exists(conn, "ensemble_snapshots"):
+            return None
+        try:
+            row = conn.execute(
+                "SELECT 1 FROM ensemble_snapshots WHERE snapshot_id = ? LIMIT 1",
+                (snapshot_id,),
+            ).fetchone()
+            return snapshot_id if row is not None else None
+        except sqlite3.OperationalError:
+            return None
 
 
 def _normalize_opportunity_availability_status(value: str) -> str:
@@ -6702,11 +6748,14 @@ def log_trade_exit(conn: sqlite3.Connection, pos) -> None:
             conn,
             getattr(pos, "decision_snapshot_id", None),
         )
+        p_raw = getattr(pos, "p_raw", None)
+        if p_raw is None:
+            p_raw = getattr(pos, "p_posterior", 0.0)
         values = (
             pos.market_id, pos.bin_label, pos.direction, pos.size_usd, pos.entry_price, pos.last_exit_at or datetime.now(timezone.utc).isoformat(),
             snapshot_fk,
             getattr(pos, "calibration_version", "") or None,
-            getattr(pos, "p_raw", None), getattr(pos, "p_posterior", None), pos.edge, 0.0, 0.0, 0.0,
+            p_raw, getattr(pos, "p_posterior", None), pos.edge, 0.0, 0.0, 0.0,
             status, getattr(pos, "strategy", ""), pos.edge_source, _bin_type_for_label(pos.bin_label), env, pos.last_exit_at, pos.exit_price, getattr(pos, 'pnl', 0.0),
             getattr(pos, "trade_id", ""),
             getattr(pos, "order_id", ""),

@@ -1517,27 +1517,34 @@ def _append_linkable_trade_fact_if_missing(
             )
             return None
         if state in {"MATCHED", "MINED", "CONFIRMED"} and not same_fill_economics:
-            return record_finding(
-                conn,
-                kind="unrecorded_trade",
-                subject_id=trade_id,
-                context=context,
-                evidence={
-                    "exchange_trade": dict(raw),
-                    "local_command": _command_evidence(command),
-                    "existing_trade_fact": {
-                        "trade_fact_id": latest_fact.get("trade_fact_id"),
-                        "state": latest_fact.get("state"),
-                        "filled_size": latest_fact.get("filled_size"),
-                        "fill_price": latest_fact.get("fill_price"),
+            if not _confirmed_price_revision_has_authority(
+                latest_fact,
+                raw=raw,
+                venue_order_id=order_id,
+                state=state,
+                filled_size=filled_size,
+            ):
+                return record_finding(
+                    conn,
+                    kind="unrecorded_trade",
+                    subject_id=trade_id,
+                    context=context,
+                    evidence={
+                        "exchange_trade": dict(raw),
+                        "local_command": _command_evidence(command),
+                        "existing_trade_fact": {
+                            "trade_fact_id": latest_fact.get("trade_fact_id"),
+                            "state": latest_fact.get("state"),
+                            "filled_size": latest_fact.get("filled_size"),
+                            "fill_price": latest_fact.get("fill_price"),
+                        },
+                        "reason": "exchange_trade_lifecycle_regression_or_economic_drift",
+                        "incoming_state": state,
+                        "incoming_filled_size": filled_size,
+                        "incoming_fill_price": fill_price,
                     },
-                    "reason": "exchange_trade_lifecycle_regression_or_economic_drift",
-                    "incoming_state": state,
-                    "incoming_filled_size": filled_size,
-                    "incoming_fill_price": fill_price,
-                },
-                recorded_at=observed_at,
-            )
+                    recorded_at=observed_at,
+                )
         if not _trade_lifecycle_transition_allowed(str(latest_fact.get("state") or ""), state):
             return record_finding(
                 conn,
@@ -2325,6 +2332,28 @@ def _same_decimal_value(left: Any, right: Any) -> bool:
         return _decimal(left) == _decimal(right)
     except (InvalidOperation, ValueError):
         return False
+
+
+def _confirmed_price_revision_has_authority(
+    fact: Mapping[str, Any],
+    *,
+    raw: Mapping[str, Any],
+    venue_order_id: str | None,
+    state: str,
+    filled_size: str,
+) -> bool:
+    previous = str(fact.get("state") or "")
+    if state != "CONFIRMED" or previous not in {"MATCHED", "MINED"}:
+        return False
+    if not _trade_lifecycle_transition_allowed(previous, state):
+        return False
+    if not _same_decimal_value(fact.get("filled_size"), filled_size):
+        return False
+    return (
+        _taker_order_price_applies(raw, venue_order_id)
+        or _selected_maker_order(raw, venue_order_id) is not None
+        or _first_explicit_fill_price(raw) is not None
+    )
 
 
 def _trade_lifecycle_transition_allowed(previous: str, current: str) -> bool:

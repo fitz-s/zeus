@@ -1,6 +1,6 @@
 # Created: 2026-03-30
-# Last reused/audited: 2026-05-16
-# Lifecycle: created=2026-03-30; last_reviewed=2026-05-16; last_reused=2026-05-16
+# Last reused/audited: 2026-05-18
+# Lifecycle: created=2026-03-30; last_reviewed=2026-05-16; last_reused=2026-05-18
 # Purpose: Protect DB schema bootstrap contracts, daily revision-history DDL, and fact-smoke authority labels.
 # Reuse: Audit touched schema assertions and high-sensitivity skip metadata before closeout.
 # Authority basis: P2 4.4.A2 daily observation revision-history schema packet; Wave16 object-meaning fact-smoke authority repair; PR90 latest-event env authority review fix; 2026-05-16 live-continuous Phase B event-status boundary.
@@ -1185,6 +1185,100 @@ def test_manual_portfolio_state_does_not_write_real_exit_audit(monkeypatch):
 
     closed = close_position(state, "t1", 1.0, "SETTLEMENT")
     assert closed is not None
+
+
+def test_audit_logging_writes_exit_audit_to_trade_connection_after_k1_split(tmp_path, monkeypatch):
+    """Portfolio exit audit must write trade_decisions on the trade DB after K1 split."""
+    import sqlite3
+
+    from src.state.db import init_schema_trade_only
+    from src.state.portfolio import PortfolioState, Position, close_position
+
+    trade_db = tmp_path / "zeus_trades.db"
+
+    def _wrong_world_connection(*args, **kwargs):
+        raise AssertionError("exit audit must not use world get_connection for trade_decisions")
+
+    def _trade_connection(*args, **kwargs):
+        conn = sqlite3.connect(trade_db)
+        conn.row_factory = sqlite3.Row
+        init_schema_trade_only(conn)
+        return conn
+
+    monkeypatch.setattr("src.state.db.get_connection", _wrong_world_connection)
+    monkeypatch.setattr("src.state.db.get_trade_connection_with_world", _trade_connection)
+
+    state = PortfolioState(audit_logging_enabled=True)
+    pos = Position(
+        trade_id="trade-k1-audit",
+        market_id="market-k1-audit",
+        city="NYC",
+        cluster="US-Northeast",
+        target_date="2026-04-01",
+        bin_label="39-40°F",
+        direction="buy_yes",
+        unit="F",
+        size_usd=10.0,
+        shares=25.0,
+        cost_basis_usd=10.0,
+        entry_price=0.40,
+        p_posterior=0.60,
+        edge=0.20,
+        strategy="center_buy",
+        strategy_key="center_buy",
+        edge_source="center_buy",
+        state="holding",
+    )
+    pos.decision_snapshot_id = "1128362"
+    state.positions.append(pos)
+
+    closed = close_position(state, "trade-k1-audit", 1.0, "SETTLEMENT")
+    assert closed is not None
+
+    conn = sqlite3.connect(trade_db)
+    conn.row_factory = sqlite3.Row
+    row = conn.execute(
+        """
+        SELECT runtime_trade_id, status, p_raw, forecast_snapshot_id
+          FROM trade_decisions
+         WHERE runtime_trade_id = ?
+        """,
+        ("trade-k1-audit",),
+    ).fetchone()
+    conn.close()
+    assert dict(row) == {
+        "runtime_trade_id": "trade-k1-audit",
+        "status": "exited",
+        "p_raw": 0.60,
+        "forecast_snapshot_id": None,
+    }
+
+
+def test_trade_exit_snapshot_fk_drops_dead_legacy_fk_edge(tmp_path):
+    """Exit audit must not preserve a forecasts-v2 id into a legacy local FK."""
+    import sqlite3
+
+    from src.state.db import _local_legacy_snapshot_fk
+
+    conn = sqlite3.connect(tmp_path / "legacy_fk.db")
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys=ON")
+    conn.execute(
+        """
+        CREATE TABLE trade_decisions (
+            trade_id INTEGER PRIMARY KEY,
+            forecast_snapshot_id INTEGER REFERENCES ensemble_snapshots(snapshot_id)
+        )
+        """
+    )
+    conn.execute(
+        "CREATE TABLE ensemble_snapshots (snapshot_id INTEGER PRIMARY KEY)"
+    )
+    assert _local_legacy_snapshot_fk(conn, "1128362") is None
+
+    conn.execute("INSERT INTO ensemble_snapshots (snapshot_id) VALUES (1128362)")
+    assert _local_legacy_snapshot_fk(conn, "1128362") == 1128362
+    conn.close()
 
 
 def test_load_portfolio_enables_audit_logging(tmp_path):
@@ -3145,7 +3239,8 @@ def test_append_many_and_project_rejects_missing_env_for_non_settlement_events(t
     conn.close()
 
 
-def test_query_authoritative_settlement_rows_requires_verified_settlement_truth(tmp_path):
+@pytest.mark.parametrize("settlement_truth_source", ["world.settlements", "forecasts.settlements"])
+def test_query_authoritative_settlement_rows_requires_verified_settlement_truth(tmp_path, settlement_truth_source):
     from src.engine.lifecycle_events import build_settlement_canonical_write
     from src.state.db import append_many_and_project, query_authoritative_settlement_rows
     from src.state.portfolio import Position
@@ -3185,7 +3280,7 @@ def test_query_authoritative_settlement_rows_requires_verified_settlement_truth(
         sequence_no=1,
         phase_before="pending_exit",
         settlement_authority="VERIFIED",
-        settlement_truth_source="world.settlements",
+        settlement_truth_source=settlement_truth_source,
         settlement_market_slug="nyc-high-2026-04-01",
         settlement_temperature_metric="high",
         settlement_source="WU",
@@ -3198,7 +3293,7 @@ def test_query_authoritative_settlement_rows_requires_verified_settlement_truth(
     assert len(rows) == 1
     assert rows[0]["source"] == "position_events"
     assert rows[0]["settlement_authority"] == "VERIFIED"
-    assert rows[0]["settlement_truth_source"] == "world.settlements"
+    assert rows[0]["settlement_truth_source"] == settlement_truth_source
     assert rows[0]["settlement_temperature_metric"] == "high"
     assert rows[0]["settlement_value"] == pytest.approx(40.0)
     assert rows[0]["canonical_payload_complete"] is True

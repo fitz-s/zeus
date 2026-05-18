@@ -1,5 +1,5 @@
 # Created: 2026-05-17
-# Last reused or audited: 2026-05-17
+# Last reused or audited: 2026-05-18
 # Authority basis: PR-I.5.a / autonomous redeem prep (PR_I5_WEB3_WIRE.md)
 """Antibody tests: winning_index_set populated at REDEEM_INTENT_CREATED time.
 
@@ -132,11 +132,12 @@ def test_winning_index_set_none_for_multi_bin_unsupported():
     assert stored is None, f"Expected NULL for multi-bin unsupported case, got {stored!r}"
 
 
-def test_migration_bumps_user_version():
-    """CB-1 antibody: migration up() must set PRAGMA user_version = 5.
+def test_migration_bumps_user_version_without_downgrading_newer_db():
+    """CB-1 antibody: migration up() must set at least PRAGMA user_version = 5.
 
     Without this, post-merge assert_schema_current() raises because SCHEMA_VERSION=5
     but the DB user_version stays at whatever the previous migration left it.
+    If the DB is already newer, the migration must not downgrade it.
     Authority: CRITIC_REPORT.md §CB-1 (2026-05-17).
     """
     conn = sqlite3.connect(":memory:")
@@ -156,6 +157,21 @@ def test_migration_bumps_user_version():
     assert v_after == 5, (
         f"CB-1: migration must set PRAGMA user_version=5, got {v_after}. "
         "assert_schema_current() would raise post-merge without this."
+    )
+
+    newer = sqlite3.connect(":memory:")
+    newer.row_factory = sqlite3.Row
+    newer.execute("PRAGMA user_version = 6")
+    newer.execute(
+        "CREATE TABLE IF NOT EXISTS settlement_commands "
+        "(command_id TEXT PRIMARY KEY)"
+    )
+    newer.commit()
+    migration_i.up(newer)
+    newer.commit()
+    v_newer_after = newer.execute("PRAGMA user_version").fetchone()[0]
+    assert v_newer_after == 6, (
+        f"migration must not downgrade newer live DB user_version, got {v_newer_after}"
     )
 
 
