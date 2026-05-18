@@ -5,13 +5,23 @@
 """F26 allowlist migration antibody.
 
 Asserts that every CURRENT_REUSABLE entry that was migrated from
-tests/conftest._WLA_SQLITE_CONNECT_ALLOWLIST is now:
+tests/conftest._WLA_RESIDUAL_ALLOWLIST is now:
   1. Present in src.state.db_writer_lock.SQLITE_CONNECT_ALLOWLIST
-  2. Absent from the conftest-only residual set (_WLA_SQLITE_CONNECT_ALLOWLIST
-     before the union is applied).
+  2. Absent from the conftest-only residual set
+     (tests/conftest._WLA_RESIDUAL_ALLOWLIST, imported directly so any
+     re-addition in conftest is observed without a parallel update here).
 
-Sed-break protocol: remove one entry from SQLITE_CONNECT_ALLOWLIST in
-db_writer_lock.py → this test fails naming the missing entry; restore → pass.
+Sed-break protocols:
+  A. Remove one entry from SQLITE_CONNECT_ALLOWLIST in db_writer_lock.py
+     → test_migrated_entry_present_in_production_allowlist fails naming the
+     missing entry; restore → pass.
+  B. Re-add a migrated entry to _WLA_RESIDUAL_ALLOWLIST in tests/conftest.py
+     → test_migrated_entry_absent_from_conftest_residual fails naming the
+     re-added entry; restore → pass. This is the two-truth drift Codex
+     called out on PR #157; the antibody must catch it.
+  C. Add a residual entry to SQLITE_CONNECT_ALLOWLIST in db_writer_lock.py
+     → test_residual_does_not_intersect_production_allowlist fails; restore
+     → pass.
 """
 
 from __future__ import annotations
@@ -19,10 +29,17 @@ from __future__ import annotations
 import pytest
 
 from src.state.db_writer_lock import SQLITE_CONNECT_ALLOWLIST
+from tests.conftest import _WLA_RESIDUAL_ALLOWLIST
 
 # ---------------------------------------------------------------------------
 # Canonical list of the 42 migrated CURRENT_REUSABLE entries.
 # Source: conftest.py audit (F26, 2026-05-18).
+#
+# `_WLA_RESIDUAL_ALLOWLIST` (imported above) is the SINGLE source of truth
+# for the conftest-only residual (STALE_REWRITE + QUARANTINED + canonical
+# infra). Tests read it directly rather than maintaining a duplicate copy
+# here — that is the two-truth allowlist drift this F26 antibody is
+# designed to catch (PR #157 review feedback).
 # ---------------------------------------------------------------------------
 MIGRATED_ENTRIES: frozenset[str] = frozenset(
     {
@@ -78,50 +95,6 @@ MIGRATED_ENTRIES: frozenset[str] = frozenset(
     }
 )
 
-# The conftest residual (STALE_REWRITE + QUARANTINED + canonical infra only).
-# These must NOT be in the migrated set.
-_CONFTEST_STALE_REWRITE: frozenset[str] = frozenset(
-    {
-        "src/data/market_scanner.py",
-        "scripts/backfill_forecast_issue_time.py",
-        "scripts/backfill_london_f_to_c_2026_05_08.py",
-        "scripts/backfill_low_contract_window_evidence.py",
-        "scripts/backfill_obs_v2.py",
-        "scripts/obs_v2_live_tick.py",
-        "scripts/backfill_ogimet_metar.py",
-        "scripts/backfill_outcome_fact.py",
-        "scripts/backfill_tigge_snapshot_p_raw_v2.py",
-        "scripts/backfill_wu_daily_all.py",
-        "scripts/cleanup_ghost_positions.py",
-        "scripts/etl_forecasts_v2_from_legacy.py",
-        "scripts/fill_obs_v2_dst_gaps.py",
-        "scripts/fill_obs_v2_meteostat.py",
-        "scripts/force_cycle_with_healthy_gates.py",
-        "scripts/hko_ingest_tick.py",
-        "scripts/ingest_grib_to_snapshots.py",
-        "scripts/migrate_add_authority_column.py",
-        "scripts/migrate_b070_control_overrides_to_history.py",
-        "scripts/migrate_backtest_runs_lane_constraint_2026_05_07.py",
-        "scripts/migrate_ensemble_snapshots_v2_add_ingest_backend.py",
-        "scripts/migrate_forecasts_availability_provenance.py",
-        "scripts/migrate_observations_k1.py",
-        "scripts/nuke_rebuild_projections.py",
-        "scripts/rebuild_calibration_pairs_canonical.py",
-        "scripts/rebuild_calibration_pairs_v2.py",
-        "scripts/rebuild_settlements.py",
-        "scripts/reevaluate_readiness_2026_05_07.py",
-        "scripts/refit_platt_v2.py",
-        "scripts/_zeus_emergency_k2_obs_backfill_2026_05_10.py",
-    }
-)
-_CONFTEST_QUARANTINED: frozenset[str] = frozenset({"scripts/verify_truth_surfaces.py"})
-_CONFTEST_CANONICAL_INFRA: frozenset[str] = frozenset(
-    {"src/state/db.py", "src/state/collateral_ledger.py"}
-)
-
-# The full conftest residual set (what should remain in conftest ONLY, not migrated).
-_CONFTEST_RESIDUAL_ONLY = _CONFTEST_STALE_REWRITE | _CONFTEST_QUARANTINED | _CONFTEST_CANONICAL_INFRA
-
 
 @pytest.mark.parametrize("entry", sorted(MIGRATED_ENTRIES))
 def test_migrated_entry_present_in_production_allowlist(entry: str) -> None:
@@ -144,31 +117,30 @@ def test_migrated_entry_absent_from_conftest_residual(entry: str) -> None:
     """Each migrated entry must NOT remain in the conftest-only residual set.
 
     This guards against accidental re-addition of a CURRENT_REUSABLE entry
-    to the conftest STALE_REWRITE / QUARANTINED block.
+    to the conftest STALE_REWRITE / QUARANTINED block. The residual set is
+    read DIRECTLY from conftest._WLA_RESIDUAL_ALLOWLIST so any re-addition
+    in conftest is observed without a parallel update here.
     """
-    assert entry not in _CONFTEST_RESIDUAL_ONLY, (
+    assert entry not in _WLA_RESIDUAL_ALLOWLIST, (
         f"MIGRATION REGRESSION: '{entry}' appears in the conftest-only residual "
-        f"set. CURRENT_REUSABLE entries live in db_writer_lock.py only."
+        f"set (_WLA_RESIDUAL_ALLOWLIST in tests/conftest.py). "
+        f"CURRENT_REUSABLE entries live in db_writer_lock.py only."
     )
 
 
-def test_stale_rewrite_entries_not_in_production_allowlist() -> None:
-    """STALE_REWRITE entries must remain in conftest residual only.
+def test_residual_does_not_intersect_production_allowlist() -> None:
+    """Conftest residual (STALE_REWRITE + QUARANTINED + canonical infra) must
+    not intersect with the production allowlist.
 
-    They require per-entry rewrite decisions (Track A.6) and must not be
-    silently promoted to the permanent production allowlist.
+    STALE_REWRITE entries need Track A.6 per-entry rewrite decisions; the
+    QUARANTINED entry needs a non-mechanical rewrite; canonical infra
+    intentionally lives outside db_writer_lock. None should be silently
+    promoted into the production allowlist.
     """
-    leaked = _CONFTEST_STALE_REWRITE & SQLITE_CONNECT_ALLOWLIST
+    leaked = _WLA_RESIDUAL_ALLOWLIST & SQLITE_CONNECT_ALLOWLIST
     assert not leaked, (
-        f"SCOPE CREEP: STALE_REWRITE entries found in the production allowlist: "
-        f"{sorted(leaked)}. These need Track A.6 retrofit before promotion."
-    )
-
-
-def test_quarantined_entry_not_in_production_allowlist() -> None:
-    """The QUARANTINED entry (verify_truth_surfaces.py) must not be promoted."""
-    leaked = _CONFTEST_QUARANTINED & SQLITE_CONNECT_ALLOWLIST
-    assert not leaked, (
-        f"SCOPE CREEP: QUARANTINED entry found in production allowlist: "
-        f"{sorted(leaked)}. This requires a non-mechanical rewrite."
+        f"SCOPE CREEP: conftest residual entries found in the production "
+        f"allowlist: {sorted(leaked)}. STALE_REWRITE entries need Track A.6 "
+        f"retrofit; QUARANTINED needs non-mechanical rewrite; canonical infra "
+        f"is by design outside db_writer_lock."
     )

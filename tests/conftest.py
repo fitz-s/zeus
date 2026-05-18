@@ -168,13 +168,20 @@ _WLA_CACHE_PATH = _WLA_REPO_ROOT / ".pytest_cache" / "writer_lock_antibody.json"
 #
 # F26 follow-up (2026-05-18): 42 CURRENT_REUSABLE entries have been migrated
 # to src/state/db_writer_lock.SQLITE_CONNECT_ALLOWLIST (the production owner).
-# This residual set contains ONLY:
-#   - canonical infra not owned by db_writer_lock (src/state/db.py,
-#     src/state/collateral_ledger.py)
-#   - STALE_REWRITE (30 entries, pending Track A.6 batch retrofit)
-#   - QUARANTINED (1 entry, non-mechanical rewrite deferred)
+# Conftest now owns ONLY:
+#   - canonical infra not owned by db_writer_lock — _WLA_CANONICAL_INFRA_ALLOWLIST
+#     (src/state/db.py is intentionally also in the production allowlist; the
+#     dual listing is by design)
+#   - STALE_REWRITE (pending Track A.6 batch retrofit) — _WLA_RESIDUAL_ALLOWLIST
+#   - QUARANTINED (non-mechanical rewrite deferred) — _WLA_RESIDUAL_ALLOWLIST
 #
-# The effective gate-allowlist = _WLA_SQLITE_CONNECT_ALLOWLIST | _WLA_PRODUCTION_ALLOWLIST
+# The effective gate-allowlist = canonical_infra | residual | production.
+#
+# `_WLA_RESIDUAL_ALLOWLIST` (STALE_REWRITE + QUARANTINED) is the single
+# source of truth for paths that MUST NOT appear in the production
+# allowlist. tests/test_allowlist_migration_f26.py imports it directly so
+# there is no duplicate hand-maintained copy that could drift (the
+# two-truth bug this antibody is meant to catch).
 #
 # Reason tags used in comments:
 #   canonical_shim      — the canonical DB helper; direct connect is the point
@@ -182,15 +189,28 @@ _WLA_CACHE_PATH = _WLA_REPO_ROOT / ".pytest_cache" / "writer_lock_antibody.json"
 #   pending_track_a6_scripts — write script not yet retrofit; deferred to Track A.6 batch
 #   deferred_nonmechanical   — verify_truth_surfaces: non-mechanical rewrite, separate phase
 #
-_WLA_SQLITE_CONNECT_ALLOWLIST = frozenset({
-    # --- canonical infrastructure (NOT in db_writer_lock production allowlist) ---
+# Canonical infrastructure. These ARE allowed to also appear in the
+# production db_writer_lock allowlist (src/state/db.py is the canonical
+# shim and is intentionally in both). Tracked as a separate subset so
+# the no-leak check below only fires on STALE_REWRITE / QUARANTINED
+# entries that genuinely must not promote to production.
+#
+# NOTE: src/state/db_writer_lock.py is intentionally NOT allowlisted. The file
+# has no sqlite3.connect() call sites today; if a future edit introduces one,
+# the antibody SHOULD fire so this module stays a coordination layer (not a
+# connect path). Allowlisting a no-connect file would weaken the gate.
+_WLA_CANONICAL_INFRA_ALLOWLIST = frozenset({
     "src/state/db.py",                              # canonical_shim
     "src/state/collateral_ledger.py",               # singleton_persistent_conn (2026-05-13 fix): CollateralLedger(db_path=) opens a ledger-owned conn for the process-wide singleton so it survives transient caller-conn lifecycles. Single connect site, no schema mutation outside init_collateral_schema.
-    # NOTE: src/state/db_writer_lock.py is intentionally NOT allowlisted. The file
-    # has no sqlite3.connect() call sites today; if a future edit introduces one,
-    # the antibody SHOULD fire so this module stays a coordination layer (not a
-    # connect path). Allowlisting a no-connect file would weaken the gate.
+})
 
+# Residual must-not-leak set: STALE_REWRITE + QUARANTINED entries only.
+# Any path here that also appears in db_writer_lock.SQLITE_CONNECT_ALLOWLIST
+# is a scope-creep regression (Track A.6 retrofit or non-mechanical rewrite
+# was skipped). The F26 antibody in tests/test_allowlist_migration_f26.py
+# imports this set directly so a CURRENT_REUSABLE re-addition fails the
+# test without a parallel update there.
+_WLA_RESIDUAL_ALLOWLIST = frozenset({
     # --- src/ daemon sites: pending Track A.6 (#246) ---
     "src/data/market_scanner.py",                   # pending_track_a6
     # src/ingest_main.py, src/main.py, src/observability/status_summary.py,
@@ -239,9 +259,11 @@ _WLA_SQLITE_CONNECT_ALLOWLIST = frozenset({
     "scripts/verify_truth_surfaces.py",             # deferred_nonmechanical (PR #86)
 })
 
-# Effective allowlist: residual (STALE_REWRITE + QUARANTINED + canonical infra)
+# Effective allowlist: canonical infra + residual (STALE_REWRITE + QUARANTINED)
 # unioned with the production owner set imported above.
-_WLA_SQLITE_CONNECT_ALLOWLIST = _WLA_SQLITE_CONNECT_ALLOWLIST | _WLA_PRODUCTION_ALLOWLIST
+_WLA_SQLITE_CONNECT_ALLOWLIST = (
+    _WLA_CANONICAL_INFRA_ALLOWLIST | _WLA_RESIDUAL_ALLOWLIST | _WLA_PRODUCTION_ALLOWLIST
+)
 
 
 
@@ -330,8 +352,9 @@ def pytest_configure(config) -> None:
 
     Track A.3 posture (PR #92): FAIL-CI on any direct sqlite3.connect()
     outside the allowlist.  Advisory→fail-CI upgrade per Track A plan.
-    Add to _WLA_SQLITE_CONNECT_ALLOWLIST with a cited reason tag to
-    suppress a specific site during staged rollout.
+    Add to _WLA_RESIDUAL_ALLOWLIST (STALE_REWRITE / QUARANTINED) or
+    db_writer_lock.SQLITE_CONNECT_ALLOWLIST (CURRENT_REUSABLE) with a
+    cited reason tag to suppress a specific site during staged rollout.
     """
     if _wla_is_bypassed():
         config.issue_config_time_warning(
@@ -353,7 +376,7 @@ def pytest_configure(config) -> None:
             f"allowlist ({allowlist_size} entries). "
             f"For CURRENT_REUSABLE sites add to SQLITE_CONNECT_ALLOWLIST in "
             f"src/state/db_writer_lock.py. For STALE_REWRITE/QUARANTINED sites "
-            f"add to _WLA_SQLITE_CONNECT_ALLOWLIST in tests/conftest.py with a "
+            f"add to _WLA_RESIDUAL_ALLOWLIST in tests/conftest.py with a "
             f"cited reason tag (pending_track_a6 / deferred_nonmechanical / etc). "
             f"Violations: {findings[:5]}"
             + (f" ... and {len(findings) - 5} more" if len(findings) > 5 else "")
