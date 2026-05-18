@@ -29,6 +29,7 @@ import logging
 import os
 import signal
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -41,6 +42,12 @@ logger = logging.getLogger("zeus.ingest")
 _scheduler: Any | None = None
 FORECAST_LIVE_OWNER_ENV = "ZEUS_FORECAST_LIVE_OWNER"
 
+# SIGTERM-unif (WAVE-4): captured at module load so the forensic elapsed
+# computed in _graceful_shutdown matches what src/main.py and
+# src/riskguard/riskguard.py emit. See WAVE3_BATCH_C_PER_FINDING_ACCOUNTING.md
+# carry-forward #5.
+_PROCESS_START = time.monotonic()
+
 
 def _forecast_live_owner() -> str:
     return os.environ.get(FORECAST_LIVE_OWNER_ENV, "ingest_main").strip().lower() or "ingest_main"
@@ -51,8 +58,22 @@ def _ingest_main_owns_opendata() -> bool:
 
 
 def _graceful_shutdown(signum, frame) -> None:
-    """SIGTERM handler — wait for in-flight jobs then exit 0."""
+    """SIGTERM handler — wait for in-flight jobs then exit 0.
+
+    Emits two log lines:
+    1. The legacy `received SIGTERM` line (INFO → .log) — preserves
+       backward compat with operator grep tooling installed before
+       WAVE-4 SIGTERM-unif.
+    2. The unified `SIGTERM_RECEIVED pid=... ppid=... elapsed=...s`
+       token (ERROR → .err) — same forensic shape that src/main.py,
+       src/riskguard/riskguard.py and src/control/heartbeat_supervisor.py
+       emit, so a single grep across all 5 daemons returns parity hits.
+    """
     logger.info("data-ingest daemon received SIGTERM; shutting down scheduler")
+    logger.error(
+        "SIGTERM_RECEIVED pid=%s ppid=%s elapsed=%ss",
+        os.getpid(), os.getppid(), int(time.monotonic() - _PROCESS_START),
+    )
     if _scheduler is not None:
         try:
             _scheduler.shutdown(wait=True)
