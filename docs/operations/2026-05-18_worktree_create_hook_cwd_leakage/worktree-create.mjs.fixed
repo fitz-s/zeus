@@ -41,7 +41,10 @@ function readStdin() {
     process.stdin.setEncoding("utf8");
     process.stdin.on("data", (chunk) => (data += chunk));
     process.stdin.on("end", () => resolveFn(data));
-    setTimeout(() => resolveFn(data), 2000); // safety timeout
+    // safety timeout: unref'd so it won't keep the event loop alive
+    // after stdin ends normally (avoids ~2s latency on every hook run)
+    const t = setTimeout(() => resolveFn(data), 2000);
+    t.unref();
   });
 }
 

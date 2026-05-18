@@ -7,6 +7,9 @@
 #    hookSpecificOutput.worktreePath)"
 #   "Command hooks print the path on stdout instead."
 #   feedback_hook_design_failure_cascades_to_discipline_violation.md
+# Lifecycle: created=2026-05-18; last_reviewed=2026-05-18; last_reused=never
+# Purpose: Antibody for WorktreeCreate hook stdout contract (no JSON envelope)
+# Reuse: Verify hook path and snapshot path exist; inspect _hook_under_test()
 
 Antibody for the USER-GLOBAL WorktreeCreate hook
 (~/.claude/hooks/worktree-create.mjs).
