@@ -658,6 +658,14 @@ def run_oos_evaluation(
 # ---------------------------------------------------------------------------
 
 def main() -> int:
+    import os
+    if os.environ.get("ZEUS_CALIBRATION_TRANSFER_OOS_EVAL_ENABLED", "0") != "1":
+        logger.info(
+            "F39_SELF_POLICING: ZEUS_CALIBRATION_TRANSFER_OOS_EVAL_ENABLED!=1; "
+            "Phase B trigger not met; exit 0 (no work, plist auto-no-ops)"
+        )
+        return 0
+
     parser = argparse.ArgumentParser(
         description="OOS evaluator: writes validated_calibration_transfers rows."
     )
