@@ -42,9 +42,12 @@ NYC_SEMANTICS = SettlementSemantics.default_wu_fahrenheit("KLGA")
 
 
 def _write_tigge_decision(root: Path, *, payload_path: str | None = None) -> Path:
+    # Cluster M.3 (2026-05-18): glob in forecast_source_registry requires
+    # 'docs/operations/task_2026-04-26_ultimate_plan/**/docs/historical_evidence/tigge_ingest_decision_*.md'
+    # Old path r3/evidence/ did NOT match the **/docs/historical_evidence/ glob segment.
     path = (
         root
-        / "docs/operations/task_2026-04-26_ultimate_plan/r3/evidence"
+        / "docs/operations/task_2026-04-26_ultimate_plan/r3/docs/historical_evidence"
         / "tigge_ingest_decision_2026-04-27.md"
     )
     path.parent.mkdir(parents=True, exist_ok=True)
