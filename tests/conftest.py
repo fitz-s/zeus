@@ -222,8 +222,8 @@ _WLA_RESIDUAL_ALLOWLIST = frozenset({
     "src/state/chunk_boundary_events.py",  # pending_track_a6: F11 daemon-thread observability write; intentionally separate conn from BulkChunker's conn to avoid lock-order conflict; failure-silent
 })
 
-# Effective allowlist: canonical infra + residual (STALE_REWRITE + QUARANTINED)
-# unioned with the production owner set imported above.
+# Effective allowlist: canonical infra + residual (Track A.6 daemon sites only;
+# STALE_REWRITE + QUARANTINED fully resolved in F26 cleanup) + production owner set.
 _WLA_SQLITE_CONNECT_ALLOWLIST = (
     _WLA_CANONICAL_INFRA_ALLOWLIST | _WLA_RESIDUAL_ALLOWLIST | _WLA_PRODUCTION_ALLOWLIST
 )
@@ -315,9 +315,13 @@ def pytest_configure(config) -> None:
 
     Track A.3 posture (PR #92): FAIL-CI on any direct sqlite3.connect()
     outside the allowlist.  Advisory→fail-CI upgrade per Track A plan.
-    Add to _WLA_RESIDUAL_ALLOWLIST (STALE_REWRITE / QUARANTINED) or
-    db_writer_lock.SQLITE_CONNECT_ALLOWLIST (CURRENT_REUSABLE) with a
-    cited reason tag to suppress a specific site during staged rollout.
+
+    F26 cleanup (2026-05-18): STALE_REWRITE and QUARANTINED classes are fully
+    resolved.  _WLA_RESIDUAL_ALLOWLIST now holds only daemon src/ sites pending
+    Track A.6 (#246).  New sites should go to SQLITE_CONNECT_ALLOWLIST in
+    src/state/db_writer_lock.py (CURRENT_REUSABLE) or, if a daemon src/ site
+    requiring Track A.6 work, to _WLA_RESIDUAL_ALLOWLIST with reason tag
+    pending_track_a6.
     """
     if _wla_is_bypassed():
         config.issue_config_time_warning(
@@ -338,9 +342,9 @@ def pytest_configure(config) -> None:
             f"{len(findings)} direct sqlite3.connect() site(s) outside "
             f"allowlist ({allowlist_size} entries). "
             f"For CURRENT_REUSABLE sites add to SQLITE_CONNECT_ALLOWLIST in "
-            f"src/state/db_writer_lock.py. For STALE_REWRITE/QUARANTINED sites "
-            f"add to _WLA_RESIDUAL_ALLOWLIST in tests/conftest.py with a "
-            f"cited reason tag (pending_track_a6 / deferred_nonmechanical / etc). "
+            f"src/state/db_writer_lock.py. For daemon src/ sites pending Track A.6 "
+            f"(#246) add to _WLA_RESIDUAL_ALLOWLIST in tests/conftest.py with "
+            f"reason tag pending_track_a6. "
             f"Violations: {findings[:5]}"
             + (f" ... and {len(findings) - 5} more" if len(findings) > 5 else "")
         )

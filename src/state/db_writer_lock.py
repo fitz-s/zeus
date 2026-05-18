@@ -643,7 +643,8 @@ def subprocess_run_with_write_class(
 # from conftest._WLA_RESIDUAL_ALLOWLIST.  28 entries already used db_writer_lock
 # correctly (already_guarded / operator_invoked); 1 script retrofitted with a
 # db_writer_lock wrap (migrate_backtest_runs_lane_constraint_2026_05_07.py);
-# verify_truth_surfaces.py promoted as read_only (0 writes, all SELECTs + mode=ro);
+# verify_truth_surfaces.py promoted as read_only (0 DML writes; RISK_DB/DEFAULT_TRADE_DB/
+# SHARED_DB connects switched to mode=ro URIs in F26 cleanup; all SQL is SELECT-only);
 # _zeus_emergency_k2_obs_backfill_2026_05_10.py dropped (file deleted post-run).
 # Remaining residual: src/data/market_scanner.py (daemon INSERT, pending Track A.6)
 # + src/state/chunk_boundary_events.py (daemon thread write, separate conn by design).

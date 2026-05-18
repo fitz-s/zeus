@@ -1,10 +1,14 @@
-# Created: 2026-05-07
-# Last reused or audited: 2026-05-18
+# Lifecycle: created=2026-05-07; last_reviewed=2026-05-18; last_reused=never
+# Purpose: One-shot migration — add 'selection_coverage' to lane CHECK constraints
+#          in backtest_runs and backtest_outcome_comparison tables.
+# Reuse: Idempotent (detects already-migrated via sqlite_master inspection).
+#        Inspect DB schema + PR #87 context before re-running.
 # Authority basis: PR #87 fix — selection_coverage lane omitted from
 #   backtest_runs + backtest_outcome_comparison CHECK constraints in
 #   src/state/db.py:2267,2283.
-# F26 follow-up (2026-05-18): db_writer_lock(BULK) wrap added; backtest DB is
-#   not a live-trading DB but the lock makes the allowlist promotion clean.
+# F26 follow-up (2026-05-18): db_writer_lock(BULK) wrap added (nullcontext for
+#   dry-run); backtest DB is not a live-trading DB but the lock makes the
+#   allowlist promotion clean.
 """Migrate backtest DB: add 'selection_coverage' to lane CHECK constraints.
 
 SQLite does not support ALTER TABLE … MODIFY CONSTRAINT, so this migration

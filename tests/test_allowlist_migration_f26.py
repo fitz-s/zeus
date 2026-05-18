@@ -1,5 +1,8 @@
-# Created: 2026-05-18
-# Last reused or audited: 2026-05-18
+# Lifecycle: created=2026-05-18; last_reviewed=2026-05-18; last_reused=2026-05-18
+# Purpose: Antibody asserting F26 allowlist migration (Phase 1) and cleanup (Phase 2)
+#          outcomes; catches two-truth drift between conftest residual and production allowlist.
+# Reuse: Inspect F26_CLEANUP_PROMOTED / F26_CLEANUP_DROPPED sets against actual
+#        db_writer_lock.SQLITE_CONNECT_ALLOWLIST before relying on test counts.
 # Authority basis: /Users/leofitz/.claude/jobs/9ea6f95c/findings/f26_allowlist_audit.md
 #                  F26 follow-up brief: migrate 38 (actual 42) CURRENT_REUSABLE entries
 #                  F26 cleanup brief (2026-05-18): resolve 29 STALE_REWRITE + 1 QUARANTINED
@@ -11,11 +14,14 @@ Phase 1 (PR #157): 42 CURRENT_REUSABLE entries migrated from conftest residual
   to src.state.db_writer_lock.SQLITE_CONNECT_ALLOWLIST.
 
 Phase 2 (this PR): 29 STALE_REWRITE + 1 QUARANTINED entries resolved:
-  - 28 already_guarded/operator_invoked scripts promoted to production allowlist
+  - 21 already_guarded backfill/ingest scripts promoted to production allowlist
+  - 5 operator_invoked migration scripts promoted to production allowlist
   - 1 script retrofitted with db_writer_lock wrap then promoted
-  - 1 QUARANTINED (verify_truth_surfaces) promoted as read_only (0 writes)
+  - 1 one-shot operator script promoted
+  - 1 QUARANTINED (verify_truth_surfaces) promoted as read_only (SELECT-only, no writes)
   - 1 dropped (_zeus_emergency_k2_obs_backfill_2026_05_10.py — file deleted)
   - 2 daemon src/ sites remain in residual pending Track A.6 (#246)
+  Total: 29 promoted + 1 dropped = 30 entries resolved (F26_CLEANUP_PROMOTED has 29 entries)
 
 Sed-break protocols:
   A. Remove one entry from SQLITE_CONNECT_ALLOWLIST in db_writer_lock.py
@@ -193,7 +199,8 @@ F26_CLEANUP_PROMOTED: frozenset[str] = frozenset(
         "scripts/migrate_backtest_runs_lane_constraint_2026_05_07.py",
         # one-shot idempotent operator script
         "scripts/reevaluate_readiness_2026_05_07.py",
-        # QUARANTINED resolved: read_only (0 writes, all SELECTs + mode=ro)
+        # QUARANTINED resolved: read_only (0 DML writes; all connects SELECT-only;
+        # RISK_DB/DEFAULT_TRADE_DB/SHARED_DB switched to mode=ro URIs in F26 cleanup)
         "scripts/verify_truth_surfaces.py",
     }
 )
