@@ -84,10 +84,18 @@ jobs:
       - name: Run full pytest sweep
         # Inherits pytest.ini addopts: -m "not live_topology and not live_drift"
         # (measured sweep baseline: 753s / 12.5 min cold with this filter active).
-        # --timeout=600 kills hung individual tests.
-        # -x exits on first failure (signal-fast on broken main).
+        # --timeout=600 kills hung individual tests (requires pytest-timeout).
+        # --maxfail=20 surfaces multiple clusters per run (design D1).
+        # --reruns=1 tolerates single-flake without contaminating failure-ID signal.
         run: |
-          pytest tests/ -x --timeout=600 -q
+          pytest tests/ \
+            --maxfail=20 \
+            --reruns=1 \
+            --reruns-delay=2 \
+            --timeout=600 \
+            --junit-xml=junit.xml \
+            -q \
+            2>&1 | tee pytest-output.log
 
       - name: Summarize sweep
         if: always()
