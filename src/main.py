@@ -35,7 +35,7 @@ from src.config import cities_by_name, get_mode, settings
 from src.engine.cycle_runner import run_cycle
 from src.engine.discovery_mode import DiscoveryMode
 from src.observability.scheduler_health import _write_scheduler_health
-from src.state.db import init_schema, get_world_connection, get_trade_connection
+from src.state.db import init_schema, init_schema_trade_only, get_world_connection, get_trade_connection
 
 logger = logging.getLogger("zeus")
 
@@ -1742,9 +1742,11 @@ def main():
     # Read-only smoke: confirm world DB is reachable.
     conn.execute("SELECT COUNT(*) FROM settlements LIMIT 1").fetchone()
 
-    # Ensure trade DB has all tables (prevents lazy-creation gaps)
+    # Ensure trade DB has only trade-class tables (PR-S4b: was init_schema which
+    # also created world tables on zeus_trades.db; init_schema_trade_only creates
+    # only the 12 trade-class tables so assert_db_matches_registry(TRADE) passes).
     trade_conn = get_trade_connection(write_class="live")
-    init_schema(trade_conn)
+    init_schema_trade_only(trade_conn)
     trade_conn.close()
 
     # F109 boot-time consolidation (2026-05-17 MAJ-1).
@@ -1898,7 +1900,7 @@ def main():
         scheduler.start()
     except (KeyboardInterrupt, SystemExit):
         logger.info("Zeus shutting down")
-        scheduler.shutdown()
+        scheduler.shutdown(wait=True)  # U7: wait=True so inflight cycles commit before exit
 
 
 if __name__ == "__main__":
