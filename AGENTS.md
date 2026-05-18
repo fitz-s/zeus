@@ -44,12 +44,13 @@ The truth path is:
 
 `chain/CLOB facts -> canonical DB/events -> projections/status -> derived reports`
 
-**K1 DB split (2026-05-11):** Zeus operates two canonical SQLite files.
+**K1 DB split (2026-05-11):** Zeus operates three canonical SQLite files.
 `state/zeus-world.db` holds `WORLD_CLASS` tables (markets, positions, lifecycle).
 `state/zeus-forecasts.db` holds `FORECAST_CLASS` tables (observations, settlements,
 calibration_pairs_v2, ensemble_snapshots_v2, source_run, market_events_v2).
+`state/zeus_trades.db` holds trade execution records and CLOB order state.
 Table ownership is machine-checked via `architecture/db_table_ownership.yaml`
-(loader: `src/state/table_registry.py`). No write transaction may span both DBs
+(loader: `src/state/table_registry.py`). No write transaction may span DBs
 via independent connections (INV-37); the sanctioned cross-DB write path is
 `get_forecasts_connection_with_world()` (ATTACH+SAVEPOINT).
 
