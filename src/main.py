@@ -1740,7 +1740,7 @@ def main():
     # or backfill cannot starve daemon startup.
     conn = get_world_connection()
     # Read-only smoke: confirm world DB is reachable.
-    conn.execute("SELECT COUNT(*) FROM settlements LIMIT 1").fetchone()
+    conn.execute("SELECT 1 FROM sqlite_master WHERE name='settlements'").fetchone()
 
     # Ensure trade DB has only trade-class tables (PR-S4b: was init_schema which
     # also created world tables on zeus_trades.db; init_schema_trade_only creates
