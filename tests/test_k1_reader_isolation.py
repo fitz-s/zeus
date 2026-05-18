@@ -229,13 +229,20 @@ def test_monitor_refresh_temp_persistence_query_uses_world_qualifier():
 # WORLD_ONLY_TABLES helper — extends the existing pattern from F41 to cover
 # world-class tables read under get_forecasts_connection_with_world.
 # Coordinator addition (2026-05-17): temp_persistence is world_class.
+# Restored 2026-05-17 (phase critic CRIT-1): F43 antibody scope merged back in
+# after K1-sweep cherry-pick `git checkout --theirs` accidentally wiped it.
 # ---------------------------------------------------------------------------
 
 # Tables that are WORLD_CLASS and must be qualified as world.<table> when read
 # under a forecasts-rooted connection (MAIN=forecasts.db).
+# Union of: K-B sweep additions + F43 SELECT/FROM-side antibody set.
 WORLD_ONLY_TABLES_UNDER_K1 = {
-    "temp_persistence",             # F102 — world_class, ETL writes to zeus-world.db
-    "validated_calibration_transfers",  # F41 — world_class, covered by existing test
+    "temp_persistence",                  # F102 — world_class, ETL writes to zeus-world.db
+    "validated_calibration_transfers",   # F41 — world_class
+    "observation_instants_v2",           # F43 — 1.8M rows in world.db
+    "platt_models_v2",                   # F43 — 1.4K rows in world.db
+    "data_coverage",                     # F43 — world-class (cross-DB write target post-K1)
+    "daily_observation_revisions",       # F43 — world-class
 }
 
 
@@ -255,4 +262,98 @@ def test_monitor_refresh_world_tables_are_qualified():
         assert len(all_occ) == len(qualified_occ), (
             f"monitor_refresh.py: {len(all_occ) - len(qualified_occ)} unqualified "
             f"'{table}' reference(s) — must be 'world.{table}' (K-B fix, world_class)."
+        )
+
+
+# ---------------------------------------------------------------------------
+# F43 antibody (RESTORED 2026-05-17 per phase critic CRIT-1) — broader scope:
+# scan ALL K1-helper-using scripts (not just monitor_refresh.py) for bare
+# world_class FROM/JOIN refs. K1-sweep's antibody was monitor_refresh-only;
+# F43's was bridge_oracle_to_calibration + evaluate_calibration_transfer_oos.
+# Both are needed; this is the union (broader file scope, broader table scope).
+# ---------------------------------------------------------------------------
+
+
+def _strip_sql_comments(src: str) -> str:
+    """Strip Python and SQL comments so we don't false-positive on commented-out SQL."""
+    out = []
+    for line in src.splitlines():
+        idx = line.find("#")
+        if idx >= 0:
+            line = line[:idx]
+        out.append(line)
+    return "\n".join(out)
+
+
+@pytest.mark.parametrize("script_name", K1_FIXED_SCRIPTS)
+def test_k1_helper_world_tables_qualified(script_name):
+    """F43 regression-block: SELECT/FROM refs to world_class-only tables under
+    a K1-helper-using script must be prefixed with `world.`.
+
+    PR #137 F40/F41 fix introduced 3 silent dead-reads (bridge:183/195, eval:222)
+    by changing connection to forecasts.db MAIN without world-qualifying the SQL.
+    This antibody catches that category permanently.
+    """
+    import re as _re
+    src = (SCRIPTS / script_name).read_text()
+    if "get_forecasts_connection_with_world" not in src:
+        pytest.skip(f"{script_name} no longer uses K1 helper; antibody not applicable")
+    src_clean = _strip_sql_comments(src)
+
+    violations = []
+    for table in WORLD_ONLY_TABLES_UNDER_K1:
+        # Find any FROM <table> or JOIN <table> that is NOT preceded by 'world.'
+        pattern = (
+            r'\b(?:FROM|JOIN)\s+'
+            r'(?<!\bworld\.)'
+            r'\b' + _re.escape(table) + r'\b'
+        )
+        for m in _re.finditer(pattern, src_clean, _re.IGNORECASE):
+            preceding = src_clean[max(0, m.start()):m.end()]
+            if not _re.search(r'\bworld\.\s*' + _re.escape(table), preceding, _re.IGNORECASE):
+                line = src_clean[:m.start()].count("\n") + 1
+                violations.append((line, table, preceding.strip()))
+
+    assert not violations, (
+        f"{script_name}: F43 regression — bare references to world_class tables "
+        f"under K1-helper context.\n"
+        + "\n".join(
+            f"  line {ln}: {tbl} (raw: {raw!r})" for ln, tbl, raw in violations
+        )
+        + "\nFix: prefix with `world.` (e.g. `FROM world." + violations[0][1] + "`) "
+        + "since get_forecasts_connection_with_world() makes forecasts.db the MAIN."
+    )
+
+
+def test_world_only_tables_set_matches_registry():
+    """Sanity: every table in WORLD_ONLY_TABLES_UNDER_K1 must be classified
+    as world_class in architecture/db_table_ownership.yaml (canonical entry,
+    not legacy_archived) and must NOT have a forecast_class twin (which would
+    make bare ref correct under K1 helper). Catches drift if a table gets
+    re-classified during future K-splits."""
+    import yaml
+    registry_path = REPO / "architecture" / "db_table_ownership.yaml"
+    if not registry_path.exists():
+        pytest.skip("db_table_ownership.yaml not present")
+    data = yaml.safe_load(registry_path.read_text())
+    entries_by_name = {}
+    for t in data.get("tables", []):
+        entries_by_name.setdefault(t["name"], []).append(t)
+
+    for table in WORLD_ONLY_TABLES_UNDER_K1:
+        entries = entries_by_name.get(table, [])
+        assert entries, f"{table}: not registered in db_table_ownership.yaml"
+        # Must have a world_class canonical entry (not legacy_archived only)
+        canonical_classes = {
+            e.get("schema_class") for e in entries
+            if e.get("schema_class") != "legacy_archived"
+        }
+        assert "world_class" in canonical_classes, (
+            f"{table}: canonical schema_class set {canonical_classes!r} does not "
+            f"include world_class; remove from WORLD_ONLY_TABLES_UNDER_K1 or fix registry."
+        )
+        # Must NOT include forecast_class (would make bare ref correct under K1 helper)
+        assert "forecast_class" not in canonical_classes, (
+            f"{table}: registry shows BOTH world_class and forecast_class. "
+            f"Bare ref under K1 helper could be correct — remove from this antibody set."
         )
