@@ -43,6 +43,10 @@ logger = logging.getLogger("zeus")
 _cycle_lock = threading.Lock()
 OPENING_HUNT_FIRST_DELAY_SECONDS = 30.0
 
+# PR-S6 deployment freshness gate — mutable container populated in main() at boot.
+# Tests monkeypatch this dict directly; scheduler job reads it each tick.
+_BOOT_STATE: dict = {"sha": None, "ts": None}
+
 
 def _utc_run_time_after(seconds: float) -> datetime:
     """Return a UTC first-run time for APScheduler interval jobs."""
@@ -1066,6 +1070,174 @@ def _run_venue_heartbeat_loop(cadence_seconds: float) -> None:
         time.sleep(max(0.1, cadence_seconds - elapsed))
 
 
+def _capture_boot_state() -> dict:
+    """PR-S6: capture git HEAD SHA + timestamp at daemon start.
+
+    Returns {"sha": sha, "ts": datetime} on success.
+    Returns {"sha": None, "ts": None} if ZEUS_ACCEPT_STALE_DEPLOY=1 and git fails.
+    Raises SystemExit if git fails and ZEUS_ACCEPT_STALE_DEPLOY != "1" (fail-loud).
+
+    Extracted as a named function so tests can call it directly (not an inlined copy).
+    """
+    import subprocess
+
+    from src.config import PROJECT_ROOT
+
+    try:
+        sha = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(PROJECT_ROOT),
+            timeout=5,
+            stderr=subprocess.DEVNULL,
+        ).strip().decode()
+        return {"sha": sha, "ts": datetime.now(timezone.utc)}
+    except Exception as exc:
+        if os.environ.get("ZEUS_ACCEPT_STALE_DEPLOY") == "1":
+            logger.warning(
+                "deployment_freshness: boot SHA capture failed (%s); "
+                "ZEUS_ACCEPT_STALE_DEPLOY=1 — skipping gate", exc,
+            )
+            return {"sha": None, "ts": None}
+        raise SystemExit(
+            f"deployment_freshness: boot SHA capture failed ({exc}) and "
+            "ZEUS_ACCEPT_STALE_DEPLOY != 1. Cannot initialize freshness gate. "
+            "Set ZEUS_ACCEPT_STALE_DEPLOY=1 to skip."
+        )
+
+
+@_scheduler_job("deployment_freshness")
+def _check_deployment_freshness(
+    *,
+    boot_sha: str | None = None,
+    boot_ts: datetime | None = None,
+    repo_root: "Path | None" = None,
+    now: datetime | None = None,
+) -> None:
+    """PR-S6: deployment freshness gate — detects stale daemon (merged code never reloaded).
+
+    Compares the git HEAD SHA at daemon boot vs the current working-tree HEAD.
+    Divergence means a merge/deploy happened after the daemon started.
+
+    Grace windows (by uptime):
+      < 4h   : WARNING log. Normal deploy window; no action (daemon may not have
+               restarted yet after a deploy).
+      4–24h  : ERROR log + state/deployment_freshness.json flag + pause_entries
+               (reason='deployment_freshness_4h_divergence'). Trading paused to
+               prevent operating on stale pricing logic.
+      >= 24h : SystemExit fail-closed unless ZEUS_ACCEPT_STALE_DEPLOY=1.
+
+    Advisory state written to state/deployment_freshness.json (NOT control_plane.json
+    which is overwritten every cycle by _write_control_payload).
+
+    All git failures and non-git-repo environments are silent (no crash).
+    """
+    import json
+    import subprocess
+
+    from src.config import PROJECT_ROOT, state_path
+
+    _boot_sha: str | None = boot_sha if boot_sha is not None else _BOOT_STATE.get("sha")
+    _boot_ts: datetime | None = boot_ts if boot_ts is not None else _BOOT_STATE.get("ts")
+    _now: datetime = now if now is not None else datetime.now(timezone.utc)
+    _repo_root: Path = repo_root if repo_root is not None else PROJECT_ROOT
+
+    if not _boot_sha or not _boot_ts:
+        # Boot capture failed — skip silently.
+        logger.debug("_check_deployment_freshness: boot state not captured, skipping")
+        return
+
+    # Check ZEUS_ACCEPT_STALE_DEPLOY override first.
+    if os.environ.get("ZEUS_ACCEPT_STALE_DEPLOY") == "1":
+        logger.warning(
+            "deployment_freshness: ZEUS_ACCEPT_STALE_DEPLOY=1 override active; "
+            "skipping staleness check (boot_sha=%s)", _boot_sha[:8]
+        )
+        return
+
+    try:
+        current_sha: str = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(_repo_root),
+            timeout=5,
+            stderr=subprocess.DEVNULL,
+        ).strip().decode()
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
+        logger.warning(
+            "deployment_freshness: git rev-parse failed (%s); skipping check", exc
+        )
+        return
+
+    if current_sha == _boot_sha:
+        return  # No divergence.
+
+    uptime_hours: float = (_now - _boot_ts).total_seconds() / 3600.0
+
+    if uptime_hours >= 24.0:
+        import signal as _signal
+        logger.critical(
+            "DEPLOYMENT_STALE — loaded SHA %s but filesystem has %s for >%.1fh. "
+            "Signaling SIGTERM to escape APScheduler exception boundary.",
+            _boot_sha[:8], current_sha[:8], uptime_hours,
+        )
+        # os.kill(SIGTERM) propagates to the process's signal handler OUTSIDE
+        # APScheduler's BaseException catch in run_job(), ensuring the daemon
+        # actually stops. The trailing raise keeps direct callers (test suite)
+        # correctly fail-closed.
+        os.kill(os.getpid(), _signal.SIGTERM)
+        raise SystemExit(
+            f"DEPLOYMENT_STALE — daemon loaded SHA {_boot_sha[:8]} but filesystem "
+            f"has {current_sha[:8]} for >{uptime_hours:.1f}h. "
+            f"Set ZEUS_ACCEPT_STALE_DEPLOY=1 to override."
+        )
+    elif uptime_hours >= 4.0:
+        logger.error(
+            "deployment_freshness_diverged_total: boot_sha=%s current_sha=%s "
+            "uptime_hours=%.1f — merged code not reloaded; pausing entries",
+            _boot_sha[:8], current_sha[:8], uptime_hours,
+        )
+        # Write advisory flag to dedicated state/deployment_freshness.json.
+        # NOT control_plane.json — that file is overwritten on every cycle by
+        # _write_control_payload (control_plane.py:119) which writes only
+        # {commands, acks}. A dedicated file survives all control_plane writes.
+        df_path = state_path("deployment_freshness.json")
+        try:
+            _df: dict = {
+                "boot_sha": _boot_sha,
+                "current_sha": current_sha,
+                "uptime_hours": round(uptime_hours, 2),
+                "detected_at": _now.isoformat(),
+            }
+            _tmp = str(df_path) + ".tmp"
+            with open(_tmp, "w") as _f:
+                json.dump(_df, _f, indent=2)
+            os.replace(_tmp, str(df_path))
+        except Exception as _exc:
+            logger.warning("deployment_freshness: failed to write flag file: %s", _exc)
+        # Pause new entries — prevents trading 5h+ on stale pricing code
+        # (the exact 2026-05-17 incident class). Idempotent if already paused.
+        try:
+            from src.control.control_plane import pause_entries
+            # issued_by="system_auto_pause" activates the idempotency guard in
+            # control_plane._has_active_auto_pause_override — prevents duplicate
+            # control_overrides rows and alert spam on every 60s tick.
+            pause_entries(
+                "deployment_freshness_4h_divergence",
+                issued_by="system_auto_pause",
+                effective_until=None,
+            )
+        except Exception as _exc:
+            logger.error(
+                "deployment_freshness: pause_entries failed (%s); "
+                "entries NOT paused despite 4h staleness", _exc,
+            )
+    else:
+        logger.warning(
+            "deployment_freshness_diverged_total: boot_sha=%s current_sha=%s "
+            "uptime_hours=%.1f — within grace window, no action",
+            _boot_sha[:8], current_sha[:8], uptime_hours,
+        )
+
+
 def _startup_freshness_check() -> None:
     """§3.1: data freshness gate at boot — uses evaluate_freshness_at_boot.
 
@@ -1455,6 +1627,15 @@ def main():
     )
 
     logger.info("Zeus starting in %s mode%s", mode, " (single cycle)" if once else "")
+
+    # PR-S6: capture deployment snapshot for freshness gate.
+    # Must run early (before any blocking I/O) so uptime accounting is accurate.
+    # Fail-loud if git unavailable and ZEUS_ACCEPT_STALE_DEPLOY != "1".
+    _boot = _capture_boot_state()
+    _BOOT_STATE.update(_boot)
+    if _boot.get("sha"):
+        logger.info("deployment_freshness: boot_sha=%s", _boot["sha"][:8])
+
     # Proxy health gate: strip dead HTTP_PROXY so data-only mode works
     # without VPN. Must precede any HTTP call (PolymarketClient wallet check, etc).
     from src.data.proxy_health import bypass_dead_proxy_env_vars
@@ -1617,6 +1798,11 @@ def main():
     scheduler.add_job(
         _wrap_unwrap_liveness_guard_cycle, "interval", minutes=30,
         id="wrap_unwrap_liveness_guard", max_instances=1, coalesce=True,
+    )
+    # PR-S6: deployment freshness gate — runs every 60s, fail-closed at 24h uptime.
+    scheduler.add_job(
+        _check_deployment_freshness, "interval", seconds=60,
+        id="deployment_freshness", max_instances=1, coalesce=True,
     )
 
     # Boot-time fail-closed cascade-liveness contract check. MUST run AFTER
