@@ -393,3 +393,130 @@ def test_settlement_commands_parses_winning_index_set_and_passes_kw(monkeypatch,
     assert captured_kwargs["condition_id"] == _TEST_CONDITION_ID
     assert captured_kwargs["index_sets"] == [2]
     conn.close()
+
+
+def test_submit_redeem_routes_index_sets_missing_to_operator_required(monkeypatch, tmp_path):
+    """Integration: submit_redeem must route REDEEM_INDEX_SETS_MISSING to
+    REDEEM_OPERATOR_REQUIRED (non-terminal), not REDEEM_FAILED (terminal).
+
+    Missing winning-bin data is a harvester input gap, not a chain failure.
+    The row must remain repairable via operator CLI.
+    """
+    import sqlite3
+    from datetime import datetime, timezone
+
+    from src.contracts.fx_classification import FXClassification
+    from src.execution.settlement_commands import (
+        SettlementState,
+        init_settlement_command_schema,
+        request_redeem,
+        submit_redeem,
+    )
+
+    monkeypatch.setenv("ZEUS_PUSD_FX_CLASSIFIED", FXClassification.FX_LINE_ITEM.value)
+    monkeypatch.setattr(
+        "src.execution.settlement_commands.redemption_decision",
+        lambda: type("CutoverDecision", (), {
+            "allow_redemption": True,
+            "block_reason": None,
+            "state": "LIVE_ENABLED",
+        })(),
+    )
+
+    db_path = tmp_path / "settlement.db"
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    init_settlement_command_schema(conn)
+
+    # Request with winning_index_set=None so adapter receives index_sets=None.
+    command_id = request_redeem(
+        _TEST_CONDITION_ID,
+        "pUSD",
+        market_id="market-test",
+        pusd_amount_micro=1_000_000,
+        token_amounts={"yes-token": "1"},
+        conn=conn,
+        requested_at=datetime(2026, 5, 18, tzinfo=timezone.utc),
+        winning_index_set=None,
+    )
+
+    class _MissingIndexSetsAdapter:
+        def redeem(self, condition_id, *, index_sets=None):
+            return {
+                "success": False,
+                "errorCode": "REDEEM_INDEX_SETS_MISSING",
+                "errorMessage": "no index_sets",
+                "condition_id": condition_id,
+            }
+
+    result = submit_redeem(command_id, _MissingIndexSetsAdapter(), object(), conn=conn)
+
+    assert result.state == SettlementState.REDEEM_OPERATOR_REQUIRED, (
+        f"REDEEM_INDEX_SETS_MISSING must route to REDEEM_OPERATOR_REQUIRED, got {result.state}"
+    )
+    conn.close()
+
+
+def test_winning_index_set_json_non_list_rejected(monkeypatch, tmp_path):
+    """Defensive parsing: a JSON-encoded string or object must not iterate
+    characters/keys and produce silently wrong index_sets.  The parse must
+    fail-closed to parsed_index_sets=None so the adapter returns
+    REDEEM_INDEX_SETS_MISSING rather than broadcasting wrong calldata.
+    """
+    import sqlite3
+    from datetime import datetime, timezone
+
+    from src.contracts.fx_classification import FXClassification
+    from src.execution.settlement_commands import (
+        SettlementState,
+        init_settlement_command_schema,
+        request_redeem,
+        submit_redeem,
+    )
+
+    monkeypatch.setenv("ZEUS_PUSD_FX_CLASSIFIED", FXClassification.FX_LINE_ITEM.value)
+    monkeypatch.setattr(
+        "src.execution.settlement_commands.redemption_decision",
+        lambda: type("CutoverDecision", (), {
+            "allow_redemption": True,
+            "block_reason": None,
+            "state": "LIVE_ENABLED",
+        })(),
+    )
+
+    db_path = tmp_path / "settlement.db"
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    init_settlement_command_schema(conn)
+
+    # Malformed: JSON string "2" — iterating chars would yield ["2"], an
+    # accidental match for [2], so this is a subtle correctness failure.
+    command_id = request_redeem(
+        _TEST_CONDITION_ID,
+        "pUSD",
+        market_id="market-test",
+        pusd_amount_micro=1_000_000,
+        token_amounts={"yes-token": "1"},
+        conn=conn,
+        requested_at=datetime(2026, 5, 18, tzinfo=timezone.utc),
+        winning_index_set='"2"',  # JSON-encoded bare string, not array
+    )
+
+    captured_index_sets: list = []
+
+    class _RecordingAdapter:
+        def redeem(self, condition_id, *, index_sets=None):
+            captured_index_sets.append(index_sets)
+            return {
+                "success": False,
+                "errorCode": "REDEEM_INDEX_SETS_MISSING",
+                "errorMessage": "index_sets was None after parse failure",
+                "condition_id": condition_id,
+            }
+
+    submit_redeem(command_id, _RecordingAdapter(), object(), conn=conn)
+
+    assert captured_index_sets == [None], (
+        f"malformed JSON string must produce index_sets=None, got {captured_index_sets}"
+    )
+    conn.close()

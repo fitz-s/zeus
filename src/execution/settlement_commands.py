@@ -407,6 +407,14 @@ def submit_redeem(
             else:
                 try:
                     decoded = json.loads(raw_winning_index_set)
+                    # Validate decoded is a non-empty list of integer-like
+                    # entries before iteration. A JSON string (e.g. "2") or
+                    # object would iterate characters/keys and produce
+                    # silently wrong index_sets.
+                    if not isinstance(decoded, list) or not decoded:
+                        raise ValueError(
+                            f"winning_index_set must be a non-empty JSON array, got {type(decoded).__name__}: {decoded!r}"
+                        )
                     parsed_index_sets = [int(x) for x in decoded]
                 except Exception as parse_exc:
                     logger.warning(
@@ -442,9 +450,32 @@ def submit_redeem(
             # REDEEM_DEFERRED_TO_R1 stub, route to REDEEM_OPERATOR_REQUIRED
             # (first-class operator-completion state) instead of generic
             # REVIEW_REQUIRED catch-all. Operator-completion CLI is
-            # scripts/operator_record_redeem.py. Other errorCodes still
-            # route to REDEEM_FAILED as a true terminal failure.
-            stub_deferred = raw_payload.get("errorCode") == "REDEEM_DEFERRED_TO_R1"
+            # scripts/operator_record_redeem.py.
+            #
+            # PR-I.5.c (2026-05-18): extend the operator-required set to cover
+            # structural pre-flight failures that are not chain-submission errors
+            # and should not be terminally classified as REDEEM_FAILED:
+            #   - REDEEM_INDEX_SETS_MISSING / REDEEM_INDEX_SET_PARSE_FAILED:
+            #     missing winning-bin data; harvester must repopulate before retry.
+            #   - REDEEM_GAS_ESTIMATE_REVERTED: on-chain revert (already redeemed,
+            #     wrong index_sets, no balance) — operator must inspect chain state.
+            #   - REDEEM_CALLDATA_BUILD_FAILED: malformed condition_id or index_sets;
+            #     input repair required before re-run.
+            #   - REDEEM_SIGNER_FUNDER_MISMATCH: EOA != funder (Safe deployment);
+            #     operator must configure a matching EOA funder.
+            #   - REDEEM_WRONG_CHAIN: chain_id != 137; config repair required.
+            # These are operator-review states, not terminal failures.
+            _OPERATOR_REVIEW_ERRORCODES = frozenset({
+                "REDEEM_DEFERRED_TO_R1",
+                "REDEEM_INDEX_SETS_MISSING",
+                "REDEEM_INDEX_SET_PARSE_FAILED",
+                "REDEEM_GAS_ESTIMATE_REVERTED",
+                "REDEEM_CALLDATA_BUILD_FAILED",
+                "REDEEM_SIGNER_FUNDER_MISMATCH",
+                "REDEEM_WRONG_CHAIN",
+            })
+            error_code = raw_payload.get("errorCode")
+            stub_deferred = error_code in _OPERATOR_REVIEW_ERRORCODES
             if stub_deferred:
                 state_after = SettlementState.REDEEM_OPERATOR_REQUIRED
                 terminal_flag = False  # operator CLI exits this state
