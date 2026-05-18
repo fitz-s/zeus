@@ -38,7 +38,7 @@ if str(REPO_ROOT_SCRIPTS) not in sys.path:
 REPO_ROOT = pathlib.Path(__file__).parent.parent
 ADMISSION_SEVERITY_YAML = REPO_ROOT / "architecture" / "admission_severity.yaml"
 
-# Canonical 9-value enum per D1 amendment (critic-opus ATTACK 3 resolved in PLAN §0.5)
+# Canonical 10-value enum — docs_instruction added 2026-05-10 (G4 cluster J update)
 EXPECTED_ENUM_VALUES = {
     "plan_only",
     "create_new",
@@ -49,6 +49,7 @@ EXPECTED_ENUM_VALUES = {
     "hotfix",
     "rebase_keepup",
     "other",
+    "docs_instruction",
 }
 
 
@@ -69,16 +70,16 @@ def _load_intent_enum() -> list[dict]:
 # Structure tests
 # ---------------------------------------------------------------------------
 
-def test_enum_has_exactly_9_values() -> None:
-    """Enum must have exactly 9 values per critic-opus D1 amendment.
+def test_enum_has_exactly_10_values() -> None:
+    """Enum must have exactly 10 values (docs_instruction added 2026-05-10).
 
     Values: plan_only, create_new, modify_existing, refactor, audit, hygiene,
-    hotfix, rebase_keepup, other.
+    hotfix, rebase_keepup, other, docs_instruction.
     """
     entries = _load_intent_enum()
     ids = {e["id"] for e in entries if isinstance(e, dict) and "id" in e}
     assert ids == EXPECTED_ENUM_VALUES, (
-        f"typed_intent_enum IDs do not match expected 9 values.\n"
+        f"typed_intent_enum IDs do not match expected 10 values.\n"
         f"  Expected: {sorted(EXPECTED_ENUM_VALUES)}\n"
         f"  Got:      {sorted(ids)}\n"
         f"  Missing:  {sorted(EXPECTED_ENUM_VALUES - ids)}\n"

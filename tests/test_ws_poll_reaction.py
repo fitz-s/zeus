@@ -114,8 +114,8 @@ def _insert_event(
         """
         INSERT INTO position_events
             (event_id, position_id, event_version, sequence_no, event_type,
-             occurred_at, strategy_key, source_module, payload_json)
-        VALUES (?, ?, 1, ?, ?, ?, ?, 'tests', '{}')
+             occurred_at, strategy_key, source_module, payload_json, env)
+        VALUES (?, ?, 1, ?, ?, ?, ?, 'tests', '{}', 'live')
         """,
         (f"{position_id}:ev:{suffix}", position_id, seq_no, event_type, occurred_at, strategy_key),
     )

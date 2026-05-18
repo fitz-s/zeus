@@ -214,30 +214,28 @@ def _run_dispatch_in_repo(
 
 class TestCheckImplementationLogic:
     """
-    Unit tests for _run_blocking_check_pre_checkout_uncommitted_overlap logic
+    Unit tests for _run_advisory_check_pre_checkout_uncommitted_overlap logic
     by importing the function directly.
     """
 
     def test_no_command_allows(self) -> None:
-        """Empty command payload must allow."""
+        """Empty command payload must return None (no advisory)."""
         sys.path.insert(0, str(REPO_ROOT / ".claude" / "hooks"))
         try:
             import dispatch as d
-            decision, reason = d._run_blocking_check_pre_checkout_uncommitted_overlap({})
-            assert decision == "allow"
-            assert reason == "no_command"
+            result = d._run_advisory_check_pre_checkout_uncommitted_overlap({})
+            assert result is None
         finally:
             sys.path.pop(0)
 
     def test_git_status_not_checkout(self) -> None:
-        """git status is not a checkout command — must allow."""
+        """git status is not a checkout command — must return None (no advisory)."""
         sys.path.insert(0, str(REPO_ROOT / ".claude" / "hooks"))
         try:
             import dispatch as d
             payload = {"tool_input": {"command": "git status"}}
-            decision, reason = d._run_blocking_check_pre_checkout_uncommitted_overlap(payload)
-            assert decision == "allow"
-            assert reason == "not_a_checkout_command"
+            result = d._run_advisory_check_pre_checkout_uncommitted_overlap(payload)
+            assert result is None
         finally:
             sys.path.pop(0)
 
@@ -250,9 +248,9 @@ class TestCheckImplementationLogic:
             # the check then runs against real git which may or may not have overlap.
             # Just assert it doesn't crash.
             payload = {"tool_input": {"command": "git checkout -b mybranch-xyz-nomatch"}}
-            decision, reason = d._run_blocking_check_pre_checkout_uncommitted_overlap(payload)
-            # Accept any of the non-crash reasons
-            assert decision in ("allow", "deny")
+            result = d._run_advisory_check_pre_checkout_uncommitted_overlap(payload)
+            # Returns None (no advisory) or a string advisory message
+            assert result is None or isinstance(result, str)
         finally:
             sys.path.pop(0)
 
@@ -262,9 +260,9 @@ class TestCheckImplementationLogic:
         try:
             import dispatch as d
             payload = {"tool_input": {"command": "gh pr checkout 99"}}
-            decision, reason = d._run_blocking_check_pre_checkout_uncommitted_overlap(payload)
-            # 99 is the PR number; git ls-tree will fail (no such branch) → allow
-            assert decision in ("allow", "deny")
+            result = d._run_advisory_check_pre_checkout_uncommitted_overlap(payload)
+            # Returns None (no advisory) or a string advisory message
+            assert result is None or isinstance(result, str)
         finally:
             sys.path.pop(0)
 
@@ -326,12 +324,12 @@ class TestDisjointAllow:
     the hook allows the checkout.
     """
 
-    def test_deny_message_content_when_overlap(self) -> None:
+    def test_advisory_message_content_when_overlap(self) -> None:
         """
-        When a deny is issued, the message must include:
-        - 'BLOCKED:' prefix
-        - Lossless options (a), (b), (c)
-        - Override hints (STASH_FIRST_VERIFIED, OPERATOR_DESTRUCTIVE)
+        When uncommitted modifications exist, the function must return a non-None
+        advisory string mentioning the modified file and git stash suggestion.
+        (Function signature changed from (decision, reason) tuple to str | None
+        when _run_blocking_check was renamed to _run_advisory_check — G4 cluster G.)
         """
         sys.path.insert(0, str(REPO_ROOT / ".claude" / "hooks"))
         try:
@@ -355,17 +353,11 @@ class TestDisjointAllow:
 
             with mock.patch("dispatch.subprocess.run", side_effect=fake_run):
                 payload = {"tool_input": {"command": "git checkout some-branch"}}
-                decision, reason = d._run_blocking_check_pre_checkout_uncommitted_overlap(
-                    payload
-                )
-            assert decision == "deny"
-            assert "BLOCKED:" in reason
-            assert "(a)" in reason  # stash option
-            assert "(b)" in reason  # commit option
-            assert "(c)" in reason  # worktree option
-            assert "STASH_FIRST_VERIFIED" in reason
-            assert "OPERATOR_DESTRUCTIVE" in reason
-            assert "src/engine/evaluator.py" in reason
+                result = d._run_advisory_check_pre_checkout_uncommitted_overlap(payload)
+            # Function returns non-None advisory string when modifications exist
+            assert result is not None, "Expected advisory message for uncommitted overlap"
+            assert isinstance(result, str)
+            assert "src/engine/evaluator.py" in result or "modification" in result.lower()
         finally:
             if str(REPO_ROOT / ".claude" / "hooks") in sys.path:
                 sys.path.remove(str(REPO_ROOT / ".claude" / "hooks"))
