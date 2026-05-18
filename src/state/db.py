@@ -3569,15 +3569,17 @@ def init_schema_trade_only(conn: sqlite3.Connection) -> None:
            No world tables on trade.db.
         3. Forecasts conn (ingest daemon): init_schema_forecasts(forecasts_conn).
 
-    Idempotent: all CREATEs use IF NOT EXISTS. The ghost-drop migration below is
-    also idempotent — it is a no-op once the extra tables are gone.
+    Idempotent: all CREATEs use IF NOT EXISTS.
 
-    Ghost-drop migration (Case C — production zeus_trades.db):
+    Ghost tables (Case C — production zeus_trades.db):
         Pre-PR-S4b, src/main.py:1747 called init_schema(trade_conn) which is the
-        world-schema constructor. This polluted zeus_trades.db with 61+ world tables
-        that were never written to. On first run of PR-S4b, this function drops them.
-        Safety: any ghost with row_count > 0 raises RuntimeError (fail-closed).
-        Atomicity: all DROPs are wrapped in a single transaction.
+        world-schema constructor. This polluted zeus_trades.db with 66 world-class
+        tables (including shadow_signals with 27k rows, probability_trace_fact with
+        33k rows, availability_fact with 24k rows). These ghost tables are NOT dropped
+        here — they are declared ``legacy_archived`` in architecture/db_table_ownership.yaml
+        (db: trade, §4 Path B). The INV-37 writer fix (PR-S4b §3) redirects all future
+        writes to zeus-world.db. Data migration is deferred per dispatch guidance
+        ("DO NOT migrate data. DO NOT touch state/*.db.").
 
     PR-S4b (2026-05-18).
     """
@@ -3600,6 +3602,22 @@ def init_schema_trade_only(conn: sqlite3.Connection) -> None:
 
     # Re-apply busy_timeout: each executescript() resets the C-level handler.
     conn.execute(f"PRAGMA busy_timeout = {_busy_ms}")
+
+    # Verify all 12 trade-class tables were actually created — guards against
+    # silent DDL drift between _TRADE_CLASS_TABLES and _TRADE_CLASS_DDL /
+    # SETTLEMENT_COMMAND_SCHEMA.  Uses subset (not equality) because Path B
+    # leaves legacy_archived ghost tables on zeus_trades.db.
+    _actual_tables = {
+        row[0]
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()
+    }
+    _missing = _TRADE_CLASS_TABLES - _actual_tables
+    if _missing:
+        raise RuntimeError(
+            f"init_schema_trade_only: DDL did not create expected trade-class tables: {sorted(_missing)}"
+        )
 
     # NOTE: The 66 non-trade-class tables that pre-PR-S4b init_schema(trade_conn)
     # created on zeus_trades.db (including shadow_signals with 27k rows,
@@ -5387,8 +5405,8 @@ def log_shadow_signal(
     shadow_signals rows to land in zeus_trades.db instead of zeus-world.db.
     The ``conn`` parameter is kept for backward compat but is no longer used.
     """
+    _wconn = get_world_connection()
     try:
-        _wconn = get_world_connection()
         _wconn.execute(
             """
             INSERT INTO shadow_signals
@@ -5401,6 +5419,8 @@ def log_shadow_signal(
     except Exception as e:
         import logging
         logging.getLogger(__name__).warning("Failed to log shadow signal: %s", e)
+    finally:
+        _wconn.close()
 
 
 def _bin_type_for_label(label: str) -> str:
@@ -5579,9 +5599,26 @@ def log_probability_trace_fact(
     than accepting an opaque conn from callers. Pre-fix, callers passed the
     cycle trades-rooted conn (zeus_trades.db MAIN with world ATTACHed), causing
     probability_trace_fact rows to land in zeus_trades.db instead of zeus-world.db.
-    The ``conn`` parameter is kept for backward compat but is no longer used.
+    The ``conn`` parameter is accepted for backward compatibility but ignored.
+    Previously a ``None`` conn short-circuited with ``{"status": "skipped_no_connection"}``;
+    now a write is performed unconditionally against zeus-world.db regardless of
+    the value passed. Callers that relied on the skip behaviour must be updated.
     """
     conn = get_world_connection()
+    try:
+        return _log_probability_trace_fact_inner(conn, candidate=candidate, decision=decision, recorded_at=recorded_at, mode=mode)
+    finally:
+        conn.close()
+
+
+def _log_probability_trace_fact_inner(
+    conn: "sqlite3.Connection",
+    *,
+    candidate,
+    decision,
+    recorded_at: str,
+    mode: str,
+) -> dict:
     if not _table_exists(conn, "probability_trace_fact"):
         logger.info("Probability trace table unavailable; skipping durable write")
         return {"status": "skipped_missing_table", "table": "probability_trace_fact"}
@@ -6123,48 +6160,51 @@ def log_availability_fact(
     The ``conn`` parameter is kept for backward compat but is no longer used.
     """
     conn = get_world_connection()
-    if not _table_exists(conn, "availability_fact"):
-        logger.info("Availability fact table unavailable; skipping durable write")
-        return {"status": "skipped_missing_table", "table": "availability_fact"}
+    try:
+        if not _table_exists(conn, "availability_fact"):
+            logger.info("Availability fact table unavailable; skipping durable write")
+            return {"status": "skipped_missing_table", "table": "availability_fact"}
 
-    normalized_scope_type = scope_type if scope_type in {"cycle", "candidate", "city_target", "order", "chain"} else "candidate"
-    normalized_impact = impact if impact in {"skip", "degrade", "retry", "block"} else "skip"
-    payload = json.dumps(details or {}, ensure_ascii=False, sort_keys=True)
-    conn.execute(
-        """
-        INSERT INTO availability_fact (
-            availability_id,
-            scope_type,
-            scope_key,
-            failure_type,
-            started_at,
-            ended_at,
-            impact,
-            details_json
+        normalized_scope_type = scope_type if scope_type in {"cycle", "candidate", "city_target", "order", "chain"} else "candidate"
+        normalized_impact = impact if impact in {"skip", "degrade", "retry", "block"} else "skip"
+        payload = json.dumps(details or {}, ensure_ascii=False, sort_keys=True)
+        conn.execute(
+            """
+            INSERT INTO availability_fact (
+                availability_id,
+                scope_type,
+                scope_key,
+                failure_type,
+                started_at,
+                ended_at,
+                impact,
+                details_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(availability_id) DO UPDATE SET
+                scope_type=excluded.scope_type,
+                scope_key=excluded.scope_key,
+                failure_type=excluded.failure_type,
+                started_at=excluded.started_at,
+                ended_at=excluded.ended_at,
+                impact=excluded.impact,
+                details_json=excluded.details_json
+            """,
+            (
+                availability_id,
+                normalized_scope_type,
+                scope_key,
+                failure_type,
+                started_at,
+                ended_at,
+                normalized_impact,
+                payload,
+            ),
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(availability_id) DO UPDATE SET
-            scope_type=excluded.scope_type,
-            scope_key=excluded.scope_key,
-            failure_type=excluded.failure_type,
-            started_at=excluded.started_at,
-            ended_at=excluded.ended_at,
-            impact=excluded.impact,
-            details_json=excluded.details_json
-        """,
-        (
-            availability_id,
-            normalized_scope_type,
-            scope_key,
-            failure_type,
-            started_at,
-            ended_at,
-            normalized_impact,
-            payload,
-        ),
-    )
-    conn.commit()
-    return {"status": "written", "table": "availability_fact"}
+        conn.commit()
+        return {"status": "written", "table": "availability_fact"}
+    finally:
+        conn.close()
 
 
 def _parse_iso_timestamp(value: str | None) -> datetime | None:
