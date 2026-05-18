@@ -1297,6 +1297,82 @@ def _startup_data_health_check(conn):
         logger.debug("Startup health check failed: %s", e)
 
 
+def _run_f109_consolidator() -> None:
+    """Boot-time F109 consolidation: reduce duplicate open-phase position rows.
+
+    Must run BEFORE the 202605_position_current_idempotent_open_per_token
+    migration applies the partial UNIQUE INDEX (that migration's pre-flight
+    raises if duplicates still exist). Idempotent: NO-OP on healthy state.
+
+    Failure-tolerant: logs WARNING + returns without raising so the daemon
+    continues to boot; the migration's own pre-flight then raises if the DB
+    is still inconsistent (fail-closed guarantee preserved).
+
+    Karachi-safe: single-row positions pass the HAVING COUNT(*) > 1 filter
+    and are never touched.
+
+    Logs: [F109_CONSOLIDATOR_BOOT] tokens_scanned=N voided=M divergent=K
+    """
+    from src.state.db import get_trade_connection
+    from src.state.position_duplicate_consolidator import consolidate
+
+    try:
+        trade_conn = get_trade_connection(write_class="live")
+        try:
+            report = consolidate(trade_conn)
+        finally:
+            trade_conn.close()
+    except Exception as exc:
+        logger.warning(
+            "[F109_CONSOLIDATOR_BOOT] failed — continuing boot (migration pre-flight "
+            "will enforce hard gate if duplicates remain): %s",
+            exc,
+        )
+        return
+
+    logger.info(
+        "[F109_CONSOLIDATOR_BOOT] tokens_scanned=%d voided=%d divergent=%d "
+        "chain_snapshot_used=%s",
+        report["scanned_tokens"],
+        len(report["voided_positions"]),
+        len(report["divergent_tokens"]),
+        report["chain_snapshot_used"],
+    )
+
+
+def _run_f109_migration() -> None:
+    """Boot-time application of 202605_position_current_idempotent_open_per_token.
+
+    Applies the partial UNIQUE INDEX on position_current(token_id) for open
+    phases. Idempotent: skips if index already present. Pre-flight raises if
+    any token still holds >1 open-phase rows (consolidator must run first).
+
+    Failure-tolerant: logs WARNING on error rather than aborting boot — the
+    daemon can function without the index; the writer-side check in
+    projection.py remains the active defence.
+    """
+    import importlib
+
+    from src.state.db import get_trade_connection
+
+    try:
+        _mod = importlib.import_module(
+            "scripts.migrations.202605_position_current_idempotent_open_per_token"
+        )
+        trade_conn = get_trade_connection(write_class="live")
+        try:
+            _mod.up(trade_conn)
+            trade_conn.commit()
+        finally:
+            trade_conn.close()
+    except Exception as exc:
+        logger.warning(
+            "[F109_MIGRATION_BOOT] 202605_position_current_idempotent_open_per_token "
+            "failed — index not installed (consolidator pre-flight may have raised): %s",
+            exc,
+        )
+
+
 def _assert_live_safe_strategies_or_exit(*, refresh_state: bool = True) -> None:
     """G6 boot guard: refuse live launch when a non-allowlisted strategy is enabled.
 
@@ -1377,6 +1453,13 @@ def main():
     trade_conn = get_trade_connection(write_class="live")
     init_schema(trade_conn)
     trade_conn.close()
+
+    # F109 boot-time consolidation + migration (2026-05-17 MAJ-1).
+    # Must run BEFORE any strategy gate or wallet check that reads position_current.
+    # Order: consolidator first (reduces duplicates) → migration second (installs
+    # partial UNIQUE INDEX; pre-flight raises if duplicates remain).
+    _run_f109_consolidator()
+    _run_f109_migration()
 
     # Startup health check: warn about deferred data actions
     _startup_data_health_check(conn)
