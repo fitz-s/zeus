@@ -1090,7 +1090,7 @@ def _check_persistence_anomaly(
             return 1.0 - discount_magnitude
         else:
             logger.debug(
-                "PERSISTENCE_NO_DATA: temp_persistence has no row for %s/%s/bucket=%s — returning 1.0 (no discount)",
+                "PERSISTENCE_NO_DATA: world.temp_persistence has no row for %s/%s/bucket=%s — returning 1.0 (no discount)",
                 city_name, target_date, bucket,
             )
 
