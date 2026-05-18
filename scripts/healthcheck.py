@@ -33,6 +33,15 @@ RISKGUARD_STALE_SECONDS = 5 * 60
 SOURCE_HEALTH_WRITER_STALE_SECONDS = 15 * 60
 LIVE_DB_UNKNOWN_HOLDER_SECONDS = 10 * 60
 SETTLEMENT_TRUTH_STALE_SECONDS = int(os.environ.get("ZEUS_SETTLEMENT_TRUTH_STALE_SECONDS", str(48 * 3600)))
+
+# WAVE-4 F91+F99+F100 — daemon heartbeat staleness budgets, per
+# docs/operations/task_2026-05-16_post_pr126_audit/RUN_15_track3_f91_f86_observability.md
+# §"Recommended remediation order" priority 3 ("fold staleness checks into
+# healthcheck.py"). Each budget is the cadence × ~3 with headroom so a single
+# missed write does not page; ~2 missed in a row does.
+HEARTBEAT_LIVE_TRADING_STALE_SECONDS = 5 * 60    # HB-1 daemon-heartbeat.json — writer cadence 60s
+HEARTBEAT_DATA_INGEST_STALE_SECONDS = 5 * 60     # HB-2 daemon-heartbeat-ingest.json — writer cadence 60s
+HEARTBEAT_FORECAST_LIVE_STALE_SECONDS = 3 * 60   # HB-3 forecast-live-heartbeat.json — writer cadence 30s
 PROCESS_CODE_STALE_TOLERANCE_SECONDS = 2
 PROCESS_CODE_SURFACES = {
     "live_trading": (
@@ -763,6 +772,133 @@ def _source_health_status() -> dict:
     }
 
 
+def _heartbeat_freshness_status() -> dict:
+    """WAVE-4 F91+F99+F100 — close the alert loop on HB-1/HB-2/HB-3.
+
+    Reads three live-trading-relevant heartbeat JSON files and computes
+    a freshness verdict per writer. The autonomous heartbeat_dispatcher
+    cron (`*/30 * * * *`) calls healthcheck.py; this function makes that
+    cron path see HB-1 (live-trading), HB-2 (data-ingest), and HB-3
+    (forecast-live) staleness — closing the gap surfaced in
+    RUN_15_track3_f91_f86_observability.md (4 of 5 heartbeat surfaces
+    were write-only, with no autonomous reader on the alert path).
+
+    Each entry's verdict:
+      - `present`: file exists on disk
+      - `age_seconds`: now - written_at (None when payload lacks a time field)
+      - `fresh`: age within the per-writer budget
+      - `time_field`: which key the writer uses for its timestamp
+        (`timestamp` / `alive_at` / `written_at`) — see F101 schema drift.
+
+    Overall `ok` requires every present writer to be `fresh`. A missing
+    file is reported as a writer-specific issue but is GATED on the env
+    flag `ZEUS_HEARTBEAT_FRESHNESS_PAGES=1` before participating in
+    the top-level `healthy` predicate (default OFF preserves
+    shadow-run safety per the existing
+    `ZEUS_ENTRY_FORECAST_HEALTHCHECK_BLOCKERS` convention).
+    """
+    state_root = _status_path().parent
+    writers = {
+        "live_trading": {
+            "path": state_root / "daemon-heartbeat.json",
+            "time_field_candidates": ("timestamp", "written_at"),
+            "budget_seconds": HEARTBEAT_LIVE_TRADING_STALE_SECONDS,
+        },
+        "data_ingest": {
+            "path": state_root / "daemon-heartbeat-ingest.json",
+            "time_field_candidates": ("alive_at", "written_at", "timestamp"),
+            "budget_seconds": HEARTBEAT_DATA_INGEST_STALE_SECONDS,
+        },
+        "forecast_live": {
+            "path": state_root / "forecast-live-heartbeat.json",
+            "time_field_candidates": ("written_at", "timestamp"),
+            "budget_seconds": HEARTBEAT_FORECAST_LIVE_STALE_SECONDS,
+        },
+    }
+
+    results: dict[str, dict] = {}
+    any_violation = False
+    issue = None
+
+    for name, spec in writers.items():
+        entry: dict = {
+            "path": str(spec["path"]),
+            "budget_seconds": spec["budget_seconds"],
+        }
+        path = spec["path"]
+        if not path.exists():
+            entry["present"] = False
+            entry["fresh"] = False
+            entry["issue"] = f"HEARTBEAT_{name.upper()}_MISSING"
+            results[name] = entry
+            any_violation = True
+            issue = issue or entry["issue"]
+            continue
+
+        entry["present"] = True
+        try:
+            with open(path) as f:
+                payload = json.load(f)
+        except Exception as exc:
+            entry["fresh"] = False
+            entry["issue"] = f"HEARTBEAT_{name.upper()}_UNPARSEABLE"
+            entry["error"] = str(exc)
+            results[name] = entry
+            any_violation = True
+            issue = issue or entry["issue"]
+            continue
+
+        if not isinstance(payload, dict):
+            entry["fresh"] = False
+            entry["issue"] = f"HEARTBEAT_{name.upper()}_NOT_OBJECT"
+            results[name] = entry
+            any_violation = True
+            issue = issue or entry["issue"]
+            continue
+
+        time_field = None
+        timestamp_str = None
+        for candidate in spec["time_field_candidates"]:
+            if candidate in payload and payload[candidate]:
+                time_field = candidate
+                timestamp_str = str(payload[candidate])
+                break
+        entry["time_field"] = time_field
+        entry["timestamp"] = timestamp_str
+
+        if not timestamp_str:
+            entry["fresh"] = False
+            entry["issue"] = f"HEARTBEAT_{name.upper()}_NO_TIMESTAMP"
+            results[name] = entry
+            any_violation = True
+            issue = issue or entry["issue"]
+            continue
+
+        age_seconds = _status_age_seconds(timestamp_str)
+        entry["age_seconds"] = None if age_seconds is None else round(age_seconds, 1)
+        if age_seconds is None:
+            entry["fresh"] = False
+            entry["issue"] = f"HEARTBEAT_{name.upper()}_BAD_TIMESTAMP"
+            results[name] = entry
+            any_violation = True
+            issue = issue or entry["issue"]
+            continue
+
+        fresh = age_seconds <= spec["budget_seconds"]
+        entry["fresh"] = fresh
+        if not fresh:
+            entry["issue"] = f"HEARTBEAT_{name.upper()}_STALE"
+            any_violation = True
+            issue = issue or entry["issue"]
+        results[name] = entry
+
+    return {
+        "ok": not any_violation,
+        "issue": issue,
+        "writers": results,
+    }
+
+
 def _execution_capability_db_lock_status(status: dict | None) -> dict:
     execution_capability = (status or {}).get("execution_capability")
     if not isinstance(execution_capability, dict):
@@ -877,6 +1013,19 @@ def check() -> dict:
     result["source_health_ok"] = bool(result["source_health"].get("ok"))
     if not result["source_health_ok"]:
         result["source_health_issue"] = result["source_health"].get("issue") or "LIVE_SOURCE_HEALTH_STALE"
+
+    # WAVE-4 F91+F99+F100 — fold HB-1/HB-2/HB-3 staleness into healthcheck.
+    # Always EVALUATED (so operators see the per-writer detail in the JSON
+    # output) but only PAGES (participates in the `healthy` predicate) when
+    # ZEUS_HEARTBEAT_FRESHNESS_PAGES=1. Default OFF preserves shadow-run
+    # safety; flip ON after the cron path is observed clean for at least
+    # one Karachi window.
+    result["heartbeat_freshness"] = _heartbeat_freshness_status()
+    result["heartbeat_freshness_ok"] = bool(result["heartbeat_freshness"].get("ok"))
+    if not result["heartbeat_freshness_ok"]:
+        result["heartbeat_freshness_issue"] = (
+            result["heartbeat_freshness"].get("issue") or "HEARTBEAT_FRESHNESS_STALE"
+        )
     result["live_db_holders"] = _live_db_holder_status()
     result["live_db_holders_ok"] = bool(result["live_db_holders"].get("ok", True))
     if not result["live_db_holders_ok"]:
@@ -1128,6 +1277,15 @@ def check() -> dict:
     # behavior. Closes the fail-OPEN seam critic-opus ATTACK 4 surfaced.
     if os.environ.get("ZEUS_ENTRY_FORECAST_HEALTHCHECK_BLOCKERS") == "1":
         healthy = healthy and not bool(result.get("entry_forecast_blockers"))
+
+    # WAVE-4 F91+F99+F100 activation: when ZEUS_HEARTBEAT_FRESHNESS_PAGES=1,
+    # HB-1/HB-2/HB-3 staleness participates in the healthy predicate, closing
+    # the alert loop on daemon-liveness signals that were previously
+    # write-only. Default OFF preserves the legacy "GREEN even if a daemon
+    # heartbeat is silently stale" behavior; flip ON only after operator
+    # confirms the cron path has been clean for a Karachi window.
+    if os.environ.get("ZEUS_HEARTBEAT_FRESHNESS_PAGES") == "1":
+        healthy = healthy and bool(result.get("heartbeat_freshness_ok"))
 
     result["healthy"] = healthy
     return result
