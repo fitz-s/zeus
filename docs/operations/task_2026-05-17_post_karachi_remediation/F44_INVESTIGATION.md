@@ -108,7 +108,9 @@ in any plist or `cron/jobs.json`.
 `observation_instants_v2` was designed with a complete backfill path but an incomplete
 live-refresh path. The migration plan (obs-migration-iter3.md) specified the writer contract
 and source-tier rules but never produced a live-tick daemon or cron job for WU/Ogimet cities.
-The 2026-05-10 cutoff is when the last manual backfill run completed.
+The 2026-05-10 cutoff coincides with what we believe was the last manual backfill run
+(no backfill log was probed to confirm this exact date; it is inferred from the MAX(target_date)
+gap and is marked unverified per Fitz Constraint #4).
 
 The F44 discovery doc's hypothesis that "K1 broke a prior invocation" is incorrect: the
 K1 PR never touched any v2 writer invocation path. The omission predates K1.
