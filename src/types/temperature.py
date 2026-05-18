@@ -19,9 +19,56 @@ Two distinct types:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
+from decimal import Decimal
+from typing import Literal, NewType
 
 from scipy.stats import norm
+
+# ---------------------------------------------------------------------------
+# Celsius / Fahrenheit NewTypes (zero runtime cost — type-checker-only)
+#
+# Purpose: make Celsius + Fahrenheit un-typecheckable without an explicit
+# conversion.  Satisfies Fitz Constraint #1: "make the category impossible,
+# not just the instance."
+#
+# Design: NewType over float (for float-valued paths) and over Decimal
+# (for settlement-precision paths where arithmetic must stay exact).
+# The Temperature class below remains for objects that carry unit as a runtime
+# field; NewTypes are for function-boundary annotation where the unit is
+# statically known.
+# ---------------------------------------------------------------------------
+
+Celsius = NewType("Celsius", float)
+Fahrenheit = NewType("Fahrenheit", float)
+
+# Decimal variants for settlement math (SettlementRoundingPolicy paths).
+CelsiusDecimal = NewType("CelsiusDecimal", Decimal)
+FahrenheitDecimal = NewType("FahrenheitDecimal", Decimal)
+
+
+def degC(value: float) -> Celsius:
+    """Wrap a float as Celsius — makes unit intent explicit at call sites."""
+    return Celsius(value)
+
+
+def degF(value: float) -> Fahrenheit:
+    """Wrap a float as Fahrenheit — makes unit intent explicit at call sites."""
+    return Fahrenheit(value)
+
+
+def degC_d(value: Decimal) -> CelsiusDecimal:
+    """Wrap a Decimal as CelsiusDecimal for settlement-precision paths."""
+    return CelsiusDecimal(value)
+
+
+def f_to_c(value: Fahrenheit) -> Celsius:
+    """Convert Fahrenheit to Celsius.  Typed so mixed-unit addition fails mypy."""
+    return Celsius((float(value) - 32.0) * 5.0 / 9.0)
+
+
+def c_to_f(value: Celsius) -> Fahrenheit:
+    """Convert Celsius to Fahrenheit.  Typed so mixed-unit addition fails mypy."""
+    return Fahrenheit(float(value) * 9.0 / 5.0 + 32.0)
 
 Unit = Literal["F", "C"]
 
@@ -158,7 +205,7 @@ class TemperatureDelta:
     def __rmul__(self, scalar: object) -> TemperatureDelta:
         return self.__mul__(scalar)
 
-    def __truediv__(self, other: object):
+    def __truediv__(self, other: object) -> "TemperatureDelta | float":
         """Divide a delta by a scalar or another delta.
 
         delta / scalar → TemperatureDelta (e.g., spread std over N samples)
