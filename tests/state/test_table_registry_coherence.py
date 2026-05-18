@@ -307,6 +307,38 @@ class TestA4AssertDbMatchesRegistry:
             db_mod.ZEUS_WORLD_DB_PATH = orig_w
             db_mod.ZEUS_FORECASTS_DB_PATH = orig_f
 
+    def test_a4_allows_migration_ledger_on_world_and_forecasts(self, tmp_path):
+        """The migration runner ledger is an internal per-DB table, not schema drift."""
+        import src.state.db as db_mod
+        from scripts.migrations import _ensure_ledger
+        from src.state.table_registry import DBIdentity, assert_db_matches_registry
+
+        world_conn = sqlite3.connect(":memory:")
+        db_mod.init_schema_world_only(world_conn)
+        _ensure_ledger(world_conn, db_identity="world")
+        assert_db_matches_registry(world_conn, DBIdentity.WORLD)
+        world_conn.close()
+
+        wc_path = tmp_path / "zeus-world.db"
+        fc_path = tmp_path / "zeus-forecasts.db"
+        conn_w = sqlite3.connect(str(wc_path))
+        db_mod.init_schema(conn_w)
+        conn_w.close()
+
+        orig_w = db_mod.ZEUS_WORLD_DB_PATH
+        orig_f = db_mod.ZEUS_FORECASTS_DB_PATH
+        try:
+            db_mod.ZEUS_WORLD_DB_PATH = wc_path
+            db_mod.ZEUS_FORECASTS_DB_PATH = fc_path
+            forecasts_conn = sqlite3.connect(str(fc_path))
+            db_mod.init_schema_forecasts(forecasts_conn)
+            _ensure_ledger(forecasts_conn, db_identity="forecasts")
+            assert_db_matches_registry(forecasts_conn, DBIdentity.FORECASTS)
+            forecasts_conn.close()
+        finally:
+            db_mod.ZEUS_WORLD_DB_PATH = orig_w
+            db_mod.ZEUS_FORECASTS_DB_PATH = orig_f
+
     def test_a4_column_shape_check_raises_on_missing_column(self):
         """assert_db_matches_registry raises when required column is missing.
 
