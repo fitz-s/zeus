@@ -38,7 +38,7 @@ Meta-verify (sed-break/restore)
 - Marker dated >30 days back via sed → test fails with that script's name.
 - Restore → test passes for that script.
 - Marker dated >100 years back → test fails (covers any "old marker" case).
-- Marker dated 1 day in the future → passes (date arithmetic is one-sided).
+- Marker dated 1 day in the future → test fails (future dates are rejected).
 """
 from __future__ import annotations
 
@@ -105,14 +105,14 @@ _SCRIPTS_WITH_MARKERS = _scripts_with_markers()
 
 @pytest.mark.parametrize(
     "script",
-    _SCRIPTS_WITH_MARKERS,
-    ids=[s.name for s in _SCRIPTS_WITH_MARKERS] or ["no-markers-in-repo"],
+    _SCRIPTS_WITH_MARKERS if _SCRIPTS_WITH_MARKERS else [None],
+    ids=[s.name for s in _SCRIPTS_WITH_MARKERS] if _SCRIPTS_WITH_MARKERS else ["no-markers-in-repo"],
 )
-def test_defer_marker_within_window(script: Path) -> None:
+def test_defer_marker_within_window(script: Path | None) -> None:
     """A WRITER_LOCK_DEFER_REVIEW marker must be no more than 30 days old."""
-    if not _SCRIPTS_WITH_MARKERS:
-        # Vacuous pass: no markers in repo means no expiry risk.  Still fires
-        # the test node so the harness records the scan ran.
+    if script is None:
+        # Vacuous pass: no markers in repo means no expiry risk.  The sentinel
+        # param ensures pytest collects one node so the harness records the scan ran.
         return
 
     today = date.today()
@@ -130,6 +130,14 @@ def test_defer_marker_within_window(script: Path) -> None:
             overdue.append(
                 f"  line {line_no}: malformed date — marker is unparseable; "
                 "either fix the YYYY-MM-DD format or remove the marker"
+            )
+            continue
+        if marker_date > today:
+            overdue.append(
+                f"  line {line_no}: WRITER_LOCK_DEFER_REVIEW={marker_date.isoformat()} "
+                f"is future-dated (today={today.isoformat()}); markers must be set to "
+                "today or earlier — a future date silently extends the defer window "
+                "beyond the 30-day policy limit"
             )
             continue
         if marker_date < cutoff:
@@ -154,23 +162,22 @@ def test_defer_marker_within_window(script: Path) -> None:
     )
 
 
-def test_defer_marker_date_arithmetic_is_one_sided() -> None:
-    """Sanity check: a future-dated marker is treated as valid.
+def test_future_dated_marker_is_rejected() -> None:
+    """A future-dated WRITER_LOCK_DEFER_REVIEW marker must be flagged as overdue.
 
-    Markers should normally be set to today; a future date is unusual but not
-    a violation by itself — only past-the-window dates fail.  This test pins
-    the one-sided behaviour so the regex/date logic cannot be silently flipped.
+    Setting a marker date in the future would silently extend the defer window
+    beyond the 30-day policy limit.  The check must be two-sided: reject both
+    dates older than cutoff AND dates strictly after today.
     """
-    future = date.today() + timedelta(days=365)
+    today = date.today()
+    future = today + timedelta(days=365)
     sample = f"# WRITER_LOCK_DEFER_REVIEW={future.isoformat()}\n"
     markers = _extract_markers(sample)
     assert len(markers) == 1
     line_no, marker_date = markers[0]
     assert line_no == 1
     assert marker_date == future
-    today = date.today()
-    cutoff = today - timedelta(days=DEFER_WINDOW_DAYS)
-    assert marker_date >= cutoff, "Future dates must never appear overdue."
+    assert marker_date > today, "Precondition: synthetic date is in the future."
 
 
 def test_defer_marker_regex_captures_date_components() -> None:
@@ -197,11 +204,12 @@ def test_old_marker_in_synthetic_content_is_overdue() -> None:
     vacuously passes (no markers in repo), this test still proves the
     overdue-detection logic is functional.
     """
-    long_ago = date.today() - timedelta(days=DEFER_WINDOW_DAYS + 1)
+    today = date.today()
+    long_ago = today - timedelta(days=DEFER_WINDOW_DAYS + 1)
     sample = f"# WRITER_LOCK_DEFER_REVIEW={long_ago.isoformat()}\n"
     markers = _extract_markers(sample)
     assert markers
-    cutoff = date.today() - timedelta(days=DEFER_WINDOW_DAYS)
+    cutoff = today - timedelta(days=DEFER_WINDOW_DAYS)
     assert markers[0][1] < cutoff, (
         f"Synthetic marker {markers[0][1]} should be < cutoff {cutoff}"
     )
@@ -213,7 +221,8 @@ def test_marker_at_exact_window_boundary_is_valid() -> None:
     Boundary semantics: ``marker_date < cutoff`` triggers failure.
     ``marker_date == cutoff`` (exactly 30 days back) is still valid.
     """
-    boundary = date.today() - timedelta(days=DEFER_WINDOW_DAYS)
-    cutoff = date.today() - timedelta(days=DEFER_WINDOW_DAYS)
+    today = date.today()
+    boundary = today - timedelta(days=DEFER_WINDOW_DAYS)
+    cutoff = today - timedelta(days=DEFER_WINDOW_DAYS)
     assert boundary == cutoff
     assert not (boundary < cutoff), "Boundary day must remain valid (inclusive)."
