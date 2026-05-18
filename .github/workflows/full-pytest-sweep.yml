@@ -85,6 +85,19 @@ jobs:
           echo "rationale=${GATE_RATIONALE}"
           echo "promotion=${GATE_PROMOTION_CONDITION}"
 
+      - name: Assert collection floor (>=400 tests)
+        run: |
+          count=$(pytest --collect-only -q tests/ 2>&1 | grep -E '^[0-9]+ tests? collected' | grep -oE '^[0-9]+')
+          if [ -z "$count" ]; then
+            echo "::error::Could not determine collected test count"
+            exit 1
+          fi
+          echo "Collected ${count} tests"
+          if [ "$count" -lt 400 ]; then
+            echo "::error::Collection floor breach: only ${count} tests collected (floor: 400). Silent drop detected."
+            exit 1
+          fi
+
       - name: Run full pytest sweep
         # Inherits pytest.ini addopts: -m "not live_topology and not live_drift"
         # (measured sweep baseline: 753s / 12.5 min cold with this filter active).
