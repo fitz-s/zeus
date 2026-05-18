@@ -2,7 +2,7 @@
 # Purpose: Mock live execution happy/error path coverage with R3 cutover guard opt-outs.
 # Reuse: Run when _live_order side effects, ACK semantics, or mock CLOB behavior changes.
 # Created: 2026-04-27
-# Last reused/audited: 2026-04-27
+# Last reused/audited: 2026-05-18
 # Authority basis: R3 Z1 cutover guard audit; pre-existing live execution mock tests updated to opt out of CutoverGuard so they keep testing executor mechanics.
 """Tier 5.1 u2014 Live execution mock test.
 
@@ -262,3 +262,41 @@ class TestLiveOrderErrorModes:
 
         assert result.status == "pending"  # order succeeded despite alert failure
         assert result.order_id == "ord-ok"
+
+
+def test_redeem_submitter_row_failure_raises_for_scheduler_health(monkeypatch):
+    from src import main as main_mod
+    from src.contracts.fx_classification import FXClassificationPending
+
+    class _FakeAdapter:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    fake_conn = MagicMock()
+    fake_conn.execute.return_value.fetchall.return_value = [{"command_id": "redeem-c1"}]
+    fake_creds = {"private_key": "0xprivkey-test", "funder_address": "0xfunder-test"}
+
+    monkeypatch.setattr(main_mod, "get_mode", lambda: "live")
+    with patch(
+        "src.data.polymarket_client.resolve_polymarket_credentials",
+        return_value=fake_creds,
+    ), patch(
+        "src.state.db.get_trade_connection",
+        return_value=fake_conn,
+    ), patch(
+        "src.venue.polymarket_v2_adapter.PolymarketV2Adapter",
+        _FakeAdapter,
+    ), patch(
+        "src.execution.settlement_commands.submit_redeem",
+        side_effect=FXClassificationPending("Q-FX-1 open: ZEUS_PUSD_FX_CLASSIFIED is unset"),
+    ), patch(
+        "src.data.dual_run_lock.acquire_lock",
+    ) as mock_lock:
+        mock_lock.return_value.__enter__.return_value = True
+        mock_lock.return_value.__exit__.return_value = False
+
+        with pytest.raises(RuntimeError, match="redeem_submitter: submitted=0 failed=1"):
+            main_mod._redeem_submitter_cycle.__wrapped__()
+
+    fake_conn.rollback.assert_called_once()
+    fake_conn.close.assert_called_once()

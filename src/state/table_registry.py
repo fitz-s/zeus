@@ -202,6 +202,7 @@ def _load_registry() -> dict[tuple[str, DBIdentity], TableEntry]:
 
 # Load at module import time — any error here propagates FATAL per INV-05.
 _REGISTRY: dict[tuple[str, DBIdentity], TableEntry] = _load_registry()
+_INTERNAL_TABLES_ALLOWED_ON_ANY_DB = frozenset({"_migrations_applied"})
 
 
 # ---------------------------------------------------------------------------
@@ -321,7 +322,11 @@ def assert_db_matches_registry(conn: sqlite3.Connection, db_identity: DBIdentity
     # Check 1: set equality (excluding legacy_archived on both sides).
     live_tables_non_ghost = live_tables - legacy_archived_on_this_db
     missing_from_disk = registry_tables - live_tables_non_ghost
-    extra_on_disk = live_tables_non_ghost - registry_tables
+    extra_on_disk = (
+        live_tables_non_ghost
+        - registry_tables
+        - _INTERNAL_TABLES_ALLOWED_ON_ANY_DB
+    )
 
     if missing_from_disk or extra_on_disk:
         msg_parts = [

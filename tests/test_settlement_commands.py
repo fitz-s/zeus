@@ -1,7 +1,7 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-04-30
+# Last reused/audited: 2026-05-18
 # Authority basis: R3 R1 settlement/redeem command ledger packet
-# Lifecycle: created=2026-04-27; last_reviewed=2026-04-30; last_reused=2026-04-30
+# Lifecycle: created=2026-04-27; last_reviewed=2026-04-30; last_reused=2026-05-18
 # Purpose: Lock R3 R1 redeem command durability, Q-FX-1 gating, and tx-hash recovery.
 # Reuse: Run for settlement/redeem, harvester redemption, collateral FX gate, or payout-asset changes.
 """Regression tests for R3 R1 durable settlement/redeem commands."""
@@ -237,6 +237,206 @@ def test_redeem_failure_does_not_mark_position_settled(conn, monkeypatch):
     assert conn.execute("SELECT phase FROM position_current WHERE position_id = 'pos-r1'").fetchone()["phase"] == "active"
 
 
+def test_harvester_settlement_close_requires_redeem_enqueue_success(conn, monkeypatch):
+    import src.execution.exit_lifecycle as exit_lifecycle
+    import src.execution.harvester as harvester
+
+    conn.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, trade_id, strategy_key, city, target_date, updated_at, temperature_metric
+        )
+        VALUES (
+            'pos-karachi-redeem-gate', 'day0_window', 'trade-karachi-redeem-gate',
+            'opening_inertia', 'Karachi', '2026-05-17', ?, 'high'
+        )
+        """,
+        (NOW.isoformat(),),
+    )
+    pos = SimpleNamespace(
+        trade_id="trade-karachi-redeem-gate",
+        city="Karachi",
+        target_date="2026-05-17",
+        direction="buy_yes",
+        condition_id="cond-karachi",
+        token_id="yes-karachi",
+        no_token_id=None,
+        entry_price=0.37,
+        shares=1.5873,
+        p_posterior=0.71,
+        bin_label="37C or higher",
+        exit_price=None,
+        entry_method="model",
+        selected_method="model",
+        decision_snapshot_id="",
+        edge_source="opening_inertia",
+        strategy="opening_inertia",
+        last_exit_at="",
+        market_id="market-karachi",
+        state="day0_window",
+        exit_state="",
+        chain_state="",
+        temperature_metric="high",
+    )
+    portfolio = SimpleNamespace(positions=[pos], ignored_tokens=[])
+    settlement_records = []
+    mark_settled_calls = []
+    log_event_calls = []
+    suppress_calls = []
+
+    monkeypatch.setattr(harvester, "_get_canonical_exit_flag", lambda: True)
+    monkeypatch.setattr(
+        harvester,
+        "_settlement_economics_for_position",
+        lambda position: (position.shares, position.entry_price * position.shares),
+    )
+    monkeypatch.setattr(
+        harvester,
+        "enqueue_redeem_command",
+        lambda *args, **kwargs: {
+            "status": "error",
+            "command_id": None,
+            "reason": "no such column: winning_index_set",
+        },
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "mark_settled",
+        lambda *args, **kwargs: mark_settled_calls.append((args, kwargs)),
+    )
+    monkeypatch.setattr(harvester, "log_event", lambda *args, **kwargs: log_event_calls.append((args, kwargs)))
+    monkeypatch.setattr(
+        harvester,
+        "record_token_suppression",
+        lambda *args, **kwargs: suppress_calls.append((args, kwargs)) or {"status": "written"},
+    )
+
+    settled = harvester._settle_positions(
+        conn,
+        portfolio,
+        city="Karachi",
+        target_date="2026-05-17",
+        winning_label="37C or higher",
+        settlement_records=settlement_records,
+        settlement_authority="VERIFIED",
+        settlement_truth_source="WU",
+        settlement_market_slug="highest-temperature-in-karachi-on-may-17-2026",
+        settlement_temperature_metric="high",
+    )
+
+    assert settled == 0
+    assert settlement_records == []
+    assert mark_settled_calls == []
+    assert log_event_calls == []
+    assert suppress_calls == []
+
+
+def test_harvester_question_label_matches_canonical_winning_bin_for_redeem(conn, monkeypatch):
+    import src.execution.exit_lifecycle as exit_lifecycle
+    import src.execution.harvester as harvester
+
+    conn.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, trade_id, strategy_key, city, target_date, updated_at, temperature_metric
+        )
+        VALUES (
+            'pos-karachi-question-label', 'day0_window', 'trade-karachi-question-label',
+            'opening_inertia', 'Karachi', '2026-05-17', ?, 'high'
+        )
+        """,
+        (NOW.isoformat(),),
+    )
+    pos = SimpleNamespace(
+        trade_id="trade-karachi-question-label",
+        city="Karachi",
+        target_date="2026-05-17",
+        direction="buy_yes",
+        condition_id="cond-karachi",
+        token_id="yes-karachi",
+        no_token_id="no-karachi",
+        entry_price=0.37,
+        shares=1.5873,
+        p_posterior=0.71,
+        bin_label="Will the highest temperature in Karachi be 37°C or higher on May 17?",
+        exit_price=None,
+        entry_method="model",
+        selected_method="model",
+        decision_snapshot_id="snapshot-karachi",
+        edge_source="opening_inertia",
+        strategy="opening_inertia",
+        last_exit_at="",
+        market_id="market-karachi",
+        state="day0_window",
+        exit_state="",
+        chain_state="synced",
+        temperature_metric="high",
+    )
+    portfolio = SimpleNamespace(positions=[pos], ignored_tokens=[])
+    settlement_records = []
+    enqueue_calls = []
+    mark_settled_calls = []
+
+    monkeypatch.setattr(harvester, "_get_canonical_exit_flag", lambda: True)
+    monkeypatch.setattr(
+        harvester,
+        "_settlement_economics_for_position",
+        lambda position: (position.shares, position.entry_price * position.shares),
+    )
+
+    def _enqueue(*args, **kwargs):
+        enqueue_calls.append((args, kwargs))
+        return {"status": "queued", "command_id": "cmd-karachi", "reason": None}
+
+    def _mark_settled(portfolio_arg, trade_id, settlement_price, reason):
+        mark_settled_calls.append((trade_id, settlement_price, reason))
+        return SimpleNamespace(
+            trade_id=trade_id,
+            bin_label=pos.bin_label,
+            direction=pos.direction,
+            p_posterior=pos.p_posterior,
+            pnl=round(pos.shares * settlement_price - pos.entry_price * pos.shares, 2),
+            decision_snapshot_id=pos.decision_snapshot_id,
+            edge_source=pos.edge_source,
+            strategy=pos.strategy,
+            last_exit_at=NOW.isoformat(),
+            exit_price=settlement_price,
+            exit_reason=reason,
+        )
+
+    monkeypatch.setattr(harvester, "enqueue_redeem_command", _enqueue)
+    monkeypatch.setattr(exit_lifecycle, "mark_settled", _mark_settled)
+    monkeypatch.setattr(harvester, "record_token_suppression", lambda *a, **k: {"status": "written"})
+    monkeypatch.setattr(harvester, "log_event", lambda *a, **k: None)
+    monkeypatch.setattr(harvester, "log_settlement_event", lambda *a, **k: None)
+    monkeypatch.setattr(harvester, "_dual_write_canonical_settlement_if_available", lambda *a, **k: None)
+
+    settled = harvester._settle_positions(
+        conn,
+        portfolio,
+        city="Karachi",
+        target_date="2026-05-17",
+        winning_label="37°C or higher",
+        settlement_records=settlement_records,
+        settlement_authority="VERIFIED",
+        settlement_truth_source="forecasts.settlements",
+        settlement_market_slug="highest-temperature-in-karachi-on-may-17-2026",
+        settlement_temperature_metric="high",
+        settlement_source="WU",
+        settlement_value=37.0,
+    )
+
+    assert settled == 1
+    assert mark_settled_calls == [("trade-karachi-question-label", 1.0, "SETTLEMENT")]
+    assert len(enqueue_calls) == 1
+    _, enqueue_kwargs = enqueue_calls[0]
+    assert enqueue_kwargs["payout_asset"] == "pUSD"
+    assert enqueue_kwargs["market_id"] == "market-karachi"
+    assert enqueue_kwargs["pusd_amount_micro"] == 1_587_300
+    assert enqueue_kwargs["token_amounts"] == {"yes-karachi": 1.5873}
+    assert enqueue_kwargs["winning_index_set"] == '["2"]'
+
+
 def test_v1_legacy_unresolved_classified_separately_from_v2_pusd_payout(conn, monkeypatch):
     from src.execution.settlement_commands import SettlementState, request_redeem
 
@@ -249,17 +449,39 @@ def test_v1_legacy_unresolved_classified_separately_from_v2_pusd_payout(conn, mo
     assert json.loads(row["error_payload"])["reason"] == "legacy_usdc_e_payout_requires_operator_review"
 
 
-def test_redeem_blocked_until_q_fx_1_classified(conn, monkeypatch):
+def test_enqueue_backfills_existing_redeem_winning_index_set_before_settlement_close(conn):
+    from src.execution.harvester import enqueue_redeem_command
+
+    first = enqueue_redeem_command(
+        conn,
+        condition_id="condition-backfill-index-set",
+        payout_asset="pUSD",
+        market_id="market-backfill-index-set",
+        token_amounts={"yes-token": "1.5"},
+        winning_index_set=None,
+    )
+    assert first["status"] == "queued"
+    assert command(conn, first["command_id"])["winning_index_set"] is None
+
+    second = enqueue_redeem_command(
+        conn,
+        condition_id="condition-backfill-index-set",
+        payout_asset="pUSD",
+        market_id="market-backfill-index-set",
+        token_amounts={"yes-token": "1.5"},
+        winning_index_set='["2"]',
+    )
+
+    assert second == {"status": "already_exists", "command_id": first["command_id"], "reason": None}
+    assert command(conn, first["command_id"])["winning_index_set"] == '["2"]'
+    assert "REDEEM_INDEX_SET_BACKFILLED" in states(conn, first["command_id"])
+
+
+def test_redeem_submit_blocked_until_q_fx_1_classified(conn, monkeypatch):
     from src.execution.settlement_commands import request_redeem, submit_redeem
 
     monkeypatch.delenv("ZEUS_PUSD_FX_CLASSIFIED", raising=False)
-    with pytest.raises(FXClassificationPending):
-        request_redeem("condition-gated", "pUSD", market_id="market-gated", conn=conn, requested_at=NOW)
-    assert conn.execute("SELECT COUNT(*) FROM settlement_commands").fetchone()[0] == 0
-
-    monkeypatch.setenv("ZEUS_PUSD_FX_CLASSIFIED", FXClassification.FX_LINE_ITEM.value)
     command_id = request_redeem("condition-gated", "pUSD", market_id="market-gated", conn=conn, requested_at=NOW)
-    monkeypatch.delenv("ZEUS_PUSD_FX_CLASSIFIED", raising=False)
     adapter = FakeRedeemAdapter({"success": True, "tx_hash": "0xmust-not-call"})
 
     with pytest.raises(FXClassificationPending):

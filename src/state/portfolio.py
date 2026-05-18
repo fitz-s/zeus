@@ -1993,19 +1993,30 @@ def _track_exit(state: PortfolioState, pos: Position) -> None:
     })
 
     if state.audit_logging_enabled:
+        conn = None
         try:
-            from src.state.db import get_connection, log_trade_exit
+            from src.state.db import get_trade_connection_with_world, log_trade_exit
             # v4 plan §AX3: trade exit audit = LIVE (runtime exit path).
-            conn = get_connection(write_class="live")
+            conn = get_trade_connection_with_world(write_class="live")
             log_trade_exit(conn, pos)
             # INFO(DT#1): This commit is exempt from the commit_then_export
             # choke point. The exit audit row is itself the authoritative
             # record of the exit event, not a derived export. Durability
             # must survive a subsequent cycle crash or JSON write failure.
             conn.commit()
-            conn.close()
         except Exception as e:
+            if conn is not None:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
             logger.warning("Error logging trade exit to db: %s", e)
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
 
 
 

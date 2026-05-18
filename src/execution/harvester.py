@@ -12,6 +12,7 @@ import json
 import logging
 import math
 import os
+import re
 import sqlite3
 import time
 from dataclasses import dataclass
@@ -1180,6 +1181,42 @@ def _canonical_bin_label(lo: Optional[float], hi: Optional[float], unit: str) ->
     return f"{int(lo)}°{unit} or higher"
 
 
+def _label_temperature_unit(label: object) -> Optional[str]:
+    match = re.search(r"°\s*([FfCc])", str(label or ""))
+    if not match:
+        return None
+    return match.group(1).upper()
+
+
+def _parsed_temperature_bins_equivalent(left: object, right: object) -> Optional[bool]:
+    """Compare a market question/bin label against a canonical winning-bin label.
+
+    Returns None when either side is not parseable, so settlement does not turn an
+    authority gap into a losing close.
+    """
+    left_s = str(left or "").strip()
+    right_s = str(right or "").strip()
+    if not left_s or not right_s:
+        return None
+    if left_s == right_s:
+        return True
+
+    left_unit = _label_temperature_unit(left_s)
+    right_unit = _label_temperature_unit(right_s)
+    if left_unit and right_unit and left_unit != right_unit:
+        return None
+
+    left_bin = _parse_temp_range(left_s)
+    right_bin = _parse_temp_range(right_s)
+    if left_bin == (None, None) or right_bin == (None, None):
+        return None
+    return all(
+        (a is None and b is None)
+        or (a is not None and b is not None and math.isclose(float(a), float(b), abs_tol=1e-9))
+        for a, b in zip(left_bin, right_bin)
+    )
+
+
 _HARVESTER_LIVE_DATA_VERSION = {
     "wu_icao": "wu_icao_history_v1",
     "hko": "hko_daily_api_v1",
@@ -2149,7 +2186,16 @@ def _settle_positions(
 
         # Determine P&L — correct formula: shares × exit_price - cost_basis
         # Legacy-predecessor comparison found the old formula underestimated winning P&L
-        won = pos.bin_label == winning_label
+        won_result = _parsed_temperature_bins_equivalent(pos.bin_label, winning_label)
+        if won_result is None:
+            logger.warning(
+                "Skipping settlement for %s: position bin %r is not comparable to winning bin %r",
+                pos.trade_id,
+                pos.bin_label,
+                winning_label,
+            )
+            continue
+        won = won_result
         try:
             shares, settlement_cost_basis = _settlement_economics_for_position(pos)
         except ValueError as exc:
@@ -2160,10 +2206,59 @@ def _settle_positions(
             exit_price = 1.0 if won else 0.0
         else:
             exit_price = 1.0 if not won else 0.0
-        phase_before = _canonical_phase_before_for_settlement(pos)
         settlement_price = exit_price
         if getattr(pos, "state", "") == "economically_closed":
             settlement_price = getattr(pos, "exit_price", exit_price)
+
+        # Winning positions are claimable inventory. Do not mark them settled
+        # unless the durable redeem command is present or successfully queued.
+        if exit_price > 0:
+            if not pos.condition_id:
+                logger.error(
+                    "Skipping settlement close for %s: winning position has no condition_id for redeem command",
+                    pos.trade_id,
+                )
+                continue
+            redeem_token_id = pos.token_id if pos.direction == "buy_yes" else pos.no_token_id
+            # PR-I.5.a: encode the chain-winning outcome bin as a CTF indexSet.
+            # Binary market convention: YES outcome = index 1 -> indexSet 1<<1 = 2,
+            #   NO outcome = index 0 -> indexSet 1<<0 = 1.
+            # exit_price > 0 guarantees this position is on the winning side:
+            #   buy_yes + won=True  -> YES won -> indexSet ["2"]
+            #   buy_no  + won=False -> NO won  -> indexSet ["1"]
+            # V1 limitation: multi-bin (ranged market) encoding not supported.
+            # The `else` branch (direction not buy_yes/buy_no) explicitly sets
+            # winning_index_set=None, which suppresses the field for non-binary
+            # markets. This is WAD per PR-I.5.a scope; PR-I.5.b will extend
+            # to ranged markets. The buy_yes/buy_no branches are binary-only
+            # by design — they do NOT need an explicit is_binary_market guard
+            # because: (a) Zeus only enters binary CTF markets, and (b) the
+            # else=None fallback is the safe default for any unexpected direction.
+            if pos.direction == "buy_yes":
+                _winning_index_set: Optional[str] = '["2"]'
+            elif pos.direction == "buy_no":
+                _winning_index_set = '["1"]'
+            else:
+                _winning_index_set = None
+            redeem_result = enqueue_redeem_command(
+                conn,
+                condition_id=pos.condition_id,
+                payout_asset="pUSD",
+                market_id=getattr(pos, "market_id", "") or pos.condition_id,
+                pusd_amount_micro=int(round(shares * 1_000_000)),
+                token_amounts={redeem_token_id: shares} if redeem_token_id else {},
+                trade_id=pos.trade_id,
+                winning_index_set=_winning_index_set,
+            )
+            if redeem_result.get("status") == "error":
+                logger.error(
+                    "Skipping settlement close for %s: redeem command enqueue failed: %s",
+                    pos.trade_id,
+                    redeem_result.get("reason"),
+                )
+                continue
+
+        phase_before = _canonical_phase_before_for_settlement(pos)
 
         # F1: Route settlement close through exit_lifecycle when flag is on
         if _canonical_exit:
@@ -2191,45 +2286,6 @@ def _settle_positions(
             ))
             if strategy_tracker is not None:
                 strategy_tracker.record_settlement(closed)
-
-        # T2G-NO-INLINE-REQUEST-REDEEM: all redeem-state transitions route through
-        # enqueue_redeem_command (the single auditable entry point per T1C +
-        # T2G-REDEEM-STATE-TRANSITION-AUDITABLE). The prior inline
-        # 'from src.execution.settlement_commands import request_redeem' block
-        # is removed here; request_redeem is only called inside
-        # enqueue_redeem_command's body (src/execution/harvester.py:~499).
-        if exit_price > 0 and pos.condition_id:
-            redeem_token_id = pos.token_id if pos.direction == "buy_yes" else pos.no_token_id
-            # PR-I.5.a: encode the chain-winning outcome bin as a CTF indexSet.
-            # Binary market convention: YES outcome = index 1 → indexSet 1<<1 = 2,
-            #   NO outcome = index 0 → indexSet 1<<0 = 1.
-            # exit_price > 0 guarantees this position is on the winning side:
-            #   buy_yes + won=True  → YES won → indexSet ["2"]
-            #   buy_no  + won=False → NO won  → indexSet ["1"]
-            # V1 limitation: multi-bin (ranged market) encoding not supported.
-            # The `else` branch (direction not buy_yes/buy_no) explicitly sets
-            # winning_index_set=None, which suppresses the field for non-binary
-            # markets. This is WAD per PR-I.5.a scope; PR-I.5.b will extend
-            # to ranged markets. The buy_yes/buy_no branches are binary-only
-            # by design — they do NOT need an explicit is_binary_market guard
-            # because: (a) Zeus only enters binary CTF markets, and (b) the
-            # else=None fallback is the safe default for any unexpected direction.
-            if pos.direction == "buy_yes":
-                _winning_index_set: Optional[str] = '["2"]'
-            elif pos.direction == "buy_no":
-                _winning_index_set = '["1"]'
-            else:
-                _winning_index_set = None
-            enqueue_redeem_command(
-                conn,
-                condition_id=pos.condition_id,
-                payout_asset="pUSD",
-                market_id=getattr(pos, "market_id", "") or pos.condition_id,
-                pusd_amount_micro=int(round(shares * 1_000_000)),
-                token_amounts={redeem_token_id: shares} if redeem_token_id else {},
-                trade_id=pos.trade_id,
-                winning_index_set=_winning_index_set,
-            )
 
         # T2-C: Add settled token to ignored set (don't resurrect in reconciliation)
         token_id = pos.token_id if pos.direction == "buy_yes" else pos.no_token_id

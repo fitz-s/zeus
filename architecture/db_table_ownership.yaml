@@ -11,6 +11,7 @@
 #                        backtest_class | legacy_archived
 #   schema_version_owner — SCHEMA_VERSION | SCHEMA_FORECASTS_VERSION | none
 #   created_by         — init_schema | init_schema_forecasts | apply_v2_schema |
+#                        scripts.migrations._ensure_ledger |
 #                        migration_script_<name>
 #   pk_col             — primary key column name (or null for compound/no PK)
 #   required_columns   — optional list of {name, type, nullable} for boot column-shape check
@@ -48,6 +49,25 @@ metadata:
       audit_artifact: ".claude/jobs/fda4e853/audit_2026_05_17/E_db_split.md"
 
 tables:
+
+  # ---------------------------------------------------------------------------
+  # MIGRATION FRAMEWORK tables
+  # ---------------------------------------------------------------------------
+
+  - name: _migrations_applied
+    db: trade
+    schema_class: trade_class
+    schema_version_owner: none
+    created_by: scripts.migrations._ensure_ledger
+    pk_col: name
+    required_columns:
+      - {name: name, type: TEXT, nullable: true}
+      - {name: applied_at, type: TEXT, nullable: false}
+    notes: >
+      Per-DB migration ledger for state/zeus_trades.db. Created by the migration
+      framework and by init_schema_trade_only before boot-time
+      assert_db_matches_registry(TRADE), so both fresh and already-migrated
+      trade DBs carry the same registry-declared table.
 
   # ---------------------------------------------------------------------------
   # FORECAST-CLASS tables (db: forecasts, authoritative in zeus-forecasts.db)

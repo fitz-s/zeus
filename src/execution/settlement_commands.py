@@ -232,16 +232,21 @@ def request_redeem(
     V1 limitation: multi-bin (ranged market) encoding is not supported here;
     callers should pass None for non-binary markets until PR-I.5.b extends this.
 
-    pUSD redemption/accounting is Q-FX-1 gated.  Legacy USDC.e payout is not
-    silently promoted into pUSD accounting; it is recorded directly into
-    ``REDEEM_REVIEW_REQUIRED`` for operator classification.
+    This records intent only. pUSD redemption submission/accounting remains
+    Q-FX-1 gated in submit_redeem(); a missing FX classification must not erase
+    the durable command that tells the operator what work is pending. Legacy
+    USDC.e payout is not silently promoted into pUSD accounting; it is recorded
+    directly into ``REDEEM_REVIEW_REQUIRED`` for operator classification.
     """
 
     condition_id = _require_nonempty("condition_id", condition_id)
     market_id = _require_nonempty("market_id", market_id or condition_id)
     payout_asset = _normalize_payout_asset(payout_asset)
-    if payout_asset == "pUSD":
-        require_pusd_redemption_allowed(fx_classification)
+    if fx_classification is not None and not isinstance(fx_classification, FXClassification):
+        raise TypeError(
+            "pUSD redemption FX classification must be FXClassification, "
+            f"got {type(fx_classification).__name__}"
+        )
     if pusd_amount_micro is not None and int(pusd_amount_micro) < 0:
         raise ValueError("pusd_amount_micro must be non-negative")
 
@@ -255,7 +260,7 @@ def request_redeem(
 
     existing = conn.execute(
         """
-        SELECT command_id FROM settlement_commands
+        SELECT command_id, state, winning_index_set FROM settlement_commands
          WHERE condition_id = ?
            AND market_id = ?
            AND payout_asset = ?
@@ -266,6 +271,33 @@ def request_redeem(
         (condition_id, market_id, payout_asset),
     ).fetchone()
     if existing is not None:
+        if winning_index_set is not None and existing["winning_index_set"] is None:
+            requested_at_s = _coerce_time(requested_at)
+            with _savepoint(conn):
+                conn.execute(
+                    """
+                    UPDATE settlement_commands
+                       SET winning_index_set = ?
+                     WHERE command_id = ?
+                       AND winning_index_set IS NULL
+                    """,
+                    (winning_index_set, existing["command_id"]),
+                )
+                _append_event(
+                    conn,
+                    str(existing["command_id"]),
+                    "REDEEM_INDEX_SET_BACKFILLED",
+                    {
+                        "condition_id": condition_id,
+                        "market_id": market_id,
+                        "payout_asset": payout_asset,
+                        "winning_index_set": winning_index_set,
+                        "previous_state": existing["state"],
+                    },
+                    recorded_at=requested_at_s,
+                )
+            if own_conn:
+                conn.commit()
         if own_conn:
             conn.close()
         return str(existing["command_id"])
