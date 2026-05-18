@@ -1900,7 +1900,7 @@ def main():
         scheduler.start()
     except (KeyboardInterrupt, SystemExit):
         logger.info("Zeus shutting down")
-        scheduler.shutdown()
+        scheduler.shutdown(wait=True)  # U7: wait=True so inflight cycles commit before exit
 
 
 if __name__ == "__main__":
