@@ -376,3 +376,94 @@ def assert_db_matches_registry(conn: sqlite3.Connection, db_identity: DBIdentity
                     f"column '{col_spec.name}' nullable={live_nullable} but registry requires "
                     f"nullable={col_spec.nullable}."
                 )
+
+
+# ---------------------------------------------------------------------------
+# A5 (v1.F44 2026-05-18): assert_writer_jobs_registered
+# Boot-check: every YAML entry with daemon_writer != "none" must have its
+# job string present in the set of @_scheduler_job(...) decorators in
+# src/ingest_main.py.  Raises RegistryAssertionError (FATAL) if not wired.
+# ---------------------------------------------------------------------------
+
+def assert_writer_jobs_registered(ingest_main_source: str | None = None) -> None:
+    """Verify every daemon_writer declared in the registry has a scheduler job.
+
+    Walks architecture/db_table_ownership.yaml for entries with a
+    ``daemon_writer`` field whose value is not ``"none"``, then AST-scans
+    ``src/ingest_main.py`` to collect all ``@_scheduler_job("...")`` decorator
+    strings.  Raises RegistryAssertionError for any mismatch.
+
+    Args:
+        ingest_main_source: Python source text of ingest_main.py.  Injected
+            by tests; production callers pass None (auto-resolved from repo root).
+    """
+    import ast
+
+    # --- 1. Collect daemon_writer entries from raw YAML (extra fields tolerated) ---
+    try:
+        raw_yaml = yaml.safe_load(_REGISTRY_PATH.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise RegistryAssertionError(
+            f"assert_writer_jobs_registered: could not read registry YAML: {exc}"
+        ) from exc
+
+    declared: dict[str, str] = {}  # table_name → daemon_writer job id
+    for section in raw_yaml.get("tables", {}).values():
+        if not isinstance(section, list):
+            continue
+        for entry in section:
+            if not isinstance(entry, dict):
+                continue
+            dw = entry.get("daemon_writer")
+            if dw and str(dw).strip().lower() != "none":
+                declared[str(entry["name"])] = str(dw).strip()
+
+    if not declared:
+        # Nothing to check — registry has no daemon_writer entries yet
+        return
+
+    # --- 2. Collect @_scheduler_job("...") strings via AST ---
+    if ingest_main_source is None:
+        ingest_main_path = _REGISTRY_PATH.parent.parent / "src" / "ingest_main.py"
+        try:
+            ingest_main_source = ingest_main_path.read_text(encoding="utf-8")
+        except Exception as exc:
+            raise RegistryAssertionError(
+                f"assert_writer_jobs_registered: could not read ingest_main.py: {exc}"
+            ) from exc
+
+    try:
+        tree = ast.parse(ingest_main_source)
+    except SyntaxError as exc:
+        raise RegistryAssertionError(
+            f"assert_writer_jobs_registered: could not parse ingest_main.py: {exc}"
+        ) from exc
+
+    registered_jobs: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef):
+            continue
+        for decorator in node.decorator_list:
+            # Match: @_scheduler_job("job_name")
+            if not isinstance(decorator, ast.Call):
+                continue
+            func = decorator.func
+            if not (isinstance(func, ast.Name) and func.id == "_scheduler_job"):
+                continue
+            if decorator.args and isinstance(decorator.args[0], ast.Constant):
+                registered_jobs.add(str(decorator.args[0].value))
+
+    # --- 3. Cross-check ---
+    missing: list[str] = []
+    for table_name, job_id in sorted(declared.items()):
+        if job_id not in registered_jobs:
+            missing.append(
+                f"  table '{table_name}' declares daemon_writer='{job_id}' "
+                f"but no @_scheduler_job('{job_id}') found in ingest_main.py"
+            )
+
+    if missing:
+        raise RegistryAssertionError(
+            "assert_writer_jobs_registered: FATAL — registry declares daemon writers "
+            "that are not wired as scheduler jobs:\n" + "\n".join(missing)
+        )
