@@ -1,5 +1,6 @@
-# Created: 2026-04-26
-# Last reused/audited: 2026-05-17
+# Lifecycle: created=2026-04-26; last_reviewed=2026-05-18; last_reused=2026-05-18
+# Purpose: Command recovery loop for unresolved venue command side effects.
+# Reuse: Run when command recovery, venue order payload normalization, or unknown side-effect resolution changes.
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md §P1.S4
 #                  + docs/operations/task_2026-05-15_live_order_e2e_goal/LIVE_ORDER_E2E_GOAL_PLAN.md
 """Command recovery loop — INV-31.
@@ -31,6 +32,7 @@ import hashlib
 import logging
 import json
 import sqlite3
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Optional
@@ -122,6 +124,30 @@ def _age_seconds(cmd: VenueCommand, *, now: datetime) -> float | None:
     return (now - started_at).total_seconds()
 
 
+def _venue_order_payload(value: object | None) -> dict | None:
+    """Normalize live adapter order objects to a JSON-safe venue payload."""
+
+    if value is None:
+        return None
+    if isinstance(value, Mapping):
+        payload = dict(value)
+    else:
+        raw = getattr(value, "raw", None)
+        if isinstance(raw, Mapping):
+            payload = dict(raw)
+        else:
+            payload = dict(getattr(value, "__dict__", {}) or {})
+    status = getattr(value, "status", None)
+    if status not in (None, "") and not (payload.get("status") or payload.get("state")):
+        payload["status"] = str(status)
+    order_id = getattr(value, "order_id", None)
+    if order_id not in (None, "") and not _extract_order_id(payload):
+        payload["orderID"] = str(order_id)
+    if not (_extract_order_id(payload) or payload.get("status") or payload.get("state")):
+        return None
+    return payload
+
+
 def _extract_order_id(venue_resp: dict | None, fallback: str | None = None) -> str | None:
     if not isinstance(venue_resp, dict):
         return fallback
@@ -161,16 +187,17 @@ def _lookup_unknown_side_effect_order(cmd: VenueCommand, client) -> tuple[str, d
     """Return ('found'|'not_found'|'unavailable', venue_response)."""
 
     if cmd.venue_order_id:
-        return "found", client.get_order(cmd.venue_order_id)
+        return "found", _venue_order_payload(client.get_order(cmd.venue_order_id))
     finder = getattr(client, "find_order_by_idempotency_key", None)
     if callable(finder):
         found = finder(cmd.idempotency_key.value)
         if found is None:
             return "found", None
-        if isinstance(found, dict):
-            return "found", found
+        payload = _venue_order_payload(found)
+        if payload is not None:
+            return "found", payload
         logger.warning(
-            "recovery: command %s idempotency-key lookup returned non-dict %s; "
+            "recovery: command %s idempotency-key lookup returned non-order %s; "
             "treating lookup as unavailable",
             cmd.command_id, type(found).__name__,
         )
@@ -1194,7 +1221,7 @@ def reconcile_matched_order_facts(conn: sqlite3.Connection, client) -> dict:
                 summary["stayed"] += 1
                 continue
             try:
-                point_order = get_order(order_id)
+                point_order = _venue_order_payload(get_order(order_id))
             except Exception as exc:
                 logger.warning(
                     "recovery: matched order point lookup failed for command %s order %s: %s",
@@ -1204,7 +1231,7 @@ def reconcile_matched_order_facts(conn: sqlite3.Connection, client) -> dict:
                 )
                 summary["errors"] += 1
                 continue
-            if not isinstance(point_order, dict):
+            if point_order is None:
                 summary["stayed"] += 1
                 continue
             venue_status = str(_first_present(point_order, "status", "state") or "").upper()
@@ -1473,7 +1500,7 @@ def reconcile_local_orphan_no_fill_findings(conn: sqlite3.Connection, client) ->
                 summary["errors"] += 1
                 continue
             try:
-                venue_resp = get_order(venue_order_id)
+                venue_payload = _venue_order_payload(get_order(venue_order_id))
             except Exception as exc:
                 logger.warning(
                     "recovery: local orphan venue lookup for command %s (venue_order_id=%s) raised: %s",
@@ -1483,7 +1510,6 @@ def reconcile_local_orphan_no_fill_findings(conn: sqlite3.Connection, client) ->
                 )
                 summary["errors"] += 1
                 continue
-            venue_payload = venue_resp if isinstance(venue_resp, dict) else None
             venue_status = (
                 str((venue_payload or {}).get("status") or (venue_payload or {}).get("state") or "NOT_FOUND")
                 .upper()
@@ -1554,11 +1580,9 @@ def _point_order_terminal_for_partial_remainder(client, venue_order_id: str) -> 
     get_order = getattr(client, "get_order", None)
     if not callable(get_order):
         raise RuntimeError("client lacks get_order; partial remainder terminal proof is unknown")
-    raw = get_order(venue_order_id)
+    raw = _venue_order_payload(get_order(venue_order_id))
     if raw is None:
         return True, "NOT_FOUND", None
-    if not isinstance(raw, dict):
-        return False, "UNKNOWN", None
     status = str(raw.get("status") or raw.get("state") or "").upper()
     if status in _TERMINAL_NO_FILL_VENUE_STATUSES:
         return True, status, raw
@@ -1826,7 +1850,7 @@ def _review_required_cancel_unknown_live_order_recovery(
             exc,
         )
         return "error"
-    order = _raw_payload(raw_order)
+    order = _venue_order_payload(raw_order) or {}
     if not order:
         return "stayed"
     order_id = _extract_order_id(order)
@@ -2469,7 +2493,7 @@ def _reconcile_row(
 
             venue_order_id = _extract_order_id(venue_resp, cmd.venue_order_id)
             if venue_resp is not None:
-                venue_status = str(venue_resp.get("status") or "").upper()
+                venue_status = _order_status(venue_resp)
                 payload = {
                     "venue_order_id": venue_order_id,
                     "venue_status": venue_status,
@@ -2598,7 +2622,7 @@ def _reconcile_row(
 
         # Venue lookup — exceptions propagate to caller's per-row try/except.
         try:
-            venue_resp = client.get_order(venue_order_id)
+            venue_resp = _venue_order_payload(client.get_order(venue_order_id))
         except Exception as exc:
             # Network / auth error: leave in current state, retry next cycle.
             logger.warning(
@@ -2615,7 +2639,7 @@ def _reconcile_row(
             if venue_resp is not None:
                 # Inspect venue status — pre-fix code unconditionally emitted
                 # SUBMIT_ACKED even when status="REJECTED" (HIGH-2).
-                venue_status = str(venue_resp.get("status") or "").upper()
+                venue_status = _order_status(venue_resp)
                 if venue_status == "REJECTED":
                     append_event(
                         conn,
@@ -2681,7 +2705,7 @@ def _reconcile_row(
         if state == CommandState.UNKNOWN:
             if venue_resp is not None:
                 # Same status-aware branching as SUBMITTING (HIGH-2 symmetric).
-                venue_status = str(venue_resp.get("status") or "").upper()
+                venue_status = _order_status(venue_resp)
                 if venue_status == "REJECTED":
                     append_event(
                         conn,
@@ -2753,7 +2777,7 @@ def _reconcile_row(
                     cmd.command_id,
                 )
                 return "advanced"
-            venue_status = str(venue_resp.get("status") or "").upper()
+            venue_status = _order_status(venue_resp)
             if venue_status in _CANCEL_TERMINAL_STATUSES:
                 append_event(
                     conn,

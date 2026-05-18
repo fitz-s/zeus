@@ -29,6 +29,8 @@ from __future__ import annotations
 
 import sqlite3
 
+TARGET_DB = "world"
+
 _CREATE_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS db_chunk_boundary_events (
     event_id       TEXT PRIMARY KEY,

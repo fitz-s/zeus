@@ -43,6 +43,8 @@ import sys
 from pathlib import Path
 from typing import Iterable
 
+TARGET_DB = "trade"
+
 logger = logging.getLogger(__name__)
 
 NEW_STATE = "REDEEM_OPERATOR_REQUIRED"

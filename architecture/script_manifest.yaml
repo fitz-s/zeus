@@ -446,7 +446,7 @@ scripts:
     reason: "Classifies existing venue_commands, venue_command_events, submission envelopes, order facts, and trade facts. It fails closed unless an accepted/resting or filled command has daemon-to-command correlation fields, venue order identity, live venue facts, and matching record-chain proof."
   live_health_probe.py:
     # Created: 2026-05-11
-    # Last reused or audited: 2026-05-16
+    # Last reused or audited: 2026-05-18
     # Authority basis: docs/operations/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md; docs/operations/task_2026-05-16_live_continuous_run_package/LIVE_CONTINUOUS_RUN_PACKAGE_PLAN.md Phase C
     class: diagnostic
     lifecycle: long_lived
@@ -649,19 +649,19 @@ scripts:
     lifecycle: long_lived
     authority_scope: repair_write
     reuse_when: >
-      Promote completed STAGE_DB calibration_v2 (platt_models_v2 + optional pairs) to PROD via atomic backup + BEGIN IMMEDIATE write. Sentinel-completeness gate refuses incomplete rebuilds.
+      Promote completed STAGE_DB platt_models_v2 to PROD via atomic backup + BEGIN IMMEDIATE write. Sentinel-completeness gate refuses incomplete rebuilds. calibration_pairs_v2 is forecast-class authority and uses promote_calibration_pairs_v2.py.
     do_not_use_when: >
       STAGE_DB sentinel state != COMPLETE (script refuses); PROD currently held by another writer (BEGIN IMMEDIATE will fail).
-    canonical_command: "python3 scripts/promote_calibration_v2_stage_to_prod.py {inspect|promote|verify} --stage-db <PATH> [--commit] [--include-pairs] [--null-snapshot-id]"
+    canonical_command: "python3 scripts/promote_calibration_v2_stage_to_prod.py {inspect|promote|verify} --stage-db <PATH> [--commit]"
     delete_policy: retain_until_superseded
-    read_targets: [state/zeus-world.db, state/zeus-forecasts.db, '<STAGE_DB_PATH>']
-    write_targets: [state/zeus-world.db, state/zeus-forecasts.db]
+    read_targets: [state/zeus-world.db, '<STAGE_DB_PATH>']
+    write_targets: [state/zeus-world.db]
     dry_run_default: true
     apply_flag: "--commit"
     target_db: state/zeus-world.db
     external_inputs: []
     dangerous_if_run: true
-    promotion_barrier: "--commit required; sentinel-completeness gate refuses incomplete STAGE; atomic gzipped backup before BEGIN IMMEDIATE; rollback if commit fails."
+    promotion_barrier: "--commit required; sentinel-completeness, non-empty STAGE, and STAGE/PROD schema-match gates run before backup/write; atomic gzipped backup before BEGIN IMMEDIATE; rollback if commit fails."
     required_helpers: []
     required_tests: [tests/test_promote_calibration_v2_stage_to_prod.py]
   regenerate_registries.py:

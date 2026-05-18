@@ -1,5 +1,5 @@
 # Created: 2026-05-07
-# Last reused or audited: 2026-05-07
+# Last reused or audited: 2026-05-18
 # Authority basis: backtest_v2_port_2026_05_07.md §D2+D3
 #
 # Dynamic SQL safety (PR #87 Copilot reply): all f-string SQL in this module
@@ -42,10 +42,12 @@ from typing import Literal, Optional
 import numpy as np
 
 from src.config import City, cities_by_name, edge_n_bootstrap, settings
+from src.contracts.season import season_from_month
 from src.contracts.settlement_semantics import SettlementSemantics
 from src.engine.replay import (
     BACKTEST_AUTHORITY_SCOPE,
     ReplayContext,
+    ReplayPreflightError,
     ReplaySummary,
     _insert_backtest_outcome,
     _insert_backtest_run,
@@ -204,8 +206,6 @@ def _score_one_snapshot(
     Returns a dict with keys: city, target_date, snapshot_id, hit, brier,
     picked_labels, winning_bin, missing_reason, timezone_class.
     """
-    from src.calibration.manager import get_calibrator, season_from_month
-    from src.calibration.platt import calibrate_and_normalize
     from src.data.market_scanner import _parse_temp_range
     from src.strategy.market_fusion import MODEL_ONLY_POSTERIOR_MODE
     from src.strategy.market_analysis import MarketAnalysis
@@ -262,10 +262,22 @@ def _score_one_snapshot(
         base_result["missing_reason"] = "empty_p_raw"
         return base_result
 
+    if not ctx._calibration_pairs_v2_table:
+        raise ReplayPreflightError(
+            "selection_coverage requires forecasts calibration_pairs_v2 authority table."
+        )
+
     # -- Load calibration pair labels for bin construction
     cp_rows = ctx.conn.execute(
-        f"SELECT DISTINCT range_label FROM {ctx._sp}calibration_pairs_v2 WHERE city = ? AND target_date = ? ORDER BY range_label",
-        (city.name, target_date),
+        f"""
+        SELECT DISTINCT range_label
+        FROM {ctx._calibration_pairs_v2_table}
+        WHERE city = ?
+          AND target_date = ?
+          AND temperature_metric = ?
+        ORDER BY range_label
+        """,
+        (city.name, target_date, temperature_metric),
     ).fetchall()
     labels = []
     for row in cp_rows:
@@ -315,6 +327,9 @@ def _score_one_snapshot(
     season = season_from_month(target_d.month, lat=city.lat)
 
     if not override_platt and cal_supported:
+        from src.calibration.manager import get_calibrator
+        from src.calibration.platt import calibrate_and_normalize
+
         cal, _ = get_calibrator(
             ctx.conn, city, target_date,
             temperature_metric=temperature_metric,
@@ -471,7 +486,8 @@ def run_selection_coverage(
 ) -> ReplaySummary:
     """Run selection-coverage replay: score live FDR bin picks vs settled outcomes.
 
-    Reads from world.db (calibration_pairs_v2, settlements_v2, ensemble_snapshots_v2).
+    Reads from forecasts DB authority tables
+    (calibration_pairs_v2, settlements_v2, ensemble_snapshots_v2).
     Writes ONLY to zeus_backtest.db. Does NOT write to world.db.
 
     Args:
@@ -488,9 +504,14 @@ def run_selection_coverage(
     conn.row_factory = sqlite3.Row
     ctx = ReplayContext(conn, allow_snapshot_only_reference=True)
 
-    # Resolve calibration_pairs_v2 table name (may be world. prefixed or local)
-    cp_v2_table = f"{ctx._sp}calibration_pairs_v2"
-    sv2_table = f"{ctx._sp}settlements_v2"
+    cp_v2_table = ctx._calibration_pairs_v2_table
+    sv2_table = ctx._settlements_v2_table
+    if not cp_v2_table or not sv2_table:
+        conn.close()
+        raise ReplayPreflightError(
+            "selection_coverage requires forecasts calibration_pairs_v2 and "
+            "settlements_v2 authority tables."
+        )
 
     # Check whether settlements_v2 has a snapshot_id column.
     # Use PRAGMA <schema>.table_info(<table>) so the query runs against the

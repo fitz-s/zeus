@@ -1,15 +1,32 @@
-# Lifecycle: created=2026-05-17; last_reviewed=2026-05-17; last_reused=never
+# Lifecycle: created=2026-05-17; last_reviewed=2026-05-18; last_reused=2026-05-18
 # Purpose: CLI entry point for scripts.migrations runner.
 #   Usage: python -m scripts.migrations apply [--dry-run] [--target=NAME] [--db-path=PATH]
 # Authority: docs/operations/task_2026-05-17_post_karachi_remediation/FIX_SEV1_BUNDLE.md §F23
 """Migration runner CLI.
 
-Default target DB is zeus_trades.db via get_trade_connection().
-Pass --db-path to run against an arbitrary SQLite file (e.g. for CI / tmp DB tests).
+When --target names a migration with TARGET_DB metadata, the runner opens that
+canonical database by default. Pass --db-path together with --db-identity for
+CI/temp DB tests.
 """
 import argparse
 import sqlite3
 import sys
+
+
+def _canonical_connection(db_identity: str) -> sqlite3.Connection:
+    from src.state.db import (
+        get_forecasts_connection,
+        get_trade_connection,
+        get_world_connection,
+    )
+
+    if db_identity == "trade":
+        return get_trade_connection()
+    if db_identity == "world":
+        return get_world_connection()
+    if db_identity == "forecasts":
+        return get_forecasts_connection()
+    raise ValueError(f"unknown db_identity={db_identity!r}")
 
 
 def _main(argv: list[str] | None = None) -> int:
@@ -35,26 +52,41 @@ def _main(argv: list[str] | None = None) -> int:
         metavar="PATH",
         default=None,
         help=(
-            "Path to a SQLite database file. "
-            "Defaults to zeus_trades.db via get_trade_connection()."
+            "Path to a SQLite database file. Requires --db-identity unless "
+            "--target declares TARGET_DB."
+        ),
+    )
+    apply_p.add_argument(
+        "--db-identity",
+        choices=("trade", "world", "forecasts"),
+        default=None,
+        help=(
+            "Identity of the opened DB. Defaults to the target migration's "
+            "TARGET_DB, or trade when applying pending trade migrations."
         ),
     )
 
     args = parser.parse_args(argv)
 
     if args.command == "apply":
-        from scripts.migrations import apply_migrations
+        from scripts.migrations import apply_migrations, target_db_for_migration
+
+        target_db = target_db_for_migration(args.target) if args.target else None
+        db_identity = args.db_identity or target_db or "trade"
 
         if args.db_path:
             conn = sqlite3.connect(args.db_path)
             conn.row_factory = sqlite3.Row
         else:
-            from src.state.db import get_trade_connection
-
-            conn = get_trade_connection()
+            conn = _canonical_connection(db_identity)
 
         try:
-            applied = apply_migrations(conn, dry_run=args.dry_run, target=args.target)
+            applied = apply_migrations(
+                conn,
+                dry_run=args.dry_run,
+                target=args.target,
+                db_identity=db_identity,
+            )
         finally:
             conn.close()
 

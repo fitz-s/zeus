@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# Lifecycle: created=2026-05-11; last_reviewed=2026-05-16; last_reused=2026-05-17
+# Lifecycle: created=2026-05-11; last_reviewed=2026-05-18; last_reused=2026-05-18
 # Purpose: One-shot live health signal for daemon, forecast-live owner, riskguard, status summary, and entry capability.
 # Reuse: Run when live process ownership, forecast-live heartbeat semantics, or operator health alerts change.
 # Created: 2026-05-11
-# Last reused/audited: 2026-05-17
+# Last reused/audited: 2026-05-18
 # Authority basis: docs/operations/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md; docs/operations/task_2026-05-16_live_continuous_run_package/LIVE_CONTINUOUS_RUN_PACKAGE_PLAN.md Phase C; 2026-05-17 volatile runtime-artifact code-plane contract.
 """One-shot live health probe.
 
@@ -108,9 +108,26 @@ def _parse_iso_epoch(value):
     if not value:
         return None
     try:
-        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()
+        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            # Zeus heartbeat producers write timezone-aware UTC strings. Legacy
+            # naive strings are interpreted as UTC instead of host-local time so
+            # health status does not vary with operator machine timezone.
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.timestamp()
     except ValueError:
         return None
+
+def _heartbeat_payload_age(payload, *, now_epoch=None):
+    now = float(now_epoch if now_epoch is not None else datetime.now(timezone.utc).timestamp())
+    for key in ("written_at", "timestamp"):
+        epoch = _parse_iso_epoch((payload or {}).get(key))
+        if epoch is None:
+            continue
+        if epoch > now:
+            return None, None
+        return max(0, int(now - epoch)), key
+    return None, None
 
 def _process_start_epoch(pid):
     try:
@@ -386,10 +403,15 @@ def main():
 
     forecast_hb_path = os.path.join(ROOT, FORECAST_LIVE_HEARTBEAT)
     forecast_hb = _load_json(forecast_hb_path)
+    forecast_hb_age, forecast_hb_age_source = _heartbeat_payload_age(forecast_hb)
+    if forecast_hb_age is None:
+        forecast_hb_age = _age(forecast_hb_path)
+        forecast_hb_age_source = "mtime"
     report["forecast_live_hb"] = {
         "alive": forecast_hb.get("alive"),
         "status": forecast_hb.get("status"),
-        "age_s": _age(forecast_hb_path),
+        "age_s": forecast_hb_age,
+        "age_source": forecast_hb_age_source,
     }
 
     # Process liveness

@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-04-25; last_reviewed=2026-04-30; last_reused=2026-05-06
+# Lifecycle: created=2026-04-25; last_reviewed=2026-05-18; last_reused=2026-05-18
 # Purpose: Lock replay CLI and market-events preflight behavior against unsafe diagnostic fallback.
 # Reuse: Run when replay preflight, WU settlement sweep, or replay CLI error handling changes.
 # Authority basis: POST_AUDIT_HANDOFF 4.2.C market-events preflight packet
@@ -15,7 +15,7 @@ from src.engine.replay import (
     _market_price_linkage_limitations,
     run_replay,
 )
-from src.state.db import get_connection, init_schema
+from src.state.db import get_connection, init_schema, init_schema_forecasts
 import scripts.run_replay as cli_module
 from scripts.run_replay import _format_total_pnl, _pnl_available
 
@@ -43,13 +43,14 @@ def _mark_settlements_verified(conn) -> None:
     conn.execute("UPDATE settlements SET authority = 'VERIFIED'")
 
 
-def _patch_trade_history_connections(monkeypatch, trade_db, world_db, backtest_db) -> None:
+def _patch_trade_history_connections(monkeypatch, trade_db, world_db, forecasts_db, backtest_db) -> None:
     import src.engine.replay as replay_module
     import src.state.db as db_module
 
     def _trade_with_world():
         conn = db_module.get_connection(trade_db)
         conn.execute("ATTACH DATABASE ? AS world", (str(world_db),))
+        conn.execute("ATTACH DATABASE ? AS forecasts", (str(forecasts_db),))
         return conn
 
     monkeypatch.setattr(replay_module, "get_trade_connection_with_world", _trade_with_world)
@@ -65,19 +66,25 @@ def _seed_trade_history_fixture(
 ):
     trade_db = tmp_path / "trade-history-trade.db"
     world_db = tmp_path / "trade-history-world.db"
+    forecasts_db = tmp_path / "trade-history-forecasts.db"
     backtest_db = tmp_path / "trade-history-backtest.db"
 
     world = get_connection(world_db)
     init_schema(world)
-    world.execute(
+    world.commit()
+    world.close()
+
+    forecasts = get_connection(forecasts_db)
+    init_schema_forecasts(forecasts)
+    forecasts.execute(
         """
         INSERT INTO settlements (city, target_date, winning_bin, settlement_value, temperature_metric)
         VALUES ('NYC', '2026-04-03', '39-40°F', 40.0, 'high')
         """
     )
-    _mark_settlements_verified(world)
-    world.commit()
-    world.close()
+    _mark_settlements_verified(forecasts)
+    forecasts.commit()
+    forecasts.close()
 
     trade = get_connection(trade_db)
     init_schema(trade)
@@ -108,7 +115,7 @@ def _seed_trade_history_fixture(
     )
     trade.commit()
     trade.close()
-    return trade_db, world_db, backtest_db
+    return trade_db, world_db, forecasts_db, backtest_db
 
 
 def test_run_replay_allows_snapshot_only_reference_opt_in(tmp_path, monkeypatch):
@@ -355,6 +362,7 @@ def test_wu_settlement_sweep_requires_market_events_for_strict_subjects(tmp_path
     db_path = tmp_path / "wu-preflight.db"
     conn = get_connection(db_path)
     init_schema(conn)
+    init_schema_forecasts(conn)
     # D1: wu_settlement_sweep now reads settlements_v2; fixture updated accordingly
     conn.execute(
         """
@@ -383,6 +391,7 @@ def test_wu_settlement_sweep_rejects_wrong_market_event_label(tmp_path, monkeypa
     db_path = tmp_path / "wu-wrong-label.db"
     conn = get_connection(db_path)
     init_schema(conn)
+    init_schema_forecasts(conn)
     # D1: wu_settlement_sweep now reads settlements_v2; fixture updated accordingly
     conn.execute(
         """
@@ -1205,8 +1214,8 @@ def test_cli_trade_history_audit_routes_to_backtest_lane(tmp_path, monkeypatch, 
 
 
 def test_trade_history_audit_labels_outcome_fact_as_legacy_non_promotion(tmp_path, monkeypatch):
-    trade_db, world_db, backtest_db = _seed_trade_history_fixture(tmp_path)
-    _patch_trade_history_connections(monkeypatch, trade_db, world_db, backtest_db)
+    trade_db, world_db, forecasts_db, backtest_db = _seed_trade_history_fixture(tmp_path)
+    _patch_trade_history_connections(monkeypatch, trade_db, world_db, forecasts_db, backtest_db)
 
     summary = run_replay("2026-04-03", "2026-04-03", mode="trade_history_audit")
 
@@ -1230,11 +1239,11 @@ def test_trade_history_audit_labels_outcome_fact_as_legacy_non_promotion(tmp_pat
 
 
 def test_trade_history_audit_rejects_unlinked_outcome_fact_as_actual_trade_evidence(tmp_path, monkeypatch):
-    trade_db, world_db, backtest_db = _seed_trade_history_fixture(
+    trade_db, world_db, forecasts_db, backtest_db = _seed_trade_history_fixture(
         tmp_path,
         outcome_decision_snapshot_id=None,
     )
-    _patch_trade_history_connections(monkeypatch, trade_db, world_db, backtest_db)
+    _patch_trade_history_connections(monkeypatch, trade_db, world_db, forecasts_db, backtest_db)
 
     summary = run_replay("2026-04-03", "2026-04-03", mode="trade_history_audit")
 
@@ -1255,12 +1264,12 @@ def test_trade_history_audit_rejects_unlinked_outcome_fact_as_actual_trade_evide
 
 
 def test_trade_history_audit_rejects_snapshot_mismatched_outcome_fact(tmp_path, monkeypatch):
-    trade_db, world_db, backtest_db = _seed_trade_history_fixture(
+    trade_db, world_db, forecasts_db, backtest_db = _seed_trade_history_fixture(
         tmp_path,
         position_decision_snapshot_id="snap-1",
         outcome_decision_snapshot_id="snap-stale",
     )
-    _patch_trade_history_connections(monkeypatch, trade_db, world_db, backtest_db)
+    _patch_trade_history_connections(monkeypatch, trade_db, world_db, forecasts_db, backtest_db)
 
     summary = run_replay("2026-04-03", "2026-04-03", mode="trade_history_audit")
 
@@ -1297,6 +1306,7 @@ def test_wu_settlement_sweep_v2_corpus_produces_settlements(tmp_path, monkeypatc
     db_path = tmp_path / "wu-v2-antibody.db"
     conn = get_connection(db_path)
     init_schema(conn)
+    init_schema_forecasts(conn)
 
     # Seed settlements_v2 — one VERIFIED HIGH row for Paris
     conn.execute(
@@ -1328,11 +1338,32 @@ def test_wu_settlement_sweep_v2_corpus_produces_settlements(tmp_path, monkeypatc
     import src.engine.replay as replay_module
     import src.state.db as db_module
 
+    backtest_db = tmp_path / "wu-v2-backtest.db"
     monkeypatch.setattr(
         replay_module,
         "get_trade_connection_with_world",
         lambda: db_module.get_connection(db_path),
     )
+    monkeypatch.setattr(
+        replay_module,
+        "get_backtest_connection",
+        lambda: db_module.get_connection(backtest_db),
+    )
+
+    conn = get_connection(db_path)
+    conn.execute(
+        """
+        INSERT INTO calibration_pairs_v2
+            (city, target_date, temperature_metric, observation_field,
+             range_label, p_raw, outcome, lead_days, season, cluster,
+             forecast_available_at, data_version, bias_corrected, authority)
+        VALUES ('Paris', '2026-04-10', 'low', 'low_temp',
+                '1°C', 0.20, 0, 1.0, 'MAM', 'Paris',
+                '2026-04-09T08:00:00Z', 'v2', 0, 'VERIFIED')
+        """
+    )
+    conn.commit()
+    conn.close()
 
     summary = run_replay("2026-04-10", "2026-04-10", mode="wu_settlement_sweep")
 
@@ -1341,4 +1372,22 @@ def test_wu_settlement_sweep_v2_corpus_produces_settlements(tmp_path, monkeypatc
         "n_settlements=0: wu_settlement_sweep returned no rows — "
         "likely SQL still reads from bare settlements/calibration_pairs (v1 empty tables). "
         "Verify D1 port to settlements_v2 + calibration_pairs_v2."
+    )
+    backtest = get_connection(backtest_db)
+    outcome_labels = [
+        row[0]
+        for row in backtest.execute(
+            """
+            SELECT range_label FROM backtest_outcome_comparison
+            WHERE run_id = ? AND city = 'Paris' AND target_date = '2026-04-10'
+            ORDER BY range_label
+            """,
+            (summary.run_id,),
+        ).fetchall()
+    ]
+    backtest.close()
+    assert outcome_labels == ["12°C"], (
+        "WU settlement sweep must join calibration_pairs_v2 by "
+        "city/date/temperature_metric; LOW rows for the same city/date must not "
+        "be scored against a HIGH settlement."
     )
