@@ -422,3 +422,32 @@ Run #14 logged F90 SEV-1 as "82KB jobs.json vs 2-line crontab, 40 jobs un-schedu
 
 ### Documents in this track
 - `RUN_15_track1_f90_cron_diff.md` (NEW)
+
+
+## Run #16 Track A status delta (2026-05-17, branch fix/wave-2-lineage-and-k1-cleanup-2026-05-17)
+
+### Headline
+- **F87 (SEV-1 HOT) → CLOSED-FALSE-ALARM.** `com.zeus.forecast-live` PID 10397 is healthy (process alive, `.err` mtime within 1 min, heartbeat fresh). Run #14 misread `launchctl list` column 2 (which is the LAST exit status, not current state) as live status. No Karachi exposure; no restart required.
+- **F85 (SEV-2) → ROOT-CAUSE-PINNED + FIX-SPECIFIED.** Plist layer ruled out — all 7 `com.zeus.*.plist` files have distinct `StandardOutPath`/`StandardErrorPath`. Root cause is Python `logging.basicConfig()` default `StreamHandler` writing to `sys.stderr` at 4 daemon entry points. Dual-handler patch spec'd (INFO→stdout, WARNING+→stderr) with operator verification probe. No production code mutated.
+
+### Updated status
+| F# | Prior | Now (Run #16 A) | Reason |
+|---|---|---|---|
+| F87 | SEV-1 NEW HOT (Run #14) | **CLOSED-FALSE-ALARM** | Evidence: `ps -ef \| grep forecast_live_daemon` → PID 10397 alive; `ls -la logs/zeus-forecast-live.err` → mtime 2026-05-17 18:59 (fresh); `launchctl list` column 2 value `1` is prior incarnation's exit code, not current state. Antibody added to LEARNINGS.md §1. |
+| F85 | SEV-2 NEW (Run #14) | **ROOT-CAUSE-PINNED + FIX-SPEC** | Plist forensics: 7/7 plists wire distinct `.log`/`.err` paths — layer ruled out. Code forensics: `grep -n basicConfig src/main.py src/ingest_main.py src/ingest/forecast_live_daemon.py src/riskguard/riskguard.py` → 4 sites, all pass only `level=logging.INFO[+format=]`, none pass `stream=`. CPython `StreamHandler.__init__` defaults `stream=sys.stderr` → all INFO writes go to `.err`. Patch spec in RUN_16_track_A §3. |
+
+### Carry-forward open SEV-1 (post Run #16 A close of F87)
+F3, F32, F35, F63, F71, **F90a**, F48 (HOT-FIX-SPEC), F103. **F87 removed** from carry-forward.
+
+### Karachi 5/17 + 5/19 ops gate (updated)
+1. ~~F87 daemon restart~~ — **NOT REQUIRED** (false-alarm).
+2. F48 — apply Run #15 T2 §5 hot-fix Edits A–C (forecasts.-schema-qualified SELECT + counter).
+3. F85 fix — **LOW priority for Karachi gate** (observability only; daemons functionally healthy). Bundle with F86 SIGTERM-handler patch in same daemon-hygiene PR.
+4. F90a (SEV-1 from Run #15 T1) — payload.model reconciliation.
+
+### Audit-discipline meta-finding
+Run #14 F87 was the 4th SEV-1 in this audit reframed/closed-false-alarm on second pass (after F90, F48, F87). Common root cause: claim derived from a status indicator (launchctl column, jobs.json line count, settlements rowcount) without the cross-check probe. **LEARNINGS.md §3** codifies the probe-then-claim rule as a precondition for any future SEV-1 opening in this audit lane.
+
+### Documents in this run
+- `RUN_16_track_A_f85_log_routing_f87_close.md` (NEW)
+- `LEARNINGS.md` (NEW — cross-run antibody catalog)
