@@ -315,7 +315,7 @@ def test_promotion_triggers_economic_close():
 # ---------------------------------------------------------------------------
 
 def test_concurrent_ws_ingest_does_not_collide():
-    """CRITIC_FLAG-2: BEGIN IMMEDIATE ensures only one CONFIRMED row per command."""
+    """CRITIC_FLAG-2: SAVEPOINT re-check guard ensures only one CONFIRMED row per command."""
     import os
     import tempfile
 
@@ -404,3 +404,50 @@ def test_concurrent_ws_ingest_does_not_collide():
             os.unlink(db_path)
         except Exception:
             pass
+
+
+# ---------------------------------------------------------------------------
+# Test 8: production-pattern antibody — promoter runs inside outer transaction
+# (mirrors cycle_runner conn lifecycle: prior DML leaves conn.in_transaction=True)
+#
+# Meta-verify: revert _savepoint_atomic swap back to BEGIN IMMEDIATE and this
+# test MUST fail with OperationalError "cannot start a transaction within a
+# transaction". Restore → passes.
+# ---------------------------------------------------------------------------
+
+def test_promoter_runs_inside_outer_transaction_without_raising():
+    """Critical fix R1: SAVEPOINT composes with outer implicit TX; BEGIN IMMEDIATE did not.
+
+    Simulates cycle_runner pattern: prior DML (chain_sync, allocator) left the
+    shared conn in_transaction=True before the promoter is called.
+    """
+    conn = _conn()
+    _seed_command(conn, "cmd-8", "ord-8")
+    _seed_matched_fact(
+        conn,
+        trade_id="trade-8",
+        command_id="cmd-8",
+        venue_order_id="ord-8",
+        observed_at=_old(),
+    )
+
+    # Simulate cycle_runner prior DML: update a venue_commands row without committing.
+    # This opens an implicit transaction and leaves conn.in_transaction=True.
+    conn.execute(
+        "UPDATE venue_commands SET updated_at=? WHERE command_id='cmd-8'",
+        (_now().isoformat(),),
+    )
+    assert conn.in_transaction, (
+        "Precondition: conn must be in_transaction=True before calling promote_pending_trades"
+    )
+
+    clob = _clob_returning("CONFIRMED", tx_hash="0xouter-tx")
+
+    # This must NOT raise — SAVEPOINT composes with outer transaction.
+    stats = promote_pending_trades(conn, clob, max_age_seconds=60)
+
+    assert stats["promoted"] == 1, (
+        f"Promoter must succeed inside outer transaction, got stats={stats}. "
+        "If this fails with OperationalError, the SAVEPOINT fix was not applied."
+    )
+    assert _count_facts(conn, "trade-8", "CONFIRMED") == 1

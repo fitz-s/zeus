@@ -13,11 +13,13 @@ This module owns all exit state transitions. CycleRunner calls it;
 CycleRunner does not contain exit business logic.
 """
 
+import hashlib
 import logging
 import copy
 import json
 import math
 import sqlite3
+import time as _time_module
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
@@ -26,6 +28,7 @@ from types import SimpleNamespace
 from typing import Optional
 
 from src.execution.collateral import check_sell_collateral
+from src.observability.counters import increment as _cnt_inc
 from src.execution.executor import OrderResult, create_exit_order_intent, execute_exit_order
 from src.state.lifecycle_manager import (
     enter_pending_exit_runtime_state,
@@ -206,8 +209,6 @@ _PROMOTE_MAX_AGE_SECONDS = 3600
 
 
 def _hash_raw_payload(payload: object) -> str:
-    import hashlib
-    import json
     raw = json.dumps(payload or {}, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
@@ -216,16 +217,23 @@ def promote_pending_trades(
     conn: sqlite3.Connection,
     clob_client,
     max_age_seconds: int = _PROMOTE_MIN_AGE_SECONDS,
-    max_cycle_budget_ms: int = 5000,
+    max_cycle_budget_ms: int = 3000,
 ) -> dict:
-    """Advance MATCHED/MINED venue_trade_facts rows to CONFIRMED by polling CLOB REST.
+    """Advance MATCHED venue_trade_facts rows to CONFIRMED by polling CLOB REST.
 
-    Candidate SELECT is bounded to LIMIT 10. Loop honors max_cycle_budget_ms; on
-    timeout emits metric promote_pending_trades_budget_exhausted_total and breaks.
+    Candidate SELECT is bounded to LIMIT 10. Loop honors max_cycle_budget_ms
+    (default 3000ms — below httpx's 5s default so the deadline check fires
+    before a single slow call exhausts the entire budget).
 
-    Per-row promotion is wrapped in BEGIN IMMEDIATE so the candidate re-check and
-    append_trade_fact are atomic against concurrent WS_USER ingests
-    (CRITIC_FLAG-2, STRUCTURAL_PLAN.md v3 §2 PR-S2).
+    Per-row re-check + append_trade_fact are wrapped in _savepoint_atomic so
+    they are atomic against concurrent WS_USER ingests. SAVEPOINT nests cleanly
+    inside any outer implicit transaction (CRITIC_FLAG-2, PR-S2 critic R1 fix).
+    BEGIN IMMEDIATE was the prior approach; it raises OperationalError when
+    cycle_runner's conn already has an open implicit transaction from prior
+    DML (chain_sync, allocator, etc.), silently disabling the promoter.
+
+    Writes CONFIRMED rows only. MINED is skipped (no intermediate writes) —
+    aligns with FILL_STATUSES gate and F3 provenance bundle (state='CONFIRMED').
 
     Error handling per A_patches_plan.md §1 table:
       404             → silent skip, no phantom write
@@ -234,12 +242,9 @@ def promote_pending_trades(
       5xx             → log + skip row (retry next cycle)
       unexpected exc  → log + skip row
     """
-    import time
+    from src.state.venue_command_repo import _savepoint_atomic, append_trade_fact
 
-    from src.observability.counters import increment as _cnt_inc
-    from src.state.venue_command_repo import append_trade_fact
-
-    deadline_ms = time.monotonic() * 1000 + max_cycle_budget_ms
+    deadline_ms = _time_module.monotonic() * 1000 + max_cycle_budget_ms
     cutoff_old = _utcnow() - timedelta(seconds=max_age_seconds)
     cutoff_abandon = _utcnow() - timedelta(seconds=_PROMOTE_MAX_AGE_SECONDS)
 
@@ -272,7 +277,7 @@ def promote_pending_trades(
     stats: dict = {"polled": 0, "promoted": 0, "errors": 0, "skipped": 0}
 
     for row in candidates:
-        if time.monotonic() * 1000 >= deadline_ms:
+        if _time_module.monotonic() * 1000 >= deadline_ms:
             _cnt_inc("promote_pending_trades_budget_exhausted_total")
             logger.warning(
                 "telemetry_counter event=promote_pending_trades_budget_exhausted_total"
@@ -327,7 +332,8 @@ def promote_pending_trades(
 
         new_status = (raw.get("status") or "").upper()
 
-        if new_status not in ("CONFIRMED", "MINED"):
+        # Major fix #3: only write CONFIRMED rows. MINED is not a fill authority.
+        if new_status != "CONFIRMED":
             stats["skipped"] += 1
             continue
 
@@ -336,18 +342,16 @@ def promote_pending_trades(
         rest_size = raw.get("size") or raw.get("filled_size") or filled_size or "0"
         rest_price = raw.get("price") or raw.get("fill_price") or fill_price or "0"
 
-        # CRITIC_FLAG-2: BEGIN IMMEDIATE for the entire re-check + write window.
-        # _savepoint_atomic uses SAVEPOINT/RELEASE (not `with conn:`) so
-        # nesting inside BEGIN IMMEDIATE is safe.
-        try:
-            conn.execute("BEGIN IMMEDIATE")
-            # Re-check under lock: another writer may have promoted concurrently.
+        # CRITIC_FLAG-2: SAVEPOINT wraps re-check + append_trade_fact atomically.
+        # SAVEPOINT nests inside any outer implicit transaction — safe when called
+        # from cycle_runner where prior DML (chain_sync, allocator) left conn
+        # in_transaction=True. BEGIN IMMEDIATE would raise OperationalError here.
+        with _savepoint_atomic(conn):
             already = conn.execute(
                 "SELECT 1 FROM venue_trade_facts WHERE command_id=? AND state='CONFIRMED'",
                 (command_id,),
             ).fetchone()
             if already:
-                conn.execute("COMMIT")
                 stats["skipped"] += 1
                 continue
 
@@ -356,7 +360,7 @@ def promote_pending_trades(
                 trade_id=trade_id,
                 venue_order_id=venue_order_id,
                 command_id=command_id,
-                state=new_status,
+                state="CONFIRMED",
                 filled_size=str(rest_size),
                 fill_price=str(rest_price),
                 tx_hash=tx_hash,
@@ -365,28 +369,12 @@ def promote_pending_trades(
                 raw_payload_hash=_hash_raw_payload(raw),
                 raw_payload_json=raw,
             )
-            conn.execute("COMMIT")
-        except sqlite3.IntegrityError:
-            # UNIQUE (trade_id, local_sequence) fired — concurrent writer won.
-            try:
-                conn.execute("ROLLBACK")
-            except Exception:
-                pass
-            stats["skipped"] += 1
-            continue
-        except Exception:
-            try:
-                conn.execute("ROLLBACK")
-            except Exception:
-                pass
-            raise
 
-        if new_status == "CONFIRMED":
-            stats["promoted"] += 1
-            logger.info(
-                "promote_pending_trades: promoted trade_id=%s order_id=%s → CONFIRMED tx=%s",
-                trade_id, venue_order_id, tx_hash,
-            )
+        stats["promoted"] += 1
+        logger.info(
+            "promote_pending_trades: promoted trade_id=%s order_id=%s → CONFIRMED tx=%s",
+            trade_id, venue_order_id, tx_hash,
+        )
 
     return stats
 
