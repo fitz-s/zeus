@@ -51,8 +51,9 @@ calibration_pairs_v2, ensemble_snapshots_v2, source_run, market_events_v2).
 `state/zeus_trades.db` holds trade execution records and CLOB order state.
 Table ownership is machine-checked via `architecture/db_table_ownership.yaml`
 (loader: `src/state/table_registry.py`). No write transaction may span DBs
-via independent connections (INV-37); the sanctioned cross-DB write path is
-`get_forecasts_connection_with_world()` (ATTACH+SAVEPOINT).
+via independent connections (INV-37); the sanctioned cross-DB write paths are
+`get_forecasts_connection_with_world()` (forecasts↔world, ATTACH+SAVEPOINT)
+and `trade_connection_with_world_flocked()` (trade↔world, ATTACH+flock).
 
 Zeus is dual-track. High and low temperature families share local-calendar-day
 geometry and do not share physical quantity, observation field, Day0 causality,
