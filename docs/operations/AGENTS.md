@@ -179,6 +179,9 @@ make a surface default-read unless `current_state.md` routes it.
 | `task_2026-05-16_live_continuous_run_package/CRITIC_REVIEW.md` | packet review evidence | Critic attack and approval record for the live continuous-run package plan; not empirical live-ready evidence |
 | `task_2026-05-17_live_order_survival/` | plan packet container | Live order survival packet for heartbeat lease ownership, submit ownership projection, REVIEW_REQUIRED clearance, and sustained order progress proof |
 | `task_2026-05-17_live_order_survival/LIVE_ORDER_SURVIVAL_PLAN.md` | topology planning packet | Plan and completion definition for proving submitted orders survive heartbeat/recovery boundaries through fill, venue terminality, or explicit no-exposure clearance |
+| `task_2026-05-18_wave3_dispatches/` | packet evidence container | Wave 3 Batch C per-finding accounting and critic verdict evidence for F85/F86/F89/F101 observability and heartbeat fixes |
+| `task_2026-05-18_wave3_dispatches/WAVE3_BATCH_C_PER_FINDING_ACCOUNTING.md` | packet accounting evidence | Per-finding accounting for Wave 3 Batch C observability and heartbeat findings |
+| `task_2026-05-18_wave3_dispatches/WAVE3_BATCH_C_CRITIC_VERDICT.md` | packet review evidence | Critic verdict for Wave 3 Batch C observability and heartbeat findings |
 | `LIVE_LAUNCH_HANDOFF.md` | Live launch handoff document for daemon deployment |
 | `docs/historical_evidence/UNMATCHED_GAMMA_CITIES_2026_05_07.md` | Unmatched gamma cities investigation evidence (2026-05-07) |
 | `docs/historical_evidence/CLOUD_EXTRACT_PATCH_2026_05_07.md` | Cloud extract patch evidence (2026-05-07) |
