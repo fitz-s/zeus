@@ -30,11 +30,9 @@ import sqlite3
 import threading
 import time
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
-
-from unittest.mock import patch as _patch
 
 from src.state.db_writer_lock import BulkChunker, bulk_lock_with_chunker
 from src.state.chunk_boundary_events import emit_event, ensure_table
@@ -194,6 +192,37 @@ def test_emit_event_row_visible_to_reader(tmp_path: Path) -> None:
 # Probe 4: migration idempotency — up() runs twice without error
 # ---------------------------------------------------------------------------
 
+def test_migration_idempotent(tmp_path: Path) -> None:
+    """202605_db_chunk_boundary_events.up() is safe to call twice.
+
+    First call creates the table; second call detects it already exists and
+    skips without error (the CREATE TABLE IF NOT EXISTS + _is_already_applied
+    guard).
+    """
+    import importlib.util, sys
+    from pathlib import Path as _Path
+    _mig_path = _Path(__file__).parent.parent.parent / "scripts" / "migrations" / "202605_db_chunk_boundary_events.py"
+    _spec = importlib.util.spec_from_file_location("_mig_chunk_boundary", str(_mig_path))
+    _mod = importlib.util.module_from_spec(_spec)
+    _spec.loader.exec_module(_mod)
+    up = _mod.up
+
+    db_path = tmp_path / "world_idempotent.db"
+    conn = sqlite3.connect(str(db_path))
+    try:
+        # First call: creates the table.
+        up(conn)
+        row = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='db_chunk_boundary_events'"
+        ).fetchone()
+        assert row is not None, "F11 migration: table should exist after first up()"
+
+        # Second call: must not raise.
+        up(conn)  # idempotent
+    finally:
+        conn.close()
+
+
 # ---------------------------------------------------------------------------
 # Probe 5 (E2E): bulk_lock_with_chunker → event_writer → real db row
 # Antibody for CRITICAL Fix 1: exercises the wiring gap the critic flagged.
@@ -228,7 +257,7 @@ def test_bulk_lock_with_chunker_emits_real_row(tmp_path: Path) -> None:
         event_writer=_event_writer,
     ) as chunker:
         # Trigger LIVE_CONTENDED yield via mock on the returned chunker instance.
-        with _patch.object(chunker, "_is_live_contended", return_value=True):
+        with patch.object(chunker, "_is_live_contended", return_value=True):
             chunker.yield_if_live_contended()
 
     write_conn.close()
@@ -309,34 +338,3 @@ def test_emit_event_timeout_from_env(tmp_path: Path, monkeypatch) -> None:
         f"F11 hygiene: timeout should be 12.345s (ZEUS_DB_BUSY_TIMEOUT_MS=12345); "
         f"got {captured_timeouts[0]}"
     )
-
-
-def test_migration_idempotent(tmp_path: Path) -> None:
-    """202605_db_chunk_boundary_events.up() is safe to call twice.
-
-    First call creates the table; second call detects it already exists and
-    skips without error (the CREATE TABLE IF NOT EXISTS + _is_already_applied
-    guard).
-    """
-    import importlib.util, sys
-    from pathlib import Path as _Path
-    _mig_path = _Path(__file__).parent.parent.parent / "scripts" / "migrations" / "202605_db_chunk_boundary_events.py"
-    _spec = importlib.util.spec_from_file_location("_mig_chunk_boundary", str(_mig_path))
-    _mod = importlib.util.module_from_spec(_spec)
-    _spec.loader.exec_module(_mod)
-    up = _mod.up
-
-    db_path = tmp_path / "world_idempotent.db"
-    conn = sqlite3.connect(str(db_path))
-    try:
-        # First call: creates the table.
-        up(conn)
-        row = conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='db_chunk_boundary_events'"
-        ).fetchone()
-        assert row is not None, "F11 migration: table should exist after first up()"
-
-        # Second call: must not raise.
-        up(conn)  # idempotent
-    finally:
-        conn.close()
