@@ -1,5 +1,5 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-05-11
+# Last reused/audited: 2026-05-18
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/T1.yaml
 #                  + docs/operations/task_2026-05-01_bankroll_truth_chain/architect_memo.md §7
 #                  + PLAN docs/operations/task_2026-05-11_init_schema_boot_invariant/PLAN.md §5.6
@@ -444,3 +444,140 @@ def _enforce_schema_pinned_hash():
             f"{r.stdout}{r.stderr}",
             returncode=1,
         )
+
+
+# ---------------------------------------------------------------------------
+# DB Isolation Antibody — TI-1 (2026-05-18)
+# Reject any sqlite3.connect() call inside a pytest run that resolves to a
+# live Zeus DB path. Allow :memory:, file:...?mode=ro URIs, and any path
+# under a per-test tmpdir or other non-live locations.
+# Bypass (emergency-only): ZEUS_DISABLE_DB_ISOLATION_ANTIBODY=1
+# Authority: RESTART_READINESS_PLAN.md §3 TI-1; JOB fda4e853 audit_2026_05_17
+# ---------------------------------------------------------------------------
+
+import sqlite3 as _ti1_sqlite3
+from pathlib import Path as _ti1_Path
+
+from src.state.db import (
+    ZEUS_WORLD_DB_PATH as _TI1_WORLD,
+    ZEUS_FORECASTS_DB_PATH as _TI1_FORECASTS,
+    _zeus_trade_db_path as _ti1_trade_path,
+)
+
+_TI1_LIVE_PATHS: frozenset[str] = frozenset({
+    str(_TI1_WORLD.resolve()),
+    str(_TI1_FORECASTS.resolve()),
+    str(_ti1_trade_path().resolve()),
+})
+
+
+def _ti1_is_blocked(database: str) -> bool:
+    """Return True iff `database` resolves to a live Zeus DB path.
+
+    Handles plain paths, file: URIs, and query-string variants.
+    Only ``file:...?mode=ro`` URIs are allowed against live paths
+    (read-only by SQLite semantics — no writes possible).
+    All other file: URIs that resolve to a live path are blocked.
+    """
+    from urllib.parse import parse_qs, urlparse
+
+    if not isinstance(database, str):
+        return False
+    # :memory: and named-memory variants — never writes to disk
+    if database == ":memory:" or database.startswith("file::memory:"):
+        return False
+    if database.startswith("file:"):
+        parsed = urlparse(database)
+        # Allow read-only URIs — SQLite enforces no writes
+        qs = parse_qs(parsed.query)
+        mode = qs.get("mode", [""])[0]
+        if mode == "ro":
+            return False
+        # All other file: URIs: extract path and check against live paths
+        try:
+            db_path = parsed.path
+            resolved = str(_ti1_Path(db_path).resolve())
+        except (OSError, ValueError):
+            return False
+        return resolved in _TI1_LIVE_PATHS
+    try:
+        resolved = str(_ti1_Path(database).resolve())
+    except (OSError, ValueError):
+        return False
+    return resolved in _TI1_LIVE_PATHS
+
+
+_ti1_orig_connect = _ti1_sqlite3.connect
+
+
+def _ti1_guarded_connect(database, *args, **kwargs):
+    if _ti1_is_blocked(str(database)):
+        raise AssertionError(
+            f"TI-1 antibody: test attempted to open live Zeus DB at {database!r}. "
+            "Use the autouse `_ti1_redirect_live_db` fixture (default) or pass an "
+            "explicit tmp_path. Bypass: ZEUS_DISABLE_DB_ISOLATION_ANTIBODY=1 (emergency-only)."
+        )
+    return _ti1_orig_connect(database, *args, **kwargs)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _ti1_install_db_isolation_antibody():
+    """Session-scope: wrap sqlite3.connect to block opens of live Zeus DB paths."""
+    if os.environ.get("ZEUS_DISABLE_DB_ISOLATION_ANTIBODY") == "1":
+        yield
+        return
+    _ti1_sqlite3.connect = _ti1_guarded_connect
+    try:
+        yield
+    finally:
+        _ti1_sqlite3.connect = _ti1_orig_connect
+
+
+# ---------------------------------------------------------------------------
+# Per-test live-DB redirect — TI-1 (2026-05-18)
+# Belt-and-suspenders: redirect `src.state.db._connect` calls aimed at any
+# of the live DB paths to a per-test tmpdir mirror. The sqlite3.connect
+# antibody above is the safety net; this fixture is the default-correct
+# behaviour so tests silently get isolated storage.
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(autouse=True)
+def _ti1_redirect_live_db(tmp_path, monkeypatch):
+    """Redirect _connect() calls and ATTACH targets for live Zeus DBs to per-test tmp mirrors.
+
+    Belt-and-suspenders: patches BOTH the _connect() helper AND the module-level
+    path constants (ZEUS_WORLD_DB_PATH, ZEUS_FORECASTS_DB_PATH, and the return
+    value of _zeus_trade_db_path). This ensures that cross-DB helpers such as
+    get_forecasts_connection_with_world() and trade_connection_with_world_flocked()
+    also land on mirrors when they issue ``ATTACH DATABASE ? AS world/forecasts``
+    using those constants.
+    """
+    if os.environ.get("ZEUS_DISABLE_DB_ISOLATION_ANTIBODY") == "1":
+        yield
+        return
+    from src.state import db as _state_db
+
+    tmp_world = tmp_path / "zeus-world.db"
+    tmp_forecasts = tmp_path / "zeus-forecasts.db"
+    tmp_trades = tmp_path / "zeus_trades.db"
+
+    mirrors = {
+        str(_TI1_WORLD.resolve()): tmp_world,
+        str(_TI1_FORECASTS.resolve()): tmp_forecasts,
+        str(_ti1_trade_path().resolve()): tmp_trades,
+    }
+    orig_connect = _state_db._connect
+
+    def _redirecting_connect(db_path, *args, **kwargs):
+        resolved = str(_ti1_Path(db_path).resolve()) if db_path else ""
+        target = mirrors.get(resolved, db_path)
+        return orig_connect(target, *args, **kwargs)
+
+    monkeypatch.setattr(_state_db, "_connect", _redirecting_connect)
+    # Also redirect the module-level path constants so ATTACH DATABASE calls
+    # inside cross-DB helpers (get_forecasts_connection_with_world,
+    # trade_connection_with_world_flocked) resolve to the per-test mirrors.
+    monkeypatch.setattr(_state_db, "ZEUS_WORLD_DB_PATH", tmp_world)
+    monkeypatch.setattr(_state_db, "ZEUS_FORECASTS_DB_PATH", tmp_forecasts)
+    monkeypatch.setattr(_state_db, "_zeus_trade_db_path", lambda: tmp_trades)
+    yield
