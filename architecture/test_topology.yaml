@@ -1745,3 +1745,95 @@ test_metadata:
       in-memory state restored to operator values after skip (not auto_exception).
     created: 2026-05-18
     last_reused_or_audited: 2026-05-18
+
+  tests/test_day0_bound_classification.py:
+    modules: [contracts, signal]
+    category: relationship_test
+    profile: phase0_pr5_day0_bound_classification
+    blocks_commit: true
+    asserted_invariants:
+      - INV-09
+      - INV-16
+      - BOUND-CLASSIFICATION-EXHAUSTIVE-3-MEMBERS
+      - BOUND-CLASSIFICATION-12-CELL-MATRIX
+    source_under_test:
+      - src/contracts/day0_observation_context.py
+    law_dependencies:
+      - docs/operations/task_2026-05-17_strategy_vnext_phase0/PHASE_0_V4_ADDENDUM.md
+      - docs/operations/task_2026-05-17_strategy_vnext_phase0/scaffolds/pr5_scaffold_report.md
+    notes: >
+      R-5.1: BoundClassification enum exhaustiveness and 12-cell property matrix.
+      Enum exhaustiveness: asserts exactly 3 members (DETERMINISTIC, BOUNDED_LIVE,
+      UNBOUNDED_NO_OBS_YET) and str-enum equality. 12-cell matrix (R-5.1e):
+      3 BoundClassification × 4 daypart (pre_sunrise, morning, afternoon, post_peak)
+      = 12 distinct Day0ObservationContext dataclass constructions; each cell asserts
+      .bound_classification, .daypart, .observed_extreme_so_far (None iff
+      UNBOUNDED_NO_OBS_YET), and is_dst_gap_hour is bool. Production code shipped
+      at commit e13c029b34 (PR #191). All 20 tests LIVE (R-5.1f stub deleted;
+      classify_bound and build_day0_observation_context have full production bodies).
+      classify_bound raises ValueError when obs is not None and members is None
+      (fail-closed on missing forecast; empty list [] signals closed window).
+    created: 2026-05-19
+    last_reused_or_audited: 2026-05-19
+
+  tests/test_diurnal_dst_property.py:
+    modules: [signal, contracts]
+    category: relationship_test
+    profile: phase0_pr5_day0_bound_classification
+    blocks_commit: true
+    asserted_invariants:
+      - INV-16
+      - DST-MISSING-HOUR-FLAGGED-SPRING-FORWARD
+      - DST-AMBIGUOUS-HOUR-FLAGGED-FALL-BACK
+    source_under_test:
+      - src/signal/diurnal.py
+      - src/contracts/dst_semantics.py
+    law_dependencies:
+      - docs/operations/task_2026-05-17_strategy_vnext_phase0/PHASE_0_V4_ADDENDUM.md
+      - docs/operations/task_2026-05-17_strategy_vnext_phase0/scaffolds/pr5_scaffold_report.md
+    notes: >
+      R-5.2: DST property tests for build_day0_temporal_context covering 3 archetypes.
+      Archetype A: London 2026-03-29 spring-forward (GMT→BST, missing 01:00–01:59
+      local) — is_missing_local_hour=True; control (10:00 BST) → False. Archetype B:
+      Sydney 2025-10-05 spring-forward (AEST→AEDT, missing 02:00–02:59 local) →
+      is_missing_local_hour=True. Archetype C: New York 2026-11-01 fall-back (EDT→EST,
+      ambiguous 01:00–01:59 fold=0/1) → is_ambiguous_local_hour=True, is_missing=False.
+      Real DST risk surface is _instant_from_local_hour (diurnal.py:298–334) using
+      datetime.combine without missing-hour branch. Production code shipped at commit
+      e13c029b34 (PR #191). All 5 tests LIVE. Observation timestamps corrected:
+      spring-forward uses naive local strings (UTC form lands after gap); fall-back
+      uses fold=1 UTC for the ambiguous second occurrence.
+    created: 2026-05-19
+    last_reused_or_audited: 2026-05-19
+
+  tests/test_day0_unit_box_propagation.py:
+    modules: [contracts, signal, types]
+    category: core_law_antibody
+    profile: phase0_pr5_day0_bound_classification
+    blocks_commit: true
+    asserted_invariants:
+      - INV-09
+      - CELSIUS-BOX-FAHRENHEIT-BOX-SEAM-EXTRACTION
+      - DAY0-SIGNAL-INPUTS-CURRENT-TEMP-IS-FLOAT
+    source_under_test:
+      - src/contracts/day0_observation_context.py
+      - src/signal/day0_router.py
+      - src/types/temperature.py
+    law_dependencies:
+      - docs/operations/task_2026-05-17_strategy_vnext_phase0/PHASE_0_V4_ADDENDUM.md
+      - docs/operations/task_2026-05-17_strategy_vnext_phase0/scaffolds/pr5_scaffold_report.md
+    notes: >
+      R-5.3: CelsiusBox/FahrenheitBox propagation boundary antibodies, mirroring F3
+      PR #177 pattern from tests/types/test_celsius_box_arithmetic.py. CelsiusBox
+      and FahrenheitBox live at the IngestAdapter→Day0Router seam; .value is extracted
+      before Day0SignalInputs construction (day0_router.py:7–21 design: signal layer
+      uses bare float, unit-polymorphic at runtime). Antibody tests: cross-unit
+      CelsiusBox+FahrenheitBox raises TypeError (seam mirror); Day0SignalInputs
+      .current_temp must be float not Box type; unit-mismatch conversion stub.
+      Q1 (phase6_contract.md R-BA..R-BD conflict) resolved as invalid by orchestrator
+      triage (phase6_contract is archived Q2 2026; math-split and unit-type are
+      orthogonal concerns). Production code shipped at commit e13c029b34 (PR #191).
+      All 7 tests LIVE (1 new test added: bare-float at seam raises TypeError).
+      IngestAdapter seam implemented in src/contracts/day0_observation_context.py.
+    created: 2026-05-19
+    last_reused_or_audited: 2026-05-19
