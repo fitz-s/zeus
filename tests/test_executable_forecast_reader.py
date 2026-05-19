@@ -634,3 +634,111 @@ def test_full_reader_blocks_snapshot_local_day_window_mismatch() -> None:
 
     assert not result.ok
     assert result.reason_code == "SNAPSHOT_LOCAL_DAY_WINDOW_MISMATCH"
+
+
+# ---------------------------------------------------------------------------
+# Readiness-timing cross-clock race antibody (2026-05-19 alpha-loss postmortem):
+# Producer readiness rows are written by ECMWF ingest (a separate cycle from
+# the trading cycle); the ON CONFLICT(scope_key) DO UPDATE pattern in
+# write_readiness_state UPSERTs `computed_at` in place. When ingest fires
+# mid-cycle, the row's computed_at is replaced with the writer's wall-clock
+# at write time. The trading cycle holds a frozen `decision_time` from cycle
+# start; comparing the row's UPSERTed computed_at against that frozen `now`
+# trips a cross-clock race that fires READINESS_TIMING_ORDER_INVALID for
+# every candidate market — even though the readiness row was, by design, a
+# valid, fresh row that the cycle should consume.
+#
+# Daemon decision_log id=1116 (2026-05-19T19:36-19:50 opening_hunt) rejected
+# 50/52 cities with this code; at probe time the latest readiness row had
+# computed_at=2026-05-19T20:05:42, +25 minutes ahead of the cycle's frozen
+# decision_time of 19:36:22.
+#
+# Relationship invariant: _evaluate_executable_forecast's causal-order check
+# must enforce only the within-write-transaction relations
+# (captured_at <= producer_computed_at <= entry_computed_at). The historical
+# clause `entry_computed_at > now` mixed two clocks (writer's wall-clock vs
+# cycle's frozen now) and produced false positives; it has been removed.
+# Sed-flip: restore `or entry_computed_at > now` to the line-763 conjunction
+# → both tests below go RED.
+# ---------------------------------------------------------------------------
+
+
+def test_full_reader_accepts_producer_readiness_upserted_after_decision_time() -> None:
+    """Antibody: a producer_readiness row whose computed_at is after the
+    cycle's frozen decision_time must still produce LIVE_ELIGIBLE — the row
+    was a normal UPSERT by the ingest writer, not a malformed input."""
+    conn = _conn()
+    _insert_snapshot(conn)
+    _insert_source_run(
+        conn,
+        source_available_at=_utc(2026, 5, 3, 8, 0),
+        captured_at=_utc(2026, 5, 3, 8, 20),
+    )
+    _insert_coverage(conn)
+    # Producer readiness written by ingest AFTER cycle.now=10:00 (race window).
+    _insert_readiness(
+        conn,
+        strategy_key=PRODUCER_READINESS_STRATEGY_KEY,
+        readiness_id="producer-readiness-upserted-future",
+        computed_at=_utc(2026, 5, 3, 10, 5),  # +5 minutes ahead of decision_time
+        dependency_json={"coverage_id": "coverage-1"},
+    )
+    _insert_readiness(
+        conn,
+        strategy_key="entry_forecast",
+        readiness_id="entry-readiness-1",
+        market_family="family-1",
+        condition_id="condition-123",
+        computed_at=_utc(2026, 5, 3, 10, 5),
+    )
+
+    result = _read_full(conn)  # decision_time = _utc(2026, 5, 3, 10) = 10:00
+
+    assert result.ok, (
+        f"Cross-clock race antibody FAIL: result.ok={result.ok}, "
+        f"reason_code={result.reason_code!r}. Expected LIVE_ELIGIBLE. "
+        f"The historical entry_computed_at > now clause has been restored "
+        f"and is rejecting a valid mid-cycle UPSERT."
+    )
+    assert result.reason_code == "EXECUTABLE_FORECAST_READY"
+
+
+def test_full_reader_still_blocks_genuine_causal_order_violation() -> None:
+    """Antibody: removing `entry_computed_at > now` must NOT weaken the
+    genuine causal-order check captured_at <= producer_computed_at. A row
+    whose producer claims to have been computed BEFORE its own source was
+    captured is a real data-integrity violation and must still BLOCK."""
+    conn = _conn()
+    _insert_snapshot(conn)
+    _insert_source_run(
+        conn,
+        source_available_at=_utc(2026, 5, 3, 8, 0),
+        captured_at=_utc(2026, 5, 3, 9, 30),  # capture at 09:30
+    )
+    _insert_coverage(conn)
+    # Producer claims to have computed BEFORE its own data was captured —
+    # genuine causal violation; must block.
+    _insert_readiness(
+        conn,
+        strategy_key=PRODUCER_READINESS_STRATEGY_KEY,
+        readiness_id="producer-readiness-acausal",
+        computed_at=_utc(2026, 5, 3, 9, 0),  # earlier than captured_at
+        dependency_json={"coverage_id": "coverage-1"},
+    )
+    _insert_readiness(
+        conn,
+        strategy_key="entry_forecast",
+        readiness_id="entry-readiness-1",
+        market_family="family-1",
+        condition_id="condition-123",
+        computed_at=_utc(2026, 5, 3, 9, 0),
+    )
+
+    result = _read_full(conn)
+
+    assert not result.ok
+    assert result.reason_code == "READINESS_TIMING_ORDER_INVALID", (
+        f"Genuine causal-order check FAIL: got reason_code={result.reason_code!r}, "
+        f"expected READINESS_TIMING_ORDER_INVALID. The captured_at > producer_computed_at "
+        f"check has been weakened along with the > now removal."
+    )

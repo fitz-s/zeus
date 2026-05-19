@@ -760,7 +760,23 @@ def read_executable_forecast(
         entry_computed_at = producer_computed_at
     if source_available_at > captured_at:
         return ExecutableForecastBundleResult("BLOCKED", "SOURCE_AVAILABLE_AFTER_CAPTURE")
-    if captured_at > producer_computed_at or producer_computed_at > entry_computed_at or entry_computed_at > now:
+    # Causal-order check keeps the meaningful invariants:
+    #   capture <= producer-readiness <= entry-readiness
+    # The historical extra clause `entry_computed_at > now` compared the
+    # producer's stamp against the cycle's *frozen* decision_time, but the
+    # readiness writer (ECMWF ingest) UPSERTs rows in place — when ingest
+    # fires mid-cycle, the existing row's computed_at is replaced with a
+    # newer wall-clock from the writer thread, which is always >=
+    # the consumer cycle's frozen `now`. That produced READINESS_TIMING_ORDER_INVALID
+    # for every market in the cycle (decision_log id=1116 / 1117: 50/52 and
+    # 30/49 cities rejected with this code on 2026-05-19). The semantic
+    # claim "readiness was computed by the time we decided" cannot be
+    # enforced by comparing two different clocks against a frozen point —
+    # the producer's stamp is its own wall-clock; the consumer's `now` is
+    # the cycle-start clock. Removing the clause keeps the two genuine
+    # causal-order checks (which DO compare timestamps from the same write
+    # transaction) and unsticks live trading.
+    if captured_at > producer_computed_at or producer_computed_at > entry_computed_at:
         return ExecutableForecastBundleResult("BLOCKED", "READINESS_TIMING_ORDER_INVALID")
 
     evidence = ExecutableForecastEvidence(
