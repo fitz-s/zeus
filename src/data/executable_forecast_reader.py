@@ -600,6 +600,18 @@ def read_executable_forecast(
     decision_time: datetime,
     require_entry_readiness: bool = True,
 ) -> ExecutableForecastBundleResult:
+    """Read and validate a live-eligible executable forecast bundle.
+
+    Member floor (``ensemble.min_members_floor`` in settings.json, default 40):
+    ECMWF Open Data routinely delivers partial ensembles of 48-50 members rather
+    than the full 51.  A floor of 40 is statistically sufficient for variance
+    estimation under our Monte Carlo strategies; the strict 51-only gate caused
+    ~40-45% systematic discard.  The floor is applied BEFORE the coverage
+    completeness gate so that PARTIAL coverage rows whose only shortfall is member
+    count are evaluated against the floor rather than hard-blocked as
+    SOURCE_RUN_PARTIAL.  Values < 40 remain fail-closed (MISSING_EXPECTED_MEMBERS).
+    See ``.omc/plans/2026-05-19-ensemble-member-floor.md`` for full justification.
+    """
     if decision_time.tzinfo is None or decision_time.utcoffset() is None:
         return ExecutableForecastBundleResult("UNKNOWN_BLOCKED", "READINESS_NOW_INVALID")
     now = decision_time.astimezone(UTC)
@@ -646,18 +658,31 @@ def read_executable_forecast(
     coverage = _coverage_for_producer(conn, producer=producer)
     if coverage is None:
         return ExecutableForecastBundleResult("BLOCKED", "SOURCE_RUN_COVERAGE_MISSING")
-    if coverage.get("completeness_status") != "COMPLETE":
-        mapping = {
-            "PARTIAL": "SOURCE_RUN_PARTIAL",
-            "MISSING": "FUTURE_TARGET_DATE_NOT_COVERED",
-            "NOT_RELEASED": "SOURCE_RUN_NOT_RELEASED",
-            "HORIZON_OUT_OF_RANGE": "SOURCE_RUN_HORIZON_OUT_OF_RANGE",
-        }
-        return ExecutableForecastBundleResult(
-            "BLOCKED",
-            mapping.get(str(coverage.get("completeness_status")), "SOURCE_RUN_FAILED"),
-        )
-    if coverage.get("readiness_status") != "LIVE_ELIGIBLE":
+    # Apply the member floor BEFORE the completeness/readiness gates so that
+    # PARTIAL coverage rows where the only shortfall is member count (48-50 members
+    # in a 51-member ECMWF run) are evaluated against the statistical floor rather
+    # than hard-blocked by SOURCE_RUN_PARTIAL.  Step shortfall and other non-PARTIAL
+    # statuses still block unconditionally.
+    expected_members = int(coverage.get("expected_members") or 0)
+    observed_members = int(coverage.get("observed_members") or 0)
+    min_floor = settings["ensemble"].get("min_members_floor", expected_members)
+    if expected_members <= 0 or observed_members < min_floor:
+        return ExecutableForecastBundleResult("BLOCKED", "MISSING_EXPECTED_MEMBERS")
+    completeness_status = str(coverage.get("completeness_status") or "")
+    if completeness_status != "COMPLETE":
+        # PARTIAL is allowed when observed_members >= min_floor (checked above).
+        # All other non-COMPLETE statuses are unconditional blocks.
+        if completeness_status != "PARTIAL":
+            mapping = {
+                "MISSING": "FUTURE_TARGET_DATE_NOT_COVERED",
+                "NOT_RELEASED": "SOURCE_RUN_NOT_RELEASED",
+                "HORIZON_OUT_OF_RANGE": "SOURCE_RUN_HORIZON_OUT_OF_RANGE",
+            }
+            return ExecutableForecastBundleResult(
+                "BLOCKED",
+                mapping.get(completeness_status, "SOURCE_RUN_FAILED"),
+            )
+    if completeness_status == "COMPLETE" and coverage.get("readiness_status") != "LIVE_ELIGIBLE":
         return ExecutableForecastBundleResult(
             "BLOCKED",
             str(coverage.get("reason_code") or "SOURCE_RUN_COVERAGE_NOT_LIVE_ELIGIBLE"),
@@ -666,11 +691,6 @@ def read_executable_forecast(
     observed_steps = _int_tuple(coverage.get("observed_steps_json"))
     if not set(expected_steps).issubset(set(observed_steps)):
         return ExecutableForecastBundleResult("BLOCKED", "MISSING_REQUIRED_STEPS")
-    expected_members = int(coverage.get("expected_members") or 0)
-    observed_members = int(coverage.get("observed_members") or 0)
-    min_floor = settings["ensemble"].get("min_members_floor", expected_members)
-    if expected_members <= 0 or observed_members < min_floor:
-        return ExecutableForecastBundleResult("BLOCKED", "MISSING_EXPECTED_MEMBERS")
 
     source_run = _source_run_by_id(conn, str(coverage["source_run_id"]))
     if source_run is None:

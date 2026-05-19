@@ -21,6 +21,7 @@ from src.config import (
     ensemble_n_mc,
     ensemble_primary_model,
     entry_forecast_config,
+    settings,
 )
 from src.contracts import (
     EntryMethod,
@@ -410,9 +411,10 @@ def _refresh_ens_member_counting(
                 "members_unit_mismatch",
             ]
         member_extrema = np.asarray(period_extrema_members, dtype=float)
+        _extrema_floor = settings["ensemble"].get("min_members_floor", ensemble_member_count())
         if (
             member_extrema.ndim != 1
-            or len(member_extrema) < ensemble_member_count()
+            or len(member_extrema) < _extrema_floor
             or not np.isfinite(member_extrema).all()
         ):
             _set_monitor_probability_fresh(position, False)

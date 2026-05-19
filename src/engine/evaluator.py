@@ -2114,7 +2114,8 @@ def evaluate_candidate(
             applied_validations=["ens_fetch"],
         )]
     n_members_meta = ens_result.get("n_members")
-    if n_members_meta is not None and int(n_members_meta) < ensemble_member_count():
+    _n_members_floor = settings["ensemble"].get("min_members_floor", ensemble_member_count())
+    if n_members_meta is not None and int(n_members_meta) < _n_members_floor:
         return [_make_rejection_decision(
             rejection_stage="SIGNAL_QUALITY",
             rejection_reasons=["ENS fetch failed or < 51 members"],
@@ -2366,9 +2367,10 @@ def evaluate_candidate(
                     applied_validations=["entry_forecast_reader", "members_unit"],
                 )]
             member_extrema = np.asarray(period_extrema_members, dtype=float)
+            _extrema_floor = settings["ensemble"].get("min_members_floor", ensemble_member_count())
             if (
                 member_extrema.ndim != 1
-                or len(member_extrema) < ensemble_member_count()
+                or len(member_extrema) < _extrema_floor
                 or not np.isfinite(member_extrema).all()
             ):
                 return [_make_rejection_decision(
