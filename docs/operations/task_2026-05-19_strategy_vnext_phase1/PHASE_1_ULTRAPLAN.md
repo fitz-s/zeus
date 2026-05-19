@@ -1,6 +1,6 @@
 # Phase 1 ULTRAPLAN — Strategy vNext (Scope C, revised)
 
-**Created**: 2026-05-19 by orchestrator opus (v0); revised 2026-05-19 same session (v1) after opus critic NEEDS_REVISION verdict.
+**Created**: 2026-05-19 by orchestrator opus (v0); revised 2026-05-19 same session (v1) after opus critic NEEDS_REVISION verdict; revised again (v2 — Path D natural-key reframe) after SCAFFOLD critic round 1 caught root design failure that `decision_group_id` is a derived hash, not a materialized join key.
 **Authority basis**:
 - `docs/operations/task_2026-05-17_strategy_vnext_phase0/PHASE_0_V4_ULTRAPLAN.md §M` (canonical Phase 1 instrumentation list + Phase 2-7 strategy upgrade list)
 - Operator directive 2026-05-19 selecting Scope C (decision_events + Day0Nowcast)
@@ -69,34 +69,64 @@ Every new file: 3-line provenance header (Created / Last reused or audited / Aut
 
 ---
 
-## §4. Track 1 — decision_events instrumentation hardening
+## §4. Track 1 — decision_events instrumentation hardening (Path D — natural-key reframe)
 
-### §4.1 Problem
-Phase 0 PRs 3+6 added 12 new fields to `DecisionSourceContext` (24 total). Storage during Phase 0 was distributed scaffolding across `ensemble_snapshots_v2` + `settlement_commands` + `wrap_unwrap_commands` — explicitly Phase-0-compatible. Phase 1 lands the canonical `decision_events` table consolidating the 24-field decision record per `decision_group_id`.
+### §4.0 Architectural reframe — Path D (post-SCAFFOLD-critic-v1)
 
-### §4.2 Production surface
+**Root design failure** caught at SCAFFOLD critic round 1: ultraplan v1 named `decision_group_id` as the canonical cross-module join key. But `decision_group_id` is a **derived hash** computed at write time from `(strategy_key, market_id, target_date, observation_time_rounded)` (see `src/contracts/decision_group_id.py:50`). The column was never materialized on the 4 source tables (`ensemble_snapshots_v2`, `settlement_commands`, `wrap_unwrap_commands`, `decision_log` — identity buried in `artifact_json`). Materializing the hash cross-table would create 4 drift points + break on hash version changes (`_v1` → `_v2`).
 
-| Artifact | Path | Type |
-|---|---|---|
-| Schema | `src/state/db.py` (world DB init path, `_init_schema_world` or equivalent) | CREATE TABLE + indices |
-| Writer | `src/state/decision_events.py` (new) | `write_decision_event(ctx, ekc, intent, *, conn=None) -> None` — connection default = world DB |
-| Reader | `src/state/decision_events.py` | `read_decision_event_by_group(decision_group_id) -> DecisionEventRow` (world DB read) |
-| Migration script | `scripts/migrate_decision_events_create_2026_05_19.py` | CREATE TABLE + idempotent IF NOT EXISTS |
-| Backfill script | `scripts/backfill_decision_events_from_phase0_temp.py` | Reads forecasts.ensemble_snapshots_v2 + trade.settlement_commands + world.wrap_unwrap_commands; writes consolidated rows to world.decision_events |
-| Manifest entry | `architecture/db_table_ownership.yaml` | `decision_events` row, db=world, schema_class=world_class |
-| Schema bump | SCHEMA_VERSION 12 → 13 + regenerate `tests/state/_schema_pinned_hash.txt` |
+**Path D resolution**: the natural identifying tuple IS the join key. The hash is demoted to a derived audit-only column on `decision_events`.
 
-### §4.3 Schema (with source-contract attribution, per critic SEV-3)
+```
+DecisionNaturalKey = (market_id, condition_id, temperature_metric, target_date, observation_time)
+```
+
+Properties of Path D vs the rejected paths (A column-add prereq / B artifact_json with hash join / C forward-only):
+
+| Failure mode | A | B | C | **D** |
+|---|---|---|---|---|
+| Future ALTER forgets `decision_group_id` on a new source table | Recurs | N/A | N/A | **Impossible — no special column to forget** |
+| Hash function v1→v2 silently breaks joins | Yes | Yes | N/A | **No — joins on raw fields, not hash** |
+| Live writer computes hash from stale inputs | Possible | Possible | Possible | **Impossible — DB computes via TRIGGER** |
+| Historical Phase-0 data recoverable | Hard | Hard (JSON parse for hash) | Permanent loss | **Trivial — natural key in artifact_json + market_events_v2** |
+| New cross-DB ATTACH path required | Maybe | No | No | **No — independent reads + Python merge** |
+
+This makes the **bug category** impossible going forward (Fitz §1.4): the join key is no longer a thing a writer can forget to populate — it's just the columns the writer already populates to mean anything.
+
+### §4.1 Production surface (Path D)
+
+| Artifact | Path | Type | LOC est. |
+|---|---|---|---|
+| NewType + helpers | `src/contracts/decision_natural_key.py` (new) | `DecisionNaturalKey` NewType + `from_market_event_row()` + `from_ensemble_snapshot_row()` + `from_artifact_json()` | ~150 |
+| Schema | `src/state/db.py` world DB init path | CREATE TABLE with natural-key PK + AFTER INSERT TRIGGER populating `decision_group_id` audit column + 3 indices | — (in db.py) |
+| Writer | `src/state/decision_events.py` (new) | `write_decision_event(natural_key, ctx, ekc, intent, *, conn) -> None` — takes typed `DecisionNaturalKey`; conn default = world | ~200 |
+| Reader | same module | `read_decision_event_by_natural_key(key)` AND `read_decision_event_by_hash(decision_group_id)` (both indexed) | — (same file) |
+| Migration script | `scripts/migrate_decision_events_create_2026_05_19.py` | CREATE TABLE + TRIGGER + indices, idempotent (IF NOT EXISTS) | ~80 |
+| Backfill script | `scripts/backfill_decision_events_from_artifact_json.py` | Parse `decision_log.artifact_json` → natural key + 12 old fields; PR-3/6 fields = NULL for historical (Path F honest); optional enrichment from `market_events_v2`/`ensemble_snapshots_v2` | ~200 |
+| Antibody | `tests/test_inv_decision_events_completeness.py` | Natural-key completeness: every decision-tagged forecast in `ensemble_snapshots_v2` → at least one `decision_events` row keyed by natural tuple | ~100 |
+| Manifest | `architecture/db_table_ownership.yaml` + `architecture/source_rationale.yaml` | `decision_events`: db=world, schema_class=world_class | — |
+| Schema bump | SCHEMA_VERSION 12 → 13 + regenerate `tests/state/_schema_pinned_hash.txt` | — |
+
+**Total LOC est.**: ~730 production + ~200 tests/backfill = ~930 across **2 PRs** (sequencing in §4.7).
+
+### §4.2 Schema (Path D)
 
 ```sql
 CREATE TABLE IF NOT EXISTS decision_events (
-    decision_group_id   TEXT NOT NULL,            -- PK component
-    decision_seq        INTEGER NOT NULL,         -- PK component (see §4.3.1 derivation)
-    decision_time       TEXT NOT NULL,            -- ISO8601 UTC
-
-    -- Identity (from ExecutionIntent layer)
+    -- Natural key (PK)
     market_id           TEXT NOT NULL,
     condition_id        TEXT NOT NULL,
+    temperature_metric  TEXT NOT NULL CHECK (temperature_metric IN ('high', 'low')),
+    target_date         TEXT NOT NULL,             -- settlement calendar day (ISO date)
+    observation_time    TEXT NOT NULL,             -- ISO8601 UTC (R-3.1/3.2/3.3 ordering)
+    decision_seq        INTEGER NOT NULL,          -- intra-natural-key ordering, see §4.2.1
+
+    -- Audit-only derived hash (NOT a PK input; populated by AFTER INSERT TRIGGER)
+    decision_group_id   TEXT,                      -- See §4.2.2 — written by trigger, NOT by INSERT
+
+    decision_time       TEXT NOT NULL,             -- when the decision was made
+
+    -- Identity (from ExecutionIntent layer; complements natural key)
     outcome             TEXT NOT NULL,
     side                TEXT NOT NULL,
     strategy_key        TEXT NOT NULL,
@@ -109,134 +139,220 @@ CREATE TABLE IF NOT EXISTS decision_events (
     target_size_usd     REAL,
     target_price        REAL,
 
-    -- DecisionSourceContext — PR 3 (4 fields)
-    forecast_time       TEXT,
-    observation_time    TEXT NOT NULL,            -- R-3.1/3.2/3.3 ordering invariants
-    provider_reported_time TEXT,                  -- Path F Optional
-    observation_available_at TEXT NOT NULL,
-    polymarket_end_anchor_source TEXT NOT NULL,   -- 'gamma_explicit' | 'f1_12z_fallback'
+    -- DecisionSourceContext — PR 3 (5 fields; mixed sources)
+    forecast_time              TEXT,
+    provider_reported_time     TEXT,               -- Path F Optional
+    observation_available_at   TEXT NOT NULL,
+    polymarket_end_anchor_source TEXT NOT NULL CHECK (
+        polymarket_end_anchor_source IN ('gamma_explicit', 'f1_12z_fallback')
+    ),
 
     -- DecisionSourceContext — PR 6 (8 fields)
     first_member_observed_time TEXT NOT NULL,
     run_complete_time          TEXT NOT NULL,
     zeus_submit_intent_time    TEXT NOT NULL,
     venue_ack_time             TEXT NOT NULL,
-    first_inclusion_block_time TEXT,              -- chain-confirmed, may arrive post-decision (Optional)
-    finality_confirmed_time    TEXT,              -- chain-confirmed (Optional)
-    clock_skew_estimate_ms     INTEGER,           -- Optional (probe may fail)
-    raw_orderbook_hash_transition_delta_ms INTEGER,  -- Optional (first observation = NULL)
+    first_inclusion_block_time TEXT,               -- Optional (chain confirms post-decision)
+    finality_confirmed_time    TEXT,               -- Optional
+    clock_skew_estimate_ms_at_submit INTEGER,      -- Optional (source: settlement_commands; correct name verified)
+    raw_orderbook_hash_transition_delta_ms INTEGER,-- Optional (source: ensemble_snapshots_v2; verified)
 
     -- Provenance
-    schema_version             INTEGER NOT NULL,  -- 13 for live writes; 12 for backfilled rows
-    source                     TEXT NOT NULL,     -- 'phase0_backfill' | 'live_decision'
+    schema_version             INTEGER NOT NULL CHECK (schema_version IN (12, 13)),
+    source                     TEXT NOT NULL CHECK (
+        source IN ('phase0_backfill', 'live_decision')
+    ),
 
-    PRIMARY KEY (decision_group_id, decision_seq)
+    PRIMARY KEY (market_id, condition_id, temperature_metric, target_date, observation_time, decision_seq)
 );
 
-CREATE INDEX IF NOT EXISTS idx_decision_events_market ON decision_events(market_id);
-CREATE INDEX IF NOT EXISTS idx_decision_events_strategy ON decision_events(strategy_key);
-CREATE INDEX IF NOT EXISTS idx_decision_events_time ON decision_events(decision_time);
+-- AFTER INSERT TRIGGER populates the audit-only decision_group_id hash
+CREATE TRIGGER IF NOT EXISTS decision_events_hash_after_insert
+AFTER INSERT ON decision_events
+FOR EACH ROW
+WHEN NEW.decision_group_id IS NULL
+BEGIN
+    UPDATE decision_events
+       SET decision_group_id = (
+           -- Python equivalent: decision_group_id_v1_hash(
+           --   strategy_key=NEW.strategy_key,
+           --   market_id=NEW.market_id,
+           --   target_date=NEW.target_date,
+           --   observation_time_rounded=NEW.observation_time)
+           -- SCAFFOLD must finalize the in-SQL hash expression OR mark the
+           -- trigger as Python-callout via sqlite create_function() bound at
+           -- connection time. Both options reviewed by wave-critic v2.
+           NULL  -- SCAFFOLD-PENDING — see §4.2.2 below
+       )
+     WHERE market_id = NEW.market_id
+       AND condition_id = NEW.condition_id
+       AND temperature_metric = NEW.temperature_metric
+       AND target_date = NEW.target_date
+       AND observation_time = NEW.observation_time
+       AND decision_seq = NEW.decision_seq;
+END;
+
+-- Indices for the 3 most common access patterns
+CREATE INDEX IF NOT EXISTS idx_decision_events_market_date
+    ON decision_events(market_id, target_date);
+CREATE INDEX IF NOT EXISTS idx_decision_events_strategy
+    ON decision_events(strategy_key, decision_time);
+CREATE INDEX IF NOT EXISTS idx_decision_events_hash
+    ON decision_events(decision_group_id);   -- audit-only lookups
 ```
 
-**§4.3.1 decision_seq derivation**:
-- Backfill: monotonic per `decision_group_id`, ordered by `(forecast_time, observation_time)` ASC, starting at 0
-- Live writes: incremented atomically at write time; first write for a group_id = 0
+**§4.2.1 `decision_seq` derivation**:
+- Live writes: `SELECT COALESCE(MAX(decision_seq), -1) + 1 FROM decision_events WHERE market_id=? AND condition_id=? AND temperature_metric=? AND target_date=? AND observation_time=?`, under `db_writer_lock(LIVE)` + SAVEPOINT (atomic; concurrent same-key writes serialized).
+- Backfill: monotonic per natural-key tuple, ordered by `decision_time` ASC, starting at 0.
 
-Required NOT NULL fields per critic B3 classification (Phase 0 carryover): 7 REQUIRED (decision_group_id, decision_time, market_id, condition_id, outcome, side, strategy_key) + 7 PR-3/PR-6 REQUIRED (observation_time, observation_available_at, polymarket_end_anchor_source, first_member_observed_time, run_complete_time, zeus_submit_intent_time, venue_ack_time). All chain-finality + Optional/Path-F fields nullable.
+**§4.2.2 Hash computation strategy (SCAFFOLD must choose)**:
+- **Option α (Python callout)**: SQLite `connection.create_function('decision_group_id_v1', 4, _python_hash)` binds the Python hash function as a SQL UDF; trigger calls `decision_group_id_v1(strategy_key, market_id, target_date, observation_time)`. Pro: identical hash semantics as Python writers; UDF binding lives in `get_world_connection()` initialization. Con: requires every reader connection to bind the UDF for read-side hash verification.
+- **Option β (writer-side hash, trigger-validated)**: writer Python code computes hash AND passes it as the `decision_group_id` value in INSERT (column nullable). Trigger fires only when value is NULL (backstop). Pro: simpler — no UDF. Con: drift possible if writers forget to compute.
+- **Orchestrator recommendation: α** — makes drift impossible (only the DB-bound UDF can populate; writers cannot bypass).
 
-### §4.4 Backfill plan (revised per critic SEV-1 #2 + #3)
+**Required NOT NULL columns** (17 total — corrected from SCAFFOLD v1 §3.3 which said 14): 6 natural-key (incl. decision_seq) + decision_time + outcome + side + strategy_key + observation_available_at + polymarket_end_anchor_source + first_member_observed_time + run_complete_time + zeus_submit_intent_time + venue_ack_time + schema_version + source = **17**. Note: `decision_group_id` is NULL on INSERT, populated by trigger — effectively non-null post-INSERT.
 
-**Cross-DB semantic — sequential snapshot read with fail-open** (NOT atomic across DBs; INV-37 honored by avoiding cross-DB write surface):
+### §4.3 Backfill plan (Path D — artifact_json primary source)
 
 ```python
-# Pseudocode for backfill (chunked by decision_group_id)
-for chunk in iter_group_ids(chunk_size=500):
-    # Step 1: Read forecasts side (independent read-only conn)
-    forecasts_rows = read_from_forecasts(
-        table="ensemble_snapshots_v2",
-        columns=[
-            "decision_group_id", "first_member_observed_time", "run_complete_time",
-            "raw_orderbook_hash_transition_delta_ms",  # CORRECTED per critic SEV-1 #3
-        ],
-        where=f"decision_group_id IN {chunk}",
-    )
-    # Step 2: Read trade side (independent read-only conn)
-    trade_rows = read_from_trade(
-        table="settlement_commands",
-        columns=[
-            "decision_group_id", "polymarket_end_anchor_source",
-            "zeus_submit_intent_time", "venue_ack_time", "clock_skew_estimate_ms",
-        ],
-        where=f"decision_group_id IN {chunk}",
-    )
-    # Step 3: Read world side (independent read-only conn, or co-conn with write)
-    world_rows = read_from_world(
-        table="wrap_unwrap_commands",
-        columns=[
-            "decision_group_id", "first_inclusion_block_time", "finality_confirmed_time",
-        ],
-        where=f"decision_group_id IN {chunk}",
-    )
+# Backfill from decision_log.artifact_json (Path F-aware: historical rows NULL for PR 3+6 fields)
+for chunk in iter_decision_log_ids(chunk_size=500):
+    # Step 1: Read decision_log (world DB — same DB as decision_events; no cross-DB read needed)
+    log_rows = world.execute("""
+        SELECT id, mode, started_at, completed_at, artifact_json, timestamp
+        FROM decision_log
+        WHERE id IN (?, ?, ...)
+    """, chunk).fetchall()
 
-    # Step 4: Merge by decision_group_id (Python-side; missing → NULL Optional)
-    merged = merge_by_group_id(forecasts_rows, trade_rows, world_rows)
+    # Step 2: Parse artifact_json → natural key + 12 old fields
+    parsed = []
+    for r in log_rows:
+        try:
+            j = json.loads(r["artifact_json"])
+        except json.JSONDecodeError:
+            continue  # fail-open: skip malformed entries
+        nk = DecisionNaturalKey.from_artifact_json(j)  # extract 5 natural-key fields
+        if nk is None:
+            continue  # missing natural-key fields → skip (cannot key without them)
+        parsed.append((nk, j, r))
 
-    # Step 5: WRITE to world.decision_events under db_writer_lock(BULK)
+    # Step 3 (optional enrichment): independent reads from forecasts/trade for PR-3+6 fields
+    # Historical writes may have populated some; best-effort. Keyed on natural fields, NOT hash.
+    forecasts_enrich = forecasts.execute("""
+        SELECT city, target_date, temperature_metric,
+               first_member_observed_time, run_complete_time,
+               raw_orderbook_hash_transition_delta_ms
+        FROM ensemble_snapshots_v2
+        WHERE (city, target_date, temperature_metric) IN ((?,?,?), ...)
+    """, enrichment_keys).fetchall()
+    # Similarly trade.settlement_commands → clock_skew_estimate_ms_at_submit etc.
+    # Resolve (city, target_date, metric) → (market_id, condition_id) via market_events_v2
+
+    # Step 4: Merge per natural key + write to world.decision_events
     with db_writer_lock(world_db, write_class=BULK):
-        with get_world_connection() as conn:  # single-DB write — INV-37 trivially honored
-            for row in merged:
-                conn.execute("INSERT INTO decision_events ...", row)
+        with get_world_connection() as conn:
+            for nk, j, log_row in parsed:
+                seq = conn.execute("""
+                    SELECT COALESCE(MAX(decision_seq), -1) + 1
+                    FROM decision_events
+                    WHERE market_id=? AND condition_id=? AND temperature_metric=?
+                      AND target_date=? AND observation_time=?
+                """, nk).fetchone()[0]
+                row = build_row(nk, seq, j, enrich_data,
+                                source='phase0_backfill', schema_version=12)
+                conn.execute("INSERT OR IGNORE INTO decision_events ...", row)
             conn.commit()
 ```
 
-**Fail-open semantics**: if a side's data is partially missing for a group_id, the row still writes with Optional fields = NULL. `source='phase0_backfill'` distinguishes vs live writes. Backfill is **idempotent** via `INSERT OR REPLACE INTO decision_events` on PK conflict — safe to re-run after partial failures.
+**INSERT OR IGNORE** (NOT REPLACE — fixes critic v1 SEV-2 #6): if a row already exists at the same `(natural-key + decision_seq)`, skip. Prevents backfill from blasting live rows. Idempotent on rerun.
 
-**Source column corrections per critic SEV-1 #3**:
-- `raw_orderbook_hash_transition_delta_ms` ← `ensemble_snapshots_v2` (forecasts), verified at `src/state/schema/v2_schema.py:211` + yaml line 175
-- `clock_skew_estimate_ms` ← `settlement_commands` (trade), per PR 6 column placement (operator/critic-verify in SCAFFOLD)
+**Path F honesty**: 12 PR-3+6 fields that did not exist when historical artifact_json was written → NULL. CHECK constraints on `polymarket_end_anchor_source` and `schema_version` apply; SCAFFOLD must default backfilled rows to `polymarket_end_anchor_source='gamma_explicit'` (per Phase 0 critic B2 verdict — same rationale: dominant case, retroactive labeling).
 
-### §4.5 Antibody — INV-decision-events-completeness (revised per critic SEV-2 §4.5)
+**No new ATTACH path**: each DB uses its independent sanctioned read connection; final write is single-DB to world. INV-37 trivially honored.
 
-Cross-DB count comparison via **read-only ATTACH** (existing `get_forecasts_connection_with_world()` is the sanctioned read path for forecasts→world):
+### §4.4 Antibody — INV-decision-events-completeness (natural-key, no ATTACH)
 
 ```python
-def test_inv_decision_events_completeness_per_recent_cycle():
-    # Use sanctioned ATTACH read: forecasts attached to world
-    with get_forecasts_connection_with_world(mode="ro") as conn:
-        # Pick a recent live cycle that should have decisions
-        result = conn.execute("""
-            SELECT
-                (SELECT COUNT(*) FROM ensemble_snapshots_v2
-                 WHERE cycle_id = ? AND decision_group_id IS NOT NULL) AS forecast_count,
-                (SELECT COUNT(*) FROM decision_events
-                 WHERE cycle_id = ?) AS event_count
-        """, (cycle_id, cycle_id)).fetchone()
+def test_inv_decision_events_completeness_natural_key():
+    """For every decision-tagged forecast in the last 7d, decision_events
+    must carry at least one row keyed by the natural tuple.
 
-    n_forecast, n_events = result
-    # Non-empty precondition gates the assertion (avoids trivial-pass on empty cycles)
-    if n_forecast == 0:
-        pytest.skip(f"cycle {cycle_id} has no decision-tagged forecasts; non-degenerate test impossible")
-    assert n_events == n_forecast, (
+    Cross-module relationship test (Fitz §3 invariant pattern).
+    Independent read connections — INV-37 trivially honored.
+    """
+    forecasts = get_forecasts_connection_read_only()
+    world = get_world_connection_read_only()
+
+    candidates = forecasts.execute("""
+        SELECT city, target_date, temperature_metric, available_at
+        FROM ensemble_snapshots_v2
+        WHERE recorded_at >= datetime('now', '-7 days')
+          AND causality_status = 'OK'
+    """).fetchall()
+
+    market_map = {
+        (r['city'], r['target_date'], r['temperature_metric']):
+            (r['market_slug'], r['condition_id'])
+        for r in forecasts.execute("""
+            SELECT city, target_date, temperature_metric, market_slug, condition_id
+            FROM market_events_v2
+        """).fetchall()
+    }
+
+    misses = []
+    for c in candidates:
+        key = (c['city'], c['target_date'], c['temperature_metric'])
+        if key not in market_map:
+            continue  # no market = no decision possible
+        market_id, condition_id = market_map[key]
+        n = world.execute("""
+            SELECT COUNT(*) FROM decision_events
+            WHERE market_id = ? AND condition_id = ?
+              AND temperature_metric = ? AND target_date = ?
+        """, (market_id, condition_id, c['temperature_metric'], c['target_date'])).fetchone()[0]
+        if n == 0:
+            misses.append((market_id, condition_id, c['target_date']))
+
+    if not candidates:
+        pytest.skip("no decision-tagged forecasts in 7d window — non-degenerate test impossible")
+    assert not misses, (
         f"INV-decision-events-completeness violated: "
-        f"cycle={cycle_id} forecasts={n_forecast} events={n_events}"
+        f"{len(misses)} decision-tagged forecasts have no decision_events row. "
+        f"Sample: {misses[:5]}"
     )
 ```
 
-Join key: `decision_group_id` (NOT `strategy_key` — strategy_key is not on ensemble_snapshots_v2 directly). Non-empty precondition prevents trivial pass.
+Properties:
+- Tests a **cross-module relationship** (forecasts.ensemble_snapshots_v2 ↔ forecasts.market_events_v2 ↔ world.decision_events) — Fitz §3 pattern
+- **Independent read connections** — INV-37 trivially honored (no new ATTACH path)
+- **Non-empty precondition** prevents trivial-pass
+- **Survives hash version changes** — keyed on natural tuple, not on `decision_group_id`
+- **Survives source-table additions** — new tables ship with natural-key columns (because they need them to participate in any cross-module query); writers that omit immediately visible
 
-### §4.6 Backward compatibility
+### §4.5 Backward compatibility
 
-Phase 0 readers consume `ensemble_snapshots_v2` / `settlement_commands` / `wrap_unwrap_commands` directly. Phase 1 readers prefer `decision_events`. **Dual-source merge** semantics for readers (per critic ambiguity flag):
-- Primary lookup: `decision_events` by `decision_group_id`
-- Fallback: if `decision_events` row missing (e.g., backfill gap), fall back to Phase 0 temp storage with `source='inferred_legacy'` tag
-- Live writes ONLY to `decision_events` post-Phase-1; Phase 0 temp fields STOP being written (no double-writes)
+Phase 0 readers consume `ensemble_snapshots_v2` / `settlement_commands` / `wrap_unwrap_commands` directly. Phase 1 readers prefer `decision_events`. Dual-source merge for readers:
+- Primary lookup: `decision_events` by natural key (new canonical)
+- Fallback: if `decision_events` row missing (e.g., pre-`decision_log`-retention history), read from Phase 0 temp storage
 
-Phase 0 temp fields removal: deferred to Phase 2 — Phase 2 confirms decision_events is healthy + has full backfill coverage + no readers depend on temp fields, then drops the temp columns. Removal date target: post-Phase-1-closure + 30d soak.
+Live writes ONLY to `decision_events` post-Phase-1; Phase 0 temp INSERT callsites are removed in Phase 2 cleanup (Phase 1 leaves them as fallback paths to avoid disruption).
 
-### §4.7 Out-of-scope for T1
-- Phase 0 temp field removal (Phase 2)
+Phase 0 temp field removal: deferred to Phase 2 (target: Phase-1-closure + 30d soak).
+
+### §4.6 Out-of-scope for T1
+- Forward-fit migrations adding `decision_group_id` columns to source tables (Phase 2+; audit convenience only — Path D makes them optional, never required)
 - decision_events as time-series replay store (Phase 2+)
 - decision_log → decision_events bridging (Phase 2; both write paths coexist post-T1)
+- Hash function v2 (Phase 2+; natural-key joins keep working under any hash version)
+
+### §4.7 PR sequencing
+
+| PR | Title | Contents | LOC est. |
+|---|---|---|---|
+| **PR-T1-A** | foundation: DecisionNaturalKey + decision_events table | `src/contracts/decision_natural_key.py` (NewType + 3 helpers) + `src/state/decision_events.py` (writer/reader) + migration script + `src/state/db.py` SCHEMA_VERSION 12→13 + AFTER INSERT TRIGGER + manifest entries (db_table_ownership.yaml + source_rationale.yaml) | ~550 |
+| **PR-T1-B** | backfill + antibody | `scripts/backfill_decision_events_from_artifact_json.py` + `tests/test_inv_decision_events_completeness.py` (natural-key completeness antibody, **strict-pass** — no longer xfail) + 13 mypy errors in `db.py:8685-8904` (schema-adjacent cleanup folded in) | ~300 |
+
+PR-T1-B depends on PR-T1-A merged. Single executor handles both via SendMessage continuity.
 
 ---
 
