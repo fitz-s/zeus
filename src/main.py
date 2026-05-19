@@ -1054,8 +1054,46 @@ def _start_user_channel_ingestor_if_enabled() -> None:
     # and (b) again from inside the retry loop whenever the prior attempt failed
     # or the start() coroutine exited. Either path independently advances the
     # daemon — transient API failures no longer permanently latch the WS guard.
+    # Map exception types to ws_gap_guard subscription_state so operator
+    # telemetry distinguishes "auth/creds failed" from generic transport/network
+    # failures. AUTH_FAILED gates differently from DISCONNECTED in the gap guard
+    # (auth requires operator intervention; disconnect retries cleanly).
+    # Conservative classification: only treat creds-shape failures as AUTH_FAILED.
+    def _classify_build_failure(exc: BaseException) -> str:
+        name = type(exc).__name__
+        msg = str(exc).lower()
+        auth_signals = (
+            "creds",
+            "auth",
+            "api_key",
+            "api-key",
+            "passphrase",
+            "secret",
+            "signature",
+            "unauthorized",
+            "401",
+            "403",
+        )
+        if any(sig in msg for sig in auth_signals):
+            return "AUTH_FAILED"
+        if name in {"WSAuthMissing", "ValueError", "TypeError"} and "creds" in msg:
+            return "AUTH_FAILED"
+        return "DISCONNECTED"
+
     def _build_ingestor() -> "PolymarketUserChannelIngestor | None":
         global _user_channel_ingestor
+        # Invalidate the adapter's memoized SDK client so this attempt forces a
+        # fresh create_or_derive_api_key() rather than reusing a cached client
+        # whose creds were None from a prior failed boot
+        # (codereview-may19 / Codex P1: src/venue/polymarket_v2_adapter.py:286
+        # memoizes self._client; without reset, every retry sees the same bad
+        # creds and the loop never recovers).
+        try:
+            adapter._client = None  # type: ignore[attr-defined]
+        except Exception:  # noqa: BLE001
+            # Adapter might not expose the attribute on all stub paths; non-fatal.
+            pass
+
         try:
             sdk_client = adapter._sdk_client()
             sdk_creds = sdk_client.creds
@@ -1075,10 +1113,13 @@ def _start_user_channel_ingestor_if_enabled() -> None:
             _user_channel_ingestor = ingestor
             return ingestor
         except Exception as exc:
+            subscription_state = _classify_build_failure(exc)
             gap_reason = f"user_channel_attempt_failed:{type(exc).__name__}"
-            record_gap(gap_reason, subscription_state="AUTH_FAILED")
+            record_gap(gap_reason, subscription_state=subscription_state)
             logger.error(
-                "M3 user-channel ingestor build failed: %s; will retry inside daemon thread",
+                "M3 user-channel ingestor build failed (subscription_state=%s): %s; "
+                "will retry inside daemon thread",
+                subscription_state,
                 exc,
                 exc_info=True,
             )
