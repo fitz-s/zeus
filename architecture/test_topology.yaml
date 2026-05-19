@@ -228,6 +228,7 @@ test_trust_policy:
     tests/test_live_readiness_gates.py: {created: "2026-04-27", last_used: "2026-04-27"}
     tests/test_entry_forecast_config.py: {created: "2026-05-03", last_used: "2026-05-03"}
     tests/test_executable_forecast_reader.py: {created: "2026-05-03", last_used: "2026-05-14"}
+    tests/test_executable_forecast_reader_member_floor.py: {created: "2026-05-19", last_used: "2026-05-19"}
     tests/test_ingest_boot_time_semantics.py: {created: "2026-05-02", last_used: "2026-05-02"}
     tests/test_ingest_grib_source_run_context.py: {created: "2026-05-03", last_used: "2026-05-03"}
     tests/test_live_entry_status.py: {created: "2026-05-03", last_used: "2026-05-03"}

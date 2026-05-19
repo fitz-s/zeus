@@ -35,7 +35,8 @@
     "bimodal_gap_ratio": 0.3,
     "boundary_window": 0.5,
     "unimodal_range_epsilon": 0.5,
-    "conflict_kl_threshold": 0.15
+    "conflict_kl_threshold": 0.15,
+    "min_members_floor": 40
   },
   "entry_forecast": {
     "source_id": "ecmwf_open_data",
