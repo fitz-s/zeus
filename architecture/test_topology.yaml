@@ -628,6 +628,7 @@ categories:
     - tests/test_ensemble_snapshots_bias_corrected_schema.py
     - tests/test_evaluator_metric_normalizer_failclosed.py
     - tests/test_execution_intent_typed_slippage.py
+    - tests/test_lifecycle_pending_exit_guard.py
     - tests/test_lifecycle_terminal_predicate.py
     - tests/test_monitor_refresh_ci_fallback.py
     - tests/test_position_metric_resolver.py

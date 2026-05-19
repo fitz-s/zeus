@@ -220,7 +220,7 @@ def enter_pending_exit_runtime_state(
         chain_state=chain_state,
     )
     # Idempotency: positions that have already advanced past PENDING_EXIT
-    # (economically_closed via market resolution, settled, voided, etc.) cannot
+    # (economically_closed via market resolution, terminal phases, etc.) cannot
     # legally transition back to PENDING_EXIT — there is no remaining inventory
     # to exit. fold_lifecycle_phase would raise; callers (e.g. day0_capture's
     # exit-pending projection path) crash and starve the max_instances=1 cycle
@@ -228,13 +228,16 @@ def enter_pending_exit_runtime_state(
     # Anchor incident: 2026-05-19T23:00:39Z day0_capture crash with
     # `illegal lifecycle phase fold: 'economically_closed' -> 'pending_exit'`,
     # killing live-trade pipeline for 30+ minutes post-daemon-restart.
-    if current_phase in {
-        LifecyclePhase.ECONOMICALLY_CLOSED,
-        LifecyclePhase.SETTLED,
-        LifecyclePhase.VOIDED,
-        LifecyclePhase.ADMIN_CLOSED,
-        LifecyclePhase.QUARANTINED,
-    }:
+    #
+    # Per Copilot review (PR #216): derive the terminal set from
+    # `is_terminal_state` (sourced from LEGAL_LIFECYCLE_FOLDS) so future
+    # fold-table edits cannot silently miss new terminal phases. ECONOMICALLY_CLOSED
+    # is NOT terminal (folds to {ECONOMICALLY_CLOSED, SETTLED, VOIDED}), so it
+    # must be layered explicitly here as the originally-observed crash case.
+    if (
+        current_phase == LifecyclePhase.ECONOMICALLY_CLOSED
+        or is_terminal_state(current_phase)
+    ):
         return current_phase.value
     fold_lifecycle_phase(current_phase, LifecyclePhase.PENDING_EXIT)
     return LifecyclePhase.PENDING_EXIT.value
