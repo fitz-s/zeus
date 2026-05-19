@@ -1070,8 +1070,25 @@ def _coerce_time(value: datetime | str | None) -> str:
     return str(value)
 
 
+def _jsonable(o: Any) -> Any:
+    """Coerce HexBytes / bytes / similar to hex-string for JSON serialization.
+
+    Receipt payloads from web3.eth.get_transaction_receipt contain HexBytes
+    instances (blockHash, transactionHash, logsBloom, logs[].topics, etc.)
+    that the stdlib JSONEncoder rejects. Without this default-hook the
+    reconcile_pending_redeems path crashes with TypeError, leaving rows
+    stuck in REDEEM_TX_HASHED indefinitely.
+    """
+    # HexBytes inherits from bytes and has .hex() method; bytes also has .hex()
+    if isinstance(o, (bytes, bytearray)):
+        return "0x" + o.hex() if not o.hex().startswith("0x") else o.hex()
+    # AttributeDict (web3) subclasses dict → handled automatically by json
+    # Address types str-subclassed; Decimal not used in receipts
+    raise TypeError(f"Object of type {type(o).__name__} is not JSON serializable")
+
+
 def _json_dumps(value: Any) -> str:
-    return json.dumps(value, sort_keys=True, separators=(",", ":"))
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), default=_jsonable)
 
 
 def _payload_hash(payload_json: str) -> str:

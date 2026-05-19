@@ -417,6 +417,8 @@ test_trust_policy:
     tests/test_settlement_commands_negrisk_misroute_recovery.py: {created: "2026-05-19", last_used: "2026-05-19"}
     # PR redeem-reconciler-wiring — PR-I.5 completion: reconciler wiring antibody (Karachi auto-recovery).
     tests/test_main_redeem_reconciler_wiring.py: {created: "2026-05-19", last_used: "2026-05-19"}
+    # fix/json-hexbytes-serializer — HexBytes JSON serializer antibody (2026-05-19 alpha-loss postmortem).
+    tests/test_settlement_commands_hexbytes_serializer.py: {created: "2026-05-19", last_used: "2026-05-19"}
 
 categories:
   core_law_antibody:
@@ -2264,5 +2266,29 @@ test_metadata:
       archived=True. Five sed-flip tests cover tag ordering (T1), CLOB-archived
       rejection (T2), CLOB-live admission (T3), CLOB-error fallback (T4), and
       per-tick cache dedup (T5).
+    created: 2026-05-19
+    last_reused_or_audited: 2026-05-19
+
+  tests/test_settlement_commands_hexbytes_serializer.py:
+    modules: [execution, state, venue]
+    category: core_law_antibody
+    profile: fix_json_hexbytes_serializer_2026_05_19
+    blocks_commit: true
+    asserted_invariants:
+      - JSON-HEXBYTES-SERIALIZABLE
+    source_under_test:
+      - src/execution/settlement_commands.py
+    law_dependencies:
+      - architecture/invariants.yaml
+      - docs/authority/zeus_current_architecture.md
+    notes: >
+      Antibody for 2026-05-19 alpha-loss: _json_dumps had no custom encoder; web3
+      receipts containing HexBytes (blockHash, transactionHash, logsBloom,
+      logs[].topics) caused TypeError in reconcile_pending_redeems, leaving all
+      REDEEM_TX_HASHED rows stuck. Fix: _jsonable default-hook coerces bytes/HexBytes
+      to "0xHEX" form; unsupported types still raise TypeError.
+      Five contracts: T1 top-level HexBytes, T2 raw bytes, T3 nested logs,
+      T4 full round-trip (sed-flip verified: removing default=_jsonable → RED),
+      T5 unsupported type still raises.
     created: 2026-05-19
     last_reused_or_audited: 2026-05-19
