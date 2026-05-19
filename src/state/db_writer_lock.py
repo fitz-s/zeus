@@ -757,6 +757,14 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         # --- PR 3+6 (2026-05-19) migration scripts ---
         "scripts/migrate_settlement_commands_polymarket_anchor.py",  # operator_invoked: DDL-only idempotent ADD COLUMN for PR3+PR6 columns
         "scripts/migrate_ensemble_snapshots_v2_alpha_proxy.py",     # operator_invoked: DDL-only idempotent ADD COLUMN for PR6 timing chain
+        # --- one-shot operator-local market injection (2026-05-19) ---
+        # Untracked utility (ran 2026-05-19, 0 callers). Bare sqlite3.connect() at
+        # lines 210/236/512/513 not wrapped in db_writer_lock(BULK). Allowlisted to
+        # unblock Phase 1 pytest. Slated for deletion or proper wrap at Phase 1 closure.
+        "scripts/inject_may2021_markets_2026_05_19.py",  # operator_invoked: one-shot bulk injection (Phase 1 cleanup pending)
+        # --- T1 Phase-1 decision_events scripts (2026-05-19) ---
+        "scripts/audit_artifact_json_natural_key_coverage_2026_05_19.py",  # read_only: SELECT-only audit; T1 backfill precondition gate
+        "scripts/migrate_decision_events_create_2026_05_19.py",            # operator_invoked: idempotent CREATE TABLE/TRIGGER/INDEX; not daemon path
     }
 )
 

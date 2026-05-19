@@ -102,6 +102,7 @@ directory should EITHER be moved under `archive/` OR keep a
 | `task_2026-05-17_docs_taxonomy_design/` | `feat/docs-taxonomy-design-2026-05-17` | **closed** — docs taxonomy design + W1-W6 execution + PR #136 merge | 2026-05-17 |
 | `task_2026-05-17_reference_authority_docs_phase/` | audit packet | **active** — reference + authority docs citation audit phase (drift repair) | 2026-05-17 |
 | `2026-05-18_worktree_create_hook_cwd_leakage/` | PR #153 | **active** — incident packet: WorktreeCreate hook cwd-leakage fix + committed snapshot + antibody test | 2026-05-18 |
+| `task_2026-05-19_strategy_vnext_phase1/` | PR #214 (T1-A), PR #215 (T1-B) | **active** — Phase 1 T1: decision_events table + natural-key writer + backfill + antibody (PHASE_1_ULTRAPLAN.md Path D v3) | 2026-05-19 |
 
 ## Active operation (only one allowed unless explicit branching)
 

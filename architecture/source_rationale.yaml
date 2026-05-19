@@ -1858,6 +1858,14 @@ files:
     - src/execution/harvester.py
     - src/observability/status_summary.py
     - src/state/db.py
+  src/state/decision_events.py:
+    zone: K2_runtime
+    authority_role: decision_event_instrumentation
+    why: "T1 Path D natural-key writer/reader for decision_events table. Single-DB world write (INV-37 trivially honored — no ATTACH). writer-side deid_v1_ hash (Option β). Live writes under db_writer_lock(LIVE); backfill under db_writer_lock(BULK). NOT_DAEMON_WIRED: daemon wiring deferred to Phase 2 activation commit."
+    write_routes:
+    - settlement_write
+    downstream:
+    - src/state/db.py
   src/state/ledger.py:
     zone: K0_frozen_kernel
     authority_role: canonical_event_ledger

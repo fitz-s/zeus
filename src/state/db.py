@@ -201,6 +201,22 @@ def get_forecasts_connection(
     return _connect(ZEUS_FORECASTS_DB_PATH, write_class=write_class)
 
 
+def get_world_connection_read_only() -> sqlite3.Connection:
+    """Read-only world DB connection (write_class=None).
+    T1 thin wrapper — encodes read-only intent in the call site name.
+    INV-37: single-DB read; no ATTACH path.
+    """
+    return get_world_connection(write_class=None)
+
+
+def get_forecasts_connection_read_only() -> sqlite3.Connection:
+    """Read-only forecasts DB connection (write_class=None).
+    T1 thin wrapper — encodes read-only intent in the call site name.
+    INV-37: single-DB read; no ATTACH path.
+    """
+    return get_forecasts_connection(write_class=None)
+
+
 @contextlib.contextmanager
 def get_forecasts_connection_with_world(
     *,
@@ -827,7 +843,7 @@ def get_connection(
 # CI hook scripts/check_schema_version.py diffs the sqlite_master hash of
 # a fresh-init DB against tests/state/_schema_pinned_hash.txt and fails
 # the PR if SCHEMA_VERSION did not change in lockstep.
-SCHEMA_VERSION = 13  # 2026-05-19 codereview-may19 P1-3: polymarket_end_anchor_source DEFAULT 'gamma_explicit' → 'unknown_legacy' (no fabricated authority on legacy rows)
+SCHEMA_VERSION = 13  # 2026-05-19 T1: decision_events table + backstop trigger + 3 indices (Path D natural-key, deid_v1_ namespace); polymarket_end_anchor_source DEFAULT 'unknown_legacy'
 
 
 def init_schema(
@@ -1287,6 +1303,67 @@ def init_schema(
             timestamp TEXT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_decision_log_ts ON decision_log(timestamp);
+
+        -- T1 Phase-1: decision_events — natural-key instrumentation table (Path D v3)
+        -- PK: 5-component natural key; condition_id is nullable enrichment (NOT in PK)
+        -- decision_event_id: deid_v1_ namespace — DISTINCT from dgid_v1_ (calibration)
+        -- Writer computes hash via decision_event_id_v1_hash(); trigger backstop on NULL.
+        -- SCHEMA_VERSION 13 (2026-05-19 T1)
+        CREATE TABLE IF NOT EXISTS decision_events (
+            market_slug         TEXT NOT NULL,
+            temperature_metric  TEXT NOT NULL CHECK (temperature_metric IN ('high', 'low')),
+            target_date         TEXT NOT NULL,
+            observation_time    TEXT NOT NULL,
+            decision_seq        INTEGER NOT NULL,
+            condition_id        TEXT,
+            decision_event_id   TEXT,
+            decision_time       TEXT NOT NULL,
+            outcome             TEXT NOT NULL,
+            side                TEXT NOT NULL,
+            strategy_key        TEXT NOT NULL,
+            cycle_id            TEXT,
+            cycle_iteration     INTEGER,
+            p_posterior         REAL,
+            edge                REAL,
+            target_size_usd     REAL,
+            target_price        REAL,
+            forecast_time              TEXT,
+            provider_reported_time     TEXT,
+            observation_available_at   TEXT NOT NULL,
+            polymarket_end_anchor_source TEXT NOT NULL CHECK (
+                polymarket_end_anchor_source IN ('gamma_explicit', 'f1_12z_fallback')
+            ),
+            first_member_observed_time TEXT,
+            run_complete_time          TEXT,
+            zeus_submit_intent_time    TEXT,
+            venue_ack_time             TEXT,
+            first_inclusion_block_time TEXT,
+            finality_confirmed_time    TEXT,
+            clock_skew_estimate_ms_at_submit INTEGER,
+            raw_orderbook_hash_transition_delta_ms INTEGER,
+            schema_version INTEGER NOT NULL CHECK (schema_version IN (12, 13)),
+            source         TEXT NOT NULL CHECK (source IN ('phase0_backfill', 'live_decision')),
+            PRIMARY KEY (market_slug, temperature_metric, target_date, observation_time, decision_seq)
+        );
+        CREATE INDEX IF NOT EXISTS idx_decision_events_slug_date
+            ON decision_events(market_slug, target_date);
+        CREATE INDEX IF NOT EXISTS idx_decision_events_strategy
+            ON decision_events(strategy_key, decision_time);
+        CREATE INDEX IF NOT EXISTS idx_decision_events_event_id
+            ON decision_events(decision_event_id);
+        CREATE TRIGGER IF NOT EXISTS decision_events_event_id_backstop
+        AFTER INSERT ON decision_events
+        FOR EACH ROW
+        WHEN NEW.decision_event_id IS NULL
+        BEGIN
+            UPDATE decision_events
+               SET decision_event_id = 'deid_v1_BACKSTOP_NULL_WRITER_BYPASS'
+             WHERE market_slug = NEW.market_slug
+               AND temperature_metric = NEW.temperature_metric
+               AND target_date = NEW.target_date
+               AND observation_time = NEW.observation_time
+               AND decision_seq = NEW.decision_seq;
+        END;
 
         -- ETL tables: legacy-predecessor data validated and imported
 
