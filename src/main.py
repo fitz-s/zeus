@@ -1371,6 +1371,86 @@ def _check_deployment_freshness(
         )
 
 
+_DEPLOYMENT_FRESHNESS_PAUSE_REASON = "deployment_freshness_4h_divergence"
+
+
+def _boot_deployment_freshness_auto_resume() -> None:
+    """Boot-time auto-resume: clear a deployment_freshness_4h_divergence pause when
+    the operator has restarted the daemon with the current git HEAD SHA.
+
+    Called AFTER _assert_live_safe_strategies_or_exit() (which hydrates _control_state
+    via refresh_control_state) so is_entries_paused() / get_entries_pause_reason()
+    reflect durable DB state, not stale in-memory defaults.
+
+    Logic:
+    - If entries are NOT paused → no-op.
+    - If entries are paused for a reason OTHER than deployment_freshness_4h_divergence → no-op;
+      do not clear operator-issued or other system pauses.
+    - If entries are paused with reason=deployment_freshness_4h_divergence AND the current
+      git HEAD matches _BOOT_STATE['sha'] → call resume_entries() to clear the DB override
+      + tombstone + refresh in-memory state. Logs at INFO with both SHAs.
+    - If SHA is still mismatched → do NOT auto-resume; operator must investigate.
+    - Any exception is caught and logged at WARNING so boot proceeds safely.
+    """
+    import subprocess
+
+    from src.config import PROJECT_ROOT
+    from src.control.control_plane import (
+        get_entries_pause_reason,
+        is_entries_paused,
+        resume_entries,
+    )
+
+    try:
+        if not is_entries_paused():
+            return
+        pause_reason = get_entries_pause_reason()
+        if pause_reason != _DEPLOYMENT_FRESHNESS_PAUSE_REASON:
+            return
+        boot_sha: str | None = _BOOT_STATE.get("sha")
+        if not boot_sha:
+            logger.warning(
+                "deployment_freshness_auto_resume: boot SHA not captured; cannot verify SHA match"
+            )
+            return
+        try:
+            current_sha = subprocess.check_output(
+                ["git", "rev-parse", "HEAD"],
+                cwd=str(PROJECT_ROOT),
+                timeout=5,
+                stderr=subprocess.DEVNULL,
+            ).strip().decode()
+        except Exception as exc:
+            logger.warning(
+                "deployment_freshness_auto_resume: git rev-parse failed (%s); cannot verify SHA match",
+                exc,
+            )
+            return
+        if current_sha != boot_sha:
+            logger.warning(
+                "deployment_freshness_auto_resume: SHA still mismatched at boot "
+                "(boot=%s current=%s) — NOT auto-resuming; operator must investigate",
+                boot_sha[:8], current_sha[:8],
+            )
+            return
+        # SHA matches: operator restarted with current code — safe to auto-resume.
+        resume_entries(
+            "deployment_freshness_resumed_on_sha_match",
+            issued_by="control_plane",
+        )
+        logger.info(
+            "deployment_freshness_auto_resume: cleared deployment_freshness_4h_divergence pause "
+            "— boot_sha=%s matches filesystem HEAD=%s; entries unblocked",
+            boot_sha[:8], current_sha[:8],
+        )
+    except Exception as exc:
+        logger.warning(
+            "deployment_freshness_auto_resume: unexpected error (%s); boot continues without auto-resume",
+            exc,
+            exc_info=True,
+        )
+
+
 def _startup_freshness_check() -> None:
     """§3.1: data freshness gate at boot — uses evaluate_freshness_at_boot.
 
@@ -1937,6 +2017,12 @@ def main():
     # operator-set gates from prior `set_strategy_gate` invocations are not
     # visible. See _assert_live_safe_strategies_or_exit() docstring above.
     _assert_live_safe_strategies_or_exit()
+
+    # PR-S8 boot-time auto-resume: if entries were paused at 4h SHA divergence
+    # (PR #149 deployment_freshness gate) and the daemon is now restarted with
+    # the current git HEAD, clear the pause automatically. Must run AFTER
+    # _assert_live_safe_strategies_or_exit() (which hydrates _control_state).
+    _boot_deployment_freshness_auto_resume()
 
     # P7: Fail-closed wallet gate — must run before first cycle.
     # GATE SPLIT (§3.7): wallet failure is ALWAYS fatal, no operator override.
