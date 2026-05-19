@@ -118,12 +118,29 @@ def _insert_tx_hashed_command(conn, condition_id: str, tx_hash: str) -> str:
     return cmd_id
 
 
+_PAYOUT_REDEMPTION_TOPIC = (
+    "0x2682012a4a4f1973119f1c9b90745d1bd91fa2bab387344f044cb3586864d18d"
+)
+
+
 def _make_receipt(tx_hash: str, status: int, to_address: str) -> dict:
+    """Build a minimal receipt dict with a PayoutRedemption log from `to_address`.
+
+    The logs-based antibody guard (4th iteration) inspects logs[*].address
+    for the PayoutRedemption topic, not receipt.to.
+    """
     return {
         "status": status,
         "to": to_address,
         "blockNumber": 100,
         "block_number": 100,
+        "logs": [
+            {
+                "address": to_address,
+                "topics": [_PAYOUT_REDEMPTION_TOPIC, "0x" + "cc" * 32],
+                "data": "0x",
+            }
+        ],
     }
 
 

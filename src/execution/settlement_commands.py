@@ -876,13 +876,12 @@ def reconcile_pending_redeems(web3: Any, conn: sqlite3.Connection) -> list[Settl
         block_number = _extract_int(receipt_payload, "block_number", "blockNumber")
         confirmation_count = _confirmation_count(web3, block_number)
         if status in {1, "1", True, "success", "SUCCESS"}:
-            # Antibody guard: if this is a negRisk market but tx.to is Standard CTF,
-            # the redeem went to the wrong adapter and yielded 0 payout.  Do NOT
-            # mark terminal — reset to REDEEM_OPERATOR_REQUIRED + clear tx_hash so
-            # reseat_stub_deferred_rows_for_autonomous_retry promotes it back to
-            # REDEEM_RETRYING and the submitter rebuilds via NegRiskAdapter.
-            # Root cause: Karachi c8c220f5 tx 0x0c85d9… mined to Standard CTF.
-            tx_to = (receipt_payload.get("to") or "").lower()
+            # Antibody guard (4th iteration — logs[*].address):
+            # Polymarket relay-style submissions route through a proxy; receipt.to is
+            # NEVER the adapter contract.  The Standard CTF adapter address appears in
+            # logs[*].address for every log whose topic[0] == PayoutRedemption.
+            # Root cause: Karachi c8c220f5 tx 0x0c85d9… — StandardCTF emitted
+            # PayoutRedemption (logs[1].address = 0x4d97…) for a negRisk market.
             is_negrisk_market = _lookup_market_neg_risk_authoritative(
                 conn, str(row["condition_id"])
             )
@@ -895,19 +894,50 @@ def reconcile_pending_redeems(web3: Any, conn: sqlite3.Connection) -> list[Settl
                     row["command_id"], row["condition_id"],
                 )
                 continue
-            if is_negrisk_market and tx_to == POLYGON_CTF_ADDRESS.lower():
+
+            # Scan receipt logs for the adapter that emitted PayoutRedemption.
+            # topic[0] == 0x2682012a…  is the PayoutRedemption event selector.
+            _PAYOUT_REDEMPTION_TOPIC = (
+                "0x2682012a4a4f1973119f1c9b90745d1bd91fa2bab387344f044cb3586864d18d"
+            )
+            def _to_hex_str(v: Any) -> str:
+                """Coerce a topic/address value to a lowercase 0x-prefixed hex string.
+
+                web3 returns HexBytes (has .hex() but no leading '0x'); plain
+                receipts return bare strings already prefixed with '0x'.
+                """
+                if isinstance(v, (bytes, bytearray)):
+                    return "0x" + v.hex()
+                s = str(v)
+                if s.startswith("0x") or s.startswith("0X"):
+                    return s.lower()
+                return s.lower()
+
+            adapter_addrs: set[str] = set()
+            for _log in receipt_payload.get("logs", []):
+                _topics = _log.get("topics") or []
+                if _topics and _to_hex_str(_topics[0]) == _PAYOUT_REDEMPTION_TOPIC:
+                    _addr = _to_hex_str(_log.get("address") or "")
+                    if _addr:
+                        adapter_addrs.add(_addr)
+
+            routed_to_standard_ctf = POLYGON_CTF_ADDRESS.lower() in adapter_addrs
+            routed_to_neg_risk_adapter = POLYGON_NEGRISK_ADAPTER_ADDRESS.lower() in adapter_addrs
+
+            if is_negrisk_market and routed_to_standard_ctf and not routed_to_neg_risk_adapter:
+                _wrong_adapters = ",".join(sorted(adapter_addrs))
                 misroute_error = {
                     "errorCode": "REDEEM_NEGRISK_MISROUTED",
-                    "wrong_adapter": tx_to,
+                    "wrong_adapter_in_logs": _wrong_adapters,
                     "expected": POLYGON_NEGRISK_ADAPTER_ADDRESS.lower(),
                     "previous_tx_hash": tx_hash,
                 }
                 logger.warning(
                     "[REDEEM_NEGRISK_MISROUTED] command_id=%s condition_id=%s "
-                    "tx_hash=%s wrong_adapter=%s expected=%s — resetting to "
+                    "tx_hash=%s wrong_adapter_in_logs=%s expected=%s — resetting to "
                     "REDEEM_OPERATOR_REQUIRED for autonomous retry via correct adapter",
                     row["command_id"], row["condition_id"], tx_hash,
-                    tx_to, POLYGON_NEGRISK_ADAPTER_ADDRESS.lower(),
+                    _wrong_adapters, POLYGON_NEGRISK_ADAPTER_ADDRESS.lower(),
                 )
                 with _savepoint(conn):
                     # _transition uses COALESCE so it cannot clear tx_hash.
