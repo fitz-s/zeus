@@ -1,10 +1,13 @@
+# Lifecycle: created=2026-05-19; last_reviewed=2026-05-19; last_reused=2026-05-19
+# Purpose: Antibody tests for NegRiskAdapter redeem calldata + routing
+# Reuse: pytest tests/test_polymarket_v2_adapter_negrisk_redeem.py
 # Created: 2026-05-19
 # Last reused or audited: 2026-05-19
-# Authority basis: On-chain evidence 2026-05-19 (NegRiskCtfAdapter at
-#                  0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296; Karachi
-#                  failed-redeem tx 0x0c85d94640d33...; successful
-#                  reference tx 0x4ce58f2683bd...);
-#                  .omc/plans/2026-05-19-negrisk-redeem-routing.md
+# Authority basis: PR #187 negRisk routing fix; on-chain evidence 2026-05-19
+#   (NegRiskCtfAdapter at 0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296;
+#    Karachi failed-redeem tx 0x0c85d94640d33...; successful reference
+#    tx 0x4ce58f2683bd...);
+#   .omc/plans/2026-05-19-negrisk-redeem-routing.md
 
 """Antibody tests for negRisk redeem calldata + routing.
 

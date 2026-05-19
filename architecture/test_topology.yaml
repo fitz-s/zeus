@@ -399,6 +399,8 @@ test_trust_policy:
     tests/test_allocate_chain_truth.py: {created: "2026-05-17", last_used: "2026-05-18"}
     # LIVE TRADE BLOCKER fix: ECMWFOpenDataIngest wires ingest_class for ecmwf_open_data source.
     tests/test_ecmwf_open_data_ingest.py: {created: "2026-05-19", last_used: "2026-05-19"}
+    # PR #187 — negRisk redeem calldata + routing antibodies (Karachi failure).
+    tests/test_polymarket_v2_adapter_negrisk_redeem.py: {created: "2026-05-19", last_used: "2026-05-19"}
 
 categories:
   core_law_antibody:
@@ -446,6 +448,7 @@ categories:
     - tests/test_v2_adapter.py
     - tests/test_venue_envelope_live_bound.py
     - tests/test_polymarket_adapter_submit_safety.py
+    - tests/test_polymarket_v2_adapter_negrisk_redeem.py
     - tests/test_collateral_ledger.py
     - tests/test_executable_market_snapshot_v2.py
     - tests/test_provenance_5_projections.py
@@ -1404,6 +1407,27 @@ test_metadata:
       Fake-SDK safety test. Verifies SDK create_and_post_order/post_order/create_order
       call_count == 0 when a placeholder envelope is submitted directly or via
       submit_limit_order without _allow_compat_for_test=True.
+  tests/test_polymarket_v2_adapter_negrisk_redeem.py:
+    modules: [venue, execution]
+    category: core_law_antibody
+    profile: pr187_negrisk_redeem_routing
+    blocks_commit: true
+    asserted_invariants:
+      - NEGRISK-CALLDATA-SELECTOR-DBECCB23
+      - NEGRISK-YES-SLOT-ZERO-NO-SLOT-ONE
+      - NEGRISK-ADAPTER-ADDRESS-PINNED
+      - NEGRISK-FACT-MISSING-FAILS-CLOSED
+    source_under_test:
+      - src/venue/polymarket_v2_adapter.py
+      - src/execution/settlement_commands.py
+    law_dependencies:
+      - .omc/plans/2026-05-19-negrisk-redeem-routing.md
+    notes: >
+      Antibody tests for PR #187 negRisk redeem routing fix. Pins Karachi reference
+      calldata byte-for-byte (selector 0xdbeccb23, YES/NO slot mapping). Also covers
+      submit_redeem() layer: snapshot-present+token_amounts_json routes to
+      adapter.redeem(neg_risk=True, amount_per_slot=<correct>); missing snapshot row
+      fails closed with REDEEM_NEGRISK_FACT_MISSING (topology.yaml:4193 law).
   tests/test_chain_reconciliation_corrected_guard.py:
     modules: [state]
     category: core_law_antibody

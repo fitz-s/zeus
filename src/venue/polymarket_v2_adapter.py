@@ -998,6 +998,33 @@ class PolymarketV2Adapter:
                 "condition_id": condition_id,
             }
 
+        # ── Dry-run gate (EOA path: standard CTF and negRisk EOA) ───────────────
+        # Thread 2 fix: EOA path (signer_eoa == funder_address) previously
+        # bypassed ZEUS_AUTONOMOUS_REDEEM_DRY_RUN and called eth_sendRawTransaction
+        # unconditionally. The Safe wrap paths (_redeem_via_safe,
+        # _redeem_via_negrisk_safe) already have this gate; this brings the EOA
+        # path into alignment so ALL broadcast sites respect the dry-run flag.
+        _eoa_dry_run = os.environ.get(AUTONOMOUS_REDEEM_DRY_RUN_ENV, "").lower() in (
+            "1", "true", "yes", "on",
+        )
+        if _eoa_dry_run:
+            import logging as _logging
+            _logger = _logging.getLogger(__name__)
+            _logger.warning(
+                "REDEEM_DRY_RUN_LOGGED funder_address=%s "
+                "condition_id=%s neg_risk=%s raw_tx_hex_len=%d raw_tx_hex=%s",
+                self.funder_address, condition_id, neg_risk, len(raw_hex), raw_hex,
+            )
+            return {
+                "success": False,
+                "errorCode": "REDEEM_DRY_RUN_LOGGED",
+                "errorMessage": "dry-run mode: raw tx built+signed but not broadcast (EOA path)",
+                "condition_id": condition_id,
+                "raw_tx_hex": raw_hex,
+                "neg_risk": neg_risk,
+            }
+
+        # ── Broadcast ────────────────────────────────────────────────────────
         try:
             tx_hash = self._rpc_call(
                 self.polygon_rpc_url,

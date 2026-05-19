@@ -1,7 +1,7 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-05-18
+# Last reused/audited: 2026-05-19
 # Authority basis: R3 R1 settlement/redeem command ledger packet
-# Lifecycle: created=2026-04-27; last_reviewed=2026-04-30; last_reused=2026-05-18
+# Lifecycle: created=2026-04-27; last_reviewed=2026-04-30; last_reused=2026-05-19
 # Purpose: Lock R3 R1 redeem command durability, Q-FX-1 gating, and tx-hash recovery.
 # Reuse: Run for settlement/redeem, harvester redemption, collateral FX gate, or payout-asset changes.
 """Regression tests for R3 R1 durable settlement/redeem commands."""
@@ -26,8 +26,66 @@ def conn():
     db = sqlite3.connect(":memory:")
     db.row_factory = sqlite3.Row
     init_schema(db)
+    # Attach an in-memory world DB so submit_redeem's world.executable_market_snapshots
+    # query does not raise OperationalError and trigger the REDEEM_NEGRISK_FACT_MISSING
+    # fail-closed path on every test that passes a plain conn (Thread 3 fix requires
+    # world schema to be present; absent world ATTACH → exception → neg_risk_row=None).
+    db.execute("ATTACH DATABASE ':memory:' AS world")
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS world.executable_market_snapshots (
+          snapshot_id TEXT PRIMARY KEY,
+          gamma_market_id TEXT NOT NULL DEFAULT '',
+          event_id TEXT NOT NULL DEFAULT '',
+          condition_id TEXT NOT NULL,
+          question_id TEXT NOT NULL DEFAULT '',
+          yes_token_id TEXT NOT NULL DEFAULT '',
+          no_token_id TEXT NOT NULL DEFAULT '',
+          enable_orderbook INTEGER NOT NULL DEFAULT 0,
+          active INTEGER NOT NULL DEFAULT 1,
+          closed INTEGER NOT NULL DEFAULT 0,
+          min_tick_size TEXT NOT NULL DEFAULT '0.01',
+          min_order_size TEXT NOT NULL DEFAULT '5',
+          fee_details_json TEXT NOT NULL DEFAULT '{}',
+          token_map_json TEXT NOT NULL DEFAULT '{}',
+          neg_risk INTEGER NOT NULL DEFAULT 0,
+          orderbook_top_bid TEXT NOT NULL DEFAULT '0',
+          orderbook_top_ask TEXT NOT NULL DEFAULT '1',
+          orderbook_depth_json TEXT NOT NULL DEFAULT '{}',
+          raw_gamma_payload_hash TEXT NOT NULL DEFAULT '',
+          raw_clob_market_info_hash TEXT NOT NULL DEFAULT '',
+          raw_orderbook_hash TEXT NOT NULL DEFAULT '',
+          authority_tier TEXT NOT NULL DEFAULT 'GAMMA',
+          captured_at TEXT NOT NULL DEFAULT (datetime('now')),
+          freshness_deadline TEXT NOT NULL DEFAULT (datetime('now', '+1 day'))
+        )
+        """
+    )
     yield db
     db.close()
+
+
+def _insert_world_snapshot(
+    conn: sqlite3.Connection,
+    condition_id: str,
+    *,
+    neg_risk: int = 0,
+    yes_token_id: str = "yes-token-dummy",
+    no_token_id: str = "no-token-dummy",
+) -> None:
+    """Insert a minimal world.executable_market_snapshots row so submit_redeem
+    can look up neg_risk facts (Thread 1+3 fix: world schema qualification +
+    fail-closed on missing row). Tests that want standard CTF routing pass
+    neg_risk=0 (default); negRisk tests pass neg_risk=1."""
+    conn.execute(
+        """
+        INSERT OR REPLACE INTO world.executable_market_snapshots (
+          snapshot_id, gamma_market_id, event_id, condition_id, question_id,
+          yes_token_id, no_token_id, neg_risk, captured_at, freshness_deadline
+        ) VALUES (?, '', '', ?, '', ?, ?, ?, datetime('now'), datetime('now', '+1 day'))
+        """,
+        (f"snap-{condition_id}", condition_id, yes_token_id, no_token_id, neg_risk),
+    )
 
 
 class FakeRedeemAdapter:
@@ -90,6 +148,7 @@ def test_redeem_lifecycle_atomic_states(conn, monkeypatch):
 
     monkeypatch.setenv("ZEUS_PUSD_FX_CLASSIFIED", FXClassification.FX_LINE_ITEM.value)
     allow_redemption(monkeypatch)
+    _insert_world_snapshot(conn, "condition-r1")  # Thread 3 fix: world schema required
 
     command_id = request_redeem(
         "condition-r1",
@@ -134,6 +193,7 @@ def test_redeem_submitted_persists_execution_capability_before_adapter_contact(c
 
     monkeypatch.setenv("ZEUS_PUSD_FX_CLASSIFIED", FXClassification.FX_LINE_ITEM.value)
     allow_redemption(monkeypatch)
+    _insert_world_snapshot(conn, "condition-capability")  # Thread 3 fix: world schema required
     command_id = request_redeem(
         "condition-capability",
         "pUSD",
@@ -200,6 +260,7 @@ def test_redeem_crash_after_tx_hash_recovers_by_chain_receipt(conn, monkeypatch)
 
     monkeypatch.setenv("ZEUS_PUSD_FX_CLASSIFIED", FXClassification.TRADING_PNL_INFLOW.value)
     allow_redemption(monkeypatch)
+    _insert_world_snapshot(conn, "condition-crash")  # Thread 3 fix: world schema required
     command_id = request_redeem("condition-crash", "pUSD", market_id="market-crash", conn=conn, requested_at=NOW)
     submit_redeem(command_id, FakeRedeemAdapter({"success": True, "transaction_hash": "0xcrash"}), object(), conn=conn)
 
@@ -216,6 +277,7 @@ def test_redeem_failure_does_not_mark_position_settled(conn, monkeypatch):
 
     monkeypatch.setenv("ZEUS_PUSD_FX_CLASSIFIED", FXClassification.CARRY_COST.value)
     allow_redemption(monkeypatch)
+    _insert_world_snapshot(conn, "condition-fail")  # Thread 3 fix: world schema required
     conn.execute(
         """
         INSERT INTO position_current (position_id, phase, trade_id, strategy_key, updated_at, temperature_metric)
@@ -518,3 +580,150 @@ def test_payout_asset_constraint_enforced(conn, monkeypatch):
     monkeypatch.setenv("ZEUS_PUSD_FX_CLASSIFIED", FXClassification.FX_LINE_ITEM.value)
     with pytest.raises(ValueError, match="unsupported payout_asset"):
         request_redeem("condition-bad", "DAI", market_id="market-bad", conn=conn, requested_at=NOW)
+
+
+# ── Thread 4 tests: negRisk routing through submit_redeem ────────────────────
+# Added for PR #187 thread 4 (Copilot): coverage for snapshot-present+token_amounts_json
+# → adapter.redeem(neg_risk=True, amount_per_slot=<correct>), YES/NO token-id selection,
+# and missing-snapshot-row fail-closed path (REDEEM_NEGRISK_FACT_MISSING).
+
+
+class _CapturingAdapter:
+    """Records all redeem() kwargs for assertions."""
+
+    def __init__(self, response=None):
+        self.response = response or {"success": True, "tx_hash": "0xnr"}
+        self.calls: list[dict] = []
+
+    def redeem(self, condition_id: str, *, index_sets=None, neg_risk=False, amount_per_slot=None, **_kw):
+        self.calls.append(
+            {
+                "condition_id": condition_id,
+                "index_sets": list(index_sets) if index_sets else None,
+                "neg_risk": neg_risk,
+                "amount_per_slot": amount_per_slot,
+            }
+        )
+        return self.response
+
+
+def test_submit_redeem_negrisk_snapshot_yes_amount_per_slot(conn, monkeypatch):
+    """Thread 4a: snapshot present + token_amounts_json → adapter.redeem() called with
+    neg_risk=True and the correct amount_per_slot derived from yes_token_id."""
+    from src.execution.settlement_commands import (
+        SettlementState,
+        request_redeem,
+        submit_redeem,
+    )
+
+    monkeypatch.setenv("ZEUS_PUSD_FX_CLASSIFIED", FXClassification.FX_LINE_ITEM.value)
+    allow_redemption(monkeypatch)
+
+    yes_tok = "0xyes-karachi"
+    no_tok = "0xno-karachi"
+    _insert_world_snapshot(
+        conn, "condition-nr-yes",
+        neg_risk=1,
+        yes_token_id=yes_tok,
+        no_token_id=no_tok,
+    )
+    token_amounts = {yes_tok: "1.587297"}  # 1.587297 USDC → 1_587_297 micro
+
+    command_id = request_redeem(
+        "condition-nr-yes",
+        "pUSD",
+        market_id="market-nr-yes",
+        token_amounts=token_amounts,
+        winning_index_set='["2"]',  # YES won
+        conn=conn,
+        requested_at=NOW,
+    )
+    adapter = _CapturingAdapter()
+    result = submit_redeem(command_id, adapter, object(), conn=conn)
+
+    assert result.state is SettlementState.REDEEM_TX_HASHED, result
+    assert len(adapter.calls) == 1
+    call = adapter.calls[0]
+    assert call["neg_risk"] is True, "neg_risk must be True when snapshot says neg_risk=1"
+    assert call["amount_per_slot"] == 1_587_297, (
+        f"expected 1_587_297 micro-units from token_amounts_json, got {call['amount_per_slot']}"
+    )
+    assert call["index_sets"] == [2]
+
+
+def test_submit_redeem_negrisk_snapshot_no_side_amount(conn, monkeypatch):
+    """Thread 4b: NO side (index_set=1) uses no_token_id to look up amount_per_slot."""
+    from src.execution.settlement_commands import (
+        SettlementState,
+        request_redeem,
+        submit_redeem,
+    )
+
+    monkeypatch.setenv("ZEUS_PUSD_FX_CLASSIFIED", FXClassification.FX_LINE_ITEM.value)
+    allow_redemption(monkeypatch)
+
+    yes_tok = "0xyes-no-side"
+    no_tok = "0xno-no-side"
+    _insert_world_snapshot(
+        conn, "condition-nr-no",
+        neg_risk=1,
+        yes_token_id=yes_tok,
+        no_token_id=no_tok,
+    )
+    token_amounts = {no_tok: "2.5"}  # 2.5 USDC → 2_500_000 micro
+
+    command_id = request_redeem(
+        "condition-nr-no",
+        "pUSD",
+        market_id="market-nr-no",
+        token_amounts=token_amounts,
+        winning_index_set='["1"]',  # NO won
+        conn=conn,
+        requested_at=NOW,
+    )
+    adapter = _CapturingAdapter()
+    result = submit_redeem(command_id, adapter, object(), conn=conn)
+
+    assert result.state is SettlementState.REDEEM_TX_HASHED, result
+    call = adapter.calls[0]
+    assert call["neg_risk"] is True
+    assert call["amount_per_slot"] == 2_500_000, (
+        f"expected 2_500_000 from no_token_id in token_amounts_json, got {call['amount_per_slot']}"
+    )
+    assert call["index_sets"] == [1]
+
+
+def test_submit_redeem_negrisk_missing_snapshot_fails_closed(conn, monkeypatch):
+    """Thread 4c: missing world snapshot row → REDEEM_OPERATOR_REQUIRED with
+    REDEEM_NEGRISK_FACT_MISSING (topology.yaml:4193 fail-closed law).
+    adapter.redeem() must NOT be called."""
+    from src.execution.settlement_commands import (
+        SettlementState,
+        request_redeem,
+        submit_redeem,
+    )
+
+    monkeypatch.setenv("ZEUS_PUSD_FX_CLASSIFIED", FXClassification.FX_LINE_ITEM.value)
+    allow_redemption(monkeypatch)
+
+    # Deliberately do NOT insert a world snapshot for this condition_id
+    command_id = request_redeem(
+        "condition-nr-missing",
+        "pUSD",
+        market_id="market-nr-missing",
+        token_amounts={"some-token": "1.0"},
+        winning_index_set='["2"]',
+        conn=conn,
+        requested_at=NOW,
+    )
+    adapter = _CapturingAdapter()
+    result = submit_redeem(command_id, adapter, object(), conn=conn)
+
+    assert result.state is SettlementState.REDEEM_OPERATOR_REQUIRED, (
+        f"expected REDEEM_OPERATOR_REQUIRED (fail-closed), got {result.state}"
+    )
+    assert adapter.calls == [], "adapter.redeem() must NOT be called when snapshot is missing"
+    assert result.error_payload is not None
+    assert result.error_payload.get("errorCode") == "REDEEM_NEGRISK_FACT_MISSING", (
+        f"expected REDEEM_NEGRISK_FACT_MISSING in error_payload, got {result.error_payload}"
+    )
