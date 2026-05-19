@@ -537,7 +537,11 @@ def _canonical_projection() -> dict:
         "chain_state": "unknown",
         "token_id": None,
         "no_token_id": None,
-        "condition_id": None,
+        # Fix B (2026-05-19): condition_id required for open-phase writes; supply a valid value.
+        # upsert_position_current raises NullConditionIdOnOpenPhaseError for NULL on
+        # pending_entry/active/day0_window/pending_exit/unknown. Tests using this projection
+        # must supply a non-empty condition_id.
+        "condition_id": "0xdeadbeef00000000000000000000000000000000000000000000000000000001",
         "order_id": None,
         "order_status": None,
         "updated_at": "2026-04-03T00:00:00Z",
@@ -1472,6 +1476,10 @@ def _runtime_position(
         order_posted_at="2026-04-03T00:00:00Z",
         chain_state=chain_state,
         exit_state=exit_state,
+        # Fix B (2026-05-19): condition_id required for open-phase writes.
+        # upsert_position_current raises NullConditionIdOnOpenPhaseError for NULL on
+        # pending_entry/active/day0_window/pending_exit/unknown phases.
+        condition_id="0xdeadbeef00000000000000000000000000000000000000000000000000000001",
     )
 
 
@@ -4065,6 +4073,11 @@ def _discovery_phase_harness(*, conn: sqlite3.Connection):
             "executable_snapshot_min_tick_size": 0.01,
             "executable_snapshot_min_order_size": 1.0,
             "executable_snapshot_neg_risk": False,
+            # Fix B (2026-05-19): evaluator.py:2005-2009 places condition_id into
+            # each bin dict read by cycle_runtime as decision.tokens["condition_id"].
+            # materialize_position now forwards this to Position() so
+            # upsert_position_current's NullConditionIdOnOpenPhaseError guard passes.
+            "condition_id": "0xdeadbeef00000000000000000000000000000000000000000000000000000001",
         },
         size_usd=10.0,
         decision_id="dec-1",

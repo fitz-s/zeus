@@ -146,6 +146,33 @@ def _find_existing_open_row(
     return str(row[0]) if row is not None else None
 
 
+class NullConditionIdOnOpenPhaseError(ValueError):
+    """Raised when upsert_position_current detects condition_id=NULL on an open-phase row.
+
+    Fix B (2026-05-19): positions in open phases require condition_id for CTF
+    operations (balanceOf, redeemPositions). A NULL at this phase means the entry
+    write-path did not populate it — fail closed rather than silently allowing a
+    row that will break exit/redemption later.
+
+    Closed phases (voided, settled, admin_closed, etc.) remain permissive because
+    legacy rows may predate the condition_id backfill.
+    """
+
+    def __init__(self, *, position_id: str, phase: str):
+        super().__init__(
+            f"NullConditionId: position_id={position_id!r} phase={phase!r} — "
+            f"condition_id must be non-empty for open-phase position writes. "
+            f"Check that the entry write-path populates condition_id from the executable_market_snapshot."
+        )
+        self.position_id = position_id
+        self.phase = phase
+
+
+# Phases that require a non-empty condition_id. These are the phases where
+# the position is still active and CTF operations may be needed.
+_CONDITION_ID_REQUIRED_PHASES = frozenset(_F109_OPEN_PHASES)
+
+
 @capability("canonical_position_write", lease=True)
 def upsert_position_current(conn: sqlite3.Connection, projection: dict) -> None:
     # F109 writer-side idempotency check (2026-05-17).
@@ -159,6 +186,18 @@ def upsert_position_current(conn: sqlite3.Connection, projection: dict) -> None:
     candidate_phase = str(projection.get("phase") or "")
     candidate_token = projection.get("token_id")
     candidate_position_id = str(projection.get("position_id") or "")
+
+    # Fix B (2026-05-19): fail-closed guard for NULL condition_id on open phases.
+    # This makes the category of "CTF operation fails because condition_id is NULL"
+    # impossible at write-time rather than detectable only at sell/redeem time.
+    if candidate_phase in _CONDITION_ID_REQUIRED_PHASES:
+        candidate_condition_id = projection.get("condition_id")
+        if not candidate_condition_id:
+            raise NullConditionIdOnOpenPhaseError(
+                position_id=candidate_position_id,
+                phase=candidate_phase,
+            )
+
     if (
         candidate_phase in _F109_OPEN_PHASES
         and candidate_token
