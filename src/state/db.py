@@ -4526,20 +4526,19 @@ def log_forward_market_substrate(
 
 
 def log_market_source_contract_topology_facts(
-    conn: sqlite3.Connection | None,
+    conn: sqlite3.Connection | None,  # Deprecated: ignored; function opens its own world connection (INV-37 fix, wave-2)
     *,
     markets: Iterable[dict],
     recorded_at: str,
     scan_authority: str,
 ) -> dict:
-    """Persist scanner source-contract proof into market_topology_state.
+    """Persist scanner source-contract proof into market_topology_state in zeus-world.db.
 
-    The writer is explicit-connection only. It does not open the default DB,
-    create tables, migrate schema, commit, or change market eligibility.
+    INV-37 fix (wave-2, 2026-05-18): opens its own world connection rather than
+    accepting an opaque conn from callers. Pre-fix, callers could pass a
+    trades-rooted or forecasts-ATTACHed conn, causing writes to land in the wrong
+    DB. The ``conn`` parameter is kept for backward compat but is no longer used.
     """
-    if conn is None:
-        return {"status": "skipped_no_connection", "tables": _MARKET_SOURCE_CONTRACT_TOPOLOGY_TABLES}
-
     if str(scan_authority or "").strip().upper() != "VERIFIED":
         return {
             "status": "refused_degraded_authority",
@@ -4551,301 +4550,337 @@ def log_market_source_contract_topology_facts(
     if recorded_at_value is None:
         return {"status": "refused_missing_recorded_at", "tables": _MARKET_SOURCE_CONTRACT_TOPOLOGY_TABLES}
 
-    missing_tables = [
-        table for table in _MARKET_SOURCE_CONTRACT_TOPOLOGY_TABLES if not _table_exists(conn, table)
-    ]
-    if missing_tables:
-        return {
-            "status": "skipped_missing_tables",
-            "tables": _MARKET_SOURCE_CONTRACT_TOPOLOGY_TABLES,
-            "missing_tables": tuple(missing_tables),
-        }
-
-    missing_columns = tuple(
-        sorted(set(_MARKET_TOPOLOGY_STATE_REQUIRED_COLUMNS) - _table_columns(conn, "market_topology_state"))
-    )
-    if missing_columns:
-        return {
-            "status": "skipped_invalid_schema",
-            "tables": _MARKET_SOURCE_CONTRACT_TOPOLOGY_TABLES,
-            "missing_columns": {"market_topology_state": missing_columns},
-        }
-
-    counts = {
-        "topology_rows_written": 0,
-        "markets_skipped_missing_facts": 0,
-        "markets_skipped_source_contract_status": 0,
-        "outcomes_skipped_missing_facts": 0,
-    }
-
-    for market in markets:
-        if not isinstance(market, dict):
-            counts["markets_skipped_missing_facts"] += 1
-            continue
-        source_contract = market.get("source_contract") or {}
-        if not isinstance(source_contract, dict):
-            counts["markets_skipped_source_contract_status"] += 1
-            continue
-        source_contract_status = _forward_clean_str(source_contract.get("status"))
-        if source_contract_status != "MATCH":
-            counts["markets_skipped_source_contract_status"] += 1
-            continue
-
-        market_slug = _forward_clean_str(market.get("slug"))
-        event_id = _forward_clean_str(market.get("event_id"))
-        city_obj = market.get("city")
-        city_name = _forward_city_name(city_obj)
-        city_timezone = _forward_clean_str(
-            market.get("city_timezone") or getattr(city_obj, "timezone", None)
-        )
-        target_date = _forward_clean_str(market.get("target_date"))
-        temperature_metric = _forward_metric(market.get("temperature_metric"))
-        if not (market_slug and city_name and target_date and temperature_metric):
-            counts["markets_skipped_missing_facts"] += 1
-            continue
-
-        data_version = _forward_clean_str(market.get("data_version")) or "gamma_source_contract_v1"
-        observation_field = (
-            "daily_max_temperature" if temperature_metric == "high" else "daily_min_temperature"
-        )
-        resolution_sources = list(source_contract.get("resolution_sources") or market.get("resolution_sources") or [])
-
-        for outcome in market.get("outcomes") or ():
-            if not isinstance(outcome, dict):
-                counts["outcomes_skipped_missing_facts"] += 1
-                continue
-            condition_id = _forward_clean_str(outcome.get("condition_id"))
-            if condition_id is None:
-                counts["outcomes_skipped_missing_facts"] += 1
-                continue
-            question_id = _forward_clean_str(outcome.get("question_id"))
-            token_ids = [
-                token_id
-                for token_id in (
-                    _forward_clean_str(outcome.get("token_id")),
-                    _forward_clean_str(outcome.get("no_token_id")),
-                )
-                if token_id is not None
-            ]
-            provenance = {
-                "writer": "log_market_source_contract_topology_facts",
-                "source": "gamma_market_scanner",
-                "recorded_at": recorded_at_value,
-                "market_slug": market_slug,
-                "event_id": event_id,
-                "event_slug": market_slug,
-                "condition_id": condition_id,
-                "question_id": question_id,
-                "outcome_title": _forward_clean_str(outcome.get("title")),
-                "city": city_name,
-                "target_date": target_date,
-                "temperature_metric": temperature_metric,
-                "resolution_sources": resolution_sources,
-                "source_contract": source_contract,
+    _wconn = get_world_connection(write_class="live")
+    try:
+        missing_tables = [
+            table for table in _MARKET_SOURCE_CONTRACT_TOPOLOGY_TABLES if not _table_exists(_wconn, table)
+        ]
+        if missing_tables:
+            return {
+                "status": "skipped_missing_tables",
+                "tables": _MARKET_SOURCE_CONTRACT_TOPOLOGY_TABLES,
+                "missing_tables": tuple(missing_tables),
             }
-            topology_id = "market_source_contract:{}:{}:{}:{}:{}".format(
-                market_slug,
-                condition_id,
-                city_name,
-                target_date,
-                temperature_metric,
-            )
-            write_market_topology_state(
-                conn,
-                topology_id=topology_id,
-                market_family="weather_temperature",
-                condition_id=condition_id,
-                status="CURRENT",
-                source_contract_status="MATCH",
-                authority_status="VERIFIED",
-                event_id=event_id,
-                question_id=question_id,
-                city_id=city_name,
-                city_timezone=city_timezone,
-                target_local_date=target_date,
-                temperature_metric=temperature_metric,
-                physical_quantity="temperature",
-                observation_field=observation_field,
-                data_version=data_version,
-                token_ids_json=token_ids,
-                source_contract_reason=_forward_clean_str(source_contract.get("reason")),
-                provenance_json=provenance,
-            )
-            conn.execute(
-                "UPDATE market_topology_state SET recorded_at = ? WHERE topology_id = ?",
-                (recorded_at_value, topology_id),
-            )
-            counts["topology_rows_written"] += 1
 
-    status = "written" if counts["topology_rows_written"] else "skipped_no_valid_rows"
-    return {
-        "status": status,
-        "tables": _MARKET_SOURCE_CONTRACT_TOPOLOGY_TABLES,
-        **counts,
-    }
+        missing_columns = tuple(
+            sorted(set(_MARKET_TOPOLOGY_STATE_REQUIRED_COLUMNS) - _table_columns(_wconn, "market_topology_state"))
+        )
+        if missing_columns:
+            return {
+                "status": "skipped_invalid_schema",
+                "tables": _MARKET_SOURCE_CONTRACT_TOPOLOGY_TABLES,
+                "missing_columns": {"market_topology_state": missing_columns},
+            }
+
+        counts = {
+            "topology_rows_written": 0,
+            "markets_skipped_missing_facts": 0,
+            "markets_skipped_source_contract_status": 0,
+            "outcomes_skipped_missing_facts": 0,
+        }
+
+        for market in markets:
+            if not isinstance(market, dict):
+                counts["markets_skipped_missing_facts"] += 1
+                continue
+            source_contract = market.get("source_contract") or {}
+            if not isinstance(source_contract, dict):
+                counts["markets_skipped_source_contract_status"] += 1
+                continue
+            source_contract_status = _forward_clean_str(source_contract.get("status"))
+            if source_contract_status != "MATCH":
+                counts["markets_skipped_source_contract_status"] += 1
+                continue
+
+            market_slug = _forward_clean_str(market.get("slug"))
+            event_id = _forward_clean_str(market.get("event_id"))
+            city_obj = market.get("city")
+            city_name = _forward_city_name(city_obj)
+            city_timezone = _forward_clean_str(
+                market.get("city_timezone") or getattr(city_obj, "timezone", None)
+            )
+            target_date = _forward_clean_str(market.get("target_date"))
+            temperature_metric = _forward_metric(market.get("temperature_metric"))
+            if not (market_slug and city_name and target_date and temperature_metric):
+                counts["markets_skipped_missing_facts"] += 1
+                continue
+
+            data_version = _forward_clean_str(market.get("data_version")) or "gamma_source_contract_v1"
+            observation_field = (
+                "daily_max_temperature" if temperature_metric == "high" else "daily_min_temperature"
+            )
+            resolution_sources = list(source_contract.get("resolution_sources") or market.get("resolution_sources") or [])
+
+            for outcome in market.get("outcomes") or ():
+                if not isinstance(outcome, dict):
+                    counts["outcomes_skipped_missing_facts"] += 1
+                    continue
+                condition_id = _forward_clean_str(outcome.get("condition_id"))
+                if condition_id is None:
+                    counts["outcomes_skipped_missing_facts"] += 1
+                    continue
+                question_id = _forward_clean_str(outcome.get("question_id"))
+                token_ids = [
+                    token_id
+                    for token_id in (
+                        _forward_clean_str(outcome.get("token_id")),
+                        _forward_clean_str(outcome.get("no_token_id")),
+                    )
+                    if token_id is not None
+                ]
+                provenance = {
+                    "writer": "log_market_source_contract_topology_facts",
+                    "source": "gamma_market_scanner",
+                    "recorded_at": recorded_at_value,
+                    "market_slug": market_slug,
+                    "event_id": event_id,
+                    "event_slug": market_slug,
+                    "condition_id": condition_id,
+                    "question_id": question_id,
+                    "outcome_title": _forward_clean_str(outcome.get("title")),
+                    "city": city_name,
+                    "target_date": target_date,
+                    "temperature_metric": temperature_metric,
+                    "resolution_sources": resolution_sources,
+                    "source_contract": source_contract,
+                }
+                topology_id = "market_source_contract:{}:{}:{}:{}:{}".format(
+                    market_slug,
+                    condition_id,
+                    city_name,
+                    target_date,
+                    temperature_metric,
+                )
+                write_market_topology_state(
+                    _wconn,
+                    topology_id=topology_id,
+                    market_family="weather_temperature",
+                    condition_id=condition_id,
+                    status="CURRENT",
+                    source_contract_status="MATCH",
+                    authority_status="VERIFIED",
+                    event_id=event_id,
+                    question_id=question_id,
+                    city_id=city_name,
+                    city_timezone=city_timezone,
+                    target_local_date=target_date,
+                    temperature_metric=temperature_metric,
+                    physical_quantity="temperature",
+                    observation_field=observation_field,
+                    data_version=data_version,
+                    token_ids_json=token_ids,
+                    source_contract_reason=_forward_clean_str(source_contract.get("reason")),
+                    provenance_json=provenance,
+                )
+                _wconn.execute(
+                    "UPDATE market_topology_state SET recorded_at = ? WHERE topology_id = ?",
+                    (recorded_at_value, topology_id),
+                )
+                counts["topology_rows_written"] += 1
+
+        _wconn.commit()
+        status = "written" if counts["topology_rows_written"] else "skipped_no_valid_rows"
+        return {
+            "status": status,
+            "tables": _MARKET_SOURCE_CONTRACT_TOPOLOGY_TABLES,
+            **counts,
+        }
+    except Exception as e:
+        import logging as _logging
+        _logging.getLogger(__name__).warning("Failed to log market source contract topology facts: %s", e)
+        return {"status": "error", "tables": _MARKET_SOURCE_CONTRACT_TOPOLOGY_TABLES, "error": str(e)}
+    finally:
+        _wconn.close()
 
 
 def append_source_contract_audit_events(
-    conn: sqlite3.Connection | None,
+    conn: sqlite3.Connection | None,  # Deprecated: ignored when db_path is None; use db_path for explicit audit DB routing
     *,
     report: dict,
+    db_path: "Path | None" = None,
 ) -> dict:
-    """Append source-contract watch evidence without affecting eligibility."""
-    if conn is None:
-        return {"status": "skipped_no_connection", "tables": _SOURCE_CONTRACT_AUDIT_TABLES}
+    """Append source-contract watch evidence without affecting eligibility.
+
+    INV-37 fix (wave-2, 2026-05-18): opens its own connection rather than
+    accepting an opaque conn from callers. Pre-fix, callers could pass a
+    trades-rooted or forecasts-ATTACHed conn, causing writes to land in the wrong
+    DB. The ``conn`` parameter is kept for backward compat but is no longer used.
+
+    When ``db_path`` is provided (e.g. from ``--audit-db-path`` CLI flag), writes
+    to that specific file instead of the canonical world DB. This is the only
+    legitimate escape hatch: the caller has explicitly opened and initialised the
+    target DB (via ``init_schema``) and is intentionally writing to a separate
+    audit file, not substituting a wrong-DB connection.
+    """
     if not isinstance(report, dict):
         return {"status": "refused_invalid_report", "tables": _SOURCE_CONTRACT_AUDIT_TABLES}
 
-    missing_tables = [
-        table for table in _SOURCE_CONTRACT_AUDIT_TABLES if not _table_exists(conn, table)
-    ]
-    if missing_tables:
-        return {
-            "status": "skipped_missing_tables",
-            "tables": _SOURCE_CONTRACT_AUDIT_TABLES,
-            "missing_tables": tuple(missing_tables),
-        }
+    if db_path is not None:
+        from pathlib import Path as _Path
+        _wconn = get_connection(_Path(db_path), write_class="bulk")
+        # Initialise schema for a fresh audit DB (mirrors prior explicit init_schema call
+        # in watch_source_contract.py::persist_audit_report before wave-2 refactor).
+        init_schema(_wconn)
+    else:
+        _wconn = get_world_connection(write_class="live")
+    try:
+        missing_tables = [
+            table for table in _SOURCE_CONTRACT_AUDIT_TABLES if not _table_exists(_wconn, table)
+        ]
+        if missing_tables:
+            return {
+                "status": "skipped_missing_tables",
+                "tables": _SOURCE_CONTRACT_AUDIT_TABLES,
+                "missing_tables": tuple(missing_tables),
+            }
 
-    missing_columns = tuple(
-        sorted(
-            set(_SOURCE_CONTRACT_AUDIT_REQUIRED_COLUMNS)
-            - _table_columns(conn, "source_contract_audit_events")
+        missing_columns = tuple(
+            sorted(
+                set(_SOURCE_CONTRACT_AUDIT_REQUIRED_COLUMNS)
+                - _table_columns(_wconn, "source_contract_audit_events")
+            )
         )
-    )
-    if missing_columns:
+        if missing_columns:
+            return {
+                "status": "skipped_invalid_schema",
+                "tables": _SOURCE_CONTRACT_AUDIT_TABLES,
+                "missing_columns": {"source_contract_audit_events": missing_columns},
+            }
+
+        checked_at_utc = _forward_clean_str(report.get("checked_at_utc"))
+        scan_authority = _forward_clean_str(report.get("authority"))
+        if checked_at_utc is None or scan_authority is None:
+            return {"status": "refused_missing_scan_metadata", "tables": _SOURCE_CONTRACT_AUDIT_TABLES}
+        if scan_authority not in _SOURCE_CONTRACT_AUDIT_AUTHORITIES:
+            return {
+                "status": "refused_invalid_scan_authority",
+                "tables": _SOURCE_CONTRACT_AUDIT_TABLES,
+                "scan_authority": scan_authority,
+            }
+        events = report.get("events") or []
+        if not isinstance(events, list):
+            return {"status": "refused_invalid_report", "tables": _SOURCE_CONTRACT_AUDIT_TABLES}
+
+        counts = {
+            "audit_rows_inserted": 0,
+            "audit_rows_unchanged": 0,
+            "events_skipped_missing_facts": 0,
+            "events_refused_invalid_facts": 0,
+        }
+        report_status = _forward_clean_str(report.get("status"))
+        if report_status is not None and report_status not in _SOURCE_CONTRACT_AUDIT_REPORT_STATUSES:
+            return {
+                "status": "refused_invalid_report_status",
+                "tables": _SOURCE_CONTRACT_AUDIT_TABLES,
+                "report_status": report_status,
+            }
+
+        for event in events:
+            if not isinstance(event, dict):
+                counts["events_skipped_missing_facts"] += 1
+                continue
+            source_contract = event.get("source_contract") or {}
+            if not isinstance(source_contract, dict):
+                counts["events_skipped_missing_facts"] += 1
+                continue
+            event_id = _forward_clean_str(event.get("event_id") or event.get("slug"))
+            source_contract_status = _forward_clean_str(source_contract.get("status")) or "UNKNOWN"
+            severity = _forward_clean_str(event.get("severity")) or "WARN"
+            if event_id is None:
+                counts["events_skipped_missing_facts"] += 1
+                continue
+            if severity not in _SOURCE_CONTRACT_AUDIT_SEVERITIES:
+                counts["events_refused_invalid_facts"] += 1
+                continue
+            if source_contract_status not in _SOURCE_CONTRACT_AUDIT_STATUSES:
+                counts["events_refused_invalid_facts"] += 1
+                continue
+
+            resolution_sources = list(source_contract.get("resolution_sources") or [])
+            resolution_sources_json = json.dumps(
+                resolution_sources,
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            )
+            source_contract_json = json.dumps(
+                source_contract,
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            )
+            payload = {
+                "checked_at_utc": checked_at_utc,
+                "scan_authority": scan_authority,
+                "report_status": report_status,
+                "event_id": event_id,
+                "slug": _forward_clean_str(event.get("slug")),
+                "city": _forward_clean_str(event.get("city")),
+                "target_date": _forward_clean_str(event.get("target_date")),
+                "temperature_metric": _forward_metric(event.get("temperature_metric")),
+                "severity": severity,
+                "source_contract": source_contract,
+            }
+            payload_hash = hashlib.sha256(
+                json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+            ).hexdigest()
+            audit_id = hashlib.sha256(
+                f"{checked_at_utc}|{event_id}|{payload_hash}".encode("utf-8")
+            ).hexdigest()
+            cursor = _wconn.execute(
+                """
+                INSERT OR IGNORE INTO source_contract_audit_events (
+                    audit_id, checked_at_utc, scan_authority, report_status, severity,
+                    event_id, slug, title, city, target_date, temperature_metric,
+                    source_contract_status, source_contract_reason,
+                    configured_source_family, configured_station_id,
+                    observed_source_family, observed_station_id,
+                    resolution_sources_json, source_contract_json, payload_hash
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    audit_id,
+                    checked_at_utc,
+                    scan_authority,
+                    report_status,
+                    severity,
+                    event_id,
+                    _forward_clean_str(event.get("slug")),
+                    _forward_clean_str(event.get("title")),
+                    _forward_clean_str(event.get("city")),
+                    _forward_clean_str(event.get("target_date")),
+                    _forward_metric(event.get("temperature_metric")),
+                    source_contract_status,
+                    _forward_clean_str(source_contract.get("reason")),
+                    _forward_clean_str(source_contract.get("configured_source_family")),
+                    _forward_clean_str(source_contract.get("configured_station_id")),
+                    _forward_clean_str(source_contract.get("source_family")),
+                    _forward_clean_str(source_contract.get("station_id")),
+                    resolution_sources_json,
+                    source_contract_json,
+                    payload_hash,
+                ),
+            )
+            if cursor.rowcount:
+                counts["audit_rows_inserted"] += 1
+            else:
+                counts["audit_rows_unchanged"] += 1
+
+        _wconn.commit()
+        status = "written" if counts["audit_rows_inserted"] else "skipped_no_valid_rows"
+        if counts["audit_rows_unchanged"] and not counts["audit_rows_inserted"]:
+            status = "unchanged"
         return {
-            "status": "skipped_invalid_schema",
+            "status": status,
             "tables": _SOURCE_CONTRACT_AUDIT_TABLES,
-            "missing_columns": {"source_contract_audit_events": missing_columns},
+            **counts,
         }
-
-    checked_at_utc = _forward_clean_str(report.get("checked_at_utc"))
-    scan_authority = _forward_clean_str(report.get("authority"))
-    if checked_at_utc is None or scan_authority is None:
-        return {"status": "refused_missing_scan_metadata", "tables": _SOURCE_CONTRACT_AUDIT_TABLES}
-    if scan_authority not in _SOURCE_CONTRACT_AUDIT_AUTHORITIES:
-        return {
-            "status": "refused_invalid_scan_authority",
-            "tables": _SOURCE_CONTRACT_AUDIT_TABLES,
-            "scan_authority": scan_authority,
-        }
-    events = report.get("events") or []
-    if not isinstance(events, list):
-        return {"status": "refused_invalid_report", "tables": _SOURCE_CONTRACT_AUDIT_TABLES}
-
-    counts = {
-        "audit_rows_inserted": 0,
-        "audit_rows_unchanged": 0,
-        "events_skipped_missing_facts": 0,
-        "events_refused_invalid_facts": 0,
-    }
-    report_status = _forward_clean_str(report.get("status"))
-    if report_status is not None and report_status not in _SOURCE_CONTRACT_AUDIT_REPORT_STATUSES:
-        return {
-            "status": "refused_invalid_report_status",
-            "tables": _SOURCE_CONTRACT_AUDIT_TABLES,
-            "report_status": report_status,
-        }
-
-    for event in events:
-        if not isinstance(event, dict):
-            counts["events_skipped_missing_facts"] += 1
-            continue
-        source_contract = event.get("source_contract") or {}
-        if not isinstance(source_contract, dict):
-            counts["events_skipped_missing_facts"] += 1
-            continue
-        event_id = _forward_clean_str(event.get("event_id") or event.get("slug"))
-        source_contract_status = _forward_clean_str(source_contract.get("status")) or "UNKNOWN"
-        severity = _forward_clean_str(event.get("severity")) or "WARN"
-        if event_id is None:
-            counts["events_skipped_missing_facts"] += 1
-            continue
-        if severity not in _SOURCE_CONTRACT_AUDIT_SEVERITIES:
-            counts["events_refused_invalid_facts"] += 1
-            continue
-        if source_contract_status not in _SOURCE_CONTRACT_AUDIT_STATUSES:
-            counts["events_refused_invalid_facts"] += 1
-            continue
-
-        resolution_sources = list(source_contract.get("resolution_sources") or [])
-        resolution_sources_json = json.dumps(
-            resolution_sources,
-            sort_keys=True,
-            separators=(",", ":"),
-            default=str,
-        )
-        source_contract_json = json.dumps(
-            source_contract,
-            sort_keys=True,
-            separators=(",", ":"),
-            default=str,
-        )
-        payload = {
-            "checked_at_utc": checked_at_utc,
-            "scan_authority": scan_authority,
-            "report_status": report_status,
-            "event_id": event_id,
-            "slug": _forward_clean_str(event.get("slug")),
-            "city": _forward_clean_str(event.get("city")),
-            "target_date": _forward_clean_str(event.get("target_date")),
-            "temperature_metric": _forward_metric(event.get("temperature_metric")),
-            "severity": severity,
-            "source_contract": source_contract,
-        }
-        payload_hash = hashlib.sha256(
-            json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
-        ).hexdigest()
-        audit_id = hashlib.sha256(
-            f"{checked_at_utc}|{event_id}|{payload_hash}".encode("utf-8")
-        ).hexdigest()
-        cursor = conn.execute(
-            """
-            INSERT OR IGNORE INTO source_contract_audit_events (
-                audit_id, checked_at_utc, scan_authority, report_status, severity,
-                event_id, slug, title, city, target_date, temperature_metric,
-                source_contract_status, source_contract_reason,
-                configured_source_family, configured_station_id,
-                observed_source_family, observed_station_id,
-                resolution_sources_json, source_contract_json, payload_hash
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                audit_id,
-                checked_at_utc,
-                scan_authority,
-                report_status,
-                severity,
-                event_id,
-                _forward_clean_str(event.get("slug")),
-                _forward_clean_str(event.get("title")),
-                _forward_clean_str(event.get("city")),
-                _forward_clean_str(event.get("target_date")),
-                _forward_metric(event.get("temperature_metric")),
-                source_contract_status,
-                _forward_clean_str(source_contract.get("reason")),
-                _forward_clean_str(source_contract.get("configured_source_family")),
-                _forward_clean_str(source_contract.get("configured_station_id")),
-                _forward_clean_str(source_contract.get("source_family")),
-                _forward_clean_str(source_contract.get("station_id")),
-                resolution_sources_json,
-                source_contract_json,
-                payload_hash,
-            ),
-        )
-        if cursor.rowcount:
-            counts["audit_rows_inserted"] += 1
-        else:
-            counts["audit_rows_unchanged"] += 1
-
-    status = "written" if counts["audit_rows_inserted"] else "skipped_no_valid_rows"
-    if counts["audit_rows_unchanged"] and not counts["audit_rows_inserted"]:
-        status = "unchanged"
-    return {
-        "status": status,
-        "tables": _SOURCE_CONTRACT_AUDIT_TABLES,
-        **counts,
-    }
+    except Exception as e:
+        import logging as _logging
+        _logging.getLogger(__name__).warning("Failed to append source contract audit events: %s", e)
+        return {"status": "error", "tables": _SOURCE_CONTRACT_AUDIT_TABLES, "error": str(e)}
+    finally:
+        _wconn.close()
 
 
 @capability("settlement_write", lease=True)
@@ -6044,7 +6079,7 @@ def query_data_improvement_inventory(conn: sqlite3.Connection | None) -> dict:
 
 
 def log_opportunity_fact(
-    conn: sqlite3.Connection | None,
+    conn: sqlite3.Connection | None,  # Deprecated: ignored; function opens its own trade connection (INV-37 fix, wave-2)
     *,
     candidate,
     decision,
@@ -6053,131 +6088,144 @@ def log_opportunity_fact(
     rejection_reasons: list[str] | None,
     recorded_at: str,
 ) -> dict:
-    if conn is None:
-        logger.info("Opportunity fact write skipped: no connection")
-        return {"status": "skipped_no_connection", "table": "opportunity_fact"}
-    if not _table_exists(conn, "opportunity_fact"):
-        logger.info("Opportunity fact table unavailable; skipping durable write")
-        return {"status": "skipped_missing_table", "table": "opportunity_fact"}
+    """Write one opportunity fact row to zeus_trades.db.
 
-    edge = getattr(decision, "edge", None)
-    direction = str(getattr(edge, "direction", "") or "unknown")
-    if direction not in {"buy_yes", "buy_no", "unknown"}:
-        direction = "unknown"
-    range_label = str(getattr(getattr(edge, "bin", None), "label", "") or "")
-    strategy_key = str(getattr(decision, "strategy_key", "") or "").strip() or None
-    snapshot_id = str(getattr(decision, "decision_snapshot_id", "") or "").strip() or None
-    p_raw = _decision_vector_value(decision, "p_raw")
-    p_cal = _decision_vector_value(decision, "p_cal")
-    p_market = _decision_vector_value(decision, "p_market")
-    if p_cal is None and edge is not None:
-        try:
-            p_cal = float(getattr(edge, "p_model", None))
-        except (TypeError, ValueError):
-            p_cal = None
-    if p_market is None and edge is not None:
-        try:
-            p_market = float(getattr(edge, "p_market", None))
-        except (TypeError, ValueError):
-            p_market = None
-    best_edge = None
-    ci_width = None
-    alpha = getattr(decision, "alpha", None)
-    if edge is not None:
-        try:
-            best_edge = float(getattr(edge, "edge", None))
-        except (TypeError, ValueError):
-            best_edge = None
-        try:
-            ci_width = max(0.0, float(edge.ci_upper) - float(edge.ci_lower))
-        except (TypeError, ValueError, AttributeError):
-            ci_width = None
+    INV-37 fix (wave-2, 2026-05-18): opens its own trade connection rather than
+    accepting an opaque conn from callers. Pre-fix, callers could pass a
+    forecasts-rooted or world-ATTACHed conn, causing writes to land in the wrong
+    DB. The ``conn`` parameter is kept for backward compat but is no longer used.
+    """
+    _wconn = get_trade_connection(write_class="live")
     try:
-        alpha = float(alpha) if alpha not in (None, "") else None
-    except (TypeError, ValueError):
-        alpha = None
-    rejection_reason_json = None
-    if rejection_reasons:
-        rejection_reason_json = json.dumps(list(rejection_reasons), ensure_ascii=False)
+        if not _table_exists(_wconn, "opportunity_fact"):
+            logger.info("Opportunity fact table unavailable; skipping durable write")
+            return {"status": "skipped_missing_table", "table": "opportunity_fact"}
 
-    conn.execute(
-        """
-        INSERT INTO opportunity_fact (
-            decision_id,
-            candidate_id,
-            city,
-            target_date,
-            range_label,
-            direction,
-            strategy_key,
-            discovery_mode,
-            entry_method,
-            snapshot_id,
-            p_raw,
-            p_cal,
-            p_market,
-            alpha,
-            best_edge,
-            ci_width,
-            rejection_stage,
-            rejection_reason_json,
-            availability_status,
-            should_trade,
-            recorded_at
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(decision_id) DO UPDATE SET
-            candidate_id=excluded.candidate_id,
-            city=excluded.city,
-            target_date=excluded.target_date,
-            range_label=excluded.range_label,
-            direction=excluded.direction,
-            strategy_key=excluded.strategy_key,
-            discovery_mode=excluded.discovery_mode,
-            entry_method=excluded.entry_method,
-            snapshot_id=excluded.snapshot_id,
-            p_raw=excluded.p_raw,
-            p_cal=excluded.p_cal,
-            p_market=excluded.p_market,
-            alpha=excluded.alpha,
-            best_edge=excluded.best_edge,
-            ci_width=excluded.ci_width,
-            rejection_stage=excluded.rejection_stage,
-            rejection_reason_json=excluded.rejection_reason_json,
-            availability_status=excluded.availability_status,
-            should_trade=excluded.should_trade,
-            recorded_at=COALESCE(opportunity_fact.recorded_at, excluded.recorded_at)
-        """,
-        (
-            str(getattr(decision, "decision_id", "") or ""),
-            _opportunity_fact_candidate_id(candidate) or None,
-            _candidate_city_name(candidate) or None,
-            str(getattr(candidate, "target_date", "") or "") or None,
-            range_label or None,
-            direction,
-            strategy_key,
-            str(getattr(candidate, "discovery_mode", "") or "") or None,
-            str(
-                getattr(decision, "selected_method", "")
-                or getattr(decision, "entry_method", "")
-                or ""
+        edge = getattr(decision, "edge", None)
+        direction = str(getattr(edge, "direction", "") or "unknown")
+        if direction not in {"buy_yes", "buy_no", "unknown"}:
+            direction = "unknown"
+        range_label = str(getattr(getattr(edge, "bin", None), "label", "") or "")
+        strategy_key = str(getattr(decision, "strategy_key", "") or "").strip() or None
+        snapshot_id = str(getattr(decision, "decision_snapshot_id", "") or "").strip() or None
+        p_raw = _decision_vector_value(decision, "p_raw")
+        p_cal = _decision_vector_value(decision, "p_cal")
+        p_market = _decision_vector_value(decision, "p_market")
+        if p_cal is None and edge is not None:
+            try:
+                p_cal = float(getattr(edge, "p_model", None))
+            except (TypeError, ValueError):
+                p_cal = None
+        if p_market is None and edge is not None:
+            try:
+                p_market = float(getattr(edge, "p_market", None))
+            except (TypeError, ValueError):
+                p_market = None
+        best_edge = None
+        ci_width = None
+        alpha = getattr(decision, "alpha", None)
+        if edge is not None:
+            try:
+                best_edge = float(getattr(edge, "edge", None))
+            except (TypeError, ValueError):
+                best_edge = None
+            try:
+                ci_width = max(0.0, float(edge.ci_upper) - float(edge.ci_lower))
+            except (TypeError, ValueError, AttributeError):
+                ci_width = None
+        try:
+            alpha = float(alpha) if alpha not in (None, "") else None
+        except (TypeError, ValueError):
+            alpha = None
+        rejection_reason_json = None
+        if rejection_reasons:
+            rejection_reason_json = json.dumps(list(rejection_reasons), ensure_ascii=False)
+
+        _wconn.execute(
+            """
+            INSERT INTO opportunity_fact (
+                decision_id,
+                candidate_id,
+                city,
+                target_date,
+                range_label,
+                direction,
+                strategy_key,
+                discovery_mode,
+                entry_method,
+                snapshot_id,
+                p_raw,
+                p_cal,
+                p_market,
+                alpha,
+                best_edge,
+                ci_width,
+                rejection_stage,
+                rejection_reason_json,
+                availability_status,
+                should_trade,
+                recorded_at
             )
-            or None,
-            snapshot_id,
-            p_raw,
-            p_cal,
-            p_market,
-            alpha,
-            best_edge,
-            ci_width,
-            str(rejection_stage or "") or None,
-            rejection_reason_json,
-            _normalize_opportunity_availability_status(getattr(decision, "availability_status", "")),
-            int(bool(should_trade)),
-            recorded_at,
-        ),
-    )
-    return {"status": "written", "table": "opportunity_fact"}
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(decision_id) DO UPDATE SET
+                candidate_id=excluded.candidate_id,
+                city=excluded.city,
+                target_date=excluded.target_date,
+                range_label=excluded.range_label,
+                direction=excluded.direction,
+                strategy_key=excluded.strategy_key,
+                discovery_mode=excluded.discovery_mode,
+                entry_method=excluded.entry_method,
+                snapshot_id=excluded.snapshot_id,
+                p_raw=excluded.p_raw,
+                p_cal=excluded.p_cal,
+                p_market=excluded.p_market,
+                alpha=excluded.alpha,
+                best_edge=excluded.best_edge,
+                ci_width=excluded.ci_width,
+                rejection_stage=excluded.rejection_stage,
+                rejection_reason_json=excluded.rejection_reason_json,
+                availability_status=excluded.availability_status,
+                should_trade=excluded.should_trade,
+                recorded_at=COALESCE(opportunity_fact.recorded_at, excluded.recorded_at)
+            """,
+            (
+                str(getattr(decision, "decision_id", "") or ""),
+                _opportunity_fact_candidate_id(candidate) or None,
+                _candidate_city_name(candidate) or None,
+                str(getattr(candidate, "target_date", "") or "") or None,
+                range_label or None,
+                direction,
+                strategy_key,
+                str(getattr(candidate, "discovery_mode", "") or "") or None,
+                str(
+                    getattr(decision, "selected_method", "")
+                    or getattr(decision, "entry_method", "")
+                    or ""
+                )
+                or None,
+                snapshot_id,
+                p_raw,
+                p_cal,
+                p_market,
+                alpha,
+                best_edge,
+                ci_width,
+                str(rejection_stage or "") or None,
+                rejection_reason_json,
+                _normalize_opportunity_availability_status(getattr(decision, "availability_status", "")),
+                int(bool(should_trade)),
+                recorded_at,
+            ),
+        )
+        _wconn.commit()
+        return {"status": "written", "table": "opportunity_fact"}
+    except Exception as e:
+        import logging as _logging
+        _logging.getLogger(__name__).warning("Failed to log opportunity fact: %s", e)
+        return {"status": "error", "table": "opportunity_fact", "error": str(e)}
+    finally:
+        _wconn.close()
 
 
 def log_availability_fact(

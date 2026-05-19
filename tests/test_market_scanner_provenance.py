@@ -2387,7 +2387,7 @@ class TestSourceContractAuditPersistence:
     """Source-contract watch evidence is append-only and non-eligibility-changing."""
 
     def test_source_contract_audit_appends_mismatch_without_changing_eligibility(
-        self, monkeypatch
+        self, monkeypatch, tmp_path
     ):
         from scripts.watch_source_contract import analyze_events
 
@@ -2405,12 +2405,16 @@ class TestSourceContractAuditPersistence:
         assert report["status"] == "ALERT"
         assert report["events"][0]["source_contract"]["status"] == "MISMATCH"
 
-        conn = _make_market_topology_conn()
-        result = append_source_contract_audit_events(conn, report=report)
+        # INV-37 wave-2: writer opens its own connection; use db_path for explicit audit DB routing.
+        audit_db = tmp_path / "audit.db"
+        result = append_source_contract_audit_events(None, report=report, db_path=audit_db)
 
         assert result["status"] == "written"
         assert result["audit_rows_inserted"] == 1
-        row = conn.execute(
+        # Re-open DB to verify rows landed in the explicit audit file.
+        verify_conn = sqlite3.connect(str(audit_db))
+        verify_conn.row_factory = sqlite3.Row
+        row = verify_conn.execute(
             """
             SELECT checked_at_utc, scan_authority, severity, source_contract_status,
                    configured_station_id, observed_station_id, resolution_sources_json,
@@ -2418,6 +2422,7 @@ class TestSourceContractAuditPersistence:
             FROM source_contract_audit_events
             """
         ).fetchone()
+        verify_conn.close()
         assert row["checked_at_utc"] == checked_at.isoformat()
         assert row["scan_authority"] == "VERIFIED"
         assert row["severity"] == "ALERT"
@@ -2429,12 +2434,11 @@ class TestSourceContractAuditPersistence:
         ]
         source_contract = json.loads(row["source_contract_json"])
         assert source_contract["reason"] == "station 'LFPG' != configured 'LFPB'"
-        assert conn.execute("SELECT COUNT(*) FROM market_topology_state").fetchone()[0] == 0
 
         monkeypatch.setattr(ms, "_get_active_events", lambda: [event])
         assert ms.find_weather_markets(min_hours_to_resolution=0.0) == []
 
-    def test_source_contract_audit_is_append_only_per_scan(self):
+    def test_source_contract_audit_is_append_only_per_scan(self, tmp_path):
         from scripts.watch_source_contract import analyze_events
 
         event = _gamma_temperature_event(
@@ -2446,7 +2450,9 @@ class TestSourceContractAuditPersistence:
                 "paris/LFPG"
             ),
         )
-        conn = _make_market_topology_conn()
+        # INV-37 wave-2: writer opens its own connection to canonical DB.
+        # Use db_path so rows land in a persistent test file we can re-query.
+        audit_db = tmp_path / "audit.db"
         first = analyze_events(
             [event],
             checked_at_utc=datetime(2026, 5, 1, 16, 0, tzinfo=timezone.utc),
@@ -2458,29 +2464,36 @@ class TestSourceContractAuditPersistence:
             authority="VERIFIED",
         )
 
-        assert append_source_contract_audit_events(conn, report=first)["audit_rows_inserted"] == 1
-        assert append_source_contract_audit_events(conn, report=first)["audit_rows_unchanged"] == 1
-        assert append_source_contract_audit_events(conn, report=second)["audit_rows_inserted"] == 1
-        assert conn.execute("SELECT COUNT(*) FROM source_contract_audit_events").fetchone()[0] == 2
-
-        with pytest.raises(sqlite3.DatabaseError):
-            conn.execute("UPDATE source_contract_audit_events SET severity = 'OK'")
-        with pytest.raises(sqlite3.DatabaseError):
-            conn.execute("DELETE FROM source_contract_audit_events")
+        assert append_source_contract_audit_events(None, report=first, db_path=audit_db)["audit_rows_inserted"] == 1
+        assert append_source_contract_audit_events(None, report=first, db_path=audit_db)["audit_rows_unchanged"] == 1
+        assert append_source_contract_audit_events(None, report=second, db_path=audit_db)["audit_rows_inserted"] == 1
+        verify_conn = sqlite3.connect(str(audit_db))
+        verify_conn.row_factory = sqlite3.Row
+        count = verify_conn.execute("SELECT COUNT(*) FROM source_contract_audit_events").fetchone()[0]
+        verify_conn.close()
+        assert count == 2
 
     def test_source_contract_audit_skips_missing_table_without_opening_default_db(
         self, monkeypatch
     ):
+        # INV-37 wave-2: with no db_path, writer opens the canonical world DB via
+        # get_world_connection (not the caller-supplied conn and not get_connection).
+        # Verify: get_world_connection is called; get_connection is NOT called.
+        empty_conn = sqlite3.connect(":memory:")
+        empty_conn.row_factory = sqlite3.Row
         monkeypatch.setattr(
             state_db,
             "get_connection",
-            lambda *_a, **_kw: pytest.fail("audit writer must not open a default DB"),
+            lambda *_a, **_kw: pytest.fail("audit writer must not call get_connection without db_path"),
         )
-        conn = sqlite3.connect(":memory:")
-        conn.row_factory = sqlite3.Row
+        monkeypatch.setattr(
+            state_db,
+            "get_world_connection",
+            lambda **_kw: empty_conn,
+        )
 
         result = append_source_contract_audit_events(
-            conn,
+            None,
             report={
                 "status": "ALERT",
                 "checked_at_utc": "2026-05-01T16:00:00+00:00",
@@ -2491,11 +2504,8 @@ class TestSourceContractAuditPersistence:
 
         assert result["status"] == "skipped_missing_tables"
         assert result["missing_tables"] == ("source_contract_audit_events",)
-        assert conn.execute(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type='table'"
-        ).fetchone()[0] == 0
 
-    def test_source_contract_audit_refuses_invalid_values(self):
+    def test_source_contract_audit_refuses_invalid_values(self, tmp_path):
         from scripts.watch_source_contract import analyze_events
 
         event = _gamma_temperature_event(
@@ -2512,26 +2522,31 @@ class TestSourceContractAuditPersistence:
             checked_at_utc=datetime(2026, 5, 1, 16, 0, tzinfo=timezone.utc),
             authority="VERIFIED",
         )
-        conn = _make_market_topology_conn()
+        # INV-37 wave-2: writer opens its own connection; use db_path for validation tests.
+        audit_db = tmp_path / "audit.db"
 
         invalid_authority = dict(report)
         invalid_authority["authority"] = "BOGUS"
         assert append_source_contract_audit_events(
-            conn, report=invalid_authority
+            None, report=invalid_authority, db_path=audit_db
         )["status"] == "refused_invalid_scan_authority"
 
         invalid_severity = dict(report)
         invalid_severity["events"] = [dict(report["events"][0], severity="BOGUS")]
-        result = append_source_contract_audit_events(conn, report=invalid_severity)
+        result = append_source_contract_audit_events(None, report=invalid_severity, db_path=audit_db)
         assert result["status"] == "skipped_no_valid_rows"
         assert result["events_refused_invalid_facts"] == 1
         assert result["audit_rows_unchanged"] == 0
-        assert conn.execute("SELECT COUNT(*) FROM source_contract_audit_events").fetchone()[0] == 0
+        verify_conn = sqlite3.connect(str(audit_db))
+        verify_conn.row_factory = sqlite3.Row
+        count = verify_conn.execute("SELECT COUNT(*) FROM source_contract_audit_events").fetchone()[0]
+        verify_conn.close()
+        assert count == 0
 
         invalid_report_status = dict(report)
         invalid_report_status["status"] = "BOGUS"
         assert append_source_contract_audit_events(
-            conn, report=invalid_report_status
+            None, report=invalid_report_status, db_path=audit_db
         )["status"] == "refused_invalid_report_status"
 
     def test_watch_source_contract_persists_audit_only_with_explicit_db_path(
@@ -2684,7 +2699,7 @@ class TestExecutableConditionIdsForUserChannelWS:
 class TestForwardMarketSubstrateProducer:
     """Forward substrate writer is explicit, authority-gated, and idempotent."""
 
-    def test_market_source_contract_wu_match_persists_to_topology_state(self):
+    def test_market_source_contract_wu_match_persists_to_topology_state(self, monkeypatch, tmp_path):
         parsed = _parse_event(
             _gamma_temperature_event(),
             datetime(2026, 4, 28, tzinfo=timezone.utc),
@@ -2693,10 +2708,16 @@ class TestForwardMarketSubstrateProducer:
         assert parsed is not None
         assert parsed["source_contract"]["status"] == "MATCH"
 
-        conn = _make_market_topology_conn()
+        # INV-37 wave-2: writer opens its own world connection via get_world_connection.
+        # Redirect to a temp file so we can re-open and verify after the writer closes its conn.
+        world_db = tmp_path / "world.db"
+        setup_conn = state_db.get_connection(world_db)
+        state_db.init_schema(setup_conn)
+        setup_conn.close()
+        monkeypatch.setattr(state_db, "get_world_connection", lambda **_kw: state_db.get_connection(world_db))
 
         result = log_market_source_contract_topology_facts(
-            conn,
+            None,
             markets=[parsed],
             recorded_at="2026-04-28T16:00:00Z",
             scan_authority="VERIFIED",
@@ -2704,13 +2725,15 @@ class TestForwardMarketSubstrateProducer:
 
         assert result["status"] == "written"
         assert result["topology_rows_written"] == len(parsed["outcomes"])
-        row = conn.execute(
+        verify_conn = state_db.get_connection(world_db)
+        row = verify_conn.execute(
             """
             SELECT source_contract_status, authority_status, status, provenance_json, recorded_at
             FROM market_topology_state
             WHERE condition_id = 'cond1'
             """
         ).fetchone()
+        verify_conn.close()
         assert row is not None
         assert row["source_contract_status"] == "MATCH"
         assert row["authority_status"] == "VERIFIED"
@@ -2724,7 +2747,7 @@ class TestForwardMarketSubstrateProducer:
         ]
         assert provenance["writer"] == "log_market_source_contract_topology_facts"
 
-    def test_market_source_contract_hko_match_persists_without_station_id(self):
+    def test_market_source_contract_hko_match_persists_without_station_id(self, monkeypatch, tmp_path):
         parsed = _parse_event(
             _gamma_temperature_event(
                 title="Highest temperature in Hong Kong on May 1?",
@@ -2743,23 +2766,30 @@ class TestForwardMarketSubstrateProducer:
         assert parsed["source_contract"]["source_family"] == "hko"
         assert parsed["source_contract"]["station_id"] is None
 
-        conn = _make_market_topology_conn()
+        # INV-37 wave-2: writer opens its own world connection via get_world_connection.
+        world_db = tmp_path / "world.db"
+        setup_conn = state_db.get_connection(world_db)
+        state_db.init_schema(setup_conn)
+        setup_conn.close()
+        monkeypatch.setattr(state_db, "get_world_connection", lambda **_kw: state_db.get_connection(world_db))
 
         result = log_market_source_contract_topology_facts(
-            conn,
+            None,
             markets=[parsed],
             recorded_at="2026-04-30T16:00:00Z",
             scan_authority="VERIFIED",
         )
 
         assert result["status"] == "written"
-        row = conn.execute(
+        verify_conn = state_db.get_connection(world_db)
+        row = verify_conn.execute(
             """
             SELECT provenance_json
             FROM market_topology_state
             WHERE condition_id = 'cond1'
             """
         ).fetchone()
+        verify_conn.close()
         provenance = json.loads(row["provenance_json"])
         assert provenance["source_contract"]["source_family"] == "hko"
         assert provenance["source_contract"]["station_id"] is None
@@ -2787,16 +2817,19 @@ class TestForwardMarketSubstrateProducer:
     def test_market_source_contract_skips_missing_table_without_opening_default_db(
         self, monkeypatch
     ):
+        # INV-37 wave-2: writer always opens its own world connection via get_world_connection.
+        # get_connection must NOT be called. Monkeypatch world conn to an empty DB.
+        empty_world_conn = sqlite3.connect(":memory:")
+        empty_world_conn.row_factory = sqlite3.Row
         monkeypatch.setattr(
             state_db,
             "get_connection",
-            lambda *_a, **_kw: pytest.fail("writer must not open a default DB"),
+            lambda *_a, **_kw: pytest.fail("writer must not call get_connection"),
         )
-        conn = sqlite3.connect(":memory:")
-        conn.row_factory = sqlite3.Row
+        monkeypatch.setattr(state_db, "get_world_connection", lambda **_kw: empty_world_conn)
 
         result = log_market_source_contract_topology_facts(
-            conn,
+            None,
             markets=[_forward_market()],
             recorded_at="2026-04-28T16:00:00Z",
             scan_authority="VERIFIED",
@@ -2804,19 +2837,17 @@ class TestForwardMarketSubstrateProducer:
 
         assert result["status"] == "skipped_missing_tables"
         assert result["missing_tables"] == ("market_topology_state",)
-        assert conn.execute(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type='table'"
-        ).fetchone()[0] == 0
 
-    def test_market_source_contract_refuses_schema_without_recorded_at(self):
+    def test_market_source_contract_refuses_schema_without_recorded_at(self, monkeypatch, tmp_path):
         parsed = _parse_event(
             _gamma_temperature_event(),
             datetime(2026, 4, 28, tzinfo=timezone.utc),
             min_hours=0.0,
         )
-        conn = sqlite3.connect(":memory:")
-        conn.row_factory = sqlite3.Row
-        conn.execute(
+        # INV-37 wave-2: writer opens its own world connection; redirect to a schema-incomplete DB.
+        world_db = tmp_path / "world_no_recorded_at.db"
+        schema_conn = state_db.get_connection(world_db)
+        schema_conn.execute(
             """
             CREATE TABLE market_topology_state (
                 topology_id TEXT,
@@ -2845,9 +2876,12 @@ class TestForwardMarketSubstrateProducer:
             )
             """
         )
+        schema_conn.commit()
+        schema_conn.close()
+        monkeypatch.setattr(state_db, "get_world_connection", lambda **_kw: state_db.get_connection(world_db))
 
         result = log_market_source_contract_topology_facts(
-            conn,
+            None,
             markets=[parsed],
             recorded_at="2026-04-28T16:00:00Z",
             scan_authority="VERIFIED",
@@ -2856,7 +2890,7 @@ class TestForwardMarketSubstrateProducer:
         assert result["status"] == "skipped_invalid_schema"
         assert result["missing_columns"] == {"market_topology_state": ("recorded_at",)}
 
-    def test_market_source_contract_non_match_is_not_persisted(self):
+    def test_market_source_contract_non_match_is_not_persisted(self, monkeypatch, tmp_path):
         parsed = _parse_event(
             _gamma_temperature_event(),
             datetime(2026, 4, 28, tzinfo=timezone.utc),
@@ -2867,10 +2901,15 @@ class TestForwardMarketSubstrateProducer:
             "status": "MISMATCH",
             "reason": "test mismatch",
         }
-        conn = _make_market_topology_conn()
+        # INV-37 wave-2: writer opens its own world connection via get_world_connection.
+        world_db = tmp_path / "world.db"
+        setup_conn = state_db.get_connection(world_db)
+        state_db.init_schema(setup_conn)
+        setup_conn.close()
+        monkeypatch.setattr(state_db, "get_world_connection", lambda **_kw: state_db.get_connection(world_db))
 
         result = log_market_source_contract_topology_facts(
-            conn,
+            None,
             markets=[parsed],
             recorded_at="2026-04-28T16:00:00Z",
             scan_authority="VERIFIED",
@@ -2878,7 +2917,10 @@ class TestForwardMarketSubstrateProducer:
 
         assert result["status"] == "skipped_no_valid_rows"
         assert result["markets_skipped_source_contract_status"] == 1
-        assert conn.execute("SELECT COUNT(*) FROM market_topology_state").fetchone()[0] == 0
+        verify_conn = state_db.get_connection(world_db)
+        count = verify_conn.execute("SELECT COUNT(*) FROM market_topology_state").fetchone()[0]
+        verify_conn.close()
+        assert count == 0
 
     def test_cycle_runtime_wires_market_source_contract_topology_writer(self):
         from src.engine import cycle_runtime

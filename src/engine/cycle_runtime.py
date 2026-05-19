@@ -2559,7 +2559,7 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                     summary[f"market_source_contract_topology_{key}"] = int(
                         source_contract_result.get(key) or 0
                     )
-            if source_contract_status == "skipped_invalid_schema":
+            if source_contract_status in {"skipped_invalid_schema", "error"}:
                 deps.logger.warning(
                     "Market source-contract topology degraded: %s", source_contract_result
                 )
