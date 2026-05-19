@@ -232,6 +232,37 @@ def init_settlement_command_schema(conn: sqlite3.Connection) -> None:
             if "duplicate column" not in str(exc).lower():
                 raise
 
+    # codereview-may19 P1-3 / Codex P1: backfill correction for v12-era rows.
+    # The previous ALTER (DEFAULT 'gamma_explicit') stamped legacy rows whose
+    # anchor source was never captured with a fabricated authority label.
+    # The DEFAULT change above only protects FUTURE rows; existing rows still
+    # carry the fabricated 'gamma_explicit'. Convert them to 'unknown_legacy'
+    # so downstream causal-evidence consumers can distinguish "verified
+    # Gamma-explicit anchor" from "unknown legacy fabrication".
+    #
+    # Idempotency: keyed off PRAGMA user_version. Set to 13 only after the
+    # update has run; subsequent boots see user_version=13 and skip. Real
+    # live callers passing an explicit 'gamma_explicit' value (Gamma's actual
+    # endDate as the verified anchor) write rows AFTER this boot, so the
+    # one-shot does not corrupt verified rows.
+    try:
+        current_version = int(conn.execute("PRAGMA user_version").fetchone()[0])
+    except Exception:
+        current_version = 0
+    if current_version < 13:
+        try:
+            conn.execute(
+                "UPDATE settlement_commands SET polymarket_end_anchor_source = 'unknown_legacy' "
+                "WHERE polymarket_end_anchor_source = 'gamma_explicit'"
+            )
+            conn.execute("PRAGMA user_version = 13")
+        except Exception as exc:
+            logger.warning(
+                "[V13_BACKFILL_GAMMA_EXPLICIT_FAILED] exc=%s; legacy rows may "
+                "retain fabricated authority. Investigate before next boot.",
+                exc,
+            )
+
 
 def request_redeem(
     condition_id: str,
