@@ -282,3 +282,36 @@ def test_json_dumps_unsupported_type_raises():
     """T5: Non-bytes unsupported types still raise TypeError — no silent corruption."""
     with pytest.raises(TypeError, match="is not JSON serializable"):
         _json_dumps({"x": object()})
+
+
+def test_T6_attributedict_coerced_to_plain_dict():
+    """Antibody T6 (2026-05-19 live reconciler postmortem):
+    web3 AttributeDict (used for nested log entries in transaction receipts)
+    must serialize via the dict-coercion branch in `_jsonable`. Sed-flip:
+    removing the `hasattr(o, "keys")` branch causes this test → RED.
+    """
+    # Reproduce web3.types.AttributeDict shape: dict-like with attribute access,
+    # NOT a strict dict subclass on web3 7.x / Python 3.14.
+    class FakeAttributeDict:
+        def __init__(self, data):
+            self._data = dict(data)
+        def keys(self):
+            return self._data.keys()
+        def __getitem__(self, k):
+            return self._data[k]
+        def __iter__(self):
+            return iter(self._data)
+        def __len__(self):
+            return len(self._data)
+    log_entry = FakeAttributeDict({
+        "blockHash": b"\x01" * 32,
+        "transactionHash": b"\x02" * 32,
+        "logIndex": 0,
+    })
+    payload = {"logs": [log_entry], "status": 1}
+    js = _json_dumps(payload)
+    assert '"logIndex":0' in js
+    assert '"status":1' in js
+    # bytes coerced via the bytes branch
+    assert "0x" + "01" * 32 in js
+    assert "0x" + "02" * 32 in js
