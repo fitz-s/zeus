@@ -41,9 +41,11 @@ _CURRENT_SOURCE_CYCLE_STATUSES = frozenset({"SUCCESS"})
 # A PARTIAL journal at T+8h means more steps may still publish; treating it as
 # "already journaled" would lock the daemon out of those later steps and force
 # every entry into MISSING_REQUIRED_STEPS until the next 00Z/12Z cycle —
-# exactly the live blackout observed 2026-05-18→2026-05-19. The safe-cycle
-# poll re-fetches incrementally; UPSERT keys on source_run_id so refetching a
-# stable cycle is idempotent.
+# exactly the live blackout observed 2026-05-18→2026-05-19. Idempotent under
+# refetch: job_run UPSERTs on `job_run_key` (job_name + scheduled_for + source_id
+# + track + release_calendar_key), source_run on its `source_run_id` PK, and
+# source_run_coverage / readiness_state on composite identity keys — all stable
+# across refetches of the same cycle, so a no-op refetch just rewrites rows.
 
 FORECAST_LIVE_JOB_IDS = frozenset(
     {
