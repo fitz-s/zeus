@@ -1,12 +1,16 @@
 # Created: 2026-05-07
-# Last reused or audited: 2026-05-07
+# Last reused or audited: 2026-05-19
 # Authority basis: Navigation Topology v2 PLAN §2.3; critic-opus C3/D1 amendment; admission_severity.yaml typed_intent_enum; sunset 2026-11-07
+# Lifecycle: created=2026-05-07; last_reviewed=2026-05-19; last_reused=2026-05-19
+# Purpose: Validate typed_intent_enum in admission_severity.yaml (10 values, unique IDs, descriptions)
+# Reuse: standalone pytest; reads architecture/admission_severity.yaml directly
 
 """Validates the typed_intent_enum in architecture/admission_severity.yaml.
 
 Asserts:
-  1. Enum has exactly 9 values: {plan_only, create_new, modify_existing, refactor,
-     audit, hygiene, hotfix, rebase_keepup, other} (D1 amendment per critic-opus C3).
+  1. Enum has exactly 10 values: {plan_only, create_new, modify_existing, refactor,
+     audit, hygiene, hotfix, rebase_keepup, other, docs_instruction}
+     (docs_instruction added 2026-05-10 G4 cluster J update; D1 amendment per critic-opus C3).
   2. plan_only admits without profile match (admission shortcut per K3 — described
      in entry's description field).
   3. other is explicit fall-through (admission still applies per K1 severity tier —

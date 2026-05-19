@@ -82,7 +82,8 @@ class MockTracker:
         "Cluster M.6 (2026-05-18): execute_monitoring_phase now delegates to cycle_runtime "
         "with a deps injection pattern; refresh_position uses monitor_probability_refresh "
         "(not recompute_native_probability) so p_posterior is NaN and DAY0_OBSERVATION_REVERSAL "
-        "trigger no longer fires for stale market-date positions. Needs full monkeypatch rewrite."
+        "trigger no longer fires for stale market-date positions. Needs full monkeypatch rewrite. "
+        "Tracking: rewrite due before live v2 monitoring promotion; expiry 2026-06-30."
     ),
     strict=True,
 )

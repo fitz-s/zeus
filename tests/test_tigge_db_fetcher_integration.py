@@ -1,9 +1,12 @@
 # Created: 2026-05-01
-# Last reused/audited: 2026-05-18
+# Last reused/audited: 2026-05-19
 # Authority basis: live-blockers session 2026-05-01 — TIGGE DB-backed entry evidence relationship;
 #                  PR 37 review: registered-ingest cache TTL must not use source capture time.
 # Cluster M.3 (2026-05-18): DB_FETCH_TIME and RECORDED_AT updated to be time-relative so
 # ensemble_client.fetch_ensemble (which uses datetime.now()) can pass the 24h freshness window.
+# Lifecycle: created=2026-05-01; last_reviewed=2026-05-19; last_reused=2026-05-19
+# Purpose: Relationship antibody verifying TIGGE DB rows → trading-side ensemble evidence
+# Reuse: standalone pytest; uses relative-time constants for datetime.now() freshness window
 """Relationship antibody: TIGGE DB rows → trading-side ensemble evidence."""
 
 from __future__ import annotations
@@ -23,7 +26,11 @@ AVAILABLE_AT = "2026-04-29T00:00:00+00:00"
 # passes when ensemble_client.fetch_ensemble calls datetime.now(). The two passing tests that
 # call _fetch_db_payload(fake_city, DECISION_TIME) directly use DECISION_TIME as fetch_time, so
 # they also pass the freshness check as long as DECISION_TIME >= DB_FETCH_DATETIME.
-DB_FETCH_DATETIME = datetime.now(timezone.utc) - timedelta(hours=1)
+# Fixed reference time avoids non-determinism from datetime.now() at module import time.
+# Tests that exercise ensemble_client.fetch_ensemble (which calls datetime.now() internally)
+# monkeypatch datetime.now to return _ANCHOR so freshness checks are deterministic.
+_ANCHOR = datetime(2026, 5, 19, 12, 0, 0, tzinfo=timezone.utc)
+DB_FETCH_DATETIME = _ANCHOR - timedelta(hours=1)
 DB_FETCH_TIME = DB_FETCH_DATETIME.strftime("%Y-%m-%dT%H:%M:%S+00:00")
 RECORDED_AT = DB_FETCH_DATETIME.strftime("%Y-%m-%d %H:%M:%S")
 DECISION_TIME = DB_FETCH_DATETIME + timedelta(minutes=30)
@@ -219,6 +226,14 @@ def test_fetch_ensemble_tigge_satisfies_entry_evidence_contract(
     )
     monkeypatch.setattr(ec, "gate_source_role", lambda _spec, _role: None)
     monkeypatch.setattr(tc, "_operator_gate_open", lambda **_kwargs: True)
+    # Freeze datetime.now() in ensemble_client to _ANCHOR so the 24h freshness check
+    # against DB_FETCH_DATETIME (_ANCHOR - 1h) is deterministic regardless of test runtime.
+    import src.data.ensemble_client as _ec_module
+    from datetime import datetime as _real_dt
+    monkeypatch.setattr(_ec_module, "datetime", type("_FakeDT", (), {
+        "now": staticmethod(lambda tz=None: _ANCHOR.replace(tzinfo=tz) if tz else _ANCHOR),
+        "__getattr__": lambda self, name: getattr(_real_dt, name),
+    })())
 
     result = ec.fetch_ensemble(
         fake_city,
@@ -258,6 +273,13 @@ def test_fetch_ensemble_tigge_cache_uses_retrieval_time_not_source_capture(
     )
     monkeypatch.setattr(ec, "gate_source_role", lambda _spec, _role: None)
     monkeypatch.setattr(tc, "_operator_gate_open", lambda **_kwargs: True)
+    # Freeze datetime.now() in ensemble_client to _ANCHOR for deterministic freshness checks.
+    import src.data.ensemble_client as _ec_module
+    from datetime import datetime as _real_dt
+    monkeypatch.setattr(_ec_module, "datetime", type("_FakeDT", (), {
+        "now": staticmethod(lambda tz=None: _ANCHOR.replace(tzinfo=tz) if tz else _ANCHOR),
+        "__getattr__": lambda self, name: getattr(_real_dt, name),
+    })())
     calls = {"count": 0}
     original_fetch = TIGGEIngest.fetch
 

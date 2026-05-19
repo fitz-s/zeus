@@ -1,6 +1,9 @@
 # Created: 2026-05-02
-# Last reused/audited: 2026-05-03
+# Last reused/audited: 2026-05-19
 # Authority basis: docs/operations/task_2026-05-02_data_daemon_readiness/PLAN.md PR45b + PLAN_v4 cycle-profile contract.
+# Lifecycle: created=2026-05-02; last_reviewed=2026-05-19; last_reused=2026-05-19
+# Purpose: Verify release calendar schedule and boundary conditions
+# Reuse: standalone pytest; no shared fixtures
 
 from __future__ import annotations
 

@@ -1,6 +1,9 @@
 # Created: 2026-05-18
-# Last reused or audited: 2026-05-18
+# Last reused or audited: 2026-05-19
 # Authority basis: G4_CLEANUP_DESIGN.md §2 L (Cluster L), src/data/AGENTS.md
+# Lifecycle: created=2026-05-18; last_reviewed=2026-05-19; last_reused=2026-05-19
+# Purpose: Verify WU scheduler eligibility logic and dispatch routing (K2 cluster L)
+# Reuse: standalone pytest; no shared fixtures beyond conftest.py
 """K2 physical-clock WU scheduler tests."""
 from __future__ import annotations
 
