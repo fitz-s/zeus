@@ -512,6 +512,14 @@ tables:
     schema_version_owner: SCHEMA_VERSION
     created_by: init_schema
     pk_col: null
+    pr2_fields_added: "2026-05-19"
+    pr2_columns:
+      - wide_spread_display_substitution
+      - depth_at_best_ask
+    pr2_notes: >
+      PR 2 (phase0-pr27): added wide_spread_display_substitution (BOOL/INT) and
+      depth_at_best_ask (INT) via idempotent ALTER TABLE ADD COLUMN in
+      init_snapshot_schema(). spread_observed_window_ms deferred (Finding #8 decision-a).
 
   - name: execution_fact
     db: trade
@@ -1276,6 +1284,9 @@ tables:
     created_by: init_schema_pre_pr_s4b
     pk_col: null
     notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
+    pr2_notes: >
+      PR 2 (phase0-pr27): new columns NOT applied to this ghost table (trade db, legacy_archived).
+      ALTER TABLE only runs on world.db via init_snapshot_schema() in snapshot_repo.py.
 
   - name: exit_mutex_holdings
     db: trade

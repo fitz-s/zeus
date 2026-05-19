@@ -24,6 +24,7 @@ from src import config as runtime_config
 from src.config import City, cities_by_name, state_path
 from src.contracts.executable_market_snapshot_v2 import (
     FRESHNESS_WINDOW_DEFAULT,
+    WIDE_SPREAD_THRESHOLD_USD,
     ExecutableMarketSnapshotV2,
     MarketSnapshotMismatchError,
     canonicalize_legacy_fee_rate_value,
@@ -1950,6 +1951,12 @@ def capture_executable_market_snapshot(
         authority_tier="CLOB",
         captured_at=captured,
         freshness_deadline=captured + FRESHNESS_WINDOW_DEFAULT,
+        # PR 2 microstructure transparency fields
+        wide_spread_display_substitution=bool(
+            _compute_spread(raw_orderbook, top_bid, top_ask) is not None
+            and _compute_spread(raw_orderbook, top_bid, top_ask) >= WIDE_SPREAD_THRESHOLD_USD
+        ),
+        depth_at_best_ask=_depth_at_best_ask(raw_orderbook),
     )
     insert_snapshot(conn, snapshot)
     return {
@@ -2199,6 +2206,35 @@ def _optional_top_book_level_decimal(orderbook: dict, side: str) -> tuple[Decima
 
 def _top_book_decimal(orderbook: dict, side: str) -> Decimal:
     return _top_book_level_decimal(orderbook, side)[0]
+
+
+# PR 2 — microstructure helpers
+
+def _compute_spread(
+    raw_orderbook: dict,
+    top_bid: Decimal,
+    top_ask: Decimal | None,
+) -> Decimal | None:
+    """Return bid-ask spread as Decimal, or None when ask is absent (one-sided book)."""
+    if top_ask is None:
+        return None
+    return top_ask - top_bid
+
+
+def _depth_at_best_ask(raw_orderbook: dict) -> int:
+    """Return shares available at best ask, parsed as int (rounded down). 0 when unavailable.
+
+    Parses from raw_orderbook["asks"][0]["size"] using the same pattern as
+    _top_book_level_decimal.  Returns 0 for one-sided book (no asks key).
+    """
+    asks = raw_orderbook.get("asks")
+    if not isinstance(asks, list) or not asks:
+        return 0
+    try:
+        _, ask_size = _top_book_level_decimal(raw_orderbook, "asks")
+        return int(ask_size)
+    except Exception:
+        return 0
 
 
 def _datetime_fact(surface: dict, name: str) -> datetime | None:

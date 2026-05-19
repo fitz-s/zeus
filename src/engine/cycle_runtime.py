@@ -19,6 +19,7 @@ from types import SimpleNamespace
 
 from src.config import get_mode
 from src.contracts.decision_evidence import DecisionEvidence, EvidenceAsymmetryError
+from src.contracts.effective_kelly_context import EffectiveKellyContext
 from src.contracts.execution_intent import DecisionSourceContext
 from src.engine.time_context import lead_hours_to_date_start, lead_hours_to_settlement_close
 from src.state.lifecycle_manager import (
@@ -751,6 +752,31 @@ def _reprice_decision_from_executable_snapshot(
     taker_fee_rate = float(getattr(decision, "execution_fee_rate", 0.0) or 0.0)
     if sizing_bankroll <= 0.0 or kelly_multiplier <= 0.0:
         raise ValueError("EXECUTABLE_REPRICE_REJECTED: missing sizing context")
+    # PR 7 — build EffectiveKellyContext from snapshot microstructure fields.
+    # Spread derived from the snapshot's orderbook top levels (already parsed above).
+    # Order type for maker path (W2) is GTC; taker paths (W3/W4) inherit the
+    # intent context order_type which defaults to "GTC" pre-upgrade.
+    # Use getattr with defaults for backward-compat with legacy SimpleNamespace mocks
+    # in tests that predate the PR2 fields (depth_at_best_ask=0, top_ask check).
+    from decimal import Decimal as _Decimal
+    _snap_top_ask = getattr(snapshot, "orderbook_top_ask", None)
+    _snap_depth = int(getattr(snapshot, "depth_at_best_ask", 0) or 0)
+    _snapshot_spread_usd = (
+        (best_ask - best_bid)
+        if _snap_top_ask is not None
+        else _Decimal("0")
+    )
+    _reprice_order_type = str(final_intent_context.get("order_type") or "GTC").strip().upper()
+    _maker_effective_context = EffectiveKellyContext(
+        spread_usd=_snapshot_spread_usd,
+        depth_at_best_ask=_snap_depth,
+        order_type="GTC",  # W2: passive maker limit order
+    )
+    _taker_effective_context = EffectiveKellyContext(
+        spread_usd=_snapshot_spread_usd,
+        depth_at_best_ask=_snap_depth,
+        order_type=_reprice_order_type,
+    )
     # The first candidate is a passive maker limit. If the book supports an
     # immediate fill, the marketable branch below resizes with taker fees.
     repriced_size_at_snapshot_vwmp = _size_at_execution_price_boundary(
@@ -759,6 +785,7 @@ def _reprice_decision_from_executable_snapshot(
         fee_rate=0.0,
         sizing_bankroll=sizing_bankroll,
         kelly_multiplier=kelly_multiplier,
+        effective_context=_maker_effective_context,  # W2
     )
     if repriced_size_at_snapshot_vwmp <= 0.0:
         raise ValueError("EXECUTABLE_REPRICE_REJECTED: repriced size is zero")
@@ -796,6 +823,7 @@ def _reprice_decision_from_executable_snapshot(
             fee_rate=taker_fee_rate,
             sizing_bankroll=sizing_bankroll,
             kelly_multiplier=kelly_multiplier,
+            effective_context=_taker_effective_context,  # W3
         )
         best_ask_fee_adjusted_edge = best_ask_edge - (
             taker_fee_rate * best_ask_float * (1.0 - best_ask_float)
@@ -865,6 +893,7 @@ def _reprice_decision_from_executable_snapshot(
             fee_rate=taker_fee_rate,
             sizing_bankroll=sizing_bankroll,
             kelly_multiplier=kelly_multiplier,
+            effective_context=_taker_effective_context,  # W4
         )
         if size_at_depth_limit <= 0.0:
             final_best_ask = None

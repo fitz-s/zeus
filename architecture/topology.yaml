@@ -8095,3 +8095,39 @@ digest_profiles:
       - "docs/operations/task_2026-05-17_strategy_vnext_phase0/PHASE_0_V4_ADDENDUM.md"
       - "docs/operations/task_2026-05-17_strategy_vnext_phase0/preflight/migration_dry_runs.json"
       - "docs/reference/zeus_math_spec.md"
+
+  - id: "phase0-pr27-effective-kelly"
+    description: >
+      PR 2+7 bundled: ExecutableMarketSnapshotV2 wide_spread + depth fields (PR 2)
+      and EffectiveKellyContext 5th-multiplier haircut (PR 7). Closes INV-kelly-effective.
+      Finding #8 decision-a: spread_observed_window_ms deferred to follow-up PR.
+    created: "2026-05-19"
+    status: "production"
+    invariants:
+      - "INV-kelly-effective"
+      - "INV-12"
+      - "INV-21"
+      - "INV-33"
+    source_files:
+      - "src/contracts/effective_kelly_context.py"
+      - "src/contracts/executable_market_snapshot_v2.py"
+      - "src/state/snapshot_repo.py"
+      - "src/data/market_scanner.py"
+      - "src/engine/evaluator.py"
+      - "src/engine/cycle_runtime.py"
+      - "src/engine/replay.py"
+    test_files:
+      - "tests/test_inv_kelly_effective.py"
+      - "tests/test_pr2_wide_spread_fields.py"
+    gates:
+      - "pytest -q tests/test_inv_kelly_effective.py tests/test_pr2_wide_spread_fields.py"
+      - "python3 scripts/topology_doctor.py --planning-lock --changed-files <files>"
+    downstream:
+      - "src/engine/evaluator.py"
+      - "src/engine/cycle_runtime.py"
+      - "src/engine/replay.py"
+    reference_reads:
+      - "docs/operations/task_2026-05-17_strategy_vnext_phase0/PHASE_0_V4_ADDENDUM.md"
+      - "docs/operations/task_2026-05-17_strategy_vnext_phase0/critic_2_pr2_pr7_kelly.md"
+      - "scaffolds/pr27_scaffold.md"
+      - "scaffolds/pr27_scaffold_critic.md"

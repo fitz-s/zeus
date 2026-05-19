@@ -26,6 +26,9 @@ OutcomeLabel = Literal["YES", "NO"]
 
 FRESHNESS_WINDOW_DEFAULT = timedelta(seconds=30)
 
+# PR 2: Polymarket UI displays last-trade price as midpoint when spread >= this.
+WIDE_SPREAD_THRESHOLD_USD = Decimal("0.10")
+
 
 class MarketSnapshotError(ValueError):
     """Base class for executable market snapshot gate failures."""
@@ -96,6 +99,16 @@ class ExecutableMarketSnapshotV2:
     captured_at: datetime
     freshness_deadline: datetime
 
+    # PR 2 — microstructure transparency fields (Finding #8 decision: spread_observed_window_ms
+    # deferred to follow-up PR where the windowed observer is also implemented)
+    wide_spread_display_substitution: bool = False
+    # True when observed spread >= WIDE_SPREAD_THRESHOLD_USD (0.10).
+    # Polymarket UI substitutes last-trade price for midpoint above this threshold.
+
+    depth_at_best_ask: int = 0
+    # Shares available at best ask from orderbook_depth_jsonb["asks"][0]["size"].
+    # Parsed as int (shares, rounded down). 0 = one-sided book or unavailable.
+
     def __post_init__(self) -> None:
         if not self.snapshot_id:
             raise ValueError("snapshot_id is required")
@@ -151,6 +164,9 @@ class ExecutableMarketSnapshotV2:
                 object.__setattr__(self, name, _as_utc(value, field_name=name))
         if deadline < captured:
             raise ValueError("freshness_deadline must be >= captured_at")
+        # PR 2 microstructure field validators
+        if self.depth_at_best_ask < 0:
+            raise ValueError("depth_at_best_ask must be >= 0")
 
     @property
     def is_fresh(self) -> bool:
