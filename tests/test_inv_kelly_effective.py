@@ -48,20 +48,32 @@ def _make_context(
     )
 
 
-# ── R-EE.1: live-path warning on missing context ──────────────────────────────
+# ── R-EE.1: live-path raise + non-live warning on missing context ─────────────
 
-def test_missing_context_logs_warning_on_live_path(caplog):
-    """INV-kelly-effective: _size_at_execution_price_boundary logs WARNING when
-    effective_context=None on a live path.  No raise — fail-warn not fail-hard
-    (per SCAFFOLD §3 and critic Finding #8 pattern: enforce at boundary, degrade
-    gracefully, raise only when wide_spread is explicitly True).
+def test_missing_context_raises_on_live_path():
+    """INV-kelly-effective (A1 fixup): _size_at_execution_price_boundary raises
+    MissingEffectiveContextError when effective_context=None on a live path.
 
-    get_mode() always returns "live" (src/config.py:44), so no patching is needed;
-    we just call the function and confirm the warning fires.
+    get_mode() returns "live" by default in the test environment; no patching
+    needed for the raise-in-live branch.
     """
     from src.engine.evaluator import _size_at_execution_price_boundary
 
-    # Call with effective_context=None — the function warns but does not raise
+    with pytest.raises(MissingEffectiveContextError, match="INV-kelly-effective"):
+        _size_at_execution_price_boundary(
+            p_posterior=0.60,
+            entry_price=0.50,
+            fee_rate=0.02,
+            sizing_bankroll=1000.0,
+            kelly_multiplier=0.5,
+            effective_context=None,
+        )
+
+
+def test_allow_missing_context_bypasses_raise_on_live_path(caplog):
+    """allow_missing_context=True (pre-snapshot path) warns but does not raise on live."""
+    from src.engine.evaluator import _size_at_execution_price_boundary
+
     with caplog.at_level(logging.WARNING, logger="src.engine.evaluator"):
         result = _size_at_execution_price_boundary(
             p_posterior=0.60,
@@ -70,7 +82,29 @@ def test_missing_context_logs_warning_on_live_path(caplog):
             sizing_bankroll=1000.0,
             kelly_multiplier=0.5,
             effective_context=None,
+            allow_missing_context=True,
         )
+    assert result > 0.0
+    assert any("INV-kelly-effective" in r.message for r in caplog.records)
+
+
+def test_missing_context_logs_warning_on_non_live_path(caplog):
+    """INV-kelly-effective: _size_at_execution_price_boundary logs WARNING (not
+    raise) when effective_context=None on a non-live path (paper/replay/backtest).
+    """
+    from unittest.mock import patch
+    from src.engine.evaluator import _size_at_execution_price_boundary
+
+    with patch("src.config.get_mode", return_value="paper"):
+        with caplog.at_level(logging.WARNING, logger="src.engine.evaluator"):
+            result = _size_at_execution_price_boundary(
+                p_posterior=0.60,
+                entry_price=0.50,
+                fee_rate=0.02,
+                sizing_bankroll=1000.0,
+                kelly_multiplier=0.5,
+                effective_context=None,
+            )
     # Result is positive (graceful degrade — no haircut)
     assert result > 0.0
     # Warning must appear
@@ -80,16 +114,17 @@ def test_missing_context_logs_warning_on_live_path(caplog):
 
 
 def test_effective_context_provided_applies_haircut():
-    """When effective_context is wide+shallow, haircut reduces size vs no context."""
+    """When effective_context is wide+shallow, haircut reduces size vs tight+deep."""
     from src.engine.evaluator import _size_at_execution_price_boundary
 
+    # Baseline: TIGHT+DEEP context → haircut=1.0 (no reduction)
     baseline = _size_at_execution_price_boundary(
         p_posterior=0.60,
         entry_price=0.50,
         fee_rate=0.02,
         sizing_bankroll=1000.0,
         kelly_multiplier=0.5,
-        effective_context=None,
+        effective_context=_make_context(spread_usd="0.02", depth=500, order_type="FOK"),
     )
     # WIDE+SHALLOW FOK haircut = 0.30
     ctx = _make_context(spread_usd="0.12", depth=10, order_type="FOK")
@@ -111,17 +146,30 @@ def test_effective_context_provided_applies_haircut():
 # ── R-EE.2: AST audit — all call sites pass effective_context keyword ─────────
 
 def test_ast_audit_all_kelly_callers_pass_effective_context():
-    """AST-scan src/engine/ for _size_at_execution_price_boundary call sites;
-    assert every call passes effective_context as an explicit keyword argument.
+    """AST-scan src/ (entire source tree) for _size_at_execution_price_boundary
+    call sites; assert every call passes effective_context as an explicit keyword.
 
-    This is a structural antibody: adding a new call site without the keyword
-    is a compile-time miss, not a runtime miss.
+    A2 fixup: scope widened from src/engine/ to src/ so call sites added in
+    src/execution/, src/strategy/, src/state/, or elsewhere are caught.
+
+    ALLOW_LIST: files that intentionally omit effective_context (with documented
+    reasons).  Each entry must include a comment justifying the exemption.
     """
-    src_root = Path(__file__).parent.parent / "src" / "engine"
+    src_root = Path(__file__).parent.parent / "src"
+    # Relative to repo root (src/...) to match the path format in error messages.
+    repo_root = Path(__file__).parent.parent
+    ALLOW_LIST = {
+        # K2 backtest replay uses raw kelly_size (not _size_at_execution_price_boundary)
+        # — listed for completeness; no actual call site.
+        "src/backtest/executable_ev_replay.py",
+    }
     target_fn = "_size_at_execution_price_boundary"
 
     missing = []
     for py_file in src_root.rglob("*.py"):
+        rel = str(py_file.relative_to(repo_root))
+        if rel in ALLOW_LIST:
+            continue
         try:
             tree = ast.parse(py_file.read_text())
         except SyntaxError:
@@ -141,7 +189,7 @@ def test_ast_audit_all_kelly_callers_pass_effective_context():
             # Check for effective_context keyword
             kw_names = {kw.arg for kw in node.keywords}
             if "effective_context" not in kw_names:
-                missing.append(f"{py_file.relative_to(py_file.parent.parent.parent)}:{node.lineno}")
+                missing.append(f"{rel}:{node.lineno}")
 
     assert not missing, (
         f"Call sites missing effective_context keyword: {missing}\n"

@@ -27,6 +27,9 @@ OutcomeLabel = Literal["YES", "NO"]
 FRESHNESS_WINDOW_DEFAULT = timedelta(seconds=30)
 
 # PR 2: Polymarket UI displays last-trade price as midpoint when spread >= this.
+# $0.10 is community-verified behavior (rocknblock.io analysis + Polymarket
+# Whitepaper); no official docs.polymarket.com/trading URL carries the exact
+# cutoff.  Do not add an unverified URL here.
 WIDE_SPREAD_THRESHOLD_USD = Decimal("0.10")
 
 
@@ -193,6 +196,12 @@ class ExecutableMarketSnapshotV2:
         The raw CLOB orderbook hash proves depth payload lineage. Corrected
         execution identity also needs token map, fee metadata, tick/min-order,
         neg-risk, tradability flags, selected side, and timing fields.
+
+        PR 2 microstructure fields (wide_spread_display_substitution,
+        depth_at_best_ask) are intentionally excluded from this hash: both are
+        deterministic functions of the raw orderbook payload (already captured
+        in raw_orderbook_hash above).  Including them would break hash stability
+        across schema bumps without adding any new entropy.
         """
 
         return _sha256_json(

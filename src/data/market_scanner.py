@@ -1910,6 +1910,8 @@ def capture_executable_market_snapshot(
     # repricing.
     _utc_datetime(captured_at, field_name="captured_at")
     captured = datetime.now(timezone.utc)
+    # PR 2: cache spread computation to avoid calling _compute_spread twice.
+    _spread_usd = _compute_spread(raw_orderbook, top_bid, top_ask)
     snapshot = ExecutableMarketSnapshotV2(
         snapshot_id=_snapshot_id(
             condition_id=condition_id,
@@ -1951,10 +1953,9 @@ def capture_executable_market_snapshot(
         authority_tier="CLOB",
         captured_at=captured,
         freshness_deadline=captured + FRESHNESS_WINDOW_DEFAULT,
-        # PR 2 microstructure transparency fields
+        # PR 2 microstructure transparency fields (_spread_usd cached above)
         wide_spread_display_substitution=bool(
-            _compute_spread(raw_orderbook, top_bid, top_ask) is not None
-            and _compute_spread(raw_orderbook, top_bid, top_ask) >= WIDE_SPREAD_THRESHOLD_USD
+            _spread_usd is not None and _spread_usd >= WIDE_SPREAD_THRESHOLD_USD
         ),
         depth_at_best_ask=_depth_at_best_ask(raw_orderbook),
     )

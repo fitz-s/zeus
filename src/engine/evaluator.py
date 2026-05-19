@@ -793,6 +793,7 @@ def _size_at_execution_price_boundary(
     sizing_bankroll: float,
     kelly_multiplier: float,
     effective_context: EffectiveKellyContext | None = None,
+    allow_missing_context: bool = False,
 ) -> float:
     """Size a trade at the evaluator→Kelly boundary using typed entry cost.
 
@@ -804,9 +805,13 @@ def _size_at_execution_price_boundary(
 
     PR 7 — INV-kelly-effective: effective_context provides a 5th multiplicative
     haircut factor applied AFTER the existing 4-multiplier chain.  When
-    effective_context is None on a live path with wide spread, raises
-    MissingEffectiveContextError (fail-closed).  Backtest / replay paths pass
-    None with graceful degrade (no haircut, WARNING logged).
+    effective_context is None on a live path, raises MissingEffectiveContextError
+    (fail-closed) UNLESS allow_missing_context=True is explicitly passed.  The
+    sole authorised allow_missing_context=True site is the evaluate_candidate
+    inner loop (evaluator.py:~3707) — a pre-snapshot provisional sizing path
+    where context is not yet in scope; final haircut is applied downstream at
+    cycle_runtime W2/W3/W4.  Non-live paths (replay/backtest) pass None with
+    graceful degrade (no haircut, WARNING logged).
     """
     # PR 7: apply microstructure haircut to kelly_multiplier before sizing.
     effective_kelly_multiplier = kelly_multiplier
@@ -814,14 +819,19 @@ def _size_at_execution_price_boundary(
         effective_kelly_multiplier = kelly_multiplier * effective_context.haircut()
     else:
         from src.config import get_mode as _get_mode
-        if _get_mode() == "live":
-            # Fail-closed on live paths: log warning; no raise unless wide spread
-            # is explicitly signaled.  Raise only when caller knows spread is wide
-            # (i.e., when context was available but not passed).
-            logger.warning(
+        if _get_mode() == "live" and not allow_missing_context:
+            # Fail-closed on live: raise so any caller that forgets context
+            # surfaces immediately rather than silently sizing without haircut.
+            raise MissingEffectiveContextError(
                 "INV-kelly-effective: _size_at_execution_price_boundary called without "
-                "effective_context on live path; degrading gracefully (no haircut)"
+                "effective_context on live path; failing closed."
             )
+        _mode = _get_mode()
+        logger.warning(
+            "INV-kelly-effective: _size_at_execution_price_boundary called without "
+            "effective_context on %s path; degrading gracefully (no haircut)",
+            f"{_mode} (allow_missing_context=True)" if _mode == "live" else _mode,
+        )
 
     raw_entry_price = float(entry_price)
     ep = ExecutionPrice(
@@ -3701,6 +3711,8 @@ def evaluate_candidate(
             # different scope.  This evaluate_candidate loop does not carry the
             # ExecutableMarketSnapshotV2; microstructure haircut is applied at
             # cycle_runtime W2/W3/W4 where the snapshot IS in scope.
+            # allow_missing_context=True: sole authorised pre-snapshot path; see
+            # _size_at_execution_price_boundary docstring for invariant contract.
             size = _size_at_execution_price_boundary(
                 p_posterior=edge.p_posterior,
                 entry_price=edge.entry_price,
@@ -3708,6 +3720,7 @@ def evaluate_candidate(
                 sizing_bankroll=sizing_bankroll,
                 kelly_multiplier=km * risk_throttle,
                 effective_context=None,
+                allow_missing_context=True,
             )
         except ValueError as exc:
             decisions.append(EdgeDecision(

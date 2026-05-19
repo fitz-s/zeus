@@ -231,3 +231,108 @@ def test_snapshot_default_fields_are_safe():
     )
     assert snap.wide_spread_display_substitution is False
     assert snap.depth_at_best_ask == 0
+
+
+# ── A3: Migration upgrade-path test ──────────────────────────────────────────
+
+def test_pr2_migration_upgrade_path():
+    """A3 fixup: existing pre-PR-2 world.db (without new columns) → ALTER TABLE
+    ADD COLUMN succeeds and new columns are present + usable.
+
+    This exercises the real production deploy path: a world.db at the old
+    schema (without wide_spread_display_substitution + depth_at_best_ask) is
+    upgraded in-place by init_snapshot_schema's idempotent ALTER TABLE block.
+    """
+    from src.state.connection_pair import WorldConnection, DBIdentity
+
+    raw = sqlite3.connect(":memory:")
+    raw.row_factory = sqlite3.Row
+
+    # Manually create the pre-PR-2 schema — exact CREATE TABLE from
+    # src/state/snapshot_repo.py:32-79 but WITHOUT the two new columns.
+    raw.executescript("""
+        CREATE TABLE IF NOT EXISTS executable_market_snapshots (
+          snapshot_id TEXT PRIMARY KEY,
+          gamma_market_id TEXT NOT NULL,
+          event_id TEXT NOT NULL,
+          event_slug TEXT,
+          condition_id TEXT NOT NULL,
+          question_id TEXT NOT NULL,
+          yes_token_id TEXT NOT NULL,
+          no_token_id TEXT NOT NULL,
+          selected_outcome_token_id TEXT,
+          outcome_label TEXT CHECK (outcome_label IN ('YES','NO') OR outcome_label IS NULL),
+          enable_orderbook INTEGER NOT NULL CHECK (enable_orderbook IN (0,1)),
+          active INTEGER NOT NULL CHECK (active IN (0,1)),
+          closed INTEGER NOT NULL CHECK (closed IN (0,1)),
+          accepting_orders INTEGER CHECK (accepting_orders IN (0,1) OR accepting_orders IS NULL),
+          market_start_at TEXT,
+          market_end_at TEXT,
+          market_close_at TEXT,
+          sports_start_at TEXT,
+          min_tick_size TEXT NOT NULL,
+          min_order_size TEXT NOT NULL,
+          fee_details_json TEXT NOT NULL,
+          token_map_json TEXT NOT NULL,
+          rfqe INTEGER CHECK (rfqe IN (0,1) OR rfqe IS NULL),
+          neg_risk INTEGER NOT NULL CHECK (neg_risk IN (0,1)),
+          orderbook_top_bid TEXT NOT NULL,
+          orderbook_top_ask TEXT NOT NULL,
+          orderbook_depth_json TEXT NOT NULL,
+          raw_gamma_payload_hash TEXT NOT NULL,
+          raw_clob_market_info_hash TEXT NOT NULL,
+          raw_orderbook_hash TEXT NOT NULL,
+          authority_tier TEXT NOT NULL CHECK (authority_tier IN ('GAMMA','DATA','CLOB','CHAIN')),
+          captured_at TEXT NOT NULL,
+          freshness_deadline TEXT NOT NULL,
+          UNIQUE (snapshot_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_snapshots_condition_captured
+          ON executable_market_snapshots (condition_id, captured_at DESC);
+        CREATE TRIGGER IF NOT EXISTS no_update_executable_market_snapshots
+        BEFORE UPDATE ON executable_market_snapshots
+        BEGIN SELECT RAISE(ABORT, 'executable_market_snapshots is APPEND-ONLY (NC-NEW-B)'); END;
+        CREATE TRIGGER IF NOT EXISTS no_delete_executable_market_snapshots
+        BEFORE DELETE ON executable_market_snapshots
+        BEGIN SELECT RAISE(ABORT, 'executable_market_snapshots is APPEND-ONLY (NC-NEW-B)'); END;
+    """)
+
+    # Verify pre-migration state: new columns absent
+    pre_cols = {row[1] for row in raw.execute(
+        "PRAGMA table_info(executable_market_snapshots)"
+    ).fetchall()}
+    assert "wide_spread_display_substitution" not in pre_cols, (
+        "Pre-migration setup error: column should not exist yet"
+    )
+    assert "depth_at_best_ask" not in pre_cols, (
+        "Pre-migration setup error: column should not exist yet"
+    )
+
+    # Run init_snapshot_schema — this is what deploy executes on an existing DB.
+    conn = WorldConnection.wrap(raw)
+    init_snapshot_schema(conn)
+
+    # Verify new columns now exist
+    post_cols = {row[1] for row in raw.execute(
+        "PRAGMA table_info(executable_market_snapshots)"
+    ).fetchall()}
+    assert "wide_spread_display_substitution" in post_cols, (
+        f"Migration failed: wide_spread_display_substitution not in schema; cols={post_cols}"
+    )
+    assert "depth_at_best_ask" in post_cols, (
+        f"Migration failed: depth_at_best_ask not in schema; cols={post_cols}"
+    )
+
+    # Roundtrip: insert a snapshot via the production writer, read it back
+    snap = _make_snapshot(
+        snapshot_id="snap-migration-test",
+        wide_spread=True,
+        depth=42,
+    )
+    insert_snapshot(conn, snap)
+    loaded = get_snapshot(conn, "snap-migration-test")
+    assert loaded is not None, "Snapshot not found after migration + insert"
+    assert loaded.wide_spread_display_substitution is True
+    assert loaded.depth_at_best_ask == 42
+
+    raw.close()

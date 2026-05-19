@@ -13,6 +13,7 @@ Covers:
 
 import pytest
 import numpy as np
+from decimal import Decimal
 
 from src.contracts.alpha_decision import AlphaDecision
 from src.contracts.execution_price import (
@@ -20,6 +21,18 @@ from src.contracts.execution_price import (
     ExecutionPriceContractError,
     polymarket_fee,
 )
+from src.contracts.effective_kelly_context import EffectiveKellyContext
+
+
+def _neutral_context() -> EffectiveKellyContext:
+    """TIGHT/DEEP context with haircut=1.0 — neutral for tests that don't
+    exercise microstructure haircut logic."""
+    return EffectiveKellyContext(
+        spread_usd=Decimal("0.02"),
+        depth_at_best_ask=500,
+        order_type="FOK",
+        fee_erased=False,
+    )
 from src.strategy.market_analysis_family_scan import FullFamilyHypothesis
 
 
@@ -208,6 +221,7 @@ class TestEvaluatorWiring:
             fee_rate=0.05,
             sizing_bankroll=1000.0,
             kelly_multiplier=0.25,
+            effective_context=_neutral_context(),
         )
         # Must equal the fee-adjusted size (not the larger bare-float size)
         from src.contracts.execution_price import ExecutionPrice
@@ -525,10 +539,12 @@ class TestEvaluatorWiring:
         size_no_fee = _size_at_execution_price_boundary(
             p_posterior=p_posterior, entry_price=bare_entry,
             fee_rate=0.0, sizing_bankroll=1000.0, kelly_multiplier=0.25,
+            effective_context=_neutral_context(),
         )
         size_with_fee = _size_at_execution_price_boundary(
             p_posterior=p_posterior, entry_price=bare_entry,
             fee_rate=0.05, sizing_bankroll=1000.0, kelly_multiplier=0.25,
+            effective_context=_neutral_context(),
         )
 
         assert size_with_fee < size_no_fee, "Fee-adjusted entry price must produce smaller position size"
