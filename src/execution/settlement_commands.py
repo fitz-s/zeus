@@ -523,18 +523,41 @@ def submit_redeem(
                 )
                 neg_risk_row = None
             if neg_risk_row is None:
-                # Fail-closed: topology.yaml:4193 law forbids guessing neg-risk
-                # facts. An absent snapshot row means the world DB has not
-                # recorded authority data for this market; proceeding with
-                # is_neg_risk=False would silently route negRisk markets to the
-                # standard CTF path and produce a zero-payout redeem (Karachi
-                # failure mode). Short-circuit: assign raw directly so the
-                # existing error-code router below transitions to
-                # REDEEM_OPERATOR_REQUIRED (REDEEM_NEGRISK_FACT_MISSING is in
-                # _OPERATOR_REVIEW_ERRORCODES). No adapter call is made.
+                # Snapshot miss — try live Gamma authority fallback before
+                # failing closed. The topology law (yaml:4193) forbids GUESSING
+                # neg-risk facts; the public Gamma CLOB endpoint IS the canonical
+                # authority for this fact (it is what every other reader in this
+                # module already consults via _lookup_market_neg_risk_authoritative
+                # Tier 3). The snapshot table is a populated CACHE of that
+                # authority, not a separate source of truth — when the cache
+                # row is absent (legacy positions entered before the snapshot
+                # cycle existed; world DB never re-seeded after schema migration),
+                # consulting the live authority is structurally consistent.
+                #
+                # Karachi failure mode (2026-05-19): in-flight redeem positions
+                # 7557a029 + e914a28a + c8c220f5 were entered before the
+                # capture_executable_market_snapshot side-effect path existed;
+                # snapshot table held 0 rows; submitter could not advance and
+                # latched OPERATOR_REQUIRED until structural fix.
+                _gamma_row = _fetch_neg_risk_from_gamma_for_submitter(row["condition_id"])
+                if _gamma_row is not None:
+                    logger.info(
+                        "[REDEEM_NEGRISK_GAMMA_FALLBACK] command_id=%s condition_id=%s "
+                        "neg_risk=%s yes_token_id=%s no_token_id=%s",
+                        command_id,
+                        row["condition_id"],
+                        _gamma_row["neg_risk"],
+                        _gamma_row.get("yes_token_id"),
+                        _gamma_row.get("no_token_id"),
+                    )
+                    neg_risk_row = _gamma_row
+            if neg_risk_row is None:
+                # Both snapshot AND live Gamma exhausted — fail closed.
+                # No adapter call is made; existing error-code router below
+                # transitions to REDEEM_OPERATOR_REQUIRED.
                 logger.warning(
                     "[REDEEM_NEGRISK_FACT_MISSING] command_id=%s condition_id=%s "
-                    "action=operator_must_populate_world_snapshot",
+                    "action=operator_must_populate_world_snapshot snapshot_miss=1 gamma_miss=1",
                     command_id, row["condition_id"],
                 )
                 raw = {
@@ -542,6 +565,7 @@ def submit_redeem(
                     "errorCode": "REDEEM_NEGRISK_FACT_MISSING",
                     "errorMessage": (
                         f"no snapshot row in world.executable_market_snapshots "
+                        f"and live Gamma fallback also failed "
                         f"for condition_id={row['condition_id']!r}; "
                         "cannot determine neg_risk without authority data "
                         "(topology.yaml:4193)"
@@ -731,6 +755,72 @@ def submit_redeem(
     finally:
         if own_conn:
             conn.close()
+
+
+def _fetch_neg_risk_from_gamma_for_submitter(
+    condition_id: str,
+) -> Optional[dict[str, Any]]:
+    """Live Gamma authority fallback for the submitter's neg_risk + token IDs.
+
+    Returns a dict shaped like a `world.executable_market_snapshots` row:
+        {"neg_risk": bool, "yes_token_id": str | None, "no_token_id": str | None}
+
+    Or None on transient failure / malformed payload — caller falls back to
+    REDEEM_NEGRISK_FACT_MISSING fail-closed.
+
+    Topology law (yaml:4193) forbids GUESSING neg-risk facts. Gamma CLOB is the
+    canonical public authority (it is the same source consulted by
+    _lookup_market_neg_risk_authoritative Tier 3 and by the entry-side scanner).
+    The world snapshot table is a populated CACHE of this authority; consulting
+    the authority directly when the cache is missing is structurally consistent
+    with the no-guessing law — what is forbidden is defaulting to False or
+    using an unrelated heuristic.
+
+    2026-05-19 Karachi root cause: in-flight redeem positions entered before the
+    capture_executable_market_snapshot side-effect path existed had no cache
+    row and could not advance, latching OPERATOR_REQUIRED indefinitely. Adding
+    this live-authority fallback closes that gap.
+    """
+    import httpx
+
+    gamma_url = f"https://clob.polymarket.com/markets/{condition_id}"
+    try:
+        resp = httpx.get(gamma_url, timeout=5.0)
+        resp.raise_for_status()
+        payload = resp.json()
+    except Exception as exc:
+        logger.warning(
+            "[REDEEM_NEGRISK_GAMMA_FETCH_FAILED] condition_id=%s exc=%s",
+            condition_id,
+            exc,
+        )
+        return None
+
+    if "neg_risk" not in payload:
+        logger.warning(
+            "[REDEEM_NEGRISK_GAMMA_NO_FIELD] condition_id=%s response_keys=%s",
+            condition_id,
+            list(payload.keys())[:20],
+        )
+        return None
+
+    yes_token_id: Optional[str] = None
+    no_token_id: Optional[str] = None
+    for token in payload.get("tokens", []) or []:
+        outcome = str(token.get("outcome") or "").strip().lower()
+        token_id = token.get("token_id")
+        if not token_id:
+            continue
+        if outcome == "yes":
+            yes_token_id = str(token_id)
+        elif outcome == "no":
+            no_token_id = str(token_id)
+
+    return {
+        "neg_risk": bool(payload["neg_risk"]),
+        "yes_token_id": yes_token_id,
+        "no_token_id": no_token_id,
+    }
 
 
 def _lookup_market_neg_risk_authoritative(
