@@ -260,6 +260,14 @@ def _redeem_submitter_cycle() -> None:
             return
         conn = get_trade_connection(write_class="live")
         try:
+            from src.execution.settlement_commands import reseat_stub_deferred_rows_for_autonomous_retry
+            promoted = reseat_stub_deferred_rows_for_autonomous_retry(conn)
+            if promoted > 0:
+                conn.commit()
+                logger.info(
+                    "redeem_submitter: promoted %d stub-deferred rows to RETRYING",
+                    promoted,
+                )
             # Poll ALL submittable states (INTENT_CREATED + RETRYING).
             placeholders = ",".join("?" * len(_SUBMITTABLE_STATES))
             state_values = tuple(s.value for s in _SUBMITTABLE_STATES)
