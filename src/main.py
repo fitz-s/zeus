@@ -1040,60 +1040,88 @@ def _start_user_channel_ingestor_if_enabled() -> None:
 
     adapter = PolymarketClient()._ensure_v2_adapter()
 
-    # Source L2 API credentials from the adapter's SDK client, which derives them
-    # via create_or_derive_api_key().  This is the ONLY correct source of truth for
-    # L2 creds — the plist env vars (POLYMARKET_API_KEY etc.) may be stale or absent
-    # (operator directive 2026-05-01: on-chain derivation is the canonical source).
-    # WSAuth.from_env() is intentionally NOT used here for the live daemon path.
-    try:
-        sdk_client = adapter._sdk_client()
-        sdk_creds = sdk_client.creds
-        ws_auth = WSAuth(
-            api_key=sdk_creds.api_key,
-            secret=sdk_creds.api_secret,
-            passphrase=sdk_creds.api_passphrase,
-        )
-    except Exception as exc:
-        record_gap(f"user_channel_start_failed:creds_unavailable", subscription_state="AUTH_FAILED")
-        logger.error(
-            "M3 user-channel ingestor could not obtain L2 creds from adapter: %s; "
-            "daemon stays in reduce_only=True mode",
-            exc,
-        )
-        return
-
-    try:
-        _user_channel_ingestor = PolymarketUserChannelIngestor(adapter, condition_ids, auth=ws_auth)
-    except Exception as exc:
-        record_gap(f"user_channel_start_failed:{type(exc).__name__}", subscription_state="AUTH_FAILED")
-        raise
-
     _WS_RETRY_BASE_SECONDS = 5
     _WS_RETRY_MAX_SECONDS = 300  # cap at 5 minutes
 
+    # Boot-time transient failures from create_or_derive_api_key() (e.g., Polymarket
+    # /auth/api-key returning 400) used to latch AUTH_FAILED forever because the
+    # creds fetch lived outside the retry loop with a bare `return` on exception —
+    # no thread ever started, ws_gap_guard never received a SUBSCRIBED message,
+    # daemon stayed in reduce_only=True until the next SIGTERM.
+    #
+    # Structural fix: factor creds+ingestor construction into a helper that gets
+    # invoked (a) eagerly so a healthy boot constructs synchronously like before,
+    # and (b) again from inside the retry loop whenever the prior attempt failed
+    # or the start() coroutine exited. Either path independently advances the
+    # daemon — transient API failures no longer permanently latch the WS guard.
+    def _build_ingestor() -> "PolymarketUserChannelIngestor | None":
+        global _user_channel_ingestor
+        try:
+            sdk_client = adapter._sdk_client()
+            sdk_creds = sdk_client.creds
+            if sdk_creds is None:
+                raise RuntimeError(
+                    "adapter._sdk_client().creds is None "
+                    "(create_or_derive_api_key() failed; likely transient /auth/api-key error)"
+                )
+            ws_auth = WSAuth(
+                api_key=sdk_creds.api_key,
+                secret=sdk_creds.api_secret,
+                passphrase=sdk_creds.api_passphrase,
+            )
+            ingestor = PolymarketUserChannelIngestor(
+                adapter, condition_ids, auth=ws_auth
+            )
+            _user_channel_ingestor = ingestor
+            return ingestor
+        except Exception as exc:
+            gap_reason = f"user_channel_attempt_failed:{type(exc).__name__}"
+            record_gap(gap_reason, subscription_state="AUTH_FAILED")
+            logger.error(
+                "M3 user-channel ingestor build failed: %s; will retry inside daemon thread",
+                exc,
+                exc_info=True,
+            )
+            return None
+
+    # Eager best-effort construction (preserves the synchronous-build contract
+    # that callers and unit tests rely on when the boot environment is healthy).
+    _build_ingestor()
+
     def _runner() -> None:
+        global _user_channel_ingestor
         import asyncio
-        import math
+        import time as _time
 
         attempt = 0
         while True:
-            try:
-                asyncio.run(_user_channel_ingestor.start())
-                # start() returned cleanly — server closed the connection gracefully.
-                logger.warning("M3 user-channel ingestor exited cleanly; reconnecting")
-            except Exception as exc:
-                logger.error("M3 user-channel ingestor stopped: %s", exc, exc_info=True)
             attempt += 1
+            ingestor = _user_channel_ingestor or _build_ingestor()
+            if ingestor is not None:
+                try:
+                    asyncio.run(ingestor.start())
+                    logger.warning(
+                        "M3 user-channel ingestor exited cleanly; reconnecting"
+                    )
+                except Exception as exc:
+                    logger.error(
+                        "M3 user-channel ingestor attempt %d stopped: %s",
+                        attempt,
+                        exc,
+                        exc_info=True,
+                    )
+                # Force a fresh creds fetch on the next iteration — auth tokens may
+                # have expired and a stale ingestor would just fail-loop again.
+                _user_channel_ingestor = None
             backoff = min(
                 _WS_RETRY_BASE_SECONDS * (2 ** min(attempt - 1, 6)),
                 _WS_RETRY_MAX_SECONDS,
             )
             logger.info(
-                "M3 user-channel ingestor will reconnect in %.0fs (attempt %d)",
+                "M3 user-channel ingestor will retry in %.0fs (attempt %d)",
                 backoff,
                 attempt,
             )
-            import time as _time
             _time.sleep(backoff)
 
     _user_channel_thread = threading.Thread(
@@ -1103,7 +1131,8 @@ def _start_user_channel_ingestor_if_enabled() -> None:
     )
     _user_channel_thread.start()
     logger.info(
-        "M3 user-channel ingestor started for %d condition_ids (auto_derived=%s)",
+        "M3 user-channel ingestor thread launched for %d condition_ids "
+        "(auto_derived=%s); creds re-fetched per-attempt inside retry loop on failure",
         len(condition_ids),
         auto_derived,
     )
