@@ -827,7 +827,7 @@ def get_connection(
 # CI hook scripts/check_schema_version.py diffs the sqlite_master hash of
 # a fresh-init DB against tests/state/_schema_pinned_hash.txt and fails
 # the PR if SCHEMA_VERSION did not change in lockstep.
-SCHEMA_VERSION = 11  # 2026-05-19 PR2+7: executable_market_snapshots wide_spread_display_substitution + depth_at_best_ask columns
+SCHEMA_VERSION = 12  # 2026-05-19 PR3+PR6: DecisionSourceContext 24-field expansion + ensemble_snapshots_v2 alpha-proxy timing chain + settlement_commands anchor + wrap_unwrap chain-finality + clock_skew_probe
 
 
 def init_schema(
@@ -1888,8 +1888,21 @@ def init_schema(
         );
     """)
     # T1A: DDL single-source — delegate to schema owner to avoid duplication.
-    from src.execution.settlement_commands import SETTLEMENT_COMMAND_SCHEMA
+    from src.execution.settlement_commands import SETTLEMENT_COMMAND_SCHEMA, init_settlement_command_schema
     conn.executescript(SETTLEMENT_COMMAND_SCHEMA)
+    # PR 3+6 (2026-05-19): idempotent column migrations for settlement_commands.
+    init_settlement_command_schema(conn)
+
+    # PR 6 (2026-05-19): chain-finality split columns on wrap_unwrap_commands.
+    for _alter_sql in [
+        "ALTER TABLE wrap_unwrap_commands ADD COLUMN first_inclusion_block_time TEXT",
+        "ALTER TABLE wrap_unwrap_commands ADD COLUMN finality_confirmed_time TEXT",
+    ]:
+        try:
+            conn.execute(_alter_sql)
+        except Exception as _exc:
+            if "duplicate column" not in str(_exc).lower():
+                raise
 
     # task #200 (2026-05-10): executescript() resets the C-level busy handler.
     # Re-apply after the last executescript() so all subsequent conn.execute()
