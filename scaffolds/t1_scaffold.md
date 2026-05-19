@@ -1,25 +1,37 @@
 <!-- Created: 2026-05-19 -->
 <!-- Last reused or audited: 2026-05-19 -->
-<!-- Authority basis: PHASE_1_ULTRAPLAN.md §4 (Path D natural-key reframe, v2) -->
+<!-- Authority basis: PHASE_1_ULTRAPLAN.md §4 (Path D natural-key reframe, v3) -->
 
-# T1 SCAFFOLD v2 — decision_events instrumentation hardening (Path D)
+# T1 SCAFFOLD v3 — decision_events instrumentation hardening (Path D)
 
-**Status**: SCAFFOLD v2 (post-critic-v1 Path D reframe; awaiting critic round 2)
+**Status**: SCAFFOLD v3 (post-critic-round-2 natural-key simplification + writer-side hash)
 **Author**: sonnet executor, worktree `phase1-t1-decision-events-20260519`
 **Entry SHA**: origin/main = `f5f1da3a4b`
 
 ---
 
-## 1. Architectural reframe (Path D)
+## 1. Architectural reframe (Path D — v3)
 
 `decision_group_id` is a **derived hash**, not a materialised join key.  Treating
 it as a PK would create 4 drift points and break on hash version changes.
 
-**Path D**: the natural identifying tuple IS the join key.  Hash is audit-only.
+**Path D v3**: the natural identifying tuple IS the join key.  Hash is audit-only.
 
 ```
-DecisionNaturalKey = (market_id, condition_id, temperature_metric, target_date, observation_time)
+DecisionNaturalKey = (market_slug, temperature_metric, target_date, observation_time, decision_seq)
 ```
+
+v3 simplifications vs v2:
+- **PK is 5 components** (not 6) — `condition_id` DROPPED from PK.
+  `market_events_v2.condition_id` is NULLABLE for pre-discovery markets;
+  `market_slug` is the durable non-null identifier.
+- **Column renamed**: `market_id` → `market_slug`; `decision_group_id` → `decision_event_id`
+- **Hash namespace**: `deid_v1_` prefix (DISTINCT from calibration's `dgid_v1_`).
+  New function `decision_event_id_v1_hash()` in `src/contracts/decision_natural_key.py`.
+- **Option β (writer-side hash)**: writer Python computes hash, passes in INSERT.
+  Trigger backstop fires ONLY on NULL, setting sentinel `'deid_v1_BACKSTOP_NULL_WRITER_BYPASS'`.
+  No SQLite UDF binding required (resolves v2 ambiguity #1).
+- **Backfill**: DELETE-by-source THEN INSERT (NOT INSERT OR IGNORE — per critic SEV-2).
 
 See `PHASE_1_ULTRAPLAN.md §4.0` for full Path A/B/C/D comparison matrix.
 
@@ -36,24 +48,27 @@ independent read-only connections — no new ATTACH path.
 
 ---
 
-## 3. Schema (Path D — full outline)
+---
+
+## 3. Schema (Path D — v3 full outline)
 
 Full SQL in `scripts/migrate_decision_events_create_2026_05_19.py` (`_CREATE_TABLE`,
 `_CREATE_TRIGGER`, `_CREATE_INDICES`). Key structure:
 
 ```sql
-PRIMARY KEY (market_id, condition_id, temperature_metric,
-             target_date, observation_time, decision_seq)
+PRIMARY KEY (market_slug, temperature_metric, target_date, observation_time, decision_seq)
 ```
 
-`decision_group_id` — nullable on INSERT; populated by AFTER INSERT TRIGGER.
+`condition_id` — nullable enrichment column (NOT in PK). `market_slug` is canonical.
+`decision_event_id` — nullable on INSERT; writer computes via `decision_event_id_v1_hash()`;
+trigger backstop fires on NULL setting sentinel (see §4.2.2 / Option β).
 
 **CHECK constraints**: `temperature_metric IN ('high','low')` /
 `polymarket_end_anchor_source IN ('gamma_explicit','f1_12z_fallback')` /
 `schema_version IN (12,13)` / `source IN ('phase0_backfill','live_decision')`
 
-**3 indices**: `(market_id, target_date)` / `(strategy_key, decision_time)` /
-`(decision_group_id)` (audit lookups)
+**3 indices**: `(market_slug, target_date)` / `(strategy_key, decision_time)` /
+`(decision_event_id)` (audit lookups)
 
 ### 3.1 Column source attribution
 
@@ -63,15 +78,17 @@ PRIMARY KEY (market_id, condition_id, temperature_metric,
 | `clock_skew_estimate_ms_at_submit` | `settlement_commands` | trade |
 | `first_inclusion_block_time`, `finality_confirmed_time` | `wrap_unwrap_commands` | world |
 | `provider_reported_time` | Path F Optional — None if WU API | — |
+| `cycle_id`, `cycle_iteration` | cycle_runtime (live); NULL for backfill | — |
+| probability fields (`p_posterior`, `edge`, etc.) | live-only; NULL for backfill | — |
 
 ### 3.2 decision_seq derivation
 
-- **Backfill**: monotonic per natural-key tuple ordered by `decision_time` ASC, from 0
-- **Live writes**: `SELECT COALESCE(MAX(decision_seq),-1)+1` under `db_writer_lock(LIVE)` + SAVEPOINT, WHERE natural-key matches
+- **Backfill**: DELETE-by-source THEN monotonic seq per natural-key ordered by `decision_time` ASC, from 0
+- **Live writes**: `SELECT COALESCE(MAX(decision_seq),-1)+1` under `db_writer_lock(LIVE)`, WHERE natural-key matches
 
-### 3.3 NOT NULL classification
+### 3.3 NOT NULL classification (18 total — corrected from v2 §3.3)
 
-**Natural-key** (6): `market_id`, `condition_id`, `temperature_metric`, `target_date`,
+**Natural-key** (4 + seq): `market_slug`, `temperature_metric`, `target_date`,
 `observation_time`, `decision_seq`
 
 **Identity/time** (5): `decision_time`, `outcome`, `side`, `strategy_key`, `observation_available_at`
@@ -82,7 +99,7 @@ PRIMARY KEY (market_id, condition_id, temperature_metric,
 
 **Provenance** (2): `schema_version`, `source`
 
-**Total NOT NULL: 18** (ultraplan §4.2 says 17 — discrepancy flagged in §7 ambiguity #2)
+**Total NOT NULL: 18** (ultraplan §4.2 v3 corrected; `decision_event_id` effective-non-null post-INSERT via trigger)
 
 ---
 
