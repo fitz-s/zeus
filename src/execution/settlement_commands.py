@@ -461,7 +461,117 @@ def submit_redeem(
                 raw_winning_index_set,
                 parsed_index_sets,
             )
-            raw = adapter.redeem(row["condition_id"], index_sets=parsed_index_sets)
+
+            # negRisk routing: look up neg_risk flag + token IDs from world
+            # snapshot table. get_trade_connection_with_world() ATTACHes the
+            # world schema so the query MUST use the qualified name
+            # world.executable_market_snapshots. The main connection is
+            # zeus_trades.db; unqualified reads would hit any legacy ghost row
+            # in the trade DB, not the authoritative world snapshot.
+            # (Thread 1 fix: qualify table as world.executable_market_snapshots)
+            #
+            # Topology law (topology.yaml:4193): neg-risk facts may not be
+            # guessed; a missing snapshot row FAILS CLOSED by assigning raw to
+            # REDEEM_NEGRISK_FACT_MISSING and skipping the adapter call.
+            # (Thread 3 fix: fail-closed instead of defaulting is_neg_risk=False)
+            amount_per_slot: int | None = None
+            try:
+                neg_risk_row = conn.execute(
+                    """
+                    SELECT neg_risk, yes_token_id, no_token_id
+                      FROM world.executable_market_snapshots
+                     WHERE condition_id = ?
+                     ORDER BY captured_at DESC
+                     LIMIT 1
+                    """,
+                    (row["condition_id"],),
+                ).fetchone()
+            except Exception as snap_exc:
+                logger.warning(
+                    "[REDEEM_NEGRISK_SNAPSHOT_LOOKUP_FAILED] command_id=%s exc=%s",
+                    command_id, snap_exc,
+                )
+                neg_risk_row = None
+            if neg_risk_row is None:
+                # Fail-closed: topology.yaml:4193 law forbids guessing neg-risk
+                # facts. An absent snapshot row means the world DB has not
+                # recorded authority data for this market; proceeding with
+                # is_neg_risk=False would silently route negRisk markets to the
+                # standard CTF path and produce a zero-payout redeem (Karachi
+                # failure mode). Short-circuit: assign raw directly so the
+                # existing error-code router below transitions to
+                # REDEEM_OPERATOR_REQUIRED (REDEEM_NEGRISK_FACT_MISSING is in
+                # _OPERATOR_REVIEW_ERRORCODES). No adapter call is made.
+                logger.warning(
+                    "[REDEEM_NEGRISK_FACT_MISSING] command_id=%s condition_id=%s "
+                    "action=operator_must_populate_world_snapshot",
+                    command_id, row["condition_id"],
+                )
+                raw = {
+                    "success": False,
+                    "errorCode": "REDEEM_NEGRISK_FACT_MISSING",
+                    "errorMessage": (
+                        f"no snapshot row in world.executable_market_snapshots "
+                        f"for condition_id={row['condition_id']!r}; "
+                        "cannot determine neg_risk without authority data "
+                        "(topology.yaml:4193)"
+                    ),
+                    "condition_id": row["condition_id"],
+                }
+            else:
+                # neg_risk_row is present: extract neg_risk flag + token IDs.
+                _nr_val = (
+                    neg_risk_row["neg_risk"]
+                    if hasattr(neg_risk_row, "keys")
+                    else neg_risk_row[0]
+                )
+                is_neg_risk: bool = bool(_nr_val)
+                if is_neg_risk and parsed_index_sets and row["token_amounts_json"]:
+                    try:
+                        token_amounts: dict = json.loads(row["token_amounts_json"])
+                        # winning_index_set=[2]=YES uses yes_token_id; [1]=NO uses no_token_id
+                        winning_slot = parsed_index_sets[0]
+                        _yes = (
+                            neg_risk_row["yes_token_id"]
+                            if hasattr(neg_risk_row, "keys")
+                            else neg_risk_row[1]
+                        )
+                        _no = (
+                            neg_risk_row["no_token_id"]
+                            if hasattr(neg_risk_row, "keys")
+                            else neg_risk_row[2]
+                        )
+                        winning_token_id: str | None
+                        if winning_slot == 2:
+                            winning_token_id = str(_yes) if _yes else None
+                        elif winning_slot == 1:
+                            winning_token_id = str(_no) if _no else None
+                        else:
+                            winning_token_id = None
+                        if winning_token_id and winning_token_id in token_amounts:
+                            amount_per_slot = round(
+                                float(token_amounts[winning_token_id]) * 1_000_000
+                            )
+                        elif len(token_amounts) == 1:
+                            # Single-key map: use the only entry (binary market)
+                            amount_per_slot = round(
+                                float(next(iter(token_amounts.values()))) * 1_000_000
+                            )
+                    except Exception as amt_exc:
+                        logger.warning(
+                            "[REDEEM_NEGRISK_AMOUNT_PARSE_FAILED] command_id=%s exc=%s",
+                            command_id, amt_exc,
+                        )
+                logger.debug(
+                    "[REDEEM_NEGRISK_CTX] command_id=%s is_neg_risk=%s amount_per_slot=%s",
+                    command_id, is_neg_risk, amount_per_slot,
+                )
+                raw = adapter.redeem(
+                    row["condition_id"],
+                    index_sets=parsed_index_sets,
+                    neg_risk=is_neg_risk,
+                    amount_per_slot=amount_per_slot,
+                )
         except Exception as exc:  # preserve durable SUBMITTED before retry classification
             error_payload = {"exception_type": type(exc).__name__, "message": str(exc)}
             with _savepoint(conn):
@@ -510,6 +620,14 @@ def submit_redeem(
                 "REDEEM_SAFE_VERSION_UNSUPPORTED",
                 "REDEEM_SAFE_OWNER_MISMATCH",
                 "REDEEM_EOA_MATIC_INSUFFICIENT",
+                # negRisk adapter requires token balance (in micro-units).
+                # Missing data → operator must inspect token_amounts_json /
+                # executable_market_snapshots before retry. Not terminal.
+                "REDEEM_NEGRISK_AMOUNT_MISSING",
+                # Missing world snapshot row for condition_id: topology.yaml:4193
+                # forbids guessing neg-risk facts; operator must populate
+                # world.executable_market_snapshots before retry.
+                "REDEEM_NEGRISK_FACT_MISSING",
                 # Design intent: dry-run routes to OPERATOR_REQUIRED so the
                 # operator reviews the Tenderly trace before clearing to live
                 # broadcast.  This is the intended smoke-gate for first-run

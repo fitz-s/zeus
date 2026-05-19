@@ -71,7 +71,7 @@ class _StubDeferredAdapter:
     def __init__(self):
         self.calls = []
 
-    def redeem(self, condition_id: str, *, index_sets=None):
+    def redeem(self, condition_id: str, *, index_sets=None, **_ignored):
         # PR-I.5.c: kw-only index_sets — mock ignores; stub-deferred is the contract under test.
         self.calls.append(condition_id)
         return {
@@ -87,7 +87,7 @@ class _UnexpectedErrorAdapter:
         self.error_code = error_code
         self.calls = []
 
-    def redeem(self, condition_id: str, *, index_sets=None):
+    def redeem(self, condition_id: str, *, index_sets=None, **_ignored):
         # PR-I.5.c: kw-only index_sets accepted but unused; this mock simulates
         # arbitrary errorCodes that must route to REDEEM_FAILED (not OPERATOR_REQUIRED).
         self.calls.append(condition_id)

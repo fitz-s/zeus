@@ -425,7 +425,7 @@ def test_settlement_commands_parses_winning_index_set_and_passes_kw(monkeypatch,
     captured_kwargs: dict = {}
 
     class _CapturingAdapter:
-        def redeem(self, condition_id, *, index_sets=None):
+        def redeem(self, condition_id, *, index_sets=None, **_ignored):
             captured_kwargs["condition_id"] = condition_id
             captured_kwargs["index_sets"] = index_sets
             return {"success": True, "tx_hash": "0xtest"}
@@ -483,7 +483,7 @@ def test_submit_redeem_routes_index_sets_missing_to_operator_required(monkeypatc
     )
 
     class _MissingIndexSetsAdapter:
-        def redeem(self, condition_id, *, index_sets=None):
+        def redeem(self, condition_id, *, index_sets=None, **_ignored):
             return {
                 "success": False,
                 "errorCode": "REDEEM_INDEX_SETS_MISSING",
@@ -547,7 +547,7 @@ def test_winning_index_set_json_non_list_rejected(monkeypatch, tmp_path):
     captured_index_sets: list = []
 
     class _RecordingAdapter:
-        def redeem(self, condition_id, *, index_sets=None):
+        def redeem(self, condition_id, *, index_sets=None, **_ignored):
             captured_index_sets.append(index_sets)
             return {
                 "success": False,
@@ -885,7 +885,7 @@ def test_operator_review_errorcodes_set_equals_adapter_enumerated_codes(monkeypa
         _code = code  # capture for closure
 
         class _SafeCodeAdapter:
-            def redeem(self, cid, *, index_sets=None):
+            def redeem(self, cid, *, index_sets=None, **_ignored):
                 return {"success": False, "errorCode": _code, "errorMessage": "test", "condition_id": cid}
 
         submit_redeem(command_id, _SafeCodeAdapter(), object(), conn=conn)
