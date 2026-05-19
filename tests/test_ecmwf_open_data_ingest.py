@@ -8,7 +8,7 @@
 #   Antibody 3: empty DB → fetch raises ValueError (fails closed, no silent empty result)
 #   Antibody 4: registry wiring — forecast_source_registry has ingest_class=ECMWFOpenDataIngest
 #   Antibody 5: fetch_ensemble guard cleared — no SourceNotEnabled for entry_primary role
-# Reuse: standalone pytest; uses in-memory sqlite mock; no live DB required
+# Reuse: standalone pytest; uses file-backed temp SQLite (via tmp_path); no live DB required
 """Relationship antibody: ECMWFOpenDataIngest DB rows → trading-side ensemble evidence."""
 
 from __future__ import annotations
@@ -89,7 +89,7 @@ def fake_city():
 
 @pytest.fixture
 def staged_forecasts_db(tmp_path: Path, monkeypatch):
-    """In-memory DB with VERIFIED ecmwf_open_data high+low rows for Amsterdam."""
+    """File-backed temp SQLite DB (tmp_path) with VERIFIED ecmwf_open_data high+low rows for Amsterdam."""
     db_path = tmp_path / "zeus-forecasts.db"
     conn = sqlite3.connect(str(db_path))
     conn.executescript(_CREATE_TABLE_SQL)
@@ -137,7 +137,7 @@ def staged_forecasts_db(tmp_path: Path, monkeypatch):
 
 @pytest.fixture
 def empty_forecasts_db(tmp_path: Path, monkeypatch):
-    """In-memory DB with the table but zero rows."""
+    """File-backed temp SQLite DB (tmp_path) with the table but zero rows."""
     db_path = tmp_path / "empty-forecasts.db"
     conn = sqlite3.connect(str(db_path))
     conn.executescript(_CREATE_TABLE_SQL)

@@ -159,7 +159,10 @@ def _fetch_db_payload(city: "City", fetch_time: datetime) -> Optional[ForecastBu
     ``EnsembleSignal.member_maxes_for_target_date()`` returns daily HIGH and
     ``member_mins_for_target_date()`` returns daily LOW.
 
-    Returns None when no qualifying rows are found (caller skips the candidate).
+    Returns None when no qualifying rows are found; ``ECMWFOpenDataIngest.fetch()``
+    raises ``ValueError`` on None (fails closed — no silent empty result).
+    Dates where only one metric is present are skipped (fail-closed per-date)
+    to prevent opposite-metric substitution (mis-provenance).
     """
     if fetch_time.tzinfo is None:
         fetch_time = fetch_time.replace(tzinfo=timezone.utc)
@@ -218,13 +221,21 @@ def _fetch_db_payload(city: "City", fetch_time: datetime) -> Optional[ForecastBu
     for date_str in all_dates:
         high_vec = high_by_date.get(date_str)
         low_vec = low_by_date.get(date_str)
-        if high_vec is None and low_vec is None:
+        if high_vec is None or low_vec is None:
+            # Fail closed: a date missing either metric cannot be reliably reconstructed.
+            # Substituting the opposite metric is mis-provenance.
+            _log.warning(
+                "ecmwf_open_data_ingest: city=%s target_date=%s missing metric=%s, "
+                "skipping date (fail-closed, no opposite-metric substitution)",
+                city.name,
+                date_str,
+                "high" if high_vec is None else "low",
+            )
             continue
         for hour in range(24):
             all_times.append(f"{date_str}T{hour:02d}:00:00+00:00")
             use_high = hour >= 12
-            chosen = (high_vec if use_high else low_vec) or low_vec or high_vec
-            assert chosen is not None
+            chosen = high_vec if use_high else low_vec
             all_member_rows.append(list(chosen))
 
     if not all_times:
