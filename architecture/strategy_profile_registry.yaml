@@ -195,6 +195,34 @@ shoulder_sell:
   min_settled_decisions: 30
   promotion_evidence_ref: null   # promote when shadow evidence is mature
 
+imminent_open_capture:
+  thesis: >
+    Re-opened or D+1 market capture: enters markets with 0-24h to settlement
+    that fall below opening_hunt's min_hours_to_resolution:24 threshold.
+    Targets Polymarket re-openings and next-day markets not yet covered by
+    city-local DAY0_CAPTURE gating. Edge source is ENS ensemble probability
+    vs market price; alpha window is narrow so sizing is conservative.
+    Approved operator urgency: Polymarket May 20-21 re-opens (2026-05-19).
+  live_status: live
+  allowed_market_phases: [pre_settlement_day, settlement_day]
+  allowed_discovery_modes: [imminent_open_capture]
+  cycle_axis_dispatch_mode: imminent_open_capture
+  allowed_directions: [buy_yes, buy_no]
+  allowed_bin_topology: [point, finite_range, open_shoulder]
+  metric_support:
+    high: live
+    low:  blocked   # LOW oracle bridge not yet shipped (PLAN.md §A3 D-3)
+  kelly_default_multiplier: 0.5
+  kelly_phase_overrides:
+    pre_trading: 0.0
+    pre_settlement_day: 0.5
+    settlement_day: 0.5
+    post_trading: 0.0
+    resolved: 0.0
+  min_shadow_decisions: 0
+  min_settled_decisions: 0
+  promotion_evidence_ref: null
+
 shoulder_buy:
   thesis: >
     Buy open-shoulder bins post-bias-correction. Theoretically

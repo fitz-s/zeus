@@ -414,6 +414,8 @@ def _classify_edge_source(mode: DiscoveryMode, edge) -> str:
         return "settlement_capture"
     if mode == DiscoveryMode.OPENING_HUNT:
         return "opening_inertia"
+    if mode == DiscoveryMode.IMMINENT_OPEN_CAPTURE:
+        return "imminent_open_capture"
     if edge.direction == "buy_no" and edge.bin.is_shoulder:
         return "shoulder_sell"
     if edge.direction == "buy_yes" and not edge.bin.is_shoulder:
@@ -437,6 +439,13 @@ MODE_PARAMS = {
     DiscoveryMode.OPENING_HUNT: {"max_hours_since_open": 24, "min_hours_to_resolution": 24},
     DiscoveryMode.UPDATE_REACTION: {"min_hours_since_open": 24, "min_hours_to_resolution": 6},
     DiscoveryMode.DAY0_CAPTURE: {"max_hours_to_resolution": 6},
+    # imminent_open_capture: captures D+1 / re-opened markets in the 0-24h window.
+    # Upper bound 24h keeps it strictly below opening_hunt's min_hours_to_resolution:24
+    # so the two cycles never compete for the same market.
+    # Does NOT use max_hours_to_resolution (that key triggers the city-local phase
+    # filter via filter_market_to_settlement_day, which would exclude exactly the
+    # markets this cycle is designed to capture).
+    DiscoveryMode.IMMINENT_OPEN_CAPTURE: {"imminent_window_hours": 24},
 }
 PENDING_FILL_STATUSES = {"CONFIRMED"}
 PENDING_CANCEL_STATUSES = {"CANCELLED", "CANCELED", "EXPIRED", "REJECTED"}
@@ -515,13 +524,15 @@ def run_cycle(mode: DiscoveryMode) -> dict:
 
     # S-4 fix (architect audit 2026-04-30, recovery 2026-05-01) — per-cycle
     # freshness gate. evaluate_freshness_mid_run is imported at module level so
-    # tests can monkeypatch it. Three branches per design §3.1:
+    # tests can monkeypatch it. Four branches per design §3.1 + imminent extension:
     #   FRESH    → fall through (normal cycle)
-    #   STALE w/ day0_capture_disabled + DiscoveryMode.DAY0_CAPTURE → short-circuit
+    #   STALE w/ day0_capture_disabled + DAY0_CAPTURE or IMMINENT_OPEN_CAPTURE → short-circuit
     #   STALE w/ ensemble_disabled + DiscoveryMode.OPENING_HUNT     → tag degraded_data, continue
     # The DAY0 short-circuit returns the summary BEFORE any IO so the trading stack
     # never touches stale upstream data. OPENING_HUNT continues with the flag set
     # so downstream entry decisions can be tagged in decision_log.
+    # IMMINENT_OPEN_CAPTURE is fail-closed like DAY0_CAPTURE: markets close within
+    # 24h so there is no time to recover from a bad trade on stale signals.
     try:
         _freshness_verdict = evaluate_freshness_mid_run(STATE_DIR)
     except Exception as exc:
@@ -534,7 +545,11 @@ def run_cycle(mode: DiscoveryMode) -> dict:
         # is constructed). Routed through helper for grep-symmetry per
         # critic R4 A5-L1.
         from src.engine.dispatch import settlement_day_dispatch_for_mode
-        if _freshness_verdict.day0_capture_disabled and settlement_day_dispatch_for_mode(mode):
+        _is_fail_closed_mode = (
+            settlement_day_dispatch_for_mode(mode)
+            or mode == DiscoveryMode.IMMINENT_OPEN_CAPTURE
+        )
+        if _freshness_verdict.day0_capture_disabled and _is_fail_closed_mode:
             summary["skipped"] = True
             summary["skip_reason"] = "cycle_skipped_freshness_degraded"
             summary["stale_sources"] = list(_freshness_verdict.stale_sources)

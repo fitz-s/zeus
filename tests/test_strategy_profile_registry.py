@@ -67,6 +67,7 @@ def test_all_six_strategies_are_registered():
         "shoulder_sell",
         "shoulder_buy",
         "center_sell",
+        "imminent_open_capture",  # added 2026-05-19: D+1 / re-opened market capture
     })
 
 
@@ -100,23 +101,27 @@ def test_kelly_default_for_unknown_key_is_zero():
 def test_live_safe_keys_match_pre_A4_LIVE_SAFE_STRATEGIES():
     """Pre-A4 LIVE_SAFE_STRATEGIES = {opening_inertia, center_buy,
     settlement_capture, shoulder_sell}. Boot-allowable = live OR shadow.
+    imminent_open_capture added 2026-05-19 (live status → included here).
     """
     assert sp.live_safe_keys() == frozenset({
         "opening_inertia",
         "center_buy",
         "settlement_capture",
         "shoulder_sell",
+        "imminent_open_capture",  # added 2026-05-19
     })
 
 
 def test_live_allowed_keys_match_pre_A4__LIVE_ALLOWED_STRATEGIES():
     """Pre-A4 _LIVE_ALLOWED_STRATEGIES = {settlement_capture, center_buy,
     opening_inertia}. Runtime-entry = live ONLY.
+    imminent_open_capture added 2026-05-19 (live status → included here).
     """
     assert sp.live_allowed_keys() == frozenset({
         "settlement_capture",
         "center_buy",
         "opening_inertia",
+        "imminent_open_capture",  # added 2026-05-19
     })
 
 

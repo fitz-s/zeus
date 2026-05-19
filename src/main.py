@@ -2084,6 +2084,16 @@ def main():
         next_run_time=_utc_run_time_after(_day0_first_delay_seconds(discovery)),
         max_instances=1, coalesce=True,
     )
+    # imminent_open_capture: fires every 5 min to catch re-opened or D+1 markets
+    # in the 0-24h window that fall below opening_hunt's min_hours_to_resolution:24
+    # threshold. Fail-closed on stale data (same freshness gate as day0_capture).
+    scheduler.add_job(
+        lambda: _run_mode(DiscoveryMode.IMMINENT_OPEN_CAPTURE), "interval",
+        minutes=discovery.get("imminent_open_capture_interval_min", 5),
+        id="imminent_open_capture",
+        next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS + 15.0),
+        max_instances=1, coalesce=True,
+    )
     scheduler.add_job(_harvester_cycle, "interval", hours=1, id="harvester")
     scheduler.add_job(_write_heartbeat, "interval", seconds=60, id="heartbeat",
                       max_instances=1, coalesce=True)
