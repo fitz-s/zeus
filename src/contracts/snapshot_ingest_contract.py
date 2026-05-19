@@ -122,9 +122,23 @@ def validate_snapshot_contract(payload: dict) -> SnapshotIngestDecision:
         return SnapshotIngestDecision(False, "MISSING_CAUSALITY_FIELD", False, "UNKNOWN")
 
     causality_status = causality_field.get("status", "UNKNOWN") if isinstance(causality_field, dict) else "UNKNOWN"
-    boundary_ambiguous = bool(
-        payload.get("boundary_policy", {}).get("boundary_ambiguous", False)
-    )
+    boundary_policy = payload.get("boundary_policy", {}) if isinstance(payload.get("boundary_policy"), dict) else {}
+    boundary_ambiguous = bool(boundary_policy.get("boundary_ambiguous", False))
+    # 2026-05-19: majority-threshold re-evaluation. The per-snapshot boundary_ambiguous
+    # flag in the payload was computed with the ANY-member rule (old Bug A). Re-derive
+    # from ambiguous_member_count when available so Law 1 honours the new majority rule.
+    # If ambiguous_member_count is absent (legacy rows), fall back to the stored flag.
+    _ambig_count = boundary_policy.get("ambiguous_member_count")
+    if _ambig_count is not None:
+        try:
+            _ambig_int = int(_ambig_count)
+            # Majority threshold: 26/51 ≈ 51%. Operator-tunable env var mirrors extractor.
+            import os as _os
+            _threshold_raw = _os.environ.get("AMBIGUITY_MAJORITY_THRESHOLD", "")
+            _threshold = int(_threshold_raw) if _threshold_raw.strip() else 26
+            boundary_ambiguous = _ambig_int >= _threshold
+        except (ValueError, TypeError):
+            pass  # keep flag value from payload
     issue_time = payload.get("issue_time_utc")
 
     training_allowed = True
@@ -136,6 +150,8 @@ def validate_snapshot_contract(payload: dict) -> SnapshotIngestDecision:
             causality_status = "RUNTIME_ONLY_FALLBACK"
 
     # Law 1 (low only): boundary-ambiguous snapshots must not enter calibration training.
+    # 2026-05-19: boundary_ambiguous now reflects majority threshold (≥26/51) not any-member.
+    # SYNTHESIS.md Addendum 2 §5. ambiguous_member_count persisted in payload for downstream audit.
     if spec.temperature_metric == "low" and boundary_ambiguous:
         training_allowed = False
         if causality_status == "OK":

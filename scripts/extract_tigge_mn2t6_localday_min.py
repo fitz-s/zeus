@@ -127,15 +127,22 @@ class BoundaryClassification:
     def boundary_ambiguous(self) -> bool:
         """True when boundary bucket can determine the local-day minimum.
 
-        MIN-specific rule: if boundary_min <= inner_min, the boundary zone
-        could be the true local-day minimum, introducing look-ahead leakage.
+        MIN-specific rule: if boundary_min < inner_min (strict), the boundary zone
+        is strictly colder than the inner window — genuine look-ahead leakage risk.
+        Ties (boundary_min == inner_min) are NOT flagged: the boundary bucket cannot
+        be strictly *lower* than the inner, so it adds no new information.
         Ambiguity also applies when there are no inner buckets (boundary-only coverage).
+
+        Bug fix 2026-05-19 (SYNTHESIS Addendum 2 §2 Bug B): changed <= to < (strict).
+        Non-strict ties were quarantining the snapshot when boundary_min happened to
+        equal inner_min — e.g. both members landing on the same isotherm — despite
+        providing zero look-ahead leakage signal.
         """
         if self.boundary_min is None:
             return False
         if self.inner_min is None:
             return True
-        return self.boundary_min <= self.inner_min
+        return self.boundary_min < self.inner_min
 
     @property
     def effective_min(self) -> float | None:
@@ -294,12 +301,25 @@ def build_low_snapshot_json(
             step_vals, day_start_utc, day_end_utc, issue_utc
         )
 
-    any_boundary_ambiguous = any(
-        c.boundary_ambiguous for c in member_classifications.values()
-    )
     ambiguous_member_count = sum(
         1 for c in member_classifications.values() if c.boundary_ambiguous
     )
+    # Bug fix 2026-05-19 (SYNTHESIS Addendum 2 §2 Bug A):
+    # Old rule: any(boundary_ambiguous) quarantined the whole 51-member snapshot when
+    # even 1 member fired — probabilistically near-certain to trigger.
+    # New rule: majority threshold (≥26/51 ≈ 51%) before quarantine.
+    # Empirical basis: ensemble_snapshots_v2 last-7-days shows ambiguous_member_count
+    # is continuously distributed 0-51; 26 (51% of 51-member ensemble) is the v1
+    # default. Operator-tunable via AMBIGUITY_MAJORITY_THRESHOLD env var.
+    # SYNTHESIS.md Addendum 2 §5 + §9.
+    _default_threshold = max(1, len(member_classifications) // 2 + 1)  # 26/51, 26/50 etc
+    try:
+        import os as _os
+        _threshold_raw = _os.environ.get("AMBIGUITY_MAJORITY_THRESHOLD", "")
+        AMBIGUITY_MAJORITY_THRESHOLD = int(_threshold_raw) if _threshold_raw.strip() else _default_threshold
+    except (ValueError, AttributeError):
+        AMBIGUITY_MAJORITY_THRESHOLD = _default_threshold
+    any_boundary_ambiguous = ambiguous_member_count >= AMBIGUITY_MAJORITY_THRESHOLD
 
     # Build members list — emit raw Kelvin (members_unit='K')
     members_out = []
