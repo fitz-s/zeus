@@ -421,6 +421,8 @@ test_trust_policy:
     tests/test_settlement_commands_hexbytes_serializer.py: {created: "2026-05-19", last_used: "2026-05-19"}
     # fix/antibody-negrisk-gamma-fallback — authoritative lookup 3-tier fallback + fail-closed None (PR #196).
     tests/test_antibody_lookup_fallback.py: {created: "2026-05-19", last_used: "2026-05-19"}
+    # phase1-codehash-drift-antibody — runtime CI antibody: fail-closed on internal_resolver upgrade (2026-05-19).
+    tests/test_inv_codehash_drift_detection.py: {created: "2026-05-19", last_used: "2026-05-19"}
 
 categories:
   core_law_antibody:
@@ -646,6 +648,8 @@ categories:
     - tests/test_main_redeem_reconciler_wiring.py
     # fix/antibody-negrisk-gamma-fallback — authoritative 3-tier lookup + fail-closed None (PR #196).
     - tests/test_antibody_lookup_fallback.py
+    # phase1-codehash-drift-antibody — runtime CI antibody: fail-closed on internal_resolver upgrade (2026-05-19).
+    - tests/test_inv_codehash_drift_detection.py
 
   useful_regression:
     - tests/test_alpha_target_coherence.py
@@ -2419,3 +2423,31 @@ test_metadata:
       INV-alpha-provenance antibody: raw_orderbook_hash_transition_delta_ms cache
       logic correctness. Verifies process-local hash transition delta is computed
       correctly, None on first observation, positive int on hash change.
+
+  # ── Phase 1 prerequisite #4 — codehash drift detection antibody ──────────
+  tests/test_inv_codehash_drift_detection.py:
+    modules: [contracts, state]
+    category: core_law_antibody
+    kind: antibody
+    profile: phase1_codehash_drift_antibody
+    blocks_commit: true
+    asserted_invariants:
+      - INV-ERA-2
+    source_under_test:
+      - src/state/settlement_writers.py
+      - src/contracts/resolution_era.py
+    law_dependencies:
+      - docs/operations/task_2026-05-17_strategy_vnext_phase0/PHASE_0_V4_ULTRAPLAN.md
+      - preflight/eth_call_resolution_authority.json
+    notes: >
+      Runtime CI antibody for INV-ERA-2: re-fetches keccak256(eth_getCode(
+      0x69c47De9D4D3Dad79590d61b9e05918E03775f24, 'latest')) from Polygon mainnet
+      and asserts it matches ERA_BASIS_INTERNAL_RESOLVER.on_chain_codehash in
+      src/state/settlement_writers.py. C1 asserts chain_id==0x89 (mainnet guard).
+      C2 asserts deployed codehash == literal. Fails with both hashes named so
+      operator can distinguish contract upgrade from test-env issues.
+      Sed-flip verified: mutate on_chain_codehash literal → C2 goes RED.
+      Marker: requires_rpc (outbound HTTPS to Polygon RPC). Included in default
+      CI sweep; skip offline with -m "not requires_rpc".
+    created: 2026-05-19
+    last_reused_or_audited: 2026-05-19
