@@ -18,6 +18,7 @@ import logging
 import copy
 import json
 import math
+import os
 import sqlite3
 import time as _time_module
 from collections.abc import Mapping
@@ -26,7 +27,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from inspect import Parameter, signature
 from types import SimpleNamespace
-from typing import Optional
+from typing import Callable, Optional
 
 from src.execution.collateral import check_sell_collateral
 from src.observability.counters import increment as _cnt_inc
@@ -678,15 +679,133 @@ def is_exit_cooldown_active(position: Position) -> bool:
     return _utcnow() < deadline
 
 
+# ---------------------------------------------------------------------------
+# CTF on-chain balance query — isolated helper for chain-truth void
+# ---------------------------------------------------------------------------
+# Created: 2026-05-19
+# Authority basis: Fix A — ghost pending_exit chain-truth sync
+
+_CTF_BALANCE_OF_SELECTOR = "0x00fdd58e"  # balanceOf(address,uint256) keccak256[:4]
+_CTF_ADDRESS = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"  # Polygon mainnet CTF
+_DEFAULT_POLYGON_RPC_URL = "https://polygon-bor-rpc.publicnode.com"
+
+
+def _abi_encode_balance_of(owner: str, token_id: str) -> str:
+    """ABI-encode balanceOf(address,uint256) calldata.
+
+    Returns hex string with 0x prefix:
+      selector (4 bytes) + owner padded to 32 bytes + token_id padded to 32 bytes.
+    """
+    owner_clean = owner.lower().removeprefix("0x")
+    if len(owner_clean) != 40:
+        raise ValueError(f"invalid owner address: {owner!r}")
+    owner_word = owner_clean.rjust(64, "0")
+    # token_id is a large decimal or hex string
+    token_int = int(str(token_id), 10) if not str(token_id).startswith("0x") else int(str(token_id), 16)
+    token_word = format(token_int, "064x")
+    return f"{_CTF_BALANCE_OF_SELECTOR}{owner_word}{token_word}"
+
+
+def _query_ctf_balance(
+    asset_id: str,
+    owner_address: str,
+    rpc_url: str | None = None,
+    rpc_call: Callable | None = None,
+) -> int | None:
+    """Query ERC-1155 balanceOf(owner, asset_id) on the Polygon CTF contract.
+
+    Returns the integer balance (raw ERC-1155 units, scaled 1e6 for pUSD).
+    Returns None on any RPC failure — callers must treat None as "unknown"
+    and fail-open (no destructive action).
+
+    Imports _json_rpc_call from polymarket_v2_adapter at call-time to avoid
+    circular imports; the module-level import is deliberately deferred.
+    """
+    if not asset_id or not owner_address:
+        return None
+    try:
+        if rpc_call is None:
+            from src.venue.polymarket_v2_adapter import _json_rpc_call
+            rpc_call = _json_rpc_call
+        resolved_rpc_url = rpc_url or os.environ.get("POLYGON_RPC_URL", _DEFAULT_POLYGON_RPC_URL)
+        calldata = _abi_encode_balance_of(owner_address, asset_id)
+        raw = rpc_call(resolved_rpc_url, "eth_call", [{"to": _CTF_ADDRESS, "data": calldata}, "latest"])
+        return int(str(raw or "0x0"), 16)
+    except Exception as exc:
+        logger.warning(
+            "_query_ctf_balance failed for asset_id=%s owner=%s: %s",
+            asset_id, owner_address, exc,
+        )
+        return None
+
+
+def _asset_id_for_position(position: Position) -> str:
+    """Return the ERC-1155 token ID (asset_id) the position holds."""
+    if getattr(position, "direction", "") == "buy_yes":
+        return str(getattr(position, "token_id", "") or "")
+    return str(getattr(position, "no_token_id", "") or getattr(position, "token_id", "") or "")
+
+
 def handle_exit_pending_missing(
     portfolio: PortfolioState,
     position: Position,
     conn: sqlite3.Connection | None = None,
+    rpc_call: Callable | None = None,
 ) -> dict:
-    """Own the `exit_pending_missing` escalation path for pending exits."""
+    """Own the `exit_pending_missing` escalation path for pending exits.
+
+    Chain-truth gate (Fix A, 2026-05-19):
+    Before falling back to in-memory exit_state branch logic, query the
+    Polygon CTF ERC-1155 contract for the actual on-chain balance:
+      - balance == 0 → position is sold on-chain; mark voided
+      - balance > 0  → position still held; re-queue for exit retry
+      - RPC failure  → fail-open, fall through to existing logic (no destructive action)
+    """
 
     if position.chain_state != "exit_pending_missing":
         return {"action": "ignore", "position": None}
+
+    # ── Chain-truth gate ──────────────────────────────────────────────────────
+    asset_id = _asset_id_for_position(position)
+    safe_address = (
+        os.environ.get("POLYMARKET_FUNDER_ADDRESS")
+        or os.environ.get("POLYMARKET_PROXY_ADDRESS")
+        or ""
+    )
+    if asset_id and safe_address:
+        on_chain_balance = _query_ctf_balance(
+            asset_id, safe_address, rpc_call=rpc_call
+        )
+        if on_chain_balance is not None:
+            if on_chain_balance == 0:
+                # Chain confirms zero balance: position is closed. Void it.
+                logger.info(
+                    "CHAIN_TRUTH_VOID %s: on-chain balance=0 for asset_id=%s → voiding",
+                    position.trade_id,
+                    asset_id,
+                )
+                return _void_chain_confirmed_zero(portfolio, position, asset_id, conn)
+            else:
+                # Position still held on-chain. Re-queue for sell retry.
+                logger.info(
+                    "CHAIN_TRUTH_RETRY %s: on-chain balance=%s for asset_id=%s → retry exit",
+                    position.trade_id,
+                    on_chain_balance,
+                    asset_id,
+                )
+                _mark_exit_retry(
+                    position,
+                    reason="EXIT_CHAIN_MISSING_STILL_HELD",
+                    error=f"chain_balance={on_chain_balance};asset_id={asset_id}",
+                    conn=conn,
+                )
+                return {"action": "retry", "position": position}
+        # on_chain_balance is None → RPC failure; fall through to legacy logic
+        logger.warning(
+            "CHAIN_TRUTH_RPC_FAIL %s: RPC unreachable, falling back to legacy exit_state logic",
+            position.trade_id,
+        )
+    # ── Legacy exit_state branch logic (unchanged) ───────────────────────────
     _mark_pending_exit(position)
     _dual_write_canonical_pending_exit_if_available(
         conn,
@@ -713,6 +832,92 @@ def handle_exit_pending_missing(
     if position.exit_state in EXIT_LIFECYCLE_OWNED_STATES:
         return {"action": "skip", "position": None}
     return {"action": "ignore", "position": None}
+
+
+def _void_chain_confirmed_zero(
+    portfolio: PortfolioState,
+    position: Position,
+    asset_id: str,
+    conn: sqlite3.Connection | None,
+) -> dict:
+    """Void a pending_exit position whose on-chain balance is confirmed zero.
+
+    Emits an ADMIN_VOIDED position_event with evidence_source=CHAIN_BALANCEOF
+    to make the chain-truth origin permanent in the audit trail.
+    """
+    from src.state.portfolio import void_position
+
+    trade_id = position.trade_id
+    voided = void_position(portfolio, trade_id, "CHAIN_CONFIRMED_ZERO")
+    if voided is None:
+        logger.warning(
+            "_void_chain_confirmed_zero: void_position returned None for %s (already removed?)",
+            trade_id,
+        )
+        return {"action": "skip", "position": None}
+
+    # Emit canonical ADMIN_VOIDED event carrying chain-truth evidence
+    if conn is not None:
+        try:
+            import json as _json
+
+            from src.engine.lifecycle_events import build_position_current_projection
+            from src.state.db import append_many_and_project
+            from src.state.lifecycle_manager import fold_lifecycle_phase
+
+            sequence_no = _next_canonical_sequence_no(conn, trade_id)
+            occurred_at = getattr(voided, "last_exit_at", "") or datetime.now(timezone.utc).isoformat()
+            projection = build_position_current_projection(voided)
+            projection["updated_at"] = occurred_at
+            projection["chain_state"] = "chain_confirmed_zero"
+
+            env = str(getattr(voided, "env", "") or "live")
+            if env not in {"live", "test", "replay", "backtest", "shadow"}:
+                env = "live"
+
+            event = {
+                "event_id": f"{trade_id}:admin_voided_chain_zero:{sequence_no}",
+                "position_id": trade_id,
+                "event_version": 1,
+                "sequence_no": sequence_no,
+                "event_type": "ADMIN_VOIDED",
+                "occurred_at": occurred_at,
+                "phase_before": "pending_exit",
+                "phase_after": fold_lifecycle_phase("pending_exit", "voided").value,
+                "strategy_key": str(
+                    getattr(voided, "strategy_key", "")
+                    or getattr(voided, "strategy", "")
+                    or ""
+                ),
+                "decision_id": None,
+                "snapshot_id": getattr(voided, "decision_snapshot_id", "") or None,
+                "order_id": getattr(voided, "last_exit_order_id", "") or getattr(voided, "order_id", "") or None,
+                "command_id": None,
+                "caused_by": "chain_truth_balance_zero",
+                "idempotency_key": f"{trade_id}:admin_voided_chain_zero:{sequence_no}",
+                "venue_status": "voided",
+                "source_module": "src.execution.exit_lifecycle",
+                "env": env,
+                "payload_json": _json.dumps(
+                    {
+                        "reason": "CHAIN_CONFIRMED_ZERO",
+                        "evidence_source": "CHAIN_BALANCEOF",
+                        "asset_id": asset_id,
+                        "chain_state": "chain_confirmed_zero",
+                    },
+                    default=str,
+                    sort_keys=True,
+                ),
+            }
+            append_many_and_project(conn, [event], projection)
+        except Exception as exc:
+            logger.warning(
+                "_void_chain_confirmed_zero: canonical event write failed for %s: %s",
+                trade_id,
+                exc,
+            )
+
+    return {"action": "closed", "position": voided}
 
 
 def _is_below_min_order_sell_error(error: str) -> bool:
