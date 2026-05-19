@@ -796,6 +796,21 @@ def _fetch_neg_risk_from_gamma_for_submitter(
         )
         return None
 
+    # Type guard (PR #212 Copilot review): Gamma is supposed to return a JSON
+    # object, but a misconfigured endpoint or upstream bug could return a list,
+    # string, or number. payload.get(...) / payload.keys() on a non-mapping
+    # would raise AttributeError and break the fail-closed contract — caller
+    # would not get None, it would propagate an exception up. Mapping check
+    # keeps the contract typed.
+    from collections.abc import Mapping as _Mapping
+    if not isinstance(payload, _Mapping):
+        logger.warning(
+            "[REDEEM_NEGRISK_GAMMA_NON_MAPPING] condition_id=%s payload_type=%s",
+            condition_id,
+            type(payload).__name__,
+        )
+        return None
+
     if "neg_risk" not in payload:
         logger.warning(
             "[REDEEM_NEGRISK_GAMMA_NO_FIELD] condition_id=%s response_keys=%s",
@@ -806,7 +821,13 @@ def _fetch_neg_risk_from_gamma_for_submitter(
 
     yes_token_id: Optional[str] = None
     no_token_id: Optional[str] = None
-    for token in payload.get("tokens", []) or []:
+    tokens = payload.get("tokens", []) or []
+    if not isinstance(tokens, list):
+        # Tokens is supposed to be a list of dicts; defensive type guard.
+        tokens = []
+    for token in tokens:
+        if not isinstance(token, _Mapping):
+            continue
         outcome = str(token.get("outcome") or "").strip().lower()
         token_id = token.get("token_id")
         if not token_id:

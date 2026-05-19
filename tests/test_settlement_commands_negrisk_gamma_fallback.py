@@ -167,6 +167,57 @@ def test_g1_fetch_neg_risk_from_gamma_extracts_tokens_and_neg_risk():
     assert result["no_token_id"] == "0xno_token_id_efgh"
 
 
+def test_g1c_fetch_neg_risk_from_gamma_handles_non_mapping_payload():
+    """G1c (PR #212 Copilot review): if Gamma returns a non-mapping JSON
+    (list/string/number), the helper must return None — NOT raise
+    AttributeError when calling .keys() / .get() on it.
+
+    Sed-flip: remove the isinstance(payload, Mapping) guard → helper raises
+    AttributeError on .keys() → caller never gets None → fail-closed contract broken."""
+    from src.execution.settlement_commands import _fetch_neg_risk_from_gamma_for_submitter
+
+    class _ListResp:
+        status_code = 200
+        def raise_for_status(self): return None
+        def json(self): return [{"unexpected": "list_payload"}]
+
+    with patch("httpx.get", return_value=_ListResp()):
+        result = _fetch_neg_risk_from_gamma_for_submitter(_CONDITION_ID)
+
+    assert result is None, (
+        f"G1c FAIL: helper returned {result!r} for a list payload; expected "
+        f"None. The Mapping type guard is missing — caller will not fail "
+        f"closed when Gamma returns malformed JSON."
+    )
+
+
+def test_g1d_fetch_neg_risk_from_gamma_handles_non_mapping_token():
+    """G1d (defensive): a malformed token entry (not a dict) inside the tokens
+    list must be skipped, not raise."""
+    from src.execution.settlement_commands import _fetch_neg_risk_from_gamma_for_submitter
+
+    class _MalformedTokenResp:
+        status_code = 200
+        def raise_for_status(self): return None
+        def json(self):
+            return {
+                "neg_risk": True,
+                "tokens": [
+                    "not_a_dict",  # malformed entry — must be skipped
+                    {"outcome": "Yes", "token_id": "0xyes_ok"},
+                    None,  # malformed entry
+                    {"outcome": "No", "token_id": "0xno_ok"},
+                ],
+            }
+
+    with patch("httpx.get", return_value=_MalformedTokenResp()):
+        result = _fetch_neg_risk_from_gamma_for_submitter(_CONDITION_ID)
+
+    assert result is not None, "G1d FAIL: malformed entries broke parsing entirely."
+    assert result["yes_token_id"] == "0xyes_ok"
+    assert result["no_token_id"] == "0xno_ok"
+
+
 def test_g1b_fetch_neg_risk_from_gamma_returns_none_on_http_error():
     """G1b: any httpx exception → helper returns None (caller fails closed)."""
     import httpx
