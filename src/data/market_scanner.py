@@ -1757,17 +1757,23 @@ def build_market_support_topology(event: dict, *, unit: str) -> MarketSupportTop
 def _market_child_is_tradable(market: dict) -> bool:
     """Return whether a Gamma child market is currently tradable.
 
-    Gamma can return open parent events with closed or non-accepting children.
-    Executability is an explicit child-market fact: missing active/orderbook/
-    accepting flags are unknown, not tradable.
+    Polymarket negRisk semantic (verified 2026-05-19 via direct Gamma probe):
+    on multi-outcome events, child.active=False is a routing label, NOT a
+    tradeability indicator. acceptingOrders is the authoritative gate.
+    PR #184 fixed this at the EVENT level via _event_has_active_children;
+    the same fix applies at the MARKET (child) level here. Anchor: every
+    highest-temperature child sampled on 2026-05-19 had active=False,
+    accepting=True, closed=False, enableOrderBook=True — and was fully
+    tradeable on the Polymarket UI.
+
+    Missing closed/accepting/orderbook flags remain unknown=not-tradable.
     """
 
     closed = _boolish_market_field(market, "closed", "isClosed")
-    active = _boolish_market_field(market, "active", "isActive")
     accepting = _boolish_market_field(market, "acceptingOrders", "accepting_orders")
     orderbook = _boolish_market_field(market, "enableOrderBook", "enable_orderbook", "orderbookEnabled")
 
-    return closed is False and active is True and accepting is True and orderbook is True
+    return closed is False and accepting is True and orderbook is True
 
 
 def _boolish_market_field(market: dict, *names: str) -> bool | None:

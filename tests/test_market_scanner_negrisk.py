@@ -208,3 +208,51 @@ def test_fetch_events_by_tags_does_not_pass_closed_false_param():
             f"Regression: 'closed=false' found in API params {p}. "
             "negRisk events are invisible to this filter — revert causes 0 weather markets found."
         )
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 antibody: child-level _market_child_is_tradable negRisk semantic
+# (added 2026-05-19 after live-stage 0-markets blocker — PR #184 fixed event
+# level; same active=False ≠ untradeable invariant applies at the child level)
+# ---------------------------------------------------------------------------
+
+from src.data.market_scanner import _market_child_is_tradable
+
+
+_NEGRISK_TRADEABLE_CHILD = {
+    # Verified 2026-05-19 via direct Gamma probe: every highest-temperature
+    # child returned active=False but was accepting and shown on UI.
+    "active": False,
+    "acceptingOrders": True,
+    "closed": False,
+    "enableOrderBook": True,
+}
+
+
+def test_negrisk_child_active_false_is_tradable() -> None:
+    """negRisk child with active=False and acceptingOrders=True MUST admit.
+
+    Sed-break: reintroducing 'active is True' in _market_child_is_tradable
+    flips this to False and live finds 0 markets again.
+    """
+    assert _market_child_is_tradable(_NEGRISK_TRADEABLE_CHILD) is True
+
+
+def test_child_missing_accepting_is_not_tradable() -> None:
+    """Unknown/missing acceptingOrders MUST remain not-tradable (fail-closed)."""
+    child = {k: v for k, v in _NEGRISK_TRADEABLE_CHILD.items() if k != "acceptingOrders"}
+    assert _market_child_is_tradable(child) is False
+
+
+def test_child_closed_overrides_accepting() -> None:
+    """closed=True wins even with acceptingOrders=True (stale Gamma routing)."""
+    child = dict(_NEGRISK_TRADEABLE_CHILD)
+    child["closed"] = True
+    assert _market_child_is_tradable(child) is False
+
+
+def test_child_orderbook_disabled_is_not_tradable() -> None:
+    """enableOrderBook=False means no CLOB liquidity — must reject."""
+    child = dict(_NEGRISK_TRADEABLE_CHILD)
+    child["enableOrderBook"] = False
+    assert _market_child_is_tradable(child) is False
