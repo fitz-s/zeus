@@ -43,7 +43,16 @@ FORECAST_LIVE_HEARTBEAT_SECONDS = 30
 FORECAST_LIVE_SAFE_CYCLE_POLL_SECONDS = 5 * 60
 FORECAST_LIVE_SOURCE_HEALTH_SECONDS = 10 * 60
 FORECAST_LIVE_SOURCE_HEALTH_SOURCE_IDS = frozenset({"ecmwf_open_data"})
-_CURRENT_SOURCE_CYCLE_STATUSES = frozenset({"SUCCESS", "PARTIAL"})
+_CURRENT_SOURCE_CYCLE_STATUSES = frozenset({"SUCCESS"})
+# Why SUCCESS-only: ECMWF Open Data disseminates a cycle incrementally over ~10h.
+# A PARTIAL journal at T+8h means more steps may still publish; treating it as
+# "already journaled" would lock the daemon out of those later steps and force
+# every entry into MISSING_REQUIRED_STEPS until the next 00Z/12Z cycle —
+# exactly the live blackout observed 2026-05-18→2026-05-19. Idempotent under
+# refetch: job_run UPSERTs on `job_run_key` (job_name + scheduled_for + source_id
+# + track + release_calendar_key), source_run on its `source_run_id` PK, and
+# source_run_coverage / readiness_state on composite identity keys — all stable
+# across refetches of the same cycle, so a no-op refetch just rewrites rows.
 
 FORECAST_LIVE_JOB_IDS = frozenset(
     {

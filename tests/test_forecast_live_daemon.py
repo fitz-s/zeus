@@ -1,6 +1,6 @@
 # Created: 2026-05-14
-# Last reused/audited: 2026-05-16
-# Authority basis: docs/operations/task_2026-05-08_deep_alignment_audit/DATA_DAEMON_LIVE_EFFICIENCY_REFACTOR_PLAN.md section 6.1, section 6.2, section 8 Phase 4, and Phase 6 durable work journaling; docs/operations/task_2026-05-16_live_continuous_run_package/LIVE_CONTINUOUS_RUN_PACKAGE_PLAN.md source-health gate.
+# Last reused/audited: 2026-05-19
+# Authority basis: docs/operations/task_2026-05-08_deep_alignment_audit/DATA_DAEMON_LIVE_EFFICIENCY_REFACTOR_PLAN.md section 6.1, section 6.2, section 8 Phase 4, and Phase 6 durable work journaling; docs/operations/task_2026-05-16_live_continuous_run_package/LIVE_CONTINUOUS_RUN_PACKAGE_PLAN.md source-health gate; fix/forecast-live-partial-retry 2026-05-19 (ECMWF incremental dissemination correction).
 """Relationship tests for the dedicated forecast-live daemon boundary."""
 
 from __future__ import annotations
@@ -459,10 +459,19 @@ def test_safe_cycle_poll_fetches_latest_safe_cycle_when_not_journaled(tmp_path, 
     assert row["scheduled_for"] == "2026-05-17T12:00:00+00:00"
 
 
-def test_safe_cycle_poll_does_not_refetch_current_partial_cycle(tmp_path, monkeypatch) -> None:
+def test_safe_cycle_poll_refetches_partial_cycle_with_pending_steps(tmp_path, monkeypatch) -> None:
+    """ECMWF Open Data disseminates a cycle's steps incrementally over ~10h.
+    A PARTIAL journal recorded at T+8h reflects only the steps observable at
+    that moment; further steps publish over the following hours. The safe-
+    cycle poll MUST refetch on PARTIAL so incremental steps enter the journal
+    and live entries don't stall on MISSING_REQUIRED_STEPS until next 00Z/12Z.
+
+    Anchor incident: 2026-05-18T20:11 UTC the 12Z cycle was journaled PARTIAL
+    with NOT_RELEASED_STEPS=[...48 steps...]. The pre-fix daemon never
+    re-fetched; opening_hunt rejected all 11 candidates for 8+ hours."""
     from src.data.release_calendar import FetchDecision
     import src.ingest.forecast_live_daemon as forecast_live_daemon
-    from src.state.job_run_repo import write_job_run
+    from src.state.job_run_repo import get_latest_job_run, write_job_run
 
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
@@ -507,8 +516,91 @@ def test_safe_cycle_poll_does_not_refetch_current_partial_cycle(tmp_path, monkey
         safe_fetch_not_before=safe_fetch,
     )
 
+    collector_calls: list[str] = []
+
     def collector(*, track: str, **_kwargs) -> dict:
-        raise AssertionError(f"collector must not refetch current source cycle for {track}")
+        collector_calls.append(track)
+        return {
+            "status": "ok",
+            "track": track,
+            "source_run_id": "ecmwf_open_data:mx2t6_high:2026-05-17T12Z",
+            "release_calendar_key": "ecmwf_open_data:mx2t6_high:full",
+            "forecast_track": "mx2t6_high_full_horizon",
+            "snapshots_inserted": 1,
+            "coverage_written": 1,
+            "producer_readiness_written": 1,
+        }
+
+    result = forecast_live_daemon._run_opendata_track_if_due(
+        "mx2t6_high",
+        _locks_dir_override=tmp_path,
+        _collector=collector,
+        _source_paused=lambda source_id: False,
+        _job_conn=conn,
+        _now_utc=datetime(2026, 5, 17, 20, 20, tzinfo=timezone.utc),
+    )
+
+    assert result["status"] == "ok", "PARTIAL journal must not short-circuit refetch"
+    assert collector_calls == ["mx2t6_high"], "collector must be invoked to pick up newly-released steps"
+    row = get_latest_job_run(conn, "forecast_live_opendata_mx2t6_high")
+    assert row is not None
+    assert row["source_run_id"] == "ecmwf_open_data:mx2t6_high:2026-05-17T12Z"
+
+
+def test_safe_cycle_poll_does_not_refetch_completed_success_cycle(tmp_path, monkeypatch) -> None:
+    """API-spam guard: once a cycle reaches SUCCESS (all steps observed,
+    completeness=COMPLETE), the safe-cycle poll must skip refetch — there is
+    no incremental data left to gather and refetching would only burn ECMWF
+    bandwidth. Complements test_safe_cycle_poll_refetches_partial_*."""
+    from src.data.release_calendar import FetchDecision
+    import src.ingest.forecast_live_daemon as forecast_live_daemon
+    from src.state.job_run_repo import write_job_run
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    init_schema_forecasts(conn)
+
+    selected_cycle = datetime(2026, 5, 17, 12, tzinfo=timezone.utc)
+    safe_fetch = datetime(2026, 5, 17, 20, 5, tzinfo=timezone.utc)
+
+    monkeypatch.setattr(
+        forecast_live_daemon,
+        "_forecast_work_identity",
+        lambda track, now_utc: {
+            "decision": FetchDecision.FETCH_ALLOWED,
+            "metadata": {
+                "selected_cycle_time": selected_cycle,
+                "next_safe_fetch_at": safe_fetch,
+            },
+            "job_name": "forecast_live_opendata_mx2t6_high",
+            "source_id": "ecmwf_open_data",
+            "track": track,
+            "scheduled_for": selected_cycle,
+            "release_calendar_key": "ecmwf_open_data:mx2t6_high:full",
+            "safe_fetch_not_before": safe_fetch,
+        },
+    )
+    write_job_run(
+        conn,
+        job_run_id="forecast-live-20260517-12z-success",
+        job_name="forecast_live_opendata_mx2t6_high",
+        plane="forecast",
+        scheduled_for=selected_cycle,
+        started_at=datetime(2026, 5, 17, 20, 10, tzinfo=timezone.utc),
+        finished_at=datetime(2026, 5, 17, 20, 14, tzinfo=timezone.utc),
+        status="SUCCESS",
+        reason_code=None,
+        rows_written=552,
+        rows_failed=0,
+        source_run_id="ecmwf_open_data:mx2t6_high:2026-05-17T12Z",
+        source_id="ecmwf_open_data",
+        track="mx2t6_high",
+        release_calendar_key="ecmwf_open_data:mx2t6_high:full",
+        safe_fetch_not_before=safe_fetch,
+    )
+
+    def collector(*, track: str, **_kwargs) -> dict:
+        raise AssertionError(f"collector must not refetch SUCCESS-journaled cycle for {track}")
 
     result = forecast_live_daemon._run_opendata_track_if_due(
         "mx2t6_high",
