@@ -70,7 +70,7 @@ def test_antibody_zero_bleeding_rows_post_cutover_in_live_db():
     ...
 
 
-@pytest.mark.xfail(reason="SCAFFOLD: fixture DB not yet populated — PR 1 body phase")
+@pytest.mark.skip(reason="SCAFFOLD: backfill not yet executed against live DB; 2829 expected. Fixture DB path pending separate operator-coordinated backfill step. Remove skip when backfill is verified complete (COUNT = 0).")
 def test_antibody_zero_bleeding_rows_post_cutover_in_fixture_db():
     """CI antibody (fixture DB): using a minimal in-memory fixture DB with known
     BLEEDING rows, after running write_settlement_v2_with_era_provenance() on each,

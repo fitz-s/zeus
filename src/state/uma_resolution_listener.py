@@ -206,6 +206,9 @@ UMA_OO_SETTLE_EVENT_SIGNATURE: str = (
 
 # ── data types ─────────────────────────────────────────────────────── #
 
+# Polygon mainnet finality depth (Critic P7-2, ULTRAPLAN §D.1).
+CONFIRMATIONS_REQUIRED_DEFAULT: int = 6
+
 
 @dataclass(frozen=True)
 class ResolvedMarket:
@@ -224,6 +227,10 @@ class ResolvedMarket:
     raw_log: dict
     """Verbatim log entry. Stored so a future schema migration can
     re-derive fields without re-querying the chain."""
+    confirmations_count: int = 0
+    """Block confirmations observed at record time. Tentative if < confirmations_required."""
+    confirmations_required: int = CONFIRMATIONS_REQUIRED_DEFAULT
+    """Minimum confirmations before this row is considered finalized."""
 
 
 # ── pluggable RPC client ───────────────────────────────────────────── #
@@ -265,6 +272,13 @@ class UmaRpcClient(ABC):
         Tests: return a synthetic value.
         Must NOT raise — return 0 on failure (caller treats as unknown).
         """
+
+    def check_transaction_exists(self, tx_hash: str) -> bool:
+        """Return True if the transaction identified by tx_hash still exists
+        on-chain (i.e., not reorg'd out). Default implementation is fail-open
+        (returns True) — subclasses should override for production reorg safety.
+        """
+        return True
 
 
 class UmaHttpRpcClient(UmaRpcClient):
@@ -483,6 +497,9 @@ def init_uma_resolution_schema(conn: sqlite3.Connection) -> None:
             resolved_at_utc TEXT NOT NULL,
             raw_log_json TEXT NOT NULL,
             observed_at_utc TEXT NOT NULL,
+            confirmations_count INTEGER NOT NULL DEFAULT 0,
+            confirmations_required INTEGER NOT NULL DEFAULT 6,
+            is_valid INTEGER NOT NULL DEFAULT 1,
             PRIMARY KEY (condition_id, tx_hash)
         );
         """
@@ -491,6 +508,16 @@ def init_uma_resolution_schema(conn: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_uma_resolution_condition "
         "ON uma_resolution(condition_id);"
     )
+    # Idempotent ADD COLUMN for existing DBs (SQLite ignores duplicate column errors).
+    for _col_ddl in (
+        "ALTER TABLE uma_resolution ADD COLUMN confirmations_count INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE uma_resolution ADD COLUMN confirmations_required INTEGER NOT NULL DEFAULT 6",
+        "ALTER TABLE uma_resolution ADD COLUMN is_valid INTEGER NOT NULL DEFAULT 1",
+    ):
+        try:
+            conn.execute(_col_ddl)
+        except Exception:
+            pass  # Column already exists — idempotent
 
 
 def record_resolution(conn: sqlite3.Connection, resolution: ResolvedMarket) -> None:
@@ -503,8 +530,9 @@ def record_resolution(conn: sqlite3.Connection, resolution: ResolvedMarket) -> N
         """
         INSERT OR IGNORE INTO uma_resolution
             (condition_id, tx_hash, block_number, resolved_value,
-             resolved_at_utc, raw_log_json, observed_at_utc)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+             resolved_at_utc, raw_log_json, observed_at_utc,
+             confirmations_count, confirmations_required, is_valid)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             resolution.condition_id,
@@ -514,8 +542,63 @@ def record_resolution(conn: sqlite3.Connection, resolution: ResolvedMarket) -> N
             resolution.resolved_at_utc.isoformat(),
             json.dumps(resolution.raw_log, sort_keys=True, default=str),
             datetime.now(timezone.utc).isoformat(),
+            resolution.confirmations_count,
+            resolution.confirmations_required,
+            1,
         ),
     )
+
+
+def run_late_revalidation_pass(
+    conn: sqlite3.Connection,
+    *,
+    rpc_client: "Optional[UmaRpcClient]" = None,
+) -> int:
+    """Check tentative uma_resolution rows against on-chain state.
+
+    A row is tentative when confirmations_count < confirmations_required.
+    For each tentative row, asks the rpc_client whether the tx_hash still
+    exists on-chain. Rows invalidated by a Polygon reorg are marked
+    is_valid = 0 so they cannot be used as settlement evidence.
+
+    Args:
+        conn: Connection to the world.db (uma_resolution table lives here).
+        rpc_client: Optional UmaRpcClient. When None, returns 0 immediately
+            (fail-open — no revalidation without an RPC client).
+
+    Returns:
+        Number of rows marked invalid during this pass.
+    """
+    init_uma_resolution_schema(conn)
+    if rpc_client is None:
+        return 0
+    tentative_rows = conn.execute(
+        """
+        SELECT condition_id, tx_hash, block_number
+        FROM uma_resolution
+        WHERE confirmations_count < confirmations_required
+          AND is_valid = 1
+        ORDER BY block_number ASC
+        """
+    ).fetchall()
+    invalidated = 0
+    for row in tentative_rows:
+        condition_id, tx_hash, block_number = row[0], row[1], row[2]
+        try:
+            tx_found = rpc_client.check_transaction_exists(tx_hash)
+        except Exception as exc:
+            logger.warning(
+                "late_revalidation: RPC error checking tx_hash %s: %s — skipping row",
+                tx_hash, exc,
+            )
+            continue
+        if not tx_found:
+            conn.execute(
+                "UPDATE uma_resolution SET is_valid = 0 WHERE condition_id = ? AND tx_hash = ?",
+                (condition_id, tx_hash),
+            )
+            invalidated += 1
+    return invalidated
 
 
 # ── cursor: last-scanned block ─────────────────────────────────────── #

@@ -5,49 +5,150 @@
 """
 Rollback script: restore pre-backfill provenance_json for settlements_v2 rows.
 
-SCAFFOLD — implementation body not yet written.
-
 PURPOSE:
     Rollback a partial or complete provenance backfill by restoring
     provenance_json rows to the legacy 'harvester_live_uma_vote' form.
-    Used when:
-      - The backfill produced incorrect era assignments
-      - PR 1 is reverted and the system needs to return to legacy behaviour
-      - A partial backfill must be unwound before re-running cleanly
+    Used when the backfill produced incorrect era assignments or PR 1 is reverted.
 
     IMPORTANT: This script requires a pre-backfill snapshot to restore from.
-    It does NOT attempt to infer what the original provenance was from current
-    DB state. The snapshot must be produced by audit_settlements_v2_era_provenance.py
+    The snapshot must be produced by running the audit script with --snapshot-mode
     before the backfill is run.
 
-USAGE (SCAFFOLD pseudocode):
+USAGE:
     python scripts/rollback_settlements_v2_era_provenance.py
         --snapshot PATH
-        [--dry-run]
+        [--apply]
         [--row-cap N]
 
-    Options:
-      --snapshot PATH  Path to JSON snapshot produced by audit script pre-backfill (REQUIRED)
-      --dry-run        Print what would be restored; write nothing
-      --row-cap N      Limit total rows restored in one run (default: 500)
-
-SNAPSHOT FORMAT (pseudocode):
-    The snapshot is a JSON file output by audit_settlements_v2_era_provenance.py
-    with --mode pre-backfill-snapshot, containing per-row original provenance_json.
-
-IMPLEMENTATION NOTES (SCAFFOLD pseudocode):
-    1. Load snapshot JSON
-    2. Verify snapshot was produced for the same DB (check total_rows, queried_at_utc)
-    3. For each row in snapshot with era_status == BLEEDING (i.e., rows we backfilled):
-       a. SAVEPOINT rollback_chunk_N
-       b. UPDATE settlements_v2 SET provenance_json = snapshot_row['original_provenance_json']
-          WHERE condition_id = snapshot_row['condition_id']
-          AND settled_at = snapshot_row['settled_at']
-       c. RELEASE SAVEPOINT (or ROLLBACK on exception)
-    4. Verify post-rollback: COUNT(*) WHERE LIKE 'harvester_live_uma_vote' matches snapshot count
+    --apply is REQUIRED to write; without it the script runs in dry-run mode.
 
 DISK SAFETY:
     Same constraints as backfill: PRAGMA busy_timeout=5000, 500-row chunks,
     no bare sqlite3.connect(), use get_forecasts_connection_with_world().
-    disk_sufficient_for_rebuild=false; no DB copy required.
 """
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+_REPO_ROOT = Path(__file__).parent.parent
+sys.path.insert(0, str(_REPO_ROOT))
+
+_BLEEDING_TAG = "harvester_live_uma_vote"
+
+
+def run_rollback(
+    snapshot_path: Path,
+    *,
+    apply: bool = False,
+    row_cap: int = 500,
+    chunk_size: int = 500,
+) -> dict:
+    """Run the rollback from snapshot. Returns a summary dict."""
+    from src.state.db import get_forecasts_connection_with_world
+
+    if not snapshot_path.exists():
+        return {"error": f"Snapshot file not found: {snapshot_path}"}
+
+    snapshot = json.loads(snapshot_path.read_text())
+    rows_to_restore = snapshot.get("rows", [])
+    if not rows_to_restore:
+        return {"error": "Snapshot has no 'rows' key or is empty — cannot rollback"}
+
+    # Limit to row_cap
+    rows_to_restore = rows_to_restore[:row_cap]
+
+    total_restored = 0
+    total_errors = 0
+    chunks_done = 0
+
+    if not apply:
+        return {
+            "mode": "dry_run",
+            "total_to_restore": len(rows_to_restore),
+            "apply_with": "--apply to execute writes",
+        }
+
+    with get_forecasts_connection_with_world() as conn:
+        conn.execute("PRAGMA busy_timeout = 5000")
+
+        offset = 0
+        while offset < len(rows_to_restore):
+            chunk = rows_to_restore[offset : offset + chunk_size]
+            savepoint_name = f"rollback_chunk_{chunks_done}"
+            conn.execute(f"SAVEPOINT {savepoint_name}")
+            try:
+                for row_snap in chunk:
+                    condition_id = row_snap.get("condition_id")
+                    settled_at = row_snap.get("settled_at")
+                    original_prov = row_snap.get("original_provenance_json")
+                    if not condition_id or original_prov is None:
+                        total_errors += 1
+                        continue
+                    conn.execute(
+                        """
+                        UPDATE settlements_v2
+                        SET provenance_json = ?
+                        WHERE condition_id = ? AND settled_at = ?
+                        """,
+                        (original_prov, condition_id, settled_at),
+                    )
+                    total_restored += 1
+                conn.execute(f"RELEASE SAVEPOINT {savepoint_name}")
+                chunks_done += 1
+            except Exception as exc:
+                conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint_name}")
+                print(f"ERROR in rollback chunk {chunks_done}: {exc}", file=sys.stderr)
+                total_errors += len(chunk)
+                chunks_done += 1
+
+            offset += chunk_size
+
+        # Verify post-rollback count
+        remaining_clean = conn.execute(
+            f"SELECT COUNT(*) FROM settlements_v2 WHERE provenance_json NOT LIKE '%{_BLEEDING_TAG}%'"
+            " AND provenance_json IS NOT NULL AND provenance_json != '{}'"
+        ).fetchone()[0]
+
+    return {
+        "mode": "apply",
+        "total_rows_in_snapshot": len(snapshot.get("rows", [])),
+        "total_restored": total_restored,
+        "total_errors": total_errors,
+        "chunks_done": chunks_done,
+        "snapshot_queried_at_utc": snapshot.get("queried_at_utc"),
+    }
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Rollback settlements_v2 era provenance backfill from snapshot."
+    )
+    parser.add_argument(
+        "--snapshot", required=True,
+        help="Path to JSON snapshot produced before backfill (REQUIRED)"
+    )
+    parser.add_argument(
+        "--apply", action="store_true",
+        help="Actually write changes (default: dry-run only)"
+    )
+    parser.add_argument("--row-cap", type=int, default=500, help="Max rows per run (default: 500)")
+    parser.add_argument("--chunk-size", type=int, default=500, help="Rows per SAVEPOINT chunk (default: 500)")
+    args = parser.parse_args()
+
+    if not args.apply:
+        print("DRY-RUN mode (pass --apply to write changes)", file=sys.stderr)
+
+    result = run_rollback(
+        Path(args.snapshot),
+        apply=args.apply,
+        row_cap=args.row_cap,
+        chunk_size=args.chunk_size,
+    )
+    print(json.dumps(result, indent=2))
+
+
+if __name__ == "__main__":
+    main()

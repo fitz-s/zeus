@@ -51,13 +51,6 @@ _SOURCE_PATHS_TO_AUDIT = [
 _FORBIDDEN_LITERAL = "harvester_live_uma_vote"
 
 
-@pytest.mark.xfail(
-    reason=(
-        "SCAFFOLD: twin writer not yet consolidated — "
-        "harvester.py:1338 and harvester_truth_writer.py:556 still contain "
-        f"'{_FORBIDDEN_LITERAL}'. Remove xfail after PR 1 implementation."
-    )
-)
 def test_r1_3_no_harvester_live_uma_vote_in_twin_paths():
     """R-1.3: The literal 'harvester_live_uma_vote' must not appear in harvester.py
     or harvester_truth_writer.py after twin writer consolidation in PR 1.

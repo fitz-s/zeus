@@ -111,6 +111,13 @@ class EraDispatchResult:
     reason_code: str                        # short machine-readable label
     reason_message: str                     # operator-readable explanation
 
+    def is_admittable(self) -> bool:
+        """Return True iff the dispatch resolved to a known era and a settlement row
+        is safe to write. Any other outcome (ERA_DEAD, ERA_EMPTY_OBSERVATION) is
+        not admittable — callers must raise or defer before writing.
+        """
+        return self.outcome == EraDispatchOutcome.ERA_RESOLVED
+
 
 @dataclass(frozen=True)
 class EraAuthorityBasis:

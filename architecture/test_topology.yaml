@@ -256,6 +256,8 @@ test_trust_policy:
     tests/test_settlement_commands_schema.py: {created: "2026-05-04", last_used: "2026-05-04"}
     tests/test_venue_envelope_live_bound.py: {created: "2026-05-04", last_used: "2026-05-04"}
     tests/test_polymarket_adapter_submit_safety.py: {created: "2026-05-04", last_used: "2026-05-04"}
+    # PR #187 — NegRiskCtfAdapter redeem antibody (Karachi PayoutRedemption=0 root-cause).
+    tests/test_polymarket_v2_adapter_negrisk_redeem.py: {created: "2026-05-19", last_used: "2026-05-19"}
     tests/test_chain_reconciliation_corrected_guard.py: {created: "2026-05-05", last_used: "2026-05-05"}
     tests/test_position_projection_d6_counters.py: {created: "2026-05-05", last_used: "2026-05-05"}
     tests/test_harvester_settlement_redeem.py: {created: "2026-05-05", last_used: "2026-05-05"}
@@ -1410,24 +1412,31 @@ test_metadata:
   tests/test_polymarket_v2_adapter_negrisk_redeem.py:
     modules: [venue, execution]
     category: core_law_antibody
-    profile: pr187_negrisk_redeem_routing
+    profile: r3_venue_submit_live_bound
     blocks_commit: true
     asserted_invariants:
-      - NEGRISK-CALLDATA-SELECTOR-DBECCB23
-      - NEGRISK-YES-SLOT-ZERO-NO-SLOT-ONE
-      - NEGRISK-ADAPTER-ADDRESS-PINNED
-      - NEGRISK-FACT-MISSING-FAILS-CLOSED
+      - PR187-NEGRISK-CALLDATA-BYTE-FOR-BYTE-KARACHI
+      - PR187-NEGRISK-YES-AT-SLOT-0
+      - PR187-NEGRISK-NO-AT-SLOT-1
+      - PR187-NEGRISK-SELECTOR-PINNED-DBECCB23
+      - PR187-NEGRISK-ADAPTER-ADDRESS-PINNED
+      - PR187-NEGRISK-AMOUNT-MISSING-FAIL-CLOSED
+      - PR187-NEGRISK-FACT-MISSING-FAIL-CLOSED
     source_under_test:
       - src/venue/polymarket_v2_adapter.py
       - src/execution/settlement_commands.py
     law_dependencies:
       - .omc/plans/2026-05-19-negrisk-redeem-routing.md
+      - architecture/topology.yaml
     notes: >
-      Antibody tests for PR #187 negRisk redeem routing fix. Pins Karachi reference
-      calldata byte-for-byte (selector 0xdbeccb23, YES/NO slot mapping). Also covers
-      submit_redeem() layer: snapshot-present+token_amounts_json routes to
-      adapter.redeem(neg_risk=True, amount_per_slot=<correct>); missing snapshot row
-      fails closed with REDEEM_NEGRISK_FACT_MISSING (topology.yaml:4193 law).
+      Antibody for Karachi PayoutRedemption(payout=0) root-cause (PR #183
+      shipped standard CTF calldata against negRisk markets). Pins
+      NegRiskCtfAdapter (0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296) +
+      selector 0xdbeccb23 + YES/NO amounts slot mapping. Byte-for-byte
+      Karachi vector verified against successful reference tx
+      0x4ce58f2683bd81f7f49b7dd19e35cc2db4fc137c2f841712876ace23afe39448.
+      Also covers REDEEM_NEGRISK_AMOUNT_MISSING + REDEEM_NEGRISK_FACT_MISSING
+      fail-closed routing in settlement_commands.submit_redeem.
   tests/test_chain_reconciliation_corrected_guard.py:
     modules: [state]
     category: core_law_antibody

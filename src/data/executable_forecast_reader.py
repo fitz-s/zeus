@@ -691,6 +691,11 @@ def read_executable_forecast(
     observed_steps = _int_tuple(coverage.get("observed_steps_json"))
     if not set(expected_steps).issubset(set(observed_steps)):
         return ExecutableForecastBundleResult("BLOCKED", "MISSING_REQUIRED_STEPS")
+    expected_members = int(coverage.get("expected_members") or 0)
+    observed_members = int(coverage.get("observed_members") or 0)
+    min_floor = settings["ensemble"].get("min_members_floor", expected_members)
+    if expected_members <= 0 or observed_members < min_floor:
+        return ExecutableForecastBundleResult("BLOCKED", "MISSING_EXPECTED_MEMBERS")
 
     source_run = _source_run_by_id(conn, str(coverage["source_run_id"]))
     if source_run is None:
@@ -732,7 +737,6 @@ def read_executable_forecast(
     snapshot_window_start = _parse_utc(snapshot.local_day_start_utc)
     if coverage_window_start is None or snapshot_window_start != coverage_window_start:
         return ExecutableForecastBundleResult("BLOCKED", "SNAPSHOT_LOCAL_DAY_WINDOW_MISMATCH")
-    min_floor = settings["ensemble"].get("min_members_floor", expected_members)
     if len(snapshot.members) < min_floor:
         return ExecutableForecastBundleResult("BLOCKED", "MISSING_EXPECTED_MEMBERS")
     coverage_snapshot_ids = tuple(int(item) for item in _json_list(coverage.get("snapshot_ids_json")) if str(item).isdigit())

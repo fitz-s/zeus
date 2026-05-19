@@ -7,19 +7,18 @@
 """
 Consolidated settlement writer with era provenance.
 
-DESIGN CONTRACT (SCAFFOLD):
+DESIGN CONTRACT:
     This module is the SINGLE write path for settlements_v2 in Phase 0+.
     Both historical write paths (harvester.py L2 and harvester_truth_writer.py L4)
     are consolidated here. After PR 1 implementation:
-      - src/execution/harvester.py:1338 calls write_settlement_v2_with_era_provenance()
-      - src/ingest/harvester_truth_writer.py:556 calls write_settlement_v2_with_era_provenance()
+      - src/execution/harvester.py calls write_settlement_v2_with_era_provenance()
+      - src/ingest/harvester_truth_writer.py calls write_settlement_v2_with_era_provenance()
     Neither site may write harvester_live_uma_vote provenance directly.
 
 INV-37 CONSTRAINT (EXPLICIT):
     ALL writes involving settlements_v2 (forecasts.db) AND uma_resolution or
     era_watermark (world.db) MUST go through get_forecasts_connection_with_world()
     at src/state/db.py:205. No bare sqlite3.connect() of either DB in this module.
-    Violation raises Inv37Violation (see src/state/db.py).
 
 ERA AUTHORITY BASIS SINGLETONS:
     Module-level constants document the two known eras at Phase 0.
@@ -28,6 +27,7 @@ ERA AUTHORITY BASIS SINGLETONS:
 """
 from __future__ import annotations
 
+import json
 from datetime import date
 from typing import Any
 
@@ -69,55 +69,18 @@ ERA_CUTOVER_DATE = date(2026, 2, 21)
 
 
 # ---------------------------------------------------------------------------
-# Public API (SCAFFOLD — bodies are pseudocode comments only)
+# Public API
 # ---------------------------------------------------------------------------
 
 def dispatch_era_basis(settled_at_utc: date) -> EraDispatchResult:
     """Dispatch to the correct EraAuthorityBasis for a given settlement date.
 
-    SCAFFOLD — implementation body not yet written.
-
     Returns EraDispatchResult with typed outcome. Callers MUST check
     result.outcome before accessing result.era_basis (None on non-ERA_RESOLVED).
 
-    Logic (SCAFFOLD pseudocode):
-        if settled_at_utc is None or not isinstance(settled_at_utc, date):
-            raise ValueError(f"settled_at_utc must be a date, got {type(settled_at_utc)}")
-
-        if settled_at_utc >= ERA_CUTOVER_DATE:
-            return EraDispatchResult(
-                outcome=EraDispatchOutcome.ERA_RESOLVED,
-                era_basis=ERA_BASIS_INTERNAL_RESOLVER,
-                reason_code="post_cutover_internal_resolver",
-                reason_message=f"settled_at {settled_at_utc} >= cutover {ERA_CUTOVER_DATE}",
-            )
-        elif settled_at_utc >= ERA_BASIS_UMA_OO_V2.era_start_date_utc:
-            return EraDispatchResult(
-                outcome=EraDispatchOutcome.ERA_RESOLVED,
-                era_basis=ERA_BASIS_UMA_OO_V2,
-                reason_code="pre_cutover_uma_oo_v2",
-                reason_message=f"settled_at {settled_at_utc} < cutover {ERA_CUTOVER_DATE}",
-            )
-        else:
-            # No era covers this date — fail-closed, never silent (Critic P4)
-            return EraDispatchResult(
-                outcome=EraDispatchOutcome.ERA_DEAD,
-                era_basis=None,
-                reason_code="no_era_match",
-                reason_message=(
-                    f"settled_at {settled_at_utc} predates all known era starts. "
-                    "Dispatcher must raise or quarantine; never write settlement row."
-                ),
-            )
-
-    ERA_EMPTY_OBSERVATION usage (separate path):
-        When uma_resolution_listener returns empty for a pre-cutover market, the
-        caller constructs EraDispatchResult(outcome=ERA_EMPTY_OBSERVATION, ...) and
-        defers/retries — it does NOT call dispatch_era_basis() again with the same date.
-
     Args:
         settled_at_utc: The UTC date of the settlement event. Callers
-            must have already resolved local→UTC conversion before calling here.
+            must have already resolved local->UTC conversion before calling here.
 
     Returns:
         EraDispatchResult with outcome=ERA_RESOLVED and era_basis populated on
@@ -126,7 +89,34 @@ def dispatch_era_basis(settled_at_utc: date) -> EraDispatchResult:
     Raises:
         ValueError: if settled_at_utc is None or not a date instance.
     """
-    ...
+    if settled_at_utc is None or not isinstance(settled_at_utc, date):
+        raise ValueError(f"settled_at_utc must be a date, got {type(settled_at_utc)}")
+
+    if settled_at_utc >= ERA_CUTOVER_DATE:
+        return EraDispatchResult(
+            outcome=EraDispatchOutcome.ERA_RESOLVED,
+            era_basis=ERA_BASIS_INTERNAL_RESOLVER,
+            reason_code="post_cutover_internal_resolver",
+            reason_message=f"settled_at {settled_at_utc} >= cutover {ERA_CUTOVER_DATE}",
+        )
+    elif settled_at_utc >= ERA_BASIS_UMA_OO_V2.era_start_date_utc:
+        return EraDispatchResult(
+            outcome=EraDispatchOutcome.ERA_RESOLVED,
+            era_basis=ERA_BASIS_UMA_OO_V2,
+            reason_code="pre_cutover_uma_oo_v2",
+            reason_message=f"settled_at {settled_at_utc} < cutover {ERA_CUTOVER_DATE}",
+        )
+    else:
+        # No era covers this date — fail-closed, never silent (Critic P4)
+        return EraDispatchResult(
+            outcome=EraDispatchOutcome.ERA_DEAD,
+            era_basis=None,
+            reason_code="no_era_match",
+            reason_message=(
+                f"settled_at {settled_at_utc} predates all known era starts. "
+                "Dispatcher must raise or quarantine; never write settlement row."
+            ),
+        )
 
 
 def write_settlement_v2_with_era_provenance(
@@ -134,63 +124,95 @@ def write_settlement_v2_with_era_provenance(
     era_basis: EraAuthorityBasis,
     *,
     conn: Any | None = None,
-) -> None:
+) -> dict[str, Any]:
     """Write a settlement row to settlements_v2 with typed era provenance.
 
     This is the CONSOLIDATED write path for all settlement writes. Both
     src/execution/harvester.py and src/ingest/harvester_truth_writer.py
     route through here after PR 1 implementation.
 
-    SCAFFOLD — implementation body is pseudocode comments only.
-
-    INV-37 ATTACH+SAVEPOINT PATTERN (pseudocode):
-
-        from src.state.db import get_forecasts_connection_with_world
-
-        with get_forecasts_connection_with_world() as _conn:   # ATTACH zeus-world.db AS world
-            _conn.execute("SAVEPOINT era_dispatch")
-            try:
-                if era_basis.era == ResolutionEra.UMA_OO_V2:
-                    # 1. Read uma_resolution from world.uma_resolution
-                    #    to verify the settlement is backed by an on-chain UMA vote.
-                    #    SELECT * FROM world.uma_resolution
-                    #    WHERE condition_id = settlement['condition_id']
-                    #    AND confirmations_count >= confirmations_required
-                    #    -> if not found: raise ValueError(f"no confirmed UMA row for {settlement}")
-
-                    # 2. Build provenance_json with era metadata
-                    #    provenance = _build_era_provenance(settlement, era_basis, uma_row)
-
-                elif era_basis.era == ResolutionEra.INTERNAL_RESOLVER_POST_2026_02_21:
-                    # 1. Internal resolver: eth_call validation path
-                    #    No uma_resolution lookup; use era_basis.on_chain_address for audit trail
-                    #    provenance = _build_era_provenance(settlement, era_basis, uma_row=None)
-
-                # 3. INSERT OR REPLACE INTO settlements_v2 with provenance_json
-                #    including era=era_basis.era.value in the provenance blob.
-                #    NEVER write 'harvester_live_uma_vote' in provenance_json after PR 1.
-
-                # 4. Optionally update era_watermark in world.era_watermark
-                #    (only on first-write for a new era transition)
-
-                _conn.execute("RELEASE SAVEPOINT era_dispatch")
-            except Exception:
-                _conn.execute("ROLLBACK TO SAVEPOINT era_dispatch")
-                raise
+    INV-37 ATTACH+SAVEPOINT PATTERN:
+        When conn=None, obtains connection via get_forecasts_connection_with_world()
+        and wraps the write in a SAVEPOINT era_dispatch for atomicity.
+        When conn is caller-provided, the caller owns the transaction boundary;
+        no SAVEPOINT is added (avoids with-conn + SAVEPOINT atomicity collision,
+        MEMORY: feedback_with_conn_nested_savepoint_audit).
 
     Args:
-        settlement: Dict containing at minimum condition_id, outcome, settled_at,
-            and all fields required by settlements_v2 schema.
+        settlement: Dict containing at minimum city, target_date, temperature_metric,
+            market_slug, and all fields required by settlements_v2 schema.
         era_basis: The EraAuthorityBasis for this settlement. Use
             dispatch_era_basis(settled_at_utc) to obtain it.
         conn: Optional pre-established connection (for testing with monkey-patched
-            connections). When None, obtains via get_forecasts_connection_with_world().
+            connections or caller-owned transactions). When None, obtains via
+            get_forecasts_connection_with_world().
+
+    Returns:
+        The dict returned by log_settlement_v2 (e.g. {"status": "written", ...} or
+        {"status": "refused_missing_identity", ...}). Callers MUST check status.
 
     Raises:
-        Inv37Violation: if a bare sqlite3.connect() is used (caught at db.py level).
         ValueError: if settlement is missing required fields or era basis is inconsistent.
     """
-    ...
+    from src.state.db import get_forecasts_connection_with_world, log_settlement_v2
+
+    def _execute(active_conn: Any) -> dict[str, Any]:
+        uma_row: dict[str, Any] | None = None
+        if era_basis.era == ResolutionEra.UMA_OO_V2:
+            condition_id = settlement.get("condition_id")
+            if condition_id:
+                row = active_conn.execute(
+                    """
+                    SELECT condition_id, tx_hash, block_number, resolved_value,
+                           resolved_at_utc, raw_log_json, observed_at_utc
+                    FROM uma_resolution
+                    WHERE condition_id = ?
+                    ORDER BY block_number DESC
+                    LIMIT 1
+                    """,
+                    (condition_id,),
+                ).fetchone()
+                if row:
+                    keys = (
+                        "condition_id", "tx_hash", "block_number", "resolved_value",
+                        "resolved_at_utc", "raw_log_json", "observed_at_utc",
+                    )
+                    uma_row = dict(zip(keys, row))
+
+        provenance = _build_era_provenance(settlement, era_basis, uma_row)
+        # Merge caller-supplied provenance fields (writer tag, obs_source, etc.) so
+        # era provenance fields are added rather than replacing existing evidence.
+        merged_provenance = dict(settlement.get("provenance", {}))
+        merged_provenance.update(provenance)
+
+        return log_settlement_v2(
+            active_conn,
+            city=settlement["city"],
+            target_date=settlement["target_date"],
+            temperature_metric=settlement["temperature_metric"],
+            market_slug=settlement.get("market_slug"),
+            winning_bin=settlement.get("winning_bin"),
+            settlement_value=settlement.get("settlement_value"),
+            settlement_source=settlement.get("settlement_source"),
+            settled_at=settlement.get("settled_at"),
+            authority=settlement.get("authority", "QUARANTINED"),
+            provenance=merged_provenance,
+            recorded_at=settlement.get("recorded_at"),
+        )
+
+    if conn is not None:
+        # Caller owns the transaction; no SAVEPOINT wrapping here.
+        return _execute(conn)
+    else:
+        with get_forecasts_connection_with_world() as _conn:
+            _conn.execute("SAVEPOINT era_dispatch")
+            try:
+                result = _execute(_conn)
+                _conn.execute("RELEASE SAVEPOINT era_dispatch")
+                return result
+            except Exception:
+                _conn.execute("ROLLBACK TO SAVEPOINT era_dispatch")
+                raise
 
 
 def _build_era_provenance(
@@ -200,27 +222,29 @@ def _build_era_provenance(
 ) -> dict[str, Any]:
     """Build the provenance_json dict for a settlement row.
 
-    SCAFFOLD — implementation body not yet written.
-
-    The returned dict is serialised as provenance_json TEXT in settlements_v2.
-    Key fields (SCAFFOLD pseudocode):
-        {
-            "era": era_basis.era.value,
-            "era_start_date_utc": era_basis.era_start_date_utc.isoformat(),
-            "on_chain_address": era_basis.on_chain_address,
-            "on_chain_codehash": era_basis.on_chain_codehash,
-            "authority_doc": era_basis.authority_doc,
-            "operator_authorization_date": era_basis.operator_authorization_date.isoformat(),
-            # For UMA_OO_V2 era only:
-            "uma_condition_id": uma_row['condition_id'] if uma_row else None,
-            "uma_tx_hash": uma_row['tx_hash'] if uma_row else None,
-            "uma_confirmations": uma_row['confirmations_count'] if uma_row else None,
-            # Reconstruction method (replaces legacy 'harvester_live_uma_vote' tag):
-            "reconstruction_method": f"era_provenance_{era_basis.era.value}",
-        }
+    The returned dict is merged into the caller's provenance dict and
+    serialised as provenance_json TEXT in settlements_v2.
 
     NOTE: The string 'harvester_live_uma_vote' MUST NOT appear in any
     provenance_json written after PR 1 merge. Post-PR-1 antibody test
     (tests/test_inv_era_provenance_post_cutover_count.py) asserts COUNT == 0.
     """
-    ...
+    provenance: dict[str, Any] = {
+        "era": era_basis.era.value,
+        "era_start_date_utc": era_basis.era_start_date_utc.isoformat(),
+        "on_chain_address": era_basis.on_chain_address,
+        "on_chain_codehash": era_basis.on_chain_codehash,
+        "authority_doc": era_basis.authority_doc,
+        "operator_authorization_date": era_basis.operator_authorization_date.isoformat(),
+        # Reconstruction method — replaces legacy tag
+        "reconstruction_method": f"era_provenance_{era_basis.era.value}",
+    }
+    if uma_row is not None:
+        provenance["uma_condition_id"] = uma_row.get("condition_id")
+        provenance["uma_tx_hash"] = uma_row.get("tx_hash")
+        provenance["uma_confirmations"] = uma_row.get("confirmations_count")
+    else:
+        provenance["uma_condition_id"] = None
+        provenance["uma_tx_hash"] = None
+        provenance["uma_confirmations"] = None
+    return provenance
