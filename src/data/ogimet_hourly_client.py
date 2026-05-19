@@ -43,7 +43,7 @@ from zoneinfo import ZoneInfo
 import httpx
 
 from src.data.wu_hourly_client import HourlyObservation
-from src.types.temperature import Celsius, c_to_f
+from src.types.temperature import Celsius, CelsiusBox, c_to_f
 
 
 # Force IPv4-only HTTP transport. Ogimet's IPv6 route intermittently
@@ -118,7 +118,9 @@ def _parse_metar_temp_c(metar_body: str) -> Optional[Celsius]:
         value = int(raw[1:] if negative else raw)
     except ValueError:
         return None
-    return Celsius(float(-value if negative else value))
+    # F3 PR 4: CelsiusBox as unit witness at parse boundary; value extracted for
+    # container compat (row containers stay list[tuple[datetime, Celsius]]).
+    return Celsius(CelsiusBox(float(-value if negative else value)).value)
 
 
 def _parse_metar_csv_line(line: str) -> Optional[tuple[datetime, Celsius]]:

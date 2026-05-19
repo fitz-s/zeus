@@ -26,7 +26,7 @@ import httpx
 from src.config import City
 from src.contracts.exceptions import MissingCalibrationError, ObservationUnavailableError
 from src.data.openmeteo_quota import quota_tracker
-from src.types.temperature import Fahrenheit
+from src.types.temperature import Fahrenheit, FahrenheitBox
 
 
 @dataclass(frozen=True, slots=True)
@@ -386,12 +386,11 @@ def _fetch_iem_asos(
             return None
 
         ob = data["last_ob"]
-        # F3 PR 2/3: IEM ASOS endpoint returns °F for WU ICAO stations.
-        # Tag at API parse boundary as Fahrenheit.
+        # F3 PR 4: FahrenheitBox as unit witness; .value extracted into Fahrenheit.
         raw_tmpf = ob["tmpf"]
         if raw_tmpf is None:
             return None
-        temp_f = Fahrenheit(float(raw_tmpf))
+        temp_f = Fahrenheit(FahrenheitBox(float(raw_tmpf)).value)
 
         local_valid = ob.get("local_valid")
         observed_local = _parse_local_timestamp(local_valid, tz)

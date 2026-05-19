@@ -41,7 +41,7 @@ from zoneinfo import ZoneInfo
 import httpx
 
 from src.data.wu_hourly_client import HourlyObservation
-from src.types.temperature import Celsius, c_to_f
+from src.types.temperature import Celsius, CelsiusBox, c_to_f
 
 logger = logging.getLogger(__name__)
 
@@ -272,9 +272,8 @@ def fetch_meteostat_bulk(
                 continue
         try:
             hour = int(hour_s)
-            # F3 PR 2/3: Meteostat CSV temp_C column is always native °C.
-            # Tag at parse boundary; convert to output unit explicitly.
-            temp_c = Celsius(float(temp_s))
+            # F3 PR 4: CelsiusBox as unit witness; .value extracted into Celsius.
+            temp_c = Celsius(CelsiusBox(float(temp_s)).value)
             utc_dt = datetime.fromisoformat(f"{date_s}T{hour:02d}:00:00+00:00")
         except (ValueError, TypeError):
             continue
