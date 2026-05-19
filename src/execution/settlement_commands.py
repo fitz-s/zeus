@@ -919,7 +919,7 @@ def reseat_stub_deferred_rows_for_autonomous_retry(conn: sqlite3.Connection) -> 
     obviates manual operator action for stub-deferred rows."""
     autonomous_enabled = os.environ.get(
         "ZEUS_AUTONOMOUS_REDEEM_ENABLED", ""
-    ).strip().lower() in ("1", "true", "yes")
+    ).strip().lower() in ("1", "true", "yes", "on")
     if not autonomous_enabled:
         return 0
     rows = conn.execute(
@@ -933,10 +933,22 @@ def reseat_stub_deferred_rows_for_autonomous_retry(conn: sqlite3.Connection) -> 
         except json.JSONDecodeError:
             continue
         if err.get("errorCode") == "REDEEM_DEFERRED_TO_R1":
-            conn.execute(
+            cur = conn.execute(
                 "UPDATE settlement_commands SET state = ?, terminal_at = NULL"
-                " WHERE command_id = ?",
-                (SettlementState.REDEEM_RETRYING.value, row["command_id"]),
+                " WHERE command_id = ? AND state = ?",
+                (
+                    SettlementState.REDEEM_RETRYING.value,
+                    row["command_id"],
+                    SettlementState.REDEEM_OPERATOR_REQUIRED.value,
+                ),
             )
-            promoted += 1
+            if cur.rowcount == 1:
+                _append_event(
+                    conn,
+                    row["command_id"],
+                    SettlementState.REDEEM_RETRYING.value,
+                    {"reason": "stub_deferred_reseat_autonomous"},
+                    recorded_at=_coerce_time(None),
+                )
+                promoted += 1
     return promoted

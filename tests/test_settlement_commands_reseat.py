@@ -1,6 +1,9 @@
 # Created: 2026-05-19
 # Last reused or audited: 2026-05-19
 # Authority basis: fix/redeem-reseat-stub-deferred plan; post-PR-#183 autonomous redeem path
+# Lifecycle: created=2026-05-19; last_reviewed=2026-05-19; last_reused=never
+# Purpose: Antibody tests for reseat_stub_deferred_rows_for_autonomous_retry — state-guard race, truthy env parity, idempotency.
+# Reuse: Inspect settlement_commands.py reseat function and SettlementState enum before running.
 """Antibody tests for reseat_stub_deferred_rows_for_autonomous_retry.
 
 Sed-break meta-verify: removing the `autonomous_enabled` check causes
@@ -144,3 +147,55 @@ def test_reseat_idempotent(conn, monkeypatch):
 
     assert first == 1
     assert second == 0
+
+
+def test_reseat_state_guard_skips_concurrent_transition(conn, monkeypatch):
+    """State guard prevents clobbering a row that transitioned out of OPERATOR_REQUIRED
+    between the SELECT and UPDATE (e.g. operator CLI set it to REDEEM_TX_HASHED)."""
+    monkeypatch.setenv("ZEUS_AUTONOMOUS_REDEEM_ENABLED", "1")
+    _insert_operator_required(conn, "cmd-007", "REDEEM_DEFERRED_TO_R1")
+    # Simulate concurrent operator transition before reseat runs its UPDATE.
+    conn.execute(
+        "UPDATE settlement_commands SET state = ? WHERE command_id = ?",
+        (SettlementState.REDEEM_TX_HASHED.value, "cmd-007"),
+    )
+    conn.commit()
+
+    promoted = reseat_stub_deferred_rows_for_autonomous_retry(conn)
+
+    assert promoted == 0
+    row = conn.execute(
+        "SELECT state FROM settlement_commands WHERE command_id = ?",
+        ("cmd-007",),
+    ).fetchone()
+    # Row must remain in TX_HASHED — not clobbered back to RETRYING.
+    assert row["state"] == SettlementState.REDEEM_TX_HASHED.value
+
+
+def test_reseat_truthy_env_on_value(conn, monkeypatch):
+    """ZEUS_AUTONOMOUS_REDEEM_ENABLED=on is accepted (parity with polymarket_v2_adapter)."""
+    monkeypatch.setenv("ZEUS_AUTONOMOUS_REDEEM_ENABLED", "on")
+    _insert_operator_required(conn, "cmd-008", "REDEEM_DEFERRED_TO_R1")
+
+    promoted = reseat_stub_deferred_rows_for_autonomous_retry(conn)
+
+    assert promoted == 1
+
+
+def test_reseat_appends_event_on_promotion(conn, monkeypatch):
+    """A stub_deferred_reseat_autonomous event is appended when a row is promoted."""
+    monkeypatch.setenv("ZEUS_AUTONOMOUS_REDEEM_ENABLED", "1")
+    _insert_operator_required(conn, "cmd-009", "REDEEM_DEFERRED_TO_R1")
+
+    promoted = reseat_stub_deferred_rows_for_autonomous_retry(conn)
+    conn.commit()
+
+    assert promoted == 1
+    events = conn.execute(
+        "SELECT event_type, payload_json FROM settlement_command_events WHERE command_id = ?",
+        ("cmd-009",),
+    ).fetchall()
+    assert len(events) == 1
+    assert events[0]["event_type"] == SettlementState.REDEEM_RETRYING.value
+    payload = json.loads(events[0]["payload_json"])
+    assert payload.get("reason") == "stub_deferred_reseat_autonomous"
