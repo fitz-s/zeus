@@ -1,4 +1,4 @@
-"""K2 live sunrise/sunset appender (Open-Meteo Archive API).
+"""K2 live sunrise/sunset appender — dual-path: Open-Meteo archive + NOAA.
 
 Keeps `solar_daily` fresh for all 46 cities. Unlike the other three append
 modules this one is deterministic — sunrise/sunset are astronomical, not
@@ -8,9 +8,11 @@ given (city, target_date) in the past, present, or future are fully
 determined by lat/lon/timezone/date and never change after publication.
 
 Consequences of this determinism:
-- Fetch window is [today, today+14] — unlike WU/hourly/forecasts which
-  must stay within the source's "published so far" range. The Open-Meteo
-  endpoint computes future sunrise/sunset deterministically.
+- `daily_tick` writes [today, today+14]: today via Open-Meteo archive API
+  (authoritative settlement source) and today+1..today+14 via stdlib NOAA
+  solar equations (no HTTP). archive-api.open-meteo.com rejects
+  end_date > today with HTTP 400; the NOAA path provides the forward window
+  so day0_capture never starves. Verified 2026-05-19 (alpha-loss postmortem).
 - Coverage grain is (city, target_date) with no sub_key. WRITTEN is the
   only non-empty state on the happy path; LEGITIMATE_GAP is theoretically
   possible for pre-city-onboard dates but the scanner applies that
@@ -318,11 +320,11 @@ def append_solar_window(
     chunk_days: int = CHUNK_DAYS,
     sleep_seconds: float = SLEEP_BETWEEN_REQUESTS,
 ) -> dict:
-    """Fetch + upsert sunrise/sunset for [start, end] for one city.
+    """Fetch + upsert sunrise/sunset for [start, end] for one city via Open-Meteo archive.
 
-    Accepts start/end that may extend past "today" because sunrise/sunset
-    is computable for any future date. Open-Meteo archive happily returns
-    future-day predictions for this daily endpoint.
+    start/end must be <= today: archive-api.open-meteo.com rejects
+    end_date > today with HTTP 400. For future dates use
+    _append_solar_future_window (NOAA astronomical path, no HTTP).
     """
     stats = {"fetched": 0, "inserted": 0, "fetch_errors": 0}
     if start_date > end_date:
@@ -385,10 +387,20 @@ def daily_tick(
     rebuild_run_id: Optional[str] = None,
     future_days: int = 14,
 ) -> dict:
-    """Daemon once-per-day entrypoint: fetch [today, today+future_days] for each city.
+    """Daemon once-per-day entrypoint: write [today, today+future_days] for each city.
 
-    Because sunrise/sunset is deterministic, this call is idempotent and
-    can run any time. Scheduled once per day (not per hour) in src/main.py.
+    Dual-path per date:
+    - today: Open-Meteo archive API (authoritative settlement source).
+    - today+1..today+future_days: NOAA astronomical equations (no HTTP).
+
+    archive-api.open-meteo.com rejects end_date > today (HTTP 400), so the
+    forward window is computed locally. Because sunrise/sunset is
+    deterministic, this call is idempotent and can run any time. Scheduled
+    once per day (not per hour) in src/main.py.
+
+    Returned stats keys:
+    - fetched/inserted/fetch_errors: Open-Meteo archive path counters.
+    - noaa_errors: NOAA local-compute or insert failures (no network).
     """
     if now_utc is None:
         now_utc = datetime.now(timezone.utc)
@@ -397,13 +409,19 @@ def daily_tick(
     if cities is None:
         cities = list(ALL_CITIES)
 
-    totals = {"cities_processed": 0, "fetched": 0, "inserted": 0, "fetch_errors": 0}
+    totals = {
+        "cities_processed": 0,
+        "fetched": 0,
+        "inserted": 0,
+        "fetch_errors": 0,   # Open-Meteo network failures
+        "noaa_errors": 0,    # NOAA local-compute / insert failures
+    }
     today = now_utc.date()
     future_end = today + timedelta(days=future_days)
     for city in cities:
-        # Past/present: Open-Meteo archive (authoritative settlement source).
+        # Present: Open-Meteo archive (authoritative settlement source).
         # archive-api.open-meteo.com rejects end_date > today (HTTP 400),
-        # so cap at today. Verified empirically 2026-05-10.
+        # so only today's row is fetched here. Verified empirically 2026-05-10.
         archive_stats = append_solar_window(
             city, today, today, conn, rebuild_run_id=rebuild_run_id,
         )
@@ -422,7 +440,7 @@ def daily_tick(
             rebuild_run_id=rebuild_run_id,
         )
         totals["inserted"] += future_stats.get("inserted", 0)
-        totals["fetch_errors"] += future_stats.get("errors", 0)
+        totals["noaa_errors"] += future_stats.get("errors", 0)
 
         totals["cities_processed"] += 1
     return totals

@@ -20,7 +20,7 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
-from src.config import cities_by_name
+from src.config import City, cities_by_name
 from src.data.solar_append import (
     _noaa_sunrise_sunset_utc,
     _build_noaa_row,
