@@ -425,3 +425,130 @@ def test_empty_tables_return_certified_empty_visibility() -> None:
     assert report["authority"] == "derived_operator_visibility"
     assert report["buckets"] == []
     assert report["source_errors"] == []
+
+
+# ---------------------------------------------------------------------------
+# K1-ghost antibody (2026-05-19 alpha-loss postmortem):
+# K1 migration moved calibration_pairs_v2 from world.db to forecasts.db but
+# left an empty ghost shell in world.db. A sensor that searches
+# ["world", "main"] hits the ghost first and reports 0 verified pairs for
+# every bucket — even though forecasts.db holds 91M VERIFIED rows. The
+# `calibration_serving_status` route reports BLOCKED to operators and the
+# entry pipeline treats every market as CALIBRATION_IMMATURE.
+#
+# Relationship invariant: _table_ref must resolve calibration_pairs_v2 to
+# the schema that holds real data. With both `world` (empty) and `forecasts`
+# (populated) attached, it MUST return the forecasts ref. Sed-flip:
+# removing `"forecasts"` from _TABLE_SCHEMA_PREFERENCE causes RED.
+# ---------------------------------------------------------------------------
+
+
+def test_table_ref_prefers_forecasts_over_world_ghost_for_calibration_pairs_v2(
+    tmp_path,
+) -> None:
+    from src.observability.calibration_serving_status import _table_ref
+
+    world_path = tmp_path / "world.db"
+    forecasts_path = tmp_path / "forecasts.db"
+
+    world = sqlite3.connect(str(world_path))
+    world.execute(
+        "CREATE TABLE calibration_pairs_v2 (id INTEGER PRIMARY KEY, value INTEGER)"
+    )
+    world.commit()
+    world.close()
+
+    forecasts = sqlite3.connect(str(forecasts_path))
+    forecasts.execute(
+        "CREATE TABLE calibration_pairs_v2 (id INTEGER PRIMARY KEY, value INTEGER)"
+    )
+    forecasts.executemany(
+        "INSERT INTO calibration_pairs_v2 (id, value) VALUES (?, ?)",
+        [(1, 100), (2, 200), (3, 300)],
+    )
+    forecasts.commit()
+    forecasts.close()
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute("ATTACH DATABASE ? AS world", (str(world_path),))
+    conn.execute("ATTACH DATABASE ? AS forecasts", (str(forecasts_path),))
+
+    resolved = _table_ref(conn, "calibration_pairs_v2")
+    assert resolved == "forecasts.calibration_pairs_v2", (
+        f"K1-ghost antibody FAIL: _table_ref resolved to {resolved!r}; "
+        f"expected 'forecasts.calibration_pairs_v2'. World.db holds an empty "
+        f"K1-orphan shell; reading it produces a false-BLOCKED signal."
+    )
+
+    row_count = conn.execute(
+        f"SELECT COUNT(*) FROM {resolved}"
+    ).fetchone()[0]
+    assert row_count == 3, (
+        f"K1-ghost antibody FAIL: resolved ref {resolved!r} returned "
+        f"{row_count} rows; expected 3 (the forecasts.db real data)."
+    )
+    conn.close()
+
+
+def test_table_ref_falls_back_to_world_when_forecasts_unattached(tmp_path) -> None:
+    """If only `world` is attached (e.g. ETL standalone scripts), the sensor
+    must still resolve to world.calibration_pairs_v2 rather than returning
+    None. Verifies the preference map is ordered, not hardcoded."""
+    from src.observability.calibration_serving_status import _table_ref
+
+    world_path = tmp_path / "world.db"
+    world = sqlite3.connect(str(world_path))
+    world.execute(
+        "CREATE TABLE calibration_pairs_v2 (id INTEGER PRIMARY KEY)"
+    )
+    world.commit()
+    world.close()
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute("ATTACH DATABASE ? AS world", (str(world_path),))
+
+    resolved = _table_ref(conn, "calibration_pairs_v2")
+    assert resolved == "world.calibration_pairs_v2"
+    conn.close()
+
+
+def test_both_observability_sensors_share_canonical_schema_preference() -> None:
+    """Antibody (PR #210 Copilot review): calibration_serving_status and
+    status_summary must reference the SAME schema preference object — keeping
+    two independent maps in sync is brittle and would re-introduce the
+    2026-05-19 K1-ghost false-BLOCKED outage if one drifted.
+
+    Sed-flip: copy-paste a local _TABLE_SCHEMA_PREFERENCE back into either
+    sensor module and stop importing from v2_table_schema_preference → the
+    `is` identity check fails → RED.
+    """
+    from src.observability.v2_table_schema_preference import V2_TABLE_SCHEMA_PREFERENCE
+    from src.observability import status_summary as ss_mod
+
+    assert ss_mod._V2_ROW_COUNT_SCHEMA_PREFERENCE is V2_TABLE_SCHEMA_PREFERENCE, (
+        "K1-ghost drift antibody FAIL: status_summary._V2_ROW_COUNT_SCHEMA_PREFERENCE "
+        "is not the canonical V2_TABLE_SCHEMA_PREFERENCE — the two sensors will drift "
+        "and one will reintroduce the operator-visibility defect."
+    )
+
+
+def test_v2_table_schema_preference_covers_every_v2_table() -> None:
+    """Drift guard: every v2 table that any sensor reads MUST be enumerated
+    in the canonical map. If a new v2 table is added without registering it
+    here, both sensors silently fall back to the legacy ("world","main")
+    default and may hit a ghost shell in world.db.
+    """
+    from src.observability.v2_table_schema_preference import V2_TABLE_SCHEMA_PREFERENCE
+
+    expected_v2_tables = {
+        "calibration_pairs_v2",
+        "ensemble_snapshots_v2",
+        "platt_models_v2",
+        "historical_forecasts_v2",
+        "settlements_v2",
+    }
+    missing = expected_v2_tables - set(V2_TABLE_SCHEMA_PREFERENCE.keys())
+    assert not missing, (
+        f"Drift antibody FAIL: V2_TABLE_SCHEMA_PREFERENCE missing tables: "
+        f"{sorted(missing)}. Update src/observability/v2_table_schema_preference.py."
+    )
