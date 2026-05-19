@@ -934,17 +934,26 @@ def _clob_market_is_live(condition_id: str) -> bool | None:
     """
     global _CLOB_ARCHIVED_CACHE
     if condition_id in _CLOB_ARCHIVED_CACHE:
-        archived, eob = _CLOB_ARCHIVED_CACHE[condition_id]
+        cached = _CLOB_ARCHIVED_CACHE[condition_id]
+        if cached is None:
+            return None
+        archived, eob = cached
         return not archived and eob
     try:
         resp = httpx.get(
             f"{CLOB_BASE}/markets/{condition_id}",
-            timeout=5.0,
+            timeout=2.0,
         )
     except httpx.RequestError as exc:
+        # Memoize failure so subsequent same-tick calls short-circuit instead of
+        # incurring serial timeouts. Bot review P1 (Codex + Copilot 2026-05-19):
+        # _event_has_active_children runs up to 10 pages × 50 events per tag;
+        # uncached failure path stalls scanning for minutes during a CLOB outage.
+        _CLOB_ARCHIVED_CACHE[condition_id] = None
         logger.debug("CLOB archived check failed for %s: %s", condition_id, exc)
         return None
     if resp.status_code != 200:
+        _CLOB_ARCHIVED_CACHE[condition_id] = None
         logger.debug(
             "CLOB archived check non-200 for %s: %s", condition_id, resp.status_code
         )
@@ -952,6 +961,7 @@ def _clob_market_is_live(condition_id: str) -> bool | None:
     try:
         data = resp.json()
     except Exception:
+        _CLOB_ARCHIVED_CACHE[condition_id] = None
         return None
     archived = bool(data.get("archived", False))
     eob = bool(data.get("enable_order_book", True))

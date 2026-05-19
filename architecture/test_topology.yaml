@@ -2250,7 +2250,8 @@ test_metadata:
     source_under_test:
       - src/data/market_scanner.py
     law_dependencies:
-      - /Users/leofitz/.claude/jobs/fda4e853/design/maker-mode-redesign.md
+      - architecture/invariants.yaml
+      - docs/authority/zeus_current_architecture.md
     notes: >
       Antibody for fix/scanner-tag-priority-archived-filter (2026-05-19).
       Two stacked failures blocked Zeus from discovering Polymarket V2-native

@@ -1,6 +1,9 @@
 # Created: 2026-05-19
 # Last reused or audited: 2026-05-19
 # Authority basis: Polymarket V2 cutover (2026-05-11) — gamma acceptingOrders lies for archived markets
+# Lifecycle: created=2026-05-19; last_reviewed=2026-05-19; last_reused=never
+# Purpose: Antibody tests for src/data/market_scanner.py — tag-84 priority + CLOB archived cross-check (Polymarket V2 cutover 2026-05-11 unblock).
+# Reuse: Run when modifying TAG_SLUGS order, _event_has_active_children, _clob_market_is_live, or _CLOB_ARCHIVED_CACHE behavior.
 """Antibody tests: tag-84 priority ordering + CLOB archived cross-check.
 
 Two stacked failures blocked Zeus from discovering V2-native weather markets
