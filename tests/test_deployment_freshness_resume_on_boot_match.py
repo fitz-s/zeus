@@ -3,6 +3,9 @@
 # Authority basis: PIPELINE_REVIEW.md §8, SYNTHESIS.md §8.7
 #   5/18 incident: PR #149 deployment_freshness_4h_divergence pause persisted
 #   across daemon restart because boot sequence had no auto-resume logic.
+# Lifecycle: created=2026-05-19; last_reviewed=2026-05-19; last_reused=never
+# Purpose: antibody — deployment_freshness boot-time SHA-match auto-resume (PR #149 fix)
+# Reuse: Run when modifying boot_check logic, deployment_freshness pause/resume, or control_plane boot sequence.
 """Antibody tests for boot-time deployment_freshness auto-resume.
 
 When an operator restarts the daemon after deploying new code (i.e. git HEAD

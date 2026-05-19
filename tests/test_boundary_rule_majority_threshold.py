@@ -1,6 +1,9 @@
 # Created: 2026-05-19
 # Last reused or audited: 2026-05-19
 # Authority basis: SYNTHESIS.md Addendum 2 §2 (Bug A + Bug B) + §5
+# Lifecycle: created=2026-05-19; last_reviewed=2026-05-19; last_reused=never
+# Purpose: antibody — boundary-ambiguous majority threshold + strict-< rule (LOW 91% over-rejection fix)
+# Reuse: Run when modifying boundary_ambiguous logic, per-snapshot aggregation, or ensemble member rejection rules.
 """Antibody tests for boundary-leakage rule fixes.
 
 Bug A fix: per-snapshot aggregation changed from any() to majority threshold (≥26/51).
