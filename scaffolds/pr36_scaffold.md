@@ -1,9 +1,9 @@
 # PR 3 + PR 6 SCAFFOLD — DecisionSourceContext Coordinated Extension
 
 **Branch**: `feat/phase0-pr36-decision-source-context-coordinated-20260519`
-**Authored**: 2026-05-19 by Executor B/36 (v1); revised 2026-05-19 by Executor B/36 v2
+**Authored**: 2026-05-19 by Executor B/36 (v1); revised 2026-05-19 by Executor B/36 v2; Path F finalized 2026-05-19 by Executor B/36 v3
 **Authority**: WAVE_B_PR_3_6_FIELD_MAP.md (field ownership table, 17 rows)
-**Phase**: SCAFFOLD REVISION — 3 blocking items addressed; production not yet started
+**Phase**: SCAFFOLD REVISION — all 3 blocking items resolved; production not yet started
 
 ---
 
@@ -70,28 +70,79 @@ _prev_orderbook_hash_by_market: dict[str, tuple[str, float]] = {}
 
 ---
 
-## BLOCKING REVISION 3 — Validator vacuousness / Path B writer decision (HALT reported)
+## BLOCKING REVISION 3 — Validator vacuousness / Path F (RESOLVED)
 
-**Orchestrator decided**: Path B — expand PR 3 scope to wire the writer in the same PR (`observation_client.py` populates `observation_time`, `provider_reported_time`, `observation_available_at` into `DecisionSourceContext` factory paths).
+**Orchestrator decision (v3 final)**: **Path F — Optional `provider_reported_time` + conditional validators**.
 
-**B/36 v2 HALT condition triggered**: Path B is not feasible as specified.
+**Why the prior paths were rejected**:
+- **Path A** (vacuous validators with empty-string default): pollutes schema — reader cannot distinguish "deliberately empty" from "writer broke". Violates "every field has observable semantics" principle.
+- **Path B-degraded / B-alt** (fabricate `provider_reported_time = observation_time`): `obs_after_provider` assertion becomes trivially always-true; instrument is permanently always-green regardless of real data quality. Silent fabrication is worse than no instrument.
+- **Path F** (Optional + conditional): honest — `None` means "this source doesn't expose a separate provider-reported timestamp"; assertions fire only on real data; schema is future-compatible for institutional sources (NOAA, METAR) that DO expose separate observation/report times.
 
-**Finding**: The WU API (Weather Underground timeseries) is the only executable settlement source in `observation_client.py`. It exposes a single timestamp per observation: `valid_time_gmt` (when the measurement was valid). There is **no `provider_reported_time` field** in the WU API payload — no "provider's stated reported-at" field distinct from the observation validity time. The IEM ASOS and Open-Meteo fallbacks similarly expose only a single observation timestamp.
+**Authority basis**: Code-over-docs rule (CLAUDE.md). `src/data/observation_client.py:324` is ground truth — `valid_time_gmt` is the only timestamp in WU API payload. No fabrication permitted.
 
-**Grep evidence**:
-- `src/data/observation_client.py:324` — only timestamp extracted from WU API: `raw_time = obs.get("valid_time_gmt")`
-- Zero occurrences of `reported_at`, `reportedAt`, `pubTime`, `obsTimeLocal`, `obsTimeUtc` in `observation_client.py`
-- `Day0ObservationContext` dataclass has no `provider_reported_time` field
+---
 
-**Consequence**: If `provider_reported_time` is forced equal to `observation_time` with a `degradation_level` adjustment (the fallback option mentioned in the critic spec), the ordering assertion `observation_time ≤ provider_reported_time` becomes trivially true (equality), and `provider_after_available` reduces to `observation_time ≤ observation_available_at` — one fewer causal chain link than specified.
+### Path F specification
 
-**ESCALATION — operator decision required**:
-> Path B as specified requires `provider_reported_time` to come from the weather provider's API response. The WU API does not expose this field. Three options:
-> - **Path B-degraded**: Populate `provider_reported_time = observation_time` (equality fallback). Validators work but the `obs_after_provider` check is vacuous. Acceptable if Phase 0 instrument is "available whenever provider time is accessible."
-> - **Path A-revised**: Ship PR 3 validators with all three new fields present in the dataclass but empty-string default. Add a code comment explaining vacuousness + "INSTRUMENT_INACTIVE_UNTIL_WU_REPORTED_AT_AVAILABLE". Defer writer wire-up to Phase 1 when/if WU API upgrade or alternate provider adds `reported_at`.
-> - **Path B-alt**: Use `observation_available_at` = `datetime.now(UTC)` at `get_current_observation()` call return (the "when Zeus first could access this observation" definition), and `provider_reported_time = observation_time` (equality). This gives two live orderings (`observation_time ≤ observation_available_at` and `observation_available_at ≤ decision_time`), with the middle link (`obs ≤ provider`) vacuous. Partial instrument, honest about degradation.
+**Field declaration** (in `DecisionSourceContext`):
+```python
+provider_reported_time: Optional[str] = None   # None = source doesn't expose separate reported-at
+```
+NOT `str = ""`. The `Optional[str]` type is intentional — allows `None` to mean "not available" rather than "empty string / writer forgot to populate".
 
-**B/36 v2 does NOT resolve this unilaterally. Awaiting operator instruction before proceeding.**
+**Field count**: Still 24. `provider_reported_time` is a declared field (just Optional). 12 existing + 4 PR 3 new + 8 PR 6 new = 24. No change from BLOCKING REVISION 1.
+
+**Conditional validators in `integrity_errors()`**:
+```python
+obs_time = _context_time(self.observation_time)
+obs_avail = _context_time(self.observation_available_at)
+dec_time = parsed_times["decision_time"]   # already computed above
+
+# provider_reported_time is Optional — only assert when populated
+if self.provider_reported_time is not None:
+    prov_time = _context_time(self.provider_reported_time)
+    if obs_time and prov_time and obs_time > prov_time:
+        errors.append("obs_after_provider")
+    if prov_time and obs_avail and prov_time > obs_avail:
+        errors.append("provider_after_available")
+
+# available_after_decision stays UNCONDITIONAL (observation_available_at is mandatory)
+if obs_avail and dec_time and obs_avail > dec_time:
+    errors.append("available_after_decision")
+```
+
+When `provider_reported_time is None`: the two conditional assertions skip silently — no fabrication, no fake-passing, no vacuous always-green.
+
+**Writer wire-up** (Path F):
+
+`src/data/observation_client.py` (WU branch — at `DecisionSourceContext` factory or at the `get_current_observation()` write-back site):
+```python
+observation_time = valid_time_gmt_iso   # from obs.get("valid_time_gmt")
+provider_reported_time = None           # WU API has no separate reported-at field
+observation_available_at = datetime.now(timezone.utc).isoformat()  # harvester write-back time
+```
+
+`src/data/observation_client.py` (IEM ASOS branch — `_fetch_iem_asos`):
+- Grep `_fetch_iem_asos` for any candidate "reported-at" field in ASOS payload. If none (expected): `provider_reported_time = None`.
+- `observation_available_at = datetime.now(timezone.utc).isoformat()` regardless.
+
+`observation_available_at` is **MANDATORY** (not Optional). The gap `observation_available_at − observation_time` is a real, meaningful harvester-latency measurement even without provider-reported time.
+
+**Semantic note on `observation_available_at`**: This is the moment Zeus's harvester wrote back the observation, i.e., when it became available to downstream consumers. It is NOT the "observation valid time" (`observation_time`). The delta captures real harvesting lag.
+
+**Tests** — conditional branch coverage required:
+
+In `tests/test_decision_source_context_causality_pr3.py`:
+- R-3.1 (conditional): `provider_reported_time = "2026-01-01T10:00:00Z"`, `observation_time = "2026-01-01T10:01:00Z"` → `"obs_after_provider"` in errors
+- R-3.2 (conditional): `provider_reported_time = "2026-01-01T10:02:00Z"`, `observation_available_at = "2026-01-01T10:01:00Z"` → `"provider_after_available"` in errors
+- R-3.3 (unconditional): `observation_available_at > decision_time` → `"available_after_decision"` in errors (unchanged)
+- **R-3.NEW-a**: `provider_reported_time = None` → `"obs_after_provider"` NOT in errors regardless of `observation_time` value
+- **R-3.NEW-b**: `provider_reported_time = None` → `"provider_after_available"` NOT in errors regardless of `observation_available_at` value
+- R-3.4 (happy path): in-order timestamps with real `provider_reported_time` → no causality errors
+- R-3.5: `CausalityStatus` accepts all 9 Literal values without type error
+
+PR 6's 3 validators (`inclusion_after_finality`, `submit_after_ack`, `excessive_clock_drift`) are unconditional and unaffected by Path F.
 
 ---
 
@@ -101,32 +152,38 @@ _prev_orderbook_hash_by_market: dict[str, tuple[str, float]] = {}
 
 **Action**: Add 4 new fields to `DecisionSourceContext` dataclass after `decision_time_status`; add 3 ordering assertions in `integrity_errors()`.
 
-**New fields to add** (all `str = ""`):
+**New fields to add** (Path F: `provider_reported_time` is `Optional[str]`, others `str = ""`):
 ```python
 # Observation timing chain (rows 1-3 in field map — NEW per F1 finding)
-observation_time: str = ""           # UTC ISO; when observation instrument recorded
-provider_reported_time: str = ""     # UTC ISO; timestamp as reported by weather provider
-observation_available_at: str = ""   # UTC ISO; when Zeus first could access this observation
+observation_time: str = ""                  # UTC ISO; when observation instrument recorded
+provider_reported_time: Optional[str] = None  # UTC ISO; provider's stated reported-at, if exposed
+observation_available_at: str = ""          # UTC ISO; harvester write-back time (MANDATORY)
 # Anchor source tag (row 17 in field map — NEW)
-polymarket_end_anchor_source: str = ""  # "gamma_explicit" | "f1_12z_fallback"
+polymarket_end_anchor_source: str = ""      # "gamma_explicit" | "f1_12z_fallback"
 ```
+
+`Optional` import: add `from typing import Optional` if not already present in `execution_intent.py`.
 
 **New integrity_errors() assertions** (after existing checks, using `_context_time()`):
 ```python
 obs_time = _context_time(self.observation_time)
-prov_time = _context_time(self.provider_reported_time)
 obs_avail = _context_time(self.observation_available_at)
 dec_time = parsed_times["decision_time"]   # already computed above
 
-if obs_time and prov_time and obs_time > prov_time:
-    errors.append("obs_after_provider")
-if prov_time and obs_avail and prov_time > obs_avail:
-    errors.append("provider_after_available")
+# provider_reported_time is Optional — only assert when populated (Path F)
+if self.provider_reported_time is not None:
+    prov_time = _context_time(self.provider_reported_time)
+    if obs_time and prov_time and obs_time > prov_time:
+        errors.append("obs_after_provider")
+    if prov_time and obs_avail and prov_time > obs_avail:
+        errors.append("provider_after_available")
+
+# available_after_decision is UNCONDITIONAL — observation_available_at is mandatory
 if obs_avail and dec_time and obs_avail > dec_time:
     errors.append("available_after_decision")
 ```
 
-**Update `from_forecast_context()`**: pass empty string defaults for new fields (no source in this factory path).
+**Update `from_forecast_context()`**: pass `observation_time=""`, `provider_reported_time=None`, `observation_available_at=""`, `polymarket_end_anchor_source=""` for the new fields (no source in this factory path).
 
 ### 2. `src/contracts/snapshot_ingest_contract.py` (line 96)
 
@@ -188,12 +245,15 @@ Backfill logic: rows where `tx_hash IS NOT NULL` or `market_end_at IS NOT NULL` 
 # Created: 2026-05-19
 ```
 
-Relationship tests R-3.1, R-3.2, R-3.3 (written BEFORE implementation):
-- R-3.1: `observation_time > provider_reported_time` → `integrity_errors()` contains `"obs_after_provider"`
-- R-3.2: `provider_reported_time > observation_available_at` → contains `"provider_after_available"`
-- R-3.3: `observation_available_at > decision_time` → contains `"available_after_decision"`
-- R-3.4 (happy path): in-order timestamps → no causality errors emitted
+Relationship tests R-3.1 to R-3.5 + conditional None branches (written BEFORE implementation):
+- R-3.1: `provider_reported_time = "...T10:01Z"`, `observation_time = "...T10:02Z"` (obs after provider) → `integrity_errors()` contains `"obs_after_provider"`
+- R-3.2: `provider_reported_time = "...T10:02Z"`, `observation_available_at = "...T10:01Z"` (provider after avail) → contains `"provider_after_available"`
+- R-3.3: `observation_available_at > decision_time` → contains `"available_after_decision"` (UNCONDITIONAL — no `provider_reported_time` dependency)
+- R-3.4 (happy path): in-order timestamps with real `provider_reported_time` → no causality errors emitted
 - R-3.5: `causality_status` field accepts all 9 values of `CausalityStatus` Literal without type error
+- **R-3.NEW-a** (Path F conditional): `provider_reported_time = None`, `observation_time` set to future (would trigger obs_after_provider if `provider_reported_time` were populated) → `"obs_after_provider"` NOT in errors
+- **R-3.NEW-b** (Path F conditional): `provider_reported_time = None`, `observation_available_at` set to past (would trigger provider_after_available if populated) → `"provider_after_available"` NOT in errors
+- **R-3.NEW-c** (Path F mandatory): `observation_available_at` populated even when `provider_reported_time = None`, and `available_after_decision` still fires when ordering violated
 
 ---
 
@@ -490,11 +550,11 @@ ALTER TABLE wrap_unwrap_commands ADD COLUMN finality_confirmed_time TEXT;
 
 ---
 
-## LOC estimate (revised v2)
+## LOC estimate (revised v3 — Path F final)
 
 | Component | Lines |
 |---|---|
-| `execution_intent.py` additions (fields + validators) | ~60 |
+| `execution_intent.py` additions (fields + validators, Path F Optional) | ~65 |
 | `snapshot_ingest_contract.py` (enum + type change + mapping dict) | ~30 |
 | `market_phase.py` (anchor tagging) | ~15 |
 | `fill_tracker.py` (finality split) | ~25 |
@@ -502,20 +562,23 @@ ALTER TABLE wrap_unwrap_commands ADD COLUMN finality_confirmed_time TEXT;
 | `executor.py` (submit intent + ack capture) | ~20 |
 | `clock_skew_probe.py` (new module) | ~70 |
 | `monitor_refresh.py` (prior-hash cache + delta derivation) | ~30 |
-| Migration scripts × 3 (realistic estimate: 70 LOC each) | ~210 |
-| Test files × 3 | ~250 |
-| **Total production** | **~480** |
-| **Total with tests** | **~730** |
+| `observation_client.py` (Path F writer: `observation_available_at = now()`, `provider_reported_time = None`) | ~30 |
+| Migration scripts × 3 (realistic: 70 LOC each) | ~210 |
+| Test files × 3 (incl. R-3.NEW-a/b conditional None branches) | ~270 |
+| **Total production** | **~515** |
+| **Total with tests** | **~785** |
 
-**Note**: Path B writer scope (observation_client.py ~50-80 LOC) is blocked pending operator ESCALATION on `provider_reported_time` source. If Path B-alt or B-degraded is approved, add ~50 LOC production + ~50 LOC tests → **~830 total**. Well within 1500 LOC SCAFFOLD cap.
+**Path F note**: No fabrication writer needed (`provider_reported_time = None` for WU/IEM is a 2-line assignment, not a derived field). Smaller scope than B-degraded. `observation_available_at` write adds ~15 LOC real value (harvester latency measurement). Well within 1500 LOC SCAFFOLD cap.
 
 ---
 
-## ESCALATION / open items (v2 revision — for Wave-B opus critic + operator)
+## ESCALATION / open items (v3 revision — all blocking items resolved)
 
 1. **F1 (field-map "(existing)" label)**: RESOLVED. Rows 1-3 are genuinely new fields (confirmed by grep + BLOCKING REVISION 1 above).
 2. **`observation_instants_v2` no-migration**: RESOLVED. Critic approved deferral to Phase 1. Out of scope for Phase 0.
 3. **`run_complete_time` writer site**: RESOLVED per APPROVED items from critic. Write site = `source_run_completeness == "COMPLETE"` branch in `_fetch_ecmwf_run_data()` result-building block (line ~818), NOT the `< 51` negative guard.
 4. **`raw_orderbook_hash_transition_delta_ms` derivation**: RESOLVED in BLOCKING REVISION 2. Cache dict in `src/engine/monitor_refresh.py` (module-level, process-local).
-5. **OPEN — Path B writer feasibility (ESCALATION for operator)**: WU API does not expose `provider_reported_time` separately from `observation_time`. Three paths (B-degraded, A-revised, B-alt) described in BLOCKING REVISION 3 above. Awaiting operator direction before production starts.
-6. **Backfill heuristic correction**: `tx_hash IS NULL` heuristic was inverted in v1 SCAFFOLD. Correct discriminator = `market_end_at IS NOT NULL → 'gamma_explicit'`. Fixed in Storage migration SQL section above.
+5. **Path B writer feasibility → Path F**: RESOLVED. Orchestrator decided Path F (Optional + conditional validators). `provider_reported_time: Optional[str] = None`; WU+IEM writers set `None` (no fabrication); conditional validators skip silently when None. Full spec in BLOCKING REVISION 3 above. No new ESCALATIONs.
+6. **Backfill heuristic correction**: RESOLVED. `tx_hash IS NULL` heuristic was inverted in v1 SCAFFOLD. Correct discriminator = `market_end_at IS NOT NULL → 'gamma_explicit'`. Fixed in Storage migration SQL section above.
+
+**All 3 BLOCKING items resolved. No open ESCALATIONs. Ready for Wave-B opus critic review before production.**
