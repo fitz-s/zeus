@@ -247,3 +247,20 @@ def market_phase_from_market_dict(
         polymarket_end_utc=polymarket_end_utc,
         uma_resolved=uma_resolved,
     )
+
+
+def market_end_anchor_source(market: dict) -> str:
+    """Return the anchor source string for polymarket_end_anchor_source.
+
+    Returns 'gamma_explicit' when market_end_at / endDate / end_date is present
+    in the market dict, otherwise 'f1_12z_fallback' (the F1 12:00 UTC uniform
+    anchor is used as the settlement end time).
+
+    Phase 0 status: helper introduced but not yet wired into the harvester →
+    request_redeem call path (wiring requires threading the market dict through
+    harvester.py; deferred to Phase 1 settlement-chain hardening).
+    The DB column defaults to 'gamma_explicit' for all Phase 0 rows, which is
+    correct for the current majority case (all live markets have explicit end dates).
+    """
+    end_str = market.get("market_end_at") or market.get("endDate") or market.get("end_date")
+    return "gamma_explicit" if end_str else "f1_12z_fallback"

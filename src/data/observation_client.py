@@ -55,6 +55,9 @@ class Day0ObservationContext:
     first_sample_time: object = None
     last_sample_time: object = None
     coverage_status: str = "UNKNOWN"
+    # PR 3: observation timing chain fields (Path F)
+    observation_available_at: str = ""       # UTC ISO; harvester write-back time (MANDATORY)
+    provider_reported_time: Optional[str] = None  # UTC ISO; None = source doesn't expose separate reported-at
 
     def __post_init__(self) -> None:
         if self.low_so_far is None:
@@ -358,6 +361,8 @@ def _fetch_wu_observation(
             first_sample_time=_observation_time_utc_iso(first_local),
             last_sample_time=_observation_time_utc_iso(last_local),
             coverage_status="OK",
+            observation_available_at=datetime.now(timezone.utc).isoformat(),
+            provider_reported_time=None,  # WU API has no separate reported-at field
         )
 
     except (httpx.HTTPError, KeyError, ValueError) as e:
@@ -433,6 +438,8 @@ def _fetch_iem_asos(
             first_sample_time=local_valid,
             last_sample_time=local_valid,
             coverage_status="DIAGNOSTIC_FALLBACK",
+            observation_available_at=datetime.now(timezone.utc).isoformat(),
+            provider_reported_time=None,  # IEM ASOS has no separate reported-at field
         )
 
     except MissingCalibrationError:

@@ -2320,3 +2320,43 @@ test_metadata:
     notes: >
       R-EE.5–R-EE.6: PR 2 wide_spread_display_substitution + depth_at_best_ask
       roundtrip, one-sided-book zero-depth, schema idempotency, WIDE_SPREAD_THRESHOLD.
+
+  tests/test_decision_source_context_causality_pr3.py:
+    modules: [contracts, data, strategy]
+    category: relationship_protection
+    kind: relationship
+    created: 2026-05-19
+    pr: PR3
+    blocks_commit: true
+    law_dependencies:
+      - scaffolds/pr36_scaffold.md
+    notes: >
+      PR 3 relationship tests: observation timing chain ordering (obs_after_provider,
+      provider_after_available, available_after_decision). Path F conditional validators
+      (provider_reported_time=None suppresses obs_after_provider + provider_after_available).
+  tests/test_decision_source_context_pr6.py:
+    modules: [contracts, execution, runtime]
+    category: relationship_protection
+    kind: relationship
+    created: 2026-05-19
+    pr: PR6
+    blocks_commit: true
+    law_dependencies:
+      - scaffolds/pr36_scaffold.md
+    notes: >
+      PR 6 relationship tests: chain-finality split (inclusion_after_finality),
+      submit/ack ordering (submit_after_ack), clock drift thresholds (100ms warning,
+      200ms blocking). R-6.4 raw_orderbook_hash_transition_delta_ms fixture probe.
+  tests/test_inv_alpha_provenance.py:
+    modules: [data]
+    category: core_law_antibody
+    kind: antibody
+    created: 2026-05-19
+    pr: PR6
+    blocks_commit: true
+    law_dependencies:
+      - scaffolds/pr36_scaffold.md
+    notes: >
+      INV-alpha-provenance antibody: raw_orderbook_hash_transition_delta_ms cache
+      logic correctness. Verifies process-local hash transition delta is computed
+      correctly, None on first observation, positive int on hash change.

@@ -777,6 +777,12 @@ def _write_source_authority_chain(
         source_run_completeness = "PARTIAL"
         partial_run = True
         reason_code = "MISSING_EXPECTED_MEMBERS"
+    # PR 6: capture member timing chain fields for DecisionSourceContext.
+    # min/max use default="" so empty filtered generators never raise ValueError
+    # (all rows could legitimately have NULL source_available_at on degraded ingest).
+    _avail_times = [str(row["source_available_at"]) for row in rows if row.get("source_available_at")]
+    first_member_observed_time_iso: str = min(_avail_times, default="")
+    run_complete_time_iso: str = ("" if partial_run else max(_avail_times, default=""))
     observed_step_horizons = [
         float(row["step_horizon_hours"])
         for row in rows
@@ -967,6 +973,8 @@ def _write_source_authority_chain(
         "source_run_completeness": source_run_completeness,
         "coverage_written": coverage_written,
         "producer_readiness_written": readiness_written,
+        "first_member_observed_time": first_member_observed_time_iso,
+        "run_complete_time": run_complete_time_iso,
     }
 
 

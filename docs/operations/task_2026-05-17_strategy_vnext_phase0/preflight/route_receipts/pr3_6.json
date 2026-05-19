@@ -1,0 +1,62 @@
+{
+  "queried_at_utc": "2026-05-19T12:00:00Z",
+  "task": "phase0_pr3_pr6_decision_source_context_coordinated",
+  "intent": "modify_existing",
+  "write_intent": "write",
+  "files_submitted": [
+    "src/contracts/execution_intent.py",
+    "src/contracts/snapshot_ingest_contract.py",
+    "src/strategy/market_phase.py",
+    "src/execution/fill_tracker.py",
+    "src/data/ecmwf_open_data.py",
+    "src/runtime/clock_skew_probe.py"
+  ],
+  "file_read_only": "src/contracts/executable_market_snapshot_v2.py",
+  "admission_status": "advisory_only",
+  "profile": "generic",
+  "navigation_ok": false,
+  "hard_stop_findings": [],
+  "topology_gap_findings": [
+    {
+      "gap": "digest_profile_missing_for_phase0_pr3_pr6",
+      "detail": "Files span contracts + strategy + execution + data profiles. No digest profile in architecture/topology.yaml covers this Phase 0 multi-profile cross-cutting change.",
+      "fix": "Add zeus.phase0_pr3_pr6_decision_source_context profile to architecture/topology.yaml before production ADMITTED status is required.",
+      "binding_yaml_update": "Not yet applied. Needed before production code admission."
+    }
+  ],
+  "scaffold_findings": [
+    {
+      "id": "F1",
+      "severity": "IMPORTANT",
+      "finding": "Field map rows 1-3 (observation_time, provider_reported_time, observation_available_at) are labelled '(existing)' but grep confirms ZERO occurrences in DecisionSourceContext and ZERO codebase occurrences of provider_reported_time / observation_available_at. These are genuinely NEW fields.",
+      "impact": "PR 3 must ADD all 3 fields to DecisionSourceContext before adding validators. The '(existing)' label refers to the conceptual domain (observation_instants_v2 table), not the Python type.",
+      "action_required": "SCAFFOLD CRITIC CONFIRM: rows 1-3 need ADD_FIELD + validator, not validator-only."
+    },
+    {
+      "id": "F2",
+      "severity": "QUESTION",
+      "finding": "observation_instants_v2 schema has no columns matching observation_time/provider_reported_time/observation_available_at. Field map lists it as the storage table but no migration is specified.",
+      "action_required": "SCAFFOLD CRITIC CONFIRM: DB migration for observation_instants_v2 out of scope for Phase 0?"
+    },
+    {
+      "id": "F3",
+      "severity": "QUESTION",
+      "finding": "run_complete_time writer site: the observed_members >= 51 positive branch in ecmwf_open_data.py is not a single flip-point. The complete-run watermark needs derivation from source_run_completeness == 'COMPLETE'.",
+      "action_required": "SCAFFOLD CRITIC CONFIRM: write site for run_complete_time."
+    },
+    {
+      "id": "F4",
+      "severity": "QUESTION",
+      "finding": "raw_orderbook_hash_transition_delta_ms requires prior-hash comparison. Prior hash storage site (likely cycle_runtime snapshot cache) not identified.",
+      "action_required": "SCAFFOLD CRITIC CONFIRM: derivation site for hash transition delta before implementation."
+    }
+  ],
+  "verdict": "SCAFFOLD_PROCEED_WITH_NOTED_GAPS",
+  "notes": [
+    "ULTRAPLAN E.2 expected admission_status=ADMITTED. Actual: advisory_only (no digest profile yet).",
+    "src/execution/executor.py added to file list during scaffold: required for zeus_submit_intent_time + venue_ack_time capture (field map rows 12-13 writer site).",
+    "No hard-stop files identified. src/execution/fill_tracker.py falls under src/execution/** but not flagged as hard-stop in this PR's governance (no era-dispatch or money-path concern).",
+    "LOC estimate: ~330 production + ~200 tests = ~530 total. Well within 1500 cap. Single PR confirmed.",
+    "B/27 non-collision verified: executable_market_snapshot_v2.py is read-only for B/36."
+  ]
+}

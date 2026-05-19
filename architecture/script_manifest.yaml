@@ -1084,3 +1084,54 @@ scripts:
       --apply only updates last_verified on PASS; no other state mutation.
     required_helpers: []
     required_tests: []
+  migrate_settlement_commands_polymarket_anchor.py:
+    class: migration
+    module_owner: execution
+    status: active
+    lifecycle: phase0_pr36
+    packet: docs/operations/task_2026-05-17_strategy_vnext_phase0
+    authority_scope: repair_write
+    dangerous_if_run: true
+    dry_run_default: true
+    apply_flag: "--apply"
+    target_db: state/zeus-world.db
+    read_targets: [state/zeus-world.db]
+    write_targets: [state/zeus-world.db]
+    canonical_command: "python3 scripts/migrate_settlement_commands_polymarket_anchor.py [--db PATH] [--dry-run | --apply]"
+    external_inputs: []
+    delete_policy: retain_until_superseded
+    reuse_when: >
+      PR3+6 one-shot migration: adds polymarket_end_anchor_source (NOT NULL DEFAULT 'gamma_explicit'),
+      zeus_submit_intent_time, venue_ack_time, clock_skew_estimate_ms_at_submit to settlement_commands,
+      and first_inclusion_block_time + finality_confirmed_time to wrap_unwrap_commands.
+      Run once per DB; idempotent on re-run (duplicate column errors silently skipped).
+    do_not_use_when: "All target columns already present (idempotency guard)."
+    promotion_barrier: "Requires explicit --apply flag; dry-run default shows ALTER statements only."
+    unguarded_write_rationale: "DDL only (ADD COLUMN with DEFAULT); idempotent; reversible because new columns default and old readers continue to work; --apply required."
+    required_helpers: [src.state.db.get_connection]
+    required_tests: [tests/test_decision_source_context_causality_pr3.py, tests/test_decision_source_context_pr6.py]
+  migrate_ensemble_snapshots_v2_alpha_proxy.py:
+    class: migration
+    module_owner: engine
+    status: active
+    lifecycle: phase0_pr36
+    packet: docs/operations/task_2026-05-17_strategy_vnext_phase0
+    authority_scope: repair_write
+    dangerous_if_run: true
+    dry_run_default: true
+    apply_flag: "--apply"
+    target_db: state/zeus-forecasts.db
+    read_targets: [state/zeus-forecasts.db]
+    write_targets: [state/zeus-forecasts.db]
+    canonical_command: "python3 scripts/migrate_ensemble_snapshots_v2_alpha_proxy.py [--db PATH] [--dry-run | --apply]"
+    external_inputs: []
+    delete_policy: retain_until_superseded
+    reuse_when: >
+      PR6 one-shot migration: adds first_member_observed_time, run_complete_time,
+      raw_orderbook_hash_transition_delta_ms to ensemble_snapshots_v2.
+      All columns nullable; no backfill required. Run once per DB; idempotent on re-run.
+    do_not_use_when: "All target columns already present (idempotency guard)."
+    promotion_barrier: "Requires explicit --apply flag; dry-run default shows ALTER statements only."
+    unguarded_write_rationale: "DDL only (ADD COLUMN nullable); idempotent; no backfill; --apply required."
+    required_helpers: [src.state.db.get_connection]
+    required_tests: [tests/test_inv_alpha_provenance.py, tests/test_decision_source_context_pr6.py]

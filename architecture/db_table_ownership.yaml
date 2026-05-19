@@ -169,6 +169,10 @@ tables:
     notes: >
       K1-split 2026-05-11. v2 ensemble snapshots (apply_v2_schema via init_schema_forecasts).
       Ghost copy on world.db declared legacy_archived below.
+    pr6_columns:
+      - {name: first_member_observed_time, type: TEXT, nullable: true, pr: PR6}
+      - {name: run_complete_time, type: TEXT, nullable: true, pr: PR6}
+      - {name: raw_orderbook_hash_transition_delta_ms, type: INTEGER, nullable: true, pr: PR6}
 
   - name: calibration_pairs_v2
     db: forecasts
@@ -790,6 +794,11 @@ tables:
       Re-owned trade per 2026-05-17 audit. Writer: settlement_command
       flows via trade conn (src/execution/harvester.py:683). Empty in
       both DBs today; declaration realigned for INV-37 ATTACH semantics.
+    pr3_pr6_columns:
+      - {name: polymarket_end_anchor_source, type: TEXT, default: gamma_explicit, pr: PR3}
+      - {name: zeus_submit_intent_time, type: TEXT, nullable: true, pr: PR6}
+      - {name: venue_ack_time, type: TEXT, nullable: true, pr: PR6}
+      - {name: clock_skew_estimate_ms_at_submit, type: INTEGER, nullable: true, pr: PR6}
 
   - name: shadow_signals
     db: world
@@ -942,6 +951,9 @@ tables:
     schema_version_owner: SCHEMA_VERSION
     created_by: init_schema
     pk_col: null
+    pr6_columns:
+      - {name: first_inclusion_block_time, type: TEXT, nullable: true, pr: PR6}
+      - {name: finality_confirmed_time, type: TEXT, nullable: true, pr: PR6}
 
   - name: wrap_unwrap_events
     db: world

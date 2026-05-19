@@ -13,6 +13,7 @@ Phase 5B (B078 / SD-1): enforces the dual-track ingest boundary laws:
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal
 
 from src.contracts.ensemble_snapshot_provenance import (
     ECMWF_OPENDATA_LOW_CONTRACT_WINDOW_DATA_VERSION,
@@ -85,6 +86,35 @@ _ALLOWED_DATA_VERSIONS: dict[str, MetricIdentity] = {
     # matches HIGH_LOCALDAY_MAX / LOW_LOCALDAY_MIN respectively (6h TIGGE identity).
     _ECMWF_OPENDATA_HIGH_DATA_VERSION_LEGACY: HIGH_LOCALDAY_MAX,
     _ECMWF_OPENDATA_LOW_DATA_VERSION_LEGACY: LOW_LOCALDAY_MIN,
+}
+
+
+# PR 3+6 (2026-05-19): CausalityStatus Literal — 10 values covering all DecisionSourceContext
+# integrity_errors() return codes. Alphabetized for readability.
+CausalityStatus = Literal[
+    "AVAILABLE_AFTER_DECISION",
+    "CLOCK_DRIFT_WARNING",
+    "DECISION_BEFORE_FORECAST_AVAILABLE",
+    "EXCESSIVE_CLOCK_DRIFT",
+    "INCLUSION_AFTER_FINALITY",
+    "MISSING_CAUSALITY_FIELD",
+    "OBS_AFTER_PROVIDER",
+    "OK",
+    "PROVIDER_AFTER_AVAILABLE",
+    "SUBMIT_AFTER_ACK",
+]
+
+# Mapping from integrity_errors() string codes to CausalityStatus literals
+INTEGRITY_ERROR_TO_CAUSALITY: dict[str, str] = {
+    "available_after_decision": "AVAILABLE_AFTER_DECISION",
+    "clock_drift_warning": "CLOCK_DRIFT_WARNING",
+    "forecast_available_after_decision": "DECISION_BEFORE_FORECAST_AVAILABLE",
+    "excessive_clock_drift": "EXCESSIVE_CLOCK_DRIFT",
+    "inclusion_after_finality": "INCLUSION_AFTER_FINALITY",
+    "missing_causality_field": "MISSING_CAUSALITY_FIELD",
+    "obs_after_provider": "OBS_AFTER_PROVIDER",
+    "provider_after_available": "PROVIDER_AFTER_AVAILABLE",
+    "submit_after_ack": "SUBMIT_AFTER_ACK",
 }
 
 

@@ -211,6 +211,20 @@ def _build_redeem_execution_capability(
 
 def init_settlement_command_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(SETTLEMENT_COMMAND_SCHEMA)
+    # PR 3 (2026-05-19): idempotent ADD COLUMN migrations for new fields.
+    # "duplicate column" is expected on already-migrated databases; ignore it.
+    for alter_sql in [
+        "ALTER TABLE settlement_commands ADD COLUMN polymarket_end_anchor_source TEXT NOT NULL DEFAULT 'gamma_explicit'",
+        # PR 6 (2026-05-19)
+        "ALTER TABLE settlement_commands ADD COLUMN zeus_submit_intent_time TEXT",
+        "ALTER TABLE settlement_commands ADD COLUMN venue_ack_time TEXT",
+        "ALTER TABLE settlement_commands ADD COLUMN clock_skew_estimate_ms_at_submit INTEGER",
+    ]:
+        try:
+            conn.execute(alter_sql)
+        except Exception as exc:
+            if "duplicate column" not in str(exc).lower():
+                raise
 
 
 def request_redeem(
@@ -224,6 +238,7 @@ def request_redeem(
     requested_at: datetime | str | None = None,
     fx_classification: FXClassification | None = None,
     winning_index_set: str | None = None,
+    polymarket_end_anchor_source: str = "",
 ) -> str:
     """Create a durable redeem intent and return its command id.
 
@@ -323,8 +338,9 @@ def request_redeem(
                 INSERT INTO settlement_commands (
                   command_id, state, condition_id, market_id, payout_asset,
                   pusd_amount_micro, token_amounts_json, winning_index_set,
-                  requested_at, terminal_at, error_payload
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                  requested_at, terminal_at, error_payload,
+                  polymarket_end_anchor_source
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     command_id,
@@ -338,6 +354,7 @@ def request_redeem(
                     requested_at_s,
                     requested_at_s if state in _TERMINAL_STATES else None,
                     _json_dumps(error_payload) if error_payload else None,
+                    polymarket_end_anchor_source or "gamma_explicit",
                 ),
             )
             _append_event(

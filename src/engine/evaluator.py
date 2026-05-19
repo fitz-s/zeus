@@ -4039,6 +4039,11 @@ def _store_ens_snapshot(conn, city, target_date, ens, ens_result) -> str:
         spread = ens.spread_float()
         is_bimodal = int(ens.is_bimodal())
         model_version = ens_result["model"]
+        # PR 6: member timing chain fields from ens_result (ecmwf authority chain)
+        _first_member_observed_time = str(ens_result.get("first_member_observed_time") or "") or None
+        _run_complete_time = str(ens_result.get("run_complete_time") or "") or None
+        _hash_delta_ms = ens_result.get("raw_orderbook_hash_transition_delta_ms")
+        _hash_delta_ms = int(_hash_delta_ms) if isinstance(_hash_delta_ms, int) else None
         if v2_table:
             conn.execute(f"""
                 INSERT INTO {v2_table}
@@ -4046,8 +4051,9 @@ def _store_ens_snapshot(conn, city, target_date, ens, ens_result) -> str:
                  issue_time, valid_time, available_at, fetch_time, lead_hours, members_json,
                  spread, is_bimodal, model_version, data_version, training_allowed,
                  causality_status, boundary_ambiguous, provenance_json, authority,
-                 members_unit, unit)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 members_unit, unit,
+                 first_member_observed_time, run_complete_time, raw_orderbook_hash_transition_delta_ms)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(city, target_date, temperature_metric, issue_time, data_version)
                 DO UPDATE SET
                     physical_quantity = excluded.physical_quantity,
@@ -4066,7 +4072,10 @@ def _store_ens_snapshot(conn, city, target_date, ens, ens_result) -> str:
                     provenance_json = excluded.provenance_json,
                     authority = excluded.authority,
                     members_unit = excluded.members_unit,
-                    unit = excluded.unit
+                    unit = excluded.unit,
+                    first_member_observed_time = COALESCE(first_member_observed_time, excluded.first_member_observed_time),
+                    run_complete_time = COALESCE(run_complete_time, excluded.run_complete_time),
+                    raw_orderbook_hash_transition_delta_ms = COALESCE(raw_orderbook_hash_transition_delta_ms, excluded.raw_orderbook_hash_transition_delta_ms)
             """, (
                 city.name,
                 target_date,
@@ -4090,6 +4099,9 @@ def _store_ens_snapshot(conn, city, target_date, ens, ens_result) -> str:
                 authority,
                 members_unit,
                 getattr(city, "settlement_unit", None),
+                _first_member_observed_time,
+                _run_complete_time,
+                _hash_delta_ms,
             ))
             row = conn.execute(f"""
                 SELECT snapshot_id FROM {v2_table}

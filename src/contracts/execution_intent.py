@@ -593,6 +593,12 @@ def simulate_clob_sweep(
     )
 
 
+# Decisions written before this epoch predate PR 3 and will not have the new fields.
+# The required-field check for PR 3+6 fields is gated on decision_time >= this sentinel.
+# Pre-PR-3 decisions retain their existing state without emitting new errors.
+_PR3_REQUIRED_FIELDS_EPOCH = "2026-05-19T00:00:00Z"
+
+
 @dataclass(frozen=True)
 class DecisionSourceContext:
     """Compact decision-source evidence consumed by execution capability proof.
@@ -600,6 +606,10 @@ class DecisionSourceContext:
     This is intentionally not a source-routing policy. Evaluator decides source
     authority before selection; execution only verifies that the accepted
     decision's source/timing evidence survived the handoff to live submit.
+
+    PR 3 additions (2026-05-19): observation timing chain (rows 1-3 in WAVE_B field map)
+    + polymarket_end_anchor_source (row 17). PR 6 additions: rows 9-16 (timing chain,
+    chain finality, clock drift). 24 fields total post-PR-6.
     """
 
     source_id: str = ""
@@ -614,6 +624,30 @@ class DecisionSourceContext:
     authority_tier: str = ""
     decision_time: str = ""
     decision_time_status: str = ""
+
+    # PR 3 — observation timing chain (WAVE_B field map rows 1-3, row 17)
+    observation_time: str = ""               # UTC ISO; when instrument recorded observation
+    provider_reported_time: Optional[str] = None  # UTC ISO; provider reported-at (Path F: None = not available)
+    observation_available_at: str = ""       # UTC ISO; harvester write-back time (MANDATORY)
+    polymarket_end_anchor_source: str = ""   # "gamma_explicit" | "f1_12z_fallback"
+
+    # PR 6 — ensemble run timing (field map rows 9-10)
+    first_member_observed_time: str = ""     # UTC ISO; first ENS member downloaded
+    run_complete_time: str = ""              # UTC ISO; all 51 members present
+
+    # PR 6 — alpha proxy (field map row 11)
+    raw_orderbook_hash_transition_delta_ms: Optional[int] = None  # ms since hash last changed; None on first obs
+
+    # PR 6 — submission chain (field map rows 12-13)
+    zeus_submit_intent_time: str = ""        # UTC ISO; moment Zeus called executor.submit()
+    venue_ack_time: str = ""                 # UTC ISO; Polymarket REST ack received
+
+    # PR 6 — chain finality split (field map rows 14-15)
+    first_inclusion_block_time: str = ""     # UTC ISO; tx first seen in any block
+    finality_confirmed_time: str = ""        # UTC ISO; >=6 confirmation watermark
+
+    # PR 6 — clock drift (field map row 16)
+    clock_skew_estimate_ms: Optional[int] = None  # host clock - venue Date: header (ms); None = probe failed
 
     @classmethod
     def from_forecast_context(cls, context: Mapping[str, object] | None) -> "DecisionSourceContext | None":
@@ -632,9 +666,26 @@ class DecisionSourceContext:
             authority_tier=_context_text(context.get("authority_tier")),
             decision_time=_context_text(context.get("decision_time") or context.get("decision_time_utc")),
             decision_time_status=_context_text(context.get("decision_time_status")),
+            # PR 3+6 fields: legacy callers pass nothing; defaults apply
+            observation_time=_context_text(context.get("observation_time")),
+            provider_reported_time=_context_text(context.get("provider_reported_time")) or None,
+            observation_available_at=_context_text(context.get("observation_available_at")),
+            polymarket_end_anchor_source=_context_text(context.get("polymarket_end_anchor_source")),
+            first_member_observed_time=_context_text(context.get("first_member_observed_time")),
+            run_complete_time=_context_text(context.get("run_complete_time")),
+            raw_orderbook_hash_transition_delta_ms=context.get("raw_orderbook_hash_transition_delta_ms") if isinstance(context.get("raw_orderbook_hash_transition_delta_ms"), int) else None,
+            zeus_submit_intent_time=_context_text(context.get("zeus_submit_intent_time")),
+            venue_ack_time=_context_text(context.get("venue_ack_time")),
+            first_inclusion_block_time=_context_text(context.get("first_inclusion_block_time")),
+            finality_confirmed_time=_context_text(context.get("finality_confirmed_time")),
+            clock_skew_estimate_ms=context.get("clock_skew_estimate_ms") if isinstance(context.get("clock_skew_estimate_ms"), int) else None,
         )
 
     def integrity_errors(self) -> tuple[str, ...]:
+        # Error-string conventions:
+        # - Forecast-chain violations use long-form: "forecast_<what>_after_<when>"
+        # - Observation/causality violations use short-form: "<subject>_after_<ref>"
+        # The difference is intentional -- do not normalize without a migration.
         errors: list[str] = []
         required_fields = {
             "source_id": self.source_id,
@@ -694,6 +745,64 @@ class DecisionSourceContext:
             errors.append(f"authority_not_forecast:{self.authority_tier}")
         if self.decision_time_status and self.decision_time_status != "OK":
             errors.append(f"decision_time_status_not_ok:{self.decision_time_status}")
+
+        # --- PR 3+6 new validators ---
+        # New required fields: only enforced for decisions written after PR 3 landed.
+        # Pre-PR-3 decisions (decision_time < _PR3_REQUIRED_FIELDS_EPOCH) keep their
+        # existing state without emitting new missing_* errors (backward compat).
+        _dec_t = _context_time(self.decision_time)
+        _pr3_epoch = _context_time(_PR3_REQUIRED_FIELDS_EPOCH)
+        _gate_new_required = bool(_dec_t and _pr3_epoch and _dec_t >= _pr3_epoch)
+        if _gate_new_required:
+            pr3_required = {
+                "observation_time": self.observation_time,
+                "observation_available_at": self.observation_available_at,
+                "polymarket_end_anchor_source": self.polymarket_end_anchor_source,
+                "first_member_observed_time": self.first_member_observed_time,
+                "run_complete_time": self.run_complete_time,
+                "zeus_submit_intent_time": self.zeus_submit_intent_time,
+                "venue_ack_time": self.venue_ack_time,
+            }
+            for field, value in pr3_required.items():
+                if not value:
+                    errors.append(f"missing_{field}")
+
+        # PR 3: observation-chain ordering
+        obs_time = _context_time(self.observation_time)
+        obs_avail = _context_time(self.observation_available_at)
+
+        # provider_reported_time is Optional -- only assert when populated (Path F)
+        if self.provider_reported_time is not None:
+            prov_time = _context_time(self.provider_reported_time)
+            if obs_time and prov_time and obs_time > prov_time:
+                errors.append("obs_after_provider")
+            if prov_time and obs_avail and prov_time > obs_avail:
+                errors.append("provider_after_available")
+
+        # available_after_decision is UNCONDITIONAL -- observation_available_at is mandatory
+        if obs_avail and decision_time and obs_avail > decision_time:
+            errors.append("available_after_decision")
+
+        # PR 6: chain finality ordering
+        incl_t = _context_time(self.first_inclusion_block_time)
+        fin_t = _context_time(self.finality_confirmed_time)
+        if incl_t and fin_t and incl_t > fin_t:
+            errors.append("inclusion_after_finality")
+
+        # PR 6: submission ordering
+        submit_t = _context_time(self.zeus_submit_intent_time)
+        ack_t = _context_time(self.venue_ack_time)
+        if submit_t and ack_t and submit_t > ack_t:
+            errors.append("submit_after_ack")
+
+        # PR 6: clock drift -- threshold 200ms (B4: 100ms barely exceeds HTTPS RTT noise floor)
+        # warning (non-blocking) at 100ms boundary; error at 200ms
+        if self.clock_skew_estimate_ms is not None:
+            abs_skew = abs(self.clock_skew_estimate_ms)
+            if abs_skew > 200:
+                errors.append("excessive_clock_drift")
+            elif abs_skew > 100:
+                errors.append("clock_drift_warning")  # observability only; non-blocking
 
         return tuple(errors)
 
