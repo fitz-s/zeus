@@ -565,11 +565,11 @@ def run_cycle(mode: DiscoveryMode) -> dict:
         _clear_ensemble_cache()
     except Exception as exc:
         logger.warning("ensemble cache clear failed: %s", exc)
-    try:
-        from src.data.market_scanner import _clear_active_events_cache
-        _clear_active_events_cache()
-    except Exception as exc:
-        logger.warning("market scanner cache clear failed: %s", exc)
+    # NOTE: _clear_active_events_cache() intentionally omitted here.
+    # The _ACTIVE_EVENTS_TTL=300s already handles staleness; forced clear
+    # on every cycle caused cold gamma+CLOB fetches (400-700s) that
+    # consumed the entire per-market evaluation budget before any market
+    # was evaluated → bp_evaluated=0.  Let TTL govern freshness.
     try:
         from src.control.control_plane import process_commands
         process_commands()
