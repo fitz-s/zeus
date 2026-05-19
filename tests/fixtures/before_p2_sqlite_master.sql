@@ -389,6 +389,52 @@ CREATE INDEX idx_day0_metric_fact_city_ts
         ;
 -- index: idx_decision_log_ts
 CREATE INDEX idx_decision_log_ts ON decision_log(timestamp);
+-- table: decision_events
+CREATE TABLE decision_events (
+            market_slug         TEXT NOT NULL,
+            temperature_metric  TEXT NOT NULL CHECK (temperature_metric IN ('high', 'low')),
+            target_date         TEXT NOT NULL,
+            observation_time    TEXT NOT NULL,
+            decision_seq        INTEGER NOT NULL,
+            condition_id        TEXT,
+            decision_event_id   TEXT,
+            decision_time       TEXT NOT NULL,
+            outcome             TEXT NOT NULL,
+            side                TEXT NOT NULL,
+            strategy_key        TEXT NOT NULL,
+            cycle_id            TEXT,
+            cycle_iteration     INTEGER,
+            p_posterior         REAL,
+            edge                REAL,
+            target_size_usd     REAL,
+            target_price        REAL,
+            forecast_time              TEXT,
+            provider_reported_time     TEXT,
+            observation_available_at   TEXT NOT NULL,
+            polymarket_end_anchor_source TEXT NOT NULL CHECK (
+                polymarket_end_anchor_source IN ('gamma_explicit', 'f1_12z_fallback')
+            ),
+            first_member_observed_time TEXT,
+            run_complete_time          TEXT,
+            zeus_submit_intent_time    TEXT,
+            venue_ack_time             TEXT,
+            first_inclusion_block_time TEXT,
+            finality_confirmed_time    TEXT,
+            clock_skew_estimate_ms_at_submit INTEGER,
+            raw_orderbook_hash_transition_delta_ms INTEGER,
+            schema_version INTEGER NOT NULL CHECK (schema_version IN (12, 13)),
+            source         TEXT NOT NULL CHECK (source IN ('phase0_backfill', 'live_decision')),
+            PRIMARY KEY (market_slug, temperature_metric, target_date, observation_time, decision_seq)
+        );
+-- index: idx_decision_events_slug_date
+CREATE INDEX idx_decision_events_slug_date
+            ON decision_events(market_slug, target_date);
+-- index: idx_decision_events_strategy
+CREATE INDEX idx_decision_events_strategy
+            ON decision_events(strategy_key, decision_time);
+-- index: idx_decision_events_event_id
+CREATE INDEX idx_decision_events_event_id
+            ON decision_events(decision_event_id);
 -- v1.F20 (2026-05-18): idx_ensemble_city_date dropped with ensemble_snapshots table.
 -- index: idx_envelope_events_subject
 CREATE INDEX idx_envelope_events_subject ON provenance_envelope_events (subject_type, subject_id, observed_at);

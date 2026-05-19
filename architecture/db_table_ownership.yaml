@@ -485,6 +485,14 @@ tables:
     created_by: init_schema
     pk_col: decision_id
 
+  - name: decision_events
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: "[market_slug, temperature_metric, target_date, observation_time, decision_seq]"
+    notes: "T1 Path D natural-key instrumentation table (PHASE_1_ULTRAPLAN.md §4.2 v3). condition_id is nullable enrichment (not in PK). decision_event_id is audit-only deid_v1_ hash (distinct from calibration dgid_v1_). SCHEMA_VERSION 13."
+
   - name: diurnal_curves
     db: world
     schema_class: world_class

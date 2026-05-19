@@ -95,27 +95,102 @@ def decision_event_id_v1_hash(
 
 def from_market_event_row(row: Any) -> Optional[DecisionNaturalKey]:
     """Extract key from market_events_v2 row (dict or sqlite3.Row).
-    Returns None if required fields absent or temperature_metric invalid.
-    Production: map market_events_v2 column names; market_slug is the canonical id.
+
+    market_events_v2 columns used: market_slug, temperature_metric, target_date.
+    observation_time is NOT in market_events_v2 — caller must supply it as context.
     decision_seq is not in source row — caller provides context for sequencing.
+
+    Returns DecisionNaturalKey with observation_time='' and decision_seq=0 as
+    sentinels; callers are expected to fill those fields before inserting.
+    Returns None if required fields absent or temperature_metric invalid.
     """
-    raise NotImplementedError("SCAFFOLD — pending T1 production pass")
+    try:
+        market_slug = str(row["market_slug"]).strip()
+        temperature_metric = str(row["temperature_metric"]).strip().lower()
+        target_date = str(row["target_date"]).strip()
+    except (KeyError, TypeError):
+        return None
+    if not market_slug or not target_date:
+        return None
+    if temperature_metric not in ("high", "low"):
+        return None
+    return DecisionNaturalKey((market_slug, temperature_metric, target_date, "", 0))
 
 
 def from_ensemble_snapshot_row(row: Any) -> Optional[DecisionNaturalKey]:
-    """Extract key from ensemble_snapshots_v2 row.
-    city → market_slug resolved Python-side via market_events_v2 (not condition_id).
-    Returns None if city→market_slug resolution fails.
-    decision_seq not in source row — caller provides context for sequencing.
+    """Extract partial key from ensemble_snapshots_v2 row.
+
+    ensemble_snapshots_v2 has city, target_date, temperature_metric, available_at.
+    city is NOT market_slug — callers must resolve city → market_slug via
+    market_events_v2 (keyed on city + target_date + temperature_metric).
+    Returns None if required fields absent or temperature_metric invalid.
+
+    The returned key uses city as a PLACEHOLDER in the market_slug position.
+    The backfill and antibody callers are responsible for resolving to market_slug
+    before writing or comparing decision_events rows.
     """
-    raise NotImplementedError("SCAFFOLD — pending T1 production pass")
+    try:
+        city = str(row["city"]).strip()
+        temperature_metric = str(row["temperature_metric"]).strip().lower()
+        target_date = str(row["target_date"]).strip()
+        available_at = str(row.get("available_at") or row.get("fetch_time", "")).strip()
+    except (KeyError, TypeError):
+        return None
+    if not city or not target_date:
+        return None
+    if temperature_metric not in ("high", "low"):
+        return None
+    # city is a placeholder; callers must resolve to market_slug before use
+    return DecisionNaturalKey((city, temperature_metric, target_date, available_at, 0))
 
 
 def from_artifact_json(j: dict) -> Optional[DecisionNaturalKey]:
-    """Extract 4-component prefix from decision_log.artifact_json dict.
-    Returns (market_slug, temperature_metric, target_date, observation_time, 0) tuple
-    wrapped as DecisionNaturalKey with decision_seq=0 (backfill caller adjusts seq).
+    """Extract partial key from a decision_log trade_case dict.
+
+    Accepts the individual trade_case dict embedded in artifact_json["trade_cases"].
+    The backfill iterates artifact_json["trade_cases"] and calls this per element.
+
+    Fields extracted:
+      - temperature_metric: derived from range_label ("highest" → "high", "lowest" → "low")
+        or from direction ("buy_yes" with "high" context); returns None if unresolvable.
+      - target_date: from "target_date" key directly.
+      - observation_time: from "timestamp" key (decision timestamp at cycle time).
+      - market_slug: NOT directly available — city is used as PLACEHOLDER.
+        Callers must resolve city → market_slug via market_events_v2 before inserting.
+
+    Returns DecisionNaturalKey with city-as-placeholder in market_slug position,
+    decision_seq=0 (backfill caller adjusts seq after DELETE-and-recount).
+    Returns None if required fields are absent or temperature_metric is unresolvable.
     Robust to missing keys (return None, not raise) — historical rows vary.
-    Production: audit actual Phase 0 artifact_json key names before finalising.
     """
-    raise NotImplementedError("SCAFFOLD — pending T1 production pass")
+    try:
+        city = str(j.get("city", "")).strip()
+        target_date = str(j.get("target_date", "")).strip()
+        observation_time = str(j.get("timestamp", "")).strip()
+        range_label = str(j.get("range_label", "")).lower()
+    except (AttributeError, TypeError):
+        return None
+
+    if not target_date or not observation_time:
+        return None
+
+    # Derive temperature_metric from range_label keywords
+    if "highest" in range_label:
+        temperature_metric: Optional[str] = "high"
+    elif "lowest" in range_label:
+        temperature_metric = "low"
+    else:
+        # Fallback: attempt to derive from city-level range_label context
+        # Some legacy records may use "high temperature" / "low temperature"
+        if "high temperature" in range_label or " high " in range_label:
+            temperature_metric = "high"
+        elif "low temperature" in range_label or " low " in range_label:
+            temperature_metric = "low"
+        else:
+            return None  # cannot resolve temperature_metric
+
+    if not city:
+        return None
+
+    # city is a placeholder for market_slug; caller resolves via market_events_v2
+    return DecisionNaturalKey((city, temperature_metric, target_date, observation_time, 0))

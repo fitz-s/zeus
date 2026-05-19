@@ -101,8 +101,39 @@ _CREATE_INDICES = [
 
 
 def main() -> None:
-    """SCAFFOLD — production body pending T1 production pass."""
-    raise NotImplementedError("SCAFFOLD — pending T1 production")
+    """Apply decision_events CREATE TABLE, AFTER INSERT TRIGGER, and 3 indices to world DB.
+
+    Idempotent (IF NOT EXISTS). Does NOT bump SCHEMA_VERSION — src/state/db.py owns that
+    via init_schema(). This script is a standalone migration path for production deployments
+    where the DB already exists and init_schema() must not be re-run in full.
+    """
+    import sqlite3
+
+    # Import the canonical world DB path (avoids hardcoding)
+    import sys
+    import pathlib
+    sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
+    from src.state.db import ZEUS_WORLD_DB_PATH  # noqa: PLC0415
+
+    db_path = ZEUS_WORLD_DB_PATH
+    print(f"Applying decision_events schema to: {db_path}")
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.execute(_CREATE_TABLE)
+        print("  CREATE TABLE decision_events: OK")
+
+        conn.execute(_CREATE_TRIGGER)
+        print("  CREATE TRIGGER decision_events_event_id_backstop: OK")
+
+        for stmt in _CREATE_INDICES:
+            conn.execute(stmt)
+        print(f"  CREATE INDEX x{len(_CREATE_INDICES)}: OK")
+
+        conn.commit()
+        print("Done. decision_events schema applied idempotently.")
+    finally:
+        conn.close()
 
 
 if __name__ == "__main__":

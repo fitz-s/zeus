@@ -762,6 +762,9 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         # lines 210/236/512/513 not wrapped in db_writer_lock(BULK). Allowlisted to
         # unblock Phase 1 pytest. Slated for deletion or proper wrap at Phase 1 closure.
         "scripts/inject_may2021_markets_2026_05_19.py",  # operator_invoked: one-shot bulk injection (Phase 1 cleanup pending)
+        # --- T1 Phase-1 decision_events scripts (2026-05-19) ---
+        "scripts/audit_artifact_json_natural_key_coverage_2026_05_19.py",  # read_only: SELECT-only audit; T1 backfill precondition gate
+        "scripts/migrate_decision_events_create_2026_05_19.py",            # operator_invoked: idempotent CREATE TABLE/TRIGGER/INDEX; not daemon path
     }
 )
 
