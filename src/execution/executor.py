@@ -2386,6 +2386,8 @@ def execute_exit_order(
             )
         if pre_submit_envelope is not None and hasattr(client, "bind_submission_envelope"):
             client.bind_submission_envelope(pre_submit_envelope)
+        # PR 6 (2026-05-19): capture zeus_submit_intent_time immediately before network call.
+        _zeus_submit_intent_time = datetime.now(timezone.utc).isoformat()
         try:
             result = client.place_limit_order(
                 token_id=intent.token_id,
@@ -2639,6 +2641,15 @@ def execute_exit_order(
                     "source": "place_limit_order_ack",
                 },
             )
+            # PR 6 (2026-05-19): persist submit intent + venue ack timing to settlement_commands.
+            # Best-effort: do not fail the order on UPDATE error (column may not exist on older DBs).
+            try:
+                conn.execute(
+                    "UPDATE settlement_commands SET zeus_submit_intent_time = COALESCE(zeus_submit_intent_time, ?), venue_ack_time = COALESCE(venue_ack_time, ?) WHERE command_id = ?",
+                    (_zeus_submit_intent_time, ack_time, command_id),
+                )
+            except Exception as _timing_exc:
+                logger.debug("PR6 timing update skipped (column absent on older DB): %s", _timing_exc)
             if _own_conn:
                 conn.commit()
         except Exception as inner:

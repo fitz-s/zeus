@@ -1,3 +1,6 @@
+# Created: 2026-05-19
+# Last reused/audited: 2026-05-19
+# Authority basis: PR 6 WAVE_B_PR_3_6_FIELD_MAP.md row 16; pr36_scaffold.md BLOCKING REVISION 5
 """Durable USDC.e ↔ pUSD wrap/unwrap command states for R3 Z4.
 
 Z4 models request/tx/confirmation/failure state only. It does not submit live
@@ -182,6 +185,12 @@ def _transition(
     direction = str(row["direction"])
     new_state = tx_state[direction]
     terminal_at = datetime.now(timezone.utc).isoformat() if terminal else None
+    _now_utc = datetime.now(timezone.utc).isoformat()
+    # PR 6 (2026-05-19): chain finality split.
+    # first_inclusion_block_time: set when block_number first appears (tx in any block).
+    # finality_confirmed_time: set when confirmation_count >= 6.
+    _first_inclusion = _now_utc if block_number is not None else None
+    _finality = _now_utc if (confirmation_count is not None and confirmation_count >= 6) else None
     try:
         conn.execute(
             """
@@ -191,7 +200,9 @@ def _transition(
                    block_number = COALESCE(?, block_number),
                    confirmation_count = COALESCE(?, confirmation_count),
                    terminal_at = COALESCE(?, terminal_at),
-                   error_payload = COALESCE(?, error_payload)
+                   error_payload = COALESCE(?, error_payload),
+                   first_inclusion_block_time = COALESCE(first_inclusion_block_time, ?),
+                   finality_confirmed_time = COALESCE(finality_confirmed_time, ?)
              WHERE command_id = ?
             """,
             (
@@ -201,6 +212,8 @@ def _transition(
                 confirmation_count,
                 terminal_at,
                 error_payload,
+                _first_inclusion,
+                _finality,
                 command_id,
             ),
         )

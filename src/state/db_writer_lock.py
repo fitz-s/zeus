@@ -754,6 +754,9 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         "scripts/backfill_settlements_v2_era_provenance.py",    # operator_invoked: --apply required; writes under SAVEPOINT
         "scripts/rollback_settlements_v2_era_provenance.py",    # operator_invoked: --apply required; snapshot-based restoration
         "scripts/migrate_settlement_commands_in_flight_at_era_flip.py",  # operator_invoked: quarantine DDL + SAVEPOINT
+        # --- PR 3+6 (2026-05-19) migration scripts ---
+        "scripts/migrate_settlement_commands_polymarket_anchor.py",  # operator_invoked: DDL-only idempotent ADD COLUMN for PR3+PR6 columns
+        "scripts/migrate_ensemble_snapshots_v2_alpha_proxy.py",     # operator_invoked: DDL-only idempotent ADD COLUMN for PR6 timing chain
     }
 )
 

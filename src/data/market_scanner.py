@@ -36,6 +36,10 @@ from src.types.market import BinTopologyError, validate_bin_topology
 
 logger = logging.getLogger(__name__)
 
+# PR 6 (2026-05-19): process-local cache for raw_orderbook_hash transition delta.
+# key: condition_id, value: (hash_str, captured_at_unix_ts)
+_prev_orderbook_hash_by_market: dict[str, tuple[str, float]] = {}
+
 GAMMA_BASE = "https://gamma-api.polymarket.com"
 
 # B017: data-provenance types. See also src/data/__init__.py note.
@@ -2050,11 +2054,22 @@ def capture_executable_market_snapshot(
         depth_at_best_ask=_depth_at_best_ask(raw_orderbook),
     )
     insert_snapshot(conn, snapshot)
+    # PR 6 (2026-05-19): compute raw_orderbook_hash transition delta.
+    _current_hash = snapshot.raw_orderbook_hash
+    _now_ts = time.time()
+    _hash_delta_ms: Optional[int] = None
+    _prior = _prev_orderbook_hash_by_market.get(condition_id)
+    if _prior is not None:
+        _prior_hash, _prior_ts = _prior
+        if _current_hash != _prior_hash:
+            _hash_delta_ms = int((_now_ts - _prior_ts) * 1000)
+    _prev_orderbook_hash_by_market[condition_id] = (_current_hash, _now_ts)
     return {
         "executable_snapshot_id": snapshot.snapshot_id,
         "executable_snapshot_min_tick_size": str(snapshot.min_tick_size),
         "executable_snapshot_min_order_size": str(snapshot.min_order_size),
         "executable_snapshot_neg_risk": snapshot.neg_risk,
+        "raw_orderbook_hash_transition_delta_ms": _hash_delta_ms,
     }
 
 

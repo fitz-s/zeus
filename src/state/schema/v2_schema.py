@@ -205,6 +205,10 @@ def _create_ensemble_snapshots_v2(conn: sqlite3.Connection) -> None:
         "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN forecast_window_attribution_status TEXT",
         "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN contributes_to_target_extrema INTEGER CHECK (contributes_to_target_extrema IS NULL OR contributes_to_target_extrema IN (0, 1))",
         "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN forecast_window_block_reasons_json TEXT",
+        # PR 6 (2026-05-19): alpha-proxy timing chain fields
+        "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN first_member_observed_time TEXT",
+        "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN run_complete_time TEXT",
+        "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN raw_orderbook_hash_transition_delta_ms INTEGER",
     ]:
         try:
             conn.execute(alter_sql)
