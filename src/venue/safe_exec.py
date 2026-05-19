@@ -123,8 +123,13 @@ def sign_safe_tx(tx_hash_bytes: bytes, signer_key: str) -> bytes:
     from eth_account import Account
 
     # Safe pre-signs the raw 32-byte EIP-712 hash directly (no additional
-    # EIP-191 wrapping).  Account._sign_hash accepts the raw 32-byte digest.
-    signed = Account._sign_hash(tx_hash_bytes, signer_key)
+    # EIP-191 wrapping).  Account.unsafe_sign_hash is the stable public API
+    # in eth_account>=0.13 (successor to the private _sign_hash).  The
+    # "unsafe" label is eth_account's own warning that EIP-191 wrapping is
+    # the caller's responsibility — Safe SafeTxHash is already domain-separated
+    # by EIP-712, so raw signing is correct here.  eth_account==0.13.7 pinned
+    # in requirements.txt; the API is stable across 0.13.x.
+    signed = Account.unsafe_sign_hash(tx_hash_bytes, signer_key)
     r = signed.r.to_bytes(32, "big")
     s = signed.s.to_bytes(32, "big")
     v = bytes([signed.v])
