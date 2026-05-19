@@ -12,6 +12,7 @@ import contextlib
 import hashlib
 import json
 import logging
+import os
 import sqlite3
 import uuid
 from dataclasses import dataclass
@@ -906,3 +907,36 @@ def _confirmation_count(web3: Any, block_number: int | None) -> int:
         return max(0, int(current) - int(block_number) + 1)
     except (TypeError, ValueError):
         return 0
+
+
+def reseat_stub_deferred_rows_for_autonomous_retry(conn: sqlite3.Connection) -> int:
+    """When autonomous redeem path is enabled, rows parked in
+    REDEEM_OPERATOR_REQUIRED with errorCode REDEEM_DEFERRED_TO_R1
+    (stub-era deferral) are now eligible for auto-retry.
+    Transition them to REDEEM_RETRYING for the redeem_submitter
+    poller to pick up. Reason: REDEEM_OPERATOR_REQUIRED was
+    designed for stub-era. Post-PR-#183 the autonomous path
+    obviates manual operator action for stub-deferred rows."""
+    autonomous_enabled = os.environ.get(
+        "ZEUS_AUTONOMOUS_REDEEM_ENABLED", ""
+    ).strip().lower() in ("1", "true", "yes")
+    if not autonomous_enabled:
+        return 0
+    rows = conn.execute(
+        "SELECT command_id, error_payload FROM settlement_commands WHERE state = ?",
+        (SettlementState.REDEEM_OPERATOR_REQUIRED.value,),
+    ).fetchall()
+    promoted = 0
+    for row in rows:
+        try:
+            err = json.loads(row["error_payload"] or "{}")
+        except json.JSONDecodeError:
+            continue
+        if err.get("errorCode") == "REDEEM_DEFERRED_TO_R1":
+            conn.execute(
+                "UPDATE settlement_commands SET state = ?, terminal_at = NULL"
+                " WHERE command_id = ?",
+                (SettlementState.REDEEM_RETRYING.value, row["command_id"]),
+            )
+            promoted += 1
+    return promoted
