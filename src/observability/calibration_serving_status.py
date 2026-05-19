@@ -31,23 +31,15 @@ def _table_exists(conn: sqlite3.Connection, schema: str, table: str) -> bool:
     return row is not None
 
 
-# Per-table schema preference. K1-migration left empty ghost shells of some
-# tables in world.db after moving the live data to forecasts.db; a sensor
-# that searches ["world","main"] would hit the ghost and report 0 rows.
-# Mirror the canonical map at src/observability/status_summary.py:130 so
-# both sensors agree on where each v2 table actually lives.
-_TABLE_SCHEMA_PREFERENCE: dict[str, tuple[str, ...]] = {
-    "calibration_pairs_v2": ("forecasts", "world", "main"),
-    "ensemble_snapshots_v2": ("forecasts", "world", "main"),
-    "settlements_v2": ("forecasts", "world", "main"),
-    "platt_models_v2": ("world", "main"),
-    "historical_forecasts_v2": ("world", "main"),
-}
-
-
 def _table_ref(conn: sqlite3.Connection, table: str, *, prefer_world: bool = True) -> str | None:
+    # Per-table schema preference: the canonical map lives in
+    # src/observability/v2_table_schema_preference.py so calibration_serving and
+    # status_summary cannot drift (PR #210 Copilot review: keeping two
+    # independent maps in sync is brittle and would re-introduce the same
+    # operator-visibility defect if one is updated without the other).
+    from src.observability.v2_table_schema_preference import V2_TABLE_SCHEMA_PREFERENCE
     schemas = _attached_schema_names(conn)
-    candidates = _TABLE_SCHEMA_PREFERENCE.get(
+    candidates = V2_TABLE_SCHEMA_PREFERENCE.get(
         table,
         ("world", "main") if prefer_world else ("main", "world"),
     )

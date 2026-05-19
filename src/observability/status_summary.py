@@ -127,13 +127,12 @@ _V2_TABLES = (
     "settlements_v2",
 )
 
-_V2_ROW_COUNT_SCHEMA_PREFERENCE = {
-    "platt_models_v2": ("world", "main"),
-    "calibration_pairs_v2": ("forecasts", "world", "main"),
-    "ensemble_snapshots_v2": ("forecasts", "world", "main"),
-    "historical_forecasts_v2": ("world", "main"),
-    "settlements_v2": ("forecasts", "world", "main"),
-}
+# Canonical schema preference lives in v2_table_schema_preference.py so this
+# module and calibration_serving_status share a single source of truth (PR
+# #210 review: drifting copies caused the 2026-05-19 false-BLOCKED outage).
+from src.observability.v2_table_schema_preference import (
+    V2_TABLE_SCHEMA_PREFERENCE as _V2_ROW_COUNT_SCHEMA_PREFERENCE,
+)
 
 
 def _quote_sql_identifier(identifier: str) -> str:

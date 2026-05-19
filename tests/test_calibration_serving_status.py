@@ -510,3 +510,45 @@ def test_table_ref_falls_back_to_world_when_forecasts_unattached(tmp_path) -> No
     resolved = _table_ref(conn, "calibration_pairs_v2")
     assert resolved == "world.calibration_pairs_v2"
     conn.close()
+
+
+def test_both_observability_sensors_share_canonical_schema_preference() -> None:
+    """Antibody (PR #210 Copilot review): calibration_serving_status and
+    status_summary must reference the SAME schema preference object — keeping
+    two independent maps in sync is brittle and would re-introduce the
+    2026-05-19 K1-ghost false-BLOCKED outage if one drifted.
+
+    Sed-flip: copy-paste a local _TABLE_SCHEMA_PREFERENCE back into either
+    sensor module and stop importing from v2_table_schema_preference → the
+    `is` identity check fails → RED.
+    """
+    from src.observability.v2_table_schema_preference import V2_TABLE_SCHEMA_PREFERENCE
+    from src.observability import status_summary as ss_mod
+
+    assert ss_mod._V2_ROW_COUNT_SCHEMA_PREFERENCE is V2_TABLE_SCHEMA_PREFERENCE, (
+        "K1-ghost drift antibody FAIL: status_summary._V2_ROW_COUNT_SCHEMA_PREFERENCE "
+        "is not the canonical V2_TABLE_SCHEMA_PREFERENCE — the two sensors will drift "
+        "and one will reintroduce the operator-visibility defect."
+    )
+
+
+def test_v2_table_schema_preference_covers_every_v2_table() -> None:
+    """Drift guard: every v2 table that any sensor reads MUST be enumerated
+    in the canonical map. If a new v2 table is added without registering it
+    here, both sensors silently fall back to the legacy ("world","main")
+    default and may hit a ghost shell in world.db.
+    """
+    from src.observability.v2_table_schema_preference import V2_TABLE_SCHEMA_PREFERENCE
+
+    expected_v2_tables = {
+        "calibration_pairs_v2",
+        "ensemble_snapshots_v2",
+        "platt_models_v2",
+        "historical_forecasts_v2",
+        "settlements_v2",
+    }
+    missing = expected_v2_tables - set(V2_TABLE_SCHEMA_PREFERENCE.keys())
+    assert not missing, (
+        f"Drift antibody FAIL: V2_TABLE_SCHEMA_PREFERENCE missing tables: "
+        f"{sorted(missing)}. Update src/observability/v2_table_schema_preference.py."
+    )
