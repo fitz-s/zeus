@@ -827,7 +827,7 @@ def get_connection(
 # CI hook scripts/check_schema_version.py diffs the sqlite_master hash of
 # a fresh-init DB against tests/state/_schema_pinned_hash.txt and fails
 # the PR if SCHEMA_VERSION did not change in lockstep.
-SCHEMA_VERSION = 12  # 2026-05-19 PR3+PR6: DecisionSourceContext 24-field expansion + ensemble_snapshots_v2 alpha-proxy timing chain + settlement_commands anchor + wrap_unwrap chain-finality + clock_skew_probe
+SCHEMA_VERSION = 13  # 2026-05-19 codereview-may19 P1-3: polymarket_end_anchor_source DEFAULT 'gamma_explicit' → 'unknown_legacy' (no fabricated authority on legacy rows)
 
 
 def init_schema(

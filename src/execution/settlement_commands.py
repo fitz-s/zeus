@@ -214,7 +214,13 @@ def init_settlement_command_schema(conn: sqlite3.Connection) -> None:
     # PR 3 (2026-05-19): idempotent ADD COLUMN migrations for new fields.
     # "duplicate column" is expected on already-migrated databases; ignore it.
     for alter_sql in [
-        "ALTER TABLE settlement_commands ADD COLUMN polymarket_end_anchor_source TEXT NOT NULL DEFAULT 'gamma_explicit'",
+        # codereview-may19 P1-3: do NOT fabricate 'gamma_explicit' for historical
+        # rows during migration. Historical rows whose authority chain was never
+        # captured must carry the explicit "unknown_legacy" sentinel so
+        # downstream causal-evidence consumers cannot mistake them for rows
+        # whose anchor source was actually verified at write time. Live callers
+        # (request_redeem) are required to pass a non-legacy value explicitly.
+        "ALTER TABLE settlement_commands ADD COLUMN polymarket_end_anchor_source TEXT NOT NULL DEFAULT 'unknown_legacy'",
         # PR 6 (2026-05-19)
         "ALTER TABLE settlement_commands ADD COLUMN zeus_submit_intent_time TEXT",
         "ALTER TABLE settlement_commands ADD COLUMN venue_ack_time TEXT",
@@ -354,7 +360,14 @@ def request_redeem(
                     requested_at_s,
                     requested_at_s if state in _TERMINAL_STATES else None,
                     _json_dumps(error_payload) if error_payload else None,
-                    polymarket_end_anchor_source or "gamma_explicit",
+                    # codereview-may19 P1-3: live-created rows must supply an
+                    # explicit non-empty anchor source. Empty string falls
+                    # through to "unknown_legacy" — the same sentinel migrated
+                    # rows carry — so we never fabricate "gamma_explicit"
+                    # provenance for rows whose authority chain wasn't recorded.
+                    # Real callers thread the actual source through the keyword
+                    # arg; tests / historical paths get "unknown_legacy".
+                    polymarket_end_anchor_source or "unknown_legacy",
                 ),
             )
             _append_event(
