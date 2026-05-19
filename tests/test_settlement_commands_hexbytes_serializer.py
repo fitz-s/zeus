@@ -176,8 +176,17 @@ def world_db_t4():
             pass
 
 
+_PAYOUT_REDEMPTION_TOPIC = (
+    "0x2682012a4a4f1973119f1c9b90745d1bd91fa2bab387344f044cb3586864d18d"
+)
+
+
 def _make_hexbytes_receipt(tx_hash: str, status: int, to_address: str) -> dict:
-    """Build a fake receipt with HexBytes fields as web3 would return."""
+    """Build a fake receipt with HexBytes fields as web3 would return.
+
+    Includes a PayoutRedemption log from `to_address` so that the logs-based
+    antibody guard (4th iteration) has the signal it needs.
+    """
     tx_bytes = HexBytes(tx_hash) if tx_hash.startswith("0x") else HexBytes("0x" + tx_hash)
     return {
         "status": status,
@@ -189,9 +198,13 @@ def _make_hexbytes_receipt(tx_hash: str, status: int, to_address: str) -> dict:
         "logsBloom": HexBytes(b"\x00" * 8),
         "logs": [
             {
+                "address": to_address,
                 "blockHash": HexBytes("0xaabbccdd"),
                 "transactionHash": tx_bytes,
-                "topics": [HexBytes("0x1111"), HexBytes("0x2222")],
+                "topics": [
+                    HexBytes(_PAYOUT_REDEMPTION_TOPIC),
+                    HexBytes("0x" + "aa" * 32),
+                ],
                 "data": HexBytes(b"\xde\xad"),
             }
         ],

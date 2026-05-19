@@ -141,13 +141,37 @@ def _insert_tx_hashed_command(conn, condition_id: str, tx_hash: str) -> str:
     return cmd_id
 
 
-def _make_web3(tx_hash: str, status: int, to_address: str) -> SimpleNamespace:
-    """Minimal web3 mock: eth.get_transaction_receipt returns a receipt dict."""
+_PAYOUT_REDEMPTION_TOPIC = (
+    "0x2682012a4a4f1973119f1c9b90745d1bd91fa2bab387344f044cb3586864d18d"
+)
+
+
+def _make_web3(
+    tx_hash: str,
+    status: int,
+    to_address: str,
+    logs: list | None = None,
+) -> SimpleNamespace:
+    """Minimal web3 mock: eth.get_transaction_receipt returns a receipt dict.
+
+    `logs` defaults to a single PayoutRedemption log from `to_address` so that
+    the logs-based antibody guard (4th iteration, PR that follows #192) has the
+    same signal it would from a real receipt.
+    """
+    if logs is None:
+        logs = [
+            {
+                "address": to_address,
+                "topics": [_PAYOUT_REDEMPTION_TOPIC, "0x" + "cc" * 32],
+                "data": "0x",
+            }
+        ]
     receipt = {
         "status": status,
         "to": to_address,
         "blockNumber": 100,
         "block_number": 100,
+        "logs": logs,
     }
     eth_mock = SimpleNamespace(
         get_transaction_receipt=lambda _tx: receipt,
