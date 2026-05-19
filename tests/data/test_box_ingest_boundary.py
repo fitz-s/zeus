@@ -3,8 +3,11 @@
 # Authority basis: F3 PR 4 / study at jobs/9ea6f95c/findings/f3_frozen_dataclass_study.md
 """Ingest boundary tests for CelsiusBox / FahrenheitBox wrapping.
 
-Verifies that the four ingest parse helpers (ogimet, HKO, meteostat, IEM ASOS)
-correctly apply unit-box wrapping at their respective parse boundaries.
+Verifies the Box-wrapping pattern at ingest boundaries and exercises the
+Ogimet parse helpers directly. HKO, Meteostat, and IEM ASOS boundary sites
+use the same CelsiusBox/FahrenheitBox pattern and are covered by the
+unit-witness boundary tests below rather than per-client smoke tests
+(those clients require live HTTP or complex fixture setup).
 
 For ogimet: confirms the METAR parser and CSV-line parser return float-compatible
 values (CelsiusBox.value extracted into Celsius NewType, so isinstance(x, float)).

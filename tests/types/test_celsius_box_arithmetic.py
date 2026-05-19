@@ -8,7 +8,8 @@ Load-bearing tests:
   2. Cross-unit arithmetic raises TypeError (the runtime antibody).
   3. Conversion helpers round-trip correctly.
   4. Frozen dataclass guarantees: hashable, immutable after construction.
-  5. Sed-break: commenting out __add__ cross-unit guard causes tests 3+4 to fail.
+  5. Sed-break: commenting out __add__ cross-unit guard causes tests in section 2
+     (test_celsius_add_fahrenheit_raises, test_fahrenheit_add_celsius_raises) to fail.
 
 Fitz Constraint #1: "make the category impossible, not just the instance."
 """
