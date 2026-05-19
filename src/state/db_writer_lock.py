@@ -765,6 +765,7 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         # --- T1 Phase-1 decision_events scripts (2026-05-19) ---
         "scripts/audit_artifact_json_natural_key_coverage_2026_05_19.py",  # read_only: SELECT-only audit; T1 backfill precondition gate
         "scripts/migrate_decision_events_create_2026_05_19.py",            # operator_invoked: idempotent CREATE TABLE/TRIGGER/INDEX; not daemon path
+        "scripts/backfill_decision_events_from_artifact_json.py",          # already_guarded: reads mode=ro (forecasts); writes under db_writer_lock(BULK) when not dry_run
     }
 )
 

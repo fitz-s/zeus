@@ -1,6 +1,6 @@
 # Created: 2026-05-19
 # Last reused or audited: 2026-05-19
-# Authority basis: PHASE_1_ULTRAPLAN.md §4.3 (Backfill PRECONDITION, critic round-2 SEV-2)
+# Authority basis: PHASE_1_ULTRAPLAN.md §4.3 (Backfill PRECONDITION, critic round-2 SEV-2); operator directive 2026-05-19 "paths按main写入"
 """Audit artifact_json natural-key coverage in decision_log.
 
 Reads N random decision_log rows from the world DB, parses artifact_json,
@@ -17,6 +17,9 @@ Note: from_artifact_json returns a PARTIAL key (city placeholder for market_slug
 Recovery rate measures whether temperature_metric derivation and required fields
 (target_date, observation_time via timestamp) are present — not whether market_slug
 is resolved. The backfill resolves city→market_slug via market_events_v2.
+
+IMPORTANT: This script reads PRIMARY production state (not worktree-local).
+Uses src/state/db_paths.primary_world_db_path() per operator directive.
 
 Output: JSON to .claude/jobs/audit_artifact_json_natural_key/<UTC-timestamp>/result.json
         + stdout summary line.
@@ -38,7 +41,7 @@ from datetime import datetime, timezone
 sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
 
 from src.contracts.decision_natural_key import from_artifact_json
-from src.state.db import ZEUS_WORLD_DB_PATH
+from src.state.db_paths import primary_world_db_path
 
 
 def _iter_trade_cases(artifact_json_str: str):
@@ -54,44 +57,48 @@ def _iter_trade_cases(artifact_json_str: str):
 
 
 def run_audit(sample: int = 1000) -> dict:
-    """Run the audit and return a result dict."""
-    conn = sqlite3.connect(str(ZEUS_WORLD_DB_PATH))
-    conn.row_factory = sqlite3.Row
+    """Run the audit and return a result dict.
 
-    # Check table existence before querying (world DB may be empty on first run)
+    Reads from PRIMARY production world DB (not worktree-local).
+    Exits with code 2 if DB or table is absent — vacuous pass is not acceptable.
+    """
+    db_path = primary_world_db_path()
+    if not db_path.exists():
+        print(
+            f"FATAL: PRIMARY world DB not found at {db_path}. "
+            "Audit cannot run against absent production DB — vacuous pass rejected.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA query_only=ON")
+
+    # Hard-fail if decision_log table is missing — this must be a production DB
     has_table = conn.execute(
         "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='decision_log'"
     ).fetchone()[0]
     if not has_table:
         conn.close()
-        return {
-            "total_runs": 0,
-            "sampled_runs": 0,
-            "total_trade_cases": 0,
-            "recovered": 0,
-            "failed": 0,
-            "recovery_rate": None,
-            "status": "NO_TABLE",
-            "message": "decision_log table does not exist in world DB — no data to audit; gate passes vacuously",
-            "db_path": str(ZEUS_WORLD_DB_PATH),
-            "audit_ts": datetime.now(timezone.utc).isoformat(),
-        }
+        print(
+            f"FATAL: decision_log table missing in PRIMARY world DB at {db_path}. "
+            "The production DB must have decision_log — vacuous pass rejected. "
+            "Verify PR-T1-A migration applied to primary state/zeus-world.db.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
 
     total_runs = conn.execute("SELECT COUNT(*) FROM decision_log").fetchone()[0]
     if total_runs == 0:
         conn.close()
-        return {
-            "total_runs": 0,
-            "sampled_runs": 0,
-            "total_trade_cases": 0,
-            "recovered": 0,
-            "failed": 0,
-            "recovery_rate": None,
-            "status": "NO_DATA",
-            "message": "decision_log has 0 rows — no data to audit; gate passes vacuously",
-            "db_path": str(ZEUS_WORLD_DB_PATH),
-            "audit_ts": datetime.now(timezone.utc).isoformat(),
-        }
+        print(
+            f"FATAL: decision_log has 0 rows in PRIMARY world DB at {db_path}. "
+            "No data to audit — vacuous pass rejected. "
+            "Confirm live daemon has written decision_log entries before running audit.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
 
     rows = conn.execute(
         """
@@ -127,12 +134,13 @@ def run_audit(sample: int = 1000) -> dict:
                     })
 
     if total_trade_cases == 0:
-        recovery_rate = None
-        status = "NO_TRADE_CASES"
-        message = (
-            f"Sampled {sampled_runs} decision_log runs; "
-            "none contained trade_cases — gate passes vacuously"
+        print(
+            f"FATAL: Sampled {sampled_runs} decision_log runs from PRIMARY DB at {db_path}; "
+            "none contained trade_cases — vacuous pass rejected. "
+            "Confirm live daemon decision_log rows include artifact_json with trade_cases.",
+            file=sys.stderr,
         )
+        sys.exit(2)
     else:
         recovery_rate = recovered / total_trade_cases
         if recovery_rate >= 0.80:
@@ -159,7 +167,7 @@ def run_audit(sample: int = 1000) -> dict:
         "status": status,
         "message": message,
         "failure_examples": failure_examples,
-        "db_path": str(ZEUS_WORLD_DB_PATH),
+        "db_path": str(db_path),
         "audit_ts": datetime.now(timezone.utc).isoformat(),
     }
 
