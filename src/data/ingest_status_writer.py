@@ -178,12 +178,9 @@ def write_ingest_status(
         "holes_by_city_count": _holes_by_city_count(world_conn, "solar_daily"),
     }
 
-    # ensemble_snapshots
-    table_stats["ensemble_snapshots"] = {
-        "rows_last_hour": _rows_in_period(world_conn, "ensemble_snapshots", "fetch_time", 1),
-        "rows_last_day": _rows_in_period(world_conn, "ensemble_snapshots", "fetch_time", 24),
-        "holes_by_city_count": {},  # ensemble_snapshots not in data_coverage
-    }
+    # ensemble_snapshots: v1.F20 (2026-05-18) — table removed from world DB registry.
+    # Canonical table is ensemble_snapshots_v2 on forecasts.db. Do NOT query here;
+    # the world connection will return -1 from swallowed missing-table errors.
 
     # observations (daily observations — uses fetched_at from data_coverage proxy)
     table_stats["observations"] = {
