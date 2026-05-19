@@ -350,16 +350,23 @@ def _redeem_submitter_cycle() -> None:
 def _redeem_reconciler_cycle() -> None:
     """Poll REDEEM_TX_HASHED rows + reconcile_pending_redeems against web3.
 
-    NO-OP until web3 is installed + adapter wired (PR-I.5). Without web3,
-    operator-recorded tx_hash rows sit in TX_HASHED indefinitely — that's
-    expected per SCAFFOLD §I.2 ('redeem_reconciler: results=0').
+    PR-I.5 completion (2026-05-19): wires Web3 HTTPProvider + calls
+    reconcile_pending_redeems so the antibody guard merged in PR #192 is
+    reachable in production.  Karachi anchor: tx 0x0c85d94… (negRisk market
+    c8c220f5…) sitting in REDEEM_TX_HASHED since 2026-05-19T08:26 UTC.
     """
     from src.data.dual_run_lock import acquire_lock
     from src.execution.settlement_commands import (
         SettlementState,
         list_commands,
+        reconcile_pending_redeems,
     )
     from src.state.db import get_trade_connection
+    from src.venue.polymarket_v2_adapter import DEFAULT_POLYGON_RPC_URL
+
+    if get_mode() != "live":
+        logger.info("redeem_reconciler skipped_non_live mode=%s", get_mode())
+        return
 
     with acquire_lock("redeem_reconciler") as acquired:
         if not acquired:
@@ -372,18 +379,29 @@ def _redeem_reconciler_cycle() -> None:
                 logger.info("redeem_reconciler: results=0")
                 return
             try:
-                from web3 import Web3  # noqa: F401 — import probe only
+                from web3 import Web3
             except ImportError:
                 logger.info(
                     "redeem_reconciler: web3 not installed; rows=%d sitting in "
                     "TX_HASHED (expected pre-PR-I.5)", len(rows),
                 )
                 return
-            # web3 provider wiring is PR-I.5 scope; in PR-I we declare the seam.
-            logger.warning(
-                "redeem_reconciler: web3 import succeeded but provider wiring "
-                "is PR-I.5 scope; rows=%d not reconciled this tick.", len(rows),
-            )
+            polygon_rpc_url = os.environ.get("POLYGON_RPC_URL", DEFAULT_POLYGON_RPC_URL)
+            w3 = Web3(Web3.HTTPProvider(polygon_rpc_url, request_kwargs={"timeout": 15}))
+            try:
+                results = reconcile_pending_redeems(w3, conn)
+                conn.commit()
+                logger.info(
+                    "redeem_reconciler: reconciled=%d states=%s",
+                    len(results), [r.state.value for r in results],
+                )
+            except Exception as exc:
+                try:
+                    conn.rollback()
+                except Exception:  # noqa: BLE001
+                    pass
+                logger.error("redeem_reconciler: error=%s", exc)
+                raise
         finally:
             conn.close()
 

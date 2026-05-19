@@ -413,6 +413,8 @@ test_trust_policy:
     tests/test_polymarket_v2_adapter_dry_run_no_raw_tx_leak.py: {created: "2026-05-19", last_used: "2026-05-19"}
     # PR #192 — negRisk-misroute reconcile-guard antibody (Karachi root-cause permanent fix).
     tests/test_settlement_commands_negrisk_misroute_recovery.py: {created: "2026-05-19", last_used: "2026-05-19"}
+    # PR redeem-reconciler-wiring — PR-I.5 completion: reconciler wiring antibody (Karachi auto-recovery).
+    tests/test_main_redeem_reconciler_wiring.py: {created: "2026-05-19", last_used: "2026-05-19"}
 
 categories:
   core_law_antibody:
@@ -632,6 +634,8 @@ categories:
     - tests/test_settlement_commands_negrisk_world_attach.py
     - tests/test_polymarket_v2_adapter_dry_run_no_raw_tx_leak.py
     - tests/test_settlement_commands_negrisk_misroute_recovery.py
+    # PR redeem-reconciler-wiring — reconciler wiring antibody.
+    - tests/test_main_redeem_reconciler_wiring.py
 
   useful_regression:
     - tests/test_alpha_target_coherence.py
