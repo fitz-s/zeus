@@ -411,6 +411,8 @@ test_trust_policy:
     tests/test_boundary_rule_majority_threshold.py: {created: "2026-05-19", last_used: "2026-05-19"}
     tests/test_settlement_commands_negrisk_world_attach.py: {created: "2026-05-19", last_used: "2026-05-19"}
     tests/test_polymarket_v2_adapter_dry_run_no_raw_tx_leak.py: {created: "2026-05-19", last_used: "2026-05-19"}
+    # PR #192 — negRisk-misroute reconcile-guard antibody (Karachi root-cause permanent fix).
+    tests/test_settlement_commands_negrisk_misroute_recovery.py: {created: "2026-05-19", last_used: "2026-05-19"}
 
 categories:
   core_law_antibody:
@@ -629,6 +631,7 @@ categories:
     - tests/test_boundary_rule_majority_threshold.py
     - tests/test_settlement_commands_negrisk_world_attach.py
     - tests/test_polymarket_v2_adapter_dry_run_no_raw_tx_leak.py
+    - tests/test_settlement_commands_negrisk_misroute_recovery.py
 
   useful_regression:
     - tests/test_alpha_target_coherence.py
@@ -2201,5 +2204,29 @@ test_metadata:
       must NOT expose raw_tx_hex in returned payload or log messages. Only
       dry_run_fingerprint (SHA-256[:16]) is permitted. Broadcast replay impossible
       with fingerprint alone.
+    created: 2026-05-19
+    last_reused_or_audited: 2026-05-19
+
+  tests/test_settlement_commands_negrisk_misroute_recovery.py:
+    modules: [execution, state, venue]
+    category: core_law_antibody
+    profile: pr192_negrisk_misroute_reconcile_guard
+    blocks_commit: true
+    asserted_invariants:
+      - NEGRISK-MISROUTE-GUARD
+      - REDEEM-NEGRISK-MISROUTED-RESETS-TO-OPERATOR-REQUIRED
+    source_under_test:
+      - src/execution/settlement_commands.py
+      - src/venue/polymarket_v2_adapter.py
+    law_dependencies:
+      - docs/invariants.md
+    notes: >
+      Antibody for PR #192 Karachi root-cause: reconcile_pending_redeems() must detect
+      a confirmed tx to POLYGON_CTF_ADDRESS for a negRisk market and reset to
+      REDEEM_OPERATOR_REQUIRED (tx_hash=NULL, error_payload=REDEEM_NEGRISK_MISROUTED)
+      so the row re-enters the retry path via POLYGON_NEGRISK_ADAPTER_ADDRESS.
+      Four contracts: C1 primary (Karachi case), C2 negative control (standard CTF ok),
+      C3 positive control (negRisk correct adapter ok), C4 fail-safe (missing world DB).
+      Sed-flip verified 2026-05-19: disabling guard causes C1 → RED.
     created: 2026-05-19
     last_reused_or_audited: 2026-05-19
