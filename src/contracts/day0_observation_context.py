@@ -170,8 +170,18 @@ def classify_bound(
     if observed_extreme_so_far is None:
         return BoundClassification.UNBOUNDED_NO_OBS_YET
 
-    if member_extremes_remaining is None or len(member_extremes_remaining) == 0:
-        # No remaining forecast members — observation is the only signal; treat as deterministic
+    if member_extremes_remaining is None:
+        # Observation present but forecast unavailable — fail closed rather than silently
+        # treating forecast-missing as DETERMINISTIC (which would signal a fully-resolved
+        # position and allow downstream callers to skip further evaluation).
+        raise ValueError(
+            "classify_bound: observed_extreme_so_far is not None but "
+            "member_extremes_remaining is None. Cannot determine bound state without "
+            "forecast members. Pass an empty list [] if the forecast window has closed."
+        )
+
+    if len(member_extremes_remaining) == 0:
+        # Forecast window closed (no remaining members) — observation determines settlement
         return BoundClassification.DETERMINISTIC
 
     if is_high_market:

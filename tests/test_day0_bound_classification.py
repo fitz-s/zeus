@@ -1,6 +1,6 @@
 # Created: 2026-05-19
 # Last reused or audited: 2026-05-19
-# Authority basis: PHASE_0_V4_ADDENDUM.md PR 5 row; INV-09
+# Authority basis: docs/operations/task_2026-05-17_strategy_vnext_phase0/PHASE_0_V4_ULTRAPLAN.md §D.3 (Phase 0 PR 5)
 # Production code implemented in PR 5 (2026-05-19). All tests live.
 # See docs/operations/task_2026-05-17_strategy_vnext_phase0/scaffolds/pr5_scaffold_report.md
 """R-5.1: BoundClassification enum exhaustiveness + 12-cell property matrix.
@@ -118,6 +118,23 @@ def test_classify_bound_deterministic_low() -> None:
         is_high_market=False,
     )
     assert result == BoundClassification.DETERMINISTIC
+
+
+def test_classify_bound_raises_when_obs_present_and_members_none() -> None:
+    """classify_bound raises ValueError when obs is not None but members is None.
+
+    Fail-closed: returning DETERMINISTIC when forecast is unavailable would signal
+    a fully-resolved position to callers that haven't seen any member data.
+    Pass an empty list [] to indicate the forecast window has closed.
+    """
+    import pytest
+
+    with pytest.raises(ValueError, match="member_extremes_remaining is None"):
+        classify_bound(
+            observed_extreme_so_far=75.0,
+            member_extremes_remaining=None,
+            is_high_market=True,
+        )
 
 
 # ---------------------------------------------------------------------------

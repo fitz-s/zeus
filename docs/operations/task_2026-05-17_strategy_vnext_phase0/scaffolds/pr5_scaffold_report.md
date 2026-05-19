@@ -1,9 +1,11 @@
 # PR 5 Scaffold Report: BoundClassification + CelsiusBox Propagation + DST Audit
 
+> **STATUS UPDATE 2026-05-19**: Production code shipped at commit `e13c029b34`. Below sections describe the original SCAFFOLD-phase artifacts; tests are now live + classify_bound, build_day0_observation_context, IngestAdapter all have production bodies. See PR #191 for the integrated landing.
+
 **Date**: 2026-05-19
 **Branch**: feat/phase0-pr5-day0-bound-classification-20260519
 **Authority**: PHASE_0_V4_ADDENDUM.md PR 5 row; INV-09, INV-16
-**Status**: SCAFFOLD ONLY — production code pending
+**Status**: SCAFFOLD ONLY — production code pending (see STATUS UPDATE banner above)
 
 ---
 
@@ -22,12 +24,13 @@
 
 | File | Type | Status |
 |---|---|---|
-| `src/contracts/day0_observation_context.py` | New contract | SCAFFOLD (stubs, `raise NotImplementedError`) |
-| `tests/test_day0_bound_classification.py` | R-5.1 tests | SCAFFOLD (31 tests, all `@pytest.mark.skip`) |
-| `tests/test_diurnal_dst_property.py` | R-5.2 tests | SCAFFOLD (5 tests, all `@pytest.mark.skip`) |
-| `tests/test_day0_unit_box_propagation.py` | R-5.3 tests | SCAFFOLD (6 tests, all `@pytest.mark.skip`) |
+| `src/contracts/day0_observation_context.py` | New contract | PRODUCTION (commit `e13c029b34`): classify_bound, build_day0_observation_context, IngestAdapter all live |
+| `tests/test_day0_bound_classification.py` | R-5.1 tests | PRODUCTION: 20 tests LIVE (R-5.1f stub deleted) |
+| `tests/test_diurnal_dst_property.py` | R-5.2 tests | PRODUCTION: 5 tests LIVE |
+| `tests/test_day0_unit_box_propagation.py` | R-5.3 tests | PRODUCTION: 7 tests LIVE (1 new: bare-float TypeError guard) |
 
-Test collection: **31 tests collected, 31 skipped, 0 failures**.
+Test collection (scaffold phase): **31 tests collected, 31 skipped, 0 failures** (historical).
+Test collection (production phase, commit `e13c029b34`): **32 tests collected, 32 passed, 0 skipped**.
 
 ---
 

@@ -1,6 +1,6 @@
 # Created: 2026-05-19
 # Last reused or audited: 2026-05-19
-# Authority basis: PHASE_0_V4_ADDENDUM.md PR 5 row; F3 PR #177 antibody pattern
+# Authority basis: docs/operations/task_2026-05-17_strategy_vnext_phase0/PHASE_0_V4_ULTRAPLAN.md §D.3 (Phase 0 PR 5)
 # Production code implemented in PR 5 (2026-05-19). All tests live.
 # See docs/operations/task_2026-05-17_strategy_vnext_phase0/scaffolds/pr5_scaffold_report.md
 """R-5.3: IngestAdapter + CelsiusBox / FahrenheitBox propagation boundary tests.

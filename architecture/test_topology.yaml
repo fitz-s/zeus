@@ -1768,9 +1768,11 @@ test_metadata:
       3 BoundClassification × 4 daypart (pre_sunrise, morning, afternoon, post_peak)
       = 12 distinct Day0ObservationContext dataclass constructions; each cell asserts
       .bound_classification, .daypart, .observed_extreme_so_far (None iff
-      UNBOUNDED_NO_OBS_YET), and is_dst_gap_hour is bool. classify_bound and
-      build_day0_observation_context stubs (R-5.1b–d, R-5.1f) skip until PR 5
-      production code lands. All 21 tests @pytest.mark.skip.
+      UNBOUNDED_NO_OBS_YET), and is_dst_gap_hour is bool. Production code shipped
+      at commit e13c029b34 (PR #191). All 20 tests LIVE (R-5.1f stub deleted;
+      classify_bound and build_day0_observation_context have full production bodies).
+      classify_bound raises ValueError when obs is not None and members is None
+      (fail-closed on missing forecast; empty list [] signals closed window).
     created: 2026-05-19
     last_reused_or_audited: 2026-05-19
 
@@ -1797,7 +1799,10 @@ test_metadata:
       is_missing_local_hour=True. Archetype C: New York 2026-11-01 fall-back (EDT→EST,
       ambiguous 01:00–01:59 fold=0/1) → is_ambiguous_local_hour=True, is_missing=False.
       Real DST risk surface is _instant_from_local_hour (diurnal.py:298–334) using
-      datetime.combine without missing-hour branch. All 5 tests @pytest.mark.skip.
+      datetime.combine without missing-hour branch. Production code shipped at commit
+      e13c029b34 (PR #191). All 5 tests LIVE. Observation timestamps corrected:
+      spring-forward uses naive local strings (UTC form lands after gap); fall-back
+      uses fold=1 UTC for the ambiguous second occurrence.
     created: 2026-05-19
     last_reused_or_audited: 2026-05-19
 
@@ -1827,6 +1832,8 @@ test_metadata:
       .current_temp must be float not Box type; unit-mismatch conversion stub.
       Q1 (phase6_contract.md R-BA..R-BD conflict) resolved as invalid by orchestrator
       triage (phase6_contract is archived Q2 2026; math-split and unit-type are
-      orthogonal concerns). All 6 tests @pytest.mark.skip.
+      orthogonal concerns). Production code shipped at commit e13c029b34 (PR #191).
+      All 7 tests LIVE (1 new test added: bare-float at seam raises TypeError).
+      IngestAdapter seam implemented in src/contracts/day0_observation_context.py.
     created: 2026-05-19
     last_reused_or_audited: 2026-05-19
