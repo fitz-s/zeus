@@ -158,9 +158,10 @@ def test_t3_non_allowlist_errorcode_not_promoted(conn, monkeypatch):
 
 def test_t4_allowlist_gates_negrisk_misrouted_promotion():
     """T4 (sed-flip antibody): REDEEM_NEGRISK_MISROUTED MUST appear in
-    _AUTONOMOUS_RETRY_ERRORCODES_ALWAYS. If this assertion fails, the allowlist
-    was edited without updating this test — T1 and T5 would silently pass as
-    zero-promotion no-ops.
+    _AUTONOMOUS_RETRY_ERRORCODES_ALWAYS. This test is the direct membership
+    assertion — it fails loudly (not silently) the moment the entry is removed.
+    T1 and T5 also fail loudly on removal (they assert promoted == 1), so T4
+    provides an explicit, self-documenting signal naming the exact entry at risk.
 
     To verify the sed-flip catches a regression: remove 'REDEEM_NEGRISK_MISROUTED'
     from _AUTONOMOUS_RETRY_ERRORCODES_ALWAYS and this test should turn RED."""

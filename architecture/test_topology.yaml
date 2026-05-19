@@ -2241,7 +2241,7 @@ test_metadata:
       - src/execution/settlement_commands.py
       - src/venue/polymarket_v2_adapter.py
     law_dependencies:
-      - docs/invariants.md
+      - architecture/invariants.yaml
     notes: >
       Antibody for PR #192 Karachi root-cause: reconcile_pending_redeems() must detect
       a confirmed tx to POLYGON_CTF_ADDRESS for a negRisk market and reset to
@@ -2263,7 +2263,7 @@ test_metadata:
     source_under_test:
       - src/execution/settlement_commands.py
     law_dependencies:
-      - docs/invariants.md
+      - architecture/invariants.yaml
     notes: >
       Antibody for PR-208 5th-iter Karachi fix: adds REDEEM_NEGRISK_MISROUTED to
       _AUTONOMOUS_RETRY_ERRORCODES_ALWAYS so reseat_stub_deferred_rows_for_autonomous_retry
