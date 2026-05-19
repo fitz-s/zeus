@@ -46,9 +46,18 @@ ERA_DEAD WATERMARK (Critic P4):
 """
 import pytest
 
-# SCAFFOLD: import will succeed after implementation
-# from src.contracts.resolution_era import ResolutionEra, ERA_CUTOVER_DATE
-# from src.state.settlement_writers import dispatch_era_basis, ERA_BASIS_INTERNAL_RESOLVER, ERA_BASIS_UMA_OO_V2
+# SCAFFOLD: imports will succeed after implementation
+# from src.contracts.resolution_era import (
+#     ResolutionEra,
+#     EraDispatchOutcome,
+#     EraDispatchResult,
+# )
+# from src.state.settlement_writers import (
+#     dispatch_era_basis,
+#     ERA_BASIS_INTERNAL_RESOLVER,
+#     ERA_BASIS_UMA_OO_V2,
+#     ERA_CUTOVER_DATE,
+# )
 
 
 @pytest.mark.xfail(reason="SCAFFOLD: implementation not yet written — PR 1 body phase")
@@ -72,8 +81,19 @@ def test_r1_2_pre_cutover_market_dispatches_uma_oo_v2_era():
 @pytest.mark.xfail(reason="SCAFFOLD: implementation not yet written — PR 1 body phase")
 def test_r1_2_extension_era_dead_watermark_on_empty_uma_window():
     """R-1.2 extension (Critic P4): when uma_resolution_listener returns an empty
-    log window for a pre-cutover market, the dispatcher must raise or return
-    ERA_DEAD signal — NOT silently fall through to INTERNAL_RESOLVER era.
+    log window for a pre-cutover market, the caller must construct
+    EraDispatchResult(outcome=EraDispatchOutcome.ERA_EMPTY_OBSERVATION, era_basis=None, ...)
+    and defer/retry — NOT silently fall through to INTERNAL_RESOLVER era.
+
+    dispatch_era_basis() itself returns ERA_DEAD only when no era covers the date.
+    ERA_EMPTY_OBSERVATION is constructed by the listener caller when the on-chain
+    event has not been indexed yet.
+
+    Assert:
+        - EraDispatchOutcome.ERA_DEAD.value == "era_dead"
+        - EraDispatchOutcome.ERA_EMPTY_OBSERVATION.value == "era_empty_observation"
+        - A mocked empty uma_resolution lookup produces ERA_EMPTY_OBSERVATION, not
+          ERA_RESOLVED with INTERNAL_RESOLVER_POST_2026_02_21 as a fallback
     """
     ...
 

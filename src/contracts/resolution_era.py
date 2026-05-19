@@ -56,6 +56,62 @@ class ResolutionEra(str, Enum):
     # OPEN enum — future cutovers add via era_watermark table, not by editing this file.
 
 
+class EraDispatchOutcome(str, Enum):
+    """Typed outcome for era dispatch operations.
+
+    Replaces the informal "ERA_DEAD" string sentinel with a machine-readable
+    enum. Callers must branch on outcome before accessing era_basis.
+
+    ERA_RESOLVED:
+        The market's settled_at date matched a known era. era_basis is populated.
+        The settlement row is safe to write via write_settlement_v2_with_era_provenance().
+
+    ERA_DEAD:
+        No era matches this market — fail-closed, never silent.
+        This is NOT the same as an empty observation window.
+        Causes: settled_at before all known era starts, or a gap in era coverage.
+        era_basis is None. Dispatcher must raise or quarantine; silent fallthrough
+        is a correctness violation (Critic P4).
+
+    ERA_EMPTY_OBSERVATION:
+        The uma_resolution_listener returned an empty log window for this market.
+        This is a legitimate transient state — the on-chain event may not have
+        been indexed yet, or the window predates observable logs.
+        era_basis is None. Caller should retry or defer, not settle.
+    """
+
+    ERA_RESOLVED = "era_resolved"
+    ERA_DEAD = "era_dead"
+    ERA_EMPTY_OBSERVATION = "era_empty_observation"
+
+
+@dataclass(frozen=True)
+class EraDispatchResult:
+    """Typed result returned by dispatch_era_basis().
+
+    SCAFFOLD: dispatch_era_basis() in settlement_writers.py returns this type.
+    Callers must check outcome before accessing era_basis.
+
+    Fields:
+        outcome: The dispatch result classification.
+        era_basis: Populated when outcome == ERA_RESOLVED; None otherwise.
+        reason_code: Short machine-readable code for logging/metrics
+            (e.g. "post_cutover_internal", "pre_cutover_uma", "no_era_match").
+        reason_message: Operator-readable explanation of the dispatch decision.
+
+    Usage pattern (SCAFFOLD pseudocode):
+        result = dispatch_era_basis(settled_at_utc)
+        if result.outcome != EraDispatchOutcome.ERA_RESOLVED:
+            raise EraDispatchError(result.reason_code, result.reason_message)
+        write_settlement_v2_with_era_provenance(settlement, result.era_basis)
+    """
+
+    outcome: EraDispatchOutcome
+    era_basis: EraAuthorityBasis | None    # None iff outcome != ERA_RESOLVED
+    reason_code: str                        # short machine-readable label
+    reason_message: str                     # operator-readable explanation
+
+
 @dataclass(frozen=True)
 class EraAuthorityBasis:
     """Compile-time snapshot of authority evidence for one resolution era.

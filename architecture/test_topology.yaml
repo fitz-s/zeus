@@ -1966,4 +1966,119 @@ test_metadata:
       hash output format (dgid_v1_ prefix), same-args equality, and different-args
       inequality; activate post-PR4 implementation once decision_group_id_v1_hash()
       has its NotImplementedError replaced with the SHA-256 implementation.    created: 2026-05-19
+  tests/test_resolution_era_dispatch.py:
+    modules: [contracts, state]
+    category: relationship_test
+    profile: phase0_pr1_resolution_era
+    blocks_commit: true
+    asserted_invariants:
+      - INV-ERA-1-POST-CUTOVER-NOT-UMA
+      - INV-ERA-3-OPEN-ERA-DISPATCH
+      - ERA-DEAD-NEVER-SILENT
+    source_under_test:
+      - src/contracts/resolution_era.py
+      - src/state/settlement_writers.py
+    law_dependencies:
+      - docs/operations/task_2026-05-17_strategy_vnext_phase0/PHASE_0_V4_ULTRAPLAN.md
+      - docs/operations/task_2026-05-17_strategy_vnext_phase0/critic_1_pr1_settlement.md
+    notes: >
+      Relationship tests R-1.1 and R-1.2. R-1.1: post-cutover market (settled_at >= 2026-02-21)
+      dispatches to INTERNAL_RESOLVER_POST_2026_02_21; provenance_json contains
+      era='internal_resolver_post_2026_02_21', not 'harvester_live_uma_vote'.
+      R-1.2: pre-cutover market dispatches to UMA_OO_V2. R-1.2 extension (Critic P4):
+      empty uma_resolution window produces EraDispatchOutcome.ERA_EMPTY_OBSERVATION,
+      never silent ERA_RESOLVED fallback. All tests xfail until PR 1 implementation.
+    created: 2026-05-19
+    last_reused_or_audited: 2026-05-19
+
+  tests/test_twin_writer_no_duplicate_uma_tag.py:
+    modules: [execution, ingest]
+    category: relationship_test
+    profile: phase0_pr1_resolution_era
+    blocks_commit: true
+    asserted_invariants:
+      - TWIN-WRITER-CONSOLIDATION-COMPLETE
+    source_under_test:
+      - src/execution/harvester.py
+      - src/ingest/harvester_truth_writer.py
+      - src/state/settlement_writers.py
+    law_dependencies:
+      - docs/operations/task_2026-05-17_strategy_vnext_phase0/PHASE_0_V4_ULTRAPLAN.md
+    notes: >
+      Relationship test R-1.3. AST + line-scan audit asserting the literal string
+      'harvester_live_uma_vote' does NOT appear in harvester.py or
+      harvester_truth_writer.py after twin writer consolidation. Correctly xfails
+      pre-implementation (strings present at harvester.py:1338, harvester_truth_writer.py:556).
+      Remove xfail marker when twin writers are consolidated through settlement_writers.py.
+    created: 2026-05-19
+    last_reused_or_audited: 2026-05-19
+
+  tests/test_settlement_writer_inv37_attach.py:
+    modules: [state]
+    category: core_law_antibody
+    profile: phase0_pr1_resolution_era
+    blocks_commit: true
+    asserted_invariants:
+      - INV-37-ATTACH-SAVEPOINT-REQUIRED
+      - INV-37-NO-BARE-SQLITE-CONNECT
+    source_under_test:
+      - src/state/settlement_writers.py
+      - src/state/db.py
+    law_dependencies:
+      - docs/operations/task_2026-05-17_strategy_vnext_phase0/PHASE_0_V4_ULTRAPLAN.md
+      - docs/operations/task_2026-05-17_strategy_vnext_phase0/critic_1_pr1_settlement.md
+      - architecture/db_table_ownership.yaml
+    notes: >
+      Relationship test R-1.4. INV-37 ATTACH+SAVEPOINT compliance: monkey-patches
+      sqlite3.connect to assert no bare connections are made during
+      write_settlement_v2_with_era_provenance(); verifies get_forecasts_connection_with_world()
+      is called; asserts SAVEPOINT era_dispatch is issued and either RELEASE or ROLLBACK
+      fires. Also verifies exception path triggers ROLLBACK TO SAVEPOINT (atomicity).
+    created: 2026-05-19
+    last_reused_or_audited: 2026-05-19
+
+  tests/test_uma_resolution_listener_late_revalidation.py:
+    modules: [state]
+    category: relationship_test
+    profile: phase0_pr1_resolution_era
+    blocks_commit: true
+    asserted_invariants:
+      - UMA-REORG-SAFETY-LATE-REVALIDATION
+      - CONFIRMATIONS-REQUIRED-DEFAULT-6
+    source_under_test:
+      - src/state/uma_resolution_listener.py
+    law_dependencies:
+      - docs/operations/task_2026-05-17_strategy_vnext_phase0/PHASE_0_V4_ULTRAPLAN.md
+      - docs/operations/task_2026-05-17_strategy_vnext_phase0/critic_1_pr1_settlement.md
+    notes: >
+      Relationship test R-1.5. Polygon reorg safety: a uma_resolution row with
+      confirmation_count < confirmations_required that is later invalidated by a chain
+      reorg must be removed (or marked invalid) by the late-revalidation pass. Also
+      asserts confirmed rows (count >= required) are not removed. Default
+      confirmations_required == 6 (Polygon mainnet finality). Addresses
+      INSERT OR IGNORE reorg risk at uma_resolution_listener.py:496 (Critic P7-2).
+    created: 2026-05-19
+    last_reused_or_audited: 2026-05-19
+
+  tests/test_inv_era_provenance_post_cutover_count.py:
+    modules: [state, contracts]
+    category: core_law_antibody
+    profile: phase0_pr1_resolution_era
+    blocks_commit: true
+    asserted_invariants:
+      - ERA-PROVENANCE-POST-CUTOVER-COUNT-ZERO
+    source_under_test:
+      - src/state/settlement_writers.py
+      - src/contracts/resolution_era.py
+    law_dependencies:
+      - docs/operations/task_2026-05-17_strategy_vnext_phase0/PHASE_0_V4_ULTRAPLAN.md
+      - docs/operations/task_2026-05-17_strategy_vnext_phase0/preflight/migration_dry_runs.json
+    notes: >
+      CI antibody: after PR 1 merge and backfill, SELECT COUNT(*) FROM settlements_v2
+      WHERE provenance_json LIKE '%harvester_live_uma_vote%' AND settled_at >= '2026-02-21'
+      MUST equal 0. Pre-merge expected count: 2829 (per migration_dry_runs.json).
+      Live-DB variant (marked @pytest.mark.live_db) is skipped until backfill completes.
+      Fixture-DB variant uses in-memory DB with known BLEEDING rows; static query
+      string assertion always passes. Removes the 2829-row era-blind bleeding state
+      from becoming a permanent regression path.    created: 2026-05-19
     last_reused_or_audited: 2026-05-19

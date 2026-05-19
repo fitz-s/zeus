@@ -31,7 +31,12 @@ from __future__ import annotations
 from datetime import date
 from typing import Any
 
-from src.contracts.resolution_era import EraAuthorityBasis, ResolutionEra
+from src.contracts.resolution_era import (
+    EraAuthorityBasis,
+    EraDispatchOutcome,
+    EraDispatchResult,
+    ResolutionEra,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -67,23 +72,56 @@ ERA_CUTOVER_DATE = date(2026, 2, 21)
 # Public API (SCAFFOLD — bodies are pseudocode comments only)
 # ---------------------------------------------------------------------------
 
-def dispatch_era_basis(settled_at_utc: date) -> EraAuthorityBasis:
+def dispatch_era_basis(settled_at_utc: date) -> EraDispatchResult:
     """Dispatch to the correct EraAuthorityBasis for a given settlement date.
 
     SCAFFOLD — implementation body not yet written.
 
-    Logic:
+    Returns EraDispatchResult with typed outcome. Callers MUST check
+    result.outcome before accessing result.era_basis (None on non-ERA_RESOLVED).
+
+    Logic (SCAFFOLD pseudocode):
+        if settled_at_utc is None or not isinstance(settled_at_utc, date):
+            raise ValueError(f"settled_at_utc must be a date, got {type(settled_at_utc)}")
+
         if settled_at_utc >= ERA_CUTOVER_DATE:
-            return ERA_BASIS_INTERNAL_RESOLVER
+            return EraDispatchResult(
+                outcome=EraDispatchOutcome.ERA_RESOLVED,
+                era_basis=ERA_BASIS_INTERNAL_RESOLVER,
+                reason_code="post_cutover_internal_resolver",
+                reason_message=f"settled_at {settled_at_utc} >= cutover {ERA_CUTOVER_DATE}",
+            )
+        elif settled_at_utc >= ERA_BASIS_UMA_OO_V2.era_start_date_utc:
+            return EraDispatchResult(
+                outcome=EraDispatchOutcome.ERA_RESOLVED,
+                era_basis=ERA_BASIS_UMA_OO_V2,
+                reason_code="pre_cutover_uma_oo_v2",
+                reason_message=f"settled_at {settled_at_utc} < cutover {ERA_CUTOVER_DATE}",
+            )
         else:
-            return ERA_BASIS_UMA_OO_V2
+            # No era covers this date — fail-closed, never silent (Critic P4)
+            return EraDispatchResult(
+                outcome=EraDispatchOutcome.ERA_DEAD,
+                era_basis=None,
+                reason_code="no_era_match",
+                reason_message=(
+                    f"settled_at {settled_at_utc} predates all known era starts. "
+                    "Dispatcher must raise or quarantine; never write settlement row."
+                ),
+            )
+
+    ERA_EMPTY_OBSERVATION usage (separate path):
+        When uma_resolution_listener returns empty for a pre-cutover market, the
+        caller constructs EraDispatchResult(outcome=ERA_EMPTY_OBSERVATION, ...) and
+        defers/retries — it does NOT call dispatch_era_basis() again with the same date.
 
     Args:
         settled_at_utc: The UTC date of the settlement event. Callers
             must have already resolved local→UTC conversion before calling here.
 
     Returns:
-        The authoritative EraAuthorityBasis for the settlement date.
+        EraDispatchResult with outcome=ERA_RESOLVED and era_basis populated on
+        success; outcome=ERA_DEAD with era_basis=None when no era matches.
 
     Raises:
         ValueError: if settled_at_utc is None or not a date instance.
