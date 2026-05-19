@@ -425,8 +425,12 @@ test_trust_policy:
     tests/test_inv_codehash_drift_detection.py: {created: "2026-05-19", last_used: "2026-05-19"}
     # PR-209 — 5th-iter Karachi: REDEEM_NEGRISK_MISROUTED added to autonomous retry allowlist.
     tests/test_reseat_negrisk_misrouted_allowlist.py: {created: "2026-05-19", last_used: "2026-05-19"}
-    # PR #212 — Karachi-class Gamma authority fallback when world snapshot row missing.
-    tests/test_settlement_commands_negrisk_gamma_fallback.py: {created: "2026-05-19", last_used: "2026-05-19"}
+    # PR #213 — codereview-may19 P1-1: IMMINENT_OPEN_CAPTURE registered in MODE_TIMEOUTS.
+    tests/test_executor_mode_timeouts.py: {created: "2026-05-19", last_used: "2026-05-19"}
+    # PR #213 — codereview-may19 P0-2: redeem dry-run no signed raw_tx_hex leak in logs/payload.
+    tests/test_redeem_dry_run_no_raw_tx_leak.py: {created: "2026-05-19", last_used: "2026-05-19"}
+    # PR #213 — codereview-may19 P1-3: settlement_commands.polymarket_end_anchor_source DEFAULT unknown_legacy.
+    tests/test_settlement_commands_anchor_source_default.py: {created: "2026-05-19", last_used: "2026-05-19"}
 
 categories:
   core_law_antibody:

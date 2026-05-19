@@ -214,7 +214,13 @@ def init_settlement_command_schema(conn: sqlite3.Connection) -> None:
     # PR 3 (2026-05-19): idempotent ADD COLUMN migrations for new fields.
     # "duplicate column" is expected on already-migrated databases; ignore it.
     for alter_sql in [
-        "ALTER TABLE settlement_commands ADD COLUMN polymarket_end_anchor_source TEXT NOT NULL DEFAULT 'gamma_explicit'",
+        # codereview-may19 P1-3: do NOT fabricate 'gamma_explicit' for historical
+        # rows during migration. Historical rows whose authority chain was never
+        # captured must carry the explicit "unknown_legacy" sentinel so
+        # downstream causal-evidence consumers cannot mistake them for rows
+        # whose anchor source was actually verified at write time. Live callers
+        # (request_redeem) are required to pass a non-legacy value explicitly.
+        "ALTER TABLE settlement_commands ADD COLUMN polymarket_end_anchor_source TEXT NOT NULL DEFAULT 'unknown_legacy'",
         # PR 6 (2026-05-19)
         "ALTER TABLE settlement_commands ADD COLUMN zeus_submit_intent_time TEXT",
         "ALTER TABLE settlement_commands ADD COLUMN venue_ack_time TEXT",
@@ -225,6 +231,37 @@ def init_settlement_command_schema(conn: sqlite3.Connection) -> None:
         except Exception as exc:
             if "duplicate column" not in str(exc).lower():
                 raise
+
+    # codereview-may19 P1-3 / Codex P1: backfill correction for v12-era rows.
+    # The previous ALTER (DEFAULT 'gamma_explicit') stamped legacy rows whose
+    # anchor source was never captured with a fabricated authority label.
+    # The DEFAULT change above only protects FUTURE rows; existing rows still
+    # carry the fabricated 'gamma_explicit'. Convert them to 'unknown_legacy'
+    # so downstream causal-evidence consumers can distinguish "verified
+    # Gamma-explicit anchor" from "unknown legacy fabrication".
+    #
+    # Idempotency: keyed off PRAGMA user_version. Set to 13 only after the
+    # update has run; subsequent boots see user_version=13 and skip. Real
+    # live callers passing an explicit 'gamma_explicit' value (Gamma's actual
+    # endDate as the verified anchor) write rows AFTER this boot, so the
+    # one-shot does not corrupt verified rows.
+    try:
+        current_version = int(conn.execute("PRAGMA user_version").fetchone()[0])
+    except Exception:
+        current_version = 0
+    if current_version < 13:
+        try:
+            conn.execute(
+                "UPDATE settlement_commands SET polymarket_end_anchor_source = 'unknown_legacy' "
+                "WHERE polymarket_end_anchor_source = 'gamma_explicit'"
+            )
+            conn.execute("PRAGMA user_version = 13")
+        except Exception as exc:
+            logger.warning(
+                "[V13_BACKFILL_GAMMA_EXPLICIT_FAILED] exc=%s; legacy rows may "
+                "retain fabricated authority. Investigate before next boot.",
+                exc,
+            )
 
 
 def request_redeem(
@@ -354,7 +391,14 @@ def request_redeem(
                     requested_at_s,
                     requested_at_s if state in _TERMINAL_STATES else None,
                     _json_dumps(error_payload) if error_payload else None,
-                    polymarket_end_anchor_source or "gamma_explicit",
+                    # codereview-may19 P1-3: live-created rows must supply an
+                    # explicit non-empty anchor source. Empty string falls
+                    # through to "unknown_legacy" — the same sentinel migrated
+                    # rows carry — so we never fabricate "gamma_explicit"
+                    # provenance for rows whose authority chain wasn't recorded.
+                    # Real callers thread the actual source through the keyword
+                    # arg; tests / historical paths get "unknown_legacy".
+                    polymarket_end_anchor_source or "unknown_legacy",
                 ),
             )
             _append_event(
@@ -1432,6 +1476,13 @@ def _confirmation_count(web3: Any, block_number: int | None) -> int:
 _AUTONOMOUS_RETRY_ERRORCODES_ALWAYS: frozenset[str] = frozenset({
     "REDEEM_DEFERRED_TO_R1",
     "REDEEM_NEGRISK_MISROUTED",   # PR-209: antibody-reset cases auto-retry via NegRiskAdapter
+    # PR #212 completion: NEGRISK_FACT_MISSING is now auto-recoverable because
+    # _fetch_neg_risk_from_gamma_for_submitter() supplies the missing fact from
+    # the canonical Gamma authority when the world snapshot cache is empty
+    # (Karachi-class positions entered before the snapshot side-effect path
+    # existed). Pre-PR #212 this errorCode latched OPERATOR_REQUIRED forever;
+    # post-PR #212 the next submit attempt resolves it.
+    "REDEEM_NEGRISK_FACT_MISSING",
 })
 
 # Error codes that require DRY_RUN to be OFF before retry. REDEEM_DRY_RUN_LOGGED

@@ -801,8 +801,19 @@ def test_dry_run_signs_but_skips_broadcast(monkeypatch):
 
     assert result["success"] is False
     assert result["errorCode"] == "REDEEM_DRY_RUN_LOGGED", result
-    assert "raw_tx_hex" in result
-    assert result["raw_tx_hex"].startswith("0x")
+    # codereview-may19 P0-2: raw_tx_hex was redacted to a SHA-256 fingerprint
+    # to prevent broadcast-by-observer. Operators correlate via fingerprint,
+    # not the raw bytes.
+    assert "raw_tx_hex" not in result, (
+        "Safe dry-run return must NOT include raw_tx_hex (P0-2 redaction)."
+    )
+    assert "dry_run_fingerprint" in result, (
+        "Safe dry-run return MUST include dry_run_fingerprint (P0-2 contract)."
+    )
+    assert isinstance(result["dry_run_fingerprint"], str)
+    assert len(result["dry_run_fingerprint"]) == 16, (
+        "dry_run_fingerprint must be first-16-hex-chars of SHA-256(raw_hex)."
+    )
     # Confirm eth_sendRawTransaction was never called
     for call_args in rpc.call_args_list:
         method = call_args[0][1] if len(call_args[0]) >= 2 else ""
