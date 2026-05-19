@@ -1,6 +1,9 @@
 # Created: 2026-05-18
-# Last reused or audited: 2026-05-18
+# Last reused or audited: 2026-05-19
 # Authority basis: /tmp/inv37_wave2_plan.md; PR-S4b §3; architecture/db_table_ownership.yaml
+# Lifecycle: created=2026-05-18; last_reviewed=2026-05-19; last_reused=2026-05-19
+# Purpose: Antibody tests verifying INV-37 wave-2 writers route to canonical DB (not caller conn)
+# Reuse: import and call individual test functions; fixtures are session-scoped
 """Antibody tests for INV-37 writer schema qualification — wave-2 (log_opportunity_fact,
 log_market_source_contract_topology_facts, append_source_contract_audit_events).
 
@@ -22,7 +25,6 @@ These tests verify:
 from __future__ import annotations
 
 import sqlite3
-import pathlib
 from unittest.mock import patch
 
 import pytest

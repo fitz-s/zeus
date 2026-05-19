@@ -533,14 +533,11 @@ def persist_audit_report(
 ) -> dict[str, Any] | None:
     if audit_db_path is None:
         return None
-    conn = state_db.get_connection(audit_db_path, write_class="bulk")
-    try:
-        state_db.init_schema(conn)
-        result = state_db.append_source_contract_audit_events(conn, report=report)
-        conn.commit()
-        return {**result, "db_path": str(audit_db_path)}
-    finally:
-        conn.close()
+    # Pass db_path so append_source_contract_audit_events opens its own connection
+    # to the explicit audit file (INV-37 wave-2 escape hatch for explicit audit DB routing).
+    # init_schema is called internally via get_connection; explicit init_schema call removed.
+    result = state_db.append_source_contract_audit_events(None, report=report, db_path=audit_db_path)
+    return {**result, "db_path": str(audit_db_path)}
 
 
 def exit_code_for_report(report: dict[str, Any], *, fail_on: str) -> int:

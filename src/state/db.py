@@ -4665,21 +4665,35 @@ def log_market_source_contract_topology_facts(
 
 
 def append_source_contract_audit_events(
-    conn: sqlite3.Connection | None,  # Deprecated: ignored; function opens its own world connection (INV-37 fix, wave-2)
+    conn: sqlite3.Connection | None,  # Deprecated: ignored when db_path is None; use db_path for explicit audit DB routing
     *,
     report: dict,
+    db_path: "Path | None" = None,
 ) -> dict:
     """Append source-contract watch evidence without affecting eligibility.
 
-    INV-37 fix (wave-2, 2026-05-18): opens its own world connection rather than
+    INV-37 fix (wave-2, 2026-05-18): opens its own connection rather than
     accepting an opaque conn from callers. Pre-fix, callers could pass a
     trades-rooted or forecasts-ATTACHed conn, causing writes to land in the wrong
     DB. The ``conn`` parameter is kept for backward compat but is no longer used.
+
+    When ``db_path`` is provided (e.g. from ``--audit-db-path`` CLI flag), writes
+    to that specific file instead of the canonical world DB. This is the only
+    legitimate escape hatch: the caller has explicitly opened and initialised the
+    target DB (via ``init_schema``) and is intentionally writing to a separate
+    audit file, not substituting a wrong-DB connection.
     """
     if not isinstance(report, dict):
         return {"status": "refused_invalid_report", "tables": _SOURCE_CONTRACT_AUDIT_TABLES}
 
-    _wconn = get_world_connection(write_class="live")
+    if db_path is not None:
+        from pathlib import Path as _Path
+        _wconn = get_connection(_Path(db_path), write_class="bulk")
+        # Initialise schema for a fresh audit DB (mirrors prior explicit init_schema call
+        # in watch_source_contract.py::persist_audit_report before wave-2 refactor).
+        init_schema(_wconn)
+    else:
+        _wconn = get_world_connection(write_class="live")
     try:
         missing_tables = [
             table for table in _SOURCE_CONTRACT_AUDIT_TABLES if not _table_exists(_wconn, table)

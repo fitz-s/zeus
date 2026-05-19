@@ -460,7 +460,7 @@ def test_concurrent_ws_ingest_does_not_collide():
             )
         else:
             # Losing thread errored before reporting promoted; winning thread must have promoted.
-            assert total_promoted >= 1 or count == 1, (
+            assert total_promoted >= 1, (
                 "At least one promotion must have succeeded (data invariant: count==1)"
             )
 
