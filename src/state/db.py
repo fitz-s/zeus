@@ -15,7 +15,7 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import TYPE_CHECKING, Iterable, Optional
+from typing import TYPE_CHECKING, Any, Iterable, Optional
 
 if TYPE_CHECKING:
     from src.state.db_writer_lock import WriteClass
@@ -8611,13 +8611,13 @@ def _settlement_authority_smoke_summary(conn: sqlite3.Connection) -> dict:
     }
 
 
-def query_p4_fact_smoke_summary(conn: sqlite3.Connection) -> dict:
+def query_p4_fact_smoke_summary(conn: sqlite3.Connection) -> dict[str, Any]:
     missing_tables = [
         table
         for table in ("opportunity_fact", "availability_fact", "execution_fact", "outcome_fact")
         if not _table_exists(conn, table)
     ]
-    summary = {
+    summary: dict[str, Any] = {
         "missing_tables": missing_tables,
         "opportunity": {"total": 0, "trade_eligible": 0, "no_trade": 0, "availability_tagged": 0},
         "availability": {"total": 0, "failure_types": {}},
@@ -8721,7 +8721,7 @@ def query_execution_event_summary(
     *,
     limit: int | None = 500,
     not_before: str | None = None,
-) -> dict:
+) -> dict[str, Any]:
     """Execution event summary from canonical position_events."""
     filters = []
     params: list[object] = []
@@ -8743,7 +8743,7 @@ def query_execution_event_summary(
     except Exception:
         rows = []
 
-    def _blank() -> dict:
+    def _blank() -> dict[str, int]:
         return {
             "entry_attempted": 0,
             "entry_filled": 0,
@@ -8759,7 +8759,7 @@ def query_execution_event_summary(
         }
 
     overall = _blank()
-    by_strategy: dict[str, dict] = {}
+    by_strategy: dict[str, dict[str, int]] = {}
 
     mapping = {
         "POSITION_OPEN_INTENT": "entry_attempted",
@@ -8823,16 +8823,21 @@ def transition_phase(
     )
 
 
+def _float_or_none(v: Any) -> float | None:
+    """Coerce to float if non-None, otherwise return None."""
+    return float(v) if v is not None else None
+
+
 def log_exit_lifecycle_event(
     conn: sqlite3.Connection,
-    pos,
+    pos: object,
     *,
     event_type: str,
     reason: str = "",
     error: str = "",
     status: str = "",
     order_id: str | None = None,
-    details: dict | None = None,
+    details: dict[str, Any] | None = None,
     timestamp: str | None = None,
 ) -> None:
     """Append sell-side lifecycle telemetry without changing exit authority."""
@@ -8894,8 +8899,8 @@ def log_exit_lifecycle_event(
             filled_at=filled_at,
             voided_at=voided_at,
             submitted_price=submitted_price,
-            fill_price=payload.get("fill_price") if exit_has_fill_finality else None,
-            shares=(
+            fill_price=float(payload["fill_price"]) if exit_has_fill_finality and payload.get("fill_price") is not None else None,
+            shares=_float_or_none(
                 payload.get("shares")
                 if payload.get("shares") is not None
                 else getattr(pos, "effective_shares", getattr(pos, "shares", None))
@@ -8910,7 +8915,7 @@ def log_exit_lifecycle_event(
 
 def log_exit_retry_event(
     conn: sqlite3.Connection,
-    pos,
+    pos: object,
     *,
     reason: str,
     error: str = "",
@@ -8930,7 +8935,7 @@ def log_exit_retry_event(
 
 def log_pending_exit_status_event(
     conn: sqlite3.Connection,
-    pos,
+    pos: object,
     *,
     status: str,
     timestamp: str | None = None,
@@ -8948,14 +8953,14 @@ def log_pending_exit_status_event(
 
 def log_exit_attempt_event(
     conn: sqlite3.Connection,
-    pos,
+    pos: object,
     *,
     order_id: str,
     status: str,
     current_market_price: float,
     best_bid: float | None,
     shares: float,
-    details: dict | None = None,
+    details: dict[str, Any] | None = None,
     timestamp: str | None = None,
 ) -> None:
     """Append sell-order attempt telemetry at placement time."""
@@ -8980,7 +8985,7 @@ def log_exit_attempt_event(
 
 def log_exit_fill_event(
     conn: sqlite3.Connection,
-    pos,
+    pos: object,
     *,
     order_id: str,
     fill_price: float,
@@ -9009,7 +9014,7 @@ def log_exit_fill_event(
 
 def log_exit_fill_check_error_event(
     conn: sqlite3.Connection,
-    pos,
+    pos: object,
     *,
     order_id: str,
     timestamp: str | None = None,
@@ -9025,7 +9030,7 @@ def log_exit_fill_check_error_event(
     )
 
 
-def log_exit_retry_released_event(conn: sqlite3.Connection, pos, *, timestamp: str | None = None) -> None:
+def log_exit_retry_released_event(conn: sqlite3.Connection, pos: object, *, timestamp: str | None = None) -> None:
     """Append telemetry when cooldown expires and exit can be re-evaluated."""
     log_exit_lifecycle_event(
         conn,
@@ -9038,7 +9043,7 @@ def log_exit_retry_released_event(conn: sqlite3.Connection, pos, *, timestamp: s
 
 def log_pending_exit_recovery_event(
     conn: sqlite3.Connection,
-    pos,
+    pos: object,
     *,
     event_type: str,
     reason: str,
