@@ -565,6 +565,9 @@ def run_reconcile_sweep(
                 observed_at=observed,
             )
         )
+    _resolve_disappeared_ghost_order_findings(
+        conn, open_order_ids, observed_at=observed
+    )
     reconcile_recorded_maker_fill_economics(conn, observed_at=observed)
     return findings
 
@@ -1401,6 +1404,49 @@ def _resolve_open_position_drift_findings(
             resolved_by="src.execution.exchange_reconcile",
             resolved_at=resolved_at,
         )
+
+
+def _resolve_disappeared_ghost_order_findings(
+    conn: sqlite3.Connection,
+    open_order_ids: set[str],
+    *,
+    observed_at: datetime,
+) -> int:
+    """Resolve `exchange_ghost_order` findings whose subject is no longer in
+    the live `open_order_ids` snapshot.
+
+    A ghost finding is recorded when the exchange reports an open order that
+    has no local command. Once that order subsequently transitions to
+    CANCELED, MATCHED, or expires, it disappears from `get_open_orders()`.
+    Without an explicit resolve path the finding stays `resolved_at IS NULL`
+    forever, and `governor` keeps `kill_switch_armed=True` — entries are
+    blocked indefinitely.
+
+    The resolution is read-only against the chain; only writes the local
+    `exchange_reconcile_findings` row.
+    """
+    rows = conn.execute(
+        """
+        SELECT finding_id, subject_id
+          FROM exchange_reconcile_findings
+         WHERE kind = 'exchange_ghost_order'
+           AND resolved_at IS NULL
+        """
+    ).fetchall()
+    resolved = 0
+    for row in rows:
+        subject = str(row["subject_id"])
+        if subject in open_order_ids:
+            continue
+        resolve_finding(
+            conn,
+            str(row["finding_id"]),
+            resolution="exchange_ghost_order_no_longer_in_open_orders",
+            resolved_by="src.execution.exchange_reconcile",
+            resolved_at=observed_at,
+        )
+        resolved += 1
+    return resolved
 
 
 def _resolve_open_trade_findings(

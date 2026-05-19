@@ -1050,8 +1050,26 @@ def reconcile_pending_redeems(web3: Any, conn: sqlite3.Connection) -> list[Settl
                 )
                 continue
 
-            # Scan receipt logs for the adapter that emitted PayoutRedemption.
-            # topic[0] == 0x2682012a…  is the PayoutRedemption event selector.
+            # Routing detection (5th iteration — NegRiskAdapter custom event topic):
+            #
+            # Standard CTF emits PayoutRedemption with topic
+            # 0x2682012a4a4f1973119f1c9b90745d1bd91fa2bab387344f044cb3586864d18d.
+            # NegRiskAdapter emits its OWN redemption event with a DIFFERENT topic
+            # 0x9140a6a270ef945260c03894b3c6b3b2695e9d5101feef0ff24fec960cfd3224
+            # (observed on Karachi tx 0xe08e03334f25... block 87135584, log[7]).
+            #
+            # NegRiskAdapter internally calls Standard CTF to move underlying
+            # positions during a negRisk redeem, so Standard CTF emits its
+            # PayoutRedemption EVEN WHEN routing is correct through NegRiskAdapter.
+            # The previous check (4th iter) required NegRiskAdapter to emit a
+            # PayoutRedemption event and false-flagged the correct flow as MISROUTED
+            # → reseat → GS013 retry loop on already-redeemed position. Karachi
+            # 2026-05-19 was the canonical case.
+            #
+            # Correct test: for negRisk markets, the route is correct iff
+            # NegRiskAdapter's contract address appears as a log emitter anywhere
+            # in the receipt. Its presence proves the contract was called
+            # (only the contract itself can emit events under its own address).
             _PAYOUT_REDEMPTION_TOPIC = (
                 "0x2682012a4a4f1973119f1c9b90745d1bd91fa2bab387344f044cb3586864d18d"
             )
@@ -1068,18 +1086,28 @@ def reconcile_pending_redeems(web3: Any, conn: sqlite3.Connection) -> list[Settl
                     return s.lower()
                 return s.lower()
 
-            adapter_addrs: set[str] = set()
+            _negrisk_addr = POLYGON_NEGRISK_ADAPTER_ADDRESS.lower()
+            _stdctf_addr = POLYGON_CTF_ADDRESS.lower()
+            payout_redemption_emitters: set[str] = set()
+            log_emitter_addrs: set[str] = set()
             for _log in receipt_payload.get("logs", []):
+                _addr = _to_hex_str(_log.get("address") or "")
+                if _addr:
+                    log_emitter_addrs.add(_addr)
                 _topics = _log.get("topics") or []
-                if _topics and _to_hex_str(_topics[0]) == _PAYOUT_REDEMPTION_TOPIC:
-                    _addr = _to_hex_str(_log.get("address") or "")
-                    if _addr:
-                        adapter_addrs.add(_addr)
+                if _topics and _to_hex_str(_topics[0]) == _PAYOUT_REDEMPTION_TOPIC and _addr:
+                    payout_redemption_emitters.add(_addr)
 
-            routed_to_standard_ctf = POLYGON_CTF_ADDRESS.lower() in adapter_addrs
-            routed_to_neg_risk_adapter = POLYGON_NEGRISK_ADAPTER_ADDRESS.lower() in adapter_addrs
+            routed_to_standard_ctf = _stdctf_addr in payout_redemption_emitters
+            routed_to_neg_risk_adapter = _negrisk_addr in log_emitter_addrs
+            # Back-compat: surface adapter_addrs (kept for downstream consumers
+            # and logging) as the union of PayoutRedemption emitters PLUS the
+            # NegRiskAdapter address when it was called.
+            adapter_addrs = set(payout_redemption_emitters)
+            if routed_to_neg_risk_adapter:
+                adapter_addrs.add(_negrisk_addr)
 
-            if is_negrisk_market and routed_to_standard_ctf and not routed_to_neg_risk_adapter:
+            if is_negrisk_market and not routed_to_neg_risk_adapter:
                 _wrong_adapters = ",".join(sorted(adapter_addrs))
                 misroute_error = {
                     "errorCode": "REDEEM_NEGRISK_MISROUTED",
