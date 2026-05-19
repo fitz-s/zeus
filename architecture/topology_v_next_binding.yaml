@@ -58,13 +58,14 @@ coverage_map:
         - "scripts/worktree_doctor.py"
         - "docs/operations/AGENTS.md"
 
-    # Money path — pricing and contracts
+    # Money path — pricing and contracts (includes all src/contracts/** for new types like ResolutionEra)
     - id: money_path_pricing
       patterns:
         - "src/contracts/settlement_semantics.py"
         - "src/contracts/execution_price.py"
         - "src/contracts/venue_submission_envelope.py"
         - "src/contracts/fx_classification.py"
+        - "src/contracts/**"
         - "src/engine/evaluator.py"
 
     # Money path — execution (also under hard_stop; changes here require governance)
@@ -80,11 +81,14 @@ coverage_map:
         - "src/engine/monitor_refresh.py"
         - "src/observability/**"
 
-    # Forecast pipeline — cycle runner and runtime
+    # Forecast pipeline — cycle runner, runtime, dispatch, and strategy evidence
     - id: forecast_pipeline
       patterns:
         - "src/engine/cycle_runner.py"
         - "src/engine/cycle_runtime.py"
+        - "src/engine/dispatch.py"
+        - "src/strategy/market_phase_evidence.py"
+        - "src/strategy/market_phase.py"
 
     # Calibration — Platt scaling and model parameters
     - id: calibration
@@ -214,6 +218,10 @@ coverage_map:
     - ".env*"
 
   hard_stop_paths:
+    # Live-money surface advisories — operator directive 2026-05-19:
+    # Touching these surfaces triggers LIVE_MONEY_SURFACE_TOUCHED context-aware warnings;
+    # enforcement is via critic-agent review + INV-37 ATTACH+SAVEPOINT + relationship tests,
+    # NOT via admission denial. The admission_engine converts these from block→advisory.
     # Live side effects — any write here may trigger a live API call or position change
     - "src/execution/**"
     - "src/venue/**"
@@ -276,6 +284,30 @@ cohorts:
     files:
       - "docs/operations/task_*/PLAN.md"
       - "docs/operations/AGENTS.md"
+
+  # Phase 0 PR 1 — ResolutionEra + twin writer consolidation + INV-37 ATTACH
+  # Multi-profile cohort: money_path_pricing + data_ingestion + forecast_pipeline + state_read_model
+  # Governance: PHASE_0_V4_ULTRAPLAN.md D.1; hard_stop file (harvester.py) requires separate override.
+  - id: zeus.phase0_pr1_resolution_era
+    description: >
+      Phase 0 PR 1 cohort: ResolutionEra enum + EraAuthorityBasis contract (new),
+      settlement_writers cross-DB helper (new), harvester_truth_writer twin writer
+      consolidation, dispatch era-dispatch wiring, cycle_runtime uma_resolved_source,
+      market_phase_evidence era field, and uma_resolution_listener late-revalidation.
+      Spans money_path_pricing + data_ingestion + forecast_pipeline + state_read_model.
+      src/execution/harvester.py is hard_stop and handled under separate governance override.
+    profile: state_read_model
+    intent_classes:
+      - modify_existing
+      - create_new
+    files:
+      - "src/contracts/resolution_era.py"
+      - "src/state/settlement_writers.py"
+      - "src/ingest/harvester_truth_writer.py"
+      - "src/engine/dispatch.py"
+      - "src/engine/cycle_runtime.py"
+      - "src/strategy/market_phase_evidence.py"
+      - "src/state/uma_resolution_listener.py"
 
 # ---------------------------------------------------------------------------
 # §7. Severity Overrides

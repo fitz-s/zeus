@@ -874,6 +874,7 @@ def _uma_resolution_listener_tick():
         UmaHttpRpcClient,
         get_last_scanned_block,
         poll_uma_resolutions,
+        run_late_revalidation_pass,
         set_last_scanned_block,
     )
     from src.state.db import get_world_connection, ZEUS_FORECASTS_DB_PATH
@@ -965,6 +966,16 @@ def _uma_resolution_listener_tick():
                 from_block=from_block,
                 to_block=to_block,
             )
+            # Late-revalidation pass: check tentative rows (confirmations < required)
+            # against the chain. Any reorged rows are marked is_valid=0 so they
+            # cannot be used as settlement evidence via lookup_resolution().
+            invalidated = run_late_revalidation_pass(write_conn, rpc_client=rpc_client)
+            if invalidated:
+                logger.warning(
+                    "ingest_uma_resolution_listener: %d tentative row(s) invalidated "
+                    "by late-revalidation pass (probable Polygon reorg)",
+                    invalidated,
+                )
             # Advance cursor regardless of resolution count — empty windows are
             # legitimate progress and re-scanning them wastes RPC budget.
             set_last_scanned_block(write_conn, oo_contract_address, to_block)

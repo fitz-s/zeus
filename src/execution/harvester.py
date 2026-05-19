@@ -46,6 +46,7 @@ from src.state.db import (
     query_settlement_events,
     record_token_suppression,
 )
+from src.state.settlement_writers import dispatch_era_basis, write_settlement_v2_with_era_provenance
 from src.architecture.decorators import capability, protects
 from src.state.canonical_write import commit_then_export
 from src.state.portfolio import (
@@ -1335,7 +1336,6 @@ def _write_settlement_truth(
         "obs_id": obs_row.get("id") if obs_row else None,
         "decision_time_snapshot_id": obs_row.get("fetched_at") if obs_row else None,
         "rounding_rule": rounding_rule,
-        "reconstruction_method": "harvester_live_uma_vote",
         "event_slug": event_slug or None,
         "pm_bin_lo": pm_bin_lo,
         "pm_bin_hi": pm_bin_hi,
@@ -1381,20 +1381,43 @@ def _write_settlement_truth(
                 data_version, json.dumps(provenance, sort_keys=True, default=str),
             ),
         )
-        settlement_v2_result = log_settlement_v2(
-            conn,
-            city=city.name,
-            target_date=target_date,
-            temperature_metric=metric_identity.temperature_metric,
-            market_slug=event_slug or None,
-            winning_bin=winning_bin,
-            settlement_value=settlement_value,
-            settlement_source=city.settlement_source,
-            settled_at=settled_at,
-            authority=authority,
-            provenance=provenance,
-            recorded_at=settled_at,
-        )
+        # Route to era-aware writer (PR 1). dispatch_era_basis selects the
+        # correct EraAuthorityBasis from settled_at date.
+        from datetime import date as _date
+        _settled_date = _date.fromisoformat(str(settled_at)[:10])
+        _era_result = dispatch_era_basis(_settled_date)
+        _settlement_dict = {
+            "city": city.name,
+            "target_date": target_date,
+            "temperature_metric": metric_identity.temperature_metric,
+            "market_slug": event_slug or None,
+            "winning_bin": winning_bin,
+            "settlement_value": settlement_value,
+            "settlement_source": city.settlement_source,
+            "settled_at": settled_at,
+            "authority": authority,
+            "provenance": provenance,
+            "recorded_at": settled_at,
+        }
+        if _era_result.is_admittable():
+            settlement_v2_result = write_settlement_v2_with_era_provenance(
+                _settlement_dict, _era_result.era_basis, conn=conn
+            )
+        else:
+            settlement_v2_result = log_settlement_v2(
+                conn,
+                city=city.name,
+                target_date=target_date,
+                temperature_metric=metric_identity.temperature_metric,
+                market_slug=event_slug or None,
+                winning_bin=winning_bin,
+                settlement_value=settlement_value,
+                settlement_source=city.settlement_source,
+                settled_at=settled_at,
+                authority=authority,
+                provenance=provenance,
+                recorded_at=settled_at,
+            )
         if authority == "VERIFIED" and resolved_market_outcomes:
             market_events_v2_result = log_market_event_outcomes_v2(
                 conn,

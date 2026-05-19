@@ -228,7 +228,9 @@ def test_T5_write_settlement_verified_path(scratch_db):
     assert prov["source_family"] == "WU"
     assert prov["obs_id"] == 42
     assert prov["rounding_rule"] == "wmo_half_up"
-    assert prov["reconstruction_method"] == "harvester_live_uma_vote"
+    # PR 1: 'reconstruction_method' was removed from the legacy settlements provenance dict;
+    # era-aware reconstruction_method is now in settlements_v2 provenance via era_provenance_.
+    assert "reconstruction_method" not in prov or prov.get("reconstruction_method", "").startswith("era_provenance_")
     assert result["authority"] == "VERIFIED"
 
 

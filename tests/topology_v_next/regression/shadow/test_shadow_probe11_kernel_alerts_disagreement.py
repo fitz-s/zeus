@@ -1,11 +1,15 @@
 # Created: 2026-05-15
-# Last reused or audited: 2026-05-15
+# Last reused or audited: 2026-05-19
 # Authority basis: docs/operations/task_2026-05-15_p3_topology_v_next_phase2_shadow/SCAFFOLD.md §5 probe11
+#                  operator directive 2026-05-19 (hard_stop → advisory-only)
 """
-Probe 11 — Kernel alerts disagree: v_next emits kernel alerts for hard_stop paths.
+Probe 11 — Kernel alerts for credentials path (advisory-only per operator directive).
 
 Trigger: files=["config/credentials/api_key.json"] (config/credentials/** is a
-hard_stop_path in ZEUS_BINDING §3). Old side returns admitted; v_next emits HARD_STOP.
+hard_stop_path in ZEUS_BINDING §3). Old side returns admitted.
+
+Operator directive 2026-05-19: v_next no longer emits HARD_STOP admission denial;
+kernel_alerts still capture the match. Severity is advisory, not HARD_STOP.
 
 Kill criterion: assert record.kernel_alert_count >= 1
 — failure means kernel wiring is broken for credential paths.
@@ -28,15 +32,18 @@ PAYLOAD_ADMITTED = {
 
 class TestProbe11KernelAlertsDisagreement:
 
-    def test_credentials_path_emits_hard_stop(self):
-        """v_next emits HARD_STOP + kernel alert for credentials path."""
+    def test_credentials_path_emits_kernel_alert_advisory(self):
+        """v_next emits kernel alert for credentials path (kill criterion).
+        Operator directive 2026-05-19: severity is advisory, not HARD_STOP."""
         decision = admit(intent="modify_existing", files=FILES_CRED)
-        assert decision.severity.value == "HARD_STOP", (
-            f"Expected HARD_STOP for credentials path. Got {decision.severity.value!r}"
-        )
-        # Kill criterion
+        # Kill criterion: kernel_alerts still populated
         assert len(decision.kernel_alerts) >= 1, (
             f"kernel_alerts empty for credentials path — kernel wiring broken."
+        )
+        # Operator directive: must NOT be HARD_STOP
+        assert decision.severity.value != "HARD_STOP", (
+            f"Operator directive 2026-05-19: credentials path should advise not block. "
+            f"Got {decision.severity.value!r}"
         )
 
     def test_kernel_alerts_appear_in_envelope(self):
@@ -54,7 +61,9 @@ class TestProbe11KernelAlertsDisagreement:
             assert "code" in alert
 
     def test_shadow_record_kernel_alert_count(self, monkeypatch):
-        """DivergenceRecord.kernel_alert_count is populated correctly."""
+        """DivergenceRecord.kernel_alert_count is populated correctly (kill criterion).
+        Operator directive 2026-05-19: agreement_class is no longer DISAGREE_HARD_STOP
+        because v_next no longer emits HARD_STOP severity."""
         captured = []
         monkeypatch.setattr(
             "scripts.topology_v_next.cli_integration_shim.log_divergence",
@@ -75,12 +84,16 @@ class TestProbe11KernelAlertsDisagreement:
         assert len(captured) == 1
         record = captured[0]
 
-        # Kill criterion
+        # Kill criterion: kernel_alert_count preserved
         assert record.kernel_alert_count >= 1, (
             f"kernel_alert_count == {record.kernel_alert_count}. "
             f"Kernel wiring is broken for credential paths."
         )
-        assert record.agreement_class == "DISAGREE_HARD_STOP"
+        # Operator directive: no longer DISAGREE_HARD_STOP (advisory-only routing)
+        assert record.agreement_class != "DISAGREE_HARD_STOP", (
+            f"Operator directive 2026-05-19: hard_stop should advise not block. "
+            f"Got {record.agreement_class!r}"
+        )
 
     def test_hard_stop_blockers_not_in_advisory(self):
         """HARD_STOP issues appear in blockers, not advisory."""

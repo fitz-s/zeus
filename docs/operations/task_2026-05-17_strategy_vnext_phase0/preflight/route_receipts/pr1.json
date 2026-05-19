@@ -1,0 +1,42 @@
+{
+  "queried_at_utc": "2026-05-19T10:00:00Z",
+  "task": "phase0_pr1_resolution_era",
+  "intent": "modify_existing",
+  "write_intent": "write",
+  "files_submitted": [
+    "src/contracts/resolution_era.py",
+    "src/state/settlement_writers.py",
+    "src/ingest/harvester_truth_writer.py",
+    "src/engine/dispatch.py",
+    "src/engine/cycle_runtime.py",
+    "src/strategy/market_phase_evidence.py",
+    "src/state/uma_resolution_listener.py"
+  ],
+  "file_omitted_hard_stop": "src/execution/harvester.py",
+  "admission_status": "advisory_only",
+  "profile": "generic",
+  "navigation_ok": false,
+  "hard_stop_findings": [
+    {
+      "file": "src/execution/harvester.py",
+      "matched_pattern": "src/execution/**",
+      "severity": "HARD_STOP",
+      "resolution": "Hard-stop path requires explicit governance override. PR 1 implementation must obtain operator governance for harvester.py edit admission before writing L1 (line 1061) and L2 (line 1338)."
+    }
+  ],
+  "topology_gap_findings": [
+    {
+      "gap": "digest_profile_missing_for_phase0_pr1",
+      "detail": "Files span money_path_pricing + data_ingestion + forecast_pipeline + state_read_model profiles. No digest profile in architecture/digest_profiles.py (canonical: architecture/topology.yaml) covers this multi-profile cross-cutting change.",
+      "fix": "Add zeus.phase0_pr1_resolution_era profile to architecture/topology.yaml and regenerate digest_profiles.py before implementation PR admission can report ADMITTED.",
+      "binding_yaml_update": "architecture/topology_v_next_binding.yaml updated with cohort zeus.phase0_pr1_resolution_era and profile pattern extensions (src/contracts/**, src/engine/dispatch.py, src/strategy/market_phase_evidence.py). v_next admission reports ADMIT when --v-next-shadow flag is used."
+    }
+  ],
+  "verdict": "SCAFFOLD_PROCEED_WITH_NOTED_GAPS",
+  "notes": [
+    "ULTRAPLAN D.1 expected admission_status=ADMITTED. Actual status is advisory_only.",
+    "Two pre-implementation actions required: (1) add phase0_pr1 digest profile to topology.yaml, (2) obtain harvester.py governance override.",
+    "binding YAML cohort zeus.phase0_pr1_resolution_era already declared; v_next shadow shows ADMIT for 7 non-hard-stop files.",
+    "SCAFFOLD files proceed under advisory_only; production code bodies are not written."
+  ]
+}

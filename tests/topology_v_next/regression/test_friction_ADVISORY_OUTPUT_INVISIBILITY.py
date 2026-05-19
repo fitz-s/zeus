@@ -1,6 +1,7 @@
 # Created: 2026-05-15
-# Last reused or audited: 2026-05-15
+# Last reused or audited: 2026-05-19
 # Authority basis: docs/operations/task_2026-05-15_p1_topology_v_next_additive/SCAFFOLD.md §2.2, §5.2
+#                  operator directive 2026-05-19 (hard_stop → advisory-only)
 """
 Friction regression: ADVISORY_OUTPUT_INVISIBILITY (P1.3 deliverable).
 
@@ -169,9 +170,11 @@ class TestAdvisoryOutputInvisibilityClosure:
         assert "issues" in d
         assert isinstance(d["issues"], list)
 
-    def test_hard_stop_ok_false_issues_populated(self):
+    def test_live_money_advisory_kernel_alerts_populated(self):
         """
-        HARD_STOP: ok=False AND kernel_alerts populated; issues is accessible.
+        Operator directive 2026-05-19: hard_stop path no longer blocks (ok != False due to
+        HARD_STOP). kernel_alerts is still populated for downstream critic routing.
+        Previously tested ok=False + HARD_STOP; now tests advisory mode + kernel_alerts present.
         """
         binding = _make_binding_full()
         decision = admit(
@@ -179,9 +182,9 @@ class TestAdvisoryOutputInvisibilityClosure:
             files=["src/execution/executor.py"],
             binding=binding,
         )
-        assert decision.ok is False
-        assert decision.severity == Severity.HARD_STOP
-        # kernel_alerts is top-level too
+        # Operator directive: hard_stop path must NOT produce HARD_STOP severity
+        assert decision.severity != Severity.HARD_STOP
+        # kernel_alerts is top-level and still captures the match
         assert isinstance(decision.kernel_alerts, tuple)
         assert len(decision.kernel_alerts) > 0
         d = decision.to_dict()

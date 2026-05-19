@@ -1,6 +1,7 @@
 # Created: 2026-05-15
-# Last reused or audited: 2026-05-15
+# Last reused or audited: 2026-05-19
 # Authority basis: docs/operations/task_2026-05-15_p1_topology_v_next_additive/SCAFFOLD.md §2.1
+#                  operator directive 2026-05-19 (LIVE_MONEY_SURFACE_TOUCHED added)
 """
 Unit tests for scripts/topology_v_next/dataclasses.py.
 
@@ -95,6 +96,8 @@ class TestFrictionPattern:
         "INTENT_ENUM_TOO_NARROW",
         "CLOSED_PACKET_STILL_LOAD_BEARING",
         "ADVISORY_OUTPUT_INVISIBILITY",
+        # Added operator directive 2026-05-19: hard_stop surfaces produce advisory context
+        "LIVE_MONEY_SURFACE_TOUCHED",
     }
 
     def test_all_patterns_present(self):

@@ -55,7 +55,7 @@ class FrictionPattern(str, Enum):
     """
     Named friction patterns from operational history per Universal §12.
 
-    These are the seven patterns that v_next structurally addresses.
+    These are the named patterns that v_next structurally addresses.
     """
 
     LEXICAL_PROFILE_MISS = "LEXICAL_PROFILE_MISS"
@@ -65,6 +65,15 @@ class FrictionPattern(str, Enum):
     INTENT_ENUM_TOO_NARROW = "INTENT_ENUM_TOO_NARROW"
     CLOSED_PACKET_STILL_LOAD_BEARING = "CLOSED_PACKET_STILL_LOAD_BEARING"
     ADVISORY_OUTPUT_INVISIBILITY = "ADVISORY_OUTPUT_INVISIBILITY"
+    LIVE_MONEY_SURFACE_TOUCHED = "LIVE_MONEY_SURFACE_TOUCHED"
+    """
+    Operator directive 2026-05-19: topology system provides context, never blocks.
+    Emitted when a submitted file matches hard_stop_paths (live-money / canonical-truth /
+    lifecycle-grammar / schema surfaces). Enforcement is via critic-agent review,
+    INV-37 ATTACH+SAVEPOINT, and relationship-invariant tests — NOT admission denial.
+    Files that previously caused ok=False (HARD_STOP) now produce ok=True with this
+    advisory diagnosis attached.
+    """
 
 
 @dataclass(frozen=True)

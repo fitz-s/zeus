@@ -749,6 +749,11 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         "scripts/audit_calibration_pairs_v2_null_groups.py",    # read_only: mode=ro preflight audit; 0 writes
         "scripts/migrate_calibration_pairs_v2_not_null.py",     # operator_invoked: DDL-only schema migration (CREATE TRIGGER / REBUILD)
         "scripts/rollback_calibration_pairs_v2_not_null.py",    # operator_invoked: DDL-only rollback (DROP TRIGGER / REBUILD)
+        # --- PR 1 era-provenance scripts ---
+        "scripts/audit_settlements_v2_era_provenance.py",       # read_only: SELECT-only, no writes
+        "scripts/backfill_settlements_v2_era_provenance.py",    # operator_invoked: --apply required; writes under SAVEPOINT
+        "scripts/rollback_settlements_v2_era_provenance.py",    # operator_invoked: --apply required; snapshot-based restoration
+        "scripts/migrate_settlement_commands_in_flight_at_era_flip.py",  # operator_invoked: quarantine DDL + SAVEPOINT
     }
 )
 
