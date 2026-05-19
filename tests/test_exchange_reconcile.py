@@ -1,5 +1,5 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-05-18
+# Last reused/audited: 2026-05-19
 # Lifecycle: created=2026-04-27; last_reviewed=2026-05-07; last_reused=2026-05-17
 # Authority basis: docs/operations/task_2026-05-08_object_invariance_remaining_mainline/PLAN.md
 # Purpose: R3 M5 exchange reconciliation sweep antibodies.
@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -2304,6 +2305,162 @@ def test_terminal_local_row_does_not_hide_positive_exchange_exposure(conn):
     assert [finding.subject_id for finding in position_findings] == [token]
     assert '"exchange_size":"10"' in position_findings[0].evidence_json
     assert '"confirmed_journal_size":"0"' in position_findings[0].evidence_json
+
+
+def test_settled_redeem_pending_token_holding_is_expected_wallet_balance(conn):
+    from src.execution.exchange_reconcile import record_finding, run_reconcile_sweep
+
+    token = "settled-redeem-pending-token"
+    seed_command(
+        conn,
+        command_id="cmd-settled-redeem-pending",
+        venue_order_id="ord-settled-redeem-pending",
+        position_id="pos-settled-redeem-pending",
+        token_id=token,
+        state="FILLED",
+        size=5.17,
+        price=0.37,
+    )
+    append_trade_fact(
+        conn,
+        command_id="cmd-settled-redeem-pending",
+        venue_order_id="ord-settled-redeem-pending",
+        token_id=token,
+        trade_id="trade-settled-redeem-pending",
+        size="1.5873",
+        state="CONFIRMED",
+    )
+    seed_position_baseline(
+        conn,
+        position_id="pos-settled-redeem-pending",
+        order_id="ord-settled-redeem-pending",
+    )
+    conn.execute(
+        """
+        UPDATE position_current
+           SET phase = 'settled',
+               chain_state = 'synced',
+               token_id = ?,
+               condition_id = 'condition-m5',
+               market_id = 'condition-m5',
+               shares = 1.5873,
+               order_id = 'ord-settled-redeem-pending',
+               updated_at = ?
+         WHERE position_id = 'pos-settled-redeem-pending'
+        """,
+        (token, NOW.isoformat()),
+    )
+    conn.execute(
+        """
+        INSERT INTO settlement_commands (
+            command_id, state, condition_id, market_id, payout_asset,
+            pusd_amount_micro, token_amounts_json, requested_at, winning_index_set
+        ) VALUES (?, 'REDEEM_INTENT_CREATED', 'condition-m5', 'condition-m5', 'pUSD',
+                  1587297, ?, ?, ?)
+        """,
+        (
+            "redeem-settled-redeem-pending",
+            json.dumps({token: 1.5872972972972974}, separators=(",", ":")),
+            NOW.isoformat(),
+            json.dumps(["2"]),
+        ),
+    )
+    observed = NOW + timedelta(minutes=10)
+    stale = record_finding(
+        conn,
+        kind="position_drift",
+        subject_id=token,
+        context="ws_gap",
+        evidence={"reason": "settled_redeem_pending_probe"},
+        recorded_at=observed - timedelta(minutes=1),
+    )
+
+    result = run_reconcile_sweep(
+        FakeM5Adapter(positions=[position(token_id=token, size="1.5873")]),
+        conn,
+        context="ws_gap",
+        observed_at=observed,
+    )
+
+    assert not any(finding.kind == "position_drift" for finding in result)
+    resolved = conn.execute(
+        "SELECT resolution, resolved_by FROM exchange_reconcile_findings WHERE finding_id = ?",
+        (stale.finding_id,),
+    ).fetchone()
+    assert dict(resolved) == {
+        "resolution": "position_drift_settlement_command_token_holding",
+        "resolved_by": "src.execution.exchange_reconcile",
+    }
+
+
+def test_redeem_confirmed_settled_token_still_at_exchange_is_position_drift(conn):
+    from src.execution.exchange_reconcile import run_reconcile_sweep
+
+    token = "redeem-confirmed-exchange-positive-token"
+    seed_command(
+        conn,
+        command_id="cmd-redeem-confirmed",
+        venue_order_id="ord-redeem-confirmed",
+        position_id="pos-redeem-confirmed",
+        token_id=token,
+        state="FILLED",
+    )
+    append_trade_fact(
+        conn,
+        command_id="cmd-redeem-confirmed",
+        venue_order_id="ord-redeem-confirmed",
+        token_id=token,
+        trade_id="trade-redeem-confirmed",
+        size="1.5873",
+        state="CONFIRMED",
+    )
+    seed_position_baseline(conn, position_id="pos-redeem-confirmed", order_id="ord-redeem-confirmed")
+    conn.execute(
+        """
+        UPDATE position_current
+           SET phase = 'settled',
+               token_id = ?,
+               condition_id = 'condition-m5',
+               market_id = 'condition-m5',
+               shares = 1.5873,
+               order_id = 'ord-redeem-confirmed',
+               updated_at = ?
+         WHERE position_id = 'pos-redeem-confirmed'
+        """,
+        (token, NOW.isoformat()),
+    )
+    conn.execute(
+        """
+        INSERT INTO settlement_commands (
+            command_id, state, condition_id, market_id, payout_asset,
+            pusd_amount_micro, token_amounts_json, tx_hash, requested_at,
+            submitted_at, terminal_at, winning_index_set
+        ) VALUES (?, 'REDEEM_CONFIRMED', 'condition-m5', 'condition-m5', 'pUSD',
+                  1587297, ?, '0xredeem', ?, ?, ?, ?)
+        """,
+        (
+            "redeem-confirmed",
+            json.dumps({token: 1.5873}, separators=(",", ":")),
+            NOW.isoformat(),
+            NOW.isoformat(),
+            NOW.isoformat(),
+            json.dumps(["2"]),
+        ),
+    )
+
+    result = run_reconcile_sweep(
+        FakeM5Adapter(positions=[position(token_id=token, size="1.5873")]),
+        conn,
+        context="ws_gap",
+        observed_at=NOW + timedelta(minutes=10),
+    )
+
+    position_findings = [finding for finding in result if finding.kind == "position_drift"]
+    assert [finding.subject_id for finding in position_findings] == [token]
+    evidence = position_findings[0].evidence_json
+    assert '"exchange_size":"1.5873"' in evidence
+    assert '"settlement_command_token_size":"0"' in evidence
+    assert '"expected_wallet_size":"0"' in evidence
 
 
 def test_backoff_exhausted_chain_absent_pending_exit_admin_closes_canonical(conn):
