@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# Lifecycle: created=2026-05-19; last_reviewed=2026-05-19; last_reused=never
+# Purpose: Operator rollback script — removes NOT NULL trigger or DDL enforcement on calibration_pairs_v2.decision_group_id
+# Reuse: Only needed if migrate script SAVEPOINT did not roll back cleanly; dry-run first
 # Created: 2026-05-19
 # Last reused or audited: 2026-05-19
 # Authority basis: PHASE_0_V4_ADDENDUM.md §R-4.2, migration_dry_runs.json
@@ -153,12 +156,27 @@ def _strip_not_null(create_sql: str, table: str) -> str:
     return new_sql
 
 
+def _get_index_ddl(conn: sqlite3.Connection, table: str) -> list[str]:
+    """Return CREATE INDEX DDL statements for all user-defined indexes on table."""
+    rows = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='index' AND tbl_name=? AND sql IS NOT NULL",
+        (table,),
+    ).fetchall()
+    return [row[0] for row in rows if row[0]]
+
+
 def _apply_rebuild_rollback(conn: sqlite3.Connection, table: str) -> None:
-    """Rebuild table removing NOT NULL on decision_group_id under SAVEPOINT."""
+    """Rebuild table removing NOT NULL on decision_group_id under SAVEPOINT.
+
+    Preserves all user-defined indexes: captured before DROP, recreated
+    after RENAME.
+    """
     sp = f"rollback_not_null_{table}"
     conn.execute(f"SAVEPOINT {sp}")
     try:
         original_sql = _get_table_create_sql(conn, table)
+        # Capture index DDL before dropping the table.
+        index_ddl_list = _get_index_ddl(conn, table)
         new_sql = _strip_not_null(original_sql, table)
         conn.execute(new_sql)
         cols = [
@@ -171,6 +189,9 @@ def _apply_rebuild_rollback(conn: sqlite3.Connection, table: str) -> None:
         )
         conn.execute(f"DROP TABLE {table}")
         conn.execute(f"ALTER TABLE {table}_new RENAME TO {table}")
+        # Recreate indexes on the renamed table.
+        for idx_sql in index_ddl_list:
+            conn.execute(idx_sql)
         conn.execute(f"RELEASE SAVEPOINT {sp}")
     except Exception:
         conn.execute(f"ROLLBACK TO SAVEPOINT {sp}")

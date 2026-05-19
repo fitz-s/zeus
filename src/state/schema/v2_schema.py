@@ -310,6 +310,25 @@ def _create_calibration_pairs_v2(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_calibration_pairs_v2_refit_core
             ON calibration_pairs_v2(temperature_metric, data_version, training_allowed, authority)
     """)
+    # PHASE0-PR4: Install NOT NULL triggers on fresh DBs so the enforcement invariant
+    # holds from the first INSERT, not only after the operator runs the migration script.
+    # Idempotent (CREATE TRIGGER IF NOT EXISTS).
+    conn.execute("""
+        CREATE TRIGGER IF NOT EXISTS calibration_pairs_v2_dgid_not_null_ins
+        BEFORE INSERT ON calibration_pairs_v2
+        WHEN NEW.decision_group_id IS NULL
+        BEGIN
+            SELECT RAISE(ABORT, 'NOT NULL: calibration_pairs_v2.decision_group_id');
+        END
+    """)
+    conn.execute("""
+        CREATE TRIGGER IF NOT EXISTS calibration_pairs_v2_dgid_not_null_upd
+        BEFORE UPDATE OF decision_group_id ON calibration_pairs_v2
+        WHEN NEW.decision_group_id IS NULL
+        BEGIN
+            SELECT RAISE(ABORT, 'NOT NULL: calibration_pairs_v2.decision_group_id');
+        END
+    """)
 
 
 def apply_v2_schema(conn: sqlite3.Connection, *, forecast_tables: bool = True) -> None:

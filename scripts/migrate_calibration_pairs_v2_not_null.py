@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# Lifecycle: created=2026-05-19; last_reviewed=2026-05-19; last_reused=never
+# Purpose: Operator migration script — adds NOT NULL enforcement on calibration_pairs_v2.decision_group_id via TRIGGER or REBUILD mode
+# Reuse: Run preflight audit first; confirm 0 NULL rows; use --mode=trigger (disk-safe) unless rebuild is explicitly scheduled
 # Created: 2026-05-19
 # Last reused or audited: 2026-05-19
 # Authority basis: PHASE_0_V4_ADDENDUM.md §R-4.2, migration_dry_runs.json
@@ -225,12 +228,32 @@ def _inject_not_null(create_sql: str, table: str) -> str:
     return new_sql
 
 
+def _get_index_ddl(conn: sqlite3.Connection, table: str) -> list[str]:
+    """Return CREATE INDEX DDL statements for all user-defined indexes on table.
+
+    Excludes auto-generated indexes (SQLite internal names start with 'sqlite_').
+    """
+    rows = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='index' AND tbl_name=? AND sql IS NOT NULL",
+        (table,),
+    ).fetchall()
+    return [row[0] for row in rows if row[0] and not row[0].strip().upper().startswith("CREATE UNIQUE")]
+
+
 def _apply_rebuild_mode(conn: sqlite3.Connection, table: str) -> None:
-    """Rebuild table with NOT NULL on decision_group_id under SAVEPOINT."""
+    """Rebuild table with NOT NULL on decision_group_id under SAVEPOINT.
+
+    Preserves all user-defined indexes: captured from sqlite_master before
+    DROP, recreated after RENAME so calibration/refit queries keep their
+    expected indexes (idx_calibration_pairs_v2_bucket, _city_date_metric,
+    _refit_core).
+    """
     sp = f"migrate_not_null_{table}"
     conn.execute(f"SAVEPOINT {sp}")
     try:
         original_sql = _get_table_create_sql(conn, table)
+        # Capture all user-defined index DDL before dropping the table.
+        index_ddl_list = _get_index_ddl(conn, table)
         new_sql = _inject_not_null(original_sql, table)
         conn.execute(new_sql)
         # Copy all rows — will fail with IntegrityError if any NULL exists.
@@ -245,6 +268,10 @@ def _apply_rebuild_mode(conn: sqlite3.Connection, table: str) -> None:
         )
         conn.execute(f"DROP TABLE {table}")
         conn.execute(f"ALTER TABLE {table}_new RENAME TO {table}")
+        # Recreate indexes on the renamed table. The DDL from sqlite_master
+        # references the original table name, which now applies to the renamed table.
+        for idx_sql in index_ddl_list:
+            conn.execute(idx_sql)
         conn.execute(f"RELEASE SAVEPOINT {sp}")
     except Exception:
         conn.execute(f"ROLLBACK TO SAVEPOINT {sp}")

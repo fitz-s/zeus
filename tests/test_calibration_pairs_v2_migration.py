@@ -1,3 +1,6 @@
+# Lifecycle: created=2026-05-19; last_reviewed=2026-05-19; last_reused=never
+# Purpose: R-4.3 migration antibody tests — trigger-mode and rebuild-mode NOT NULL enforcement on calibration_pairs_v2
+# Reuse: Tests use synthetic fixtures; safe to run at any time; no live DB touched
 # Created: 2026-05-19
 # Last reused or audited: 2026-05-19
 # Authority basis: PHASE_0_V4_ADDENDUM.md §R-4.3, migration_dry_runs.json
@@ -32,7 +35,10 @@ import pytest
 
 @pytest.fixture
 def calibration_pairs_db_path_clean(tmp_path):
-    """SQLite DB at tmp_path with calibration_pairs_v2, zero NULL decision_group_id."""
+    """SQLite DB at tmp_path with calibration_pairs_v2, zero NULL decision_group_id.
+
+    Also creates a named index (idx_test_city) to verify indexes survive rebuild.
+    """
     db = tmp_path / "fixture_clean.db"
     conn = sqlite3.connect(str(db))
     conn.execute("""
@@ -42,6 +48,9 @@ def calibration_pairs_db_path_clean(tmp_path):
             decision_group_id TEXT
         )
     """)
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_test_city ON calibration_pairs_v2(city)"
+    )
     conn.execute(
         "INSERT INTO calibration_pairs_v2 (city, decision_group_id) VALUES (?, ?)",
         ("Chicago", "dgid_v1_test000"),
@@ -164,7 +173,7 @@ def test_apply_trigger_mode_clean_fixture_blocks_null_insert(calibration_pairs_d
 # ---------------------------------------------------------------------------
 
 def test_apply_rebuild_mode_clean_fixture_shows_not_null(calibration_pairs_db_path_clean):
-    """T4: execute_migration rebuild-mode: PRAGMA table_info shows notnull=1."""
+    """T4: execute_migration rebuild-mode: PRAGMA table_info shows notnull=1 and indexes preserved."""
     migrate = _import_migrate()
     result = migrate.execute_migration(
         str(calibration_pairs_db_path_clean), "calibration_pairs_v2", "rebuild"
@@ -176,9 +185,19 @@ def test_apply_rebuild_mode_clean_fixture_shows_not_null(calibration_pairs_db_pa
         row[1]: row[3]
         for row in conn.execute("PRAGMA table_info(calibration_pairs_v2)")
     }
+    # Verify index survived the rebuild (bot T2 fix antibody).
+    indexes = {
+        row[0]
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='calibration_pairs_v2'"
+        )
+    }
     conn.close()
     assert info.get("decision_group_id") == 1, (
         f"Expected notnull=1, got {info.get('decision_group_id')!r}"
+    )
+    assert "idx_test_city" in indexes, (
+        f"Index idx_test_city was lost after rebuild. Found: {indexes!r}"
     )
 
 
