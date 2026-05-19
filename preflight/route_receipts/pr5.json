@@ -1,0 +1,29 @@
+{
+  "pr": "PR 5",
+  "branch": "feat/phase0-pr5-day0-bound-classification-20260519",
+  "date": "2026-05-19",
+  "task_class": "day0_monitoring",
+  "topology_doctor_check": "task-boot-profiles",
+  "result": {
+    "ok": true,
+    "issues": []
+  },
+  "scope": {
+    "new_files": [
+      "src/contracts/day0_observation_context.py",
+      "tests/test_day0_bound_classification.py",
+      "tests/test_diurnal_dst_property.py",
+      "tests/test_day0_unit_box_propagation.py",
+      "docs/operations/task_2026-05-17_strategy_vnext_phase0/scaffolds/pr5_scaffold_report.md"
+    ],
+    "annotated_files": [
+      "src/signal/day0_router.py",
+      "src/signal/day0_signal.py",
+      "src/signal/diurnal.py"
+    ],
+    "plan_lock_required": false,
+    "wave": "Wave A (parallel with PR 1, PR 4)"
+  },
+  "invars": ["INV-09", "INV-16"],
+  "authority": "docs/operations/task_2026-05-17_strategy_vnext_phase0/PHASE_0_V4_ADDENDUM.md"
+}

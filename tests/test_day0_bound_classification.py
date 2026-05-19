@@ -17,10 +17,13 @@ Each cell asserts:
 Design note: observation_state is NOT a third axis; it is implicit in
 BoundClassification (UNBOUNDED = no obs, BOUNDED_LIVE/DETERMINISTIC = obs present).
 """
+import itertools
+
 import pytest
 
 from src.contracts.day0_observation_context import (
     BoundClassification,
+    Day0ObservationContext,
     classify_bound,
     build_day0_observation_context,
 )
@@ -126,52 +129,84 @@ def test_classify_bound_deterministic_low() -> None:
 
 
 # ---------------------------------------------------------------------------
-# R-5.1e: 12-cell matrix — build_day0_observation_context × (classification × daypart)
+# R-5.1e: 12-cell matrix — Day0ObservationContext × (BoundClassification × daypart)
 # ---------------------------------------------------------------------------
-# Each cell: (BoundClassification, daypart) pair.
-# Daypart values: pre_sunrise | morning | afternoon | post_peak
-# Production code must populate .daypart correctly from temporal_context.
+# Each cell is a DISTINCT (BoundClassification, daypart) pair, directly
+# constructing Day0ObservationContext (bypassing the stub factory which raises
+# NotImplementedError). The factory test is in R-5.1f (skipped, pending prod code).
+#
+# Daypart values (PR 5 definition — 4-way split finer than DaylightPhase's 3):
+#   pre_sunrise  — before sunrise; no intraday obs expected
+#   morning      — post-sunrise through mid-morning
+#   afternoon    — mid-day through mid-afternoon
+#   post_peak    — after the expected daily extreme hour; outcome tends to stabilize
+#
+# observed_extreme_so_far per classification:
+#   UNBOUNDED_NO_OBS_YET  → None
+#   BOUNDED_LIVE           → 72.0 (present, but some members can still exceed it)
+#   DETERMINISTIC          → 80.0 (exceeds all remaining member maxes)
 
 _DAYPARTS = ["pre_sunrise", "morning", "afternoon", "post_peak"]
+_OBSERVED: dict[str, float | None] = {
+    "UNBOUNDED_NO_OBS_YET": None,
+    "BOUNDED_LIVE": 72.0,
+    "DETERMINISTIC": 80.0,
+}
+
+_12_CELLS = list(itertools.product(
+    [BoundClassification.UNBOUNDED_NO_OBS_YET, BoundClassification.BOUNDED_LIVE, BoundClassification.DETERMINISTIC],
+    _DAYPARTS,
+))
 
 
 @pytest.mark.skip(reason="SCAFFOLD only — PR 5 production code pending")
-@pytest.mark.parametrize("daypart", _DAYPARTS)
-def test_12_cell_matrix_unbounded_no_obs_yet(daypart: str) -> None:
-    """UNBOUNDED_NO_OBS_YET × 4 dayparts: context builds without error, daypart set."""
-    ctx = build_day0_observation_context(
-        temporal_context=None,  # temporal_context may be None on DB degrade
-        observed_extreme_so_far=None,
-        member_extremes_remaining=[72.0, 73.0, 71.0],
-        is_high_market=True,
-    )
-    assert ctx.bound_classification == BoundClassification.UNBOUNDED_NO_OBS_YET
-    assert ctx.daypart == daypart  # SCAFFOLD: production code sets daypart from temporal_context
+@pytest.mark.parametrize("classification,daypart", _12_CELLS,
+    ids=[f"{c.value}×{d}" for c, d in _12_CELLS])
+def test_12_cell_matrix(classification: BoundClassification, daypart: str) -> None:
+    """Each of 12 (BoundClassification × daypart) cells constructs a distinct Day0ObservationContext.
 
+    Directly tests the dataclass — factory is stub (NotImplementedError pending production).
+    Production code must: (a) call classify_bound to get BoundClassification,
+    (b) derive daypart from temporal_context.solar_day.phase + post_peak_confidence,
+    (c) set is_dst_gap_hour from temporal_context.is_missing_local_hour.
 
-@pytest.mark.skip(reason="SCAFFOLD only — PR 5 production code pending")
-@pytest.mark.parametrize("daypart", _DAYPARTS)
-def test_12_cell_matrix_bounded_live(daypart: str) -> None:
-    """BOUNDED_LIVE × 4 dayparts: context builds without error, daypart set."""
-    ctx = build_day0_observation_context(
+    Each cell asserts:
+    - .bound_classification matches the parametrized value
+    - .daypart matches the parametrized string
+    - .observed_extreme_so_far is None iff classification == UNBOUNDED_NO_OBS_YET
+    - .is_dst_gap_hour is a bool (not accidentally None)
+    - .temporal_context is None (graceful degrade path — no DB required for this test)
+    """
+    obs = _OBSERVED[classification.value]
+    ctx = Day0ObservationContext(
         temporal_context=None,
-        observed_extreme_so_far=72.0,
-        member_extremes_remaining=[74.0, 71.0, 73.0],
-        is_high_market=True,
+        bound_classification=classification,
+        observed_extreme_so_far=obs,
+        is_dst_gap_hour=False,
+        daypart=daypart,
     )
-    assert ctx.bound_classification == BoundClassification.BOUNDED_LIVE
+    assert ctx.bound_classification == classification
     assert ctx.daypart == daypart
+    if classification == BoundClassification.UNBOUNDED_NO_OBS_YET:
+        assert ctx.observed_extreme_so_far is None
+    else:
+        assert ctx.observed_extreme_so_far is not None
+    assert isinstance(ctx.is_dst_gap_hour, bool)
+    assert ctx.temporal_context is None
 
+
+# ---------------------------------------------------------------------------
+# R-5.1f: Factory stub — build_day0_observation_context raises NotImplementedError
+# ---------------------------------------------------------------------------
+# (Tests the scaffold stub itself; will be replaced when production code lands.)
 
 @pytest.mark.skip(reason="SCAFFOLD only — PR 5 production code pending")
-@pytest.mark.parametrize("daypart", _DAYPARTS)
-def test_12_cell_matrix_deterministic(daypart: str) -> None:
-    """DETERMINISTIC × 4 dayparts: context builds without error, daypart set."""
-    ctx = build_day0_observation_context(
-        temporal_context=None,
-        observed_extreme_so_far=80.0,
-        member_extremes_remaining=[74.0, 71.0, 73.0],
-        is_high_market=True,
-    )
-    assert ctx.bound_classification == BoundClassification.DETERMINISTIC
-    assert ctx.daypart == daypart
+def test_factory_stub_raises_not_implemented() -> None:
+    """build_day0_observation_context raises NotImplementedError (scaffold stub)."""
+    with pytest.raises(NotImplementedError):
+        build_day0_observation_context(
+            temporal_context=None,
+            observed_extreme_so_far=None,
+            member_extremes_remaining=[72.0, 73.0],
+            is_high_market=True,
+        )
