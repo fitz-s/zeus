@@ -31,6 +31,7 @@ import json
 import pathlib
 import sqlite3
 import sys
+from collections import defaultdict
 from typing import Any
 
 # Allow running from repo root
@@ -69,8 +70,9 @@ def _build_slug_map() -> dict[tuple[str, str, str], str]:
     if not fc_path.exists():
         print(f"WARNING: PRIMARY forecasts DB not found at {fc_path}; slug_map will be empty.", file=sys.stderr)
         return {}
-    fc_conn = sqlite3.connect(str(fc_path))
+    fc_conn = sqlite3.connect(f"file:{fc_path}?mode=ro", uri=True)
     fc_conn.row_factory = sqlite3.Row
+    fc_conn.execute("PRAGMA query_only=ON")
     try:
         rows = fc_conn.execute(
             """
@@ -88,9 +90,13 @@ def _build_slug_map() -> dict[tuple[str, str, str], str]:
     }
 
 
-def _get_next_seq(conn: sqlite3.Connection, market_slug: str, temperature_metric: str,
+def _get_base_seq(conn: sqlite3.Connection, market_slug: str, temperature_metric: str,
                   target_date: str, observation_time: str) -> int:
-    """Get next available decision_seq after DELETE of phase0_backfill rows."""
+    """Get next available decision_seq after DELETE of phase0_backfill rows.
+
+    After DELETE WHERE source='phase0_backfill' for this natural key, only
+    source='live_decision' rows remain. Base seq is MAX(live seq)+1 or 0.
+    """
     row = conn.execute(
         """
         SELECT COALESCE(MAX(decision_seq), -1) + 1
@@ -208,10 +214,20 @@ def run_backfill(*, dry_run: bool = False, limit: int | None = None) -> dict[str
             if not pending:
                 continue
 
+            # Group by natural key (market_slug, metric, target_date, observation_time)
+            # so that DELETE fires once per group and all rows in that group get
+            # sequential decision_seq values. Without grouping, the second trade-case
+            # for the same natural key would DELETE the first one, leaving only 1 row
+            # per (market_slug, metric, target_date, observation_time) tuple.
+            NaturalKey = tuple[str, str, str, str]
+            grouped: dict[NaturalKey, list[dict[str, Any]]] = defaultdict(list)
+            for market_slug, temperature_metric, target_date, observation_time, fields in pending:
+                grouped[(market_slug, temperature_metric, target_date, observation_time)].append(fields)
+
             with db_writer_lock(db_path, WriteClass.BULK):
-                for market_slug, temperature_metric, target_date, observation_time, fields in pending:
-                    # Step 1: DELETE prior phase0_backfill rows for this natural key
-                    # (preserves source='live_decision' rows at same key)
+                for (market_slug, temperature_metric, target_date, observation_time), group_fields in grouped.items():
+                    # Step 1: DELETE all prior phase0_backfill rows for this natural key
+                    # (one DELETE per group — preserves source='live_decision' rows)
                     result = conn.execute(
                         """
                         DELETE FROM decision_events
@@ -225,77 +241,78 @@ def run_backfill(*, dry_run: bool = False, limit: int | None = None) -> dict[str
                     )
                     stats["rows_deleted"] += result.rowcount
 
-                    # Step 2: Derive seq from what remains after DELETE
-                    seq = _get_next_seq(
+                    # Step 2: Base seq from remaining live_decision rows after DELETE
+                    base_seq = _get_base_seq(
                         conn, market_slug, temperature_metric, target_date, observation_time
                     )
 
-                    # Step 3: Compute hash + INSERT
-                    deid = decision_event_id_v1_hash(
-                        market_slug=market_slug,
-                        temperature_metric=temperature_metric,
-                        target_date=target_date,
-                        observation_time=observation_time,
-                        decision_seq=seq,
-                    )
-
-                    conn.execute(
-                        """
-                        INSERT INTO decision_events (
-                            market_slug, temperature_metric, target_date,
-                            observation_time, decision_seq,
-                            condition_id, decision_event_id, decision_time,
-                            outcome, side, strategy_key,
-                            cycle_id, cycle_iteration,
-                            p_posterior, edge, target_size_usd, target_price,
-                            forecast_time, provider_reported_time,
-                            observation_available_at, polymarket_end_anchor_source,
-                            first_member_observed_time, run_complete_time,
-                            zeus_submit_intent_time, venue_ack_time,
-                            first_inclusion_block_time, finality_confirmed_time,
-                            clock_skew_estimate_ms_at_submit,
-                            raw_orderbook_hash_transition_delta_ms,
-                            schema_version, source
-                        ) VALUES (
-                            ?,?,?,?,?,
-                            ?,?,?,
-                            ?,?,?,
-                            ?,?,
-                            ?,?,?,?,
-                            ?,?,
-                            ?,?,
-                            ?,?,
-                            ?,?,
-                            ?,?,
-                            ?,
-                            ?,
-                            ?,?
+                    # Step 3: INSERT all rows in this group with sequential seq values
+                    for offset, fields in enumerate(group_fields):
+                        seq = base_seq + offset
+                        deid = decision_event_id_v1_hash(
+                            market_slug=market_slug,
+                            temperature_metric=temperature_metric,
+                            target_date=target_date,
+                            observation_time=observation_time,
+                            decision_seq=seq,
                         )
-                        """,
-                        (
-                            market_slug, temperature_metric, target_date,
-                            observation_time, seq,
-                            fields["condition_id"], deid, fields["decision_time"],
-                            fields["outcome"], fields["side"], fields["strategy_key"],
-                            None, None,  # cycle_id, cycle_iteration (Phase 2+)
-                            fields["p_posterior"], fields["edge"],
-                            fields["target_size_usd"], fields["target_price"],
-                            fields["forecast_time"], fields["provider_reported_time"],
-                            fields["observation_available_at"],
-                            "gamma_explicit",  # polymarket_end_anchor_source: Phase 0 critic B2 default
-                            # PR-6 timing fields NULL for backfill (Path F honesty)
-                            None,  # first_member_observed_time
-                            None,  # run_complete_time
-                            None,  # zeus_submit_intent_time
-                            None,  # venue_ack_time
-                            None,  # first_inclusion_block_time
-                            None,  # finality_confirmed_time
-                            None,  # clock_skew_estimate_ms_at_submit
-                            None,  # raw_orderbook_hash_transition_delta_ms
-                            _SCHEMA_VERSION, _SOURCE,
-                        ),
-                    )
-                    stats["rows_inserted"] += 1
+                        conn.execute(
+                            """
+                            INSERT INTO decision_events (
+                                market_slug, temperature_metric, target_date,
+                                observation_time, decision_seq,
+                                condition_id, decision_event_id, decision_time,
+                                outcome, side, strategy_key,
+                                cycle_id, cycle_iteration,
+                                p_posterior, edge, target_size_usd, target_price,
+                                forecast_time, provider_reported_time,
+                                observation_available_at, polymarket_end_anchor_source,
+                                first_member_observed_time, run_complete_time,
+                                zeus_submit_intent_time, venue_ack_time,
+                                first_inclusion_block_time, finality_confirmed_time,
+                                clock_skew_estimate_ms_at_submit,
+                                raw_orderbook_hash_transition_delta_ms,
+                                schema_version, source
+                            ) VALUES (
+                                ?,?,?,?,?,
+                                ?,?,?,
+                                ?,?,?,
+                                ?,?,
+                                ?,?,?,?,
+                                ?,?,
+                                ?,?,
+                                ?,?,
+                                ?,?,
+                                ?,?,
+                                ?,
+                                ?,
+                                ?,?
+                            )
+                            """,
+                            (
+                                market_slug, temperature_metric, target_date,
+                                observation_time, seq,
+                                fields["condition_id"], deid, fields["decision_time"],
+                                fields["outcome"], fields["side"], fields["strategy_key"],
+                                None, None,  # cycle_id, cycle_iteration (Phase 2+)
+                                fields["p_posterior"], fields["edge"],
+                                fields["target_size_usd"], fields["target_price"],
+                                fields["forecast_time"], fields["provider_reported_time"],
+                                fields["observation_available_at"],
+                                "gamma_explicit",  # polymarket_end_anchor_source: Phase 0 critic B2 default
+                                # PR-6 timing fields NULL for backfill (Path F honesty)
+                                None,  # first_member_observed_time
+                                None,  # run_complete_time
+                                None,  # zeus_submit_intent_time
+                                None,  # venue_ack_time
+                                None,  # first_inclusion_block_time
+                                None,  # finality_confirmed_time
+                                None,  # clock_skew_estimate_ms_at_submit
+                                None,  # raw_orderbook_hash_transition_delta_ms
+                                _SCHEMA_VERSION, _SOURCE,
+                            ),
+                        )
+                        stats["rows_inserted"] += 1
 
                 conn.commit()
 

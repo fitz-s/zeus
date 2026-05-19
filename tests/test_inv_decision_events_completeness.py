@@ -61,9 +61,11 @@ def test_inv_decision_events_completeness_natural_key() -> None:
     world = get_world_connection_read_only()
 
     try:
+        # DISTINCT on (city, target_date, metric, available_at) — avoids redundant
+        # lookups when multiple ensemble members share the same observation window.
         candidates = forecasts.execute(
             """
-            SELECT city, target_date, temperature_metric, available_at
+            SELECT DISTINCT city, target_date, temperature_metric, available_at
             FROM ensemble_snapshots_v2
             WHERE recorded_at >= datetime('now', '-7 days')
               AND causality_status = 'OK'
@@ -90,17 +92,21 @@ def test_inv_decision_events_completeness_natural_key() -> None:
             if key not in slug_map:
                 continue  # no market = no decision possible
             market_slug = slug_map[key]
+            # Include observation_time (available_at) in the lookup — without it,
+            # one decision_events row can satisfy all observation_times for the same
+            # (market_slug, metric, target_date) tuple, hiding per-observation misses.
             n = world.execute(
                 """
                 SELECT COUNT(*) FROM decision_events
                 WHERE market_slug = ?
                   AND temperature_metric = ?
                   AND target_date = ?
+                  AND observation_time = ?
                 """,
-                (market_slug, c["temperature_metric"], c["target_date"]),
+                (market_slug, c["temperature_metric"], c["target_date"], c["available_at"]),
             ).fetchone()[0]
             if n == 0:
-                misses.append((market_slug, c["target_date"], c["temperature_metric"]))
+                misses.append((market_slug, c["target_date"], c["temperature_metric"], c["available_at"]))
 
     finally:
         forecasts.close()
@@ -111,6 +117,6 @@ def test_inv_decision_events_completeness_natural_key() -> None:
 
     assert not misses, (
         f"INV-decision-events-completeness violated: "
-        f"{len(misses)} decision-tagged forecasts have no decision_events row. "
-        f"Sample: {misses[:5]}"
+        f"{len(misses)} (market_slug, target_date, metric, observation_time) tuples "
+        f"have no decision_events row. Sample: {misses[:5]}"
     )

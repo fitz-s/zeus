@@ -71,8 +71,9 @@ def run_audit(sample: int = 1000) -> dict:
         )
         sys.exit(2)
 
-    conn = sqlite3.connect(str(db_path))
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA query_only=ON")
 
     # Hard-fail if decision_log table is missing — this must be a production DB
     has_table = conn.execute(
