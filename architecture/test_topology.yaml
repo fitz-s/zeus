@@ -52,6 +52,7 @@ test_trust_policy:
     tests/test_dissemination_schedules.py: {created: "2026-04-28", last_used: "2026-04-28"}
     tests/test_ddd_wiring.py: {created: "2026-05-03", last_used: "2026-05-15"}
     tests/test_dedup_gate_token.py: {created: "2026-05-17", last_used: "2026-05-18"}
+    tests/test_solar_append_future_window.py: {created: "2026-05-19", last_used: "2026-05-19"}
     tests/test_data_density_discount_v2.py: {created: "2026-05-03", last_used: "2026-05-15"}
     tests/test_ensemble_client.py: {created: "2026-04-01", last_used: "2026-04-29"}
     tests/test_forecasts_writer_provenance_required.py: {created: "2026-04-28", last_used: "2026-04-28"}
@@ -418,6 +419,7 @@ test_trust_policy:
 
 categories:
   core_law_antibody:
+    - tests/test_solar_append_future_window.py
     - tests/test_architecture_contracts.py
     - tests/test_assumptions_validation.py
     - tests/test_authority_gate.py
