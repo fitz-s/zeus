@@ -76,17 +76,16 @@ def test_antibody_zero_bleeding_rows_post_cutover_in_live_db():
     if not db_path.exists():
         pytest.skip(f"live forecasts DB not present at {db_path}")
 
-    # Bypass TI-1 only inside this explicitly-opted-in block.
-    os.environ["ZEUS_DISABLE_DB_ISOLATION_ANTIBODY"] = "1"
+    # Use read-only URI: TI-1 explicitly allows file:...?mode=ro (no writes possible).
+    # Setting ZEUS_DISABLE_DB_ISOLATION_ANTIBODY inside a test body is too late —
+    # the session-scoped autouse fixture already evaluated the env var at startup.
+    ro_uri = f"file:{db_path}?mode=ro"
+    conn = sqlite3.connect(ro_uri, uri=True)
     try:
-        conn = sqlite3.connect(str(db_path))
-        try:
-            cursor = conn.execute(_ANTIBODY_QUERY)
-            count = cursor.fetchone()[0]
-        finally:
-            conn.close()
+        cursor = conn.execute(_ANTIBODY_QUERY)
+        count = cursor.fetchone()[0]
     finally:
-        os.environ.pop("ZEUS_DISABLE_DB_ISOLATION_ANTIBODY", None)
+        conn.close()
 
     assert count == 0, (
         f"INV-era-provenance violated: {count} BLEEDING rows post-cutover (settled_at >= {_PR1_MERGE_DATE}). "

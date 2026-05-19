@@ -84,11 +84,13 @@ def _try_rpc_call(method: str, params: list) -> tuple[str, object]:
         try:
             result = _json_rpc(url, method, params)
             return url, result
-        except (urllib.error.URLError, urllib.error.HTTPError, OSError) as exc:
+        except (urllib.error.URLError, urllib.error.HTTPError, OSError, RuntimeError) as exc:
+            # RuntimeError covers JSON-RPC error payloads (rate-limit, method errors, etc.)
+            # returned by a reachable endpoint — fall through to the next endpoint.
             last_exc = exc
             continue
     raise RuntimeError(
-        f"All Polygon RPC endpoints unreachable: {_RPC_ENDPOINTS!r}. "
+        f"All Polygon RPC endpoints failed: {_RPC_ENDPOINTS!r}. "
         f"Last error: {last_exc}"
     ) from last_exc
 
