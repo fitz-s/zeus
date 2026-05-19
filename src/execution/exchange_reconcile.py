@@ -69,6 +69,15 @@ _ENTRY_FILL_PROJECTION_PHASES = frozenset({"pending_entry", "active", "day0_wind
 _EXIT_FILL_PROJECTION_PHASES = frozenset({"active", "day0_window", "pending_exit", "economically_closed"})
 _TERMINAL_ORDER_FACT_STATES = frozenset({"MATCHED", "CANCEL_CONFIRMED", "EXPIRED", "VENUE_WIPED"})
 _PENDING_EXIT_NON_CURRENT_ORDER_STATUSES = frozenset({"filled", "sell_filled"})
+_REDEEM_PENDING_WALLET_HOLDING_STATES = frozenset(
+    {
+        "REDEEM_INTENT_CREATED",
+        "REDEEM_SUBMITTED",
+        "REDEEM_TX_HASHED",
+        "REDEEM_RETRYING",
+        "REDEEM_OPERATOR_REQUIRED",
+    }
+)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS exchange_reconcile_findings (
@@ -1057,12 +1066,15 @@ def _record_position_drift_findings(
         conn,
         states=_OPTIMISTIC_POSITION_FACT_STATES,
     )
-    tokens = sorted(set(exchange) | set(confirmed_journal))
+    settlement_holdings = _settlement_command_token_holdings_by_token(conn)
+    tokens = sorted(set(exchange) | set(confirmed_journal) | set(settlement_holdings))
     findings: list[ReconcileFinding] = []
     for token in tokens:
         exchange_size = exchange.get(token, Decimal("0"))
         confirmed_size = confirmed_journal.get(token, Decimal("0"))
         optimistic_size = optimistic_journal.get(token, Decimal("0"))
+        settlement_size = settlement_holdings.get(token, Decimal("0"))
+        expected_wallet_size = confirmed_size + settlement_size
         if _position_size_matches(exchange_size, confirmed_size):
             _resolve_open_position_drift_findings(
                 conn,
@@ -1071,11 +1083,33 @@ def _record_position_drift_findings(
                 resolved_at=observed_at,
             )
             continue
+        if settlement_size > Decimal("0") and _position_size_matches(
+            exchange_size,
+            expected_wallet_size,
+        ):
+            _resolve_open_position_drift_findings(
+                conn,
+                token,
+                resolution="position_drift_settlement_command_token_holding",
+                resolved_at=observed_at,
+            )
+            continue
         if _position_size_hidden_by_visibility_floor(exchange_size, confirmed_size):
             _resolve_open_position_drift_findings(
                 conn,
                 token,
                 resolution="position_drift_below_position_api_visibility_floor",
+                resolved_at=observed_at,
+            )
+            continue
+        if settlement_size > Decimal("0") and _position_size_hidden_by_visibility_floor(
+            exchange_size,
+            expected_wallet_size,
+        ):
+            _resolve_open_position_drift_findings(
+                conn,
+                token,
+                resolution="position_drift_settlement_command_visibility_floor",
                 resolved_at=observed_at,
             )
             continue
@@ -1113,9 +1147,16 @@ def _record_position_drift_findings(
                     "journal_size": str(confirmed_size),
                     "confirmed_journal_size": str(confirmed_size),
                     "optimistic_journal_size": str(optimistic_size),
+                    "settlement_command_token_size": str(settlement_size),
+                    "expected_wallet_size": str(expected_wallet_size),
                     "journal_evidence_class": "confirmed_trade_facts",
+                    "settlement_evidence_class": "unconfirmed_redeem_settlement_commands",
                     "optimistic_evidence_class": "matched_or_mined_trade_facts",
-                    "reason": "exchange_position_differs_from_confirmed_trade_facts",
+                    "reason": (
+                        "exchange_position_differs_from_expected_wallet_facts"
+                        if settlement_size > Decimal("0")
+                        else "exchange_position_differs_from_confirmed_trade_facts"
+                    ),
                 },
                 recorded_at=observed_at,
             )
@@ -1257,10 +1298,13 @@ def _resolve_position_drift_tokens_from_current_truth(
         conn,
         states=_OPTIMISTIC_POSITION_FACT_STATES,
     )
+    settlement_holdings = _settlement_command_token_holdings_by_token(conn)
     for token in sorted(str(item) for item in token_ids):
         exchange_size = exchange.get(token, Decimal("0"))
         confirmed_size = confirmed_journal.get(token, Decimal("0"))
         optimistic_size = optimistic_journal.get(token, Decimal("0"))
+        settlement_size = settlement_holdings.get(token, Decimal("0"))
+        expected_wallet_size = confirmed_size + settlement_size
         if _position_size_matches(exchange_size, confirmed_size):
             _resolve_open_position_drift_findings(
                 conn,
@@ -1269,11 +1313,33 @@ def _resolve_position_drift_tokens_from_current_truth(
                 resolved_at=observed_at,
             )
             continue
+        if settlement_size > Decimal("0") and _position_size_matches(
+            exchange_size,
+            expected_wallet_size,
+        ):
+            _resolve_open_position_drift_findings(
+                conn,
+                token,
+                resolution="position_drift_settlement_command_token_holding",
+                resolved_at=observed_at,
+            )
+            continue
         if _position_size_hidden_by_visibility_floor(exchange_size, confirmed_size):
             _resolve_open_position_drift_findings(
                 conn,
                 token,
                 resolution="position_drift_below_position_api_visibility_floor",
+                resolved_at=observed_at,
+            )
+            continue
+        if settlement_size > Decimal("0") and _position_size_hidden_by_visibility_floor(
+            exchange_size,
+            expected_wallet_size,
+        ):
+            _resolve_open_position_drift_findings(
+                conn,
+                token,
+                resolution="position_drift_settlement_command_visibility_floor",
                 resolved_at=observed_at,
             )
             continue
@@ -2517,6 +2583,43 @@ def _journal_positions_by_token(
         if str(row["side"]).upper() == "SELL":
             signed = -signed
         out[token] = out.get(token, Decimal("0")) + signed
+    return out
+
+
+def _settlement_command_token_holdings_by_token(conn: sqlite3.Connection) -> dict[str, Decimal]:
+    """Expected wallet CTF holdings from redeem commands not yet confirmed.
+
+    ``_journal_positions_by_token`` is an active-exposure view. M5 compares
+    against the venue wallet position surface, so settled positions that have
+    queued/operator-gated redeem commands remain expected wallet holdings while
+    the redeem command is still pending. Failed or review-required commands do
+    not attest to an active redeem path and must not mask real wallet drift.
+    """
+
+    if not _table_exists(conn, "settlement_commands"):
+        return {}
+    pending_states = tuple(sorted(_REDEEM_PENDING_WALLET_HOLDING_STATES))
+    state_placeholders = ", ".join("?" for _ in pending_states)
+    rows = conn.execute(
+        f"""
+        SELECT token_amounts_json
+          FROM settlement_commands
+         WHERE state IN ({state_placeholders})
+           AND TRIM(COALESCE(token_amounts_json, '')) != ''
+        """,
+        pending_states,
+    ).fetchall()
+    out: dict[str, Decimal] = {}
+    for row in rows:
+        payload = _json_mapping(row["token_amounts_json"])
+        for token, raw_amount in payload.items():
+            token_id = str(token).strip()
+            if not token_id:
+                continue
+            amount = _positive_decimal_or_none(raw_amount)
+            if amount is None:
+                continue
+            out[token_id] = out.get(token_id, Decimal("0")) + amount
     return out
 
 
