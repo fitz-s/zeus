@@ -2284,12 +2284,15 @@ test_metadata:
     notes: >
       Antibody for 2026-05-19 alpha-loss: _json_dumps had no custom encoder; web3
       receipts containing HexBytes (blockHash, transactionHash, logsBloom,
-      logs[].topics) caused TypeError in reconcile_pending_redeems, leaving all
-      REDEEM_TX_HASHED rows stuck. Fix: _jsonable default-hook coerces bytes/HexBytes
-      to "0xHEX" form; unsupported types still raise TypeError.
-      Five contracts: T1 top-level HexBytes, T2 raw bytes, T3 nested logs,
-      T4 full round-trip (sed-flip verified: removing default=_jsonable → RED),
-      T5 unsupported type still raises.
+      logs[].topics) AND AttributeDict (logs[] nested mapping) caused TypeError
+      in reconcile_pending_redeems, leaving all REDEEM_TX_HASHED rows stuck.
+      Fix: _jsonable default-hook coerces bytes/HexBytes to "0xHEX" form AND
+      converts dict-like mappings (web3 AttributeDict) to plain dict; unsupported
+      types still raise TypeError. Six contracts: T1 top-level HexBytes, T2 raw
+      bytes, T3 nested logs, T4 full round-trip via reconcile_pending_redeems
+      (sed-flip verified: removing default=_jsonable → RED), T5 unsupported type
+      still raises, T6 web3 AttributeDict simulated mapping coerced via
+      hasattr(o, "keys") branch (added by PR #202 hotfix on top of PR #198).
     created: 2026-05-19
     last_reused_or_audited: 2026-05-19
   # ── PR 2+7 phase0-pr27-effective-kelly test metadata ─────────────────────

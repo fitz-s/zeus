@@ -1,5 +1,5 @@
 # Created: 2026-05-19
-# Last reused or audited: 2026-05-19
+# Last reused/audited: 2026-05-19
 # Authority basis: live reconcile_pending_redeems HexBytes serializer fix (2026-05-19 alpha-loss postmortem)
 # Lifecycle: created=2026-05-19; last_reviewed=2026-05-19; last_reused=never
 # Purpose: Antibody tests — _json_dumps / _jsonable HexBytes serialization fix.
