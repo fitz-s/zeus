@@ -1304,11 +1304,23 @@ def _confirmation_count(web3: Any, block_number: int | None) -> int:
         return 0
 
 
-# Error codes ALWAYS auto-retry-eligible once autonomous mode is enabled:
-# "on-chain action did NOT happen, just stubbed". REDEEM_DEFERRED_TO_R1 is
-# the legacy stub from the pre-PR-#183 era.
+# Error codes ALWAYS auto-retry-eligible once autonomous mode is enabled.
+# Membership criterion: the REDEEM EFFECT DID NOT OCCUR on-chain, so retrying
+# is safe and idempotent — either no tx was ever broadcast (legacy stub), or
+# the on-chain tx confirmed against the wrong contract but the redeem outcome
+# was not settled (tx_hash is cleared by the antibody, not re-queued).
+#   REDEEM_DEFERRED_TO_R1: legacy stub from the pre-PR-#183 era; no tx broadcast.
+#   REDEEM_NEGRISK_MISROUTED (PR-209): antibody (reconcile_pending_redeems) fires
+#     only when a confirmed negRisk tx hit POLYGON_CTF_ADDRESS instead of
+#     POLYGON_NEGRISK_ADAPTER_ADDRESS. Antibody clears tx_hash and parks row here.
+#     Reseat → submitter retries via NegRiskAdapter. Loop self-terminates because
+#     once the correct adapter is used the reconcile guard condition
+#     (routed_to_standard_ctf and not routed_to_neg_risk_adapter) is FALSE and
+#     the antibody never fires again. An infinite loop would require the submitter
+#     to persistently mis-route, which is a deeper routing bug orthogonal to reseat.
 _AUTONOMOUS_RETRY_ERRORCODES_ALWAYS: frozenset[str] = frozenset({
     "REDEEM_DEFERRED_TO_R1",
+    "REDEEM_NEGRISK_MISROUTED",   # PR-209: antibody-reset cases auto-retry via NegRiskAdapter
 })
 
 # Error codes that require DRY_RUN to be OFF before retry. REDEEM_DRY_RUN_LOGGED
@@ -1333,7 +1345,11 @@ def reseat_stub_deferred_rows_for_autonomous_retry(conn: sqlite3.Connection) -> 
     auto-retry-eligible back to REDEEM_RETRYING so the submitter picks them
     up. Two-tier allowlist:
       * _AUTONOMOUS_RETRY_ERRORCODES_ALWAYS — retry whenever autonomous mode
-        is ON (legacy stubs that never produced a real tx).
+        is ON (legacy stubs that never produced a real tx). Includes:
+        - REDEEM_DEFERRED_TO_R1: legacy stub-era, no tx ever submitted.
+        - REDEEM_NEGRISK_MISROUTED (PR-208): antibody in reconcile_pending_redeems
+          resets misrouted negRisk redemptions here; reseat → submitter re-routes
+          through NegRiskAdapter on the next cycle. Anchor: Karachi c8c220f5.
       * _AUTONOMOUS_RETRY_ERRORCODES_REQUIRE_LIVE — retry only when DRY_RUN is
         OFF (DRY_RUN_LOGGED would otherwise infinite-loop through the dry-run
         branch and defeat the operator smoke gate).
