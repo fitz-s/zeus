@@ -903,7 +903,8 @@ def _event_has_active_children(event: dict, now_utc: datetime) -> bool:
     The `closed=false` API filter returns 0 results for these events.
 
     An event is admitted iff:
-      1. endDate >= now_utc  (not yet expired)
+      1. endDate is present, parseable, and >= now_utc — OR endDate is missing/
+         unparseable (best-effort; missing endDate is deferred to _parse_event)
       2. At least one child market has acceptingOrders=True
     """
     end_str = event.get("endDate") or event.get("end_date")
@@ -939,9 +940,12 @@ def _fetch_events_by_tags() -> list[dict]:
             # Fetch events with this tag — no closed= filter; Polymarket negRisk
             # semantic means event.closed=True on actively-tradeable multi-outcome
             # events. Client-side gate via _event_has_active_children.
+            # Pages are ordered endDate desc; once all events on a page have
+            # past endDates, deeper pages are also past — break early.
+            _MAX_TAG_PAGES = 10  # hard cap; each page = 50 events
             events = []
             offset = 0
-            while True:
+            for _page in range(_MAX_TAG_PAGES):
                 resp = _gamma_get("/events", params={
                     "tag_id": tag_id,
                     "order": "endDate",
@@ -956,6 +960,16 @@ def _fetch_events_by_tags() -> list[dict]:
                 events.extend(batch)
                 if len(batch) < 50:
                     break
+                # Early-break: last event in page has the oldest endDate.
+                # If it's already past, remaining pages are all past events.
+                oldest_end = batch[-1].get("endDate") or batch[-1].get("end_date") or ""
+                if oldest_end:
+                    try:
+                        oldest_dt = datetime.fromisoformat(oldest_end.replace("Z", "+00:00"))
+                        if oldest_dt < now_utc:
+                            break
+                    except (ValueError, TypeError):
+                        pass
                 offset += 50
 
             # Client-side tradeability gate: keep only events with future endDate

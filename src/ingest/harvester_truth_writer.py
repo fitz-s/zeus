@@ -309,17 +309,24 @@ def _fetch_open_settling_markets() -> list[dict]:
     # closed=true can appear on unsettled multi-outcome events. Writing truth
     # for an unsettled market produces phantom outcomes (verified 2026-05-19).
     # _CLOSED_EVENTS_CUTOFF_DAYS=30 still applies via cutoff_iso above.
-    now_iso = datetime.now(timezone.utc).isoformat()
+    # Use datetime comparison (not ISO string lexicographic compare) to handle
+    # formats with fractional seconds or non-UTC offsets safely.
+    now_utc = datetime.now(timezone.utc)
     settled: list[dict] = []
     for ev in results:
         end = ev.get("endDate") or ev.get("end_date") or ""
-        if end and end.replace("Z", "+00:00") > now_iso:
-            logger.debug(
-                "harvester_truth_writer: skipping future-endDate event %s endDate=%s",
-                ev.get("id") or ev.get("slug"),
-                end,
-            )
-            continue
+        if end:
+            try:
+                end_dt = datetime.fromisoformat(end.replace("Z", "+00:00"))
+                if end_dt > now_utc:
+                    logger.debug(
+                        "harvester_truth_writer: skipping future-endDate event %s endDate=%s",
+                        ev.get("id") or ev.get("slug"),
+                        end,
+                    )
+                    continue
+            except (ValueError, TypeError):
+                pass  # unparseable endDate: pass through, downstream will handle
         settled.append(ev)
 
     # Dedup at event grain by (conditionId or id).
