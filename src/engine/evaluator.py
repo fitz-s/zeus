@@ -826,12 +826,17 @@ def _size_at_execution_price_boundary(
                 "INV-kelly-effective: _size_at_execution_price_boundary called without "
                 "effective_context on live path; failing closed."
             )
-        _mode = _get_mode()
-        logger.warning(
-            "INV-kelly-effective: _size_at_execution_price_boundary called without "
-            "effective_context on %s path; degrading gracefully (no haircut)",
-            f"{_mode} (allow_missing_context=True)" if _mode == "live" else _mode,
-        )
+        # Only warn when context is genuinely missing (not an explicit bypass).
+        # allow_missing_context=True is an authorised path (e.g. replay W5,
+        # evaluate_candidate pre-snapshot loop) — suppress the warning there
+        # to avoid log noise on every tick in the hot inner loop.
+        if not allow_missing_context:
+            _mode = _get_mode()
+            logger.warning(
+                "INV-kelly-effective: _size_at_execution_price_boundary called without "
+                "effective_context on %s path; degrading gracefully (no haircut)",
+                _mode,
+            )
 
     raw_entry_price = float(entry_price)
     ep = ExecutionPrice(

@@ -44,19 +44,19 @@ depth_at_best_ask: int = 0
 # Number of shares available at best ask from orderbook_depth_jsonb["asks"][0]["size"].
 # Parsed as int (shares, rounded down). 0 = one-sided book or unavailable.
 
-spread_observed_window_ms: int = 0
-# Milliseconds over which the spread was observed (point-in-time = 0).
-# The capture path in market_scanner.py uses a single snapshot; default is 0.
-# Future windowed-max implementations will populate this field.
+# NOTE (2026-05-19 bot-review fixup): spread_observed_window_ms was in the original
+# scaffold design but was REMOVED from scope in Path-A.  Only two fields shipped:
+# wide_spread_display_substitution and depth_at_best_ask.  Do not add
+# spread_observed_window_ms unless explicitly re-scoped in a future PR.
 ```
 
 ### Validator additions in `__post_init__`
 
 ```python
+if not isinstance(self.wide_spread_display_substitution, bool):
+    raise TypeError("wide_spread_display_substitution must be bool")
 if self.depth_at_best_ask < 0:
     raise ValueError("depth_at_best_ask must be >= 0")
-if self.spread_observed_window_ms < 0:
-    raise ValueError("spread_observed_window_ms must be >= 0")
 # Derive wide_spread_display_substitution from top-level fields if not set.
 # NOT auto-derived in __post_init__ — caller must compute and pass explicitly
 # so the derivation logic is grep-visible at the construction site.
@@ -76,15 +76,15 @@ WIDE_SPREAD_THRESHOLD_USD = Decimal("0.10")  # Polymarket UI substitution thresh
 
 ### Storage migration — `executable_market_snapshots` table (world.db)
 
-Three new columns added via `ALTER TABLE … ADD COLUMN` in `snapshot_repo.py::init_snapshot_schema()`:
+Two new columns added via `ALTER TABLE … ADD COLUMN` in `snapshot_repo.py::init_snapshot_schema()`
+(spread_observed_window_ms removed from scope — see note above):
 ```sql
 ALTER TABLE executable_market_snapshots ADD COLUMN wide_spread_display_substitution INTEGER NOT NULL DEFAULT 0 CHECK (wide_spread_display_substitution IN (0,1));
 ALTER TABLE executable_market_snapshots ADD COLUMN depth_at_best_ask INTEGER NOT NULL DEFAULT 0;
-ALTER TABLE executable_market_snapshots ADD COLUMN spread_observed_window_ms INTEGER NOT NULL DEFAULT 0;
 ```
 Pattern: `ADD COLUMN … DEFAULT` matches existing SQLite ALTER pattern used by Wave-A PRs. No SAVEPOINT required — single-DB, no cross-DB write. INV-37 does NOT apply here.
 
-`_row_from_snapshot` and `_snapshot_from_row` updated to include the three fields.
+`_row_from_snapshot` and `_snapshot_from_row` updated to include the two shipped fields.
 
 ### market_scanner.py — populate at construction
 
@@ -94,7 +94,7 @@ In `market_scanner.py` at the `ExecutableMarketSnapshotV2(…)` construction sit
 _spread = _compute_spread(raw_orderbook, top_bid, top_ask)
 wide_spread_display_substitution=(_spread is not None and _spread >= WIDE_SPREAD_THRESHOLD_USD),
 depth_at_best_ask=_depth_at_best_ask(raw_orderbook),
-spread_observed_window_ms=0,  # point-in-time snapshot
+# spread_observed_window_ms removed from scope (not shipped in Path-A)
 ```
 
 `_compute_spread` and `_depth_at_best_ask` are module-private helpers in `market_scanner.py`. `_depth_at_best_ask` parses `orderbook["asks"][0]["size"]` — same pattern as `_top_book_level_decimal` already in `market_scanner.py`.

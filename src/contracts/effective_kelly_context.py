@@ -6,16 +6,17 @@
 """EffectiveKellyContext — microstructure-aware Kelly multiplier haircut.
 
 INV-kelly-effective: _size_at_execution_price_boundary must receive an
-EffectiveKellyContext on live-money paths when wide_spread_display_substitution
-is True.  Backtest / replay paths pass None and receive graceful degrade (no
-haircut, WARNING logged).
+EffectiveKellyContext on all live-money paths.  Backtest / replay paths pass
+None and receive graceful degrade (no haircut, WARNING logged).  The enforce-
+ment is unconditional — it does not depend on wide_spread_display_substitution.
 
 Bucket policy: 3 spread tiers × 2 depth tiers × order_type column.
 The $0.05 MID boundary is the convex fee-erosion midpoint; at spread ≥ $0.05
 the Polymarket price-dependent fee formula (execution_price.py:130,
 fee_per_share = fee_rate × p × (1-p)) erodes edge non-linearly for
-mid-probability tokens.  $0.10 is the Polymarket UI display-substitution
-threshold (docs.polymarket.com/trading).
+mid-probability tokens.  $0.10 is the Polymarket UI display-substitution threshold (community-verified;
+no official Polymarket documentation URL confirmed — see also the same note in
+executable_market_snapshot_v2.py WIDE_SPREAD_THRESHOLD_USD).
 
 FOK haircut ≥ FAK haircut at every (spread, depth) cell by construction:
 FOK is price-guaranteed (fill-or-kill), so only fill probability is discounted.
@@ -52,11 +53,12 @@ _HAIRCUT_TABLE: Final[dict[tuple[str, str], tuple[float, float]]] = {
 
 
 class MissingEffectiveContextError(ValueError):
-    """Raised when kelly_size is called without EffectiveKellyContext
-    and wide_spread_display_substitution=True on a live-money path.
+    """Raised when _size_at_execution_price_boundary is called without
+    EffectiveKellyContext on a live-money path (and allow_missing_context=False).
 
-    INV-kelly-effective: wide-spread execution without microstructure context
-    may systematically oversize positions.  Fail closed on live paths.
+    INV-kelly-effective: execution without microstructure context may
+    systematically oversize positions.  Fail closed on live paths regardless
+    of wide_spread_display_substitution value.
     """
 
 

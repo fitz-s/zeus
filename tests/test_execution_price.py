@@ -22,6 +22,7 @@ from src.contracts.execution_price import (
     polymarket_fee,
 )
 from src.contracts.effective_kelly_context import EffectiveKellyContext
+from src.strategy.market_analysis_family_scan import FullFamilyHypothesis
 
 
 def _neutral_context() -> EffectiveKellyContext:
@@ -33,7 +34,6 @@ def _neutral_context() -> EffectiveKellyContext:
         order_type="FOK",
         fee_erased=False,
     )
-from src.strategy.market_analysis_family_scan import FullFamilyHypothesis
 
 
 # ---------------------------------------------------------------------------

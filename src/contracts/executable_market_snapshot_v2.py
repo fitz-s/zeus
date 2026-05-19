@@ -168,6 +168,11 @@ class ExecutableMarketSnapshotV2:
         if deadline < captured:
             raise ValueError("freshness_deadline must be >= captured_at")
         # PR 2 microstructure field validators
+        if not isinstance(self.wide_spread_display_substitution, bool):
+            raise TypeError(
+                f"wide_spread_display_substitution must be bool; "
+                f"got {type(self.wide_spread_display_substitution).__name__!r}"
+            )
         if self.depth_at_best_ask < 0:
             raise ValueError("depth_at_best_ask must be >= 0")
 

@@ -71,7 +71,10 @@ def test_missing_context_raises_on_live_path():
 
 
 def test_allow_missing_context_bypasses_raise_on_live_path(caplog):
-    """allow_missing_context=True (pre-snapshot path) warns but does not raise on live."""
+    """allow_missing_context=True (authorised bypass) does not raise and does not
+    warn on live.  Warning is suppressed for explicit bypasses to avoid log noise
+    on the hot inner loop (evaluate_candidate pre-snapshot path, replay W5).
+    """
     from src.engine.evaluator import _size_at_execution_price_boundary
 
     with caplog.at_level(logging.WARNING, logger="src.engine.evaluator"):
@@ -85,7 +88,10 @@ def test_allow_missing_context_bypasses_raise_on_live_path(caplog):
             allow_missing_context=True,
         )
     assert result > 0.0
-    assert any("INV-kelly-effective" in r.message for r in caplog.records)
+    # Explicit bypass must NOT produce a warning — suppressed to avoid hot-loop noise.
+    assert not any("INV-kelly-effective" in r.message for r in caplog.records), (
+        "allow_missing_context=True is an authorised bypass; no warning expected"
+    )
 
 
 def test_missing_context_logs_warning_on_non_live_path(caplog):
@@ -286,7 +292,7 @@ def test_cycle_runtime_imports_effective_kelly_context():
     import importlib
     import src.engine.cycle_runtime as cr_module
 
-    assert hasattr(cr_module, "EffectiveKellyContext") or True, (
+    assert hasattr(cr_module, "EffectiveKellyContext"), (
         "EffectiveKellyContext must be imported in cycle_runtime"
     )
     # Read the module source and verify import
