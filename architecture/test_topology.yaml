@@ -403,6 +403,16 @@ test_trust_policy:
     tests/test_ecmwf_open_data_ingest.py: {created: "2026-05-19", last_used: "2026-05-19"}
     # PR #187 — negRisk redeem calldata + routing antibodies (Karachi failure).
     tests/test_polymarket_v2_adapter_negrisk_redeem.py: {created: "2026-05-19", last_used: "2026-05-19"}
+    # PR #192 — ECMWFOpenDataIngest metric independence antibodies (PR #190 root-cause).
+    tests/test_ecmwf_open_data_ingest_metric_independence.py: {created: "2026-05-19", last_used: "2026-05-19"}
+    # PR #195 — live-entries-hardening: deployment_freshness boot auto-resume, boundary majority threshold,
+    # negRisk ATTACH world fix + dry-run signed-tx leak fix antibodies.
+    tests/test_deployment_freshness_resume_on_boot_match.py: {created: "2026-05-19", last_used: "2026-05-19"}
+    tests/test_boundary_rule_majority_threshold.py: {created: "2026-05-19", last_used: "2026-05-19"}
+    tests/test_settlement_commands_negrisk_world_attach.py: {created: "2026-05-19", last_used: "2026-05-19"}
+    tests/test_polymarket_v2_adapter_dry_run_no_raw_tx_leak.py: {created: "2026-05-19", last_used: "2026-05-19"}
+    # PR #192 — negRisk-misroute reconcile-guard antibody (Karachi root-cause permanent fix).
+    tests/test_settlement_commands_negrisk_misroute_recovery.py: {created: "2026-05-19", last_used: "2026-05-19"}
 
 categories:
   core_law_antibody:
@@ -451,6 +461,7 @@ categories:
     - tests/test_venue_envelope_live_bound.py
     - tests/test_polymarket_adapter_submit_safety.py
     - tests/test_polymarket_v2_adapter_negrisk_redeem.py
+    - tests/test_ecmwf_open_data_ingest_metric_independence.py
     - tests/test_collateral_ledger.py
     - tests/test_executable_market_snapshot_v2.py
     - tests/test_provenance_5_projections.py
@@ -614,6 +625,13 @@ categories:
     # PR #154 — WAVE-5 F22 writer-lock defer marker expiry antibody (2026-05-18).
     - tests/test_operator_script_lock_contract.py
     - tests/test_writer_lock_defer_markers_expiry.py
+    # PR #195 — live-entries-hardening bot-review fixes (2026-05-19).
+    # negRisk ATTACH world fix, dry-run signed-tx leak, deployment_freshness boot resume, boundary majority.
+    - tests/test_deployment_freshness_resume_on_boot_match.py
+    - tests/test_boundary_rule_majority_threshold.py
+    - tests/test_settlement_commands_negrisk_world_attach.py
+    - tests/test_polymarket_v2_adapter_dry_run_no_raw_tx_leak.py
+    - tests/test_settlement_commands_negrisk_misroute_recovery.py
 
   useful_regression:
     - tests/test_alpha_target_coherence.py
@@ -2090,4 +2108,125 @@ test_metadata:
       Fixture-DB variant uses in-memory DB with known BLEEDING rows; static query
       string assertion always passes. Removes the 2829-row era-blind bleeding state
       from becoming a permanent regression path.    created: 2026-05-19
+
+  tests/test_ecmwf_open_data_ingest_metric_independence.py:
+    modules: [data]
+    category: core_law_antibody
+    profile: ecmwf_open_data_metric_independence
+    blocks_commit: true
+    asserted_invariants:
+      - ECMWF-HIGH-PATH-INDEPENDENT-OF-LOW-ROWS
+      - ECMWF-LOW-PATH-INDEPENDENT-OF-HIGH-ROWS
+      - ECMWF-NO-CROSS-METRIC-SUBSTITUTION
+    source_under_test:
+      - src/data/ecmwf_open_data_ingest.py
+    law_dependencies:
+      - PIPELINE_REVIEW.md
+    notes: >
+      Antibody tests for PR #192 ECMWFOpenDataIngest metric independence (PR #190
+      root cause). ECMWFOpenDataIngest(temperature_metric='high') queries only HIGH
+      rows with no LOW-row dependency; 'low' queries only LOW rows. Sed-flip
+      verified: reverting metric-independence path turns A1 RED.
+    created: 2026-05-19
+    last_reused_or_audited: 2026-05-19
+
+  tests/test_deployment_freshness_resume_on_boot_match.py:
+    modules: [main, control]
+    category: core_law_antibody
+    profile: pr195_deployment_freshness_boot_resume
+    blocks_commit: true
+    asserted_invariants:
+      - DEPLOYMENT-FRESHNESS-SHA-MATCH-RESUMES
+      - DEPLOYMENT-FRESHNESS-SHA-MISMATCH-NO-RESUME
+    source_under_test:
+      - src/main.py
+    law_dependencies:
+      - PIPELINE_REVIEW.md
+    notes: >
+      Antibody for PR #195: boot-time auto-resume of deployment_freshness pause
+      when git HEAD SHA matches. SHA mismatch must NOT resume. Sed-flip verified.
+    created: 2026-05-19
+    last_reused_or_audited: 2026-05-19
+
+  tests/test_boundary_rule_majority_threshold.py:
+    modules: [data, engine]
+    category: core_law_antibody
+    profile: pr195_boundary_majority_threshold
+    blocks_commit: true
+    asserted_invariants:
+      - BOUNDARY-MAJORITY-26-OF-51
+      - BOUNDARY-STRICT-LESS-THAN
+    source_under_test:
+      - src/data/boundary_rules.py
+    law_dependencies:
+      - SYNTHESIS.md
+    notes: >
+      Antibody for PR #195: majority threshold (>=26/51) replaces any() for
+      per-snapshot boundary aggregation; strict < replaces <= for per-member
+      boundary_ambiguous property. Fixes LOW 91% over-rejection.
+    created: 2026-05-19
+    last_reused_or_audited: 2026-05-19
+
+  tests/test_settlement_commands_negrisk_world_attach.py:
+    modules: [execution, state]
+    category: core_law_antibody
+    profile: pr195_negrisk_world_attach_guard
+    blocks_commit: true
+    asserted_invariants:
+      - NEGRISK-WORLD-ATTACH-BEFORE-QUERY
+      - NEGRISK-FACT-MISSING-FAILS-CLOSED
+    source_under_test:
+      - src/execution/settlement_commands.py
+      - src/state/db.py
+    law_dependencies:
+      - .omc/plans/pr195-live-entries-hardening-2026-05-19.md
+    notes: >
+      Antibody for PR #195 P1 fix: submit_redeem() with a plain trade connection
+      must ATTACH world before world.executable_market_snapshots query. Verifies
+      no OperationalError and snapshot lookup succeeds for negRisk market.
+    created: 2026-05-19
+    last_reused_or_audited: 2026-05-19
+
+  tests/test_polymarket_v2_adapter_dry_run_no_raw_tx_leak.py:
+    modules: [venue]
+    category: core_law_antibody
+    profile: pr195_dry_run_no_raw_tx_leak
+    blocks_commit: true
+    asserted_invariants:
+      - DRY-RUN-NO-RAW-TX-HEX-IN-PAYLOAD
+      - DRY-RUN-NO-RAW-TX-HEX-IN-LOG
+    source_under_test:
+      - src/venue/polymarket_v2_adapter.py
+    law_dependencies:
+      - .omc/plans/pr195-live-entries-hardening-2026-05-19.md
+    notes: >
+      Security antibody for PR #195 P1 fix: ZEUS_AUTONOMOUS_REDEEM_DRY_RUN path
+      must NOT expose raw_tx_hex in returned payload or log messages. Only
+      dry_run_fingerprint (SHA-256[:16]) is permitted. Broadcast replay impossible
+      with fingerprint alone.
+    created: 2026-05-19
+    last_reused_or_audited: 2026-05-19
+
+  tests/test_settlement_commands_negrisk_misroute_recovery.py:
+    modules: [execution, state, venue]
+    category: core_law_antibody
+    profile: pr192_negrisk_misroute_reconcile_guard
+    blocks_commit: true
+    asserted_invariants:
+      - NEGRISK-MISROUTE-GUARD
+      - REDEEM-NEGRISK-MISROUTED-RESETS-TO-OPERATOR-REQUIRED
+    source_under_test:
+      - src/execution/settlement_commands.py
+      - src/venue/polymarket_v2_adapter.py
+    law_dependencies:
+      - docs/invariants.md
+    notes: >
+      Antibody for PR #192 Karachi root-cause: reconcile_pending_redeems() must detect
+      a confirmed tx to POLYGON_CTF_ADDRESS for a negRisk market and reset to
+      REDEEM_OPERATOR_REQUIRED (tx_hash=NULL, error_payload=REDEEM_NEGRISK_MISROUTED)
+      so the row re-enters the retry path via POLYGON_NEGRISK_ADAPTER_ADDRESS.
+      Four contracts: C1 primary (Karachi case), C2 negative control (standard CTF ok),
+      C3 positive control (negRisk correct adapter ok), C4 fail-safe (missing world DB).
+      Sed-flip verified 2026-05-19: disabling guard causes C1 → RED.
+    created: 2026-05-19
     last_reused_or_audited: 2026-05-19

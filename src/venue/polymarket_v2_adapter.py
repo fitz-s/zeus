@@ -1008,19 +1008,28 @@ class PolymarketV2Adapter:
             "1", "true", "yes", "on",
         )
         if _eoa_dry_run:
+            import hashlib as _hashlib
             import logging as _logging
             _logger = _logging.getLogger(__name__)
+            # SECURITY: never log or return the signed raw_tx_hex. A signed
+            # raw transaction is a broadcastable payload; anyone with log or
+            # DB read access could broadcast it and bypass the no-side-effect
+            # gate. Log only non-sensitive metadata: tx-type label + calldata
+            # length + a short fingerprint (first 16 hex chars of SHA-256).
+            _dry_run_fingerprint = _hashlib.sha256(raw_hex.encode()).hexdigest()[:16]
             _logger.warning(
                 "REDEEM_DRY_RUN_LOGGED funder_address=%s "
-                "condition_id=%s neg_risk=%s raw_tx_hex_len=%d raw_tx_hex=%s",
-                self.funder_address, condition_id, neg_risk, len(raw_hex), raw_hex,
+                "condition_id=%s neg_risk=%s raw_tx_hex_len=%d "
+                "dry_run_fingerprint=%s tx_type=EOA",
+                self.funder_address, condition_id, neg_risk,
+                len(raw_hex), _dry_run_fingerprint,
             )
             return {
                 "success": False,
                 "errorCode": "REDEEM_DRY_RUN_LOGGED",
                 "errorMessage": "dry-run mode: raw tx built+signed but not broadcast (EOA path)",
                 "condition_id": condition_id,
-                "raw_tx_hex": raw_hex,
+                "dry_run_fingerprint": _dry_run_fingerprint,
                 "neg_risk": neg_risk,
             }
 

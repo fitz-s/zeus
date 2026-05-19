@@ -1,6 +1,6 @@
 # Created: 2026-05-19
 # Last reused/audited: 2026-05-19
-# Authority basis: docs/operations/task_2026-05-04_tigge_ingest_resilience/DESIGN_PHASE3_LIVE_ROUTING_FIX.md
+# Authority basis: docs/operations/task_2026-05-04_tigge_ingest_resilience/DESIGN_PHASE3_LIVE_ROUTING_FIX.md + PIPELINE_REVIEW.md §7
 """ECMWFOpenDataIngest — DB-backed adapter for the ecmwf_open_data forecast source.
 
 LIVE TRADE BLOCKER FIX (2026-05-19)
@@ -71,13 +71,31 @@ class ECMWFOpenDataIngest:
     No operator gate required — ecmwf_open_data is ``enabled_by_default=True``
     with no ``requires_operator_decision`` flag.  The registry-level gate check
     in ``ensemble_client.fetch_ensemble`` runs before this class is instantiated.
+
+    Metric independence (PIPELINE_REVIEW.md §7):
+    When ``temperature_metric`` is supplied ('high' or 'low'), only that metric's
+    rows are queried and assembled — no cross-metric dependency.  This prevents
+    the fail-closed cross-metric drop where a missing LOW-OK row (91% of LOW rows
+    are REJECTED_BOUNDARY_AMBIGUOUS) discards perfectly-good HIGH-OK rows.
+
+    When ``temperature_metric=None`` (default), both metrics are combined as
+    before (backward-compatible for diagnostic/crosscheck callers).
     """
 
     source_id = SOURCE_ID
     authority_tier = AUTHORITY_TIER
 
-    def __init__(self, city: "City | None" = None) -> None:
+    def __init__(
+        self,
+        city: "City | None" = None,
+        temperature_metric: "str | None" = None,
+    ) -> None:
+        if temperature_metric is not None and temperature_metric not in ("high", "low"):
+            raise ValueError(
+                f"temperature_metric must be 'high', 'low', or None; got {temperature_metric!r}"
+            )
         self._city = city
+        self._temperature_metric = temperature_metric
 
     def fetch(
         self,
@@ -87,7 +105,9 @@ class ECMWFOpenDataIngest:
         """Return a source-stamped ECMWF Open Data bundle from the DB."""
         if self._city is None:
             raise ValueError("ECMWFOpenDataIngest requires a city to read from DB")
-        bundle = _fetch_db_payload(self._city, run_init_utc)
+        bundle = _fetch_db_payload(
+            self._city, run_init_utc, temperature_metric=self._temperature_metric
+        )
         if bundle is None:
             raise ValueError(
                 f"No VERIFIED ecmwf_open_data rows found in ensemble_snapshots_v2 "
@@ -149,98 +169,158 @@ def _coerce_utc_datetime(value: object, fallback: datetime) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
-def _fetch_db_payload(city: "City", fetch_time: datetime) -> Optional[ForecastBundle]:
+def _fetch_db_payload(
+    city: "City",
+    fetch_time: datetime,
+    temperature_metric: "str | None" = None,
+) -> Optional[ForecastBundle]:
     """Query ensemble_snapshots_v2 for ecmwf_open_data rows and build a ForecastBundle.
 
-    Combines high + low temperature metric rows into a symmetric hourly grid
-    (same strategy as tigge_client._fetch_db_payload): morning hours (00-11 UTC)
-    carry the LOW member vector; afternoon hours (12-23 UTC) carry the HIGH
-    member vector.  This preserves the invariant that
-    ``EnsembleSignal.member_maxes_for_target_date()`` returns daily HIGH and
-    ``member_mins_for_target_date()`` returns daily LOW.
+    Metric independence (PIPELINE_REVIEW.md §7):
+    When ``temperature_metric`` is 'high' or 'low', ONLY that metric's rows are
+    queried and assembled.  The hourly grid is filled with the single metric's
+    vector for all 24 hours (no cross-metric coupling).  This preserves the
+    no-opposite-metric-substitution invariant while decoupling HIGH-OK availability
+    from LOW-OK availability — removing the fail-closed cross-metric drop that
+    killed HIGH-OK entries whenever LOW-OK rows were missing (91% of LOW rows are
+    REJECTED_BOUNDARY_AMBIGUOUS due to boundary-policy §7.3).
+
+    When ``temperature_metric=None`` (default / backward-compatible mode), both
+    metrics are combined into the classic symmetric grid: morning hours (00-11 UTC)
+    carry LOW, afternoon hours (12-23 UTC) carry HIGH.  Dates where only one metric
+    is present are still skipped in combined mode (no opposite-metric substitution).
 
     Returns None when no qualifying rows are found; ``ECMWFOpenDataIngest.fetch()``
     raises ``ValueError`` on None (fails closed — no silent empty result).
-    Dates where only one metric is present are skipped (fail-closed per-date)
-    to prevent opposite-metric substitution (mis-provenance).
     """
     if fetch_time.tzinfo is None:
         fetch_time = fetch_time.replace(tzinfo=timezone.utc)
     fetch_time = fetch_time.astimezone(timezone.utc)
     cutoff = (fetch_time - timedelta(hours=_FRESHNESS_WINDOW_HOURS)).isoformat()
 
-    high_rows = _query_metric(city.name, "high", cutoff)
-    low_rows = _query_metric(city.name, "low", cutoff)
+    if temperature_metric is not None:
+        # --- Metric-specific path (HIGH-only or LOW-only) ---
+        # Only query the requested metric — no cross-metric dependency.
+        metric_rows = _query_metric(city.name, temperature_metric, cutoff)
+        if not metric_rows:
+            _log.warning(
+                "ecmwf_open_data_ingest: no VERIFIED %s rows for city=%s within %dh",
+                temperature_metric,
+                city.name,
+                _FRESHNESS_WINDOW_HOURS,
+            )
+            return None
 
-    if not high_rows and not low_rows:
-        _log.warning(
-            "ecmwf_open_data_ingest: no VERIFIED rows for city=%s within %dh",
-            city.name,
-            _FRESHNESS_WINDOW_HOURS,
-        )
-        return None
-
-    # Parse rows into per-date member lists
-    high_by_date: dict[str, list[float]] = {}
-    low_by_date: dict[str, list[float]] = {}
-    provenance: dict[str, str | None] = {
-        "issue_time": None,
-        "available_at": None,
-        "fetch_time": None,
-        "recorded_at": None,
-    }
-
-    for metric_rows, by_date in ((high_rows, high_by_date), (low_rows, low_by_date)):
-        # Use the most-recent snapshot per target_date (already filtered by MAX snapshot_id)
+        by_date: dict[str, list[float]] = {}
+        provenance: dict[str, str | None] = {
+            "issue_time": None,
+            "available_at": None,
+            "fetch_time": None,
+            "recorded_at": None,
+        }
         for row in metric_rows:
             target_date: str = row["target_date"]
             members_raw: list[float] = json.loads(row["members_json"])
             if len(members_raw) != 51:
                 _log.warning(
-                    "ecmwf_open_data_ingest: city=%s target_date=%s has %d members (expected 51), skipping",
+                    "ecmwf_open_data_ingest: city=%s target_date=%s %s has %d members (expected 51), skipping",
                     city.name,
                     target_date,
+                    temperature_metric,
                     len(members_raw),
                 )
                 continue
             by_date[target_date] = members_raw
-            # Accumulate provenance from most-recent rows (string comparison works for ISO timestamps)
             for key in ("issue_time", "available_at", "fetch_time", "recorded_at"):
                 val = row[key]
                 if val and (provenance[key] is None or val > provenance[key]):  # type: ignore[operator]
                     provenance[key] = val
 
-    all_dates = sorted(set(high_by_date) | set(low_by_date))
-    if not all_dates:
-        return None
+        all_dates = sorted(by_date)
+        if not all_dates:
+            return None
 
-    n_members = 51
-    all_times: list[str] = []
-    all_member_rows: list[list[float]] = []  # shape: (n_hours, 51) — to be transposed
+        all_times: list[str] = []
+        all_member_rows: list[list[float]] = []
+        for date_str in all_dates:
+            vec = by_date[date_str]
+            for hour in range(24):
+                all_times.append(f"{date_str}T{hour:02d}:00:00+00:00")
+                all_member_rows.append(list(vec))
 
-    for date_str in all_dates:
-        high_vec = high_by_date.get(date_str)
-        low_vec = low_by_date.get(date_str)
-        if high_vec is None or low_vec is None:
-            # Fail closed: a date missing either metric cannot be reliably reconstructed.
-            # Substituting the opposite metric is mis-provenance.
+        synthesised_tag = f"ensemble_snapshots_v2.ecmwf_open_data.{temperature_metric}_only"
+
+    else:
+        # --- Combined-metric path (backward-compatible) ---
+        high_rows = _query_metric(city.name, "high", cutoff)
+        low_rows = _query_metric(city.name, "low", cutoff)
+
+        if not high_rows and not low_rows:
             _log.warning(
-                "ecmwf_open_data_ingest: city=%s target_date=%s missing metric=%s, "
-                "skipping date (fail-closed, no opposite-metric substitution)",
+                "ecmwf_open_data_ingest: no VERIFIED rows for city=%s within %dh",
                 city.name,
-                date_str,
-                "high" if high_vec is None else "low",
+                _FRESHNESS_WINDOW_HOURS,
             )
-            continue
-        for hour in range(24):
-            all_times.append(f"{date_str}T{hour:02d}:00:00+00:00")
-            use_high = hour >= 12
-            chosen = high_vec if use_high else low_vec
-            all_member_rows.append(list(chosen))
+            return None
+
+        high_by_date: dict[str, list[float]] = {}
+        low_by_date: dict[str, list[float]] = {}
+        provenance = {
+            "issue_time": None,
+            "available_at": None,
+            "fetch_time": None,
+            "recorded_at": None,
+        }
+
+        for metric_rows, bd in ((high_rows, high_by_date), (low_rows, low_by_date)):
+            for row in metric_rows:
+                target_date = row["target_date"]
+                members_raw = json.loads(row["members_json"])
+                if len(members_raw) != 51:
+                    _log.warning(
+                        "ecmwf_open_data_ingest: city=%s target_date=%s has %d members (expected 51), skipping",
+                        city.name,
+                        target_date,
+                        len(members_raw),
+                    )
+                    continue
+                bd[target_date] = members_raw
+                for key in ("issue_time", "available_at", "fetch_time", "recorded_at"):
+                    val = row[key]
+                    if val and (provenance[key] is None or val > provenance[key]):  # type: ignore[operator]
+                        provenance[key] = val
+
+        all_dates = sorted(set(high_by_date) | set(low_by_date))
+        if not all_dates:
+            return None
+
+        all_times = []
+        all_member_rows = []
+        for date_str in all_dates:
+            high_vec = high_by_date.get(date_str)
+            low_vec = low_by_date.get(date_str)
+            if high_vec is None or low_vec is None:
+                # Fail closed for combined mode: opposite-metric substitution is mis-provenance.
+                _log.warning(
+                    "ecmwf_open_data_ingest: city=%s target_date=%s missing metric=%s "
+                    "in combined mode — skipping date (no opposite-metric substitution)",
+                    city.name,
+                    date_str,
+                    "high" if high_vec is None else "low",
+                )
+                continue
+            for hour in range(24):
+                all_times.append(f"{date_str}T{hour:02d}:00:00+00:00")
+                use_high = hour >= 12
+                chosen = high_vec if use_high else low_vec
+                all_member_rows.append(list(chosen))
+
+        synthesised_tag = "ensemble_snapshots_v2.ecmwf_open_data.high+low"
 
     if not all_times:
         return None
 
+    n_members = 51
     # Shape: (n_hours, 51) → transpose → (51, n_hours)
     members_hourly = np.array(all_member_rows, dtype=np.float64).T
     assert members_hourly.shape[0] == n_members
@@ -262,7 +342,7 @@ def _fetch_db_payload(city: "City", fetch_time: datetime) -> Optional[ForecastBu
         "fetch_time": captured_at.isoformat(),
         "captured_at": captured_at.isoformat(),
         "recorded_at": provenance["recorded_at"] or "",
-        "synthesised_from": "ensemble_snapshots_v2.ecmwf_open_data.high+low",
+        "synthesised_from": synthesised_tag,
     }
 
     return ForecastBundle(
