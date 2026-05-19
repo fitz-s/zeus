@@ -1,6 +1,7 @@
 # Created: 2026-05-19
 # Last reused or audited: 2026-05-19
 # Authority basis: PR-I.5 wiring + architecture/invariants.md NEGRISK-MISROUTE-GUARD
+# Lifecycle: created=2026-05-19; last_reviewed=2026-05-19; last_reused=never
 # Purpose: Antibody test — _redeem_reconciler_cycle() actually calls reconcile_pending_redeems
 #          end-to-end (Karachi auto-recovery path).
 # Reuse: Run when modifying _redeem_reconciler_cycle() in src/main.py or reconcile_pending_redeems().
