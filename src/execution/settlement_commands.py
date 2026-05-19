@@ -909,19 +909,47 @@ def _confirmation_count(web3: Any, block_number: int | None) -> int:
         return 0
 
 
+# Error codes ALWAYS auto-retry-eligible once autonomous mode is enabled:
+# "on-chain action did NOT happen, just stubbed". REDEEM_DEFERRED_TO_R1 is
+# the legacy stub from the pre-PR-#183 era.
+_AUTONOMOUS_RETRY_ERRORCODES_ALWAYS: frozenset[str] = frozenset({
+    "REDEEM_DEFERRED_TO_R1",
+})
+
+# Error codes that require DRY_RUN to be OFF before retry. REDEEM_DRY_RUN_LOGGED
+# rows ARE eligible — but only after operator review during dry-run smoke. If
+# reseat'ed while DRY_RUN is still ON, the adapter dry-run branch returns
+# DRY_RUN_LOGGED again, creating an infinite reseat→submit→DRY_RUN loop that
+# defeats the operator-review-before-broadcast gate. Anchor: Codex P2 + Copilot
+# review on PR #186 caught this; antibody covers the dry-run gating.
+_AUTONOMOUS_RETRY_ERRORCODES_REQUIRE_LIVE: frozenset[str] = frozenset({
+    "REDEEM_DRY_RUN_LOGGED",
+})
+
+
+def _autonomous_dry_run_enabled() -> bool:
+    return os.environ.get(
+        "ZEUS_AUTONOMOUS_REDEEM_DRY_RUN", ""
+    ).strip().lower() in ("1", "true", "yes", "on")
+
+
 def reseat_stub_deferred_rows_for_autonomous_retry(conn: sqlite3.Connection) -> int:
-    """When autonomous redeem path is enabled, rows parked in
-    REDEEM_OPERATOR_REQUIRED with errorCode REDEEM_DEFERRED_TO_R1
-    (stub-era deferral) are now eligible for auto-retry.
-    Transition them to REDEEM_RETRYING for the redeem_submitter
-    poller to pick up. Reason: REDEEM_OPERATOR_REQUIRED was
-    designed for stub-era. Post-PR-#183 the autonomous path
-    obviates manual operator action for stub-deferred rows."""
+    """Promote rows parked in REDEEM_OPERATOR_REQUIRED whose errorCode is
+    auto-retry-eligible back to REDEEM_RETRYING so the submitter picks them
+    up. Two-tier allowlist:
+      * _AUTONOMOUS_RETRY_ERRORCODES_ALWAYS — retry whenever autonomous mode
+        is ON (legacy stubs that never produced a real tx).
+      * _AUTONOMOUS_RETRY_ERRORCODES_REQUIRE_LIVE — retry only when DRY_RUN is
+        OFF (DRY_RUN_LOGGED would otherwise infinite-loop through the dry-run
+        branch and defeat the operator smoke gate).
+    Reason: REDEEM_OPERATOR_REQUIRED was designed for stub-era; post-PR-#183
+    the autonomous path obviates manual operator action for these cases."""
     autonomous_enabled = os.environ.get(
         "ZEUS_AUTONOMOUS_REDEEM_ENABLED", ""
     ).strip().lower() in ("1", "true", "yes", "on")
     if not autonomous_enabled:
         return 0
+    dry_run_enabled = _autonomous_dry_run_enabled()
     rows = conn.execute(
         "SELECT command_id, error_payload FROM settlement_commands WHERE state = ?",
         (SettlementState.REDEEM_OPERATOR_REQUIRED.value,),
@@ -932,7 +960,16 @@ def reseat_stub_deferred_rows_for_autonomous_retry(conn: sqlite3.Connection) -> 
             err = json.loads(row["error_payload"] or "{}")
         except json.JSONDecodeError:
             continue
-        if err.get("errorCode") == "REDEEM_DEFERRED_TO_R1":
+        err_code = err.get("errorCode")
+        if err_code in _AUTONOMOUS_RETRY_ERRORCODES_ALWAYS:
+            eligible = True
+        elif err_code in _AUTONOMOUS_RETRY_ERRORCODES_REQUIRE_LIVE:
+            # DRY_RUN_LOGGED: only reseat once dry-run gate is lifted, otherwise
+            # the adapter dry-run branch returns DRY_RUN_LOGGED again → loop.
+            eligible = not dry_run_enabled
+        else:
+            eligible = False
+        if eligible:
             cur = conn.execute(
                 "UPDATE settlement_commands SET state = ?, terminal_at = NULL"
                 " WHERE command_id = ? AND state = ?",
@@ -947,7 +984,10 @@ def reseat_stub_deferred_rows_for_autonomous_retry(conn: sqlite3.Connection) -> 
                     conn,
                     row["command_id"],
                     SettlementState.REDEEM_RETRYING.value,
-                    {"reason": "stub_deferred_reseat_autonomous"},
+                    {
+                        "reason": "stub_deferred_reseat_autonomous",
+                        "prior_errorcode": err_code,
+                    },
                     recorded_at=_coerce_time(None),
                 )
                 promoted += 1

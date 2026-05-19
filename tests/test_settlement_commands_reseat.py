@@ -197,5 +197,98 @@ def test_reseat_appends_event_on_promotion(conn, monkeypatch):
     ).fetchall()
     assert len(events) == 1
     assert events[0]["event_type"] == SettlementState.REDEEM_RETRYING.value
+
+
+# --------------------------------------------------------------------------
+# Antibody: DRY_RUN_LOGGED extension (2026-05-19 Karachi incident)
+# --------------------------------------------------------------------------
+
+def test_reseat_dry_run_logged_promotes(conn, monkeypatch):
+    """A row stuck in OPERATOR_REQUIRED with errorCode=REDEEM_DRY_RUN_LOGGED
+    MUST be promoted to RETRYING — same structural class as DEFERRED_TO_R1
+    (on-chain action did not happen). Anchor: 2026-05-19 Karachi c8c220f5."""
+    monkeypatch.setenv("ZEUS_AUTONOMOUS_REDEEM_ENABLED", "1")
+    _insert_operator_required(conn, "cmd-010", "REDEEM_DRY_RUN_LOGGED")
+
+    promoted = reseat_stub_deferred_rows_for_autonomous_retry(conn)
+
+    assert promoted == 1
+    row = conn.execute(
+        "SELECT state FROM settlement_commands WHERE command_id = ?",
+        ("cmd-010",),
+    ).fetchone()
+    assert row["state"] == SettlementState.REDEEM_RETRYING.value
+
+
+def test_reseat_records_prior_errorcode_for_forensics(conn, monkeypatch):
+    """The append_event payload MUST carry prior_errorcode so post-mortem
+    queries can distinguish DEFERRED_TO_R1 vs DRY_RUN_LOGGED origin."""
+    monkeypatch.setenv("ZEUS_AUTONOMOUS_REDEEM_ENABLED", "1")
+    _insert_operator_required(conn, "cmd-011", "REDEEM_DRY_RUN_LOGGED")
+
+    promoted = reseat_stub_deferred_rows_for_autonomous_retry(conn)
+    conn.commit()
+
+    assert promoted == 1
+    events = conn.execute(
+        "SELECT payload_json FROM settlement_command_events WHERE command_id = ?",
+        ("cmd-011",),
+    ).fetchall()
+    assert len(events) == 1
     payload = json.loads(events[0]["payload_json"])
-    assert payload.get("reason") == "stub_deferred_reseat_autonomous"
+    assert payload.get("prior_errorcode") == "REDEEM_DRY_RUN_LOGGED"
+
+
+def test_reseat_allowlist_closed_to_index_missing(conn, monkeypatch):
+    """Allowlist sed-break: REDEEM_INDEX_SETS_MISSING is NOT auto-retry-able —
+    needs harvester to backfill winning_index_set first. Adding it to the
+    allowlist by accident would cause endless RETRY loops on unfillable rows."""
+    monkeypatch.setenv("ZEUS_AUTONOMOUS_REDEEM_ENABLED", "1")
+    _insert_operator_required(conn, "cmd-012", "REDEEM_INDEX_SETS_MISSING")
+
+    promoted = reseat_stub_deferred_rows_for_autonomous_retry(conn)
+
+    assert promoted == 0
+    row = conn.execute(
+        "SELECT state FROM settlement_commands WHERE command_id = ?",
+        ("cmd-012",),
+    ).fetchone()
+    assert row["state"] == SettlementState.REDEEM_OPERATOR_REQUIRED.value
+
+
+def test_reseat_dry_run_logged_blocked_when_dry_run_env_on(conn, monkeypatch):
+    """Codex P2 + Copilot review on PR #186: DRY_RUN_LOGGED reseat must NOT
+    fire while ZEUS_AUTONOMOUS_REDEEM_DRY_RUN is still ON. Otherwise the
+    adapter dry-run branch returns DRY_RUN_LOGGED again → infinite loop that
+    defeats the operator-review-before-broadcast gate."""
+    monkeypatch.setenv("ZEUS_AUTONOMOUS_REDEEM_ENABLED", "1")
+    monkeypatch.setenv("ZEUS_AUTONOMOUS_REDEEM_DRY_RUN", "1")
+    _insert_operator_required(conn, "cmd-013", "REDEEM_DRY_RUN_LOGGED")
+
+    promoted = reseat_stub_deferred_rows_for_autonomous_retry(conn)
+
+    assert promoted == 0
+    row = conn.execute(
+        "SELECT state FROM settlement_commands WHERE command_id = ?",
+        ("cmd-013",),
+    ).fetchone()
+    assert row["state"] == SettlementState.REDEEM_OPERATOR_REQUIRED.value
+
+
+def test_reseat_deferred_r1_promotes_regardless_of_dry_run_env(conn, monkeypatch):
+    """DEFERRED_TO_R1 is a legacy stub from pre-autonomous era — it pre-dates
+    the dry-run flag and must promote whether DRY_RUN is ON or OFF (otherwise
+    operators using DRY_RUN for smoke-testing new redeem paths would block
+    promotion of unrelated stub-era rows)."""
+    monkeypatch.setenv("ZEUS_AUTONOMOUS_REDEEM_ENABLED", "1")
+    monkeypatch.setenv("ZEUS_AUTONOMOUS_REDEEM_DRY_RUN", "1")
+    _insert_operator_required(conn, "cmd-014", "REDEEM_DEFERRED_TO_R1")
+
+    promoted = reseat_stub_deferred_rows_for_autonomous_retry(conn)
+
+    assert promoted == 1
+    row = conn.execute(
+        "SELECT state FROM settlement_commands WHERE command_id = ?",
+        ("cmd-014",),
+    ).fetchone()
+    assert row["state"] == SettlementState.REDEEM_RETRYING.value
