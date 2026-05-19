@@ -894,11 +894,38 @@ def _clear_active_events_cache() -> None:
     _ACTIVE_EVENTS_LAST_STATUS = "NEVER_FETCHED"
 
 
+def _event_has_active_children(event: dict, now_utc: datetime) -> bool:
+    """Tradeability gate for Polymarket negRisk multi-outcome events.
+
+    Polymarket negRisk semantic (verified 2026-05-19): for multi-outcome events,
+    event.closed and event.active are routing labels, NOT tradeability indicators.
+    True tradeability lives at the inner-market level: child.acceptingOrders=True.
+    The `closed=false` API filter returns 0 results for these events.
+
+    An event is admitted iff:
+      1. endDate is present, parseable, and >= now_utc — OR endDate is missing/
+         unparseable (best-effort; missing endDate is deferred to _parse_event)
+      2. At least one child market has acceptingOrders=True
+    """
+    end_str = event.get("endDate") or event.get("end_date")
+    if end_str:
+        try:
+            end_dt = datetime.fromisoformat(end_str.replace("Z", "+00:00"))
+            if end_dt < now_utc:
+                return False
+        except (ValueError, TypeError):
+            pass  # unparseable endDate: let _parse_event reject it downstream
+
+    children = event.get("markets") or []
+    return any(child.get("acceptingOrders") is True for child in children)
+
+
 def _fetch_events_by_tags() -> list[dict]:
     """Fetch events using tag slugs."""
     network_errors = 0
     all_events = []
     seen_ids = set()
+    now_utc = datetime.now(timezone.utc)
     for tag_slug in TAG_SLUGS:
         try:
             # Resolve tag ID
@@ -910,12 +937,21 @@ def _fetch_events_by_tags() -> list[dict]:
             if not tag_id:
                 continue
 
-            # Fetch events with this tag
+            # Fetch events with this tag — no closed= filter; Polymarket negRisk
+            # semantic means event.closed=True on actively-tradeable multi-outcome
+            # events. Client-side gate via _event_has_active_children.
+            # Pages are ordered endDate desc; once all events on a page have
+            # past endDates, deeper pages are also past — break early.
+            _MAX_TAG_PAGES = 10  # hard cap; each page = 50 events
             events = []
             offset = 0
-            while True:
+            for _page in range(_MAX_TAG_PAGES):
                 resp = _gamma_get("/events", params={
-                    "tag_id": tag_id, "closed": "false", "limit": 50, "offset": offset
+                    "tag_id": tag_id,
+                    "order": "endDate",
+                    "ascending": "false",
+                    "limit": 50,
+                    "offset": offset,
                 })
                 resp.raise_for_status()
                 batch = resp.json()
@@ -924,7 +960,21 @@ def _fetch_events_by_tags() -> list[dict]:
                 events.extend(batch)
                 if len(batch) < 50:
                     break
+                # Early-break: last event in page has the oldest endDate.
+                # If it's already past, remaining pages are all past events.
+                oldest_end = batch[-1].get("endDate") or batch[-1].get("end_date") or ""
+                if oldest_end:
+                    try:
+                        oldest_dt = datetime.fromisoformat(oldest_end.replace("Z", "+00:00"))
+                        if oldest_dt < now_utc:
+                            break
+                    except (ValueError, TypeError):
+                        pass
                 offset += 50
+
+            # Client-side tradeability gate: keep only events with future endDate
+            # and at least one child with acceptingOrders=True.
+            events = [e for e in events if _event_has_active_children(e, now_utc)]
 
             for event in events:
                 event_id = event.get("id") or event.get("slug")
@@ -950,11 +1000,18 @@ def _fetch_events_by_tags() -> list[dict]:
 def _fetch_events_by_keyword(keyword: str) -> list[dict]:
     """Fallback: fetch events by keyword search."""
     try:
+        now_utc = datetime.now(timezone.utc)
+        # No closed= filter: negRisk events have event.closed=True while still
+        # tradeable. Tradeability is child.acceptingOrders=True (2026-05-19).
         resp = _gamma_get("/events", params={
-            "closed": "false", "limit": 100, "title": keyword
+            "order": "endDate",
+            "ascending": "false",
+            "limit": 100,
+            "title": keyword,
         })
         resp.raise_for_status()
-        return resp.json()
+        events = resp.json()
+        return [e for e in events if _event_has_active_children(e, now_utc)]
     except httpx.HTTPError as e:
         logger.warning("Keyword fetch failed: %s", e)
         return []

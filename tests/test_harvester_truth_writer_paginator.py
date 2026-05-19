@@ -1,6 +1,9 @@
+# Lifecycle: created=2026-05-11; last_reviewed=2026-05-19; last_reused=2026-05-19
+# Purpose: Relationship tests — ingest-side harvester paginator bound and future-endDate datetime filter
+# Reuse: Run via pytest tests/test_harvester_truth_writer_paginator.py
 # Created: 2026-05-11
-# Last reused or audited: 2026-05-11
-# Authority basis: PLAN.md §D.1, critic v4 ACCEPT 2026-05-11
+# Last reused or audited: 2026-05-19
+# Authority basis: PLAN.md §D.1, critic v4 ACCEPT 2026-05-11; PR-184 datetime-compare fix 2026-05-19
 """Relationship tests — ingest-side harvester paginator bound (D.1).
 
 Verifies:
@@ -170,3 +173,91 @@ def test_dedup_by_condition_id():
 
     matching = [r for r in results if r.get("conditionId") == shared_id]
     assert len(matching) == 1, f"Expected 1 deduped event with conditionId={shared_id}, got {len(matching)}"
+
+
+# ---------------------------------------------------------------------------
+# Test 5: Future-endDate events skipped (negRisk semantic 2026-05-19)
+# ---------------------------------------------------------------------------
+def test_harvester_truth_writer_skips_future_enddate():
+    """closed=true events with endDate still in the future must be dropped.
+
+    Polymarket negRisk semantic: event.closed=True can appear on unsettled
+    multi-outcome events. Writing truth for an unsettled market produces
+    phantom outcomes (verified 2026-05-19). The post-fetch filter must
+    drop any event whose endDate > now_utc.
+    """
+    from src.ingest.harvester_truth_writer import _fetch_open_settling_markets
+
+    future_end = (datetime.now(timezone.utc) + timedelta(days=4)).isoformat()
+    past_end = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+
+    future_event = {"conditionId": "future-cid", "endDate": future_end, "markets": []}
+    past_event = {"conditionId": "past-cid", "endDate": past_end, "markets": []}
+
+    def fake_get(url, *, params, timeout):
+        return FakeResponse([future_event, past_event])
+
+    with patch("httpx.get", side_effect=fake_get):
+        with patch("src.data.market_scanner.GAMMA_BASE", "http://test"):
+            results = _fetch_open_settling_markets()
+
+    ids = [r.get("conditionId") for r in results]
+    assert "future-cid" not in ids, (
+        "Regression: future-endDate event was NOT filtered. "
+        "negRisk closed=true unsettled event would produce phantom truth."
+    )
+    assert "past-cid" in ids, "past-cid (settled) must be kept"
+
+
+# ---------------------------------------------------------------------------
+# Test 6: datetime-not-string comparison for future-endDate filter
+# ---------------------------------------------------------------------------
+def test_future_enddate_filter_uses_datetime_not_string_compare():
+    """Future-endDate filter must use datetime comparison, not ISO 8601 string lexicography.
+
+    String lexicographic compare is NOT time-order-safe when formats differ.
+    Example: "2026-05-19T19:00:00-05:00" (which is future UTC = 00:00+00:00 next day)
+    compares lexicographically as LESS THAN "2026-05-19T22:00:00+00:00" (now_utc),
+    so a naive string compare would incorrectly keep the event (phantom truth write).
+    A correct datetime compare sees 2026-05-20T00:00:00+00:00 > now → correctly drops it.
+
+    This test verifies the fix: the event must be filtered out (not appear in results).
+    """
+    from src.ingest.harvester_truth_writer import _fetch_open_settling_markets
+
+    # Construct a time that is FUTURE in UTC but whose ISO string sorts BEFORE
+    # a UTC "now" string due to non-UTC offset (Chicago -05:00).
+    # now_utc ≈ "2026-05-19T22:00:00+00:00"
+    # future_local = same wall-clock moment expressed as -05:00 → "2026-05-19T17:00:00-05:00"
+    # Lex compare: "2026-05-19T17..." < "2026-05-19T22..." → old code keeps it (BUG)
+    # Datetime compare: both == 2026-05-19T22:00:00Z → future > now → correctly drops it
+    now = datetime.now(timezone.utc)
+    # 2 hours in the future, expressed with -05:00 offset
+    future_utc = now + timedelta(hours=2)
+    from datetime import timezone as tz_mod
+    chicago_offset = tz_mod(timedelta(hours=-5))
+    future_chicago_str = future_utc.astimezone(chicago_offset).isoformat()
+    # Verify the lex-trap: the string must sort before an equivalent UTC string
+    now_iso = now.isoformat()
+    assert future_chicago_str < now_iso, (
+        f"Test pre-condition failed: {future_chicago_str!r} should lex-sort < {now_iso!r} "
+        "to exercise the string-compare bug path"
+    )
+
+    future_event = {"conditionId": "future-tz-cid", "endDate": future_chicago_str, "markets": []}
+    past_end = (now - timedelta(days=1)).isoformat()
+    past_event = {"conditionId": "past-cid-tz", "endDate": past_end, "markets": []}
+
+    def fake_get(url, *, params, timeout):
+        return FakeResponse([future_event, past_event])
+
+    with patch("httpx.get", side_effect=fake_get):
+        with patch("src.data.market_scanner.GAMMA_BASE", "http://test"):
+            results = _fetch_open_settling_markets()
+
+    ids = [r.get("conditionId") for r in results]
+    assert "future-tz-cid" not in ids, (
+        f"Regression: future-endDate event with non-UTC offset ({future_chicago_str!r}) "
+        "was NOT filtered. String lexicographic compare was used instead of datetime compare."
+    )
+    assert "past-cid-tz" in ids, "past-cid-tz (settled) must be kept"
