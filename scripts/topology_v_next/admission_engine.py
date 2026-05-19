@@ -95,28 +95,33 @@ def admit(
     # Step 2: Run Hard Safety Kernel (Universal §15 G1 — runs regardless)
     kernel_alerts = _run_kernel(files, binding)
 
-    # Step 3: Hard-stop short-circuit (d7: use kernel_alerts list, not a second iteration)
+    # Step 3: Live-money surface advisory (operator directive 2026-05-19).
+    # Topology system provides context, never blocks. Hard-stop-paths formerly
+    # caused ok=False; they now emit LIVE_MONEY_SURFACE_TOUCHED advisories and
+    # flow into normal admission. Enforcement is via critic-agent review,
+    # INV-37 ATTACH+SAVEPOINT, and relationship-invariant tests — not denial.
     if kernel_alerts:
-        return _build_decision(
-            ok=False,
-            profile_matched=None,
-            intent_class=resolved_intent,
-            severity=Severity.HARD_STOP,
-            issues=tuple(intent_issues),
-            companion_files=(),
-            missing_phrases=(),
-            closest_rejected_profile=None,
-            friction_budget_used=_increment_friction_budget(friction_state),
-            diagnosis=DiagnosisEntry(
-                pattern=FrictionPattern.CLOSED_PACKET_STILL_LOAD_BEARING,
-                evidence=f"Hard-stop path detected in submitted files: {files}",
-                resolution_path=(
-                    "Remove the protected path from the change set. "
-                    "Hard-stop paths require explicit governance override."
+        # Demote each HARD_STOP kernel alert to ADVISORY so it flows through
+        # _assemble_diagnosis as LIVE_MONEY_SURFACE_TOUCHED rather than blocking.
+        intent_issues.extend(
+            IssueRecord(
+                code="live_money_surface_touched",
+                path=alert.path,
+                severity=Severity.ADVISORY,
+                message=(
+                    f"Live-money surface: '{alert.path}' matches hard_stop pattern "
+                    f"'{alert.metadata.get('matched_pattern', 'unknown')}'. "
+                    "Ensure: (a) critic-agent review, "
+                    "(b) cross-DB writes via get_forecasts_connection_with_world() "
+                    "ATTACH+SAVEPOINT (INV-37), "
+                    "(c) relationship-invariant tests for this surface. "
+                    "See architecture/source_rationale.yaml + matching antibody tests."
                 ),
-            ),
-            kernel_alerts=tuple(kernel_alerts),
+                metadata={"matched_pattern": alert.metadata.get("matched_pattern", ""), "original_severity": "HARD_STOP"},
+            )
+            for alert in kernel_alerts
         )
+        # Do NOT short-circuit. Continue to profile matching with advisories attached.
 
     # Step 4: Resolve candidate profiles via Coverage Map
     candidates = _resolve_candidates(files, binding)
@@ -457,6 +462,7 @@ def _assemble_diagnosis(issues: list[IssueRecord]) -> DiagnosisEntry | None:
         "missing_companion": FrictionPattern.CLOSED_PACKET_STILL_LOAD_BEARING,
         "companion_skip_token_used": FrictionPattern.ADVISORY_OUTPUT_INVISIBILITY,
         "hard_stop_path": FrictionPattern.CLOSED_PACKET_STILL_LOAD_BEARING,
+        "live_money_surface_touched": FrictionPattern.LIVE_MONEY_SURFACE_TOUCHED,
     }
 
     _sev_order = {

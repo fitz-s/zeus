@@ -1,13 +1,17 @@
 # Created: 2026-05-15
-# Last reused or audited: 2026-05-15
+# Last reused or audited: 2026-05-19
 # Authority basis: docs/operations/task_2026-05-15_p1_topology_v_next_additive/SCAFFOLD.md §2.1
+#                  operator directive 2026-05-19 (topology advisory-only conversion)
 """
 Unit tests for scripts/topology_v_next/admission_engine.py.
 
-Covers: full §4 algorithm trace per step; HARD_STOP short-circuit;
+Covers: full §4 algorithm trace per step; live-money surface advisory (op-directive 2026-05-19);
 AdmissionDecision struct field population; friction_budget_used defaulting
 when no friction_state; _check_authority_status emits authority_status_stale
 when TTL exceeded; anti-sidecar signature checks.
+
+Operator directive 2026-05-19: hard_stop_paths now emit LIVE_MONEY_SURFACE_TOUCHED
+ADVISORY instead of blocking admission. Tests updated accordingly.
 """
 from __future__ import annotations
 
@@ -22,6 +26,7 @@ from scripts.topology_v_next.dataclasses import (
     BindingLayer,
     CohortDecl,
     CoverageMap,
+    FrictionPattern,
     Intent,
     IssueRecord,
     Severity,
@@ -75,6 +80,33 @@ def _make_binding(
 
 
 STUB_BINDING = _make_binding()
+
+# Binding that includes src/execution/** in a profile (money_path_execution)
+# so that hard_stop files are covered and composition_conflict is not emitted.
+# Required to verify advisory-only behavior per operator directive 2026-05-19.
+STUB_BINDING_WITH_EXECUTION = _make_binding(
+    profiles={
+        "agent_runtime": (
+            "scripts/topology_doctor.py",
+            "scripts/topology_doctor_digest.py",
+            "architecture/task_boot_profiles.yaml",
+            "architecture/admission_severity.yaml",
+            "architecture/test_topology.yaml",
+            "docs/operations/AGENTS.md",
+        ),
+        "test_suite": (
+            "tests/test_*.py",
+            "tests/topology_v_next/**",
+            "tests/fixtures/**",
+        ),
+        "money_path_execution": (
+            "src/execution/**",
+        ),
+        "money_path_venue": (
+            "src/venue/**",
+        ),
+    },
+)
 
 
 # ---------------------------------------------------------------------------
@@ -190,52 +222,67 @@ class TestAdmitBasic:
 
 
 # ---------------------------------------------------------------------------
-# Tests: HARD_STOP short-circuit
+# Tests: live-money surface advisory (operator directive 2026-05-19)
+#
+# Hard_stop_paths previously caused ok=False (HARD_STOP short-circuit).
+# Operator directive 2026-05-19: topology system NEVER blocks, only advises.
+# kernel_alerts still capture matched paths at HARD_STOP severity (for
+# downstream critic routing), but admission continues and ok=True.
 # ---------------------------------------------------------------------------
 
 class TestHardStopShortCircuit:
-    def test_hard_stop_file_ok_is_false(self):
+    def test_hard_stop_file_ok_is_TRUE_advisory_only(self):
+        """Operator directive 2026-05-19: hard_stop file must NOT block (ok=True).
+        Uses STUB_BINDING_WITH_EXECUTION so src/execution/** has profile coverage
+        and composition_conflict is not emitted."""
         result = admit(
             intent=Intent.modify_existing,
             files=["src/execution/orders.py"],
-            binding=STUB_BINDING,
+            binding=STUB_BINDING_WITH_EXECUTION,
         )
-        assert result.ok is False
+        assert result.ok is True
 
-    def test_hard_stop_severity(self):
+    def test_hard_stop_severity_is_advisory_not_hard_stop(self):
+        """Hard_stop file emits ADVISORY (or SOFT_BLOCK from overrides), not HARD_STOP."""
         result = admit(
             intent=Intent.modify_existing,
             files=["src/execution/orders.py"],
-            binding=STUB_BINDING,
+            binding=STUB_BINDING_WITH_EXECUTION,
         )
-        assert result.severity == Severity.HARD_STOP
+        assert result.severity != Severity.HARD_STOP
 
-    def test_hard_stop_profile_matched_is_none(self):
+    def test_hard_stop_profile_matched_is_populated(self):
+        """Admission continues to profile matching — profile_matched is set when file is in a profile."""
         result = admit(
             intent=Intent.modify_existing,
             files=["src/execution/orders.py"],
-            binding=STUB_BINDING,
+            binding=STUB_BINDING_WITH_EXECUTION,
         )
-        assert result.profile_matched is None
+        assert result.ok is True
+        assert result.profile_matched == "money_path_execution"
 
     def test_hard_stop_kernel_alerts_populated(self):
+        """kernel_alerts still capture matched hard_stop paths for critic routing."""
         result = admit(
             intent=Intent.modify_existing,
             files=["src/execution/orders.py"],
-            binding=STUB_BINDING,
+            binding=STUB_BINDING_WITH_EXECUTION,
         )
         assert len(result.kernel_alerts) >= 1
         assert all(a.severity == Severity.HARD_STOP for a in result.kernel_alerts)
 
-    def test_mixed_files_with_hard_stop_blocks(self):
-        """Even one hard-stop file in a set blocks the whole admission."""
+    def test_mixed_files_with_hard_stop_emits_advisory_not_hard_stop(self):
+        """Hard-stop file in a multi-profile set: advisory emitted (not HARD_STOP).
+        Note: ok may be False due to composition_conflict (multi-profile soft-block),
+        but severity must never be HARD_STOP — the hard_stop itself does not block."""
         result = admit(
             intent=Intent.modify_existing,
             files=["scripts/topology_doctor.py", "src/venue/client.py"],
-            binding=STUB_BINDING,
+            binding=STUB_BINDING_WITH_EXECUTION,
         )
-        assert result.ok is False
-        assert result.severity == Severity.HARD_STOP
+        assert result.severity != Severity.HARD_STOP
+        codes = {i.code for i in result.issues}
+        assert "live_money_surface_touched" in codes
 
 
 # ---------------------------------------------------------------------------
@@ -502,3 +549,103 @@ class TestToDictShape:
         # ok may be True (ADVISORY doesn't block) but issues must be visible
         if d["ok"]:
             assert len(d["issues"]) > 0  # intent_unspecified advisory present
+
+
+# ---------------------------------------------------------------------------
+# Tests: live-money surface advisory — harvester.py specific (operator directive 2026-05-19)
+#
+# Coordinator requirement: a file list containing src/execution/harvester.py +
+# valid profile + valid intent → admission succeeds (ok=True) with a
+# live_money_surface_touched advisory in issues, NOT with ok=False.
+# ---------------------------------------------------------------------------
+
+class TestLiveMoneyAdvisory:
+    """
+    Verifies operator directive 2026-05-19: hard_stop paths produce ADVISORY context,
+    not admission denial. Specifically covers src/execution/harvester.py which is
+    the hard_stop file in the phase0_pr1_resolution_era cohort.
+    """
+
+    def _make_binding_with_execution(self) -> BindingLayer:
+        """Reuse STUB_BINDING_WITH_EXECUTION which has src/execution/** in both
+        hard_stop_paths and a money_path_execution profile."""
+        return STUB_BINDING_WITH_EXECUTION
+
+    def test_harvester_py_admission_ok_is_true(self):
+        """src/execution/harvester.py must produce ok=True, not ok=False."""
+        binding = self._make_binding_with_execution()
+        result = admit(
+            intent=Intent.modify_existing,
+            files=["src/execution/harvester.py"],
+            binding=binding,
+        )
+        assert result.ok is True, (
+            f"Operator directive 2026-05-19: hard_stop should advise, not block. "
+            f"Got ok={result.ok}, severity={result.severity}"
+        )
+
+    def test_harvester_py_emits_live_money_surface_touched_advisory(self):
+        """src/execution/harvester.py must emit live_money_surface_touched advisory in issues."""
+        binding = self._make_binding_with_execution()
+        result = admit(
+            intent=Intent.modify_existing,
+            files=["src/execution/harvester.py"],
+            binding=binding,
+        )
+        codes = {i.code for i in result.issues}
+        assert "live_money_surface_touched" in codes, (
+            f"Expected live_money_surface_touched advisory in issues; got codes={codes}"
+        )
+
+    def test_harvester_py_advisory_severity_is_not_hard_stop(self):
+        """The live_money_surface_touched issue must be ADVISORY, not HARD_STOP."""
+        binding = self._make_binding_with_execution()
+        result = admit(
+            intent=Intent.modify_existing,
+            files=["src/execution/harvester.py"],
+            binding=binding,
+        )
+        lm_issues = [i for i in result.issues if i.code == "live_money_surface_touched"]
+        assert len(lm_issues) >= 1
+        for issue in lm_issues:
+            assert issue.severity == Severity.ADVISORY, (
+                f"live_money_surface_touched must be ADVISORY; got {issue.severity}"
+            )
+
+    def test_harvester_py_kernel_alerts_still_capture_hard_stop(self):
+        """kernel_alerts must still record the hard_stop match at HARD_STOP severity
+        for downstream critic routing, even though admission itself is not blocked."""
+        binding = self._make_binding_with_execution()
+        result = admit(
+            intent=Intent.modify_existing,
+            files=["src/execution/harvester.py"],
+            binding=binding,
+        )
+        assert len(result.kernel_alerts) >= 1
+        assert all(a.severity == Severity.HARD_STOP for a in result.kernel_alerts)
+
+    def test_harvester_py_diagnosis_is_live_money_surface_touched(self):
+        """_assemble_diagnosis must map live_money_surface_touched to
+        FrictionPattern.LIVE_MONEY_SURFACE_TOUCHED."""
+        binding = self._make_binding_with_execution()
+        result = admit(
+            intent=Intent.modify_existing,
+            files=["src/execution/harvester.py"],
+            binding=binding,
+        )
+        assert result.diagnosis is not None
+        assert result.diagnosis.pattern == FrictionPattern.LIVE_MONEY_SURFACE_TOUCHED
+
+    def test_harvester_py_with_valid_profile_file_emits_advisory(self):
+        """Mixed set: harvester.py (hard_stop) + topology_doctor.py (agent_runtime profile).
+        hard_stop emits advisory (not HARD_STOP). Admission may soft-block on
+        composition_conflict (multi-profile), but severity is never HARD_STOP."""
+        binding = self._make_binding_with_execution()
+        result = admit(
+            intent=Intent.modify_existing,
+            files=["scripts/topology_doctor.py", "src/execution/harvester.py"],
+            binding=binding,
+        )
+        assert result.severity != Severity.HARD_STOP
+        codes = {i.code for i in result.issues}
+        assert "live_money_surface_touched" in codes

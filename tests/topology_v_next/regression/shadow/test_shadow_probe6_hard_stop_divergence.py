@@ -1,17 +1,19 @@
 # Created: 2026-05-15
-# Last reused or audited: 2026-05-15
+# Last reused or audited: 2026-05-19
 # Authority basis: docs/operations/task_2026-05-15_p3_topology_v_next_phase2_shadow/SCAFFOLD.md §5 probe6
+#                  operator directive 2026-05-19 (hard_stop → advisory-only)
 """
-Probe 6 — HARD_STOP divergence captured in shadow record.
+Probe 6 — Live-money surface advisory (previously HARD_STOP divergence).
 
 Trigger: files=["src/execution/executor.py"] (LIVE_SIDE_EFFECT_PATH per ZEUS_BINDING
 hard_stop_paths: "src/execution/**") with intent="modify_existing".
-Expected: v_next emits HARD_STOP via kernel; kernel_alert_count >= 1;
-old side (stub payload) returns its normal admission result.
-DivergenceRecord is classified DISAGREE_HARD_STOP.
 
-Kill criterion: assert record.agreement_class == "DISAGREE_HARD_STOP"
-AND assert kernel_alert_count >= 1.
+Operator directive 2026-05-19: hard_stop paths now produce ADVISORY context, not
+HARD_STOP admission denial. kernel_alerts still capture the HARD_STOP kernel match
+for downstream critic routing. DivergenceRecord agreement_class changes accordingly.
+
+Kill criterion: kernel_alert_count >= 1 (kernel wiring preserved).
+Severity invariant: decision.severity != HARD_STOP (advisory-only directive).
 """
 import pytest
 
@@ -34,36 +36,39 @@ PAYLOAD_ADMITTED = {
 
 class TestProbe6HardStopDivergence:
 
-    def test_hard_stop_emitted_by_vnext(self):
-        """v_next emits HARD_STOP for src/execution/executor.py."""
+    def test_kernel_alerts_still_populated_for_execution_path(self):
+        """Kernel still captures hard_stop match even under advisory-only directive.
+        kernel_alert_count >= 1 is the preserved kill criterion.
+        Operator directive 2026-05-19: severity is no longer HARD_STOP."""
         decision = admit(intent="modify_existing", files=FILES)
-        assert decision.severity.value == "HARD_STOP", (
-            f"Expected HARD_STOP severity, got {decision.severity.value!r}. "
+        assert len(decision.kernel_alerts) >= 1, (
+            f"Expected >= 1 kernel alert, got {len(decision.kernel_alerts)}. "
             f"Hard Safety Kernel wiring may be broken."
         )
-        assert len(decision.kernel_alerts) >= 1, (
-            f"Expected >= 1 kernel alert, got {len(decision.kernel_alerts)}"
+        # Operator directive: hard_stop must NOT block (HARD_STOP severity removed)
+        assert decision.severity.value != "HARD_STOP", (
+            f"Operator directive 2026-05-19: execution path should advise not block. "
+            f"Got {decision.severity.value!r}."
         )
 
-    def test_hard_stop_envelope_blockers_populated(self):
-        """format_output populates blockers list when v_next emits HARD_STOP."""
+    def test_live_money_advisory_emitted_for_execution_path(self):
+        """format_output surfaces live_money_surface_touched in advisory (not blockers).
+        Operator directive 2026-05-19: the envelope decision reflects advisory severity."""
         decision = admit(intent="modify_existing", files=FILES)
         envelope = format_output(decision)
 
-        assert envelope["decision"] == "HARD_STOP"
-        assert envelope["ok"] is False
-        # SCAFFOLD §2.1: blockers = decision.issues only; kernel HARD_STOP lives in kernel_alerts.
-        # For kernel-only HARD_STOP paths, blockers may be empty — kernel_alerts carries evidence.
-        assert len(envelope["blockers"]) + len(envelope["kernel_alerts"]) >= 1, (
-            f"Both blockers and kernel_alerts are empty despite HARD_STOP severity. "
-            f"blockers={envelope['blockers']}, kernel_alerts={envelope['kernel_alerts']}"
+        # Kernel alert is still present
+        assert len(envelope["kernel_alerts"]) >= 1, (
+            f"kernel_alerts not in envelope: {envelope['kernel_alerts']}"
         )
-        assert envelope["advisory"] == [], (
-            f"advisory should be empty for HARD_STOP: {envelope['advisory']}"
+        # Decision is no longer HARD_STOP
+        assert envelope["decision"] != "HARD_STOP", (
+            f"Operator directive 2026-05-19: envelope decision must not be HARD_STOP. "
+            f"Got {envelope['decision']!r}"
         )
 
-    def test_divergence_record_agreement_class(self, monkeypatch):
-        """Shadow record classified DISAGREE_HARD_STOP when v_next sees HARD_STOP."""
+    def test_divergence_record_kernel_alert_count(self, monkeypatch):
+        """Shadow record kernel_alert_count >= 1 for execution path (kill criterion preserved)."""
         captured_records = []
         monkeypatch.setattr(
             "scripts.topology_v_next.cli_integration_shim.log_divergence",
@@ -81,21 +86,16 @@ class TestProbe6HardStopDivergence:
         shadow = result["v_next_shadow"]
         assert shadow.get("error") is None
 
-        # Kill criterion: record must be classified DISAGREE_HARD_STOP
         assert len(captured_records) == 1
         record = captured_records[0]
-        assert record.agreement_class == "DISAGREE_HARD_STOP", (
-            f"Expected DISAGREE_HARD_STOP, got {record.agreement_class!r}. "
-            f"Hard Stop divergence classification broken."
-        )
 
-        # Kill criterion: kernel_alert_count >= 1
+        # Kill criterion preserved: kernel_alert_count >= 1
         assert record.kernel_alert_count >= 1, (
             f"kernel_alert_count == {record.kernel_alert_count}; kernel wiring broken."
         )
 
     def test_envelope_kernel_alerts_populated(self, monkeypatch):
-        """kernel_alerts in envelope is non-empty for HARD_STOP path."""
+        """kernel_alerts in envelope is non-empty for execution path."""
         monkeypatch.setattr(
             "scripts.topology_v_next.cli_integration_shim.log_divergence",
             lambda record: None,

@@ -218,6 +218,10 @@ coverage_map:
     - ".env*"
 
   hard_stop_paths:
+    # Live-money surface advisories — operator directive 2026-05-19:
+    # Touching these surfaces triggers LIVE_MONEY_SURFACE_TOUCHED context-aware warnings;
+    # enforcement is via critic-agent review + INV-37 ATTACH+SAVEPOINT + relationship tests,
+    # NOT via admission denial. The admission_engine converts these from block→advisory.
     # Live side effects — any write here may trigger a live API call or position change
     - "src/execution/**"
     - "src/venue/**"
