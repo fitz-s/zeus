@@ -1432,6 +1432,13 @@ def _confirmation_count(web3: Any, block_number: int | None) -> int:
 _AUTONOMOUS_RETRY_ERRORCODES_ALWAYS: frozenset[str] = frozenset({
     "REDEEM_DEFERRED_TO_R1",
     "REDEEM_NEGRISK_MISROUTED",   # PR-209: antibody-reset cases auto-retry via NegRiskAdapter
+    # PR #212 completion: NEGRISK_FACT_MISSING is now auto-recoverable because
+    # _fetch_neg_risk_from_gamma_for_submitter() supplies the missing fact from
+    # the canonical Gamma authority when the world snapshot cache is empty
+    # (Karachi-class positions entered before the snapshot side-effect path
+    # existed). Pre-PR #212 this errorCode latched OPERATOR_REQUIRED forever;
+    # post-PR #212 the next submit attempt resolves it.
+    "REDEEM_NEGRISK_FACT_MISSING",
 })
 
 # Error codes that require DRY_RUN to be OFF before retry. REDEEM_DRY_RUN_LOGGED

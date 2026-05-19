@@ -230,3 +230,77 @@ def test_t5_end_to_end_karachi_pattern_advances_to_retrying(conn, monkeypatch):
     assert len(events) >= 1
     payload = json.loads(events[-1]["payload_json"])
     assert payload.get("prior_errorcode") == "REDEEM_NEGRISK_MISROUTED"
+
+
+# ---------------------------------------------------------------------------
+# T6 — REDEEM_NEGRISK_FACT_MISSING also in autonomous retry allowlist (PR #212
+# completion). The Gamma fallback helper _fetch_neg_risk_from_gamma_for_submitter
+# resolves FACT_MISSING on the next submit attempt; the retry must therefore
+# be allowed without operator intervention.
+# ---------------------------------------------------------------------------
+
+
+def test_t6_negrisk_fact_missing_promoted_to_retrying(conn, monkeypatch):
+    """T6 (PR #212 completion): an OPERATOR_REQUIRED row with errorCode=
+    REDEEM_NEGRISK_FACT_MISSING must be promoted to RETRYING — the submitter
+    will then call _fetch_neg_risk_from_gamma_for_submitter() to source the
+    missing fact from canonical Gamma authority and complete the redeem.
+    Sed-flip: remove REDEEM_NEGRISK_FACT_MISSING from
+    _AUTONOMOUS_RETRY_ERRORCODES_ALWAYS → T6 → RED.
+    """
+    monkeypatch.setenv("ZEUS_AUTONOMOUS_REDEEM_ENABLED", "1")
+    error_payload = json.dumps({
+        "errorCode": "REDEEM_NEGRISK_FACT_MISSING",
+        "condition_id": "0xkarachi_negrisk_condition_id_c8c220f5",
+        "errorMessage": "no snapshot row in world.executable_market_snapshots",
+    })
+    conn.execute(
+        """
+        INSERT INTO settlement_commands
+          (command_id, state, condition_id, market_id, payout_asset, requested_at,
+           error_payload, tx_hash)
+        VALUES (?, ?, ?, ?, ?, ?, ?, NULL)
+        """,
+        (
+            "karachi-t6",
+            SettlementState.REDEEM_OPERATOR_REQUIRED.value,
+            "0xkarachi_negrisk_condition_id_c8c220f5",
+            "0xkarachi_market",
+            "USDC",
+            "2026-05-19T06:00:00Z",
+            error_payload,
+        ),
+    )
+    conn.commit()
+
+    promoted = reseat_stub_deferred_rows_for_autonomous_retry(conn)
+    conn.commit()
+
+    assert promoted == 1, (
+        f"T6 FAIL: expected 1 promoted (FACT_MISSING now auto-retryable via "
+        f"PR #212 Gamma fallback), got {promoted}. _AUTONOMOUS_RETRY_ERRORCODES_ALWAYS "
+        f"must include REDEEM_NEGRISK_FACT_MISSING."
+    )
+    row = conn.execute(
+        "SELECT state FROM settlement_commands WHERE command_id = ?",
+        ("karachi-t6",),
+    ).fetchone()
+    assert row["state"] == SettlementState.REDEEM_RETRYING.value, (
+        f"T6 FAIL: Karachi-class FACT_MISSING row still stuck in {row['state']!r}; "
+        "PR #212 Gamma fallback will never run because submitter only processes RETRYING rows"
+    )
+
+
+def test_t7_allowlist_contains_both_misrouted_and_fact_missing():
+    """T7: explicit membership contract — _AUTONOMOUS_RETRY_ERRORCODES_ALWAYS
+    must contain both auto-recoverable error codes. Sed-flip: drop either key →
+    RED. Drift guard: if the allowlist is rewritten, both must be preserved."""
+    from src.execution.settlement_commands import _AUTONOMOUS_RETRY_ERRORCODES_ALWAYS
+
+    required = {"REDEEM_NEGRISK_MISROUTED", "REDEEM_NEGRISK_FACT_MISSING"}
+    missing = required - set(_AUTONOMOUS_RETRY_ERRORCODES_ALWAYS)
+    assert not missing, (
+        f"T7 FAIL: _AUTONOMOUS_RETRY_ERRORCODES_ALWAYS missing {sorted(missing)}; "
+        f"these are the structurally auto-recoverable error codes (PR #209 + #212). "
+        f"Removing either silently re-introduces the Karachi-class latch."
+    )
