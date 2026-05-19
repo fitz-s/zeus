@@ -1562,6 +1562,12 @@ def materialize_position(candidate, decision, result, portfolio, city, mode, *, 
         unit=city.settlement_unit,
         token_id=decision.tokens["token_id"],
         no_token_id=decision.tokens["no_token_id"],
+        # Fix B (2026-05-19): populate condition_id at entry write-time so
+        # upsert_position_current's NullConditionIdOnOpenPhaseError guard passes.
+        # evaluator.py:2005-2009 places condition_id into each bin dict; cycle_runtime
+        # reads it back from decision.tokens at the point of materialization.
+        # This closes the write-path gap that caused Jakarta e914a28a-420's NULL row.
+        condition_id=str(decision.tokens.get("condition_id") or ""),
         strategy_key=strategy_key,
         strategy=strategy_key,
         edge_source=edge_source,

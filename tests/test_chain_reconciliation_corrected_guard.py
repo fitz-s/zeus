@@ -1,5 +1,5 @@
 # Created: 2026-05-05
-# Last reused or audited: 2026-05-07
+# Last reused or audited: 2026-05-19
 # Authority basis: object-meaning invariance Wave26 explicit position env authority.
 """Relationship tests: chain-reconciliation D6-field freeze for corrected-eligible positions.
 
@@ -65,6 +65,10 @@ def _make_position(
         order_posted_at="2026-05-01T00:00:00Z",
         chain_state=chain_state,
         token_id="tok-1",
+        # Fix B (2026-05-19): condition_id required for open-phase writes.
+        # Populated at order time from the executable_market_snapshot;
+        # tests must supply a value so the NullConditionIdOnOpenPhaseError guard passes.
+        condition_id="cond-1",
         corrected_executable_economics_eligible=corrected_eligible,
     )
 
