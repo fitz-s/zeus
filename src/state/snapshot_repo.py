@@ -77,6 +77,23 @@ def init_snapshot_schema(conn: WorldConnection) -> None:
         BEGIN SELECT RAISE(ABORT, 'executable_market_snapshots is APPEND-ONLY (NC-NEW-B)'); END;
         """
     )
+    # PR 2: add microstructure transparency columns (idempotent ADD COLUMN).
+    # spread_observed_window_ms deferred to follow-up PR (Finding #8 decision-a).
+    import logging as _logging
+    _pr2_logger = _logging.getLogger(__name__)
+    for _ddl in (
+        "ALTER TABLE executable_market_snapshots ADD COLUMN wide_spread_display_substitution INTEGER NOT NULL DEFAULT 0 CHECK (wide_spread_display_substitution IN (0,1))",
+        "ALTER TABLE executable_market_snapshots ADD COLUMN depth_at_best_ask INTEGER NOT NULL DEFAULT 0",
+    ):
+        try:
+            conn.execute(_ddl)
+        except Exception as _exc:
+            if "duplicate column" not in str(_exc).lower():
+                raise
+            _pr2_logger.info(
+                "PR2 migration: column already exists, skipping: %s",
+                _ddl.split("ADD COLUMN ")[1].split()[0],
+            )
 
 
 def insert_snapshot(conn: WorldConnection, snapshot: ExecutableMarketSnapshotV2) -> None:
@@ -93,7 +110,8 @@ def insert_snapshot(conn: WorldConnection, snapshot: ExecutableMarketSnapshotV2)
           rfqe, neg_risk, orderbook_top_bid, orderbook_top_ask,
           orderbook_depth_json, raw_gamma_payload_hash,
           raw_clob_market_info_hash, raw_orderbook_hash, authority_tier,
-          captured_at, freshness_deadline
+          captured_at, freshness_deadline,
+          wide_spread_display_substitution, depth_at_best_ask
         ) VALUES (
           :snapshot_id, :gamma_market_id, :event_id, :event_slug, :condition_id,
           :question_id, :yes_token_id, :no_token_id, :selected_outcome_token_id,
@@ -103,7 +121,8 @@ def insert_snapshot(conn: WorldConnection, snapshot: ExecutableMarketSnapshotV2)
           :rfqe, :neg_risk, :orderbook_top_bid, :orderbook_top_ask,
           :orderbook_depth_json, :raw_gamma_payload_hash,
           :raw_clob_market_info_hash, :raw_orderbook_hash, :authority_tier,
-          :captured_at, :freshness_deadline
+          :captured_at, :freshness_deadline,
+          :wide_spread_display_substitution, :depth_at_best_ask
         )
         """,
         _row_from_snapshot(snapshot),
@@ -188,6 +207,9 @@ def _row_from_snapshot(snapshot: ExecutableMarketSnapshotV2) -> dict[str, Any]:
         "authority_tier": snapshot.authority_tier,
         "captured_at": _dt(snapshot.captured_at),
         "freshness_deadline": _dt(snapshot.freshness_deadline),
+        # PR 2 microstructure fields
+        "wide_spread_display_substitution": int(snapshot.wide_spread_display_substitution),
+        "depth_at_best_ask": snapshot.depth_at_best_ask,
     }
 
 
@@ -226,6 +248,9 @@ def _snapshot_from_row(row: sqlite3.Row) -> ExecutableMarketSnapshotV2:
         authority_tier=row["authority_tier"],
         captured_at=_dt_parse_required(row["captured_at"]),
         freshness_deadline=_dt_parse_required(row["freshness_deadline"]),
+        # PR 2 microstructure fields — default 0 for pre-PR2 legacy rows
+        wide_spread_display_substitution=bool(row["wide_spread_display_substitution"] or 0),
+        depth_at_best_ask=int(row["depth_at_best_ask"] or 0),
     )
 
 

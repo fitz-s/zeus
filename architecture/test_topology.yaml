@@ -2292,3 +2292,28 @@ test_metadata:
       T5 unsupported type still raises.
     created: 2026-05-19
     last_reused_or_audited: 2026-05-19
+  # ── PR 2+7 phase0-pr27-effective-kelly test metadata ─────────────────────
+  tests/test_inv_kelly_effective.py:
+    modules: [engine, contracts]
+    category: core_law_antibody
+    blocks_commit: true
+    created: "2026-05-19"
+    last_reused_or_audited: "2026-05-19"
+    law_dependencies:
+      - docs/operations/task_2026-05-17_strategy_vnext_phase0/PHASE_0_V4_ADDENDUM.md
+      - scaffolds/pr27_scaffold.md
+    notes: >
+      R-EE.1–R-EE.4, R-EE.7–R-EE.8: INV-kelly-effective enforcement, bucket
+      policy property tests, fee_erased zero-size, cycle_runtime threading audit.
+  tests/test_pr2_wide_spread_fields.py:
+    modules: [contracts, state, data]
+    category: core_law_antibody
+    blocks_commit: true
+    created: "2026-05-19"
+    last_reused_or_audited: "2026-05-19"
+    law_dependencies:
+      - docs/operations/task_2026-05-17_strategy_vnext_phase0/PHASE_0_V4_ADDENDUM.md
+      - scaffolds/pr27_scaffold.md
+    notes: >
+      R-EE.5–R-EE.6: PR 2 wide_spread_display_substitution + depth_at_best_ask
+      roundtrip, one-sided-book zero-depth, schema idempotency, WIDE_SPREAD_THRESHOLD.

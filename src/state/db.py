@@ -827,7 +827,7 @@ def get_connection(
 # CI hook scripts/check_schema_version.py diffs the sqlite_master hash of
 # a fresh-init DB against tests/state/_schema_pinned_hash.txt and fails
 # the PR if SCHEMA_VERSION did not change in lockstep.
-SCHEMA_VERSION = 10  # 2026-05-19 PR1: uma_resolution confirmations_count/confirmations_required/is_valid columns
+SCHEMA_VERSION = 11  # 2026-05-19 PR2+7: executable_market_snapshots wide_spread_display_substitution + depth_at_best_ask columns
 
 
 def init_schema(

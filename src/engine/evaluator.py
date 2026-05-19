@@ -122,6 +122,7 @@ from src.contracts.executable_market_snapshot_v2 import (
     canonicalize_fee_details,
     fee_rate_fraction_from_details,
 )
+from src.contracts.effective_kelly_context import EffectiveKellyContext, MissingEffectiveContextError
 from src.contracts.execution_price import ExecutionPrice, polymarket_fee
 from src.contracts.alpha_decision import AlphaTargetMismatchError
 from src.data.forecast_source_registry import (
@@ -791,6 +792,8 @@ def _size_at_execution_price_boundary(
     fee_rate: float,
     sizing_bankroll: float,
     kelly_multiplier: float,
+    effective_context: EffectiveKellyContext | None = None,
+    allow_missing_context: bool = False,
 ) -> float:
     """Size a trade at the evaluator→Kelly boundary using typed entry cost.
 
@@ -799,7 +802,42 @@ def _size_at_execution_price_boundary(
 
     Per-trade safety-cap authority was removed 2026-05-04; per-cycle exposure
     discipline now lives in posture / RiskGuard / max-exposure gates only.
+
+    PR 7 — INV-kelly-effective: effective_context provides a 5th multiplicative
+    haircut factor applied AFTER the existing 4-multiplier chain.  When
+    effective_context is None on a live path, raises MissingEffectiveContextError
+    (fail-closed) UNLESS allow_missing_context=True is explicitly passed.  The
+    sole authorised allow_missing_context=True site is the evaluate_candidate
+    inner loop (evaluator.py:~3707) — a pre-snapshot provisional sizing path
+    where context is not yet in scope; final haircut is applied downstream at
+    cycle_runtime W2/W3/W4.  Non-live paths (replay/backtest) pass None with
+    graceful degrade (no haircut, WARNING logged).
     """
+    # PR 7: apply microstructure haircut to kelly_multiplier before sizing.
+    effective_kelly_multiplier = kelly_multiplier
+    if effective_context is not None:
+        effective_kelly_multiplier = kelly_multiplier * effective_context.haircut()
+    else:
+        from src.config import get_mode as _get_mode
+        if _get_mode() == "live" and not allow_missing_context:
+            # Fail-closed on live: raise so any caller that forgets context
+            # surfaces immediately rather than silently sizing without haircut.
+            raise MissingEffectiveContextError(
+                "INV-kelly-effective: _size_at_execution_price_boundary called without "
+                "effective_context on live path; failing closed."
+            )
+        # Only warn when context is genuinely missing (not an explicit bypass).
+        # allow_missing_context=True is an authorised path (e.g. replay W5,
+        # evaluate_candidate pre-snapshot loop) — suppress the warning there
+        # to avoid log noise on every tick in the hot inner loop.
+        if not allow_missing_context:
+            _mode = _get_mode()
+            logger.warning(
+                "INV-kelly-effective: _size_at_execution_price_boundary called without "
+                "effective_context on %s path; degrading gracefully (no haircut)",
+                _mode,
+            )
+
     raw_entry_price = float(entry_price)
     ep = ExecutionPrice(
         value=raw_entry_price,
@@ -817,7 +855,7 @@ def _size_at_execution_price_boundary(
         p_posterior,
         ep_fee_adjusted,
         sizing_bankroll,
-        kelly_multiplier,
+        effective_kelly_multiplier,
     )
 
     # P10E strict: shadow-off path removed. R10 requires fee-adjusted typed price.
@@ -3673,12 +3711,21 @@ def evaluate_candidate(
             ))
             continue
         try:
+            # PR 7 (W1): effective_context=None — bid/ask data for this edge's
+            # token is fetched in the p_market loop (evaluator.py:~2795) in a
+            # different scope.  This evaluate_candidate loop does not carry the
+            # ExecutableMarketSnapshotV2; microstructure haircut is applied at
+            # cycle_runtime W2/W3/W4 where the snapshot IS in scope.
+            # allow_missing_context=True: sole authorised pre-snapshot path; see
+            # _size_at_execution_price_boundary docstring for invariant contract.
             size = _size_at_execution_price_boundary(
                 p_posterior=edge.p_posterior,
                 entry_price=edge.entry_price,
                 fee_rate=fee_rate,
                 sizing_bankroll=sizing_bankroll,
                 kelly_multiplier=km * risk_throttle,
+                effective_context=None,
+                allow_missing_context=True,
             )
         except ValueError as exc:
             decisions.append(EdgeDecision(

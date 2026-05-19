@@ -1719,12 +1719,18 @@ def _replay_one_settlement(
                 edge.entry_price,
                 fee_rate=_replay_fee_rate,
             )
+            # PR 7 (W5): no ExecutableMarketSnapshotV2 in scope at this replay
+            # call point — graceful degrade (effective_context=None, no haircut).
+            # allow_missing_context=True required because get_mode() returns "live"
+            # unconditionally; replay has no snapshot in scope at this call point.
             size_usd = _size_at_execution_price_boundary(
                 p_posterior=edge.p_posterior,
                 entry_price=edge.entry_price,
                 fee_rate=_replay_fee_rate,
                 sizing_bankroll=sizing_bankroll,
                 kelly_multiplier=k_mult,
+                effective_context=None,
+                allow_missing_context=True,
             )
             size_usd = max(0.0, size_usd)
             if not market_price_linked:
