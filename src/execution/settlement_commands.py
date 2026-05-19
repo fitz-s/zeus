@@ -354,7 +354,7 @@ def request_redeem(
                     requested_at_s,
                     requested_at_s if state in _TERMINAL_STATES else None,
                     _json_dumps(error_payload) if error_payload else None,
-                    polymarket_end_anchor_source or None,
+                    polymarket_end_anchor_source or "gamma_explicit",
                 ),
             )
             _append_event(

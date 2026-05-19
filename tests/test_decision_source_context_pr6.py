@@ -1,8 +1,8 @@
 # Created: 2026-05-19
 # Last reused or audited: 2026-05-19
 # Authority basis: pr36_scaffold.md §7 — R-6.1 through R-6.4
-# Lifecycle: PR 6 relationship tests for DecisionSourceContext timing chain
-# Purpose: Verify chain-finality split, submit/ack ordering, clock drift threshold
+# Lifecycle: created=2026-05-19; last_reviewed=2026-05-19; last_reused=never
+# Purpose: Verify chain-finality split, submit/ack ordering, clock drift threshold (PR6 relationship tests for DecisionSourceContext timing chain).
 # Reuse: relationship tests only; alpha-provenance antibody lives in test_inv_alpha_provenance.py
 """Relationship tests for DecisionSourceContext PR 6 timing chain.
 

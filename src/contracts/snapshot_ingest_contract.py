@@ -108,7 +108,7 @@ CausalityStatus = Literal[
 INTEGRITY_ERROR_TO_CAUSALITY: dict[str, str] = {
     "available_after_decision": "AVAILABLE_AFTER_DECISION",
     "clock_drift_warning": "CLOCK_DRIFT_WARNING",
-    "decision_before_forecast_available": "DECISION_BEFORE_FORECAST_AVAILABLE",
+    "forecast_available_after_decision": "DECISION_BEFORE_FORECAST_AVAILABLE",
     "excessive_clock_drift": "EXCESSIVE_CLOCK_DRIFT",
     "inclusion_after_finality": "INCLUSION_AFTER_FINALITY",
     "missing_causality_field": "MISSING_CAUSALITY_FIELD",

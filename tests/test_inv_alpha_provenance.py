@@ -1,8 +1,8 @@
 # Created: 2026-05-19
 # Last reused or audited: 2026-05-19
 # Authority basis: pr36_scaffold.md §7 INV-alpha-provenance antibody
-# Lifecycle: INV-alpha-provenance antibody test
-# Purpose: Every ensemble_snapshots_v2 write via PR6 path has non-null raw_orderbook_hash_transition_delta_ms
+# Lifecycle: created=2026-05-19; last_reviewed=2026-05-19; last_reused=never
+# Purpose: Every ensemble_snapshots_v2 write via PR6 path has non-null raw_orderbook_hash_transition_delta_ms (INV-alpha-provenance antibody).
 # Reuse: standalone; no shared fixtures with timing-chain tests
 """INV-alpha-provenance antibody: raw_orderbook_hash_transition_delta_ms must be non-null
 on every ensemble_snapshots_v2 row written via the PR6 capture path.

@@ -1,6 +1,9 @@
 # Created: 2026-05-19
 # Last reused or audited: 2026-05-19
 # Authority basis: PR 3 WAVE_B_PR_3_6_FIELD_MAP.md row 17; wave_b_opus_critic_pr36.md B2
+# Lifecycle: created=2026-05-19; last_reviewed=2026-05-19; last_reused=never
+# Purpose: One-shot idempotent migration adding polymarket_end_anchor_source + PR6 columns to settlement_commands and wrap_unwrap_commands in world.db.
+# Reuse: Run once per DB instance; check --dry-run output before --apply; idempotent on re-run (duplicate column errors silently skipped).
 """PR 3 migration: add polymarket_end_anchor_source to settlement_commands.
 
 Adds a single TEXT NOT NULL column with DEFAULT 'gamma_explicit' to

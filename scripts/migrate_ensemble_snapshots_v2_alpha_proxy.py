@@ -1,6 +1,9 @@
 # Created: 2026-05-19
 # Last reused or audited: 2026-05-19
 # Authority basis: PR 6 WAVE_B_PR_3_6_FIELD_MAP.md rows 9-11; pr36_scaffold.md PR 6 migrations
+# Lifecycle: created=2026-05-19; last_reviewed=2026-05-19; last_reused=never
+# Purpose: One-shot idempotent migration adding timing chain + alpha proxy columns to ensemble_snapshots_v2 in forecasts.db.
+# Reuse: Run once per DB instance; check --dry-run output before --apply; nullable columns so no backfill required.
 """PR 6 migration: add timing chain + alpha proxy columns to ensemble_snapshots_v2.
 
 Adds 3 columns to ensemble_snapshots_v2 in forecasts.db:

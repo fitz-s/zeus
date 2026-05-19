@@ -1,6 +1,9 @@
 # Created: 2026-05-19
 # Last reused or audited: 2026-05-19
 # Authority basis: pr36_scaffold.md §5 — R-3.1 through R-3.5 + R-3.NEW-a/b/c
+# Lifecycle: created=2026-05-19; last_reviewed=2026-05-19; last_reused=never
+# Purpose: Relationship tests for DecisionSourceContext PR3 observation-chain ordering validators (R-3.x).
+# Reuse: relationship tests only; Path F (provider_reported_time=None) conditional suppression verified here.
 """Relationship tests for DecisionSourceContext PR 3 timing chain.
 
 Tests the observation-chain ordering validators (R-3.x) added by PR 3:

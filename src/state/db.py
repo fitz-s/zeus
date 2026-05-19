@@ -1888,8 +1888,9 @@ def init_schema(
         );
     """)
     # T1A: DDL single-source — delegate to schema owner to avoid duplication.
-    from src.execution.settlement_commands import SETTLEMENT_COMMAND_SCHEMA, init_settlement_command_schema
-    conn.executescript(SETTLEMENT_COMMAND_SCHEMA)
+    # init_settlement_command_schema() already calls executescript(SETTLEMENT_COMMAND_SCHEMA)
+    # internally; calling executescript here too is redundant. Use only the delegated call.
+    from src.execution.settlement_commands import init_settlement_command_schema
     # PR 3+6 (2026-05-19): idempotent column migrations for settlement_commands.
     init_settlement_command_schema(conn)
 
