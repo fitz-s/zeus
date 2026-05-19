@@ -10,6 +10,7 @@
       "21:00"
     ],
     "day0_interval_min": 15,
+    "imminent_open_capture_interval_min": 5,
     "ecmwf_open_data_times_utc": [
       "01:30",
       "13:30"

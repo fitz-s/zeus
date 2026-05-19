@@ -1306,6 +1306,8 @@ def _edge_source_for(candidate: MarketCandidate, edge: BinEdge) -> str:
         return "settlement_capture"
     if candidate.discovery_mode == DiscoveryMode.OPENING_HUNT.value:
         return "opening_inertia"
+    if candidate.discovery_mode == DiscoveryMode.IMMINENT_OPEN_CAPTURE.value:
+        return "imminent_open_capture"
     if edge.direction == "buy_no" and edge.bin.is_shoulder:
         return "shoulder_sell"
     if edge.direction == "buy_yes" and not edge.bin.is_shoulder:
@@ -1320,6 +1322,8 @@ def _strategy_key_for(candidate: MarketCandidate, edge: BinEdge) -> str | None:
         return "settlement_capture"
     if candidate.discovery_mode == DiscoveryMode.OPENING_HUNT.value:
         return "opening_inertia"
+    if candidate.discovery_mode == DiscoveryMode.IMMINENT_OPEN_CAPTURE.value:
+        return "imminent_open_capture"
     if edge.direction == "buy_no" and edge.bin.is_shoulder:
         return "shoulder_sell"
     if edge.direction == "buy_yes" and not edge.bin.is_shoulder:
@@ -1334,6 +1338,8 @@ def _strategy_key_for_hypothesis(candidate: MarketCandidate, hypothesis: FullFam
         return "settlement_capture"
     if candidate.discovery_mode == DiscoveryMode.OPENING_HUNT.value:
         return "opening_inertia"
+    if candidate.discovery_mode == DiscoveryMode.IMMINENT_OPEN_CAPTURE.value:
+        return "imminent_open_capture"
     if hypothesis.direction == "buy_no" and hypothesis.is_shoulder:
         return "shoulder_sell"
     if hypothesis.direction == "buy_yes" and not hypothesis.is_shoulder:
@@ -1345,6 +1351,7 @@ def _entry_ci_rejection_reason(candidate: MarketCandidate, edge: BinEdge) -> str
     if candidate.discovery_mode not in {
         DiscoveryMode.DAY0_CAPTURE.value,
         DiscoveryMode.UPDATE_REACTION.value,
+        DiscoveryMode.IMMINENT_OPEN_CAPTURE.value,
     }:
         return None
     try:

@@ -254,7 +254,7 @@ _REQUIRED_FIELDS = {
 
 
 _VALID_DISCOVERY_MODES: frozenset[str] = frozenset({
-    "day0_capture", "opening_hunt", "update_reaction",
+    "day0_capture", "opening_hunt", "update_reaction", "imminent_open_capture",
 })
 
 

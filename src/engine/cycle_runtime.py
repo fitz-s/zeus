@@ -2621,11 +2621,28 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
     min_hours_to_resolution = params.get("min_hours_to_resolution")
     if min_hours_to_resolution is None:
         min_hours_to_resolution = 0 if "max_hours_to_resolution" in params else 6
+    if "imminent_window_hours" in params:
+        # imminent_open_capture: pure UTC time-to-resolution filter (no city-local
+        # phase gate). Scans markets with 0 < hours_to_resolution <= window.
+        # Window is capped at 24h so it sits strictly below opening_hunt's
+        # min_hours_to_resolution: 24, preventing double-coverage.
+        # min_hours_to_resolution=0 to include markets already past the 6h
+        # default floor used by other modes.
+        min_hours_to_resolution = 0
     markets = deps.find_weather_markets(min_hours_to_resolution=min_hours_to_resolution)
     if "max_hours_since_open" in params:
         markets = [m for m in markets if m["hours_since_open"] < params["max_hours_since_open"]]
     if "min_hours_since_open" in params:
         markets = [m for m in markets if m["hours_since_open"] >= params["min_hours_since_open"]]
+    if "imminent_window_hours" in params:
+        # Upper bound: strictly < imminent_window_hours (not <=) so opening_hunt
+        # owns markets at exactly the boundary (hours_to_resolution == 24).
+        window = float(params["imminent_window_hours"])
+        markets = [
+            m for m in markets
+            if m.get("hours_to_resolution") is not None
+            and 0 < m["hours_to_resolution"] < window
+        ]
     if "max_hours_to_resolution" in params:
         # P4 site 2 of 2 (PLAN_v3 §6.P4 D-A two-clock unification).
         # Flag ON (default post-A6 2026-05-04): replace legacy filter
