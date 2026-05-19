@@ -431,6 +431,10 @@ test_trust_policy:
     tests/test_redeem_dry_run_no_raw_tx_leak.py: {created: "2026-05-19", last_used: "2026-05-19"}
     # PR #213 — codereview-may19 P1-3: settlement_commands.polymarket_end_anchor_source DEFAULT unknown_legacy.
     tests/test_settlement_commands_anchor_source_default.py: {created: "2026-05-19", last_used: "2026-05-19"}
+    # 2026-05-19 kill-switch unblock: reconciler resolves exchange_ghost_order findings when subject disappears from get_open_orders().
+    tests/test_exchange_reconcile_ghost_order_resolve_on_disappear.py: {created: "2026-05-19", last_used: "2026-05-19"}
+    # 2026-05-19 misroute antibody 5th-iter: NegRiskAdapter emits its OWN topic; correct route iff NegRiskAdapter address in receipt.logs.
+    tests/test_misroute_antibody_negrisk_correct_route.py: {created: "2026-05-19", last_used: "2026-05-19"}
 
 categories:
   core_law_antibody:
