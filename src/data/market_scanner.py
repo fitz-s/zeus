@@ -141,6 +141,24 @@ _LOW_METRIC_KEYWORDS = (
 # markets first; putting it second means seen_ids dedup suppresses those instead
 # of suppressing the live tag-84 results. (Polymarket V2 cutover 2026-05-11.)
 TAG_SLUGS = ["weather", "temperature", "daily-temperature"]
+
+# Slug-pattern fallback discovery (2026-05-19 alpha window).
+# Tag-based gamma queries do NOT surface newly-opened weather markets until
+# Polymarket adds the tag — typically a lag of minutes to hours.
+# Direct slug lookup via GET /events?slug=<full-slug> returns live markets
+# immediately after opening. This city list covers the verified-tradeable
+# set confirmed on 2026-05-19; expand as new cities launch.
+SLUG_DISCOVERY_CITIES = [
+    "amsterdam", "denver", "shanghai", "kuala-lumpur", "panama-city",
+    "mexico-city", "jeddah", "london", "new-york-city", "paris", "tokyo",
+    "seoul", "miami", "chicago",
+]
+# Slug prefixes to enumerate per (city, date).
+SLUG_DISCOVERY_PREFIXES = [
+    "highest-temperature-in-{city}-on-{date}",
+    "lowest-temperature-in-{city}-on-{date}",
+]
+
 _ACTIVE_EVENTS_CACHE: list[dict] | None = None
 _ACTIVE_EVENTS_CACHE_AT: float = 0.0  # monotonic timestamp of last fetch
 _ACTIVE_EVENTS_CACHE_AT_UTC: datetime | None = None  # wall-clock of last successful fetch
@@ -1089,7 +1107,102 @@ def _fetch_events_by_tags() -> list[dict]:
 
     if network_errors == len(TAG_SLUGS):
         raise httpx.RequestError(f"All {len(TAG_SLUGS)} tag fetches failed due to network errors")
+
+    # Slug-pattern fallback: pick up newly-opened markets not yet tagged.
+    # seen_ids is passed by reference so slug discovery deduplicates against
+    # tag results without a separate pass.
+    slug_events = _fetch_events_by_slug_pattern(seen_ids, now_utc)
+    all_events.extend(slug_events)
+    if slug_events:
+        logger.info(
+            "slug_pattern fallback added %d new event(s) not found via tags",
+            len(slug_events),
+        )
     return all_events
+
+
+def _fetch_events_by_slug_pattern(
+    seen_ids: set,
+    now_utc: datetime,
+    *,
+    target_dates: list[str] | None = None,
+) -> list[dict]:
+    """Slug-pattern fallback: discover weather markets not yet tagged on Gamma.
+
+    Newly-opened Polymarket weather markets appear on gamma /events?slug=<slug>
+    immediately but may not be reachable via tag queries until Polymarket
+    applies the tag (lag: minutes to hours). This function enumerates
+    (city, date, prefix) tuples and fetches each via direct slug lookup.
+
+    Only events NOT already in ``seen_ids`` (by id or slug) are returned.
+    The CLOB cross-check in ``_event_has_active_children`` is applied so
+    archived markets are rejected even if Gamma reports them as live.
+
+    Args:
+        seen_ids: set of event id/slug strings already collected by
+            ``_fetch_events_by_tags``; used for dedup (mutated in place).
+        now_utc: current UTC datetime for tradeability gate.
+        target_dates: list of "YYYY-MM-DD" strings to enumerate; defaults
+            to today + tomorrow in UTC.
+
+    Returns:
+        list of new event dicts, each tagged with ``_discovery_path="slug_pattern"``.
+    """
+    if target_dates is None:
+        from datetime import date, timedelta
+        today = date.today()
+        target_dates = [
+            today.strftime("%Y-%m-%d"),
+            (today + timedelta(days=1)).strftime("%Y-%m-%d"),
+        ]
+
+    # Convert "YYYY-MM-DD" → "may-20-2026" slug fragment
+    def _date_to_slug_fragment(date_str: str) -> str:
+        from datetime import date as _date
+        d = _date.fromisoformat(date_str)
+        return d.strftime("%B-%-d-%Y").lower()  # "may-20-2026"
+
+    new_events: list[dict] = []
+    for date_str in target_dates:
+        try:
+            slug_date = _date_to_slug_fragment(date_str)
+        except (ValueError, TypeError):
+            logger.warning("slug_pattern: invalid target_date %r, skipping", date_str)
+            continue
+        for city in SLUG_DISCOVERY_CITIES:
+            for prefix_template in SLUG_DISCOVERY_PREFIXES:
+                slug = prefix_template.format(city=city, date=slug_date)
+                try:
+                    resp = _gamma_get("/events", params={"slug": slug}, timeout=10.0, retries=2)
+                except httpx.HTTPError as exc:
+                    logger.debug("slug_pattern fetch failed for %s: %s", slug, exc)
+                    continue
+                if resp.status_code != 200:
+                    logger.debug("slug_pattern %s → HTTP %s", slug, resp.status_code)
+                    continue
+                try:
+                    batch = resp.json()
+                except Exception:
+                    continue
+                if not isinstance(batch, list):
+                    batch = [batch] if isinstance(batch, dict) and batch else []
+                for event in batch:
+                    if not isinstance(event, dict):
+                        continue
+                    event_id = event.get("id") or event.get("slug")
+                    if event_id in seen_ids:
+                        continue
+                    if not _event_has_active_children(event, now_utc):
+                        continue
+                    seen_ids.add(event_id)
+                    event["_discovery_path"] = "slug_pattern"
+                    new_events.append(event)
+                    logger.info(
+                        "slug_pattern: discovered new event slug=%s id=%s",
+                        event.get("slug"),
+                        event.get("id"),
+                    )
+    return new_events
 
 
 def _fetch_events_by_keyword(keyword: str) -> list[dict]:

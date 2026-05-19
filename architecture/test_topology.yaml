@@ -2269,6 +2269,33 @@ test_metadata:
     created: 2026-05-19
     last_reused_or_audited: 2026-05-19
 
+  tests/test_scanner_slug_pattern.py:
+    modules: [data]
+    category: core_law_antibody
+    profile: fix_scanner_slug_pattern_discovery_2026_05_19
+    blocks_commit: true
+    asserted_invariants:
+      - SLUG-PATTERN-DISCOVERS-UNTAGGED-MARKETS
+      - SLUG-PATTERN-GRACEFUL-ON-404-OR-EMPTY
+      - SLUG-PATTERN-DEDUP-AGAINST-TAG-RESULTS
+      - SLUG-PATH-CLOB-ARCHIVED-CROSS-CHECK
+      - SLUG-SEEN-IDS-SHARED-WITH-TAG-PATH
+    source_under_test:
+      - src/data/market_scanner.py
+    law_dependencies:
+      - architecture/invariants.yaml
+    notes: >
+      Antibody for fix/scanner-slug-pattern-discovery (2026-05-19 alpha window).
+      Tag-based gamma queries do not surface newly-opened weather markets until
+      Polymarket applies the tag (minutes-to-hours lag). Direct slug lookup via
+      GET /events?slug=<full-slug> works immediately. Tests cover: discovery
+      of new events (T1), graceful 404/empty (T2), dedup against tag results
+      (T3), CLOB archived cross-check on slug path (T4), shared seen_ids set
+      prevents duplicates (T5). Bare slug returns negRisk parent with all bins
+      in markets:[...] — one request per (city, date).
+    created: 2026-05-19
+    last_reused_or_audited: 2026-05-19
+
   tests/test_settlement_commands_hexbytes_serializer.py:
     modules: [execution, state, venue]
     category: core_law_antibody
