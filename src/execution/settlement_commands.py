@@ -509,6 +509,10 @@ def submit_redeem(
                 "REDEEM_SAFE_VERSION_UNSUPPORTED",
                 "REDEEM_SAFE_OWNER_MISMATCH",
                 "REDEEM_EOA_MATIC_INSUFFICIENT",
+                # Design intent: dry-run routes to OPERATOR_REQUIRED so the
+                # operator reviews the Tenderly trace before clearing to live
+                # broadcast.  This is the intended smoke-gate for first-run
+                # validation, not a transient error state.
                 "REDEEM_DRY_RUN_LOGGED",
             })
             error_code = raw_payload.get("errorCode")
