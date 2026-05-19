@@ -85,19 +85,56 @@ From `preflight/migration_dry_runs.json` (2026-05-17):
 
 **Migration path**: `SINGLE_STEP` (no backfill needed — 0 NULLs).
 
-### Disk Constraint (OPERATOR ACTION REQUIRED)
+### Two Migration Modes (RESOLVED — no disk-freeing required for default path)
+
+The migrate script supports two modes. The disk constraint is resolved at the SCAFFOLD layer:
+
+| Mode | Disk overhead | PRAGMA notnull | Status |
+|------|--------------|----------------|--------|
+| `--mode=trigger` (DEFAULT) | ~0 KB (2 triggers per table) | notnull=0 (column DDL unchanged) | **RECOMMENDED — run now** |
+| `--mode=rebuild` (canonical) | ~50 GiB peak for forecasts.db | notnull=1 | Deferred until operator frees disk |
+
+#### `--mode=trigger` (default, disk-safe) — RECOMMENDED
+
+Adds two `BEFORE INSERT` + `BEFORE UPDATE OF decision_group_id` triggers per table. Each trigger calls `RAISE(ABORT, ...)` on NULL. DB-layer enforcement. Validated live in `test_calibration_pairs_v2_migration.py::test_trigger_mode_blocks_null_insert_on_synthetic_fixture`.
+
+```sql
+-- Per table (forecasts.db::calibration_pairs_v2 and world.db::calibration_pairs_v2_archived_2026_05_11):
+CREATE TRIGGER {table}_dgid_not_null_ins
+BEFORE INSERT ON {table}
+WHEN NEW.decision_group_id IS NULL
+BEGIN SELECT RAISE(ABORT, 'NOT NULL: {table}.decision_group_id'); END;
+
+CREATE TRIGGER {table}_dgid_not_null_upd
+BEFORE UPDATE OF decision_group_id ON {table}
+WHEN NEW.decision_group_id IS NULL
+BEGIN SELECT RAISE(ABORT, 'NOT NULL: {table}.decision_group_id'); END;
+```
+
+Trade-offs:
+- PRO: Zero disk overhead. Immediate (~ms). Reversible via `DROP TRIGGER`. DB-layer enforcement.
+- CON: `PRAGMA table_info` still shows `notnull=0` (column DDL unchanged). Per-row μs overhead on INSERT/UPDATE (immeasurable at scale).
+
+#### `--mode=rebuild` (canonical NOT NULL) — deferred
+
+Requires ~50 GiB free. Uses CREATE TABLE_new + INSERT + DROP + RENAME under per-DB SAVEPOINT. Produces `notnull=1` in PRAGMA. Run this after operator frees disk if the "pure" NOT NULL column is preferred.
+
+```
+Usage:
+    python scripts/migrate_calibration_pairs_v2_not_null.py \
+        --apply --mode rebuild --require-free-disk-gib 55 --table forecasts
+```
+
+#### Disk State (for reference)
 
 | Resource | Value |
 |----------|-------|
 | `zeus-forecasts.db` size | ~49 GiB |
 | `zeus-world.db` size | ~39 GiB |
-| Peak disk needed (rebuild) | ~50 GiB (new table = full copy) |
-| Free disk at audit (2026-05-17) | **~22 GiB** |
-| **Shortfall** | **~28 GiB** |
-
-**Operator must free ~30+ GiB before running `migrate_calibration_pairs_v2_not_null.py --apply`.**
-
-The migrate script will enforce `--require-free-disk-gib 55` (default) and refuse to execute with insufficient headroom.
+| Peak disk needed (rebuild mode) | ~50 GiB for forecasts.db rebuild |
+| Free disk at audit (2026-05-17) | ~22 GiB |
+| **Disk constraint for trigger-mode** | **NONE — trigger-mode runs immediately** |
+| Disk constraint for rebuild-mode | ~30+ GiB must be freed by operator |
 
 ---
 

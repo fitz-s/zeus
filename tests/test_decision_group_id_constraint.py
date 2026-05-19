@@ -23,6 +23,30 @@ Test plan:
 
 import pytest
 
+from src.contracts.decision_group_id import decision_group_id_v1_hash
+
+
+def test_decision_group_id_v1_hash_raises_value_error_on_empty_market_id():
+    """LIVE: empty market_id raises ValueError — input validation contract is pinned.
+
+    This test is NOT xfail. The ValueError guard is live even in SCAFFOLD phase
+    because it is pure input validation with no dependency on the hash implementation.
+    """
+    with pytest.raises(ValueError, match="market_id"):
+        decision_group_id_v1_hash(market_id="", bin_index=0, lead_days_bucket=1)
+
+
+def test_decision_group_id_v1_hash_raises_value_error_on_negative_bin_index():
+    """LIVE: negative bin_index raises ValueError."""
+    with pytest.raises(ValueError, match="bin_index"):
+        decision_group_id_v1_hash(market_id="0xabc", bin_index=-1, lead_days_bucket=1)
+
+
+def test_decision_group_id_v1_hash_raises_value_error_on_zero_lead_days():
+    """LIVE: lead_days_bucket <= 0 raises ValueError."""
+    with pytest.raises(ValueError, match="lead_days_bucket"):
+        decision_group_id_v1_hash(market_id="0xabc", bin_index=0, lead_days_bucket=0)
+
 
 @pytest.mark.xfail(strict=False, reason="SCAFFOLD: NOT NULL constraint not yet applied")
 def test_not_null_constraint_rejects_null_decision_group_id():

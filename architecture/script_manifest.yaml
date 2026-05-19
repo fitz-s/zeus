@@ -676,7 +676,7 @@ scripts:
     target_db: "state/zeus-forecasts.db (also state/zeus-world.db for archived table)"
     read_targets: [state/zeus-forecasts.db, state/zeus-world.db]
     write_targets: [state/zeus-forecasts.db, state/zeus-world.db]
-    unguarded_write_rationale: "NOT NULL rebuild on calibration_pairs_v2 (91M rows, forecasts.db) and calibration_pairs_v2_archived_2026_05_11 (53M rows, world.db). Uses SQLite rebuild pattern (CREATE new + INSERT + DROP old + RENAME) under SAVEPOINT. Requires --apply to execute. Requires --require-free-disk-gib guard (default 55 GiB); 22 GiB free as of 2026-05-17 preflight — operator must free disk first."
+    unguarded_write_rationale: "Two modes: --mode=trigger (default, disk-safe): adds BEFORE INSERT + BEFORE UPDATE OF decision_group_id triggers per table, zero disk overhead, RECOMMENDED at 22 GiB free. --mode=rebuild (canonical): CREATE new + INSERT + DROP + RENAME under per-DB SAVEPOINT, requires ~50 GiB headroom. Both modes are per-DB sequential (forecasts.db then world.db), NOT cross-DB ATTACH. Requires --apply; --mode=rebuild also requires --require-free-disk-gib guard."
     promotion_barrier: "Schema migration is permanent; rollback via rollback_calibration_pairs_v2_not_null.py only if SAVEPOINT failed to self-recover."
     required_helpers: ["scripts/audit_calibration_pairs_v2_null_groups.py"]
     required_tests: [tests/test_calibration_pairs_v2_migration.py, tests/test_decision_group_id_constraint.py]

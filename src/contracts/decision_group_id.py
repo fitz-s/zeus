@@ -71,9 +71,18 @@ def decision_group_id_v1_hash(
     Raises:
         ValueError: if any argument is outside its valid domain.
 
-    SCAFFOLD: raise NotImplementedError pending PR 4 implementation phase.
+    SCAFFOLD: hash body raises NotImplementedError pending PR 4 implementation phase.
+    Input validation guards are live — they pin the ValueError contract now.
     """
-    # Implementation deferred — SCAFFOLD only.
+    # Input validation — LIVE. These guards are permanent API contracts.
+    if not market_id:
+        raise ValueError("market_id must be a non-empty string")
+    if bin_index < 0:
+        raise ValueError(f"bin_index must be >= 0, got {bin_index!r}")
+    if lead_days_bucket <= 0:
+        raise ValueError(f"lead_days_bucket must be > 0, got {lead_days_bucket!r}")
+
+    # Hash implementation deferred — SCAFFOLD only.
     raise NotImplementedError(
         "decision_group_id_v1_hash: implementation deferred to PR 4 production phase"
     )

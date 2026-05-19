@@ -8055,9 +8055,9 @@ digest_profiles:
       - "architecture/script_manifest.yaml"
     required_law:
       - "DecisionGroupId is a NewType guard; raw str must never be passed where DecisionGroupId is required."
-      - "SQLite NOT NULL migration on calibration_pairs_v2 (91M rows) requires rebuild pattern with --require-free-disk-gib guard."
+      - "NOT NULL on calibration_pairs_v2.decision_group_id has two migration modes: (a) --mode=trigger (default, disk-safe): adds two SQLite triggers per table (BEFORE INSERT + BEFORE UPDATE OF decision_group_id) that RAISE(ABORT) on NULL; zero disk overhead; RECOMMENDED when free disk < 50 GiB. (b) --mode=rebuild (canonical): CREATE TABLE_new with TEXT NOT NULL + INSERT + DROP + RENAME under SAVEPOINT; requires ~50 GiB headroom. These are INDEPENDENT per-DB operations, NOT cross-DB."
       - "P_CLAMP_LOW=0.01 is operator-approved deviation from spec eps=1e-6 (§14.9); INV-eps-spec-conformance CI test enforces drift detection."
-      - "Cross-DB writes (forecasts.db + world.db) must use INV-37 ATTACH+SAVEPOINT pattern."
+      - "INV-37 ATTACH+SAVEPOINT governs RUNTIME cross-DB writes (e.g., get_forecasts_connection_with_world() in the calibration pipeline). Migration scripts are NOT cross-DB; they operate on one DB at a time (forecasts.db then world.db sequentially) using per-DB SAVEPOINT, not ATTACH."
       - "Migration scripts must default dry_run=True and require explicit --apply flag."
     allowed_files:
       - "src/contracts/decision_group_id.py"
