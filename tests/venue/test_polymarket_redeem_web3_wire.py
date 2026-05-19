@@ -621,6 +621,24 @@ def test_safe_tx_hash_pinned_against_reference(monkeypatch):
         "the reference hash — the assertion does not catch a typehash mutation"
     )
 
+    # ── Meta-verify: break DOMAIN_SEPARATOR_TYPEHASH → hash must differ ──────
+    monkeypatch.setattr(_safe_exec, "SAFE_TX_TYPEHASH", _safe_exec.SAFE_TX_TYPEHASH)  # restore
+    broken_domain_typehash = bytes(32)  # all-zeros
+    monkeypatch.setattr(_safe_exec, "DOMAIN_SEPARATOR_TYPEHASH", broken_domain_typehash)
+    broken_domain_result = build_safe_tx_hash(
+        safe_address=_REF_SAFE_ADDRESS,
+        chain_id=_REF_CHAIN_ID,
+        to=_REF_TO,
+        value=0,
+        data=b"",
+        operation=0,
+        nonce=0,
+    )
+    assert "0x" + broken_domain_result.hex() != _REF_SAFE_TX_HASH, (
+        "ANTIBODY META-VERIFY FAILED: zeroed DOMAIN_SEPARATOR_TYPEHASH still "
+        "produces the reference hash — the domain separator mutation is not detected"
+    )
+
 
 def test_safe_branch_engaged_only_when_signature_type_2_and_eoa_differs(monkeypatch):
     """Routing logic: three cases.
@@ -671,8 +689,10 @@ def test_safe_branch_engaged_only_when_signature_type_2_and_eoa_differs(monkeypa
         signature_type=2,
     )
     r2_mismatch = adapter2_mismatch.redeem(_TEST_CONDITION_ID, index_sets=[2])
-    # Should have hit the Safe wrap and failed on VERSION() call
-    assert r2_mismatch["errorCode"] == "REDEEM_SAFE_VERSION_UNSUPPORTED", r2_mismatch
+    # Safe wrap engaged; VERSION() RPC failed → REDEEM_RPC_PRECHECK_FAILED
+    # (not REDEEM_SAFE_VERSION_UNSUPPORTED which is reserved for a decoded
+    # version string that doesn't match 1.3.0 — see SEV-3 fix).
+    assert r2_mismatch["errorCode"] == "REDEEM_RPC_PRECHECK_FAILED", r2_mismatch
     rpc_version_fail.assert_called_once()
 
 
@@ -877,3 +897,83 @@ def test_operator_review_errorcodes_set_equals_adapter_enumerated_codes(monkeypa
             f"errorCode {code!r} should route to REDEEM_OPERATOR_REQUIRED, got {row['state']!r}"
         )
         conn.close()
+
+
+def test_safe_branch_aborts_when_chain_id_not_polygon(monkeypatch):
+    """SEV-1 antibody: chain_id guard fires BEFORE Safe branch routing.
+
+    With signature_type=2 and a mismatched funder (Safe deployment scenario),
+    a non-137 chain_id must return REDEEM_WRONG_CHAIN without making any RPC
+    calls.  Prior to the fix the chain guard sat below the Safe branch dispatch,
+    so a wrong-chain adapter could enter _redeem_via_safe and begin preflights.
+    """
+    monkeypatch.setenv(AUTONOMOUS_REDEEM_ENABLED_ENV, "1")
+
+    rpc_no_call = MagicMock(side_effect=AssertionError("RPC must not be called on wrong chain"))
+    adapter = PolymarketV2Adapter(
+        funder_address=_TEST_MISMATCHED_FUNDER,
+        signer_key=_TEST_PRIVATE_KEY,
+        chain_id=1,  # Ethereum mainnet — wrong
+        polygon_rpc_url=_TEST_RPC_URL,
+        rpc_call=rpc_no_call,
+        q1_egress_evidence_path=None,
+        client_factory=lambda **kwargs: MagicMock(name="ClobClient"),
+        signature_type=2,  # Safe deployment — would enter _redeem_via_safe pre-fix
+    )
+
+    result = adapter.redeem(_TEST_CONDITION_ID, index_sets=[2])
+
+    assert result["success"] is False
+    assert result["errorCode"] == "REDEEM_WRONG_CHAIN", result
+    rpc_no_call.assert_not_called()
+
+
+def test_rpc_timeout_distinguished_from_version_mismatch(monkeypatch):
+    """SEV-3 antibody: RPC failure on VERSION() must return REDEEM_RPC_PRECHECK_FAILED,
+    not REDEEM_SAFE_VERSION_UNSUPPORTED.
+
+    A network blip or RPC node error on the VERSION() eth_call must not quarantine
+    a healthy Safe as having an unsupported version.
+    """
+    monkeypatch.setenv(AUTONOMOUS_REDEEM_ENABLED_ENV, "1")
+
+    # Simulate RPC failure (timeout, network error, etc.)
+    rpc = MagicMock(side_effect=RuntimeError("connection timeout"))
+    adapter = _make_safe_adapter(rpc)
+    result = adapter.redeem(_TEST_CONDITION_ID, index_sets=[2])
+
+    assert result["success"] is False
+    assert result["errorCode"] == "REDEEM_RPC_PRECHECK_FAILED", (
+        f"RPC failure must map to REDEEM_RPC_PRECHECK_FAILED, not "
+        f"REDEEM_SAFE_VERSION_UNSUPPORTED; got {result['errorCode']!r}"
+    )
+
+    # Semantic mismatch (decoded version != 1.3.0) must still produce the
+    # semantic code — the RPC itself succeeds but the version is wrong.
+    rpc2 = MagicMock(return_value=_abi_encode_string("1.4.1"))
+    adapter2 = _make_safe_adapter(rpc2)
+    result2 = adapter2.redeem(_TEST_CONDITION_ID, index_sets=[2])
+
+    assert result2["success"] is False
+    assert result2["errorCode"] == "REDEEM_SAFE_VERSION_UNSUPPORTED", (
+        f"Semantic version mismatch must map to REDEEM_SAFE_VERSION_UNSUPPORTED; "
+        f"got {result2['errorCode']!r}"
+    )
+
+
+def test_safe_sign_against_pinned_eth_account_version(monkeypatch):
+    """SEV-2 antibody: sign_safe_tx must use the public unsafe_sign_hash API and
+    produce a valid 65-byte signature for a known input.
+
+    eth_account==0.13.7 is pinned in requirements.txt.  This test catches any
+    API rename that would cause a silent AttributeError at signing time.
+    """
+    from src.venue.safe_exec import sign_safe_tx
+
+    test_hash = bytes.fromhex("7cabb3e5b9d5fd12a38408cb16feefd041cb8cb8cfeb4dd465397af08e0f2ec6")
+    sig = sign_safe_tx(test_hash, _TEST_PRIVATE_KEY)
+
+    assert isinstance(sig, bytes), f"Expected bytes, got {type(sig)}"
+    assert len(sig) == 65, f"Expected 65-byte signature, got {len(sig)}"
+    # v byte must be 27 or 28 (Safe EOA ECDSA convention)
+    assert sig[64] in (27, 28), f"Expected v in (27, 28), got {sig[64]}"

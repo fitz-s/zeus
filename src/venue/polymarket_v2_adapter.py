@@ -806,12 +806,23 @@ class PolymarketV2Adapter:
                 "condition_id": condition_id,
             }
 
-        # Fail-closed safety: the raw tx sender is the EOA derived from
-        # signer_key, not the proxy/Safe at funder_address.  If they differ
-        # (Zeus default: funder is a POLY_GNOSIS_SAFE, signature_type=2) then
-        # autonomous redeem cannot succeed — broadcasting would spend EOA gas
-        # without accessing the Safe's CTF positions.  Also guard the chain_id
-        # so Polygon-specific calldata is never broadcast on another network.
+        # Fail-closed: Polygon-specific calldata must never be broadcast on
+        # another network.  Check chain_id BEFORE any path routing so the
+        # Safe branch cannot bypass this guard.
+        if int(self.chain_id) != 137:
+            return {
+                "success": False,
+                "errorCode": "REDEEM_WRONG_CHAIN",
+                "errorMessage": (
+                    f"autonomous redeem only supported on Polygon mainnet (chain_id=137); "
+                    f"configured chain_id={self.chain_id}"
+                ),
+                "condition_id": condition_id,
+            }
+
+        # Derive the EOA that will sign/broadcast.  For the Safe wrap path
+        # (signature_type==2, EOA != funder) this is the signer EOA, not the
+        # Safe address.  Any other EOA/funder mismatch is a hard config error.
         try:
             from eth_account import Account as _Account
 
@@ -841,16 +852,6 @@ class PolymarketV2Adapter:
                 "errorMessage": (
                     f"signer EOA {signer_eoa} != funder_address {self.funder_address}; "
                     "autonomous redeem requires an EOA funder when signature_type != 2"
-                ),
-                "condition_id": condition_id,
-            }
-        if int(self.chain_id) != 137:
-            return {
-                "success": False,
-                "errorCode": "REDEEM_WRONG_CHAIN",
-                "errorMessage": (
-                    f"autonomous redeem only supported on Polygon mainnet (chain_id=137); "
-                    f"configured chain_id={self.chain_id}"
                 ),
                 "condition_id": condition_id,
             }
@@ -1027,9 +1028,12 @@ class PolymarketV2Adapter:
                 ["string"], bytes.fromhex(str(raw_version).removeprefix("0x"))
             )[0]
         except Exception as exc:
+            # RPC/network failure or ABI-decode error — NOT a semantic version
+            # mismatch.  Use REDEEM_RPC_PRECHECK_FAILED so a network blip does
+            # not quarantine a healthy Safe as "unsupported version".
             return {
                 "success": False,
-                "errorCode": "REDEEM_SAFE_VERSION_UNSUPPORTED",
+                "errorCode": "REDEEM_RPC_PRECHECK_FAILED",
                 "errorMessage": f"VERSION() eth_call failed: {exc}",
                 "condition_id": condition_id,
             }
@@ -1057,9 +1061,10 @@ class PolymarketV2Adapter:
                 ["address[]"], bytes.fromhex(str(raw_owners).removeprefix("0x"))
             )[0]
         except Exception as exc:
+            # RPC failure — not a semantic ownership mismatch.
             return {
                 "success": False,
-                "errorCode": "REDEEM_SAFE_OWNER_MISMATCH",
+                "errorCode": "REDEEM_RPC_PRECHECK_FAILED",
                 "errorMessage": f"getOwners() eth_call failed: {exc}",
                 "condition_id": condition_id,
             }
@@ -1102,9 +1107,10 @@ class PolymarketV2Adapter:
             )
             eoa_balance_wei = int(str(raw_balance), 16)
         except Exception as exc:
+            # RPC failure — not a semantic balance-too-low result.
             return {
                 "success": False,
-                "errorCode": "REDEEM_EOA_MATIC_INSUFFICIENT",
+                "errorCode": "REDEEM_RPC_PRECHECK_FAILED",
                 "errorMessage": f"eth_getBalance failed for signer EOA: {exc}",
                 "condition_id": condition_id,
             }
