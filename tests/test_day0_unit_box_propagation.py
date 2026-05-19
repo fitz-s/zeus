@@ -1,8 +1,6 @@
-# Created: 2026-05-19
-# Last reused or audited: 2026-05-19
-# Authority basis: docs/operations/task_2026-05-17_strategy_vnext_phase0/PHASE_0_V4_ULTRAPLAN.md §D.3 (Phase 0 PR 5)
-# Production code implemented in PR 5 (2026-05-19). All tests live.
-# See docs/operations/task_2026-05-17_strategy_vnext_phase0/scaffolds/pr5_scaffold_report.md
+# Lifecycle: created=2026-05-19; last_reviewed=2026-05-19; last_reused=2026-05-19
+# Purpose: validate CelsiusBox/FahrenheitBox seam at Day0 ingest (bare-float raises)
+# Reuse: re-audit when IngestAdapter or unit-box contract changes
 """R-5.3: IngestAdapter + CelsiusBox / FahrenheitBox propagation boundary tests.
 
 Exercises the IngestAdapter seam (src/contracts/day0_observation_context.py).

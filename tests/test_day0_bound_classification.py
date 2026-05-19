@@ -1,8 +1,6 @@
-# Created: 2026-05-19
-# Last reused or audited: 2026-05-19
-# Authority basis: docs/operations/task_2026-05-17_strategy_vnext_phase0/PHASE_0_V4_ULTRAPLAN.md §D.3 (Phase 0 PR 5)
-# Production code implemented in PR 5 (2026-05-19). All tests live.
-# See docs/operations/task_2026-05-17_strategy_vnext_phase0/scaffolds/pr5_scaffold_report.md
+# Lifecycle: created=2026-05-19; last_reviewed=2026-05-19; last_reused=2026-05-19
+# Purpose: validate BoundClassification enum + 12-cell classify_bound property matrix + ValueError fail-closed contract
+# Reuse: re-audit when day0_observation_context.py classify_bound or BoundClassification enum changes
 """R-5.1: BoundClassification enum exhaustiveness + 12-cell property matrix.
 
 12-cell matrix: 3 BoundClassification values × 4 dayparts

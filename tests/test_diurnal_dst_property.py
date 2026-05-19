@@ -1,8 +1,6 @@
-# Created: 2026-05-19
-# Last reused or audited: 2026-05-19
-# Authority basis: docs/operations/task_2026-05-17_strategy_vnext_phase0/PHASE_0_V4_ULTRAPLAN.md §D.3 (Phase 0 PR 5)
-# Production code implemented in PR 5 (2026-05-19). All tests live.
-# See docs/operations/task_2026-05-17_strategy_vnext_phase0/scaffolds/pr5_scaffold_report.md
+# Lifecycle: created=2026-05-19; last_reviewed=2026-05-19; last_reused=2026-05-19
+# Purpose: validate DST archetype handling (London 2026-03-29 spring-forward, Sydney 2025-10-05, NYC 2026-11-01 fall-back)
+# Reuse: re-audit when diurnal.py or solar.py timezone handling changes
 """R-5.2: DST property tests for build_day0_temporal_context.
 
 Three DST archetypes:
