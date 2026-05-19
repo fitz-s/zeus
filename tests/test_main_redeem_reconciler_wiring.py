@@ -203,7 +203,7 @@ def test_reconciler_cycle_drives_negrisk_misroute_to_operator_required(
         def eth(self):
             return fake_eth
 
-    import web3 as _web3_mod
+    _web3_mod = pytest.importorskip("web3")
     monkeypatch.setattr(_web3_mod, "Web3", FakeWeb3)
 
     # Patch _write_scheduler_health to suppress filesystem side-effects
