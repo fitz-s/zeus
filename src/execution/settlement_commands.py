@@ -1309,6 +1309,7 @@ def _confirmation_count(web3: Any, block_number: int | None) -> int:
 # the legacy stub from the pre-PR-#183 era.
 _AUTONOMOUS_RETRY_ERRORCODES_ALWAYS: frozenset[str] = frozenset({
     "REDEEM_DEFERRED_TO_R1",
+    "REDEEM_NEGRISK_MISROUTED",   # PR-208: antibody-reset cases auto-retry via NegRiskAdapter
 })
 
 # Error codes that require DRY_RUN to be OFF before retry. REDEEM_DRY_RUN_LOGGED
@@ -1333,7 +1334,11 @@ def reseat_stub_deferred_rows_for_autonomous_retry(conn: sqlite3.Connection) -> 
     auto-retry-eligible back to REDEEM_RETRYING so the submitter picks them
     up. Two-tier allowlist:
       * _AUTONOMOUS_RETRY_ERRORCODES_ALWAYS — retry whenever autonomous mode
-        is ON (legacy stubs that never produced a real tx).
+        is ON (legacy stubs that never produced a real tx). Includes:
+        - REDEEM_DEFERRED_TO_R1: legacy stub-era, no tx ever submitted.
+        - REDEEM_NEGRISK_MISROUTED (PR-208): antibody in reconcile_pending_redeems
+          resets misrouted negRisk redemptions here; reseat → submitter re-routes
+          through NegRiskAdapter on the next cycle. Anchor: Karachi c8c220f5.
       * _AUTONOMOUS_RETRY_ERRORCODES_REQUIRE_LIVE — retry only when DRY_RUN is
         OFF (DRY_RUN_LOGGED would otherwise infinite-loop through the dry-run
         branch and defeat the operator smoke gate).

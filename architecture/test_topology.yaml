@@ -423,6 +423,8 @@ test_trust_policy:
     tests/test_antibody_lookup_fallback.py: {created: "2026-05-19", last_used: "2026-05-19"}
     # phase1-codehash-drift-antibody — runtime CI antibody: fail-closed on internal_resolver upgrade (2026-05-19).
     tests/test_inv_codehash_drift_detection.py: {created: "2026-05-19", last_used: "2026-05-19"}
+    # PR-209 — 5th-iter Karachi: REDEEM_NEGRISK_MISROUTED added to autonomous retry allowlist.
+    tests/test_reseat_negrisk_misrouted_allowlist.py: {created: "2026-05-19", last_used: "2026-05-19"}
 
 categories:
   core_law_antibody:
@@ -650,6 +652,8 @@ categories:
     - tests/test_antibody_lookup_fallback.py
     # phase1-codehash-drift-antibody — runtime CI antibody: fail-closed on internal_resolver upgrade (2026-05-19).
     - tests/test_inv_codehash_drift_detection.py
+    # PR-209 — 5th-iter Karachi: REDEEM_NEGRISK_MISROUTED added to autonomous retry allowlist.
+    - tests/test_reseat_negrisk_misrouted_allowlist.py
 
   useful_regression:
     - tests/test_alpha_target_coherence.py
@@ -2246,6 +2250,28 @@ test_metadata:
       Four contracts: C1 primary (Karachi case), C2 negative control (standard CTF ok),
       C3 positive control (negRisk correct adapter ok), C4 fail-safe (missing world DB).
       Sed-flip verified 2026-05-19: disabling guard causes C1 → RED.
+    created: 2026-05-19
+    last_reused_or_audited: 2026-05-19
+
+  tests/test_reseat_negrisk_misrouted_allowlist.py:
+    modules: [execution, state]
+    category: core_law_antibody
+    profile: pr208_reseat_negrisk_misrouted_allowlist
+    blocks_commit: true
+    asserted_invariants:
+      - REDEEM-NEGRISK-MISROUTED-AUTONOMOUS-RETRY
+    source_under_test:
+      - src/execution/settlement_commands.py
+    law_dependencies:
+      - docs/invariants.md
+    notes: >
+      Antibody for PR-208 5th-iter Karachi fix: adds REDEEM_NEGRISK_MISROUTED to
+      _AUTONOMOUS_RETRY_ERRORCODES_ALWAYS so reseat_stub_deferred_rows_for_autonomous_retry
+      promotes rows back to REDEEM_RETRYING. Without this, PR-207 antibody correctly
+      parks Karachi in OPERATOR_REQUIRED but the submitter never retries via NegRiskAdapter.
+      Five contracts: T1 primary promotion, T2 env-gate blocks, T3 allowlist closed,
+      T4 sed-flip (allowlist membership assertion), T5 end-to-end Karachi-pattern seed.
+      Sed-flip: removing REDEEM_NEGRISK_MISROUTED from allowlist → T1 and T5 → RED.
     created: 2026-05-19
     last_reused_or_audited: 2026-05-19
 
