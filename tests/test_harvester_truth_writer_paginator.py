@@ -170,3 +170,37 @@ def test_dedup_by_condition_id():
 
     matching = [r for r in results if r.get("conditionId") == shared_id]
     assert len(matching) == 1, f"Expected 1 deduped event with conditionId={shared_id}, got {len(matching)}"
+
+
+# ---------------------------------------------------------------------------
+# Test 5: Future-endDate events skipped (negRisk semantic 2026-05-19)
+# ---------------------------------------------------------------------------
+def test_harvester_truth_writer_skips_future_enddate():
+    """closed=true events with endDate still in the future must be dropped.
+
+    Polymarket negRisk semantic: event.closed=True can appear on unsettled
+    multi-outcome events. Writing truth for an unsettled market produces
+    phantom outcomes (verified 2026-05-19). The post-fetch filter must
+    drop any event whose endDate > now_utc.
+    """
+    from src.ingest.harvester_truth_writer import _fetch_open_settling_markets
+
+    future_end = (datetime.now(timezone.utc) + timedelta(days=4)).isoformat()
+    past_end = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+
+    future_event = {"conditionId": "future-cid", "endDate": future_end, "markets": []}
+    past_event = {"conditionId": "past-cid", "endDate": past_end, "markets": []}
+
+    def fake_get(url, *, params, timeout):
+        return FakeResponse([future_event, past_event])
+
+    with patch("httpx.get", side_effect=fake_get):
+        with patch("src.data.market_scanner.GAMMA_BASE", "http://test"):
+            results = _fetch_open_settling_markets()
+
+    ids = [r.get("conditionId") for r in results]
+    assert "future-cid" not in ids, (
+        "Regression: future-endDate event was NOT filtered. "
+        "negRisk closed=true unsettled event would produce phantom truth."
+    )
+    assert "past-cid" in ids, "past-cid (settled) must be kept"
