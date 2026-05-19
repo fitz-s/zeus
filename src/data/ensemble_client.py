@@ -261,10 +261,17 @@ def _fetch_registered_ingest_ensemble(
             return _clone_result(cached)
 
     lead_hours = tuple(range(0, max(1, int(forecast_days)) * 24))
+    # Thread temperature_metric to the ingest class constructor so metric-aware
+    # ingest classes (e.g. ECMWFOpenDataIngest) can query only the requested
+    # metric without cross-metric coupling (PIPELINE_REVIEW.md §7).
+    # Fall back through progressively fewer kwargs for classes that don't accept them.
     try:
-        ingest = ingest_class(city=city)
+        ingest = ingest_class(city=city, temperature_metric=temperature_metric)
     except TypeError:
-        ingest = ingest_class()
+        try:
+            ingest = ingest_class(city=city)
+        except TypeError:
+            ingest = ingest_class()
     bundle = ingest.fetch(fetch_time, lead_hours)
     parsed = _parse_ingest_bundle(
         bundle, model=model, fetch_time=fetch_time, role=role,
