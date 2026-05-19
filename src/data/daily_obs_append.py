@@ -90,7 +90,7 @@ from src.state.data_coverage import (
     record_written,
 )
 from src.types.observation_atom import ObservationAtom
-from src.types.temperature import Celsius
+from src.types.temperature import Celsius, CelsiusBox
 
 logger = logging.getLogger(__name__)
 
@@ -399,8 +399,8 @@ def _accumulate_hko_reading(conn) -> bool:
         return False
 
     try:
-        # F3 PR 2/3: HKO API is always native °C. Tag at parse boundary.
-        temp_c = Celsius(float(hko_reading))
+        # F3 PR 4: CelsiusBox as unit witness; .value extracted for SQL compat.
+        temp_c = Celsius(CelsiusBox(float(hko_reading)).value)
     except (TypeError, ValueError):
         logger.warning("HKO rhrread: non-numeric temperature value: %r", hko_reading)
         return False
