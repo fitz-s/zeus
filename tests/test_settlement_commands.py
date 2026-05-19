@@ -36,7 +36,7 @@ class FakeRedeemAdapter:
         self.exc = exc
         self.calls = []
 
-    def redeem(self, condition_id: str, *, index_sets=None):
+    def redeem(self, condition_id: str, *, index_sets=None, **_ignored):
         # PR-I.5.c: caller now passes index_sets kw — mock accepts and records.
         self.calls.append((condition_id, list(index_sets) if index_sets else None))
         if self.exc is not None:
@@ -151,7 +151,7 @@ def test_redeem_submitted_persists_execution_capability_before_adapter_contact(c
         def __init__(self) -> None:
             self.calls = []
 
-        def redeem(self, condition_id: str, *, index_sets=None):
+        def redeem(self, condition_id: str, *, index_sets=None, **_ignored):
             row = conn.execute(
                 """
                 SELECT payload_json

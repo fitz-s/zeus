@@ -51,7 +51,7 @@ def test_redeem_submitter_adapter_has_credentials_in_live_mode(monkeypatch):
         def __init__(self, **kwargs):
             captured["kwargs"] = kwargs
 
-        def redeem(self, condition_id, *, index_sets=None):  # pragma: no cover - not exercised here
+        def redeem(self, condition_id, *, index_sets=None, **_ignored):  # pragma: no cover - not exercised here
             return {"success": False, "errorCode": "STUB"}
 
     # No submittable rows → cycle exits after row-fetch but AFTER the adapter
