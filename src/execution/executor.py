@@ -52,6 +52,13 @@ MODE_TIMEOUTS = {
     "opening_hunt": 4 * 3600,
     "update_reaction": 1 * 3600,
     "day0_capture": 15 * 60,
+    # imminent_open_capture: mirrors day0_capture (0-24h window, fast-resolve).
+    # Scheduler registers this mode in main.py but cycle_runtime._mode_timeout_seconds
+    # raised "Unknown execution mode" before this entry existed — every candidate
+    # found by the imminent mode died at the execute_intent boundary. This was
+    # the dominant root cause of 0 entry orders submitted during the 2026-05-19
+    # alpha-loss session. Authority: operator code-review-may19 P1-1.
+    "imminent_open_capture": 15 * 60,
 }
 
 
