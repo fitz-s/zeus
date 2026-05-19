@@ -2463,6 +2463,80 @@ def test_redeem_confirmed_settled_token_still_at_exchange_is_position_drift(conn
     assert '"expected_wallet_size":"0"' in evidence
 
 
+@pytest.mark.parametrize("settlement_state", ["REDEEM_FAILED", "REDEEM_REVIEW_REQUIRED"])
+def test_terminal_non_pending_redeem_state_does_not_mask_position_drift(conn, settlement_state):
+    from src.execution.exchange_reconcile import run_reconcile_sweep
+
+    token = f"{settlement_state.lower()}-exchange-positive-token"
+    seed_command(
+        conn,
+        command_id=f"cmd-{settlement_state.lower()}",
+        venue_order_id=f"ord-{settlement_state.lower()}",
+        position_id=f"pos-{settlement_state.lower()}",
+        token_id=token,
+        state="FILLED",
+    )
+    append_trade_fact(
+        conn,
+        command_id=f"cmd-{settlement_state.lower()}",
+        venue_order_id=f"ord-{settlement_state.lower()}",
+        token_id=token,
+        trade_id=f"trade-{settlement_state.lower()}",
+        size="1.5873",
+        state="CONFIRMED",
+    )
+    seed_position_baseline(
+        conn,
+        position_id=f"pos-{settlement_state.lower()}",
+        order_id=f"ord-{settlement_state.lower()}",
+    )
+    conn.execute(
+        """
+        UPDATE position_current
+           SET phase = 'settled',
+               token_id = ?,
+               condition_id = 'condition-m5',
+               market_id = 'condition-m5',
+               shares = 1.5873,
+               updated_at = ?
+         WHERE position_id = ?
+        """,
+        (token, NOW.isoformat(), f"pos-{settlement_state.lower()}"),
+    )
+    conn.execute(
+        """
+        INSERT INTO settlement_commands (
+            command_id, state, condition_id, market_id, payout_asset,
+            pusd_amount_micro, token_amounts_json, requested_at,
+            terminal_at, winning_index_set
+        ) VALUES (?, ?, 'condition-m5', 'condition-m5', 'pUSD',
+                  1587297, ?, ?, ?, ?)
+        """,
+        (
+            f"redeem-{settlement_state.lower()}",
+            settlement_state,
+            json.dumps({token: 1.5873}, separators=(",", ":")),
+            NOW.isoformat(),
+            NOW.isoformat(),
+            json.dumps(["2"]),
+        ),
+    )
+
+    result = run_reconcile_sweep(
+        FakeM5Adapter(positions=[position(token_id=token, size="1.5873")]),
+        conn,
+        context="ws_gap",
+        observed_at=NOW + timedelta(minutes=10),
+    )
+
+    position_findings = [finding for finding in result if finding.kind == "position_drift"]
+    assert [finding.subject_id for finding in position_findings] == [token]
+    evidence = position_findings[0].evidence_json
+    assert '"exchange_size":"1.5873"' in evidence
+    assert '"settlement_command_token_size":"0"' in evidence
+    assert '"expected_wallet_size":"0"' in evidence
+
+
 def test_backoff_exhausted_chain_absent_pending_exit_admin_closes_canonical(conn):
     from src.execution.exit_lifecycle import handle_exit_pending_missing
     from src.state.portfolio import PortfolioState, Position

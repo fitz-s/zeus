@@ -69,7 +69,15 @@ _ENTRY_FILL_PROJECTION_PHASES = frozenset({"pending_entry", "active", "day0_wind
 _EXIT_FILL_PROJECTION_PHASES = frozenset({"active", "day0_window", "pending_exit", "economically_closed"})
 _TERMINAL_ORDER_FACT_STATES = frozenset({"MATCHED", "CANCEL_CONFIRMED", "EXPIRED", "VENUE_WIPED"})
 _PENDING_EXIT_NON_CURRENT_ORDER_STATUSES = frozenset({"filled", "sell_filled"})
-_REDEEM_CONFIRMED_STATE = "REDEEM_CONFIRMED"
+_REDEEM_PENDING_WALLET_HOLDING_STATES = frozenset(
+    {
+        "REDEEM_INTENT_CREATED",
+        "REDEEM_SUBMITTED",
+        "REDEEM_TX_HASHED",
+        "REDEEM_RETRYING",
+        "REDEEM_OPERATOR_REQUIRED",
+    }
+)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS exchange_reconcile_findings (
@@ -2581,22 +2589,25 @@ def _journal_positions_by_token(
 def _settlement_command_token_holdings_by_token(conn: sqlite3.Connection) -> dict[str, Decimal]:
     """Expected wallet CTF holdings from redeem commands not yet confirmed.
 
-    ``_journal_positions_by_token`` is an active-exposure view.  M5 compares
+    ``_journal_positions_by_token`` is an active-exposure view. M5 compares
     against the venue wallet position surface, so settled positions that have
-    queued/operator-gated redeem commands remain expected wallet holdings until
-    the redeem command is confirmed.
+    queued/operator-gated redeem commands remain expected wallet holdings while
+    the redeem command is still pending. Failed or review-required commands do
+    not attest to an active redeem path and must not mask real wallet drift.
     """
 
     if not _table_exists(conn, "settlement_commands"):
         return {}
+    pending_states = tuple(sorted(_REDEEM_PENDING_WALLET_HOLDING_STATES))
+    state_placeholders = ", ".join("?" for _ in pending_states)
     rows = conn.execute(
-        """
+        f"""
         SELECT token_amounts_json
           FROM settlement_commands
-         WHERE state != ?
+         WHERE state IN ({state_placeholders})
            AND TRIM(COALESCE(token_amounts_json, '')) != ''
         """,
-        (_REDEEM_CONFIRMED_STATE,),
+        pending_states,
     ).fetchall()
     out: dict[str, Decimal] = {}
     for row in rows:
