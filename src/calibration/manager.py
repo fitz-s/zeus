@@ -1096,6 +1096,13 @@ def _fit_from_pairs(
     if len(pairs) < level3:
         return None
 
+    # PHASE0-PR4-SCAFFOLD typing seam: decision_group_ids are raw str from DB.
+    # Post-PR4 production: cast to DecisionGroupId via decision_group_id_v1_hash
+    # OR load typed via a typed accessor that returns DecisionGroupId (not raw str).
+    # The NOT NULL constraint on calibration_pairs_v2.decision_group_id will land
+    # in the PR 4 implementation phase; until then, the None-guard below is live.
+    # INV-group-id-type: callers of ExtendedPlattCalibrator.fit() must supply
+    # DecisionGroupId-typed arrays once the NewType is wired end-to-end.
     decision_group_ids = np.array([p.get("decision_group_id") for p in pairs], dtype=object)
     if any(group_id is None or str(group_id) == "" for group_id in decision_group_ids):
         logger.warning("Platt fit refused for %s_%s: missing decision_group_id", cluster, season)

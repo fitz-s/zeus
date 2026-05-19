@@ -19,6 +19,29 @@ logger = logging.getLogger(__name__)
 
 
 # Clamp range for logit transform — prevents log(0) and log(inf)
+#
+# PHASE0-PR4-SCAFFOLD §14.9 DECISION — operator-approved deviation from spec:
+#   Spec (zeus_math_spec.md §14.9) prescribes eps=1e-6.
+#   Current code uses P_CLAMP_LOW=0.01 (100× coarser).
+#
+#   Deliberate trade (approved 2026-05-19):
+#     KNOWN INFORMATION LOSS: forecasts in p∈[1e-6, 0.01] ∪ [0.99, 1-1e-6]
+#     are clamped to 0.01/0.99 before logit transform. Affects tail-skewed
+#     weather markets where p<0.01 is operationally meaningful.
+#
+#     OPERATIONAL JUSTIFICATION: 144M+ logit calls; 0.01 clamp yields stable
+#     logit range [-4.6, +4.6] vs [-13.8, +13.8] at 1e-6. Tighter clamp
+#     increases gradient magnitudes in rare tail samples, destabilising lbfgs.
+#     Refit of all 91M calibration_pairs_v2 rows would be required to change.
+#
+#     INVARIANT: INV-eps-spec-conformance — test_inv_eps_spec_conformance.py
+#     must fail (and alert) if P_CLAMP_LOW drifts from this documented value
+#     without a matching spec update. CI antibody against silent drift.
+#
+#   DO NOT change P_CLAMP_LOW without:
+#     1. Updating zeus_math_spec.md §14.9 to match.
+#     2. Scheduling a full calibration refit (91M rows).
+#     3. Updating INV-eps-spec-conformance expected_value.
 P_CLAMP_LOW = 0.01
 P_CLAMP_HIGH = 0.99
 

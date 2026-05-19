@@ -636,9 +636,17 @@ Current code disagrees with this spec at the following points. The data-rebuild 
 - `src/strategy/market_analysis.py:185-244` `_bootstrap_bin` needs audit.
 - **Fix**: confirm it resamples by decision_group; rewrite if not.
 
-### 14.9 Logit clipping not verified
-- `src/calibration/platt.py` needs audit for explicit `clip(p, eps, 1-eps)` before `logit`.
-- **Fix**: add clipping with `eps = 1e-6` if missing.
+### 14.9 Logit clipping — deployed with eps = 0.01
+
+- `src/calibration/platt.py` applies `clip(p, eps, 1 - eps)` before `logit` at line 170–181.
+- Deployed value: **`eps = 0.01`** (constant `P_CLAMP_LOW`). This is an operator-approved
+  deviation from the §13 theoretical default of `1e-6`.
+- **Rationale**: lbfgs numerical stability at the ±13.8 logit range with sparse tail samples;
+  cost asymmetry makes a full 91M-row refit to recover the theoretical `1e-6` unjustified.
+  The deviation is annotated in `src/calibration/platt.py` and pinned by CI antibody test
+  `tests/test_inv_eps_spec_conformance.py` (INV-eps-spec-conformance).
+- **Status**: RESOLVED. §13 definition (`eps = 1e-6`) remains the spec default; §14.9
+  documents the approved production deployment at `eps = 0.01`.
 
 ### 14.10 Outer-bin representation unconfirmed
 - `Bin.low`/`high` type is float per current `src/types/market.py`; `-inf`/`+inf` allowed by Python but unverified across all Bin consumers.

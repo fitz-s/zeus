@@ -252,6 +252,19 @@ def _create_calibration_pairs_v2(conn: sqlite3.Connection) -> None:
             cluster TEXT NOT NULL,
             forecast_available_at TEXT NOT NULL,
             settlement_value REAL,
+            -- PHASE0-PR4: decision_group_id NOT NULL enforcement is LIVE (PR 4 production).
+            -- Canonical enforcement: TRIGGER-mode (default, disk-safe).
+            --   scripts/migrate_calibration_pairs_v2_not_null.py --apply --mode trigger
+            --   Two BEFORE INSERT + BEFORE UPDATE triggers per table enforce NOT NULL.
+            --   Idempotent (CREATE TRIGGER IF NOT EXISTS). Zero disk overhead.
+            --   PRAGMA table_info still shows notnull=0 (column DDL unchanged).
+            -- Optional canonical DDL rebuild (requires ~50 GiB free disk):
+            --   scripts/migrate_calibration_pairs_v2_not_null.py --apply --mode rebuild
+            --   Produces notnull=1 in PRAGMA table_info but requires disk headroom.
+            --   BLOCKED at current 22 GiB free — operator-coordinated separately.
+            -- Preflight confirmed: 0 NULL rows as of 2026-05-17. See:
+            --   docs/operations/task_2026-05-17_strategy_vnext_phase0/preflight/migration_dry_runs.json
+            -- Column DDL unchanged until rebuild-mode migration runs:
             decision_group_id TEXT,
             bias_corrected INTEGER NOT NULL DEFAULT 0
                 CHECK (bias_corrected IN (0, 1)),
@@ -296,6 +309,25 @@ def _create_calibration_pairs_v2(conn: sqlite3.Connection) -> None:
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_calibration_pairs_v2_refit_core
             ON calibration_pairs_v2(temperature_metric, data_version, training_allowed, authority)
+    """)
+    # PHASE0-PR4: Install NOT NULL triggers on fresh DBs so the enforcement invariant
+    # holds from the first INSERT, not only after the operator runs the migration script.
+    # Idempotent (CREATE TRIGGER IF NOT EXISTS).
+    conn.execute("""
+        CREATE TRIGGER IF NOT EXISTS calibration_pairs_v2_dgid_not_null_ins
+        BEFORE INSERT ON calibration_pairs_v2
+        WHEN NEW.decision_group_id IS NULL
+        BEGIN
+            SELECT RAISE(ABORT, 'NOT NULL: calibration_pairs_v2.decision_group_id');
+        END
+    """)
+    conn.execute("""
+        CREATE TRIGGER IF NOT EXISTS calibration_pairs_v2_dgid_not_null_upd
+        BEFORE UPDATE OF decision_group_id ON calibration_pairs_v2
+        WHEN NEW.decision_group_id IS NULL
+        BEGIN
+            SELECT RAISE(ABORT, 'NOT NULL: calibration_pairs_v2.decision_group_id');
+        END
     """)
 
 
