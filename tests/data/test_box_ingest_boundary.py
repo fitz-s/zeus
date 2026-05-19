@@ -3,17 +3,15 @@
 # Authority basis: F3 PR 4 / study at jobs/9ea6f95c/findings/f3_frozen_dataclass_study.md
 """Ingest boundary tests for CelsiusBox / FahrenheitBox wrapping.
 
-Verifies the Box-wrapping pattern at ingest boundaries and exercises the
-Ogimet parse helpers directly. HKO, Meteostat, and IEM ASOS boundary sites
-use the same CelsiusBox/FahrenheitBox pattern and are covered by the
-unit-witness boundary tests below rather than per-client smoke tests
-(those clients require live HTTP or complex fixture setup).
+Scope:
+  - CelsiusBox / FahrenheitBox boundary pattern (construction, .value extraction,
+    cross-unit guard at the wrap site).
+  - Ogimet parse helpers (_parse_metar_temp_c, _parse_metar_csv_line): confirm
+    Box-wrapped values flow through correctly and return float-compatible results.
 
-For ogimet: confirms the METAR parser and CSV-line parser return float-compatible
-values (CelsiusBox.value extracted into Celsius NewType, so isinstance(x, float)).
-
-For the Box types themselves: confirms construction, .value extraction, and
-cross-unit guard all work as expected at the ingest-boundary call pattern.
+HKO, Meteostat, and IEM ASOS boundary sites apply the same pattern and are
+covered by tests/data/test_ingest_unit_types.py (F3 PR 2/3, on main since #171).
+Per-client smoke tests here would require live HTTP or complex fixture setup.
 
 Design note (F3 PR 4 brief): CelsiusBox/FahrenheitBox are created at the write
 site and immediately unwrapped (.value) into the container float. The unit-witness

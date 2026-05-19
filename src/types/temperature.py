@@ -105,9 +105,7 @@ class CelsiusBox:
             return CelsiusBox(self.value + other.value)
         if isinstance(other, FahrenheitBox):
             raise TypeError("Cannot add Celsius + Fahrenheit; convert first via f_to_c")
-        if isinstance(other, (int, float)):
-            return CelsiusBox(self.value + float(other))
-        return NotImplemented  # type: ignore[return-value]
+        return NotImplemented  # bare int/float rejected — unit unknown
 
     def __radd__(self, other: object) -> "CelsiusBox":
         return self.__add__(other)
@@ -117,9 +115,15 @@ class CelsiusBox:
             return CelsiusBox(self.value - other.value)
         if isinstance(other, FahrenheitBox):
             raise TypeError("Cannot subtract Fahrenheit from Celsius; convert first")
-        if isinstance(other, (int, float)):
-            return CelsiusBox(self.value - float(other))
-        return NotImplemented  # type: ignore[return-value]
+        return NotImplemented  # bare int/float rejected — unit unknown
+
+    def add_delta(self, delta: float) -> "CelsiusBox":
+        """Add a same-unit scalar delta. Use only when the delta is unit-confirmed."""
+        return CelsiusBox(self.value + float(delta))
+
+    def sub_delta(self, delta: float) -> "CelsiusBox":
+        """Subtract a same-unit scalar delta. Use only when the delta is unit-confirmed."""
+        return CelsiusBox(self.value - float(delta))
 
     def to_fahrenheit(self) -> "FahrenheitBox":
         return FahrenheitBox(self.value * 9.0 / 5.0 + 32.0)
@@ -141,9 +145,7 @@ class FahrenheitBox:
             return FahrenheitBox(self.value + other.value)
         if isinstance(other, CelsiusBox):
             raise TypeError("Cannot add Fahrenheit + Celsius; convert first via c_to_f")
-        if isinstance(other, (int, float)):
-            return FahrenheitBox(self.value + float(other))
-        return NotImplemented  # type: ignore[return-value]
+        return NotImplemented  # bare int/float rejected — unit unknown
 
     def __radd__(self, other: object) -> "FahrenheitBox":
         return self.__add__(other)
@@ -153,9 +155,15 @@ class FahrenheitBox:
             return FahrenheitBox(self.value - other.value)
         if isinstance(other, CelsiusBox):
             raise TypeError("Cannot subtract Celsius from Fahrenheit; convert first")
-        if isinstance(other, (int, float)):
-            return FahrenheitBox(self.value - float(other))
-        return NotImplemented  # type: ignore[return-value]
+        return NotImplemented  # bare int/float rejected — unit unknown
+
+    def add_delta(self, delta: float) -> "FahrenheitBox":
+        """Add a same-unit scalar delta. Use only when the delta is unit-confirmed."""
+        return FahrenheitBox(self.value + float(delta))
+
+    def sub_delta(self, delta: float) -> "FahrenheitBox":
+        """Subtract a same-unit scalar delta. Use only when the delta is unit-confirmed."""
+        return FahrenheitBox(self.value - float(delta))
 
     def to_celsius(self) -> CelsiusBox:
         return CelsiusBox((self.value - 32.0) * 5.0 / 9.0)

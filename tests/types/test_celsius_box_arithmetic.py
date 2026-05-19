@@ -6,9 +6,11 @@
 Load-bearing tests:
   1. Same-unit addition and subtraction return correct Box type.
   2. Cross-unit arithmetic raises TypeError (the runtime antibody).
-  3. Conversion helpers round-trip correctly.
-  4. Frozen dataclass guarantees: hashable, immutable after construction.
-  5. Sed-break: commenting out __add__ cross-unit guard causes tests in section 2
+  3. Scalar (bare int/float) arithmetic raises TypeError — unit unknown.
+  4. add_delta / sub_delta explicit scalar path works correctly.
+  5. Conversion helpers round-trip correctly.
+  6. Frozen dataclass guarantees: hashable, immutable after construction.
+  7. Sed-break: commenting out __add__ cross-unit guard causes tests in section 2
      (test_celsius_add_fahrenheit_raises, test_fahrenheit_add_celsius_raises) to fail.
 
 Fitz Constraint #1: "make the category impossible, not just the instance."
@@ -68,7 +70,61 @@ def test_fahrenheit_add_celsius_raises() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 3. Conversion helpers
+# 3. Bare scalar arithmetic raises TypeError — unit unknown guard
+# ---------------------------------------------------------------------------
+
+def test_celsius_box_add_scalar_raises() -> None:
+    """CelsiusBox + bare float raises TypeError — unit of the scalar is unknown."""
+    c = CelsiusBox(20)
+    with pytest.raises(TypeError):
+        _ = c + 5.0  # type: ignore[operator]
+
+
+def test_fahrenheit_box_add_scalar_raises() -> None:
+    """FahrenheitBox + bare float raises TypeError — unit of the scalar is unknown."""
+    f = FahrenheitBox(68)
+    with pytest.raises(TypeError):
+        _ = f + 5.0  # type: ignore[operator]
+
+
+def test_celsius_box_sub_scalar_raises() -> None:
+    c = CelsiusBox(20)
+    with pytest.raises(TypeError):
+        _ = c - 5.0  # type: ignore[operator]
+
+
+def test_fahrenheit_box_sub_scalar_raises() -> None:
+    f = FahrenheitBox(68)
+    with pytest.raises(TypeError):
+        _ = f - 5.0  # type: ignore[operator]
+
+
+# ---------------------------------------------------------------------------
+# 4. add_delta / sub_delta — explicit unit-confirmed scalar path
+# ---------------------------------------------------------------------------
+
+def test_celsius_box_add_delta() -> None:
+    result = CelsiusBox(20).add_delta(5.0)
+    assert result == CelsiusBox(25)
+
+
+def test_celsius_box_sub_delta() -> None:
+    result = CelsiusBox(20).sub_delta(5.0)
+    assert result == CelsiusBox(15)
+
+
+def test_fahrenheit_box_add_delta() -> None:
+    result = FahrenheitBox(68).add_delta(5.0)
+    assert result == FahrenheitBox(73)
+
+
+def test_fahrenheit_box_sub_delta() -> None:
+    result = FahrenheitBox(73).sub_delta(5.0)
+    assert result == FahrenheitBox(68)
+
+
+# ---------------------------------------------------------------------------
+# 5. Conversion helpers
 # ---------------------------------------------------------------------------
 
 def test_celsius_to_fahrenheit_conversion() -> None:
@@ -84,7 +140,7 @@ def test_fahrenheit_to_celsius_conversion() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 4. Frozen dataclass guarantees
+# 6. Frozen dataclass guarantees
 # ---------------------------------------------------------------------------
 
 def test_celsius_box_is_hashable() -> None:
