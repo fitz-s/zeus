@@ -35,7 +35,9 @@
     "bimodal_gap_ratio": 0.3,
     "boundary_window": 0.5,
     "unimodal_range_epsilon": 0.5,
-    "conflict_kl_threshold": 0.15
+    "conflict_kl_threshold": 0.15,
+    "min_members_floor": 40,
+    "_min_members_floor_rationale_2026_05_19": "ECMWF Open Data partial dissemination at 48-50 is statistically equivalent to full 51 for variance estimation under our Monte Carlo strategies. Strict 51-only gate caused 40-45% systematic discard for weeks. Floor of 40 keeps fail-closed for genuinely degraded ensembles (< 40 = unreliable variance) while admitting statistically-viable partial ensembles."
   },
   "entry_forecast": {
     "source_id": "ecmwf_open_data",
