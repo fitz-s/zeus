@@ -1,6 +1,9 @@
 # Created: 2026-05-05
-# Last reused or audited: 2026-05-05
+# Last reused or audited: 2026-05-19
 # Authority basis: docs/operations/task_2026-05-04_zeus_may3_review_remediation/phases/T2G/phase.json
+# Lifecycle: created=2026-05-05; last_reviewed=2026-05-19; last_reused=2026-05-19
+# Purpose: T2G invariant — _settle_positions routes redeem through enqueue_redeem_command
+# Reuse: standalone pytest; no live DB required
 """Tests for T2G: _settle_positions routes redeem through enqueue_redeem_command.
 
 Invariants asserted:

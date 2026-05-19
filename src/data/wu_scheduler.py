@@ -147,6 +147,9 @@ def run_wu_daily_dispatch(now_utc: Optional[datetime] = None) -> None:
     scheduler_instance = WuDailyScheduler()
     rebuild_run_id = f"wu_daily_dispatch_{now_utc.strftime('%Y-%m-%dT%H:%M:%SZ')}"
 
+    # append_wu_city writes to observations (forecasts-class) AND data_coverage (world-class)
+    # in a single SAVEPOINT — requires the forecasts+world ATTACH connection (INV-37/K1).
+    # Each city gets its own context-manager call to avoid cross-city SAVEPOINT interference.
     wu_totals = {"inserted": 0, "guard_rejected": 0, "fetch_errors": 0, "missing_from_api": 0}
     collected = 0
     for city_cfg in cities_by_name.values():
@@ -165,8 +168,8 @@ def run_wu_daily_dispatch(now_utc: Optional[datetime] = None) -> None:
                 wu_totals[k] += stats.get(k, 0)
             collected += 1
             logger.info("wu_daily_dispatch: collected %s (%s)", city_cfg.name, local_yesterday)
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("wu_daily_dispatch: error for %s: %s", city_cfg.name, exc)
+        except Exception:  # noqa: BLE001
+            logger.exception("wu_daily_dispatch: error for %s", city_cfg.name)
 
     if not collected:
         logger.debug("wu_daily_dispatch: no cities eligible this tick")

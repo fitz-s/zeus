@@ -1,6 +1,9 @@
 # Created: 2026-04-28
-# Last reused/audited: 2026-04-28
+# Last reused/audited: 2026-05-19
 # Authority basis: round3_verdict.md §1 #2 + ULTIMATE_PLAN.md L312-314
+# Lifecycle: created=2026-04-28; last_reviewed=2026-05-19; last_reused=2026-05-19
+# Purpose: Cross-module invariant — ws_poll_reaction latency attribution and aggregation
+# Reuse: standalone pytest; monkeypatches strategy attribution pipeline
 # (WS_OR_POLL_TIGHTENING third edge leg). Per Fitz "test relationships, not
 # just functions" — these tests verify the CROSS-MODULE invariant that
 # compute_reaction_latency_per_strategy correctly joins token_price_log →
