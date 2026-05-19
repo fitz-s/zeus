@@ -760,6 +760,27 @@ def read_executable_forecast(
         entry_computed_at = producer_computed_at
     if source_available_at > captured_at:
         return ExecutableForecastBundleResult("BLOCKED", "SOURCE_AVAILABLE_AFTER_CAPTURE")
+    # P0-2 codereview-may19-2 (2026-05-19): decision-time causality invariant.
+    #
+    # The forecast bundle used for a trade MUST have been published and ingested
+    # BEFORE the trade decision time. Two clean causality checks compare clocks
+    # that DO NOT have the UPSERT-rewriting hazard that killed the previous
+    # `entry_computed_at > now` check (producer/entry computed_at are writer
+    # wall-clocks; source_available_at and captured_at are source-clock stamps
+    # frozen at row-insert time, never rewritten):
+    #
+    #   source_available_at  — NWP run publication time on provider's clock
+    #   captured_at          — Zeus ingest fetch time (frozen at source-run insert)
+    #
+    # Without these checks the bundle reader can satisfy a frozen decision_time
+    # cycle with a source-run that didn't exist yet at the recorded decision_time.
+    # That's a causality leak: trades get evidence from the future. Operator
+    # 2026-05-19 directive: restore "available before decision" without
+    # re-introducing the cross-clock UPSERT bug.
+    if source_available_at > now:
+        return ExecutableForecastBundleResult("BLOCKED", "SOURCE_AVAILABLE_AFTER_DECISION_TIME")
+    if captured_at > now:
+        return ExecutableForecastBundleResult("BLOCKED", "SOURCE_CAPTURED_AFTER_DECISION_TIME")
     # Causal-order check keeps the meaningful invariants:
     #   capture <= producer-readiness <= entry-readiness
     # The historical extra clause `entry_computed_at > now` compared the

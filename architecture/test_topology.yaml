@@ -437,6 +437,10 @@ test_trust_policy:
     tests/test_misroute_antibody_negrisk_correct_route.py: {created: "2026-05-19", last_used: "2026-05-19"}
     # 2026-05-19 lifecycle pending_exit guard: terminal-ish origins are no-op (was: ValueError crashed day0_capture and starved imminent_open_capture).
     tests/test_lifecycle_pending_exit_guard.py: {created: "2026-05-19", last_used: "2026-05-19"}
+    # 2026-05-19 codereview-may19-2 P0-1: entry gate consults full blocker set via `entries_blocked_reason`, not just risk/heartbeat/ws/quarantine subset.
+    tests/test_entry_gate_authority_promotion.py: {created: "2026-05-19", last_used: "2026-05-19"}
+    # 2026-05-19 codereview-may19-2 P0-2: executable forecast reader enforces source-clock causality (source_available_at/captured_at <= decision_time).
+    tests/test_forecast_decision_time_causality.py: {created: "2026-05-19", last_used: "2026-05-19"}
 
 categories:
   core_law_antibody:
@@ -628,6 +632,8 @@ categories:
     - tests/test_ensemble_snapshots_bias_corrected_schema.py
     - tests/test_evaluator_metric_normalizer_failclosed.py
     - tests/test_execution_intent_typed_slippage.py
+    - tests/test_entry_gate_authority_promotion.py
+    - tests/test_forecast_decision_time_causality.py
     - tests/test_lifecycle_pending_exit_guard.py
     - tests/test_lifecycle_terminal_predicate.py
     - tests/test_monitor_refresh_ci_fallback.py

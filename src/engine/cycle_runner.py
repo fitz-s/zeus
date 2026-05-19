@@ -950,7 +950,17 @@ def run_cycle(mode: DiscoveryMode) -> dict:
     # heartbeat_supervisor.summary / ws_gap_guard.summary), default to
     # not allowing submit so we mirror the explicit fail-closed paths at
     # cycle_runner.py:752,754 above.
-    if _discovery_gates_allow_entries(
+    #
+    # P0-1 codereview-may19-2 (2026-05-19): promote `entries_blocked_reason`
+    # from observability to authority. Pre-fix, the gate only consulted
+    # risk/heartbeat/ws/quarantine, while the daemon separately recorded
+    # `entries_blocked_reason` for chain_ready/force_exit/entry_bankroll/
+    # exposure_gate/entries_paused/cutover/portfolio_governor/posture. That
+    # split let `_execute_discovery_phase()` run with operators seeing
+    # "blocked: X" — safety object and observability object were architecturally
+    # divided. Now the gate requires `entries_blocked_reason is None` AND
+    # the original fail-closed contract on dict shape.
+    if entries_blocked_reason is None and _discovery_gates_allow_entries(
         risk_level,
         _heartbeat_status,
         _ws_gap_status,
