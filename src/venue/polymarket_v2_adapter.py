@@ -1334,17 +1334,27 @@ class PolymarketV2Adapter:
 
         # ── Dry-run gate ──────────────────────────────────────────────────────
         if dry_run:
+            # SECURITY (codereview-may19 P0-2): never log or return the signed
+            # raw_tx_hex. A signed raw transaction is a broadcastable payload;
+            # any observer (logs, DB events, alerting collectors, backups) can
+            # broadcast it and bypass the no-side-effect gate. Log only
+            # non-sensitive metadata (tx_type label + length + short SHA-256
+            # fingerprint) — matching the EOA dry-run path's secure pattern.
+            import hashlib as _hashlib
+            _dry_run_fingerprint = _hashlib.sha256(raw_hex.encode()).hexdigest()[:16]
             logger.warning(
                 "REDEEM_DRY_RUN_LOGGED safe_address=%s safe_nonce=%d "
-                "condition_id=%s raw_tx_hex_len=%d raw_tx_hex=%s",
-                safe_address, safe_nonce, condition_id, len(raw_hex), raw_hex,
+                "condition_id=%s raw_tx_hex_len=%d "
+                "dry_run_fingerprint=%s tx_type=SAFE",
+                safe_address, safe_nonce, condition_id,
+                len(raw_hex), _dry_run_fingerprint,
             )
             return {
                 "success": False,
                 "errorCode": "REDEEM_DRY_RUN_LOGGED",
                 "errorMessage": "dry-run mode: raw tx built+signed but not broadcast",
                 "condition_id": condition_id,
-                "raw_tx_hex": raw_hex,
+                "dry_run_fingerprint": _dry_run_fingerprint,
                 "safe_nonce": safe_nonce,
             }
 
@@ -1650,17 +1660,24 @@ class PolymarketV2Adapter:
 
         # ── Dry-run gate ──────────────────────────────────────────────────────
         if dry_run:
+            # SECURITY (codereview-may19 P0-2): never log or return the signed
+            # raw_tx_hex (broadcastable payload). Log only metadata and a short
+            # SHA-256 fingerprint, matching the EOA + Safe dry-run patterns.
+            import hashlib as _hashlib
+            _dry_run_fingerprint = _hashlib.sha256(raw_hex.encode()).hexdigest()[:16]
             logger.warning(
                 "REDEEM_DRY_RUN_LOGGED safe_address=%s safe_nonce=%d "
-                "condition_id=%s neg_risk=True raw_tx_hex_len=%d raw_tx_hex=%s",
-                safe_address, safe_nonce, condition_id, len(raw_hex), raw_hex,
+                "condition_id=%s neg_risk=True raw_tx_hex_len=%d "
+                "dry_run_fingerprint=%s tx_type=NEGRISK_SAFE",
+                safe_address, safe_nonce, condition_id,
+                len(raw_hex), _dry_run_fingerprint,
             )
             return {
                 "success": False,
                 "errorCode": "REDEEM_DRY_RUN_LOGGED",
                 "errorMessage": "dry-run mode: raw tx built+signed but not broadcast (negRisk path)",
                 "condition_id": condition_id,
-                "raw_tx_hex": raw_hex,
+                "dry_run_fingerprint": _dry_run_fingerprint,
                 "safe_nonce": safe_nonce,
                 "neg_risk": True,
             }
