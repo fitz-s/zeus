@@ -1,23 +1,26 @@
 # PR 3 + PR 6 SCAFFOLD — DecisionSourceContext Coordinated Extension
 
 **Branch**: `feat/phase0-pr36-decision-source-context-coordinated-20260519`
-**Authored**: 2026-05-19 by Executor B/36 (v1); revised 2026-05-19 by Executor B/36 v2; Path F finalized 2026-05-19 by Executor B/36 v3
+**Authored**: 2026-05-19 by Executor B/36 (v1); revised 2026-05-19 by Executor B/36 v2; Path F finalized 2026-05-19 by Executor B/36 v3; Wave-B opus revisions applied by Executor B/36 v4
 **Authority**: WAVE_B_PR_3_6_FIELD_MAP.md (field ownership table, 17 rows)
-**Phase**: SCAFFOLD REVISION — all 3 blocking items resolved; production not yet started
+**Phase**: SCAFFOLD REVISION v4 — all opus critic blockers resolved; production ready
 
 ---
 
-## Grep-verified line anchors (current main, worktree HEAD = ad2d99f)
+## Grep-verified line anchors (worktree HEAD = 516a646715, 2026-05-19)
 
 | Symbol | File | Line | Notes |
 |---|---|---|---|
-| `class DecisionSourceContext:` | `src/contracts/execution_intent.py` | 597 | v4 said :605 — drifted -8 lines (Wave A landed) |
+| `class DecisionSourceContext:` | `src/contracts/execution_intent.py` | 597 | verified at worktree HEAD |
 | `causality_status: str` | `src/contracts/snapshot_ingest_contract.py` | 96 | matches L12 |
 | `def _f1_fallback_end_utc` | `src/strategy/market_phase.py` | 203 | matches L5 |
 | `_f1_fallback_end_utc(` invocation | `src/strategy/market_phase.py` | 236 | write-site for `polymarket_end_anchor_source` |
 | `confirmation_count=_extract_int` | `src/execution/fill_tracker.py` | 542 | PR 6 split site |
 | `if rows and observed_members < 51` | `src/data/ecmwf_open_data.py` | 775 | `first_member_observed_time` capture site |
-| `raw_orderbook_hash: str` | `src/contracts/executable_market_snapshot_v2.py` | 94 | READ-ONLY for B/36 (B/27 owns writes) |
+| `raw_orderbook_hash: str` | `src/contracts/executable_market_snapshot_v2.py` | 94 | READ-ONLY for B/36 (B/27 owns writes); fresh grep shows :94 NOT :97 — B/27 not yet merged into this branch; access is by attribute so line number is informational |
+| `def _store_ens_snapshot(` | `src/engine/evaluator.py` | 3912 | writer for `ensemble_snapshots_v2`; reads `raw_orderbook_hash_transition_delta_ms` from `ens_result` dict |
+| `def capture_executable_market_snapshot(` | `src/data/market_scanner.py` | 1804 | hash computation site; B1 cache lives here |
+| `raw_orderbook_hash=_sha256_json(raw_orderbook),` | `src/data/market_scanner.py` | 1949 | hash assignment within snapshot construction |
 
 **SCAFFOLD FINDING F1**: Field map rows 1-3 (`observation_time`, `provider_reported_time`, `observation_available_at`) are labelled "(existing)" but grep confirms ZERO occurrences in `DecisionSourceContext` and ZERO codebase occurrences of `provider_reported_time` / `observation_available_at`. These are genuinely NEW fields. PR 3 must ADD them to the dataclass, THEN add validators. The "(existing)" label refers to the conceptual domain (they live in `observation_instants_v2`), not the Python type.
 
@@ -46,27 +49,29 @@ Field map coordination check: 12 existing + 4 PR 3 new + 8 PR 6 new = 24 (not 21
 
 ---
 
-## BLOCKING REVISION 2 — F4 prior-hash cache specification (applied)
+## BLOCKING REVISION 2 — F4 prior-hash cache specification (REVISED per Wave-B opus critic B1)
 
-**Problem**: `raw_orderbook_hash` in `cycle_runtime.py:950` is a one-shot audit value in a reprice function — not a persisted inter-cycle cache. There is no existing mechanism to compute `raw_orderbook_hash_transition_delta_ms` (requires knowing the PREVIOUS hash + timestamp). The v1 SCAFFOLD's hypothesis that the derivation could live in `cycle_runtime`'s "snapshot cache" was wrong.
+**Wave-B opus critic finding (B1 CRITICAL)**: `src/engine/monitor_refresh.py:652/1320` uses `clob.get_best_bid_ask()` — `raw_orderbook_hash` is NOT in scope there. The cache in `monitor_refresh.py` would never receive a hash to compare. INV-alpha-provenance antibody dead-on-arrival.
 
-**Verified location for the per-cycle refresh consumer path**: `src/engine/monitor_refresh.py` — specifically `monitor_quote_refresh()` (line 652) and `refresh_position()` (line 1320), which run per held-position per cycle. The hash comparison must happen at or near the orderbook snapshot acquisition point in this module.
+**Revised location**: Cache lives in `src/data/market_scanner.py`, inside `capture_executable_market_snapshot()` at line ~1804, immediately after the `raw_orderbook_hash=_sha256_json(raw_orderbook)` assignment (line 1949). This is the ONLY path where `raw_orderbook_hash` is computed.
 
-**Specified cache design**:
+**Revised cache design**:
 ```python
-# src/engine/monitor_refresh.py — module-level, process-local dict
+# src/data/market_scanner.py — module-level, process-local dict
 _prev_orderbook_hash_by_market: dict[str, tuple[str, float]] = {}
-# key: market_condition_id (or token_id used as market key)
+# key: condition_id (canonical market identifier)
 # value: (hash_str, captured_at_unix_ts)
 ```
 
 **Lifecycle**:
-- **Read**: on each per-cycle snapshot construction, compare `snapshot.raw_orderbook_hash` to `_prev_orderbook_hash_by_market.get(market_key)`. If hash differs from prior AND prior entry exists: `delta_ms = int((time.time() - prev_ts) * 1000)`.
-- **Write**: after each hash observation (whether changed or not), update `_prev_orderbook_hash_by_market[market_key] = (current_hash, time.time())`.
-- **Lifetime**: process-local. No persistence needed for Phase 0 instrument. Value is `None` for first observation per market (no prior to compare against).
-- **Null semantics**: `raw_orderbook_hash_transition_delta_ms = None` when no prior hash exists for this market key (first observation in process lifetime).
+- **Read**: at end of `capture_executable_market_snapshot()` after `raw_orderbook_hash` is computed, look up `_prev_orderbook_hash_by_market.get(condition_id)`. If prior entry exists AND hash differs: `delta_ms = int((time.time() - prev_ts) * 1000)`.
+- **Write**: after each hash observation (whether changed or not), update `_prev_orderbook_hash_by_market[condition_id] = (current_hash, time.time())`.
+- **Return path**: `capture_executable_market_snapshot()` currently returns a dict (`{"executable_snapshot_id": ..., ...}`). Add `"raw_orderbook_hash_transition_delta_ms": delta_ms` to that return dict (None on first observation).
+- **Consumer**: `_store_ens_snapshot(conn, city, target_date, ens, ens_result)` in `evaluator.py:3912` receives `ens_result` dict. The caller that builds `ens_result` can pass the delta value through; `_store_ens_snapshot` writes it to `ensemble_snapshots_v2`.
+- **Lifetime**: process-local. No persistence needed for Phase 0 instrument.
+- **Null semantics**: `raw_orderbook_hash_transition_delta_ms = None` for first observation per market (no prior to compare against).
 
-**Location constraint**: B/36 adds this dict to `src/engine/monitor_refresh.py` only. B/27 owns `src/contracts/executable_market_snapshot_v2.py` — B/36 reads `snapshot.raw_orderbook_hash` as an attribute access, no edits to that file.
+**Location constraint**: B/36 adds this dict to `src/data/market_scanner.py` only. B/27 owns `src/contracts/executable_market_snapshot_v2.py` — B/36 reads `snapshot.raw_orderbook_hash` as an attribute access at construction time, no edits to that file.
 
 ---
 
@@ -143,6 +148,93 @@ In `tests/test_decision_source_context_causality_pr3.py`:
 - R-3.5: `CausalityStatus` accepts all 9 Literal values without type error
 
 PR 6's 3 validators (`inclusion_after_finality`, `submit_after_ack`, `excessive_clock_drift`) are unconditional and unaffected by Path F.
+
+---
+
+## BLOCKING REVISION 4 — required_fields classification + backward compat (Wave-B opus critic B3)
+
+### Required vs Optional for the 12 new PR 3+6 fields
+
+The existing `required_fields` dict in `integrity_errors()` (line ~639) checks all 12 existing fields. Adding the 12 new fields naively would cause every pre-PR-3 decision to emit new `missing_*` errors — backward-incompatible.
+
+**Classification per orchestrator (B3)**:
+
+| Field | PR | Classification | Rationale |
+|---|---|---|---|
+| `observation_time` | PR 3 | **Required** | Directly written by `observation_client.py`; mandatory harvester latency instrument |
+| `observation_available_at` | PR 3 | **Required** | Mandatory: gap to `observation_time` is the key latency measurement |
+| `polymarket_end_anchor_source` | PR 3 | **Required** | Every settlement command has an anchor source (gamma or F1); must be tagged |
+| `first_member_observed_time` | PR 6 | **Required** | Directly written by `ecmwf_open_data.py:775`; always observable |
+| `run_complete_time` | PR 6 | **Required** | Written when all 51 members present; always observable |
+| `zeus_submit_intent_time` | PR 6 | **Required** | Written at submit call; always observable |
+| `venue_ack_time` | PR 6 | **Required** | Written from CLOB response; always observable |
+| `provider_reported_time` | PR 3 | **Optional** (`Optional[str] = None`) | Path F: WU API has no separate reported-at; None means "not exposed by this source" |
+| `first_inclusion_block_time` | PR 6 | **Optional** (`str = ""`) | Chain confirmation may arrive post-decision-write |
+| `finality_confirmed_time` | PR 6 | **Optional** (`str = ""`) | ≥6 confirmation watermark; may arrive post-decision-write |
+| `clock_skew_estimate_ms` | PR 6 | **Optional** (`int | None = None`) | Probe may fail; None = probe failure (not a system error) |
+| `raw_orderbook_hash_transition_delta_ms` | PR 6 | **Optional** (`int | None = None`) | None on first observation per market (no prior to compare) |
+
+### Backward-compat gating mechanism
+
+**Chosen approach**: timestamp sentinel — check `decision_time >= _PR3_REQUIRED_FIELDS_EPOCH` before emitting `missing_*` errors for the 7 required new fields.
+
+```python
+# src/contracts/execution_intent.py — module-level constant
+# Decisions written before this epoch predate PR 3 and will not have the new fields.
+_PR3_REQUIRED_FIELDS_EPOCH = "2026-05-19T00:00:00Z"
+```
+
+Inside `integrity_errors()`, the new required-field check is gated:
+```python
+# New required fields (PR 3+6) — only enforced for decisions written after PR 3 landed.
+# Pre-PR-3 decisions retain their state without emitting new errors.
+_dec_t = _context_time(self.decision_time)
+_pr3_epoch = _context_time(_PR3_REQUIRED_FIELDS_EPOCH)
+_gate_new_required = bool(_dec_t and _pr3_epoch and _dec_t >= _pr3_epoch)
+if _gate_new_required:
+    pr3_required = {
+        "observation_time": self.observation_time,
+        "observation_available_at": self.observation_available_at,
+        "polymarket_end_anchor_source": self.polymarket_end_anchor_source,
+        "first_member_observed_time": self.first_member_observed_time,
+        "run_complete_time": self.run_complete_time,
+        "zeus_submit_intent_time": self.zeus_submit_intent_time,
+        "venue_ack_time": self.venue_ack_time,
+    }
+    for field, value in pr3_required.items():
+        if not value:
+            errors.append(f"missing_{field}")
+```
+
+**Writer responsibility**: All writers that emit `decision_time >= _PR3_REQUIRED_FIELDS_EPOCH` MUST populate the 7 required fields. The test fixtures and mock factories must be updated to set them. Existing tests with `decision_time` in the past are automatically exempt.
+
+---
+
+## BLOCKING REVISION 5 — Clock skew threshold (Wave-B opus critic B4)
+
+**Fix**: Widen `"excessive_clock_drift"` error threshold from 100ms → 200ms. Emit new `"clock_drift_warning"` (non-blocking, observability signal only — not an error) at 100ms.
+
+**In `integrity_errors()`**:
+```python
+# Row 16 clock drift — threshold 200ms per B4 (100ms barely exceeds HTTPS RTT noise floor)
+if self.clock_skew_estimate_ms is not None:
+    abs_skew = abs(self.clock_skew_estimate_ms)
+    if abs_skew > 200:
+        errors.append("excessive_clock_drift")
+    elif abs_skew > 100:
+        errors.append("clock_drift_warning")  # observability only; non-blocking
+```
+
+**In `clock_skew_probe.py` module docstring** (mandatory per B4): document that 200ms threshold accommodates HTTPS RTT on a healthy network (typically 30–100ms), and 100ms boundary emits a warning for observation.
+
+---
+
+## BLOCKING REVISION 6 — SCHEMA_VERSION (Wave-B opus critic cross-PR note)
+
+- B/27 branch (`feat/phase0-pr27-effective-kelly-bundled-20260519`) bumps SCHEMA_VERSION 10 → 11.
+- B/36 (this branch) sets SCHEMA_VERSION 10 → **12** now. This branch MUST be rebased off B/27 before merge so the version sequence is 10→11→12.
+- The `tests/state/_schema_pinned_hash.txt` file MUST be regenerated in the same commit that bumps SCHEMA_VERSION.
+- Commit plan: schema bump + pinned hash regen is its own commit (3rd commit atop PR 3 + PR 6 production commits) OR included in the PR 6 commit.
 
 ---
 
@@ -231,7 +323,20 @@ Then thread `anchor_source` to the settlement_commands INSERT (via a context dic
 ```sql
 ALTER TABLE settlement_commands ADD COLUMN polymarket_end_anchor_source TEXT NOT NULL DEFAULT 'gamma_explicit';
 ```
-Backfill logic: rows where `tx_hash IS NOT NULL` or `market_end_at IS NOT NULL` get `gamma_explicit`; others get `f1_12z_fallback`. The migration script handles this.
+
+**Backfill logic (B2 — Wave-B opus critic fix)**: `settlement_commands` has NO `market_end_at` column (verified against schema at `src/execution/settlement_commands.py:33-53`). Original backfill SQL using `CASE WHEN market_end_at IS NOT NULL` would crash with `OperationalError: no such column`.
+
+**Corrected backfill**:
+```sql
+-- Pre-PR-3 rows didn't tag anchor source; default to dominant case (gamma_explicit).
+-- Per-row precision was lost before this PR; F1-fallback rows are minority and
+-- unrecoverable retroactively without joining through executable_market_snapshots.
+-- Simplicity wins per orchestrator decision (B2 fix, path b).
+UPDATE settlement_commands
+  SET polymarket_end_anchor_source = 'gamma_explicit'
+  WHERE polymarket_end_anchor_source IS NULL;
+```
+(Note: `ALTER TABLE ... ADD COLUMN ... DEFAULT 'gamma_explicit'` already sets all existing rows to `'gamma_explicit'` in SQLite. The UPDATE is a belt-and-suspenders safety for any edge cases, and documents the intent explicitly.)
 
 **Migration script**: `scripts/migrate_settlement_commands_polymarket_anchor.py` (idempotent, dry-run flag).
 
@@ -306,9 +411,13 @@ ack_t = _context_time(self.venue_ack_time)
 if submit_t and ack_t and submit_t > ack_t:
     errors.append("submit_after_ack")
 
-# Row 16 clock drift
-if self.clock_skew_estimate_ms is not None and abs(self.clock_skew_estimate_ms) > 100:
-    errors.append("excessive_clock_drift")
+# Row 16 clock drift — threshold 200ms (B4); warning at 100ms boundary
+if self.clock_skew_estimate_ms is not None:
+    abs_skew = abs(self.clock_skew_estimate_ms)
+    if abs_skew > 200:
+        errors.append("excessive_clock_drift")
+    elif abs_skew > 100:
+        errors.append("clock_drift_warning")  # observability only; non-blocking
 ```
 
 ### 2. `src/data/ecmwf_open_data.py` (line 775)
@@ -405,7 +514,9 @@ Header block:
 Relationship tests R-6.1 to R-6.4:
 - R-6.1: `first_inclusion_block_time > finality_confirmed_time` → `"inclusion_after_finality"` in errors
 - R-6.2: `zeus_submit_intent_time > venue_ack_time` → `"submit_after_ack"` in errors
-- R-6.3: `abs(clock_skew_estimate_ms) > 100` → `"excessive_clock_drift"` in errors
+- R-6.3a: `abs(clock_skew_estimate_ms) > 200` → `"excessive_clock_drift"` in errors (blocking)
+- R-6.3b: `100 < abs(clock_skew_estimate_ms) <= 200` → `"clock_drift_warning"` in errors, `"excessive_clock_drift"` NOT in errors (non-blocking observability)
+- R-6.3c: `abs(clock_skew_estimate_ms) <= 100` → neither warning nor error
 - R-6.4: `raw_orderbook_hash_transition_delta_ms` non-null on every post-PR6 `ensemble_snapshots_v2` row (antibody probe via test DB fixture)
 
 **`tests/test_inv_alpha_provenance.py`**
@@ -456,19 +567,22 @@ src/runtime/clock_skew_probe.py — NTP-style clock skew probe vs Polymarket RES
 
 ---
 
-## CausalityStatus enum — 9 values (alphabetized)
+## CausalityStatus enum — 10 values (alphabetized)
+
+**B4 update**: `CLOCK_DRIFT_WARNING` added as 10th value (non-blocking observability; PR 6 emits alongside `OK` when 100ms < |skew| ≤ 200ms).
 
 ```python
 CausalityStatus = Literal[
-    "AVAILABLE_AFTER_DECISION",       # PR 3 validator: obs_avail > decision_time
+    "AVAILABLE_AFTER_DECISION",            # PR 3 validator: obs_avail > decision_time
+    "CLOCK_DRIFT_WARNING",                 # PR 6 observability: 100ms < |clock_skew_ms| ≤ 200ms (non-blocking)
     "DECISION_BEFORE_FORECAST_AVAILABLE",  # existing, renamed from generic
-    "EXCESSIVE_CLOCK_DRIFT",          # PR 6 validator: |clock_skew_ms| > 100
-    "INCLUSION_AFTER_FINALITY",       # PR 6 validator: incl > finality
-    "MISSING_CAUSALITY_FIELD",        # existing (line 122)
-    "OBS_AFTER_PROVIDER",             # PR 3 validator: obs_time > provider_time
-    "OK",                             # existing success path
-    "PROVIDER_AFTER_AVAILABLE",       # PR 3 validator: provider_time > obs_avail
-    "SUBMIT_AFTER_ACK",               # PR 6 validator: submit > ack
+    "EXCESSIVE_CLOCK_DRIFT",               # PR 6 validator: |clock_skew_ms| > 200ms (blocking)
+    "INCLUSION_AFTER_FINALITY",            # PR 6 validator: incl > finality
+    "MISSING_CAUSALITY_FIELD",             # existing (line 122)
+    "OBS_AFTER_PROVIDER",                  # PR 3 validator: obs_time > provider_time
+    "OK",                                  # existing success path
+    "PROVIDER_AFTER_AVAILABLE",            # PR 3 validator: provider_time > obs_avail
+    "SUBMIT_AFTER_ACK",                    # PR 6 validator: submit > ack
 ]
 ```
 
@@ -492,13 +606,14 @@ Add to `src/contracts/snapshot_ingest_contract.py` alongside `CausalityStatus`:
 # Explicit mapping: integrity_errors() short-form string → CausalityStatus value.
 # Prevents the two namespaces from drifting independently.
 INTEGRITY_ERROR_TO_CAUSALITY: dict[str, str] = {
-    "available_after_decision":        "AVAILABLE_AFTER_DECISION",
+    "available_after_decision":          "AVAILABLE_AFTER_DECISION",
+    "clock_drift_warning":               "CLOCK_DRIFT_WARNING",
     "forecast_available_after_decision": "DECISION_BEFORE_FORECAST_AVAILABLE",
-    "excessive_clock_drift":           "EXCESSIVE_CLOCK_DRIFT",
-    "inclusion_after_finality":        "INCLUSION_AFTER_FINALITY",
-    "obs_after_provider":              "OBS_AFTER_PROVIDER",
-    "provider_after_available":        "PROVIDER_AFTER_AVAILABLE",
-    "submit_after_ack":                "SUBMIT_AFTER_ACK",
+    "excessive_clock_drift":             "EXCESSIVE_CLOCK_DRIFT",
+    "inclusion_after_finality":          "INCLUSION_AFTER_FINALITY",
+    "obs_after_provider":                "OBS_AFTER_PROVIDER",
+    "provider_after_available":          "PROVIDER_AFTER_AVAILABLE",
+    "submit_after_ack":                  "SUBMIT_AFTER_ACK",
     # "missing_*" fields → "MISSING_CAUSALITY_FIELD" (handled by prefix check in consumer)
 }
 ```
@@ -512,16 +627,15 @@ INTEGRITY_ERROR_TO_CAUSALITY: dict[str, str] = {
 -- idempotent: ALTER TABLE ADD COLUMN succeeds silently if column exists (SQLite ≥3.37)
 ALTER TABLE settlement_commands
   ADD COLUMN polymarket_end_anchor_source TEXT NOT NULL DEFAULT 'gamma_explicit';
--- Backfill: market_end_at IS NOT NULL → 'gamma_explicit' (explicit Gamma API end provided)
---           market_end_at IS NULL     → 'f1_12z_fallback' (F1 derived anchor was used)
--- NOTE: tx_hash IS NULL heuristic from v1 was WRONG — tx_hash tracks submission state,
--- not whether the market endDate was explicit. market_end_at column is the correct discriminator.
--- Verify market_end_at column exists in settlement_commands before running backfill.
+-- Backfill: ALL historical rows default to 'gamma_explicit'.
+-- settlement_commands has NO market_end_at column (verified: src/execution/settlement_commands.py:33-53).
+-- The original CASE WHEN market_end_at ... backfill would crash. Orchestrator fix B2 (path b):
+-- default ALL pre-PR-3 rows to 'gamma_explicit'; F1-fallback rows are minority and
+-- unrecoverable without a cross-table JOIN that adds fragility. Per-row precision was lost
+-- before this PR was written.
 UPDATE settlement_commands
-  SET polymarket_end_anchor_source = CASE
-    WHEN market_end_at IS NOT NULL THEN 'gamma_explicit'
-    ELSE 'f1_12z_fallback'
-  END;
+  SET polymarket_end_anchor_source = 'gamma_explicit'
+  WHERE polymarket_end_anchor_source IS NULL;
 ```
 
 ### PR 6 migrations
@@ -545,40 +659,46 @@ ALTER TABLE wrap_unwrap_commands ADD COLUMN finality_confirmed_time TEXT;
 
 ## Non-collision with B/27
 
-- `src/contracts/executable_market_snapshot_v2.py`: B/36 reads `raw_orderbook_hash` (line 94) to derive `raw_orderbook_hash_transition_delta_ms` in the monitor-refresh path. B/36 does NOT write to this file. B/27 owns all writes.
-- The derivation site for `raw_orderbook_hash_transition_delta_ms` is in the consumer (monitor/evaluator) — not in `executable_market_snapshot_v2.py`.
+- `src/contracts/executable_market_snapshot_v2.py`: B/36 reads `raw_orderbook_hash` attribute to derive `raw_orderbook_hash_transition_delta_ms`. B/36 does NOT write to this file. B/27 owns all writes. Fresh grep at worktree HEAD shows `:94` (not `:97`); B/27 not yet merged into this branch; access is by attribute.
+- **B1 correction**: The derivation site for `raw_orderbook_hash_transition_delta_ms` is in `src/data/market_scanner.py::capture_executable_market_snapshot()` (NOT `monitor_refresh.py`). This is the only module where `raw_orderbook_hash` is in scope. B/36 adds module-level `_prev_orderbook_hash_by_market` dict here.
+- B/36 does NOT edit `src/engine/monitor_refresh.py` for the hash cache (prior SCAFFOLD was wrong; corrected per Wave-B opus critic B1).
 
 ---
 
-## LOC estimate (revised v3 — Path F final)
+## LOC estimate (revised v4 — Wave-B opus critic fixes applied)
 
 | Component | Lines |
 |---|---|
-| `execution_intent.py` additions (fields + validators, Path F Optional) | ~65 |
-| `snapshot_ingest_contract.py` (enum + type change + mapping dict) | ~30 |
+| `execution_intent.py` additions (fields + validators + B3 gating + B4 clock thresholds) | ~85 |
+| `snapshot_ingest_contract.py` (10-value enum + type change + mapping dict) | ~35 |
 | `market_phase.py` (anchor tagging) | ~15 |
 | `fill_tracker.py` (finality split) | ~25 |
 | `ecmwf_open_data.py` (member timestamps) | ~20 |
 | `executor.py` (submit intent + ack capture) | ~20 |
-| `clock_skew_probe.py` (new module) | ~70 |
-| `monitor_refresh.py` (prior-hash cache + delta derivation) | ~30 |
+| `clock_skew_probe.py` (new module, 200ms threshold + docstring) | ~75 |
+| `market_scanner.py` (B1: `_prev_orderbook_hash_by_market` cache + delta + return) | ~30 |
 | `observation_client.py` (Path F writer: `observation_available_at = now()`, `provider_reported_time = None`) | ~30 |
 | Migration scripts × 3 (realistic: 70 LOC each) | ~210 |
-| Test files × 3 (incl. R-3.NEW-a/b conditional None branches) | ~270 |
-| **Total production** | **~515** |
-| **Total with tests** | **~785** |
+| Test files × 3 (incl. R-3.NEW-a/b, R-6.3a/b/c, backward-compat) | ~290 |
+| **Total production** | **~535** |
+| **Total with tests** | **~825** |
 
-**Path F note**: No fabrication writer needed (`provider_reported_time = None` for WU/IEM is a 2-line assignment, not a derived field). Smaller scope than B-degraded. `observation_available_at` write adds ~15 LOC real value (harvester latency measurement). Well within 1500 LOC SCAFFOLD cap.
+**B1 delta from v3**: `monitor_refresh.py` replaced by `market_scanner.py` for the cache. No net LOC change.
+**B3 delta**: ~20 LOC for backward-compat gating logic in `integrity_errors()`.
+**B4 delta**: ~5 LOC for split threshold + warning path. Well within 1500 LOC SCAFFOLD cap.
 
 ---
 
-## ESCALATION / open items (v3 revision — all blocking items resolved)
+## ESCALATION / open items (v4 revision — all Wave-B opus critic blockers resolved)
 
-1. **F1 (field-map "(existing)" label)**: RESOLVED. Rows 1-3 are genuinely new fields (confirmed by grep + BLOCKING REVISION 1 above).
-2. **`observation_instants_v2` no-migration**: RESOLVED. Critic approved deferral to Phase 1. Out of scope for Phase 0.
-3. **`run_complete_time` writer site**: RESOLVED per APPROVED items from critic. Write site = `source_run_completeness == "COMPLETE"` branch in `_fetch_ecmwf_run_data()` result-building block (line ~818), NOT the `< 51` negative guard.
-4. **`raw_orderbook_hash_transition_delta_ms` derivation**: RESOLVED in BLOCKING REVISION 2. Cache dict in `src/engine/monitor_refresh.py` (module-level, process-local).
-5. **Path B writer feasibility → Path F**: RESOLVED. Orchestrator decided Path F (Optional + conditional validators). `provider_reported_time: Optional[str] = None`; WU+IEM writers set `None` (no fabrication); conditional validators skip silently when None. Full spec in BLOCKING REVISION 3 above. No new ESCALATIONs.
-6. **Backfill heuristic correction**: RESOLVED. `tx_hash IS NULL` heuristic was inverted in v1 SCAFFOLD. Correct discriminator = `market_end_at IS NOT NULL → 'gamma_explicit'`. Fixed in Storage migration SQL section above.
+1. **F1 (field-map "(existing)" label)**: RESOLVED. Rows 1-3 are genuinely new fields.
+2. **`observation_instants_v2` no-migration**: RESOLVED. Critic approved deferral to Phase 1.
+3. **`run_complete_time` writer site**: RESOLVED. Write site = `source_run_completeness == "COMPLETE"` branch in `_fetch_ecmwf_run_data()`, line ~818.
+4. **`raw_orderbook_hash_transition_delta_ms` derivation (B1 CRITICAL)**: RESOLVED. Cache dict relocated to `src/data/market_scanner.py::capture_executable_market_snapshot()` (NOT `monitor_refresh.py`). This is the only scope where `raw_orderbook_hash` is computed.
+5. **Path F**: RESOLVED. `provider_reported_time: Optional[str] = None`; WU+IEM writers set `None`.
+6. **Backfill SQL (B2 CRITICAL)**: RESOLVED. `settlement_commands` has no `market_end_at` column; old CASE WHEN would crash. All historical rows default to `'gamma_explicit'`.
+7. **required_fields classification (B3 MAJOR)**: RESOLVED. 7 required, 5 optional, backward-compat via `_PR3_REQUIRED_FIELDS_EPOCH = "2026-05-19T00:00:00Z"` timestamp sentinel. See BLOCKING REVISION 4 above.
+8. **Clock skew threshold (B4 MINOR)**: RESOLVED. Error at >200ms; warning (non-blocking) at >100ms. `CausalityStatus` now 10 values with `CLOCK_DRIFT_WARNING` added.
+9. **SCHEMA_VERSION**: This branch bumps 10 → 12. Must be merged after B/27 (which bumps 10 → 11). Orchestrator controls merge order.
 
-**All 3 BLOCKING items resolved. No open ESCALATIONs. Ready for Wave-B opus critic review before production.**
+**All Wave-B opus critic blockers (B1-B4) resolved. Production-ready.**
