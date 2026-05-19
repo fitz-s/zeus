@@ -330,15 +330,24 @@ def test_kill_switch_recognizes_truthy_variants(monkeypatch):
 
 
 def test_signer_funder_mismatch_fails_closed(monkeypatch):
-    """Fail-closed guard: if signer EOA != funder_address, redeem() must return
-    REDEEM_SIGNER_FUNDER_MISMATCH without touching the RPC.
+    """Fail-closed guard: signature_type != 2 + EOA != funder → REDEEM_SIGNER_FUNDER_MISMATCH.
 
-    This is the structural antibody for the Safe/proxy deployment scenario where
-    Zeus's funder is a POLY_GNOSIS_SAFE but the signer_key is an EOA.
+    With signature_type=2 a mismatch now enters the Safe wrap path (tested
+    separately).  This test covers signature_type=0 (plain EOA path) where
+    a mismatch remains a hard fail with no RPC contact.
     """
     monkeypatch.setenv(AUTONOMOUS_REDEEM_ENABLED_ENV, "1")
     rpc_call = MagicMock(side_effect=AssertionError("RPC must not be called on mismatch"))
-    adapter = _make_adapter(rpc_call, funder_address=_TEST_MISMATCHED_FUNDER)
+    adapter = PolymarketV2Adapter(
+        funder_address=_TEST_MISMATCHED_FUNDER,
+        signer_key=_TEST_PRIVATE_KEY,
+        chain_id=137,
+        polygon_rpc_url=_TEST_RPC_URL,
+        rpc_call=rpc_call,
+        q1_egress_evidence_path=None,
+        client_factory=lambda **kwargs: MagicMock(name="ClobClient"),
+        signature_type=0,
+    )
 
     result = adapter.redeem(_TEST_CONDITION_ID, index_sets=[2])
 
@@ -553,3 +562,418 @@ def test_winning_index_set_json_non_list_rejected(monkeypatch, tmp_path):
         f"malformed JSON string must produce index_sets=None, got {captured_index_sets}"
     )
     conn.close()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Safe v1.3.0 execTransaction antibody tests (Option A, 2026-05-19)
+# Authority: /tmp/SAFE_REDEEM_AUTOMATION_DESIGN.md §Antibody tests
+# Meta-verify protocol: test_safe_tx_hash_pinned_against_reference includes a
+# monkeypatch.setattr sed-break of SAFE_TX_TYPEHASH to confirm the assertion
+# actually catches a wrong typehash (not a vacuous pass).
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Known-good reference vector.  Parameters:
+#   safe=0xaaaa...aa, chain=137, to=0xbbbb...bb, value=0, data=b'', op=0, nonce=0
+#   All zero gas fields.  Computed offline by build_safe_tx_hash itself (see
+#   the computation at repo root scripts/compute_safe_tx_hash_vector.py).
+_REF_SAFE_ADDRESS  = "0x" + "aa" * 20
+_REF_CHAIN_ID      = 137
+_REF_TO            = "0x" + "bb" * 20
+_REF_SAFE_TX_HASH  = "0x7cabb3e5b9d5fd12a38408cb16feefd041cb8cb8cfeb4dd465397af08e0f2ec6"
+
+
+def test_safe_tx_hash_pinned_against_reference(monkeypatch):
+    """build_safe_tx_hash must reproduce the reference vector exactly.
+
+    Meta-verify (sed-break): monkeypatch SAFE_TX_TYPEHASH to all-zeros and
+    confirm the assertion fails with a hash mismatch (antibody catches the break).
+    """
+    import src.venue.safe_exec as _safe_exec
+    from src.venue.safe_exec import build_safe_tx_hash
+
+    result = build_safe_tx_hash(
+        safe_address=_REF_SAFE_ADDRESS,
+        chain_id=_REF_CHAIN_ID,
+        to=_REF_TO,
+        value=0,
+        data=b"",
+        operation=0,
+        nonce=0,
+    )
+    assert "0x" + result.hex() == _REF_SAFE_TX_HASH, (
+        f"SafeTxHash mismatch: got 0x{result.hex()}, expected {_REF_SAFE_TX_HASH}"
+    )
+
+    # ── Meta-verify: break SAFE_TX_TYPEHASH → hash must differ ───────────────
+    broken_typehash = bytes(32)  # all-zeros
+    monkeypatch.setattr(_safe_exec, "SAFE_TX_TYPEHASH", broken_typehash)
+    broken_result = build_safe_tx_hash(
+        safe_address=_REF_SAFE_ADDRESS,
+        chain_id=_REF_CHAIN_ID,
+        to=_REF_TO,
+        value=0,
+        data=b"",
+        operation=0,
+        nonce=0,
+    )
+    assert "0x" + broken_result.hex() != _REF_SAFE_TX_HASH, (
+        "ANTIBODY META-VERIFY FAILED: zeroed SAFE_TX_TYPEHASH still produces "
+        "the reference hash — the assertion does not catch a typehash mutation"
+    )
+
+    # ── Meta-verify: break DOMAIN_SEPARATOR_TYPEHASH → hash must differ ──────
+    monkeypatch.setattr(_safe_exec, "SAFE_TX_TYPEHASH", _safe_exec.SAFE_TX_TYPEHASH)  # restore
+    broken_domain_typehash = bytes(32)  # all-zeros
+    monkeypatch.setattr(_safe_exec, "DOMAIN_SEPARATOR_TYPEHASH", broken_domain_typehash)
+    broken_domain_result = build_safe_tx_hash(
+        safe_address=_REF_SAFE_ADDRESS,
+        chain_id=_REF_CHAIN_ID,
+        to=_REF_TO,
+        value=0,
+        data=b"",
+        operation=0,
+        nonce=0,
+    )
+    assert "0x" + broken_domain_result.hex() != _REF_SAFE_TX_HASH, (
+        "ANTIBODY META-VERIFY FAILED: zeroed DOMAIN_SEPARATOR_TYPEHASH still "
+        "produces the reference hash — the domain separator mutation is not detected"
+    )
+
+
+def test_safe_branch_engaged_only_when_signature_type_2_and_eoa_differs(monkeypatch):
+    """Routing logic: three cases.
+
+    1. sig_type=0 + mismatch → REDEEM_SIGNER_FUNDER_MISMATCH (no Safe wrap)
+    2. sig_type=2 + EOA matches funder → Safe wrap NOT engaged (passes through)
+    3. sig_type=2 + mismatch → _redeem_via_safe is entered (VERSION call made)
+    """
+    from unittest.mock import MagicMock, patch
+
+    monkeypatch.setenv(AUTONOMOUS_REDEEM_ENABLED_ENV, "1")
+
+    # Case 1: sig_type=0, mismatch → hard fail, no RPC
+    rpc_no_call = MagicMock(side_effect=AssertionError("RPC must not be called"))
+    adapter0 = PolymarketV2Adapter(
+        funder_address=_TEST_MISMATCHED_FUNDER,
+        signer_key=_TEST_PRIVATE_KEY,
+        chain_id=137,
+        polygon_rpc_url=_TEST_RPC_URL,
+        rpc_call=rpc_no_call,
+        q1_egress_evidence_path=None,
+        client_factory=lambda **kwargs: MagicMock(name="ClobClient"),
+        signature_type=0,
+    )
+    r0 = adapter0.redeem(_TEST_CONDITION_ID, index_sets=[2])
+    assert r0["errorCode"] == "REDEEM_SIGNER_FUNDER_MISMATCH", r0
+    rpc_no_call.assert_not_called()
+
+    # Case 2: sig_type=2, EOA == funder → not a mismatch; standard path continues
+    # (will hit REDEEM_RPC_PRECHECK_FAILED because rpc_call raises, but NOT Safe wrap)
+    rpc_fail = MagicMock(side_effect=RuntimeError("rpc stub"))
+    adapter2_match = _make_adapter(rpc_fail, funder_address=_TEST_FUNDER)
+    r2_match = adapter2_match.redeem(_TEST_CONDITION_ID, index_sets=[2])
+    # Standard path: should reach RPC (nonce fetch) before failing, not Safe wrap
+    assert r2_match["errorCode"] != "REDEEM_SIGNER_FUNDER_MISMATCH", r2_match
+    assert r2_match["errorCode"] != "REDEEM_SAFE_VERSION_UNSUPPORTED", r2_match
+
+    # Case 3: sig_type=2, mismatch → Safe wrap engaged; VERSION call is first RPC call
+    rpc_version_fail = MagicMock(side_effect=RuntimeError("version rpc stub"))
+    adapter2_mismatch = PolymarketV2Adapter(
+        funder_address=_TEST_MISMATCHED_FUNDER,
+        signer_key=_TEST_PRIVATE_KEY,
+        chain_id=137,
+        polygon_rpc_url=_TEST_RPC_URL,
+        rpc_call=rpc_version_fail,
+        q1_egress_evidence_path=None,
+        client_factory=lambda **kwargs: MagicMock(name="ClobClient"),
+        signature_type=2,
+    )
+    r2_mismatch = adapter2_mismatch.redeem(_TEST_CONDITION_ID, index_sets=[2])
+    # Safe wrap engaged; VERSION() RPC failed → REDEEM_RPC_PRECHECK_FAILED
+    # (not REDEEM_SAFE_VERSION_UNSUPPORTED which is reserved for a decoded
+    # version string that doesn't match 1.3.0 — see SEV-3 fix).
+    assert r2_mismatch["errorCode"] == "REDEEM_RPC_PRECHECK_FAILED", r2_mismatch
+    rpc_version_fail.assert_called_once()
+
+
+def _make_safe_adapter(rpc_call_fn):
+    """Build adapter with sig_type=2 and mismatched funder (Safe deployment)."""
+    return PolymarketV2Adapter(
+        funder_address=_TEST_MISMATCHED_FUNDER,
+        signer_key=_TEST_PRIVATE_KEY,
+        chain_id=137,
+        polygon_rpc_url=_TEST_RPC_URL,
+        rpc_call=rpc_call_fn,
+        q1_egress_evidence_path=None,
+        client_factory=lambda **kwargs: MagicMock(name="ClobClient"),
+        signature_type=2,
+    )
+
+
+def _abi_encode_string(s: str) -> str:
+    """ABI-encode a string for eth_call return simulation."""
+    import eth_abi
+    return "0x" + eth_abi.encode(["string"], [s]).hex()
+
+
+def _abi_encode_address_array(addrs: list) -> str:
+    import eth_abi
+    return "0x" + eth_abi.encode(["address[]"], [addrs]).hex()
+
+
+def _hex32(n: int) -> str:
+    return "0x" + n.to_bytes(32, "big").hex()
+
+
+def test_safe_version_mismatch_fails_closed(monkeypatch):
+    """Mock VERSION()='1.4.1' → REDEEM_SAFE_VERSION_UNSUPPORTED; no broadcast."""
+    monkeypatch.setenv(AUTONOMOUS_REDEEM_ENABLED_ENV, "1")
+
+    rpc = MagicMock(return_value=_abi_encode_string("1.4.1"))
+    adapter = _make_safe_adapter(rpc)
+    result = adapter.redeem(_TEST_CONDITION_ID, index_sets=[2])
+
+    assert result["success"] is False
+    assert result["errorCode"] == "REDEEM_SAFE_VERSION_UNSUPPORTED", result
+    # Only VERSION() call should have been made; no broadcast
+    assert rpc.call_count == 1
+
+
+def test_safe_owner_not_in_getowners_fails_closed(monkeypatch):
+    """Mock getOwners() missing signer → REDEEM_SAFE_OWNER_MISMATCH."""
+    monkeypatch.setenv(AUTONOMOUS_REDEEM_ENABLED_ENV, "1")
+
+    # Sequence: VERSION ok, getOwners returns list without our signer
+    other_addr = "0x" + "33" * 20
+    responses = [
+        _abi_encode_string("1.3.0"),
+        _abi_encode_address_array([other_addr]),
+    ]
+    rpc = MagicMock(side_effect=responses)
+    adapter = _make_safe_adapter(rpc)
+    result = adapter.redeem(_TEST_CONDITION_ID, index_sets=[2])
+
+    assert result["success"] is False
+    assert result["errorCode"] == "REDEEM_SAFE_OWNER_MISMATCH", result
+    assert rpc.call_count == 2
+
+
+def test_eoa_matic_below_floor_fails_closed(monkeypatch):
+    """eth_getBalance < 0.05 MATIC → REDEEM_EOA_MATIC_INSUFFICIENT."""
+    monkeypatch.setenv(AUTONOMOUS_REDEEM_ENABLED_ENV, "1")
+
+    signer_eoa = _Account.from_key(_TEST_PRIVATE_KEY).address
+    # VERSION ok, getOwners includes signer, nonce=0, balance=0.01 MATIC
+    responses = [
+        _abi_encode_string("1.3.0"),
+        _abi_encode_address_array([signer_eoa]),
+        _hex32(0),            # nonce
+        hex(10_000_000_000_000_000),  # 0.01 MATIC — below 0.05 floor
+    ]
+    rpc = MagicMock(side_effect=responses)
+    adapter = _make_safe_adapter(rpc)
+    result = adapter.redeem(_TEST_CONDITION_ID, index_sets=[2])
+
+    assert result["success"] is False
+    assert result["errorCode"] == "REDEEM_EOA_MATIC_INSUFFICIENT", result
+
+
+def test_dry_run_signs_but_skips_broadcast(monkeypatch):
+    """DRY_RUN=1: raw tx built+signed, no eth_sendRawTransaction, errorCode=REDEEM_DRY_RUN_LOGGED."""
+    monkeypatch.setenv(AUTONOMOUS_REDEEM_ENABLED_ENV, "1")
+    monkeypatch.setenv("ZEUS_AUTONOMOUS_REDEEM_DRY_RUN", "1")
+
+    signer_eoa = _Account.from_key(_TEST_PRIVATE_KEY).address
+    # Responses for: VERSION, getOwners, nonce, eth_getBalance,
+    # eth_getTransactionCount, eth_gasPrice, eth_estimateGas
+    responses = [
+        _abi_encode_string("1.3.0"),
+        _abi_encode_address_array([signer_eoa]),
+        _hex32(0),                          # safe nonce
+        hex(100_000_000_000_000_000),        # 0.1 MATIC — above floor
+        hex(5),                              # EOA tx count
+        hex(30_000_000_000),                 # gasPrice 30 gwei
+        hex(200_000),                        # estimateGas
+    ]
+    rpc = MagicMock(side_effect=responses)
+    adapter = _make_safe_adapter(rpc)
+    result = adapter.redeem(_TEST_CONDITION_ID, index_sets=[2])
+
+    assert result["success"] is False
+    assert result["errorCode"] == "REDEEM_DRY_RUN_LOGGED", result
+    assert "raw_tx_hex" in result
+    assert result["raw_tx_hex"].startswith("0x")
+    # Confirm eth_sendRawTransaction was never called
+    for call_args in rpc.call_args_list:
+        method = call_args[0][1] if len(call_args[0]) >= 2 else ""
+        assert method != "eth_sendRawTransaction", (
+            "DRY_RUN must not call eth_sendRawTransaction"
+        )
+
+
+def test_exec_transaction_calldata_selector_is_0x6a761202():
+    """Wire pin: EXEC_TX_SELECTOR must equal keccak256('execTransaction(...)')[:4]."""
+    from eth_utils import keccak
+    from src.venue.safe_exec import EXEC_TX_SELECTOR, build_exec_transaction_calldata
+
+    # Verify constant
+    expected_selector = keccak(
+        b"execTransaction(address,uint256,bytes,uint8,uint256,uint256,uint256,address,address,bytes)"
+    )[:4]
+    assert EXEC_TX_SELECTOR == expected_selector, (
+        f"EXEC_TX_SELECTOR mismatch: {EXEC_TX_SELECTOR.hex()} != {expected_selector.hex()}"
+    )
+
+    # Verify calldata starts with selector
+    calldata = build_exec_transaction_calldata(
+        to="0x" + "bb" * 20,
+        value=0,
+        data=b"",
+        operation=0,
+        signatures=b"\x00" * 65,
+    )
+    assert calldata.startswith("0x" + EXEC_TX_SELECTOR.hex()), (
+        f"calldata selector mismatch: {calldata[:10]}"
+    )
+
+
+def test_operator_review_errorcodes_set_equals_adapter_enumerated_codes(monkeypatch):
+    """Drift antibody: _OPERATOR_REVIEW_ERRORCODES must contain the 4 new Safe codes.
+
+    For each new code, verifies it routes to REDEEM_OPERATOR_REQUIRED via
+    submit_redeem (integration: state machine routing, not just set membership).
+    """
+    import sqlite3
+    from datetime import datetime, timezone
+
+    from src.contracts.fx_classification import FXClassification
+    from src.execution.settlement_commands import (
+        init_settlement_command_schema,
+        request_redeem,
+        submit_redeem,
+    )
+
+    monkeypatch.setenv("ZEUS_PUSD_FX_CLASSIFIED", FXClassification.FX_LINE_ITEM.value)
+    monkeypatch.setattr(
+        "src.execution.settlement_commands.redemption_decision",
+        lambda: type("D", (), {"allow_redemption": True, "block_reason": None, "state": "LIVE_ENABLED"})(),
+    )
+
+    SAFE_CODES = {
+        "REDEEM_SAFE_VERSION_UNSUPPORTED",
+        "REDEEM_SAFE_OWNER_MISMATCH",
+        "REDEEM_EOA_MATIC_INSUFFICIENT",
+        "REDEEM_DRY_RUN_LOGGED",
+    }
+
+    for code in SAFE_CODES:
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        init_settlement_command_schema(conn)
+
+        command_id = request_redeem(
+            _TEST_CONDITION_ID,
+            "pUSD",
+            market_id="market-drift-test",
+            pusd_amount_micro=1_000_000,
+            token_amounts={"yes-token": "1"},
+            conn=conn,
+            requested_at=datetime(2026, 5, 19, tzinfo=timezone.utc),
+            winning_index_set='[2]',
+        )
+
+        _code = code  # capture for closure
+
+        class _SafeCodeAdapter:
+            def redeem(self, cid, *, index_sets=None):
+                return {"success": False, "errorCode": _code, "errorMessage": "test", "condition_id": cid}
+
+        submit_redeem(command_id, _SafeCodeAdapter(), object(), conn=conn)
+
+        row = conn.execute(
+            "SELECT state FROM settlement_commands WHERE command_id=?", (command_id,)
+        ).fetchone()
+        assert row["state"] == "REDEEM_OPERATOR_REQUIRED", (
+            f"errorCode {code!r} should route to REDEEM_OPERATOR_REQUIRED, got {row['state']!r}"
+        )
+        conn.close()
+
+
+def test_safe_branch_aborts_when_chain_id_not_polygon(monkeypatch):
+    """SEV-1 antibody: chain_id guard fires BEFORE Safe branch routing.
+
+    With signature_type=2 and a mismatched funder (Safe deployment scenario),
+    a non-137 chain_id must return REDEEM_WRONG_CHAIN without making any RPC
+    calls.  Prior to the fix the chain guard sat below the Safe branch dispatch,
+    so a wrong-chain adapter could enter _redeem_via_safe and begin preflights.
+    """
+    monkeypatch.setenv(AUTONOMOUS_REDEEM_ENABLED_ENV, "1")
+
+    rpc_no_call = MagicMock(side_effect=AssertionError("RPC must not be called on wrong chain"))
+    adapter = PolymarketV2Adapter(
+        funder_address=_TEST_MISMATCHED_FUNDER,
+        signer_key=_TEST_PRIVATE_KEY,
+        chain_id=1,  # Ethereum mainnet — wrong
+        polygon_rpc_url=_TEST_RPC_URL,
+        rpc_call=rpc_no_call,
+        q1_egress_evidence_path=None,
+        client_factory=lambda **kwargs: MagicMock(name="ClobClient"),
+        signature_type=2,  # Safe deployment — would enter _redeem_via_safe pre-fix
+    )
+
+    result = adapter.redeem(_TEST_CONDITION_ID, index_sets=[2])
+
+    assert result["success"] is False
+    assert result["errorCode"] == "REDEEM_WRONG_CHAIN", result
+    rpc_no_call.assert_not_called()
+
+
+def test_rpc_timeout_distinguished_from_version_mismatch(monkeypatch):
+    """SEV-3 antibody: RPC failure on VERSION() must return REDEEM_RPC_PRECHECK_FAILED,
+    not REDEEM_SAFE_VERSION_UNSUPPORTED.
+
+    A network blip or RPC node error on the VERSION() eth_call must not quarantine
+    a healthy Safe as having an unsupported version.
+    """
+    monkeypatch.setenv(AUTONOMOUS_REDEEM_ENABLED_ENV, "1")
+
+    # Simulate RPC failure (timeout, network error, etc.)
+    rpc = MagicMock(side_effect=RuntimeError("connection timeout"))
+    adapter = _make_safe_adapter(rpc)
+    result = adapter.redeem(_TEST_CONDITION_ID, index_sets=[2])
+
+    assert result["success"] is False
+    assert result["errorCode"] == "REDEEM_RPC_PRECHECK_FAILED", (
+        f"RPC failure must map to REDEEM_RPC_PRECHECK_FAILED, not "
+        f"REDEEM_SAFE_VERSION_UNSUPPORTED; got {result['errorCode']!r}"
+    )
+
+    # Semantic mismatch (decoded version != 1.3.0) must still produce the
+    # semantic code — the RPC itself succeeds but the version is wrong.
+    rpc2 = MagicMock(return_value=_abi_encode_string("1.4.1"))
+    adapter2 = _make_safe_adapter(rpc2)
+    result2 = adapter2.redeem(_TEST_CONDITION_ID, index_sets=[2])
+
+    assert result2["success"] is False
+    assert result2["errorCode"] == "REDEEM_SAFE_VERSION_UNSUPPORTED", (
+        f"Semantic version mismatch must map to REDEEM_SAFE_VERSION_UNSUPPORTED; "
+        f"got {result2['errorCode']!r}"
+    )
+
+
+def test_safe_sign_against_pinned_eth_account_version(monkeypatch):
+    """SEV-2 antibody: sign_safe_tx must use the public unsafe_sign_hash API and
+    produce a valid 65-byte signature for a known input.
+
+    eth_account==0.13.7 is pinned in requirements.txt.  This test catches any
+    API rename that would cause a silent AttributeError at signing time.
+    """
+    from src.venue.safe_exec import sign_safe_tx
+
+    test_hash = bytes.fromhex("7cabb3e5b9d5fd12a38408cb16feefd041cb8cb8cfeb4dd465397af08e0f2ec6")
+    sig = sign_safe_tx(test_hash, _TEST_PRIVATE_KEY)
+
+    assert isinstance(sig, bytes), f"Expected bytes, got {type(sig)}"
+    assert len(sig) == 65, f"Expected 65-byte signature, got {len(sig)}"
+    # v byte must be 27 or 28 (Safe EOA ECDSA convention)
+    assert sig[64] in (27, 28), f"Expected v in (27, 28), got {sig[64]}"

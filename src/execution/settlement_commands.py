@@ -505,6 +505,15 @@ def submit_redeem(
                 "REDEEM_CALLDATA_BUILD_FAILED",
                 "REDEEM_SIGNER_FUNDER_MISMATCH",
                 "REDEEM_WRONG_CHAIN",
+                # Safe v1.3.0 execTransaction wrap codes (Option A, 2026-05-19)
+                "REDEEM_SAFE_VERSION_UNSUPPORTED",
+                "REDEEM_SAFE_OWNER_MISMATCH",
+                "REDEEM_EOA_MATIC_INSUFFICIENT",
+                # Design intent: dry-run routes to OPERATOR_REQUIRED so the
+                # operator reviews the Tenderly trace before clearing to live
+                # broadcast.  This is the intended smoke-gate for first-run
+                # validation, not a transient error state.
+                "REDEEM_DRY_RUN_LOGGED",
             })
             error_code = raw_payload.get("errorCode")
             stub_deferred = error_code in _OPERATOR_REVIEW_ERRORCODES
