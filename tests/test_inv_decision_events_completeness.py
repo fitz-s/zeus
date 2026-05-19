@@ -1,42 +1,41 @@
 # Created: 2026-05-19
 # Last reused or audited: 2026-05-19
-# Authority basis: PHASE_1_ULTRAPLAN.md §4.5
+# Authority basis: PHASE_1_ULTRAPLAN.md §4.4 (Path D natural-key antibody)
 # SCAFFOLD: INV-decision-events-completeness antibody — pending T1 production pass
 
 """
-Antibody test: INV-decision-events-completeness
+Antibody test: INV-decision-events-completeness (natural-key, no ATTACH)
 
-Invariant: for any recent live cycle, COUNT(decision_events WHERE cycle_id=X)
-== COUNT(ensemble_snapshots_v2 WHERE cycle_id=X AND decision_group_id IS NOT NULL).
+Invariant: for every decision-tagged forecast in the last 7 days (ensemble_snapshots_v2
+WHERE causality_status='OK'), decision_events must carry at least one row keyed by
+the matching natural tuple (market_id, condition_id, temperature_metric, target_date).
 
-Join key: decision_group_id (not strategy_key).
-Non-empty precondition: skip if cycle has no decision-tagged forecasts.
+Cross-module relationship test (Fitz §3 invariant pattern):
+  forecasts.ensemble_snapshots_v2 → forecasts.market_events_v2 (city→market_id)
+  → world.decision_events (natural-key lookup)
 
-Read path (production): get_forecasts_connection_with_world() — sanctioned ATTACH
-(forecasts=MAIN, world=ATTACHED). Read-only use only.
+Independent read connections — INV-37 trivially honored (no ATTACH path).
+Non-empty precondition: skip (not fail) if no decision-tagged forecasts in window.
 
-AMBIGUITY (for production pass): get_forecasts_connection_with_world() signature
-is `*, write_class: WriteClass | str = "bulk"` — no `mode="ro"` kwarg exists.
-§4.5 pseudocode uses mode="ro" which is incorrect. Production pass must open
-with write_class="bulk" or use independent read connections.
-
-xfail-strict: test will fail until T1 production is complete (table does not exist yet).
+xfail-strict: test will fail until T1 production is complete
+(decision_events table does not exist yet).
 """
 
 import pytest
 
 
 @pytest.mark.xfail(strict=True, reason="SCAFFOLD — antibody pending T1 production")
-def test_inv_decision_events_completeness_per_recent_cycle() -> None:
-    """SCAFFOLD: cross-DB count comparison via sanctioned ATTACH read.
+def test_inv_decision_events_completeness_natural_key() -> None:
+    """Cross-module: every decision-tagged forecast (7d, causality_status='OK')
+    in ensemble_snapshots_v2 must have >= 1 decision_events row keyed by natural tuple.
 
-    Production implementation (pending T1 production pass):
-    1. Identify a recent live cycle_id with decision-tagged forecasts.
-    2. Open get_forecasts_connection_with_world(write_class="bulk").
-       (NOTE: no mode="ro" — production pass resolves correct read path)
-    3. COUNT ensemble_snapshots_v2 WHERE cycle_id=? AND decision_group_id IS NOT NULL.
-    4. COUNT decision_events WHERE cycle_id=?.
-    5. Skip if n_forecast == 0 (non-degenerate precondition).
-    6. Assert n_events == n_forecast.
+    Independent read connections (INV-37 trivially honored — no ATTACH).
+    city→(market_id, condition_id) resolved Python-side via market_events_v2.
+    pytest.skip (not fail) if no candidates in 7d window.
+
+    See PHASE_1_ULTRAPLAN.md §4.4 for full pseudocode.
     """
-    pytest.fail("SCAFFOLD — decision_events table does not exist yet; antibody pending T1 production")
+    pytest.fail(
+        "SCAFFOLD — decision_events table does not exist yet; "
+        "antibody pending T1 production"
+    )

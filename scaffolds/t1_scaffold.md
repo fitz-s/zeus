@@ -1,286 +1,225 @@
 <!-- Created: 2026-05-19 -->
 <!-- Last reused or audited: 2026-05-19 -->
-<!-- Authority basis: PHASE_1_ULTRAPLAN.md §4 -->
+<!-- Authority basis: PHASE_1_ULTRAPLAN.md §4 (Path D natural-key reframe, v2) -->
 
-# T1 SCAFFOLD — decision_events instrumentation hardening
+# T1 SCAFFOLD v2 — decision_events instrumentation hardening (Path D)
 
-**Status**: SCAFFOLD (pre-critic, pre-production)
+**Status**: SCAFFOLD v2 (post-critic-v1 Path D reframe; awaiting critic round 2)
 **Author**: sonnet executor, worktree `phase1-t1-decision-events-20260519`
 **Entry SHA**: origin/main = `f5f1da3a4b`
 
 ---
 
-## 1. Pre-flight admission verdict
+## 1. Architectural reframe (Path D)
 
-`topology_doctor.py --navigation --json` returned:
+`decision_group_id` is a **derived hash**, not a materialised join key.  Treating
+it as a PK would create 4 drift points and break on hash version changes.
+
+**Path D**: the natural identifying tuple IS the join key.  Hash is audit-only.
 
 ```
-status: advisory_only
-profile_id: generic
-confidence: 0.0
-needs_typed_intent: true
-selected_by: weak_term_nonselectable
+DecisionNaturalKey = (market_id, condition_id, temperature_metric, target_date, observation_time)
 ```
 
-Advisory only — no strong-term profile matched. Out-of-scope file advisory:
-- `architecture/source_rationale.yaml` listed as `companion_missing` (not in scope for this dispatch; production pass must include it alongside yaml manifest update).
-
-**Decision**: proceed. The advisory reflects topology_doctor profile gap, not a conflicting ownership claim. `architecture/db_table_ownership.yaml:481` confirms `decision_log` = world-class; `decision_events` follows same pattern.
+See `PHASE_1_ULTRAPLAN.md §4.0` for full Path A/B/C/D comparison matrix.
 
 ---
 
 ## 2. DB ownership
 
-| Table | DB | schema_class | Version owner | Colocation rationale |
-|---|---|---|---|---|
-| `decision_events` (new) | **world** | `world_class` | `SCHEMA_VERSION` | Colocates with `decision_log` (world-class, `db_table_ownership.yaml:481`). World-DB authority allows readers to join `decision_events ↔ decision_log` within one connection. |
+| Table | DB | schema_class | Rationale |
+|---|---|---|---|
+| `decision_events` (new) | **world** | `world_class` | Colocates with `decision_log` (world-class, `db_table_ownership.yaml:481`). |
 
-**INV-37 compliance**: T1 writes only to world DB (single-DB write — INV-37 trivially honored). Cross-DB backfill reads use 3 independent read-only connections (sequential snapshot, fail-open).
-
-**Do NOT create a new ATTACH path for T1.**
+**INV-37**: T1 writes only to world DB (single-DB). Cross-DB backfill uses 3
+independent read-only connections — no new ATTACH path.
 
 ---
 
-## 3. Schema (final, with source-contract attribution)
+## 3. Schema (Path D — full outline)
+
+Full SQL in `scripts/migrate_decision_events_create_2026_05_19.py` (`_CREATE_TABLE`,
+`_CREATE_TRIGGER`, `_CREATE_INDICES`). Key structure:
 
 ```sql
-CREATE TABLE IF NOT EXISTS decision_events (
-    -- PK
-    decision_group_id   TEXT NOT NULL,
-    decision_seq        INTEGER NOT NULL,
-    decision_time       TEXT NOT NULL,            -- ISO8601 UTC
-
-    -- Identity (source: ExecutionIntent)
-    market_id           TEXT NOT NULL,
-    condition_id        TEXT NOT NULL,
-    outcome             TEXT NOT NULL,
-    side                TEXT NOT NULL,
-    strategy_key        TEXT NOT NULL,
-    cycle_id            TEXT,
-    cycle_iteration     INTEGER,
-
-    -- Probability outputs (source: EffectiveKellyContext + decision pipeline)
-    p_posterior         REAL,
-    edge                REAL,
-    target_size_usd     REAL,
-    target_price        REAL,
-
-    -- DecisionSourceContext PR 3 (4 fields; source: observation pipeline)
-    forecast_time       TEXT,
-    observation_time    TEXT NOT NULL,
-    provider_reported_time TEXT,                  -- Path F Optional; None if WU API
-    observation_available_at TEXT NOT NULL,
-    polymarket_end_anchor_source TEXT NOT NULL,   -- 'gamma_explicit' | 'f1_12z_fallback'
-
-    -- DecisionSourceContext PR 6 (8 fields; mixed sources)
-    first_member_observed_time TEXT NOT NULL,     -- source: ensemble_snapshots_v2 (forecasts)
-    run_complete_time          TEXT NOT NULL,     -- source: ensemble_snapshots_v2 (forecasts)
-    zeus_submit_intent_time    TEXT NOT NULL,     -- source: settlement_commands (trade)
-    venue_ack_time             TEXT NOT NULL,     -- source: settlement_commands (trade)
-    first_inclusion_block_time TEXT,              -- source: wrap_unwrap_commands (world); Optional
-    finality_confirmed_time    TEXT,              -- source: wrap_unwrap_commands (world); Optional
-    clock_skew_estimate_ms     INTEGER,           -- source: settlement_commands (trade); Optional
-    raw_orderbook_hash_transition_delta_ms INTEGER,  -- source: ensemble_snapshots_v2 (forecasts); Optional
-
-    -- Provenance
-    schema_version             INTEGER NOT NULL,  -- 13 for live writes; 12 for backfilled rows
-    source                     TEXT NOT NULL,     -- 'phase0_backfill' | 'live_decision'
-
-    PRIMARY KEY (decision_group_id, decision_seq)
-);
-
-CREATE INDEX IF NOT EXISTS idx_decision_events_market   ON decision_events(market_id);
-CREATE INDEX IF NOT EXISTS idx_decision_events_strategy ON decision_events(strategy_key);
-CREATE INDEX IF NOT EXISTS idx_decision_events_time     ON decision_events(decision_time);
+PRIMARY KEY (market_id, condition_id, temperature_metric,
+             target_date, observation_time, decision_seq)
 ```
 
-### 3.1 Source verification
+`decision_group_id` — nullable on INSERT; populated by AFTER INSERT TRIGGER.
 
-- `raw_orderbook_hash_transition_delta_ms` ← `ensemble_snapshots_v2` (forecasts): verified at
-  `src/state/schema/v2_schema.py:211` (ALTER TABLE adds the column to ensemble_snapshots_v2) and
-  `src/engine/evaluator.py:4052,4062` (reads from ens_result, writes to ensemble_snapshots_v2).
-- `clock_skew_estimate_ms` ← `settlement_commands` (trade): per PR 6 placement — VERIFY in production pass
-  by grepping `settlement_commands` schema before writing.
-- NOT from `wrap_unwrap_commands` — that table owns only chain-finality fields.
+**CHECK constraints**: `temperature_metric IN ('high','low')` /
+`polymarket_end_anchor_source IN ('gamma_explicit','f1_12z_fallback')` /
+`schema_version IN (12,13)` / `source IN ('phase0_backfill','live_decision')`
+
+**3 indices**: `(market_id, target_date)` / `(strategy_key, decision_time)` /
+`(decision_group_id)` (audit lookups)
+
+### 3.1 Column source attribution
+
+| Column | Source table | DB |
+|---|---|---|
+| `raw_orderbook_hash_transition_delta_ms` | `ensemble_snapshots_v2` | forecasts |
+| `clock_skew_estimate_ms_at_submit` | `settlement_commands` | trade |
+| `first_inclusion_block_time`, `finality_confirmed_time` | `wrap_unwrap_commands` | world |
+| `provider_reported_time` | Path F Optional — None if WU API | — |
 
 ### 3.2 decision_seq derivation
 
-- **Backfill**: monotonic per `decision_group_id`, ordered by `(forecast_time, observation_time)` ASC, starting at 0
-- **Live writes**: `SELECT COALESCE(MAX(decision_seq), -1) + 1 FROM decision_events WHERE decision_group_id = ?` within the write transaction — production pass implements atomically
+- **Backfill**: monotonic per natural-key tuple ordered by `decision_time` ASC, from 0
+- **Live writes**: `SELECT COALESCE(MAX(decision_seq),-1)+1` under `db_writer_lock(LIVE)` + SAVEPOINT, WHERE natural-key matches
 
 ### 3.3 NOT NULL classification
 
-REQUIRED (7): `decision_group_id`, `decision_time`, `market_id`, `condition_id`, `outcome`, `side`, `strategy_key`
+**Natural-key** (6): `market_id`, `condition_id`, `temperature_metric`, `target_date`,
+`observation_time`, `decision_seq`
 
-PR-3/PR-6 REQUIRED (7): `observation_time`, `observation_available_at`, `polymarket_end_anchor_source`, `first_member_observed_time`, `run_complete_time`, `zeus_submit_intent_time`, `venue_ack_time`
+**Identity/time** (5): `decision_time`, `outcome`, `side`, `strategy_key`, `observation_available_at`
 
-Optional (all chain-finality + probabilistic): `first_inclusion_block_time`, `finality_confirmed_time`, `clock_skew_estimate_ms`, `raw_orderbook_hash_transition_delta_ms`, `forecast_time`, `provider_reported_time`, `cycle_id`, `cycle_iteration`, `p_posterior`, `edge`, `target_size_usd`, `target_price`
+**PR-3** (1): `polymarket_end_anchor_source`
+
+**PR-6** (4): `first_member_observed_time`, `run_complete_time`, `zeus_submit_intent_time`, `venue_ack_time`
+
+**Provenance** (2): `schema_version`, `source`
+
+**Total NOT NULL: 18** (ultraplan §4.2 says 17 — discrepancy flagged in §7 ambiguity #2)
 
 ---
 
-## 4. Writer + reader signatures
+## 4. New contract: DecisionNaturalKey
+
+**File**: `src/contracts/decision_natural_key.py` (new)
+
+```python
+DecisionNaturalKey = NewType('DecisionNaturalKey', tuple)
+# runtime: tuple[str, str, Literal['high','low'], str, str]
+# positional: (market_id, condition_id, temperature_metric, target_date, observation_time)
+```
+
+Three helper stubs (`NotImplementedError`):
+- `from_market_event_row(row)` — map market_events_v2 row → key
+- `from_ensemble_snapshot_row(row)` — includes city→market_id Python-side resolution
+- `from_artifact_json(j)` — robust to missing keys in historical artifact_json
+
+---
+
+## 5. Writer + reader signatures
 
 ```python
 # src/state/decision_events.py
 
 def write_decision_event(
-    ctx: DecisionSourceContext,
-    ekc: EffectiveKellyContext,
-    intent: ExecutionIntent,
+    natural_key: DecisionNaturalKey,
+    ctx: DecisionSourceContext,       # from src.contracts.execution_intent
+    ekc: EffectiveKellyContext,       # from src.contracts.effective_kelly_context
+    intent: ExecutionIntent,          # from src.contracts.execution_intent
     *,
     conn: sqlite3.Connection | None = None,
-) -> None:
-    """
-    Write a single decision_events row for a live decision.
-    If conn=None, opens get_world_connection(write_class="live").
-    decision_seq is derived atomically via MAX(decision_seq)+1.
-    source='live_decision', schema_version=SCHEMA_VERSION.
-    """
-    ...
+) -> None: ...
 
-def read_decision_event_by_group(
-    decision_group_id: str,
-    *,
-    conn: sqlite3.Connection | None = None,
-) -> list[DecisionEventRow]:
-    """
-    Read all decision_events rows for a decision_group_id from world DB.
-    Returns list ordered by decision_seq ASC.
-    Returns [] if not found (caller may fall back to Phase 0 temp storage).
-    If conn=None, opens get_world_connection(write_class=None).
-    """
-    ...
+def read_decision_event_by_natural_key(key: DecisionNaturalKey, ...) -> list[DecisionEventRow]: ...
+def read_decision_event_by_hash(decision_group_id: str, ...) -> list[DecisionEventRow]: ...
 ```
+
+All three raise `NotImplementedError` (SCAFFOLD).  `read_decision_event_by_group`
+from v1 removed cleanly.
 
 ---
 
-## 5. Backfill plan
+## 6. Backfill plan (Path D — artifact_json primary)
 
-Cross-DB semantic: sequential snapshot reads (3 independent read-only connections), Python merge, single-DB write to world. NOT atomic across DBs. INV-37 honored (no new ATTACH path).
+**Primary source**: `decision_log.artifact_json` (world DB — same DB as
+`decision_events`; no cross-DB read needed for core fields).
 
-```
-for chunk in iter_group_ids(source=world_decision_log, chunk_size=500):
-    1. Read forecasts (independent read conn):
-       ensemble_snapshots_v2 → first_member_observed_time, run_complete_time,
-                                raw_orderbook_hash_transition_delta_ms
-       WHERE decision_group_id IN chunk
+**Enrichment** (optional, independent reads keyed on natural fields):
+- forecasts: `ensemble_snapshots_v2` → PR-6 timing fields
+- trade: `settlement_commands` → PR-6 timing + `clock_skew_estimate_ms_at_submit`
+- `city→(market_id, condition_id)` resolved Python-side via `market_events_v2`
 
-    2. Read trade (independent read conn):
-       settlement_commands → zeus_submit_intent_time, venue_ack_time,
-                             clock_skew_estimate_ms, polymarket_end_anchor_source
-       WHERE decision_group_id IN chunk
+**`INSERT OR IGNORE`** (NOT REPLACE) — does not overwrite existing live rows.
 
-    3. Read world (independent read conn):
-       wrap_unwrap_commands → first_inclusion_block_time, finality_confirmed_time
-       decision_log         → decision_time, market_id, condition_id, outcome,
-                              side, strategy_key, observation_time,
-                              observation_available_at, forecast_time
-       WHERE decision_group_id IN chunk
+**Path F honesty**: historical PR-3/PR-6 fields → NULL.
+`polymarket_end_anchor_source` defaults to `'gamma_explicit'` (Phase 0 critic B2).
 
-    4. Python-merge by decision_group_id
-       Missing side → Optional fields = NULL (fail-open, not abort)
-
-    5. Write to world.decision_events
-       INSERT OR REPLACE INTO decision_events ...
-       schema_version=12, source='phase0_backfill'
-       (idempotent on PK conflict — safe to re-run)
-```
-
-**Fail-open invariant**: partial-missing group_id still writes. `source='phase0_backfill'` distinguishes from live rows.
+Renamed file: `scripts/backfill_decision_events_from_artifact_json.py`
+(was `backfill_decision_events_from_phase0_temp.py` — `git mv` preserves history)
 
 ---
 
-## 6. Migration script outline
+## 7. Migration script outline
 
 `scripts/migrate_decision_events_create_2026_05_19.py`:
+- `_CREATE_TABLE` — full 30-column schema string
+- `_CREATE_TRIGGER` — AFTER INSERT trigger populating `decision_group_id` via UDF
+- `_CREATE_INDICES` — 3 index statements
+- `main()` raises `NotImplementedError` (production pass fills body + UDF binding)
 
-- Opens world DB with `get_world_connection(write_class="bulk")`
-- Executes `CREATE TABLE IF NOT EXISTS decision_events (...)` per §3
-- Executes 3 `CREATE INDEX IF NOT EXISTS` per §3
-- Idempotent — safe to re-run; IF NOT EXISTS guards prevent errors
-- Does NOT bump SCHEMA_VERSION (that happens in `src/state/db.py` in production pass)
-- Logs row to stdout: `"decision_events table created/verified in {db_path}"`
-
----
-
-## 7. Schema bump path (document only — NOT yet applied)
-
-File to modify: `src/state/db.py`
-
-Change: `SCHEMA_VERSION = 12` → `SCHEMA_VERSION = 13`
-
-Comment update:
-```python
-SCHEMA_VERSION = 13  # 2026-05-19 T1: decision_events table + indices (world DB)
-```
-
-After bump: regenerate `tests/state/_schema_pinned_hash.txt` via:
-```bash
-python -m pytest tests/state/test_schema_pinned_hash.py --update-hash
-# or however the existing pinned hash is generated — check test file
-```
-
-Also: add `decision_events` entry to `architecture/db_table_ownership.yaml` (see §8).
-Also: add `decision_events` entry to `architecture/source_rationale.yaml` (companion file; production pass).
+**Does NOT bump SCHEMA_VERSION** (production pass owns `src/state/db.py`)
 
 ---
 
-## 8. Manifest entries (document only — NOT yet applied)
+## 8. Antibody (natural-key, no ATTACH)
 
-### db_table_ownership.yaml (after `decision_log` entry at line 481)
+**File**: `tests/test_inv_decision_events_completeness.py`
 
-```yaml
-  - name: decision_events
-    db: world
-    schema_class: world_class
-    schema_version_owner: SCHEMA_VERSION
-    created_by: migrate_decision_events_create_2026_05_19
-    pk_col: "[decision_group_id, decision_seq]"
-    notes: >
-      Canonical consolidated decision record per decision_group_id.
-      Phase 1 T1 landing (PHASE_1_ULTRAPLAN.md §4).
-      Colocates with decision_log (world-class) for join capability.
-      Backfilled from ensemble_snapshots_v2 (forecasts) + settlement_commands (trade)
-      + wrap_unwrap_commands (world) via sequential-snapshot fail-open backfill script.
-```
+- `@pytest.mark.xfail(strict=True)` (table not yet created)
+- Tests: `forecasts.ensemble_snapshots_v2` (7d window, `causality_status='OK'`)
+  → city resolved to `(market_id, condition_id)` via `market_events_v2`
+  → `world.decision_events` COUNT ≥ 1 per natural-key tuple
+- **Independent read connections** (`get_forecasts_connection_read_only()` +
+  `get_world_connection_read_only()`) — INV-37 trivially honored
+- `pytest.skip` (not fail) if no candidates in window
 
 ---
 
-## 9. Antibody design
+## 9. Schema bump path (NOT applied — production pass)
 
-### INV-decision-events-completeness
+`src/state/db.py`: `SCHEMA_VERSION = 12` → `SCHEMA_VERSION = 13`
 
-**Invariant**: For any recent live cycle, `COUNT(decision_events WHERE cycle_id=X)` equals `COUNT(ensemble_snapshots_v2 WHERE cycle_id=X AND decision_group_id IS NOT NULL)`.
+Regenerate `tests/state/_schema_pinned_hash.txt` after bump.
 
-**Test file**: `tests/test_inv_decision_events_completeness.py`
-
-**xfail-strict reason**: `"SCAFFOLD — antibody pending T1 production"`
-
-**Read path**: `get_forecasts_connection_with_world()` (sanctioned ATTACH: forecasts=MAIN, world=ATTACHED). This is a read-only use of the cross-DB attach path — no write surface.
-
-**Ambiguity flagged for production pass**: `get_forecasts_connection_with_world` signature is `*, write_class: WriteClass | str = "bulk"` — no `mode="ro"` kwarg exists. The §4.5 pseudocode shows `mode="ro"` which is incorrect. Production pass must open this connection with `write_class="bulk"` or open independent read connections. Do NOT add a `mode` kwarg.
+Manifest entries (same commit as CREATE TABLE):
+- `architecture/db_table_ownership.yaml` — `decision_events` after `decision_log` (line 481):
+  `db: world, schema_class: world_class, pk_col: "[market_id, condition_id, temperature_metric, target_date, observation_time, decision_seq]"`
+- `architecture/source_rationale.yaml` — companion entry (topology_doctor advisory)
 
 ---
 
-## 10. Skeleton files checklist
+## 10. PR sequencing
 
-| File | Type | LOC budget |
+| PR | Title | Contents |
 |---|---|---|
-| `src/state/decision_events.py` | writer + reader stubs | ~40 LOC |
-| `scripts/migrate_decision_events_create_2026_05_19.py` | migration stub | ~35 LOC |
-| `scripts/backfill_decision_events_from_phase0_temp.py` | backfill pseudocode shell | ~50 LOC |
-| `tests/test_inv_decision_events_completeness.py` | xfail antibody scaffold | ~35 LOC |
+| **PR-T1-A** | foundation: DecisionNaturalKey + decision_events table | `src/contracts/decision_natural_key.py` + `src/state/decision_events.py` + migration script + `src/state/db.py` SCHEMA_VERSION bump + manifest entries |
+| **PR-T1-B** | backfill + antibody | `scripts/backfill_decision_events_from_artifact_json.py` + `tests/test_inv_decision_events_completeness.py` (promote from xfail to strict-pass) |
 
-Total skeleton LOC target: ~160 (well within 200 budget).
+PR-T1-B depends on PR-T1-A merged.
 
 ---
 
-## 11. Ambiguities for critic / production pass
+## 11. Ambiguities for wave-critic round 2
 
-1. **`get_forecasts_connection_with_world(mode="ro")` does not exist** — §4.5 antibody pseudocode uses a non-existent kwarg. Production pass picks correct read path. (See §9 above.)
+**#1 CRITICAL — hash UDF 4-arg mismatch**: `PHASE_1_ULTRAPLAN.md §4.2.2` says the
+trigger calls `decision_group_id_v1(strategy_key, market_id, target_date, observation_time)`
+(4 args).  But `src/contracts/decision_group_id.py:50` (`decision_group_id_v1_hash`)
+takes **7 named kwargs** (`market_id, target_date, forecast_available_at, source_id,
+data_version, bin_index, lead_days_bucket`) and has a completely different canonical
+form.  These signatures are irreconcilable without a decision:
+- (a) New wrapper mapping 4 trigger args → 7-kwarg hash with fixed defaults for
+  `forecast_available_at, source_id, data_version, bin_index, lead_days_bucket`
+- (b) The trigger uses a different, simpler hash function defined fresh for
+  `decision_events` (not the calibration-pair `decision_group_id_v1_hash`)
+- (c) Python UDF dropped; trigger left as `NULL` placeholder; hash computed by
+  writer Python code and passed in directly (Option β from ultraplan)
+**Migration script `_CREATE_TRIGGER` currently uses Option α stub with 4-arg call
+— needs wave-critic decision before production pass.**
 
-2. **"24 fields" count in §4.1** refers to DecisionSourceContext fields, not total table columns. §4.3 SQL has 29 columns total (identity + probability + PR3 + PR6 + provenance). The schema follows §4.3 verbatim.
+**#2 NOT NULL count discrepancy**: my recount = **18** NOT NULL columns; ultraplan
+§4.2 states 17.  Recount: 6 natural-key + decision_time + outcome + side +
+strategy_key + observation_available_at + polymarket_end_anchor_source +
+first_member_observed_time + run_complete_time + zeus_submit_intent_time +
+venue_ack_time + schema_version + source = 18.  Wave-critic should confirm
+which column was omitted from the ultraplan count.
 
-3. **`clock_skew_estimate_ms` source attribution** — ultraplan §4.4 lists it under trade-side `settlement_commands`. Production pass must grep `settlement_commands` schema to confirm before writing.
-
-4. **`topology_doctor` companion advisory** — `architecture/source_rationale.yaml` required alongside yaml manifest update. Production pass must include it.
+**#3 `get_world_connection_read_only` existence**: antibody uses
+`get_world_connection_read_only()`.  Production pass must verify this function
+exists in `src/state/db.py` or use the correct read-only equivalent.
