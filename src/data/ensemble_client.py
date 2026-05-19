@@ -7,6 +7,7 @@ API: https://ensemble-api.open-meteo.com/v1/ensemble
 Free tier: 10,000 calls/day, no API key required.
 """
 
+import inspect
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from typing import Optional
@@ -264,14 +265,16 @@ def _fetch_registered_ingest_ensemble(
     # Thread temperature_metric to the ingest class constructor so metric-aware
     # ingest classes (e.g. ECMWFOpenDataIngest) can query only the requested
     # metric without cross-metric coupling (PIPELINE_REVIEW.md §7).
-    # Fall back through progressively fewer kwargs for classes that don't accept them.
-    try:
+    # Use inspect.signature to determine which kwargs the class accepts, avoiding
+    # a broad TypeError catch that could mask real constructor bugs (e.g. a
+    # TypeError raised inside __init__ would silently fall back to a wrong sig).
+    _init_params = inspect.signature(ingest_class.__init__).parameters
+    if "temperature_metric" in _init_params and "city" in _init_params:
         ingest = ingest_class(city=city, temperature_metric=temperature_metric)
-    except TypeError:
-        try:
-            ingest = ingest_class(city=city)
-        except TypeError:
-            ingest = ingest_class()
+    elif "city" in _init_params:
+        ingest = ingest_class(city=city)
+    else:
+        ingest = ingest_class()
     bundle = ingest.fetch(fetch_time, lead_hours)
     parsed = _parse_ingest_bundle(
         bundle, model=model, fetch_time=fetch_time, role=role,

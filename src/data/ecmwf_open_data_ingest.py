@@ -90,6 +90,10 @@ class ECMWFOpenDataIngest:
         city: "City | None" = None,
         temperature_metric: "str | None" = None,
     ) -> None:
+        if temperature_metric is not None and temperature_metric not in ("high", "low"):
+            raise ValueError(
+                f"temperature_metric must be 'high', 'low', or None; got {temperature_metric!r}"
+            )
         self._city = city
         self._temperature_metric = temperature_metric
 

@@ -1,6 +1,9 @@
 # Created: 2026-05-19
 # Last reused or audited: 2026-05-19
 # Authority basis: PIPELINE_REVIEW.md §7 + PR #190 root-cause
+# Lifecycle: created=2026-05-19; last_reviewed=2026-05-19; last_reused=never
+# Purpose: Antibody tests — ECMWFOpenDataIngest metric independence (HIGH/LOW path isolation).
+# Reuse: Run when modifying ecmwf_open_data_ingest.py, _fetch_db_payload, or ensemble_client ingest dispatch.
 """Antibody tests: ECMWFOpenDataIngest metric independence.
 
 Root cause (PIPELINE_REVIEW.md §7): PR #190 introduced a fail-closed require-both-metrics

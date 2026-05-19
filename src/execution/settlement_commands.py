@@ -390,6 +390,19 @@ def submit_redeem(
 
         conn = get_trade_connection_with_world()
     assert conn is not None
+    # INV-37 (ATTACH guard): callers may pass an external trade connection that
+    # lacks the world schema (e.g. main.py's scheduler conn opened via
+    # get_trade_connection(write_class="live")).  Ensure world is ATTACHed
+    # before the world.executable_market_snapshots query at line ~482 so that
+    # negRisk snapshot lookup never raises OperationalError and silently routes
+    # every redeem to REDEEM_NEGRISK_FACT_MISSING / REDEEM_OPERATOR_REQUIRED.
+    from src.state.db import ZEUS_WORLD_DB_PATH as _WORLD_PATH
+    _attached = {row[1] for row in conn.execute("PRAGMA database_list").fetchall()}
+    if "world" not in _attached:
+        try:
+            conn.execute("ATTACH DATABASE ? AS world", (str(_WORLD_PATH),))
+        except sqlite3.OperationalError as _att_exc:
+            logger.warning("[SUBMIT_REDEEM_ATTACH_WORLD_FAILED] exc=%r", _att_exc)
     init_settlement_command_schema(conn)
     submitted_at_s = _coerce_time(submitted_at)
 
@@ -549,13 +562,17 @@ def submit_redeem(
                         else:
                             winning_token_id = None
                         if winning_token_id and winning_token_id in token_amounts:
-                            amount_per_slot = round(
-                                float(token_amounts[winning_token_id]) * 1_000_000
+                            from decimal import Decimal, ROUND_HALF_UP
+                            amount_per_slot = int(
+                                (Decimal(str(token_amounts[winning_token_id])) * Decimal(1_000_000))
+                                .quantize(Decimal("1"), rounding=ROUND_HALF_UP)
                             )
                         elif len(token_amounts) == 1:
                             # Single-key map: use the only entry (binary market)
-                            amount_per_slot = round(
-                                float(next(iter(token_amounts.values()))) * 1_000_000
+                            from decimal import Decimal, ROUND_HALF_UP
+                            amount_per_slot = int(
+                                (Decimal(str(next(iter(token_amounts.values())))) * Decimal(1_000_000))
+                                .quantize(Decimal("1"), rounding=ROUND_HALF_UP)
                             )
                     except Exception as amt_exc:
                         logger.warning(
