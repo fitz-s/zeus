@@ -20,6 +20,7 @@ from typing import Mapping, Literal
 
 from src.data.forecast_ingest_protocol import ForecastAuthorityTier, ForecastIngestProtocol
 from src.data.tigge_client import TIGGEIngest
+from src.data.ecmwf_open_data_ingest import ECMWFOpenDataIngest
 
 
 ForecastSourceTier = Literal["primary", "secondary", "experimental", "disabled"]
@@ -188,6 +189,7 @@ SOURCES: dict[str, ForecastSourceSpec] = {
         tier="secondary",
         kind="scheduled_collector",
         model_name="ecmwf_open_data",
+        ingest_class=ECMWFOpenDataIngest,
         allowed_roles=(
             "entry_primary",
             "training_archive_alignment",
