@@ -1835,5 +1835,135 @@ test_metadata:
       orthogonal concerns). Production code shipped at commit e13c029b34 (PR #191).
       All 7 tests LIVE (1 new test added: bare-float at seam raises TypeError).
       IngestAdapter seam implemented in src/contracts/day0_observation_context.py.
+
+  tests/test_decision_group_id_constraint.py:
+    modules: [contracts, calibration]
+    category: core_law_antibody
+    profile: phase0_pr4_decision_group_id
+    blocks_commit: true
+    asserted_invariants:
+      - INV-GROUP-ID-TYPE-VALUEERROR-EMPTY-MARKET-ID
+      - INV-GROUP-ID-TYPE-VALUEERROR-NEGATIVE-BIN-INDEX
+      - INV-GROUP-ID-TYPE-VALUEERROR-ZERO-LEAD-DAYS
+      - DECISION-GROUP-ID-NOT-NULL-CONSTRAINT
+      - DECISION-GROUP-ID-HASH-DETERMINISTIC
+    source_under_test:
+      - src/contracts/decision_group_id.py
+      - src/state/schema/v2_schema.py
+    law_dependencies:
+      - docs/operations/task_2026-05-17_strategy_vnext_phase0/PHASE_0_V4_ADDENDUM.md
+      - docs/operations/task_2026-05-17_strategy_vnext_phase0/scaffolds/pr4_scaffold_report.md
+    notes: >
+      R-4.1: Three live (non-xfail) tests pin the ValueError contract for
+      decision_group_id_v1_hash() input validation — empty market_id, negative
+      bin_index, zero lead_days_bucket all raise ValueError immediately (guards
+      fire before the NotImplementedError body). Five xfail tests cover NOT NULL
+      constraint enforcement and hash determinism; activate post-PR4 implementation
+      once decision_group_id_v1_hash() is implemented and migration has run.
     created: 2026-05-19
+    last_reused_or_audited: 2026-05-19
+
+  tests/test_inv_eps_spec_conformance.py:
+    modules: [calibration]
+    category: core_law_antibody
+    profile: phase0_pr4_decision_group_id
+    blocks_commit: true
+    asserted_invariants:
+      - INV-EPS-SPEC-CONFORMANCE-P-CLAMP-LOW-0.01
+      - INV-EPS-SPEC-CONFORMANCE-P-CLAMP-HIGH-0.99
+      - LOGIT-SAFE-CLAMPS-BELOW-P-CLAMP-LOW
+      - LOGIT-SAFE-NO-CLAMP-ABOVE-P-CLAMP-LOW
+      - ZEUS-MATH-SPEC-14-9-EXISTS
+    source_under_test:
+      - src/calibration/platt.py
+    law_dependencies:
+      - docs/operations/task_2026-05-17_strategy_vnext_phase0/PHASE_0_V4_ADDENDUM.md
+      - docs/reference/zeus_math_spec.md
+    notes: >
+      INV-eps-spec-conformance CI antibody: 5 live tests (no xfail) that fail
+      immediately if P_CLAMP_LOW drifts from the operator-approved 0.01 deviation
+      (spec prescribes 1e-6, §14.9). Catching drift forces: (1) update
+      zeus_math_spec.md §14.9, (2) update EXPECTED_P_CLAMP_LOW in this file,
+      (3) schedule full calibration refit (91M rows). The spec file existence check
+      ensures the deviation documentation anchor is never accidentally deleted.
+    created: 2026-05-19
+    last_reused_or_audited: 2026-05-19
+
+  tests/test_calibration_pairs_v2_migration.py:
+    modules: [calibration, state]
+    category: relationship_test
+    profile: phase0_pr4_decision_group_id
+    blocks_commit: true
+    asserted_invariants:
+      - CALIBRATION-PAIRS-V2-TRIGGER-NOT-NULL-INS-BLOCKED
+      - CALIBRATION-PAIRS-V2-TRIGGER-NOT-NULL-UPD-BLOCKED
+      - MIGRATION-SAVEPOINT-ROLLBACK-ON-FAILURE
+      - MIGRATION-ROW-COUNT-INVARIANT
+    source_under_test:
+      - scripts/migrate_calibration_pairs_v2_not_null.py
+      - scripts/audit_calibration_pairs_v2_null_groups.py
+      - src/state/schema/v2_schema.py
+    law_dependencies:
+      - docs/operations/task_2026-05-17_strategy_vnext_phase0/PHASE_0_V4_ADDENDUM.md
+      - docs/operations/task_2026-05-17_strategy_vnext_phase0/preflight/migration_dry_runs.json
+      - docs/operations/task_2026-05-17_strategy_vnext_phase0/scaffolds/pr4_scaffold_report.md
+    notes: >
+      R-4.3: One live test (test_trigger_mode_blocks_null_insert_on_synthetic_fixture)
+      validates the trigger SQL template end-to-end on a synthetic fixture DB —
+      NULL INSERT blocked, UPDATE-to-NULL blocked, non-NULL operations succeed.
+      Nine xfail tests cover dry-run, --mode=trigger/rebuild apply, disk guard,
+      SAVEPOINT rollback, and row-count invariant; fixtures return usable tmp_path
+      DB paths (no collection-time raises). Activate post-PR4 implementation once
+      migration scripts have NotImplementedError removed.
+    created: 2026-05-19
+    last_reused_or_audited: 2026-05-19
+
+  tests/test_outer_bin_inf_roundtrip.py:
+    modules: [calibration]
+    category: core_law_antibody
+    profile: phase0_pr4_decision_group_id
+    blocks_commit: true
+    asserted_invariants:
+      - LOGIT-SAFE-ZERO-FINITE
+      - LOGIT-SAFE-ONE-FINITE
+      - LOGIT-SAFE-ALL-FINITE-UNIT-INTERVAL
+      - CALIBRATE-AND-NORMALIZE-SUMS-TO-ONE-EXTREME-INPUTS
+      - NORMALIZE-BIN-PROBABILITY-FINITE-VALID-WIDTH
+    source_under_test:
+      - src/calibration/platt.py
+    law_dependencies:
+      - docs/operations/task_2026-05-17_strategy_vnext_phase0/PHASE_0_V4_ADDENDUM.md
+    notes: >
+      §14.10 ±inf roundtrip audit: 7 live tests (no xfail) confirm that
+      P_CLAMP_LOW=0.01 / P_CLAMP_HIGH=0.99 prevent ±inf logit values in all
+      normal operation paths. Tests cover logit_safe at 0.0, 1.0, and across
+      linspace(0,1,1000); boundary clamp equality; calibrate_and_normalize output
+      sums to 1.0 with outer-bin extremes near 0 and 1; normalize_bin_probability
+      finite for valid bin widths. §14.10 finding: largely closed — no production
+      code changes required.
+    created: 2026-05-19
+    last_reused_or_audited: 2026-05-19
+
+  tests/test_decision_group_id_newtype_audit.py:
+    modules: [contracts, calibration]
+    category: relationship_test
+    profile: phase0_pr4_decision_group_id
+    blocks_commit: true
+    asserted_invariants:
+      - DECISION-GROUP-ID-NEWTYPE-IMPORTABLE
+      - DECISION-GROUP-ID-IS-STR-SUBTYPE
+      - DECISION-GROUP-ID-HASH-CALLABLE-CORRECT-SIGNATURE
+      - DECISION-GROUP-ID-CONTRACT-FILE-EXISTS
+      - INV-GROUP-ID-TYPE-HASH-PREFIX-DGID-V1
+    source_under_test:
+      - src/contracts/decision_group_id.py
+    law_dependencies:
+      - docs/operations/task_2026-05-17_strategy_vnext_phase0/PHASE_0_V4_ADDENDUM.md
+    notes: >
+      R-4.5: AST + structural audit. Five live tests pin the importability,
+      NewType-as-str-subtype property, callable + correct-signature contract,
+      and file existence of decision_group_id.py. Three xfail tests cover the
+      hash output format (dgid_v1_ prefix), same-args equality, and different-args
+      inequality; activate post-PR4 implementation once decision_group_id_v1_hash()
+      has its NotImplementedError replaced with the SHA-256 implementation.    created: 2026-05-19
     last_reused_or_audited: 2026-05-19
