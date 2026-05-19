@@ -1,38 +1,33 @@
 # Created: 2026-05-19
 # Last reused or audited: 2026-05-19
 # Authority basis: PHASE_0_V4_ADDENDUM.md PR 5 row; F3 PR #177 antibody pattern
-# SCAFFOLD ONLY — all tests are @pytest.mark.skip pending PR 5 production code.
+# Production code implemented in PR 5 (2026-05-19). All tests live.
 # See docs/operations/task_2026-05-17_strategy_vnext_phase0/scaffolds/pr5_scaffold_report.md
-"""R-5.3: CelsiusBox / FahrenheitBox propagation boundary tests.
+"""R-5.3: IngestAdapter + CelsiusBox / FahrenheitBox propagation boundary tests.
 
+Exercises the IngestAdapter seam (src/contracts/day0_observation_context.py).
 Mirrors the F3 PR #177 antibody pattern from tests/types/test_celsius_box_arithmetic.py.
 
-Design constraint (OPEN QUESTION #1, see scaffold report):
-  day0_router.py lines 7-21 (authority: phase6_contract.md R-BA..R-BD) explicitly
-  states that the signal/evaluator layer uses plain float because values are
-  unit-polymorphic at runtime. CelsiusBox / FahrenheitBox therefore live at the
-  IngestAdapter→Day0Router seam, not inside Day0 hot loops. Production code must
-  extract `.value` before constructing Day0SignalInputs.
+Design constraint (day0_router.py lines 7-21, authority: phase6_contract.md R-BA..R-BD):
+  The signal/evaluator layer uses plain float because values are unit-polymorphic at
+  runtime (Dallas=°F, London=°C share the same code paths). CelsiusBox / FahrenheitBox
+  live at the IngestAdapter→Day0Router seam, not inside Day0 hot loops. The adapter
+  extracts `.value` before Day0SignalInputs construction.
 
 These tests assert:
-  a. An IngestAdapter emitting a CelsiusBox to a °C city does NOT silently coerce
-     to Fahrenheit before Day0SignalInputs construction (the wrong path that F3
-     PR 4/PR 5 exists to block).
-  b. An IngestAdapter emitting a FahrenheitBox to a °F city is accepted correctly.
+  a. IngestAdapter for a °C city accepts CelsiusBox and returns the float value.
+  b. IngestAdapter for a °F city accepts FahrenheitBox and returns the float value.
   c. Mixing CelsiusBox + FahrenheitBox at the seam raises TypeError (antibody).
   d. Day0SignalInputs receives the raw `.value` float, NOT the box object itself
      (unit carried in the `unit` field per day0_router.py design).
-
-Note on SCAFFOLD: the IngestAdapter seam does not yet exist as a typed class.
-These tests are stubs against the expected API. The antibody (c) is the
-load-bearing test — if a future PR merges boxes directly into Day0SignalInputs
-without `.value` extraction, test (d) will catch it via type annotation error.
+  e. IngestAdapter raises ValueError on unit mismatch (FahrenheitBox for °C city).
+  f. IngestAdapter raises TypeError on bare float (box required at boundary).
 """
 from __future__ import annotations
 
 import pytest
-from unittest.mock import MagicMock
 
+from src.contracts.day0_observation_context import IngestAdapter
 from src.types.temperature import CelsiusBox, FahrenheitBox
 
 
@@ -41,29 +36,26 @@ from src.types.temperature import CelsiusBox, FahrenheitBox
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.skip(reason="SCAFFOLD only — PR 5 production code pending")
 def test_celsius_box_value_extracted_at_ingest_seam() -> None:
-    """CelsiusBox.value is extracted before Day0SignalInputs construction.
+    """IngestAdapter for a °C city accepts CelsiusBox and returns float value.
 
-    Asserts that an ingest adapter emitting CelsiusBox(22.5) for a °C city
-    results in Day0SignalInputs.current_temp == 22.5 (float), not a CelsiusBox.
-
-    SCAFFOLD: replace with real IngestAdapter call once the seam exists.
+    Asserts that the adapter correctly extracts CelsiusBox.value (22.5 float)
+    and does NOT silently coerce to Fahrenheit before Day0SignalInputs construction.
     """
+    adapter = IngestAdapter(city_unit="C")
     box = CelsiusBox(22.5)
-    # Simulate seam: production code must call box.value, not pass box directly
-    extracted_value: float = box.value
-    assert isinstance(extracted_value, float)
-    assert extracted_value == 22.5
+    result = adapter.normalize_observation(box)
+    assert isinstance(result, float)
+    assert result == 22.5
 
 
-@pytest.mark.skip(reason="SCAFFOLD only — PR 5 production code pending")
 def test_fahrenheit_box_value_extracted_at_ingest_seam() -> None:
-    """FahrenheitBox.value is extracted before Day0SignalInputs construction."""
+    """IngestAdapter for a °F city accepts FahrenheitBox and returns float value."""
+    adapter = IngestAdapter(city_unit="F")
     box = FahrenheitBox(72.0)
-    extracted_value: float = box.value
-    assert isinstance(extracted_value, float)
-    assert extracted_value == 72.0
+    result = adapter.normalize_observation(box)
+    assert isinstance(result, float)
+    assert result == 72.0
 
 
 # ---------------------------------------------------------------------------
@@ -71,7 +63,6 @@ def test_fahrenheit_box_value_extracted_at_ingest_seam() -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.skip(reason="SCAFFOLD only — PR 5 production code pending")
 def test_celsius_box_cannot_add_fahrenheit_at_seam() -> None:
     """Mirror of F3 PR #177 antibody: CelsiusBox + FahrenheitBox raises TypeError.
 
@@ -85,7 +76,6 @@ def test_celsius_box_cannot_add_fahrenheit_at_seam() -> None:
         _ = london_obs + dallas_obs
 
 
-@pytest.mark.skip(reason="SCAFFOLD only — PR 5 production code pending")
 def test_fahrenheit_box_cannot_add_celsius_at_seam() -> None:
     """Mirror: FahrenheitBox + CelsiusBox raises TypeError."""
     dallas_obs = FahrenheitBox(72.0)
@@ -99,27 +89,27 @@ def test_fahrenheit_box_cannot_add_celsius_at_seam() -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.skip(reason="SCAFFOLD only — PR 5 production code pending")
 def test_day0_signal_inputs_current_temp_is_float_not_box() -> None:
     """Day0SignalInputs.current_temp carries float, not CelsiusBox or FahrenheitBox.
 
     Design basis: day0_router.py lines 7-21 — signal layer is unit-polymorphic;
     unit is carried as `unit: str = 'F'` field, not as a typed box.
 
-    This test explicitly fails if someone passes a box directly to Day0SignalInputs,
-    ensuring the seam extraction (`.value`) is not skipped in a future PR.
+    Exercises the full seam: IngestAdapter.normalize_observation → float →
+    Day0SignalInputs.current_temp.
     """
-    import numpy as np
     from src.signal.day0_router import Day0SignalInputs
     from src.types.metric_identity import MetricIdentity
 
-    metric = MetricIdentity.from_str("HIGH")
-
-    # Correct: float extracted from box at ingest seam
+    metric = MetricIdentity.from_raw("high")
+    adapter = IngestAdapter(city_unit="C")
     box = CelsiusBox(22.5)
+
+    # IngestAdapter extracts .value; signal inputs receive float
+    current_temp = adapter.normalize_observation(box)
     inputs = Day0SignalInputs(
         temperature_metric=metric,
-        current_temp=box.value,   # explicit .value extraction — the required pattern
+        current_temp=current_temp,  # float from adapter — the required pattern
         hours_remaining=8.0,
         observed_high_so_far=None,
         observed_low_so_far=None,
@@ -129,39 +119,40 @@ def test_day0_signal_inputs_current_temp_is_float_not_box() -> None:
     )
     assert isinstance(inputs.current_temp, float)
     assert inputs.current_temp == 22.5
-
-    # Wrong: passing box directly would break hot-loop arithmetic
-    # (CelsiusBox is not a float subtype; arithmetic ops on Day0 signal would fail)
-    # We verify the type guard holds at construction:
-    # SCAFFOLD: if Day0SignalInputs adds __post_init__ float validation, this
-    #           would raise at construction. For now, just assert type:
     assert not isinstance(inputs.current_temp, CelsiusBox)
     assert not isinstance(inputs.current_temp, FahrenheitBox)
 
 
 # ---------------------------------------------------------------------------
-# R-5.3d: Unit mismatch guard — same city, wrong box type
+# R-5.3d: Unit mismatch guard — FahrenheitBox for °C city raises ValueError
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.skip(reason="SCAFFOLD only — PR 5 production code pending")
 def test_celsius_city_receives_fahrenheit_box_raises_at_seam() -> None:
-    """An ingest adapter for a °C city must not silently accept a FahrenheitBox.
+    """IngestAdapter for a °C city must not silently accept a FahrenheitBox.
 
-    SCAFFOLD: this test exercises the FUTURE ingest adapter validation that
-    rejects a FahrenheitBox for a city configured as unit='C'. Production code
-    must raise ValueError (or equivalent) at the seam before .value extraction.
-
-    Current state: this behaviour does not yet exist. Test is a contract stub.
+    Exercises the unit-mismatch guard in IngestAdapter.normalize_observation.
+    A FahrenheitBox arriving at a °C ingest boundary indicates a data-routing
+    error and must raise ValueError before .value extraction.
     """
+    adapter = IngestAdapter(city_unit="C")
     fahrenheit_for_celsius_city = FahrenheitBox(72.0)
-    city_unit = "C"  # city is configured as Celsius
 
-    # SCAFFOLD: replace with real IngestAdapter call:
-    # with pytest.raises(ValueError, match="unit mismatch"):
-    #     adapter.normalize_observation(fahrenheit_for_celsius_city, city_unit)
-    #
-    # For now, assert the cross-unit conversion exists to make the intent executable:
-    celsius_corrected = fahrenheit_for_celsius_city.to_celsius()
-    assert isinstance(celsius_corrected, CelsiusBox)
-    assert abs(celsius_corrected.value - 22.222) < 0.01
+    with pytest.raises(ValueError, match="[Uu]nit mismatch"):
+        adapter.normalize_observation(fahrenheit_for_celsius_city)
+
+
+# ---------------------------------------------------------------------------
+# R-5.3e: Bare float at seam raises TypeError — boxes required at boundary
+# ---------------------------------------------------------------------------
+
+
+def test_bare_float_at_ingest_seam_raises_type_error() -> None:
+    """IngestAdapter raises TypeError when a bare float is passed.
+
+    Bare float does not carry unit information. The ingest boundary requires
+    an explicit CelsiusBox or FahrenheitBox so the unit is always present.
+    """
+    adapter = IngestAdapter(city_unit="F")
+    with pytest.raises(TypeError, match="CelsiusBox or FahrenheitBox"):
+        adapter.normalize_observation(72.0)  # type: ignore[arg-type]

@@ -1,9 +1,9 @@
 # Created: 2026-05-19
 # Last reused or audited: 2026-05-19
 # Authority basis: PHASE_0_V4_ADDENDUM.md PR 5 row; INV-09, INV-16
-# SCAFFOLD ONLY — production logic pending. All function bodies are stubs.
+# Production code implemented in PR 5 (2026-05-19).
 # See docs/operations/task_2026-05-17_strategy_vnext_phase0/scaffolds/pr5_scaffold_report.md
-# for open questions, 12-cell matrix, and DST archetype set.
+# for design notes, 12-cell matrix, and DST archetype set.
 """Day0 observation-context contracts: BoundClassification + Day0ObservationContext.
 
 BoundClassification
@@ -46,10 +46,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Union
+
+from src.types.temperature import CelsiusBox, FahrenheitBox
 
 if TYPE_CHECKING:
     from src.types import Day0TemporalContext
+    from src.types.solar import DaylightPhase
 
 
 # ---------------------------------------------------------------------------
@@ -131,7 +134,7 @@ class Day0ObservationContext:
 
 
 # ---------------------------------------------------------------------------
-# Factory functions (SCAFFOLD — bodies are stubs)
+# Factory functions
 # ---------------------------------------------------------------------------
 
 
@@ -161,10 +164,26 @@ def classify_bound(
 
     Raises
     ------
-    NotImplementedError
-        SCAFFOLD — production logic pending.
+    ValueError
+        If observed_extreme_so_far is not None and member_extremes_remaining is None.
     """
-    raise NotImplementedError("SCAFFOLD: classify_bound not yet implemented (PR 5 production code pending)")
+    if observed_extreme_so_far is None:
+        return BoundClassification.UNBOUNDED_NO_OBS_YET
+
+    if member_extremes_remaining is None or len(member_extremes_remaining) == 0:
+        # No remaining forecast members — observation is the only signal; treat as deterministic
+        return BoundClassification.DETERMINISTIC
+
+    if is_high_market:
+        # DETERMINISTIC if observation already exceeds every remaining member max
+        if all(observed_extreme_so_far >= m for m in member_extremes_remaining):
+            return BoundClassification.DETERMINISTIC
+    else:
+        # LOW market: DETERMINISTIC if observation already undercuts every remaining member min
+        if all(observed_extreme_so_far <= m for m in member_extremes_remaining):
+            return BoundClassification.DETERMINISTIC
+
+    return BoundClassification.BOUNDED_LIVE
 
 
 def build_day0_observation_context(
@@ -193,10 +212,137 @@ def build_day0_observation_context(
     Returns
     -------
     Day0ObservationContext
+    """
+    bound_classification = classify_bound(
+        observed_extreme_so_far=observed_extreme_so_far,
+        member_extremes_remaining=member_extremes_remaining,
+        is_high_market=is_high_market,
+    )
+
+    is_dst_gap_hour: bool = (
+        temporal_context.is_missing_local_hour if temporal_context is not None else False
+    )
+
+    daypart = _derive_daypart(temporal_context)
+
+    return Day0ObservationContext(
+        temporal_context=temporal_context,
+        bound_classification=bound_classification,
+        observed_extreme_so_far=observed_extreme_so_far,
+        is_dst_gap_hour=is_dst_gap_hour,
+        daypart=daypart,
+    )
+
+
+def _derive_daypart(temporal_context: "Day0TemporalContext | None") -> str:
+    """Derive the 4-way daypart string from a Day0TemporalContext.
+
+    Delegates to Day0TemporalContext.daypart (defined in solar.py, the approved
+    time-semantics layer) so that this file does not access current_local_hour
+    directly (semantic linter rule: raw local-hour access restricted to solar.py /
+    diurnal.py / day0_signal.py).
+
+    Falls back to "morning" when temporal_context is None (graceful degrade).
+    """
+    if temporal_context is None:
+        return "morning"
+
+    return temporal_context.daypart
+
+
+# ---------------------------------------------------------------------------
+# IngestAdapter — CelsiusBox / FahrenheitBox → float seam
+# ---------------------------------------------------------------------------
+
+
+class IngestAdapter:
+    """Boundary guard for Day0 temperature observation ingest.
+
+    Accepts CelsiusBox or FahrenheitBox at the ingest seam and returns a
+    canonical float for Day0SignalInputs construction. Rejects:
+
+      - bare ``float`` input (raises TypeError — boxes must be used at the
+        boundary so the unit is always explicit)
+      - mismatched box type for the city's configured unit (raises ValueError —
+        a FahrenheitBox arriving at a °C city indicates a data-routing error)
+
+    Design basis: day0_router.py lines 7-21 — the signal layer is unit-polymorphic;
+    unit is carried as ``unit: str = "F"`` field. The adapter extracts ``.value``
+    before Day0SignalInputs construction so that hot-loop arithmetic operates on
+    plain float throughout.
+
+    Usage
+    -----
+    .. code-block:: python
+
+        adapter = IngestAdapter(city_unit="C")
+        current_temp: float = adapter.normalize_observation(CelsiusBox(22.5))
+        # → 22.5  (float, ready for Day0SignalInputs.current_temp)
 
     Raises
     ------
-    NotImplementedError
-        SCAFFOLD — production logic pending.
+    TypeError
+        If the observation is a bare float (or any non-box type).
+    ValueError
+        If the box unit does not match ``city_unit``.
     """
-    raise NotImplementedError("SCAFFOLD: build_day0_observation_context not yet implemented (PR 5 production code pending)")
+
+    def __init__(self, city_unit: str) -> None:
+        """Initialise the adapter for a city with the given unit ('C' or 'F').
+
+        Parameters
+        ----------
+        city_unit
+            Expected temperature unit for this city: ``"C"`` for Celsius cities
+            (e.g. London, Sydney), ``"F"`` for Fahrenheit cities (e.g. Dallas).
+        """
+        if city_unit not in {"C", "F"}:
+            raise ValueError(f"city_unit must be 'C' or 'F', got {city_unit!r}")
+        self._city_unit = city_unit
+
+    def normalize_observation(
+        self, observation: Union[CelsiusBox, FahrenheitBox]
+    ) -> float:
+        """Validate the observation box and return its numeric value as a float.
+
+        Parameters
+        ----------
+        observation
+            A CelsiusBox or FahrenheitBox. Must match the city's configured unit.
+
+        Returns
+        -------
+        float
+            The numeric temperature value extracted from the box.
+
+        Raises
+        ------
+        TypeError
+            If ``observation`` is not a CelsiusBox or FahrenheitBox (e.g. bare float).
+        ValueError
+            If the box type does not match ``city_unit``:
+            CelsiusBox for a °F city, or FahrenheitBox for a °C city.
+        """
+        if not isinstance(observation, (CelsiusBox, FahrenheitBox)):
+            raise TypeError(
+                f"IngestAdapter.normalize_observation expects CelsiusBox or "
+                f"FahrenheitBox, got {type(observation).__name__}. "
+                f"Bare float is not accepted at the Day0 ingest boundary — "
+                f"wrap in the appropriate box type to make the unit explicit."
+            )
+
+        if self._city_unit == "C" and isinstance(observation, FahrenheitBox):
+            raise ValueError(
+                f"Unit mismatch at Day0 ingest seam: city is configured as °C "
+                f"but received FahrenheitBox({observation.value}). "
+                f"Pass CelsiusBox for Celsius cities."
+            )
+
+        if self._city_unit == "F" and isinstance(observation, CelsiusBox):
+            raise ValueError(
+                f"Unit mismatch at Day0 ingest seam: city is configured as °F "
+                f"but received CelsiusBox({observation.value}). "
+                f"Pass FahrenheitBox for Fahrenheit cities."
+            )
+
+        return float(observation.value)

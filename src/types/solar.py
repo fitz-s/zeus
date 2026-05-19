@@ -145,3 +145,29 @@ class Day0TemporalContext:
     @property
     def phase(self) -> DaylightPhase:
         return self.solar_day.phase(self.current_local_hour)
+
+    @property
+    def daypart(self) -> str:
+        """4-way daypart string for Day0 decision routing.
+
+        Returns one of: "pre_sunrise", "morning", "afternoon", "post_peak".
+        Defined here (inside the approved time-semantics layer) so that
+        consumers in src/contracts/ do not access current_local_hour directly.
+
+        Logic (PR 5 definition):
+          pre_sunrise  — DaylightPhase.PRE_SUNRISE
+          post_peak    — DaylightPhase.POST_SUNSET, or post_peak_confidence >= 0.5
+          afternoon    — DAYLIGHT, current_local_hour >= peak_hour (when known)
+          morning      — DAYLIGHT, all other cases
+        """
+        _phase = self.phase
+        if _phase == DaylightPhase.PRE_SUNRISE:
+            return "pre_sunrise"
+        if _phase == DaylightPhase.POST_SUNSET:
+            return "post_peak"
+        # DaylightPhase.DAYLIGHT — use peak_hour + post_peak_confidence to split
+        if self.post_peak_confidence >= 0.5:
+            return "post_peak"
+        if self.peak_hour is not None and self.current_local_hour >= self.peak_hour:
+            return "afternoon"
+        return "morning"

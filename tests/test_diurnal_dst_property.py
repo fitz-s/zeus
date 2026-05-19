@@ -1,7 +1,7 @@
 # Created: 2026-05-19
 # Last reused or audited: 2026-05-19
 # Authority basis: PHASE_0_V4_ADDENDUM.md PR 5 row; INV-16
-# SCAFFOLD ONLY — all tests are @pytest.mark.skip pending PR 5 production code.
+# Production code implemented in PR 5 (2026-05-19). All tests live.
 # See docs/operations/task_2026-05-17_strategy_vnext_phase0/scaffolds/pr5_scaffold_report.md
 """R-5.2: DST property tests for build_day0_temporal_context.
 
@@ -76,20 +76,27 @@ _LONDON_SOLAR_2026_03_29 = {
 }
 
 
-@pytest.mark.skip(reason="SCAFFOLD only — PR 5 production code pending")
 @patch("src.state.db.get_world_connection")
 def test_london_spring_forward_missing_hour_flagged(mock_get_conn) -> None:
-    """Archetype A: observation at 01:30 local (spring-forward gap) → is_missing_local_hour=True."""
+    """Archetype A: observation at 01:30 local (spring-forward gap) → is_missing_local_hour=True.
+
+    Observation time is passed as a naive local string (no tz offset). This is
+    required: 01:30 UTC converts to 02:30 BST (after the transition) and is NOT
+    in the gap. The gap hour 01:00–01:59 local BST never exists; it can only be
+    reached by constructing a naive local datetime (which _is_missing_local_hour
+    detects via UTC round-trip).
+    """
     from src.signal.diurnal import build_day0_temporal_context
 
     mock_get_conn.return_value = _fake_conn_for_city(_LONDON_SOLAR_2026_03_29)
 
-    # 01:30 UTC on 2026-03-29 is in the gap (clocks jumped from 01:00→02:00)
+    # Pass a naive local timestamp — no tz suffix. _parse_runtime_observation_instant
+    # treats this as local time and calls replace(tzinfo=tz), landing in the DST gap.
     ctx = build_day0_temporal_context(
         "London",
         date(2026, 3, 29),
         "Europe/London",
-        observation_time="2026-03-29T01:30:00+00:00",
+        observation_time="2026-03-29 01:30:00",  # naive local — in spring-forward gap
         observation_source="wu_api",
     )
     assert ctx is not None, "Context must not degrade for valid solar data"
@@ -99,7 +106,6 @@ def test_london_spring_forward_missing_hour_flagged(mock_get_conn) -> None:
     assert ctx.is_ambiguous_local_hour is False
 
 
-@pytest.mark.skip(reason="SCAFFOLD only — PR 5 production code pending")
 @patch("src.state.db.get_world_connection")
 def test_london_normal_hour_not_flagged(mock_get_conn) -> None:
     """Archetype A control: observation at 10:00 BST → no DST flags."""
@@ -136,20 +142,23 @@ _SYDNEY_SOLAR_2025_10_05 = {
 }
 
 
-@pytest.mark.skip(reason="SCAFFOLD only — PR 5 production code pending")
 @patch("src.state.db.get_world_connection")
 def test_sydney_spring_forward_missing_hour_flagged(mock_get_conn) -> None:
-    """Archetype B: observation at 02:30 local (spring-forward gap) → is_missing_local_hour=True."""
+    """Archetype B: observation at 02:30 local (spring-forward gap) → is_missing_local_hour=True.
+
+    Same pattern as London: the UTC form 16:30 UTC = 03:30 AEDT (after transition),
+    not in the gap. Must use naive local '2025-10-05 02:30:00' to land in the gap.
+    """
     from src.signal.diurnal import build_day0_temporal_context
 
     mock_get_conn.return_value = _fake_conn_for_city(_SYDNEY_SOLAR_2025_10_05)
 
-    # 02:30 local = 16:30 UTC on 2025-10-04 (AEST is UTC+10; gap is at 02:00 local)
+    # Naive local timestamp — no tz suffix. 02:30 local is in the AEST→AEDT gap.
     ctx = build_day0_temporal_context(
         "Sydney",
         date(2025, 10, 5),
         "Australia/Sydney",
-        observation_time="2025-10-04T16:30:00+00:00",  # 02:30 AEST in gap
+        observation_time="2025-10-05 02:30:00",  # naive local — in spring-forward gap
         observation_source="wu_api",
     )
     assert ctx is not None
@@ -177,31 +186,36 @@ _NYC_SOLAR_2026_11_01 = {
 }
 
 
-@pytest.mark.skip(reason="SCAFFOLD only — PR 5 production code pending")
 @patch("src.state.db.get_world_connection")
 def test_nyc_fall_back_ambiguous_hour_flagged(mock_get_conn) -> None:
-    """Archetype C: observation at 01:30 local (fall-back repeat hour) → is_ambiguous_local_hour=True."""
+    """Archetype C: observation at 01:30 local (fall-back second occurrence) → is_ambiguous_local_hour=True.
+
+    The fall-back ambiguous window (01:00–01:59 EDT/EST) appears twice.
+    First occurrence:  01:30 EDT = 05:30 UTC (fold=0) — astimezone() returns fold=0, NOT ambiguous
+    Second occurrence: 01:30 EST = 06:30 UTC (fold=1) — astimezone() returns fold=1, IS ambiguous
+
+    is_ambiguous_local_hour = bool(getattr(local_ts, 'fold', 0)), so we must use the
+    second-occurrence UTC timestamp (06:30 UTC) to get fold=1.
+    """
     from src.signal.diurnal import build_day0_temporal_context
 
     mock_get_conn.return_value = _fake_conn_for_city(_NYC_SOLAR_2026_11_01)
 
-    # 01:30 local first occurrence (EDT) = 05:30 UTC; second occurrence (EST) = 06:30 UTC
-    # Build with the first occurrence (fold=0):
+    # Second occurrence of 01:30 local (EST, fold=1) = 06:30 UTC
     ctx = build_day0_temporal_context(
         "New_York",
         date(2026, 11, 1),
         "America/New_York",
-        observation_time="2026-11-01T05:30:00+00:00",  # 01:30 EDT (fold=0)
+        observation_time="2026-11-01T06:30:00+00:00",  # 01:30 EST (fold=1) — ambiguous
         observation_source="wu_api",
     )
     assert ctx is not None
     assert ctx.is_ambiguous_local_hour is True, (
-        "01:30 local on 2026-11-01 (NYC fall-back) must be flagged as ambiguous"
+        "01:30 EST (second occurrence, fold=1) on 2026-11-01 must be flagged as ambiguous"
     )
     assert ctx.is_missing_local_hour is False
 
 
-@pytest.mark.skip(reason="SCAFFOLD only — PR 5 production code pending")
 @patch("src.state.db.get_world_connection")
 def test_nyc_fall_back_normal_evening_not_flagged(mock_get_conn) -> None:
     """Archetype C control: observation at 14:00 local (after fall-back) → no DST flags."""

@@ -1,7 +1,7 @@
 # Created: 2026-05-19
 # Last reused or audited: 2026-05-19
 # Authority basis: PHASE_0_V4_ADDENDUM.md PR 5 row; INV-09
-# SCAFFOLD ONLY — all tests are @pytest.mark.skip pending PR 5 production code.
+# Production code implemented in PR 5 (2026-05-19). All tests live.
 # See docs/operations/task_2026-05-17_strategy_vnext_phase0/scaffolds/pr5_scaffold_report.md
 """R-5.1: BoundClassification enum exhaustiveness + 12-cell property matrix.
 
@@ -34,14 +34,12 @@ from src.contracts.day0_observation_context import (
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.skip(reason="SCAFFOLD only — PR 5 production code pending")
 def test_bound_classification_has_three_members() -> None:
     """BoundClassification has exactly 3 members; no silent additions."""
     members = {m.value for m in BoundClassification}
     assert members == {"DETERMINISTIC", "BOUNDED_LIVE", "UNBOUNDED_NO_OBS_YET"}
 
 
-@pytest.mark.skip(reason="SCAFFOLD only — PR 5 production code pending")
 def test_bound_classification_is_string_enum() -> None:
     """BoundClassification members compare equal to their string values."""
     assert BoundClassification.DETERMINISTIC == "DETERMINISTIC"
@@ -54,7 +52,6 @@ def test_bound_classification_is_string_enum() -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.skip(reason="SCAFFOLD only — PR 5 production code pending")
 def test_classify_bound_no_obs_returns_unbounded_high() -> None:
     result = classify_bound(
         observed_extreme_so_far=None,
@@ -64,7 +61,6 @@ def test_classify_bound_no_obs_returns_unbounded_high() -> None:
     assert result == BoundClassification.UNBOUNDED_NO_OBS_YET
 
 
-@pytest.mark.skip(reason="SCAFFOLD only — PR 5 production code pending")
 def test_classify_bound_no_obs_returns_unbounded_low() -> None:
     result = classify_bound(
         observed_extreme_so_far=None,
@@ -79,7 +75,6 @@ def test_classify_bound_no_obs_returns_unbounded_low() -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.skip(reason="SCAFFOLD only — PR 5 production code pending")
 def test_classify_bound_obs_present_not_deterministic_high() -> None:
     """HIGH market: observed=72°F but some members can still exceed it → BOUNDED_LIVE."""
     result = classify_bound(
@@ -90,7 +85,6 @@ def test_classify_bound_obs_present_not_deterministic_high() -> None:
     assert result == BoundClassification.BOUNDED_LIVE
 
 
-@pytest.mark.skip(reason="SCAFFOLD only — PR 5 production code pending")
 def test_classify_bound_obs_present_not_deterministic_low() -> None:
     """LOW market: observed=45°F but some members can still go below it → BOUNDED_LIVE."""
     result = classify_bound(
@@ -106,7 +100,6 @@ def test_classify_bound_obs_present_not_deterministic_low() -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.skip(reason="SCAFFOLD only — PR 5 production code pending")
 def test_classify_bound_deterministic_high() -> None:
     """HIGH market: observed=80°F exceeds ALL remaining member maxes → DETERMINISTIC."""
     result = classify_bound(
@@ -117,7 +110,6 @@ def test_classify_bound_deterministic_high() -> None:
     assert result == BoundClassification.DETERMINISTIC
 
 
-@pytest.mark.skip(reason="SCAFFOLD only — PR 5 production code pending")
 def test_classify_bound_deterministic_low() -> None:
     """LOW market: observed=32°F undercuts ALL remaining member mins → DETERMINISTIC."""
     result = classify_bound(
@@ -159,7 +151,6 @@ _12_CELLS = list(itertools.product(
 ))
 
 
-@pytest.mark.skip(reason="SCAFFOLD only — PR 5 production code pending")
 @pytest.mark.parametrize("classification,daypart", _12_CELLS,
     ids=[f"{c.value}×{d}" for c, d in _12_CELLS])
 def test_12_cell_matrix(classification: BoundClassification, daypart: str) -> None:
@@ -195,18 +186,6 @@ def test_12_cell_matrix(classification: BoundClassification, daypart: str) -> No
     assert ctx.temporal_context is None
 
 
-# ---------------------------------------------------------------------------
-# R-5.1f: Factory stub — build_day0_observation_context raises NotImplementedError
-# ---------------------------------------------------------------------------
-# (Tests the scaffold stub itself; will be replaced when production code lands.)
-
-@pytest.mark.skip(reason="SCAFFOLD only — PR 5 production code pending")
-def test_factory_stub_raises_not_implemented() -> None:
-    """build_day0_observation_context raises NotImplementedError (scaffold stub)."""
-    with pytest.raises(NotImplementedError):
-        build_day0_observation_context(
-            temporal_context=None,
-            observed_extreme_so_far=None,
-            member_extremes_remaining=[72.0, 73.0],
-            is_high_market=True,
-        )
+# R-5.1f removed: test_factory_stub_raises_not_implemented was a scaffold
+# contract that the factory raises NotImplementedError. Deleted when
+# production code was implemented in PR 5 (2026-05-19).
