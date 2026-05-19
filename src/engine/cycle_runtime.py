@@ -2646,7 +2646,6 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
 
     params = deps.MODE_PARAMS[mode]
     evaluation_budget_seconds = _live_discovery_eval_budget_seconds(mode, env, params)
-    evaluation_started_at = _monotonic_seconds(deps)
     min_hours_to_resolution = params.get("min_hours_to_resolution")
     if min_hours_to_resolution is None:
         min_hours_to_resolution = 0 if "max_hours_to_resolution" in params else 6
@@ -2659,6 +2658,10 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
         # default floor used by other modes.
         min_hours_to_resolution = 0
     markets = deps.find_weather_markets(min_hours_to_resolution=min_hours_to_resolution)
+    # NOTE: evaluation_started_at is set AFTER find_weather_markets() so that
+    # gamma/CLOB network I/O (400-700s cold scan) does not consume the
+    # per-market evaluation budget.  Budget is for market evaluation only.
+    evaluation_started_at = _monotonic_seconds(deps)
     if "max_hours_since_open" in params:
         markets = [m for m in markets if m["hours_since_open"] < params["max_hours_since_open"]]
     if "min_hours_since_open" in params:
