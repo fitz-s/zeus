@@ -252,6 +252,18 @@ def _create_calibration_pairs_v2(conn: sqlite3.Connection) -> None:
             cluster TEXT NOT NULL,
             forecast_available_at TEXT NOT NULL,
             settlement_value REAL,
+            -- PHASE0-PR4-SCAFFOLD: decision_group_id will gain NOT NULL in the
+            -- production migration (PR 4 implementation phase).
+            -- Preflight confirmed: 0 NULL rows on calibration_pairs_v2 (91M rows,
+            -- zeus-forecasts.db) and calibration_pairs_v2_archived_2026_05_11
+            -- (53M rows, zeus-world.db) as of 2026-05-17.
+            -- Migration path: SINGLE_STEP rebuild (SQLite cannot ALTER COLUMN to
+            -- add NOT NULL; requires CREATE new + INSERT + DROP old + RENAME).
+            -- Disk constraint: ~50 GiB peak needed; only 22 GiB free at audit.
+            -- Operator must free disk before migration. See:
+            --   docs/operations/task_2026-05-17_strategy_vnext_phase0/preflight/migration_dry_runs.json
+            -- Target DDL (post-migration):
+            --   decision_group_id TEXT NOT NULL,
             decision_group_id TEXT,
             bias_corrected INTEGER NOT NULL DEFAULT 0
                 CHECK (bias_corrected IN (0, 1)),
