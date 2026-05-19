@@ -1,3 +1,6 @@
+# Lifecycle: created=2026-05-05; last_reviewed=2026-05-19; last_reused=2026-05-19
+# Purpose: Relationship tests for chain_reconciliation D6-field freeze on corrected-eligible positions
+# Reuse: pytest tests/test_chain_reconciliation_corrected_guard.py
 # Created: 2026-05-05
 # Last reused or audited: 2026-05-19
 # Authority basis: object-meaning invariance Wave26 explicit position env authority.

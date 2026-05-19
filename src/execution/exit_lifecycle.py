@@ -686,8 +686,6 @@ def is_exit_cooldown_active(position: Position) -> bool:
 # Authority basis: Fix A — ghost pending_exit chain-truth sync
 
 _CTF_BALANCE_OF_SELECTOR = "0x00fdd58e"  # balanceOf(address,uint256) keccak256[:4]
-_CTF_ADDRESS = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"  # Polygon mainnet CTF
-_DEFAULT_POLYGON_RPC_URL = "https://polygon-bor-rpc.publicnode.com"
 
 
 def _abi_encode_balance_of(owner: str, token_id: str) -> str:
@@ -699,6 +697,10 @@ def _abi_encode_balance_of(owner: str, token_id: str) -> str:
     owner_clean = owner.lower().removeprefix("0x")
     if len(owner_clean) != 40:
         raise ValueError(f"invalid owner address: {owner!r}")
+    try:
+        int(owner_clean, 16)
+    except ValueError:
+        raise ValueError(f"invalid owner address (non-hex): {owner!r}")
     owner_word = owner_clean.rjust(64, "0")
     # token_id is a large decimal or hex string
     token_int = int(str(token_id), 10) if not str(token_id).startswith("0x") else int(str(token_id), 16)
@@ -724,12 +726,16 @@ def _query_ctf_balance(
     if not asset_id or not owner_address:
         return None
     try:
+        from src.venue.polymarket_v2_adapter import (  # deferred: avoid circular import
+            _json_rpc_call,
+            DEFAULT_POLYGON_RPC_URL,
+            POLYGON_CTF_ADDRESS,
+        )
         if rpc_call is None:
-            from src.venue.polymarket_v2_adapter import _json_rpc_call
             rpc_call = _json_rpc_call
-        resolved_rpc_url = rpc_url or os.environ.get("POLYGON_RPC_URL", _DEFAULT_POLYGON_RPC_URL)
+        resolved_rpc_url = rpc_url or os.environ.get("POLYGON_RPC_URL", DEFAULT_POLYGON_RPC_URL)
         calldata = _abi_encode_balance_of(owner_address, asset_id)
-        raw = rpc_call(resolved_rpc_url, "eth_call", [{"to": _CTF_ADDRESS, "data": calldata}, "latest"])
+        raw = rpc_call(resolved_rpc_url, "eth_call", [{"to": POLYGON_CTF_ADDRESS, "data": calldata}, "latest"])
         return int(str(raw or "0x0"), 16)
     except Exception as exc:
         logger.warning(
@@ -911,11 +917,9 @@ def _void_chain_confirmed_zero(
             }
             append_many_and_project(conn, [event], projection)
         except Exception as exc:
-            logger.warning(
-                "_void_chain_confirmed_zero: canonical event write failed for %s: %s",
-                trade_id,
-                exc,
-            )
+            raise RuntimeError(
+                f"_void_chain_confirmed_zero: canonical event write failed for {trade_id}: {exc}"
+            ) from exc
 
     return {"action": "closed", "position": voided}
 

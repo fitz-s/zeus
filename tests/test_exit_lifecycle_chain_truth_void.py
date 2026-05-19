@@ -1,8 +1,9 @@
+# Lifecycle: created=2026-05-19; last_reviewed=2026-05-19; last_reused=2026-05-19
+# Purpose: Antibody tests for chain-truth-based exit_lifecycle void sync
+# Reuse: pytest tests/test_exit_lifecycle_chain_truth_void.py
 # Created: 2026-05-19
 # Last reused or audited: 2026-05-19
-# Authority basis: Fix A+B — ghost pending_exit chain-truth sync
-#   src/execution/exit_lifecycle.py::handle_exit_pending_missing (Fix A)
-#   src/state/projection.py::upsert_position_current (Fix B)
+# Authority basis: PR #189 — chain canonical via balanceOf for pending_exit
 """Antibody tests for ghost pending_exit chain-truth void sync.
 
 Four antibodies:

@@ -170,9 +170,7 @@ class NullConditionIdOnOpenPhaseError(ValueError):
 
 # Phases that require a non-empty condition_id. These are the phases where
 # the position is still active and CTF operations may be needed.
-_CONDITION_ID_REQUIRED_PHASES = frozenset(
-    {"pending_entry", "active", "day0_window", "pending_exit", "unknown"}
-)
+_CONDITION_ID_REQUIRED_PHASES = frozenset(_F109_OPEN_PHASES)
 
 
 @capability("canonical_position_write", lease=True)
