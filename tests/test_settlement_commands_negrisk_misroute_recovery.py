@@ -302,15 +302,19 @@ def test_negrisk_market_with_negrisk_adapter_tx_marks_confirmed(
         _db_mod.ZEUS_WORLD_DB_PATH = orig
 
 
-def test_negrisk_lookup_world_attach_failure_returns_false_safely(trade_conn, monkeypatch):
-    """C4 (fail-safe): _lookup_market_neg_risk_via_world_attach returns False safely when
-    world DB path is missing/invalid, so reconcile falls through to REDEEM_CONFIRMED
-    (fail-open on lookup errors — does not crash or suppress other results).
+def test_negrisk_lookup_all_sources_fail_returns_none(trade_conn, monkeypatch):
+    """C4 (fail-closed): _lookup_market_neg_risk_authoritative returns None (NOT False) when
+    world DB is missing, trades.db has no row, and Gamma is unavailable.
+
+    Updated contract (PR #196): old function returned False on world-DB failure (fail-open),
+    which silently bypassed the antibody guard.  New function returns None (fail-closed) so
+    the caller defers the terminal transition instead of wrongly confirming REDEEM_CONFIRMED.
     """
     import pathlib
+    from unittest.mock import patch
     import src.execution.settlement_commands as sc
 
-    # Point to a non-existent path so ATTACH fails
+    # Point to a non-existent path so ATTACH fails (Tier 1 miss)
     missing_path = pathlib.Path("/tmp/zeus_world_nonexistent_antibody_test.db")
     monkeypatch.setattr(
         "src.execution.settlement_commands.ZEUS_WORLD_DB_PATH",
@@ -321,11 +325,13 @@ def test_negrisk_lookup_world_attach_failure_returns_false_safely(trade_conn, mo
     orig = _db_mod.ZEUS_WORLD_DB_PATH
     _db_mod.ZEUS_WORLD_DB_PATH = missing_path
     try:
-        result = sc._lookup_market_neg_risk_via_world_attach(trade_conn, _NEGRISK_CONDITION_ID)
-        # C4: must return False, not raise
-        assert result is False, (
-            f"C4 FAIL: _lookup_market_neg_risk_via_world_attach returned {result!r} "
-            "on missing world DB; expected False (fail-safe)"
+        # trade_conn has no executable_market_snapshots rows (Tier 2 miss)
+        # Gamma also fails (Tier 3 miss) → must return None, not False
+        with patch("httpx.get", side_effect=Exception("network error")):
+            result = sc._lookup_market_neg_risk_authoritative(trade_conn, _NEGRISK_CONDITION_ID)
+        assert result is None, (
+            f"C4 FAIL: _lookup_market_neg_risk_authoritative returned {result!r} "
+            "when all sources failed; expected None (fail-closed, not False)"
         )
     finally:
         _db_mod.ZEUS_WORLD_DB_PATH = orig

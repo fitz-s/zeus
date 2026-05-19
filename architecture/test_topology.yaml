@@ -419,6 +419,8 @@ test_trust_policy:
     tests/test_main_redeem_reconciler_wiring.py: {created: "2026-05-19", last_used: "2026-05-19"}
     # fix/json-hexbytes-serializer — HexBytes JSON serializer antibody (2026-05-19 alpha-loss postmortem).
     tests/test_settlement_commands_hexbytes_serializer.py: {created: "2026-05-19", last_used: "2026-05-19"}
+    # fix/antibody-negrisk-gamma-fallback — authoritative lookup 3-tier fallback + fail-closed None (PR #196).
+    tests/test_antibody_lookup_fallback.py: {created: "2026-05-19", last_used: "2026-05-19"}
 
 categories:
   core_law_antibody:
@@ -642,6 +644,8 @@ categories:
     - tests/test_settlement_commands_negrisk_misroute_recovery.py
     # PR redeem-reconciler-wiring — reconciler wiring antibody.
     - tests/test_main_redeem_reconciler_wiring.py
+    # fix/antibody-negrisk-gamma-fallback — authoritative 3-tier lookup + fail-closed None (PR #196).
+    - tests/test_antibody_lookup_fallback.py
 
   useful_regression:
     - tests/test_alpha_target_coherence.py
@@ -2322,6 +2326,34 @@ test_metadata:
       hasattr(o, "keys") branch (added by PR #202 hotfix on top of PR #198).
     created: 2026-05-19
     last_reused_or_audited: 2026-05-19
+
+  tests/test_antibody_lookup_fallback.py:
+    modules: [execution, state, venue]
+    category: core_law_antibody
+    profile: fix_antibody_negrisk_gamma_fallback_pr196
+    blocks_commit: true
+    asserted_invariants:
+      - NEGRISK-LOOKUP-AUTHORITATIVE-FAIL-CLOSED
+      - REDEEM-NEGRISK-UNKNOWN-DEFERS-NOT-CONFIRMS
+    source_under_test:
+      - src/execution/settlement_commands.py
+    law_dependencies:
+      - architecture/invariants.yaml
+      - docs/authority/zeus_current_architecture.md
+    notes: >
+      Antibody for PR #196 data-dependency failure: _lookup_market_neg_risk_via_world_attach
+      queried world.executable_market_snapshots which was empty (0 rows for Karachi
+      condition_id 0x8407ffe5...). Empty lookup returned False (not True), antibody guard
+      never fired, Karachi was marked REDEEM_CONFIRMED despite negRisk mis-route to Standard CTF.
+      Fix: _lookup_market_neg_risk_authoritative uses 3-tier fallback (world.db ATTACH →
+      trades.db main table → Gamma CLOB API) and returns None on all-fail (fail-closed).
+      Caller defers terminal transition (continue) on None instead of silently confirming.
+      Five contracts: T1 world.db hit, T2 trades.db hit (Karachi production path),
+      T3 Gamma hit, T4 all fail → None (NOT False), T5 caller None → REDEEM_TX_HASHED stays
+      (sed-flip verified: removing None-guard continue → T5 RED).
+    created: 2026-05-19
+    last_reused_or_audited: 2026-05-19
+
   # ── PR 2+7 phase0-pr27-effective-kelly test metadata ─────────────────────
   tests/test_inv_kelly_effective.py:
     modules: [engine, contracts]
