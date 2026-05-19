@@ -745,6 +745,10 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         "scripts/reevaluate_readiness_2026_05_07.py",       # operator_invoked: one-shot idempotent readiness repair (ran 2026-05-07, expected 0 updates)
         # --- QUARANTINED resolved: verify_truth_surfaces is read_only (0 writes) ---
         "scripts/verify_truth_surfaces.py",                 # read_only: all connects are mode=ro or SELECT-only; 0 INSERT/UPDATE/DELETE
+        # --- phase0-pr4: NOT NULL migration scripts ---
+        "scripts/audit_calibration_pairs_v2_null_groups.py",    # read_only: mode=ro preflight audit; 0 writes
+        "scripts/migrate_calibration_pairs_v2_not_null.py",     # operator_invoked: DDL-only schema migration (CREATE TRIGGER / REBUILD)
+        "scripts/rollback_calibration_pairs_v2_not_null.py",    # operator_invoked: DDL-only rollback (DROP TRIGGER / REBUILD)
     }
 )
 

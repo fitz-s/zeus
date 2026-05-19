@@ -252,18 +252,19 @@ def _create_calibration_pairs_v2(conn: sqlite3.Connection) -> None:
             cluster TEXT NOT NULL,
             forecast_available_at TEXT NOT NULL,
             settlement_value REAL,
-            -- PHASE0-PR4-SCAFFOLD: decision_group_id will gain NOT NULL in the
-            -- production migration (PR 4 implementation phase).
-            -- Preflight confirmed: 0 NULL rows on calibration_pairs_v2 (91M rows,
-            -- zeus-forecasts.db) and calibration_pairs_v2_archived_2026_05_11
-            -- (53M rows, zeus-world.db) as of 2026-05-17.
-            -- Migration path: SINGLE_STEP rebuild (SQLite cannot ALTER COLUMN to
-            -- add NOT NULL; requires CREATE new + INSERT + DROP old + RENAME).
-            -- Disk constraint: ~50 GiB peak needed; only 22 GiB free at audit.
-            -- Operator must free disk before migration. See:
+            -- PHASE0-PR4: decision_group_id NOT NULL enforcement is LIVE (PR 4 production).
+            -- Canonical enforcement: TRIGGER-mode (default, disk-safe).
+            --   scripts/migrate_calibration_pairs_v2_not_null.py --apply --mode trigger
+            --   Two BEFORE INSERT + BEFORE UPDATE triggers per table enforce NOT NULL.
+            --   Idempotent (CREATE TRIGGER IF NOT EXISTS). Zero disk overhead.
+            --   PRAGMA table_info still shows notnull=0 (column DDL unchanged).
+            -- Optional canonical DDL rebuild (requires ~50 GiB free disk):
+            --   scripts/migrate_calibration_pairs_v2_not_null.py --apply --mode rebuild
+            --   Produces notnull=1 in PRAGMA table_info but requires disk headroom.
+            --   BLOCKED at current 22 GiB free — operator-coordinated separately.
+            -- Preflight confirmed: 0 NULL rows as of 2026-05-17. See:
             --   docs/operations/task_2026-05-17_strategy_vnext_phase0/preflight/migration_dry_runs.json
-            -- Target DDL (post-migration):
-            --   decision_group_id TEXT NOT NULL,
+            -- Column DDL unchanged until rebuild-mode migration runs:
             decision_group_id TEXT,
             bias_corrected INTEGER NOT NULL DEFAULT 0
                 CHECK (bias_corrected IN (0, 1)),

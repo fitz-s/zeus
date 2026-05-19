@@ -4,9 +4,6 @@
 #   topology packet "phase0-pr4-decision-group-id"
 """R-4.5: AST audit — DecisionGroupId NewType structural tests.
 
-LIVE TESTS (partially): Tests that can pass today are live.
-Tests requiring the production hash implementation are xfail(SCAFFOLD).
-
 INV-group-id-type: All call sites that construct or accept decision group IDs
 must use DecisionGroupId (NewType wrapping str), not raw str.
 
@@ -16,10 +13,9 @@ Test plan:
     T3 (LIVE): decision_group_id_v1_hash is importable and callable.
     T4 (LIVE): decision_group_id_v1_hash has the correct signature (inspect).
     T5 (LIVE): src/contracts/decision_group_id.py exists with SCAFFOLD header.
-    T6 (SCAFFOLD): decision_group_id_v1_hash("0xabc", 3, 7) returns a
-        non-empty str starting with "dgid_v1_".
-    T7 (SCAFFOLD): Two DecisionGroupId values from same args are equal.
-    T8 (SCAFFOLD): Two DecisionGroupId values from different args are not equal.
+    T6 (LIVE): decision_group_id_v1_hash returns a non-empty str starting with "dgid_v1_".
+    T7 (LIVE): Two DecisionGroupId values from same args are equal.
+    T8 (LIVE): Two DecisionGroupId values from different args are not equal.
 """
 
 import inspect
@@ -28,6 +24,16 @@ import os
 import pytest
 
 from src.contracts.decision_group_id import DecisionGroupId, decision_group_id_v1_hash
+
+_FULL_KWARGS = dict(
+    market_id="0xabc123",
+    target_date="2026-06-01",
+    forecast_available_at="2026-05-25T12:00:00",
+    source_id="tigge_mars",
+    data_version="v2.3",
+    bin_index=3,
+    lead_days_bucket=7,
+)
 
 
 def test_decision_group_id_is_importable():
@@ -66,39 +72,23 @@ def test_decision_group_id_contract_file_exists():
     )
 
 
-@pytest.mark.xfail(strict=False, reason="SCAFFOLD: decision_group_id_v1_hash not yet implemented")
 def test_decision_group_id_v1_hash_returns_dgid_prefixed_str():
-    """Hash output must be non-empty str starting with 'dgid_v1_'.
-
-    SCAFFOLD: not implemented.
-    """
-    result = decision_group_id_v1_hash(
-        market_id="0xabc123",
-        bin_index=3,
-        lead_days_bucket=7,
-    )
+    """T6: Hash output must be non-empty str starting with 'dgid_v1_'."""
+    result = decision_group_id_v1_hash(**_FULL_KWARGS)
     assert isinstance(result, str)
     assert result.startswith("dgid_v1_"), f"Expected 'dgid_v1_' prefix, got: {result!r}"
     assert len(result) > len("dgid_v1_"), "Hash result too short"
 
 
-@pytest.mark.xfail(strict=False, reason="SCAFFOLD: decision_group_id_v1_hash not yet implemented")
 def test_decision_group_id_v1_hash_same_args_equal():
-    """Same args always return identical DecisionGroupId.
-
-    SCAFFOLD: not implemented.
-    """
-    a = decision_group_id_v1_hash(market_id="0xabc", bin_index=0, lead_days_bucket=1)
-    b = decision_group_id_v1_hash(market_id="0xabc", bin_index=0, lead_days_bucket=1)
+    """T7: Same args always return identical DecisionGroupId."""
+    a = decision_group_id_v1_hash(**_FULL_KWARGS)
+    b = decision_group_id_v1_hash(**_FULL_KWARGS)
     assert a == b
 
 
-@pytest.mark.xfail(strict=False, reason="SCAFFOLD: decision_group_id_v1_hash not yet implemented")
 def test_decision_group_id_v1_hash_different_args_not_equal():
-    """Different args must return different DecisionGroupId values.
-
-    SCAFFOLD: not implemented.
-    """
-    a = decision_group_id_v1_hash(market_id="0xabc", bin_index=0, lead_days_bucket=1)
-    b = decision_group_id_v1_hash(market_id="0xabc", bin_index=1, lead_days_bucket=1)
+    """T8: Different args must return different DecisionGroupId values."""
+    a = decision_group_id_v1_hash(**_FULL_KWARGS)
+    b = decision_group_id_v1_hash(**{**_FULL_KWARGS, "bin_index": 4})
     assert a != b
