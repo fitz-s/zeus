@@ -1,3 +1,6 @@
+# Lifecycle: created=2026-05-19; last_reviewed=2026-05-19; last_reused=2026-05-19
+# Purpose: Antibody tests for negRisk event.closed semantic — client-side acceptingOrders gate
+# Reuse: Run via pytest tests/test_market_scanner_negrisk.py
 # Created: 2026-05-19
 # Last reused or audited: 2026-05-19
 # Authority basis: Polymarket negRisk semantic verified 2026-05-19; task brief fix/market-scanner-negrisk-acceptingorders
@@ -161,3 +164,47 @@ def test_sed_break_negrisk_closed_event_is_not_rejected_by_helper():
         "Regression: _event_has_active_children rejected an event with "
         "event.closed=True + child.acceptingOrders=True. The negRisk fix was reverted."
     )
+
+
+# ---------------------------------------------------------------------------
+# API discriminator: _fetch_events_by_tags must NOT pass closed=false
+#
+# If `closed=false` is reintroduced in the API params, Polymarket returns 0
+# results for negRisk events — causing the scanner to miss all weather markets.
+# This test mocks _gamma_get and asserts the discriminator is absent from params.
+# ---------------------------------------------------------------------------
+
+def test_fetch_events_by_tags_does_not_pass_closed_false_param():
+    """API discriminator: _fetch_events_by_tags must never include closed=false in params.
+
+    Sed-break: restoring `"closed": "false"` to the _gamma_get params in
+    _fetch_events_by_tags will cause this test to FAIL immediately.
+    """
+    from unittest.mock import MagicMock, patch
+    from src.data.market_scanner import _fetch_events_by_tags
+
+    captured_params: list[dict] = []
+
+    def fake_gamma_get(path, *, params=None, **kwargs):
+        if params:
+            captured_params.append(dict(params))
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        # Return tag data for /tags/slug/... calls, empty event list otherwise
+        if "/tags/slug/" in path:
+            mock_resp.json.return_value = {"id": 99, "slug": path.split("/")[-1]}
+        else:
+            mock_resp.json.return_value = []  # empty batch → stops pagination
+        mock_resp.raise_for_status.return_value = None
+        return mock_resp
+
+    with patch("src.data.market_scanner._gamma_get", side_effect=fake_gamma_get):
+        _fetch_events_by_tags()
+
+    event_params = [p for p in captured_params if "tag_id" in p]
+    assert event_params, "No event-fetch params captured — _fetch_events_by_tags did not call _gamma_get"
+    for p in event_params:
+        assert p.get("closed") != "false", (
+            f"Regression: 'closed=false' found in API params {p}. "
+            "negRisk events are invisible to this filter — revert causes 0 weather markets found."
+        )
