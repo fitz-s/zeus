@@ -2,6 +2,9 @@
 # Last reused or audited: 2026-05-19
 # Authority basis: docs/operations/task_2026-05-17_strategy_vnext_phase0/PHASE_0_V4_ULTRAPLAN.md §H
 #                  docs/operations/task_2026-05-17_strategy_vnext_phase0/PHASE_0_V4_ADDENDUM.md
+# Lifecycle: created=2026-05-19; last_reviewed=2026-05-19; last_reused=2026-05-19
+# Purpose: Restore settlements_v2 provenance_json rows from pre-backfill snapshot
+# Reuse: operator_invoked only; requires --apply + snapshot file; never called by daemon
 """
 Rollback script: restore pre-backfill provenance_json for settlements_v2 rows.
 
@@ -11,8 +14,13 @@ PURPOSE:
     Used when the backfill produced incorrect era assignments or PR 1 is reverted.
 
     IMPORTANT: This script requires a pre-backfill snapshot to restore from.
-    The snapshot must be produced by running the audit script with --snapshot-mode
-    before the backfill is run.
+    The snapshot must be produced by the operator before running the backfill.
+
+    SNAPSHOT FORMAT: JSON with {"rows": [...]} where each row contains:
+        {"city": "...", "target_date": "YYYY-MM-DD", "temperature_metric": "high|low",
+         "original_provenance_json": "{...}"}
+    settlements_v2 is keyed by (city, target_date, temperature_metric).
+    There is NO condition_id column in settlements_v2.
 
 USAGE:
     python scripts/rollback_settlements_v2_era_provenance.py
@@ -81,19 +89,22 @@ def run_rollback(
             conn.execute(f"SAVEPOINT {savepoint_name}")
             try:
                 for row_snap in chunk:
-                    condition_id = row_snap.get("condition_id")
-                    settled_at = row_snap.get("settled_at")
+                    city = row_snap.get("city")
+                    target_date = row_snap.get("target_date")
+                    temperature_metric = row_snap.get("temperature_metric")
                     original_prov = row_snap.get("original_provenance_json")
-                    if not condition_id or original_prov is None:
+                    # settlements_v2 UNIQUE key: (city, target_date, temperature_metric)
+                    # There is no condition_id column in settlements_v2.
+                    if not (city and target_date and temperature_metric) or original_prov is None:
                         total_errors += 1
                         continue
                     conn.execute(
                         """
                         UPDATE settlements_v2
                         SET provenance_json = ?
-                        WHERE condition_id = ? AND settled_at = ?
+                        WHERE city = ? AND target_date = ? AND temperature_metric = ?
                         """,
-                        (original_prov, condition_id, settled_at),
+                        (original_prov, city, target_date, temperature_metric),
                     )
                     total_restored += 1
                 conn.execute(f"RELEASE SAVEPOINT {savepoint_name}")

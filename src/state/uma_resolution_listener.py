@@ -671,6 +671,7 @@ def lookup_resolution(
                resolved_at_utc, raw_log_json
         FROM uma_resolution
         WHERE condition_id = ?
+          AND is_valid = 1
         ORDER BY block_number DESC
         LIMIT 1
         """,
