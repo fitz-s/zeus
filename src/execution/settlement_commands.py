@@ -1071,19 +1071,26 @@ def _coerce_time(value: datetime | str | None) -> str:
 
 
 def _jsonable(o: Any) -> Any:
-    """Coerce HexBytes / bytes / similar to hex-string for JSON serialization.
+    """Coerce HexBytes / bytes / AttributeDict / similar for JSON serialization.
 
     Receipt payloads from web3.eth.get_transaction_receipt contain HexBytes
-    instances (blockHash, transactionHash, logsBloom, logs[].topics, etc.)
-    that the stdlib JSONEncoder rejects. Without this default-hook the
-    reconcile_pending_redeems path crashes with TypeError, leaving rows
-    stuck in REDEEM_TX_HASHED indefinitely.
+    (blockHash, transactionHash, logsBloom, logs[].topics, etc.) AND
+    AttributeDict (web3 mapping for nested log entries) that the stdlib
+    JSONEncoder rejects. Without this default-hook the reconcile_pending_redeems
+    path crashes with TypeError, leaving rows stuck in REDEEM_TX_HASHED.
     """
     # HexBytes inherits from bytes and has .hex() method; bytes also has .hex()
     if isinstance(o, (bytes, bytearray)):
-        return "0x" + o.hex() if not o.hex().startswith("0x") else o.hex()
-    # AttributeDict (web3) subclasses dict → handled automatically by json
-    # Address types str-subclassed; Decimal not used in receipts
+        h = o.hex()
+        return h if h.startswith("0x") else "0x" + h
+    # Mapping-like (web3 AttributeDict) — coerce to plain dict so JSON encoder
+    # recurses normally. Required because in web3 7.x / Python 3.14 AttributeDict
+    # is not a strict dict subclass, so json's internal isinstance(o, dict) check
+    # falls through to this default hook. (2026-05-19 live reconciler error:
+    # "Object of type AttributeDict is not JSON serializable when serializing
+    # list item 0 when serializing dict item 'logs'".)
+    if hasattr(o, "keys") and callable(getattr(o, "keys", None)):
+        return dict(o)
     raise TypeError(f"Object of type {type(o).__name__} is not JSON serializable")
 
 
