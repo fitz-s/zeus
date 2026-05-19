@@ -130,6 +130,7 @@ test_trust_policy:
     tests/test_live_safety_invariants.py: {created: "2026-03-31", last_used: "2026-04-29"}
     tests/test_load_platt_v2_data_version_filter.py: {created: "2026-04-30", last_used: "2026-04-30"}
     tests/test_market_scanner_provenance.py: {created: "2026-04-17", last_used: "2026-05-02"}
+    tests/test_scanner_archived_filter.py: {created: "2026-05-19", last_used: "2026-05-19"}
     tests/test_market_phase.py: {created: "2026-05-04", last_used: "2026-05-04"}
     tests/test_market_phase_persistence.py: {created: "2026-05-04", last_used: "2026-05-04"}
     tests/test_market_phase_dispatch.py: {created: "2026-05-04", last_used: "2026-05-04"}
@@ -622,6 +623,7 @@ categories:
     - tests/test_settlement_commands_ux_review_required.py
     - tests/test_migration_runner_idempotent.py
     - tests/test_market_scanner_zero_insert_alert.py
+    - tests/test_scanner_archived_filter.py
     - tests/test_k1_reader_isolation.py
     - tests/test_k1_reader_isolation_batch2.py
     - tests/test_evaluator_dsi_invariant.py
@@ -2234,5 +2236,33 @@ test_metadata:
       Four contracts: C1 primary (Karachi case), C2 negative control (standard CTF ok),
       C3 positive control (negRisk correct adapter ok), C4 fail-safe (missing world DB).
       Sed-flip verified 2026-05-19: disabling guard causes C1 → RED.
+    created: 2026-05-19
+    last_reused_or_audited: 2026-05-19
+
+  tests/test_scanner_archived_filter.py:
+    modules: [data]
+    category: core_law_antibody
+    profile: pr_scanner_tag84_archived_filter
+    blocks_commit: true
+    asserted_invariants:
+      - TAG-84-WEATHER-BEFORE-TEMPERATURE
+      - CLOB-ARCHIVED-OVERRIDES-GAMMA
+      - CLOB-ERROR-FALLS-BACK-TO-GAMMA
+      - CLOB-CACHE-ONE-REQUEST-PER-CID-PER-TICK
+    source_under_test:
+      - src/data/market_scanner.py
+    law_dependencies:
+      - architecture/invariants.yaml
+      - docs/authority/zeus_current_architecture.md
+    notes: >
+      Antibody for fix/scanner-tag-priority-archived-filter (2026-05-19).
+      Two stacked failures blocked Zeus from discovering Polymarket V2-native
+      weather markets post-V2 cutover (2026-05-11): (1) TAG_SLUGS put
+      "temperature" (tag 104615, stale Dec/Jan archives) before "weather"
+      (tag 84, live arch-arch-* markets); (2) _event_has_active_children
+      trusted Gamma acceptingOrders=True for markets CLOB reports as
+      archived=True. Five sed-flip tests cover tag ordering (T1), CLOB-archived
+      rejection (T2), CLOB-live admission (T3), CLOB-error fallback (T4), and
+      per-tick cache dedup (T5).
     created: 2026-05-19
     last_reused_or_audited: 2026-05-19

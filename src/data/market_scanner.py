@@ -131,12 +131,25 @@ _LOW_METRIC_KEYWORDS = (
 )
 
 # Tag slugs to search (in priority order)
-TAG_SLUGS = ["temperature", "weather", "daily-temperature"]
+# "weather" (tag id 84) is first: returns V2-native arch-arch-* markets with
+# archived=False. "temperature" (id 104615) surfaces stale 2025-Dec/Jan archived
+# markets first; putting it second means seen_ids dedup suppresses those instead
+# of suppressing the live tag-84 results. (Polymarket V2 cutover 2026-05-11.)
+TAG_SLUGS = ["weather", "temperature", "daily-temperature"]
 _ACTIVE_EVENTS_CACHE: list[dict] | None = None
 _ACTIVE_EVENTS_CACHE_AT: float = 0.0  # monotonic timestamp of last fetch
 _ACTIVE_EVENTS_CACHE_AT_UTC: datetime | None = None  # wall-clock of last successful fetch
 _ACTIVE_EVENTS_LAST_STATUS: ScanAuthority = "NEVER_FETCHED"  # B017 provenance flag
 _ACTIVE_EVENTS_TTL: float = 300.0  # 5-minute TTL
+
+# Per-tick CLOB /markets/{cid} archived cross-check cache.
+# Gamma reports acceptingOrders=True for archived markets post-V2 cutover
+# (2026-05-11). CLOB is authoritative; cache key = condition_id, value =
+# (archived: bool, enable_order_book: bool). Reset each scanner tick via
+# clear_clob_archived_cache().
+_CLOB_ARCHIVED_CACHE: dict[str, tuple[bool, bool]] = {}
+CLOB_BASE = "https://clob.polymarket.com"
+
 SOURCE_CONTRACT_QUARANTINE_PATH_ENV = "ZEUS_SOURCE_CONTRACT_QUARANTINE_PATH"
 SOURCE_CONTRACT_QUARANTINE_SCHEMA_VERSION = 1
 SOURCE_CONTRACT_ALERT_STATUSES = frozenset({"AMBIGUOUS", "MISMATCH", "UNSUPPORTED"})
@@ -819,6 +832,7 @@ def _get_active_events_snapshot() -> MarketSnapshot:
     )
     if fresh_needed:
         try:
+            _clear_clob_archived_cache()  # reset per-tick CLOB archived cross-check cache
             _ACTIVE_EVENTS_CACHE = _fetch_events_by_tags()
             _ACTIVE_EVENTS_CACHE_AT = now
             _ACTIVE_EVENTS_CACHE_AT_UTC = datetime.now(timezone.utc)
@@ -894,6 +908,67 @@ def _clear_active_events_cache() -> None:
     _ACTIVE_EVENTS_LAST_STATUS = "NEVER_FETCHED"
 
 
+def _clear_clob_archived_cache() -> None:
+    """Reset the per-tick CLOB archived cross-check cache.
+
+    Call once per scanner tick (before _fetch_events_by_tags) so each tick
+    re-validates freshly. Cache accumulates within a tick to avoid hammering
+    CLOB with redundant requests for the same condition_id.
+    """
+    global _CLOB_ARCHIVED_CACHE
+    _CLOB_ARCHIVED_CACHE = {}
+
+
+def _clob_market_is_live(condition_id: str) -> bool | None:
+    """Cross-check CLOB /markets/{condition_id} for archived status.
+
+    Gamma reports acceptingOrders=True for markets CLOB considers archived
+    post-V2 cutover (2026-05-11). CLOB is authoritative on liveness.
+
+    Returns:
+        True  — CLOB confirms live (archived=False AND enable_order_book=True)
+        False — CLOB confirms archived (archived=True OR enable_order_book=False)
+        None  — CLOB unreachable / non-200; caller falls back to Gamma
+
+    Result is memoised in _CLOB_ARCHIVED_CACHE for the current scanner tick.
+    """
+    global _CLOB_ARCHIVED_CACHE
+    if condition_id in _CLOB_ARCHIVED_CACHE:
+        cached = _CLOB_ARCHIVED_CACHE[condition_id]
+        if cached is None:
+            return None
+        archived, eob = cached
+        return not archived and eob
+    try:
+        resp = httpx.get(
+            f"{CLOB_BASE}/markets/{condition_id}",
+            timeout=2.0,
+        )
+    except httpx.RequestError as exc:
+        # Memoize failure so subsequent same-tick calls short-circuit instead of
+        # incurring serial timeouts. Bot review P1 (Codex + Copilot 2026-05-19):
+        # _event_has_active_children runs up to 10 pages × 50 events per tag;
+        # uncached failure path stalls scanning for minutes during a CLOB outage.
+        _CLOB_ARCHIVED_CACHE[condition_id] = None
+        logger.debug("CLOB archived check failed for %s: %s", condition_id, exc)
+        return None
+    if resp.status_code != 200:
+        _CLOB_ARCHIVED_CACHE[condition_id] = None
+        logger.debug(
+            "CLOB archived check non-200 for %s: %s", condition_id, resp.status_code
+        )
+        return None
+    try:
+        data = resp.json()
+    except Exception:
+        _CLOB_ARCHIVED_CACHE[condition_id] = None
+        return None
+    archived = bool(data.get("archived", False))
+    eob = bool(data.get("enable_order_book", True))
+    _CLOB_ARCHIVED_CACHE[condition_id] = (archived, eob)
+    return not archived and eob
+
+
 def _event_has_active_children(event: dict, now_utc: datetime) -> bool:
     """Tradeability gate for Polymarket negRisk multi-outcome events.
 
@@ -905,7 +980,10 @@ def _event_has_active_children(event: dict, now_utc: datetime) -> bool:
     An event is admitted iff:
       1. endDate is present, parseable, and >= now_utc — OR endDate is missing/
          unparseable (best-effort; missing endDate is deferred to _parse_event)
-      2. At least one child market has acceptingOrders=True
+      2. At least one child market has acceptingOrders=True AND passes CLOB
+         archived cross-check (Gamma lies for archived markets post-V2 cutover
+         2026-05-11; CLOB /markets/{cid} is authoritative). If CLOB is
+         unreachable, Gamma's acceptingOrders is trusted as fallback.
     """
     end_str = event.get("endDate") or event.get("end_date")
     if end_str:
@@ -917,7 +995,19 @@ def _event_has_active_children(event: dict, now_utc: datetime) -> bool:
             pass  # unparseable endDate: let _parse_event reject it downstream
 
     children = event.get("markets") or []
-    return any(child.get("acceptingOrders") is True for child in children)
+    for child in children:
+        if child.get("acceptingOrders") is not True:
+            continue
+        cid = child.get("conditionId") or child.get("condition_id")
+        if cid:
+            clob_live = _clob_market_is_live(cid)
+            if clob_live is False:
+                # CLOB is authoritative: market is archived despite Gamma claim
+                continue
+            # clob_live=True: confirmed live; clob_live=None: CLOB unreachable,
+            # fall back to Gamma trust
+        return True
+    return False
 
 
 def _fetch_events_by_tags() -> list[dict]:
