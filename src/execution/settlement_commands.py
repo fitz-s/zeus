@@ -733,42 +733,119 @@ def submit_redeem(
             conn.close()
 
 
-def _lookup_market_neg_risk_via_world_attach(conn: sqlite3.Connection, condition_id: str) -> bool:
-    """Return True if the market is negRisk per world.executable_market_snapshots.
+def _lookup_market_neg_risk_authoritative(
+    conn: sqlite3.Connection, condition_id: str
+) -> Optional[bool]:
+    """Return True/False if neg_risk is known, or None if all sources are unavailable.
 
-    Ensures the world schema is ATTACHed before the query (same guard pattern as
-    submit_redeem lines 399-405).  Returns False on any error — the caller MUST
-    treat False as "not confirmed negRisk" and NOT as "definitely standard CTF".
+    Three-tier authoritative lookup — fail-closed contract:
+      Tier 1 — world.executable_market_snapshots via ATTACH (primary source).
+      Tier 2 — main executable_market_snapshots on the active conn (zeus_trades.db
+               already has 478 rows; guards against empty world.db).
+      Tier 3 — Gamma CLOB API https://clob.polymarket.com/markets/{condition_id}
+               (5-second timeout, reads .neg_risk field).
+
+    Returns None (NOT False) when all three tiers fail — the caller MUST defer the
+    terminal transition rather than silently marking REDEEM_CONFIRMED on an unknown
+    market type.  None means "unknown", False means "confirmed standard CTF".
     """
+    import httpx
     from src.state.db import ZEUS_WORLD_DB_PATH as _WORLD_PATH
+
+    # --- Tier 1: world.executable_market_snapshots via ATTACH ---
     _attached = {row[1] for row in conn.execute("PRAGMA database_list").fetchall()}
     if "world" not in _attached:
         try:
             conn.execute("ATTACH DATABASE ? AS world", (str(_WORLD_PATH),))
         except sqlite3.OperationalError as _att_exc:
             logger.warning("[RECONCILE_REDEEM_ATTACH_WORLD_FAILED] exc=%r", _att_exc)
-            return False
+    # Attempt the query only if world schema is now attached
+    _attached_now = {row[1] for row in conn.execute("PRAGMA database_list").fetchall()}
+    if "world" in _attached_now:
+        try:
+            neg_risk_row = conn.execute(
+                """
+                SELECT neg_risk
+                  FROM world.executable_market_snapshots
+                 WHERE condition_id = ?
+                 ORDER BY captured_at DESC
+                 LIMIT 1
+                """,
+                (condition_id,),
+            ).fetchone()
+            if neg_risk_row is not None:
+                _nr_val = neg_risk_row["neg_risk"] if hasattr(neg_risk_row, "keys") else neg_risk_row[0]
+                return bool(_nr_val)
+            # Row not found in world.db — fall through to Tier 2
+            logger.debug(
+                "[RECONCILE_REDEEM_NEGRISK_WORLD_MISS] condition_id=%s — world.db has no row; trying trades.db",
+                condition_id,
+            )
+        except Exception as snap_exc:
+            logger.warning(
+                "[RECONCILE_REDEEM_NEGRISK_WORLD_QUERY_FAILED] condition_id=%s exc=%s",
+                condition_id, snap_exc,
+            )
+
+    # --- Tier 2: main (zeus_trades.db) executable_market_snapshots ---
     try:
-        neg_risk_row = conn.execute(
+        trades_row = conn.execute(
             """
             SELECT neg_risk
-              FROM world.executable_market_snapshots
+              FROM executable_market_snapshots
              WHERE condition_id = ?
              ORDER BY captured_at DESC
              LIMIT 1
             """,
             (condition_id,),
         ).fetchone()
-    except Exception as snap_exc:
-        logger.warning(
-            "[RECONCILE_REDEEM_NEGRISK_LOOKUP_FAILED] condition_id=%s exc=%s",
-            condition_id, snap_exc,
+        if trades_row is not None:
+            _nr_val2 = trades_row["neg_risk"] if hasattr(trades_row, "keys") else trades_row[0]
+            logger.info(
+                "[RECONCILE_REDEEM_NEGRISK_TRADES_HIT] condition_id=%s neg_risk=%s",
+                condition_id, _nr_val2,
+            )
+            return bool(_nr_val2)
+        logger.debug(
+            "[RECONCILE_REDEEM_NEGRISK_TRADES_MISS] condition_id=%s — trades.db has no row; trying Gamma",
+            condition_id,
         )
-        return False
-    if neg_risk_row is None:
-        return False
-    _nr_val = neg_risk_row["neg_risk"] if hasattr(neg_risk_row, "keys") else neg_risk_row[0]
-    return bool(_nr_val)
+    except Exception as trades_exc:
+        logger.warning(
+            "[RECONCILE_REDEEM_NEGRISK_TRADES_QUERY_FAILED] condition_id=%s exc=%s",
+            condition_id, trades_exc,
+        )
+
+    # --- Tier 3: Gamma CLOB API ---
+    gamma_url = f"https://clob.polymarket.com/markets/{condition_id}"
+    try:
+        resp = httpx.get(gamma_url, timeout=5.0)
+        resp.raise_for_status()
+        payload = resp.json()
+        if "neg_risk" in payload:
+            gamma_val = bool(payload["neg_risk"])
+            logger.info(
+                "[RECONCILE_REDEEM_NEGRISK_GAMMA_HIT] condition_id=%s neg_risk=%s",
+                condition_id, gamma_val,
+            )
+            return gamma_val
+        logger.warning(
+            "[RECONCILE_REDEEM_NEGRISK_GAMMA_NO_FIELD] condition_id=%s response keys=%s",
+            condition_id, list(payload.keys()),
+        )
+    except Exception as gamma_exc:
+        logger.warning(
+            "[RECONCILE_REDEEM_NEGRISK_GAMMA_FAILED] condition_id=%s exc=%s",
+            condition_id, gamma_exc,
+        )
+
+    # All three tiers exhausted — return None (fail-closed; caller must defer)
+    logger.warning(
+        "[RECONCILE_REDEEM_NEGRISK_ALL_SOURCES_FAILED] condition_id=%s — "
+        "world.db, trades.db, and Gamma all unavailable; returning None (fail-closed)",
+        condition_id,
+    )
+    return None
 
 
 def reconcile_pending_redeems(web3: Any, conn: sqlite3.Connection) -> list[SettlementResult]:
@@ -806,9 +883,18 @@ def reconcile_pending_redeems(web3: Any, conn: sqlite3.Connection) -> list[Settl
             # REDEEM_RETRYING and the submitter rebuilds via NegRiskAdapter.
             # Root cause: Karachi c8c220f5 tx 0x0c85d9… mined to Standard CTF.
             tx_to = (receipt_payload.get("to") or "").lower()
-            is_negrisk_market = _lookup_market_neg_risk_via_world_attach(
+            is_negrisk_market = _lookup_market_neg_risk_authoritative(
                 conn, str(row["condition_id"])
             )
+            if is_negrisk_market is None:
+                # Unknown — all three lookup sources failed (world.db empty, trades.db miss,
+                # Gamma unreachable).  Defer terminal transition; will retry next tick.
+                logger.warning(
+                    "[RECONCILE_REDEEM_NEGRISK_UNKNOWN] command_id=%s condition_id=%s "
+                    "— deferring transition; will retry next tick",
+                    row["command_id"], row["condition_id"],
+                )
+                continue
             if is_negrisk_market and tx_to == POLYGON_CTF_ADDRESS.lower():
                 misroute_error = {
                     "errorCode": "REDEEM_NEGRISK_MISROUTED",
