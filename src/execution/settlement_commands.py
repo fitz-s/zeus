@@ -505,6 +505,11 @@ def submit_redeem(
                 "REDEEM_CALLDATA_BUILD_FAILED",
                 "REDEEM_SIGNER_FUNDER_MISMATCH",
                 "REDEEM_WRONG_CHAIN",
+                # Safe v1.3.0 execTransaction wrap codes (Option A, 2026-05-19)
+                "REDEEM_SAFE_VERSION_UNSUPPORTED",
+                "REDEEM_SAFE_OWNER_MISMATCH",
+                "REDEEM_EOA_MATIC_INSUFFICIENT",
+                "REDEEM_DRY_RUN_LOGGED",
             })
             error_code = raw_payload.get("errorCode")
             stub_deferred = error_code in _OPERATOR_REVIEW_ERRORCODES
