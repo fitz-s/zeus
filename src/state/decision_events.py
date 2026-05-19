@@ -125,6 +125,8 @@ def write_decision_event(
     ekc: "EffectiveKellyContext",
     intent: "ExecutionIntent",
     *,
+    strategy_key: str,
+    p_posterior: Optional[float] = None,
     conn: Optional[sqlite3.Connection] = None,
 ) -> None:
     """Write a decision_events row for a live decision.
@@ -133,6 +135,11 @@ def write_decision_event(
     decision_event_id computed writer-side via decision_event_id_v1_hash() — Option β.
     decision_seq derived atomically under db_writer_lock(LIVE).
     schema_version=SCHEMA_VERSION (13), source='live_decision'.
+
+    strategy_key: caller-provided governance strategy identifier
+        (one of 'settlement_capture', 'shoulder_sell', 'center_buy', 'opening_inertia').
+    p_posterior: model posterior probability at decision time (optional; not yet in
+        ExecutionIntent; caller passes when available from forecast pipeline).
 
     Enforces NOT NULL on PR-6 timing fields when source='live_decision':
     first_member_observed_time, run_complete_time, zeus_submit_intent_time,
@@ -223,10 +230,10 @@ def write_decision_event(
                     observation_time, row_seq,
                     None,  # condition_id: caller enriches if needed
                     deid, ctx.decision_time,
-                    "pending", side, intent.market_id,  # outcome=pending until settlement
+                    "pending", side, strategy_key,  # outcome=pending until settlement
                     None, None,  # cycle_id, cycle_iteration: future Phase-2
-                    intent.decision_edge or None,
-                    None,  # edge from ctx if available
+                    p_posterior,  # posterior probability from forecast pipeline (caller-supplied)
+                    intent.decision_edge or None,  # edge: decision pipeline edge
                     float(intent.target_size_usd),
                     float(intent.limit_price),
                     ctx.forecast_available_at or None,

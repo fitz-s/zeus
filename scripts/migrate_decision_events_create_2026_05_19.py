@@ -59,10 +59,11 @@ CREATE TABLE IF NOT EXISTS decision_events (
     ),
 
     -- DecisionSourceContext — PR 6 (8 fields)
-    first_member_observed_time TEXT NOT NULL,
-    run_complete_time          TEXT NOT NULL,
-    zeus_submit_intent_time    TEXT NOT NULL,
-    venue_ack_time             TEXT NOT NULL,
+    -- Nullable to allow phase0_backfill rows; Python enforces NOT NULL for source='live_decision'
+    first_member_observed_time TEXT,
+    run_complete_time          TEXT,
+    zeus_submit_intent_time    TEXT,
+    venue_ack_time             TEXT,
     first_inclusion_block_time TEXT,
     finality_confirmed_time    TEXT,
     clock_skew_estimate_ms_at_submit INTEGER,

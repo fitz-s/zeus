@@ -265,6 +265,29 @@ scripts:
   antibody_scan.py: {class: diagnostic}
   apply_recommended_controls.py: {class: repair, apply_flag: explicit_import_only, target_db: state/control_plane.json}
   audit_architecture_alignment.py: {class: diagnostic}
+  audit_artifact_json_natural_key_coverage_2026_05_19.py:
+    class: diagnostic_report_writer
+    module_owner: engine
+    status: active
+    lifecycle: packet_ephemeral
+    packet: docs/operations/task_2026-05-19_strategy_vnext_phase1
+    authority_scope: diagnostic_non_promotion
+    dangerous_if_run: false
+    dry_run_default: true
+    apply_flag: null
+    target_db: null
+    read_targets: [state/zeus-world.db]
+    write_targets: [stdout, .claude/jobs/audit_artifact_json_natural_key]
+    canonical_command: "python3 scripts/audit_artifact_json_natural_key_coverage_2026_05_19.py [--db PATH] [--sample N]"
+    external_inputs: []
+    delete_policy: retain_until_superseded
+    reuse_when: >
+      PR-T1-A gate check: measure from_artifact_json() natural-key recovery rate on
+      decision_log rows before running backfill. Acceptance gate >= 80% recovery.
+    do_not_use_when: "World DB is uninitialized (returns NO_TABLE vacuous pass). Use after decision_log rows exist."
+    promotion_barrier: "Read-only diagnostic; does not write DB truth."
+    required_helpers: [src.contracts.decision_natural_key.from_artifact_json]
+    required_tests: []
   audit_city_data_readiness.py: {class: diagnostic_report_writer, write_targets: [stdout, temp]}
   audit_observation_instants_v2.py:
     class: diagnostic_report_writer
@@ -281,6 +304,31 @@ scripts:
   automation_analysis.py: {class: diagnostic}
   backfill_cluster_taxonomy.py: {class: etl_writer, dangerous_if_run: true, apply_flag: implicit, target_db: state/zeus-world.db}
   backfill_current_market_price_snapshots.py: {class: etl_writer}
+  backfill_decision_events_from_artifact_json.py:
+    class: etl_writer
+    module_owner: engine
+    status: active
+    lifecycle: packet_ephemeral
+    packet: docs/operations/task_2026-05-19_strategy_vnext_phase1
+    authority_scope: repair_write
+    dangerous_if_run: true
+    dry_run_default: true
+    apply_flag: "--apply"
+    target_db: state/zeus-world.db
+    read_targets: [state/zeus-world.db, state/zeus-forecasts.db]
+    write_targets: [state/zeus-world.db]
+    canonical_command: "python3 scripts/backfill_decision_events_from_artifact_json.py [--db PATH] [--forecasts-db PATH] [--dry-run | --apply]"
+    external_inputs: []
+    delete_policy: retain_until_superseded
+    reuse_when: >
+      PR-T1-B one-shot backfill: populate decision_events from decision_log.artifact_json.
+      DELETE-by-source then INSERT; idempotent re-run safe (preserves live_decision rows).
+      Run after audit_artifact_json_natural_key_coverage gate passes >= 80%.
+    do_not_use_when: "Audit gate has not been run. World DB uninitialized. Source='live_decision' rows must be preserved (DELETE scope is phase0_backfill only)."
+    promotion_barrier: "Requires --apply flag; dry-run default. Run audit gate first."
+    unguarded_write_rationale: "DELETE-by-source scoped to phase0_backfill only; live_decision rows preserved; --apply required."
+    required_helpers: [src.state.decision_events.write_decision_event, src.contracts.decision_natural_key.from_artifact_json]
+    required_tests: [tests/test_inv_decision_events_completeness.py]
   backfill_ens.py: {class: etl_writer}
   backfill_forecast_issue_time.py: {class: repair, dangerous_if_run: true, apply_flag: "--apply", target_db: state/zeus-world.db, dry_run_default: true, read_targets: [state/zeus-world.db], write_targets: [state/zeus-world.db], authority_scope: repair_write, lifecycle: long_lived, status: active, delete_policy: retain_until_superseded, reuse_when: "Backfill forecast_issue_time + availability_provenance for pre-F11 NULL rows. Idempotent — skips already-populated rows. Requires F11.2 schema migration applied first.", do_not_use_when: "Schema migration not applied yet (script raises). All rows already populated.", canonical_command: "python3 scripts/backfill_forecast_issue_time.py [--db PATH] (--dry-run | --apply --confirm-backup | --verify)", external_inputs: [], promotion_barrier: "--apply requires --confirm-backup affirming verified DB backup exists.", required_helpers: [src.data.dissemination_schedules.derive_availability], required_tests: [tests/test_dissemination_schedules.py, tests/test_forecasts_writer_provenance_required.py], unguarded_write_rationale: "Backfills 23,466 rows in single transaction; --apply + --confirm-backup required; uses F11.1 dissemination registry to derive provenance per source."}
   backfill_uma_resolution_2026.py:
@@ -1110,6 +1158,31 @@ scripts:
     unguarded_write_rationale: "DDL only (ADD COLUMN with DEFAULT); idempotent; reversible because new columns default and old readers continue to work; --apply required."
     required_helpers: [src.state.db.get_connection]
     required_tests: [tests/test_decision_source_context_causality_pr3.py, tests/test_decision_source_context_pr6.py]
+  migrate_decision_events_create_2026_05_19.py:
+    class: migration
+    module_owner: engine
+    status: active
+    lifecycle: packet_ephemeral
+    packet: docs/operations/task_2026-05-19_strategy_vnext_phase1
+    authority_scope: repair_write
+    dangerous_if_run: true
+    dry_run_default: false
+    apply_flag: implicit
+    target_db: state/zeus-world.db
+    read_targets: [state/zeus-world.db]
+    write_targets: [state/zeus-world.db]
+    canonical_command: "python3 scripts/migrate_decision_events_create_2026_05_19.py [--db PATH]"
+    external_inputs: []
+    delete_policy: retain_until_superseded
+    reuse_when: >
+      T1 one-shot migration: CREATE TABLE decision_events, trigger, and 3 indices
+      in world DB. Idempotent (IF NOT EXISTS); safe to re-run. For environments
+      not using init_schema() directly.
+    do_not_use_when: "Table already exists via init_schema() path (idempotent either way)."
+    promotion_barrier: "DDL only; idempotent; no data written."
+    unguarded_write_rationale: "DDL CREATE TABLE/INDEX/TRIGGER with IF NOT EXISTS; idempotent; no data mutation."
+    required_helpers: [src.state.db.get_world_connection]
+    required_tests: [tests/test_p2_byte_equivalence.py]
   migrate_ensemble_snapshots_v2_alpha_proxy.py:
     class: migration
     module_owner: engine
