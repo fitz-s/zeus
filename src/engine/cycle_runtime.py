@@ -14,7 +14,7 @@ import os
 import time
 from dataclasses import is_dataclass, replace
 from datetime import date, datetime, timedelta, timezone
-from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
+from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_FLOOR
 from types import SimpleNamespace
 
 from src.config import get_mode
@@ -84,6 +84,22 @@ _ORDER_OWNERSHIP_TERMINAL_ORDER_STATUSES = frozenset(
 )
 _LIVE_DISCOVERY_EVAL_BUDGET_ENV = "ZEUS_LIVE_DISCOVERY_EVAL_BUDGET_SECONDS"
 _LIVE_DISCOVERY_EVAL_BUDGET_DEFAULT_SECONDS = 360.0
+POLYMARKET_MARKETABLE_BUY_MIN_NOTIONAL_USD = Decimal("1")
+
+
+def _marketable_buy_min_notional_usd(final_intent_context: dict) -> Decimal:
+    raw_value = final_intent_context.get("marketable_buy_min_notional_usd")
+    if raw_value in (None, ""):
+        return POLYMARKET_MARKETABLE_BUY_MIN_NOTIONAL_USD
+    try:
+        value = Decimal(str(raw_value))
+    except (InvalidOperation, ValueError) as exc:
+        raise ValueError(
+            "marketable_buy_min_notional_usd must be a decimal-compatible value"
+        ) from exc
+    if value <= Decimal("0"):
+        raise ValueError("marketable_buy_min_notional_usd must be positive")
+    return value
 
 
 # D4: exit triggers whose statistical burden (2 consecutive negative cycles,
@@ -866,6 +882,11 @@ def _reprice_decision_from_executable_snapshot(
         edge_aware_taker_enabled = allow_taker_upgrade and bool(should_cross)
     edge_aware_taker_selected = False
     depth_sweep_limit_decimal = Decimal("0")
+    marketable_buy_below_venue_min = False
+    marketable_buy_submitted_notional_usd: Decimal | None = None
+    marketable_buy_min_notional_usd = _marketable_buy_min_notional_usd(
+        final_intent_context
+    )
     if positive_edge_cap_decimal > Decimal("0") and slippage_cap_decimal > Decimal("0"):
         depth_sweep_limit_decimal = _floor_to_tick(
             min(slippage_cap_decimal, positive_edge_cap_decimal),
@@ -912,12 +933,56 @@ def _reprice_decision_from_executable_snapshot(
                     f"visible_best_ask_usd={float(best_ask_sweep.gross_notional):.6f} "
                     f"required_usd={size_at_depth_limit:.6f}"
                 )
-            final_best_ask = depth_sweep_limit_float
-            final_price = depth_sweep_limit_float
-            repriced_size = size_at_depth_limit
-            corrected_candidate_price = depth_sweep_limit_float
-            corrected_candidate_expected_fill = float(best_ask_sweep.average_price or best_ask_float)
-            corrected_candidate_size = size_at_depth_limit
+            if direction.startswith("buy_"):
+                marketable_buy_submitted_shares = _quantize_submit_shares(
+                    str(direction),
+                    max(best_ask_sweep.filled_shares, snapshot.min_order_size),
+                    final_limit_price=depth_sweep_limit_decimal,
+                    order_type="FOK",
+                )
+                marketable_buy_submitted_notional_usd = (
+                    marketable_buy_submitted_shares * depth_sweep_limit_decimal
+                )
+            if (
+                marketable_buy_submitted_notional_usd is not None
+                and marketable_buy_submitted_notional_usd < marketable_buy_min_notional_usd
+            ):
+                passive_cap = _floor_to_tick(
+                    min(
+                        snapshot_limit_decimal,
+                        best_ask - tick_size_decimal,
+                        positive_edge_cap_decimal,
+                    ),
+                    tick_size_decimal,
+                )
+                if passive_cap < best_bid <= positive_edge_cap_decimal and best_bid < best_ask:
+                    passive_cap = best_bid
+                if passive_cap <= Decimal("0") or passive_cap >= best_ask:
+                    raise ValueError(
+                        "EXECUTABLE_MARKETABLE_BUY_BELOW_MIN_NOTIONAL_NO_PASSIVE_PRICE: "
+                        f"required_usd={float(marketable_buy_submitted_notional_usd):.6f} "
+                        f"marketable_min_usd={float(marketable_buy_min_notional_usd):.6f} "
+                        f"best_bid={float(best_bid):.6f} best_ask={best_ask_float:.6f}"
+                    )
+                snapshot_limit_decimal = passive_cap
+                snapshot_limit_price = float(snapshot_limit_decimal)
+                final_price = snapshot_limit_price
+                corrected_candidate_price = snapshot_limit_price
+                corrected_candidate_expected_fill = snapshot_limit_price
+                corrected_candidate_size = repriced_size_at_snapshot_vwmp
+                repriced_size = repriced_size_at_snapshot_vwmp
+                marketable_buy_below_venue_min = True
+                passive_maker_repositioned = True
+                passive_maker_reposition_reason = (
+                    "marketable_buy_notional_below_venue_min_repositioned_passive"
+                )
+            else:
+                final_best_ask = depth_sweep_limit_float
+                final_price = depth_sweep_limit_float
+                repriced_size = size_at_depth_limit
+                corrected_candidate_price = depth_sweep_limit_float
+                corrected_candidate_expected_fill = float(best_ask_sweep.average_price or best_ask_float)
+                corrected_candidate_size = size_at_depth_limit
 
     selected_order_type = str(final_intent_context.get("order_type") or "GTC").strip().upper()
     final_order_type = selected_order_type
@@ -998,6 +1063,13 @@ def _reprice_decision_from_executable_snapshot(
         "best_ask_slippage_bps": float(best_ask_slippage_bps),
         "best_ask_fee_adjusted_edge": float(best_ask_fee_adjusted_edge),
         "best_ask_size_at_fee_adjusted_cost": float(best_ask_size_at_fee_adjusted_cost),
+        "marketable_buy_min_notional_usd": float(marketable_buy_min_notional_usd),
+        "marketable_buy_submitted_notional_usd": (
+            None
+            if marketable_buy_submitted_notional_usd is None
+            else float(marketable_buy_submitted_notional_usd)
+        ),
+        "marketable_buy_below_venue_min": bool(marketable_buy_below_venue_min),
         "best_ask_inside_edge_budget": bool(best_ask_inside_edge_budget),
         "f34_crossing_evidence": f34_crossing_evidence,
         "best_ask_slippage_override_by_edge": bool(edge_aware_taker_selected),

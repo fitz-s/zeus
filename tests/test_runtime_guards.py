@@ -709,6 +709,7 @@ def _insert_executable_snapshot(
     orderbook_depth: dict | None = None,
     captured_at: datetime | None = None,
     fee_details: dict | None = None,
+    min_tick_size: str = "0.01",
 ) -> None:
     from src.contracts.executable_market_snapshot_v2 import ExecutableMarketSnapshotV2
     from src.state.snapshot_repo import insert_snapshot
@@ -735,7 +736,7 @@ def _insert_executable_snapshot(
             market_end_at=None,
             market_close_at=None,
             sports_start_at=None,
-            min_tick_size=Decimal("0.01"),
+            min_tick_size=Decimal(min_tick_size),
             min_order_size=Decimal("5"),
             fee_details=fee_details or {"source": "test", "fee_rate_bps": 0},
             token_map_raw={"YES": yes_token_id, "NO": no_token_id},
@@ -3057,6 +3058,204 @@ def test_executable_snapshot_repricing_upgrades_maker_order_type_when_crossing_a
     assert shadow["live_submit_authority"] is True
     assert decision.final_execution_intent.order_type == "FOK"
     assert decision.final_execution_intent.post_only is False
+
+
+def test_executable_snapshot_repricing_keeps_low_notional_marketable_buy_passive(tmp_path):
+    """RELATIONSHIP: venue marketability floor -> submit-safe order semantics.
+
+    Polymarket rejects marketable BUY orders below $1 notional even when the
+    market minimum size allows fewer shares. A low-notional positive-edge entry
+    may stay passive below the best ask, but must not be upgraded to FOK/taker.
+    """
+    from dataclasses import replace
+
+    conn = get_connection(tmp_path / "snapshot-reprice-low-notional-marketable-buy.db")
+    init_schema(conn)
+    _insert_executable_snapshot(
+        conn,
+        snapshot_id="snap-low-notional-marketable-buy",
+        selected_outcome_token_id="yes1",
+        outcome_label="YES",
+        yes_token_id="yes1",
+        no_token_id="no1",
+        top_bid="0.002",
+        top_ask="0.005",
+        bid_size="90",
+        ask_size="10",
+        min_tick_size="0.001",
+        fee_details={"feeRate": "0.10", "source": "test_snapshot_taker_fee"},
+    )
+    edge = replace(
+        _edge(),
+        p_posterior=0.007355886286613883,
+        p_market=0.0035,
+        entry_price=0.0019722222222222224,
+        vwmp=0.0035,
+        edge=0.00538366406439166,
+        forward_edge=0.00538366406439166,
+    )
+    decision = EdgeDecision(
+        should_trade=True,
+        edge=edge,
+        tokens={"token_id": "yes1", "no_token_id": "no1"},
+        size_usd=0.03,
+        applied_validations=[],
+        edge_context=types.SimpleNamespace(p_posterior=edge.p_posterior),
+        decision_snapshot_id="decision-snap-low-notional-marketable-buy",
+        sizing_bankroll=187.985625,
+        kelly_multiplier_used=0.125,
+        execution_fee_rate=0.10,
+    )
+
+    best_ask = cycle_runtime._reprice_decision_from_executable_snapshot(
+        conn,
+        decision,
+        {"executable_snapshot_id": "snap-low-notional-marketable-buy"},
+        {
+            "order_type": "GTC",
+            "allow_taker_upgrade": True,
+            "marketable_buy_min_notional_usd": "",
+            "cancel_after": datetime(2026, 5, 22, 1, tzinfo=timezone.utc),
+            "resolution_window": "2026-05-22",
+            "correlation_key": "Jeddah:2026-05-22",
+        },
+    )
+    conn.close()
+
+    reprice = decision.tokens["executable_snapshot_reprice"]
+    shadow = reprice["corrected_pricing_shadow"]
+    assert best_ask is None
+    assert reprice["marketable_buy_below_venue_min"] is True
+    assert reprice["marketable_buy_submitted_notional_usd"] < 1.0
+    assert reprice["passive_maker_reposition_reason"] == (
+        "marketable_buy_notional_below_venue_min_repositioned_passive"
+    )
+    assert reprice["selected_order_type"] == "GTC"
+    assert reprice["final_order_type"] == "GTC"
+    assert reprice["taker_order_type_upgraded"] is False
+    assert reprice["final_limit_price"] == pytest.approx(0.004)
+    assert reprice["final_best_ask"] is None
+    assert shadow["order_policy"] == "post_only_passive_limit"
+    assert shadow["live_submit_authority"] is True
+    assert decision.final_execution_intent.order_type == "GTC"
+    assert decision.final_execution_intent.post_only is True
+    assert float(decision.final_execution_intent.final_limit_price) < 0.005
+
+
+def test_executable_snapshot_repricing_rejects_low_notional_marketable_buy_without_passive_price(tmp_path):
+    """RELATIONSHIP: sub-$1 taker ban cannot create an invalid maker order."""
+    from dataclasses import replace
+
+    conn = get_connection(tmp_path / "snapshot-reprice-low-notional-no-passive.db")
+    init_schema(conn)
+    _insert_executable_snapshot(
+        conn,
+        snapshot_id="snap-low-notional-no-passive",
+        selected_outcome_token_id="yes1",
+        outcome_label="YES",
+        yes_token_id="yes1",
+        no_token_id="no1",
+        top_bid="0.00075",
+        top_ask="0.001",
+        bid_size="1000",
+        ask_size="100",
+        min_tick_size="0.001",
+        fee_details={"feeRate": "0.10", "source": "test_snapshot_taker_fee"},
+    )
+    edge = replace(
+        _edge(),
+        p_posterior=0.0015,
+        p_market=0.00099975,
+        entry_price=0.00099975,
+        vwmp=0.00099975,
+        edge=0.00050025,
+        forward_edge=0.00050025,
+    )
+    decision = EdgeDecision(
+        should_trade=True,
+        edge=edge,
+        tokens={"token_id": "yes1", "no_token_id": "no1"},
+        size_usd=0.03,
+        applied_validations=[],
+        edge_context=types.SimpleNamespace(p_posterior=edge.p_posterior),
+        decision_snapshot_id="decision-snap-low-notional-no-passive",
+        sizing_bankroll=187.985625,
+        kelly_multiplier_used=0.125,
+        execution_fee_rate=0.10,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="EXECUTABLE_MARKETABLE_BUY_BELOW_MIN_NOTIONAL_NO_PASSIVE_PRICE",
+    ):
+        cycle_runtime._reprice_decision_from_executable_snapshot(
+            conn,
+            decision,
+            {"executable_snapshot_id": "snap-low-notional-no-passive"},
+            {
+                "order_type": "GTC",
+                "allow_taker_upgrade": True,
+                "marketable_buy_min_notional_usd": None,
+                "cancel_after": datetime(2026, 5, 22, 1, tzinfo=timezone.utc),
+                "resolution_window": "2026-05-22",
+                "correlation_key": "Jeddah:2026-05-22",
+            },
+        )
+    conn.close()
+
+
+def test_executable_snapshot_repricing_allows_low_kelly_when_min_shares_clear_marketable_floor(tmp_path):
+    """RELATIONSHIP: marketable BUY floor uses actual submitted notional."""
+    conn = get_connection(tmp_path / "snapshot-reprice-min-shares-clears-floor.db")
+    init_schema(conn)
+    _insert_executable_snapshot(
+        conn,
+        snapshot_id="snap-min-shares-clears-floor",
+        selected_outcome_token_id="yes1",
+        outcome_label="YES",
+        yes_token_id="yes1",
+        no_token_id="no1",
+        top_bid="0.20",
+        top_ask="0.30",
+        bid_size="100",
+        ask_size="100",
+        fee_details={"feeRate": "0.03", "source": "test_snapshot_taker_fee"},
+    )
+    edge = _edge()
+    decision = EdgeDecision(
+        should_trade=True,
+        edge=edge,
+        tokens={"token_id": "yes1", "no_token_id": "no1"},
+        size_usd=0.60,
+        applied_validations=[],
+        edge_context=types.SimpleNamespace(p_posterior=edge.p_posterior),
+        decision_snapshot_id="decision-snap-min-shares-clears-floor",
+        sizing_bankroll=100.0,
+        kelly_multiplier_used=0.25,
+        execution_fee_rate=0.03,
+    )
+
+    best_ask = cycle_runtime._reprice_decision_from_executable_snapshot(
+        conn,
+        decision,
+        {"executable_snapshot_id": "snap-min-shares-clears-floor"},
+        {
+            "order_type": "GTC",
+            "allow_taker_upgrade": True,
+            "cancel_after": datetime(2026, 4, 3, 1, tzinfo=timezone.utc),
+            "resolution_window": "2026-04-03",
+            "correlation_key": "NYC:2026-04-03",
+        },
+    )
+    conn.close()
+
+    reprice = decision.tokens["executable_snapshot_reprice"]
+    assert best_ask == pytest.approx(0.30)
+    assert reprice["best_ask_size_at_fee_adjusted_cost"] < 1.0
+    assert reprice["marketable_buy_submitted_notional_usd"] == pytest.approx(1.5)
+    assert reprice["marketable_buy_below_venue_min"] is False
+    assert reprice["final_order_type"] == "FOK"
+    assert decision.final_execution_intent.submitted_shares == Decimal("5")
 
 
 def test_executable_snapshot_repricing_crosses_positive_ev_ask_outside_flat_slippage_when_live_taker_allowed(tmp_path):

@@ -173,14 +173,25 @@ def _is_polymarket_geoblock_403(exc: Exception) -> bool:
 
 
 def _is_polymarket_invalid_amount_400(exc: Exception) -> bool:
-    message = str(exc)
-    return (
-        type(exc).__name__ == "PolyApiException"
-        and "status_code=400" in message
-        and "invalid amounts" in message
+    if type(exc).__name__ != "PolyApiException":
+        return False
+    return _is_polymarket_invalid_amount_400_message(str(exc))
+
+
+def _is_polymarket_invalid_amount_400_message(message: str) -> bool:
+    if "status_code=400" not in message:
+        return False
+    precision_rejection = (
+        "invalid amounts" in message
         and "maker amount" in message
         and "taker amount" in message
     )
+    marketable_buy_min_rejection = (
+        "invalid amount" in message
+        and "marketable BUY order" in message
+        and "min size: $1" in message
+    )
+    return precision_rejection or marketable_buy_min_rejection
 
 
 def _geoblock_rejection_payload(exc: Exception, *, idempotency_key: str) -> dict:

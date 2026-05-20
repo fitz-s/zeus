@@ -229,14 +229,6 @@ _GEOBLOCK_403_MARKERS = (
     "Trading restricted in your region",
     "geoblock",
 )
-_INVALID_AMOUNT_400_MARKERS = (
-    "status_code=400",
-    "invalid amounts",
-    "maker amount",
-    "taker amount",
-)
-
-
 def _dict_row(row) -> dict:
     if row is None:
         return {}
@@ -2560,6 +2552,8 @@ def _invalid_amount_400_predicates(
     envelope = _command_envelope(conn, command.get("envelope_id"))
     position_counts = _count_position_rows_for_command(conn, command)
     exception_message = str(latest_payload.get("exception_message") or "")
+    from src.execution.executor import _is_polymarket_invalid_amount_400_message
+
     predicates = {
         "latest_event_is_submit_timeout_unknown": (
             latest_event_type == CommandEventType.SUBMIT_TIMEOUT_UNKNOWN.value
@@ -2568,8 +2562,8 @@ def _invalid_amount_400_predicates(
             latest_payload.get("reason") == "post_submit_exception_possible_side_effect"
         ),
         "exception_type_polyapi": latest_payload.get("exception_type") == "PolyApiException",
-        "exception_message_invalid_amount_400": all(
-            marker in exception_message for marker in _INVALID_AMOUNT_400_MARKERS
+        "exception_message_invalid_amount_400": (
+            _is_polymarket_invalid_amount_400_message(exception_message)
         ),
         "no_venue_order_id": not str(command.get("venue_order_id") or "").strip(),
         "no_final_submission_envelope": not final_envelope_ids,
