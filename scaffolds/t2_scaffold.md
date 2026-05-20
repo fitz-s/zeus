@@ -118,14 +118,18 @@ CREATE TABLE IF NOT EXISTS day0_nowcast_runs (
 **NOT NULL columns (9)**: market_slug, temperature_metric, target_date, observation_time,
 run_seq, fit_run_id, hours_remaining, daypart, schema_version, source — 10 total.
 
-**bin_grid_id deferred to Phase 2 (MarketAnalysisVNext)**: Day0 markets resolve ≤6h; bin
-re-list within that window is vanishingly rare. The propagation path (`bin_grid_id` on
-`ensemble_snapshots_v2` and `ContractOutcomeDomain`) does not reach `evaluator.py:2363` or
-`monitor_refresh.py:838` — the `bins` list at those sites is built inline from market
-`outcomes` (Bin type has no `bin_grid_id` field). Plumbing it requires new architectural
-surface not in T2 scope. Scaffold §13 #2 claim "propagated from cycle_runtime.bins" was
-a phantom: no such propagation exists. Phase 2 retrofit will add bin_grid_id/bin_schema_version
-once the canonical propagation path is designed.
+**bin_grid_id deferred to Phase 2 (MarketAnalysisVNext)**: day0_nowcast_runs rows are written
+only during the ≤6h nowcast applicability window (the subset of the 24h Day0 market lifecycle
+where the horizon guard permits writes). Within that 6h write window, bin re-list is rare.
+The broader 24h Day0 lifecycle bin evolution is already covered by
+`ensemble_snapshots_v2.bin_grid_id` (the upstream ensemble snapshot that triggers the Day0
+cycle). The propagation path (`bin_grid_id` on `ensemble_snapshots_v2` and
+`ContractOutcomeDomain`) does not reach `evaluator.py:2363` or `monitor_refresh.py:838`
+— the `bins` list at those sites is built inline from market `outcomes` (Bin type has no
+`bin_grid_id` field). Plumbing it requires new architectural surface not in T2 scope.
+Scaffold §13 #2 claim "propagated from cycle_runtime.bins" was a phantom: no such propagation
+exists. Phase 2 retrofit will plumb bin_grid_id from the triggering ensemble row to
+day0_nowcast_runs once a clean propagation path lands.
 
 **p_fused NOT stored here** — evaluator computes element-wise fusion per-bin and stores
 result in `decision_events.p_posterior`. Nowcast runs table stores only nowcast output.
@@ -312,6 +316,10 @@ CHECK constraint widened to `IN (3, 4)` during migration window (Fix 3).
   Original v3 claim ("propagated from cycle_runtime.bins") was a phantom — no propagation
   path exists at evaluator.py:2363 or monitor_refresh.py:838. bins list is built inline
   from market outcomes; Bin type has no bin_grid_id field. NOT NULL count corrected to 10.
+  Correct rationale: nowcast writes happen only during the ≤6h applicability window (subset
+  of the 24h Day0 lifecycle). Bin re-list within that 6h window is rare. The upstream
+  ensemble_snapshots_v2.bin_grid_id covers the 24h lifecycle bin evolution. Phase 2 retrofit
+  will plumb bin_grid_id from the triggering ensemble row once propagation path lands.
 **#3 resolved**: Caller-site wiring, not router side-effect (Option c per critic round-2).
 **#4 resolved**: One-hot daypart encoding (3 columns: γ_morning, γ_afternoon, γ_post_peak;
   pre_sunrise = reference category).
