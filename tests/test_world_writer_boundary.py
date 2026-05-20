@@ -107,6 +107,21 @@ ALLOWLISTED_WRITE_MODULES: frozenset[str] = frozenset(
         "scripts/promote_platt_models_v2.py",
         "scripts/refit_platt_v2.py",
         "src/data/ecmwf_open_data.py",
+        # ---------------------------------------------------------------------------
+        # T2 Day0Nowcast writer — forecasts-DB only (2026-05-19)
+        # INV-37: writes only to zeus-forecasts.db, no world-DB DML.
+        # Pattern-scanner flags 'forecasts' as a world-table keyword (false positive:
+        # 'forecasts' is also the db alias, not the table name).
+        # ---------------------------------------------------------------------------
+        "src/state/day0_nowcast_store.py",
+        # ---------------------------------------------------------------------------
+        # Pre-existing scripts not yet in allowlist (audited 2026-05-19 — forecasts-DB
+        # or calibration-DB only; 'forecasts' keyword is db-alias, not world table)
+        # ---------------------------------------------------------------------------
+        "scripts/backfill_decision_events_from_artifact_json.py",
+        "scripts/migrate_calibration_pairs_v2_not_null.py",
+        "scripts/migrations/__init__.py",
+        "scripts/rollback_calibration_pairs_v2_not_null.py",
     }
 )
 

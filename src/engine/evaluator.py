@@ -79,6 +79,10 @@ from src.engine.discovery_mode import DiscoveryMode
 from src.data.forecast_fetch_plan import data_version_for_track, track_for_metric
 from src.engine.time_context import lead_days_to_date_start, lead_hours_to_date_start
 from src.signal.day0_router import Day0Router, Day0SignalInputs
+from src.signal.day0_high_nowcast_signal import (
+    Day0HighNowcastSignal,
+    NotApplicableHorizon as _NowcastNotApplicableHorizon,
+)
 from src.signal.day0_window import remaining_member_extrema_for_day0
 from src.signal.ensemble_signal import EnsembleSignal, p_raw_vector_from_maxes, select_hours_for_target_date
 from src.control.control_plane import get_edge_threshold_multiplier
@@ -2382,6 +2386,63 @@ def evaluate_candidate(
         # but contract-implicit.
         p_raw = day0.p_vector(bins, n_mc=day0_n_mc())
         day0_forecast_context = day0.forecast_context()
+
+        # T2 Day0HighNowcastSignal — parallel write lane (caller-site, not router).
+        # Option c: Day0Router stays pure; nowcast is a side-write here.
+        # Write only when a calibrated HorizonPlattFit exists in forecasts DB.
+        # fit_run_id NOT NULL FK: a missing fit means no write (fail-safe).
+        # conn=None below: write_nowcast_run acquires its own forecasts connection
+        # (INV-37: world conn from evaluate_candidate must not touch forecasts DB).
+        if temperature_metric.is_high() and hours_remaining <= 6.0:
+            _obs_time_for_nowcast = _day0_observation_field(
+                candidate.observation, "observation_time"
+            )
+            if _obs_time_for_nowcast is not None:
+                try:
+                    from src.state.day0_nowcast_store import (
+                        read_latest_platt_fit,
+                        write_nowcast_run,
+                    )
+                    _horizon_model = read_latest_platt_fit()
+                    if _horizon_model is not None:
+                        _nowcast = Day0HighNowcastSignal(
+                            observed_high_so_far=float(observed_high_so_far or 0.0),
+                            member_maxes_remaining=extrema.maxes,
+                            current_temp=float(current_temp),
+                            hours_remaining=hours_remaining,
+                            model=_horizon_model,
+                            unit=city.settlement_unit or "F",
+                            observation_source=str(
+                                _day0_observation_field(candidate.observation, "source", "")
+                            ),
+                            observation_time=str(_obs_time_for_nowcast),
+                            temporal_context=temporal_context,
+                            round_fn=settlement_semantics.round_values,
+                        )
+                        _p_nowcast_vec = _nowcast.p_vector(bins)
+                        try:
+                            write_nowcast_run(
+                                market_slug=str(candidate.slug or ""),
+                                temperature_metric=temperature_metric.temperature_metric,
+                                target_date=str(target_date),
+                                observation_time=str(_obs_time_for_nowcast),
+                                fit_run_id=_horizon_model.fit_run_id,
+                                p_nowcast=_p_nowcast_vec,
+                                p_now_raw=p_raw,
+                                hours_remaining=hours_remaining,
+                                daypart=temporal_context.daypart,
+                                source="live_nowcast",
+                                conn=None,  # acquires own forecasts conn; world conn must not be passed
+                            )
+                        except Exception as _nowcast_write_exc:
+                            logger.warning(
+                                "[DAY0_NOWCAST_WRITE_FAILED] slug=%s metric=%s exc=%s",
+                                candidate.slug,
+                                temperature_metric.temperature_metric,
+                                _nowcast_write_exc,
+                            )
+                except _NowcastNotApplicableHorizon:
+                    pass  # horizon guard fired; no write
         raw_arr = extrema.maxes if extrema.maxes is not None else extrema.mins
         required_member_floor = ensemble_member_count() if required_hour_indices is not None else 1
         if raw_arr is None or np.count_nonzero(np.isfinite(raw_arr)) < required_member_floor:

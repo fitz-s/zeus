@@ -2511,7 +2511,7 @@ def assert_schema_current(conn: sqlite3.Connection) -> None:
 # SCHEMA_FORECASTS_VERSION: bumped whenever forecast-authority DDL changes.
 # Owned tables include the 7 K1 forecast-class tables, the live source
 # authority chain tables, producer readiness_state, and forecast-live job_run.
-SCHEMA_FORECASTS_VERSION: int = 3
+SCHEMA_FORECASTS_VERSION: int = 4  # T2 Day0Nowcast tables (2026-05-19)
 
 
 def _create_settlements(conn: sqlite3.Connection) -> None:
@@ -2932,6 +2932,9 @@ _FORECAST_TABLES = (
     "calibration_pairs_v2",
     "settlements_v2",
     "market_events_v2",
+    # T2 Day0Nowcast — SCHEMA_FORECASTS_VERSION 4 (2026-05-19)
+    "day0_horizon_platt_fits",
+    "day0_nowcast_runs",
 )
 
 
@@ -3006,6 +3009,91 @@ def _ensure_v2_forecast_indexes(conn: sqlite3.Connection) -> None:
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_calibration_pairs_v2_refit_core
             ON calibration_pairs_v2(temperature_metric, data_version, training_allowed, authority)
+    """)
+
+
+def _create_day0_horizon_platt_fits(conn: sqlite3.Connection) -> None:
+    """Create day0_horizon_platt_fits table. Idempotent. K1 forecast-class.
+
+    One row per HorizonPlattFit execution (fit_run_id = uuid4 PK).
+    Referenced as FK by day0_nowcast_runs.fit_run_id.
+
+    T2 Day0Nowcast — SCHEMA_FORECASTS_VERSION 4 (2026-05-19).
+    """
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS day0_horizon_platt_fits (
+            fit_run_id          TEXT PRIMARY KEY,
+            fit_version         TEXT NOT NULL,
+            alpha               REAL NOT NULL,
+            beta                REAL NOT NULL,
+            gamma_morning       REAL NOT NULL,
+            gamma_afternoon     REAL NOT NULL,
+            gamma_post_peak     REAL NOT NULL,
+            delta               REAL NOT NULL,
+            epsilon             REAL NOT NULL,
+            fit_date            TEXT,
+            n_obs               INTEGER NOT NULL,
+            sample_period_start TEXT,
+            sample_period_end   TEXT,
+            schema_version      INTEGER NOT NULL CHECK (schema_version IN (3, 4)),
+            source              TEXT NOT NULL CHECK (source IN ('live_fit', 'replay_fit'))
+        )
+    """)
+
+
+def _create_day0_nowcast_runs(conn: sqlite3.Connection) -> None:
+    """Create day0_nowcast_runs table + AFTER INSERT trigger + indexes. Idempotent.
+
+    K1 forecast-class table. One row per Day0HighNowcastSignal evaluation.
+    nowcast_event_id (nei_v1_ namespace) computed writer-side; AFTER INSERT
+    trigger is a backstop sentinel for NULL writer-bypass.
+
+    T2 Day0Nowcast — SCHEMA_FORECASTS_VERSION 4 (2026-05-19).
+    bin_grid_id deferred to Phase 2 (no propagation path at Day0 caller sites).
+    """
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS day0_nowcast_runs (
+            market_slug         TEXT NOT NULL,
+            temperature_metric  TEXT NOT NULL CHECK (temperature_metric IN ('high', 'low')),
+            target_date         TEXT NOT NULL,
+            observation_time    TEXT NOT NULL,
+            run_seq             INTEGER NOT NULL,
+            nowcast_event_id    TEXT,
+            fit_run_id          TEXT NOT NULL
+                REFERENCES day0_horizon_platt_fits(fit_run_id),
+            p_nowcast_json      TEXT,
+            p_now_raw_json      TEXT,
+            hours_remaining     REAL NOT NULL,
+            daypart             TEXT NOT NULL
+                CHECK (daypart IN ('pre_sunrise','morning','afternoon','post_peak')),
+            schema_version      INTEGER NOT NULL CHECK (schema_version IN (3, 4)),
+            source              TEXT NOT NULL CHECK (source IN ('live_nowcast', 'replay')),
+            PRIMARY KEY (market_slug, temperature_metric, target_date, observation_time, run_seq)
+        )
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_day0_nowcast_runs_slug_date
+            ON day0_nowcast_runs(market_slug, target_date)
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_day0_nowcast_runs_event_id
+            ON day0_nowcast_runs(nowcast_event_id)
+    """)
+    # AFTER INSERT backstop: if writer failed to supply nowcast_event_id,
+    # stamp sentinel so NULL rows are detectable in audit queries.
+    conn.execute("""
+        CREATE TRIGGER IF NOT EXISTS trg_day0_nowcast_runs_nei_backstop
+        AFTER INSERT ON day0_nowcast_runs
+        WHEN NEW.nowcast_event_id IS NULL
+        BEGIN
+            UPDATE day0_nowcast_runs
+            SET nowcast_event_id = 'nei_v1_BACKSTOP_NULL_WRITER_BYPASS'
+            WHERE market_slug        = NEW.market_slug
+              AND temperature_metric = NEW.temperature_metric
+              AND target_date        = NEW.target_date
+              AND observation_time   = NEW.observation_time
+              AND run_seq            = NEW.run_seq;
+        END
     """)
 
 
@@ -3159,6 +3247,12 @@ def init_schema_forecasts(conn: sqlite3.Connection) -> None:
     # so both branches converge to the canonical v2 index inventory.
     # PLAN-evidence: docs/operations/task_2026-05-14_attach_path_index_fix/PLAN.md
     _ensure_v2_forecast_indexes(conn)
+
+    # T2 Day0Nowcast — SCHEMA_FORECASTS_VERSION 4 (2026-05-19).
+    # These tables are forecast-class only; not in world_src so always created
+    # via static helpers (ATTACH branch will not find them in world_src.sqlite_master).
+    _create_day0_horizon_platt_fits(conn)
+    _create_day0_nowcast_runs(conn)
 
     # Mark schema current — MUST be last (partial failure must not mark ready).
     conn.execute(f"PRAGMA user_version = {SCHEMA_FORECASTS_VERSION}")
