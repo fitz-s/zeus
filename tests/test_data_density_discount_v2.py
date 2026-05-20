@@ -1,11 +1,14 @@
 # Created: 2026-05-03
-# Last reused/audited: 2026-05-15
+# Last reused/audited: 2026-05-20
 # Authority basis: docs/reference/zeus_oracle_density_discount_reference.md (v2 redesign)
+# Lifecycle: created=2026-05-03; last_reviewed=2026-05-20; last_reused=2026-05-20
+# Purpose: DDD v2 two-rail trigger and continuous linear discount curve antibodies.
+# Reuse: Run when changing data-density floors, window-elapsed behavior, or oracle mismatch preservation.
 """Tests for DDD v2 — Two-Rail trigger + continuous linear curve.
 
 Test coverage:
   - Rail 1 fires when cov<0.35 and window>0.5
-  - Rail 1 does NOT fire when cov<0.35 but window<0.5
+  - Rails do NOT fire when observation window is not half elapsed
   - Rail 2 produces 0% discount at cov=floor
   - Rail 2 produces 9% cap at shortfall >= 0.45
   - Linear interpolation: shortfall=0.10 → discount ≈ 0.02
@@ -104,8 +107,8 @@ class TestRail1AbsoluteKill:
         assert result.rail == 1
         assert result.discount == 0.0
 
-    def test_rail1_does_not_fire_when_window_below_half(self):
-        """Rail 1 does NOT fire when cov=0.30 but window=0.40 <= 0.50."""
+    def test_density_discount_waits_until_window_half_elapsed(self):
+        """Observation-density discounts cannot fire before observations exist."""
         floors, nstar = make_configs("Tokyo", "high", 1.0)
         result = evaluate_ddd(
             city="Tokyo", track="high",
@@ -117,7 +120,10 @@ class TestRail1AbsoluteKill:
             n_star_config=nstar,
         )
         assert result.action == "DISCOUNT"
-        assert result.rail == 2
+        assert result.rail is None
+        assert result.discount == 0.0
+        assert result.diagnostic["final_discount_pre_mismatch"] == 0.0
+        assert result.diagnostic["discount_deferred_reason"] == "observation_window_not_half_elapsed"
 
     def test_rail1_does_not_fire_at_exactly_035_threshold(self):
         """Rail 1 does NOT fire at cov=0.35 exactly (< 0.35 required)."""
@@ -201,13 +207,13 @@ class TestRail2Cap:
         assert result.action == "DISCOUNT"
         assert result.discount == pytest.approx(MAX_DISCOUNT, abs=1e-9)
 
-    def test_nine_percent_cap_at_large_shortfall(self):
-        """Shortfall=0.80 still capped at 9%."""
+    def test_nine_percent_cap_at_large_shortfall_after_window_half_elapsed(self):
+        """Shortfall=0.80 still capped at 9% after the observation window matures."""
         floors, nstar = make_configs("TestCity", "high", 1.0)
         result = evaluate_ddd(
             city="TestCity", track="high",
             current_cov=0.20,  # shortfall = 0.80; but < 0.35 → Rail 1 at window>0.5
-            window_elapsed=0.30,  # window < 0.5, so Rail 1 does NOT fire
+            window_elapsed=0.50,  # exactly half elapsed: Rail 1 does NOT fire
             N_platt_samples=840,
             mismatch_rate=0.0,
             city_floors_config=floors,
@@ -410,8 +416,8 @@ class TestCityScenarios:
         assert result.action == "HALT"
         assert result.rail == 1
 
-    def test_lagos_cov_zero_no_fire_early_window(self):
-        """Lagos: cov=0 but window=0.30 < 0.50 — Rail 1 does NOT fire."""
+    def test_lagos_cov_zero_no_discount_early_window(self):
+        """Lagos: cov=0 before half-window is not evidence of missing observations."""
         floors, nstar = make_configs("Lagos", "high", 0.45)
         result = evaluate_ddd(
             city="Lagos", track="high",
@@ -423,8 +429,9 @@ class TestCityScenarios:
             n_star_config=nstar,
         )
         assert result.action == "DISCOUNT"
-        # cov=0, floor=0.45, shortfall=0.45 → discount=0.09 (cap)
-        assert result.discount == pytest.approx(MAX_DISCOUNT, abs=1e-9)
+        assert result.rail is None
+        assert result.discount == 0.0
+        assert result.diagnostic["discount_deferred_reason"] == "observation_window_not_half_elapsed"
 
     def test_tokyo_floor_10_cov_6_7_mild_discount(self):
         """Tokyo: floor=1.0, cov=6/7≈0.857 → shortfall≈0.143, discount≈2.86%."""

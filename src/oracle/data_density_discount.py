@@ -1,5 +1,5 @@
 # Created: 2026-05-03
-# Last reused/audited: 2026-05-15
+# Last reused/audited: 2026-05-20
 # Authority basis: docs/reference/zeus_oracle_density_discount_reference.md (v2 redesign)
 """Data Density Discount (DDD) v2 — Two-Rail trigger + continuous linear curve.
 
@@ -9,6 +9,8 @@ Phase 1 analysis: docs/operations/task_2026-05-03_ddd_implementation_plan/
 Runtime artifacts: src/oracle/ddd_artifacts/
 
 Two-Rail logic:
+  Pre-window — No observation-density penalty before the observation window is
+               half elapsed; target-day WU absence is not evidence until then.
   Rail 1 — Absolute hard kill: cov < 0.35 AND window_elapsed > 0.50
   Rail 2 — Continuous linear discount: D = min(0.09, 0.20 × shortfall)
             with 1.25× amplification when N_platt_samples < N_star
@@ -218,6 +220,27 @@ def evaluate_ddd(
         "source_id": source_id,
         "horizon_profile": horizon_profile,
     }
+
+    # ── PRE-WINDOW: target-day observation absence is not yet evidence ─────
+    if window_elapsed < WINDOW_ELAPSED_THRESHOLD:
+        diagnostic["rail_fired"] = None
+        diagnostic["shortfall"] = None
+        diagnostic["final_discount_pre_mismatch"] = 0.0
+        diagnostic["discount_deferred_reason"] = "observation_window_not_half_elapsed"
+        final_discount = max(mismatch_rate, 0.0)
+        logger.debug(
+            "DDD deferred: city=%s track=%s cov=%.3f floor=%.3f "
+            "window_elapsed=%.2f mismatch=%.4f",
+            city, track, current_cov, city_floor, window_elapsed, mismatch_rate,
+        )
+        result = DDDResult(
+            action="DISCOUNT",
+            discount=final_discount,
+            rail=None,
+            diagnostic=diagnostic,
+        )
+        _emit_diagnostic_log(result)
+        return result
 
     # ── RAIL 1: Absolute hard kill ─────────────────────────────────────────
     # Physics: below 0.35, no probability claim about daily extreme is defensible.

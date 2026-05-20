@@ -18,6 +18,7 @@ import uuid
 from collections import defaultdict
 from dataclasses import dataclass, field, fields, is_dataclass
 from datetime import date, datetime, timezone
+from decimal import Decimal, InvalidOperation
 from enum import Enum
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Optional
@@ -891,6 +892,28 @@ def _size_at_execution_price_boundary(
 
     # P10E strict: shadow-off path removed. R10 requires fee-adjusted typed price.
     return fee_adjusted_size
+
+
+def _effective_min_order_usd_for_entry(
+    *,
+    tokens: dict | None,
+    entry_price: float,
+    fallback_min_order_usd: float,
+) -> tuple[float, str]:
+    """Return the minimum notional backed by executable snapshot metadata."""
+
+    fallback = max(0.0, float(fallback_min_order_usd or 0.0))
+    raw_min_order = (tokens or {}).get("executable_snapshot_min_order_size")
+    if raw_min_order is None:
+        return fallback, "settings_min_order_usd"
+    try:
+        min_order_shares = Decimal(str(raw_min_order))
+        price = Decimal(str(entry_price))
+    except (InvalidOperation, ValueError):
+        return fallback, "settings_min_order_usd_invalid_snapshot_min_order"
+    if min_order_shares <= 0 or price <= 0 or price >= 1:
+        return fallback, "settings_min_order_usd_invalid_snapshot_min_order"
+    return float(min_order_shares * price), "executable_snapshot_min_order_size"
 
 
 def _default_weather_fee_rate() -> float:
@@ -4022,7 +4045,15 @@ def evaluate_candidate(
             size *= policy.allocation_multiplier
             decision_validations.append(f"strategy_policy_allocation_{policy.allocation_multiplier:g}x")
 
-        if size < limits.min_order_usd:
+        effective_min_order_usd, min_order_authority = _effective_min_order_usd_for_entry(
+            tokens=tokens,
+            entry_price=edge.entry_price,
+            fallback_min_order_usd=limits.min_order_usd,
+        )
+        if min_order_authority == "executable_snapshot_min_order_size":
+            decision_validations.append("executable_snapshot_min_order_size")
+
+        if size < effective_min_order_usd:
             decisions.append(EdgeDecision(
                 False,
                 edge=edge,
@@ -4035,7 +4066,10 @@ def evaluate_candidate(
                 edge_source=edge_source,
                 strategy_key=strategy_key,
                 rejection_reason_enum=NoTradeReason.SIZE_BELOW_MINIMUM,
-                rejection_reason_detail=f"${size:.2f} < ${limits.min_order_usd} (throttled: {risk_throttle})",
+                rejection_reason_detail=(
+                    f"${size:.2f} < ${effective_min_order_usd:.4f} "
+                    f"(authority: {min_order_authority}, throttled: {risk_throttle})"
+                ),
             ))
             continue
 
