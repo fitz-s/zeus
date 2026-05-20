@@ -2729,3 +2729,28 @@ test_metadata:
       with explicit 'gamma_explicit' are retained unchanged.
     created: 2026-05-19
     last_reused_or_audited: 2026-05-19
+
+  tests/test_inv_book_hash_transitions_completeness.py:
+    modules: [state, data]
+    category: cross_module_antibody
+    kind: antibody
+    profile: phase2_t1_book_hash_transitions_antibody
+    blocks_commit: false
+    asserted_invariants:
+      - INV-book-hash-transitions-completeness
+    source_under_test:
+      - src/state/book_hash_transitions.py
+      - src/data/market_scanner.py
+      - src/state/db.py
+    law_dependencies:
+      - docs/operations/task_2026-05-20_strategy_vnext_phase2/T1_BOOK_HASH_TRANSITIONS_SCAFFOLD.md
+      - docs/operations/task_2026-05-20_strategy_vnext_phase2/PHASE_2_ULTRAPLAN.md
+    notes: >
+      Live-only antibody (skips in CI when world DB absent). Asserts:
+      for every market with >1 distinct raw_orderbook_hash in the last 24h of
+      market_price_history, book_hash_transitions must carry (distinct_count - 1)
+      rows in the same window. Three :memory: roundtrip/noop/seq-increment tests
+      run in all environments. ISO-8601 cutoff computed in Python to avoid
+      datetime('now',...) vs ISO TEXT format mismatch in SQLite comparisons.
+    created: 2026-05-20
+    last_reused_or_audited: 2026-05-20

@@ -2236,3 +2236,21 @@ CREATE INDEX idx_day0_nowcast_runs_event_id
             ON day0_nowcast_runs(nowcast_event_id);
 -- table: sqlite_sequence
 CREATE TABLE sqlite_sequence(name,seq);
+-- table: book_hash_transitions
+CREATE TABLE book_hash_transitions (
+    market_slug         TEXT NOT NULL,
+    observed_at         TEXT NOT NULL,
+    transition_seq      INTEGER NOT NULL,
+    prev_hash           TEXT NOT NULL,
+    new_hash            TEXT NOT NULL CHECK (new_hash != prev_hash),
+    delta_ms            INTEGER NOT NULL CHECK (delta_ms >= 0),
+    cycle_id            TEXT,
+    schema_version      INTEGER NOT NULL CHECK (schema_version IN (13, 14)),
+    PRIMARY KEY (market_slug, observed_at, transition_seq)
+);
+-- index: idx_book_hash_transitions_market_time
+CREATE INDEX idx_book_hash_transitions_market_time
+    ON book_hash_transitions(market_slug, observed_at);
+-- index: idx_book_hash_transitions_new_hash
+CREATE INDEX idx_book_hash_transitions_new_hash
+    ON book_hash_transitions(new_hash);
