@@ -507,6 +507,12 @@ def _write_heartbeat() -> None:
         tmp = Path(str(path) + ".tmp")
         tmp.write_text(json.dumps(payload))
         tmp.replace(path)
+        # Relationship-F: surface composite live-health on every heartbeat cycle
+        try:
+            from src.control.live_health import compute_composite_live_health
+            compute_composite_live_health()
+        except Exception:
+            pass  # observability write must never mask heartbeat success
         _heartbeat_fails = 0
     except Exception as exc:
         _heartbeat_fails += 1

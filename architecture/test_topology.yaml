@@ -673,6 +673,8 @@ categories:
     - tests/test_inv_codehash_drift_detection.py
     # PR-209 — 5th-iter Karachi: REDEEM_NEGRISK_MISROUTED added to autonomous retry allowlist.
     - tests/test_reseat_negrisk_misrouted_allowlist.py
+    # codereview-may19-2.md relationship F — composite live-health surfaces run_mode failure
+    - tests/test_run_mode_failure_surfaces.py
 
   useful_regression:
     - tests/test_alpha_target_coherence.py
@@ -2494,5 +2496,30 @@ test_metadata:
       Sed-flip verified: mutate on_chain_codehash literal → C2 goes RED.
       Marker: requires_rpc (outbound HTTPS to Polygon RPC). Included in default
       CI sweep; skip offline with -m "not requires_rpc".
+    created: 2026-05-19
+    last_reused_or_audited: 2026-05-19
+
+  tests/test_run_mode_failure_surfaces.py:
+    modules: [control]
+    category: core_law_antibody
+    kind: antibody
+    profile: r_relationship_f_live_health_composite
+    blocks_commit: true
+    asserted_invariants:
+      - RELATIONSHIP-F-COMPOSITE-DEGRADED-ON-FAILED-RUN-MODE
+      - RELATIONSHIP-F-COMPOSITE-DEGRADED-ON-STALE-STATUS-SUMMARY
+      - RELATIONSHIP-F-COMPOSITE-HEALTHY-WHEN-ALL-OK
+      - RELATIONSHIP-F-DEGRADED-EMITS-WARNING-LOG
+    source_under_test:
+      - src/control/live_health.py
+    law_dependencies:
+      - codereview-may19-2.md relationship F
+    notes: >
+      Closes the "scheduler alive but not trading" observability gap (relationship F).
+      Asserts compute_composite_live_health() returns DEGRADED when run_mode has
+      failed (scheduler_jobs_health.json status=FAILED) or status_summary.json is
+      stale (>5 min), even when daemon heartbeat is fresh. T4 asserts WARNING log
+      is emitted with the failing surface name. Call site in _write_heartbeat() in
+      src/main.py surfaces composite to state/live_health_composite.json each cycle.
     created: 2026-05-19
     last_reused_or_audited: 2026-05-19
