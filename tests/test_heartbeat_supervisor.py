@@ -32,7 +32,10 @@ from src.control.heartbeat_supervisor import (
     OrderType,
     configure_global_supervisor,
     fresh_heartbeat_id_from_status,
+    heartbeat_cadence_seconds_from_env,
+    heartbeat_http_timeout_seconds_from_env,
     heartbeat_required_for,
+    install_dedicated_heartbeat_http_timeout,
     run_heartbeat_keeper,
     write_heartbeat_keeper_status,
 )
@@ -133,6 +136,54 @@ def test_chain_token_protocol_rotation_and_transient_failure_preserves_current_i
         "server-returned id on each tick, (c) preserve that id across "
         f"transient failures. Got: {adapter.heartbeat_ids!r}"
     )
+
+
+def test_default_heartbeat_timeout_budget_is_shorter_than_cadence(monkeypatch):
+    """RELATIONSHIP: transport timeout budget -> venue lease continuity.
+
+    A heartbeat POST may be processed by the venue but time out before the
+    rotated lease token reaches Zeus. If that HTTP call is allowed to block for
+    the whole cadence, one stall can consume the lease window and resting
+    orders can be venue-cancelled before the next recovery tick.
+    """
+
+    monkeypatch.delenv("ZEUS_HEARTBEAT_CADENCE_SECONDS", raising=False)
+    monkeypatch.delenv("ZEUS_HEARTBEAT_HTTP_TIMEOUT_SECONDS", raising=False)
+
+    cadence = heartbeat_cadence_seconds_from_env()
+    timeout = heartbeat_http_timeout_seconds_from_env(cadence)
+
+    assert cadence == 2
+    assert 0.0 < timeout < cadence
+    assert cadence + timeout < 5.0
+
+
+def test_heartbeat_timeout_env_cannot_cover_full_cadence(monkeypatch):
+    monkeypatch.setenv("ZEUS_HEARTBEAT_HTTP_TIMEOUT_SECONDS", "5")
+
+    with pytest.raises(ValueError, match="shorter than heartbeat cadence"):
+        heartbeat_http_timeout_seconds_from_env(5)
+
+
+def test_install_dedicated_heartbeat_timeout_replaces_sdk_http_client(monkeypatch):
+    """RELATIONSHIP: keeper timeout config -> actual SDK heartbeat transport."""
+
+    monkeypatch.delenv("ZEUS_HEARTBEAT_HTTP_TIMEOUT_SECONDS", raising=False)
+    from py_clob_client_v2.http_helpers import helpers as heartbeat_http_helpers
+
+    old_client = heartbeat_http_helpers._http_client
+    try:
+        install_dedicated_heartbeat_http_timeout(cadence_seconds=2)
+
+        installed = heartbeat_http_helpers._http_client
+        assert installed is not old_client
+        assert installed.timeout.read == pytest.approx(1.0)
+        assert installed.timeout.connect == pytest.approx(1.0)
+    finally:
+        installed = heartbeat_http_helpers._http_client
+        if installed is not old_client:
+            installed.close()
+        heartbeat_http_helpers._http_client = old_client
 
 
 def test_invalid_heartbeat_id_restarts_chain_in_same_tick():
