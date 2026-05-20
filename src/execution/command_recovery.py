@@ -35,6 +35,7 @@ import sqlite3
 from collections.abc import Mapping
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
+from types import SimpleNamespace
 from typing import Optional
 
 from src.execution.command_bus import (
@@ -738,6 +739,584 @@ def _positive_fill_trade_fact_summary(conn: sqlite3.Connection, command_id: str)
         count += 1
         filled += size
     return {"count": count, "filled_size": _decimal_text(filled)}
+
+
+def _json_mapping(raw: object) -> dict:
+    if isinstance(raw, dict):
+        return raw
+    if raw in (None, ""):
+        return {}
+    try:
+        parsed = json.loads(str(raw))
+    except (TypeError, json.JSONDecodeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _latest_unprojected_filled_entry_candidates(conn: sqlite3.Connection) -> list[dict]:
+    required = {
+        "venue_commands",
+        "venue_trade_facts",
+        "position_current",
+        "venue_submission_envelopes",
+        "executable_market_snapshots",
+    }
+    if not all(_table_exists(conn, table) for table in required):
+        return []
+    rows = conn.execute(
+        """
+        WITH latest_trade_fact AS (
+            SELECT command_id, trade_id, MAX(local_sequence) AS max_sequence
+              FROM venue_trade_facts
+             GROUP BY command_id, trade_id
+        ),
+        entry_fill AS (
+            SELECT fact.command_id,
+                   COUNT(*) AS fill_fact_count,
+                   SUM(CAST(fact.filled_size AS REAL)) AS filled_size,
+                   SUM(CAST(fact.filled_size AS REAL) * CAST(fact.fill_price AS REAL))
+                       / SUM(CAST(fact.filled_size AS REAL)) AS fill_price,
+                   MAX(fact.observed_at) AS observed_at,
+                   GROUP_CONCAT(DISTINCT fact.state) AS fill_states,
+                   MAX(fact.trade_fact_id) AS trade_fact_id
+              FROM venue_trade_facts fact
+              JOIN latest_trade_fact latest
+                ON latest.command_id = fact.command_id
+               AND latest.trade_id = fact.trade_id
+               AND latest.max_sequence = fact.local_sequence
+             WHERE fact.state IN ('MATCHED', 'MINED', 'CONFIRMED')
+               AND CAST(COALESCE(fact.filled_size, '0') AS REAL) > 0
+               AND CAST(COALESCE(fact.fill_price, '0') AS REAL) > 0
+             GROUP BY fact.command_id
+        )
+        SELECT cmd.*,
+               entry_fill.fill_fact_count AS fill_fact_count,
+               entry_fill.filled_size AS fill_filled_size,
+               entry_fill.fill_price AS fill_price,
+               entry_fill.observed_at AS fill_observed_at,
+               entry_fill.fill_states AS fill_states,
+               entry_fill.trade_fact_id AS source_trade_fact_id,
+               env.condition_id AS env_condition_id,
+               env.yes_token_id AS env_yes_token_id,
+               env.no_token_id AS env_no_token_id,
+               env.selected_outcome_token_id AS env_selected_outcome_token_id,
+               env.outcome_label AS env_outcome_label,
+               snap.condition_id AS snapshot_condition_id,
+               snap.yes_token_id AS snapshot_yes_token_id,
+               snap.no_token_id AS snapshot_no_token_id,
+               snap.selected_outcome_token_id AS snapshot_selected_outcome_token_id,
+               snap.outcome_label AS snapshot_outcome_label
+          FROM venue_commands cmd
+          JOIN entry_fill
+            ON entry_fill.command_id = cmd.command_id
+          LEFT JOIN position_current pc
+            ON pc.position_id = cmd.position_id
+          LEFT JOIN venue_submission_envelopes env
+            ON env.envelope_id = cmd.envelope_id
+          LEFT JOIN executable_market_snapshots snap
+            ON snap.snapshot_id = cmd.snapshot_id
+         WHERE cmd.intent_kind = 'ENTRY'
+           AND cmd.side = 'BUY'
+           AND cmd.state = 'FILLED'
+           AND cmd.venue_order_id IS NOT NULL
+           AND cmd.venue_order_id != ''
+           AND pc.position_id IS NULL
+         ORDER BY entry_fill.observed_at, cmd.command_id
+        """
+    ).fetchall()
+    return [_dict_row(row) for row in rows]
+
+
+def _decision_log_trade_case_for_command(conn: sqlite3.Connection, command: dict) -> tuple[dict, int | None]:
+    if not _table_exists(conn, "decision_log"):
+        return {}, None
+    position_id = str(command.get("position_id") or "")
+    decision_id = str(command.get("decision_id") or "")
+    token_id = str(command.get("token_id") or "")
+    like_terms = [term for term in (position_id, decision_id, token_id) if term]
+    if not like_terms:
+        return {}, None
+    where = " OR ".join("artifact_json LIKE ?" for _ in like_terms)
+    rows = conn.execute(
+        f"""
+        SELECT id, artifact_json
+          FROM decision_log
+         WHERE {where}
+         ORDER BY id DESC
+         LIMIT 25
+        """,
+        tuple(f"%{term}%" for term in like_terms),
+    ).fetchall()
+    for row in rows:
+        record = _dict_row(row)
+        artifact = _json_mapping(record.get("artifact_json"))
+        cases = artifact.get("trade_cases")
+        if not isinstance(cases, list):
+            continue
+        for case in cases:
+            if not isinstance(case, dict):
+                continue
+            if (
+                (position_id and str(case.get("trade_id") or "") == position_id)
+                or (decision_id and str(case.get("decision_id") or "") == decision_id)
+                or (token_id and str(case.get("token_id") or "") == token_id)
+            ):
+                return case, int(record.get("id") or 0)
+    return {}, None
+
+
+def _case_unit(case: dict) -> str:
+    settlement = _json_mapping(case.get("settlement_semantics_json"))
+    epistemic = _json_mapping(case.get("epistemic_context_json"))
+    forecast_context = _json_mapping(epistemic.get("forecast_context"))
+    for value in (
+        case.get("unit"),
+        settlement.get("measurement_unit"),
+        forecast_context.get("unit"),
+    ):
+        unit = str(value or "").strip().upper()
+        if unit in {"F", "C"}:
+            return unit
+    label = str(case.get("range_label") or case.get("bin_label") or "")
+    if "°C" in label or " C" in label or label.endswith("C"):
+        return "C"
+    if "°F" in label or " F" in label or label.endswith("F"):
+        return "F"
+    raise ValueError("filled entry projection repair requires unit provenance")
+
+
+def _case_temperature_metric(case: dict) -> str:
+    epistemic = _json_mapping(case.get("epistemic_context_json"))
+    forecast_context = _json_mapping(epistemic.get("forecast_context"))
+    for value in (
+        case.get("temperature_metric"),
+        forecast_context.get("temperature_metric"),
+    ):
+        metric = str(value or "").strip().lower()
+        if metric in {"high", "low"}:
+            return metric
+    label = str(case.get("range_label") or case.get("bin_label") or "").lower()
+    if "lowest" in label or " low " in label:
+        return "low"
+    if "highest" in label or " high " in label:
+        return "high"
+    raise ValueError("filled entry projection repair requires temperature_metric provenance")
+
+
+def _filled_entry_recovery_position(
+    candidate: dict,
+    trade_case: dict,
+    *,
+    decision_log_id: int | None,
+) -> SimpleNamespace:
+    position_id = str(candidate.get("position_id") or "").strip()
+    command_id = str(candidate.get("command_id") or "").strip()
+    venue_order_id = str(candidate.get("venue_order_id") or "").strip()
+    selected_token_id = str(candidate.get("token_id") or "").strip()
+    condition_id = str(
+        candidate.get("env_condition_id")
+        or candidate.get("snapshot_condition_id")
+        or trade_case.get("market_id")
+        or ""
+    ).strip()
+    token_id = str(
+        candidate.get("env_yes_token_id")
+        or candidate.get("snapshot_yes_token_id")
+        or trade_case.get("token_id")
+        or ""
+    ).strip()
+    no_token_id = str(
+        candidate.get("env_no_token_id")
+        or candidate.get("snapshot_no_token_id")
+        or trade_case.get("no_token_id")
+        or ""
+    ).strip()
+    if not position_id or not command_id or not venue_order_id:
+        raise ValueError("filled entry projection repair requires position, command, and order ids")
+    if not condition_id or not selected_token_id or not token_id or not no_token_id:
+        raise ValueError("filled entry projection repair requires CTF condition/token identity")
+    if str(trade_case.get("trade_id") or "") not in {position_id, ""}:
+        raise ValueError("decision_log trade_id does not match venue command position_id")
+    if str(trade_case.get("token_id") or token_id) != token_id:
+        raise ValueError("decision_log token_id does not match YES token identity")
+
+    shares_dec = _positive_decimal_or_none(candidate.get("fill_filled_size"))
+    fill_price_dec = _positive_decimal_or_none(candidate.get("fill_price"))
+    if shares_dec is None or fill_price_dec is None:
+        raise ValueError("filled entry projection repair requires positive fill economics")
+    cost_basis_dec = shares_dec * fill_price_dec
+    observed_at = str(candidate.get("fill_observed_at") or candidate.get("updated_at") or _now_iso())
+    size_usd = _decimal_or_none(trade_case.get("size_usd")) or cost_basis_dec
+    bin_label = str(trade_case.get("bin_label") or trade_case.get("range_label") or "").strip()
+    city = str(trade_case.get("city") or "").strip()
+    target_date = str(trade_case.get("target_date") or "").strip()
+    direction = str(trade_case.get("direction") or "").strip()
+    strategy_key = str(trade_case.get("strategy_key") or trade_case.get("strategy") or "").strip()
+    if not city or not target_date or not bin_label or direction not in {"buy_yes", "buy_no"}:
+        raise ValueError("filled entry projection repair requires decision_log market identity")
+    expected_selected = no_token_id if direction == "buy_no" else token_id
+    if selected_token_id != expected_selected:
+        raise ValueError("venue command selected token does not match decision direction")
+    for surface_name, selected in (
+        ("submission envelope", candidate.get("env_selected_outcome_token_id")),
+        ("executable snapshot", candidate.get("snapshot_selected_outcome_token_id")),
+    ):
+        normalized = str(selected or "").strip()
+        if normalized and normalized != selected_token_id:
+            raise ValueError(f"{surface_name} selected token does not match venue command token")
+    if strategy_key not in {"settlement_capture", "shoulder_sell", "center_buy", "opening_inertia"}:
+        raise ValueError("filled entry projection repair requires valid strategy_key")
+    p_posterior = _decimal_or_none(trade_case.get("p_posterior")) or Decimal("0")
+    edge_context = _json_mapping(trade_case.get("edge_context_json"))
+    return SimpleNamespace(
+        trade_id=position_id,
+        state="entered",
+        exit_state="",
+        chain_state="unknown",
+        env="live",
+        market_id=condition_id,
+        city=city,
+        cluster=str(trade_case.get("cluster") or city),
+        target_date=target_date,
+        bin_label=bin_label,
+        direction=direction,
+        unit=_case_unit(trade_case),
+        size_usd=float(size_usd),
+        shares=float(shares_dec),
+        cost_basis_usd=float(cost_basis_dec),
+        entry_price=float(fill_price_dec),
+        p_posterior=float(p_posterior),
+        last_monitor_prob=None,
+        last_monitor_edge=None,
+        last_monitor_market_price=None,
+        decision_snapshot_id=str(
+            trade_case.get("decision_snapshot_id")
+            or edge_context.get("decision_snapshot_id")
+            or candidate.get("snapshot_id")
+            or ""
+        ),
+        entry_method=str(trade_case.get("selected_method") or trade_case.get("entry_method") or ""),
+        strategy_key=strategy_key,
+        strategy=strategy_key,
+        edge_source=str(trade_case.get("edge_source") or strategy_key),
+        discovery_mode=str(trade_case.get("discovery_mode") or "opening_hunt"),
+        token_id=token_id,
+        no_token_id=no_token_id,
+        condition_id=condition_id,
+        order_id=venue_order_id,
+        entry_order_id=venue_order_id,
+        order_status="filled",
+        entered_at=observed_at,
+        order_posted_at=str(candidate.get("created_at") or observed_at),
+        updated_at=observed_at,
+        temperature_metric=_case_temperature_metric(trade_case),
+        source_trade_fact_id=candidate.get("source_trade_fact_id"),
+        fill_states=candidate.get("fill_states"),
+        fill_fact_count=candidate.get("fill_fact_count"),
+        command_id=command_id,
+        decision_id=str(candidate.get("decision_id") or ""),
+        decision_log_id=decision_log_id,
+        executable_snapshot_id=str(candidate.get("snapshot_id") or ""),
+    )
+
+
+def _entry_recovery_event(
+    position: SimpleNamespace,
+    *,
+    sequence_no: int,
+    event_type: str,
+    occurred_at: str,
+    phase_before: str | None,
+    phase_after: str,
+    order_id: str | None,
+) -> dict:
+    command_id = str(position.command_id)
+    position_id = str(position.trade_id)
+    slug = event_type.lower()
+    payload = {
+        "reason": "terminal_filled_entry_trade_fact_projection_repair",
+        "proof_class": "filled_entry_command_trade_fact_without_position_current",
+        "command_id": command_id,
+        "venue_order_id": position.order_id,
+        "source_trade_fact_id": position.source_trade_fact_id,
+        "fill_states": position.fill_states,
+        "fill_fact_count": position.fill_fact_count,
+        "decision_log_id": position.decision_log_id,
+        "executable_snapshot_id": position.executable_snapshot_id,
+        "condition_id": position.condition_id,
+        "token_id": position.token_id,
+    }
+    return {
+        "event_id": f"{position_id}:recovered_{slug}:{command_id}",
+        "position_id": position_id,
+        "event_version": 1,
+        "sequence_no": sequence_no,
+        "event_type": event_type,
+        "occurred_at": occurred_at,
+        "phase_before": phase_before,
+        "phase_after": phase_after,
+        "strategy_key": position.strategy_key,
+        "decision_id": position.decision_id,
+        "snapshot_id": position.decision_snapshot_id or None,
+        "order_id": order_id,
+        "command_id": command_id,
+        "caused_by": f"venue_trade_fact:{position.source_trade_fact_id}",
+        "idempotency_key": f"{position_id}:recovered:{slug}:{command_id}",
+        "venue_status": str(position.fill_states or "FILLED"),
+        "source_module": "src.execution.command_recovery",
+        "env": position.env,
+        "payload_json": json.dumps(payload, sort_keys=True, default=str),
+    }
+
+
+def _append_filled_entry_projection_repair(
+    conn: sqlite3.Connection,
+    *,
+    candidate: dict,
+) -> None:
+    from src.engine.lifecycle_events import build_position_current_projection
+    from src.state.ledger import append_many_and_project
+    from src.state.projection import upsert_position_current
+
+    trade_case, decision_log_id = _decision_log_trade_case_for_command(conn, candidate)
+    if not trade_case:
+        raise ValueError("filled entry projection repair requires matching decision_log trade_case")
+    position = _filled_entry_recovery_position(
+        candidate,
+        trade_case,
+        decision_log_id=decision_log_id,
+    )
+    projection = build_position_current_projection(position)
+    position_id = str(position.trade_id)
+    existing_fill = conn.execute(
+        """
+        SELECT 1
+          FROM position_events
+         WHERE position_id = ?
+           AND event_type = 'ENTRY_ORDER_FILLED'
+         LIMIT 1
+        """,
+        (position_id,),
+    ).fetchone()
+    if existing_fill is not None:
+        upsert_position_current(conn, projection)
+        return
+    if _latest_position_sequence(conn, position_id) != 0:
+        raise ValueError(
+            "filled entry projection repair refuses partial position_events without ENTRY_ORDER_FILLED"
+        )
+    filled_at = str(candidate.get("fill_observed_at") or _now_iso())
+    posted_at = str(candidate.get("created_at") or filled_at)
+    events = [
+        _entry_recovery_event(
+            position,
+            sequence_no=1,
+            event_type="POSITION_OPEN_INTENT",
+            occurred_at=posted_at,
+            phase_before=None,
+            phase_after="pending_entry",
+            order_id=None,
+        ),
+        _entry_recovery_event(
+            position,
+            sequence_no=2,
+            event_type="ENTRY_ORDER_POSTED",
+            occurred_at=posted_at,
+            phase_before="pending_entry",
+            phase_after="pending_entry",
+            order_id=position.order_id,
+        ),
+        _entry_recovery_event(
+            position,
+            sequence_no=3,
+            event_type="ENTRY_ORDER_FILLED",
+            occurred_at=filled_at,
+            phase_before="pending_entry",
+            phase_after="active",
+            order_id=position.order_id,
+        ),
+    ]
+    append_many_and_project(conn, events, projection)
+
+
+def reconcile_filled_entry_projection_repairs(conn: sqlite3.Connection) -> dict:
+    """Repair filled ENTRY command truth when initial position projection failed."""
+
+    summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+    for candidate in _latest_unprojected_filled_entry_candidates(conn):
+        summary["scanned"] += 1
+        command_id = str(candidate.get("command_id") or "")
+        safe_command_id = "".join(ch if ch.isalnum() else "_" for ch in command_id)
+        sp_name = f"sp_filled_entry_projection_{safe_command_id}"
+        conn.execute(f"SAVEPOINT {sp_name}")
+        try:
+            _append_filled_entry_projection_repair(conn, candidate=candidate)
+            conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+            summary["advanced"] += 1
+        except Exception as exc:
+            conn.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
+            conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+            logger.error(
+                "recovery: filled entry projection repair failed for command %s: %s",
+                command_id,
+                exc,
+            )
+            summary["errors"] += 1
+    return summary
+
+
+def _filled_entry_lot_materialization_candidates(conn: sqlite3.Connection) -> list[dict]:
+    required = {
+        "venue_commands",
+        "venue_trade_facts",
+        "position_current",
+        "position_lots",
+        "trade_decisions",
+    }
+    if not all(_table_exists(conn, table) for table in required):
+        return []
+    rows = conn.execute(
+        """
+        WITH latest_trade_fact AS (
+            SELECT command_id, trade_id, MAX(local_sequence) AS max_sequence
+              FROM venue_trade_facts
+             GROUP BY command_id, trade_id
+        )
+        SELECT cmd.command_id,
+               cmd.position_id,
+               cmd.decision_id,
+               cmd.intent_kind,
+               cmd.side,
+               cmd.market_id,
+               cmd.token_id,
+               fact.trade_fact_id,
+               fact.trade_id,
+               fact.state AS trade_state,
+               fact.filled_size,
+               fact.fill_price,
+               fact.source,
+               fact.observed_at,
+               fact.venue_timestamp
+          FROM venue_commands cmd
+          JOIN position_current pc
+            ON pc.position_id = cmd.position_id
+          JOIN venue_trade_facts fact
+            ON fact.command_id = cmd.command_id
+          JOIN latest_trade_fact latest
+            ON latest.command_id = fact.command_id
+           AND latest.trade_id = fact.trade_id
+           AND latest.max_sequence = fact.local_sequence
+          LEFT JOIN position_lots lot
+            ON lot.source_trade_fact_id = fact.trade_fact_id
+         WHERE cmd.intent_kind = 'ENTRY'
+           AND cmd.side = 'BUY'
+           AND cmd.state = 'FILLED'
+           AND fact.state IN ('MATCHED', 'MINED', 'CONFIRMED')
+           AND CAST(COALESCE(fact.filled_size, '0') AS REAL) > 0
+           AND CAST(COALESCE(fact.fill_price, '0') AS REAL) > 0
+           AND lot.lot_id IS NULL
+           AND EXISTS (
+               SELECT 1
+                 FROM trade_decisions td
+                WHERE td.runtime_trade_id = cmd.position_id
+                   OR CAST(td.trade_id AS TEXT) = cmd.position_id
+                   OR CAST(td.trade_id AS TEXT) = cmd.decision_id
+           )
+           AND NOT EXISTS (
+               SELECT 1
+                 FROM position_lots trade_lot
+                 JOIN venue_trade_facts lot_fact
+                   ON lot_fact.trade_fact_id = trade_lot.source_trade_fact_id
+                WHERE lot_fact.command_id = fact.command_id
+                  AND lot_fact.trade_id = fact.trade_id
+                  AND trade_lot.state IN ('OPTIMISTIC_EXPOSURE', 'CONFIRMED_EXPOSURE')
+           )
+         ORDER BY fact.observed_at, fact.trade_fact_id
+        """
+    ).fetchall()
+    return [_dict_row(row) for row in rows]
+
+
+def _append_filled_entry_position_lot_repair(
+    conn: sqlite3.Connection,
+    *,
+    candidate: dict,
+) -> bool:
+    from src.state.venue_command_repo import append_position_lot, resolve_position_lot_id_for_command
+
+    command_id = str(candidate.get("command_id") or "")
+    command = {
+        "command_id": command_id,
+        "position_id": candidate.get("position_id"),
+        "decision_id": candidate.get("decision_id"),
+        "intent_kind": candidate.get("intent_kind"),
+        "side": candidate.get("side"),
+        "market_id": candidate.get("market_id"),
+        "token_id": candidate.get("token_id"),
+    }
+    position_lot_id = resolve_position_lot_id_for_command(conn, command)
+    if position_lot_id is None:
+        return False
+    trade_state = str(candidate.get("trade_state") or "")
+    lot_state = "CONFIRMED_EXPOSURE" if trade_state == "CONFIRMED" else "OPTIMISTIC_EXPOSURE"
+    observed_at = str(candidate.get("observed_at") or _now_iso())
+    append_position_lot(
+        conn,
+        position_id=position_lot_id,
+        state=lot_state,
+        shares=str(candidate["filled_size"]),
+        entry_price_avg=str(candidate["fill_price"]),
+        source_command_id=command_id,
+        source_trade_fact_id=int(candidate["trade_fact_id"]),
+        captured_at=observed_at,
+        state_changed_at=observed_at,
+        source=str(candidate.get("source") or "REST"),
+        observed_at=observed_at,
+        venue_timestamp=candidate.get("venue_timestamp"),
+        raw_payload_json={
+            "source": "command_recovery_filled_entry_position_lot_repair",
+            "proof_class": "filled_entry_command_trade_fact_without_position_lot",
+            "command_id": command_id,
+            "position_id": str(candidate.get("position_id") or ""),
+            "trade_fact_id": int(candidate["trade_fact_id"]),
+            "trade_id": str(candidate.get("trade_id") or ""),
+            "trade_state": trade_state,
+            "market_id": str(candidate.get("market_id") or ""),
+            "token_id": str(candidate.get("token_id") or ""),
+        },
+    )
+    return True
+
+
+def reconcile_filled_entry_position_lot_repairs(conn: sqlite3.Connection) -> dict:
+    """Repair filled ENTRY commands whose trade facts never materialized lots."""
+
+    summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+    for candidate in _filled_entry_lot_materialization_candidates(conn):
+        summary["scanned"] += 1
+        command_id = str(candidate.get("command_id") or "")
+        fact_id = str(candidate.get("trade_fact_id") or "")
+        safe_command_id = "".join(ch if ch.isalnum() else "_" for ch in command_id)
+        sp_name = f"sp_filled_entry_lot_{safe_command_id}_{fact_id}"
+        conn.execute(f"SAVEPOINT {sp_name}")
+        try:
+            advanced = _append_filled_entry_position_lot_repair(conn, candidate=candidate)
+            conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+            if advanced:
+                summary["advanced"] += 1
+            else:
+                summary["stayed"] += 1
+        except Exception as exc:
+            conn.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
+            conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+            logger.error(
+                "recovery: filled entry lot repair failed for command %s trade_fact %s: %s",
+                command_id,
+                fact_id,
+                exc,
+            )
+            summary["errors"] += 1
+    return summary
 
 
 def _command_fill_coverage_state(command: dict, fill_summary: dict) -> str:
@@ -2374,6 +2953,94 @@ def clear_review_required_no_venue_exposure(
     return payload
 
 
+def clear_review_required_confirmed_fill(
+    conn: sqlite3.Connection,
+    command_id: str,
+    *,
+    source_commit: str,
+    source_function: str = "PolymarketUserChannelIngestor._handle_trade",
+    reviewed_by: str = "operator",
+    occurred_at: str | None = None,
+) -> dict:
+    """Restore FILLED only when REVIEW_REQUIRED followed an already confirmed fill."""
+
+    command = _review_required_command(conn, command_id)
+    events = _command_events(conn, command_id)
+    latest_reason = _latest_review_required_payload(events).get("reason")
+    if latest_reason != "ws_trade_lifecycle_regression_or_economic_drift":
+        raise ValueError("confirmed-fill review clearance only supports WS lifecycle/economic drift reviews")
+    fill_payload = None
+    for event in reversed(events):
+        if event.get("event_type") == CommandEventType.FILL_CONFIRMED.value:
+            fill_payload = _json_dict(event.get("payload_json"))
+            break
+    if fill_payload is None:
+        raise ValueError("confirmed-fill review clearance requires a prior FILL_CONFIRMED event")
+    trade_id = str(fill_payload.get("trade_id") or "")
+    venue_order_id = str(fill_payload.get("venue_order_id") or command.get("venue_order_id") or "")
+    row = conn.execute(
+        """
+        SELECT *
+        FROM venue_trade_facts
+        WHERE command_id = ?
+          AND trade_id = ?
+          AND venue_order_id = ?
+          AND state IN ('MATCHED', 'MINED', 'CONFIRMED')
+        ORDER BY local_sequence DESC, trade_fact_id DESC
+        LIMIT 1
+        """,
+        (command_id, trade_id, venue_order_id),
+    ).fetchone()
+    if row is None:
+        raise ValueError("confirmed-fill review clearance requires a matching positive venue_trade_facts row")
+    trade_fact = _dict_row(row)
+    if not str(source_commit or "").strip():
+        raise ValueError("source_commit is required")
+    now = occurred_at or _now_iso()
+    payload = {
+        "schema_version": 1,
+        "reason": "review_cleared_confirmed_fill",
+        "command_id": command_id,
+        "decision_id": str(command.get("decision_id") or ""),
+        "venue_order_id": venue_order_id,
+        "trade_id": trade_id,
+        "filled_size": str(trade_fact.get("filled_size") or ""),
+        "fill_price": str(trade_fact.get("fill_price") or ""),
+        "proof_class": "prior_fill_confirmed_event_with_positive_trade_fact",
+        "required_predicates": {
+            "latest_event_is_review_required": bool(events and events[-1].get("event_type") == CommandEventType.REVIEW_REQUIRED.value),
+            "review_reason_supported": latest_reason == "ws_trade_lifecycle_regression_or_economic_drift",
+            "prior_fill_confirmed_event": True,
+            "positive_trade_fact": True,
+        },
+        "prior_fill_confirmed_event": fill_payload,
+        "trade_fact_proof": {
+            "trade_fact_id": trade_fact.get("trade_fact_id"),
+            "state": trade_fact.get("state"),
+            "source": trade_fact.get("source"),
+            "observed_at": trade_fact.get("observed_at"),
+        },
+        "review_required_proof": {
+            "reason": latest_reason,
+        },
+        "source_proof": {
+            "source_commit": source_commit,
+            "source_function": source_function,
+            "source_reason": "ws_trade_lifecycle_regression_or_economic_drift",
+        },
+        "reviewed_by": reviewed_by,
+        "cleared_at": now,
+    }
+    append_event(
+        conn,
+        command_id=command_id,
+        event_type=CommandEventType.FILL_CONFIRMED.value,
+        occurred_at=now,
+        payload=payload,
+    )
+    return payload
+
+
 def clear_submit_unknown_geoblock_403(
     conn: sqlite3.Connection,
     command_id: str,
@@ -2892,6 +3559,18 @@ def reconcile_unresolved_commands(
         summary["advanced"] += matched_summary["advanced"]
         summary["stayed"] += matched_summary["stayed"]
         summary["errors"] += matched_summary["errors"]
+
+        filled_entry_repair_summary = reconcile_filled_entry_projection_repairs(conn)
+        summary["filled_entry_projection_repair"] = filled_entry_repair_summary
+        summary["advanced"] += filled_entry_repair_summary["advanced"]
+        summary["stayed"] += filled_entry_repair_summary["stayed"]
+        summary["errors"] += filled_entry_repair_summary["errors"]
+
+        filled_entry_lot_summary = reconcile_filled_entry_position_lot_repairs(conn)
+        summary["filled_entry_position_lot_repair"] = filled_entry_lot_summary
+        summary["advanced"] += filled_entry_lot_summary["advanced"]
+        summary["stayed"] += filled_entry_lot_summary["stayed"]
+        summary["errors"] += filled_entry_lot_summary["errors"]
 
         exit_pending_summary = reconcile_exit_pending_projections(conn)
         summary["exit_pending_projections"] = exit_pending_summary

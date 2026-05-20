@@ -41,6 +41,7 @@ logger = logging.getLogger("zeus")
 
 # Cross-mode lock: prevents two discovery modes from reading/writing portfolio concurrently
 _cycle_lock = threading.Lock()
+_market_discovery_lock = threading.Lock()
 OPENING_HUNT_FIRST_DELAY_SECONDS = 30.0
 
 # PR-S6 deployment freshness gate — mutable container populated in main() at boot.
@@ -840,6 +841,8 @@ def _refresh_global_collateral_snapshot_if_due(
 
     if adapter is None:
         return False
+    if not _collateral_background_refresh_lock.acquire(blocking=False):
+        return False
     try:
         from src.state.collateral_ledger import get_global_ledger
 
@@ -874,6 +877,8 @@ def _refresh_global_collateral_snapshot_if_due(
     except Exception as exc:
         logger.warning("CollateralLedger heartbeat refresh failed closed: %s", exc)
         return False
+    finally:
+        _collateral_background_refresh_lock.release()
 
 
 def _run_ws_gap_reconcile_if_required(
@@ -1023,14 +1028,11 @@ def _start_collateral_background_refresh_async(adapter=None) -> str:
     active_adapter = adapter or _venue_heartbeat_adapter
     if active_adapter is None:
         return "adapter_unavailable"
-    if not _collateral_background_refresh_lock.acquire(blocking=False):
+    if _collateral_background_refresh_lock.locked():
         return "already_running"
 
     def _runner() -> None:
-        try:
-            _refresh_global_collateral_snapshot_if_due(active_adapter)
-        finally:
-            _collateral_background_refresh_lock.release()
+        _refresh_global_collateral_snapshot_if_due(active_adapter)
 
     thread = threading.Thread(
         target=_runner,
@@ -1193,41 +1195,43 @@ def _auto_derive_user_channel_condition_ids(
 ) -> list[str]:
     """Derive the user-channel WS subscription set.
 
-    Gamma scanning is primary. When it yields no condition_ids or fails, boot
-    falls back to fresh condition_ids already persisted in ``market_events_v2``.
+    Fresh persisted ``market_events_v2`` rows are primary. When those rows are
+    missing at boot, Gamma scanning is enabled by default so the one-shot
+    user-channel starter does not latch to an empty subscription set for the
+    lifetime of the live process. Operators can disable this fallback by setting
+    ``ZEUS_USER_CHANNEL_BOOT_GAMMA_SCAN=0``.
 
     Total failure still returns [] rather than raising; the daemon then stays in
     the fail-closed WS posture recorded by the gap guard.
     """
+    persisted_ids = _market_events_v2_user_channel_condition_ids(now=now)
+    if persisted_ids:
+        return persisted_ids
+    if os.getenv("ZEUS_USER_CHANNEL_BOOT_GAMMA_SCAN", "1").strip().lower() not in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }:
+        logger.warning(
+            "user-channel WS found no fresh market_events_v2 condition_ids; "
+            "boot Gamma scan disabled by ZEUS_USER_CHANNEL_BOOT_GAMMA_SCAN=0"
+        )
+        return []
     try:
         from src.data.market_scanner import (
             extract_executable_condition_ids,
             find_weather_markets,
         )
 
-        # min_hours_to_resolution=0.0: include day0 markets (<6h to settlement).
-        # The scanner's default of 6.0 would silently drop day0 condition_ids
-        # from the WS subscription set, so order/fill updates for day0 trades
-        # — which Zeus actively trades via DiscoveryMode.DAY0_CAPTURE — would
-        # be missed while the WS guard reports healthy. (PR #34 codex P1.)
-        events = find_weather_markets(min_hours_to_resolution=0.0)
-        condition_ids = extract_executable_condition_ids(events)
-        if condition_ids:
-            return condition_ids
-        fallback_ids = _market_events_v2_user_channel_condition_ids(now=now)
-        if fallback_ids:
-            logger.warning(
-                "user-channel WS scanner yielded 0 condition_ids; using %d "
-                "fresh market_events_v2 condition_ids as fallback",
-                len(fallback_ids),
-            )
-        return fallback_ids
-    except Exception as exc:
-        logger.warning(
-            "user-channel WS scanner failed: %s; trying market_events_v2 fallback",
-            exc,
+        events = find_weather_markets(
+            min_hours_to_resolution=0.0,
+            include_slug_pattern=False,
         )
-        return _market_events_v2_user_channel_condition_ids(now=now)
+        return extract_executable_condition_ids(events)
+    except Exception as exc:
+        logger.warning("user-channel WS scanner failed: %s", exc)
+        return []
 
 
 def _start_user_channel_ingestor_if_enabled() -> None:
@@ -1551,6 +1555,52 @@ def _run_venue_heartbeat_loop(cadence_seconds: float) -> None:
             logger.error("venue heartbeat loop tick failed: %s", exc, exc_info=True)
         elapsed = (datetime.now(timezone.utc) - started).total_seconds()
         time.sleep(max(0.1, cadence_seconds - elapsed))
+
+
+@_scheduler_job("market_discovery")
+def _market_discovery_cycle() -> None:
+    """Refresh executable market substrate outside decision-cycle critical path."""
+
+    acquired = _market_discovery_lock.acquire(blocking=False)
+    if not acquired:
+        logger.warning("market_discovery skipped: previous market_discovery still running")
+        return
+    try:
+        from src.data.market_scanner import (
+            find_slug_pattern_weather_markets,
+            refresh_executable_market_substrate_snapshots,
+        )
+        from src.data.polymarket_client import PolymarketClient
+        from src.state.db import get_trade_connection
+
+        events = find_slug_pattern_weather_markets(
+            min_hours_to_resolution=0.0,
+        )
+        conn = get_trade_connection(write_class="live")
+        try:
+            with PolymarketClient() as snapshot_clob:
+                snapshot_summary = refresh_executable_market_substrate_snapshots(
+                    conn,
+                    markets=events,
+                    clob=snapshot_clob,
+                    captured_at=datetime.now(timezone.utc),
+                    scan_authority="VERIFIED",
+                )
+            conn.commit()
+        finally:
+            conn.close()
+        if snapshot_summary.get("attempted", 0) > 0 and snapshot_summary.get("inserted", 0) == 0:
+            raise RuntimeError(
+                "market_discovery refreshed events but captured no executable snapshots: "
+                f"{snapshot_summary}"
+            )
+        logger.info(
+            "market_discovery: refreshed %s weather events; executable_snapshots=%s",
+            len(events),
+            snapshot_summary,
+        )
+    finally:
+        _market_discovery_lock.release()
 
 
 def _capture_boot_state() -> dict:
@@ -2425,6 +2475,15 @@ def main():
         id="imminent_open_capture",
         next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS + 15.0),
         max_instances=1, coalesce=True,
+    )
+    scheduler.add_job(
+        _market_discovery_cycle,
+        "interval",
+        minutes=5,
+        id="market_discovery",
+        next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS + 90.0),
+        max_instances=1,
+        coalesce=True,
     )
     scheduler.add_job(_harvester_cycle, "interval", hours=1, id="harvester")
     scheduler.add_job(_write_heartbeat, "interval", seconds=60, id="heartbeat",

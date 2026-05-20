@@ -264,6 +264,88 @@ def test_user_channel_auto_derive_bad_fallback_age_env_still_fails_soft(
     assert condition_ids == ["0xaaa"]
 
 
+def test_user_channel_auto_derive_scans_gamma_by_default_when_persisted_ids_missing(
+    monkeypatch,
+    tmp_path,
+):
+    """Relationship: one-shot WS boot must not default-latch to an empty subscription set."""
+
+    from src import main as zeus_main
+
+    db_path = tmp_path / "forecasts.db"
+    setup = sqlite3.connect(db_path)
+    setup.execute(
+        """
+        CREATE TABLE market_events_v2 (
+            condition_id TEXT,
+            target_date TEXT,
+            recorded_at TEXT
+        )
+        """
+    )
+    setup.commit()
+    setup.close()
+
+    def _forecasts_conn():
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    def _scanner_fallback(**kw):
+        return [{"condition_ids": ["0xgamma", "0xgamma2", "0xgamma"]}]
+
+    monkeypatch.delenv("ZEUS_USER_CHANNEL_BOOT_GAMMA_SCAN", raising=False)
+    monkeypatch.setattr("src.data.market_scanner.find_weather_markets", _scanner_fallback)
+    monkeypatch.setattr("src.state.db.get_forecasts_connection", _forecasts_conn)
+
+    condition_ids = zeus_main._auto_derive_user_channel_condition_ids(
+        now=datetime(2026, 5, 18, 16, 30, tzinfo=timezone.utc)
+    )
+
+    assert condition_ids == ["0xgamma", "0xgamma2"]
+
+
+def test_user_channel_auto_derive_respects_disabled_boot_gamma_scan(
+    monkeypatch,
+    tmp_path,
+):
+    """Relationship: operators can still keep scanner work out of boot explicitly."""
+
+    from src import main as zeus_main
+
+    db_path = tmp_path / "forecasts.db"
+    setup = sqlite3.connect(db_path)
+    setup.execute(
+        """
+        CREATE TABLE market_events_v2 (
+            condition_id TEXT,
+            target_date TEXT,
+            recorded_at TEXT
+        )
+        """
+    )
+    setup.commit()
+    setup.close()
+
+    def _forecasts_conn():
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    def _scanner_must_not_run(**kw):
+        raise AssertionError("Gamma scan should be disabled")
+
+    monkeypatch.setenv("ZEUS_USER_CHANNEL_BOOT_GAMMA_SCAN", "0")
+    monkeypatch.setattr("src.data.market_scanner.find_weather_markets", _scanner_must_not_run)
+    monkeypatch.setattr("src.state.db.get_forecasts_connection", _forecasts_conn)
+
+    condition_ids = zeus_main._auto_derive_user_channel_condition_ids(
+        now=datetime(2026, 5, 18, 16, 30, tzinfo=timezone.utc)
+    )
+
+    assert condition_ids == []
+
+
 def _seed_trade_decision_runtime_alias(c, *, trade_id: int, runtime_trade_id: str | None = None) -> None:
     c.execute(
         """
@@ -636,6 +718,102 @@ def test_trade_lifecycle_forward_transition_requires_stable_fill_economics(conn)
     assert [r["state"] for r in _rows(conn, "position_lots")] == ["OPTIMISTIC_EXPOSURE"]
     assert load_calibration_trade_facts(conn) == []
     assert _command_state(conn) == "REVIEW_REQUIRED"
+
+
+def test_ws_lifecycle_accepts_tick_equivalent_rest_fill_price_without_review(conn):
+    """REST exact cost basis and WS tick price are the same trade economics."""
+
+    conn.execute(
+        """
+        UPDATE venue_commands
+           SET size = ?, price = ?
+         WHERE command_id = 'cmd-ws'
+        """,
+        (5.0, 0.44),
+    )
+    append_trade_fact(
+        conn,
+        trade_id="trade-ws",
+        venue_order_id="ord-ws",
+        command_id="cmd-ws",
+        state="MATCHED",
+        filled_size="5.116278",
+        fill_price="0.4299998944545233859457988796",
+        source="REST",
+        observed_at=NOW,
+        raw_payload_hash=HASH_A,
+        raw_payload_json={"source": "place_limit_order_matched_submit"},
+    )
+    conn.commit()
+
+    result = _ingestor(conn).handle_message(
+        _trade_message(
+            "CONFIRMED",
+            size="5.116278",
+            price="0.43",
+            transaction_hash="0xconfirmed",
+            confirmation_count=3,
+        )
+    )
+
+    assert result["command_event"] == "FILL_CONFIRMED"
+    assert _command_state(conn) == "FILLED"
+    rows = _rows(conn, "venue_trade_facts")
+    assert [(r["state"], r["source"]) for r in rows] == [("MATCHED", "REST"), ("CONFIRMED", "WS_USER")]
+    assert Decimal(rows[-1]["filled_size"]) == Decimal("5.116278")
+    assert Decimal(rows[-1]["fill_price"]) == Decimal("0.4299998944545233859457988796")
+    assert [r["state"] for r in _rows(conn, "position_lots")] == ["CONFIRMED_EXPOSURE"]
+    assert Decimal(_rows(conn, "position_lots")[-1]["entry_price_avg"]) == Decimal(
+        "0.4299998944545233859457988796"
+    )
+
+
+def test_maker_side_partial_fill_lifecycle_uses_zeus_maker_leg_economics(conn):
+    """Maker-side WS trades carry taker economics at top level; Zeus owns the maker leg."""
+
+    conn.execute(
+        """
+        UPDATE venue_commands
+           SET size = ?, price = ?
+         WHERE command_id = 'cmd-ws'
+        """,
+        (181.16, 0.01),
+    )
+    conn.commit()
+
+    ingestor = _ingestor(conn)
+    for status in ("MATCHED", "MINED", "CONFIRMED"):
+        ingestor.handle_message(
+            _trade_message(
+                status,
+                taker_order_id="foreign-taker-order",
+                size="100",
+                price="0.99",
+                maker_orders=[
+                    {
+                        "order_id": "ord-ws",
+                        "matched_amount": "100",
+                        "price": "0.01",
+                        "side": "BUY",
+                    }
+                ],
+                transaction_hash="0xpartialconfirmed",
+                confirmation_count=3 if status == "CONFIRMED" else 0,
+            )
+        )
+
+    rows = _rows(conn, "venue_trade_facts")
+    assert [(r["state"], Decimal(r["filled_size"]), Decimal(r["fill_price"])) for r in rows] == [
+        ("MATCHED", Decimal("100"), Decimal("0.01")),
+        ("MINED", Decimal("100"), Decimal("0.01")),
+        ("CONFIRMED", Decimal("100"), Decimal("0.01")),
+    ]
+    assert [r["state"] for r in _rows(conn, "position_lots")] == [
+        "OPTIMISTIC_EXPOSURE",
+        "CONFIRMED_EXPOSURE",
+    ]
+    assert [r["event_type"] for r in _rows(conn, "venue_command_events")].count("FILL_CONFIRMED") == 0
+    assert _command_state(conn) == "PARTIAL"
 
 
 def test_same_trade_id_different_order_requires_review_not_rebinding(conn):

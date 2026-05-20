@@ -293,17 +293,25 @@ class PolymarketV2Adapter:
         if not kwargs.get("api_creds"):
             try:
                 client.set_api_creds(client.create_or_derive_api_key())
-                import logging
-                logging.getLogger(__name__).warning(
+                logger.warning(
                     "VENUE_AUTH_FALLBACK_TRIGGERED: create_or_derive_api_key used "
                     "(primary /auth/api-key creds absent); L2 calls proceeding via derived creds",
                 )
             except Exception as exc:  # pragma: no cover - upstream SDK behaviour
-                import logging
-                logging.getLogger(__name__).warning(
-                    "create_or_derive_api_key failed; L2-authenticated calls will "
-                    "fail until creds are provided: %s", exc,
-                )
+                env_api_creds = _api_creds_from_env()
+                if env_api_creds is None:
+                    logger.warning(
+                        "create_or_derive_api_key failed; L2-authenticated calls will "
+                        "fail until creds are provided: %s", exc,
+                    )
+                else:
+                    client.set_api_creds(env_api_creds)
+                    logger.warning(
+                        "VENUE_AUTH_STATIC_FALLBACK_TRIGGERED: create_or_derive_api_key "
+                        "failed; using POLYMARKET_API_* creds and deferring validity "
+                        "to the next L2-authenticated preflight: %s",
+                        exc,
+                    )
         return client
 
     def _sdk_client(self) -> Any:
@@ -2356,6 +2364,21 @@ def _sdk_version() -> str:
         return importlib.metadata.version("py-clob-client-v2")
     except importlib.metadata.PackageNotFoundError:
         return "uninstalled"
+
+
+def _api_creds_from_env() -> Any | None:
+    api_key = os.environ.get("POLYMARKET_API_KEY")
+    api_secret = os.environ.get("POLYMARKET_API_SECRET")
+    api_passphrase = os.environ.get("POLYMARKET_API_PASSPHRASE")
+    if not (api_key and api_secret and api_passphrase):
+        return None
+    from py_clob_client_v2.clob_types import ApiCreds
+
+    return ApiCreds(
+        api_key=api_key,
+        api_secret=api_secret,
+        api_passphrase=api_passphrase,
+    )
 
 
 def _normalize_signature_type(value: Any) -> int:

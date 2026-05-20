@@ -1,7 +1,7 @@
 # Created: 2026-04-17
-# Last reused or audited: 2026-05-18
+# Last reused or audited: 2026-05-20
 # Authority basis: AGENTS.md money path; S1 market source-proof persistence via market_topology_state.
-# Lifecycle: created=2026-04-17; last_reviewed=2026-05-18; last_reused=2026-05-18
+# Lifecycle: created=2026-04-17; last_reviewed=2026-05-18; last_reused=2026-05-20
 # Purpose: Lock market_scanner provenance, source-contract drift behavior, and Venus diagnostic authority labels.
 # Reuse: Inspect src/data/market_scanner.py and scripts/watch_source_contract.py before relying on these assertions.
 # Authority basis: audit bug B017 (STILL_OPEN P1 SD-H), Fitz methodology constraint #4 "Data Provenance > Code Correctness"; Wave16 object-meaning diagnostic authority repair.
@@ -274,6 +274,51 @@ def _make_forward_substrate_conn() -> sqlite3.Connection:
     return conn
 
 
+def _make_persisted_substrate_conn() -> sqlite3.Connection:
+    conn = _make_forward_substrate_conn()
+    init_snapshot_schema(conn)
+    return conn
+
+
+def _insert_persisted_reader_snapshot(
+    conn: sqlite3.Connection,
+    *,
+    market_end_at: str = "2026-05-20T12:00:00+00:00",
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO executable_market_snapshots (
+            snapshot_id, gamma_market_id, event_id, event_slug, condition_id,
+            question_id, yes_token_id, no_token_id, selected_outcome_token_id,
+            outcome_label, enable_orderbook, active, closed, accepting_orders,
+            min_tick_size, min_order_size, fee_details_json, token_map_json,
+            neg_risk, orderbook_top_bid, orderbook_top_ask,
+            orderbook_depth_json, market_start_at, market_end_at,
+            market_close_at, sports_start_at, raw_gamma_payload_hash,
+            raw_clob_market_info_hash, raw_orderbook_hash, authority_tier,
+            captured_at, freshness_deadline
+        ) VALUES (
+            'snap-mid', 'gamma-mid', 'event-persisted',
+            'lowest-temperature-in-chicago-on-april-30-2026', 'cond-mid',
+            'question-mid', 'yes-mid', 'no-mid', 'yes-mid', 'YES',
+            1, 1, 0, 1, '0.01', '5', '{}',
+            '{"clobTokenIds":["yes-mid","no-mid"],"outcomes":["Yes","No"]}',
+            1, '0.41', '0.43', '{}',
+            '2026-05-19T08:00:00+00:00',
+            ?,
+            ?,
+            ?,
+            'gamma-hash', 'clob-hash',
+            'book-hash', 'CLOB',
+            '2026-05-20T10:00:00+00:00',
+            '2026-05-20T10:15:00+00:00'
+        )
+        """,
+        (market_end_at, market_end_at, market_end_at),
+    )
+    conn.commit()
+
+
 def _make_forward_substrate_db(tmp_path: Path, request: pytest.FixtureRequest) -> "tuple[str, sqlite3.Connection]":
     """K1-A fix: returns (db_path, conn) for a temp file-backed substrate DB.
 
@@ -296,6 +341,189 @@ def _make_full_linkage_conn() -> sqlite3.Connection:
     apply_v2_schema(conn)
     init_snapshot_schema(conn)
     return conn
+
+
+def test_slug_pattern_discovery_rotates_under_request_budget(monkeypatch):
+    """Background slug discovery must slice work instead of rescanning every slug each tick."""
+
+    class Response:
+        status_code = 200
+
+        def __init__(self, slug: str):
+            self._slug = slug
+
+        def json(self):
+            return [{"id": self._slug, "slug": self._slug, "markets": []}]
+
+    calls: list[str] = []
+
+    def fake_gamma_get(path: str, *, params: dict | None = None, timeout: float, retries: int):
+        assert path == "/events"
+        assert timeout > 0
+        assert retries >= 1
+        slug = str((params or {})["slug"])
+        calls.append(slug)
+        return Response(slug)
+
+    monkeypatch.setattr(ms, "SLUG_DISCOVERY_CITIES", ["alpha", "beta", "gamma"])
+    monkeypatch.setattr(ms, "SLUG_DISCOVERY_PREFIXES", ["highest-temperature-in-{city}-on-{date}"])
+    monkeypatch.setattr(ms, "_SLUG_DISCOVERY_CURSOR", 0)
+    monkeypatch.setattr(ms, "_gamma_get", fake_gamma_get)
+    monkeypatch.setattr(ms, "_event_has_active_children", lambda _event, _now: True)
+
+    now = datetime(2026, 5, 20, 10, 0, tzinfo=timezone.utc)
+    first = ms._fetch_events_by_slug_pattern(
+        set(),
+        now,
+        target_dates=["2026-05-20"],
+        max_requests=2,
+        budget_seconds=100,
+    )
+    second = ms._fetch_events_by_slug_pattern(
+        set(),
+        now,
+        target_dates=["2026-05-20"],
+        max_requests=2,
+        budget_seconds=100,
+    )
+
+    assert calls == [
+        "highest-temperature-in-alpha-on-may-20-2026",
+        "highest-temperature-in-beta-on-may-20-2026",
+        "highest-temperature-in-gamma-on-may-20-2026",
+        "highest-temperature-in-alpha-on-may-20-2026",
+    ]
+    assert [event["_discovery_path"] for event in first + second] == ["slug_pattern"] * 4
+
+
+def test_snapshot_refresh_stops_when_budget_is_exhausted(monkeypatch):
+    """Executable snapshot refresh must not monopolize live background execution."""
+
+    now = datetime(2026, 5, 20, 12, 0, tzinfo=timezone.utc)
+    market = {
+        "event_id": "budget-event",
+        "slug": "highest-temperature-in-budget-on-may-21-2026",
+        "outcomes": [
+            {
+                "condition_id": f"cond-{idx}",
+                "token_id": f"yes-{idx}",
+                "no_token_id": f"no-{idx}",
+                "market_end_at": "2026-05-21T12:00:00+00:00",
+                "executable": True,
+            }
+            for idx in range(3)
+        ],
+    }
+    clock = {"now": 0.0}
+    captured: list[str] = []
+
+    def fake_capture(conn, *, market, decision, clob, captured_at, scan_authority, execution_side):
+        captured.append(decision.tokens["market_id"])
+        clock["now"] += 2.0
+
+    monkeypatch.setattr(ms.time, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(ms, "capture_executable_market_snapshot", fake_capture)
+
+    summary = ms.refresh_executable_market_substrate_snapshots(
+        sqlite3.connect(":memory:"),
+        markets=[market],
+        clob=object(),
+        captured_at=now,
+        max_outcomes=3,
+        budget_seconds=1.0,
+    )
+
+    assert captured == ["cond-0"]
+    assert summary["attempted"] == 1
+    assert summary["skipped"] == 5
+    assert summary["truncated"] == 1
+    assert summary["budget_exhausted"] == 1
+
+
+def test_snapshot_refresh_persists_yes_and_no_substrate_sides():
+    """Relationship: background substrate must not erase the later decision side."""
+
+    conn = _make_market_topology_conn()
+    now = datetime(2026, 5, 20, 12, 0, tzinfo=timezone.utc)
+    market = {
+        "event_id": "side-event",
+        "slug": "highest-temperature-in-side-on-may-21-2026",
+        "outcomes": [
+            {
+                "condition_id": "cond-side",
+                "question_id": "question-side",
+                "gamma_market_id": "gamma-side",
+                "token_id": "yes-side",
+                "no_token_id": "no-side",
+                "raw_gamma_payload_hash": "c" * 64,
+                "active": True,
+                "closed": False,
+                "accepting_orders": True,
+                "enable_orderbook": True,
+                "market_end_at": "2026-05-21T12:00:00+00:00",
+                "executable": True,
+                "token_map_raw": {
+                    "clobTokenIds": ["yes-side", "no-side"],
+                    "outcomes": ["Yes", "No"],
+                },
+                "gamma_market_raw": {
+                    "id": "gamma-side",
+                    "conditionId": "cond-side",
+                    "questionID": "question-side",
+                    "active": True,
+                    "closed": False,
+                    "acceptingOrders": True,
+                    "enableOrderBook": True,
+                    "clobTokenIds": ["yes-side", "no-side"],
+                },
+            }
+        ],
+    }
+
+    class SideAwareClob:
+        def get_clob_market_info(self, condition_id: str) -> dict:
+            return {
+                "condition_id": condition_id,
+                "tokens": [{"token_id": "yes-side"}, {"token_id": "no-side"}],
+                "feesEnabled": True,
+            }
+
+        def get_orderbook_snapshot(self, token_id: str) -> dict:
+            return {
+                "asset_id": token_id,
+                "tick_size": "0.01",
+                "min_order_size": "5",
+                "neg_risk": True,
+                "bids": [{"price": "0.40", "size": "10"}],
+                "asks": [{"price": "0.42", "size": "10"}],
+            }
+
+        def get_fee_rate(self, token_id: str) -> float:
+            return 0
+
+    summary = ms.refresh_executable_market_substrate_snapshots(
+        conn,
+        markets=[market],
+        clob=SideAwareClob(),
+        captured_at=now,
+        max_outcomes=4,
+        budget_seconds=1.0,
+    )
+
+    assert summary["attempted"] == 2
+    assert summary["inserted"] == 2
+    rows = conn.execute(
+        """
+        SELECT outcome_label, selected_outcome_token_id
+          FROM executable_market_snapshots
+         WHERE condition_id = 'cond-side'
+         ORDER BY outcome_label
+        """
+    ).fetchall()
+    assert [(row["outcome_label"], row["selected_outcome_token_id"]) for row in rows] == [
+        ("NO", "no-side"),
+        ("YES", "yes-side"),
+    ]
 
 
 def _make_market_topology_conn() -> sqlite3.Connection:
@@ -668,7 +896,7 @@ class TestSourceContractGate:
 
     def test_current_yes_price_returns_none_for_non_executable_support_child(self, monkeypatch):
         event = _gamma_support_event_with_closed_low_shoulder()
-        monkeypatch.setattr(ms, "_get_active_events", lambda: [event])
+        monkeypatch.setattr(ms, "_get_active_events", lambda **_kwargs: [event])
 
         assert ms.get_current_yes_price("cond-low-closed") is None
 
@@ -825,7 +1053,7 @@ class TestSourceContractGate:
         assert parsed is not None
         assert parsed["source_contract"]["status"] == "MISSING"
 
-        monkeypatch.setattr(ms, "_get_active_events", lambda: [event])
+        monkeypatch.setattr(ms, "_get_active_events", lambda **_kwargs: [event])
 
         assert ms.find_weather_markets(min_hours_to_resolution=0.0) == []
 
@@ -853,7 +1081,7 @@ class TestSourceContractGate:
         )
         assert parsed["source_contract"]["station_id"] == "KLAX"
 
-        monkeypatch.setattr(ms, "_get_active_events", lambda: [event])
+        monkeypatch.setattr(ms, "_get_active_events", lambda **_kwargs: [event])
 
         assert len(ms.find_weather_markets(min_hours_to_resolution=0.0)) == 1
 
@@ -1031,7 +1259,7 @@ class TestSourceContractGate:
                 "paris/LFPG"
             ),
         )
-        monkeypatch.setattr(ms, "_get_active_events", lambda: [matching_event_after_reconfig])
+        monkeypatch.setattr(ms, "_get_active_events", lambda **_kwargs: [matching_event_after_reconfig])
 
         assert ms.find_weather_markets(min_hours_to_resolution=0.0) == []
 
@@ -1057,7 +1285,7 @@ class TestSourceContractGate:
                 "bonneuil-en-france/LFPB"
             ),
         )
-        monkeypatch.setattr(ms, "_get_active_events", lambda: [active_event])
+        monkeypatch.setattr(ms, "_get_active_events", lambda **_kwargs: [active_event])
 
         assert ms.get_current_yes_price("cond1") == pytest.approx(0.55)
         siblings = ms.get_sibling_outcomes("cond1")
@@ -1107,7 +1335,7 @@ class TestSourceContractGate:
                 "bonneuil-en-france/LFPB"
             ),
         )
-        monkeypatch.setattr(ms, "_get_active_events", lambda: [event])
+        monkeypatch.setattr(ms, "_get_active_events", lambda **_kwargs: [event])
 
         parsed = _parse_event(
             event,
@@ -2435,7 +2663,7 @@ class TestSourceContractAuditPersistence:
         source_contract = json.loads(row["source_contract_json"])
         assert source_contract["reason"] == "station 'LFPG' != configured 'LFPB'"
 
-        monkeypatch.setattr(ms, "_get_active_events", lambda: [event])
+        monkeypatch.setattr(ms, "_get_active_events", lambda **_kwargs: [event])
         assert ms.find_weather_markets(min_hours_to_resolution=0.0) == []
 
     def test_source_contract_audit_is_append_only_per_scan(self, tmp_path):
@@ -2678,7 +2906,7 @@ class TestExecutableConditionIdsForUserChannelWS:
         self, monkeypatch
     ):
         event = _gamma_temperature_event()
-        monkeypatch.setattr(ms, "_get_active_events", lambda: [event])
+        monkeypatch.setattr(ms, "_get_active_events", lambda **_kwargs: [event])
         # Avoid the SQLite persistence side-effect during the unit assertion;
         # the production path already exercises it elsewhere.
         monkeypatch.setattr(ms, "_persist_market_events_to_db", lambda *_a, **_k: 0)
@@ -2698,6 +2926,416 @@ class TestExecutableConditionIdsForUserChannelWS:
 
 class TestForwardMarketSubstrateProducer:
     """Forward substrate writer is explicit, authority-gated, and idempotent."""
+
+    def test_snapshot_refresh_budget_skips_expired_child_markets(self):
+        conn = _make_persisted_substrate_conn()
+        captured_at = datetime(2026, 5, 20, 12, 2, tzinfo=timezone.utc)
+
+        class AnyConditionClob:
+            def get_clob_market_info(self, condition_id: str) -> dict:
+                return {
+                    "condition_id": condition_id,
+                    "tokens": [
+                        {"token_id": f"{condition_id}-yes"},
+                        {"token_id": f"{condition_id}-no"},
+                    ],
+                    "feesEnabled": True,
+                }
+
+            def get_orderbook_snapshot(self, token_id: str) -> dict:
+                return {
+                    "asset_id": token_id,
+                    "tick_size": "0.01",
+                    "min_order_size": "5",
+                    "neg_risk": True,
+                    "bids": [],
+                    "asks": [{"price": "0.42", "size": "100"}],
+                }
+
+            def get_fee_rate(self, token_id: str) -> float:
+                return 0
+
+        def outcome(condition_id: str, market_end_at: str) -> dict:
+            return {
+                "title": f"{condition_id} bin",
+                "token_id": f"{condition_id}-yes",
+                "no_token_id": f"{condition_id}-no",
+                "market_id": condition_id,
+                "condition_id": condition_id,
+                "question_id": f"{condition_id}-question",
+                "gamma_market_id": f"{condition_id}-gamma",
+                "range_low": 1,
+                "range_high": 2,
+                "executable": True,
+                "active": True,
+                "closed": False,
+                "accepting_orders": True,
+                "enable_orderbook": True,
+                "market_end_at": market_end_at,
+                "raw_gamma_payload_hash": "a" * 64,
+                "token_map_raw": {
+                    "clobTokenIds": [f"{condition_id}-yes", f"{condition_id}-no"],
+                    "outcomes": ["Yes", "No"],
+                },
+                "gamma_market_raw": {
+                    "id": f"{condition_id}-gamma",
+                    "conditionId": condition_id,
+                    "questionID": f"{condition_id}-question",
+                    "active": True,
+                    "closed": False,
+                    "acceptingOrders": True,
+                    "enableOrderBook": True,
+                    "clobTokenIds": [f"{condition_id}-yes", f"{condition_id}-no"],
+                },
+            }
+
+        expired_market = {
+            "event_id": "expired-event",
+            "slug": "highest-temperature-in-expired-on-may-20-2026",
+            "outcomes": [
+                outcome(f"expired-{index}", "2026-05-20T12:00:00+00:00")
+                for index in range(3)
+            ],
+        }
+        future_market = {
+            "event_id": "future-event",
+            "slug": "highest-temperature-in-future-on-may-21-2026",
+            "outcomes": [outcome("future-0", "2026-05-21T12:00:00+00:00")],
+        }
+
+        summary = ms.refresh_executable_market_substrate_snapshots(
+            conn,
+            markets=[expired_market, future_market],
+            clob=AnyConditionClob(),
+            captured_at=captured_at,
+            max_outcomes=1,
+        )
+
+        assert summary["attempted"] == 1
+        assert summary["inserted"] == 1
+        rows = conn.execute(
+            "SELECT event_slug, condition_id FROM executable_market_snapshots"
+        ).fetchall()
+        assert [(row["event_slug"], row["condition_id"]) for row in rows] == [
+            ("highest-temperature-in-future-on-may-21-2026", "future-0")
+        ]
+
+    def test_snapshot_refresh_prioritizes_opening_hunt_window_under_budget(self):
+        conn = _make_persisted_substrate_conn()
+        captured_at = datetime(2026, 5, 20, 12, 2, tzinfo=timezone.utc)
+
+        class AnyConditionClob:
+            def get_clob_market_info(self, condition_id: str) -> dict:
+                return {
+                    "condition_id": condition_id,
+                    "tokens": [
+                        {"token_id": f"{condition_id}-yes"},
+                        {"token_id": f"{condition_id}-no"},
+                    ],
+                    "feesEnabled": True,
+                }
+
+            def get_orderbook_snapshot(self, token_id: str) -> dict:
+                return {
+                    "asset_id": token_id,
+                    "tick_size": "0.01",
+                    "min_order_size": "5",
+                    "neg_risk": True,
+                    "bids": [],
+                    "asks": [{"price": "0.42", "size": "100"}],
+                }
+
+            def get_fee_rate(self, token_id: str) -> float:
+                return 0
+
+        def market(slug: str, condition_id: str, start_at: str, end_at: str) -> dict:
+            return {
+                "event_id": slug,
+                "slug": slug,
+                "hours_since_open": (
+                    captured_at - datetime.fromisoformat(start_at.replace("Z", "+00:00"))
+                ).total_seconds() / 3600,
+                "hours_to_resolution": (
+                    datetime.fromisoformat(end_at.replace("Z", "+00:00")) - captured_at
+                ).total_seconds() / 3600,
+                "outcomes": [
+                    {
+                        "title": f"{condition_id} bin",
+                        "token_id": f"{condition_id}-yes",
+                        "no_token_id": f"{condition_id}-no",
+                        "market_id": condition_id,
+                        "condition_id": condition_id,
+                        "question_id": f"{condition_id}-question",
+                        "gamma_market_id": f"{condition_id}-gamma",
+                        "range_low": 1,
+                        "range_high": 2,
+                        "executable": True,
+                        "active": True,
+                        "closed": False,
+                        "accepting_orders": True,
+                        "enable_orderbook": True,
+                        "market_start_at": start_at,
+                        "market_end_at": end_at,
+                        "raw_gamma_payload_hash": "b" * 64,
+                        "token_map_raw": {
+                            "clobTokenIds": [f"{condition_id}-yes", f"{condition_id}-no"],
+                            "outcomes": ["Yes", "No"],
+                        },
+                        "gamma_market_raw": {
+                            "id": f"{condition_id}-gamma",
+                            "conditionId": condition_id,
+                            "questionID": f"{condition_id}-question",
+                            "active": True,
+                            "closed": False,
+                            "acceptingOrders": True,
+                            "enableOrderBook": True,
+                            "clobTokenIds": [f"{condition_id}-yes", f"{condition_id}-no"],
+                        },
+                    }
+                ],
+            }
+
+        day0_market = market(
+            "highest-temperature-in-day0-on-may-21-2026",
+            "day0-0",
+            "2026-05-19T04:00:00+00:00",
+            "2026-05-21T12:00:00+00:00",
+        )
+        opening_market = market(
+            "highest-temperature-in-opening-on-may-22-2026",
+            "opening-0",
+            "2026-05-20T04:00:00+00:00",
+            "2026-05-22T12:00:00+00:00",
+        )
+
+        summary = ms.refresh_executable_market_substrate_snapshots(
+            conn,
+            markets=[day0_market, opening_market],
+            clob=AnyConditionClob(),
+            captured_at=captured_at,
+            max_outcomes=1,
+        )
+
+        assert summary["attempted"] == 1
+        assert summary["inserted"] == 1
+        rows = conn.execute(
+            "SELECT event_slug, condition_id FROM executable_market_snapshots"
+        ).fetchall()
+        assert [(row["event_slug"], row["condition_id"]) for row in rows] == [
+            ("highest-temperature-in-opening-on-may-22-2026", "opening-0")
+        ]
+
+    def test_persisted_reader_reconstructs_full_support_from_snapshot_and_market_events(self):
+        conn = _make_persisted_substrate_conn()
+        for condition_id, label, low, high, token in (
+            ("cond-low", "35°F or lower", None, 35.0, "yes-low"),
+            ("cond-mid", "36-37°F", 36.0, 37.0, "yes-mid"),
+            ("cond-high", "38°F or higher", 38.0, None, "yes-high"),
+        ):
+            conn.execute(
+                """
+                INSERT INTO market_events_v2 (
+                    market_slug, city, target_date, temperature_metric,
+                    condition_id, token_id, range_label, range_low,
+                    range_high, recorded_at
+                ) VALUES (?, 'Chicago', '2026-04-30', 'low', ?, ?, ?, ?, ?,
+                    '2026-05-20T09:59:00+00:00')
+                """,
+                (
+                    "lowest-temperature-in-chicago-on-april-30-2026",
+                    condition_id,
+                    token,
+                    label,
+                    low,
+                    high,
+                ),
+            )
+        _insert_persisted_reader_snapshot(conn)
+
+        snapshot = ms.read_persisted_weather_markets(
+            conn,
+            now_utc=datetime(2026, 5, 20, 10, 5, tzinfo=timezone.utc),
+            max_age_seconds=900,
+        )
+
+        assert snapshot.authority == "VERIFIED"
+        assert len(snapshot.events) == 1
+        market = snapshot.events[0]
+        assert [o["condition_id"] for o in market["outcomes"]] == [
+            "cond-low",
+            "cond-mid",
+            "cond-high",
+        ]
+        executable = [o for o in market["outcomes"] if o["executable"]]
+        assert [o["condition_id"] for o in executable] == ["cond-mid"]
+        assert executable[0]["token_id"] == "yes-mid"
+        assert executable[0]["no_token_id"] == "no-mid"
+        assert executable[0]["executable_snapshot_id"] == "snap-mid"
+        assert market["market_start_at"] == "2026-05-19T08:00:00+00:00"
+        assert market["market_end_at"] == "2026-05-20T12:00:00+00:00"
+        assert market["market_close_at"] == "2026-05-20T12:00:00+00:00"
+        assert market["sports_start_at"] == "2026-05-20T12:00:00+00:00"
+        assert market["hours_to_resolution"] == 1.9166666666666667
+        assert market["hours_since_open"] == 26.083333333333332
+
+    def test_persisted_sibling_reader_reconstructs_support_without_network_scan(self, monkeypatch):
+        conn = _make_persisted_substrate_conn()
+        for condition_id, label, low, high, token in (
+            ("cond-low", "35°F or lower", None, 35.0, "yes-low"),
+            ("cond-mid", "36-37°F", 36.0, 37.0, "yes-mid"),
+            ("cond-high", "38°F or higher", 38.0, None, "yes-high"),
+        ):
+            conn.execute(
+                """
+                INSERT INTO market_events_v2 (
+                    market_slug, city, target_date, temperature_metric,
+                    condition_id, token_id, range_label, range_low,
+                    range_high, recorded_at
+                ) VALUES (?, 'Chicago', '2026-04-30', 'low', ?, ?, ?, ?, ?,
+                    '2026-05-20T09:59:00+00:00')
+                """,
+                (
+                    "lowest-temperature-in-chicago-on-april-30-2026",
+                    condition_id,
+                    token,
+                    label,
+                    low,
+                    high,
+                ),
+            )
+        _insert_persisted_reader_snapshot(conn)
+        monkeypatch.setattr(
+            ms,
+            "_get_active_events",
+            lambda **_kwargs: (_ for _ in ()).throw(AssertionError("network discovery not allowed")),
+        )
+
+        snapshot = ms.read_persisted_sibling_outcomes(
+            "cond-mid",
+            conn=conn,
+            now_utc=datetime(2026, 5, 20, 10, 5, tzinfo=timezone.utc),
+            max_age_seconds=900,
+        )
+
+        assert snapshot.authority == "VERIFIED"
+        assert [o["condition_id"] for o in snapshot.events] == [
+            "cond-low",
+            "cond-mid",
+            "cond-high",
+        ]
+        assert next(o for o in snapshot.events if o["condition_id"] == "cond-mid")[
+            "executable_snapshot_id"
+        ] == "snap-mid"
+
+    def test_get_sibling_outcomes_uses_persisted_authority_without_legacy_scan(self, monkeypatch):
+        monkeypatch.setattr(
+            ms,
+            "read_persisted_sibling_outcomes",
+            lambda *_args, **_kwargs: ms.MarketSnapshot(
+                events=[{"condition_id": "cond-mid", "market_id": "cond-mid"}],
+                authority="VERIFIED",
+            ),
+        )
+        monkeypatch.setattr(
+            ms,
+            "_get_active_events",
+            lambda **_kwargs: (_ for _ in ()).throw(AssertionError("legacy scan not allowed")),
+        )
+
+        assert ms.get_sibling_outcomes("cond-mid") == [
+            {"condition_id": "cond-mid", "market_id": "cond-mid"}
+        ]
+        assert ms.get_last_scan_authority() == "VERIFIED"
+
+    def test_get_sibling_outcomes_fails_closed_on_stale_persisted_authority(self, monkeypatch):
+        monkeypatch.setattr(
+            ms,
+            "read_persisted_sibling_outcomes",
+            lambda *_args, **_kwargs: ms.MarketSnapshot(events=[], authority="STALE"),
+        )
+        monkeypatch.setattr(
+            ms,
+            "_get_active_events",
+            lambda **_kwargs: (_ for _ in ()).throw(AssertionError("legacy scan not allowed")),
+        )
+
+        assert ms.get_sibling_outcomes("cond-mid") == []
+
+    def test_persisted_reader_rejects_fresh_but_expired_snapshots(self):
+        conn = _make_persisted_substrate_conn()
+        conn.execute(
+            """
+            INSERT INTO market_events_v2 (
+                market_slug, city, target_date, temperature_metric,
+                condition_id, token_id, range_label, range_low,
+                range_high, recorded_at
+            ) VALUES (
+                'lowest-temperature-in-chicago-on-april-30-2026',
+                'Chicago', '2026-04-30', 'low', 'cond-mid', 'yes-mid',
+                '36-37°F', 36.0, 37.0, '2026-05-20T09:59:00+00:00'
+            )
+            """
+        )
+        _insert_persisted_reader_snapshot(
+            conn,
+            market_end_at="2026-05-20T10:00:00+00:00",
+        )
+
+        snapshot = ms.read_persisted_weather_markets(
+            conn,
+            now_utc=datetime(2026, 5, 20, 10, 5, tzinfo=timezone.utc),
+            max_age_seconds=900,
+        )
+
+        assert snapshot.authority == "STALE"
+        assert snapshot.events == []
+
+    def test_persisted_reader_joins_trade_snapshots_to_forecasts_market_events(self):
+        trade_conn = _make_persisted_substrate_conn()
+        forecasts_conn = _make_forward_substrate_conn()
+        for condition_id, label, low, high, token in (
+            ("cond-low", "35°F or lower", None, 35.0, "yes-low"),
+            ("cond-mid", "36-37°F", 36.0, 37.0, "yes-mid"),
+            ("cond-high", "38°F or higher", 38.0, None, "yes-high"),
+        ):
+            forecasts_conn.execute(
+                """
+                INSERT INTO market_events_v2 (
+                    market_slug, city, target_date, temperature_metric,
+                    condition_id, token_id, range_label, range_low,
+                    range_high, recorded_at
+                ) VALUES (?, 'Chicago', '2026-04-30', 'low', ?, ?, ?, ?, ?,
+                    '2026-05-20T09:59:00+00:00')
+                """,
+                (
+                    "lowest-temperature-in-chicago-on-april-30-2026",
+                    condition_id,
+                    token,
+                    label,
+                    low,
+                    high,
+                ),
+            )
+        forecasts_conn.commit()
+        _insert_persisted_reader_snapshot(trade_conn)
+
+        snapshot = ms.read_persisted_weather_markets(
+            trade_conn,
+            now_utc=datetime(2026, 5, 20, 10, 5, tzinfo=timezone.utc),
+            max_age_seconds=900,
+            market_events_conn=forecasts_conn,
+        )
+
+        assert snapshot.authority == "VERIFIED"
+        assert len(snapshot.events) == 1
+        assert snapshot.events[0]["hours_to_resolution"] == 1.9166666666666667
+        assert [o["condition_id"] for o in snapshot.events[0]["outcomes"]] == [
+            "cond-low",
+            "cond-mid",
+            "cond-high",
+        ]
+        executable = [o for o in snapshot.events[0]["outcomes"] if o["executable"]]
+        assert [o["condition_id"] for o in executable] == ["cond-mid"]
 
     def test_market_source_contract_wu_match_persists_to_topology_state(self, monkeypatch, tmp_path):
         parsed = _parse_event(
@@ -3247,6 +3885,57 @@ class TestForwardMarketSubstrateProducer:
         assert result["outcomes_skipped_with_outcome_fact"] == 1
         assert conn.execute("SELECT COUNT(*) FROM market_events_v2").fetchone()[0] == 1
         assert conn.execute("SELECT COUNT(*) FROM market_price_history").fetchone()[0] == 0
+
+    def test_forward_substrate_treats_legacy_range_label_outcome_as_unresolved(
+        self, tmp_path, request
+    ):
+        """Legacy active rows sometimes stored range_label in outcome.
+
+        That value is not settlement truth. It must not block fresh scanner
+        price facts for the same unresolved market identity.
+        """
+        db_path, conn = _make_forward_substrate_db(tmp_path, request)
+        conn.execute(
+            """
+            INSERT INTO market_events_v2 (
+                market_slug, city, target_date, temperature_metric,
+                condition_id, token_id, range_label, range_low, range_high,
+                outcome, created_at, recorded_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "lowest-temperature-in-chicago-on-april-30-2026",
+                "Chicago",
+                "2026-04-30",
+                "low",
+                "cond-low-shoulder",
+                "yes-low-shoulder",
+                "35°F or lower",
+                None,
+                35.0,
+                "35°F or lower",
+                "2026-04-29T12:00:00Z",
+                "2026-04-29T15:00:00Z",
+            ),
+        )
+        conn.commit()
+        market = _forward_market()
+        market["outcomes"] = [market["outcomes"][0]]
+
+        result = log_forward_market_substrate(
+            markets=[market],
+            recorded_at="2026-04-29T16:00:00Z",
+            scan_authority="VERIFIED",
+            _db_path=db_path,
+        )
+
+        assert result["status"] == "written"
+        assert result["market_events_unchanged"] == 1
+        assert result["price_rows_inserted"] == 2
+        assert result["outcomes_skipped_with_outcome_fact"] == 0
+        assert conn.execute("SELECT COUNT(*) FROM market_events_v2").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM market_price_history").fetchone()[0] == 2
 
     def test_forward_substrate_does_not_append_prices_for_event_identity_conflicts(self, tmp_path, request):
         """Rejected event identity conflicts cannot create orphan price facts."""

@@ -68,6 +68,69 @@ _TERMINAL_VENUE_ORDER_STATES = {
 }
 
 
+def _atomic_write_status_payload(payload: dict) -> None:
+    import tempfile
+
+    fd, tmp = tempfile.mkstemp(dir=str(STATUS_PATH.parent), suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(payload, f, indent=2)
+        os.replace(tmp, str(STATUS_PATH))
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def write_cycle_pulse(cycle_summary: dict | None = None) -> None:
+    """Update the live progress timestamp without running the full read model."""
+
+    generated_at = datetime.now(timezone.utc).isoformat()
+    prior: dict = {}
+    if STATUS_PATH.exists():
+        try:
+            with open(STATUS_PATH) as f:
+                loaded = json.load(f)
+            if isinstance(loaded, dict):
+                prior = loaded
+        except Exception:
+            prior = {}
+    status = dict(prior)
+    status["timestamp"] = generated_at
+    if cycle_summary is not None:
+        status["cycle"] = dict(cycle_summary)
+    try:
+        status["execution_capability"] = _get_execution_capability_status()
+    except Exception as exc:
+        status["execution_capability"] = {
+            "schema_version": 1,
+            "authority": "derived_operator_visibility",
+            "derived_only": True,
+            "live_action_authorized": False,
+            "entry": {
+                "action": "entry",
+                "status": "blocked",
+                "global_allow_submit": False,
+                "live_action_authorized": False,
+                "authority": "derived_operator_visibility",
+                "components": [
+                    _capability_component(
+                        "execution_capability_pulse",
+                        allowed=False,
+                        reason="pulse_refresh_failed",
+                        details={"error_type": type(exc).__name__, "error": str(exc)},
+                    )
+                ],
+                "required_intent_components": [],
+                "blocked_components": ["execution_capability_pulse"],
+            },
+        }
+    status = annotate_truth_payload(status, STATUS_PATH, generated_at=generated_at, authority="VERIFIED")
+    _atomic_write_status_payload(status)
+
+
 def _enum_text(value, default: str) -> str:
     if value in (None, ""):
         return default
@@ -1272,15 +1335,4 @@ def write_status(cycle_summary: dict = None) -> None:
         status["truth"]["compatibility_inputs"] = compatibility_inputs
 
     # Atomic write
-    import tempfile
-    fd, tmp = tempfile.mkstemp(dir=str(STATUS_PATH.parent), suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w") as f:
-            json.dump(status, f, indent=2)
-        os.replace(tmp, str(STATUS_PATH))
-    except Exception:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
+    _atomic_write_status_payload(status)

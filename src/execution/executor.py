@@ -499,6 +499,36 @@ def _component_from_result(component: str, result=None, **details) -> dict:
     return payload
 
 
+_PRE_SUBMIT_AUDIT_ONLY_DECISION_SOURCE_ERRORS = frozenset(
+    {
+        "missing_observation_time",
+        "missing_observation_available_at",
+        "missing_zeus_submit_intent_time",
+        "missing_venue_ack_time",
+        "clock_drift_warning",
+    }
+)
+
+
+def _pre_submit_decision_source_errors(
+    context: DecisionSourceContext,
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Split source blockers from audit fields unavailable before venue submit."""
+
+    errors = context.integrity_errors()
+    blockers = tuple(
+        error
+        for error in errors
+        if error not in _PRE_SUBMIT_AUDIT_ONLY_DECISION_SOURCE_ERRORS
+    )
+    deferred = tuple(
+        error
+        for error in errors
+        if error in _PRE_SUBMIT_AUDIT_ONLY_DECISION_SOURCE_ERRORS
+    )
+    return blockers, deferred
+
+
 def _entry_decision_source_component(intent: ExecutionIntent) -> dict:
     context = getattr(intent, "decision_source_context", None)
     if context is None:
@@ -507,8 +537,13 @@ def _entry_decision_source_component(intent: ExecutionIntent) -> dict:
             allowed=False,
             reason="missing_decision_source_context",
         )
-    errors = context.integrity_errors()
+    errors, deferred_errors = _pre_submit_decision_source_errors(context)
     details = context.capability_details()
+    if deferred_errors:
+        details = {
+            **details,
+            "pre_submit_deferred_audit_errors": ",".join(deferred_errors),
+        }
     if errors:
         return _capability_component(
             "decision_source_integrity",
@@ -1642,7 +1677,9 @@ def _legacy_entry_intent_from_final(
         )
     if intent.decision_source_context is None:
         raise ValueError("FinalExecutionIntent missing decision_source_context")
-    decision_source_errors = intent.decision_source_context.integrity_errors()
+    decision_source_errors, _deferred_errors = _pre_submit_decision_source_errors(
+        intent.decision_source_context
+    )
     if decision_source_errors:
         raise ValueError(
             "FinalExecutionIntent decision_source_context failed integrity: "
@@ -2657,8 +2694,9 @@ def execute_exit_order(
                 )
             except Exception as _timing_exc:
                 logger.debug("PR6 timing update skipped (column absent on older DB): %s", _timing_exc)
-            if _own_conn:
-                conn.commit()
+            # Exit submission uses the same durable side-effect boundary as entry:
+            # ACK/order facts must be visible even when the caller owns conn.
+            conn.commit()
         except Exception as inner:
             logger.error(
                 "execute_exit_order: SUBMIT_ACKED append_event failed (command_id=%s order_id=%s): %s",

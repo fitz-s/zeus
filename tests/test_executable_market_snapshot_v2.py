@@ -1,5 +1,5 @@
 # Created: 2026-04-27
-# Lifecycle: created=2026-04-27; last_reviewed=2026-05-15; last_reused=2026-05-17
+# Lifecycle: created=2026-04-27; last_reviewed=2026-05-15; last_reused=2026-05-20
 # Purpose: U1 snapshot antibodies plus pricing-semantics contract scaffolding.
 # Reuse: Run when executable snapshots, venue_commands gating, or V2 market preflight semantics change.
 # Authority basis: docs/operations/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md
@@ -327,6 +327,7 @@ def test_capture_executable_snapshot_persists_verified_gamma_and_clob_facts(conn
         "fee_rate_unit_inferred": "legacy_get_fee_rate_gt_1_bps",
     }
     assert loaded.authority_tier == "CLOB"
+    assert fields["condition_id"] == "condition-1"
     assert fields["executable_snapshot_min_tick_size"] == "0.01"
     assert fields["executable_snapshot_min_order_size"] == "5"
     assert fields["executable_snapshot_neg_risk"] is False
@@ -390,6 +391,56 @@ def test_bid_only_sell_snapshot_authorizes_sell_but_not_buy_command(conn):
             snapshot_id="snap-sell-bid-only",
             side="BUY",
             price=0.49,
+            size=10.0,
+        )
+
+
+def test_capture_buy_snapshot_preserves_ask_only_book_without_fabricating_bid(conn):
+    clob = FakeClobFacts(orderbook={
+        "asset_id": "yes-token",
+        "tick_size": "0.01",
+        "min_order_size": "5",
+        "neg_risk": False,
+        "bids": [],
+        "asks": [{"price": "0.51", "size": "100"}],
+    })
+
+    fields = capture_executable_market_snapshot(
+        conn,
+        market=_market_for_capture(),
+        decision=_decision_for_capture(direction="buy_yes"),
+        clob=clob,
+        captured_at=NOW,
+        scan_authority="VERIFIED",
+        execution_side="BUY",
+    )
+    loaded = get_snapshot(conn, fields["executable_snapshot_id"])
+    raw = conn.execute(
+        "SELECT orderbook_top_bid, orderbook_top_ask FROM executable_market_snapshots WHERE snapshot_id = ?",
+        (fields["executable_snapshot_id"],),
+    ).fetchone()
+
+    assert loaded is not None
+    assert loaded.orderbook_top_bid is None
+    assert loaded.orderbook_top_ask == Decimal("0.51")
+    assert raw["orderbook_top_bid"] == "ABSENT"
+    assert raw["orderbook_top_ask"] == "0.51"
+    assert json.loads(loaded.orderbook_depth_jsonb)["bids"] == []
+
+    _insert_command(
+        conn,
+        snapshot_id=fields["executable_snapshot_id"],
+        side="BUY",
+        price=0.51,
+        size=10.0,
+        expected_min_order_size=Decimal("5"),
+    )
+    with pytest.raises(MarketSnapshotMismatchError, match="SELL command requires bid-side"):
+        _insert_command(
+            conn,
+            snapshot_id=fields["executable_snapshot_id"],
+            side="SELL",
+            price=0.51,
             size=10.0,
         )
 
@@ -653,17 +704,6 @@ def test_capture_executable_snapshot_requires_verified_gamma_authority(conn, aut
                 "asks": [{"price": "0.51", "size": "100"}],
             }),
             "tick_size",
-        ),
-        (
-            FakeClobFacts(orderbook={
-                "asset_id": "yes-token",
-                "tick_size": "0.01",
-                "min_order_size": "5",
-                "neg_risk": False,
-                "bids": [],
-                "asks": [{"price": "0.51", "size": "100"}],
-            }),
-            "missing bids",
         ),
         (
             FakeClobFacts(orderbook={

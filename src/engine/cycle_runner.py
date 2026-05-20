@@ -1049,8 +1049,8 @@ def run_cycle(mode: DiscoveryMode) -> dict:
             save_tracker(tracker)
 
     def _export_status() -> None:
-        from src.observability.status_summary import write_status
-        write_status(summary)
+        from src.observability.status_summary import write_cycle_pulse
+        write_cycle_pulse(summary)
 
     try:
         commit_then_export(

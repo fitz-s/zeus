@@ -1,5 +1,5 @@
 # Created: 2026-05-03
-# Last reused/audited: 2026-05-14
+# Last reused/audited: 2026-05-20
 # Authority basis: docs/operations/task_2026-05-14_data_daemon_live_efficiency/DATA_DAEMON_LIVE_EFFICIENCY_REFACTOR_PLAN.md
 #   Phase 3 producer-readiness-only data daemon cutover path.
 """Executable forecast reader relationship tests."""
@@ -427,6 +427,8 @@ def test_full_reader_returns_evidence_bundle_with_separate_readiness_ids() -> No
     ens_result = result.bundle.to_ens_result()
     assert ens_result["period_extrema_source"] == "local_calendar_day_member_extrema"
     assert ens_result["raw_payload_hash"] == "a" * 64
+    assert ens_result["first_member_observed_time"] == "2026-05-03T08:10:00+00:00"
+    assert ens_result["run_complete_time"] == "2026-05-03T08:15:00+00:00"
 
 
 def test_full_reader_prefers_attached_forecasts_authority_and_keeps_entry_local(tmp_path) -> None:

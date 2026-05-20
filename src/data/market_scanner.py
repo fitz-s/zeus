@@ -13,9 +13,10 @@ import time
 import hashlib
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Literal, Optional
 
 import httpx
@@ -172,6 +173,7 @@ _ACTIVE_EVENTS_TTL: float = 300.0  # 5-minute TTL
 # (archived: bool, enable_order_book: bool). Reset each scanner tick via
 # clear_clob_archived_cache().
 _CLOB_ARCHIVED_CACHE: dict[str, tuple[bool, bool]] = {}
+_SLUG_DISCOVERY_CURSOR: int = 0
 CLOB_BASE = "https://clob.polymarket.com"
 
 SOURCE_CONTRACT_QUARANTINE_PATH_ENV = "ZEUS_SOURCE_CONTRACT_QUARANTINE_PATH"
@@ -743,18 +745,55 @@ def extract_executable_condition_ids(events: list[dict]) -> list[str]:
 
 def find_weather_markets(
     min_hours_to_resolution: float = 6.0,
+    *,
+    include_slug_pattern: bool = True,
 ) -> list[dict]:
     """Find active weather temperature markets. Spec §6.2.
 
     Returns list of enriched event dicts with parsed city, date, outcomes.
     """
-    events = _get_active_events()
+    events = _get_active_events(include_slug_pattern=include_slug_pattern)
     if not events:
         _mark_keyword_fallback_authority()
         events = _fetch_events_by_keyword("temperature")
 
-    results = []
+    return _parse_and_persist_weather_events(
+        events,
+        min_hours_to_resolution=min_hours_to_resolution,
+    )
+
+
+def find_slug_pattern_weather_markets(
+    min_hours_to_resolution: float = 0.0,
+    *,
+    target_dates: list[str] | None = None,
+) -> list[dict]:
+    """Find current weather markets via bounded direct slug lookups.
+
+    This avoids the full tag/page Gamma scan and is intended for live background
+    substrate refresh. Returned events use the same parser and persistence path
+    as ``find_weather_markets``.
+    """
+
     now = datetime.now(timezone.utc)
+    _clear_clob_archived_cache()
+    events = _fetch_events_by_slug_pattern(set(), now, target_dates=target_dates)
+    return _parse_and_persist_weather_events(
+        events,
+        now=now,
+        min_hours_to_resolution=min_hours_to_resolution,
+    )
+
+
+def _parse_and_persist_weather_events(
+    events: list[dict],
+    *,
+    min_hours_to_resolution: float,
+    now: datetime | None = None,
+) -> list[dict]:
+    results = []
+    if now is None:
+        now = datetime.now(timezone.utc)
 
     for event in events:
         parsed = _parse_event(event, now, min_hours_to_resolution)
@@ -816,6 +855,14 @@ def get_sibling_outcomes(market_id: str) -> list[dict]:
     S6: needed by monitor_refresh to build the full bin vector for
     calibrate_and_normalize() (same path as entry).
     """
+    persisted = read_persisted_sibling_outcomes(market_id)
+    global _ACTIVE_EVENTS_LAST_STATUS
+    _ACTIVE_EVENTS_LAST_STATUS = persisted.authority
+    if persisted.authority == "VERIFIED":
+        return persisted.events
+    if persisted.authority == "STALE":
+        return []
+
     events = _get_active_events()
     if not events:
         _mark_keyword_fallback_authority()
@@ -828,17 +875,102 @@ def get_sibling_outcomes(market_id: str) -> list[dict]:
     return []
 
 
-def _get_active_events() -> list[dict]:
+def _open_trade_snapshot_connection(db_path: str | Path | None = None):
+    try:
+        from src.state.db import _zeus_trade_db_path
+
+        resolved = Path(db_path) if db_path is not None else _zeus_trade_db_path()
+        if not resolved.exists():
+            return None
+        conn = sqlite3.connect(
+            f"file:{resolved.resolve()}?mode=ro",
+            uri=True,
+            timeout=10,
+        )
+        conn.row_factory = sqlite3.Row
+        return conn
+    except sqlite3.Error as exc:
+        logger.warning("trade executable snapshot read-open failed: %s", exc)
+        return None
+
+
+def read_persisted_sibling_outcomes(
+    market_id: str,
+    *,
+    conn=None,
+    now_utc: datetime | None = None,
+    max_age_seconds: float | None = None,
+    market_events_conn=None,
+    market_events_db_path: str | Path | None = None,
+    snapshot_db_path: str | Path | None = None,
+) -> MarketSnapshot:
+    """Read sibling topology from durable executable substrate without network I/O.
+
+    This is the live monitor/exit support-topology reader.  The caller receives
+    a ``MarketSnapshot`` whose ``events`` field is the sibling outcome list for
+    the event containing ``market_id``.
+    """
+
+    market_id = str(market_id or "").strip()
+    if not market_id:
+        return MarketSnapshot(events=[], authority="NEVER_FETCHED")
+
+    owned_conn = None
+    source = conn
+    if source is None:
+        owned_conn = _open_trade_snapshot_connection(snapshot_db_path)
+        source = owned_conn
+    if source is None:
+        return MarketSnapshot(events=[], authority="NEVER_FETCHED")
+
+    try:
+        snapshot = read_persisted_weather_markets(
+            source,
+            now_utc=now_utc,
+            max_age_seconds=max_age_seconds,
+            market_events_conn=market_events_conn,
+            market_events_db_path=market_events_db_path,
+        )
+        global _ACTIVE_EVENTS_LAST_STATUS
+        _ACTIVE_EVENTS_LAST_STATUS = snapshot.authority
+        if snapshot.authority != "VERIFIED":
+            return MarketSnapshot(
+                events=[],
+                authority=snapshot.authority,
+                fetched_at_utc=snapshot.fetched_at_utc,
+                stale_age_seconds=snapshot.stale_age_seconds,
+            )
+        for event in snapshot.events:
+            outcomes = list(event.get("outcomes") or [])
+            if any(str(o.get("market_id") or o.get("condition_id") or "").strip() == market_id for o in outcomes):
+                return MarketSnapshot(
+                    events=outcomes,
+                    authority="VERIFIED",
+                    fetched_at_utc=snapshot.fetched_at_utc,
+                    stale_age_seconds=snapshot.stale_age_seconds,
+                )
+        return MarketSnapshot(
+            events=[],
+            authority="STALE",
+            fetched_at_utc=snapshot.fetched_at_utc,
+            stale_age_seconds=snapshot.stale_age_seconds,
+        )
+    finally:
+        if owned_conn is not None:
+            owned_conn.close()
+
+
+def _get_active_events(*, include_slug_pattern: bool = True) -> list[dict]:
     """Return active events list (legacy API, backwards-compatible).
 
     Prefer ``_get_active_events_snapshot()`` when you need provenance
     metadata (B017). This wrapper unpacks the snapshot's events list so
     existing callers continue to work unchanged.
     """
-    return list(_get_active_events_snapshot().events)
+    return list(_get_active_events_snapshot(include_slug_pattern=include_slug_pattern).events)
 
 
-def _get_active_events_snapshot() -> MarketSnapshot:
+def _get_active_events_snapshot(*, include_slug_pattern: bool = True) -> MarketSnapshot:
     """Return a MarketSnapshot with explicit provenance (B017 / SD-H).
 
     On successful fetch: authority="VERIFIED", stale_age_seconds=0.0.
@@ -857,7 +989,14 @@ def _get_active_events_snapshot() -> MarketSnapshot:
     if fresh_needed:
         try:
             _clear_clob_archived_cache()  # reset per-tick CLOB archived cross-check cache
-            _ACTIVE_EVENTS_CACHE = _fetch_events_by_tags()
+            try:
+                _ACTIVE_EVENTS_CACHE = _fetch_events_by_tags(
+                    include_slug_pattern=include_slug_pattern
+                )
+            except TypeError as exc:
+                if "unexpected keyword" not in str(exc):
+                    raise
+                _ACTIVE_EVENTS_CACHE = _fetch_events_by_tags()
             _ACTIVE_EVENTS_CACHE_AT = now
             _ACTIVE_EVENTS_CACHE_AT_UTC = datetime.now(timezone.utc)
             _ACTIVE_EVENTS_LAST_STATUS = "VERIFIED"
@@ -1034,7 +1173,7 @@ def _event_has_active_children(event: dict, now_utc: datetime) -> bool:
     return False
 
 
-def _fetch_events_by_tags() -> list[dict]:
+def _fetch_events_by_tags(*, include_slug_pattern: bool = True) -> list[dict]:
     """Fetch events using tag slugs."""
     network_errors = 0
     all_events = []
@@ -1112,14 +1251,72 @@ def _fetch_events_by_tags() -> list[dict]:
     # Slug-pattern fallback: pick up newly-opened markets not yet tagged.
     # seen_ids is passed by reference so slug discovery deduplicates against
     # tag results without a separate pass.
-    slug_events = _fetch_events_by_slug_pattern(seen_ids, now_utc)
-    all_events.extend(slug_events)
-    if slug_events:
-        logger.info(
-            "slug_pattern fallback added %d new event(s) not found via tags",
-            len(slug_events),
-        )
+    if include_slug_pattern:
+        slug_events = _fetch_events_by_slug_pattern(seen_ids, now_utc)
+        all_events.extend(slug_events)
+        if slug_events:
+            logger.info(
+                "slug_pattern fallback added %d new event(s) not found via tags",
+                len(slug_events),
+            )
     return all_events
+
+
+def _slug_pattern_target_dates(now_utc: datetime) -> list[str]:
+    raw_days = os.getenv("ZEUS_MARKET_DISCOVERY_LOOKAHEAD_DAYS", "2")
+    try:
+        max_target_offset_days = max(2, int(raw_days))
+    except (TypeError, ValueError):
+        logger.warning(
+            "Invalid ZEUS_MARKET_DISCOVERY_LOOKAHEAD_DAYS=%r; using 2",
+            raw_days,
+        )
+        max_target_offset_days = 2
+    now = now_utc.astimezone(timezone.utc)
+    today = now.date()
+    first_offset = 1 if now.hour >= 12 else 0
+    return [
+        (today + timedelta(days=offset)).strftime("%Y-%m-%d")
+        for offset in range(first_offset, max_target_offset_days + 1)
+    ]
+
+
+def _positive_int_env(name: str, default: int) -> int:
+    raw = os.getenv(name, str(default))
+    try:
+        return max(1, int(raw))
+    except (TypeError, ValueError):
+        logger.warning("Invalid %s=%r; using %s", name, raw, default)
+        return default
+
+
+def _positive_float_env(name: str, default: float) -> float:
+    raw = os.getenv(name, str(default))
+    try:
+        return max(0.1, float(raw))
+    except (TypeError, ValueError):
+        logger.warning("Invalid %s=%r; using %s", name, raw, default)
+        return default
+
+
+def _slug_pattern_max_requests_from_env(max_requests: int | None = None) -> int:
+    if max_requests is not None:
+        return max(1, int(max_requests))
+    return _positive_int_env("ZEUS_MARKET_DISCOVERY_SLUG_MAX_REQUESTS", 28)
+
+
+def _slug_pattern_budget_seconds_from_env(budget_seconds: float | None = None) -> float:
+    if budget_seconds is not None:
+        return max(0.1, float(budget_seconds))
+    return _positive_float_env("ZEUS_MARKET_DISCOVERY_SLUG_BUDGET_SECONDS", 90.0)
+
+
+def _slug_pattern_http_timeout_seconds_from_env() -> float:
+    return _positive_float_env("ZEUS_MARKET_DISCOVERY_SLUG_HTTP_TIMEOUT_SECONDS", 4.0)
+
+
+def _slug_pattern_http_retries_from_env() -> int:
+    return _positive_int_env("ZEUS_MARKET_DISCOVERY_SLUG_HTTP_RETRIES", 1)
 
 
 def _fetch_events_by_slug_pattern(
@@ -1127,6 +1324,8 @@ def _fetch_events_by_slug_pattern(
     now_utc: datetime,
     *,
     target_dates: list[str] | None = None,
+    max_requests: int | None = None,
+    budget_seconds: float | None = None,
 ) -> list[dict]:
     """Slug-pattern fallback: discover weather markets not yet tagged on Gamma.
 
@@ -1149,13 +1348,10 @@ def _fetch_events_by_slug_pattern(
     Returns:
         list of new event dicts, each tagged with ``_discovery_path="slug_pattern"``.
     """
+    global _SLUG_DISCOVERY_CURSOR
+
     if target_dates is None:
-        from datetime import date, timedelta
-        today = date.today()
-        target_dates = [
-            today.strftime("%Y-%m-%d"),
-            (today + timedelta(days=1)).strftime("%Y-%m-%d"),
-        ]
+        target_dates = _slug_pattern_target_dates(now_utc)
 
     # Convert "YYYY-MM-DD" → "may-20-2026" slug fragment
     def _date_to_slug_fragment(date_str: str) -> str:
@@ -1163,7 +1359,7 @@ def _fetch_events_by_slug_pattern(
         d = _date.fromisoformat(date_str)
         return d.strftime("%B-%-d-%Y").lower()  # "may-20-2026"
 
-    new_events: list[dict] = []
+    jobs: list[tuple[str, str, str]] = []
     for date_str in target_dates:
         try:
             slug_date = _date_to_slug_fragment(date_str)
@@ -1172,37 +1368,68 @@ def _fetch_events_by_slug_pattern(
             continue
         for city in SLUG_DISCOVERY_CITIES:
             for prefix_template in SLUG_DISCOVERY_PREFIXES:
-                slug = prefix_template.format(city=city, date=slug_date)
-                try:
-                    resp = _gamma_get("/events", params={"slug": slug}, timeout=10.0, retries=2)
-                except httpx.HTTPError as exc:
-                    logger.debug("slug_pattern fetch failed for %s: %s", slug, exc)
-                    continue
-                if resp.status_code != 200:
-                    logger.debug("slug_pattern %s → HTTP %s", slug, resp.status_code)
-                    continue
-                try:
-                    batch = resp.json()
-                except Exception:
-                    continue
-                if not isinstance(batch, list):
-                    batch = [batch] if isinstance(batch, dict) and batch else []
-                for event in batch:
-                    if not isinstance(event, dict):
-                        continue
-                    event_id = event.get("id") or event.get("slug")
-                    if event_id in seen_ids:
-                        continue
-                    if not _event_has_active_children(event, now_utc):
-                        continue
-                    seen_ids.add(event_id)
-                    event["_discovery_path"] = "slug_pattern"
-                    new_events.append(event)
-                    logger.info(
-                        "slug_pattern: discovered new event slug=%s id=%s",
-                        event.get("slug"),
-                        event.get("id"),
-                    )
+                jobs.append((date_str, city, prefix_template.format(city=city, date=slug_date)))
+
+    if not jobs:
+        return []
+
+    request_limit = min(len(jobs), _slug_pattern_max_requests_from_env(max_requests))
+    deadline = time.monotonic() + _slug_pattern_budget_seconds_from_env(budget_seconds)
+    timeout = _slug_pattern_http_timeout_seconds_from_env()
+    retries = _slug_pattern_http_retries_from_env()
+    start = _SLUG_DISCOVERY_CURSOR % len(jobs)
+    visited = 0
+    budget_exhausted = False
+    new_events: list[dict] = []
+
+    for step in range(len(jobs)):
+        if visited >= request_limit:
+            break
+        if time.monotonic() >= deadline:
+            budget_exhausted = True
+            break
+        _date_str, _city, slug = jobs[(start + step) % len(jobs)]
+        visited += 1
+        try:
+            resp = _gamma_get("/events", params={"slug": slug}, timeout=timeout, retries=retries)
+        except httpx.HTTPError as exc:
+            logger.debug("slug_pattern fetch failed for %s: %s", slug, exc)
+            continue
+        if resp.status_code != 200:
+            logger.debug("slug_pattern %s → HTTP %s", slug, resp.status_code)
+            continue
+        try:
+            batch = resp.json()
+        except Exception:
+            continue
+        if not isinstance(batch, list):
+            batch = [batch] if isinstance(batch, dict) and batch else []
+        for event in batch:
+            if not isinstance(event, dict):
+                continue
+            event_id = event.get("id") or event.get("slug")
+            if event_id in seen_ids:
+                continue
+            if not _event_has_active_children(event, now_utc):
+                continue
+            seen_ids.add(event_id)
+            event["_discovery_path"] = "slug_pattern"
+            new_events.append(event)
+            logger.info(
+                "slug_pattern: discovered new event slug=%s id=%s",
+                event.get("slug"),
+                event.get("id"),
+            )
+
+    _SLUG_DISCOVERY_CURSOR = (start + visited) % len(jobs)
+    if visited < len(jobs):
+        logger.info(
+            "slug_pattern: truncated discovery requests visited=%s total=%s cursor=%s budget_exhausted=%s",
+            visited,
+            len(jobs),
+            _SLUG_DISCOVERY_CURSOR,
+            budget_exhausted,
+        )
     return new_events
 
 
@@ -2103,12 +2330,13 @@ def capture_executable_market_snapshot(
         (raw_orderbook, raw_clob_market),
         ("neg_risk", "negRisk", "negative_risk"),
     )
-    top_bid, _bid_size = _top_book_level_decimal(raw_orderbook, "bids")
     if side == "BUY":
+        top_bid, _bid_size = _optional_top_book_level_decimal(raw_orderbook, "bids")
         top_ask, _ask_size = _top_book_level_decimal(raw_orderbook, "asks")
     else:
+        top_bid, _bid_size = _top_book_level_decimal(raw_orderbook, "bids")
         top_ask, _ask_size = _optional_top_book_level_decimal(raw_orderbook, "asks")
-    if top_ask is not None and top_bid >= top_ask:
+    if top_bid is not None and top_ask is not None and top_bid >= top_ask:
         raise ExecutableSnapshotCaptureError("CLOB orderbook is crossed")
 
     # Validate the caller's boundary timestamp, but do not use it as the
@@ -2197,11 +2425,540 @@ def capture_executable_market_snapshot(
     _prev_orderbook_hash_by_market[condition_id] = (_current_hash, _now_ts)
     return {
         "executable_snapshot_id": snapshot.snapshot_id,
+        "condition_id": snapshot.condition_id,
         "executable_snapshot_min_tick_size": str(snapshot.min_tick_size),
         "executable_snapshot_min_order_size": str(snapshot.min_order_size),
         "executable_snapshot_neg_risk": snapshot.neg_risk,
         "raw_orderbook_hash_transition_delta_ms": _hash_delta_ms,
     }
+
+
+def _parse_snapshot_time(value: Any) -> datetime | None:
+    if value in (None, ""):
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _json_object(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return dict(value)
+    if value in (None, ""):
+        return {}
+    try:
+        parsed = json.loads(str(value))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    return dict(parsed) if isinstance(parsed, dict) else {}
+
+
+def _set_if_present(target: dict[str, Any], key: str, value: Any) -> None:
+    if target.get(key) in (None, "") and value not in (None, ""):
+        target[key] = value
+
+
+def _update_event_timing_from_snapshot(
+    event: dict[str, Any],
+    snapshot: dict[str, Any],
+    *,
+    now: datetime,
+) -> None:
+    for key in ("market_start_at", "market_end_at", "market_close_at", "sports_start_at"):
+        _set_if_present(event, key, snapshot.get(key))
+
+    start_at = _parse_snapshot_time(snapshot.get("market_start_at"))
+    end_at = _parse_snapshot_time(
+        snapshot.get("market_end_at")
+        or snapshot.get("market_close_at")
+        or snapshot.get("sports_start_at")
+    )
+    if start_at is not None:
+        event["hours_since_open"] = (now - start_at).total_seconds() / 3600.0
+    if end_at is not None:
+        event["hours_to_resolution"] = (end_at - now).total_seconds() / 3600.0
+
+
+def _city_from_name(city_name: str) -> City | str:
+    return cities_by_name.get(city_name) or city_name
+
+
+def _table_exists(conn, table_name: str) -> bool:
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+            (table_name,),
+        ).fetchone()
+    except sqlite3.Error:
+        return False
+    return row is not None
+
+
+def _open_forecasts_market_events_connection(db_path: str | Path | None = None):
+    try:
+        from src.state.db import ZEUS_FORECASTS_DB_PATH
+
+        resolved = Path(db_path) if db_path is not None else ZEUS_FORECASTS_DB_PATH
+        if not resolved.exists():
+            return None
+        conn = sqlite3.connect(
+            f"file:{resolved.resolve()}?mode=ro",
+            uri=True,
+            timeout=10,
+        )
+        conn.row_factory = sqlite3.Row
+        return conn
+    except sqlite3.Error as exc:
+        logger.warning("forecasts market_events_v2 read-open failed: %s", exc)
+        return None
+
+
+def _market_event_rows_for_snapshot_conditions(
+    snapshot_conn,
+    condition_ids: tuple[str, ...],
+    *,
+    market_events_conn=None,
+    market_events_db_path: str | Path | None = None,
+) -> list[dict[str, Any]]:
+    if not condition_ids:
+        return []
+
+    owned_conn = None
+    sources = []
+    if market_events_conn is not None:
+        sources.append(market_events_conn)
+    else:
+        owned_conn = _open_forecasts_market_events_connection(market_events_db_path)
+        if owned_conn is not None:
+            sources.append(owned_conn)
+    if snapshot_conn not in sources:
+        sources.append(snapshot_conn)
+
+    try:
+        placeholders = ",".join("?" for _ in condition_ids)
+        for source in sources:
+            if not _table_exists(source, "market_events_v2"):
+                continue
+            market_event_rows = source.execute(
+                f"""
+                SELECT market_slug
+                  FROM market_events_v2
+                 WHERE condition_id IN ({placeholders})
+                 GROUP BY market_slug
+                """,
+                condition_ids,
+            ).fetchall()
+            slugs = [str(row["market_slug"]) for row in market_event_rows if row["market_slug"]]
+            if not slugs:
+                continue
+            slug_placeholders = ",".join("?" for _ in slugs)
+            rows = source.execute(
+                f"""
+                SELECT *
+                  FROM market_events_v2
+                 WHERE market_slug IN ({slug_placeholders})
+                 ORDER BY market_slug, range_low IS NOT NULL, range_low, range_high, condition_id
+                """,
+                tuple(slugs),
+            ).fetchall()
+            if rows:
+                return [dict(row) for row in rows]
+    finally:
+        if owned_conn is not None:
+            owned_conn.close()
+    return []
+
+
+def read_persisted_weather_markets(
+    conn,
+    *,
+    now_utc: datetime | None = None,
+    max_age_seconds: float | None = None,
+    market_events_conn=None,
+    market_events_db_path: str | Path | None = None,
+) -> MarketSnapshot:
+    """Read live market substrate from durable executable snapshots.
+
+    This is the live decision-cycle reader. It never performs network discovery;
+    the background market_discovery job owns Gamma/CLOB refresh. If the durable
+    substrate is missing or stale, live entry fails closed before evaluation.
+    """
+
+    now = now_utc or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    else:
+        now = now.astimezone(timezone.utc)
+    if max_age_seconds is None:
+        raw_age = os.getenv("ZEUS_LIVE_MARKET_SUBSTRATE_MAX_AGE_SECONDS", "900")
+        try:
+            max_age_seconds = float(raw_age)
+        except (TypeError, ValueError):
+            max_age_seconds = 900.0
+    max_age_seconds = max(1.0, float(max_age_seconds))
+    cutoff = now - timedelta(seconds=max_age_seconds)
+
+    snapshot_rows = conn.execute(
+        """
+        SELECT *
+          FROM executable_market_snapshots
+         ORDER BY captured_at DESC
+        """
+    ).fetchall()
+    if not snapshot_rows:
+        return MarketSnapshot(events=[], authority="NEVER_FETCHED")
+
+    latest_seen: datetime | None = None
+    latest_by_condition: dict[str, dict[str, Any]] = {}
+    for row in snapshot_rows:
+        data = dict(row)
+        captured_at = _parse_snapshot_time(data.get("captured_at"))
+        if captured_at is None:
+            continue
+        latest_seen = captured_at if latest_seen is None else max(latest_seen, captured_at)
+        condition_id = str(data.get("condition_id") or "").strip()
+        if not condition_id or captured_at < cutoff:
+            continue
+        current = latest_by_condition.get(condition_id)
+        current_at = _parse_snapshot_time(current.get("captured_at")) if current else None
+        if current is None or current_at is None or captured_at > current_at:
+            latest_by_condition[condition_id] = data
+
+    if not latest_by_condition:
+        age = (now - latest_seen).total_seconds() if latest_seen is not None else None
+        return MarketSnapshot(
+            events=[],
+            authority="STALE",
+            fetched_at_utc=latest_seen,
+            stale_age_seconds=age,
+        )
+
+    rows = _market_event_rows_for_snapshot_conditions(
+        conn,
+        tuple(latest_by_condition),
+        market_events_conn=market_events_conn,
+        market_events_db_path=market_events_db_path,
+    )
+    if not rows:
+        return MarketSnapshot(
+            events=[],
+            authority="STALE",
+            fetched_at_utc=latest_seen,
+            stale_age_seconds=(now - latest_seen).total_seconds() if latest_seen else None,
+        )
+
+    events_by_slug: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        data = dict(row)
+        slug = str(data.get("market_slug") or "")
+        condition_id = str(data.get("condition_id") or "").strip()
+        snapshot = latest_by_condition.get(condition_id)
+        event = events_by_slug.setdefault(
+            slug,
+            {
+                "event_id": slug,
+                "slug": slug,
+                "title": slug.replace("-", " "),
+                "city": _city_from_name(str(data.get("city") or "")),
+                "target_date": str(data.get("target_date") or ""),
+                "temperature_metric": str(data.get("temperature_metric") or ""),
+                "hours_since_open": 24.0,
+                "hours_to_resolution": None,
+                "market_start_at": None,
+                "market_end_at": None,
+                "market_close_at": None,
+                "sports_start_at": None,
+                "outcomes": [],
+                "condition_ids": [],
+                "support_topology": {
+                    "topology_status": "complete",
+                    "support_child_count": 0,
+                    "executable_child_count": 0,
+                },
+                "source_contract": {"status": "MATCH", "source": "persisted_market_substrate"},
+            },
+        )
+        outcome = {
+            "title": str(data.get("range_label") or data.get("outcome") or condition_id),
+            "range_low": data.get("range_low"),
+            "range_high": data.get("range_high"),
+            "market_id": condition_id,
+            "condition_id": condition_id,
+            "token_id": str(data.get("token_id") or ""),
+            "no_token_id": "",
+            "price": None,
+            "no_price": None,
+            "executable": False,
+        }
+        if snapshot is not None:
+            _update_event_timing_from_snapshot(event, snapshot, now=now)
+            selected_token = str(snapshot.get("selected_outcome_token_id") or "")
+            yes_token = str(snapshot.get("yes_token_id") or "")
+            no_token = str(snapshot.get("no_token_id") or "")
+            outcome.update(
+                {
+                    "token_id": yes_token,
+                    "no_token_id": no_token,
+                    "question_id": str(snapshot.get("question_id") or ""),
+                    "gamma_market_id": str(snapshot.get("gamma_market_id") or ""),
+                    "price": float(snapshot["orderbook_top_ask"])
+                    if snapshot.get("orderbook_top_ask") not in (None, "")
+                    else None,
+                    "market_start_at": snapshot.get("market_start_at"),
+                    "market_end_at": snapshot.get("market_end_at"),
+                    "market_close_at": snapshot.get("market_close_at"),
+                    "sports_start_at": snapshot.get("sports_start_at"),
+                    "executable": bool(
+                        snapshot.get("active")
+                        and not snapshot.get("closed")
+                        and snapshot.get("enable_orderbook")
+                        and snapshot.get("accepting_orders")
+                        and selected_token
+                    ),
+                    "executable_snapshot_id": str(snapshot.get("snapshot_id") or ""),
+                    "executable_snapshot_min_tick_size": snapshot.get("min_tick_size"),
+                    "executable_snapshot_min_order_size": snapshot.get("min_order_size"),
+                    "executable_snapshot_neg_risk": bool(snapshot.get("neg_risk")),
+                    "gamma_market_raw": {
+                        "id": snapshot.get("gamma_market_id"),
+                        "active": bool(snapshot.get("active")),
+                        "closed": bool(snapshot.get("closed")),
+                        "enable_orderbook": bool(snapshot.get("enable_orderbook")),
+                        "acceptingOrders": bool(snapshot.get("accepting_orders")),
+                    },
+                    "token_map_raw": _json_object(snapshot.get("token_map_json")),
+                }
+            )
+            if outcome["executable"]:
+                event["condition_ids"].append(condition_id)
+        event["outcomes"].append(outcome)
+
+    events: list[dict] = []
+    for event in events_by_slug.values():
+        event["condition_ids"] = _dedupe_condition_ids(event["condition_ids"])
+        event["support_topology"]["support_child_count"] = len(event["outcomes"])
+        event["support_topology"]["executable_child_count"] = len(event["condition_ids"])
+        hours_to_resolution = event.get("hours_to_resolution")
+        if hours_to_resolution is None or hours_to_resolution <= 0:
+            continue
+        events.append(event)
+
+    if not events:
+        return MarketSnapshot(
+            events=[],
+            authority="STALE",
+            fetched_at_utc=latest_seen,
+            stale_age_seconds=(now - latest_seen).total_seconds() if latest_seen else None,
+        )
+
+    return MarketSnapshot(
+        events=events,
+        authority="VERIFIED",
+        fetched_at_utc=latest_seen,
+        stale_age_seconds=(now - latest_seen).total_seconds() if latest_seen else 0.0,
+    )
+
+
+def _snapshot_max_outcomes_from_env(max_outcomes: int | None) -> int:
+    if max_outcomes is not None:
+        return max(1, int(max_outcomes))
+    return _positive_int_env("ZEUS_MARKET_DISCOVERY_SNAPSHOT_MAX_OUTCOMES", 8)
+
+
+def _snapshot_budget_seconds_from_env(budget_seconds: float | None = None) -> float:
+    if budget_seconds is not None:
+        return max(0.1, float(budget_seconds))
+    return _positive_float_env("ZEUS_MARKET_DISCOVERY_SNAPSHOT_BUDGET_SECONDS", 90.0)
+
+
+def _outcome_market_end_at(market: dict[str, Any], outcome: dict[str, Any]) -> datetime | None:
+    return _parse_snapshot_time(
+        outcome.get("market_end_at")
+        or outcome.get("market_close_at")
+        or outcome.get("sports_start_at")
+        or market.get("market_end_at")
+        or market.get("market_close_at")
+        or market.get("sports_start_at")
+    )
+
+
+def _float_or_none(value: Any) -> float | None:
+    if value in (None, ""):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _market_hours_since_open(
+    market: dict[str, Any],
+    outcome: dict[str, Any],
+    *,
+    captured: datetime,
+) -> float | None:
+    raw_hours = market.get("hours_since_open")
+    parsed_hours = _float_or_none(raw_hours)
+    if parsed_hours is not None:
+        return parsed_hours
+    start_at = _parse_snapshot_time(
+        outcome.get("market_start_at") or market.get("market_start_at")
+    )
+    if start_at is None:
+        return None
+    return (captured - start_at).total_seconds() / 3600.0
+
+
+def _market_hours_to_resolution(
+    market: dict[str, Any],
+    outcome: dict[str, Any],
+    *,
+    captured: datetime,
+) -> float | None:
+    raw_hours = market.get("hours_to_resolution")
+    parsed_hours = _float_or_none(raw_hours)
+    if parsed_hours is not None:
+        return parsed_hours
+    end_at = _outcome_market_end_at(market, outcome)
+    if end_at is None:
+        return None
+    return (end_at - captured).total_seconds() / 3600.0
+
+
+def _snapshot_refresh_priority(
+    market: dict[str, Any],
+    outcome: dict[str, Any],
+    *,
+    captured: datetime,
+) -> tuple[int, float, float]:
+    hours_since_open = _market_hours_since_open(market, outcome, captured=captured)
+    hours_to_resolution = _market_hours_to_resolution(market, outcome, captured=captured)
+    open_age = hours_since_open if hours_since_open is not None else float("inf")
+    time_to_resolution = hours_to_resolution if hours_to_resolution is not None else float("inf")
+    if (
+        hours_since_open is not None
+        and hours_to_resolution is not None
+        and hours_since_open < 24
+        and hours_to_resolution >= 24
+    ):
+        return (0, open_age, time_to_resolution)
+    if hours_to_resolution is not None and 0 < hours_to_resolution < 24:
+        return (1, time_to_resolution, open_age)
+    return (2, open_age, time_to_resolution)
+
+
+def refresh_executable_market_substrate_snapshots(
+    conn,
+    *,
+    markets: list[dict],
+    clob: Any,
+    captured_at: datetime | None = None,
+    scan_authority: str = "VERIFIED",
+    max_outcomes: int | None = None,
+    budget_seconds: float | None = None,
+) -> dict[str, Any]:
+    """Capture fresh executable snapshots for the live reader substrate."""
+
+    captured = captured_at or datetime.now(timezone.utc)
+    limit = _snapshot_max_outcomes_from_env(max_outcomes)
+    attempted = inserted = skipped = failed = 0
+    failures: list[dict[str, str]] = []
+    seen_snapshot_sides: set[tuple[str, str]] = set()
+    candidates: list[
+        tuple[tuple[int, float, float], int, dict[str, Any], dict[str, Any], str, str]
+    ] = []
+    ordinal = 0
+
+    for market in markets or []:
+        for outcome in market.get("outcomes", []) or []:
+            ordinal += 1
+            condition_id = str(outcome.get("condition_id") or outcome.get("market_id") or "").strip()
+            if not condition_id:
+                skipped += 1
+                continue
+            if not outcome.get("executable"):
+                skipped += 1
+                continue
+            end_at = _outcome_market_end_at(market, outcome)
+            if end_at is not None and end_at <= captured:
+                skipped += 1
+                continue
+            for direction in ("buy_yes", "buy_no"):
+                snapshot_side = (condition_id, direction)
+                if snapshot_side in seen_snapshot_sides:
+                    skipped += 1
+                    continue
+                if direction == "buy_no" and not str(outcome.get("no_token_id") or "").strip():
+                    skipped += 1
+                    continue
+                seen_snapshot_sides.add(snapshot_side)
+                candidates.append(
+                    (
+                        _snapshot_refresh_priority(market, outcome, captured=captured),
+                        ordinal,
+                        market,
+                        outcome,
+                        condition_id,
+                        direction,
+                    )
+                )
+
+    candidates.sort(key=lambda item: (item[0], item[1]))
+    if len(candidates) > limit:
+        skipped += len(candidates) - limit
+
+    selected_candidates = candidates[:limit]
+    deadline = time.monotonic() + _snapshot_budget_seconds_from_env(budget_seconds)
+    budget_exhausted = False
+    for index, (_priority, _ordinal, market, outcome, condition_id, direction) in enumerate(
+        selected_candidates
+    ):
+        if time.monotonic() >= deadline:
+            budget_exhausted = True
+            skipped += len(selected_candidates) - index
+            break
+        attempted += 1
+        decision = SimpleNamespace(
+            edge=SimpleNamespace(direction=direction),
+            tokens={
+                "token_id": outcome.get("token_id"),
+                "no_token_id": outcome.get("no_token_id"),
+                "market_id": condition_id,
+            },
+        )
+        try:
+            capture_executable_market_snapshot(
+                conn,
+                market=market,
+                decision=decision,
+                clob=clob,
+                captured_at=captured,
+                scan_authority=scan_authority,
+                execution_side="BUY",
+            )
+            inserted += 1
+        except Exception as exc:
+            failed += 1
+            if len(failures) < 3:
+                failures.append({"condition_id": condition_id, "error": str(exc)})
+
+    summary = {
+        "attempted": attempted,
+        "inserted": inserted,
+        "skipped": skipped,
+        "failed": failed,
+        "truncated": int(len(candidates) > limit or budget_exhausted),
+        "budget_exhausted": int(budget_exhausted),
+    }
+    if failures:
+        summary["failure_samples"] = failures
+    if attempted > 0 and inserted == 0:
+        logger.warning("Executable market substrate refresh inserted no snapshots: %s", summary)
+    return summary
 
 
 def _find_decision_outcome(market: dict, tokens: dict) -> dict | None:
@@ -2449,11 +3206,11 @@ def _top_book_decimal(orderbook: dict, side: str) -> Decimal:
 
 def _compute_spread(
     raw_orderbook: dict,
-    top_bid: Decimal,
+    top_bid: Decimal | None,
     top_ask: Decimal | None,
 ) -> Decimal | None:
-    """Return bid-ask spread as Decimal, or None when ask is absent (one-sided book)."""
-    if top_ask is None:
+    """Return bid-ask spread as Decimal, or None for one-sided books."""
+    if top_bid is None or top_ask is None:
         return None
     return top_ask - top_bid
 

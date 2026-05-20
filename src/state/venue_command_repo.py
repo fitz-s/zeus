@@ -141,6 +141,7 @@ _TRANSITIONS: dict[tuple[str, str], str] = {
     ("REVIEW_REQUIRED", "REVIEW_CLEARED_NO_VENUE_SIDE_EFFECT"): "REJECTED",
     ("REVIEW_REQUIRED", "REVIEW_CLEARED_NO_VENUE_EXPOSURE"):    "EXPIRED",
     ("REVIEW_REQUIRED", "REVIEW_CLEARED_VENUE_ORDER_LIVE"):     "ACKED",
+    ("REVIEW_REQUIRED", "FILL_CONFIRMED"):                      "FILLED",
 }
 
 _PROVENANCE_SOURCES = frozenset(
@@ -1114,6 +1115,13 @@ def _validate_review_clearance_payload(
             command_id=command_id,
         )
         return
+    if current_state == "REVIEW_REQUIRED" and event_type == "FILL_CONFIRMED":
+        _validate_review_confirmed_fill_payload(
+            conn=conn,
+            payload=payload,
+            command_id=command_id,
+        )
+        return
     if event_type != "REVIEW_CLEARED_NO_VENUE_SIDE_EFFECT":
         return
     if current_state != "REVIEW_REQUIRED":
@@ -1348,6 +1356,45 @@ def _validate_review_no_exposure_payload(
         raise ValueError("review no-exposure review_required_proof reason does not match DB")
 
 
+def _validate_review_confirmed_fill_payload(
+    *,
+    conn: sqlite3.Connection,
+    payload: Optional[dict],
+    command_id: str,
+) -> None:
+    if not isinstance(payload, dict):
+        raise ValueError("review confirmed-fill clearance requires structured proof payload")
+    if payload.get("reason") != "review_cleared_confirmed_fill":
+        raise ValueError("review confirmed-fill clearance payload requires reason=review_cleared_confirmed_fill")
+    if payload.get("command_id") != command_id:
+        raise ValueError("review confirmed-fill clearance payload command_id must match appended command")
+    if payload.get("proof_class") != "prior_fill_confirmed_event_with_positive_trade_fact":
+        raise ValueError("review confirmed-fill clearance proof_class is not supported")
+    required_predicates = payload.get("required_predicates")
+    if not isinstance(required_predicates, dict):
+        raise ValueError("review confirmed-fill clearance requires required_predicates")
+    required_true = (
+        "latest_event_is_review_required",
+        "review_reason_supported",
+        "prior_fill_confirmed_event",
+        "positive_trade_fact",
+    )
+    missing = [name for name in required_true if required_predicates.get(name) is not True]
+    if missing:
+        raise ValueError(f"review confirmed-fill predicates are not proven true: {missing}")
+    actual = _actual_review_confirmed_fill_predicates(conn, command_id, payload)
+    actual_failures = [name for name, ok in actual.items() if not ok]
+    if actual_failures:
+        raise ValueError(f"review confirmed-fill DB predicates failed: {actual_failures}")
+    source = payload.get("source_proof")
+    if not isinstance(source, dict):
+        raise ValueError("review confirmed-fill clearance requires source_proof")
+    if source.get("source_function") not in {"PolymarketUserChannelIngestor._handle_trade", "operator_review"}:
+        raise ValueError("review confirmed-fill clearance source_function is not supported")
+    if not str(source.get("source_commit") or "").strip():
+        raise ValueError("review confirmed-fill clearance requires source_commit")
+
+
 def _review_clearance_parse_utc(value: object) -> datetime.datetime | None:
     if value in (None, ""):
         return None
@@ -1553,6 +1600,65 @@ def _actual_review_required_reason(
     if not isinstance(payload, dict):
         return ""
     return str(payload.get("reason") or "").strip()
+
+
+def _actual_review_confirmed_fill_predicates(
+    conn: sqlite3.Connection,
+    command_id: str,
+    payload: dict,
+) -> dict[str, bool]:
+    trade_id = str(payload.get("trade_id") or "")
+    venue_order_id = str(payload.get("venue_order_id") or "")
+    filled_size = str(payload.get("filled_size") or "")
+    fill_price = str(payload.get("fill_price") or "")
+    with _row_factory_as(conn, sqlite3.Row):
+        events = conn.execute(
+            """
+            SELECT sequence_no, event_type, payload_json
+            FROM venue_command_events
+            WHERE command_id = ?
+            ORDER BY sequence_no
+            """,
+            (command_id,),
+        ).fetchall()
+        trade_fact = conn.execute(
+            """
+            SELECT *
+            FROM venue_trade_facts
+            WHERE command_id = ?
+              AND trade_id = ?
+              AND venue_order_id = ?
+              AND state IN ('MATCHED', 'MINED', 'CONFIRMED')
+            ORDER BY local_sequence DESC, trade_fact_id DESC
+            LIMIT 1
+            """,
+            (command_id, trade_id, venue_order_id),
+        ).fetchone()
+    latest_event_type = str(events[-1]["event_type"] or "") if events else ""
+    prior_fill_confirmed = False
+    for event in events[:-1]:
+        if str(event["event_type"] or "") != "FILL_CONFIRMED":
+            continue
+        event_payload = _review_clearance_json_dict(event["payload_json"])
+        if (
+            str(event_payload.get("trade_id") or "") == trade_id
+            and str(event_payload.get("venue_order_id") or "") == venue_order_id
+        ):
+            prior_fill_confirmed = True
+            break
+    review_reason = _actual_review_required_reason(conn, command_id)
+    positive_trade_fact = (
+        trade_fact is not None
+        and trade_fact_has_positive_fill_economics(trade_fact)
+        and _decimal_text_equal(filled_size, trade_fact["filled_size"])
+        and _decimal_text_equal(fill_price, trade_fact["fill_price"])
+    )
+    return {
+        "latest_event_is_review_required": latest_event_type == "REVIEW_REQUIRED",
+        "review_reason_supported": review_reason == "ws_trade_lifecycle_regression_or_economic_drift",
+        "prior_fill_confirmed_event": prior_fill_confirmed,
+        "positive_trade_fact": positive_trade_fact,
+    }
 
 
 def _optional_decimal_positive(value: object) -> bool:

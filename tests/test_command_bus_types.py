@@ -735,6 +735,11 @@ class TestReviewRequiredIsQuasiTerminal:
                 "REVIEW_CLEARED_VENUE_ORDER_LIVE",
                 "ACKED",
             ),
+            (
+                "REVIEW_REQUIRED",
+                "FILL_CONFIRMED",
+                "FILLED",
+            ),
         ]
 
     def test_review_required_is_in_flight_for_visibility(self):

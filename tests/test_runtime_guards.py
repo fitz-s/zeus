@@ -1,7 +1,7 @@
 """Runtime guard and live-cycle wiring tests."""
 # Lifecycle: created=2026-04-28; last_reviewed=2026-05-18; last_reused=2026-05-18
 # Created: 2026-04-28
-# Last reused/audited: 2026-05-18
+# Last reused/audited: 2026-05-20
 # Authority basis: docs/operations/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md; task_2026-04-28_contamination_remediation Batch G; Phase 1B ENS snapshot persistence; Phase 1D forecast source policy; PR #56 MarketPhaseEvidence sidecar propagation; Wave26 explicit position env authority.
 # Purpose: Lock runtime guard and live-cycle wiring contracts.
 # Reuse: Run for runtime guard, live-only cleanup, and cycle wiring changes.
@@ -2541,7 +2541,7 @@ def test_live_entry_final_intent_receives_executable_snapshot_fields(tmp_path):
         "forecast_source_id": "tigge",
         "model_family": "ecmwf_ifs025",
         "forecast_issue_time": "2026-04-03T00:00:00+00:00",
-        "forecast_valid_time": "2026-04-03T06:00:00+00:00",
+        "forecast_valid_time": "2026-06-01T06:00:00+00:00",
         "forecast_fetch_time": "2026-04-03T01:00:00+00:00",
         "forecast_available_at": "2026-04-03T00:30:00+00:00",
         "raw_payload_hash": "a" * 64,
@@ -2550,10 +2550,13 @@ def test_live_entry_final_intent_receives_executable_snapshot_fields(tmp_path):
         "authority_tier": "FORECAST",
         "decision_time": decision_time.isoformat(),
         "decision_time_status": "OK",
+        "polymarket_end_anchor_source": "gamma_explicit",
+        "first_member_observed_time": "2026-04-03T00:45:00+00:00",
+        "run_complete_time": "2026-04-03T01:00:00+00:00",
     }
     market = {
         "city": NYC,
-        "target_date": "2026-04-01",
+        "target_date": "2026-06-01",
         "hours_since_open": 12.0,
         "hours_to_resolution": 24.0,
         "event_id": "evt-snapshot",
@@ -3179,6 +3182,64 @@ def test_corrected_pricing_quantizes_immediate_buy_to_venue_amount_precision(tmp
     assert shadow["candidate_submitted_shares"] == "7"
 
 
+def test_corrected_pricing_raises_positive_edge_fok_to_venue_minimum_shares(tmp_path):
+    """RELATIONSHIP: live BUY FOK sizing must honor venue min shares before submit."""
+
+    from src.state.snapshot_repo import get_snapshot
+
+    conn = get_connection(tmp_path / "snapshot-reprice-venue-min-shares.db")
+    init_schema(conn)
+    _insert_executable_snapshot(
+        conn,
+        snapshot_id="snap-reprice-venue-min-shares",
+        selected_outcome_token_id="yes1",
+        outcome_label="YES",
+        yes_token_id="yes1",
+        no_token_id="no1",
+        top_bid="0.23",
+        top_ask="0.32",
+        ask_size="11",
+    )
+    snapshot = get_snapshot(conn, "snap-reprice-venue-min-shares")
+    assert snapshot is not None
+    edge = _edge()
+    decision = EdgeDecision(
+        should_trade=True,
+        edge=edge,
+        tokens={"token_id": "yes1", "no_token_id": "no1"},
+        size_usd=1.36,
+        applied_validations=[],
+        edge_context=types.SimpleNamespace(p_posterior=edge.p_posterior),
+        decision_snapshot_id="decision-snap-venue-min-shares",
+        sizing_bankroll=100.0,
+        kelly_multiplier_used=0.25,
+        execution_fee_rate=0.0,
+    )
+
+    shadow = cycle_runtime._attach_corrected_pricing_authority(
+        decision=decision,
+        snapshot=snapshot,
+        candidate_limit_price=0.32,
+        candidate_expected_fill_price_before_fee=0.32,
+        candidate_size_usd=1.36,
+        order_type="FOK",
+        cancel_after=datetime(2026, 4, 3, 1, tzinfo=timezone.utc),
+        resolution_window="2026-04-03",
+        correlation_key="NYC:2026-04-03",
+    )
+    conn.close()
+
+    final_intent = decision.final_execution_intent
+    assert final_intent is not None
+    assert final_intent.submitted_shares == Decimal("5")
+    assert final_intent.size_kind == "shares"
+    assert final_intent.size_value == Decimal("5")
+    assert shadow["sweep_submitted_shares"] == "5"
+    assert shadow["candidate_submitted_shares"] == "5"
+    assert shadow["candidate_size_kind"] == "shares"
+    assert shadow["candidate_size_usd"] == "1.6"
+
+
 def test_executable_snapshot_repricing_sweeps_deeper_ask_inside_budget(tmp_path):
     from dataclasses import replace
 
@@ -3695,7 +3756,8 @@ def test_executable_snapshot_repricing_ignores_thin_ask_outside_slippage_budget(
     assert reprice["final_limit_price"] == pytest.approx(0.23)
 
 
-def test_live_reprice_binds_intent_limit_when_dynamic_gap_would_not_jump(tmp_path):
+def test_live_reprice_binds_intent_limit_when_dynamic_gap_would_not_jump(tmp_path, monkeypatch):
+    monkeypatch.setenv("ZEUS_LIVE_MARKET_SUBSTRATE_READER", "0")
     db_path = tmp_path / "live-reprice-limit-contract.db"
     conn = get_connection(db_path)
     init_schema(conn)
@@ -3820,6 +3882,148 @@ def test_live_reprice_binds_intent_limit_when_dynamic_gap_would_not_jump(tmp_pat
     assert shadow["submitted_limit_price"] == "0.25"
     assert shadow["submit_path"] == "final_execution_intent"
     assert shadow["submitted_matches_corrected_candidate"] is True
+
+
+def test_live_discovery_recaptures_stale_executable_snapshot_before_reprice(tmp_path, monkeypatch):
+    monkeypatch.setenv("ZEUS_LIVE_MARKET_SUBSTRATE_READER", "0")
+    db_path = tmp_path / "live-reprice-stale-recapture.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+    _insert_executable_snapshot(
+        conn,
+        snapshot_id="snap-stale-before-submit",
+        selected_outcome_token_id="yes1",
+        outcome_label="YES",
+        yes_token_id="yes1",
+        no_token_id="no1",
+        event_id="evt-stale-recapture",
+        condition_id="m1",
+        top_bid="0.20",
+        top_ask="0.30",
+        captured_at=datetime.now(timezone.utc) - timedelta(seconds=60),
+    )
+    artifact = CycleArtifact(mode=DiscoveryMode.OPENING_HUNT.value, started_at="2026-04-03T00:00:00Z")
+    summary = {"candidates": 0, "no_trades": 0}
+    market = {
+        "city": NYC,
+        "target_date": "2026-04-01",
+        "hours_since_open": 12.0,
+        "hours_to_resolution": 24.0,
+        "event_id": "evt-stale-recapture",
+        "slug": "slug-stale-recapture",
+        "temperature_metric": "high",
+        "outcomes": [
+            {
+                "title": "39-40°F",
+                "range_low": 39,
+                "range_high": 40,
+                "token_id": "yes1",
+                "no_token_id": "no1",
+                "market_id": "m1",
+            },
+        ],
+    }
+    decision = EdgeDecision(
+        should_trade=True,
+        edge=_edge(),
+        tokens={
+            "market_id": "m1",
+            "token_id": "yes1",
+            "no_token_id": "no1",
+            "executable_snapshot_id": "snap-stale-before-submit",
+            "executable_snapshot_min_tick_size": "0.01",
+            "executable_snapshot_min_order_size": "5",
+            "executable_snapshot_neg_risk": False,
+        },
+        size_usd=5.0,
+        decision_id="d-stale-recapture",
+        selected_method="ens_member_counting",
+        applied_validations=["ens_fetch"],
+        decision_snapshot_id="model-snap-stale-recapture",
+        edge_source="opening_inertia",
+        strategy_key="opening_inertia",
+        edge_context=types.SimpleNamespace(p_posterior=0.47),
+        sizing_bankroll=100.0,
+        kelly_multiplier_used=0.25,
+        execution_fee_rate=0.0,
+    )
+    captured = {"snapshot_refreshes": 0}
+
+    def _capture_snapshot(conn, **_kwargs):
+        captured["snapshot_refreshes"] += 1
+        _insert_executable_snapshot(
+            conn,
+            snapshot_id="snap-fresh-before-submit",
+            selected_outcome_token_id="yes1",
+            outcome_label="YES",
+            yes_token_id="yes1",
+            no_token_id="no1",
+            event_id="evt-stale-recapture",
+            condition_id="m1",
+            top_bid="0.24",
+            top_ask="0.25",
+        )
+        return {
+            "executable_snapshot_id": "snap-fresh-before-submit",
+            "condition_id": "m1",
+            "executable_snapshot_min_tick_size": "0.01",
+            "executable_snapshot_min_order_size": "5",
+            "executable_snapshot_neg_risk": False,
+        }
+
+    def _execute_capture(intent, **kwargs):
+        captured["intent"] = intent
+        return OrderResult(
+            status="pending",
+            trade_id="trade-stale-recapture",
+            order_id="ord-stale-recapture",
+            submitted_price=float(intent.final_limit_price),
+            shares=1.0,
+            command_state="INTENT_CREATED",
+        )
+
+    deps = types.SimpleNamespace(
+        MODE_PARAMS={DiscoveryMode.OPENING_HUNT: {}},
+        find_weather_markets=lambda **kwargs: [market],
+        get_last_scan_authority=lambda: "VERIFIED",
+        capture_executable_market_snapshot=_capture_snapshot,
+        DiscoveryMode=DiscoveryMode,
+        logger=types.SimpleNamespace(warning=lambda *args, **kwargs: None, error=lambda *args, **kwargs: None),
+        NoTradeCase=NoTradeCase,
+        MarketCandidate=MarketCandidate,
+        evaluate_candidate=lambda *args, **kwargs: [decision],
+        is_strategy_enabled=lambda _strategy: True,
+        _classify_edge_source=lambda _mode, _edge: "opening_inertia",
+        create_execution_intent=lambda **kwargs: (_ for _ in ()).throw(
+            AssertionError("live final-intent path must not create legacy intent")
+        ),
+        execute_intent=lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("live final-intent path must not submit legacy intent")
+        ),
+        execute_final_intent=_execute_capture,
+        select_final_order_type=lambda conn, snapshot_id: "FOK",
+    )
+
+    cycle_runtime.execute_discovery_phase(
+        conn,
+        clob=None,
+        portfolio=PortfolioState(),
+        artifact=artifact,
+        tracker=StrategyTracker(),
+        limits=types.SimpleNamespace(),
+        mode=DiscoveryMode.OPENING_HUNT,
+        summary=summary,
+        entry_bankroll=100.0,
+        decision_time=datetime(2026, 4, 3, tzinfo=timezone.utc),
+        env="live",
+        deps=deps,
+    )
+    conn.close()
+
+    assert captured["snapshot_refreshes"] == 1
+    assert captured["intent"].snapshot_id == "snap-fresh-before-submit"
+    assert summary["no_trades"] == 0
+    assert len(artifact.trade_cases) == 1
 
 
 def test_live_reprice_builds_post_only_passive_final_intent(tmp_path):
@@ -3950,6 +4154,7 @@ def test_live_reprice_builds_post_only_passive_final_intent(tmp_path):
 
 
 def test_live_entry_captures_and_commits_snapshot_before_executor(tmp_path, monkeypatch):
+    monkeypatch.setenv("ZEUS_LIVE_MARKET_SUBSTRATE_READER", "0")
     from src.data.market_scanner import capture_executable_market_snapshot
     from src.execution.executor import execute_final_intent as real_execute_final_intent
     from src.state.snapshot_repo import get_snapshot
@@ -3964,7 +4169,7 @@ def test_live_entry_captures_and_commits_snapshot_before_executor(tmp_path, monk
         "forecast_source_id": "tigge",
         "model_family": "ecmwf_ifs025",
         "forecast_issue_time": "2026-04-03T00:00:00+00:00",
-        "forecast_valid_time": "2026-04-03T06:00:00+00:00",
+        "forecast_valid_time": "2026-06-01T06:00:00+00:00",
         "forecast_fetch_time": "2026-04-03T01:00:00+00:00",
         "forecast_available_at": "2026-04-03T00:30:00+00:00",
         "raw_payload_hash": "b" * 64,
@@ -3973,10 +4178,13 @@ def test_live_entry_captures_and_commits_snapshot_before_executor(tmp_path, monk
         "authority_tier": "FORECAST",
         "decision_time": decision_time.isoformat(),
         "decision_time_status": "OK",
+        "polymarket_end_anchor_source": "gamma_explicit",
+        "first_member_observed_time": "2026-04-03T00:45:00+00:00",
+        "run_complete_time": "2026-04-03T01:00:00+00:00",
     }
     market = {
         "city": NYC,
-        "target_date": "2026-04-01",
+        "target_date": "2026-06-01",
         "hours_since_open": 12.0,
         "hours_to_resolution": 24.0,
         "event_id": "evt-forward-snapshot",
@@ -4141,6 +4349,7 @@ def test_live_entry_captures_and_commits_snapshot_before_executor(tmp_path, monk
         "SELECT decision_id, token_id, price, state FROM venue_commands WHERE decision_id = ?",
         ("d-forward-snapshot",),
     ).fetchone()
+    assert captured, summary
     price_linkage = conn.execute(
         """
         SELECT market_price_linkage, source, best_bid, best_ask,
@@ -4158,6 +4367,7 @@ def test_live_entry_captures_and_commits_snapshot_before_executor(tmp_path, monk
     assert captured["intent"].final_limit_price % captured["intent"].tick_size == 0
     assert loaded_snapshot is not None
     assert loaded_snapshot.captured_at != datetime(2026, 4, 3, tzinfo=timezone.utc)
+    assert decision.tokens["condition_id"] == "cond1"
     assert snapshot_count == 1
     assert command_count == 1
     assert command_row["decision_id"] == "d-forward-snapshot"

@@ -1,8 +1,8 @@
-# Lifecycle: created=2026-04-27; last_reviewed=2026-05-15; last_reused=2026-05-17
+# Lifecycle: created=2026-04-27; last_reviewed=2026-05-15; last_reused=2026-05-20
 # Purpose: Lock R3 Z3 HeartbeatSupervisor fail-closed resting-order gate behavior.
 # Reuse: Run when heartbeat supervision, executor submit gating, or R3 live-money readiness changes.
 # Created: 2026-04-27
-# Last reused/audited: 2026-05-17
+# Last reused/audited: 2026-05-20
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/Z3.yaml
 #                  + docs/operations/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md
 #                  + 2026-05-17 CLOB venue-heartbeat critical-path split
@@ -979,6 +979,166 @@ def test_venue_background_m5_reconcile_defers_until_user_ws_configured():
         "gap_reason": "not_configured",
         "m5_reconcile_required": True,
     }
+
+
+def test_market_discovery_scheduler_refreshes_market_substrate_outside_cycle(monkeypatch):
+    from src import main
+    import src.data.market_scanner as market_scanner
+    import src.data.polymarket_client as polymarket_client
+    import src.state.db as state_db
+
+    calls: list[tuple[str, object]] = []
+
+    def fake_find_slug_pattern_weather_markets(*, min_hours_to_resolution):
+        calls.append(("find", min_hours_to_resolution))
+        return [{"slug": "weather-event", "outcomes": [{"condition_id": "cond-1", "executable": True}]}]
+
+    class FakePolymarketClient:
+        def __enter__(self):
+            calls.append(("clob_enter", self))
+            return self
+
+        def __exit__(self, *_exc):
+            calls.append(("clob_exit", self))
+
+        def get_clob_market_info(self, *_args, **_kwargs):
+            raise AssertionError("refresh helper is stubbed in this relationship test")
+
+    class FakeConn:
+        def commit(self):
+            calls.append(("commit", None))
+
+        def close(self):
+            calls.append(("close", None))
+
+    def fake_refresh(conn, *, markets, clob, captured_at, scan_authority):
+        calls.append(("refresh", (conn, markets, isinstance(clob, FakePolymarketClient), scan_authority)))
+        return {"attempted": 1, "inserted": 1, "skipped": 0, "failed": 0, "truncated": 0}
+
+    monkeypatch.setattr(
+        market_scanner,
+        "find_slug_pattern_weather_markets",
+        fake_find_slug_pattern_weather_markets,
+    )
+    monkeypatch.setattr(
+        market_scanner,
+        "find_weather_markets",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("market_discovery must not run full tag scan")),
+    )
+    monkeypatch.setattr(market_scanner, "refresh_executable_market_substrate_snapshots", fake_refresh)
+    monkeypatch.setattr(polymarket_client, "PolymarketClient", FakePolymarketClient)
+    monkeypatch.setattr(state_db, "get_trade_connection", lambda write_class: FakeConn())
+    monkeypatch.setattr(
+        main,
+        "_ensure_venue_read_side_adapter",
+        lambda: (_ for _ in ()).throw(AssertionError("market_discovery must use public CLOB read client")),
+    )
+
+    main._market_discovery_cycle()
+
+    assert ("find", 0.0) in calls
+    refresh_calls = [call for call in calls if call[0] == "refresh"]
+    assert len(refresh_calls) == 1
+    assert refresh_calls[0][1][2] is True
+    assert ("commit", None) in calls
+    assert ("close", None) in calls
+
+
+def test_market_discovery_scheduler_runs_while_cycle_lock_is_held(monkeypatch):
+    from src import main
+    import src.data.market_scanner as market_scanner
+    import src.data.polymarket_client as polymarket_client
+    import src.state.db as state_db
+
+    calls: list[str] = []
+    monkeypatch.setattr(
+        market_scanner,
+        "find_slug_pattern_weather_markets",
+        lambda **_kwargs: calls.append("find") or [],
+    )
+    monkeypatch.setattr(
+        market_scanner,
+        "refresh_executable_market_substrate_snapshots",
+        lambda *_args, **_kwargs: calls.append("refresh") or {
+            "attempted": 0,
+            "inserted": 0,
+            "skipped": 0,
+            "failed": 0,
+            "truncated": 0,
+        },
+    )
+
+    class FakePolymarketClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return None
+
+    class FakeConn:
+        def commit(self):
+            calls.append("commit")
+
+        def close(self):
+            calls.append("close")
+
+    monkeypatch.setattr(polymarket_client, "PolymarketClient", FakePolymarketClient)
+    monkeypatch.setattr(state_db, "get_trade_connection", lambda write_class: FakeConn())
+
+    assert main._cycle_lock.acquire(blocking=False)
+    try:
+        main._market_discovery_cycle()
+    finally:
+        main._cycle_lock.release()
+
+    assert calls == ["find", "refresh", "commit", "close"]
+
+
+def test_market_discovery_scheduler_defers_only_when_previous_refresh_runs(monkeypatch):
+    from src import main
+    import src.data.market_scanner as market_scanner
+
+    monkeypatch.setattr(
+        market_scanner,
+        "find_slug_pattern_weather_markets",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("self-overlap must not scan")),
+    )
+
+    assert main._market_discovery_lock.acquire(blocking=False)
+    try:
+        main._market_discovery_cycle()
+    finally:
+        main._market_discovery_lock.release()
+
+
+def test_user_channel_auto_derive_prefers_persisted_ids_and_skips_boot_gamma_scan(monkeypatch):
+    from src import main
+    import src.data.market_scanner as market_scanner
+
+    monkeypatch.delenv("ZEUS_USER_CHANNEL_BOOT_GAMMA_SCAN", raising=False)
+    monkeypatch.setattr(main, "_market_events_v2_user_channel_condition_ids", lambda now=None: ["cond-persisted"])
+    monkeypatch.setattr(
+        market_scanner,
+        "find_weather_markets",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("fresh persisted ids must not boot-scan Gamma")),
+    )
+
+    assert main._auto_derive_user_channel_condition_ids() == ["cond-persisted"]
+
+
+def test_user_channel_auto_derive_returns_empty_without_boot_gamma_opt_in(monkeypatch):
+    from src import main
+    import src.data.market_scanner as market_scanner
+
+    monkeypatch.delenv("ZEUS_USER_CHANNEL_BOOT_GAMMA_SCAN", raising=False)
+    monkeypatch.setattr(main, "_market_events_v2_user_channel_condition_ids", lambda now=None: [])
+    monkeypatch.setattr(
+        market_scanner,
+        "find_weather_markets",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("boot Gamma scan must be opt-in")),
+    )
+
+    assert main._auto_derive_user_channel_condition_ids() == []
 
 
 @pytest.mark.skip(reason="M5 exchange reconciliation owns no-resubmit proof after heartbeat loss.")

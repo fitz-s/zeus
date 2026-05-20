@@ -1,5 +1,5 @@
 # Created: 2026-05-03
-# Last reused/audited: 2026-05-15
+# Last reused/audited: 2026-05-20
 # Authority basis: docs/operations/task_2026-05-14_data_daemon_live_efficiency/DATA_DAEMON_LIVE_EFFICIENCY_REFACTOR_PLAN.md
 #   Phase 3 evaluator consumes producer readiness without hot-path entry-readiness writes.
 """Executable forecast reader for V4 source-linked ensemble snapshots."""
@@ -58,6 +58,9 @@ class ExecutableForecastSnapshot:
     members_unit: str
     local_day_start_utc: str | None
     step_horizon_hours: float | None
+    first_member_observed_time: str
+    run_complete_time: str
+    raw_orderbook_hash_transition_delta_ms: int | None
 
 
 @dataclass(frozen=True)
@@ -74,6 +77,8 @@ class ExecutableForecastEvidence:
     source_issue_time: str | None
     source_release_time: str
     source_available_at: str
+    fetch_started_at: str | None
+    fetch_finished_at: str | None
     captured_at: str
     input_snapshot_ids: tuple[int, ...]
     raw_payload_hash: str | None
@@ -118,6 +123,19 @@ class ExecutableForecastBundle:
             "valid_time": self.evidence.target_local_date,
             "fetch_time": self.evidence.captured_at,
             "available_at": self.evidence.source_available_at,
+            "first_member_observed_time": (
+                self.snapshot.first_member_observed_time
+                or self.evidence.fetch_started_at
+                or self.evidence.captured_at
+            ),
+            "run_complete_time": (
+                self.snapshot.run_complete_time
+                or self.evidence.fetch_finished_at
+                or self.evidence.captured_at
+            ),
+            "raw_orderbook_hash_transition_delta_ms": (
+                self.snapshot.raw_orderbook_hash_transition_delta_ms
+            ),
             "executable_forecast_evidence": self.evidence,
         }
 
@@ -578,6 +596,13 @@ def read_executable_forecast_snapshot(
         members_unit=str(row["members_unit"]),
         local_day_start_utc=row.get("local_day_start_utc"),
         step_horizon_hours=float(row["step_horizon_hours"]) if row.get("step_horizon_hours") is not None else None,
+        first_member_observed_time=str(row.get("first_member_observed_time") or ""),
+        run_complete_time=str(row.get("run_complete_time") or ""),
+        raw_orderbook_hash_transition_delta_ms=(
+            int(row["raw_orderbook_hash_transition_delta_ms"])
+            if row.get("raw_orderbook_hash_transition_delta_ms") is not None
+            else None
+        ),
     )
     return ExecutableForecastReadResult("LIVE_ELIGIBLE", "EXECUTABLE_FORECAST_READY", snapshot)
 
@@ -813,6 +838,8 @@ def read_executable_forecast(
         source_issue_time=source_run.get("source_issue_time"),
         source_release_time=str(source_run["source_release_time"]),
         source_available_at=str(source_run["source_available_at"]),
+        fetch_started_at=source_run.get("fetch_started_at"),
+        fetch_finished_at=source_run.get("fetch_finished_at"),
         captured_at=str(source_run["captured_at"]),
         input_snapshot_ids=(snapshot.snapshot_id,),
         raw_payload_hash=source_run.get("raw_payload_hash"),

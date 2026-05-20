@@ -1,5 +1,5 @@
 # Created: 2026-04-28
-# Last reused/audited: 2026-05-17
+# Last reused/audited: 2026-05-20
 # Authority basis: docs/operations/task_2026-04-28_contamination_remediation/plan.md; task_2026-04-29 Phase 1A/1B evaluator gates; docs/operations/task_2026-05-07_object_invariance_wave24/PLAN.md.
 # Lifecycle: created=2026-04-28; last_reviewed=2026-05-07; last_reused=2026-05-07
 # Purpose: Cross-module P&L flow, CI-threshold, status-summary bankroll, and hardcoded-audit tests.
@@ -1519,6 +1519,56 @@ def test_inv_write_status_preserves_cycle_when_refreshing_without_summary(monkey
     refreshed = json.loads(status_path.read_text())
 
     assert refreshed["cycle"]["entries_blocked_reason"] == "risk_level=ORANGE"
+
+
+def test_write_cycle_pulse_refreshes_timestamp_without_full_status_read_model(monkeypatch, tmp_path):
+    status_path = tmp_path / "status_summary.json"
+    status_path.write_text(
+        json.dumps(
+            {
+                "timestamp": "2026-04-02T00:00:00+00:00",
+                "process": {"pid": 1, "mode": "live", "version": "zeus_v2"},
+                "portfolio": {"open_positions": 2},
+                "cycle": {"mode": "opening_hunt", "candidates": 0},
+                "execution_capability": {
+                    "entry": {
+                        "status": "blocked",
+                        "global_allow_submit": False,
+                        "blocked_components": ["stale_ws_gap_guard"],
+                    }
+                },
+            }
+        )
+    )
+
+    monkeypatch.setattr(status_summary_module, "STATUS_PATH", status_path)
+    monkeypatch.setattr(
+        status_summary_module,
+        "_get_execution_capability_status",
+        lambda: {
+            "schema_version": 1,
+            "entry": {
+                "status": "requires_intent",
+                "global_allow_submit": True,
+                "blocked_components": [],
+            },
+        },
+    )
+    monkeypatch.setattr(
+        status_summary_module,
+        "get_trade_connection_with_world",
+        lambda: (_ for _ in ()).throw(AssertionError("cycle pulse must not query DB read model")),
+    )
+
+    status_summary_module.write_cycle_pulse({"mode": "opening_hunt", "candidates": 3})
+    refreshed = json.loads(status_path.read_text())
+
+    assert refreshed["timestamp"] != "2026-04-02T00:00:00+00:00"
+    assert refreshed["portfolio"] == {"open_positions": 2}
+    assert refreshed["cycle"] == {"mode": "opening_hunt", "candidates": 3}
+    assert refreshed["execution_capability"]["entry"]["global_allow_submit"] is True
+    assert refreshed["execution_capability"]["entry"]["blocked_components"] == []
+    assert refreshed["truth"]["authority"] == "VERIFIED"
 
 
 def test_inv_write_status_drops_stale_pause_cycle_when_refreshing_after_resume(monkeypatch, tmp_path):

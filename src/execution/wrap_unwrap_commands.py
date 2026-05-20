@@ -40,7 +40,9 @@ CREATE TABLE IF NOT EXISTS wrap_unwrap_commands (
   confirmation_count INTEGER DEFAULT 0,
   requested_at TEXT NOT NULL,
   terminal_at TEXT,
-  error_payload TEXT
+  error_payload TEXT,
+  first_inclusion_block_time TEXT,
+  finality_confirmed_time TEXT
 );
 
 CREATE TABLE IF NOT EXISTS wrap_unwrap_events (

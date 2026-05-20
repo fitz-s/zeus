@@ -184,6 +184,50 @@ def test_owned_collateral_ledger_bad_timeout_env_falls_back(tmp_path, monkeypatc
         ledger.close()
 
 
+def test_live_collateral_refresh_skips_when_refresh_lane_is_busy(monkeypatch):
+    """RELATIONSHIP: heartbeat lane arbitration -> CollateralLedger refresh.
+
+    External heartbeat mode can schedule a dedicated collateral refresh and
+    venue-background maintenance in the same window.  Only one path may refresh
+    the process-global ledger at a time; otherwise the singleton's SQLite
+    connection can be used concurrently and starve submit preflight.
+    """
+
+    import src.main as main
+    from src.state.collateral_ledger import configure_global_ledger
+
+    class Adapter:
+        calls = 0
+
+        def get_collateral_payload(self):
+            self.calls += 1
+            return {
+                "pusd_balance_micro": 10_000_000,
+                "pusd_allowance_micro": 10_000_000,
+                "ctf_token_balances": {},
+                "ctf_token_allowances": {},
+                "authority_tier": "CHAIN",
+            }
+
+    adapter = Adapter()
+    ledger = CollateralLedger()
+    configure_global_ledger(ledger)
+    main._last_collateral_heartbeat_refresh_attempt_at = None
+    assert main._collateral_background_refresh_lock.acquire(blocking=False)
+    try:
+        assert (
+            main._refresh_global_collateral_snapshot_if_due(
+                adapter,
+                now=datetime.now(timezone.utc),
+            )
+            is False
+        )
+        assert adapter.calls == 0
+    finally:
+        main._collateral_background_refresh_lock.release()
+        configure_global_ledger(None)
+
+
 def _buy_intent(
     size_usd: float = 10.0,
     token_id: str = YES_TOKEN,
