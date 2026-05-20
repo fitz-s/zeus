@@ -1,8 +1,8 @@
 # Created: 2026-05-19
-# Last reused or audited: 2026-05-19
+# Last reused or audited: 2026-05-20
 # Authority basis: slug-pattern discovery (2026-05-19 alpha window) — tag-based gamma queries
 #   do not surface newly-opened weather markets until tag is applied; direct slug lookup works immediately.
-# Lifecycle: created=2026-05-19; last_reviewed=2026-05-19; last_reused=never
+# Lifecycle: created=2026-05-19; last_reviewed=2026-05-19; last_reused=2026-05-20
 # Purpose: Antibody tests for _fetch_events_by_slug_pattern — slug fallback discovery path in market_scanner.
 # Reuse: Run when modifying SLUG_DISCOVERY_CITIES, SLUG_DISCOVERY_PREFIXES, _fetch_events_by_slug_pattern,
 #   or _fetch_events_by_tags integration. Verify CLOB cross-check still applies on slug path.
@@ -290,6 +290,55 @@ def test_seen_ids_shared_between_tag_and_slug_paths(monkeypatch):
         "seen_ids must be shared between tag fetch and slug_pattern fetch to "
         "prevent duplicate event entries in the combined output"
     )
+
+
+def test_live_slug_pattern_market_reader_never_runs_tag_scan(monkeypatch):
+    """Live background substrate discovery must stay bounded to slug lookups."""
+
+    slug_event = _make_gamma_event(event_id="evt-live-slug", condition_id="0xlive01")
+    parsed = {
+        "event_id": "evt-live-slug",
+        "slug": "highest-temperature-in-amsterdam-on-may-20-2026",
+        "title": "Highest temperature in Amsterdam on May 20?",
+        "city": ms.cities_by_name["Amsterdam"],
+        "target_date": "2026-05-20",
+        "temperature_metric": "high",
+        "hours_to_resolution": 12.0,
+        "hours_since_open": 1.0,
+        "outcomes": [{"condition_id": "0xlive01", "executable": True}],
+        "condition_ids": ["0xlive01"],
+        "source_contract": {"status": "MATCH"},
+    }
+    calls: list[tuple[str, object]] = []
+
+    monkeypatch.setattr(
+        ms,
+        "_fetch_events_by_tags",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("slug-only live reader must not tag-scan")),
+    )
+    monkeypatch.setattr(
+        ms,
+        "_fetch_events_by_slug_pattern",
+        lambda seen_ids, now_utc, *, target_dates=None: calls.append(("slug", target_dates)) or [slug_event],
+    )
+    monkeypatch.setattr(ms, "_parse_event", lambda event, now, min_hours: parsed)
+    monkeypatch.setattr(ms, "_persist_market_events_to_db", lambda results: calls.append(("persist", len(results))) or len(results))
+
+    results = ms.find_slug_pattern_weather_markets(
+        min_hours_to_resolution=0.0,
+        target_dates=["2026-05-20"],
+    )
+
+    assert results == [parsed]
+    assert calls == [("slug", ["2026-05-20"]), ("persist", 1)]
+
+
+def test_default_slug_pattern_dates_skip_expired_and_cover_opening_hunt_horizon():
+    """Opening-hunt markets can open two future calendar dates before settlement."""
+
+    dates = ms._slug_pattern_target_dates(_NOW)
+
+    assert dates == ["2026-05-20", "2026-05-21"]
 
 
 # ---------------------------------------------------------------------------

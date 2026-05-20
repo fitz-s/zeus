@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-05-16; last_reviewed=2026-05-16; last_reused=never
+# Lifecycle: created=2026-05-16; last_reviewed=2026-05-16; last_reused=2026-05-20
 # Purpose: Antibody test for architecture/cascade_liveness_contract.yaml; enforces
 #   that every state-machine table with *_INTENT_CREATED rows has a registered
 #   APScheduler poller in src/main.py, and that every terminal_states_with_operator_action
@@ -36,9 +36,13 @@ SETTLEMENT_COMMANDS_SRC = REPO_ROOT / "src" / "execution" / "settlement_commands
 NON_STATE_MACHINE_JOB_IDS = frozenset({
     "opening_hunt",
     "day0_capture",
+    "imminent_open_capture",
+    "market_discovery",
     "harvester",
     "heartbeat",
     "venue_heartbeat",
+    "deployment_freshness",
+    "wu_daily",
 })
 
 

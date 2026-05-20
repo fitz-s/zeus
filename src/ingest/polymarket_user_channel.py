@@ -19,7 +19,7 @@ import os
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Any, Awaitable, Callable, Iterable, Optional
 
 from src.control import ws_gap_guard
@@ -181,15 +181,41 @@ def _same_decimal_value(left: Any, right: Any) -> bool:
         return False
 
 
+def _tick_equivalent_price(left: Any, right: Any, tick_size: Any) -> bool:
+    try:
+        left_decimal = Decimal(str(left))
+        right_decimal = Decimal(str(right))
+        tick_decimal = Decimal(str(tick_size))
+    except (InvalidOperation, TypeError, ValueError):
+        return False
+    if not (left_decimal.is_finite() and right_decimal.is_finite() and tick_decimal.is_finite()):
+        return False
+    if tick_decimal <= Decimal("0"):
+        return False
+    return left_decimal.quantize(tick_decimal, rounding=ROUND_HALF_UP) == right_decimal.quantize(
+        tick_decimal,
+        rounding=ROUND_HALF_UP,
+    )
+
+
+def _same_price_value(left: Any, right: Any, *, tick_size: Any = None) -> bool:
+    if _same_decimal_value(left, right):
+        return True
+    if tick_size is None or tick_size == "":
+        return False
+    return _tick_equivalent_price(left, right, tick_size)
+
+
 def _same_trade_fill_economics(
     fact: dict[str, Any],
     *,
     filled_size: str,
     fill_price: str,
+    price_tick_size: Any = None,
 ) -> bool:
     return (
         _same_decimal_value(fact.get("filled_size"), filled_size)
-        and _same_decimal_value(fact.get("fill_price"), fill_price)
+        and _same_price_value(fact.get("fill_price"), fill_price, tick_size=price_tick_size)
     )
 
 
@@ -310,6 +336,25 @@ def _lookup_command(conn, venue_order_ids: Iterable[str]) -> Optional[dict[str, 
         ids,
     ).fetchone()
     return dict(row) if row is not None else None
+
+
+def _command_tick_size(conn: Any, command: dict[str, Any]) -> str | None:
+    envelope_id = str(command.get("envelope_id") or "")
+    if not envelope_id:
+        return None
+    try:
+        row = conn.execute(
+            "SELECT tick_size FROM venue_submission_envelopes WHERE envelope_id = ?",
+            (envelope_id,),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return None
+    if row is None:
+        return None
+    try:
+        return str(row["tick_size"])
+    except (KeyError, TypeError, IndexError):
+        return str(row[0])
 
 
 def _command_fill_is_complete(conn, command: dict[str, Any]) -> bool:
@@ -710,6 +755,7 @@ class PolymarketUserChannelIngestor:
                 }
             filled_size = _decimal_str(size_raw, "0")
             fill_price = _decimal_str(price_raw, "0")
+            price_tick_size = _command_tick_size(conn, command)
             latest_fact = _latest_trade_fact_for_trade_id(conn, trade_id)
             if latest_fact is not None:
                 identity_mismatch = []
@@ -745,6 +791,7 @@ class PolymarketUserChannelIngestor:
                     latest_fact,
                     filled_size=filled_size,
                     fill_price=fill_price,
+                    price_tick_size=price_tick_size,
                 )
                 if same_fill_economics and str(latest_fact.get("state") or "") == status:
                     conn.commit()
@@ -753,6 +800,9 @@ class PolymarketUserChannelIngestor:
                         "command_event": None,
                         "reason": "duplicate_trade_fact",
                     }
+                if same_fill_economics:
+                    filled_size = str(latest_fact.get("filled_size"))
+                    fill_price = str(latest_fact.get("fill_price"))
                 if status in TRADE_FILL_ECONOMICS_STATUSES and not same_fill_economics:
                     self._append_command_event_if_legal(
                         conn,

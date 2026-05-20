@@ -27,7 +27,9 @@ CREATE TABLE IF NOT EXISTS wrap_unwrap_commands (
   confirmation_count INTEGER DEFAULT 0,
   requested_at TEXT NOT NULL,
   terminal_at TEXT,
-  error_payload TEXT
+  error_payload TEXT,
+  first_inclusion_block_time TEXT,
+  finality_confirmed_time TEXT
 );
 
 CREATE TABLE IF NOT EXISTS wrap_unwrap_events (
@@ -53,6 +55,15 @@ class WrapUnwrapState(str, Enum):
 
 def init_wrap_unwrap_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(WRAP_UNWRAP_SCHEMA)
+    _ensure_column(conn, "wrap_unwrap_commands", "first_inclusion_block_time", "TEXT")
+    _ensure_column(conn, "wrap_unwrap_commands", "finality_confirmed_time", "TEXT")
+
+
+def _ensure_column(conn: sqlite3.Connection, table: str, column: str, ddl_type: str) -> None:
+    existing = {str(row["name"]) for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    if column in existing:
+        return
+    conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl_type}")
 
 
 def request_wrap(amount_micro: int, conn: sqlite3.Connection | None = None) -> str:

@@ -14,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import importlib
 import sys
+import types
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -165,6 +166,62 @@ class FakeCancelOrderClient:
         return self.response
 
 
+class FakeAuthClient:
+    derive_response = None
+    derive_error = None
+    instances = []
+
+    def __init__(
+        self,
+        host,
+        chain_id,
+        *,
+        key=None,
+        creds=None,
+        signature_type=None,
+        funder=None,
+    ):
+        self.host = host
+        self.chain_id = chain_id
+        self.key = key
+        self.creds = creds
+        self.signature_type = signature_type
+        self.funder = funder
+        self.calls = []
+        type(self).instances.append(self)
+
+    def create_or_derive_api_key(self):
+        self.calls.append(("create_or_derive_api_key",))
+        if self.derive_error is not None:
+            raise self.derive_error
+        return self.derive_response
+
+    def set_api_creds(self, creds):
+        self.calls.append(("set_api_creds", creds))
+        self.creds = creds
+
+
+@dataclass(frozen=True)
+class FakeApiCreds:
+    api_key: str
+    api_secret: str
+    api_passphrase: str
+
+
+def _install_fake_py_clob_client_v2(monkeypatch):
+    package = types.ModuleType("py_clob_client_v2")
+    client_module = types.ModuleType("py_clob_client_v2.client")
+    clob_types_module = types.ModuleType("py_clob_client_v2.clob_types")
+    client_module.ClobClient = FakeAuthClient
+    clob_types_module.ApiCreds = FakeApiCreds
+    package.client = client_module
+    package.clob_types = clob_types_module
+    monkeypatch.setitem(sys.modules, "py_clob_client_v2", package)
+    monkeypatch.setitem(sys.modules, "py_clob_client_v2.client", client_module)
+    monkeypatch.setitem(sys.modules, "py_clob_client_v2.clob_types", clob_types_module)
+    return FakeApiCreds
+
+
 def _intent(direction: Direction = Direction("buy_yes"), token_id: str = "yes-token") -> ExecutionIntent:
     return ExecutionIntent(
         direction=direction,
@@ -194,6 +251,96 @@ def _adapter(tmp_path: Path, fake_client=None):
         q1_egress_evidence_path=evidence,
         client_factory=lambda **kwargs: fake_client,
     ), fake_client
+
+
+def test_default_client_factory_prefers_derived_creds_over_env(monkeypatch):
+    ApiCreds = _install_fake_py_clob_client_v2(monkeypatch)
+    from src.venue.polymarket_v2_adapter import PolymarketV2Adapter
+
+    FakeAuthClient.instances = []
+    FakeAuthClient.derive_error = None
+    FakeAuthClient.derive_response = ApiCreds(
+        api_key="derived-key",
+        api_secret="derived-secret",
+        api_passphrase="derived-passphrase",
+    )
+    monkeypatch.setenv("POLYMARKET_API_KEY", "env-key")
+    monkeypatch.setenv("POLYMARKET_API_SECRET", "env-secret")
+    monkeypatch.setenv("POLYMARKET_API_PASSPHRASE", "env-passphrase")
+
+    adapter = PolymarketV2Adapter(
+        host="https://clob.polymarket.com",
+        funder_address="0xfunder",
+        signer_key="test-key",
+        q1_egress_evidence_path=None,
+    )
+
+    client = adapter._sdk_client()
+
+    assert client.creds.api_key == "derived-key"
+    assert client.calls == [
+        ("create_or_derive_api_key",),
+        ("set_api_creds", FakeAuthClient.derive_response),
+    ]
+
+
+def test_default_client_factory_uses_env_creds_when_derivation_fails(monkeypatch):
+    _install_fake_py_clob_client_v2(monkeypatch)
+    from src.venue.polymarket_v2_adapter import PolymarketV2Adapter
+
+    FakeAuthClient.instances = []
+    FakeAuthClient.derive_response = None
+    FakeAuthClient.derive_error = RuntimeError("derive unavailable")
+    monkeypatch.setenv("POLYMARKET_API_KEY", "env-key")
+    monkeypatch.setenv("POLYMARKET_API_SECRET", "env-secret")
+    monkeypatch.setenv("POLYMARKET_API_PASSPHRASE", "env-passphrase")
+
+    adapter = PolymarketV2Adapter(
+        host="https://clob.polymarket.com",
+        funder_address="0xfunder",
+        signer_key="test-key",
+        q1_egress_evidence_path=None,
+    )
+
+    client = adapter._sdk_client()
+
+    assert client.creds.api_key == "env-key"
+    assert client.creds.api_secret == "env-secret"
+    assert client.creds.api_passphrase == "env-passphrase"
+    assert [call[0] for call in client.calls] == [
+        "create_or_derive_api_key",
+        "set_api_creds",
+    ]
+
+
+def test_default_client_factory_does_not_override_explicit_api_creds(monkeypatch):
+    ApiCreds = _install_fake_py_clob_client_v2(monkeypatch)
+    from src.venue.polymarket_v2_adapter import PolymarketV2Adapter
+
+    provided = ApiCreds(
+        api_key="provided-key",
+        api_secret="provided-secret",
+        api_passphrase="provided-passphrase",
+    )
+    FakeAuthClient.instances = []
+    FakeAuthClient.derive_response = None
+    FakeAuthClient.derive_error = AssertionError("derive should not be called")
+    monkeypatch.setenv("POLYMARKET_API_KEY", "env-key")
+    monkeypatch.setenv("POLYMARKET_API_SECRET", "env-secret")
+    monkeypatch.setenv("POLYMARKET_API_PASSPHRASE", "env-passphrase")
+
+    adapter = PolymarketV2Adapter(
+        host="https://clob.polymarket.com",
+        funder_address="0xfunder",
+        signer_key="test-key",
+        api_creds=provided,
+        q1_egress_evidence_path=None,
+    )
+
+    client = adapter._sdk_client()
+
+    assert client.creds is provided
+    assert client.calls == []
 
 
 def test_adapter_threads_configured_signature_type_to_client_factory(tmp_path):

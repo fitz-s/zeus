@@ -2,7 +2,7 @@
 # Purpose: Lock executor command split phase ordering and ACK invariants.
 # Reuse: Run when venue command persistence, live order submission, or ACK handling changes.
 # Created: 2026-04-26
-# Last reused/audited: 2026-05-17
+# Last reused/audited: 2026-05-20
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md §P1.S3
 #                  + docs/operations/task_2026-05-15_live_order_e2e_goal/LIVE_ORDER_E2E_GOAL_PLAN.md
 """INV-30 relationship tests: executor split build/persist/submit/ack.
@@ -433,6 +433,115 @@ class TestLiveOrderCommandSplit:
         assert components_by_name["decision_source_integrity"]["allowed"] is True
         assert components_by_name["decision_source_integrity"]["details"]["source_id"] == "tigge"
         assert components_by_name["decision_source_integrity"]["details"]["degradation_level"] == "OK"
+
+    def test_entry_pre_submit_integrity_does_not_require_post_submit_audit_fields(
+        self,
+        mem_conn,
+        monkeypatch,
+    ):
+        """Pre-submit source proof must not require fields only produced by submit/ack."""
+        import src.execution.executor as executor_module
+        from src.execution.executor import _live_order
+
+        monkeypatch.setattr(executor_module, "_assert_risk_allocator_allows_submit", lambda *args, **kwargs: None)
+        monkeypatch.setattr(executor_module, "_select_risk_allocator_order_type", lambda *args, **kwargs: "GTC")
+        monkeypatch.setattr(
+            executor_module,
+            "_assert_ws_gap_allows_submit",
+            lambda *args, **kwargs: {"component": "ws_gap_guard", "allowed": True, "reason": "allowed"},
+        )
+
+        context = _decision_source_context(
+            decision_time="2026-05-20T13:30:40+00:00",
+            forecast_issue_time="2026-05-20T00:00:00+00:00",
+            forecast_valid_time="2026-05-22T00:00:00+00:00",
+            forecast_fetch_time="2026-05-20T13:26:03+00:00",
+            forecast_available_at="2026-05-20T00:00:00+00:00",
+            polymarket_end_anchor_source="gamma_explicit",
+            first_member_observed_time="2026-05-20T13:20:00+00:00",
+            run_complete_time="2026-05-20T13:26:00+00:00",
+        )
+        assert {
+            "missing_observation_time",
+            "missing_observation_available_at",
+            "missing_zeus_submit_intent_time",
+            "missing_venue_ack_time",
+        }.issubset(set(context.integrity_errors()))
+        intent = _make_entry_intent(mem_conn, decision_source_context=context)
+
+        with patch("src.data.polymarket_client.PolymarketClient") as MockClient:
+            mock_inst = MagicMock()
+            MockClient.return_value = mock_inst
+            mock_inst.v2_preflight.return_value = None
+            bound = _capture_bound_submission_envelope(mock_inst)
+            mock_inst.place_limit_order.side_effect = (
+                lambda **kwargs: _final_submit_result(bound, order_id="ord-entry-pre-submit-audit")
+            )
+
+            result = _live_order(
+                trade_id="trd-entry-pre-submit-audit",
+                intent=intent,
+                shares=18.19,
+                conn=mem_conn,
+                decision_id="dec-entry-pre-submit-audit",
+            )
+
+        assert result.status == "pending"
+        assert mock_inst.place_limit_order.called
+
+    def test_final_intent_legacy_envelope_ignores_pre_submit_audit_only_gaps(self):
+        """FinalExecutionIntent handoff must use the same pre-submit integrity split."""
+        from src.contracts.execution_intent import FinalExecutionIntent
+        from src.execution.executor import _legacy_entry_intent_from_final
+
+        context = _decision_source_context(
+            decision_time="2026-05-20T13:30:40+00:00",
+            forecast_issue_time="2026-05-20T00:00:00+00:00",
+            forecast_valid_time="2026-05-22T00:00:00+00:00",
+            forecast_fetch_time="2026-05-20T13:26:03+00:00",
+            forecast_available_at="2026-05-20T00:00:00+00:00",
+            polymarket_end_anchor_source="gamma_explicit",
+            first_member_observed_time="2026-05-20T13:20:00+00:00",
+            run_complete_time="2026-05-20T13:26:00+00:00",
+        )
+        final_intent = FinalExecutionIntent(
+            hypothesis_id="hyp-pre-submit-audit",
+            selected_token_id="tok-pre-submit-audit",
+            direction="buy_yes",
+            size_kind="shares",
+            size_value=Decimal("5"),
+            submitted_shares=Decimal("5"),
+            final_limit_price=Decimal("0.25"),
+            expected_fill_price_before_fee=Decimal("0.25"),
+            fee_adjusted_execution_price=Decimal("0.25"),
+            order_policy="marketable_limit_depth_bound",
+            order_type="FOK",
+            post_only=False,
+            cancel_after=datetime.now(timezone.utc) + timedelta(minutes=5),
+            snapshot_id="snap-pre-submit-audit",
+            snapshot_hash="a" * 64,
+            cost_basis_id="cost_basis:" + ("b" * 16),
+            cost_basis_hash="b" * 64,
+            max_slippage_bps=Decimal("200"),
+            tick_size=Decimal("0.01"),
+            min_order_size=Decimal("5"),
+            fee_rate=Decimal("0"),
+            neg_risk=False,
+            event_id="event-pre-submit-audit",
+            resolution_window="2026-05-22",
+            correlation_key="Jeddah:2026-05-22",
+            decision_source_context=context,
+        )
+
+        legacy_intent = _legacy_entry_intent_from_final(
+            final_intent,
+            market_id="condition-pre-submit-audit",
+            event_id="event-pre-submit-audit",
+            submitted_shares=5.0,
+        )
+
+        assert legacy_intent.decision_source_context is context
+        assert legacy_intent.token_id == "tok-pre-submit-audit"
 
     @pytest.mark.parametrize(
         ("context", "expected_reason"),

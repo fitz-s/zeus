@@ -1,5 +1,5 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-05-17
+# Last reused/audited: 2026-05-20
 # Authority basis: docs/operations/task_2026-05-17_live_order_survival/LIVE_ORDER_SURVIVAL_PLAN.md S5
 #                  docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/U1.yaml
 """Executable CLOB market snapshot contract.
@@ -92,7 +92,7 @@ class ExecutableMarketSnapshotV2:
     token_map_raw: dict[str, Any]
     rfqe: Optional[bool]
     neg_risk: bool
-    orderbook_top_bid: Decimal
+    orderbook_top_bid: Decimal | None
     orderbook_top_ask: Decimal | None
     orderbook_depth_jsonb: str
     raw_gamma_payload_hash: str
@@ -130,15 +130,17 @@ class ExecutableMarketSnapshotV2:
             raise ValueError("min_tick_size must be positive")
         if self.min_order_size <= 0:
             raise ValueError("min_order_size must be positive")
-        top_bid = _as_decimal(self.orderbook_top_bid, "orderbook_top_bid")
-        if top_bid <= 0:
-            raise ValueError("orderbook_top_bid must be positive")
-        object.__setattr__(self, "orderbook_top_bid", top_bid)
+        top_bid = None
+        if self.orderbook_top_bid is not None:
+            top_bid = _as_decimal(self.orderbook_top_bid, "orderbook_top_bid")
+            if top_bid <= 0:
+                raise ValueError("orderbook_top_bid must be positive when present")
+            object.__setattr__(self, "orderbook_top_bid", top_bid)
         if self.orderbook_top_ask is not None:
             top_ask = _as_decimal(self.orderbook_top_ask, "orderbook_top_ask")
             if top_ask <= 0:
                 raise ValueError("orderbook_top_ask must be positive when present")
-            if top_bid >= top_ask:
+            if top_bid is not None and top_bid >= top_ask:
                 raise ValueError("orderbook_top_bid must be below orderbook_top_ask when ask is present")
             object.__setattr__(self, "orderbook_top_ask", top_ask)
         for name in (
@@ -313,6 +315,8 @@ def assert_snapshot_executable(
             raise MarketSnapshotMismatchError(f"side must be BUY or SELL, got {side!r}")
         if command_side == "BUY" and snapshot.orderbook_top_ask is None:
             raise MarketSnapshotMismatchError("BUY command requires ask-side executable snapshot evidence")
+        if command_side == "SELL" and snapshot.orderbook_top_bid is None:
+            raise MarketSnapshotMismatchError("SELL command requires bid-side executable snapshot evidence")
 
     if expected_min_tick_size is not None:
         expected_tick = _as_decimal(expected_min_tick_size, "expected_min_tick_size")

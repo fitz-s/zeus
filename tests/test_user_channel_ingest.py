@@ -638,6 +638,102 @@ def test_trade_lifecycle_forward_transition_requires_stable_fill_economics(conn)
     assert _command_state(conn) == "REVIEW_REQUIRED"
 
 
+def test_ws_lifecycle_accepts_tick_equivalent_rest_fill_price_without_review(conn):
+    """REST exact cost basis and WS tick price are the same trade economics."""
+
+    conn.execute(
+        """
+        UPDATE venue_commands
+           SET size = ?, price = ?
+         WHERE command_id = 'cmd-ws'
+        """,
+        (5.0, 0.44),
+    )
+    append_trade_fact(
+        conn,
+        trade_id="trade-ws",
+        venue_order_id="ord-ws",
+        command_id="cmd-ws",
+        state="MATCHED",
+        filled_size="5.116278",
+        fill_price="0.4299998944545233859457988796",
+        source="REST",
+        observed_at=NOW,
+        raw_payload_hash=HASH_A,
+        raw_payload_json={"source": "place_limit_order_matched_submit"},
+    )
+    conn.commit()
+
+    result = _ingestor(conn).handle_message(
+        _trade_message(
+            "CONFIRMED",
+            size="5.116278",
+            price="0.43",
+            transaction_hash="0xconfirmed",
+            confirmation_count=3,
+        )
+    )
+
+    assert result["command_event"] == "FILL_CONFIRMED"
+    assert _command_state(conn) == "FILLED"
+    rows = _rows(conn, "venue_trade_facts")
+    assert [(r["state"], r["source"]) for r in rows] == [("MATCHED", "REST"), ("CONFIRMED", "WS_USER")]
+    assert Decimal(rows[-1]["filled_size"]) == Decimal("5.116278")
+    assert Decimal(rows[-1]["fill_price"]) == Decimal("0.4299998944545233859457988796")
+    assert [r["state"] for r in _rows(conn, "position_lots")] == ["CONFIRMED_EXPOSURE"]
+    assert Decimal(_rows(conn, "position_lots")[-1]["entry_price_avg"]) == Decimal(
+        "0.4299998944545233859457988796"
+    )
+
+
+def test_maker_side_partial_fill_lifecycle_uses_zeus_maker_leg_economics(conn):
+    """Maker-side WS trades carry taker economics at top level; Zeus owns the maker leg."""
+
+    conn.execute(
+        """
+        UPDATE venue_commands
+           SET size = ?, price = ?
+         WHERE command_id = 'cmd-ws'
+        """,
+        (181.16, 0.01),
+    )
+    conn.commit()
+
+    ingestor = _ingestor(conn)
+    for status in ("MATCHED", "MINED", "CONFIRMED"):
+        ingestor.handle_message(
+            _trade_message(
+                status,
+                taker_order_id="foreign-taker-order",
+                size="100",
+                price="0.99",
+                maker_orders=[
+                    {
+                        "order_id": "ord-ws",
+                        "matched_amount": "100",
+                        "price": "0.01",
+                        "side": "BUY",
+                    }
+                ],
+                transaction_hash="0xpartialconfirmed",
+                confirmation_count=3 if status == "CONFIRMED" else 0,
+            )
+        )
+
+    rows = _rows(conn, "venue_trade_facts")
+    assert [(r["state"], Decimal(r["filled_size"]), Decimal(r["fill_price"])) for r in rows] == [
+        ("MATCHED", Decimal("100"), Decimal("0.01")),
+        ("MINED", Decimal("100"), Decimal("0.01")),
+        ("CONFIRMED", Decimal("100"), Decimal("0.01")),
+    ]
+    assert [r["state"] for r in _rows(conn, "position_lots")] == [
+        "OPTIMISTIC_EXPOSURE",
+        "CONFIRMED_EXPOSURE",
+    ]
+    assert [r["event_type"] for r in _rows(conn, "venue_command_events")].count("FILL_CONFIRMED") == 0
+    assert _command_state(conn) == "PARTIAL"
+
+
 def test_same_trade_id_different_order_requires_review_not_rebinding(conn):
     ingestor = _ingestor(conn)
     ingestor.handle_message(_trade_message("MATCHED"))

@@ -31,6 +31,7 @@ Tests:
 from __future__ import annotations
 
 import sqlite3
+import inspect
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -88,6 +89,16 @@ def test_lock_degrade_returns_summary_not_raises(monkeypatch):
     assert result.get("skip_reason") == "db_write_lock_degraded", (
         f"Expected skip_reason='db_write_lock_degraded', got: {result.get('skip_reason')}"
     )
+
+
+def test_cycle_success_export_uses_lightweight_status_pulse():
+    """Cycle success must not run full derived status_summary inside the lock."""
+
+    import src.engine.cycle_runner as cr
+
+    source = inspect.getsource(cr.run_cycle)
+    assert "write_cycle_pulse(summary)" in source
+    assert "write_status(summary)" not in source
 
 
 # ---------------------------------------------------------------------------

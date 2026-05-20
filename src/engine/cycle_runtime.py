@@ -484,9 +484,10 @@ def _attach_corrected_pricing_authority(
     immediate_order_type = str(order_type or "").strip().upper()
     final_unsupported_reason = ""
     if is_marketable and immediate_order_type in {"FOK", "FAK"}:
+        raw_submit_shares = max(sweep.filled_shares, snapshot.min_order_size)
         submitted_shares = _quantize_submit_shares(
             direction,
-            sweep.filled_shares,
+            raw_submit_shares,
             final_limit_price=candidate_limit,
             order_type=immediate_order_type,
         )
@@ -2617,6 +2618,7 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
             "executable_snapshot_id": str(
                 tokens.get("executable_snapshot_id") or tokens.get("snapshot_id") or ""
             ).strip(),
+            "condition_id": str(tokens.get("condition_id") or "").strip(),
             "executable_snapshot_min_tick_size": tokens.get(
                 "executable_snapshot_min_tick_size",
                 tokens.get("min_tick_size"),
@@ -2636,6 +2638,8 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
         missing = []
         if not fields["executable_snapshot_id"]:
             missing.append("executable_snapshot_id")
+        if not fields["condition_id"]:
+            missing.append("condition_id")
         if fields["executable_snapshot_min_tick_size"] is None:
             missing.append("executable_snapshot_min_tick_size")
         if fields["executable_snapshot_min_order_size"] is None:
@@ -2643,6 +2647,75 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
         if fields["executable_snapshot_neg_risk"] is None:
             missing.append("executable_snapshot_neg_risk")
         return missing
+
+    def _capture_execution_snapshot_for_decision(market, decision, city_name: str, target_date: str) -> tuple[dict, str]:
+        capture_snapshot = getattr(deps, "capture_executable_market_snapshot", None)
+        if not callable(capture_snapshot):
+            return _execution_snapshot_fields(getattr(decision, "tokens", {}) or {}), "capture_helper_unavailable"
+        try:
+            captured_snapshot_fields = capture_snapshot(
+                conn,
+                market=market,
+                decision=decision,
+                clob=clob,
+                captured_at=datetime.now(timezone.utc),
+                scan_authority=scan_authority,
+            )
+        except Exception as exc:
+            deps.logger.warning(
+                "Executable market snapshot capture failed for %s %s %s: %s",
+                city_name,
+                target_date,
+                decision.edge.bin.label if decision.edge else "",
+                exc,
+            )
+            if not isinstance(decision.tokens, dict):
+                decision.tokens = {}
+            decision.tokens["executable_snapshot_capture_error"] = str(exc)
+            return _execution_snapshot_fields(decision.tokens), str(exc)
+        if not isinstance(decision.tokens, dict):
+            decision.tokens = {}
+        decision.tokens.update(captured_snapshot_fields)
+        try:
+            from src.state.db import log_executable_snapshot_market_price_linkage
+
+            linkage_result = log_executable_snapshot_market_price_linkage(
+                conn,
+                snapshot_id=str(captured_snapshot_fields.get("executable_snapshot_id", "")),
+            )
+            summary["forward_market_price_linkage_status"] = str(linkage_result.get("status", ""))
+            if _forward_price_linkage_status_degraded(summary["forward_market_price_linkage_status"]):
+                summary["degraded"] = True
+        except Exception as exc:
+            deps.logger.warning(
+                "Executable snapshot price linkage write failed for %s %s %s: %s",
+                city_name,
+                target_date,
+                decision.edge.bin.label if decision.edge else "",
+                exc,
+            )
+            summary["forward_market_price_linkage_status"] = "error"
+            summary["degraded"] = True
+        try:
+            conn.commit()
+        except Exception as exc:
+            deps.logger.warning(
+                "Executable market snapshot commit failed for %s %s %s: %s",
+                city_name,
+                target_date,
+                decision.edge.bin.label if decision.edge else "",
+                exc,
+            )
+            decision.tokens["executable_snapshot_capture_error"] = f"executable_snapshot_commit_failed:{exc}"
+            return _execution_snapshot_fields(decision.tokens), str(decision.tokens["executable_snapshot_capture_error"])
+        return _execution_snapshot_fields(decision.tokens), ""
+
+    def _execution_snapshot_is_stale(conn, snapshot_id: str) -> bool:
+        from src.contracts.executable_market_snapshot_v2 import is_fresh
+        from src.state.snapshot_repo import get_snapshot
+
+        snapshot = get_snapshot(conn, snapshot_id)
+        return snapshot is None or not is_fresh(snapshot, datetime.now(timezone.utc))
 
     params = deps.MODE_PARAMS[mode]
     evaluation_budget_seconds = _live_discovery_eval_budget_seconds(mode, env, params)
@@ -2657,10 +2730,34 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
         # min_hours_to_resolution=0 to include markets already past the 6h
         # default floor used by other modes.
         min_hours_to_resolution = 0
-    markets = deps.find_weather_markets(min_hours_to_resolution=min_hours_to_resolution)
-    # NOTE: evaluation_started_at is set AFTER find_weather_markets() so that
-    # gamma/CLOB network I/O (400-700s cold scan) does not consume the
-    # per-market evaluation budget.  Budget is for market evaluation only.
+    live_substrate_reader = (
+        str(os.getenv("ZEUS_LIVE_MARKET_SUBSTRATE_READER", "1")).strip().lower()
+        not in {"0", "false", "no", "off"}
+    )
+    market_snapshot = None
+    if env == "live" and conn is not None and live_substrate_reader:
+        from src.data.market_scanner import read_persisted_weather_markets
+
+        market_snapshot = read_persisted_weather_markets(conn, now_utc=decision_time)
+        markets = list(market_snapshot.events)
+        summary["market_substrate_source"] = "persisted_executable_market_snapshots"
+        summary["market_substrate_fetched_at_utc"] = (
+            market_snapshot.fetched_at_utc.isoformat()
+            if market_snapshot.fetched_at_utc is not None
+            else None
+        )
+        summary["market_substrate_stale_age_seconds"] = (
+            market_snapshot.stale_age_seconds
+        )
+        summary["market_substrate_market_count"] = len(markets)
+        if market_snapshot.authority != "VERIFIED":
+            summary["market_substrate_unavailable_reason"] = market_snapshot.authority
+    else:
+        markets = deps.find_weather_markets(min_hours_to_resolution=min_hours_to_resolution)
+    # NOTE: evaluation_started_at is set AFTER market substrate acquisition so
+    # that upstream discovery I/O does not consume per-market evaluation budget.
+    # Live normally reads persisted substrate here; background market_discovery
+    # owns Gamma/CLOB refresh.
     evaluation_started_at = _monotonic_seconds(deps)
     if "max_hours_since_open" in params:
         markets = [m for m in markets if m["hours_since_open"] < params["max_hours_since_open"]]
@@ -2706,13 +2803,31 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
             ]
         else:
             markets = [m for m in markets if m.get("hours_to_resolution") is not None and m["hours_to_resolution"] < params["max_hours_to_resolution"]]
-    scan_authority = _market_scan_authority()
+    scan_authority = market_snapshot.authority if market_snapshot is not None else _market_scan_authority()
     summary["market_scan_authority"] = scan_authority
     _record_forward_market_substrate(markets, scan_authority)
     scan_availability_status = _market_scan_availability_status(scan_authority)
     if scan_availability_status:
         reasons = [f"market_scan_authority={scan_authority}"]
         if not markets:
+            artifact.add_no_trade(
+                deps.NoTradeCase(
+                    decision_id="",
+                    city="",
+                    target_date="",
+                    range_label="",
+                    direction="unknown",
+                    rejection_stage="MARKET_FILTER",
+                    strategy_key="",
+                    strategy="",
+                    edge_source="",
+                    availability_status=scan_availability_status,
+                    rejection_reasons=reasons,
+                    market_hours_open=None,
+                    timestamp=decision_time.isoformat(),
+                )
+            )
+            summary["no_trades"] += 1
             _record_availability_fact(
                 status=scan_availability_status,
                 reasons=reasons,
@@ -3236,73 +3351,27 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                     missing_snapshot_fields = _missing_execution_snapshot_fields(snapshot_fields)
                     snapshot_capture_error = ""
                     if str(env or "").strip().lower() == "live" and missing_snapshot_fields:
-                        capture_snapshot = getattr(deps, "capture_executable_market_snapshot", None)
-                        if callable(capture_snapshot):
-                            try:
-                                captured_snapshot_fields = capture_snapshot(
-                                    conn,
-                                    market=market,
-                                    decision=d,
-                                    clob=clob,
-                                    captured_at=datetime.now(timezone.utc),
-                                    scan_authority=scan_authority,
-                                )
-                            except Exception as exc:
-                                deps.logger.warning(
-                                    "Executable market snapshot capture failed for %s %s %s: %s",
-                                    city.name,
-                                    candidate.target_date,
-                                    d.edge.bin.label if d.edge else "",
-                                    exc,
-                                )
-                                if not isinstance(d.tokens, dict):
-                                    d.tokens = {}
-                                snapshot_capture_error = str(exc)
-                                d.tokens["executable_snapshot_capture_error"] = snapshot_capture_error
-                            else:
-                                if not isinstance(d.tokens, dict):
-                                    d.tokens = {}
-                                d.tokens.update(captured_snapshot_fields)
-                                try:
-                                    from src.state.db import log_executable_snapshot_market_price_linkage
+                        snapshot_fields, snapshot_capture_error = _capture_execution_snapshot_for_decision(
+                            market,
+                            d,
+                            city.name,
+                            candidate.target_date,
+                        )
+                        missing_snapshot_fields = _missing_execution_snapshot_fields(snapshot_fields)
 
-                                    linkage_result = log_executable_snapshot_market_price_linkage(
-                                        conn,
-                                        snapshot_id=str(
-                                            captured_snapshot_fields.get("executable_snapshot_id", "")
-                                        ),
-                                    )
-                                    summary["forward_market_price_linkage_status"] = str(
-                                        linkage_result.get("status", "")
-                                    )
-                                    if _forward_price_linkage_status_degraded(
-                                        summary["forward_market_price_linkage_status"]
-                                    ):
-                                        summary["degraded"] = True
-                                except Exception as exc:
-                                    deps.logger.warning(
-                                        "Executable snapshot price linkage write failed for %s %s %s: %s",
-                                        city.name,
-                                        candidate.target_date,
-                                        d.edge.bin.label if d.edge else "",
-                                        exc,
-                                    )
-                                    summary["forward_market_price_linkage_status"] = "error"
-                                    summary["degraded"] = True
-                                snapshot_fields = _execution_snapshot_fields(d.tokens)
-                                missing_snapshot_fields = _missing_execution_snapshot_fields(snapshot_fields)
-                                try:
-                                    conn.commit()
-                                except Exception as exc:
-                                    deps.logger.warning(
-                                        "Executable market snapshot commit failed for %s %s %s: %s",
-                                        city.name,
-                                        candidate.target_date,
-                                        d.edge.bin.label if d.edge else "",
-                                        exc,
-                                    )
-                                    snapshot_capture_error = f"executable_snapshot_commit_failed:{exc}"
-                                    d.tokens["executable_snapshot_capture_error"] = snapshot_capture_error
+                    if (
+                        str(env or "").strip().lower() == "live"
+                        and not missing_snapshot_fields
+                        and not snapshot_capture_error
+                        and _execution_snapshot_is_stale(conn, snapshot_fields["executable_snapshot_id"])
+                    ):
+                        snapshot_fields, snapshot_capture_error = _capture_execution_snapshot_for_decision(
+                            market,
+                            d,
+                            city.name,
+                            candidate.target_date,
+                        )
+                        missing_snapshot_fields = _missing_execution_snapshot_fields(snapshot_fields)
 
                     if str(env or "").strip().lower() == "live" and (missing_snapshot_fields or snapshot_capture_error):
                         summary["no_trades"] += 1

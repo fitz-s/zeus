@@ -4327,6 +4327,14 @@ def _forward_existing_matches(existing, expected: dict, *, ignore: set[str] | No
     return True
 
 
+def _forward_existing_outcome_is_resolved(existing: dict) -> bool:
+    outcome = _forward_clean_str(existing.get("outcome"))
+    if outcome is None:
+        return False
+    range_label = _forward_clean_str(existing.get("range_label"))
+    return outcome != range_label
+
+
 def _insert_forward_market_event(conn: sqlite3.Connection, values: dict) -> str:
     existing = conn.execute(
         """
@@ -4340,7 +4348,7 @@ def _insert_forward_market_event(conn: sqlite3.Connection, values: dict) -> str:
     ).fetchone()
     if existing is not None:
         existing_values = dict(zip(_FORWARD_MARKET_EVENT_COLUMNS, tuple(existing)))
-        if _forward_clean_str(existing_values.get("outcome")) is not None:
+        if _forward_existing_outcome_is_resolved(existing_values):
             return "resolved_existing"
         if _forward_existing_matches(existing_values, values, ignore={"recorded_at", "outcome"}):
             return "unchanged"
@@ -5758,6 +5766,30 @@ def _opportunity_fact_candidate_id(candidate) -> str:
     return ""
 
 
+def _main_database_path(conn: sqlite3.Connection | None) -> Path | None:
+    if conn is None:
+        return None
+    try:
+        for row in conn.execute("PRAGMA database_list").fetchall():
+            name = row["name"] if isinstance(row, sqlite3.Row) else row[1]
+            path = row["file"] if isinstance(row, sqlite3.Row) else row[2]
+            if name == "main" and path:
+                return Path(str(path)).resolve()
+    except Exception:
+        return None
+    return None
+
+
+def _is_verified_trade_connection(conn: sqlite3.Connection | None) -> bool:
+    main_path = _main_database_path(conn)
+    if main_path is None:
+        return False
+    try:
+        return main_path == _zeus_trade_db_path().resolve()
+    except Exception:
+        return False
+
+
 def _decision_vector_value(decision, attr_name: str) -> float | None:
     edge = getattr(decision, "edge", None)
     vector = getattr(decision, attr_name, None)
@@ -6285,9 +6317,12 @@ def log_opportunity_fact(
     INV-37 fix (wave-2, 2026-05-18): opens its own trade connection rather than
     accepting an opaque conn from callers. Pre-fix, callers could pass a
     forecasts-rooted or world-ATTACHed conn, causing writes to land in the wrong
-    DB. The ``conn`` parameter is kept for backward compat but is no longer used.
+    DB. Live cycles may pass their already-open trade connection; when its main
+    DB path is verified as zeus_trades.db, reuse it to avoid a same-process
+    second writer deadlocking on the cycle's own transaction.
     """
-    _wconn = get_trade_connection(write_class="live")
+    _wconn = conn if _is_verified_trade_connection(conn) else get_trade_connection(write_class="live")
+    _owns_connection = _wconn is not conn
     try:
         if not _table_exists(_wconn, "opportunity_fact"):
             logger.info("Opportunity fact table unavailable; skipping durable write")
@@ -6410,14 +6445,16 @@ def log_opportunity_fact(
                 recorded_at,
             ),
         )
-        _wconn.commit()
+        if _owns_connection:
+            _wconn.commit()
         return {"status": "written", "table": "opportunity_fact"}
     except Exception as e:
         import logging as _logging
         _logging.getLogger(__name__).warning("Failed to log opportunity fact: %s", e)
         return {"status": "error", "table": "opportunity_fact", "error": str(e)}
     finally:
-        _wconn.close()
+        if _owns_connection:
+            _wconn.close()
 
 
 def log_availability_fact(

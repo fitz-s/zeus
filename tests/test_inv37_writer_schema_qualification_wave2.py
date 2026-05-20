@@ -1,5 +1,5 @@
 # Created: 2026-05-18
-# Last reused or audited: 2026-05-19
+# Last reused or audited: 2026-05-20
 # Authority basis: /tmp/inv37_wave2_plan.md; PR-S4b §3; architecture/db_table_ownership.yaml
 # Lifecycle: created=2026-05-18; last_reviewed=2026-05-19; last_reused=2026-05-19
 # Purpose: Antibody tests verifying INV-37 wave-2 writers route to canonical DB (not caller conn)
@@ -223,14 +223,44 @@ def test_opportunity_fact_lands_in_trade_db(tmp_trade_db, tmp_foreign_db):
     assert "opportunity_fact" not in tables, "opportunity_fact must NOT exist on foreign DB"
 
 
+def test_opportunity_fact_reuses_verified_trade_connection(tmp_trade_db):
+    """A live trade-DB caller conn must not self-deadlock through a second writer."""
+    from src.state.db import log_opportunity_fact
+
+    trade_conn = sqlite3.connect(str(tmp_trade_db))
+
+    with (
+        patch("src.state.db._zeus_trade_db_path", return_value=tmp_trade_db),
+        patch("src.state.db.get_trade_connection") as mock_trade,
+    ):
+        mock_trade.side_effect = AssertionError("must reuse the verified trade connection")
+        result = log_opportunity_fact(
+            trade_conn,
+            candidate=_FakeCandidate(),
+            decision=_FakeDecision(),
+            should_trade=True,
+            rejection_stage="none",
+            rejection_reasons=None,
+            recorded_at="2026-05-18T12:00:00+00:00",
+        )
+
+    count = trade_conn.execute(
+        "SELECT COUNT(*) FROM opportunity_fact WHERE decision_id='dec-w2-001'"
+    ).fetchone()[0]
+    trade_conn.close()
+
+    assert result.get("status") == "written"
+    assert count == 1
+
+
 def test_opportunity_fact_sed_break(tmp_trade_db, tmp_foreign_db):
-    """Sed-break: log_opportunity_fact must call get_trade_connection() internally."""
+    """Sed-break: unsafe caller conns still route through get_trade_connection()."""
     from src.state.db import log_opportunity_fact
     import inspect
 
     src = inspect.getsource(log_opportunity_fact)
     assert "get_trade_connection" in src, (
-        "sed-break: log_opportunity_fact must call get_trade_connection() internally. "
+        "sed-break: log_opportunity_fact must call get_trade_connection() for unsafe conns. "
         "If this assertion fails, the INV-37 wave-2 fix was reverted."
     )
 

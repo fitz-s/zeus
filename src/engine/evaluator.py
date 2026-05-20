@@ -1,5 +1,5 @@
 # Created: prior
-# Last reused/audited: 2026-05-17
+# Last reused/audited: 2026-05-20
 # Authority basis: docs/operations/task_2026-05-14_data_daemon_live_efficiency/DATA_DAEMON_LIVE_EFFICIENCY_REFACTOR_PLAN.md
 #   Phase 3 live evaluator consumes forecast producer readiness instead of direct-fetching OpenData.
 """Evaluator: takes a market candidate, returns an EdgeDecision or NoTradeCase.
@@ -1084,6 +1084,21 @@ def _entry_forecast_evidence_errors(
         errors.append(f"forecast_evidence_authority_not_forecast:{authority}")
 
     return errors
+
+
+def _polymarket_end_anchor_source_for_candidate(candidate: MarketCandidate) -> str:
+    """Map market-phase evidence provenance into the decision source context."""
+
+    phase_source = str(
+        getattr(candidate, "market_phase_source", None)
+        or getattr(getattr(candidate, "phase_evidence", None), "phase_source", "")
+        or ""
+    ).strip()
+    if phase_source == "verified_gamma":
+        return "gamma_explicit"
+    if phase_source == "fallback_f1":
+        return "f1_12z_fallback"
+    return ""
 
 
 def _normalize_temperature_metric(value: str | None) -> MetricIdentity:
@@ -3245,6 +3260,14 @@ def evaluate_candidate(
         decision_time.isoformat() if isinstance(decision_time, datetime) else None
     )
     forecast_context["decision_time_status"] = "OK" if decision_time is not None else "NOT_SUPPLIED_DIRECT_EVALUATOR_CALL"
+    forecast_context["first_member_observed_time"] = ens_result.get("first_member_observed_time")
+    forecast_context["run_complete_time"] = ens_result.get("run_complete_time")
+    forecast_context["raw_orderbook_hash_transition_delta_ms"] = ens_result.get(
+        "raw_orderbook_hash_transition_delta_ms"
+    )
+    forecast_context["polymarket_end_anchor_source"] = (
+        _polymarket_end_anchor_source_for_candidate(candidate)
+    )
     n_bootstrap = edge_n_bootstrap()
     edges = analysis.find_edges(n_bootstrap=n_bootstrap)
     _fdr_fallback = False
