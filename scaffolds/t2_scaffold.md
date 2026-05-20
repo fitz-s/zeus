@@ -2,9 +2,9 @@
 <!-- Last reused or audited: 2026-05-19 -->
 <!-- Authority basis: docs/operations/task_2026-05-19_strategy_vnext_phase1/PHASE_1_ULTRAPLAN.md §5 (Option B pivot, v3) -->
 
-# T2 SCAFFOLD v3 — Day0HighNowcastSignal + bin_grid_id + one-hot daypart + fit_run_id
+# T2 SCAFFOLD v3.1 — Day0HighNowcastSignal + one-hot daypart + fit_run_id (bin_grid_id deferred)
 
-**Status**: SCAFFOLD v3 (critic round-2 light patches applied; proceeding to production)
+**Status**: SCAFFOLD v3.1 (bin_grid_id/bin_schema_version deferred to Phase 2; proceeding to production)
 **Author**: sonnet executor, worktree `phase1-t2-day0-nowcast-20260520`
 **Entry SHA**: origin/main = `649f73d865` (PR-T1-B merged; T1 complete)
 
@@ -82,15 +82,13 @@ Namespace: `nei_v1_` — DISTINCT from T1's `deid_v1_` and calibration's `dgid_v
 Writer-side hash (Option β, mirrors T1). AFTER INSERT trigger backstop:
 sentinel `'nei_v1_BACKSTOP_NULL_WRITER_BYPASS'`.
 
-### §3.3 Column sketch (v3 — bin_grid_id added, fit_run_id, one-hot daypart)
+### §3.3 Column sketch (v3.1 — bin_grid_id deferred, fit_run_id, one-hot daypart)
 
 ```sql
 CREATE TABLE IF NOT EXISTS day0_nowcast_runs (
     -- Natural key (PK)
     market_slug         TEXT NOT NULL,
     temperature_metric  TEXT NOT NULL CHECK (temperature_metric IN ('high', 'low')),
-    bin_grid_id         TEXT NOT NULL,             -- maps p_nowcast_json[i] to (low,high) bin range
-    bin_schema_version  TEXT NOT NULL,             -- matches ensemble_snapshots_v2.bin_schema_version
     target_date         TEXT NOT NULL,
     observation_time    TEXT NOT NULL,
     run_seq             INTEGER NOT NULL,
@@ -117,12 +115,17 @@ CREATE TABLE IF NOT EXISTS day0_nowcast_runs (
 );
 ```
 
-**NOT NULL columns (11)**: market_slug, temperature_metric, bin_grid_id, bin_schema_version,
-target_date, observation_time, run_seq, fit_run_id, hours_remaining, daypart, schema_version, source
-— 12 total (NOT NULL count is 12; written as 11 in v2 due to counting error, now corrected).
+**NOT NULL columns (9)**: market_slug, temperature_metric, target_date, observation_time,
+run_seq, fit_run_id, hours_remaining, daypart, schema_version, source — 10 total.
 
-`bin_grid_id` pattern from `src/state/schema/v2_schema.py:133-134` (ensemble_snapshots_v2).
-Ensures p_nowcast_json[i] can always be reconstructed to its (low, high) bin bounds.
+**bin_grid_id deferred to Phase 2 (MarketAnalysisVNext)**: Day0 markets resolve ≤6h; bin
+re-list within that window is vanishingly rare. The propagation path (`bin_grid_id` on
+`ensemble_snapshots_v2` and `ContractOutcomeDomain`) does not reach `evaluator.py:2363` or
+`monitor_refresh.py:838` — the `bins` list at those sites is built inline from market
+`outcomes` (Bin type has no `bin_grid_id` field). Plumbing it requires new architectural
+surface not in T2 scope. Scaffold §13 #2 claim "propagated from cycle_runtime.bins" was
+a phantom: no such propagation exists. Phase 2 retrofit will add bin_grid_id/bin_schema_version
+once the canonical propagation path is designed.
 
 **p_fused NOT stored here** — evaluator computes element-wise fusion per-bin and stores
 result in `decision_events.p_posterior`. Nowcast runs table stores only nowcast output.
@@ -302,12 +305,13 @@ CHECK constraint widened to `IN (3, 4)` during migration window (Fix 3).
 
 ---
 
-## §13. Decisions locked in SCAFFOLD v3 (no further critic round)
+## §13. Decisions locked in SCAFFOLD v3.1 (no further critic round)
 
 **#1 resolved**: Storage writer = `src/state/day0_nowcast_store.py` (mirrors T1 pattern).
-**#2 resolved**: bin_grid_id + bin_schema_version columns added (Patch 1 SEV-1).
-  p_nowcast_json is reconstructable given bin_grid_id; bins-snapshot not separately needed
-  because bin_grid_id is the stable key into the existing bin registry.
+**#2 REVISED (v3.1)**: bin_grid_id/bin_schema_version DEFERRED to Phase 2.
+  Original v3 claim ("propagated from cycle_runtime.bins") was a phantom — no propagation
+  path exists at evaluator.py:2363 or monitor_refresh.py:838. bins list is built inline
+  from market outcomes; Bin type has no bin_grid_id field. NOT NULL count corrected to 10.
 **#3 resolved**: Caller-site wiring, not router side-effect (Option c per critic round-2).
 **#4 resolved**: One-hot daypart encoding (3 columns: γ_morning, γ_afternoon, γ_post_peak;
   pre_sunrise = reference category).
