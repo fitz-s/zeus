@@ -2867,18 +2867,19 @@ def refresh_executable_market_substrate_snapshots(
     limit = _snapshot_max_outcomes_from_env(max_outcomes)
     attempted = inserted = skipped = failed = 0
     failures: list[dict[str, str]] = []
-    seen_conditions: set[str] = set()
-    candidates: list[tuple[tuple[int, float, float], int, dict[str, Any], dict[str, Any], str]] = []
+    seen_snapshot_sides: set[tuple[str, str]] = set()
+    candidates: list[
+        tuple[tuple[int, float, float], int, dict[str, Any], dict[str, Any], str, str]
+    ] = []
     ordinal = 0
 
     for market in markets or []:
         for outcome in market.get("outcomes", []) or []:
             ordinal += 1
             condition_id = str(outcome.get("condition_id") or outcome.get("market_id") or "").strip()
-            if not condition_id or condition_id in seen_conditions:
+            if not condition_id:
                 skipped += 1
                 continue
-            seen_conditions.add(condition_id)
             if not outcome.get("executable"):
                 skipped += 1
                 continue
@@ -2886,15 +2887,25 @@ def refresh_executable_market_substrate_snapshots(
             if end_at is not None and end_at <= captured:
                 skipped += 1
                 continue
-            candidates.append(
-                (
-                    _snapshot_refresh_priority(market, outcome, captured=captured),
-                    ordinal,
-                    market,
-                    outcome,
-                    condition_id,
+            for direction in ("buy_yes", "buy_no"):
+                snapshot_side = (condition_id, direction)
+                if snapshot_side in seen_snapshot_sides:
+                    skipped += 1
+                    continue
+                if direction == "buy_no" and not str(outcome.get("no_token_id") or "").strip():
+                    skipped += 1
+                    continue
+                seen_snapshot_sides.add(snapshot_side)
+                candidates.append(
+                    (
+                        _snapshot_refresh_priority(market, outcome, captured=captured),
+                        ordinal,
+                        market,
+                        outcome,
+                        condition_id,
+                        direction,
+                    )
                 )
-            )
 
     candidates.sort(key=lambda item: (item[0], item[1]))
     if len(candidates) > limit:
@@ -2903,14 +2914,16 @@ def refresh_executable_market_substrate_snapshots(
     selected_candidates = candidates[:limit]
     deadline = time.monotonic() + _snapshot_budget_seconds_from_env(budget_seconds)
     budget_exhausted = False
-    for index, (_priority, _ordinal, market, outcome, condition_id) in enumerate(selected_candidates):
+    for index, (_priority, _ordinal, market, outcome, condition_id, direction) in enumerate(
+        selected_candidates
+    ):
         if time.monotonic() >= deadline:
             budget_exhausted = True
             skipped += len(selected_candidates) - index
             break
         attempted += 1
         decision = SimpleNamespace(
-            edge=SimpleNamespace(direction="buy_yes"),
+            edge=SimpleNamespace(direction=direction),
             tokens={
                 "token_id": outcome.get("token_id"),
                 "no_token_id": outcome.get("no_token_id"),

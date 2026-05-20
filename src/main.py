@@ -1195,9 +1195,11 @@ def _auto_derive_user_channel_condition_ids(
 ) -> list[str]:
     """Derive the user-channel WS subscription set.
 
-    Fresh persisted ``market_events_v2`` rows are primary. Boot-time Gamma
-    scanning is opt-in because the scanner can take minutes during cold start
-    and belongs in the background market_discovery job, not daemon bootstrap.
+    Fresh persisted ``market_events_v2`` rows are primary. When those rows are
+    missing at boot, Gamma scanning is enabled by default so the one-shot
+    user-channel starter does not latch to an empty subscription set for the
+    lifetime of the live process. Operators can disable this fallback by setting
+    ``ZEUS_USER_CHANNEL_BOOT_GAMMA_SCAN=0``.
 
     Total failure still returns [] rather than raising; the daemon then stays in
     the fail-closed WS posture recorded by the gap guard.
@@ -1205,7 +1207,7 @@ def _auto_derive_user_channel_condition_ids(
     persisted_ids = _market_events_v2_user_channel_condition_ids(now=now)
     if persisted_ids:
         return persisted_ids
-    if os.getenv("ZEUS_USER_CHANNEL_BOOT_GAMMA_SCAN", "0").strip().lower() not in {
+    if os.getenv("ZEUS_USER_CHANNEL_BOOT_GAMMA_SCAN", "1").strip().lower() not in {
         "1",
         "true",
         "yes",
@@ -1213,7 +1215,7 @@ def _auto_derive_user_channel_condition_ids(
     }:
         logger.warning(
             "user-channel WS found no fresh market_events_v2 condition_ids; "
-            "skipping boot Gamma scan in live critical path"
+            "boot Gamma scan disabled by ZEUS_USER_CHANNEL_BOOT_GAMMA_SCAN=0"
         )
         return []
     try:

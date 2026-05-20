@@ -435,9 +435,95 @@ def test_snapshot_refresh_stops_when_budget_is_exhausted(monkeypatch):
 
     assert captured == ["cond-0"]
     assert summary["attempted"] == 1
-    assert summary["skipped"] == 2
+    assert summary["skipped"] == 5
     assert summary["truncated"] == 1
     assert summary["budget_exhausted"] == 1
+
+
+def test_snapshot_refresh_persists_yes_and_no_substrate_sides():
+    """Relationship: background substrate must not erase the later decision side."""
+
+    conn = _make_market_topology_conn()
+    now = datetime(2026, 5, 20, 12, 0, tzinfo=timezone.utc)
+    market = {
+        "event_id": "side-event",
+        "slug": "highest-temperature-in-side-on-may-21-2026",
+        "outcomes": [
+            {
+                "condition_id": "cond-side",
+                "question_id": "question-side",
+                "gamma_market_id": "gamma-side",
+                "token_id": "yes-side",
+                "no_token_id": "no-side",
+                "raw_gamma_payload_hash": "c" * 64,
+                "active": True,
+                "closed": False,
+                "accepting_orders": True,
+                "enable_orderbook": True,
+                "market_end_at": "2026-05-21T12:00:00+00:00",
+                "executable": True,
+                "token_map_raw": {
+                    "clobTokenIds": ["yes-side", "no-side"],
+                    "outcomes": ["Yes", "No"],
+                },
+                "gamma_market_raw": {
+                    "id": "gamma-side",
+                    "conditionId": "cond-side",
+                    "questionID": "question-side",
+                    "active": True,
+                    "closed": False,
+                    "acceptingOrders": True,
+                    "enableOrderBook": True,
+                    "clobTokenIds": ["yes-side", "no-side"],
+                },
+            }
+        ],
+    }
+
+    class SideAwareClob:
+        def get_clob_market_info(self, condition_id: str) -> dict:
+            return {
+                "condition_id": condition_id,
+                "tokens": [{"token_id": "yes-side"}, {"token_id": "no-side"}],
+                "feesEnabled": True,
+            }
+
+        def get_orderbook_snapshot(self, token_id: str) -> dict:
+            return {
+                "asset_id": token_id,
+                "tick_size": "0.01",
+                "min_order_size": "5",
+                "neg_risk": True,
+                "bids": [{"price": "0.40", "size": "10"}],
+                "asks": [{"price": "0.42", "size": "10"}],
+            }
+
+        def get_fee_rate(self, token_id: str) -> float:
+            return 0
+
+    summary = ms.refresh_executable_market_substrate_snapshots(
+        conn,
+        markets=[market],
+        clob=SideAwareClob(),
+        captured_at=now,
+        max_outcomes=4,
+        budget_seconds=1.0,
+    )
+
+    assert summary["attempted"] == 2
+    assert summary["inserted"] == 2
+    rows = conn.execute(
+        """
+        SELECT outcome_label, selected_outcome_token_id
+          FROM executable_market_snapshots
+         WHERE condition_id = 'cond-side'
+         ORDER BY outcome_label
+        """
+    ).fetchall()
+    assert [(row["outcome_label"], row["selected_outcome_token_id"]) for row in rows] == [
+        ("NO", "no-side"),
+        ("YES", "yes-side"),
+    ]
 
 
 def _make_market_topology_conn() -> sqlite3.Connection:
