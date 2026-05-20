@@ -30,12 +30,20 @@ fit_version (semantic, e.g., "hpf_v1") is stable across re-runs of the same algo
 Training data source: calibration_pairs_v2 (forecasts DB), filtered to Day0 rows
 with valid hours_remaining <= 6 and known daypart.
 
-Production pass implements fit_day0_horizon_platt() using sklearn or scipy.optimize.
+fit_day0_horizon_platt() uses scipy.optimize.minimize (L-BFGS-B) to fit the
+logistic regression model via log-loss minimization.  sklearn is not a
+declared dependency in requirements.txt so we use scipy which is already
+imported by the signal stack.
 """
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass, field
 from typing import Any
+
+import numpy as np
+from scipy.optimize import minimize
+from scipy.special import expit, logit
 
 
 @dataclass
@@ -101,24 +109,52 @@ class HorizonPlattFit:
 
         Args:
             p_now_raw: empirical climatology probability (raw, pre-calibration).
+                Clipped to [1e-7, 1-1e-7] to avoid infinite logit.
             hours_remaining: continuous horizon covariate (0 <= x <= 6).
             daypart: one of 'pre_sunrise', 'morning', 'afternoon', 'post_peak'.
             temperature_metric_indicator: 0=low, 1=high.
 
-        Production pass uses scipy.special.logit for the input transform,
-        then scipy.special.expit to recover P_nowcast from logit output.
-
-        Raises NotImplementedError: SCAFFOLD stub.
+        Returns:
+            logit(P_nowcast) — caller applies expit() to recover P_nowcast.
         """
-        raise NotImplementedError(
-            "HorizonPlattFit.predict_logit() is a SCAFFOLD stub — "
-            "production pass fills the logit transform + linear combination."
+        p_clipped = float(np.clip(p_now_raw, 1e-7, 1.0 - 1e-7))
+        logit_raw = float(logit(p_clipped))
+        gamma = (
+            self.gamma_morning * (daypart == "morning")
+            + self.gamma_afternoon * (daypart == "afternoon")
+            + self.gamma_post_peak * (daypart == "post_peak")
         )
+        return (
+            self.alpha * logit_raw
+            + self.beta * float(hours_remaining)
+            + gamma
+            + self.delta * float(temperature_metric_indicator)
+            + self.epsilon
+        )
+
+    def predict_proba(
+        self,
+        p_now_raw: float,
+        hours_remaining: float,
+        daypart: str,
+        temperature_metric_indicator: float,
+    ) -> float:
+        """Return P_nowcast in [0, 1]. Convenience wrapper over predict_logit."""
+        return float(expit(self.predict_logit(
+            p_now_raw, hours_remaining, daypart, temperature_metric_indicator,
+        )))
+
+
+_VALID_DAYPARTS = frozenset({"pre_sunrise", "morning", "afternoon", "post_peak"})
 
 
 def fit_day0_horizon_platt(
     observations: list,
     outcomes: list,
+    *,
+    fit_date: str = "",
+    sample_period_start: str = "",
+    sample_period_end: str = "",
 ) -> HorizonPlattFit:
     """Fit the horizon-aware Platt model to historical Day0 nowcast data.
 
@@ -133,20 +169,82 @@ def fit_day0_horizon_platt(
             - temperature_metric_indicator (float): 0=low, 1=high
         outcomes: sequence of binary outcomes (1=resolved YES, 0=NO),
                   same length and order as observations.
+        fit_date: ISO date string for the fit record (optional, defaults to today).
+        sample_period_start: earliest training sample date (optional).
+        sample_period_end: latest training sample date (optional).
 
     Returns:
         HorizonPlattFit with fitted (α, β, γ_morning, γ_afternoon, γ_post_peak, δ, ε)
         and fit_run_id (uuid4) + fit_version ("hpf_v1").
 
     Raises:
-        ValueError: if observations and outcomes have different lengths.
-        NotImplementedError: SCAFFOLD stub — production pass required.
+        ValueError: if observations and outcomes have different lengths or contain
+            invalid daypart values.
     """
     if len(observations) != len(outcomes):
         raise ValueError(
             f"observations and outcomes must have the same length, "
             f"got {len(observations)} and {len(outcomes)}"
         )
-    raise NotImplementedError(
-        "fit_day0_horizon_platt() is a SCAFFOLD stub — production pass required."
+    if not observations:
+        raise ValueError("observations must be non-empty")
+
+    # Validate and extract features
+    n = len(observations)
+    logit_raw = np.zeros(n)
+    hrs = np.zeros(n)
+    is_morning = np.zeros(n)
+    is_afternoon = np.zeros(n)
+    is_post_peak = np.zeros(n)
+    metric_ind = np.zeros(n)
+
+    for i, obs in enumerate(observations):
+        dp = obs["daypart"]
+        if dp not in _VALID_DAYPARTS:
+            raise ValueError(f"Invalid daypart {dp!r} at index {i}; expected one of {sorted(_VALID_DAYPARTS)}")
+        p_raw = float(np.clip(obs["p_now_raw"], 1e-7, 1.0 - 1e-7))
+        logit_raw[i] = float(logit(p_raw))
+        hrs[i] = float(obs["hours_remaining"])
+        is_morning[i] = 1.0 if dp == "morning" else 0.0
+        is_afternoon[i] = 1.0 if dp == "afternoon" else 0.0
+        is_post_peak[i] = 1.0 if dp == "post_peak" else 0.0
+        metric_ind[i] = float(obs["temperature_metric_indicator"])
+
+    y = np.asarray(outcomes, dtype=np.float64)
+
+    # Design matrix: [logit_raw, hrs, is_morning, is_afternoon, is_post_peak, metric_ind, 1]
+    X = np.column_stack([logit_raw, hrs, is_morning, is_afternoon, is_post_peak, metric_ind, np.ones(n)])
+
+    def neg_log_loss(w: np.ndarray) -> float:
+        logit_pred = X @ w
+        p = expit(logit_pred)
+        p_clip = np.clip(p, 1e-12, 1.0 - 1e-12)
+        return -float(np.mean(y * np.log(p_clip) + (1.0 - y) * np.log(1.0 - p_clip)))
+
+    def grad(w: np.ndarray) -> np.ndarray:
+        p = expit(X @ w)
+        return -(X.T @ (y - p)) / n
+
+    w0 = np.zeros(X.shape[1])
+    result = minimize(neg_log_loss, w0, jac=grad, method="L-BFGS-B")
+    alpha, beta, g_morning, g_afternoon, g_post_peak, delta, epsilon = result.x
+
+    if not fit_date:
+        from datetime import date as _date
+        fit_date = _date.today().isoformat()
+
+    return HorizonPlattFit(
+        alpha=float(alpha),
+        beta=float(beta),
+        gamma_morning=float(g_morning),
+        gamma_afternoon=float(g_afternoon),
+        gamma_post_peak=float(g_post_peak),
+        delta=float(delta),
+        epsilon=float(epsilon),
+        fit_version="hpf_v1",
+        fit_run_id=str(uuid.uuid4()),
+        fit_date=fit_date,
+        n_obs=n,
+        sample_period_start=sample_period_start,
+        sample_period_end=sample_period_end,
     )

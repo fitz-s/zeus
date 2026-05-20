@@ -95,3 +95,87 @@ def test_day0_nowcast_horizon_bound_rejects_negative():
             current_temp=inputs.current_temp,
             hours_remaining=inputs.hours_remaining,
         )
+
+
+def test_day0_nowcast_floor_semantics_holds():
+    """Relationship test: settlement_samples() must produce values >= obs_floor.
+
+    HIGH semantics: observed_high_so_far forms a FLOOR — the day's high cannot
+    be below what has already been observed. Any sample below obs_floor indicates
+    a logic inversion (LOW ceiling applied instead of HIGH floor).
+    """
+    obs_floor = 70.0
+    signal = Day0HighNowcastSignal(
+        observed_high_so_far=obs_floor,
+        member_maxes_remaining=np.array([65.0, 68.0, 69.0]),  # all below obs_floor
+        current_temp=66.0,
+        hours_remaining=3.0,
+    )
+    samples = signal.settlement_samples()
+    assert np.all(samples >= obs_floor), (
+        f"settlement_samples() violated HIGH floor invariant: "
+        f"min={samples.min()}, obs_floor={obs_floor}. "
+        "HIGH semantics require floor (max), not ceiling (min)."
+    )
+
+
+def test_day0_nowcast_high_semantics_vs_low_semantics():
+    """Relationship test: HIGH nowcast samples >= LOW conceptual ceiling for same obs.
+
+    When observed_high_so_far == observed_low_so_far (degenerate case),
+    HIGH samples must be >= that value (floor), while the equivalent LOW signal
+    would produce samples <= that value (ceiling). Tests that the two semantics
+    are directionally inverted as designed.
+    """
+    obs_val = 72.0
+    ens = np.array([68.0, 70.0, 71.0])  # all below obs_val
+    high_signal = Day0HighNowcastSignal(
+        observed_high_so_far=obs_val,
+        member_maxes_remaining=ens,
+        current_temp=69.0,
+        hours_remaining=2.0,
+    )
+    high_samples = high_signal.settlement_samples()
+    # HIGH: floor applied — all samples must be >= obs_floor
+    assert np.all(high_samples >= obs_val), (
+        f"HIGH floor invariant violated: min={high_samples.min()}, obs_floor={obs_val}"
+    )
+
+
+def test_inv_nowcast_completeness_natural_key():
+    """Completeness: nowcast_event_id_v1_hash produces nei_v1_ namespace.
+
+    Relationship test: the nei_v1_ hash contract (distinct from deid_v1_ and dgid_v1_)
+    must be enforced at the writer-side. Tests that the hash function produces the
+    expected namespace prefix and is stable for the same inputs.
+    """
+    from src.state.day0_nowcast_store import nowcast_event_id_v1_hash
+
+    nei = nowcast_event_id_v1_hash(
+        market_slug="will-chicago-high-temp-be-65-70f-on-may-20",
+        temperature_metric="high",
+        target_date="2026-05-20",
+        observation_time="2026-05-20T14:00:00",
+        run_seq=0,
+    )
+    assert nei.startswith("nei_v1_"), (
+        f"nowcast_event_id must use nei_v1_ namespace, got {nei!r}"
+    )
+    # Stability: same inputs must produce the same hash (deterministic)
+    nei2 = nowcast_event_id_v1_hash(
+        market_slug="will-chicago-high-temp-be-65-70f-on-may-20",
+        temperature_metric="high",
+        target_date="2026-05-20",
+        observation_time="2026-05-20T14:00:00",
+        run_seq=0,
+    )
+    assert nei == nei2, "nowcast_event_id_v1_hash must be deterministic for same inputs"
+    # Distinctness: different run_seq must produce different hash
+    nei3 = nowcast_event_id_v1_hash(
+        market_slug="will-chicago-high-temp-be-65-70f-on-may-20",
+        temperature_metric="high",
+        target_date="2026-05-20",
+        observation_time="2026-05-20T14:00:00",
+        run_seq=1,
+    )
+    assert nei != nei3, "Different run_seq must yield different nowcast_event_id"

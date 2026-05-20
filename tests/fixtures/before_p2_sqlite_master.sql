@@ -1686,6 +1686,11 @@ CREATE UNIQUE INDEX ux_observation_revisions_payload
 CREATE UNIQUE INDEX ux_settlement_commands_active_condition_asset
   ON settlement_commands (condition_id, market_id, payout_asset)
   WHERE state NOT IN ('REDEEM_CONFIRMED','REDEEM_FAILED');
+-- table: settlement_schema_migrations
+CREATE TABLE settlement_schema_migrations (
+              migration_key TEXT PRIMARY KEY,
+              applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
 -- table: validated_calibration_transfers
 CREATE TABLE validated_calibration_transfers (
                 id                    INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2186,5 +2191,47 @@ CREATE TABLE source_run (
             recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             CHECK (partial_run = 0 OR completeness_status = 'PARTIAL')
         );
+-- table: day0_horizon_platt_fits
+CREATE TABLE day0_horizon_platt_fits (
+            fit_run_id          TEXT PRIMARY KEY,
+            fit_version         TEXT NOT NULL,
+            alpha               REAL NOT NULL,
+            beta                REAL NOT NULL,
+            gamma_morning       REAL NOT NULL,
+            gamma_afternoon     REAL NOT NULL,
+            gamma_post_peak     REAL NOT NULL,
+            delta               REAL NOT NULL,
+            epsilon             REAL NOT NULL,
+            fit_date            TEXT NOT NULL,
+            n_obs               INTEGER NOT NULL,
+            sample_period_start TEXT NOT NULL,
+            sample_period_end   TEXT NOT NULL,
+            schema_version      INTEGER NOT NULL CHECK (schema_version IN (3, 4)),
+            source              TEXT NOT NULL CHECK (source IN ('live_fit', 'replay_fit'))
+        );
+-- table: day0_nowcast_runs
+CREATE TABLE day0_nowcast_runs (
+            market_slug         TEXT NOT NULL,
+            temperature_metric  TEXT NOT NULL CHECK (temperature_metric IN ('high', 'low')),
+            target_date         TEXT NOT NULL,
+            observation_time    TEXT NOT NULL,
+            run_seq             INTEGER NOT NULL,
+            nowcast_event_id    TEXT,
+            fit_run_id          TEXT NOT NULL,
+            p_nowcast_json      TEXT,
+            p_now_raw_json      TEXT,
+            hours_remaining     REAL NOT NULL,
+            daypart             TEXT NOT NULL
+                CHECK (daypart IN ('pre_sunrise','morning','afternoon','post_peak')),
+            schema_version      INTEGER NOT NULL CHECK (schema_version IN (3, 4)),
+            source              TEXT NOT NULL CHECK (source IN ('live_nowcast', 'replay')),
+            PRIMARY KEY (market_slug, temperature_metric, target_date, observation_time, run_seq)
+        );
+-- index: idx_day0_nowcast_runs_slug_date
+CREATE INDEX idx_day0_nowcast_runs_slug_date
+            ON day0_nowcast_runs(market_slug, target_date);
+-- index: idx_day0_nowcast_runs_event_id
+CREATE INDEX idx_day0_nowcast_runs_event_id
+            ON day0_nowcast_runs(nowcast_event_id);
 -- table: sqlite_sequence
 CREATE TABLE sqlite_sequence(name,seq);

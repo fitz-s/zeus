@@ -15,8 +15,11 @@ p_cal is np.ndarray, not scalar).
 Horizon guard: raises NotApplicableHorizon when inputs.hours_remaining > 6.
 Fail-closed: live mode must not relabel ensemble output as nowcast.
 
-SCAFFOLD stub: settlement_samples() raises NotImplementedError.
-Production pass fills body using HorizonPlattFit from day0_horizon_calibration.
+settlement_samples() implements HIGH floor semantics:
+    anchored = max(ens_remaining, current_temp)   # HIGH: floor, not ceiling
+    blended  = w * anchored + (1-w) * current_temp
+    return max(obs_floor, blended)                # floor applied element-wise
+
 Intentionally does NOT import day0_low_nowcast_signal (parallel-structure invariant).
 """
 from __future__ import annotations
@@ -25,6 +28,7 @@ from typing import TYPE_CHECKING, Callable
 
 import numpy as np
 
+from src.contracts.settlement_semantics import apply_settlement_rounding
 from src.signal.forecast_uncertainty import day0_nowcast_context
 
 if TYPE_CHECKING:
@@ -40,7 +44,7 @@ class NotApplicableHorizon(ValueError):
 
 
 class Day0HighNowcastSignal:
-    """High-temperature Day0 nowcast signal (SCAFFOLD stub).
+    """High-temperature Day0 nowcast signal.
 
     Constructor mirrors Day0LowNowcastSignal for structural symmetry:
     same required fields, same rich optional fields, same output interface.
@@ -124,24 +128,24 @@ class Day0HighNowcastSignal:
             current_utc_timestamp=self._current_utc_timestamp,
         )
 
+    def _settle(self, values: np.ndarray) -> np.ndarray:
+        return apply_settlement_rounding(values, self._round_fn, self._precision)
+
     def settlement_samples(self) -> np.ndarray:
-        """Apply HorizonPlattFit to compute calibrated nowcast sample distribution.
+        """HIGH floor semantics — mirrors Day0LowNowcastSignal with max instead of min.
 
-        Production pass:
-            1. Compute P_now_raw from empirical climatology (last 3 readings trajectory)
-            2. Apply self._model (HorizonPlattFit) to get P_nowcast (scalar per bin)
-            3. Return samples drawn from nowcast-calibrated distribution
-               (shape matches self.ens_remaining for evaluator compatibility)
+        Day's high cannot be below observed_high_so_far (floor, not ceiling).
 
-        Evaluator owns element-wise fusion:
-            P_fused[bin] = w * P_nowcast[bin] + (1-w) * p_cal[bin]
-            w = sigmoid(-(hours_remaining - 3))
-        Fusion not computed here; nowcast output passed to evaluator as-is.
+        Algorithm:
+            anchored = max(ens_remaining[i], current_temp)  # floor: high can only rise
+            w        = _remaining_weight()
+            blended  = w * anchored + (1-w) * current_temp
+            final    = max(obs_floor, blended)              # floor from observation
         """
-        raise NotImplementedError(
-            "Day0HighNowcastSignal.settlement_samples() is a SCAFFOLD stub. "
-            "Production pass: apply HorizonPlattFit to produce calibrated nowcast samples."
-        )
+        anchored = np.maximum(self.ens_remaining, self.current_temp)
+        w = self._remaining_weight()
+        blended = w * anchored + (1.0 - w) * self.current_temp
+        return self._settle(np.maximum(self.obs_floor, blended))
 
     def p_bin(self, low: float | None, high: float | None) -> float:
         """Per-bin probability under nowcast distribution. Mirrors Day0LowNowcastSignal."""

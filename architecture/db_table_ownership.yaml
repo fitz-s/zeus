@@ -184,6 +184,32 @@ tables:
       K1-split 2026-05-11. v2 calibration pairs (apply_v2_schema via init_schema_forecasts).
       Ghost copy on world.db declared legacy_archived below.
 
+  - name: day0_horizon_platt_fits
+    db: forecasts
+    schema_class: forecast_class
+    schema_version_owner: SCHEMA_FORECASTS_VERSION
+    created_by: init_schema_forecasts
+    pk_col: fit_run_id
+    notes: >
+      T2 Day0Nowcast (2026-05-19). One row per HorizonPlattFit execution (uuid4 PK).
+      Referenced as FK by day0_nowcast_runs.fit_run_id. SCHEMA_FORECASTS_VERSION 4.
+      fit_version="hpf_v1" stable across re-runs; fit_run_id is per-execution UUID.
+
+  - name: day0_nowcast_runs
+    db: forecasts
+    schema_class: forecast_class
+    schema_version_owner: SCHEMA_FORECASTS_VERSION
+    created_by: init_schema_forecasts
+    pk_col: "[market_slug, temperature_metric, target_date, observation_time, run_seq]"
+    notes: >
+      T2 Day0Nowcast (2026-05-19). One row per Day0HighNowcastSignal evaluation.
+      nowcast_event_id: nei_v1_ namespace (distinct from deid_v1_ and dgid_v1_).
+      Writer-side hash; AFTER INSERT trigger backstop sentinel on NULL.
+      Writes occur only during ≤6h applicability window (subset of 24h Day0 lifecycle).
+      bin_grid_id deferred to Phase 2: no propagation path at Day0 caller sites;
+      upstream ensemble_snapshots_v2.bin_grid_id covers the 24h lifecycle bin evolution.
+      SCHEMA_FORECASTS_VERSION 4. CHECK (schema_version IN (3, 4)) for migration window.
+
   # ---------------------------------------------------------------------------
   # LEGACY_ARCHIVED — ghost copies of forecast-class tables on world.db
   # Same table names as forecast-class entries above, but db: world.
@@ -402,6 +428,18 @@ tables:
     created_by: init_schema
     pk_col: null
     notes: Ghost shell on world.db. Authoritative on trade.db. Drop after 2026-08-15.
+
+  - name: settlement_schema_migrations
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_settlement_command_schema
+    pk_col: migration_key
+    notes: >
+      Idempotency ledger for settlement_commands schema migrations.
+      Replaces the prior PRAGMA user_version = 13 approach
+      (codereview-bundle DDL hot-path split, 2026-05-19).
+      Key 'v13_gamma_backfill' marks the gamma_explicit → unknown_legacy backfill.
 
   # ---------------------------------------------------------------------------
   # WORLD-CLASS tables (db: world, authoritative in zeus-world.db)
