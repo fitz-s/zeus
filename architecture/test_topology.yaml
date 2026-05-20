@@ -441,6 +441,8 @@ test_trust_policy:
     tests/test_entry_gate_authority_promotion.py: {created: "2026-05-19", last_used: "2026-05-19"}
     # 2026-05-19 codereview-may19-2 P0-2: executable forecast reader enforces source-clock causality (source_available_at/captured_at <= decision_time).
     tests/test_forecast_decision_time_causality.py: {created: "2026-05-19", last_used: "2026-05-19"}
+    # 2026-05-19 codereview-may19-2 P1-1: ACK facts durable post-SDK-submit, independent of outer cycle commit.
+    tests/test_live_order_ack_durability.py: {created: "2026-05-19", last_used: "2026-05-19"}
 
 categories:
   core_law_antibody:
@@ -675,6 +677,8 @@ categories:
     - tests/test_reseat_negrisk_misrouted_allowlist.py
     # codereview-may19-2.md relationship F — composite live-health surfaces run_mode failure
     - tests/test_run_mode_failure_surfaces.py
+    # codereview-may19-2 P1-1: ACK facts durable post-SDK-submit (unconditional commit in _live_order).
+    - tests/test_live_order_ack_durability.py
 
   useful_regression:
     - tests/test_alpha_target_coherence.py
@@ -2521,5 +2525,50 @@ test_metadata:
       stale (>5 min), even when daemon heartbeat is fresh. T4 asserts WARNING log
       is emitted with the failing surface name. Call site in _write_heartbeat() in
       src/main.py surfaces composite to state/live_health_composite.json each cycle.
+    created: 2026-05-19
+    last_reused_or_audited: 2026-05-19
+
+  tests/test_live_order_ack_durability.py:
+    modules: [execution]
+    category: core_law_antibody
+    blocks_commit: true
+    asserted_invariants:
+      - P1-1-ACK-COMMIT-INDEPENDENT-OF-OWN-CONN
+    source_under_test:
+      - src/execution/executor.py
+    law_dependencies:
+      - codereview-may19-2.md section 6 P1-1
+    notes: >
+      Antibody for P1-1: _live_order must commit SUBMIT_ACKED + order fact
+      immediately after SDK ACK, independent of whether the caller owns the
+      connection. Sed-flip test greps for sentinel comment; crash-simulation
+      test opens a file-backed DB with an external connection, appends ACK
+      facts + commits, closes without outer commit, reopens and asserts rows
+      persist. Prevents venue order loss on crash between SDK ACK and cycle commit.
+    created: 2026-05-19
+    last_reused_or_audited: 2026-05-19
+  tests/test_ghost_order_proof_backed_resolution.py:
+    modules: [execution]
+    category: core_law_antibody
+    profile: r3_reconcile_ghost_order_proof
+    blocks_commit: true
+    asserted_invariants:
+      - P1-5-GHOST-ORDER-NO-PROOF-STAYS-UNRESOLVED
+      - P1-5-GHOST-ORDER-TERMINAL-POINT-ORDER-RESOLVES
+      - P1-5-GHOST-ORDER-LINKED-TRADE-FACT-RESOLVES
+      - P1-5-GHOST-ORDER-POSITION-EXPOSURE-BLOCKS-RESOLUTION
+      - P1-5-GHOST-ORDER-OPERATOR-RESOLUTION-ACCEPTED
+    source_under_test:
+      - src/execution/exchange_reconcile.py
+    law_dependencies:
+      - codereview-may19-2.md P1-5
+    notes: >
+      Closes the "ghost-order resolved by disappearance alone" defect (P1-5).
+      Before this antibody, absence from get_open_orders() was the sole resolution
+      criterion — a venue read-miss would silently clear the finding while real
+      exposure persisted and the kill-switch was disarmed. Now at least one proof
+      must fire: (a) terminal point-order status, (c) linked venue_trade_facts row,
+      (d) no token exposure in position_current, or (b) no matching trade in
+      get_trades enumeration. Operator path (e) is the direct resolve_finding() API.
     created: 2026-05-19
     last_reused_or_audited: 2026-05-19

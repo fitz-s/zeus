@@ -3652,8 +3652,11 @@ def _live_order(
                         **final_envelope_payload,
                     },
                 )
-            if _own_conn:
-                conn.commit()
+            # P1-1: durable commit independent of _own_conn — codereview-may19-2
+            # ACK/order/trade facts must persist immediately regardless of whether
+            # the caller provided an external connection. A crash after SDK ACK
+            # but before the outer cycle commit would lose the venue order record.
+            conn.commit()
         except Exception as inner:
             logger.error(
                 "_live_order: SUBMIT_ACKED append_event failed (command_id=%s order_id=%s): %s",
