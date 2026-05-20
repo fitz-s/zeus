@@ -768,6 +768,9 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         "scripts/backfill_decision_events_from_artifact_json.py",          # already_guarded: reads mode=ro (forecasts); writes under db_writer_lock(BULK) when not dry_run
         # --- T1 Phase-2 book_hash_transitions scripts (2026-05-20) ---
         "scripts/migrate_book_hash_transitions_create_2026_05_21.py",      # operator_invoked: idempotent CREATE TABLE/INDEX only; no PRAGMA user_version bump; not daemon path
+        # --- PR #219 V2 wrap path correction scripts (2026-05-20) ---
+        "scripts/run_redeem_reconcile_with_onchain_proof.py",  # operator_invoked: one-shot Karachi redeem reconciliation; writes REDEEM_CONFIRMED to zeus_trades.db via with conn:
+        "scripts/wrap_usdce_to_pusd_via_onramp.py",           # operator_invoked: one-shot standalone wrap runner; no DB writes (on-chain only)
     }
 )
 

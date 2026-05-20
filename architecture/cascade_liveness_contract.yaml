@@ -44,14 +44,29 @@ state_machines:
 
   - table: wrap_unwrap_commands
     db: world
-    intent_states: [WRAP_REQUESTED, UNWRAP_REQUESTED]
-    # NOTE: no terminal_states_with_operator_action field for liveness_only entries.
-    # Table must stay empty until Z5 pUSD migration ships (per SCAFFOLD §E.2);
-    # the liveness_guard poller asserts row count == 0 instead of driving transitions.
-    # If pUSD migration is abandoned per RISK 3, this entry + the poller +
-    # src/execution/wrap_unwrap_commands.py all get deleted in one commit.
+    # source_module: path to the file whose AST is walked for _transition calls.
+    # test_cascade_liveness_contract.py uses this to validate terminal_states_with_operator_action.
+    source_module: src/execution/wrap_unwrap_commands.py
+    intent_states: [WRAP_REQUESTED]
+    terminal_states:
+      - WRAP_CONFIRMED
+      - WRAP_FAILED
+    terminal_states_with_operator_action:
+      - state: WRAP_FAILED
+        max_age_hours: 24
+        operator_runbook: docs/operations/task_2026-05-16_deep_alignment_audit/KARACHI_2026_05_17_MANUAL_FALLBACK.md
+        escalation_action: "Investigate wrap failure; re-queue via enqueue_wrap_if_balance_above_threshold after root cause resolved"
+        cli_invocation: "python -m scripts.operator_record_wrap <command_id> --resolution <note>"
     required_pollers:
-      - id: wrap_unwrap_liveness_guard
-        watched_states: [WRAP_REQUESTED, UNWRAP_REQUESTED]
-        owner: src/main.py:_wrap_unwrap_liveness_guard_cycle
-        mode: liveness_only
+      - id: wrap_intent_creator
+        watched_states: [WRAP_REQUESTED]
+        owner: src/main.py:_wrap_intent_creator_cycle
+        mode: enqueuer
+      - id: wrap_submitter
+        watched_states: [WRAP_REQUESTED, WRAP_APPROVED]
+        owner: src/main.py:_wrap_submitter_cycle
+        mode: submitter
+      - id: wrap_reconciler
+        watched_states: [WRAP_APPROVE_TX_HASHED, WRAP_TX_HASHED]
+        owner: src/main.py:_wrap_reconciler_cycle
+        mode: reconciler

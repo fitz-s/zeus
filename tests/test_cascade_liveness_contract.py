@@ -41,8 +41,11 @@ NON_STATE_MACHINE_JOB_IDS = frozenset({
     "harvester",
     "heartbeat",
     "venue_heartbeat",
+    # deployment_freshness + wu_daily + imminent_open_capture are operational,
+    # not state-machine pollers.
     "deployment_freshness",
     "wu_daily",
+    "imminent_open_capture",
 })
 
 
@@ -143,11 +146,13 @@ def _state_transitions_in_module(module_path: Path) -> Iterable[str]:
         if not _calls_transition(fdef):
             continue
         for sub in ast.walk(fdef):
-            # SettlementState.REDEEM_OPERATOR_REQUIRED  →  Attribute(Name)
+            # SomeState.STATE_NAME  →  Attribute(Name)
+            # Matches SettlementState.XXX, WrapUnwrapState.XXX, etc.
             if isinstance(sub, ast.Attribute) and isinstance(sub.value, ast.Name):
-                if sub.value.id == "SettlementState":
-                    yield sub.attr
-            # "REDEEM_OPERATOR_REQUIRED"  →  Constant(str)
+                attr = sub.attr
+                if attr.isupper() and "_" in attr:
+                    yield attr
+            # "STATE_NAME"  →  Constant(str)
             if isinstance(sub, ast.Constant) and isinstance(sub.value, str):
                 # filter to look-like-state strings (uppercase + underscores)
                 if sub.value.isupper() and "_" in sub.value:
@@ -193,11 +198,26 @@ def test_every_scheduler_poller_for_state_machines_is_listed_in_contract():
 
 
 def test_terminal_states_with_operator_action_have_transition_in_source():
+    """Each operator-action state must have a transition in its state machine's source module.
+
+    The source module is resolved from:
+      1. sm["source_module"] if present (path relative to REPO_ROOT)
+      2. Fallback to SETTLEMENT_COMMANDS_SRC for backwards compatibility.
+    """
     contract = _load_contract()
-    transitions = set(_state_transitions_in_module(SETTLEMENT_COMMANDS_SRC))
     missing: list[tuple[str, str]] = []
     for sm in contract["state_machines"]:
-        for entry in sm.get("terminal_states_with_operator_action", []) or []:
+        entries = sm.get("terminal_states_with_operator_action", []) or []
+        if not entries:
+            continue
+        # Resolve source module: prefer explicit source_module field.
+        source_rel = sm.get("source_module")
+        if source_rel:
+            source_path = REPO_ROOT / source_rel
+        else:
+            source_path = SETTLEMENT_COMMANDS_SRC
+        transitions = set(_state_transitions_in_module(source_path))
+        for entry in entries:
             state = entry["state"]
             if state not in transitions:
                 missing.append((sm["table"], state))
