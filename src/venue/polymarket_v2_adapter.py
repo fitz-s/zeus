@@ -83,6 +83,23 @@ AUTONOMOUS_REDEEM_ENABLED_ENV = "ZEUS_AUTONOMOUS_REDEEM_ENABLED"
 # skip eth_sendRawTransaction, return REDEEM_DRY_RUN_LOGGED so operator can
 # validate via Tenderly before first live broadcast.
 AUTONOMOUS_REDEEM_DRY_RUN_ENV = "ZEUS_AUTONOMOUS_REDEEM_DRY_RUN"
+# USDC.e ERC-20 on Polygon mainnet.
+# Source: Polygon bridge canonical address; on-chain bytecode verified 2026-05-19.
+POLYGON_USDCE_ADDRESS = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
+# pUSD wrapper ("Wrapped Collateral") on Polygon mainnet.
+# NOTE: POLYGON_PUSD_ADDRESS (0xC011...) = "Polymarket USD" CTF collateral token — DIFFERENT.
+# This address (0x3A3BD7bb) = pUSD ERC-4626-style wrapper; wrap() deposits USDC.e, mints pUSD.
+# wrap(address,uint256) selector = 0xbf376c7a (verified via on-chain bytecode scan 2026-05-19).
+# UNVERIFIED: arg-0 assumed = `to` recipient per ERC-4626 convention;
+#   first live tx must verify pUSD lands at safe_address.
+POLYGON_PUSD_WRAPPER_ADDRESS = "0x3A3BD7bb9528E159577F7C2e685CC81A765002E2"
+# ERC-20 approve(spender,amount) selector.
+ERC20_APPROVE_SELECTOR = "0x095ea7b3"
+# pUSD wrap(address to, uint256 amount) selector, verified on-chain 2026-05-19.
+PUSD_WRAP_SELECTOR = "0xbf376c7a"
+# Kill switch for autonomous wrap. Default OFF (empty string → dry_run=False = live).
+# Set ZEUS_AUTONOMOUS_WRAP_DRY_RUN=1 to enable dry-run (build+sign, skip broadcast).
+AUTONOMOUS_WRAP_DRY_RUN_ENV = "ZEUS_AUTONOMOUS_WRAP_DRY_RUN"
 
 
 @dataclass(frozen=True)
@@ -1721,6 +1738,321 @@ class PolymarketV2Adapter:
             "gas_limit": gas_limit,
         }
 
+    def _wrap_via_safe(
+        self,
+        safe_address: str,
+        amount_micro: int,
+        tx_kind: str,  # "APPROVE" or "WRAP"
+        signer_eoa: str,
+    ) -> dict[str, Any]:
+        """Safe v1.3.0 execTransaction for USDC.e → pUSD two-step wrapping.
+
+        tx_kind="APPROVE": calls USDC.e.approve(POLYGON_PUSD_WRAPPER_ADDRESS, amount_micro)
+        tx_kind="WRAP":    calls pUSD.wrap(safe_address, amount_micro)
+
+        UNVERIFIED: wrap(address,uint256) arg-0 assumed = `to` recipient per ERC-4626
+        convention; first live tx must verify pUSD lands at safe_address.
+
+        Returns dict with:
+          success=True, tx_hash=<str>                       (live broadcast)
+          success=False, errorCode="WRAP_DRY_RUN_LOGGED",
+            dry_run_fingerprint=<16-hex>                   (dry-run mode)
+          success=False, errorCode=<WRAP_*>                (error)
+        """
+        import hashlib as _hashlib
+        import logging
+        import os
+
+        from src.venue.safe_exec import (
+            SAFE_V1_3_VERSION,
+            build_exec_transaction_calldata,
+            build_safe_tx_hash,
+            sign_safe_tx,
+        )
+
+        _logger = logging.getLogger(__name__)
+        dry_run = os.environ.get(AUTONOMOUS_WRAP_DRY_RUN_ENV, "").lower() in (
+            "1", "true", "yes", "on",
+        )
+
+        if tx_kind not in ("APPROVE", "WRAP"):
+            return {
+                "success": False,
+                "errorCode": "WRAP_INVALID_TX_KIND",
+                "errorMessage": f"tx_kind must be APPROVE or WRAP, got {tx_kind!r}",
+                "tx_kind": tx_kind,
+            }
+
+        # ── Pre-flight 1: Safe VERSION ────────────────────────────────────────
+        try:
+            import eth_abi
+            raw_version = self._rpc_call(
+                self.polygon_rpc_url,
+                "eth_call",
+                [{"to": safe_address, "data": "0xffa1ad74"}, "latest"],
+            )
+            version_str = eth_abi.decode(
+                ["string"], bytes.fromhex(str(raw_version).removeprefix("0x"))
+            )[0]
+        except Exception as exc:
+            return {
+                "success": False,
+                "errorCode": "WRAP_RPC_PRECHECK_FAILED",
+                "errorMessage": f"VERSION() eth_call failed: {exc}",
+                "tx_kind": tx_kind,
+            }
+        if version_str != SAFE_V1_3_VERSION:
+            return {
+                "success": False,
+                "errorCode": "WRAP_SAFE_VERSION_UNSUPPORTED",
+                "errorMessage": (
+                    f"Safe at {safe_address} reports VERSION={version_str!r}; "
+                    f"expected {SAFE_V1_3_VERSION!r}"
+                ),
+                "tx_kind": tx_kind,
+            }
+
+        # ── Pre-flight 2: getOwners ───────────────────────────────────────────
+        try:
+            raw_owners = self._rpc_call(
+                self.polygon_rpc_url,
+                "eth_call",
+                [{"to": safe_address, "data": "0xa0e67e2b"}, "latest"],
+            )
+            owners_list = eth_abi.decode(
+                ["address[]"], bytes.fromhex(str(raw_owners).removeprefix("0x"))
+            )[0]
+        except Exception as exc:
+            return {
+                "success": False,
+                "errorCode": "WRAP_RPC_PRECHECK_FAILED",
+                "errorMessage": f"getOwners() eth_call failed: {exc}",
+                "tx_kind": tx_kind,
+            }
+        if signer_eoa.lower() not in [o.lower() for o in owners_list]:
+            return {
+                "success": False,
+                "errorCode": "WRAP_SAFE_OWNER_MISMATCH",
+                "errorMessage": f"signer EOA {signer_eoa} not in Safe.getOwners() {owners_list}",
+                "tx_kind": tx_kind,
+            }
+
+        # ── Pre-flight 3: Safe nonce ──────────────────────────────────────────
+        try:
+            raw_nonce = self._rpc_call(
+                self.polygon_rpc_url,
+                "eth_call",
+                [{"to": safe_address, "data": "0xaffed0e0"}, "latest"],
+            )
+            safe_nonce = int(str(raw_nonce), 16)
+        except Exception as exc:
+            return {
+                "success": False,
+                "errorCode": "WRAP_RPC_PRECHECK_FAILED",
+                "errorMessage": f"Safe nonce() eth_call failed: {exc}",
+                "tx_kind": tx_kind,
+            }
+
+        # ── Pre-flight 4: EOA MATIC balance ──────────────────────────────────
+        _MATIC_FLOOR_WEI = 50_000_000_000_000_000  # 0.05 MATIC
+        try:
+            raw_balance = self._rpc_call(
+                self.polygon_rpc_url,
+                "eth_getBalance",
+                [signer_eoa, "latest"],
+            )
+            eoa_balance_wei = int(str(raw_balance), 16)
+        except Exception as exc:
+            return {
+                "success": False,
+                "errorCode": "WRAP_RPC_PRECHECK_FAILED",
+                "errorMessage": f"eth_getBalance failed for signer EOA: {exc}",
+                "tx_kind": tx_kind,
+            }
+        if eoa_balance_wei < _MATIC_FLOOR_WEI:
+            return {
+                "success": False,
+                "errorCode": "WRAP_EOA_MATIC_INSUFFICIENT",
+                "errorMessage": (
+                    f"signer EOA {signer_eoa} has {eoa_balance_wei} wei MATIC; "
+                    f"need >= {_MATIC_FLOOR_WEI} wei (0.05 MATIC)"
+                ),
+                "tx_kind": tx_kind,
+            }
+
+        # ── Build inner calldata ──────────────────────────────────────────────
+        try:
+            inner_calldata_hex = _build_wrap_calldata(tx_kind, safe_address, amount_micro)
+        except Exception as exc:
+            return {
+                "success": False,
+                "errorCode": "WRAP_CALLDATA_BUILD_FAILED",
+                "errorMessage": f"inner calldata build failed: {exc}",
+                "tx_kind": tx_kind,
+            }
+        inner_data = bytes.fromhex(inner_calldata_hex.removeprefix("0x"))
+        inner_to = (
+            POLYGON_USDCE_ADDRESS if tx_kind == "APPROVE" else POLYGON_PUSD_WRAPPER_ADDRESS
+        )
+
+        # ── Build Safe tx hash + sign ─────────────────────────────────────────
+        try:
+            safe_tx_hash_bytes = build_safe_tx_hash(
+                safe_address=safe_address,
+                chain_id=int(self.chain_id),
+                to=inner_to,
+                value=0,
+                data=inner_data,
+                operation=0,  # CALL
+                nonce=safe_nonce,
+            )
+            signature = sign_safe_tx(safe_tx_hash_bytes, self.signer_key)
+        except Exception as exc:
+            return {
+                "success": False,
+                "errorCode": "WRAP_SIGN_FAILED",
+                "errorMessage": f"Safe sign failed: {exc}",
+                "tx_kind": tx_kind,
+            }
+
+        # ── Build outer execTransaction calldata ─────────────────────────────
+        try:
+            exec_calldata = build_exec_transaction_calldata(
+                to=inner_to,
+                value=0,
+                data=inner_data,
+                operation=0,
+                signatures=signature,
+            )
+        except Exception as exc:
+            return {
+                "success": False,
+                "errorCode": "WRAP_CALLDATA_BUILD_FAILED",
+                "errorMessage": f"execTransaction calldata build failed: {exc}",
+                "tx_kind": tx_kind,
+            }
+
+        # ── EOA nonce + gas ───────────────────────────────────────────────────
+        try:
+            eoa_nonce_hex = self._rpc_call(
+                self.polygon_rpc_url,
+                "eth_getTransactionCount",
+                [signer_eoa, "pending"],
+            )
+            eoa_nonce = int(str(eoa_nonce_hex), 16)
+            gas_price_hex = self._rpc_call(self.polygon_rpc_url, "eth_gasPrice", [])
+            gas_price = int(str(gas_price_hex), 16)
+        except Exception as exc:
+            return {
+                "success": False,
+                "errorCode": "WRAP_RPC_PRECHECK_FAILED",
+                "errorMessage": f"EOA nonce/gasPrice fetch failed: {exc}",
+                "tx_kind": tx_kind,
+            }
+
+        try:
+            gas_hex = self._rpc_call(
+                self.polygon_rpc_url,
+                "eth_estimateGas",
+                [{"from": signer_eoa, "to": safe_address, "data": exec_calldata}],
+            )
+            gas_limit = (int(str(gas_hex), 16) * 12) // 10
+        except V2AdapterError as exc:
+            return {
+                "success": False,
+                "errorCode": "WRAP_GAS_ESTIMATE_REVERTED",
+                "errorMessage": f"eth_estimateGas reverted: {exc}",
+                "tx_kind": tx_kind,
+            }
+        except Exception as exc:
+            return {
+                "success": False,
+                "errorCode": "WRAP_RPC_PRECHECK_FAILED",
+                "errorMessage": f"eth_estimateGas failed: {exc}",
+                "tx_kind": tx_kind,
+            }
+
+        outer_tx = {
+            "to": safe_address,
+            "data": exec_calldata,
+            "value": 0,
+            "chainId": int(self.chain_id),
+            "nonce": eoa_nonce,
+            "gas": gas_limit,
+            "gasPrice": gas_price,
+        }
+
+        try:
+            from eth_account import Account
+            signed = Account.sign_transaction(outer_tx, self.signer_key)
+            raw_hex = "0x" + signed.raw_transaction.hex().removeprefix("0x")
+        except Exception as exc:
+            return {
+                "success": False,
+                "errorCode": "WRAP_SIGN_FAILED",
+                "errorMessage": f"sign_transaction (outer EOA tx) failed: {exc}",
+                "tx_kind": tx_kind,
+            }
+
+        # ── Dry-run gate ──────────────────────────────────────────────────────
+        if dry_run:
+            # SECURITY: never log or return the signed raw_tx_hex.
+            # A signed raw transaction is a broadcastable payload; any observer can
+            # replay it and bypass the no-side-effect gate. Log only non-sensitive
+            # metadata (fingerprint of calldata, NOT of signed tx).
+            _dry_run_fingerprint = _hashlib.sha256(exec_calldata.encode()).hexdigest()[:16]
+            _logger.warning(
+                "WRAP_DRY_RUN_LOGGED safe_address=%s safe_nonce=%d "
+                "tx_kind=%s amount_micro=%d raw_tx_hex_len=%d "
+                "dry_run_fingerprint=%s",
+                safe_address, safe_nonce, tx_kind, amount_micro,
+                len(raw_hex), _dry_run_fingerprint,
+            )
+            return {
+                "success": False,
+                "errorCode": "WRAP_DRY_RUN_LOGGED",
+                "errorMessage": "dry-run mode: raw tx built+signed but not broadcast",
+                "tx_kind": tx_kind,
+                "dry_run_fingerprint": _dry_run_fingerprint,
+                "safe_nonce": safe_nonce,
+            }
+
+        # ── Broadcast ─────────────────────────────────────────────────────────
+        try:
+            tx_hash = self._rpc_call(
+                self.polygon_rpc_url,
+                "eth_sendRawTransaction",
+                [raw_hex],
+            )
+        except Exception as exc:
+            return {
+                "success": False,
+                "errorCode": "WRAP_BROADCAST_FAILED",
+                "errorMessage": f"eth_sendRawTransaction failed: {exc}",
+                "tx_kind": tx_kind,
+            }
+
+        import re as _re
+        tx_hash_str = str(tx_hash) if tx_hash is not None else None
+        if not tx_hash_str or not _re.fullmatch(r"0x[0-9a-fA-F]{64}", tx_hash_str):
+            return {
+                "success": False,
+                "errorCode": "WRAP_INVALID_TX_HASH",
+                "errorMessage": f"eth_sendRawTransaction returned non-hash: {tx_hash!r}",
+                "tx_kind": tx_kind,
+            }
+
+        return {
+            "success": True,
+            "tx_hash": tx_hash_str,
+            "tx_kind": tx_kind,
+            "safe_nonce": safe_nonce,
+            "eoa_nonce": eoa_nonce,
+            "gas_price": gas_price,
+            "gas_limit": gas_limit,
+            "amount_micro": amount_micro,
+        }
+
     def post_heartbeat(self, heartbeat_id: str) -> HeartbeatAck:
         raw = self._sdk_client().post_heartbeat(heartbeat_id)
         return HeartbeatAck(ok=True, raw=dict(raw or {}))
@@ -2201,6 +2533,35 @@ def _build_negrisk_redeem_calldata(
         [condition_bytes, amounts_array],
     )
     selector = bytes.fromhex(NEGRISK_REDEEM_POSITIONS_SELECTOR.removeprefix("0x"))
+    return "0x" + (selector + encoded_args).hex()
+
+
+def _build_wrap_calldata(tx_kind: str, safe_address: str, amount_micro: int) -> str:
+    """Build inner calldata for one step of the USDC.e → pUSD two-step wrap.
+
+    tx_kind="APPROVE": ERC-20 approve(POLYGON_PUSD_WRAPPER_ADDRESS, amount_micro)
+      ABI-encoded: approve(address spender, uint256 value)
+      selector: 0x095ea7b3
+      args: [spender=POLYGON_PUSD_WRAPPER_ADDRESS padded to 32B, value padded to 32B]
+
+    tx_kind="WRAP": pUSD.wrap(safe_address, amount_micro)
+      ABI-encoded: wrap(address to, uint256 amount)
+      selector: 0xbf376c7a
+      args: [to=safe_address padded to 32B, amount padded to 32B]
+      UNVERIFIED: arg-0 assumed = `to` recipient; first live tx must confirm.
+    """
+    import eth_abi  # type: ignore[import]
+
+    if tx_kind == "APPROVE":
+        selector = bytes.fromhex(ERC20_APPROVE_SELECTOR.removeprefix("0x"))
+        encoded_args = eth_abi.encode(["address", "uint256"], [POLYGON_PUSD_WRAPPER_ADDRESS, amount_micro])
+    elif tx_kind == "WRAP":
+        selector = bytes.fromhex(PUSD_WRAP_SELECTOR.removeprefix("0x"))
+        # arg-0 = to (recipient = safe, wrapping USDC.e FOR the safe)
+        # arg-1 = amount in USDC.e micro-units
+        encoded_args = eth_abi.encode(["address", "uint256"], [safe_address, amount_micro])
+    else:
+        raise ValueError(f"tx_kind must be APPROVE or WRAP, got {tx_kind!r}")
     return "0x" + (selector + encoded_args).hex()
 
 

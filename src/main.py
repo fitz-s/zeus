@@ -198,9 +198,14 @@ def _wu_daily_dispatch() -> None:
 # _redeem_reconciler_cycle: polls REDEEM_TX_HASHED, calls reconcile_pending_redeems
 #   (no-op until web3 is wired — operator-recorded tx_hash sits in TX_HASHED
 #   until PR-I.5 follow-up).
-# _wrap_unwrap_liveness_guard_cycle: liveness_only mode; asserts table stays
-#   empty until Z5 pUSD migration (per SCAFFOLD §E.2). Does NOT drive any
-#   state transition (antibody test enforces this via ast walk).
+# Wrap cycle functions (2026-05-19 auto-wrap-post-redeem):
+# _wrap_intent_creator_cycle: reads Safe USDC.e balance; inserts WRAP_REQUESTED
+#   if balance > threshold and no non-terminal WRAP row exists.
+# _wrap_submitter_cycle: picks up WRAP_REQUESTED → submits APPROVE tx;
+#   picks up WRAP_APPROVED → submits WRAP tx; advances state on success.
+# _wrap_reconciler_cycle: polls chain for tx receipts; advances
+#   WRAP_APPROVE_TX_HASHED → WRAP_APPROVED and WRAP_TX_HASHED → WRAP_CONFIRMED;
+#   on WRAP_CONFIRMED calls adapter.update_balance_allowance() to refresh CLOB ledger.
 
 @_scheduler_job("redeem_submitter")
 def _redeem_submitter_cycle() -> None:
@@ -406,38 +411,275 @@ def _redeem_reconciler_cycle() -> None:
             conn.close()
 
 
-@_scheduler_job("wrap_unwrap_liveness_guard")
-def _wrap_unwrap_liveness_guard_cycle() -> None:
-    """liveness_only poller: assert wrap_unwrap_commands stays empty until Z5.
+@_scheduler_job("wrap_intent_creator")
+def _wrap_intent_creator_cycle() -> None:
+    """Enqueue WRAP_REQUESTED if Safe USDC.e balance > threshold and no pending row.
 
-    Per SCAFFOLD §E.2: the wrap_unwrap_commands state machine exists in src/
-    (defined but no production enqueue caller). Until pUSD migration ships,
-    rows here are a bug. This poller counts and alerts; does NOT call any
-    state-transition helper (antibody test enforces this via ast walk).
+    On-chain balance-driven (not journal-driven). Idempotent: skips if any
+    non-terminal WRAP row already exists. Skipped in non-live mode.
     """
+    from src.data.dual_run_lock import acquire_lock
+    from src.execution.wrap_unwrap_commands import enqueue_wrap_if_balance_above_threshold
     from src.state.db import get_world_connection
+    from src.venue.polymarket_v2_adapter import DEFAULT_POLYGON_RPC_URL
 
-    conn = get_world_connection()
-    try:
-        try:
-            row = conn.execute(
-                "SELECT COUNT(*) FROM wrap_unwrap_commands"
-            ).fetchone()
-        except Exception as exc:
-            # Table may not exist in some envs; log + return (fail-open).
-            logger.info("wrap_unwrap_liveness_guard: table missing (%s)", exc)
+    if get_mode() != "live":
+        logger.info("wrap_intent_creator skipped_non_live mode=%s", get_mode())
+        return
+
+    with acquire_lock("wrap_intent_creator") as acquired:
+        if not acquired:
+            logger.info("wrap_intent_creator skipped_lock_held")
             return
-        count = row[0] if row else 0
-        if count > 0:
-            logger.warning(
-                "[WRAP_UNWRAP_LIVENESS_GUARD] %d unexpected rows in "
-                "wrap_unwrap_commands; table must stay empty until Z5 per "
-                "SCAFFOLD §E.2. Investigate before continuing.", count,
+        try:
+            from web3 import Web3
+        except ImportError:
+            logger.info("wrap_intent_creator: web3 not installed; skipping")
+            return
+        polygon_rpc_url = os.environ.get("POLYGON_RPC_URL", DEFAULT_POLYGON_RPC_URL)
+        w3 = Web3(Web3.HTTPProvider(polygon_rpc_url, request_kwargs={"timeout": 15}))
+        safe_address = os.environ.get("POLYMARKET_FUNDER_ADDRESS", "")
+        if not safe_address:
+            logger.warning("wrap_intent_creator: POLYMARKET_FUNDER_ADDRESS not set")
+            return
+        conn = get_world_connection()
+        try:
+            command_id = enqueue_wrap_if_balance_above_threshold(
+                safe_address, w3, conn,
             )
-        else:
-            logger.debug("wrap_unwrap_liveness_guard: count=0 (expected)")
-    finally:
-        conn.close()
+            if command_id:
+                conn.commit()
+                logger.info("wrap_intent_creator: enqueued command_id=%s", command_id)
+            else:
+                logger.debug("wrap_intent_creator: no wrap needed (threshold or pending)")
+        finally:
+            conn.close()
+
+
+@_scheduler_job("wrap_submitter")
+def _wrap_submitter_cycle() -> None:
+    """Submit APPROVE tx for WRAP_REQUESTED rows; WRAP tx for WRAP_APPROVED rows.
+
+    Each step is a separate Safe execTransaction. Skipped in non-live mode.
+    """
+    from src.data.dual_run_lock import acquire_lock
+    from src.data.polymarket_client import (
+        resolve_polymarket_credentials,
+        _resolve_clob_v2_signature_type,
+        _resolve_q1_egress_evidence_path,
+    )
+    from src.execution.wrap_unwrap_commands import (
+        WrapUnwrapState,
+        fail_wrap,
+        list_pending_wrap_commands,
+        mark_wrap_approve_tx_hashed,
+        mark_wrap_tx_hashed,
+    )
+    from src.state.db import get_world_connection
+    from src.venue.polymarket_v2_adapter import (
+        DEFAULT_Q1_EGRESS_EVIDENCE,
+        DEFAULT_POLYGON_RPC_URL,
+        DEFAULT_V2_HOST,
+        PolymarketV2Adapter,
+        Q1_EGRESS_EVIDENCE_ENV,
+    )
+
+    if get_mode() != "live":
+        logger.info("wrap_submitter skipped_non_live mode=%s", get_mode())
+        return
+
+    with acquire_lock("wrap_submitter") as acquired:
+        if not acquired:
+            logger.info("wrap_submitter skipped_lock_held")
+            return
+        conn = get_world_connection()
+        try:
+            rows = list_pending_wrap_commands(conn)
+            actionable = [
+                r for r in rows
+                if r["state"] in (
+                    WrapUnwrapState.WRAP_REQUESTED.value,
+                    WrapUnwrapState.WRAP_APPROVED.value,
+                )
+            ]
+            if not actionable:
+                logger.debug("wrap_submitter: no actionable rows")
+                return
+            try:
+                creds = resolve_polymarket_credentials()
+            except RuntimeError as exc:
+                raise RuntimeError(
+                    f"wrap_submitter: credentials unavailable (fail-closed): {exc}"
+                ) from exc
+            q1_egress_evidence = _resolve_q1_egress_evidence_path(
+                default=DEFAULT_Q1_EGRESS_EVIDENCE, env_name=Q1_EGRESS_EVIDENCE_ENV,
+            )
+            adapter = PolymarketV2Adapter(
+                host=os.environ.get("POLYMARKET_CLOB_V2_HOST", DEFAULT_V2_HOST),
+                funder_address=creds["funder_address"],
+                signer_key=creds["private_key"],
+                chain_id=int(os.environ.get("POLYMARKET_CHAIN_ID", "137")),
+                signature_type=_resolve_clob_v2_signature_type(),
+                polygon_rpc_url=os.environ.get("POLYGON_RPC_URL", DEFAULT_POLYGON_RPC_URL),
+                api_creds=creds.get("api_creds"),
+                q1_egress_evidence_path=q1_egress_evidence,
+            )
+            signer_eoa = creds.get("signer_eoa", creds["funder_address"])
+            submitted = 0
+            failed = 0
+            for row in actionable:
+                command_id = row["command_id"]
+                amount_micro = row["amount_micro"]
+                current_state = row["state"]
+                tx_kind = "APPROVE" if current_state == WrapUnwrapState.WRAP_REQUESTED.value else "WRAP"
+                try:
+                    result = adapter._wrap_via_safe(
+                        safe_address=creds["funder_address"],
+                        amount_micro=amount_micro,
+                        tx_kind=tx_kind,
+                        signer_eoa=signer_eoa,
+                    )
+                    if result.get("errorCode") == "WRAP_DRY_RUN_LOGGED":
+                        logger.info(
+                            "wrap_submitter: dry_run command_id=%s tx_kind=%s fingerprint=%s",
+                            command_id, tx_kind, result.get("dry_run_fingerprint"),
+                        )
+                        continue
+                    if not result.get("success"):
+                        raise RuntimeError(
+                            f"_wrap_via_safe failed: {result.get('errorCode')} "
+                            f"{result.get('errorMessage')}"
+                        )
+                    tx_hash = result["tx_hash"]
+                    if tx_kind == "APPROVE":
+                        mark_wrap_approve_tx_hashed(
+                            command_id, tx_hash, conn=conn,
+                        )
+                    else:
+                        mark_wrap_tx_hashed(command_id, tx_hash, conn=conn)
+                    conn.commit()
+                    submitted += 1
+                    logger.info(
+                        "wrap_submitter: command_id=%s tx_kind=%s tx_hash=%s",
+                        command_id, tx_kind, tx_hash,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    try:
+                        conn.rollback()
+                    except Exception:  # noqa: BLE001
+                        pass
+                    failed += 1
+                    logger.error(
+                        "wrap_submitter: command_id=%s tx_kind=%s error=%s",
+                        command_id, tx_kind, exc,
+                    )
+                    try:
+                        fail_wrap(
+                            command_id,
+                            error_payload={"error": str(exc), "tx_kind": tx_kind},
+                            conn=conn,
+                        )
+                        conn.commit()
+                    except Exception:  # noqa: BLE001
+                        pass
+            logger.info("wrap_submitter: submitted=%d failed=%d", submitted, failed)
+            if failed:
+                raise RuntimeError(f"wrap_submitter: submitted={submitted} failed={failed}")
+        finally:
+            conn.close()
+
+
+@_scheduler_job("wrap_reconciler")
+def _wrap_reconciler_cycle() -> None:
+    """Poll WRAP_APPROVE_TX_HASHED and WRAP_TX_HASHED rows; advance state on receipt.
+
+    On WRAP_CONFIRMED, calls adapter.update_balance_allowance() to refresh CLOB ledger.
+    Skipped in non-live mode.
+    """
+    from src.data.dual_run_lock import acquire_lock
+    from src.data.polymarket_client import (
+        resolve_polymarket_credentials,
+        _resolve_clob_v2_signature_type,
+        _resolve_q1_egress_evidence_path,
+    )
+    from src.execution.wrap_unwrap_commands import (
+        WrapUnwrapState,
+        init_wrap_unwrap_schema,
+        reconcile_pending_wraps,
+    )
+    from src.state.db import get_world_connection
+    from src.venue.polymarket_v2_adapter import (
+        DEFAULT_Q1_EGRESS_EVIDENCE,
+        DEFAULT_POLYGON_RPC_URL,
+        DEFAULT_V2_HOST,
+        PolymarketV2Adapter,
+        Q1_EGRESS_EVIDENCE_ENV,
+    )
+
+    if get_mode() != "live":
+        logger.info("wrap_reconciler skipped_non_live mode=%s", get_mode())
+        return
+
+    with acquire_lock("wrap_reconciler") as acquired:
+        if not acquired:
+            logger.info("wrap_reconciler skipped_lock_held")
+            return
+        try:
+            from web3 import Web3
+        except ImportError:
+            logger.info("wrap_reconciler: web3 not installed; skipping")
+            return
+        polygon_rpc_url = os.environ.get("POLYGON_RPC_URL", DEFAULT_POLYGON_RPC_URL)
+        w3 = Web3(Web3.HTTPProvider(polygon_rpc_url, request_kwargs={"timeout": 15}))
+        conn = get_world_connection()
+        try:
+            init_wrap_unwrap_schema(conn)
+            reconcile_states = (
+                WrapUnwrapState.WRAP_APPROVE_TX_HASHED.value,
+                WrapUnwrapState.WRAP_TX_HASHED.value,
+            )
+            rows = conn.execute(
+                "SELECT command_id FROM wrap_unwrap_commands WHERE state IN (?,?)",
+                reconcile_states,
+            ).fetchall()
+            if not rows:
+                logger.debug("wrap_reconciler: no rows to reconcile")
+                return
+            try:
+                creds = resolve_polymarket_credentials()
+            except RuntimeError as exc:
+                raise RuntimeError(
+                    f"wrap_reconciler: credentials unavailable (fail-closed): {exc}"
+                ) from exc
+            q1_egress_evidence = _resolve_q1_egress_evidence_path(
+                default=DEFAULT_Q1_EGRESS_EVIDENCE, env_name=Q1_EGRESS_EVIDENCE_ENV,
+            )
+            adapter = PolymarketV2Adapter(
+                host=os.environ.get("POLYMARKET_CLOB_V2_HOST", DEFAULT_V2_HOST),
+                funder_address=creds["funder_address"],
+                signer_key=creds["private_key"],
+                chain_id=int(os.environ.get("POLYMARKET_CHAIN_ID", "137")),
+                signature_type=_resolve_clob_v2_signature_type(),
+                polygon_rpc_url=polygon_rpc_url,
+                api_creds=creds.get("api_creds"),
+                q1_egress_evidence_path=q1_egress_evidence,
+            )
+            try:
+                results = reconcile_pending_wraps(w3, adapter, conn)
+                conn.commit()
+                logger.info(
+                    "wrap_reconciler: reconciled=%d states=%s",
+                    len(results), [r.get("state") for r in results],
+                )
+            except Exception as exc:
+                try:
+                    conn.rollback()
+                except Exception:  # noqa: BLE001
+                    pass
+                logger.error("wrap_reconciler: error=%s", exc)
+                raise
+        finally:
+            conn.close()
 
 
 def _assert_cascade_liveness_contract(scheduler) -> None:
@@ -2196,8 +2438,16 @@ def main():
         max_instances=1, coalesce=True,
     )
     scheduler.add_job(
-        _wrap_unwrap_liveness_guard_cycle, "interval", minutes=30,
-        id="wrap_unwrap_liveness_guard", max_instances=1, coalesce=True,
+        _wrap_intent_creator_cycle, "interval", minutes=5,
+        id="wrap_intent_creator", max_instances=1, coalesce=True,
+    )
+    scheduler.add_job(
+        _wrap_submitter_cycle, "interval", minutes=2,
+        id="wrap_submitter", max_instances=1, coalesce=True,
+    )
+    scheduler.add_job(
+        _wrap_reconciler_cycle, "interval", minutes=2,
+        id="wrap_reconciler", max_instances=1, coalesce=True,
     )
     # PR-S6: deployment freshness gate — runs every 60s, fail-closed at 24h uptime.
     scheduler.add_job(
