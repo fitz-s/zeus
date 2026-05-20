@@ -916,6 +916,20 @@ def _effective_min_order_usd_for_entry(
     return float(min_order_shares * price), "executable_snapshot_min_order_size"
 
 
+def _risk_limits_for_effective_min_order(
+    limits: RiskLimits,
+    effective_min_order_usd: float,
+) -> RiskLimits:
+    """Preserve risk caps while aligning min-order authority with entry sizing."""
+
+    effective_min = max(0.0, float(effective_min_order_usd or 0.0))
+    if float(limits.min_order_usd or 0.0) == effective_min:
+        return limits
+    values = {field.name: getattr(limits, field.name) for field in fields(RiskLimits)}
+    values["min_order_usd"] = effective_min
+    return RiskLimits(**values)
+
+
 def _default_weather_fee_rate() -> float:
     try:
         from src.contracts.reality_contract import load_contracts_from_yaml
@@ -4084,7 +4098,10 @@ def evaluate_candidate(
                 + (projected_city_exposure_usd[city.name] / sizing_bankroll if sizing_bankroll > 0 else 0.0)
             ),
             current_portfolio_heat=current_heat,
-            limits=limits,
+            limits=_risk_limits_for_effective_min_order(
+                limits,
+                effective_min_order_usd,
+            ),
         )
         if not allowed:
             decisions.append(EdgeDecision(

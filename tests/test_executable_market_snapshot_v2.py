@@ -38,7 +38,11 @@ from src.contracts.execution_intent import (
     FinalExecutionIntent,
     simulate_clob_sweep,
 )
-from src.engine.evaluator import _effective_min_order_usd_for_entry
+from src.engine.evaluator import (
+    _effective_min_order_usd_for_entry,
+    _risk_limits_for_effective_min_order,
+)
+from src.strategy.risk_limits import RiskLimits, check_position_allowed
 from src.state.db import init_schema
 from src.state.snapshot_repo import get_snapshot, insert_snapshot
 from src.state.venue_command_repo import insert_command
@@ -354,6 +358,39 @@ def test_entry_sizing_minimum_falls_back_without_snapshot_authority():
 
     assert authority == "settings_min_order_usd"
     assert effective_min == pytest.approx(1.0)
+
+
+def test_entry_risk_limit_minimum_reuses_snapshot_authority_not_global_usd_floor():
+    effective_min, authority = _effective_min_order_usd_for_entry(
+        tokens={"executable_snapshot_min_order_size": "5"},
+        entry_price=0.002,
+        fallback_min_order_usd=1.0,
+    )
+    assert authority == "executable_snapshot_min_order_size"
+
+    base_limits = RiskLimits(min_order_usd=1.0)
+    blocked, blocked_reason = check_position_allowed(
+        size_usd=0.06,
+        bankroll=187.98,
+        city="Jeddah",
+        current_city_exposure=0.0,
+        current_portfolio_heat=0.0,
+        limits=base_limits,
+    )
+    assert blocked is False
+    assert "minimum $1.00" in blocked_reason
+
+    allowed, reason = check_position_allowed(
+        size_usd=0.06,
+        bankroll=187.98,
+        city="Jeddah",
+        current_city_exposure=0.0,
+        current_portfolio_heat=0.0,
+        limits=_risk_limits_for_effective_min_order(base_limits, effective_min),
+    )
+
+    assert allowed is True
+    assert reason == "OK"
 
 
 def test_capture_sell_exit_snapshot_preserves_bid_only_book_without_fabricating_ask(conn):
