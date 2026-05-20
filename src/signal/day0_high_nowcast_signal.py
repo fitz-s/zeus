@@ -61,8 +61,10 @@ class Day0HighNowcastSignal:
             by `unit` kwarg per day0_router.py L7-21 design note).
         hours_remaining: canonical horizon field from Day0SignalInputs.
             Guard raises NotApplicableHorizon if > 6.
-        model: HorizonPlattFit from day0_horizon_calibration. None in SCAFFOLD
-            (settlement_samples raises NotImplementedError). Required in production.
+        model: HorizonPlattFit from day0_horizon_calibration. Optional — when None,
+            settlement_samples() still runs using ensemble-only floor semantics, but
+            predict_proba() is unavailable. Pass a loaded HorizonPlattFit for Platt
+            calibration (load via day0_nowcast_store.read_latest_platt_fit()).
     """
 
     def __init__(

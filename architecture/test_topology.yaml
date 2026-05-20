@@ -2479,6 +2479,27 @@ test_metadata:
       correctly, None on first observation, positive int on hash change.
 
   # ── Phase 1 prerequisite #4 — codehash drift detection antibody ──────────
+  tests/test_inv_nowcast_horizon_bound.py:
+    modules: [signal, calibration, state]
+    category: cross_module_antibody
+    kind: antibody
+    profile: phase1_t2_nowcast_antibody
+    blocks_commit: true
+    asserted_invariants:
+      - INV-nowcast-horizon-bound
+    source_under_test:
+      - src/signal/day0_high_nowcast_signal.py
+      - src/calibration/day0_horizon_calibration.py
+      - src/state/day0_nowcast_store.py
+    law_dependencies:
+      - docs/operations/task_2026-05-19_strategy_vnext_phase1/PHASE_1_ULTRAPLAN.md
+    notes: >
+      Cross-module antibody: Day0HighNowcastSignal.NotApplicableHorizon fires on
+      hours_remaining > 6 or < 0; HIGH floor semantics (np.maximum); natural-key
+      nei_v1_ completeness. T2 Day0Nowcast (Phase 1 Track 2, 2026-05-19).
+    created: 2026-05-19
+    last_reused_or_audited: 2026-05-19
+
   tests/test_inv_codehash_drift_detection.py:
     modules: [contracts, state]
     category: core_law_antibody

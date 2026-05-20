@@ -3031,10 +3031,10 @@ def _create_day0_horizon_platt_fits(conn: sqlite3.Connection) -> None:
             gamma_post_peak     REAL NOT NULL,
             delta               REAL NOT NULL,
             epsilon             REAL NOT NULL,
-            fit_date            TEXT NOT NULL,
+            fit_date            TEXT,
             n_obs               INTEGER NOT NULL,
-            sample_period_start TEXT NOT NULL,
-            sample_period_end   TEXT NOT NULL,
+            sample_period_start TEXT,
+            sample_period_end   TEXT,
             schema_version      INTEGER NOT NULL CHECK (schema_version IN (3, 4)),
             source              TEXT NOT NULL CHECK (source IN ('live_fit', 'replay_fit'))
         )
@@ -3059,7 +3059,8 @@ def _create_day0_nowcast_runs(conn: sqlite3.Connection) -> None:
             observation_time    TEXT NOT NULL,
             run_seq             INTEGER NOT NULL,
             nowcast_event_id    TEXT,
-            fit_run_id          TEXT NOT NULL,
+            fit_run_id          TEXT NOT NULL
+                REFERENCES day0_horizon_platt_fits(fit_run_id),
             p_nowcast_json      TEXT,
             p_now_raw_json      TEXT,
             hours_remaining     REAL NOT NULL,

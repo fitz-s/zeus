@@ -2389,30 +2389,36 @@ def evaluate_candidate(
 
         # T2 Day0HighNowcastSignal — parallel write lane (caller-site, not router).
         # Option c: Day0Router stays pure; nowcast is a side-write here.
-        # Write only when model is available (fit_run_id NOT NULL requires an existing
-        # day0_horizon_platt_fits row; model=None = no calibrated fit yet).
-        if temperature_metric.is_high() and hours_remaining <= 6.0 and conn is not None:
+        # Write only when a calibrated HorizonPlattFit exists in forecasts DB.
+        # fit_run_id NOT NULL FK: a missing fit means no write (fail-safe).
+        # conn=None below: write_nowcast_run acquires its own forecasts connection
+        # (INV-37: world conn from evaluate_candidate must not touch forecasts DB).
+        if temperature_metric.is_high() and hours_remaining <= 6.0:
             _obs_time_for_nowcast = _day0_observation_field(
                 candidate.observation, "observation_time"
             )
             if _obs_time_for_nowcast is not None:
                 try:
-                    _nowcast = Day0HighNowcastSignal(
-                        observed_high_so_far=float(observed_high_so_far or 0.0),
-                        member_maxes_remaining=extrema.maxes,
-                        current_temp=float(current_temp),
-                        hours_remaining=hours_remaining,
-                        model=None,
-                        unit=city.settlement_unit or "F",
-                        observation_source=str(
-                            _day0_observation_field(candidate.observation, "source", "")
-                        ),
-                        observation_time=str(_obs_time_for_nowcast),
-                        temporal_context=temporal_context,
-                        round_fn=settlement_semantics.round_values,
+                    from src.state.day0_nowcast_store import (
+                        read_latest_platt_fit,
+                        write_nowcast_run,
                     )
-                    if _nowcast._model is not None:
-                        from src.state.day0_nowcast_store import write_nowcast_run
+                    _horizon_model = read_latest_platt_fit()
+                    if _horizon_model is not None:
+                        _nowcast = Day0HighNowcastSignal(
+                            observed_high_so_far=float(observed_high_so_far or 0.0),
+                            member_maxes_remaining=extrema.maxes,
+                            current_temp=float(current_temp),
+                            hours_remaining=hours_remaining,
+                            model=_horizon_model,
+                            unit=city.settlement_unit or "F",
+                            observation_source=str(
+                                _day0_observation_field(candidate.observation, "source", "")
+                            ),
+                            observation_time=str(_obs_time_for_nowcast),
+                            temporal_context=temporal_context,
+                            round_fn=settlement_semantics.round_values,
+                        )
                         _p_nowcast_vec = _nowcast.p_vector(bins)
                         try:
                             write_nowcast_run(
@@ -2420,13 +2426,13 @@ def evaluate_candidate(
                                 temperature_metric=temperature_metric.temperature_metric,
                                 target_date=str(target_date),
                                 observation_time=str(_obs_time_for_nowcast),
-                                fit_run_id=_nowcast._model.fit_run_id,
+                                fit_run_id=_horizon_model.fit_run_id,
                                 p_nowcast=_p_nowcast_vec,
                                 p_now_raw=p_raw,
                                 hours_remaining=hours_remaining,
                                 daypart=temporal_context.daypart,
                                 source="live_nowcast",
-                                conn=conn,
+                                conn=None,  # acquires own forecasts conn; world conn must not be passed
                             )
                         except Exception as _nowcast_write_exc:
                             logger.warning(

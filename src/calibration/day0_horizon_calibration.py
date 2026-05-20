@@ -227,6 +227,12 @@ def fit_day0_horizon_platt(
 
     w0 = np.zeros(X.shape[1])
     result = minimize(neg_log_loss, w0, jac=grad, method="L-BFGS-B")
+    if not result.success or not np.all(np.isfinite(result.x)):
+        raise ValueError(
+            f"fit_day0_horizon_platt: L-BFGS-B failed to converge. "
+            f"message={result.message!r}, success={result.success}, "
+            f"fun={result.fun:.6g}, x_finite={np.all(np.isfinite(result.x))}"
+        )
     alpha, beta, g_morning, g_afternoon, g_post_peak, delta, epsilon = result.x
 
     if not fit_date:

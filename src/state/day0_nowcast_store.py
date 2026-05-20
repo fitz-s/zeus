@@ -108,8 +108,8 @@ def write_platt_fit(
                     float(fit.alpha), float(fit.beta),
                     float(fit.gamma_morning), float(fit.gamma_afternoon), float(fit.gamma_post_peak),
                     float(fit.delta), float(fit.epsilon),
-                    fit.fit_date or "", fit.n_obs,
-                    fit.sample_period_start or "", fit.sample_period_end or "",
+                    fit.fit_date or None, fit.n_obs,
+                    fit.sample_period_start or None, fit.sample_period_end or None,
                     SCHEMA_FORECASTS_VERSION, "live_fit",
                 ),
             )
@@ -206,6 +206,56 @@ def write_nowcast_run(
             )
             conn.commit()
             return nei
+    finally:
+        if own_conn and conn is not None:
+            conn.close()
+
+
+def read_latest_platt_fit(
+    *,
+    fit_version: str = "hpf_v1",
+    conn: Optional[sqlite3.Connection] = None,
+):
+    """Return the most-recently written HorizonPlattFit for the given fit_version.
+
+    Returns None when no fit row exists (e.g. before first calibration run).
+    conn=None -> get_forecasts_connection_read_only().
+    """
+    from src.calibration.day0_horizon_calibration import HorizonPlattFit
+    from src.state.db import get_forecasts_connection_read_only
+
+    own_conn = conn is None
+    if own_conn:
+        conn = get_forecasts_connection_read_only()
+        conn.row_factory = sqlite3.Row
+
+    try:
+        row = conn.execute(
+            """
+            SELECT * FROM day0_horizon_platt_fits
+            WHERE fit_version = ?
+            ORDER BY rowid DESC LIMIT 1
+            """,
+            (fit_version,),
+        ).fetchone()
+        if row is None:
+            return None
+        r = dict(row)
+        return HorizonPlattFit(
+            alpha=float(r["alpha"]),
+            beta=float(r["beta"]),
+            gamma_morning=float(r["gamma_morning"]),
+            gamma_afternoon=float(r["gamma_afternoon"]),
+            gamma_post_peak=float(r["gamma_post_peak"]),
+            delta=float(r["delta"]),
+            epsilon=float(r["epsilon"]),
+            fit_version=r.get("fit_version", fit_version),
+            fit_run_id=r["fit_run_id"],
+            fit_date=r.get("fit_date") or None,
+            n_obs=r.get("n_obs"),
+            sample_period_start=r.get("sample_period_start") or None,
+            sample_period_end=r.get("sample_period_end") or None,
+        )
     finally:
         if own_conn and conn is not None:
             conn.close()

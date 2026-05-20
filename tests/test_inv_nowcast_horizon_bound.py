@@ -7,15 +7,9 @@ Invariant: Day0HighNowcastSignal.__init__ MUST raise NotApplicableHorizon when
 Day0SignalInputs.hours_remaining > 6 OR hours_remaining < 0.
 
 xfail-strict rationale:
-    SCAFFOLD stub: Day0HighNowcastSignal.__init__ raises NotApplicableHorizon
-    on construction when hours_remaining > 6 — guard is implemented in __init__
-    (fail-fast on construction, not deferred to evaluate). This test is NOT xfail
-    in SCAFFOLD — the guard fires immediately. xfail-strict is removed here and the
-    test runs as a STRICT PASS in SCAFFOLD.
-
-    If the guard were deferred to settlement_samples(), it would be xfail (since
-    settlement_samples() raises NotImplementedError first). Guard-in-init is the
-    correct Option B design: callers discover inapplicability at construction.
+    Guard is implemented in __init__ (fail-fast on construction, not deferred to
+    evaluate). Guard-in-init is the correct Option B design: callers discover
+    inapplicability at construction, not during settlement_samples().
 
 Relationship: Cross-module invariant (Fitz §3 pattern). Tests that Day0HighNowcastSignal
 (src/signal/day0_high_nowcast_signal.py) correctly enforces the horizon applicability
@@ -68,8 +62,7 @@ def test_day0_nowcast_horizon_bound_allows_within_ceiling():
     """Boundary: hours_remaining <= 6 must NOT raise NotApplicableHorizon."""
     inputs = _make_inputs(hours_remaining=6.0)
 
-    # Should not raise; settlement_samples() raises NotImplementedError (SCAFFOLD)
-    # but construction succeeds — guard only fires on > 6, not = 6.
+    # Should not raise; construction succeeds — guard only fires on > 6 or < 0, not = 6.
     signal = Day0HighNowcastSignal(
         observed_high_so_far=inputs.observed_high_so_far,
         member_maxes_remaining=inputs.member_maxes_remaining,
