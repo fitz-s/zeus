@@ -1255,6 +1255,101 @@ class TestRecoveryResolutionTable:
             "errors": 0,
         }
 
+    def test_filled_entry_trade_fact_with_existing_position_repairs_missing_position_lot(
+        self,
+        conn,
+        mock_client,
+    ):
+        _insert(conn, size=5.0, price=0.34)
+        _advance_to_acked(conn, venue_order_id="ord-001")
+        _seed_pending_entry_projection(conn)
+        conn.execute(
+            """
+            UPDATE position_current
+               SET phase = 'active',
+                   shares = 5.0,
+                   cost_basis_usd = 1.7,
+                   entry_price = 0.34,
+                   order_status = 'filled',
+                   updated_at = '2026-04-26T00:06:00Z'
+             WHERE position_id = 'pos-001'
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO trade_decisions (
+                market_id, bin_label, direction, size_usd, price, timestamp,
+                p_raw, p_posterior, edge, ci_lower, ci_upper, kelly_fraction,
+                status, runtime_trade_id
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "condition-test",
+                "Karachi high",
+                "buy_yes",
+                1.7,
+                0.34,
+                "2026-04-26T00:06:00Z",
+                0.6,
+                0.6,
+                0.1,
+                0.05,
+                0.15,
+                0.0,
+                "entered",
+                "pos-001",
+            ),
+        )
+        from src.state.venue_command_repo import append_event
+
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="FILL_CONFIRMED",
+            occurred_at="2026-04-26T00:06:00Z",
+            payload={"venue_order_id": "ord-001", "venue_status": "MATCHED"},
+        )
+        trade_fact_id = _append_trade_fact(
+            conn,
+            state="MATCHED",
+            filled_size="5",
+            fill_price="0.34",
+        )
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["filled_entry_position_lot_repair"] == {
+            "scanned": 1,
+            "advanced": 1,
+            "stayed": 0,
+            "errors": 0,
+        }
+        lot = conn.execute(
+            """
+            SELECT state, shares, entry_price_avg, source_command_id, source_trade_fact_id, source
+              FROM position_lots
+             WHERE source_command_id = 'cmd-001'
+            """
+        ).fetchone()
+        assert dict(lot) == {
+            "state": "OPTIMISTIC_EXPOSURE",
+            "shares": "5",
+            "entry_price_avg": "0.34",
+            "source_command_id": "cmd-001",
+            "source_trade_fact_id": trade_fact_id,
+            "source": "REST",
+        }
+        second_summary = reconcile_unresolved_commands(conn, mock_client)
+        assert second_summary["filled_entry_position_lot_repair"] == {
+            "scanned": 0,
+            "advanced": 0,
+            "stayed": 0,
+            "errors": 0,
+        }
+
     def test_acked_exit_order_fact_with_point_order_matched_records_pending_exit(
         self,
         conn,

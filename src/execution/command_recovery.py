@@ -1155,6 +1155,7 @@ def _filled_entry_lot_materialization_candidates(conn: sqlite3.Connection) -> li
         "venue_trade_facts",
         "position_current",
         "position_lots",
+        "trade_decisions",
     }
     if not all(_table_exists(conn, table) for table in required):
         return []
@@ -1198,6 +1199,22 @@ def _filled_entry_lot_materialization_candidates(conn: sqlite3.Connection) -> li
            AND CAST(COALESCE(fact.filled_size, '0') AS REAL) > 0
            AND CAST(COALESCE(fact.fill_price, '0') AS REAL) > 0
            AND lot.lot_id IS NULL
+           AND EXISTS (
+               SELECT 1
+                 FROM trade_decisions td
+                WHERE td.runtime_trade_id = cmd.position_id
+                   OR CAST(td.trade_id AS TEXT) = cmd.position_id
+                   OR CAST(td.trade_id AS TEXT) = cmd.decision_id
+           )
+           AND NOT EXISTS (
+               SELECT 1
+                 FROM position_lots trade_lot
+                 JOIN venue_trade_facts lot_fact
+                   ON lot_fact.trade_fact_id = trade_lot.source_trade_fact_id
+                WHERE lot_fact.command_id = fact.command_id
+                  AND lot_fact.trade_id = fact.trade_id
+                  AND trade_lot.state IN ('OPTIMISTIC_EXPOSURE', 'CONFIRMED_EXPOSURE')
+           )
          ORDER BY fact.observed_at, fact.trade_fact_id
         """
     ).fetchall()
