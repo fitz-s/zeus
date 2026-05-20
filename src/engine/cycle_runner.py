@@ -389,7 +389,7 @@ def _discovery_gates_allow_entries(
         and bool((cutover_summary.get("entry") or {}).get("allow_submit", False))
         and bool((heartbeat_status.get("entry") or {}).get("allow_submit", False))
         and bool((ws_gap_status.get("entry") or {}).get("allow_submit", False))
-        and bool((governor_status.get("entry") or {}).get("allow_submit", True))
+        and bool((governor_status.get("entry") or {}).get("allow_submit", False))
     )
 
 
