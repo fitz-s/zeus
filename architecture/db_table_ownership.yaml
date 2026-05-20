@@ -429,18 +429,6 @@ tables:
     pk_col: null
     notes: Ghost shell on world.db. Authoritative on trade.db. Drop after 2026-08-15.
 
-  - name: settlement_schema_migrations
-    db: world
-    schema_class: world_class
-    schema_version_owner: SCHEMA_VERSION
-    created_by: init_settlement_command_schema
-    pk_col: migration_key
-    notes: >
-      Idempotency ledger for settlement_commands schema migrations.
-      Replaces the prior PRAGMA user_version = 13 approach
-      (codereview-bundle DDL hot-path split, 2026-05-19).
-      Key 'v13_gamma_backfill' marks the gamma_explicit → unknown_legacy backfill.
-
   # ---------------------------------------------------------------------------
   # WORLD-CLASS tables (db: world, authoritative in zeus-world.db)
   # 63 tables from init_schema that are purely world-class.
