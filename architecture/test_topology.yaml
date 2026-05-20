@@ -291,7 +291,7 @@ test_trust_policy:
     tests/test_calibration_transfer_policy_with_evidence.py: {created: "2026-05-05", last_used: "2026-05-08"}
     tests/test_calibration_world_attach_reads.py: {created: "2026-05-02", last_used: "2026-05-02"}
     tests/test_capability_decorator_coverage.py: {created: "2026-05-06", last_used: "2026-05-07"}
-    tests/test_cascade_liveness_contract.py: {created: "2026-05-01", last_used: "2026-05-16"}
+    tests/test_cascade_liveness_contract.py: {created: "2026-05-01", last_used: "2026-05-20"}
     tests/test_charter_mandatory_evidence.py: {created: "2026-05-06", last_used: "2026-05-06"}
     tests/test_charter_sunset_required.py: {created: "2026-05-06", last_used: "2026-05-06"}
     tests/test_check_pr_identity_collisions.py: {created: "2026-05-04", last_used: "2026-05-04"}
@@ -445,6 +445,9 @@ test_trust_policy:
     tests/test_forecast_decision_time_causality.py: {created: "2026-05-19", last_used: "2026-05-19"}
     # 2026-05-19 codereview-may19-2 P1-1: ACK facts durable post-SDK-submit, independent of outer cycle commit.
     tests/test_live_order_ack_durability.py: {created: "2026-05-19", last_used: "2026-05-19"}
+    # PR #219 — autonomous USDC.e → pUSD post-redeem wrap (Confirm Deposit automation).
+    tests/test_auto_wrap_state_machine.py: {created: "2026-05-19", last_used: "2026-05-20"}
+    tests/test_auto_wrap_dry_run_no_raw_tx_leak.py: {created: "2026-05-19", last_used: "2026-05-20"}
 
 categories:
   core_law_antibody:

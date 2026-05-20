@@ -1,5 +1,10 @@
 # Created: 2026-05-19
-# Last reused or audited: 2026-05-19
+# Last reused or audited: 2026-05-20
+# Lifecycle: created=2026-05-19; last_reviewed=2026-05-20; last_reused=2026-05-20
+# Purpose: Antibody tests — signed raw_tx_hex must never appear in logs or return
+#   payloads of wrap dry-run paths (parallel to codereview-may19 P0-2 for redeem).
+# Reuse: Run after any change to polymarket_v2_adapter._wrap_via_safe or
+#   wrap_unwrap_commands dry-run paths. No daemon or on-chain state required.
 # Authority basis: .omc/plans/2026-05-19-auto-wrap-post-redeem.md; operator brief session fda4e853
 """Antibody tests: signed raw_tx_hex must never appear in logs or return
 payloads of wrap dry-run paths.

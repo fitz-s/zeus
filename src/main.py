@@ -419,6 +419,7 @@ def _wrap_intent_creator_cycle() -> None:
     non-terminal WRAP row already exists. Skipped in non-live mode.
     """
     from src.data.dual_run_lock import acquire_lock
+    from src.data.polymarket_client import resolve_polymarket_credentials
     from src.execution.wrap_unwrap_commands import enqueue_wrap_if_balance_above_threshold
     from src.state.db import get_world_connection
     from src.venue.polymarket_v2_adapter import DEFAULT_POLYGON_RPC_URL
@@ -436,12 +437,20 @@ def _wrap_intent_creator_cycle() -> None:
         except ImportError:
             logger.info("wrap_intent_creator: web3 not installed; skipping")
             return
+        # Resolve Safe address from the same Keychain-backed credential source
+        # used by wrap_submitter and wrap_reconciler so all three cycles agree
+        # on which Safe's balance to monitor and which Safe to transact against.
+        try:
+            creds = resolve_polymarket_credentials()
+        except RuntimeError as exc:
+            logger.warning("wrap_intent_creator: credentials unavailable, skipping: %s", exc)
+            return
+        safe_address = creds["funder_address"]
+        if not safe_address:
+            logger.warning("wrap_intent_creator: funder_address empty in credentials")
+            return
         polygon_rpc_url = os.environ.get("POLYGON_RPC_URL", DEFAULT_POLYGON_RPC_URL)
         w3 = Web3(Web3.HTTPProvider(polygon_rpc_url, request_kwargs={"timeout": 15}))
-        safe_address = os.environ.get("POLYMARKET_FUNDER_ADDRESS", "")
-        if not safe_address:
-            logger.warning("wrap_intent_creator: POLYMARKET_FUNDER_ADDRESS not set")
-            return
         conn = get_world_connection()
         try:
             command_id = enqueue_wrap_if_balance_above_threshold(
@@ -524,7 +533,12 @@ def _wrap_submitter_cycle() -> None:
                 api_creds=creds.get("api_creds"),
                 q1_egress_evidence_path=q1_egress_evidence,
             )
-            signer_eoa = creds.get("signer_eoa", creds["funder_address"])
+            # Derive signer EOA from private_key (same as redeem flow).
+            # creds["funder_address"] is the Safe proxy address, NOT an owner EOA.
+            # _wrap_via_safe validates signer_eoa against Safe.getOwners(), so
+            # passing funder_address would always fail with WRAP_SAFE_OWNER_MISMATCH.
+            from eth_account import Account as _Account  # type: ignore[import]
+            signer_eoa = _Account.from_key(creds["private_key"]).address
             submitted = 0
             failed = 0
             for row in actionable:

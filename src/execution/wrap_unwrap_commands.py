@@ -87,8 +87,13 @@ def init_wrap_unwrap_schema(conn: sqlite3.Connection) -> None:
     for stmt in _WRAP_SCHEMA_ALTERS:
         try:
             conn.execute(stmt)
-        except sqlite3.OperationalError:
-            pass  # column already exists
+        except sqlite3.OperationalError as exc:
+            # ALTER TABLE ADD COLUMN raises "duplicate column name: <col>" when
+            # the column already exists (idempotent schema evolution). Any other
+            # OperationalError (I/O failure, locked DB, syntax error in a future
+            # stmt) is a real error and must propagate so the caller sees it.
+            if "duplicate column name" not in str(exc).lower():
+                raise
 
 
 def enqueue_wrap_if_balance_above_threshold(

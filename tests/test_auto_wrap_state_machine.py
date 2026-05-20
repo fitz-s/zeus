@@ -1,5 +1,10 @@
 # Created: 2026-05-19
-# Last reused or audited: 2026-05-19
+# Last reused or audited: 2026-05-20
+# Lifecycle: created=2026-05-19; last_reviewed=2026-05-20; last_reused=2026-05-20
+# Purpose: State machine antibody tests for wrap_unwrap_commands.py — enqueue,
+#   idempotency, threshold, state transitions, DB isolation (world not trades).
+# Reuse: Run after any change to wrap_unwrap_commands.py state machine. All
+#   tests use an in-memory SQLite connection — no daemon or on-chain state required.
 # Authority basis: .omc/plans/2026-05-19-auto-wrap-post-redeem.md
 """State machine antibody tests for wrap_unwrap_commands.py.
 
