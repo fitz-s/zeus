@@ -912,11 +912,17 @@ def _filled_entry_recovery_position(
     position_id = str(candidate.get("position_id") or "").strip()
     command_id = str(candidate.get("command_id") or "").strip()
     venue_order_id = str(candidate.get("venue_order_id") or "").strip()
-    token_id = str(candidate.get("token_id") or "").strip()
+    selected_token_id = str(candidate.get("token_id") or "").strip()
     condition_id = str(
         candidate.get("env_condition_id")
         or candidate.get("snapshot_condition_id")
         or trade_case.get("market_id")
+        or ""
+    ).strip()
+    token_id = str(
+        candidate.get("env_yes_token_id")
+        or candidate.get("snapshot_yes_token_id")
+        or trade_case.get("token_id")
         or ""
     ).strip()
     no_token_id = str(
@@ -927,12 +933,12 @@ def _filled_entry_recovery_position(
     ).strip()
     if not position_id or not command_id or not venue_order_id:
         raise ValueError("filled entry projection repair requires position, command, and order ids")
-    if not condition_id or not token_id or not no_token_id:
+    if not condition_id or not selected_token_id or not token_id or not no_token_id:
         raise ValueError("filled entry projection repair requires CTF condition/token identity")
     if str(trade_case.get("trade_id") or "") not in {position_id, ""}:
         raise ValueError("decision_log trade_id does not match venue command position_id")
     if str(trade_case.get("token_id") or token_id) != token_id:
-        raise ValueError("decision_log token_id does not match venue command token_id")
+        raise ValueError("decision_log token_id does not match YES token identity")
 
     shares_dec = _positive_decimal_or_none(candidate.get("fill_filled_size"))
     fill_price_dec = _positive_decimal_or_none(candidate.get("fill_price"))
@@ -948,6 +954,16 @@ def _filled_entry_recovery_position(
     strategy_key = str(trade_case.get("strategy_key") or trade_case.get("strategy") or "").strip()
     if not city or not target_date or not bin_label or direction not in {"buy_yes", "buy_no"}:
         raise ValueError("filled entry projection repair requires decision_log market identity")
+    expected_selected = no_token_id if direction == "buy_no" else token_id
+    if selected_token_id != expected_selected:
+        raise ValueError("venue command selected token does not match decision direction")
+    for surface_name, selected in (
+        ("submission envelope", candidate.get("env_selected_outcome_token_id")),
+        ("executable snapshot", candidate.get("snapshot_selected_outcome_token_id")),
+    ):
+        normalized = str(selected or "").strip()
+        if normalized and normalized != selected_token_id:
+            raise ValueError(f"{surface_name} selected token does not match venue command token")
     if strategy_key not in {"settlement_capture", "shoulder_sell", "center_buy", "opening_inertia"}:
         raise ValueError("filled entry projection repair requires valid strategy_key")
     p_posterior = _decimal_or_none(trade_case.get("p_posterior")) or Decimal("0")

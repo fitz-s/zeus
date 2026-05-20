@@ -56,6 +56,9 @@ _NOW = datetime(2026, 4, 26, tzinfo=timezone.utc)
 def _insert(conn, *, command_id="cmd-001", position_id="pos-001",
             decision_id="dec-001", idempotency_key=None,
             intent_kind="ENTRY", market_id="mkt-001", token_id="tok-001",
+            no_token_id: str | None = None,
+            selected_token_id: str | None = None,
+            outcome_label: str | None = None,
             side="BUY", size=10.0, price=0.5,
             created_at="2026-04-26T00:00:00Z"):
     """Insert a command row and return its command_id."""
@@ -64,7 +67,16 @@ def _insert(conn, *, command_id="cmd-001", position_id="pos-001",
         import hashlib
         # Build a unique 32-hex key per command_id so duplicate inserts don't collide.
         idempotency_key = hashlib.md5(command_id.encode()).hexdigest()
-    snapshot_id = _ensure_snapshot(conn, token_id=token_id)
+    no_token_id = no_token_id or f"{token_id}-no"
+    selected_token_id = selected_token_id or token_id
+    outcome_label = outcome_label or ("NO" if selected_token_id == no_token_id else "YES")
+    snapshot_id = _ensure_snapshot(
+        conn,
+        token_id=token_id,
+        no_token_id=no_token_id,
+        selected_outcome_token_id=selected_token_id,
+        outcome_label=outcome_label,
+    )
     insert_command(
         conn,
         command_id=command_id,
@@ -72,6 +84,9 @@ def _insert(conn, *, command_id="cmd-001", position_id="pos-001",
         envelope_id=_ensure_envelope(
             conn,
             token_id=token_id,
+            no_token_id=no_token_id,
+            selected_outcome_token_id=selected_token_id,
+            outcome_label=outcome_label,
             side=side,
             price=price,
             size=size,
@@ -81,7 +96,7 @@ def _insert(conn, *, command_id="cmd-001", position_id="pos-001",
         idempotency_key=idempotency_key,
         intent_kind=intent_kind,
         market_id=market_id,
-        token_id=token_id,
+        token_id=selected_token_id,
         side=side,
         size=size,
         price=price,
@@ -90,11 +105,21 @@ def _insert(conn, *, command_id="cmd-001", position_id="pos-001",
     return command_id
 
 
-def _ensure_snapshot(conn, *, token_id: str, snapshot_id: str | None = None) -> str:
+def _ensure_snapshot(
+    conn,
+    *,
+    token_id: str,
+    snapshot_id: str | None = None,
+    no_token_id: str | None = None,
+    selected_outcome_token_id: str | None = None,
+    outcome_label: str = "YES",
+) -> str:
     from src.contracts.executable_market_snapshot_v2 import ExecutableMarketSnapshotV2
     from src.state.snapshot_repo import get_snapshot, insert_snapshot
 
-    snapshot_id = snapshot_id or f"snap-{token_id}"
+    no_token_id = no_token_id or f"{token_id}-no"
+    selected_outcome_token_id = selected_outcome_token_id or token_id
+    snapshot_id = snapshot_id or f"snap-{selected_outcome_token_id}"
     if get_snapshot(conn, snapshot_id) is not None:
         return snapshot_id
     insert_snapshot(
@@ -107,9 +132,9 @@ def _ensure_snapshot(conn, *, token_id: str, snapshot_id: str | None = None) -> 
             condition_id="condition-test",
             question_id="question-test",
             yes_token_id=token_id,
-            no_token_id=f"{token_id}-no",
-            selected_outcome_token_id=token_id,
-            outcome_label="YES",
+            no_token_id=no_token_id,
+            selected_outcome_token_id=selected_outcome_token_id,
+            outcome_label=outcome_label,
             enable_orderbook=True,
             active=True,
             closed=False,
@@ -121,7 +146,7 @@ def _ensure_snapshot(conn, *, token_id: str, snapshot_id: str | None = None) -> 
             min_tick_size=Decimal("0.01"),
             min_order_size=Decimal("0.01"),
             fee_details={},
-            token_map_raw={"YES": token_id, "NO": f"{token_id}-no"},
+            token_map_raw={"YES": token_id, "NO": no_token_id},
             rfqe=None,
             neg_risk=False,
             orderbook_top_bid=Decimal("0.49"),
@@ -142,6 +167,9 @@ def _ensure_envelope(
     conn,
     *,
     token_id: str,
+    no_token_id: str | None = None,
+    selected_outcome_token_id: str | None = None,
+    outcome_label: str = "YES",
     envelope_id: str | None = None,
     side: str = "BUY",
     price: float | Decimal = 0.5,
@@ -152,7 +180,9 @@ def _ensure_envelope(
 
     price_dec = Decimal(str(price))
     size_dec = Decimal(str(size))
-    envelope_id = envelope_id or f"env-{token_id}-{side}-{price_dec}-{size_dec}"
+    no_token_id = no_token_id or f"{token_id}-no"
+    selected_outcome_token_id = selected_outcome_token_id or token_id
+    envelope_id = envelope_id or f"env-{selected_outcome_token_id}-{side}-{price_dec}-{size_dec}"
     if conn.execute(
         "SELECT 1 FROM venue_submission_envelopes WHERE envelope_id = ?",
         (envelope_id,),
@@ -169,9 +199,9 @@ def _ensure_envelope(
             condition_id="condition-test",
             question_id="question-test",
             yes_token_id=token_id,
-            no_token_id=f"{token_id}-no",
-            selected_outcome_token_id=token_id,
-            outcome_label="YES",
+            no_token_id=no_token_id,
+            selected_outcome_token_id=selected_outcome_token_id,
+            outcome_label=outcome_label,
             side=side,
             price=price_dec,
             size=size_dec,
@@ -1253,6 +1283,73 @@ class TestRecoveryResolutionTable:
             "advanced": 0,
             "stayed": 0,
             "errors": 0,
+        }
+
+    def test_terminal_buy_no_filled_entry_repair_preserves_yes_token_identity(
+        self,
+        conn,
+        mock_client,
+    ):
+        _insert(
+            conn,
+            token_id="tok-yes",
+            no_token_id="tok-no",
+            selected_token_id="tok-no",
+            outcome_label="NO",
+            size=5.0,
+            price=0.34,
+        )
+        _advance_to_acked(conn, venue_order_id="ord-001")
+        from src.state.venue_command_repo import append_event
+
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="FILL_CONFIRMED",
+            occurred_at="2026-04-26T00:06:00Z",
+            payload={"venue_order_id": "ord-001", "venue_status": "MATCHED"},
+        )
+        _append_trade_fact(
+            conn,
+            state="MATCHED",
+            filled_size="5",
+            fill_price="0.34",
+        )
+        _insert_decision_log_trade_case_for_recovery(
+            conn,
+            token_id="tok-yes",
+            no_token_id="tok-no",
+        )
+        artifact = json.loads(conn.execute("SELECT artifact_json FROM decision_log").fetchone()[0])
+        artifact["trade_cases"][0]["direction"] = "buy_no"
+        conn.execute(
+            "UPDATE decision_log SET artifact_json = ?",
+            (json.dumps(artifact, sort_keys=True),),
+        )
+        conn.commit()
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["filled_entry_projection_repair"] == {
+            "scanned": 1,
+            "advanced": 1,
+            "stayed": 0,
+            "errors": 0,
+        }
+        current = conn.execute(
+            """
+            SELECT token_id, no_token_id, shares, cost_basis_usd
+              FROM position_current
+             WHERE position_id = 'pos-001'
+            """
+        ).fetchone()
+        assert dict(current) == {
+            "token_id": "tok-yes",
+            "no_token_id": "tok-no",
+            "shares": 5.0,
+            "cost_basis_usd": 1.7,
         }
 
     def test_filled_entry_trade_fact_with_existing_position_repairs_missing_position_lot(
