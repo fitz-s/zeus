@@ -3,6 +3,8 @@ from __future__ import annotations
 import logging
 from enum import Enum
 
+from src.architecture.decorators import capability, protects
+
 logger = logging.getLogger(__name__)
 
 
@@ -198,17 +200,45 @@ def fold_lifecycle_phase(
     return next_phase
 
 
+@capability("canonical_position_write", lease=True)
+@protects("INV-04", "INV-08")
 def enter_pending_exit_runtime_state(
     current_state: object,
     *,
     exit_state: object = "",
     chain_state: object = "",
 ) -> str:
+    """Compute the next lifecycle phase value for a pending-exit transition.
+
+    Pure phase calculator (no DB I/O); decorated for capability registry
+    coverage per architecture/capabilities.yaml::canonical_position_write
+    because callers project the return value into canonical position rows.
+    """
     current_phase = phase_for_runtime_position(
         state=current_state,
         exit_state=exit_state,
         chain_state=chain_state,
     )
+    # Idempotency: positions that have already advanced past PENDING_EXIT
+    # (economically_closed via market resolution, terminal phases, etc.) cannot
+    # legally transition back to PENDING_EXIT — there is no remaining inventory
+    # to exit. fold_lifecycle_phase would raise; callers (e.g. day0_capture's
+    # exit-pending projection path) crash and starve the max_instances=1 cycle
+    # lock, blocking imminent_open_capture and the entire entry pipeline.
+    # Anchor incident: 2026-05-19T23:00:39Z day0_capture crash with
+    # `illegal lifecycle phase fold: 'economically_closed' -> 'pending_exit'`,
+    # killing live-trade pipeline for 30+ minutes post-daemon-restart.
+    #
+    # Per Copilot review (PR #216): derive the terminal set from
+    # `is_terminal_state` (sourced from LEGAL_LIFECYCLE_FOLDS) so future
+    # fold-table edits cannot silently miss new terminal phases. ECONOMICALLY_CLOSED
+    # is NOT terminal (folds to {ECONOMICALLY_CLOSED, SETTLED, VOIDED}), so it
+    # must be layered explicitly here as the originally-observed crash case.
+    if (
+        current_phase == LifecyclePhase.ECONOMICALLY_CLOSED
+        or is_terminal_state(current_phase)
+    ):
+        return current_phase.value
     fold_lifecycle_phase(current_phase, LifecyclePhase.PENDING_EXIT)
     return LifecyclePhase.PENDING_EXIT.value
 

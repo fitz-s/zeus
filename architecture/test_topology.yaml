@@ -435,6 +435,16 @@ test_trust_policy:
     tests/test_exchange_reconcile_ghost_order_resolve_on_disappear.py: {created: "2026-05-19", last_used: "2026-05-19"}
     # 2026-05-19 misroute antibody 5th-iter: NegRiskAdapter emits its OWN topic; correct route iff NegRiskAdapter address in receipt.logs.
     tests/test_misroute_antibody_negrisk_correct_route.py: {created: "2026-05-19", last_used: "2026-05-19"}
+    # 2026-05-19 lifecycle pending_exit guard: terminal-ish origins are no-op (was: ValueError crashed day0_capture and starved imminent_open_capture).
+    tests/test_lifecycle_pending_exit_guard.py: {created: "2026-05-19", last_used: "2026-05-19"}
+    # 2026-05-19 codereview-may19-2 P0-1: entry gate consults full blocker set via `entries_blocked_reason`, not just risk/heartbeat/ws/quarantine subset.
+    tests/test_entry_gate_authority_promotion.py: {created: "2026-05-19", last_used: "2026-05-19"}
+    # 2026-05-19 codereview-may19.md P0-1 structural refactor: _discovery_gates_allow_entries() is kwargs-only single authority; block_registry authoritative; fail-closed on registry-unavailable.
+    tests/test_cycle_runner_discovery_gate_authority.py: {created: "2026-05-19", last_used: "2026-05-19"}
+    # 2026-05-19 codereview-may19-2 P0-2: executable forecast reader enforces source-clock causality (source_available_at/captured_at <= decision_time).
+    tests/test_forecast_decision_time_causality.py: {created: "2026-05-19", last_used: "2026-05-19"}
+    # 2026-05-19 codereview-may19-2 P1-1: ACK facts durable post-SDK-submit, independent of outer cycle commit.
+    tests/test_live_order_ack_durability.py: {created: "2026-05-19", last_used: "2026-05-19"}
 
 categories:
   core_law_antibody:
@@ -626,6 +636,10 @@ categories:
     - tests/test_ensemble_snapshots_bias_corrected_schema.py
     - tests/test_evaluator_metric_normalizer_failclosed.py
     - tests/test_execution_intent_typed_slippage.py
+    - tests/test_entry_gate_authority_promotion.py
+    - tests/test_cycle_runner_discovery_gate_authority.py
+    - tests/test_forecast_decision_time_causality.py
+    - tests/test_lifecycle_pending_exit_guard.py
     - tests/test_lifecycle_terminal_predicate.py
     - tests/test_monitor_refresh_ci_fallback.py
     - tests/test_position_metric_resolver.py
@@ -664,6 +678,10 @@ categories:
     - tests/test_inv_codehash_drift_detection.py
     # PR-209 — 5th-iter Karachi: REDEEM_NEGRISK_MISROUTED added to autonomous retry allowlist.
     - tests/test_reseat_negrisk_misrouted_allowlist.py
+    # codereview-may19-2.md relationship F — composite live-health surfaces run_mode failure
+    - tests/test_run_mode_failure_surfaces.py
+    # codereview-may19-2 P1-1: ACK facts durable post-SDK-submit (unconditional commit in _live_order).
+    - tests/test_live_order_ack_durability.py
 
   useful_regression:
     - tests/test_alpha_target_coherence.py
@@ -2485,5 +2503,208 @@ test_metadata:
       Sed-flip verified: mutate on_chain_codehash literal → C2 goes RED.
       Marker: requires_rpc (outbound HTTPS to Polygon RPC). Included in default
       CI sweep; skip offline with -m "not requires_rpc".
+    created: 2026-05-19
+    last_reused_or_audited: 2026-05-19
+
+  tests/test_run_mode_failure_surfaces.py:
+    modules: [control]
+    category: core_law_antibody
+    kind: antibody
+    profile: r_relationship_f_live_health_composite
+    blocks_commit: true
+    asserted_invariants:
+      - RELATIONSHIP-F-COMPOSITE-DEGRADED-ON-FAILED-RUN-MODE
+      - RELATIONSHIP-F-COMPOSITE-DEGRADED-ON-STALE-STATUS-SUMMARY
+      - RELATIONSHIP-F-COMPOSITE-HEALTHY-WHEN-ALL-OK
+      - RELATIONSHIP-F-DEGRADED-EMITS-WARNING-LOG
+    source_under_test:
+      - src/control/live_health.py
+    law_dependencies:
+      - codereview-may19-2.md relationship F
+    notes: >
+      Closes the "scheduler alive but not trading" observability gap (relationship F).
+      Asserts compute_composite_live_health() returns DEGRADED when run_mode has
+      failed (scheduler_jobs_health.json status=FAILED) or status_summary.json is
+      stale (>5 min), even when daemon heartbeat is fresh. T4 asserts WARNING log
+      is emitted with the failing surface name. Call site in _write_heartbeat() in
+      src/main.py surfaces composite to state/live_health_composite.json each cycle.
+    created: 2026-05-19
+    last_reused_or_audited: 2026-05-19
+
+  tests/test_live_order_ack_durability.py:
+    modules: [execution]
+    category: core_law_antibody
+    blocks_commit: true
+    asserted_invariants:
+      - P1-1-ACK-COMMIT-INDEPENDENT-OF-OWN-CONN
+    source_under_test:
+      - src/execution/executor.py
+    law_dependencies:
+      - codereview-may19-2.md section 6 P1-1
+    notes: >
+      Antibody for P1-1: _live_order must commit SUBMIT_ACKED + order fact
+      immediately after SDK ACK, independent of whether the caller owns the
+      connection. Sed-flip test greps for sentinel comment; crash-simulation
+      test opens a file-backed DB with an external connection, appends ACK
+      facts + commits, closes without outer commit, reopens and asserts rows
+      persist. Prevents venue order loss on crash between SDK ACK and cycle commit.
+    created: 2026-05-19
+    last_reused_or_audited: 2026-05-19
+  tests/test_ghost_order_proof_backed_resolution.py:
+    modules: [execution]
+    category: core_law_antibody
+    profile: r3_reconcile_ghost_order_proof
+    blocks_commit: true
+    asserted_invariants:
+      - P1-5-GHOST-ORDER-NO-PROOF-STAYS-UNRESOLVED
+      - P1-5-GHOST-ORDER-TERMINAL-POINT-ORDER-RESOLVES
+      - P1-5-GHOST-ORDER-LINKED-TRADE-FACT-RESOLVES
+      - P1-5-GHOST-ORDER-POSITION-EXPOSURE-BLOCKS-RESOLUTION
+      - P1-5-GHOST-ORDER-OPERATOR-RESOLUTION-ACCEPTED
+    source_under_test:
+      - src/execution/exchange_reconcile.py
+    law_dependencies:
+      - codereview-may19-2.md P1-5
+    notes: >
+      Closes the "ghost-order resolved by disappearance alone" defect (P1-5).
+      Before this antibody, absence from get_open_orders() was the sole resolution
+      criterion — a venue read-miss would silently clear the finding while real
+      exposure persisted and the kill-switch was disarmed. Now at least one proof
+      must fire: (a) terminal point-order status, (c) linked venue_trade_facts row,
+      (d) no token exposure in position_current, or (b) no matching trade in
+      get_trades enumeration. Operator path (e) is the direct resolve_finding() API.
+    created: 2026-05-19
+    last_reused_or_audited: 2026-05-19
+
+  tests/test_decision_events_live_wiring.py:
+    modules: [state, engine, contracts]
+    category: core_law_antibody
+    profile: p13_decision_events_live_wiring
+    blocks_commit: true
+    asserted_invariants:
+      - P1-3-DECISION-EVENTS-PRIMITIVE-SIGNATURE
+      - P1-3-DECISION-EVENTS-WRITE-REACHES-TABLE
+      - P1-3-DECISION-EVENTS-FAIL-SOFT-NO-DSC
+    source_under_test:
+      - src/state/decision_events.py
+      - src/engine/cycle_runtime.py
+    law_dependencies:
+      - codereview-may19-2.md P1-3
+    notes: >
+      Closes the "write_decision_event implemented but never called" defect (P1-3).
+      Asserts: (1) write_decision_event accepts primitive fields (direction,
+      target_size_usd, limit_price, edge, p_posterior) rather than an
+      ExecutionIntent object, decoupling it from FinalExecutionIntent field names;
+      (2) a write with conn=None produces a readable row in the world DB;
+      (3) missing decision_source_context on FinalExecutionIntent causes no write
+      and no crash (fail-soft guard in cycle_runtime.py).
+    created: 2026-05-19
+    last_reused_or_audited: 2026-05-19
+
+  tests/test_decision_seq_lock_path.py:
+    modules: [state, contracts]
+    category: core_law_antibody
+    profile: p14_decision_seq_lock_path
+    blocks_commit: true
+    asserted_invariants:
+      - P1-4-DECISION-SEQ-NON-WORLD-CONN-REJECTED
+      - P1-4-DECISION-SEQ-INCREMENTS-SEQUENTIALLY
+    source_under_test:
+      - src/state/decision_events.py
+    law_dependencies:
+      - codereview-may19-2.md P1-4
+    notes: >
+      Closes the db_writer_lock/conn lock-path coupling defect (P1-4). The lock
+      was acquired on ZEUS_WORLD_DB_PATH but MAX+1 executed on caller-supplied
+      conn. If conn was the trade DB, the lock did not serialise the target table.
+      Fix: AssertionError raised immediately when conn is not None and
+      PRAGMA database_list returns a path not ending in 'zeus-world.db'.
+      Asserts: (1) trade-DB or arbitrary-path conn raises AssertionError with
+      "world DB connection" in the message before any INSERT; (2) no decision_events
+      table exists in the non-world DB after the rejected call; (3) two sequential
+      conn=None calls increment decision_seq 0 → 1.
+    created: 2026-05-19
+    last_reused_or_audited: 2026-05-19
+
+  tests/test_negrisk_redeem_payout_proof.py:
+    modules: [execution]
+    category: core_law_antibody
+    profile: p12_negrisk_payout_proof
+    blocks_commit: true
+    asserted_invariants:
+      - REDEEM_NEGRISK_WRONG_CONDITION
+      - REDEEM_NEGRISK_ZERO_PAYOUT
+      - REDEEM_NEGRISK_AMOUNT_MISMATCH
+      - REDEEM_NEGRISK_REVIEW_REQUIRED
+    source_under_test:
+      - src/execution/settlement_commands.py
+    law_dependencies:
+      - codereview-may19-2.md P1-2
+    notes: >
+      NegRisk redeem confirmation requires parsing the NegRiskAdapter PayoutRedemption
+      event from receipt logs: conditionId must match, payout must be > 0, and payout
+      amount must match token_amounts_json within 0.1% tolerance. Error codes gate
+      the confirmed path; mismatches route to REDEEM_REVIEW_REQUIRED.
+    created: 2026-05-19
+    last_reused_or_audited: 2026-05-19
+
+  tests/test_settlement_schema_runtime_no_ddl.py:
+    modules: [execution]
+    category: core_law_antibody
+    profile: p12_settlement_schema_no_ddl
+    blocks_commit: true
+    asserted_invariants:
+      - SETTLEMENT_SCHEMA_DDL_HOT_PATH_BANNED
+    source_under_test:
+      - src/execution/settlement_commands.py
+    law_dependencies:
+      - codereview-may19.md P1-2
+    notes: >
+      DDL (CREATE TABLE, ALTER TABLE, DROP) must not run on the hot path.
+      ensure_settlement_schema_ready is boot-only; assert_settlement_schema_ready
+      is the hot-path guard (PRAGMA table_info only). Antibody verifies that
+      submit_redeem, reconcile_pending_redeems, and list_commands emit zero DDL
+      on an already-initialized schema.
+    created: 2026-05-19
+    last_reused_or_audited: 2026-05-19
+
+  tests/test_reconcile_pending_redeems_batch_cap.py:
+    modules: [execution]
+    category: core_law_antibody
+    profile: p14_reconcile_batch_cap
+    blocks_commit: true
+    asserted_invariants:
+      - RECONCILE_REDEEM_BATCH_CAP_ENFORCED
+      - RECONCILE_REDEEM_BUDGET_EXCEEDED
+      - RECONCILE_REDEEM_CLOB_CACHE_DEDUPLICATES
+    source_under_test:
+      - src/execution/settlement_commands.py
+    law_dependencies:
+      - codereview-may19.md P1-4
+    notes: >
+      reconcile_pending_redeems must respect ZEUS_REDEEM_RECONCILE_BATCH_CAP (default 50),
+      a wall-clock budget ZEUS_REDEEM_RECONCILE_BUDGET_S (default 60s), and a per-call
+      CLOB cache to avoid repeated Gamma HTTP lookups for the same condition_id within
+      one reconcile tick. Antibody: C1 cap=5/20 rows processed ≤5; C2 budget=0s logs
+      RECONCILE_REDEEM_BUDGET_EXCEEDED; C3 3 rows same condition → lookup called ≤1 time.
+    created: 2026-05-19
+    last_reused_or_audited: 2026-05-19
+
+  tests/test_settlement_migration_unknown_legacy_default.py:
+    modules: [execution]
+    category: core_law_antibody
+    profile: p13_settlement_migration_legacy_default
+    blocks_commit: true
+    asserted_invariants:
+      - SETTLEMENT_LEGACY_SOURCE_BACKFILLED
+    source_under_test:
+      - src/execution/settlement_commands.py
+    law_dependencies:
+      - codereview-may19.md P1-3
+    notes: >
+      Pre-migration rows with polymarket_end_anchor_source='gamma_explicit' must
+      be converted to 'unknown_legacy' by ensure_settlement_schema_ready (V13
+      backfill). New rows without explicit source get 'unknown_legacy'. New rows
+      with explicit 'gamma_explicit' are retained unchanged.
     created: 2026-05-19
     last_reused_or_audited: 2026-05-19

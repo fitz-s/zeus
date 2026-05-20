@@ -566,7 +566,7 @@ def run_reconcile_sweep(
             )
         )
     _resolve_disappeared_ghost_order_findings(
-        conn, open_order_ids, observed_at=observed
+        adapter, conn, open_order_ids, trades=trades if trades_available else None, observed_at=observed
     )
     reconcile_recorded_maker_fill_economics(conn, observed_at=observed)
     return findings
@@ -1406,24 +1406,134 @@ def _resolve_open_position_drift_findings(
         )
 
 
+_GHOST_PROOF_TERMINAL_STATES = frozenset(
+    {"CANCELLED", "CANCELED", "EXPIRED", "REJECTED", "SUBMIT_REJECTED", "FILLED"}
+)
+
+
+def _ghost_proof_a_point_order_terminal(
+    adapter: Any, order_id: str
+) -> tuple[bool, str]:
+    """(a) point-order terminal status via get_order().
+
+    Returns (proven, resolution_string). Proven iff the adapter has get_order
+    and the returned status is a terminal state. FILLED counts as proof that
+    the order is gone (no cancel-semantic confusion).
+    """
+    get_order_fn = getattr(adapter, "get_order", None)
+    if not callable(get_order_fn):
+        return False, ""
+    try:
+        point_order = get_order_fn(order_id)
+    except Exception:
+        return False, ""
+    state = _order_state(point_order)
+    if state is None:
+        return False, ""
+    if state in _GHOST_PROOF_TERMINAL_STATES:
+        return True, f"exchange_ghost_order_terminal_point_order_{state.lower()}"
+    return False, ""
+
+
+def _ghost_proof_c_linked_trade_fact(
+    conn: sqlite3.Connection, order_id: str
+) -> tuple[bool, str]:
+    """(c) venue_trade_facts row already present for this order_id.
+
+    A fact row means the order did transact; finding can be resolved.
+    """
+    if not _table_exists(conn, "venue_trade_facts"):
+        return False, ""
+    row = conn.execute(
+        "SELECT 1 FROM venue_trade_facts WHERE venue_order_id = ? LIMIT 1",
+        (order_id,),
+    ).fetchone()
+    if row is not None:
+        return True, "exchange_ghost_order_linked_trade_fact_present"
+    return False, ""
+
+
+def _ghost_proof_d_no_token_exposure(
+    conn: sqlite3.Connection, order_id: str
+) -> tuple[bool, str]:
+    """(d) position_current shows no resulting token exposure.
+
+    A ghost order that left no active position means the fill didn't create
+    risk we need to track — cancellation-equivalent for reconcile purposes.
+    Specifically: if no position_current row references this order_id with a
+    non-zero shares value, the order produced no tracked exposure.
+    """
+    if not _table_exists(conn, "position_current"):
+        return False, ""
+    row = conn.execute(
+        """
+        SELECT 1
+          FROM position_current
+         WHERE order_id = ?
+           AND COALESCE(shares, 0) > 0
+         LIMIT 1
+        """,
+        (order_id,),
+    ).fetchone()
+    if row is None:
+        return True, "exchange_ghost_order_no_token_exposure_after_disappearance"
+    return False, ""
+
+
+def _ghost_proof_b_no_matching_trade(
+    adapter: Any, order_id: str, existing_trades: list[Any] | None
+) -> tuple[bool, str]:
+    """(b) fresh get_trades enumeration found no trade matching this order_id.
+
+    If trades surface is available and no matching trade exists, the order
+    was canceled/expired rather than filled — cancellation-equivalent.
+    Uses trades already fetched during the sweep when available.
+    """
+    if existing_trades is not None:
+        trade_list = existing_trades
+    else:
+        get_trades_fn = getattr(adapter, "get_trades", None)
+        if not callable(get_trades_fn):
+            return False, ""
+        try:
+            trade_list = list(get_trades_fn() or [])
+        except Exception:
+            return False, ""
+
+    for trade in trade_list:
+        raw = _raw(trade)
+        for matched_id in _trade_order_ids(raw):
+            if matched_id == order_id:
+                return False, ""
+    return True, "exchange_ghost_order_no_matching_trade_in_enumeration"
+
+
 def _resolve_disappeared_ghost_order_findings(
+    adapter: Any,
     conn: sqlite3.Connection,
     open_order_ids: set[str],
     *,
+    trades: list[Any] | None = None,
     observed_at: datetime,
 ) -> int:
     """Resolve `exchange_ghost_order` findings whose subject is no longer in
-    the live `open_order_ids` snapshot.
+    the live ``open_order_ids`` snapshot — but ONLY when backed by at least
+    one proof that the disappearance is terminal (cancel/fill/expire) rather
+    than a read-miss (pagination, venue lag, trade surface migration).
 
-    A ghost finding is recorded when the exchange reports an open order that
-    has no local command. Once that order subsequently transitions to
-    CANCELED, MATCHED, or expires, it disappears from `get_open_orders()`.
-    Without an explicit resolve path the finding stays `resolved_at IS NULL`
-    forever, and `governor` keeps `kill_switch_armed=True` — entries are
-    blocked indefinitely.
+    Proof hierarchy (first match wins, cheapest first):
+      (a) get_order(subject_id) returns a terminal status
+          (CANCELLED/EXPIRED/REJECTED/FILLED/SUBMIT_REJECTED)
+      (c) venue_trade_facts has a row with venue_order_id = subject_id
+      (d) position_current has no row with order_id = subject_id and shares > 0
+      (b) get_trades enumeration found no trade matching subject_id
 
-    The resolution is read-only against the chain; only writes the local
-    `exchange_reconcile_findings` row.
+    If NONE of (a)–(d) hold, the finding stays unresolved (kill-switch / reduce-
+    only stays armed fail-closed). This prevents a venue read-miss from silently
+    "resolving" real exposure.
+
+    Operator resolution (e) is handled externally via resolve_finding(...,
+    resolved_by='operator') and does not enter this auto-resolver.
     """
     rows = conn.execute(
         """
@@ -1438,10 +1548,30 @@ def _resolve_disappeared_ghost_order_findings(
         subject = str(row["subject_id"])
         if subject in open_order_ids:
             continue
+
+        # Attempt each proof in order; bail on first hit.
+        proven, resolution = _ghost_proof_a_point_order_terminal(adapter, subject)
+        if not proven:
+            proven, resolution = _ghost_proof_c_linked_trade_fact(conn, subject)
+        if not proven:
+            proven, resolution = _ghost_proof_d_no_token_exposure(conn, subject)
+        if not proven:
+            proven, resolution = _ghost_proof_b_no_matching_trade(adapter, subject, trades)
+
+        if not proven:
+            logger.warning(
+                "ghost_order_unproven_disappearance: subject=%s finding=%s — "
+                "kill_switch stays armed; check venue read freshness or use "
+                "operator resolution.",
+                subject,
+                row["finding_id"],
+            )
+            continue
+
         resolve_finding(
             conn,
             str(row["finding_id"]),
-            resolution="exchange_ghost_order_no_longer_in_open_orders",
+            resolution=resolution,
             resolved_by="src.execution.exchange_reconcile",
             resolved_at=observed_at,
         )

@@ -14,7 +14,7 @@ from src.contracts.decision_natural_key import (
 )
 
 if TYPE_CHECKING:
-    from src.contracts.execution_intent import DecisionSourceContext, ExecutionIntent
+    from src.contracts.execution_intent import DecisionSourceContext
     from src.contracts.effective_kelly_context import EffectiveKellyContext
 
 
@@ -123,9 +123,12 @@ def write_decision_event(
     natural_key: DecisionNaturalKey,
     ctx: "DecisionSourceContext",
     ekc: "EffectiveKellyContext",
-    intent: "ExecutionIntent",
     *,
+    direction: str,
     strategy_key: str,
+    target_size_usd: float,
+    limit_price: float,
+    edge: Optional[float] = None,
     p_posterior: Optional[float] = None,
     conn: Optional[sqlite3.Connection] = None,
 ) -> None:
@@ -136,10 +139,20 @@ def write_decision_event(
     decision_seq derived atomically under db_writer_lock(LIVE).
     schema_version=SCHEMA_VERSION (13), source='live_decision'.
 
+    Accepts primitives rather than ExecutionIntent/FinalExecutionIntent to avoid
+    structural coupling to callers that hold FinalExecutionIntent (which has
+    final_limit_price / size_value instead of limit_price / target_size_usd).
+
+    direction: "YES" or "NO" (or enum .value) — the trade side.
     strategy_key: caller-provided governance strategy identifier
         (one of 'settlement_capture', 'shoulder_sell', 'center_buy', 'opening_inertia').
-    p_posterior: model posterior probability at decision time (optional; not yet in
-        ExecutionIntent; caller passes when available from forecast pipeline).
+    target_size_usd: notional USD size for this decision.
+    limit_price: limit price submitted to venue.
+    edge: model edge at decision time (optional).
+    p_posterior: model posterior probability at decision time (optional).
+
+    P1-4 guard: when conn is provided, asserts it is a world DB connection so that
+    the db_writer_lock(ZEUS_WORLD_DB_PATH) actually serialises the target table.
 
     Enforces NOT NULL on PR-6 timing fields when source='live_decision':
     first_member_observed_time, run_complete_time, zeus_submit_intent_time,
@@ -149,6 +162,19 @@ def write_decision_event(
     from src.state.db_writer_lock import WriteClass, db_writer_lock
 
     market_slug, temperature_metric, target_date, observation_time, _ = natural_key
+
+    # P1-4: when caller supplies a connection it MUST be the world DB so that
+    # db_writer_lock(ZEUS_WORLD_DB_PATH) actually serialises the MAX+1 query
+    # and the INSERT against the real target table.
+    if conn is not None:
+        _db_list = conn.execute("PRAGMA database_list").fetchall()
+        _actual_path = _db_list[0][2] if _db_list else ""
+        if not _actual_path.endswith("zeus-world.db"):
+            raise AssertionError(
+                f"write_decision_event: conn must be a world DB connection "
+                f"(lock path is ZEUS_WORLD_DB_PATH); got {_actual_path!r}. "
+                "Pass conn=None to let write_decision_event open its own world connection."
+            )
 
     # Live-only enforcement of PR-6 timing fields
     _required_live = {
@@ -164,8 +190,6 @@ def write_decision_event(
         raise ValueError(
             f"write_decision_event: live_decision requires non-empty fields: {missing}"
         )
-
-    side = intent.direction.value if hasattr(intent.direction, "value") else str(intent.direction)
 
     own_conn = conn is None
     if own_conn:
@@ -230,12 +254,12 @@ def write_decision_event(
                     observation_time, row_seq,
                     None,  # condition_id: caller enriches if needed
                     deid, ctx.decision_time,
-                    "pending", side, strategy_key,  # outcome=pending until settlement
+                    "pending", direction, strategy_key,  # outcome=pending until settlement
                     None, None,  # cycle_id, cycle_iteration: future Phase-2
                     p_posterior,  # posterior probability from forecast pipeline (caller-supplied)
-                    intent.decision_edge or None,  # edge: decision pipeline edge
-                    float(intent.target_size_usd),
-                    float(intent.limit_price),
+                    edge or None,  # edge: decision pipeline edge
+                    float(target_size_usd),
+                    float(limit_price),
                     ctx.forecast_available_at or None,
                     ctx.provider_reported_time or None,
                     ctx.observation_available_at,

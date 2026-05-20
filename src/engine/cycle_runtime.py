@@ -3507,6 +3507,44 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                             )
                             submitted_limit = float(final_limit_decimal)
                             submit_rejected = str(getattr(result, "status", "") or "") == "rejected"
+                            # P1-3: write decision_events row after each live submit.
+                            # Fail-soft: logging/learning infrastructure must not crash the cycle.
+                            # Pass conn=None so write_decision_event opens its own world-DB
+                            # connection (P1-4: avoids lock-path mismatch with trade-DB conn).
+                            _dsc = getattr(final_intent, "decision_source_context", None)
+                            if _dsc is not None:
+                                try:
+                                    from src.contracts.decision_natural_key import (
+                                        make_decision_natural_key,
+                                    )
+                                    from src.state.decision_events import write_decision_event
+
+                                    _nk = make_decision_natural_key(
+                                        market_slug=candidate.slug,
+                                        temperature_metric=candidate.temperature_metric,
+                                        target_date=candidate.target_date,
+                                        observation_time=_dsc.observation_time or "",
+                                        decision_seq=0,  # overwritten atomically by write_decision_event
+                                    )
+                                    write_decision_event(
+                                        _nk,
+                                        _dsc,
+                                        None,  # ekc: reserved for future Phase-2 Kelly context
+                                        direction=str(final_intent.direction),
+                                        strategy_key=strategy_name,
+                                        target_size_usd=float(final_intent.size_value),
+                                        limit_price=float(final_intent.final_limit_price),
+                                        edge=float(d.edge.edge) if d.edge else None,
+                                        p_posterior=float(d.edge.p_posterior) if d.edge else None,
+                                        conn=None,
+                                    )
+                                except Exception as _de_exc:  # noqa: BLE001
+                                    deps.logger.warning(
+                                        "write_decision_event failed (degraded); cycle continues: %s",
+                                        _de_exc,
+                                        exc_info=True,
+                                    )
+                                    summary["degraded"] = True
                             reprice_payload["execution_path"] = "final_execution_intent"
                             reprice_payload["submitted_limit_price"] = (
                                 None if submit_rejected else submitted_limit

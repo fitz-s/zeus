@@ -3679,8 +3679,15 @@ def init_schema_trade_only(conn: sqlite3.Connection) -> None:
     # (DDL lives in src/execution/settlement_commands.py to keep the schema
     # co-located with the command implementation — same pattern as
     # SETTLEMENT_COMMAND_SCHEMA referenced in init_schema.)
-    from src.execution.settlement_commands import SETTLEMENT_COMMAND_SCHEMA
+    from src.execution.settlement_commands import (
+        SETTLEMENT_COMMAND_SCHEMA,
+        ensure_settlement_schema_ready,
+    )
     conn.executescript(SETTLEMENT_COMMAND_SCHEMA)
+    # ensure_settlement_schema_ready creates settlement_schema_migrations and
+    # applies column migrations (idempotent). Must run after SETTLEMENT_COMMAND_SCHEMA
+    # so the settlement_commands table exists for the ALTER TABLE steps.
+    ensure_settlement_schema_ready(conn)
 
     # Re-apply busy_timeout: each executescript() resets the C-level handler.
     conn.execute(f"PRAGMA busy_timeout = {_busy_ms}")

@@ -576,13 +576,13 @@ def enqueue_redeem_command(
     command_id (str | None), reason (str | None).
     """
     from src.execution.settlement_commands import (  # noqa: F401 — verify import only
-        init_settlement_command_schema,
+        assert_settlement_schema_ready,
         request_redeem,
         SettlementState,
     )
     try:
         resolved_market_id = market_id or condition_id
-        init_settlement_command_schema(conn)
+        assert_settlement_schema_ready(conn)
         existing = conn.execute(
             """
             SELECT command_id FROM settlement_commands
